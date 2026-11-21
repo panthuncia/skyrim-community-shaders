@@ -3,9 +3,10 @@
 // The engine draw families' programs: CS's shader for an engine draw with the defines ShaderCache gives its descriptor, plus the
 // pipeline state the engine's state objects describe.
 //
-// A program must exist before its first draw needs it. Stages compile when CS loads one of the family's descriptors. Every program
-// key a session draws with is written to a manifest, and the next session prebuilds those keys at setup. A key in neither is built
-// on the render thread at its first draw and logged once as "not prebuilt". The engine never draws while a program builds.
+// Every program builds on the program service (RenderGraph/ProgramService.h). Stages compile when CS loads one of the family's
+// descriptors. Every program key a session draws with is written to a manifest, and the next session queues those keys in CS's
+// setup batch, so they are built before the first frame. A key first seen in a draw is posted to the service and logged once as
+// "not prebuilt"; its draws stay the engine's until it is built. The render thread never builds or waits for a program.
 
 #include <array>
 #include <compare>
@@ -85,7 +86,7 @@ namespace DCLF::Family
 		void (*stagesOf)(bool a_pixel, std::uint32_t a_descriptor, std::vector<StageRequest>& a_out) = nullptr;
 	};
 
-	/** @brief A family's programs by ProgramKey. Get on the render thread, Prebuild at setup. */
+	/** @brief A family's programs by ProgramKey. Get on the render thread, Prebuild at CS's setup. */
 	class EngineDrawPrograms
 	{
 	public:
@@ -94,12 +95,16 @@ namespace DCLF::Family
 		~EngineDrawPrograms();
 
 		/**
-		 * @brief The key's program. Waits for a prebuilt key still building, and builds an unseen key now and logs it once.
-		 * Null, logged once, when the states have no ORG form or the build failed.
+		 * @brief Render thread. The key's program once built. Null while it builds, and for a key whose states have no ORG form
+		 * (logged once). Never builds and never waits: an unseen key is posted to the program service and listed in the manifest.
+		 * A failed build is fatal. The defines follow from the family's shader type, so a_shader is not read.
 		 */
 		std::shared_ptr<const RasterProgram> Get(const ProgramKey& a_key, const RE::BSShader& a_shader);
 
-		/** @brief Main thread, once at setup, after the engine loaded its shaders. Queues the manifest's keys on the build thread. */
+		/**
+		 * @brief Render thread, once at CS's setup, before the setup batch is joined. Queues the manifest's keys on the program
+		 * service. The descriptors' defines need only the shader type, so the engine need not have loaded the family's shader.
+		 */
 		void Prebuild();
 
 		/** @brief Programs built so far. */

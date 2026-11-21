@@ -13,7 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBuffers.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/FrameRetirement.h"
+#include "RenderGraph/Async/Retirement.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
@@ -103,7 +103,7 @@ namespace DCLF::Features::LocalLights
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			auto scene = std::make_shared<Scene>();
-			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), FrameRetirement(),
+			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = "cs.dclf.light-contexts", .maxPerClass = 0, .spareFree = PooledBackings::PerFrameSpares() });
 			auto atlasStandIn = a_setup.StructuredBuffer(1, 4, kAtlasStandInName);
 			auto gatesStandIn = a_setup.StructuredBuffer(1, 4, kGatesStandInName);

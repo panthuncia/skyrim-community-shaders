@@ -2,6 +2,8 @@
 
 // IndirectDraws::Impl's revision producer and scene revision state. Included by Impl.h, before the struct.
 
+#include "RenderGraph/Frame/EpochRecordings.h"
+
 namespace DCLF
 {
 	struct ImplProducer
@@ -39,10 +41,10 @@ namespace DCLF
 		/** @brief Brings the draw bound up to date with the tables' change log. */
 		void UpdateDrawBound(const SceneTables& a_tables, std::uint32_t a_generation);
 		/** @brief The newest RevisionInputs from the render thread, latest wins. Taken at each make's start. */
-		LatestSlot<RevisionInputs> revisionInputsSlot;
+		::RenderGraph::Frame::LatestSlot<RevisionInputs> revisionInputsSlot;
 		RevisionInputs postedInputs;  // what the render thread last posted
 		/** @brief Shadow view slot requests, served at the build point before its build. */
-		LatestSlot<ShadowSlotsRequest> shadowSlotsSlot;
+		::RenderGraph::Frame::LatestSlot<ShadowSlotsRequest> shadowSlotsSlot;
 		/**
 		 * @brief The scene revisions. A recording needs exactly its shape and versions, so an unchanged epoch inherits the last recording
 		 * and any other is recorded on ORG's host thread. Each member says whether it belongs to the builder, the frame or the completions.
@@ -59,6 +61,9 @@ namespace DCLF
 			std::shared_ptr<const org::async::RevisionFragment> versionsFragment;
 			std::shared_ptr<const NamedVersions> versionsFragmentSet;  // the sealed set versionsFragment was made for
 			std::uint64_t graphBuilds = ~0ull;  // the build versionsFragment was made for (RevisionInputs::buildGeneration)
+			// The frame versions versionsFragment was made for (RevisionInputs::frameVersionsSerial). New ones make every epoch record
+			// again against them (plan step 10b).
+			std::uint64_t frameVersions = ~0ull;
 			std::uint64_t growthWaits = 0;  // makes whose set was pending on a growth, since the last report
 			std::uint64_t buildWaits = 0;  // makes that sealed nothing while waiting for a graph build
 			std::uint64_t seals = 0, versionSets = 0, sealFailures = 0;
@@ -81,12 +86,24 @@ namespace DCLF
 			std::uint64_t occlusionSubmitted = 0;
 			// Per epoch, whether the selected revision has recordings for the graph as built now.
 			std::array<bool, kMaxEpochs> covered{};
+			// Per epoch, why the engine draws it when it is not covered (DecideEpochCoverage).
+			std::array<EngineState, kMaxEpochs> engine{};
 			bool explicitBuilds = false;
-			// Uncovered frames happen only before DCLF draws or under a load screen.
+			// Uncovered frames happen only while DCLF does not draw or under a load screen.
 			std::uint64_t builds = 0, uncoveredFrames = 0, ticketsReleased = 0;
 			std::array<std::uint64_t, kMaxEpochs> uncovered{};
-			// Per epoch, the inputs whose recording failed. Not retried until they change.
-			std::array<std::vector<std::shared_ptr<const org::async::RevisionFragment>>, kMaxEpochs> failedFor;
+			/** @brief What an epoch's recordings are for: exactly these fragments (the versions, the shape, then each hosted shape). */
+			struct RecordingInputs
+			{
+				std::vector<std::shared_ptr<const org::async::RevisionFragment>> fragments;
+				friend bool operator==(const RecordingInputs&, const RecordingInputs&) = default;
+			};
+			// The current inputs and the last ones. A drop is not asked for again until the inputs change.
+			static constexpr std::size_t kRecordingsKept = 2;
+			// Per epoch. An entry's payload is the fragment its recordings resolve. The builder looks up and adds.
+			using RecordingCache = ::RenderGraph::Frame::EpochRecordings::Cache<RecordingInputs, kRecordingsKept,
+				::RenderGraph::Frame::EpochRecordings::AfterDrop::KeepUntilNewKey, std::shared_ptr<org::async::RevisionFragment>>;
+			std::array<RecordingCache, kMaxEpochs> recordingCaches;
 		} revisions;
 		/** @brief Recording requests not yet completed. The build point releases unsubmitted tickets for them. */
 		std::atomic<std::uint32_t> recordingsOutstanding{ 0 };

@@ -1,5 +1,6 @@
 #include "RenderGraph/Engine/Scaleform/GfxTextures.h"
 
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -78,11 +79,11 @@ namespace RenderGraph::Engine::Scaleform::GfxTextures
 
 	void Install()
 	{
-		if (!Textures::Requested())
+		if (!Engine::GraphMode())
 			return;
 		// The hook sits on the guest device at renderer +0x490. Without the guest that device is DXVK's own, shared with CS, so nothing is patched.
 		if (!Tripwire::GuestRequested()) {
-			logger::info("[ORG] Scaleform: GFx's textures stay DXVK's (making them on ORG needs CS_ORG_TRIPWIRE_GUEST=1)");
+			logger::info("[ORG] Scaleform: native mode has no guest device, so GFx's textures are not hooked");
 			return;
 		}
 		REL::Relocation<std::uintptr_t> vtable{ REL::RelocationID(292188, 243114) };

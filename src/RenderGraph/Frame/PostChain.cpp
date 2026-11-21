@@ -3,6 +3,7 @@
 #include "Deferred.h"
 #include "Features/Upscaling.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -27,10 +28,6 @@ namespace RenderGraph::Frame::PostChain
 		constexpr REL::RelocationID kHdrEnabled{ 513463, 391301 };
 		// Tested with the VL effect's active flag by RenderWorldPostProcess (100430 / 107148) and the VL composite (100493).
 		constexpr REL::RelocationID kVolumetricEnabled{ 527940, 414913 };
-		// The upsample (100548) runs when unlocked and a scale is not 1.
-		constexpr REL::RelocationID kDynamicLock{ 525027, 411509 };
-		constexpr REL::RelocationID kDynamicScaleX{ 525023, 411505 };
-		constexpr REL::RelocationID kDynamicScaleY{ 525024, 411506 };
 		// ImageSpaceEffectHDR::Render (100465 / 107183) state. The adapt target is below 0 when there is none.
 		// The last-level parity flips on each render.
 		constexpr REL::RelocationID kAdaptTarget{ 513465, 391303 };
@@ -77,7 +74,6 @@ namespace RenderGraph::Frame::PostChain
 		constexpr std::uintptr_t kLensFlares = 0x180;        // active at +0x30
 		constexpr std::uintptr_t kSil = 0x1d8;               // active at +0x10, counter at +0x14
 		constexpr std::uintptr_t kTemporal = 0x1f0;          // enabled +0x18, form +0x2c, history +0x34, water +0x38
-		constexpr std::uintptr_t kUpsample = 0x1f8;          // active at +0x08
 		constexpr std::uintptr_t kUsesLdr = 0x210;
 		constexpr std::uintptr_t kScreenshot = 0x211;
 
@@ -211,7 +207,7 @@ namespace RenderGraph::Frame::PostChain
 	void Install()
 	{
 		auto& state = Get();
-		if (state.installed || REL::Module::IsVR() || !Engine::ImageSpace::Requested())
+		if (state.installed || !Engine::GraphMode())
 			return;
 		stl::detour_thunk<RenderWorldPostProcess>(REL::RelocationID(100430, 107148));
 		stl::detour_thunk<RenderEndOfFrameEffects>(REL::RelocationID(99023, 105674));
@@ -256,13 +252,12 @@ namespace RenderGraph::Frame::PostChain
 			fields.taaMode = static_cast<std::uint8_t>(Member<std::int32_t>(taa, 0x2c));
 			fields.taaWater = Member<bool>(taa, 0x38);
 		}
-		fields.dynres = Global<std::int32_t>(kDynamicLock) == 0 && (Global<float>(kDynamicScaleX) != 1.0f || Global<float>(kDynamicScaleY) != 1.0f);
-		if (const auto upsample = Member<std::uintptr_t>(base, kUpsample); !upsample || !Member<bool>(upsample, 0x08))
-			fields.dynres = false;
+		// The dynamic-resolution upsample (100548) is not read: a ratio is no build input (decision 6a). Its group is always on, gated.
 		fields.screenshot = Member<bool>(base, kScreenshot);
 		// Upscaling turns the engine's TAA on just before the end-of-frame effects and off after, so the flag at Begin says nothing.
 		auto& upscaling = globals::features::upscaling;
-		const auto method = upscaling.GetUpscaleMethod();
+		// The adopted revision's method, so the evaluate switches in with its build and textures.
+		const auto method = upscaling.FrameUpscaleMethod();
 		if (upscaling.loaded)
 			fields.taa = !Upscaling::IsWindowUnusable() && method == Upscaling::UpscaleMethod::kTAA;
 		fields.upscaler = upscaling.loaded && !Upscaling::IsWindowUnusable() &&
@@ -381,20 +376,5 @@ namespace RenderGraph::Frame::PostChain
 			break;
 		}
 		return fields;
-	}
-
-	void LogStats()
-	{
-		auto& state = Get();
-		if (!On())
-			return;
-		const std::lock_guard lock(state.mutex);
-		std::string list;
-		for (const auto& [name, count] : state.changes)
-			list += fmt::format("{}{} {}", list.empty() ? "" : ", ", name, count);
-		logger::info("[ORG] post description: {} world frames, {} changed against their slot's last description ({})", state.frames, state.changedFrames,
-			list.empty() ? std::string("none") : list);
-		state.frames = state.changedFrames = 0;
-		state.changes.clear();
 	}
 }

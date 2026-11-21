@@ -3,7 +3,6 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/EntrySpaceTable.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
-#include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 
 #include <algorithm>
@@ -383,39 +382,8 @@ namespace DCLF::Scene
 			state->busy.store(false, std::memory_order_release);
 			state->busy.notify_all();
 		};
-		if (Policy::SerialFanout() || !SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu,
-										  "DCLF candidate spare", [job](const auto&) { job(); }))
+		if (!::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu,
+				"DCLF candidate spare", [job](const auto&) { job(); }))
 			job();
-	}
-
-	std::string EntrySpaceTable::CheckSnapshot(const EntrySpace& a_snapshot) const
-	{
-		const auto& s = a_snapshot;
-		if (s.Capacity() != nodes.size() || s.GeometryCapacity() != geometryNodes.size())
-			return fmt::format("{} entries, {} geometries; the table {}, {}", s.Capacity(), s.GeometryCapacity(), nodes.size(), geometryNodes.size());
-		if (s.entries.size() != index.size())
-			return fmt::format("{} live entries, the table {}", s.entries.size(), index.size());
-		for (std::uint32_t e = 0; e < nodes.size(); ++e) {
-			if (s.entryVersion[e] != version[e] || s.entryNodes[e] != nodes[e])
-				return fmt::format("entry {} at version {} ({}), the table's {} ({})", e, s.entryVersion[e], static_cast<const void*>(s.entryNodes[e]), version[e],
-					static_cast<const void*>(nodes[e]));
-			if (!nodes[e])
-				continue;
-			if (const auto it = s.entries.find(nodes[e]); it == s.entries.end() || it->second != e)
-				return fmt::format("entry {} not listed", e);
-			if (s.entryGeometries[e] != geometries[e])
-				return fmt::format("entry {} with {} geometries, the table's {}", e, s.entryGeometries[e].size(), geometries[e].size());
-		}
-		for (std::uint32_t g = 0; g < geometryNodes.size(); ++g) {
-			if (s.geometryNodes[g] != geometryNodes[g] || s.geometryEntry[g] != geometryEntry[g])
-				return fmt::format("geometry {} of entry {}, the table's of {}", g, s.geometryEntry[g], geometryEntry[g]);
-			if (!geometryNodes[g])
-				continue;
-			if (s.geometrySlot[g] != geometrySlot[g] || s.primaryGeometry[g] != primaryGeometry[g])
-				return fmt::format("geometry {} at slot {} verdict {}, the table's {} {}", g, s.geometrySlot[g], s.primaryGeometry[g], geometrySlot[g], primaryGeometry[g]);
-			if (const auto it = s.geometries.find(geometryNodes[g]); it == s.geometries.end() || it->second != g)
-				return fmt::format("geometry {} not listed", g);
-		}
-		return {};
 	}
 }

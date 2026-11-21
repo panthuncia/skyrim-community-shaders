@@ -57,40 +57,6 @@ namespace DCLF::Direct::Simd
 		}
 	}
 
-	std::uint32_t PlaneGroupAvx2(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
-		std::uint32_t a_lanes)
-	{
-		// Four vectors of eight, each tested only while a bound of a_lanes is in it.
-		__m256 x[4], y[4], z[4], r[4], minusR[4];
-		std::uint32_t vectors = 0;
-		for (std::uint32_t v = 0; v < 4; ++v)
-			if ((a_lanes >> (8 * v)) & 0xFFu) {
-				vectors |= 1u << v;
-				x[v] = _mm256_loadu_ps(a_x + 8 * v), y[v] = _mm256_loadu_ps(a_y + 8 * v), z[v] = _mm256_loadu_ps(a_z + 8 * v), r[v] = _mm256_loadu_ps(a_r + 8 * v);
-				minusR[v] = _mm256_sub_ps(_mm256_setzero_ps(), r[v]);
-			}
-		std::uint32_t outside = 0, notContained = 0;
-		std::uint32_t mask;
-		std::memcpy(&mask, a_set + 24, 4);
-		for (std::uint32_t rest = mask & 0x3Fu; rest; rest &= rest - 1) {
-			float n[4];
-			std::memcpy(n, a_set + std::size_t(_tzcnt_u32(rest)) * 4, 16);
-			const __m256 nx = _mm256_set1_ps(n[0]), ny = _mm256_set1_ps(n[1]), nz = _mm256_set1_ps(n[2]), d0 = _mm256_set1_ps(n[3]);
-			for (std::uint32_t v = 0; v < 4; ++v) {
-				if (!((vectors >> v) & 1u))
-					continue;
-				const __m256 d = _mm256_sub_ps(_mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(ny, y[v]), _mm256_mul_ps(nx, x[v])), _mm256_mul_ps(z[v], nz)), d0);
-				const auto behind = static_cast<std::uint32_t>(_mm256_movemask_ps(_mm256_cmp_ps(d, minusR[v], _CMP_LE_OQ)));
-				const auto near = static_cast<std::uint32_t>(_mm256_movemask_ps(_mm256_cmp_ps(d, r[v], _CMP_LT_OQ)));
-				outside |= behind << (8 * v);
-				notContained |= (behind | near) << (8 * v);
-			}
-			if (((a_kind == 7u ? outside : notContained) & a_lanes) == a_lanes)
-				break;
-		}
-		return (a_kind == 7u ? ~outside : notContained) & a_lanes;
-	}
-
 	void ParabolicAvx2(const Spheres& a_spheres, std::uint32_t a_count, const float* a_sphere, const float* a_plane, std::uint32_t a_flags, const std::uint64_t* a_dead,
 		std::uint8_t* a_pass)
 	{

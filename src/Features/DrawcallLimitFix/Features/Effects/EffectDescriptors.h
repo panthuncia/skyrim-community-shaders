@@ -33,8 +33,8 @@ namespace DCLF::Features::Effects
 	enum EffectVariantBit : std::uint32_t
 	{
 		kEffectVariantShape = 1u << 0,          // any shape but a BSTriShape or a particle system (dynamic shapes)
-		kEffectVariantSkinned = 1u << 1,        // EffectSkinned disagrees with the leaf's skin instance (a rigid skin only without its switch), or CS_DCLF_SKINNED off
-		kEffectVariantDecal = 1u << 2,          // kDecal / kDynamicDecal with CS_DCLF_DECALS off, or one that registers no pass
+		kEffectVariantSkinned = 1u << 1,        // EffectSkinned disagrees with the leaf's skin instance (a rigid skin only without its switch)
+		kEffectVariantDecal = 1u << 2,          // kDecal / kDynamicDecal that registers no pass
 		kEffectVariantSkyObject = 1u << 3,      // bit 45: hint 0x12, geometry group 13
 		kEffectVariantWireframe = 1u << 4,      // bit 48
 		kEffectVariantCloudLighting = 1u << 5,  // kEffectLighting with kCloudLOD while CS_DCLF_EFFECT_CLOUD_LIGHT is 0
@@ -52,7 +52,7 @@ namespace DCLF::Features::Effects
 		kEffectVariantCount = 16
 	};
 	constexpr std::array<std::string_view, kEffectVariantCount> kEffectVariantNames{ "shape", "skinned", "decal", "sky-object", "wireframe",
-		"cloud-lighting", "lighting-without-llf", "blood", "projected-uv", "blend-pair", "particle: toggle off", "particle: class",
+		"cloud-lighting", "lighting-without-llf", "blood", "projected-uv", "blend-pair", "particle: not ported", "particle: class",
 		"particle: no data", "particle: aligned", "particle: unblended", "particle: decal" };
 	inline constexpr std::uint32_t kEffectVariantParticles = kEffectVariantParticle | kEffectVariantParticleClass | kEffectVariantParticleData |
 	                                                         kEffectVariantParticleAligned | kEffectVariantParticleUnblended | kEffectVariantParticleDecal;

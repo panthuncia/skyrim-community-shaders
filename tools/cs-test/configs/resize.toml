@@ -1,7 +1,11 @@
-# Size changes in the middle of a session: Exponential Height Fog's grid settings (its volumes' extents, as the menu's sliders
+# Size changes in the middle of a session: the fog volumes' grid settings (ViewAtmosphere's near and middle sizes, as the menu's sliders
 # write them) and upscale method switches to FSR and to TAA (a new render size when the
 # method changes). Each new size is a new version of a graph
-# texture, which may only switch in at a frame boundary. Compose it: native-vulkan+resize, native-d3d12+resize, guest+resize.
+# texture, which may only switch in at a frame boundary. The upscale switches also change the dynamic-resolution ratios that
+# ImageSpace's world and chain clients follow (frame revision plan 6.7), so those register again with the revision.
+# Compose it: native-vulkan+resize, native-d3d12+resize, guest+resize.
+# DCLF's epochs record against each new version and switch in with it (frame revision plan, step 10b): no declared view
+# mismatch, and no DCLF recording of a version the frame does not read.
 extends = ["base"]
 
 [run]
@@ -32,25 +36,25 @@ arg = "fog"
 at = "previous"
 frames = 1
 do = "setting"
-arg = "ExponentialHeightFog.volumetricGridSizeZ=96"
+arg = "ViewAtmosphere.nearSlices=96"
 
 [[steps]]
 at = "previous"
 frames = 2
 do = "setting"
-arg = "ExponentialHeightFog.volumetricGridSizeZ=100"
+arg = "ViewAtmosphere.nearSlices=100"
 
 [[steps]]
 at = "previous"
 frames = 60
 do = "setting"
-arg = "ExponentialHeightFog.volumetricGridPixelSize=12"
+arg = "ViewAtmosphere.nearPixelSize=12"
 
 [[steps]]
 at = "previous"
 frames = 60
 do = "setting"
-arg = "ExponentialHeightFog.volumetricFarGridSizeZ=48"
+arg = "ViewAtmosphere.middleSlices=48"
 
 [[steps]]
 at = "previous"
@@ -90,3 +94,8 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["fog", "grid", "fsr", "taa"]
+no_log = ["frame tap error", "declared view mismatch:", "binds a version the frame does not read"]
+
+# The client ran on the render graph (the game's graph frame counts at exit; skipped in plain D3D11 mode).
+[expect.graph_frames]
+min = { "cs.exp-height-fog" = 60 }

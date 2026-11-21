@@ -239,7 +239,6 @@ namespace DCLF::Diagnostics
 				}
 			};
 			if (const auto* plan = a_readback.plan.get()) {
-				checkBuckets("forward", plan->forward, [&](std::size_t a_b) { return plan->ForwardCountWord(a_b); }, 2, forwardDraws);
 				checkBuckets("main", plan->main, [&](std::size_t a_b) { return plan->MainCountWord(a_b); }, 1, otherDraws);
 				checkBuckets("terrain", plan->terrain, [&](std::size_t a_b) { return plan->TerrainCountWord(a_b); }, 1, otherDraws);
 				checkBuckets("decal", plan->decals, [&](std::size_t a_b) { return plan->DecalCountWord(a_b); }, 2, decalDraws);

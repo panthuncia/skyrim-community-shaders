@@ -1,4 +1,4 @@
-// Blood splatter feature entry, off by default (CS_ORG_BLOOD_SPLATTER=1 turns it on).
+// Blood splatter feature entry. On in graph mode.
 
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -15,10 +15,8 @@ namespace DCLF::Features::BloodSplatter
 		{
 			if (!Enabled())
 				return;
-			// Must run before the render graph initializes, because the anchors' epochs are fixed then.
-			BloodSplatterDraws::Reserve();
 			InstallHooks();
-			logger::info("[DCLF] blood splatter: on (CS_ORG_BLOOD_SPLATTER=1): the screen blood is drawn at the EngineDraws anchor");
+			logger::info("[DCLF] blood splatter: on (graph mode): the screen blood is drawn at the EngineDraws anchor");
 		}
 
 		std::string Status()
@@ -29,7 +27,7 @@ namespace DCLF::Features::BloodSplatter
 
 	bool Enabled()
 	{
-		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
+		static const bool enabled = ::RenderGraph::Engine::GraphMode();
 		return enabled;
 	}
 

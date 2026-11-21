@@ -38,12 +38,11 @@ namespace DCLF::Features::Forward
 			return epoch;
 		}
 
-		// Returns whether this recording draws the refraction normals. a_context is the submission's ToggleSet.
-		bool PrepareRefraction(void* a_context, const Draws::Resources* a_resources, const Draws::PassFrame* a_shape)
+		// Returns whether this recording draws the refraction normals.
+		bool PrepareRefraction(void*, const Draws::Resources* a_resources, const Draws::PassFrame* a_shape)
 		{
-			const auto& toggles = *static_cast<const ToggleSet*>(a_context);
 			bool drawn = false;
-			if (Extensions::ObjectClassOn(toggles, Api::ObjectClass::Refraction)) {
+			if (Extensions::ObjectClassOn(Api::ObjectClass::Refraction)) {
 				const auto* resources = a_resources;
 				auto& pipelines = DrawPipelines::Get();
 				pipelines.RequestRefraction();
@@ -70,15 +69,15 @@ namespace DCLF::Features::Forward
 		void ReportLines(std::string& a_text)
 		{
 			const auto f = IndirectDraws::Get().TakeSharedEpochStats(ForwardEpoch());
-			a_text += fmt::format("[DCLF] forward epoch (T7d, CS_DCLF_FORWARD {}): reached {} frames, {} epochs; not submitted: {} without this frame's colour epoch, "
+			a_text += fmt::format("[DCLF] forward epoch (T7d): reached {} frames, {} epochs; not submitted: {} without this frame's colour epoch, "
 								  "{} without a forward recording{}, {} with nothing to draw (no forward or refraction slot), {} failed{}\n",
-				Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward) ? "on" : "off", f.reached, f.epochs, f.noSharedPayload, f.noRecording,
+				f.reached, f.epochs, f.noSharedPayload, f.noRecording,
 				f.noRecording ? " <- NO FORWARD RECORDING" : "", f.empty, f.failed,
 				f.failed ? " <- EPOCH FAILED" : "");
-			if (refraction.drawn || refraction.notReady || Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Refraction))
-				a_text += fmt::format("[DCLF] refraction (T7d, CS_DCLF_REFRACTION {}): {} forward epochs drew the refraction normals, {} with refraction slots could not "
+			if (refraction.drawn || refraction.notReady || Extensions::ObjectClassOn(Api::ObjectClass::Refraction))
+				a_text += fmt::format("[DCLF] refraction (T7d): {} forward epochs drew the refraction normals, {} with refraction slots could not "
 									  "(no refraction pipeline yet, or no refraction normals){}\n",
-					Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Refraction) ? "on" : "off", refraction.drawn, refraction.notReady,
+					refraction.drawn, refraction.notReady,
 					refraction.notReady && !refraction.drawn ? " <- NO REFRACTION DRAW" : "");
 			refraction.drawn = refraction.notReady = 0;
 		}
@@ -87,22 +86,21 @@ namespace DCLF::Features::Forward
 	bool SubmitForwardEpoch()
 	{
 		DCLF_ZONE("CS.DCLF.ExecuteForward");
-		ToggleSet toggles = ActiveToggles();
 		const std::uint32_t epoch = ForwardEpoch();
-		if (!Extensions::ObjectClassOn(toggles, Api::ObjectClass::Forward) || epoch == Draws::kNoEpoch)
+		if (!Extensions::ObjectClassOn(Api::ObjectClass::Forward) || epoch == Draws::kNoEpoch)
 			return false;
-		const auto result = IndirectDraws::Get().SubmitSharedEpoch(epoch, { .prepare = &PrepareRefraction, .context = &toggles,
+		const auto result = IndirectDraws::Get().SubmitSharedEpoch(epoch, { .prepare = &PrepareRefraction,
 			.empty = [](const Draws::PassFrame& a_shape) { return !a_shape.forwardCapacity && !a_shape.refractionCapacity; } });
 		if (!result.submitted || !result.optional)
 			return false;
-		refraction.frame = Scene::FrameView::Get().GetFrame();
+		refraction.frame = Scene::FrameView::Get().SceneStep();
 		++refraction.drawn;
 		return true;
 	}
 
 	bool RefractionDrawnThisFrame()
 	{
-		return refraction.frame == Scene::FrameView::Get().GetFrame();
+		return refraction.frame == Scene::FrameView::Get().SceneStep();
 	}
 
 	void RegisterReport(Api::InstallContext& a_context)

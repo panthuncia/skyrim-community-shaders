@@ -1,12 +1,10 @@
+// Dual-target (Common/OrgResources.hlsli).
+#include "Common/OrgResources.hlsli"
+#define PHYSICAL_LENS_TAIL_RESOURCES(X)                  	X(EXTERN_LATCH, DiffractionConstants, Diffraction, 2) 	X(SRV, StructuredBuffer<float4>, TailSources, 0)     	X(SRV, StructuredBuffer<uint>, TailTiles, 1)         	X(SRV, Texture2DArray<float4>, TailPSF, 2)           	X(SRV, StructuredBuffer<uint>, TailWorkTiles, 3)     	X(SRV, ByteAddressBuffer, TailDispatch, 4)           	X(UAV, RWTexture2DArray<float>, TailRadiance, 0)     	X(SAMPLER, SamplerState, LinearClamp, 0)
+ORG_PUSH_BLOCK(PHYSICAL_LENS_TAIL_RESOURCES(ORG_HANDLE))
 #include "PostProcessing/PhysicalLensImaging/diffraction_parameters.hlsli"
 #include "PostProcessing/PhysicalLensImaging/diffraction_sampling.hlsli"
-StructuredBuffer<float4> TailSources : register(t0);
-StructuredBuffer<uint> TailTiles : register(t1);
-Texture2DArray<float4> TailPSF : register(t2);
-StructuredBuffer<uint> TailWorkTiles : register(t3);
-ByteAddressBuffer TailDispatch : register(t4);
-RWTexture2DArray<float> TailRadiance : register(u0);
-SamplerState LinearClamp : register(s0);
+PHYSICAL_LENS_TAIL_RESOURCES(ORG_RESOURCE)
 // A broad incoherent source suppresses fine diffraction structure. Evaluate
 // its integrated field on a shared tile lattice; point and thin sources retain
 // per-pixel evaluation. The three otherwise redundant subtile groups exit.

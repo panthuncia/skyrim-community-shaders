@@ -5,6 +5,7 @@ only for cs-test: the build to stage, the mods to turn off, the run's own limits
 """
 
 import copy
+import re
 import tomllib
 from pathlib import Path
 
@@ -21,10 +22,17 @@ FIXED = {
     "build": {"stage": str, "shader_cache": str},
     "game": {"save": str, "cell": str, "mods_off": list, "autoload_mod": str, "uncapped": bool},
     "timeouts": {"launch": int, "compile": int, "load": int, "step_wait": int},
-    "expect": {"reach": str, "shots": list, "no_log": list, "live_frames": int},
+    "expect": {"reach": str, "shots": list, "no_log": list, "live_frames": int, "graph_frames": dict},
+    # fg.presentmon: the game's presents per second from the PresentMon service, next to the [FGTEST] lines (presentmon.py).
+    "fg": {"presentmon": bool},
 }
-STEP_FIELDS = {"at": str, "frames": int, "do": str, "arg": str, "wait": str, "wait_s": int}
-RAW_TABLES = ("env", "dclf_ini")
+STEP_FIELDS = {"at": str, "frames": int, "do": str, "arg": str, "wait": str, "wait_s": int, "await": str}
+AWAITS = ("adopted",)
+# A call step's arg: <owner>.<name> or <owner>.<name>=<arg>.
+CALL_ARG = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(=.*)?", re.DOTALL)
+GRAPH_FRAMES_FIELDS = ("min",)
+# Tables taken as they are. saved_settings goes into the saved settings file for one run (harness part, not the contract).
+RAW_TABLES = ("env", "dclf_ini", "saved_settings")
 
 
 def parse_value(text):
@@ -95,7 +103,7 @@ def apply_set(merged, assignment, schema):
     value = parse_value(text.strip())
     if "." not in key:
         if key != "steps":
-            raise ConfigError(f"--set '{key}': name a table and key, such as dclf.shadows or run.timeout_s")
+            raise ConfigError(f"--set '{key}': name a table and key, such as dclf.cull or run.timeout_s")
         merged["steps"] = value
         return
     table, name = key.split(".", 1)
@@ -122,6 +130,8 @@ def check_fixed(merged):
                 raise ConfigError(f"{table}.{name} takes a string, not {value!r}")
             if want is list and not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
                 raise ConfigError(f"{table}.{name} takes a list of strings, not {value!r}")
+            if want is dict and not isinstance(value, dict):
+                raise ConfigError(f"{table}.{name} must be a table, not {value!r}")
     shader_cache = merged.get("build", {}).get("shader_cache", "warm")
     if shader_cache not in ("warm", "cold"):
         raise ConfigError(f"build.shader_cache takes warm or cold, not {shader_cache!r}")
@@ -131,6 +141,26 @@ def check_fixed(merged):
     reach = merged.get("expect", {}).get("reach", "")
     if reach and reach not in MILESTONES:
         raise ConfigError(f"expect.reach takes a milestone ({', '.join(MILESTONES)}), not {reach!r}")
+    check_graph_frames(merged.get("expect", {}).get("graph_frames", {}))
+    saved = merged.get("saved_settings", {})
+    if not isinstance(saved, dict):
+        raise ConfigError("[saved_settings] must be a table")
+    for section, value in saved.items():
+        if not isinstance(value, dict):
+            raise ConfigError(f"saved_settings.{section} must be a table (a section of the settings file), not {value!r}")
+
+
+def check_graph_frames(graph):
+    """expect.graph_frames: min maps a client id to the frames it must run on the graph."""
+    for name in graph:
+        if name not in GRAPH_FRAMES_FIELDS:
+            raise ConfigError(f"unknown key 'expect.graph_frames.{name}' (known: {', '.join(GRAPH_FRAMES_FIELDS)})")
+    minimum = graph.get("min", {})
+    if not isinstance(minimum, dict):
+        raise ConfigError(f"expect.graph_frames.min must be a table of client id = frames, not {minimum!r}")
+    for client, frames in minimum.items():
+        if isinstance(frames, bool) or not isinstance(frames, int) or frames < 1:
+            raise ConfigError(f"expect.graph_frames.min.{client} takes a whole number of at least 1, not {frames!r}")
 
 
 def check_steps(steps):
@@ -158,8 +188,13 @@ def check_steps(steps):
         wait = step.get("wait")
         if wait is not None and wait not in WAITS and not (wait.startswith("signal:") and wait[7:].isdigit()):
             raise ConfigError(f"step {i + 1}: wait takes {', '.join(WAITS)} or signal:<n>, not {wait!r}")
+        awaited = step.get("await")
+        if awaited is not None and awaited not in AWAITS:
+            raise ConfigError(f"step {i + 1}: await takes {', '.join(AWAITS)}, not {awaited!r}")
+        if step["do"] == "call" and not CALL_ARG.fullmatch(step.get("arg", "")):
+            raise ConfigError(f"step {i + 1}: call takes <owner>.<name> or <owner>.<name>=<arg>, not {step.get('arg', '')!r}")
         normal = {"at": at, "frames": step.get("frames", 0), "do": step["do"], "arg": step.get("arg", "")}
-        for optional in ("wait", "wait_s"):
+        for optional in ("wait", "wait_s", "await"):
             if optional in step:
                 normal[optional] = step[optional]
         out.append(normal)
@@ -214,11 +249,11 @@ def flatten(merged, schema, name):
 
     for var, value in merged.get("env", {}).items():
         if not schema.env_allowed(var):
-            raise ConfigError(f"unknown switch [env] {var}: add it to the schema (gen_schema.py) or fix the name")
+            raise ConfigError(f"unknown switch [env] {var}: add it to src/Testing/SwitchRegistry.cpp and regenerate switches.json, or fix the name")
         key = schema.by_env.get(var)
         if key and schema.get(key).get("use_instead"):
             raise ConfigError(f"[env] {var}: write {schema.get(key)['use_instead']} instead")
-        if var in origin and not origin[var].startswith("org.census"):
+        if var in origin:
             raise ConfigError(f"{var} is set by {origin[var]} and by [env]: keep one")
         if isinstance(value, bool):
             value = "1" if value else "0"
@@ -235,6 +270,9 @@ def flatten(merged, schema, name):
     timeouts = dict(DEFAULT_TIMEOUTS)
     timeouts.update(merged.get("timeouts", {}))
     expect = merged.get("expect", {})
+    graph = expect.get("graph_frames", {})
+    # Empty when the config asks nothing of the graph, so the harness skips the check.
+    graph_frames = {"min": dict(graph.get("min", {}))} if graph.get("min") else {}
     run = merged.get("run", {})
     build = merged.get("build", {})
     contract = {
@@ -250,7 +288,7 @@ def flatten(merged, schema, name):
         "timeouts": timeouts,
         "steps": check_steps(merged.get("steps", [])),
         "expect": {"reach": expect.get("reach", ""), "shots": list(expect.get("shots", [])), "no_log": list(expect.get("no_log", [])),
-                   "live_frames": expect.get("live_frames", 0)},
+                   "live_frames": expect.get("live_frames", 0), "graph_frames": graph_frames},
     }
     # A named save: the autoload mod would load its own save first, so it is turned off too.
     mods_off = list(game.get("mods_off", []))
@@ -263,7 +301,9 @@ def flatten(merged, schema, name):
         "shader_cache": build.get("shader_cache", "warm"),
         "mods_off": mods_off,
         "uncapped": bool(game.get("uncapped", False)),
+        "presentmon": bool(merged.get("fg", {}).get("presentmon", False)),
         "autoload_off": autoload_mod if autoload_off else "",
+        "saved_settings": copy.deepcopy(merged.get("saved_settings", {})),
         "timeout_s": run.get("timeout_s", 600),
         "stall_s": run.get("stall_s", 90),
         "label": run.get("label", ""),

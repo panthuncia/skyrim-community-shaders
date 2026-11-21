@@ -1,24 +1,12 @@
 #include "Features/RemoteControl/TraceStatistics.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include <BasicTelemetry/Sampling.h>
-#endif
+#include <BasicTelemetry/Sampling.h>
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 
 namespace GpuCounters::Trace::Statistics
 {
-	bool Available()
-	{
-#if defined(CS_HAS_RENDER_GRAPH)
-		return true;
-#else
-		return false;
-#endif
-	}
-
 	Config ClampConfig(Config a_config)
 	{
 		if (!(a_config.confidence > 0.0 && a_config.confidence < 1.0))
@@ -36,7 +24,6 @@ namespace GpuCounters::Trace::Statistics
 		out.samples = static_cast<std::uint32_t>(a_samples.size());
 		if (a_samples.empty())
 			return out;
-#if defined(CS_HAS_RENDER_GRAPH)
 		const auto config = ClampConfig(a_config);
 		basic_telemetry::SamplingConfig sampling;
 		sampling.minimumSamples = config.minSamples;
@@ -61,22 +48,6 @@ namespace GpuCounters::Trace::Statistics
 		out.lag1Autocorrelation = summary.lag1Autocorrelation;
 		out.madOutliers = summary.madOutlierCount;
 		out.converged = summary.converged;
-#else
-		(void)a_config;
-		auto sorted = a_samples;
-		std::ranges::sort(sorted);
-		const auto percentile = [&](double a_p) {
-			const double index = a_p * double(sorted.size() - 1);
-			const auto lo = static_cast<std::size_t>(std::floor(index)), hi = static_cast<std::size_t>(std::ceil(index));
-			return sorted[lo] + (sorted[hi] - sorted[lo]) * (index - double(lo));
-		};
-		out.effectiveSamples = double(sorted.size());
-		out.mean = std::accumulate(sorted.begin(), sorted.end(), 0.0) / double(sorted.size());
-		out.median = percentile(0.5);
-		out.p05 = percentile(0.05);
-		out.p95 = percentile(0.95);
-		out.halfWidth = out.relativeHalfWidth = std::nan("");
-#endif
 		return out;
 	}
 

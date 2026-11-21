@@ -21,6 +21,10 @@ One FXC-built shader against what DXVK made of it. A run's DXVK_SHADER_DUMP_PATH
 reflection stripped; the second form finds a stage in the dump by its signature chunks. Prints the DXBC's count and opcode mix beside the
 SPIR-V's, and with --vertex the driver's statistics of the module and of variants with one thing removed. Compiled size is static: confirm
 with an NvPerf capture in game (smsp__inst_executed_shader_ps over sm__warps_launched_shader_ps), since the executed count is what costs time.
+
+Build the tools first, from a Visual Studio developer prompt at the repository root:
+  cmake -S tools/shader-compare -B build/shader-tools -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/shader-tools
+  meson setup build/dxbc-spirv-tools extern/dxvk/subprojects/dxbc-spirv -Denable_tools=true && ninja -C build/dxbc-spirv-tools
 """
 import argparse
 import collections
@@ -45,7 +49,7 @@ STATS = os.path.join(ROOT, 'build', 'shader-tools', 'spv-pipeline-stats.exe')
 # ORGModuleServices' SPIR-V arguments (BasicRHI rhi_shader_abi.h AppendVulkanDxcSpirvArguments), in its order.
 ABI = ['-spirv', '-fvk-use-dx-layout', '-fspv-target-env=vulkan1.3', '-fvk-bind-resource-heap', '1000000', '0',
        '-fvk-bind-sampler-heap', '1000001', '0', '-fvk-bind-counter-heap', '1000002', '0']
-EAGER = []  # --eager: the pulled rewrite with every block member a static (CS_DCLF_LAZY_ROWS=0)
+EAGER = []  # --eager: the pulled rewrite with every block member a static (the game always uses lazy rows)
 EXTRA_DXC = []  # --dxc-arg: appended to every DCLF build's arguments
 KINDS = {'ps': (True, False, False), 'pulled-ps': (True, False, True), 'depth-ps': (True, True, False),
          'pulled-depth-ps': (True, True, True), 'vs': (False, False, False), 'pulled-vs': (False, False, True)}
@@ -372,7 +376,7 @@ def main():
     ap.add_argument('--kind', default='pulled-ps', choices=sorted(KINDS))
     ap.add_argument('--define', action='append', default=[], help='an extra DCLF define, NAME[=value]')
     ap.add_argument('--dxc-arg', action='append', default=[], help='an extra DXC argument for the DCLF builds (e.g. -O3, -Od)')
-    ap.add_argument('--eager', action='store_true', help='the pulled rewrite without lazy rows (CS_DCLF_LAZY_ROWS=0)')
+    ap.add_argument('--eager', action='store_true', help='the pulled rewrite without lazy rows (the game always uses them)')
     ap.add_argument('--tree', default='repo', choices=['repo', 'deployed'])
     ap.add_argument('--native', default='fxc', choices=['fxc', 'cache'])
     ap.add_argument('--out', default=os.path.join(ROOT, 'build', 'shader-compare'))
@@ -395,7 +399,7 @@ def main():
         EAGER.append(True)
     for tool in (SHADERTOOL, DXBC_COMPILER):
         if not os.path.exists(tool):
-            sys.exit(f'{tool} is missing: build it (tools/shader-compare/README.md)')
+            sys.exit(f'{tool} is missing: build it (see the top of tools/shader-compare/shader_compare.py)')
     os.makedirs(args.out, exist_ok=True)
     stages, lighting, options = load_dump(args.dump)
     tree = stage_tree(args.out, args.tree)

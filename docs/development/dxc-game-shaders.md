@@ -80,7 +80,7 @@ faster than it, and the main thread's stacks show no limiter.
 ## Survey
 
 `tools/shader-compare/dxc_survey.py` builds with DXC every request the game made of FXC, and compares the results with the DXBC the game
-stored. Its corpus comes from one run of `tools/cs-ab/scenarios/fxc-corpus.env`: 3,181 requests, 1,187 distinct builds, 86 shader files.
+stored. Its corpus came from one run of the old cs-ab scenario `fxc-corpus.env` (now the `fxc-corpus` cs-test config): 3,181 requests, 1,187 distinct builds, 86 shader files.
 
 | Check | Result |
 | --- | --- |
@@ -113,5 +113,5 @@ The roadmap's container stands. Three decisions changed once the survey had real
 Stages 2 and 3 were one vertical slice, tested in game together, rather than through the standalone sample the roadmap proposed: a boot takes under a
 minute, and the survey had covered what the sample would have checked offline.
 
-`tools/cs-ab/scenarios/dxc-slice.env` (DCLF off) and `dxc-slice-dclf.env` (DCLF on) are the gate: a shot and timers at the newest save, with `-Env CS_SHADER_DXC=<regex>`. Each
+The `dxc-slice` cs-test config is the gate: a shot and timers at the newest save, with `--set cs.shader_dxc=<regex>` (and `--set dclf.enabled=false` for DCLF off). Each
 variant's store keeps its builds, so a second run of the same selection takes no compile time.

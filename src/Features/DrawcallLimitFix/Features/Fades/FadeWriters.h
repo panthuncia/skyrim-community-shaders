@@ -18,7 +18,7 @@ namespace DCLF::SceneCapture
 namespace DCLF::Features::Fades
 {
 	/** @brief Main thread, at Main::Update's entry. Publishes the writer tables, then writes the fade stores back. */
-	void WriteFadeWriters(bool a_running);
+	void WriteFadeWriters();
 	/**
 	 * @brief Whether DCLF is the node's only fade writer this frame. Any thread.
 	 * The engine's fade update and OnVisible skip their stores on such nodes.

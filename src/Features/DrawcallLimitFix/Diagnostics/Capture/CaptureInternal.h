@@ -26,7 +26,6 @@ namespace DCLF::Capture
 		std::uint32_t frame = 0;
 		float presentMs = 0.0f;           // Present to Present
 		std::uint32_t dclfUs = 0;         // DCLF's render-thread time in the last finished frame
-		std::uint32_t adoptWaitUs = 0;    // the render thread's wait for a scene snapshot
 		std::uint32_t sceneLag = 0;       // frames since the last scene pass ended
 		std::uint32_t notReady = 0;       // epochs skipped so far in the report window
 		std::array<std::uint32_t, 4> queued{};  // the scene executor's queued jobs, by domain

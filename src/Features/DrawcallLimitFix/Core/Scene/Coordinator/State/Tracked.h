@@ -116,7 +116,6 @@ namespace DCLF::Scene
 			// With several references on its chain, the innermost is here and the outermost in moveKeyOuter. With none, its category node.
 			const void* moveKey = nullptr;
 			const void* moveKeyOuter = nullptr;
-			std::uint32_t gateWitnessWalk = 0;
 			// Owed to the next per-frame walk, since the event walk skips per-frame entries. Otherwise the first-person switch's hide
 			// of the third-person skeleton would be lost.
 			std::vector<const RE::NiAVObject*> hiddenChain;

@@ -1,48 +1,54 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/Engine/Scaleform/Passes.h"
+#include "RenderGraph/Engine/Scaleform/Passes.h"
 
-#	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
-#	include "Features/HDRDisplay.h"
-#	include "Features/HDRDisplay/ORGHDRDisplay.h"
-#	include "Globals.h"
-#	include "RenderGraph/DxvkImageImport.h"
-#	include "RenderGraph/Engine/Native/Native.h"
-#	include "RenderGraph/Engine/Scaleform/Display.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "RenderGraph/Frame/Transients.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/FrameStaging.h"
-#	include "RenderGraph/ProgramCache.h"
-#	include "RenderGraph/RasterProgram.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
-#	include "RenderGraph/ShaderBindings.h"
-#	include "RenderGraph/UndeclaredAccess.h"
+#include "Features/HDRDisplay.h"
+#include "Features/HDRDisplay/ORGHDRDisplay.h"
+#include "RenderGraph/Engine/UiTargets.h"
+#include "Globals.h"
+#include "RenderGraph/AnchorPasses.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Scaleform/Display.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/Frame/Observed.h"
+#include "RenderGraph/Frame/ProgramSet.h"
+#include "RenderGraph/Frame/Transients.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/RasterProgram.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/LatchBlock.h>
-#	include <Render/PreparedPass.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/PixelBuffer.h>
-#	include <Resources/TextureDescription.h>
-#	include <rhi_helpers.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/LatchBlock.h>
+#include <Render/PreparedPass.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/Buffers/Buffer.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/PixelBuffer.h>
+#include <Resources/TextureDescription.h>
+#include <rhi_helpers.h>
 
-#	include <algorithm>
-#	include <array>
-#	include <bit>
-#	include <cmath>
-#	include <cstddef>
-#	include <cstring>
-#	include <optional>
-#	include <set>
-#	include <string>
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstring>
+#include <optional>
+#include <set>
+#include <string>
 
 namespace RenderGraph::Engine::Scaleform::Passes
 {
@@ -53,9 +59,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr const char* kPixelShader = "Scaleform/FillPS.hlsl";
 		constexpr const char* kFilterVertexShader = "Scaleform/FilterVS.hlsl";
 		constexpr const char* kFilterPixelShader = "Scaleform/FilterPS.hlsl";
-		// GpuTextures' diagnostic source tag for Scaleform's views.
-		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::Scaleform);
-		constexpr std::uint32_t kMinimumStaging = 256u << 10;
 		// One run gate entry per command. A longer segment is drawn in several runs.
 		constexpr std::uint32_t kGateEntries = 1024;
 		// The UI stage's fixed instances. Interface runs before a menu's scene use 8 to 15 and runs after it use 0 to 7.
@@ -132,7 +135,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		/** @brief What one run of a surface's pass records. Immutable once stored. */
 		struct Frame
 		{
-			std::shared_ptr<org::LatchBlock> staging;
+			Staging staging;
 			std::vector<FrameCommand> commands;
 			rhi::Viewport viewport{};
 			rhi::ScissorRect scissor{};
@@ -151,8 +154,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 */
 		enum class Role : std::uint8_t
 		{
-			Framebuffer,  // kFRAMEBUFFER's RTV, or HDR's saved one
-			HdrUi,        // while HDR redirects the interface into it
+			Framebuffer,  // kFRAMEBUFFER's RTV
+			HdrUi,        // HDR's UI texture: the interface's target while HDR is on (Engine::UiTargets)
 			Main,         // the main menu's and loading menu's movies
 			// The book menu's pages, drawn into a GFx render texture that is one of these engine targets.
 			Book0,
@@ -181,11 +184,15 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			rhi::Format colourFormat = rhi::Format::Unknown;
 			rhi::Format depthFormat = rhi::Format::Unknown;
 			std::uint32_t width = 0, height = 0;
+			// A scratch image's declared texture. Its size follows the display and changes only at adoption.
+			const GraphResources::Texture2D* declared = nullptr;
 			// One per instance. Empty when the graph cannot draw onto the surface.
 			std::vector<std::shared_ptr<const Slots>> colourSlots;
 			std::vector<std::shared_ptr<const Slots>> depthSlots;  // empty without an importable depth-stencil
 
 			bool Drawable() const { return !colourSlots.empty(); }
+			std::uint32_t Width() const { return declared ? declared->Desc().Width : width; }
+			std::uint32_t Height() const { return declared ? declared->Desc().Height : height; }
 			bool Masks() const { return !depthSlots.empty(); }
 
 			/** @brief Empties every slot, so an older build's pass on this surface draws nothing more. */
@@ -206,31 +213,45 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return slots;
 		}
 
+		/** @brief A registration's state: the surfaces it was made with. */
+		struct ClientState
+		{
+			std::uint64_t surfaces = 0;
+		};
+
+		/** @brief What the client's registration depends on. */
+		struct ClientKey
+		{
+			std::uint64_t surfaces = 0;
+			std::uint64_t reads = 0;
+			bool operator==(const ClientKey&) const = default;
+		};
+
 		struct PathState
 		{
-			bool reserved = false;
-			bool failed = false;
 			bool setUp = false;
 			std::array<org::OwnedDescriptorBinding, 4> samplers;  // by wrap * 2 + sample
 			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture, then the scratch images
-			std::uint32_t scratchWidth = 0, scratchHeight = 0;    // the largest role surface's size
-			std::shared_ptr<const void> scratchPlacement;        // null when they have memory of their own
+			// The scratch images, declared on the display size.
+			std::array<RenderGraph::Frame::DeclaredTexture2D, kScratchTargets> scratch;
 			// Tracked textures the displays read. A new one makes the client register again after the run.
 			std::vector<Read> reads;
 			bool readsChanged = false;
+			// Raised for new reads. With surfacesGeneration it is the declared client's key.
+			std::uint64_t readsGeneration = 0;
+			// The client, made again when a revision starts after a new surface or new reads.
+			RenderGraph::Frame::DeclaredClientOf<ClientState> client;
+			// The client's key, raised with a new surface or new reads (ObserveClientKey).
+			RenderGraph::Frame::Observed<ClientKey> clientKey{ "Scaleform.Client" };
 			std::uint64_t commits = 0;
 			std::uint32_t registrations = 0;
-			// A registration for new reads alone keeps the surfaces, since the graph built before it still draws them.
-			std::uint32_t surfacesRegistration = 0;
-			std::uint32_t builtRegistration = 0;
 			std::uint32_t largestSegment = 0;
-			// The schedule draws a display only once it holds a registration with the current surfaces.
+			// The schedule draws a display only once it holds a registration with the current surfaces (ClientState::surfaces).
 			std::uint64_t surfacesGeneration = 0;
 			std::uint32_t peakTaps = 0;  // logged at each new peak
-			ProgramCache<RasterProgram, ProgramKey> programs{ "Scaleform" };
-			std::set<ProgramKey> failedPrograms;
+			// Made at Setup. A draw whose pipeline the adopted revision does not have holds its segment back until one does.
+			std::unique_ptr<::RenderGraph::Frame::ProgramSet<ProgramKey, RasterProgram>> programs;
 			std::shared_ptr<RunGate> gate;
-			std::shared_ptr<FrameStaging> staging;
 			// The run in progress, from Submit to the end of its anchor run.
 			Display* pending = nullptr;
 			std::uint32_t pendingFirst = 0;
@@ -364,7 +385,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 		/**
 		 * @brief Every draw state the capture can make, so pipelines are built ahead. The set must stay in step with what Renderer.cpp
-		 * emits. 3D draws are not enumerated and are built at their first draw.
+		 * emits. 3D draws are not enumerated: their first draw wants the pipeline, and its segment waits for it.
 		 */
 		std::vector<DrawState> DrawStates(bool a_withDepth)
 		{
@@ -438,9 +459,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 		public:
 			DisplayPass(std::shared_ptr<const Surface> a_surface, std::shared_ptr<const Slots> a_slots, std::shared_ptr<const RunGate> a_gate, bool a_withDepth,
-				std::shared_ptr<const Reads> a_reads, bool a_atExecution, std::uint32_t a_instance) :
+				std::shared_ptr<const Reads> a_reads, std::uint32_t a_instance) :
 				surface(std::move(a_surface)), slots(std::move(a_slots)), gate(std::move(a_gate)), withDepth(a_withDepth), reads(std::move(a_reads)),
-				atExecution(a_atExecution), gateBase(a_instance * kGateEntries) {}
+				gateBase(a_instance * kGateEntries) {}
 
 			PassBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -457,7 +478,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return bindings;
 			}
 
-			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadRevision(atExecution, a_out); }
+			// The UI stage records it ahead, so every commit's slot is a new ticket.
+			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadTicket(false, a_out); }
 
 			PassFrame Prepare(const PassBindings&, const org::PassPrepareContext&) const { return { slots, gate, gateBase }; }
 
@@ -530,7 +552,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						continue;
 					if (command.program != bound) {
 						commands.BindLayout(command.program->layout->GetHandle());
-						commands.BindPipeline(command.program->Pipeline());
+						commands.BindPipeline(command.program->Pipeline(a_recording));
 						bound = command.program;
 					}
 					if (command.lines != lines) {
@@ -565,7 +587,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::shared_ptr<const RunGate> gate;
 			bool withDepth = false;
 			std::shared_ptr<const Reads> reads;
-			bool atExecution = false;
 			std::uint32_t gateBase = 0;
 		};
 
@@ -664,9 +685,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				std::optional<RenderGraph::UndeclaredAccess::DeclaredViewScope> declared;
 				if (reads[i] && !added)
 					declared.emplace();
-				auto binding = DCLF::GpuTextures::Get().ResolveBinding(view, kSourceTag);
+				auto binding = ::DCLF::GpuTextures::Get().ResolveBinding(view, ::DCLF::GpuTextures::Tag(::DCLF::GpuTextures::Source::Scaleform));
 				declared.reset();
-				if (binding.index == DCLF::GpuTextures::kInvalid) {
+				if (!binding) {
 					state.commitReason = "a texture's view cannot be resolved";
 					return;
 				}
@@ -679,12 +700,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				}));
 			}
 
-			frame->staging = state.staging->Acquire(std::max<std::uint64_t>(display.staging.size(), 4));
-			if (!frame->staging) {
-				state.commitReason = "no staging buffer";
-				return;
-			}
-			std::memcpy(frame->staging->Bytes().data(), display.staging.data(), display.staging.size());
+			frame->staging = AcquireStaging("Scaleform", display.staging.size());
+			std::memcpy(frame->staging->mapped, display.staging.data(), display.staging.size());
 
 			const std::size_t first = state.pendingFirst;
 			const std::size_t last = std::min<std::size_t>(first + state.pendingCount, display.commands.size());
@@ -711,7 +728,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				out.filter = command.state.filter != 0;
 				if (command.state.filter) {
 					FilterBlock filter{};
-					filter.geometry = frame->staging->SrvIndex();
+					filter.geometry = frame->staging->srvIndex;
 					filter.vertexOffset = command.record;
 					filter.matrixOffset = command.record + kFilterMatrixOffset;
 					filter.constantsOffset = command.record + kFilterConstantsOffset;
@@ -722,7 +739,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					std::memcpy(&out.block, &filter, sizeof(filter));
 					continue;
 				}
-				out.block.geometry = frame->staging->SrvIndex();
+				out.block.geometry = frame->staging->srvIndex;
 				out.block.record = command.record;
 				for (std::uint32_t stage = 0; stage < 2; ++stage) {
 					out.block.textures[stage] = textureOf(stage);
@@ -736,16 +753,17 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			for (const auto& sampler : state.samplers)
 				frame->owners.push_back(sampler.Owner());
 
-			frame->width = surface.width;
-			frame->height = surface.height;
+			const auto width = surface.Width(), height = surface.Height();
+			frame->width = width;
+			frame->height = height;
 			frame->clear = display.clearTarget && state.pendingFirst == 0;
 			frame->format = surface.colourFormat;
 			frame->viewport = { display.viewport[0], display.viewport[1], display.viewport[2], display.viewport[3], 0.0f, 1.0f };
 			// D3D11 clips to the viewport, since the renderer's rasterizer state has no scissor.
-			const float left = std::clamp(display.viewport[0], 0.0f, static_cast<float>(surface.width));
-			const float top = std::clamp(display.viewport[1], 0.0f, static_cast<float>(surface.height));
-			const float right = std::clamp(display.viewport[0] + display.viewport[2], left, static_cast<float>(surface.width));
-			const float bottom = std::clamp(display.viewport[1] + display.viewport[3], top, static_cast<float>(surface.height));
+			const float left = std::clamp(display.viewport[0], 0.0f, static_cast<float>(width));
+			const float top = std::clamp(display.viewport[1], 0.0f, static_cast<float>(height));
+			const float right = std::clamp(display.viewport[0] + display.viewport[2], left, static_cast<float>(width));
+			const float bottom = std::clamp(display.viewport[1] + display.viewport[3], top, static_cast<float>(height));
 			frame->scissor = { static_cast<std::int32_t>(std::floor(left)), static_cast<std::int32_t>(std::floor(top)),
 				static_cast<std::uint32_t>(std::ceil(right) - std::floor(left)), static_cast<std::uint32_t>(std::ceil(bottom) - std::floor(top)) };
 
@@ -767,7 +785,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			for (const auto& read : a_state.reads)
 				declared->push_back(read.texture);
 			// Scratch images are declared by every instance but the first. Nothing earlier in the frame wrote them, and a draw into one
-			// clears it first, since the frame arena may hold other transients there. The anchor's own epoch declares them in every pass.
+			// clears it first. The anchor's own epoch declares them in every pass.
 			auto withScratch = std::make_shared<Reads>(*declared);
 			for (const auto& surface : a_state.surfaces)
 				if (surface->scratch >= 0 && surface->Drawable())
@@ -791,7 +809,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						if (a_instance >= a_slots.size())
 							return nullptr;
 						return std::make_shared<DisplayPass>(surface, a_slots[a_instance], gate, a_withDepth, firstInstance == a_instance ? firstReads : reads,
-							FrameAnchors::RecordsAtExecution(Anchor::Interface), a_instance);
+							a_instance);
 					};
 					client.passes.push_back(std::move(pass));
 				};
@@ -806,12 +824,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			client.instances = [] { return kInstances; };
 			client.instanceMajor = true;
 			// A registration for new reads keeps the surfaces, slots and gate, so the older registration still draws the displays.
-			client.matchesById = true;
-			client.generation = a_state.surfacesGeneration;
+			// Declare gives the client a generation, so it taps by id.
 			client.registerResources = [](org::RenderGraph& a_graph) {
-				for (const auto& surface : Path().surfaces)
-					if (!surface->ownId.empty() && surface->colour.Plain())
+				for (const auto& surface : Path().surfaces) {
+					if (surface->declared)
+						surface->declared->Register(a_graph);
+					else if (!surface->ownId.empty() && surface->colour.Plain())
 						a_graph.RegisterResource(org::ResourceIdentifier(surface->ownId), surface->colour.Plain());
+				}
 			};
 			client.commit = [](const FrameAnchors::Point&) { Commit(); };
 			client.active = [] { return Path().pending != nullptr; };
@@ -825,30 +845,45 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return client;
 		}
 
-		/** @brief Registers the client with a pass pair for every surface. False, failing the path, when refused. */
-		bool RegisterClient(PathState& a_state)
+		/** @brief Raises the client's key from the surfaces and reads generations. The next revision start makes the client again. */
+		void ObserveClientKey(PathState& a_state)
 		{
-			if (!FrameAnchors::Register(MakeClient(a_state))) {
-				a_state.failed = true;
-				logger::error("[ORG] Scaleform: the Interface anchor's client could not be registered; D3D11 draws every display");
-				return false;
-			}
-			++a_state.registrations;
-			const auto drawable = std::ranges::count_if(a_state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); });
-			logger::info("[ORG] Scaleform: registered with {} surfaces (registration {})", drawable, a_state.registrations);
-			return true;
+			a_state.clientKey.Observe(ClientKey{ a_state.surfacesGeneration, a_state.readsGeneration });
+		}
+
+		/** @brief Declares the client. A new surface or new reads make it again when the next revision starts. */
+		void DeclareInterfaceClient(PathState& a_state)
+		{
+			ObserveClientKey(a_state);
+			a_state.client = RenderGraph::Frame::DeclareClient<ClientKey, ClientState>(
+				kClientId, RenderGraph::Frame::DependsOn(a_state.clientKey.Var()),
+				[](const RenderGraph::Frame::Inputs& a_in) -> std::optional<ClientKey> {
+					const auto* key = Path().clientKey.Get(a_in);
+					return key ? std::optional<ClientKey>(*key) : std::nullopt;
+				},
+				[](const ClientKey& a_key, FrameAnchors::ClientDesc& a_client) -> std::shared_ptr<ClientState> {
+					auto& state = Path();
+					std::erase_if(state.reads, [&](const Read& a_read) { return a_read.lastCommit + kReadIdleCommits < state.commits; });
+					a_client = MakeClient(state);
+					++state.registrations;
+					const auto drawable = std::ranges::count_if(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); });
+					logger::info("[ORG] Scaleform: a client for the next revision with {} surfaces and {} tracked reads (registration {})", drawable,
+						state.reads.size(), state.registrations);
+					return std::make_shared<ClientState>(ClientState{ a_key.surfaces });
+				});
 		}
 
 		/**
-		 * @brief Registers again with the current reads after a run found a new tracked texture. The graph rebuilds off the render
-		 * thread, and until then the old graph draws new reads through their raw indices.
+		 * @brief New tracked reads make the client again when the next revision starts. Until its build switches in, the old
+		 * graph draws new reads through their raw indices.
 		 */
 		void RegisterReads(PathState& a_state)
 		{
 			a_state.readsChanged = false;
-			std::erase_if(a_state.reads, [&](const Read& a_read) { return a_read.lastCommit + kReadIdleCommits < a_state.commits; });
-			logger::info("[ORG] Scaleform: {} tracked textures read by the displays; the Interface graph is built again to declare them", a_state.reads.size());
-			RegisterClient(a_state);
+			++a_state.readsGeneration;
+			ObserveClientKey(a_state);
+			logger::info("[ORG] Scaleform: {} tracked textures read by the displays; the client is made again at the next revision to declare them",
+				a_state.reads.size());
 		}
 
 		std::int32_t EngineTargetOf(ID3D11Texture2D* a_texture)
@@ -889,17 +924,11 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return -1;
 		}
 
-		/** @brief The back buffer's RTV, which is HDR's saved one while HDR points kFRAMEBUFFER at its UI texture. */
+		/** @brief kFRAMEBUFFER's RTV. HDR Display leaves it alone in graph mode: the interface's redirect is Engine::UiTargets. */
 		ID3D11RenderTargetView* FramebufferRtv()
 		{
 			auto* renderer = globals::game::renderer;
-			if (!renderer)
-				return nullptr;
-			auto* rtv = renderer->GetRuntimeData().renderTargets[static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)].RTV;
-			const auto& hdr = globals::features::hdrDisplay;
-			if (hdr.uiTexture && hdr.uiTexture->rtv && rtv == hdr.uiTexture->rtv.get() && hdr.savedFramebufferRTV)
-				rtv = hdr.savedFramebufferRTV;
-			return rtv;
+			return renderer ? renderer->GetRuntimeData().renderTargets[static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)].RTV : nullptr;
 		}
 
 		winrt::com_ptr<ID3D11Texture2D> TextureOf(ID3D11RenderTargetView* a_rtv, DXGI_FORMAT& a_format)
@@ -977,21 +1006,44 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return depth.texture ? Tripwire::Unwrap(depth.texture) : nullptr;
 		}
 
-		/** @brief Imports a non-engine target through the anchors, so it is one graph resource whoever imports it. */
+		/**
+		 * @brief Imports a target that is neither an engine target nor HDR's UI texture (a twin, found by its slot) through the
+		 * anchors, so it is one graph resource whoever imports it.
+		 */
 		FrameAnchors::Texture ImportTarget(ID3D11Texture2D* a_texture, DXGI_FORMAT a_format, const std::string& a_id)
 		{
-			const auto& hdr = globals::features::hdrDisplay;
-			if (hdr.uiTexture && hdr.uiTexture->resource &&
-				(hdr.uiTexture->resource.get() == a_texture || Tripwire::Unwrap(hdr.uiTexture->resource.get()) == a_texture)) {
-				const auto& ui = *hdr.uiTexture;
-				return FrameAnchors::D3D11Texture("hdr.ui", ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
-			}
 			org::TextureDescription desc{};
 			desc.format = rhi::helpers::ToRHI(a_format);
 			desc.channels = 4;
 			desc.hasRTV = true;
 			desc.rtvFormat = desc.format;
-			return FrameAnchors::ImportTexture(a_id, a_texture, desc);
+			return FrameAnchors::ImportTexture(a_id, { .texture = a_texture, .views = &desc });
+		}
+
+		/** @brief Where a display draws: its D3D11 texture and its view's format. */
+		struct ColourTarget
+		{
+			ID3D11Texture2D* texture = nullptr;
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+		};
+
+		/**
+		 * @brief The display's target, sent to the frame's interface target (Engine::UiTargets): a display bound to kFRAMEBUFFER
+		 * draws into HDR's UI texture while HDR is on, which the composite reads. Fatal when HDR is on and that texture has no RTV.
+		 */
+		ColourTarget UiTargetOf(const Display& a_display)
+		{
+			ColourTarget target{ a_display.target, a_display.targetFormat };
+			if (a_display.scratch != -1 || !RenderGraph::Engine::UiTargets::DrawsIntoHdrUi())
+				return target;
+			DXGI_FORMAT format{};
+			if (RoleTexture(Role::Framebuffer, format).get() != target.texture)
+				return target;
+			// HDR Display's wrapper keeps the texture alive, so the raw pointer outlives the com_ptr.
+			const auto ui = RoleTexture(Role::HdrUi, format);
+			if (!ui || format == DXGI_FORMAT_UNKNOWN)
+				RenderGraph::Fatal("Scaleform", "HDR is on and its UI texture has no render target view");
+			return { ui.get(), format };
 		}
 
 		/** @brief The graph texture of a role's target. A remade texture becomes that import's next version, never a new id. */
@@ -999,7 +1051,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 			a_ownId.clear();
 			if (const auto target = EngineTargetOf(a_colour); target >= 0)
-				return FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
+				return FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(target)));
 			if (auto owned = ORGHDRDisplay::Get().GraphOf(a_colour)) {
 				// The graph-owned HDR UI twin, which the composite reads.
 				a_ownId = "cs.scaleform.hdr-ui";
@@ -1013,7 +1065,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!a_depth)
 				return {};
 			const auto depth = EngineDepthOf(a_depth);
-			return depth >= 0 ? FrameAnchors::EngineDepth(static_cast<std::uint32_t>(depth)) : FrameAnchors::Texture{};
+			return depth >= 0 ? FrameAnchors::EngineTexture(FrameAnchors::Depth(static_cast<std::uint32_t>(depth))) : FrameAnchors::Texture{};
 		}
 
 		/** @brief Makes the role's surface. It has no passes when the target cannot be imported. */
@@ -1051,8 +1103,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
-		 * @brief Queues every pipeline the surface may need on the build thread, so they build while the game loads.
-		 * One needed before its build finished is built on the render thread and logged.
+		 * @brief Queues every pipeline the surface may need on the programs lane, so they build while the game loads.
+		 * A segment that needs one still building waits for it.
 		 */
 		void QueuePrograms(PathState& a_state, const Surface& a_surface)
 		{
@@ -1062,7 +1114,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			const auto queue = [&](bool a_withDepth) {
 				for (const auto& drawState : DrawStates(a_withDepth)) {
 					const ProgramKey key{ drawState, a_surface.colourFormat, a_withDepth ? a_surface.depthFormat : rhi::Format::Unknown };
-					(void)a_state.programs.Get(key, [&] { return DescOf(key); });
+					a_state.programs->Queue(key);
 					++queued;
 				}
 			};
@@ -1105,26 +1157,26 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 * @brief Keeps a role's surface when its remade texture is the same graph texture, so nothing is rebuilt.
 		 * Null when the graph texture changed, and the caller remakes the surface.
 		 */
-		Surface* RefreshSurface(PathState& a_state, Role a_role, const Display& a_display)
+		Surface* RefreshSurface(PathState& a_state, Role a_role, const ColourTarget& a_target)
 		{
 			const auto found = std::ranges::find_if(a_state.surfaces, [&](const auto& a_surface) { return a_surface->scratch < 0 && a_surface->role == a_role; });
 			if (found == a_state.surfaces.end() || !(*found)->Drawable())
 				return nullptr;
 			Surface& surface = **found;
-			if (surface.colourFormat != rhi::helpers::ToRHI(a_display.targetFormat))
+			if (surface.colourFormat != rhi::helpers::ToRHI(a_target.format))
 				return nullptr;
 			std::string ownId;
-			const auto colour = ColourOf(a_role, a_display.target, a_display.targetFormat, ownId);
+			const auto colour = ColourOf(a_role, a_target.texture, a_target.format, ownId);
 			if (!colour || !(colour == surface.colour) || ownId != surface.ownId)
 				return nullptr;
 			auto* depthTexture = RoleDepth(a_role);
 			const auto depth = DepthTextureOf(depthTexture);
 			if (!(depth == surface.depth))
 				return nullptr;
-			surface.colourTexture.copy_from(a_display.target);
+			surface.colourTexture.copy_from(a_target.texture);
 			surface.depthTexture.copy_from(depthTexture);
 			D3D11_TEXTURE2D_DESC desc{};
-			a_display.target->GetDesc(&desc);
+			a_target.texture->GetDesc(&desc);
 			surface.width = desc.Width;
 			surface.height = desc.Height;
 			if (depthTexture && surface.depth) {
@@ -1142,7 +1194,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 * @brief The surface a_display draws onto. A role whose texture was remade gets a new surface and a re-registration,
 		 * and the graph rebuilds at the next build point. Null with a_reason otherwise.
 		 */
-		Surface* SurfaceFor(PathState& a_state, const Display& a_display, bool a_needsDepth, const char*& a_reason)
+		Surface* SurfaceFor(PathState& a_state, const Display& a_display, const ColourTarget& a_target, bool a_needsDepth, const char*& a_reason)
 		{
 			if (a_display.scratch != -1) {
 				auto* scratch = const_cast<Surface*>(ScratchSurface(a_state, a_display.scratch));
@@ -1150,12 +1202,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					a_reason = "a render target of GFx's that no scratch image could take (larger than the screen, or all in use)";
 				return scratch && scratch->Drawable() ? scratch : nullptr;
 			}
-			if (auto* surface = Find(a_state, a_display.target)) {
+			if (auto* surface = Find(a_state, a_target.texture)) {
 				if (!surface->Drawable()) {
 					a_reason = "a render target the graph cannot import";
 					return nullptr;
 				}
-				if (surface->colourFormat != rhi::helpers::ToRHI(a_display.targetFormat)) {
+				if (surface->colourFormat != rhi::helpers::ToRHI(a_target.format)) {
 					a_reason = "a render target view in another format than its surface's";
 					return nullptr;
 				}
@@ -1167,21 +1219,21 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			}
 			for (const auto role : kRoles) {
 				DXGI_FORMAT format{};
-				if (RoleTexture(role, format).get() != a_display.target)
+				if (RoleTexture(role, format).get() != a_target.texture)
 					continue;
-				if (auto* refreshed = RefreshSurface(a_state, role, a_display); refreshed)
+				if (auto* refreshed = RefreshSurface(a_state, role, a_target); refreshed)
 					return refreshed;
 				logger::info("[ORG] Scaleform: the {} texture was made again as another graph resource; the Interface graph is built again with it",
 					RoleName(role));
 				if (DeclareSurface(a_state, role)) {
 					++a_state.surfacesGeneration;
-					if (RegisterClient(a_state))
-						a_state.surfacesRegistration = a_state.registrations;
+					// The registration the next revision makes holds it.
+					ObserveClientKey(a_state);
 				}
 				a_reason = "a surface made again (drawn once the Interface graph is built with it)";
 				return nullptr;
 			}
-			a_reason = OtherTargetReason(a_display.target);
+			a_reason = OtherTargetReason(a_target.texture);
 			return nullptr;
 		}
 
@@ -1196,14 +1248,15 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				logger::info("[ORG] Scaleform: the largest segment so far has {} commands (drawn in runs of at most {})", a_commands, kGateEntries);
 		}
 
-		/** @brief Names a draw's failed pipeline key once. The draw is left out and the rest of its segment draws. */
-		void NoteFailedProgram(PathState& a_state, const ProgramKey& a_key)
+		/** @brief Logs a draw state that was not queued ahead, once. It is built for the next revision, and its segments wait for it. */
+		void NoteLateProgram(const ProgramKey& a_key)
 		{
-			if (!a_state.failedPrograms.insert(a_key).second)
+			static std::set<ProgramKey> s_logged;
+			if (!s_logged.insert(a_key).second)
 				return;
-			logger::error(
+			logger::info(
 				"[ORG] Scaleform programs: the pipeline for vertex kind {}, pixel kind {}, filter {}, blend {}, stencil {}, {} (colour format {}, "
-				"depth format {}) could not be built; its draws are left out",
+				"depth format {}) was not queued ahead; its segments wait until it is built",
 				a_key.state.vertexKind, a_key.state.pixelKind, a_key.state.filter, a_key.state.blend, static_cast<int>(a_key.state.stencil),
 				a_key.state.lines ? "line strip" : "triangle list", static_cast<int>(a_key.colour), static_cast<int>(a_key.depth));
 		}
@@ -1233,69 +1286,52 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 	namespace
 	{
-		/** @brief Makes the scratch images that GFx's pushed render targets draw into, at the largest role surface's size. */
+		/**
+		 * @brief Declares the scratch images that GFx's pushed render targets draw into, at the display size. A new display size is
+		 * a new version of each, adopted with its frame revision, so a window that grows takes larger GFx targets.
+		 */
 		void MakeScratch(PathState& a_state)
 		{
-			for (const auto& surface : a_state.surfaces)
-				if (surface->Drawable()) {
-					a_state.scratchWidth = std::max(a_state.scratchWidth, surface->width);
-					a_state.scratchHeight = std::max(a_state.scratchHeight, surface->height);
-				}
-			if (!a_state.scratchWidth || !a_state.scratchHeight)
-				return;
-			// The scratch images share bytes with other stages' transients. A draw into one clears it, and nothing reads one before that.
-			std::vector<std::shared_ptr<org::PixelBuffer>> textures;
+			// A draw into one clears it, and nothing reads one before that.
+			const D3D11_TEXTURE2D_DESC desc{ .Width = 1,
+				.Height = 1,
+				.MipLevels = 1,
+				.ArraySize = 1,
+				.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+				.SampleDesc = { .Count = 1 },
+				.Usage = D3D11_USAGE_DEFAULT,
+				.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET };
 			for (std::uint32_t i = 0; i < kScratchTargets; ++i) {
-				org::TextureDescription desc{};
-				desc.imageDimensions = { { a_state.scratchWidth, a_state.scratchHeight, 0, 0 } };
-				desc.channels = 4;
-				desc.format = kScratchFormat;
-				desc.hasRTV = true;
-				desc.rtvFormat = kScratchFormat;
-				desc.hasSRV = true;
-				desc.srvFormat = kScratchFormat;
-				auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
-				if (!texture) {
-					logger::warn("[ORG] Scaleform: scratch image {} could not be made; GFx's render targets beyond it are not drawn", i);
-					break;
-				}
-				texture->SetName(fmt::format("cs.scaleform.scratch.{}", i));
-				textures.push_back(std::move(texture));
-			}
-			// In guest mode or with the arena off they get memory of their own.
-			try {
-				a_state.scratchPlacement = RenderGraph::Frame::Transients::Place("Scaleform's scratch images", textures);
-			} catch (const std::exception& e) {
-				stl::report_and_fail(fmt::format("Community Shaders: Scaleform's scratch images could not be placed in the frame arena: {}", e.what()));
-			}
-			if (!a_state.scratchPlacement)
-				for (const auto& texture : textures)
-					texture->Materialize();
-			for (std::uint32_t i = 0; i < textures.size(); ++i) {
-				auto& texture = textures[i];
+				auto& texture = a_state.scratch[i];
+				texture = RenderGraph::Frame::DeclareTexture2D(fmt::format("Scaleform::Scratch{}", i), RenderGraph::Frame::DisplaySized(desc),
+					GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+				if (!texture || !texture->Versioned())
+					RenderGraph::Fatal("Scaleform", fmt::format("scratch image {} could not be declared", i));
 				auto surface = std::make_shared<Surface>();
 				surface->scratch = static_cast<std::int32_t>(i);
-				surface->ownId = texture->GetName();
-				surface->colour = FrameAnchors::Texture(std::static_pointer_cast<org::Resource>(texture));
+				surface->ownId = texture->Name();
+				surface->declared = texture.Get();
+				surface->colour = RenderGraph::AnchorPasses::TextureOf(*texture);
 				surface->colourFormat = kScratchFormat;
-				surface->width = a_state.scratchWidth;
-				surface->height = a_state.scratchHeight;
 				surface->colourSlots = MakeSlots();
 				if (i == 0)
 					QueuePrograms(a_state, *surface);
 				a_state.surfaces.push_back(std::move(surface));
 			}
-			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets ({})", kScratchTargets, a_state.scratchWidth, a_state.scratchHeight,
-				a_state.scratchPlacement ? "in the frame arena, span derived from the graphs that use them" : "memory of their own");
+			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets, declared on the display size", kScratchTargets,
+				a_state.scratch[0]->Desc().Width, a_state.scratch[0]->Desc().Height);
 		}
 	}
 
 	bool ScratchSize(std::uint32_t& a_width, std::uint32_t& a_height)
 	{
 		const auto& state = Path();
-		a_width = state.scratchWidth;
-		a_height = state.scratchHeight;
-		return state.setUp && a_width && a_height;
+		a_width = a_height = 0;
+		if (!state.setUp || !state.scratch[0])
+			return false;
+		a_width = state.scratch[0]->Desc().Width;
+		a_height = state.scratch[0]->Desc().Height;
+		return a_width && a_height;
 	}
 
 	std::uint32_t ScratchCount()
@@ -1304,25 +1340,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		return static_cast<std::uint32_t>(std::ranges::count_if(state.surfaces, [](const auto& a_surface) { return a_surface->scratch >= 0; }));
 	}
 
-	bool Reserve()
-	{
-		auto& state = Path();
-		state.reserved = FrameAnchors::Reserve(Anchor::Interface);
-		if (!state.reserved)
-			logger::warn("[ORG] Scaleform: CS_ORG_SCALEFORM=1, but the Interface anchor could not be reserved; the D3D11 renderer draws");
-		return state.reserved;
-	}
-
 	void Setup()
 	{
 		auto& state = Path();
-		if (!state.reserved || state.setUp || state.failed)
+		if (!Engine::GraphMode() || state.setUp)
 			return;
-		if (!RenderGraphRuntime::Get().IsActive() || !FrameAnchors::HasEpoch(Anchor::Interface)) {
-			state.failed = true;
-			logger::warn("[ORG] Scaleform: CS_ORG_SCALEFORM=1, but the render graph or its Interface anchor is not active; the D3D11 renderer draws");
-			return;
-		}
+		if (!RenderGraphRuntime::Get().IsActive())
+			RenderGraph::Fatal("Scaleform", "the render graph is not active");
 		for (std::uint32_t i = 0; i < state.samplers.size(); ++i) {
 			// CreateShaders' samplers use LOD bias -0.5 and the top mip only.
 			D3D11_SAMPLER_DESC desc{};
@@ -1334,42 +1358,31 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			desc.MinLOD = 0.0f;
 			desc.MaxLOD = 0.0f;
 			state.samplers[i] = ShaderBindings::CreateSamplerFromD3D11(desc);
-			if (!state.samplers[i]) {
-				state.failed = true;
-				logger::error("[ORG] Scaleform: the samplers could not be made (no descriptor service); the D3D11 renderer draws");
-				return;
-			}
+			if (!state.samplers[i])
+				RenderGraph::Fatal("Scaleform", "the samplers could not be made (no descriptor service)");
 		}
 		// Each instance has its own kGateEntries.
 		state.gate = RunGate::Create("cs.scaleform.gate", kGateEntries * kInstances);
-		state.staging = FrameStaging::Create({ .name = "cs.scaleform.staging",
-			.minimumBytes = kMinimumStaging,
-			.runsPerFrame = kInstances });
-		if (!state.gate || !state.staging) {
-			state.failed = true;
-			logger::error("[ORG] Scaleform: the run gate or the staging pool could not be made; the D3D11 renderer draws");
-			return;
-		}
+		if (!state.gate)
+			RenderGraph::Fatal("Scaleform", "the run gate could not be made");
+		// The surfaces queue the draw states they may need. A later draw state is built for the next revision.
+		state.programs = std::make_unique<::RenderGraph::Frame::ProgramSet<ProgramKey, RasterProgram>>("Scaleform.Programs",
+			[](const ProgramKey& a_key) { return DescOf(a_key); });
 		for (const auto role : kRoles)
 			(void)DeclareSurface(state, role);
 		MakeScratch(state);
 		state.surfacesGeneration = 1;
-		if (std::ranges::none_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); })) {
-			state.failed = true;
-			logger::error("[ORG] Scaleform: none of the surfaces' targets can be imported; the D3D11 renderer draws");
-			return;
-		}
-		if (!RegisterClient(state))
-			return;
-		state.surfacesRegistration = state.registrations;
+		if (std::ranges::none_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); }))
+			RenderGraph::Fatal("Scaleform", "none of the surfaces' targets can be imported");
+		DeclareInterfaceClient(state);
 		state.setUp = true;
-		logger::info("[ORG] Scaleform: on (CS_ORG_SCALEFORM); the client joins the Interface graph at setup's build point");
+		logger::info("[ORG] Scaleform: on; the client joins the Interface graph with the first revision");
 	}
 
 	bool Ready()
 	{
 		const auto& state = Path();
-		return state.setUp && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(Anchor::Interface);
+		return state.setUp && RenderGraphRuntime::Get().IsActive();
 	}
 
 	bool Submit(Display& a_display, const char*& a_reason, bool& a_lagged)
@@ -1377,7 +1390,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		auto& state = Path();
 		a_lagged = false;
 		if (!Ready()) {
-			a_reason = "the graph path is off (not set up, or failed)";
+			a_reason = "the graph path is not set up";
 			return false;
 		}
 		if (a_display.commands.empty() && !a_display.clearTarget)
@@ -1388,12 +1401,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		const bool needsDepth = a_display.scratch == -1 && a_display.depth && std::ranges::any_of(a_display.commands, [](const Command& a_command) {
 			return a_command.kind == Command::Kind::ClearStencil || a_command.state.stencil != Stencil::Off;
 		});
-		Surface* surface = SurfaceFor(state, a_display, needsDepth, a_reason);
+		Surface* surface = SurfaceFor(state, a_display, UiTargetOf(a_display), needsDepth, a_reason);
 		if (!surface)
 			return false;
 
-		// A pipeline still building is built here, never left to D3D11. A key that failed leaves its draw out.
+		// The render thread never builds a pipeline. One the adopted revision does not have is wanted (once): the next revision
+		// starts once it is built. Until that revision is adopted the segment is held back. A failed build is fatal.
 		state.pendingPrograms.assign(a_display.commands.size(), nullptr);
+		bool building = false;
 		for (std::size_t i = 0; i < a_display.commands.size(); ++i) {
 			const Command& command = a_display.commands[i];
 			if (command.kind != Command::Kind::Draw)
@@ -1401,28 +1416,36 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			ProgramKey key{ command.state, surface->colourFormat, needsDepth ? surface->depthFormat : rhi::Format::Unknown };
 			if (!needsDepth)
 				key.state.stencil = Stencil::Off;
-			state.pendingPrograms[i] = state.programs.Require(key, [&] { return DescOf(key); });
-			if (!state.pendingPrograms[i])
-				NoteFailedProgram(state, key);
+			state.pendingPrograms[i] = state.programs->Adopted(key);
+			if (state.pendingPrograms[i])
+				continue;
+			if (state.programs->Want(key))
+				NoteLateProgram(key);
+			building = true;
+		}
+		if (building) {
+			state.pendingPrograms.clear();
+			a_reason = "a pipeline is still building (drawn once it is built)";
+			a_lagged = true;
+			return false;
 		}
 		// The UI stage's schedule must hold a registration with the current surfaces. Until a rebuild switches in at a frame
 		// boundary the display lags.
-		const auto hold = FrameAnchors::HeldNow(kClientId, Anchor::Interface);
-		if (hold.held) {
-			if (!hold.scheduled || hold.generation != state.surfacesGeneration) {
-				state.pendingPrograms.clear();
-				a_reason = !hold.scheduled ? "the UI stage's schedule does not hold the client yet" : "a surface made again (drawn once the UI stage's build with it switches in)";
-				a_lagged = true;
-				return false;
-			}
-		} else if (FrameAnchors::Scheduled(kClientId, Anchor::Interface)) {
-			state.builtRegistration = state.registrations;
-		} else if (state.builtRegistration == 0 || state.builtRegistration < state.surfacesRegistration) {
+		const auto held = state.client.Held(Anchor::Interface);
+		if (!held.Placement().InStage()) {
+			// No stage takes the anchor's work now, so nothing draws it.
 			state.pendingPrograms.clear();
 			a_reason = !FrameAnchors::IsRenderOwner()        ? "a segment off the render owner" :
-			           !RenderGraphRuntime::Get().IsActive() ? "the graph path is off (not set up, or failed)" :
-			                                                   "a surface made again (drawn once the Interface graph is built with it)";
+			           !RenderGraphRuntime::Get().IsActive() ? "the graph path is not set up" :
+			                                                   "no UI stage holds the client now (drawn once one does)";
 			a_lagged = FrameAnchors::IsRenderOwner() && RenderGraphRuntime::Get().IsActive();
+			return false;
+		}
+		if (held.Lagging() || held->surfaces != state.surfacesGeneration) {
+			state.pendingPrograms.clear();
+			a_reason = held.Lagging() ? "the UI stage's schedule does not hold the client yet" :
+			                                           "a surface made again (drawn once the UI stage's build with it switches in)";
+			a_lagged = true;
 			return false;
 		}
 
@@ -1459,27 +1482,3 @@ namespace RenderGraph::Engine::Scaleform::Passes
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-#	include "RenderGraph/Engine/Scaleform/Passes.h"
-
-namespace RenderGraph::Engine::Scaleform::Passes
-{
-	bool Reserve() { return false; }
-	void Setup() {}
-	bool Ready() { return false; }
-	bool ScratchSize(std::uint32_t& a_width, std::uint32_t& a_height)
-	{
-		a_width = a_height = 0;
-		return false;
-	}
-	std::uint32_t ScratchCount() { return 0; }
-	bool Submit(Display&, const char*& a_reason, bool& a_lagged)
-	{
-		a_reason = "built without the render graph";
-		a_lagged = false;
-		return false;
-	}
-}
-
-#endif

@@ -35,9 +35,9 @@ namespace DCLF::Features::BloodSplatter
 		// The draw latch's capacity. A bigger batch is split into several runs.
 		constexpr std::size_t kMaxLatched = 32;
 
-		Util::ReasonLog& Refusals()
+		Family::RefusalLog& Refusals()
 		{
-			static Util::ReasonLog log("[DCLF] blood splatter: the engine draws", spdlog::level::warn);
+			static Family::RefusalLog log("[DCLF] blood splatter: the engine draws");
 			return log;
 		}
 
@@ -107,7 +107,7 @@ namespace DCLF::Features::BloodSplatter
 			const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[kFramebuffer];
 			if (target.RTV) {
 				D3D11_RENDER_TARGET_VIEW_DESC desc{};
-				Unwrap(target.RTV)->GetDesc(&desc);
+				target.RTV->GetDesc(&desc);
 				draw.key.colourFormats[0] = static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 			}
 			if (!draw.key.colourFormats[0])
@@ -179,7 +179,7 @@ namespace DCLF::Features::BloodSplatter
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
-				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !BloodSplatterDraws::Available() || (Family::BeginBatch(), !BloodSplatterDraws::CanTake())) {
+				if (!FrameAnchors::IsRenderOwner() || !BloodSplatterDraws::Available() || (Family::BeginBatch(), !BloodSplatterDraws::CanTake())) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}

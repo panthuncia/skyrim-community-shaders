@@ -130,10 +130,10 @@ namespace DCLF::Capture
 
 		std::string FramesCsv(const Session& a_session)
 		{
-			std::string out = "frame,present_ms,dclf_render_thread_us,adopt_wait_us,scene_lag_frames,epochs_not_ready,queued_coordinator,queued_preparation,"
+			std::string out = "frame,present_ms,dclf_render_thread_us,scene_lag_frames,epochs_not_ready,queued_coordinator,queued_preparation,"
 							  "queued_scene,queued_streaming,loading,running,cpu_pipeline,interior\n";
 			for (const auto& f : a_session.frames)
-				out += fmt::format("{},{:.3f},{},{},{},{},{},{},{},{},{},{},{},{}\n", f.frame, f.presentMs, f.dclfUs, f.adoptWaitUs, f.sceneLag, f.notReady, f.queued[0],
+				out += fmt::format("{},{:.3f},{},{},{},{},{},{},{},{},{},{},{}\n", f.frame, f.presentMs, f.dclfUs, f.sceneLag, f.notReady, f.queued[0],
 					f.queued[1], f.queued[2], f.queued[3], f.loading ? 1 : 0, f.running ? 1 : 0, f.cpuPipeline ? 1 : 0, f.interior ? 1 : 0);
 			return out;
 		}

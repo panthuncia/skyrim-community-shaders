@@ -1,6 +1,7 @@
 // The classify inputs' samples and the scene passes' snapshots.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ClassifyInputs.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Extensions
 {
@@ -35,7 +36,7 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the classify input needs were bound twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the classify input needs were bound twice");
 		// By name, like a toggle's needs. Names are unique.
 		const auto inputs = RegisteredClassifyInputs();
 		for (std::size_t n = 0; n < a_needs.size() && n < kClassifyInputNeedSlots; ++n)

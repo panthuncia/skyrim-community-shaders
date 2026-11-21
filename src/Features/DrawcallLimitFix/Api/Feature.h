@@ -57,8 +57,6 @@ namespace DCLF::Api
 		/** @brief Registers a frame binding. Its register must not clash with Core's or another binding's. */
 		virtual void RegisterFrameBinding(const FrameBinding& a_binding) = 0;
 		virtual SwitchId RegisterSwitch(const FeatureSwitch& a_switch) = 0;
-		/** @brief Registers a toggle. Any toggle it needs must be registered before it. */
-		virtual ToggleId RegisterToggle(const FeatureToggle& a_toggle) = 0;
 		/** @brief Registers a classify input. */
 		virtual ClassifyInputId RegisterClassifyInput(const ClassifyInputContribution& a_input) = 0;
 		/**
@@ -96,8 +94,6 @@ namespace DCLF::Api
 		virtual CoordinatorComponentId RegisterCoordinatorComponent(const CoordinatorComponent& a_component) = 0;
 		/** @brief Registers a Lighting technique. Each technique belongs to one feature. */
 		virtual void RegisterTechnique(const TechniqueContribution& a_technique) = 0;
-		/** @brief Registers a gate on a technique contributed earlier. */
-		virtual void RegisterTechniqueGate(const TechniqueGate& a_gate) = 0;
 		/** @brief Registers a geometry type. Each type belongs to one feature. */
 		virtual void RegisterGeometryType(const GeometryTypeContribution& a_type) = 0;
 		/** @brief Registers a parent and leaves pair. Each pair belongs to one feature. */

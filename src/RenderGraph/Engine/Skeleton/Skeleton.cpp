@@ -1,57 +1,57 @@
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
 
-bool RenderGraph::Engine::Skeleton::Requested()
-{
-	static const bool requested = RenderGraph::Engine::Native::GraphMode();
-	return requested;
-}
-
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
+#include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 
-#	include "Globals.h"
-#	include "RenderGraph/AnchorPasses.h"
-#	include "RenderGraph/BuildManager.h"
-#	include "RenderGraph/DxvkOrgInterop.h"
-#	include "RenderGraph/Frame/EngineTargetUse.h"
-#	include "RenderGraph/Frame/FrameDriver.h"
-#	include "RenderGraph/Frame/PostChain.h"
-#	include "RenderGraph/Engine/Targets/EngineTargets.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/FrameSequence.h"
-#	include "RenderGraph/RasterProgram.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
-#	include "RenderGraph/ShaderBindings.h"
-#	include "RenderGraph/Switches.h"
-#	include "Utils/Logging.h"
+#include "Globals.h"
+#include "RenderGraph/AnchorPasses.h"
+#include "RenderGraph/BuildManager.h"
+#include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Observed.h"
+#include "RenderGraph/Frame/PostChain.h"
+#include "RenderGraph/Frame/ProgramSet.h"
+#include "RenderGraph/Engine/Targets/EngineTargetSet.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/RasterProgram.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/Switches.h"
+#include "Utils/Logging.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/LatchBlock.h>
-#	include <Render/PassBuilders.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/VersionedTexture.h>
-#	include <rhi_helpers.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/LatchBlock.h>
+#include <Render/PassBuilders.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/VersionedTexture.h>
+#include <rhi_helpers.h>
 
-#	include <algorithm>
-#	include <array>
-#	include <atomic>
-#	include <cstring>
-#	include <limits>
-#	include <map>
-#	include <optional>
-#	include <set>
-#	include <tuple>
-#	include <vector>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstring>
+#include <deque>
+#include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <source_location>
+#include <string>
+#include <tuple>
+#include <vector>
 
 namespace DCLF
 {
@@ -67,13 +67,14 @@ namespace RenderGraph::Engine::Skeleton
 	namespace
 	{
 		using FrameAnchors::Anchor;
+		namespace RF = ::RenderGraph::Frame;
 		using ColourTarget = RE::RENDER_TARGETS;
 		using DepthTarget = RE::RENDER_TARGETS_DEPTHSTENCIL;
 
 		constexpr const char* kShader = "RenderGraph/EngineClear.hlsl";
 
-		// The views the engine clears get one pass each, registered once at Setup.
-		// A clear of any other view keeps the engine's call, so a new view never changes the registration.
+		// The views the engine clears get one pass each, declared at Setup and registered again only for a remade target.
+		// At a patched engine site, a clear of any other engine view is a tap error (EngineWork), so a new view never changes the registration.
 		constexpr std::array<std::uint32_t, 8> kColourTargets{ ColourTarget::kMAIN, ColourTarget::kMAIN_COPY, ColourTarget::kMAIN_ONLY_ALPHA,
 			ColourTarget::kNORMAL_TAAMASK_SSRMASK, ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP, ColourTarget::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED,
 			ColourTarget::kMOTION_VECTOR, ColourTarget::kSHADOW_MASK };
@@ -83,7 +84,10 @@ namespace RenderGraph::Engine::Skeleton
 			DepthTarget::kSHADOWMAPS, DepthTarget::kPRECIPITATION_OCCLUSION_MAP, DepthTarget::kCUBEMAP_REFLECTIONS };
 		constexpr std::uint32_t kDepthSlices = 8;
 
-		/** @brief Each group has its own anchor, so a run declares only its group's views. */
+		/**
+		* @brief Each group has its own anchor, so a run declares only its group's views. The cube group has none: the start stage's
+		* face sky clears the faces.
+		*/
 		enum class Group : std::uint8_t
 		{
 			Shadow,
@@ -92,7 +96,6 @@ namespace RenderGraph::Engine::Skeleton
 			Count
 		};
 		constexpr std::size_t kGroups = static_cast<std::size_t>(Group::Count);
-		constexpr std::array<Anchor, kGroups> kGroupAnchors{ Anchor::EngineShadowClear, Anchor::EngineCubeClear, Anchor::EngineFrameClear };
 		constexpr std::array<const char*, kGroups> kGroupIds{ "cs.engine.skeleton.shadow", "cs.engine.skeleton.cube", "cs.engine.skeleton.frame" };
 		constexpr std::array<const char*, kGroups> kGroupNames{ "shadow", "cube", "frame" };
 
@@ -136,6 +139,7 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			const char* name;
 			bool dclf;                           // a DCLF epoch, else an anchor
+			// A DCLF host's epoch, or the stage that holds an anchor host wholly. Count for an anchor that stages share.
 			RenderGraphRuntime::Segment segment;
 			Anchor anchor;
 		};
@@ -143,9 +147,9 @@ namespace RenderGraph::Engine::Skeleton
 			{ "own", false, RenderGraphRuntime::Segment::Count, Anchor::Count },
 			{ "shadow-view", true, RenderGraphRuntime::Segment::ShadowView, Anchor::Count },
 			{ "z-prepass", true, RenderGraphRuntime::Segment::ZPrepass, Anchor::Count },
-			{ "prepass", false, RenderGraphRuntime::Segment::Count, Anchor::Prepass },
+			{ "prepass", false, RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(RenderGraph::Frame::SegmentId::PreMain)), Anchor::Prepass },
 			{ "engine-draws", false, RenderGraphRuntime::Segment::Count, Anchor::EngineDraws },
-			{ "deferred-passes", false, RenderGraphRuntime::Segment::Count, Anchor::DeferredPasses },
+			{ "deferred-passes", false, RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(RenderGraph::Frame::SegmentId::Deferred)), Anchor::DeferredPasses },
 			{ "image-space", false, RenderGraphRuntime::Segment::Count, Anchor::ImageSpace },
 			{ "post-chain", false, RenderGraphRuntime::Segment::Count, Anchor::ImageSpace },
 			{ "start", false, RenderGraphRuntime::Segment::Count, Anchor::EngineShadowClear },
@@ -188,10 +192,18 @@ namespace RenderGraph::Engine::Skeleton
 			return StageHost(a_host) ? a_host : Host::Own;
 		}
 
-		/** @brief A world frame or a frozen world's capture frame. Render owner. */
+		/** @brief Whether a call belongs to a Bink frame: one is current, or a movie tick's work comes before the Begin of its own. */
+		bool BinkFrame()
+		{
+			return RenderGraph::Frame::Driver::Current().kind == RenderGraph::Frame::Kind::Bink || RenderGraph::Frame::Driver::MovieFrameNext();
+		}
+
+		/** @brief A world frame or a frozen world's capture frame. A movie tick before its Begin is the coming Bink frame's. Render owner. */
 		bool WorldFrame()
 		{
 			using RenderGraph::Frame::Kind;
+			if (RenderGraph::Frame::Driver::MovieFrameNext())
+				return false;
 			const auto& frame = RenderGraph::Frame::Driver::Current();
 			return frame.kind == Kind::World || (frame.kind == Kind::FrozenWorld && frame.capture);
 		}
@@ -199,7 +211,7 @@ namespace RenderGraph::Engine::Skeleton
 		std::uint32_t HostSegment(Host a_host)
 		{
 			const auto& info = kHostInfo[HostIndex(a_host)];
-			return info.dclf ? static_cast<std::uint32_t>(info.segment) : FrameAnchors::RunSegment(info.anchor);
+			return static_cast<std::uint32_t>(info.segment);
 		}
 
 		enum class Kind : std::uint8_t
@@ -224,6 +236,7 @@ namespace RenderGraph::Engine::Skeleton
 		struct ClearDraw
 		{
 			std::uint32_t flags = 0;
+			// From the revision that registers the view, which starts only once it is built.
 			std::shared_ptr<const RasterProgram> program;
 			std::uint32_t entry = 0;
 		};
@@ -258,7 +271,21 @@ namespace RenderGraph::Engine::Skeleton
 		struct ClearFrame
 		{
 			std::shared_ptr<const ClearSpec> spec;
+			std::uint32_t width = 0, height = 0;  // the version the frame binds
 		};
+
+		/**
+		* @brief The clear's extent: the slot's version the preparation binds (a resize is a new version, and a revision may be prepared
+		* while the old one is adopted), else the extent it was registered with.
+		*/
+		std::pair<std::uint32_t, std::uint32_t> ClearExtent(const ClearSpec& a_spec, const org::PassPrepareContext& a_context)
+		{
+			if (a_spec.resource.Slot()) {
+				const auto size = a_spec.resource.PreparedSize(a_context);
+				return { size.width, size.height };
+			}
+			return { a_spec.width, a_spec.height };
+		}
 
 		/** @brief Each draw clears only when the commit opened its gate entry. */
 		class ClearPass final : public org::TypedRenderGraphPass<ClearPass, ClearFrame, ClearBindings>
@@ -284,14 +311,19 @@ namespace RenderGraph::Engine::Skeleton
 				return declare(org::Subresources(texture.Plain(), org::Mip(0, 1), org::Slice(spec->slice, 1)));
 			}
 
-			// The recording depends only on the registration and first gate entry. The gate decides each run.
+			// The recording depends only on the registration and first gate entry. The gate decides each run. The extent follows
+			// the bound version, which a kept recording checks itself.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
 				a_out.push_back(spec->generation);
 				a_out.push_back(spec->draws.front().entry);
 			}
 
-			ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { spec }; }
+			ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext& a_context) const
+			{
+				const auto [width, height] = ClearExtent(*spec, a_context);
+				return { spec, width, height };
+			}
 
 			// A kept late batch keeps its list while SkipsAtExecution's answer holds.
 			static constexpr bool kRecordKeyedBySkip = true;
@@ -308,7 +340,7 @@ namespace RenderGraph::Engine::Skeleton
 				const auto& clear = *a_frame.spec;
 				for (const auto& variant : clear.draws) {
 					RasterProgram::DrawDesc draw{};
-					draw.viewport = { .x = 0, .y = 0, .width = clear.width, .height = clear.height };
+					draw.viewport = { .x = 0, .y = 0, .width = a_frame.width, .height = a_frame.height };
 					draw.debugName = clear.name.c_str();
 					draw.indirect = &clear.gate->Latch();
 					draw.indirectOffset = clear.gate->Offset(variant.entry);
@@ -341,45 +373,92 @@ namespace RenderGraph::Engine::Skeleton
 			UINT flags = 0;  // named in the frame sequence census
 		};
 
-		struct GroupState
+		/** @brief One view a group may clear, as a frame start saw it. The pointers only name the engine's objects. */
+		struct TargetFacts
 		{
+			Target target;
+			const void* view = nullptr;
+			const void* texture = nullptr;
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+			std::uint32_t slice = 0;
+			bool shaped = false;  // one mip-0 slice
+			std::uint32_t width = 0, height = 0;
+
+			bool operator==(const TargetFacts&) const = default;
+		};
+		using GroupFacts = std::vector<TargetFacts>;
+
+		/** @brief A clear program: the view's format and the depth flags, 0 for colour. */
+		using ProgramKey = std::pair<rhi::Format, std::uint32_t>;
+
+		/** @brief One registration of a group's clears: its views, its gates, and the copies each host and place runs. */
+		struct GroupBuild
+		{
+			GroupFacts facts;
+			std::uint32_t generation = 0;
+			std::uint32_t entries = 0;
 			std::map<Target, std::shared_ptr<const ClearSpec>> specs;
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<org::LatchBlock> colours;
-			std::vector<Pending> hostedPending;
 			std::array<std::vector<std::shared_ptr<const ClearSpec>>, kHosts> hosted;
-			std::array<bool, kHosts> hostedRegistered{};
-			std::array<std::atomic<std::uint32_t>, kHosts> hostedBuilt{};
-			std::uint32_t generation = 0;
-			bool registered = false;
-			bool stale = false;       // registered again at the next flush with nothing pending
-			std::uint64_t lent = 0;   // clears that found a lent slot
-			bool failed = false;      // stays on D3D11 for the session
-			std::uint64_t taken = 0;
-			std::uint64_t dropped = 0;  // clears replaced by a stage's load operations
 			std::array<std::map<Target, std::shared_ptr<const ClearSpec>>, kPlaces> placeSpecs;
 			std::shared_ptr<RunGate> placeGate;
 			std::shared_ptr<org::LatchBlock> placeColours;
-			std::array<bool, kPlaces> placeRegistered{};
-			std::uint32_t entries = 0;
+		};
+
+		/** @brief A client's key: the group's build for the revision's facts. Equal facts give the same build. */
+		struct BuildKey
+		{
+			std::shared_ptr<GroupBuild> build;
+			bool operator==(const BuildKey&) const = default;
+		};
+
+		/** @brief How many builds a group keeps, so a revision whose facts came back reuses its build. The clients keep theirs. */
+		constexpr std::size_t kKeptBuilds = 8;
+
+		struct GroupState
+		{
+			std::unique_ptr<RF::Observed<GroupFacts>> facts;
+			std::deque<std::shared_ptr<GroupBuild>> builds;  // newest last
+			std::array<RF::DeclaredClientOf<GroupBuild>, kHosts> hostClients;
+			std::array<RF::DeclaredClientOf<GroupBuild>, kPlaces> placeClients;
+			std::vector<Pending> hostedPending;
+			std::array<std::atomic<std::uint32_t>, kHosts> hostedBuilt{};
+			std::uint32_t generation = 0;
+			std::uint64_t lent = 0;   // clears that found a lent slot
+			bool failed = false;      // the cube group without an anchor: a stage's face sky clears the faces
+			std::uint64_t taken = 0;
+			std::uint64_t dropped = 0;  // clears replaced by a stage's load operations
 			std::uint64_t placed = 0;
+		};
+
+		/** @brief A copy's engine textures, as a frame start saw them. */
+		struct CopyFacts
+		{
+			const void* source = nullptr;
+			const void* target = nullptr;
+			bool operator==(const CopyFacts&) const = default;
+		};
+
+		/** @brief Where a copy client runs: its own anchor, first in a host's anchor, or in the UI stage. */
+		enum class CopyAt : std::uint8_t
+		{
+			Own,
+			Hosted,
+			Ui,
 		};
 
 		struct CopyState
 		{
+			std::unique_ptr<RF::Observed<CopyFacts>> facts;
 			Host host = Host::Own;
-			bool hostedRegistered = false;
-			FrameAnchors::Texture source, target;
 			std::shared_ptr<RunGate> gate;  // gated so the copy can run in a frame phase
 			// Opened by the engine's call in the stage's frame inputs.
 			std::shared_ptr<RunGate> uiGate;
-			bool uiRegistered = false;
-			const void* sourceTexture = nullptr;
-			const void* targetTexture = nullptr;
-			bool registered = false;
+			// Each registration's state is its key, so the frame reads the adopted textures from client.Adopted().
+			RF::DeclaredClientOf<CopyFacts> client, hostedClient, uiClient;
 			bool wanted = false;
 			bool executed = false;
-			bool failed = false;
 			bool announced = false;
 			std::uint64_t dropped = 0;  // native mode: copies with no reader
 		};
@@ -391,9 +470,10 @@ namespace RenderGraph::Engine::Skeleton
 			bool flushing = false;
 			std::array<GroupState, kGroups> groups;
 			std::array<CopyState, kCopies> copies;
-			// Made at registration only, never per clear.
-			std::map<std::pair<rhi::Format, std::uint32_t>, std::shared_ptr<const RasterProgram>> programs;
-			std::set<Target> refused;  // logged once each
+			// Keys known at setup join CS's setup batch. A new format is wanted at a frame start, and the revision waits for it.
+			std::unique_ptr<RF::ProgramSet<ProgramKey, RasterProgram>> programs;
+			std::map<Target, std::string> noClearPass;  // why a known view has no clear pass, logged once each
+			std::set<Target> keptOnD3D11;                // engine clears with no pass, logged once each
 		};
 
 		SkeletonState& Skel()
@@ -446,36 +526,40 @@ namespace RenderGraph::Engine::Skeleton
 			return Group::Frame;
 		}
 
-		/** @brief kFRAMEBUFFER, the window's, is left to D3D11. */
-		std::optional<Target> FindColour(const ID3D11RenderTargetView* a_view)
+		/** @brief The engine target a field handle is. Empty for anything else, such as a CS texture lent into a slot. */
+		std::optional<Targets::TargetRef> IdentifyField(const ID3D11View* a_view)
 		{
-			auto* renderer = globals::game::renderer;
-			if (!renderer || !a_view)
+			if (!a_view || !Tripwire::IsHandle(a_view))
 				return std::nullopt;
-			const auto& targets = renderer->GetRuntimeData().renderTargets;
-			for (std::uint32_t i = ColourTarget::kMAIN; i < ColourTarget::kTOTAL; ++i)
-				if (targets[i].RTV == a_view)
-					return Target{ Kind::Colour, i, 0 };
-			const auto& cubes = renderer->GetRendererData().cubemapRenderTargets;
-			for (std::uint32_t i = 0; i < RE::RENDER_TARGET_CUBEMAP::kTOTAL; ++i)
-				for (std::uint32_t face = 0; face < 6; ++face)
-					if (cubes[i].cubeSideRTV[face] == a_view)
-						return Target{ Kind::Cube, i, face };
-			return std::nullopt;
+			return Targets::Identify(a_view);
 		}
 
-		/** @brief Writable views only. */
+		/** @brief kFRAMEBUFFER, the window's, is left to D3D11, and so are mip views of a target. */
+		std::optional<Target> FindColour(const ID3D11RenderTargetView* a_view)
+		{
+			const auto target = IdentifyField(a_view);
+			if (!target)
+				return std::nullopt;
+			if (target->kind == Targets::Kind::Cubemap && target->view == Targets::View::CubeFace)
+				return Target{ Kind::Cube, target->index, target->slice };
+			if (target->kind != Targets::Kind::Colour || target->view != Targets::View::Rtv || target->index == ColourTarget::kFRAMEBUFFER)
+				return std::nullopt;
+			// A mip view target's RTV names its source with the mip. Only the source's own RTV is the target's.
+			if (globals::game::renderer->GetRuntimeData().renderTargets[target->index].RTV != a_view)
+				return std::nullopt;
+			return Target{ Kind::Colour, target->index, 0 };
+		}
+
+		/** @brief Writable views only. A view repeated in several slices is the first slice's, as KnownTargets lists it. */
 		std::optional<Target> FindDepth(const ID3D11DepthStencilView* a_view)
 		{
-			auto* renderer = globals::game::renderer;
-			if (!renderer || !a_view)
+			const auto target = IdentifyField(a_view);
+			if (!target || target->kind != Targets::Kind::Depth || target->view != Targets::View::Dsv)
 				return std::nullopt;
-			// The engine's depth table has kTOTAL entries on SE and AE, whatever the array's declared size.
-			const auto& depths = renderer->GetDepthStencilData().depthStencils;
-			for (std::uint32_t i = 0; i < DepthTarget::kTOTAL; ++i)
-				for (std::uint32_t slice = 0; slice < kDepthSlices; ++slice)
-					if (depths[i].views[slice] == a_view)
-						return Target{ Kind::Depth, i, slice };
+			const auto& views = globals::game::renderer->GetDepthStencilData().depthStencils[target->index].views;
+			for (std::uint32_t slice = 0; slice < kDepthSlices; ++slice)
+				if (views[slice] == a_view)
+					return Target{ Kind::Depth, target->index, slice };
 			return std::nullopt;
 		}
 
@@ -484,11 +568,11 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			switch (a_target.kind) {
 			case Kind::Colour:
-				return FrameAnchors::EngineTarget(a_target.index);
+				return FrameAnchors::EngineTexture(FrameAnchors::Colour(a_target.index));
 			case Kind::Depth:
-				return FrameAnchors::EngineDepth(a_target.index);
+				return FrameAnchors::EngineTexture(FrameAnchors::Depth(a_target.index));
 			default:
-				return FrameAnchors::EngineCubemap(a_target.index);
+				return FrameAnchors::EngineTexture(FrameAnchors::Cubemap(a_target.index));
 			}
 		}
 
@@ -550,50 +634,46 @@ namespace RenderGraph::Engine::Skeleton
 
 		bool HasStencil(DXGI_FORMAT a_format) { return a_format == DXGI_FORMAT_D24_UNORM_S8_UINT || a_format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT; }
 
-		/** @brief Built only at registration, one attempt per key. a_depthFlags is 0 for colour. */
-		std::shared_ptr<const RasterProgram> ProgramFor(rhi::Format a_format, std::uint32_t a_depthFlags)
+		/** @brief A clear program's description. Its key's depth flags are 0 for colour. */
+		RasterProgram::Desc DescribeClear(const ProgramKey& a_key)
 		{
-			auto& state = Skel();
-			const auto key = std::make_pair(a_format, a_depthFlags);
-			if (const auto it = state.programs.find(key); it != state.programs.end())
-				return it->second;
-			auto* host = RenderGraphRuntime::Get().Host();
-			if (!host)
-				return nullptr;
+			const auto [format, depthFlags] = a_key;
 			RasterProgram::Desc desc{ .pixelSource = kShader, .vertexSource = kShader, .vertexEntry = L"VSMain", .commonDefines = false };
-			if (a_depthFlags == 0) {
+			if (depthFlags == 0) {
 				desc.pixelEntry = L"PSColour";
 				desc.constantWords = ShaderBindings::Words<ClearBlock>();
-				desc.targets = { { .format = a_format } };
-			} else {
-				desc.pixelEntry = L"PSDepth";
-				desc.depthFormat = a_format;
-				const bool depth = (a_depthFlags & D3D11_CLEAR_DEPTH) != 0;
-				desc.depth = { .depthEnable = depth, .depthWrite = depth, .depthFunc = rhi::CompareOp::Always };
-				if (a_depthFlags & D3D11_CLEAR_STENCIL) {
-					// The engine clears stencil to 0, so zero it whatever the test.
-					const rhi::StencilFaceState zero{ .failOp = rhi::StencilOp::Zero, .depthFailOp = rhi::StencilOp::Zero, .passOp = rhi::StencilOp::Zero, .func = rhi::CompareOp::Always };
-					desc.depth.stencilEnable = true;
-					desc.depth.stencilReadMask = 0;
-					desc.depth.stencilWriteMask = 0xFF;
-					desc.depth.front = zero;
-					desc.depth.back = zero;
-				}
+				desc.targets = { { .format = format } };
+				return desc;
 			}
-			auto program = RasterProgram::Load(host->Device(), desc);
-			if (!program)
-				logger::warn("[ORG] engine skeleton: the clear program for format {} (flags {}) could not be made; those clears stay on D3D11",
-					static_cast<int>(a_format), a_depthFlags);
-			// Kept even when null, so each format is tried once.
-			state.programs.emplace(key, program);
-			return program;
+			desc.pixelEntry = L"PSDepth";
+			desc.depthFormat = format;
+			const bool depth = (depthFlags & D3D11_CLEAR_DEPTH) != 0;
+			desc.depth = { .depthEnable = depth, .depthWrite = depth, .depthFunc = rhi::CompareOp::Always };
+			if (depthFlags & D3D11_CLEAR_STENCIL) {
+				// The engine clears stencil to 0, so zero it whatever the test.
+				const rhi::StencilFaceState zero{ .failOp = rhi::StencilOp::Zero, .depthFailOp = rhi::StencilOp::Zero, .passOp = rhi::StencilOp::Zero, .func = rhi::CompareOp::Always };
+				desc.depth.stencilEnable = true;
+				desc.depth.stencilReadMask = 0;
+				desc.depth.stencilWriteMask = 0xFF;
+				desc.depth.front = zero;
+				desc.depth.back = zero;
+			}
+			return desc;
 		}
 
-		/** @brief The engine keeps the clear. Logged once per view. */
-		void Refuse(const Target& a_target, std::string_view a_reason)
+		/** @brief A known view the skeleton makes no clear pass for. An engine clear of it is a tap error. Logged once per view. */
+		void NoteNoClearPass(const Target& a_target, std::string_view a_reason)
 		{
-			if (Skel().refused.emplace(a_target).second)
-				logger::info("[ORG] engine skeleton: {} stays on D3D11 ({})", TargetName(a_target), a_reason);
+			if (Skel().noClearPass.insert_or_assign(a_target, std::string(a_reason)).second)
+				logger::info("[ORG] engine skeleton: {} has no clear pass ({}); an engine clear of it is a tap error", TargetName(a_target), a_reason);
+		}
+
+		/** @brief An engine clear graph mode has no pass for. A tap error, and the clear is dropped. */
+		void RefuseEngineClear(const Target& a_target, std::uint32_t a_flags, std::string_view a_why,
+			const std::source_location& a_where = std::source_location::current())
+		{
+			RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::EngineWork, RenderGraph::Frame::SegmentId::Count,
+				fmt::format("an engine clear of {} (flags {}): {}", TargetName(a_target), a_flags, a_why), a_where);
 		}
 
 		/** @brief A run that did not draw what it took. Development builds stop. Otherwise the work is not drawn and the engine does not redo it. */
@@ -643,9 +723,9 @@ namespace RenderGraph::Engine::Skeleton
 			auto* renderer = globals::game::renderer;
 			if (!renderer)
 				return targets;
-			// An unbacked target in native mode gets no clear pass. Its engine clear is declared dropped.
+			// An unbacked target gets no clear pass. Its engine clear is declared dropped.
 			for (const auto index : kColourTargets)
-				if (!Frame::EngineTargetUse::ColourUnbacked(index))
+				if (!Targets::Unbacked(Targets::Colour(index)))
 					targets.push_back({ Kind::Colour, index, 0 });
 			for (const auto index : kMoreColourTargets)
 				targets.push_back({ Kind::Colour, index, 0 });
@@ -667,59 +747,113 @@ namespace RenderGraph::Engine::Skeleton
 			return targets;
 		}
 
-		/** @brief Null, logged, when the view cannot be cleared on the graph. */
-		std::shared_ptr<ClearSpec> MakeSpec(const Target& a_target)
+		/** @brief The group's known views that the engine has this session, with only their objects filled. */
+		GroupFacts ObjectsOf(const std::vector<Target>& a_known, Group a_group)
 		{
-			auto* view = ViewOf(a_target);
-			auto* texture = TextureOf(a_target);
-			if (!view || !texture)
-				return nullptr;  // the engine has no such view this session
-			const bool depth = a_target.kind == Kind::Depth;
-			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-			std::uint32_t slice = 0;
-			if (!ViewShape(view, depth, format, slice) || (a_target.kind == Kind::Cube && slice != a_target.slice)) {
-				Refuse(a_target, "not a single mip-0 slice");
-				return nullptr;
-			}
-			if (IsIntegerFormat(format)) {
-				Refuse(a_target, "an integer format");
-				return nullptr;
-			}
-			auto resource = ResourceOf(a_target);
-			if (!resource) {
-				Refuse(a_target, "no graph texture");
-				return nullptr;
-			}
-			D3D11_TEXTURE2D_DESC textureDesc{};
-			texture->GetDesc(&textureDesc);
-			auto spec = std::make_shared<ClearSpec>();
-			spec->target = a_target;
-			spec->resource = std::move(resource);
-			spec->view = view;
-			spec->texture = texture;
-			spec->slice = slice;
-			spec->depth = depth;
-			spec->width = textureDesc.Width;
-			spec->height = textureDesc.Height;
-			// The engine clears depth-only formats with 1, and stencil formats with 3 and 2.
-			std::vector<std::uint32_t> flags{ 0u };
-			if (depth)
-				flags = HasStencil(format) ? std::vector<std::uint32_t>{ D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, D3D11_CLEAR_STENCIL } :
-				                             std::vector<std::uint32_t>{ D3D11_CLEAR_DEPTH };
-			for (const auto flag : flags) {
-				auto program = ProgramFor(rhi::helpers::ToRHI(format), flag);
-				if (!program)
+			GroupFacts facts;
+			for (const auto& target : a_known) {
+				if (GroupFor(target) != a_group)
 					continue;
-				spec->draws.push_back({ .flags = flag, .program = std::move(program) });
+				auto* view = ViewOf(target);
+				auto* texture = TextureOf(target);
+				if (view && texture)
+					facts.push_back({ .target = target, .view = view, .texture = texture });
 			}
-			if (spec->draws.empty()) {
-				Refuse(a_target, "no clear program");
+			return facts;
+		}
+
+		/** @brief Whether two fact lists name the same views and textures. */
+		bool SameObjects(const GroupFacts& a_left, const GroupFacts& a_right)
+		{
+			return std::ranges::equal(a_left, a_right, [](const TargetFacts& a_l, const TargetFacts& a_r) {
+				return a_l.target == a_r.target && a_l.view == a_r.view && a_l.texture == a_r.texture;
+			});
+		}
+
+		/** @brief Fills each view's shape, format and size from the engine's objects. Render owner, at a frame start. */
+		void Describe(GroupFacts& a_facts)
+		{
+			for (auto& fact : a_facts) {
+				const bool depth = fact.target.kind == Kind::Depth;
+				fact.shaped = ViewShape(ViewOf(fact.target), depth, fact.format, fact.slice) && (fact.target.kind != Kind::Cube || fact.slice == fact.target.slice);
+				D3D11_TEXTURE2D_DESC desc{};
+				TextureOf(fact.target)->GetDesc(&desc);
+				fact.width = desc.Width;
+				fact.height = desc.Height;
+			}
+		}
+
+		/** @brief The flag sets the engine clears a view with. The engine clears depth-only formats with 1, and stencil formats with 3 and 2. */
+		std::vector<std::uint32_t> ClearFlagsOf(const TargetFacts& a_fact)
+		{
+			if (a_fact.target.kind != Kind::Depth)
+				return { 0u };
+			if (HasStencil(a_fact.format))
+				return { D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, D3D11_CLEAR_STENCIL };
+			return { D3D11_CLEAR_DEPTH };
+		}
+
+		/** @brief Whether the graph can clear the view: one mip-0 slice of a format that is not an integer one. */
+		bool Clearable(const TargetFacts& a_fact)
+		{
+			return a_fact.shaped && !IsIntegerFormat(a_fact.format);
+		}
+
+		/** @brief Asks for the clear programs of a_facts. At setup they join CS's setup batch, later they gate the next revision. */
+		void WantPrograms(const GroupFacts& a_facts, bool a_setup)
+		{
+			auto& programs = *Skel().programs;
+			for (const auto& fact : a_facts) {
+				if (!Clearable(fact))
+					continue;
+				for (const auto flags : ClearFlagsOf(fact)) {
+					const ProgramKey key{ rhi::helpers::ToRHI(fact.format), flags };
+					if (a_setup)
+						programs.Queue(key);
+					else
+						(void)programs.Want(key);
+				}
+			}
+		}
+
+		/** @brief Null, logged, when the view cannot be cleared on the graph. a_in is the revision that registers it. */
+		std::shared_ptr<ClearSpec> MakeSpec(const TargetFacts& a_fact, const RF::Inputs& a_in)
+		{
+			const auto& target = a_fact.target;
+			if (!a_fact.shaped) {
+				NoteNoClearPass(target, "not a single mip-0 slice");
 				return nullptr;
 			}
+			if (IsIntegerFormat(a_fact.format)) {
+				NoteNoClearPass(target, "an integer format");
+				return nullptr;
+			}
+			auto resource = ResourceOf(target);
+			if (!resource) {
+				NoteNoClearPass(target, "no graph texture");
+				return nullptr;
+			}
+			auto spec = std::make_shared<ClearSpec>();
+			spec->target = target;
+			spec->resource = std::move(resource);
+			spec->view = a_fact.view;
+			spec->texture = a_fact.texture;
+			spec->slice = a_fact.slice;
+			spec->depth = target.kind == Kind::Depth;
+			spec->width = a_fact.width;
+			spec->height = a_fact.height;
+			for (const auto flags : ClearFlagsOf(a_fact)) {
+				// The frame start that saw the view wanted its program, and this revision starts only once it is built.
+				auto program = Skel().programs->For(a_in, ProgramKey{ rhi::helpers::ToRHI(a_fact.format), flags });
+				if (!program)
+					RenderGraph::Fatal("engine skeleton", fmt::format("{} has no clear program for flags {} in the revision that registers it", TargetName(target), flags));
+				spec->draws.push_back({ .flags = flags, .program = std::move(program) });
+			}
+			Skel().noClearPass.erase(target);
 			return spec;
 		}
 
-		/** @brief The epoch that runs next after the engine's call and writes the target first, from the CS_ORG_FRAME_SEQUENCE census. */
+		/** @brief The epoch that runs next after the engine's call and writes the target first. */
 		Host HostFor(const Target& a_target, std::uint32_t a_flags)
 		{
 			// In a world frame the start stage's sky draws clear the reflection faces with load operations, so the engine's clears drop.
@@ -773,19 +907,13 @@ namespace RenderGraph::Engine::Skeleton
 			return a_target == ColourTarget::kTEMPORAL_AA_MASK || a_target == ColourTarget::kMOTION_VECTOR || a_target == ColourTarget::kMAIN_ONLY_ALPHA;
 		}
 
-		/** @brief Whether the start stage's sky clears the reflection faces with load operations in world frames. */
-		bool FacesClearedBySky()
-		{
-			return FrameAnchors::HeldByStage(Anchor::SkyReflections);
-		}
-
-		/** @brief A DCLF epoch in native mode, or an anchor with an epoch. */
+		/** @brief A DCLF epoch, or an anchor (every anchor is a stage's). */
 		bool HostAvailable(Host a_host)
 		{
 			const auto& info = kHostInfo[HostIndex(a_host)];
 			if (a_host == Host::Own)
 				return false;
-			return info.dclf || FrameAnchors::HasEpoch(info.anchor);
+			return info.dclf || info.anchor != Anchor::Count;
 		}
 
 		std::string HostedClientId(std::size_t a_group, Host a_host)
@@ -841,7 +969,7 @@ namespace RenderGraph::Engine::Skeleton
 			std::shared_ptr<const HostedSet> set;
 		};
 
-		/** @brief Rebuilds the DCLF epochs' graphs with every group's hosted passes. */
+		/** @brief Rebuilds the DCLF epochs' graphs with every group's newest hosted passes. */
 		void PublishHosted()
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -850,10 +978,13 @@ namespace RenderGraph::Engine::Skeleton
 			auto set = std::make_shared<HostedSet>();
 			std::vector<std::uint32_t> epochs;
 			for (std::size_t g = 0; g < kGroups; ++g) {
-				set->generation[g] = Skel().groups[g].generation;
+				const auto& builds = Skel().groups[g].builds;
+				const auto* newest = builds.empty() ? nullptr : builds.back().get();
+				set->generation[g] = newest ? newest->generation : 0;
 				for (std::size_t h = 0; h < kHosts; ++h)
 					if (kHostInfo[h].dclf) {
-						set->specs[g][h] = Skel().groups[g].hosted[h];
+						if (newest)
+							set->specs[g][h] = newest->hosted[h];
 						if (std::ranges::find(epochs, RenderGraphRuntime::EpochOf(kHostInfo[h].segment)) == epochs.end())
 							epochs.push_back(RenderGraphRuntime::EpochOf(kHostInfo[h].segment));
 					}
@@ -864,27 +995,47 @@ namespace RenderGraph::Engine::Skeleton
 			}, epochs);
 		}
 
-		bool HasHostedPending(Group a_group, Host a_host)
+		/** @brief The build of a_facts, if the group still keeps it. */
+		std::shared_ptr<GroupBuild> FindBuild(const GroupState& a_group, const GroupFacts& a_facts)
 		{
-			return std::ranges::any_of(GroupOf(a_group).hostedPending, [&](const Pending& a_pending) { return a_pending.host == a_host; });
+			for (auto it = a_group.builds.rbegin(); it != a_group.builds.rend(); ++it)
+				if ((*it)->facts == a_facts)
+					return *it;
+			return nullptr;
 		}
 
-		/** @brief Writes the clears handed to this host since its last run into the run. a_close closes the gate first, for DCLF hosts. */
-		void CommitHosted(Group a_group, Host a_host, bool a_close)
+		/**
+		* @brief The build the frame uses: the adopted registration's, from setup's adoption on. Every registered client of a group
+		* holds the build of the same facts, adopted at one Begin. Null while none is registered.
+		*/
+		std::shared_ptr<GroupBuild> AdoptedBuild(Group a_group)
+		{
+			const auto& group = GroupOf(a_group);
+			for (const auto& client : group.hostClients)
+				if (auto build = client.Adopted())
+					return build;
+			for (const auto& client : group.placeClients)
+				if (auto build = client.Adopted())
+					return build;
+			return nullptr;
+		}
+
+		/** @brief Writes the clears handed to this DCLF host since its last run into the run, after closing the gate. */
+		void CommitHosted(Group a_group, Host a_host)
 		{
 			auto& group = GroupOf(a_group);
-			if (!group.gate || !group.colours)
+			const auto build = AdoptedBuild(a_group);
+			if (!build || !build->gate || !build->colours)
 				return;
 			const org::RunRef run = RunGate::Current();
-			if (a_close)
-				group.gate->Close(run);
+			build->gate->Close(run);
 			std::uint32_t count = 0;
 			std::erase_if(group.hostedPending, [&](const Pending& a_pending) {
 				if (a_pending.host != a_host)
 					return false;
 				if (!a_pending.depth)
-					group.colours->WriteValue(run, a_pending.gateEntry * RunGate::kEntryBytes, a_pending.colour);
-				group.gate->OpenDraw(run, a_pending.gateEntry);
+					build->colours->WriteValue(run, a_pending.gateEntry * RunGate::kEntryBytes, a_pending.colour);
+				build->gate->OpenDraw(run, a_pending.gateEntry);
 				++count;
 				return true;
 			});
@@ -894,14 +1045,10 @@ namespace RenderGraph::Engine::Skeleton
 			}
 		}
 
-		/** @brief An anchor host gets a client of its own. DCLF hosts get the hosted extension. */
-		void RegisterHosted(Group a_group)
+		/** @brief Splits a build's views by the hosts that run them. DCLF hosts get the hosted extension, anchor hosts a client each. */
+		void SplitHosted(GroupBuild& a_build, std::size_t a_group)
 		{
-			auto& group = GroupOf(a_group);
-			const auto index = IndexOf(a_group);
-			for (auto& specs : group.hosted)
-				specs.clear();
-			for (const auto& [target, spec] : group.specs) {
+			for (const auto& [target, spec] : a_build.specs) {
 				std::array<std::vector<ClearDraw>, kHosts> draws;
 				for (const auto& draw : spec->draws) {
 					if (const auto host = HostFor(target, draw.flags); HostAvailable(host))
@@ -917,58 +1064,39 @@ namespace RenderGraph::Engine::Skeleton
 					auto hosted = std::make_shared<ClearSpec>(*spec);
 					hosted->draws = std::move(draws[h]);
 					hosted->name = fmt::format("{}@{}", spec->name, kHostInfo[h].name);
-					group.hosted[h].push_back(std::move(hosted));
+					a_build.hosted[h].push_back(std::move(hosted));
 				}
 			}
-			for (std::size_t h = 0; h < kHosts; ++h) {
-				const auto host = static_cast<Host>(h);
-				if (kHostInfo[h].dclf || host == Host::Own)
-					continue;
-				const auto id = HostedClientId(index, host);
-				if (group.hosted[h].empty()) {
-					if (std::exchange(group.hostedRegistered[h], false))
-						FrameAnchors::Unregister(id);
-					continue;
-				}
-				FrameAnchors::ClientDesc client{};
-				client.id = id;
-				for (const auto& spec : group.hosted[h]) {
-					std::shared_ptr<const ClearSpec> pass = spec;
-					client.passes.push_back({ .name = spec->name,
-						.anchor = kHostInfo[h].anchor,
-						// First at the anchor, since the host's own passes write the cleared view after it.
-						.order = std::numeric_limits<std::int32_t>::min() + static_cast<std::int32_t>(spec->draws.front().entry),
-						.kind = FrameAnchors::PassKind::Render,
-						.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
-						.atExecution = true,
-						// In these stages the engine's call stages the entry before the commit, so the CPU gate answer decides at record time.
-						.gpuGated = !(host == Host::DeferredPasses || host == Host::ImageSpace || host == Host::PostChain || host == Host::Start || host == Host::PreDepth) });
-				}
-				if (StageHost(host)) {
-					// The engine's call stages the entry and colour, so the step's tap has nothing to commit.
-					client.active = [] { return false; };
-					client.segmentOnly = true;
-				} else {
-					client.active = [a_group, host] { return HasHostedPending(a_group, host); };
-					client.commit = [a_group, host](const FrameAnchors::Point&) { CommitHosted(a_group, host, false); };
-				}
-				client.gates = { group.gate };
-				group.hostedRegistered[h] = FrameAnchors::Register(std::move(client));
-				if (!group.hostedRegistered[h]) {
-					group.hosted[h].clear();
-					logger::warn("[ORG] engine skeleton: the {} anchor refused the {} clears it hosts; they run on the {} anchor", FrameAnchors::Name(kHostInfo[h].anchor),
-						kGroupNames[index], FrameAnchors::Name(kGroupAnchors[index]));
-				}
-			}
-			for (std::size_t h = 0; h < kHosts; ++h)
-				if (kHostInfo[h].dclf)
-					group.hostedBuilt[h].store(0, std::memory_order_release);
 			std::string summary;
 			for (std::size_t h = 0; h < kHosts; ++h)
-				if (!group.hosted[h].empty())
-					summary += fmt::format("{}{} {}", summary.empty() ? "" : ", ", kHostInfo[h].name, group.hosted[h].size());
+				if (!a_build.hosted[h].empty())
+					summary += fmt::format("{}{} {}", summary.empty() ? "" : ", ", kHostInfo[h].name, a_build.hosted[h].size());
 			if (!summary.empty())
-				logger::info("[ORG] engine skeleton: a world frame's {} clears run in their hosts' epochs (views by host: {})", kGroupNames[index], summary);
+				logger::info("[ORG] engine skeleton: a world frame's {} clears run in their hosts' epochs (views by host: {})", kGroupNames[a_group], summary);
+		}
+
+		/**
+		* @brief An anchor host's client: its views first at the anchor, since the host's own passes write them after it. Every
+		* anchor host is a stage host, so the engine's call stages the entry and colour, and the step has no tap.
+		*/
+		void HostedClient(const GroupBuild& a_build, Host a_host, FrameAnchors::ClientDesc& a_client)
+		{
+			const auto h = HostIndex(a_host);
+			for (const auto& spec : a_build.hosted[h]) {
+				std::shared_ptr<const ClearSpec> pass = spec;
+				a_client.passes.push_back({ .name = spec->name,
+					.anchor = kHostInfo[h].anchor,
+					.order = std::numeric_limits<std::int32_t>::min() + static_cast<std::int32_t>(spec->draws.front().entry),
+					.kind = FrameAnchors::PassKind::Render,
+					.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
+					.atExecution = true,
+					// In these stages the engine's call stages the entry before the commit, so the CPU gate answer decides at record time.
+					.gpuGated = !(a_host == Host::DeferredPasses || a_host == Host::ImageSpace || a_host == Host::PostChain || a_host == Host::Start ||
+								  a_host == Host::PreDepth) });
+			}
+			a_client.active = [] { return false; };
+			a_client.segmentOnly = true;
+			a_client.gates = { a_build.gate };
 		}
 
 		std::string PlaceClientId(std::size_t a_group, std::size_t a_place) { return fmt::format("{}@{}", kGroupIds[a_group], kPlaceNames[a_place]); }
@@ -994,88 +1122,139 @@ namespace RenderGraph::Engine::Skeleton
 
 		bool PlacesOn()
 		{
-			return FrameAnchors::HasEpoch(Anchor::EngineFrameClear) && FrameAnchors::NamedByStage(PlaceClientId(IndexOf(Group::Frame), 0));
+			return FrameAnchors::NamedByStage(PlaceClientId(IndexOf(Group::Frame), 0));
 		}
 
-		/** @brief Copies each view's spec once per place that clears it, on that place's gate entries. Segment-only. */
-		void RegisterPlaces(Group a_group)
+		/** @brief Copies each view's spec once per place that clears it, on that place's gate entries. */
+		void SplitPlaces(GroupBuild& a_build, std::size_t a_group)
 		{
-			auto& group = GroupOf(a_group);
-			const auto index = IndexOf(a_group);
-			for (auto& specs : group.placeSpecs)
-				specs.clear();
-			const auto unregisterAll = [&] {
-				for (std::size_t place = 0; place < kPlaces; ++place)
-					if (std::exchange(group.placeRegistered[place], false))
-						FrameAnchors::Unregister(PlaceClientId(index, place));
-			};
-			if (!PlacesOn() || !group.entries) {
-				unregisterAll();
+			if (!PlacesOn() || !a_build.entries)
 				return;
-			}
-			group.placeGate = RunGate::Create(fmt::format("{}.places", kGroupIds[index]), group.entries * static_cast<std::uint32_t>(kPlaces));
+			a_build.placeGate = RunGate::Create(fmt::format("{}.places", kGroupIds[a_group]), a_build.entries * static_cast<std::uint32_t>(kPlaces));
 			auto* host = RenderGraphRuntime::Get().Host();
-			group.placeColours = host ? org::LatchBlock::Create(fmt::format("{}.places.colours", kGroupIds[index]), group.entries * static_cast<std::uint32_t>(kPlaces) * RunGate::kEntryBytes) : nullptr;
-			if (!group.placeGate || !group.placeColours) {
-				unregisterAll();
-				logger::warn("[ORG] engine skeleton: the {} clears' places have no run gate; those frames' clears keep the {} anchor's ticket", kGroupNames[index],
-					FrameAnchors::Name(kGroupAnchors[index]));
-				return;
-			}
+			a_build.placeColours = host ? org::LatchBlock::Create(fmt::format("{}.places.colours", kGroupIds[a_group]),
+											  a_build.entries * static_cast<std::uint32_t>(kPlaces) * RunGate::kEntryBytes) :
+			                              nullptr;
+			if (!a_build.placeGate || !a_build.placeColours)
+				RenderGraph::Fatal("engine skeleton", fmt::format("the {} clears' places have no run gate", kGroupNames[a_group]));
 			std::string summary;
 			for (std::size_t place = 0; place < kPlaces; ++place) {
-				FrameAnchors::ClientDesc client{};
-				client.id = PlaceClientId(index, place);
-				for (const auto& [target, spec] : group.specs) {
+				for (const auto& [target, spec] : a_build.specs) {
 					if (!PlaceClears(static_cast<Place>(place), target))
 						continue;
 					auto placed = std::make_shared<ClearSpec>(*spec);
 					placed->name = fmt::format("{}@{}", spec->name, kPlaceNames[place]);
-					placed->gate = group.placeGate;
-					placed->colours = group.placeColours;
+					placed->gate = a_build.placeGate;
+					placed->colours = a_build.placeColours;
 					for (auto& draw : placed->draws)
-						draw.entry += static_cast<std::uint32_t>(place) * group.entries;
-					std::shared_ptr<const ClearSpec> pass = placed;
-					client.passes.push_back({ .name = placed->name,
-						.anchor = Anchor::EngineFrameClear,
-						.order = static_cast<std::int32_t>(placed->draws.front().entry),
-						.kind = FrameAnchors::PassKind::Render,
-						.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
-						// The engine's call stages the entry before the commit. A clear not asked for skips and folds its barriers.
-						.atExecution = true });
-					group.placeSpecs[place].emplace(target, std::move(pass));
+						draw.entry += static_cast<std::uint32_t>(place) * a_build.entries;
+					a_build.placeSpecs[place].emplace(target, std::move(placed));
 				}
-				if (client.passes.empty()) {
-					if (std::exchange(group.placeRegistered[place], false))
-						FrameAnchors::Unregister(client.id);
-					continue;
-				}
-				// The engine's call stages the entry and colour, so the step has no tap.
-				client.active = [] { return false; };
-				client.segmentOnly = true;
-				client.gates = { group.placeGate };
-				const auto views = client.passes.size();
-				group.placeRegistered[place] = FrameAnchors::Register(std::move(client));
-				if (group.placeRegistered[place])
-					summary += fmt::format("{}{} {}", summary.empty() ? "" : ", ", kPlaceNames[place], views);
-				else
-					group.placeSpecs[place].clear();
+				if (!a_build.placeSpecs[place].empty())
+					summary += fmt::format("{}{} {}", summary.empty() ? "" : ", ", kPlaceNames[place], a_build.placeSpecs[place].size());
 			}
 			if (!summary.empty())
-				logger::info("[ORG] engine skeleton: a menu scene's {} clears run in the UI stage (views by place: {})", kGroupNames[index], summary);
+				logger::info("[ORG] engine skeleton: a menu scene's {} clears run in the UI stage (views by place: {})", kGroupNames[a_group], summary);
+		}
+
+		/** @brief A place's client: segment-only, since the engine's call stages the entry and colour and the step has no tap. */
+		void PlaceClient(const GroupBuild& a_build, std::size_t a_place, FrameAnchors::ClientDesc& a_client)
+		{
+			for (const auto& [target, placed] : a_build.placeSpecs[a_place]) {
+				const std::shared_ptr<const ClearSpec> pass = placed;
+				a_client.passes.push_back({ .name = placed->name,
+					.anchor = Anchor::EngineFrameClear,
+					.order = static_cast<std::int32_t>(placed->draws.front().entry),
+					.kind = FrameAnchors::PassKind::Render,
+					.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
+					// The engine's call stages the entry before the commit. A clear not asked for skips and folds its barriers.
+					.atExecution = true });
+			}
+			a_client.active = [] { return false; };
+			a_client.segmentOnly = true;
+			a_client.gates = { a_build.placeGate };
+		}
+
+		/** @brief A new build of a group's clears for a_facts, with a new gate and colour latch, so an older recording never clears the wrong view. */
+		std::shared_ptr<GroupBuild> MakeBuild(Group a_group, const GroupFacts& a_facts, const RF::Inputs& a_in)
+		{
+			auto& group = GroupOf(a_group);
+			const auto index = IndexOf(a_group);
+			auto build = std::make_shared<GroupBuild>();
+			build->facts = a_facts;
+			build->generation = ++group.generation;
+			std::vector<std::shared_ptr<ClearSpec>> made;
+			for (const auto& fact : a_facts)
+				if (auto spec = MakeSpec(fact, a_in)) {
+					build->entries += static_cast<std::uint32_t>(spec->draws.size());
+					made.push_back(std::move(spec));
+				}
+			if (made.empty())
+				return build;
+			build->gate = RunGate::Create(kGroupIds[index], build->entries);
+			auto* host = RenderGraphRuntime::Get().Host();
+			build->colours = host ? org::LatchBlock::Create(fmt::format("{}.colours", kGroupIds[index]), build->entries * RunGate::kEntryBytes) : nullptr;
+			if (!build->gate || !build->colours)
+				RenderGraph::Fatal("engine skeleton", fmt::format("the {} clears' run gate could not be made", kGroupNames[index]));
+			std::uint32_t entry = 0;
+			for (auto& spec : made) {
+				for (auto& draw : spec->draws)
+					draw.entry = entry++;
+				spec->name = fmt::format("{}.{}", kGroupIds[index], TargetName(spec->target));
+				spec->generation = build->generation;
+				spec->gate = build->gate;
+				spec->colours = build->colours;
+				build->specs.emplace(spec->target, std::move(spec));
+			}
+			logger::info("[ORG] engine skeleton: the {} clears made ({} views, {} gate entries, registration {})", kGroupNames[index], build->specs.size(),
+				build->entries, build->generation);
+			SplitHosted(*build, index);
+			SplitPlaces(*build, index);
+			return build;
 		}
 
 		/**
-		* @brief Stages a clear into the UI stage place that FrameAnchors::StagePlace names.
-		* False when no open stage has a place for it.
+		* @brief Render thread, in a client's key when a revision starts. The group's build for the revision's facts. Equal facts
+		* give the same build, so every client of the group registers the same views and gates.
 		*/
-		bool TakeIntoPlace(Group a_group, const Target& a_target, const Pending& a_pending)
+		std::shared_ptr<GroupBuild> BuildOf(Group a_group, const RF::Inputs& a_in)
+		{
+			auto& group = GroupOf(a_group);
+			const auto* facts = group.facts ? group.facts->Get(a_in) : nullptr;
+			if (!facts)
+				return nullptr;
+			if (auto found = FindBuild(group, *facts))
+				return found;
+			auto build = MakeBuild(a_group, *facts, a_in);
+			group.builds.push_back(build);
+			while (group.builds.size() > kKeptBuilds)
+				group.builds.pop_front();
+			PublishHosted();
+			return build;
+		}
+
+		/** @brief The gate entry of a_target's draw for a_flags among a_specs, if one clears it. */
+		std::optional<std::uint32_t> EntryIn(const std::vector<std::shared_ptr<const ClearSpec>>& a_specs, const Target& a_target, std::uint32_t a_flags)
+		{
+			for (const auto& spec : a_specs) {
+				if (!(spec->target == a_target))
+					continue;
+				for (const auto& draw : spec->draws)
+					if (draw.flags == a_flags)
+						return draw.entry;
+			}
+			return std::nullopt;
+		}
+
+		/**
+		* @brief Stages a clear into the UI stage place that FrameAnchors::StagePlace names, on the gate of the registration the
+		* stage holds. False when no open stage has a place for it.
+		*/
+		bool TakeIntoPlace(Group a_group, const Target& a_target, std::uint32_t a_flags, const Pending& a_pending)
 		{
 			auto& group = GroupOf(a_group);
 			const auto index = IndexOf(a_group);
 			static Util::ReasonLog s_kept("[ORG] engine skeleton: a clear at no place of the UI stage keeps its group anchor's ticket");
-			if (!group.placeGate)
-				return !WorldFrame() && s_kept.Report("the group has no places"), false;
 			std::array<std::string, kPlaces> ids;
 			std::array<std::string_view, kPlaces> views;
 			for (std::size_t place = 0; place < kPlaces; ++place) {
@@ -1085,25 +1264,30 @@ namespace RenderGraph::Engine::Skeleton
 			const auto place = FrameAnchors::StagePlace(views);
 			if (place < 0)
 				return !WorldFrame() && s_kept.Report(fmt::format("{}: no open stage has a place for the {} clears", RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind), kGroupNames[index])), false;
-			if (!group.placeRegistered[static_cast<std::size_t>(place)])
-				return s_kept.Report(fmt::format("the {} place is not registered", kPlaceNames[static_cast<std::size_t>(place)])), false;
-			const auto& specs = group.placeSpecs[static_cast<std::size_t>(place)];
-			if (!specs.contains(a_target))
-				return s_kept.Report(fmt::format("the {} place does not clear {}", kPlaceNames[static_cast<std::size_t>(place)], TargetName(a_target))), false;
-			const std::uint32_t entry = static_cast<std::uint32_t>(place) * group.entries + a_pending.gateEntry;
-			const bool staged = FrameAnchors::StageInputs(ids[static_cast<std::size_t>(place)], [&] {
+			const auto p = static_cast<std::size_t>(place);
+			const auto held = group.placeClients[p].Held(Anchor::Count);
+			if (!held)
+				return s_kept.Report(fmt::format("the stage's schedule does not have the {} place's client on ({})", kPlaceNames[p], FrameAnchors::ReasonName(held.Reason()))), false;
+			const auto found = held->placeSpecs[p].find(a_target);
+			if (found == held->placeSpecs[p].end())
+				return s_kept.Report(fmt::format("the {} place does not clear {}", kPlaceNames[p], TargetName(a_target))), false;
+			const auto entry = EntryIn({ found->second }, a_target, a_flags);
+			if (!entry)
+				return s_kept.Report(fmt::format("the {} place has no clear of {} for flags {}", kPlaceNames[p], TargetName(a_target), a_flags)), false;
+			const auto& build = *held;
+			const bool staged = FrameAnchors::StageInputs(ids[p], [&] {
 				const org::RunRef run = RunGate::Current();
 				if (!a_pending.depth)
-					group.placeColours->WriteValue(run, entry * RunGate::kEntryBytes, a_pending.colour);
-				group.placeGate->OpenDraw(run, entry);
+					build.placeColours->WriteValue(run, *entry * RunGate::kEntryBytes, a_pending.colour);
+				build.placeGate->OpenDraw(run, *entry);
 			});
 			if (!staged)
-				return s_kept.Report(fmt::format("the stage's schedule does not have the {} place's client on", kPlaceNames[static_cast<std::size_t>(place)])), false;
+				return s_kept.Report(fmt::format("the stage did not take the {} place's inputs", kPlaceNames[p])), false;
 			++group.taken;
 			if (group.placed++ == 0)
-				logger::info("[ORG] engine skeleton: the first {} clear at a place runs at the UI stage's {} place ({} frame)", kGroupNames[index],
-					kPlaceNames[static_cast<std::size_t>(place)], RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind));
-			RenderGraph::Frame::Driver::NoteHosted(kPlaceNames[static_cast<std::size_t>(place)], 1);
+				logger::info("[ORG] engine skeleton: the first {} clear at a place runs at the UI stage's {} place ({} frame)", kGroupNames[index], kPlaceNames[p],
+					RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind));
+			RenderGraph::Frame::Driver::NoteHosted(kPlaceNames[p], 1);
 			return true;
 		}
 
@@ -1123,158 +1307,140 @@ namespace RenderGraph::Engine::Skeleton
 			       engine.image.image && engine.image.image == call.image.image;
 		}
 
-		/** @brief Whether the host's graph holds this registration's passes. */
-		bool HostReady(Group a_group, Host a_host)
+		/** @brief Whether a DCLF host's graph holds the adopted build's passes. */
+		bool HostReady(Group a_group, const GroupBuild& a_build, Host a_host)
 		{
 			if (a_host == Host::Own || StageHost(a_host) || !WorldFrame())
 				return false;
-			const auto& group = GroupOf(a_group);
 			const auto h = HostIndex(a_host);
-			if (group.hosted[h].empty())
+			if (!kHostInfo[h].dclf || a_build.hosted[h].empty())
 				return false;
 			// DCLF epochs run only once DCLF draws the world. The shadow epoch draws the views only if that frame's coverage decision took them.
-			if (kHostInfo[h].dclf && (!RenderGraph::Frame::Driver::Current().dclfDraws || !DCLF::EpochsRun()))
+			if (!RenderGraph::Frame::Driver::Current().sceneDraws || !DCLF::EpochsRun())
 				return false;
 			if (a_host == Host::ShadowView && !DCLF::DrawsShadowViews())
 				return false;
 			// Menu 3D scenes also clear the main depth. Only RenderDepth's clear belongs to the Z-prepass.
 			if (a_host == Host::ZPrepass && !DCLF::InDepthPass())
 				return false;
-			return kHostInfo[h].dclf && group.hostedBuilt[h].load(std::memory_order_acquire) == group.generation;
+			return GroupOf(a_group).hostedBuilt[h].load(std::memory_order_acquire) == a_build.generation;
 		}
 
 		/**
-		* @brief Registers the group's passes with a new gate and colour latch, so an older recording can never clear the wrong view.
-		* Called at Setup and after a resize.
+		* @brief The view's pass for a_flags in a_build. Null when there is none. Then a_engineKeeps says whether the caller's call
+		* stays. Otherwise the clear was a tap error and is dropped. Only a patched engine site (a_engineSite) is a tap error. A
+		* clear at the native context may be CS's own, so the context records it.
 		*/
-		void Build(Group a_group)
+		const ClearDraw* DrawFor(Group a_group, const GroupBuild& a_build, const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags, bool a_engineSite,
+			bool& a_engineKeeps)
 		{
-			auto& group = GroupOf(a_group);
-			const auto index = IndexOf(a_group);
-			std::vector<std::shared_ptr<ClearSpec>> made;
-			std::uint32_t entries = 0;
-			for (const auto& target : KnownTargets()) {
-				if (GroupFor(target) != a_group)
-					continue;
-				if (auto spec = MakeSpec(target)) {
-					entries += static_cast<std::uint32_t>(spec->draws.size());
-					made.push_back(std::move(spec));
+			a_engineKeeps = false;
+			// Some engine clears have no pass yet (the water targets kUNDERWATER_MASK and kRAW_WATER). They stay on D3D11, logged once
+			// per view, unless CS_ORG_ENGINE_DRAW_TAP=1 makes them tap errors.
+			const auto refuse = [&](std::string_view a_why) -> const ClearDraw* {
+				static const bool strict = Switches::On("CS_ORG_ENGINE_DRAW_TAP");
+				if (a_engineSite && strict) {
+					RefuseEngineClear(a_target, a_flags, a_why);
+					return nullptr;
 				}
-			}
-			group.specs.clear();
-			group.stale = false;
-			if (made.empty()) {
-				if (std::exchange(group.registered, false))
-					FrameAnchors::Unregister(kGroupIds[index]);
-				return;
-			}
-			group.gate = RunGate::Create(kGroupIds[index], entries);
-			auto* host = RenderGraphRuntime::Get().Host();
-			group.colours = host ? org::LatchBlock::Create(fmt::format("{}.colours", kGroupIds[index]), entries * RunGate::kEntryBytes) : nullptr;
-			if (!group.gate || !group.colours) {
-				group.failed = true;
-				logger::warn("[ORG] engine skeleton: the {} clears' run gate could not be made; they stay on D3D11", kGroupNames[index]);
-				return;
-			}
-			++group.generation;
-			group.entries = entries;
-			FrameAnchors::ClientDesc client{};
-			client.id = kGroupIds[index];
-			std::uint32_t entry = 0;
-			for (auto& spec : made) {
-				for (auto& draw : spec->draws)
-					draw.entry = entry++;
-				spec->name = fmt::format("{}.{}", kGroupIds[index], TargetName(spec->target));
-				spec->generation = group.generation;
-				spec->gate = group.gate;
-				spec->colours = group.colours;
-				std::shared_ptr<const ClearSpec> pass = spec;
-				client.passes.push_back({ .name = spec->name,
-					.anchor = kGroupAnchors[index],
-					.order = static_cast<std::int32_t>(spec->draws.front().entry),
-					.kind = FrameAnchors::PassKind::Render,
-					.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
-					// A run clears only a few views. The others record nothing.
-					.atExecution = true,
-					// Every clear is an indirect draw through the gate, so native mode records it ahead.
-					.gpuGated = true });
-				group.specs.emplace(spec->target, std::move(pass));
-			}
-			const auto passes = client.passes.size();
-			group.registered = true;
-			logger::info("[ORG] engine skeleton: the {} clears registered at the {} anchor ({} views, {} gate entries, registration {})", kGroupNames[index],
-				FrameAnchors::Name(kGroupAnchors[index]), passes, entries, group.generation);
-			RegisterHosted(a_group);
-			RegisterPlaces(a_group);
-			PublishHosted();
-		}
-
-		/** @brief Null when the caller must use D3D11 now: no pass, a remade target, or a registration not yet in the built graph. */
-		const ClearDraw* DrawFor(Group a_group, const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags)
-		{
-			auto& group = GroupOf(a_group);
-			const auto found = group.specs.find(a_target);
-			if (found == group.specs.end()) {
-				Refuse(a_target, "not a view the skeleton clears");
+				a_engineKeeps = true;
+				if (a_engineSite && Skel().keptOnD3D11.insert(a_target).second)
+					logger::info("[ORG] engine skeleton: a clear of {} stays on D3D11 ({})", TargetName(a_target), a_why);
 				return nullptr;
+			};
+			const auto found = a_build.specs.find(a_target);
+			if (found == a_build.specs.end()) {
+				// An engine-owned target stays the engine's D3D11 object (EngineTargetSet), so its clear stays with its draws.
+				// An unbacked target's clear goes to the context, which drops it or reports the unbacked use.
+				if (a_target.kind == Kind::Colour &&
+					(Targets::EngineOwned(Targets::Colour(a_target.index)) || Targets::Unbacked(Targets::Colour(a_target.index)))) {
+					a_engineKeeps = true;
+					return nullptr;
+				}
+				std::string_view why = "not a view the skeleton clears";
+				if (const auto noted = Skel().noClearPass.find(a_target); noted != Skel().noClearPass.end())
+					why = noted->second;
+				return refuse(why);
 			}
 			const auto& spec = *found->second;
 			// Another view in the slot means a lent slot or a remade target, so this clear is not the pass's.
-			// Skylighting lends the precipitation occlusion slot for a while. CheckMadeAgain catches remade targets at the next frame start.
 			if (spec.view != a_view || spec.texture != TextureOf(a_target)) {
-				if (group.lent++ == 0)
-					logger::info("[ORG] engine skeleton: a clear of {} found another view in its slot ({}); it stays on D3D11 while the slot holds it",
-						TargetName(a_target), spec.texture != TextureOf(a_target) ? "another texture" : "the same texture, another view");
-				return nullptr;
+				const bool remade = spec.texture != TextureOf(a_target);
+				// Guest mode: Skylighting lends the precipitation occlusion slot, and the engine draws the map into it on D3D11.
+				// The clear stays with those draws. Native mode lends no slot.
+				if (!Native::Active() && a_target.kind == Kind::Depth && a_target.index == DepthTarget::kPRECIPITATION_OCCLUSION_MAP) {
+					if (GroupOf(a_group).lent++ == 0)
+						logger::info("[ORG] engine skeleton: a clear of {} found Skylighting's lent view in its slot; it stays with the engine's occlusion draws",
+							TargetName(a_target));
+					a_engineKeeps = true;
+					return nullptr;
+				}
+				// The next frame start observes the new texture, and the revision after it registers the view again.
+				if (remade) {
+					if (a_engineSite) {
+						static Util::ReasonLog s_remade("[ORG] engine skeleton: a clear lags (its target was made again; it registers with the next revision); nothing clears it this frame");
+						s_remade.Report(TargetName(a_target));
+					} else
+						a_engineKeeps = true;
+					return nullptr;
+				}
+				return refuse("another view of its texture is in its slot");
 			}
 			for (const auto& draw : spec.draws)
 				if (draw.flags == a_flags)
 					return &draw;
-			Refuse(a_target, "its clear flags have no pass");
-			return nullptr;
+			return refuse("its clear flags have no pass");
 		}
 
 		/** @brief Native mode: a clear with no place is a mismatch and draws nothing. Returns true, the engine's call is taken. */
 		bool NoPlace(const Target& a_target, std::uint32_t a_flags, std::string_view a_why)
 		{
 			const auto& frame = RenderGraph::Frame::Driver::Current();
-			RenderGraph::FrameSequence::NoteUnplaced(fmt::format("skeleton clear of {}/{}", TargetName(a_target), a_flags));
 			RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
 				fmt::format("a clear of {} (flags {}) in a {} frame{}: {}", TargetName(a_target), a_flags, RenderGraph::Frame::KindName(frame.kind),
 					frame.capture ? " (capture)" : "", a_why));
 			return true;
 		}
 
-		bool Take(const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags, Pending a_pending)
+		/** @brief False when the caller makes its call: a clear the skeleton has no pass for at the native context (not a_engineSite). */
+		bool Take(const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags, Pending a_pending, bool a_engineSite)
 		{
 			const Group group = GroupFor(a_target);
 			auto& state = GroupOf(group);
-			// In world frames the face sky clears the faces. Other frame kinds never read them, and the next world frame's sky clears them.
-			if (group == Group::Cube && FacesClearedBySky()) {
+			// In world frames the start stage's face sky clears the faces. Other frame kinds never read them, and the next world frame's
+			// sky clears them. Setup leaves the cube group without passes for this.
+			if (group == Group::Cube && state.failed) {
 				if (state.dropped++ == 0)
 					logger::info("[ORG] engine skeleton: reflection face clears are dropped; the start stage's face sky clears each face and its depth");
 				return true;
 			}
-			if (state.failed || state.stale || !state.registered)
-				return false;
-			const auto* draw = DrawFor(group, a_target, a_view, a_flags);
+			const auto build = AdoptedBuild(group);
+			if (!build || build->specs.empty()) {
+				if (!a_engineSite)
+					return false;
+				RefuseEngineClear(a_target, a_flags, fmt::format("the adopted revision has no {} clear passes", kGroupNames[IndexOf(group)]));
+				return true;
+			}
+			bool engineKeeps = false;
+			const auto* draw = DrawFor(group, *build, a_target, a_view, a_flags, a_engineSite, engineKeeps);
 			if (!draw)
-				return false;
+				return !engineKeeps;
 			a_pending.gateEntry = draw->entry;
 			a_pending.target = a_target;
 			// Bink frames and the session's first frame clear the main depth outside every stage, but nothing reads it there.
-			// Every other frame kind clears it before its first read, so drop it.
+			// Every other frame kind clears it before its first read, so drop it. A movie's first tick clears it before its Begin,
+			// still in the frame before the movie, and that clear is the Bink frame's too.
 			if (a_target.kind == Kind::Depth && a_target.index == DepthTarget::kMAIN && PlacesOn() &&
-				(RenderGraph::Frame::Driver::Current().kind == RenderGraph::Frame::Kind::Bink || RenderGraph::Frame::Driver::Current().frame == 0)) {
+				(BinkFrame() || RenderGraph::Frame::Driver::Current().frame == 0)) {
 				if (state.dropped++ == 0)
 					logger::info("[ORG] engine skeleton: a Bink frame's (or frame 0's) clear of the main depth is dropped (no reader before the next kind's own clear)");
 				return true;
 			}
 			// The UI stage opens after every world stage ends, so a world stage's clear never finds a place.
-			if (TakeIntoPlace(group, a_target, a_pending))
+			if (TakeIntoPlace(group, a_target, a_flags, a_pending))
 				return true;
 			const auto host = HostFor(a_target, a_flags);
-			if (HostReady(group, host)) {
+			if (HostReady(group, *build, host)) {
 				a_pending.host = host;
 				state.hostedPending.push_back(a_pending);
 				return true;
@@ -1283,29 +1449,33 @@ namespace RenderGraph::Engine::Skeleton
 			if (!WorldFrame())
 				return unplaced("no open stage has a place for it");
 			const auto place = StagePlaceFor(host);
-			if (place == Host::Own || GroupOf(group).hosted[HostIndex(place)].empty())
+			if (place == Host::Own || build->hosted[HostIndex(place)].empty())
 				return unplaced("no stage of the world recipe clears it");
-			const auto id = HostedClientId(IndexOf(group), place);
-			const auto hold = FrameAnchors::HeldNow(id, kHostInfo[HostIndex(place)].anchor);
-			if (!hold.held)
-				return unplaced(fmt::format("the {} stage place is not open", kHostInfo[HostIndex(place)].name));
-			if (!hold.scheduled) {
-				// The stage's schedule does not hold the place's client yet, so the clear lags.
+			const auto& info = kHostInfo[HostIndex(place)];
+			const auto held = state.hostClients[HostIndex(place)].Held(info.anchor);
+			if (!held.Placement().InStage())
+				return unplaced(fmt::format("the {} stage place is not open", info.name));
+			if (!held) {
+				// The stage has no schedule yet, so the clear lags.
 				static Util::ReasonLog s_lag("[ORG] engine skeleton: a clear lags (its stage's schedule does not hold the place yet); nothing clears it this frame");
-				s_lag.Report(fmt::format("{} at the {} place", TargetName(a_target), kHostInfo[HostIndex(place)].name));
+				s_lag.Report(fmt::format("{} at the {} place ({})", TargetName(a_target), info.name, FrameAnchors::ReasonName(held.Reason())));
 				return true;
 			}
-			const auto* spec = &state;
-			const bool staged = FrameAnchors::StageInputs(id, [&] {
+			// The registration the stage holds has its own gate entries.
+			const auto entry = EntryIn(held->hosted[HostIndex(place)], a_target, a_flags);
+			if (!entry)
+				return unplaced(fmt::format("the {} stage place's registration does not clear it", info.name));
+			const auto& holder = *held;
+			const bool staged = FrameAnchors::StageInputs(HostedClientId(IndexOf(group), place), [&] {
 				const org::RunRef run = RunGate::Current();
 				if (!a_pending.depth)
-					spec->colours->WriteValue(run, a_pending.gateEntry * RunGate::kEntryBytes, a_pending.colour);
-				spec->gate->OpenDraw(run, a_pending.gateEntry);
+					holder.colours->WriteValue(run, *entry * RunGate::kEntryBytes, a_pending.colour);
+				holder.gate->OpenDraw(run, *entry);
 			});
 			if (!staged)
-				return NoPlace(a_target, a_flags, fmt::format("the {} stage place did not take it", kHostInfo[HostIndex(place)].name));
+				return NoPlace(a_target, a_flags, fmt::format("the {} stage place did not take it", info.name));
 			++state.taken;
-			RenderGraph::Frame::Driver::NoteHosted(kHostInfo[HostIndex(place)].name, 1);
+			RenderGraph::Frame::Driver::NoteHosted(info.name, 1);
 			return true;
 		}
 
@@ -1325,145 +1495,90 @@ namespace RenderGraph::Engine::Skeleton
 		std::pair<FrameAnchors::Texture, FrameAnchors::Texture> GraphTexturesOf(CopyKind a_kind)
 		{
 			if (a_kind == CopyKind::Depth)
-				return { FrameAnchors::EngineDepth(DepthTarget::kMAIN), FrameAnchors::EngineDepth(DepthTarget::kPOST_ZPREPASS_COPY) };
+				return { FrameAnchors::EngineTexture(FrameAnchors::Depth(DepthTarget::kMAIN)), FrameAnchors::EngineTexture(FrameAnchors::Depth(DepthTarget::kPOST_ZPREPASS_COPY)) };
 			const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[ColourTarget::kMAIN];
-			auto copy = Targets::Find(reinterpret_cast<const ID3D11Resource*>(main.textureCopy));
+			auto copy = Targets::Slot(Targets::ColourCopy(ColourTarget::kMAIN));
 			if (!copy && main.textureCopy)
-				copy = FrameAnchors::D3D11Texture("engine.kMAIN.copy", main.textureCopy, main.SRVCopy, nullptr);
-			return { FrameAnchors::EngineTarget(ColourTarget::kMAIN), std::move(copy) };
+				copy = FrameAnchors::ImportTexture("cs.d3d11.engine.kMAIN.copy", { .texture = main.textureCopy, .srv = main.SRVCopy });
+			return { FrameAnchors::EngineTexture(FrameAnchors::Colour(ColourTarget::kMAIN)), std::move(copy) };
 		}
 
-		void RegisterHostedCopy(CopyKind a_kind);
-		void RegisterUiCopy(CopyKind a_kind);
+		std::string CopyClientId(CopyKind a_kind, CopyAt a_at)
+		{
+			const auto index = static_cast<std::size_t>(a_kind);
+			switch (a_at) {
+			case CopyAt::Hosted:
+				return fmt::format("{}@{}", kCopyIds[index], kHostInfo[HostIndex(Host::DeferredPasses)].name);
+			case CopyAt::Ui:
+				return kUiDepthCopyId;
+			default:
+				return kCopyIds[index];
+			}
+		}
 
 		/**
-		* @brief Registers the copy's client. Called at Setup and after a resize.
-		* No run gate: a transfer copy has no indirect form, and this anchor only runs from RunCopy, which always wants the copy.
+		* @brief A copy's client, for its own anchor, first in the deferred passes, or in the UI stage. Each frame's extent comes
+		* from the current versions, so a resize needs no new registration.
+		* - Own: no run gate entry for the depth copy, since Main::RenderDepth always copies; the kMAIN copy is gated. This anchor
+		*   only runs from RunCopy, which always wants the copy.
+		* - Hosted: ungated, since Deferred::DeferredPasses copies in every world frame.
+		* - Ui: the engine's call opens its entry. A frame with no menu scene skips it.
 		*/
-		void RegisterCopy(CopyKind a_kind)
+		FrameAnchors::ClientDesc CopyClient(CopyKind a_kind, CopyAt a_at)
 		{
 			const auto index = static_cast<std::size_t>(a_kind);
 			auto& copy = CopyOf(a_kind);
-			if (!globals::game::renderer)
-				return;
-			std::tie(copy.sourceTexture, copy.targetTexture) = EngineTexturesOf(a_kind);
-			std::tie(copy.source, copy.target) = GraphTexturesOf(a_kind);
-			if (!copy.source || !copy.target) {
-				if (std::exchange(copy.registered, false))
-					FrameAnchors::Unregister(kCopyIds[index]);
-				logger::info("[ORG] engine skeleton: {}: a texture has no graph texture; it stays on D3D11", kCopyNames[index]);
-				return;
+			auto [source, target] = GraphTexturesOf(a_kind);
+			// The key holds both engine textures, so both must be on the graph.
+			if (!source || !target)
+				RenderGraph::Fatal("engine skeleton", fmt::format("{}: a texture has no graph texture", kCopyNames[index]));
+			if (source.Width() != target.Width() || source.Height() != target.Height() || source.Format() != target.Format())
+				RenderGraph::Fatal("engine skeleton", fmt::format("{}: the textures differ in size or format", kCopyNames[index]));
+			const auto& hostInfo = kHostInfo[HostIndex(Host::DeferredPasses)];
+			const auto id = CopyClientId(a_kind, a_at);
+			auto anchor = kCopyAnchors[index];
+			std::int32_t order = 0;
+			std::string step = kCopySteps[index];
+			std::shared_ptr<RunGate> gate;
+			std::optional<std::uint32_t> entry;
+			switch (a_at) {
+			case CopyAt::Own:
+				gate = copy.gate;
+				if (a_kind != CopyKind::Depth)
+					entry = 0u;
+				break;
+			case CopyAt::Hosted:
+				anchor = hostInfo.anchor;
+				order = std::numeric_limits<std::int32_t>::min();
+				step = fmt::format("{}@{}", step, hostInfo.name);
+				break;
+			case CopyAt::Ui:
+				anchor = Anchor::EngineDepthCopy;
+				gate = copy.uiGate;
+				entry = 0u;
+				step = "post-zprepass@ui";
+				break;
 			}
-			if (copy.source.Width() != copy.target.Width() || copy.source.Height() != copy.target.Height() || copy.source.Format() != copy.target.Format()) {
-				copy.failed = true;
-				logger::warn("[ORG] engine skeleton: {}: the textures differ in size or format; it stays on D3D11", kCopyNames[index]);
-				return;
-			}
-			if (!copy.gate)
-				copy.gate = RunGate::Create(kCopyIds[index], 1);
-			if (!copy.gate) {
-				copy.failed = true;
-				logger::warn("[ORG] engine skeleton: {}: no run gate; it stays on D3D11", kCopyNames[index]);
-				return;
-			}
-			AnchorPasses::Builder builder(kCopyAnchors[index], kCopyIds[index], 0, {}, copy.gate);
-			// Main::RenderDepth always copies, so the depth copy is ungated in the pre-main stage and on its own anchor.
-			const bool declared = a_kind == CopyKind::Depth;
-			builder.Add(AnchorPasses::Copy{
-				.name = kCopySteps[index],
-				.source = copy.source,
-				.target = copy.target,
-				.width = copy.source.Width(),
-				.height = copy.source.Height(),
-				.gate = declared ? std::nullopt : std::optional<std::uint32_t>(0u) });
-			FrameAnchors::ClientDesc client{};
-			client.id = kCopyIds[index];
-			client.passes = builder.Take();
-			client.gates = { copy.gate };
-			client.commit = [a_kind](const FrameAnchors::Point&) {
-				if (const auto& gate = CopyOf(a_kind).gate)
-					gate->OpenDispatch(0, 1);
-			};
-			client.active = [a_kind] { return CopyOf(a_kind).wanted; };
-			client.executed = [a_kind](const FrameAnchors::Point&) { CopyOf(a_kind).executed = true; };
-			copy.registered = FrameAnchors::Register(std::move(client));
-			if (!copy.registered) {
-				copy.failed = true;
-				logger::warn("[ORG] engine skeleton: the {} anchor refused {}; it stays on D3D11", FrameAnchors::Name(kCopyAnchors[index]), kCopyNames[index]);
-				return;
-			}
-			RegisterHostedCopy(a_kind);
-			RegisterUiCopy(a_kind);
-		}
-
-		/** @brief Native mode with hosting. The engine's call opens its entry. A frame with no menu scene skips it. */
-		void RegisterUiCopy(CopyKind a_kind)
-		{
-			auto& copy = CopyOf(a_kind);
-			if (a_kind != CopyKind::Depth)
-				return;
-			if (!copy.uiGate)
-				copy.uiGate = RunGate::Create(kUiDepthCopyId, 1);
-			if (!copy.uiGate) {
-				logger::error("[ORG] engine skeleton: {}: no run gate for the UI stage's copy", kCopyNames[static_cast<std::size_t>(a_kind)]);
-				return;
-			}
-			AnchorPasses::Builder builder(Anchor::EngineDepthCopy, kUiDepthCopyId, 0, {}, copy.uiGate);
-			builder.Add(AnchorPasses::Copy{
-				.name = "post-zprepass@ui",
-				.source = copy.source,
-				.target = copy.target,
-				.width = copy.source.Width(),
-				.height = copy.source.Height(),
-				.gate = 0u });
-			FrameAnchors::ClientDesc client{};
-			client.id = kUiDepthCopyId;
-			client.passes = builder.Take();
-			client.gates = { copy.uiGate };
-			// The engine's call stages the entry, so the step has no tap.
-			client.active = [] { return false; };
-			client.segmentOnly = true;
-			copy.uiRegistered = FrameAnchors::Register(std::move(client));
-			if (!copy.uiRegistered)
-				logger::error("[ORG] engine skeleton: the UI stage's {} was refused", kCopyNames[static_cast<std::size_t>(a_kind)]);
-		}
-
-		/** @brief CS's own depth copy runs first in the DeferredPasses anchor. */
-		void RegisterHostedCopy(CopyKind a_kind)
-		{
-			auto& copy = CopyOf(a_kind);
-			const auto index = static_cast<std::size_t>(a_kind);
-			// The kMAIN copy keeps its own ticket. Water draws follow it outdoors and the ImageSpace chain indoors, and one host cannot follow both.
-			const Host host = a_kind == CopyKind::Depth ? Host::DeferredPasses : Host::Own;
-			if (host == Host::Own)
-				return;
-			const auto& info = kHostInfo[HostIndex(host)];
-			const auto id = fmt::format("{}@{}", kCopyIds[index], info.name);
-			if (!HostAvailable(host)) {
-				if (std::exchange(copy.hostedRegistered, false))
-					FrameAnchors::Unregister(id);
-				copy.host = Host::Own;
-				return;
-			}
-			// Ungated, since Deferred::DeferredPasses copies in every world frame.
-			AnchorPasses::Builder builder(info.anchor, id, std::numeric_limits<std::int32_t>::min(), {}, nullptr);
-			builder.Add(AnchorPasses::Copy{
-				.name = fmt::format("{}@{}", kCopySteps[index], info.name),
-				.source = copy.source,
-				.target = copy.target,
-				.width = copy.source.Width(),
-				.height = copy.source.Height(),
-				.gate = std::nullopt });
+			AnchorPasses::Builder builder(anchor, id, order, {}, gate);
+			builder.Add(AnchorPasses::Copy{ .name = std::move(step), .source = std::move(source), .target = std::move(target), .width = 0, .height = 0, .gate = entry });
 			FrameAnchors::ClientDesc client{};
 			client.id = id;
 			client.passes = builder.Take();
-			client.active = [] { return false; };
-			// Without the stages, the copy runs on its own anchor.
-			client.segmentOnly = true;
-			copy.hostedRegistered = FrameAnchors::Register(std::move(client));
-			copy.host = copy.hostedRegistered ? host : Host::Own;
-			if (copy.hostedRegistered)
-				logger::info("[ORG] engine skeleton: in a world frame {} runs first at the {} anchor", kCopyNames[index], FrameAnchors::Name(info.anchor));
+			if (gate)
+				client.gates = { gate };
+			if (a_at == CopyAt::Own) {
+				client.commit = [a_kind](const FrameAnchors::Point&) {
+					if (const auto& own = CopyOf(a_kind).gate)
+						own->OpenDispatch(0, 1);
+				};
+				client.active = [a_kind] { return CopyOf(a_kind).wanted; };
+				client.executed = [a_kind](const FrameAnchors::Point&) { CopyOf(a_kind).executed = true; };
+			} else {
+				// The engine's call stages the entry, or the stage runs it every frame, so the step has no tap.
+				client.active = [] { return false; };
+				client.segmentOnly = true;
+			}
+			return client;
 		}
 
 		/** @brief Whether the open stage declares this depth copy. The engine's call then does nothing more. */
@@ -1473,23 +1588,22 @@ namespace RenderGraph::Engine::Skeleton
 			if (a_kind != CopyKind::Depth)
 				return false;
 			// The UI stage opens after every world stage ends, so the pre-main copy never finds it open.
-			if (copy.uiRegistered && FrameAnchors::StageInputs(kUiDepthCopyId, [&] { copy.uiGate->OpenDispatch(RunGate::Current(), 0, 1); })) {
+			if (copy.uiClient.Registered() && FrameAnchors::StageInputs(kUiDepthCopyId, [&] { copy.uiGate->OpenDispatch(RunGate::Current(), 0, 1); })) {
 				a_where = "UI stage";
 				return true;
 			}
 			if (!WorldFrame()) {
 				static Util::ReasonLog s_notDeclared("[ORG] engine skeleton: a depth copy outside a world frame is not the UI stage's pass");
-				const auto reason = copy.uiRegistered ? fmt::format("{}: the UI stage is not open, or its schedule does not have the copy on",
-															RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind)) :
-				                                        std::string("the UI stage's copy is not registered");
+				const auto reason = copy.uiClient.Registered() ? fmt::format("{}: the UI stage is not open, or its schedule does not have the copy on",
+																	 RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind)) :
+				                                                 std::string("the UI stage's copy is not registered");
 				s_notDeclared.Report(reason);
 				return false;
 			}
 			a_where = a_hostable ? "deferred stage" : "pre-main stage";
 			if (a_hostable)
-				return copy.host != Host::Own && copy.hostedRegistered &&
-				       FrameAnchors::CanTap(fmt::format("{}@{}", kCopyIds[static_cast<std::size_t>(a_kind)], kHostInfo[HostIndex(copy.host)].name));
-			return copy.registered && FrameAnchors::CanTap(kCopyIds[static_cast<std::size_t>(a_kind)]);
+				return copy.host != Host::Own && copy.hostedClient.Registered() && FrameAnchors::Place(CopyClientId(a_kind, CopyAt::Hosted)).built;
+			return copy.client.Registered() && FrameAnchors::Place(kCopyIds[static_cast<std::size_t>(a_kind)]).built;
 		}
 
 		/** @brief False when the skeleton does not take the copy and the caller copies. a_hostable makes a world frame's copy wait for its host. */
@@ -1497,7 +1611,7 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			const auto index = static_cast<std::size_t>(a_kind);
 			auto& copy = CopyOf(a_kind);
-			if (copy.failed || !Usable())
+			if (!Usable())
 				return false;
 			// RenderDepth's copy is its last act, so the pre-depth stage commits here at the latest.
 			if (a_kind == CopyKind::Depth && !a_hostable && WorldFrame())
@@ -1505,23 +1619,29 @@ namespace RenderGraph::Engine::Skeleton
 			// CS's depth copy is the deferred+water stage's first pass, so the pre-main stage ends here at the latest.
 			if (a_kind == CopyKind::Depth && a_hostable && WorldFrame())
 				(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::PreMain);
+			// The adopted registration's textures. A texture made again inside the frame registers with the revision after the next frame start.
+			const auto adopted = copy.client.Adopted();
+			const auto [sourceTexture, targetTexture] = EngineTexturesOf(a_kind);
+			if (!adopted || adopted->source != sourceTexture || adopted->target != targetTexture) {
+				static Util::ReasonLog s_remade("[ORG] engine skeleton: a copy lags (a texture was made again; it registers with the next revision); nothing copies this frame");
+				s_remade.Report(kCopyNames[index]);
+				return true;
+			}
 			const char* where = nullptr;
-			if (EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyDeclared(a_kind, a_hostable, where)) {
+			if (CopyDeclared(a_kind, a_hostable, where)) {
 				RenderGraph::Frame::Driver::NoteHosted(where, 1);
 				return true;
 			}
-			if (EngineTexturesOf(a_kind) != std::pair{ copy.sourceTexture, copy.targetTexture }) {
-				logger::info("[ORG] engine skeleton: {}: a texture was made again; it registers again", kCopyNames[index]);
-				RegisterCopy(a_kind);
-				return false;
+			if (!copy.client.Registered()) {
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::EngineWork, RenderGraph::Frame::SegmentId::Count,
+					fmt::format("{}: the engine copied a texture the skeleton did not register", kCopyNames[index]));
+				return true;
 			}
-			if (!copy.registered)
-				return false;
 			using RenderGraph::Frame::SegmentId;
 			const auto start = static_cast<std::uint32_t>(SegmentId::Start);
 			// The reflection cubemap's render copies the main depth while the start stage is open.
 			// The pre-main copy overwrites kPOST_ZPREPASS_COPY before anyone reads it, so drop this one.
-			if (a_kind == CopyKind::Depth && WorldFrame() && (FrameAnchors::StageOpen(start) || FrameAnchors::StageAbsent(start))) {
+			if (a_kind == CopyKind::Depth && WorldFrame() && FrameAnchors::Stage(start).InStage()) {
 				if (copy.dropped++ == 0)
 					logger::info("[ORG] engine skeleton: {} while the start stage is open (the cubemap's render) is dropped: pre-main's copy writes it again before any reader",
 						kCopyNames[index]);
@@ -1530,34 +1650,34 @@ namespace RenderGraph::Engine::Skeleton
 			// The copy's anchor has no epoch of its own, so every copy is a stage's pass or dropped.
 			const auto& frame = RenderGraph::Frame::Driver::Current();
 			if (a_kind == CopyKind::Depth) {
-				// The holding stage has no schedule yet, or a build with this registration is pending, so the copy lags.
+				// The holding stage has no schedule yet, so the copy lags.
 				auto holder = static_cast<std::uint32_t>(SegmentId::Ui);
 				std::string holderId(kUiDepthCopyId);
 				if (WorldFrame()) {
 					holder = static_cast<std::uint32_t>(a_hostable ? SegmentId::Deferred : SegmentId::PreMain);
-					holderId = a_hostable ? fmt::format("{}@{}", kCopyIds[index], kHostInfo[HostIndex(Host::DeferredPasses)].name) : std::string(kCopyIds[index]);
+					holderId = CopyClientId(a_kind, a_hostable ? CopyAt::Hosted : CopyAt::Own);
 				}
-				if (FrameAnchors::StageAbsent(holder) || FrameAnchors::TapMayLag(holderId)) {
+				if (FrameAnchors::Stage(holder).reason == FrameAnchors::Reason::Absent || FrameAnchors::Place(holderId).MayLag()) {
 					static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage has no schedule yet); nothing copies this frame");
 					s_lag.Report(kCopyNames[index]);
 					return true;
 				}
+				const auto isOpen = [](std::uint32_t a_segment) { return FrameAnchors::Stage(a_segment).reason == FrameAnchors::Reason::None; };
 				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
 					fmt::format("{} in a {} frame came while no open stage holds it (open: start {}, pre-depth {}, pre-main {}, deferred+water {}; hostable {})",
-						kCopyNames[index], RenderGraph::Frame::KindName(frame.kind), FrameAnchors::StageOpen(start),
-						FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::PreDepth)), FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::PreMain)),
-						FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::Deferred)), a_hostable));
+						kCopyNames[index], RenderGraph::Frame::KindName(frame.kind), isOpen(start),
+						isOpen(static_cast<std::uint32_t>(SegmentId::PreDepth)), isOpen(static_cast<std::uint32_t>(SegmentId::PreMain)),
+						isOpen(static_cast<std::uint32_t>(SegmentId::Deferred)), a_hostable));
 				return true;
 			}
-			const auto hold = FrameAnchors::HeldNow(kCopyIds[index], kCopyAnchors[index]);
-			if (!hold.held) {
-				RenderGraph::FrameSequence::NoteUnplaced(fmt::format("skeleton copy {}", kCopySteps[index]));
+			const auto hold = FrameAnchors::Place(kCopyIds[index], kCopyAnchors[index]);
+			if (!hold.InStage()) {
 				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
 					fmt::format("{} in a {} frame came while no open stage holds it", kCopyNames[index], RenderGraph::Frame::KindName(frame.kind)));
 				return true;
 			}
-			// A newer registration is not in the graph until the stage's next build switches in, so it lags too.
-			if (!hold.scheduled || !FrameAnchors::CanTap(kCopyIds[index])) {
+			// The stage has no schedule yet, so the copy lags.
+			if (!hold.draws || !hold.built) {
 				static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage's schedule does not hold it yet); nothing copies this frame");
 				s_lag.Report(kCopyNames[index]);
 				return true;
@@ -1577,40 +1697,131 @@ namespace RenderGraph::Engine::Skeleton
 			return true;
 		}
 
-		/** @brief Runs the clears taken so far. A run that does not draw them is an error. */
-		void FlushGroup(std::size_t a_index)
+		/**
+		* @brief At a frame start. Observes the engine's targets and copy textures. A remade one is an event, so the next
+		* revision registers its clients again and starts once their builds and any new clear program are built.
+		*/
+		void ObserveTargets(bool a_setup)
 		{
 			auto& state = Skel();
-			auto& group = state.groups[a_index];
-			if (group.stale && !group.failed)
-				Build(static_cast<Group>(a_index));
+			if (!globals::game::renderer)
+				return;
+			const auto known = KnownTargets();
+			for (std::size_t g = 0; g < kGroups; ++g) {
+				auto& group = state.groups[g];
+				if (group.failed || !group.facts)
+					continue;
+				auto facts = ObjectsOf(known, static_cast<Group>(g));
+				const auto* latest = group.facts->Latest();
+				// A resize is a new version of the same slot, which the clears follow each frame.
+				if (latest && SameObjects(*latest, facts))
+					continue;
+				Describe(facts);
+				WantPrograms(facts, a_setup);
+				const bool remade = latest != nullptr;
+				if (group.facts->Observe(facts) && remade)
+					logger::info("[ORG] engine skeleton: an engine target of the {} clears was made again; they register with the next revision", kGroupNames[g]);
+			}
+			for (std::size_t i = 0; i < kCopies; ++i) {
+				auto& copy = state.copies[i];
+				if (!copy.facts)
+					continue;
+				const auto [source, target] = EngineTexturesOf(static_cast<CopyKind>(i));
+				const bool had = copy.facts->Latest() != nullptr;
+				if (copy.facts->Observe(CopyFacts{ source, target }) && had)
+					logger::info("[ORG] engine skeleton: {}: a texture was made again; it registers with the next revision", kCopyNames[i]);
+			}
 		}
 
-		/** @brief Checked at frame start rather than at a clear, because a slot can be lent within a frame. */
-		void CheckMadeAgain()
+		/** @brief The group's clients: one per anchor host and one per UI stage place, each keyed on the group's build. */
+		void DeclareGroup(Group a_group)
 		{
-			for (std::size_t g = 0; g < kGroups; ++g) {
-				auto& group = Skel().groups[g];
-				if (group.failed || group.stale || !group.registered)
+			auto& group = GroupOf(a_group);
+			const auto index = IndexOf(a_group);
+			for (std::size_t h = 0; h < kHosts; ++h) {
+				const auto host = static_cast<Host>(h);
+				if (kHostInfo[h].dclf || host == Host::Own || !HostAvailable(host))
 					continue;
-				for (const auto& [target, spec] : group.specs) {
-					if (spec->view == ViewOf(target) && spec->texture == TextureOf(target))
-						continue;
-					group.stale = true;
-					logger::info("[ORG] engine skeleton: {} was made again ({}); the {} clears register again", TargetName(target),
-						spec->texture != TextureOf(target) ? "a new texture" : "the same texture, another view", kGroupNames[g]);
-					break;
-				}
+				group.hostClients[h] = RF::DeclareClient<BuildKey, GroupBuild>(
+					HostedClientId(index, host), RF::DependsOn(group.facts->Var()),
+					[a_group, h](const RF::Inputs& a_in) -> std::optional<BuildKey> {
+						auto build = BuildOf(a_group, a_in);
+						if (!build || build->hosted[h].empty())
+							return std::nullopt;
+						return BuildKey{ std::move(build) };
+					},
+					[host](const BuildKey& a_key, FrameAnchors::ClientDesc& a_client) {
+						HostedClient(*a_key.build, host, a_client);
+						return a_key.build;
+					});
 			}
+			// Every group declares its places, so each new facts value makes its build when a revision starts.
+			for (std::size_t place = 0; place < kPlaces; ++place) {
+				group.placeClients[place] = RF::DeclareClient<BuildKey, GroupBuild>(
+					PlaceClientId(index, place), RF::DependsOn(group.facts->Var()),
+					[a_group, place](const RF::Inputs& a_in) -> std::optional<BuildKey> {
+						auto build = BuildOf(a_group, a_in);
+						if (!build || build->placeSpecs[place].empty())
+							return std::nullopt;
+						return BuildKey{ std::move(build) };
+					},
+					[place](const BuildKey& a_key, FrameAnchors::ClientDesc& a_client) {
+						PlaceClient(*a_key.build, place, a_client);
+						return a_key.build;
+					});
+			}
+		}
+
+		/** @brief A copy's client at a_at, keyed on its engine textures. No client while the engine has either texture missing. */
+		RF::DeclaredClientOf<CopyFacts> DeclareCopy(CopyKind a_kind, CopyAt a_at)
+		{
+			auto client = RF::DeclareClient<CopyFacts, CopyFacts>(
+				CopyClientId(a_kind, a_at), RF::DependsOn(CopyOf(a_kind).facts->Var()),
+				[a_kind](const RF::Inputs& a_in) -> std::optional<CopyFacts> {
+					const auto* facts = CopyOf(a_kind).facts->Get(a_in);
+					if (!facts || !facts->source || !facts->target)
+						return std::nullopt;
+					return *facts;
+				},
+				[a_kind, a_at](const CopyFacts& a_facts, FrameAnchors::ClientDesc& a_client) {
+					a_client = CopyClient(a_kind, a_at);
+					return std::make_shared<CopyFacts>(a_facts);
+				});
+			return client;
 		}
 
 		/** @brief A native immediate-context clear outside the patched sites, run on the graph now. False lets the context record it. */
 		bool TakeNow(const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags, const Pending& a_pending)
 		{
-			if (FrameAnchors::InRun() || !Take(a_target, a_view, a_flags, a_pending))
-				return false;
-			FlushGroup(IndexOf(GroupFor(a_target)));
-			return true;
+			return !FrameAnchors::InRun() && Take(a_target, a_view, a_flags, a_pending, false);
+		}
+
+		/** @brief The flags a depth clear asks the graph for, 0 for none. A format without stencil clears depth only, whatever the flags ask. */
+		std::uint32_t DepthClearFlags(const Target& a_target, UINT a_flags)
+		{
+			std::uint32_t flags = a_flags & (D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL);
+			if (const auto build = AdoptedBuild(GroupFor(a_target))) {
+				const auto found = build->specs.find(a_target);
+				if (found != build->specs.end() && found->second->draws.size() == 1 && found->second->draws.front().flags == D3D11_CLEAR_DEPTH)
+					flags &= D3D11_CLEAR_DEPTH;
+			}
+			return flags;
+		}
+
+		/** @brief The target of a depth clear the graph can make, else empty. The clear programs only write depth 1 and stencil 0, the only values the engine uses. */
+		std::optional<Target> DepthClearTarget(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
+		{
+			if (!Usable() || ((a_flags & D3D11_CLEAR_DEPTH) && a_depth != 1.0f) || ((a_flags & D3D11_CLEAR_STENCIL) && a_stencil != 0))
+				return std::nullopt;
+			return FindDepth(a_view);
+		}
+
+		/** @brief A colour clear's pending entry. */
+		Pending ColourPending(const FLOAT a_colour[4])
+		{
+			Pending pending{ .depth = false };
+			std::memcpy(pending.colour.data(), a_colour, sizeof(pending.colour));
+			return pending;
 		}
 	}
 
@@ -1649,9 +1860,9 @@ namespace RenderGraph::Engine::Skeleton
 				if (!kHostInfo[h].dclf || kHostInfo[h].segment != a_segment)
 					continue;
 				for (std::size_t g = 0; g < kGroups; ++g) {
-					auto& group = Skel().groups[g];
-					if (!group.hosted[h].empty() && group.hostedBuilt[h].load(std::memory_order_acquire) == group.generation)
-						CommitHosted(static_cast<Group>(g), static_cast<Host>(h), true);
+					const auto build = AdoptedBuild(static_cast<Group>(g));
+					if (build && !build->hosted[h].empty() && Skel().groups[g].hostedBuilt[h].load(std::memory_order_acquire) == build->generation)
+						CommitHosted(static_cast<Group>(g), static_cast<Host>(h));
 				}
 			}
 		}
@@ -1660,10 +1871,10 @@ namespace RenderGraph::Engine::Skeleton
 	void BeginFrame()
 	{
 		auto& state = Skel();
-		if (state.setUp && FrameAnchors::IsRenderOwner())
-			CheckMadeAgain();
 		if (!state.setUp || !FrameAnchors::IsRenderOwner())
 			return;
+		// Checked at frame start rather than at a clear, because a slot can be lent within a frame.
+		ObserveTargets(false);
 		// A loading screen cut this frame short, so its waiting work is abandoned.
 		if (RenderGraph::Frame::Driver::LoadStartedThisFrame()) {
 			std::uint32_t abandoned = 0;
@@ -1683,61 +1894,62 @@ namespace RenderGraph::Engine::Skeleton
 		}
 	}
 
-	void Reserve()
-	{
-		if (!Requested())
-			return;
-		bool reserved = true;
-		for (const auto anchor : { Anchor::EngineShadowClear, Anchor::EngineFrameClear, Anchor::EngineDepthCopy })
-			reserved = FrameAnchors::Reserve(anchor) && reserved;
-		// Where the start stage holds the face sky, that sky clears the faces, so the cube group needs no anchor.
-		if (!FrameAnchors::StageStepsAt(Anchor::SkyReflections))
-			reserved = FrameAnchors::Reserve(Anchor::EngineCubeClear) && reserved;
-		if (FrameAnchors::StageStepsAt(Anchor::EngineCopy))
-			reserved = FrameAnchors::Reserve(Anchor::EngineCopy) && reserved;
-		if (!reserved)
-			logger::warn("[ORG] engine skeleton: CS_ORG_ENGINE_SKELETON=1, but not every anchor could be reserved; those clears stay on D3D11");
-	}
-
 	void Setup()
 	{
 		auto& state = Skel();
-		if (!Requested() || state.setUp)
+		if (!Engine::GraphMode() || state.setUp)
 			return;
-		if (!state.installed) {
-			logger::warn("[ORG] engine skeleton: CS_ORG_ENGINE_SKELETON=1, but its engine hooks are not installed; the engine clears with D3D11");
-			return;
-		}
-		if (!RenderGraphRuntime::Get().IsActive() || !globals::game::renderer) {
-			logger::warn("[ORG] engine skeleton: CS_ORG_ENGINE_SKELETON=1, but the render graph is not active; the engine clears with D3D11");
-			return;
-		}
-		// Everything registers here, so a clear never registers anything during play.
+		if (!state.installed)
+			RenderGraph::Fatal("engine skeleton", "its engine hooks are not installed");
+		if (!RenderGraphRuntime::Get().IsActive() || !globals::game::renderer)
+			RenderGraph::Fatal("engine skeleton", "the render graph is not active");
+		// Everything is declared here, so a clear never registers anything. A remade target registers with a revision.
+		state.programs = std::make_unique<RF::ProgramSet<ProgramKey, RasterProgram>>("EngineSkeleton.Clears", &DescribeClear);
 		for (std::size_t i = 0; i < kGroups; ++i) {
-			if (!FrameAnchors::HasEpoch(kGroupAnchors[i])) {
+			// The start stage's face sky clears the reflection faces, so the cube group has no anchor and no passes.
+			if (static_cast<Group>(i) == Group::Cube) {
 				state.groups[i].failed = true;
 				continue;
 			}
-			Build(static_cast<Group>(i));
+			state.groups[i].facts = std::make_unique<RF::Observed<GroupFacts>>(fmt::format("EngineSkeleton.{}", kGroupNames[i]));
 		}
+		for (std::size_t i = 0; i < kCopies; ++i) {
+			auto& copy = state.copies[i];
+			copy.gate = RunGate::Create(kCopyIds[i], 1);
+			if (static_cast<CopyKind>(i) == CopyKind::Depth)
+				copy.uiGate = RunGate::Create(kUiDepthCopyId, 1);
+			copy.facts = std::make_unique<RF::Observed<CopyFacts>>(fmt::format("EngineSkeleton.{}", kCopyIds[i]));
+		}
+		// The setup's clear programs join CS's setup batch, and the first revision registers every client.
+		ObserveTargets(true);
+		for (std::size_t i = 0; i < kGroups; ++i)
+			if (!state.groups[i].failed)
+				DeclareGroup(static_cast<Group>(i));
 		for (std::size_t i = 0; i < kCopies; ++i) {
 			const auto kind = static_cast<CopyKind>(i);
 			auto& copy = state.copies[i];
-			copy.failed = !FrameAnchors::HasEpoch(kCopyAnchors[i]);
-			if (!copy.failed)
-				RegisterCopy(kind);
+			copy.client = DeclareCopy(kind, CopyAt::Own);
+			// The kMAIN copy keeps its own ticket. Water draws follow it outdoors and the ImageSpace chain indoors, and one host cannot follow both.
+			if (kind == CopyKind::Depth && HostAvailable(Host::DeferredPasses)) {
+				copy.hostedClient = DeclareCopy(kind, CopyAt::Hosted);
+				copy.host = Host::DeferredPasses;
+				logger::info("[ORG] engine skeleton: in a world frame {} runs first at the {} anchor", kCopyNames[i],
+					FrameAnchors::Name(kHostInfo[HostIndex(Host::DeferredPasses)].anchor));
+			}
+			if (kind == CopyKind::Depth)
+				copy.uiClient = DeclareCopy(kind, CopyAt::Ui);
 		}
 		state.setUp = true;
 		// Native mode answers its own copies before the hook is asked.
-		if (state.copies[static_cast<std::size_t>(CopyKind::Main)].registered)
+		if (const auto* main = state.copies[static_cast<std::size_t>(CopyKind::Main)].facts->Latest(); main && main->source && main->target)
 			Tripwire::SetGuestCopyHook(&Sites::TakeContextCopy);
 		RenderGraphRuntime::SetEpochHooks({ .starting = &EpochStarting, .commit = &EpochCommit });
-		logger::info("[ORG] engine skeleton: on (CS_ORG_ENGINE_SKELETON); the engine's clears and its main depth copy are registered with the graph");
+		logger::info("[ORG] engine skeleton: on; the engine's clears and its main depth copy are declared and register with the first revision");
 	}
 
 	bool CopyPostZPrepassDepth()
 	{
-		return Requested() && RunCopy(CopyKind::Depth, true);
+		return Engine::GraphMode() && RunCopy(CopyKind::Depth, true);
 	}
 
 	void MarkInstalled()
@@ -1752,45 +1964,23 @@ namespace RenderGraph::Engine::Skeleton
 			if (!Usable() || !a_colour)
 				return false;
 			const auto target = FindColour(a_view);
-			if (!target)
-				return false;
-			Pending pending{ .depth = false };
-			std::memcpy(pending.colour.data(), a_colour, sizeof(pending.colour));
-			return Take(*target, a_view, 0, pending);
+			return target && Take(*target, a_view, 0, ColourPending(a_colour), true);
 		}
 
 		bool TakeDepthClear(ID3D11DeviceContext*, ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
 		{
-			// The clear programs only write depth 1 and stencil 0, the only values the engine uses.
-			if (!Usable() || ((a_flags & D3D11_CLEAR_DEPTH) && a_depth != 1.0f) || ((a_flags & D3D11_CLEAR_STENCIL) && a_stencil != 0))
-				return false;
-			const auto target = FindDepth(a_view);
+			const auto target = DepthClearTarget(a_view, a_flags, a_depth, a_stencil);
 			if (!target)
 				return false;
-			// A format without stencil clears depth only, whatever the flags ask.
-			std::uint32_t flags = a_flags & (D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL);
-			const auto& specs = GroupOf(GroupFor(*target)).specs;
-			if (const auto found = specs.find(*target); found != specs.end() && found->second->draws.size() == 1 && found->second->draws.front().flags == D3D11_CLEAR_DEPTH)
-				flags &= D3D11_CLEAR_DEPTH;
-			if (flags == 0)
-				return false;  // the D3D11 call does nothing either
-			return Take(*target, a_view, flags, Pending{ .depth = true, .flags = a_flags });
-		}
-
-		void Flush()
-		{
-			auto& state = Skel();
-			// Only the render owner takes clears.
-			if (!state.setUp || state.flushing || !FrameAnchors::IsRenderOwner())
-				return;
-			for (std::size_t i = 0; i < kGroups; ++i)
-				FlushGroup(i);
+			const auto flags = DepthClearFlags(*target, a_flags);
+			// No flags left: the D3D11 call does nothing either.
+			return flags && Take(*target, a_view, flags, Pending{ .depth = true, .flags = a_flags }, true);
 		}
 
 		bool TakeDepthCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source)
 		{
 			auto* renderer = globals::game::renderer;
-			if (!renderer || !Requested())
+			if (!renderer || !Engine::GraphMode())
 				return false;
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
 			if (!SameImage(depths[DepthTarget::kPOST_ZPREPASS_COPY].texture, a_destination) || !SameImage(depths[DepthTarget::kMAIN].texture, a_source))
@@ -1803,32 +1993,21 @@ namespace RenderGraph::Engine::Skeleton
 			if (!Usable() || !a_colour)
 				return false;
 			const auto target = FindColour(a_view);
-			if (!target)
-				return false;
-			Pending pending{ .depth = false };
-			std::memcpy(pending.colour.data(), a_colour, sizeof(pending.colour));
-			return TakeNow(*target, a_view, 0, pending);
+			return target && TakeNow(*target, a_view, 0, ColourPending(a_colour));
 		}
 
 		bool TakeContextDepthClear(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
 		{
-			if (!Usable() || ((a_flags & D3D11_CLEAR_DEPTH) && a_depth != 1.0f) || ((a_flags & D3D11_CLEAR_STENCIL) && a_stencil != 0))
-				return false;
-			const auto target = FindDepth(a_view);
+			const auto target = DepthClearTarget(a_view, a_flags, a_depth, a_stencil);
 			if (!target)
 				return false;
-			std::uint32_t flags = a_flags & (D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL);
-			const auto& specs = GroupOf(GroupFor(*target)).specs;
-			if (const auto found = specs.find(*target); found != specs.end() && found->second->draws.size() == 1 && found->second->draws.front().flags == D3D11_CLEAR_DEPTH)
-				flags &= D3D11_CLEAR_DEPTH;
-			if (flags == 0)
-				return false;
-			return TakeNow(*target, a_view, flags, Pending{ .depth = true, .flags = a_flags });
+			const auto flags = DepthClearFlags(*target, a_flags);
+			return flags && TakeNow(*target, a_view, flags, Pending{ .depth = true, .flags = a_flags });
 		}
 
 		bool TakeContextCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source)
 		{
-			if (!Requested() || !globals::game::renderer || !a_destination || FrameAnchors::InRun())
+			if (!Engine::GraphMode() || !globals::game::renderer || !a_destination || FrameAnchors::InRun())
 				return false;
 			for (std::size_t i = 0; i < kCopies; ++i) {
 				const auto kind = static_cast<CopyKind>(i);
@@ -1841,28 +2020,3 @@ namespace RenderGraph::Engine::Skeleton
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-#	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
-
-namespace RenderGraph::Engine::Skeleton
-{
-	void Reserve() {}
-	void Setup() {}
-	void BeginFrame() {}
-	bool CopyPostZPrepassDepth() { return false; }
-	void MarkInstalled() {}
-
-	namespace Sites
-	{
-		bool TakeColourClear(ID3D11DeviceContext*, ID3D11RenderTargetView*, const FLOAT[4]) { return false; }
-		bool TakeDepthClear(ID3D11DeviceContext*, ID3D11DepthStencilView*, UINT, FLOAT, UINT8) { return false; }
-		void Flush() {}
-		bool TakeDepthCopy(ID3D11Resource*, ID3D11Resource*) { return false; }
-		bool TakeContextColourClear(ID3D11RenderTargetView*, const FLOAT[4]) { return false; }
-		bool TakeContextDepthClear(ID3D11DepthStencilView*, UINT, FLOAT, UINT8) { return false; }
-		bool TakeContextCopy(ID3D11Resource*, ID3D11Resource*) { return false; }
-	}
-}
-
-#endif

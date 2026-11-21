@@ -53,40 +53,28 @@ namespace DCLF::Api
 	 * @brief An engine Lighting technique whose objects the feature ports.
 	 *
 	 * - propertyFlags, geometryType: objects whose property has any of these flags belong to the feature whatever technique they use.
-	 *   They are DCLF's only while the toggle is on and the geometry matches, otherwise they stay native as LOD.
+	 *   They are DCLF's only while the geometry matches, otherwise they stay native as LOD.
 	 */
 	struct TechniqueContribution
 	{
 		std::uint32_t technique = ~0u;
-		ToggleId toggle;
 		std::uint32_t objectFlags = 0;
 		std::uint64_t propertyFlags = 0;
 		std::uint8_t geometryType = 0xFF;
 		ObjectExtras extras = ObjectExtras::None;
 	};
 
-	/**
-	 * @brief While a classify input holds, a contributed technique also needs a second toggle.
-	 * Used when another CS feature draws those objects its own way, such as Terrain Blending.
-	 */
-	struct TechniqueGate
-	{
-		std::uint32_t technique = ~0u;
-		ClassifyInputId whileOn;
-		ToggleId needs;
-	};
-
 	/** @brief Mirrored node kind bit for a BSFaceGenNiNode, tested by an entry class rule. */
 	inline constexpr std::uint32_t kMirroredKindFaceGen = 1u << 7;
 
 	/**
-	 * @brief An engine geometry type whose objects the feature ports while its toggle is on.
+	 * @brief An engine geometry type whose objects the feature ports.
 	 *
-	 * - toggle: may be empty only when the contribution sets just the entry rule.
+	 * - ported: its objects are DCLF's. False only when the contribution sets just the entry rule.
 	 * - propertyFlags: limits the objects to Lighting properties with any of these flags. 0 means every object of the type.
 	 * - itemClass: the FrameValues item class for its skinless objects that have a palette block.
 	 * - moves: its objects change every frame without events, such as a particle system's bounds, so they are placed every frame.
-	 * - entry: the entry class its objects get when under a parent of entry.parentKind, whatever the toggle.
+	 * - entry: the entry class its objects get when under a parent of entry.parentKind.
 	 *   perFrame entries are classified every frame. holdsParent keeps the parent node alive as the entry's source.
 	 * - ranges: fills the index ranges to draw. Called on the capturing thread in the engine-read window, once per record capture.
 	 */
@@ -101,7 +89,7 @@ namespace DCLF::Api
 		};
 
 		std::uint8_t geometryType = 0xFF;
-		ToggleId toggle;
+		bool ported = false;
 		std::uint64_t propertyFlags = 0;
 		FrameValueItemClass itemClass{};
 		bool moves = false;
@@ -137,7 +125,6 @@ namespace DCLF::Api
 	{
 		EngineParent parent = EngineParent::Billboard;
 		ParentLeaves leaves = ParentLeaves::TurnedEffectShapes;
-		ToggleId toggle;
 	};
 
 	/** @brief An object class Core can derive but leaves native until a feature takes it. */
@@ -156,15 +143,14 @@ namespace DCLF::Api
 		// BSEffectShaderProperty objects, drawn by the Effect port.
 		Effect,
 		// Opaque effects drawn through the opaque decal group without its bias.
-		// Read as taken whatever its toggle, because the Effect port only runs while Effect is on.
 		OpaqueEffect,
 		// Shapes with a single-partition NiSkinInstance.
 		Skinned,
-		// Skins with several partitions, or a BSDismemberSkinInstance. Needs Skinned's toggle too.
+		// Skins with several partitions, or a BSDismemberSkinInstance.
 		SkinPartitions,
 		// Blended objects. This class gates the whole forward epoch.
 		Forward,
-		// Refraction objects, drawn into the refraction normals. Needs Forward's toggle too.
+		// Refraction objects, drawn into the refraction normals.
 		Refraction,
 		// Grass instance shapes, drawn from mirrored instance records as the Grass draw family.
 		Grass,
@@ -172,7 +158,7 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief Makes an object class DCLF's while the toggle is on.
+	 * @brief Makes an object class DCLF's.
 	 *
 	 * - categoryRoot: the engine root the class's objects live under, or null for none yet. Called once per frame on the render thread.
 	 *   Two classes may share a root.
@@ -180,7 +166,6 @@ namespace DCLF::Api
 	struct ObjectClassContribution
 	{
 		ObjectClass objectClass = ObjectClass::Count;
-		ToggleId toggle;
 		RE::NiNode* (*categoryRoot)() = nullptr;
 	};
 

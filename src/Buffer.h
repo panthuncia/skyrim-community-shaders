@@ -15,13 +15,6 @@ namespace Util
 	void SetResourceName(ID3D11DeviceChild* Resource, const char* Format, ...);
 }
 
-// RenderGraph/Engine/Flush/Flush.h: inside a CS stage's window (guest mode, with the flush latch), the write reaches DXVK when the window
-// closes. True when it was kept.
-namespace RenderGraph::Engine::Flush
-{
-	bool WriteBehind(ID3D11Buffer* a_buffer, const void* a_data, std::size_t a_size);
-}
-
 namespace detail
 {
 	inline void SetD3DName(ID3D11DeviceChild* resource, const std::string& name, const char* suffix = nullptr)
@@ -104,8 +97,6 @@ public:
 	{
 		auto ctx = globals::d3d::context;
 		if (desc.Usage == D3D11_USAGE_DYNAMIC) {
-			if (RenderGraph::Engine::Flush::WriteBehind(resource.get(), src_data, data_size))
-				return;
 			D3D11_MAPPED_SUBRESOURCE mapped_buffer{};
 			ZeroMemory(&mapped_buffer, sizeof(D3D11_MAPPED_SUBRESOURCE));
 			DX::ThrowIfFailed(ctx->Map(resource.get(), 0u, D3D11_MAP_WRITE_DISCARD, 0u, &mapped_buffer));

@@ -6,27 +6,46 @@
 
 #define CLOUD_PREVIEW_SLICES 8
 
-SamplerState WrapSampler : register(s0);
-SamplerState ClampSampler : register(s1);
+// Dual-target (Common/OrgResources.hlsli). The graph reads the constants from a latch.
+#include "Common/OrgResources.hlsli"
 
-Texture2D<float4> TexCloudHeight : register(t0);
-Texture2D<float3> TexCloudModeling : register(t1);
-Texture2D<float2> TexCloudProfileLUT : register(t2);
-Texture2D<float3> TexCloudAdjustmentLUT : register(t3);
+// Field: frequencyX, frequencyY, base altitude (m), top altitude (m).
+// CameraSpan: cameraX (m), cameraY (m), NDF span X (m), NDF span Y (m).
+// Shape: bottom spread, bottom spread height, bottom softness, bottom softness height.
+// Shape2: top expansion, density scale, unused, unused.
+#define CROSS_SECTION_FIELDS(M, A) \
+	M(float4, Field)               \
+	M(float4, CameraSpan)          \
+	M(float4, Shape)               \
+	M(float4, Shape2)
 
-RWTexture2D<float4> OutColor : register(u0);
+#define CROSS_SECTION_RESOURCES(X)                      \
+	X(SRV, Texture2D<float4>, TexCloudHeight, 0)        \
+	X(SRV, Texture2D<float3>, TexCloudModeling, 1)      \
+	X(SRV, Texture2D<float2>, TexCloudProfileLUT, 2)    \
+	X(SRV, Texture2D<float3>, TexCloudAdjustmentLUT, 3) \
+	X(UAV, RWTexture2D<float4>, OutColor, 0)            \
+	X(SAMPLER, SamplerState, WrapSampler, 0)            \
+	X(SAMPLER, SamplerState, ClampSampler, 1)           \
+	X(LATCH, CrossSectionConstants, CrossSectionCB, 0)
+ORG_PUSH_BLOCK(CROSS_SECTION_RESOURCES(ORG_HANDLE))
 
-cbuffer CrossSectionCB : register(b0)
-{
-	// frequencyX, frequencyY, base altitude (m), top altitude (m)
-	float4 Field;
-	// cameraX (m), cameraY (m), NDF span X (m), NDF span Y (m)
-	float4 CameraSpan;
-	// bottom spread, bottom spread height, bottom softness, bottom softness height
-	float4 Shape;
-	// top expansion, density scale, unused, unused
-	float4 Shape2;
-};
+ORG_RESOURCE(SAMPLER, SamplerState, WrapSampler, 0)
+ORG_RESOURCE(SAMPLER, SamplerState, ClampSampler, 1)
+
+ORG_RESOURCE(SRV, Texture2D<float4>, TexCloudHeight, 0)
+ORG_RESOURCE(SRV, Texture2D<float3>, TexCloudModeling, 1)
+ORG_RESOURCE(SRV, Texture2D<float2>, TexCloudProfileLUT, 2)
+ORG_RESOURCE(SRV, Texture2D<float3>, TexCloudAdjustmentLUT, 3)
+
+ORG_RESOURCE(UAV, RWTexture2D<float4>, OutColor, 0)
+
+ORG_GLOBAL_LATCH_BEGIN(CrossSectionConstants, CrossSectionCB, 0)
+CROSS_SECTION_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(CrossSectionConstants, CrossSectionCB, 0)
+#define ORG_GLOBAL_LATCH CrossSectionCB
+CROSS_SECTION_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
 
 [numthreads(8, 8, 1)] void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 	uint width, height;

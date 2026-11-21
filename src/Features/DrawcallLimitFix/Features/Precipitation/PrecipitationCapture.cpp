@@ -1,6 +1,6 @@
 // Engine-side hook for the precipitation family. DrawTriShape latches a precipitation draw and runs the anchor's pass for it at
 // once, at its place in the grouped alphas. Render thread.
-// A draw the family cannot take reaches the engine with nobody vouching for it, and the residue census counts it.
+// A draw the family cannot take reaches the engine with nobody vouching for it. Its reason is logged once.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -42,9 +42,9 @@ namespace DCLF::Features::Precipitation
 		constexpr std::uint32_t kStrictLightSlot = 3;
 
 		/** @brief The inherent refusals, each logged once per reason. */
-		Util::ReasonLog& Refusals()
+		Family::RefusalLog& Refusals()
 		{
-			static Util::ReasonLog log("[DCLF] precipitation: the engine draws", spdlog::level::warn);
+			static Family::RefusalLog log("[DCLF] precipitation: the engine draws");
 			return log;
 		}
 
@@ -60,7 +60,7 @@ namespace DCLF::Features::Precipitation
 			if (!a_rtv)
 				return 0;
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
-			Unwrap(a_rtv)->GetDesc(&desc);
+			a_rtv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -69,7 +69,7 @@ namespace DCLF::Features::Precipitation
 			if (!a_dsv)
 				return 0;
 			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
-			Unwrap(a_dsv)->GetDesc(&desc);
+			a_dsv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -275,7 +275,7 @@ namespace DCLF::Features::Precipitation
 			if (!state || !state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::Particle ||
 				!PrecipitationTechnique(state->currentPixelDescriptor))
 				return false;
-			if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !PrecipitationDraws::Available())
+			if (!FrameAnchors::IsRenderOwner() || !PrecipitationDraws::Available())
 				return false;
 			Family::BeginBatch();
 			if (!PrecipitationDraws::CanTake())

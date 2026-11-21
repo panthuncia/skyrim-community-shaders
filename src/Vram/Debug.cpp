@@ -1,5 +1,6 @@
 #include "Vram/Debug.h"
 
+#include "DxvkExports.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/DxvkOrgInterop.h"
@@ -181,11 +182,10 @@ namespace Vram::Debug
 	{
 		if (!a_dxvkD3D11)
 			return;
-		const auto configure = reinterpret_cast<PFN_dxvkConfigureMemoryDebug>(reinterpret_cast<void*>(::GetProcAddress(a_dxvkD3D11, "dxvkConfigureMemoryDebug")));
-		if (!configure) {
-			logger::info("[VRAM] dxvk_d3d11.dll has no dxvkConfigureMemoryDebug; resources without an owner are not traced to their creators");
+		// Plain D3D11 mode may run on a DXVK without it. DxvkLoader logged the missing exports.
+		const auto configure = DxvkExports::Get().configureMemoryDebug;
+		if (!configure)
 			return;
-		}
 		configure(DXVK_MEMORY_DEBUG_CREATION_STACKS);
 		logger::info("[VRAM] DXVK records every resource's creation stack");
 	}
@@ -229,11 +229,7 @@ namespace Vram::Debug
 
 	CallSite DxvkCreationSite(std::uint64_t a_cookie)
 	{
-		static const auto getStack = [] {
-			HMODULE d3d11 = ::GetModuleHandleW(L"dxvk_d3d11.dll");
-			return d3d11 ? reinterpret_cast<PFN_dxvkGetResourceCreationStack>(reinterpret_cast<void*>(::GetProcAddress(d3d11, "dxvkGetResourceCreationStack"))) :
-			               nullptr;
-		}();
+		const auto getStack = DxvkExports::Get().getResourceCreationStack;
 		if (!getStack || !globals::d3d::device)
 			return {};
 		void* frames[48];

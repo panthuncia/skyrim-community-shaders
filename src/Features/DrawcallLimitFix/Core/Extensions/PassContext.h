@@ -9,6 +9,7 @@
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include <Render/PreparedPass.h>
 #include <Render/RenderGraph/RenderGraph.h>
 #include <Resources/Buffers/VersionedBuffer.h>
 #include <Resources/VersionedTexture.h>
@@ -33,6 +34,7 @@ namespace org::services
 namespace DCLF::Draws
 {
 	struct BuildState;
+	struct GraphConditions;
 	struct Resources;
 	struct RevisionShapes;
 	struct SceneBuffers;
@@ -86,6 +88,12 @@ namespace DCLF::Api
 			assert(build);
 			return *build;
 		}
+
+		/**
+		 * @brief The conditions of the build that makes the pass. A pass that needs one at preparation or recording captures it
+		 * here, at its make, so it never reads the attached graphs' conditions.
+		 */
+		const Draws::GraphConditions& Conditions() const;
 
 		template <class T>
 		std::shared_ptr<const T> State() const
@@ -156,11 +164,12 @@ namespace DCLF::Draws
 
 	/** @brief One compute dispatch of a_program with its push constants. */
 	template <class Constants>
-	void RecordDispatch(rhi::CommandList& a_commands, const ComputeProgram& a_program, const Constants& a_constants, std::uint32_t a_groups)
+	void RecordDispatch(org::RecordingContext& a_recording, const ComputeProgram& a_program, const Constants& a_constants, std::uint32_t a_groups)
 	{
-		a_commands.BindLayout(a_program.layout->GetHandle());
-		a_commands.BindPipeline(a_program.Pipeline());
-		a_commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<std::uint32_t>(sizeof(Constants) / 4), reinterpret_cast<const std::uint32_t*>(&a_constants));
-		a_commands.Dispatch(a_groups, 1, 1);
+		auto& commands = a_recording.Commands();
+		commands.BindLayout(a_program.layout->GetHandle());
+		commands.BindPipeline(a_program.Pipeline(a_recording));
+		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<std::uint32_t>(sizeof(Constants) / 4), reinterpret_cast<const std::uint32_t*>(&a_constants));
+		commands.Dispatch(a_groups, 1, 1);
 	}
 }

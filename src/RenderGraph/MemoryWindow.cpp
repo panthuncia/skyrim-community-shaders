@@ -1,25 +1,23 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/MemoryWindow.h"
+#include "RenderGraph/MemoryWindow.h"
 
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "Vram/OrgMemory.h"
-#	include "Vram/VramLedger.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "Vram/OrgMemory.h"
+#include "Vram/VramLedger.h"
 
-#	include <DebugUI/MemoryIntrospectionWidget.h>
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/MemoryIntrospectionAPI.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <implot.h>
+#include <DebugUI/MemoryIntrospectionWidget.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/MemoryIntrospectionAPI.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <implot.h>
 
-#	include <algorithm>
-#	include <chrono>
-#	include <cctype>
-#	include <unordered_map>
-#	include <vector>
+#include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <unordered_map>
+#include <vector>
 
 namespace RenderGraphMemory
 {
@@ -217,4 +215,3 @@ namespace RenderGraphMemory
 	}
 }
 
-#endif

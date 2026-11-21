@@ -34,7 +34,6 @@ namespace DCLF::Api
 	{
 	public:
 		std::uint32_t frame = 0;
-		bool failed = false;                         // DCLF claims nothing this session
 		const SceneTables* tables = nullptr;         // the frame's installed tables
 		const PipelineCatalog* catalog = nullptr;
 	};
@@ -80,12 +79,11 @@ namespace DCLF::Api
 		bool operator==(const ViewAccumulators&) const = default;
 	};
 
-	/** @brief What a view root contribution's owned gets: the view and the active toggles. */
+	/** @brief What a view root contribution's owned gets: the view. */
 	class ViewRootFrame
 	{
 	public:
 		EngineView view;
-		const ToggleSet& toggles;
 	};
 
 	/** @brief Where a cull hidden source lists its nodes, and whether they are listed as hidden or with their current bit. */
@@ -110,7 +108,6 @@ namespace DCLF::Extensions
 	struct ViewEntry
 	{
 		bool registered = false;
-		Api::ToggleId toggle;
 		bool forwardDecals = false;
 		std::uint8_t phase = 0;      // the feature's own SetPhase bit
 		std::uint32_t viewBit = 0;   // the feature's own kView* bit
@@ -124,11 +121,10 @@ namespace DCLF::Extensions
 		Api::ViewArea area = Api::ViewArea::Target;
 		Api::ViewWithholding withholding = Api::ViewWithholding::OwnRenderers;
 		Api::ViewTargetImport targetImport = Api::ViewTargetImport::ColourWithOwnDepth;
-		bool coveredInitially = false, coveredOnFailedGraph = false;
+		bool coveredInitially = false;
 		bool (*covered)(const Api::ViewCoverage&) = nullptr;
 		void (*captureRoot)(Api::ViewRootCapture&) = nullptr;
 		void (*accumulators)(Api::ViewAccumulators&) = nullptr;
-		bool (*residueDue)() = nullptr;
 		// Per ViewPoint, the features' work in registration order.
 		std::array<std::vector<void (*)(const Api::ViewPointContext&)>, kViewPoints> work;
 	};
@@ -180,12 +176,6 @@ namespace DCLF::Extensions
 
 	/** @brief Render thread, at the frame's start. Appends every cull hidden source's nodes. The caller sorts the list. */
 	void CollectCullHidden(std::vector<std::pair<const RE::NiAVObject*, bool>>& a_list);
-
-	/** @brief Whether DCLF draws a_view under a_toggles. */
-	inline bool ViewOn(const ToggleSet& a_toggles, Api::EngineView a_view)
-	{
-		return a_toggles.On(ViewEntryOf(a_view).toggle);
-	}
 
 	/**
 	 * @brief Any thread, after InstallFeatures. The view a forward key belongs to: the view whose bits it carries, or else the plain key view.

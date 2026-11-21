@@ -5,11 +5,15 @@
 #include <span>
 
 #include "Buffer.h"
+#include "Utils/Setting.h"
 
 /** @brief Adds heightmap-based terrain shadow casting that updates dynamically with sun position. */
 struct TerrainShadows : public Feature
 {
 public:
+	/** @brief Binds the settings that shape the frame. */
+	TerrainShadows();
+
 	virtual inline std::string GetName() override { return "Terrain Shadows"; }
 	virtual std::string GetDisplayName() override { return T("feature.terrain_shadows.name", "Terrain Shadows"); }
 	/** @brief Returns the short identifier name. */
@@ -31,7 +35,7 @@ public:
 
 	struct Settings
 	{
-		bool EnableTerrainShadow = true;
+		CS::Setting<bool> EnableTerrainShadow = true;
 	} settings;
 
 	bool needPrecompute = false;

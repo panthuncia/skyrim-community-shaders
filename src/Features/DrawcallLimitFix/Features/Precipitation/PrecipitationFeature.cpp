@@ -1,4 +1,4 @@
-// Precipitation: the engine's rain and snow drawn by the render graph (CS_ORG_PRECIPITATION=1, default off).
+// Precipitation: the engine's rain and snow drawn by the render graph in graph mode.
 // The engine side is PrecipitationCapture.cpp and the graph side PrecipitationDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Precipitation/Precipitation.h"
@@ -16,10 +16,8 @@ namespace DCLF::Features::Precipitation
 		{
 			if (!Enabled())
 				return;
-			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
-			PrecipitationDraws::Reserve();
 			InstallHooks();
-			logger::info("[DCLF] precipitation: on (CS_ORG_PRECIPITATION=1): the rain and snow are drawn at the EngineDraws anchor, each draw at its place");
+			logger::info("[DCLF] precipitation: on (graph mode): the rain and snow are drawn at the EngineDraws anchor, each draw at its place");
 		}
 
 		std::string Status()
@@ -30,7 +28,7 @@ namespace DCLF::Features::Precipitation
 
 	bool Enabled()
 	{
-		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
+		static const bool enabled = ::RenderGraph::Engine::GraphMode();
 		return enabled;
 	}
 

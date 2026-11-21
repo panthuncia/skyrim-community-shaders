@@ -13,7 +13,13 @@ from pathlib import Path
 CS_MOD = re.compile(r"^[+-](CS AB .+|CommunityShaders_AIO|CommunityShaders_AIO_native|CommunityShaders_ORG_Staging|Community Shaders DXVK ORG|CS ORG DXVK Optimized)$")
 
 # What a build writes that another build must not see: moved, not copied, so a swap is instant.
-LIVE_STATE = [("ShaderCache", "ShaderCache")]  # (folder under overwrite, folder in the variant's stash)
+# (folder under overwrite, folder in the variant's stash)
+# The shader cache is shared by every variant, so it is not in this list. The V2 store keys each record by the
+# root, entry point, target, defines, compiler arguments and compiler identity. It checks every file a record
+# read, and names artifacts by their content. A variant with other shader sources updates the records it
+# touches, and switching back costs preprocessing, not compiling. A stash per variant made every new stage
+# name start empty and compile everything. Old stashes under variants/<name>/ShaderCache are no longer read.
+LIVE_STATE = []
 
 
 class Mo2Error(Exception):

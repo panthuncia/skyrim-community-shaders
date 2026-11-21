@@ -1,4 +1,4 @@
-#include "Features/DrawcallLimitFix/Core/Runtime/SceneExecutor.h"
+#include "RenderGraph/Async/Executor.h"
 #include <ORGModuleServices/Async/StateGraph.h>
 
 #include <cassert>
@@ -20,7 +20,7 @@ void Until(Predicate predicate)
 int main()
 {
 	using Graph = org::async::AsyncStateGraph;
-	using Executor = DCLF::SceneExecutor;
+	using Executor = RenderGraph::Frame::Executor;
 	using Result = Graph::ArtifactBuildResult;
 	using org::async::ArtifactReadiness;
 	auto scheduler = std::make_shared<Executor>();

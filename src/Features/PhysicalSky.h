@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Utils/AsyncShaderSet.h"
+#include "Utils/Setting.h"
 #include "Utils/TexturePreview.h"
 
 #include "PhysicalSky/Aerosol.h"
@@ -13,6 +14,9 @@
 
 struct PhysicalSky final : public Feature
 {
+	/** @brief Binds the toggles to their frame variables. The global is the only instance. */
+	PhysicalSky();
+
 	////////////////////////////////////////////////// Boilerplate
 
 	// Metadata
@@ -44,13 +48,20 @@ struct PhysicalSky final : public Feature
 	void LoadSettings(json& o_json) override;
 	void SaveSettings(json& o_json) override;
 
-	/** @brief Whether Physical Sky is loaded, enabled, and not owned by Effects 11 (unless handed back through the Scene Manager). */
+	/**
+	* @brief Whether Physical Sky is loaded, enabled, and not owned by Effects 11 (unless handed back through the Scene Manager).
+	* On the render graph "enabled" is the adopted revision's, so the frame and the graph's clients switch together.
+	*/
 	bool IsActive() const;
 	/** @brief Whether Physical Sky rendered this frame. */
 	bool IsRendering() const { return loaded && cbData.enabled; }
-	/** @brief Whether volumetric clouds are enabled and their screen targets have not failed to allocate. */
-	bool VolumetricCloudsEnabled() const { return settings.enableVolumetricClouds && !volumetricScreenResourcesFailed; }
-
+	/** @brief Whether volumetric clouds are enabled (the adopted revision's on the render graph) and their screen targets have not failed to allocate. */
+	bool VolumetricCloudsEnabled() const;
+	/**
+	* @brief Whether the sky would render this frame if it were enabled: everything Reset checks but the toggle.
+	* Atmosphere and Fog's composite key reads it with the toggle. Render thread.
+	*/
+	bool RendersWhenEnabled() const { return rendersWhenEnabled; }
 	void DrawSettings() override;
 	bool HasDebugSection() const override { return true; }
 	void DrawDebugSection() override;
@@ -91,7 +102,7 @@ struct PhysicalSky final : public Feature
 	void Prepass() override;
 	void GenerateLuts();
 	void AccumShadow();
-	inline void PostPostLoad() override { Hooks::Install(); }
+	void PostPostLoad() override;
 
 	////////////////////////////////////////////////// Feature Specific Data
 	constexpr static std::wstring_view kShaderDir = L"Data\\Shaders\\PhysicalSky";
@@ -129,9 +140,10 @@ struct PhysicalSky final : public Feature
 	constexpr static CloudQualityPreset kCloudQualityMedium = { 10.f, 8.f, 0.8f, 1, true, false, true, true };
 	constexpr static CloudQualityPreset kCloudQualityHigh = { 32.f, 8.f, 0.5f, 1, false, false, false, true };
 
+	/** @brief The CPU settings. The toggles change which graph clients and textures exist, so they are CS::Setting. */
 	struct Settings
 	{
-		bool enabled = true;
+		CS::Setting<bool> enabled = true;
 		bool enableAllExteriorCells = false;
 		bool forceEnableAllInteriorCells = false;
 		bool overrideDirLight = true;
@@ -195,7 +207,7 @@ struct PhysicalSky final : public Feature
 		float silverLiningSpread = 0.f;
 
 		// VOLUMETRIC CLOUDS
-		bool enableVolumetricClouds = false;
+		CS::Setting<bool> enableVolumetricClouds = false;
 		float lightningIntensity = 0.f;  // zero restores vanilla weather lightning
 		struct LightningSettings
 		{
@@ -326,6 +338,8 @@ struct PhysicalSky final : public Feature
 	bool diskPhaseValid = false;
 	/** @brief Rebuilds normalized finite-disc scattering responses when angular radii or particle optics change. */
 	void UpdateDiskPhaseLut();
+	/** @brief The disk phase LUT's constants (DiskPhaseLut.cs.hlsl's DiskPhaseConstants). */
+	std::array<float, 12> DiskPhaseParameters() const;
 	eastl::unique_ptr<Texture2D> texMsLut = nullptr;  // multiscattering
 	eastl::unique_ptr<Texture2D> texSvLut = nullptr;  // sky view
 	eastl::unique_ptr<Texture2D> texSkyTail = nullptr;
@@ -659,11 +673,15 @@ struct PhysicalSky final : public Feature
 		kMainViewAndCubemap
 	};
 	void SetupVolumetricResources();
-	/// Allocates the ambient transport volumes when the grid is first used.
+	/// Allocates the ambient transport volumes when the grid is first used. On the render graph they are made at setup.
 	bool EnsureCloudAmbientTransportResources();
-	/** @brief Creates the full-resolution cloud targets on first use; on failure disables volumetric clouds for the session. @return True when they exist. */
+	/**
+	* @brief Creates the full-resolution cloud targets on first use; on failure disables volumetric clouds for the session. @return True when they exist.
+	* On the render graph they are made at SetupVolumetricResources, declared one texel while the clouds are off (ORGVolumetricClouds).
+	*/
 	bool EnsureVolumetricScreenResources();
 	bool volumetricScreenResourcesFailed = false;
+	bool rendersWhenEnabled = false;  ///< Reset's checks but the toggle, for RendersWhenEnabled
 	/** @brief Clears every cloud output to white transmittance and black luminance. */
 	void ClearVolumetricToNeutral();
 	bool volumetricNeutralCleared = false;  ///< Disabled-cloud targets already hold neutral values.

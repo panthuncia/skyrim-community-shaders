@@ -413,7 +413,17 @@ namespace DCLF
 		std::uint64_t bytesCopied = 0;
 	};
 
-	template <class T, std::size_t kChunk>
+	/** @brief How a KeptChunkStore tells that a view shares a chunk. */
+	enum class KeptSharing : std::uint8_t
+	{
+		// By the chunk's use_count. A replaced chunk is retired until every view lets go, then reused.
+		kByCount,
+		// By a stamp that Freeze moves after each copy is taken. Only the writer decides sharing, never a count another thread
+		// moves. Nothing is retired or reused, so a replaced chunk and the owners its elements hold go with their last holder.
+		kByStamp,
+	};
+
+	template <class T, std::size_t kChunk, KeptSharing kSharing>
 	class KeptChunkStore;
 
 	/**
@@ -548,7 +558,7 @@ namespace DCLF
 		}
 
 	private:
-		template <class, std::size_t>
+		template <class, std::size_t, KeptSharing>
 		friend class KeptChunkStore;
 
 		std::size_t Mask() const { return ChunkElements() - 1; }
@@ -683,12 +693,15 @@ namespace DCLF
 
 	/**
 	 * @brief A kept array's own elements, used like a std::vector. A write first takes private copies of the chunk table and chunk if a view shares them,
-	 * so views never change. Replaced chunks are retired until every view releases them, then reused.
+	 * so views never change. With kByCount, replaced chunks are retired until every view releases them, then reused.
+	 * With kByStamp, a copy of the store is a view: call Freeze after taking one. Writes then go through Mutable(index), and reads of a
+	 * non-const store never copy.
 	 * Single-threaded, except that after Prepare over a range, writes to distinct elements in it may come from many threads.
 	 */
-	template <class T, std::size_t kChunk>
+	template <class T, std::size_t kChunk, KeptSharing kSharing = KeptSharing::kByCount>
 	class KeptChunkStore
 	{
+		static constexpr bool kByStamp = kSharing == KeptSharing::kByStamp;
 		// Functions, not constants, because a kept array may be declared while T is incomplete.
 		static constexpr std::size_t Length()
 		{
@@ -703,14 +716,21 @@ namespace DCLF
 	public:
 		KeptChunkStore() = default;
 		// A copy shares the elements but not the chunks kept for reuse, which each store owns.
+		// With kByStamp it holds every chunk as shared, and keeps the counts.
 		KeptChunkStore(const KeptChunkStore& a_other) :
-			table(a_other.table) {}
+			table(a_other.table)
+		{
+			if constexpr (kByStamp)
+				CopyStamps(a_other);
+		}
 		KeptChunkStore& operator=(const KeptChunkStore& a_other)
 		{
 			if (this != &a_other) {
 				table = a_other.table;
 				free.clear();
 				retired.clear();
+				if constexpr (kByStamp)
+					CopyStamps(a_other);
 			}
 			return *this;
 		}
@@ -720,22 +740,53 @@ namespace DCLF
 		std::size_t size() const { return table->count; }
 		bool empty() const { return !table->count; }
 		const T& operator[](std::size_t a_index) const { return (*table)[a_index]; }
-		T& operator[](std::size_t a_index) { return Own(a_index >> Shift())[a_index & Mask()]; }
+		T& operator[](std::size_t a_index)
+			requires(!kByStamp)
+		{
+			return Mutable(a_index);
+		}
 		const T& back() const { return (*table)[table->count - 1]; }
-		T& back() { return (*this)[table->count - 1]; }
+		T& back()
+			requires(!kByStamp)
+		{
+			return Mutable(table->count - 1);
+		}
 		const KeptChunks<T>& Get() const { return *table; }
 		KeptChunkStore& Mutable() { return *this; }
+		/** @brief Element a_index for writing, its chunk copied first if a view shares it. */
+		T& Mutable(std::size_t a_index) { return Own(a_index >> Shift())[a_index & Mask()]; }
+		/** @brief kByStamp, after a copy was taken: every chunk and the table are shared from here on. */
+		void Freeze()
+			requires(kByStamp)
+		{
+			++stamp;
+		}
+		/** @brief kByStamp: every write so far, a copy's included. Equal while nothing was written. */
+		std::uint64_t Writes() const
+			requires(kByStamp)
+		{
+			return writes;
+		}
 
 		void resize(std::size_t a_count) { resize(a_count, T{}); }
 		void resize(std::size_t a_count, const T& a_value)
 		{
 			OwnTable();
 			auto& t = *table;
+			if constexpr (kByStamp)
+				++writes;
 			if (a_count <= t.count) {
 				const std::size_t keep = (a_count + Mask()) >> Shift();
+				// kByStamp resets the dropped tail of the last kept chunk, so the owners its elements hold go now.
+				if constexpr (kByStamp) {
+					if (const std::size_t used = a_count & Mask(); used && a_count < t.count) {
+						auto& tail = Own(a_count >> Shift());
+						std::fill(tail.begin() + static_cast<std::ptrdiff_t>(used), tail.begin() + static_cast<std::ptrdiff_t>(std::min(Length(), used + (t.count - a_count))), T{});
+					}
+				}
 				while (t.chunks.size() > keep) {
 					Drop(std::move(t.chunks.back()));
-					t.chunks.pop_back();
+					PopChunk();
 				}
 				t.count = a_count;
 				return;
@@ -749,7 +800,7 @@ namespace DCLF
 			while (t.chunks.size() < need) {
 				auto chunk = Take();
 				chunk->assign(Length(), a_value);
-				t.chunks.push_back(std::move(chunk));
+				PushChunk(std::move(chunk));
 			}
 			peakChunks = std::max(peakChunks, t.chunks.size());
 			t.count = a_count;
@@ -761,7 +812,7 @@ namespace DCLF
 			if (!(t.count & Mask())) {
 				auto chunk = Take();
 				chunk->resize(Length());
-				t.chunks.push_back(std::move(chunk));
+				PushChunk(std::move(chunk));
 				peakChunks = std::max(peakChunks, t.chunks.size());
 			}
 			Own(t.count >> Shift())[t.count & Mask()] = a_value;
@@ -771,9 +822,11 @@ namespace DCLF
 		{
 			OwnTable();
 			auto& t = *table;
+			if constexpr (kByStamp)
+				++writes;
 			if (!(--t.count & Mask())) {
 				Drop(std::move(t.chunks.back()));
-				t.chunks.pop_back();
+				PopChunk();
 			}
 		}
 		void clear() { resize(0); }
@@ -808,11 +861,37 @@ namespace DCLF
 		const KeptCopyStats& Stats() const { return stats; }
 
 	private:
+		/** @brief kByStamp: a copy holds every chunk and the table as shared, and keeps the counts. */
+		void CopyStamps(const KeptChunkStore& a_other)
+		{
+			stamps.assign(a_other.stamps.size(), 0);
+			tableStamp = 0;
+			stamp = 1;
+			writes = a_other.writes;
+			stats = a_other.stats;
+		}
+		void PushChunk(std::shared_ptr<Chunk>&& a_chunk)
+		{
+			table->chunks.push_back(std::move(a_chunk));
+			if constexpr (kByStamp)
+				stamps.push_back(stamp);
+		}
+		void PopChunk()
+		{
+			table->chunks.pop_back();
+			if constexpr (kByStamp)
+				stamps.pop_back();
+		}
 		/** @brief The chunk table, copied first if a view shares it. */
 		void OwnTable()
 		{
-			if (table.use_count() == 1) [[likely]]
+			if constexpr (kByStamp) {
+				if (tableStamp == stamp) [[likely]]
+					return;
+				tableStamp = stamp;
+			} else if (table.use_count() == 1) [[likely]] {
 				return;
+			}
 			table = std::make_shared<KeptChunks<T>>(*table);
 			++stats.tableCopies;
 		}
@@ -821,6 +900,16 @@ namespace DCLF
 		{
 			OwnTable();
 			auto& chunk = table->chunks[a_chunk];
+			if constexpr (kByStamp) {
+				++writes;
+				if (stamps[a_chunk] != stamp) {
+					chunk = std::make_shared<Chunk>(*chunk);
+					stamps[a_chunk] = stamp;
+					++stats.chunkCopies;
+					stats.bytesCopied += Length() * sizeof(T);
+				}
+				return *chunk;
+			}
 			if (chunk.use_count() == 1) [[likely]] {
 				// A view that just let go read it before this write.
 				std::atomic_thread_fence(std::memory_order_acquire);
@@ -837,7 +926,7 @@ namespace DCLF
 		/** @brief A chunk of this store's own, reused or new. The caller sets its contents. */
 		std::shared_ptr<Chunk> Take()
 		{
-			if (reuseKeptStorage && !free.empty()) {
+			if (!kByStamp && reuseKeptStorage && !free.empty()) {
 				auto chunk = std::move(free.back());
 				free.pop_back();
 				++stats.chunkReuses;
@@ -849,7 +938,7 @@ namespace DCLF
 		/** @brief Gives up a chunk. Reusable now if no view holds it, otherwise at BeginBuild once none does. */
 		void Drop(std::shared_ptr<Chunk>&& a_chunk)
 		{
-			if (!reuseKeptStorage || !a_chunk)
+			if (kByStamp || !reuseKeptStorage || !a_chunk)
 				return;
 			if (a_chunk.use_count() != 1)
 				retired.push_back(std::move(a_chunk));
@@ -862,6 +951,10 @@ namespace DCLF
 		std::vector<std::shared_ptr<Chunk>> retired;  // replaced while a view held them. Freed here, never on a view's thread.
 		std::size_t peakChunks = 0;                   // the most the table had, which sets what is kept for reuse
 		KeptCopyStats stats;
+		// kByStamp only. Each chunk's stamp and the table's: a part is shared when its stamp is not the current one.
+		std::vector<std::uint64_t> stamps;  // by chunk
+		std::uint64_t tableStamp = 1, stamp = 1;
+		std::uint64_t writes = 0;
 	};
 
 	/**

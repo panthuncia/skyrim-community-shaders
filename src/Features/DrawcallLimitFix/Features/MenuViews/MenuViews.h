@@ -1,10 +1,8 @@
 #pragma once
 
-// MenuViews (CS_ORG_MENU3D, CS_ORG_MAP; docs/development/p5/menus.md): the engine's menu scene renders as DCLF views of their own.
+// MenuViews (graph mode; docs/development/p5/menus.md): the engine's menu scene renders as DCLF views of their own.
 // Menu scenes are UI3DSceneManager::Render's models and the local map. The race menu and world map are the main world render with
 // another camera, which DCLF's main view already draws.
-// This stage is a diagnostic probe. It logs what a view of each scene would need and withholds nothing, so the engine draws every
-// menu scene and no graph client is registered.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -28,24 +26,10 @@ namespace DCLF::Features::MenuViews
 		inline constexpr Engine::Offset kLocalMapWaterSubmit{ { 16335, 0x433 }, { 16094, 0x430 } };
 	}
 
-	/** @brief The menu scene a SubmitAccumulator call renders. */
-	enum class MenuScene : std::uint8_t
-	{
-		Menu3D,         // UI3DSceneManager::Render: a light scheme's model (RE::INTERFACE_LIGHT_SCHEME)
-		LocalMap,       // LocalMapRenderer::Render's land and objects pass
-		LocalMapWater,  // its water pass (render mode 0x13)
-		Count
-	};
-
 	Api::Feature Feature();
 
-	/** @brief Whether CS_ORG_MENU3D=1. Read once. */
+	/** @brief Whether the menu 3D scene is the family's, which is graph mode. Read once. */
 	bool Menu3DEnabled();
-	/** @brief Whether CS_ORG_MAP=1. Read once. */
+	/** @brief Whether the local map is the family's, which is graph mode. Read once. */
 	bool MapEnabled();
-
-	void InstallHooks();
-	void PreflightHooks();
-	/** @brief Takes the probe's counters since the last report. */
-	std::string Report();
 }

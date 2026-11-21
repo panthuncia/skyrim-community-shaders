@@ -141,9 +141,4 @@ namespace DCLF::Features::TreeWind
 	{
 		return Extensions::FrameValuePoolIndex(pool);
 	}
-
-	const std::vector<TreeStatic>* SeedsIfDone(bool a_wait)
-	{
-		return FrameValues::Get().ProducerDone(a_wait) ? &seeds.Get() : nullptr;
-	}
 }

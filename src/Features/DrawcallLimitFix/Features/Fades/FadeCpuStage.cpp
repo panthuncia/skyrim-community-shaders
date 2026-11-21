@@ -589,7 +589,7 @@ namespace DCLF::Features::Fades
 			TracyCZoneValue(fPrep, steps);
 			TracyCZoneEnd(fPrep);
 			TracyCZoneN(fSteps, "CS.DCLF.FadeCpuStage.Steps", true);
-			SceneScheduler::Executor().ParallelFor("CS.DCLF.FadeCpuStage.Roots", steps, kRootGrain, [&](std::size_t a_begin, std::size_t a_end) {
+			::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.FadeCpuStage.Roots", steps, kRootGrain, [&](std::size_t a_begin, std::size_t a_end) {
 				const std::size_t chunk = a_begin / kRootGrain;
 				StepContext context{ *input, list, rows, seeds, *storage, states, chunkEvents[chunk], chunkMarked[chunk], animated };
 				for (std::size_t r = a_begin; r < a_end; ++r)

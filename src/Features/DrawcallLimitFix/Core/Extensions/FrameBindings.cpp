@@ -5,8 +5,10 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/ImageRegistry.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
-#include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Targets/EngineTargetSet.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/PublishedResources.h"
@@ -85,15 +87,23 @@ namespace DCLF::Extensions
 
 	namespace
 	{
-		/** @brief Every frame texture's graph ids once each. With a_withView, only textures that have a view. */
-		std::vector<std::string_view> GraphIdsOf(bool a_withView)
+		/**
+		 * @brief Every frame texture's graph ids once each, for the colour passes. With a_faces, the reflection faces' ids: a texture's
+		 * own faces ids when it has them (per-epoch views), else its graph ids if it has a view.
+		 */
+		std::vector<std::string_view> GraphIdsOf(bool a_faces)
 		{
 			std::vector<std::string_view> ids;
+			const auto add = [&](const auto& a_ids) {
+				for (const auto id : a_ids)
+					if (!id.empty() && std::ranges::find(ids, id) == ids.end())
+						ids.push_back(id);
+			};
 			for (const auto& texture : RegisteredFrameTextures())
-				if (!a_withView || texture.view)
-					for (const auto id : texture.graphResources)
-						if (!id.empty() && std::ranges::find(ids, id) == ids.end())
-							ids.push_back(id);
+				if (a_faces && texture.FacesOwnIds())
+					add(texture.facesGraphResources);
+				else if (!a_faces || texture.view)
+					add(texture.graphResources);
 			return ids;
 		}
 
@@ -137,9 +147,11 @@ namespace DCLF::Extensions
 	{
 		const org::SrvView view{ .variant = PublishedResources::ShaderResourceVariant(a_id) };
 		DeclaredReads::Entry entry{ .id = std::string(a_id), .view = a_builder.ShaderResource(org::ResourceIdentifier(a_id), view).View() };
-		// The index of the view just declared, which the commit latches.
+		// The index of the view just declared, which the commit latches. A versioned slot's index follows its versions, which change
+		// only with a frame revision that records its readers against the new one (plan step 10b), so the build's index is no
+		// reference for it. ORG checks those readers' version currency instead.
 		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
-		if (!PublishedResources::ShaderResourceIndex(a_id, entry.latched))
+		if (PublishedResources::IsVersioned(a_id) || !PublishedResources::ShaderResourceIndex(a_id, entry.latched))
 			entry.latched = UINT32_MAX;
 		if (!a_out.entries)
 			a_out.entries = std::make_shared<std::vector<DeclaredReads::Entry>>();
@@ -198,6 +210,62 @@ namespace DCLF::Extensions
 		s_declared.store(std::move(next), std::memory_order_release);
 	}
 
+	bool DeclaredTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, std::span<const std::string_view> a_ids,
+		std::uint32_t& a_index)
+	{
+		// Only an id a graph build declared, so the graph orders the read after its writes.
+		const auto declared = s_declared.load(std::memory_order_acquire);
+		std::string_view read;
+		for (const auto id : a_ids) {
+			if (id.empty() || !declared || std::ranges::find(*declared, id) == declared->end() || !PublishedResources::IsPublished(id))
+				continue;
+			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
+			if (PublishedResources::ShaderResourceIndex(id, a_index)) {
+				read = id;
+				break;
+			}
+		}
+		// Log each change once per reader and register. Commits run only on the render thread.
+		constexpr auto kReaders = static_cast<std::size_t>(GraphTextureReader::Count);
+		static std::array<std::array<std::string_view, kTextureRegisters>, kReaders> s_logged{};
+		static std::array<std::array<bool, kTextureRegisters>, kReaders> s_seen{};
+		const auto reader = static_cast<std::size_t>(a_reader);
+		const auto slot = a_register < kTextureRegisters ? a_register : 0;
+		if (!s_seen[reader][slot] || s_logged[reader][slot] != read) {
+			s_seen[reader][slot] = true;
+			s_logged[reader][slot] = read;
+			const auto who = GraphTextureWho(a_reader, a_register, a_name);
+			if (read.empty())
+				logger::info("[DCLF] {} reads the null texture until its own graph resource is declared", who);
+			else
+				logger::info("[DCLF] {} reads its own graph resource '{}' (descriptor {})", who, read, a_index);
+		}
+		return !read.empty();
+	}
+
+	namespace
+	{
+		/** @brief Logs each path change once per reader and register, and returns whether a graph resource is read. Render thread. */
+		bool NoteGraphTextureRead(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, std::string_view a_read, std::uint32_t a_index)
+		{
+			constexpr auto kReaders = static_cast<std::size_t>(GraphTextureReader::Count);
+			static std::array<std::array<std::string_view, kTextureRegisters>, kReaders> s_logged{};
+			static std::array<std::array<bool, kTextureRegisters>, kReaders> s_seen{};
+			const auto reader = static_cast<std::size_t>(a_reader);
+			const auto slot = a_register < kTextureRegisters ? a_register : 0;
+			if (!s_seen[reader][slot] || s_logged[reader][slot] != a_read) {
+				s_seen[reader][slot] = true;
+				s_logged[reader][slot] = a_read;
+				const auto who = GraphTextureWho(a_reader, a_register, a_name);
+				if (a_read.empty())
+					logger::info("[DCLF] {} reads its D3D11 view", who);
+				else
+					logger::info("[DCLF] {} reads the graph resource '{}' (descriptor {})", who, a_read, a_index);
+			}
+			return !a_read.empty();
+		}
+	}
+
 	bool GraphTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, const ID3D11ShaderResourceView* a_view,
 		std::span<const std::string_view> a_ids, std::uint32_t& a_index)
 	{
@@ -216,23 +284,30 @@ namespace DCLF::Extensions
 				break;
 			}
 		}
-		// Log each path change once per reader and register. Commits run only on the render thread.
-		constexpr auto kReaders = static_cast<std::size_t>(GraphTextureReader::Count);
-		static std::array<std::array<std::string_view, kTextureRegisters>, kReaders> s_logged{};
-		static std::array<std::array<bool, kTextureRegisters>, kReaders> s_seen{};
-		const auto reader = static_cast<std::size_t>(a_reader);
-		const auto slot = a_register < kTextureRegisters ? a_register : 0;
-		if (!s_seen[reader][slot] || s_logged[reader][slot] != read) {
-			s_seen[reader][slot] = true;
-			s_logged[reader][slot] = read;
-			const auto who = GraphTextureWho(a_reader, a_register, a_name);
-			if (read.empty())
-				logger::info("[DCLF] {} reads its D3D11 view", who);
-			else
-				logger::info("[DCLF] {} reads the graph resource '{}' (descriptor {})", who, read, a_index);
-		}
-		return !read.empty();
+		return NoteGraphTextureRead(a_reader, a_register, a_name, read, a_index);
 	}
+
+	bool FrameTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, const FrameTextureEntry& a_texture, const ID3D11ShaderResourceView* a_view,
+		std::uint32_t& a_index)
+	{
+		if (!a_texture.graphId)
+			return GraphTextureIndex(a_reader, a_register, a_texture.name, a_view, a_texture.graphResources, a_index);
+		// Only an id the registration lists, which is a static string, so the log may keep it.
+		const std::string_view asked = a_texture.graphId();
+		const auto listed = asked.empty() ? a_texture.graphResources.end() : std::ranges::find(a_texture.graphResources, asked);
+		std::string_view read;
+		if (listed != a_texture.graphResources.end()) {
+			const auto id = *listed;
+			const auto declared = s_declared.load(std::memory_order_acquire);
+			if (declared && std::ranges::find(*declared, id) != declared->end()) {
+				RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
+				if (PublishedResources::ShaderResourceIndex(id, a_index))
+					read = id;
+			}
+		}
+		return NoteGraphTextureRead(a_reader, a_register, a_texture.name, read, a_index);
+	}
+
 
 	namespace
 	{
@@ -297,19 +372,8 @@ namespace DCLF::Extensions
 		auto* view = RenderGraph::Engine::Tripwire::Unwrap(a_view);
 		if (!view)
 			view = a_view;
-		if (GraphTextureIndex(a_reader, a_register, a_name, view, a_ids, a_index))
-			return true;
-		// Publish the target once per new view. The first publish rebuilds every graph, and the next build declares it.
-		constexpr auto kReaders = static_cast<std::size_t>(GraphTextureReader::Count);
-		static std::array<std::array<const void*, kTextureRegisters>, kReaders> s_served{};
-		auto& served = s_served[static_cast<std::size_t>(a_reader)][a_register < kTextureRegisters ? a_register : 0];
-		if (served != view && RenderGraph::Engine::Targets::Enabled()) {
-			served = view;
-			winrt::com_ptr<ID3D11Resource> resource;
-			view->GetResource(resource.put());
-			RenderGraph::Engine::Targets::Find(resource.get());
-		}
-		return false;
+		// The engine target set publishes every target under its id at setup, so nothing is published here.
+		return GraphTextureIndex(a_reader, a_register, a_name, view, a_ids, a_index);
 	}
 
 	std::span<const std::string_view> PrecipitationOcclusionGraphTextureIds()
@@ -349,13 +413,20 @@ namespace DCLF::Extensions
 		served = view;
 		// Skylighting's twin map swapped into the field is not the engine's map. It has its own id.
 		// Publishing it under this id would replace the engine map's slot whenever the two take turns.
+		namespace Targets = RenderGraph::Engine::Targets;
+		const auto fieldTarget = RenderGraph::Engine::Tripwire::IsHandle(field) ? Targets::Identify(static_cast<const ID3D11View*>(field)) : std::nullopt;
+		const bool engineMap = fieldTarget && fieldTarget->kind == Targets::Kind::Depth && fieldTarget->index == static_cast<std::uint16_t>(target);
 		winrt::com_ptr<ID3D11Resource> resource;
 		view->GetResource(resource.put());
 		DxvkOrgInteropResourceInfo info{};
-		if (resource && !RenderGraph::Engine::Targets::Find(resource.get()) && RenderGraphRuntime::Get().DescribeResource(resource.get(), info) &&
-			info.kind == DXVK_ORG_INTEROP_RESOURCE_IMAGE && RenderGraph::MadeImageOf(reinterpret_cast<std::uint64_t>(info.image.image)).resource)
+		const auto madeImage = [&] {
+			const auto entry = RenderGraph::ImageRegistry::Find(reinterpret_cast<std::uint64_t>(info.image.image));
+			return entry && entry->kind == RenderGraph::ImageRegistry::Kind::Made && entry->resource;
+		};
+		if (resource && !engineMap && RenderGraphRuntime::Get().DescribeResource(resource.get(), info) &&
+			info.kind == DXVK_ORG_INTEROP_RESOURCE_IMAGE && madeImage())
 			return false;
-		const auto import = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(target));
+		const auto import = FrameAnchors::EngineTexture(FrameAnchors::Depth(static_cast<std::uint32_t>(target)));
 		if (!import)
 			return false;
 		// Engine::Targets publishes ORG's own target under this id. Otherwise publish the import here, again with each new view.

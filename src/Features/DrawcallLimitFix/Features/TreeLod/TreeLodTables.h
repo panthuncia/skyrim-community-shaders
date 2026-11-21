@@ -5,12 +5,12 @@
 // Tree LOD's scene resources: the TreeInstances tables, the cull program and the counts' readbacks. Included by the sources that use them.
 
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
-#include "Features/DrawcallLimitFix/Core/Render/Readback/RunRanges.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeInstancesLayout.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 
 #include "RenderGraph/ComputeProgram.h"
 #include <ORGModuleServices/GrowableBufferTypes.h>
+#include <Render/RunReadback.h>
 #include <Resources/Buffers/Buffer.h>
 
 #include <array>
@@ -38,12 +38,11 @@ namespace DCLF::Features::TreeLod
 	};
 	inline constexpr std::uint32_t kTreeLodCullConstantWords = sizeof(TreeLodCullConstants) / 4;
 
-	/** @brief Tree LOD cull counts, read back per run range on the graph host's thread. */
+	/** @brief Tree LOD cull counts, read back per run region on the graph host's thread. */
 	struct TreeLodCounts
 	{
-		Draws::RunRanges ranges{ Draws::kReadbackRanges };
-		std::vector<std::shared_ptr<org::Buffer>> readback;  // by range
-		std::vector<std::uint8_t> filled;                    // by range: its copy holds a frame's counts
+		std::shared_ptr<org::RunReadback> readback;  // the visible header, then the stage ring, per stable run
+		std::vector<std::uint8_t> filled;            // by region: its copy holds a frame's counts
 		std::atomic<std::uint64_t> frames{ 0 }, phaseOne{ 0 }, retests{ 0 }, phaseTwo{ 0 };
 		std::uint32_t stagesJudged = 0;
 		std::uint32_t probeLogged = 0;

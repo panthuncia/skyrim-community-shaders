@@ -7,7 +7,7 @@
 
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Pipeline/StateConversion.h"
-#include "RenderGraph/ProgramCache.h"
+#include "RenderGraph/ProgramService.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
@@ -17,8 +17,6 @@
 #include <atomic>
 #include <bit>
 #include <charconv>
-#include <chrono>
-#include <condition_variable>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -33,7 +31,8 @@
 namespace DCLF::Family
 {
 	namespace Pipeline = ::RenderGraph::Engine::Pipeline;
-	namespace Detail = ::RenderGraph::ProgramCacheDetail;
+	namespace ProgramsDetail = ::RenderGraph::Programs;
+	namespace Service = ::RenderGraph::Programs::Detail;
 
 	namespace
 	{
@@ -43,21 +42,6 @@ namespace DCLF::Family
 		constexpr std::size_t kKeyWords = 6 + 4 + kBlendWords + kDepthStencilWords + kRasterWords;
 		// Cap the keys per family, so a broken file or a mod changing states every frame cannot make startup build without bound.
 		constexpr std::size_t kMaxManifestKeys = 512;
-		// How long a draw waits for a prebuilt program before it gives up with an error.
-		constexpr auto kLongestWait = std::chrono::seconds(60);
-
-		enum class Status : std::uint8_t
-		{
-			Building,
-			Ready,
-			Failed,
-		};
-
-		struct Entry
-		{
-			std::shared_ptr<const RasterProgram> program;  // set under Impl::mutex with status
-			Status status = Status::Building;
-		};
 
 		/** @brief The family's name as a manifest tag, with no spaces or tabs. */
 		std::string TagOf(std::string_view a_family)
@@ -232,9 +216,10 @@ namespace DCLF::Family
 				return set.size() < kMaxManifestKeys && set.insert(a_key).second;
 			}
 
-			/** @brief Writes every key to a temporary file, then renames it over the manifest. */
+			/** @brief Writes every key to a temporary file, then renames it over the manifest. One save at a time: the pool runs jobs at once. */
 			void Save()
 			{
+				std::scoped_lock saving(saveMutex);
 				std::string text;
 				{
 					std::scoped_lock lock(mutex);
@@ -306,6 +291,7 @@ namespace DCLF::Family
 			}
 
 			std::mutex mutex;
+			std::mutex saveMutex;
 			bool loaded = false;
 			std::map<std::string, std::set<ProgramKey>> keys;
 		};
@@ -316,15 +302,10 @@ namespace DCLF::Family
 		std::string family;
 		std::string tag;
 		ProgramSource source;
-		// The family's shader object, from the first descriptor CS loaded or the first draw. The engine's shaders live for the session.
-		std::atomic<const RE::BSShader*> shader{ nullptr };
-		std::mutex mutex;
-		std::condition_variable changed;  // an entry left Building
-		std::map<ProgramKey, std::shared_ptr<Entry>> entries;
-		std::atomic<std::size_t> built{ 0 };
-		std::atomic<bool> prebuildAsked{ false };
-		std::atomic<bool> prebuilt{ false };
-		bool waitLogged = false;
+		// A key's build on the program service, or null when the key has no ORG form. Posted on the render thread.
+		mutable std::mutex mutex;
+		std::map<ProgramKey, std::shared_ptr<Service::Slot>> entries;
+		std::atomic<std::uint64_t> stillBuilding{ 0 };  // draws that found their program still building
 		// Each stage request is compiled or queued once.
 		std::mutex stageMutex;
 		std::set<StageRequest> stages;
@@ -332,12 +313,15 @@ namespace DCLF::Family
 		Impl(std::string a_family, ProgramSource a_source) :
 			family(std::move(a_family)), tag(TagOf(family)), source(std::move(a_source)) {}
 
+		/** @brief The family's shader type. Its descriptors' defines follow from the type, so no engine shader object is needed. */
+		RE::BSShader::Type ShaderType() const { return static_cast<RE::BSShader::Type>(source.shaderType); }
+
 		/** @brief The defines a descriptor gives both stages, without VSHADER and PSHADER, plus the variant's. */
-		Defines DefinesOf(std::uint32_t a_descriptor, DefineStage a_stage, std::uint32_t a_variant, const RE::BSShader& a_shader) const
+		Defines DefinesOf(std::uint32_t a_descriptor, DefineStage a_stage, std::uint32_t a_variant) const
 		{
 			Defines defines;
 			const auto stage = a_stage == DefineStage::Vertex ? SIE::ShaderClass::Vertex : SIE::ShaderClass::Pixel;
-			for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(a_shader, stage, a_descriptor)) {
+			for (const auto& [name, value] : SIE::ShaderCache::GetCompileDefines(ShaderType(), stage, a_descriptor)) {
 				if (name == "VSHADER" || name == "PSHADER")
 					continue;
 				defines.emplace_back(std::wstring(name.begin(), name.end()), std::wstring(value.begin(), value.end()));
@@ -350,19 +334,19 @@ namespace DCLF::Family
 		}
 
 		/** @brief The desc both stages compile from, without targets or states. */
-		RasterProgram::Desc StageDescOf(std::uint32_t a_descriptor, DefineStage a_stage, std::uint32_t a_variant, const RE::BSShader& a_shader) const
+		RasterProgram::Desc StageDescOf(std::uint32_t a_descriptor, DefineStage a_stage, std::uint32_t a_variant) const
 		{
 			RasterProgram::Desc desc{};
 			desc.pixelSource = source.source;
 			desc.vertexSource = source.source;
 			desc.languageVersion = source.languageVersion;
 			desc.constantWords = source.constantWords;
-			desc.defines = DefinesOf(a_descriptor, a_stage, a_variant, a_shader);
+			desc.defines = DefinesOf(a_descriptor, a_stage, a_variant);
 			return desc;
 		}
 
-		/** @brief The program's desc from its key alone. Nothing, with a_why set, when it has no ORG form. */
-		std::optional<RasterProgram::Desc> DescOf(const ProgramKey& a_key, const RE::BSShader& a_shader, std::string& a_why) const
+		/** @brief The program's desc from its key alone. Nothing, with a_why set, when it has no ORG form. Render thread. */
+		std::optional<RasterProgram::Desc> DescOf(const ProgramKey& a_key, std::string& a_why) const
 		{
 			const auto blendDesc = DecodeBlend(a_key.blend);
 			rhi::BlendState blend{};
@@ -379,7 +363,7 @@ namespace DCLF::Family
 				a_why = "no target";
 				return std::nullopt;
 			}
-			auto desc = StageDescOf(a_key.descriptor, a_key.defineStage, a_key.variant, a_shader);
+			auto desc = StageDescOf(a_key.descriptor, a_key.defineStage, a_key.variant);
 			for (std::size_t i = 0; i < a_key.colourFormats.size() && a_key.colourFormats[i]; ++i) {
 				auto attachment = blend.attachments[blend.independentBlend ? i : 0];
 				if ((a_key.maskedTargets >> i) & 1)
@@ -392,42 +376,28 @@ namespace DCLF::Family
 				desc.depthFormat = static_cast<rhi::Format>(a_key.depthFormat);
 			}
 			desc.raster = Pipeline::RasterFromD3D11(DecodeRaster(a_key.raster));
-			Detail::ResolveDefines(desc);
+			ProgramsDetail::ResolveDefines(desc);
 			return desc;
 		}
 
-		/** @brief Stores a finished build's program, null on failure, and wakes the waiters. */
-		void Finish(const std::shared_ptr<Entry>& a_entry, std::shared_ptr<const RasterProgram> a_program)
+		/**
+		 * @brief Render thread. Posts the key's build on the program service. Null, with a_why set, when the key has no ORG form.
+		 * It gates no revision, since draws find it by key. A failed build is fatal at the next revision start (Programs::Collect).
+		 */
+		std::shared_ptr<Service::Slot> Queue(const ProgramKey& a_key, std::string& a_why) const
 		{
-			{
-				std::scoped_lock lock(mutex);
-				a_entry->status = a_program ? Status::Ready : Status::Failed;
-				a_entry->program = std::move(a_program);
-			}
-			if (a_entry->status == Status::Ready)
-				built.fetch_add(1, std::memory_order_relaxed);
-			changed.notify_all();
-		}
-
-		/** @brief Builds a desc on the calling thread. Null when it failed. */
-		static std::shared_ptr<const RasterProgram> Load(const RasterProgram::Desc& a_desc, std::string_view a_family)
-		{
-			try {
-				return Detail::Load(a_desc);
-			} catch (const std::exception& e) {
-				logger::error("[DCLF] {}: building {} threw: {}", a_family, Detail::Label(a_desc), e.what());
+			auto desc = DescOf(a_key, a_why);
+			if (!desc)
 				return nullptr;
-			}
+			auto label = std::format("{}: descriptor {:#x} variant {} key {:08x}", family, a_key.descriptor, a_key.variant, HashOf(a_key));
+			return Service::Queue(std::move(label), [desc = std::move(*desc)]() -> std::shared_ptr<const void> { return ProgramsDetail::Load(desc); }, false);
 		}
 
-		/** @brief Queues the manifest's keys once setup asked and the shader object is known. */
-		void TryPrebuild();
-
-		/** @brief Lists a key in the manifest. A new one is saved on the build thread. */
+		/** @brief Lists a key in the manifest. A new one is saved on the program service's pool. */
 		void Remember(const ProgramKey& a_key) const
 		{
 			if (Manifest::Get().Add(tag, a_key))
-				Detail::Post([] { Manifest::Get().Save(); });
+				ProgramsDetail::Post([] { Manifest::Get().Save(); });
 		}
 	};
 
@@ -449,11 +419,11 @@ namespace DCLF::Family
 		}
 
 		/** @brief Compiles one stage request into the shader store. Blocks, so call on a compile thread. */
-		void CompileStageRequest(EngineDrawPrograms::Impl& a_impl, const RE::BSShader& a_shader, const StageRequest& a_request)
+		void CompileStageRequest(EngineDrawPrograms::Impl& a_impl, const RE::BSShader&, const StageRequest& a_request)
 		{
 			try {
-				auto desc = a_impl.StageDescOf(a_request.descriptor, a_request.stage, a_request.variant, a_shader);
-				Detail::ResolveDefines(desc);
+				auto desc = a_impl.StageDescOf(a_request.descriptor, a_request.stage, a_request.variant);
+				ProgramsDetail::ResolveDefines(desc);
 				if (!RasterProgram::CompileStages(desc)) {
 					static Util::ReasonLog failures("[DCLF] engine draw programs: a stage precompile failed", spdlog::level::warn);
 					failures.Report(std::format("{} descriptor {:#x} variant {}", a_impl.family, a_request.descriptor, a_request.variant));
@@ -502,107 +472,72 @@ namespace DCLF::Family
 
 	std::size_t EngineDrawPrograms::Built() const
 	{
-		return impl->built.load(std::memory_order_relaxed);
+		std::scoped_lock lock(impl->mutex);
+		return static_cast<std::size_t>(std::ranges::count_if(impl->entries, [](const auto& a_entry) {
+			return a_entry.second && a_entry.second->done.load(std::memory_order_acquire) && a_entry.second->program;
+		}));
 	}
 
-	std::shared_ptr<const RasterProgram> EngineDrawPrograms::Get(const ProgramKey& a_key, const RE::BSShader& a_shader)
+	std::shared_ptr<const RasterProgram> EngineDrawPrograms::Get(const ProgramKey& a_key, const RE::BSShader&)
 	{
-		const RE::BSShader* none = nullptr;
-		// The engine loaded the shader before the family installed, so queue the manifest's keys now.
-		if (impl->shader.compare_exchange_strong(none, &a_shader))
-			impl->TryPrebuild();
-		std::shared_ptr<Entry> entry;
 		{
-			std::unique_lock lock(impl->mutex);
+			std::scoped_lock lock(impl->mutex);
 			if (const auto found = impl->entries.find(a_key); found != impl->entries.end()) {
-				entry = found->second;
-				// A prebuilt key still building is waited for. This gates the first world frame's draws.
-				if (entry->status == Status::Building) {
-					const auto start = std::chrono::steady_clock::now();
-					while (entry->status == Status::Building) {
-						if (impl->changed.wait_for(lock, std::chrono::milliseconds(100)) == std::cv_status::timeout &&
-							std::chrono::steady_clock::now() - start > kLongestWait) {
-							logger::error("[DCLF] {}: the prebuilt program for descriptor {:#x} (variant {}) did not finish in {} s; this draw is the engine's", impl->family,
-								a_key.descriptor, a_key.variant, kLongestWait.count());
-							return nullptr;
-						}
-					}
-					const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-					if (!std::exchange(impl->waitLogged, true))
-						logger::info("[DCLF] {}: the first draw waited {} ms for its prebuilt program (descriptor {:#x})", impl->family, waited, a_key.descriptor);
-				}
-				return entry->status == Status::Ready ? entry->program : nullptr;
-			}
-			if (!Detail::Available())
+				const auto& slot = found->second;
+				// No ORG form, logged when the key was first seen.
+				if (!slot)
+					return nullptr;
+				if (slot->done.load(std::memory_order_acquire))
+					return std::static_pointer_cast<const RasterProgram>(slot->program);
+				// Never waited for. The setup batch builds the manifest's keys, so only a key first seen after setup gets here.
+				if (impl->stillBuilding.fetch_add(1, std::memory_order_relaxed) == 0)
+					logger::info("[DCLF] {}: a draw found its program for descriptor {:#x} still building on the program service; such draws stay the engine's "
+								 "until it is built (counted)",
+						impl->family, a_key.descriptor);
 				return nullptr;
-			entry = std::make_shared<Entry>();
-			impl->entries.emplace(a_key, entry);
+			}
 		}
-
-		// Never seen, so build now on the render thread from the stages in the store.
+		if (!ProgramsDetail::Available())
+			return nullptr;
+		// Never seen, so posted to the program service. Never built here.
 		std::string why;
-		const auto desc = impl->DescOf(a_key, a_shader, why);
-		if (!desc) {
+		auto slot = impl->Queue(a_key, why);
+		const bool posted = slot != nullptr;
+		{
+			std::scoped_lock lock(impl->mutex);
+			impl->entries.emplace(a_key, std::move(slot));
+		}
+		if (!posted) {
 			logger::warn("[DCLF] {}: the program for descriptor {:#x} (variant {}) cannot be built: {}; its draws stay the engine's", impl->family, a_key.descriptor,
 				a_key.variant, why);
-			impl->Finish(entry, nullptr);
 			return nullptr;
 		}
-		const auto start = std::chrono::steady_clock::now();
-		auto program = Impl::Load(*desc, impl->family);
-		const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-		impl->Finish(entry, program);
-		if (!program) {
-			logger::error("[DCLF] {}: the program for descriptor {:#x} (variant {}) could not be built; its draws stay the engine's", impl->family, a_key.descriptor,
-				a_key.variant);
-			return nullptr;
-		}
-		logger::warn("[DCLF] {}: the program for descriptor {:#x} (variant {}, key {:08x}) was not prebuilt: built on the render thread at its first draw in {} ms "
-					 "({} built); the manifest lists it from now on",
-			impl->family, a_key.descriptor, a_key.variant, HashOf(a_key), took, Built());
+		logger::warn("[DCLF] {}: the program for descriptor {:#x} (variant {}, key {:08x}) was not prebuilt: it builds on the program service and its draws stay "
+					 "the engine's until then; the manifest lists it from now on",
+			impl->family, a_key.descriptor, a_key.variant, HashOf(a_key));
 		impl->Remember(a_key);
-		return program;
+		return nullptr;
 	}
 
 	void EngineDrawPrograms::Prebuild()
 	{
-		impl->prebuildAsked.store(true, std::memory_order_release);
-		if (!impl->shader.load())
-			logger::info("[DCLF] {}: the manifest's programs are queued once the engine loads the family's shader", impl->family);
-		impl->TryPrebuild();
-	}
-
-	void EngineDrawPrograms::Impl::TryPrebuild()
-	{
-		const auto* loaded = shader.load(std::memory_order_acquire);
-		if (!loaded || !prebuildAsked.load(std::memory_order_acquire) || prebuilt.exchange(true))
+		if (!ProgramsDetail::Available())
 			return;
-		const auto keys = Manifest::Get().Of(tag);
+		const auto keys = Manifest::Get().Of(impl->tag);
 		std::size_t queued = 0, refused = 0;
 		for (const auto& key : keys) {
-			std::shared_ptr<Entry> entry;
 			{
-				std::scoped_lock lock(mutex);
-				if (entries.contains(key))
+				std::scoped_lock lock(impl->mutex);
+				if (impl->entries.contains(key))
 					continue;
-				entry = std::make_shared<Entry>();
-				entries.emplace(key, entry);
 			}
 			std::string why;
-			auto desc = DescOf(key, *loaded, why);
-			if (!desc) {
-				++refused;
-				Finish(entry, nullptr);
-				continue;
-			}
-			const bool posted = Detail::Post([self = this, entry, desc = std::move(*desc)] { self->Finish(entry, Load(desc, self->family)); });
-			if (!posted) {
-				Finish(entry, nullptr);
-				continue;
-			}
-			++queued;
+			auto slot = impl->Queue(key, why);
+			(slot ? queued : refused) += 1;
+			std::scoped_lock lock(impl->mutex);
+			impl->entries.emplace(key, std::move(slot));
 		}
-		logger::info("[DCLF] {}: {} programs from the manifest queued on the program build thread{}", family, queued,
+		logger::info("[DCLF] {}: {} programs from the manifest queued on the program service{}", impl->family, queued,
 			refused ? std::format(" ({} listed keys have no ORG form)", refused) : std::string());
 	}
 
@@ -610,15 +545,11 @@ namespace DCLF::Family
 	{
 		auto& registry = Stages();
 		std::vector<std::pair<EngineDrawPrograms::Impl*, StageRequest>> now;
-		std::vector<EngineDrawPrograms::Impl*> seen;  // families whose shader object this call made known
 		{
 			std::scoped_lock lock(registry.mutex);
 			for (auto* family : registry.families) {
 				if (family->source.shaderType != static_cast<std::uint32_t>(a_shader.shaderType.underlying()) || !family->source.stagesOf)
 					continue;
-				const RE::BSShader* none = nullptr;
-				if (family->shader.compare_exchange_strong(none, &a_shader))
-					seen.push_back(family);
 				std::vector<StageRequest> requests;
 				family->source.stagesOf(a_pixel, a_descriptor, requests);
 				for (const auto& request : requests) {
@@ -637,9 +568,6 @@ namespace DCLF::Family
 		// On CS's compile pool, so neither the engine's shader load nor ShaderCompilationTask waits on a compile here.
 		for (const auto& [family, request] : now)
 			SIE::ShaderCache::Instance().compilationPool.detach_task([family, shader = &a_shader, request] { CompileStageRequest(*family, *shader, request); });
-		// A family whose setup asked for its manifest before the engine loaded its shader queues it now.
-		for (auto* family : seen)
-			family->TryPrebuild();
 	}
 
 	void StartStagePrecompile()

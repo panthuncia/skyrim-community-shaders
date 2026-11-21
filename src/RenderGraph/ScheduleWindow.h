@@ -1,11 +1,9 @@
 #pragma once
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include <Render/RenderGraph/ScheduleTrace.h>
 
-#	include <Render/RenderGraph/ScheduleTrace.h>
-
-#	include <cstdint>
-#	include <memory>
+#include <cstdint>
+#include <memory>
 
 /**
  * @brief The menu's "Render graph schedule" window and the DevBench tool communityshaders.schedule.
@@ -33,4 +31,3 @@ namespace RenderGraphSchedule
 	void DrawWindow();
 }
 
-#endif

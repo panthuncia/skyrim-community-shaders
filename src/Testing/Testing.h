@@ -5,6 +5,7 @@
 // and load holds through the functions below.
 
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -15,7 +16,7 @@ namespace Testing
 {
 	/**
 	 * @brief SKSEPlugin_Load, before anything reads a switch: reads the test configuration and applies its switches.
-	 * Also applies the old CommunityShaders.env file, which is kept for one migration step.
+	 * Also applies CommunityShaders.env beside the log, where manual runs set switches.
 	 */
 	void LoadConfig();
 
@@ -67,6 +68,21 @@ namespace Testing
 	/** @brief Whether a command of this name is registered, by name or by prefix. */
 	bool HasCommand(std::string_view a_name);
 
+	/**
+	 * @brief Any time before the steps run: a feature's named test command, which a "call" step runs as
+	 * "<owner>.<name>[=<arg>]". The render graph's commands are owner "org". A later registration of the same name replaces it.
+	 */
+	void RegisterFeatureCommand(std::string a_owner, std::string a_name, Command a_command);
+
+	/** @brief Render thread: runs the feature command a_owner.a_name with a_arg. False with a_error set when none is registered. */
+	bool RunFeatureCommand(std::string_view a_owner, std::string_view a_name, const std::string& a_arg, std::string& a_error);
+
+	/**
+	 * @brief Any thread: a_value under a_key in the status file's "report" object. The harness reads it after the run
+	 * ("graph_frames" for expect.graph_frames). Latest wins. Does nothing outside a test run.
+	 */
+	void SetReport(std::string a_key, nlohmann::json a_value);
+
 	/** @brief A wait condition by name (a step's wait). Render thread at Present. True once the condition holds. */
 	void RegisterWait(std::string a_name, std::function<bool()> a_holds);
 
@@ -74,31 +90,14 @@ namespace Testing
 	void RegisterExitReport(std::function<void()> a_report);
 
 	/**
-	 * @brief Render thread: runs one old-style command line. "dclf:<name>=<arg>" runs <name> (or "dclf:<name>") with <arg>, and any
-	 * other line runs as a console command. Returns false with a_error set when no command takes it.
+	 * @brief Render thread: runs one command line. "<command>[=<arg>]" runs a registered command by its cs-test step name
+	 * ("shot=a", "dclf:cull=off", "org:rebuild"), and any other line runs as a console command. Returns false with a_error set
+	 * when the command fails.
 	 */
 	bool RunCommandLine(const std::string& a_line, std::string& a_error);
 
 	/** @brief Any thread: a command line to run at the next Present (DevBench's communityshaders.dclf). */
 	void QueueCommandLine(std::string a_line);
-
-	/** @brief The old command list's progress (CS_DCLF_TEST_COMMANDS), as of the last Present. */
-	struct LegacyProgress
-	{
-		std::uint32_t frame = 0;
-		std::uint32_t shift = 0;      // frames the list's waits held so far
-		std::uint32_t next = 0;       // the next command's index
-		std::uint32_t commands = 0;   // the list's length
-		std::uint32_t nextFrame = 0;  // the frame the next command runs at, as of now
-		std::string nextCommand;
-		std::string waiting;  // the condition the list holds on; empty when none
-	};
-
-	/** @brief Any thread: the old command list's progress. */
-	LegacyProgress GetLegacyProgress();
-
-	/** @brief Render thread: frames counted as world frames (no loading menu, no hold). The old command list counts these. */
-	bool WorldFrame();
 
 	/**
 	 * @brief Any thread: the GPU device was lost. Writes the outcome device-lost with the fault, then ends the process two

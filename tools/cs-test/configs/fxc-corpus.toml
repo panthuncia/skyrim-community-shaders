@@ -1,0 +1,17 @@
+# Converted from the old fxc-corpus scenario: every FXC request the startup precompile and a short look at the save make,
+# for tools/shader-compare/dxc_survey.py. Old exit frame 600 became world-ready + 500.
+extends = ["base"]
+
+[timeouts]
+compile = 900
+
+[cs]
+fxc_request_dump = 'C:\Modding\CS-AB\fxc-corpus'
+
+[[steps]]
+at = "world-ready"
+frames = 500
+do = "exit"
+
+[expect]
+reach = "world-ready"

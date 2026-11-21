@@ -111,8 +111,7 @@ namespace DCLF::Direct
 	 */
 	bool ForwardReached(bool a_refraction);
 
-	/** @brief Whether the shadow site draws in CPU mode. An epoch whose site is not live is not covered, and the engine draws it. */
-	bool ShadowSiteLive();
+	/** @brief Whether a view's site draws in CPU mode. An epoch whose site is not live is not covered, and the engine draws it. */
 	bool ViewSiteLive(std::uint32_t a_view);
 
 	/*
@@ -131,7 +130,7 @@ namespace DCLF::Direct
 		FrameCounters sum;
 		std::uint32_t frames = 0;
 		std::array<std::uint32_t, static_cast<std::size_t>(Site::kCount)> siteRuns{}, siteEmpty{};  // callbacks, and those that drew nothing
-		std::uint32_t notQueued = 0, slotWaits = 0, rowWaits = 0;
+		std::uint32_t slotWaits = 0, rowWaits = 0;
 		std::uint32_t forwardSkipped = 0;  // GPU-driven frames whose forward draws had no cull frame
 		double slotWaitMs = 0.0;
 		// CPU time of the render thread and DXVK's CS thread from FrameStart to FrameStart, and wall time.

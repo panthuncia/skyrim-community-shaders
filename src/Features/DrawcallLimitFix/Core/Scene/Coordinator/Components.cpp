@@ -9,11 +9,6 @@ namespace DCLF::Api
 	static_assert(kMirroredKindTree == SceneCapture::kKindTree, "the Api's mirrored kind bits are the capture's");
 	static_assert(kMirroredKindCaptured == SceneCapture::kKindCaptured, "the Api's mirrored kind bits are the capture's");
 
-	bool CoordinatorComponentContext::DenseWalk() const
-	{
-		return coordinator.denseWalk;
-	}
-
 	const void* CoordinatorComponentContext::MirroredFadeNode(std::uint32_t a_slot, std::uint32_t& a_kind) const
 	{
 		a_kind = 0;
@@ -428,14 +423,6 @@ namespace DCLF::Scene
 		for (std::uint32_t c = 0; c < registered.size(); ++c)
 			if (registered[c].walk.ended)
 				registered[c].walk.ended({ tables, ComponentState(c), *this, c });
-	}
-
-	void Coordinator::ComponentsDense(bool a_begun)
-	{
-		const auto registered = Extensions::RegisteredCoordinatorComponents();
-		for (std::uint32_t c = 0; c < registered.size(); ++c)
-			if (const auto hook = a_begun ? registered[c].dense.begun : registered[c].dense.ended)
-				hook({ tables, ComponentState(c), *this, c });
 	}
 
 	void Coordinator::ComponentsForgot(const RE::BSGeometry* a_geometry)

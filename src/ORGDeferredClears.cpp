@@ -1,35 +1,27 @@
 #include "ORGDeferredClears.h"
 
-#include "RenderGraph/Switches.h"
-
-bool ORGDeferredClears::Requested()
-{
-	return !Switches::Off("CS_ORG_DEFERRED_CLEARS");
-}
-
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "Deferred.h"
-#	include "Globals.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
+#include "Deferred.h"
+#include "Globals.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
 
-#	include <Render/PassBuilders.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/ExternalTextureResource.h>
+#include <Render/PassBuilders.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/ExternalTextureResource.h>
 
-#	include <algorithm>
-#	include <array>
-#	include <atomic>
-#	include <cstdint>
-#	include <cstring>
-#	include <limits>
-#	include <memory>
-#	include <vector>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <vector>
 
 namespace
 {
@@ -41,16 +33,16 @@ namespace
 	// Last, since on D3D11 the clears come at the first state flush after every feature's Prepass.
 	constexpr std::int32_t kOrder = std::numeric_limits<std::int32_t>::max();
 
+	// The passes read this state, so Impl only marks that setup finished.
 	struct Shared
 	{
-		bool setUp = false;
 		// As float bit patterns. The render thread writes and the host's thread reads.
 		std::array<std::atomic<std::uint32_t>, 4> colour{};
 		// Recorded at execution, so a run that left it closed skips.
 		std::shared_ptr<RenderGraph::RunGate> gate;
 	};
 
-	Shared& Get()
+	Shared& SharedState()
 	{
 		static Shared s_shared;
 		return s_shared;
@@ -60,7 +52,7 @@ namespace
 	{
 		std::array<float, 4> colour{};
 		for (std::size_t i = 0; i < colour.size(); ++i) {
-			const std::uint32_t bits = Get().colour[i].load(std::memory_order_relaxed);
+			const std::uint32_t bits = SharedState().colour[i].load(std::memory_order_relaxed);
 			std::memcpy(&colour[i], &bits, sizeof(bits));
 		}
 		return colour;
@@ -81,8 +73,8 @@ namespace
 	class ClearPass final : public org::TypedRenderGraphPass<ClearPass, ClearFrame, ClearBindings>
 	{
 	public:
-		ClearPass(std::array<FrameAnchors::Texture, kTargets.size()> a_targets, std::uint32_t a_width, std::uint32_t a_height) :
-			targets(std::move(a_targets)), width(a_width), height(a_height) {}
+		explicit ClearPass(std::array<FrameAnchors::Texture, kTargets.size()> a_targets) :
+			targets(std::move(a_targets)) {}
 
 		ClearBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -95,11 +87,22 @@ namespace
 		// The colour is recorded into the pass, so a new one re-records it.
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
-			for (const auto& component : Get().colour)
+			for (const auto& component : SharedState().colour)
 				a_out.push_back(component.load(std::memory_order_relaxed));
 		}
 
-		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { CurrentColour(), width, height }; }
+		// The size of the versions the preparation binds: a resize is a new version of each target, and a revision may be prepared
+		// while the old ones are adopted. The extent follows the bound versions, which a kept recording checks itself.
+		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext& a_context) const
+		{
+			const auto size = targets[0].PreparedSize(a_context);
+			for (std::size_t i = 1; i < targets.size(); ++i) {
+				const auto other = targets[i].PreparedSize(a_context);
+				if (other.width != size.width || other.height != size.height)
+					RenderGraph::Fatal(ORGDeferredClears::kName, "the GBuffer targets differ in size");
+			}
+			return { CurrentColour(), size.width, size.height };
+		}
 
 		// A kept late batch keeps its list while SkipsAtExecution's answer holds.
 		static constexpr bool kRecordKeyedBySkip = true;
@@ -107,7 +110,7 @@ namespace
 		// A run that left the gate closed records only barriers.
 		static bool SkipsAtExecution(const ClearBindings&, const ClearFrame&, const org::PassRecordContext& a_recording)
 		{
-			const auto& gate = Get().gate;
+			const auto& gate = SharedState().gate;
 			return gate && !gate->IsOpen(a_recording.Run(), 0);
 		}
 
@@ -135,60 +138,44 @@ namespace
 
 	private:
 		std::array<FrameAnchors::Texture, kTargets.size()> targets;
-		std::uint32_t width = 0, height = 0;
 	};
 }
 
-namespace ORGDeferredClears
+struct ORGDeferredClears::Impl
 {
-	void Reserve()
-	{
-		if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::Prepass))
-			logger::warn("[ORG] Deferred clears: the Prepass anchor could not be reserved; the engine clears the GBuffer");
-	}
+	// Registered at the first revision start, which waits for the stage builds that hold it.
+	RenderGraph::Frame::DeclaredClient client;
+};
 
-	void Setup()
-	{
-		auto& shared = Get();
-		if (!Requested() || shared.setUp)
-			return;
-		if (!RenderGraphRuntime::Get().IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Prepass)) {
-			logger::info("[ORG] Deferred clears: the render graph or its Prepass anchor is not available; the engine clears the GBuffer");
-			return;
-		}
-		if (!shared.gate)
-			shared.gate = RenderGraph::RunGate::Create(kClientId, 1);
-		if (!shared.gate) {
-			logger::warn("[ORG] Deferred clears: no run gate; the engine clears the GBuffer");
-			return;
-		}
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
+ORGDeferredClears::ORGDeferredClears() = default;
+ORGDeferredClears::~ORGDeferredClears() = default;
+
+void ORGDeferredClears::Setup()
+{
+	if (!BeginSetup())
+		return;
+	auto& shared = SharedState();
+	if (!shared.gate)
+		shared.gate = RenderGraph::RunGate::Create(kClientId, 1);
+	const auto make = [](FrameAnchors::ClientDesc& client) {  // fills the registration
 		client.passes.push_back({ .name = std::string(kClientId) + ".gbuffer",
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = kOrder,
 			.kind = FrameAnchors::PassKind::Render,
 			.make = []() -> std::shared_ptr<org::RenderPass> {
-				// A resize makes new imports, which rebuild the graph.
+				// The targets' slots. Their sizes are read in Prepare, so a resize needs no new pass.
 				std::array<FrameAnchors::Texture, kTargets.size()> targets;
 				for (std::size_t i = 0; i < kTargets.size(); ++i) {
-					targets[i] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(kTargets[i]));
-					if (!targets[i]) {
-						logger::warn("[ORG] Deferred clears: GBuffer target {} cannot be imported; the engine clears the GBuffer", static_cast<std::uint32_t>(kTargets[i]));
-						return nullptr;
-					}
-					if (targets[i].Width() != targets[0].Width() || targets[i].Height() != targets[0].Height()) {
-						logger::warn("[ORG] Deferred clears: the GBuffer targets differ in size; the engine clears the GBuffer");
-						return nullptr;
-					}
+					targets[i] = FrameAnchors::EngineTexture(FrameAnchors::Colour(kTargets[i]));
+					if (!targets[i])
+						Fatal(fmt::format("GBuffer target {} cannot be imported", static_cast<std::uint32_t>(kTargets[i])));
 				}
-				const std::uint32_t width = targets[0].Width(), height = targets[0].Height();
-				return std::make_shared<ClearPass>(std::move(targets), width, height);
+				return std::make_shared<ClearPass>(std::move(targets));
 			},
 			.atExecution = true });
-		client.gates = { shared.gate };
+		client.gates = { SharedState().gate };
 		client.commit = [](const FrameAnchors::Point&) {
-			Get().gate->OpenDispatch(0, 1);
+			SharedState().gate->OpenDispatch(0, 1);
 			auto* renderer = globals::game::renderer;
 			if (!renderer)
 				return;
@@ -196,31 +183,25 @@ namespace ORGDeferredClears
 			for (std::size_t i = 0; i < 4; ++i) {
 				std::uint32_t bits = 0;
 				std::memcpy(&bits, &colour[i], sizeof(bits));
-				Get().colour[i].store(bits, std::memory_order_relaxed);
+				SharedState().colour[i].store(bits, std::memory_order_relaxed);
 			}
 		};
-		if (!FrameAnchors::Register(std::move(client))) {
-			logger::warn("[ORG] Deferred clears: the client could not be registered; the engine clears the GBuffer");
-			return;
-		}
-		shared.setUp = true;
+	};
+	auto next = std::make_unique<Impl>();
+	// The client never changes, so its key is constant.
+	next->client = RenderGraph::Frame::DeclareClient<bool>(
+		std::string(kClientId), {}, [](const RenderGraph::Frame::Inputs&) -> std::optional<bool> { return true; },
+		[make](const bool&, FrameAnchors::ClientDesc& a_out) {
+			make(a_out);
+			return true;
+		});
+	impl = std::move(next);
 
-		logger::info("[ORG] Deferred clears: the GBuffer targets are cleared at the Prepass anchor (CS_ORG_DEFERRED_CLEARS=0 leaves them to the engine)");
-	}
-
-	bool TakeClears()
-	{
-		return Get().setUp && FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Prepass);
-	}
+	logger::info("[ORG] Deferred clears: the GBuffer targets are cleared at the Prepass anchor");
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-namespace ORGDeferredClears
+bool ORGDeferredClears::TakeClears() const
 {
-	void Reserve() {}
-	void Setup() {}
-	bool TakeClears() { return false; }
+	return impl && FrameAnchors::Place(kClientId, FrameAnchors::Anchor::Prepass).draws;
 }
 
-#endif

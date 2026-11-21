@@ -18,8 +18,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -37,13 +37,14 @@
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <ORGModuleServices/PipelineRegistry.h>
-#include <ORGModuleServices/PipelineService.h>
 #include <rhi_helpers.h>
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/DrawcallLimitFix/Diagnostics/ParityCounter.h"
@@ -284,9 +285,6 @@ namespace DCLF
 				throw std::runtime_error(fmt::format("vertex attributes {:03X} (BSGraphics::Vertex::Attribute bits) are not in the geometry's layout {:016X}", missing,
 					a_vertexLayout));
 		}
-		// Salts the recipes so a pipeline built with an input layout is never the artifact a recipe finds.
-		inline constexpr std::uint64_t kPulledVerticesSalt = 0x5055'4C4C'5645'5254ull;
-
 		inline rhi::LayoutBindingRange LayoutRange(std::uint32_t a_binding, std::uint32_t a_count, rhi::ShaderStage a_stage, rhi::LayoutRangeSource a_source, std::size_t a_offset,
 			bool a_samplers = false)
 		{
@@ -581,9 +579,21 @@ namespace DCLF
 		bool d3d12 = false;  // layouts of root constants alone, plain draws only
 		bool deviceGenerated = false;
 		bool gpuDriven = false;
-		bool depthClipDisable = false;
 		bool attempted = false;
-		org::services::PipelineService service;
+		/** @brief A build's result: the pipeline, or why it failed. */
+		struct Artifact
+		{
+			org::services::PipelinePayload payload;
+			std::string error;
+			explicit operator bool() const noexcept { return payload != nullptr; }
+		};
+		/** @brief Builds a pipeline once on DCLF's build pool. a_done gets the result on the thread that built it. Nothing waits for it. */
+		template <class Done>
+		static void RequestBuild(std::function<org::services::PipelinePayload()> a_build, Done a_done)
+		{
+			org::services::BuildPipeline(BuildSubmitter(), std::move(a_build),
+				[a_done = std::move(a_done)](org::services::LiveBuild a_built) { a_done(Artifact{ std::move(a_built.payload), std::move(a_built.error) }); });
+		}
 		/** @brief A pipeline's hot reload registration: how to rebuild it and the program it is built from now. */
 		struct Live
 		{
@@ -636,50 +646,50 @@ namespace DCLF
 		{
 			PipelineKey key;
 			std::uint32_t generation = 0;
-			org::services::PipelineArtifact artifact;
+			Artifact artifact;
 			std::shared_ptr<const Live> live;
 		};
 		struct ShadowDone
 		{
 			ShadowPipelineKey key;
 			std::uint32_t generation = 0;
-			org::services::PipelineArtifact artifact;
+			Artifact artifact;
 			std::shared_ptr<const Live> live;
 		};
 		struct FamilyDone
 		{
 			std::uint32_t generation = 0;
-			org::services::PipelineArtifact artifact;
+			Artifact artifact;
 			std::shared_ptr<const Live> live;
 		};
 		struct ForwardDone
 		{
 			ForwardPipelineKey key;
 			std::uint32_t generation = 0;
-			org::services::PipelineArtifact artifact;
+			Artifact artifact;
 			std::shared_ptr<const Live> live;
 		};
 		struct RefractionDone
 		{
 			std::uint32_t generation = 0;
 			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the refraction normals format it was built for
-			org::services::PipelineArtifact artifact;
+			Artifact artifact;
 			std::shared_ptr<const Live> live;
 		};
 		struct Completions
 		{
-			EventQueue<MainDone, 1024> main;
-			EventQueue<ShadowDone, 1024> shadow;
-			std::array<EventQueue<FamilyDone, 16>, kDrawFamilyLanes> family;
-			EventQueue<ForwardDone, 256> forward;
-			EventQueue<RefractionDone, 16> refraction;
+			RenderGraph::Frame::EventQueue<MainDone, 1024> main;
+			RenderGraph::Frame::EventQueue<ShadowDone, 1024> shadow;
+			std::array<RenderGraph::Frame::EventQueue<FamilyDone, 16>, kDrawFamilyLanes> family;
+			RenderGraph::Frame::EventQueue<ForwardDone, 256> forward;
+			RenderGraph::Frame::EventQueue<RefractionDone, 16> refraction;
 			// Requests to the lane, and the lane's engine-state requests back to the render thread.
-			EventQueue<LightingRequest, 1024> requests;
-			EventQueue<ShadowRequest, 1024> shadowRequests;
-			EventQueue<ForwardPipelineKey, 256> forwardRequests;
+			RenderGraph::Frame::EventQueue<LightingRequest, 1024> requests;
+			RenderGraph::Frame::EventQueue<ShadowRequest, 1024> shadowRequests;
+			RenderGraph::Frame::EventQueue<ForwardPipelineKey, 256> forwardRequests;
 			std::array<std::atomic<bool>, kDrawFamilyLanes> familyRequest{};
 			std::atomic<bool> refractionRequest{ false };
-			EventQueue<std::uint32_t, 64> stateRequests;
+			RenderGraph::Frame::EventQueue<std::uint32_t, 64> stateRequests;
 		};
 		// Never freed, because a build may complete while the process tears down.
 		Completions* completions = new Completions;
@@ -687,7 +697,6 @@ namespace DCLF
 		// Builds run on DCLF's preparation pool. A shader reload's start and its swap wake the lane.
 		Impl()
 		{
-			service.Configure(BuildSubmitter());
 			if (auto* registry = RenderGraphRuntime::PipelineRegistry())
 				registry->AddListener([] { WakePipelineLane(); });
 		}
@@ -765,7 +774,6 @@ namespace DCLF
 		struct FrameInput
 		{
 			TargetFormats targets;
-			std::uint32_t targetsGeneration = 0;
 			// Every state asked for, valid or not.
 			std::shared_ptr<const ankerl::unordered_dense::map<std::uint32_t, EngineState>> states;
 			std::optional<bool> frontCCW;
@@ -780,16 +788,15 @@ namespace DCLF
 			DXGI_FORMAT refractionFormat = DXGI_FORMAT_UNKNOWN;
 			std::uint8_t refractionWriteMask = 0xF;
 		};
-		LatestSlot<FrameInput> inputSlot;
+		::RenderGraph::Frame::LatestSlot<FrameInput> inputSlot;
 		FrameInput renderInput;
 		std::vector<std::uint32_t> pendingStateBits;  // asked for by the lane but not readable until the deferred pass
-		LatestSlot<PipelineCatalog> catalogSlot;
+		::RenderGraph::Frame::LatestSlot<PipelineCatalog> catalogSlot;
 
 		/** @brief Render thread. Posts the current frame inputs and wakes the lane. */
 		void PostInput(const DrawPipelines& a_owner)
 		{
 			renderInput.targets = a_owner.targets;
-			renderInput.targetsGeneration = a_owner.generation;
 			inputSlot.Post(std::make_unique<FrameInput>(renderInput));
 			WakePipelineLane();
 		}
@@ -892,7 +899,6 @@ namespace DCLF
 			std::atomic<std::uint32_t> stateClasses{ 0 }, largestClass{ 0 };
 			Diagnostics::ParityCounter classParity;
 			std::atomic<std::uint64_t> classParityChecks{ 0 }, classParityMismatches{ 0 };
-			std::string recreatedBy;  // for the warnings
 			std::uint64_t revision = 0;
 			bool dirty = false;  // publish the catalog at the end of the pass
 			struct ProgramFamilyCounters
@@ -908,7 +914,6 @@ namespace DCLF
 				std::vector<std::shared_ptr<org::services::LivePipelineSlot>> setSlots;
 				std::vector<std::uint64_t> layouts;
 				std::vector<std::uint8_t> discards;
-				std::string recreatedBy;  // for the warnings
 			};
 			Shadow shadow;
 			/** @brief A draw family's two pipelines, rebuilt with each new main set. */
@@ -956,7 +961,6 @@ namespace DCLF
 				std::vector<org::services::PipelinePayload> retired;  // kept for the process
 			};
 			Forward forward;
-			std::uint64_t servicePass = 0;  // the service's displaced payloads retire at once
 		};
 		Lane lane;
 
@@ -992,10 +996,6 @@ namespace DCLF
 		void TryRequest(const PipelineKey& a_key);
 		/** @brief Warns about an on-demand build, with its nearest requested relative. */
 		void LogOnDemandBuild(const PipelineKey& a_key, Api::ProgramFamily a_family, std::uint32_t a_slot) const;
-		/** @brief The main targets changed, so every key is built again into a new set. */
-		void RecreateMainSet(const TargetFormats& a_from, const TargetFormats& a_to);
-		void ResetMainSet(std::string a_by);
-		void ResetShadowSet(std::string a_by);
 		/** @brief Starts the forward pipelines over, keeping the built ones for the process. */
 		void ResetForward();
 		/** @brief After a shader reload moved the sources, request every parked or failed key again. */
@@ -1012,8 +1012,6 @@ namespace DCLF
 		/** @brief Admits completed builds, publishes a set version and hands out their indices. */
 		void AdmitLane();
 		void TryRequestShadow(const ShadowPipelineKey& a_key);
-		/** @brief The shadow map format changed, so every shadow key is built again into a new set. */
-		void RecreateShadowSet(DXGI_FORMAT a_from, DXGI_FORMAT a_to);
 		void AdmitShadow();
 		void TryRequestFamily(Api::DrawFamily a_family);
 		void TryRequestFamilies();
@@ -1174,7 +1172,7 @@ namespace DCLF
 		/** @brief Brings every class's sets of a_version up to its members below a_admitted. */
 		bool ApplyClasses(SetVersion& a_version, std::uint32_t a_admitted);
 		/**
-		 * @brief CS_DCLF_SET_PARITY. Checks every class of a just-published version against its members.
+		 * @brief CS_DCLF_PARITY. Checks every class of a just-published version against its members.
 		 * A member whose state differs from its class's first pipeline would draw with the wrong fixed-function state.
 		 */
 		void CheckClasses(const SetVersion& a_version);

@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
@@ -85,7 +86,7 @@ namespace DCLF
 				exact += need[b];
 			}
 			if (exact > a_slotSequences)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: a shadow view's {} draws past its slot's {} sequences (the scene's draw bound missed them)",
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("a shadow view's {} draws past its slot's {} sequences (the scene's draw bound missed them)",
 					exact, a_slotSequences));
 			if (total > a_slotSequences)
 				for (std::size_t b = 0; b < out.size(); ++b)
@@ -138,7 +139,6 @@ namespace DCLF
 			const RenderGraph::BufferRef recordRef = a_resources.constantsRef + kShadowFrameRecordOffset;
 			out.push[kShadowPushFrameRecordRef] = recordRef.viewSlot;
 			out.push[kShadowPushFrameRecordRef + 1] = recordRef.byteOffset;
-			RenderGraph::CheckBufferRef(recordRef, base + kShadowFrameRecordOffset, 0, "shadow frame record (shadow push words 2-3)");
 			push(kShadowPushViewBlock, viewBlock);
 			push(kShadowPushPerFrame, viewBlock + kShadowPerFrameOffset);
 			const auto blocks = ShadowArenaBlocksOf();
@@ -152,7 +152,7 @@ namespace DCLF
 		std::uint32_t ShadowViewCapacity(std::uint32_t a_previous, std::uint32_t a_draws, std::uint32_t a_slotDraws)
 		{
 			if (a_draws > a_slotDraws)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: a shadow view's {} draws past its sequence buffer's {} (the scene's draw bound missed them)",
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("a shadow view's {} draws past its sequence buffer's {} (the scene's draw bound missed them)",
 					a_draws, a_slotDraws));
 			return GrowCapacity(a_previous, a_draws, a_slotDraws);
 		}

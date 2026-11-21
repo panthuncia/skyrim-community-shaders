@@ -14,10 +14,8 @@
 #include "EngineFixes/LODBlendRingFix.h"
 #include "EngineFixes/LandscapeSeamsFix.h"
 #include "EngineFixes/SunShadowMaskFix.h"
-#include "Utils/SwitchFile.h"
 #include "Features/DrawcallLimitFix.h"
 #include "GpuEventTimers.h"
-#include "GpuIdleTrace.h"
 #include "FeatureIssues.h"
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
@@ -200,7 +198,7 @@ void State::Draw()
 	auto context = globals::d3d::context;
 
 	if (shaderCache->IsEnabled()) {
-		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
+		if (terrainBlending.loaded && terrainBlending.FrameEnabled()) {
 			ZoneScopedN("TerrainBlending::TerrainShaderHacks");
 			terrainBlending.TerrainShaderHacks();
 		}
@@ -479,12 +477,6 @@ void State::Setup()
 
 	// Adopt DXVK's Vulkan device for the render graph before features create
 	// resources; features fall back to their D3D11 paths when it stays inactive.
-	GpuLoadPass::ReserveAnchor();
-	// Anchors are reserved before the graph initializes: the frame's epochs are fixed then.
-	ORGDeferredComposite::Reserve();
-	ORGDeferredClears::Reserve();
-	ImGuiRenderer::ReserveAnchor();
-	RenderGraph::Engine::Reserve();
 	RenderGraphRuntime::Get().Initialize();
 	// The engine's targets move to ORG, then the engine subsystems that use them set up, before any feature reads them.
 	RenderGraph::Engine::Setup();
@@ -943,8 +935,8 @@ void State::LoadFromJson(nlohmann::json& settings)
 			shaderCache->SetFileWatcher(advanced["Use FileWatcher"]);
 		if (advanced.contains("Frame Annotations") && advanced["Frame Annotations"].is_boolean())
 			frameAnnotations = advanced["Frame Annotations"];
-		// The GPU idle trace attributes gaps to the engine's render phases, which only the annotations mark.
-		if ((GpuIdleTrace::Requested() || GpuEventTimers::Requested() || GpuCounters::EnvironmentRequested()) && !frameAnnotations) {
+		// The GPU event timers and counters attribute work to the engine's render phases, which only the annotations mark.
+		if ((GpuEventTimers::Requested() || GpuCounters::EnvironmentRequested()) && !frameAnnotations) {
 			frameAnnotationsSetting = frameAnnotations;
 			frameAnnotations = true;
 		}
@@ -1301,17 +1293,7 @@ std::string State::GetDefinesString()
 
 std::shared_ptr<const std::vector<std::pair<std::string, std::string>>> State::GetDefines()
 {
-	// CS_DCLF_SHADOW_DEBUG_OUTPUT (dclf-validation.md, "Shader debug output (`CS_DCLF_SHADOW_DEBUG_OUTPUT`)"): Lighting.hlsl writes chosen intermediate values into the Diffuse
-	// target, native and DCLF alike (DCLF_SHADOW_DEBUG).
-	static const bool shadowDebug = Util::SwitchFile::Enabled("CS_DCLF_SHADOW_DEBUG_OUTPUT");
 	std::scoped_lock lock(shaderDefinesMutex);
-	if (shadowDebug && std::ranges::none_of(*shaderDefines, [](const auto& a_define) { return a_define.first == "DCLF_SHADOW_DEBUG"; })) {
-		auto defines = std::make_shared<std::vector<std::pair<std::string, std::string>>>(*shaderDefines);
-		defines->emplace_back("DCLF_SHADOW_DEBUG", "1");
-		shaderDefines = std::move(defines);
-		// The disk cache's file names carry this string, so the debug builds are cached apart.
-		shaderDefinesString += shaderDefinesString.empty() ? "DCLF_SHADOW_DEBUG=1" : ";DCLF_SHADOW_DEBUG=1";
-	}
 	return shaderDefines;
 }
 
@@ -1618,7 +1600,6 @@ void State::BeginPerfEvent(std::string_view title)
 	pPerf->BeginEvent(std::wstring(title.begin(), title.end()).c_str());
 	if (GpuCounters::RangesActive())
 		GpuCounters::PushRange(title);
-	GpuIdleTrace::BeginEvent(title);
 	GpuEventTimers::BeginEvent(title);
 }
 
@@ -1643,7 +1624,6 @@ void State::EndPerfEvent()
 	if (GpuCounters::RangesActive())
 		GpuCounters::PopRange();
 	pPerf->EndEvent();
-	GpuIdleTrace::EndEvent();
 	GpuEventTimers::EndEvent();
 }
 
@@ -1665,7 +1645,6 @@ void State::SetPerfMarker(std::string_view title)
 	if (!PerfEventsConsumed())
 		return;
 	pPerf->SetMarker(std::wstring(title.begin(), title.end()).c_str());
-	GpuIdleTrace::Mark(title);
 }
 
 void State::SetAdapterDescription(const std::wstring& description)
@@ -1752,7 +1731,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		auto& upscaling = globals::features::upscaling;
 
 		if (upscaling.loaded) {
-			auto upscaleMethod = upscaling.GetUpscaleMethod();
+			auto upscaleMethod = upscaling.FrameUpscaleMethod();
 			if (temporal && upscaleMethod != Upscaling::UpscaleMethod::kTAA) {
 				float2 screenSz{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
 				auto renderSize = Util::ConvertToDynamic(screenSz, true);

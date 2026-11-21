@@ -18,7 +18,6 @@
 #include <utility>
 #include <vector>
 
-#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Api/Reports.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/MaterialBindings.h"
@@ -33,8 +32,8 @@
 #include "Features/DrawcallLimitFix/Core/Runtime/SlotTable.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/Retirement.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/PublicationLog.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
@@ -71,7 +70,6 @@ namespace DCLF
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/State/Dependents.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/State/Categories.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/State/Attach.h"
-#include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/State/Candidates.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/State/Placements.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/State/Hidden.h"
@@ -157,10 +155,7 @@ namespace DCLF
 			std::uint32_t boneRows = 0;
 			std::uint32_t projectedUV = 0;  // candidates with the ProjectedUV bit, and terrain ones
 			std::uint32_t landBlend = 0;
-			// Under Policy::RecomputeCachedVerdicts, derivedDiffers must stay 0.
 			std::uint32_t derivedHits = 0;
-			std::uint32_t derivedChecked = 0;
-			std::uint32_t derivedDiffers = 0;
 			std::uint32_t slotsSwept = 0;
 			std::uint32_t geometriesRefreshed = 0;
 			std::uint32_t geometriesRelocated = 0;  // slots made stale by a move of their buffers (pinless imports), since the start
@@ -172,10 +167,7 @@ namespace DCLF
 			std::uint32_t geometriesAlive = 0, pipelinesAlive = 0, materialsAlive = 0;
 			// Objects left native by Ineligible::Technique, by technique id. 63 is refraction.
 			std::array<std::uint32_t, 64> techniqueRejects{};
-			// Must stay 0, as for derivedDiffers.
 			std::uint32_t classifyHits = 0;
-			std::uint32_t classifyChecked = 0;
-			std::uint32_t classifyDiffers = 0;
 			// In ms. Measured only with CS_DCLF_PROFILE, so the loop makes no clock calls otherwise.
 			std::array<double, static_cast<std::size_t>(BuildPart::Count)> partMs{};
 			std::array<double, static_cast<std::size_t>(BuildPart::Count)> accumulatePartMs{};
@@ -186,10 +178,9 @@ namespace DCLF
 			std::uint64_t lightPlaced = 0, lightSkins = 0;
 			std::uint64_t moveEvents = 0;
 			std::uint64_t perFrameRelookups = 0;
-			std::uint64_t hiddenEvents = 0, verdictsChecked = 0, verdictsSkipped = 0, verdictsMissed = 0;
+			std::uint64_t hiddenEvents = 0, verdictsChecked = 0, verdictsSkipped = 0;
 			std::uint64_t hiddenRetaken = 0;  // statics classified again for a hidden event on their chain
 			std::uint64_t hiddenAheadAnnounced = 0;  // hidden events announced again at a capture newer than them (hiddenAhead)
-			std::string firstVerdictMissed;
 			// CS_DCLF_PROFILE only.
 			std::array<double, static_cast<std::size_t>(EvaluateKind::Count)> evaluateKindMs{};
 			std::array<std::uint64_t, static_cast<std::size_t>(EvaluateKind::Count)> evaluateKindCount{};
@@ -211,9 +202,8 @@ namespace DCLF
 			stats.lightByTrait = {};
 			stats.lightPlaced = stats.lightSkins = 0;
 			stats.moveEvents = stats.perFrameRelookups = 0;
-			stats.hiddenEvents = stats.verdictsChecked = stats.verdictsSkipped = stats.verdictsMissed = 0;
+			stats.hiddenEvents = stats.verdictsChecked = stats.verdictsSkipped = 0;
 			stats.hiddenRetaken = stats.hiddenAheadAnnounced = 0;
-			stats.firstVerdictMissed.clear();
 			stats.evaluateKindMs = {};
 			stats.evaluateKindCount = {};
 		}
@@ -230,20 +220,12 @@ namespace DCLF
 
 		/** @brief Render thread. Allows the pump's wakes once DCLF is installed. */
 		void StartScenePump();
-		/** @brief Render thread. With a_full false a pass applies events only. a_inline makes the frame start run the pass itself. */
-		void SetScenePassMode(bool a_full, bool a_inline);
-		/** @brief Render thread, frame start under the parities. Runs one pass inline. */
-		void RunScenePassInline();
-		/** @brief Render thread at Present when no frame start ran since the last one, as in menus and load screens. */
-		void ApplyEventsInline();
+		/** @brief Render thread. With a_full false a pass applies events only. */
+		void SetScenePassMode(bool a_full);
 		/** @brief Fallbacks that read what a pass writes must refuse while this is true. */
 		bool SceneTaskInFlight() const;
 		/** @brief The pump stopped for good and no scene pass runs again. */
 		bool ScenePumpFailed() const;
-		/** @brief Test hook. The next scene pass throws past its handler, which stops the pump for good. */
-		void ThrowNextScenePass();
-		/** @brief The next scene pass logs how DCLF binds each actor's geometry and flags what looks wrong. */
-		void RequestActorProbe(std::string a_label);
 		/** @brief Scene lane only. The fade census as JSON, from the registrations at Api::ReportPoint::CaptureCensus. */
 		json FadeCensus();
 		/** @brief Scene lane only. The sizes of the coordinator's growable containers, one line each. */
@@ -335,8 +317,8 @@ namespace DCLF
 			stats.fadingDrawn = stats.fadingFrames = 0;
 			return result;
 		}
-		/** @brief On a scene thread this is sceneFrame, which lags the render thread. */
-		std::uint32_t GetFrame() const;
+		/** @brief DCLF's scene step (FrameView::SceneStep). On a scene thread this is sceneFrame, which lags the render thread. */
+		std::uint32_t SceneStep() const;
 		/** @brief The pass as a 32-bit stamp. Never 0, which means never, nor Tables::kSlotFree. */
 		std::uint32_t PassStamp() const { return static_cast<std::uint32_t>(passSerial % 0xFFFFFFFEull) + 1u; }
 		std::shared_ptr<const EntrySpace> CoordinatorSunCandidates() const { return sunCandidates; }
@@ -354,7 +336,7 @@ namespace DCLF
 		void ApplySet();
 
 		/** @brief One scene pass. Publishes only when something changed. */
-		void RunSceneWork(bool a_task);
+		void RunSceneWork();
 		std::pair<std::uint64_t, std::string> TakeUndrawnClaims() { return { std::exchange(undrawnClaims, 0), std::exchange(undrawnFirst, {}) }; }
 		struct SetStats
 		{
@@ -375,7 +357,6 @@ namespace DCLF
 			std::string firstWaiting;
 		};
 		SetStats TakeSetStats() { return std::exchange(setStats, {}); }
-		std::string DescribeSunCandidate(const void* a_geometry) const;
 		void NoteFadeRootUnmirrored() { ++placementStats.fadeRootsUnmirrored; }
 		/** @brief Reads the tracked map on the caller's thread. */
 		bool IsTracked(const RE::BSGeometry* a_geometry) const;
@@ -405,7 +386,7 @@ namespace DCLF
 		const PlacementPlan* PeekPlacementPlan() const { return placementPlanReady.get(); }
 
 
-		/** @brief True on the lane and its fan-out chunks, where GetFrame returns the coordinator's frame. */
+		/** @brief True on the lane and its fan-out chunks, where SceneStep returns the coordinator's scene step. */
 		static inline thread_local bool sceneWorkThread = false;
 
 	private:
@@ -489,25 +470,8 @@ namespace DCLF
 			std::uint64_t pipelinesTrimmed = 0;  // recycles that cut the pipeline table's top (RecycleRetired)
 		} retirementStats;
 
-		/** @brief A difference is checked again after the next batch. */
-		template <class Describe, class Recheck>
-		void NoteMirrorRead(MirrorRead a_read, bool a_differ, Describe&& a_describe, Recheck&& a_recheck) const
-		{
-			++MirrorReads().checked[static_cast<std::size_t>(a_read)];
-			if (a_differ)
-				deferredReads.push_back({ a_read, a_describe(), std::function<bool()>(std::forward<Recheck>(a_recheck)) });
-		}
 		void MirrorSubtree(const void* a_root, Ineligible a_reason, std::vector<std::pair<RE::BSGeometry*, Ineligible>>& a_out, bool& a_unmirrored) const;
-		/** @brief A refused lease means the engine's update may run, so the check is skipped and counted. */
-		EngineReadWindow::Lease LiveCheckLease(MirrorRead a_read) const
-		{
-			EngineReadWindow::Lease lease;
-			if (!lease)
-				++MirrorReads().refused[static_cast<std::size_t>(a_read)];
-			return lease;
-		}
 		MirrorReadStats& MirrorReads() const { return mirrorReadSink ? *mirrorReadSink : mirrorReads; }
-		void RecheckDeferredReads();
 		RE::NiNode* MirrorCategoryNode(const void* a_object, Ineligible& a_reason, bool& a_unmirrored) const;
 		void PrepareMirrorCaptures(const std::vector<const SceneCapture::Records*>& a_captures, std::size_t a_records);
 		void PinBatch(const std::vector<RE::NiPointer<RE::NiRefObject>>& a_pins)
@@ -545,13 +509,10 @@ namespace DCLF
 		void ApplyMirrorEvents(const EventBatch& a_batch, BatchIndex& a_index);
 		void PinMirrorBatch(const EventBatch& a_batch, std::vector<const SceneCapture::Records*>& a_captures, std::size_t& a_records);
 		void CountMirrorWork();
-		void CheckMirrorRecordUses();
 
 		void ListDependents(RE::BSGeometry* a_geometry, Tracked& a_tracked);
 		void UnlistDependents(RE::BSGeometry* a_geometry, Tracked& a_tracked, bool a_root);
 		void UnlistCategoryMember(RE::BSGeometry* a_geometry, Tracked& a_tracked);
-		void CheckCategoryMembers(const char* a_where);
-		void CheckAncestorKeys();
 		/** @brief a_live means a_root is a live walk's pointer rather than a batch pin. */
 		bool OwnRoot(const RE::NiAVObject* a_root, bool a_live);
 		void ReleaseRootOwner(const RE::NiAVObject* a_root);
@@ -565,7 +526,7 @@ namespace DCLF
 			const std::vector<RE::NiAVObject*>& a_addedRoots, std::uint8_t a_cause);
 		/** @brief Runs first in the pass, before the drains. */
 		void TakeCategoryCapture();
-		/** @brief From the mirror's chain. The result is a key only. CS_DCLF_MIRROR_PARITY checks it against the live chain. */
+		/** @brief From the mirror's chain. The result is a key only. CS_DCLF_PARITY checks it against the live chain. */
 		RE::NiNode* FindCategoryNode(RE::NiAVObject* a_object, Ineligible* a_parentReason, bool* a_unmirrored = nullptr) const;
 		/** @brief The object must be alive. */
 		RE::NiNode* FindCategoryNodeLive(RE::NiAVObject* a_object, Ineligible* a_parentReason) const;
@@ -650,16 +611,15 @@ namespace DCLF
 			if (a_root && plannedRoots.contains(a_root))
 				placementDependentsTouched.emplace_back(a_root, a_geometry);
 		}
-		/** @brief a_prune drops a stale member from moverSet. The parity never prunes. */
-		std::optional<PlannedKey> PlannedMoverNow(RE::BSGeometry* a_geometry, bool a_prune);
-		/** @brief a_prune forgets a still root that is no longer listed. */
-		bool PlannedRootNow(const RE::NiAVObject* a_root, bool a_prune);
+		/** @brief Drops a stale member from moverSet. */
+		std::optional<PlannedKey> PlannedMoverNow(RE::BSGeometry* a_geometry);
+		/** @brief Forgets a still root that is no longer listed. */
+		bool PlannedRootNow(const RE::NiAVObject* a_root);
 		std::optional<PlannedKey> PlannedDependentNow(const RE::NiAVObject* a_root, const void* a_geometry) const;
 		void AddPlannedSlots(const PlannedKey& a_key, const PlannedOwner& a_owner);
 		void RemovePlannedSlots(const PlannedKey& a_key, const PlannedOwner& a_owner);
 		/** @brief a_reset diffs against an empty set. */
 		void DiffPlacementSet(PlacementPlan& a_plan, bool a_reset);
-		PlacementPlan::Check RebuildPlacementSet();
 		void ReportPlacementDeltas();
 		/** @brief The node is a key and is not dereferenced. */
 		void ApplyMotionUpdate(const void* a_node);
@@ -688,8 +648,7 @@ namespace DCLF
 		bool RootMovesNow(const RE::NiAVObject* a_root) const;
 		static bool PlacementMatters(const Tracked& a_tracked);
 		/**
-		 * @brief The root is a key and is never dereferenced. With a_whole false only a changed motion verdict reclassifies the dependents,
-		 * and the parity's witness passes check the rest.
+		 * @brief The root is a key and is never dereferenced. With a_whole false only a changed motion verdict reclassifies the dependents.
 		 */
 		void ScheduleRoot(const RE::NiAVObject* a_root, bool a_whole = true);
 		void ApplyNodeEvent(RE::NiAVObject* a_node);
@@ -849,18 +808,14 @@ namespace DCLF
 		 */
 		bool HiddenForWalk(const RE::NiAVObject* a_object) const;
 		bool HiddenForWalk(const void* a_object, const SceneCapture::NodeRecord& a_record) const;
-		/** @brief CS_DCLF_WALK_PARITY's reference. Leaves the coordinator unchanged. */
-		void DenseReference(Tables& a_dense, ankerl::unordered_dense::map<const RE::BSGeometry*, Ineligible>& a_reasons);
 		/** @brief True when changed. */
 		bool WriteObjectExtras(std::uint32_t a_object);
 		void BuildScenePhase();
-		void DenseWalk();
 		/** @brief a_keepIndices keeps object indices for a delta walk. */
 		void BeginWalk(bool a_keepIndices = false);
 
 		/**
 		 * @brief Evaluates only entries whose inputs can have changed. Every other slot keeps its record.
-		 * CS_DCLF_WALK_PARITY checks the result against a walk from scratch.
 		 */
 		void DeltaWalk();
 		void ScheduleFullEvaluation();
@@ -875,14 +830,11 @@ namespace DCLF
 			PartTimer& a_timer);
 		std::uint32_t PerFrameTraits(const Tracked& a_tracked, const RE::BSGeometry& a_geometry) const;
 		std::uint32_t PerFrameTraitsOf(bool a_entryClassTrait, bool a_ownerClassTrait, const RE::NiNode* a_categoryNode, const RE::BSGeometry& a_geometry) const;
-		/** @brief a_freshMotion is the walk parity's root motion from scratch. */
-		std::pair<bool, std::uint32_t> PerFrameOf(const Tracked& a_tracked, const RE::BSGeometry& a_geometry, Ineligible a_reason, std::uint32_t& a_traits,
-			ankerl::unordered_dense::map<const RE::NiAVObject*, bool>* a_freshMotion = nullptr);
 		/** @brief a_full writes it in full even if it only moved. */
 		void Schedule(RE::BSGeometry* a_geometry, Tracked& a_tracked, bool a_full = true);
 		bool KeepSkin(RE::BSGeometry* a_geometry, Tracked& a_tracked, const EvalResult& a_result);
 		/** @brief Whether an actor's earlier record still stands except for placement and palette. */
-		bool FrameVerdictKept(const Tracked& a_tracked, EvalCounters& a_counters, EvalResult& a_out) const;
+		bool FrameVerdictKept(const Tracked& a_tracked, EvalCounters& a_counters) const;
 		void Reclassify(RE::BSGeometry* a_geometry, Tracked& a_tracked);
 		void MoveBucket(Tracked& a_tracked, Ineligible a_bucket);
 		void FinishDeltaWalk(PartTimer& a_timer);
@@ -891,8 +843,8 @@ namespace DCLF
 		void NoteRelocatedGeometry(const std::vector<ID3D11Buffer*>& a_buffers);
 		void ScheduleRefreshedGeometry(PartTimer& a_timer);
 		/**
-		 * @brief Evaluations are pure and merges run in index order. CS_DCLF_FANOUT 0 runs each in turn, 1 evaluates all then merges,
-		 * 2 (the default) merges pool chunks as they finish.
+		 * @brief Evaluations are pure and merges run in index order. Fan-out mode 0 runs each in turn, 1 evaluates all then merges,
+		 * 2 merges pool chunks as they finish.
 		 */
 		void EvaluateRound(PartTimer& a_timer, std::size_t a_first);
 		void EvaluateStreamed(PartTimer& a_timer, std::size_t a_first, std::size_t a_count, std::size_t a_chunks, bool a_light, bool a_profileKinds,
@@ -903,7 +855,7 @@ namespace DCLF
 		/** @brief False when rejected with no record. */
 		bool EvaluateKeptVerdict(const Tracked& a_tracked, const SceneCapture::LeafView& a_leaf, bool a_rereads, EvalCounters& a_counters, EvalResult& a_out) const;
 		/** @brief False when rejected with no record. */
-		bool EvaluateStaticVerdict(RE::BSGeometry* a_geometry, const Tracked& a_tracked, const SceneCapture::LeafView& a_leaf, bool a_classifyProbe,
+		bool EvaluateStaticVerdict(const Tracked& a_tracked, const SceneCapture::LeafView& a_leaf,
 			EvalCounters& a_counters, EvalResult& a_out, PartTimer& a_timer) const;
 		void EvaluateRecordInputs(RE::BSGeometry* a_geometry, const SceneCapture::LeafView& a_leaf, EvalResult& a_out) const;
 		void EvaluateShadowInputs(const SceneCapture::LeafView& a_leaf, EvalResult& a_out) const;
@@ -912,15 +864,13 @@ namespace DCLF
 		static std::pair<bool, std::uint32_t> PerFrameFrom(std::uint32_t a_traits, Ineligible a_reason, bool a_mayRecord);
 		void MergeEntry(std::size_t a_index, bool a_profileKinds, EvalResult& a_result, PartTimer& a_timer);
 		/** @brief True when the kept record stands. Otherwise the entry is evaluated in full for the write. */
-		bool MergeLight(RE::BSGeometry* a_geometry, Tracked& a_tracked, EvalResult& a_result, PartTimer& a_timer, bool a_witnessed, const char*& a_missed);
-		/** @brief Parity check that a dependent only its witness scheduled came out unchanged. */
-		void CheckRootWitness(const Tracked& a_tracked, bool a_written, bool a_hadSlot, std::uint32_t a_slotBefore, const Tables::Columns& a_columnsBefore,
-			bool a_perFrameBefore, std::uint32_t a_traitsBefore, Ineligible a_reasonBefore);
+		bool MergeLight(RE::BSGeometry* a_geometry, Tracked& a_tracked, EvalResult& a_result, PartTimer& a_timer);
 		bool MergeWrite(RE::BSGeometry* a_geometry, Tracked& a_tracked, EvalResult& a_result, PartTimer& a_timer, Ineligible& a_bucket);
-		/** @brief Listed while the reason is an engine caster's and the engine would draw its shadow. */
-		void NoteEngineCaster(RE::BSGeometry* a_geometry, Ineligible a_reason);
-		/** @brief Each caster's root is owned by the coordinator, so it lives as long as the publication. */
-		std::shared_ptr<const EngineOnlySubset> PublishEngineCasters();
+		/**
+		 * @brief Logs a permanent refusal of a geometry that casts a shadow, once per reason. It stays the engine's, whose draws
+		 * graph mode skips, so it casts no shadow.
+		 */
+		void NoteRefusedCaster(RE::BSGeometry* a_geometry, Ineligible a_reason);
 		void NoteUnstable(RE::BSGeometry* a_geometry, const SceneCapture::GeometryRecord& a_record);
 		std::uint32_t unstableLogged = 0;  // NoteUnstable's lines, this session
 		// Cached per geometry slot key so the buffer descriptions are read once, not every walk.
@@ -946,13 +896,12 @@ namespace DCLF
 		struct JoinFrame;
 		struct JoinBinding;
 		void RunJoins(JoinFrame& a_frame);
-		void RunActorProbeIfAsked();
 		void MergeJoin(const OrderEntry& a_entry, JoinResult& a_result, JoinFrame& a_frame);
 		std::uint32_t BindJoinPipeline(const JoinResult& a_result, const LightingDescriptors& a_descriptors, bool a_layer, PartTimer& a_timer);
 		std::uint32_t MakeJoinPipeline(const JoinResult& a_result, const LightingDescriptors& a_descriptors, bool a_layer);
 		bool BindJoinMaterial(std::uint32_t a_objectId, const JoinResult& a_result, const LightingDescriptors& a_descriptors, Tracked::Derived& a_derived,
 			PartTimer& a_timer, std::uint32_t& a_materialSlot);
-		void RecordJoinDerivation(const OrderEntry& a_entry, const JoinResult& a_result, const JoinFrame& a_frame, bool a_derivedHit,
+		void RecordJoinDerivation(const OrderEntry& a_entry, const JoinResult& a_result, const JoinFrame& a_frame,
 			const LightingDescriptors& a_descriptors, const JoinBinding& a_binding, Tracked::Derived& a_derived);
 		void PatchJoin(const OrderEntry& a_entry, const JoinResult& a_result, JoinFrame& a_frame, ObjectRecord& a_object, std::uint32_t a_objectId,
 			const LightingDescriptors& a_descriptors, const JoinBinding& a_binding);
@@ -1015,7 +964,6 @@ namespace DCLF
 		void ComponentsWalkBegun();
 		void ComponentsScheduling(bool a_full);
 		void ComponentsWalkEnded();
-		void ComponentsDense(bool a_begun);
 		/** @brief Runs after the entry's slot is released. */
 		void ComponentsForgot(const RE::BSGeometry* a_geometry);
 		void ComponentRecycled(std::uint32_t a_component, std::uint32_t a_first, std::uint32_t a_count);
@@ -1044,7 +992,7 @@ namespace DCLF
 		void ComponentsPublished();
 
 		ShadowInputs ShadowInputsOf(std::uint32_t a_slot) const;
-		void RefreshShadowSets(bool a_forceRebuild);
+		void RefreshShadowSets();
 		void ResetShadowIndex(std::vector<std::uint32_t>& a_changed);
 		void ApplyShadowInputs(std::uint32_t a_slot, const ShadowInputs& a_inputs, bool a_live, bool a_add, std::uint32_t& a_moved);
 		void EmitShadowSets(bool a_rebuild, std::uint32_t a_moved);
@@ -1137,10 +1085,9 @@ namespace DCLF
 		bool PublicationNeeded();
 		void NotePublished();
 		/** @brief False means the pass defers. */
-		bool PublicationDue(bool a_task, PublishReason& a_why) const;
-		void PublishIfDue(bool a_task);
+		bool PublicationDue(PublishReason& a_why) const;
+		void PublishIfDue();
 		void ReportPublicationPacing();
-		void CheckPacedPublication(const Tables& a_published, const SetSnapshot& a_claims);
-		void ScenePass(bool a_inline);
+		void ScenePass();
 	};
 }

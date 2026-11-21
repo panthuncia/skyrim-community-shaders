@@ -3,45 +3,45 @@
 #include <d3d11.h>
 
 #include <cstdint>
-#include <memory>
 
 #include "RenderGraph/FrameAnchors.h"
 
 /**
-* @brief The engine's render targets as ORG resources, with CS_ORG_ENGINE_TARGETS=1.
+* @brief The engine's side of the engine target set (EngineTargetSet.h): the four create detours and the set's begin and end.
 *
-* The engine's target creation functions are detoured so ORG makes each image. The engine's fields get DXVK's D3D11 objects
-* over the same memory, so D3D11 readers keep working. Each target is a versioned slot published by id, such as "Engine::kMAIN".
-*
-* The first set is made with D3D11 before the graph exists, and TakeOver replaces it. Later sets are made on ORG directly.
-* The engine still frees targets through D3D11. A token in each texture's private data retires the image once DXVK destroys it.
-*
-* Kept on D3D11: kFRAMEBUFFER, mip-generating targets, mip views of other targets, non-DEFAULT 3D targets, and failures.
-* Everything but Enabled runs on the render thread.
+* The engine's first set is made with D3D11 before the graph exists. Engine::Setup then declares every target (DeclareSet), and
+* the fields get tripwire handles over the declared textures. After that the create detours only record the engine's properties
+* and put the same handles back into the fields. They never make or release anything, and they never call the engine's function,
+* except for the targets that stay the engine's own (mip-generating targets and mip views of them). EndSet raises the shapes,
+* and the revision that carries them points the handles at the new versions at its adoption.
 */
 namespace RenderGraph::Engine::Targets
 {
-	/** @brief Whether CS_ORG_ENGINE_TARGETS=1 is set. */
-	bool Enabled();
-
 	void Install();
 
-	/** @brief Call before BSShaderRenderTargets::Create. */
+	/** @brief Call before BSShaderRenderTargets::Create. Opens a set. */
 	void BeginSet();
 
-	/** @brief Call after BSShaderRenderTargets::Create. Publishes the set and moves the resize generation once. */
+	/**
+	* @brief Call after BSShaderRenderTargets::Create. Before DeclareSet it only records. After it, it saves the size the engine
+	* wrote into BSGraphics::State, writes back the size of the targets the frame has until adoption, and raises
+	* Vars::EngineTargetShapes() and Vars::DisplaySize().
+	*/
 	void EndSet();
 
-	/** @brief Remakes the targets the engine made on D3D11 before the graph existed, right after the graph initializes. */
-	void TakeOver();
+	/** @brief Whether DeclareSet ran, so a set now is a later set that only records. Hooks.cpp skips State::Setup then. Any thread. */
+	bool OwnsSets();
 
 	/**
-	* @brief Wraps every ORG target's fields in tripwire handles once the guest device and context exist.
-	* Only with CS_ORG_ENGINE_TARGET_HANDLES=1. Targets made later get handles at creation.
+	* @brief Puts tripwire handles in the fields once the guest device and context exist (guest mode: the Renderer::Init state
+	* setup hook; native mode: DeclareSet itself). Fills Identify's map. Once; later calls do nothing.
 	*/
 	void InstallHandles();
 
-	/** @brief How a CS feature remakes an engine target. ORG uses it from the first version so the feature's Recreate finds its shape. */
+	/** @brief Fatal when a colour target's field no longer holds the set's handle (a feature wrote it). Render thread. */
+	void CheckFields(std::string_view a_where);
+
+	/** @brief How a CS feature changes an engine target's shape. Only read by the target's declaration. */
 	struct Plan
 	{
 		const char* owner = "?";                   // for the log
@@ -51,26 +51,6 @@ namespace RenderGraph::Engine::Targets
 		bool dropCopy = false;                     // otherwise the copy keeps the engine's format, as HDR leaves it
 	};
 
-	/** @brief Call before the render graph is set up. A later call for the same target replaces the plan. */
+	/** @brief Call before Engine::Setup (DeclareSet). A later call for the same target replaces the plan; one after DeclareSet is fatal. */
 	void PlanTarget(std::uint32_t a_target, const Plan& a_plan);
-
-	bool Owns(std::uint32_t a_target);
-
-	/**
-	* @brief Remakes an ORG-owned target with another description until the engine's next Create. True with nothing done if it already has that shape.
-	* False when ORG does not own it or a_desc is not a DEFAULT 2D texture with one slice and one mip. The caller then uses D3D11.
-	*/
-	bool Recreate(std::uint32_t a_target, const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_keepCopy = false);
-
-	/** @brief Undoes Recreate. False when ORG does not own the target. */
-	bool Restore(std::uint32_t a_target);
-
-	/** @brief The published slot whose current D3D11 texture, or a tripwire handle of it, is a_texture. Empty if none. */
-	FrameAnchors::Texture Find(const ID3D11Resource* a_texture);
-
-	/** @brief Find by the VkImage DXVK reports for a texture. */
-	FrameAnchors::Texture FindImage(std::uint64_t a_image);
-
-	/** @brief Render thread, each frame. Hands the images of destroyed D3D11 textures to ReleaseAfterD3D11. */
-	void ServiceRetired();
 }

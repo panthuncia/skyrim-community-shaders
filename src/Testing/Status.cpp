@@ -2,15 +2,14 @@
 #include "Testing/Internal.h"
 
 #include "Globals.h"
+#include "RenderGraph/Frame/Revision.h"
 #include "ShaderCache.h"
 #include "Utils/LogTee.h"
 #include "Utils/SwitchFile.h"
 
 #include <spdlog/sinks/base_sink.h>
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include <rhi.h>
-#endif
+#include <rhi.h>
 
 #include <fstream>
 #include <set>
@@ -126,6 +125,8 @@ namespace Testing
 				step = json{ { "index", a_run.stepIndex }, { "do", a_run.config.steps[a_run.stepIndex].command }, { "state", a_run.stepState } };
 			auto& watcher = Watcher();
 			const auto lastError = watcher ? watcher->LastError() : std::string{};
+			// What an "adopted" await compares: the variables the last adopted revision carried and the newest a Begin took.
+			const auto mark = RenderGraph::Frame::Revision::Mark();
 			return json{
 				{ "version", 1 },
 				{ "run_id", a_run.config.runId },
@@ -145,6 +146,8 @@ namespace Testing
 				{ "reason", a_run.reason },
 				{ "fault", { { "address", a_run.faultAddress }, { "markers", a_run.faultMarkers } } },
 				{ "shots", a_run.shots },
+				{ "revision", { { "running", mark.running }, { "adopted", mark.revision }, { "adopted_variables", mark.adoptedVariables }, { "taken_variables", mark.takenVariables } } },
+				{ "report", a_run.report },
 			};
 		}
 
@@ -187,6 +190,14 @@ namespace Testing
 	}
 
 	double Now() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - Run().start).count(); }
+
+	void SetReport(std::string a_key, nlohmann::json a_value)
+	{
+		auto& run = Run();
+		std::scoped_lock lock(run.mutex);
+		if (run.configured)
+			run.report[std::move(a_key)] = std::move(a_value);
+	}
 
 	bool Configured()
 	{
@@ -315,14 +326,12 @@ namespace Testing
 		auto& watcher = Watcher();
 		if (watcher)
 			return;
-#if defined(CS_HAS_RENDER_GRAPH)
 		// BasicRHI's lost devices (Vulkan's device fault and crash markers, D3D12's DRED report) end a test run.
 		rhi::SetDeviceLossCallback([](const rhi::DeviceLossInfo& a_info) {
 			deviceLossSeen.store(true, std::memory_order_release);
 			ReportDeviceLost(fmt::format("{}: {}", a_info.backend, a_info.where), a_info.faultAddress, a_info.faultKind ? a_info.faultKind : "",
 				a_info.markers ? a_info.markers : "");
 		});
-#endif
 		watcher = std::make_shared<WatchSink>();
 		{
 			auto& run = Run();

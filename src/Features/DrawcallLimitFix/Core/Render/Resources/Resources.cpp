@@ -1,9 +1,10 @@
-// GPU resources for the DCLF draws: the main, scene, shadow and view resources. All are created on the render thread.
+// GPU resources for the DCLF draws: the main, scene, shadow and view resources. All are created on the render thread, except the
+// parts a new display size sizes (FollowDisplaySize), which the build executor makes.
 // Each versioned buffer is registered with the scene's set, which grows it.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
-#include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/BufferRefs.h"
+#include "RenderGraph/Frame/Variables.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
@@ -11,48 +12,35 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/VertexStreams.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/ScheduleDump.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
 #include <cassert>
-#include <mutex>
-#include <unordered_map>
 
 namespace DCLF::Draws
 {
 	namespace
 	{
-		/** @brief One desc's program load. The program is written before the state turns kLoaded. */
-		struct ProgramLoad
+		// The main, shadow and view setups' programs, queued at CS's setup (SetupPrograms). The setups run in frames and never build.
+		ComputeProgram::Desc BuildDrawsDesc(const wchar_t* a_entry = L"main")
 		{
-			static constexpr int kLoading = 0, kLoaded = 1, kFailed = 2;
-			std::atomic<int> state{ kLoading };
-			std::shared_ptr<const ComputeProgram> program;
-		};
-
-		/** @brief LoadProgram's entries by desc, for one device. A new device starts over. */
-		struct ProgramLoads
-		{
-			std::mutex mutex;
-			const void* device = nullptr;
-			std::unordered_map<std::string, std::shared_ptr<ProgramLoad>> entries;
-		};
-
-		ProgramLoads& Loads()
-		{
-			static ProgramLoads loads;
-			return loads;
+			return { .source = kBuildDrawsShader, .entry = a_entry, .constantWords = kBuildDrawsConstantWords };
 		}
-
-		/** @brief Everything in a desc that changes what Load builds. */
-		std::string ProgramKey(const ComputeProgram::Desc& a_desc)
-		{
-			std::string key = a_desc.source + '|' + Util::WStringToString(a_desc.entry) + '|' + std::to_string(a_desc.constantWords) + (a_desc.commonDefines ? "|c" : "|n");
-			for (const auto& [name, value] : a_desc.defines)
-				key += '|' + Util::WStringToString(name) + '=' + Util::WStringToString(value);
-			return key;
-		}
+		// The main and view setups share this one.
+		const SetupPrograms::Compute kBuildDraws{ "DCLF BuildDraws", [] { return BuildDrawsDesc(); } };
+		const SetupPrograms::Compute kClearPortalQueries{ "DCLF clear portal queries", [] { return BuildDrawsDesc(L"ClearPortalQueries"); } };
+		const SetupPrograms::Compute kPreparePortalQueries{ "DCLF prepare portal queries", [] { return BuildDrawsDesc(L"PreparePortalQueries"); } };
+		const SetupPrograms::Compute kShadowCasterRows{ "DCLF shadow caster rows", [] { return BuildDrawsDesc(L"ShadowCasterRows"); } };
+		const SetupPrograms::Compute kShadowViews{ "DCLF shadow views", [] { return BuildDrawsDesc(L"ShadowViews"); } };
+		const SetupPrograms::Compute kForwardSort{ "DCLF forward sort",
+			[] { return ComputeProgram::Desc{ .source = kForwardSortShader, .constantWords = kForwardSortConstantWords }; } };
+		const SetupPrograms::Compute kSortScatter{ "DCLF draw sort",
+			[] { return ComputeProgram::Desc{ .source = kSortSequencesShader, .constantWords = kSortSequencesConstantWords }; } };
+		const SetupPrograms::Compute kBlockScan{ "DCLF draw sort", [] { return PrefixSum::BlockScanDesc(); } };
+		const SetupPrograms::Compute kBlockOffsets{ "DCLF draw sort", [] { return PrefixSum::BlockOffsetsDesc(); } };
+		const SetupPrograms::Compute kVisibilityEvents{ "DCLF visibility events",
+			[] { return ComputeProgram::Desc{ .source = kVisibilityEventsShader, .constantWords = kVisibilityEventsConstantWords }; } };
 
 		/** @brief A device-local buffer the shaders read by device address. */
 		std::shared_ptr<org::Buffer> DeviceBuffer(std::uint64_t a_bytes, const char* a_name)
@@ -258,31 +246,6 @@ namespace DCLF::Draws
 			}
 		}
 
-		/** @brief The foliage pixel record at the target's size. */
-		void CreateFoliageRecord(Resources& a_state, [[maybe_unused]] org::GraphHost& a_host, rhi::Device a_device, const D3D11_TEXTURE2D_DESC& a_target)
-		{
-			auto foliage = std::make_shared<Resources::FoliageRecord>();
-			foliage->width = a_target.Width;
-			foliage->height = a_target.Height;
-			const std::uint64_t pixels = std::uint64_t(a_target.Width) * a_target.Height;
-			for (std::uint32_t h = 0; h < 2; ++h) {
-				foliage->ids[h] = CreateWords(pixels, true, fmt::format("cs.dclf.foliage-ids{}", h).c_str());
-				foliage->colours[h] = CreateWords(pixels * kFoliageColourWords, true, fmt::format("cs.dclf.foliage-colours{}", h).c_str());
-				foliage->idsRef[h] = RenderGraph::DeclaredRefOf(a_device, *foliage->ids[h]);
-				foliage->coloursRef[h] = RenderGraph::DeclaredRefOf(a_device, *foliage->colours[h]);
-			}
-			foliage->results = CreateWords(kFoliageResultWords, true, "cs.dclf.foliage-results");
-			foliage->owners = CreateWords(pixels * 2, true, "cs.dclf.foliage-owners");
-			foliage->ownersIndex = foliage->owners->GetUAVShaderVisibleInfo(0).slot.index;
-			foliage->resultsRef = RenderGraph::DeclaredRefOf(a_device, *foliage->results);
-			// The record only stands if the observers' compare pass accepts it.
-			bool ready = false;
-			// One readback range per run lease index the colour epoch records at.
-			Diagnostics::Notify(Diagnostics::FoliageRecordMade{ *foliage, a_device, 16u, ready });
-			if (ready)
-				a_state.foliage = std::move(foliage);
-		}
-
 		/** @brief Imports the engine's refraction normals (kREFRACTION_NORMALS), bound as RT0 for group 5 by FUN_1414b4860.
 		 * Without them DCLF draws no refraction. */
 		void ImportRefractionNormals(Resources& a_state, rhi::Device a_device)
@@ -347,11 +310,66 @@ namespace DCLF::Draws
 			a_state.hzbMips = pyramid.mips;
 			a_state.hzbScratch = std::move(pyramid.scratch);
 		}
+
+		/**
+		 * @brief Render thread. Gives a_next, which holds only the parts sized by the display and the dispatch signatures, every other
+		 * part of a_from. Both name the same buffers, imports and programs, so a scene made for either draws the same objects.
+		 * A new Resources field goes here unless the display sizes it.
+		 */
+		void CopySizeless(Resources& a_next, const Resources& a_from)
+		{
+			a_next.frameBuffers = a_from.frameBuffers;
+			a_next.scene = a_from.scene;
+			a_next.sequences = a_from.sequences;
+			a_next.count = a_from.count;
+			a_next.classCounts = a_from.classCounts;
+			a_next.zBucketCounts = a_from.zBucketCounts;
+			a_next.pool = a_from.pool;
+			a_next.buildDraws = a_from.buildDraws;
+			a_next.clearPortalQueries = a_from.clearPortalQueries;
+			a_next.preparePortalQueries = a_from.preparePortalQueries;
+			a_next.countD3D11 = a_from.countD3D11;
+			a_next.frameConstants = a_from.frameConstants;
+			a_next.latchedTargets.store(a_from.latchedTargets.load(std::memory_order_acquire), std::memory_order_release);
+			a_next.frameConstantsAddress = a_from.frameConstantsAddress;
+			a_next.frameConstantsRef = a_from.frameConstantsRef;
+			a_next.frameBlocks = a_from.frameBlocks;
+			a_next.sharedLightZeroed = a_from.sharedLightZeroed;
+			a_next.targetCount = a_from.targetCount;
+			a_next.native = a_from.native;
+			a_next.nativeDepth = a_from.nativeDepth;
+			a_next.terrainDepth = a_from.terrainDepth;
+			a_next.refractionNormals = a_from.refractionNormals;
+			a_next.refractionFormat = a_from.refractionFormat;
+			a_next.shadowMask = a_from.shadowMask;
+			a_next.shadow = a_from.shadow;
+			a_next.visibility = a_from.visibility;
+			a_next.frustum = a_from.frustum;
+			a_next.retests = a_from.retests;
+			a_next.retestDispatch = a_from.retestDispatch;
+			a_next.passStats = a_from.passStats;
+			a_next.preprocessMain = a_from.preprocessMain;
+			a_next.forwardSort = a_from.forwardSort;
+			a_next.graphBuffers = a_from.graphBuffers;
+			a_next.sort = a_from.sort;
+			a_next.depthCommitted = a_from.depthCommitted;
+			a_next.views = a_from.views;
+		}
 	}
 }
 
 namespace DCLF
 {
+	namespace
+	{
+		/** @brief Asks the main epochs' graphs to be built again. They pick up the build state's main resources. */
+		void AskMainBuilds(org::GraphHost& a_host)
+		{
+			a_host.AddExtension(kExtensionId, [] { return MakeMainOpaqueExtension(BuildingState(kExtensionId)); },
+				ExtensionEpochs(Api::EpochShape::Main));
+		}
+	}
+
 	bool IndirectDraws::Impl::Setup(const Capture& a_capture, bool a_depthOnly)
 	{
 		auto* host = RenderGraphRuntime::Get().Host();
@@ -376,9 +394,33 @@ namespace DCLF
 		auto frameBuffers = FrameBuffersOf(a_capture, graphBuffers);
 		const bool sameFrameBuffers = resources && resources->frameBuffers.size() == frameBuffers.size() &&
 		                              std::equal(frameBuffers.begin(), frameBuffers.end(), resources->frameBuffers.begin(), [](const auto& a, const auto& b) { return a.SameShape(b); });
-		if (resources && targets == formats && target.Width == width && target.Height == height && sameFrameBuffers &&
-			resources->graphBuffers == graphBuffers)
+		const bool sameShape = resources && targets == formats && sameFrameBuffers && resources->graphBuffers == graphBuffers;
+		if (sameShape && target.Width == width && target.Height == height)
 			return true;
+		// A new display size: main resources for it are being made off the render thread or are with the builds already
+		// (FollowDisplaySize). The frame takes them with the first scene made for them, and runs these until then.
+		const auto followed = [&](std::uint32_t a_width, std::uint32_t a_height) { return target.Width == a_width && target.Height == a_height; };
+		if (sameShape && !Scene::FrameView::Get().NotDrawingYet() &&
+			((pendingResources && followed(pendingResources->width, pendingResources->height)) || (sizing && followed(sizing->width, sizing->height))))
+			return true;
+		// Once DCLF draws, its graphs and snapshot hold these resources. Only a display size change carries new ones (plan step 10a-0).
+		// The colour epoch is skipped instead.
+		if (resources && Scene::FrameView::Get().EverDrew()) {
+			std::string what;
+			if (!(targets == formats))
+				what += "the target formats, ";
+			if (target.Width != width || target.Height != height)
+				what += fmt::format("the size {}x{} -> {}x{}, ", width, height, target.Width, target.Height);
+			if (!sameFrameBuffers)
+				what += fmt::format("the CPU structured buffers at t16 and up ({} -> {}), ", resources->frameBuffers.size(), frameBuffers.size());
+			if (resources->graphBuffers != graphBuffers)
+				what += fmt::format("the frame graph buffers with indices {:#x} -> {:#x}, ", resources->graphBuffers, graphBuffers);
+			IndirectDraws::NoteInputChanged(fmt::format("the main-pass graph resources would be made again after DCLF drew; changed: {}", what.substr(0, what.size() - 2)));
+			return false;
+		}
+		// Before DCLF draws, the resources are made again here, so resources for another display size are dropped.
+		pendingResources.reset();
+		sizing.reset();
 
 		auto device = host->Device();
 		auto state = std::make_shared<Resources>();
@@ -395,8 +437,6 @@ namespace DCLF
 
 		state->width = target.Width;
 		state->height = target.Height;
-		if (Policy::RecordFoliagePixels())
-			CreateFoliageRecord(*state, *host, device, target);
 
 		ImportRefractionNormals(*state, device);
 		ImportShadowMask(*state, device);
@@ -426,33 +466,99 @@ namespace DCLF
 			}
 		PostRevisionInputs();
 		// The main epochs' graphs pick up the new resources at their next build.
-		host->AddExtension(kExtensionId, [] { return Diagnostics::ScheduleDumped(kExtensionId, MakeMainOpaqueExtension(BuildingState(kExtensionId))); }, ExtensionEpochs(Api::EpochShape::Main));
+		AskMainBuilds(*host);
 		logger::info("[DCLF] Main-pass graph resources: {} targets {}x{}, depth format {}", targets.colorCount, width, height, static_cast<int>(targets.depth));
 		return true;
 	}
 
+	void IndirectDraws::Impl::FollowDisplaySize()
+	{
+		// Before DCLF draws, Setup makes the resources again at the colour pass's size.
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!host || !resources || Scene::FrameView::Get().NotDrawingYet())
+			return;
+		namespace Vars = RenderGraph::Frame::Vars;
+		const auto display = Vars::Adopted(Vars::DisplaySize());
+		if (!display.width || !display.height)
+			return;
+		const auto at = [&](const Resources& a_resources) { return a_resources.width == display.width && a_resources.height == display.height; };
+		// The builds have this size already. A job for another size is dropped.
+		if (at(*AheadMain())) {
+			sizing.reset();
+			return;
+		}
+		if (!sizing || sizing->width != display.width || sizing->height != display.height) {
+			// The parts the display sizes are made on the build executor. The rest is shared with the resources the frame runs.
+			auto job = std::make_shared<Sizing>();
+			job->width = display.width;
+			job->height = display.height;
+			sizing = job;
+			const auto device = host->Device();
+			const auto buildDraws = resources->buildDraws;
+			const auto preparePortalQueries = resources->preparePortalQueries;
+			auto task = [job, device, buildDraws, preparePortalQueries] {
+				auto next = std::make_shared<Resources>();
+				next->width = job->width;
+				next->height = job->height;
+				SetUpHzb(*next, device);
+				next->dispatchSignature = CreateDispatchSignature(device, buildDraws->layout->GetHandle());
+				next->portalQuerySignature = CreateDispatchSignature(device, preparePortalQueries->layout->GetHandle());
+				job->failed = !next->dispatchSignature || !next->portalQuerySignature;
+				job->made = std::move(next);
+				job->done.store(true, std::memory_order_release);
+			};
+			if (!BuildSubmitter()(task)) {
+				job->failed = true;
+				job->done.store(true, std::memory_order_release);
+			}
+			logger::info("[DCLF] main resources for {}x{}: their display-sized parts are made on the build executor", display.width, display.height);
+			return;
+		}
+		// One new generation at a time: resources already handed over are adopted first, so no scene made for them is left
+		// to be adopted after newer ones. A size they do not have is made again from them.
+		if (!sizing->done.load(std::memory_order_acquire) || pendingResources)
+			return;
+		const auto job = std::move(sizing);
+		if (job->failed) {
+			IndirectDraws::NoteInputChanged(fmt::format(
+				"the main resources for the display size {}x{} could not be made (no dispatch signature, or the build executor refused the job)", job->width, job->height));
+			return;
+		}
+		auto next = job->made;
+		CopySizeless(*next, *resources);
+		pendingResources = std::move(next);
+		// The builds and the snapshot builder take the new resources now. The frame takes them with the first scene made for them.
+		PostRevisionInputs();
+		AskMainBuilds(*host);
+		PostResourcesAhead();
+		logger::info("[DCLF] main resources for {}x{}: handed to the builds (HZB {}x{}, {} mips); the frame takes them with a scene made for them",
+			pendingResources->width, pendingResources->height, pendingResources->hzbWidth, pendingResources->hzbHeight, pendingResources->hzbMips);
+	}
+
+	void IndirectDraws::Impl::AdoptPendingMain()
+	{
+		if (!pendingResources)
+			return;
+		auto previous = std::exchange(resources, std::move(pendingResources));
+		pendingResources.reset();
+		width = resources->width;
+		height = resources->height;
+		// The views draw from the main resources the frame runs. A view set up after the hand-over joined the old ones only.
+		for (const auto& slot : kViewSlots)
+			if (const auto& view = View(slot.view).resources; view && view->main == previous) {
+				view->main = resources;
+				resources->views[ViewIndex(slot.view)] = view;
+			}
+		logger::info("[DCLF] main resources for {}x{}: adopted with a scene made for them (were {}x{})", width, height, previous->width, previous->height);
+	}
+
 	bool IndirectDraws::Impl::CreateMainBuffers(Resources& a_state, [[maybe_unused]] org::GraphHost& a_host, rhi::Device a_device)
 	{
-		// Programs compile off the render thread. Until they finish nothing is made and DCLF stays off.
-		// Every BuildDraws variant is requested here, so they compile together and the other setups find them ready.
-		bool programsPending = false;
-		auto load = [&](const ComputeProgram::Desc& a_desc) {
-			bool loading = false;
-			auto program = LoadProgram(a_device, a_desc, loading);
-			programsPending = programsPending || loading;
-			return program;
-		};
-		auto buildDraws = load({ .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords, .defines = ::DCLF::Diagnostics::RefTrace::ComputeDefines(2) });
-		auto clearPortalQueries = load({ .source = kBuildDrawsShader, .entry = L"ClearPortalQueries", .constantWords = kBuildDrawsConstantWords });
-		auto preparePortalQueries = load({ .source = kBuildDrawsShader, .entry = L"PreparePortalQueries", .constantWords = kBuildDrawsConstantWords });
-		auto forwardSort = load({ .source = kForwardSortShader, .constantWords = kForwardSortConstantWords });
-		(void)load({ .source = kBuildDrawsShader, .entry = L"ShadowCasterRows", .constantWords = kBuildDrawsConstantWords });
-		(void)load({ .source = kBuildDrawsShader, .entry = L"ShadowViews", .constantWords = kBuildDrawsConstantWords });
-		(void)load({ .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
-		// Compiled ahead so DrawSort::Create finds it cached.
-		(void)load({ .source = kSortSequencesShader, .constantWords = kSortSequencesConstantWords });
-		if (programsPending)
-			return NotReady(8, "its compute programs are compiling off the render thread");
+		// CS's setup built every program, so nothing here compiles or waits.
+		auto buildDraws = kBuildDraws.Get();
+		auto clearPortalQueries = kClearPortalQueries.Get();
+		auto preparePortalQueries = kPreparePortalQueries.Get();
+		auto forwardSort = kForwardSort.Get();
 		// The sequence ranges start at the first layout's sizes. RequireMain grows them to the scene's draw bound.
 		const bool smallTables = SwitchValue(Switch::TableStart) == "small";
 		const MainLayout firstLayout = InitialMainLayout();
@@ -467,40 +573,29 @@ namespace DCLF
 		a_state.frustum = MakeVersioned(CreateWords(objects, true, "cs.dclf.frustum"), { .extent = { 0, 4, 4 } });
 		// Phase 1's retest list, one word per object slot.
 		a_state.retests = MakeVersioned(CreateWords(objects, true, "cs.dclf.retests"), { .extent = { 0, 4, 4 } });
-		if (SwitchEnabled(Switch::SetParity))
-			a_state.writers = MakeVersioned(CreateWords(objects * 8, true, "cs.dclf.writers"), { .extent = { 0, 32, 4 } });
 		a_state.retestDispatch = CreateWords(4, true, "cs.dclf.retest-dispatch");
 		if (PassStats::Enabled())
 			CreatePassStats(a_state, a_device);
 		a_state.preprocessMain = PreprocessStates::Create(a_device, "the main segment");
-		// The forward epoch records in its own epoch, so it needs its own state lists.
-		a_state.preprocessForward = PreprocessStates::Create(a_device, "the forward epoch");
 		a_state.buildDraws = std::move(buildDraws);
-		if (!a_state.buildDraws)
-			return NotReady(7, "the BuildDraws program could not be created");
 		a_state.clearPortalQueries = std::move(clearPortalQueries);
 		a_state.preparePortalQueries = std::move(preparePortalQueries);
-		if (!a_state.clearPortalQueries || !a_state.preparePortalQueries)
-			return NotReady(7, "the main member portal query programs could not be created");
 		a_state.portalQuerySignature = CreateDispatchSignature(a_device, a_state.preparePortalQueries->layout->GetHandle());
 		if (!a_state.portalQuerySignature)
 			return NotReady(7, "the main member portal query signature could not be created");
-
-		// Without the forward sort the forward epoch draws nothing.
 		a_state.forwardSort = std::move(forwardSort);
-		if (!a_state.forwardSort)
-			logger::warn("[DCLF] the forward sort program could not be created: the forward epoch draws nothing");
 		a_state.dispatchSignature = CreateDispatchSignature(a_device, a_state.buildDraws->layout->GetHandle());
 		if (!a_state.dispatchSignature)
 			return NotReady(7, "the BuildDraws dispatch signature could not be created");
 		// BuildDraws appends in thread order, so without a sort by pipeline nearly every sequence would switch pipeline.
-		a_state.sort = DrawSort::Create(a_device, firstLayout.sequenceDraws);
+		a_state.sort = DrawSort::Create(std::make_shared<const PrefixSum::Programs>(PrefixSum::Programs{ kBlockScan.Get(), kBlockOffsets.Get() }), kSortScatter.Get(),
+			firstLayout.sequenceDraws);
 		const GrowableSpec bucketWords{ .extent = { 0, 4, 4 }, .policy = org::services::GrowthPolicy::Doubling(64) };
 		a_state.zBucketCounts[0] = MakeVersioned(CreateWords(64, true, "cs.dclf.z.bucket-counts"), bucketWords);
 		a_state.zBucketCounts[1] = MakeVersioned(CreateWords(64, true, "cs.dclf.z.bucket-counts2"), bucketWords);
 		a_state.pool = EnsureIndexPool(*scene, a_device, smallTables);
 		if (!a_state.pool)
-			return NotReady(7, "the index pool's copy program could not be created");
+			return NotReady(7, "the index pool's dispatch signature could not be created");
 		// The view covers every count word. A short view would read zeros that look clean.
 		a_state.countD3D11 = WrapWords(*a_state.count, kCountWords * sizeof(std::uint32_t));
 		a_state.frameConstants = DeviceBuffer(kFrameConstantBytes, "cs.dclf.frame-constants");
@@ -669,23 +764,19 @@ namespace DCLF
 		// The visibility readback reads the root states' rows, so it is not made without them.
 		if (Extensions::CullBindingBuffer(Api::CullBindingSlot::RootRows, *buffers)) {
 			const std::uint32_t roots = smallStart ? 4u : kInitialVisibilityRoots;
-			if (auto* host = RenderGraphRuntime::Get().Host()) {
-				buffers->visibilityEventsProgram = ComputeProgram::Load(a_device, { .source = kVisibilityEventsShader, .constantWords = kVisibilityEventsConstantWords });
-				if (buffers->visibilityEventsProgram) {
-					const std::uint32_t events = smallStart ? 4u : kInitialVisibilityEvents;
-					buffers->visibilityEvents = MakeVersioned(CreateWords(VisibilityEventBytes(events) / 4, true, "cs.dclf.visibility-events"),
-						{ .extent = { kVisibilityEventHeaderWords * 4, 16, 4 } });
-					buffers->visibilityRootReported = MakeVersioned(StructuredBuffer(roots, 2 * sizeof(std::uint32_t), "cs.dclf.visibility-root-reported", unused, true),
-						{ .extent = { 0, 8, 8 }, .contents = GrowableContents::Zero });
-					buffers->visibilityObjectReported = MakeVersioned(StructuredBuffer(objects, sizeof(std::uint32_t), "cs.dclf.visibility-object-reported", unused, true),
-						{ .extent = { 0, 4, 4 }, .contents = GrowableContents::Zero });
-					auto readback = std::make_shared<VisibilityReadback>();
-					readback->armed.resize(readback->ranges.Count());
-					readback->AddSet(events);
-					buffers->visibilityReadback = std::move(readback);
-				} else {
-					logger::warn("[DCLF] The visibility events program could not be created; the stood-in roots' kAccumulated is not written (T7b2)");
-				}
+			if (RenderGraphRuntime::Get().Host()) {
+				buffers->visibilityEventsProgram = kVisibilityEvents.Get();
+				const std::uint32_t events = smallStart ? 4u : kInitialVisibilityEvents;
+				buffers->visibilityEvents = MakeVersioned(CreateWords(VisibilityEventBytes(events) / 4, true, "cs.dclf.visibility-events"),
+					{ .extent = { kVisibilityEventHeaderWords * 4, 16, 4 } });
+				buffers->visibilityRootReported = MakeVersioned(StructuredBuffer(roots, 2 * sizeof(std::uint32_t), "cs.dclf.visibility-root-reported", unused, true),
+					{ .extent = { 0, 8, 8 }, .contents = GrowableContents::Zero });
+				buffers->visibilityObjectReported = MakeVersioned(StructuredBuffer(objects, sizeof(std::uint32_t), "cs.dclf.visibility-object-reported", unused, true),
+					{ .extent = { 0, 4, 4 }, .contents = GrowableContents::Zero });
+				auto readback = std::make_shared<VisibilityReadback>();
+				readback->list = MakeEventList("cs.dclf.visibility-events-readback", sizeof(VisibilityEvent), events);
+				readback->armed.resize(readback->list->Regions());
+				buffers->visibilityReadback = std::move(readback);
 			}
 		}
 		// Pass setups run after every table, since a pass may take its feature's scene resources. A null state keeps a pass out of the graph.
@@ -751,39 +842,6 @@ namespace DCLF
 		}
 	}
 
-	std::shared_ptr<const ComputeProgram> Draws::LoadProgram(rhi::Device a_device, const ComputeProgram::Desc& a_desc, bool& a_pending)
-	{
-		auto& loads = Loads();
-		std::shared_ptr<ProgramLoad> entry;
-		bool start = false;
-		{
-			std::lock_guard lock(loads.mutex);
-			if (loads.device != a_device.impl) {
-				loads.entries.clear();
-				loads.device = a_device.impl;
-			}
-			auto& slot = loads.entries[ProgramKey(a_desc)];
-			if (!slot) {
-				slot = std::make_shared<ProgramLoad>();
-				start = true;
-			}
-			entry = slot;
-		}
-		if (start) {
-			// The compile can block in DXC for seconds after a shader change, so it runs on the build executor.
-			// It runs inline only when the executor refuses the task.
-			auto task = [entry, a_device, desc = a_desc] {
-				entry->program = ComputeProgram::Load(a_device, desc);
-				entry->state.store(entry->program ? ProgramLoad::kLoaded : ProgramLoad::kFailed, std::memory_order_release);
-			};
-			if (!BuildSubmitter()(task))
-				task();
-		}
-		const int state = entry->state.load(std::memory_order_acquire);
-		a_pending = state == ProgramLoad::kLoading;
-		return state == ProgramLoad::kLoaded ? entry->program : nullptr;
-	}
-
 	bool ShadowEngine::SetupShadow()
 	{
 		if (shadow)
@@ -794,12 +852,9 @@ namespace DCLF
 		if (!host)
 			return ShadowNotReady(0, "no render graph");
 		auto device = host->Device();
-		// Programs first. While they compile nothing is made and the views stay native.
-		bool pending = false, rowsPending = false;
-		auto assignCasterRows = LoadProgram(device, { .source = kBuildDrawsShader, .entry = L"ShadowCasterRows", .constantWords = kBuildDrawsConstantWords }, rowsPending);
-		auto buildDraws = LoadProgram(device, { .source = kBuildDrawsShader, .entry = L"ShadowViews", .constantWords = kBuildDrawsConstantWords }, pending);
-		if (pending || rowsPending)
-			return ShadowNotReady(0, "the compute programs are compiling off the render thread");
+		// CS's setup built the programs.
+		auto assignCasterRows = kShadowCasterRows.Get();
+		auto buildDraws = kShadowViews.Get();
 		auto state = std::make_shared<ShadowResources>();
 		state->constants = DeviceBuffer(kShadowConstantBytes, "cs.dclf.shadow.constants");
 		// The shadow commit latches into the constants alone, so this is known before any graph declares the pass.
@@ -826,10 +881,6 @@ namespace DCLF
 		state->casterFirsts = MakeVersioned(CreateWords(objects, true, "cs.dclf.shadow.caster-firsts"), { .extent = { 0, 4, 4 } });
 		state->casterRowsUsed = CreateWords(4u, true, "cs.dclf.shadow.caster-rows-used");
 		state->assignCasterRows = std::move(assignCasterRows);
-		if (!state->assignCasterRows) {
-			shadowSetupFailed = true;
-			return ShadowNotReady(1, "the caster rows' compute program could not be created");
-		}
 		state->rowsDispatchSignature = CreateDispatchSignature(device, state->assignCasterRows->layout->GetHandle());
 		if (!state->rowsDispatchSignature) {
 			shadowSetupFailed = true;
@@ -837,10 +888,6 @@ namespace DCLF
 		}
 		// One dispatch covers every view of an epoch.
 		state->buildDraws = std::move(buildDraws);
-		if (!state->buildDraws) {
-			shadowSetupFailed = true;
-			return ShadowNotReady(1, "the BuildDraws compute program could not be created");
-		}
 		state->dispatchSignature = CreateDispatchSignature(device, state->buildDraws->layout->GetHandle());
 		if (!state->dispatchSignature) {
 			shadowSetupFailed = true;
@@ -849,7 +896,7 @@ namespace DCLF
 		state->pool = EnsureIndexPool(*state->scene, device, smallSlots);
 		if (!state->pool) {
 			shadowSetupFailed = true;
-			return ShadowNotReady(1, "the index pool's copy program could not be created");
+			return ShadowNotReady(1, "the index pool's dispatch signature could not be created");
 		}
 		state->constantsAddress = AddressOf(device, *state->constants);
 		state->constantsRef = RenderGraph::DeclaredRefOf(device, *state->constants);
@@ -874,7 +921,7 @@ namespace DCLF
 		}
 		shadow = state;
 		shadowHost.ShadowResourcesMade(state);
-		host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
+		host->AddExtension(kShadowExtensionId, [] { return MakeShadowExtension(BuildingState(kShadowExtensionId)); }, ExtensionEpochs(Api::EpochShape::Shadow));
 		logger::info("[DCLF] shadow view graph resources created");
 		shadowHost.PostRevisionInputs();
 		return true;
@@ -887,7 +934,7 @@ namespace DCLF
 		auto& shadow = shadowEngine->shadow;
 		if (const auto request = shadowSlotsSlot.Take(); request && host && shadow && request->slots > shadow->drawArgs.size()) {
 			AddShadowViewSlots(*shadow, request->slots, request->sequenceDraws, request->bucketCountWords);
-			host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
+			host->AddExtension(kShadowExtensionId, [] { return MakeShadowExtension(BuildingState(kShadowExtensionId)); }, ExtensionEpochs(Api::EpochShape::Shadow));
 			PostRevisionInputs();
 		}
 	}
@@ -911,19 +958,14 @@ namespace DCLF
 			logger::warn("[DCLF] the {} view's {}; it stays native", traits.name, a_what);
 			return false;
 		};
-		// While the program compiles the view stays native, without failing.
-		bool programsPending = false;
-		auto buildDraws = LoadProgram(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords }, programsPending);
-		if (programsPending)
-			return false;
+		auto buildDraws = kBuildDraws.Get();
 		auto state = std::make_shared<ViewResources>();
 		state->traits = &traits;
 		state->main = resources;
 		state->buildDraws = std::move(buildDraws);
-		if (state->buildDraws)
-			state->dispatchSignature = CreateDispatchSignature(device, state->buildDraws->layout->GetHandle());
+		state->dispatchSignature = CreateDispatchSignature(device, state->buildDraws->layout->GetHandle());
 		if (!state->dispatchSignature)
-			return fail("BuildDraws program could not be created");
+			return fail("BuildDraws dispatch signature could not be created");
 		state->count = CreateWords(kCountWords, true, name("draw-count").c_str());
 		// First sizes. RequireView grows them to hold the view's plan.
 		const std::uint32_t buckets = org::services::GrowthPolicy::Doubling(16).NextAs(0u, ViewLatchLayout::Initial(traits).buckets);
@@ -976,10 +1018,9 @@ namespace DCLF
 				return fail("the faces' camera blocks' views could not be made");
 			MatchViewFrameBuffers(*state, resources->frameBuffers);
 		}
-		// The forward part draws through the main set's colour signatures with an explicit preprocess, like ForwardDrawPass.
-		if (traits.forwardPart)
-			state->preprocessForward = PreprocessStates::Create(device, fmt::format("the {} forward part", traits.name).c_str());
 		resources->views[ViewIndex(a_kind)] = state;
+		if (pendingResources)
+			pendingResources->views[ViewIndex(a_kind)] = state;
 		v.resources = std::move(state);
 		logger::info("[DCLF] {} graph resources created", traits.name);
 		PostRevisionInputs();
@@ -1025,7 +1066,7 @@ namespace DCLF
 		r.targetTexture = a_texture;
 		r.width = info.image.extent.width;
 		r.height = info.image.extent.height;
-		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(BuildingState(id), kind)); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
+		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return MakeViewExtension(BuildingState(id), kind); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
 		logger::info("[DCLF] {} {} imported: {}x{}, {} faces, format {}", traits.name, traits.target, r.width, r.height, info.image.arrayLayers, static_cast<int>(view.targets.colour));
 		PostRevisionInputs();
 		return true;
@@ -1071,7 +1112,7 @@ namespace DCLF
 			logger::info("[DCLF] {} depth imported: {}x{}, format {}", traits.name, info.image.extent.width, info.image.extent.height, static_cast<int>(dsvDesc.Format));
 		}
 		r.rebuildPending = false;
-		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(BuildingState(id), kind)); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
+		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return MakeViewExtension(BuildingState(id), kind); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
 		PostRevisionInputs();
 		return true;
 	}
@@ -1100,7 +1141,7 @@ namespace DCLF
 			shadow->depthTexture[a_index] = a_texture;
 			shadow->depthLayers[a_index] = a_layers;
 			// The passes need to bind a new resource, so the shadow epochs' graphs rebuild at their next build.
-			host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
+			host->AddExtension(kShadowExtensionId, [] { return MakeShadowExtension(BuildingState(kShadowExtensionId)); }, ExtensionEpochs(Api::EpochShape::Shadow));
 		};
 		// A graph-owned target, such as an occlusion map's twin, is one 2D slice.
 		if (a_graph) {

@@ -7,7 +7,6 @@
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 #include <string>
 
@@ -24,10 +23,9 @@ namespace DCLF::Features::Reflection
 		 * @brief The view's contribution: the main set's LOD techniques, six faces with tree LOD, the engine's cube with DCLF's own depth.
 		 * Withheld in its own renderers, the cube camera's accumulators.
 		 */
-		Api::ViewContribution Contribution(Api::ToggleId a_toggle)
+		Api::ViewContribution Contribution()
 		{
 			return { .view = kView,
-				.toggle = a_toggle,
 				.phase = kSetReflection,
 				.membership = Api::ViewMembership::LodTechniques,
 				.keys = { .lodTechniquesOnly = true },
@@ -45,9 +43,7 @@ namespace DCLF::Features::Reflection
 				.withholding = Api::ViewWithholding::OwnRenderers,
 				.targetImport = Api::ViewTargetImport::ColourWithOwnDepth,
 				.coveredInitially = true,
-				.coveredOnFailedGraph = true,
-				.covered = &Covered,
-				.residueDue = &ResidueDue };
+				.covered = &Covered };
 		}
 
 		/** @brief Installs the water reflection's hooks first of the early hooks, before Core's observers. */
@@ -56,39 +52,23 @@ namespace DCLF::Features::Reflection
 			ReflectionFaces::Install();
 			ReflectionFaces::SetFaceOriented([](const RE::NiCamera& a_camera, std::uint32_t a_face) {
 				RenderThreadBudget::Hook budget(RenderThreadBudget::Site::ReflectionFace);
-				if (ShellState::Running())
-					FaceOriented(a_camera, a_face);
-			});
-			ReflectionFaces::SetAfterFaceDraws([] {
-				RenderThreadBudget::Hook budget(RenderThreadBudget::Site::ReflectionFace);
-				if (ShellState::Running())
-					FaceDrawn();
+				FaceOriented(a_camera, a_face);
 			});
 			ReflectionFaces::SetRootsOwned([](bool a_plain) {
 				RenderThreadBudget::Hook budget(RenderThreadBudget::Site::ReflectionFace);
-				return ShellState::Running() ? IndirectDraws::Get().ViewLodRootsOwned(kView, a_plain) : 0u;
+				return IndirectDraws::Get().ViewLodRootsOwned(kView, a_plain);
 			});
 		}
 
 		void Install(Api::InstallContext& a_context)
 		{
-			// Registered after the precipitation mask's switch, where Core's was.
-			const auto reflectionsSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_REFLECTIONS", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::UnlessOne,
-				.description = "0: the water reflection's faces stay native (live toggle's seed)", .before = "CS_DCLF_OPAQUE_EFFECTS" });
-			// Registered first after the occlusion maps' toggles, so its bit in the packed toggle word stays where Core's was.
-			const auto reflections = a_context.RegisterToggle({ .name = "reflections", .label = "Draw the water reflection's distant land, objects and trees",
-				.tooltip = "DCLF draws the LOD the water's cube map reflects from its own tables on the GPU; the engine draws the sky, and any LOD DCLF cannot draw yet.",
-				.section = "Reflections", .seed = reflectionsSwitch, .after = "shadows" });
-			a_context.RegisterView(Contribution(reflections));
+			// DCLF draws the LOD the water's cube map reflects from its own tables on the GPU; the engine draws the sky.
+			a_context.RegisterView(Contribution());
 			a_context.RegisterViewWork({ .view = kView, .point = Api::ViewPoint::FrameStartAfterTreeLod, .run = &Prepare });
 			a_context.RegisterViewWork({ .view = kView, .point = Api::ViewPoint::DepthCommitted, .run = &Execute });
-			// The engine's update hides these whatever the toggle.
+			// The engine's update hides these.
 			a_context.RegisterCullHiddenSource({ .bit = Api::CullHiddenBit::AsNow, .nodes = &CullHiddenByUpdate });
 			a_context.RegisterReportLines({ .name = "reflection", .point = Api::ReportPoint::AsyncWorkViews, .text = &Lines });
-			if (Diagnostics::Observe().claimsOrScene) {
-				SubscribeFaceCameraParity();
-				SubscribeResidue();
-			}
 		}
 	}
 

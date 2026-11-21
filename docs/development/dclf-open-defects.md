@@ -368,6 +368,20 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     **Next:** count publication holes apart for flips that were deferred, and judge by the release check.
 -   **A hold's known effects.** During a hold, both terrain levels' LOD water registers, and a held block's segments are not
     updated. The map's hide-all is handled by flushing. These effects have not been measured visually.
+-   **DynDOLOD LOD shapes without the LOD flags may be drawn by nobody (unconfirmed).** `Eligibility::Static`
+    (`Core/Scene/Model/Eligibility.cpp`) admits a `BSSubIndexTriShape` only when its shader property carries Features/Lod's
+    `kLODObjects | kHDLODObjects`. Ordinary object LOD (`.bto`) has them and DCLF draws it. DynDOLOD's 3D tree LOD and other
+    passthru LOD shapes inside its `.bto` files keep the full model's shader flags, so they come out `Ineligible::NotTriShape`; in
+    guest the flush latch then skips the engine's draw, and native has no engine draw. Found by reading the code
+    (`docs/development/plans/dclf-tree-wind-object-lod.md`); the test profile has no DynDOLOD output, so it is unconfirmed.
+    **Decision (2026-11-18):** admit every LOD shape under the LOD roots, flags or not, kept non-casting (`IsLodObject`), with a
+    matching rule for the water reflection. **Next:** confirm on a DynDOLOD install with `CS_DCLF_CENSUS=1` (look for
+    `NotTriShape` sub-index shapes under `lodLandRoot`), then admit them.
+-   **Tree Wind does not sway object-LOD trees in DCLF.** Blocked by the entry above. Decided design: a buffer owned by Tree
+    Wind, read by device reference from record words 4-5, with the bend data built by background jobs under engine-read-window
+    leases (plan: `dclf-tree-wind-object-lod.md`). **Improvement target:** that design copies vertices and computes bend data on
+    the CPU. A better one would avoid the copies and the CPU work altogether (for example, derive the bend weights on the GPU from
+    data DCLF already uploads), and the whole area should be revisited before or instead of building the copy path.
 
 ## Grass drawn by the engine on the first takeover after a load
 
@@ -394,20 +408,17 @@ both ways (no overlap, no hole). **Check:** a turn-only run's first `grass draws
     input list named slots the CPU's builds did not. The payload's tables are the snapshot's own (checked in vp7), so it is not a
     payload built from newer tables. If the GPU's inputs are stale (a region upload or journal gap), it draws freed objects'
     records for those frames. Since then (2026-10-22, 120 s runs vp11-vp18) it showed in 4 of 8 runs, now one slot a window at
-    most, the same way. Established, each by a TEMP parity-only diagnostic still in place:
-    -   no CPU list names the slot (`listed by 0x0`: neither segment's resident region nor input list; `SetParity.cpp`);
-    -   the installed publication's inputs backing, copied after the colour epoch with the words, does not hold it anywhere in
-        its 16,384 entries (vp17, slot 174, frame 4997: `name it at: none`);
-    -   the commit pairs the payload with the publication made from its body (`CommitMainPayload`: 0 mismatches), the inputs
-        backings' catch-ups match the whole list (`payload inputs backings`: 0 differ), and no segment commits a frame number
-        twice (0 repeats in vp18).
+    most, the same way. Established by TEMP parity-only diagnostics, since removed (ORG cleanup, 2026-11-20):
+    -   no CPU list named the slot (neither segment's resident region nor input list);
+    -   the installed publication's inputs backing, copied after the colour epoch with the words, did not hold it anywhere in
+        its 16,384 entries (vp17, slot 174, frame 4997);
+    -   the commit paired the payload with the publication made from its body (0 mismatches), the inputs backings' catch-ups
+        matched the whole list (0 differ), and no segment committed a frame number twice (0 repeats in vp18).
     So the word was written with this frame's stamp from an input list that is not the installed publication's as copied.
-    **Diagnostic in place (TEMP, CS_DCLF_SET_PARITY only):** each visibility word's writer is recorded per segment
-    (`Resources::writers`, BuildDrawsCS's `RecordWriter`, bound through the main dispatches' unused `memberClaimsIndex`): the
-    stamp, the scene list's SRV index, the input's position and the write site. An "outside the set" sample prints both segments'
-    writers next to the installed inputs SRV. It did not reproduce in run wr4 (2026-10-22, about 12,400 frames walking out of
-    Riverwood). **Next:** on a hit, a writer whose inputs SRV is not the installed one means a dispatch read another backing; the
-    same SRV with no input naming the slot means the backing changed after the dispatch.
+    A per-segment writer record (`Resources::writers`, BuildDrawsCS's `RecordWriter`) was added next and did not reproduce in
+    run wr4 (2026-10-22, about 12,400 frames walking out of Riverwood). The set parity's "drawn outside the set" line still
+    reports the symptom. To dig further, restore the writer records from git history (before `refactor(dclf): drop set parity
+    TEMP records`).
 -   **Extras parity on terrain and object LOD after a load (`<- DIFFER`).** In run tog9 (2026-10-25, MO2 1.6.1170 heavy
     exterior, `CS_DCLF_PERSISTENT_PARITY`), the first two windows only: 97 of 1111 and 39 of 1391 objects, largest difference
     262144, first samples `Block (3, 0)` (component 2: completed -30720, reference -4710.4) and `objsnowHD-LargeRef`
@@ -415,8 +426,8 @@ both ways (no overlap, no hole). **Check:** a turn-only run's first `grass draws
     switch, so the CPU/GPU toggling there is not its cause. Not seen in v3-full on the same save. Seen again in run fix-full
     (2026-10-26, the 1.6.1170 heavy setup's grass save, turning, persistent and set parity): two windows, 57 of 591 and 167 of 701
     objects, first samples `objsnow` and `Alpha` (component 7). Not investigated.
--   **Build parity's decal check reads only the classes' decal sub-ranges.** With the plain decal buckets on
-    (`CS_DCLF_DECAL_PLAIN`) the decals go to the class plan's decal buckets, which `DrawnDecal` does not read, so the check reports
+-   **Build parity's decal check reads only the classes' decal sub-ranges.** With the plain decal buckets
+    the decals go to the class plan's decal buckets, which `DrawnDecal` does not read, so the check reports
     every slot culled ("87 slots, 87 culled"). The colour and terrain draws' plain buckets were added to the comparison on 2026-10-22
     (it had compared nothing since the plain buckets came in). **Next:** read the decal buckets the same way.
 -   **Accumulated parity on terrain and object LOD geometry (`<- ACCUMULATED DIFFER`).** In run vp10 (`CS_DCLF_ACCUMULATED_PARITY`
@@ -539,7 +550,7 @@ The cache's per-light `LocalShadow` flag, its `FirstPerson` / `WorldEyePosition`
 
 A frame's shadow-casting point and spot lights are numbered as their `Accumulate` runs (`LocalLightCull`'s `TakeOrdinal`). DCLF
 tracks a light's bits in a 32-bit mask, so a light past the 32nd gets no ordinal: no empty cull, no engine-only subset, and the
-engine culls the whole scene for it (`EngineOnlyCull::WholeCull::PointPastMask` / `SpotPastMask`, counted in the primary cull's
+engine culls the whole scene for it (`WholeCull::Reason::PointPastMask` / `SpotPastMask`, counted in the primary cull's
 report as `<- WHOLE ENGINE CULL`). It is the last light case without coverage. None was counted in the 2026-11-08 runs (Riverwood,
 Dragonsreach, Whiterun); the point lights' line counts them as "past the mask's 32", which only showed before DCLF ran.
 **Next:** a scene with more than 32 shadow lights in one frame (heavily lit interiors, light mods); then either widen the mask
@@ -589,8 +600,83 @@ refuses each, so they join instead of being registered by the engine every frame
     Since 2026-11-08 the runtime opts in to resting layouts and nothing is pinned, so this window may be gone; it has not been
     re-run under the validation layer. **Next:** check with `amdval.env`, and pin at first description only if it remains under
     `CS_ORG_RESTING_LAYOUTS=0`.
+-   **Physical Sky washes the scene out.** With Physical Sky on, a Whiterun exterior at noon is covered in a bright cream haze:
+    distant terrain nearly gone, a flat pale sky, glowing silhouette edges. It happens in plain D3D11 mode, in the graph modes,
+    and in upstream's own build (`a03587448`, 2.0.0-rc.1, checked by hand on 2026-11-19), so it is not from the sync or the ORG
+    ports. **Cause (confirmed 2026-11-19):** Physical Sky's output is calibrated for a linear scene; with Linear Lighting off
+    (Post Processing in Vanilla mode) its sky radiance, aerial perspective and 10 lux sun land in the gamma buffer unscaled. With
+    Linear Lighting on, plain D3D11 looks normal. A candidate fix that turns Physical Sky off without Linear Lighting is on
+    `fix/physsky-washout` (`2e0fdec49`), not merged. **Next:** waiting on the feature author on whether the combination is meant
+    to work; left alone until then.
 -   **BasicRHI's `frontCCW` under Vulkan.** `frontCCW` has D3D's meaning on both backends. SARP and BasicRenderer set it true for
     glTF content. Their D3D12 behaviour is unchanged, but they have not been run under Vulkan since the mapping changed.
+
+## Graph-mode port gaps
+
+Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 hard ports.
+
+-   **A cold loading screen can lose its frame schedule.** With a cold shader store and a load that outlasts the intro movie, the
+    UI stage's build after the targets are registered again is staged together with the post build, which compiles about 75
+    ImageSpace programs one by one through `GetNow` at the graph's build ("Setup did not queue it"). That took 40 s in batch 16,
+    and frame 167 of the loading screen had a kMAIN clear with no place in the schedule. Warm stores do not show it.
+    **Next:** address with the shader precompile overhaul (queue the programs at Setup and compile them in parallel).
+-   **A cold cache makes a frame wait for DCLF's on-demand pipelines.** A new variant (for example HDR's Lighting variants in
+    native Vulkan with frame generation) is compiled on demand while the frame waits; one took 13 s on 2026-11-19 and the hang
+    watchdog fired at 15 s (`native-vulkan+fg-hdr`, passed once warm). The render thread must never wait. **Next:** with the
+    shader precompile overhaul; until then warm each mode and config once before judging a failure.
+-   **Physical Sky's aerial perspective is its own full-screen pass.** The ORG deferred composite's push block holds 32
+    words and uses 26; Physical Sky needs about 7 more and ViewAtmosphere 3. So the aerial perspective runs as
+    `cs.physical-sky.composite` right after `cs.deferred` (phase 2, not yet run in the game). Minor cost: one more full-screen
+    read and write of kMAIN and a second fp16 rounding. **Next:** fold it back into the composite when the composite takes a
+    handle table.
+-   **Intermittent crash in DCLF's material capture during a load (guest).** `guest+resize` on build `2fcb06441` crashed at the
+    loading screen (2026-11-19 12:12, `crash-2026-11-19-12-12-42.log`): the render thread executed `0x1ffff`, with
+    `MaterialPort.cpp:68` (`Capture(*a_material, ...)`) under `SceneCapture.cpp:707` on the scanned stack. Two reruns passed. A
+    guess, not proven: a material whose reference count is still above zero while it is being destroyed (its vtable already
+    gone). **Next:** check the material's lifetime against the capture in `SceneCapture`, and catch it with a hang/crash dump.
+-   **Native Vulkan: Physical Lens's ghosts and starburst lose the device on the RX 6600.** Seen in `cs.pp.physical-lens.request-plans`
+    with frame generation off (step 6's lead, `native-vulkan+fg-fx`, 2026-11-19). The lens image mapping and Camera FX are fine.
+    **Next:** reproduce with `DXVK_DEBUG=hang` and the RGD crash flow on Vulkan only.
+-   **Physical Sky's graph clouds are about 6% darker than D3D11.** Same frame, clear weather, Whiterun: guest's overcast sky
+    reads 223 against D3D11's 239. Under the washout (Linear Lighting off) the clear skies already differ, so the gap is not
+    pinned. First suspects: the ambient inputs (ground-reflection SH, ambient transport). **Next:** compare with Linear
+    Lighting on.
+-   **Physical Sky's lightning, storms, voxel clouds, local NDF, middle and cirrus layers and clouds in water reflections are
+    untested on the graph.** Only clear weather at one spot ran (`clouds.toml`, `clouds-long.toml`).
+-   **A wrong JSON type in a Physical Sky setting crashes the game.** `PhysicalSky.enableVolumetricClouds=1` (a number for a
+    bool) ends in a JSON type error. Settings must be validated (`.claude/CLAUDE.md`).
+-   **A cold shader store makes boot slow with the clouds:** the 50 cloud programs compile before data-loaded, beyond the 120 s
+    load limit on a first run. Warm per mode first.
+-   **(Closed) Guest: Physical Sky's volumetric clouds kept the AP shadow, the fog's scattering and the sky tail on D3D11.**
+    Phase 4 of `physical-sky-port.md` put the clouds on the graph (`cs.physical-sky.cloud-maps`, `cs.physical-sky.clouds`).
+    The three read the shadow volume and mean by their published ids, and the D3D11 fallbacks are gone.
+-   **(Closed) Native: no volumetric clouds and no lightning.** The native gate in `PhysicalSky::VolumetricCloudsEnabled`
+    is removed. The lightning query reads its candidates through `RenderGraph::RunReadback`.
+-   **(Closed) Guest: kMAIN goes non-finite with Exponential Height Fog on.** With the fog and its volumetric fog on, guest's image goes
+    black with bright green-haloed foliage and stays so (NaN or inf through bloom). Fog off, native and plain D3D11 are clean.
+    Pre-existing: build `87fcac5d6` (before ViewAtmosphere's port) shows it too. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=1` shows kMAIN
+    already non-finite before the post-water composite, and `=6` (pass-through) keeps the blobs, so the composite is not the cause.
+    **Fixed (2026-11-19, build `1a0b9dde1`):** the fog's temporal history (`CS_ORG_FOG_DEBUG=8` turned it off and the image
+    was clean). Guest memory is DXVK's recycled VRAM, so history texels never written held garbage, and the 0.96 blend kept
+    it. The scattering shader now rejects history that is not finite or above 65504 (`3bd376e65`, also in D3D11), and
+    readers get the volumes only after a run wrote them (`d451564b3`). Guest fog now matches native and plain D3D11. Where
+    the unwritten texels come from is not proven. `CS_ORG_FOG_DEBUG=9` (clear the histories every run) is clean too.
+    `CS_ORG_FOG_DEBUG=10` (clear every 600 frames by a one-shot client) hung 31 frames after world-ready; it is a
+    diagnostic only, not looked into.
+-   **(Closed) Native: the fog volumes hold almost no fog.** With the same settings plain D3D11 shows haze on distant hills; native shows
+    none. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=3` reads transmittance near 1 across the screen, so the integrated volumes the post-water
+    composite reads are near identity. Before ViewAtmosphere's port native had no fog composite at all, so this was hidden.
+    **Update (2026-11-19, build `0d994ca13`):** native Vulkan now shows the same haze as plain D3D11 at the same spot
+    (`native-vulkan+fog` vs `d3d11+fog`), most likely since the post-water composite flag follows the frame (`b2b46322d`).
+    Native D3D12 matches too. **Closed.**
+-   **A graph build reads PublishedResources off the render thread.** Once per run near loading:
+    `[C] [ORG] PublishedResources used on thread N, not the render owner: its entries are not locked`. N is an async graph-build
+    thread building the UI stage. The likely caller is DCLF's `DeclarePublishedRead` (`FrameBindings.cpp:136`), which calls
+    `ShaderResourceVariant` and `ShaderResourceIndex` during a pass's declare; they read live, unlocked entries. **Next:** carry
+    each entry's published state and view in the build snapshot and serve these two calls from it during a build.
+-   **Physical Sky's `PHYSICAL_SKY` define in graph builds.** Removing the strip had broken DCLF Lighting and Effect pipelines
+    (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and the ORG
+    `ISSAOComposite` build in guest. Phase 3 of `physical-sky-port.md` maps them and removes the strip; not yet run in the game.
 
 ## Accepted differences
 

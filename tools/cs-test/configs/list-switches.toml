@@ -1,0 +1,10 @@
+# The switch dump: the game writes CommunityShaders-Switches.json at kPostPostLoad and exits, outcome passed.
+# Then copy it to the schema: python tools/cs-test/cs_test.py schema
+# Run it with DCLF on (the default), so its features' switches are in the dump.
+extends = ["base"]
+
+[env]
+CS_TEST_LIST_SWITCHES = "1"
+
+[expect]
+live_frames = 0

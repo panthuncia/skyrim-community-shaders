@@ -1,6 +1,8 @@
-// Switches: the registry, the switches file and environment read once, and the startup summary.
+// Switches: Core's switches and the features' registered ones, read once from the switches file and environment, and the startup summary.
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
+#include "RenderGraph/Fatal.h"
+#include "Testing/SwitchRegistry.h"
 #include "Utils/SwitchFile.h"
 
 #include <Windows.h>
@@ -16,14 +18,7 @@ namespace DCLF
 {
 	namespace
 	{
-		enum class Kind : std::uint8_t
-		{
-			Feature,
-			Parity,
-			Diagnostic,
-			Test,
-			Other,
-		};
+		using Kind = Testing::SwitchRegistry::Kind;
 
 		// Which values narrow a feature, as its reader interprets them.
 		enum class Reduced : std::uint8_t
@@ -37,142 +32,67 @@ namespace DCLF
 		struct Entry
 		{
 			Switch id;
-			std::string_view name;
-			Kind kind;
+			std::string_view name;  // a row of the switch table (src/Testing/SwitchRegistry.cpp), which has its kind and description
 			Reduced reduced;
-			bool environmentOnly;
-			std::string_view description;
 		};
 
 		using enum Switch;
-		constexpr auto F = Kind::Feature, P = Kind::Parity, D = Kind::Diagnostic, T = Kind::Test, O = Kind::Other;
 		// A feature's Api::SwitchKind is one of these.
-		static_assert(static_cast<Kind>(Api::SwitchKind::Feature) == F && static_cast<Kind>(Api::SwitchKind::Parity) == P &&
-					  static_cast<Kind>(Api::SwitchKind::Diagnostic) == D && static_cast<Kind>(Api::SwitchKind::Test) == T && static_cast<Kind>(Api::SwitchKind::Other) == O);
+		static_assert(static_cast<Kind>(Api::SwitchKind::Feature) == Kind::Feature && static_cast<Kind>(Api::SwitchKind::Parity) == Kind::Parity &&
+					  static_cast<Kind>(Api::SwitchKind::Diagnostic) == Kind::Diagnostic && static_cast<Kind>(Api::SwitchKind::Test) == Kind::Test &&
+					  static_cast<Kind>(Api::SwitchKind::Other) == Kind::Other);
 		constexpr auto N = Reduced::Never;
 
-		// One row per switch, in Switch order, checked below.
-		constexpr Entry kRegistry[] = {
-			{ Dclf, "CS_DCLF", F, Reduced::Zero, false, "0: DCLF does not install" },
-			{ AsyncPriority, "CS_DCLF_ASYNC_PRIORITY", F, N, false, "normal: the coordinator and scene threads keep normal priority instead of above normal (and frame-critical jobs run at normal); noboost: workers are not raised to a ParallelFor caller's priority while they hold its chunks, nor for frame-critical jobs (the CPU pipeline's culls)" },
-			{ AsyncCompute, "CS_DCLF_ASYNC_COMPUTE", F, Reduced::Zero, false,
-				"0: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue; unset: on in guest mode, off in native mode (1 turns it on there)" },
-			{ ForwardPlain, "CS_DCLF_FORWARD_PLAIN", F, Reduced::Zero, false,
-				"0: the forward epoch draws its range device-generated, a call per state class, instead of a plain draw per pipeline" },
-			{ ForwardDirect, "CS_DCLF_FORWARD_DIRECT", F, Reduced::Zero, false,
-				"0: the GPU-driven graph keeps its forward family (blended, refraction, first person's forward part) on the GPU, sorted per pipeline, instead of the CPU pipeline" },
-			{ AsyncGraphBuilds, "CS_DCLF_ASYNC_BUILDS", F, Reduced::Zero, false,
-				"0: DCLF's epoch graphs are built on the render thread at its build point, instead of on the scene worker and attached at a frame's end" },
-			{ MainPlain, "CS_DCLF_MAIN_PLAIN", F, Reduced::Zero, false,
-				"0: the colour pass draws its main range device-generated, a call per state class, instead of a plain draw per pipeline" },
-			{ TerrainPlain, "CS_DCLF_TERRAIN_PLAIN", F, Reduced::Zero, false,
-				"0: the colour segment's second pass draws the terrain groups' ranges device-generated, a call per state class, instead of a plain draw per pipeline" },
-			{ DecalPlain, "CS_DCLF_DECAL_PLAIN", F, Reduced::Zero, false,
-				"0: the decal groups draw device-generated, a call per state class (the engine's order within a class), instead of a plain draw per pipeline (the engine's order within a pipeline)" },
-			{ ShadowMerge, "CS_DCLF_SHADOW_MERGE", F, Reduced::Zero, false,
-				"0: a shadow view's pipelines keep every technique bit and vertex layout of its casters' keys, instead of one pipeline per canonical depth-only technique (CanonicalShadowTechnique; the layout read per draw)" },
-			{ ShadowDepthClamp, "CS_DCLF_SHADOW_DEPTH_CLAMP", F, Reduced::Zero, false,
-				"0: a shadow view whose rasterizer state turns depth clipping off stays the engine's, instead of drawing with depth clamped to the viewport's range (RasterState::depthClip, where the device has depthClamp)" },
-			{ LazyRows, "CS_DCLF_LAZY_ROWS", F, Reduced::Zero, false,
-				"0: a pulled build reads every row block member into a static at entry (live through the shader) instead of loading each where it is used" },
-			{ Workers, "CS_DCLF_WORKERS", F, N, false, "the preparation pool's threads (default hardware threads - 2, at least 1)" },
-			{ FrameWorkers, "CS_DCLF_FRAME_WORKERS", F, N, false, "the frame-critical threads (default a quarter of the preparation pool, at least 2; 0: none, the preparation workers alone take frame-critical jobs)" },
-			{ SceneCopies, "CS_DCLF_SCENE_COPIES", F, N, false,
-				"the copies a frame's scene values keep per pool class (FrameValues' rows; default 3, 2 to the frames in flight): a frame's producer reuses the copy the oldest in-flight frame bound, its uploads waiting on the GPU for that frame" },
-			{ Shrink, "CS_DCLF_SHRINK", F, N, false,
-				"when the growable scene buffers give memory back (one policy for all, PooledBackings::Shrink): default once a buffer was asked at most a quarter of its capacity for 5 s; "
-				"off: grow-only; eager: at the first such ask (stress and parity runs)" },
-			{ Fanout, "CS_DCLF_FANOUT", F, N, false,
-				"the scene pass's evaluation rounds and joins (T6b3e): 0 interleaved on the scene lane (the reference), 1 every entry evaluated then merged, on the lane; 2 (default) evaluated on the preparation pool from 128 entries, merged in order" },
-			{ Precompile, "CS_DCLF_PRECOMPILE", F, Reduced::Zero, false, "0: DCLF's SPIR-V programs compile on first use instead of alongside the engine's shaders" },
-			{ Cull, "CS_DCLF_CULL", F, Reduced::Cull, false, "off|frustum|occlusion (default): GPU culling, the live toggle's seed" },
+		// One row per switch, in Switch order, checked below. The startup summary lists them in this order.
+		constexpr Entry kCore[] = {
+			// Features: unset is DCLF's full featureset; the startup log names a run that narrows one.
+			{ Dclf, "CS_DCLF", Reduced::Zero },
+			{ AsyncCompute, "CS_DCLF_ASYNC_COMPUTE", Reduced::Zero },
+			{ SceneCopies, "CS_DCLF_SCENE_COPIES", N },
+			{ Shrink, "CS_DCLF_SHRINK", N },
+			{ Cull, "CS_DCLF_CULL", Reduced::Cull },
 			// The CPU-driven pipeline, an experiment, seeds the live toggles. See dclf-architecture.md, "The CPU-driven pipeline".
-			{ CpuPipeline, "CS_DCLF_PIPELINE", F, N, false, "auto (default: exteriors GPU-driven, interiors CPU-driven)|manual|gpu|cpu: the draws culled and recorded on the GPU, or culled on the CPU and recorded as direct draws into DXVK's command buffer; gpu and cpu are manual with both kinds of cell (live toggle's seed)" },
-			{ CpuRecord, "CS_DCLF_CPU_RECORD", F, N, false, "indirect|serial|parallel (default indirect on every vendor): the CPU pipeline's per-frame views as indirect draws the cull jobs write, recorded by DXVK's CS thread, or into a secondary list per batch on the pool (live toggle's seed)" },
-			{ CpuCadence, "CS_DCLF_CPU_CADENCE", F, N, false,
-				"frame|snapshot, or <view>=frame|snapshot,...: the CPU pipeline's views culled and recorded every frame (default) or once per snapshot (main is always per frame; live toggles' seeds)" },
-			{ CpuBatch, "CS_DCLF_CPU_BATCH", F, N, false, "the CPU pipeline's batch lanes (default 4096, rounded up to a multiple of 8; the live setting's seed: dclf:cpu-batch, the menu)" },
-			{ ShadowOrder, "CS_DCLF_SHADOW_ORDER", F, Reduced::Zero, false,
-				"the CPU pipeline's shadow views' draw order: their casters nearest the light first, in this many depth slabs, by pipeline within each (default 8; 1: by distance alone; 0: the lists' order, by pipeline)" },
-			{ ProjectedUv, "CS_DCLF_PROJECTED_UV", F, Reduced::UnlessOne, false, "0: projected-UV objects stay native (live toggle's seed)" },
-			{ PlainSnowSparkle, "CS_DCLF_PLAIN_SNOW_SPARKLE", F, Reduced::UnlessOne, false,
-				"0: a snow layer whose material is the plain class draws without sparkle instead of the Snow class's default (live toggle's seed)" },
-			{ Shadows, "CS_DCLF_SHADOWS", F, Reduced::UnlessOne, false, "0: DCLF does not draw the shadow views (live toggle's seed)" },
-			// The render graph's submission switches are in src/Testing/SwitchRegistry.cpp.
-
-			{ PersistentParity, "CS_DCLF_PERSISTENT_PARITY", P, N, false, "1: every kept store (records, bindings, slots, shading, geometry) against a rebuild, every 60 frames" },
-			{ WalkParity, "CS_DCLF_WALK_PARITY", P, N, false, "1: the delta walk against a dense walk, every 60 frames" },
-			{ ChangeLogParity, "CS_DCLF_CHANGE_LOG_PARITY", P, N, false, "1: the change log against a diff of the tables" },
-			{ ResidentParity, "CS_DCLF_RESIDENT_PARITY", P, N, false, "1: resident records against the engine's registrations" },
-			{ BuildParity, "CS_DCLF_BUILD_PARITY", P, N, false, "1: the build cache against a fresh build" },
-			{ SetParity, "CS_DCLF_SET_PARITY", P, N, false, "1: the per-object visibility words read back after the colour epoch against the CPU's decisions" },
-			{ MirrorParity, "CS_DCLF_MIRROR_PARITY", P, N, false, "1: the scene mirror against the live objects, a slice of the tracked set a frame (step 6e F3)" },
-			{ PlayerParity, "CS_DCLF_PLAYER_PARITY", P, N, false, "1: the compatibility monitor starts on (the menu switches it live): engine state other plugins change with no hook DCLF sees, by reference and plugin" },
-			{ CaptureParity, "CS_DCLF_CAPTURE_PARITY", P, N, false, "1: the tables against the engine's own lighting draws (run with CS_DCLF_PARITY_BOTH=1, so the engine draws what DCLF draws)" },
-			{ ParityBoth, "CS_DCLF_PARITY_BOTH", P, N, false, "1: nothing is withheld from the engine, which draws everything while DCLF draws its set as well (capture parity compares the two; it double-draws)" },
-			{ CapturePointParity, "CS_DCLF_CAPTURE_POINT_PARITY", P, N, false, "1: the colour epoch's captured bindings against the frame's first native lighting draw" },
-			{ AccumulatedParity, "CS_DCLF_ACCUMULATED_PARITY", P, N, false,
-				"1: T7b1/T7b2 observers: DCLF's decoded visibility against the engine's kAccumulated on the listed roots and their geometry, frame by frame (<- ACCUMULATED), and FUN_1402cff60's animation gate on the stood-in roots against DCLF's writes (<- ANIM RATE); off: the readback and the writes still run" },
-
-			{ Stats, "CS_DCLF_STATS", D, N, false, "1: the periodic report" },
-			{ PassStats, "CS_DCLF_PASS_STATS", D, N, false, "1: per-pass counts in the report" },
-			{ Profile, "CS_DCLF_PROFILE", D, N, false, "1: scene-phase timings in the report" },
-			{ ShaderDebug, "CS_DCLF_SHADER_DEBUG", D, N, false, "default on (off in the release profile, 1 turns it on): SPIR-V with debug info, and the HLSL sources copied beside the log; 0: without" },
-			{ ShaderSourceDir, "CS_DCLF_SHADER_SOURCE_DIR", D, N, false, "where CS_DCLF_SHADER_DEBUG copies the HLSL sources" },
-			{ StageDump, "CS_DCLF_STAGE_DUMP", D, N, false,
-				"<dir>: every DCLF stage request's compile inputs, the Lighting programs' descriptor pairs and the pulled rewrite's options, as JSON "
-				"lines in <dir>/stages.jsonl, for tools/shader-compare" },
-			{ TraceTexturePaths, "CS_DCLF_TRACE_TEXTURE_PATHS", D, N, false, "set: texture identities are logged with their paths" },
-			{ Census, "CS_DCLF_CENSUS", D, N, false,
-				"1: T7a's census, every report: what the engine still draws (the passes registered and not withheld) per view and class (DCLF's verdict for Lighting geometry; shader type and RTTI otherwise)" },
-			{ PrecisionCensus, "CS_DCLF_PRECISION_CENSUS", D, N, false, "1: every 300 frames, what the engine's float translations lose against their parent chains composed in double, by distance from the origin" },
-			{ MirrorWatch, "CS_DCLF_MIRROR_WATCH", D, N, false, "1|<name>|node:|geometry:|transform:|fade:|fadetype:|alpha:|alphas:<form ID>|...|missed:<field>|parity...: hardware watchpoints, with the writers' callers, name the writers the mirror misses (MirrorWatch.h)" },
-			{ TableStart, "CS_DCLF_TABLE_START", D, N, false, "small: the growable GPU tables start with a few rows, so that growth runs early and often" },
-			{ DepthTrace, "CS_DCLF_DEPTH_TRACE", D, N, false, "1: the D3D11 calls that touch the main depth buffer, for five frames" },
-			{ DrawTrace, "CS_DCLF_DRAW_TRACE", D, N, false, "1: the callers of the D3D11 draws" },
-			{ TargetProbe, "CS_DCLF_TARGET_PROBE", D, N, false, "x,y: the G-buffer targets at a pixel where the opaque pass ends (open defect)" },
-			{ TargetDump, "CS_DCLF_TARGET_DUMP", D, N, false, "f1,f2,...: at those Present counts, every target bound at each dump point of the frame (and kMAIN, its depth) read back asynchronously and written as half-size PNGs with NaN/Inf marked, and their statistics (Diagnostics/TargetDump.h; into SKSE/dclf-dump/<count>)" },
-			{ FoliageParity, "CS_DCLF_FOLIAGE_PARITY", P, N, false,
-				"1: the alpha-tested colour draws' pixels (object, albedo, diffuse) against the frame before's, tree wind frozen; wind: not frozen" },
-			{ ShadowDebugOutput, "CS_DCLF_SHADOW_DEBUG_OUTPUT", D, N, false, "1: Lighting.hlsl writes the sun's shadow terms into the diffuse target (open defect)" },
-			{ ReleaseGuard, "CS_DCLF_RELEASE_GUARD", D, N, false,
-				"1: the engine objects' last releases on DCLF's threads (the scene lane, the pool) counted and named by class (NiRefObject::DeleteThis patched; T6b3e)" },
-			{ ScheduleDump, "CS_DCLF_SCHEDULE_DUMP", D, N, false, "1: each epoch's passes as gathered, logged whenever a list changes (tools/dclf-schedule-diff.py)" },
-			{ FrameTrace, "CS_DCLF_FRAME_TRACE", D, N, false,
-				"1: every frame's adoption, epoch coverage, main epoch outcomes, colour culling counts and retirement point, and F10 as a marker, for finding corrupt frames (tools/dclf-corrupt-frames.py)" },
-			{ RefCheck, "CS_DCLF_REF_CHECK", D, N, false,
-				"1: every buffer view ref checked as it is made and where DCLF records one (its slot in BasicRHI's region, its pair live and its buffer's, "
-				"the address it reads at, the bytes inside the view, the heaps' bytes for the pair), and every described buffer's import against the "
-				"buffer's address now; the first mismatches are logged as \"ref check:\" lines (open defect: the RX 6600 device fault)" },
-			{ RefTrace, "CS_DCLF_REF_TRACE", D, N, false,
-				"1: Vulkan: the DCLF stages record the buffer view refs each load and store site uses (a pixel or vertex in 64), logged once a second "
-				"as \"ref trace:\" lines by site line, with null and odd refs counted (open defect: black DCLF objects)" },
-
-			{ TestCommands, "CS_DCLF_TEST_COMMANDS", T, N, false, "<frame>:<console command>;...: console commands at given frames" },
-			{ TestMove, "CS_DCLF_TEST_MOVE", T, N, false, "<start>:<end>:<units per frame>;...: carries the player forward" },
-			{ TestTurn, "CS_DCLF_TEST_TURN", T, N, false, "<start>:<end>:<degrees per frame>;...: turns the player" },
-			{ TestToggle, "CS_DCLF_TEST_TOGGLE", T, N, false, "<off frame>:<on frame>...: switches DCLF off and on" },
-			{ TestExit, "CS_DCLF_TEST_EXIT", T, N, false, "<frame>: the game exits at once after that many frames (startup loops)" },
-			{ TestRefuse, "CS_DCLF_TEST_REFUSE", T, N, false,
-				"<name>,...: geometry whose node name contains one is refused as an unstable buffer (a RaceMenu morph on test2): the engine-only subset's paths" },
-			{ TestShadowClamp, "CS_DCLF_TEST_SHADOW_CLAMP", T, N, false,
-				"1: every shadow view draws with depth clamped instead of clipped, as a view whose rasterizer state turns depth clipping off would (CS_DCLF_SHADOW_DEPTH_CLAMP's path; shadows differ only where casters cross a view's near or far plane)" },
-
-			{ UpscaleSubmit, "CS_UPSCALE_SUBMIT", O, N, false, "direct: upscaling's ring submissions wait for DXVK's command stream" },
-			{ StreamlineReflex, "CS_STREAMLINE_REFLEX", O, N, false, "0: Streamline does not load Reflex, PCL or DLSS-G (for Nsight captures)" },
+			{ CpuPipeline, "CS_DCLF_PIPELINE", N },
+			{ CpuRecord, "CS_DCLF_CPU_RECORD", N },
+			{ CpuBatch, "CS_DCLF_CPU_BATCH", N },
+			{ PlainSnowSparkle, "CS_DCLF_PLAIN_SNOW_SPARKLE", Reduced::UnlessOne },
+			// Parity checks: a live path against a from-scratch reference, logging each mismatch.
+			{ Parity, "CS_DCLF_PARITY", N },
+			{ PlayerParity, "CS_DCLF_PLAYER_PARITY", N },
+			{ CaptureParity, "CS_DCLF_CAPTURE_PARITY", N },
+			{ ParityBoth, "CS_DCLF_PARITY_BOTH", N },
+			// Diagnostics. See dclf-validation.md, "Probes and diagnostics".
+			{ Stats, "CS_DCLF_STATS", N },
+			{ PassStats, "CS_DCLF_PASS_STATS", N },
+			{ Profile, "CS_DCLF_PROFILE", N },
+			{ ShaderDebug, "CS_DCLF_SHADER_DEBUG", N },
+			{ ShaderSourceDir, "CS_DCLF_SHADER_SOURCE_DIR", N },
+			{ StageDump, "CS_DCLF_STAGE_DUMP", N },
+			{ TableStart, "CS_DCLF_TABLE_START", N },
+			{ ReleaseGuard, "CS_DCLF_RELEASE_GUARD", N },
 		};
-		static_assert(std::size(kRegistry) == static_cast<std::size_t>(Switch::Count));
+		static_assert(std::size(kCore) == static_cast<std::size_t>(Switch::Count));
 		static_assert([] {
-			for (std::size_t i = 0; i < std::size(kRegistry); ++i)
-				if (static_cast<std::size_t>(kRegistry[i].id) != i)
+			for (std::size_t i = 0; i < std::size(kCore); ++i)
+				if (static_cast<std::size_t>(kCore[i].id) != i)
 					return false;
 			return true;
 		}());
+
+		/** @brief The switch table's row for a Core switch. A missing row is a programming error. */
+		const Testing::SwitchRegistry::Row& CoreSwitchRow(const Entry& a_entry)
+		{
+			const auto* row = Testing::SwitchRegistry::Find(a_entry.name);
+			if (!row)
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the switch {} has no row in src/Testing/SwitchRegistry.cpp", a_entry.name));
+			return *row;
+		}
 
 		struct Values
 		{
 			std::array<std::string, static_cast<std::size_t>(Switch::Count)> value;
 			std::array<bool, static_cast<std::size_t>(Switch::Count)> enabled{};
+			std::array<Kind, static_cast<std::size_t>(Switch::Count)> kind{};  // from the switch table
 			std::vector<std::string> unknown;  // CS_DCLF_* names set in the file or environment that no row names
 		};
 
@@ -180,17 +100,14 @@ namespace DCLF
 		{
 			static const Values values = [] {
 				Values v;
-				for (const auto& entry : kRegistry) {
+				for (const auto& entry : kCore) {
+					v.kind[static_cast<std::size_t>(entry.id)] = CoreSwitchRow(entry).kind;
 					auto& value = v.value[static_cast<std::size_t>(entry.id)];
-					value = Util::SwitchFile::Value(entry.name, entry.environmentOnly);
+					value = Util::SwitchFile::Value(entry.name);
 					v.enabled[static_cast<std::size_t>(entry.id)] = value == "1";
 				}
-				auto known = [](std::string_view a_name) {
-					for (const auto& entry : kRegistry)
-						if (entry.name == a_name)
-							return true;
-					return false;
-				};
+				// Known: a row of the switch table, Core's or another reader's.
+				auto known = [](std::string_view a_name) { return Testing::SwitchRegistry::Find(a_name) != nullptr; };
 				for (const auto& name : Util::SwitchFile::FileNames())
 					if (!known(name))
 						v.unknown.push_back(name);
@@ -250,9 +167,9 @@ namespace DCLF
 		{
 			const auto& registered = RegisteredSwitches();
 			std::vector<std::uint8_t> listed(registered.size(), 0);
-			for (const auto& entry : kRegistry) {
+			for (const auto& entry : kCore) {
 				ListAnchoredAt(a_row, listed, &Registered::before, entry.name);
-				a_row(entry.name, entry.kind, entry.reduced, SwitchValue(entry.id));
+				a_row(entry.name, Read().kind[static_cast<std::size_t>(entry.id)], entry.reduced, SwitchValue(entry.id));
 				ListAnchoredAt(a_row, listed, &Registered::after, entry.name);
 			}
 			for (std::size_t i = 0; i < registered.size(); ++i)
@@ -290,20 +207,15 @@ namespace DCLF
 	Api::SwitchId RegisterSwitch(const Api::FeatureSwitch& a_switch, std::string_view a_feature)
 	{
 		auto& registered = RegisteredSwitches();
-		const auto known = [&](std::string_view a_name) {
-			for (const auto& entry : kRegistry)
-				if (entry.name == a_name)
-					return true;
-			return false;
-		};
-		if (a_switch.name.empty() || known(a_switch.name))
-			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered the switch '{}', which Core has (or no name)", a_feature, a_switch.name));
+		if (a_switch.name.empty() || Testing::SwitchRegistry::Find(a_switch.name))
+			::RenderGraph::Fatal("Drawcall Limit Fix",
+				fmt::format("{} registered the switch '{}', which the switch table has (or no name)", a_feature, a_switch.name));
 		for (const auto& entry : registered)
 			if (entry.name == a_switch.name)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered the switch {} twice", a_feature, a_switch.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered the switch {} twice", a_feature, a_switch.name));
 		// Its anchor may be a switch a later feature registers, so CheckSwitchAnchors checks it at the end.
 		if (!a_switch.before.empty() && !a_switch.after.empty())
-			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s switch {} is listed before {} and after {}", a_feature, a_switch.name, a_switch.before,
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s switch {} is listed before {} and after {}", a_feature, a_switch.name, a_switch.before,
 				a_switch.after));
 		auto& entry = registered.emplace_back();
 		entry.name = a_switch.name;
@@ -320,30 +232,13 @@ namespace DCLF
 	namespace
 	{
 		std::atomic<bool> featureSwitchesRegistered{ false };
-
-		std::string_view KindName(Kind a_kind)
-		{
-			switch (a_kind) {
-			case Kind::Feature:
-				return "feature";
-			case Kind::Parity:
-				return "parity";
-			case Kind::Diagnostic:
-				return "diagnostic";
-			case Kind::Test:
-				return "test";
-			default:
-				return "other";
-			}
-		}
 	}
 
-	void ForEachSwitchRow(const std::function<void(std::string_view, std::string_view, std::string_view)>& a_row)
+	void ForEachFeatureSwitch(const std::function<void(std::string_view, std::string_view, bool, std::string_view)>& a_row)
 	{
-		for (const auto& entry : kRegistry)
-			a_row(entry.name, KindName(entry.kind), entry.description);
 		for (const auto& entry : RegisteredSwitches())
-			a_row(entry.name, KindName(entry.kind), entry.description);
+			a_row(entry.name, Testing::SwitchRegistry::KindName(entry.kind), entry.reduced == Reduced::UnlessOne || entry.reduced == Reduced::Zero,
+				entry.description);
 	}
 
 	bool FeatureSwitchesRegistered() { return featureSwitchesRegistered.load(std::memory_order_acquire); }
@@ -354,14 +249,14 @@ namespace DCLF
 		const auto& registered = RegisteredSwitches();
 		std::vector<std::uint8_t> listed(registered.size(), 0);
 		auto none = [](std::string_view, Kind, Reduced, const std::string&) {};
-		for (const auto& entry : kRegistry) {
+		for (const auto& entry : kCore) {
 			ListAnchoredAt(none, listed, &Registered::before, entry.name);
 			ListAnchoredAt(none, listed, &Registered::after, entry.name);
 		}
 		for (std::size_t i = 0; i < registered.size(); ++i) {
 			const auto& entry = registered[i];
 			if (!listed[i] && (!entry.after.empty() || !entry.before.empty()))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: the switch {} is listed {} {}, which no switch is (or its anchors loop)", entry.name,
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the switch {} is listed {} {}, which no switch is (or its anchors loop)", entry.name,
 					entry.after.empty() ? "before" : "after", entry.after.empty() ? entry.before : entry.after));
 		}
 		featureSwitchesRegistered.store(true, std::memory_order_release);
@@ -380,7 +275,7 @@ namespace DCLF
 
 	std::string_view SwitchName(Switch a_switch)
 	{
-		return static_cast<std::size_t>(a_switch) < std::size(kRegistry) ? kRegistry[static_cast<std::size_t>(a_switch)].name : std::string_view{};
+		return static_cast<std::size_t>(a_switch) < std::size(kCore) ? kCore[static_cast<std::size_t>(a_switch)].name : std::string_view{};
 	}
 
 	std::string_view SwitchName(Api::SwitchId a_switch)

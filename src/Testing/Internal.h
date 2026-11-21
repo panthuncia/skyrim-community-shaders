@@ -23,6 +23,8 @@ namespace Testing
 		std::string command;  // "do"
 		std::string arg;
 		std::string wait;
+		// "adopted": the step runs once the frame revision that holds the previous step's writes is adopted. Empty: none.
+		std::string awaitCondition;
 		double waitSeconds = 0.0;  // 0: timeouts.step_wait
 	};
 
@@ -81,6 +83,9 @@ namespace Testing
 		std::string stepState;
 		std::vector<std::string> shots;
 
+		// SetReport's values, the status file's "report" object.
+		nlohmann::json report = nlohmann::json::object();
+
 		std::string lastError;
 		std::string outcome, reason;
 		std::string faultAddress, faultMarkers;
@@ -124,9 +129,6 @@ namespace Testing
 
 	/** @brief Steps: per Present. Render thread. */
 	void RunSteps(std::uint32_t a_frame);
-
-	/** @brief The old CS_DCLF_TEST_* switches' list, per Present. Render thread. */
-	void RunLegacy(std::uint32_t a_frame);
 
 	/** @brief Commands: runs a registered command. Render thread. */
 	bool RunCommand(const std::string& a_name, const std::string& a_arg, std::string& a_error);

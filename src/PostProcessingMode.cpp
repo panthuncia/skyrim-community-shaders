@@ -140,6 +140,7 @@ namespace PostProcessingMode
 		const Mode mode = IsAvailable(chosen) ? chosen : ResolveDefaultMode();
 		heldMode = mode != chosen ? std::optional(chosen) : std::nullopt;
 		Apply(mode);
+		logger::info("Post Processing Mode: {} (chosen {})", magic_enum::enum_name(mode), magic_enum::enum_name(chosen));
 		pendingMode.reset();
 		resolved = true;
 	}

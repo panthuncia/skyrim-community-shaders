@@ -5,8 +5,6 @@
 // - The depth site hosts the reflection faces and first-person depth. Their commits run inside the depth commit, the
 //   site attaches them when it opens, and it draws them after main depth and the families, each into its own target.
 // - The first-person colour site draws what this frame's first-person depth culled, then its forward part back to front.
-//
-// A view's recording reads only its shape, the batch set and the frame's index pool, so it could be recorded once per snapshot.
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 

@@ -19,7 +19,7 @@ cbuffer FadeStateConstants : register(b0)
 	uint FrameIndex;   // StructuredBuffer<FadeFrame>, one row
 	uint LatchIndex;   // ByteAddressBuffer, the depth segment's BuildDrawsLatch
 	uint LatchOffset;
-	uint LogIndex;           // RWStructuredBuffer<FadeLogEntry> (CS_DCLF_FADE_PARITY)
+	uint ReservedLogWord;    // unused
 	uint OutIndex0;          // RWStructuredBuffer<FadeNodeState>, published states of even frames
 	uint OutIndex1;          // and of the odd
 	uint ReservedProgramsWord;  // the programs are the depth latch's portalProgramsIndex
@@ -32,7 +32,7 @@ cbuffer FadeStateConstants : register(b0)
 	uint PortalResultsIndex;
 }
 
-// Must match Records.h, VisibilityEventsCS.hlsl's copies, and FadeRecords.h for FadeLogEntry.
+// Must match Records.h and VisibilityEventsCS.hlsl's copies.
 struct FadeNodeState
 {
 	uint Flags;
@@ -95,25 +95,17 @@ struct FadeFrame
 	float TreeHeightLimit;
 	uint Padding;
 	float4 Divisors[4];
-	// Per-frame values. The pass is prepared before the commit that writes this row. ~0u log root means none.
+	// Per-frame values. The pass is prepared before the commit that writes this row.
 	uint RootCount;
 	uint SceneFrame;
-	uint LogBase;
-	uint Reserved;
+	uint Reserved0;
+	uint Reserved1;
 	// The animation job's update inputs.
 	float3 AnimEye;
 	float AnimLodAdjust;
 	int AnimCounter;
 	float AnimDeltaTime;
 	uint2 AnimPadding;
-};
-
-struct FadeLogEntry
-{
-	FadeNodeState Before;
-	FadeNodeState After;
-	float3 Centre;
-	uint Root;
 };
 
 // The placement rows, as BindlessPlacement.
@@ -511,7 +503,6 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 		published[index] = state;
 		return;
 	}
-	const FadeNodeState before = state;
 	// A root's centre is its member's fade node placement row.
 	ByteAddressBuffer frameLatch = ResourceDescriptorHeap[LatchIndex];
 	StructuredBuffer<PlacementRows> placements = ResourceDescriptorHeap[frameLatch.Load(LatchOffset + 252)];
@@ -550,15 +541,6 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 	states[index] = state;
 	published[index] = state;
 	ReportMilestone(index, root, state);
-	if (F.LogBase != 0xFFFFFFFFu && index >= F.LogBase && index - F.LogBase < 64u) {
-		RWStructuredBuffer<FadeLogEntry> log = ResourceDescriptorHeap[LogIndex];
-		FadeLogEntry entry;
-		entry.Before = before;
-		entry.After = state;
-		entry.Centre = centre;
-		entry.Root = index;
-		log[index - F.LogBase] = entry;
-	}
 }
 
 	// Read-only query preparation. MergeSeed changes only this invocation's local root copy.

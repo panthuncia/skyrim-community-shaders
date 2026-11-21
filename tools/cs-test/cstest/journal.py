@@ -163,8 +163,24 @@ def undo(paths, data, log=print, stop=procs.stop_game_and_mo2, running=None):
                 if src.exists() and not dst.exists():
                     shutil.move(str(src), str(dst))
                     log(f"Put back {dst}")
+            elif kind == "restore":
+                # A file the run changed: its copy from before goes back over it.
+                path, backup = Path(entry["path"]), Path(entry["backup"])
+                if not backup.exists():
+                    raise FileNotFoundError(f"the copy of {path} from before the run is missing: {backup}")
+                shutil.copy2(backup, path)
+                backup.unlink()
+                log(f"Put back {path}")
             elif kind == "variant":
                 log(_swap_back(paths, entry))
+            elif kind == "cold_cache":
+                # A cold run's own cache goes, and the shared one it set aside comes back.
+                live, held = Path(entry["live"]), Path(entry["held"])
+                if held.exists():
+                    if live.exists():
+                        shutil.rmtree(live)
+                    shutil.move(str(held), str(live))
+                    log(f"Put the shared shader cache back at {live}")
         except Exception as error:  # Keep going: every other entry should still be undone.
             failed = True
             log(f"Could not undo {entry}: {error}")

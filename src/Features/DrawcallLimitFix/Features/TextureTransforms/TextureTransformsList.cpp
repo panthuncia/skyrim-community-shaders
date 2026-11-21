@@ -140,8 +140,6 @@ namespace DCLF::Features::TextureTransforms
 				withRows->animatedSlots = rows.animated.slotOf;
 				list = std::move(withRows);
 			}
-			if (a_build.check)
-				CheckListParity(*list, *BuildWhole(rows, tables, slots));
 			namespace stats = TextureTransformStats;
 			stats::built.fetch_add(1, std::memory_order_relaxed);
 			stats::builtEntries.fetch_add(list->entries.size(), std::memory_order_relaxed);

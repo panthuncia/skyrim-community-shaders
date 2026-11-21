@@ -37,14 +37,15 @@ namespace RenderGraph::Engine::Bink
 	{
 		class Movie;
 
-		/** @brief Makes the movie texture, sampler, targets and the client. Logged and off when a part cannot be made. */
+		/** @brief Makes the movie texture and sampler and declares the Present anchor's client for the session. Nothing outside graph mode. A failure is fatal. */
 		void Setup();
 
 		/**
-		 * @brief Whether this tick may draw on the graph. With a_betweenFrames a needed rebuild happens here, between two frames.
-		 * False while that build is not attached yet, or when the framebuffer cannot be imported. Render thread.
+		 * @brief Whether this tick may draw on the graph. False while the UI stage's schedule does not hold the client's newest
+		 * registration, which a frame revision makes when the targets change: the tick lags. Also false, as a tap error, when
+		 * the graph path is down. Either way the tick queues nothing. Render thread.
 		 */
-		bool Begin(bool a_betweenFrames);
+		bool Begin();
 
 		/** @brief A movie's tiles laid out in staging and in the movie texture's chunks. Null only for a layout with no tiles. Render thread. */
 		std::shared_ptr<Movie> CreateMovie(const Layout& a_layout, std::uint32_t a_tileSize);
@@ -53,16 +54,14 @@ namespace RenderGraph::Engine::Bink
 		std::byte* Lock(Movie& a_movie, std::uint32_t a_tile, std::uint32_t& a_rowPitch);
 
 		/**
-		 * @brief Queues the movie's frame for the Present anchor in place of the engine's tile draw, onto HDR's UI texture with a_hdr.
-		 * False when the graph has nothing to draw, and the engine's draw runs. Render thread.
+		 * @brief Queues the movie's frame for the Present anchor in place of the engine's tile draw, onto the frame's interface target
+		 * (Engine::UiTargets: HDR's UI texture while HDR is on). False when the graph has nothing to draw, and nothing draws the tiles.
+		 * Render thread.
 		 */
-		bool Queue(const std::shared_ptr<Movie>& a_movie, bool a_hdr);
+		bool Queue(const std::shared_ptr<Movie>& a_movie);
 
 		/** @brief Drops a staging buffer the tick took but did not queue. Render thread. */
 		void EndTick(Movie& a_movie);
-
-		/** @brief Marks that the engine's tile textures hold a newer frame than the graph's. Render thread. */
-		void MarkStale(Movie& a_movie);
 
 		/** @brief Resets for the next movie and drops the stages' kept recordings of this one. The client stays registered. Render thread. */
 		void MovieEnded();

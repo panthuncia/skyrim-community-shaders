@@ -1,7 +1,7 @@
 // Engine-side hooks for the water family. The water batches run with their draws latched, DrawTriShape latches a water draw
 // instead of drawing it, and SetupGeometry counts a batch's passes. Render thread.
-// A batch the family cannot take reaches the engine with nobody vouching for it. Under the flush latch it is skipped and the
-// residue census counts it, because each such case is a family defect.
+// A batch the family cannot take reaches the engine with nobody vouching for it. Under the flush latch it is skipped.
+// Each such case is a family defect, and its reason is logged once.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -44,9 +44,9 @@ namespace DCLF::Features::Water
 		const char* NameOf(View a_view) { return a_view == View::Mask ? "mask" : "surface"; }
 
 		/** @brief The inherent refusals, each logged once per reason. */
-		Util::ReasonLog& Refusals()
+		Family::RefusalLog& Refusals()
 		{
-			static Util::ReasonLog log("[DCLF] water: the engine draws", spdlog::level::warn);
+			static Family::RefusalLog log("[DCLF] water: the engine draws");
 			return log;
 		}
 
@@ -62,6 +62,7 @@ namespace DCLF::Features::Water
 			std::shared_ptr<Run> run;
 			// Kept so a run restarted after another shader's draw (Interrupt) has the same headers.
 			std::array<std::uint32_t, kHeaderRegisters.size()> headerIndices{};
+			Integrations::PhysicalSky::OrgHandles physSky{};
 			std::uint32_t depthFormat = 0;
 			Family::Passes passes;
 			std::uint32_t lastTechnique = 0;  // the last pass's technique (State::currentPixelDescriptor >> 11 & 0xF)
@@ -81,7 +82,7 @@ namespace DCLF::Features::Water
 			if (!a_rtv)
 				return 0;
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
-			Unwrap(a_rtv)->GetDesc(&desc);
+			a_rtv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -90,7 +91,7 @@ namespace DCLF::Features::Water
 			if (!a_dsv)
 				return 0;
 			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
-			Unwrap(a_dsv)->GetDesc(&desc);
+			a_dsv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -129,6 +130,7 @@ namespace DCLF::Features::Water
 			a_capture.run = std::make_shared<Run>();
 			a_capture.run->view = a_capture.view;
 			a_capture.run->headerIndices = a_capture.headerIndices;
+			a_capture.run->physSky = a_capture.physSky;
 		}
 
 		/**
@@ -184,6 +186,19 @@ namespace DCLF::Features::Water
 					Refusals().Report(std::format("a {} batch whose t{} holds '{}'", NameOf(a_view), kHeaderRegisters[h], header.publishedId), Family::ReasonOf(read));
 					return false;
 				}
+			}
+			// Physical Sky's resources, which the pixel stages read through the draw's latch. A view that reads no headers reads none of them.
+			if (!HeadersRead(a_view))
+				return true;
+			const auto readPhysSky = [a_view](std::string_view a_id, std::uint32_t& a_index, std::string& a_why) {
+				const auto result = WaterDraws::ReadPublished(a_view, a_id, a_index);
+				a_why = Family::ReasonOf(result);
+				return result == Family::InputResult::Graph;
+			};
+			std::string why;
+			if (!Integrations::PhysicalSky::ResolveOrgHandles(a_run.physSky, a_run.owners, readPhysSky, why)) {
+				Refusals().Report(std::format("a {} batch", NameOf(a_view)), why);
+				return false;
 			}
 			return true;
 		}
@@ -247,6 +262,7 @@ namespace DCLF::Features::Water
 			constants.descriptors[1] = permutation.PixelShaderDescriptor;
 			constants.descriptors[2] = permutation.ExtraShaderDescriptor;
 			constants.descriptors[3] = permutation.ExtraFeatureDescriptor;
+			constants.physSky = run.physSky;
 			constants.effectRadius = permutation.EffectRadius;
 
 			draw.program = WaterDraws::Program(draw.key, *state->currentShader);
@@ -316,7 +332,7 @@ namespace DCLF::Features::Water
 			{
 				auto& capture = GetCapture();
 				// A batch nested in a latched one feeds the outer batch. Otherwise the engine draws batches the family cannot run.
-				if (capture.active || !TakesView(kView) || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
+				if (capture.active || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
@@ -330,6 +346,7 @@ namespace DCLF::Features::Water
 				}
 				capture.view = kView;
 				capture.headerIndices = run->headerIndices;
+				capture.physSky = run->physSky;
 				capture.run = std::move(run);
 				capture.failed = false;
 				capture.passes.Begin();

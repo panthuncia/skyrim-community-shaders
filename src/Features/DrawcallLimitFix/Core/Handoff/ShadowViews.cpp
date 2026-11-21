@@ -309,7 +309,7 @@ namespace DCLF
 	{
 		Clear();
 		// The lights in the order the engine renders them a moment later. If no selection ran this frame there are no views and no renderer is published.
-		const auto* selection = LightSlots().Current(Scene::FrameView::Get().GetFrame());
+		const auto* selection = LightSlots().Current(Scene::FrameView::Get().SceneStep());
 		if (!selection) {
 			PublishRenderers();
 			return;
@@ -340,7 +340,6 @@ namespace DCLF
 	{
 		// Published whole, since the hook runs on the engine's registration threads.
 		auto renderers = std::make_shared<PassCapture::ShadowRendererMap>();
-		auto focus = std::make_shared<PassCapture::ShadowRendererMap>();  // the covered focus views' renderers, by focus descriptor
 		// For a group renderer the engine makes during a registration, which is in no set yet.
 		auto accumulators = std::make_shared<PassCapture::ShadowAccumulatorMap>();
 		for (const auto& view : views)
@@ -351,11 +350,8 @@ namespace DCLF
 			if (!view.covered)
 				continue;
 			renderers->emplace(batch, static_cast<std::uint8_t>(view.renderMode - PassCapture::kFirstShadowMode));
-			if (view.focus)
-				focus->emplace(batch, static_cast<std::uint8_t>(view.descriptor));
 		}
 		PassCapture::Get().SetShadowBatchRenderers(std::move(renderers));
-		PassCapture::Get().SetFocusBatchRenderers(std::move(focus));
 		PassCapture::Get().SetShadowAccumulators(std::move(accumulators));
 	}
 

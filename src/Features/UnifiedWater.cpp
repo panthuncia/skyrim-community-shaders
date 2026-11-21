@@ -1,5 +1,6 @@
 ﻿#include "UnifiedWater.h"
 #include "Features/DrawcallLimitFix.h"
+#include "Utils/Hash.h"
 
 #include "I18n/I18n.h"
 #include "Menu.h"
@@ -383,12 +384,12 @@ bool UnifiedWater::LoadOrderChanged()
 	if (!dataHandler)
 		return false;
 
-	uint64_t hash = 14695981039346656037ull;
+	uint64_t hash = Util::Fnv1a::kOffset;
 
 	auto addBytes = [&](const unsigned char* p) {
 		for (; *p; ++p) {
 			hash ^= *p;
-			hash *= 1099511628211ull;
+			hash *= Util::Fnv1a::kPrime;
 		}
 	};
 
@@ -494,11 +495,11 @@ void UnifiedWater::TESWaterSystem_InitializeWater_SetWaterShaderMaterialParams::
 
 	func(form, material);
 
-	uint32_t hash = 2166136261u;
+	uint32_t hash = Util::Fnv1a32::kOffset;
 	auto addStrToHash = [&](const char* str) {
 		for (auto p = reinterpret_cast<const unsigned char*>(str); *p; ++p) {
 			hash ^= *p;
-			hash *= 16777619u;
+			hash *= Util::Fnv1a32::kPrime;
 		}
 	};
 

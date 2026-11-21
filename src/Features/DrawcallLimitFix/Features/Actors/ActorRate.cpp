@@ -47,17 +47,15 @@ namespace DCLF::Features::Actors
 			return true;
 		}
 
-		void UpdateActorRate(bool a_running)
+		void UpdateActorRate()
 		{
-			if (!a_running)
-				return;
 			auto* lists = RE::ProcessLists::GetSingleton();
 			if (!lists)
 				return;
 			auto& c = actorRate;
 			++c.entries;
 			const std::uint32_t counter = Engine::Global<std::uint32_t>(Engine::Address::kFrameCounter);
-			const std::uint32_t sceneFrame = Scene::FrameView::Get().GetFrame();
+			const std::uint32_t sceneFrame = Scene::FrameView::Get().SceneStep();
 			const auto& sun = Shadows::Sun::SunBoard();
 			const bool sunViews = sun.valid && sun.sceneFrame == sceneFrame;
 			for (const auto& handle : lists->highActorHandles) {

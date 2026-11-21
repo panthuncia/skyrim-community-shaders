@@ -10,6 +10,8 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 include(AddCXXFiles)
 add_cxx_files("${PROJECT_NAME}")
+# The tripwire handles' self-test lives with the tests. It needs the plugin's handles, so the plugin compiles it.
+target_sources("${PROJECT_NAME}" PRIVATE tests/Tripwire/TripwireSelfTest.cpp)
 
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Plugin.h.in

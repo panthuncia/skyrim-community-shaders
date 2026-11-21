@@ -3,19 +3,25 @@
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
 	namespace Draws
 	{
+		namespace
+		{
+			const SetupPrograms::Compute kIndexPoolProgram{ "DCLF index pool", [] { return ComputeProgram::Desc{ .source = kIndexPoolShader, .constantWords = kIndexPoolConstantWords }; } };
+		}
+
 		std::shared_ptr<IndexPool> EnsureIndexPool(SceneBuffers& a_scene, rhi::Device a_device, bool a_small)
 		{
 			if (a_scene.pool)
 				return a_scene.pool;
 			auto pool = std::make_shared<IndexPool>();
-			pool->program = ComputeProgram::Load(a_device, { .source = kIndexPoolShader, .constantWords = kIndexPoolConstantWords });
-			if (pool->program)
-				pool->dispatchSignature = CreateDispatchSignature(a_device, pool->program->layout->GetHandle());
+			pool->program = kIndexPoolProgram.Get();
+			pool->dispatchSignature = CreateDispatchSignature(a_device, pool->program->layout->GetHandle());
 			if (!pool->dispatchSignature) {
 				logger::warn("[DCLF] The index pool's copy program could not be created");
 				return nullptr;
@@ -223,7 +229,7 @@ namespace DCLF
 				{
 					const auto copyCount = static_cast<std::uint32_t>(copies.size());
 					if (copyCount > copiesCapacity)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: the index pool's {} copies past the {} its buffer holds (the requirement missed them)", copyCount,
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the index pool's {} copies past the {} its buffer holds (the requirement missed them)", copyCount,
 							copiesCapacity));
 					if (copyCount)
 						a_uploads(p.copies, copies.data(), std::size_t(copyCount) * sizeof(copies[0]), 0);
@@ -250,7 +256,6 @@ namespace DCLF
 			update.UpdateRanges(count, a_generation);
 			p.cursor.Advance(a_tables.geometryLog);
 			p.indicesFilled.Filled(indices);
-			Diagnostics::Notify(Diagnostics::IndexPoolUpdated{ p, a_tables, count });
 
 			update.UploadFirsts(firsts, count, a_uploads);
 			return update.UploadCopies(a_latch, a_latchRun, a_poolOffset, a_uploads);

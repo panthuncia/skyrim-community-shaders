@@ -31,7 +31,7 @@ namespace DCLF::Draws
 			std::vector<ViewKind> views;
 			for (const auto& view : hosted)
 				views.push_back(view->traits->kind);
-			return MakeLatchedCopiesPass(
+			return MakeLatchedCopiesPass(a_context.Conditions(),
 				[resources = resources, hosted = std::move(hosted)] {
 					auto targets = MainLatchedTargets(*resources);
 					for (const auto& view : hosted) {
@@ -58,12 +58,12 @@ namespace DCLF::Draws
 
 		std::shared_ptr<org::RenderPass> BuildDraws(const Api::PassContext& a_context)
 		{
-			return MakeBuildDrawsPass(a_context.Main(), a_context.segment);
+			return MakeBuildDrawsPass(a_context.Main(), a_context.Conditions(), a_context.segment);
 		}
 
 		std::shared_ptr<org::RenderPass> MemberQueries(const Api::PassContext& a_context)
 		{
-			return MakeBuildDrawsPass(a_context.Main(), a_context.segment, 1, true);
+			return MakeBuildDrawsPass(a_context.Main(), a_context.Conditions(), a_context.segment, 1, true);
 		}
 
 		// The pool copies the depth commit gave out, before the draws read them. Records nothing in the revision's depth
@@ -83,7 +83,7 @@ namespace DCLF::Draws
 			// rebuilt, phase 2 retests phase 1's rejects and draws them. Only while the HZB exists.
 		std::shared_ptr<org::RenderPass> BuildDrawsPhaseTwo(const Api::PassContext& a_context)
 		{
-			return a_context.PhaseTwo() ? MakeBuildDrawsPass(a_context.Main(), a_context.segment, 2) : nullptr;
+			return a_context.PhaseTwo() ? MakeBuildDrawsPass(a_context.Main(), a_context.Conditions(), a_context.segment, 2) : nullptr;
 		}
 
 		// Visibility changes once both phases' verdicts are final.
@@ -103,7 +103,7 @@ namespace DCLF::Draws
 		std::shared_ptr<org::RenderPass> VisibilityEventsCopy(const Api::PassContext& a_context)
 		{
 			const auto& resources = a_context.Main();
-			return VisibilityEventsReady(*resources) ? MakeEventReadbackPass(resources->scene, resources->scene->visibilityEvents, resources->scene->visibilityReadback) : nullptr;
+			return VisibilityEventsReady(*resources) ? MakeEventReadbackPass(resources->scene, resources->scene->visibilityEvents, resources->scene->visibilityReadback->list) : nullptr;
 		}
 
 		// The scan runs every execution so the counts it clears stay zero even without a build. The scatter runs only after a build.
@@ -129,11 +129,8 @@ namespace DCLF::Draws
 		std::shared_ptr<org::RenderPass> ForwardSort(const Api::PassContext& a_context)
 		{
 			const auto& resources = a_context.Main();
-			if (!resources->forwardSort)
-				return nullptr;
-			// When the CPU sorts the forward draws, only the decal buckets are left for this pass.
-			const bool decalsOnly = CurrentGraphConditions().forwardDirect;
-			return MakeForwardSortPass(resources->sequences, { nullptr, resources->classCounts }, [main = resources, decalsOnly](const org::PassPrepareContext& a_preparation) {
+			// The CPU sorts the forward draws, so only the decal buckets are left for this pass.
+			return MakeForwardSortPass(resources->sequences, { nullptr, resources->classCounts }, [main = resources](const org::PassPrepareContext& a_preparation) {
 				const auto frame = CurrentFrame(a_preparation, RenderGraphRuntime::Segment::MainOpaque);
 				if (!frame || !BuildsDraws(a_preparation, *main, RenderGraphRuntime::Segment::MainOpaque))
 					return ForwardSortSource{};
@@ -145,19 +142,6 @@ namespace DCLF::Draws
 						const auto& bucket = frame->classPlan->decals[b];
 						source.ranges.push_back({ bucket.first, bucket.capacity, frame->classPlan->DecalCountWord(b) * kWord, ForwardSortConstants::kRankInstance });
 					}
-				if (decalsOnly)
-					return source;
-				// The forward buckets' pairs, ranked into firstInstance for the plain draw.
-				if (frame->classPlan && !frame->classPlan->forward.empty()) {
-					const auto& plan = *frame->classPlan;
-					for (std::size_t b = 0; b < plan.forward.size(); ++b)
-						source.ranges.push_back({ plan.forward[b].first, plan.forward[b].capacity, plan.ForwardCountWord(b) * kWord, ForwardSortConstants::kRankInstance });
-					return source;
-				}
-				// Each state class's forward pair, counted by its classCounts word.
-				for (std::uint32_t c = 0; c < frame->classes.size(); ++c)
-					if (const auto& range = frame->classes[c].ranges[kClassRangeForward]; range.capacity)
-						source.ranges.push_back({ range.first, range.capacity, ClassCountWord(c, kClassRangeForward) * kWord });
 				return source;
 			});
 		}

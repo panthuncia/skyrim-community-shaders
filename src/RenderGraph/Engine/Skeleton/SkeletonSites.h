@@ -11,14 +11,11 @@ namespace RenderGraph::Engine::Skeleton
 // What the engine call sites ask of the skeleton. Main thread, with the engine's context.
 namespace RenderGraph::Engine::Skeleton::Sites
 {
-	/** @brief True when the skeleton takes the clear for the next Flush. False means the caller makes the D3D11 call now. */
+	/** @brief True when the skeleton takes the clear: a stage or host runs it. False means the caller makes the D3D11 call now. */
 	bool TakeColourClear(ID3D11DeviceContext* a_context, ID3D11RenderTargetView* a_view, const FLOAT a_colour[4]);
 
 	/** @brief As TakeColourClear. */
 	bool TakeDepthClear(ID3D11DeviceContext* a_context, ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil);
-
-	/** @brief A run that does not draw them is an error. */
-	void Flush();
 
 	/** @brief False means the caller must copy. */
 	bool TakeDepthCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source);

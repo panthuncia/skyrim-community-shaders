@@ -143,7 +143,6 @@ namespace DCLF
 			filterDirty.clear();
 			filterDirtyAll = true;
 		}
-		const auto toggles = ActiveToggles();
 		if (!Policy::WithholdFromEngine()) {
 			++listStats.notToggled;
 			return false;
@@ -152,7 +151,7 @@ namespace DCLF
 		bool everyMap = true;
 		for (std::uint32_t v = 0; v < kOcclusionViews && everyMap; ++v)
 			if (const auto& map = Extensions::OcclusionMapOf(v); map.registered && *map.available)
-				everyMap = Extensions::OcclusionOn(ActiveToggles(), v);
+				everyMap = Extensions::OcclusionOn(v);
 		if (!everyMap) {
 			++listStats.noOcclusion;
 			return false;
@@ -315,7 +314,6 @@ namespace DCLF
 		listsFiltered.store(false, std::memory_order_release);
 		listFilter.store(nullptr, std::memory_order_release);
 		listMode.store(ListMode::Engine, std::memory_order_release);
-		Diagnostics::Notify<Diagnostics::EnginePoint::SceneListsPublishing>();
 		if (!installed) {
 			++listStats.notToggled;
 			listsDirty.store(true, std::memory_order_relaxed);
@@ -324,15 +322,6 @@ namespace DCLF
 		auto filter = CurrentListFilter();
 		std::uint64_t witness = 0;
 		const bool keepable = ListsKeepable(witness);
-		// The engine's build, whole.
-		if (!Policy::FilterSceneLists(Scene::FrameView::Get().GetFrame())) {
-			if (Diagnostics::Armed<Diagnostics::SceneListsWhole>())
-				Diagnostics::Notify(Diagnostics::SceneListsWhole{ filter, filter ? &filter->roots : nullptr, keepable });
-			++listStats.dryRuns;
-			++listStats.engineFrames;
-			listsDirty.store(true, std::memory_order_relaxed);
-			return;
-		}
 		ListMode mode = ListMode::Engine;
 		if (keepable) {
 			const bool dirty = listsDirty.load(std::memory_order_relaxed);
@@ -697,7 +686,6 @@ namespace DCLF
 					self.BuryLists();
 					func();
 					self.listsDirty.store(true, std::memory_order_relaxed);
-					Diagnostics::Notify<Diagnostics::EnginePoint::EngineSceneListsBuilt>();
 					self.FilterSceneLists();
 					return;
 				}
@@ -815,12 +803,12 @@ namespace DCLF
 		c.reasonFrames = l.reasonFrames, c.keptBy = l.keptBy;
 		l.filterJudged = l.filterInserted = l.filterErased = l.reasonFrames = 0;
 		l.keptBy = {};
-		c.frames = l.frames, c.published = l.published, c.built = l.built, c.dryRuns = l.dryRuns, c.notToggled = l.notToggled, c.notCurrent = l.notCurrent;
+		c.frames = l.frames, c.published = l.published, c.built = l.built, c.notToggled = l.notToggled, c.notCurrent = l.notCurrent;
 		c.noExclusion = l.noExclusion, c.noOcclusion = l.noOcclusion;
 		c.restored = l.restored, c.restoreDetached = l.restoreDetached, c.unexcluded = l.unexcluded, c.lostWhileOut = l.lostWhileOut;
 		c.engineFrames = l.engineFrames, c.notKeepable = l.notKeepable, c.notKeepableBy = l.notKeepableBy;
 		c.rebuildStructure = l.rebuildStructure, c.rebuildFilter = l.rebuildFilter, c.rebuildWitness = l.rebuildWitness, c.rebuildDirty = l.rebuildDirty;
-		l.frames = l.published = l.built = l.dryRuns = l.notToggled = l.notCurrent = l.noExclusion = l.noOcclusion = 0;
+		l.frames = l.published = l.built = l.notToggled = l.notCurrent = l.noExclusion = l.noOcclusion = 0;
 		l.restored = l.restoreDetached = l.unexcluded = l.lostWhileOut = l.engineFrames = l.notKeepable = 0;
 		l.notKeepableBy = {};
 		l.rebuildStructure = l.rebuildFilter = l.rebuildWitness = l.rebuildDirty = 0;

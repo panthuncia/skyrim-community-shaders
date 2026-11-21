@@ -16,6 +16,4 @@ namespace DCLF::Features::LocalLights
 
 	// Objects with these flags only take lights that affect land (+0x61). kLandscape is 14, kNoLODLandFade 46 (FUN_14147c340).
 	inline constexpr std::uint64_t kLandscapeFlags = (1ull << 14) | (1ull << 46);
-
-	void LightSelectionLines();
 }

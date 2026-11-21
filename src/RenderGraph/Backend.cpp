@@ -1,10 +1,8 @@
-#if defined(CS_HAS_RENDER_GRAPH)
+#include "RenderGraph/Backend.h"
 
-#	include "RenderGraph/Backend.h"
+#include "RenderGraph/Switches.h"
 
-#	include "RenderGraph/Switches.h"
-
-#	include <atomic>
+#include <atomic>
 
 namespace RenderGraph::Backend
 {
@@ -45,11 +43,11 @@ namespace RenderGraph::Backend
 
 	bool D3D12Built()
 	{
-#	if defined(CS_ORG_HAS_D3D12)
+#if defined(CS_ORG_HAS_D3D12)
 		return true;
-#	else
+#else
 		return false;
-#	endif
+#endif
 	}
 
 	std::string RequestError()
@@ -64,4 +62,3 @@ namespace RenderGraph::Backend
 	}
 }
 
-#endif

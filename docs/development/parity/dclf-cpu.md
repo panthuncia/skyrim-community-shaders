@@ -35,8 +35,8 @@ Then:
   queued.
 - **Secondaries.** `SiteOut::direct` records everything straight into the epoch's primary list. No secondary is made on either
   backend: D3D12 bundles cannot set viewports or hold barriers, and nothing in the code needed secondaries outside guest's state
-  isolation from DXVK. `Direct::FrameMode()` turns `parallel` into `indirect` and every cadence into per frame in native mode. Guest
-  keeps secondaries (`Inline()`, Parallel mode, per-snapshot recordings).
+  isolation from DXVK. Guest
+  keeps secondaries (`Inline()`).
 - **GPU-driven frames.** `HandOffRun` and `ForwardHandOffCancel` set `handedOff` directly. The epoch records its late pass inline
   after the call, on the same thread.
 - **The direct forward and first-person families.** `GraphConditions::forwardDirect` and `firstPersonForwardDirect` test
@@ -56,7 +56,7 @@ Then:
 - **CPU shadow site.** On D3D12 each view's push words 4-13 are replaced, as `ShadowViewPass` does: the view block and its
   VS_PerFrame copy by ref (the adopted version of `viewBlocks`), the zero block by ref (`constantsRef`), and SharedData and
   FeatureData by constant buffer view (`blockViewIndices`).
-- **Pushed colour and depth** (`kExpPushedColour`, `kExpPushedDepth`) are no-ops on D3D12 (`BeginList`). They need unpulled
+- **Pushed colour and depth** are no-ops on D3D12 (`BeginList`). They need unpulled
   pipelines, which D3D12 does not build.
 - **`kD3D12DclfSwitches`** (its own commit): `CS_DCLF_PIPELINE=gpu`, `CS_DCLF_FORWARD_DIRECT=0`, `CS_DCLF_FORWARD=0` and
   `CS_DCLF_FIRST_PERSON=0` are gone. The Effect and particle rows stay: particles draw in the forward site's sort, but they need

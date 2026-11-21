@@ -231,37 +231,25 @@ To check this, `CS_DCLF_STATS=1` adds `lost for want of a caster row` to the sha
 
 ## The harness
 
-`tools/cs-ab/cs-ab.ps1` swaps a build's mod folder and shader cache in MO2 and runs scenarios unattended. Close MO2 first.
+These runs used the old `tools/cs-ab` harness, since deleted (its scenarios, `cs-ab.ps1` and the process-dump scripts
+`dump/texture_chains.py`, `compare_chains.py` and `climb_holders.py` are in git history). Its successor is cs-test
+(`tools/cs-test/README.md`): `stage` swaps a build's mod folder and shader cache in MO2 (`--pad` as `-Pad` did), `run` runs a
+config unattended, and `compare` diffs two runs. The memory tables come from `tools/cs-test/compare.py`, which reads each run's
+`CS-AB-memory.csv` (`CS_AB_PROBE=1`) and VRAM JSON:
 
 ```powershell
-tools/cs-ab/cs-ab.ps1 stage dev <dev checkout>/build/ALL/aio -Pad 4000
-tools/cs-ab/cs-ab.ps1 stage dclf build/Release/aio -Pad 4000
-tools/cs-ab/cs-ab.ps1 run dclf chain -Label on
-tools/cs-ab/cs-ab.ps1 run dclf chain -Label off -Env CS_DCLF=0
-tools/cs-ab/cs-ab.ps1 run dev chain
-tools/cs-ab/cs-ab.ps1 restore
-python tools/cs-ab/compare.py <run folder> <run folder> ...
-python tools/cs-ab/compare.py --owners whiterun <run folder> ...
+python tools/cs-test/compare.py <run folder> <run folder> ...
+python tools/cs-test/compare.py --owners whiterun <run folder> ...
 ```
 
-Scenarios are `tools/cs-ab/scenarios/*.env`. Results go to `C:\Modding\CS-AB\runs`, and stashed caches to `C:\Modding\CS-AB\variants`. Dev's patch is uncommitted on the local branch `ab/dev-memory` of `external_refs/skyrim-community-shaders`: `src/MemAB.*`, `src/MemProbe.h` and four one-line hooks. It reads the same `CS_DCLF_TEST_*` commands, with the same frame counting, and writes the same VRAM JSON.
+Results go to `C:\Modding\CS-AB\runs`, and stashed caches to `C:\Modding\CS-AB\variants`. Dev's patch is uncommitted on the local branch `ab/dev-memory` of `external_refs/skyrim-community-shaders`: `src/MemAB.*`, `src/MemProbe.h` and four one-line hooks. It read the old harness's `CS_DCLF_TEST_*` commands, which this branch no longer has.
 
-To find what keeps a texture alive, compare full process dumps of two builds at the same stop. This needs [procdump](https://learn.microsoft.com/sysinternals/downloads/procdump), and each dump is 13-20 GB, so delete them afterwards:
-
-```powershell
-tools/cs-ab/cs-ab.ps1 run dev solitude-dump -DumpAtFrame 7171 -DumpPath dev.dmp
-tools/cs-ab/cs-ab.ps1 run dclf solitude-dump -Label off -Env CS_DCLF=0 -DumpAtFrame 7171 -DumpPath dclf.dmp
-python tools/cs-ab/dump/texture_chains.py dev.dmp dev.pkl
-python tools/cs-ab/dump/texture_chains.py dclf.dmp dclf.pkl
-python tools/cs-ab/dump/compare_chains.py dev.pkl dclf.pkl=<dclf run folder>
-python tools/cs-ab/dump/climb_holders.py dclf.dmp dclf.pkl PBRLandscape
-```
-
-The scripts need numpy and read AE 1.6.1170's vtables.
+To find what kept a texture alive, the runs compared full process dumps of two builds at the same stop (with
+[procdump](https://learn.microsoft.com/sysinternals/downloads/procdump); each dump is 13-20 GB, so delete them afterwards).
 
 Three things that caught these runs out:
 
--   **`-Pad` matters for a cold V1 cache.** usvfs crashes the game when its file table grows while threads read it, and a cold V1 compile creates thousands of files (twice here, within minutes). `-Pad` makes MO2 grow the table first. Field users building a V1 cache under MO2 can hit this too.
+-   **`--pad` (`-Pad`) matters for a cold V1 cache.** usvfs crashes the game when its file table grows while threads read it, and a cold V1 compile creates thousands of files (twice here, within minutes). `--pad` makes MO2 grow the table first. Field users building a V1 cache under MO2 can hit this too.
 -   **Displays must stay on.** With them off, native D3D11 Presents throttle to about 3 fps. The harness holds them on.
 -   **`stage` mirrors its source.** Only use a complete AIO folder such as `build/Release/aio`. `build/ALL/aio` can hold just the DLLs, and staging from it would delete the mod's shaders.
 -   **The branch can undo a test's upscaler.** With `hardwareDefaultsApplied` false, the first load turns FSR into DLSS. Set it true for an FSR run, and check `method` on the log's `internal resolution` line.

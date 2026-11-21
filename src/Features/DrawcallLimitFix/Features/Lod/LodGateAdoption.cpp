@@ -3,8 +3,6 @@
 #include "Features/DrawcallLimitFix/Features/Lod/LodGateComponent.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
-#include "Features/DrawcallLimitFix/Features/Lod/Diagnostics/LodGateEvents.h"
 #include "Features/DrawcallLimitFix/Features/Lod/LodGates.h"
 
 namespace DCLF::Features::Lod::Gates
@@ -15,12 +13,6 @@ namespace DCLF::Features::Lod::Gates
 	}
 
 	ReleaseStats& Releases() { return releaseStats; }
-
-	void Published([[maybe_unused]] const Api::CoordinatorComponentContext& a_context)
-	{
-		// Runs before the deltas are taken, so the observers can still read the pending flips.
-		Diagnostics::Notify(GateFlipsPublished{});
-	}
 
 	void Adopt(const Api::AdoptionContext& a_context)
 	{
@@ -36,8 +28,6 @@ namespace DCLF::Features::Lod::Gates
 			const bool released = LodGates::Flip(flip.token);
 			if (!claims)
 				++rs.beforeDrawing;
-			else
-				Diagnostics::Notify(GateReleasing{ claims, flip.token, flip.incoming, flip.outgoing, released });
 			rs.flipToReleaseMs.push_back(GateMs(flip.flipNs, now));
 			rs.requestToReleaseMs.push_back(GateMs(flip.requestNs, now));
 			rs.flipToReleaseFrames.push_back(a_context.frame >= flip.flipFrame ? a_context.frame - flip.flipFrame : 0u);

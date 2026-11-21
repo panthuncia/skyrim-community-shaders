@@ -196,34 +196,34 @@ namespace DCLF::Extensions
 				return kind;
 		return 0;
 	}
-	/** @brief Whether port a_kind's objects are DCLF's under a_toggles. */
-	inline bool PortOn(const ToggleSet& a_toggles, std::uint8_t a_kind)
+	/** @brief Whether port a_kind's objects are DCLF's. */
+	inline bool PortOn(std::uint8_t a_kind)
 	{
-		return a_kind != 0 && a_kind < kMaterialKinds && ObjectClassOn(a_toggles, MaterialPorts()[a_kind].objectClass);
+		return a_kind != 0 && a_kind < kMaterialKinds && ObjectClassOn(MaterialPorts()[a_kind].objectClass);
 	}
-	/** @brief Whether port a_kind classifies a particle geometry's leaf under a_toggles. */
-	inline bool PortTakesParticles(const ToggleSet& a_toggles, std::uint8_t a_kind)
+	/** @brief Whether port a_kind classifies a particle geometry's leaf. */
+	inline bool PortTakesParticles(std::uint8_t a_kind)
 	{
-		return PortOn(a_toggles, a_kind) && MaterialPorts()[a_kind].rules.particleGeometry;
+		return PortOn(a_kind) && MaterialPorts()[a_kind].rules.particleGeometry;
 	}
 	/**
 	 * @brief Whether a leaf is a shape the billboards turn: turned shapes admitted, its port's rules allow it, and it is a skinless BSTriShape.
 	 * Such a leaf under exactly one billboard node is DCLF's.
 	 */
-	inline bool BillboardTurnedLeaf(const ToggleSet& a_toggles, std::uint8_t a_kind, std::uint8_t a_type, bool a_skinned)
+	inline bool BillboardTurnedLeaf(std::uint8_t a_kind, std::uint8_t a_type, bool a_skinned)
 	{
-		return ParentAdmits(a_toggles, Api::EngineParent::Billboard, Api::ParentLeaves::TurnedEffectShapes) && a_kind != 0 &&
+		return ParentAdmits(Api::EngineParent::Billboard, Api::ParentLeaves::TurnedEffectShapes) && a_kind != 0 &&
 		       MaterialPorts()[a_kind].rules.turnedByBillboards && a_type == static_cast<std::uint8_t>(RE::BSGeometry::Type::kTriShape) && !a_skinned;
 	}
 	/**
 	 * @brief Whether a Lighting leaf is a refraction shape the billboards turn, such as the heat haze cards over fires and forges.
 	 * Its only draw is the refraction normals, whose vertex stage turns it.
 	 */
-	inline bool BillboardTurnedRefraction(const ToggleSet& a_toggles, std::uint8_t a_kind, std::uint64_t a_flags, std::uint8_t a_type, bool a_skinned)
+	inline bool BillboardTurnedRefraction(std::uint8_t a_kind, std::uint64_t a_flags, std::uint8_t a_type, bool a_skinned)
 	{
 		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
 		constexpr std::uint64_t kRefractionFlags = static_cast<std::uint64_t>(Flag::kRefraction) | static_cast<std::uint64_t>(Flag::kTempRefraction);
-		return ParentAdmits(a_toggles, Api::EngineParent::Billboard, Api::ParentLeaves::TurnedEffectShapes) && ObjectClassOn(a_toggles, Api::ObjectClass::Refraction) &&
+		return ParentAdmits(Api::EngineParent::Billboard, Api::ParentLeaves::TurnedEffectShapes) && ObjectClassOn(Api::ObjectClass::Refraction) &&
 		       a_kind == 0 && (a_flags & kRefractionFlags) != 0 && a_type == static_cast<std::uint8_t>(RE::BSGeometry::Type::kTriShape) && !a_skinned;
 	}
 	inline const Api::MaterialPortRules& PortRules(std::uint8_t a_kind) { return MaterialPorts()[a_kind].rules; }

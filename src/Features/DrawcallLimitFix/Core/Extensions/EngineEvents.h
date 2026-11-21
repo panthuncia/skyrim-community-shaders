@@ -103,8 +103,8 @@ namespace DCLF::Extensions
 	// The primary cull's calls, each to every stand-in observer in order.
 	void StandInRootsChanged(const Api::StandInRootsChange& a_change);
 	void StandInRootsCleared();
-	void StandInUpdateEntry(bool a_running);
-	void StandInAfterWrites(bool a_running);
+	void StandInUpdateEntry();
+	void StandInAfterWrites();
 	/** @brief Any thread, no lock. Each observer's structure. */
 	void StandInStructure(const void* a_parent);
 	/** @brief Render thread, when the list jobs finish. Each observer's listJobsDone. */

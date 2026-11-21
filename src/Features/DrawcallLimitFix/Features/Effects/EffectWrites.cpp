@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
+#include "RenderGraph/Fatal.h"
 
 #include <array>
 #include <cstddef>
@@ -55,7 +56,7 @@ namespace DCLF::Features::Effects
 				auto* controller = SceneWriter::Arg<RE::NiTimeController*>(a_event, 0);
 				auto* property = static_cast<RE::BSShaderProperty*>(controller->target);
 				auto* material = property ? property->material : nullptr;
-				const bool captured = Extensions::ObjectClassOn(SceneToggles(), Api::ObjectClass::Effect);
+				const bool captured = Extensions::ObjectClassOn(Api::ObjectClass::Effect);
 				updates.push_back({ property, material, captured ? EffectWrittenOf(material) : EffectWritten{}, a_propertyColour, captured });
 				return;
 			}
@@ -105,7 +106,7 @@ namespace DCLF::Features::Effects
 		                        SceneWriter::SubscribeCall(SWF_HOOK_EFFECT_COLOR_CONTROLLER_UPDATE, &OnEffectColorController) &&
 		                        SceneWriter::SubscribeCall(SWF_HOOK_EFFECT_MATERIAL_COPY_MEMBERS, &OnEffectCopyMembers, SWF_PHASE_POST);
 		if (!subscribed)
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the effect write hooks after reporting them installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the effect write hooks after reporting them installed");
 		logger::info("[DCLF] effect write hooks subscribed: the effect controllers and material");
 	}
 }

@@ -2,6 +2,7 @@
 // The install order below matters because several pieces must register after other features' equivalents.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
+#include "Utils/Hash.h"
 #include "Features/DrawcallLimitFix/Features/Fades/Fades.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadesInternal.h"
 
@@ -37,15 +38,13 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		Api::SwitchId emptyFadeNodeSwitch, fadeParitySwitch;
+		Api::SwitchId emptyFadeNodeSwitch;
 
 		void RegisterSettings(Api::InstallContext& a_context)
 		{
 			emptyFadeNodeSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_EMPTY_FADE_NODE", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero,
 				.description = "default on (T7f item 7): the engine's empty fade node (the BSFadeNode 0x14332a2a0 holds, which every BSShaderProperty starts with and the engine reads as none) is no fade root: such geometry (terrain, object LOD, some clutter) takes its entry's root; 0: it is listed as one fade root of all of them, outside the scene graph",
-				.before = "CS_DCLF_PERSISTENT_PARITY" });
-			fadeParitySwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_FADE_PARITY", .kind = Api::SwitchKind::Parity, .reduced = Api::SwitchReduced::Never,
-				.description = "1: the fade port against the engine's functions, and FadeStateCS against the port", .after = "CS_DCLF_RESIDENT_PARITY" });
+				.before = "CS_DCLF_STATS" });
 		}
 
 		// The fade-out distance is measured from the node's centre. Trees also get the height test.
@@ -59,7 +58,7 @@ namespace DCLF::Features::Fades
 		void RootGlobalsKey(const Api::RootTestInput& a_input, std::uint32_t& a_witness)
 		{
 			const auto& g = a_input.globals;
-			const auto mix = [&](std::uint32_t a_value) { a_witness = (a_witness ^ a_value) * 16777619u; };
+			const auto mix = [&](std::uint32_t a_value) { a_witness = (a_witness ^ a_value) * Util::Fnv1a32::kPrime; };
 			mix(g.fadesOn | (g.fadeLodUpdates << 8) | (g.fadeSpecialA == g.fadeSpecialB ? 0x10000u : 0u));
 			mix(std::bit_cast<std::uint32_t>(g.fadeDistanceMult));
 			mix(std::bit_cast<std::uint32_t>(g.fadeOutThreshold));
@@ -68,7 +67,7 @@ namespace DCLF::Features::Fades
 				mix(std::bit_cast<std::uint32_t>(g.fadeTypeDivisors[type]));
 		}
 
-		// The write-back task is kicked at the frame start and joined when DCLF's async work drains.
+		// The write-back task is kicked at the frame start and never joined.
 		void RegisterRootStates(Api::InstallContext& a_context)
 		{
 			a_context.RegisterRootStates({ .name = "fade roots",
@@ -78,7 +77,6 @@ namespace DCLF::Features::Fades
 				.test = &RootTest,
 				.globalsKey = &RootGlobalsKey,
 				.kick = &KickFadeWriteBack,
-				.wait = &WaitFadeWriteBack,
 				.frameStart = &FadeState::BeginFrame,
 				.latchGlobals = &FadeState::LatchGlobals });
 		}
@@ -100,11 +98,6 @@ namespace DCLF::Features::Fades
 	Api::Feature Feature()
 	{
 		return { .name = "fades", .install = &Install, .earlyHooks = &InstallEarlyHooks, .preflight = &PreflightWriters };
-	}
-
-	bool FadeParity()
-	{
-		return SwitchEnabled(fadeParitySwitch);
 	}
 
 	bool EmptyFadeNodeIsNone()

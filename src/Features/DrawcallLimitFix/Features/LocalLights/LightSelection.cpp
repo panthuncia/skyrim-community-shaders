@@ -12,8 +12,6 @@
 
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "State.h"
 
 namespace DCLF
@@ -188,7 +186,7 @@ namespace DCLF
 	{
 		// Invalidate first, so an early return leaves no light views this frame.
 		ShadowViews::LightSlots().Invalidate();
-		const std::uint32_t sceneFrame = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t sceneFrame = Scene::FrameView::Get().SceneStep();
 		std::vector<FrameLight> frameLights = frame.sceneFrame == sceneFrame ? std::move(frame.frameLights) : std::vector<FrameLight>{};
 		const std::uint32_t selections = frame.sceneFrame == sceneFrame ? frame.selections + 1 : 1;
 		frame = {};
@@ -325,7 +323,6 @@ namespace DCLF
 		// The board holds spans into frame, valid until the next Select.
 		ShadowViews::LightSlots().Publish(frame.sceneFrame, frame.slots, frame.focusHosts, frame.focusCount);
 		TellKeptLights(frame);
-		Diagnostics::Notify<Diagnostics::EnginePoint::LightSelectionMade>();
 	}
 
 	void LightSelection::TellKeptLights(const Frame& a_frame)
@@ -348,7 +345,6 @@ namespace DCLF
 			static void thunk()
 			{
 				auto& selection = LightSelection::Get();
-				Diagnostics::Notify<Diagnostics::EnginePoint::LightSelectionBegin>();
 				func();
 				selection.Select();
 			}

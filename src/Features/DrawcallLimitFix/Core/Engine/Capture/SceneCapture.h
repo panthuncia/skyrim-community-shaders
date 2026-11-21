@@ -384,9 +384,6 @@ namespace DCLF::SceneCapture
 	void NoteOutOfWorld();
 	/** @brief The render thread, recorded at the frame's start, for the counters. */
 	void SetMainThread(std::uint32_t a_thread);
-	/** @brief The render thread's frame, for the records' diagnostics. */
-	void SetFrame(std::uint32_t a_frame);
-	std::uint32_t Frame();
 
 	/**
 	 * @brief The skin-partition LOD row a pass draws with (NiSkinPartition::Unk_25, AE 140d43a10): LODMode.index + singleLevel * 4.

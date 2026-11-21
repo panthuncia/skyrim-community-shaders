@@ -322,7 +322,7 @@ namespace DCLF::Draws::detail
 			rows(a_rows), sinkTarget(&a_sink), lanes(&a_scratch.lanes), forwardOnly(a_in.forwardOnly)
 		{
 			if (a_in.catalog)
-				zGroups = GetIndirectState(*a_in.catalog, a_in.targetsGeneration).zGroups;
+				zGroups = GetIndirectState(*a_in.catalog).zGroups;
 			reflectionBit = Extensions::ViewEntryOf(Api::EngineView::Reflection).viewBit;
 			firstPersonBit = Extensions::ViewEntryOf(Api::EngineView::FirstPerson).viewBit;
 			for (std::uint32_t v = 0; v < kOcclusionViews; ++v) {
@@ -566,10 +566,6 @@ namespace DCLF::Draws::detail
 		void Posted(std::uint64_t a_write, std::shared_ptr<const org::services::PublishedBufferVersion> a_version);
 		/** @brief Forget everything, so the next set compacts. */
 		void Reset();
-		/** @brief A set's resident sequence, or null. For the equivalence check. */
-		const DrawSequence* Sequence(const Direct::ViewBatchSet& a_set, std::uint32_t a_sequence) const;
-		/** @brief Describe what the lists hold for a_object. For the equivalence check. */
-		std::string Explain(std::uint32_t a_object, const ViewBatchInputs& a_in) const;
 		/** @brief The report line, or empty. Resets the counters. */
 		std::string TakeReport();
 
@@ -580,8 +576,4 @@ namespace DCLF::Draws::detail
 		std::unique_ptr<State> state;
 		std::shared_ptr<Compaction> compaction;
 	};
-
-	/** @brief Compare an incremental set against a full build of the same snapshot. Returns the number of differing lanes. */
-	std::size_t CompareSets(const SceneLists& a_lists, const Direct::ViewBatchSet& a_incremental, const Direct::ViewBatchSet& a_full,
-		const std::vector<DrawSequence>& a_fullSequences, const ViewBatchInputs& a_in);
 }

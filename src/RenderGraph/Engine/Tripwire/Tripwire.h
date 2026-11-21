@@ -23,7 +23,8 @@ namespace org
  * @brief Tripwire handles are COM objects that stand in the engine's ID3D11* and IDXGISwapChain fields once ORG owns the resource.
  *
  * IUnknown, GetDesc and debug names work. Every other method is a tripwire that logs its call site once and fails harmlessly.
- * A guest handle wraps a D3D11 object and forwards every call to it, logging only watched methods.
+ * A guest handle wraps a D3D11 object and forwards every call to it, logging only watched methods. The context is the exception:
+ * in both modes it keeps binds and drops draws, and a guest one forwards only the work outside draws (see DeviceContextHandle).
  * Never pass a handle straight to DXVK's own device or context, since DXVK casts it to its own class and crashes. Use Unwrap.
  * The last Release frees the handle on any thread, but its ORG resource is queued for ServiceRetired so GPU memory outlives use.
  * CS_ORG_TRIPWIRE_LOG=1 logs call site reports, and CS_ORG_TRIPWIRE_SELFTEST=1 runs a self-test at startup.
@@ -61,36 +62,17 @@ namespace RenderGraph::Engine::Tripwire
 	/** @brief The interface's method names in vtable order, so a name's index is its vtable slot. */
 	std::span<const char* const> SlotNames(Kind a_kind);
 
-	/** @brief The methods a guest handle logs while it forwards them, being calls that should not happen any more. */
-	class WatchSet
-	{
-	public:
-		/** @brief More than the largest vtable, ID3D11DeviceContext's 115 slots. */
-		static constexpr std::size_t kMaxSlots = 128;
-
-		WatchSet() = default;
-
-		static WatchSet All();
-
-		/** @brief The named methods of a_kind's interface. Unknown names are logged and ignored. The lookup is by string, so reuse the set. */
-		static WatchSet Of(Kind a_kind, std::initializer_list<std::string_view> a_methods);
-
-		bool Test(std::uint16_t a_slot) const { return a_slot < kMaxSlots && bits.test(a_slot); }
-
-	private:
-		std::bitset<kMaxSlots> bits;
-	};
+	/** @brief More than the largest vtable, ID3D11DeviceContext's 115 slots. */
+	inline constexpr std::size_t kMaxMethodSlots = 128;
 
 	struct Options
 	{
 		/** @brief The debug name shown in the log. SetPrivateData can change it later. */
 		std::string name;
-		/** @brief The ORG resource the handle stands for. Released through ServiceRetired after the last Release. */
+		/** @brief The ORG resource the handle stands for. Released through ServiceRetired after the last Release or a Retarget. */
 		std::shared_ptr<org::Resource> graph;
 		/** @brief Anything else the handle keeps alive, released with the graph resource. */
 		std::shared_ptr<const void> owner;
-		/** @brief The methods logged while forwarded. Guest mode only. */
-		WatchSet watch;
 	};
 
 	/** @name Factories
@@ -125,6 +107,50 @@ namespace RenderGraph::Engine::Tripwire
 	winrt::com_ptr<ID3D11Device> CreateDevice(Options a_options = {}, ID3D11Device* a_wrap = nullptr);
 	winrt::com_ptr<IDXGISwapChain> CreateSwapChain(const DXGI_SWAP_CHAIN_DESC& a_desc, Options a_options = {}, IDXGISwapChain* a_wrap = nullptr);
 	/** @} */
+
+	/** @brief What a handle stands for after Retarget. a_wrap gets one reference. */
+	template <class Desc>
+	struct Target
+	{
+		IUnknown* wrap = nullptr;               // DXVK's object (guest) or the native handle (native); null = unbacked
+		Desc desc{};                            // what GetDesc answers from now on
+		std::shared_ptr<org::Resource> graph;   // what GraphResourceOf answers
+		std::shared_ptr<const void> owner;      // kept alive with it
+	};
+
+	/**
+	 * @brief Points a_handle at another object. Calls made after it forward to a_target.wrap. The old object, graph resource and
+	 * owner go to the retire queue (ServiceRetired), so DXVK and the GPU can finish with them. Fatal for a handle that is not a
+	 * resource or view handle, for a kind mismatch, and off the render owner. Only at the frame's adoption point.
+	 * The engine's shadow state still holds the same pointer, so the caller marks its bindings dirty afterwards.
+	 */
+	void Retarget(ID3D11Texture2D* a_handle, Target<D3D11_TEXTURE2D_DESC> a_target);
+	void Retarget(ID3D11Texture3D* a_handle, Target<D3D11_TEXTURE3D_DESC> a_target);
+	void Retarget(ID3D11ShaderResourceView* a_handle, Target<D3D11_SHADER_RESOURCE_VIEW_DESC> a_target);
+	void Retarget(ID3D11RenderTargetView* a_handle, Target<D3D11_RENDER_TARGET_VIEW_DESC> a_target);
+	void Retarget(ID3D11DepthStencilView* a_handle, Target<D3D11_DEPTH_STENCIL_VIEW_DESC> a_target);
+	void Retarget(ID3D11UnorderedAccessView* a_handle, Target<D3D11_UNORDERED_ACCESS_VIEW_DESC> a_target);
+
+	/**
+	 * @name Unbacked handles. Nothing is behind them yet: every call trips and fails harmlessly, GetDesc answers a_desc.
+	 * A view made with a null a_wrap over an unbacked resource is unbacked too. Retarget gives one an object.
+	 * @{ */
+	winrt::com_ptr<ID3D11Texture2D> CreateUnbackedTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, Options a_options);
+	winrt::com_ptr<ID3D11Texture3D> CreateUnbackedTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, Options a_options);
+	/** @} */
+
+	/** @brief Whether the handle has nothing behind it, in either mode. The context drops work that passes one. Any thread. */
+	bool IsUnbacked(const void* a_object);
+
+	/**
+	 * @brief After retargeting engine field handles: the engine's shadow state caches bound objects by pointer and skips a bind
+	 * whose pointer did not change, so every render target, viewport, shader resource and UAV bind is marked dirty. The engine's
+	 * next flush binds the new objects. Not ClearState, which would drop CS's own bindings too. Render owner, at the adoption point.
+	 */
+	void MarkEngineBindingsDirty();
+
+	/** @brief How many context calls were dropped for an unbacked handle argument this session. Any thread. */
+	std::uint64_t UnbackedDrops();
 
 	/** @brief Pairs a device handle with a context handle so each answers the other. Call once, before either is handed out. */
 	bool PairDeviceAndContext(ID3D11Device* a_device, ID3D11DeviceContext* a_context);
@@ -204,14 +230,18 @@ namespace RenderGraph::Engine::Tripwire
 	/** @brief Runs the self-test and starts the periodic report when their switches are on. Installs nothing in the engine. */
 	void Start();
 
+	/** @brief The handles' self-test, in tests/Tripwire/TripwireSelfTest.cpp. Start runs it with CS_ORG_TRIPWIRE_SELFTEST=1. */
+	namespace SelfTest
+	{
+		bool Requested();
+		void Run();
+	}
+
 	/** @brief Logs every call site with its count when CS_ORG_TRIPWIRE_LOG=1. */
 	void Report(std::string_view a_reason);
 
 	/** @brief Stops the periodic report's thread and logs the exit report. */
 	void Stop();
-
-	/** @brief Meters the handle methods called on this thread for Tracy and the log, when CS_ORG_D3D11_METER=1. Render thread. */
-	void MeterFrame();
 
 	/** @brief Names a code address for logs, with the Address Library ID and offset for game code. */
 	std::string DescribeCaller(const void* a_address);
@@ -285,25 +315,26 @@ namespace RenderGraph::Engine::Tripwire
 	bool NativeServicesInstalled();
 
 	/**
-	 * @brief Asked before the guest context forwards any call. False drops it as a native handle would.
-	 * Must be cheap and must not call the guest context. Any thread.
+	 * @brief Told of every context call that reaches nothing, draws and dispatches among them, in either mode, before it is recorded.
+	 * Must be cheap and must not call the context. Any thread.
 	 */
-	using ContextFilter = bool (*)(std::uint16_t a_slot, void* a_caller);
+	using ContextObserver = void (*)(std::uint16_t a_slot, void* a_caller);
 
-	/** @brief Installs the guest context's single filter, used by the residue census and the flush latch. Null removes it. */
-	void SetContextFilter(ContextFilter a_filter);
+	/** @brief Installs the context's single observer, the engine draw census (Flush.h). Null removes it. */
+	void SetContextObserver(ContextObserver a_observer);
 
 	/**
-	 * @brief Lets the flush latch take a guest Map or Unmap so nothing reaches DXVK, for engine constant buffers in a CS stage's
-	 * window. Must not call the guest context. Render owner.
+	 * @brief Lets the engine constants answer a Map or Unmap of the engine's pool constant buffers from CS memory, so it reaches
+	 * neither DXVK nor the native context. Asked first in both graph modes. In guest mode a_resource is unwrapped, in native mode
+	 * it is the handle the engine passed. Must not call the context. Any thread that drives the immediate context.
 	 */
-	struct GuestMapHooks
+	struct MapHooks
 	{
 		bool (*map)(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out) = nullptr;
 		bool (*unmap)(ID3D11Resource* a_resource, UINT a_subresource) = nullptr;
 	};
 
-	void SetGuestMapHooks(const GuestMapHooks& a_hooks);
+	void SetMapHooks(const MapHooks& a_hooks);
 
 	/** @brief Lets the skeleton's kMAIN copy run on the graph instead of DXVK. Must not call the guest context. Any thread. */
 	using GuestCopyHook = bool (*)(ID3D11Resource* a_destination, ID3D11Resource* a_source);

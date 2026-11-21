@@ -1,0 +1,57 @@
+# Shader hot reload during play (cleanup plan A4). A reload of every live pipeline, each forced to a new version even when
+# unchanged, then a reload of one unchanged file (Lighting.hlsl). The forced reload publishes every pipeline at a new pipeline
+# generation: one ShaderGeneration event. Every graph is built again on the build lane, and the revision that carries the event is
+# adopted once every graph pins the new generation and DCLF's scene is recorded on its rebuilt graphs. Frames keep the old
+# pipelines meanwhile, and nothing waits or builds on the render thread. The unchanged reload publishes nothing, so it raises no
+# event. The shots before and after must match.
+# Compose it: native-vulkan+shader-reload, native-d3d12+shader-reload, guest+shader-reload.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "shot"
+arg = "before"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "org:reload-shaders"
+arg = "all"
+
+# The wait holds the shot until the reload finished and a frame revision adopted its pipeline generation.
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "after-all"
+wait = "reload"
+wait_s = 120
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "org:reload-shaders"
+arg = "Lighting.hlsl"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "after-file"
+wait = "reload"
+wait_s = 120
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["before", "after-all", "after-file"]
+no_log = ["frame tap error", "fatal: frame revision:", "shader reload: every graph asked for", "graph failed to prepare", "shader-reload wait",
+	"graph built on the render thread after the first world frame"]

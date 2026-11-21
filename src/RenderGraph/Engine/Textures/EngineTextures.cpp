@@ -1,45 +1,34 @@
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
-#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Engine.h"
 
 #include "RenderGraph/Switches.h"
 
-namespace RenderGraph::Engine::Textures
-{
-	bool Requested()
-	{
-		// The creators were checked on SE 1.5.97 and AE 1.6.1170, not on VR.
-		static const bool requested = !REL::Module::IsVR() && RenderGraph::Engine::Native::GraphMode();
-		return requested;
-	}
-}
-
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "Globals.h"
-#	include "RenderGraph/DxvkImageImport.h"
-#	include "RenderGraph/DxvkOrgInterop.h"
-#	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/UndeclaredAccess.h"
-#	include "Utils/D3D.h"
+#include "Globals.h"
+#include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/ImageRegistry.h"
+#include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/UndeclaredAccess.h"
+#include "Utils/D3D.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/TextureDescription.h>
-#	include <rhi_helpers.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/TextureDescription.h>
+#include <rhi_helpers.h>
 
-#	include <DirectXTex.h>
+#include <DirectXTex.h>
 
-#	include <algorithm>
-#	include <atomic>
-#	include <mutex>
-#	include <shared_mutex>
-#	include <unordered_map>
-#	include <vector>
+#include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
+#include <vector>
 
 namespace RenderGraph::Engine::Textures
 {
@@ -63,7 +52,7 @@ namespace RenderGraph::Engine::Textures
 					g_registry.erase(graph.get());
 				}
 				// The import does not own the image, so no import may find it after this.
-				RenderGraph::ForgetMadeImage(graph.get());
+				RenderGraph::ImageRegistry::Retire(graph.get());
 				// Release the graph's import before the image.
 				graph.reset();
 				image = {};
@@ -141,18 +130,18 @@ namespace RenderGraph::Engine::Textures
 
 	bool Active()
 	{
-		return Requested() && RenderGraphRuntime::Get().CanWrapTexturesWithData();
+		return Engine::GraphMode() && RenderGraphRuntime::Get().IsActive();
 	}
 
 	bool Create(const CreateInfo& a_info, Created& a_out)
 	{
 		a_out = {};
-		if (!Requested())
+		if (!Engine::GraphMode())
 			return false;
 		auto& runtime = RenderGraphRuntime::Get();
 		auto* host = runtime.Host();
 		if (!Active() || !host) {
-			// Made before the render graph started, or with a DXVK build lacking the export.
+			// Made before the render graph started.
 			g_left.fetch_add(1, std::memory_order_relaxed);
 			LogOnce(g_loggedInactive, a_info.name, "the render graph cannot wrap images with their contents yet");
 			return false;
@@ -226,7 +215,8 @@ namespace RenderGraph::Engine::Textures
 			return fail(g_loggedLayout, "the graph cannot import the layout DXVK rests it in");
 		}
 		// An import of this texture returns this resource instead of importing it again.
-		RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(info.image.image), record->graph, graphDesc, a_info.name);
+		RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(info.image.image), { record->graph, nullptr,
+			std::make_shared<const org::TextureDescription>(graphDesc), "EngineTextures", a_info.name, RenderGraph::ImageRegistry::Kind::Made });
 		record->name = a_info.name;
 		record->dimension = a_info.dimension;
 		record->desc.Width = a_info.width;
@@ -303,7 +293,7 @@ namespace RenderGraph::Engine::Textures
 
 	std::shared_ptr<const Texture> Find(const ID3D11ShaderResourceView* a_view)
 	{
-		if (!a_view || !Requested())
+		if (!a_view || !Engine::GraphMode())
 			return nullptr;
 		auto graph = Tripwire::GraphResourceOf(a_view);
 		if (!graph) {
@@ -331,18 +321,3 @@ namespace RenderGraph::Engine::Textures
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-namespace RenderGraph::Engine::Textures
-{
-	bool Active() { return false; }
-	bool Create(const CreateInfo&, Created& a_out)
-	{
-		a_out = {};
-		return false;
-	}
-	std::shared_ptr<const Texture> Find(const ID3D11ShaderResourceView*) { return nullptr; }
-	Stats GetStats() { return {}; }
-}
-
-#endif

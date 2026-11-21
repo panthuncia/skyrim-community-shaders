@@ -22,7 +22,7 @@ namespace Testing
 
 		/**
 		 * @brief The old CommunityShaders.env beside the log, one NAME=value per line, '#' for comments. A launcher such as an
-		 * already-running MO2 does not pass a new environment to the game. Kept for one migration step: cs-ab still writes it.
+		 * already-running MO2 does not pass a new environment to the game. Manual runs set switches with it.
 		 */
 		void ApplyEnvFile()
 		{
@@ -125,9 +125,12 @@ namespace Testing
 						step.arg = item.contains("arg") ? SwitchText(item["arg"]) : std::string{};
 						step.wait = item.value("wait", std::string{});
 						step.waitSeconds = Seconds(item, "wait_s", 0.0);
+						step.awaitCondition = item.value("await", std::string{});
+						if (!step.awaitCondition.empty() && step.awaitCondition != "adopted")
+							a_errors.push_back(fmt::format("step {}: 'await' = '{}' is not adopted", a_config.steps.size(), step.awaitCondition));
 						if (step.at != "previous" && !IsMilestone(step.at))
 							a_errors.push_back(fmt::format("step {}: 'at' = '{}' is no milestone", a_config.steps.size(), step.at));
-						if (step.command.empty() && step.wait.empty())
+						if (step.command.empty() && step.wait.empty() && step.awaitCondition.empty())
 							a_errors.push_back(fmt::format("step {}: neither 'do' nor 'wait'", a_config.steps.size()));
 						a_config.steps.push_back(std::move(step));
 					}

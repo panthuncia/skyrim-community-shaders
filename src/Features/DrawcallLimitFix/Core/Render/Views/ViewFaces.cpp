@@ -18,7 +18,7 @@ namespace DCLF
 			auto& faces = state.faces[d];
 			faces.pipeline = {};
 			// A family without faces, such as grass, has no forward pipeline.
-			if (a_on && Extensions::DrawFamilyHasFaces(family) && Extensions::DrawFamilyOn(ActiveToggles(), family)) {
+			if (a_on && Extensions::DrawFamilyHasFaces(family) && Extensions::DrawFamilyOn(family)) {
 				auto& drawPipelines = DrawPipelines::Get();
 				const ForwardPipelineKey key{ 0, 0, FamilySlotOf(family).forwardFlags };
 				drawPipelines.RequestForward(key);
@@ -47,7 +47,7 @@ namespace DCLF
 				Api::DrawFamilyFaceRow query{ *scene, true, own.row, nullptr };
 				return faces.row && faces.row(query);
 			};
-			state.facesOwned[d] = ViewDrawable(a_view, ActiveToggles()) && impl->ViewCovered(a_view) && own.ready && impl->familyOwned[d] && scene && rowDraws();
+			state.facesOwned[d] = ViewDrawable(a_view) && impl->ViewCovered(a_view) && own.ready && impl->familyOwned[d] && scene && rowDraws();
 			PassCapture::Get().SetViewFamilyOwned(a_view, family, state.facesOwned[d]);
 		}
 	}

@@ -8,6 +8,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
+#include "RenderGraph/Async/Lanes.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
@@ -19,7 +20,6 @@
 #include <format>
 #include <ranges>
 #include <sstream>
-#include <thread>
 #include <type_traits>
 
 namespace DCLF
@@ -30,8 +30,6 @@ namespace DCLF
 		std::atomic<org::async::SerializedTaskPump*> scenePump{ nullptr };
 		// A producer whose bit is already set leaves the Notify to the one that set it. Any set bit means a pass is queued.
 		std::atomic<std::uint32_t> scenePassReasons{ 0 };
-		// Under the parities, wakes are dropped and the frame start runs the pass.
-		std::atomic<bool> scenePassesInline{ false };
 		std::atomic<bool> scenePassesLoading{ false };
 		// One cache line per source, since the job threads count them.
 		struct alignas(64) DeferredCount
@@ -42,7 +40,6 @@ namespace DCLF
 		std::array<DeferredCount, static_cast<std::size_t>(SceneWake::Count)> scenePassDeferred{};
 		// The pump is closed for good, logged once.
 		std::atomic<bool> scenePumpFailed{ false };
-		std::atomic<bool> throwNextPass{ false };
 		thread_local std::uint32_t wakeBatchDepth = 0;
 		thread_local std::uint32_t wakeBatched = 0;
 
@@ -50,7 +47,7 @@ namespace DCLF
 		void WakeScenePassBits(std::uint32_t a_bits)
 		{
 			auto* pump = scenePump.load(std::memory_order_acquire);
-			if (!pump || !a_bits || scenePassesInline.load(std::memory_order_relaxed))
+			if (!pump || !a_bits)
 				return;
 			// Pairs with the fence ScenePass makes after taking the reasons. Either that pass's drains see the push, or this read sees the
 			// reasons taken and this wake queues the next pass.
@@ -61,7 +58,6 @@ namespace DCLF
 				return;
 			(void)pump->Notify();
 		}
-		thread_local bool passInline = false;
 
 		const std::shared_ptr<const FrameGlobals>& NoFrameGlobals()
 		{
@@ -124,29 +120,22 @@ namespace DCLF::Scene
 	void Coordinator::StartScenePump()
 	{
 		// Never destroyed. The lane is the scene work's alone, so a long pass never holds up the frame's builds.
-		static auto* pump = SceneScheduler::MakeLanePump(
-			SceneScheduler::Executor(), SceneScheduler::SceneLaneScope(), SceneExecutor::Scene, org::async::TaskDispatch::Controlled, "DCLF scene pass",
-			[this] { ScenePass(passInline); },
-			[] {
-				if (!scenePumpFailed.exchange(true, std::memory_order_acq_rel))
-					logger::error("[DCLF] the scene pump stopped (its task refused by the scene lane, or a pass threw past its handler); no scene pass runs from here on");
-			});
+		static auto* pump = &::RenderGraph::Frame::MakeLane(
+			{ "DCLF scene pass", ::RenderGraph::Frame::Executor::Scene, org::async::TaskDispatch::Controlled,
+				[] {
+					if (!scenePumpFailed.exchange(true, std::memory_order_acq_rel))
+						logger::error("[DCLF] the scene pump stopped (its task refused by the serial lane, or a pass threw past its handler); no scene pass runs from here on");
+				} },
+			[this] { ScenePass(); });
 		// A returned retirement does not wake, since that could wake a pass whose drop returns the next one.
 		scenePump.store(pump, std::memory_order_release);
 		// Catches what was pushed before the pump existed.
 		WakeScenePass(SceneWake::Attach);
 	}
 
-	void Coordinator::SetScenePassMode(bool a_full, bool a_inline)
+	void Coordinator::SetScenePassMode(bool a_full)
 	{
 		passesFull.store(a_full, std::memory_order_release);
-		scenePassesInline.store(a_inline, std::memory_order_relaxed);
-	}
-
-	void Coordinator::ThrowNextScenePass()
-	{
-		throwNextPass.store(true, std::memory_order_release);
-		WakeScenePass(SceneWake::FrameInput);
 	}
 
 	bool Coordinator::ScenePumpFailed() const
@@ -160,34 +149,9 @@ namespace DCLF::Scene
 		return pump && !pump->IsIdle();
 	}
 
-	void Coordinator::RunScenePassInline()
-	{
-		auto* pump = scenePump.load(std::memory_order_acquire);
-		if (!pump)
-			return;
-		// Under the parities, a pass the lane already started ends first, then this frame's runs here.
-		passInline = true;
-		while (!pump->TryRunInline()) {
-			if (scenePumpFailed.load(std::memory_order_acquire))
-				break;
-			std::this_thread::yield();
-		}
-		passInline = false;
-		FrameView::Get().DeliverPrimaryNotes();
-	}
-
-	void Coordinator::ApplyEventsInline()
-	{
-		const bool full = passesFull.exchange(false, std::memory_order_acq_rel);
-		RunScenePassInline();
-		passesFull.store(full, std::memory_order_release);
-	}
-
-	void Coordinator::ScenePass(bool a_inline)
+	void Coordinator::ScenePass()
 	{
 		DCLF_ZONE("CS.DCLF.ScenePass");
-		if (throwNextPass.exchange(false, std::memory_order_acq_rel)) [[unlikely]]
-			throw 0;  // not a std::exception: past the pass's handler, into the pump's (SerializedTaskPump::RunOwned), which stops it
 		// Take the sources before anything else. This pairs with WakeScenePassBits' fence.
 		const std::uint32_t sources = scenePassReasons.exchange(0, std::memory_order_acq_rel);
 		std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -197,12 +161,10 @@ namespace DCLF::Scene
 		const std::uint64_t publishedBefore = pumpStats.published;
 		const auto start = std::chrono::steady_clock::now();
 		const std::uint64_t eventsOnlyBefore = pumpStats.eventsOnly;
-		// On the lane no engine memory may be read without a lease. Inline the render thread stays itself.
-		if (!a_inline)
-			sceneWorkThread = true;
+		// On the lane no engine memory may be read without a lease.
+		sceneWorkThread = true;
 		const bool marked = EngineReadWindow::sceneWork;
-		if (!a_inline)
-			EngineReadWindow::sceneWork = true;
+		EngineReadWindow::sceneWork = true;
 		// Inputs posted after this belong to the next pass, and their post wakes it.
 		TakeFrameInputs();
 		try {
@@ -210,8 +172,7 @@ namespace DCLF::Scene
 			FrameGlobals::Scope scope(passGlobals);
 			// The whole pass reads the toggles its frame inputs carried, never the frame's or the live ones.
 			ToggleSnapshotScope toggles(&passSnapshot.toggles);
-			RunSceneWork(!a_inline);
-			RunActorProbeIfAsked();
+			RunSceneWork();
 			// This lane owns the census state.
 			DCLF::Capture::RunSceneLaneWork();
 		} catch (const std::exception& e) {
@@ -227,7 +188,6 @@ namespace DCLF::Scene
 		auto& ps = pumpStats;
 		ps.passMs.push_back(ms);
 		++ps.passes;
-		ps.inlinePasses += a_inline ? 1 : 0;
 		// A pass counts under every source it took.
 		const bool changed = ps.published != publishedBefore || passDeferred;
 		for (std::uint32_t s = 0; s < static_cast<std::uint32_t>(SceneWake::Count); ++s)
@@ -276,14 +236,13 @@ namespace DCLF::Scene
 			const double publications = static_cast<double>((std::max)(p.published, std::uint64_t(1)));
 			const auto reason = [&](PublishReason a_why) { return p.byReason[static_cast<std::size_t>(a_why)]; };
 			logger::info("[DCLF] publication pacing (W3: a publication only once the snapshot builder took the last, or for the frame's pass): {} full passes over {} frames "
-						 "({:.2f} a frame, max {}), {} publications ({:.2f} a frame, max {}; {} the frame's pass, {} the last taken, {} inline, {} the first), {} passes deferred "
+						 "({:.2f} a frame, max {}), {} publications ({:.2f} a frame, max {}; {} the frame's pass, {} the last taken, {} the first), {} passes deferred "
 						 "({} folded into a later publication); claims {} replayed ({:.1f} keys each), {} copied whole, {} shared again; tables' whole-copied rest "
-						 "{:.3f} ms a publication; paced parity {} checks, {} tables differ, {} claims differ{}{}",
+						 "{:.3f} ms a publication",
 				p.passes, p.frames, static_cast<double>(p.passes) / frames, p.maxPasses, p.published, static_cast<double>(p.published) / frames, p.maxPublished,
-				reason(PublishReason::Frame), reason(PublishReason::Taken), reason(PublishReason::Inline), reason(PublishReason::First), p.deferred, p.folded,
+				reason(PublishReason::Frame), reason(PublishReason::Taken), reason(PublishReason::First), p.deferred, p.folded,
 				p.claimsReplayed, static_cast<double>(p.claimsKeys) / static_cast<double>((std::max)(p.claimsReplayed, std::uint64_t(1))), p.claimsWhole,
-				p.claimsShared, p.restMs / publications, p.parityChecks, p.parityTables, p.parityClaims,
-				!p.parityChecks ? "" : (p.parityTables || p.parityClaims) ? " <- PACED PUBLICATION DIFFERS; first: " : " <- OK", p.parityFirst);
+				p.claimsShared, p.restMs / publications);
 			static constexpr std::array<const char*, std::tuple_size_v<decltype(PublishKey::words)> + 2> kKeyNames{ "tables generation", "change log",
 				"geometry log", "material log", "extras log", "version counter", "constants stamp", "family stamps", "objects", "geometries", "pipelines",
 				"materials", "sun candidates", "light candidates", "light entries appeared", "commit toggles", "pipelines applied", "lookups", "catalog" };
@@ -322,13 +281,11 @@ namespace DCLF::Scene
 		p.lastFrame = lastFrame;
 	}
 
-	bool Coordinator::PublicationDue(bool a_task, PublishReason& a_why) const
+	bool Coordinator::PublicationDue(PublishReason& a_why) const
 	{
 		// Otherwise a publication posted now would only replace the last one in the work slot. The pass defers and its changes stay pending.
 		if (!publishedKeyValid || !publicationSequence)
 			return a_why = PublishReason::First, true;
-		if (!a_task)
-			return a_why = PublishReason::Inline, true;
 		if (passTookFrameInputs || (passSources & (1u << static_cast<std::uint32_t>(SceneWake::FrameInput))))
 			return a_why = PublishReason::Frame, true;
 		if (IndirectDraws::Get().SnapshotWorkTaken() >= publicationSequence)
@@ -346,15 +303,14 @@ namespace DCLF::Scene
 		auto& g = moverGateStats;
 		if (g.perFrameWalks) {
 			const double walks = static_cast<double>(g.perFrameWalks);
-			const bool witnessed = g.witnessChecks != 0;
 			logger::info("[DCLF] mover gate (A1: the light path by event, the plan as a delta): {} per-frame walks ({} ungated); per walk {:.1f} per-frame entries taken "
 						 "({:.1f} moved, {:.1f} hidden event owed, {:.1f} first person, {:.1f} with no light path), {:.1f} left for want of an event; placement set {} movers, "
 						 "{} roots ({} still); {} plans ({} with written slots, {} with the set changed; {} candidates the same as the last), {} per-frame walks made none; "
-						 "mirror updates classifying again {} nodes, {} geometries; gate parity {} checks, {} would differ{}{}",
+						 "mirror updates classifying again {} nodes, {} geometries",
 				g.perFrameWalks, g.ungatedWalks, static_cast<double>(g.due) / walks, static_cast<double>(g.moved) / walks, static_cast<double>(g.owed) / walks,
 				static_cast<double>(g.firstPerson) / walks, static_cast<double>(g.fullEveryFrame) / walks, static_cast<double>(g.skipped) / walks, moverSet.size(),
 				movingRoots.size() + stillRoots.size(), stillRoots.size(), g.plans, g.plansWritten, g.plansChanged, g.candidatesSame, g.perFrameWithoutPlan, g.mirrorNodes,
-				g.mirrorGeometries, g.witnessChecks, g.witnessDiffer, !witnessed ? "" : g.witnessDiffer ? " <- GATE MISSED; first: " : " <- OK", g.firstDiffer);
+				g.mirrorGeometries);
 		}
 		g = {};
 	}

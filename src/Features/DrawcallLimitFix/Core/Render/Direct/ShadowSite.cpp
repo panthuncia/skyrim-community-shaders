@@ -276,21 +276,6 @@ namespace DCLF::Direct
 			cull.strict = state->strict.get();
 			auto& site = NewView(*slot, run, latched.type, cull, false);
 			site.bindings = &bindings;
-			// Its map's rendering, which Parallel mode's secondaries and per-snapshot recordings are recorded inside.
-			{
-				site.secondary = run.record == RecordMode::Parallel;
-				auto& inheritance = site.inheritance;
-				inheritance.depthFormat = targets.formats[view.target];
-				inheritance.stencilFormat = StencilOf(targets.formats[view.target]);
-				inheritance.x = view.x;
-				inheritance.y = view.y;
-				inheritance.width = view.width;
-				inheritance.height = view.height;
-				inheritance.minDepth = view.minDepth;
-				inheritance.maxDepth = view.maxDepth;
-				inheritance.debugName = occlusion ? "DCLF direct occlusion map" : "DCLF direct shadow view";
-			}
-			PrepareSnapshotView(*slot, run, site);
 			ShadowPass pass{};
 			pass.view = &site;
 			pass.dsv = rhi::DescriptorSlot(targets.dsvHeap->GetHandle(), targets.first[view.target] + (targets.layers[view.target] > 1 ? view.slice : 0u));
@@ -313,10 +298,5 @@ namespace DCLF::Direct
 			});
 		});
 		SetPending(run);
-	}
-
-	bool ShadowSiteLive()
-	{
-		return ActiveToggles().shadows;
 	}
 }

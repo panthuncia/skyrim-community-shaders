@@ -61,10 +61,8 @@
 #include "Features/PerformanceOverlay/ABTesting/ABTestAggregator.h"
 #include "Features/PerformanceOverlay/ABTesting/ABTesting.h"
 #include "Features/ScreenshotFeature.h"
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/MemoryWindow.h"
-#	include "RenderGraph/ScheduleWindow.h"
-#endif
+#include "RenderGraph/MemoryWindow.h"
+#include "RenderGraph/ScheduleWindow.h"
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Menu::ThemeSettings::PaletteColors,
@@ -1560,8 +1558,6 @@ void Menu::DrawWeatherDetailsWindow()
  */
 void Menu::DrawRenderGraphWindows()
 {
-#if defined(CS_HAS_RENDER_GRAPH)
 	RenderGraphSchedule::DrawWindow();
 	RenderGraphMemory::DrawWindow();
-#endif
 }

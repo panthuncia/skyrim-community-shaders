@@ -1,4 +1,4 @@
-// Fades' CS_DCLF_STATS report lines: the port parity, the fade roots, the write-back and the fade writers.
+// Fades' CS_DCLF_STATS report lines: the fade roots, the write-back and the fade writers.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeRoots.h"
@@ -16,15 +16,6 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		/** @brief Prints only when the port check ran on a root since the last report. */
-		void PortLines(std::uint32_t)
-		{
-			const auto fadePort = TakePortCheck();
-			if (fadePort.checked)
-				logger::info("[DCLF] fade port parity (the port against the engine's functions on node copies): {} roots, {} differ{}{}", fadePort.checked, fadePort.differ,
-					fadePort.differ ? " <- FADE PORT" : " <- OK", fadePort.first.empty() ? "" : "; first: " + fadePort.first);
-		}
-
 		void RootsLines(std::uint32_t)
 		{
 			const auto& lodTables = Scene::FrameView::Get().GetTables();
@@ -42,12 +33,9 @@ namespace DCLF::Features::Fades
 				const auto applied = writeBack.applied.exchange(0), stale = writeBack.stale.exchange(0), busy = writeBack.busy.exchange(0);
 				const auto storeNs = writeBack.storeNs.exchange(0), notWritten = writeBack.notWritten.exchange(0), dropped = writeBack.dropped.exchange(0);
 				const auto harvested = writeBack.harvested.exchange(0), withEvents = writeBack.harvestedWithEvents.exchange(0), events = writeBack.events.exchange(0);
-				const auto overflowed = writeBack.overflowed.exchange(0), missed = writeBack.missed.exchange(0), setsAdded = writeBack.setsAdded.exchange(0);
-				std::uint32_t sets = 0, listEvents = 0;
-				for (const auto* set = writeBack.sets.load(std::memory_order_acquire); set; set = set->next) {
-					++sets;
-					listEvents = std::max(listEvents, set->events);
-				}
+				const auto list = writeBack.list->Stats(true);
+				const auto overflowed = list.overflowed, missed = list.missed, setsAdded = list.setsAdded;
+				const std::uint32_t sets = list.sets, listEvents = list.largest;
 				// The readback is harvested on re-arm, so replayed frames are read too.
 				if (applied || stale || busy || harvested || missed)
 					a_text += fmt::format("[DCLF] fade write-back (T7b4/T7b6): {} milestones written onto stood-in roots' nodes by the main thread at Main::Update's entry "
@@ -73,7 +61,6 @@ namespace DCLF::Features::Fades
 
 	void RegisterReport(Api::InstallContext& a_context)
 	{
-		a_context.RegisterReportLines({ .name = "fade port", .point = Api::ReportPoint::PrimaryCullParity, .lines = &PortLines });
 		a_context.RegisterReportLines({ .name = "fade roots", .point = Api::ReportPoint::PrimaryCullLast, .lines = &RootsLines });
 		a_context.RegisterReportLines({ .name = "fade write-back", .point = Api::ReportPoint::AsyncWorkWriteBack, .text = &WriteBackText });
 		a_context.RegisterReportLines({ .name = "fade writers", .point = Api::ReportPoint::AsyncWorkWriteBack, .text = &WritersText });

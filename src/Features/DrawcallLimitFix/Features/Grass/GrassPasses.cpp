@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -46,8 +47,8 @@ namespace DCLF::Draws
 	{
 	public:
 		GrassCullPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const Features::Grass::GrassTables> a_tables, std::uint32_t a_phase,
-			RenderGraphRuntime::Segment a_segment) :
-			resources(std::move(a_resources)), tables(std::move(a_tables)), phase(a_phase), segment(a_segment) {}
+			RenderGraphRuntime::Segment a_segment, const GraphConditions& a_conditions) :
+			resources(std::move(a_resources)), tables(std::move(a_tables)), phase(a_phase), segment(a_segment), conditions(a_conditions) {}
 
 		GrassCullBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -83,7 +84,7 @@ namespace DCLF::Draws
 			auto& constants = prepared.constants;
 			constants.phase = phase;
 			constants.retestOffset = static_cast<std::uint32_t>(NamedUnitsOf(a_preparation, tables->visible) * GrassInstances::kRetestOffsetPerUnit);
-			if (Draws::OcclusionTested(*resources, *frame)) {
+			if (Draws::OcclusionTested(conditions, *resources, *frame)) {
 				prepared.occlusion = true;
 				constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
 				constants.hzbMips = resources->hzbMips;
@@ -111,7 +112,7 @@ namespace DCLF::Draws
 			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, Features::Grass::kGrassCullConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 			commands.Dispatch(a_frame.groups, 1, 1);
 		}
@@ -121,6 +122,7 @@ namespace DCLF::Draws
 		std::shared_ptr<const Features::Grass::GrassTables> tables;
 		std::uint32_t phase = 1;
 		RenderGraphRuntime::Segment segment;
+		GraphConditions conditions;  // the build's
 	};
 
 	struct GrassArgsBindings
@@ -184,7 +186,7 @@ namespace DCLF::Draws
 			constants.drawsIndex = a_recording.Index(a_bindings.draws);
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, Features::Grass::kGrassArgsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 			commands.Dispatch(a_frame.groups, 1, 1);
 		}
@@ -247,24 +249,19 @@ namespace DCLF::Draws
 			if (!a_frame.counts)
 				return;
 			auto& counts = *a_frame.counts;
-			// The range's lease retires before it records again, so its last copy has finished.
-			const std::uint32_t slot = counts.ranges.Of(a_recording.Run());
-			if (slot >= counts.readback.size())
+			// The region's lease retires before it records again, so its last copy has finished.
+			const std::uint32_t region = counts.readback->RegionOf(a_recording.Run());
+			if (region >= counts.filled.size())
 				return;
-			if (counts.filled[slot]) {
-				auto resource = counts.readback[slot]->GetAPIResource();
-				void* mapped = nullptr;
-				resource.Map(&mapped);
-				if (mapped) {
+			if (counts.filled[region]) {
+				counts.readback->ReadRegion(region, [&](const std::byte* a_bytes) {
 					GrassInstances::DrawsHeader header;
-					std::memcpy(&header, mapped, sizeof(header));
+					std::memcpy(&header, a_bytes, sizeof(header));
 					Sum(counts, header);
-					resource.Unmap(0, 0);
-				}
+				});
 			}
-			a_recording.Commands().CopyBufferRegion(counts.readback[slot]->GetAPIResource().GetHandle(), 0, a_recording.Resolve(a_bindings.draws).GetHandle(), 0,
-				sizeof(GrassInstances::DrawsHeader));
-			counts.filled[slot] = 1;
+			counts.readback->RecordCopy(a_recording.Commands(), region, 0, a_recording.Resolve(a_bindings.draws).GetHandle(), 0, sizeof(GrassInstances::DrawsHeader));
+			counts.filled[region] = 1;
 		}
 
 	private:
@@ -293,7 +290,7 @@ namespace DCLF::Features::Grass
 		{
 			if (a_context.Interior())  // interiors have no grass
 				return nullptr;
-			return std::make_shared<Draws::GrassCullPass>(a_context.Main(), a_context.State<GrassTables>(), 1, a_context.segment);
+			return std::make_shared<Draws::GrassCullPass>(a_context.Main(), a_context.State<GrassTables>(), 1, a_context.segment, a_context.Conditions());
 		}
 
 		std::shared_ptr<org::RenderPass> MakeArgsPhaseOne(const Api::PassContext& a_context)
@@ -310,7 +307,7 @@ namespace DCLF::Features::Grass
 				return nullptr;
 			if (!a_context.PhaseTwo())
 				return nullptr;
-			return std::make_shared<Draws::GrassCullPass>(a_context.Main(), a_context.State<GrassTables>(), 2, a_context.segment);
+			return std::make_shared<Draws::GrassCullPass>(a_context.Main(), a_context.State<GrassTables>(), 2, a_context.segment, a_context.Conditions());
 		}
 
 		std::shared_ptr<org::RenderPass> MakeArgsPhaseTwo(const Api::PassContext& a_context)

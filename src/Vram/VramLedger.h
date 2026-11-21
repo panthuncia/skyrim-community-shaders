@@ -102,9 +102,6 @@ namespace Vram
 	 */
 	void TagGameRenderTargets(bool a_overwrite);
 
-	/** @brief One line (no newline): device-local totals, the largest a_owners owners, and the residuals. */
-	std::string ReportLine(std::size_t a_owners);
-
 	/**
 	 * @brief Writes the snapshot as JSON (rows, heaps, reconciliation) under a_directory, named a_fileName, or a stamped
 	 * CommunityShaders-VRAM-<ms>.json when a_fileName is empty. Returns the file, empty on failure.

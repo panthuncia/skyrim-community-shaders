@@ -29,7 +29,6 @@ namespace DCLF::Portals
 		bool Reached(std::uint32_t a_program) const;
 		/** @brief Whether the room's compound frustum has operators, so Process1 tests it. */
 		bool HasOps(std::uint32_t a_program) const;
-		bool SkipView(std::uint32_t a_program) const;
 		bool Pass(std::uint32_t a_program, const float a_centre[3], float a_radius) const;
 
 	private:

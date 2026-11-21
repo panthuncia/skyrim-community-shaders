@@ -27,9 +27,7 @@
 #include "Vram/Debug.h"
 #include "Vram/VramLedger.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/MemoryWindow.h"
-#endif
+#include "RenderGraph/MemoryWindow.h"
 
 namespace
 {
@@ -707,7 +705,6 @@ void AdvancedSettingsRenderer::RenderTestingSection()
 		FeatureIssues::Test::DrawDeveloperModeTestingUI();
 
 		ImGui::Spacing();
-#if defined(CS_HAS_RENDER_GRAPH)
 		if (ImGui::Button(T("menu.advanced.vram_attribution", "VRAM Attribution")))
 			RenderGraphMemory::OpenWindow();
 		if (auto _tt = Util::HoverTooltipWrapper())
@@ -715,7 +712,6 @@ void AdvancedSettingsRenderer::RenderTestingSection()
 				"Every D3D11 and render graph resource with its owner and size, by owner, source or heap, reconciled against the driver's "
 				"heap usage."));
 		ImGui::SameLine();
-#endif
 		if (ImGui::Button(T("menu.advanced.vram_dump", "Dump VRAM Attribution"))) {
 			const auto path = Vram::WriteJson(Util::SwitchFile::Directory());
 			if (path.empty())

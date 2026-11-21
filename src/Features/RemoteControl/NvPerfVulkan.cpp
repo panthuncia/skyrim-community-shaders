@@ -1,8 +1,9 @@
-#if defined(CS_HAS_RENDER_GRAPH) && defined(NVPERF_ENABLED)
+#if defined(NVPERF_ENABLED)
 
 // volk must precede every Vulkan header in this translation unit.
 #	include <rhi_interop_vulkan.h>
 
+#	include "DxvkExports.h"
 #	include "Features/RemoteControl/GpuCountersBackend.h"
 
 #	include "Globals.h"
@@ -103,9 +104,10 @@ namespace GpuCounters::detail
 				const auto module = static_cast<HMODULE>(a_dxvkModule);
 				PFN_dxvkSetCommandBufferBoundaryCallbacks setBoundaryCallbacks = nullptr;
 				if (module) {
-					enqueueQueueCallback = reinterpret_cast<PFN_dxvkEnqueueQueueCallback>(::GetProcAddress(module, "dxvkEnqueueQueueCallback"));
-					emitCommandBufferCallback = reinterpret_cast<PFN_dxvkEmitCommandBufferCallback>(::GetProcAddress(module, "dxvkEmitCommandBufferCallback"));
-					setBoundaryCallbacks = reinterpret_cast<PFN_dxvkSetCommandBufferBoundaryCallbacks>(::GetProcAddress(module, "dxvkSetCommandBufferBoundaryCallbacks"));
+					const auto& dxvk = DxvkExports::Get();
+					enqueueQueueCallback = dxvk.enqueueQueueCallback;
+					emitCommandBufferCallback = dxvk.emitCommandBufferCallback;
+					setBoundaryCallbacks = dxvk.setCommandBufferBoundaryCallbacks;
 					if (!enqueueQueueCallback || !emitCommandBufferCallback || !setBoundaryCallbacks) {
 						unavailable = "the DXVK build lacks the queue and command buffer callbacks";
 						logger::warn("[NvPerf] {}; no Vulkan capture", unavailable);
@@ -275,7 +277,7 @@ namespace GpuCounters::detail
 					// A revision's epochs (DCLF's) are recorded once and submitted until the revision changes, so recordings
 					// made before arming would execute in the passes without their ranges: a rebuild records them all again,
 					// and the frame after it waits for the new ones, well within the lead.
-					RenderGraph::Builds::RequestAll("NvPerf profiling");
+					RenderGraph::Builds::Ask({ .all = true }, "NvPerf profiling");
 					// The first pass waits for facts, not a frame count: the rebuild done and ranges recorded into the new
 					// recordings (the graph's epochs record asynchronously, so a fixed lead can measure a frame whose lists
 					// predate the arming: no ranges, or a capture failing within the profiler's 8 frames), then the host's
@@ -413,7 +415,7 @@ namespace GpuCounters::detail
 				SetRangesActive(false);
 				// The recordings kept across frames (a revision's epochs) recorded while armed hold this session's ranges: recorded
 				// again, so that none executes in a later session.
-				RenderGraph::Builds::RequestAll("NvPerf profiling");
+				RenderGraph::Builds::Ask({ .all = true }, "NvPerf profiling");
 				for (auto pushed = events.rbegin(); pushed != events.rend(); ++pushed)
 					if (*pushed)
 						emitCommandBufferCallback(globals::d3d::device, &PopInDxvk, nullptr);

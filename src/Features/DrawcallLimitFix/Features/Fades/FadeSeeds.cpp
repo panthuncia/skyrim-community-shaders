@@ -176,11 +176,6 @@ namespace DCLF::Features::Fades
 		return fadeSeeds.Get();
 	}
 
-	const std::vector<FadeRootStatic>* SeedsIfDone(bool a_wait)
-	{
-		return FrameValues::Get().ProducerDone(a_wait) ? &fadeSeeds.Get() : nullptr;
-	}
-
 	SeedCounts PeekSeedCounts()
 	{
 		return { unsentSeedCount.load(std::memory_order_relaxed), owedSeedCount.load(std::memory_order_relaxed) };

@@ -13,8 +13,6 @@ namespace DCLF::Draws
 {
 	namespace
 	{
-		constexpr std::uint32_t kPipelineParityOffset = 43;
-
 		bool SameUsage(const Lookups::RegisterUsageBits& a_bits, const RegisterUsage& a_usage)
 		{
 			return a_bits.vertexConstants == a_usage.vertexConstants && a_bits.pixelConstants == a_usage.pixelConstants && a_bits.textures == a_usage.textures &&
@@ -65,7 +63,7 @@ namespace DCLF::Draws
 				entry.requested = false;
 				changed = true;
 			}
-			// Ask the lane once per key. It keeps every key and rebuilds them after a target change.
+			// Ask the lane once per key. It keeps every key.
 			if (!entry.requested) {
 				DrawPipelines::Get().RequestLighting(key, static_cast<std::uint32_t>(p));
 				entry.requested = true;
@@ -128,15 +126,6 @@ namespace DCLF::Draws
 		}
 	}
 
-	void ResolvePipelineLookups(const SceneTables& a_tables, const PipelineCatalog* a_catalog, Lookups& a_lookups)
-	{
-		// Every slot. This is the reference the parity check compares against.
-		DCLF_ZONE("CS.DCLF.Scene.PipelineLookupsFull");
-		BeginPipelineLookups(a_tables, a_catalog, a_lookups);
-		for (std::size_t p = 0; p < a_tables.pipelines.size(); ++p)
-			ResolvePipelineSlot(a_tables, a_catalog, a_lookups, p);
-	}
-
 	void ResolveShadowLookups(const SceneTables& a_tables, const PipelineCatalog* a_catalog, const ShadowLookupInputs& a_inputs, LookupsResolveState& a_state,
 		Lookups& a_lookups)
 	{
@@ -188,7 +177,6 @@ namespace DCLF::Draws
 		bool resolved = true;
 		auto& pipelines = DrawPipelines::Get();
 		// Merged view pipelines use the canonical depth-only technique and no layout, so slots of one output share a bucket.
-		static const bool merge = SwitchOnUnlessZero(Switch::ShadowMerge);
 		for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
 			if (!a_inputs.modes[m])
 				continue;
@@ -209,8 +197,7 @@ namespace DCLF::Draws
 				const std::uint32_t slot = slotIt->second;
 				const std::uint32_t occlusion = IsOcclusionMode(m) ? OcclusionOfMode(m) : ~0u;
 				for (const std::uint32_t state : modeStates[m]) {
-					const ShadowPipelineKey viewKey = merge ? ShadowPipelineKey{ CanonicalShadowTechnique(technique), slotKey.rasterFlags, 0, state } :
-					                                          ShadowPipelineKey{ technique, slotKey.rasterFlags, slotKey.vertexLayout, state };
+					const ShadowPipelineKey viewKey{ CanonicalShadowTechnique(technique), slotKey.rasterFlags, 0, state };
 					// Ask the lane once per key. It keeps every key and rebuilds them all after a format change.
 					if (a_state.shadowRequested.insert(viewKey).second)
 						pipelines.RequestShadow(viewKey, key, occlusion);
@@ -253,21 +240,12 @@ namespace DCLF
 {
 	void IndirectDraws::ResolveLookups(const void* a_tables, const PipelineCatalog* a_catalog, Lookups& a_lookups, LookupsResolveState& a_state)
 	{
-		if (!impl || failed)
+		if (!impl)
 			return;
 		const auto& tables = *static_cast<const SceneTables*>(a_tables);
-		// The parity check then resolves every slot, which must write nothing.
 		++a_state.calls;
 		if (EngineShaders::Lighting() && ShaderPrograms::Get().Enabled()) {
 			Draws::ResolveChangedPipelineLookups(tables, a_catalog, a_lookups, a_state);
-			if (Diagnostics::Observe().scene && Diagnostics::ParityDue(a_state.calls, Draws::kPipelineParityOffset)) {
-				const std::uint64_t writes = a_lookups.pipelines.Writes();
-				const std::uint32_t versions = a_lookups.versionCounter;
-				Draws::ResolvePipelineLookups(tables, a_catalog, a_lookups);
-				a_state.pipelineParity.Check(writes == a_lookups.pipelines.Writes() && versions == a_lookups.versionCounter, [&] {
-					return fmt::format("{} pipeline entries written by a full resolution after the witnessed one", a_lookups.pipelines.Writes() - writes);
-				});
-			}
 		}
 		auto inputs = impl->shadowEngine->shadowLookupInputs.load(std::memory_order_acquire);
 		if (inputs && !inputs->enabled)
@@ -288,22 +266,18 @@ namespace DCLF
 
 	void IndirectDraws::PostLookupInputs()
 	{
-		if (!impl || failed)
+		if (!impl)
 			return;
 		// Publish the import context and fixed bindings before the scene work runs.
 		GpuTextures::Get().PublishImportContext();
 		UpdateShadowCapability();
-		// The pipeline lane's shadow inputs. The format is the shadow views' depth format, or an occlusion map's while no shadow view has drawn.
+		// The shadow pipelines' format, from the engine target set's declarations at setup (DeclaredTargets). It never changes.
 		auto& engine = *impl->shadowEngine;
+		engine.pipelineShadowFormat = DrawPipelines::Get().ShadowFormat();
 		auto& views = engine.lastShadow;
 		ShadowLookupInputs inputs;
-		inputs.enabled = SceneToggles().shadows && views.known && globals::game::utilityShader;
+		inputs.enabled = views.known && globals::game::utilityShader;
 		if (inputs.enabled) {
-			DXGI_FORMAT shadowFormat = views.dsvFormat;
-			for (const DXGI_FORMAT occlusionFormat : engine.OcclusionFormats())
-				if (shadowFormat == DXGI_FORMAT_UNKNOWN)
-					shadowFormat = occlusionFormat;
-			DrawPipelines::Get().SetShadowInputs(shadowFormat, *globals::game::utilityShader);
 			inputs.modes = views.modes;
 			inputs.rasterStates = views.rasterStates;
 			inputs.dsvFormat = views.dsvFormat;

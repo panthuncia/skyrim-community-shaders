@@ -13,11 +13,13 @@
 #include "Features/PhysicalSky.h"
 #include "Features/Skylighting.h"
 #include "Features/TerrainShadows.h"
+#include "Features/ViewAtmosphere/ORGViewAtmosphere.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
 #include "Utils/DebugSection.h"
+#include "Utils/GpuBlock.h"
 
 #define I18N_KEY_PREFIX "feature.view_atmosphere."
 
@@ -39,6 +41,46 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	depthDistribution,
 	lookupJitter)
 
+ViewAtmosphere::ViewAtmosphere()
+{
+	settings.enabled.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.enabled"));
+	settings.nearPixelSize.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.nearPixelSize"));
+	settings.nearSlices.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.nearSlices"));
+	settings.middlePixelSize.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.middlePixelSize"));
+	settings.middleSlices.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.middleSlices"));
+	settings.distantPixelSize.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.distantPixelSize"));
+	settings.distantSlices.Bind(CS::SettingRegistry::Declare("ViewAtmosphere.distantSlices"));
+}
+
+namespace
+{
+	using AtmosphereCpu = ViewAtmosphere::Settings;
+	using AtmosphereGpu = ViewAtmosphere::GpuSettings;
+
+	// Every GPU field comes from the setting of the same name.
+	using AtmosphereGpuBlock = CS::GpuBlock<AtmosphereGpu,
+		CS::GpuField<&AtmosphereCpu::enabled, &AtmosphereGpu::enabled>,
+		CS::GpuField<&AtmosphereCpu::nearPixelSize, &AtmosphereGpu::nearPixelSize>,
+		CS::GpuField<&AtmosphereCpu::nearSlices, &AtmosphereGpu::nearSlices>,
+		CS::GpuField<&AtmosphereCpu::middlePixelSize, &AtmosphereGpu::middlePixelSize>,
+		CS::GpuField<&AtmosphereCpu::middleSlices, &AtmosphereGpu::middleSlices>,
+		CS::GpuField<&AtmosphereCpu::distantPixelSize, &AtmosphereGpu::distantPixelSize>,
+		CS::GpuField<&AtmosphereCpu::distantSlices, &AtmosphereGpu::distantSlices>,
+		CS::GpuField<&AtmosphereCpu::historyMissSamples, &AtmosphereGpu::historyMissSamples>,
+		CS::GpuField<&AtmosphereCpu::nearRange, &AtmosphereGpu::nearRange>,
+		CS::GpuField<&AtmosphereCpu::localRange, &AtmosphereGpu::localRange>,
+		CS::GpuField<&AtmosphereCpu::historyWeight, &AtmosphereGpu::historyWeight>,
+		CS::GpuField<&AtmosphereCpu::sampleJitter, &AtmosphereGpu::sampleJitter>,
+		CS::GpuField<&AtmosphereCpu::shadowBias, &AtmosphereGpu::shadowBias>,
+		CS::GpuField<&AtmosphereCpu::depthDistribution, &AtmosphereGpu::depthDistribution>,
+		CS::GpuField<&AtmosphereCpu::lookupJitter, &AtmosphereGpu::lookupJitter>>;
+}
+
+ViewAtmosphere::GpuSettings ViewAtmosphere::GetCommonBufferData() const
+{
+	return AtmosphereGpuBlock::Fill(settings);
+}
+
 void ViewAtmosphere::LoadSettings(json& value)
 {
 	settings = value;
@@ -46,13 +88,13 @@ void ViewAtmosphere::LoadSettings(json& value)
 	const auto bounded = [](float input, float fallback, float minimum, float maximum) {
 		return std::clamp(std::isfinite(input) ? input : fallback, minimum, maximum);
 	};
-	settings.enabled = settings.enabled != 0;
-	settings.nearPixelSize = std::clamp(settings.nearPixelSize, 4u, 64u);
-	settings.middlePixelSize = std::clamp(settings.middlePixelSize, settings.nearPixelSize, 64u);
-	settings.distantPixelSize = std::clamp(settings.distantPixelSize, settings.nearPixelSize, 64u);
-	settings.nearSlices = std::clamp(settings.nearSlices, 16u, 160u);
-	settings.middleSlices = std::clamp(settings.middleSlices, 16u, 160u);
-	settings.distantSlices = std::clamp(settings.distantSlices, 16u, 160u);
+	settings.enabled = settings.enabled.Get() != 0 ? 1u : 0u;
+	settings.nearPixelSize = std::clamp(settings.nearPixelSize.Get(), 4u, 64u);
+	settings.middlePixelSize = std::clamp(settings.middlePixelSize.Get(), settings.nearPixelSize.Get(), 64u);
+	settings.distantPixelSize = std::clamp(settings.distantPixelSize.Get(), settings.nearPixelSize.Get(), 64u);
+	settings.nearSlices = std::clamp(settings.nearSlices.Get(), 16u, 160u);
+	settings.middleSlices = std::clamp(settings.middleSlices.Get(), 16u, 160u);
+	settings.distantSlices = std::clamp(settings.distantSlices.Get(), 16u, 160u);
 	settings.historyMissSamples = std::clamp(settings.historyMissSamples, 1u, 16u);
 	settings.nearRange = bounded(settings.nearRange, defaults.nearRange, 15.0f / Util::Units::GAME_UNIT_TO_M, 700.0f / Util::Units::GAME_UNIT_TO_M);
 	settings.localRange = bounded(settings.localRange, defaults.localRange, std::max(30.0f / Util::Units::GAME_UNIT_TO_M, settings.nearRange + 1000.0f), 3000.0f / Util::Units::GAME_UNIT_TO_M);
@@ -85,15 +127,13 @@ std::pair<std::string, std::vector<std::string>> ViewAtmosphere::GetFeatureSumma
 void ViewAtmosphere::DrawSettings()
 {
 	ImGui::TextWrapped("%s", T(TKEY("ownership_hint"), "These settings control rendering quality, not the weather. Configure atmosphere and cloud appearance in Physical Sky, and fog density and lighting in Exponential Height Fog."));
-	bool enabled = settings.enabled != 0;
-	if (ImGui::Checkbox(T(TKEY("shared_volume"), "Use Shared Atmosphere and Fog Volume"), &enabled)) {
-		settings.enabled = enabled;
+	if (Util::Checkbox(T(TKEY("shared_volume"), "Use Shared Atmosphere and Fog Volume"), settings.enabled))
 		lastFrame = UINT32_MAX;
-	}
+	const bool enabled = settings.enabled.Get() != 0;
 	ImGui::TextWrapped("%s", T(TKEY("shared_hint"), "The shared volume requires active Physical Sky. Otherwise aerial perspective uses its LUT and volumetric fog uses separate volumes. Quality settings below also apply to standalone volumetric fog. Reflections use a separate low-resolution atmosphere and fog cache when the shared volume is enabled."));
 	ImGui::TextUnformatted(IsReady() ? T(TKEY("status_shared"), "Active: shared atmosphere and fog volume") : T(TKEY("status_separate"), "Active: separate rendering paths"));
 
-	const uint32_t minPixels = 4, maxPixels = 64, minSlices = 16, maxSlices = 160;
+	const int minPixels = 4, maxPixels = 64, minSlices = 16, maxSlices = 160;
 	const auto distanceSlider = [](const char* label, float& value, float minimum, float maximum) {
 		float meters = value * Util::Units::GAME_UNIT_TO_M;
 		if (ImGui::SliderFloat(label, &meters, minimum, maximum, "%.1f m", ImGuiSliderFlags_AlwaysClamp))
@@ -103,16 +143,18 @@ void ViewAtmosphere::DrawSettings()
 	ImGui::TextWrapped("%s", T(TKEY("grid_hint"), "Smaller pixel sizes and more depth slices improve detail at a higher cost. The shared volume continues beyond the local range to 40 km; standalone volumetric fog ends at the local range."));
 	distanceSlider(T(TKEY("near_range"), "Near Grid End"), settings.nearRange, 15.0f, std::min(700.0f, (settings.localRange - 1000.0f) * Util::Units::GAME_UNIT_TO_M));
 	distanceSlider(T(TKEY("local_range"), "Local Volume End"), settings.localRange, std::max(30.0f, (settings.nearRange + 1000.0f) * Util::Units::GAME_UNIT_TO_M), 3000.0f);
-	if (ImGui::SliderScalar(T(TKEY("near_pixels"), "Near Grid Pixel Size"), ImGuiDataType_U32, &settings.nearPixelSize, &minPixels, &maxPixels, "%u", ImGuiSliderFlags_AlwaysClamp)) {
-		settings.middlePixelSize = std::max(settings.middlePixelSize, settings.nearPixelSize);
-		settings.distantPixelSize = std::max(settings.distantPixelSize, settings.nearPixelSize);
+	if (Util::SliderInt(T(TKEY("near_pixels"), "Near Grid Pixel Size"), settings.nearPixelSize, minPixels, maxPixels, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+		settings.middlePixelSize = std::max(settings.middlePixelSize.Get(), settings.nearPixelSize.Get());
+		settings.distantPixelSize = std::max(settings.distantPixelSize.Get(), settings.nearPixelSize.Get());
 	}
-	ImGui::SliderScalar(T(TKEY("near_slices"), "Near Grid Depth Slices"), ImGuiDataType_U32, &settings.nearSlices, &minSlices, &maxSlices, "%u", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderScalar(T(TKEY("middle_pixels"), "Middle Grid Pixel Size"), ImGuiDataType_U32, &settings.middlePixelSize, &settings.nearPixelSize, &maxPixels, "%u", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderScalar(T(TKEY("middle_slices"), "Middle Grid Depth Slices"), ImGuiDataType_U32, &settings.middleSlices, &minSlices, &maxSlices, "%u", ImGuiSliderFlags_AlwaysClamp);
+	// The later grids are never finer than the near grid.
+	const uint32_t nearPixels = settings.nearPixelSize;
+	Util::SliderInt(T(TKEY("near_slices"), "Near Grid Depth Slices"), settings.nearSlices, minSlices, maxSlices, "%d", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderInt(T(TKEY("middle_pixels"), "Middle Grid Pixel Size"), settings.middlePixelSize, static_cast<int>(nearPixels), maxPixels, "%d", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderInt(T(TKEY("middle_slices"), "Middle Grid Depth Slices"), settings.middleSlices, minSlices, maxSlices, "%d", ImGuiSliderFlags_AlwaysClamp);
 	if (enabled && globals::features::physicalSky.loaded && globals::features::physicalSky.cbData.enabled) {
-		ImGui::SliderScalar(T(TKEY("distant_pixels"), "Distant Atmosphere Pixel Size"), ImGuiDataType_U32, &settings.distantPixelSize, &settings.nearPixelSize, &maxPixels, "%u", ImGuiSliderFlags_AlwaysClamp);
-		ImGui::SliderScalar(T(TKEY("distant_slices"), "Distant Atmosphere Depth Slices"), ImGuiDataType_U32, &settings.distantSlices, &minSlices, &maxSlices, "%u", ImGuiSliderFlags_AlwaysClamp);
+		Util::SliderInt(T(TKEY("distant_pixels"), "Distant Atmosphere Pixel Size"), settings.distantPixelSize, static_cast<int>(nearPixels), maxPixels, "%d", ImGuiSliderFlags_AlwaysClamp);
+		Util::SliderInt(T(TKEY("distant_slices"), "Distant Atmosphere Depth Slices"), settings.distantSlices, minSlices, maxSlices, "%d", ImGuiSliderFlags_AlwaysClamp);
 	}
 	ImGui::SeparatorText(T(TKEY("sampling"), "Sampling"));
 	ImGui::SliderFloat(T(TKEY("history_weight"), "Temporal History Weight"), &settings.historyWeight, 0.0f, 0.99f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
@@ -142,9 +184,55 @@ void ViewAtmosphere::DrawDebugSection()
 
 #undef I18N_KEY_PREFIX
 
+void ViewAtmosphere::SetupResources()
+{
+	ORGViewAtmosphere::Get().Setup();
+}
+
+ViewAtmosphere::AtlasLayout ViewAtmosphere::LayoutFor(float2 a_screen, std::uint32_t a_nearPixels, std::uint32_t a_middlePixels, std::uint32_t a_distantPixels,
+	std::uint32_t a_nearSlices, std::uint32_t a_middleSlices, std::uint32_t a_distantSlices)
+{
+	// The later grids are never finer than the near grid.
+	const uint32_t pixelSize = std::clamp(a_nearPixels, 4u, 64u);
+	const uint32_t sizes[3] = { pixelSize, std::max(pixelSize, std::clamp(a_middlePixels, 4u, 64u)), std::max(pixelSize, std::clamp(a_distantPixels, 4u, 64u)) };
+	const uint32_t layers[3] = { std::clamp(a_nearSlices, 16u, 160u), std::clamp(a_middleSlices, 16u, 160u), std::clamp(a_distantSlices, 16u, 160u) };
+	AtlasLayout layout{};
+	uint32_t gridScale[3] = { 1u, 1u, 1u };
+	// While the atlas is over 8 M texels, the largest grid gets coarser.
+	for (;;) {
+		for (uint32_t i = 0; i < 3; ++i)
+			layout.size[i] = { std::max(1u, uint32_t(std::ceil(a_screen.x / (sizes[i] * gridScale[i])))),
+				std::max(1u, uint32_t(std::ceil(a_screen.y / (sizes[i] * gridScale[i])))), layers[i], 0u };
+		layout.offset[0] = { 0, 0, 0, 0 };
+		layout.offset[1] = { layout.size[2].x, layout.size[0].y, 0, 0 };
+		layout.offset[2] = { 0, layout.size[0].y, 0, 0 };
+		layout.atlas = { std::max(layout.size[0].x, layout.size[1].x + layout.size[2].x), layout.size[0].y + std::max(layout.size[1].y, layout.size[2].y),
+			std::max({ layers[0], layers[1], layers[2] }) + 1u, 0 };
+		if (uint64_t(layout.atlas.x) * layout.atlas.y * layout.atlas.z <= 8ull * 1024ull * 1024ull)
+			return layout;
+		uint32_t largestGrid = 0;
+		uint64_t largestSize = 0;
+		for (uint32_t i = 0; i < 3; ++i) {
+			const auto size = layout.size[i];
+			const uint64_t volume = uint64_t(size.x) * size.y * (size.z + 1u);
+			if (volume > largestSize) {
+				largestGrid = i;
+				largestSize = volume;
+			}
+		}
+		++gridScale[largestGrid];
+	}
+}
+
 bool ViewAtmosphere::Prepare()
 {
 	prepared = ready = false;
+	// The graph modes' medium is ORGViewAtmosphere's. Nothing here runs D3D11 work there.
+	if (ORGViewAtmosphere::On()) {
+		ORGViewAtmosphere::Get().Prepass();
+		lastFrame = UINT32_MAX;
+		return false;
+	}
 	Unbind();
 	auto& sky = globals::features::physicalSky;
 	if (!sky.loaded || !sky.cbData.enabled || !loaded || !settings.enabled || !sky.texTrLut || !sky.texMsLut || !sky.texSkyTail || !sky.csSkyTailGen ||
@@ -188,43 +276,21 @@ bool ViewAtmosphere::Prepare()
 	auto& fog = globals::features::exponentialHeightFog;
 	const bool useFog = fog.IsActive();
 	const float2 screen = Util::ConvertToDynamic(float2{ float(globals::game::graphicsState->screenWidth), float(globals::game::graphicsState->screenHeight) });
-	const uint32_t pixelSize = std::clamp(settings.nearPixelSize, 4u, 64u);
-	const uint32_t farPixelSize = std::max(pixelSize, std::clamp(settings.middlePixelSize, 4u, 64u));
 	const float maxDistance = 40000.0f / Util::Units::GAME_UNIT_TO_M;
 	const float nearEnd = std::clamp(settings.nearRange, 1000.0f, maxDistance * 0.1f);
 	const float middleEnd = std::clamp(settings.localRange, nearEnd + 1000.0f, maxDistance * 0.5f);
-	const uint32_t sizes[3] = { pixelSize, farPixelSize, std::max(pixelSize, std::clamp(settings.distantPixelSize, 4u, 64u)) };
-	const uint32_t layers[3] = { std::clamp(settings.nearSlices, 16u, 160u),
-		std::clamp(settings.middleSlices, 16u, 160u), std::clamp(settings.distantSlices, 16u, 160u) };
 	const float ends[4] = { 0.0f, nearEnd, middleEnd, maxDistance };
+	const auto layout = LayoutFor(screen, settings.nearPixelSize, settings.middlePixelSize, settings.distantPixelSize, settings.nearSlices, settings.middleSlices,
+		settings.distantSlices);
 	Parameters next{};
-	uint32_t gridScale[3] = { 1u, 1u, 1u };
-	for (;;) {
-		for (uint32_t i = 0; i < 3; ++i) {
-			auto& grid = next.grids[i];
-			grid.size = { std::max(1u, uint32_t(std::ceil(screen.x / (sizes[i] * gridScale[i])))), std::max(1u, uint32_t(std::ceil(screen.y / (sizes[i] * gridScale[i])))), layers[i], 0u };
-			const float scale = i == 0 ? 10.0f / Util::Units::GAME_UNIT_TO_M : ends[i];
-			grid.depth = { ends[i], ends[i + 1], scale, std::log2(1.0f + (ends[i + 1] - ends[i]) / scale) };
-		}
-		next.grids[1].offset = { next.grids[2].size.x, next.grids[0].size.y, 0, 0 };
-		next.grids[2].offset = { 0, next.grids[0].size.y, 0, 0 };
-		next.atlas = { std::max(next.grids[0].size.x, next.grids[1].size.x + next.grids[2].size.x),
-			next.grids[0].size.y + std::max(next.grids[1].size.y, next.grids[2].size.y),
-			std::max({ layers[0], layers[1], layers[2] }) + 1u, 0 };
-		if (uint64_t(next.atlas.x) * next.atlas.y * next.atlas.z <= 8ull * 1024ull * 1024ull)
-			break;
-		uint32_t largestGrid = 0;
-		uint64_t largestSize = 0;
-		for (uint32_t i = 0; i < 3; ++i) {
-			const auto size = next.grids[i].size;
-			const uint64_t volume = uint64_t(size.x) * size.y * (size.z + 1u);
-			if (volume > largestSize) {
-				largestGrid = i;
-				largestSize = volume;
-			}
-		}
-		++gridScale[largestGrid];
+	for (uint32_t i = 0; i < 3; ++i) {
+		auto& grid = next.grids[i];
+		grid.size = layout.size[i];
+		grid.offset = layout.offset[i];
+		const float scale = i == 0 ? 10.0f / Util::Units::GAME_UNIT_TO_M : ends[i];
+		grid.depth = { ends[i], ends[i + 1], scale, std::log2(1.0f + (ends[i + 1] - ends[i]) / scale) };
 	}
+	next.atlas = layout.atlas;
 
 	const bool resized = !source || std::memcmp(&data.atlas, &next.atlas, sizeof(next.atlas)) != 0;
 	const bool changed = resized || std::memcmp(data.grids, next.grids, sizeof(next.grids)) != 0 || data.flags.y != uint32_t(useFog);
@@ -388,6 +454,8 @@ void ViewAtmosphere::Bind(bool compute)
 
 void ViewAtmosphere::RenderReflection()
 {
+	if (ORGViewAtmosphere::On())
+		return;
 	Unbind();
 	auto& sky = globals::features::physicalSky;
 	auto& fog = globals::features::exponentialHeightFog;
@@ -533,6 +601,8 @@ void ViewAtmosphere::RenderReflection()
 
 void ViewAtmosphere::Unbind()
 {
+	if (ORGViewAtmosphere::On())
+		return;
 	ID3D11ShaderResourceView* nullSrvs[3]{};
 	globals::d3d::context->PSSetShaderResources(125, 3, nullSrvs);
 	globals::d3d::context->CSSetShaderResources(125, 3, nullSrvs);
@@ -540,6 +610,7 @@ void ViewAtmosphere::Unbind()
 
 void ViewAtmosphere::ClearShaderCache()
 {
+	ORGViewAtmosphere::Get().ClearShaderCache();
 	preview.ClearShaderCache();
 	mediumCompositeCS = nullptr;
 	mediumShaderRequested = false;
@@ -555,6 +626,8 @@ void ViewAtmosphere::ClearShaderCache()
 
 bool ViewAtmosphere::CompositeEnabled()
 {
+	if (ORGViewAtmosphere::On())
+		return ORGViewAtmosphere::Get().CompositeActive();
 	if (!loaded || !globals::deferred->postWaterHookInstalled || !globals::shaderCache->IsEnabled() ||
 		!globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].UAV)
 		return false;
@@ -589,6 +662,10 @@ bool ViewAtmosphere::CompositeEnabled()
 
 void ViewAtmosphere::CompositeAfterWater()
 {
+	if (ORGViewAtmosphere::On()) {
+		ORGViewAtmosphere::Get().CompositeAfterWater();
+		return;
+	}
 	if (!CompositeEnabled() ||
 		!globals::state->inWorld ||
 		(globals::state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections)) != 0 ||

@@ -4,6 +4,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
@@ -44,15 +45,15 @@ namespace DCLF::Features::Sky
 		namespace Queries = ::RenderGraph::Engine::OcclusionQueries;
 
 		/** @brief Why a sun occlusion draw was skipped, each logged once. */
-		Util::ReasonLog& SunSkips()
+		Family::RefusalLog& SunSkips()
 		{
-			static Util::ReasonLog log("[DCLF] sky: a sun occlusion draw is skipped, its query answers its last count", spdlog::level::warn);
+			static Family::RefusalLog log("[DCLF] sky: a sun occlusion draw is skipped, its query answers its last count");
 			return log;
 		}
 
-		Util::ReasonLog& Refusals()
+		Family::RefusalLog& Refusals()
 		{
-			static Util::ReasonLog log("[DCLF] sky: the engine draws", spdlog::level::warn);
+			static Family::RefusalLog log("[DCLF] sky: the engine draws");
 			return log;
 		}
 
@@ -90,7 +91,7 @@ namespace DCLF::Features::Sky
 			if (!a_rtv)
 				return 0;
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
-			Unwrap(a_rtv)->GetDesc(&desc);
+			a_rtv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -99,7 +100,7 @@ namespace DCLF::Features::Sky
 			if (!a_dsv)
 				return 0;
 			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
-			Unwrap(a_dsv)->GetDesc(&desc);
+			a_dsv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -230,7 +231,20 @@ namespace DCLF::Features::Sky
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h)
 				if (!read(kHeaderRegisters[h], a_published.headers[h], a_run.headerIndices[h]))
 					return false;
-			return read(17, a_published.sceneDepth, a_run.sceneDepthIndex);
+			if (!read(17, a_published.sceneDepth, a_run.sceneDepthIndex))
+				return false;
+			// Physical Sky's resources, which the sky's pixel stages read through the draw's latch.
+			const auto readPhysSky = [a_view](std::string_view a_id, std::uint32_t& a_index, std::string& a_why) {
+				const auto result = SkyDraws::ReadPublished(a_view, a_id, a_index);
+				a_why = Family::ReasonOf(result);
+				return result == Family::InputResult::Graph;
+			};
+			std::string why;
+			if (!Integrations::PhysicalSky::ResolveOrgHandles(a_run.physSky, a_run.owners, readPhysSky, why)) {
+				Refusals().Report(std::format("a {} batch", NameOf(a_view)), why);
+				return false;
+			}
+			return true;
 		}
 
 		/** @brief Which of t0-t2 a sky technique samples. */
@@ -282,6 +296,7 @@ namespace DCLF::Features::Sky
 			next->sceneDepthIndex = full.sceneDepthIndex;
 			next->sceneDepthNull = full.sceneDepthNull;
 			next->headerIndices = full.headerIndices;
+			next->physSky = full.physSky;
 			FlushLatched(a_capture);
 			a_capture.run = std::move(next);
 			return true;
@@ -431,6 +446,7 @@ namespace DCLF::Features::Sky
 			// The alpha test reference SetDirtyStates would write to PS b11.
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 			constants.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor;
+			constants.physSky = run.physSky;
 			// No depth bias offset. An offset left the sky short of depth 1, so the deferred pass lit and fogged it as geometry.
 			// The engine's sky also leaves the range whole.
 			draw.viewport = Family::LatchViewport(0);
@@ -473,7 +489,7 @@ namespace DCLF::Features::Sky
 			}
 			if (!reason)
 				return group;
-			static Util::ReasonLog log("[DCLF] sky: the engine draws the cloud layers this batch");
+			static Family::RefusalLog log("[DCLF] sky: the engine draws the cloud layers this batch");
 			log.Report(std::format("{} view: {}", NameOf(a_capture.shape.view), reason));
 			return nullptr;
 		}
@@ -509,7 +525,7 @@ namespace DCLF::Features::Sky
 					return;
 				}
 				const auto engineDraws = [&] { func(a_accumulator, a_first, a_last, a_flags, a_group); };
-				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SkyDraws::Available())
+				if (!FrameAnchors::IsRenderOwner() || !SkyDraws::Available())
 					return engineDraws();
 				Family::BeginBatch();
 				Shape shape;
@@ -582,7 +598,7 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief Hook on BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604). Only with CS_ORG_OCCLUSION_QUERIES=1.
+		 * @brief Hook on BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604). Only in graph mode.
 		 * An ORG query answers the engine's GetQueryData. A draw the graph cannot take is skipped.
 		 */
 		struct SunOcclusionQuery
@@ -603,7 +619,7 @@ namespace DCLF::Features::Sky
 				auto run = std::make_shared<Run>();
 				run->view = View::Sun;
 				const char* refusal = SunShape(capture, *run);
-				if (!refusal && (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SkyDraws::Available()))
+				if (!refusal && (!FrameAnchors::IsRenderOwner() || !SkyDraws::Available()))
 					refusal = "the graph cannot draw now";
 				if (!refusal && !SkyDraws::CanTakeSun())
 					refusal = "its anchor cannot run now";
@@ -717,7 +733,7 @@ namespace DCLF::Features::Sky
 		if (clouds)
 			stl::write_thunk_call<CloudGroup>(REL::Offset(Address::kCloudGroup).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Sky>(RE::VTABLE_BSSkyShader[0], &OnSetupGeometry);
-		if (Queries::Requested() && Address::kSunOcclusionQuery.Known()) {
+		if (::RenderGraph::Engine::GraphMode() && Address::kSunOcclusionQuery.Known()) {
 			stl::detour_thunk<SunOcclusionQuery>(REL::Offset(Address::kSunOcclusionQuery).address());
 			HookSites::NoteDetour("BSShaderAccumulator's occlusion query draw (the sun's, on the graph)", SunOcclusionQuery::func.address());
 		}

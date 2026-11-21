@@ -41,10 +41,10 @@ namespace DCLF::Features::Fades
 	 * @brief Host side of the fade write-back. Event batches reach the write-back task through a lock-free stack.
 	 * A frame whose epoch did not run loses nothing, because FadeStateCS did not run either.
 	 */
-	struct FadeWriteBack : Draws::HostEventRing
+	struct FadeWriteBack
 	{
-		FadeWriteBack() :
-			HostEventRing(&BytesFor) {}
+		// The event list's readback. Its regions are the armed slots.
+		std::shared_ptr<org::RunReadback> list;
 		struct Batch
 		{
 			std::vector<FadeEvent> events;
@@ -112,7 +112,7 @@ namespace DCLF::Features::Fades
 	struct FadeScene
 	{
 		Draws::Versioned fadeRoots, fadeStates;
-		std::shared_ptr<org::Buffer> fadeFrameBuffer, fadeLog;
+		std::shared_ptr<org::Buffer> fadeFrameBuffer;
 		Draws::Versioned fadeRootPrograms;
 		Draws::Versioned fadeAnimated;  // per root slot, the scene frame whose animation batch last updated it
 		org::services::FilledVersion fadeAnimatedFilled;
@@ -141,7 +141,6 @@ namespace DCLF::Features::Fades
 		std::uint32_t fadeRootCount = 0;
 		std::uint32_t fadeFrameNumber = 0;  // the scene frame of fadeFrame
 		FadeFrame fadeFrame{};
-		std::uint32_t fadeLogBase = ~0u;
 		std::shared_ptr<const ComputeProgram> fadeState;
 		std::shared_ptr<const ComputeProgram> portalQueries;
 		std::shared_ptr<Portals::Batch> portalBatch;
@@ -183,21 +182,17 @@ namespace DCLF::Features::Fades
 	std::uint32_t SeedsIndex();
 	/** @brief The seed rows this producer just made. Producer thread only. */
 	const std::vector<FadeRootStatic>& ProducerSeeds();
-	/** @brief Render thread. The frame's seed rows once the producer is done. a_wait blocks until then. */
-	const std::vector<FadeRootStatic>* SeedsIfDone(bool a_wait = false);
 
 	/**
 	 * @brief Render thread, at the start of the frame. Hands fade events read back since the last kick to a task for WriteFadeStores.
 	 * Without it, engine readers such as tree LOD crossfade and the occlusion cull would see stale node fades.
 	 */
 	void KickFadeWriteBack();
-	/** @brief Render thread, never per frame. Waits for the write-back task and drops what it found. */
-	void WaitFadeWriteBack();
 	/**
 	 * @brief Main thread, at Main::Update's entry while no cull or animation job runs. Writes the task's stores to roots DCLF owns.
 	 * Roots a_written rejects are left to the engine's cull.
 	 */
-	void WriteFadeStores(bool a_live, const std::function<bool(const void*)>& a_written);
+	void WriteFadeStores(const std::function<bool(const void*)>& a_written);
 
 	// RegisterRender's parts, in the order FadeRender.cpp calls them.
 	void RegisterSeeds(Api::InstallContext& a_context);

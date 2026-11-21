@@ -20,7 +20,7 @@ namespace DCLF::Api
 	 * Every callback is optional.
 	 *
 	 * - changed: render thread. Roots that left come before roots that joined. They stay alive during the call.
-	 * - updateEntry: main thread at Main::Update's entry, in registration order. Tells whether DCLF runs this frame.
+	 * - updateEntry: main thread at Main::Update's entry, in registration order.
 	 * - afterWrites: main thread, after every updateEntry.
 	 * - structure: any thread, per attach or detach. Must be lock-free and cheap. a_parent may be null.
 	 * - listJobsDone: render thread, once per frame when the list jobs finish. Data the hooks gathered on job threads is complete here.
@@ -29,8 +29,8 @@ namespace DCLF::Api
 	{
 		void (*changed)(const StandInRootsChange& a_change) = nullptr;
 		void (*cleared)() = nullptr;
-		void (*updateEntry)(bool a_running) = nullptr;
-		void (*afterWrites)(bool a_running) = nullptr;
+		void (*updateEntry)() = nullptr;
+		void (*afterWrites)() = nullptr;
 		void (*structure)(const void* a_parent) = nullptr;
 		void (*listJobsDone)() = nullptr;
 	};
@@ -106,15 +106,11 @@ namespace DCLF::Api
 	/**
 	 * @brief Lets a feature skip engine show stores. The stubs test `open` and call `vetoes` only while it is non-zero.
 	 * A vetoed store does not run and raises no hidden event. Core supplies defaults, so the stubs look the same with or without a veto.
-	 *
-	 * - engineHid: optional, any thread. Called after one of hideSites' engine stores hid an object.
 	 */
 	struct ShowVeto
 	{
 		const std::atomic<std::uint32_t>* open = nullptr;
 		bool (*vetoes)(const void* a_object) = nullptr;
-		void (*engineHid)(const void* a_object, std::uint32_t a_siteOffset) = nullptr;
-		std::span<const std::uint32_t> hideSites;
 	};
 
 	/** @brief A feature's own engine writer whose hook pushes move events, counted under its name in the report. */

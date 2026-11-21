@@ -12,8 +12,8 @@
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/PublicationLog.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/Retirement.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
@@ -153,28 +153,28 @@ namespace DCLF::Scene
 		}
 
 		// Render thread -> coordinator.
-		LatestSlot<FrameInputs> frameInputs;
-		LatestSlot<std::shared_ptr<const CategoryCapture>> categoryPosted;
+		::RenderGraph::Frame::LatestSlot<FrameInputs> frameInputs;
+		::RenderGraph::Frame::LatestSlot<std::shared_ptr<const CategoryCapture>> categoryPosted;
 		std::atomic<std::shared_ptr<const GeometryPort::PipelineFrame>> pipelineFramePosted;
 		std::atomic<std::shared_ptr<const AncestorMapInput>> ancestorMapPosted;
 		std::atomic<std::shared_ptr<const SharedBindings::ProjectedCapture>> projectedPosted;
 		// PrimaryCull's admitted roots, a whole set, latest wins.
-		LatestSlot<std::vector<Api::StandInRoot>> standInRootsPosted;
-		EventQueue<std::unique_ptr<PipelineConstantsPost>, 256> pipelineConstantsPosted;
+		::RenderGraph::Frame::LatestSlot<std::vector<Api::StandInRoot>> standInRootsPosted;
+		RenderGraph::Frame::EventQueue<std::unique_ptr<PipelineConstantsPost>, 256> pipelineConstantsPosted;
 		// While a load screen is up the passes run no live check.
 		std::atomic<bool> loadingSeen{ false };
-		EventQueue<MaterialAnswer> materialRequestsAnswered{ &WakeSceneMaterialAnswer };
-		EventQueue<FadeNodeAnswer, 256> fadeNodeAnswers;
+		RenderGraph::Frame::EventQueue<MaterialAnswer> materialRequestsAnswered{ &WakeSceneMaterialAnswer };
+		RenderGraph::Frame::EventQueue<FadeNodeAnswer, 256> fadeNodeAnswers;
 		Retired<ScenePublication> retiredPublications;
 
 		// Coordinator -> render thread.
 		PublicationLog<PublicationDeltas> publicationLog;  // every publication's deltas, walked by the frame's start
-		EventQueue<PrimaryNote> primaryNotes;
-		EventQueue<MaterialRequest> materialRequests;
-		EventQueue<FadeNodeRequest, 256> fadeNodeRequests;
+		RenderGraph::Frame::EventQueue<PrimaryNote> primaryNotes;
+		RenderGraph::Frame::EventQueue<MaterialRequest> materialRequests;
+		RenderGraph::Frame::EventQueue<FadeNodeRequest, 256> fadeNodeRequests;
 		// Tracked geometries the mirror held no record of, captured at the next frame start.
-		EventQueue<RE::NiPointer<RE::NiAVObject>, 256> mirrorCaptureRequests;
-		EventQueue<std::shared_ptr<SwitchCatchUp>, 64> switchCatchUps;
+		RenderGraph::Frame::EventQueue<RE::NiPointer<RE::NiAVObject>, 256> mirrorCaptureRequests;
+		RenderGraph::Frame::EventQueue<std::shared_ptr<SwitchCatchUp>, 64> switchCatchUps;
 		// Tells the render thread which category captures it may let go of.
 		std::atomic<std::uint64_t> categoryAppliedGeneration{ 0 };
 		// The newest capture whose pins the coordinator is done with.

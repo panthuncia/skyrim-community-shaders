@@ -11,19 +11,19 @@ namespace DCLF::Draws
 	};
 	struct EventReadbackPrepared
 	{
-		std::shared_ptr<HostEventRing> ring;  // holds the staging set
-		const HostEventRing::StagingSet* set = nullptr;
+		std::shared_ptr<const org::RunReadback> list;  // holds the set
+		const org::RunReadback::ListSet* set = nullptr;
 	};
 
 	/**
-	 * @brief Copies an event list whole into the frame slot's host buffer. A fixed copy, so the recording depends on the slot
-	 * alone. The depth commit harvests it when the slot comes round again.
+	 * @brief Copies an event list whole into its readback's region for the run. A fixed copy, so the recording depends on the run
+	 * alone. The depth commit reads it when the region's run commits again.
 	 */
 	class EventReadbackPass final : public org::TypedRenderGraphPass<EventReadbackPass, EventReadbackPrepared, EventReadbackBindings>
 	{
 	public:
-		EventReadbackPass(std::shared_ptr<SceneBuffers> a_scene, Versioned a_events, std::shared_ptr<HostEventRing> a_ring) :
-			scene(std::move(a_scene)), events(std::move(a_events)), ring(std::move(a_ring)) {}
+		EventReadbackPass(std::shared_ptr<SceneBuffers> a_scene, Versioned a_events, std::shared_ptr<org::RunReadback> a_list) :
+			scene(std::move(a_scene)), events(std::move(a_events)), list(std::move(a_list)) {}
 
 		EventReadbackBindings Declare(org::PassBuilder& a_builder) { return { a_builder.CopySource(*events) }; }
 
@@ -31,28 +31,25 @@ namespace DCLF::Draws
 
 		EventReadbackPrepared Prepare(const EventReadbackBindings&, const org::PassPrepareContext& a_preparation) const
 		{
-			return { ring, ring->SetFor(static_cast<std::uint32_t>(NamedUnitsOf(a_preparation, events))) };
+			return { list, list->SetFor(static_cast<std::uint32_t>(NamedUnitsOf(a_preparation, events))) };
 		}
 
 		static void Record(const EventReadbackBindings& a_bindings, const EventReadbackPrepared& a_prepared, org::PassRecordContext& a_recording)
 		{
-			const std::uint32_t range = a_prepared.ring ? a_prepared.ring->ranges.Of(a_recording.Run()) : RunRanges::kNone;
-			if (!a_prepared.set || range >= a_prepared.set->buffers.size())
+			if (!a_prepared.list || !a_prepared.set)
 				return;
-			// The header and the list's full capacity.
-			a_recording.Commands().CopyBufferRegion(a_prepared.set->buffers[range]->GetAPIResource().GetHandle(), 0, a_recording.Resolve(a_bindings.events).GetHandle(), 0,
-				a_prepared.ring->bytesFor(a_prepared.set->events));
+			a_prepared.list->RecordList(a_recording.Commands(), a_recording.Run(), a_recording.Resolve(a_bindings.events).GetHandle(), *a_prepared.set);
 		}
 
 	private:
 		std::shared_ptr<SceneBuffers> scene;
 		Versioned events;
-		std::shared_ptr<HostEventRing> ring;
+		std::shared_ptr<org::RunReadback> list;
 	};
 
-	std::shared_ptr<org::RenderPass> MakeEventReadbackPass(std::shared_ptr<SceneBuffers> a_scene, Versioned a_events, std::shared_ptr<HostEventRing> a_ring)
+	std::shared_ptr<org::RenderPass> MakeEventReadbackPass(std::shared_ptr<SceneBuffers> a_scene, Versioned a_events, std::shared_ptr<org::RunReadback> a_list)
 	{
-		return std::make_shared<EventReadbackPass>(std::move(a_scene), std::move(a_events), std::move(a_ring));
+		return std::make_shared<EventReadbackPass>(std::move(a_scene), std::move(a_events), std::move(a_list));
 	}
 
 	namespace
@@ -77,7 +74,7 @@ namespace DCLF::Draws
 	};
 
 	/**
-	 * @brief Copies each drawn source's count words and its latch's stamp into the run's host buffer range. A fixed copy, so
+	 * @brief Copies each drawn source's count words and its latch's stamp into the run's readback region. A fixed copy, so
 	 * the recording depends on the shape and run alone.
 	 */
 	class CounterReadbackPass final : public org::TypedRenderGraphPass<CounterReadbackPass, CounterReadbackPrepared, CounterReadbackBindings>
@@ -113,19 +110,18 @@ namespace DCLF::Draws
 			const auto& readback = a_prepared.readback;
 			const auto& latch = a_prepared.source.latch;
 			const auto run = a_recording.Run();
-			const std::uint32_t range = readback ? readback->ranges.Of(run) : RunRanges::kNone;
-			if (!readback || !latch || range >= readback->buffers.size())
+			const std::uint32_t range = readback ? readback->RangeOf(run) : org::RunReadback::kNoRegion;
+			if (!readback || !latch || range == org::RunReadback::kNoRegion)
 				return;
 			auto& commands = a_recording.Commands();
-			const auto host = readback->buffers[range]->GetAPIResource().GetHandle();
 			const auto at = latch->At(run);
 			const auto latchBuffer = at.buffer->GetAPIResource().GetHandle();
 			const std::uint64_t region = at.offset;
 			constexpr std::uint64_t kWordBytes = sizeof(std::uint32_t);
 			for (const auto& copy : a_prepared.source.copies) {
 				const std::uint64_t hostAt = std::uint64_t(copy.source) * CounterReadback::kSourceWords * kWordBytes;
-				commands.CopyBufferRegion(host, hostAt, a_recording.Resolve(a_bindings.counts[copy.source]).GetHandle(), 0, kCountWords * kWordBytes);
-				commands.CopyBufferRegion(host, hostAt + kCountWords * kWordBytes, latchBuffer, region + copy.latchOffset + offsetof(BuildDrawsLatch, visibilityStamp), kWordBytes);
+				readback->readback->RecordCopy(commands, range, hostAt, a_recording.Resolve(a_bindings.counts[copy.source]).GetHandle(), 0, kCountWords * kWordBytes);
+				readback->readback->RecordCopy(commands, range, hostAt + kCountWords * kWordBytes, latchBuffer, region + copy.latchOffset + offsetof(BuildDrawsLatch, visibilityStamp), kWordBytes);
 			}
 		}
 

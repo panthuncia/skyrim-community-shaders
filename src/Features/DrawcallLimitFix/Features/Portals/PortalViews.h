@@ -20,11 +20,6 @@ namespace RE
 	class NiNode;
 }
 
-namespace DCLF::Diagnostics
-{
-	struct PortalViewsView;
-}
-
 namespace DCLF
 {
 	/**
@@ -61,19 +56,6 @@ namespace DCLF
 		bool VisibleUnbound() const { return visibleUnbound.load(std::memory_order_acquire); }
 		/** @brief a_room's program this frame, or null when the room was not reached. */
 		const Program* RoomProgram(const void* a_room) const;
-		/** @brief Portal tests, occlusion planes and boxes the built programs held. */
-		struct ProgramCounts
-		{
-			std::uint64_t portals = 0, planes = 0, boxes = 0;
-		};
-		/** @brief Walks since the last Take, and their programs' contents. */
-		struct BuildCounts
-		{
-			std::uint64_t built = 0, skipped = 0;
-			ProgramCounts programs;
-		};
-		BuildCounts TakeBuildCounts();
-
 		/** @brief Encodes this frame's programs as FadeStateCS and BuildDraws read them (PortalPrograms.h). */
 		void Encode(std::vector<std::uint32_t>& a_words) const;
 		/** @brief This frame's Encode, made at Build so the GPU copy and the CPU checks read the same words. */
@@ -185,12 +167,9 @@ namespace DCLF
 		void CommitLightWalk();
 		/** @brief FUN_140e14300: the light and the world camera both see unbound space, or share a room. */
 		bool SharesRoom(const LightRooms& a_light) const;
-		/** @brief Whether a light's room process (+0x128) matches what WalkLight assumes. a_why names the first mismatch. */
-		bool LightProcessAsAssumed(const void* a_roomProcess, std::string& a_why) const;
 
 	private:
 		PortalViews() = default;
-		friend struct Diagnostics::PortalViewsView;
 
 		struct Vec3
 		{
@@ -234,12 +213,6 @@ namespace DCLF
 		void AddOccluderRoom(Program& a_program, const void* a_occluder, const Program* a_parent);
 		bool AddBox(Program& a_program, const void* a_box);
 		void AddPlane(Program& a_program, const void* a_plane);
-		/**
-		 * @brief For portal parity: unbound space's program rebuilt with the engine's occluder states instead of DCLF's.
-		 * Only for a walk that started in unbound space.
-		 */
-		Program UnboundWithEngineStates(const void* a_graph);
-
 		static Quad Corners(const void* a_quad);
 		static PlaneSet& Grow(Program& a_program, std::uint32_t a_index) { return PortalModel::Grow(a_program, a_index); }
 		PlaneSet PortalPlanes(const void* a_quad, const Vec3& a_eye);
@@ -265,7 +238,6 @@ namespace DCLF
 		ankerl::unordered_dense::map<const void*, Flags> edgeFlags;
 		ankerl::unordered_dense::map<const void*, std::uint32_t> states;
 		ankerl::unordered_dense::map<const void*, BoxScratch> boxes;
-		bool engineWalkTest = false;  // UnboundWithEngineStates: an untested plane judged by the engine's walk (WithinFrustumDistFirst)
 		ankerl::unordered_dense::set<const void*> crossed;                   // portals keyed this frame
 		Program temp;                                                        // the engine's temp frustum (0x14332a710)
 		const void* edgeGraph = nullptr;                                     // the graph edgeFlags are for
@@ -302,8 +274,5 @@ namespace DCLF
 		ankerl::unordered_dense::map<const void*, Flags> lightEdgeFlags;  // the last light walk's copy of edgeFlags
 		bool lightFlagsPending = false;
 		std::array<std::byte, 0x188> lightCamera{};
-
-		ProgramCounts programCounts;
-		std::uint64_t built = 0, skipped = 0;
 	};
 }

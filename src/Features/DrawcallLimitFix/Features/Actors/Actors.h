@@ -1,7 +1,7 @@
 #pragma once
 
-// Actors: the geometry under an actor's 3D and the actor techniques (skin, faces, hair, eyes), drawn by DCLF while the toggle is on.
-// Whatever the toggle, the feature also owns the actor-owned entry class, the actors' engine events (SetAlpha fades and move
+// Actors: the geometry under an actor's 3D and the actor techniques (skin, faces, hair, eyes), drawn by DCLF.
+// The feature also owns the actor-owned entry class, the actors' engine events (SetAlpha fades and move
 // writers) and the animation stamp from DCLF's shadow views (ActorRate.cpp).
 // Features/Skins decides which skinned geometry DCLF draws. Core keeps the bone palette path.
 // See dclf-architecture.md, "Trees and actors".

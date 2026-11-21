@@ -3,6 +3,7 @@
 // Buffer view refs from BasicRHI buffers. Device::GetBufferViewRef makes a buffer's raw view pair on first use and frees it with the buffer.
 
 #include "RenderGraph/BufferRef.h"
+#include "RenderGraph/FrameClock.h"
 #include "RenderGraph/UndeclaredAccess.h"
 
 #include <rhi.h>
@@ -29,27 +30,13 @@ namespace RenderGraph
 {
 	inline BufferRef ToBufferRef(rhi::BufferViewRef a_ref) { return { a_ref.viewSlot, a_ref.byteOffset }; }
 
-	// Ref checks, CS_DCLF_REF_CHECK, off by default. Made refs and refs given to CheckBufferRef are checked against BasicRHI's view ref region.
-	inline std::atomic<bool> g_bufferRefChecks{ false };
-	inline bool BufferRefChecksOn() { return g_bufferRefChecks.load(std::memory_order_relaxed); }
-	/** @brief Turns the ref checks on or off. Set once, at install. */
-	void SetBufferRefChecks(bool a_on);
-
-	/** @brief Checks a ref against BasicRHI's view ref region on Vulkan, logging the first mismatches with a_what. Null refs pass.
-	*  Any thread. Takes BasicRHI's views mutex. */
-	void CheckBufferRef(rhi::Device a_device, BufferRef a_ref, rhi::ResourceHandle a_buffer, std::uint64_t a_address, std::uint64_t a_bytes, std::string_view a_what,
-		std::source_location a_where = std::source_location::current());
-
 	/** @brief BufferRefOf's work, without the undeclared-access note. Any thread. */
-	inline BufferRef MakeBufferRef(rhi::Device a_device, rhi::ResourceHandle a_buffer, std::uint64_t a_offset, std::source_location a_where)
+	inline BufferRef MakeBufferRef(rhi::Device a_device, rhi::ResourceHandle a_buffer, std::uint64_t a_offset, std::source_location)
 	{
-		const BufferRef ref = a_device ? ToBufferRef(a_device.GetBufferViewRef({ a_buffer, a_offset })) : BufferRef{};
-		if (ref && BufferRefChecksOn())
-			CheckBufferRef(a_device, ref, a_buffer, 0, 0, "BufferRefOf", a_where);
-		return ref;
+		return a_device ? ToBufferRef(a_device.GetBufferViewRef({ a_buffer, a_offset })) : BufferRef{};
 	}
 
-	/** @brief a_buffer's ref at a_offset, or null. A raw ref by handle, so the undeclared-access validator logs it with a_where. Any thread. */
+	/** @brief a_buffer's ref at a_offset, or null. A raw ref by handle, which the undeclared-access check raises at a_where. Any thread. */
 	inline BufferRef BufferRefOf(rhi::Device a_device, rhi::ResourceHandle a_buffer, std::uint64_t a_offset = 0,
 		std::source_location a_where = std::source_location::current())
 	{
@@ -62,21 +49,15 @@ namespace RenderGraph
 	BufferRef BufferRefOf(rhi::ResourceHandle a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
 	BufferRef BufferRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
 
-	/** @brief A ref for a buffer every reading pass declares, so the undeclared-access validator skips it. Name those passes at the call. */
+	/** @brief A ref for a buffer every reading pass declares, so the undeclared-access check skips it. Name those passes at the call. */
 	BufferRef DeclaredRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
 	/** @brief DeclaredRefOf on a_device, for a buffer made before the graph host is reachable. The same rule applies. Any thread. */
 	BufferRef DeclaredRefOf(rhi::Device a_device, const org::Buffer& a_buffer, std::uint64_t a_offset = 0,
 		std::source_location a_where = std::source_location::current());
 
-	/** @brief CheckBufferRef on the graph host's device; nothing without a host or with the checks off. */
-	void CheckBufferRef(BufferRef a_ref, std::uint64_t a_address, std::uint64_t a_bytes, std::string_view a_what,
-		std::source_location a_where = std::source_location::current());
-
-	/** @brief The render thread's frame for latch checks, advanced at each frame's end. A latch keeps its frame so checks can tell frames apart. */
-	inline std::atomic<std::uint64_t> g_refFrame{ 1 };
-	inline std::uint64_t RefFrame() { return g_refFrame.load(std::memory_order_acquire); }
-	/** @brief The frame's end. Render thread. */
-	inline void AdvanceRefFrame() { g_refFrame.fetch_add(1, std::memory_order_acq_rel); }
+	/** @brief The frame for latch checks: the frame clock's presentSerial, which moves at each sealed present. Never 0.
+	*  A latch keeps its frame so checks can tell frames apart. */
+	inline std::uint64_t RefFrame() { return FrameClock::PresentSerial(); }
 
 	/** @brief The ref a site last latched for a buffer at commit, with its frame and the last few before it. Prepare compares it with the declaration.
 	*  Set it to the buffer's ref at byte 0, since the check compares view slots. Any thread. */

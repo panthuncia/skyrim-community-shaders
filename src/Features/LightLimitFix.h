@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include "OverlayFeature.h"
+#include "Utils/Setting.h"
 
 struct LightLimitFix : OverlayFeature
 {
@@ -50,6 +51,8 @@ struct LightLimitFix : OverlayFeature
 	[[msvc::noinline]] bool CheckParticleLightPass(RE::BSRenderPass* a_pass);
 
 public:
+	LightLimitFix();
+
 	virtual inline std::string GetName() override { return "Light Limit Fix"; }
 	virtual std::string GetDisplayName() override { return T("feature.light_limit_fix.name", "Light Limit Fix"); }
 	virtual inline std::string GetShortName() override { return "LightLimitFix"; }
@@ -382,6 +385,17 @@ public:
 	ankerl::unordered_dense::map<RE::FormID, RE::NiPoint3> localShadowActorHistoryNext;
 	bool localShadowSelecting = false;
 	bool localShadowHooksInstalled = false;
+	/** @brief The cache follows Drawcall Limit Fix's shadow views (LocalShadowsFollowDCLF at startup), with no caster rotation. */
+	bool localShadowFollowsDCLF = false;
+	/** @brief A local light's first view that Drawcall Limit Fix drew this frame, with the depth target and slice it drew into. */
+	struct LocalShadowDrawnView
+	{
+		RE::BSShadowLight* light = nullptr;
+		uint32_t target = 0;
+		uint32_t slice = 0;
+	};
+	/** @brief This frame's, taken at EarlyPrepass while the cache follows Drawcall Limit Fix. */
+	eastl::vector<LocalShadowDrawnView> localShadowDrawnViews;
 	/** @brief True inside the first-person pass, which rebases posAdjust, so shaders take the world eye from WorldEyePosition. */
 	bool localShadowFirstPersonPass = false;
 	uint32_t localShadowFrame = 0;
@@ -401,13 +415,12 @@ public:
 	uint32_t localShadowEngineMipLevels = 1;
 	uint32_t localShadowEngineSlices = 0;
 	bool localShadowDirectCopy = false;
-	// The cache lives on the render graph (ORGLocalShadows, CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1) rather than in localShadowCache/localShadowBuffer.
+	// The cache lives on the render graph (ORGLocalShadows) rather than in localShadowCache/localShadowBuffer, for the session.
+	// Its shape then follows the adopted frame revision (FollowLocalShadowGraph).
 	bool localShadowOnGraph = false;
 	// The frame's description, the same for both paths: the slices to copy and every slot's data.
 	eastl::vector<LocalShadowCopy> localShadowFrameCopies;
 	eastl::vector<LocalShadowData> localShadowFrameData;
-	// The graph could not hold the cache, or lost it: D3D11 holds it for the rest of the session.
-	bool localShadowGraphFailed = false;
 	uint32_t localShadowAllocFailedFrame = 0;
 	RE::Setting* poissonRadiusScaleSetting = nullptr;
 	bool poissonRadiusScaleLookedUp = false;
@@ -419,11 +432,11 @@ public:
 	/** @brief True when local shadows are enabled and their hooks were installed at startup. */
 	bool IsLocalShadowsEnabled() const { return settings.EnableLocalShadows && localShadowHooksInstalled; }
 	/**
-	 * @brief Whether Drawcall Limit Fix blocks the local shadow cache (its hooks are never installed). DCLF draws the shadow maps
-	 * for its own port of the engine's light selection, which the cache's caster rotation (FilterLocalShadowCaster, through
-	 * UpdateCamera) does not reach, so the two would choose different lights (dclf-open-defects.md).
+	 * @brief Whether Drawcall Limit Fix draws the shadow maps (graph mode), for its own port of the engine's light selection. The cache then
+	 * follows the local lights' views DCLF's shadow epoch draws, and the caster rotation (FilterLocalShadowCaster, through
+	 * UpdateCamera) is not installed, since DCLF's selection would not see it. Decided once, at PostPostLoad.
 	 */
-	static bool LocalShadowsBlockedByDCLF();
+	static bool LocalShadowsFollowDCLF();
 	/**
 	 * @brief This frame's lights (t35): the render graph's buffer when it culled the clusters, else the D3D11 fallback's.
 	 * Valid for consumers that run after Prepass.
@@ -436,8 +449,18 @@ public:
 	ID3D11ShaderResourceView* GetLightIndexListSRV() const;
 	/** @brief This frame's light grid, from the same source as GetLightIndexListSRV. */
 	ID3D11ShaderResourceView* GetLightGridSRV() const;
-	/** @brief True when local shadows are enabled and the cache texture exists. */
-	bool IsLocalShadowCacheActive() const { return IsLocalShadowsEnabled() && (localShadowCache || localShadowOnGraph); }
+	/**
+	 * @brief True when the frame has a cache: on the render graph, the adopted revision's (its slots), else the D3D11 texture
+	 * while local shadows are enabled.
+	 */
+	bool IsLocalShadowCacheActive() const { return localShadowOnGraph ? localShadowHooksInstalled && localShadowCacheSlots != 0 : IsLocalShadowsEnabled() && localShadowCache; }
+	/** @brief The cache's slots for the slots setting, clamped to MIN_LOCAL_SHADOW_SLOTS and MAX_LOCAL_SHADOW_SLOTS. */
+	static uint32_t LocalShadowSlotsFor(uint32_t a_setting);
+	/**
+	 * @brief The cache's resolution for the resolution setting (0 matches the engine) and the engine's shadow map resolution.
+	 * The engine's resolution over it is a power of two, since LocalShadowCopyCS tree-reduces.
+	 */
+	static uint32_t LocalShadowResolutionFor(uint32_t a_setting, uint32_t a_engineResolution);
 	/** @brief The cache's slot data (t102): the render graph's export or the D3D11 buffer; null without a cache. */
 	ID3D11ShaderResourceView* GetLocalShadowDataSRV() const;
 	/** @brief The cache's shadow maps (t103), from the same source as GetLocalShadowDataSRV. */
@@ -461,6 +484,16 @@ public:
 	 * Runs before the engine selects its point/spot shadow-casting lights.
 	 */
 	void ScheduleLocalShadowCasters();
+	/**
+	 * @brief Starts the cache's frame: follows the graph's adopted cache, then tracks the scene's shadow lights, their actors and
+	 * their place on screen, and drops lights that left. False when there is no cache this frame.
+	 */
+	bool TrackLocalShadowCasters();
+	/**
+	 * @brief EarlyPrepass, while the cache follows Drawcall Limit Fix: starts the cache's frame and takes the local lights' views
+	 * DCLF drew this frame. A light DCLF drew or one on screen counts as in range, in place of the engine's UpdateCamera result.
+	 */
+	void FollowDCLFShadowViews();
 	/** @brief Point/spot shadow maps the engine can render this frame: every mask channel, minus one when the sun takes a shadow map. */
 	static uint32_t GetEngineLocalShadowBudget();
 	/**
@@ -477,8 +510,13 @@ public:
 
 	/** @brief Binds the local shadow cache and projection buffer for pixel shaders. */
 	void BindLocalShadowResources();
-	/** @brief Creates or recreates the cache texture and projection buffer to match the settings and the engine shadow map. */
+	/** @brief D3D11 only: creates or recreates the cache texture and projection buffer to match the settings and the engine shadow map. */
 	void EnsureLocalShadowResources(ID3D11Texture2D* a_engineShadowMaps);
+	/**
+	 * @brief Render graph only: takes the adopted revision's cache shape. A new shape holds none of the old slices, so every slice
+	 * assignment is forgotten. Nothing is made or released here.
+	 */
+	void FollowLocalShadowGraph();
 	/** @brief Releases the cache resources and forgets every slice assignment. */
 	void ReleaseLocalShadowResources();
 	/** @brief Finds a free cache slice or reclaims the least recently rendered reclaimable one; an actor-lit caster may take the least important static caster's slice. */
@@ -520,9 +558,10 @@ public:
 		bool EnableParticleLightsCulling = true;
 		bool EnableLightsVisualisation = false;
 		uint LightsVisualisationMode = 0;
-		bool EnableLocalShadows = false;
-		uint LocalShadowSlots = 16;
-		uint LocalShadowResolution = 0;
+		// The cache's shape follows these (frame revision plan, 6.13).
+		CS::Setting<bool> EnableLocalShadows = false;
+		CS::Setting<std::uint32_t> LocalShadowSlots = 16;
+		CS::Setting<std::uint32_t> LocalShadowResolution = 0;
 		uint LocalShadowSamples = 8;
 		float LocalShadowFilterScale = 1.0f;
 
@@ -532,22 +571,26 @@ public:
 
 	uint clusterSize[3] = { 16 };
 
-	/** @brief Whether this frame's clusters came from the render graph (its outputs are bound at t36/t37). */
-	bool orgCulledThisFrame = false;
-
 	/** @brief Updates near/far and the dynamic-resolution cluster grid for this frame. */
 	void UpdateClusterParameters();
 
-	/** @brief Culls the frame's lights on the render graph; false means the D3D11 dispatches must run. */
+	/**
+	 * @brief Hands the frame's lights to the render graph, which culls them at the Prepass anchor. False outside graph mode,
+	 * where the D3D11 dispatches run.
+	 */
 	bool CullOnRenderGraph(const eastl::vector<LightData>& a_lightsData);
 
 	/**
-	 * @brief Debug (CS_ORG_LLF_PARITY=1): reruns this frame's culling on D3D11 and compares
-	 * each cluster's light set against the render graph's output. Logs the result.
+	 * @brief Debug (CS_ORG_LLF_PARITY=1): compares the D3D11 culling of the parity frame with the render graph's, cluster by
+	 * cluster, and logs the result. The graph culls at the Prepass anchor, after this hook, so the compare runs one frame later.
 	 */
-	void CompareRenderGraphCulling();
+	void CompareRenderGraphCulling(uint32_t a_clusterTotal, uint32_t a_lightCount);
 
 	uint32_t orgParityFrame = 0;
+	// The parity frame's D3D11 culling waits for the compare in the next frame, with its cluster and light counts.
+	bool orgParityPending = false;
+	uint32_t orgParityClusters = 0;
+	uint32_t orgParityLights = 0;
 
 	Settings settings;
 
@@ -656,7 +699,8 @@ public:
 
 		static void Install();
 		/** @brief Installs the shadow caster rotation hooks; only called when local shadows are enabled at startup. */
-		static void InstallLocalShadows();
+		/** @brief a_rotation adds the caster rotation's hooks, which select the lights the engine draws. */
+		static void InstallLocalShadows(bool a_rotation);
 	};
 
 	virtual bool IsCore() const override { return true; }

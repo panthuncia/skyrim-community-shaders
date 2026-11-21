@@ -1,7 +1,10 @@
 #include "Features/PhysicalSky.h"
 
+#include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #include "Util.h"
 
+#include <array>
+#include <cstring>
 #include <numbers>
 
 namespace
@@ -147,7 +150,17 @@ void SkyLightning::SuppressVanilla(RE::Sky* sky) const
 
 void SkyLightning::QuerySource(ID3D11ComputeShader* shader)
 {
-	if (!OwnsWeather() || pendingPhase != Phase::Query || !shader)
+	if (!OwnsWeather() || pendingPhase != Phase::Query)
+		return;
+	// On the render graph the cloud client dispatches the query, and ReadSource reads it back on a later frame.
+	if (ORGVolumetricClouds::On()) {
+		if (ORGVolumetricClouds::Get().QueueLightningQuery()) {
+			pendingPhase = Phase::Readback;
+			queryStart = time;
+		}
+		return;
+	}
+	if (!shader)
 		return;
 	auto* context = globals::d3d::context;
 	auto* output = candidates->uav.get();
@@ -163,6 +176,13 @@ void SkyLightning::QuerySource(ID3D11ComputeShader* shader)
 
 void SkyLightning::ReadSource(PhysicalSky& sky)
 {
+	// On the render graph the candidates arrive through a replayable readback. None yet means the query is still in flight.
+	if (ORGVolumetricClouds::On()) {
+		std::array<float4, kCandidates> found{};
+		if (ORGVolumetricClouds::Get().TakeLightningCandidates(found))
+			SelectSource(sky, found.data());
+		return;
+	}
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	auto* context = globals::d3d::context;
 	const HRESULT result = context->Map(readback.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
@@ -173,14 +193,20 @@ void SkyLightning::ReadSource(PhysicalSky& sky)
 		nextEvent = time + 0.1;
 		return;
 	}
-	const auto* positions = static_cast<const float4*>(mapped.pData);
+	std::array<float4, kCandidates> positions{};
+	std::memcpy(positions.data(), mapped.pData, sizeof(positions));
+	context->Unmap(readback.get(), 0);
+	SelectSource(sky, positions.data());
+}
+
+void SkyLightning::SelectSource(PhysicalSky& sky, const float4* positions)
+{
 	float4 selected{};
 	for (uint32_t i = 0; i < kCandidates; ++i)
 		if (positions[i].w > 0.f) {
 			selected = positions[i];
 			break;
 		}
-	context->Unmap(readback.get(), 0);
 	if (selected.w <= 0.f) {
 		pendingPhase = Phase::Idle;
 		nextEvent = time + std::clamp(60.0 / std::max(sky.settings.lightning.rate, 1.f), 0.1, 3.0);
@@ -206,9 +232,12 @@ void SkyLightning::PromoteSource(PhysicalSky& sky)
 	eventSeed = pendingSeed;
 	randomState = eventSeed;
 	BuildChannel(sky.cbData.zBottom);
-	std::array<Segment, kMaxSegments> upload{};
-	std::copy(channel.begin(), channel.end(), upload.begin());
-	segments->Update(upload.data(), sizeof(upload));
+	// The render graph's cloud passes read the channel from their latch (Channel()).
+	if (!ORGVolumetricClouds::On()) {
+		std::array<Segment, kMaxSegments> upload{};
+		std::copy(channel.begin(), channel.end(), upload.begin());
+		segments->Update(upload.data(), sizeof(upload));
+	}
 	activeLane ^= 1u;
 	preparedFrames = pendingFrames;
 	pendingPhase = Phase::Idle;

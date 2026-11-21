@@ -69,18 +69,12 @@ namespace DCLF::Scene
 		{
 			std::uint64_t mirrorBatches = 0, mirrorCaptures = 0, mirrorPooled = 0, mirrorRecords = 0;
 			double mirrorPrepareMs = 0.0, mirrorApplyMs = 0.0;
-			std::uint64_t usesChecks = 0, usesUnused = 0;  // UnusedRecords' parity (CheckMirrorUses)
 			std::uint64_t geometryRounds = 0, geometryPooled = 0, geometries = 0, geometriesPooled = 0;
 			std::uint64_t categoriesLeft = 0, categoryMembersDropped = 0, rootsLeftScanned = 0;
-			std::uint64_t categoryChecks = 0, categoryDiffer = 0;  // CheckCategoryMembers' checks, and those that differed
-			std::string categoryFirst;
-			std::uint64_t ancestorChecks = 0, ancestorEntries = 0, ancestorStaleKeys = 0, ancestorStaleValues = 0;
-			std::string ancestorFirst;
 			static constexpr std::size_t kMirrorKinds = 6;
 			std::array<std::uint64_t, kMirrorKinds> mirrorKindEvents{};
 			std::array<double, kMirrorKinds> mirrorKindMs{};
 			std::uint64_t replaysSkipped = 0, replaysWalked = 0, updatesKept = 0, updatesForgotten = 0;
-			std::uint64_t applyChecks = 0, applyWrong = 0;  // SceneMirror's own checks (Policy::CheckMirrorApply), and those that failed
 			std::uint64_t structuralEvents = 0, detachedGeometries = 0, detachedErased = 0, leafKeys = 0, leafHolds = 0;
 			double ancestorMs = 0.0, detachMs = 0.0, mergeMs = 0.0, leafMs = 0.0;
 		} attachStats;

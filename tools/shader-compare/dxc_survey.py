@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds every game shader the FXC path built with DXC instead, outside the game, and compares the results.
 
-Input is CS_FXC_REQUEST_DUMP's fxc-requests.jsonl (tools/cs-ab/scenarios/fxc-corpus.env) and the shader store that run used,
+Input is CS_FXC_REQUEST_DUMP's fxc-requests.jsonl (python tools/cs-test/cs_test.py run fxc-corpus) and the shader store that run used,
 which holds each request's DXBC. Requests that FXC saw as the same text share one build.
 
 Reports, per shader file: builds DXC rejects, grouped by message; spirv-val failures; constant buffer variables whose offsets
@@ -22,7 +22,7 @@ import time
 
 SDK = os.environ.get('VULKAN_SDK', r'C:\VulkanSDK\1.4.357.0')
 MOD = r'C:\Modding\MO2\mods\CS AB dclf'
-STORE = 'C:/Modding/MO2/overwrite/ShaderCache/v2'  # with the run's variant live (cs-ab.ps1 use)
+STORE = 'C:/Modding/MO2/overwrite/ShaderCache/v2'  # with the run's variant live
 ARTIFACT_HEADER = 48  # ShaderStore.cpp, ArtifactHeader
 # The game's arguments (src/Utils/DxcShaderStore.cpp).
 # Each register class gets its own range of bindings here, so the comparison can tell them apart.

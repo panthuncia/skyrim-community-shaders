@@ -1,0 +1,30 @@
+# The compatibility monitor (CS_DCLF_PLAYER_PARITY): a faked foreign write (dclf:foreign-write) to nearby alpha thresholds must be
+# found and named, with "compatibility monitor: ... <- OFFENDER" in the log and a report from dclf:compat-report.
+# Compose it: guest+dclf-compat, native-vulkan+dclf-compat.
+extends = ["base"]
+
+[dclf]
+player_parity = true
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "dclf:foreign-write"
+arg = "4"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "dclf:compat-report"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+no_log = ["frame tap error"]

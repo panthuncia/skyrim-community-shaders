@@ -8,7 +8,6 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Reports.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/RegistrationCensus.h"
 
 #include "Deferred.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -30,13 +29,7 @@
 #include "RenderGraph/MemoryWindow.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "State.h"
-#include "Vram/VramLedger.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
-
-namespace DCLF::RegistrationCensus
-{
-	void TraceCrossings(std::uint32_t a_frame);
-}
 
 namespace DCLF::Reports
 {
@@ -57,7 +50,6 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 	auto& leaks = Leaks();
 	auto& timing = c.timing;
 	const bool due = Due(frame);
-	DCLF::RegistrationCensus::TraceCrossings(frame);
 	// Lit passes into the main views that nobody drew, summed per frame over the window.
 	static struct
 	{
@@ -73,15 +65,6 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 		nobody.framesWith += passes ? 1u : 0u;
 		nobody.most = (std::max)(nobody.most, passes);
 		nobody.first = nobody.first ? nobody.first : capture.mainNobodyFirst;
-	}
-	// Census of the passes the engine kept, classified at Present.
-	if (DCLF::RegistrationCensus::Enabled()) {
-		DCLF::RegistrationCensus::Collect();
-		if (due) {
-			std::istringstream censusLines(DCLF::RegistrationCensus::TakeReport());
-			for (std::string line; std::getline(censusLines, line);)
-				logger::info("{}", line);
-		}
 	}
 	// DCLF's render-thread time. Always reported.
 	if (due)
@@ -159,14 +142,13 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 				familyLanes += fmt::format("{} (lane): {} requested, {} built, {} failed{}, frames waited {}; ", family.label, family.requested, family.ready, family.failed,
 					family.failed ? " <- FAILED" : "", family.waits);
 		logger::info("[DCLF] indirect pipelines: {} requested, {} in the set, {} failed ({} Z-prepass pipelines, {} without a pixel stage; {} state classes, the largest of {}); "
-					 "target changes {}; shadow: {} requested, {} in the set, {} failed; "
+					 "shadow: {} requested, {} in the set, {} failed; "
 					 "set versions published {} (waited {} frames), shadow {} (waited {}); {}forward (lane): {} requested, {} built, {} failed{}, frames waited {}",
-			indirect.requested, indirect.ready, indirect.failed, indirect.zPipelines, indirect.zDepthOnly, indirect.stateClasses, indirect.largestClass, indirect.targetChanges,
+			indirect.requested, indirect.ready, indirect.failed, indirect.zPipelines, indirect.zDepthOnly, indirect.stateClasses, indirect.largestClass,
 			indirect.shadowRequested, indirect.shadowReady, indirect.shadowFailed,
 			indirect.setPublishes, indirect.setWaits, indirect.shadowSetPublishes, indirect.shadowSetWaits, familyLanes, indirect.forwardRequested, indirect.forwardReady,
 			indirect.forwardFailed, indirect.forwardFailed ? " <- FAILED" : "", indirect.forwardWaits);
 		// The builds pack by the lane's constant tables. ShaderCache's are the observers'.
-		DCLF::Reports::ConstantTableLines();
 		const auto& draws = DCLF::IndirectDraws::Get().GetStats();
 		std::string skipped;
 		for (std::size_t i = 0; i < draws.skipped.size(); ++i) {
@@ -215,7 +197,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 		std::istringstream reportLines(DCLF::IndirectDraws::Get().AsyncReport() + DCLF::Reports::SceneFrameLines());
 		for (std::string line; std::getline(reportLines, line);)
 			logger::info("{}", line);
-		if (DCLF::ActiveToggles().shadows) {
+		{
 			const auto& shadow = DCLF::IndirectDraws::Get().GetShadowStats();
 			std::string notReadyReasons;
 			for (std::size_t r = 0; r < shadow.notReadyReasons.size(); ++r) {
@@ -233,13 +215,6 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 							 "{} below the size threshold ({} texels); {} tested, {} drawn, {} rejected by the frustum, {} lost for want of a caster row",
 					shadow.cullSampledView, shadow.cullSampledMode, shadow.cullClass, shadow.cullSunEntryOut, shadow.cullMinRadius, shadow.cullRootFading,
 					shadow.cullBelowTexels, DCLF::Draws::shadowMinTexels.load(std::memory_order_relaxed), shadow.cullTested, shadow.cullDrawn, shadow.cullRejected, shadow.cullRowsLost);
-			if (DCLF::Draws::shadowSizeProbe.load(std::memory_order_relaxed) >= 0)
-				logger::info("[DCLF] shadow size probe (view {} mode {:#x}): drawn casters / triangles by bound radius <256 {} / {}, <1024 {} / {}, <4096 {} / {}, larger {} / {}",
-					shadow.cullSampledView, shadow.cullSampledMode, shadow.probeCasters[0], shadow.probeTriangles[0], shadow.probeCasters[1], shadow.probeTriangles[1],
-					shadow.probeCasters[2], shadow.probeTriangles[2], shadow.probeCasters[3], shadow.probeTriangles[3]);
-			if (shadow.sunEntryChecks)
-				logger::info("[DCLF] sun entry on the GPU: {} inputs checked against the CPU's verdict (sampled frames), {} differ{}", shadow.sunEntryChecks,
-					shadow.sunEntryMismatches, shadow.sunEntryMismatches ? " <- DIFFER" : " <- OK");
 			if (DCLF::PassCapture::ShadowWithholdingEnabled()) {
 				const auto& captured = DCLF::PassCapture::Get().GetStats();
 				logger::info("[DCLF] shadow views by the set: withheld plain {} / clamped {} / paraboloid {} passes, {} volumetric-only passes and {} of hints 11, 7 and 3 (last frame); the set's casters {} / {} / {} (last epoch); {} members a shadow build could not draw{}{}; {} face regions uploaded; {} views not ready, {} of them with withheld casters{}",
@@ -334,9 +309,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 		// The graph's tracked memory, DCLF's included.
 		if (const auto memory = RenderGraphMemory::ReportLine(12, 16); !memory.empty())
 			logger::info("[DCLF] {}", memory);
-		// All VRAM, DXVK's included, by owner and reconciled against the driver's heap usage.
-		if (const auto vram = Vram::ReportLine(16); !vram.empty())
-			logger::info("[DCLF] {}", vram);
+		// All VRAM is not on this line: its snapshot walks every DXVK resource and stalled Present. The VRAM window and dumps show it.
 		DCLF::Extensions::ReportLinesAt(DCLF::Api::ReportPoint::Statistics, frame);
 		timing = {};
 	}

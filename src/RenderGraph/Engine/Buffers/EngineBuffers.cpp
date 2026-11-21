@@ -1,41 +1,31 @@
 // The engine's static vertex and index buffers on ORG. See EngineBuffers.h.
 
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
-#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Fatal.h"
 
 #include "RenderGraph/Switches.h"
 
-namespace RenderGraph::Engine::Buffers
-{
-	bool Requested()
-	{
-		static const bool requested = RenderGraph::Engine::Native::GraphMode();
-		return requested;
-	}
-}
-
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/BufferRefs.h"
+#include "RenderGraph/BufferRefs.h"
 
-#	include "RenderGraph/Engine/Buffers/BufferBacking.h"
-#	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/UndeclaredAccess.h"
+#include "RenderGraph/Engine/Buffers/BufferBacking.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/ResourceUseDeclaration.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <Resources/Buffers/VersionedBuffer.h>
-#	include <rhi.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/ResourceUseDeclaration.h>
+#include <Resources/Buffers/Buffer.h>
+#include <Resources/Buffers/VersionedBuffer.h>
+#include <rhi.h>
 
-#	include <cstring>
-#	include <exception>
-#	include <string_view>
+#include <cstring>
+#include <exception>
+#include <string_view>
 
 namespace RenderGraph::Engine::Buffers
 {
@@ -43,13 +33,6 @@ namespace RenderGraph::Engine::Buffers
 	{
 		namespace
 		{
-			// A load fails the same way for every buffer, so each failure kind is logged once.
-			void WarnOnce(std::atomic_flag& a_flag, std::string_view a_what)
-			{
-				if (!a_flag.test_and_set())
-					logger::warn("[ORG] engine buffers: {}; those buffers stay D3D11", a_what);
-			}
-			std::atomic_flag warnedMap, warnedWrap, warnedAllocate, warnedTie;
 		}
 
 		std::optional<Backing> MakeBacking(const D3D11_BUFFER_DESC& a_desc, const char* a_name)
@@ -68,24 +51,19 @@ namespace RenderGraph::Engine::Buffers
 				void* data = nullptr;
 				auto api = buffer->GetAPIResource();
 				api.Map(&data);  // kept mapped for the buffer's life
-				if (!data) {
-					WarnOnce(warnedMap, "an upload buffer has no mapping");
-					return std::nullopt;
-				}
+				if (!data)
+					RenderGraph::Fatal("engine buffers", "an upload buffer has no mapping");
 				std::memset(static_cast<std::uint8_t*>(data) + a_desc.ByteWidth, 0, bytes - a_desc.ByteWidth);
 				D3D11_BUFFER_DESC wrap{};
 				wrap.ByteWidth = a_desc.ByteWidth;
 				wrap.Usage = D3D11_USAGE_DEFAULT;
 				wrap.BindFlags = a_desc.BindFlags;
 				auto guest = runtime.WrapBuffer(*buffer, wrap);
-				if (!guest) {
-					WarnOnce(warnedWrap, "DXVK refused to wrap an upload buffer");
-					return std::nullopt;
-				}
+				if (!guest)
+					RenderGraph::Fatal("engine buffers", "DXVK refused to wrap an upload buffer");
 				return Backing{ std::move(buffer), std::move(guest), static_cast<std::uint8_t*>(data) };
 			} catch (const std::exception& e) {
-				WarnOnce(warnedAllocate, fmt::format("an upload buffer could not be made ({})", e.what()));
-				return std::nullopt;
+				RenderGraph::Fatal("engine buffers", fmt::format("an upload buffer could not be made ({})", e.what()));
 			}
 		}
 
@@ -99,10 +77,8 @@ namespace RenderGraph::Engine::Buffers
 				options.graph = std::move(graph);
 				return Tripwire::CreateBuffer(a_desc, std::move(options), a_backing.guest.get());
 			}
-			if (!Tripwire::AttachGraphResource(a_backing.guest.get(), std::move(graph))) {
-				WarnOnce(warnedTie, "an upload buffer could not be tied to its DXVK buffer");
-				return nullptr;
-			}
+			if (!Tripwire::AttachGraphResource(a_backing.guest.get(), std::move(graph)))
+				RenderGraph::Fatal("engine buffers", "an upload buffer could not be tied to its DXVK buffer");
 			return a_backing.guest;
 		}
 
@@ -180,9 +156,9 @@ namespace RenderGraph::Engine::Buffers
 
 	void InstallGameHooks()
 	{
-		if (!Requested())
+		if (!Engine::GraphMode())
 			return;
-		logger::info("[ORG] engine buffers (CS_ORG_ENGINE_BUFFERS=1): hooking the geometry creators and the dynamic ring");
+		logger::info("[ORG] engine buffers: hooking the geometry creators and the dynamic ring");
 		stl::detour_thunk<CreateGeometry<0>>(REL::RelocationID(75473, 77259));
 		stl::detour_thunk<CreateGeometry<1>>(REL::RelocationID(75476, 77262));
 		stl::detour_thunk<CreateGeometry<2>>(REL::RelocationID(75481, 77268));
@@ -191,25 +167,25 @@ namespace RenderGraph::Engine::Buffers
 
 	void InstallDeviceHooks(ID3D11Device* a_device)
 	{
-		if (!Requested() || !a_device)
+		if (!Engine::GraphMode() || !a_device)
 			return;
 		stl::detour_vfunc<3, Device_CreateBuffer>(a_device);
 	}
 
 	void EndFrame()
 	{
-		if (Requested())
+		if (Engine::GraphMode())
 			detail::ReleaseEndedFrames();
 	}
 
 	bool Owns(ID3D11Buffer* a_buffer)
 	{
-		return a_buffer && Requested() && std::dynamic_pointer_cast<org::Buffer>(Tripwire::GraphResourceOf(a_buffer)) != nullptr;
+		return a_buffer && Engine::GraphMode() && std::dynamic_pointer_cast<org::Buffer>(Tripwire::GraphResourceOf(a_buffer)) != nullptr;
 	}
 
 	void DeclareRingRead(org::RenderPassBuilder& a_builder)
 	{
-		if (!Requested())
+		if (!Engine::GraphMode())
 			return;
 		const auto& ring = detail::RingVersions();
 		if (!ring)
@@ -221,7 +197,7 @@ namespace RenderGraph::Engine::Buffers
 
 	std::optional<Direct> Resolve(ID3D11Buffer* a_buffer)
 	{
-		if (!a_buffer || !Requested())
+		if (!a_buffer || !Engine::GraphMode())
 			return std::nullopt;
 		const auto buffer = std::dynamic_pointer_cast<org::Buffer>(Tripwire::GraphResourceOf(a_buffer));
 		if (!buffer)
@@ -259,22 +235,3 @@ namespace RenderGraph::Engine::Buffers
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-// Without OpenRenderGraph the engine's buffers stay D3D11.
-namespace RenderGraph::Engine::Buffers
-{
-	void InstallGameHooks()
-	{
-		if (Requested())
-			logger::warn("[ORG] CS_ORG_ENGINE_BUFFERS=1 ignored: built without OpenRenderGraph");
-	}
-	void InstallDeviceHooks(ID3D11Device*) {}
-	void EndFrame() {}
-	std::optional<Direct> Resolve(ID3D11Buffer*) { return std::nullopt; }
-	bool Owns(ID3D11Buffer*) { return false; }
-	void DeclareRingRead(org::RenderPassBuilder&) {}
-	Stats GetStats() { return {}; }
-}
-
-#endif

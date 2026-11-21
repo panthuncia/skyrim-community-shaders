@@ -41,7 +41,7 @@ namespace DCLF::Scene
 			census = { { "skipped", "no fade census registered (the Fades feature is not installed)" } };
 		if (!other.empty())
 			census["other"] = std::move(other);
-		census["frame"] = GetFrame();
+		census["frame"] = SceneStep();
 		return census;
 	}
 

@@ -15,6 +15,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
@@ -61,7 +62,7 @@ namespace DCLF
 			std::span<const ShadowBucket> a_buckets, bool a_write, BuildDrawsLatch& a_latch)
 		{
 			if (a_buckets.size() > a_layout.keySlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} shadow buckets past the latch's {} key slots", a_buckets.size(), a_layout.keySlots));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} shadow buckets past the latch's {} key slots", a_buckets.size(), a_layout.keySlots));
 			const std::uint32_t offset = a_layout.BucketOffset(a_slot);
 			a_latch.bucketTableOffset = static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchRun)) + offset;
 			if (!a_write || a_buckets.empty())
@@ -98,7 +99,7 @@ namespace DCLF
 			const auto& layout = a_layout;
 			// ReserveShadowLatch gives every registered state a row in every mode.
 			if (a_rasterState == 0 || a_rasterState > layout.rasterStates || a_mode >= kShadowModeCount)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: shadow view rasterizer state {} of mode {} past the latch's {} rows", a_rasterState, a_mode,
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("shadow view rasterizer state {} of mode {} past the latch's {} rows", a_rasterState, a_mode,
 					layout.rasterStates));
 			const std::uint32_t mapRowOffset = layout.MapOffset() + layout.MapRowOf(a_mode, a_rasterState) * layout.MapRowBytes();
 			a_latch.pipelineMapOffset = static_cast<std::uint32_t>(a_latchBlock.Offset(a_latchRun)) + mapRowOffset;
@@ -106,7 +107,7 @@ namespace DCLF
 				return;
 			const auto& row = a_buckets.bucketOfSlot;
 			if (row.size() > layout.keySlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} shadow key slots past the latch's {}", row.size(), layout.keySlots));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} shadow key slots past the latch's {}", row.size(), layout.keySlots));
 			if (!row.empty())
 				LatchWrite(a_latchBlock, "shadow map rows", a_latchRun, mapRowOffset, std::as_bytes(std::span(row)));
 		}
@@ -132,7 +133,7 @@ namespace DCLF
 		{
 			const auto& layout = a_layout;
 			if (a_processes.size() > layout.sunProcesses)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} sun full-frustum processes past the latch's {}", a_processes.size(), layout.sunProcesses));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} sun full-frustum processes past the latch's {}", a_processes.size(), layout.sunProcesses));
 			const std::uint32_t header[4] = { static_cast<std::uint32_t>(a_processes.size()), 0, 0, 0 };
 			LatchWrite(a_latchBlock, "shadow sun processes", a_latchRun, layout.SunEntryOffset(), std::as_bytes(std::span(header)));
 			if (!a_processes.empty())
@@ -175,8 +176,7 @@ namespace DCLF
 		// Called before the engine draws the map. This frame's view layout is not set up yet, so the check uses last frame's.
 		// If the layout changes anyway, LatchOcclusionViews skips the map and the engine renders it.
 		const auto& engine = *impl->shadowEngine;
-		const auto toggles = ActiveToggles();
-		if (a_view >= kOcclusionViews || failed || !toggles.shadows || !Extensions::OcclusionOn(toggles, a_view) || !engine.shadow ||
+		if (a_view >= kOcclusionViews || !Extensions::OcclusionOn(a_view) || !engine.shadow ||
 			!engine.shadow->depth[OcclusionDepthTarget(a_view)])
 			return false;
 		// The built graph may lack the map's import while a rebuild is pending.
@@ -184,7 +184,7 @@ namespace DCLF
 		if (!host || RenderGraphRuntime::Get().RebuildRequestedUnstaged())
 			return false;
 		std::optional<ShadowViewLayout> predicted;
-		for (const auto& layout : engine.PredictedOcclusion(&toggles))
+		for (const auto& layout : engine.PredictedOcclusion(true))
 			if (layout.slot == OcclusionSlot(a_view))
 				predicted = layout;
 		bool shaped = false;
@@ -231,7 +231,7 @@ namespace DCLF
 				auto& uploads = a_commit.uploads;
 				auto& scene = *a_commit.resources.scene;
 				shadowStats.faceUploads += Extensions::UploadVertexStream(adopted, payload.streamRows, scene, uploads);
-				Extensions::RunCommitHooks({ Api::CommitKind::Shadow, adopted, Scene::FrameView::Get().GetTables(), Scene::FrameView::Get().GetFrame(), scene, uploads, nullptr,
+				Extensions::RunCommitHooks({ Api::CommitKind::Shadow, adopted, Scene::FrameView::Get().GetTables(), Scene::FrameView::Get().SceneStep(), scene, uploads, nullptr,
 					a_frameOwners });
 				shadowStats.records = static_cast<std::uint32_t>(payload.materialRows.Count());
 				shadowStats.skippedTexture = payload.skippedTexture;
@@ -301,8 +301,6 @@ namespace DCLF
 							latch.cullFlags |= kCullMinTexels;
 							latch.minCasterRadius = radius;
 						}
-					if (view.sunView && shadowSizeProbe.load(std::memory_order_relaxed) >= 0)
-						latch.cullFlags |= kCullSizeProbe;
 					latch.viewBits = ShadowViewBits(view.modeIndex, view.sunView);
 					// A focus view draws only its target's members. The latch stores root + 1, and an unlisted target draws nothing.
 					if (view.focus) {
@@ -341,7 +339,6 @@ namespace DCLF
 					if (a_direct)
 						a_direct->push_back({ view.modeIndex == kParabolicShadowMode ? Direct::ViewType::Point : view.sunView ? Direct::ViewType::Sun : Direct::ViewType::Spot,
 							slot, index, latch });
-					Diagnostics::Notify(Diagnostics::ShadowViewLatched{ view, latch, frameNumber, payload, shadowStats });
 					resources.labels.push_back({ view.viewId, view.renderMode, slot });
 				}
 				// Placements without a view this frame get a zero latch, so they do no work.
@@ -439,7 +436,7 @@ namespace DCLF
 					constexpr std::size_t recordEnd = kShadowFrameRecordOffset + sizeof(DrawBindings);
 					static_assert(recordEnd <= kShadowArenaBlocksOffset, "the frame record overlaps the arena's blocks");
 					if (bytes.size() < recordEnd)
-						stl::report_and_fail("Drawcall Limit Fix: a shadow arena without its frame record");
+						::RenderGraph::Fatal("Drawcall Limit Fix", "a shadow arena without its frame record");
 					// A kept publication commits the same build every frame, so stage nothing then.
 					// For a new build, stage only the chunks that differ.
 					auto& staged = Draws::shadowArenaHeld;
@@ -493,7 +490,7 @@ namespace DCLF
 					if (!a_size)
 						return;
 					if (a_bytes.size() != a_size)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: a shadow commit's CS block of {} bytes for its place of {}", a_bytes.size(), a_size));
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("a shadow commit's CS block of {} bytes for its place of {}", a_bytes.size(), a_size));
 					latched(resources.constants, a_bytes.data(), a_bytes.size(), a_offset);
 				};
 				writeBlock(blocks.sharedData, blocks.sharedBytes, in.sharedData);
@@ -567,7 +564,7 @@ namespace DCLF
 		DCLF_ZONE("CS.DCLF.ExecuteShadowFrame");
 		auto& engine = *impl->shadowEngine;
 		auto& pending = engine.pendingViews;
-		const std::uint32_t frameNumber = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t frameNumber = Scene::FrameView::Get().SceneStep();
 		// The engine renders any occlusion map this epoch does not draw. Those are counted here.
 		const std::uint32_t maps = engine.OcclusionSetUp(a_maps, frameNumber);
 		auto mapsNotDrawn = [&](std::uint32_t a_drawn) {
@@ -575,8 +572,7 @@ namespace DCLF
 				shadowStats.occlusionNotReady[v] += ((a_maps & ~a_drawn) >> v) & 1;
 			return a_drawn;
 		};
-		// On the CPU pipeline the engine draws shadows until the shadow site is live.
-		if (!ActiveToggles().shadows || failed || (pending.empty() && !maps) || (Direct::CpuFrame() && !Direct::ShadowSiteLive())) {
+		if (pending.empty() && !maps) {
 			pending.clear();
 			return mapsNotDrawn(0);
 		}
@@ -729,7 +725,7 @@ namespace DCLF
 		}
 		// Keep occluders in the payload even on frames that do not draw the map.
 		for (std::uint32_t v = 0; v < kOcclusionViews; ++v)
-			if (Extensions::OcclusionOn(ActiveToggles(), v) && readyModes[OcclusionModeOf(v)] && occlusion[v].dsvFormat != DXGI_FORMAT_UNKNOWN)
+			if (Extensions::OcclusionOn(v) && readyModes[OcclusionModeOf(v)] && occlusion[v].dsvFormat != DXGI_FORMAT_UNKNOWN)
 				modeUsed[OcclusionModeOf(v)] = true;
 		for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
 			if (modeUsed[m])
@@ -740,6 +736,10 @@ namespace DCLF
 			shadowTargetFormat = dsvFormat;
 			NoteCapability(shadowCatalogBuilt, fmt::format("a view draws into format {}", static_cast<int>(dsvFormat)));
 		}
+		// The shadow pipelines are built for the engine shadow map's declared format, fixed at setup. A view in another format is a defect.
+		if (dsvFormat != DXGI_FORMAT_UNKNOWN && pipelineShadowFormat != DXGI_FORMAT_UNKNOWN && dsvFormat != pipelineShadowFormat)
+			IndirectDraws::NoteInputChanged(fmt::format("a shadow view draws into depth format {}, not the shadow pipelines' declared {}", static_cast<int>(dsvFormat),
+				static_cast<int>(pipelineShadowFormat)));
 	}
 
 	void ShadowEngine::NoteShadowEpochDrawn(const ShadowPayload& a_payload, const std::array<bool, kShadowModeCount>& a_modeUsed, std::uint32_t a_frame,
@@ -782,14 +782,13 @@ namespace DCLF
 	{
 		DCLF_ZONE("CS.DCLF.PrepareShadowInputs");
 		ShadowInputs in;
-		in.frameNumber = Scene::FrameView::Get().GetFrame();
+		in.frameNumber = Scene::FrameView::Get().SceneStep();
 		in.modeUsed = a_modeUsed;
 		in.modeRasterStates = a_modeRasterStates;
 		// The sun's full-frustum planes. At the shadow epoch these are this frame's. For the build ahead they are last frame's,
 		// because it is posted before this frame's UpdateCamera.
 		Api::SunEntryPlanesSink entryPlanes(in.sunEntryProcesses);
-		const bool entryPlanesTaken = Extensions::SampleSunEntryPlanes(entryPlanes, in.frameNumber);
-		Diagnostics::Notify(Diagnostics::SunEntryPlanesTaken{ in.frameNumber, entryPlanesTaken });
+		(void)Extensions::SampleSunEntryPlanes(entryPlanes, in.frameNumber);
 		in.sunCandidates = Scene::FrameView::Get().GetSunCandidates();
 		in.lightCandidates = Scene::FrameView::Get().GetLightCandidates();
 		in.addresses.constants = a_resources.constantsAddress;
@@ -832,8 +831,8 @@ namespace DCLF
 		if (!host || !readback)
 			return;
 		auto& armed = readback->armed;
-		const std::uint32_t frameSlot = readback->ranges.Of(host->CurrentRun());
-		if (frameSlot == Draws::RunRanges::kNone)
+		const std::uint32_t frameSlot = readback->RangeOf(host->CurrentRun());
+		if (frameSlot == org::RunReadback::kNoRegion)
 			return;
 		const auto epoch = shadowCullEpochs++;
 		bool lost = false;
@@ -857,10 +856,6 @@ namespace DCLF
 					a_stats.cullClass = a_words[16];
 					a_stats.cullBelowTexels = a_words[Draws::kCountBelowTexelsWord];
 					a_stats.cullRowsLost = a_words[Draws::kCountCasterRowsLostWord];
-					for (std::uint32_t c = 0; c < 4; ++c) {
-						a_stats.probeCasters[c] = a_words[Draws::kCountProbeCastersWord + c];
-						a_stats.probeTriangles[c] = a_words[Draws::kCountProbeTrianglesWord + c];
-					}
 					a_stats.cullSampledView = armed.view;
 					a_stats.cullSampledMode = armed.mode;
 				});
@@ -869,10 +864,9 @@ namespace DCLF
 			}
 		}
 		// Sample one epoch in 127, or the one after a lost sample, cycling through the views.
-		const int probe = shadowSizeProbe.load(std::memory_order_relaxed);
-		if (((epoch % 127) != 0 && !lost && probe < 0) || !shadow || shadow->labels.empty())
+		if (((epoch % 127) != 0 && !lost) || !shadow || shadow->labels.empty())
 			return;
-		const auto& view = shadow->labels[probe >= 0 ? static_cast<std::uint32_t>(probe) % shadow->labels.size() : (epoch / 127) % shadow->labels.size()];
+		const auto& view = shadow->labels[(epoch / 127) % shadow->labels.size()];
 		if (view.slot >= readback->sources)
 			return;
 		armed = { true, frameSlot, view.slot, CounterReadback::StampOf(a_frame), view.viewId, view.renderMode, host->SubmittedPoint() };

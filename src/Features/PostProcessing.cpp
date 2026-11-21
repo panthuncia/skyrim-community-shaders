@@ -23,6 +23,7 @@
 #include "Features/LinearLighting.h"
 #include "Features/Upscaling.h"
 #include "Utils/ColorSpace.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Vram/DxvkMemory.h"
 
@@ -133,7 +134,7 @@ void PostProcessing::DrawSettings()
 	const char* settingsTooltip = T("feature.post_processing.edit_settings_for_this_feature", "Edit settings for this feature.");
 
 	// Draws a read-only checkbox for a forced-on sub-feature and returns true. Otherwise callers bind
-	// `&feat->enabled` themselves: the scene catalog generator only recognises that form as a scene toggle.
+	// `feat->enabled` themselves: the scene catalog generator only recognises that form as a scene toggle.
 	auto isForcedOn = [this](PostProcessFeature& feature) {
 		return feature.IsAutoEnabled() ||
 		       (&feature == GetPipelineFeature<HistogramAutoExposure>(FeaturePipelineIndex::AutoExposure) && GetActivePhysicalCameraState());
@@ -215,7 +216,7 @@ void PostProcessing::DrawSettings()
 			const bool automatic = isForcedOn(*feat);
 			const bool experimental = feat->IsExperimental();
 			if (!drawForcedEnabled("##Enabled", *feat))
-				ImGui::Checkbox("##Enabled", &feat->enabled);
+				Util::Checkbox("##Enabled", feat->enabled);
 
 			// The name opens the settings too, so the whole row reads as one entry
 			ImGui::SameLine();
@@ -280,7 +281,7 @@ void PostProcessing::DrawSettings()
 			ImGui::SetCursorPosY(headerBottom);
 
 			if (!drawForcedEnabled(T("feature.post_processing.enabled", "Enabled"), *feat))
-				ImGui::Checkbox(T("feature.post_processing.enabled", "Enabled"), &feat->enabled);
+				Util::Checkbox(T("feature.post_processing.enabled", "Enabled"), feat->enabled);
 			ImGui::Spacing();
 			if (feat->IsActive()) {
 				// Some settings pages preview the feature's textures before its first frame has run.
@@ -403,7 +404,7 @@ void PostProcessing::SaveSettings(json& o_json)
 			json featureSetting{};
 			pipe->SaveSettings(featureSetting);
 			o_json[pipe->GetType()] = {
-				{ "enabled", pipe->enabled },
+				{ "enabled", pipe->enabled.Get() },
 				{ "settings", featureSetting }
 			};
 		}
@@ -425,6 +426,18 @@ void PostProcessing::ApplyContextualDefaults(json& a_defaults) const
 	}
 }
 
+void PostProcessing::BindPipelineSettings(PostProcessFeature& a_feature, FeaturePipelineIndex a_index)
+{
+	// One name per pipeline slot in FeaturePipelineIndex order. A new instance takes the same variable.
+	static constexpr std::array<std::string_view, static_cast<size_t>(FeaturePipelineIndex::COUNT)> kSlotNames = {
+		"DoF", "Vignette", "LocalExposure", "AutoExposure", "MotionBlur", "PhysicalGlare", "CODBloom", "LensFlare", "PhysicalLens", "Composite",
+		"ColorGrading", "LUT", "Camera", "Border"
+	};
+	const auto slot = static_cast<size_t>(a_index);
+	if (slot < kSlotNames.size())
+		a_feature.enabled.Bind(CS::SettingRegistry::Declare(std::format("PostProcessing.{}.enabled", kSlotNames[slot])));
+}
+
 std::shared_ptr<PostProcessFeature> PostProcessing::MakePipelineFeature(FeaturePipelineIndex idx)
 {
 	switch (idx) {
@@ -444,6 +457,8 @@ std::shared_ptr<PostProcessFeature> PostProcessing::MakePipelineFeature(FeatureP
 		return std::make_shared<CODBloom>();
 	case FeaturePipelineIndex::LensFlare:
 		return std::make_shared<LensFlare>();
+	case FeaturePipelineIndex::PhysicalLens:
+		return std::make_shared<PhysicalLens>();
 	case FeaturePipelineIndex::Composite:
 		return std::make_shared<Composite>();
 	case FeaturePipelineIndex::ColorGrading:
@@ -477,6 +492,9 @@ void PostProcessing::BuildPipeline()
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Vignette)] = std::make_shared<Vignette>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Camera)] = std::make_shared<Camera>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Border)] = std::make_shared<Border>();
+	for (size_t index = 0; index < pipeline.size(); ++index)
+		if (pipeline[index])
+			BindPipelineSettings(*pipeline[index], static_cast<FeaturePipelineIndex>(index));
 	ApplyDefaultEnabledStates();
 }
 
@@ -494,8 +512,7 @@ void PostProcessing::SyncPipelineResources()
 {
 	for (size_t index = 0; index < pipeline.size(); ++index) {
 		auto& pipe = pipeline[index];
-		// An active sub-feature is set up where the D3D11 path first draws it (DrawFeature), so it holds no D3D11 textures while
-		// the render graph runs the chain.
+		// An active sub-feature is set up where the chain first draws it (DrawFeature, or the graph's key in ORGPostProcessing).
 		if (!pipe || pipe->IsActive() || !pipe->resourcesReady)
 			continue;
 
@@ -504,6 +521,7 @@ void PostProcessing::SyncPipelineResources()
 		json featureSettings{};
 		pipe->SaveSettings(featureSettings);
 		auto fresh = MakePipelineFeature(static_cast<FeaturePipelineIndex>(index));
+		BindPipelineSettings(*fresh, static_cast<FeaturePipelineIndex>(index));
 		fresh->owner = this;
 		fresh->enabled = pipe->enabled;
 		fresh->LoadSettings(featureSettings);
@@ -851,14 +869,17 @@ bool PostProcessing::ReadsMainCopy(RE::RENDER_TARGET a_input) const
 {
 	// The tonemap hook hands us the pass input directly, so no need to probe the bound RTV.
 	// Refraction still routes through kMAIN_COPY without that being reflected in a_input.
+	// When CS's ImageSpace steps draw the world chain, the scene stays in kMAIN: their refraction copies back into it.
+	if (RenderGraph::Engine::ImageSpace::SceneInMain())
+		return false;
 	return isrefraction || a_input == RE::RENDER_TARGETS::kMAIN_COPY;
 }
 
 std::optional<RE::RENDER_TARGET> PostProcessing::PreProcess(RE::RENDER_TARGET a_input)
 {
-	// The render graph ran the chain in the Tonemap anchor's epoch.
+	// Graph mode: the render graph ran the chain in the Tonemap anchor's epoch, or this frame has no chain. Never D3D11.
 	// Its Border pass zeroes the band's motion vectors itself (ORG/ORGBorder.cpp).
-	if (ORGPostProcessing::Get().Ran()) {
+	if (ORGPostProcessing::Get().IsActive()) {
 		isrefraction = false;
 		return std::nullopt;
 	}
@@ -1096,6 +1117,4 @@ void PostProcessing::PostPostLoad()
 	stl::write_vfunc<0x6, VanillaDoF_IsActive>(RE::VTABLE_ImageSpaceEffectDepthOfField[0]);
 	stl::write_vfunc<0x1, VanillaBlur_Render>(RE::VTABLE_ImageSpaceEffectBlur[0]);
 	stl::write_vfunc<0x2, BSImagespaceShaderRefraction_SetupTechnique>(RE::VTABLE_BSImagespaceShaderRefraction[0]);
-
-	ORGPostProcessing::Reserve();
 }

@@ -1,14 +1,10 @@
 #include "RenderGraph/Frame/Transients.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/RenderGraph/FrameAliasArena.h>
+#include <Resources/PixelBuffer.h>
 
-#	include "RenderGraph/Switches.h"
-
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/RenderGraph/FrameAliasArena.h>
-#	include <Resources/PixelBuffer.h>
-
-#	include <atomic>
+#include <atomic>
 
 namespace RenderGraph::Frame::Transients
 {
@@ -66,10 +62,6 @@ namespace RenderGraph::Frame::Transients
 
 	bool Install(org::GraphHost& a_host)
 	{
-		if (Switches::Off("CS_ORG_FRAME_ARENA")) {
-			logger::info("[ORG] frame arena off (CS_ORG_FRAME_ARENA=0): each CS stage keeps its transients in pools of its own");
-			return false;
-		}
 		// Every world recipe epoch gets a position, DCLF's too, since they bind the G-buffer from the Z-prepass to first person.
 		// Only CS's stages put their own transients in the arena, since DCLF's epochs run a varying number of times a frame.
 		std::vector<org::GraphHost::FramePosition> positions;
@@ -108,45 +100,5 @@ namespace RenderGraph::Frame::Transients
 			return std::nullopt;
 		return std::pair{ found->label, FromAlias(found->span) };
 	}
-
-	void LogStats()
-	{
-		auto& state = Get();
-		if (!On() || !state.host)
-			return;
-		const auto arena = state.host->FrameArena();
-		if (!arena)
-			return;
-		const auto blocks = arena->Blocks();
-		logger::info("[ORG] frame arena: {} blocks, {:.1f} MiB", blocks.size(), arena->Bytes() / (1024.0 * 1024.0));
-		for (const auto& block : blocks) {
-			std::string ranges;
-			for (const auto& range : block.ranges)
-				ranges += fmt::format("{}{} [{:.1f}, {:.1f}) MiB {}", ranges.empty() ? "" : "; ", range.name, range.begin / (1024.0 * 1024.0),
-					range.end / (1024.0 * 1024.0), Describe(FromAlias(range.span)));
-			logger::info("[ORG] frame arena: block {:#x} class {} {:.1f} MiB: {}", block.poolID, block.resourceClass, block.capacity / (1024.0 * 1024.0), ranges);
-		}
-		for (const auto& group : state.host->FrameTransientGroups()) {
-			std::string members;
-			for (const auto& member : group.members)
-				members += fmt::format("{}{}", members.empty() ? "" : ", ", member);
-			logger::info("[ORG] frame arena: frame transients {} span {} (derived from the graphs that use them): {}", group.label, Describe(FromAlias(group.span)),
-				members);
-		}
-	}
 }
 
-#else
-
-namespace RenderGraph::Frame::Transients
-{
-	std::uint32_t PositionOf(SegmentId) { return 0; }
-	std::string Describe(Span) { return {}; }
-	bool On() { return false; }
-	bool Install(org::GraphHost&) { return false; }
-	std::shared_ptr<const void> Place(std::string, std::span<const std::shared_ptr<org::PixelBuffer>>) { return nullptr; }
-	std::optional<std::pair<std::string, Span>> FrameTransientOf(std::string_view) { return std::nullopt; }
-	void LogStats() {}
-}
-
-#endif

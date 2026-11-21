@@ -46,10 +46,6 @@ namespace DCLF::Features::Portals
 	 */
 	std::shared_ptr<org::RenderPass> MakeBatchPass(std::shared_ptr<Draws::Resources> a_resources, std::shared_ptr<const Batch> a_batch,
 		RenderGraphRuntime::Segment a_segment, bool a_evaluate);
-	/** @brief A batch's owner: its batch in a scene (null: none). */
-	using BatchOf = const Batch* (*)(const Draws::SceneBuffers&);
-	/** @brief Install: a batch whose queries CS_DCLF_PORTAL_CAPTURE writes (Diagnostics/PortalCapture.cpp), under a_label. */
-	void RegisterBatchCapture(std::string a_label, BatchOf a_batchOf);
 	/** @brief Render-thread diagnostic for a main-camera snapshot that outgrew its adopted bucket scratch (evaluated unbatched). */
 	void CheckMainBatchCapacity(Batch& a_batch, std::uint32_t a_frame, std::uint64_t a_capacity);
 }

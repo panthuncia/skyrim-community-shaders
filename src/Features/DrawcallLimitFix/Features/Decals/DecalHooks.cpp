@@ -5,6 +5,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/NodeCaptures.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Features::Decals
 {
@@ -34,7 +35,7 @@ namespace DCLF::Features::Decals
 	void InstallDecalHooks()
 	{
 		if (!SceneWriter::SubscribeCall(SWF_HOOK_DECAL_ARRAY_EDIT, &OnDecalArrayEdit, SWF_PHASE_POST))
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the decal array edits after reporting them installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the decal array edits after reporting them installed");
 	}
 
 	void RegisterDecalCapture(Api::InstallContext& a_context)

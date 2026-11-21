@@ -10,7 +10,6 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Triggers.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 
 namespace DCLF::Features::FirstPerson
@@ -33,10 +32,10 @@ namespace DCLF::Features::FirstPerson
 		{
 			static void thunk(void* a_camera, void* a_accumulator, std::uint32_t a_flags)
 			{
-				if (ShellState::Running()) {
+				{
 					RenderThreadBudget::Hook budget(RenderThreadBudget::Site::ZPrepass);
 					// The hidden bits as the engine's first-person cull left them. Next frame's member chains read these.
-					if (Extensions::ViewOn(SceneToggles(), kView))
+					if (Extensions::ViewRegistered(kView))
 						if (auto* player = RE::PlayerCharacter::GetSingleton())
 							FrameGlobals::NoteFirstPersonCulled(player->Get3D(true));
 					TakeDepthRange(ShellState::Passes().depthControlDriven);
@@ -51,8 +50,7 @@ namespace DCLF::Features::FirstPerson
 		{
 			static void thunk(void* a_camera, void* a_accumulator, std::uint32_t a_flags)
 			{
-				Diagnostics::Notify(Diagnostics::TargetPoint{ "before first person" });
-				if (ShellState::Running()) {
+				{
 					RenderThreadBudget::Hook budget(RenderThreadBudget::Site::AfterOpaque);
 					{
 						Extensions::TriggerScope trigger(colourRender);
@@ -60,9 +58,7 @@ namespace DCLF::Features::FirstPerson
 					}
 					globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 				}
-				Diagnostics::Notify(Diagnostics::TargetPoint{ "after DCLF first person" });
 				func(a_camera, a_accumulator, a_flags);
-				Diagnostics::Notify(Diagnostics::TargetPoint{ "after first person" });
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};

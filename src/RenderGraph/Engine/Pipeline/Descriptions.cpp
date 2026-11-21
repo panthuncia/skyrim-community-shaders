@@ -3,39 +3,18 @@
 
 #include "RenderGraph/Switches.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "Globals.h"
-#	include "RenderGraph/Engine/Pipeline/StateConversion.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "RenderGraph/ShaderBindings.h"
-#	include "State.h"
+#include "Globals.h"
+#include "RenderGraph/Engine/Pipeline/StateConversion.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/ShaderBindings.h"
+#include "State.h"
 
-#	include <ORGModuleServices/ShaderStore.h>
-
-#	include <d3dcompiler.h>
-
-#	include <algorithm>
-#	include <cctype>
-#	include <cstring>
-#	include <shared_mutex>
-#	include <string_view>
-#	include <type_traits>
-#	include <unordered_map>
-#endif
+#include <shared_mutex>
+#include <string_view>
+#include <unordered_map>
 
 namespace RenderGraph::Engine::Pipeline
 {
-	bool Enabled()
-	{
-#if defined(CS_HAS_RENDER_GRAPH)
-		static const bool enabled = RenderGraph::Engine::Native::GraphMode();
-		return enabled;
-#else
-		return false;
-#endif
-	}
-
-#if defined(CS_HAS_RENDER_GRAPH)
 
 	namespace
 	{
@@ -65,8 +44,6 @@ namespace RenderGraph::Engine::Pipeline
 		{
 			std::shared_mutex lock;
 			std::unordered_map<const void*, Entry> entries;
-			// The engine never releases these layouts.
-			std::unordered_map<std::uint64_t, std::shared_ptr<const InputLayoutDescription>> layoutsByKey;
 		};
 
 		// Never destroyed, since tokens are released when their objects go, which can be after static destruction.
@@ -178,125 +155,6 @@ namespace RenderGraph::Engine::Pipeline
 			return description;
 		}
 
-		const wchar_t* TargetOf(Stage a_stage)
-		{
-			switch (a_stage) {
-			case Stage::Vertex:
-				return L"vs_6_6";
-			case Stage::Pixel:
-				return L"ps_6_6";
-			default:
-				return L"cs_6_6";
-			}
-		}
-
-		org::services::ShaderStoreHash Hash(std::span<const std::uint8_t> a_bytes)
-		{
-			return org::services::HashShaderBytes(std::as_bytes(a_bytes));
-		}
-
-		/** @brief FNV-1a field by field, since D3D11 descriptions have padding. */
-		class KeyHasher
-		{
-		public:
-			template <class T>
-			void Add(const T& a_value)
-			{
-				static_assert(std::is_trivially_copyable_v<T> && std::has_unique_object_representations_v<T>);
-				const auto* bytes = reinterpret_cast<const std::uint8_t*>(&a_value);
-				for (std::size_t i = 0; i < sizeof(T); ++i) {
-					value ^= bytes[i];
-					value *= 0x100000001b3ull;
-				}
-			}
-			void Add(std::string_view a_text)
-			{
-				Add(a_text.size());
-				for (const char c : a_text)
-					Add(c);
-			}
-			void Add(float a_value)
-			{
-				std::uint32_t bits;
-				std::memcpy(&bits, &a_value, sizeof(bits));
-				Add(bits);
-			}
-
-			std::uint64_t value = 0xcbf29ce484222325ull;
-		};
-
-		void AddShader(KeyHasher& a_hasher, const std::shared_ptr<const ShaderDescription>& a_shader)
-		{
-			a_hasher.Add(a_shader ? a_shader->hash.high : 0ull);
-			a_hasher.Add(a_shader ? a_shader->hash.low : 0ull);
-		}
-
-		void AddBlend(KeyHasher& a_hasher, const D3D11_BLEND_DESC& a_desc)
-		{
-			a_hasher.Add(a_desc.AlphaToCoverageEnable);
-			a_hasher.Add(a_desc.IndependentBlendEnable);
-			for (const auto& target : a_desc.RenderTarget) {
-				a_hasher.Add(target.BlendEnable);
-				a_hasher.Add(static_cast<std::uint32_t>(target.SrcBlend));
-				a_hasher.Add(static_cast<std::uint32_t>(target.DestBlend));
-				a_hasher.Add(static_cast<std::uint32_t>(target.BlendOp));
-				a_hasher.Add(static_cast<std::uint32_t>(target.SrcBlendAlpha));
-				a_hasher.Add(static_cast<std::uint32_t>(target.DestBlendAlpha));
-				a_hasher.Add(static_cast<std::uint32_t>(target.BlendOpAlpha));
-				a_hasher.Add(target.RenderTargetWriteMask);
-			}
-		}
-
-		void AddFace(KeyHasher& a_hasher, const D3D11_DEPTH_STENCILOP_DESC& a_face)
-		{
-			a_hasher.Add(static_cast<std::uint32_t>(a_face.StencilFailOp));
-			a_hasher.Add(static_cast<std::uint32_t>(a_face.StencilDepthFailOp));
-			a_hasher.Add(static_cast<std::uint32_t>(a_face.StencilPassOp));
-			a_hasher.Add(static_cast<std::uint32_t>(a_face.StencilFunc));
-		}
-
-		void AddDepthStencil(KeyHasher& a_hasher, const D3D11_DEPTH_STENCIL_DESC& a_desc)
-		{
-			a_hasher.Add(a_desc.DepthEnable);
-			a_hasher.Add(static_cast<std::uint32_t>(a_desc.DepthWriteMask));
-			a_hasher.Add(static_cast<std::uint32_t>(a_desc.DepthFunc));
-			a_hasher.Add(a_desc.StencilEnable);
-			a_hasher.Add(a_desc.StencilReadMask);
-			a_hasher.Add(a_desc.StencilWriteMask);
-			AddFace(a_hasher, a_desc.FrontFace);
-			AddFace(a_hasher, a_desc.BackFace);
-		}
-
-		// The scissor flag is not pipeline state.
-		void AddRaster(KeyHasher& a_hasher, const D3D11_RASTERIZER_DESC& a_desc)
-		{
-			a_hasher.Add(static_cast<std::uint32_t>(a_desc.FillMode));
-			a_hasher.Add(static_cast<std::uint32_t>(a_desc.CullMode));
-			a_hasher.Add(a_desc.FrontCounterClockwise);
-			a_hasher.Add(a_desc.DepthBias);
-			a_hasher.Add(a_desc.DepthBiasClamp);
-			a_hasher.Add(a_desc.SlopeScaledDepthBias);
-			a_hasher.Add(a_desc.DepthClipEnable);
-		}
-
-		void AddLayout(KeyHasher& a_hasher, const InputLayoutDescription* a_layout)
-		{
-			if (!a_layout) {
-				a_hasher.Add(0u);
-				return;
-			}
-			a_hasher.Add(static_cast<std::uint32_t>(a_layout->elements.size()));
-			for (const auto& element : a_layout->elements) {
-				a_hasher.Add(std::string_view(element.SemanticName ? element.SemanticName : ""));
-				a_hasher.Add(element.SemanticIndex);
-				a_hasher.Add(static_cast<std::uint32_t>(element.Format));
-				a_hasher.Add(element.InputSlot);
-				a_hasher.Add(element.AlignedByteOffset);
-				a_hasher.Add(static_cast<std::uint32_t>(element.InputSlotClass));
-				a_hasher.Add(element.InstanceDataStepRate);
-			}
-		}
-
 		template <class T>
 		T* TableEntry(REL::RelocationID a_id, std::size_t a_index)
 		{
@@ -307,48 +165,23 @@ namespace RenderGraph::Engine::Pipeline
 
 	ShaderDescription::ShaderDescription(Stage a_stage, std::span<const std::uint8_t> a_bytecode) :
 		stage(a_stage),
-		bytecode(a_bytecode.begin(), a_bytecode.end()),
-		hash(Hash(a_bytecode)),
-		spirv(Util::DxcSpirvModule(std::as_bytes(a_bytecode)))
+		bytecode(a_bytecode.begin(), a_bytecode.end())
 	{
-	}
-
-	const Util::ShaderReflection* ShaderDescription::Reflection() const
-	{
-		std::call_once(reflected, [this] {
-			winrt::com_ptr<ID3DBlob> blob;
-			if (bytecode.empty() || FAILED(D3DCreateBlob(bytecode.size(), blob.put())))
-				return;
-			std::memcpy(blob->GetBufferPointer(), bytecode.data(), bytecode.size());
-			Util::ShaderReflection read;
-			if (Util::ReflectShader(*blob, read))
-				reflection = std::move(read);
-		});
-		return reflection ? &*reflection : nullptr;
-	}
-
-	std::optional<org::PipelineShaderSource> ShaderDescription::PipelineSource() const
-	{
-		const auto from = Source();
-		if (!from)
-			return std::nullopt;
-		return org::PipelineShaderSource{ .path = from->path, .entry = L"main", .target = TargetOf(stage) };
 	}
 
 	std::shared_ptr<const ShaderDescription> RecordShader(Stage a_stage, IUnknown* a_object, std::span<const std::uint8_t> a_bytecode)
 	{
 		winrt::com_ptr<ID3D11DeviceChild> child;
-		if (!Enabled() || !a_object || a_bytecode.empty() || FAILED(a_object->QueryInterface(IID_PPV_ARGS(child.put()))))
+		if (!GraphMode() || !a_object || a_bytecode.empty() || FAILED(a_object->QueryInterface(IID_PPV_ARGS(child.put()))))
 			return nullptr;
 		auto description = std::make_shared<ShaderDescription>(a_stage, a_bytecode);
 		Insert(a_object, child.get(), EntryKind::Shader, description);
 		return description;
 	}
 
-	std::shared_ptr<const InputLayoutDescription> RecordInputLayout(ID3D11InputLayout* a_object, std::span<const D3D11_INPUT_ELEMENT_DESC> a_elements,
-		std::span<const std::uint8_t> a_vertexShaderBytecode)
+	std::shared_ptr<const InputLayoutDescription> RecordInputLayout(ID3D11InputLayout* a_object, std::span<const D3D11_INPUT_ELEMENT_DESC> a_elements)
 	{
-		if (!Enabled() || !a_object)
+		if (!GraphMode() || !a_object)
 			return nullptr;
 		auto description = std::make_shared<InputLayoutDescription>();
 		description->semantics.reserve(a_elements.size());
@@ -357,35 +190,8 @@ namespace RenderGraph::Engine::Pipeline
 		description->elements.assign(a_elements.begin(), a_elements.end());
 		for (std::size_t i = 0; i < a_elements.size(); ++i)
 			description->elements[i].SemanticName = description->semantics[i].c_str();
-		description->vertexShaderHash = Hash(a_vertexShaderBytecode);
-		description->layout = InputLayoutFromD3D11(description->elements, description->error);
 		Insert(a_object, a_object, EntryKind::InputLayout, description);
 		return description;
-	}
-
-	void RecordEngineInputLayoutKey(ID3D11InputLayout* a_object, std::uint64_t a_key)
-	{
-		const auto description = FindInputLayout(a_object);
-		if (!description)
-			return;
-		description->engineKey.store(a_key, std::memory_order_relaxed);
-		auto& registry = GetRegistry();
-		std::unique_lock lock(registry.lock);
-		registry.layoutsByKey.insert_or_assign(a_key, description);
-	}
-
-	std::shared_ptr<const InputLayoutDescription> FindEngineInputLayout(std::uint64_t a_key)
-	{
-		auto& registry = GetRegistry();
-		std::shared_lock lock(registry.lock);
-		const auto found = registry.layoutsByKey.find(a_key);
-		return found != registry.layoutsByKey.end() ? found->second : nullptr;
-	}
-
-	void RecordShaderSource(IUnknown* a_object, ShaderSource a_source)
-	{
-		if (const auto description = FindShader(a_object))
-			description->SetSource(std::make_shared<const ShaderSource>(std::move(a_source)));
 	}
 
 	std::shared_ptr<const ShaderDescription> FindShader(IUnknown* a_object)
@@ -503,115 +309,4 @@ namespace RenderGraph::Engine::Pipeline
 		out.topology = shadow.topology;
 		return out;
 	}
-
-	DrawPipelinePieces Resolve(const EngineDrawState& a_state)
-	{
-		DrawPipelinePieces out;
-		const auto note = [&](std::string_view a_what) {
-			if (!out.missing.empty())
-				out.missing += ", ";
-			out.missing += a_what;
-		};
-		if (a_state.vertexShader)
-			out.vertexShader = FindShader(reinterpret_cast<IUnknown*>(a_state.vertexShader->shader));
-		if (!out.vertexShader)
-			note("vertex shader");
-		// No pixel shader is a depth-only draw, not a gap.
-		if (a_state.pixelShader) {
-			out.pixelShader = FindShader(reinterpret_cast<IUnknown*>(a_state.pixelShader->shader));
-			if (!out.pixelShader)
-				note("pixel shader");
-		}
-		out.inputLayout = FindEngineInputLayout(a_state.inputLayoutKey);
-		if (!out.inputLayout)
-			note("input layout");
-		out.blend = FindBlend(EngineBlendState(a_state.blendMode, a_state.alphaToCoverage, a_state.writeMode, a_state.blendExtra));
-		if (!out.blend || !out.blend->error.empty())
-			note("blend state");
-		out.depthStencil = FindDepthStencil(EngineDepthStencilState(a_state.depthMode, a_state.stencilMode));
-		if (!out.depthStencil)
-			note("depth-stencil state");
-		out.raster = FindRaster(EngineRasterState(a_state.fill, a_state.cull, a_state.depthBias, a_state.scissor));
-		if (!out.raster)
-			note("rasterizer state");
-		out.topology = TopologyFromD3D11(a_state.topology);
-		if (out.topology == rhi::PrimitiveTopology::Unknown)
-			note("topology");
-		out.stencilRef = a_state.stencilRef;
-		return out;
-	}
-
-	std::uint64_t PipelineKey(const DrawPipelinePieces& a_pieces, std::span<const std::uint32_t> a_strides, const rhi::RenderTargets& a_targets, rhi::Format a_depthFormat)
-	{
-		KeyHasher hasher;
-		AddShader(hasher, a_pieces.vertexShader);
-		AddShader(hasher, a_pieces.pixelShader);
-		AddLayout(hasher, a_pieces.inputLayout.get());
-		hasher.Add(static_cast<std::uint32_t>(a_strides.size()));
-		for (const auto stride : a_strides)
-			hasher.Add(stride);
-		hasher.Add(a_pieces.blend ? 1u : 0u);
-		if (a_pieces.blend)
-			AddBlend(hasher, a_pieces.blend->d3d);
-		hasher.Add(a_pieces.depthStencil ? 1u : 0u);
-		if (a_pieces.depthStencil)
-			AddDepthStencil(hasher, a_pieces.depthStencil->d3d);
-		hasher.Add(a_pieces.raster ? 1u : 0u);
-		if (a_pieces.raster)
-			AddRaster(hasher, a_pieces.raster->d3d);
-		hasher.Add(static_cast<std::uint32_t>(a_pieces.topology));
-		hasher.Add(a_targets.count);
-		for (std::uint32_t i = 0; i < a_targets.count && i < 8; ++i)
-			hasher.Add(static_cast<std::uint32_t>(a_targets.formats[i]));
-		hasher.Add(static_cast<std::uint32_t>(a_depthFormat));
-		return hasher.value;
-	}
-
-	org::GraphicsPipelineDesc PipelineStates(const DrawPipelinePieces& a_pieces, std::span<const std::uint32_t> a_strides, const rhi::RenderTargets& a_targets,
-		rhi::Format a_depthFormat)
-	{
-		org::GraphicsPipelineDesc out;
-		out.name = "Engine draw";
-		if (a_pieces.raster)
-			out.raster = a_pieces.raster->rhi;
-		if (a_pieces.blend && a_pieces.blend->error.empty())
-			out.blend = a_pieces.blend->rhi;
-		if (a_pieces.depthStencil)
-			out.depth = a_pieces.depthStencil->rhi;
-		out.renderTargets = a_targets;
-		if (a_depthFormat != rhi::Format::Unknown)
-			out.depthFormat = a_depthFormat;
-		out.topology = a_pieces.topology;
-		if (a_pieces.inputLayout) {
-			auto layout = WithStrides(a_pieces.inputLayout->layout, a_strides);
-			if (a_pieces.vertexShader) {
-				if (const auto* reflection = a_pieces.vertexShader->Reflection())
-					AssignLocations(layout, *reflection);
-			}
-			out.inputLayout = std::move(layout);
-		}
-		return out;
-	}
-
-	void AssignLocations(org::PipelineInputLayout& a_layout, const Util::ShaderReflection& a_vertexShader)
-	{
-		const auto equal = [](std::string_view a_left, std::string_view a_right) {
-			return std::ranges::equal(a_left, a_right, [](char a, char b) { return std::toupper(static_cast<unsigned char>(a)) == std::toupper(static_cast<unsigned char>(b)); });
-		};
-		for (auto& attribute : a_layout.attributes) {
-			std::uint32_t location = 0;
-			for (const auto& input : a_vertexShader.inputs) {
-				// System values take no vertex input location.
-				if (input.semantic.size() >= 3 && equal(std::string_view(input.semantic).substr(0, 3), "SV_"))
-					continue;
-				if (input.index == attribute.semanticIndex && equal(input.semantic, attribute.semanticName)) {
-					attribute.location = location;
-					break;
-				}
-				++location;
-			}
-		}
-	}
-
-#endif
 }

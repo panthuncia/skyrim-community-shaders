@@ -30,13 +30,15 @@ namespace FrameAnchors
 * Publishing a twin registers it under its id with every epoch's graph, so a pass in any epoch declares a read by that id and
 * ORG's sequencer orders it after the producer's write. Nothing is copied.
 * Only resources the graph never aliases may be published. A reader earlier in the frame than the producer reads the previous frame.
-* A versioned twin is published as its slot, so its resizes need no build. A new resource under an id rebuilds every graph once.
-* An id stays registered once published, even after Withdraw, since older graphs may still declare it.
+* A versioned twin is published as its slot, so its new versions need no build. Publishing never rebuilds a graph that holds the
+* id: another resource under a published id is fatal (cleanup plan A12). Publish ids once, at setup, as declared textures whose
+* versions follow the owner's settings; an id that is off is one texel, never gone. A dependent reads the owner's adopted
+* setting to learn whether it is on, not whether the id is published.
 * Everything here runs on the render thread.
 */
 namespace PublishedResources
 {
-	/** @brief Publishes a_resource under a_id for every epoch's graph from the next build on. Call after creating the twin and after each Resize.
+	/** @brief Publishes a_resource under a_id for every epoch's graph from the next build on. Call after creating the twin.
 	*  False, logged, when the twin is empty, aliasable or the runtime is inactive. */
 	bool Publish(std::string_view a_id, const GraphResources::Resource& a_resource);
 
@@ -48,16 +50,10 @@ namespace PublishedResources
 	bool Publish(const GraphResources::Texture2D& a_texture);
 
 	/** @brief Publishes a FrameAnchors import of a D3D11 texture under its import id, so every epoch's readers use the writers' resource.
-	*  a_srv is the view readers find bound. Import and publish again on a resize. */
+	*  a_srv is the view readers find bound. */
 	bool PublishImport(std::string_view a_id, const FrameAnchors::Texture& a_import, const ID3D11ShaderResourceView* a_srv);
 
-	/** @brief Publishes again every live twin whose graph resource changed in a Resize. Render thread. */
-	void Refresh();
-
-	/** @brief The producer left its ORG path, so readers return to D3D11. The resource stays registered. */
-	void Withdraw(std::string_view a_id);
-
-	/** @brief Whether a_id is published and not withdrawn. */
+	/** @brief Whether a_id is published. */
 	bool IsPublished(std::string_view a_id);
 
 	/** @brief Whether a_id was ever published, so every graph built since registers it. */
@@ -70,12 +66,18 @@ namespace PublishedResources
 	/** @brief Whether a_view is the D3D11 export of a_id's twin while a_id is published. Does not allocate. */
 	bool IsExportOf(const ID3D11ShaderResourceView* a_view, std::string_view a_id);
 
-	/** @brief The bindless index of a_id's whole-resource SRV. Not a declaration, so the undeclared-access validator logs it with a_where.
-	*  False when a_id is not published, withdrawn or has no such view. */
+	/** @brief The bindless index of a_id's whole-resource SRV. Not a declaration, so the undeclared-access check raises it at a_where.
+	*  False when a_id is not published or has no such view. During a build it reads that graph's snapshot, so any thread. */
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index, std::source_location a_where = std::source_location::current());
 
+	/**
+	* @brief Whether a_id's resolver is a versioned slot (a texture's or a buffer's), whose descriptor follows its versions. A build's Declare reads the
+	* snapshot that graph registers, so any thread then; otherwise the render thread.
+	*/
+	bool IsVersioned(std::string_view a_id);
+
 	/** @brief The view variant ShaderResourceIndex hands out for a_id, so a declaration covers the descriptor it reads.
-	*  UINT32_MAX for a primary view or an unknown id. Render thread. */
+	*  UINT32_MAX for a primary view or an unknown id. Render thread, or a build on any thread (its snapshot). */
 	std::uint32_t ShaderResourceVariant(std::string_view a_id);
 
 	/** @brief The id whose twin exports a_view, or empty. A pass reading the export through its own import is not ordered after the producer.

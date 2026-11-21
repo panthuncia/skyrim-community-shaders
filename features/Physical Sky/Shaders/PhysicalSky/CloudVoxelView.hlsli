@@ -2,7 +2,13 @@
 #define PHYSICAL_SKY_CLOUD_VOXEL_VIEW_HLSLI
 
 #ifdef CLOUD_VOXEL_VIEW
-cbuffer VoxelViewDispatch : register(b3) { uint4 VoxelScreenRect; };
+// ORG: the CloudDispatch latch (Volumetrics.cs.hlsl's push block), which the main view reads as StormScreenRect.
+ORG_GLOBAL_LATCH_BEGIN(VoxelViewDispatchData, VoxelViewDispatch, 3)
+uint4 VoxelScreenRect;
+ORG_GLOBAL_LATCH_END(VoxelViewDispatchData, CloudDispatch, 3)
+#	if defined(CS_ORG_BINDLESS)
+static uint4 VoxelScreenRect = CloudDispatch.VoxelScreenRect;
+#	endif
 
 // Both integrals represent the same full-resolution checkerboard pixel.
 // Composite before the shared temporal reconstruction, without spatial upsampling.

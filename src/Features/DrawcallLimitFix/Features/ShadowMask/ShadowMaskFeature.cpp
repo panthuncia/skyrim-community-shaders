@@ -1,10 +1,9 @@
-// Shadow mask: the engine's shadow mask passes drawn by the render graph (CS_ORG_SHADOW_MASK=1, default off).
+// Shadow mask: the engine's shadow mask passes drawn by the render graph in graph mode.
 // The engine side is ShadowMaskCapture.cpp and the graph side ShadowMaskDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
-#include "RenderGraph/Switches.h"
 
 #include <algorithm>
 #include <array>
@@ -18,11 +17,8 @@ namespace DCLF::Features::ShadowMask
 		{
 			if (!Enabled())
 				return;
-			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
-			ShadowMaskDraws::Reserve();
 			InstallHooks();
-			logger::info("[DCLF] shadow mask: on (CS_ORG_SHADOW_MASK=1): the shadow masks are drawn at the EngineDraws anchor (world {}, menu scenes {})",
-				TakesView(View::World) ? "the graph's" : "the engine's", TakesView(View::Menu) ? "the graph's" : "the engine's");
+			logger::info("[DCLF] shadow mask: on (graph mode): the shadow masks are drawn at the EngineDraws anchor (world and menu scenes)");
 		}
 
 		std::string Status()
@@ -36,21 +32,9 @@ namespace DCLF::Features::ShadowMask
 		return a_view == View::Menu ? "menu" : "world";
 	}
 
-	bool TakesView(View a_view)
-	{
-		static const std::array<bool, static_cast<std::size_t>(View::Count)> taken = [] {
-			const auto views = Switches::List("CS_ORG_SHADOW_MASK_VIEWS");
-			if (views.empty())
-				return std::array<bool, static_cast<std::size_t>(View::Count)>{ true, true };
-			const auto named = [&](const char* a_view) { return std::ranges::find(views, a_view) != views.end(); };
-			return std::array<bool, static_cast<std::size_t>(View::Count)>{ named("world"), named("menu") };
-		}();
-		return a_view < View::Count && taken[static_cast<std::size_t>(a_view)];
-	}
-
 	bool Enabled()
 	{
-		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
+		static const bool enabled = ::RenderGraph::Engine::GraphMode();
 		return enabled;
 	}
 

@@ -594,13 +594,11 @@ bool ScreenshotFeature::IsInMenu() const
 void ScreenshotFeature::PostPostLoad()
 {
 	ApplyVanillaScreenshotSetting();
-	ORGScreenshot::Reserve();
 }
 
 void ScreenshotFeature::SetupResources()
 {
-	if (ORGScreenshot::Requested())
-		(void)ORGScreenshot::Get().Setup();
+	ORGScreenshot::Get().Setup();
 }
 
 void ScreenshotFeature::ApplyVanillaScreenshotSetting()
@@ -1143,7 +1141,7 @@ void ScreenshotFeature::Capture()
 	screenshot.copyToClipboard = copyToClipboard && captureOutputPath.empty();
 	screenshot.notify = captureOutputPath.empty();
 
-	// The render graph's readback (CS_ORG_SCREENSHOT=1): the whole source is copied, and the worker crops it.
+	// The render graph's readback, in graph mode: the whole source is copied, and the worker crops it.
 	if (ORGScreenshot::Get().IsActive()) {
 		screenshot.cropX = copyX;
 		screenshot.cropY = copyY;

@@ -10,8 +10,8 @@
  * Edition\SKSE\CommunityShaders-DCLF.ini` (a flat `NAME=value` file in the directory CS writes its log to).
  *
  * The file exists because the game does not reliably inherit the environment of whatever started it: Mod Organizer 2 hands the
- * game its own environment block, so switches exported by a launcher script never arrive. Drawcall Limit Fix keeps the registry
- * of its own switches (its Runtime/Switches.h); other code reads a switch by name here, and caches what it reads.
+ * game its own environment block, so switches exported by a launcher script never arrive. Every switch is a row of the switch
+ * table (src/Testing/SwitchRegistry.cpp). Code reads a switch by name here, and caches what it reads.
  */
 namespace Util::SwitchFile
 {

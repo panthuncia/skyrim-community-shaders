@@ -14,8 +14,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -32,7 +32,6 @@
 #include <Tracy/Tracy.hpp>
 
 #include <OpenRenderGraph/GraphHost.h>
-#include <ORGModuleServices/PipelineService.h>
 #include <rhi_helpers.h>
 
 #include <algorithm>
@@ -43,6 +42,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesImpl.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
@@ -146,9 +146,10 @@ namespace DCLF
 						 "themselves, and only plain indirect draws are recorded");
 		deviceGenerated = indirect.pipelineSets && indirect.indexBufferArguments && indirect.maxPipelineSetCount >= kMaxPipelines;
 		gpuDriven = indirect.countedDraws;
-		// A shadow view whose rasterizer state turns depth clipping off draws with depth clamped.
+		// A shadow view whose rasterizer state turns depth clipping off draws with depth clamped. A device without it can't run DCLF.
 		::FixedFunctionFeatureInfo fixedFunction{};
-		depthClipDisable = device.QueryFeatureInfo(&fixedFunction.header) == rhi::Result::Ok && fixedFunction.depthClipDisable;
+		if (device.QueryFeatureInfo(&fixedFunction.header) != rhi::Result::Ok || !fixedFunction.depthClipDisable)
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the device has no depth clamp (depthClipDisable), which the shadow views need");
 		if (!gpuDriven)
 			logger::warn("[DCLF] Counted indirect draws unavailable (drawIndirectCount): every cell draws CPU-driven");
 		else if (!deviceGenerated)
@@ -299,11 +300,6 @@ namespace DCLF
 		return Enabled() && impl->deviceGenerated;
 	}
 
-	std::size_t DrawPipelines::BuildsInFlight() const
-	{
-		return impl->service.InFlightCount();
-	}
-
 	bool DrawPipelines::GpuDriven() const
 	{
 		return Enabled() && impl->gpuDriven;
@@ -314,24 +310,25 @@ namespace DCLF
 		return impl->deviceGenerated;
 	}
 
-	void DrawPipelines::SetTargetFormats(const TargetFormats& a_formats)
+	void DrawPipelines::InitTargetFormats(const TargetFormats& a_formats)
 	{
-		// A draw with nothing bound, seen at shutdown, is not the main pass.
-		if (a_formats == targets || a_formats.colorCount == 0 || a_formats.depth == DXGI_FORMAT_UNKNOWN)
-			return;
+		auto describe = [](const TargetFormats& a_formats) {
+			std::string text;
+			for (std::uint32_t i = 0; i < a_formats.colorCount; ++i)
+				text += fmt::format("{} ", static_cast<int>(a_formats.colors[i]));
+			return text + fmt::format("depth {}", static_cast<int>(a_formats.depth));
+		};
+		if (a_formats.colorCount == 0 || a_formats.depth == DXGI_FORMAT_UNKNOWN)
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the main pass's declared target formats are incomplete ({})", describe(a_formats)));
+		// D3D11 mode runs CS's setup again after a resize. The formats are the same then, so that call does nothing.
 		if (HasTargetFormats()) {
-			auto describe = [](const TargetFormats& a_formats) {
-				std::string text;
-				for (std::uint32_t i = 0; i < a_formats.colorCount; ++i)
-					text += fmt::format("{} ", static_cast<int>(a_formats.colors[i]));
-				return text + fmt::format("depth {}", static_cast<int>(a_formats.depth));
-			};
-			// Until the frame's catalog catches up, GetIndirectState and CatalogFamilyPipelines give none.
-			logger::info("[DCLF] Main pass targets changed ({} -> {}); the indirect pipelines and tree LOD's are built again", describe(targets), describe(a_formats));
-			++stats.targetChanges;
-			++generation;
+			if (!(a_formats == targets))
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the main pass's target formats changed ({} -> {}); they are fixed for the session",
+					describe(targets), describe(a_formats)));
+			return;
 		}
 		targets = a_formats;
+		logger::info("[DCLF] Main pass target formats: {}", describe(targets));
 		if (Enabled())
 			impl->PostInput(*this);
 	}
@@ -399,13 +396,9 @@ namespace DCLF
 		auto& l = lane;
 		auto& s = l.shadow;
 		auto& f = l.forward;
-		// New targets restart the main set and families, a new shadow format the shadow set, new forward targets the forward pipelines.
+		// The main targets and the shadow format are set once at setup. New forward targets restart the forward pipelines.
 		bool inputsChanged = false;
 		if (auto input = inputSlot.Take()) {
-			if (l.input && l.input->targets.colorCount != 0 && !(l.input->targets == input->targets))
-				RecreateMainSet(l.input->targets, input->targets);
-			if (l.input && l.input->shadowFormat != DXGI_FORMAT_UNKNOWN && input->shadowFormat != l.input->shadowFormat)
-				RecreateShadowSet(l.input->shadowFormat, input->shadowFormat);
 			for (std::size_t v = 0; l.input && v < Extensions::kEngineViews; ++v)
 				if (l.input->viewTargets[v].colour != DXGI_FORMAT_UNKNOWN && !(l.input->viewTargets[v] == input->viewTargets[v])) {
 					RecreateForward(l.input->viewTargets[v], input->viewTargets[v]);
@@ -415,9 +408,9 @@ namespace DCLF
 				l.refraction.Reset();
 			l.input = std::shared_ptr<const FrameInput>(std::move(input));
 			inputsChanged = true;
-			l.dirty = true;  // the catalog names the targets' generation, the shadow format and the forward targets
+			l.dirty = true;  // the catalog names the shadow format and the forward targets
 		}
-		// Each key once. The lane keeps them and rebuilds after a target or format change.
+		// Each key once. The lane keeps them.
 		completions->requests.Drain([&](LightingRequest&& a_request) {
 			if (l.asked.try_emplace(a_request.key, a_request.slot).second)
 				TryRequest(a_request.key);
@@ -471,9 +464,6 @@ namespace DCLF
 		AdmitLane();
 		AdmitShadow();
 		AdmitFamiliesAndForward();
-		// Displaced payloads retire at once, because every payload a recording may use is held by the lane's sets and catalogs, not the service.
-		service.PublishReady(++l.servicePass);
-		service.Retire(l.servicePass);
 		if (l.dirty)
 			PublishCatalog();
 	}
@@ -520,7 +510,7 @@ namespace DCLF
 			return;
 		l.registryGeneration = registryGeneration;
 		const auto swapped = [](const std::shared_ptr<org::services::LivePipelineSlot>& a_slot, const org::services::PipelinePayload& a_payload) {
-			return a_slot && a_slot->Peek() != a_payload.get();
+			return a_slot && a_slot->Current()->payload != a_payload;
 		};
 		// Reload the main set's payloads, then rebuild its Z groups and state classes, since a new pipeline may now defer depth or share a depth pipeline.
 		std::uint32_t main = 0, shadow = 0, others = 0;
@@ -586,7 +576,6 @@ namespace DCLF
 			catalog->entries.emplace(key, out);
 		}
 		catalog->generation = l.generation;
-		catalog->targetsGeneration = l.input ? l.input->targetsGeneration : 0;
 		catalog->revision = ++l.revision;
 		// Published only grows within a generation, so this covers every index handed out.
 		catalog->setVersion = l.versions.published.load();

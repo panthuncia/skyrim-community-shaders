@@ -1,3 +1,7 @@
+// Dual-target (Common/OrgResources.hlsli). The flare shaders share one push block: these lists, and planning.cs.hlsl's.
+#include "PostProcessing/PhysicalLensFlare/resources.hlsli"
+ORG_PUSH_BLOCK(PHYSICAL_LENS_OPTICS_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_EXPOSURE_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_FLARE_RESOURCES(ORG_HANDLE)
+		PHYSICAL_LENS_FLARE_PUPIL_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_PLANNING_RESOURCES(ORG_HANDLE))
 #include "PostProcessing/PhysicalLensFlare/optics.hlsli"
 #ifdef PHYSICAL_LENS_AREA_LAYERS
 #	include "PostProcessing/PhysicalLensFlare/area.hlsli"
@@ -7,19 +11,13 @@
 // Tile-local moments and a weighted central-moment merge avoid catastrophic
 // cancellation for tiny emitters near the edge of a 4K frame.
 #include "PostProcessing/PhysicalLensFlare/exposure.hlsli"
-Texture2D<float4> Scene : register(t0);
-StructuredBuffer<Source> Sources : register(t1);
-RWStructuredBuffer<Source> Candidates : register(u0);
-RWStructuredBuffer<Source> Selected : register(u1);
-// Before selection: lit count, regional mean, two component roots.
+// RegionData, before selection: lit count, regional mean, two component roots.
 // After selection: threshold, regional mean, selected base/excess source + 1.
-RWStructuredBuffer<float4> RegionData : register(u4);
-RWStructuredBuffer<float4> OutRays : register(u1);
-RWStructuredBuffer<Bundle> OutBundles : register(u4);
-RWStructuredBuffer<Job> OutJobs : register(u2);
-RWByteAddressBuffer Arguments : register(u3);
-StructuredBuffer<Job> Jobs : register(t3);
+PHYSICAL_LENS_FLARE_RESOURCES(ORG_RESOURCE)
 #ifdef PHYSICAL_LENS_COMPACT_BEAMS
+#	if defined(CS_ORG_BINDLESS)
+#		error PHYSICAL_LENS_COMPACT_BEAMS has no ORG build
+#	endif
 RWStructuredBuffer<uint> OutRasterQuads : register(u5);
 RWByteAddressBuffer RasterArguments : register(u3);
 groupshared uint RasterFirst, RasterCount, RasterQuadStart;
@@ -34,9 +32,7 @@ groupshared float PilotWeights[49];
 groupshared float4 PilotGeometry[49];
 groupshared float4 BeamStatistics[64];
 groupshared float2 PupilPDF[8];
-StructuredBuffer<float2> PupilCoordinates : register(t4);
-RWStructuredBuffer<float2> OutPupilCoordinates : register(u4);
-StructuredBuffer<float4> TracedRays : register(t0);
+PHYSICAL_LENS_FLARE_PUPIL_RESOURCES(ORG_RESOURCE)
 float2 PupilQuantile(float2 q);
 groupshared float3 Colors[64];
 groupshared float3 Moments[64];

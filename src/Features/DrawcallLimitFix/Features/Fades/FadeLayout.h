@@ -12,7 +12,7 @@ namespace DCLF::Draws
 	struct FadeStateConstants
 	{
 		std::uint32_t rootsIndex = 0, statesIndex = 0, frameIndex = 0;
-		std::uint32_t latchIndex = 0, latchOffset = 0, logIndex = 0;
+		std::uint32_t latchIndex = 0, latchOffset = 0, reservedLog = 0;
 		std::uint32_t outIndices[2]{};        // indexed by the scene frame's parity
 		std::uint32_t reservedProgramsWord = 0;  // unused, the programs come from the depth latch
 		std::uint32_t rootProgramsIndex = 0;  // StructuredBuffer<uint>, one program per root

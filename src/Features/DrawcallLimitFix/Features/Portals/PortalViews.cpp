@@ -14,8 +14,6 @@
 #include "Features/DrawcallLimitFix/Features/Portals/PortalShapes.h"
 #include "Features/DrawcallLimitFix/Features/Portals/RoomVisibility.h"
 
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Features/Portals/Portals.h"
 #include <Tracy/Tracy.hpp>
 #include <algorithm>
@@ -32,9 +30,6 @@ namespace DCLF
 	{
 		using namespace Engine;
 		using namespace PortalShapes;
-
-		// BSParabolicCullingProcess::TestBaseVisibility2: a shadow light room process's portal test (vfunc 0xD8).
-		constexpr Engine::Offset kParabolicPortalTest{ { 108607 }, { 101604 } };
 
 		/** @brief The ceiling as the box silhouette takes it: cvttss2si, then up by one unless exact or negative (INT_MIN saturates). */
 		std::int32_t Ceil(float a_value)
@@ -254,7 +249,6 @@ namespace DCLF
 		set = PortalPlanes(a_portal, eye);
 		set.mask = std::abs(((p[1] * eye.y + p[0] * eye.x) + p[2] * eye.z) - p[3]) <= 5.0f ? 0u : 0x3Fu;
 		++a_program.freePlane;
-		++programCounts.portals;
 	}
 
 	void PortalViews::AddPlane(Program& a_program, const void* a_plane)
@@ -297,7 +291,6 @@ namespace DCLF
 				a_program.sets[s + 3] = PortalPlanes(other, eye);
 				a_program.sets[s + 3].mask &= ~(links[1] ? 0x08u : 0x10u);
 				a_program.freePlane += 4;
-				programCounts.planes += 2;
 				return;
 			}
 		}
@@ -305,7 +298,6 @@ namespace DCLF
 		EmitTest(a_program, kOccluderTest, s);
 		Grow(a_program, s) = PortalPlanes(a_plane, eye);
 		++a_program.freePlane;
-		++programCounts.planes;
 	}
 
 	bool PortalViews::AddBox(Program& a_program, const void* a_box)
@@ -329,7 +321,6 @@ namespace DCLF
 			ops[n++].word = s + 1;
 			ops[n++].word = kClose;
 			a_program.freePlane += 2;
-			++programCounts.boxes;
 		}
 		return ok;
 	}
@@ -359,46 +350,13 @@ namespace DCLF
 			return;
 		// An untested start-room plane is judged as Build judges graph planes, not by WithinFrustumDistFirst. That function has a rectangle
 		// bug that accepts planes wholly outside the view (skyrim-engine-notes.md).
-		if (state == 0 && !(engineWalkTest ? WithinFrustumDistFirst(a_occluder, camera.view, camera.eye) : PlaneJudged(a_occluder)))
+		if (state == 0 && !PlaneJudged(a_occluder))
 			return;
 		if (a_needOpen) {
 			Emit(a_program, kAnd);
 			a_needOpen = false;
 		}
 		AddPlane(a_program, a_occluder);
-	}
-
-	PortalViews::Program PortalViews::UnboundWithEngineStates(const void* a_graph)
-	{
-		const auto savedStates = states;
-		const auto savedBoxes = boxes;
-		const auto savedFlags = edgeFlags;
-		const auto savedCounts = programCounts;
-		ForList(a_graph, kGraphOccluders, [&](const void* a_occluder) {
-			if (!a_occluder)
-				return;
-			states[a_occluder] = At<std::uint32_t>(a_occluder, 0x40);
-			// A plane the engine's other tests judged keeps the edge flags they wrote (+0xF0). The walk takes it untested.
-			if (IsPlane(a_occluder) && states[a_occluder] != 0)
-				std::memcpy(edgeFlags[a_occluder].data(), reinterpret_cast<const std::byte*>(a_occluder) + 0xF0, 4);
-		});
-		Program program;
-		Reset(program);
-		bool needOpen = true;
-		engineWalkTest = true;
-		ForList(a_graph, kGraphOccluders, [&](const void* a_occluder) {
-			if (a_occluder)
-				AddOccluderTop(program, a_occluder, needOpen);
-		});
-		engineWalkTest = false;
-		if (!needOpen)
-			Emit(program, kClose);
-		Finalize(program);
-		states = savedStates;
-		boxes = savedBoxes;
-		edgeFlags = savedFlags;
-		programCounts = savedCounts;
-		return program;
 	}
 
 	void PortalViews::AddOccluderRoom(Program& a_program, const void* a_occluder, const Program* a_parent)
@@ -1011,7 +969,7 @@ namespace DCLF
 		// FUN_1401a43c0: every room holding the camera's near-plane centre walked from (only the first as the first), else unbound space.
 		DCLF_ZONE("CS.DCLF.PortalViews");
 		frame.valid = false;
-		frame.sceneFrame = Scene::FrameView::Get().GetFrame();
+		frame.sceneFrame = Scene::FrameView::Get().SceneStep();
 		// Always encode on exit, even with no programs, so FadeStateCS, BuildDraws and the checks read this frame's words.
 		struct EncodeOnExit
 		{
@@ -1024,7 +982,6 @@ namespace DCLF
 		const void* graph = sceneNode ? At<const void*>(sceneNode, kSceneNodeGraph) : nullptr;
 		frame.graph = graph;
 		if (!cam || !graph) {
-			++skipped;
 			return;
 		}
 		if (graph != edgeGraph) {
@@ -1095,8 +1052,6 @@ namespace DCLF
 		Finalize(frame.unbound);
 		frame.valid = true;
 		visibleUnbound.store(frame.visibleUnbound, std::memory_order_release);
-		++built;
-		Diagnostics::Notify<Diagnostics::EnginePoint::PortalWalkBuilt>();
 	}
 
 
@@ -1189,11 +1144,10 @@ namespace DCLF
 		std::swap(crossed, lightCrossed);
 		lightEdgeFlags = edgeFlags;
 		std::swap(edgeFlags, lightEdgeFlags);
-		const ProgramCounts saved = std::exchange(programCounts, {});
 		parabolic = &sphere;
 		frame.graph = graph;
 		frame.valid = true;
-		frame.sceneFrame = Scene::FrameView::Get().GetFrame();
+		frame.sceneFrame = Scene::FrameView::Get().SceneStep();
 		frame.roomKeys.clear();
 		frame.rooms.clear();
 		frame.accumulated.clear();
@@ -1230,26 +1184,10 @@ namespace DCLF
 		a_rooms.context = std::move(context);
 		lightFlagsPending = true;
 		parabolic = nullptr;
-		programCounts = saved;
 		std::swap(edgeFlags, lightEdgeFlags);
 		std::swap(crossed, lightCrossed);
 		std::swap(frame, lightFrame);
 		std::swap(camera, light);
-	}
-
-	bool PortalViews::LightProcessAsAssumed(const void* a_roomProcess, std::string& a_why) const
-	{
-		// Plane 0 still takes part in an occlusion plane's WithinFrustumDistFirst (its camera-distance test) with no plane on.
-		const bool planeZero = At<float>(a_roomProcess, 0x3C) == 0.0f && At<float>(a_roomProcess, 0x40) == 0.0f && At<float>(a_roomProcess, 0x44) == 0.0f &&
-		                       At<float>(a_roomProcess, 0x48) == 0.0f;
-		if (At<std::uint32_t>(a_roomProcess, 0x9C) != 0 || !planeZero)
-			return a_why = fmt::format("view mask {:#x}, plane 0 {} {} {} {}", At<std::uint32_t>(a_roomProcess, 0x9C), At<float>(a_roomProcess, 0x3C),
-					   At<float>(a_roomProcess, 0x40), At<float>(a_roomProcess, 0x44), At<float>(a_roomProcess, 0x48)),
-			       false;
-		// The process has no RTTI name, so check its vfunc 0xD8 against TestBaseVisibility2.
-		if (const std::uintptr_t test = (*reinterpret_cast<const std::uintptr_t* const*>(a_roomProcess))[0xD8 / 8]; test != REL::Offset(kParabolicPortalTest).address())
-			return a_why = fmt::format("its vfunc 0xD8 at {:#x}", test - REL::Module::get().base() + 0x140000000), false;
-		return true;
 	}
 
 	void PortalViews::CommitLightWalk()
@@ -1462,13 +1400,5 @@ namespace DCLF
 		// A reader counted here may hold any retired set. With none, nothing can.
 		if (visibleReaders.load(std::memory_order_seq_cst) == 0)
 			visibleRetired.clear();
-	}
-
-	PortalViews::BuildCounts PortalViews::TakeBuildCounts()
-	{
-		BuildCounts c{ built, skipped, programCounts };
-		built = skipped = 0;
-		programCounts = {};
-		return c;
 	}
 }

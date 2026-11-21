@@ -1,15 +1,13 @@
-// LocalLights feature registration: the light selection, the light volumes and the parity checks.
+// LocalLights feature registration: the light selection and the light volumes.
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightContextResources.h"
 #include "Features/DrawcallLimitFix/Features/LocalLights/LocalLights.h"
 #include "Features/DrawcallLimitFix/Features/LocalLights/LocalShadowLights.h"
-#include "Features/DrawcallLimitFix/Features/LocalLights/Diagnostics/LightSelectionParity.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ClassifyInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 #include <cstring>
 
@@ -63,8 +61,6 @@ namespace DCLF::Features::LocalLights
 				.sample = &Sample,
 				.pointLightsActive = &PointLightsActive,
 				.pointLights = &LocalShadowLights::SamplePointLights });
-			if (Diagnostics::Observe().claimsOrScene)
-				Diagnostics::LightSelectionParity::Install();
 		}
 	}
 

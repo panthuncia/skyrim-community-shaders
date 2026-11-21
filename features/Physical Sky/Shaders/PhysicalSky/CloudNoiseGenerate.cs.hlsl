@@ -1,4 +1,6 @@
 #define COMPUTESHADER
+// Dual-target (Common/OrgResources.hlsli). The graph reads the parameters from a latch. All entries share one list.
+#include "Common/OrgResources.hlsli"
 #include "Common/Random.hlsli"
 #include "PhysicalSky/AlligatorNoise.hlsli"
 
@@ -14,20 +16,35 @@ struct NoiseBand
 	float padding;
 };
 
-cbuffer Parameters : register(b1)
-{
-	NoiseBand shape[4];
-	NoiseBand warp[2];
-	uint seed;
-	uint firstSlice;
-	uint mip;
-	float warpCorrelation;
-};
+#define CLOUD_NOISE_FIELDS(M, A) \
+	A(NoiseBand, shape, 4)       \
+	A(NoiseBand, warp, 2)        \
+	M(uint, seed)                \
+	M(uint, firstSlice)          \
+	M(uint, mip)                 \
+	M(float, warpCorrelation)
 
-Texture2D<float4> SourceAdjustment : register(t0);
-Texture2D<float4> PreviousAdjustment : register(t1);
-RWTexture3D<unorm float4> ShapeOutput : register(u0);
-RWTexture2D<unorm float4> AdjustmentOutput : register(u1);
+#define CLOUD_NOISE_RESOURCES(X)                           \
+	X(SRV, Texture2D<float4>, SourceAdjustment, 0)         \
+	X(SRV, Texture2D<float4>, PreviousAdjustment, 1)       \
+	X(SRV, Texture3D<float4>, PreviousShape, 2)            \
+	X(UAV, RWTexture3D<unorm float4>, ShapeOutput, 0)      \
+	X(UAV, RWTexture2D<unorm float4>, AdjustmentOutput, 1) \
+	X(LATCH, CloudNoiseConstants, Parameters, 1)
+ORG_PUSH_BLOCK(CLOUD_NOISE_RESOURCES(ORG_HANDLE))
+
+ORG_GLOBAL_LATCH_BEGIN(CloudNoiseConstants, Parameters, 1)
+CLOUD_NOISE_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(CloudNoiseConstants, Parameters, 1)
+#define ORG_GLOBAL_LATCH Parameters
+CLOUD_NOISE_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+
+ORG_RESOURCE(SRV, Texture2D<float4>, SourceAdjustment, 0)
+ORG_RESOURCE(SRV, Texture2D<float4>, PreviousAdjustment, 1)
+ORG_RESOURCE(SRV, Texture3D<float4>, PreviousShape, 2)
+ORG_RESOURCE(UAV, RWTexture3D<unorm float4>, ShapeOutput, 0)
+ORG_RESOURCE(UAV, RWTexture2D<unorm float4>, AdjustmentOutput, 1)
 
 float3 CellHash(int3 cell, uint period, uint salt)
 {
@@ -146,4 +163,22 @@ float Response(float value, NoiseBand band)
 		[unroll] for (uint x = 0u; x < 2u; ++x)
 			displacement += PreviousAdjustment.Load(int3(min(tid * 2u + uint2(x, y), previousSize - 1u), 0)).gb;
 	AdjustmentOutput[tid] = float4(SourceAdjustment.Load(int3(tid, mip)).r, displacement * 0.25, 1.0);
+}
+
+// One mip of the 3D shape noise, a box filter like D3D11's GenerateMips. The graph has no 3D GenerateMips.
+// PreviousShape is the mip above, ShapeOutput this mip. Each texel averages a 2x2x2 block.
+// Reads clamp to the previous mip's size, so odd sizes work.
+[numthreads(4, 4, 4)] void generateShapeMip(uint3 tid : SV_DispatchThreadID) {
+	uint3 size;
+	ShapeOutput.GetDimensions(size.x, size.y, size.z);
+	if (any(tid >= size))
+		return;
+	uint3 previousSize;
+	PreviousShape.GetDimensions(previousSize.x, previousSize.y, previousSize.z);
+	float4 sum = 0.0;
+	[unroll] for (uint z = 0u; z < 2u; ++z)
+		[unroll] for (uint y = 0u; y < 2u; ++y)
+			[unroll] for (uint x = 0u; x < 2u; ++x)
+				sum += PreviousShape.Load(int4(min(tid * 2u + uint3(x, y, z), previousSize - 1u), 0));
+	ShapeOutput[tid] = sum * 0.125;
 }

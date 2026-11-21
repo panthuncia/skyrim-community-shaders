@@ -161,8 +161,6 @@ namespace DCLF::Features::Particles
 		std::uint32_t listedRun = 0;
 		std::vector<std::uint16_t> order;
 		std::vector<float> depth;
-		// Read by the observer on any thread.
-		std::atomic<std::uint32_t> expandedRun{ 0 };
 		// How many runs in a row the same snapshot was expanded. A system the engine stopped updating draws from its last state.
 		std::uint64_t expandedSequence = 0;
 		std::uint32_t sameRuns = 0;
@@ -390,7 +388,7 @@ namespace DCLF::Features::Particles
 				record->writing.store(false, std::memory_order_release);
 				captures.fetch_add(1, std::memory_order_relaxed);
 				// The move event lets the scene pass's light path take the system only when it moves.
-				if (Extensions::GeometryTypeOn(SceneToggles(), static_cast<std::uint8_t>(RE::BSGeometry::Type::kParticles))) {
+				if (Extensions::GeometryTypeOn(static_cast<std::uint8_t>(RE::BSGeometry::Type::kParticles))) {
 					Extensions::PushReservedMove(moveWriter, &a_system, Api::MoveReach::ScenePass);
 				}
 				// The update moves the nearest BSOrderedNode's bound, which the blended leaves beside it sort by. Fires and waterfalls rely on this.
@@ -601,7 +599,6 @@ namespace DCLF::Features::Particles
 		PlacementOf(slot, a_out);
 		a_out.particles = count;
 		a_out.snapshot = true;
-		a_record.expandedRun.store(runs.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 		a_record.sameRuns = slot.sequence == a_record.expandedSequence ? a_record.sameRuns + 1 : 0;
 		a_record.expandedSequence = slot.sequence;
 		if (a_record.sameRuns == kFrozenRuns)
@@ -652,16 +649,6 @@ namespace DCLF::Features::Particles
 		}
 		followed.store(static_cast<std::uint32_t>(records.size()), std::memory_order_relaxed);
 		runs.store(run, std::memory_order_relaxed);
-	}
-
-	bool ParticleSnapshots::Covered(const RE::BSGeometry* a_geometry, bool& a_followed) const
-	{
-		const Table* table = PinTable();
-		const Record* record = table ? table->Find(a_geometry) : nullptr;
-		const std::uint32_t expanded = record ? record->expandedRun.load(std::memory_order_relaxed) : 0u;
-		writersInside.fetch_sub(1, std::memory_order_seq_cst);
-		a_followed = record != nullptr;
-		return expanded && runs.load(std::memory_order_relaxed) - expanded <= kCoveredRuns;
 	}
 
 	ParticleSnapshots::Counters ParticleSnapshots::Take()

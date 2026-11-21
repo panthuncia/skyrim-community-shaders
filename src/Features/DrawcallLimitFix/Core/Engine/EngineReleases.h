@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 #include <atomic>
 #include <cstdint>
@@ -13,8 +13,8 @@ namespace DCLF::EngineReleases
 	 * @brief Engine references let go off the render thread, released on it at Present. Dropping the last reference to a scene graph
 	 * object runs the engine's destructors, which belong on its main thread.
 	 */
-	inline EventQueue<RE::NiPointer<RE::NiRefObject>> queue;
-	inline EventQueue<std::shared_ptr<void>> owners;
+	inline RenderGraph::Frame::EventQueue<RE::NiPointer<RE::NiRefObject>> queue;
+	inline RenderGraph::Frame::EventQueue<std::shared_ptr<void>> owners;
 
 	// Scene work references go back through the retirement chain. A batch arrives here once no publication up to its node lives.
 	// A reader that keeps only a publication's data, not its node, asks Alive. These are the newest publications pushed and released.

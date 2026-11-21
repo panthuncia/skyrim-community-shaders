@@ -4,7 +4,7 @@
 //                   [--shadow-mask <slot>] [--samplers <count>] [--lazy]
 //
 // rewrite: the pulled build's source (DCLF_PULLED), as ShaderPrograms makes it: PulledSource::Rewrite with the options a
-// CS_DCLF_STAGE_DUMP "options" line names; --lazy (CS_DCLF_LAZY_ROWS) takes the eager names from every .hlsl and .hlsli under --shaders,
+// CS_DCLF_STAGE_DUMP "options" line names; --lazy (the game's default) takes the eager names from every .hlsl and .hlsli under --shaders,
 // as RenderGraphRuntime::ShaderSourceFiles lists them.
 //
 //   dclf-shadertool d3d12 <preprocessed.hlsl> <out.hlsl> --pixel|--vertex [--shadow]

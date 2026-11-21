@@ -1,5 +1,5 @@
 # The green-streak repro (green-whiterun-off.env): DXVK guest mode, Whiterun at 13:00 in clear weather, one shot of the bridge.
-# Score the shot with tools/cs-test/greenscore.py. ORG_PERSISTENT_ALIAS_SHARE_EPOCHS=1 put the streaks back before the alias fix.
+# Score the shot with tools/cs-test/greenscore.py.
 extends = ["guest"]
 
 [run]

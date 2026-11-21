@@ -1,3 +1,4 @@
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 
 #include <DirectXTex.h>
@@ -153,11 +154,11 @@ namespace RenderGraph::Engine::Textures
 
 	void InstallHooks()
 	{
-		if (!Requested())
+		if (!Engine::GraphMode())
 			return;
 		stl::detour_thunk<LoadDDS>(REL::RelocationID(75721, 77533));
 		stl::detour_thunk<CreateD3DResources>(REL::RelocationID(75724, 77538));
 		stl::detour_thunk<CreateTexture2D>(REL::RelocationID(75511, 77303));
-		logger::info("[ORG] engine textures: on (CS_ORG_ENGINE_TEXTURES=1); file and DEFAULT textures are made on render graph images");
+		logger::info("[ORG] engine textures: on; file and DEFAULT textures are made on render graph images");
 	}
 }

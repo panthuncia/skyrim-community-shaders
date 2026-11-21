@@ -1,6 +1,7 @@
 // The node capture contributions' entries.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/NodeCaptures.h"
+#include "RenderGraph/Fatal.h"
 
 #include <vector>
 
@@ -16,10 +17,10 @@ namespace DCLF::Extensions
 	{
 		const void* rtti = a_capture.rtti ? a_capture.rtti() : nullptr;
 		if (a_capture.name.empty() || !rtti || !a_capture.capture)
-			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete node capture contribution", a_feature));
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete node capture contribution", a_feature));
 		for (const auto& entry : nodeCaptures)
 			if (entry.rtti == rtti)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s node capture {} names the class node capture {} has", a_feature, a_capture.name, entry.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s node capture {} names the class node capture {} has", a_feature, a_capture.name, entry.name));
 		nodeCaptures.push_back({ std::string(a_capture.name), rtti, a_capture.capture });
 	}
 

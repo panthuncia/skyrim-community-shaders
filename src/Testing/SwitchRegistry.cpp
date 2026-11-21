@@ -1,10 +1,10 @@
 #include "Testing/SwitchRegistry.h"
 
+#include "Feature.h"
+#include "Testing/Internal.h"
 #include "Utils/SwitchFile.h"
 
-#if defined(CS_HAS_DCLF)
-#	include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
-#endif
+#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include <algorithm>
 #include <fstream>
@@ -15,238 +15,185 @@ namespace Testing::SwitchRegistry
 {
 	namespace
 	{
-		// The switches outside DCLF's registry. No table of them exists in the code: these are the names the sources read.
-		// A name read at run time that is in no table is logged (NoteRead), so a new switch shows up.
-		constexpr std::string_view kOther[] = {
-			"BASICRHI_BARRIER_PROBE",
-			"BASICRHI_BARRIER_PROBE_FILE",
-			"BASICRHI_COMMAND_POOL_PROBE",
-			"BASICRHI_COMMAND_POOL_SITES",
-			"BASICRHI_COMMAND_POOL_PROBE_SHARED",
-			"BASICRHI_D3D12_RESET_TRACE",
-			"BASICRHI_DEVICE_MEMORY_REPORT",
-			"BASICRHI_DX12_FULL_BARRIERS",
-			"BASICRHI_DX12_TEST_NO_DEPTH",
-			"BASICRHI_HEAP_BIND_REPEAT",
-			"BASICRHI_MEMORY_DUMP",
-			"BASICRHI_PAD_LISTS",
-			"BASICRHI_RELEASE_COMMAND_MEMORY",
-			"BASICRHI_SHADER_API_D3D12",
-			"BASICRHI_SHADER_API_VULKAN",
-			"BASICRHI_SPLIT_SUBMITS",
-			"BASICRHI_VK_BINDING",
-			"BASICRHI_VK_CRASH_MARKERS",
-			"BASICRHI_VK_DUMP_ISA",
-			"BASICRHI_VK_DUMP_LOWERED",
-			"BASICRHI_VK_LIMITS",
-			"BASICRHI_VK_MAX_DESCRIPTORS",
-			"BASICRHI_VK_VALIDATE_LOWERING",
-			"CS_AB_PROBE",
-			"CS_DCLF_MAP_HOLD",
-			"CS_DCLF_SITE_STATS",
-			"CS_DISABLE_FEATURES",
-			"CS_EDITOR",
-			"CS_ENABLE_FEATURES",
-			"CS_FFT",
-			"CS_FG_DISPLAY_SUSPEND",
-			"CS_FORCE_FSR_FG",
-			"CS_FRAME_LATENCY",
-			"CS_FSRFG_QDEPTH",
-			"CS_FXC_REQUEST_DUMP",
-			"CS_GAME_GAMMA",
-			"CS_GPA",
-			"CS_GPA_DIR",
-			"CS_GPU_AMD",
-			"CS_GPU_CRASH_ANALYSIS",
-			"CS_GPU_EVENT_STATS",
-			"CS_GPU_EVENT_TIMERS",
-			"CS_GPU_IDLE_MIN_GAP_US",
-			"CS_GPU_IDLE_SOURCE",
-			"CS_GPU_IDLE_TRACE",
-			"CS_GPU_LOAD",
-			"CS_GPU_OP_PROBE",
-			"CS_GPU_TIMERS",
-			"CS_RHI_CENSUS",
-			"CS_SUBMIT_TRACE",
-			"CS_GRASS_COLLISION_STATS",
-			"CS_HAIR",
-			"CS_HANG_WATCHDOG",
-			"CS_NATIVE_D3D11",
-			"CS_NO_D3DX_UPGRADE",
-			"CS_NO_PASS_PREFETCH",
-			"CS_NVPERF_BASELINE",
-			"CS_NVPERF_HALF_WIDTH",
-			"CS_NVPERF_LABEL",
-			"CS_NVPERF_MAX_REPEATS",
-			"CS_NVPERF_MAX_SAMPLES",
-			"CS_NVPERF_MIN_SAMPLES",
-			"CS_NVPERF_REPEATS",
-			"CS_NVPERF_SAMPLES",
-			"CS_NVPERF_START_FRAME",
-			"CS_NVPERF_TEMPLATE",
-			"CS_ORG",
-			"CS_ORG_ADAPT_READBACK",
-			"CS_ORG_ALIAS_LOG",
-			"CS_ORG_ANCHOR_SELFTEST",
-			"CS_ORG_BINK_SHOT",
-			"CS_ORG_CENSUS_FRAMES",
-			"CS_ORG_CENSUS_TOP",
-			"CS_ORG_COALESCE_SUBMITS",
-			"CS_ORG_COMPUTE_QUEUE",
-			"CS_ORG_COPY_QUEUE",
-			"CS_ORG_CRASH_MARKERS",
-			"CS_ORG_D3D11_METER",
-			"CS_ORG_D3D12_DEBUG",
-			"CS_ORG_D3D12_SDK",
-			"CS_ORG_D3D12_SDK_PATH",
-			"CS_ORG_D3D12_SELFTEST",
-			"CS_ORG_D3D12_SELFTEST_HDR",
-			"CS_ORG_DEFERRED_CLEARS",
-			"CS_ORG_DETAILED_CHECKPOINTS",
-			"CS_ORG_ENGINE_CONSTANTS_CHECK",
-			"CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES",
-			"CS_ORG_ENGINE_FLUSH_LATCH_KEEP",
-			"CS_ORG_ENGINE_FLUSH_LATCH_UNBIND",
-			"CS_ORG_ENGINE_TARGETS_DCLF",
-			"CS_ORG_EPOCH_STATS",
-			"CS_ORG_FRAME_ARENA",
-			"CS_ORG_FRAME_SEQUENCE",
-			"CS_ORG_GPU_GATES",
-			"CS_ORG_GRAPHRES_SELFTEST",
-			"CS_ORG_GRAPH_RESOURCES_FRAME",
-			"CS_ORG_IMAGESPACE_EFFECTS",
-			"CS_ORG_IMAGESPACE_LOG",
-			"CS_ORG_IMAGE_DUPLICATE_CHECK",
-			"CS_ORG_KEEP_GATED",
-			"CS_ORG_KEEP_LIVE",
-			"CS_ORG_LLF_PARITY",
-			"CS_ORG_MERGE_HANDOFFS",
-			"CS_ORG_MERGE_TICKETS",
-			"CS_ORG_NATIVE",
-			"CS_ORG_NATIVE_BACKEND",
-			"CS_ORG_NATIVE_OP_CENSUS",
-			"CS_ORG_NATIVE_PRESENT_PROBE",
-			"CS_ORG_NATIVE_SYNC_PRESENT",
-			"CS_ORG_NATIVE_VALIDATION",
-			"CS_ORG_NATIVE_WRITE_CENSUS",
-			"CS_ORG_OCCLUSION_QUERY_LOG",
-			"CS_ORG_PINNED_IMPORTS",
-			"CS_ORG_QUEUE_PRESENT",
-			"CS_ORG_QUEUE_UPLOADS",
-			"CS_ORG_SCOPED_FRAME_WAIT",
-			"CS_ORG_UPLOADS_WITH_BATCHES",
-			"CS_ORG_SHOT_TARGET",
-			"CS_ORG_RECIPE_FATAL",
-			"CS_ORG_MISMATCH_FATAL",
-			"CS_ORG_RAW_ACCESS_CHECK",
-			"CS_ORG_RECORDING_TIMESTAMPS",
-			"CS_ORG_RESIDUE_CENSUS",
-			"CS_ORG_RESIDUE_CENSUS_FRAMES",
-			"CS_ORG_RESIDUE_CENSUS_TOP",
-			"CS_ORG_RESTING_LAYOUTS",
-			"CS_ORG_RT_SAMPLE",
-			"CS_ORG_SHADOW_MASK_VIEWS",
-			"CS_ORG_SHARED_CONSTANTS_CHECK",
-			"CS_ORG_SSGI_DEBUG",
-			"CS_ORG_SUBMIT_THREAD",
-			"CS_ORG_TEST_CONTRIBUTOR",
-			"CS_ORG_TEST_CONTRIBUTOR_EPOCH",
-			"CS_ORG_TEST_CONTRIBUTOR_FRAMES",
-			"CS_ORG_TICKETS_AHEAD",
-			"CS_ORG_TRIPWIRE_LOG",
-			"CS_ORG_TRIPWIRE_LOG_INTERVAL",
-			"CS_ORG_TRIPWIRE_SELFTEST",
-			"CS_ORG_TRIPWIRE_WATCH_ALL",
-			"CS_ORG_UPLOAD_QUEUE",
-			"CS_ORG_VALIDATE_UNDECLARED",
-			"CS_ORG_VALIDATE_UNDECLARED_LOG",
-			"CS_ORG_VRAM_SOURCE",
-			"CS_ORG_WATER_PARTS",
-			"CS_PASS_ROUNDS",
-			"CS_PASS_SAMPLE",
-			"CS_PASS_SKIP",
-			"CS_PROFILER_LOG",
-			"CS_RENDERDOC_DLL",
-			"CS_RENDERDOC_REF_ALL",
-			"CS_SHADER_DXC",
-			"CS_SKIN",
-			"CS_SL_VERBOSE",
-			"CS_STREAMLINE_DLSS",
-			"CS_TEST_CRASH",
-			"CS_TEST_HANG",
-			"CS_TEST_LIST_SWITCHES",
-			"CS_TEX_CENSUS",
-			"CS_UPSCALE_UNFOCUSED",
-			"CS_VK_CLIENT_PRIORITY",
-			"CS_VK_DRIVER_TRACE",
-			"CS_VK_PRIORITY",
-			"CS_VK_SPILL",
-			"CS_VRAM_DEBUG",
-			"DXVK_CONFIG",
-			"DXVK_DEBUG",
-			"DXVK_DEFER_TEXTURE_ALLOCATION",
-			"DXVK_DEVICE_MEMORY_REPORT",
-			"DXVK_HDR",
-			"DXVK_HUD",
-			"DXVK_LOG_LEVEL",
-			"DXVK_LOG_PATH",
-			"DXVK_PIPELINE_STATS",
-			"DXVK_SHADER_DUMP_PATH",
-			"DXVK_VIEW_TRACE",
-			"CS_D3D12_SOURCE_DUMP",
-			"CS_TEST_SHADER_DEFINES",
-			"ORG_BLOCK_MIB",
-			"ORG_COMPILE_TRACE_PASSES",
-			"ORG_GENERATE_MIPS_ARRAY",
-			"ORG_GRAPH_REPLAY",
-			"ORG_GRAPH_REPLAY_OUTPUT",
-			"ORG_GRAPH_SEQUENCE",
-			"ORG_PASS_RECORD_CONCURRENCY",
-			"ORG_PERSISTENT_ALIAS_EXCLUDE",
-			"ORG_PERSISTENT_ALIAS_SHARE_EPOCHS",
-			"ORG_PERSISTENT_COPIES_ON_COPY_QUEUE",
-			"ORG_PERSISTENT_DUMP_SLOTS",
-			"ORG_PERSISTENT_FORCE_REALIAS",
-			"ORG_RESOURCE_LIFETIME_TRACE",
-			"ORG_RESOURCE_LIFETIME_TRACE_HOLD_RETIRED",
-			"ORG_SERVICES_TEST_DXC_DIR",
-			"ORG_STATEGRAPH_STALL_DUMP",
-			"ORG_TEST_DEVICE",
-			"ORG_TRACE",
-			"ORG_TRACE_FILE",
-			"ORG_TRACE_RESOURCE",
-			"ORG_TRACE_STANDALONE",
-			"ORG_UPDATE_GOLDEN",
-			"ORG_VALIDATE_ALIAS_ADMISSION",
-			"ORG_VALIDATE_SHARING",
-			"SARP_D3D12_DRED",
-			"SARP_D3D12_GPU_VALIDATION",
-			"SARP_GPU_LIFETIME_TRACE",
-			"VK_INSTANCE_LAYERS",
-			"VK_LAYER_PATH",
-			"VK_LOADER_DEBUG",
-			"VK_LOADER_LAYERS_DISABLE",
-			"VK_LOADER_LAYERS_ENABLE",
+		using enum Type;
+		using enum Kind;
+
+		// Every switch the game reads, in alphabetical order (checked below). DCLF's Core reads its rows through
+		// DCLF::Switch. DCLF's features register their own (DCLF::RegisterSwitch). A name read at run time that is in
+		// neither is logged (NoteRead), so a new switch shows up. A key makes the row a typed cs-test config key.
+		// The game's dump of this table (CS_TEST_LIST_SWITCHES) is cs-test's schema: regenerate it after a change here.
+		constexpr Row kSwitches[] = {
+			{ .name = "BASICRHI_BARRIER_PROBE" },
+			{ .name = "BASICRHI_BARRIER_PROBE_FILE" },
+			{ .name = "BASICRHI_COMMAND_POOL_PROBE" },
+			{ .name = "BASICRHI_COMMAND_POOL_PROBE_SHARED" },
+			{ .name = "BASICRHI_COMMAND_POOL_SITES" },
+			{ .name = "BASICRHI_D3D12_RESET_TRACE" },
+			{ .name = "BASICRHI_DEVICE_MEMORY_REPORT" },
+			{ .name = "BASICRHI_DX12_FULL_BARRIERS" },
+			{ .name = "BASICRHI_DX12_TEST_NO_DEPTH" },
+			{ .name = "BASICRHI_HEAP_BIND_REPEAT" },
+			{ .name = "BASICRHI_MEMORY_DUMP" },
+			{ .name = "BASICRHI_PAD_LISTS" },
+			{ .name = "BASICRHI_RELEASE_COMMAND_MEMORY" },
+			{ .name = "BASICRHI_SPLIT_SUBMITS" },
+			{ .name = "BASICRHI_VK_BINDING" },
+			{ .name = "BASICRHI_VK_CRASH_MARKERS" },
+			{ .name = "BASICRHI_VK_DUMP_ISA" },
+			{ .name = "BASICRHI_VK_DUMP_LOWERED" },
+			{ .name = "BASICRHI_VK_LIMITS" },
+			{ .name = "BASICRHI_VK_MAX_DESCRIPTORS" },
+			{ .name = "BASICRHI_VK_VALIDATE_LOWERING" },
+			{ .name = "CS_AB_PROBE" },
+			{ .name = "CS_D3D12_SOURCE_DUMP" },
+			{ .name = "CS_DCLF", .key = "dclf.enabled", .type = Bool, .defaultValue = "1", .kind = Feature, .description = "0: DCLF does not install" },
+			{ .name = "CS_DCLF_ASYNC_COMPUTE", .type = Bool, .defaultValue = "1", .kind = Feature, .description = "0: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue; unset: on in guest mode, off in native mode (1 turns it on there)" },
+			{ .name = "CS_DCLF_CAPTURE_PARITY", .key = "dclf.capture_parity", .type = Bool, .defaultValue = "0", .kind = Parity, .description = "1: the tables against the engine's own lighting draws (run with CS_DCLF_PARITY_BOTH=1, so the engine draws what DCLF draws)" },
+			{ .name = "CS_DCLF_CPU_BATCH", .kind = Feature, .description = "the CPU pipeline's batch lanes (default 4096, rounded up to a multiple of 8; the live setting's seed: dclf:cpu-batch, the menu)" },
+			{ .name = "CS_DCLF_CPU_RECORD", .kind = Feature, .description = "indirect|serial (default indirect on every vendor): the CPU pipeline's per-frame views as indirect draws the cull jobs write, or direct draws DXVK's CS thread records (live toggle's seed)" },
+			{ .name = "CS_DCLF_CULL", .key = "dclf.cull", .type = Enum, .defaultValue = "occlusion", .choices = "off|frustum|occlusion", .kind = Feature, .description = "off|frustum|occlusion (default): GPU culling, the live toggle's seed" },
+			{ .name = "CS_DCLF_MAP_HOLD" },
+			{ .name = "CS_DCLF_PARITY", .key = "dclf.parity", .type = Bool, .defaultValue = "0", .kind = Parity, .description = "1: set parity (the claims against the engine's registrations, and the visibility words read back after the colour epoch against the CPU's decisions), the kept stores against a rebuild every 60 frames, and the scene mirror against the live objects every frame" },
+			{ .name = "CS_DCLF_PARITY_BOTH", .key = "dclf.parity_both", .type = Bool, .defaultValue = "0", .kind = Parity, .description = "1: nothing is withheld from the engine, which draws everything while DCLF draws its set as well (capture parity compares the two; it double-draws)" },
+			{ .name = "CS_DCLF_PASS_STATS", .key = "dclf.pass_stats", .type = Bool, .defaultValue = "0", .kind = Diagnostic, .description = "1: per-pass counts in the report" },
+			{ .name = "CS_DCLF_PIPELINE", .kind = Feature, .description = "auto (default: exteriors GPU-driven, interiors CPU-driven)|manual|gpu|cpu: the draws culled and recorded on the GPU, or culled on the CPU and recorded as direct draws into DXVK's command buffer; gpu and cpu are manual with both kinds of cell (live toggle's seed)" },
+			{ .name = "CS_DCLF_PLAIN_SNOW_SPARKLE", .key = "dclf.plain_snow_sparkle", .type = Bool, .defaultValue = "1", .kind = Feature, .description = "0: a snow layer whose material is the plain class draws without sparkle instead of the Snow class's default (live toggle's seed)" },
+			{ .name = "CS_DCLF_PLAYER_PARITY", .key = "dclf.player_parity", .type = Bool, .defaultValue = "0", .kind = Parity, .description = "1: the compatibility monitor starts on (the menu switches it live): engine state other plugins change with no hook DCLF sees, by reference and plugin" },
+			{ .name = "CS_DCLF_PROFILE", .type = Bool, .defaultValue = "0", .kind = Diagnostic, .description = "1: scene-phase timings in the report" },
+			{ .name = "CS_DCLF_RELEASE_GUARD", .type = Bool, .defaultValue = "0", .kind = Diagnostic, .description = "1: the engine objects' last releases on DCLF's threads (the scene lane, the pool) counted and named by class (NiRefObject::DeleteThis patched; T6b3e)" },
+			{ .name = "CS_DCLF_SCENE_COPIES", .kind = Feature, .description = "the copies a frame's scene values keep per pool class (FrameValues' rows; default 3, 2 to the frames in flight): a frame's producer reuses the copy the oldest in-flight frame bound, its uploads waiting on the GPU for that frame" },
+			{ .name = "CS_DCLF_SHADER_DEBUG", .kind = Diagnostic, .description = "default on (off in the release profile, 1 turns it on): SPIR-V with debug info, and the HLSL sources copied beside the log; 0: without" },
+			{ .name = "CS_DCLF_SHADER_SOURCE_DIR", .kind = Diagnostic, .description = "where CS_DCLF_SHADER_DEBUG copies the HLSL sources" },
+			{ .name = "CS_DCLF_SHRINK", .kind = Feature, .description = "when the growable scene buffers give memory back (one policy for all, PooledBackings::Shrink): default once a buffer was asked at most a quarter of its capacity for 5 s; off: grow-only; eager: at the first such ask (stress and parity runs)" },
+			{ .name = "CS_DCLF_SITE_STATS", .type = Bool },
+			{ .name = "CS_DCLF_STAGE_DUMP", .kind = Diagnostic, .description = "<dir>: every DCLF stage request's compile inputs, the Lighting programs' descriptor pairs and the pulled rewrite's options, as JSON lines in <dir>/stages.jsonl, for tools/shader-compare" },
+			{ .name = "CS_DCLF_STATS", .key = "dclf.stats", .type = Bool, .defaultValue = "0", .kind = Diagnostic, .description = "1: the periodic report" },
+			{ .name = "CS_DCLF_TABLE_START", .kind = Diagnostic, .description = "small: the growable GPU tables start with a few rows, so that growth runs early and often" },
+			{ .name = "CS_DISABLE_FEATURES", .key = "cs.disable_features", .description = "comma-separated feature short names disabled at boot (write [features] instead)" },
+			{ .name = "CS_EDITOR" },
+			{ .name = "CS_ENABLE_FEATURES" },
+			{ .name = "CS_FG_DISPLAY_SUSPEND" },
+			{ .name = "CS_FORCE_FSR_FG" },
+			{ .name = "CS_FRAME_LATENCY" },
+			{ .name = "CS_FSRFG_QDEPTH" },
+			{ .name = "CS_FXC_REQUEST_DUMP", .key = "cs.fxc_request_dump", .description = "<folder>: one line per FXC request in fxc-requests.jsonl there, to repeat the build outside the game" },
+			{ .name = "CS_GPA", .key = "cs.gpa", .type = Bool, .description = "1: GPUPerfAPI loads at startup (it must exist before the device)" },
+			{ .name = "CS_GPA_DIR" },
+			{ .name = "CS_GPU_COUNTERS_RANGES", .key = "cs.gpu_counters_ranges", .description = "a headless run's hardware counter capture, queued once the counter backend is ready" },
+			{ .name = "CS_GPU_COUNTERS_SAMPLES", .key = "cs.gpu_counters_samples", .type = Int, .description = "that capture's samples (default 3)" },
+			{ .name = "CS_GPU_COUNTERS_START_FRAME", .key = "cs.gpu_counters_start_frame", .type = Int, .description = "the frame that capture starts at" },
+			{ .name = "CS_GPU_EVENT_STATS" },
+			{ .name = "CS_GPU_EVENT_TIMERS", .key = "cs.gpu_event_timers", .type = Int, .description = "<frames>: the GPU event timers on, their counts logged every that many frames" },
+			{ .name = "CS_GPU_LOAD" },
+			{ .name = "CS_GPU_OP_PROBE" },
+			{ .name = "CS_GPU_TIMERS" },
+			{ .name = "CS_GRASS_COLLISION_STATS", .type = Bool },
+			{ .name = "CS_HANG_WATCHDOG", .key = "cs.hang_watchdog", .type = Int, .description = "seconds without progress before the hang watchdog writes its report (default 15)" },
+			{ .name = "CS_NATIVE_D3D11" },
+			{ .name = "CS_NO_D3DX_UPGRADE" },
+			{ .name = "CS_NO_PASS_PREFETCH" },
+			{ .name = "CS_NVPERF_BASELINE" },
+			{ .name = "CS_NVPERF_HALF_WIDTH" },
+			{ .name = "CS_NVPERF_LABEL" },
+			{ .name = "CS_NVPERF_MAX_REPEATS" },
+			{ .name = "CS_NVPERF_MAX_SAMPLES" },
+			{ .name = "CS_NVPERF_MIN_SAMPLES" },
+			{ .name = "CS_NVPERF_REPEATS" },
+			{ .name = "CS_NVPERF_SAMPLES", .type = Int },
+			{ .name = "CS_NVPERF_START_FRAME", .type = Int },
+			{ .name = "CS_NVPERF_TEMPLATE" },
+			{ .name = "CS_ORG", .key = "org.enabled", .type = Bool, .defaultValue = "1", .description = "0: the render graph is off; features: only its interop device features, without the graph" },
+			{ .name = "CS_ORG_ALIAS_LOG", .type = Bool, .defaultValue = "0" },
+			{ .name = "CS_ORG_BINK_SHOT", .key = "org.bink_shot" },
+			{ .name = "CS_ORG_D3D12_SDK" },
+			{ .name = "CS_ORG_D3D12_SDK_PATH" },
+			{ .name = "CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES", .type = Int },
+			{ .name = "CS_ORG_ENGINE_DRAW_TAP" },
+			{ .name = "CS_ORG_FOG_DEBUG" },
+			{ .name = "CS_ORG_GRAPH_RESOURCES_FRAME" },
+			{ .name = "CS_ORG_LLF_PARITY", .key = "org.llf_parity", .description = "1: the parity frame's D3D11 light culling against the render graph's, cluster by cluster" },
+			{ .name = "CS_ORG_MISMATCH_FATAL", .key = "org.mismatch_fatal", .description = "0: a frame anchor mismatch is not fatal (it is in every build but the Release profile)" },
+			{ .name = "CS_ORG_NATIVE", .key = "org.native", .type = Bool, .defaultValue = "0", .description = "true: native mode, no DXVK; BasicRHI's device and ORG present (render-graph.md, \"Native mode\")" },
+			{ .name = "CS_ORG_NATIVE_BACKEND", .key = "org.backend", .type = Enum, .defaultValue = "vulkan", .choices = "vulkan|d3d12", .description = "native mode's backend; d3d12 needs org.native" },
+			{ .name = "CS_ORG_NATIVE_SYNC_PRESENT" },
+			{ .name = "CS_ORG_NATIVE_VALIDATION", .key = "org.validation", .type = Bool, .defaultValue = "0", .description = "true: BasicRHI's API validation in native mode (Vulkan layers or the D3D12 debug layer)" },
+			{ .name = "CS_ORG_OCCLUSION_QUERY_LOG", .type = Bool, .defaultValue = "0" },
+			{ .name = "CS_ORG_PRESENT_COPY_SKIP" },
+			{ .name = "CS_ORG_RAW_ACCESS_CHECK", .key = "org.raw_access_check", .type = Bool, .defaultValue = "0", .description = "native: log and count work on graph-tracked images that skips the graph's state tracking ([ORG raw access] lines)" },
+			{ .name = "CS_ORG_RECORDING_TIMESTAMPS", .type = Bool, .defaultValue = "0" },
+			{ .name = "CS_ORG_SHARED_CONSTANTS_CHECK", .type = Bool, .defaultValue = "0" },
+			{ .name = "CS_ORG_SHOT_TARGET" },
+			{ .name = "CS_ORG_SSGI_DEBUG" },
+			{ .name = "CS_ORG_SSS_KEEP_APART" },
+			{ .name = "CS_ORG_TAP_ERROR_TEST" },
+			{ .name = "CS_ORG_TRIPWIRE_LOG", .key = "org.tripwire_log", .type = Bool, .defaultValue = "0", .description = "1: Tripwire logs every call site with its count" },
+			{ .name = "CS_ORG_TRIPWIRE_LOG_INTERVAL", .key = "org.tripwire_log_interval", .type = Int, .description = "seconds between Tripwire's call site reports (default 60)" },
+			{ .name = "CS_ORG_TRIPWIRE_SELFTEST", .type = Bool, .defaultValue = "0" },
+			{ .name = "CS_ORG_TRIPWIRE_WATCH_ALL", .type = Bool, .defaultValue = "0" },
+			{ .name = "CS_ORG_VIEW_ATMOSPHERE_DEBUG" },
+			{ .name = "CS_ORG_VRAM_SOURCE", .key = "org.vram_source", .description = "org: ORG's allocator counts beside DXVK's memory, for the VRAM heaps and texture streaming's budget" },
+			{ .name = "CS_PASS_ROUNDS", .type = Int },
+			{ .name = "CS_PASS_SAMPLE", .type = Bool },
+			{ .name = "CS_PASS_SKIP" },
+			{ .name = "CS_PROFILER_LOG" },
+			{ .name = "CS_RENDERDOC_DLL" },
+			{ .name = "CS_RENDERDOC_REF_ALL" },
+			{ .name = "CS_RHI_CENSUS" },
+			{ .name = "CS_SHADER_DXC", .key = "cs.shader_dxc", .description = "a regular expression on <path>:<target>:<descriptor>: the shaders that build with DXC; empty: every shader with FXC" },
+			{ .name = "CS_SL_VERBOSE" },
+			{ .name = "CS_STREAMLINE_DLSS", .type = Bool },
+			{ .name = "CS_STREAMLINE_REFLEX", .description = "0: Streamline does not load Reflex, PCL or DLSS-G (for Nsight captures)" },
+			{ .name = "CS_SUBMIT_TRACE" },
+			{ .name = "CS_TEST_CRASH" },
+			{ .name = "CS_TEST_HANG" },
+			{ .name = "CS_TEST_LIST_SWITCHES", .description = "1: the game writes CommunityShaders-Switches.json (every switch) at kPostPostLoad and exits" },
+			{ .name = "CS_TEX_CENSUS", .type = Bool },
+			{ .name = "CS_UPSCALE_SUBMIT", .description = "direct: upscaling's ring submissions wait for DXVK's command stream" },
+			{ .name = "CS_UPSCALE_UNFOCUSED", .type = Bool },
+			{ .name = "CS_VK_CLIENT_PRIORITY" },
+			{ .name = "CS_VK_DRIVER_TRACE" },
+			{ .name = "CS_VK_PRIORITY" },
+			{ .name = "CS_VK_SPILL" },
+			{ .name = "CS_VRAM_DEBUG", .key = "cs.vram_debug", .type = Bool, .description = "1: the VRAM attribution's debug mode: creation call sites and ORG's allocation ledger" },
+			{ .name = "DXVK_CONFIG" },
+			{ .name = "DXVK_DEBUG", .key = "dxvk.debug", .description = "DXVK's debug options (hang: its hang markers; DRED on D3D12)" },
+			{ .name = "DXVK_DEFER_TEXTURE_ALLOCATION" },
+			{ .name = "DXVK_DEVICE_MEMORY_REPORT" },
+			{ .name = "DXVK_FILTER_DEVICE_NAME", .key = "dxvk.filter_device_name", .description = "DXVK uses only the adapter whose name contains this" },
+			{ .name = "DXVK_HDR" },
+			{ .name = "DXVK_HUD" },
+			{ .name = "DXVK_LOG_LEVEL" },
+			{ .name = "DXVK_LOG_PATH" },
+			{ .name = "DXVK_PIPELINE_STATS", .type = Bool },
+			{ .name = "DXVK_SHADER_DUMP_PATH" },
+			{ .name = "DXVK_VIEW_TRACE" },
+			{ .name = "ORG_GRAPH_REPLAY_OUTPUT" },
+			{ .name = "SARP_D3D12_DRED" },
+			{ .name = "SARP_D3D12_GPU_VALIDATION", .type = Bool },
+			{ .name = "VK_INSTANCE_LAYERS" },
+			{ .name = "VK_LAYER_PATH" },
+			{ .name = "VK_LOADER_DEBUG" },
+			{ .name = "VK_LOADER_LAYERS_DISABLE", .key = "vk.loader_layers_disable", .description = "the Vulkan loader leaves out these layers (comma-separated globs)" },
+			{ .name = "VK_LOADER_LAYERS_ENABLE" },
 		};
 
-		// The render graph's epoch and submission switches, with their help text. Listed here, not in DCLF's registry, so they are
-		// checked in builds without Drawcall Limit Fix too.
-		struct Described
-		{
-			std::string_view name;
-			std::string_view description;
-		};
-		constexpr Described kDescribed[] = {
-			{ "CS_ORG_BATCH_SUBMIT", "0: an epoch's submissions go to DXVK one at a time" },
-			{ "CS_ORG_CLOSED", "1: epochs return every resource to its home state and start with a full barrier (closed executions, an interop fallback)" },
-			{ "CS_ORG_EARLY_FLUSH", "1: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch)" },
-			{ "CS_ORG_EXTERNAL_HOME", "0: epochs do not return DXVK's images to their home state on the graphics queue (unsafe: DXVK expects them there)" },
-		};
+		static_assert([] {
+			for (std::size_t i = 1; i < std::size(kSwitches); ++i)
+				if (!(kSwitches[i - 1].name < kSwitches[i].name))
+					return false;
+			return true;
+		}(), "kSwitches is in alphabetical order, each name once");
+		static_assert([] {
+			for (const auto& row : kSwitches)
+				if ((row.type == Type::Enum) != !row.choices.empty())
+					return false;
+			return true;
+		}(), "an Enum row has choices, and only an Enum row");
 
 		// Families read by a computed name: any name with the prefix is known.
 		constexpr std::string_view kPrefixes[] = { "CS_GPU_COUNTERS_", "CS_NVPERF_", "DXVK_", "VK_" };
 
-		std::string Family(std::string_view a_name)
+		std::string_view Family(std::string_view a_name)
 		{
 			if (a_name.starts_with("CS_DCLF"))
 				return "dclf";
@@ -261,30 +208,60 @@ namespace Testing::SwitchRegistry
 			return "cs";
 		}
 
-		/** @brief DCLF's rows (Core's, and the features' registered so far), a_row(name, kind, description). */
-		template <class Row>
-		void ForEachDclfRow([[maybe_unused]] Row&& a_row)
+		std::string_view TypeName(Type a_type)
 		{
-#if defined(CS_HAS_DCLF)
-			DCLF::ForEachSwitchRow([&](std::string_view a_name, std::string_view a_kind, std::string_view a_description) { a_row(a_name, a_kind, a_description); });
-#endif
+			switch (a_type) {
+			case Type::Bool:
+				return "bool";
+			case Type::Int:
+				return "int";
+			case Type::Enum:
+				return "enum";
+			default:
+				return "string";
+			}
+		}
+
+		/** @brief Whether DCLF's features registered a_name. */
+		bool FeatureSwitch([[maybe_unused]] std::string_view a_name)
+		{
+			bool found = false;
+			DCLF::ForEachFeatureSwitch([&](std::string_view a_row, std::string_view, bool, std::string_view) { found = found || a_row == a_name; });
+			return found;
 		}
 
 		bool DclfComplete()
 		{
-#if defined(CS_HAS_DCLF)
 			return DCLF::FeatureSwitchesRegistered();
-#else
-			return true;
-#endif
+		}
+	}
+
+	const Row* Find(std::string_view a_name)
+	{
+		const auto* end = std::end(kSwitches);
+		const auto* row = std::lower_bound(std::begin(kSwitches), end, a_name, [](const Row& a_row, std::string_view a_wanted) { return a_row.name < a_wanted; });
+		return row != end && row->name == a_name ? row : nullptr;
+	}
+
+	std::string_view KindName(Kind a_kind)
+	{
+		switch (a_kind) {
+		case Kind::Feature:
+			return "feature";
+		case Kind::Parity:
+			return "parity";
+		case Kind::Diagnostic:
+			return "diagnostic";
+		case Kind::Test:
+			return "test";
+		default:
+			return "other";
 		}
 	}
 
 	Known Check(std::string_view a_name)
 	{
-		bool found = false;
-		ForEachDclfRow([&](std::string_view a_row, std::string_view, std::string_view) { found = found || a_row == a_name; });
-		if (found || std::ranges::find(kOther, a_name) != std::end(kOther) || std::ranges::find(kDescribed, a_name, &Described::name) != std::end(kDescribed))
+		if (Find(a_name) || FeatureSwitch(a_name))
 			return Known::Yes;
 		for (const auto prefix : kPrefixes)
 			if (a_name.starts_with(prefix) && a_name.size() > prefix.size())
@@ -292,24 +269,6 @@ namespace Testing::SwitchRegistry
 		if (a_name.starts_with("CS_DCLF_") && !DclfComplete())
 			return Known::Unchecked;
 		return Known::No;
-	}
-
-	std::vector<Info> All()
-	{
-		std::vector<Info> all;
-		std::set<std::string, std::less<>> names;
-		ForEachDclfRow([&](std::string_view a_name, std::string_view a_kind, std::string_view a_description) {
-			if (names.emplace(a_name).second)
-				all.push_back({ std::string(a_name), std::string(a_kind), std::string(a_description), "dclf" });
-		});
-		for (const auto& row : kDescribed)
-			if (names.emplace(row.name).second)
-				all.push_back({ std::string(row.name), "other", std::string(row.description), Family(row.name) });
-		for (const auto name : kOther)
-			if (names.emplace(name).second)
-				all.push_back({ std::string(name), "other", "", Family(name) });
-		std::ranges::sort(all, {}, &Info::name);
-		return all;
 	}
 
 	namespace
@@ -354,10 +313,34 @@ namespace Testing::SwitchRegistry
 		if (Util::SwitchFile::Value("CS_TEST_LIST_SWITCHES", true) != "1")
 			return;
 		const auto path = Util::SwitchFile::Directory() / "CommunityShaders-Switches.json";
-		json rows = json::array();
-		for (const auto& info : All())
-			rows.push_back({ { "name", info.name }, { "kind", info.kind }, { "description", info.description }, { "family", info.family } });
-		const json document{ { "version", 1 }, { "dclf_complete", DclfComplete() }, { "switches", std::move(rows) } };
+		auto choices = [](std::string_view a_text) {
+			json list = json::array();
+			for (std::size_t start = 0; start < a_text.size();) {
+				const auto end = std::min(a_text.find('|', start), a_text.size());
+				list.push_back(std::string(a_text.substr(start, end - start)));
+				start = end + 1;
+			}
+			return list;
+		};
+		std::vector<json> rows;
+		for (const auto& row : kSwitches)
+			rows.push_back({ { "name", std::string(row.name) }, { "key", std::string(row.key) }, { "type", std::string(TypeName(row.type)) },
+				{ "default", std::string(row.defaultValue) }, { "choices", choices(row.choices) }, { "kind", std::string(KindName(row.kind)) },
+				{ "family", std::string(Family(row.name)) }, { "description", std::string(row.description) } });
+		// A feature's switch has no key. One on by default is a bool, and so is one whose text starts "1:", which 1 turns on.
+		DCLF::ForEachFeatureSwitch([&](std::string_view a_name, std::string_view a_kind, bool a_defaultOn, std::string_view a_description) {
+			const bool offByDefault = !a_defaultOn && a_description.starts_with("1:");
+			rows.push_back({ { "name", std::string(a_name) }, { "key", "" }, { "type", a_defaultOn || offByDefault ? "bool" : "string" },
+				{ "default", a_defaultOn ? "1" : offByDefault ? "0" : "" }, { "choices", json::array() }, { "kind", std::string(a_kind) }, { "family", "dclf" },
+				{ "description", std::string(a_description) } });
+		});
+		std::ranges::sort(rows, {}, [](const json& a_row) { return a_row["name"].get<std::string>(); });
+		std::vector<std::string> features;
+		for (auto* feature : ::Feature::GetFeatureList())
+			features.push_back(feature->GetShortName());
+		std::ranges::sort(features);
+		std::vector<std::string> prefixes(std::begin(kPrefixes), std::end(kPrefixes));
+		const json document{ { "version", 2 }, { "dclf_complete", DclfComplete() }, { "prefixes", prefixes }, { "features", features }, { "switches", rows } };
 		const auto temporary = std::filesystem::path(path).concat(".tmp");
 		{
 			std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
@@ -365,7 +348,10 @@ namespace Testing::SwitchRegistry
 		}
 		std::error_code error;
 		std::filesystem::rename(temporary, path, error);
-		logger::info("[TEST] CS_TEST_LIST_SWITCHES: {} switches written to {}{}; exiting", document["switches"].size(), path.string(), error ? " (rename failed)" : "");
+		const auto reason = fmt::format("CS_TEST_LIST_SWITCHES: {} switches written to {}{}", rows.size(), path.string(), error ? " (rename failed)" : "");
+		logger::info("[TEST] {}; exiting", reason);
+		// In a test run the outcome is written first, so cs-test can make the dump (configs/list-switches.toml).
+		Testing::Finish(error ? "failed" : "passed", reason, 0u);
 		spdlog::apply_all([](const std::shared_ptr<spdlog::logger>& a_logger) { a_logger->flush(); });
 		::TerminateProcess(::GetCurrentProcess(), 0);
 	}

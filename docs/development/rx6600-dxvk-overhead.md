@@ -3,7 +3,7 @@
 Measured 2026-11-08 on an AMD Radeon RX 6600 (driver 26.10.1, Vulkan driverVersion 2.0.353), 1080p (`iSize` 1920x1080, FSR
 quality, so a 1280x720 render), vsync off, Dev-Fast builds of both (`/Od`: CPU numbers read slow, GPU numbers do not). One sample
 per rung. Native is `external_refs/skyrim-community-shaders` at `ab/dev-memory` (upstream dev plus the A/B probes). Every DXVK run
-has `DXVK_DEBUG=hang`. Harness: `tools/cs-ab` with the `rx6600-*` scenarios; runs in `C:\Modding\CS-AB\runs`.
+has `DXVK_DEBUG=hang`. Harness: the old `tools/cs-ab` with the `rx6600-*` scenarios (now the `rx6600-*` cs-test configs); runs in `C:\Modding\CS-AB\runs`.
 
 DXVK's author warns that RDNA1/2 on Windows "can only use the slow legacy binding model, and suffers from severe performance
 issues". This build does not use the legacy model: Community Shaders' render graph needs descriptor buffers, which DXVK then

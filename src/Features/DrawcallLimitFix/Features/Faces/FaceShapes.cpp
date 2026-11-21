@@ -42,13 +42,6 @@ namespace DCLF::Features::Faces
 			{
 				std::uint64_t walks = 0, published = 0, updated = 0, written = 0;
 			} counts;
-			// The parity's dense walk overwrites the regions, so they are saved before it and restored after.
-			struct Saved
-			{
-				FaceRegions faceRegions;
-				FaceRegionFree faceRegionFree;
-				std::uint32_t faceRegionTop = 0;
-			} saved;
 		};
 
 		std::shared_ptr<void> Make() { return std::make_shared<FaceShapes>(); }
@@ -207,8 +200,7 @@ namespace DCLF::Features::Faces
 		{
 			auto& state = a_context.State<FaceShapes>();
 			auto& tables = a_context.tables;
-			// Skip the dense walk, whose tables are restored afterwards.
-			for (const auto& [source, first] : a_context.DenseWalk() ? decltype(tables.streamRowsReleased){} : tables.streamRowsReleased) {
+			for (const auto& [source, first] : tables.streamRowsReleased) {
 				const auto* geometry = static_cast<const RE::BSGeometry*>(source);
 				const auto it = state.faceRegions.find(geometry);
 				if (it == state.faceRegions.end() || it->second.first != first)
@@ -239,21 +231,6 @@ namespace DCLF::Features::Faces
 			}
 			if (FaceSnapshots::Enabled())
 				FaceSnapshots::Get().EndWalk();
-		}
-
-		void DenseBegun(const Api::CoordinatorComponentContext& a_context)
-		{
-			auto& state = a_context.State<FaceShapes>();
-			state.saved = { state.faceRegions, state.faceRegionFree, state.faceRegionTop };
-		}
-
-		void DenseEnded(const Api::CoordinatorComponentContext& a_context)
-		{
-			auto& state = a_context.State<FaceShapes>();
-			state.faceRegions = std::move(state.saved.faceRegions);
-			state.faceRegionFree = std::move(state.saved.faceRegionFree);
-			state.faceRegionTop = state.saved.faceRegionTop;
-			state.saved = {};
 		}
 
 		void Reset(const Api::CoordinatorComponentContext& a_context)
@@ -351,7 +328,6 @@ namespace DCLF::Features::Faces
 		const auto component = a_context.RegisterCoordinatorComponent({ .name = "faces",
 			.make = &Make,
 			.walk = { .begun = &WalkBegun, .scheduling = &Scheduling, .ended = &WalkEnded },
-			.dense = { .begun = &DenseBegun, .ended = &DenseEnded },
 			.retirement = { .reset = &Reset, .forgot = &Forgot, .recycled = &Recycled },
 			.entryClass = { .follows = Api::EntryClass::FaceShape, .takes = a_taken, .listed = &Listed, .resolve = &Resolve, .streamed = &Streamed } });
 		a_context.RegisterReportLines({ .name = "face publications", .point = Api::ReportPoint::SceneCoordinatorDelta, .component = component, .componentText = &DeltaLine });

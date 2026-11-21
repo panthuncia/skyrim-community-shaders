@@ -45,7 +45,6 @@ namespace DCLF
 	void IndirectDraws::DecideDrawFamilies(std::uint32_t a_frame)
 	{
 		auto* scene = impl->scene.get();
-		const auto toggles = ActiveToggles();
 		for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f) {
 			const auto& entry = Extensions::DrawFamilies()[f];
 			if (!entry.taken)
@@ -54,7 +53,7 @@ namespace DCLF
 			// A frame without claims is entirely the engine's, and so is a family that is off or not set up.
 			bool owned = false, waits = false;
 			// The CPU pipeline draws a family only through its main.direct. One without it is the engine's there.
-			if (scene && Draws::FamilySetUp(*scene, family) && Extensions::DrawFamilyOn(toggles, family) && !Scene::FrameView::Get().NotDrawingYet() &&
+			if (scene && Draws::FamilySetUp(*scene, family) && Extensions::DrawFamilyOn(family) && !Scene::FrameView::Get().NotDrawingYet() &&
 				(!Direct::CpuFrame() || entry.contribution.main.direct))
 				owned = entry.contribution.frame.decide({ a_frame, scene, family, &waits });
 			impl->familyOwned[f] = owned;

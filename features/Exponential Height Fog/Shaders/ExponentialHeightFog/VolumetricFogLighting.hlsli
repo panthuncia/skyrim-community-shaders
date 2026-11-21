@@ -6,6 +6,14 @@
 #	define VOLUMETRIC_FOG_ENGINE_LOCAL_SHADOW(i) EngineLocalShadows[i]
 #endif
 
+// The volume passes' flags say which world shadow inputs they bind (VolumetricFogCSCommon.hlsli). A graph pass binds
+// nothing for an input that is not written yet, so the read must not run. Other includers bind every input.
+#if defined(VOLUMETRIC_FOG_FLAGS)
+#	define VOLUMETRIC_FOG_IF_BOUND(a_bound) [branch] if (a_bound)
+#else
+#	define VOLUMETRIC_FOG_IF_BOUND(a_bound)
+#endif
+
 float SampleDirectionalShadowPCF(float3 positionLS, uint cascadeIndex)
 {
 	uint shadowWidth;
@@ -78,14 +86,24 @@ float SampleDirectionalWorldShadow(float3 positionWS)
 
 	float worldShadow = 1.0f;
 #if defined(TERRAIN_SHADOWS)
-	worldShadow *= TerrainShadows::GetTerrainShadow(positionWS + FrameBuffer::CameraPosAdjust.xyz, LinearSampler);
+	VOLUMETRIC_FOG_IF_BOUND(VolumetricFogHasTerrainShadows)
+	{
+		worldShadow *= TerrainShadows::GetTerrainShadow(positionWS + FrameBuffer::CameraPosAdjust.xyz, LinearSampler);
+	}
 #endif
 #if defined(CLOUD_SHADOWS)
-	worldShadow *= CloudShadows::GetCloudShadowMult(positionWS, LinearSampler);
+	VOLUMETRIC_FOG_IF_BOUND(VolumetricFogHasCloudShadows)
+	{
+		worldShadow *= CloudShadows::GetCloudShadowMult(positionWS, LinearSampler);
+	}
 #endif
 #if defined(PHYSICAL_SKY)
-	if (SharedData::physSkyData.enabled)
-		worldShadow *= dot(PhysSky::GetDirlightTransmittance(positionWS + FrameBuffer::CameraPosAdjust.xyz, LinearSampler, true), 1.0f.xxx / 3.0f);
+	if (SharedData::physSkyData.enabled) {
+		VOLUMETRIC_FOG_IF_BOUND(VolumetricFogHasPhysSkyShadowVolume)
+		{
+			worldShadow *= dot(PhysSky::GetDirlightTransmittance(positionWS + FrameBuffer::CameraPosAdjust.xyz, LinearSampler, true), 1.0f.xxx / 3.0f);
+		}
+	}
 #endif
 	return worldShadow;
 }
@@ -130,9 +148,12 @@ float3 ComputeDirectionalLightColor(float3 positionWS)
 	if (SharedData::physSkyData.enabled) {
 		if (SharedData::physSkyData.volCloudUseSun != 0u && !SharedData::InInterior && !SharedData::HideSky)
 			dirLightColor = Color::DirectionalLight(SharedData::physSkyData.sunlightColor);
-		const float3 planetPosition = PhysSky::GetMediumPlanetPosition(positionWS);
-		float3 physSkyTransmittance = lerp(1.0f, PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planetPosition, lightDirection), SharedData::physSkyData.trMix);
-		dirLightColor *= saturate(physSkyTransmittance);
+		VOLUMETRIC_FOG_IF_BOUND(VolumetricFogHasPhysSkyTransmittance)
+		{
+			const float3 planetPosition = PhysSky::GetMediumPlanetPosition(positionWS);
+			float3 physSkyTransmittance = lerp(1.0f, PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planetPosition, lightDirection), SharedData::physSkyData.trMix);
+			dirLightColor *= saturate(physSkyTransmittance);
+		}
 	}
 #endif
 	return dirLightColor * ExponentialHeightFog::EvaluateHeightFogLightTransmittance(positionWS, FrameBuffer::CameraPosAdjust.xyz, lightDirection);

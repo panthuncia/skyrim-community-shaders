@@ -1,9 +1,8 @@
-// Tree LOD's report lines: its draws and two-phase cull, its mirror and parity, and the depth commits' holes log, which is always on.
+// Tree LOD's report lines: its draws and two-phase cull, its mirror, and the depth commits' holes log, which is always on.
 
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodTables.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/Diagnostics/TreeLodEvents.h"
-#include "Features/DrawcallLimitFix/Features/TreeLod/Diagnostics/TreeLodParity.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/DrawsView.h"
@@ -56,18 +55,13 @@ namespace DCLF::Features::TreeLod
 				CullLine(*counts, a_text);
 		}
 
-		/** @brief The mirror's line (newline-terminated), its counters and its parity's reset. */
+		/** @brief The mirror's line (newline-terminated) and its counters' reset. */
 		std::string MirrorLine(Mirror& a_mirror)
 		{
 			const auto s = a_mirror.TakeStats();
-			auto& p = ParityState();
-			auto text = fmt::format("[DCLF] tree LOD mirror: {} shapes, {} instances{}; {} adds, {} removes ({} off the render thread); parity {} checks, {} shapes compared, {} not settled, {} missing, {} stale, {} refilled after the drain, {} differ{}{}; {} groups drawn by the rule where the engine keeps hidden records\n",
-				a_mirror.Size(), a_mirror.InstanceCount(), installed ? "" : ", events not installed", s.adds, s.removes, TakeOffThread(), p.checks, p.shapes, p.unsettled,
-				p.missing, p.stale, p.late, p.differ, p.checks ? (p.missing || p.stale || p.differ ? " <- TREE LOD MIRROR; first: " : " <- OK") : "", p.first, s.intended);
-			p = { .suspects = std::move(p.suspects), .frame = p.frame };
-			return text;
+			return fmt::format("[DCLF] tree LOD mirror: {} shapes, {} instances{}; {} adds, {} removes ({} off the render thread); {} groups drawn by the rule where the engine keeps hidden records\n",
+				a_mirror.Size(), a_mirror.InstanceCount(), installed ? "" : ", events not installed", s.adds, s.removes, TakeOffThread(), s.intended);
 		}
-
 		// The render thread's scene lines: the mirror's, once it holds shapes or its events are in.
 		void MirrorText(std::string& a_text)
 		{

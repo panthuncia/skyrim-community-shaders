@@ -1,7 +1,7 @@
 #pragma once
 
-// The water reflection's own frame state: this update's captured faces, the cube and the report counters, and the face camera parity's
-// counts. Render thread. Included by the feature's sources.
+// The water reflection's own frame state: this update's captured faces, the cube and the report counters. Render thread.
+// Included by the feature's sources.
 
 // ViewEpoch.h first, because volk must precede every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
@@ -34,8 +34,6 @@ namespace DCLF::Features::Reflection
 			RE::NiPoint3 eye;
 		};
 		std::array<Face, kFaces> faces;
-		// The face the engine last oriented the camera to (the parity).
-		std::uint32_t orientedFace = ~0u;
 		winrt::com_ptr<ID3D11Texture2D> cube;  // the cube target the faces render into
 		std::uint32_t width = 0, height = 0;
 		// Since the last report.
@@ -51,21 +49,5 @@ namespace DCLF::Features::Reflection
 	{
 		static ReflectionFrame frame;
 		return frame;
-	}
-
-	/** @brief The faces' camera parity counts. The report takes them. */
-	struct FaceCameras
-	{
-		std::uint32_t faces = 0, blocks = 0, slices = 0;
-		std::uint64_t registers = 0;  // differing registers (c0-c44), by bit
-		float largest = 0.0f;
-		std::string first;
-	};
-
-	/** @brief The parity's counts (render thread). */
-	inline FaceCameras& FaceCameraCounts()
-	{
-		static FaceCameras counts;
-		return counts;
 	}
 }

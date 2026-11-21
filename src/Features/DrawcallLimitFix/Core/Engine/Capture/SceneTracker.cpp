@@ -1,12 +1,14 @@
 // The NiNode child edits and the event stack they and the hooks push onto.
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
+#include "RenderGraph/Fatal.h"
 
 #include <algorithm>
 #include <atomic>
@@ -50,7 +52,7 @@ namespace DCLF
 		void StampWoken(SceneTracker::Event* a_event)
 		{
 			a_event->stampNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-			a_event->stampFrame = SceneCapture::Frame();
+			a_event->stampFrame = DCLF::SceneClock::Step();
 		}
 
 		void OnChildAttached(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
@@ -70,7 +72,7 @@ namespace DCLF
 			if (event.flags & SWF_CHILD_REPARENT) {
 				// The engine's attach of this child is in progress on this thread, so no other move can be.
 				if (t_move.child && t_move.child != child)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: a move of {} began on thread {} while the move of {} was open", static_cast<const void*>(child),
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("a move of {} began on thread {} while the move of {} was open", static_cast<const void*>(child),
 						::GetCurrentThreadId(), static_cast<const void*>(t_move.child)));
 				t_move.child = child;
 			}
@@ -120,7 +122,7 @@ namespace DCLF
 			return;
 		// PostPostLoad required SWF's structure capability before any hook was written.
 		if (!SceneWriter::Subscribe(SWF_EVENT_CHILD_ATTACHED, &OnChildAttached) || !SceneWriter::Subscribe(SWF_EVENT_CHILD_DETACHING, &OnChildDetaching))
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the child-edit subscriptions after reporting them installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the child-edit subscriptions after reporting them installed");
 		installed = true;
 		logger::info("[DCLF] Scene tracking subscribed to SceneWriterFramework's child edits");
 	}
@@ -193,33 +195,17 @@ namespace DCLF
 			taken.swap(heldDetaches);
 			heldDetachCount.store(0, std::memory_order_release);
 		}
-		for (const auto& held : taken) {
-			if (stopped.load(std::memory_order_acquire)) {
-				held.oldest->next = nullptr;
-				FreeEvents(held.newest);
-				continue;
-			}
+		for (const auto& held : taken)
 			PushChain(held.oldest, held.newest, 1u << static_cast<std::uint32_t>(SceneWake::Detach));
-		}
 	}
 
 	void SceneTracker::PushCaptured(Event* a_event, bool a_fillOnly)
 	{
 		if (!a_event)
 			return;
-		if (stopped.load(std::memory_order_acquire)) {
-			delete a_event;
-			return;
-		}
 		a_event->mirrorOnly = true;
 		a_event->mirrorFill = a_fillOnly;
 		Push(a_event);
-	}
-
-	void SceneTracker::Stop()
-	{
-		stopped.store(true, std::memory_order_release);
-		FreeEvents(Drain());
 	}
 
 	void SceneTracker::CollectAncestors(const RE::NiAVObject* a_node, std::vector<const void*>& a_out)
@@ -231,16 +217,8 @@ namespace DCLF
 
 	void SceneTracker::PushAttached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent)
 	{
-		if (!a_child || stopped.load(std::memory_order_acquire)) {
-			if (a_child && t_move.child == a_child) {
-				if (t_move.newest) {
-					t_move.oldest->next = nullptr;
-					FreeEvents(t_move.newest);
-				}
-				t_move = {};
-			}
+		if (!a_child)
 			return;
-		}
 		auto* event = new Event{};
 		event->type = EventType::Attached;
 		event->thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
@@ -279,7 +257,7 @@ namespace DCLF
 
 	void SceneTracker::PushDetached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent)
 	{
-		if (!a_child || stopped.load(std::memory_order_acquire))
+		if (!a_child)
 			return;
 		// Before the engine's detach, so the child's parent is still the node it leaves.
 		const bool inWorld = SceneCapture::InWorld(a_child);
@@ -322,7 +300,7 @@ namespace DCLF
 	void SceneTracker::PushStacked(std::uint32_t a_channel, std::uint64_t a_token, std::span<RE::NiAVObject* const> a_pinned, std::span<RE::NiAVObject* const> a_named,
 		bool a_wakes)
 	{
-		if (!a_token || stopped.load(std::memory_order_acquire))
+		if (!a_token)
 			return;
 		auto* event = new Event{};
 		event->type = EventType::Stacked;
@@ -346,7 +324,7 @@ namespace DCLF
 
 	void SceneTracker::PushUpdate(SceneCapture::Update&& a_update, std::vector<RE::NiPointer<RE::NiRefObject>>&& a_pins)
 	{
-		if (!installed || stopped.load(std::memory_order_acquire))
+		if (!installed)
 			return;
 		if (a_update.hiddenSite != ~0u)
 			if (watchedRoot.load(std::memory_order_acquire))
@@ -449,9 +427,9 @@ namespace DCLF
 		subtreeCurrent = std::move(set);
 	}
 
-	EventQueue<SceneTracker::SubtreeEvent>& SceneTracker::SubtreeEvents()
+	RenderGraph::Frame::EventQueue<SceneTracker::SubtreeEvent>& SceneTracker::SubtreeEvents()
 	{
-		static EventQueue<SubtreeEvent> queue;
+		static RenderGraph::Frame::EventQueue<SubtreeEvent> queue;
 		return queue;
 	}
 

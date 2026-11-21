@@ -33,6 +33,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "RenderGraph/Fatal.h"
 
 #include <algorithm>
 #include <array>
@@ -63,8 +64,7 @@ namespace DCLF::Extensions
 			// Engine channels needed by name, bound once every install has run.
 			std::vector<std::string> engineChannelNeeds;
 			// The show veto cells. Their address stays fixed for the session.
-			Api::ShowVeto showVeto{ &kShowVetoClosed, &NoShowVeto, nullptr, {} };
-			std::vector<std::uint32_t> showVetoHideSites;
+			Api::ShowVeto showVeto{ &kShowVetoClosed, &NoShowVeto };
 			bool showVetoRegistered = false;
 			std::uint32_t reservedHiddenSites = 0;
 			std::vector<TableFamilyEntry> tableFamilies;
@@ -75,7 +75,7 @@ namespace DCLF::Extensions
 			// At most one property flag rule per technique.
 			std::array<PropertyFlagRule, kTechniqueSlots> propertyFlagRules{};
 			std::size_t propertyFlagRuleCount = 0;
-			GeometryTypeToggles geometryTypes{};
+			GeometryTypesPorted geometryTypes{};
 			// Per geometry type, its contribution. geometryType 0xFF means none.
 			GeometryTypeContributions geometryTypeContributions{};
 			EntryClassRules entryClassRules{};
@@ -83,8 +83,8 @@ namespace DCLF::Extensions
 			OwnerClasses ownerClasses{};
 			std::array<bool, static_cast<std::size_t>(Api::EntryClass::Count)> ownerClassRegistered{};
 			std::string ownedLabel = "owned", ownedWithoutRecordLabel = "owned without a record";
-			ParentToggles parents{};
-			ObjectClassToggles objectClasses{};
+			ParentsTaken parents{};
+			ObjectClassesTaken objectClasses{};
 			CategoryRoots categoryRoots{};
 			Api::UnheldRootsContribution unheldRoots{};
 			std::vector<ShadingContributionEntry> shadingContributions;
@@ -165,13 +165,13 @@ namespace DCLF::Extensions
 			                                      a_range.objectClass < Api::ObjectClass::Count && a_lists.objectClasses[static_cast<std::size_t>(a_range.objectClass)];
 			if (a_range.slot >= Api::MainRangeSlot::Count || a_range.name.empty() || !classValid ||
 				(a_range.depthPrepass && a_range.slot >= Api::MainRangeSlot::Appended0))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete main range", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete main range", a_who));
 			for (const auto& other : a_lists.mainRanges)
 				if (other.slot != Api::MainRangeSlot::Count && other.order == a_range.order)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s main range {} takes order {}, which {} has", a_who, a_range.name, static_cast<std::uint32_t>(a_range.order), other.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s main range {} takes order {}, which {} has", a_who, a_range.name, static_cast<std::uint32_t>(a_range.order), other.name));
 			auto& entry = a_lists.mainRanges[static_cast<std::size_t>(a_range.slot)];
 			if (entry.slot != Api::MainRangeSlot::Count)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes main range slot {}, which another registration has", a_who,
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes main range slot {}, which another registration has", a_who,
 					static_cast<std::uint32_t>(a_range.slot)));
 			entry = a_range;
 		}
@@ -181,19 +181,19 @@ namespace DCLF::Extensions
 		{
 			if (a_group.slot < Api::MainRangeSlot::Appended0 || a_group.slot >= Api::MainRangeSlot::Count || a_group.name.empty() || !a_group.propertyFlags ||
 				a_group.heldWhile.index >= a_lists.classifyInputs.size())
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete held group", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete held group", a_who));
 			AddMainRange(a_lists, a_who, { .slot = a_group.slot, .name = a_group.name, .order = a_group.order }, true);
 			const auto group = static_cast<std::uint32_t>(a_group.slot) - static_cast<std::uint32_t>(Api::MainRangeSlot::Appended0) + 1;
-			a_lists.heldGroups.push_back({ a_group.heldWhile, group, a_group.propertyFlags, a_group.toggle });
+			a_lists.heldGroups.push_back({ a_group.heldWhile, group, a_group.propertyFlags });
 		}
 
 		/** @brief Sets the one near twin. */
 		void SetNearTwin(Lists& a_lists, std::string_view a_who, const Api::NearTwinContribution& a_twin)
 		{
 			if (a_twin.name.empty() || a_twin.debugName.empty() || a_twin.resource.empty() || !a_twin.target || !a_twin.nearTest)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete near twin", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete near twin", a_who));
 			if (a_lists.nearTwin.target)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered near twin {}, which {} has", a_who, a_twin.name, a_lists.nearTwin.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered near twin {}, which {} has", a_who, a_twin.name, a_lists.nearTwin.name));
 			const std::string name(a_twin.name);
 			a_lists.nearTwin = { name, std::string(a_twin.debugName), std::string(a_twin.resource), name + " cannot be described", name + " could not be imported",
 				a_twin.target, a_twin.nearTest, a_twin.graph };
@@ -208,7 +208,7 @@ namespace DCLF::Extensions
 			const bool classValid = a_port.objectClass < Api::ObjectClass::Count && a_lists.objectClasses[static_cast<std::size_t>(a_port.objectClass)];
 			if (a_port.shaderType == RE::BSShader::Type::Lighting || a_port.shaderType >= RE::BSShader::Type::Total || !classValid || a_port.name.empty() || !a_port.propertyRtti ||
 				!a_port.materialVtable || !a_port.capture || !a_port.derive || !a_port.evaluate || !a_port.shading || !spaceValid(a_port.vs) || !spaceValid(a_port.ps))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete material port", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete material port", a_who));
 			// Each frame variable must name a variable of its stage and read only bytes its material has.
 			const auto readable = [&](const std::array<Api::MaterialFrameComponent, 4>& a_components) {
 				return std::all_of(a_components.begin(), a_components.end(), [&](const Api::MaterialFrameComponent& a_component) {
@@ -217,17 +217,17 @@ namespace DCLF::Extensions
 				});
 			};
 			if (a_port.frameVariables.size() > Api::kMaxMaterialFrameVariables)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material port declares more than kMaxMaterialFrameVariables frame variables: grow it first", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material port declares more than kMaxMaterialFrameVariables frame variables: grow it first", a_who));
 			for (const auto& variable : a_port.frameVariables)
 				if (variable.variable >= (variable.pixel ? a_port.ps.variables : a_port.vs.variables) || variable.first >= variable.end ||
 					variable.end > a_port.materialBytes || !readable(variable.components) || !readable(variable.alternate))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material port declares a frame variable outside its space or material", a_who));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material port declares a frame variable outside its space or material", a_who));
 			for (std::size_t kind = 1; kind < a_lists.materialPortCount; ++kind)
 				if (a_lists.materialPorts[kind].shaderType == a_port.shaderType)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material port takes shader type {}, which another port has", a_who,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material port takes shader type {}, which another port has", a_who,
 						static_cast<std::uint32_t>(a_port.shaderType)));
 			if (a_lists.materialPortCount >= kMaterialKinds)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material port is one past kMaterialKinds: grow it first", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material port is one past kMaterialKinds: grow it first", a_who));
 			a_lists.materialPorts[a_lists.materialPortCount] = a_port;
 			return static_cast<std::uint8_t>(a_lists.materialPortCount++);
 		}
@@ -269,12 +269,12 @@ namespace DCLF::Extensions
 		{
 			if (a_family.family >= Api::ProgramFamily::Count || a_family.shaderType == RE::BSShader::Type::Lighting || a_family.shaderType >= RE::BSShader::Type::Total ||
 				a_family.name.empty() || a_family.keyName.empty() || a_family.sourcePath.empty() || !a_family.programSource)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete program family", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete program family", a_who));
 			auto& entry = a_lists.programFamilies[static_cast<std::size_t>(a_family.family)];
 			if (entry.family != Api::ProgramFamily::Count)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes program family {}, which {} has", a_who, a_family.name, entry.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes program family {}, which {} has", a_who, a_family.name, entry.name));
 			if (ProgramShaderTaken(a_lists, a_family.shaderType))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s program family {} takes shader type {}, which another family has", a_who, a_family.name,
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s program family {} takes shader type {}, which another family has", a_who, a_family.name,
 					static_cast<std::uint32_t>(a_family.shaderType)));
 			entry = a_family;
 		}
@@ -283,10 +283,10 @@ namespace DCLF::Extensions
 		void AddFrameConstantRow(Lists& a_lists, std::string_view a_who, const Api::FrameConstantRow& a_row)
 		{
 			if (a_row.name.empty() || !a_row.sample || a_row.row < kFrameConstantRowFirst || a_row.row >= kFrameConstantRowsEnd)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame constant row", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete frame constant row", a_who));
 			for (const auto& row : a_lists.frameConstantRows)
 				if (row.row == a_row.row)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame constant row {} takes c{}, which {} has", a_who, a_row.name, a_row.row, row.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame constant row {} takes c{}, which {} has", a_who, a_row.name, a_row.row, row.name));
 			a_lists.frameConstantRows.push_back({ std::string(a_row.name), a_row.row, a_row.sample });
 		}
 
@@ -311,24 +311,24 @@ namespace DCLF::Extensions
 			const auto first = a_buffers.firstRegister;
 			if (a_buffers.name.empty() || !a_buffers.indices || !count || gap || first < kPixelTextureSlots || first >= kTextureRegisters ||
 				count > kTextureRegisters - first)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete frame graph buffers", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete frame graph buffers", a_who));
 			for (std::uint32_t r = first; r < first + count; ++r) {
 				if (CoreFrameRegister(r))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame graph buffers {} take t{}, which Core keeps", a_who, a_buffers.name, r));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame graph buffers {} take t{}, which Core keeps", a_who, a_buffers.name, r));
 				for (const auto& binding : a_lists.frameBindings)
 					if (binding.textureRegister == r)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r, binding.name));
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r, binding.name));
 				if (const auto texture = a_lists.frameTextureIndices[r]; texture != kNoFrameTexture)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r,
 						a_lists.frameTextures[texture].name));
 				if (const auto* other = GraphBuffersAt(a_lists, r))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r, other->name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r, other->name));
 				if (const auto* contributor = MaterialRegisterAt(a_lists, r))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r, contributor->name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame graph buffers {} take t{}, which {} has", a_who, a_buffers.name, r, contributor->name));
 			}
 			// A commit keeps each registration's indices in a fixed array.
 			if (a_lists.frameGraphBuffers.size() >= kFrameGraphBufferSlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame graph buffers {} are one past kFrameGraphBufferSlots: grow it first", a_who, a_buffers.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame graph buffers {} are one past kFrameGraphBufferSlots: grow it first", a_who, a_buffers.name));
 			auto& entry = a_lists.frameGraphBuffers.emplace_back();
 			entry.name = std::string(a_buffers.name);
 			entry.firstRegister = first;
@@ -343,24 +343,25 @@ namespace DCLF::Extensions
 		{
 			const auto r = a_texture.textureRegister;
 			const bool graphIds = std::ranges::any_of(a_texture.graphResources, [](std::string_view a_id) { return !a_id.empty(); });
-			if (a_texture.name.empty() || (!a_texture.view && !graphIds) || r < kPixelTextureSlots || r >= kTextureRegisters)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame texture", a_who));
+			if (a_texture.name.empty() || (!a_texture.view && !graphIds) || (a_texture.graphId && !graphIds) || r < kPixelTextureSlots || r >= kTextureRegisters)
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete frame texture", a_who));
 			if (CoreFrameRegister(r))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which Core keeps", a_who, a_texture.name, r));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame texture {} takes t{}, which Core keeps", a_who, a_texture.name, r));
 			for (const auto& binding : a_lists.frameBindings)
 				if (binding.textureRegister == r)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, binding.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, binding.name));
 			if (const auto other = a_lists.frameTextureIndices[r]; other != kNoFrameTexture)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, a_lists.frameTextures[other].name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, a_lists.frameTextures[other].name));
 			if (const auto* buffers = GraphBuffersAt(a_lists, r))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, buffers->name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, buffers->name));
 			if (const auto* contributor = MaterialRegisterAt(a_lists, r))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, contributor->name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame texture {} takes t{}, which {} has", a_who, a_texture.name, r, contributor->name));
 			// A colour commit samples every view into a fixed array.
 			if (a_lists.frameTextures.size() >= kFrameTextureSlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame texture {} is one past kFrameTextureSlots: grow it first", a_who, a_texture.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame texture {} is one past kFrameTextureSlots: grow it first", a_who, a_texture.name));
 			a_lists.frameTextureIndices[r] = static_cast<std::uint8_t>(a_lists.frameTextures.size());
-			a_lists.frameTextures.push_back({ std::string(a_texture.name), r, a_texture.view, a_texture.capturedWhenNull, a_texture.graphResources });
+			a_lists.frameTextures.push_back({ std::string(a_texture.name), r, a_texture.view, a_texture.capturedWhenNull, a_texture.graphResources,
+				a_texture.facesGraphResources, a_texture.graphId });
 		}
 
 		/** @brief Whether a_contributor has everything its stage needs and ascending registers within t16-t127. */
@@ -383,33 +384,33 @@ namespace DCLF::Extensions
 		void AddMaterialContributor(Lists& a_lists, std::string_view a_who, const Api::MaterialContributor& a_contributor)
 		{
 			if (!MaterialContributorComplete(a_contributor))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete material contributor", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete material contributor", a_who));
 			const auto registers = a_contributor.textureRegisters;
 			for (const std::uint32_t r : registers) {
 				if (CoreFrameRegister(r))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} takes t{}, which Core keeps", a_who, a_contributor.name, r));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material contributor {} takes t{}, which Core keeps", a_who, a_contributor.name, r));
 				for (const auto& binding : a_lists.frameBindings)
 					if (binding.textureRegister == r)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} takes t{}, which {} has", a_who, a_contributor.name, r, binding.name));
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material contributor {} takes t{}, which {} has", a_who, a_contributor.name, r, binding.name));
 				if (const auto texture = a_lists.frameTextureIndices[r]; texture != kNoFrameTexture)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} takes t{}, which {} has", a_who, a_contributor.name, r,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material contributor {} takes t{}, which {} has", a_who, a_contributor.name, r,
 						a_lists.frameTextures[texture].name));
 				if (const auto* buffers = GraphBuffersAt(a_lists, r))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} takes t{}, which {} has", a_who, a_contributor.name, r, buffers->name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material contributor {} takes t{}, which {} has", a_who, a_contributor.name, r, buffers->name));
 			}
 			if (!registers.empty())
 				for (const auto& other : a_lists.materialContributors)
 					if (!other.registers.empty() && registers.front() <= other.registers.back() && other.registers.front() <= registers.back())
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} takes t{}-t{}, which overlap {}'s", a_who, a_contributor.name,
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material contributor {} takes t{}-t{}, which overlap {}'s", a_who, a_contributor.name,
 							registers.front(), registers.back(), other.name));
 			// The feature texture slots are frozen by the row header and the HLSL decode.
 			if (a_lists.materialTextureRegisters + registers.size() > kFeatureTextureSlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} takes registers past kFeatureTextureSlots", a_who, a_contributor.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material contributor {} takes registers past kFeatureTextureSlots", a_who, a_contributor.name));
 			if (a_lists.materialWitnessWords + a_contributor.witnessWords > kMaterialContributorWitnessWords)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} writes witness words past kMaterialContributorWitnessWords: grow it first",
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material contributor {} writes witness words past kMaterialContributorWitnessWords: grow it first",
 					a_who, a_contributor.name));
 			if (a_lists.materialContributors.size() >= kMaterialContributorSlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s material contributor {} is one past kMaterialContributorSlots: grow it first", a_who,
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s material contributor {} is one past kMaterialContributorSlots: grow it first", a_who,
 					a_contributor.name));
 			a_lists.materialTextureRegisters += static_cast<std::uint32_t>(registers.size());
 			a_lists.materialWitnessWords += a_contributor.witnessWords;
@@ -432,9 +433,9 @@ namespace DCLF::Extensions
 		{
 			auto& rules = a_lists.lightingJoinRules;
 			if (a_fact.name.empty() || !a_fact.sample)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete reference fact", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete reference fact", a_who));
 			if (rules.factCount >= kReferenceFactSlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s reference fact {} is one past kReferenceFactSlots: grow it first", a_who, a_fact.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s reference fact {} is one past kReferenceFactSlots: grow it first", a_who, a_fact.name));
 			const std::uint32_t index = rules.factCount++;
 			rules.facts[index] = { std::string(a_fact.name), a_fact.none, a_fact.sample };
 			rules.factsNone |= a_fact.none ? 1u << index : 0u;
@@ -446,11 +447,11 @@ namespace DCLF::Extensions
 		{
 			auto& rules = a_lists.lightingJoinRules;
 			if (a_bits.name.empty() || !a_bits.bits || !a_bits.capture)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete property bits", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete property bits", a_who));
 			if (a_bits.bits & rules.propertyBitsTaken)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s property bits {} ({:#x}) take bits another registration has", a_who, a_bits.name, a_bits.bits));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s property bits {} ({:#x}) take bits another registration has", a_who, a_bits.name, a_bits.bits));
 			if (rules.propertyBitsCount >= kPropertyBitsSlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s property bits {} are one past kPropertyBitsSlots: grow it first", a_who, a_bits.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s property bits {} are one past kPropertyBitsSlots: grow it first", a_who, a_bits.name));
 			rules.propertyBits[rules.propertyBitsCount++] = { std::string(a_bits.name), a_bits.bits, a_bits.capture };
 			rules.propertyBitsTaken = static_cast<std::uint8_t>(rules.propertyBitsTaken | a_bits.bits);
 		}
@@ -460,13 +461,13 @@ namespace DCLF::Extensions
 		{
 			auto& rules = a_lists.lightingJoinRules;
 			if (!std::has_single_bit(a_flag.objectFlag) || !std::has_single_bit(a_flag.recordFlag) || !a_flag.applies)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete Lighting object flag", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete Lighting object flag", a_who));
 			for (std::uint32_t i = 0; i < rules.objectFlagCount; ++i)
 				if (rules.objectFlags[i].objectFlag == a_flag.objectFlag || rules.objectFlags[i].recordFlag == a_flag.recordFlag)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s Lighting object flag {:#x} (record flag {:#x}) is another registration's", a_who,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s Lighting object flag {:#x} (record flag {:#x}) is another registration's", a_who,
 						a_flag.objectFlag, a_flag.recordFlag));
 			if (rules.objectFlagCount >= kLightingObjectFlagSlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s Lighting object flag {:#x} is one past kLightingObjectFlagSlots: grow it first", a_who,
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s Lighting object flag {:#x} is one past kLightingObjectFlagSlots: grow it first", a_who,
 					a_flag.objectFlag));
 			rules.objectFlags[rules.objectFlagCount++] = a_flag;
 		}
@@ -478,12 +479,12 @@ namespace DCLF::Extensions
 			auto& masks = rules.passMasks;
 			const bool empty = !a_rules.pixelKeep && !a_rules.rawWhen && !a_rules.rawSet && !a_rules.rawFlip && !a_rules.derivePass;
 			if (empty || (a_rules.pixelKeep & ~kLightingPixelSplitBits) || ((a_rules.rawSet || a_rules.rawFlip) && !a_rules.rawWhen))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete Lighting pass rules", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete Lighting pass rules", a_who));
 			// SetupGeometry's raw technique takes only one rule.
 			if (a_rules.rawWhen && masks.rawWhen)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s Lighting pass rules give a raw technique rule, which another registration has", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s Lighting pass rules give a raw technique rule, which another registration has", a_who));
 			if (a_rules.derivePass && rules.deriveCount >= kLightingPassDeriveSlots)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s Lighting pass rules' derivePass is one past kLightingPassDeriveSlots: grow it first", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s Lighting pass rules' derivePass is one past kLightingPassDeriveSlots: grow it first", a_who));
 			masks.pixelKeep |= a_rules.pixelKeep;
 			if (a_rules.rawWhen)
 				masks = { masks.pixelKeep, a_rules.rawWhen, a_rules.rawSet, a_rules.rawFlip };
@@ -496,12 +497,12 @@ namespace DCLF::Extensions
 		{
 			const auto stage = static_cast<std::size_t>(a_buffer.stage);
 			if (a_buffer.name.empty() || stage >= a_lists.perDrawMasks.size() || a_buffer.constantRegister >= kConstantBufferRegisters)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} declared an incomplete per-draw buffer", a_who));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} declared an incomplete per-draw buffer", a_who));
 			const std::uint32_t bit = 1u << a_buffer.constantRegister;
 			if (CorePerDrawMask(a_buffer.stage) & bit)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s per-draw buffer {} takes b{}, which Core binds per draw", a_who, a_buffer.name, a_buffer.constantRegister));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s per-draw buffer {} takes b{}, which Core binds per draw", a_who, a_buffer.name, a_buffer.constantRegister));
 			if (a_lists.perDrawMasks[stage] & bit)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s per-draw buffer {} takes b{}, which another declaration has", a_who, a_buffer.name,
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s per-draw buffer {} takes b{}, which another declaration has", a_who, a_buffer.name,
 					a_buffer.constantRegister));
 			a_lists.perDrawMasks[stage] |= bit;
 		}
@@ -521,7 +522,7 @@ namespace DCLF::Extensions
 			Api::FrameValuePoolId RegisterFrameValuePool(const Api::FrameValuePool& a_pool) override
 			{
 				if (a_pool.name.empty() || !a_pool.stride || !a_pool.kick || !a_pool.sample || !a_pool.send)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame-value pool", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete frame-value pool", feature));
 				lists.pools.push_back({ std::string(a_pool.name), a_pool.stride, a_pool.deviceAddress, a_pool.unorderedAccess, a_pool.frameStart, a_pool.kick, a_pool.sample, a_pool.send });
 				return { static_cast<std::uint32_t>(lists.pools.size() - 1) };
 			}
@@ -532,16 +533,16 @@ namespace DCLF::Extensions
 			void RegisterPayloadProduct(const Api::PayloadProduct& a_product) override
 			{
 				if (a_product.name.empty() || !a_product.build || !a_product.install)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete payload product", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete payload product", feature));
 				lists.products.push_back({ std::string(a_product.name), a_product.build, a_product.carried, a_product.install });
 			}
 
 			Api::SceneResourcesId RegisterSceneResources(const Api::SceneResources& a_resources) override
 			{
 				if (a_resources.name.empty() || !a_resources.setup || !a_resources.postInputs != !a_resources.inputWords)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete scene resources", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete scene resources", feature));
 				if (lists.sceneResourceInputs + a_resources.inputWords > kSceneResourceInputWords)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s scene resources {} post words past kSceneResourceInputWords: grow it first", feature, a_resources.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s scene resources {} post words past kSceneResourceInputWords: grow it first", feature, a_resources.name));
 				lists.sceneResources.push_back({ std::string(a_resources.name), a_resources.setup, a_resources.registerGraph, a_resources.require, a_resources.fit,
 					a_resources.postInputs, lists.sceneResourceInputs, a_resources.inputWords, a_resources.latched, a_resources.sealed });
 				lists.sceneResourceInputs += a_resources.inputWords;
@@ -551,31 +552,31 @@ namespace DCLF::Extensions
 			void RegisterCommitHook(const Api::CommitHook& a_hook) override
 			{
 				if (a_hook.name.empty() || !a_hook.commit)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete commit hook", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete commit hook", feature));
 				lists.commitHooks.push_back({ std::string(a_hook.name), a_hook.commit });
 			}
 
 			void RegisterFrameBinding(const Api::FrameBinding& a_binding) override
 			{
 				if (a_binding.name.empty() || !a_binding.select || a_binding.textureRegister >= kTextureRegisters)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame binding", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete frame binding", feature));
 				if (CoreFrameRegister(a_binding.textureRegister))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame binding {} takes t{}, which Core keeps", feature, a_binding.name, a_binding.textureRegister));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame binding {} takes t{}, which Core keeps", feature, a_binding.name, a_binding.textureRegister));
 				for (const auto& binding : lists.frameBindings)
 					if (binding.textureRegister == a_binding.textureRegister)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
 							binding.name));
 				if (const auto texture = lists.frameTextureIndices[a_binding.textureRegister]; texture != kNoFrameTexture)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
 						lists.frameTextures[texture].name));
 				if (const auto* buffers = GraphBuffersAt(lists, a_binding.textureRegister))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
 						buffers->name));
 				if (const auto* contributor = MaterialRegisterAt(lists, a_binding.textureRegister))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame binding {} takes t{}, which {} has", feature, a_binding.name, a_binding.textureRegister,
 						contributor->name));
 				if (lists.frameBindings.size() >= kFrameBindingSlots)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame binding {} is one past kFrameBindingSlots: grow it first", feature, a_binding.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame binding {} is one past kFrameBindingSlots: grow it first", feature, a_binding.name));
 				lists.frameBindings.push_back({ std::string(a_binding.name), a_binding.textureRegister, a_binding.select });
 			}
 
@@ -584,20 +585,15 @@ namespace DCLF::Extensions
 				return DCLF::RegisterSwitch(a_switch, feature);
 			}
 
-			Api::ToggleId RegisterToggle(const Api::FeatureToggle& a_toggle) override
-			{
-				return DCLF::RegisterToggle(a_toggle, feature);
-			}
-
 			Api::ClassifyInputId RegisterClassifyInput(const Api::ClassifyInputContribution& a_input) override
 			{
 				if (a_input.name.empty() || !a_input.sample)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete classify input", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete classify input", feature));
 				if (lists.classifyInputs.size() >= kClassifyInputSlots)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s classify input {} is one past kClassifyInputSlots: grow it first", feature, a_input.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s classify input {} is one past kClassifyInputSlots: grow it first", feature, a_input.name));
 				for (const auto& input : lists.classifyInputs)
 					if (input.name == a_input.name)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s classify input {} has a name another input has", feature, a_input.name));
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s classify input {} has a name another input has", feature, a_input.name));
 				lists.classifyInputs.push_back({ std::string(a_input.name), a_input.sample });
 				return { static_cast<std::uint32_t>(lists.classifyInputs.size() - 1) };
 			}
@@ -605,14 +601,14 @@ namespace DCLF::Extensions
 			Api::ClassifyInputId NeedClassifyInput(std::string_view a_name) override
 			{
 				if (a_name.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} needs a classify input without a name", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} needs a classify input without a name", feature));
 				// A name needed twice counts as one need.
 				std::size_t slot = 0;
 				while (slot < lists.classifyInputNeeds.size() && lists.classifyInputNeeds[slot] != a_name)
 					++slot;
 				if (slot == lists.classifyInputNeeds.size()) {
 					if (slot >= kClassifyInputNeedSlots)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s need of classify input {} is one past kClassifyInputNeedSlots: grow it first", feature, a_name));
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s need of classify input {} is one past kClassifyInputNeedSlots: grow it first", feature, a_name));
 					lists.classifyInputNeeds.emplace_back(a_name);
 				}
 				return { kClassifyInputNeedBit | static_cast<std::uint32_t>(slot) };
@@ -623,18 +619,18 @@ namespace DCLF::Extensions
 			void RegisterLightVolumes(const Api::LightVolumesContribution& a_volumes) override
 			{
 				if (a_volumes.name.empty() || !a_volumes.sample)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete light volumes contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete light volumes contribution", feature));
 				if (!lists.lightVolumes.name.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes light volumes {}, which {} has", feature, a_volumes.name, lists.lightVolumes.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes light volumes {}, which {} has", feature, a_volumes.name, lists.lightVolumes.name));
 				lists.lightVolumes = a_volumes;
 			}
 
 			void RegisterSunVolume(const Api::SunVolumeContribution& a_volume) override
 			{
 				if (a_volume.name.empty() || !a_volume.cascades || !a_volume.entryPlanes)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete sun volume contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete sun volume contribution", feature));
 				if (!lists.sunVolume.name.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes sun volume {}, which {} has", feature, a_volume.name, lists.sunVolume.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes sun volume {}, which {} has", feature, a_volume.name, lists.sunVolume.name));
 				lists.sunVolume = a_volume;
 			}
 
@@ -643,19 +639,19 @@ namespace DCLF::Extensions
 				// Its input must be registered first, so an integration registers its own input before this.
 				if (a_value.name.empty() || (!a_value.ancestorRtti[0] && !a_value.ancestorRtti[1]) || !a_value.generation || !a_value.fill ||
 					a_value.whileOn.index >= lists.classifyInputs.size())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete ancestor value", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete ancestor value", feature));
 				if (!lists.ancestorValue.name.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes ancestor value {}, which {} has", feature, a_value.name, lists.ancestorValue.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes ancestor value {}, which {} has", feature, a_value.name, lists.ancestorValue.name));
 				lists.ancestorValue = a_value;
 			}
 
 			void RegisterLatePose(const Api::LatePoseContribution& a_pose) override
 			{
 				if (a_pose.name.empty() || !a_pose.root)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete late pose", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete late pose", feature));
 				for (const auto& other : lists.latePoses)
 					if (other.name == a_pose.name)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered late pose {} twice", feature, a_pose.name));
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered late pose {} twice", feature, a_pose.name));
 				lists.latePoses.push_back(a_pose);
 			}
 
@@ -667,10 +663,10 @@ namespace DCLF::Extensions
 				// A component's lines replace text or lines at a coordinator point, and the component must be registered first.
 				const bool component = Api::ReportPointTakesComponents(point) && a_lines.componentText;
 				if (component && (!a_lines.component || a_lines.component.index >= lists.coordinatorComponents.size()))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s report lines {} name no registered component", feature, a_lines.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s report lines {} name no registered component", feature, a_lines.name));
 				if (a_lines.name.empty() || (component ? a_lines.text || a_lines.lines :
 				                                        text ? !a_lines.text || a_lines.lines || a_lines.componentText : !a_lines.lines || a_lines.text || a_lines.componentText))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete report lines", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete report lines", feature));
 				lists.reportLines.push_back({ std::string(a_lines.name), a_lines.point, a_lines.lines, a_lines.text, a_lines.component, a_lines.componentText });
 			}
 
@@ -687,11 +683,11 @@ namespace DCLF::Extensions
 			{
 				// A SceneStack channel's events live on the scene's stack, so there is no queue to drain.
 				if (a_channel.name.empty() || (a_channel.kind != Api::ChannelKind::SceneStack && !a_channel.drain))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete engine channel", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete engine channel", feature));
 				if (FindEngineChannel(a_channel.name))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s engine channel {} has a name another channel has", feature, a_channel.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s engine channel {} has a name another channel has", feature, a_channel.name));
 				if (lists.engineChannels.size() >= kEngineChannelSlots)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s engine channel {} is one past kEngineChannelSlots: grow it first", feature, a_channel.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s engine channel {} is one past kEngineChannelSlots: grow it first", feature, a_channel.name));
 				lists.engineChannels.push_back({ std::string(a_channel.name), a_channel.kind, a_channel.apply, a_channel.wake, a_channel.namesKeys,
 					a_channel.drain, a_channel.push });
 				return { static_cast<std::uint32_t>(lists.engineChannels.size() - 1) };
@@ -700,14 +696,14 @@ namespace DCLF::Extensions
 			Api::EngineChannelId NeedEngineChannel(std::string_view a_name) override
 			{
 				if (a_name.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} needs an engine channel without a name", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} needs an engine channel without a name", feature));
 				// A name needed twice counts as one need.
 				std::size_t slot = 0;
 				while (slot < lists.engineChannelNeeds.size() && lists.engineChannelNeeds[slot] != a_name)
 					++slot;
 				if (slot == lists.engineChannelNeeds.size()) {
 					if (slot >= kEngineChannelNeedSlots)
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s need of engine channel {} is one past kEngineChannelNeedSlots: grow it first", feature, a_name));
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s need of engine channel {} is one past kEngineChannelNeedSlots: grow it first", feature, a_name));
 					lists.engineChannelNeeds.emplace_back(a_name);
 				}
 				return { kEngineChannelNeedBit | static_cast<std::uint32_t>(slot) };
@@ -716,12 +712,11 @@ namespace DCLF::Extensions
 			void RegisterShowVeto(const Api::ShowVeto& a_veto) override
 			{
 				if (!a_veto.open || !a_veto.vetoes)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete show veto", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete show veto", feature));
 				// The stubs load only one veto's cells.
 				if (std::exchange(lists.showVetoRegistered, true))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered a show veto, which another registration has", feature));
-				lists.showVetoHideSites.assign(a_veto.hideSites.begin(), a_veto.hideSites.end());
-				lists.showVeto = { a_veto.open, a_veto.vetoes, a_veto.engineHid, lists.showVetoHideSites };
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered a show veto, which another registration has", feature));
+				lists.showVeto = { a_veto.open, a_veto.vetoes };
 			}
 
 			std::uint32_t ReserveHiddenSite() override { return HiddenSourceSites() + lists.reservedHiddenSites++; }
@@ -740,12 +735,12 @@ namespace DCLF::Extensions
 			Api::TableFamilyId RegisterTableFamily(const Api::TableFamily& a_family) override
 			{
 				if (a_family.name.empty() || !a_family.make || !a_family.assign || !a_family.clear || !a_family.recycle)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete table family", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete table family", feature));
 				if (lists.tableFamilies.size() >= kTableFamilySlots)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s table family {} is one past kTableFamilySlots: grow it first", feature, a_family.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s table family {} is one past kTableFamilySlots: grow it first", feature, a_family.name));
 				// The row needs a bit above its shift, and a shifted or biased row needs a record word to ride in.
 				if (a_family.recordShift >= 32 || ((a_family.recordShift || a_family.recordBias || !a_family.recordTag) && a_family.recordWord == ~0u))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s table family {} packs its record reference past the word, or into none", feature, a_family.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s table family {} packs its record reference past the word, or into none", feature, a_family.name));
 				lists.tableFamilies.push_back({ std::string(a_family.name), a_family.make, a_family.assign, a_family.assignRow, a_family.same, a_family.clear, a_family.recycle, a_family.rowsEnd,
 					a_family.recordWord, a_family.recordShift, a_family.recordBias, a_family.recordTag, a_family.journaled, a_family.rows });
 				return { static_cast<std::uint32_t>(lists.tableFamilies.size() - 1) };
@@ -755,15 +750,15 @@ namespace DCLF::Extensions
 			{
 				const auto& followed = a_component.entryClass;
 				if (a_component.name.empty() || !a_component.make || followed.follows >= Api::EntryClass::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete coordinator component", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete coordinator component", feature));
 				// Only one component may follow an entry class.
 				if (followed.follows != Api::EntryClass::None)
 					for (const auto& component : lists.coordinatorComponents)
 						if (component.entryClass.follows == followed.follows)
-							stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s component {} follows entry class {}, which {} follows", feature, a_component.name,
+							::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s component {} follows entry class {}, which {} follows", feature, a_component.name,
 								static_cast<std::uint32_t>(followed.follows), component.name));
 				lists.coordinatorComponents.push_back({ std::string(a_component.name), a_component.make, a_component.slots, a_component.residency, a_component.accumulate, a_component.walk,
-					a_component.dense, a_component.retirement, followed, a_component.events, a_component.commit, a_component.adoption });
+					a_component.retirement, followed, a_component.events, a_component.commit, a_component.adoption });
 				if (followed.follows != Api::EntryClass::None)
 					lists.entryClassesTaken[static_cast<std::size_t>(followed.follows)] = followed.takes;
 				return { static_cast<std::uint32_t>(lists.coordinatorComponents.size() - 1) };
@@ -772,60 +767,48 @@ namespace DCLF::Extensions
 			void RegisterTechnique(const Api::TechniqueContribution& a_technique) override
 			{
 				// A property flag rule must name the geometry type its flagged objects must be.
-				if (a_technique.technique >= kTechniqueSlots || !a_technique.toggle || (a_technique.propertyFlags && a_technique.geometryType >= kGeometryTypeSlots))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete technique contribution", feature));
+				if (a_technique.technique >= kTechniqueSlots || (a_technique.propertyFlags && a_technique.geometryType >= kGeometryTypeSlots))
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete technique contribution", feature));
 				auto& entry = lists.techniques[a_technique.technique];
-				if (entry.toggle)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes technique {}, which another feature has", feature, a_technique.technique));
-				entry = { a_technique.toggle, a_technique.objectFlags, a_technique.extras };
+				if (entry.taken)
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes technique {}, which another feature has", feature, a_technique.technique));
+				entry = { true, a_technique.objectFlags, a_technique.extras };
 				// Techniques that share a rule, like LODLand and LODLandNoise, add it once.
 				if (a_technique.propertyFlags) {
-					const PropertyFlagRule rule{ a_technique.propertyFlags, a_technique.geometryType, a_technique.toggle };
+					const PropertyFlagRule rule{ a_technique.propertyFlags, a_technique.geometryType };
 					const auto rules = std::span(lists.propertyFlagRules).first(lists.propertyFlagRuleCount);
 					const bool known = std::ranges::any_of(rules, [&rule](const PropertyFlagRule& a_rule) {
-						return a_rule.propertyFlags == rule.propertyFlags && a_rule.geometryType == rule.geometryType && a_rule.toggle.bit == rule.toggle.bit;
+						return a_rule.propertyFlags == rule.propertyFlags && a_rule.geometryType == rule.geometryType;
 					});
 					if (!known)
 						lists.propertyFlagRules[lists.propertyFlagRuleCount++] = rule;
 				}
 			}
 
-			void RegisterTechniqueGate(const Api::TechniqueGate& a_gate) override
-			{
-				// The gated technique must already be registered, so an integration can gate a feature's technique.
-				if (a_gate.technique >= kTechniqueSlots || !lists.techniques[a_gate.technique].toggle || a_gate.whileOn.index >= lists.classifyInputs.size() || !a_gate.needs)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete technique gate", feature));
-				auto& entry = lists.techniques[a_gate.technique];
-				if (entry.gateNeeds)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} gates technique {}, which another gate has", feature, a_gate.technique));
-				entry.gateWhile = a_gate.whileOn;
-				entry.gateNeeds = a_gate.needs;
-			}
-
 			void RegisterGeometryType(const Api::GeometryTypeContribution& a_type) override
 			{
-				// A toggle is required unless the contribution only names an entry class, which needs its parent kinds.
+				// A type is ported unless the contribution only names an entry class, which needs its parent kinds.
 				const auto& entry = a_type.entry;
 				const bool entryValid = entry.entryClass < Api::EntryClass::Count &&
 				                        (entry.entryClass == Api::EntryClass::None ? !entry.parentKind && !entry.perFrame && !entry.holdsParent : entry.parentKind != 0);
-				const bool classValid = a_type.toggle ||
+				const bool classValid = a_type.ported ||
 				                        (!a_type.propertyFlags && a_type.itemClass == Api::FrameValueItemClass::None && !a_type.moves && !a_type.ranges &&
 				                            entry.entryClass != Api::EntryClass::None);
 				if (a_type.geometryType >= kGeometryTypeSlots || a_type.itemClass >= Api::FrameValueItemClass::Count || !entryValid || !classValid)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete geometry type contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete geometry type contribution", feature));
 				auto& contribution = lists.geometryTypeContributions[a_type.geometryType];
 				if (contribution.geometryType != 0xFF)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes geometry type {}, which another feature has", feature, static_cast<std::uint32_t>(a_type.geometryType)));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes geometry type {}, which another feature has", feature, static_cast<std::uint32_t>(a_type.geometryType)));
 				contribution = a_type;
-				lists.geometryTypes[a_type.geometryType] = a_type.toggle;
+				lists.geometryTypes[a_type.geometryType] = a_type.ported;
 				// One rule per entry class. A second type naming it must name it the same way.
 				if (entry.entryClass != Api::EntryClass::None) {
 					if (lists.ownerClassRegistered[static_cast<std::size_t>(entry.entryClass)])
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s geometry type {} names entry class {}, an owner class", feature,
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s geometry type {} names entry class {}, an owner class", feature,
 							static_cast<std::uint32_t>(a_type.geometryType), static_cast<std::uint32_t>(entry.entryClass)));
 					auto& rule = lists.entryClassRules[static_cast<std::size_t>(entry.entryClass)];
 					if (rule.entryClass != Api::EntryClass::None && (rule.perFrame != entry.perFrame || rule.holdsParent != entry.holdsParent))
-						stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s geometry type {} names entry class {} unlike another contribution", feature,
+						::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s geometry type {} names entry class {} unlike another contribution", feature,
 							static_cast<std::uint32_t>(a_type.geometryType), static_cast<std::uint32_t>(entry.entryClass)));
 					rule = entry;
 				}
@@ -833,33 +816,33 @@ namespace DCLF::Extensions
 
 			void RegisterParent(const Api::ParentContribution& a_parent) override
 			{
-				if (a_parent.parent >= Api::EngineParent::Count || a_parent.leaves >= Api::ParentLeaves::Count || !a_parent.toggle)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete parent contribution", feature));
-				auto& toggle = lists.parents[static_cast<std::size_t>(a_parent.parent)][static_cast<std::size_t>(a_parent.leaves)];
-				if (toggle)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes parent {} leaves {}, which another feature has", feature,
+				if (a_parent.parent >= Api::EngineParent::Count || a_parent.leaves >= Api::ParentLeaves::Count)
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete parent contribution", feature));
+				auto& taken = lists.parents[static_cast<std::size_t>(a_parent.parent)][static_cast<std::size_t>(a_parent.leaves)];
+				if (taken)
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes parent {} leaves {}, which another feature has", feature,
 						static_cast<std::uint32_t>(a_parent.parent), static_cast<std::uint32_t>(a_parent.leaves)));
-				toggle = a_parent.toggle;
+				taken = true;
 			}
 
 			void RegisterObjectClass(const Api::ObjectClassContribution& a_class) override
 			{
-				if (a_class.objectClass >= Api::ObjectClass::Count || !a_class.toggle)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete object class contribution", feature));
-				auto& toggle = lists.objectClasses[static_cast<std::size_t>(a_class.objectClass)];
-				if (toggle)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes object class {}, which another feature has", feature,
+				if (a_class.objectClass >= Api::ObjectClass::Count)
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete object class contribution", feature));
+				auto& taken = lists.objectClasses[static_cast<std::size_t>(a_class.objectClass)];
+				if (taken)
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes object class {}, which another feature has", feature,
 						static_cast<std::uint32_t>(a_class.objectClass)));
-				toggle = a_class.toggle;
+				taken = true;
 				lists.categoryRoots[static_cast<std::size_t>(a_class.objectClass)] = a_class.categoryRoot;
 			}
 
 			void RegisterUnheldRoots(const Api::UnheldRootsContribution& a_roots) override
 			{
 				if (!a_roots.owner || !a_roots.enter || !a_roots.leave || !a_roots.gather)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete unheld roots contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete unheld roots contribution", feature));
 				if (lists.unheldRoots.gather)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes unheld roots, which another feature has", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes unheld roots, which another feature has", feature));
 				lists.unheldRoots = a_roots;
 			}
 
@@ -868,12 +851,12 @@ namespace DCLF::Extensions
 				// ownMotion means no events, so it requires everyFrame.
 				if (a_class.entryClass == Api::EntryClass::None || a_class.entryClass >= Api::EntryClass::Count || a_class.name.empty() ||
 					(a_class.ownMotion && !a_class.everyFrame))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete entry class contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete entry class contribution", feature));
 				const auto index = static_cast<std::size_t>(a_class.entryClass);
 				auto& owner = lists.ownerClasses[a_class.ownerFormType];
 				if (lists.ownerClassRegistered[index] || owner.ownerClass != Api::EntryClass::None ||
 					lists.entryClassRules[index].entryClass != Api::EntryClass::None)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes entry class {} (form type {}), which another contribution has", feature,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes entry class {} (form type {}), which another contribution has", feature,
 						static_cast<std::uint32_t>(a_class.entryClass), static_cast<std::uint32_t>(a_class.ownerFormType)));
 				const bool first = std::ranges::none_of(lists.ownerClassRegistered, std::identity{});
 				lists.ownerClassRegistered[index] = true;
@@ -896,11 +879,11 @@ namespace DCLF::Extensions
 					return true;
 				};
 				if (a_shading.name.empty() || !a_shading.propertyFlags || !a_shading.derive || !blockValid())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete shading contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete shading contribution", feature));
 				if (a_shading.blockWords)
 					for (const auto& other : lists.shadingContributions)
 						if (other.blockWords)
-							stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s shading contribution {} claims the feature block, which {} has", feature,
+							::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s shading contribution {} claims the feature block, which {} has", feature,
 								a_shading.name, other.name));
 				lists.shadingContributions.push_back({ std::string(a_shading.name), a_shading.propertyFlags, a_shading.derive, a_shading.objectFlags,
 					a_shading.blockWords, a_shading.vsVariables });
@@ -909,9 +892,9 @@ namespace DCLF::Extensions
 			Api::FrameGlobalsSlot RegisterFrameGlobals(const Api::FrameGlobalsContribution& a_globals) override
 			{
 				if (a_globals.name.empty() || !a_globals.floats || !a_globals.capture)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame-globals contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete frame-globals contribution", feature));
 				if (lists.frameGlobalsFloats + a_globals.floats > kFrameGlobalsFloats)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s frame globals {} are past kFrameGlobalsFloats: grow it first", feature, a_globals.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s frame globals {} are past kFrameGlobalsFloats: grow it first", feature, a_globals.name));
 				const std::uint32_t first = lists.frameGlobalsFloats;
 				lists.frameGlobals.push_back({ std::string(a_globals.name), first, a_globals.floats, a_globals.capture });
 				lists.frameGlobalsFloats += a_globals.floats;
@@ -921,31 +904,30 @@ namespace DCLF::Extensions
 			void RegisterView(const Api::ViewContribution& a_view) override
 			{
 				// The phase and view bit are checked against Core's and other views' once all are registered.
-				if (a_view.view >= Api::EngineView::Count || !a_view.toggle || !a_view.phase || !a_view.shape.viewBits || !a_view.covered ||
+				if (a_view.view >= Api::EngineView::Count || !a_view.phase || !a_view.shape.viewBits || !a_view.covered ||
 					(a_view.membership == Api::ViewMembership::CategoryRoot && !a_view.captureRoot) ||
-					(a_view.withholding == Api::ViewWithholding::InMainRenderers && !a_view.accumulators) ||
-					(a_view.withholding != Api::ViewWithholding::OwnRenderers && a_view.residueDue))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete view contribution", feature));
+					(a_view.withholding == Api::ViewWithholding::InMainRenderers && !a_view.accumulators))
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete view contribution", feature));
 				auto& entry = lists.views[static_cast<std::size_t>(a_view.view)];
 				if (entry.view != Api::EngineView::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes view {}, which another feature has", feature, static_cast<std::uint32_t>(a_view.view)));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes view {}, which another feature has", feature, static_cast<std::uint32_t>(a_view.view)));
 				entry = a_view;
 			}
 
 			void RegisterViewWork(const Api::ViewWork& a_work) override
 			{
 				if (a_work.view >= Api::EngineView::Count || a_work.point >= Api::ViewPoint::Count || !a_work.run)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete view work", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete view work", feature));
 				lists.viewWork.push_back(a_work);
 			}
 
 			void RegisterViewRoot(const Api::ViewRootContribution& a_root) override
 			{
 				if (a_root.root >= Api::ViewRoot::Count || !a_root.owned)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete view root contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete view root contribution", feature));
 				// One owner per root, because a view's owned roots are its owners' answers.
 				if (ViewRootTaken(lists, a_root.root))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes view root {}, which another registration has", feature,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes view root {}, which another registration has", feature,
 						static_cast<std::uint32_t>(a_root.root)));
 				lists.viewRoots[static_cast<std::size_t>(a_root.root)] = a_root;
 			}
@@ -953,19 +935,19 @@ namespace DCLF::Extensions
 			void RegisterCullHiddenSource(const Api::CullHiddenSource& a_source) override
 			{
 				if (!a_source.nodes || a_source.bit > Api::CullHiddenBit::Hidden)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete cull hidden source", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete cull hidden source", feature));
 				lists.cullHiddenSources.push_back(a_source);
 			}
 
 			void RegisterOcclusionMap(const Api::OcclusionMapContribution& a_map) override
 			{
 				// The bits are checked against Core's and other views' once all are registered.
-				if (a_map.map >= Api::OcclusionMap::Count || !a_map.toggle || !a_map.available || !a_map.bits.phase || !a_map.bits.viewBit ||
-					!a_map.technique || !a_map.camera || !a_map.ownsAccumulator || (a_map.target == Api::OcclusionTarget::ImportedTexture && !a_map.importTarget))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete occlusion map contribution", feature));
+				if (a_map.map >= Api::OcclusionMap::Count || !a_map.available || !a_map.bits.phase || !a_map.bits.viewBit ||
+					!a_map.technique || !a_map.camera || (a_map.target == Api::OcclusionTarget::ImportedTexture && !a_map.importTarget))
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete occlusion map contribution", feature));
 				auto& entry = lists.occlusionMaps[static_cast<std::size_t>(a_map.map)];
 				if (entry.map != Api::OcclusionMap::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes occlusion map {}, which another feature has", feature, static_cast<std::uint32_t>(a_map.map)));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes occlusion map {}, which another feature has", feature, static_cast<std::uint32_t>(a_map.map)));
 				entry = a_map;
 			}
 
@@ -975,10 +957,10 @@ namespace DCLF::Extensions
 				const bool local = a_source.source == Api::ShadowSource::Spot || a_source.source == Api::ShadowSource::Point;
 				const bool sun = a_source.source == Api::ShadowSource::Sun;
 				if (a_source.source >= Api::ShadowSource::Count || !a_source.camera || (local && !a_source.lightKept) || sun != !!a_source.fullFrustumWindowEnd)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete shadow source contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete shadow source contribution", feature));
 				auto& entry = lists.shadowSources[static_cast<std::size_t>(a_source.source)];
 				if (entry.source != Api::ShadowSource::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes shadow source {}, which another feature has", feature,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes shadow source {}, which another feature has", feature,
 						static_cast<std::uint32_t>(a_source.source)));
 				entry = a_source;
 			}
@@ -986,9 +968,9 @@ namespace DCLF::Extensions
 			void RegisterShadowExclusion(const Api::ShadowExclusionContribution& a_exclusion) override
 			{
 				if (a_exclusion.name.empty() || !a_exclusion.build || !a_exclusion.publish || !a_exclusion.frameStart || !a_exclusion.listExclusion)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete shadow exclusion contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete shadow exclusion contribution", feature));
 				if (!lists.shadowExclusion.name.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes shadow exclusion {}, which {} has", feature, a_exclusion.name,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes shadow exclusion {}, which {} has", feature, a_exclusion.name,
 						lists.shadowExclusion.name));
 				lists.shadowExclusion = a_exclusion;
 			}
@@ -1007,17 +989,17 @@ namespace DCLF::Extensions
 					!lists.objectClasses[static_cast<std::size_t>(a_family.objectClass)] || a_family.resources.index >= lists.sceneResources.size() ||
 					!a_family.frame.decide || !a_family.frame.programSource || !main.declare || !main.revision || !main.record || !programValid ||
 					!DrawFamilyFacesComplete(a_family.faces))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete draw family contribution", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete draw family contribution", feature));
 				auto& entry = lists.drawFamilies[static_cast<std::size_t>(a_family.family)];
 				if (entry.family != Api::DrawFamily::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes draw family {}, which another registration has", feature,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes draw family {}, which another registration has", feature,
 						static_cast<std::uint32_t>(a_family.family)));
 				// Programs are found by shader type, and the faces' root has one owner.
 				if (ProgramShaderTaken(lists, program.shaderType))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s draw family {} takes shader type {}, which another family has", feature, program.name,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s draw family {} takes shader type {}, which another family has", feature, program.name,
 						static_cast<std::uint32_t>(program.shaderType)));
 				if (a_family.faces.root < Api::ViewRoot::Count && ViewRootTaken(lists, a_family.faces.root))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s draw family {} draws view root {}, which another registration has", feature, program.name,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s draw family {} draws view root {}, which another registration has", feature, program.name,
 						static_cast<std::uint32_t>(a_family.faces.root)));
 				entry = a_family;
 			}
@@ -1033,9 +1015,9 @@ namespace DCLF::Extensions
 				for (const auto& component : lists.coordinatorComponents)
 					followed = followed || (a_stream.entryClass != Api::EntryClass::None && component.entryClass.follows == a_stream.entryClass);
 				if (a_stream.name.empty() || !a_stream.select || !a_stream.upload || a_stream.resources.index >= lists.sceneResources.size() || !followed)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete vertex stream", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete vertex stream", feature));
 				if (lists.vertexStream.entryClass != Api::EntryClass::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes vertex stream {}, which {} has: Core's draws have one second stream", feature,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes vertex stream {}, which {} has: Core's draws have one second stream", feature,
 						a_stream.name, lists.vertexStream.name));
 				lists.vertexStream = a_stream;
 			}
@@ -1047,10 +1029,10 @@ namespace DCLF::Extensions
 				                       (!rule.pow2 || (std::has_single_bit(rule.maxUnits) && std::has_single_bit(rule.octaveSteps)));
 				if (a_rows.itemClass == Api::FrameValueItemClass::None || a_rows.itemClass >= Api::FrameValueItemClass::Count || a_rows.name.empty() || !ruleValid ||
 					!a_rows.geometrySource || !a_rows.beginRun || !a_rows.sampleChunk || !a_rows.endRun)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete palette rows class", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete palette rows class", feature));
 				auto& entry = lists.paletteRows[static_cast<std::size_t>(a_rows.itemClass) - 1];
 				if (entry.itemClass != Api::FrameValueItemClass::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes palette rows class {}, which {} has", feature,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes palette rows class {}, which {} has", feature,
 						static_cast<std::uint32_t>(a_rows.itemClass), entry.name));
 				entry = a_rows;
 			}
@@ -1064,9 +1046,9 @@ namespace DCLF::Extensions
 			{
 				if (a_field.field >= Api::ShadingRowField::Count || a_field.name.empty() || !a_field.capture ||
 					(a_field.members != Api::EntryClass::None && !a_field.membership) || a_field.members >= Api::EntryClass::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete shading field", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete shading field", feature));
 				if (std::exchange(lists.shadingFieldTaken[static_cast<std::size_t>(a_field.field)], true))
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes shading field {} ({}), which another registration has", feature,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes shading field {} ({}), which another registration has", feature,
 						a_field.name, static_cast<std::uint32_t>(a_field.field)));
 				lists.shadingFields.push_back(a_field);
 				return { static_cast<std::uint32_t>(lists.shadingFields.size() - 1) };
@@ -1075,19 +1057,19 @@ namespace DCLF::Extensions
 			void RegisterMainCullInput(const Api::MainCullInputContribution& a_input) override
 			{
 				if (a_input.name.empty() || !a_input.unboundVisible || !a_input.structure || !a_input.programsVersion || !a_input.judge || !a_input.test)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete main cull input", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete main cull input", feature));
 				if (!lists.mainCullInput.name.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes main cull input {}, which {} has", feature, a_input.name, lists.mainCullInput.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes main cull input {}, which {} has", feature, a_input.name, lists.mainCullInput.name));
 				lists.mainCullInput = a_input;
 			}
 
 			void RegisterCullBinding(const Api::CullBinding& a_binding) override
 			{
 				if (a_binding.slot >= Api::CullBindingSlot::Count || a_binding.name.empty() || !a_binding.select)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete cull binding", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete cull binding", feature));
 				auto& taken = lists.cullBindings[static_cast<std::size_t>(a_binding.slot)];
 				if (taken.select)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s cull binding {} takes slot {}, which {} has", feature, a_binding.name,
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s cull binding {} takes slot {}, which {} has", feature, a_binding.name,
 						static_cast<std::uint32_t>(a_binding.slot), taken.name));
 				taken = a_binding;
 			}
@@ -1095,18 +1077,18 @@ namespace DCLF::Extensions
 			void RegisterDepthPyramid(const Api::DepthPyramidContribution& a_pyramid) override
 			{
 				if (a_pyramid.resource.empty() || a_pyramid.scratchResource.empty() || !a_pyramid.setup)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete depth pyramid", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete depth pyramid", feature));
 				if (lists.depthPyramid.setup)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes depth pyramid {}, which another feature has", feature, a_pyramid.resource));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes depth pyramid {}, which another feature has", feature, a_pyramid.resource));
 				lists.depthPyramid = a_pyramid;
 			}
 
 			void RegisterPrimaryView(const Api::PrimaryViewContribution& a_view) override
 			{
 				if (!a_view.beforeOpaque || !a_view.afterOpaque)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete primary view", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete primary view", feature));
 				if (lists.primaryView.beforeOpaque)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes a primary view, which {} has", feature, lists.primaryViewFeature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes a primary view, which {} has", feature, lists.primaryViewFeature));
 				lists.primaryView = a_view;
 				lists.primaryViewFeature = std::string(feature);
 			}
@@ -1114,9 +1096,9 @@ namespace DCLF::Extensions
 			void RegisterShadowEpochs(const Api::ShadowEpochsContribution& a_epochs) override
 			{
 				if (!a_epochs.beforeShadowCasters || !a_epochs.beforeShadowMaps || !a_epochs.afterShadowMaps || !a_epochs.occlusionReady)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete shadow epochs", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete shadow epochs", feature));
 				if (lists.shadowEpochs.afterShadowMaps)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes the shadow epochs, which {} has", feature, lists.shadowEpochsFeature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes the shadow epochs, which {} has", feature, lists.shadowEpochsFeature));
 				lists.shadowEpochs = a_epochs;
 				lists.shadowEpochsFeature = std::string(feature);
 			}
@@ -1125,9 +1107,9 @@ namespace DCLF::Extensions
 			{
 				// Its table family must be registered first, because its objects' references are the roots Core reads.
 				if (a_states.name.empty() || !a_states.family || a_states.family.index >= lists.tableFamilies.size() || !a_states.view || !a_states.test)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete root states", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete root states", feature));
 				if (!lists.rootStates.name.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} contributes root states {}, which {} has", feature, a_states.name, lists.rootStates.name));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes root states {}, which {} has", feature, a_states.name, lists.rootStates.name));
 				lists.rootStates = a_states;
 			}
 
@@ -1137,10 +1119,10 @@ namespace DCLF::Extensions
 			void DeclareGeometryExtra(std::string_view a_extraName) override
 			{
 				if (a_extraName.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} declared a geometry extra without a name", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} declared a geometry extra without a name", feature));
 				auto& declared = lists.lightingJoinRules.geometryExtra;
 				if (!declared.empty())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} declared geometry extra {}, but {} is declared", feature, a_extraName, declared));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} declared geometry extra {}, but {} is declared", feature, a_extraName, declared));
 				declared = std::string(a_extraName);
 			}
 
@@ -1150,10 +1132,10 @@ namespace DCLF::Extensions
 			void RegisterLightingKeyBits(const Api::LightingKeyBits& a_bits) override
 			{
 				if (!a_bits.keyBits || !a_bits.permutation)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered incomplete Lighting key bits", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered incomplete Lighting key bits", feature));
 				auto& claimed = lists.lightingJoinRules.keyBits;
 				if (claimed.keyBits)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered Lighting key bits, which another registration has", feature));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered Lighting key bits, which another registration has", feature));
 				claimed = a_bits;
 			}
 
@@ -1179,7 +1161,7 @@ namespace DCLF::Extensions
 	{
 		static bool installed = false;
 		if (std::exchange(installed, true) || Registered().installed)
-			stl::report_and_fail("Drawcall Limit Fix: the features' early hooks were installed twice, or after the features");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the features' early hooks were installed twice, or after the features");
 		for (const auto& feature : a_features)
 			if (feature.earlyHooks)
 				feature.earlyHooks();
@@ -1189,7 +1171,7 @@ namespace DCLF::Extensions
 	{
 		auto& lists = Registered();
 		if (std::exchange(lists.installed, true))
-			stl::report_and_fail("Drawcall Limit Fix: the features were installed twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the features were installed twice");
 		// Core's passes register first, so a feature reusing a Core key fails its install.
 		Draws::RegisterCorePasses();
 		// Lighting is kind 0. The features' material ports take kinds from 1 in registration order.
@@ -1204,7 +1186,7 @@ namespace DCLF::Extensions
 		// Integrations install after every feature, because they may name what a feature registered. They have no early or source hooks.
 		for (const auto& integration : a_integrations) {
 			if (integration.earlyHooks || integration.sourceHooks)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: integration {} has early or source hooks", integration.name));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("integration {} has early or source hooks", integration.name));
 			context.feature = integration.name;
 			if (integration.install)
 				integration.install(context);
@@ -1236,8 +1218,6 @@ namespace DCLF::Extensions
 		ResolveMaterialContributors(lists.materialContributors);
 		ResolveProgramFamilies(lists.programFamilies);
 		std::ranges::sort(lists.frameConstantRows, {}, &FrameConstantRowEntry::row);
-		// Toggles may be anchored to a toggle a later feature registered, so they are placed and seeded only now.
-		Toggles::Get().SeedRegistered();
 		// A schedule key that nobody registered fails the install.
 		Draws::ResolveSchedule(a_schedule);
 	}
@@ -1260,7 +1240,7 @@ namespace DCLF::Extensions
 	std::span<const TableFamilyEntry> RegisteredTableFamilies() { return Registered().tableFamilies; }
 	std::span<const CoordinatorComponentEntry> RegisteredCoordinatorComponents() { return Registered().coordinatorComponents; }
 	const TechniqueEntries& RegisteredTechniques() { return Registered().techniques; }
-	const GeometryTypeToggles& RegisteredGeometryTypes() { return Registered().geometryTypes; }
+	const GeometryTypesPorted& RegisteredGeometryTypes() { return Registered().geometryTypes; }
 	const GeometryTypeContributions& RegisteredGeometryTypeContributions() { return Registered().geometryTypeContributions; }
 	const EntryClassRules& RegisteredEntryClassRules() { return Registered().entryClassRules; }
 	const OwnerClasses& RegisteredOwnerClasses() { return Registered().ownerClasses; }
@@ -1268,8 +1248,8 @@ namespace DCLF::Extensions
 	std::span<const PropertyFlagRule> PropertyFlagRules() { return std::span(Registered().propertyFlagRules).first(Registered().propertyFlagRuleCount); }
 	const CategoryRoots& RegisteredCategoryRoots() { return Registered().categoryRoots; }
 	const Api::UnheldRootsContribution& RegisteredUnheldRoots() { return Registered().unheldRoots; }
-	const ParentToggles& RegisteredParents() { return Registered().parents; }
-	const ObjectClassToggles& RegisteredObjectClasses() { return Registered().objectClasses; }
+	const ParentsTaken& RegisteredParents() { return Registered().parents; }
+	const ObjectClassesTaken& RegisteredObjectClasses() { return Registered().objectClasses; }
 	std::span<const ShadingContributionEntry> RegisteredShadingContributions() { return Registered().shadingContributions; }
 	std::span<const FrameGlobalsEntry> RegisteredFrameGlobals() { return Registered().frameGlobals; }
 	std::span<const ClassifyInputEntry> RegisteredClassifyInputs() { return Registered().classifyInputs; }

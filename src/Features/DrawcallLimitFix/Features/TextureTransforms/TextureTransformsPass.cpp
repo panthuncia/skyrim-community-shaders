@@ -9,7 +9,6 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
-#include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 
 #include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/ComputeProgram.h"
@@ -19,6 +18,8 @@
 #include <rhi.h>
 
 #include <cstdint>
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
+
 #include <memory>
 #include <span>
 #include <vector>
@@ -61,9 +62,10 @@ namespace DCLF::Draws
 	class TextureTransformsPass final : public org::TypedRenderGraphPass<TextureTransformsPass, TextureTransformsPrepared, TextureTransformsBindings>
 	{
 	public:
-		TextureTransformsPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const ComputeProgram> a_program, RenderGraphRuntime::Segment a_segment) :
+		TextureTransformsPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const ComputeProgram> a_program, RenderGraphRuntime::Segment a_segment,
+			const GraphConditions& a_conditions) :
 			resources(std::move(a_resources)), program(std::move(a_program)), segment(a_segment),
-			outerBarriers(!CurrentGraphConditions().cpuPipeline) {}
+			outerBarriers(!a_conditions.cpuPipeline) {}
 
 		TextureTransformsBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -82,9 +84,6 @@ namespace DCLF::Draws
 		{
 			TextureTransformsPrepared prepared{};
 			const auto frame = CurrentFrame(a_preparation, segment);
-			::DCLF::Diagnostics::RefTrace::NoteChanged("texture transforms pass",
-				fmt::format("program {}, frame {}, latch {}, builds draws {}, outer barriers {}", program != nullptr, frame != nullptr, frame && frame->latch,
-					BuildsDraws(a_preparation, *resources, segment), outerBarriers));
 			if (!program || !frame || !frame->latch || !BuildsDraws(a_preparation, *resources, segment))
 				return prepared;
 			RenderGraph::CheckDeclaredRefs(a_bindings.copy, a_preparation, "cs.dclf.z.texture-transforms");
@@ -96,26 +95,26 @@ namespace DCLF::Draws
 
 		static void Record(const TextureTransformsBindings&, const TextureTransformsPrepared& a_frame, org::PassRecordContext& a_recording)
 		{
-			RecordApply(a_recording.Commands(), a_frame, a_recording.Run());
+			RecordApply(a_recording, a_frame);
 		}
 
-		static void RecordApply(rhi::CommandList& a_commands, const TextureTransformsPrepared& a_frame, const org::RunRef& a_run)
+		static void RecordApply(org::PassRecordContext& a_recording, const TextureTransformsPrepared& a_frame)
 		{
 			if (!a_frame.program || !a_frame.latch)
 				return;
 			Constants constants{};
-			SetLatchWords(constants, *a_frame.latch, a_run);
-			auto& commands = a_commands;
+			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
+			auto& commands = a_recording.Commands();
 			const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
 			const rhi::BarrierBatch batch{ {}, {}, { &global, 1 } };
 			if (a_frame.outerBarriers)
 				commands.Barriers(batch);
 			// Copy every animated row before storing any entry, because an entry's row may belong to another group.
 			constants.phase = 0;
-			RecordDispatch(commands, *a_frame.program, constants, kGroups);
+			RecordDispatch(a_recording, *a_frame.program, constants, kGroups);
 			commands.Barriers(batch);
 			constants.phase = 1;
-			RecordDispatch(commands, *a_frame.program, constants, kGroups);
+			RecordDispatch(a_recording, *a_frame.program, constants, kGroups);
 			if (a_frame.outerBarriers)
 				commands.Barriers(batch);
 		}
@@ -132,19 +131,20 @@ namespace DCLF::Features::TextureTransforms
 {
 	namespace
 	{
-		std::shared_ptr<const void> Setup(const Api::PassSetup& a_setup)
+		const SetupPrograms::Compute kProgram{ "DCLF texture transforms", [] {
+			return ComputeProgram::Desc{ .source = Draws::kShader, .constantWords = Draws::kConstantWords };
+		} };
+
+		std::shared_ptr<const void> Setup(const Api::PassSetup&)
 		{
-			auto program = ComputeProgram::Load(a_setup.device, { .source = Draws::kShader, .constantWords = Draws::kConstantWords, .defines = ::DCLF::Diagnostics::RefTrace::ComputeDefines(3) });
-			if (!program)
-				logger::warn("[DCLF] The texture transforms program could not be created; DCLF's draws keep their materials' captured TexcoordOffset");
-			// Without the program nothing writes the frame's copy, so no latch names it and the draws read the installed rows.
-			SetCopyAvailable(program != nullptr);
+			auto program = kProgram.Get();
+			SetCopyAvailable(true);
 			return program;
 		}
 
 		std::shared_ptr<org::RenderPass> MakePass(const Api::PassContext& a_context)
 		{
-			return std::make_shared<Draws::TextureTransformsPass>(a_context.Main(), a_context.State<ComputeProgram>(), a_context.segment);
+			return std::make_shared<Draws::TextureTransformsPass>(a_context.Main(), a_context.State<ComputeProgram>(), a_context.segment, a_context.Conditions());
 		}
 	}
 

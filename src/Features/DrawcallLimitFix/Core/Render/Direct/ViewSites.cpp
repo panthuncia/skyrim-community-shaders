@@ -98,7 +98,6 @@ namespace DCLF::Direct::detail
 			std::shared_ptr<const IndirectState> pipelines;
 			std::shared_ptr<const ViewTargets> targets;
 			std::shared_ptr<const TargetViews> main;
-			std::array<rhi::Format, 1> colourFormats{};
 			bool valid = false;
 		};
 
@@ -261,7 +260,6 @@ namespace DCLF::Direct::detail
 			a_view.pipelines = ViewPipelines(shape, a_slot.set->buckets[static_cast<std::size_t>(a_view.type)]);
 			a_view.targets = reflection ? ReflectionTargets(a_slot, *a_view.resources) : FirstPersonTargets(a_slot, *a_view.resources);
 			a_view.main = a_depth.targets;
-			a_view.colourFormats[0] = a_view.targets->colourFormat;
 			a_view.valid = a_depth.valid && a_view.targets->valid && a_view.main && a_view.main->valid && shape.indirect.valid && shape.width && shape.height &&
 			               (reflection || a_view.main->count >= 2);
 			for (auto& face : a_view.faces) {
@@ -275,31 +273,10 @@ namespace DCLF::Direct::detail
 				b.offsetDepth = false;
 				if (face.face < shape.push.size())
 					b.framePush = shape.push[face.face];
-				// A view recorded once per snapshot draws the installed rows, its captured transforms.
-				if (FrameMode().cadence[static_cast<std::size_t>(a_view.type)] == Cadence::PerSnapshot)
-					b.animatedRows = 0;
 				// Reflection lanes draw the faces' forward pipelines, first-person depth its Z-prepass ones.
 				auto& site = NewView(a_slot, a_depth, a_view.type, face.view, !reflection);
 				site.bindings = &b;
 				face.site = &site;
-				// A GPU-driven frame culls it only for its forward part, so there is no depth to record.
-				if (!a_slot.ownsEpochs || !a_view.valid || (reflection && face.face >= a_view.targets->faces))
-					continue;
-				auto& inheritance = site.inheritance;
-				site.secondary = true;
-				if (reflection) {
-					inheritance.colorFormats = { a_view.colourFormats.data(), 1u };
-					inheritance.depthFormat = a_view.targets->depthFormat;
-				} else {
-					inheritance.depthFormat = a_view.main->depthFormat;
-				}
-				inheritance.stencilFormat = StencilOf(inheritance.depthFormat);
-				inheritance.width = shape.width;
-				inheritance.height = shape.height;
-				inheritance.minDepth = 0.0f;
-				inheritance.maxDepth = shape.depthRange;
-				inheritance.debugName = reflection ? "DCLF direct reflection face" : "DCLF direct first-person depth";
-				PrepareSnapshotView(a_slot, a_depth, site);
 			}
 		}
 
@@ -569,6 +546,6 @@ namespace DCLF::Direct
 		if (a_view != Draws::ViewIndex(Api::EngineView::Reflection) && a_view != Draws::ViewIndex(Api::EngineView::FirstPerson))
 			return false;
 		const auto kind = static_cast<Api::EngineView>(a_view);
-		return Extensions::ViewRegistered(kind) && Extensions::ViewOn(ActiveToggles(), kind);
+		return Extensions::ViewRegistered(kind);
 	}
 }

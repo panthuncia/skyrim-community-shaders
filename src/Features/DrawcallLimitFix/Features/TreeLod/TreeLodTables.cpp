@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
+#include "Features/DrawcallLimitFix/Core/Render/Readback/Readbacks.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBuffers.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/Diagnostics/TreeLodEvents.h"
@@ -27,6 +28,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
+
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -62,15 +65,12 @@ namespace DCLF::Features::TreeLod
 			return RenderGraph::DeclaredRefOf(a_device, a_buffer);
 		}
 
+		const SetupPrograms::Compute kCullProgram{ "DCLF tree LOD cull", [] { return ComputeProgram::Desc{ .source = kTreeLodCullShader, .constantWords = kTreeLodCullConstantWords }; } };
+
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
-			// Without the tree LOD cull program, tree LOD stays the engine's.
 			auto tables = std::make_shared<TreeLodTables>();
-			tables->cull = ComputeProgram::Load(a_setup.device, { .source = kTreeLodCullShader, .constantWords = kTreeLodCullConstantWords });
-			if (!tables->cull) {
-				logger::warn("[DCLF] The tree LOD cull program could not be created; tree LOD stays native");
-				return nullptr;
-			}
+			tables->cull = kCullProgram.Get();
 			const std::uint32_t shapes = a_setup.smallStart ? 4u : kInitialShapes;
 			tables->shapes = Draws::MakeVersioned(Draws::CreateWords(ShapeWords(shapes), false, "cs.dclf.tree-lod-shapes"), { .extent = { 0, sizeof(ShapeRow), 4 } });
 			tables->instances = Draws::MakeVersioned(Draws::CreateWords(InstanceWords(shapes), false, "cs.dclf.tree-lod-instances"),
@@ -94,11 +94,9 @@ namespace DCLF::Features::TreeLod
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				auto counts = std::make_shared<TreeLodCounts>();
-				for (std::uint32_t i = 0; i < counts->ranges.Count(); ++i) {
-					counts->readback.push_back(org::Buffer::CreateShared(rhi::HeapType::Readback, sizeof(VisibleHeader) + kStageSlots * kStageWords * 4));
-					counts->readback.back()->SetName("cs.dclf.tree-lod-counts-readback");
-				}
-				counts->filled.assign(counts->ranges.Count(), 0u);
+				counts->readback = org::RunReadback::CreateRegions("cs.dclf.tree-lod-counts-readback", sizeof(VisibleHeader) + kStageSlots * kStageWords * 4,
+					Draws::kReadbackRanges);
+				counts->filled.assign(counts->readback->Regions(), 0u);
 				tables->counts = std::move(counts);
 			}
 			return tables;

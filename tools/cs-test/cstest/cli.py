@@ -10,7 +10,7 @@ from .schema import ConfigError
 
 def _common(parser):
     parser.add_argument("--set", dest="sets", action="append", default=[], metavar="KEY=VALUE",
-                        help="a config value that wins over the files (repeatable): dclf.shadows=false, run.timeout_s=120")
+                        help="a config value that wins over the files (repeatable): dclf.cull=frustum, run.timeout_s=120")
     parser.add_argument("--label", help="a label for the run folder and summary")
     parser.add_argument("--stage", help="the staged build to run (same as --set build.stage=NAME)")
     parser.add_argument("--dry-run", action="store_true", help="resolve and print the config and its difference from base; touch nothing")
@@ -35,8 +35,8 @@ def build_parser():
 
     p = sub.add_parser("sweep", help="a base run, then one run per varied key")
     p.add_argument("config")
-    p.add_argument("--base", action="append", default=[], help="assignments for every run, comma-separated: \"dclf.*=false\"")
-    p.add_argument("--vary", action="append", required=True, help="keys or globs, comma-separated: dclf.shadows,dclf.grass or features.*")
+    p.add_argument("--base", action="append", default=[], help="assignments for every run, comma-separated: \"features.*=false\"")
+    p.add_argument("--vary", action="append", required=True, help="keys or globs, comma-separated: features.Skylighting,features.ScreenSpaceGI or features.*")
     p.add_argument("--mode", choices=["on-one", "off-one"], default="on-one", help="on-one: each run turns one key on; off-one: one key off")
     _common(p)
 
@@ -51,7 +51,11 @@ def build_parser():
     p = sub.add_parser("restore", help="undo leftovers, then put back the CS mod from before the first swap")
     p.add_argument("--journal-only", action="store_true", help="undo leftovers only; keep the live variant")
 
-    p = sub.add_parser("check-schema", help="compare schema.toml with the game's switch dump")
+    p = sub.add_parser("schema", help="copy the game's switch dump to switches.json, the schema (after 'run list-switches')")
+    p.add_argument("dump", nargs="?", help="the dump (default: <SKSE>\\CommunityShaders-Switches.json)")
+    p.add_argument("--out", help="where to write it (default: tools/cs-test/switches.json)")
+
+    p = sub.add_parser("check-schema", help="compare switches.json with the game's switch dump")
     p.add_argument("dump", nargs="?", help="the dump (default: <SKSE>\\CommunityShaders-Switches.json)")
     return parser
 
@@ -95,6 +99,8 @@ def main(argv=None):
             return 0
         if args.command == "restore":
             return 0 if commands.restore(paths, original=not args.journal_only) else 1
+        if args.command == "schema":
+            return 0 if commands.write_schema(paths, args.dump, args.out) else 1
         if args.command == "check-schema":
             return 0 if commands.check_schema(paths, args.dump) == 0 else 1
     except (ConfigError, journal_mod.LockError) as error:

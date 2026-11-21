@@ -51,14 +51,14 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief Any thread. The main set version of a_catalog for the given targets generation.
-	 * Invalid once the targets differ from the ones the set was built for.
+	 * @brief Any thread. The main set version of a_catalog. The main targets' formats are fixed at setup, so a published set
+	 * version is always for them.
 	 */
-	IndirectState GetIndirectState(const PipelineCatalog& a_catalog, std::uint32_t a_targetsGeneration);
+	IndirectState GetIndirectState(const PipelineCatalog& a_catalog);
 	/** @brief Whether GetIndirectState would be valid, without building it. */
-	bool IndirectStateValid(const PipelineCatalog& a_catalog, std::uint32_t a_targetsGeneration);
+	bool IndirectStateValid(const PipelineCatalog& a_catalog);
 	/** @brief Whether a set index's Z-prepass group has a depth pipeline, without building the state. */
-	bool ZGroupPipelineReady(const PipelineCatalog& a_catalog, std::uint32_t a_targetsGeneration, std::uint32_t a_setIndex);
+	bool ZGroupPipelineReady(const PipelineCatalog& a_catalog, std::uint32_t a_setIndex);
 
 	/** @brief The shadow views' pipelines from a catalog's shadow set version. */
 	struct ShadowIndirectState
@@ -98,8 +98,6 @@ namespace DCLF
 		std::uint64_t argumentsOffset = 0;
 	};
 
-	/** @brief a_family's pipelines in a_catalog. False while waiting, after failure, or once the targets changed. */
+	/** @brief a_family's pipelines in a_catalog. False while waiting or after failure. Any thread. */
 	bool CatalogFamilyPipelines(const PipelineCatalog* a_catalog, Api::DrawFamily a_family, FamilyPipelines& a_out);
-	/** @brief As above, for a given targets generation. Any thread. */
-	bool CatalogFamilyPipelines(const PipelineCatalog* a_catalog, Api::DrawFamily a_family, std::uint32_t a_targetsGeneration, FamilyPipelines& a_out);
 }

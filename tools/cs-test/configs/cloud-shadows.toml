@@ -1,0 +1,82 @@
+# Cloud Shadows under a forced storm (fw, cloud layers drawn into the reflection faces), its opacity changed and back, then a
+# coc into Dragonsreach (no full sky, so no occlusion copy) and back out to Whiterun. The layers and the occlusion cubemap
+# follow the engine's reflection cubemap, which the engine makes once a session, so the occlusion copy's client is registered
+# once, by the frame revision after setup (frame revision plan, 6.18). Opacity is a constant, so none of this may make a new
+# registration, a stale recording or a structural rebuild. Compose it: native-vulkan+cloud-shadows,
+# native-d3d12+cloud-shadows, guest+cloud-shadows.
+extends = ["base"]
+
+[run]
+timeout_s = 480
+
+[features]
+CloudShadows = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "console"
+arg = "fw 000C8220"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "clouds"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "CloudShadows.Opacity=2.0"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "clouds-opaque"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "CloudShadows.Opacity=0.5"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "interior"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "exterior"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["clouds", "clouds-opaque", "interior", "exterior"]
+no_log = ["frame tap error"]
+
+# The client ran on the render graph (the game's graph frame counts at exit; skipped in plain D3D11 mode).
+[expect.graph_frames]
+min = { "cs.cloud-shadows" = 60 }

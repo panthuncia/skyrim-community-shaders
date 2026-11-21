@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
 
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
+#include "RenderGraph/Async/Lanes.h"
 
 #include <algorithm>
 #include <atomic>
@@ -49,7 +50,7 @@ namespace DCLF
 			// Holds a runner slot.
 			void Dispatch()
 			{
-				SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "DCLF builds",
+				::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu, "DCLF builds",
 					[this](const org::async::TaskContext&) { Run(); });
 			}
 
@@ -84,7 +85,7 @@ namespace DCLF
 
 	unsigned BuildWidth()
 	{
-		return (std::max)(1u, SceneScheduler::PreparationWorkers() / 2);
+		return (std::max)(1u, ::RenderGraph::Frame::PreparationWorkers() / 2);
 	}
 
 	std::function<bool(std::function<void()>)> BuildSubmitter()
@@ -99,14 +100,14 @@ namespace DCLF
 		org::async::SerializedTaskPump& Lane()
 		{
 			// Never destroyed, because completions may still arrive while the process tears down.
-			static auto* lane = SceneScheduler::MakeLanePump(
-				SceneScheduler::Executor(), SceneScheduler::Scope(), SceneExecutor::Coordinator, org::async::TaskDispatch::Cpu, "DCLF pipeline lane",
+			static auto& lane = ::RenderGraph::Frame::MakeLane(
+				{ "DCLF pipeline lane", ::RenderGraph::Frame::Executor::Coordinator, org::async::TaskDispatch::Cpu,
+					[] { logger::error("[DCLF] the pipeline lane was refused by the executor; no Lighting pipeline is admitted from here on"); } },
 				[] {
 					if (auto* drain = laneDrain.load(std::memory_order_acquire))
 						drain();
-				},
-				[] { logger::error("[DCLF] the pipeline lane was refused by DCLF's executor; no Lighting pipeline is admitted from here on"); });
-			return *lane;
+				});
+			return lane;
 		}
 	}
 

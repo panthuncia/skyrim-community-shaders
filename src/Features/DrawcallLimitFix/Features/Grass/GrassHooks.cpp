@@ -3,8 +3,6 @@
 
 #include "Features/DrawcallLimitFix/Features/Grass/Grass.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
-#include "Features/DrawcallLimitFix/Features/Grass/Diagnostics/GrassEvents.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 #include "GrassShared/GrassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
@@ -62,28 +60,24 @@ namespace DCLF::Features::Grass
 			event.mesh.indexBuffer.copy_from(a_add.indexBuffer);
 			event.mesh.vertexDesc = a_add.vertexDesc;
 			event.mesh.indexCount = a_add.triangleCount * 3;
-			Diagnostics::Notify(GrassCaptured{ a_add.shape, a_add.group, a_add.count, a_add.seq, GrassCaptured::Kind::Add });
 			Push(std::move(event));
 		}
 
 		// A cell unload. The drain ignores groups it does not hold.
 		void OnRemoveGroup(RE::BSMultiStreamInstanceTriShape* a_shape, std::uint32_t a_group, std::uint64_t a_seq)
 		{
-			Diagnostics::Notify(GrassCaptured{ a_shape, a_group, 0, a_seq, GrassCaptured::Kind::RemoveGroup });
 			Push(Event{ .kind = Event::Kind::RemoveGroup, .seq = a_seq, .shape = a_shape, .group = a_group });
 		}
 
 		// Fires for every BSMultiStreamInstanceTriShape, grass or not. The drain ignores shapes it does not hold.
 		void OnRemove(RE::BSMultiStreamInstanceTriShape* a_shape, std::uint64_t a_seq)
 		{
-			Diagnostics::Notify(GrassCaptured{ a_shape, 0, 0, a_seq, GrassCaptured::Kind::Remove });
 			Push(Event{ .kind = Event::Kind::Remove, .seq = a_seq, .shape = a_shape });
 		}
 
 		// The engine still draws a rejected group, so the family must not withhold grass while it lives.
 		void OnRejected(RE::BSMultiStreamInstanceTriShape* a_shape, std::uint32_t a_group, std::uint64_t a_seq)
 		{
-			Diagnostics::Notify(GrassCaptured{ a_shape, a_group, 0, a_seq, GrassCaptured::Kind::Rejected });
 			Push(Event{ .kind = Event::Kind::Rejected, .seq = a_seq, .shape = a_shape, .group = a_group });
 		}
 	}

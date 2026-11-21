@@ -1366,7 +1366,7 @@ void FeatureListRenderer::ListMenuVisitor::RenderRowContextMenu(Feature* feat) c
 									  T("menu.features.restore_unavailable", "Only loaded features that keep their settings in the user config can be restored"),
 			Util::kTooltipWhenDisabled);
 
-		if (ImGui::MenuItem(T("menu.features.load_at_boot", "Load at Boot"), nullptr, !isDisabled)) {
+		if (ImGui::MenuItem(T("menu.features.load_at_boot", "Load at Boot"), nullptr, !isDisabled, feat->GetBootToggleLock().note == nullptr)) {
 			const bool enabled = feat->ToggleAtBootSetting();
 			logger::info("{}: {} at boot.", featureName, enabled ? "Enabled" : "Disabled");
 		}
@@ -1488,8 +1488,10 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureHeader(Feature* feat, bo
 	// Offered while the user's edits hide values one of their Baseline packs sets.
 	const bool canUseBaselines = canRestore && globals::state->HasEditsUnderBaselines(feat);
 
-	// The boot toggle is labelled so it does not read as an on/off switch for the effect itself
-	const char* bootLabel = T("menu.features.load_at_boot", "Load at Boot");
+	// The boot toggle is labelled so it does not read as an on/off switch for the effect itself. A locked one shows why instead.
+	const auto bootLock = feat->GetBootToggleLock();
+	const bool bootLocked = bootLock.note != nullptr;
+	const char* bootLabel = bootLocked ? bootLock.note : T("menu.features.load_at_boot", "Load at Boot");
 	const float bootLabelWidth = [bootLabel] {
 		MenuFonts::FontRoleGuard subtext(Menu::FontRole::Subtext);
 		return ImGui::CalcTextSize(bootLabel).x;
@@ -1596,16 +1598,21 @@ void FeatureListRenderer::DrawMenuVisitor::RenderFeatureHeader(Feature* feat, bo
 
 		// The toggle is shorter than the icon buttons; centre it on them instead of aligning the tops
 		ImGui::SetCursorScreenPos(ImVec2(x, rowY + (iconSize - bootToggleHeight) * 0.5f));
-		if (Util::FeatureToggle("##BootToggle", &bootEnabled)) {
-			bool newState = feat->ToggleAtBootSetting();
-			logger::info("{}: {} at boot.", featureName, newState ? "Enabled" : "Disabled");
+		{
+			Util::DisableGuard lockGuard(bootLocked);
+			if (Util::FeatureToggle("##BootToggle", &bootEnabled)) {
+				bool newState = feat->ToggleAtBootSetting();
+				logger::info("{}: {} at boot.", featureName, newState ? "Enabled" : "Disabled");
+			}
 		}
 
 		if (failed)
 			ImGui::PopStyleColor();
 		ImGui::EndGroup();
 
-		if (auto _tt = Util::HoverTooltipWrapper(); _tt && feat->loaded && feat->AppliesBootToggleLive()) {
+		if (bootLocked) {
+			Util::AddTooltip(bootLock.why ? bootLock.why : bootLock.note, Util::kTooltipWhenDisabled);
+		} else if (auto _tt = Util::HoverTooltipWrapper(); _tt && feat->loaded && feat->AppliesBootToggleLive()) {
 			if (!layout.bootLabel)
 				ImGui::TextUnformatted(bootLabel);
 			ImGui::Text(

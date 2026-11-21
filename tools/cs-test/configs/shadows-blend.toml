@@ -1,0 +1,123 @@
+# Terrain Blending and Screen Space Shadows toggled and changed mid-session (frame revision plan, 6.4 and 6.5). Each change is a
+# frame revision: Terrain Blending's Enabled switches its blend's client, its terrain depth clear and Screen Space Shadows' depth
+# source in one adoption; a new sample count multiplier is a program built off the render thread before its revision starts;
+# Screen Space Shadows off keeps the clear and drops the raymarch. Shots after each change settles. Compose it:
+# native-vulkan+shadows-blend, native-d3d12+shadows-blend, guest+shadows-blend, d3d11+shadows-blend.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+TerrainBlending = true
+ScreenSpaceShadows = true
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "TerrainBlending.Enabled=0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "blend-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "TerrainBlending.Enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "blend-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceShadows.SampleCount=3"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "ScreenSpaceShadows.SampleCount=4"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "samples-4"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceShadows.SampleCount=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceShadows.Enable=0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "shadows-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceShadows.Enable=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "TerrainBlending.Enabled=0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "shadows-on-blend-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "TerrainBlending.Enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "end"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "blend-off", "blend-on", "samples-4", "shadows-off", "shadows-on-blend-off", "end"]
+no_log = ["frame tap error", "could not be built"]
+
+# The client ran on the render graph (the game's graph frame counts at exit; skipped in plain D3D11 mode).
+[expect.graph_frames]
+min = { "cs.terrain-blending" = 60, "cs.screen-space-shadows" = 60 }

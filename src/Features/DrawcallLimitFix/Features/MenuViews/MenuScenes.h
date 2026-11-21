@@ -262,7 +262,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		View view = View::LocalMap;
 		std::vector<Draw> draws;
 		std::vector<std::byte> latch;  // every draw's constants and palettes, written into the client's latch at the run's commit
-		std::uint64_t revision = 0;    // what the recording depends on (MenuScenesDraws.cpp, RevisionOf)
+		std::uint64_t revision = 0;    // what the recording depends on (MenuScenesDraws.cpp, Run::Hash)
 		Family::Owners owners;         // the textures' imports and the buffers' leases
 
 		/** @brief Appends a_bytes to the latch, 16-byte aligned. Returns the offset, or ~0u when full. */
@@ -275,11 +275,14 @@ namespace DCLF::Features::MenuViews::Scenes
 			std::copy(a_bytes.begin(), a_bytes.end(), latch.begin() + static_cast<std::ptrdiff_t>(offset));
 			return static_cast<std::uint32_t>(offset);
 		}
+
+		/** @brief What the recording depends on: everything but the latched values and counts (MenuScenesDraws.cpp). */
+		std::uint64_t Hash() const;
 	};
 
-	/** @brief Whether CS_ORG_MAP=1 made the local map's batches the family's. */
+	/** @brief Whether the local map's batches are the family's (graph mode). */
 	bool Enabled();
-	/** @brief Whether a_view's batches are the family's, per CS_ORG_MAP or CS_ORG_MENU3D. */
+	/** @brief Whether a_view's batches are the family's, per MapEnabled or Menu3DEnabled. */
 	bool ViewEnabled(View a_view);
 	/** @brief Whether any view is the family's. */
 	bool AnyEnabled();
@@ -291,8 +294,6 @@ namespace DCLF::Features::MenuViews::Scenes
 	{
 		/** @brief Whether the anchor and runtime are up. False for good once a client failed. */
 		bool Available();
-		/** @brief Reserves the EngineDraws anchor. Must run before the render graph initializes. */
-		void Reserve();
 		/** @brief Makes the stages, programs and clients. Main thread. */
 		bool Setup();
 		/** @brief Whether a_view's batch is taken now. Its targets must still be its client's imports. */

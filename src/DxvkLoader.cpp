@@ -1,8 +1,10 @@
 #include "DxvkLoader.h"
 
-#include "Aftermath.h"
+#include "DxvkExports.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 #include "Vram/Debug.h"
 
 #include <filesystem>
@@ -122,15 +124,6 @@ namespace DxvkLoader
 			logger::warn("[DXVK] Failed to enable HDR color-space support (error {})", ::GetLastError());
 		}
 
-		// DXVK reads DXVK_DEBUG once at instance creation, so the request has to be in place before
-		// the game creates its device. Opt-in (CS_GPU_CRASH_ANALYSIS=1): DXVK's hang mode serialises
-		// concurrent command recording.
-		//
-		// Not conditional on Aftermath having armed. Aftermath is Nvidia-only, but AMD's Radeon GPU
-		// Detective reads the same debug-utils labels as the [APP] half of its execution marker
-		// tree, and on both vendors those labels are what turn "the GPU faulted" into "the GPU
-		// faulted during this pass". The vendor-specific parts are DXVK's business: it knows which
-		// GPU it is talking to and enables only what that GPU supports.
 		// Put DXVK's own output where the rest of a bug report already is. DXVK defaults to the
 		// directory holding the exe, so SkyrimSE_d3d11.log, SkyrimSE_dxgi.log and -- on a device
 		// loss with VK_EXT_device_fault -- SkyrimSE_device_fault.bin all land in the game folder,
@@ -143,24 +136,10 @@ namespace DxvkLoader
 				logger::warn("[DXVK] Failed to redirect DXVK logs to the SKSE log folder (error {})", ::GetLastError());
 		}
 
-		// Never clobber a DXVK_DEBUG the developer set. DXVK reads a single mode from this variable,
-		// so overwriting it silently disables whatever they were trying to use -- DXVK_DEBUG=pipestats
-		// looked like a broken extension for a while because crash analysis had already taken the slot.
-		wchar_t existingDebug[64]{};
-		const DWORD existingDebugLen = ::GetEnvironmentVariableW(L"DXVK_DEBUG", existingDebug, ARRAYSIZE(existingDebug));
-
-		if (existingDebugLen != 0 && existingDebugLen < ARRAYSIZE(existingDebug)) {
-			logger::info("[DXVK] DXVK_DEBUG already set externally; leaving it alone");
-		} else if (Aftermath::WantsCrashAnalysis()) {
-			// This DXVK version recognizes "hang", not "crashanalysis". The
-			// latter silently disabled debug utils and NVIDIA checkpoints.
-			if (::SetEnvironmentVariableW(L"DXVK_DEBUG", L"hang"))
-				logger::info("[DXVK] DXVK_DEBUG=hang -- requesting device faults and GPU checkpoints");
-			else
-				logger::warn("[DXVK] Failed to request GPU crash analysis (error {})", ::GetLastError());
-		} else {
-			logger::info("[DXVK] GPU crash analysis off (CS_GPU_CRASH_ANALYSIS=1 requests DXVK_DEBUG=hang)");
-		}
+		// DXVK_DEBUG=hang is the crash-diagnostics mode. DXVK reads it at instance creation: device faults and GPU checkpoints.
+		// CS's crash markers and detailed checkpoints follow it. It serialises concurrent command recording, so it is opt-in.
+		if (Switches::Equals("DXVK_DEBUG", "hang"))
+			logger::info("[DXVK] DXVK_DEBUG=hang: device faults, GPU checkpoints and CS's crash markers on");
 
 		const auto dir = GetRuntimeDir();
 		if (dir.empty()) {
@@ -194,6 +173,21 @@ namespace DxvkLoader
 			return false;
 		}
 
+		// Graph mode calls every fork export without checks, so a DXVK build without one cannot run it.
+		// Plain D3D11 mode runs on it, without what the missing exports do.
+		const auto& exports = DxvkExports::Get();
+		if (const auto missing = exports.Missing(); !missing.empty()) {
+			if (RenderGraph::Engine::GraphMode()) {
+				const auto message = fmt::format(
+					"Community Shaders: the DXVK build in '{}' lacks exports the render graph needs ({}). Reinstall Community Shaders, "
+					"or set CS_ORG=0 to play without the render graph.",
+					dir.string(), missing);
+				logger::critical("[DXVK] {}", message);
+				stl::report_and_fail(message);
+			}
+			logger::warn("[DXVK] This DXVK build lacks {}; plain D3D11 mode runs without what they do", missing);
+		}
+
 		// The render graph adopts DXVK's device; the features it needs, and the descriptor
 		// binding model negotiation callback, must be registered before the game creates that device.
 		RenderGraphRuntime::RequestDeviceFeatures(d3d11Mod);
@@ -202,10 +196,8 @@ namespace DxvkLoader
 		Vram::Debug::ConfigureDxvk(d3d11Mod);
 
 		// Frame generation enables synchronous present when it takes ownership.
-		if (auto setSync = reinterpret_cast<void (*)(uint32_t)>(::GetProcAddress(d3d11Mod, "dxvkSetSyncPresent")))
-			setSync(0u);
-		else
-			logger::warn("[DXVK] dxvkSetSyncPresent export missing -- present stays at the fork default (sync)");
+		if (exports.setSyncPresent)
+			exports.setSyncPresent(0u);
 
 		logger::info("[DXVK] Loaded DXVK from '{}' (dxvk_d3d11.dll + dxvk_dxgi.dll)", dir.string());
 		g_loaded = true;

@@ -1,6 +1,7 @@
 // The table families a SceneTables holds: made, copied, cleared, recycled and published through their registrations.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/TableFamilies.h"
+#include "Utils/Hash.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 
 #include <algorithm>
@@ -163,11 +164,11 @@ namespace DCLF::Extensions
 	std::uint64_t TableFamilies::RequirementsWitness() const
 	{
 		const auto registered = RegisteredTableFamilies();
-		std::uint64_t hash = 0xcbf29ce484222325ull;
+		std::uint64_t hash = Util::Fnv1a::kOffset;
 		for (std::size_t f = 0; f < registered.size(); ++f) {
 			const auto* held = f < entries.size() ? &entries[f] : nullptr;
 			const std::uint64_t value = registered[f].rows ? (held && held->columns ? registered[f].rows(held->columns.get()) : 0u) : StampOf(static_cast<std::uint32_t>(f));
-			hash = (hash ^ ((value << 1) | (registered[f].rows ? 1u : 0u))) * 0x100000001b3ull;
+			hash = (hash ^ ((value << 1) | (registered[f].rows ? 1u : 0u))) * Util::Fnv1a::kPrime;
 			hash ^= hash >> 29;
 		}
 		return hash;

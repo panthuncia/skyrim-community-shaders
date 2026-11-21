@@ -29,12 +29,11 @@
 #	include "State.h"
 #	include "Utils/FileSystem.h"
 
-#	if defined(CS_HAS_RENDER_GRAPH)
-#		include "RenderGraph/RenderGraphRuntime.h"
-#		include "RenderGraph/ScheduleWindow.h"
-#		include <ORGModuleServices/PipelineRegistry.h>
-#		include "Testing/Testing.h"
-#	endif
+#	include "RenderGraph/PipelineVersions.h"
+#	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/ScheduleWindow.h"
+#	include <ORGModuleServices/PipelineRegistry.h>
+#	include "Testing/Testing.h"
 
 #	include <DevBenchAPI.h>
 #	include <nlohmann/json.hpp>
@@ -900,13 +899,12 @@ namespace
 
 	/**
 	 * @brief The render graph's pipeline hot reload (docs/development/dclf-hot-reload.md). reload: every live pipeline built again
-	 * from the shader files as they are now ("file": only those built from it; "force": swap even unchanged ones), swapped at the
-	 * graph's next build. status: the registry's publication generation (moves when a reload's pipelines are swapped in) and the
-	 * last finished reload's counts and first errors.
+	 * from the shader files as they are now ("file": only those built from it; "force": publish even unchanged ones). status: the
+	 * registry's generation (moves when a reload publishes new versions), the adopted generation (moves when the frame revision that
+	 * carries it adopts the rebuilt graphs) and the last finished reload's counts and first errors.
 	 */
 	json BuildPipelinesResult(const json& a_args)
 	{
-#	if defined(CS_HAS_RENDER_GRAPH)
 		const std::string action = a_args.value("action", std::string{});
 		auto* registry = RenderGraphRuntime::PipelineRegistry();
 		if (!registry)
@@ -918,15 +916,12 @@ namespace
 		}
 		if (action == "status") {
 			const auto reload = registry->LastReload();
-			return json{ { "generation", registry->Generation() }, { "sourcesGeneration", registry->SourcesGeneration() }, { "entries", registry->EntryCount() },
+			return json{ { "generation", registry->Generation() }, { "adoptedGeneration", RenderGraph::PipelineVersions::Adopted() },
+				{ "sourcesGeneration", registry->SourcesGeneration() }, { "entries", registry->EntryCount() },
 				{ "lastReload", { { "serial", reload.serial }, { "entries", reload.entries }, { "rebuilt", reload.rebuilt }, { "failed", reload.failed },
-									{ "unchanged", reload.unchanged }, { "seconds", reload.seconds }, { "errors", reload.errors } } } };
+									{ "unchanged", reload.unchanged }, { "generation", reload.generation }, { "seconds", reload.seconds }, { "errors", reload.errors } } } };
 		}
 		return json{ { "error", "unknown action (reload|status)" }, { "action", action } };
-#	else
-		(void)a_args;
-		return json{ { "error", "built without the render graph" } };
-#	endif
 	}
 
 	void PipelinesToolHandler(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
@@ -941,7 +936,6 @@ namespace
 	 */
 	json BuildScheduleResult(const json& a_args)
 	{
-#	if defined(CS_HAS_RENDER_GRAPH)
 		const std::string action = a_args.value("action", std::string{});
 		if (action == "enable" || action == "disable") {
 			RenderGraphSchedule::SetTracing(RenderGraphSchedule::Requester::DevBench, action == "enable");
@@ -971,10 +965,6 @@ namespace
 			return json{ { "labels", labels }, { "text", text } };
 		}
 		return json{ { "error", "unknown action (enable|disable|json|text)" }, { "action", action } };
-#	else
-		(void)a_args;
-		return json{ { "error", "built without the render graph" } };
-#	endif
 	}
 
 	void ScheduleToolHandler(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
@@ -982,24 +972,14 @@ namespace
 		RunHandler("communityshaders.schedule", &BuildScheduleResult, a_argsJson, a_sink, a_write);
 	}
 
-	/** @brief Test commands (src/Testing/Testing.h, old "dclf:" lines included), queued for the next Present. */
+	/** @brief Test commands by their cs-test step names (src/Testing/Testing.h), queued for the next Present. */
 	json BuildDclfResult(const json& a_args)
 	{
-#	if defined(CS_HAS_RENDER_GRAPH)
-		// Every reply carries the command list's progress, so a client drives a run by it (a waited-for signal, the list's frame) rather
-		// than by the log. No command: the progress alone.
-		const auto progress = Testing::GetLegacyProgress();
-		json harness{ { "frame", progress.frame }, { "shift", progress.shift }, { "next", progress.next }, { "commands", progress.commands },
-			{ "nextFrame", progress.nextFrame }, { "nextCommand", progress.nextCommand }, { "waiting", progress.waiting } };
 		const std::string command = a_args.value("command", std::string{});
 		if (command.empty())
-			return json{ { "harness", std::move(harness) } };
+			return json{ { "error", "no command" } };
 		Testing::QueueCommandLine(command);
-		return json{ { "queued", command }, { "enqueued_at_frame", EnqueuedFrame() }, { "harness", std::move(harness) } };
-#	else
-		(void)a_args;
-		return json{ { "error", "built without the render graph" } };
-#	endif
+		return json{ { "queued", command }, { "enqueued_at_frame", EnqueuedFrame() } };
 	}
 
 	void DclfToolHandler(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
@@ -1206,7 +1186,7 @@ namespace DevBenchBridge
 		dvb->RegisterTool("communityshaders.trace", traceDesc, &TraceToolHandler, nullptr);
 
 		static constexpr const char* pipelinesDesc =
-			R"({"description":"Render graph pipeline hot reload (one registry for every ORG/DCLF pipeline: compute programs, DCLF's draw pipelines, Light Limit Fix's). reload: rebuild every live pipeline from the shader files as they are now (file: only those built from it, e.g. Lighting.hlsl; force: swap even unchanged ones), swapped in at the graph's next build -> {queued,reloadSerialBefore,generationBefore}. status -> {generation (moves when a reload's pipelines are swapped in),sourcesGeneration,entries,lastReload:{serial,entries,rebuilt,failed,unchanged,seconds,errors}}. Wait for lastReload.serial > reloadSerialBefore, then generation > generationBefore (when rebuilt > 0) before measuring.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["reload","status"]},"file":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}})";
+			R"({"description":"Render graph pipeline hot reload (one registry for every ORG/DCLF pipeline: compute programs, DCLF's draw pipelines, Light Limit Fix's). reload: rebuild every live pipeline from the shader files as they are now (file: only those built from it, e.g. Lighting.hlsl; force: publish even unchanged ones) as new versions; every graph is rebuilt off the render thread and a frame revision adopts them -> {queued,reloadSerialBefore,generationBefore}. status -> {generation (moves when a reload publishes new versions),adoptedGeneration (moves when the frames bind them),sourcesGeneration,entries,lastReload:{serial,entries,rebuilt,failed,unchanged,generation,seconds,errors}}. Wait for lastReload.serial > reloadSerialBefore, then adoptedGeneration >= lastReload.generation (when rebuilt > 0) before measuring.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["reload","status"]},"file":{"type":"string"},"force":{"type":"boolean"}},"required":["action"]}})";
 		dvb->RegisterTool("communityshaders.pipelines", pipelinesDesc, &PipelinesToolHandler, nullptr);
 
 		static constexpr const char* scheduleDesc =
@@ -1214,7 +1194,7 @@ namespace DevBenchBridge
 		dvb->RegisterTool("communityshaders.schedule", scheduleDesc, &ScheduleToolHandler, nullptr);
 
 		static constexpr const char* dclfDesc =
-			R"({"description":"Drawcall Limit Fix's test harness commands (CS_DCLF_TEST_COMMANDS' forms), run at the next Present: dclf:<toggle>=0|1 (a live toggle), dclf:async-compute=0|1|default (the async compute passes' queue, from a graph rebuild), dclf:rebuild, dclf:reload-shaders[=all|=<file>], dclf:define=<NAME[=v],...>, dclf:signal=<name> (releases a list's dclf:wait=signal:<name>), dclf:nvperf=<range|range...>[#samples], dclf:gpu-window=<label>, dclf:mark[=label], dclf:feature=0|1, dclf:pov=first|third, dclf:draw=0|1; any other is a console command. Omit command for the progress alone. -> {queued, harness:{frame,shift,next,commands,nextFrame,nextCommand,waiting}}","inputSchema":{"type":"object","properties":{"command":{"type":"string"}},"required":[]}})";
+			R"({"description":"Test harness commands, run at the next Present: <command>[=<arg>] with a cs-test step name (tools/cs-test/README.md), such as shot=<name>, mark[=label], feature=<ShortName>=0|1, pov=first|third, draw=0|1, signal=<name>, dclf:<toggle>=0|1 (a live DCLF toggle), dclf:cull=<mode>, org:rebuild, org:reload-shaders[=all|=<file>]; any other line is a console command. -> {queued, enqueued_at_frame}","inputSchema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}})";
 		dvb->RegisterTool("communityshaders.dclf", dclfDesc, &DclfToolHandler, nullptr);
 	}
 

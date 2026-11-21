@@ -13,8 +13,7 @@
  * interval half-width within relativeHalfWidth of its mean or within absoluteHalfWidth (a range of a few microseconds
  * never reaches a relative target).
  *
- * Built with the render graph (CS_HAS_RENDER_GRAPH), which brings BasicTelemetry; without it Available() is false, a
- * summary carries the mean, median and percentiles only, and nothing converges.
+ * The statistics come from BasicTelemetry (basic_telemetry::Sampling).
  */
 namespace GpuCounters::Trace::Statistics
 {
@@ -39,8 +38,6 @@ namespace GpuCounters::Trace::Statistics
 		bool converged = false;
 	};
 
-	/// Whether confidence intervals are computed (BasicTelemetry is built in).
-	bool Available();
 	/// The series' summary; a_config's sample counts must satisfy 2 <= minSamples <= maxSamples (ClampConfig).
 	Summary Summarize(const std::vector<double>& a_samples, const Config& a_config);
 	/// a_config with its bounds made valid (confidence in (0, 1), 2 <= minSamples <= maxSamples, half-widths >= 0).

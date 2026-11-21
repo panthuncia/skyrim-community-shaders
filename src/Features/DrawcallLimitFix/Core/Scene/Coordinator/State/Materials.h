@@ -26,9 +26,6 @@ namespace DCLF::Scene
 			const void* fieldsMovedVtable = nullptr;
 			std::array<std::pair<const void*, std::uint32_t>, 8> fieldsMovedBy{};  // by vtable, the first eight seen
 		} materialSnapshotStats;
-		// Parity only. Empty otherwise.
-		std::vector<const RE::BSShaderMaterial*> materialsDeduped;
-		static constexpr std::uint32_t kMaterialDedupParityOffset = 37;
 		struct MaterialEvaluation
 		{
 			enum class Outcome : std::uint8_t
@@ -48,7 +45,6 @@ namespace DCLF::Scene
 			const RE::BSShaderMaterial* material = nullptr;
 			const MaterialPort::MaterialSnapshot* snapshot = nullptr;
 			std::uint32_t slot = 0;
-			bool parity = false;  // a deduplicated capture's, evaluated for the parity only
 		};
 		std::vector<MaterialRewriteItem> materialRewriteItems;
 		std::vector<MaterialEvaluation> materialRewriteResults;

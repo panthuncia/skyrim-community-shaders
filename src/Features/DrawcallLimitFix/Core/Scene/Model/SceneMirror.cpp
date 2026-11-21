@@ -2,6 +2,7 @@
 // hook updates. Scene lane only.
 
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneMirror.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include <Tracy/Tracy.hpp>
@@ -88,21 +89,6 @@ namespace DCLF
 		// Captured after every kept update, so no update is newer than what it read.
 		if (a_records.sequence >= recentNewest) {
 			++work.replaysSkipped;
-			if (checking) {
-				// Parity: the walk the skip saves finds nothing.
-				++work.skipsChecked;
-				std::vector<const SceneCapture::Update*> later;
-				auto walk = [&](std::uintptr_t a_key) { Later(a_key, a_records.sequence, later); };
-				for (const auto& n : a_records.nodes)
-					walk(Key(n.key, 0));
-				for (const auto& g : a_records.geometries)
-					walk(Key(g.key, 1));
-				for (const auto& p : a_records.properties)
-					walk(Key(p.key, 2));
-				for (const auto& a : a_records.alphas)
-					walk(Key(a.key, 3));
-				work.skipsWrong += later.empty() ? 0 : 1;
-			}
 			return;
 		}
 		++work.replaysWalked;
@@ -118,29 +104,6 @@ namespace DCLF
 		for (const auto& a : a_records.alphas)
 			Replay(Key(a.key, 3), a_records.sequence);
 		replaying = false;
-	}
-
-	namespace
-	{
-		/** @brief Parity check that every prepared record matches its capture. */
-		void CheckPrepared(const Records& a_records, const SceneMirror::Prepared& a_prepared, std::uint64_t& a_checked, std::uint64_t& a_wrong)
-		{
-			const std::uint64_t sequence = a_records.sequence;
-			++a_checked;
-			bool wrong = a_prepared.nodes.size() != a_records.nodes.size() || a_prepared.geometries.size() != a_records.geometries.size() ||
-			             a_prepared.properties.size() != a_records.properties.size() || a_prepared.alphas.size() != a_records.alphas.size();
-			auto compare = [&](const auto& a_ready, const auto& a_captured) {
-				for (std::size_t i = 0; !wrong && i < a_ready.size(); ++i)
-					wrong = a_ready[i].key != a_captured[i].key || a_ready[i].sequence != sequence || a_ready[i].Differ(a_captured[i]) != 0;
-			};
-			if (!wrong) {
-				compare(a_prepared.nodes, a_records.nodes);
-				compare(a_prepared.geometries, a_records.geometries);
-				compare(a_prepared.properties, a_records.properties);
-				compare(a_prepared.alphas, a_records.alphas);
-			}
-			a_wrong += wrong ? 1 : 0;
-		}
 	}
 
 	void SceneMirror::ApplyCapture(const Records& a_records, Prepared* a_prepared)
@@ -162,13 +125,11 @@ namespace DCLF
 			a_record.sequence = sequence;
 			if constexpr (requires { a_record.writer; }) {
 				a_record.writer = 1;
-				a_record.writtenFrame = SceneCapture::Frame();
+				a_record.writtenFrame = DCLF::SceneClock::Step();
 			}
 		};
 		assert(!a_prepared || (a_prepared->nodes.size() == a_records.nodes.size() && a_prepared->geometries.size() == a_records.geometries.size() &&
 								  a_prepared->properties.size() == a_records.properties.size() && a_prepared->alphas.size() == a_records.alphas.size()));
-		if (a_prepared && checking)
-			CheckPrepared(a_records, *a_prepared, work.preparedChecked, work.preparedWrong);
 		// Properties and alphas first, then the geometries that count their uses.
 		for (std::size_t i = 0; i < a_records.properties.size(); ++i) {
 			auto& record = properties[a_records.properties[i].key].record;
@@ -313,25 +274,6 @@ namespace DCLF
 		}
 		if (recent.empty())
 			recentNewest = 0;
-		if (checking) {
-			++work.logsChecked;
-			std::size_t chained = 0;
-			bool wrong = false;
-			for (const auto& [key, last] : recentLast) {
-				wrong |= last < recentBase;
-				for (std::uint64_t at = last; at != ~0ull && at >= recentBase;) {
-					if (at - recentBase >= recent.size() || recent[static_cast<std::size_t>(at - recentBase)].key != key) {
-						wrong = true;
-						break;
-					}
-					++chained;
-					at = recent[static_cast<std::size_t>(at - recentBase)].previous;
-				}
-			}
-			for (const auto& r : recent)
-				wrong |= r.update.sequence > recentNewest || r.batch + 2 < batch;
-			work.logsWrong += wrong || chained != recent.size() ? 1 : 0;
-		}
 	}
 
 	void SceneMirror::Remember(std::uintptr_t a_key, SceneCapture::Update&& a_update)

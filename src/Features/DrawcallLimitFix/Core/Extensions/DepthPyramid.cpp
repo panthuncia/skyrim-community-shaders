@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Extensions
 {
@@ -17,7 +18,7 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the depth pyramid was resolved twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the depth pyramid was resolved twice");
 		if (!a_registered.setup)
 			return;
 		resolved = { std::string(a_registered.resource), std::string(a_registered.scratchResource), a_registered.setup };

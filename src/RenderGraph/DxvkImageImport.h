@@ -38,45 +38,13 @@ namespace RenderGraph
 	rhi::ResourcePtr ImportD3D12Resource(rhi::Device a_device, void* a_resource, const char* a_name);
 
 	/** @brief Imports a DXVK image as a graph texture whose home state is its resting layout. Sets a_desc.initialLayout.
-	*  A texture resting in GENERAL is Common-only, except in native mode. */
+	*  A texture resting in GENERAL is Common-only, except in native mode. Registers it in ImageRegistry as an import, so a second
+	*  live graph resource of the image is fatal. The caller retires it (ImageRegistry::Retire) before the image can go. */
 	std::shared_ptr<org::ExternalTextureResource> ImportDxvkTexture(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image,
 		org::TextureDescription a_desc, const char* a_name);
 
-	/** @brief The duplicate-image check, CS_ORG_IMAGE_DUPLICATE_CHECK=1. Logs when two live graph resources track one image,
-	*  since their layout moves would race. Cheap when off. Any thread. */
-	void NoteImageResource(std::uint64_t a_image, const std::shared_ptr<org::Resource>& a_resource, std::string_view a_name);
-
-	/** @brief The duplicate-image check. a_resource is no longer its image's graph resource, though frames may still finish with it. */
-	void RetireImageResource(const org::Resource* a_resource);
-
-	/** @brief An image ORG made that has a graph resource of its own (MadeImageOf). */
-	struct MadeImage
-	{
-		std::shared_ptr<org::Resource> resource;               // the image's graph resource
-		std::shared_ptr<org::VersionedTexture> slot;           // a versioned twin's slot, whose current version is resource; else null
-		std::shared_ptr<const org::TextureDescription> views;  // the views resource has
-		std::string name;                                      // its maker's name for it, for the logs
-	};
-
-	/** @brief Registers the graph resource of an image ORG made and handed to D3D11. Imports then return it instead of importing again.
-	*  Any thread. */
-	void RegisterMadeImage(std::uint64_t a_image, const std::shared_ptr<org::Resource>& a_resource, const org::TextureDescription& a_views,
-		std::string_view a_name);
-
-	/** @brief Sets a versioned twin's slot for its registered resource, so imports return the slot. Any thread. */
-	void SetMadeImageSlot(const org::Resource* a_resource, const std::shared_ptr<org::VersionedTexture>& a_slot);
-
-	/** @brief Forgets a registered resource before its image can go, so a reused handle never maps to it. Any thread. */
-	void ForgetMadeImage(const org::Resource* a_resource);
-
-	/** @brief The registered resource of a_image, or an empty MadeImage. Any thread. */
-	MadeImage MadeImageOf(std::uint64_t a_image);
-
 	/** @brief Whether raw work on graph-tracked images must take their layouts from the ledgers. True in native mode. Any thread. */
 	bool NativeGraphMovesImages();
-
-	/** @brief The graph resource whose ledger follows a_image, or null when no graph tracks it. Any thread. */
-	std::shared_ptr<org::Resource> GraphResourceOfImage(std::uint64_t a_image);
 
 	/** @brief The raw access check, CS_ORG_RAW_ACCESS_CHECK=1. Counts work on tracked images that bypasses graph state tracking. */
 	namespace RawAccess

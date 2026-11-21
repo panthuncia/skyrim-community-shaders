@@ -1,6 +1,7 @@
 #include "Features/PhysicalSky.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
+#include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "I18n/I18n.h"
 #include "State.h"
 #include "Util.h"
@@ -122,7 +123,8 @@ namespace
 			.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS | (mips ? D3D11_BIND_RENDER_TARGET : 0u),
 			.MiscFlags = mips ? D3D11_RESOURCE_MISC_GENERATE_MIPS : 0u
 		};
-		auto texture = eastl::make_unique<Texture2D>(desc, name);
+		// A graph twin in the graph modes, where the graph generates it.
+		auto texture = ORGCloudMaps::MakeTexture2D(desc, name);
 		texture->CreateSRV({ .Format = format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D, .Texture2D = { .MostDetailedMip = 0, .MipLevels = mips ? UINT(-1) : 1u } });
 		texture->CreateUAV({ .Format = format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D, .Texture2D = { .MipSlice = 0 } });
 		return texture;
@@ -389,9 +391,15 @@ bool NdfManager::UpdateNdf(const NdfSettings& settings, TextureManager& textures
 	for (const auto& path : paths)
 		textures.EnsureLoaded(path);
 	sourcePaths = std::move(paths);
-	if (!generatorProgram || !noiseProgram || !generatorCb || !noiseCb || !sampler || !texHeight || !texModeling)
+	// The graph modes generate on the render graph, never with the D3D11 programs.
+	const bool graph = ORGCloudMaps::On();
+	if ((!graph && (!generatorProgram || !noiseProgram)) || !generatorCb || !noiseCb || !sampler || !texHeight || !texModeling)
 		return false;
 	auto* context = globals::d3d::context;
+	using Input = ORGCloudMaps::Input;
+	ORGCloudMaps::Work work;
+	// The graph's noise regenerations, applied once the graph takes the work.
+	std::array<std::optional<NdfNoiseParameters>, 4> regenerated;
 	std::array<ID3D11ShaderResourceView*, 7> sources = {};
 	const auto& procedural = settings.procedural;
 	for (uint32_t i = 0; i < 4; ++i) {
@@ -411,7 +419,18 @@ bool NdfManager::UpdateNdf(const NdfSettings& settings, TextureManager& textures
 		data.bias = FiniteClamp(data.bias, -1.f, 1.f, 0.f);
 		data.responseExponent = FiniteClamp(data.responseExponent, 0.1f, 8.f, 1.f);
 		data.padding = {};
-		if (!noiseValid[i] || std::memcmp(&generatedNoise[i], &data, sizeof(data)) != 0) {
+		if ((!noiseValid[i] || std::memcmp(&generatedNoise[i], &data, sizeof(data)) != 0) && graph) {
+			auto* texture = noiseTextures[i]->resource.get();
+			ORGCloudMaps::Dispatch noise{ .step = std::format("ndf.noise{}", i),
+				.order = ORGCloudMaps::kNdfOrder + static_cast<std::int32_t>(i),
+				.program = ORGCloudMaps::Program::NdfNoise,
+				.inputs = { Input::Uav(texture, 0), Input::Latch() },
+				.groups = { (kNdfDim + 7u) >> 3, (kNdfDim + 7u) >> 3, 1 } };
+			noise.Constants(data);
+			work.dispatches.push_back(std::move(noise));
+			work.mips.push_back({ .step = std::format("ndf.noise{}.mips", i), .order = ORGCloudMaps::kNdfOrder + 10 + static_cast<std::int32_t>(i), .texture = texture });
+			regenerated[i] = data;
+		} else if (!noiseValid[i] || std::memcmp(&generatedNoise[i], &data, sizeof(data)) != 0) {
 			noiseCb->Update(data);
 			auto* cb = noiseCb->CB();
 			auto* uav = noiseTextures[i]->uav.get();
@@ -497,32 +516,57 @@ bool NdfManager::UpdateNdf(const NdfSettings& settings, TextureManager& textures
 	data.padding = {};
 	auto previousData = generatedData;
 	previousData.preview = data.preview;
-	const bool changed = !generatedValid || sources != generatedSources || textureRevision != textures.revision || std::memcmp(&previousData, &data, sizeof(data)) != 0;
+	// A regenerated noise input changes the maps, as D3D11's generatedValid = false does.
+	const bool noiseRegenerated = std::ranges::any_of(regenerated, [](const auto& a_noise) { return a_noise.has_value(); });
+	const bool changed = !generatedValid || noiseRegenerated || sources != generatedSources || textureRevision != textures.revision || std::memcmp(&previousData, &data, sizeof(data)) != 0;
 	if (!changed && generatedData.preview == data.preview)
 		return false;
-	generatorCb->Update(data);
-	auto* cb = generatorCb->CB();
-	auto* samp = sampler.get();
-	winrt::com_ptr<ID3D11SamplerState> previousSampler;
-	context->CSGetSamplers(0, 1, previousSampler.put());
-	ID3D11UnorderedAccessView* uavs[3] = { texHeight->uav.get(), texModeling->uav.get(), preview ? texPreview->uav.get() : nullptr };
-	context->CSSetConstantBuffers(1, 1, &cb);
-	context->CSSetSamplers(0, 1, &samp);
-	context->CSSetShaderResources(0, static_cast<uint32_t>(sources.size()), sources.data());
-	context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
-	context->CSSetShader(generatorProgram.get(), nullptr, 0);
-	globals::profiler->BeginPass("PhysicalSky::CloudNdf");
-	context->Dispatch((width + 7u) >> 3, (height + 7u) >> 3, 1);
-	globals::profiler->EndPass();
-	ID3D11ShaderResourceView* nullSrvs[7] = {};
-	ID3D11UnorderedAccessView* nullUavs[3] = {};
-	context->CSSetShaderResources(0, 7, nullSrvs);
-	context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
-	cb = nullptr;
-	context->CSSetConstantBuffers(1, 1, &cb);
-	context->CSSetShader(nullptr, nullptr, 0);
-	samp = previousSampler.get();
-	context->CSSetSamplers(0, 1, &samp);
+	if (graph) {
+		ORGCloudMaps::Dispatch generate{ .step = "ndf.generate",
+			.order = ORGCloudMaps::kNdfOrder + 20,
+			.program = ORGCloudMaps::Program::NdfGenerate,
+			.inputs = { Input::Srv(sources[0]), Input::Srv(sources[1]), Input::Srv(sources[2]), Input::Srv(sources[3]), Input::Srv(sources[4]),
+				Input::Srv(sources[5]), Input::Srv(sources[6]), Input::Uav(texHeight->resource.get(), 0), Input::Uav(texModeling->resource.get(), 0),
+				preview ? Input::Uav(texPreview->resource.get(), 0) : Input::Srv(nullptr), Input::SamplerOf(ORGCloudMaps::Sampler::WrapLinear), Input::Latch() },
+			.groups = { (width + 7u) >> 3, (height + 7u) >> 3, 1 } };
+		generate.Constants(data);
+		work.dispatches.push_back(std::move(generate));
+		work.owner = "ndf";
+		ORGCloudMaps::Get().Submit(std::move(work));
+		for (uint32_t i = 0; i < regenerated.size(); ++i) {
+			if (!regenerated[i])
+				continue;
+			++weatherNoiseRevision;
+			if (i == 2u)
+				++noiseRevision;
+			generatedNoise[i] = *regenerated[i];
+			noiseValid[i] = true;
+		}
+	} else {
+		generatorCb->Update(data);
+		auto* cb = generatorCb->CB();
+		auto* samp = sampler.get();
+		winrt::com_ptr<ID3D11SamplerState> previousSampler;
+		context->CSGetSamplers(0, 1, previousSampler.put());
+		ID3D11UnorderedAccessView* uavs[3] = { texHeight->uav.get(), texModeling->uav.get(), preview ? texPreview->uav.get() : nullptr };
+		context->CSSetConstantBuffers(1, 1, &cb);
+		context->CSSetSamplers(0, 1, &samp);
+		context->CSSetShaderResources(0, static_cast<uint32_t>(sources.size()), sources.data());
+		context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
+		context->CSSetShader(generatorProgram.get(), nullptr, 0);
+		globals::profiler->BeginPass("PhysicalSky::CloudNdf");
+		context->Dispatch((width + 7u) >> 3, (height + 7u) >> 3, 1);
+		globals::profiler->EndPass();
+		ID3D11ShaderResourceView* nullSrvs[7] = {};
+		ID3D11UnorderedAccessView* nullUavs[3] = {};
+		context->CSSetShaderResources(0, 7, nullSrvs);
+		context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
+		cb = nullptr;
+		context->CSSetConstantBuffers(1, 1, &cb);
+		context->CSSetShader(nullptr, nullptr, 0);
+		samp = previousSampler.get();
+		context->CSSetSamplers(0, 1, &samp);
+	}
 	generatedData = data;
 	generatedSources = sources;
 	textureRevision = textures.revision;
@@ -659,7 +703,8 @@ void MidCloudMapManager::CompileShaders(Util::AsyncShaderSet& a_shaders)
 
 bool MidCloudMapManager::Update(const MidCloudSettings& settings, TextureManager& textures, const NdfManager& ndf)
 {
-	if (!shader || !parameters || !sampler || !maps[0] || !maps[1] ||
+	const bool graph = ORGCloudMaps::On();
+	if ((!graph && !shader) || !parameters || !sampler || !maps[0] || !maps[1] ||
 		std::ranges::any_of(ndf.GetNoiseInputs(), [](auto* source) { return !source; })) {
 		valid = false;
 		return false;
@@ -678,6 +723,15 @@ bool MidCloudMapManager::Update(const MidCloudSettings& settings, TextureManager
 	const auto nextKey = nlohmann::json{ settings.weather, settings.heightPower, settings.bands.displacement }.dump();
 	if (valid && key == nextKey && textureRevision == textures.revision && noiseRevision == ndf.GetWeatherNoiseRevision())
 		return false;
+	if (graph) {
+		if (!UpdateGraph(settings, textures, ndf, states))
+			return false;
+		key = nextKey;
+		textureRevision = textures.revision;
+		noiseRevision = ndf.GetWeatherNoiseRevision();
+		valid = true;
+		return true;
+	}
 	auto* context = globals::d3d::context;
 	winrt::com_ptr<ID3D11SamplerState> previousSampler;
 	context->CSGetSamplers(0, 1, previousSampler.put());
@@ -741,6 +795,59 @@ bool MidCloudMapManager::Update(const MidCloudSettings& settings, TextureManager
 	return true;
 }
 
+bool MidCloudMapManager::UpdateGraph(const MidCloudSettings& settings, TextureManager& textures, const NdfManager& ndf,
+	const std::vector<std::pair<MidCloudWeatherState, float>>& states)
+{
+	using Input = ORGCloudMaps::Input;
+	ORGCloudMaps::Work work;
+	const auto& noise = ndf.GetNoiseInputs();
+	const auto count = static_cast<uint32_t>(states.size());
+	// The last state always writes maps[0], so the cloud renderer reads one texture whatever the count.
+	const auto targetOf = [&](uint32_t a_index) { return (count - 1u - a_index) & 1u; };
+	const auto add = [&](std::string a_step, std::int32_t a_order, const Parameters& a_data, ID3D11ShaderResourceView* a_local, uint32_t a_target,
+						 ID3D11ShaderResourceView* a_previous) {
+		ORGCloudMaps::Dispatch step{ .step = std::move(a_step),
+			.order = a_order,
+			.program = ORGCloudMaps::Program::MidCloud,
+			.inputs = { Input::Srv(noise[0]), Input::Srv(noise[1]), Input::Srv(noise[2]), Input::Srv(noise[3]), Input::Srv(a_local), Input::Srv(a_previous),
+				Input::Uav(maps[a_target]->resource.get(), 0), Input::SamplerOf(ORGCloudMaps::Sampler::WrapLinear), Input::Latch() },
+			.groups = { 64, 64, 1 } };
+		step.Constants(a_data);
+		work.dispatches.push_back(std::move(step));
+	};
+	for (uint32_t i = 0; i < count; ++i) {
+		const auto& [state, weight] = states[i];
+		auto* local = textures.Query(state.localMap);
+		if (!NdfManager::IsTextureNdf(local, 3))
+			local = nullptr;
+		Parameters data{
+			.weather = { state.layers[0], state.layers[1], state.secondaryCoverage, state.coverageGain, state.thicknessVariation },
+			.localWeight = local ? FiniteClamp(state.localWeight, 0.f, 1.f, 0.f) : 0.f,
+			.localBlendMode = std::min(state.localBlendMode, 1u),
+			.weight = std::clamp(weight, 0.f, 1.f),
+			.hasPrevious = i ? 1u : 0u,
+			.shape = { FiniteClamp(settings.heightPower, 0.25f, 4.f, 1.f), FiniteClamp(settings.bands.displacement, 0.f, .5f, 0.f), 0.f, 0.f }
+		};
+		for (auto& layer : data.weather) {
+			layer.noise = std::min(layer.noise, 4u);
+			layer.frequency = FiniteClamp(layer.frequency, 0.f, 64.f, 1.f);
+			layer.offset.x = FiniteClamp(layer.offset.x, -10000.f, 10000.f, 0.f);
+			layer.offset.y = FiniteClamp(layer.offset.y, -10000.f, 10000.f, 0.f);
+			SanitizeRange(layer.range, false);
+		}
+		const uint32_t target = targetOf(i);
+		add(std::format("middle.{}.{}", i, target), ORGCloudMaps::kWeatherOrder + static_cast<std::int32_t>(i), data, local, target,
+			i ? maps[target ^ 1u]->srv.get() : nullptr);
+	}
+	// D3D11 clears the map. A zero weight with no previous map writes zeros.
+	if (!count)
+		add("middle.empty", ORGCloudMaps::kWeatherOrder, Parameters{ .weight = 0.f, .shape = { 1.f, 0.f, 0.f, 0.f } }, nullptr, 0, nullptr);
+	work.owner = "middle";
+	ORGCloudMaps::Get().Submit(std::move(work));
+	output.copy_from(maps[0]->srv.get());
+	return true;
+}
+
 void CirrusMapManager::SetupResources()
 {
 	generationCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<GenerationParameters>());
@@ -770,7 +877,62 @@ void CirrusMapManager::CompileShaders(Util::AsyncShaderSet& a_shaders)
 
 bool CirrusMapManager::ShadersReady(const CirrusSettings&) const
 {
-	return weatherProgram && generationCb && sampler && texWeather[0] && texWeather[1];
+	// The graph modes generate on the render graph, never with the D3D11 program.
+	return (weatherProgram || ORGCloudMaps::On()) && generationCb && sampler && texWeather[0] && texWeather[1];
+}
+
+bool CirrusMapManager::UpdateGraph(const std::vector<CirrusWeatherState>& states, const std::vector<float>& weights, float2 wind, TextureManager& textures,
+	const NdfManager& ndf)
+{
+	using Input = ORGCloudMaps::Input;
+	ORGCloudMaps::Work work;
+	const auto& noise = ndf.GetNoiseInputs();
+	const auto count = static_cast<uint32_t>(states.size());
+	// The last state always writes texWeather[0], which takes the mips and is the output whatever the count.
+	const auto targetOf = [&](uint32_t a_index) { return (count - 1u - a_index) & 1u; };
+	const auto add = [&](std::string a_step, std::int32_t a_order, const GenerationParameters& a_data, ID3D11ShaderResourceView* a_local, uint32_t a_target,
+						 ID3D11ShaderResourceView* a_previous) {
+		ORGCloudMaps::Dispatch step{ .step = std::move(a_step),
+			.order = a_order,
+			.program = ORGCloudMaps::Program::Cirrus,
+			.inputs = { Input::Srv(noise[0]), Input::Srv(noise[1]), Input::Srv(noise[2]), Input::Srv(noise[3]), Input::Srv(a_local), Input::Srv(a_previous),
+				Input::Uav(texWeather[a_target]->resource.get(), 0), Input::SamplerOf(ORGCloudMaps::Sampler::WrapLinear), Input::Latch() },
+			.groups = { (kDimension + 7u) >> 3, (kDimension + 7u) >> 3, 1 } };
+		step.Constants(a_data);
+		work.dispatches.push_back(std::move(step));
+	};
+	for (uint32_t i = 0; i < count; ++i) {
+		const auto& state = states[i];
+		auto* local = textures.Query(state.localMap);
+		if (!NdfManager::IsTextureNdf(local, 3))
+			local = nullptr;
+		GenerationParameters data{
+			.weather = state.layers,
+			.windOffset = wind,
+			.localWeight = local ? FiniteClamp(state.localWeight, 0.f, 1.f, 0.f) : 0.f,
+			.localWindScale = FiniteClamp(state.localWindScale, 0.f, 16.f, 1.f),
+			.localBlendMode = std::min(state.localBlendMode, 1u),
+			.weight = weights[i],
+			.hasPrevious = i ? 1u : 0u
+		};
+		for (auto& layer : data.weather) {
+			layer.noise = std::min(layer.noise, 4u);
+			layer.frequency = FiniteClamp(layer.frequency, 0.f, 64.f, 1.f);
+			layer.offset.x = FiniteClamp(layer.offset.x, -10000.f, 10000.f, 0.f);
+			layer.offset.y = FiniteClamp(layer.offset.y, -10000.f, 10000.f, 0.f);
+			SanitizeRange(layer.range);
+		}
+		const uint32_t target = targetOf(i);
+		add(std::format("cirrus.{}.{}", i, target), ORGCloudMaps::kWeatherOrder + 100 + static_cast<std::int32_t>(i), data, local, target,
+			i ? texWeather[target ^ 1u]->srv.get() : nullptr);
+	}
+	// D3D11 clears the map. A zero weight with no previous map writes zeros.
+	if (!count)
+		add("cirrus.empty", ORGCloudMaps::kWeatherOrder + 100, GenerationParameters{ .weight = 0.f }, nullptr, 0, nullptr);
+	work.mips.push_back({ .step = "cirrus.mips", .order = ORGCloudMaps::kWeatherOrder + 190, .texture = texWeather[0]->resource.get() });
+	work.owner = "cirrus";
+	ORGCloudMaps::Get().Submit(std::move(work));
+	return true;
 }
 
 CirrusTextureSet CirrusMapManager::GetTextures() const
@@ -817,6 +979,22 @@ bool CirrusMapManager::Update(const CirrusSettings& settings, TextureManager& te
 	if (std::ranges::any_of(ndf.GetNoiseInputs(), [](auto* input) { return !input; })) {
 		generatedValid = false;
 		return hadOutputs;
+	}
+	if (ORGCloudMaps::On()) {
+		if (!UpdateGraph(states, weights, wind, textures, ndf)) {
+			// Not taken: the outputs come back next frame, when the update runs again.
+			generatedValid = false;
+			return hadOutputs;
+		}
+		outputs = { texWeather[0]->srv.get(), patterns };
+		outputResources[0].copy_from(outputs.weather);
+		outputResources[1].copy_from(outputs.patterns);
+		generatedKey = key;
+		generatedWind = wind;
+		generatedRevision = textures.revision;
+		noiseRevision = ndf.GetRevision();
+		generatedValid = true;
+		return true;
 	}
 	auto* context = globals::d3d::context;
 	auto* cb = generationCb->CB();

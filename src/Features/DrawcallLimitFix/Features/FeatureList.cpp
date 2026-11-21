@@ -52,8 +52,8 @@ namespace DCLF::Features
 		// - Reflection's early hooks run right after Portals'.
 		// - Actors reserves its move writers before any other feature, which gives them slots 2-4.
 		// - Tree wind's seed pool runs before the texture transforms' pool.
-		// - Forward comes before Effects, and Effects before Particles and Billboards. A toggle must be listed after the toggles it needs.
-		// - Skins and Actors come before First person, for the same reason. Skins also comes before Effects, which reads skins.
+		// - Forward comes before Effects, and Effects before Particles and Billboards.
+		// - Skins and Actors come before First person. Skins also comes before Effects, which reads skins.
 		// - Tree LOD's table uploads run after tree wind's, and Grass's scene resources and commit hook run after Tree LOD's.
 		// - Faces' coordinator component runs after the others', except Fades'. Both act on the slot tables' reset.
 		// - Sky registers nothing with Core (its hooks and its anchors' clients are its own), so its place sets no order; it is before Fades.

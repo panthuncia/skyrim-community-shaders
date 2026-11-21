@@ -55,15 +55,13 @@ in an SDR viewer. Judge brightness on the display.
 
 ## Tooling
 
-### GPU timers, VRAM and the idle trace
+### GPU timers and VRAM
 
 Native mode has no D3D11 timestamp queries (the context's queries answer 0), no DXVK memory snapshot and no DXVK submission trace.
 So in native mode:
 
 - `GpuTimingSource::SelectedTimers()` is always `Graph`. A `CS_GPU_TIMERS` set to anything else is logged once
   (`[GpuEvents] native mode: GPU timers come from the render graph ...`) and ignored.
-- `GpuTimingSource::IdleFromGraph()` is true: `CS_GPU_IDLE_TRACE` reads the graph's ranges
-  (`[GpuIdle] Tracing the render graph's graphics queue (CS_GPU_IDLE_SOURCE=graph)` appears without the switch).
 - `Vram::Org::Selected()` is true: VRAM attribution and texture streaming's budget read BasicRHI's heaps.
 
 Guest and plain D3D11 keep their defaults.
@@ -91,8 +89,8 @@ Expect the registration line, then the usual `[NvPerf]` capture lines and a CSV.
 
 The checkpoint registration was adoption-only (`AdoptedVulkanDeviceInfo::diagnostics`). BasicRHI's `DeviceCreateInfo` now takes
 the same callback (`vulkanRegisterCheckpoint`, `vulkanCheckpointUser`, `vulkanDetailedCheckpoints`). Native device creation sets
-it to `Aftermath::RegisterOrgCheckpoint` when Aftermath is armed (`CS_GPU_CRASH_ANALYSIS=1` and the runtime present). With crash
-markers on (that switch or `DXVK_DEBUG=hang`), every debug label then sets an NV checkpoint that the dump resolves to the pass. The
+it to `Aftermath::RegisterOrgCheckpoint` when Aftermath is armed (its runtime is present). With crash
+markers on (`DXVK_DEBUG=hang`), every debug label then sets an NV checkpoint that the dump resolves to the pass. The
 NV checkpoints then belong to the host, and BasicRHI's own crash markers keep the other sources (buffer markers, device fault).
 Line: `CreateVulkanDevice: the host's checkpoint markers record VK_NV_device_diagnostic_checkpoints at every debug label`.
 

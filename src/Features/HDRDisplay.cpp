@@ -11,18 +11,28 @@
 #include "Menu.h"
 #include "Utils/VersionedRelocation.h"
 #include "PostProcessing.h"
-#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "ScreenshotFeature.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Upscaling.h"
 #include "Upscaling/DXVKInterop.h"
+#include "Upscaling/FramePresenter.h"
+#include "Upscaling/PresentationRevision.h"
 #include "Util.h"
 #include <algorithm>
 #include <dxgi1_4.h>
 #include <dxgi1_6.h>
 #include <imgui.h>
+
+// Engine/UiTargets.h (lane P): kFRAMEBUFFER's field texture once the engine target set holds it, else null.
+namespace RenderGraph::Engine::UiTargets
+{
+	ID3D11Texture2D* BackBufferTexture();
+}
 
 #define I18N_KEY_PREFIX "feature.hdr_display."
 
@@ -630,6 +640,13 @@ void HDRDisplay::PreCreateRenderTargets()
 			std::lock_guard lock(settingsMutex);
 			enableHDR = settings.enableHDR;
 		}
+		// Graph modes: the session's first value stays, so kMAIN's format never changes at a later target set (a fatal shape change).
+		static std::optional<bool> s_first;
+		if (RenderGraph::Engine::GraphMode()) {
+			if (!s_first)
+				s_first = enableHDR;
+			enableHDR = *s_first;
+		}
 		setting->data.b = enableHDR;
 		logger::info("[HDR Display] bUse64bitsHDRRenderTarget set to {}, as HDR is", enableHDR);
 	} else {
@@ -649,6 +666,24 @@ namespace
 		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_1,
 		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_2,
 	};
+
+	/**
+	* @brief The HDR setting and the frame's HDR target as frame variables (plan, step 5b). Written every frame, so only a change
+	* is an event. The setting is also the swap chain's colour space, so a revision that changes it waits for the swap chain.
+	*/
+	void RaiseHdrVariables(const HDRDisplay& a_hdr, bool a_enableHDR, std::string_view a_writer)
+	{
+		namespace Vars = RenderGraph::Frame::Vars;
+		Vars::Set(Vars::HdrEnabled(), a_enableHDR, a_writer);
+		FrameGen::PresentationRevision::SetHdr(a_enableHDR, a_writer);
+		Vars::TargetIdentity target;
+		if (auto* texture = a_hdr.PostChainTarget()) {
+			D3D11_TEXTURE2D_DESC desc{};
+			texture->GetDesc(&desc);
+			target = { reinterpret_cast<std::uint64_t>(texture), { desc.Width, desc.Height }, static_cast<std::uint32_t>(desc.Format) };
+		}
+		Vars::Set(Vars::HdrOutputTarget(), target, a_writer);
+	}
 }
 
 void HDRDisplay::PostPostLoad()
@@ -669,9 +704,8 @@ void HDRDisplay::PostPostLoad()
 	}
 
 	stl::detour_thunk<HDR_Movie_Draw>(REL::RelocationID(87907, 90279));
-	ORGHDRDisplay::Reserve();
-	// CS_ORG_ENGINE_TARGETS: ORG makes the LDR targets in the HDR format from the start. The upgrade then finds them done and
-	// skips them, so no graph is built again for a new format at setup.
+	// Graph modes: the engine target set declares the LDR targets in the HDR format from the start, and the upgrade and restore
+	// do nothing there.
 	for (auto targetId : kLDRTargets)
 		RenderGraph::Engine::Targets::PlanTarget(targetId, { .owner = "HDR Display", .format = DXGI_FORMAT_R16G16B16A16_FLOAT });
 }
@@ -695,10 +729,15 @@ void HDRDisplay::SetupResources()
 		settings.hdrAutoDetected = true;
 		logger::info("[HDR] Auto-configured HDR based on display: {}", isHDRMonitor ? "enabled" : "disabled");
 	}
+	// The setting reaches the frame as the HdrEnabled variable, written below and at every BeginRenderFrame.
+	bool enableHDR;
 	{
 		std::lock_guard<std::mutex> lock(settingsMutex);
-		hdrEnabledForFrame = settings.enableHDR;
+		enableHDR = settings.enableHDR;
 	}
+	// The frame renders for the HDR state of the revision it adopted. A change of the setting reaches it with a later revision.
+	hdrEnabledForFrame = RenderGraph::Frame::Vars::Adopted(RenderGraph::Frame::Vars::HdrEnabled());
+	RaiseHdrVariables(*this, enableHDR, "HDRDisplay::SetupResources");
 
 	cachedDisplayMaxLuminance = GetDisplayMaxLuminance();
 
@@ -734,7 +773,7 @@ void HDRDisplay::SetupResources()
 	srvDesc.Format = texDesc.Format;
 	uavDesc.Format = texDesc.Format;
 
-	// CS_ORG_HDR_DISPLAY=1: HDR's textures are graph-owned, exported to D3D11 (ORGHDRDisplay::MakeTexture); else D3D11's.
+	// In graph mode HDR's textures are graph-owned, exported to D3D11 (ORGHDRDisplay::MakeTexture); else D3D11's.
 	auto& graphTextures = ORGHDRDisplay::Get();
 	hdrTexture = graphTextures.MakeTexture(ORGHDRDisplay::Texture::Scene, texDesc, "HDR::HdrTexture");
 	if (!hdrTexture)
@@ -792,8 +831,10 @@ void HDRDisplay::SetupResources()
 
 	UpdateHDRData();
 
-	GetHDROutputCS();
-	// CS_ORG_HDR_DISPLAY: ApplyHDR composes on the render graph from now on, or stays on D3D11.
+	// In graph mode the graph composes. D3D11 side paths (clean captures) compile the shader when they first need it.
+	if (!RenderGraph::Engine::GraphMode())
+		GetHDROutputCS();
+	// In graph mode ApplyHDR composes on the render graph from here on. A failure is fatal.
 	ORGHDRDisplay::Get().Setup();
 
 	UpgradeLDRRenderTargets();
@@ -801,24 +842,81 @@ void HDRDisplay::SetupResources()
 
 void HDRDisplay::BeginRenderFrame()
 {
-	DXVKInterop::GetSingleton()->CommitPresenterSurfaceStateForRenderFrame();
+	FrameGen::ActivePresenter().BeginFrame();
 
 	bool requestedHDR;
 	{
 		std::lock_guard<std::mutex> lock(settingsMutex);
 		requestedHDR = settings.enableHDR;
 	}
-	if (requestedHDR == hdrEnabledForFrame)
-		return;
+	// The frame renders for the HDR state of the revision it adopted. Native asked for its swap chain at the adoption, and DXVK's
+	// swap chain takes the colour space here, in the frame that adopted it. So no frame presents into the other colour space.
+	if (const bool adopted = RenderGraph::Frame::Vars::Adopted(RenderGraph::Frame::Vars::HdrEnabled()); adopted != hdrEnabledForFrame) {
+		hdrEnabledForFrame = adopted;
+		logger::info("HDR: enableHDR={} adopted with the frame revision (the setting is {})", hdrEnabledForFrame, requestedHDR);
+		UpdateHDRData();
+		UpdateSwapChainColorSpace();
+	}
+	FollowGraphTextures();
+	RaiseHdrVariables(*this, requestedHDR, "HDRDisplay::BeginRenderFrame");
+}
 
-	hdrEnabledForFrame = requestedHDR;
-	logger::info("HDR: applying enableHDR={} for the next rendered frame", hdrEnabledForFrame);
-	UpdateHDRData();
-	UpdateSwapChainColorSpace();
+namespace
+{
+	/** @brief A wrapper of a_texture (its reference taken) with a_old's views made again on it. Deletes a_old. */
+	Texture2D* Rewrap(Texture2D* a_old, ID3D11Texture2D* a_texture, const char* a_name)
+	{
+		auto* next = new Texture2D(a_texture, a_name);
+		if (a_old->srv) {
+			D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+			a_old->srv->GetDesc(&desc);
+			next->CreateSRV(desc);
+		}
+		if (a_old->uav) {
+			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
+			a_old->uav->GetDesc(&desc);
+			next->CreateUAV(desc);
+		}
+		if (a_old->rtv) {
+			D3D11_RENDER_TARGET_VIEW_DESC desc{};
+			a_old->rtv->GetDesc(&desc);
+			next->CreateRTV(desc);
+		}
+		delete a_old;
+		return next;
+	}
+}
+
+void HDRDisplay::FollowGraphTextures()
+{
+	// After the frame's adoption point: a new display size is a new version of each graph texture, with a new D3D11 export.
+	auto& graph = ORGHDRDisplay::Get();
+	const std::pair<ORGHDRDisplay::Texture, Texture2D**> textures[] = {
+		{ ORGHDRDisplay::Texture::Scene, &hdrTexture },
+		{ ORGHDRDisplay::Texture::Output, &outputTexture },
+		{ ORGHDRDisplay::Texture::Ui, &uiTexture },
+	};
+	static constexpr const char* kNames[] = { "HDR::HdrTexture", "HDR::OutputTexture", "HDR::UiTexture" };
+	for (std::size_t i = 0; i < std::size(textures); ++i) {
+		auto& wrapper = *textures[i].second;
+		if (!wrapper)
+			continue;
+		auto* next = graph.NewExport(textures[i].first, wrapper->resource.get());
+		if (!next)
+			continue;
+		wrapper = Rewrap(wrapper, next, kNames[i]);
+		// A new version's contents are undefined: the next redirect clears it.
+		if (textures[i].first == ORGHDRDisplay::Texture::Ui)
+			uiTextureClean = false;
+	}
 }
 
 void HDRDisplay::RedirectFramebuffer()
 {
+	// Graph modes: the engine's fields hold the engine target set's handles. The post chain writes the HDR target by
+	// Vars::HdrOutputTarget, and the UI targets come from Engine::UiTargets.
+	if (RenderGraph::Engine::GraphMode())
+		return;
 	if (!IsHDREnabledForFrame() || !hdrTexture || !hdrTexture->rtv)
 		return;
 
@@ -844,7 +942,8 @@ void HDRDisplay::RedirectFramebuffer()
 
 ID3D11Texture2D* HDRDisplay::PostChainTarget() const
 {
-	if (!loaded || !IsHDREnabledForFrame() || !hdrTexture || !hdrTexture->rtv || !hdrOutputCS)
+	// In graph mode the graph's program composes, so the D3D11 shader is not needed.
+	if (!loaded || !IsHDREnabledForFrame() || !hdrTexture || !hdrTexture->rtv || !(hdrOutputCS || RenderGraph::Engine::GraphMode()))
 		return nullptr;
 	return reinterpret_cast<ID3D11Texture2D*>(hdrTexture->resource.get());
 }
@@ -869,6 +968,9 @@ void HDRDisplay::RestoreFramebuffer()
 
 void HDRDisplay::SetUIBuffer()
 {
+	// Graph modes: Scaleform, Bink and ImGui draw into Engine::UiTargets' UI target; kFRAMEBUFFER's field is not swapped.
+	if (RenderGraph::Engine::GraphMode())
+		return;
 	auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 
 	// SDR mode composites UI directly into kFRAMEBUFFER.
@@ -919,11 +1021,13 @@ void HDRDisplay::PrepareMovieDraw()
 bool HDRDisplay::UsesDeferredPresentComposite() const
 {
 	return loaded && IsHDREnabledForFrame() &&
-	       uiTexture && uiTexture->rtv && hdrOutputCS;
+	       uiTexture && uiTexture->rtv && (hdrOutputCS || RenderGraph::Engine::GraphMode());
 }
 
 void HDRDisplay::SyncFramebufferUIRedirect()
 {
+	if (RenderGraph::Engine::GraphMode())
+		return;
 	if (!uiTexture || !uiTexture->rtv)
 		return;
 
@@ -1080,7 +1184,10 @@ void HDRDisplay::DrawImGuiForPresent()
 		}
 	} else {
 		auto& data = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
-		globals::d3d::context->OMSetRenderTargets(1, &data.RTV, nullptr);
+		{
+			auto* rtv = RenderGraph::Engine::Tripwire::Unwrap(data.RTV);  // the field holds a handle in graph modes
+			globals::d3d::context->OMSetRenderTargets(1, &rtv, nullptr);
+		}
 	}
 }
 
@@ -1099,7 +1206,8 @@ HRESULT HDRDisplay::RunPresentChainWithHDR(
 	UINT syncInterval,
 	UINT flags,
 	bool hdrReady,
-	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain)
+	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain,
+	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT, const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>&)>& frameEnd)
 {
 	if (UsesDeferredPresentComposite()) {
 		DeferredPresentCleanupScope cleanup{ *this };
@@ -1116,8 +1224,10 @@ HRESULT HDRDisplay::RunPresentChainWithHDR(
 		ID3D11RenderTargetView* nullRTV = nullptr;
 		globals::d3d::context->OMSetRenderTargets(1, &nullRTV, nullptr);
 		ApplyHDR();
-		const HRESULT retval = PresentToSwapChain(swapChain, syncInterval, flags);
-		return retval;
+		// The suppressed chain left the frame's end to this present, so HDR output is a step of the UI stage.
+		return frameEnd(swapChain, syncInterval, flags, [this](IDXGISwapChain* a_swapChain, UINT a_syncInterval, UINT a_flags) {
+			return PresentToSwapChain(a_swapChain, a_syncInterval, a_flags);
+		});
 	}
 
 	RunHDRBeforePresentChain(hdrReady);
@@ -1125,7 +1235,10 @@ HRESULT HDRDisplay::RunPresentChainWithHDR(
 	if (hdrReady) {
 		ClearUIBuffer();
 		auto& data = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
-		globals::d3d::context->OMSetRenderTargets(1, &data.RTV, nullptr);
+		{
+			auto* rtv = RenderGraph::Engine::Tripwire::Unwrap(data.RTV);  // the field holds a handle in graph modes
+			globals::d3d::context->OMSetRenderTargets(1, &rtv, nullptr);
+		}
 	}
 
 	return presentChain(swapChain, syncInterval, flags);
@@ -1135,7 +1248,8 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 	IDXGISwapChain* swapChain,
 	UINT syncInterval,
 	UINT flags,
-	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain)
+	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain,
+	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT, const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>&)>& frameEnd)
 {
 	const bool hdrReady = loaded && hdrDataCB && outputTexture && IsHDREnabledForFrame();
 	D3D11_VIEWPORT savedViewport{};
@@ -1150,7 +1264,8 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 		{
 			ZoneScopedN("CS.Present.Overlay");
 			auto& framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
-			globals::d3d::context->OMSetRenderTargets(1, &framebuffer.RTV, nullptr);
+			auto* rtv = RenderGraph::Engine::Tripwire::Unwrap(framebuffer.RTV);
+			globals::d3d::context->OMSetRenderTargets(1, &rtv, nullptr);
 			globals::menu->DrawOverlay();
 		}
 		globals::d3d::context->RSSetViewports(1, &savedViewport);
@@ -1168,7 +1283,7 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 	globals::d3d::context->RSSetViewports(1, &savedViewport);
 
 	ZoneScopedN("CS.Present.HdrChain");
-	return RunPresentChainWithHDR(swapChain, syncInterval, flags, hdrReady, presentChain);
+	return RunPresentChainWithHDR(swapChain, syncInterval, flags, hdrReady, presentChain, frameEnd);
 }
 
 void HDRDisplay::ClearUIBuffer()
@@ -1189,8 +1304,10 @@ void HDRDisplay::ClearUIBuffer()
 		auto& data = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 		data.RTV = savedFramebufferRTV;
 		savedFramebufferRTV = nullptr;
-		if (context)
-			context->OMSetRenderTargets(1, &data.RTV, nullptr);
+		if (context) {
+			auto* rtv = RenderGraph::Engine::Tripwire::Unwrap(data.RTV);
+			context->OMSetRenderTargets(1, &rtv, nullptr);
+		}
 	}
 }
 
@@ -1226,21 +1343,25 @@ void HDRDisplay::ApplyHDR()
 		// - SDR: kFRAMEBUFFER has the tonemapped 0-1 ISHDR output.
 		ID3D11ShaderResourceView* sceneSRV =
 			(IsHDREnabledForFrame() && hdrTexture && hdrTexture->srv) ? hdrTexture->srv.get() :
-																	framebufferRT.SRV;
+																	RenderGraph::Engine::Tripwire::Unwrap(framebufferRT.SRV);
 
 		ID3D11ShaderResourceView* uiSRV = nullptr;
 		if (uiTexture && uiTexture->srv) {
 			uiSRV = uiTexture->srv.get();
 		}
 
-		if (!GetHDROutputCS()) {
+		// In graph mode the graph composes, so the D3D11 shader is not compiled here.
+		if (!RenderGraph::Engine::GraphMode() && !GetHDROutputCS()) {
 			// Fallback: HDR shader files not present - copy kFRAMEBUFFER directly to output
 			globals::profiler->BeginPass("HDRDisplay::BackBufferCopy");
-			ID3D11Texture2D* backBuffer = nullptr;
-			HRESULT hr = globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-			if (SUCCEEDED(hr) && backBuffer) {
-				context->CopyResource(backBuffer, framebufferRT.texture);
-				backBuffer->Release();
+			// Graph modes: kFRAMEBUFFER is the scene back buffer slot itself, which the present copies into the swap chain.
+			if (!RenderGraph::Engine::GraphMode()) {
+				ID3D11Texture2D* backBuffer = nullptr;
+				HRESULT hr = globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+				if (SUCCEEDED(hr) && backBuffer) {
+					context->CopyResource(backBuffer, framebufferRT.texture);
+					backBuffer->Release();
+				}
 			}
 			globals::profiler->EndPass();
 
@@ -1250,22 +1371,28 @@ void HDRDisplay::ApplyHDR()
 		}
 
 		winrt::com_ptr<ID3D11Texture2D> backBuffer;
-		globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put()));
+		// Graph modes: the composite writes the scene back buffer slot, which the present copies into the swap chain.
+		if (auto* slot = RenderGraph::Engine::GraphMode() ? RenderGraph::Engine::UiTargets::BackBufferTexture() : nullptr)
+			backBuffer.copy_from(RenderGraph::Engine::Tripwire::Unwrap(slot));
+		else
+			globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put()));
 
-		// CS_ORG_HDR_DISPLAY: the composite, and the copy when it can, on the render graph. Else D3D11.
-		const auto composed = ORGHDRDisplay::Get().Compose(BuildHDRData(), backBuffer.get(), clearScene);
-		if (composed == ORGHDRDisplay::Composed::None) {
+		// In graph mode the composite, and the copy when it can, run on the render graph. Else D3D11.
+		// Graph mode composes and copies on the graph, or, while the UI stage lags, nothing runs on D3D11 either.
+		if (ORGHDRDisplay::Get().Compose(BuildHDRData(), backBuffer.get(), clearScene) == ORGHDRDisplay::Composed::None) {
+			// The D3D11 composite and copy below read what the UI stage draws, so the stage's work goes first.
+			ORGHDRDisplay::Get().FollowWithD3D11();
 			// The graph did not compose, so it did not clear the scene either.
 			if (clearScene && hdrTexture->rtv) {
 				const float clearColor[4]{};
 				context->ClearRenderTargetView(hdrTexture->rtv.get(), clearColor);
 			}
 			DispatchHDROutput(sceneSRV, uiSRV, outputTexture->uav.get());
-		}
-		if (backBuffer && composed != ORGHDRDisplay::Composed::OutputAndBackBuffer) {
-			globals::profiler->BeginPass("HDRDisplay::BackBufferCopy");
-			context->CopyResource(backBuffer.get(), outputTexture->resource.get());
-			globals::profiler->EndPass();
+			if (backBuffer) {
+				globals::profiler->BeginPass("HDRDisplay::BackBufferCopy");
+				context->CopyResource(backBuffer.get(), outputTexture->resource.get());
+				globals::profiler->EndPass();
+			}
 		}
 	}
 
@@ -1441,6 +1568,9 @@ void HDRDisplay::DestroyResources()
 
 void HDRDisplay::UpgradeLDRRenderTargets()
 {
+	// Graph modes: the targets are declared in the HDR format from the start (the plans in PostPostLoad).
+	if (RenderGraph::Engine::GraphMode())
+		return;
 	auto renderer = globals::game::renderer;
 	auto device = globals::d3d::device;
 
@@ -1463,15 +1593,6 @@ void HDRDisplay::UpgradeLDRRenderTargets()
 
 		D3D11_TEXTURE2D_DESC newDesc = origDesc;
 		newDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-
-		// CS_ORG_ENGINE_TARGETS: ORG makes the target again in the HDR format. Nothing is saved: the restore makes it again from the
-		// engine's own description.
-		const auto hdrName = fmt::format("HDR::{}", magic_enum::enum_name(targetId));
-		if (RenderGraph::Engine::Targets::Recreate(targetId, newDesc, hdrName.c_str(), true)) {
-			savedLDRTargets.push_back({ targetId, {} });
-			logger::info("[HDR] Upgraded render target {} to R16G16B16A16_FLOAT on the render graph (was format {})", static_cast<int>(targetId), static_cast<int>(origDesc.Format));
-			continue;
-		}
 
 		ID3D11Texture2D* newTexture = nullptr;
 		if (FAILED(device->CreateTexture2D(&newDesc, nullptr, &newTexture)))
@@ -1529,9 +1650,6 @@ void HDRDisplay::RestoreLDRRenderTargets()
 	auto renderer = globals::game::renderer;
 
 	for (auto& [targetId, saved] : savedLDRTargets) {
-		// An upgrade made on the render graph saved nothing: ORG makes the target again as the engine described it.
-		if (!saved.texture && RenderGraph::Engine::Targets::Restore(targetId))
-			continue;
 		auto& rt = renderer->GetRuntimeData().renderTargets[targetId];
 
 		if (rt.texture)
@@ -1554,7 +1672,7 @@ void HDRDisplay::RestoreLDRRenderTargets()
 void HDRDisplay::ClearShaderCache()
 {
 	patchedBlendStateCache.clear();
-	ORGHDRDisplay::Get().ClearShaderCache();
+	// The graph's HDR output program reloads with every live pipeline (RenderGraphRuntime::RequestShaderReload).
 	if (hdrOutputCS) {
 		hdrOutputCS->Release();
 		hdrOutputCS = nullptr;
@@ -1679,52 +1797,5 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	// setup and never again.
 	RefreshDisplayLuminance();
 
-	// Native mode: the swap chain handle answers no IDXGISwapChain4. BasicRHI's swap chain takes the colour space directly, and the
-	// output reaches it as in guest mode (ORGHDRDisplay copies it into the native back buffer, which the present copies to the swap
-	// chain image).
-	if (RenderGraph::Engine::Native::Active()) {
-		const bool hdr = IsHDREnabledForFrame();
-		if (RenderGraph::Engine::Native::SetSwapChainColorSpace(hdr))
-			logger::info("[HDR] Set swap chain color space to {} (native)", hdr ? "HDR10 (PQ/BT.2020)" : "SDR (sRGB)");
-		else
-			logger::warn("[HDR] Failed to set {} color space (native)", hdr ? "HDR10" : "SDR");
-		return;
-	}
-
-	IDXGISwapChain4* swapChain4 = nullptr;
-
-	if (globals::d3d::swapChain) {
-		globals::d3d::swapChain->QueryInterface(IID_PPV_ARGS(&swapChain4));
-	}
-
-	if (!swapChain4)
-		return;
-
-	auto* dxvk = DXVKInterop::GetSingleton();
-	if (dxvk->IsAvailable() || dxvk->Initialize())
-		dxvk->BeginPresenterColorSpaceTransition(IsHDREnabledForFrame());
-
-	if (IsHDREnabledForFrame()) {
-		HRESULT hr = swapChain4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
-		if (SUCCEEDED(hr)) {
-			logger::info("[HDR] Set swap chain color space to HDR10 (PQ/BT.2020)");
-			// Do NOT set HDR10 static metadata - it can cause issues on some monitors
-			// The HGiG approach is to handle highlights compression in the shader instead.
-			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-		} else {
-			logger::warn("[HDR] Failed to set HDR10 color space");
-			dxvk->CancelPresenterColorSpaceTransition(true);
-		}
-	} else {
-		HRESULT hr = swapChain4->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-		if (SUCCEEDED(hr)) {
-			logger::info("[HDR] Set swap chain color space to SDR (sRGB)");
-			swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
-		} else {
-			logger::warn("[HDR] Failed to set SDR color space");
-			dxvk->CancelPresenterColorSpaceTransition(false);
-		}
-	}
-
-	swapChain4->Release();
+	FrameGen::ActivePresenter().SetColorSpace(IsHDREnabledForFrame());
 }

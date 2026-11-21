@@ -1,12 +1,14 @@
 // The compatibility monitor. The request is applied at frame start. The coordinator's offenders are published to the menu as an
 // immutable snapshot.
 #include "PlayerParity.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 
 #include "Hooks.h"
+#include "I18n/I18n.h"
 #include "Plugin.h"
 #include "Utils/UI.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneMirror.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Scene/MirrorEvents.h"
@@ -47,7 +49,7 @@ namespace DCLF::Diagnostics::PlayerParity
 			std::uint32_t form = 0;
 			std::string example;
 		};
-		EventQueue<LeakNote, 64> leakNotes;
+		RenderGraph::Frame::EventQueue<LeakNote, 64> leakNotes;
 
 		// A mirror parity line can run to several hundred characters.
 		constexpr std::size_t kExampleChars = 400;
@@ -57,7 +59,7 @@ namespace DCLF::Diagnostics::PlayerParity
 		void Restart()
 		{
 			table = {};
-			table.offenders.sessionFrame = SceneCapture::Frame();
+			table.offenders.sessionFrame = DCLF::SceneClock::Step();
 			table.dirty = true;
 		}
 
@@ -168,7 +170,7 @@ namespace DCLF::Diagnostics::PlayerParity
 
 	void NoteMissed(const void* a_object, std::uint32_t a_form, std::uint8_t a_type, std::uint32_t a_fields, std::string_view a_example)
 	{
-		const auto frame = SceneCapture::Frame();
+		const auto frame = DCLF::SceneClock::Step();
 		// A write to a shared property or alpha shows on every reference whose mesh shares it, so it is one offender keyed by the object.
 		const bool shared = a_type == 2 || a_type == 3 || a_type == kEvicted;
 		const auto key = std::make_tuple(shared ? reinterpret_cast<std::uintptr_t>(a_object) : a_form, a_type, a_fields);
@@ -252,7 +254,7 @@ namespace DCLF::Diagnostics::PlayerParity
 		const auto offenders = Current();
 		out << fmt::format("Community Shaders {} (build {}), Drawcall Limit Fix compatibility monitor report\n", Plugin::VERSION.string(), Plugin::BUILD_DESCRIBE);
 		out << fmt::format("Game {}; monitor {}; {} checks since frame {}, now frame {}\n\n", REL::Module::get().version().string("."), Active() ? "on" : "off",
-			offenders->probes, offenders->sessionFrame, SceneCapture::Frame());
+			offenders->probes, offenders->sessionFrame, DCLF::SceneClock::Step());
 		out << "Each offender is engine state an object's reference holds that changed with no hook DCLF sees (another plugin's write, most\n"
 			   "likely): DCLF may draw it stale until something else updates it. The plugin is the reference's; the writer may be any plugin.\n\n";
 		out << fmt::format("Offenders: {}{}\n", offenders->entries.size(), offenders->overflow ? fmt::format(" (and {} more past the table's limit)", offenders->overflow) : "");
@@ -280,31 +282,32 @@ namespace DCLF::Diagnostics::PlayerParity
 		return path.string();
 	}
 
+#define I18N_KEY_PREFIX "feature.dclf.compat_monitor."
 	void DrawPanel()
 	{
-		if (!ImGui::TreeNodeEx("Compatibility monitor", ImGuiTreeNodeFlags_DefaultOpen))
+		if (!ImGui::TreeNodeEx(T(TKEY("title"), "Compatibility monitor"), ImGuiTreeNodeFlags_DefaultOpen))
 			return;
-		ImGui::TextWrapped(
+		ImGui::TextWrapped("%s", T(TKEY("intro"),
 			"Watches for changes other plugins make to the scene (node flags, fades, materials, alpha) that Drawcall Limit Fix has no hook for, "
-			"and names each object's reference and plugin. Costs a little CPU while on; it does not change what is drawn.");
+			"and names each object's reference and plugin. Costs a little CPU while on; it does not change what is drawn."));
 		bool on = Requested();
-		if (ImGui::Checkbox("Watch for changes other plugins make", &on))
+		if (ImGui::Checkbox(T(TKEY("watch"), "Watch for changes other plugins make"), &on))
 			Request(on);
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted("Each frame compares a slice of the scene with what DCLF holds; a difference no hook explains is an offender. Turning it on starts a fresh list.");
+			ImGui::TextUnformatted(T(TKEY("watch_tooltip"), "Each frame compares a slice of the scene with what DCLF holds; a difference no hook explains is an offender. Turning it on starts a fresh list."));
 		const auto offenders = Current();
-		ImGui::Text("%llu checks, %zu offenders", static_cast<unsigned long long>(offenders->probes), offenders->entries.size());
+		ImGui::Text(T(TKEY("counts"), "%llu checks, %zu offenders"), static_cast<unsigned long long>(offenders->probes), offenders->entries.size());
 		// The report also goes into the diagnostic capture.
-		if (ImGui::Button("Clear"))
+		if (ImGui::Button(T(TKEY("clear"), "Clear")))
 			Clear();
 		constexpr std::size_t kRows = 200;
 		if (!offenders->entries.empty() && ImGui::BeginTable("##dclfOffenders", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
 											   ImVec2(0.0f, 300.0f))) {
-			ImGui::TableSetupColumn("Plugin");
-			ImGui::TableSetupColumn("Reference");
-			ImGui::TableSetupColumn("Changed");
-			ImGui::TableSetupColumn("Checks");
-			ImGui::TableSetupColumn("Frames");
+			ImGui::TableSetupColumn(T(TKEY("plugin"), "Plugin"));
+			ImGui::TableSetupColumn(T(TKEY("reference"), "Reference"));
+			ImGui::TableSetupColumn(T(TKEY("changed"), "Changed"));
+			ImGui::TableSetupColumn(T(TKEY("checks"), "Checks"));
+			ImGui::TableSetupColumn(T(TKEY("frames"), "Frames"));
 			ImGui::TableHeadersRow();
 			// Names are resolved once per form, since the menu draws every frame.
 			static std::map<std::uint32_t, Named> names;
@@ -318,7 +321,7 @@ namespace DCLF::Diagnostics::PlayerParity
 				ImGui::TextUnformatted(found->second.plugin.c_str());
 				ImGui::TableNextColumn();
 				if (offender.references > 1)
-					ImGui::Text("%s (+%u sharing it)", found->second.reference.c_str(), offender.references - 1);
+					ImGui::Text(T(TKEY("shared_reference"), "%s (+%u sharing it)"), found->second.reference.c_str(), offender.references - 1);
 				else
 					ImGui::TextUnformatted(found->second.reference.c_str());
 				ImGui::TableNextColumn();
@@ -335,3 +338,4 @@ namespace DCLF::Diagnostics::PlayerParity
 		ImGui::TreePop();
 	}
 }
+#undef I18N_KEY_PREFIX

@@ -10,10 +10,10 @@ once, generically, with how to build it again, and its consumers bind through th
 `org::services::PipelineRegistry` (`extern/ORGModuleServices`, `PipelineRegistry.h`). CS owns one for the process:
 `RenderGraphRuntime::PipelineRegistry()`.
 
--   `Register(desc, payload, fingerprint, builtFor)` returns a `LivePipelineSlot`: an atomic payload and its identity (`Peek`), as
-    `org::PipelineStateSlot`. The payload is type-erased, because a DCLF pipeline is an aggregate (both variants, its pulled
-    pipelines, its state class). `desc` has an id for the log, the shader files it is compiled from, and the rebuild. An entry
-    dies with its slot's last holder.
+-   `Register(desc, payload, fingerprint, builtFor)` returns a `LivePipelineSlot`: its immutable versions, oldest first. Each
+    `PipelineVersion` is a payload and the registry generation it was published at. The payload is type-erased, because a DCLF
+    pipeline is an aggregate (both variants, its pulled pipelines, its state class). `desc` has an id for the log, the shader files
+    it is compiled from, and the rebuild. An entry dies with its slot's last holder.
 -   The rebuild builds the pipeline again from the files as they are now. It must not block: it calls `done` once, from any
     thread, with a new payload, with "unchanged" (its fingerprint equals the slot's and the reload is not forced), or with an
     error. A failure leaves the slot alone, and the error is logged.
@@ -23,12 +23,20 @@ once, generically, with how to build it again, and its consumers bind through th
     dependency-hashed.
 -   `Service()` runs on the render thread at each present (`RenderGraphRuntime::SignalFramePace`):
     -   It starts what was asked: it moves `SourcesGeneration`, tells the listeners, and runs the rebuilds' starts on one task.
-    -   It finishes a reload once every rebuild is in: it logs one line, stages the new payloads and asks the graph host for a
-        rebuild.
--   `Publish` is the safe point. Every graph build runs it, through the `cs.org.pipeline-registry` extension's factory. There the
-    host's thread is stopped and the old graph's work has been waited for. `Publish` swaps the staged payloads into their slots
-    and moves `Generation`. Each replaced payload is held until the host's retired callback passes `SubmissionsMade()` at that
-    build. Every recording after the build is of the new graph: every epoch, revision-driven or live, records again.
+    -   It finishes a reload once every rebuild is in: it logs one line and publishes each new payload as a new version of its
+        slot, all at the next `Generation`. No version a holder has changes.
+-   **Pins.** Every graph build pins the generation it is made at (`RenderGraph/PipelineVersions.h`: the `cs.org.pipeline-versions`
+    extension, `RenderGraph::SetRecordingTag`). Every recording of that graph carries the pin (`RecordingContext::Tag`) and binds
+    each slot's version at it (`LivePipelineSlot::At`). A graph built before a reload keeps binding the old versions, and so does a
+    kept recording made on it, for as long as it lives.
+-   **The revision.** A reload that published versions moves the `ShaderGeneration` frame variable to the new generation and asks
+    for every graph to be built again on the build lane (cleanup plan A4). The revision that carries the new value waits for its
+    input producer: every epoch's graph, attached or staged, pins the new generation. Every fragment source is a member of it, and a
+    drawing source's fragment must be recorded on builds that pin the generation (DCLF records one once its rebuilt graphs are
+    staged). It adopts the staged builds and the fragment together. Until then frames run the old graphs and the old versions.
+    Nothing waits on the render thread, and no graph is built there. Without a build manager, the host is asked for a rebuild.
+-   **Release.** At each present `Release` drops the versions no live pin binds (older than the one the oldest pin binds). Their
+    payloads are held until the host's retired callback passes `SubmissionsMade()` at that point.
 -   An entry built for an earlier `SourcesGeneration` (its build began before a reload read the files) is rebuilt by the next
     `Service`. So no pipeline keeps the files of before.
 
@@ -38,14 +46,15 @@ once, generically, with how to build it again, and its consumers bind through th
 -   CS's **Clear shader cache**, and every full `ShaderCache::Clear`: `DrawcallLimitFix::ClearShaderCache`, every entry.
 -   The shader watcher (`UpdateListener::UpdateCache`): the edited file. An `.hlsl` under `Data/Shaders/DrawcallLimitFix/` leaves
     the D3D11 cache alone.
--   `CS_DCLF_TEST_COMMANDS=<frame>:dclf:reload-shaders` reloads every entry. `=all` reloads every entry and forces each to be
+-   The `org:reload-shaders` test step reloads every entry. `=all` reloads every entry and forces each to be
     built and swapped. `=<file>` reloads the entries of that file, as the watcher does.
 
 ## Compute programs
 
 `ComputeProgram::Load` registers the program with its source. Its rebuild compiles the source again and makes a new SPIR-V's
 pipeline under the program's own layout. The program object and its layout stay, so no dispatch signature or owner changes. Passes
-bind `program->Pipeline()` at record time.
+bind `program->Pipeline(recording)` at record time, which is the version at the recording's pin. A list recorded outside a graph and
+submitted at once binds `CurrentPipeline()`.
 
 ## DCLF's graphics pipelines
 
@@ -61,7 +70,8 @@ bind `program->Pipeline()` at record time.
 -   **Registration.** Every kind's request makes its registration (`Impl::MakeLive`) with the same build lambda the service runs:
     main keys, shadow keys, forward keys, draw families and refraction. Each is registered when admitted. The lane keeps the slot
     where it keeps the payload: `setSlots` by set index, and `slot` on forward entries, draw families and refraction.
--   **Adoption.** Once `Generation` moves, `AdoptLivePipelines` (one step for every kind) takes each swapped slot's payload:
+-   **Adoption.** Once `Generation` moves, `AdoptLivePipelines` (one step for every kind) takes each slot's newest payload that it
+    does not have yet. Its sets hold their payloads, so no pin is needed:
     -   For the main set, it also takes the usage and constant tables, then the Z-prepass groups and state classes again. For the
         shadow set, it takes the discard class.
     -   A set that changed gets new versions (`Versions::Retire`). The next publication applies every index from the new payloads,
@@ -71,7 +81,8 @@ bind `program->Pipeline()` at record time.
 
 ## A new feature opts in
 
-Register each pipeline once, at build. Bind through the slot, at record time:
+Register each pipeline once, at build. Bind through the slot, at record time, with the recording's pin
+(`RenderGraph::PipelineVersions::VersionFor`):
 
 ```cpp
 org::services::LivePipelineDesc live{ .id = "my.pass", .sources = { "MyFeature/MyPassCS.hlsl" },
@@ -88,15 +99,20 @@ sets do) adds a listener (`AddListener`) and adopts once `Generation` moves.
 
 ## Verifying
 
-Run with `CS_DCLF_TEST_COMMANDS=<frame>:dclf:reload-shaders=all` and look for:
+Run the `shader-reload` cs-test config (an `org:reload-shaders=all` step) and look for:
 
 -   `[ORG] shader reload asked: every live pipeline, each swapped even if unchanged`
 -   `[DCLF] SPIR-V builds of Data/Shaders/Lighting.hlsl: N shader files tracked as dependencies (sources generation 1)`, which
     shows the sources were read again.
 -   `[DCLF] shader programs: sources generation 1; ... program entries of the files before dropped`
--   `[ORG] shader reload: N of M pipelines rebuilt (K failed, U unchanged) in S s`. With `=all`, N is M minus K.
--   `[ORG] shader reload: N pipelines swapped in at graph build B (registry generation G)`
+-   `[ORG] shader reload: N of M pipelines rebuilt (K failed, U unchanged) in S s off the render thread; N new versions at pipeline
+    generation G`. With `=all`, N is M minus K.
+-   `[ORG] shader reload R: pipeline generation G: every graph is built again off the render thread; the revision that carries it
+    adopts them`
 -   `[DCLF] pipeline lane: registry generation G: X main, Y shadow and Z forward, draw family and refraction pipelines swapped in`
+-   `[ORG] shader reload: frame revision V waits for every graph built with pipeline generation G`
+-   `[ORG] shader reload: pipeline generation G adopted (was F)`
 
-Then check the frame wait for the build's new snapshot (as `dclf:rebuild` shows), and that sequences stay above zero. Without
-`=all`, an unedited tree gives `0 of M pipelines rebuilt (0 failed, M unchanged)` and no swap.
+There is no wait at a Begin: no `shader-reload wait` line, and no `graph built on the render thread` warning. Check that sequences
+stay above zero. Without `=all`, an unedited tree gives `0 of M pipelines rebuilt (0 failed, M unchanged)`, no new generation and
+no revision.

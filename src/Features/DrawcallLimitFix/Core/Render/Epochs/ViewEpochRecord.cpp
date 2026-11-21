@@ -1,4 +1,4 @@
-// The view epochs' recording: their passes (cull, a trees view's draw family, draws, forward range), their PassDefs and graph extension.
+// The view epochs' recording: their passes (cull, a trees view's draw family, draws), their PassDefs and graph extension.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
@@ -51,10 +51,10 @@ namespace DCLF
 			 * @brief A view's cull: BuildDrawsCS's single phase, frustum only, one dispatch per face. A face not drawn gets a
 			 * dispatch of 0 groups.
 			 */
-			class BuildDrawsPass final : public org::TypedRenderGraphPass<BuildDrawsPass, BuildPrepared, BuildBindings>
+			class ViewBuildDrawsPass final : public org::TypedRenderGraphPass<ViewBuildDrawsPass, BuildPrepared, BuildBindings>
 			{
 			public:
-				BuildDrawsPass(std::shared_ptr<ViewResources> a_resources, std::shared_ptr<Resources> a_main) :
+				ViewBuildDrawsPass(std::shared_ptr<ViewResources> a_resources, std::shared_ptr<Resources> a_main) :
 					resources(std::move(a_resources)), mainResources(std::move(a_main)) {}
 
 				BuildBindings Declare(org::PassBuilder& a_builder)
@@ -106,7 +106,7 @@ namespace DCLF
 					viewed.poolFirstsIndex = a_recording.Index(a_bindings.poolFirsts);
 					auto& commands = a_recording.Commands();
 					commands.BindLayout(a_prepared.program->layout->GetHandle());
-					commands.BindPipeline(a_prepared.program->Pipeline());
+					commands.BindPipeline(a_prepared.program->Pipeline(a_recording));
 					for (std::uint32_t f = 0; f < a_prepared.faces; ++f) {
 						auto constants = viewed;
 						constants.bucketCountsIndex = a_recording.Index(a_bindings.bucketCounts[f]);
@@ -306,98 +306,6 @@ namespace DCLF
 			};
 
 
-			struct ForwardBindings
-			{
-				std::array<org::DeclaredViewToken, kColorTargets> targets;
-				org::DeclaredViewToken depth;
-				org::ResourceBindingToken sequences, counts;
-			};
-
-			struct ForwardPrepared
-			{
-				std::shared_ptr<const ViewFrame> frame;
-				PreprocessStates* preprocess = nullptr;
-				std::uint32_t targetCount = 0;
-			};
-
-			/**
-			 * @brief A view's forward range, sorted halves drawn per state class with the main set's forward pipelines, after the bucket
-			 * draws. Mirrors the engine drawing first person's blended list after its opaque passes.
-			 */
-			class ForwardPass final : public org::TypedRenderGraphPass<ForwardPass, ForwardPrepared, ForwardBindings>
-			{
-			public:
-				explicit ForwardPass(ViewBuild a_view) :
-					resources(a_view.resources), view(std::move(a_view)) {}
-
-				ForwardBindings Declare(org::PassBuilder& a_builder)
-				{
-					a_builder.PreferQueue(org::QueueKind::Graphics);
-					const std::span<const org::SrvView> noViews{};
-					const auto& main = *view.main;
-					const auto& scene = *main.scene;
-					ForwardBindings bindings{};
-					for (std::uint32_t i = 0; i < main.targetCount; ++i)
-						bindings.targets[i] = a_builder.RenderTarget(main.native[i]).View();
-					bindings.depth = a_builder.DepthReadWrite(view.target).View();
-					bindings.sequences = a_builder.IndirectArguments(*resources->sequences).Resource();
-					bindings.counts = a_builder.IndirectArguments(*resources->bucketCounts[0]).Resource();
-					// The face shapes' second vertex stream, pulled by address.
-					if (scene.vertexStream)
-						a_builder.ShaderResource(*scene.vertexStream, noViews);
-					a_builder.ShaderResource(resources->blocks, noViews);
-					DeclareFrameBuffers(a_builder, main);
-					a_builder.ShaderResource(main.frameConstants, noViews);
-					return bindings;
-				}
-
-				void Revision(std::vector<std::uint64_t>&) const {}
-
-				ForwardPrepared Prepare(const ForwardBindings&, const org::PassPrepareContext& a_preparation) const
-				{
-					ForwardPrepared prepared{};
-					auto frame = CurrentViewFrame(a_preparation, resources->traits->kind);
-					if (!frame || frame->forwardRanges.empty() || !frame->indirect.valid || !frame->width || !frame->height || !resources->preprocessForward ||
-						!view.main->forwardSort)
-						return prepared;
-					prepared.preprocess = resources->preprocessForward.get();
-					prepared.targetCount = view.main->targetCount;
-					prepared.frame = std::move(frame);
-					return prepared;
-				}
-
-				static void Record(const ForwardBindings& a_bindings, const ForwardPrepared& a_prepared, org::PassRecordContext& a_recording)
-				{
-					if (!a_prepared.frame || !a_prepared.preprocess)
-						return;
-					const auto& frame = *a_prepared.frame;
-					auto colours = LoadedColours(a_recording, a_bindings.targets, a_prepared.targetCount);
-					auto depth = LoadedDepth(a_recording, a_bindings.depth);
-					rhi::PassBeginInfo begin{};
-					begin.colors = { colours.data(), a_prepared.targetCount };
-					begin.depth = &depth;
-					begin.width = frame.width;
-					begin.height = frame.height;
-					begin.minDepth = 0.0f;
-					begin.maxDepth = frame.depthRange;
-					begin.debugName = "DCLF first-person forward";
-					const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
-					const auto counts = a_recording.Resolve(a_bindings.counts).GetHandle();
-					// Per state class with forward slots, its sorted half, counted by its bucket count word. Classes in creation order.
-					std::vector<IndirectCall> calls;
-					for (std::uint32_t c = 0; c < frame.forwardRanges.size() && c < frame.indirect.classes.size(); ++c)
-						if (const auto& range = frame.forwardRanges[c]; range.capacity)
-							calls.push_back({ frame.indirect.classes[c].signatures[kColorVariant], (std::uint64_t(range.first) + range.capacity) * sizeof(DrawSequence), counts,
-								std::uint64_t(frame.forwardEntry + c) * sizeof(std::uint32_t), range.capacity });
-					RecordPreprocessedDraws(a_recording, *a_prepared.preprocess, begin, frame.resourceHeap, frame.samplerHeap, frame.indirect.layout, frame.push[0], sequences,
-						calls);
-				}
-
-			private:
-				std::shared_ptr<ViewResources> resources;
-				ViewBuild view;
-			};
-
 			class ViewExtension final : public org::RenderGraph::IRenderGraphExtension
 			{
 			public:
@@ -446,19 +354,19 @@ namespace DCLF
 				std::shared_ptr<ViewResources> resources;
 			};
 
-			std::shared_ptr<org::RenderPass> LatchedCopies(const Api::PassContext& a_context)
+			std::shared_ptr<org::RenderPass> ViewLatchedCopies(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
-				return MakeLatchedCopiesPass([resources, scene = a_context.Main()->scene] { return ViewLatchedTargets(*resources, *scene); }, [kind = resources->traits->kind](const org::PassPrepareContext& a_preparation) {
+				return MakeLatchedCopiesPass(a_context.Conditions(), [resources, scene = a_context.Main()->scene] { return ViewLatchedTargets(*resources, *scene); }, [kind = resources->traits->kind](const org::PassPrepareContext& a_preparation) {
 					const auto frame = CurrentViewFrame(a_preparation, kind);
 					return frame ? LatchedSource{ frame, frame->latched } : LatchedSource{};
 				});
 			}
 
-			std::shared_ptr<org::RenderPass> BuildDraws(const Api::PassContext& a_context)
+			std::shared_ptr<org::RenderPass> ViewBuildDraws(const Api::PassContext& a_context)
 			{
 				auto view = ViewBuildOf(a_context);
-				return view.main ? std::make_shared<BuildDrawsPass>(a_context.View(), std::move(view.main)) : nullptr;
+				return view.main ? std::make_shared<ViewBuildDrawsPass>(a_context.View(), std::move(view.main)) : nullptr;
 			}
 
 			// A view without a depth pass, the reflection, draws its faces in one epoch. First person draws its depth in the depth
@@ -477,26 +385,6 @@ namespace DCLF
 				return resources->traits->depthPass && view.main ? std::make_shared<DrawPass>(std::move(view), DrawMode::Depth) : nullptr;
 			}
 
-			// The forward range is sorted in the depth epoch and drawn in the colour epoch after the bucket draws.
-			std::shared_ptr<org::RenderPass> ForwardSort(const Api::PassContext& a_context)
-			{
-				const auto& resources = a_context.View();
-				const auto& traits = *resources->traits;
-				const auto main = ViewBuildOf(a_context).main;
-				if (!traits.depthPass || !traits.forwardPart || !main || !main->forwardSort || CurrentGraphConditions().firstPersonForwardDirect)
-					return nullptr;
-				return MakeForwardSortPass(resources->sequences, { nullptr, resources->bucketCounts[0] }, [kind = traits.kind, main](const org::PassPrepareContext& a_preparation) {
-					const auto frame = CurrentViewFrame(a_preparation, kind);
-					if (!frame || !frame->latch)
-						return ForwardSortSource{};
-					ForwardSortSource source{ main->forwardSort };
-					for (std::uint32_t c = 0; c < frame->forwardRanges.size(); ++c)
-						if (const auto& range = frame->forwardRanges[c]; range.capacity)
-							source.ranges.push_back({ range.first, range.capacity, (frame->forwardEntry + c) * static_cast<std::uint32_t>(sizeof(std::uint32_t)) });
-					return source;
-				});
-			}
-
 			std::shared_ptr<org::RenderPass> ColourDraw(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
@@ -504,25 +392,13 @@ namespace DCLF
 				return resources->traits->depthPass && view.main ? std::make_shared<DrawPass>(std::move(view), DrawMode::Colour) : nullptr;
 			}
 
-			std::shared_ptr<org::RenderPass> ForwardDraw(const Api::PassContext& a_context)
-			{
-				const auto& resources = a_context.View();
-				const auto& traits = *resources->traits;
-				auto view = ViewBuildOf(a_context);
-				return traits.depthPass && traits.forwardPart && view.main && view.main->forwardSort && resources->preprocessForward && !CurrentGraphConditions().firstPersonForwardDirect ?
-				           std::make_shared<ForwardPass>(std::move(view)) :
-				           nullptr;
-			}
-
 			// Named with the view's prefix.
 			constexpr Api::PassDef kViewPasses[] = {
-				{ .key = "view.latched-copies", .passName = "{view}.latched-copies", .kind = PassKind::Copy, .make = &LatchedCopies },
-				{ .key = "view.build-draws", .passName = "{view}.build-draws", .make = &BuildDraws },
+				{ .key = "view.latched-copies", .passName = "{view}.latched-copies", .kind = PassKind::Copy, .make = &ViewLatchedCopies },
+				{ .key = "view.build-draws", .passName = "{view}.build-draws", .make = &ViewBuildDraws },
 				{ .key = "view.faces", .passName = "{view}.faces", .kind = PassKind::Render, .make = &FacesDraw },
 				{ .key = "view.depth", .passName = "{view}.depth", .kind = PassKind::Render, .make = &DepthDraw },
-				{ .key = "view.forward-sort", .passName = "{view}.forward-sort", .make = &ForwardSort },
 				{ .key = "view.colour", .passName = "{view}.colour", .kind = PassKind::Render, .make = &ColourDraw },
-				{ .key = "view.forward", .passName = "{view}.forward", .kind = PassKind::Render, .make = &ForwardDraw },
 			};
 		}
 

@@ -1,4 +1,4 @@
-// Tree wind's object contributions: technique 12 (TreeAnim) under the trees toggle, its record flag, the TreeParams and WindTimers
+// Tree wind's object contributions: technique 12 (TreeAnim), its record flag, the TreeParams and WindTimers
 // SetupGeometry derives (used until TreeWindCS has an entry for the tree), and the engine globals that derivation reads.
 
 // TreeWindScene.h first, because volk must precede every Vulkan header.
@@ -106,9 +106,9 @@ namespace DCLF::Features::TreeWind
 		}
 	}
 
-	void RegisterObjects(Api::InstallContext& a_context, Api::ToggleId a_trees)
+	void RegisterObjects(Api::InstallContext& a_context)
 	{
-		a_context.RegisterTechnique({ .technique = kTechniqueTreeAnim, .toggle = a_trees, .objectFlags = kObjectTreeAnim });
+		a_context.RegisterTechnique({ .technique = kTechniqueTreeAnim, .objectFlags = kObjectTreeAnim });
 		a_context.RegisterShading({ .name = "tree-anim", .propertyFlags = static_cast<std::uint64_t>(RE::BSShaderProperty::EShaderPropertyFlag::kTreeAnim),
 			.derive = &DeriveTreeAnim, .objectFlags = kObjectTreeAnim, .blockWords = kBlockWords, .vsVariables = kBlockVariables });
 		globalsSlot = a_context.RegisterFrameGlobals({ .name = "tree-wind", .floats = kWindGlobals, .capture = &CaptureWindGlobals });

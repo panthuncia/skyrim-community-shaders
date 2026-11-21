@@ -2,12 +2,10 @@
 
 #include "Schedule.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Reports.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Accumulated.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/CutObservers.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/PrimaryCullView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
-#include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
@@ -33,16 +31,14 @@ namespace DCLF::Reports
 		}
 
 		/** @brief The scene lists line. */
-		void SceneListsLine(const Diagnostics::CutObservers::Counts& a_diagnostics)
+		void SceneListsLine()
 		{
 			const auto l = PrimaryCull::Get().TakeListCounters();
 			const double toMs = MsPerTick();
-			const auto& d = a_diagnostics;
-			const bool bad = l.unexcluded || d.filterMissed || d.listMissing || d.listExtra || d.keptMissing || d.keptExtra;
+			const bool bad = l.unexcluded != 0;
 			logger::info("[DCLF] scene lists: {} frames: {} kept, {} built by DCLF ({} late; by cause: {} structure or hidden ({}), {} filter, {} globals, {} not DCLF's), {} the engine's ({} not keepable: {}; {} filtered); "
 						 "per DCLF build {:.0f} entries ({:.3f} ms), {:.0f} DCLF roots left out a build or filtered frame; filter sets built {} (not published: {} toggled off, {} occlusion maps native, {} snapshot not current, {} no exclusion); "
-						 "dry runs {}: {} roots, {} stand-in disagreements; DCLF's lists against the engine's: {} checks, {} of the engine's missing, {} of DCLF's not hidden extra; "
-						 "put back for an occlusion map the engine drew on {} frames ({} detached roots left out); filtered frames without the sun's exclusion {}, members lost while out {}; {}{}{}",
+						 "put back for an occlusion map the engine drew on {} frames ({} detached roots left out); filtered frames without the sun's exclusion {}, members lost while out {}; {}{}",
 				l.frames, l.kept, l.rebuilt, l.lateRebuilds, l.rebuildStructure,
 				fmt::format("events: {} object root children, {} category nodes, {} roots ({} applied: {} added, {} removed, {} rebuilt), {} hidden bits", l.structureBy[0],
 					l.structureBy[1], l.structureBy[2], l.eventsApplied, l.eventsAdded, l.eventsRemoved, l.eventsRebuilt, l.structureBy[3]),
@@ -51,12 +47,9 @@ namespace DCLF::Reports
 					l.notKeepableBy[2], l.notKeepableBy[3], l.notKeepableBy[4]),
 				l.filtered, l.rebuilt ? double(l.rebuildEntries) / l.rebuilt : 0.0, l.rebuilt ? l.rebuildTicks * toMs / l.rebuilt : 0.0,
 				(l.rebuilt + l.filtered) ? double(l.removed) / double(l.rebuilt + l.filtered) : 0.0, l.built, l.notToggled, l.noOcclusion, l.notCurrent,
-				l.noExclusion, l.dryRuns, d.filterChecked, d.filterMissed, d.listChecks, d.listMissing, d.listExtra, l.restored, l.restoreDetached, l.unexcluded,
+				l.noExclusion, l.restored, l.restoreDetached, l.unexcluded,
 				l.lostWhileOut,
-				ListReasons(l) + (d.keptChecks ? fmt::format("; kept lists against a rebuild: {} checks, {} missing, {} extra{}", d.keptChecks, d.keptMissing, d.keptExtra,
-														  d.keptFirst.empty() ? "" : " (first: " + d.keptFirst + ")") :
-				                                   ""),
-				bad ? " <- LIST FILTER" : " <- OK", d.listFirst.empty() ? "" : "; first: " + d.listFirst);
+				ListReasons(l), bad ? " <- LIST FILTER" : " <- OK");
 		}
 
 		/**
@@ -123,41 +116,27 @@ namespace DCLF::Reports
 		if (!View::CutFrames())
 			return;
 		// Views the engine culled whole while DCLF draws them, which DCLF does not cover yet.
-		if (const auto whole = EngineOnlyCull::WholeCullLine(); !whole.empty())
+		if (const auto whole = WholeCull::Line(); !whole.empty())
 			logger::warn("{}", whole);
 		const auto s = cull.TakeCutCounters();
-		const auto d = Diagnostics::CutObservers::Take();
 		const double toMs = MsPerTick();
 		const double applied = std::max<double>(static_cast<double>(s.appliedFrames), 1.0);
-		logger::info("[DCLF] primary exclusion: applied on {} of {} frames ({} without candidates, {} preconditions), {:.1f} entries planned again a frame as their candidates moved ({} pool gatherings; parity {} checks, {} differ, {} entries differing once); per frame {:.0f} eligible entries reached, "
+		logger::info("[DCLF] primary exclusion: applied on {} of {} frames ({} without candidates, {} preconditions), {:.1f} entries planned again a frame as their candidates moved ({} pool gatherings); per frame {:.0f} eligible entries reached, "
 					 "{:.0f} stood in for ({:.0f} walked, {:.0f} of them in view), {:.1f} cross-fading LOD (stood in), {:.1f} not yet admitted ({:.1f} admitted); {:.0f} members in view, {:.1f} not bound yet (the engine's), "
 					 "{:.1f} bound but not in the set (the engine's), {:.1f} hidden;  {:.1f} owned geometries left out of the engine's registration; "
 					 "{:.0f} of the engine's members in view registered by it; switches: {:.1f} entries culled by the engine (stale child), {:.0f} members unselected, selection read from every switch on {} frames and from {} events' entries; render thread: prepare {:.3f} ms, after the jobs {:.3f} ms; plans on the pool: {} kicked, {} spliced, {} stale, {} refused a lease, {:.1f} entries waiting a frame",
-			s.appliedFrames, s.frames, s.skippedStale, s.skippedPreconditions, double(s.entriesPlanned) / applied, s.compactions, d.cutChecks, d.cutMismatches, d.cutLagging, s.seen / applied, s.skipped / applied, s.walked / applied, s.visibleEntries / applied,
+			s.appliedFrames, s.frames, s.skippedStale, s.skippedPreconditions, double(s.entriesPlanned) / applied, s.compactions, s.seen / applied, s.skipped / applied, s.walked / applied, s.visibleEntries / applied,
 			s.notSettled / applied, s.notAdmitted / applied, s.admittedNow / applied, s.members / applied, s.unbound / applied,
 			s.undrawable / applied, s.hiddenSkipped / applied, s.excluded / applied,
 			s.engineMembers / applied, s.switchStale / applied, s.unselected / applied, s.liveAll, s.liveEntries, s.prepareTicks * toMs / applied, s.afterTicks * toMs / applied,
 			s.plansKicked, s.plansSpliced, s.plansStale, s.plansRefused, s.awaiting / applied);
 		// The membership, registration and resident lines come from the coordinator's pass.
-		SceneListsLine(d);
+		SceneListsLine();
 		CullsOffLine();
 		Extensions::ReportLinesAt(Api::ReportPoint::PrimaryCull, a_frame);
 		Extensions::ReportLinesAt(Api::ReportPoint::PrimaryCullSources, a_frame);
-		if (View::WalkEverything())
-			logger::info("[DCLF] stand-in walk parity: {} geometries handed to the registration from entries the stand-in would not walk{}", d.walkMissed,
-				d.walkMissed ? " <- STAND-IN WALK" : " <- OK");
-		if (!d.walkMissedFirst.empty())
-			logger::info("[DCLF] stand-in walk parity, missed:{}", d.walkMissedFirst);
-		if (d.maskChecked)
-			logger::info("[DCLF] light masks (owned members in view, which no main registration clears): {} checked, {} with the sun's bits, {} with other lights' bits{}{}",
-				d.maskChecked, d.maskSun, d.maskOther, d.maskSun || d.maskOther ? " <- LIGHT MASKS" : " <- OK", d.maskFirst.empty() ? "" : "; first: " + d.maskFirst);
 		mixedPerFrame = s.mixed / applied;
 		Extensions::ReportLinesAt(Api::ReportPoint::PrimaryCullParity, a_frame);
-		// BeginFrameCamera's main camera against the list processes'.
-		if (const auto camera = Diagnostics::Accumulated::TakeFrameCamera(); camera.checked)
-			logger::info("[DCLF] frame camera (T7f preparation: FadeEye, the camera cut and the height test from the main camera at BeginSceneFrame): {} frames, {} with "
-						 "another camera on the list processes{}",
-				camera.checked, camera.differ, camera.differ ? " <- FRAME CAMERA" : " <- OK");
 		Extensions::ReportLinesAt(Api::ReportPoint::PrimaryCullLast, a_frame);
 	}
 

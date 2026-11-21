@@ -23,9 +23,7 @@
 #include <utility>
 #include <vector>
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include <Render/Runtime/IStatisticsService.h>
-#endif
+#include <Render/Runtime/IStatisticsService.h>
 
 // The hardware counter front end: requests, status, results, the CS_GPU_COUNTERS_* switches (CS_NVPERF_* still read), and
 // the choice of backend by API and GPU vendor (GpuCountersBackend.h). Every profiler call is the backend's.
@@ -847,11 +845,7 @@ namespace GpuCounters
 
 		bool TimestampSubRangesActive() noexcept
 		{
-#if defined(CS_HAS_RENDER_GRAPH)
 			return org::runtime::RecordingSubRangesActive();
-#else
-			return false;
-#endif
 		}
 	}
 
@@ -866,10 +860,8 @@ namespace GpuCounters
 		PushedRange pushed;
 		auto* backend = g_backend.load(std::memory_order_relaxed);
 		pushed.profiler = backend && a_nativeCommandBuffer && backend->PushCommandBufferRange(a_nativeCommandBuffer, a_name);
-#if defined(CS_HAS_RENDER_GRAPH)
 		// A kept recording's own timestamps (a timestamp trace): the same range, nested in the pass's.
 		pushed.timestamps = org::runtime::BeginRecordingSubRange(a_name);
-#endif
 		if (!pushed.profiler && !pushed.timestamps)
 			return false;
 		t_pushedRanges.push_back(pushed);
@@ -885,9 +877,7 @@ namespace GpuCounters
 		if (pushed.profiler)
 			if (auto* backend = g_backend.load(std::memory_order_relaxed))
 				backend->PopCommandBufferRange(a_nativeCommandBuffer, true);
-#if defined(CS_HAS_RENDER_GRAPH)
 		if (pushed.timestamps)
 			org::runtime::EndRecordingSubRange();
-#endif
 	}
 }

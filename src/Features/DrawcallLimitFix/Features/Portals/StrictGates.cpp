@@ -53,12 +53,6 @@ namespace DCLF::Portals
 		return entry && entry[1] != 0;
 	}
 
-	bool ProgramWords::SkipView(std::uint32_t a_program) const
-	{
-		const auto* entry = Entry(a_program);
-		return entry && (entry[0] & kPortalSkipView);
-	}
-
 	bool ProgramWords::Pass(std::uint32_t a_program, const float a_centre[3], float a_radius) const
 	{
 		const auto* entry = Entry(a_program);
@@ -112,7 +106,7 @@ namespace DCLF::Portals
 
 	GateVerdict Evaluate(std::span<const GateLink> a_chain, const Context& a_context)
 	{
-		// StrictLightParity's model: Process1 from the request's mode 4, the node types' OnVisible on the way down.
+		// Process1 from the request's mode 4, the node types' OnVisible on the way down.
 		const ProgramWords programs(a_context.programs);
 		GateVerdict verdict;
 		std::uint32_t mode = 4, program = kPortalNoProgram;

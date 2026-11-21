@@ -43,8 +43,6 @@ namespace DCLF::Api
 			return *static_cast<T*>(state.get());
 		}
 
-		/** @brief Whether the parity dense walk is running. It restores the tables but not what components keep beside them. */
-		bool DenseWalk() const;
 		/** @brief The fade node of a_slot's property as the mirror holds it, and its capture kind. Reads no engine memory. */
 		const void* MirroredFadeNode(std::uint32_t a_slot, std::uint32_t& a_kind) const;
 		/**

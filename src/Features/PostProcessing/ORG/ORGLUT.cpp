@@ -1,19 +1,17 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "Features/PostProcessing/ORGPostEffect.h"
+#include "Features/PostProcessing/ORGPostEffect.h"
 
-#	include "Features/PostProcessing/LUT.h"
-#	include "Presets/UnifiedPresetCatalog.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/ShaderBindings.h"
+#include "Features/PostProcessing/LUT.h"
+#include "Presets/UnifiedPresetCatalog.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/ShaderBindings.h"
 
-#	include <DirectXTex.h>
-#	include <Resources/ExternalTextureResource.h>
+#include <DirectXTex.h>
+#include <Resources/ExternalTextureResource.h>
 
-#	include <vector>
+#include <vector>
 
 namespace ORGPostChain
 {
@@ -33,26 +31,55 @@ namespace ORGPostChain
 		* @brief LUT::Draw on the graph, one draw over the dynamic-resolution area. A 2D LUT is imported from D3D11.
 		* A 3D LUT is copied into a graph texture by a declared copy pass, since the anchors import 2D textures only.
 		*/
+		/** @brief One build's draw: its constants region, or nothing without a LUT. */
+		class LUTRun final : public Run
+		{
+		public:
+			LUTRun(LatchRegion<LUT::LUTCB> a_constants, bool a_drawn) :
+				constants(a_constants), drawn(a_drawn) {}
+
+			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
+			{
+				if (drawn)
+					a_commit.Write(constants, static_cast<LUT&>(a_feature).Constants());
+			}
+
+		private:
+			LatchRegion<LUT::LUTCB> constants;
+			bool drawn = false;
+		};
+
+		/**
+		* The LUT file (LutPath, a string) is no variable, so the loaded texture's identity is observed. A new file is a new
+		* texture of its own shape and format, so it cannot be a declared texture's version.
+		*/
 		class LUTEffect final : public Effect
 		{
 		public:
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
 			{
 				auto& lut = static_cast<LUT&>(a_feature);
-				a_key.push_back(static_cast<std::uint64_t>(lut.LutType - kNoLut));
+				lutType = lut.LutType;
+				a_key.push_back(static_cast<std::uint64_t>(lutType - kNoLut));
 				source = nullptr;
 				if (lut.LutType == kNoLut)
 					return nullptr;
+				// A LUT that is not loaded draws nothing, as the D3D11 LUT::Draw. A new load is a new key.
+				const bool loaded = lut.LutType == kLut3D ? lut.texLUT3D && lut.texLUT3D->resource : lut.texLUT2D && lut.texLUT2D->resource;
+				if (!loaded) {
+					lutType = kNoLut;
+					a_key.back() = 0;
+					return nullptr;
+				}
 				if (lut.LutType == kLut3D) {
-					if (!lut.texLUT3D || !lut.texLUT3D->resource)
-						return "the 3D LUT is not loaded";
 					if (const char* why = CopyLut3D(lut))
 						return why;
 					source = copy->Graph();
 				} else {
-					if (!lut.texLUT2D || !lut.texLUT2D->resource)
-						return "the LUT is not loaded";
-					source = FrameAnchors::ImmutableTexture("pp.lut", lut.texLUT2D->resource.get(), lut.texLUT2D->srv.get());
+					// Each loaded LUT is an import of its own, never a new texture under one id: that would change an import
+					// mid-frame (step 9b). The key holds the import, so a new LUT registers the chain again.
+					auto* texture = lut.texLUT2D->resource.get();
+					source = FrameAnchors::ImportTexture(fmt::format("cs.d3d11.pp.lut.{:x}", reinterpret_cast<std::uintptr_t>(texture)), { .texture = texture, .srv = lut.texLUT2D->srv.get(), .immutable = true });
 					if (!source)
 						return "the LUT texture cannot be imported";
 				}
@@ -60,38 +87,45 @@ namespace ORGPostChain
 				return nullptr;
 			}
 
-			void Build(Builder& a_builder, PostProcessFeature& a_feature) override
+			void Programs(ProgramSource& a_programs, PostProcessFeature&, std::span<const std::uint64_t>) override
 			{
-				lutType = static_cast<LUT&>(a_feature).LutType;
+				if (lutType != kNoLut)
+					LoadProgram(a_programs);
+			}
+
+			std::shared_ptr<Run> BuildRun(Builder& a_builder, PostProcessFeature&, std::span<const std::uint64_t>) override
+			{
+				// Observed in the key with the source it reads.
 				if (lutType == kNoLut)
-					return;
+					return std::make_shared<LUTRun>(LatchRegion<LUT::LUTCB>{}, false);
 				// As LUT::SetupResources, the output takes kMAIN_COPY's format.
 				const auto format = a_builder.GetShape().mainCopyFormat;
 				auto image = a_builder.CreateImage("PostProcessing::LUT::Output", format, D3D11_BIND_RENDER_TARGET);
-				constants = a_builder.Latch<LUT::LUTCB>();
+				const auto constants = a_builder.Latch<LUT::LUTCB>();
 				const bool is3D = lutType == kLut3D;
 				if (is3D) {
 					a_builder.Register(*copy);
-					// The chain has no one-shot pass, so the copy of a few hundred KB runs every run.
+					// The chain has no first-run gate, so the copy of a few hundred KB runs every run.
 					a_builder.Add("upload", FrameAnchors::PassKind::Copy, [staged = staged]() { return GraphResources::MakeUploadPass({ staged }); });
 				}
 				// The shader reads only the LUT LutType names.
 				a_builder.Draw({ .name = "draw",
-					.program = a_builder.Raster("PostProcessing/LUT/lut.ps.hlsl", ShaderBindings::Words<LutBlock>(), { format }),
+					.program = LoadProgram(a_builder),
 					.bindings = { Bind::Srv(a_builder.Current()), is3D ? Bind::Unused() : Bind::Srv(source), is3D ? Bind::Srv(source) : Bind::Unused(),
 						Bind::Latch(constants) },
 					.target = image,
 					.viewport = a_builder.DynamicViewport() });
 				a_builder.SetCurrent(image);
-			}
-
-			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
-			{
-				if (lutType != kNoLut)
-					a_commit.Write(constants, static_cast<LUT&>(a_feature).Constants());
+				return std::make_shared<LUTRun>(constants, true);
 			}
 
 		private:
+			/** @brief Listed in Programs and built on the programs lane. As LUT::SetupResources, the output takes kMAIN_COPY's format. */
+			static std::shared_ptr<const RasterProgram> LoadProgram(ProgramSource& a_programs)
+			{
+				return a_programs.Raster("PostProcessing/LUT/lut.ps.hlsl", ShaderBindings::Words<LutBlock>(), { a_programs.GetShape().mainCopyFormat });
+			}
+
 			/**
 			* @brief Re-reads the file's mip 0 on the CPU and stages it for the upload pass, so the graph orders and tracks the copy.
 			* A D3D11 CopyResource would write a graph resource outside the graph. @return Null, or why it cannot be made.
@@ -144,12 +178,10 @@ namespace ORGPostChain
 			std::shared_ptr<const GraphResources::StagedUpload> staged;  // for the upload pass
 			winrt::com_ptr<ID3D11Texture3D> copiedFrom;  // held so a new LUT never takes the old one's address
 			FrameAnchors::Texture source;
-			LatchRegion<LUT::LUTCB> constants;
-			int lutType = kNoLut;
+			int lutType = kNoLut;  // this frame's, from Update
 		};
 	}
 
 	std::unique_ptr<Effect> MakeLUT() { return std::make_unique<LUTEffect>(); }
 }
 
-#endif

@@ -1,6 +1,6 @@
 #pragma once
 
-// Parts of the frame-value pool that its diagnostics share. Included by TextureTransformsPool.cpp and the parity only.
+// Parts of the frame-value pool that its stats line shares. Included by TextureTransformsPool.cpp and the report only.
 
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransforms.h"
 #include "Features/DrawcallLimitFix/Api/ObjectContributors.h"
@@ -39,8 +39,6 @@ namespace DCLF::Features::TextureTransforms
 		a_values[3] = material->texCoordScale[a_buffer].y;
 	}
 
-	// The parity on parity frames and the line's counts every frame, at the end of the producer's sample.
-	void CheckPoolParity(const Api::FrameValuePoolProducer& a_producer, const TextureTransformList* a_list, std::size_t a_count, std::size_t a_buffer,
-		const std::vector<TextureTransformRow>& a_out, const std::vector<const RE::BSShaderMaterial*>& a_materials);
+	// The line's counts every frame, at the end of the producer's sample.
 	void CountPoolLine(std::size_t a_count, std::uint64_t a_changed, std::uint64_t a_refused, std::size_t a_variables, std::uint64_t a_variablesChanged);
 }

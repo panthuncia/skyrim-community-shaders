@@ -12,7 +12,8 @@ namespace org
 }
 
 /**
-* @brief The engine's textures as ORG textures, with CS_ORG_ENGINE_TEXTURES=1.
+* @brief The engine's textures as ORG textures, in graph mode (Engine::GraphMode). The creators were checked on SE 1.5.97 and AE
+* 1.6.1170, not on VR.
 *
 * Hooks the DDS loader's CreateD3DResources (SE 75724, AE 77538), which runs on loader threads with no lock, and
 * Renderer::CreateTexture2D (SE 75511, AE 77303) for DEFAULT one-mip textures. BasicRHI creates the image and DXVK wraps it
@@ -24,10 +25,7 @@ namespace org
 */
 namespace RenderGraph::Engine::Textures
 {
-	/** @brief Not on VR. */
-	bool Requested();
-
-	/** @brief Requested, and the render graph can wrap images with their contents. Any thread. */
+	/** @brief Graph mode (Engine::GraphMode), and the render graph can wrap images with their contents. Any thread. */
 	bool Active();
 
 	/** @brief Main thread, at plugin load. */

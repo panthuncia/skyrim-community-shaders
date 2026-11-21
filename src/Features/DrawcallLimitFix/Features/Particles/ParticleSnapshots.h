@@ -28,7 +28,7 @@ namespace DCLF::Api
 namespace DCLF::Features::Particles
 {
 	/**
-	 * @brief The particle systems DCLF draws (CS_DCLF_PARTICLES), so DCLF never reads a system's particle data after the update.
+	 * @brief The particle systems DCLF draws, so DCLF never reads a system's particle data after the update.
 	 *
 	 * The writer: a thunk after each update slot copies the state DCLF needs into the system's record, a triple buffer. This runs
 	 * on whatever thread updates the system. The reader: FrameValues' producer takes the newest snapshot and expands it as
@@ -99,9 +99,6 @@ namespace DCLF::Features::Particles
 		/** @brief Prunes records, publishes a changed table and frees what no writer can hold. Producer, after its items. */
 		void EndRun();
 
-		/** @brief Whether the producer expanded a snapshot of a_geometry in its last kCoveredRuns runs. Any thread. */
-		bool Covered(const RE::BSGeometry* a_geometry, bool& a_followed) const;
-		static constexpr std::uint32_t kCoveredRuns = 3;
 		/** @brief A record whose snapshot has not changed for this many runs counts as frozen. */
 		static constexpr std::uint32_t kFrozenRuns = 30;
 

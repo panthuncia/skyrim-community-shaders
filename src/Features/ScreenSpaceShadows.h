@@ -1,10 +1,16 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Utils/Setting.h"
+
+#include <cstdint>
 
 struct ScreenSpaceShadows : Feature
 {
 public:
+	/** @brief Binds the shape settings to their frame variables. The global is the only instance. */
+	ScreenSpaceShadows();
+
 	virtual inline std::string GetName() override { return "Screen Space Shadows"; }
 	virtual std::string GetDisplayName() override { return T("feature.screen_space_shadows.name", "Screen Space Shadows"); }
 	virtual inline std::string GetShortName() override { return "ScreenSpaceShadows"; }
@@ -24,17 +30,32 @@ public:
 
 	bool HasShaderDefine(RE::BSShader::Type shaderType) override;
 
-	struct BendSettings
+	/** @brief The settings block RaymarchCS reads, in RaymarchCB. Its layout is fixed. */
+	struct GpuBendSettings
 	{
 		float SurfaceThickness = 0.02f;
 		float BilinearThreshold = 0.02f;
 		float ShadowContrast = 1.0f;
 		uint Enable = 1;
 		uint SampleCount = 1;
-		uint pad0[3];
+		uint pad0[3]{};
+	};
+	static_assert(sizeof(GpuBendSettings) == 32);
+
+	/** @brief The CPU settings. Enable sets the raymarch pass, SampleCount the program (frame revision plan 6.4). */
+	struct BendSettings
+	{
+		float SurfaceThickness = 0.02f;
+		float BilinearThreshold = 0.02f;
+		float ShadowContrast = 1.0f;
+		CS::Setting<std::uint32_t> Enable = 1;
+		CS::Setting<std::uint32_t> SampleCount = 1;
 	};
 
 	BendSettings bendSettings;
+
+	/** @brief The GPU block from the settings. */
+	GpuBendSettings GetGpuSettings() const;
 
 	struct alignas(16) RaymarchCB
 	{
@@ -53,7 +74,7 @@ public:
 
 		float2 DynamicRes;
 
-		BendSettings settings;
+		GpuBendSettings settings;
 	};
 	STATIC_ASSERT_ALIGNAS_16(RaymarchCB);
 
@@ -103,11 +124,14 @@ public:
 	/** @brief Whether the shadows are drawn this frame: the feature is enabled and the full sky (sun or moon) is up. */
 	bool ShouldDraw() const;
 
-	/** @brief This frame's raymarch dispatches, from the sun's direction and the render size. */
-	Dispatches BuildDispatches() const;
+	/** @brief Whether the full sky (sun or moon) is up. */
+	static bool SkyFull();
 
-	/** @brief Reserves the Prepass anchor when the ORG path is asked for (CS_ORG_SCREEN_SPACE_SHADOWS=1). */
-	virtual void PostPostLoad() override;
+	/**
+	 * @brief This frame's raymarch dispatches, from the sun's direction and the render size of a_screenSize (the full size before
+	 * dynamic resolution). The D3D11 path passes the engine's screen size, the graph path the adopted display size.
+	 */
+	Dispatches BuildDispatches(float2 a_screenSize) const;
 
 	/** @brief Clears the shadow texture and dispatches shadow ray marching if conditions are met. Runs after every feature's Prepass. */
 	virtual void PostPrepass() override;

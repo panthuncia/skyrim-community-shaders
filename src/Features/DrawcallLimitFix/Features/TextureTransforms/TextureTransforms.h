@@ -84,7 +84,5 @@ namespace DCLF::Features::TextureTransforms
 	/** @brief Records whether the pass's program was made. Without it nothing writes the copy and no draw points at it. */
 	void SetCopyAvailable(bool a_available);
 	void RegisterProduct(Api::InstallContext& a_context);
-	// Parity check: a list built incrementally against one built whole from the same rows.
-	void CheckListParity(const TextureTransformList& a_built, const TextureTransformList& a_whole);
 	void RegisterPass(Api::InstallContext& a_context);
 }

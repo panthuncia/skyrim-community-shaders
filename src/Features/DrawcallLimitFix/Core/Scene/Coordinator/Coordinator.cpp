@@ -11,9 +11,9 @@ namespace DCLF::Scene
 		return store;
 	}
 
-	std::uint32_t Coordinator::GetFrame() const
+	std::uint32_t Coordinator::SceneStep() const
 	{
-		return sceneWorkThread ? sceneFrame : FrameView::Get().GetFrame();
+		return sceneWorkThread ? sceneFrame : FrameView::Get().SceneStep();
 	}
 
 	std::int32_t Coordinator::FindObject(const RE::BSGeometry* a_geometry) const

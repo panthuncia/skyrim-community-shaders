@@ -8,9 +8,6 @@
  */
 namespace GpuLoadPass
 {
-	/** @brief Reserves the Present anchor before the render graph initializes. */
-	void ReserveAnchor();
-
 	/** @brief Registers the pass. False and logged on failure, and the caller keeps the D3D11 load. */
 	bool Register(std::uint32_t a_groups);
 

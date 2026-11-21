@@ -12,14 +12,11 @@ namespace DCLF
 	{
 		if (!impl)
 			return {};
-		// Report when a shared epoch reached a frame since the last report, or its gate class is on.
-		const ToggleSet toggles = ActiveToggles();
+		// Report while an epoch shares a main shape, as the forward epoch does.
 		bool due = false;
 		for (std::uint32_t e = 0; e < EpochCount() && !due; ++e) {
 			const auto& traits = EpochTraitsOf(e);
-			if (traits.sharesWith == kNoEpoch || EpochTraitsOf(traits.sharesWith).shape != ShapeKind::Main)
-				continue;
-			due = impl->sharedEpochs[e].reached || (traits.gate != Api::ObjectClass::Count && Extensions::ObjectClassOn(toggles, traits.gate));
+			due = traits.sharesWith != kNoEpoch && EpochTraitsOf(traits.sharesWith).shape == ShapeKind::Main;
 		}
 		if (!due)
 			return {};
@@ -63,44 +60,7 @@ namespace DCLF
 			r.wideNoChainFirst.clear();
 		}
 		Extensions::ReportTextAt(Api::ReportPoint::AccumulatedWrites, text);
-		if (!Diagnostics::Observe().accumulated)
-			return text;
-		text += Reports::AnimRateLine();
-		struct Taken
-		{
-			std::uint64_t both, dclfOnly, engineOnly, neither;
-		};
-		const auto takeCounts = [&](Readback::Counts& a_counts) { return Taken{ take(a_counts.both), take(a_counts.dclfOnly), take(a_counts.engineOnly), take(a_counts.neither) }; };
-		const auto roots = takeCounts(r.rootCounts), geometry = takeCounts(r.geometryCounts);
-		const auto stoodRoots = takeCounts(r.stoodInRootCounts), stoodGeometry = takeCounts(r.stoodInGeometryCounts);
-		const auto frames = take(r.framesCompared), incomplete = take(r.framesIncomplete), unmatched = take(r.samplesUnmatched), moved = take(r.moved);
-		const auto staleGeometry = take(r.staleGeometry), noVerdictEngine = take(r.noVerdictEngine), noVerdictNeither = take(r.noVerdictNeither);
-		const auto hidden = take(r.hiddenDclfOnly);
-		const auto batches = take(r.batches), events = take(r.events), stale = take(r.stale), overflowed = take(r.overflowed), missed = take(r.missed);
-		const auto setsAdded = take(r.setsAdded), busy = take(r.busy), decodeNs = take(r.decodeNs);
-		std::uint32_t sets = 0, listEvents = 0;
-		for (const auto* set = r.sets.load(std::memory_order_acquire); set; set = set->next) {
-			++sets;
-			listEvents = std::max(listEvents, set->events);
-		}
-		std::string firsts;
-		static constexpr std::array<const char*, Readback::kCategories> kCategoryNames{ "roots DCLF's alone", "roots the engine's alone", "geometry DCLF's alone",
-			"geometry the engine's alone" };
-		for (std::size_t c = 0; c < Readback::kCategories; ++c) {
-			if (!r.firstNames[c].empty())
-				firsts += fmt::format("; first {}: {}", kCategoryNames[c], r.firstNames[c]);
-			r.firstNames[c].clear();
-		}
-		const bool differ = roots.dclfOnly || roots.engineOnly || geometry.dclfOnly || geometry.engineOnly;
-		return text + fmt::format(
-			"[DCLF] accumulated (T7b1): {} frames compared ({} left out: a batch past its list; {} samples no batch reached; {} slots moved), engine-culled roots "
-			"{} both / {} DCLF's alone / {} the engine's alone / {} neither, geometry {} / {} / {} / {} ({} of the engine's alone stale under a failed root); stood-in roots "
-			"{} / {} / {} / {}, geometry {} / {} / {} / {}; aside: roots with no DCLF verdict {} set by the engine / {} not, {} DCLF's alone on an app-culled root; "
-			"readback {} batches, {} events ({} stale), {} past their list, {} arms missed, {} staging sets (+{}), event list {}, {} wakes busy, decode {:.1f} us{}{}\n",
-			frames, incomplete, unmatched, moved, roots.both, roots.dclfOnly, roots.engineOnly, roots.neither, geometry.both, geometry.dclfOnly, geometry.engineOnly, geometry.neither,
-			staleGeometry, stoodRoots.both, stoodRoots.dclfOnly, stoodRoots.engineOnly, stoodRoots.neither, stoodGeometry.both, stoodGeometry.dclfOnly, stoodGeometry.engineOnly,
-			stoodGeometry.neither, noVerdictEngine, noVerdictNeither, hidden, batches, events, stale, overflowed, missed, sets, setsAdded, listEvents, busy,
-			double(decodeNs) / 1000.0, !frames ? " <- NOT COMPARED" : differ ? " <- ACCUMULATED DIFFER" : " <- OK", firsts);
+		return text;
 	}
 
 	std::string IndirectDraws::ShadowCapabilityReport() const

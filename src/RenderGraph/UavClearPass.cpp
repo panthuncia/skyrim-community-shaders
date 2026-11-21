@@ -1,20 +1,18 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/UavClearPass.h"
+#include "RenderGraph/UavClearPass.h"
 
-#	include "RenderGraph/AnchorPasses.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/RunGate.h"
+#include "RenderGraph/AnchorPasses.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/RunGate.h"
 
-#	include <Render/PassBuilders.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Render/PassBuilders.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
 
-#	include <cstdint>
-#	include <cstring>
-#	include <vector>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace
 {
@@ -105,10 +103,5 @@ namespace GraphPasses
 		return std::make_shared<UavClearPass>(std::move(a_texture), a_value, std::move(a_gate));
 	}
 
-	std::shared_ptr<org::RenderPass> MakeUavClear(const GraphResources::Resource& a_twin, std::array<float, 4> a_value, ClearGate a_gate)
-	{
-		return MakeUavClear(RenderGraph::AnchorPasses::TextureOf(a_twin), a_value, std::move(a_gate));
-	}
 }
 
-#endif

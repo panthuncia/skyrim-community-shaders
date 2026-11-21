@@ -26,8 +26,6 @@ namespace DCLF::Features::Fades
 	void RegisterDiagnostics(Api::InstallContext& a_context);
 
 	// Settings. Readable from any thread after install.
-	/** @brief CS_DCLF_FADE_PARITY. Checks the port against the engine and FadeStateCS against the port. */
-	bool FadeParity();
 	/** @brief CS_DCLF_EMPTY_FADE_NODE, on by default. The engine's shared empty fade node is not treated as a fade root. */
 	bool EmptyFadeNodeIsNone();
 }

@@ -1,7 +1,5 @@
 #pragma once
 
-#include "RenderGraph/Switches.h"
-
 #include <cstdint>
 #include <memory>
 #include <source_location>
@@ -16,23 +14,18 @@ namespace org
 }
 
 /**
-* @brief The undeclared-access validator, CS_ORG_VALIDATE_UNDECLARED=1. Logs every raw bindless index or buffer ref CS hands a shader
-* for a resource the graph should track. It only logs, never refuses.
+* @brief The undeclared-access check, on in development builds in graph mode. A raw bindless index or buffer ref CS hands a shader
+* for a resource the graph should track is an UndeclaredAccess tap error.
 *
 * A raw index bypasses the declarations, so the graph neither transitions the resource nor orders it after its writers.
 * Immutable resources, host feedback buffers and IMMUTABLE D3D11 resources are exempt. Lookups inside a DeclaredIndexScope or
-* DeclaredViewScope count apart as declared interim indices.
-* Each access is attributed to the epoch running on the thread, else to capture, else to another thread.
-* Logs the first access per site and resource, then a summary every CS_ORG_CENSUS_FRAMES frames.
+* DeclaredViewScope are declared interim indices and pass.
+* The error names the epoch running on the thread, else capture, else another thread.
 */
 namespace RenderGraph::UndeclaredAccess
 {
-	/** @brief Whether CS_ORG_VALIDATE_UNDECLARED=1. Any thread. */
-	inline bool On()
-	{
-		static const bool on = Switches::On("CS_ORG_VALIDATE_UNDECLARED");
-		return on;
-	}
+	/** @brief Whether the check runs: a development build in guest or native mode. Release builds never run it. Any thread. */
+	bool On();
 
 	/** @brief A raw index of a_view's resource, made by a_what at a_where. Any thread. */
 	void NoteView(ID3D11ShaderResourceView* a_view, std::string_view a_what, std::source_location a_where);
@@ -83,7 +76,7 @@ namespace RenderGraph::UndeclaredAccess
 		bool previous = false;
 	};
 
-	/** @brief Attributes accesses on this thread to epoch a_label for the scope. */
+	/** @brief Names epoch a_label in the errors raised on this thread for the scope. */
 	class EpochScope
 	{
 	public:
@@ -95,7 +88,4 @@ namespace RenderGraph::UndeclaredAccess
 	private:
 		const char* previous = nullptr;
 	};
-
-	/** @brief The frame's end. Reports a window when due. */
-	void EndFrame();
 }

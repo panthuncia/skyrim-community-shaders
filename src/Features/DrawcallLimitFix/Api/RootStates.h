@@ -31,7 +31,6 @@ namespace DCLF::Api
 	 * - globalsKey: mixes what test reads of the globals into a 32-bit FNV-1a witness, witness = (witness ^ word) * 16777619.
 	 *   A change rebinds every object.
 	 * - kick: render thread, once per frame. Starts the write-back task, which is never joined per frame.
-	 * - wait: joins that task when DCLF's async work drains.
 	 * - latchGlobals: without it Core writes a zero eye and a tree height of {0, +infinity}.
 	 */
 	struct RootStatesContribution
@@ -43,7 +42,6 @@ namespace DCLF::Api
 		void (*test)(const RootTestInput& a_input, RootTestOutput& a_out) = nullptr;
 		void (*globalsKey)(const RootTestInput& a_input, std::uint32_t& a_witness) = nullptr;
 		void (*kick)() = nullptr;
-		void (*wait)() = nullptr;
 		void (*frameStart)() = nullptr;
 		void (*latchGlobals)(float (&a_eye)[4], float (&a_treeHeight)[2]) = nullptr;
 	};

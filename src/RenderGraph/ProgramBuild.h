@@ -3,7 +3,7 @@
 // What ComputeProgram and RasterProgram share to build their stages.
 // Only for translation units that include volk first (rhi_interop_vulkan.h).
 
-#if defined(CS_HAS_RENDER_GRAPH) && defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 
 #	include <ORGModuleServices/ShaderCompiler.h>
 

@@ -1,6 +1,6 @@
 #pragma once
 
-// Decals (CS_DCLF_DECALS, CS_DCLF_LAYERS): the engine's decals (accumulation hints 2 and 3) and multi-index shapes' layers
+// Decals: the engine's decals (accumulation hints 2 and 3) and multi-index shapes' layers
 // (hint 12). DCLF draws them in its decal groups after the opaque draws, each group in the engine's draw order.
 // The order is rebuilt from the scene mirror, which records each decal node's array.
 // See dclf-architecture.md, "Decals and pass layers".
@@ -24,7 +24,4 @@ namespace DCLF::Features::Decals
 
 	Api::CoordinatorComponentId RegisterOrder(Api::InstallContext& a_context);
 	void CandidateLines(const Api::CoordinatorComponentContext& a_context, std::string& a_text);
-
-	void SubscribeOrderParity();
-	void OrderParityLines(const Api::CoordinatorComponentContext& a_context, std::string& a_text);
 }

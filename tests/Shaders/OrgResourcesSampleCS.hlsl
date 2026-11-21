@@ -8,6 +8,7 @@ struct SampleConstants
 {
 	float4 Scale;
 	uint4 Size;
+	float4 Weights[4];  // indexed dynamically, which a CBUFFER must allow
 };
 
 struct SampleFrame
@@ -48,16 +49,16 @@ ORG_PUSH_BLOCK(SAMPLE_RESOURCES(ORG_HANDLE))
 SAMPLE_RESOURCES(ORG_RESOURCE)
 
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
-	const float2 uv = (id.xy + 0.5) / Constants.Size.xy;
+	const float2 uv = (id.xy + 0.5) / ORG_CB(Constants).Size.xy;
 	float4 colour = Colour.SampleLevel(LinearSampler, uv, Dispatch.Mip);
 	colour += Layers.SampleLevel(LinearSampler, float3(uv, Dispatch.Slice), 0);
 	colour += Volume.SampleLevel(LinearSampler, float3(uv, 0.5), 0);
 	colour += Cube.SampleLevel(LinearSampler, float3(uv, 1), 0);
 	colour += Cubes.SampleLevel(LinearSampler, float4(uv, 1, Dispatch.Slice), 0);
-	colour += Items[id.x % Constants.Size.z];
-	colour += asfloat(Raw.Load4(16 * (id.y % Constants.Size.w)));
+	colour += Items[id.x % ORG_CB(Constants).Size.z];
+	colour += asfloat(Raw.Load4(16 * (id.y % ORG_CB(Constants).Size.w)));
 	colour *= Depth.SampleCmpLevelZero(ShadowSampler, uv, 0.5);
-	colour *= Constants.Scale;
+	colour *= ORG_CB(Constants).Scale * ORG_CB(Constants).Weights[id.x & 3];
 	colour = colour * Frame.Tint + float4(Frame.Offset, Frame.Index, Frame.Weight);
 
 	Output[id.xy] = colour;

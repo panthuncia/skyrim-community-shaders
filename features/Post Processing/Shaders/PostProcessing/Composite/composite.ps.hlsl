@@ -72,22 +72,49 @@ struct CompositeConstants
 // TexBloom: the accumulated bloom mip 1. TexFlare: the half-resolution ghosts and halo. TexAdaptation: the adapted
 // luminance. TexLocalExposureLog: the original scene log luminance. TexLuminanceGrid: the edge-aware luminance grid.
 // TexBlurredLuminance: the broad base. LinearSampler: linear clamp (local exposure and flare). BloomSampler: linear
-// border (bloom).
-#define COMPOSITE_RESOURCES(X)                             \
-	X(SHARED, ConstantBuffer, Shared, 0)                   \
-	X(SRV, Texture2D<float4>, TexColor, 0)                 \
-	X(SRV, Texture2D<float4>, TexBloom, 1)                 \
-	X(SRV, Texture2D<float4>, TexFlare, 2)                 \
-	X(SRV, Texture2D<float4>, TexGlare, 3)                 \
-	X(SRV, StructuredBuffer<float>, TexAdaptation, 4)      \
-	X(SRV, Texture2D<float>, TexLocalExposureLog, 5)       \
-	X(SRV, Texture3D<float2>, TexLuminanceGrid, 6)         \
-	X(SRV, Texture2D<float>, TexBlurredLuminance, 7)       \
-	X(SAMPLER, SamplerState, LinearSampler, 0)             \
-	X(SAMPLER, SamplerState, BloomSampler, 1)              \
-	X(LATCH, AutoExposureConstants, AutoExposure, 1)       \
-	X(LATCH, LocalExposureConstants, LocalExposure, 2)     \
-	X(LATCH, CompositeConstants, Composite, 3)
+// border (bloom). Physical Lens's entries come last, so the block without them is a prefix of the one with them. Its
+// SRVs keep their D3D11 registers, and diffraction_parameters.hlsli declares its Diffraction block.
+#ifdef HAS_PHYSICAL_LENS
+#	define COMPOSITE_RESOURCES(X)                            \
+		X(SHARED, ConstantBuffer, Shared, 0)                  \
+		X(SRV, Texture2D<float4>, TexColor, 0)                \
+		X(SRV, Texture2D<float4>, TexBloom, 1)                \
+		X(SRV, Texture2D<float4>, TexFlare, 2)                \
+		X(SRV, Texture2D<float4>, TexGlare, 3)                \
+		X(SRV, StructuredBuffer<float>, TexAdaptation, 4)     \
+		X(SRV, Texture2D<float>, TexLocalExposureLog, 5)      \
+		X(SRV, Texture3D<float2>, TexLuminanceGrid, 6)        \
+		X(SRV, Texture2D<float>, TexBlurredLuminance, 7)      \
+		X(SAMPLER, SamplerState, LinearSampler, 0)            \
+		X(SAMPLER, SamplerState, BloomSampler, 1)             \
+		X(LATCH, AutoExposureConstants, AutoExposure, 1)      \
+		X(LATCH, LocalExposureConstants, LocalExposure, 2)    \
+		X(LATCH, CompositeConstants, Composite, 3)            \
+		X(SRV, Texture2DArray<float>, TexPhysicalFlare, 8)    \
+		X(SRV, Texture2DArray<float4>, TexPhysicalLens, 9)    \
+		X(SRV, StructuredBuffer<float4>, TexWaveKernel, 10)   \
+		X(SRV, StructuredBuffer<float4>, TexWaveRegions, 11)  \
+		X(SRV, StructuredBuffer<float4>, TexWaveSources, 12)  \
+		X(SRV, StructuredBuffer<uint>, TexWaveTiles, 13)      \
+		X(SRV, Texture2DArray<float>, TexWaveTail, 14)        \
+		X(EXTERN_LATCH, DiffractionConstants, Diffraction, 4)
+#else
+#	define COMPOSITE_RESOURCES(X)                        \
+		X(SHARED, ConstantBuffer, Shared, 0)              \
+		X(SRV, Texture2D<float4>, TexColor, 0)            \
+		X(SRV, Texture2D<float4>, TexBloom, 1)            \
+		X(SRV, Texture2D<float4>, TexFlare, 2)            \
+		X(SRV, Texture2D<float4>, TexGlare, 3)            \
+		X(SRV, StructuredBuffer<float>, TexAdaptation, 4) \
+		X(SRV, Texture2D<float>, TexLocalExposureLog, 5)  \
+		X(SRV, Texture3D<float2>, TexLuminanceGrid, 6)    \
+		X(SRV, Texture2D<float>, TexBlurredLuminance, 7)  \
+		X(SAMPLER, SamplerState, LinearSampler, 0)        \
+		X(SAMPLER, SamplerState, BloomSampler, 1)         \
+		X(LATCH, AutoExposureConstants, AutoExposure, 1)  \
+		X(LATCH, LocalExposureConstants, LocalExposure, 2) \
+		X(LATCH, CompositeConstants, Composite, 3)
+#endif
 ORG_PUSH_BLOCK(COMPOSITE_RESOURCES(ORG_HANDLE))
 
 #include "Common/Color.hlsli"
@@ -112,13 +139,7 @@ cbuffer CopyConstants : register(b0)
 
 COMPOSITE_RESOURCES(ORG_RESOURCE)
 
-// The physical lens inputs are D3D11 only: the ORG chain does not run the physical lens.
 #ifdef HAS_PHYSICAL_LENS
-#	if defined(CS_ORG_BINDLESS)
-#		error "HAS_PHYSICAL_LENS has no ORG bindings"
-#	endif
-Texture2DArray<float> TexPhysicalFlare : register(t8);
-Texture2DArray<float4> TexPhysicalLens : register(t9);
 #	include "PostProcessing/PhysicalLensImaging/diffraction_composite.hlsli"
 #	include "PostProcessing/PhysicalLensImaging/mapping.hlsli"
 #endif

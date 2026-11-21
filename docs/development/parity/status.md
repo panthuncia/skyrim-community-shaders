@@ -129,11 +129,31 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 - **HDR Display in graph modes**: switching HDR on or off shows a few black frames while the post chain's new build switches in
   (the composite reads the other texture at once). Menus that draw a 3D scene (an inventory item, the local map) under HDR are not
   checked: their composite still writes the back buffer, which HDR's copy covers, as on D3D11.
+  Since frame revision step 5 (2026-11-19) the frame's HDR state and the swap chain's colour space switch together, at the
+  adoption of the `HdrEnabled` revision. The post chain's build still switches in on its own (6.15).
 - **Frame generation in guest** (2026-11-18, RX 6600, FSR-FG): engages, about 2x driver presents, and stays on through the CS menu,
   the pause menu and a loading screen, in the background and the foreground (`fg` config). Its hudless input has no HUD. FSR-FG drops
   to one presented frame for a moment about twice a second (guest 28 to 36 times a run, plain D3D11 3379). Not looked into.
-- **Frame generation in native**: the native presenter needs the frame-generation controls DXVK exports (swap chain recreate,
-  sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
+- **Frame generation in native**: FSR-FG runs on native Vulkan (2026-11-19, the plan's step 6,
+  `plans/native-frame-generation-plan.md`). `sl.fsr_g` wraps the swap chain BasicRHI makes through Streamline, and every on/off,
+  HDR or vsync change is a replacement on the submission thread (`Native::RequestPresentation`) with the plugin's load change in
+  its torn-down step. `native-fg` presents x2 (46 rendered, 92 presented a second, as guest's 46 / 91), with HDR10 too
+  (`native-vulkan+fg-hdr`). Native D3D12 is step 7, DLSS-G step 8. Not checked yet: the foreground eye check (HUD ghosting,
+  pacing, menu and loading-screen passthrough).
+
+- **Frame generation's inputs on the UI stage** (2026-11-19, A7): the hudless copy, the screenshot's clean scene and HDR output are
+  steps of the UI stage in both graph modes; no anchor runs an epoch of its own. Guest FSR-FG engages as before (`fg`), and its
+  hudless input has no HUD or CS menu. A new registration of any of the three is missing for the few frames before the stage's
+  build holds it (no hudless, a D3D11 screenshot, a D3D11 HDR composite).
+- **Frame generation's presenter and inputs** (2026-11-19, steps 2 and 3): `FrameGen::Controller` drives DXVK's presenter
+  through `FrameGen::DxvkPresenter` (the native backend is `NativePresenter`). In both graph modes FSR-FG's tags and prepare are a
+  pass of the UI stage after the hudless copy; plain D3D11 keeps the interop ring. Guest `fg` presents x2 as before. DLSS-G and
+  FSR-FG stay off in native until the plan's steps 6 to 8.
+- **FSR-FG in native D3D12** (2026-11-19, step 7): `sl.fsr_g` has a D3D12 backend (`fsrGDX12.cpp`). The proxy factory's
+  CreateSwapChainForHwnd makes FidelityFX's DX12 frame interpolation swap chain while FSR-FG is on. `native-d3d12-fg` presents x2
+  in the world (37 rendered, 74 presented a second on the RX 6600, in the background) and passes frames through in the menus and
+  the loading screen. HDR10 under it (`native-d3d12+fg-hdr`) presents x2, and the D3D12 InfoQueue stays empty with
+  `org.validation=true`. The foreground eye check (HUD ghosting, pacing) is still open.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
   draw skipped when its depth is neither kMAIN's nor the Z-prepass copy.
 - **Map:** native shows flat white patches on the world map's terrain. Compare with guest. 2026-11-18 (`map` config, RX 6600):

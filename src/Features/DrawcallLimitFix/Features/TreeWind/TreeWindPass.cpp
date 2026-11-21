@@ -83,7 +83,7 @@ namespace DCLF::Draws
 				constants.windIndices[h] = a_recording.Index(a_bindings.wind[h]);
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, Features::TreeWind::kTreeWindConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 			commands.Dispatch(a_frame.groups, 1, 1);
 		}

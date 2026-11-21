@@ -14,7 +14,7 @@ std::vector<std::string> DCLF::Reports::FrameSummary()
 	std::vector<std::string> lines;
 	const auto active = DCLF::ActiveToggles();
 	const auto& stats = DCLF::Scene::Coordinator::Get().GetStats();
-	const auto pipelineOf = [&](bool a_interior) { return DCLF::CpuPipelineFor(active, a_interior) ? (active.cpuRecord == 2 ? "cpu indirect" : active.cpuRecord == 1 ? "cpu parallel" : "cpu serial") : "gpu"; };
+	const auto pipelineOf = [&](bool a_interior) { return DCLF::CpuPipelineFor(active, a_interior) ? (active.cpuRecord == 0 ? "cpu serial" : "cpu indirect") : "gpu"; };
 	std::string flags = fmt::format("Active: cull {}, pipeline {} (interiors {}, exteriors {})", active.cullMode,
 		active.pipelineMode == DCLF::PipelineMode::Manual ? "manual" : "auto", pipelineOf(true), pipelineOf(false));
 	for (const auto& toggle : DCLF::ToggleTable())
@@ -33,7 +33,7 @@ std::vector<std::string> DCLF::Reports::FrameSummary()
 	const auto& capture = DCLF::PassCapture::Get().GetStats();
 	const auto set = DCLF::Scene::FrameView::Get().FrameClaims();
 	lines.push_back(fmt::format("DCLF set: {} members; main-view passes withheld {}", set ? static_cast<std::uint32_t>(set->phases.size()) : 0u, capture.mainWithheld));
-	if (active.shadows) {
+	{
 		const auto& shadow = DCLF::IndirectDraws::Get().GetShadowStats();
 		lines.push_back(fmt::format("Shadow views (since the last report): {} offered, {} drawn, {} not ready; last view {} inputs, {} records; sampled culling: {} tested, {} rejected",
 			shadow.views, shadow.viewsDrawn, shadow.notReady, shadow.inputs, shadow.records, shadow.cullTested, shadow.cullRejected));

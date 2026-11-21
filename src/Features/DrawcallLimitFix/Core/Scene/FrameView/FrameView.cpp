@@ -2,6 +2,7 @@
 // claims installed, and load screens noted. Render thread.
 
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
@@ -50,14 +51,14 @@ namespace DCLF::Scene
 	{
 		// Switch events are taken on the render thread only.
 		switchEventThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
-		++frame;
+		++sceneStep;
 		// The frame's engine globals, before anything of the frame reads them.
 		const auto captureStart = std::chrono::steady_clock::now();
 		// The Lighting shader first, since the globals' material sources read it.
 		CaptureLightingShader();
 		frameGlobals = FrameGlobals::Capture();
 		SceneCapture::SetMainThread(::GetCurrentThreadId());
-		SceneCapture::SetFrame(frame);
+		DCLF::SceneClock::Set(sceneStep);
 		captureNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - captureStart).count());
 		++captureFrames;
 		// Posted after the capture. The post wakes the pump.
@@ -68,7 +69,7 @@ namespace DCLF::Scene
 	{
 		auto inputs = std::make_unique<FrameInputs>();
 		inputs->globals = frameGlobals;
-		inputs->frame = frame;
+		inputs->frame = sceneStep;
 		// Sampled here so PrimaryCull reads the same sample this frame.
 		inputs->membershipWitness = PrimaryCull::Get().SampleMembershipWitness();
 		inputs->toggles = Toggles::Get().Active();
@@ -152,10 +153,10 @@ namespace DCLF::Scene
 			notesCursor = note;
 			if (oldestNs) {
 				const auto nowNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-				IndirectDraws::Get().NoteEventAdoption(nowNs > oldestNs ? static_cast<double>(nowNs - oldestNs) / 1.0e6 : 0.0, frame >= oldestFrame ? frame - oldestFrame : 0u);
+				IndirectDraws::Get().NoteEventAdoption(nowNs > oldestNs ? static_cast<double>(nowNs - oldestNs) / 1.0e6 : 0.0, sceneStep >= oldestFrame ? sceneStep - oldestFrame : 0u);
 			}
 			channels.publicationLog.Release(note);
-			TracyPlot("CS.DCLF.InstallDelayFrames", static_cast<std::int64_t>(frame - adopted->commitFrame));
+			TracyPlot("CS.DCLF.InstallDelayFrames", static_cast<std::int64_t>(sceneStep - adopted->commitFrame));
 			publicationStats.skipped += installed ? sequence - installed->sequence - 1 : 0;
 			ReturnPublication(std::move(installed));
 			installed = std::move(adopted);
@@ -170,13 +171,12 @@ namespace DCLF::Scene
 		frameCatalog = installed ? installed->catalog : nullptr;
 		frameTablesGeneration = installed ? installed->tablesGeneration : 0u;
 		DrawPipelines::Get().HoldCatalog(frameCatalog);
-		// A toggle takes effect for the frames with the first publication committed under it.
+		// A toggle takes effect for the frames with the first publication committed under it, which came with the adopted scene.
 		if (installed) {
-			Toggles::Get().Adopt(installed->toggles);
+			Toggles::Get().InstallFrame(installed->toggles);
 			frameSunCandidates = installed->sunCandidates;
 			frameLightCandidates = installed->lightCandidates;
 			frameLightEntriesAppeared = installed->lightEntriesAppeared;
-			frameEngineCasters = installed->engineCasters;
 			frameCategoryNodes = installed->categoryNodes;
 		}
 	}
@@ -185,8 +185,8 @@ namespace DCLF::Scene
 	{
 		if (!installed)
 			return;
-		// No claim is ever withdrawn after the first installation.
-		const bool whole = !std::exchange(drawingStarted, true);
+		// No claim is withdrawn while DCLF draws. The first installation, and the first after a stop, install the claims whole.
+		const bool whole = !std::exchange(drawingStarted, true) || std::exchange(stopped, false);
 		if (!whole && !installPending)
 			return;
 		installPending = false;
@@ -208,6 +208,24 @@ namespace DCLF::Scene
 		}
 		installNotes.clear();
 		notedClaims = installed->claims;
+	}
+
+	void FrameView::StopDrawing()
+	{
+		if (!drawingStarted || stopped)
+			return;
+		stopped = true;
+		// Every claimed main member leaves, so the engine's culls take the whole scene again.
+		std::vector<const RE::BSGeometry*> left;
+		if (notedClaims)
+			for (const auto& [geometry, phases] : notedClaims->phases)
+				if (phases & kSetMain)
+					left.push_back(geometry);
+		PublishFrameClaims(nullptr);
+		if (!left.empty())
+			PrimaryCull::Get().NoteSetChanges({}, left);
+		installNotes.clear();
+		logger::info("[DCLF] frame {}: a frame revision left DCLF's scene on old versions, so the engine draws until DCLF's next scene", SceneStep());
 	}
 
 	void FrameView::PublishFrameClaims(std::shared_ptr<const SetSnapshot> a_claims)
@@ -252,7 +270,7 @@ namespace DCLF::Scene
 	const SetSnapshot* FrameView::AdoptedClaims() const
 	{
 		// Before the first installation the engine draws everything.
-		return drawingStarted && installed && installed->claims ? installed->claims.get() : nullptr;
+		return !NotDrawingYet() && installed && installed->claims ? installed->claims.get() : nullptr;
 	}
 
 	void FrameView::ClearAdoptedDeltas()

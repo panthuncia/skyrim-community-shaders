@@ -5,8 +5,8 @@
     python tools/dclf-layout-check.py --update   rewrite the baselines from the tree (after a step that shrank them)
 
 Rules (always errors):
-  1. Only the shell (src/Features/DrawcallLimitFix.{h,cpp}) tests CS_HAS_DCLF; nothing under the DCLF tree tests the render
-     graph's or ORGModuleServices' macros (the tree is not built without them: cmake/RenderGraph.cmake).
+  1. Nothing under the DCLF tree tests ORGModuleServices' ORG_MODULE_SERVICES_HAS_DXC: the tree is always built with the render
+     graph and ORGModuleServices, which are required (cmake/RenderGraph.cmake).
   2. No file outside the DCLF tree includes a header inside it: the rest of CS calls DCLF through the shell.
   3. Api/ includes only Api/. Core/ includes only Api/ and Core/. Features/<X>/ includes Api/, Core/, its own folder and the
      features DEPENDS names for it. Integrations/<X>/ includes Api/ and Core/.
@@ -83,7 +83,7 @@ RENDER_INTERNAL_DIRS = (TREE / "Core" / "Render" / "Impl",)
 LITERAL_SEGMENT = re.compile(r"\bRenderGraphRuntime::Segment::")
 
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^">]+)[">]')
-DEPENDENCY_MACRO = re.compile(r"\b(CS_HAS_RENDER_GRAPH|CS_HAS_ORG_MODULE_SERVICES|CS_HAS_DCLF|ORG_MODULE_SERVICES_HAS_DXC)\b")
+DEPENDENCY_MACRO = re.compile(r"\bORG_MODULE_SERVICES_HAS_DXC\b")
 
 
 def sources(base):
@@ -233,7 +233,7 @@ def main():
         text = path.read_text(encoding="utf-8", errors="replace")
         rel = path.relative_to(ROOT).as_posix()
         if inside and DEPENDENCY_MACRO.search(text):
-            errors.append(f"{rel}: tests a dependency macro (only the shell may: CS_HAS_DCLF)")
+            errors.append(f"{rel}: tests ORG_MODULE_SERVICES_HAS_DXC (the DCLF tree is always built with ORGModuleServices)")
         if inside:
             errors += pass_adder_errors(path, rel, text)
             errors += literal_segment_errors(path, rel, text)

@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include "Features/LightLimitFix.h"
+#include "Utils/Setting.h"
 
 struct ExponentialHeightFog : Feature
 {
@@ -9,6 +10,9 @@ private:
 	static constexpr std::string_view MOD_ID = "180146";
 
 public:
+	/** @brief Binds the shape settings to their frame variables. The global is the only instance. */
+	ExponentialHeightFog();
+
 	virtual inline std::string GetName() override { return "Exponential Height Fog"; }
 	virtual std::string GetDisplayName() override { return T("feature.exponential_height_fog.name", "Exponential Height Fog"); }
 	virtual inline std::string GetShortName() override { return "ExponentialHeightFog"; }
@@ -37,14 +41,13 @@ public:
 	 * light scattering, and front-to-back integration.
 	 */
 	virtual void Prepass() override;
-	/** @brief Reserves the Prepass anchor for the render-graph path (CS_ORG_EXPONENTIAL_HEIGHT_FOG=1). */
-	virtual void PostPostLoad() override;
 
 	virtual void RestoreDefaultSettings() override;
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 
-	struct alignas(16) Settings
+	/** @brief The settings block the shaders read (the FeatureData copy). Its layout is fixed. */
+	struct alignas(16) GpuSettings
 	{
 		uint enabled = 0;
 		uint useDynamicCubemaps = 1;
@@ -81,11 +84,50 @@ public:
 		float3 volumetricFogNoiseVelocity = { 0.0f, 0.0f, 0.0f };
 		float pad0 = 0.0f;
 		float4 originalFogColorOverride = { 1.0f, 1.0f, 1.0f, 0.0f };  // rgb = replaces the weather fog colour, a = blend amount
-	} settings;
-	STATIC_ASSERT_ALIGNAS_16(Settings);
-	static_assert(sizeof(Settings) == 208);
+	};
+	STATIC_ASSERT_ALIGNAS_16(GpuSettings);
+	static_assert(sizeof(GpuSettings) == 208);
 
-	Settings GetCommonBufferData() const;
+	/** @brief The CPU settings. The ones that change the frame's shape are CS::Setting. */
+	struct Settings
+	{
+		CS::Setting<std::uint32_t> enabled = 0;
+		CS::Setting<std::uint32_t> useDynamicCubemaps = 1;
+		float startDistance = 0.0f;
+		float fogHeight = 0.0f;
+		float fogHeightFalloff = 0.2f;
+		CS::Setting<float> fogDensity = 0.005f;
+		float fogHeight2 = 0.0f;
+		float fogHeightFalloff2 = 0.2f;
+		CS::Setting<float> fogDensity2 = 0.0f;
+		float directionalInscatteringMultiplier = 1.0f;
+		float directionalInscatteringAnisotropy = 0.2f;
+		CS::Setting<std::uint32_t> useSkyIBL = 1;
+		float4 inscatteringTint = { 1.0f, 1.0f, 1.0f, 1.0f };
+		float cubemapMipLevel = 8.0f;
+		float sunlightAttenuationAmount = 1.0f;
+		uint respectVanillaFogFade = 0;
+		uint disableVanillaFog = 1;
+		float4 fogInscatteringColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+		float originalFogColorAmount = 0.0f;
+		CS::Setting<std::uint32_t> volumetricFogEnabled = 0;
+		float volumetricFogStartDistance = 0.0f;
+		float volumetricFogNearFadeInDistance = 1000.0f;
+		float4 volumetricFogAlbedo = { 1.0f, 1.0f, 1.0f, 1.0f };
+		float4 volumetricFogEmissive = { 0.0f, 0.0f, 0.0f, 0.0f };
+		float volumetricDirectionalScatteringIntensity = 1.0f;
+		float volumetricSkyLightingIntensity = 1.0f;
+		float volumetricFogScatteringDistribution = 0.2f;
+		CS::Setting<float> volumetricFogExtinctionScale = 1.0f;
+		float volumetricLocalLightScatteringIntensity = 1.0f;
+		float volumetricFogNoiseScale = 0.0f;  // noise frequency per unit; 0 = disabled
+		float volumetricFogNoiseThreshold = 0.5f;
+		float3 volumetricFogNoiseVelocity = { 0.0f, 0.0f, 0.0f };
+		float4 originalFogColorOverride = { 1.0f, 1.0f, 1.0f, 0.0f };  // rgb = replaces the weather fog colour, a = blend amount
+	} settings;
+
+	/** @brief The GPU block built from the settings, with the colours in the working space. */
+	GpuSettings GetCommonBufferData() const;
 	/** @brief Reports whether height fog contributes in the current scene. */
 	bool IsActive() const { return loaded && settings.enabled && !IsSuppressed(); }
 
@@ -105,7 +147,7 @@ public:
 		float4 gridZParams = {};
 		float4x4 clipToWorld = {};
 		float4 frameJitterOffsets[16] = {};
-		float4 historyParameters = {};  // x = near weight, y = miss sample count, z = far weight, w = unused
+		float4 historyParameters = {};  // x = near weight, y = miss sample count, z = far weight, w = 1 turns off the scattering's history check (a CS_ORG_FOG_DEBUG diagnostic)
 		float4 jitterParameters = {};   // x = LightScatteringSampleJitterMultiplier, y = StateFrameIndexMod8, zw = unused
 		// The far grid continues from the near grid to the shared local range.
 		DirectX::XMUINT4 farGridSizeAndFlags = {};
@@ -135,6 +177,11 @@ public:
 		bool localLights = false;
 		bool localShadows = false;
 		bool engineLocalShadows = false;
+		// The world shadow inputs the scattering reads only while bound (flags 256 to 2048). The D3D11 path binds them all.
+		bool terrainShadows = false;
+		bool cloudShadows = false;
+		bool physSkyTransmittance = false;
+		bool physSkyShadowVolume = false;
 		bool temporal = false;
 		bool historyValid = false;
 		bool historyValidFar = false;
@@ -148,8 +195,14 @@ public:
 private:
 	friend class ORGExponentialHeightFog;
 
-	/** @brief The volumes' grid sizes for the current render size and settings. */
+	/** @brief The volumes' grid sizes for the current render size and live settings. The D3D11 path's. */
 	GridSizes ComputeGridSizes() const;
+
+	/** @brief The volumes' grid sizes for a_size (the area the grid covers) and the grid settings. */
+	static GridSizes GridSizesFor(float2 a_size, uint32_t a_nearPixelSize, uint32_t a_nearSlices, uint32_t a_middlePixelSize, uint32_t a_middleSlices);
+
+	/** @brief Whether the volumetric fog's volumes exist for these settings. */
+	static bool VolumesOn(uint32_t a_enabled, uint32_t a_volumetricFogEnabled, float a_extinctionScale, float a_fogDensity, float a_fogDensity2);
 
 	/** @brief The frame's volumetric fog constants; a_farGridEnabled says whether the far volume covers any depth. */
 	VolumetricFogCB BuildConstants(const ConstantInputs& a_inputs, bool& a_farGridEnabled) const;

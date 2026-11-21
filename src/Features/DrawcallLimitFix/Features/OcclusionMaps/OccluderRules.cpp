@@ -2,7 +2,6 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
-#include "Features/Skylighting.h"
 
 namespace DCLF::Features::OcclusionMaps
 {
@@ -34,14 +33,6 @@ namespace DCLF::Features::OcclusionMaps
 			if (Any(a_leaf, kTreeAnim))
 				technique.set(TreeAnim);
 			return technique.underlying();
-		}
-
-		/** @brief The precipitation accumulator (Precipitation::occlusionData), which draws both maps. */
-		bool PrecipitationAccumulator(const Api::OcclusionAccumulator& a_accumulator)
-		{
-			auto* sky = globals::game::sky;
-			auto* precip = sky ? sky->precip : nullptr;
-			return precip && precip->occlusionData.accumulator.get() == a_accumulator.accumulator;
 		}
 	}
 
@@ -90,15 +81,5 @@ namespace DCLF::Features::OcclusionMaps
 		auto* sky = globals::game::sky;
 		auto* precip = sky ? sky->precip : nullptr;
 		a_camera.camera = precip ? precip->occlusionData.camera.get() : nullptr;
-	}
-
-	bool SkyOwnsAccumulator(const Api::OcclusionAccumulator& a_accumulator)
-	{
-		return PrecipitationAccumulator(a_accumulator) && globals::features::skylighting.inOcclusion;
-	}
-
-	bool PrecipitationOwnsAccumulator(const Api::OcclusionAccumulator& a_accumulator)
-	{
-		return PrecipitationAccumulator(a_accumulator) && !globals::features::skylighting.inOcclusion;
 	}
 }

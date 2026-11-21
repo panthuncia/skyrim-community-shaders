@@ -3,7 +3,6 @@
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
 #include "RenderGraph/BufferRefs.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
-#include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
@@ -99,8 +98,6 @@ namespace DCLF::Draws
 			entry.ref = a_ref;
 			entry.address = a_ref ? a_address : 0;
 			entry.bytes = a_ref ? static_cast<std::uint32_t>(std::min<std::uint64_t>(a_bytes, UINT32_MAX)) : 0u;
-			// CS_DCLF_REF_CHECK. The ref must start at the address, since the stages build refs from this pair.
-			RenderGraph::CheckBufferRef(a_ref, a_address, a_bytes, "record backing");
 		};
 		backing(kBackingFrameConstants, a_constantsRef, a_constants, a_constantsBytes);
 		const auto& pipelineRows = a_parts[PayloadPart::PipelineRows];
@@ -111,17 +108,6 @@ namespace DCLF::Draws
 		const auto animatedRows = PassAnimatedRows();
 		backing(kBackingAnimatedRows, animatedRows.ref, animatedRows.address, std::uint64_t(animatedRows.count) * kMaterialRowBytes);
 		backing(kBackingShadowRows, shadowRows.ref, shadowRows.address, shadowRows.units * sizeof(ShadowMaterialRow));
-		// CS_DCLF_REF_TRACE. Log which buffer each backing slot is when it changes.
-		if (materialRows.ref && SwitchEnabled(Switch::RefTrace)) {
-			static constexpr const char* kNames[kRecordBackings] = { "frame constants", "pipeline rows", "material rows", "animated copy", "shadow rows" };
-			std::string text;
-			for (std::uint32_t i = 0; i < kRecordBackings; ++i) {
-				const auto& entry = a_record.backings[i];
-				text += fmt::format("{}{} slot {} offset {} VA 0x{:x} bytes {}", i ? "; " : "", kNames[i], entry.ref.viewSlot, entry.ref.byteOffset, entry.address, entry.bytes);
-			}
-			// Keyed by the constants' buffer, since the main and shadow records change independently.
-			::DCLF::Diagnostics::RefTrace::NoteChanged(fmt::format("record backings (constants slot {})", a_constantsRef.viewSlot), std::move(text));
-		}
 	}
 
 	void ZeroSharedLightOnce(CommitUploads& a_uploads, const std::shared_ptr<org::Buffer>& a_target, bool& a_zeroed)
@@ -194,7 +180,6 @@ namespace DCLF::Draws
 	{
 		winrt::com_ptr<ID3D11ShaderResourceView> view;
 		globals::d3d::context->PSGetShaderResources(a_register, 1, view.put());
-		RenderGraph::Engine::Flush::NoteRead("DCLF BoundPixelBuffer", a_register, view.get());
 		if (!view)
 			return nullptr;
 		D3D11_SHADER_RESOURCE_VIEW_DESC desc{};

@@ -1,35 +1,31 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/RunGate.h"
+#include "RenderGraph/RunGate.h"
 
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunShapes.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Fatal.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <OpenRenderGraph/Runtime.h>
-#	include <Render/LatchBlock.h>
-#	include <Render/RunRef.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <OpenRenderGraph/Runtime.h>
+#include <Render/LatchBlock.h>
+#include <Render/RunRef.h>
 
-#	include <algorithm>
-#	include <cstring>
-#	include <mutex>
-#	include <unordered_set>
-#	include <vector>
-#	include <vector>
+#include <algorithm>
+#include <cstring>
+#include <mutex>
+#include <unordered_set>
+#include <vector>
+#include <vector>
 
 namespace RenderGraph
 {
 	std::shared_ptr<RunGate> RunGate::Create(std::string_view a_name, std::uint32_t a_entries)
 	{
-		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host || !a_entries) {
-			logger::warn("[ORG] run gate {}: not made (no render graph host, or no entries)", a_name);
-			return nullptr;
-		}
+		// Made at setup, where the graph runs. A gate that cannot be made is fatal in every build.
+		if (!RenderGraphRuntime::Get().Host() || !a_entries)
+			RenderGraph::Fatal("run gates", fmt::format("{} could not be made ({})", a_name, !a_entries ? "no entries" : "no render graph host"));
 		// A run's region is zeroed when allocated, so every run starts closed.
 		auto latch = org::LatchBlock::Create(std::string(a_name), a_entries * kEntryBytes);
 		return std::make_shared<RunGate>(std::move(latch), a_entries);
@@ -130,7 +126,6 @@ namespace RenderGraph
 		if (a_work) {
 			if ((word.fetch_or(bit, std::memory_order_release) & bit) == 0)
 				NoteTouched(this, run.lease);
-			RunShapes::NoteOpen(this, a_entry);
 		} else {
 			word.fetch_and(~bit, std::memory_order_release);
 		}
@@ -196,4 +191,3 @@ namespace RenderGraph
 	}
 }
 
-#endif

@@ -1,11 +1,15 @@
 #pragma once
 
+#include "RenderGraph/Engine/Targets/TargetRef.h"
+#include "RenderGraph/Frame/Placement.h"
+
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <source_location>
 #include <span>
 #include <string>
 #include <string_view>
@@ -28,6 +32,7 @@ namespace org
 	class RenderPass;
 	class Resource;
 	class VersionedTexture;
+	struct FramePreparationContext;
 	struct TextureDescription;
 }
 
@@ -49,9 +54,9 @@ namespace RenderGraph
 /**
 * @brief Frame anchors: named points in CS's frame where features attach render-graph passes.
 *
-* Each anchor is an existing CS hook point. A feature reserves anchors before the graph initializes, then registers a client
-* whose passes each name an anchor and an order key. At the hook, Run executes that anchor's passes in order.
-* An anchor nobody reserved costs nothing. One with no active client submits nothing.
+* Each anchor is an existing CS hook point, and every anchor is a step of a CS stage (Frame/RecipeTable.h). A feature registers a
+* client whose passes each name an anchor and an order key. At the hook, Run taps the stage whose step takes the anchor now.
+* An anchor with no active client submits nothing. Anchors have no epochs of their own; the stages do.
 * Everything here runs on the render owner thread. Pass Prepare and Record run on the graph host's thread, so they read only
 * what they were made with or what the commit wrote into a LatchBlock.
 * The header stays free of ORG and Vulkan includes.
@@ -99,10 +104,26 @@ namespace FrameAnchors
 		/** @brief Current(), for one call (`texture->GetAPIResource()`). */
 		org::GloballyIndexedResource* operator->() const;
 
-		/** @brief The current version's size and format. 0 or Unknown when there is none. */
+		/**
+		* @brief The current (adopted) version's size and format. 0 or Unknown when there is none. For the render thread, such as a
+		* commit. A pass's make or Prepare may run for a revision that is not adopted yet, so it reads PreparedSize instead.
+		*/
 		std::uint32_t Width() const;
 		std::uint32_t Height() const;
 		rhi::Format Format() const;
+
+		/** @brief A width and a height. */
+		struct Size
+		{
+			std::uint32_t width = 0, height = 0;
+		};
+
+		/**
+		* @brief In a pass's Prepare: the size of the version a_context's preparation binds. That is the version the revision being
+		* prepared names, or the current one when the revision does not change the slot, as ORG binds it. A plain resource's own
+		* size. No version, or a version with no size, is fatal.
+		*/
+		Size PreparedSize(const org::FramePreparationContext& a_context) const;
 
 		/** @brief ORG's SelfDeclaringResource hook: the slot, or null for a plain resource. */
 		const org::IResourceResolver* DeclaredResolver() const;
@@ -138,7 +159,6 @@ namespace FrameAnchors
 		Capture,             // the screenshot capture (ScreenshotFeature::ProcessCaptureRequest), after HDR output, before the native Present
 		// The engine's own clears and copies on the graph. They run zero or more times a frame, so they are listed last.
 		EngineShadowClear,  // a shadow map slice's clear (Renderer::ApplyState in BSShadowLight::RenderShadowmap)
-		EngineCubeClear,    // a reflection face's clears (Renderer::ApplyState in BSCubeMapCamera::RenderFaces)
 		EngineFrameClear,   // every other engine clear (ApplyState, SetDirtyStates, Renderer::ClearColor and ClearDepthStencil)
 		EngineDepthCopy,    // the main depth copied into kPOST_ZPREPASS_COPY (Main::RenderDepth, FinishAccumulating, DeferredPasses)
 		// Appended out of frame order so the values above stay. Each Scaleform display's EndDisplay, several times a frame.
@@ -185,7 +205,7 @@ namespace FrameAnchors
 
 	/**
 	* @brief One pass of a client. order only decides between passes with no resource dependency.
-	* A once pass stays until one run with it submits, so its work must be safe to run twice. atExecution records it after the commit.
+	* atExecution records it after the commit. Work that runs once is a first-run gate (RunGate.h), never a pass that leaves the graph.
 	*/
 	struct PassDesc
 	{
@@ -195,9 +215,8 @@ namespace FrameAnchors
 		PassKind kind = PassKind::Compute;
 		PassQueue queue = PassQueue::Default;
 		std::function<std::shared_ptr<org::RenderPass>()> make;
-		// Replaces make for a client with instances. A declared segment makes one pass per instance, an anchor's own epoch instance 0 only.
+		// Replaces make for a client with instances. A stage makes one pass per instance.
 		std::function<std::shared_ptr<org::RenderPass>(std::uint32_t a_instance)> makeInstance;
-		bool once = false;
 		bool atExecution = false;
 		// With atExecution, every draw and dispatch takes its counts from the run gate. With GPU gates on it records ahead
 		// and does nothing on a run whose entries are closed.
@@ -235,69 +254,45 @@ namespace FrameAnchors
 		bool segmentOnly = false;
 		// Make passes instance by instance, so the taps' order holds across targets. Scaleform displays draw over earlier ones.
 		bool instanceMajor = false;
-		// A registration the schedule does not hold yet taps as the one it holds. Only for clients whose commit every registration reads.
-		bool matchesById = false;
-		// The client's own count, returned by HeldNow: which registration the frame's schedule holds.
+		// Which registration this is. DeclareClient with a state sets it; leave it 0 elsewhere. A client with a generation taps by id:
+		// a run commits the newest registration's callbacks for the one the schedule holds, and the commit finds that one's state
+		// with DeclaredClientOf::Held (Placement::generation).
 		std::uint64_t generation = 0;
 	};
 
 	/** @brief An anchor's name, as the logs and docs give it ("DeferredPasses"). */
 	const char* Name(Anchor a_anchor);
 
-	/** @brief Reserves an anchor's epoch. Call before the render graph initializes. Returns false afterwards. */
-	bool Reserve(Anchor a_anchor);
-
-	/** @brief Whether the anchor has an epoch (reserved before initialization, and the runtime is up). */
-	bool HasEpoch(Anchor a_anchor);
-
-	/** @brief Whether atExecution passes at the anchor record after the run's commit, so they can read it. Render thread, at a build. */
+	/**
+	* @brief Whether atExecution passes at a shared anchor record after the run's commit, so they can read it, as its stages' epochs
+	* record. False for an anchor a stage holds wholly, whose passes record ahead. Render thread, at a build.
+	*/
 	bool RecordsAtExecution(Anchor a_anchor);
 
-	/** @brief The Revision for a pass whose Record reads its run's slot.
+	/** @brief The ticket's revision value for a pass whose Record reads its run's slot (not a frame revision).
 	*  Recorded at execution it never changes. Recorded ahead, every call is new, so the ticket is prepared again after the commit. */
-	inline void CommitReadRevision(bool a_atExecution, std::vector<std::uint64_t>& a_out)
+	inline void CommitReadTicket(bool a_atExecution, std::vector<std::uint64_t>& a_out)
 	{
-		static std::atomic<std::uint64_t> ahead{ 0 };
-		a_out.push_back(a_atExecution ? 0 : ahead.fetch_add(1, std::memory_order_relaxed) + 1);
+		static std::atomic<std::uint64_t> ticketSerial{ 0 };
+		a_out.push_back(a_atExecution ? 0 : ticketSerial.fetch_add(1, std::memory_order_relaxed) + 1);
 	}
 
-	/** @brief Registers or replaces a client. Render thread. Returns false, logged, on a bad desc or an inactive runtime.
-	*  A client reading the shared constants before CS's first upload waits until they exist. */
-	bool Register(ClientDesc a_client);
+	// Register is private to Declare (Frame/DeclareRegistration.h): features register through Frame::DeclareClient.
 
 	/** @brief Removes a client. Until its anchors rebuild, old graphs still hold its passes, with gates closed and no callbacks. */
-	void Unregister(std::string_view a_id);
+	void Unregister(std::string_view a_id, const std::source_location& a_where = std::source_location::current());
 
-	/** @brief Rebuilds the client's anchors after it replaced a resource outside GraphResources. Render thread. */
-	void Refresh(std::string_view a_id);
+	/**
+	* @brief Where a run of a_anchor now puts client a_id's work. Render owner. The one frame query for a client.
+	* - At an anchor a stage holds wholly, that stage. At a shared anchor, the open stage whose step takes the anchor's taps now and holds
+	*   the client.
+	* - With a_anchor Count, any open stage that holds the client, for work handed over outside a tap.
+	* A registration matches as the run's commit does: by id for a client with a generation (DeclareClient with a state), else exactly.
+	* Run can still fail after a scheduled answer. The executed callback confirms submission.
+	*/
+	Placement Place(std::string_view a_id, Anchor a_anchor = Anchor::Count);
 
-	/** @brief Whether the anchor's last built graph holds this registration of a_id. Render thread. */
-	bool InBuiltGraph(std::string_view a_id, Anchor a_anchor);
-
-	/** @brief Whether a run of a_anchor now would draw a_id's work. Ask before taking the engine's work. Render thread.
-	*  Run can still fail afterwards. The executed callback confirms submission. */
-	bool Scheduled(std::string_view a_id, Anchor a_anchor);
-
-	/** @brief Whether the stage holding a_anchor wholly has a_id's current registration in its last schedule.
-	*  For work queued before the frame's Begin, such as a Bink tick. Render owner. */
-	bool InStage(std::string_view a_id, Anchor a_anchor);
-
-	/** @brief HeldNow's answer. */
-	struct StageHold
-	{
-		bool held = false; // a run of the anchor now taps a CS stage
-		bool scheduled = false;  // the frame's schedule of that stage holds a registration of the client (by id) and has it on
-		std::uint64_t generation = 0;  // that registration's ClientDesc::generation
-	};
-
-	/** @brief Whether a run of a_anchor now taps a stage holding a_id, and which registration its schedule holds.
-	*  Held and scheduled draws. Held and not scheduled lags. Not held has no place now. Render owner. */
-	StageHold HeldNow(std::string_view a_id, Anchor a_anchor);
-
-	/** @brief The client's one-shot passes (PassDesc::once) pending again: each runs at its anchor's next run. Render thread. */
-	void Rearm(std::string_view a_id);
-
-	/** @brief The hook run after each late anchor's epoch, since an upscaler, frame generation or the present may follow.
+	/** @brief The hook run after each late anchor's tap, since an upscaler, frame generation or the present may follow.
 	*  One hook. Installing another replaces it. */
 	void SetLateEpochHook(std::function<void()> a_hook);
 
@@ -305,7 +300,7 @@ namespace FrameAnchors
 	enum class RunStatus : std::uint8_t
 	{
 		Ran,       // the epoch was submitted; the executed callbacks of the clients in the built graph ran
-		Idle,      // nothing to run: no client active and no one-shot pass pending, or the anchor has no epoch
+		Idle,      // nothing to run: no client active, or no stage takes the tap now
 		Refused,   // the caller does not own rendering (IsRenderOwner), or the runtime is not active
 		Failed,    // the epoch failed (its clients are dropped at the next poll), or the graph stopped
 	};
@@ -317,7 +312,7 @@ namespace FrameAnchors
 		constexpr operator bool() const noexcept { return status == RunStatus::Ran; }
 	};
 
-	/** @brief Runs the anchor's epoch here when it has an active client or a pending one-shot pass. Render owner only.
+	/** @brief Taps the stage whose step takes the anchor now, when it has an active client. Render owner only.
 	*  Each run takes its own run lease, so it never waits for another run of the same frame. */
 	RunResult Run(const Point& a_point);
 
@@ -328,60 +323,76 @@ namespace FrameAnchors
 	bool InRun();
 
 	/** @brief Whether the calling thread owns rendering now, the only thread where anchors run. A pure query. Any thread.
-	*  With CS_ORG_LOADING_THREAD=1 it is the thread that last began an engine frame. A false answer is always safe. */
+	*  In the graph modes it is the thread that last began an engine frame. A false answer is always safe. Revisions adopt only
+	*  on the main thread (IsMainThread), whichever thread owns rendering. */
 	bool IsRenderOwner();
 
 	/** @brief Makes the calling thread the render owner, at each engine frame start (Renderer::Begin, SE 75460, AE 77245).
-	*  Only with CS_ORG_LOADING_THREAD=1. */
+	*  Only in graph mode (Engine::GraphMode). */
 	void ClaimRenderOwnership();
 
-	/** @brief How many times rendering changed threads so far (CS_ORG_LOADING_THREAD=1). Any thread. */
+	/** @brief How many times rendering changed threads so far, in the graph modes. Any thread. */
 	std::uint64_t RenderOwnerChanges();
 
 	/** @brief Records the calling thread as the engine's main thread. SKSE loads plugins there. */
 	void LatchMainThread();
 
 	/**
-	* @brief An engine render target as a graph slot, registered as "cs.engine.target.<index>". Null if it cannot be imported.
-	* Render thread. Each image has one graph resource, so this may return an existing slot or ORG's own resource instead.
+	* @brief How imports change (frame revision plan, step 9b). The first import of an id makes its slot, with every view the texture's
+	* bind flags allow in its format plus the views the caller names. Later calls with the same texture return the slot. A new texture
+	* under the id, or a view the slot lacks, is a change: inside the frame's adoption point (a declared client's key, make or adopted
+	* call) it becomes a pending version of the revision being prepared, adopted with it. Anywhere else it is TapError::OutsideAdoption,
+	* naming the id and a_caller, and the slot keeps its version. So import what can change in a declared client's key, never mid-frame.
 	*/
-	Texture EngineTarget(std::uint32_t a_target);
 
-	/** @brief EngineTarget for a depth-stencil target (RE::RENDER_TARGETS_DEPTHSTENCIL), with its DSV and depth SRV: "cs.engine.depth.<index>". */
-	Texture EngineDepth(std::uint32_t a_depthStencil);
+	// The three import entry points: EngineTexture for the engine's targets, ImportTexture for any other D3D11 texture, and
+	// ShareImage for an image a graph outside the anchors uses.
 
-	/** @brief EngineTarget for a cubemap target, with cube views and its faces' RTVs: "cs.engine.cubemap.<index>". */
-	Texture EngineCubemap(std::uint32_t a_cubemap);
+	/** @brief Names of the engine's targets for EngineTexture: FrameAnchors::Colour(RE::RENDER_TARGET::kMAIN) and the like. */
+	using RenderGraph::Engine::Targets::Colour;
+	using RenderGraph::Engine::Targets::ColourCopy;
+	using RenderGraph::Engine::Targets::Cubemap;
+	using RenderGraph::Engine::Targets::Depth;
+	using RenderGraph::Engine::Targets::TargetRef;
 
-	/** @brief Imports a texture a feature still owns in D3D11 as "cs.d3d11.<name>". Any view may be null.
-	*  The first import of a name decides its views, so import it the same way everywhere. */
-	Texture D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
-		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv = nullptr);
+	/**
+	* @brief An engine target as a graph slot: the engine target set's declared slot, stable for the session. Render thread.
+	* A colour target the engine keeps (a mip-generating one), or any colour target before the set is declared, is imported as
+	* "cs.engine.target.<index>"; each image has one graph resource, so that may return an existing slot. Other kinds are null
+	* before the set is declared. Null for an index past the engine's table. The view and slice of a_target are ignored.
+	*/
+	Texture EngineTexture(TargetRef a_target, const std::source_location& a_caller = std::source_location::current());
 
-	/** @brief Imports a texture loaded once from a file and only read after, such as a noise or LUT texture.
-	*  Native mode makes it one untracked graph resource that passes may only read. Elsewhere it imports as D3D11Texture does. */
-	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv);
+	/** @brief What ImportTexture imports. Set texture and its views, or depth, or texture and views. */
+	struct ImportSource
+	{
+		ID3D11Texture2D* texture = nullptr;
+		ID3D11ShaderResourceView* srv = nullptr;  // any view may be null
+		ID3D11UnorderedAccessView* uav = nullptr;
+		ID3D11RenderTargetView* rtv = nullptr;
+		const RE::BSGraphics::DepthStencilData* depth = nullptr;  // a depth target outside the engine's table: its texture and views
+		const org::TextureDescription* views = nullptr;           // exactly these views, for targets like Scaleform's and ImGui's
+		// Loaded once from a file and only read after, such as a noise or LUT texture. Native mode makes it one untracked graph
+		// resource that passes may only read; elsewhere it imports like any other.
+		bool immutable = false;
+	};
 
-	/** @brief EngineDepth for a depth texture outside the engine's table. Registered as a_id and kept while the texture stays the same. */
-	Texture ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id);
-
-	/** @brief Imports any other D3D11 texture with the views a_views names, registered as a_id. For targets like Scaleform's and ImGui's. */
-	Texture ImportTexture(std::string_view a_id, ID3D11Texture2D* a_texture, const org::TextureDescription& a_views);
+	/**
+	* @brief Imports a D3D11 texture a feature or the engine still owns, registered as a_id. A feature's own texture is named
+	* "cs.d3d11.<name>" by convention. Null for an empty id. The first import of an id decides its views, so import it the same way
+	* everywhere. A depth source is kept while its texture stays the same.
+	*/
+	Texture ImportTexture(std::string_view a_id, const ImportSource& a_source, const std::source_location& a_caller = std::source_location::current());
 
 	/**
 	* @brief The one graph resource of an image used by a graph outside the anchors, such as DCLF's epochs. Render thread.
 	* The slot keeps a_texture alive so the handle is never reused. A later id import of the same image takes the slot over.
 	*/
-	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name);
-
-	/** @brief Whether a CS stage holds uncommitted staged values. D3D11 work reaching DXVK now runs ahead of it. Any thread, no lock. */
-	bool StagesHoldValues();
+	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name,
+		const std::source_location& a_caller = std::source_location::current());
 
 	/** @brief The CS stages holding staged values now, a bit per SegmentId, for the residue census. Any thread, no lock. */
 	std::uint32_t StagesHoldingValues();
-
-	/** @brief The hook called when the last open stage window closes, to apply what was kept from DXVK inside the windows. One hook. */
-	void SetWindowsClosedHook(void (*a_hook)());
 
 	/** @brief Render owner. Whether the description being read is a stage's build key rather than a frame's.
 	*  A rows callback then sets every row a frame may pick, plus requested and always-present rows. */
@@ -396,21 +407,14 @@ namespace FrameAnchors
 	/** @brief Inside a commit at a stage's tap, the instance it writes, counted from 0 per step. 0 outside a segment commit. Render owner. */
 	std::uint32_t TapInstance();
 
-	/** @brief Whether a tap of a_id now would commit into an open declared segment whose built graph holds this registration. Render owner. */
-	bool CanTap(std::string_view a_id);
-
-	/** @brief Whether a_id's work that the schedule leaves out may lag rather than never draw. Render owner.
-	*  False when the stage runs its current description on a build without the client and no such build is coming. */
-	bool TapMayLag(std::string_view a_id);
-
-	/** @brief Whether a CS stage holds a_anchor wholly, so it has no epoch of its own. Fixed after init. Any thread. */
+	/** @brief Whether a CS stage holds a_anchor wholly, rather than sharing it with other stages. False before init. Any thread. */
 	bool HeldByStage(Anchor a_anchor);
 
-	/** @brief Whether CS stage a_segment is open now. Native mode, render owner. False otherwise. */
-	bool StageOpen(std::uint32_t a_segment);
-
-	/** @brief Whether CS stage a_segment is declared but has no schedule yet, so its work lags. Native mode, render owner. */
-	bool StageAbsent(std::uint32_t a_segment);
+	/**
+	* @brief CS stage a_segment's state now. Native mode, render owner. Reason None while its window is open, Absent while it is
+	* declared in this frame with no schedule yet (its work lags), NoStage otherwise. The stage is set for None and Absent.
+	*/
+	Placement Stage(std::uint32_t a_segment);
 
 	/** @brief Drops the kept recordings of stages holding a_anchor, for work that ends, such as a Bink movie. Render owner.
 	*  A late batch keeps what its last recording retained until it records again. a_why is logged. */
@@ -422,9 +426,6 @@ namespace FrameAnchors
 
 	/** @brief Whether a CS stage names client a_id at one of its steps. Fixed after init. Any thread. */
 	bool NamedByStage(std::string_view a_id);
-
-	/** @brief Whether a CS stage has a step at a_anchor. Works before reservation, so modules reserve only where a stage uses an anchor. */
-	bool StageStepsAt(Anchor a_anchor);
 
 	/** @brief Writes client a_id's frame inputs outside its tap, while its stage window is open and the schedule has it on.
 	*  For data the engine hands over at another call, such as the clear colour. Returns false otherwise. Render owner. */
@@ -442,47 +443,27 @@ namespace FrameAnchors
 		return a_instance * a_perInstance + a_entry;
 	}
 
-	/** @brief The segment whose epoch an anchor's runs submit, its own or its stage's. Any thread, after Initialize. */
-	std::uint32_t RunSegment(Anchor a_anchor);
-
 	/** @brief At Renderer::Begin, each declared segment takes its slot's schedule for the frame. Nothing waits.
 	*  A segment with no schedule on the attached build is absent, with graph 0. */
 	void BeginFrame(RenderGraph::Frame::Description& a_frame);
 
-	/** @brief The declared segments' epochs. Empty with segments off. */
+	/** @brief The CS stages' epochs. Empty before Initialize. */
 	std::vector<std::uint32_t> SegmentEpochs();
-
-	/** @brief SegmentEpochs with each epoch's segment (a RenderGraph::Frame::SegmentId value), for the frame arena's spans. */
-	std::vector<std::pair<std::uint8_t, std::uint32_t>> SegmentEpochsById();
-
-	/** @brief Hands another module's epoch passes to the declared segment that holds it. Render thread.
-	*  a_passes is a std::vector<org::RenderGraph::ExternalPassDesc>*. a_declared says at frame start whether they work. */
-	void SetForeignPasses(std::uint32_t a_segment, std::function<void(std::uint32_t a_epoch, void* a_passes)> a_gather, std::function<bool()> a_declared);
-
-	/** @brief Whether a declared segment holds module epoch a_segment, so the module gathers nothing itself. Any thread, after Initialize. */
-	bool HoldsForeign(std::uint32_t a_segment);
-
-	/** @brief The module epoch's hook when a stage holds it. a_commit writes the run's values and the stage submits them. Render owner. */
-	RunResult TapForeign(std::uint32_t a_segment, const std::function<void()>& a_commit);
 
 	/** @brief GPU work is about to be submitted. Stages whose commit point this is commit first. Render owner. */
 	void BeforeGpuWork(const char* a_why, std::uint32_t a_segment = UINT32_MAX);
 
 	// What RenderGraphRuntime asks of the anchors.
 
-	/** @brief The anchor's segment (RenderGraphRuntime::Segment, as its value). */
-	std::uint32_t SegmentOf(Anchor a_anchor);
-
-	/** @brief Whether a segment value is an anchor's that has no epoch (no reservation): the runtime leaves it out everywhere. */
+	/** @brief Whether a segment value is a CS stage's that is not in the frame: the runtime leaves it out everywhere. */
 	bool IsUnusedSegment(std::uint32_t a_segment);
 
-	/** @brief An anchor segment's names for events, logs, the profiler and the contributor ABI. */
+	/** @brief A CS stage segment's names for events, logs and the profiler. */
 	struct SegmentNames
 	{
 		const char* label;
 		const char* inputs;
 		const char* profiler;
-		const char* contributor;
 	};
 	const SegmentNames* NamesOf(std::uint32_t a_segment);
 
@@ -490,23 +471,16 @@ namespace FrameAnchors
 	*  After the first world frame builds go to the build manager, and this returns false. */
 	bool BuildPending(std::string_view a_caller);
 
-	/** @brief Before the first frame, records the UI stage for every slot so the first frame draws it. Setup waits, no frame does. */
+	/** @brief Before the first frame, asks for the UI stage's recording for every slot. Nothing waits; each slot switches it in once recorded. */
 	void PrimeStages(std::string_view a_caller);
 
-	/** @brief Logs each reserved anchor's peak runs a frame (CS_ORG_EPOCH_STATS's report). Render thread. */
-	void LogRunStats();
-
-	/** @brief Inserts the reserved anchors' epochs into a_epochs at their place in the frame. The first call freezes reservations. */
+	/** @brief Inserts the CS stages' epochs into a_epochs at their place in the frame. The first call fixes the stages for the session. */
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs);
 
-	/** @brief Keeps several tickets prepared per anchor epoch, so back-to-back runs find them ready. CS_ORG_TICKETS_AHEAD caps it.
-	*  Safe because anchor passes read only what they were made with or what a commit wrote into a LatchBlock. */
-	void SetTicketsAhead(org::GraphHost& a_host);
-
-	/** @brief An anchor's epoch failed to build or prepare. Its clients fail, since a graph mode has no D3D11 path. Render thread.
-	*  Development builds stop. Release builds unregister them and rebuild their anchors. */
+	/** @brief A stage's epoch failed to build or prepare. Its clients fail, since a graph mode has no D3D11 path. Render thread.
+	*  Development builds stop. Release builds unregister them and rebuild their stages. */
 	void OnEpochFailed(std::uint32_t a_epoch, const std::string& a_error, bool a_keptGraph);
 
-	/** @brief Initialize, once, with the host made and no graph built: adds the anchors' extension when any anchor has an epoch. */
+	/** @brief Initialize, once, with the host made and no graph built: adds the anchors' extension. */
 	void Attach(org::GraphHost& a_host);
 }

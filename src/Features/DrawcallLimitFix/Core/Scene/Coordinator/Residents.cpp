@@ -5,19 +5,8 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 
-#include "Features/DrawcallLimitFix/Diagnostics/ParityCounter.h"
-#include "Utils/SwitchFile.h"
-
 namespace DCLF::Scene
 {
-	namespace
-	{
-		Diagnostics::ParityCounter templateParity;
-		std::uint64_t templateParityPasses = 0;
-		constexpr std::uint32_t kTemplateParityOffset = 37;
-		constexpr std::uint64_t kTemplateReportChecks = 10;
-	}
-
 	void Coordinator::MarkResidentSlot(std::uint32_t a_slot, const ResidentPatch& a_patch)
 	{
 		NoteResidentTouched(a_slot);
@@ -116,10 +105,6 @@ namespace DCLF::Scene
 		it->second = { a_pipeline, a_material, tables.pipelineSlots.Generation(a_pipeline), tables.materialSlots.Generation(a_material) };
 		AddStagedReferences(it->second);
 		NoteResidentTouched(a_slot);
-		static const bool cellTrace = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
-		if (cellTrace && a_slot < tables.objects.size())
-			logger::info("[DCLF] cell trace: pass {} frame {} slot {} {} keeps drawing pipeline {} material {} until pipeline {} material {} is ready", passSerial, sceneFrame, a_slot,
-				static_cast<const void*>(tables.objectGeometry[a_slot]), tables.objects[a_slot].pipelineIndex, tables.objects[a_slot].materialIndex, a_pipeline, a_material);
 	}
 
 	void Coordinator::UnstageBinding(std::uint32_t a_slot)
@@ -230,22 +215,6 @@ namespace DCLF::Scene
 		for (const std::uint32_t p : pipelinesTouched)
 			if ((pipelineMembers.Count(p) || stagedPipelineMembers.Count(p)) && p < tables.geometryTemplate.size())
 				tables.geometryTemplate[p] = templateOf(p);
-		if (Diagnostics::Observe().scene && Diagnostics::ParityDue(passSerial, kTemplateParityOffset)) {
-			auto& tp = templateParity;
-			for (std::uint32_t p = 0; p < pipelineMembers.lists.size() && p < tables.geometryTemplate.size(); ++p)
-				if (pipelineMembers.Count(p)) {
-					const auto* now = templateOf(p);
-					tp.Check(tables.geometryTemplate[p] == now, [&] {
-						return fmt::format("pipeline {} (first member slot {}): template {} where the member holds {}", p, pipelineMembers.First(p),
-							static_cast<const void*>(tables.geometryTemplate[p]), static_cast<const void*>(now));
-					});
-				}
-			if (++templateParityPasses % kTemplateReportChecks == 0) {
-				logger::info("[DCLF] pipeline template parity (the touched refresh against every pipeline's first member): {} checks, {} differ{}",
-					tp.checks, tp.mismatches, tp.Verdict(true));
-				tp.Reset();
-			}
-		}
 	}
 
 	RE::NiPointer<RE::NiAVObject> Coordinator::HeldFadeNode(std::uint32_t a_slot, const void* a_node)

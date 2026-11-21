@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Utils/Hash.h"
+
 // What a scene revision is made from and what it holds. Included by Internal.h, in its order.
 
 namespace DCLF::Draws
@@ -22,12 +24,11 @@ namespace DCLF::Draws
 		std::uint64_t mainGeneration = 0;
 		std::shared_ptr<ShadowResources> shadow;
 		std::shared_ptr<SceneBuffers> scene;
-		// epochBuilds is each segment's own build, which is what its recordings are of.
+		// epochBuilds is each segment's own build, which is what its recordings are of: its staged build while one is staged, else its
+		// attached one. buildGeneration is their sum over DCLF's segments.
 		std::uint64_t buildGeneration = 0;
 		std::array<std::uint64_t, static_cast<std::size_t>(RenderGraphRuntime::Segment::Count)> epochBuilds{};
 		rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
-		std::uint32_t targetsGeneration = 0;
-		DXGI_FORMAT shadowFormat = DXGI_FORMAT_UNKNOWN;
 		bool claims = false;       // !IndirectDraws::Failed
 		std::uint32_t shadowRasterStates = 0;  // DrawPipelines::ShadowRasterStateCount
 		std::uint32_t shadowCandidates = 0;
@@ -47,10 +48,12 @@ namespace DCLF::Draws
 		std::weak_ptr<org::runtime::IUploadService> uploads;
 		// With the CPU pipeline only some epochs have passes, so the revision records only those.
 		bool cpuPipeline = false;
-		bool forwardDirect = false;
-		bool firstPersonForwardDirect = false;
-		// A revision is made only while this build is the attached one. Before that, a recording would be of the old graphs.
+		// A revision is made only once every build of this state is staged or attached. Before that, a recording would be of the old graphs.
 		std::shared_ptr<const BuildState> build;
+		// The frame's versions the recordings name besides DCLF's buffers (Frame::Revision::FrameVersionsFor): a frame revision's
+		// pending ones while it has DCLF epochs in its closure, else null for the adopted ones. The serial tags the snapshot.
+		std::shared_ptr<const org::IResourceVersions> frameVersions;
+		std::uint64_t frameVersionsSerial = 0;
 	};
 
 	/** @brief A latch layout's key in the scene's set. A different layout gets a different block. */
@@ -60,10 +63,10 @@ namespace DCLF::Draws
 		static_assert(std::is_trivially_copyable_v<Layout> && sizeof(Layout) % sizeof(std::uint32_t) == 0);
 		std::array<std::uint32_t, sizeof(Layout) / sizeof(std::uint32_t)> words;
 		std::memcpy(words.data(), &a_layout, sizeof(Layout));
-		std::uint64_t key = 0xcbf29ce484222325ull;
+		Util::Fnv1a key;
 		for (const std::uint32_t word : words)
-			key = (key ^ word) * 0x100000001b3ull;
-		return key;
+			key.Mix(word);
+		return key.Value();
 	}
 
 	/**
@@ -112,10 +115,15 @@ namespace DCLF::Draws
 		std::array<std::vector<std::optional<RowBuckets>>, kShadowModeCount> rows;  // by mode, then state
 	};
 
-	/** @brief Host data for one epoch's recording: the revision's versions and the epoch's shape. */
+	/**
+	 * @brief Host data for one epoch's recording: the revision's versions and the epoch's shape. composed names DCLF's buffers and
+	 * the frame's versions (RevisionInputs::frameVersions) when there are frame versions to name, so a CS texture's new version is
+	 * recorded against before the frame revision adopts it (plan step 10b).
+	 */
 	struct EpochRevisionData final : org::IHostExecutionData
 	{
 		std::shared_ptr<const NamedVersions> versions;
+		std::shared_ptr<const org::IResourceVersions> composed;
 		RevisionShapes shapes;
 		const void* TryGet(std::type_index a_type) const noexcept override
 		{
@@ -124,7 +132,7 @@ namespace DCLF::Draws
 			if (a_type == typeid(NamedVersions))
 				return versions.get();
 			if (a_type == typeid(org::IResourceVersions))
-				return static_cast<const org::IResourceVersions*>(versions.get());
+				return composed ? composed.get() : static_cast<const org::IResourceVersions*>(versions.get());
 			return nullptr;
 		}
 	};
@@ -165,6 +173,7 @@ namespace DCLF::Draws
 		std::shared_ptr<const org::async::RevisionFragment> shape;
 		std::shared_ptr<const RevisionRecordings> recordings;
 		// With the CPU pipeline nothing is recorded and the direct sites draw from the shape.
+		// Without it the direct sites still draw the forward families.
 		bool direct = false;
 		explicit operator bool() const { return shape && (direct || (recordings && !recordings->recordings.empty())); }
 	};

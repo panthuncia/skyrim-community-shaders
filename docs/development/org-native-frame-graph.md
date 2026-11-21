@@ -8,6 +8,10 @@ Native mode (`CS_ORG_NATIVE=1`) moves to BasicRenderer's model:
 
 DXVK guest mode keeps its epochs; that machinery goes in Phase 8 of [org-full-port.md](./org-full-port.md).
 
+The dated sections below are a work log. Many switches, censuses, self-tests and files they name were removed later by the ORG
+simplification ([plans/org-simplification-plan.md](./plans/org-simplification-plan.md)). The switches that exist are the ones in
+`tools/cs-test/switches.json`.
+
 **Why.** Native mode rests every engine image in GENERAL on Vulkan and COMMON on D3D12, and closes about 48 graph executions a
 frame back to that state.
 - On the RX 6600 that costs about 1.2 ms a frame in Vulkan. It was measured by forcing DXVK's images into GENERAL with
@@ -46,16 +50,6 @@ The regions, in engine order:
 DCLF's revision-driven epochs stay separate.
 | 5     | The same on D3D12                                                                                              |                |
 | 6     | Cleanup                                                                                                        |                |
-
-## Phase 0 switches
-
-All of these are off by default. They report per window (world, menu, loading screen, map) every `CS_ORG_CENSUS_FRAMES`
-frames (default 600). `tools/cs-test/configs/native-census.toml` turns them on.
-
-- `CS_ORG_NATIVE_OP_CENSUS=1`: every native immediate operation, by kind, target and place in the frame.
-- `CS_ORG_NATIVE_WRITE_CENSUS=1`: SRV-only textures and VB/IB-only buffers that get written after creation.
-- `CS_ORG_EPOCH_STATS=1`: each anchor's runs a frame, and whether its runs differ in shape.
-- `CS_ORG_VALIDATE_UNDECLARED=1`: raw bindless accesses to resources the pass did not declare.
 
 ## Wave 1 (2026-11-13, branch `org-native/integrate`)
 
@@ -838,7 +832,7 @@ client refuses.
   clears before the context saw them.
 - No `[ORG native] ClearRenderTargetView on "Engine::kTEMPORAL_AA_MASK" ... own path` line (nor for the water targets or
   `kMAIN Copy`) after the first world frame.
-- `[ORG] engine skeleton: the frame clears registered at the EngineFrameClear anchor (N views ...)`: N is three more than in guest.
+- `[ORG] engine skeleton: the frame clears made (N views ...)`: N is three more than in guest.
 - `[ORG] engine skeleton: the kMAIN copy (kMAIN into kMAIN Copy) runs on the graph (EngineCopy anchor)`.
 - Loading screen window: `external work: UpdateSubresource texture ...` once the texture's promotion is attached, and
   `[ORG] external work: ORG's external client is ready (closed submissions ...)`.
@@ -862,6 +856,9 @@ client refuses.
 DCLF's epoch graphs are no longer built on the render thread. The scene worker builds them from an immutable **build state**, and the build
 manager attaches them at a frame's end. `CS_DCLF_ASYNC_BUILDS=0` restores the old path (built on the render thread at the build point).
 
+Since cleanup plan A5 step 2, DCLF's epochs build on the build manager's own lane, their first builds too (`BuildManager::Desc::laneOnly`).
+`ExternalBuilder`, the scene worker's build lane and `CS_DCLF_ASYNC_BUILDS` are gone. DCLF settles in the manager's poll listener.
+
 **The build state** (`Core/Render/Epochs/BuildState.{h,cpp}`).
 - One immutable value holds everything an epoch build reads that the render thread changes:
   - the requested graph conditions (all of them, not just the three bits the revision inputs carried);
@@ -878,19 +875,24 @@ manager attaches them at a frame's end. `CS_DCLF_ASYNC_BUILDS=0` restores the ol
   `Shadow.cpp`), the sites (`SitePasses.cpp`), the hosted views and pass states in `GatherScheduled`, and tree LOD's faces all read the
   build's targets, slots and main resources. They never read the live vectors and pointers the render thread replaces.
 - Per-frame fields stay on the live resources: latched targets, labels, frame buffers. Only preparation and recording read them.
-- `BuildScope` is an RAII guard that sets the calling thread's build state. A build without a scope logs:
-  - on the render thread (the host's first build of an epoch at its first submission) it is an info line, and the build uses the newest
-    value;
-  - anywhere else it is an error, and the build uses the attached value.
+- Each build carries its value. DCLF gives the build manager `CurrentBuildState` as its build input (`BuildManager::SetBuildInput`).
+  The manager takes it on the render thread when it hands a build out, and the build reads it on whatever thread runs it
+  (`Builds::Input`). The host's own builds on the render thread (an epoch's first build, setup, the pipeline swap) take it when they run.
+  A factory outside any build gets no value, logs a warning and makes no passes.
 
-**Conditions.** `RefreshGraphConditions` sets the *requested* conditions. The frame keeps the *attached* ones until the builds attach
-(`PublishAttachedBuildState`). Outside a build, `CurrentGraphConditions` returns the attached conditions, so the frame's mode
-(`GraphBuiltForCpu`), the preparations and the revision inputs follow the graph that runs. Inside a `BuildScope` it returns the build's
-conditions. Every attached value is kept alive, so the reference stays valid while another thread swaps it.
+**Conditions.** `UpdateGraphConditions` sets the *requested* conditions, inside the adoption point of a Begin whose revision changed
+one of their variables (`DclfToggles`, `Interior`, `DclfPassCuts`; frame revision plan step 10c). The frame keeps the *attached* ones
+until a scene recorded on the builds is adopted (`PublishAttachedBuildState`). The revision inputs a scene records with take their
+pipeline fields from the build state they record on, so the scene, its builds and its conditions switch in one adoption.
+- A pass reads the conditions of the build that made it (`PassContext::Conditions`). What it needs at preparation or recording it
+  captures at its make, so a staged build's recording never reads another build's conditions. There is no ambient accessor.
+- Frame code (the direct sites, coverage, `RevisionOf`, diagnostics) reads `AttachedGraphConditions`, so the frame's mode
+  (`GraphBuiltForCpu`) follows the graph that runs. `RevisionOf` reads them once into the `EpochRevision` its commit uses. Every
+  attached value is kept alive, so the reference stays valid while another thread swaps it.
 
 **The builds** (`Core/Render/Epochs/GraphBuilds.cpp`, `BuildManager::ExternalBuilder`).
 - DCLF's epochs are the build manager's *external* epochs. At each poll, the manager hands those that were asked for to the "DCLF graph
-  builds" lane on the scene worker's preparation pool. Each build runs inside a `BuildScope` holding the build state made at that poll.
+  builds" lane on the scene worker's preparation pool. Each build carries the build state taken at that poll.
 - Policy stays with the manager:
   - one group per poll;
   - a request made since a build was handed out supersedes it;
@@ -2643,8 +2645,8 @@ Native mode with segments; guest is unchanged.
 
 Engine order (Ghidra, SE 0x1405b1020, Main's frame): `Renderer::Begin`, then the decal manager and UI work, then `Main::Draw`
 (0x1405b1710), whose first call is where Drawcall Limit Fix's scene frame starts (`Main_Draw_Early`, 35560 + 0xD3). DCLF's build
-point (`IndirectDraws::BuildPoint`: its builds handed out, the build manager's finished builds attached, `RefreshGraphConditions`)
-ran there, after Begin. It needs nothing from `Main::Draw`: the graph conditions read the cell and the toggles, and the revision
+point (`IndirectDraws::BuildPoint`: its builds handed out, the build manager's finished builds staged; the graph conditions moved to
+the adoption point in step 10c) ran there, after Begin. It needs nothing from `Main::Draw`: the graph conditions read the cell and the toggles, and the revision
 inputs it posts are latest-wins. Native mode with segments now runs it from the frame driver at Begin, before the descriptions
 (`DCLF::BuildPointAtFrameStart`), for a frame that draws the world; the scene-frame start skips it for that frame. Guest keeps it at
 `Main::Draw`. The other attach points are the frame's end (`SealPresented`, `Attach::All`), DCLF's own wait for a snapshot and
@@ -3982,9 +3984,16 @@ end). RenderWaterEffects runs after the last face's sky in every world frame (fr
   writes the other target and swaps again. The hook keys each draw by effect, the target it writes (that plan) and its instance. A check
   compares the plan with the target the engine binds, once a session: no difference in the final runs.
 - **The flow copies**: the k-th copy of the frame is instance k; its loaded texture is a frame input by heap index (the latch's Source).
-- **Fixed instances** (the counts are the engine's late decisions): 8 ripples per target, 4 heightmap steps per target, 32 flow copies;
-  58 passes. All are on in every description and gated: an instance the engine does not use stays closed and does nothing on the GPU. More
+- **Instances** (the counts are the engine's late decisions): 8 ripples per target, 32 flow copies, and per target the engine's bound on
+  heightmap steps (below); 68 passes with the default timer settings. All are on in every description and gated: an instance the engine does not use stays closed and does nothing on the GPU. More
   in one frame is `NoPass`. The client `repeats`: a tap per update and per copy, each opening only its own instances' entries.
+- **The heightmap bound** (2026-11-19). The update adds the frame's game delta to its clock and steps every 0.025 s, so it runs at most
+  ceil(delta / 0.025) steps. BSTimer::Update (66987 / 68244) sets each sample to 1/6 s past 166.7 ms (or the iFPSClamp step), and
+  bCompensateUnstableFrameTime (on by default, 8 samples) averages the samples without the smallest and with the largest clamped to
+  0.05 s, so the delta reaches ((n - 1) s - min(s, 0.05)) / (n - 2): 0.186 s by default. The global time multiplier scales it (counted
+  as its next whole multiple when above 1). `HeightmapStepBound` adds one step for float rounding: 9 by default. It is a field of the
+  EngineImageSpace variable and of the start key, so a settings change registers the client again; a step past the bound while that
+  revision lags is lag, otherwise `NoPass`. The old fixed 4 assumed a 0.1 s frame: a Riverwood load after Solstheim ran 5.
 - Not built: the rain ripple, rain heightmap, blend, smooth and normals steps and the clear (shaders 86, 89, 91 to 94). The decompiled
   Render does not draw them and no session's manifest has them. A draw of one is `NoPass`.
 
@@ -4078,7 +4087,7 @@ skips its run at execution (below).
   declared frame's census line), and the switch line names the frames from the key's request to its switch-in.
 - **Per-frame fields stay out of the key.** A field that changes every frame (a parity, a ping-pong target) is in the key whole: the key
   description sets both values. Otherwise each frame would ask for a build and builds would supersede each other forever.
-- `CS_ORG_ABSENT_PASSES=0` keeps every pass (A/B runs).
+- No switch keeps every pass. The A/B switch `CS_ORG_ABSENT_PASSES` was removed with the old A/B paths.
 
 Rows: each client of a stage has its own rows. The world water client's rows overlapped the scope rows (both started at 0), so the SSR
 downsample was never row-off; the water rows now follow the scopes' (`waterRowBase`).
@@ -4230,7 +4239,7 @@ described yet; a key now changes outside the stage's frames only once the stage 
 ### What SetSkipWhen, folding and gates are still used for
 
 - `SetSkipWhen` and the build-time fold: the slot-parity variants (TAA's and the raw AO's history pairs), passes present but off in a frame's
-  description (requests that lapsed, a description that changed before its build), and every pass with `CS_ORG_ABSENT_PASSES=0`.
+  description (requests that lapsed, a description that changed before its build).
 - The execution-time fold: late batches' passes that skip their run (instances, faces, the evaluate, gated copies and clears).
 - Run gates: the per-frame choices the engine makes late (variants, instances, the screenshot copy, the tonemap's fade form, the last
   luminance level's form) and every pass's work in a run.
@@ -4793,9 +4802,8 @@ water. A steady world frame is about 11.2 to
 a frame with rain or snow always has it).
 
 No anchor runs an epoch of its own in native mode but HDR output and frame generation (Cleanup A6): every anchor a stage has a step at
-has no epoch of its own, and work at one outside every stage's step is an `own epoch in native mode` tap error (the mismatch policy). The
-frame sequence census counts own tickets in the session on each window's line, and prints every frame that has one (or engine work no
-stage had a place for, `unplaced:`), the first 32. Every engine clear and copy has a stage's place in every frame kind, or is dropped
+has no epoch of its own, and work at one outside every stage's step is an `own epoch in native mode` tap error (the mismatch policy).
+Every engine clear and copy has a stage's place in every frame kind, or is dropped
 where it is taken with a stated reason (Cleanup A6, the table there).
 
 A pass that skips its run costs nothing for the resources no running pass touches: no entry or body barrier records for them and the
@@ -4806,7 +4814,7 @@ ledger keeps their state (Cleanup A5). A stage's commit copies only the latch by
 Present in every build of their stage, recorded at execution with the CPU's gate answers (a pass that does not run skips, its barriers
 folded), because the engine decides them late or a lagging build would lose them:
 - start: the decal tests' 4 instances (8 draws each), the face tint, the six reflection faces' sky, the water effects' instances (8
-  ripples and 4 heightmap steps per target, 32 flow copies), the shadow maps' clears DCLF's shadow view does not host;
+  ripples and the timer's bound on heightmap steps per target, 32 flow copies), the shadow maps' clears DCLF's shadow view does not host;
 - pre-depth: the main depth's clear DCLF's Z-prepass does not host;
 - post: the screenshot copy, the frozen background's copy (`capture.menubg`), refraction and the radial blur after the tonemap, both tonemap
   forms, both forms of the last luminance level, the engine-counter parity variants (luminance, bright pass, the VL composite, the
@@ -4842,24 +4850,23 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 
 ### What guest mode (DXVK) still uses of the old path
 
-Since Guest B0 (2026-11-18) guest runs every port native runs, with the flush latch and the guest context: the engine's subsystems
+Since Guest B0 (2026-11-18) guest runs every port native runs, with the guest context: the engine's subsystems
 and CS's features draw on ORG in both modes, and the engine's binds and draws are withheld from DXVK. Since Guest B1 guest runs the
 frame driver, schedules, staged builds, keys and the recipe check. Since Guest B7 every CS stage of every frame kind is one block in
 DXVK's stream, as in native: start, pre-depth, pre-main, deferred+water, sun, post (the upscaler's evaluate a pass of it, recorded into
 DXVK's command buffer) and UI, which writes DXVK's back buffer directly (one stable image, Guest B7). The skeleton hosts its clears in
 Drawcall Limit Fix's graphs and the stages' places; the kMAIN copy reaches it through the guest context's CopyResource hook; the
-engine's constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). The main ImageSpace
+engine's constant-buffer writes inside a stage's window reach DXVK after the window. The main ImageSpace
 client, the shape manifest and the D3D11 renderer for refused displays are no longer set up or reached in guest.
 
 Since Guest B8 the migration scaffolding is gone: no anchor a stage has a step at keeps an epoch of its own in guest, and work there
 outside every stage's step is the `own epoch` mismatch, as in native. Only frame generation's hudless copy and HDR output keep their
 anchors' tickets (as in native). The frame arena (`Frame::Transients`) is on in guest too.
 
-What is still guest's own: `onFailed` fallbacks, the port switches and the anchors'
-own-epoch paths for a run without the stages remain in the code (a later deletion piece); Skylighting's lent slot with its D3D11 clear
+What is still guest's own: Skylighting's lent slot with its D3D11 clear
 (Guest B4); the capture's D3D11 staging copy when the graph cannot take it; DXVK's interop ring for frame generation's evaluates; the
-engine targets native keeps without memory are backed in guest (Guest B8, about 150 MiB). What still reaches DXVK inside a window is
-in Guest B6 and B7 (the residue census): none in steady frames from CS or the engine.
+engine targets native keeps without memory are backed in guest (Guest B8, about 150 MiB). Guest B6 and B7 found nothing from CS or the engine
+reaching DXVK inside a window in steady frames.
 
 ### Old native paths still reachable
 
@@ -8686,3 +8693,413 @@ On DLL `7443b456d89e`, background runs, one launch each. All seven passed: `d3d1
 - No `FailClients` stop, no consecutive-registration warning and no frame tap error. The `[E]`/`[C]` line kinds are unchanged.
 - Shots match the earlier runs in structure. The CS menu shots differ in the menu's layout. The `taa` and live shots of the resize
   run differ by about 22, probably from saved upscaler settings that changed between the runs. That was not confirmed.
+
+## Presentation replacement (2026-11-19)
+
+Steps 4 and 5 of `plans/native-frame-generation-plan.md`.
+
+- **BasicRHI.** `rhi::SwapchainDesc` and `Device::CreateSwapchain(desc)` take the colour space at create and a `presentationLayer`
+  flag: a swap chain a frame generation layer may wrap through Streamline. With the flag, Vulkan has no `pNext` at create or present
+  and no present mode switch, and a rebuild destroys the old swap chain before it makes the new one. D3D12 takes the images from
+  the proxy swap chain and reads the waitable object again after a resize. D3D12 swap chain destroy and resize never waited for
+  the GPU (`Dx12Device::self` is never set). They do now.
+- **Native.** `Native::RequestPresentation(config, tornDown)` queues an entry on the submission thread after the queued presents.
+  Under `presentLock` it waits for the presents, destroys the swap chain, runs `tornDown`, creates the new swap chain from the
+  desc and publishes the request's serial. The latest request wins, and a failure is fatal. `Native::OnFrameBegin` (in
+  `Frame::Driver::OnBegin`) takes the frame's presentation for the render thread. HDR's colour space switch is such a request,
+  so it no longer drains the submission thread from the render thread. Each change logs `[ORG native] presentation request N`
+  on the render thread and `presentation replaced (request N)` on the submission thread.
+- **Presenter.** `Features/Upscaling/FramePresenter.h` is the plan's step 2 interface. `FrameGen::NativePresenter` is its native
+  backend; the DXVK backend and the controller's use of it are step 2.
+- **Checks** (RX 6600, `DXVK_DEBUG=hang`, label `fgc-final`): `native-quick` and `native-d3d12-quick` passed; `native-vulkan+hdr` and
+  `native-d3d12+hdr` passed with one request and one replacement per toggle (Vulkan 77 and 316 ms, D3D12 80 and 74 ms, on the
+  submission thread); `native-vulkan+menu` passed. `resize` stops at its step 3 on this tree (`ExponentialHeightFog` has no
+  `volumetricGridSizeZ` setting any more); a copy without the fog grid steps (the upscaler switches kept) passed on both
+  backends. `BasicRHIPresentationLayerSmoke` passes on both backends.
+
+## A7: the hudless copy and HDR output as UI steps (2026-11-19)
+
+Plan piece A7, step 1 of `plans/native-frame-generation-plan.md`. CS on `org-native/fg-a7` from `integ/hard-ports` `1937f0c0b`.
+
+### What changed
+
+- **Recipe.** The UI stage's first step is the FrameGeneration anchor, holding `cs.upscaling.hudless` and `cs.screenshot.clean`
+  wholly. It fires in `Main_PostProcessing` after the post chain, so both copies read kFRAMEBUFFER after the chain's output (the
+  pre-exposure is divided out) and before the screen blood. HDROutput is a whole step after Overlay, before Capture. The post
+  stage's FrameGeneration ticket and the UI stage's `commitBefore` (HDR output, Capture) are gone, and so is `Role::Ticket`.
+  The UI stage has 20 steps: `kMaxSteps` and `SharedConstants::kUploadPoints` went from 19 to 21.
+- **No anchor runs an epoch of its own.** `FrameAnchors::Run`'s own-epoch tail is deleted. Work at an anchor outside every
+  stage's step is the `own epoch` tap error in both graph modes, with no exceptions (the name lost "in native mode").
+- **Two clients, one step.** The clean copy and the hudless copy tap the same step in one frame, so both are `repeats` clients,
+  and the hudless copy is active only around `CopyHudless`'s own tap. Each copies only once the UI stage's build holds its
+  registration (`Scheduled`); a frame before that has no hudless or clean scene. Both are gated per run from the commit.
+- **HDR output in the stage.** The UI stage runs `cs.hdr`'s passes on every frame, also after HDR is turned off, so every pass is
+  now gated per run (the composite, the back buffer copy, and the UI clear as a gated `ClearSceneCS` dispatch). The first build
+  without the gates showed a frozen, washed-out image after HDR was turned off: the stale composite was copied into the back
+  buffer each frame. Until the stage's build holds a new registration, `Compose` returns `None`, and HDR Display commits the UI
+  stage (`ORGHDRDisplay::FollowWithD3D11`) before its D3D11 composite or copy, so that D3D11 work follows the stage's.
+- **HDR's deferred composite ends the frame at its own present.** With HDR on, HDR Display runs the present chain suppressed (other
+  mods' Present hooks draw into the UI texture), then composes, then presents. The UI stage used to commit inside the suppressed
+  chain, before HDR output. `Hooks.cpp` now hands HDR Display the frame's end (`frameEnd`: the capture, the UI stage's end point,
+  DCLF's `BeforePresent`, frame pacing, the drain) and the suppressed chain skips it. A held present under HDR now holds, where it
+  used to present after the composite.
+
+### Stayed
+
+- **`Placed` epochs and the anchor part of `AddToFrame`.** EngineCubeClear is reserved by the skeleton and no stage has a step at
+  it, so it still gets an epoch of its own in the host's order (it never runs: its work is the `own epoch` error). Its rank comes
+  from its `Placed` entry. They go when that anchor is unreserved or gets a step.
+- **The late-epoch hook.** `SubmitSegment` runs it after a stage whose steps include a late anchor, which keeps the epoch separator
+  between the post stage's commit and frame generation's interop evaluate in guest.
+- **`RenderGraphRuntime::EpochOf`** is the segment-to-epoch map DCLF and the stages use, not an own-epoch helper.
+- FrameDriver's comment about own epochs taking a build mid-frame (`frame-revision-plan.md` 7b) is left to that step.
+
+### Checks
+
+Background runs on the RX 6600, Dev-Fast, `DXVK_DEBUG=hang`. No run logged an `own epoch` tap error, a replay error ("not
+replayable") or any other frame tap error.
+
+- `guest-quick`, `native-quick`, `native-d3d12-quick` (`final`): passed. Shots against `integ/hard-ports` (`*-ps3`) 1.1 to 1.6 apart.
+- `hdr` in all four modes (`a7b`): passed. The first build (`a7`) failed guest and native Vulkan with a frozen final target after HDR
+  was turned off: real, the ungated `cs.hdr` passes above. The HDR shots show the composite with the HUD and the CS menu.
+- `guest+menu` (`a7b`): passed.
+- `guest+fg` (`a7b`): passed. `presented x2, fg true, active true` after the switch, up to 131 driver presents a second. Shots against
+  `integ/hard-ports`'s own `guest+fg` today (`1119-060033-nfg-guest-fg-a7-baseline`): 0.3 to 1.6 apart, Dragonsreach 15 (eye adaptation).
+  Today's exterior is washed out in both builds; it is not from this change (the plain D3D11 `hdr` run shows it too).
+- The hudless input: a temporary build shot the hudless texture itself (`1119-054812-fga-guest-fg-hudless`). No compass, crosshair
+  or CS menu, also after the load.
+- The clean scene: the harness's `shot` is a scripted capture, which never waits for the clean scene, so no run had used it. The new
+  `shot-ui` test command takes a capture as the menu's button does. The first `shot-ui` of a session registers the copy and uses the
+  D3D11 snapshot; the second used the clean scene (`the copy now reads the clean scene`) in guest, native Vulkan and native D3D12
+  (`*-quick-clean`), and those screenshots have no HUD. Before, the copy was never set up at all: with the engine's targets on the
+  graph kFRAMEBUFFER's slot has no D3D11 texture. It now takes the description from the slot's view.
+
+## Frame generation's presenter and inputs pass (2026-11-19)
+
+Steps 2 and 3 of `plans/native-frame-generation-plan.md`. CS on `org-native/fg-presenter-inputs` from `integ/hard-ports` `e1c469e09`.
+
+- **Presenter.** `FrameGen::DxvkPresenter` (`Features/Upscaling/DxvkPresenter.cpp`) is the DXVK backend of `FramePresenter.h`. It
+  holds DXVK's presenter exports, which left `Streamline.cpp`, the sync present, queue depth and tearing knobs in their measured
+  order, the colour space transition and the torn-down callback. `ActivePresenter()` returns `NativePresenter` in native mode.
+  `FrameGen::Controller` asks for a replacement with `RequestPresentation(method, reason)` and finishes a switch when the presenter's
+  adopted serial reaches its request and the feature loads have settled. The dead fault block inside `Reconcile` is gone.
+- **Inputs pass.** In both graph modes FSR-FG's tags and prepare are the `cs.upscaling.fg-inputs` client of the UI stage's
+  FrameGeneration step. `ORGUpscaling::QueueFrameGenInputs` taps the step again right after the hudless copy, with the prepare in a
+  run slot, and the pass, recorded at execution, records it on the stage's list (DXVK's command buffer in guest) and restores the
+  graph's heaps. It imports kMAIN's depth or its copy, the motion vectors and the graph hudless as legacy interop uses. Plain D3D11
+  keeps the interop ring. `sl.fsr_g` logs a present that finds a frame prepared for another frame ID.
+- **Checks** (RX 6600, background, `DXVK_DEBUG=hang`, stage `fgb`). Baseline from `e1c469e09`: `guest+fg` and `d3d11+fg` (`base`).
+  - `guest+fg` (`new`): passed; the same eight `[FrameGen]` lines and four recreates as `base`; presented x2 (33 "presenting 2"
+    lines against 38 in `base`), up to 147 driver presents a second (`base` 143). The only prepare line is the UI stage pass's.
+    Shots against `base` 0.5 to 2.1 apart, Dragonsreach 5.7 (eye adaptation).
+  - `guest+fg` with `org.epoch_stats=true` (`stats`): passed; every report `0 not replayable`; no tap or replay error.
+  - `d3d11+fg` (`new`): passed; the ring path as in `base` (368 "presenting 2" lines against 391, the known dropouts).
+  - `guest-quick`, `guest+hdr`, `d3d11+hdr`, `guest+menu`, `native-quick` (`new`): passed.
+
+## FSR-FG on native Vulkan (2026-11-19)
+
+Step 6 of `plans/native-frame-generation-plan.md`. CS on `org-native/fg-native-vulkan` from `integ/hard-ports` `7bc9b04b3`, Streamline
+`org-native/fg-native-vulkan`.
+
+- **Loading.** `Streamline::Initialize` loads `kFeatureFSR_G` in native as in guest, and `SetNativeDevice` resolves its functions.
+  BasicRHI's union of the features' requirements reserves 3 graphics queues ("queues: 3 graphics"), and `sl.fsr_g` finds its present
+  and acquire queues through the interposer's `kVulkanTable` in manual hooking.
+- **Replacement.** The controller drives `NativePresenter`; the native branch registers `Streamline::CompleteSwapchainTeardown` as the
+  torn-down step, and a request that names none (HDR's colour space) runs it too. Each on/off is two replacements, as guest's two
+  recreates: the load change, then the wrap once the plugin has its options (45 to 300 ms each on the RX 6600; one FFX create took
+  910 ms). A superseded request does nothing, so an HDR toggle under FSR-FG makes one replacement.
+- **Plugin.** `FSRFrameGenOptions::hostRecreatesSwapchain`: no SUBOPTIMAL trigger, no bootstrap recreate, and a failed wrap fails the
+  create. `FSRFrameGenState::foreignPreparedFrames` counts presents that found another frame's prepare; native fails on any.
+- **Submission order.** The prepare (the UI stage's inputs pass) and the present both run on the submission thread, in frame order, so
+  native makes no render-thread discards. No foreign prepared frame in any run.
+- **Vsync.** Under a presentation layer the present keeps the swap chain's vsync, and the swap chain is made with tearing only when
+  vsync is off. A change is the controller's replacement.
+- **Pacing.** No knob added. The render thread queues a present only after the previous one finished, and FFX's present runs on the
+  submission thread, so the queue holds one frame. `native-fg` renders 46 a second with FSR-FG on and presents 92, as guest (46 / 91).
+- **Checks** (RX 6600, background, `DXVK_DEBUG=hang`, stage `fgd`; the fog's volumetric fog off, as saved).
+  - `native-fg` (`b`, `fg.presentmon`): passed, no device loss; "presenting 2 frame(s)"; `[FGTEST]` 46 rendered and 92 FSR-FG presents
+    a second, PresentMon 90.4 to 91.0 presents a second over the same seconds; passthrough (x1) in the pause menu.
+  - `native-vulkan+fg-hdr` (`b`): passed; x2 in SDR and HDR10, one replacement per HDR change; PresentMon multiplier 1.98
+    (45 rendered). Run `a` failed its live-image check on a cold HDR shader cache (10 fps).
+  - `guest+fg` (`a`): passed; the same eight `[FrameGen]` lines and four recreates as before; PresentMon multiplier 1.94.
+  - `d3d11+fg`, `native-quick`, `native-d3d12-quick`, `guest-quick`, `hdr`, `native-vulkan+hdr` (`a`): passed.
+  - `native-vulkan+fg-fx` (`c`, Post Processing mode for the run): passed; x2 with Physical Lens's image mapping and Camera on
+    and off. Run `a` (ghosts and starburst on) lost the device in `cs.pp.physical-lens.request-plans` before frame generation was on;
+    run `b` crashed turning Physical Lens off (`PostProcessing::MakePipelineFeature` had no Physical Lens case, fixed).
+
+## Frame revisions (2026-11-19)
+
+Step 1 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): the rule and a counted check. CS on `org-native/rev-step1`
+from `integ/hard-ports` `2658b7d3c`; ORG `rev-step1-adoption-observer` on `7c5d080`.
+
+- **Rule R1.** Everything a recording binds (declared versioned textures and buffers, graph structure, programs, prepared constants)
+  changes only at the frame's adoption point. Late-bound data (bindless indices, latches, stand-in declarations, frame values) may
+  change any time.
+- **The adoption point** is `Frame::Driver::OnBegin`. Today its whole body is the point. The end state is
+  `Frame::Revision::AdoptLatest()` there: the frame adopts the newest fully prepared revision whole, or nothing changes.
+- **Vocabulary.** Variable, event, `Setting<T>`, derived variable, dependent, frame revision, closure, prepared, adoption, born
+  cleared: section 1 of the plan.
+- **The check.** `src/RenderGraph/Frame/BoundaryCheck.{h,cpp}`. `Boundary::Scope` marks `OnBegin`. On the thread that opened it, and
+  outside it, the census counts:
+  - late versions: adoptions ORG reports through `VersionedResource::SetAdoptionObserver` (Publish, Adopt, Grow; never
+    `PublishLate`), by resource name and caller tag. A new resource's first version is counted apart as "new resources made late";
+  - late changes: `FrameAnchors` `Register`/`Unregister`/`Refresh`/`Rearm`, `RequestStructuralRebuild`, and any other
+    `RenderGraph::Builds` request;
+  - late attaches: builds attached and staged graphs switched in by `BuildManager`, by epoch and build point.
+  DCLF's `AdoptSnapshot` is tagged `dclf` and counted apart (allowed until step 10a). Counted, not fatal. One
+  `[ORG] boundary:` line per statistics window and one at a test run's exit, development builds only.
+- **ORG test.** `OpenRenderGraphVersionedResourceTests` (WARP): the observer sees Create, Adopt, Grow and Publish, not a pending
+  Make, not `PublishLate`, and nothing once removed. Passed; `OpenRenderGraphPersistentTests` passed.
+  `OpenRenderGraphExternalResourceTests` stops early with an uncaught "resource deadlock would occur", with or without this change.
+
+**Census** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv1`; session totals at exit):
+
+| Run | Late versions | New resources made late | Late changes | Late attaches | DCLF (allowed) | At Begin |
+|---|---|---|---|---|---|---|
+| `guest-quick` (`d`) | 2 (`twin`: the engine's volumetric lighting accumulation and its copy) | 137 | 70 | 0 | 59 | 10 |
+| `native-quick` (`c`) | 0 | 90 | 43 | 0 | 58 | 56 |
+| `native-d3d12-quick` (`c`) | 0 | 90 | 43 | 0 | 56 | 56 |
+| `d3d11+quick` (`b`) | 0 | 0 | 0 | 0 | 0 | 0 |
+| `native-vulkan+resize` (`b`) | 102 * | * | 47 | 0 | 67 | 86 |
+| `guest+resize` (`b`) | 151 * (`twin` 2) | * | 74 | 0 | 68 | 40 |
+| `native-vulkan+menu` (`b`) | 90 * | * | 43 | 0 | 66 | 64 |
+| `latch-census-short` (`b`) | 141 * (`twin` 4) | * | 90 | 0 | 95 | 10 |
+
+\* `b` runs predate the first-version split: their late versions include new resources (one each, mostly). In the native quick
+runs every late version is a new resource (DCLF's buffers, `Engine::3D::VOLUMETRIC_LIGHTING_NOISE`, SSGI's composites).
+
+- **Late changes, top sites:** "frame anchors: one-shot passes ran" (16 to 22 a run), `refresh cs.dyncubemaps`,
+  `refresh cs.screen-space-shadows`, published resources added (SSGI composites, the fog's scattering volumes), imports added
+  (`cs.d3d11.screenshot.framebuffer`, `cs.d3d11.ssgi.noise`), DCLF's graph conditions (8 to 16 in guest), `rearm cs.ssgi.reset`,
+  `rearm cs.skylighting`.
+- **Late attaches** were 0 in every run: builds attach in `OnBegin` in these runs. The frame-end `Poll(Attach::All)` and guest's
+  DCLF build point would count if they attached.
+- **Behaviour.** No change intended. `guest-quick` (`d`), `native-quick`, `native-d3d12-quick`, `d3d11+quick`, both `resize`, `native-vulkan+menu` and
+  `latch-census-short` passed. Every failed run (`guest-quick` and `native-quick` `b`, `guest-quick` `c`: "never-loaded") logged
+  "LandscapeDefault EDID texture set from TerrainHelper.esp not found": the shared profile had TerrainHelper.esp switched off by
+  then. Each passing run had it on. Shots against the `nfg` stage of the same base: `native-quick` mean channel difference 1.23,
+  `guest-quick` 2.5 to 2.7 (eye adaptation; the image matches).
+
+### Step 2: named texture versions (2026-11-19)
+
+Step 2 of the plan: a CS stage can be recorded against texture versions that are not current yet. CS on `org-native/rev-step2`
+from `integ/hard-ports` `2fcb06441`; OMS `rev-step2-named-versions` on `0185120`. ORG unchanged (step 3 runs in parallel).
+
+- **OMS.** `NamedVersions::Textures` makes a set naming texture versions, pending ones included. `FindTexture` answers them,
+  `AdoptAll` adopts them, textures are held weakly. `ComposedVersions` answers from up to four sets, first answer wins. Serials of
+  both come from one sequence. Misses count only the set's own kind, so DCLF's named parity check is not fed CS texture lookups.
+- **CS.** `FrameAnchors.cpp`: `SegmentHostData::versions` is returned for `typeid(org::IResourceVersions)`. `RequestDeclared` takes
+  `RecordVersions { versions, serial }`; the serial is part of the recording cache key. Nothing passes versions yet.
+- **Tests.** `ORGNamedVersionsTests` (WARP): find, miss, serials, errors, `AdoptAll` with textures and an expired one, selection
+  through host data (`VersionedResource::SelectVersion`, pending version bound, then current after adoption), composition order.
+  Passed. `ORGModuleServicesTests`, `ORGGrowthTests`, `ORGBufferPoolTests`, `ORGAsyncPrimitivesTests`, `ORGAsyncRuntimeTests`
+  passed. The texture case in ORG's recording test is left for after step 3 (plan section 9, "Decided by the agent (step 2)").
+
+**Runs** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv2`; session totals at exit):
+
+| Run | Result | Late versions | New resources made late | Late changes | Late attaches | DCLF (allowed) | At Begin |
+|---|---|---|---|---|---|---|---|
+| `guest-quick` (`b`) | passed | 2 (`twin`) | 137 | 70 | 0 | 61 | 10 |
+| `native-quick` (`b`) | passed | 0 | 90 | 43 | 0 | 60 | 56 |
+| `d3d11+quick` (`b`) | passed | 0 | 0 | 0 | 0 | 0 | 0 |
+| `native-d3d12-quick` (`c`) | passed | 0 | 90 | 43 | 0 | 57 | 56 |
+
+- Same as step 1 except DCLF's allowed adoptions (56 to 59 then, 57 to 61 now), which follow load timing.
+- No `NAMED PARITY` line in any run.
+- Shots against step 1's `rv1` runs: `native-quick` 0.83 to 1.0 mean channel difference, `guest-quick` 1.2 to 1.4,
+  `native-d3d12-quick` 1.1 to 1.9. `d3d11+quick` varies 35 to 109 between any two runs today (exposure; the scene matches) and
+  does not run this code.
+- Cold caches: `guest-quick` `a` and `native-d3d12-quick` `b` stopped while compiling shaders for the new stage (the D3D12 one in a
+  DCLF portal program compile). Each passed after one warm run. Launches: 8.
+
+## Frame revisions, step 3 (2026-11-19)
+
+Step 3 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): atomic multi-epoch staged attach and the closure query. CS on
+`org-native/rev-step3` from `integ/hard-ports` `2fcb06441`; ORG `rev-step3-staged-attach` (`2ca5b4c`, `0f2efbf`) on `2b22711`.
+
+- **ORG.** `GraphHost::AttachStagedEpochGraphs(epochs)` checks every epoch, then swaps all staged graphs in while holding the host's
+  thread once. One failed check refuses the set and drops no staged graph. `GraphHost::EpochsDeclaring(slots)` (any thread) gives the
+  epochs whose attached or staged graph declares a versioned resource, from `RenderGraph::PersistentDeclaredVersions` (set at a
+  graph's first build, refreshed by its preparations). Refusals carry `AttachRefusal` and are counted over the host's life
+  (`AttachStatsTotal`). The single `AttachStagedEpochGraph` now names an epoch change as such, not as a host change.
+- **CS.** No caller of the new functions yet (step 4). `BuildManager` reports refusals at staging, attach and switch to the
+  boundary census: `build refusals N (top: site: reason x n)`.
+- **ORG tests.** New step 5 of `OpenRenderGraphPersistentVulkanHostTests built` (RX 6600): two staged epochs attach together; a set
+  with one epoch's extensions changed is refused naming epoch 1 and both stay staged; an empty set, a duplicated one and one with
+  nothing staged; `EpochsDeclaring` finds a versioned buffer only epoch 1's new pass declares, in its staged graph and then its
+  attached one, and in no other epoch. Every other mode of that executable passed, and `OpenRenderGraphPersistentTests` and
+  `OpenRenderGraphVersionedResourceTests` passed. Not from this change: `leases` fails with "Synchronous frame capacity exhausted" and
+  then hangs, on `2b22711` too; `OpenRenderGraphExternalResourceTests` exits early (127) as step 1 found.
+
+**Census** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv3`, label `b` after a warm-up `w`; session totals at exit):
+
+| Run | Late versions | New resources made late | Late changes | Late attaches | DCLF (allowed) | At Begin | Build refusals |
+|---|---|---|---|---|---|---|---|
+| `guest-quick` | 2 (`twin`) | 137 | 70 | 0 | 60 | 10 | 0 |
+| `native-quick` | 0 | 90 | 43 | 0 | 60 | 56 | 0 |
+| `native-d3d12-quick` | 0 | 90 | 43 | 0 | 57 | 56 | 0 |
+| `d3d11+quick` | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+Equal to step 1's numbers except DCLF's allowed adoptions (one to three more, which vary per run). No build was refused in these
+runs (plan Q9). Shots against step 1's runs (`rv1`): mean channel difference 1.40 (guest), 1.20 (native), 1.31 (native D3D12), 5.33
+(D3D11: the same frame, a little darker overall, eye adaptation). The first `a` runs failed on the new stage's cold shader cache
+(guest crashed while compiling, native timed out compiling, native D3D12 timed out loading); the warm-up passed all four.
+Launches: 12.
+
+## Frame revisions, step 4 (2026-11-19)
+
+Step 4 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): the prepared set, behind today's API. CS on
+`org-native/rev-step4` from `integ/hard-ports` `7707964b9`; ORG `rev-step4` (`bfd13bb`) on `0f2efbf`; OMS `rev-step4` (`d2ec1c6`) on
+`9b85a9f`. Decisions to confirm are in the plan's section 9, "Decided by the agent (step 4)".
+
+- **4a (ORG, OMS).** ORG's copy-queue uploader zero-fills a fresh texture (`QueueTrackedStreamingTextureZeroFill`, every mip and
+  slice from one 4 MB zero buffer, tracked completion). OMS `MakeTextureVersions` makes pending versions (`MakeImage`, caller-made or
+  from an extent), queues the fills, and gives a texture `NamedVersions` and a `RevisionFragment` that settles on the fills' tickets.
+- **4b (CS twins).** `Resource::PlanPrepare` (render thread) and `Prepare` (any thread) make a twin's next version, memory included,
+  off the render thread. `AdoptPrepared` makes the D3D11 export at adoption. Exported versions take the previous version's home
+  layout and are zeroed by their wrap.
+- **4c/4d (coordinator, adoption).** `Frame/Revision.{h,cpp}`. `RequestSize` records a wish through `SetSizeWishHook`. At Begin the
+  wishes go to the lane (a `SerializedTaskPump` on DCLF's scene executor): versions made, closure from `EpochsDeclaring`. Member
+  stages record every scheduled slot against the pending versions (`ComposedVersions`). `AdoptLatest`, first in `OnBegin`, adopts a
+  complete revision whole: `AdoptAll`, `AdoptPrepared`, `NoteNewVersions`, staged attaches, `InstallRevisionSchedules`.
+- **4e (builds, buffers).** Staged builds of CS stages join revisions and attach with `AttachStagedEpochGraphs` (refusal fatal).
+  `Schedule`'s staged branch and its starvation counter are gone; the rule lives in the coordinator. Physical Lens's ghost paths are a
+  buffer fragment; its per-frame ticket poll and `AtNextBegin` are gone.
+- **Census.** `[ORG] frame revision: prepared, adopted, superseded, members, recordings, builds, buffers, frames from first wish to
+  adoption`. The boundary line adds "version lags outside revisions" by slot.
+
+**Runs** (RX 6600, background, `DXVK_DEBUG=hang`; stage `rv4c` for 4c/4d, `rv4e` for the merged tip). Every run passed with 0 stale
+recordings, 0 starvation errors and 0 build refusals. No late version came from a `RequestSize` site; guest's 2 to 4 are the engine's
+volumetric lighting accumulation pair, as before step 4.
+
+| Run (stage `rv4e`) | Revisions prepared/adopted/superseded | Late versions | Notes |
+|---|---|---|---|
+| `native-vulkan+resize` | 14/14/0 | 0 | 39 builds; first input to adoption p50/p95/max 5/7/10 frames |
+| `native-d3d12+resize` | 12/12/0 | 0 | 6/15/21 frames |
+| `guest+resize` | 13/13/0 | 2 | |
+| `native-vulkan+resize-drag` | 20/20/0 | 0 | last adopted size is the drag's last value |
+| `guest+resize-drag` | 18/18/0 | 2 | |
+| `menu`, `native-vulkan+menu-resize` | 9/9/0, 10 adopted | 2, 0 | |
+| `native-d3d12+hdr` | 12/12/0 | 0 | post-stage builds adopted with their revisions |
+| `latch-census-short` | 20/20/0 | 4 | |
+| lens ghosts, post chain on (guest, native Vulkan) | 13, 11 adopted | | 3 buffer revisions each; no "not replayable" error |
+| `guest-quick`, `native-quick`, `d3d11+quick`, `native-d3d12-quick` | 9, 8, none, 7 adopted | | standard set |
+
+- Each size change and staged build was adopted in one frame for all its members (pre-main, deferred and water, sun).
+- Q2: the export at adoption costs 0.007 to 0.053 ms per twin in guest, but 19 to 102 ms in native (Dev-Fast), in native's
+  `WrapTexture` (`Initialize` waits, then a clear). Today's `Resize` paid the same; it is the step's main open item.
+- `CS_ORG_GRAPHRES_SELFTEST=1`: the prepared part passes in guest. Native stops in the self-test's old part (mismatch, same on the
+  base stage).
+- Version lags outside revisions: `TerrainShadows::ShadowHeight` and `ImGui::Texture N`, both intermediates for step 6.
+
+## Frame revisions, step 5 (2026-11-19)
+
+Step 5 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): variables and event sources, with step 9 of
+[plans/native-frame-generation-plan.md](plans/native-frame-generation-plan.md). CS on `org-native/rev-step5` from `integ/hard-ports`
+`f3f292c80`; OMS `rev-step5` (`d48c924`) on `d2ec1c6`. Decisions to confirm are in the revision plan's section 9, "Decided by the agent
+(step 5)", and the frame generation plan's table, rows 43 to 50.
+
+- **5a (OMS).** `Variables.h`: a lock-free `VariableSet` (one atomic entry per variable holds value and serial together), derived
+  variables evaluated at `Take`, `RequireSizes` for constants-only variables. Unit tests in `tests/Variables/`.
+- **5b (frame-wide variables).** `Frame/Variables.{h,cpp}`: `DisplaySize`, `RenderSize` and `DynamicRatios` (constants only),
+  `UpscaleMethod`, `HdrEnabled`, `HdrOutputTarget`, `EngineShadowMap`, `ReflectionCubemap`, `UpscalerOptions`, `PresentationConfig`,
+  `FeatureSettings.<feature>` and `Setting.<name>`. Each change logs `[ORG] variable <name>: <old> -> <new> (<writer>)`; the census
+  adds `[ORG] variables: events ...`. The revision lane carries the snapshot it started with; a variables-only revision is adopted in
+  the Begin that starts it.
+- **5c (settings events).** Features project their size and shape fields (`ProjectSizeSettings`); every writer goes through
+  `ApplySettings`/`ApplyDefaults` or calls `SettingsWritten`. The missed-writer check (`CS_ORG_MISSED_WRITER_CHECK`, on by default in
+  development builds) runs at `OnBegin` and is a tap error. Cleanup A7 removed the projection, `SettingsWritten`, the wrappers and
+  `SettingsWriteBatch` once every shaping field was a `CS::Setting<T>`. The check now covers bound settings only.
+- **5d (`CS::Setting<T>`).** `Utils/Setting.{h,cpp}`, JSON serializer, widget overloads, the catalog generator and the scene widget
+  interceptor's `RaiseAt`. No real field is ported; the pilot is in the graph resource self-test.
+- **cs-test.** The `setting` step takes nested keys (`PostProcessing.CODBloom.MipBlendFactor[3]=0.2`).
+- **Frame generation step 9.** `PresentationConfig` is a variable. A revision that changes it waits for an input producer
+  (`Revision::RegisterInputProducer`): the presenter's replacement for that config. Native takes the presentation at adoption
+  (`Native::AdoptPresentation`, which replaced `OnFrameBegin`). `hdrEnabledForFrame` is the adopted `HdrEnabled`, and the colour space
+  follows it on the adopting frame.
+
+**Runs** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv5`, the missed-writer check on in every run). About 22 launches.
+
+| Run | Result | Notes |
+|---|---|---|
+| `guest-quick`, `native-quick`, `native-d3d12-quick`, `d3d11+quick` | passed | 8 events each, all at start-up; 0 missed writers |
+| `native-vulkan+resize`, `native-d3d12+resize`, `guest+resize` | passed | 21 to 22 revisions, 0 superseded; each `FeatureSettings.ViewAtmosphere` event followed by one twin revision |
+| `guest+resize-drag` | passed | 30 `ViewAtmosphere` events for 30 steps |
+| `native-vulkan+upscalers` | passed | one `UpscaleMethod` event and one adoption per change (FSR to XeSS, XeSS to TAA; DLSS falls back to FSR on AMD) |
+| `native-d3d12+hdr`, `guest+hdr` | passed | one `HdrEnabled` event each way, each adopted with `PresentationConfig`; native replaces the swap chain (requests 2 and 3) before the adoption |
+| `menu` | passed | 0 events after load, menu open and font changes included |
+| `latch-census-short` | passed | 8 events, all at start-up |
+| `native-vulkan+fg-hdr` | passed | 2x (45 rendered, 90 FSR-FG presents a second); HDR10 and back adopted through the revision |
+| `native-d3d12-fg` | passed | 2x (53 rendered, 106 presents) |
+| `fg` (guest) | passed | 2x (76 rendered, 148 presents) |
+
+- **Writers the check found.** The first `hdr` runs stopped on `HDRDisplay.enableHDR changed with no settings event`: cs-test's `hdr`
+  command, and the native menu's HDR and SSGI rows, wrote settings directly. All three now raise.
+- **Not explained.** Two runs (`guest-quick`, `native-d3d12+hdr`), each the first launch after a staged DLL change, never left the
+  loading screen: the main thread logged nothing after `load-start` while the loading screen kept rendering. Their reruns passed, and
+  so did a run right after a restage of the same DLL. No dump was taken (the stall watcher missed both). Other stages had the same
+  outcome earlier the same day (`rv1`, 6 runs).
+- `native-vulkan+fg-hdr` hung once on a cold shader store (the render thread waiting on a DCLF grass program's compile). It passed after
+  a warm-up run.
+
+## Frame revisions, step 6.1: Exponential Height Fog (2026-11-19)
+
+Step 6.1 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md), with the CS declaration API (`Frame/Declare.{h,cpp}`).
+CS on `org-native/rev-step6-1` from `integ/hard-ports` `925add6a1`; no submodule changes. The API's shape and the decisions to
+confirm are in the plan (step 6's "As built (6.1)" and section 9, "Decided by the agent (step 6.1)").
+
+- **Declarations.** Textures and clients are declared on frame variables and `CS::Setting` fields, and evaluated when a revision
+  starts. A new extent is a version made on the lane; a new client key registers the client and the revision waits for the stage
+  builds that hold it. Setting variables carry their value.
+- **Exponential Height Fog.** Its twelve volumes are declared at Setup on the display size and the grid settings (one texel while
+  off, published once), its client on its toggles. `FollowSizes`, `ResetHistories`, the per-frame release, the Prepass
+  `Build`/`Register` and debug mode 10 are gone. The settings it and ViewAtmosphere size by are `CS::Setting` (GPU structs split).
+
+**Runs** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv61`, missed-writer check on). 16 launches, none stuck at loading.
+
+| Run | Result | Notes |
+|---|---|---|
+| `native-vulkan+resize`, `native-d3d12+resize`, `guest+resize` | passed | 0 `stale recording`, 0 `structural rebuild`, 0 missed writers; each grid change one revision with its twins (e.g. `120x68x64 -> 120x68x96`), members pre-main, deferred+water, sun |
+| `native-vulkan+resize` vs `nfg` | shots match | fog, grid, fsr 1.1 to 1.3 mean diff; taa 4.1 (tree sway, checked by eye) |
+| `guest+fog`, `native-vulkan+fog`, `native-d3d12+fog` | passed | native vs `nfg` 0.8 to 1.1; guest `nfg` still shows the non-finite kMAIN defect (black image), `rv61` is clean and looks like native |
+| `guest-quick`, `native-quick`, `native-d3d12-quick`, `d3d11+quick`, `latch-census-short` | passed | no tap errors; the boundary census names no fog site |
+
+- On first enable the client lands one revision after the volumes (it needs one Prepass's inputs), about four frames; volumetric fog is
+  off in those frames, not black.
+
+## Frame revisions, step 7c: shader reload (2026-11-19)
+
+Step 7c of [plans/frame-revision-plan.md](plans/frame-revision-plan.md). CS on `org-native/rev-step7c` from `integ/hard-ports`
+`cec078238`; no submodule changes. Code only, not built or run yet.
+
+- **The event.** Once the pipeline registry stages a reload's payloads, `ServicePipelineReload` writes `Vars::ShaderGeneration`.
+  The revision that carries it builds every graph at its adoption, after its staged attach (`SwapStagedPipelines`). The
+  registry's extension publishes at that build. Nothing is built for a reload at the frame-end or Main::Draw poll any more.
+- **Why the swap is still a render-thread build (Q5).** CS programs read their slot when a pass records and keep no reference to
+  the payload. A revision's recordings are made before it is adopted, so a slot swap at adoption would leave them on the old
+  pipelines, and `Publish` frees a replaced payload once the GPU passes `SubmissionsMade()` while a kept recording made before
+  may still replay. `AttachStagedEpochGraphs` holds the host's thread but has no hook to publish inside the hold. So the swap
+  rebuilds every graph, as before, and no recording made before it survives. A slot-only swap needs revision-named pipelines
+  (OMS staged sets as host data, an ORG recording that reads its host data or retains its payloads, programs that bind through
+  it).
+- **`DeclareProgram`.** Its builds are registry entries, so every kept key reloads in place. No generation key.
+- **Test.** `shader-reload` (new): a forced reload of every pipeline, then an unchanged one-file reload, a shot before and after
+  each.
+
+## Frame revisions, step 7d: the boundary check is fatal (2026-11-19)
+
+Step 7d of [plans/frame-revision-plan.md](plans/frame-revision-plan.md). CS on `org-native/rev-step7d` from `integ/hard-ports`
+`843faa34a`; no submodule changes. Code only, not built or run yet.
+
+- **Fatal.** A version adopted or a build attached on the render thread outside the frame's adoption point is a tap error,
+  `outside the adoption point` (`TapError::OutsideAdoption`). It stops the game in development builds, as the other tap errors.
+- **Named exceptions.** `Boundary::Exception` in `Frame/BoundaryCheck.h`, one table in `BoundaryCheck.cpp`. A site opens
+  `Boundary::Allow` around its adoption or attach:
+  - `dclf`, until step 10a: DCLF's snapshot adoption, and the attach of DCLF's own epochs at any build point;
+  - `engine imports`, until step 9: engine targets (`EngineTexture::Adopt`), mid-frame imports (`FrameAnchors.cpp:JoinSlot`)
+    and the native back buffer's per-present version.
+- **Still counted, not fatal:** a new resource's first version, late changes (until 10c), build refusals, version lags.
+- **The census line** now reads `allowed exceptions: dclf (until step 10a) versions N attaches M, engine imports (until step 9)
+  versions N attaches M` in place of `allowed (dclf) adoptions N`.
+- **Before the change** (runs `*-integ-6b3*`, `*-integ-6b4*`): no late attach in any run. The only late versions were guest's
+  `Engine::3D::VOLUMETRIC_LIGHTING_ACCUMULATION` and its copy (engine targets, 2 to 4 per run), now under `engine imports`.

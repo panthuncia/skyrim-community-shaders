@@ -1,23 +1,15 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
-#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "RenderGraph/BuildManager.h"
 
 #include <atomic>
-#include <mutex>
-#include <thread>
 
 namespace DCLF::Draws
 {
 	namespace
 	{
-		thread_local const BuildScope* t_scope = nullptr;
-		thread_local const BuildState* t_state = nullptr;
-
-		std::mutex sourceMutex;
-		std::function<std::shared_ptr<const BuildState>()> source;  // sourceMutex
-		std::atomic<std::thread::id> sourceThread{};  // the render thread
-
 		std::atomic<std::shared_ptr<const BuildState>> attached;
 		std::atomic<std::uint64_t> attachedSerial{ 0 };
+		std::atomic<std::uint64_t> builtSerial{ 0 };
 	}
 
 	ShadowSlotBuffers MakeShadowSlotBuffers(const ShadowResources& a_shadow)
@@ -48,60 +40,22 @@ namespace DCLF::Draws
 		return nullptr;
 	}
 
-	BuildScope::BuildScope(std::shared_ptr<const BuildState> a_state) :
-		state(std::move(a_state)), previous(t_scope)
+	const GraphConditions& BuildState::Conditions() const
 	{
-		t_scope = this;
-		t_state = state.get();
-	}
-
-	BuildScope::~BuildScope()
-	{
-		t_scope = previous;
-		t_state = previous ? previous->state.get() : nullptr;
-	}
-
-	const BuildState* ScopedBuildState()
-	{
-		return t_state;
-	}
-
-	void SetBuildStateSource(std::function<std::shared_ptr<const BuildState>()> a_source)
-	{
-		std::scoped_lock lock(sourceMutex);
-		source = std::move(a_source);
-		sourceThread.store(std::this_thread::get_id(), std::memory_order_release);
+		static const GraphConditions kDefaults;
+		return conditions ? *conditions : kDefaults;
 	}
 
 	std::shared_ptr<const BuildState> BuildingState(const char* a_who)
 	{
-		if (t_scope)
-			return t_scope->State();
-		// No scope. On the render thread its newest value is consistent. Anywhere else it is a defect, since the render thread
-		// may be replacing the value.
-		const bool renderThread = std::this_thread::get_id() == sourceThread.load(std::memory_order_acquire);
-		static std::atomic<std::uint32_t> logged{ 0 };
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
-			if (renderThread)
-				logger::info(
-					"[DCLF] {}: a graph build without a build scope on the render thread (the host's first build of an epoch); it uses the "
-					"render thread's newest build state",
-					a_who);
-			else
-				logger::error(
-					"[DCLF] {}: a graph build without a build scope off the render thread; it uses the render thread's newest build "
-					"state, which may be changing",
-					a_who);
+		// The build manager took this value for the build on the render thread. Only DCLF gives the manager its input.
+		auto state = std::static_pointer_cast<const BuildState>(RenderGraph::Builds::Input());
+		if (!state) {
+			static std::atomic<std::uint32_t> logged{ 0 };
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 20)
+				logger::warn("[DCLF] {}: made outside a graph build, or before DCLF gave the build manager its build state; it has no passes", a_who);
 		}
-		std::function<std::shared_ptr<const BuildState>()> current;
-		{
-			std::scoped_lock lock(sourceMutex);
-			current = source;
-		}
-		if (renderThread && current)
-			return current();
-		// The source reads the render thread's state, so off that thread the attached value is the closest.
-		return AttachedBuildState();
+		return state;
 	}
 
 	void PublishAttachedBuildState(std::shared_ptr<const BuildState> a_state)
@@ -126,9 +80,13 @@ namespace DCLF::Draws
 		return attachedSerial.load(std::memory_order_acquire);
 	}
 
-	bool AsyncGraphBuilds()
+	void PublishBuiltBuildState(std::uint64_t a_serial)
 	{
-		static const bool on = SwitchOnUnlessZero(Switch::AsyncGraphBuilds);
-		return on;
+		builtSerial.store(a_serial, std::memory_order_release);
+	}
+
+	std::uint64_t BuiltBuildSerial()
+	{
+		return builtSerial.load(std::memory_order_acquire);
 	}
 }

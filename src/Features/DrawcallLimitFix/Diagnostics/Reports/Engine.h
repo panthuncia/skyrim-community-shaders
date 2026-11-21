@@ -16,6 +16,4 @@ namespace DCLF::Reports
 	std::string EngineReadWindowLine();
 	/** @brief Engine releases on DCLF's threads. Empty while not installed. */
 	std::string ReleaseGuardLine();
-	/** @brief The animation gate against DCLF's prediction, newline-terminated. Empty without the switch. */
-	std::string AnimRateLine();
 }

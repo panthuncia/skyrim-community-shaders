@@ -10,6 +10,7 @@
 #include "Features/HDRDisplay.h"
 #include "Features/LinearLighting.h"
 #include "Features/PostProcessing.h"
+#include "Features/PostProcessing/ORGPostProcessing.h"
 #include "OpenDRTIo.h"
 
 #include <DDSTextureLoader.h>
@@ -651,11 +652,19 @@ void ColorGrading::DrawSettings()
 	}
 
 	ImGui::Spacing();
-	if (Util::LabeledButton("##SaveLutImages", Icons::TI(MenuIcons::kSave), T(TKEY("save_lut_and_output_image"), "Save LUT and Output Image"))) {
-		saveImagesFlag = true;
+	// The export captures the D3D11 textures. On the render graph they are the graph's, so it is not offered.
+	const bool onGraph = ORGPostProcessing::Get().IsActive();
+	{
+		auto _ = Util::DisableGuard(onGraph);
+		if (Util::LabeledButton("##SaveLutImages", Icons::TI(MenuIcons::kSave), T(TKEY("save_lut_and_output_image"), "Save LUT and Output Image")))
+			saveImagesFlag = !onGraph;
 	}
-	if (auto _tt = Util::HoverTooltipWrapper())
-		ImGui::Text(T(TKEY("output_saved_to"), "Output will be saved to: %s"), outputPath.c_str());
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		if (onGraph)
+			ImGui::TextUnformatted(T(TKEY("save_not_on_graph"), "Not available while Post Processing runs on the render graph."));
+		else
+			ImGui::Text(T(TKEY("output_saved_to"), "Output will be saved to: %s"), outputPath.c_str());
+	}
 }
 
 void ColorGrading::RestoreDefaultSettings()

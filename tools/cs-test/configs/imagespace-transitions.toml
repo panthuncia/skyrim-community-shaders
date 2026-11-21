@@ -1,0 +1,68 @@
+# ImageSpace's step groups across interior and exterior transitions, each with a loading screen (cleanup plan B21, A4, A2):
+# Whiterun, Dragonsreach, Whiterun again, a shot after each settles, exit. Every ImageSpace draw is matched against the step build
+# the frame runs (Frame::Held), so a load's new SAO form, fog and luminance chain must lag, never fail.
+# The log must show no "frame tap error" (a NotInDescription or NoPass from ImageSpace stops a development build), and
+# "[ORG] ImageSpace: the engine's shape changed" only at Setup, the first Begins and real changes, not every frame.
+# Compose it: guest+imagespace-transitions, native-vulkan+imagespace-transitions.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 200
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "exterior"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "interior"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "exterior-again"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["exterior", "interior", "exterior-again"]
+no_log = ["frame tap error"]

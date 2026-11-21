@@ -2,6 +2,8 @@
 
 #include "Internal.h"
 
+#include "RenderGraph/Frame/FrameDriver.h"
+
 namespace DCLF::Scene
 {
 	std::uint32_t Coordinator::AllocateGeometrySlot()
@@ -109,13 +111,16 @@ namespace DCLF::Scene
 				what = "pipeline without a template";
 			if (!what)
 				continue;
-			if (stats.slotViolations++ == 0) {
+			++stats.slotViolations;
+			{
+				// A dangling slot is a defect: fatal in development builds. Release counts it and repairs the record below.
 				const auto* geometry = tables.objectGeometry[o];
-				logger::error("[DCLF] slot check: object {} '{}' {} (geometry {} written {}, pipeline {} used {}, material {} used {}, member {}, frame {})",
-					o, geometry && geometry->name.c_str() ? geometry->name.c_str() : "?", what,
-					object.geometryIndex, object.geometryIndex < tables.geometryLastUsed.size() ? tables.geometryLastUsed[object.geometryIndex] : ~0u,
-					object.pipelineIndex, tables.PipelineUsed(object.pipelineIndex), object.materialIndex, tables.MaterialUsed(object.materialIndex),
-					IsResidentSlot(static_cast<std::uint32_t>(o)), sceneFrame);
+				::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::SceneMismatch, ::RenderGraph::Frame::SegmentId::Count,
+					fmt::format("slot check: object {} '{}' {} (geometry {} written {}, pipeline {} used {}, material {} used {}, member {}, scene frame {})", o,
+						geometry && geometry->name.c_str() ? geometry->name.c_str() : "?", what, object.geometryIndex,
+						object.geometryIndex < tables.geometryLastUsed.size() ? tables.geometryLastUsed[object.geometryIndex] : ~0u, object.pipelineIndex,
+						tables.PipelineUsed(object.pipelineIndex), object.materialIndex, tables.MaterialUsed(object.materialIndex),
+						IsResidentSlot(static_cast<std::uint32_t>(o)), sceneFrame));
 			}
 			// Nothing downstream may draw from slots no member holds. The next delta walk writes it again.
 			pendingEvaluation.push_back(tables.objectGeometry[o]);
@@ -135,8 +140,7 @@ namespace DCLF::Scene
 		}
 		geometryIndex.erase(tables.geometrySlotKey[a_slot]);
 		tables.geometrySlotKey[a_slot] = nullptr;
-		if (!denseWalk)
-			relocatedGeometrySlots.erase(a_slot);
+		relocatedGeometrySlots.erase(a_slot);
 		// The leases outlive the frames in flight.
 		auto& import = tables.geometryImports[a_slot];
 		for (auto* owner : { &import.vertexOwner, &import.indexOwner })
@@ -285,7 +289,6 @@ namespace DCLF::Scene
 			tables.Retire(Tables::kRetiredPipelineLookup, a_slot);
 		});
 		freed += tables.materialSlots.DrainUnreferenced([&](std::uint32_t a_slot) {
-			Diagnostics::Notify(Diagnostics::MaterialSlotDrained{ *this, a_slot });
 			ClearMaterialSlot(a_slot);
 			++stats.materialCacheEvicted;
 			if (a_slot < materialMember.size() && std::exchange(materialMember[a_slot], 0))
@@ -298,14 +301,6 @@ namespace DCLF::Scene
 
 	std::uint32_t Coordinator::AcquireObjectSlot(Tracked& a_tracked, RE::BSGeometry* a_geometry)
 	{
-		if (denseWalk) {
-			const auto slot = static_cast<std::uint32_t>(tables.objects.size());
-			tables.GrowObjects(std::size_t(slot) + 1);
-			tables.objectGeometry[slot] = a_geometry;
-			tables.objectIdentity[slot] = a_tracked.identity;
-			tables.objectGroup[slot] = a_tracked.groupIdentity;
-			return slot;
-		}
 		if (a_tracked.slot != kNoObjectSlot && a_tracked.slot < tables.objectGeometry.size() && tables.objectGeometry[a_tracked.slot] == a_geometry &&
 			tables.objectIdentity[a_tracked.slot] == a_tracked.identity && tables.objectGroup[a_tracked.slot] == a_tracked.groupIdentity)
 			return a_tracked.slot;
@@ -326,14 +321,6 @@ namespace DCLF::Scene
 
 	std::uint32_t Coordinator::AcquireLayerSlot(Tracked& a_tracked, RE::BSGeometry* a_geometry, std::uint32_t a_base)
 	{
-		if (denseWalk) {
-			const auto slot = static_cast<std::uint32_t>(tables.objects.size());
-			tables.GrowObjects(std::size_t(slot) + 1);
-			tables.objectGeometry[slot] = a_geometry;
-			tables.objectIdentity[slot] = a_tracked.identity;
-			tables.objectGroup[slot] = a_tracked.groupIdentity;
-			return slot;
-		}
 		const std::uint32_t held = a_tracked.layerSlot;
 		if (held != kNoObjectSlot && held < tables.objectGeometry.size() && tables.objectGeometry[held] == a_geometry && tables.layerBase[held] == a_base &&
 			tables.objectIdentity[held] == a_tracked.identity && tables.objectGroup[held] == a_tracked.groupIdentity)
@@ -415,7 +402,6 @@ namespace DCLF::Scene
 				--(veto == Api::kVetoHold ? vetoHeld : vetoObserved);
 			sceneIdentity.Detach(a_geometry);
 			entryRanges.erase(a_geometry);
-			NoteEngineCaster(a_geometry, Ineligible::None);
 			HandBack(std::move(it->second.geometry));
 			HandBack(std::move(it->second.property));
 			HandBack(std::move(it->second.layerProperty));
@@ -431,10 +417,6 @@ namespace DCLF::Scene
 		// Consumers binary-search these lists.
 		for (auto& members : tables.classMembers)
 			std::sort(members.objects.begin(), members.objects.end());
-		if (denseWalk) {
-			tables.liveObjects = static_cast<std::uint32_t>(tables.objects.size());
-			return;
-		}
 		// A slot this walk did not write has no record this frame, so it is freed. The pointer is only a key and may already be gone.
 		for (std::uint32_t slot = 0; slot < tables.objects.size(); ++slot) {
 			auto* geometry = tables.objectGeometry[slot];

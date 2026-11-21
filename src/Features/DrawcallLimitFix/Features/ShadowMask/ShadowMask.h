@@ -2,7 +2,7 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Shadow mask (CS_ORG_SHADOW_MASK): the render graph draws the engine's shadow mask passes in the engine's place.
+// Shadow mask, in graph mode: the render graph draws the engine's shadow mask passes in the engine's place.
 // Each shadow-casting light is one BSUtilityShader screen-quad pass into kSHADOW_MASK. The world's run at Main::Draw (AE 107141,
 // SE 100423) and a menu scene's at UI3DSceneManager::Render (AE 52728, SE 51856). Details are in docs/development/p5/shadow-mask.md.
 // The engine's CPU code runs unchanged. Its function runs with DrawTriShape latched (ShadowMaskCapture.cpp), and an ORG pass at
@@ -105,19 +105,19 @@ namespace DCLF::Features::ShadowMask
 	{
 		View view = View::World;
 		std::vector<Draw> draws;
-		std::uint64_t revision = 0;  // what the recording depends on (ShadowMaskDraws.cpp, RevisionOf)
+		std::uint64_t revision = 0;  // what the recording depends on (ShadowMaskDraws.cpp, Run::Hash)
 		Family::Owners owners;       // the textures' imports and the buffers' leases
+
+		/** @brief What the recording depends on: everything but the latched values and counts (ShadowMaskDraws.cpp). */
+		std::uint64_t Hash() const;
 	};
 
 	/** @brief The view's name for logs and client ids. */
 	const char* NameOf(View a_view);
 
-	/** @brief Whether the graph takes a_view's batches. CS_ORG_SHADOW_MASK_VIEWS can keep one view on the engine. Read once. */
-	bool TakesView(View a_view);
-
 	Api::Feature Feature();
 
-	/** @brief Whether CS_ORG_SHADOW_MASK=1 turned the family on (read at install). */
+	/** @brief Whether the family is on, which is graph mode (read at install). */
 	bool Enabled();
 
 	void InstallHooks();
@@ -127,8 +127,6 @@ namespace DCLF::Features::ShadowMask
 	{
 		/** @brief Whether the anchor and runtime are up. False for good once a client failed. */
 		bool Available();
-		/** @brief Reserves the EngineDraws anchor. Must run before the render graph initializes. */
-		void Reserve();
 		/** @brief Makes both views' clients and queues their programs. Main thread. False while the graph has no host. */
 		bool Setup();
 		/** @brief Whether a_view's batch is taken now. Its client follows kSHADOW_MASK to a new slot after a format change. */

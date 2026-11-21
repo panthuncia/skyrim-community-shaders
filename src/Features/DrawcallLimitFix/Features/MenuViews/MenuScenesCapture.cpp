@@ -40,9 +40,9 @@ namespace DCLF::Features::MenuViews::Scenes
 		constexpr std::array<std::int32_t, 4> kMenuTargets{ kMainTarget, kMotionVectorTarget, kNormalTaaMaskTarget, kNormalTaaMaskSwapTarget };
 
 		/** @brief The inherent refusals, each logged once per reason. */
-		Util::ReasonLog& Refusals()
+		Family::RefusalLog& Refusals()
 		{
-			static Util::ReasonLog log("[DCLF] menu scenes: the engine draws", spdlog::level::warn);
+			static Family::RefusalLog log("[DCLF] menu scenes: the engine draws");
 			return log;
 		}
 
@@ -548,7 +548,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		void RunBatch(Call&& a_call)
 		{
 			auto& capture = GetCapture();
-			if (capture.active || !ViewEnabled(kView) || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SceneDraws::Available() ||
+			if (capture.active || !ViewEnabled(kView) || !FrameAnchors::IsRenderOwner() || !SceneDraws::Available() ||
 				!SceneDraws::CanTake(kView)) {
 				a_call();
 				return;

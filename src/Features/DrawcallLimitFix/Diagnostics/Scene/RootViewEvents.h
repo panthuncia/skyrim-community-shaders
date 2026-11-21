@@ -42,12 +42,4 @@ namespace DCLF::Diagnostics
 		std::span<const std::pair<const RE::NiAVObject*, bool>> cullHidden;
 	};
 
-	/** @brief The set parity's commit check left a slot out of a root view, with the waiting reason the commit left. */
-	struct SetSlotRedecided
-	{
-		const Scene::Coordinator& store;
-		std::uint32_t slot;
-		const SceneView::SlotDecision& decision;
-		std::uint8_t waitWhy;
-	};
 }

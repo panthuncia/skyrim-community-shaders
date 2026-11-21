@@ -2,7 +2,7 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Sky (CS_ORG_SKY): the render graph draws the engine's BSSkyShader passes in the main pass and the water reflection faces.
+// Sky, in graph mode: the render graph draws the engine's BSSkyShader passes in the main pass and the water reflection faces.
 // Details are in docs/development/p5/sky.md.
 // The engine's CPU code runs unchanged. The sky batch runs with DrawTriShape latched, so every pass still goes through the
 // engine's setup, and the draw is recorded instead of issued (SkyCapture.cpp). An ORG pass at the Sky or SkyReflections anchor
@@ -10,12 +10,13 @@
 // spans them when that group holds only sky shapes.
 // Cloud Shadows keeps per-layer occlusion in its D3D11 cubemaps, and layer L holds the occlusion of layers up to L. Graph cloud
 // draws write the same layers, so both paths stay in step.
-// With CS_ORG_OCCLUSION_QUERIES=1 the sun's occlusion query draw is the graph's too (docs/development/p5/occlusion-queries.md).
+// In graph mode the sun's occlusion query draw is the graph's too (docs/development/p5/occlusion-queries.md).
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
+#include "Features/DrawcallLimitFix/Integrations/PhysicalSky/PhysicalSky.h"
 
 #include <array>
 #include <cstddef>
@@ -50,7 +51,7 @@ namespace DCLF::Features::Sky
 	{
 		Main,  // the main pass's GBuffer (the Sky anchor)
 		Face,  // a water reflection face (the SkyReflections anchor)
-		Sun,   // the sun's occlusion query draw into kMAIN (the EngineQueries anchor, CS_ORG_OCCLUSION_QUERIES)
+		Sun,   // the sun's occlusion query draw into kMAIN (the EngineQueries anchor)
 		Count
 	};
 
@@ -75,8 +76,9 @@ namespace DCLF::Features::Sky
 		std::uint32_t firstIndex;
 		std::uint32_t textures[4];  // t0-t2, then t26 (kSelfShadowFromOcclusion: the occlusion cubemap)
 		std::uint32_t samplers[4];  // s0-s2
+		Integrations::PhysicalSky::OrgHandles physSky;  // the run's, the same for every draw
 	};
-	static_assert(sizeof(DrawConstants) == 352, "SkyOrgDraw's layout");
+	static_assert(sizeof(DrawConstants) == 432, "SkyOrgDraw's layout");
 	static_assert(offsetof(DrawConstants, vertexRef) == 288 && offsetof(DrawConstants, textures) == 320, "SkyOrgDraw's rows");
 
 	/** @brief The bytes of the vertex stage's PerGeometry the latch takes (c0 to c16.xy). */
@@ -133,16 +135,20 @@ namespace DCLF::Features::Sky
 		std::uint32_t sceneDepthIndex = GpuTextures::kInvalid;  // t17 when not kSceneDepth: its import, or a published id's index
 		bool sceneDepthNull = false;                            // t17 is the depth target itself, or nothing: a null view
 		std::array<std::uint32_t, 4> headerIndices{};           // kHeaderRegisters: imports, published ids' indices or null views
-		std::uint64_t revision = 0;                             // what the recording depends on (SkyDraws.cpp, RevisionOf)
+		Integrations::PhysicalSky::OrgHandles physSky{};        // Physical Sky's resources and samplers, latched with every draw
+		std::uint64_t revision = 0;                             // what the recording depends on (SkyDraws.cpp, Run::Hash)
 		Family::Owners owners;                                  // the textures' imports and the buffers' leases
 		// View::Sun only. Whether the depth target is kPOST_ZPREPASS_COPY rather than kMAIN's.
 		bool sunCopyDepth = false;
 		std::int32_t query = -1;
+
+		/** @brief What the recording depends on: everything but the latched values and counts (SkyDraws.cpp). */
+		std::uint64_t Hash() const;
 	};
 
 	Api::Feature Feature();
 
-	/** @brief Whether CS_ORG_SKY=1 turned the family on (read at install). */
+	/** @brief Whether the family is on, which is graph mode (read at install). */
 	bool Enabled();
 
 	void InstallHooks();
@@ -152,8 +158,6 @@ namespace DCLF::Features::Sky
 	{
 		/** @brief Whether the anchors and runtime are up. False for good once a client failed. */
 		bool Available();
-		/** @brief Reserves both anchors. Must run before the render graph initializes. */
-		void Reserve();
 		/** @brief Makes both views' clients for their predicted shapes and queues their programs. Main thread. */
 		bool Setup();
 		/** @brief Whether a_shape's batch is taken now. False is logged once per reason, and the engine draws the batch. */

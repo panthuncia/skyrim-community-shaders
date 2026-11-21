@@ -319,6 +319,20 @@ Expected: `a 1920x1080 movie ended: 166 frames drawn by the render graph, 0 by t
 and no `a movie plays on thread N, not the render thread` line. Since the primary path the claim no longer builds at the tick: the
 client and the tile program are ready from setup ("The primary path").
 
+## A movie played in game (2026-11-20)
+
+A movie played on the main thread in game (console or Papyrus `PlayBink`, the test harness's `bink` step) starts between two
+world frames: the main thread's frame-job wait comes after the last frame's Present and before the next Begin. Each tick decodes
+and clears kFRAMEBUFFER and the main depth before its own `Renderer::Begin`, so the first tick's clears ran while the world frame
+before it was still the described frame, and the skeleton found a world frame's depth clear with no stage open (a fatal tap error).
+
+`Frame::Driver::MovieFrameNext()` is true on a movie tick's thread from the tick's start until its Begin makes the Bink frame
+current. The skeleton counts that work as the Bink frame's: `WorldFrame()` is false there and the main depth clear is dropped,
+as in every other Bink frame. Each tick also checks the engine's in-frame flag (BGSMoviePlayer vfunc +0x58); a blocking tick that
+starts inside an open frame skips its own Begin, so its frames could not be Bink frames, and that is a tap error.
+
+To confirm: the vfunc +0x58 read on AE; that the UI stage's schedule in the first Bink frame after a world frame holds `cs.bink`.
+
 ## Open points
 
 - The startup logo on the graph: P5.12's `CS_ORG_LOADING_THREAD=1` (above). It has run in game: with every port on, the logo

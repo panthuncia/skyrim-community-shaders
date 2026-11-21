@@ -151,13 +151,16 @@ public:
 	 * @param syncInterval VSync interval.
 	 * @param flags Present flags.
 	 * @param presentChain The original Present call chain to invoke.
+	 * @param frameEnd Ends the frame (the UI stage's commit) and then calls the present it is given. The deferred composite
+	 * runs it at its own present, after HDR output, so the output is a step of the UI stage.
 	 * @return The HRESULT from the final Present call.
 	 */
 	HRESULT HandleSwapChainPresent(
 		IDXGISwapChain* swapChain,
 		UINT syncInterval,
 		UINT flags,
-		const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain);
+		const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain,
+		const std::function<HRESULT(IDXGISwapChain*, UINT, UINT, const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>&)>& frameEnd);
 
 	/** @brief Returns true while the Present bottom hook is suppressed during deferred compositing. */
 	bool IsPresentSuppressed() const { return presentSuppressed; }
@@ -248,6 +251,9 @@ public:
 	std::vector<std::pair<RE::RENDER_TARGETS::RENDER_TARGET, SavedRenderTarget>> savedLDRTargets;
 
 private:
+	/** @brief Render thread, after the frame's adoption point. Wraps the graph textures' adopted versions and makes their views again. */
+	void FollowGraphTextures();
+
 	/** @brief Restores hdrTexture after the blurred scene has been composed for presentation. */
 	void RestoreCleanScene();
 
@@ -270,7 +276,8 @@ private:
 		UINT syncInterval,
 		UINT flags,
 		bool hdrReady,
-		const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain);
+		const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain,
+		const std::function<HRESULT(IDXGISwapChain*, UINT, UINT, const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>&)>& frameEnd);
 
 	// Bind scene (t0), UI (t1, may be null), UAV (u0), CB (b0); dispatch the output CS; unbind.
 	void DispatchHDROutput(ID3D11ShaderResourceView* sceneSRV, ID3D11ShaderResourceView* uiSRV, ID3D11UnorderedAccessView* uav);

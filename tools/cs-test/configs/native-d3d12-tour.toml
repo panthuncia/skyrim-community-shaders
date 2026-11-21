@@ -9,7 +9,6 @@ extends = ["native-d3d12"]
 [org]
 tripwire_log = true
 tripwire_log_interval = 20
-residue_census = true
 
 [[steps]]
 at = "world-ready"

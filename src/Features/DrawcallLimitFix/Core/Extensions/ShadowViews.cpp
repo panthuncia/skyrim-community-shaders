@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Extensions
 {
@@ -17,7 +18,6 @@ namespace DCLF::Extensions
 		void FillRegistered(OcclusionMapEntry& a_entry, const Api::OcclusionMapContribution& a_map)
 		{
 			a_entry.registered = true;
-			a_entry.toggle = a_map.toggle;
 			a_entry.available = a_map.available;
 			a_entry.phase = a_map.bits.phase;
 			a_entry.viewBit = a_map.bits.viewBit;
@@ -29,9 +29,7 @@ namespace DCLF::Extensions
 			a_entry.report = a_map.labels.report;
 			a_entry.targetName = a_map.labels.target;
 			a_entry.importTarget = a_map.importTarget;
-			a_entry.referenceDue = a_map.referenceDue;
 			a_entry.camera = a_map.camera;
-			a_entry.ownsAccumulator = a_map.ownsAccumulator;
 		}
 
 		void DeriveShadowOrders(ShadowViewSet& a_set)
@@ -61,7 +59,7 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the shadow views were resolved twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the shadow views were resolved twice");
 		ShadowViewSet set;
 		for (std::size_t v = 0; v < a_maps.size(); ++v)
 			if (a_maps[v].map < Api::OcclusionMap::Count)
@@ -110,7 +108,7 @@ namespace DCLF::Extensions
 	{
 		static bool installed = false;
 		if (std::exchange(installed, true))
-			stl::report_and_fail("Drawcall Limit Fix: the shadow sources' hooks were installed twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the shadow sources' hooks were installed twice");
 		// By source in ShadowSource order, which is also the install log's. The light selection installs at the Spot's turn.
 		for (std::size_t s = 0; s < kShadowSources; ++s) {
 			Api::ShadowSourceHooks hooks{ static_cast<Api::ShadowSource>(s) };

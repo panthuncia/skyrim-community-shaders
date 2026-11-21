@@ -15,8 +15,6 @@
 
 namespace DCLF::Features::Shadows::Sun
 {
-	struct SunAccumulationView;
-
 	/**
 	 * @brief Removes the engine's sun cascade work where DCLF already draws the result. Render thread, plus job-thread thunks.
 	 *
@@ -82,8 +80,6 @@ namespace DCLF::Features::Shadows::Sun
 			std::uint32_t wholeFrames = 0;
 			std::uint32_t wholeDeclined = 0;
 			std::uint32_t wholeHeld = 0;  // whole frames armed though not covered: a load's hold's (Core/Render/LoadHold.h)
-			std::uint32_t wholeTargeted = 0;
-			std::uint64_t wholeTargetedRoots = 0;
 			// Full-frustum processes each whole-skip cascade culled, and those left out.
 			std::uint64_t wholeProcessesCulled = 0;
 			std::uint64_t wholeProcessesLeft = 0;
@@ -124,7 +120,6 @@ namespace DCLF::Features::Shadows::Sun
 
 		struct Hooks;
 		friend struct Hooks;
-		friend struct SunAccumulationView;
 
 		/** @brief Arms the veto that keeps excluded entries out of the full-frustum object lists. Render thread, before the cull. */
 		void ArmExclusion(RE::BSShadowDirectionalLight* a_light);
@@ -142,19 +137,6 @@ namespace DCLF::Features::Shadows::Sun
 		/** @brief The candidate geometry index if under an entry this frame removed, else ~0u. Any thread. */
 		std::uint32_t RemovedGeometryIndex(const RE::BSGeometry* a_geometry) const;
 		bool UnderRemovedEntry(const RE::BSGeometry* a_geometry) const { return RemovedGeometryIndex(a_geometry) != ~0u; }
-		/** @brief Whether a_geometry is under an entry this frame's exclusion excludes (removed or skipped). */
-		bool UnderExcludedEntry(const RE::BSGeometry* a_geometry) const
-		{
-			const auto* exclusion = frameState.exclusion.get();
-			if (!exclusion || !exclusion->candidates)
-				return false;
-			// Any ancestor counts, as CascadeProcess1 skips it. A caster under an excluded entry need not be a candidate geometry.
-			const auto& entries = exclusion->candidates->entries;
-			for (const RE::NiAVObject* object = a_geometry; object; object = object->parent)
-				if (const auto it = entries.find(object); it != entries.end() && exclusion->excluded[it->second])
-					return true;
-			return false;
-		}
 		/** @brief ORs the bits of the cascades a removed-entry geometry's bound meets into its activeLightMask. Any thread. */
 		void ApplySunBits(RE::BSGeometry* a_geometry, bool a_clears);
 
@@ -197,7 +179,6 @@ namespace DCLF::Features::Shadows::Sun
 			std::uint32_t seen = 0, vetoed = 0;
 			RE::NiAVObject* firstVetoed = nullptr;  // given back when nothing else was appended
 			std::uint32_t firstEntry = 0;
-			bool givenBack = false;
 		};
 		std::vector<VetoProcess> vetoProcesses;          // written on the render thread before the veto is armed
 		std::shared_ptr<Local::SunExclusion> armedExclusion;     // render thread: the exclusion the armed veto applies

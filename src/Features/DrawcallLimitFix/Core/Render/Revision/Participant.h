@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Utils/Hash.h"
+
 // The scene revision participants, one per ShapeKind. Each owns its kind's part of making a revision, posting inputs and building
 // payloads ahead. They are always called in ShapeKind order, once per make, post or build, never per object.
 
@@ -37,7 +39,7 @@ namespace DCLF
 			void Mix(std::uint64_t a_value)
 			{
 				auto& h = key[group];
-				h = (h ^ a_value) * 0x100000001b3ull;
+				h = (h ^ a_value) * Util::Fnv1a::kPrime;
 				h ^= h >> 29;
 			}
 			void Ptr(const void* a_pointer) { Mix(reinterpret_cast<std::uintptr_t>(a_pointer)); }

@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Features::HiddenNodes
 {
@@ -19,9 +20,6 @@ namespace DCLF::Features::HiddenNodes
 		void OnHidden(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& event = *reinterpret_cast<const SWF_HiddenEvent*>(a_event);
-			// Tells the LOD gates when the engine hides a node itself.
-			if (event.hidden && showVeto->engineHid && std::ranges::find(showVeto->hideSites, event.siteOffset) != showVeto->hideSites.end())
-				showVeto->engineHid(event.object, event.siteOffset);
 			Scene::PushHiddenUpdate(event.object, event.site);
 		}
 
@@ -57,7 +55,7 @@ namespace DCLF::Features::HiddenNodes
 				return false;
 			}
 			if (api->abiMinor >= 2 && !SceneWriter::Subscribe(SWF_EVENT_SCENE_WRITE, &OnSceneWrite))
-				stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused its scene write events at ABI minor 2");
+				::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused its scene write events at ABI minor 2");
 			logger::info("[DCLF] hidden events: {} SceneWriterFramework stores", api->SiteCount(SWF_EVENT_HIDDEN));
 			return true;
 		}
@@ -71,14 +69,5 @@ namespace DCLF::Features::HiddenNodes
 		writeSite = api ? api->SiteCount(SWF_EVENT_HIDDEN) : 0;
 		Extensions::NoteHiddenSourceSites(writeSite + 1);
 		Scene::hiddenEventsInstalled = Subscribe();
-	}
-
-	std::uintptr_t StoreSiteOf(std::uintptr_t a_address)
-	{
-		const auto* api = SceneWriter::Api();
-		std::uint32_t event = 0, offset = 0;
-		if (!api || api->ResolveSite(a_address, &event, nullptr, &offset) != SWF_OK || event != SWF_EVENT_HIDDEN)
-			return 0;
-		return 0x140000000 + offset;
 	}
 }

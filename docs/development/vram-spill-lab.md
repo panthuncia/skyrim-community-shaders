@@ -105,7 +105,7 @@ already held enough to demote and the marked targets include some that are used.
 
 ## The tools
 
-All of it is inert until asked for. Commands go in `CS_DCLF_TEST_COMMANDS`; `tools/cs-ab/scenarios/spill-*.env` and `pressure*.env` are worked examples.
+All of it is inert until asked for. The commands are cs-test steps (`spill`, `demote`, `frame-window`, `ballast`). The old cs-ab `spill-*` and `pressure*` scenarios, in git history, were worked examples.
 
 | Command or switch | What it does |
 | --- | --- |

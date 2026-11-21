@@ -1,69 +1,80 @@
 #include "ORGExponentialHeightFog.h"
-#include "RenderGraph/Engine/Native/Native.h"
+
+#include <winrt/base.h>
 
 #include "RenderGraph/Switches.h"
 
-bool ORGExponentialHeightFog::Requested()
+std::uint32_t ORGExponentialHeightFog::Debug()
 {
-	static const bool requested = RenderGraph::Engine::Native::GraphMode();
-	return requested;
+	static const std::uint32_t s_mode = [] {
+		const auto mode = Switches::Number("CS_ORG_FOG_DEBUG", 0);
+		if (mode > 9) {
+			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 9); it is off", mode);
+			return 0u;
+		}
+		if (mode)
+			logger::info("[ORG] Exponential Height Fog: debug mode {}", mode);
+		return static_cast<std::uint32_t>(mode);
+	}();
+	return s_mode;
 }
-
-ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
-{
-	static ORGExponentialHeightFog s_fog;
-	return s_fog;
-}
-
-#if defined(CS_HAS_RENDER_GRAPH)
 
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "Deferred.h"
-#	include "Features/CloudShadows.h"
-#	include "Features/CloudShadows/ORGCloudShadows.h"
-#	include "Features/ExponentialHeightFog.h"
-#	include "Features/IBL.h"
-#	include "Features/IBL/ORGIBL.h"
-#	include "Features/LightLimitFix.h"
-#	include "Features/LightLimitFix/ORGLightCulling.h"
-#	include "Features/LightLimitFix/ORGLocalShadows.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "Features/Skylighting.h"
-#	include "Features/Skylighting/ORGSkylighting.h"
-#	include "Features/TerrainBlending/ORGTerrainBlending.h"
-#	include "Features/TerrainShadows.h"
-#	include "Features/TerrainShadows/ORGTerrainShadows.h"
-#	include "Globals.h"
-#	include "RenderGraph/AnchorPasses.h"
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/PublishedResources.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
-#	include "RenderGraph/ShaderBindings.h"
-#	include "RenderGraph/SharedConstants.h"
-#	include "State.h"
-#	include "Utils/D3D.h"
-#	include "Utils/Game.h"
+#include "Deferred.h"
+#include "Features/CloudShadows.h"
+#include "Features/CloudShadows/ORGCloudShadows.h"
+#include "Features/ExponentialHeightFog.h"
+#include "Features/IBL.h"
+#include "Features/IBL/ORGIBL.h"
+#include "Features/LightLimitFix.h"
+#include "Features/LightLimitFix/ORGLightCulling.h"
+#include "Features/LightLimitFix/ORGLocalShadows.h"
+#include "Features/PhysicalSky.h"
+#include "Features/PhysicalSky/ORGPhysicalSky.h"
+#include "Features/PhysicalSky/ORGVolumetricClouds.h"
+#include "RenderGraph/Engine/Targets/TargetRef.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "Features/Skylighting.h"
+#include "Features/Skylighting/ORGSkylighting.h"
+#include "Features/TerrainBlending/ORGTerrainBlending.h"
+#include "Features/TerrainShadows.h"
+#include "Features/TerrainShadows/ORGTerrainShadows.h"
+#include "Features/ViewAtmosphere.h"
+#include "Globals.h"
+#include "RenderGraph/AnchorPasses.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/Frame/Observed.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/SharedConstants.h"
+#include "State.h"
+#include "Utils/D3D.h"
+#include "Utils/Logging.h"
+#include "Utils/Game.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/LatchBlock.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/VersionedTexture.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/LatchBlock.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/Buffers/Buffer.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/VersionedTexture.h>
 
-#	include <array>
-#	include <cstddef>
-#	include <functional>
-#	include <optional>
-#	include <string>
-#	include <tuple>
-#	include <vector>
+#include <array>
+#include <cstddef>
+#include <functional>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <vector>
 
 namespace
 {
@@ -72,12 +83,8 @@ namespace
 	// After IBL and Skylighting at the Prepass anchor. The graph orders the reads of their outputs anyway.
 	constexpr std::int32_t kOrder = 300;
 
-	/** @brief Readers return to the D3D11 views. */
-	void WithdrawIntegrated()
-	{
-		PublishedResources::Withdraw(ORGExponentialHeightFog::kNearIntegratedId);
-		PublishedResources::Withdraw(ORGExponentialHeightFog::kFarIntegratedId);
-	}
+	/** @brief Mode 9 clears the histories. It also turns off the scattering's history guard, so the symptom shows as it was. */
+	bool ClearsHistories() { return ORGExponentialHeightFog::Debug() == 9; }
 
 	using ShaderBindings::Handle;
 
@@ -116,11 +123,13 @@ namespace
 		Handle lightScattering;
 		Handle directionalShadowLights;
 		Handle depth, envIBL, skyIBL, probes, shadowHeights, cloudShadows;
+		Handle physSkyTransmittance, physSkyShadowVolume, physSkyShadowMean;  // with PHYSICAL_SKY
 		Handle lights, lightList, lightGrid, localShadows, localShadowMaps;
 		Handle engineShadowMaps;
 		ShaderBindings::Latch engineShadows;
 	};
-	static_assert(sizeof(ScatteringBlock) == 116);
+	// The whole push block: 32 words.
+	static_assert(sizeof(ScatteringBlock) == 128);
 
 	/** @brief One the client holds or imported, or one another client publishes by name. */
 	struct Source
@@ -143,6 +152,9 @@ namespace
 		kProbes,
 		kShadowHeights,
 		kCloudShadows,
+		kPhysSkyTransmittance,
+		kPhysSkyShadowVolume,
+		kPhysSkyShadowMean,
 		kLights,
 		kLightList,
 		kLightGrid,
@@ -152,27 +164,30 @@ namespace
 		kInputs
 	};
 
-	bool SameExtent(const DirectX::XMUINT4& a, const DirectX::XMUINT4& b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
-
-	/** @brief A change makes a new client. Extents are not part of it, since a new extent resizes the volumes in place. */
-	struct Shape
+	/** @brief What the client reads and whether it keeps history, as the last Prepass found them. Not variables yet. */
+	struct FogSeen
 	{
-		ExponentialHeightFog::GridSizes sizes;
 		bool farEnabled = false;
 		bool temporal = false;
 		std::array<Source, kInputs> inputs;
 
-		bool operator==(const Shape& a_other) const
-		{
-			return sizes.nearGroupReduce == a_other.sizes.nearGroupReduce && sizes.farGroupReduce == a_other.sizes.farGroupReduce &&
-			       farEnabled == a_other.farEnabled && temporal == a_other.temporal && inputs == a_other.inputs;
-		}
+		bool operator==(const FogSeen&) const = default;
 	};
 
-	/** @brief Compiled as the D3D11 build compiles them. */
+	/** @brief The client's key. A change registers a new client. The volumes' extents are not in it: they are versions. */
+	struct Shape
+	{
+		bool nearGroupReduce = false;
+		bool farGroupReduce = false;
+		FogSeen observed;
+
+		bool operator==(const Shape&) const = default;
+	};
+
+	/** @brief Compiled as the D3D11 build compiles them. Queued at Setup. */
 	struct Programs
 	{
-		std::shared_ptr<const ComputeProgram> depth, depthGroupReduce, material, scattering, integration;
+		RenderGraph::Programs::Fixed<ComputeProgram> depth, depthGroupReduce, material, scattering, integration;
 	};
 
 	/** @brief Made once at Setup and shared by every shape. */
@@ -200,19 +215,18 @@ namespace
 	}
 
 	/**
-	* @brief Live as long as the fog's graph path. Every texture is versioned, so a new extent is a new version and nothing rebuilds.
-	* None is aliased, because a version's backing is placed when it is made, not at a build.
+	* @brief Declared at Setup on the volumes' variables (Frame/Declare.h). A new grid size is a new version of each, adopted with
+	* its revision, so nothing rebuilds. While the volumes are off each is one texel. None is aliased, since a version's backing is
+	* placed when it is made.
 	*/
 	struct VolumeTextures
 	{
-		std::unique_ptr<GraphResources::Texture3D> vBuffer, scattering, scatteringHistory, integrated;
-		std::unique_ptr<GraphResources::Texture2D> conservativeDepth, conservativeDepthHistory;
-		DirectX::XMUINT4 size{};  // the extent this frame's passes and group counts use
+		RenderGraph::Frame::DeclaredTexture3D vBuffer, scattering, scatteringHistory, integrated;
+		RenderGraph::Frame::DeclaredTexture2D conservativeDepth, conservativeDepthHistory;
 
 		bool Complete() const
 		{
-			return vBuffer && *vBuffer && scattering && *scattering && scatteringHistory && *scatteringHistory && integrated && *integrated &&
-			       integrated->SRV() && conservativeDepth && *conservativeDepth && conservativeDepthHistory && *conservativeDepthHistory;
+			return vBuffer && scattering && scatteringHistory && integrated && integrated->SRV() && conservativeDepth && conservativeDepthHistory;
 		}
 
 		void Register(org::RenderGraph& a_graph) const
@@ -225,21 +239,33 @@ namespace
 			conservativeDepthHistory->Register(a_graph);
 		}
 
-		/** @brief Taken at the next frame boundary as a new version of each slot. */
-		void RequestSize(const DirectX::XMUINT4& a_size)
+		/** @brief What the debug clears cover: the histories and the textures copied into them. */
+		std::array<const GraphResources::Resource*, 4> Cleared() const
 		{
-			for (auto* volume : { vBuffer.get(), scattering.get(), scatteringHistory.get(), integrated.get() })
-				volume->RequestSize(a_size.x, a_size.y, a_size.z);
-			for (auto* depth : { conservativeDepth.get(), conservativeDepthHistory.get() })
-				depth->RequestSize(a_size.x, a_size.y);
+			return { scattering.Get(), scatteringHistory.Get(), conservativeDepth.Get(), conservativeDepthHistory.Get() };
 		}
 
-		/** @brief All textures take a new extent at the same frame boundary. */
-		DirectX::XMUINT4 Current() const
+		/** @brief The extent the frame's passes, group counts and constants use: the adopted versions'. All six share it. */
+		DirectX::XMUINT4 Size() const
 		{
-			const auto& desc = vBuffer->Desc();
-			return { desc.Width, desc.Height, desc.Depth, 0 };
+			const auto extent = RenderGraph::Frame::Revision::Adopted().Extent(integrated);
+			return { extent[0], extent[1], extent[2], 0 };
 		}
+
+		/** @brief Whether a submitted run copied into the bound histories. A new version holds only its birth (zero). */
+		bool HistoryWritten() const
+		{
+			const auto& adopted = RenderGraph::Frame::Revision::Adopted();
+			return adopted.Written(scatteringHistory) && adopted.Written(conservativeDepthHistory);
+		}
+	};
+
+	/** @brief The versions a commit read, for its run's executed callback to mark written. Null: the run does not write it. */
+	struct FogWrites
+	{
+		const void* integrated = nullptr;
+		const void* scatteringHistory = nullptr;
+		const void* depthHistory = nullptr;
 	};
 
 	/** @brief Made once, then resized in place. */
@@ -264,10 +290,10 @@ namespace
 		VolumeTextures* textures = nullptr;  // kept alive by FogState::textures
 		bool groupReduce = false;
 
-		/** @brief As the D3D11 path dispatches it. Render thread. */
+		/** @brief As the D3D11 path dispatches it, for the adopted extent. Render thread. */
 		std::array<std::uint32_t, 3> Groups(Step a_step) const
 		{
-			const auto& size = textures->size;
+			const auto size = textures->Size();
 			const std::uint32_t groupsX = (size.x + 7) / 8;
 			const std::uint32_t groupsY = (size.y + 7) / 8;
 			const std::uint32_t groupsZ = (size.z + 3) / 4;
@@ -342,7 +368,7 @@ namespace
 			switch (step) {
 			case Step::Depth:
 				b.output = uav(*v.conservativeDepth);
-				b.inputs[kDepth] = Read(a_builder, state->shape.inputs[kDepth]);
+				b.inputs[kDepth] = Read(a_builder, state->shape.observed.inputs[kDepth]);
 				b.hasInput[kDepth] = true;
 				break;
 			case Step::Material:
@@ -358,9 +384,9 @@ namespace
 				// The far volume's shader leaves out local lights.
 				for (std::uint32_t i = 0; i < kInputs; ++i) {
 					const bool local = i >= kLights && i <= kEngineShadowMaps;
-					if (i == kDepth || (isFar && local) || !state->shape.inputs[i])
+					if (i == kDepth || (isFar && local) || !state->shape.observed.inputs[i])
 						continue;
-					b.inputs[i] = Read(a_builder, state->shape.inputs[i]);
+					b.inputs[i] = Read(a_builder, state->shape.observed.inputs[i]);
 					b.hasInput[i] = true;
 				}
 				break;
@@ -419,6 +445,9 @@ namespace
 					block.probes = input(kProbes);
 					block.shadowHeights = input(kShadowHeights);
 					block.cloudShadows = input(kCloudShadows);
+					block.physSkyTransmittance = input(kPhysSkyTransmittance);
+					block.physSkyShadowVolume = input(kPhysSkyShadowVolume);
+					block.physSkyShadowMean = input(kPhysSkyShadowMean);
 					block.lights = input(kLights);
 					block.lightList = input(kLightList);
 					block.lightGrid = input(kLightGrid);
@@ -603,16 +632,20 @@ namespace
 		D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
 		a_view->GetDesc(&viewDesc);
 		const bool wholeArray = viewDesc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-		// Either side may be a tripwire handle or DXVK's object, so compare what they wrap.
-		using RenderGraph::Engine::Tripwire::Unwrap;
-		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
-		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
-			if (depthStencils[i].texture && Unwrap(depthStencils[i].texture) == Unwrap(texture.get()))
-				return { FrameAnchors::EngineDepth(i), {}, wholeArray };
-		RE::BSGraphics::DepthStencilData target{};
-		target.texture = texture.get();
-		target.depthSRV = a_view;
-		return { FrameAnchors::ImportDepth(target, a_id), {}, wholeArray };
+		// An engine field handle names its target. Identify takes handles only, so the view is asked first, then its texture.
+		namespace Targets = RenderGraph::Engine::Targets;
+		using RenderGraph::Engine::Tripwire::IsHandle;
+		std::optional<Targets::TargetRef> target;
+		if (IsHandle(a_view))
+			target = Targets::Identify(static_cast<const ID3D11View*>(a_view));
+		if (!target && IsHandle(texture.get()))
+			target = Targets::Identify(static_cast<const ID3D11Resource*>(texture.get()));
+		if (target && target->kind == Targets::Kind::Depth)
+			return { FrameAnchors::EngineTexture(FrameAnchors::Depth(target->index)), {}, wholeArray };
+		RE::BSGraphics::DepthStencilData imported{};
+		imported.texture = texture.get();
+		imported.depthSRV = a_view;
+		return { FrameAnchors::ImportTexture(a_id, { .depth = &imported }), {}, wholeArray };
 	}
 
 	/** @brief As Util::GetCurrentSceneDepthSRV(true). */
@@ -622,8 +655,22 @@ namespace
 			return {};
 		using RenderGraph::Engine::Tripwire::Unwrap;
 		if (Unwrap(a_view) == Unwrap(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV))
-			return { FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY), {} };
+			return { FrameAnchors::EngineTexture(FrameAnchors::Depth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY)), {} };
 		return Published(ORGTerrainBlending::kBlendedDepth16Id, a_view);
+	}
+
+	/**
+	* @brief The client's inputs before a Prepass saw any: the engine's depth alone. The key reads this at setup's build point, so a
+	* world frame with the volumes on always has a client. Commit turns off the flags of the inputs it does not bind.
+	*/
+	FogSeen FirstObservation()
+	{
+		FogSeen first;
+		first.temporal = Util::GetTemporal() && ORGExponentialHeightFog::Debug() != 8;
+		first.inputs[kDepth] = { FrameAnchors::EngineTexture(FrameAnchors::Depth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY)), {} };
+		if (!first.inputs[kDepth])
+			RenderGraph::Fatal(ORGExponentialHeightFog::kName, "the engine's depth cannot be imported for the first client");
+		return first;
 	}
 
 	D3D11_TEXTURE3D_DESC VolumeDesc(const DirectX::XMUINT4& a_size, DXGI_FORMAT a_format)
@@ -654,17 +701,16 @@ namespace
 	}
 
 	/** @brief ComputeProgram adds the D3D11 build's defines. */
-	std::shared_ptr<const ComputeProgram> LoadProgram(const char* a_source, const std::vector<std::string>& a_defines, std::uint32_t a_words)
+	RenderGraph::Programs::Fixed<ComputeProgram> QueueProgram(const char* a_source, const std::vector<std::string>& a_defines, std::uint32_t a_words)
 	{
 		std::vector<std::pair<std::string, std::string>> defines;
 		for (const auto& name : a_defines)
 			defines.emplace_back(name, "");
-		return ComputeProgram::Load(RenderGraphRuntime::Get().Host()->Device(),
-			{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = RenderGraph::AnchorPasses::Defines(defines) });
+		return RenderGraph::Programs::Queue("ExponentialHeightFog",
+			ComputeProgram::Desc{ .source = std::string(kShaderDir) + a_source, .constantWords = a_words, .defines = RenderGraph::AnchorPasses::Defines(defines) });
 	}
 
-	/** @brief False, logged, when one does not build. */
-	bool LoadPrograms(Programs& a_programs, bool a_far)
+	void QueuePrograms(Programs& a_programs, bool a_far)
 	{
 		std::vector<std::string> volumeDefines;
 		if (a_far)
@@ -676,76 +722,131 @@ namespace
 			scatteringDefines.emplace_back("TERRAIN_SHADOWS");
 		if (globals::features::cloudShadows.loaded)
 			scatteringDefines.emplace_back("CLOUD_SHADOWS");
+		// As the D3D11 build. Its LUT and cloud shadow inputs are Physical Sky's published twins (Prepass).
+		if (globals::features::physicalSky.loaded)
+			scatteringDefines.emplace_back("PHYSICAL_SKY");
 		auto groupDefines = volumeDefines;
 		groupDefines.emplace_back("GROUP_REDUCE");
 
-		a_programs.depth = LoadProgram("VolumetricFogConservativeDepthCS.hlsl", volumeDefines, ShaderBindings::Words<VolumeBlock>());
-		a_programs.depthGroupReduce = LoadProgram("VolumetricFogConservativeDepthCS.hlsl", groupDefines, ShaderBindings::Words<VolumeBlock>());
-		a_programs.material = LoadProgram("VolumetricFogMaterialCS.hlsl", volumeDefines, ShaderBindings::Words<VolumeBlock>());
-		a_programs.scattering = LoadProgram("VolumetricFogLightScatteringCS.hlsl", scatteringDefines, ShaderBindings::Words<ScatteringBlock>());
-		a_programs.integration = LoadProgram("VolumetricFogIntegrationCS.hlsl", volumeDefines, ShaderBindings::Words<IntegrationBlock>());
-		if (!a_programs.depth || !a_programs.depthGroupReduce || !a_programs.material || !a_programs.scattering || !a_programs.integration) {
-			logger::error("[ORG] Exponential Height Fog: a {} volume program could not be built", a_far ? "far" : "near");
-			return false;
-		}
-		return true;
+		a_programs.depth = QueueProgram("VolumetricFogConservativeDepthCS.hlsl", volumeDefines, ShaderBindings::Words<VolumeBlock>());
+		a_programs.depthGroupReduce = QueueProgram("VolumetricFogConservativeDepthCS.hlsl", groupDefines, ShaderBindings::Words<VolumeBlock>());
+		a_programs.material = QueueProgram("VolumetricFogMaterialCS.hlsl", volumeDefines, ShaderBindings::Words<VolumeBlock>());
+		a_programs.scattering = QueueProgram("VolumetricFogLightScatteringCS.hlsl", scatteringDefines, ShaderBindings::Words<ScatteringBlock>());
+		a_programs.integration = QueueProgram("VolumetricFogIntegrationCS.hlsl", volumeDefines, ShaderBindings::Words<IntegrationBlock>());
 	}
 }
 
 struct ORGExponentialHeightFog::Impl
 {
 	std::shared_ptr<const Fixed> fixed;
-	// Made at the first build and kept. A new extent resizes them, a new shape only makes new passes.
+	// Declared at Setup and kept. A new extent is a new version, a new shape a new client.
 	std::shared_ptr<Textures> textures;
+	RenderGraph::Frame::DeclaredClient declaredClient;
+	// What the last Prepass found. The client's key reads it, so it is made before the client. Before the first, FirstObservation.
+	RenderGraph::Frame::Observed<FogSeen> observed{ "ExponentialHeightFog.Inputs" };
 	std::shared_ptr<const FogState> state;
 	// Written at Prepass and latched by the commit.
 	std::optional<LatchData> pending;
 	bool hasScatteringHistory = false, hasDepthHistory = false, hasScatteringHistoryFar = false, hasDepthHistoryFar = false;
 	std::uint32_t lastFrame = UINT32_MAX;
 	bool ranLastFrame = false;
-	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
+	bool reportedConstants = false;  // the first graph frame's constants are logged once
+	const FogState* reportedUnbound = nullptr;  // the last state Commit turned flags off for, logged once each
+	// The versions the last commit read, near then far. Its run's executed callback marks them written (Frame::NoteWritten).
+	// The D3D11 readers get a volume only once a run wrote its bound version, so they never read an unwritten one.
+	std::optional<std::array<FogWrites, 2>> committedWrites;
+
+	/** @brief Whether a submitted run wrote the bound versions of both integrated volumes. Render thread. */
+	bool IntegratedWritten() const
+	{
+		if (!textures)
+			return false;
+		const auto& adopted = RenderGraph::Frame::Revision::Adopted();
+		return adopted.Written(textures->nearVolume.integrated) && adopted.Written(textures->farVolume.integrated);
+	}
+
+	/** @brief After a submitted run. Marks what its commit opened as written: the integrations (or the far clear), and the histories. */
+	void Executed()
+	{
+		const auto writes = std::exchange(committedWrites, std::nullopt);
+		if (!writes || !textures)
+			return;
+		const bool before = IntegratedWritten();
+		for (const bool isFar : { false, true }) {
+			const auto& v = isFar ? textures->farVolume : textures->nearVolume;
+			const auto& w = (*writes)[isFar ? 1 : 0];
+			RenderGraph::Frame::NoteWritten(v.integrated, w.integrated);
+			if (w.scatteringHistory)
+				RenderGraph::Frame::NoteWritten(v.scatteringHistory, w.scatteringHistory);
+			if (w.depthHistory)
+				RenderGraph::Frame::NoteWritten(v.conservativeDepthHistory, w.depthHistory);
+		}
+		if (!before && IntegratedWritten())
+			logger::info("[ORG] Exponential Height Fog: a run wrote the volumes at frame {}; the engine's draws and DCLF read them from the next Prepass",
+				globals::state->frameCount);
+	}
 
 	void MakeVolume(Volume& a_volume, VolumeTextures& a_textures, bool a_groupReduce, bool a_far) const
 	{
 		const auto& programs = a_far ? fixed->farPrograms : fixed->nearPrograms;
 		a_volume.textures = &a_textures;
 		a_volume.groupReduce = a_groupReduce;
-		a_volume.depthProgram = a_groupReduce ? programs.depthGroupReduce : programs.depth;
-		a_volume.materialProgram = programs.material;
-		a_volume.scatteringProgram = programs.scattering;
-		a_volume.integrationProgram = programs.integration;
+		a_volume.depthProgram = (a_groupReduce ? programs.depthGroupReduce : programs.depth).Get();
+		a_volume.materialProgram = programs.material.Get();
+		a_volume.scatteringProgram = programs.scattering.Get();
+		a_volume.integrationProgram = programs.integration.Get();
 	}
 
-	/** @brief False, logged, when one could not be made. */
-	static bool MakeVolumeTextures(VolumeTextures& a_volume, const DirectX::XMUINT4& a_size, bool a_far)
+	/** @brief The volumes' declarations, for the session. Fatal when one cannot be made or published. */
+	void DeclareTextures()
 	{
-		const std::string prefix = a_far ? "ExponentialHeightFog::Far" : "ExponentialHeightFog::";
-		// Versioned so a new extent is a new version. Not aliased, since a version's backing is made with it.
-		const GraphResources::Options own{ .lifetime = GraphResources::Lifetime::Persistent, .versioned = true };
-		const GraphResources::Options history{ .lifetime = GraphResources::Lifetime::History, .versioned = true };
-		// The engine's draws read these through D3D11, so they are exported and never aliased.
-		const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV, .versioned = true };
-		a_volume.size = a_size;
-		a_volume.vBuffer = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R16G16B16A16_FLOAT), prefix + "VBufferA", own);
-		a_volume.scattering = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R32G32B32A32_FLOAT), prefix + "LightScattering", own);
-		a_volume.scatteringHistory = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R32G32B32A32_FLOAT), prefix + "LightScatteringHistory", history);
-		a_volume.integrated = std::make_unique<GraphResources::Texture3D>(VolumeDesc(a_size, DXGI_FORMAT_R16G16B16A16_FLOAT),
-			std::string(a_far ? ORGExponentialHeightFog::kFarIntegratedId : ORGExponentialHeightFog::kNearIntegratedId), exported);
-		a_volume.conservativeDepth = std::make_unique<GraphResources::Texture2D>(DepthDesc(a_size), prefix + "ConservativeDepth", own);
-		a_volume.conservativeDepthHistory = std::make_unique<GraphResources::Texture2D>(DepthDesc(a_size), prefix + "ConservativeDepthHistory", history);
-		if (!a_volume.Complete()) {
-			logger::error("[ORG] Exponential Height Fog: the {} volume's textures could not be made", a_far ? "far" : "near");
-			return false;
-		}
-		return true;
-	}
-
-	/** @brief Published once. Readers follow the versions, so a resize never publishes again. False, logged, on failure. */
-	bool MakeTextures(const ExponentialHeightFog::GridSizes& a_sizes)
-	{
+		using namespace RenderGraph::Frame;
+		const auto& fog = globals::features::exponentialHeightFog.settings;
+		const auto& quality = globals::features::viewAtmosphere.settings;
+		// The grid follows the display size (decision 6a) and the grid settings. The existence rule makes it one texel while the
+		// volumes are off.
+		const auto dependencies = DependsOn(Vars::DisplaySize(), quality.nearPixelSize, quality.nearSlices, quality.middlePixelSize, quality.middleSlices);
+		const auto exists = [&] {
+			return ExistsWhen(DependsOn(fog.enabled, fog.volumetricFogEnabled, fog.volumetricFogExtinctionScale, fog.fogDensity, fog.fogDensity2),
+				[](const Inputs& a_in) {
+					const auto& f = globals::features::exponentialHeightFog.settings;
+					return ExponentialHeightFog::VolumesOn(a_in.Get(f.enabled), a_in.Get(f.volumetricFogEnabled), a_in.Get(f.volumetricFogExtinctionScale),
+						a_in.Get(f.fogDensity), a_in.Get(f.fogDensity2));
+				});
+		};
+		const auto sizeOf = [](const Inputs& a_in, bool a_far) {
+			const auto& q = globals::features::viewAtmosphere.settings;
+			const auto display = a_in.Get(Vars::DisplaySize());
+			const auto sizes = ExponentialHeightFog::GridSizesFor(float2{ static_cast<float>(display.width), static_cast<float>(display.height) },
+				a_in.Get(q.nearPixelSize), a_in.Get(q.nearSlices), a_in.Get(q.middlePixelSize), a_in.Get(q.middleSlices));
+			return a_far ? sizes.farSize : sizes.nearSize;
+		};
+		const auto volume = [&](bool a_far, const std::string& a_name, DXGI_FORMAT a_format, const GraphResources::Options& a_options) {
+			return DeclareTexture3D(
+				a_name, dependencies, [sizeOf, a_far, a_format](const Inputs& a_in) { return VolumeDesc(sizeOf(a_in, a_far), a_format); }, a_options, exists());
+		};
+		const auto depth = [&](bool a_far, const std::string& a_name, const GraphResources::Options& a_options) {
+			return DeclareTexture2D(a_name, dependencies, [sizeOf, a_far](const Inputs& a_in) { return DepthDesc(sizeOf(a_in, a_far)); }, a_options, exists());
+		};
 		auto made = std::make_shared<Textures>();
-		if (!MakeVolumeTextures(made->nearVolume, a_sizes.nearSize, false) || !MakeVolumeTextures(made->farVolume, a_sizes.farSize, true))
-			return false;
+		for (const bool isFar : { false, true }) {
+			auto& v = isFar ? made->farVolume : made->nearVolume;
+			const std::string prefix = isFar ? "ExponentialHeightFog::Far" : "ExponentialHeightFog::";
+			const GraphResources::Options own{ .lifetime = GraphResources::Lifetime::Persistent };
+			// Born zero (a History birth). Until a run copied into a version, Written keeps the passes from reading it.
+			const GraphResources::Options history{ .lifetime = GraphResources::Lifetime::History };
+			// The engine's draws read these through D3D11, so they are exported and never aliased.
+			const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV };
+			v.vBuffer = volume(isFar, prefix + "VBufferA", DXGI_FORMAT_R16G16B16A16_FLOAT, own);
+			v.scattering = volume(isFar, prefix + "LightScattering", DXGI_FORMAT_R32G32B32A32_FLOAT, own);
+			v.scatteringHistory = volume(isFar, prefix + "LightScatteringHistory", DXGI_FORMAT_R32G32B32A32_FLOAT, history);
+			v.integrated = volume(isFar, std::string(isFar ? ORGExponentialHeightFog::kFarIntegratedId : ORGExponentialHeightFog::kNearIntegratedId),
+				DXGI_FORMAT_R16G16B16A16_FLOAT, exported);
+			v.conservativeDepth = depth(isFar, prefix + "ConservativeDepth", own);
+			v.conservativeDepthHistory = depth(isFar, prefix + "ConservativeDepthHistory", history);
+			if (!v.Complete())
+				RenderGraph::Fatal(ORGExponentialHeightFog::kName, fmt::format("the {} volume's textures could not be made", isFar ? "far" : "near"));
+		}
 		D3D11_BUFFER_DESC bufferDesc{};
 		bufferDesc.Usage = D3D11_USAGE_DEFAULT;
 		bufferDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -754,45 +855,56 @@ struct ORGExponentialHeightFog::Impl
 		bufferDesc.ByteWidth = sizeof(Deferred::DirectionalShadowLightData);
 		made->directionalShadowLights = std::make_unique<GraphResources::StructuredBuffer>(bufferDesc, 1, "ExponentialHeightFog::DirectionalShadowLights",
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient });
-		if (!*made->directionalShadowLights) {
-			logger::error("[ORG] Exponential Height Fog: the shadow light buffer could not be made");
-			return false;
-		}
-		// DCLF's colour passes read them by name, ordered after the integration.
-		if (!PublishedResources::Publish(*made->nearVolume.integrated) || !PublishedResources::Publish(*made->farVolume.integrated)) {
-			logger::error("[ORG] Exponential Height Fog: the integrated volumes could not be published");
-			return false;
-		}
+		if (!*made->directionalShadowLights)
+			RenderGraph::Fatal(ORGExponentialHeightFog::kName, "the shadow light buffer could not be made");
+		// Published once, for the session. Readers follow the versions, so neither a resize nor turning the fog off publishes again.
+		if (!PublishedResources::Publish(*made->nearVolume.integrated) || !PublishedResources::Publish(*made->farVolume.integrated))
+			RenderGraph::Fatal(ORGExponentialHeightFog::kName, "the integrated volumes could not be published");
 		textures = std::move(made);
-		ResetHistories();
-		return true;
 	}
 
-	/** @brief The new sizes take effect at the next frame boundary. A volume that changed extent restarts its history. */
-	void FollowSizes(const ExponentialHeightFog::GridSizes& a_sizes)
+	/** @brief The client, declared on the settings its key reads. */
+	void DeclareClient()
 	{
-		bool resized = false;
-		for (auto [volume, size] : { std::pair{ &textures->nearVolume, a_sizes.nearSize }, std::pair{ &textures->farVolume, a_sizes.farSize } }) {
-			volume->RequestSize(size);
-			if (const auto current = volume->Current(); !SameExtent(volume->size, current)) {
-				volume->size = current;
-				resized = true;
-			}
-		}
-		if (resized) {
-			// The new versions hold nothing to reproject from.
-			ResetHistories();
-			const auto& nearSize = textures->nearVolume.size;
-			const auto& farSize = textures->farVolume.size;
-			logger::info("[ORG] Exponential Height Fog: the volumes are new versions (near {}x{}x{}, far {}x{}x{})", nearSize.x, nearSize.y, nearSize.z, farSize.x,
-				farSize.y, farSize.z);
-		}
-	}
-
-	void ResetHistories()
-	{
-		hasScatteringHistory = hasDepthHistory = hasScatteringHistoryFar = hasDepthHistoryFar = false;
-		lastFrame = UINT32_MAX;
+		using namespace RenderGraph::Frame;
+		const auto& fog = globals::features::exponentialHeightFog.settings;
+		const auto& quality = globals::features::viewAtmosphere.settings;
+		declaredClient = RenderGraph::Frame::DeclareClient<Shape>(
+			kClientId,
+			DependsOn(quality.nearPixelSize, quality.middlePixelSize, fog.enabled, fog.volumetricFogEnabled, fog.volumetricFogExtinctionScale, fog.fogDensity,
+				fog.fogDensity2, globals::features::ibl.settings.EnableIBL, observed.Var()),
+			[this](const Inputs& a_in) -> std::optional<Shape> {
+				const auto& f = globals::features::exponentialHeightFog.settings;
+				const auto& q = globals::features::viewAtmosphere.settings;
+				if (!ExponentialHeightFog::VolumesOn(a_in.Get(f.enabled), a_in.Get(f.volumetricFogEnabled), a_in.Get(f.volumetricFogExtinctionScale),
+						a_in.Get(f.fogDensity), a_in.Get(f.fogDensity2)))
+					return std::nullopt;
+				// The inputs come from the last Prepass. Before the first, the engine's depth alone.
+				const auto* seen = observed.Get(a_in);
+				const auto sizes = ExponentialHeightFog::GridSizesFor({ 1.0f, 1.0f }, a_in.Get(q.nearPixelSize), 16, a_in.Get(q.middlePixelSize), 16);
+				Shape shape{ sizes.nearGroupReduce, sizes.farGroupReduce, seen ? *seen : FirstObservation() };
+				// IBL's SH and Skylighting's probes are bound while their features are loaded: IBL from its EnableIBL, the probes
+				// always. Both publish their ids at setup, for the session. A scene that disables IBL turns it off in the constants,
+				// so the binding stays.
+				const auto& ibl = globals::features::ibl;
+				if (ibl.loaded && a_in.Get(ibl.settings.EnableIBL) != 0) {
+					shape.observed.inputs[kEnvIBL] = { nullptr, std::string(ORGIBL::kEnvId) };
+					shape.observed.inputs[kSkyIBL] = { nullptr, std::string(ORGIBL::kSkyId) };
+				}
+				if (globals::features::skylighting.loaded)
+					shape.observed.inputs[kProbes] = { nullptr, std::string(ORGSkylighting::kProbeArrayId) };
+				// Physical Sky's transmittance LUT and Light Limit Fix's culling lists are published at setup, for the session
+				// (ORGPhysicalSky::MakeLut2D, ORGLightCulling). Whether a feature is loaded is fixed for the session too.
+				if (globals::features::physicalSky.loaded)
+					shape.observed.inputs[kPhysSkyTransmittance] = { nullptr, std::string(ORGPhysicalSky::kTransmittanceLutId) };
+				if (globals::features::lightLimitFix.loaded) {
+					shape.observed.inputs[kLights] = { nullptr, std::string(ORGLightCulling::kLightsId) };
+					shape.observed.inputs[kLightList] = { nullptr, std::string(ORGLightCulling::kLightIndexListId) };
+					shape.observed.inputs[kLightGrid] = { nullptr, std::string(ORGLightCulling::kLightGridId) };
+				}
+				return shape;
+			},
+			[this](const Shape& a_shape, FrameAnchors::ClientDesc& a_client) { return MakeClient(a_shape, a_client); });
 	}
 
 	void Commit(const FogState& a_state)
@@ -800,7 +912,43 @@ struct ORGExponentialHeightFog::Impl
 		if (!pending)
 			return;
 		const auto& shape = *a_state.fixed;
-		shape.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *pending);
+		// Prepass built the constants for the newest shape. This run executes a_state, which can be a build behind it.
+		// Its push blocks hold handle 0 for an input it does not have, so its constants may only name inputs it binds.
+		// Otherwise a flag reads heap slot 0 as that input: IBL's SH from there goes unbounded into the scattering.
+		LatchData data = *pending;
+		const auto& inputs = a_state.shape.observed.inputs;
+		std::uint32_t bound = 0;
+		if (inputs[kDirectionalShadowMap])
+			bound |= 1u;
+		if (inputs[kDepth])
+			bound |= 2u | 16u;
+		if (inputs[kEnvIBL] && inputs[kSkyIBL])
+			bound |= 4u;
+		if (inputs[kProbes])
+			bound |= 8u;
+		if (inputs[kLights] && inputs[kLightList] && inputs[kLightGrid])
+			bound |= 32u;
+		if (inputs[kLocalShadows] && inputs[kLocalShadowMaps])
+			bound |= 64u;
+		if (inputs[kEngineShadowMaps])
+			bound |= 128u;
+		if (inputs[kShadowHeights])
+			bound |= 256u;
+		if (inputs[kCloudShadows])
+			bound |= 512u;
+		if (inputs[kPhysSkyTransmittance])
+			bound |= 1024u;
+		if (inputs[kPhysSkyShadowVolume] && inputs[kPhysSkyShadowMean])
+			bound |= 2048u;
+		const std::uint32_t unbound = (data.fog.gridSizeAndFlags.w | data.fog.farGridSizeAndFlags.w) & ~bound;
+		if (unbound && reportedUnbound != &a_state) {
+			reportedUnbound = &a_state;
+			logger::info("[ORG] Exponential Height Fog: this run executes a build without inputs its constants name (flags {:#x}); they are off for it",
+				unbound);
+		}
+		data.fog.gridSizeAndFlags.w &= bound;
+		data.fog.farGridSizeAndFlags.w &= bound;
+		shape.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
 		pending.reset();
 		const auto open = [&](const Volume& a_volume, bool a_far) {
 			for (std::uint32_t step = 0; step < static_cast<std::uint32_t>(Step::Count); ++step) {
@@ -809,23 +957,64 @@ struct ORGExponentialHeightFog::Impl
 			}
 		};
 		open(a_state.nearVolume, false);
-		if (a_state.shape.farEnabled)
+		if (a_state.shape.observed.farEnabled)
 			open(a_state.farVolume, true);
+		// What this run writes, as the versions bound now. The history copies run after the scattering this commit opened.
+		const auto& adopted = RenderGraph::Frame::Revision::Adopted();
+		const auto writes = [&](const VolumeTextures& a_textures, bool a_history) {
+			FogWrites w{ .integrated = adopted.Version(a_textures.integrated) };
+			if (a_history) {
+				w.scatteringHistory = adopted.Version(a_textures.scatteringHistory);
+				w.depthHistory = adopted.Version(a_textures.conservativeDepthHistory);
+			}
+			return w;
+		};
+		const bool temporalRun = a_state.shape.observed.temporal;
+		committedWrites = std::array<FogWrites, 2>{ writes(a_state.textures->nearVolume, temporalRun),
+			writes(a_state.textures->farVolume, temporalRun && a_state.shape.observed.farEnabled) };
+		// The histories hold data only once a run with history passes copied into them. The state committed here is the one this
+		// run executes, which lags a new registration by a build. Marking them at Prepass let the next frame read a history no pass
+		// had written: recycled memory, kept by the temporal blend (huge but finite values that overflow the half-float volume).
+		const auto& observedShape = a_state.shape.observed;
+		const bool temporal = observedShape.temporal;
+		hasScatteringHistory = temporal;
+		hasDepthHistory = temporal && static_cast<bool>(observedShape.inputs[kDepth]);
+		hasScatteringHistoryFar = temporal && observedShape.farEnabled;
+		hasDepthHistoryFar = hasScatteringHistoryFar && static_cast<bool>(observedShape.inputs[kDepth]);
+		lastFrame = globals::state->frameCount;
 	}
 
-	/** @brief Only a change of inputs, history or group reduction gets here. A new extent alone is FollowSizes. False, logged, on failure. */
-	bool Build(const Shape& a_shape)
+	/** @brief Mode 9's clears of each volume's histories and the textures copied into them, to zero, every run. Nothing gates them. */
+	static void AddClears(std::vector<FrameAnchors::PassDesc>& a_passes, const std::shared_ptr<const FogState>& a_state, std::string_view a_prefix,
+		std::int32_t& a_order)
 	{
-		if (!textures && !MakeTextures(a_shape.sizes))
-			return false;
+		constexpr std::array<const char*, 4> names{ "scattering", "scattering-history", "depth", "depth-history" };
+		for (const bool isFar : { false, true }) {
+			if (isFar && !a_state->shape.observed.farEnabled)
+				continue;
+			for (std::uint32_t i = 0; i < names.size(); ++i)
+				a_passes.push_back({ .name = std::format("{}.{}debug-clear-{}", a_prefix, isFar ? "far." : "near.", names[i]),
+					.anchor = FrameAnchors::Anchor::Prepass,
+					.order = a_order++,
+					.kind = FrameAnchors::PassKind::Compute,
+					.make = [a_state, isFar, i] {
+						const auto& textures = isFar ? a_state->textures->farVolume : a_state->textures->nearVolume;
+						return RenderGraph::AnchorPasses::MakeClear(RenderGraph::AnchorPasses::ClearOf("debug-clear", *textures.Cleared()[i]));
+					} });
+		}
+	}
+
+	/** @brief The registration for a new key, at the start of the revision that adopts it. A new extent alone is a version, never this. */
+	bool MakeClient(const Shape& a_shape, FrameAnchors::ClientDesc& a_client)
+	{
 		auto built = std::make_shared<FogState>();
 		built->shape = a_shape;
 		built->fixed = fixed;
 		built->textures = textures;
-		MakeVolume(built->nearVolume, textures->nearVolume, a_shape.sizes.nearGroupReduce, false);
-		MakeVolume(built->farVolume, textures->farVolume, a_shape.sizes.farGroupReduce, true);
+		MakeVolume(built->nearVolume, textures->nearVolume, a_shape.nearGroupReduce, false);
+		MakeVolume(built->farVolume, textures->farVolume, a_shape.farGroupReduce, true);
 
-		FrameAnchors::ClientDesc client{};
+		auto& client = a_client;
 		client.id = kClientId;
 		const std::shared_ptr<const FogState> shared = built;
 		std::int32_t order = kOrder;
@@ -833,6 +1022,9 @@ struct ORGExponentialHeightFog::Impl
 			client.passes.push_back({ .name = "cs.exp-height-fog." + std::move(a_name), .anchor = FrameAnchors::Anchor::Prepass, .order = order++, .kind = a_kind, .make = std::move(a_make) });
 		};
 		add("upload", FrameAnchors::PassKind::Copy, [shared] { return std::make_shared<UploadPass>(shared); });
+		const auto& observedShape = a_shape.observed;
+		if (observedShape.temporal && ORGExponentialHeightFog::Debug() == 9)
+			AddClears(client.passes, shared, "cs.exp-height-fog", order);
 		const auto addVolume = [&](bool a_far) {
 			const std::string volume = a_far ? "far." : "near.";
 			constexpr std::array<std::pair<Step, const char*>, 4> steps{ { { Step::Depth, "depth" }, { Step::Material, "material" },
@@ -841,11 +1033,11 @@ struct ORGExponentialHeightFog::Impl
 				const Step step = entry.first;
 				add(volume + entry.second, FrameAnchors::PassKind::Compute, [shared, a_far, step] { return std::make_shared<DispatchPass>(shared, a_far, step); });
 			}
-			if (a_shape.temporal)
+			if (observedShape.temporal)
 				add(volume + "history", FrameAnchors::PassKind::Copy, [shared, a_far] { return std::make_shared<HistoryPass>(shared, a_far); });
 		};
 		addVolume(false);
-		if (a_shape.farEnabled)
+		if (observedShape.farEnabled)
 			addVolume(true);
 		else
 			add("far.clear", FrameAnchors::PassKind::Compute, [shared] { return std::make_shared<ClearPass>(shared); });
@@ -855,89 +1047,84 @@ struct ORGExponentialHeightFog::Impl
 			shared->textures->directionalShadowLights->Register(a_graph);
 		};
 		client.commit = [this, shared](const FrameAnchors::Point&) { Commit(*shared); };
+		// Only a submission confirms the volumes were written. It comes only for runs whose graph holds this registration.
+		client.executed = [this](const FrameAnchors::Point&) { Executed(); };
 		// The fog has work only when Prepass gave the graph this frame.
 		client.active = [this] { return pending.has_value(); };
 		client.sharedConstants = true;
 		client.gates = { fixed->gate };
-		if (!FrameAnchors::Register(std::move(client)))
-			return false;
+		if (observedShape.temporal && ClearsHistories())
+			logger::info("[ORG] Exponential Height Fog: debug mode 9 clears the histories every run, and the scattering's history guard is off");
 		this->state = std::move(built);
-		logger::info("[ORG] Exponential Height Fog runs on the render graph (near {}x{}x{}, far {}x{}x{}{}, {})", a_shape.sizes.nearSize.x,
-			a_shape.sizes.nearSize.y, a_shape.sizes.nearSize.z, a_shape.sizes.farSize.x, a_shape.sizes.farSize.y, a_shape.sizes.farSize.z,
-			a_shape.farEnabled ? "" : " off", a_shape.temporal ? "temporal" : "no history");
+		const auto nearSize = textures->nearVolume.Size();
+		const auto farSize = textures->farVolume.Size();
+		logger::info("[ORG] Exponential Height Fog: a client for the next revision (near volume now {}x{}x{}, far {}x{}x{}{}, {})", nearSize.x, nearSize.y, nearSize.z,
+			farSize.x, farSize.y, farSize.z, observedShape.farEnabled ? "" : " off", observedShape.temporal ? "temporal" : "no history");
 		return true;
 	}
 };
 
+ORGExponentialHeightFog::ORGExponentialHeightFog() = default;
 ORGExponentialHeightFog::~ORGExponentialHeightFog() = default;
 
-void ORGExponentialHeightFog::Reserve()
+void ORGExponentialHeightFog::Setup()
 {
-	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::Prepass))
-		logger::warn("[ORG] Exponential Height Fog: the Prepass anchor could not be reserved; the fog stays on D3D11");
-}
-
-bool ORGExponentialHeightFog::Setup()
-{
-	impl.reset();
-	if (!Requested() || failed)
-		return false;
-	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.IsActive() || !runtime.Host() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Prepass)) {
-		logger::warn("[ORG] Exponential Height Fog: the render graph or its Prepass anchor is not available; the fog stays on D3D11");
-		return false;
-	}
+	// Once a session. The volumes are published, so they are never torn down.
+	if (!BeginSetup())
+		return;
 	auto fixed = std::make_shared<Fixed>();
-	if (!LoadPrograms(fixed->nearPrograms, false) || !LoadPrograms(fixed->farPrograms, true)) {
-		logger::error("[ORG] Exponential Height Fog stays on D3D11");
-		return false;
-	}
+	QueuePrograms(fixed->nearPrograms, false);
+	QueuePrograms(fixed->farPrograms, true);
 	// Linear clamp, and the comparison sampler for the directional shadow map.
 	fixed->linearSampler = ShaderBindings::CreateSamplerFromD3D11(ExponentialHeightFog::SamplerDesc(false));
 	fixed->shadowSampler = ShaderBindings::CreateSamplerFromD3D11(ExponentialHeightFog::SamplerDesc(true));
 	fixed->latch = std::make_shared<org::LatchBlock>("cs.exp-height-fog.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
 	fixed->gate = RenderGraph::RunGate::Create("cs.exp-height-fog.gate", 2 * static_cast<std::uint32_t>(Step::Count));
-	if (!fixed->linearSampler || !fixed->shadowSampler || !fixed->gate) {
-		logger::error("[ORG] Exponential Height Fog: a sampler or the run gate could not be made; the fog stays on D3D11");
-		return false;
-	}
-	impl = std::make_unique<Impl>();
-	impl->fixed = std::move(fixed);
-	logger::info("[ORG] Exponential Height Fog: the volumetric fog can run on the render graph");
-	return true;
+	if (!fixed->linearSampler || !fixed->shadowSampler)
+		Fatal("a sampler could not be made");
+	auto made = std::make_unique<Impl>();
+	made->fixed = std::move(fixed);
+	// The volumes exist from here on, for the session. The client follows the settings from the first revision.
+	made->DeclareTextures();
+	made->DeclareClient();
+	impl = std::move(made);
+	logger::info("[ORG] Exponential Height Fog: the volumetric fog runs on the render graph; its volumes and client follow the frame revisions");
 }
 
-bool ORGExponentialHeightFog::IsActive() const
+bool ORGExponentialHeightFog::VolumesOn() const
 {
-	return impl && !failed && RenderGraphRuntime::Get().IsActive();
+	const auto& adopted = RenderGraph::Frame::Revision::Adopted();
+	const auto& f = globals::features::exponentialHeightFog.settings;
+	return ExponentialHeightFog::VolumesOn(adopted.Get(f.enabled), adopted.Get(f.volumetricFogEnabled), adopted.Get(f.volumetricFogExtinctionScale),
+		adopted.Get(f.fogDensity), adopted.Get(f.fogDensity2));
 }
 
 bool ORGExponentialHeightFog::Prepass()
 {
-	if (!IsActive())
+	if (!IsActive() || Debug() == 3)
 		return false;
 	auto& fog = globals::features::exponentialHeightFog;
 	impl->pending.reset();
 
-	// A frame whose inputs the graph cannot read runs on D3D11.
-	Shape shape;
-	shape.sizes = fog.ComputeGridSizes();
-	shape.temporal = Util::GetTemporal();
-	const auto fallback = [&](const char* a_reason) {
-		if (impl->fallbackReason != a_reason) {
-			logger::info("[ORG] Exponential Height Fog: this frame runs on D3D11 ({})", a_reason);
-			impl->fallbackReason = a_reason;
-		}
+	// The adopted revision decides whether the volumes exist. Without them the frame has no volumetric fog.
+	if (!VolumesOn()) {
 		impl->ranLastFrame = false;
 		return false;
-	};
+	}
+
+	// Graph mode has no D3D11 fog. An input the graph should always have is fatal when missing. An input that is not
+	// there yet (another feature's first output) is left out: the client binds nothing for it and its flag is off.
+	FogSeen seen;
+	// Mode 8 runs without history, so no froxel reads a history texture.
+	seen.temporal = Util::GetTemporal() && Debug() != 8;
 
 	ExponentialHeightFog::ConstantInputs inputs;
-	inputs.sizes = shape.sizes;
+	inputs.sizes.nearSize = impl->textures->nearVolume.Size();
+	inputs.sizes.farSize = impl->textures->farVolume.Size();
 
-	shape.inputs[kDepth] = SceneDepth(Util::GetCurrentSceneDepthSRV(true));
-	if (!shape.inputs[kDepth])
-		return fallback("the scene depth is missing or cannot be imported");
+	seen.inputs[kDepth] = SceneDepth(Util::GetCurrentSceneDepthSRV(true));
+	if (!seen.inputs[kDepth])
+		Fatal("the scene depth is missing or is not the graph's");
 	inputs.depth = true;
 
 	LatchData data{};
@@ -945,33 +1132,13 @@ bool ORGExponentialHeightFog::Prepass()
 	// Null unless this frame drew the shadow mask, as the D3D11 path reads it.
 	auto* directionalShadowMap = globals::deferred ? globals::deferred->GetDirectionalShadowMap() : nullptr;
 	if (directionalShadowMap && hasShadowLight) {
-		shape.inputs[kDirectionalShadowMap] = ImportDepthView(directionalShadowMap, "cs.exp-height-fog.directional-shadow-map");
-		if (!shape.inputs[kDirectionalShadowMap])
-			return fallback("the directional shadow map cannot be imported");
+		seen.inputs[kDirectionalShadowMap] = ImportDepthView(directionalShadowMap, "cs.exp-height-fog.directional-shadow-map");
+		if (!seen.inputs[kDirectionalShadowMap])
+			Fatal("the directional shadow map cannot be imported");
 		inputs.directionalShadow = true;
 	}
 
-	auto& ibl = globals::features::ibl;
-	if (ibl.loaded && ibl.settings.EnableIBL != 0 && !ibl.IsDisabledForCurrentScene() && ibl.EnvIBLSRV() && ibl.SkyIBLSRV()) {
-		shape.inputs[kEnvIBL] = Published(ORGIBL::kEnvId, ibl.EnvIBLSRV());
-		shape.inputs[kSkyIBL] = Published(ORGIBL::kSkyId, ibl.SkyIBLSRV());
-		if (shape.inputs[kEnvIBL] && shape.inputs[kSkyIBL])
-			inputs.ibl = true;
-		else {
-			// IBL's SH views are not the exports, so the fog runs without IBL, which its constants turn off.
-			shape.inputs[kEnvIBL] = {};
-			shape.inputs[kSkyIBL] = {};
-		}
-	}
-
-	auto& skylighting = globals::features::skylighting;
-	if (skylighting.loaded && skylighting.ProbeArraySRV()) {
-		// A 3D texture, so only the graph's own probe volume can be read.
-		if (!PublishedResources::IsExportOf(skylighting.ProbeArraySRV(), ORGSkylighting::kProbeArrayId))
-			return fallback("Skylighting's probes are on D3D11");
-		shape.inputs[kProbes] = { nullptr, std::string(ORGSkylighting::kProbeArrayId) };
-		inputs.skylighting = true;
-	}
+	// IBL's SH and Skylighting's probes are in the client's key (DeclareClient), from the variables.
 
 	// Without the sky the shader skips terrain and cloud shadows, and Cloud Shadows binds nothing.
 	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
@@ -979,42 +1146,52 @@ bool ORGExponentialHeightFog::Prepass()
 
 	auto& terrainShadows = globals::features::terrainShadows;
 	if (terrainShadows.loaded && !skyless) {
-		shape.inputs[kShadowHeights] = Published(ORGTerrainShadows::kShadowHeightId, terrainShadows.GetShadowHeightSRV());
-		// The shader samples the heights without a null check, so a frame without them runs on D3D11.
-		if (!shape.inputs[kShadowHeights])
-			return fallback("Terrain Shadows' heights are missing or not published");
+		// None until Terrain Shadows made its heights for a heightmap. Then the scattering skips them (flag 256).
+		if (auto* heights = terrainShadows.GetShadowHeightSRV()) {
+			seen.inputs[kShadowHeights] = Published(ORGTerrainShadows::kShadowHeightId, heights);
+			if (!seen.inputs[kShadowHeights])
+				Fatal("Terrain Shadows' heights are on D3D11");
+			inputs.terrainShadows = true;
+		}
 	}
 
 	auto& cloudShadows = globals::features::cloudShadows;
 	if (cloudShadows.loaded && !skyless) {
-		// Use the cubemap Cloud Shadows binds at t25 for the frame, not whatever the slot holds now.
-		shape.inputs[kCloudShadows] = Published(ORGCloudShadows::kOcclusionId, cloudShadows.OcclusionSRV());
-		if (!shape.inputs[kCloudShadows])
-			return fallback("Cloud Shadows' texture is missing or not published");
+		// Cloud Shadows publishes its occlusion cubemap at setup, for the session (ORGCloudShadows).
+		seen.inputs[kCloudShadows] = { nullptr, std::string(ORGCloudShadows::kOcclusionId) };
+		inputs.cloudShadows = true;
 	}
 
+	// The scattering reads Physical Sky's transmittance LUT, and with the clouds on their shadow volume and its mean. The key binds
+	// the LUT (DeclareClient).
+	auto& physicalSky = globals::features::physicalSky;
+	if (physicalSky.loaded) {
+		inputs.physSkyTransmittance = true;
+		// The shader reads them only with the clouds on (the adopted enableVolumetricClouds). Until a cloud run wrote them they are
+		// left out, and the scattering skips them (flag 2048).
+		if (physicalSky.VolumetricCloudsEnabled() && ORGVolumetricClouds::OutputsWritten()) {
+			seen.inputs[kPhysSkyShadowVolume] = { nullptr, std::string(ORGVolumetricClouds::kShadowVolumeId) };
+			seen.inputs[kPhysSkyShadowMean] = { nullptr, std::string(ORGVolumetricClouds::kCloudShadowMeanId) };
+			inputs.physSkyShadowVolume = true;
+		}
+	}
+
+	// Light Limit Fix's culling lists are in the key (DeclareClient).
 	auto& lightLimitFix = globals::features::lightLimitFix;
-	if (lightLimitFix.loaded && lightLimitFix.GetLightsSRV() && lightLimitFix.GetLightIndexListSRV() && lightLimitFix.GetLightGridSRV()) {
-		if (!PublishedResources::IsExportOf(lightLimitFix.GetLightsSRV(), ORGLightCulling::kLightsId) ||
-			!PublishedResources::IsExportOf(lightLimitFix.GetLightIndexListSRV(), ORGLightCulling::kLightIndexListId) ||
-			!PublishedResources::IsExportOf(lightLimitFix.GetLightGridSRV(), ORGLightCulling::kLightGridId))
-			return fallback("Light Limit Fix's light lists are on D3D11");
-		shape.inputs[kLights] = { nullptr, std::string(ORGLightCulling::kLightsId) };
-		shape.inputs[kLightList] = { nullptr, std::string(ORGLightCulling::kLightIndexListId) };
-		shape.inputs[kLightGrid] = { nullptr, std::string(ORGLightCulling::kLightGridId) };
+	if (lightLimitFix.loaded) {
 		inputs.localLights = true;
 		if (lightLimitFix.IsLocalShadowCacheActive() && lightLimitFix.GetLocalShadowDataSRV()) {
 			if (!PublishedResources::IsExportOf(lightLimitFix.GetLocalShadowDataSRV(), ORGLocalShadows::kDataId) ||
 				!PublishedResources::IsExportOf(lightLimitFix.GetLocalShadowCacheSRV(), ORGLocalShadows::kCacheId))
-				return fallback("Light Limit Fix's local shadows are on D3D11");
-			shape.inputs[kLocalShadows] = { nullptr, std::string(ORGLocalShadows::kDataId) };
-			shape.inputs[kLocalShadowMaps] = { nullptr, std::string(ORGLocalShadows::kCacheId), true };
+				Fatal("Light Limit Fix's local shadows are on D3D11");
+			seen.inputs[kLocalShadows] = { nullptr, std::string(ORGLocalShadows::kDataId) };
+			seen.inputs[kLocalShadowMaps] = { nullptr, std::string(ORGLocalShadows::kCacheId), true };
 			inputs.localShadows = true;
 		}
 		if (auto* view = fog.BuildEngineLocalShadowData(data.engineShadows)) {
-			shape.inputs[kEngineShadowMaps] = ImportDepthView(view, "cs.exp-height-fog.engine-shadow-maps");
-			if (!shape.inputs[kEngineShadowMaps])
-				return fallback("the engine's shadow maps cannot be imported");
+			seen.inputs[kEngineShadowMaps] = ImportDepthView(view, "cs.exp-height-fog.engine-shadow-maps");
+			if (!seen.inputs[kEngineShadowMaps])
+				Fatal("the engine's shadow maps cannot be imported");
 			inputs.engineLocalShadows = true;
 		}
 	}
@@ -1022,92 +1199,77 @@ bool ORGExponentialHeightFog::Prepass()
 	// The far extent depends only on the settings and near plane.
 	bool farEnabled = false;
 	fog.BuildConstants(inputs, farEnabled);
-	shape.farEnabled = farEnabled;
+	// Mode 7 keeps the far volume cleared to no fog, so every reader sees only the near volume.
+	seen.farEnabled = farEnabled && Debug() != 7;
 
-	// A new extent alone becomes a new version at the next frame boundary, with no build. Other changes register new passes.
-	if (impl->textures)
-		impl->FollowSizes(shape.sizes);
-	if (!impl->state || !(impl->state->shape == shape)) {
-		if (!impl->Build(shape)) {
-			logger::error("[ORG] Exponential Height Fog returns to D3D11 for good");
-			FrameAnchors::Unregister(kClientId);
-			WithdrawIntegrated();
-			failed = true;
-			impl.reset();
-			return false;
-		}
-	}
+	// New inputs make a new client, registered when the next revision starts. This frame runs the client it has.
+	impl->observed.Observe(seen);
+	// The key is never empty while the volumes are on (FirstObservation), and declarations adopt at setup's build point.
+	if (!impl->state)
+		Fatal("a world frame has the volumes on but no client");
+	// The client's IBL and probe bindings, as its key found them. The scene's IBL switch is a constant.
+	const auto& bound = impl->state->shape.observed.inputs;
+	inputs.ibl = bound[kEnvIBL] && bound[kSkyIBL] && !globals::features::ibl.IsDisabledForCurrentScene();
+	inputs.skylighting = static_cast<bool>(bound[kProbes]);
 
-	// As the D3D11 Prepass keeps it.
+	// As the D3D11 Prepass keeps it. A history no run wrote yet holds none.
 	const std::uint32_t frame = globals::state->frameCount;
 	const bool consecutive = impl->lastFrame != UINT32_MAX && frame == impl->lastFrame + 1u;
-	inputs.temporal = shape.temporal;
-	inputs.historyValid = shape.temporal && impl->hasScatteringHistory && consecutive;
-	inputs.historyValidFar = shape.temporal && impl->hasScatteringHistoryFar && consecutive;
-	inputs.depthHistory = impl->hasDepthHistory;
-	inputs.depthHistoryFar = impl->hasDepthHistoryFar;
-	// May still be the old extents after a new size was asked for.
-	inputs.sizes.nearSize = impl->textures->nearVolume.size;
-	inputs.sizes.farSize = impl->textures->farVolume.size;
+	const bool temporal = impl->state->shape.observed.temporal;
+	inputs.temporal = temporal;
+	inputs.historyValid = temporal && impl->hasScatteringHistory && consecutive && impl->textures->nearVolume.HistoryWritten();
+	inputs.historyValidFar = temporal && impl->hasScatteringHistoryFar && consecutive && impl->textures->farVolume.HistoryWritten();
+	inputs.depthHistory = impl->hasDepthHistory && impl->textures->nearVolume.HistoryWritten();
+	inputs.depthHistoryFar = impl->hasDepthHistoryFar && impl->textures->farVolume.HistoryWritten();
 	data.fog = fog.BuildConstants(inputs, farEnabled);
+	if (ClearsHistories())
+		data.fog.historyParameters.w = 1.0f;
+	if (Debug() == 1) {
+		// No conservative depth and no previous one, so no froxel is culled by the scene depth.
+		data.fog.gridSizeAndFlags.w &= ~(2u | 16u);
+		data.fog.farGridSizeAndFlags.w &= ~(2u | 16u);
+	}
 	impl->pending = data;
+	if (!std::exchange(impl->reportedConstants, true)) {
+		const auto& f = data.fog;
+		const auto& s = fog.settings;
+		const auto camera = Util::GetCameraData();
+		logger::info(
+			"[ORG] Exponential Height Fog: the first graph frame: density {:.4f}/{:.4f}, extinction scale {:.3f}, albedo a {:.3f}; "
+			"near {}x{}x{} flags {:#x} z ({:.6g}, {:.6g}, {:.6g}); far {}x{}x{} flags {:#x} z ({:.6g}, {:.6g}, {:.6g}) range {:.0f}-{:.0f}{}; "
+			"camera data ({:.1f}, {:.2f}, {:.1f}, {:.1f}); depth from {}",
+			s.fogDensity.Get(), s.fogDensity2.Get(), s.volumetricFogExtinctionScale.Get(), s.volumetricFogAlbedo.w, f.gridSizeAndFlags.x, f.gridSizeAndFlags.y,
+			f.gridSizeAndFlags.z, f.gridSizeAndFlags.w, f.gridZParams.x, f.gridZParams.y, f.gridZParams.z, f.farGridSizeAndFlags.x,
+			f.farGridSizeAndFlags.y, f.farGridSizeAndFlags.z, f.farGridSizeAndFlags.w, f.farGridZParams.x, f.farGridZParams.y, f.farGridZParams.z,
+			f.farRange.x, f.farRange.y, farEnabled ? "" : " (off)", camera.x, camera.y, camera.z, camera.w,
+			seen.inputs[kDepth].resource ? "the engine's depth" : seen.inputs[kDepth].name);
+	}
 
-	impl->hasScatteringHistory = shape.temporal;
-	impl->hasDepthHistory = shape.temporal && inputs.depth;
-	impl->hasScatteringHistoryFar = shape.temporal && farEnabled;
-	impl->hasDepthHistoryFar = shape.temporal && farEnabled && inputs.depth;
-	impl->lastFrame = frame;
+	// The commit marks the histories, for the state the run executes.
 	impl->ranLastFrame = true;
-	impl->fallbackReason.clear();
 	return true;
+}
+
+bool ORGExponentialHeightFog::Readable() const
+{
+	// Mode 4 hands out versions no run wrote yet, as before the fix, to show what that does.
+	return IsActive() && impl->state && impl->ranLastFrame && (impl->IntegratedWritten() || Debug() == 4);
 }
 
 ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const
 {
-	return IsActive() && impl->state && impl->ranLastFrame ? impl->textures->nearVolume.integrated->SRV() : nullptr;
+	return Readable() ? impl->textures->nearVolume.integrated->SRV() : nullptr;
 }
 
 ID3D11ShaderResourceView* ORGExponentialHeightFog::FarSRV() const
 {
-	return IsActive() && impl->state && impl->ranLastFrame ? impl->textures->farVolume.integrated->SRV() : nullptr;
+	return Readable() ? impl->textures->farVolume.integrated->SRV() : nullptr;
 }
 
 std::optional<std::pair<std::uint32_t, std::uint32_t>> ORGExponentialHeightFog::Slices() const
 {
 	if (!NearSRV())
 		return std::nullopt;
-	return std::pair{ impl->textures->nearVolume.integrated->Desc().Depth, impl->textures->farVolume.integrated->Desc().Depth };
+	return std::pair{ impl->textures->nearVolume.Size().z, impl->textures->farVolume.Size().z };
 }
 
-void ORGExponentialHeightFog::Release()
-{
-	if (!impl || !impl->state)
-		return;
-	FrameAnchors::Unregister(kClientId);
-	WithdrawIntegrated();
-	impl->state.reset();
-	impl->textures.reset();
-	impl->pending.reset();
-	impl->hasScatteringHistory = impl->hasDepthHistory = impl->hasScatteringHistoryFar = impl->hasDepthHistoryFar = false;
-	impl->lastFrame = UINT32_MAX;
-	impl->ranLastFrame = false;
-	impl->fallbackReason.clear();
-}
-
-#else  // !CS_HAS_RENDER_GRAPH
-
-// Without OpenRenderGraph the volumetric fog always runs on D3D11.
-struct ORGExponentialHeightFog::Impl
-{};
-
-ORGExponentialHeightFog::~ORGExponentialHeightFog() = default;
-void ORGExponentialHeightFog::Reserve() {}
-bool ORGExponentialHeightFog::Setup() { return false; }
-bool ORGExponentialHeightFog::IsActive() const { return false; }
-bool ORGExponentialHeightFog::Prepass() { return false; }
-ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const { return nullptr; }
-ID3D11ShaderResourceView* ORGExponentialHeightFog::FarSRV() const { return nullptr; }
-std::optional<std::pair<std::uint32_t, std::uint32_t>> ORGExponentialHeightFog::Slices() const { return std::nullopt; }
-void ORGExponentialHeightFog::Release() {}
-
-#endif

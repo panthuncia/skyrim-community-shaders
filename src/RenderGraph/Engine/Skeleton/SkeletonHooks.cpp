@@ -1,8 +1,10 @@
 // The engine call sites of the frame skeleton. Each patch replaces a vtable call on the immediate context. The thunk either
 // hands the work to the skeleton or makes the same D3D11 call.
 
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
+#include "RenderGraph/Fatal.h"
 
 #include "Globals.h"
 
@@ -13,10 +15,9 @@
 
 namespace RenderGraph::Engine::Skeleton
 {
-#if defined(CS_HAS_RENDER_GRAPH)
 	namespace
 	{
-		// Inside ApplyState and SetDirtyStates the clears collect, and the bind that follows runs the graph first.
+		// Inside ApplyState and SetDirtyStates the clears collect.
 		void ClearTargetSite(ID3D11DeviceContext* a_context, ID3D11RenderTargetView* a_view, const FLOAT a_colour[4])
 		{
 			if (!Sites::TakeColourClear(a_context, a_view, a_colour))
@@ -29,18 +30,10 @@ namespace RenderGraph::Engine::Skeleton
 				a_context->ClearDepthStencilView(a_view, a_flags, a_depth, a_stencil);
 		}
 
-		void BindTargetsSite(ID3D11DeviceContext* a_context, UINT a_count, ID3D11RenderTargetView* const* a_views, ID3D11DepthStencilView* a_depth)
-		{
-			Sites::Flush();
-			a_context->OMSetRenderTargets(a_count, a_views, a_depth);
-		}
-
 		// Renderer::ClearDepthStencil (75466 / 77252). An immediate clear with no bind after it.
 		void ClearDepthNowSite(ID3D11DeviceContext* a_context, ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
 		{
-			if (Sites::TakeDepthClear(a_context, a_view, a_flags, a_depth, a_stencil))
-				Sites::Flush();
-			else
+			if (!Sites::TakeDepthClear(a_context, a_view, a_flags, a_depth, a_stencil))
 				a_context->ClearDepthStencilView(a_view, a_flags, a_depth, a_stencil);
 		}
 
@@ -61,10 +54,8 @@ namespace RenderGraph::Engine::Skeleton
 					if (index < RE::RENDER_TARGET::kTOTAL) {
 						auto* view = a_renderer->GetRuntimeData().renderTargets[index].RTV;
 						auto* context = reinterpret_cast<ID3D11DeviceContext*>(a_renderer->GetRuntimeData().context);
-						if (view && context && Sites::TakeColourClear(context, view, a_renderer->GetRendererData().clearColor)) {
-							Sites::Flush();
+						if (view && context && Sites::TakeColourClear(context, view, a_renderer->GetRendererData().clearColor))
 							return;
-						}
 					}
 				}
 				func(a_renderer);
@@ -84,23 +75,20 @@ namespace RenderGraph::Engine::Skeleton
 
 		constexpr std::array<std::uint8_t, 7> kClearTarget{ 0xFF, 0x90, 0x90, 0x01, 0x00, 0x00 };         // call [rax+0x190] ClearRenderTargetView
 		constexpr std::array<std::uint8_t, 7> kClearDepth{ 0xFF, 0x90, 0xA8, 0x01, 0x00, 0x00 };          // call [rax+0x1a8] ClearDepthStencilView
-		constexpr std::array<std::uint8_t, 7> kBindTargets{ 0xFF, 0x90, 0x08, 0x01, 0x00, 0x00 };         // call [rax+0x108] OMSetRenderTargets
 		constexpr std::array<std::uint8_t, 7> kCopy{ 0x41, 0xFF, 0x91, 0x78, 0x01, 0x00, 0x00 };          // call [r9+0x178] CopyResource
 		constexpr std::array<std::uint8_t, 7> kClearDepthR9{ 0x41, 0xFF, 0x91, 0xA8, 0x01, 0x00, 0x00 };  // call [r9+0x1a8] ClearDepthStencilView
 
-		const std::array<Site, 11>& PatchSites()
+		const std::array<Site, 9>& PatchSites()
 		{
-			static const std::array<Site, 11> sites{ {
+			static const std::array<Site, 9> sites{ {
 				// Renderer::ApplyState (SE 0x140d6a330, AE 0x140e44850).
 				{ "ApplyState cube clear", REL::RelocationID(75462, 77247), 0x85, 0x85, kClearTarget, 6, reinterpret_cast<void*>(&ClearTargetSite) },
 				{ "ApplyState target clear", REL::RelocationID(75462, 77247), 0xE1, 0xE1, kClearTarget, 6, reinterpret_cast<void*>(&ClearTargetSite) },
 				{ "ApplyState depth clear", REL::RelocationID(75462, 77247), 0x184, 0x184, kClearDepth, 6, reinterpret_cast<void*>(&ClearDepthSite) },
-				{ "ApplyState bind", REL::RelocationID(75462, 77247), 0x1A8, 0x1A8, kBindTargets, 6, reinterpret_cast<void*>(&BindTargetsSite) },
 				// BSGraphics::SetDirtyStates (SE 0x140d705b0, AE 0x140e4b5b0).
 				{ "SetDirtyStates cube clear", REL::RelocationID(75580, 77386), 0x8F, 0x8F, kClearTarget, 6, reinterpret_cast<void*>(&ClearTargetSite) },
 				{ "SetDirtyStates target clear", REL::RelocationID(75580, 77386), 0xF1, 0xF1, kClearTarget, 6, reinterpret_cast<void*>(&ClearTargetSite) },
 				{ "SetDirtyStates depth clear", REL::RelocationID(75580, 77386), 0x1B5, 0x1BC, kClearDepth, 6, reinterpret_cast<void*>(&ClearDepthSite) },
-				{ "SetDirtyStates bind", REL::RelocationID(75580, 77386), 0x1D9, 0x1E0, kBindTargets, 6, reinterpret_cast<void*>(&BindTargetsSite) },
 				// Renderer::ClearDepthStencil (SE 0x140d6a810, AE 0x140e44d30).
 				{ "ClearDepthStencil", REL::RelocationID(75466, 77252), 0x48, 0x48, kClearDepthR9, 7, reinterpret_cast<void*>(&ClearDepthNowSite) },
 				// Main::RenderDepth's end (SE 0x1412e3a43, AE 0x1414cd56f) and FinishAccumulating's copy (SE 0x1412cb07e, AE 0x1414b312d).
@@ -132,10 +120,10 @@ namespace RenderGraph::Engine::Skeleton
 
 	void Install()
 	{
-		if (!Requested())
+		if (!Engine::GraphMode())
 			return;
-		// A function's clears run at its bind, so its sites are patched all together or not at all.
-		// One site patched by another plugin leaves the whole function to the engine.
+		// A function's sites are patched all together or not at all.
+		// A site another plugin patched is fatal, since graph mode has no engine path for its clears.
 		const auto& sites = PatchSites();
 		std::array<bool, std::tuple_size_v<std::remove_cvref_t<decltype(sites)>>> matches{};
 		for (std::size_t i = 0; i < sites.size(); ++i)
@@ -145,11 +133,9 @@ namespace RenderGraph::Engine::Skeleton
 			bool whole = true;
 			for (std::size_t i = 0; i < sites.size(); ++i)
 				whole = whole && (sites[i].function.address() != site.function.address() || matches[i]);
-			if (!whole) {
-				logger::warn("[ORG] engine skeleton: {} at 0x{:X} is left to the engine: a call in its function is not the expected one (another plugin may patch it)",
-					site.name, AddressOf(site));
-				continue;
-			}
+			if (!whole)
+				RenderGraph::Fatal("engine skeleton", fmt::format("{} at 0x{:X}: a call in its function is not the expected one (another plugin may patch it)",
+															  site.name, AddressOf(site)));
 			Patch(site);
 			++patched;
 		}
@@ -158,11 +144,4 @@ namespace RenderGraph::Engine::Skeleton
 		logger::info("[ORG] engine skeleton: {} of {} engine call sites patched, Renderer::ClearColor {}", patched, sites.size(),
 			Renderer_ClearColor::func.address() ? "detoured" : "not detoured");
 	}
-#else
-	void Install()
-	{
-		if (Requested())
-			logger::warn("[ORG] engine skeleton: CS_ORG_ENGINE_SKELETON=1, but this build has no render graph");
-	}
-#endif
 }

@@ -36,7 +36,7 @@ One option and one SDK drive both backends. With it on:
 
 - the plugin links `nvperf_grfx_host.lib` (as the `NVPerf::Host` target) with
     `/DELAYLOAD:nvperf_grfx_host.dll` and defines `NVPERF_ENABLED` (the D3D11 backend);
-- when the render graph is built (`CS_HAS_RENDER_GRAPH`), OpenRenderGraph is built with
+- OpenRenderGraph is built with
     `ORG_ENABLE_NVPERF` against the same target (the Vulkan backend);
 - the AIO folder and `cmake --install` (component `DXVK`) get
     `SKSE/Plugins/CommunityShaders/bin/nvperf_grfx_host.dll`, beside the DXVK DLLs.
@@ -45,8 +45,7 @@ Both backends load the DLL from that one path the first time the profiler is use
 missing, profiling reports itself unavailable and nothing else changes.
 
 With the option off (CI, and wherever the SDK is absent), the profiler compiles to stubs: the panel
-and the devbench tool report that the build has no Nsight Perf. Without the render graph there is
-no Vulkan backend, and under DXVK the profiler then reports itself unavailable.
+and the devbench tool report that the build has no Nsight Perf.
 
 If a session fails with `NVPA_STATUS_INSUFFICIENT_PRIVILEGE`, enable GPU performance counters for
 all users in the NVIDIA Control Panel ([ERR_NVGPUCTRPERM](https://developer.nvidia.com/ERR_NVGPUCTRPERM)).

@@ -2,7 +2,7 @@
 
 // The CPU cull's wide kernels, in CullAvx2.cpp and CullAvx512.cpp. Each file is compiled for its own instruction set
 // without the game's PCH, and the kernel is chosen at run time by what the CPU and OS support. So this header uses plain types only.
-// Each kernel must match the SSE pass bit for bit, so keep its operation order and use no FMA (kExpCullWideCheck checks it).
+// Each kernel must match the SSE pass bit for bit, so keep its operation order and use no FMA.
 
 #include <cmath>
 #include <cstdint>
@@ -59,18 +59,9 @@ namespace DCLF::Direct::Simd
 	}
 
 	/**
-	 * @brief PortalPrograms' plane set test over up to 32 bounds, as a mask of a_lanes. Stops once every bound is decided.
-	 * Keep PortalDistance's order: ((n.y * c.y + n.x * c.x) + c.z * n.z) - d.
+	 * @brief PortalPrograms' plane set test over chunks of 16 bounds, as a mask of each chunk's lanes. Evaluates every active plane with
+	 * no early stop, so the loop stays predictable. Keep PortalDistance's order: ((n.y * c.y + n.x * c.x) + c.z * n.z) - d.
 	 */
-	using PlaneGroupFn = std::uint32_t (*)(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
-		std::uint32_t a_lanes);
-
-	std::uint32_t PlaneGroupAvx2(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
-		std::uint32_t a_lanes);
-	std::uint32_t PlaneGroupAvx512(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
-		std::uint32_t a_lanes);
-
-	/** @brief PlaneGroupFn over chunks of 16 bounds. Evaluates every active plane with no early stop, so the loop stays predictable. */
 	using PlaneChunksFn = void (*)(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
 		const std::uint16_t* a_lanes, std::uint16_t* a_pass, std::uint32_t a_chunks);
 
@@ -88,6 +79,4 @@ namespace DCLF::Direct::Simd
 	};
 	Level Supported();
 	const char* NameOf(Level a_level);
-	/** @brief The kernels the cull uses now, as far as kExpCullWide and kExpCullAvx512 allow. */
-	Level Chosen();
 }

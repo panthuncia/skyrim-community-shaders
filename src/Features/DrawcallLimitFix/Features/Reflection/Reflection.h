@@ -1,6 +1,6 @@
 #pragma once
 
-// Reflection (CS_DCLF_REFLECTIONS; dclf-architecture.md, "Water reflections"): DCLF draws the water reflection's cube map faces as
+// Reflection (dclf-architecture.md, "Water reflections"): DCLF draws the water reflection's cube map faces as
 // a view of the one scene. The feature registers the view's contribution and owns its engine hooks (ReflectionFaces), its per-frame
 // work (ReflectionView, ReflectionEpoch) and its diagnostics.
 // Core keeps what every bucketed view shares: the epoch's passes, slot state, target import, PassCapture withholding, tree LOD per
@@ -32,17 +32,8 @@ namespace DCLF::Features::Reflection
 	// TESWaterReflections::Update hides the player's third-person 3D and the water shapes around the cube faces.
 	void CullHiddenByUpdate(Api::CullHiddenNodes& a_nodes);
 	void FaceOriented(const RE::NiCamera& a_camera, std::uint32_t a_face);
-	void FaceDrawn();
 
 	// The faces' commit, inside the depth commit, and the report lines.
 	void Execute(const Api::ViewPointContext& a_context);
 	std::string Report();
-
-	// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY check of the faces' cameras against the engine's.
-	void SubscribeFaceCameraParity();
-
-	// Whether this update runs the residue watch: every 30th update under either parity switch.
-	bool ResidueDue();
-	void SubscribeResidue();
-	std::string ResidueKinds();
 }

@@ -96,7 +96,7 @@ namespace DCLF::Draws
 				return;
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_prepared.program->layout->GetHandle());
-			commands.BindPipeline(a_prepared.program->Pipeline());
+			commands.BindPipeline(a_prepared.program->Pipeline(a_recording));
 			const auto at = a_prepared.latch->At(a_recording.Run());
 			const std::uint64_t region = at.offset;
 			BuildDrawsConstants constants{};
@@ -218,7 +218,7 @@ namespace DCLF::Draws
 				return;
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_prepared.program->layout->GetHandle());
-			commands.BindPipeline(a_prepared.program->Pipeline());
+			commands.BindPipeline(a_prepared.program->Pipeline(a_recording));
 			const auto at = a_prepared.latch->At(a_recording.Run());
 			const std::uint64_t region = at.offset;
 			auto constants = a_prepared.constants;
@@ -477,7 +477,7 @@ namespace DCLF::Features::Shadows::Engine
 		std::shared_ptr<org::RenderPass> LatchedCopies(const Api::PassContext& a_context)
 		{
 			// The targets are read when the pass is declared, which may be after the build.
-			return Draws::MakeLatchedCopiesPass([shadow = a_context.Shadow(), slots = a_context.Build().shadowSlots, cpu = Draws::CurrentGraphConditions().cpuPipeline] {
+			return Draws::MakeLatchedCopiesPass(a_context.Conditions(), [shadow = a_context.Shadow(), slots = a_context.Build().shadowSlots, cpu = a_context.Conditions().cpuPipeline] {
 				return LatchedTargets(*shadow, *slots, cpu);
 			}, [](const org::PassPrepareContext& a_preparation) {
 				const auto frame = Draws::CurrentShadowFrame(a_preparation);

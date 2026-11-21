@@ -57,7 +57,4 @@ namespace RenderGraph::Frame::PostChain
 
 	/** @brief Fills a_frame.post at Renderer::Begin and counts structure changes. Render owner. */
 	void OnBegin(Description& a_frame);
-
-	/** @brief The census line for CS_ORG_EPOCH_STATS. */
-	void LogStats();
 }

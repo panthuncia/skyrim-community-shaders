@@ -1,21 +1,21 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/ShaderBindings.h"
 
-#	include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <OpenRenderGraph/Runtime.h>
-#	include <Render/Runtime/DescriptorServiceAccess.h>
-#	include <Render/Runtime/IDescriptorService.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <OpenRenderGraph/Runtime.h>
+#include <Render/Runtime/DescriptorServiceAccess.h>
+#include <Render/Runtime/IDescriptorService.h>
 
-#	include <algorithm>
-#	include <exception>
-#	include <iterator>
-#	include <memory>
+#include <algorithm>
+#include <array>
+#include <exception>
+#include <iterator>
+#include <memory>
+#include <mutex>
 
 namespace ShaderBindings
 {
@@ -120,6 +120,69 @@ namespace ShaderBindings
 		}
 	}
 
+	rhi::SamplerDesc SamplerDescOf(SamplerPreset a_preset)
+	{
+		rhi::SamplerDesc desc{};
+		const auto address = [&desc](rhi::AddressMode a_mode) { desc.addressU = desc.addressV = desc.addressW = a_mode; };
+		const auto point = [&desc] {
+			desc.minFilter = desc.magFilter = rhi::Filter::Nearest;
+			desc.mipFilter = rhi::MipFilter::Nearest;
+		};
+		switch (a_preset) {
+		case SamplerPreset::LinearClamp:
+			break;
+		case SamplerPreset::LinearWrap:
+			address(rhi::AddressMode::Wrap);
+			break;
+		case SamplerPreset::LinearMirror:
+			address(rhi::AddressMode::Mirror);
+			break;
+		case SamplerPreset::LinearBorder:
+			address(rhi::AddressMode::Border);
+			desc.borderPreset = rhi::BorderPreset::TransparentBlack;
+			break;
+		case SamplerPreset::PointClamp:
+			point();
+			break;
+		case SamplerPreset::PointBorderWhite:
+			point();
+			address(rhi::AddressMode::Border);
+			desc.borderPreset = rhi::BorderPreset::OpaqueWhite;
+			break;
+		default:
+			break;
+		}
+		return desc;
+	}
+
+	org::OwnedDescriptorBinding Sampler(SamplerPreset a_preset)
+	{
+		struct CachedSampler
+		{
+			std::weak_ptr<const void> device;
+			org::OwnedDescriptorBinding binding;
+		};
+		// Never freed: a binding released after the runtime at process exit would reach a heap that is gone.
+		static auto* const cache = new std::array<CachedSampler, static_cast<std::size_t>(SamplerPreset::kCount)>();
+		static std::mutex cacheLock;
+		const auto index = static_cast<std::size_t>(a_preset);
+		if (index >= cache->size()) {
+			logger::error("[ORG] A sampler was asked for with an unknown preset {}", index);
+			return {};
+		}
+		const auto device = RenderGraphRuntime::Get().DeviceOwner();
+		if (!device)
+			return CreateSampler(SamplerDescOf(a_preset));
+		const std::scoped_lock guard(cacheLock);
+		auto& entry = (*cache)[index];
+		const bool sameDevice = !entry.device.owner_before(device) && !device.owner_before(entry.device);
+		if (!entry.binding || !sameDevice) {
+			entry.binding = CreateSampler(SamplerDescOf(a_preset));
+			entry.device = entry.binding ? std::weak_ptr<const void>(device) : std::weak_ptr<const void>();
+		}
+		return entry.binding;
+	}
+
 	org::OwnedDescriptorBinding CreateShaderResourceView(rhi::Resource a_resource, std::shared_ptr<const void> a_owner, const rhi::SrvDesc& a_desc)
 	{
 		std::shared_ptr<org::runtime::IDescriptorService> retained;
@@ -140,4 +203,3 @@ namespace ShaderBindings
 	}
 }
 
-#endif

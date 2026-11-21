@@ -44,11 +44,10 @@ namespace DCLF
 		Evaluate,          // the first round: per-frame entries and those the events scheduled
 		GeometryScan,      // FinishDeltaWalk's geometry slot touches and the stale-slot object scan
 		LaterRounds,       // the rounds for stale and refreshed geometry slots
-		ShadowSets,        // RefreshShadowSets and its parity
+		ShadowSets,        // RefreshShadowSets
 		ObjectSweep,       // SweepObjectSlots (a full walk only)
 		SunCandidates,     // UpdateSunCandidates
 		FaceWalk,          // the components' walk end (ComponentsWalkEnded: Features/Faces' regions)
-		WalkReference,     // the walk's observers' dense reference (DenseReference)
 		Shading,           // NameShadingEvents: the shading events' slots named for FrameValues
 		Placements,        // PublishPlacementPlan: the roots taken, and the walk's plan for FrameValues
 		Joins,             // BuildAccumulatePhase, new pipelines' blocks, bindings, lookups
@@ -67,7 +66,7 @@ namespace DCLF
 	inline constexpr std::array<const char*, static_cast<std::size_t>(ScenePart::Count)> kScenePartNames{
 		"category nodes", "attach/detach", "validate", "structural events", "prologue", "sweep slots", "cull hidden bits",
 		"schedule", "switch events", "evaluate", "geometry scan", "later rounds", "shadow sets",
-		"object sweep", "sun candidates", "face walk", "walk parity", "shading", "placement plan", "joins", "commit", "publish",
+		"object sweep", "sun candidates", "face walk", "shading", "placement plan", "joins", "commit", "publish",
 		"evaluate (fan-out)", "evaluate merge", "joins (fan-out)", "joins merge", "subtrees (fan-out)", "subtrees merge"
 	};
 

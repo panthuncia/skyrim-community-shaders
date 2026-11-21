@@ -16,6 +16,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	BlendFactor,
 	MipBlendFactor)
 
+CODBloom::CODBloom()
+{
+	settings.MipBlendFactor.Bind(CS::SettingRegistry::Declare("PostProcessing.CODBloom.MipBlendFactor"));
+}
+
 void CODBloom::DrawSettings()
 {
 	ImGui::SliderFloat(T("feature.post_processing.codbloom.threshold", "Threshold"), &settings.Threshold, -7.f, 23.f, "%+.2f EV100");
@@ -36,9 +41,8 @@ void CODBloom::DrawSettings()
 	ImGui::SliderInt(T("feature.post_processing.codbloom.mip_level", "Mip Level"), &mipLevel, 1, (int)settings.MipBlendFactor.size(), "%d", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.codbloom.the_greater_the_level_the_blurrier_the_part", "The greater the level, the blurrier the part it controls"));
-	{
-		ImGui::SliderFloat(T("feature.post_processing.codbloom.intensity", "Intensity"), &settings.MipBlendFactor[mipLevel - 1], 0.f, 1.f, "%.2f");
-	}
+	// The factors are one setting, so an edit sets the whole array.
+	Util::SliderFloat(T("feature.post_processing.codbloom.intensity", "Intensity"), settings.MipBlendFactor[mipLevel - 1], 0.f, 1.f, "%.2f");
 }
 
 void CODBloom::DrawDebugSection()
@@ -206,7 +210,12 @@ CODBloom::BloomCB CODBloom::Constants(int a_mip) const
 
 int CODBloom::UsedMips() const
 {
-	return static_cast<int>(settings.MipBlendFactor[s_BloomMips - 2] == 0.f && settings.MipBlendFactor[s_BloomMips - 3] == 1.f ? s_BloomMips - 1 : s_BloomMips);
+	return UsedMipsFor(settings.MipBlendFactor.Get());
+}
+
+int CODBloom::UsedMipsFor(const std::array<float, s_BloomMips - 1>& a_factors)
+{
+	return static_cast<int>(a_factors[s_BloomMips - 2] == 0.f && a_factors[s_BloomMips - 3] == 1.f ? s_BloomMips - 1 : s_BloomMips);
 }
 
 void CODBloom::Draw(TextureInfo& inout_tex)

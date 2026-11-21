@@ -186,13 +186,9 @@ bool GraphicsAPI::Available(Mode a_mode)
 	case Mode::DXVK:
 		return true;
 	case Mode::NativeVulkan:
-#if defined(CS_HAS_RENDER_GRAPH)
 		return true;
-#else
-		return false;
-#endif
 	case Mode::NativeD3D12:
-#if defined(CS_HAS_RENDER_GRAPH) && defined(CS_ORG_HAS_D3D12)
+#if defined(CS_ORG_HAS_D3D12)
 		return true;
 #else
 		return false;

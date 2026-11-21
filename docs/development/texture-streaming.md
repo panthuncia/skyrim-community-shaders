@@ -257,8 +257,8 @@ were the same defect.
 | `dclf:tex-offset=<mips>` | How far what is on screen may step down over the budget |
 | `dclf:tex-dump=<name>` | Every texture's state to `texture-<name>.tsv`, and in the log how many material views draw their shell's current window |
 
-Scenarios: `tools/cs-ab/scenarios/tex-*.env`. Pass switches with `-Env`, for example
-`cs-ab.ps1 run dclf tex-stress -Env CS_DCLF_TEX_STREAM_DELAY_MS=100`. A streaming-off baseline needs `-Env CS_DCLF_TEX_STREAM=0`.
+The old cs-ab `tex-*` scenarios are in git history. With cs-test, pass switches with `--set` (a typed key) or a config's `[env]`, for
+example `CS_DCLF_TEX_STREAM_DELAY_MS=100`. A streaming-off baseline needs `CS_DCLF_TEX_STREAM=0`.
 
 ## Open questions
 

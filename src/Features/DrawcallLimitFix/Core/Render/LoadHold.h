@@ -10,6 +10,7 @@
 // Install and the hooks run on the main thread. Active and MenuHeld on any thread. The rest on the render thread.
 
 #include <cstdint>
+#include <string_view>
 
 namespace DCLF::LoadHold
 {
@@ -33,13 +34,18 @@ namespace DCLF::LoadHold
 	void NoteHeld(View a_view);
 
 	/**
-	 * @brief Render thread, before the shadow lights register. DCLF should draw the shadow views but cannot, so start a hold with
-	 * the presents held if DCLF has drawn before.
+	 * @brief Render thread. Starts a hold with the presents held, for a camera cut the set was not culled for (the map menu).
 	 */
 	void BeginReentry(const char* a_why);
 
+	/**
+	 * @brief Render thread. DCLF should draw a_view's shadow or occlusion views this frame but cannot. During a hold the view
+	 * is held and the hold waits for it. In a world frame outside a hold it is a tap error (Uncovered): nothing re-enters a hold for it.
+	 */
+	void NoteUndrawable(View a_view, std::string_view a_why);
+
 	/** @brief Render thread, frame start. The world's first frame under a held menu starts the hold. */
-	void OnFrameStart(bool a_running);
+	void OnFrameStart();
 	/** @brief Render thread, frame end. Judges the hold and ends it once settled. */
-	void OnFrameEnd(bool a_running);
+	void OnFrameEnd();
 }

@@ -1,5 +1,6 @@
 #include "Features/RemoteControl/Gpa.h"
 
+#include "DxvkExports.h"
 #include "DxvkLoader.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "RenderGraph/DxvkOrgInterop.h"
@@ -364,7 +365,7 @@ namespace GpuCounters::detail
 		// DXVK's device enables the driver's counter interface (it knows nothing of these extensions; DXVK's export adds them
 		// where the device has them).
 		if (a_dxvkModule) {
-			const auto request = reinterpret_cast<PFN_dxvkRequestDeviceExtensions>(::GetProcAddress(static_cast<HMODULE>(a_dxvkModule), "dxvkRequestDeviceExtensions"));
+			const auto request = DxvkExports::Get().requestDeviceExtensions;
 			const char* const extensions[] = { "VK_AMD_gpa_interface", "VK_AMD_shader_core_properties", "VK_AMD_shader_core_properties2" };
 			if (!request || FAILED(request(static_cast<uint32_t>(std::size(extensions)), extensions))) {
 				lib.ready = false;

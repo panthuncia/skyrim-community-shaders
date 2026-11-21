@@ -12,8 +12,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -29,7 +29,7 @@
 #include <Tracy/Tracy.hpp>
 
 #include <OpenRenderGraph/GraphHost.h>
-#include <ORGModuleServices/PipelineService.h>
+#include <ORGModuleServices/PipelineRegistry.h>
 #include <rhi_helpers.h>
 
 #include <algorithm>
@@ -126,27 +126,19 @@ namespace DCLF
 			return;
 		const auto& inputTargets = input->targets;
 		const auto blend = state->second.blend;
-		org::services::PipelineRecipe recipe;
-		recipe.id = fmt::format("dclf.{}", family.keyName);
-		// The depth vertex stage is left out so existing pipeline cache keys stay valid. The second colour program is mixed in only when present.
-		recipe.shaderKey = ModuleHash(drawProgram->vertex) ^ ModuleHash(drawProgram->pixel) * 0x9E3779B97F4A7C15ull ^ ModuleHash(drawProgram->depthPixel);
-		if (!drawProgram->vertex2.empty())
-			recipe.shaderKey ^= (ModuleHash(drawProgram->vertex2) ^ ModuleHash(drawProgram->pixel2) * 0x9E3779B97F4A7C15ull) * 0xC2B2AE3D27D4EB4Full;
-		recipe.fixedFunctionKey = ankerl::unordered_dense::detail::wyhash::hash(&inputTargets, sizeof(inputTargets)) ^
-		                          ankerl::unordered_dense::detail::wyhash::hash(&blend, sizeof(blend)) * 0x9E3779B97F4A7C15ull;
+		const std::string id = fmt::format("dclf.{}", family.keyName);
 		const auto build = [device = device, zLayout = zLayout->GetHandle(), formats = inputTargets, blend, frontCCW = *input->frontCCW, colours = program.colours,
 							   label = std::string_view(family.label)](const ShaderPrograms::DrawProgram& a_program) {
 			return BuildDrawFamily(device, zLayout, &a_program, colours, formats, blend, frontCCW, label);
 		};
-		recipe.build = [build, drawProgram] { return build(*drawProgram); };
-		auto live = MakeLive(recipe.id, ShaderPrograms::SourcePathOf(*input->drawFamilySource[f]), *drawProgram,
+		auto live = MakeLive(id, ShaderPrograms::SourcePathOf(*input->drawFamilySource[f]), *drawProgram,
 			[a_family, shader = input->drawFamilySource[f]](ShaderPrograms::Rebuilt<ShaderPrograms::DrawProgram> a_done) {
 				ShaderPrograms::Get().RebuildDrawFamily(a_family, *shader, std::move(a_done));
 			},
 			build);
 		t.requested = true;
-		(void)service.Request(std::move(recipe),
-			[completions = completions, f, generation = lane.generation, live = std::move(live)](const org::services::PipelineArtifact& a_artifact) {
+		RequestBuild([build, drawProgram] { return build(*drawProgram); },
+			[completions = completions, f, generation = lane.generation, live = std::move(live)](Artifact a_artifact) {
 				completions->family[f].Push({ generation, a_artifact, live });
 				WakePipelineLane();
 			});
@@ -160,7 +152,7 @@ namespace DCLF
 			const auto& family = Extensions::DrawFamilies()[d];
 			completions->family[d].Drain([&](FamilyDone&& a_done) {
 				if (a_done.generation != lane.generation)
-					return;  // from before a target change
+					return;  // from an earlier generation
 				lane.dirty = true;
 				if (!a_done.artifact) {
 					t.failed = true;
@@ -256,14 +248,13 @@ namespace DCLF
 
 	struct ForwardPipelineAccess
 	{
-		static bool Family(const PipelineCatalog* a_catalog, Api::DrawFamily a_family, std::uint32_t a_targetsGeneration, FamilyPipelines& a_out)
+		static bool Family(const PipelineCatalog* a_catalog, Api::DrawFamily a_family, FamilyPipelines& a_out)
 		{
 			auto& drawPipelines = DrawPipelines::Get();
 			const auto& impl = *drawPipelines.impl;
 			const auto f = static_cast<std::size_t>(a_family);
-			// None once the targets changed after the catalog was built.
 			const auto& signature = impl.FamilySignature(a_family);
-			if (!a_catalog || !a_catalog->families[f].pipelines || a_catalog->targetsGeneration != a_targetsGeneration || !signature)
+			if (!a_catalog || !a_catalog->families[f].pipelines || !signature)
 				return false;
 			const auto* built = static_cast<const DrawPipelines::Impl::FamilyBuilt*>(a_catalog->families[f].pipelines.get());
 			const bool instanceWord = Extensions::DrawFamilyOf(a_family).contribution.program.signature == Api::DrawFamilySignature::InstanceWordDrawInstanced;
@@ -275,11 +266,6 @@ namespace DCLF
 
 	bool CatalogFamilyPipelines(const PipelineCatalog* a_catalog, Api::DrawFamily a_family, FamilyPipelines& a_out)
 	{
-		return ForwardPipelineAccess::Family(a_catalog, a_family, DrawPipelines::Get().Generation(), a_out);
-	}
-
-	bool CatalogFamilyPipelines(const PipelineCatalog* a_catalog, Api::DrawFamily a_family, std::uint32_t a_targetsGeneration, FamilyPipelines& a_out)
-	{
-		return ForwardPipelineAccess::Family(a_catalog, a_family, a_targetsGeneration, a_out);
+		return ForwardPipelineAccess::Family(a_catalog, a_family, a_out);
 	}
 }

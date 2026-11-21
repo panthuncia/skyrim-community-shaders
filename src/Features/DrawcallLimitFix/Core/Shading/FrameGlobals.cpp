@@ -317,7 +317,7 @@ namespace DCLF
 			const auto& views = Extensions::Views();
 			for (std::uint32_t i = 0; i < views.rootCount && !subtreeRoot; ++i) {
 				const auto view = views.rootViews[i];
-				if (!Extensions::ViewOn(SceneToggles(), view))
+				if (!Extensions::ViewRegistered(view))
 					continue;
 				Api::ViewRootCapture root;
 				Extensions::ViewEntryOf(view).captureRoot(root);

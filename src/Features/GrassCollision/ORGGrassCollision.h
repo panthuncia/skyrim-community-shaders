@@ -1,23 +1,28 @@
 #pragma once
 
+#include "RenderGraph/Port.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <d3d11.h>
 #include <functional>
 #include <memory>
 #include <span>
+#include <string_view>
 
 /**
-* @brief Grass Collision's update as render-graph passes at EarlyPrepass, with CS_ORG_GRASS_COLLISION=1.
+* @brief Grass Collision's update as render-graph passes at EarlyPrepass, in graph mode.
 *
 * A copy moves the frame's colliders from the latch into graph buffers, then the update writes the 512x512 collision texture.
 * The texture is History, since each update reads the last frame's. It is exported for the engine's grass at t100 and published for DCLF.
 * EarlyPrepass runs after Main::Update queued the colliders and before every main-view grass draw.
-* Setup returns false on failure and Grass Collision keeps D3D11. Render thread throughout. Free of ORG/Vulkan includes.
+* In graph mode a setup failure is fatal. Render thread throughout. Free of ORG/Vulkan includes.
 */
-class ORGGrassCollision
+class ORGGrassCollision : public RenderGraph::Port<ORGGrassCollision>
 {
 public:
+	static constexpr std::string_view kName = "Grass Collision";
+
 	/** @brief The D3D11 path's limits and strides. */
 	struct Limits
 	{
@@ -38,18 +43,11 @@ public:
 		bool enabled = true;                   // off clears the texture, as the D3D11 path does
 	};
 
-	static ORGGrassCollision& Get();
-
-	static bool Requested();
-
-	/** @brief Grass Collision's PostPostLoad, before the render graph initializes. */
-	static void Reserve();
-
-	/** @brief At SetupResources with the runtime active. @return False keeps Grass Collision on D3D11. */
+	/**
+	* @brief At SetupResources. In graph mode a failure is fatal.
+	* @return True when the update runs on the graph. False outside graph mode, where Grass Collision uses D3D11.
+	*/
 	bool Setup(const Limits& a_limits);
-
-	/** @brief Set up, not failed, and the runtime still up. */
-	bool IsActive() const;
 
 	/**
 	* @brief Call before each EarlyPrepass run. Sizes past the limits are cut. Only a frame that staged opens the update,
@@ -59,11 +57,11 @@ public:
 
 	/** @brief Null when inactive. */
 	ID3D11ShaderResourceView* CollisionSRV() const;
-
 	~ORGGrassCollision();
 
 private:
-	ORGGrassCollision() = default;
+	friend class RenderGraph::Port<ORGGrassCollision>;
+	ORGGrassCollision();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

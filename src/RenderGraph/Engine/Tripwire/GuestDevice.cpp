@@ -1,5 +1,6 @@
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 
+#include "Globals.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
@@ -26,7 +27,7 @@ namespace RenderGraph::Engine::Tripwire
 
 	bool GuestRequested()
 	{
-		static const bool requested = Native::GraphMode() && !Native::Requested();
+		static const bool requested = Engine::GraphMode() && !Native::Requested();
 		return requested;
 	}
 
@@ -93,5 +94,12 @@ namespace RenderGraph::Engine::Tripwire
 	bool GuestContextInstalled()
 	{
 		return GetGuest().context.load(std::memory_order_acquire) != nullptr;
+	}
+
+	ID3D11DeviceContext* EngineContext()
+	{
+		if (auto* context = GetGuest().context.load(std::memory_order_acquire))
+			return context;
+		return globals::d3d::context;
 	}
 }

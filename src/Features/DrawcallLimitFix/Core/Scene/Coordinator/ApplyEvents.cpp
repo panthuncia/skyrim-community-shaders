@@ -2,6 +2,7 @@
 // it with the mirror first, and the retired batch goes back through the retirement chain.
 
 #include "Internal.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
@@ -13,7 +14,8 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
 #include "TextureStreaming/Streamer.h"
-#include "Utils/SwitchFile.h"
+
+#include "RenderGraph/Frame/FrameDriver.h"
 
 namespace DCLF::Scene
 {
@@ -40,20 +42,6 @@ namespace DCLF::Scene
 				count += keys.size();
 			return count;
 		}
-
-		bool CellTraceOn()
-		{
-			static const bool on = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
-			return on;
-		}
-
-		struct CellTraceRef
-		{
-			std::uint32_t added = 0, refiled = 0, same = 0, moved = 0, erased = 0;
-			const void* fromCategory = nullptr;
-			const void* toCategory = nullptr;
-			std::string events;
-		};
 	}
 
 	struct Coordinator::BatchIndex
@@ -146,7 +134,6 @@ namespace DCLF::Scene
 	void Coordinator::DrainMaterialCaptures()
 	{
 		auto& s = materialSnapshotStats;
-		const bool parity = Diagnostics::Observe().scene && Diagnostics::ParityDue(passSerial, kMaterialDedupParityOffset);
 		struct AlphaWritten
 		{
 			const RE::BSShaderMaterial* material;
@@ -202,8 +189,6 @@ namespace DCLF::Scene
 					if (materialDependents.contains(material))
 						++materialRecordStats.transformsWatched;
 				}
-				if (parity && !entry.listed)
-					materialsDeduped.push_back(material);
 				return;
 			}
 			if (entry.listed) {
@@ -374,25 +359,6 @@ namespace DCLF::Scene
 		std::size_t nextPrep = 0;
 		double mergeMs = 0.0;
 		double ancestorMs = 0.0, serialMs = 0.0;
-		const bool trace = CellTraceOn();
-		struct CellTraceBefore
-		{
-			const void* event = nullptr;
-			bool tracked = false;
-			const void* category = nullptr;
-		};
-		ankerl::unordered_dense::map<RE::BSGeometry*, CellTraceBefore> traceBefore;
-		if (trace)
-			for (const auto* event : a_index.structural)
-				if (event->type == SceneTracker::EventType::Attached && event->node)
-					ForEachMirror(mirror, event->node.get(), [&](const void* a_key, const SceneCapture::NodeRecord& a_record) {
-						if (a_record.kind & SceneCapture::kKindGeometry) {
-							auto* geometry = static_cast<RE::BSGeometry*>(const_cast<void*>(a_key));
-							const auto it = tracked.find(geometry);
-							traceBefore.try_emplace(geometry, CellTraceBefore{ event, it != tracked.end(), it != tracked.end() ? it->second.categoryNode : nullptr });
-						}
-						return true;
-					}, kMaxEventNodes);
 		for (auto* event : a_index.structural) {
 			// Its subtree changed, which its primary-cut plan reads.
 			if (!event->ancestors.empty() && !sunTable.index.empty()) {
@@ -431,70 +397,7 @@ namespace DCLF::Scene
 		}
 		a.ancestorMs += ancestorMs;
 		a.mergeMs += mergeMs + serialMs;
-		ankerl::unordered_dense::map<const void*, CellTraceRef> traceRefs;
-		ankerl::unordered_dense::set<RE::BSGeometry*> traceDetached;
-		if (trace) {
-			ankerl::unordered_dense::map<const void*, const void*> eventRef;
-			for (const auto& [geometry, was] : traceBefore) {
-				const auto it = tracked.find(geometry);
-				if (it == tracked.end() || !it->second.ownerReference)
-					continue;
-				auto& ref = traceRefs[it->second.ownerReference];
-				eventRef.try_emplace(was.event, it->second.ownerReference);
-				if (!was.tracked)
-					++ref.added;
-				else if (was.category != it->second.categoryNode) {
-					++ref.refiled;
-					ref.fromCategory = was.category;
-					ref.toCategory = it->second.categoryNode;
-				} else
-					++ref.same;
-			}
-			for (auto* geometry : detached) {
-				const auto it = tracked.find(geometry);
-				if (it == tracked.end() || !it->second.ownerReference || !traceDetached.insert(geometry).second)
-					continue;
-				auto& ref = traceRefs[it->second.ownerReference];
-				++(FindCategoryNode(geometry, nullptr) ? ref.moved : ref.erased);
-				ref.fromCategory = ref.fromCategory ? ref.fromCategory : it->second.categoryNode;
-			}
-			for (std::size_t i = 0; i < a_index.structural.size(); ++i) {
-				const auto* event = a_index.structural[i];
-				const void* owner = nullptr;
-				if (event->type == SceneTracker::EventType::Attached) {
-					const auto at = eventRef.find(event);
-					owner = at != eventRef.end() ? at->second : nullptr;
-				} else
-					for (auto* geometry : event->removed)
-						if (const auto it = tracked.find(geometry); it != tracked.end() && it->second.ownerReference) {
-							owner = it->second.ownerReference;
-							break;
-						}
-				if (!owner)
-					continue;
-				auto& ref = traceRefs[owner];
-				if (event->type == SceneTracker::EventType::Attached)
-					ref.events += fmt::format(" #{} attach {} under {} (thread {} frame {})", i, static_cast<const void*>(event->node.get()), mirror.Parent(event->node.get()),
-						event->thread, event->stampFrame);
-				else
-					ref.events += fmt::format(" #{} detach {} from {} ({} geometries, thread {} frame {})", i, event->detachedRoot, event->ancestors.empty() ? nullptr : event->ancestors.front(),
-						event->removed.size(), event->thread, event->stampFrame);
-			}
-		}
 		ApplyDetaches(detached);
-		if (trace && !traceRefs.empty()) {
-			ankerl::unordered_dense::map<const void*, std::uint32_t> counts;
-			for (const auto& [geometry, entry] : tracked)
-				if (entry.ownerReference && traceRefs.contains(entry.ownerReference))
-					++counts[entry.ownerReference];
-			for (const auto& [owner, ref] : traceRefs)
-				logger::info("[DCLF] cell trace: pass {} frame {} ref {}:{}; added {}, re-filed {} ({} -> {}), unchanged {}, detached but kept {}, erased {}; tracked now {}",
-					passSerial, sceneFrame, owner, ref.events, ref.added, ref.refiled, ref.fromCategory, ref.toCategory, ref.same, ref.moved, ref.erased, counts[owner]);
-		}
-		if (Policy::CheckCategoryMembers(false, passSerial))
-			CheckCategoryMembers("the attach/detach merge");
-		if (Policy::CheckAncestorKeys(passSerial))
-			CheckAncestorKeys();
 	}
 
 	void Coordinator::ApplyDetaches(const std::vector<RE::BSGeometry*>& a_detached)
@@ -569,9 +472,6 @@ namespace DCLF::Scene
 			}
 			return;
 		}
-		// Only while DCLF runs, since its frames publish the import context the requests are answered with.
-		if (!ShellState::Running())
-			return;
 		for (const auto* records : a_index.leaves)
 			for (const auto& property : records->properties) {
 				auto* view = property.diffuseHeld.get();
@@ -597,7 +497,7 @@ namespace DCLF::Scene
 		a.mirrorCaptures += captures.size();
 		a.mirrorRecords += records;
 		mirrorPreps.resize(captures.size());
-		const std::uint32_t frame = SceneCapture::Frame();
+		const std::uint32_t frame = DCLF::SceneClock::Step();
 		const std::size_t jobs = captures.size() * SceneMirror::kTypes;
 		auto body = [&](std::size_t a_begin, std::size_t a_end) {
 			DCLF_ZONE("CS.DCLF.Scene.Mirror.PrepareShards");
@@ -608,7 +508,7 @@ namespace DCLF::Scene
 		const auto start = std::chrono::steady_clock::now();
 		if (FanoutMode(records, kMirrorFanoutRecords) == 2) {
 			++a.mirrorPooled;
-			SceneScheduler::Executor().ParallelFor("CS.DCLF.Scene.Mirror.Prepare", jobs, 2, body);
+			::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.Scene.Mirror.Prepare", jobs, 2, body);
 		} else {
 			body(0, jobs);
 		}
@@ -698,7 +598,6 @@ namespace DCLF::Scene
 	void Coordinator::ApplyMirrorEvents(const EventBatch& a_batch, BatchIndex& a_index)
 	{
 		DCLF_ZONE("CS.DCLF.Scene.Mirror");
-		mirror.SetChecking(Policy::CheckMirrorApply());
 		mirror.BeginBatch();
 		std::vector<const SceneCapture::Records*> captures;
 		std::size_t records = 0;
@@ -761,9 +660,6 @@ namespace DCLF::Scene
 		assert(nextPrep == mirrorPreps.size());
 		mirrorPreps.clear();
 		attachStats.mirrorApplyMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - applyStart).count();
-		if (Policy::CheckMirrorUses(passSerial))
-			CheckMirrorRecordUses();
-		RecheckDeferredReads();
 		Diagnostics::Notify(Diagnostics::MirrorEventsApplied{ *this, std::span(a_batch.channelKeys).first(Extensions::RegisteredEngineChannels().size()) });
 	}
 
@@ -804,23 +700,6 @@ namespace DCLF::Scene
 		attach.replaysWalked += work.replaysWalked;
 		attach.updatesKept += work.remembered;
 		attach.updatesForgotten += work.forgotten;
-		attach.applyChecks += work.skipsChecked + work.preparedChecked + work.logsChecked;
-		const std::uint64_t wrong = work.skipsWrong + work.preparedWrong + work.logsWrong;
-		if (wrong && attach.applyWrong == 0)
-			logger::warn("[DCLF] scene mirror apply (W8) at pass {}: {} skipped replays that had updates to apply, {} prepared captures unlike their records, {} update logs "
-						 "unlike their chains <- MIRROR APPLY",
-				passSerial, work.skipsWrong, work.preparedWrong, work.logsWrong);
-		attach.applyWrong += wrong;
-	}
-
-	void Coordinator::CheckMirrorRecordUses()
-	{
-		++attachStats.usesChecks;
-		if (const std::size_t unused = mirror.UnusedRecords()) {
-			if (attachStats.usesUnused == 0)
-				logger::warn("[DCLF] scene mirror: {} property or alpha records no geometry counts after pass {}'s captures <- MIRROR USES", unused, passSerial);
-			attachStats.usesUnused += unused;
-		}
 	}
 
 	void Coordinator::ApplySwitchEvents(bool a_full)
@@ -836,8 +715,6 @@ namespace DCLF::Scene
 			if (!pending.structural && record->switchIndex == pending.before)
 				continue;
 			++MirrorReads().reads[static_cast<std::size_t>(MirrorRead::SwitchEvent)];
-			if (!a_full)
-				Diagnostics::Notify(Diagnostics::TrackedBelowRead{ *this, MirrorRead::SwitchEvent, node });
 			++delta.switchChanges;
 			switchesApplied.push_back(node);
 			ComponentsSwitched(node);
@@ -868,7 +745,6 @@ namespace DCLF::Scene
 		if (Extensions::OwnerClassOf(*record).ownMotion)
 			return;
 		++MirrorReads().reads[static_cast<std::size_t>(MirrorRead::NodeEvent)];
-		Diagnostics::Notify(Diagnostics::TrackedBelowRead{ *this, MirrorRead::NodeEvent, a_node });
 		auto placedEveryFrame = [](const Tracked& a_tracked) {
 			return a_tracked.perFrame && (!a_tracked.lightTraits || (a_tracked.lightTraits & (kTraitMoves | kTraitRootMoves)));
 		};
@@ -941,7 +817,10 @@ namespace DCLF::Scene
 				pendingEvaluation.push_back(it->first);
 			}
 		}
+		// A missed detach is a defect: fatal in development builds. Release counts it and drops the entry.
 		for (auto* geometry : stale) {
+			::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::SceneMismatch, ::RenderGraph::Frame::SegmentId::Count,
+				fmt::format("tracked-set check: geometry {} is tracked under a category node it no longer has (a missed detach)", fmt::ptr(geometry)));
 			EraseTracked(geometry);
 			++stats.validationDrops;
 		}
@@ -960,7 +839,6 @@ namespace DCLF::Scene
 			a_tracked.hiddenChain.push_back(object);
 			List(hiddenDependents, hiddenDependentsAt, object, a_geometry);
 		}
-		Diagnostics::Notify(Diagnostics::HiddenChainRead{ *this, a_geometry, a_tracked.categoryNode, a_tracked.hiddenChain });
 	}
 
 	void Coordinator::UnlistHiddenChain(RE::BSGeometry* a_geometry, Tracked& a_tracked)
@@ -1037,6 +915,5 @@ namespace DCLF::Scene
 			}
 		stats.hiddenRetaken += retake.size();
 		hiddenGating = hiddenEventsInstalled && sceneFrame > moveUngatedThrough;
-		hiddenWitness = hiddenGating && Policy::HiddenWitness(passSerial);
 	}
 }

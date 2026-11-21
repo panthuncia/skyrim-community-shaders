@@ -39,9 +39,4 @@ namespace DCLF::Diagnostics
 	{
 	};
 
-	/** @brief A reference's 3D was placed in its cell and its fade node's statics just set. Engine thread. */
-	struct FadeStaticsPlaced
-	{
-		const RE::NiAVObject* fade;
-	};
 }

@@ -6,10 +6,7 @@ namespace DCLF::Features::HiddenNodes
 {
 	namespace
 	{
-		void Install(Api::InstallContext& a_context)
-		{
-			RegisterWatch(a_context);
-		}
+		void Install(Api::InstallContext&) {}
 	}
 
 	Api::Feature Feature()

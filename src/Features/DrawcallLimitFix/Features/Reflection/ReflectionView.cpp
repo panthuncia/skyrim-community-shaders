@@ -9,8 +9,6 @@
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 namespace DCLF::Features::Reflection
 {
@@ -54,7 +52,6 @@ namespace DCLF::Features::Reflection
 		if (!state)
 			return;
 		auto& reflection = FrameState();
-		reflection.orientedFace = a_face;
 		// Only a plain face render is DCLF's.
 		if (!ReflectionFaces::Plain() || a_face >= kFaces)
 			return;
@@ -69,7 +66,7 @@ namespace DCLF::Features::Reflection
 				static_cast<int>(targets.colour), static_cast<int>(state->targets.depth), static_cast<int>(targets.depth));
 		draws.SetViewTargets(kView, targets);
 		++reflection.facesCaptured;
-		if (reflection.executedFrame == Scene::FrameView::Get().GetFrame())
+		if (reflection.executedFrame == Scene::FrameView::Get().SceneStep())
 			++reflection.lateFaces;
 		auto& face = reflection.faces[a_face];
 		face = {};
@@ -85,11 +82,6 @@ namespace DCLF::Features::Reflection
 		reflection.cube = std::move(target.texture);
 		reflection.width = target.width;
 		reflection.height = target.height;
-	}
-
-	void FaceDrawn()
-	{
-		Diagnostics::Notify(Diagnostics::ReflectionFaceDrawn{});
 	}
 
 	void Prepare(const Api::ViewPointContext& a_context)
@@ -108,7 +100,7 @@ namespace DCLF::Features::Reflection
 					draws.SetViewTargets(kView, { TargetOf(face).format, DXGI_FORMAT_D24_UNORM_S8_UINT });
 					draws.PostViewInputs();
 				}
-		const bool on = state->targets.colour != DXGI_FORMAT_UNKNOWN && Extensions::ViewOn(ActiveToggles(), kView) && !a_context.failed;
+		const bool on = state->targets.colour != DXGI_FORMAT_UNKNOWN && Extensions::ViewRegistered(kView);
 		auto& drawPipelines = DrawPipelines::Get();
 		if (on)
 			drawPipelines.SetViewForwardTargets(kView, state->targets);

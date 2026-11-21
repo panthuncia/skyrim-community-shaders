@@ -12,12 +12,9 @@
 #include <utility>
 #include <vector>
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "Utils/DxcShaderStore.h"
+#include "Utils/DxcShaderStore.h"
 
-#	include <Render/PipelineDesc.h>
-#	include <rhi.h>
-#endif
+#include <rhi.h>
 
 namespace RE::BSGraphics
 {
@@ -27,33 +24,21 @@ namespace RE::BSGraphics
 }
 
 /**
-* @brief Descriptions of the engine's shaders, input layouts, state objects and queries, for building ORG pipelines.
+* @brief Descriptions of the engine's shaders, input layouts, state objects and queries.
 *
-* With CS_ORG_ENGINE_SHADERS=1 every shader and input layout is described at creation. State objects and queries are described
-* from GetDesc on first lookup, with or without the switch. A token in the object's private data removes the description
+* In graph mode every shader and input layout is described at creation. State objects and queries are described
+* from GetDesc on first lookup, in any mode. A token in the object's private data removes the description
 * when the object goes. Every Find accepts a tripwire handle or a D3D11 object and returns null if nothing was described.
 * Any thread.
 */
 namespace RenderGraph::Engine::Pipeline
 {
-	/** @brief Read once. */
-	bool Enabled();
-
-#if defined(CS_HAS_RENDER_GRAPH)
 
 	enum class Stage : std::uint8_t
 	{
 		Vertex,
 		Pixel,
 		Compute
-	};
-
-	struct ShaderSource
-	{
-		std::uint32_t shaderType = 0;
-		std::uint32_t descriptor = 0;
-		std::wstring path;  ///< under Data/Shaders
-		std::vector<std::pair<std::string, std::string>> defines;  ///< ShaderCache::GetCompileDefines at creation
 	};
 
 	class ShaderDescription
@@ -65,37 +50,12 @@ namespace RenderGraph::Engine::Pipeline
 
 		const Stage stage;
 		const std::vector<std::uint8_t> bytecode;
-		const org::services::ShaderStoreHash hash;
-		/** @brief Empty for FXC's DXBC. Bindings follow DXVK's ABI. */
-		const std::vector<std::uint32_t> spirv;
-
-		/** @brief Read on first use. Null when it cannot be read. */
-		const Util::ShaderReflection* Reflection() const;
-
-		/** @brief Null for the engine's own vanilla shaders. */
-		std::shared_ptr<const ShaderSource> Source() const { return source.load(std::memory_order_acquire); }
-
-		/** @brief Called once, after creation. */
-		void SetSource(std::shared_ptr<const ShaderSource> a_source) const { source.store(std::move(a_source), std::memory_order_release); }
-
-		/** @brief Nothing without a source. */
-		std::optional<org::PipelineShaderSource> PipelineSource() const;
-
-	private:
-		mutable std::once_flag reflected;
-		mutable std::optional<Util::ShaderReflection> reflection;
-		mutable std::atomic<std::shared_ptr<const ShaderSource>> source;
 	};
 
 	struct InputLayoutDescription
 	{
 		std::vector<std::string> semantics;
 		std::vector<D3D11_INPUT_ELEMENT_DESC> elements;  ///< SemanticName points into semantics
-		org::services::ShaderStoreHash vertexShaderHash;
-		org::PipelineInputLayout layout;  ///< strides 0, the geometry's VertexDesc gives them
-		std::string error;  ///< an element BasicRHI cannot express, left out of layout
-		/** @brief The VertexDesc key CreateInputLayout made it for, or ~0. */
-		mutable std::atomic<std::uint64_t> engineKey{ ~0ull };
 	};
 
 	struct BlendDescription
@@ -147,19 +107,13 @@ namespace RenderGraph::Engine::Pipeline
 	/** @name Recording. Each replaces an earlier description of the same object.
 	* @{ */
 	std::shared_ptr<const ShaderDescription> RecordShader(Stage a_stage, IUnknown* a_object, std::span<const std::uint8_t> a_bytecode);
-	std::shared_ptr<const InputLayoutDescription> RecordInputLayout(ID3D11InputLayout* a_object, std::span<const D3D11_INPUT_ELEMENT_DESC> a_elements,
-		std::span<const std::uint8_t> a_vertexShaderBytecode);
-	/** @brief Nothing when the shader was not recorded. */
-	void RecordShaderSource(IUnknown* a_object, ShaderSource a_source);
-	void RecordEngineInputLayoutKey(ID3D11InputLayout* a_object, std::uint64_t a_key);
+	std::shared_ptr<const InputLayoutDescription> RecordInputLayout(ID3D11InputLayout* a_object, std::span<const D3D11_INPUT_ELEMENT_DESC> a_elements);
 	/** @} */
 
 	/** @name Lookups. a_object may be a tripwire handle or a D3D11 object.
 	* @{ */
 	std::shared_ptr<const ShaderDescription> FindShader(IUnknown* a_object);
 	std::shared_ptr<const InputLayoutDescription> FindInputLayout(ID3D11InputLayout* a_object);
-	/** @brief Null before its first draw. */
-	std::shared_ptr<const InputLayoutDescription> FindEngineInputLayout(std::uint64_t a_key);
 	/** @brief Described on first sight, so these answer for any live state object. */
 	std::shared_ptr<const BlendDescription> FindBlend(ID3D11BlendState* a_object);
 	std::shared_ptr<const DepthStencilDescription> FindDepthStencil(ID3D11DepthStencilState* a_object);
@@ -200,38 +154,4 @@ namespace RenderGraph::Engine::Pipeline
 		/** @brief Render thread, or under Renderer::Lock on the loading-screen thread. */
 		static EngineDrawState Latch();
 	};
-
-	/** @brief Null members were not found, and missing names them. */
-	struct DrawPipelinePieces
-	{
-		std::shared_ptr<const ShaderDescription> vertexShader;
-		std::shared_ptr<const ShaderDescription> pixelShader;
-		std::shared_ptr<const InputLayoutDescription> inputLayout;
-		std::shared_ptr<const BlendDescription> blend;
-		std::shared_ptr<const DepthStencilDescription> depthStencil;
-		std::shared_ptr<const RasterDescription> raster;
-		rhi::PrimitiveTopology topology = rhi::PrimitiveTopology::TriangleList;
-		std::uint32_t stencilRef = 0;  ///< command list state, not part of the pipeline
-		std::string missing;
-
-		bool Complete() const { return missing.empty(); }
-	};
-
-	/** @brief Render thread. a_state's shaders and table entries must be alive. */
-	DrawPipelinePieces Resolve(const EngineDrawState& a_state);
-
-	/** @brief Equal keys describe the same pipeline. */
-	std::uint64_t PipelineKey(const DrawPipelinePieces& a_pieces, std::span<const std::uint32_t> a_strides, const rhi::RenderTargets& a_targets, rhi::Format a_depthFormat);
-
-	/**
-	* @brief The state half of a draw's pipeline. The caller adds the shaders, compiled per stage, because GraphicsPipelineDesc
-	* has one define list and the engine's vertex and pixel shaders have different defines.
-	*/
-	org::GraphicsPipelineDesc PipelineStates(const DrawPipelinePieces& a_pieces, std::span<const std::uint32_t> a_strides, const rhi::RenderTargets& a_targets,
-		rhi::Format a_depthFormat);
-
-	/** @brief Sets each attribute's location to its semantic's position in the shader's input signature. Unnamed ones stay automatic. */
-	void AssignLocations(org::PipelineInputLayout& a_layout, const Util::ShaderReflection& a_vertexShader);
-
-#endif
 }

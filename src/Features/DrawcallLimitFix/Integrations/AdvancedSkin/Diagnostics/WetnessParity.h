@@ -1,7 +1,7 @@
 #pragma once
 
-// Advanced Skin's wetness parities. Render thread.
-// The capture parity checks each native draw's PS b7 and actor ownership. The persistent parity checks every member's row against Skin::GetWetness.
+// Advanced Skin's wetness parity. Render thread.
+// The capture parity checks each native draw's PS b7 and actor ownership.
 
 #include <cstdint>
 #include <string>
@@ -37,9 +37,4 @@ namespace DCLF::Integrations::AdvancedSkin
 		bool Ok() const { return mismatches == 0 && ownerMismatches == 0; }
 		void Reset() { checks = mismatches = wetDraws = ownerMismatches = 0; }
 	};
-
-	/** @brief The persistent check: every member's row against the frame start's wetness, except slots named this frame. */
-	void CheckRowWetness(const SceneTables& a_tables, const std::vector<BindlessShading>& a_rows, const std::vector<std::uint8_t>& a_named);
-	/** @brief The shading line's wetness part since the last take. Resets the counters. */
-	std::string TakeRowWetnessText();
 }

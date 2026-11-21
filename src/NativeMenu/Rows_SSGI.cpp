@@ -90,7 +90,6 @@ namespace
 			s.ResolutionMode = *preset.resolutionMode;
 		s.EnableBlur = preset.enableBlur;
 		s.EnableGI = preset.enableGI;
-		globals::features::screenSpaceGI.recompileFlag = true;
 	}
 
 	bool __stdcall IsSSGIEditable()

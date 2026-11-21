@@ -19,7 +19,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/SkinPalettes.h"
 
 #include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Cull.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PlacementRows/BillboardRow.h"
@@ -27,7 +27,6 @@
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 #include <bit>
 #include <deque>
@@ -40,17 +39,16 @@
 
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValueMoves.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Scene/MirrorWatch.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneEvents.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SkinPartitionWatch.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/FrameRetirement.h"
+#include "RenderGraph/Async/Retirement.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/Upscaling.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Fatal.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/Runtime/IUploadService.h>
@@ -230,7 +228,7 @@ namespace DCLF
 		// Bind a frame's backings to its last submission so none is reused before that frame completes on the GPU.
 		void BindFrameLeases(FrameLeases& a_leases, std::vector<org::services::BackingLease>& a_registered, BoundPoints& a_points)
 		{
-			const auto point = SubmittedRetirementPoint();
+			const auto point = ::RenderGraph::Frame::Retirement::SubmittedPoint();
 			bool bound = false;
 			const auto bind = [&](org::services::BackingLease& a_lease) {
 				if (a_lease) {
@@ -245,8 +243,8 @@ namespace DCLF
 				bind(lease);
 			const auto* host = RenderGraphRuntime::Get().Host();
 			if (bound && host && point && (a_points.empty() || a_points.back().first < point))
-				a_points.emplace_back(point, DCLF::SubmittedGpuPoint());
-			const auto completed = FrameRetirement()->Completed();
+				a_points.emplace_back(point, ::RenderGraph::Frame::Retirement::SubmittedGpuPoint());
+			const auto completed = ::RenderGraph::Frame::Retirement::Clock()->Completed();
 			while (a_points.size() > 1 && a_points[1].first <= completed)
 				a_points.pop_front();
 		}
@@ -283,40 +281,6 @@ namespace DCLF
 				a_out.push_back(ordered);
 			std::sort(a_out.begin(), a_out.end());
 			a_out.erase(std::unique(a_out.begin(), a_out.end()), a_out.end());
-		}
-
-		/** @brief A node's name and its owner's form types, for parity reports. Call under a lease. */
-		std::string OwnerKey(const RE::NiAVObject* a_node)
-		{
-			if (!a_node)
-				return "none";
-			const auto* ref = a_node->GetUserData();
-			const auto* base = ref ? ref->GetBaseObject() : nullptr;
-			return fmt::format("'{}' {}/{}", a_node->name.c_str(), ref ? magic_enum::enum_name(ref->GetFormType()) : "no ref",
-				base ? magic_enum::enum_name(base->GetFormType()) : "no base");
-		}
-
-		/** @brief The owning reference's form ID, or 0. Call under a lease. */
-		std::uint32_t OwnerForm(const RE::NiAVObject* a_node)
-		{
-			const auto* ref = a_node ? a_node->GetUserData() : nullptr;
-			return ref ? ref->GetFormID() : 0u;
-		}
-
-		std::string PlacementDifferences(const BindlessPlacement& a_expected, const BindlessPlacement& a_actual)
-		{
-			std::string text;
-			const auto field = [&](const char* a_name, const auto& a_e, const auto& a_a) {
-				if (std::memcmp(a_e, a_a, sizeof(a_e)) != 0)
-					text += fmt::format("{}{}", text.empty() ? "" : ", ", a_name);
-			};
-			field("world", a_expected.world, a_actual.world);
-			field("previousWorld", a_expected.previousWorld, a_actual.previousWorld);
-			field("bound", a_expected.bound, a_actual.bound);
-			field("sunEntry", a_expected.sunEntry, a_actual.sunEntry);
-			field("lodFadeNode", a_expected.lodFadeNode, a_actual.lodFadeNode);
-			field("forwardSort", a_expected.forwardSort, a_actual.forwardSort);
-			return text;
 		}
 
 		// Engine references go back to the render thread, which releases them at Present.
@@ -356,7 +320,7 @@ namespace DCLF
 
 		static std::shared_ptr<org::services::BackingPool> MakePool(std::string_view a_name)
 		{
-			return org::services::BackingPool::Create(PooledBackings::Hooks(), FrameRetirement(),
+			return org::services::BackingPool::Create(PooledBackings::Hooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = fmt::format("cs.dclf.frame-values.{}", a_name), .maxPerClass = PooledBackings::SceneCopies(), .spareFree = PooledBackings::SceneCopies(),
 					.reuseBound = true });
 		}
@@ -393,8 +357,8 @@ namespace DCLF
 		void RetireFieldOwners()
 		{
 			if (frameFieldOwners)
-				retiredFieldOwners.emplace_back(SubmittedRetirementPoint(), std::move(frameFieldOwners));
-			const auto completed = FrameRetirement()->Completed();
+				retiredFieldOwners.emplace_back(::RenderGraph::Frame::Retirement::SubmittedPoint(), std::move(frameFieldOwners));
+			const auto completed = ::RenderGraph::Frame::Retirement::Clock()->Completed();
 			while (!retiredFieldOwners.empty() && retiredFieldOwners.front().first <= completed)
 				retiredFieldOwners.pop_front();
 		}
@@ -500,9 +464,9 @@ namespace DCLF
 		std::vector<std::array<float, 4>> lastSphere;
 		std::vector<std::uint64_t> sphereSeq;
 		std::atomic<bool> spheresWanted{ false };
-		LatestSlot<Direct::SnapshotSpheres> spheresSlot;
+		::RenderGraph::Frame::LatestSlot<Direct::SnapshotSpheres> spheresSlot;
 		std::atomic<bool> streamSpheresWanted{ false };
-		LatestSlot<Direct::SnapshotSpheres> streamSpheresSlot;
+		::RenderGraph::Frame::LatestSlot<Direct::SnapshotSpheres> streamSpheresSlot;
 
 		// The moved-only sampling. Plans are applied in order as deltas onto kept movers and roots, indexed by move key.
 		// Each keeps engine references that go to the render thread when it leaves.
@@ -535,11 +499,6 @@ namespace DCLF
 		std::vector<std::uint32_t> unkeyedMovers, unkeyedRoots, everyFrameMovers;
 		std::vector<std::uint32_t> newMovers, newRoots;  // due once
 		std::atomic<std::uint64_t> plansApplied{ 0 }, planResets{ 0 }, planItems{ 0 };
-		struct KeptParity
-		{
-			std::uint64_t checks = 0, differ = 0;
-			std::string first;
-		} keptParity;
 		void ApplyPlan(const Plan& a_plan);
 		void ClearKept();
 		void KeyMover(std::uint32_t a_mover);
@@ -553,7 +512,6 @@ namespace DCLF
 		void RemoveDependent(const void* a_node, const void* a_geometry);
 		void ListSlotRoot(const Plan::Item& a_item, std::uint32_t a_root);
 		void UnlistSlotRoot(const Plan::Item& a_item, std::uint32_t a_root);
-		void CheckKept(const Plan::Check& a_check);
 		std::vector<const void*> drainedKeys;
 		std::vector<const void*> lastKeys;  // the gate is this frame or the last
 		// Keys due at the next producer, because their sample changed a row and must settle, or their lease was refused.
@@ -563,28 +521,6 @@ namespace DCLF
 		std::vector<std::uint32_t> dueMovers, dueRoots;
 		std::vector<const void*> watchedList;
 		ankerl::unordered_dense::set<const void*> watchedPartitions;
-		struct MovedParity
-		{
-			std::uint64_t checks = 0, rows = 0, rowsDiffer = 0, palettes = 0, palettesDiffer = 0, rootRows = 0, rootRowsDiffer = 0;
-			std::uint64_t movers = 0, moversDue = 0, roots = 0, rootsDue = 0;
-			std::string first;
-			// Changes no event named, by what changed and who owns it. These are the writers to find.
-			struct Cause
-			{
-				std::uint64_t count = 0;
-				std::string example;
-			};
-			ankerl::unordered_dense::map<std::string, Cause> causes;
-		} movedParity;
-		std::mutex movedCausesLock;
-		template <class F>
-		void NoteMovedCause(std::string a_key, F&& a_example)
-		{
-			std::scoped_lock lock(movedCausesLock);
-			auto& cause = movedParity.causes[std::move(a_key)];
-			if (cause.count++ == 0)
-				cause.example = a_example();
-		}
 		std::atomic<std::uint64_t> done{ 0 };
 		// The newest producer's signal. The render thread reads it once done reaches the frame's sequence.
 		std::shared_ptr<org::TrackedUploadTicket> signal;
@@ -616,7 +552,6 @@ namespace DCLF
 			std::uint64_t seq = 0;
 			const Plan* plan = nullptr;
 			std::uint64_t planSerial = 0;
-			bool parity = false;
 			std::vector<const Plan*> written;
 			std::vector<ShadingItem> shadingItems;
 			std::vector<ShadingFieldValue> fieldValues;
@@ -740,18 +675,6 @@ namespace DCLF
 			std::atomic<std::uint64_t>& a_refused);
 		void MarkSampled(const std::vector<Changed>& a_changed, const std::vector<std::vector<std::uint32_t>>& a_rootChanged,
 			const std::vector<std::uint8_t>& a_rootRefused, std::uint64_t& a_marked, std::uint64_t& a_paletteMarked);
-		struct Fresh
-		{
-			BindlessPlacement row{}, layer{};
-			bool sampled = false;
-		};
-		void SampleFreshMovers(const std::vector<BindlessPlacement>& a_out, std::vector<Fresh>& a_fresh, std::atomic<std::uint64_t>& a_palettesChecked,
-			std::atomic<std::uint64_t>& a_palettesDiffer, std::string& a_firstPalette);
-		void ApplyFreshRoots(const std::vector<BindlessPlacement>& a_out, const ankerl::unordered_dense::map<std::uint32_t, std::uint32_t>& a_slotMover,
-			std::vector<Fresh>& a_fresh, std::string& a_firstRoot);
-		void CompareFreshRows(const std::vector<BindlessPlacement>& a_out, const std::vector<Fresh>& a_fresh, std::string& a_firstRow);
-		void ReportMovedParity(std::uint64_t a_palettesChecked, std::uint64_t a_palettesDiffer, const std::string& a_firstRow,
-			const std::string& a_firstPalette, const std::string& a_firstRoot);
 		// Render thread.
 		static void FrameStartRegistered(const std::shared_ptr<const FrameGlobals>& a_globals);
 		void ApplyRootViewPlans(const std::vector<std::shared_ptr<const Plan>>& a_plans);
@@ -778,7 +701,6 @@ namespace DCLF
 		void MarkMover(std::uint32_t a_mover);
 		void MarkRoot(std::uint32_t a_root);
 		void MarkDue(const Job& a_job);
-		void CheckEveryMover(const Job& a_job);
 		void SampleShadingRows(const Job& a_job, std::size_t a_slots);
 		template <class Call>
 		void ForEachRegistered(const Job& a_job, Call&& a_call);
@@ -837,7 +759,7 @@ namespace DCLF
 		// Always signal. Every batch of the frame waits for it.
 		signal = a_job.uploads ? a_job.uploads->QueueStreamingSignal(a_job.timeline, a_job.seq) : nullptr;
 		if (!signal)
-			stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame values {} could not signal the frame's wait; the GPU would wait for it forever", a_job.seq));
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("frame values {} could not signal the frame's wait; the GPU would wait for it forever", a_job.seq));
 		const auto total = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 		for (auto max = maxTotalUs.load(std::memory_order_relaxed); total > max && !maxTotalUs.compare_exchange_weak(max, total, std::memory_order_relaxed);) {}
 		++frames;
@@ -889,8 +811,6 @@ namespace DCLF
 			UpsertMover(item);
 		for (const auto& root : a_plan.roots)
 			UpsertRoot(root);
-		if (a_plan.check)
-			CheckKept(*a_plan.check);
 	}
 
 	void FrameValues::Impl::ClearKept()
@@ -1130,49 +1050,6 @@ namespace DCLF
 		--liveRoots;
 	}
 
-	void FrameValues::Impl::CheckKept(const Plan::Check& a_check)
-	{
-		DCLF_ZONE("CS.DCLF.FrameValues.KeptParity");
-		using Key = Plan::Key;
-		auto byObject = [](const Key& a_left, const Key& a_right) { return a_left.object < a_right.object; };
-		Plan::Check kept;
-		for (const auto& mover : keptMovers)
-			if (mover.live)
-				kept.movers.push_back(Key::Of(mover.item));
-		std::sort(kept.movers.begin(), kept.movers.end(), byObject);
-		for (const auto& root : keptRoots) {
-			if (!root.live)
-				continue;
-			auto& [node, keys] = kept.roots.emplace_back(root.root.get(), std::vector<Key>{});
-			for (const auto& dependent : root.dependents)
-				keys.push_back(Key::Of(dependent));
-			std::sort(keys.begin(), keys.end(), byObject);
-		}
-		std::sort(kept.roots.begin(), kept.roots.end(), [](const auto& a_left, const auto& a_right) { return a_left.first < a_right.first; });
-		auto& p = keptParity;
-		++p.checks;
-		const bool differs = kept.movers != a_check.movers || kept.roots != a_check.roots;
-		if (differs) {
-			++p.differ;
-			if (p.first.empty()) {
-				std::size_t m = 0;
-				while (m < kept.movers.size() && m < a_check.movers.size() && kept.movers[m] == a_check.movers[m])
-					++m;
-				std::size_t r = 0;
-				while (r < kept.roots.size() && r < a_check.roots.size() && kept.roots[r] == a_check.roots[r])
-					++r;
-				p.first = fmt::format("movers {} kept / {} rebuilt (first difference at {}), roots {} kept / {} rebuilt (first difference at {}: {} vs {})", kept.movers.size(),
-					a_check.movers.size(), m, kept.roots.size(), a_check.roots.size(), r, r < kept.roots.size() ? kept.roots[r].first : nullptr,
-					r < a_check.roots.size() ? a_check.roots[r].first : nullptr);
-			}
-		}
-		if (p.checks < 8 && !differs)
-			return;
-		logger::info("[DCLF] frame values' kept placement set (parity): {} checks, {} differ{}{}", p.checks, p.differ, p.differ ? " <- KEPT SET DIFFERS; first: " : " <- OK",
-			p.first);
-		p = {};
-	}
-
 	void FrameValues::Impl::MarkMover(std::uint32_t a_mover)
 	{
 		if (a_mover >= keptMovers.size() || !keptMovers[a_mover].live)
@@ -1389,8 +1266,6 @@ namespace DCLF
 		rootsDue += dueRoots.size();
 		if (const auto refusals = refusedHere.load())
 			refused += refusals;
-		if (a_job.parity)
-			CheckEveryMover(a_job);
 		TrackSpheres(a_job, out);
 		for (const auto slot : listedSlots)
 			listed[slot] = 0;
@@ -1479,17 +1354,7 @@ namespace DCLF
 			return;
 		DCLF_ZONE("CS.DCLF.FrameValues.LiveSpheres");
 		const std::size_t parity = Direct::LiveParity(a_job.seq);
-		// A mover's sphere is unknown in the snapshot, so it is written below every frame.
-		if (!set->liveFilled[parity].exchange(true, std::memory_order_acq_rel))
-			for (const auto& list : set->lists)
-				for (const auto& batch : list) {
-					const auto& live = batch.liveSpheres[parity];
-					const std::size_t bytes = std::size_t(batch.count) * sizeof(float);
-					std::memcpy(live.cx, batch.cx, bytes);
-					std::memcpy(live.cy, batch.cy, bytes);
-					std::memcpy(live.cz, batch.cz, bytes);
-					std::memcpy(live.r, batch.r, bytes);
-				}
+		// The set starts both live columns from the snapshot. A mover's sphere is unknown there, so it is written every frame.
 		for (const auto& ref : set->moverLanes) {
 			const auto& batch = set->lists[ref.view][ref.batch];
 			const std::uint32_t object = batch.object[ref.lane];
@@ -1596,7 +1461,7 @@ namespace DCLF
 	void FrameValues::Impl::SampleItems(const Job& a_job, const std::vector<Listed>& a_items, const SampleOut& a_out, std::vector<Changed>& a_changed,
 		std::atomic<std::uint64_t>& a_refused)
 	{
-		auto& executor = SceneScheduler::Executor();
+		auto& executor = ::RenderGraph::Frame::SharedExecutor();
 		// A class's beginRun belongs to the producer alone, so run it before the parallel loop.
 		PaletteRuns paletteRuns;
 		BeginPaletteRuns(a_job, a_items, paletteRuns);
@@ -1882,7 +1747,7 @@ namespace DCLF
 		std::atomic<std::uint64_t>& a_refused)
 	{
 		auto& out = a_out.out;
-		SceneScheduler::Executor().ParallelFor("CS.DCLF.FrameValues.Roots", dueRoots.size(), 16, [&](std::size_t a_begin, std::size_t a_end) {
+		::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.FrameValues.Roots", dueRoots.size(), 16, [&](std::size_t a_begin, std::size_t a_end) {
 			DCLF_ZONE("CS.DCLF.FrameValues.Roots");
 			// One lease per chunk. If refused, each of its roots is.
 			EngineReadWindow::Lease lease;
@@ -1945,204 +1810,6 @@ namespace DCLF
 		}
 	}
 
-	void FrameValues::Impl::CheckEveryMover(const Job& a_job)
-	{
-		DCLF_ZONE("CS.DCLF.FrameValues.MovedParity");
-		// Parity check of moved-only sampling. A fresh sample that differs from the kept rows is a move no event named.
-		// Particle items and first-person members are skipped. A skin's palette update is idempotent per frame.
-		(void)a_job;
-		const auto& out = rows.Get();
-		std::vector<Fresh> fresh(keptMovers.size());
-		ankerl::unordered_dense::map<std::uint32_t, std::uint32_t> slotMover;
-		for (std::uint32_t m = 0; m < keptMovers.size(); ++m) {
-			const auto& item = keptMovers[m].item;
-			if (!keptMovers[m].live || item.firstPerson || item.itemClass != Api::FrameValueItemClass::None || !item.geometry || item.slot >= out.size())
-				continue;
-			slotMover.insert_or_assign(item.slot, m);
-			if (item.layerSlot != kNoObjectSlot && item.layerSlot < out.size())
-				slotMover.insert_or_assign(item.layerSlot, m);
-		}
-		std::atomic<std::uint64_t> palettesChecked{ 0 }, palettesDiffer{ 0 };
-		std::string firstPalette;
-		SampleFreshMovers(out, fresh, palettesChecked, palettesDiffer, firstPalette);
-		std::string firstRoot;
-		ApplyFreshRoots(out, slotMover, fresh, firstRoot);
-		std::string firstRow;
-		CompareFreshRows(out, fresh, firstRow);
-		ReportMovedParity(palettesChecked.load(), palettesDiffer.load(), firstRow, firstPalette, firstRoot);
-	}
-
-	void FrameValues::Impl::SampleFreshMovers(const std::vector<BindlessPlacement>& a_out, std::vector<Fresh>& a_fresh, std::atomic<std::uint64_t>& a_palettesChecked,
-		std::atomic<std::uint64_t>& a_palettesDiffer, std::string& a_firstPalette)
-	{
-		const auto& out = a_out;
-		const auto& paletteOut = palettes.Get();
-		auto& fresh = a_fresh;
-		std::atomic_flag firstPaletteTaken;
-		SceneScheduler::Executor().ParallelFor("CS.DCLF.FrameValues.MovedParity", keptMovers.size(), 64, [&](std::size_t a_begin, std::size_t a_end) {
-			for (std::size_t m = a_begin; m < a_end; ++m) {
-				const auto& item = keptMovers[m].item;
-				if (!keptMovers[m].live || item.firstPerson || item.itemClass != Api::FrameValueItemClass::None || !item.geometry || item.slot >= out.size())
-					continue;
-				EngineReadWindow::Lease lease;
-				if (!lease)
-					continue;
-				SampleItem(item, fresh[m].row, fresh[m].layer);
-				fresh[m].sampled = true;
-				if (!moverDue[m]) {
-					const auto& was = out[item.slot];
-					const auto& now = fresh[m].row;
-					const bool world = std::memcmp(was.world, now.world, sizeof(now.world)) != 0;
-					if (world && MirrorWatch::MovedFromParity())
-						MirrorWatch::ArmMoved(item.geometry.get());
-					if (world || std::memcmp(was.bound, now.bound, sizeof(now.bound)) != 0)
-						NoteMovedCause(fmt::format("{} of geometry {}", world ? "world" : "bound", OwnerKey(item.geometry.get())), [&] {
-							return fmt::format("ref {:08x}, bound ({} {} {} {}) -> ({} {} {} {})", OwnerForm(item.geometry.get()), was.bound[0], was.bound[1], was.bound[2],
-								was.bound[3], now.bound[0], now.bound[1], now.bound[2], now.bound[3]);
-						});
-				}
-				if (!item.boneRows || std::size_t(item.boneOffset) + item.boneRows > paletteOut.size() / 2)
-					continue;
-				auto& geometry = *item.geometry;
-				const float* current = nullptr;
-				const float* previous = nullptr;
-				if (!DCLF::SkinPalettes::Sample(geometry, item.boneRows, current, previous))
-					continue;
-				++a_palettesChecked;
-				const auto at = PaletteRowsOf(item.boneOffset, item.boneRows);
-				const std::size_t bytes = std::size_t(item.boneRows) * sizeof(PaletteRow);
-				const bool currentDiffers = std::memcmp(&paletteOut[at.current], current, bytes) != 0;
-				if (currentDiffers || std::memcmp(&paletteOut[at.previous], previous, bytes) != 0) {
-					++a_palettesDiffer;
-					if (!moverDue[m])
-						NoteMovedCause(fmt::format("palette of {}", OwnerKey(&geometry)), [&] {
-							return fmt::format("ref {:08x}, {} rows, {}", OwnerForm(&geometry), item.boneRows, currentDiffers ? "current" : "previous only");
-						});
-					if (!firstPaletteTaken.test_and_set())
-						a_firstPalette = fmt::format("palette of slot {} ('{}', {}): {}", item.slot, geometry.name.c_str(), moverDue[m] ? "due" : "not due",
-							currentDiffers ? "current" : "previous");
-				}
-			}
-		});
-	}
-
-	// A dependent that is not a checked mover is compared only on the two values the root writes.
-	void FrameValues::Impl::ApplyFreshRoots(const std::vector<BindlessPlacement>& a_out, const ankerl::unordered_dense::map<std::uint32_t, std::uint32_t>& a_slotMover,
-		std::vector<Fresh>& a_fresh, std::string& a_firstRoot)
-	{
-		const auto& out = a_out;
-		const auto& slotMover = a_slotMover;
-		auto& fresh = a_fresh;
-		auto& firstRoot = a_firstRoot;
-		auto& p = movedParity;
-		for (std::uint32_t r = 0; r < keptRoots.size(); ++r) {
-			const auto& root = keptRoots[r];
-			EngineReadWindow::Lease lease;
-			if (!lease || !root.live || !root.root)
-				continue;
-			float entry[4];
-			StoreListedRoot(root.root.get(), entry);
-			for (const auto& dependent : root.dependents) {
-				if (dependent.firstPerson || dependent.slot >= out.size() || !dependent.geometry)
-					continue;
-				const auto apply = [&](std::uint32_t a_slot, const RE::BSShaderProperty* a_property) {
-					float fade[4];
-					StoreFadeNode(a_property, fade);
-					if (const auto it = slotMover.find(a_slot); it != slotMover.end() && fresh[it->second].sampled) {
-						auto& target = a_slot == keptMovers[it->second].item.slot ? fresh[it->second].row : fresh[it->second].layer;
-						const bool entryDiffers = std::memcmp(out[a_slot].sunEntry, entry, sizeof(entry)) != 0;
-						const bool fadeDiffers = std::memcmp(out[a_slot].lodFadeNode, fade, sizeof(fade)) != 0;
-						if (!rootDue[r] && !moverDue[it->second] && entryDiffers && MirrorWatch::MovedFromParity())
-							MirrorWatch::ArmMovedBound(root.root.get());
-						if (!rootDue[r] && !moverDue[it->second] && (entryDiffers || fadeDiffers))
-							NoteMovedCause(fmt::format("{} of root {}", entryDiffers ? (fadeDiffers ? "sun entry and fade node" : "sun entry") : "fade node",
-											   OwnerKey(root.root.get())),
-								[&] {
-									const auto& was = out[a_slot].sunEntry;
-									const float moved = std::sqrt((entry[0] - was[0]) * (entry[0] - was[0]) + (entry[1] - was[1]) * (entry[1] - was[1]) +
-																  (entry[2] - was[2]) * (entry[2] - was[2]));
-									return fmt::format("ref {:08x}, geometry '{}', center moved {:.3f}, radius {:.3f} -> {:.3f}, fade ({} {} {} {}) -> ({} {} {} {})",
-										OwnerForm(root.root.get()), dependent.geometry->name.c_str(), moved, was[3], entry[3], out[a_slot].lodFadeNode[0],
-										out[a_slot].lodFadeNode[1], out[a_slot].lodFadeNode[2], out[a_slot].lodFadeNode[3], fade[0], fade[1], fade[2], fade[3]);
-								});
-						std::memcpy(target.sunEntry, entry, sizeof(entry));
-						std::memcpy(target.lodFadeNode, fade, sizeof(fade));
-						return;
-					}
-					++p.rootRows;
-					if (std::memcmp(out[a_slot].sunEntry, entry, sizeof(entry)) != 0 || std::memcmp(out[a_slot].lodFadeNode, fade, sizeof(fade)) != 0) {
-						++p.rootRowsDiffer;
-						if (firstRoot.empty())
-							firstRoot = fmt::format("root dependent slot {} ('{}', root {}): {}", a_slot, dependent.geometry->name.c_str(), rootDue[r] ? "due" : "not due",
-								std::memcmp(out[a_slot].sunEntry, entry, sizeof(entry)) != 0 ? "sunEntry" : "lodFadeNode");
-					}
-				};
-				apply(dependent.slot, dependent.geometry->GetGeometryRuntimeData().shaderProperty.get());
-				if (dependent.layerSlot != kNoObjectSlot && dependent.layerSlot < out.size())
-					apply(dependent.layerSlot, LayerPropertyOf(*dependent.geometry));
-			}
-		}
-	}
-
-	void FrameValues::Impl::CompareFreshRows(const std::vector<BindlessPlacement>& a_out, const std::vector<Fresh>& a_fresh, std::string& a_firstRow)
-	{
-		const auto& out = a_out;
-		const auto& fresh = a_fresh;
-		auto& firstRow = a_firstRow;
-		auto& p = movedParity;
-		for (std::uint32_t m = 0; m < keptMovers.size(); ++m) {
-			if (!fresh[m].sampled)
-				continue;
-			const auto& item = keptMovers[m].item;
-			const auto compare = [&](std::uint32_t a_slot, const BindlessPlacement& a_fresh) {
-				++p.rows;
-				if (std::memcmp(&out[a_slot], &a_fresh, sizeof(a_fresh)) == 0)
-					return;
-				++p.rowsDiffer;
-				if (firstRow.empty()) {
-					EngineReadWindow::Lease lease;
-					firstRow = fmt::format("row of slot {} ('{}', {}): {}", a_slot, lease ? item.geometry->name.c_str() : "", moverDue[m] ? "due" : "not due",
-						PlacementDifferences(a_fresh, out[a_slot]));
-				}
-			};
-			compare(item.slot, fresh[m].row);
-			if (item.layerSlot != kNoObjectSlot && item.layerSlot < out.size())
-				compare(item.layerSlot, fresh[m].layer);
-		}
-	}
-
-	void FrameValues::Impl::ReportMovedParity(std::uint64_t a_palettesChecked, std::uint64_t a_palettesDiffer, const std::string& a_firstRow,
-		const std::string& a_firstPalette, const std::string& a_firstRoot)
-	{
-		auto& p = movedParity;
-		p.palettes += a_palettesChecked;
-		p.palettesDiffer += a_palettesDiffer;
-		++p.checks;
-		p.movers += liveMovers;
-		p.moversDue += dueMovers.size();
-		p.roots += liveRoots;
-		p.rootsDue += dueRoots.size();
-		if (p.first.empty())
-			p.first = !a_firstRow.empty() ? a_firstRow : !a_firstPalette.empty() ? a_firstPalette : a_firstRoot;
-		const bool differs = p.rowsDiffer || p.palettesDiffer || p.rootRowsDiffer;
-		if (p.checks < 5 && !differs)
-			return;
-		const double n = static_cast<double>(p.checks);
-		logger::info("[DCLF] frame values' moved-only sampling (parity): {} checks; a check {:.0f} movers ({:.1f} due), {:.0f} roots ({:.1f} due); {} rows checked, {} differ; "
-					 "{} palettes checked, {} differ; {} root rows checked, {} differ{}{}",
-			p.checks, p.movers / n, p.moversDue / n, p.roots / n, p.rootsDue / n, p.rows, p.rowsDiffer, p.palettes, p.palettesDiffer, p.rootRows, p.rootRowsDiffer,
-			differs ? " <- DIFFER; first: " : " <- OK", differs ? p.first : std::string());
-		if (!p.causes.empty()) {
-			std::vector<std::pair<std::string, MovedParity::Cause>> causes(p.causes.begin(), p.causes.end());
-			std::ranges::sort(causes, [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
-			std::string text;
-			for (std::size_t i = 0; i < std::min<std::size_t>(causes.size(), 8); ++i)
-				text += fmt::format("{}{} x {} (e.g. {})", i ? "; " : "", causes[i].second.count, causes[i].first, causes[i].second.example);
-			logger::info("[DCLF] frame values' moved-only sampling (parity): not due yet changed, by owner ({} owners): {}", causes.size(), text);
-		}
-		p = {};
-	}
-
 	namespace
 	{
 		struct ShadingFieldRange
@@ -2152,6 +1819,7 @@ namespace DCLF
 		constexpr std::array<ShadingFieldRange, Extensions::kShadingRowFields> kShadingFieldRanges{ {
 			{ offsetof(BindlessShading, skinPerGeometry), sizeof(BindlessShading::skinPerGeometry) },
 			{ offsetof(BindlessShading, landscapeSeams), sizeof(BindlessShading::landscapeSeams) },
+			{ offsetof(BindlessShading, skinMaterial), sizeof(BindlessShading::skinMaterial) },
 		} };
 		static_assert(sizeof(BindlessShading::skinPerGeometry) <= sizeof(ShadingFieldValue::value));
 	}
@@ -2181,7 +1849,7 @@ namespace DCLF
 		std::vector<std::vector<std::uint32_t>> changed((items.size() + kGrain - 1) / kGrain);
 		std::vector<std::vector<std::size_t>> refusedItems(changed.size());
 		std::atomic<std::uint64_t> refusedHere{ 0 };
-		SceneScheduler::Executor().ParallelFor("CS.DCLF.FrameValues.Shading", items.size(), kGrain, [&](std::size_t a_begin, std::size_t a_end) {
+		::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.FrameValues.Shading", items.size(), kGrain, [&](std::size_t a_begin, std::size_t a_end) {
 			DCLF_ZONE("CS.DCLF.FrameValues.Shading");
 			FrameGlobals::Scope scope(a_job.globals);
 			auto& mine = changed[a_begin / kGrain];
@@ -2364,7 +2032,6 @@ namespace DCLF
 			const auto& part = a_job.registered[i];
 			Api::FrameValuePoolProducer producer;
 			producer.seq = a_job.seq;
-			producer.parity = a_job.parity;
 			producer.globals = a_job.globals.get();
 			producer.input = &part.input;
 			producer.oldestContentEpoch = part.oldestContentEpoch;
@@ -2526,15 +2193,15 @@ namespace DCLF
 	{
 		const auto writeAfter = a_writeAfter;
 		// Points rise per queue, so the latest one covers the others.
-		if (writeAfter > FrameRetirement()->Completed()) {
+		if (writeAfter > ::RenderGraph::Frame::Retirement::Clock()->Completed()) {
 			const auto at = std::ranges::find_if(boundPoints, [&](const auto& a_point) { return a_point.first >= writeAfter; });
 			if (at != boundPoints.end())
 				a_job.writeAfter = at->second;
 			else if (const auto* host = RenderGraphRuntime::Get().Host())
-				a_job.writeAfter = DCLF::SubmittedGpuPoint();  // every bind notes its point, but waiting for everything is still safe
+				a_job.writeAfter = ::RenderGraph::Frame::Retirement::SubmittedGpuPoint();  // every bind notes its point, but waiting for everything is still safe
 			reusedInFlight.fetch_add(1, std::memory_order_relaxed);
 			// Waiting for this frame's own work could hold the uploader, and the signal behind it, until the present.
-			if (static bool logged = false; !logged && !DCLF::Sealed(a_job.writeAfter)) {
+			if (static bool logged = false; !logged && !::RenderGraph::Frame::Retirement::Sealed(a_job.writeAfter)) {
 				logged = true;
 				logger::error("[DCLF] frame values {}: a reused copy's uploads wait for work the last present did not seal; the uploader may hold "
 							  "the frame's signal until the frame presents",
@@ -2554,7 +2221,7 @@ namespace DCLF
 		auto lease = a_pool.pool->Acquire({ .capacityClass = a_pool.capacity, .stride = a_stride, .flags = a_flags, .name = a_pool.backingName },
 			a_pool.newestContentEpoch.load(std::memory_order_acquire), &info);
 		if (!lease)
-			stl::report_and_fail(fmt::format("Drawcall Limit Fix: the frame values' {} pool returned no backing", a_name));
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the frame values' {} pool returned no backing", a_name));
 		++a_pool.acquires;
 		if (info.allocated)
 			++a_pool.made;
@@ -2684,7 +2351,6 @@ namespace DCLF
 		job.seq = seq;
 		job.plan = s.plan ? s.plan.get() : &kEmpty;
 		job.planSerial = s.plan ? s.planSerial : 0;
-		job.parity = Policy::SampleEveryMover(seq);
 		// Held until the producer is done.
 		for (auto& unsampled : s.unsampled) {
 			job.written.push_back(unsampled.get());
@@ -2738,7 +2404,7 @@ namespace DCLF
 		// Batches submitted from here wait for the frame's values. The producer always signals.
 		host->SetFrameWaitValue(seq);
 		s.kicked = true;
-		if (!SceneScheduler::Executor().DispatchFrameCritical(SceneScheduler::Scope(),
+		if (!::RenderGraph::Frame::SharedExecutor().DispatchFrameCritical(SceneScheduler::Scope(),
 				"frame values", [&s, job = std::move(job)](const auto&) mutable {
 					s.Run(job);
 					if (!job.refusedShading.empty()) {
@@ -2756,7 +2422,7 @@ namespace DCLF
 						if (item.property)  // a refused item's went back with it
 							EngineReleases::Push(RE::NiPointer<RE::NiRefObject>(std::move(item.property)));
 				}))
-			stl::report_and_fail("Drawcall Limit Fix: the frame values' producer was refused by DCLF's executor");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the frame values' producer was refused by DCLF's executor");
 		return true;
 	}
 
@@ -2813,17 +2479,6 @@ namespace DCLF
 		if (a_sets & kReadPools)
 			for (std::size_t i = kBuiltInPools; i < buffers.size(); ++i)
 				declare(i);
-	}
-
-	void FrameValues::Skip()
-	{
-		impl->kicked = false;
-		BindFrameLeases(impl->frameLeases, impl->registeredFrameLeases, impl->boundPoints);
-		impl->ReleaseLatePoses();
-		impl->late.plan = nullptr;
-		impl->RetireFieldOwners();
-		if (auto* host = RenderGraphRuntime::Get().Host())
-			host->SetFrameWaitValue(0);
 	}
 
 	rhi::TimelinePoint FrameValues::FrameWaitPoint() const

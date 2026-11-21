@@ -1,6 +1,7 @@
 // The primary view's entry.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/PrimaryView.h"
+#include "RenderGraph/Fatal.h"
 
 #include <utility>
 
@@ -17,7 +18,7 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the primary view was resolved twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the primary view was resolved twice");
 		if (!a_registered.beforeOpaque)
 			return;
 		resolved = a_registered;

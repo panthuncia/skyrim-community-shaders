@@ -1,6 +1,9 @@
+#include "Common/OrgResources.hlsli"
 #include "PostProcessing/PhysicalLensImaging/aperture.hlsli"
 // Direct-path optical table generation. Cost depends on table samples, not
 // screen resolution. CPU double-precision reference: PhysicalLensModel.h.
+// Dual-target (Common/OrgResources.hlsli). D3D11 keeps both cbuffers. On ORG they are constant buffers the effect copies
+// from its latch (ORG/ORGPhysicalLens.cpp), and the bare field names are macros onto them, so the code reads the same.
 struct Surface
 {
 	float4 Geometry;  // z, radius, clear semi-diameter, stop
@@ -10,15 +13,45 @@ struct Surface
 	float4 Dispersion;  // C,D curvature before and after the interface.
 	float4 CoatingTable[72];
 };
+#define IMAGING_FIELDS(M, A) \
+	M(uint, SurfaceCount)    \
+	M(uint, RayCount)        \
+	M(float, SensorZ)        \
+	M(float, Coating)        \
+	M(uint, Blades)          \
+	M(float, Rotation)       \
+	M(float, BladeCurvature) \
+	M(float, Padding)        \
+	A(Surface, Surfaces, 40)
+#define CAMERA_TABLE_FIELDS(M, A)  \
+	M(uint, GridWidth)             \
+	M(uint, GridHeight)            \
+	M(uint, PupilSamples)          \
+	M(float, InverseFocusDistance) \
+	M(float, GateWidth)            \
+	M(float, GateHeight)           \
+	M(float, ProjectionFocal)      \
+	M(float, RayPlaneZ)            \
+	A(float4, PupilTransfer, 3)
+#if defined(CS_ORG_BINDLESS)
+struct ImagingConstants
+{
+	IMAGING_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+};
+struct CameraTableConstants
+{
+	CAMERA_TABLE_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+};
+#else
 cbuffer ImagingParameters : register(b0)
 {
-	uint SurfaceCount, RayCount;
-	float SensorZ, Coating;
-	uint Blades;
-	float Rotation;
-	float BladeCurvature, Padding;
-	Surface Surfaces[40];
+	IMAGING_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
 };
+cbuffer CameraTableParameters : register(b1)
+{
+	CAMERA_TABLE_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+};
+#endif
 struct RayInput
 {
 	float4 PupilField, Conjugate;
@@ -27,8 +60,44 @@ struct RayOutput
 {
 	float4 SensorEnergy, Direction;
 };
-StructuredBuffer<RayInput> InputRays : register(t0);
-RWStructuredBuffer<RayOutput> OutputRays : register(u0);
+
+// An includer with resources of its own defines PHYSICAL_LENS_TRACE_EXTRA_HANDLES and PHYSICAL_LENS_TRACE_EXTRA_RESOURCES
+// as its list's ORG_HANDLE and ORG_RESOURCE expansions, so one push block holds both.
+#define TRACE_RESOURCES(X)                               \
+	X(EXTERN, ImagingConstants, ImagingCB, 0)            \
+	X(EXTERN, CameraTableConstants, CameraTableCB, 1)    \
+	X(SRV, StructuredBuffer<RayInput>, InputRays, 0)     \
+	X(UAV, RWStructuredBuffer<RayOutput>, OutputRays, 0) \
+	X(UAV, RWTexture2DArray<float4>, CameraMaps, 1)
+#ifndef PHYSICAL_LENS_TRACE_EXTRA_HANDLES
+#	define PHYSICAL_LENS_TRACE_EXTRA_HANDLES
+#	define PHYSICAL_LENS_TRACE_EXTRA_RESOURCES
+#endif
+ORG_PUSH_BLOCK(TRACE_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_TRACE_EXTRA_HANDLES)
+TRACE_RESOURCES(ORG_RESOURCE)
+PHYSICAL_LENS_TRACE_EXTRA_RESOURCES
+
+#if defined(CS_ORG_BINDLESS)
+ORG_RESOURCE(CBUFFER, ImagingConstants, ImagingCB, 0)
+ORG_RESOURCE(CBUFFER, CameraTableConstants, CameraTableCB, 1)
+#	define SurfaceCount ORG_CB(ImagingCB).SurfaceCount
+#	define RayCount ORG_CB(ImagingCB).RayCount
+#	define SensorZ ORG_CB(ImagingCB).SensorZ
+#	define Coating ORG_CB(ImagingCB).Coating
+#	define Blades ORG_CB(ImagingCB).Blades
+#	define Rotation ORG_CB(ImagingCB).Rotation
+#	define BladeCurvature ORG_CB(ImagingCB).BladeCurvature
+#	define Surfaces ORG_CB(ImagingCB).Surfaces
+#	define GridWidth ORG_CB(CameraTableCB).GridWidth
+#	define GridHeight ORG_CB(CameraTableCB).GridHeight
+#	define PupilSamples ORG_CB(CameraTableCB).PupilSamples
+#	define InverseFocusDistance ORG_CB(CameraTableCB).InverseFocusDistance
+#	define GateWidth ORG_CB(CameraTableCB).GateWidth
+#	define GateHeight ORG_CB(CameraTableCB).GateHeight
+#	define ProjectionFocal ORG_CB(CameraTableCB).ProjectionFocal
+#	define RayPlaneZ ORG_CB(CameraTableCB).RayPlaneZ
+#	define PupilTransfer ORG_CB(CameraTableCB).PupilTransfer
+#endif
 static const float PI = 3.14159265359;
 
 #include "PostProcessing/PhysicalLensImaging/dispersion.hlsli"
@@ -184,14 +253,6 @@ RayOutput Trace(RayInput ray, bool wave = false, float apertureMargin = 0)
 		OutputRays[id.x] = Trace(InputRays[id.x]);
 }
 
-cbuffer CameraTableParameters : register(b1)
-{
-	uint GridWidth, GridHeight, PupilSamples;
-	float InverseFocusDistance;
-	float GateWidth, GateHeight, ProjectionFocal, RayPlaneZ;
-	float4 PupilTransfer[3];
-};
-RWTexture2DArray<float4> CameraMaps : register(u1);
 groupshared float4 CameraSums[64];
 
 // Pupil centroid and integrated throughput: distortion, color and vignetting.

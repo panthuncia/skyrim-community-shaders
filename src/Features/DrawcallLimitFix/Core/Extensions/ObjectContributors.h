@@ -60,14 +60,12 @@ namespace DCLF::Extensions
 	/** @brief Floats FrameGlobals holds for the features' contributions. Grow it before registering more. */
 	inline constexpr std::uint32_t kFrameGlobalsFloats = 8;
 
-	/** @brief A technique's contribution with its gate resolved in. An empty gateNeeds means no gate. */
+	/** @brief A technique's contribution. */
 	struct TechniqueEntry
 	{
-		Api::ToggleId toggle;
+		bool taken = false;
 		std::uint32_t objectFlags = 0;
 		Api::ObjectExtras extras = Api::ObjectExtras::None;
-		Api::ClassifyInputId gateWhile;
-		Api::ToggleId gateNeeds;
 	};
 	using TechniqueEntries = std::array<TechniqueEntry, kTechniqueSlots>;
 
@@ -80,13 +78,10 @@ namespace DCLF::Extensions
 		return a_technique < a_techniques.size() ? a_techniques[a_technique].objectFlags : 0u;
 	}
 
-	/** @brief Whether a_technique's objects are DCLF's: its toggle is on, plus its gate's toggle while the gate's input holds. */
-	inline bool TechniqueOn(const TechniqueEntries& a_techniques, const ToggleSet& a_toggles, std::uint32_t a_technique)
+	/** @brief Whether a_technique's objects are DCLF's: a feature took the technique. */
+	inline bool TechniqueOn(const TechniqueEntries& a_techniques, std::uint32_t a_technique)
 	{
-		if (a_technique >= a_techniques.size())
-			return false;
-		const auto& entry = a_techniques[a_technique];
-		return entry.toggle && a_toggles.On(entry.toggle) && (!entry.gateNeeds || !ClassifyInputOn(entry.gateWhile) || a_toggles.On(entry.gateNeeds));
+		return a_technique < a_techniques.size() && a_techniques[a_technique].taken;
 	}
 
 	/** @brief Core's extras rows a_technique's objects take. */
@@ -98,15 +93,15 @@ namespace DCLF::Extensions
 
 	/** @brief Number of geometry type slots a contribution may name. */
 	inline constexpr std::uint32_t kGeometryTypeSlots = 16;
-	using GeometryTypeToggles = std::array<Api::ToggleId, kGeometryTypeSlots>;
+	using GeometryTypesPorted = std::array<bool, kGeometryTypeSlots>;
 	/** @brief Any thread, after InstallFeatures. */
-	const GeometryTypeToggles& RegisteredGeometryTypes();
+	const GeometryTypesPorted& RegisteredGeometryTypes();
 
-	/** @brief Whether a_type's objects are DCLF's under a_toggles. */
-	inline bool GeometryTypeOn(const ToggleSet& a_toggles, std::uint8_t a_type)
+	/** @brief Whether a_type's objects are DCLF's. */
+	inline bool GeometryTypeOn(std::uint8_t a_type)
 	{
 		const auto& types = RegisteredGeometryTypes();
-		return a_type < types.size() && a_toggles.On(types[a_type]);
+		return a_type < types.size() && types[a_type];
 	}
 
 	using GeometryTypeContributions = std::array<Api::GeometryTypeContribution, kGeometryTypeSlots>;
@@ -121,11 +116,11 @@ namespace DCLF::Extensions
 		return a_type < types.size() ? types[a_type] : kNone;
 	}
 
-	/** @brief Whether a_type's objects are movers under a_toggles. */
-	inline bool GeometryTypeMoves(const ToggleSet& a_toggles, std::uint8_t a_type)
+	/** @brief Whether a_type's objects are movers. */
+	inline bool GeometryTypeMoves(std::uint8_t a_type)
 	{
 		const auto& type = GeometryTypeContributionOf(a_type);
-		return type.moves && a_toggles.On(type.toggle);
+		return type.moves && type.ported;
 	}
 
 	/** @brief a_type's range capture, or null when its objects draw whole. */
@@ -134,21 +129,21 @@ namespace DCLF::Extensions
 		return GeometryTypeContributionOf(a_type).ranges;
 	}
 
-	/** @brief Whether a_type's objects draw captured ranges, whatever its toggle. */
+	/** @brief Whether a_type's objects draw captured ranges. */
 	inline bool GeometryTypeRanged(std::uint8_t a_type)
 	{
 		return GeometryRangesOf(a_type) != nullptr;
 	}
 
-	/** @brief The item class a_type's skinless objects get under a_toggles. */
-	inline Api::FrameValueItemClass GeometryItemClassOn(const ToggleSet& a_toggles, std::uint8_t a_type)
+	/** @brief The item class a_type's skinless objects get. */
+	inline Api::FrameValueItemClass GeometryItemClassOn(std::uint8_t a_type)
 	{
 		const auto& type = GeometryTypeContributionOf(a_type);
-		return a_toggles.On(type.toggle) ? type.itemClass : Api::FrameValueItemClass::None;
+		return type.ported ? type.itemClass : Api::FrameValueItemClass::None;
 	}
 
 	/**
-	 * @brief The item class the coordinator plans a record as, whatever the toggle. The frame values parity tests the same rule.
+	 * @brief The item class the coordinator plans a record as. The frame values parity tests the same rule.
 	 * Only a skinless geometry with a palette block gets its contribution's class. Everything else is None.
 	 */
 	inline Api::FrameValueItemClass PlannedItemClass(bool a_paletteBlock, std::uint8_t a_type, bool a_skinned)
@@ -200,34 +195,33 @@ namespace DCLF::Extensions
 	/** @brief The timing report's label for owner class entries. "owned" while none is registered. */
 	std::string_view OwnedEntriesLabel(bool a_withoutRecord);
 
-	/** @brief Objects whose property has any of propertyFlags are DCLF's only while toggle is on and the geometry type matches. */
+	/** @brief Objects whose property has any of propertyFlags are DCLF's only while the geometry type matches. */
 	struct PropertyFlagRule
 	{
 		std::uint64_t propertyFlags = 0;
 		std::uint8_t geometryType = 0xFF;
-		Api::ToggleId toggle;
 	};
 	/** @brief Any thread, after InstallFeatures. Techniques that share a rule list it once. */
 	std::span<const PropertyFlagRule> PropertyFlagRules();
 
-	using ParentToggles = std::array<std::array<Api::ToggleId, static_cast<std::size_t>(Api::ParentLeaves::Count)>, static_cast<std::size_t>(Api::EngineParent::Count)>;
+	using ParentsTaken = std::array<std::array<bool, static_cast<std::size_t>(Api::ParentLeaves::Count)>, static_cast<std::size_t>(Api::EngineParent::Count)>;
 	/** @brief Any thread, after InstallFeatures. */
-	const ParentToggles& RegisteredParents();
+	const ParentsTaken& RegisteredParents();
 
-	/** @brief Whether a_leaves under a_parent are DCLF's under a_toggles. */
-	inline bool ParentAdmits(const ToggleSet& a_toggles, Api::EngineParent a_parent, Api::ParentLeaves a_leaves)
+	/** @brief Whether a_leaves under a_parent are DCLF's: a feature took the pair. */
+	inline bool ParentAdmits(Api::EngineParent a_parent, Api::ParentLeaves a_leaves)
 	{
-		return a_toggles.On(RegisteredParents()[static_cast<std::size_t>(a_parent)][static_cast<std::size_t>(a_leaves)]);
+		return RegisteredParents()[static_cast<std::size_t>(a_parent)][static_cast<std::size_t>(a_leaves)];
 	}
 
-	using ObjectClassToggles = std::array<Api::ToggleId, static_cast<std::size_t>(Api::ObjectClass::Count)>;
+	using ObjectClassesTaken = std::array<bool, static_cast<std::size_t>(Api::ObjectClass::Count)>;
 	/** @brief Any thread, after InstallFeatures. */
-	const ObjectClassToggles& RegisteredObjectClasses();
+	const ObjectClassesTaken& RegisteredObjectClasses();
 
-	/** @brief Whether a_class's objects are DCLF's under a_toggles. */
-	inline bool ObjectClassOn(const ToggleSet& a_toggles, Api::ObjectClass a_class)
+	/** @brief Whether a_class's objects are DCLF's: a feature took the class at install. */
+	inline bool ObjectClassOn(Api::ObjectClass a_class)
 	{
-		return a_toggles.On(RegisteredObjectClasses()[static_cast<std::size_t>(a_class)]);
+		return RegisteredObjectClasses()[static_cast<std::size_t>(a_class)];
 	}
 
 	using CategoryRoots = std::array<RE::NiNode* (*)(), static_cast<std::size_t>(Api::ObjectClass::Count)>;
@@ -235,15 +229,6 @@ namespace DCLF::Extensions
 	const CategoryRoots& RegisteredCategoryRoots();
 	/** @brief Any thread, after InstallFeatures. A null gather means none. */
 	const Api::UnheldRootsContribution& RegisteredUnheldRoots();
-
-	/**
-	 * @brief Whether a feature took a_class at install, whatever its toggle.
-	 * For classes that stand for a load-time switch and are read on a path another class already gates, like OpaqueEffect.
-	 */
-	inline bool ObjectClassTaken(Api::ObjectClass a_class)
-	{
-		return static_cast<bool>(RegisteredObjectClasses()[static_cast<std::size_t>(a_class)]);
-	}
 
 	/** @brief Runs every shading contribution matching a_property's flags, in registration order, into a_block. */
 	void DeriveShading(const RE::BSShaderProperty& a_property, std::span<float, Api::kShadingBlockWords> a_block);

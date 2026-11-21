@@ -31,6 +31,7 @@
 namespace DCLF::Draws
 {
 	class FrameBlockViews;
+	struct GraphConditions;
 
 	/**
 	 * @brief A buffer's device address for push data. 0 once the render graph has stopped, since a worker may still be
@@ -68,9 +69,10 @@ namespace DCLF::Draws
 	};
 	/**
 	 * @brief An epoch's first pass, which copies its latched values to where its passes read them. A copy to a target
-	 * a_targets() did not declare is skipped. A host epoch copies its hosted shapes' lists in the same pass.
+	 * a_targets() did not declare is skipped. A host epoch copies its hosted shapes' lists in the same pass. a_conditions are
+	 * those of the build that makes it.
 	 */
-	std::shared_ptr<org::RenderPass> MakeLatchedCopiesPass(std::function<std::vector<LatchedTarget>()> a_targets,
+	std::shared_ptr<org::RenderPass> MakeLatchedCopiesPass(const GraphConditions& a_conditions, std::function<std::vector<LatchedTarget>()> a_targets,
 		std::function<LatchedSource(const org::PassPrepareContext&)> a_source, std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared = nullptr);
 
 	/** @brief The shadow epoch's index pool copies, dispatched from the revision's shadow shape's latch. */

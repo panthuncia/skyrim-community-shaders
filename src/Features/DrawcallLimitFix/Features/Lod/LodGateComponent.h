@@ -39,8 +39,6 @@ namespace DCLF::Features::Lod::Gates
 	struct GateFlip
 	{
 		std::uint64_t token = 0;
-		std::vector<std::pair<const RE::BSGeometry*, std::uint8_t>> incoming;  // with the flip's phases
-		std::vector<const RE::BSGeometry*> outgoing;
 		std::uint64_t requestNs = 0, flipNs = 0;
 		std::uint32_t requestFrame = 0, flipFrame = 0;  // render thread frames
 	};
@@ -85,22 +83,6 @@ namespace DCLF::Features::Lod::Gates
 		std::vector<std::uint32_t> requestToFlipFrames;
 	};
 
-	struct ObserverState
-	{
-		std::uint64_t publishHoles = 0;  // flipped incoming geometries the flip's own publication does not claim
-		std::string firstPublishHole;
-		struct Parity
-		{
-			std::uint64_t checks = 0, gates = 0, sweeps = 0, entries = 0, differ = 0, unmarked = 0;
-			std::string first;  // starts with the failed invariant's tag
-			std::uint32_t pass = 0;  // the sweep runs once a pass
-			// The rest is kept across reports.
-			std::uint64_t lastFlip = 0;
-			std::vector<std::pair<std::uint64_t, const void*>> shown;
-			std::vector<std::pair<std::uint64_t, const void*>> unmarkedOutgoing;
-		} parity;
-	};
-
 	/** @brief Scene lane only. */
 	struct GateState
 	{
@@ -110,7 +92,6 @@ namespace DCLF::Features::Lod::Gates
 		std::vector<const void*> gateEntries;       // scratch, reused by each walk
 		std::vector<GateOutcome> gateOutcomesHeld;  // taken, not applied yet
 		GateStats gateStats;
-		ObserverState observed;
 	};
 
 	/** @brief Ready means ineligible by a verdict since it was tagged, or every slot of it whole. */
@@ -156,7 +137,6 @@ namespace DCLF::Features::Lod::Gates
 	void ApplyOutcomes(const Api::CoordinatorComponentContext& a_context, Api::EngineChannelId a_channel, std::span<const void* const> a_keys);
 	void Forgot(const Api::CoordinatorComponentContext& a_context, const void* a_entry);
 
-	void Published(const Api::CoordinatorComponentContext& a_context);
 	/**
 	 * @brief Render thread, at the frame's start before the culls. Calls LodGates::Flip for each flip the installed
 	 * publications carry, so the swap shows in the first frame whose claims cover it.
@@ -170,11 +150,6 @@ namespace DCLF::Features::Lod::Gates
 		std::vector<double> flipToReleaseMs, requestToReleaseMs;
 		std::vector<std::uint32_t> flipToReleaseFrames;
 		bool any = false;
-		struct Observed
-		{
-			std::uint64_t checked = 0, holes = 0, refusedHoles = 0, coverage = 0;
-			std::string firstHole, firstCoverage;
-		} observed;
 	};
 	ReleaseStats& Releases();
 
@@ -182,9 +157,4 @@ namespace DCLF::Features::Lod::Gates
 	void GateLines(const Api::CoordinatorComponentContext& a_context, std::string& a_text);
 	/** @brief Render thread, once a report window. */
 	void ReleaseLines(std::uint32_t a_frame);
-
-	/** @brief Checks the flips against the claims under CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY. */
-	void SubscribeGateObservers();
-	/** @brief Checks the gates' state after each commit under CS_DCLF_PERSISTENT_PARITY. */
-	void SubscribeGateParity();
 }

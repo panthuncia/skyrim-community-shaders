@@ -1,3 +1,3 @@
 # DXVK guest mode: DXVK runs the game on Vulkan and the render graph shares its device. The default; base as it is.
-# Guest mode runs every port native mode runs, the flush latch and the guest context. Plain D3D11 mode (no render graph): d3d11.toml.
+# Guest mode runs every port native mode runs, and the guest context, which keeps the engine's binds and drops its draws. Plain D3D11 mode (no render graph): d3d11.toml.
 extends = ["base"]

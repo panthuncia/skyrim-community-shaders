@@ -4,7 +4,9 @@
 #include "GrassShared/GrassFrame.h"
 
 #include "Profiler.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Fatal.h"
 #include "State.h"
 #include "TruePBR.h"
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
@@ -349,6 +351,9 @@ void GrassOptimizations::SetupOptimizedPass(const GrassBucket& b)
 
 void GrassOptimizations::DrawBucket(GrassBucket& b)
 {
+	// The draw takes its state from the engine's flush on DXVK's context. In graph mode that state stays in the engine's context handle.
+	if (RenderGraph::Engine::GraphMode())
+		RenderGraph::Fatal("Grass Optimizations", "an indirect grass draw ran in graph mode");
 	auto* ctx = globals::d3d::context;
 	const uint64_t vertexDesc = b.drawResources.key.vertexDesc;
 	// The engine's buffers may be tripwire handles (CS_ORG_ENGINE_BUFFERS=1): DXVK's own context is given what they wrap.

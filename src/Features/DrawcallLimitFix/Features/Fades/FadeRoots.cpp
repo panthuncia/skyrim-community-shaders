@@ -85,7 +85,7 @@ namespace DCLF::Scene
 				a_state.lastWriteFrame.resize(std::size_t(a_root) + 1, 0);
 			}
 			a_state.lastWriter[a_root] = static_cast<std::uint8_t>(a_writer);
-			a_state.lastWriteFrame[a_root] = Coordinator::Get().GetFrame();
+			a_state.lastWriteFrame[a_root] = Coordinator::Get().SceneStep();
 		}
 
 		// Made once and held for the session.
@@ -163,8 +163,6 @@ namespace DCLF::Scene
 		/** @brief Removes a slot from its root. The last member leaving retires the root. */
 		void UnlistFadeRoot(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot)
 		{
-			if (a_context.DenseWalk())
-				return;
 			auto [family, roots] = LiveRootsOf(a_context);
 			if (a_slot >= family.objectRow.size() || family.objectRow[a_slot] == kNoFadeRoot)
 				return;
@@ -232,9 +230,6 @@ namespace DCLF::Scene
 		/** @brief Lists the fade node a written slot names, or unlists the slot if it names none. */
 		void ListFadeRoot(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot)
 		{
-			// The dense parity walk restores the tables but not the members kept beside them.
-			if (a_context.DenseWalk())
-				return;
 			const auto* geometry = a_context.ObjectGeometry(a_slot);
 			const auto* property = geometry ? a_context.Mirror().Leaf(geometry).property : nullptr;
 			const auto* node = property ? static_cast<const RE::NiAVObject*>(property->fadeNode) : nullptr;

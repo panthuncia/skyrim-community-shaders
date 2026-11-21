@@ -35,6 +35,35 @@ namespace DCLF
 		std::uint32_t width = 0, height = 0;
 		std::optional<Draws::Capture> pending;
 
+		/**
+		 * @brief The main resources' parts sized by the display, made on the build executor for a new DisplaySize (phase 3,
+		 * window resize). The render thread reads made only once done is set.
+		 */
+		struct Sizing
+		{
+			std::uint32_t width = 0, height = 0;
+			std::shared_ptr<Resources> made;                       // the sized parts and the dispatch signatures, nothing else yet
+			bool failed = false;
+			std::atomic<bool> done{ false };
+		};
+		// Render thread. The job for the newest display size the builds do not have yet. Null when none.
+		std::shared_ptr<Sizing> sizing;
+		/**
+		 * Render thread. The main resources for a new display size, handed to the builds and the snapshot builder. The frame runs
+		 * resources until it adopts the first scene made for these (InstallScene), then these become resources.
+		 */
+		std::shared_ptr<Resources> pendingResources;
+		/** @brief Render thread. The main resources the builds and the snapshot builder are for: the pending ones, else the frame's. */
+		const std::shared_ptr<Resources>& AheadMain() const { return pendingResources ? pendingResources : resources; }
+		/**
+		 * @brief Render thread, in the adoption point. Follows the adopted DisplaySize: starts the sized parts for a new size on the
+		 * build executor, and once they are made and no other new resources wait for their scene, hands the new main resources to
+		 * the builds. Never waits.
+		 */
+		void FollowDisplaySize();
+		/** @brief Render thread, at a scene's install. The frame now runs the pending main resources the scene was made for. */
+		void AdoptPendingMain();
+
 		std::unique_ptr<ShadowEngine> shadowEngine = std::make_unique<ShadowEngine>(*this);
 		/**
 		 * @brief Grows the main layout and its resources to the draw bound. A bound over the device's max sequence count or the sort's rank
@@ -67,20 +96,23 @@ namespace DCLF
 		/**
 		 * @brief Render thread. Makes the ahead context from the frame as it is now. False without main resources, and then no fit is posted.
 		 */
-		bool MakeAheadContext(AheadContext& a_out, bool a_failed);
+		bool MakeAheadContext(AheadContext& a_out);
 		/**
 		 * @brief Posts the context for main resources made at this frame's Setup straight to the builder, so the next frame's wait
 		 * for a snapshot does not need a coordinator publication.
 		 */
-		void PostResourcesAhead(bool a_failed);
+		void PostResourcesAhead();
 		/**
 		 * @brief Builder. Swaps in the render thread's context when a work item was made for older main resources. True when its draws must be rebuilt.
 		 */
 		bool RefreshWorkContext();
-		/** @brief Why a_snapshot is stale for the current graph, targets, shadow format and main resources. kStaleKinds when current. */
-		std::size_t StaleKindOf(const SceneSnapshot& a_snapshot) const;
-		/** @brief Render thread. Whether the adopted snapshot is current, with a revision, complete draws and a ready payload. */
+		/**
+		 * @brief Render thread. Whether the adopted snapshot is current: a revision, complete draws for the main resources the frame
+		 * runs, a ready payload, and every epoch's recordings of its attached build.
+		 */
 		bool AdoptedCurrent() const;
+		/** @brief Render thread, at a scene's install. Warns once per epoch recording that binds a version the frame does not read. */
+		void CheckSceneVersions(const SceneSnapshot& a_snapshot);
 
 		/** @brief Fills the buffer addresses, SRV indices and capacities a build embeds. Other fields of a_out are left alone. */
 		static void AddressesOf(const NamedVersions& a_sealed, const MainLayout& a_layout, const Resources& a_resources, std::uint32_t a_frame, ResourceAddresses& a_out);
@@ -112,12 +144,8 @@ namespace DCLF
 		/** @brief Builder. Makes a publication's stream views and payloads, in publication order. */
 		std::shared_ptr<const DrawPublication> RunAhead(std::shared_ptr<const SceneTables> a_tables, const AheadContext& a_context, const Lookups& a_lookups,
 			std::uint32_t a_generation, std::uint32_t a_frame, std::shared_ptr<const EntrySpace> a_sunCandidates, std::shared_ptr<const EntrySpace> a_lightCandidates);
-		/** @brief Waits until no build ahead runs. Never called per frame. */
-		void WaitAhead();
 		/** @brief Depth commit. Hands the last visibility events to the decode task and re-arms the readback range. */
 		void ArmVisibilityReadback(SceneBuffers& a_scene, CommitUploads& a_uploads);
-		/** @brief Waits for the visibility decode task. Never called per frame. */
-		void WaitVisibilityReadback();
 		std::shared_ptr<const DrawPublication> installedDraws;
 		/** @brief The installed tables' pipeline slots. A covering revision was made after their commit, so its latch holds them. */
 		std::uint32_t InstalledPipelineSlots() const
@@ -163,6 +191,8 @@ namespace DCLF
 		{
 			if (resources)
 				resources->shadow = a_shadow;
+			if (pendingResources)
+				pendingResources->shadow = a_shadow;
 		}
 		/** @brief Grows the scene's tables and per-object buffers to hold a_tables. */
 		void RequireSceneTables(GrowthBuild& a_build, SceneBuffers& a_scene, const SceneTables& a_tables);
@@ -228,7 +258,9 @@ namespace DCLF
 		float mainMinDepth = 0.0f, mainMaxDepth = 0.0f;
 		bool prepassInputs = false;
 
-		winrt::com_ptr<ID3D11Texture2D> mainPassDepth;
+		// Whether the last main pass bound the engine's kMAIN depth, checked against that frame's version. Empty before the first
+		// main pass. A slot keeps its field handle across a resize, so this answer does not change with the version.
+		std::optional<bool> mainPassBindsMainDepth;
 		bool loggedDepthMismatch = false;
 		// Colour commits whose sun test ran without the sun's cascades.
 		Reports::Window sunTestWindow;
@@ -246,22 +278,20 @@ namespace DCLF
 		std::vector<std::uint32_t> classCountZeros;
 
 		void ServeRevisionRequests();
-		/**
-		 * @brief Render thread. Serves the revision code's requests, builds the graph when an extension changed, and posts moved revision inputs.
-		 * a_ownEpochsOnly builds only DCLF's epochs.
-		 */
-		void BuildIfAsked(bool a_ownEpochsOnly = false);
+		/** @brief Render thread. Serves the revision code's requests, polls the build manager, and posts moved revision inputs. */
+		void BuildIfAsked();
 		/** @brief Render thread. What DCLF's epoch graphs are built from now. A new value only when something changed. */
 		std::shared_ptr<const BuildState> CurrentBuildState();
 		std::shared_ptr<const BuildState> buildState;
-		/** @brief Render thread, frame boundary. Attaches the newest build state once no DCLF epoch is pending a build. */
+		/** @brief Render thread, after each build manager poll. The newest build state is the built one once no DCLF epoch is pending a build. */
 		void SettleBuildState();
-		/** @brief Render thread. Builds DCLF's epoch graphs on the scene worker and attaches them at a frame's end. */
+		/** @brief Render thread. Builds DCLF's epoch graphs on the scene worker. They are staged and attach with a snapshot at a Begin. */
 		void RegisterGraphBuilds();
 		bool graphBuildsRegistered = false;
-		// The frame whose end attached DCLF graphs, so the next frame's wait is logged as a wait for their recordings.
-		std::uint32_t graphsAttachedFrame = ~0u;
-		std::uint64_t graphsAttachWaitLogs = 0;
+		/** @brief Render thread, in the adoption point. Registers DCLF's graph builds and updates the graph conditions for the adopted variables. */
+		void UpdateConditionsAtAdoption();
+		/** @brief Render thread, after the scene step. Counts a Begin that took no scene (snapshotFramesKept). */
+		void CountSceneKept();
 		/**
 		 * @brief The sum of DCLF's own epochs' build generations. Other epochs' builds do not invalidate DCLF's recordings.
 		 */
@@ -289,7 +319,6 @@ namespace DCLF
 		EpochRevision RevisionOf(std::uint32_t a_epoch);
 		/** @brief Whether the selected revision covers a_epoch and its graph still runs. True without revisions. */
 		bool EpochCovered(std::uint32_t a_epoch) const;
-		void CoverFailedGraph();
 		void DecideEpochCoverage(org::GraphHost* a_host);
 		void DecideViewCoverage(ViewKind a_kind, org::GraphHost* a_host, bool a_main, std::uint32_t a_frame);
 		void SubmitRevisionRecording(std::uint32_t a_epoch, const RevisionRecordings& a_recordings, std::size_t a_index);

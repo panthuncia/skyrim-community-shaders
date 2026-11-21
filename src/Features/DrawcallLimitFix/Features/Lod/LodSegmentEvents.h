@@ -18,12 +18,6 @@ namespace DCLF::Features::Lod
 		{
 			std::uint64_t events = 0, changed = 0;
 		} stats;
-		struct Parity
-		{
-			std::uint64_t checks = 0, shapes = 0, differ = 0;
-			std::string first;
-			std::uint32_t pass = 0;  // the check runs once a pass
-		} parity;
 	};
 
 	/** @brief Patches every segment writer's call, or none. */
@@ -34,13 +28,4 @@ namespace DCLF::Features::Lod
 
 	/** @brief Registers the channel, its component and its report line. */
 	void RegisterSegmentChannel(Api::InstallContext& a_context);
-
-	/** @brief Notified on the scene lane after a pass applies its segment events. */
-	struct SegmentsApplied
-	{
-		const Api::CoordinatorComponentContext& context;
-	};
-
-	/** @brief Checks the kept ranges against the live ones under CS_DCLF_PERSISTENT_PARITY. */
-	void SubscribeSegmentParity();
 }

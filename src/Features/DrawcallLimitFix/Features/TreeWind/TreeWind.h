@@ -117,32 +117,17 @@ namespace DCLF::Features::TreeWind
 	};
 	static_assert(sizeof(TreeWindFrameRow) == 64);
 
-	/** @brief The row TreeWindCS takes a tree from: its seed, if one of the row's generation exists. Must match TreeWindCS.hlsl. */
-	inline bool MergeTreeSeed(const TreeStatic& a_row, const TreeStatic* a_seeds, std::size_t a_seedCount, std::uint32_t a_slot, TreeStatic& a_out)
-	{
-		const std::size_t at = 2ull * a_slot + (a_row.seedOdd & 1u);
-		if (!a_seeds || at >= a_seedCount || a_seeds[at].generation != a_row.generation)
-			return false;
-		TreeStatic merged = a_seeds[at];  // a_out may be a_row
-		merged.seedOdd = a_row.seedOdd;
-		a_out = merged;
-		return true;
-	}
-
 	Api::Feature Feature();
 	bool ListAll();
 	void RegisterTables(Api::InstallContext& a_context);
 	/** @brief The component's registration. */
 	Api::CoordinatorComponentId ComponentId();
-	void RegisterObjects(Api::InstallContext& a_context, Api::ToggleId a_trees);
+	void RegisterObjects(Api::InstallContext& a_context);
 	void RegisterSeeds(Api::InstallContext& a_context);
 	/** @brief The seeds' backing the current frame reads, 0 before the first frame. Render thread. */
 	std::uint32_t SeedsIndex();
-	/** @brief The seed rows once the producer is done, for diagnostics. a_wait waits. Null before. */
-	const std::vector<TreeStatic>* SeedsIfDone(bool a_wait);
 	void RegisterScene(Api::InstallContext& a_context);
 	void RegisterPass(Api::InstallContext& a_context);
 	void RegisterAnimation(Api::InstallContext& a_context);
 	void RegisterReport(Api::InstallContext& a_context);
-	void SubscribeParity();
 }

@@ -1,14 +1,13 @@
 // Mirror record parity. The render thread captures a slice of tracked objects live at frame start, and the next pass compares
 // it with the mirror after its events. A differing field is "evented" when a value-less event named the object since its last
 // capture, "late" when the next batch names it, and "missed" when nothing does, meaning a writer no hook sees.
-// CS_DCLF_MIRROR_WATCH=parity arms watchpoints on what the check found stale.
 
 #include "SceneObservers.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "SceneState.h"
 
 #include "Features/DrawcallLimitFix/Diagnostics/PlayerParity.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Scene/MirrorWatch.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Internal.h"
@@ -52,16 +51,6 @@ namespace DCLF::Diagnostics
 				if (!late)
 					for (std::uint32_t b = 0; b < 32; ++b)
 						t.flagBitsMissed[b] += (p.flagBits >> b) & 1u;
-				if (!late && p.type == 2 && (p.fields & MirrorWatch::PropertyFields()))
-					m.missedProperty = key;
-				if (!late && p.type == 3)
-					m.missedAlpha = key;
-				if (!late && !m.missedWatched && p.type != 2 && (p.fields & MirrorWatch::MissedFields(p.type)) && !MirrorWatch::Armed()) {
-					m.missedWatched = key;
-					m.missedWatchedType = p.type;
-					m.missedWatchedFields = p.fields;
-					logger::info("[DCLF] mirror watch: missed {} on {}, armed at the next frame", p.what, key);
-				}
 				// Missed writes feed the compatibility monitor's offenders, by owning reference.
 				if (!late)
 					PlayerParity::NoteMissed(key, p.owner, p.type, p.fields, p.what);
@@ -121,16 +110,14 @@ namespace DCLF::Diagnostics
 					if (differ & SceneCapture::PropertyRecord::kFlags)
 						what += fmt::format(" (flags {:#x} -> {:#x}, bits {:#x}; captured frame {} thread {} sequence {}, last written by {} at frame {}; now frame {} sequence {})",
 							a_mirror->flags, a_live.flags, a_mirror->flags ^ a_live.flags, a_mirror->capturedFrame, a_mirror->thread, a_mirror->sequence,
-							a_mirror->writer == 1 ? "a capture" : a_mirror->writer == 2 ? "an update" : "?", a_mirror->writtenFrame, SceneCapture::Frame(),
+							a_mirror->writer == 1 ? "a capture" : a_mirror->writer == 2 ? "an update" : "?", a_mirror->writtenFrame, DCLF::SceneClock::Step(),
 							SceneCapture::NextSequence());
 					if (differ & (SceneCapture::PropertyRecord::kAlphaValue | SceneCapture::PropertyRecord::kProjected | SceneCapture::PropertyRecord::kLandBlend))
 						what += fmt::format(" (alpha {} -> {}, projected [{}] -> [{}], land blend [{}] -> [{}]; captured frame {} thread {}, last written by {} at frame {}; now frame {})",
 							a_mirror->alpha, a_live.alpha, fmt::join(a_mirror->projected, " "), fmt::join(a_live.projected, " "), fmt::join(a_mirror->landBlend, " "),
 							fmt::join(a_live.landBlend, " "), a_mirror->capturedFrame, a_mirror->thread, a_mirror->writer == 1 ? "a capture" : a_mirror->writer == 2 ? "an update" : "?",
-							a_mirror->writtenFrame, SceneCapture::Frame());
+							a_mirror->writtenFrame, DCLF::SceneClock::Step());
 				}
-				if (a_type == 0 && (differ & SceneCapture::NodeRecord::kFadeCurrent) && MirrorWatch::CurrentFromParity())
-					m.missedNode = a_live.key;
 				if (named.contains(a_live.key)) {
 					for (std::uint32_t b = 0; b < 32; ++b)
 						t.flagBitsEvented[b] += (a_flagBits >> b) & 1u;
@@ -283,16 +270,6 @@ namespace DCLF::Diagnostics
 			if (m.probe) {
 				DCLF_ZONE("CS.DCLF.Scene.MirrorParity");
 				Check(V::mirror(Scene::Coordinator::Get()), *m.probe, m.eventKeys, m.eventFields);
-				if (const void* property = std::exchange(m.missedProperty, nullptr))
-					m.watchProperty.store(property, std::memory_order_release);
-				if (const void* alpha = std::exchange(m.missedAlpha, nullptr))
-					m.watchAlpha.store(alpha, std::memory_order_release);
-				if (const void* node = std::exchange(m.missedNode, nullptr))
-					m.watchNode.store(node, std::memory_order_release);
-				if (const void* missed = std::exchange(m.missedWatched, nullptr)) {
-					m.watchMissedTypeFields.store((std::uint32_t(m.missedWatchedType) << 24) | (m.missedWatchedFields & 0xFFFFFFu), std::memory_order_relaxed);
-					m.watchMissed.store(missed, std::memory_order_release);
-				}
 				m.probe.reset();
 				PlayerParity::NoteCheck();
 			}
@@ -303,18 +280,8 @@ namespace DCLF::Diagnostics
 
 		void OnProbePoint(const On<ScenePoint::MirrorProbePoint>&)
 		{
-			// Render thread, frame start. Watch what the last check found stale.
+			// Render thread, frame start.
 			auto& m = SceneDiagnostics().mirror;
-			if (const void* property = m.watchProperty.exchange(nullptr, std::memory_order_acq_rel))
-				MirrorWatch::ArmProperty(property);
-			if (const void* alpha = m.watchAlpha.exchange(nullptr, std::memory_order_acq_rel))
-				MirrorWatch::ArmAlpha(alpha);
-			if (const void* node = m.watchNode.exchange(nullptr, std::memory_order_acq_rel))
-				MirrorWatch::ArmCurrent(node);
-			if (const void* missed = m.watchMissed.exchange(nullptr, std::memory_order_acq_rel)) {
-				const auto typeFields = m.watchMissedTypeFields.load(std::memory_order_relaxed);
-				MirrorWatch::ArmMissed(missed, static_cast<std::uint8_t>(typeFields >> 24), typeFields & 0xFFFFFFu);
-			}
 			// Take the newest slice and drop older ones with their references.
 			std::shared_ptr<MirrorProbeRequest> request;
 			m.probeRequests.Drain([&request](std::shared_ptr<MirrorProbeRequest>&& a_request) { request = std::move(a_request); });
@@ -394,21 +361,6 @@ namespace DCLF::Diagnostics
 			t = {};
 		}
 		return text;
-	}
-
-	namespace
-	{
-		void OnFadeStaticsPlaced(const FadeStaticsPlaced& a_event)
-		{
-			// A placed node in the world just had its statics set, so watch it for the next writer.
-			if (SceneCapture::InWorld(a_event.fade))
-				MirrorWatch::Arm(a_event.fade);
-		}
-	}
-
-	void InstallMirrorWatchPlacement()
-	{
-		Subscribe<FadeStaticsPlaced>(OnFadeStaticsPlaced);
 	}
 
 	void InstallMirrorParity(bool a_switchable)

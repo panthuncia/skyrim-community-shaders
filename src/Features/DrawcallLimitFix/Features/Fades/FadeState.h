@@ -55,18 +55,5 @@ namespace DCLF
 		FadeRootStatic StaticOf(const RE::NiAVObject& a_node);
 		/** @brief Whether a tree's LOD switch selects past child 0. */
 		bool TreeLodSelected(const RE::NiAVObject& a_node);
-
-		/**
-		 * @brief CS_DCLF_FADE_PARITY. Runs the port and the engine's functions on a copy of the node and compares.
-		 * Render thread, before the list jobs. The real node is not touched.
-		 */
-		struct PortCheck
-		{
-			std::uint64_t checked = 0, differ = 0;
-			std::string first;
-		};
-		void CheckPort(const RE::NiAVObject& a_node, const RE::NiCamera& a_camera, PortCheck& a_check);
-		/** @brief Empty when the states match. */
-		std::string Differences(const FadeNodeState& a_expected, const FadeNodeState& a_actual);
 	}
 }

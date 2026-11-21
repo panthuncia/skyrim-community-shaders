@@ -1,0 +1,26 @@
+# CS_DCLF_PARITY (phase 2 of the simplification plan): set parity, the kept stores against a rebuild and the scene mirror's probe
+# every frame, on a short walk at the autoload save. The checks log "<- OK" or name a mismatch. Read the run's log for the
+# "set parity", "persistent ... parity" and "mirror parity" lines. Compose it: guest+dclf-parity, native-vulkan+dclf-parity.
+extends = ["base"]
+
+[dclf]
+parity = true
+stats = true
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 900
+do = "shot"
+arg = "parity"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "exit"
+
+[expect]
+reach = "world-ready"
+no_log = ["frame tap error", "<- MISSED", "<- DIFFER", "<- SET CLASS"]

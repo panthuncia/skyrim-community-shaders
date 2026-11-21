@@ -14,7 +14,7 @@ namespace DCLF::Draws
 		std::shared_ptr<org::services::BackingPool> MakeGrowthPool()
 		{
 			auto hooks = PooledBackings::Hooks();
-			return org::services::BackingPool::Create(std::move(hooks), FrameRetirement(), { .name = "cs.dclf.scene-buffers", .maxPerClass = 0 });
+			return org::services::BackingPool::Create(std::move(hooks), ::RenderGraph::Frame::Retirement::Clock(), { .name = "cs.dclf.scene-buffers", .maxPerClass = 0 });
 		}
 	}
 

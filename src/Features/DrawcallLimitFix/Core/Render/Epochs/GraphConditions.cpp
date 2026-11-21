@@ -3,66 +3,42 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
-#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "RenderGraph/BuildManager.h"
+#include "RenderGraph/Frame/BoundaryCheck.h"
+#include "RenderGraph/Frame/Variables.h"
+#include "RenderGraph/Fatal.h"
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace DCLF::Draws
 {
 	namespace
 	{
-		// Render thread: the defaults until the first build point.
+		// Main thread: the defaults until the first UpdateGraphConditions.
 		std::shared_ptr<const GraphConditions> requested = std::make_shared<const GraphConditions>();
-		// Every attached value is kept, so a reference CurrentGraphConditions handed out stays valid while another thread swaps it.
+		// Every attached value is kept, so a reference AttachedGraphConditions handed out stays valid while another thread swaps it.
 		std::mutex attachedMutex;
 		std::vector<std::shared_ptr<const GraphConditions>> attachedKept;  // attachedMutex
 		std::atomic<const GraphConditions*> attachedConditions{ nullptr };
-		std::mutex cutsMutex;
-		std::string requestedCuts;  // cutsMutex
-		std::atomic<bool> latchedRecordCut{ false };
 		std::atomic<bool> builtForCpu{ false };
+		// Main thread: whether the first conditions were made. Until DCLF's first build point a Begin leaves them alone.
+		bool firstMade = false;
+		// Main thread: DCLF's first build point ran, so the next adoption point makes the first conditions.
+		bool firstWanted = false;
 
-		const GraphConditions& AttachedConditions()
-		{
-			static const GraphConditions kDefaults;
-			const auto* conditions = attachedConditions.load(std::memory_order_acquire);
-			return conditions ? *conditions : kDefaults;
-		}
 	}
 
 	bool GraphBuiltForCpu()
 	{
 		return builtForCpu.load(std::memory_order_acquire);
-	}
-
-	bool LatchedRecordCut()
-	{
-		return latchedRecordCut.load(std::memory_order_relaxed);
-	}
-
-	void SetPassCuts(std::string a_cuts)
-	{
-		std::lock_guard lock(cutsMutex);
-		requestedCuts = std::move(a_cuts);
-	}
-
-	bool PassCut(std::string_view a_key)
-	{
-		std::string_view cuts = CurrentGraphConditions().cuts;
-		while (!cuts.empty()) {
-			const auto comma = cuts.find(',');
-			const auto prefix = cuts.substr(0, comma);
-			if (prefix == "*" || (!prefix.empty() && a_key.starts_with(prefix)))
-				return true;
-			cuts = comma == std::string_view::npos ? std::string_view{} : cuts.substr(comma + 1);
-		}
-		return false;
 	}
 
 	bool CpuPipelineForced()
@@ -76,40 +52,45 @@ namespace DCLF::Draws
 		return CpuPipelineFor(a_set, a_interior) || CpuPipelineForced();
 	}
 
-	void RefreshGraphConditions(org::GraphHost& a_host)
+	void FirstGraphConditions(org::GraphHost& a_host)
 	{
-		GraphConditions next;
-		const auto* tes = RE::TES::GetSingleton();
-		next.interior = tes && tes->interiorCell;
-		next.twoPassOcclusion = Toggles::Get().Active().cullMode >= 2;
-		// A pipeline change makes every recording of the old graph stale, so the frame waits at its start for a snapshot made
-		// for the new graph. Entering or leaving an interior rebuilds the graph anyway.
-		next.cpuPipeline = CpuPipelineForCell(Toggles::Get().Active(), next.interior);
-		// The direct forward families need their epochs' late passes recorded at execution, after the commit.
-		const auto& runtime = RenderGraphRuntime::Get();
-		next.forwardDirect = !next.cpuPipeline && SwitchOnUnlessZero(Switch::ForwardDirect) &&
-		                     runtime.RecordsAtExecution(RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::Forward));
-		next.firstPersonForwardDirect = next.forwardDirect && runtime.RecordsAtExecution(RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::FirstPerson));
-		// The first-person forward part has no plain buckets. Without device-generated commands, the CPU pipeline or the direct
-		// forward family must draw it, or the engine draws the view.
-		next.firstPerson = next.cpuPipeline || next.firstPersonForwardDirect || DrawPipelines::Get().DeviceGenerated();
-		if (!next.firstPerson) {
-			static std::atomic<bool> logged{ false };
-			if (!logged.exchange(true))
-				logger::warn(
-					"[DCLF] GPU-driven without device-generated commands and without the direct forward family (CS_DCLF_FORWARD_DIRECT): "
-					"first person stays the engine's (its epochs and pipeline slots are left out)");
+		if (firstMade)
+			return;
+		firstWanted = true;
+		// Native mode's build point is inside the adoption point, so the first conditions are made now. Guest mode's is in the
+		// frame (Main::Draw), so they wait for the next Begin's UpdateGraphConditions: builds are asked for only at a boundary.
+		if (RenderGraph::Frame::Boundary::InAdoptionPoint())
+			UpdateGraphConditions(a_host);
+	}
+
+	void UpdateGraphConditions(org::GraphHost& a_host)
+	{
+		// Before DCLF's first build point nothing of DCLF runs, so its builds are not asked for (a main menu Begin).
+		if (!firstMade) {
+			if (!firstWanted)
+				return;
+			firstMade = true;
 		}
-		{
-			std::lock_guard lock(cutsMutex);
-			next.cuts = requestedCuts;
+		// Made from the adopted values at every call. Only a change asks for builds.
+		GraphConditions next;
+		next.interior = RenderGraph::Frame::Vars::Adopted(RenderGraph::Frame::Vars::Interior());
+		const auto toggles = Toggles::Get().Active();
+		next.twoPassOcclusion = toggles.cullMode >= 2;
+		// A pipeline change rebuilds DCLF's graphs. Frames keep the old ones until a Begin adopts a scene recorded on the new ones,
+		// with these conditions (its build state's). Entering or leaving an interior rebuilds the graph anyway.
+		next.cpuPipeline = CpuPipelineForCell(toggles, next.interior);
+		// The GPU-driven graph draws the forward families on the CPU pipeline's forward sites, recorded at execution after the commit.
+		if (!next.cpuPipeline) {
+			const auto& runtime = RenderGraphRuntime::Get();
+			for (const auto segment : { RenderGraphRuntime::Segment::Forward, RenderGraphRuntime::Segment::FirstPerson })
+				if (!runtime.RecordsAtExecution(RenderGraphRuntime::EpochOf(segment)))
+					::RenderGraph::Fatal("Drawcall Limit Fix",
+						fmt::format("epoch {} does not record at execution, so its forward draws have no site", RenderGraphRuntime::EpochOf(segment)));
 		}
 		if (next == *requested)
 			return;
-		logger::info("[DCLF] graph conditions: {} cell, {}, {} pipeline{}{}{}{}; the graph is rebuilt", next.interior ? "interior" : "exterior",
-				next.twoPassOcclusion ? "two-pass occlusion" : "no occlusion pass (portal and frustum culling)", next.cpuPipeline ? "CPU" : "GPU",
-				next.forwardDirect ? ", forward draws on the CPU" : "", next.firstPerson ? "" : ", first person the engine's",
-				next.cuts.empty() ? "" : ", passes cut: ", next.cuts);
+		logger::info("[DCLF] graph conditions: {} cell, {}, {} pipeline; the graph is rebuilt", next.interior ? "interior" : "exterior",
+				next.twoPassOcclusion ? "two-pass occlusion" : "no occlusion pass (portal and frustum culling)", next.cpuPipeline ? "CPU" : "GPU");
 		// Set the external epochs before the build the change requests. Running graphs keep the list they were built with.
 		// A native host submits the sites' epochs itself, so none is external there.
 		if (next.cpuPipeline != requested->cpuPipeline) {
@@ -122,13 +103,13 @@ namespace DCLF::Draws
 			a_host.SetExternalEpochs(std::move(external));
 		}
 		requested = std::make_shared<const GraphConditions>(std::move(next));
-		// With CS_DCLF_ASYNC_BUILDS=0 the frame runs the new graphs now, so their conditions are attached now.
-		if (!AsyncGraphBuilds())
-			AttachGraphConditions(requested);
+		// The frame takes the new conditions with the snapshot recorded on the new graphs, at a Begin (PublishAttachedBuildState).
 		// Only DCLF's epochs are rebuilt. A hosted segment has no graph of its own.
+		RenderGraph::Builds::Wanted rebuild;
 		for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
-			if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)))
-				RenderGraph::Builds::Request(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)), "Drawcall Limit Fix's graph conditions changed");
+			if (DCLF::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)))
+				rebuild.epochs.push_back(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)));
+		RenderGraph::Builds::Ask(std::move(rebuild), "Drawcall Limit Fix's graph conditions changed");
 	}
 
 	std::shared_ptr<const GraphConditions> RequestedGraphConditions()
@@ -149,19 +130,17 @@ namespace DCLF::Draws
 		}
 		attachedConditions.store(raw, std::memory_order_release);
 		builtForCpu.store(raw->cpuPipeline, std::memory_order_release);
-		latchedRecordCut.store(("," + raw->cuts + ",").find(",~latched-record,") != std::string::npos, std::memory_order_relaxed);
 	}
 
-	const GraphConditions& CurrentGraphConditions()
+	const GraphConditions& AttachedGraphConditions()
 	{
-		if (const auto* building = ScopedBuildState(); building && building->conditions)
-			return *building->conditions;
-		return AttachedConditions();
+		static const GraphConditions kDefaults;
+		const auto* conditions = attachedConditions.load(std::memory_order_acquire);
+		return conditions ? *conditions : kDefaults;
 	}
 
-	bool OcclusionTested(const Resources& a_resources, const PassFrame& a_frame)
+	bool OcclusionTested(const GraphConditions& a_conditions, const Resources& a_resources, const PassFrame& a_frame)
 	{
-		const auto& current = CurrentGraphConditions();
-		return a_resources.hzb && current.twoPassOcclusion && !current.cpuPipeline && a_frame.cullMode >= 2 && a_frame.width && a_frame.height;
+		return a_resources.hzb && a_conditions.twoPassOcclusion && !a_conditions.cpuPipeline && a_frame.cullMode >= 2 && a_frame.width && a_frame.height;
 	}
 }

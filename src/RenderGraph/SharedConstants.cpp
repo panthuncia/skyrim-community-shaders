@@ -1,26 +1,24 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/SharedConstants.h"
+#include "RenderGraph/SharedConstants.h"
 
-#	include "Globals.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/Switches.h"
-#	include "State.h"
+#include "Globals.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
+#include "State.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/LatchBlock.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/LatchBlock.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/Buffers/Buffer.h>
 
-#	include <array>
-#	include <atomic>
-#	include <cstring>
-#	include <span>
-#	include <vector>
+#include <array>
+#include <atomic>
+#include <cstring>
+#include <span>
+#include <vector>
 
 namespace SharedConstants
 {
@@ -192,10 +190,7 @@ namespace SharedConstants
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto* cs = globals::state;
 		if (!host || !RenderGraphRuntime::Get().IsActive() || !cs || !cs->featureDataBytes) {
-			// Asked at each anchor run until CS's first upload sizes FeatureData, so log once.
-			static std::atomic_flag s_logged;
-			if (!s_logged.test_and_set())
-				logger::info("[ORG] Shared constants: not available yet (render graph inactive, or FeatureData not sized); their clients wait");
+			logger::error("[ORG] Shared constants: not made at setup (render graph inactive, or FeatureData not sized)");
 			return false;
 		}
 		try {
@@ -235,11 +230,6 @@ namespace SharedConstants
 	bool Ready()
 	{
 		return static_cast<bool>(Shared().buffers);
-	}
-
-	bool Failed()
-	{
-		return Shared().failed;
 	}
 
 	void Register(org::RenderGraph& a_graph)
@@ -315,4 +305,3 @@ namespace SharedConstants
 	}
 }
 
-#endif

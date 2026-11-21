@@ -19,20 +19,10 @@ namespace DCLF
 		std::uint32_t varied = 0;  // a later update in the batch had other inputs, but the first update's are used for all
 	};
 
-	/** @brief One root's update from FadeStateCS, which the parity check replays in C++. */
-	struct FadeLogEntry
-	{
-		FadeNodeState before;
-		FadeNodeState after;
-		float centre[3]{};
-		std::uint32_t root = ~0u;
-	};
-	static_assert(sizeof(FadeLogEntry) == 112);
-	inline constexpr std::uint32_t kFadeLogEntries = 64;
 
 	/**
 	 * @brief A root whose fade crossed a milestone or whose leaf LOD changed. The host writes these onto the nodes in frame order.
-	 * The list starts with a header of count, scene frame and two padding words. The scene frame is always written.
+	 * The list starts with a header of count, the run's readback stamp and two padding words. The depth commit writes the stamp.
 	 */
 	struct FadeEvent
 	{

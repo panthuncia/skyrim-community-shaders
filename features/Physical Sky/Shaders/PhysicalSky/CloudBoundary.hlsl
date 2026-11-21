@@ -1,28 +1,29 @@
+// Dual-target (Common/OrgResources.hlsli). On the render graph (ORGVolumetricClouds) the parameters are a latch region, and
+// the draw has no index buffer: the vertex stage derives each vertex from SV_VertexID in the D3D11 index buffer's order.
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define CLOUD_BOUNDARY_RESOURCES(X)                   	X(SHARED, ConstantBuffer, Shared, 0)              	X(SRV, Texture2D<float2>, CloudHeight, 0)         	X(SRV, Texture2D<float3>, CloudModeling, 1)       	X(SAMPLER, SamplerState, FieldSampler, 0)         	X(LATCH, CloudBoundaryData, CloudBoundaryFrame, 0)
+ORG_PUSH_BLOCK(CLOUD_BOUNDARY_RESOURCES(ORG_HANDLE))
+
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Game.hlsli"
 #include "PhysicalSky/CloudGeometry.hlsli"
 #include "PhysicalSky/CloudMotion.hlsli"
 #include "PhysicalSky/CloudPhase.hlsli"
 
-cbuffer CloudBoundaryParameters : register(b0)
-{
-	float4 gridOriginSpacing;
-	float4 fieldFrequencyWind;
-	float4 shearAltitude;
-	float4 evolution;
-	float4 frameDimensions;
-	float cloudCurvatureRadius;
-	float bottomZ;
-	uint gridCellCount;
-	uint cloudFrameIndex;
-	float4 localRect;
-	float4 localAltitude;
-	uint traceScale;
-};
+#define CLOUD_BOUNDARY_FIELDS(M, A) 	M(float4, gridOriginSpacing)    	M(float4, fieldFrequencyWind)   	M(float4, shearAltitude)        	M(float4, evolution)            	M(float4, frameDimensions)      	M(float, cloudCurvatureRadius)  	M(float, bottomZ)               	M(uint, gridCellCount)          	M(uint, cloudFrameIndex)        	M(float4, localRect)            	M(float4, localAltitude)          	M(uint, traceScale)
 
-Texture2D<float2> CloudHeight : register(t0);
-Texture2D<float3> CloudModeling : register(t1);
-SamplerState FieldSampler : register(s0);
+ORG_GLOBAL_LATCH_BEGIN(CloudBoundaryData, CloudBoundaryParameters, 0)
+CLOUD_BOUNDARY_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(CloudBoundaryData, CloudBoundaryFrame, 0)
+#define ORG_GLOBAL_LATCH CloudBoundaryFrame
+CLOUD_BOUNDARY_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+
+ORG_RESOURCE(SRV, Texture2D<float2>, CloudHeight, 0)
+ORG_RESOURCE(SRV, Texture2D<float3>, CloudModeling, 1)
+ORG_RESOURCE(SAMPLER, SamplerState, FieldSampler, 0)
 
 struct BoundaryVertex
 {
@@ -39,6 +40,14 @@ float2 FieldUv(float2 worldXY)
 BoundaryVertex vertexMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID)
 {
 	const uint rowLength = gridCellCount + 1u;
+#if defined(CS_ORG_BINDLESS)
+	// Cell by cell, each as v, v + 1, next, v + 1, next + 1, next with next one row up (VolumetricClouds.cpp's index buffer).
+	// The masks hold each corner's x and y step.
+	const uint cell = vertexId / 6u;
+	const uint corner = vertexId - cell * 6u;
+	const uint cellY = cell / gridCellCount;
+	vertexId = cellY * rowLength + (cell - cellY * gridCellCount) + ((0x1Au >> corner) & 1u) + ((0x34u >> corner) & 1u) * rowLength;
+#endif
 	const float2 worldXY = float2(vertexId % rowLength, vertexId / rowLength) * gridOriginSpacing.zw + gridOriginSpacing.xy;
 	const float2 heights = saturate(CloudHeight.SampleLevel(FieldSampler, FieldUv(worldXY), 0));
 	const float lower = heights.x - 0.02;
@@ -72,6 +81,12 @@ BoundaryVertex vertexMain(uint vertexId : SV_VertexID, uint instanceId : SV_Inst
 	const float2 scale = frameDimensions.xy / FrameBuffer::DynamicResolutionParams2.xy / (stride * frameDimensions.zw);
 	const float2 offset = (scale - 1.0 + (stride - 1.0 - 2.0 * phase) / (stride * frameDimensions.zw)) * float2(1, -1);
 	output.position.xy = output.position.xy * scale + output.position.w * offset;
+#if defined(CS_ORG_BINDLESS)
+	// D3D11's viewport is the active low-resolution rectangle at the target's top left. The graph's render area is the whole
+	// target, which is the full-resolution frame's quarter rounded up, so shrink the frame onto that rectangle.
+	const float2 area = frameDimensions.zw / floor((frameDimensions.xy + 3.0) / 4.0);
+	output.position.xy = (output.position.xy + output.position.w * float2(1, -1)) * area - output.position.w * float2(1, -1);
+#endif
 	// Cloud boundaries extend beyond the scene projection's far plane.
 	output.position.z = output.position.w * 0.5;
 	return output;

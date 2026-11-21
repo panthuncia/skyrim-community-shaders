@@ -1,0 +1,42 @@
+# A window frame drag in a graph mode (phase 3 design, 6.3): "window drag" sends WM_ENTERSIZEMOVE, one size a frame for 30
+# frames, then WM_EXITSIZEMOVE, as a real drag does. Each size is a target set; the revision lane keeps the latest, so the
+# game lives and adopts once after the drag ends. A shot after each drag.
+# Compose it: guest+window-drag, native-vulkan+window-drag.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "window"
+arg = "drag:1280x720:30"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "dragged-small"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "drag:1920x1080:30"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "dragged-large"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["dragged-small", "dragged-large"]
+no_log = ["frame tap error", "fatal: frame revision:", "the engine is creating its render targets again", "staged build starved"]

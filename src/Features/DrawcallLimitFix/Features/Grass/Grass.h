@@ -40,5 +40,4 @@ namespace DCLF::Features::Grass
 	// Must register after the tables, which it uses.
 	void RegisterFamily(Api::InstallContext& a_context);
 	void RegisterReport(Api::InstallContext& a_context);
-	void SubscribeParity();
 }

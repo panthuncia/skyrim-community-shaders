@@ -168,7 +168,6 @@ namespace DCLF::Scene
 			scenePipelineFrame = std::move(posted);
 			channels.accumulateInputs.pipelineFramesTaken.fetch_add(1, std::memory_order_relaxed);
 		}
-		Diagnostics::Notify<Diagnostics::ScenePoint::AccumulateInputsTaken>();
 	}
 
 	void Coordinator::MakeNewPipelineConstants()
@@ -231,7 +230,7 @@ namespace DCLF::Scene
 				a_evaluate(i, a_results[i]);
 		};
 		if (a_pool) {
-			SceneScheduler::Executor().ParallelFor("CS.DCLF.Accumulate.Joins", a_count, kFanoutGrain, body);
+			::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.Accumulate.Joins", a_count, kFanoutGrain, body);
 		} else {
 			for (std::size_t begin = 0; begin < a_count; begin += kFanoutGrain)
 				body(begin, std::min(a_count, begin + kFanoutGrain));
@@ -244,7 +243,6 @@ namespace DCLF::Scene
 		bool interior;
 		std::uint32_t biasWitness;
 		bool ancestorValueOn;
-		bool derivedProbe;
 		std::uint32_t fadingThisFrame = 0;
 	};
 
@@ -262,7 +260,6 @@ namespace DCLF::Scene
 		ShardScope passScope(*this, false);
 		PartTimer timer(stats.partMs, &stats.accumulatePartMs);
 		TracyCZoneN(captureZone, "CS.DCLF.Accumulate.Capture", true);
-		Diagnostics::Notify<Diagnostics::ScenePoint::JoinsBegin>();
 		accumulatedPasses.clear();
 		accumulatedLayerPasses.clear();
 		residentJoining.clear();
@@ -276,8 +273,7 @@ namespace DCLF::Scene
 		const auto& decalBiasMode = frameDecalBias;
 		const std::uint32_t biasWitness = decalBiasMode[1] | (decalBiasMode[2] << 8) | (decalBiasMode[3] << 16);
 		const bool ancestorValueOn = Extensions::AncestorValueOn();
-		const bool derivedProbe = Policy::RecomputeCachedVerdicts(Policy::Verdicts::Derivation, passSerial);
-		JoinFrame frame{ timer, interior, biasWitness, ancestorValueOn, derivedProbe };
+		JoinFrame frame{ timer, interior, biasWitness, ancestorValueOn };
 
 		// Only the joins. Every other record keeps its binding, or has none and is only a culling candidate.
 		accumulateOrder.clear();
@@ -323,7 +319,6 @@ namespace DCLF::Scene
 		stats.materialsAlive = static_cast<std::uint32_t>(tables.materialSlots.AliveCount());
 		stats.materialCacheEntries = static_cast<std::uint32_t>(tables.materialSlots.AliveCount());
 		TracyCZoneEnd(statsZone);
-		Diagnostics::Notify<Diagnostics::ScenePoint::JoinsEnd>();
 	}
 
 	void Coordinator::RunJoins(JoinFrame& a_frame)
@@ -386,7 +381,7 @@ namespace DCLF::Scene
 
 		LightingDescriptors descriptors;
 		const Ineligible reason = a_result.reason;
-		if (derivedHit && !a_frame.derivedProbe) {
+		if (derivedHit) {
 			descriptors = derived.descriptors;
 			++stats.derivedHits;
 		} else {
@@ -410,7 +405,7 @@ namespace DCLF::Scene
 
 
 		JoinBinding binding;
-		if (derivedHit && !a_frame.derivedProbe) {
+		if (derivedHit) {
 			binding.pipelineSlot = derived.pipelineSlot;
 			binding.materialSlot = derived.materialSlot;
 			binding.staticFlags = derived.staticFlags;
@@ -435,7 +430,7 @@ namespace DCLF::Scene
 				return;
 			}
 			binding.staticFlags = a_result.staticFlags;
-			RecordJoinDerivation(a_entry, a_result, a_frame, derivedHit, descriptors, binding, derived);
+			RecordJoinDerivation(a_entry, a_result, a_frame, descriptors, binding, derived);
 			if (!layer && a_entry.accumulated->hint == kFadingHint)
 				RequestSettledPipeline(a_entry, a_result);
 		}
@@ -607,25 +602,14 @@ namespace DCLF::Scene
 		return true;
 	}
 
-	void Coordinator::RecordJoinDerivation(const OrderEntry& a_entry, const JoinResult& a_result, const JoinFrame& a_frame, bool a_derivedHit,
+	void Coordinator::RecordJoinDerivation(const OrderEntry& a_entry, const JoinResult& a_result, const JoinFrame& a_frame,
 		const LightingDescriptors& a_descriptors, const JoinBinding& a_binding, Tracked::Derived& a_derived)
 	{
-		RE::BSGeometry* geometry = a_entry.geometry;
 		const AccumulatedPass* accumulated = a_entry.accumulated;
 		const auto& descriptors = a_descriptors;
 		auto& derived = a_derived;
 		const std::uint32_t pipelineSlot = a_binding.pipelineSlot, materialSlot = a_binding.materialSlot, staticFlags = a_binding.staticFlags;
 		const PipelineKey& key = a_binding.key;
-		if (a_derivedHit && a_frame.derivedProbe) {
-			++stats.derivedChecked;
-			const bool same = derived.pipelineSlot == pipelineSlot && derived.materialSlot == materialSlot &&
-			                  derived.staticFlags == staticFlags && derived.key == key && derived.descriptors.vertex == descriptors.vertex &&
-			                  derived.descriptors.pixel == descriptors.pixel && derived.descriptors.pass == descriptors.pass;
-			if (!same && stats.derivedDiffers++ == 0)
-				logger::warn("[DCLF] derived cache: '{}' differs on recompute (slots {}/{} vs {}/{}, flags {:X} vs {:X})",
-					geometry->name.c_str() ? geometry->name.c_str() : "?", derived.pipelineSlot, derived.materialSlot,
-					pipelineSlot, materialSlot, derived.staticFlags, staticFlags);
-		}
 		derived.valid = true;
 		derived.generation = tablesGeneration;
 		derived.triShape = tables.geometrySlotKey[a_result.geometrySlot];
@@ -733,7 +717,6 @@ namespace DCLF::Scene
 		KeepResidentsAlive();
 		++residentStats.frames;
 		residentStats.resident += residents.size();
-		Diagnostics::Notify<Diagnostics::ScenePoint::ResidentsKept>();
 		{
 			// Slots are freed only when unreferenced. Parity neutralises any object that dangles.
 			if (Policy::NeutraliseDanglingSlots(slotsFreedThisFrame, passSerial))
@@ -943,8 +926,7 @@ namespace DCLF::Scene
 		                   derived.material == r.material && derived.fadeState == r.fadeState && derived.technique == accumulated->technique &&
 		                   derived.subPass == accumulated->subPass && derived.hint == accumulated->hint && derived.interior == interior &&
 		                   derived.alphaBelowOne == r.alphaBelowOne && derived.alphaState == r.alphaState && derived.biasWitness == biasWitness;
-		const bool derivedProbe = Policy::RecomputeCachedVerdicts(Policy::Verdicts::Derivation, passSerial);
-		r.classified = a_classify || !r.derivedWitness || derivedProbe;
+		r.classified = a_classify || !r.derivedWitness;
 		Ineligible reason = Ineligible::None;
 		if (r.classified)
 			reason = layer ? Eligibility::Layer(r.leaf, &r.descriptors, accumulated) : Eligibility::Static(r.leaf, &r.descriptors, accumulated);
@@ -1046,7 +1028,7 @@ namespace DCLF::Scene
 		const bool alphaBelowOne = record && record->materialAlpha < 1.0f;
 		const std::uint32_t alphaState = layer ? 0u : leaf.AlphaState();
 		// A blended fade starting or ending changes the synthetic pass's hint, so the binding goes with it.
-		const bool fading = !layer && BlendFading(leaf, record) && Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward);
+		const bool fading = !layer && BlendFading(leaf, record) && Extensions::ObjectClassOn(Api::ObjectClass::Forward);
 		return derived.valid && (derived.hint == kFadingHint) == fading && derived.alphaState == alphaState && derived.generation == tablesGeneration && derived.geometrySlot == tables.objects[a_slot].geometryIndex &&
 		       derived.property == property && derived.material == material && derived.fadeState == FadeStateOf(record) &&
 		       derived.alphaBelowOne == alphaBelowOne && derived.interior == frameInterior && derived.pipelineSlot == tables.objects[a_slot].pipelineIndex &&
@@ -1069,12 +1051,12 @@ namespace DCLF::Scene
 		tables.NoteWrite(a_slot, columnsBefore);
 	}
 
-	void Coordinator::RefreshShadowSets(bool a_forceRebuild)
+	void Coordinator::RefreshShadowSets()
 	{
 		DCLF_ZONE("CS.DCLF.Capture.ShadowSets");
 		// The dependency index holds membership across frames. Each index keeps its keys ordered by their lowest member.
 		shadowTextureNet.clear();
-		bool rebuild = a_forceRebuild || shadowIndexNeedsRebuild;
+		const bool rebuild = shadowIndexNeedsRebuild;
 		std::vector<std::uint32_t> changed = std::move(shadowDirtySlots);
 		shadowDirtySlots.clear();
 		auto& counters = shadowSetStats;

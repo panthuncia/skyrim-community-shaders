@@ -8,8 +8,6 @@ extends = ["native-vulkan"]
 [org]
 validation = true
 tripwire_log = true
-residue_census = true
-residue_census_frames = 300
 
 [[steps]]
 at = "world-ready"

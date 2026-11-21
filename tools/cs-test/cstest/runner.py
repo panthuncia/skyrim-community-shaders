@@ -1,6 +1,7 @@
 """cs-test run: one game session from a resolved config, with every change journaled and undone."""
 
 import atexit
+import copy
 import datetime
 import json
 import shutil
@@ -10,7 +11,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import collect, journal as journal_mod, mo2, procs
+from . import collect, journal as journal_mod, mo2, presentmon, procs
 from .config import diff, resolve
 from .outcome import Final, Watcher, frames_after, read_status, summary_line
 from .paths import CONFIG_DIR, GAME_EXE, LEGACY_ENV_FILE, LOG_FILE, MO2_EXE, STATUS_FILE, TEST_FILE
@@ -43,6 +44,11 @@ def resolve_with_diff(spec, sets, label=None, stage=None, schema=None, config_di
     return contract, harness, differences
 
 
+def _step_text(step):
+    text = f"{step['at']}+{step['frames']} {step['do']} {step['arg']}".strip()
+    return text + (f" await {step['await']}" if step.get("await") else "")
+
+
 def format_diff(differences):
     if not differences:
         return ["  (same as base)"]
@@ -51,7 +57,7 @@ def format_diff(differences):
         if path == "harness.autoload_off":
             lines.append(f"  {path}: {json.dumps(a)} -> {json.dumps(b)} (game.save names a save, so the autoload mod is turned off)" if b else f"  {path}: {json.dumps(a)} -> {json.dumps(b)}")
         elif path == "steps":
-            lines.append(f"  steps: {len(a or [])} -> {len(b or [])}: " + "; ".join(f"{s['at']}+{s['frames']} {s['do']} {s['arg']}".strip() for s in (b or [])))
+            lines.append(f"  steps: {len(a or [])} -> {len(b or [])}: " + "; ".join(_step_text(s) for s in (b or [])))
         else:
             lines.append(f"  {path}: {json.dumps(a)} -> {json.dumps(b)}")
     return lines
@@ -87,6 +93,34 @@ def watch(paths, contract, harness, log=print, clock=time.monotonic, sleep=time.
     watcher = Watcher(contract, harness)
     status_path = paths.skse / STATUS_FILE
     start = clock()
+    try:
+        return _watch_loop(paths, contract, harness, log, clock, sleep, watcher, status_path, start)
+    finally:
+        # Stopped before the game is killed. The samples stay for the result.
+        if watch.sampler:
+            watch.sampler.stop()
+
+
+# fg.presentmon's sampler for the run being watched.
+watch.sampler = None
+
+
+def _start_presentmon(contract, harness, games, log):
+    """fg.presentmon: samples the game's presents per second from its first poll on."""
+    if not harness.get("presentmon") or watch.sampler or not games:
+        return
+    pid = games[0]
+    sampler = presentmon.Sampler(pid, Path(contract["run_dir"]) / "presentmon.jsonl")
+    try:
+        sampler.start()
+        watch.sampler = sampler
+        log(f"  PresentMon: sampling process {pid}")
+    except presentmon.PresentMonError as error:
+        log(f"  PresentMon: {error}")
+        harness["presentmon"] = False
+
+
+def _watch_loop(paths, contract, harness, log, clock, sleep, watcher, status_path, start):
     status = None
     focused = False
     last_phase = None
@@ -94,6 +128,7 @@ def watch(paths, contract, harness, log=print, clock=time.monotonic, sleep=time.
         sleep(POLL_S)
         t = clock() - start
         games = procs.find(GAME_EXE)
+        _start_presentmon(contract, harness, games, log)
         fresh = read_status(status_path, contract["run_id"])
         if fresh is not None:
             status = fresh
@@ -132,7 +167,53 @@ def check_expectations(contract, run_dir, status, final):
     live = collect.live_image(run_dir, expect)
     if live.get("failure"):
         return Final("failed", f"{live['failure']} (harness)", "harness")
+    graph = collect.graph_frames(contract, collect.final_status(run_dir, status))
+    if graph["failures"]:
+        return Final("failed", "; ".join(graph["failures"]) + " (harness)", "harness")
     return final
+
+
+SETTINGS_USER = Path("SKSE/Plugins/CommunityShaders/SettingsUser.json")
+
+
+def deep_merge(into, layer):
+    """Tables merge key by key, recursively; everything else is replaced."""
+    for key, value in layer.items():
+        if isinstance(value, dict) and isinstance(into.get(key), dict):
+            deep_merge(into[key], value)
+        else:
+            into[key] = value
+    return into
+
+
+def write_saved_settings(paths, stage, run_id, saved, journal, log=print):
+    """[saved_settings]: merged into the saved settings for this run. The copy in MO2's overwrite folder wins over every mod, so it
+    goes there. An existing file is set aside and put back by the journal; a new one is deleted."""
+    target = paths.overwrite / SETTINGS_USER
+    if target.exists():
+        try:
+            settings = json.loads(target.read_text(encoding="utf-8-sig"))
+        except ValueError as error:
+            raise RunError(f"{target} does not parse ({error}): fix it, saved_settings will not overwrite it") from error
+        if not isinstance(settings, dict):
+            raise RunError(f"{target} is not a JSON object: fix it, saved_settings will not overwrite it")
+        backup = paths.root / "aside" / f"{run_id}-SettingsUser.json"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target, backup)
+        journal.add({"do": "restore", "path": str(target), "backup": str(backup)})
+    else:
+        settings = {}
+        staged = paths.mods / mo2.mod_for(paths, stage) / SETTINGS_USER
+        if staged.exists():
+            try:
+                settings = json.loads(staged.read_text(encoding="utf-8-sig"))
+            except ValueError as error:
+                raise RunError(f"{staged} does not parse ({error})") from error
+        journal.add({"do": "file", "path": str(target)})
+        target.parent.mkdir(parents=True, exist_ok=True)
+    deep_merge(settings, copy.deepcopy(saved))
+    target.write_text(json.dumps(settings, indent=4), encoding="utf-8")
+    log(f"Saved settings: {', '.join(saved)} written into {target} for this run")
 
 
 def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, wait_lock=0, log=print, config_dir=CONFIG_DIR):
@@ -193,10 +274,15 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         journal.add({"do": "variant", "from": previous, "to": stage})
         mo2.use_variant(paths, stage)
         if harness["shader_cache"] == "cold":
+            # The cache is shared by every stage, so a cold run sets it aside and the journal puts it back.
             cache = paths.overwrite / "ShaderCache"
+            held = paths.root / "ShaderCache.cold-hold"
+            if held.exists():
+                raise RuntimeError(f"{held} already exists: a cold run left the shared shader cache there. Move it back to {cache} first")
+            journal.add({"do": "cold_cache", "live": str(cache), "held": str(held)})
             if cache.exists():
-                log(f"Clearing {stage}'s shader cache (build.shader_cache = cold)")
-                shutil.rmtree(cache)
+                log(f"Setting the shared shader cache aside for this run (build.shader_cache = cold): {held}")
+                shutil.move(str(cache), str(held))
 
         wanted = harness["mods_off"]
         current = mo2.mods_state(paths.modlist, wanted)
@@ -216,6 +302,9 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
             journal.add({"do": "file", "path": str(tweaks)})
             tweaks.write_text(DISPLAY_TWEAKS_UNCAPPED, encoding="utf-8")
             log(f"Uncapped: wrote {tweaks} for this run")
+
+        if harness["saved_settings"]:
+            write_saved_settings(paths, stage, run_id, harness["saved_settings"], journal, log)
 
         legacy_env = paths.skse / LEGACY_ENV_FILE
         if legacy_env.exists():
@@ -268,6 +357,12 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
     scan = collect.scan_log(run_dir / LOG_FILE)
     fault = ((status or {}).get("fault") or {}).get("address") or scan["fault_address"]
     shots = collect.shots_in(run_dir)
+    presents = None
+    if watch.sampler:
+        fgtest = collect.fgtest_seconds(run_dir / LOG_FILE, started)
+        presents = {**presentmon.summarize(watch.sampler.samples, fgtest), **collect.fgtest_rates(run_dir / LOG_FILE)}
+        log(f"PresentMon: {presents}")
+        watch.sampler = None
     line = summary_line(contract["name"], harness["label"], final, status, shots, fault)
     result = {
         "run_id": contract["run_id"],
@@ -285,6 +380,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         "harness": harness,
         "shots": shots,
         "live_image": collect.live_image(run_dir, contract["expect"]),
+        "graph_frames": collect.graph_frames(contract, collect.final_status(run_dir, status)),
         "first_error": scan["first_error"] or (status or {}).get("last_error", ""),
         "fault": (status or {}).get("fault") or ({"address": fault} if fault else {}),
         "errors": scan["errors"],
@@ -292,6 +388,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         "error_kinds": scan["error_kinds"],
         "warning_kinds": scan["warning_kinds"],
         "collected": collected,
+        "presents": presents,
         "summary": line,
     }
     (run_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

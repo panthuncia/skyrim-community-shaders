@@ -1,6 +1,11 @@
-Texture2D<float4> Weather : register(t99);
-Texture2D<float2> Bounds : register(t105);
-RWTexture2D<float2> OutputBounds : register(u5);
+// Dual-target (Common/OrgResources.hlsli). On the render graph (ORGVolumetricClouds) each mip of the chain is its own pass:
+// main writes mip 0 from the weather map, reduceBounds writes mip n from mip n - 1.
+#include "Common/OrgResources.hlsli"
+
+#define MID_CLOUD_BOUNDS_RESOURCES(X)        	X(SRV, Texture2D<float4>, Weather, 99)  	X(SRV, Texture2D<float2>, Bounds, 105)  	X(UAV, RWTexture2D<float2>, OutputBounds, 5)
+ORG_PUSH_BLOCK(MID_CLOUD_BOUNDS_RESOURCES(ORG_HANDLE))
+MID_CLOUD_BOUNDS_RESOURCES(ORG_RESOURCE)
+
 groupshared float2 SharedBounds[64];
 
 [numthreads(8, 8, 1)] void main(uint2 group : SV_GroupID, uint2 thread : SV_GroupThreadID, uint lane : SV_GroupIndex) {

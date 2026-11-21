@@ -6,30 +6,10 @@
 
 namespace DCLF::Diagnostics
 {
-	void LogUnfilledFrameBuffer(const FrameBufferUnfilled& a_unfilled)
-	{
-		auto& unfilled = DrawsState::Get().unfilledFrameBuffers[a_unfilled.textureRegister];
-		if ((unfilled++ % 600) == 0)
-			logger::warn("[DCLF] frame buffer t{} ({} elements of {} bytes) not filled: the mirror holds {} bytes of it ({} times)", a_unfilled.textureRegister,
-				a_unfilled.elements, a_unfilled.stride, a_unfilled.mirrorBytes, unfilled);
-	}
-
 	void LogFadeInputsVaried(const FadeInputsVaried& a_varied)
 	{
 		if (DrawsState::Get().fadeInputsVaried++ < 5)
 			logger::info("[DCLF] the animation job's fade updates of frame {} had differing inputs; the first's stand for all", a_varied.frame);
-	}
-
-	void LogShortBuffers(const ShortBuffersDrawn& a_drawn)
-	{
-		const auto& tables = a_drawn.tables;
-		const auto& shortBuffer = a_drawn.payload.body->shortBuffer;
-		if (shortBuffer.object >= tables.objects.size())
-			return;
-		const auto& geometry = tables.geometries[tables.objects[shortBuffer.object].geometryIndex];
-		logger::warn("[DCLF] '{}' draws past its buffers: {} vertices x {} bytes needs {}, the slice holds {}; indices to {} need {}, the slice holds {}",
-			tables.objectGeometry[shortBuffer.object] ? tables.objectGeometry[shortBuffer.object]->name.c_str() : "?", geometry.vertexCount, geometry.vertexStride,
-			shortBuffer.vertexNeeded, geometry.vertexBytes, geometry.firstIndex + geometry.indexCount, shortBuffer.indexNeeded, geometry.indexBytes);
 	}
 
 	void LogCullingSetup(const MainCullingSetup& a_setup)

@@ -14,7 +14,7 @@ $SCR = 'F:\claudetmp\claude\J--hdresreach\5898b011-4161-48ee-8d41-d13ca41c0ac9\s
 Get-Process SkyrimSE, skse64_loader -EA SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 4
 Copy-Item "$SCR\$Settings" "$G\Data\SKSE\Plugins\CommunityShaders\SettingsUser.json" -Force
-foreach ($n in @('DXVK_CONFIG','CS_D3D12','DXVK_VKPROF')) { Remove-Item "Env:$n" -EA SilentlyContinue }
+foreach ($n in @('DXVK_CONFIG','DXVK_VKPROF')) { Remove-Item "Env:$n" -EA SilentlyContinue }
 
 Start-Process -FilePath "$G\skse64_loader.exe" -WorkingDirectory $G | Out-Null
 

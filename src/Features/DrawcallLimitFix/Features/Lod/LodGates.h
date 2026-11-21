@@ -32,11 +32,8 @@ namespace DCLF::Features::Lod::LodGates
 	/** @brief Must run before any gate opens. */
 	void NoteRegistered(Api::EngineChannelId a_channel, std::uint32_t a_hiddenSite);
 
-	/**
-	 * @brief Installs the thunks and detours once. No gate opens while a_running returns false, and the next LOD drain
-	 * force-releases every gate once it does, since no flip will come. Null a_running means always running.
-	 */
-	void Install(Api::SwitchId a_switch, bool (*a_running)() = nullptr);
+	/** @brief Installs the thunks and detours once. */
+	void Install(Api::SwitchId a_switch);
 	/** @brief The switch is on and Install patched every site. */
 	bool Enabled();
 	/** @brief Idempotent. */
@@ -53,21 +50,6 @@ namespace DCLF::Features::Lod::LodGates
 	 */
 	const std::atomic<std::uint32_t>& OpenGates();
 	bool Vetoes(const void* a_object);
-	/** @brief Any thread. Only does work under the parity switches, to spot LOD the engine hid again after a flip. */
-	void NoteEngineHide(const void* a_object, std::uint32_t a_siteOffset);
-	/** @brief The engine's LOD hide stores: object update, and a terrain block's two nodes. */
-	inline constexpr std::array<Engine::Offset, 3> kEngineHideSites{ { { { 31837, 0x2c4 }, { 31050, 0x1f7 } }, { { 31745, 0x9 }, { 30942, 0x9 } }, { { 31745, 0x19 }, { 30942, 0x19 } } } };
-	/** @brief kEngineHideSites as offsets for the running runtime. */
-	inline std::span<const std::uint32_t> EngineHideSites()
-	{
-		static const auto sites = [] {
-			std::array<std::uint32_t, kEngineHideSites.size()> offsets{};
-			for (std::size_t i = 0; i < offsets.size(); ++i)
-				offsets[i] = static_cast<std::uint32_t>(kEngineHideSites[i].Get());
-			return offsets;
-		}();
-		return sites;
-	}
 
 	/**
 	 * @brief Render thread. Shows the incoming blocks, hides the outgoing and queues their release for the next LOD drain.
@@ -98,14 +80,13 @@ namespace DCLF::Features::Lod::LodGates
 	inline constexpr std::size_t kFlushKinds = 9;
 	struct Totals
 	{
-		bool installed = false, coverage = false;
+		bool installed = false;
 		std::uint64_t opened = 0, initialOpened = 0, initialLoadScreen = 0, flipped = 0, flipMisses = 0, forced = 0, superseded = 0, held = 0, released = 0;
 		std::uint64_t reused = 0, handedOff = 0, deferred = 0, reattached = 0, kept = 0, reusedHidden = 0, orphansShown = 0, vetoes = 0;
 		std::uint64_t flipFrames = 0, releases = 0;
 		std::int64_t flipTicks = 0, flipTicksMax = 0, releaseTicks = 0, releaseTicksMax = 0, oldestTicks = 0;
 		std::uint32_t open = 0, oldestFrames = 0;
 		std::array<std::uint64_t, kFlushKinds> flushes{};
-		std::uint64_t coverageBoth = 0, coverageNeither = 0, coverageEngineHid = 0, engineRehides = 0;  // filled only when coverage is set
 	};
 	Totals Take();
 	const char* FlushName(std::size_t a_index);

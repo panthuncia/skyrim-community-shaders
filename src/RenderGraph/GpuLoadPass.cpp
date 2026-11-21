@@ -1,21 +1,21 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/GpuLoadPass.h"
+#include "RenderGraph/GpuLoadPass.h"
 
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/GpuTimingSource.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/Switches.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/GpuTimingSource.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/PixelBuffer.h>
-#	include <Resources/TextureDescription.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/PixelBuffer.h>
+#include <Resources/TextureDescription.h>
 
 namespace GpuLoadPass
 {
@@ -34,7 +34,8 @@ namespace GpuLoadPass
 
 		struct Resources
 		{
-			std::shared_ptr<const ComputeProgram> program;
+			// Built on the programs lane. The load dispatches nothing until it is built.
+			RenderGraph::Programs::Fixed<ComputeProgram> program;
 			std::shared_ptr<org::PixelBuffer> output;
 			std::uint32_t groups = 0;
 		};
@@ -64,11 +65,14 @@ namespace GpuLoadPass
 
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
-				a_out.push_back(reinterpret_cast<std::uintptr_t>(resources->program.get()));
+				a_out.push_back(resources->program.Ready() ? 1u : 0u);
 				a_out.push_back(resources->groups);
 			}
 
-			LoadFrame Prepare(const LoadBindings&, const org::PassPrepareContext&) const { return { resources->program, resources->groups }; }
+			LoadFrame Prepare(const LoadBindings&, const org::PassPrepareContext&) const
+			{
+				return { resources->program.Ready() ? resources->program.Get() : nullptr, resources->groups };
+			}
 
 			static void Record(const LoadBindings& a_bindings, const LoadFrame& a_frame, org::PassRecordContext& a_recording)
 			{
@@ -78,7 +82,7 @@ namespace GpuLoadPass
 				constants.outputIndex = a_recording.Index(a_bindings.output);
 				auto& commands = a_recording.Commands();
 				commands.BindLayout(a_frame.program->layout->GetHandle());
-				commands.BindPipeline(a_frame.program->Pipeline());
+				commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 				commands.Dispatch(a_frame.groups, 4, 1);
 			}
@@ -90,6 +94,8 @@ namespace GpuLoadPass
 		struct State
 		{
 			std::shared_ptr<Resources> resources;
+			// Registered at the next revision start, which waits for the Present stage's build that holds it.
+			RenderGraph::Frame::DeclaredClient client;
 			bool armed = false;
 		};
 
@@ -98,32 +104,22 @@ namespace GpuLoadPass
 			static State state;
 			return state;
 		}
-
-		bool OnGraph()
-		{
-			return GpuTimingSource::SelectedTimers() == GpuTimingSource::Timers::Graph && Switches::Number("CS_GPU_LOAD") > 0;
-		}
-	}
-
-	void ReserveAnchor()
-	{
-		if (OnGraph())
-			FrameAnchors::Reserve(FrameAnchors::Anchor::Present);
 	}
 
 	bool Register(std::uint32_t a_groups)
 	{
 		auto& state = Get();
 		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Present)) {
-			logger::warn("[PassSkip] the GPU load stays on D3D11: the render graph's Present anchor has no epoch");
+		if (!host) {
+			logger::warn("[PassSkip] the GPU load stays on D3D11: the render graph is not running");
 			return false;
 		}
 		auto resources = std::make_shared<Resources>();
 		resources->groups = a_groups;
-		resources->program = ComputeProgram::Load(host->Device(), { .source = "RenderGraph/GpuLoadCS.hlsl", .constantWords = kConstantWords });
+		// Never built on the render thread. A failed build is fatal on the programs lane.
+		resources->program = RenderGraph::Programs::Queue("GPU load", ComputeProgram::Desc{ .source = "RenderGraph/GpuLoadCS.hlsl", .constantWords = kConstantWords });
 		if (!resources->program) {
-			logger::warn("[PassSkip] the GPU load stays on D3D11: its render-graph program did not load");
+			logger::warn("[PassSkip] the GPU load stays on D3D11: the program service is not available");
 			return false;
 		}
 		org::TextureDescription desc{};
@@ -135,19 +131,21 @@ namespace GpuLoadPass
 		resources->output = org::PixelBuffer::CreateShared(desc);
 		resources->output->SetName(fmt::format("{}.output", kClientId));
 
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
-		client.passes.push_back({ .name = fmt::format("{}.dispatch", kClientId),
-			.anchor = FrameAnchors::Anchor::Present,
-			.kind = FrameAnchors::PassKind::Compute,
-			.make = [resources] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<LoadPass>(resources)); } });
-		client.registerResources = [resources](org::RenderGraph& a_graph) {
-			a_graph.RegisterResource(org::ResourceIdentifier(resources->output->GetName()), resources->output);
+		const auto make = [resources](const bool&, FrameAnchors::ClientDesc& a_client) {
+			a_client.passes.push_back({ .name = fmt::format("{}.dispatch", kClientId),
+				.anchor = FrameAnchors::Anchor::Present,
+				.kind = FrameAnchors::PassKind::Compute,
+				.make = [resources] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<LoadPass>(resources)); } });
+			a_client.registerResources = [resources](org::RenderGraph& a_graph) {
+				a_graph.RegisterResource(org::ResourceIdentifier(resources->output->GetName()), resources->output);
+			};
+			// Armed for one Present at a time, so a frame that did not arm it submits nothing.
+			a_client.active = [] { return std::exchange(Get().armed, false); };
+			return true;
 		};
-		// Armed for one Present at a time, so a frame that did not arm it submits nothing.
-		client.active = [] { return std::exchange(Get().armed, false); };
-		if (!FrameAnchors::Register(std::move(client)))
-			return false;
+		// The client never changes, so its key is constant.
+		state.client = RenderGraph::Frame::DeclareClient<bool>(
+			std::string(kClientId), {}, [](const RenderGraph::Frame::Inputs&) -> std::optional<bool> { return true; }, make);
 		state.resources = std::move(resources);
 		logger::info("[PassSkip] GPU load: {} groups on the render graph (Present anchor)", a_groups);
 		return true;
@@ -161,15 +159,3 @@ namespace GpuLoadPass
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-#	include "RenderGraph/GpuLoadPass.h"
-
-namespace GpuLoadPass
-{
-	void ReserveAnchor() {}
-	bool Register(std::uint32_t) { return false; }
-	void Arm() {}
-}
-
-#endif

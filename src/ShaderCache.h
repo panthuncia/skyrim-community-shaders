@@ -598,6 +598,12 @@ namespace SIE
 		 */
 		static std::vector<std::pair<std::string, std::string>> GetCompileDefines(const RE::BSShader& shader, ShaderClass shaderClass, uint32_t descriptor);
 
+		/**
+		 * @brief GetCompileDefines from the shader type alone, for a permutation described before the engine made its shader object.
+		 * Not for ImageSpace, whose defines come from the object.
+		 */
+		static std::vector<std::pair<std::string, std::string>> GetCompileDefines(RE::BSShader::Type type, ShaderClass shaderClass, uint32_t descriptor);
+
 		uint64_t GetCachedHitTasks();
 		uint64_t GetCompletedTasks();
 		uint64_t GetFailedTasks();

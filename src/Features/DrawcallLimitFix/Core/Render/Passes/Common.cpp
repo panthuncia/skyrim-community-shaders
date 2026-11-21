@@ -10,7 +10,6 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "RenderGraph/DxvkImageImport.h"
-#include "RenderGraph/Switches.h"
 
 #include <Resources/ExternalTextureResource.h>
 
@@ -35,20 +34,12 @@ namespace DCLF::Draws
 		FoldCullEye(a_viewProj.data(), eye, a_out);
 	}
 
-	FrameAnchors::Texture ImportImage(rhi::Device a_device, ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
+	FrameAnchors::Texture ImportImage(rhi::Device, ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
 		const char* a_name)
 	{
 		// Share the image's one graph resource with every other importer, so the graph orders all uses and one tracker follows
-		// its layout. CS_ORG_ENGINE_TARGETS_DCLF=0 keeps DCLF's own import, as a bisecting aid.
-		static const bool shareOwned = !Switches::Off("CS_ORG_ENGINE_TARGETS_DCLF");
-		if (shareOwned)
-			return FrameAnchors::ShareImage(a_texture, a_image, a_desc, a_name ? a_name : "DCLF image");
-		a_desc.imageDimensions.clear();
-		a_desc.imageDimensions.push_back({ a_image.extent.width, a_image.extent.height, 0, 0 });
-		// ORG builds a DSV per slice for arrays, so a shadow view attaches its own slice.
-		a_desc.isArray = a_image.arrayLayers > 1;
-		a_desc.arraySize = a_desc.isArray ? a_image.arrayLayers : 1;
-		return RenderGraph::ImportDxvkTexture(a_device, a_image, std::move(a_desc), a_name);
+		// its layout.
+		return FrameAnchors::ShareImage(a_texture, a_image, a_desc, a_name ? a_name : "DCLF image");
 	}
 
 	void RegisterSceneBuffers(org::RenderGraph& a_graph, const SceneBuffers& a_scene)
@@ -125,9 +116,9 @@ namespace DCLF::Draws
 		class LatchedCopiesPass final : public org::TypedRenderGraphPass<LatchedCopiesPass, LatchedSource, LatchedCopiesBindings>
 		{
 		public:
-			LatchedCopiesPass(std::function<std::vector<LatchedTarget>()> a_targets, std::function<LatchedSource(const org::PassPrepareContext&)> a_source,
-				std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared) :
-				targets(std::move(a_targets)), source(std::move(a_source)), declared(a_declared), zeros(!CurrentGraphConditions().cpuPipeline) {}
+			LatchedCopiesPass(const GraphConditions& a_conditions, std::function<std::vector<LatchedTarget>()> a_targets,
+				std::function<LatchedSource(const org::PassPrepareContext&)> a_source, std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared) :
+				targets(std::move(a_targets)), source(std::move(a_source)), declared(a_declared), zeros(!a_conditions.cpuPipeline) {}
 
 			LatchedCopiesBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -154,8 +145,6 @@ namespace DCLF::Draws
 
 			static void Record(const LatchedCopiesBindings& a_bindings, const LatchedSource& a_prepared, org::PassRecordContext& a_recording)
 			{
-				if (LatchedRecordCut())
-					return;
 				CopyLatchedLists(a_recording.Commands(), a_prepared, a_recording.Run(), [&](const void* a_key) {
 					const auto target = std::find_if(a_bindings.targets.begin(), a_bindings.targets.end(), [&](const auto& a_target) { return a_target.first == a_key; });
 					return target != a_bindings.targets.end() ? a_recording.Resolve(target->second).GetHandle() : rhi::ResourceHandle{};
@@ -170,10 +159,10 @@ namespace DCLF::Draws
 		};
 	}
 
-	std::shared_ptr<org::RenderPass> MakeLatchedCopiesPass(std::function<std::vector<LatchedTarget>()> a_targets,
+	std::shared_ptr<org::RenderPass> MakeLatchedCopiesPass(const GraphConditions& a_conditions, std::function<std::vector<LatchedTarget>()> a_targets,
 		std::function<LatchedSource(const org::PassPrepareContext&)> a_source, std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared)
 	{
-		return std::make_shared<LatchedCopiesPass>(std::move(a_targets), std::move(a_source), a_declared);
+		return std::make_shared<LatchedCopiesPass>(a_conditions, std::move(a_targets), std::move(a_source), a_declared);
 	}
 
 	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights)

@@ -1,0 +1,7 @@
+# FSR frame generation in native D3D12 (sl.fsr_g's D3D12 backend): the fg steps on BasicRHI's D3D12 backend. Read the
+# "[Streamline] FSR-FG presenting 2 frame(s)" line, the [FGTEST] presents next to the rendered rate, and the sl.fsr_g lines
+# in the Streamline log. Exponential Height Fog stays off: its volumetric fog breaks the graph modes' hudless (plan 3.6).
+extends = ["native-d3d12", "fg"]
+
+[features]
+ExponentialHeightFog = false

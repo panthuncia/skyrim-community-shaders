@@ -37,7 +37,7 @@ struct ScreenshotFeature : public Feature
 	virtual void Reset() override;
 	/** @brief Called after all features are loaded: the vanilla screenshot setting, and the render graph's Capture anchor. */
 	virtual void PostPostLoad() override;
-	/** @brief Registers the render graph's capture copy when CS_ORG_SCREENSHOT=1 (ORGScreenshot). */
+	/** @brief Registers the render graph's capture copy in graph mode (ORGScreenshot). */
 	virtual void SetupResources() override;
 
 	/** @brief Captures a screenshot from the current back buffer and enqueues it for async encoding and save. */

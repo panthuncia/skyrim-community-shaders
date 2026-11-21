@@ -4,6 +4,7 @@
 #include "DrawcallLimitFix.h"
 #include "Features/Skylighting/ORGSkylighting.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
@@ -16,6 +17,11 @@
 #include <numbers>
 
 #define I18N_KEY_PREFIX "feature.skylighting."
+
+Skylighting::Skylighting()
+{
+	resets.Bind(CS::SettingRegistry::Declare("Skylighting.resets"));
+}
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Skylighting::Settings,
@@ -45,8 +51,8 @@ void Skylighting::ResetSkylighting()
 	zenithValid = false;
 	zenithEyePending = false;
 
-	// While the probe update runs on the render graph, a graph pass clears its volumes, ordered with the graph's reads.
-	if (ORGSkylighting::Get().QueueReset()) {
+	// While the probe update runs on the render graph, the next revision gives the volumes new versions and their first run clears them.
+	if (ORGSkylighting::Get().QueueReset(*this)) {
 		probeGridBottomZ = -FLT_MAX;
 		queuedResetSkylighting = false;
 		return;
@@ -119,7 +125,7 @@ void Skylighting::SetupResources()
 		precipitationOcclusion.depthSRV->GetDesc(&srvDesc);
 		precipitationOcclusion.views[0]->GetDesc(&dsvDesc);
 
-		// CS_ORG_SKYLIGHTING=1: a graph-owned map exported to D3D11, else a D3D11 texture.
+		// In graph mode a graph-owned map exported to D3D11, else a D3D11 texture.
 		texOcclusion = ORGSkylighting::Get().MakeOcclusionMap(texDesc, srvDesc.Format, dsvDesc.Format);
 		if (!texOcclusion) {
 			texOcclusion = new Texture2D(texDesc, "Skylighting::Occlusion");
@@ -136,7 +142,7 @@ void Skylighting::SetupResources()
 		}
 	}
 
-	// CS_ORG_SKYLIGHTING=1: the render graph owns the volumes.
+	// In graph mode the render graph owns the volumes.
 	if (!ORGSkylighting::Get().Setup(*this))
 		CreateProbeVolumes();
 
@@ -217,29 +223,9 @@ void Skylighting::CreateProbeVolumes()
 	texProbeCoverage->CreateUAV(uavDesc);
 }
 
-void Skylighting::ReleaseProbeVolumes()
-{
-	for (auto* volume : { &texProbeArray, &texAccumFramesArray, &texShadowBitmask, &texShadowVisibility, &texProbeCoverage }) {
-		delete *volume;
-		*volume = nullptr;
-	}
-}
-
 bool Skylighting::UpdateProbesOnGraph()
 {
-	if (!ORGSkylighting::Requested())
-		return false;
-	const bool onGraph = ORGSkylighting::Get().Update(*this);
-	// Only one path's volumes exist. When the graph path stops (the runtime went down), the D3D11 volumes are made here and start
-	// reset.
-	if (onGraph == (texProbeArray != nullptr)) {
-		if (onGraph)
-			ReleaseProbeVolumes();
-		else
-			CreateProbeVolumes();
-		ResetSkylighting();
-	}
-	return onGraph;
+	return ORGSkylighting::Get().Update(*this);
 }
 
 ID3D11ShaderResourceView* Skylighting::ProbeArraySRV() const
@@ -285,6 +271,10 @@ void Skylighting::ClearShaderCache()
 
 void Skylighting::CompileComputeShaders()
 {
+	// The graph updates the probes in graph mode, so the D3D11 shader is not needed.
+	if (RenderGraph::Engine::GraphMode())
+		return;
+
 	struct ShaderCompileInfo
 	{
 		winrt::com_ptr<ID3D11ComputeShader>* programPtr;
@@ -442,8 +432,6 @@ void Skylighting::PostPostLoad()
 	stl::write_vfunc<0x28, BSShaderAccumulator_StartGroupingAlphas>(RE::VTABLE_BSShaderAccumulator[0]);
 
 	MenuOpenCloseEventHandler::Register();
-
-	ORGSkylighting::Reserve();
 }
 
 //////////////////////////////////////////////////////////////
@@ -749,10 +737,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	// With Drawcall Limit Fix drawing it (a_dclf), its native variant of this map: DCLF draws every occluder from its own tables,
 	// GPU-culled, in its shadow epoch, so the engine's cull and registration (SetupMask) are skipped and RenderMask only sets the camera
 	// and clears the map. Otherwise, or on a frame DCLF did not draw it, the engine does.
-	const bool reference = !native && a_dclf && dclf.OcclusionReferenceFrame(DrawcallLimitFix::kSkyOcclusion);
-	const bool engine = !native && ((!a_dclf && !held) || reference);
-	// Engine-only occluders: the engine draws them into DCLF's map at RenderMask.
-	bool engineOnly = false;
+	const bool engine = !native && !a_dclf && !held;
 	{
 		ZoneScopedN("Skylighting - Setup Projection");
 		// The engine positions the precipitation camera using its previous world
@@ -765,8 +750,6 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		_computeProjection(a_precip, a_precip->occlusionData.camera);
 		if (engine)
 			a_precip->SetupMask();
-		else if (!native && (engineOnly = dclf.OcclusionEngineOnlyMask(a_precip)))
-			;  // DCLF's map, the engine's cull for its engine-only occluders alone (SetupMask set the camera)
 		else if (auto* accumulator = a_precip->occlusionData.accumulator.get())
 			accumulator->camera = a_precip->occlusionData.camera.get();  // what SetupMask sets
 		dclf.OcclusionView(DrawcallLimitFix::kSkyOcclusion);
@@ -777,21 +760,15 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		TracyD3D11Zone(state->tracyCtx, "Skylighting - Render Height Map");
 		globals::profiler->BeginPass("Skylighting::OcclusionMask");
 		a_precip->RenderMask((RE::BSParticleShaderRainEmitter*)rain);
-		if (reference) {
-			// The engine's map, announced; then the same view again, cleared, for DCLF's.
-			dclf.OcclusionReferenceRendered(DrawcallLimitFix::kSkyOcclusion);
-			a_precip->RenderMask((RE::BSParticleShaderRainEmitter*)rain);
-		}
 		// RenderMask defers its clear until the first engine draw. The DCLF
 		// accumulator may be empty, so explicitly discard the previous sky
 		// direction's depths before the shadow epoch draws into this map.
 		// On the ORG path the graph cleared the twin after the last probe
 		// update read it (ORGSkylighting::Update), unless the engine drew
-		// into the map since; then no D3D11 clear is needed. The reference
-		// and engine-only frames, whose engine draws come first, keep it.
+		// into the map since; then no D3D11 clear is needed.
 		const bool clearedOnGraph = graph.TakeOcclusionCleared();
 		if (a_dclf) {
-			if (!native && (!clearedOnGraph || reference || engineOnly))
+			if (!native && !clearedOnGraph)
 				globals::d3d::context->ClearDepthStencilView(texOcclusion->dsv.get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 			graph.NoteOcclusionDrawn();
 		}

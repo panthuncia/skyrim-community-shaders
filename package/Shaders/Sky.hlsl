@@ -9,6 +9,7 @@
 #	define ORG_SHARED_CONSTANTS
 #	define ORG_HEADER_RESOURCES
 #	include "Common/OrgResources.hlsli"
+#	include "Common/PhysicalSkyOrgHandles.hlsli"
 
 // A draw's geometry: the engine's static vertex and index buffers by buffer view ref, which the vertex stage pulls (ORG draws have
 // no input assembly). VertexLayout is the engine's input layout key (the vertex shader's mask and the geometry's VertexDesc).
@@ -24,8 +25,9 @@ struct SkyOrgGeometry
 // A draw's values, latched by the family: the vertex stage's PerGeometry as the engine's SetupGeometry wrote it (c0 to c16.xy), the
 // pixel stage's PParams, the alpha test reference (PS b11), CS's extra descriptor for the draw, the geometry, and the heap indices of
 // t0-t2 with their samplers. Textures.w is Cloud Shadows' self-shadowing input (t26) for the draw: a cloud layer's occlusion in the
-// main pass, or SKY_ORG_OCCLUSION for the occlusion cubemap (t25). The matrices are rows: a latch is loaded with Load<T>, which does
-// not keep row_major. Everything per draw is here, so a recording is kept while only these change.
+// main pass, or SKY_ORG_OCCLUSION for the occlusion cubemap (t25). PhysSky holds Physical Sky's resources and samplers, the same
+// for every draw of a batch. The matrices are rows: a latch is loaded with Load<T>, which does not keep row_major. Everything per
+// draw is here, so a recording is kept while only these change.
 struct SkyOrgDraw
 {
 	float4 WorldViewProjRows[4];
@@ -42,6 +44,7 @@ struct SkyOrgDraw
 	SkyOrgGeometry Geometry;
 	uint4 Textures;
 	uint4 Samplers;
+	PhysSkyOrgHandles PhysSky;
 };
 
 #	define SKY_ORG_OCCLUSION 0xFFFFFFFF
@@ -69,6 +72,8 @@ static SamplerState SampBlendSampler = SamplerDescriptorHeap[SkyDraw.Samplers.y]
 static SamplerState SampNoiseGradSampler = SamplerDescriptorHeap[SkyDraw.Samplers.z];
 // Cloud Shadows' header reads CloudSelfShadowTexture through this handle.
 static uint OrgHandle_CloudSelfShadowTexture = SkyDraw.Textures.w != SKY_ORG_OCCLUSION ? SkyDraw.Textures.w : OrgHandle_CloudShadowsTexture;
+// Physical Sky's header reads its resources and SampTr and SampSv (s3, s4) through these.
+PHYS_SKY_ORG_HANDLES(SkyDraw.PhysSky)
 #endif
 
 #include "Common/ColorManagement.hlsli"

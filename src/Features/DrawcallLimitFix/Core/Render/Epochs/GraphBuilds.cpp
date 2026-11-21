@@ -1,66 +1,25 @@
-// DCLF's epoch graph builds: the build state the render thread makes, the scene worker's builds of it, and the attached
-// state settled at frame boundaries.
+// DCLF's epoch graph builds: the build state the render thread makes, and the built state settled after each build manager
+// poll.
 //
 // A structural change goes like this. The render thread changes its state and asks for builds. The build manager hands
-// them to the "DCLF graph builds" lane with the newest build state. Frames keep the attached graphs meanwhile, and no
-// snapshot is made for the new state until its builds attach. Finished builds attach together at a frame's end, after
-// its epochs were submitted. Once none is pending, the newest state becomes the attached one and the next frame adopts
-// a snapshot made for it.
+// them to its build lane with the newest build state. Frames keep the attached graphs meanwhile, and no snapshot is made
+// for the new state until its builds are staged. Each finished build is staged at the next poll. Once none is pending,
+// the newest state is the built one, and the snapshot builder records on the staged graphs. A Begin that adopts that
+// snapshot attaches the staged graphs with it (plan step 10a). An epoch's first build goes the same way, and attaches when
+// it is staged, since there is no graph to keep.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
-#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "RenderGraph/BuildManager.h"
 
-#include <deque>
-#include <mutex>
+#include <span>
+#include <utility>
 
 namespace DCLF
 {
 	namespace
 	{
-		/** @brief The builds the build manager posted, run one at a time on the scene worker's preparation pool. */
-		struct BuildLane
-		{
-			std::mutex mutex;
-			std::deque<std::function<void()>> queue;  // mutex
-		};
-
-		BuildLane& Lane()
-		{
-			// Never destroyed, since a build may still be queued while the process tears down.
-			static auto* lane = new BuildLane;
-			return *lane;
-		}
-
-		void DrainLane()
-		{
-			auto& lane = Lane();
-			for (;;) {
-				std::function<void()> build;
-				{
-					std::scoped_lock lock(lane.mutex);
-					if (lane.queue.empty())
-						return;
-					build = std::move(lane.queue.front());
-					lane.queue.pop_front();
-				}
-				DCLF_ZONE("CS.DCLF.GraphBuild");
-				build();
-			}
-		}
-
-		org::async::SerializedTaskPump& LanePump()
-		{
-			static auto* pump = SceneScheduler::MakeLanePump(
-				SceneScheduler::Executor(), SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "DCLF graph builds",
-				[] { DrainLane(); },
-				[] { logger::error("[DCLF] the graph build lane was refused by DCLF's executor; its queued builds wait for the next wake"); });
-			return *pump;
-		}
-
 		bool SameBuild(const Draws::BuildState& a_left, const Draws::BuildState& a_right)
 		{
 			return a_left.conditions == a_right.conditions && a_left.main == a_right.main && a_left.mainViews == a_right.mainViews &&
@@ -68,15 +27,28 @@ namespace DCLF
 			       a_left.passStates == a_right.passStates;
 		}
 
-		/** @brief Whether any DCLF epoch has a graph. Before that, the host builds each at its first submission. */
+		/** @brief Whether any DCLF epoch has a graph. */
 		bool AnyDclfGraph(org::GraphHost& a_host)
 		{
 			for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
-				if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)) &&
+				if (DCLF::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)) &&
 					a_host.Graph(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment))))
 					return true;
 			return false;
 		}
+
+		/** @brief Whether a_epochs names one of DCLF's epochs. Epochs are segment values. */
+		bool AnyDclfEpoch(std::span<const std::uint32_t> a_epochs)
+		{
+			for (const auto epoch : a_epochs)
+				if (epoch < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count) &&
+					DCLF::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(epoch)))
+					return true;
+			return false;
+		}
+
+		// Render thread. Set while DCLF has had no graph since its builds began, so its first builds are made from the newest state.
+		bool firstBuildsPending = false;
 	}
 
 	std::shared_ptr<const Draws::BuildState> IndirectDraws::Impl::CurrentBuildState()
@@ -84,17 +56,20 @@ namespace DCLF
 		// Everything a build reads that the render thread changes. Compared with the last value so the serial moves only on a change.
 		Draws::BuildState next;
 		next.conditions = Draws::RequestedGraphConditions();
-		next.main = resources;
-		if (resources)
+		// A new display size's main resources once they are handed over. The frame takes them with a scene built on these graphs.
+		const auto& main = AheadMain();
+		next.main = main;
+		if (main)
 			for (std::size_t v = 0; v < next.mainViews.size(); ++v)
-				next.mainViews[v] = resources->views[v].lock();
+				next.mainViews[v] = main->views[v].lock();
 		for (const auto& slot : kViewSlots) {
 			const auto& view = View(slot.view).resources;
 			if (!view)
 				continue;
 			auto& out = next.views[ViewIndex(slot.view)];
 			out.resources = view;
-			out.main = view->main;
+			// A view keeps the frame's main resources until the frame adopts the new ones (AdoptPendingMain).
+			out.main = pendingResources && view->main == resources ? pendingResources : view->main;
 			out.target = view->target;
 			out.depth = view->depth;
 			out.width = view->width;
@@ -102,7 +77,7 @@ namespace DCLF
 		}
 		next.shadow = shadowEngine->shadow;
 		next.shadowSlots = shadowEngine->SlotBuffers();
-		if (const auto& sceneBuffers = resources && resources->scene ? resources->scene : scene)
+		if (const auto& sceneBuffers = main && main->scene ? main->scene : scene)
 			next.passStates = sceneBuffers->passStates;
 		if (buildState && SameBuild(*buildState, next))
 			return buildState;
@@ -117,13 +92,18 @@ namespace DCLF
 		if (!host || !RenderGraphRuntime::Get().IsActive())
 			return;
 		const auto state = CurrentBuildState();
-		if (state->serial == Draws::AttachedBuildSerial())
+		if (!AnyDclfGraph(*host))
+			firstBuildsPending = true;
+		if (state->serial == Draws::BuiltBuildSerial())
 			return;
-		// While a build is pending the attached graphs are the old ones.
-		if (AnyDclfGraph(*host) && !RenderGraphRuntime::Get().DclfBuildsSettled())
+		// While a build is pending, the first ones too, the staged or attached graphs are the old ones.
+		if (!RenderGraphRuntime::Get().BuildsSettled())
 			return;
-		Draws::PublishAttachedBuildState(state);
-		// Post the inputs again even when nothing else moved, since the builder holds its make until this serial is attached.
+		Draws::PublishBuiltBuildState(state->serial);
+		// The first builds attach when they are staged, so their state is attached too.
+		if (std::exchange(firstBuildsPending, false))
+			Draws::PublishAttachedBuildState(state);
+		// Post the inputs again even when nothing else moved, since the builder holds its make until this serial is built.
 		PostRevisionInputs();
 		(void)SnapshotPump();
 		snapshotInputsMoved.store(true, std::memory_order_release);
@@ -137,34 +117,16 @@ namespace DCLF
 		if (graphBuildsRegistered || !builds)
 			return;
 		graphBuildsRegistered = true;
-		// A build without a scope on the render thread, the host's first build of an epoch, takes the newest value.
-		Draws::SetBuildStateSource([this] { return CurrentBuildState(); });
-		RenderGraph::BuildManager::ExternalBuilder builder;
-		// Every build the manager makes on the render thread reads the newest value, held for the build.
-		builder.ownerScope = [this]() -> std::shared_ptr<void> { return std::make_shared<Draws::BuildScope>(CurrentBuildState()); };
-		if (Draws::AsyncGraphBuilds()) {
-			// On the scene worker, the build reads only the state made at the poll that handed it out.
-			builder.post = [this](std::function<void()> a_build) {
-				auto state = CurrentBuildState();
-				{
-					auto& lane = Lane();
-					std::scoped_lock lock(lane.mutex);
-					lane.queue.push_back([state = std::move(state), build = std::move(a_build)] {
-						Draws::BuildScope scope(state);
-						build();
-					});
-				}
-				(void)LanePump().Notify();
-				return true;
-			};
-		}
-		builder.boundary = [this](bool a_attached) {
-			if (a_attached)
-				graphsAttachedFrame = Scene::FrameView::Get().GetFrame();
+		// Every build carries the newest value from its hand-out on the render thread, and its extensions make their passes from it.
+		// The host's own builds on the render thread take it when they run.
+		builds->SetBuildInput([this]() -> std::shared_ptr<const void> { return CurrentBuildState(); });
+		// After every poll, since any may stage DCLF's epochs.
+		builds->SetPollListener([this](std::span<const std::uint32_t> a_changed) {
 			SettleBuildState();
-		};
-		builds->SetExternalBuilder(std::move(builder));
-		logger::info("[DCLF] graph builds: {}", Draws::AsyncGraphBuilds() ? "on the scene worker from the build state, attached at a frame's end" :
-																			"on the render thread at the build point (CS_DCLF_ASYNC_BUILDS=0)");
+			// New staged generations, which the snapshot builder records on.
+			if (AnyDclfEpoch(a_changed))
+				PostRevisionInputs();
+		});
+		logger::info("[DCLF] graph builds: on the build manager's lane from the build state; staged, and attached with a snapshot at a Begin");
 	}
 }

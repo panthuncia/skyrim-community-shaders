@@ -1,18 +1,13 @@
-#if defined(CS_HAS_RENDER_GRAPH)
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
-#endif
+#include <rhi_interop_vulkan.h>
 
 #include "RenderGraph/GpuTimingSource.h"
 
 #include "GpuEventTimers.h"
-#include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Switches.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include <Render/Runtime/IStatisticsService.h>
-#endif
+#include <Render/Runtime/IStatisticsService.h>
 
 #include <algorithm>
 #include <array>
@@ -85,6 +80,7 @@ namespace GpuTimingSource
 			std::uint64_t dropped = 0;
 			std::vector<Frame> completed;  // render thread
 			Events events;                 // render thread
+			std::vector<Range> external;   // AddExternalRange's ranges waiting for a Present with epochs
 		};
 
 		State& Get()
@@ -271,16 +267,9 @@ namespace GpuTimingSource
 		return timers;
 	}
 
-	bool IdleFromGraph()
-	{
-		// Native mode has no DXVK submission trace.
-		static const bool graph = RenderGraph::Engine::Native::Requested() || Switches::EqualsNoCase("CS_GPU_IDLE_SOURCE", "graph");
-		return graph;
-	}
-
 	bool Collecting()
 	{
-		static const bool collecting = EventsOnGraph() || (IdleFromGraph() && GpuIdleTrace::Requested());
+		static const bool collecting = EventsOnGraph();
 		return collecting;
 	}
 
@@ -297,11 +286,28 @@ namespace GpuTimingSource
 		pending.frame.present = state.present;
 		pending.frame.window = state.window;
 		++pending.frame.epochs;
+		for (auto& range : state.external)
+			pending.frame.ranges.push_back(std::move(range));
+		state.external.clear();
+	}
+
+	void AddExternalRange(Range a_range)
+	{
+		if (!Collecting())
+			return;
+		auto& state = Get();
+		std::lock_guard lock(state.mutex);
+		if (!state.pending.empty()) {
+			state.pending.rbegin()->second.frame.ranges.push_back(std::move(a_range));
+			return;
+		}
+		// Bounded, in case no epoch is submitted for a while (a loading screen).
+		if (state.external.size() < 64)
+			state.external.push_back(std::move(a_range));
 	}
 
 	void OnCompletedFrame([[maybe_unused]] std::uint64_t a_hostFrame, [[maybe_unused]] const org::runtime::IStatisticsService& a_stats)
 	{
-#if defined(CS_HAS_RENDER_GRAPH)
 		if (!Collecting())
 			return;
 		std::vector<Range> ranges;
@@ -339,7 +345,6 @@ namespace GpuTimingSource
 			frame.ranges.push_back(std::move(range));
 		}
 		++pending->second.completed;
-#endif
 	}
 
 	namespace
@@ -347,7 +352,6 @@ namespace GpuTimingSource
 		// CS_RHI_CENSUS=<frames> logs BasicRHI's command census by list label every that many Presents. Render thread.
 		void CensusOnPresent()
 		{
-#if defined(CS_HAS_RENDER_GRAPH)
 			static const std::uint32_t interval = [] {
 				const auto frames = static_cast<std::uint32_t>(Switches::Number("CS_RHI_CENSUS"));
 				if (frames)
@@ -383,7 +387,6 @@ namespace GpuTimingSource
 			}
 			line(total, "TOTAL");
 			logger::info("{}", text);
-#endif
 		}
 	}
 

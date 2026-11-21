@@ -1,0 +1,64 @@
+# Terrain Shadows' heightmap switched by coc between worldspaces: the save's (Tamriel), Solstheim (Raven Rock), then Tamriel again
+# (Riverwood). Each worldspace's heightmap is a new value of the HeightMap frame variable, so the shadow height map's new size and
+# the client switch in with one frame revision (frame revision plan, 6.3). The exit's "[ORG] boundary:" line shows no version lag
+# for TerrainShadows::ShadowHeight. Compose it: native-vulkan+terrain-shadows, native-d3d12+terrain-shadows, guest+terrain-shadows.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+TerrainShadows = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "console"
+arg = "set timescale to 0"
+
+# A low sun, so the terrain casts long shadows.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 17"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "tamriel"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc RavenRock"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "solstheim"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "riverwood"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["tamriel", "solstheim", "riverwood"]

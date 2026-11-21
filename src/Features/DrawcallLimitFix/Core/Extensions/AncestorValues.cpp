@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ClassifyInputs.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Extensions
 {
@@ -15,7 +16,7 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the ancestor value was resolved twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the ancestor value was resolved twice");
 		if (a_registered.name.empty())
 			return;
 		auto& entry = resolved;

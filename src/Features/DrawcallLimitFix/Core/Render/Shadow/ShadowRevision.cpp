@@ -35,14 +35,12 @@ namespace DCLF
 		const auto& latches = producer.latches;
 		auto& scratch = revisionScratch;
 		scratch.latched.clear();
-		scratch.indirect = a_make.catalog ? GetShadowIndirectState(*a_make.catalog, inputs.shadowFormat) : ShadowIndirectState{};
-		// Keep only the occlusion maps enabled under this publication's toggles. Turning a map back on remakes the shape.
+		scratch.indirect = a_make.catalog ? GetShadowIndirectState(*a_make.catalog, a_make.catalog->shadowFormat) : ShadowIndirectState{};
+		// Keep only the occlusion maps DCLF draws.
 		{
 			auto& layouts = producer.occlusionLayouts;
 			layouts = inputs.occlusionLayouts;
-			std::erase_if(layouts, [&producer](const ShadowViewLayout& a_layout) {
-				return !Extensions::OcclusionOn(producer.toggles, OcclusionOfMode(a_layout.modeIndex));
-			});
+			std::erase_if(layouts, [](const ShadowViewLayout& a_layout) { return !Extensions::OcclusionOn(OcclusionOfMode(a_layout.modeIndex)); });
 		}
 		// Remember the most recent sets of drawn views. Each gets its own variant.
 		if (const auto active = inputs.shadowActiveViews; active != 0) {
@@ -239,9 +237,8 @@ namespace DCLF
 	{
 		a_next.shadow = shadow;
 		auto& drawPipelines = DrawPipelines::Get();
-		a_next.shadowFormat = drawPipelines.ShadowFormat();
 		a_next.shadowRasterStates = drawPipelines.ShadowRasterStateCount();
-		a_next.occlusionLayouts = PredictedOcclusion(nullptr);
+		a_next.occlusionLayouts = PredictedOcclusion(false);
 		a_next.shadowPlacements = shadowPlacements;
 		a_next.shadowActiveViews = lastActiveViews;
 		a_next.shadowSlots = SlotBuffers();
@@ -259,10 +256,9 @@ namespace DCLF
 
 	void ShadowEngine::PrepareAhead(ImplSnapshotBuilder::AheadContext& a_context)
 	{
-		// Uses the toggles of the next commit, which lastShadow's modes also follow.
 		auto& c = a_context;
 		const auto& tables = Scene::FrameView::Get().GetTables();
-		if (c.toggles.shadows && shadow && lastShadow.known && globals::game::utilityShader && !tables.objects.empty() &&
+		if (shadow && lastShadow.known && globals::game::utilityShader && !tables.objects.empty() &&
 			tables.shadowTechnique.size() == tables.objects.size()) {
 			c.shadowInputs = PrepareShadowInputs(*shadow, lastShadow.modes, lastShadow.rasterStates);
 			c.shadowTarget = shadow;
@@ -288,11 +284,10 @@ namespace DCLF
 		in.materialRowsOldestContentEpoch = oldest(PayloadPart::ShadowRows);
 		in.inputsOldestContentEpoch = oldest(PayloadPart::Inputs);
 		a.payload = AcquireShadowPayload();
-		a.sharedRegion = Policy::ReuseResidentRegion();
 		a.publication = &a_build.out;
 		a.frame = a_build.frame;
 		const auto shadowStart = std::chrono::steady_clock::now();
-		BuildShadowPayloadShared(in, a_build.tables, a_build.lookups, *a.payload, a_build.out.streams, ShadowKeptState(), a.sharedRegion, a.split);
+		BuildShadowPayloadShared(in, a_build.tables, a_build.lookups, *a.payload, a_build.out.streams, ShadowKeptState(), a.split);
 		a_build.stats.shadowMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - shadowStart).count();
 	}
 
@@ -313,7 +308,7 @@ namespace DCLF
 			if (!a.split.pending || a.publication != &a_build.out || a.frame != a_build.frame)
 				BuildPayloadShared(a_build);
 			const auto shadowStart = std::chrono::steady_clock::now();
-			BuildShadowPayloadRegion(a.in, tables, a_build.lookups, *a.payload, ShadowKeptState(), a.sharedRegion ? &a_build.mainRegion : nullptr, a.split);
+			BuildShadowPayloadRegion(a.in, tables, a_build.lookups, *a.payload, ShadowKeptState(), &a_build.mainRegion, a.split);
 			pairStats.shadowMs += msSince(shadowStart);
 		}
 		a.publication = nullptr;
@@ -332,8 +327,8 @@ namespace DCLF
 				else if (a_which == 1 && parabolic)
 					payload->parabolicExclusion = BuildExclusion(Api::ShadowSource::Point, in.lightCandidates, *payload, kParabolicShadowMode, tables);
 			};
-			if (sun && parabolic && !Policy::SerialFanout()) {
-				SceneScheduler::Executor().ParallelFor("CS.DCLF.BuildShadow.Exclusions", 2, 1, [&](std::size_t a_begin, std::size_t a_end) {
+			if (sun && parabolic) {
+				::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.BuildShadow.Exclusions", 2, 1, [&](std::size_t a_begin, std::size_t a_end) {
 					DCLF_ZONE("CS.DCLF.BuildShadow.ExclusionsShards");
 					for (std::size_t x = a_begin; x < a_end; ++x)
 						exclusion(x);

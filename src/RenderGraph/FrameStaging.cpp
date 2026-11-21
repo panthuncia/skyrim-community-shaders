@@ -1,93 +1,28 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/FrameStaging.h"
 
-#	include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Fatal.h"
 
-#	include <Render/LatchBlock.h>
+#include <OpenRenderGraph/Runtime.h>
 
-#	include <algorithm>
-#	include <bit>
+#include <algorithm>
+#include <exception>
+#include <format>
 
 namespace RenderGraph
 {
-	std::shared_ptr<FrameStaging> FrameStaging::Create(Desc a_desc)
+	Staging AcquireStaging(std::string_view a_area, std::uint64_t a_bytes)
 	{
-		return std::make_shared<FrameStaging>(std::move(a_desc));
-	}
-
-	FrameStaging::FrameStaging(Desc a_desc) :
-		desc(std::move(a_desc))
-	{
-		desc.runsPerFrame = (std::max)(desc.runsPerFrame, 1u);
-		keep = RenderGraphRuntime::kGameFramesInFlight * desc.runsPerFrame + 1;
-		if (desc.maxBlocks)
-			keep = (std::min)(keep, desc.maxBlocks);
-	}
-
-	std::uint32_t FrameStaging::Spare() const
-	{
-		std::scoped_lock lock(mutex);
-		return static_cast<std::uint32_t>(spare.size());
-	}
-
-	std::shared_ptr<org::LatchBlock> FrameStaging::Acquire(std::uint64_t a_bytes)
-	{
-		std::shared_ptr<org::LatchBlock> block;
-		{
-			std::scoped_lock lock(mutex);
-			auto best = spare.end();
-			for (auto it = spare.begin(); it != spare.end(); ++it)
-				if ((*it)->Stride() >= a_bytes && (best == spare.end() || (*it)->Stride() < (*best)->Stride()))
-					best = it;
-			if (best != spare.end()) {
-				block = std::move(*best);
-				spare.erase(best);
-			} else if (desc.maxBlocks && made.load(std::memory_order_relaxed) >= desc.maxBlocks) {
-				// When every block exists and no spare is big enough, the smallest is replaced by a larger one.
-				if (spare.empty())
-					return nullptr;
-				spare.erase(std::ranges::min_element(spare, {}, [](const auto& a_block) { return a_block->Stride(); }));
-				made.fetch_sub(1, std::memory_order_relaxed);
-			}
+		auto* runtime = org::Runtime::Current();
+		if (!runtime || !runtime->Arena())
+			Fatal(a_area, "a staging region was asked for with no render graph runtime");
+		try {
+			return runtime->Arena()->AcquireOversize((std::max)(a_bytes, std::uint64_t{ 4 }));
+		} catch (const std::exception& e) {
+			Fatal(a_area, std::format("a staging region of {} bytes could not be made: {}", a_bytes, e.what()));
 		}
-		if (!block) {
-			const std::uint64_t size = std::bit_ceil((std::max)(a_bytes, static_cast<std::uint64_t>(desc.minimumBytes)));
-			if (size > 0xFFFFFFFFull)
-				return nullptr;
-			try {
-				block = org::LatchBlock::CreateDedicated(desc.name, static_cast<std::uint32_t>(size));
-			} catch (const std::exception& e) {
-				logger::error("[ORG] {}: a staging buffer of {} bytes could not be made: {}", desc.name, size, e.what());
-				return nullptr;
-			}
-			const auto count = made.fetch_add(1, std::memory_order_relaxed) + 1;
-			if (count > keep && !churnLogged.test_and_set())
-				logger::info("[ORG] {}: {} staging buffers made, more than the {} it keeps ({} runs a frame); the extra ones are freed after use",
-					desc.name, count, keep, desc.runsPerFrame);
-		}
-		// Held weakly, so a block that comes back after the pool is gone is released.
-		std::weak_ptr<FrameStaging> pool = weak_from_this();
-		auto* raw = block.get();
-		return std::shared_ptr<org::LatchBlock>(raw, [pool, block = std::move(block)](org::LatchBlock*) mutable {
-			if (auto owner = pool.lock())
-				owner->GiveBack(std::move(block));
-		});
-	}
-
-	void FrameStaging::GiveBack(std::shared_ptr<org::LatchBlock> a_block)
-	{
-		std::scoped_lock lock(mutex);
-		if (spare.size() < keep) {
-			spare.push_back(std::move(a_block));
-			return;
-		}
-		// Past what the pool keeps, so release it through ORG's deletion path.
-		made.fetch_sub(1, std::memory_order_relaxed);
 	}
 }
 
-#endif

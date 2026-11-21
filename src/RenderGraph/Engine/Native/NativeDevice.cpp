@@ -1,63 +1,68 @@
 #include "RenderGraph/Engine/Native/Native.h"
+
+#include <mutex>
+#include <set>
 // Records mirror D3D11 description member names, and locals that copy them keep those names.
 #pragma warning(disable: 4458)
 
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include <rhi_helpers.h>
+#include <rhi_helpers.h>
 
-#	include <d3d11_1.h>
-#	include <functional>
+#include <d3d11_1.h>
+#include <functional>
 
-#	include "Aftermath.h"
-#	include "Features/Upscaling.h"
-#	include "Features/Upscaling/Streamline.h"
-#	include "Globals.h"
-#	include "RenderGraph/DxvkOrgInterop.h"
-#	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "RenderGraph/Backend.h"
-#	include "RenderGraph/BuildManager.h"
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/DxvkImageImport.h"
-#	include "RenderGraph/Engine/D3D12Device.h"
-#	include "RenderGraph/Engine/Native/OpCensus.h"
-#	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
-#	include "RenderGraph/ExternalWork.h"
-#	include "RenderGraph/Frame/FrameDriver.h"
-#	include "RenderGraph/Frame/Transients.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/GenerateMips.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/Switches.h"
+#include "Aftermath.h"
+#include "Features/Upscaling.h"
+#include "Features/Upscaling/NativePresenter.h"
+#include "Features/Upscaling/Streamline.h"
+#include "Globals.h"
+#include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Backend.h"
+#include "RenderGraph/BuildManager.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/Engine/D3D12Device.h"
+#include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
+#include "RenderGraph/ExternalWork.h"
+#include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/BoundaryCheck.h"
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Revision.h"
+#include "RenderGraph/Frame/Variables.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/ImageRegistry.h"
+#include "RenderGraph/GpuTimingSource.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
+#include <OpenRenderGraph/GraphHost.h>
 
-#	if defined(CS_ORG_HAS_D3D12)
-#		include <d3d12.h>
-#	endif
+#if defined(CS_ORG_HAS_D3D12)
+#	include <d3d12.h>
+#endif
 
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/PixelBuffer.h>
-#	include <Resources/TextureDescription.h>
-#	include <Resources/VersionedTexture.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/PixelBuffer.h>
+#include <Resources/TextureDescription.h>
+#include <Resources/VersionedTexture.h>
 
-#	include <algorithm>
-#	include <array>
-#	include <atomic>
-#	include <bit>
-#	include <cstring>
-#	include <chrono>
-#	include <mutex>
-#	include <set>
-#	include <span>
-#	include <unordered_map>
-#	include <unordered_set>
-#	include <vector>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <bit>
+#include <cstring>
+#include <chrono>
+#include <mutex>
+#include <set>
+#include <span>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace RenderGraph::Engine::Native
 {
@@ -86,15 +91,15 @@ namespace RenderGraph::Engine::Native
 		/** @brief A D3D12 buffer's GPU virtual address. 0 for a texture or off D3D12. */
 		uint64_t D3D12AddressOf(void* a_resource)
 		{
-#	if defined(CS_ORG_HAS_D3D12)
+#if defined(CS_ORG_HAS_D3D12)
 			if (!a_resource)
 				return 0;
 			auto* resource = static_cast<ID3D12Resource*>(a_resource);
 			return resource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? resource->GetGPUVirtualAddress() : 0;
-#	else
+#else
 			(void)a_resource;
 			return 0;
-#	endif
+#endif
 		}
 
 		VkBaseOutStructure* FindStruct(const void* a_chain, VkStructureType a_type)
@@ -241,12 +246,12 @@ namespace RenderGraph::Engine::Native
 		 * @brief Initializes Streamline for the native backend before the device exists, so the device can come up through it.
 		 * False when Streamline cannot run, and the upscalers fall back to TAA.
 		 */
-		bool NativeStreamline(rhi::DeviceCreateInfo::StreamlineHost& a_host)
+		bool NativeStreamline(rhi::DeviceCreateInfo::StreamlineHost& a_host, uint64_t a_adapterLuid)
 		{
 			if (!globals::features::upscaling.loaded)
 				return false;
 			auto* streamline = Streamline::GetSingleton();
-			if (!streamline->InitializeForNative() || !streamline->InterposerModule())
+			if (!streamline->InitializeForNative(a_adapterLuid) || !streamline->InterposerModule())
 				return false;
 			a_host.interposer = streamline->InterposerModule();
 			a_host.features = streamline->LoadedFeatures().data();
@@ -260,15 +265,17 @@ namespace RenderGraph::Engine::Native
 		bool CreateBasicRhiDevice(IDXGIAdapter* a_adapter, std::shared_ptr<rhi::DevicePtr>& a_out, std::string& a_reason)
 		{
 			static rhi::DeviceCreateInfo::StreamlineHost streamlineHost{};
-			const bool streamline = NativeStreamline(streamlineHost);
 			if (DXGI_ADAPTER_DESC described{}; a_adapter && SUCCEEDED(a_adapter->GetDesc(&described)))
 				g_adapterLuid = (static_cast<uint64_t>(static_cast<uint32_t>(described.AdapterLuid.HighPart)) << 32) | described.AdapterLuid.LowPart;
+			// After the adapter's LUID: DLSS-G loads only when this adapter has the hardware.
+			const bool streamline = NativeStreamline(streamlineHost, g_adapterLuid);
 			// D3D12 backend on the same adapter. Code after this is shared except where it checks OnD3D12().
 			if (::RenderGraph::Backend::Requested() == rhi::Backend::D3D12) {
 				D3D12DeviceOptions options{};
 				// SARP_D3D12_GPU_VALIDATION=1 adds GPU-based validation.
 				options.debug = Switches::On("CS_ORG_NATIVE_VALIDATION");
-				options.crashMarkers = (Switches::Equals("DXVK_DEBUG", "hang") || Aftermath::WantsCrashAnalysis()) && !Switches::Off("CS_ORG_CRASH_MARKERS");
+				// Crash markers (DRED) follow DXVK's hang mode.
+				options.crashMarkers = Switches::Equals("DXVK_DEBUG", "hang");
 				options.framesInFlight = RenderGraphRuntime::kGameFramesInFlight;
 				DXGI_ADAPTER_DESC adapter{};
 				if (a_adapter && SUCCEEDED(a_adapter->GetDesc(&adapter)))
@@ -288,12 +295,12 @@ namespace RenderGraph::Engine::Native
 			ci.backend = rhi::Backend::Vulkan;
 			ci.framesInFlight = RenderGraphRuntime::kGameFramesInFlight;
 			ci.enableDebug = Switches::On("CS_ORG_NATIVE_VALIDATION");
-			// Crash markers follow DXVK's hang mode. CS_ORG_CRASH_MARKERS=0 turns them off.
-			ci.enableCrashMarkers = (Switches::Equals("DXVK_DEBUG", "hang") || Aftermath::WantsCrashAnalysis()) && !Switches::Off("CS_ORG_CRASH_MARKERS");
+			// Crash markers and detailed checkpoints follow DXVK's hang mode.
+			ci.enableCrashMarkers = Switches::Equals("DXVK_DEBUG", "hang");
 			// With crash markers on, every debug label sets an Aftermath checkpoint, so dumps name the pass.
 			if (Aftermath::IsEnabled()) {
 				ci.vulkanRegisterCheckpoint = &Aftermath::RegisterOrgCheckpoint;
-				ci.vulkanDetailedCheckpoints = Switches::Equals("CS_ORG_DETAILED_CHECKPOINTS", "1");
+				ci.vulkanDetailedCheckpoints = ci.enableCrashMarkers;
 			}
 			// The graph binds through descriptor buffers alone, as on DXVK's device.
 			ci.vulkanBindingModels = rhi::vulkan::BindingModel_DescriptorBuffer;
@@ -363,7 +370,6 @@ namespace RenderGraph::Engine::Native
 				Image,    // DEFAULT, IMMUTABLE or DYNAMIC
 				Staging,  // a buffer laid out by subresource
 				Shell,    // no storage, read through its window
-				Unbacked,  // no image and no memory
 			};
 			/**
 			 * @brief Who keeps an image's state. Host images are imported by the graph. Tracked images are ORG textures.
@@ -405,9 +411,7 @@ namespace RenderGraph::Engine::Native
 			std::mutex windowLock;
 			winrt::com_ptr<ID3D11ShaderResourceView> window;
 			bool streamEnabled = false;
-			// Nothing reads what this target's engine clears would write.
-			bool dropClears = false;
-			// Read by the censuses and the validator. The written flag is only marked while one of them is on.
+			// Read by the undeclared-access check.
 			UINT bindFlags = 0;
 			D3D11_USAGE d3dUsage = D3D11_USAGE_DEFAULT;
 			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
@@ -420,9 +424,6 @@ namespace RenderGraph::Engine::Native
 			std::atomic<bool> promoted{ false };
 			std::mutex graphLock;
 			std::shared_ptr<org::ExternalTextureResource> exemptResource;
-			// The back buffer's current graph-owned version. All of this record's handles resolve to it. Guarded by the registry lock.
-			std::shared_ptr<NativeResource> renamed;
-			std::shared_ptr<const void> arenaPlacement;
 
 			NativeResource();
 			~NativeResource();
@@ -441,7 +442,6 @@ namespace RenderGraph::Engine::Native
 		{
 			std::mutex lock;
 			std::unordered_set<const void*> live;
-			std::unordered_map<std::uint64_t, NativeResource*> byImage;
 		};
 
 		Registry& GetRegistry()
@@ -460,42 +460,24 @@ namespace RenderGraph::Engine::Native
 
 		NativeResource::~NativeResource()
 		{
-			// The exempt import does not own the image, so no import may find it after this record goes.
-			if (exemptResource)
-				::RenderGraph::ForgetMadeImage(exemptResource.get());
+			// The exempt import does not own the image, so no lookup may find either graph resource after this record goes.
+			::RenderGraph::ImageRegistry::Retire(exemptResource.get());
+			if (ownership == Ownership::Tracked)
+				::RenderGraph::ImageRegistry::Retire(graphOwned.get());
 			auto& registry = GetRegistry();
 			std::lock_guard guard(registry.lock);
 			registry.live.erase(this);
-			if (ownership != Ownership::Host)
-				if (const auto found = registry.byImage.find(reinterpret_cast<std::uint64_t>(image.image)); found != registry.byImage.end() && found->second == this)
-					registry.byImage.erase(found);
 		}
 
 		std::shared_ptr<org::Resource> LedgerResourceOf(NativeResource& a_record);
 
-		/** @brief Points every handle of a_record at a_target, or back at itself when null. Any thread. */
-		void Rename(NativeResource& a_record, std::shared_ptr<NativeResource> a_target)
-		{
-			auto& registry = GetRegistry();
-			std::lock_guard guard(registry.lock);
-			a_record.renamed = std::move(a_target);
-		}
-
-		/** @brief The record a_record's handles stand for now. Any thread. */
-		std::shared_ptr<NativeResource> CurrentOf(const std::shared_ptr<NativeResource>& a_record)
-		{
-			if (!a_record)
-				return nullptr;
-			auto& registry = GetRegistry();
-			std::lock_guard guard(registry.lock);
-			return a_record->renamed ? a_record->renamed : a_record;
-		}
-
+		/** @brief Registers a tracked texture's ORG texture as its image's graph resource. An exempt one registers on its first lookup (ImmutableTextureOf). */
 		void NoteOwnedImage(NativeResource& a_record)
 		{
-			auto& registry = GetRegistry();
-			std::lock_guard guard(registry.lock);
-			registry.byImage[reinterpret_cast<std::uint64_t>(a_record.image.image)] = &a_record;
+			if (a_record.ownership != NativeResource::Ownership::Tracked || !a_record.graphOwned)
+				return;
+			::RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(a_record.image.image),
+				{ a_record.graphOwned, nullptr, nullptr, "native", fmt::format("cs.native.texture.{}", a_record.serial), ::RenderGraph::ImageRegistry::Kind::Owned });
 		}
 
 		/** @brief Starts a debug label so crash markers name the work. A no-op where unsupported. */
@@ -513,9 +495,9 @@ namespace RenderGraph::Engine::Native
 		}
 
 		/**
-		 * @brief The immediate context's work, one operation at a time in D3D11 call order. Once the graph is up it goes through
-		 * ORG's external client (Route), before that through the context's own lists (RunRhi). Both signal one timeline.
-		 * Each slot has its own descriptors, reused once the timeline passes the slot's last work.
+		 * @brief Native mode's one way to submit work outside the graphs: the immediate context's operations, DCLF's commands outside
+		 * its epochs and the present's copy, one at a time in call order, all through ORG's external client (made with the device).
+		 * Each slot has its own descriptors and keeps what its work reads, reused once the context's timeline passes the slot's work.
 		 */
 		class Immediate
 		{
@@ -529,62 +511,40 @@ namespace RenderGraph::Engine::Native
 				rhi::DescriptorSlot rtv, dsv, uavShaderVisible, uavCpu;
 			};
 
+			/** @brief What a submission uses and orders against. */
+			struct Work
+			{
+				std::span<const ::RenderGraph::ExternalWork::Access> accesses;  // graph resources, moved through the ledger
+				std::span<NativeResource* const> untracked;  // records outside the ledgers; exempt images among them leave shader-read for the work
+				std::span<NativeResource* const> used;       // every record the work uses, so a CPU access waits only for it
+				std::span<const rhi::TimelinePoint> waits;
+				std::span<const rhi::TimelinePoint> signals;
+				bool bindHeaps = true;  // false for commands that start with nothing bound
+			};
+
 			bool Init(rhi::Device a_device)
 			{
-				device = a_device;
-				queue = device.GetQueue(rhi::QueueKind::Graphics);
 				const auto heapOf = [&](rhi::DescriptorHeapType a_type, uint32_t a_capacity, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
-					return device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ a_type, a_capacity, a_shaderVisible, a_name }, a_out) == rhi::Result::Ok && a_out;
+					return a_device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ a_type, a_capacity, a_shaderVisible, a_name }, a_out) == rhi::Result::Ok && a_out;
 				};
 				const auto heap = [&](rhi::DescriptorHeapType a_type, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
 					return heapOf(a_type, kSlots, a_shaderVisible, a_name, a_out);
 				};
-				bool ok = heap(rhi::DescriptorHeapType::RTV, false, "CS native immediate RTVs", rtvHeap) &&
-				     heap(rhi::DescriptorHeapType::DSV, false, "CS native immediate DSVs", dsvHeap) &&
-				     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, true, "CS native immediate UAVs", uavHeap) &&
-				     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, false, "CS native immediate UAVs (CPU)", uavCpuHeap);
-				// Each command pool costs the driver about 2 MB on the RX 6600, so slots share one where the backend allows.
-				ok = ok && device.CreateCommandAllocator(rhi::QueueKind::Graphics, sharedAllocator) == rhi::Result::Ok && sharedAllocator;
-				const bool shared = ok && sharedAllocator->SupportsSharedLists();
-				for (uint32_t i = 0; i < kSlots; ++i) {
-					auto& slot = slots[i];
-					if (ok && !shared)
-						ok = device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) == rhi::Result::Ok && slot.allocator;
-					ok = ok && device.CreateCommandList(rhi::QueueKind::Graphics, AllocatorOf(slot), slot.list) == rhi::Result::Ok && slot.list;
-					if (ok) {
-						slot.list->SetName(fmt::format("CS native immediate {}", i).c_str());
-						slot.list->End();
-					}
-				}
-				return ok && device.CreateTimeline(timeline, 0, "CS native immediate context") == rhi::Result::Ok && timeline;
+				const bool ok = heap(rhi::DescriptorHeapType::RTV, false, "CS native immediate RTVs", rtvHeap) &&
+				                heap(rhi::DescriptorHeapType::DSV, false, "CS native immediate DSVs", dsvHeap) &&
+				                heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, true, "CS native immediate UAVs", uavHeap) &&
+				                heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, false, "CS native immediate UAVs (CPU)", uavCpuHeap);
+				return ok && a_device.CreateTimeline(timeline, 0, "CS native immediate context") == rhi::Result::Ok && timeline;
 			}
 
 			/**
-			 * @brief Records and submits on the context's own list. Only valid before the render graph is up, since no epoch runs then.
-			 * Returns the work's timeline value, or 0 on failure. One caller at a time.
+			 * @brief Records and submits a_record through ORG's external client. Returns the work's value on the context's timeline, or 0
+			 * only after the client's shutdown at the window's close.
 			 */
-			uint64_t RunRhi(const std::string& a_label, const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record,
-				std::vector<std::shared_ptr<const void>> a_keep, std::span<NativeResource* const> a_used)
+			uint64_t Run(const std::string& a_label, const Work& a_work, const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record,
+				std::vector<std::shared_ptr<const void>> a_keep)
 			{
-				return Submit(
-					a_label,
-					[&](Slot& a_slot, uint32_t a_index) {
-						const Descriptors descriptors = DescriptorsOf(a_index);
-						BindHeaps(a_slot.list.Get());
-						a_record(a_slot.list.Get(), descriptors);
-					},
-					std::move(a_keep), a_used);
-			}
-
-			/**
-			 * @brief Runs commands through ORG's external client once the graph is up. a_accesses moves tracked images via the ledger.
-			 * a_untracked images rest in Common and a_record moves them itself. Returns 0 when the client rejected the work.
-			 */
-			uint64_t Route(const std::string& a_label, std::span<const ::RenderGraph::ExternalWork::Access> a_accesses, std::span<NativeResource* const> a_untracked,
-				const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record, std::vector<std::shared_ptr<const void>> a_keep,
-				std::span<NativeResource* const> a_used)
-			{
-				// Commit stages before taking this lock. Committing can run CS code that re-enters Route and would deadlock.
+				// Commit stages before taking this lock. Committing can run CS code that re-enters Run and would deadlock.
 				::FrameAnchors::BeforeGpuWork("native context");
 				// Drain pending epochs before the lock too, since a pass recorded there may use the context.
 				RenderGraphRuntime::Get().DrainSubmissions(a_label.c_str());
@@ -593,26 +553,28 @@ namespace RenderGraph::Engine::Native
 				auto& slot = slots[index];
 				const Descriptors descriptors = DescriptorsOf(index);
 				// The client submits on this queue too. The lock keeps this context's signals in order.
-				const rhi::TimelinePoint signal{ timeline->GetHandle(), value + 1 };
+				std::vector<rhi::TimelinePoint> signals(a_work.signals.begin(), a_work.signals.end());
+				signals.push_back({ timeline->GetHandle(), value + 1 });
 				const bool submitted = ::RenderGraph::ExternalWork::Submit(
-					a_label, a_accesses,
+					a_label, a_work.accesses,
 					[&](rhi::CommandList& a_list) {
 						BeginLabel(a_list, a_label);
-						BindHeaps(a_list);
-						LeaveShaderRead(a_list, a_untracked, false);
+						if (a_work.bindHeaps)
+							BindHeaps(a_list);
+						LeaveShaderRead(a_list, a_work.untracked, false);
 						a_record(a_list, descriptors);
-						LeaveShaderRead(a_list, a_untracked, true);
+						LeaveShaderRead(a_list, a_work.untracked, true);
 						EndLabel(a_list);
 					},
-					{}, { &signal, 1 });
+					{}, signals, a_work.waits);
 				if (!submitted)
 					return 0;
 				slot.value = ++value;
 				slot.keep = std::move(a_keep);
-				for (auto* used : a_used)
+				for (auto* used : a_work.used)
 					if (used)
 						used->lastUse.store(value, std::memory_order_release);
-				if (!a_accesses.empty())
+				if (!a_work.accesses.empty())
 					::RenderGraph::RawAccess::Count(::RenderGraph::RawAccess::Kind::Routed);
 				return value;
 			}
@@ -621,15 +583,10 @@ namespace RenderGraph::Engine::Native
 			uint64_t RunUntracked(const std::string& a_label, const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record,
 				std::vector<std::shared_ptr<const void>> a_keep, std::span<NativeResource* const> a_used)
 			{
-				if (RenderGraphRuntime::Get().IsActive())
-					return Route(a_label, {}, {}, a_record, std::move(a_keep), a_used);
-				return RunRhi(a_label, a_record, std::move(a_keep), a_used);
-			}
-
-			uint64_t Submitted()
-			{
-				std::lock_guard guard(lock);
-				return value;
+				Work work;
+				work.untracked = a_used;
+				work.used = a_used;
+				return Run(a_label, work, a_record, std::move(a_keep));
 			}
 
 			bool Done(uint64_t a_value) { return !a_value || timeline->GetCompletedValue() >= a_value; }
@@ -637,17 +594,14 @@ namespace RenderGraph::Engine::Native
 			bool Wait(uint64_t a_value) { return Done(a_value) || timeline->HostWait(a_value) == rhi::Result::Ok; }
 
 		private:
-			static constexpr uint32_t kSlots = 32;
+			// Context operations and DCLF's commands share the slots, a few dozen a frame, so a reuse never waits on recent work.
+			static constexpr uint32_t kSlots = 64;
 
 			struct Slot
 			{
-				rhi::CommandAllocatorPtr allocator;  // only where lists cannot share one, on D3D12
-				rhi::CommandListPtr list;
 				uint64_t value = 0;
 				std::vector<std::shared_ptr<const void>> keep;
 			};
-
-			rhi::CommandAllocator& AllocatorOf(Slot& a_slot) { return a_slot.allocator ? a_slot.allocator.Get() : sharedAllocator.Get(); }
 
 			/** @brief The next slot once the GPU is done with it. Releases what its last work kept. Call with the lock. */
 			uint32_t AcquireSlotLocked()
@@ -678,41 +632,6 @@ namespace RenderGraph::Engine::Native
 					a_list.SetDescriptorHeaps(uavHeap->GetHandle(), std::nullopt);
 			}
 
-			template <class Body>
-			uint64_t Submit(const std::string& a_label, Body&& a_body, std::vector<std::shared_ptr<const void>> a_keep, std::span<NativeResource* const> a_used)
-			{
-				std::lock_guard guard(lock);
-				const uint32_t index = AcquireSlotLocked();
-				auto& slot = slots[index];
-				// A shared allocator resets only this list. A slot's own resets whole.
-				if (slot.allocator)
-					slot.allocator->Recycle();
-				slot.list->Recycle(AllocatorOf(slot));
-				BeginLabel(slot.list.Get(), a_label);
-				// Operations expect Common, so exempt textures leave the shader-read state for the operation and return after.
-				LeaveShaderRead(slot.list.Get(), a_used, false);
-				a_body(slot, index);
-				LeaveShaderRead(slot.list.Get(), a_used, true);
-				EndLabel(slot.list.Get());
-				slot.list->End();
-				rhi::CommandList lists[] = { slot.list.Get() };
-				const rhi::TimelinePoint signal{ timeline->GetHandle(), value + 1 };
-				rhi::SubmitDesc submit{};
-				submit.signals = { &signal, 1 };
-				if (queue.Submit({ lists, 1 }, submit) != rhi::Result::Ok) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::error("[ORG native] an immediate context operation could not be submitted; such operations are lost");
-					return 0;
-				}
-				slot.value = ++value;
-				slot.keep = std::move(a_keep);
-				for (auto* record : a_used)
-					if (record)
-						record->lastUse.store(value, std::memory_order_release);
-				return value;
-			}
-
 			/** @brief Moves exempt images between shader-read and Common. Images still uploading are left alone. */
 			static void LeaveShaderRead(rhi::CommandList& a_list, std::span<NativeResource* const> a_used, bool a_back)
 			{
@@ -736,11 +655,7 @@ namespace RenderGraph::Engine::Native
 			}
 
 			std::mutex lock;
-			rhi::Device device;
-			rhi::Queue queue;
 			rhi::DescriptorHeapPtr rtvHeap, dsvHeap, uavHeap, uavCpuHeap;
-			// Declared before the slots so it outlives their lists.
-			rhi::CommandAllocatorPtr sharedAllocator;
 			std::array<Slot, kSlots> slots;
 			uint64_t next = 0;
 			rhi::TimelinePtr timeline;
@@ -919,17 +834,9 @@ namespace RenderGraph::Engine::Native
 			UINT bindFlags = 0, cpuAccess = 0, miscFlags = 0;
 			const D3D11_SUBRESOURCE_DATA* data = nullptr;
 			std::string name;
+			// Graph-owned before RenderGraphRuntime::Initialize too. Only the back buffer asks: the ORG runtime exists from stage 3.
+			bool beforeGraph = false;
 		};
-
-		/** @brief The textures a FrameTransientScope collects on this thread, each with the rest of its making once placed. */
-		struct FrameGroup
-		{
-			std::string label;
-			std::vector<std::shared_ptr<org::PixelBuffer>> textures;
-			std::vector<std::function<bool()>> finish;
-			std::vector<std::shared_ptr<NativeResource>> records;
-		};
-		thread_local FrameGroup* t_frameGroup = nullptr;
 
 		void NoteRequest(NativeResource& a_record, const TextureRequest& a_request)
 		{
@@ -941,7 +848,7 @@ namespace RenderGraph::Engine::Native
 
 		/**
 		 * @brief Whether a texture is exempt from tracking. It must be shader-only, made with contents, and without CPU access.
-		 * The write census found only one such texture written later, the loading screen's, which NoteWrite promotes.
+		 * Only one such texture is written later, the loading screen's, which NoteWrite promotes.
 		 */
 		bool IsExemptRequest(const TextureRequest& a_request)
 		{
@@ -984,100 +891,18 @@ namespace RenderGraph::Engine::Native
 		void LockQueue(void*, VkQueue) { g_queueLock.lock(); }
 		void UnlockQueue(void*, VkQueue) { g_queueLock.unlock(); }
 
-		/**
-		 * @brief Out-of-graph work on the graphics queue, between full memory barriers, such as DCLF's frame signal.
-		 * Draws that belong to a site go in its epoch as an inline pass instead.
-		 */
-		class Commands
-		{
-		public:
-			bool Init(rhi::Device a_device)
-			{
-				queue = a_device.GetQueue(rhi::QueueKind::Graphics);
-				// Lists share one allocator where the backend allows, since a command pool costs the driver about 2 MB.
-				if (a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, sharedAllocator) != rhi::Result::Ok || !sharedAllocator)
-					return false;
-				const bool shared = sharedAllocator->SupportsSharedLists();
-				for (auto& slot : slots) {
-					if (!shared && (a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) != rhi::Result::Ok || !slot.allocator))
-						return false;
-					if (a_device.CreateCommandList(rhi::QueueKind::Graphics, AllocatorOf(slot), slot.list) != rhi::Result::Ok || !slot.list)
-						return false;
-					slot.list->SetName("CS native commands");
-					// D3D12 resets only a closed list, so close it until first use.
-					slot.list->End();
-				}
-				return a_device.CreateTimeline(timeline, 0, "CS native commands") == rhi::Result::Ok && timeline;
-			}
-
-			/** @brief a_record runs exactly once on true and never on false. It starts with nothing bound. One call at a time. */
-			bool Run(void (*a_record)(void*, rhi::CommandList&), void* a_user, std::span<const rhi::TimelinePoint> a_waits,
-				std::span<const rhi::TimelinePoint> a_signals, const char* a_label)
-			{
-				std::lock_guard guard(lock);
-				auto& slot = slots[next++ % kSlots];
-				if (slot.value && timeline->GetCompletedValue() < slot.value && timeline->HostWait(slot.value) != rhi::Result::Ok)
-					return false;
-				if (slot.allocator)
-					slot.allocator->Recycle();
-				slot.list->Recycle(AllocatorOf(slot));
-				auto list = slot.list.Get();
-				BeginLabel(list, a_label ? a_label : "CS native commands");
-				// Full barriers make every access before and after visible, as DXVK's stream would.
-				auto full = rhi::FullMemoryBarrier();
-				rhi::BarrierBatch barriers{};
-				barriers.globals = { &full, 1u };
-				list.Barriers(barriers);
-				if (a_record)
-					a_record(a_user, list);
-				list.Barriers(barriers);
-				EndLabel(list);
-				list.End();
-				thread_local std::vector<rhi::TimelinePoint> waits, signals;
-				waits.assign(a_waits.begin(), a_waits.end());
-				signals.assign(a_signals.begin(), a_signals.end());
-				signals.push_back({ timeline->GetHandle(), value + 1 });
-				rhi::CommandList lists[] = { list };
-				rhi::SubmitDesc submit{};
-				submit.waits = { waits.data(), static_cast<uint32_t>(waits.size()) };
-				submit.signals = { signals.data(), static_cast<uint32_t>(signals.size()) };
-				if (queue.Submit({ lists, 1 }, submit) != rhi::Result::Ok) {
-					// The recording ran, so the call counts as taken. A failed submission means a lost device.
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::error("[ORG native] commands ('{}') could not be submitted; such work is lost (logged once)", a_label ? a_label : "");
-					slot.value = 0;
-					return true;
-				}
-				slot.value = ++value;
-				return true;
-			}
-
-		private:
-			// Out-of-graph work is a few calls a frame, so 64 lists mean a reuse never waits on recent work.
-			static constexpr uint32_t kSlots = 64;
-
-			struct Slot
-			{
-				rhi::CommandAllocatorPtr allocator;  // only where lists cannot share one, on D3D12
-				rhi::CommandListPtr list;
-				uint64_t value = 0;
-			};
-
-			rhi::CommandAllocator& AllocatorOf(Slot& a_slot) { return a_slot.allocator ? a_slot.allocator.Get() : sharedAllocator.Get(); }
-
-			std::mutex lock;
-			rhi::Queue queue;
-			// Declared before the slots so it outlives their lists.
-			rhi::CommandAllocatorPtr sharedAllocator;
-			std::array<Slot, kSlots> slots;
-			rhi::TimelinePtr timeline;
-			uint64_t value = 0;
-			uint64_t next = 0;
-		};
-
 		uint64_t CopyRhi(const std::string& a_label, const std::shared_ptr<NativeResource>& a_destination, const std::shared_ptr<NativeResource>& a_source, bool a_all,
 			uint32_t a_destinationSub, uint32_t a_x, uint32_t a_y, uint32_t a_z, uint32_t a_sourceSub, const D3D11_BOX* a_box, bool& a_recorded, bool* a_routed);
+
+		/** @brief The swap chain's presentation. */
+		struct PresentationState
+		{
+			std::uint64_t serial = 0;     // the request the swap chain was last made for. 0 is the swap chain made at startup
+			std::uint32_t format = 0;     // the swap chain images' rhi::Format
+			bool hdr10 = false;
+			bool presentationLayer = false;
+			bool vsync = false;  // with a presentation layer, the vsync the swap chain was made for. Its presents keep it
+		};
 
 		struct NativeState;
 		NativeState* g_device = nullptr;
@@ -1090,49 +915,73 @@ namespace RenderGraph::Engine::Native
 			rhi::Queue graphics;
 			Immediate immediate;
 			// GenerateMips' compute programs for 2D and for arrays and cubes. Loaded once the graph is up.
-			std::shared_ptr<const GraphPasses::GenerateMipsProgram> mips2D, mipsArray;
-			Commands commands;
+			std::shared_ptr<const ComputeProgram> mips2D, mipsArray;
+			// ORG's runtime, made with the device for the external client. RenderGraphRuntime::Initialize takes it (TakeOrgRuntime).
+			std::shared_ptr<org::Runtime> orgRuntime;
 
 			rhi::SwapchainPtr swapchain;
 			HWND window = nullptr;
 			DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
 			rhi::Format swapchainFormat = rhi::Format::R8G8B8A8_UNorm;
+			// What the engine asked for last (ResizeBuffers). Render thread, under presentLock.
 			uint32_t bufferCount = 2;
 			uint32_t width = 0, height = 0;
+			// The swap chain's own size and image count. The submission thread changes them after the presents queued before the
+			// resize (ResizeSwapchain), under presentLock.
+			uint32_t swapBufferCount = 2;
+			uint32_t swapWidth = 0, swapHeight = 0;
+			// The latest swap chain resize asked for. An older one still queued does nothing.
+			std::atomic<uint64_t> resizesAsked = 0;
 			uint32_t frameLatency = 2;
+			// What GetBuffer answers: the startup version's handle, then kFRAMEBUFFER's field once the set adopted the slot.
 			winrt::com_ptr<ID3D11Texture2D> backBuffer;
 
-			// One present command list per slot, reused once the timeline passes its last use.
-			std::array<rhi::CommandAllocatorPtr, kPresentSlots> allocators;
-			std::array<rhi::CommandListPtr, kPresentSlots> lists;
+			// Each present slot's copy value on the present timeline. A slot is reused once the timeline passes it.
 			std::array<uint64_t, kPresentSlots> slotValues{};
 			rhi::TimelinePtr presentTimeline;
 			uint64_t presentValue = 0;
 			uint64_t presents = 0;
 			bool resizeRequested = false;
-			// CS_ORG_NATIVE_PRESENT_PROBE=1 copies the back buffer about once a second through the D3D11 capture path and logs its mean colour.
-			struct Probe
+			/**
+			 * @brief kFRAMEBUFFER's slot, made with the swap chain. The present copies its current version. Native makes its versions
+			 * until the engine target set adopts it at Engine::Setup (AdoptBackBufferSlot); the set makes them after that.
+			 */
+			std::shared_ptr<org::VersionedTexture> backBufferSlot;
+			// Whether the set adopted the slot. GetBuffer then answers the set's field, and a resize makes no version here. Under presentLock.
+			bool setAdopted = false;
+			/** @brief What a present copies: the slot's current version when the present was asked for. */
+			struct PresentSource
 			{
-				std::shared_ptr<NativeResource> staging;
-				uint64_t value = 0;  // 0 when no copy is pending
-				std::chrono::steady_clock::time_point last{};
-			} probe;
-			std::shared_ptr<NativeResource> backBufferRecord;  // CurrentOf gives the version it stands for
-			// The back buffer as graph-owned versions in one slot. The frame's passes write the current version, and the present's tail copies it.
-			// Empty when off, on D3D12, before the graph is up, or when the versions could not be made.
-			struct GraphBackBuffer
+				std::shared_ptr<org::Resource> graph;
+				uint32_t width = 0, height = 0;
+			};
+			/**
+			 * @brief The "native present copy" GPU range: a timestamp pair around each present's copy, resolved into a readback buffer
+			 * and read when its slot comes round again. On while GpuTimingSource collects (CS_GPU_EVENT_TIMERS).
+			 */
+			struct PresentTimer
 			{
-				std::vector<std::shared_ptr<NativeResource>> records;
-				std::vector<std::shared_ptr<const org::TextureVersion>> versions;
-				std::shared_ptr<org::VersionedTexture> slot;
-				uint32_t current = 0;
-				uint64_t tails = 0;
-			} graph;
+				rhi::QueryPoolPtr pool;
+				rhi::ResourcePtr readback;
+				uint64_t stride = 8;
+				double msPerTick = 0.0;
+				std::array<bool, kPresentSlots> pending{};
+			} presentTimer;
 			std::atomic<bool> lost = false;
 			std::mutex presentLock;
+			// The presentation (NativePresenter::RequestConfig). Requests come from any thread, and NativePresenter counts them. The
+			// submission thread replaces the swap chain under presentLock and publishes what it made under presentationLock, which
+			// never waits on anything.
+			std::mutex presentationLock;
+			PresentationState adoptedPresentation{};
+			std::function<void()> leaving;  // under presentationLock
+			// With a presentation layer, the vsync the swap chain was made for. Submission thread, under presentLock.
+			std::optional<bool> layerVsync;
+			PresentationState framePresentation{};  // render owner
+			// Whether the output took HDR10 when the swap chain was last made, for a presentation taken before it is replaced.
+			std::atomic<bool> hdr10Supported = false;
 			// The render thread queues a present only once the one before has finished.
 			std::atomic<uint64_t> queuedPresents = 0, donePresents = 0;
-			std::atomic<uint64_t> presentPaceWaits = 0, presentPaceUs = 0;
 
 			// Each present drains BasicRHI's queued validation messages into the log.
 			bool validation = false;
@@ -1258,7 +1107,6 @@ namespace RenderGraph::Engine::Native
 					}
 					record->ownership = NativeResource::Ownership::Exempt;
 					record->restsShaderRead.store(true, std::memory_order_release);
-					NoteOwnedImage(*record);
 					a_out = std::move(record);
 					return S_OK;
 				}
@@ -1284,8 +1132,8 @@ namespace RenderGraph::Engine::Native
 			bool MakeGraphOwned(const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format, rhi::Format a_viewFormat, const rhi::FormatSupport& a_support,
 				bool a_typelessDepth, bool a_cube, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth, std::shared_ptr<NativeResource>& a_out)
 			{
-				// The engine's startup textures come before the ORG runtime exists.
-				if (!RenderGraphRuntime::Get().IsActive())
+				// The engine's startup textures stay host-made until the graph is up. The back buffer is graph-owned from stage 3.
+				if (!a_request.beforeGraph && !RenderGraphRuntime::Get().IsActive())
 					return false;
 				const bool depthStencil = (a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
 				const bool renderTarget = (a_request.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
@@ -1337,28 +1185,6 @@ namespace RenderGraph::Engine::Native
 				auto record = std::make_shared<NativeResource>();
 				record->name = a_request.name;
 				NoteRequest(*record, a_request);
-				// In a frame arena group the texture has no memory until the scope ends, so any GPU use before then is a recipe mismatch.
-				const bool grouped = t_frameGroup && !a_request.data && a_request.usage == D3D11_USAGE_DEFAULT && Frame::Transients::On();
-				if (grouped) {
-					try {
-						auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
-						texture->SetName(fmt::format("cs.native.texture.{}", record->serial));
-						record->kind = NativeResource::Kind::Unbacked;
-						record->graphOwned = texture;
-						t_frameGroup->textures.push_back(texture);
-						t_frameGroup->records.push_back(record);
-						TextureRequest request = a_request;
-						request.data = nullptr;
-						t_frameGroup->finish.push_back([this, record, request, a_dxgiFormat, a_format, a_viewFormat, a_support, a_mips, a_layers, a_depth] {
-							return FinishGraphOwned(record, request, a_dxgiFormat, a_format, a_viewFormat, a_support, a_mips, a_layers, a_depth);
-						});
-					} catch (const std::exception& e) {
-						LogHostMade(fmt::format("ORG could not make it ({})", e.what()), a_request.name);
-						return false;
-					}
-					a_out = std::move(record);
-					return true;
-				}
 				try {
 					record->graphOwned = org::PixelBuffer::CreateShared(desc);
 					record->graphOwned->SetName(fmt::format("cs.native.texture.{}", record->serial));
@@ -1402,8 +1228,6 @@ namespace RenderGraph::Engine::Native
 				}
 				record->ownership = NativeResource::Ownership::Tracked;
 				NoteOwnedImage(*record);
-				// Registered for the duplicate check.
-				::RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(record->image.image), record->graphOwned, fmt::format("cs.native.texture.{}", record->serial));
 				if (a_request.usage == D3D11_USAGE_DYNAMIC) {
 					TextureRequest cpu = a_request;
 					cpu.data = nullptr;
@@ -1596,8 +1420,8 @@ namespace RenderGraph::Engine::Native
 			/** @brief Loads GenerateMips' programs once the graph's shader compiler is up. */
 			void LoadMipPrograms()
 			{
-				mips2D = GraphPasses::LoadGenerateMips(Rhi(), false);
-				mipsArray = GraphPasses::LoadGenerateMips(Rhi(), true);
+				mips2D = ComputeProgram::Load(Rhi(), ComputeProgram::GenerateMips(false));
+				mipsArray = ComputeProgram::Load(Rhi(), ComputeProgram::GenerateMips(true));
 				logger::info("[ORG native] GenerateMips: the context builds mip chains with a compute shader ({}2D textures, {}arrays and cubes)",
 					mips2D ? "" : "not for ", mipsArray ? "" : "not for ");
 			}
@@ -1795,6 +1619,9 @@ namespace RenderGraph::Engine::Native
 				const ::RenderGraph::ExternalWork::Access access{ &texture, {},
 					{ rhi::ResourceAccessType::CopyDest, copies.empty() ? rhi::ResourceLayout::Common : rhi::ResourceLayout::CopyDest, rhi::ResourceSyncState::Copy } };
 				NativeResource* const used[] = { &a_record };
+				Immediate::Work work;
+				work.accesses = { &access, 1 };
+				work.used = used;
 				const auto record = [&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
 					for (const auto& copy : copies) {
 						rhi::BufferTextureCopyFootprint region{};
@@ -1806,7 +1633,7 @@ namespace RenderGraph::Engine::Native
 						a_list.CopyBufferToTexture(region);
 					}
 				};
-				return immediate.Route((copies.empty() ? "initial layout " : "initial contents ") + a_request.name, { &access, 1 }, {}, record, { upload }, used) != 0;
+				return immediate.Run((copies.empty() ? "initial layout " : "initial contents ") + a_request.name, work, record, { upload }) != 0;
 			}
 
 			/**
@@ -1858,7 +1685,11 @@ namespace RenderGraph::Engine::Native
 				return S_OK;
 			}
 
-			/** @brief The back buffer the engine draws into, which Present copies into the swap chain image. */
+			/**
+			 * @brief kFRAMEBUFFER's next version before the engine target set adopts the slot: InitD3D's GetBuffer and every frame up
+			 * to Engine::Setup draw into it. A graph-owned texture from stage 3, so the present copies it through the ledger as it
+			 * copies the set's versions. The first call makes the slot. Render thread, under presentLock after stage 3.
+			 */
 			bool MakeBackBuffer()
 			{
 				TextureRequest request;
@@ -1867,10 +1698,23 @@ namespace RenderGraph::Engine::Native
 				request.format = format;
 				request.bindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 				request.name = "Native::BackBuffer";
+				request.beforeGraph = true;
 				std::shared_ptr<NativeResource> record;
 				if (FAILED(MakeTexture(request, record)))
 					return false;
-				backBufferRecord = record;
+				if (!record->graphOwned)
+					RenderGraph::Fatal("native device", "the back buffer is not graph-owned, so it cannot be a version of kFRAMEBUFFER's slot");
+				auto image = std::static_pointer_cast<org::GloballyIndexedResource>(record->graphOwned);
+				try {
+					if (!backBufferSlot) {
+						backBufferSlot = org::VersionedTexture::CreateImage(std::move(image));
+					} else {
+						const ::RenderGraph::Frame::Boundary::Caller caller("native back buffer");
+						backBufferSlot->PublishImage(std::move(image));
+					}
+				} catch (const std::exception& e) {
+					RenderGraph::Fatal("native device", fmt::format("the back buffer could not be a version of kFRAMEBUFFER's slot: {}", e.what()));
+				}
 				D3D11_TEXTURE2D_DESC desc{ width, height, 1, 1, format, { 1, 0 }, D3D11_USAGE_DEFAULT, request.bindFlags, 0, 0 };
 				Tripwire::Options options;
 				options.name = request.name;
@@ -1879,107 +1723,159 @@ namespace RenderGraph::Engine::Native
 				return backBuffer != nullptr;
 			}
 
-			/** @brief Drops the graph present's versions, so the back buffer is its own again. */
-			void DropGraphBackBuffer()
+			/** @brief The present's timeline and timer. Its copies are recorded through the external client. */
+			bool MakePresentObjects()
 			{
-				for (const auto& record : graph.records)
-					if (record && record->graphOwned)
-						::RenderGraph::ForgetMadeImage(record->graphOwned.get());
-				if (backBufferRecord)
-					Rename(*backBufferRecord, nullptr);
-				graph = {};
-			}
-
-			/**
-			 * @brief Makes the back buffer's graph-owned versions in one slot, so every importer gets the slot. Needs the present lock.
-			 * @return False when the versions could not be made, and the present copies by hand.
-			 */
-			bool MakeGraphBackBuffer()
-			{
-				// One version only. Rotating versions every frame made every prepared ticket stale and every kept recording unusable.
-				const uint32_t count = 1;
-				DropGraphBackBuffer();
-				if (!backBufferRecord || !RenderGraphRuntime::Get().IsActive())
+				if (Rhi().CreateTimeline(presentTimeline, 0, "CS native present") != rhi::Result::Ok || !presentTimeline)
 					return false;
-				GraphBackBuffer made;
-				for (uint32_t i = 0; i < count; ++i) {
-					TextureRequest request;
-					request.width = width;
-					request.height = height;
-					request.format = format;
-					request.bindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-					request.name = fmt::format("Native::BackBuffer.{}", i);
-					std::shared_ptr<NativeResource> record;
-					if (FAILED(MakeTexture(request, record)) || !record || record->ownership != NativeResource::Ownership::Tracked || !record->graphOwned) {
-						logger::warn(
-							"[ORG native] graph present: back buffer version {} could not be made as a graph-owned texture ({}x{}, DXGI format {}); "
-							"the present copies the back buffer by hand",
-							i, width, height, static_cast<int>(format));
-						return false;
-					}
-					made.records.push_back(std::move(record));
-				}
-				try {
-					made.slot = org::VersionedTexture::Create(made.records.front()->graphOwned);
-					made.versions.push_back(made.slot->Current());
-					for (uint32_t i = 1; i < count; ++i)
-						made.versions.push_back(made.slot->Make(made.records[i]->graphOwned));
-				} catch (const std::exception& e) {
-					logger::warn("[ORG native] graph present: the back buffer's slot could not be made ({}); the present copies the back buffer by hand", e.what());
-					return false;
-				}
-				for (const auto& record : made.records) {
-					::RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(record->image.image), record->graphOwned, record->graphOwned->GetDescription(),
-						"Native::BackBuffer");
-					::RenderGraph::SetMadeImageSlot(record->graphOwned.get(), made.slot);
-				}
-				graph = std::move(made);
-				Rename(*backBufferRecord, graph.records.front());
-				logger::info(
-					"[ORG native] graph present: the back buffer is a graph-owned slot of {} version{} ({}x{}, DXGI "
-					"format {}); the present copies the current one into the swap chain image through ORG's external client{}",
-					count, count == 1 ? "" : "s", width, height, static_cast<int>(format), count > 1 ? ", and the next present slot's version becomes current" : "");
+				MakePresentTimer();
 				return true;
 			}
 
-			/** @brief Moves to the next version after a tail. Render owner only, so no frame's passes straddle two versions. */
-			void NextGraphVersion()
+			/** @brief The present copy's timestamps, when the GPU timers collect. Without them the copy is untimed, which is logged. */
+			void MakePresentTimer()
 			{
-				if (graph.versions.size() < 2)
+				if (!GpuTimingSource::Collecting())
 					return;
-				graph.current = (graph.current + 1) % static_cast<uint32_t>(graph.versions.size());
-				graph.slot->Adopt(graph.versions[graph.current]);
-				Rename(*backBufferRecord, graph.records[graph.current]);
-				if (auto* host = RenderGraphRuntime::Get().Host())
-					host->NoteNewVersions();
+				rhi::QueryPoolDesc desc{};
+				desc.type = rhi::QueryType::Timestamp;
+				desc.count = kPresentSlots * 2;
+				const uint64_t ticksPerSecond = Rhi().GetTimestampCalibration(rhi::QueueKind::Graphics).ticksPerSecond;
+				if (!ticksPerSecond || Rhi().CreateQueryPool(desc, presentTimer.pool) != rhi::Result::Ok || !presentTimer.pool) {
+					logger::warn("[ORG native] the present copy has no GPU timer: the timestamp queries could not be made");
+					presentTimer = {};
+					return;
+				}
+				presentTimer.pool->SetName("CS native present copy");
+				presentTimer.stride = (std::max)(presentTimer.pool->GetQueryResultInfo().elementSize, 8u);
+				const rhi::ResourceDesc bufferDesc = rhi::helpers::ResourceDesc::Buffer(presentTimer.stride * desc.count, rhi::HeapType::Readback, {}, "CS native present copy timestamps");
+				if (Rhi().CreateCommittedResource(bufferDesc, presentTimer.readback) != rhi::Result::Ok || !presentTimer.readback) {
+					logger::warn("[ORG native] the present copy has no GPU timer: the timestamp readback could not be made");
+					presentTimer = {};
+					return;
+				}
+				presentTimer.msPerTick = 1000.0 / static_cast<double>(ticksPerSecond);
+				logger::info("[ORG native] the present copy is timed on the GPU (\"native present copy\" in the [GpuEvents] lines)");
 			}
 
-			void OnGraphReady()
+			/** @brief Starts a_slot's timed range on a_list. */
+			void BeginPresentTimer(rhi::CommandList& a_list, uint32_t a_slot)
+			{
+				if (!presentTimer.pool)
+					return;
+				a_list.ResetQueries(presentTimer.pool->GetHandle(), a_slot * 2, 2);
+				a_list.WriteTimestamp(presentTimer.pool->GetHandle(), a_slot * 2, rhi::Stage::Top);
+			}
+
+			/** @brief Ends a_slot's timed range on a_list and resolves it for EndPresentSlot. */
+			void EndPresentTimer(rhi::CommandList& a_list, uint32_t a_slot)
+			{
+				if (!presentTimer.pool)
+					return;
+				a_list.WriteTimestamp(presentTimer.pool->GetHandle(), a_slot * 2 + 1, rhi::Stage::Bottom);
+				a_list.ResolveQueryData(presentTimer.pool->GetHandle(), a_slot * 2, 2, presentTimer.readback->GetHandle(), presentTimer.stride * a_slot * 2);
+			}
+
+			/** @brief After a_slot's last present finished on the GPU: hands its copy's time to GpuTimingSource. */
+			void ReadPresentTimer(uint32_t a_slot)
+			{
+				if (!presentTimer.pool || !std::exchange(presentTimer.pending[a_slot], false))
+					return;
+				void* mapped = nullptr;
+				presentTimer.readback->Map(&mapped, presentTimer.stride * a_slot * 2, presentTimer.stride * 2);
+				if (!mapped)
+					return;
+				uint64_t ticks[2]{};
+				std::memcpy(&ticks[0], static_cast<const std::byte*>(mapped), sizeof(uint64_t));
+				std::memcpy(&ticks[1], static_cast<const std::byte*>(mapped) + presentTimer.stride, sizeof(uint64_t));
+				presentTimer.readback->Unmap(0, 0);
+				if (!ticks[0] || ticks[1] < ticks[0])
+					return;
+				GpuTimingSource::Range range;
+				range.name = "native present copy";
+				range.queue = GpuTimingSource::Queue::Graphics;
+				// A sub-range keeps it out of the queue's walk, so it adds a row and changes no other range's self time.
+				range.kind = GpuTimingSource::RangeKind::Sub;
+				range.beginTick = ticks[0];
+				range.endTick = ticks[1];
+				range.ms = static_cast<double>(ticks[1] - ticks[0]) * presentTimer.msPerTick;
+				GpuTimingSource::AddExternalRange(std::move(range));
+			}
+
+			/** @brief CS_ORG_PRESENT_COPY_SKIP=1 (development builds): the present keeps its barriers and skips its copy, for timing. */
+			static bool SkipPresentCopy()
+			{
+#if defined(CS_RELEASE_PROFILE)
+				return false;
+#else
+				static const bool skip = [] {
+					const bool on = Switches::On("CS_ORG_PRESENT_COPY_SKIP");
+					if (on)
+						logger::warn("[ORG native] CS_ORG_PRESENT_COPY_SKIP=1: the present skips its copy; the screen shows garbage and timings stay valid");
+					return on;
+				}();
+				return skip;
+#endif
+			}
+
+			/** @brief The slot's current version as a present copies it. Empty when it has no readable description. Under presentLock. */
+			PresentSource CurrentSource() const
+			{
+				PresentSource source;
+				source.graph = backBufferSlot->CurrentResource();
+				rhi::ResourceDesc desc{};
+				if (!source.graph || !source.graph->TryGetRHIResourceDesc(desc))
+					return {};
+				source.width = desc.texture.width;
+				source.height = desc.texture.height;
+				return source;
+			}
+
+			/**
+			 * @brief The engine target set adopted kFRAMEBUFFER's slot (its twin's first version joined it). GetBuffer answers the
+			 * set's field from now on. Render thread, at Engine::Setup, before the first frame that draws into it.
+			 */
+			void AdoptBackBufferSlot(const std::shared_ptr<org::VersionedTexture>& a_slot, winrt::com_ptr<ID3D11Texture2D> a_field)
 			{
 				std::lock_guard guard(presentLock);
-				(void)MakeGraphBackBuffer();
+				if (setAdopted)
+					RenderGraph::Fatal("native device", "the engine target set adopted the back buffer slot twice");
+				if (!a_slot || a_slot != backBufferSlot)
+					RenderGraph::Fatal("native device", "the engine target set's kFRAMEBUFFER is not the slot native made with the swap chain");
+				if (!a_field)
+					RenderGraph::Fatal("native device", "the engine target set adopted the back buffer slot without a field");
+				setAdopted = true;
+				// The engine released its views of the startup version at DeclareSet. A present still queued holds that version until it ran.
+				backBuffer = std::move(a_field);
+				logger::info("[ORG native] the engine target set adopted kFRAMEBUFFER's slot; it makes the slot's versions from now on");
 			}
 
-			bool MakePresentObjects()
-			{
-				for (uint32_t i = 0; i < kPresentSlots; ++i) {
-					if (Rhi().CreateCommandAllocator(rhi::QueueKind::Graphics, allocators[i]) != rhi::Result::Ok || !allocators[i] ||
-						Rhi().CreateCommandList(rhi::QueueKind::Graphics, allocators[i].Get(), lists[i]) != rhi::Result::Ok || !lists[i])
-						return false;
-					lists[i]->SetName(fmt::format("CS native present {}", i).c_str());
-					lists[i]->End();
-				}
-				return Rhi().CreateTimeline(presentTimeline, 0, "CS native present") == rhi::Result::Ok && presentTimeline;
-			}
-
-			/** @brief Waits for every queued copy, so the back buffer and swap chain images can change. */
+			/**
+			 * @brief Waits for every queued copy, so the swap chain images can change. The submission thread's, before it replaces or
+			 * resizes the swap chain, and the window's close. A failed wait is a lost device: nothing more is shown.
+			 */
 			void WaitPresents()
 			{
-				if (presentValue)
-					(void)presentTimeline->HostWait(presentValue, 2000);
+				if (!presentValue || presentTimeline->HostWait(presentValue) == rhi::Result::Ok)
+					return;
+				lost = true;
+				logger::error("[ORG native] the presents' copies never finished on the GPU; nothing more is shown");
 			}
 
-			HRESULT Resize(uint32_t a_count, uint32_t a_width, uint32_t a_height, DXGI_FORMAT a_format)
+			/** @brief A swap chain resize for the submission thread. */
+			struct ResizeRequest
+			{
+				uint32_t count = 0, width = 0, height = 0;
+				uint64_t serial = 0;
+			};
+
+			/**
+			 * @brief The engine's ResizeBuffers. Render thread, under presentLock. Takes the engine's new size and, before the engine
+			 * target set adopted the slot, makes kFRAMEBUFFER's next version. The swap chain itself is resized by the
+			 * submission thread after the presents queued so far (QueueSwapchainResize with a_request), so nothing waits here.
+			 * Until kFRAMEBUFFER's version at the new size is adopted, the present copies the smaller extent.
+			 */
+			HRESULT Resize(uint32_t a_count, uint32_t a_width, uint32_t a_height, DXGI_FORMAT a_format, ResizeRequest& a_request)
 			{
 				if (!a_width || !a_height) {
 					RECT client{};
@@ -1989,58 +1885,168 @@ namespace RenderGraph::Engine::Native
 				}
 				if (a_count)
 					bufferCount = (std::max)(a_count, 2u);
+				const DXGI_FORMAT previousFormat = format;
 				if (a_format != DXGI_FORMAT_UNKNOWN)
 					format = a_format;
-				WaitPresents();
-				if (swapchain->ResizeBuffers(bufferCount, a_width, a_height, swapchainFormat, 0) != rhi::Result::Ok) {
-					logger::error("[ORG native] the swap chain could not be resized to {}x{}", a_width, a_height);
-					return DXGI_ERROR_INVALID_CALL;
-				}
+				// Every version of the slot has the first one's format.
+				if (format != previousFormat)
+					RenderGraph::Fatal("native device", fmt::format("the swap chain was resized to DXGI format {} from {}; kFRAMEBUFFER cannot change its format",
+						static_cast<int>(format), static_cast<int>(previousFormat)));
+				const bool keepBackBuffer = backBuffer && a_width == width && a_height == height;
 				width = a_width;
 				height = a_height;
-				// The engine released its views before ResizeBuffers, so the old back buffer and its versions go now.
-				const bool graphPresent = graph.slot != nullptr;
-				DropGraphBackBuffer();
+				a_request = { bufferCount, width, height, resizesAsked.fetch_add(1, std::memory_order_acq_rel) + 1 };
+				// The engine target set makes kFRAMEBUFFER's next version on the revision lane, so only the swap chain follows.
+				if (setAdopted) {
+					// The set writes DisplaySize from the engine's new targets.
+					logger::info("[ORG native] the engine resized to {}x{}; the swap chain follows after the queued presents, kFRAMEBUFFER with the engine target set",
+						width, height);
+					return S_OK;
+				}
+				// Nothing the frame binds changes when the size and format stay: the engine takes the same back buffer again.
+				if (keepBackBuffer) {
+					logger::info("[ORG native] the engine resized at its size {}x{}; the back buffer is kept", width, height);
+					return S_OK;
+				}
+				// Before the set adopted the slot: the engine released its views before ResizeBuffers, so the old version's handle goes now.
+				// A present still queued holds the old version until it ran.
 				backBuffer = nullptr;
 				if (!MakeBackBuffer()) {
-					logger::error("[ORG native] the back buffer could not be made again at {}x{}", width, height);
+					logger::error("[ORG native] kFRAMEBUFFER's next version could not be made at {}x{}", width, height);
 					return E_OUTOFMEMORY;
 				}
-				if (graphPresent) {
-					// The new versions are a new slot, so graphs built with the old one must be rebuilt.
-					::GraphResources::RequestStructuralRebuild("native back buffer resized: its graph present slot is made again");
-					(void)MakeGraphBackBuffer();
-				}
-				logger::info("[ORG native] swap chain and back buffer resized to {}x{}", width, height);
+				// DisplaySize is the set's to write (DeclareSet), so nothing reads this size before it.
+				logger::info("[ORG native] kFRAMEBUFFER's next version is made at {}x{}; the swap chain follows after the queued presents", width, height);
 				return S_OK;
 			}
 
 			/**
-			 * @brief Remakes the swap chain at the back buffer's size after Present reports a mode change or failure.
-			 * The back buffer must stay, since the engine keeps drawing through its views of it.
+			 * @brief Render owner, outside presentLock. Queues a_request's swap chain resize on the submission thread, after the presents
+			 * queued so far. A newer request supersedes it. Never waits.
+			 */
+			void QueueSwapchainResize(const ResizeRequest& a_request)
+			{
+				RenderGraphRuntime::Get().QueueOnSubmitThread([this, a_request] {
+					std::lock_guard guard(presentLock);
+					if (resizesAsked.load(std::memory_order_acquire) != a_request.serial)
+						return;
+					ResizeSwapchain(a_request.count, a_request.width, a_request.height);
+				});
+			}
+
+			/** @brief Submission thread, under presentLock. Resizes the swap chain once its images are free. A failure is fatal. */
+			void ResizeSwapchain(uint32_t a_count, uint32_t a_width, uint32_t a_height)
+			{
+				ZoneScopedN("CS.Native.ResizeSwapchain");
+				if (lost.load(std::memory_order_relaxed))
+					return;
+				WaitPresents();
+				if (lost.load(std::memory_order_relaxed))
+					return;
+				if (swapchain->ResizeBuffers(a_count, a_width, a_height, swapchainFormat, 0) != rhi::Result::Ok)
+					RenderGraph::Fatal("native device", fmt::format("the swap chain could not be resized to {}x{} with {} images", a_width, a_height, a_count));
+				swapBufferCount = a_count;
+				swapWidth = a_width;
+				swapHeight = a_height;
+				// The resize remade the images, so a mode change reported before it is served.
+				resizeRequested = false;
+				logger::info("[ORG native] swap chain resized to {}x{} on the submission thread", swapWidth, swapHeight);
+			}
+
+			/**
+			 * @brief Remakes the swap chain at its size after Present reports a mode change or failure. The thread that presents, under
+			 * presentLock: the submission thread when presents are queued. The back buffer stays, since the engine draws through its views.
 			 */
 			void RecreateSwapchain()
 			{
-				WaitPresents();
-				if (swapchain->ResizeBuffers(bufferCount, width, height, swapchainFormat, 0) != rhi::Result::Ok)
-					logger::error("[ORG native] the swap chain could not be made again at {}x{}", width, height);
-				else
-					logger::info("[ORG native] swap chain made again at {}x{} (the back buffer is kept)", width, height);
+				ResizeSwapchain(swapBufferCount, swapWidth, swapHeight);
 			}
 
+			/** @brief Publishes what the swap chain is now. Under presentLock. */
+			void PublishPresentation(uint64_t a_serial, bool a_vsync)
+			{
+				const bool hdr10 = swapchain->ColorSpace() == rhi::SwapchainColorSpace::Hdr10St2084;
+				const bool layer = swapchain->Caps().presentationLayer;
+				hdr10Supported.store(swapchain->IsColorSpaceSupported(rhi::SwapchainColorSpace::Hdr10St2084), std::memory_order_relaxed);
+				std::lock_guard guard(presentationLock);
+				adoptedPresentation.serial = a_serial;
+				adoptedPresentation.format = static_cast<std::uint32_t>(hdr10 ? rhi::Format::R10G10B10A2_UNorm : swapchainFormat);
+				adoptedPresentation.hdr10 = hdr10;
+				adoptedPresentation.presentationLayer = layer;
+				adoptedPresentation.vsync = a_vsync;
+			}
+
+			/**
+			 * @brief The submission thread's replacement: waits for the presents, destroys the swap chain, runs a_tornDown, creates the
+			 * new one. Under presentLock, so a loading screen's present on its own thread cannot use the swap chain in between.
+			 */
+			void ReplacePresentation(const FrameGen::PresentationConfig& a_config, uint64_t a_serial)
+			{
+				ZoneScopedN("CS.Native.ReplacePresentation");
+				const auto describe = [&] {
+					return fmt::format("frame generation {}, {}, vsync {}, tearing {}", static_cast<int>(a_config.method), a_config.hdr ? "HDR10" : "SDR",
+						a_config.vsync, a_config.tearing);
+				};
+				if (lost.load(std::memory_order_relaxed))
+					return;
+				const auto start = std::chrono::steady_clock::now();
+				WaitPresents();
+				if (lost.load(std::memory_order_relaxed))
+					return;
+				// HDR10 the output cannot show presents SDR, as before.
+				const bool hdr = a_config.hdr && swapchain->IsColorSpaceSupported(rhi::SwapchainColorSpace::Hdr10St2084);
+				if (a_config.hdr && !hdr)
+					logger::warn("[ORG native] HDR is on, but the display path does not take HDR10 (ST.2084, Rec. 2020). Presenting SDR.");
+				swapchain.Reset();
+				// The step stored last, so a feature load change waiting for a replacement goes through whichever request runs.
+				const auto tornDown = FrameGen::NativePresenter::Get().TornDown();
+				if (tornDown && !tornDown())
+					RenderGraph::Fatal("native device", fmt::format("the presentation's torn-down step failed for {}", describe()));
+				rhi::SwapchainDesc desc{};
+				desc.hwnd = window;
+				desc.width = swapWidth;
+				desc.height = swapHeight;
+				desc.format = swapchainFormat;
+				desc.bufferCount = swapBufferCount;
+				desc.presentationLayer = a_config.method != FrameGen::Method::kNone;
+				// A layer bakes the present mode in (FidelityFX's swap chain does), so make it with the mode the vsync asks for.
+				// BasicRHI picks the first mode from allowTearing.
+				desc.allowTearing = a_config.tearing && !(desc.presentationLayer && a_config.vsync);
+				desc.colorSpace = hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
+				if (const auto created = Rhi().CreateSwapchain(desc, swapchain); created != rhi::Result::Ok || !swapchain)
+					RenderGraph::Fatal("native device", fmt::format("the swap chain could not be made for {} (BasicRHI result {})", describe(), static_cast<int>(created)));
+				if (swapchain->SetMaximumFrameLatency(frameLatency) != rhi::Result::Ok)
+					RenderGraph::Fatal("native device", fmt::format("the new swap chain refused a frame latency of {}", frameLatency));
+				// A fresh swap chain has no mode change pending.
+				resizeRequested = false;
+				layerVsync = desc.presentationLayer ? std::optional<bool>(a_config.vsync) : std::nullopt;
+				PublishPresentation(a_serial, a_config.vsync);
+				FrameGen::NativePresenter::Get().Replaced(a_serial);
+				logger::info("[ORG native] presentation replaced (request {}): {}; {} images {}x{}, presentation layer {}, {:.1f} ms", a_serial, describe(),
+					swapchain->ImageCount(), swapWidth, swapHeight, desc.presentationLayer,
+					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+			}
+
+			/**
+			 * @brief The engine's Present. A DXGI_PRESENT_TEST present does no work. The render owner queues the present on the
+			 * submission thread. Two kinds run on the calling thread: presents before RenderGraphRuntime::Initialize, which made no
+			 * submission thread yet, and presents of a thread that does not own rendering (a loading screen's), which cannot take the
+			 * render owner's pacing counters. Every present copies the slot's current version through the external
+			 * client.
+			 */
 			HRESULT Present(UINT a_syncInterval, UINT a_flags)
 			{
-				static const bool probeOn = Switches::On("CS_ORG_NATIVE_PRESENT_PROBE");
-				// The probe copies through the render thread's immediate context, so it keeps the present on this thread.
-				if (!(a_flags & DXGI_PRESENT_TEST) && !probeOn && RenderGraphRuntime::Get().QueuesPresent())
+				if (a_flags & DXGI_PRESENT_TEST)
+					return S_OK;
+				if (RenderGraphRuntime::Get().QueuesPresent())
 					return QueuePresent(a_syncInterval);
-				// The frame's pending epochs must reach the queue before this present.
+				// The render owner's epochs must reach the queue before this present, and so must what they wait for. Nothing is queued
+				// before the graph host exists.
 				RenderGraphRuntime::Get().DrainSubmissions("the present", true);
-				if (!(a_flags & DXGI_PRESENT_TEST))
-					for (const auto& wait : RenderGraphRuntime::Get().TakePresentWaits())
-						wait();
+				for (const auto& wait : RenderGraphRuntime::Get().TakePresentWaits())
+					wait();
 				std::lock_guard guard(presentLock);
-				return PresentLocked(a_syncInterval, a_flags, nullptr, false);
+				return PresentLocked(a_syncInterval, CurrentSource());
 			}
 
 			/**
@@ -2053,37 +2059,27 @@ namespace RenderGraph::Engine::Native
 				const uint64_t queued = queuedPresents.load(std::memory_order_relaxed);
 				if (donePresents.load(std::memory_order_acquire) < queued) {
 					ZoneScopedN("CS.Native.PresentPace");
-					const auto start = std::chrono::steady_clock::now();
 					for (auto done = donePresents.load(std::memory_order_acquire); done < queued; done = donePresents.load(std::memory_order_acquire))
 						donePresents.wait(done, std::memory_order_acquire);
-					presentPaceWaits.fetch_add(1, std::memory_order_relaxed);
-					presentPaceUs.fetch_add(static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count()),
-						std::memory_order_relaxed);
 				}
-				std::shared_ptr<NativeResource> source;
-				bool tail = false;
+				PresentSource source;
 				{
 					std::lock_guard guard(presentLock);
 					if (lost.load(std::memory_order_relaxed) || !backBuffer)
 						return S_OK;
-					source = CurrentOf(backBufferRecord);
-					if (!source)
+					// The version current now, since the render thread may adopt the next one before this present runs.
+					source = CurrentSource();
+					if (!source.graph)
 						return S_OK;
-					tail = graph.slot && source->graphOwned;
-					if (tail) {
-						++graph.tails;
-						NextGraphVersion();
-					}
 				}
 				queuedPresents.store(queued + 1, std::memory_order_relaxed);
-				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), tail, a_syncInterval,
-																  waits = RenderGraphRuntime::Get().TakePresentWaits()] {
+				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), a_syncInterval, waits = RenderGraphRuntime::Get().TakePresentWaits()] {
 					ZoneScopedN("CS.Native.QueuedPresent");
 					for (const auto& wait : waits)
 						wait();
 					{
 						std::lock_guard guard(presentLock);
-						(void)PresentLocked(a_syncInterval, 0, source, tail);
+						(void)PresentLocked(a_syncInterval, source);
 					}
 					donePresents.fetch_add(1, std::memory_order_release);
 					donePresents.notify_all();
@@ -2091,21 +2087,15 @@ namespace RenderGraph::Engine::Native
 				return S_OK;
 			}
 
-			/** @brief The present under presentLock. A null a_queued means present on the calling thread with the current version. */
-			HRESULT PresentLocked(UINT a_syncInterval, UINT a_flags, const std::shared_ptr<NativeResource>& a_queued, bool a_queuedTail)
+			/** @brief The present under presentLock: copies a_source, a version of kFRAMEBUFFER's slot, into the swap chain image. */
+			HRESULT PresentLocked(UINT a_syncInterval, const PresentSource& a_source)
 			{
-				if (a_flags & DXGI_PRESENT_TEST)
-					return S_OK;
 				if (lost.load(std::memory_order_relaxed))
 					return S_OK;  // already reported, and the game's frame still ends
 				if (std::exchange(resizeRequested, false))
 					RecreateSwapchain();
-				if (!backBuffer)
+				if (!backBuffer || !a_source.graph)
 					return S_OK;
-				static const bool probeEnabled = Switches::On("CS_ORG_NATIVE_PRESENT_PROBE");
-				if (probeEnabled)
-					ReadProbe();
-
 				const uint32_t slot = static_cast<uint32_t>(presents % kPresentSlots);
 				bool slotLost = false;
 				if (slotValues[slot]) {
@@ -2117,9 +2107,7 @@ namespace RenderGraph::Engine::Native
 					logger::error("[ORG native] a present's copy never finished on the GPU; nothing more is shown");
 					return S_OK;
 				}
-				auto& list = lists[slot];
-				allocators[slot]->Recycle();
-				list->Recycle(allocators[slot].Get());
+				ReadPresentTimer(slot);
 
 				// D3D12 Present does not block for frame latency, so pace on the swap chain's waitable object. Vulkan's Present blocks itself.
 				if (OnD3D12()) {
@@ -2132,120 +2120,26 @@ namespace RenderGraph::Engine::Native
 				}
 				const uint32_t index = swapchain->CurrentImageIndex();
 				const rhi::ResourceHandle target = swapchain->Image(index);
-				const auto source = a_queued ? a_queued : CurrentOf(backBufferRecord);
-				if (!source)
-					return S_OK;
-				if (a_queued) {
-					// QueuePresent already moved to the next version.
-					if (a_queuedTail) {
-						const HRESULT result = PresentThroughLedger(*source->graphOwned, source, slot, target, a_syncInterval, true, false);
-						if (result != E_PENDING)
-							return result;
-						static std::atomic_flag logged;
-						if (!logged.test_and_set())
-							logger::warn("[ORG native] graph present: ORG's external client refused a queued present's tail; it copies on its own path (logged once)");
-					}
-				} else if (graph.slot && source->graphOwned) {
-					// Only the render owner moves to the next version. A loading screen or logo presenting from another thread keeps it current.
-					if (::FrameAnchors::IsRenderOwner()) {
-						const HRESULT result = PresentThroughLedger(*source->graphOwned, source, slot, target, a_syncInterval, true);
-						if (result != E_PENDING)
-							return result;
-						static std::atomic_flag logged;
-						if (!logged.test_and_set())
-							logger::warn(
-								"[ORG native] graph present: ORG's external client refused the present's tail; the present copies on its own "
-								"path, and the version stays current (logged once)");
-					} else {
-						static std::atomic_flag logged;
-						if (!logged.test_and_set())
-							logger::info(
-								"[ORG native] graph present: a present on thread {}, which does not own rendering (a loading screen or the "
-								"logo), copies the current version on the old path; the version stays current (logged once)",
-								::GetCurrentThreadId());
-					}
-				}
-				// The copy goes through the external client, which takes the back buffer's layout from the ledger.
-				if (const auto ledger = LedgerResourceOf(*source)) {
-					const HRESULT result = PresentThroughLedger(*ledger, source, slot, target, a_syncInterval, false);
-					if (result != E_PENDING)
-						return result;
-				}
-				// Before the graph is up nothing moved the back buffer out of Common, and the queue orders this copy after the frame's writes.
-				const rhi::ResourceHandle sourceImage = source->resource->GetHandle();
-				const uint32_t copyWidth = (std::min)(source->shape.width, width), copyHeight = (std::min)(source->shape.height, height);
-				std::array<rhi::TextureBarrier, 2> before{};
-				before[0].texture = sourceImage;
-				before[0].beforeSync = rhi::ResourceSyncState::All;
-				before[0].afterSync = rhi::ResourceSyncState::Copy;
-				before[0].beforeAccess = rhi::ResourceAccessType::Common;
-				before[0].afterAccess = rhi::ResourceAccessType::CopySource;
-				before[0].beforeLayout = rhi::ResourceLayout::Common;
-				before[0].afterLayout = rhi::ResourceLayout::CopySource;
-				before[1].texture = target;
-				before[1].beforeSync = rhi::ResourceSyncState::None;
-				before[1].afterSync = rhi::ResourceSyncState::Copy;
-				before[1].beforeAccess = rhi::ResourceAccessType::None;
-				before[1].afterAccess = rhi::ResourceAccessType::CopyDest;
-				before[1].beforeLayout = rhi::ResourceLayout::Undefined;
-				before[1].afterLayout = rhi::ResourceLayout::CopyDest;
-				before[1].discard = true;
-				list->Barriers({ { before.data(), static_cast<uint32_t>(before.size()) }, {}, {} });
-				rhi::TextureCopyRegion to{};
-				to.texture = target;
-				to.width = copyWidth;
-				to.height = copyHeight;
-				rhi::TextureCopyRegion from{};
-				from.texture = sourceImage;
-				from.width = copyWidth;
-				from.height = copyHeight;
-				list->CopyTextureRegion(to, from);
-				std::array<rhi::TextureBarrier, 2> after = before;
-				after[0].beforeSync = rhi::ResourceSyncState::Copy;
-				after[0].afterSync = rhi::ResourceSyncState::All;
-				after[0].beforeAccess = rhi::ResourceAccessType::CopySource;
-				after[0].afterAccess = rhi::ResourceAccessType::Common;
-				after[0].beforeLayout = rhi::ResourceLayout::CopySource;
-				after[0].afterLayout = rhi::ResourceLayout::Common;
-				after[1].beforeSync = rhi::ResourceSyncState::Copy;
-				after[1].afterSync = rhi::ResourceSyncState::None;
-				after[1].beforeAccess = rhi::ResourceAccessType::CopyDest;
-				after[1].afterAccess = rhi::ResourceAccessType::Present;
-				after[1].beforeLayout = rhi::ResourceLayout::CopyDest;
-				after[1].afterLayout = rhi::ResourceLayout::Present;
-				after[1].discard = false;
-				list->Barriers({ { after.data(), static_cast<uint32_t>(after.size()) }, {}, {} });
-				list->End();
-
-				rhi::CommandList submitted[] = { list.Get() };
-				const rhi::TimelinePoint signal{ presentTimeline->GetHandle(), ++presentValue };
-				rhi::SubmitDesc submit{};
-				submit.signals = { &signal, 1 };
-				if (graphics.Submit({ submitted, 1 }, submit) != rhi::Result::Ok) {
-					--presentValue;
-					lost = true;
-					logger::error("[ORG native] the present's copy could not be submitted; nothing more is shown");
-					return S_OK;
-				}
-				slotValues[slot] = presentValue;
-				return FinishPresent(signal, a_syncInterval, source);
+				// The slot is the graph's, so the copy always goes through the ledger. A refusal has no other path.
+				return PresentThroughLedger(*a_source.graph, a_source.graph, a_source.width, a_source.height, slot, target, a_syncInterval);
 			}
 
 			/**
 			 * @brief The present's copy through ORG's external client, which moves the back buffer out of wherever the frame left it.
-			 * The swap chain image is not the graph's, so its barriers are recorded here. Returns E_PENDING when the client refused.
+			 * The swap chain image is not the graph's, so its barriers are recorded here. A client that cannot submit is fatal.
 			 */
-			HRESULT PresentThroughLedger(org::Resource& a_backBuffer, const std::shared_ptr<NativeResource>& a_record, uint32_t a_slot,
-				rhi::ResourceHandle a_target, UINT a_syncInterval, bool a_tail, bool a_nextVersion = true)
+			HRESULT PresentThroughLedger(org::Resource& a_backBuffer, std::shared_ptr<const void> a_keepAlive, uint32_t a_width, uint32_t a_height,
+				uint32_t a_slot, rhi::ResourceHandle a_target, UINT a_syncInterval)
 			{
 				const auto source = a_backBuffer.GetAPIResource().GetHandle();
-				// A mode change can remake the swap chain alone, so copy the smaller size.
-				const uint32_t copyWidth = (std::min)(a_record->shape.width, width), copyHeight = (std::min)(a_record->shape.height, height);
+				// A mode change can remake the swap chain alone, and a resize lands before kFRAMEBUFFER's version, so copy the smaller size.
+				const uint32_t copyWidth = (std::min)(a_width, swapWidth), copyHeight = (std::min)(a_height, swapHeight);
 				const std::array accesses{ ::RenderGraph::ExternalWork::CopySource(a_backBuffer) };
 				const rhi::TimelinePoint signal{ presentTimeline->GetHandle(), presentValue + 1 };
 				const bool submitted = ::RenderGraph::ExternalWork::Submit(
-					a_tail ? "native present tail" : "native present copy", accesses,
+					"native present copy", accesses,
 					[&](rhi::CommandList& a_list) {
+						BeginPresentTimer(a_list, a_slot);
 						rhi::TextureBarrier before{};
 						before.texture = a_target;
 						before.beforeSync = rhi::ResourceSyncState::None;
@@ -2264,7 +2158,9 @@ namespace RenderGraph::Engine::Native
 						from.texture = source;
 						from.width = copyWidth;
 						from.height = copyHeight;
-						a_list.CopyTextureRegion(to, from);
+						if (!SkipPresentCopy())
+							a_list.CopyTextureRegion(to, from);
+						EndPresentTimer(a_list, a_slot);
 						rhi::TextureBarrier after = before;
 						after.beforeSync = rhi::ResourceSyncState::Copy;
 						after.afterSync = rhi::ResourceSyncState::None;
@@ -2275,40 +2171,36 @@ namespace RenderGraph::Engine::Native
 						after.discard = false;
 						a_list.Barriers({ { &after, 1 }, {}, {} });
 					},
-					a_record, { &signal, 1 });
+					std::move(a_keepAlive), { &signal, 1 });
+				// The client shut down at the window's close: nothing is shown any more.
 				if (!submitted)
-					return E_PENDING;
+					return S_OK;
 				slotValues[a_slot] = ++presentValue;
-				const HRESULT result = FinishPresent(signal, a_syncInterval, a_record);
-				if (a_tail && a_nextVersion) {
-					// After the present, so its probe read the version this frame drew.
-					++graph.tails;
-					NextGraphVersion();
-				}
-				return result;
+				presentTimer.pending[a_slot] = static_cast<bool>(presentTimer.pool);
+				return FinishPresent(signal, a_syncInterval);
 			}
 
-			/** @brief Runs the probe and the present after the copy was submitted. */
-			HRESULT FinishPresent(const rhi::TimelinePoint& a_signal, UINT a_syncInterval, const std::shared_ptr<NativeResource>& a_source)
+			/** @brief Runs the present after the copy was submitted. */
+			HRESULT FinishPresent(const rhi::TimelinePoint& a_signal, UINT a_syncInterval)
 			{
-				static const bool probeEnabled = Switches::On("CS_ORG_NATIVE_PRESENT_PROBE");
 				// Diagnostic. Each present waits for the GPU, which tells a cross-frame memory reuse race from a GPU ordering bug.
 				static const bool syncPresent = Switches::On("CS_ORG_NATIVE_SYNC_PRESENT");
 				if (syncPresent)
 					(void)Rhi().WaitIdle();
 				++presents;
-				if (probeEnabled)
-					RecordProbe(a_source);
 				if (presents % 600 == 0)
 					::RenderGraph::RawAccess::Summary();
 
 				rhi::PresentSyncDesc sync{};
 				sync.queue = graphics;
 				sync.wait = a_signal;
+				// A presentation layer keeps the vsync it was made with. A change is a replacement (the frame generation controller asks
+				// for it), never a recreate inside the present, which would skip the replacement's torn-down step.
+				const bool vsync = layerVsync.value_or(a_syncInterval > 0);
 				rhi::Result presented;
 				{
 					ZoneScopedN("CS.Native.SwapchainPresent");
-					presented = swapchain->Present(a_syncInterval > 0, sync);
+					presented = swapchain->Present(vsync, sync);
 				}
 				if (presents == 1)
 					Stage("first present", fmt::format("{}x{}, result {}", width, height, static_cast<int>(presented)));
@@ -2327,83 +2219,6 @@ namespace RenderGraph::Engine::Native
 						resizeRequested = true;
 				}
 				return S_OK;
-			}
-
-			/** @brief About once a second, copies the presented back buffer into the probe's staging texture. */
-			void RecordProbe(const std::shared_ptr<NativeResource>& a_source)
-			{
-				const auto now = std::chrono::steady_clock::now();
-				if (probe.value || !a_source || now - probe.last < std::chrono::seconds(1))
-					return;
-				probe.last = now;
-				if (!probe.staging || probe.staging->shape.width != width || probe.staging->shape.height != height) {
-					TextureRequest request;
-					request.width = width;
-					request.height = height;
-					request.format = format;
-					request.usage = D3D11_USAGE_STAGING;
-					request.cpuAccess = D3D11_CPU_ACCESS_READ;
-					request.name = "Native::PresentProbe";
-					probe.staging.reset();
-					if (FAILED(MakeStaging(request, false, probe.staging)) || !probe.staging)
-						return;
-				}
-				const auto source = a_source;
-				const auto staging = probe.staging;
-				bool recorded = false;
-				probe.value = CopyRhi("present probe", staging, source, false, 0, 0, 0, 0, 0, nullptr, recorded, nullptr);
-				if (!recorded) {
-					probe.value = 0;
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::warn("[ORG native] present probe: the context could not copy the back buffer into staging memory (logged once)");
-				}
-			}
-
-			/** @brief Logs the back buffer's mean colour and how much is not black, once the probe's copy is done. */
-			void ReadProbe()
-			{
-				if (!probe.value || !immediate.Done(probe.value) || !probe.staging)
-					return;
-				probe.value = 0;
-				void* mapped = nullptr;
-				probe.staging->resource->Map(&mapped);
-				if (!mapped)
-					return;
-				const auto& entry = probe.staging->layout[0];
-				const auto* bytes = static_cast<const uint8_t*>(mapped) + entry.offset;
-				const bool packed10 = format == DXGI_FORMAT_R10G10B10A2_UNORM;
-				const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM;
-				double sum[3]{};
-				uint64_t lit = 0, pixels = 0;
-				const uint32_t probeWidth = probe.staging->shape.width, probeHeight = probe.staging->shape.height;
-				for (uint32_t y = 0; y < probeHeight; y += 2) {
-					const auto* row = reinterpret_cast<const uint32_t*>(bytes + uint64_t(y) * entry.rowPitch);
-					for (uint32_t x = 0; x < probeWidth; x += 2) {
-						const uint32_t texel = row[x];
-						double r, g, b;
-						if (packed10) {
-							r = (texel & 0x3FF) / 1023.0;
-							g = ((texel >> 10) & 0x3FF) / 1023.0;
-							b = ((texel >> 20) & 0x3FF) / 1023.0;
-						} else {
-							const double c0 = (texel & 0xFF) / 255.0, c2 = ((texel >> 16) & 0xFF) / 255.0;
-							r = bgra ? c2 : c0;
-							g = ((texel >> 8) & 0xFF) / 255.0;
-							b = bgra ? c0 : c2;
-						}
-						sum[0] += r;
-						sum[1] += g;
-						sum[2] += b;
-						lit += (r + g + b) > 0.0 ? 1 : 0;
-						++pixels;
-					}
-				}
-				probe.staging->resource->Unmap(0, 0);
-				if (!pixels)
-					return;
-				logger::info("[ORG native] present probe after {} presents: back buffer {}x{} (DXGI format {}), mean RGB {:.4f} {:.4f} {:.4f}, {:.1f}% of pixels not black",
-					presents, probeWidth, probeHeight, static_cast<int>(format), sum[0] / pixels, sum[1] / pixels, sum[2] / pixels, 100.0 * double(lit) / double(pixels));
 			}
 
 			void FillDesc(DXGI_SWAP_CHAIN_DESC& a_out) const
@@ -2514,6 +2329,8 @@ namespace RenderGraph::Engine::Native
 			{
 				if (!g_device)
 					return E_FAIL;
+				// A presentation replacement on the submission thread swaps the swap chain under presentLock.
+				std::lock_guard guard(g_device->presentLock);
 				g_device->frameLatency = a_frames ? a_frames : 3;
 				(void)g_device->swapchain->SetMaximumFrameLatency(g_device->frameLatency);
 				logger::info("[ORG native] the engine set the frame latency to {}", g_device->frameLatency);
@@ -2616,12 +2433,49 @@ namespace RenderGraph::Engine::Native
 			return g_device->backBuffer->QueryInterface(a_riid, a_out);
 		}
 
+		/** @brief Runs the presentation's leaving step (NativePresenter::SetTornDown sets it) on this thread. */
+		void RunPresentationLeaving()
+		{
+			std::function<void()> leaving;
+			{
+				std::lock_guard guard(g_device->presentationLock);
+				leaving = g_device->leaving;
+			}
+			if (leaving)
+				leaving();
+		}
+
+		/**
+		 * @brief The size the engine's last resize asked for, width in the low word, once the set owns the back buffer. Zero before.
+		 * The engine reads its size from GetBuffer's description, which is kFRAMEBUFFER's adopted one, so the set writes this instead.
+		 */
+		std::atomic<std::uint64_t> g_engineExtent{ 0 };
+
 		HRESULT SwapChainResizeBuffers(UINT a_count, UINT a_width, UINT a_height, DXGI_FORMAT a_format, UINT)
 		{
-			// A queued present uses the swap chain and back buffer, so let it finish before taking the lock.
-			RenderGraphRuntime::Get().DrainSubmissions("a swap chain resize", true);
-			std::lock_guard guard(g_device->presentLock);
-			return g_device->Resize(a_count, a_width, a_height, a_format == DXGI_FORMAT_UNKNOWN ? DXGI_FORMAT_UNKNOWN : BackBufferFormat(a_format));
+			// The engine passes 0x0, which means the window's client area, as with DXGI.
+			UINT wantedWidth = a_width, wantedHeight = a_height;
+			if (!wantedWidth || !wantedHeight) {
+				RECT client{};
+				::GetClientRect(g_device->window, &client);
+				wantedWidth = (std::max)(static_cast<UINT>(client.right - client.left), 1u);
+				wantedHeight = (std::max)(static_cast<UINT>(client.bottom - client.top), 1u);
+			}
+			RunPresentationLeaving();
+			// The render thread only takes the new size. The submission thread resizes the swap chain after the queued presents.
+			NativeState::ResizeRequest request;
+			HRESULT result;
+			{
+				std::lock_guard guard(g_device->presentLock);
+				result = g_device->Resize(a_count, a_width, a_height, a_format == DXGI_FORMAT_UNKNOWN ? DXGI_FORMAT_UNKNOWN : BackBufferFormat(a_format), request);
+			}
+			if (SUCCEEDED(result)) {
+				g_device->QueueSwapchainResize(request);
+				// The engine's size state follows the request; the swap chain follows on the submission thread.
+				if (g_device->setAdopted)
+					g_engineExtent.store(std::uint64_t(wantedWidth) | (std::uint64_t(wantedHeight) << 32), std::memory_order_release);
+			}
+			return result;
 		}
 
 		HRESULT SwapChainGetDesc(DXGI_SWAP_CHAIN_DESC* a_out)
@@ -2752,9 +2606,7 @@ namespace RenderGraph::Engine::Native
 				auto& registry = GetRegistry();
 				std::lock_guard guard(registry.lock);
 				if (registry.live.contains(owner.get())) {
-					auto record = std::const_pointer_cast<NativeResource>(std::static_pointer_cast<const NativeResource>(owner));
-					// The back buffer under graph present resolves to its current version.
-					return record->renamed ? record->renamed : record;
+					return std::const_pointer_cast<NativeResource>(std::static_pointer_cast<const NativeResource>(owner));
 				}
 			}
 			// A port's handle around a native one.
@@ -2762,77 +2614,38 @@ namespace RenderGraph::Engine::Native
 			return wrapped && wrapped != a_object && Tripwire::IsHandle(wrapped) ? Resolve(wrapped) : nullptr;
 		}
 
-		/** @brief A census name. The handle's debug name, else the record's own. */
-		std::string CensusName(const NativeResource& a_record, const void* a_resource, ID3D11View* a_view)
+		/** @brief Marks a_record written since it was made, for the undeclared-access check's exemptions. Any thread. */
+		void MarkWritten(NativeResource& a_record)
 		{
-			winrt::com_ptr<ID3D11Resource> viewed;
-			if (a_view) {
-				// A native view keeps its resource, so this makes no tripwire call.
-				a_view->GetResource(viewed.put());
-				a_resource = viewed.get();
-			}
-			auto name = a_resource ? Tripwire::Describe(a_resource).name : std::string();
-			return name.empty() ? a_record.name : name;
-		}
-
-		/** @brief Records one immediate operation for the censuses. Call only when OpCensus::Flags() is non-zero. */
-		void NoteOp(OpCensus::Op a_op, NativeResource& a_record, const void* a_resource, ID3D11View* a_view = nullptr)
-		{
-			if (OpCensus::IsWrite(a_op))
-				a_record.written.store(true, std::memory_order_relaxed);
-			if (!(OpCensus::Flags() & (OpCensus::kOps | OpCensus::kWrites)))
-				return;
-			const std::string name = CensusName(a_record, a_resource, a_view);
-			OpCensus::Record(a_op, { a_record.serial, name, a_record.bindFlags, static_cast<uint32_t>(a_record.d3dUsage), static_cast<uint32_t>(a_record.dimension),
-									   a_record.initialData });
-		}
-
-		/** @brief Counts an operation that a graph pass or the external client took. A write still marks its resource. */
-		void NoteRouted(OpCensus::Op a_op, NativeResource& a_record, OpCensus::Route a_route)
-		{
-			if (!OpCensus::Flags())
-				return;
-			if (OpCensus::IsWrite(a_op))
-				a_record.written.store(true, std::memory_order_relaxed);
-			OpCensus::RecordRouted(a_op, a_route);
+			a_record.written.store(true, std::memory_order_relaxed);
 		}
 
 		/**
-		 * @brief Counts an operation on untracked resources outside every graph pass. While the graph is active the first 64 per
-		 * operation and resource are logged, showing what still takes this path.
+		 * @brief An operation on untracked resources outside every graph pass while the graph is active: no graph pass or graph
+		 * resource orders it. Logged once per operation and resource. Loading-screen uploads and some feature clears still run this
+		 * way, so it is not a tap error yet.
 		 */
-		void NoteRaw(OpCensus::Op a_op, const NativeResource& a_record)
+		void NoteRaw(const char* a_operation, const NativeResource& a_record)
 		{
 			if (!RenderGraphRuntime::Get().IsActive())
 				return;
-			static std::mutex lock;
-			static std::unordered_set<std::uint64_t> logged;
-			constexpr std::size_t kMaxLines = 64;
-			std::lock_guard guard(lock);
-			if (logged.size() > kMaxLines)
-				return;
-			if (!logged.insert(a_record.serial * static_cast<std::uint64_t>(OpCensus::Op::Count) + static_cast<std::uint64_t>(a_op)).second)
-				return;
-			if (logged.size() > kMaxLines) {
-				logger::info("[ORG native] more operations take the immediate context's own path; only the first {} are logged", kMaxLines);
-				return;
+			static std::mutex s_mutex;
+			static std::set<std::string> s_logged;
+			auto key = fmt::format("{} on \"{}\"", a_operation, a_record.name);
+			{
+				std::scoped_lock lock(s_mutex);
+				if (!s_logged.insert(key).second)
+					return;
 			}
-			logger::info(
-				"[ORG native] {} on \"{}\" runs outside the ledgers (no graph pass or graph resource orders it; logged once per "
-				"operation and resource)",
-				OpCensus::Name(a_op), a_record.name);
+			logger::info("[ORG native] {} runs outside the ledgers (no graph pass or graph resource orders it; logged once per operation and resource)", key);
 		}
 
-		/** @brief Counts an operation RunOp ran, through the ledgers or on untracked resources. */
-		void NoteRun(OpCensus::Op a_op, NativeResource& a_record, const void* a_resource, ID3D11View* a_view, bool a_routed)
+		/** @brief After a write RunOp ran: it marks its resource, and work nothing routed is outside the ledgers. */
+		void NoteRun(const char* a_operation, NativeResource& a_record, bool a_routed)
 		{
-			if (a_routed) {
-				NoteRouted(a_op, a_record, OpCensus::Route::ExternalWork);
-				return;
-			}
-			if (OpCensus::Flags())
-				NoteOp(a_op, a_record, a_resource, a_view);
-			NoteRaw(a_op, a_record);
+			MarkWritten(a_record);
+			if (!a_routed)
+				NoteRaw(a_operation, a_record);
 		}
 
 		/**
@@ -2843,18 +2656,12 @@ namespace RenderGraph::Engine::Native
 		{
 			if (a_record.kind != NativeResource::Kind::Image)
 				return nullptr;
-			if (a_record.ownership == NativeResource::Ownership::Tracked)
-				return a_record.graphOwned;
-			if (a_record.ownership == NativeResource::Ownership::Host) {
-				auto graph = ::RenderGraph::GraphResourceOfImage(reinterpret_cast<std::uint64_t>(a_record.image.image));
-				return graph && graph->IsRenderGraphManaged() ? graph : nullptr;
-			}
-			if (a_record.ownership != NativeResource::Ownership::Exempt || !a_record.promoted.load(std::memory_order_acquire))
+			// An exempt texture follows a ledger only once a write promoted it.
+			if (a_record.ownership == NativeResource::Ownership::Exempt && !a_record.promoted.load(std::memory_order_acquire))
 				return nullptr;
-			std::lock_guard guard(a_record.graphLock);
-			if (a_record.exemptResource && a_record.exemptResource->IsRenderGraphManaged())
-				return a_record.exemptResource;
-			return nullptr;
+			// The image's one graph resource: a tracked texture's own, a promoted exempt one's, or a host image's import.
+			const auto entry = ::RenderGraph::ImageRegistry::Find(reinterpret_cast<std::uint64_t>(a_record.image.image));
+			return entry && entry->resource->IsRenderGraphManaged() ? entry->resource : nullptr;
 		}
 
 		/**
@@ -2866,32 +2673,14 @@ namespace RenderGraph::Engine::Native
 			if (a_record.ownership != NativeResource::Ownership::Exempt || a_record.promoted.exchange(true, std::memory_order_acq_rel))
 				return;
 			std::shared_ptr<org::ExternalTextureResource> resource;
-			{
-				std::lock_guard guard(a_record.graphLock);
-				resource = a_record.exemptResource;
-			}
+			if (const auto entry = ::RenderGraph::ImageRegistry::Find(reinterpret_cast<std::uint64_t>(a_record.image.image)))
+				resource = std::dynamic_pointer_cast<org::ExternalTextureResource>(entry->resource);
 			logger::info("[ORG native] {}: an exempt texture written after creation; promoted to tracked{}", a_record.name,
 				resource ? ", graphs built again" : " (no graph read it yet)");
 			if (!resource)
 				return;
-			::RenderGraph::Builds::Change([resource] { resource->SetGraphOwnership(org::Resource::GraphOwnership::GraphManaged); },
+			::RenderGraph::Builds::Ask({ .change = [resource] { resource->SetGraphOwnership(org::Resource::GraphOwnership::GraphManaged); } },
 				fmt::format("native texture '{}' written after creation", a_record.name));
-		}
-
-		OpCensus::Op MapOp(D3D11_MAP a_type)
-		{
-			switch (a_type) {
-			case D3D11_MAP_READ:
-				return OpCensus::Op::MapRead;
-			case D3D11_MAP_READ_WRITE:
-				return OpCensus::Op::MapReadWrite;
-			case D3D11_MAP_WRITE_DISCARD:
-				return OpCensus::Op::MapWriteDiscard;
-			case D3D11_MAP_WRITE_NO_OVERWRITE:
-				return OpCensus::Op::MapWriteNoOverwrite;
-			default:
-				return OpCensus::Op::MapWrite;
-			}
 		}
 
 		/** @brief Logs once per operation that its object was not made by the native device. */
@@ -2900,17 +2689,6 @@ namespace RenderGraph::Engine::Native
 			if (!a_logged.test_and_set())
 				logger::warn("[ORG native] {} on \"{}\", which native mode did not make; nothing happens (logged once)", a_operation,
 					a_object ? Tripwire::Describe(a_object).name : std::string("null"));
-		}
-
-		/** @brief Refuses GPU work on an unbacked engine target. Fatal in development builds, skipped and logged once in release. */
-		bool RefuseUnbacked(const NativeResource& a_record, std::string_view a_operation)
-		{
-			if (a_record.kind != NativeResource::Kind::Unbacked)
-				return false;
-			::RenderGraph::Frame::Driver::NoteUnbackedUse(a_record.name,
-				fmt::format("{} on \"{}\", an engine target native mode keeps without memory (Frame/EngineTargetUse.cpp lists no user of it)",
-					a_operation, a_record.name));
-			return true;
 		}
 
 		VkExtent3D MipExtent(const Shape& a_shape, uint32_t a_mip)
@@ -3012,13 +2790,12 @@ namespace RenderGraph::Engine::Native
 		using OpRecord = std::function<void(rhi::CommandList&, const Immediate::Descriptors&, std::span<const rhi::Resource>)>;
 
 		/**
-		 * @brief Runs one context operation with BasicRHI commands, through Route once the graph is up and through RunRhi before.
-		 * Tracked uses go through the ledger, others move from Common and back. Returns 0 when nothing was submitted.
+		 * @brief Runs one context operation with BasicRHI commands through the external client. Uses with a graph resource go through
+		 * its ledger, others move from Common and back. Returns 0 only after the client's shutdown.
 		 */
 		uint64_t RunOp(const std::string& a_label, std::span<const Use> a_uses, const OpRecord& a_record, std::vector<std::shared_ptr<const void>> a_keep,
 			bool* a_routed = nullptr)
 		{
-			const bool graph = RenderGraphRuntime::Get().IsActive();
 			std::vector<rhi::Resource> handles;
 			std::vector<Use> moved;
 			std::vector<NativeResource*> used, untracked;
@@ -3034,7 +2811,7 @@ namespace RenderGraph::Engine::Native
 					continue;
 				}
 				note(used, use.record);
-				auto ledger = graph ? LedgerResourceOf(*use.record) : nullptr;
+				auto ledger = LedgerResourceOf(*use.record);
 				if (ledger) {
 					handles.push_back(ledger->GetAPIResource());
 					accesses.push_back({ ledger.get(), RangeOf(*use.record, use.range), { use.access, use.layout, use.sync } });
@@ -3052,9 +2829,11 @@ namespace RenderGraph::Engine::Native
 				a_record(a_list, a_descriptors, handles);
 				Transition(a_list, moved, true);
 			};
-			if (graph)
-				return g_device->immediate.Route(a_label, accesses, untracked, body, std::move(a_keep), used);
-			return g_device->immediate.RunRhi(a_label, body, std::move(a_keep), used);
+			Immediate::Work work;
+			work.accesses = accesses;
+			work.untracked = untracked;
+			work.used = used;
+			return g_device->immediate.Run(a_label, work, body, std::move(a_keep));
 		}
 
 		/** @brief A footprint extent, in whole blocks for block-compressed formats. */
@@ -3586,8 +3365,6 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "Map", a_resource);
 				return E_INVALIDARG;
 			}
-			if (RefuseUnbacked(*record, "Map"))
-				return E_INVALIDARG;
 			NativeResource* cpu = CpuSide(*record);
 			if (!cpu) {
 				static std::atomic_flag logged;
@@ -3597,8 +3374,8 @@ namespace RenderGraph::Engine::Native
 			}
 			if (cpu->kind == NativeResource::Kind::Staging && a_subresource >= cpu->layout.size())
 				return E_INVALIDARG;
-			if (OpCensus::Flags())
-				NoteOp(MapOp(a_type), *record, a_resource);
+			if (a_type != D3D11_MAP_READ)
+				MarkWritten(*record);
 			// A read waits for the GPU's writes and a write for its reads. NO_OVERWRITE promises not to touch what is in use.
 			// DYNAMIC buffers are not renamed.
 			if (a_type != D3D11_MAP_WRITE_NO_OVERWRITE) {
@@ -3647,7 +3424,7 @@ namespace RenderGraph::Engine::Native
 				const auto upload = record->upload;
 				bool recorded = false, routed = false;
 				CopyRhi("unmap (dynamic upload) " + image->name, image, upload, false, a_subresource, 0, 0, 0, a_subresource, nullptr, recorded, &routed);
-				NoteRun(OpCensus::Op::UnmapUpload, *image, a_resource, nullptr, routed);
+				NoteRun("Unmap (dynamic upload)", *image, routed);
 			}
 		}
 
@@ -3661,12 +3438,9 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "UpdateSubresource", a_resource);
 				return;
 			}
-			if (RefuseUnbacked(*record, "UpdateSubresource"))
-				return;
-			const auto op = record->kind == NativeResource::Kind::Buffer ? OpCensus::Op::UpdateBuffer : OpCensus::Op::UpdateTexture;
-			// Texture updates are counted where they run, in NoteRun.
-			if (OpCensus::Flags() && record->kind != NativeResource::Kind::Image)
-				NoteOp(op, *record, a_resource);
+			// Image updates are noted where they run, in NoteRun.
+			if (record->kind != NativeResource::Kind::Image)
+				MarkWritten(*record);
 			if (record->kind == NativeResource::Kind::Buffer) {
 				const uint64_t from = a_box ? a_box->left : 0;
 				const uint64_t size = a_box ? a_box->right - a_box->left : record->size;
@@ -3683,7 +3457,7 @@ namespace RenderGraph::Engine::Native
 					}
 					return;
 				}
-				NoteRaw(OpCensus::Op::UpdateBuffer, *record);
+				NoteRaw("UpdateSubresource (buffer)", *record);
 				auto upload = g_device->MakeUpload(size);
 				if (!upload)
 					return;
@@ -3775,7 +3549,7 @@ namespace RenderGraph::Engine::Native
 						a_list.CopyBufferToTexture(copy);
 					},
 					{ planes, record }, &routed);
-				NoteRun(op, *record, a_resource, nullptr, routed);
+				NoteRun("UpdateSubresource (texture)", *record, routed);
 				return;
 			}
 			auto upload = g_device->MakeUpload(uint64_t(rowPitch) * rows * extent.depth);
@@ -3804,7 +3578,7 @@ namespace RenderGraph::Engine::Native
 					a_list.CopyBufferToTexture(copy);
 				},
 				{ upload, record }, &routed);
-			NoteRun(op, *record, a_resource, nullptr, routed);
+			NoteRun("UpdateSubresource (texture)", *record, routed);
 		}
 
 		void ContextCopySubresourceRegion(ID3D11Resource* a_destination, UINT a_destinationSub, UINT a_x, UINT a_y, UINT a_z, ID3D11Resource* a_source,
@@ -3817,8 +3591,6 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "CopySubresourceRegion", destination ? static_cast<const void*>(a_source) : a_destination);
 				return;
 			}
-			if (RefuseUnbacked(*destination, "CopySubresourceRegion into") || RefuseUnbacked(*source, "CopySubresourceRegion from"))
-				return;
 			// D3D11's runtime drops a copy onto itself, and Vulkan copies must not overlap.
 			if (destination == source && a_destinationSub == a_sourceSub)
 				return;
@@ -3826,8 +3598,7 @@ namespace RenderGraph::Engine::Native
 			bool recorded = false, routed = false;
 			CopyRhi("copy region " + source->name + " to " + destination->name, destination, source, false, a_destinationSub, a_x, a_y, a_z, a_sourceSub, a_box, recorded,
 				&routed);
-			NoteRun(OpCensus::Op::CopyRegion, *destination, a_destination, nullptr, routed);
-			NoteRun(OpCensus::Op::CopyRegionSource, *source, a_source, nullptr, routed);
+			NoteRun("CopySubresourceRegion", *destination, routed);
 			if (!recorded) {
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
@@ -3844,16 +3615,13 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "CopyResource", destination ? static_cast<const void*>(a_source) : a_destination);
 				return;
 			}
-			if (RefuseUnbacked(*destination, "CopyResource into") || RefuseUnbacked(*source, "CopyResource from"))
-				return;
 			// D3D11's runtime drops a copy onto itself.
 			if (destination == source)
 				return;
 			NoteWrite(*destination);
 			// The skeleton's static copy pass takes this copy on the graph.
 			if (Skeleton::Sites::TakeContextCopy(a_destination, a_source)) {
-				NoteRouted(OpCensus::Op::Copy, *destination, OpCensus::Route::GraphPass);
-				NoteRouted(OpCensus::Op::CopySource, *source, OpCensus::Route::GraphPass);
+				MarkWritten(*destination);
 				return;
 			}
 			// Diagnostic for a main depth copy the skeleton did not take. Logged once.
@@ -3865,8 +3633,7 @@ namespace RenderGraph::Engine::Native
 			}
 			bool recorded = false, routed = false;
 			CopyRhi("copy " + source->name + " to " + destination->name, destination, source, true, 0, 0, 0, 0, 0, nullptr, recorded, &routed);
-			NoteRun(OpCensus::Op::Copy, *destination, a_destination, nullptr, routed);
-			NoteRun(OpCensus::Op::CopySource, *source, a_source, nullptr, routed);
+			NoteRun("CopyResource", *destination, routed);
 			if (!recorded) {
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
@@ -3925,7 +3692,7 @@ namespace RenderGraph::Engine::Native
 			}
 			const bool array = shape.layers > 1;
 			const auto& program = array ? g_device->mipsArray : g_device->mips2D;
-			if (!program || !program->compute) {
+			if (!program) {
 				static std::atomic_flag logged;
 				return refuse(logged, "the GenerateMips compute shader is not loaded");
 			}
@@ -3986,8 +3753,8 @@ namespace RenderGraph::Engine::Native
 					}
 					(void)g_device->Rhi().CreateUnorderedAccessView({ a_descriptors.uavShaderVisible.heap, first + mip }, scratchHandle, desc);
 				}
-				a_list.BindLayout(program->compute->layout->GetHandle());
-				a_list.BindPipeline(program->compute->Pipeline());
+				a_list.BindLayout(program->layout->GetHandle());
+				a_list.BindPipeline(program->CurrentPipeline());
 				for (uint32_t mip = 1; mip < mips; ++mip) {
 					// The previous dispatch wrote this one's source.
 					if (mip > 1)
@@ -4009,8 +3776,6 @@ namespace RenderGraph::Engine::Native
 		void ContextGenerateMips(ID3D11ShaderResourceView* a_view)
 		{
 			const auto record = Resolve(a_view);
-			if (record && RefuseUnbacked(*record, "GenerateMips"))
-				return;
 			if (!record || record->kind != NativeResource::Kind::Image) {
 				static std::atomic_flag logged;
 				Unknown(logged, "GenerateMips", a_view);
@@ -4022,7 +3787,7 @@ namespace RenderGraph::Engine::Native
 				return;
 			bool routed = false;
 			if (GenerateMipsRhi(record, routed))
-				NoteRun(OpCensus::Op::GenerateMips, *record, nullptr, a_view, routed);
+				NoteRun("GenerateMips", *record, routed);
 		}
 
 		/** @brief The image subresources an RTV, DSV or UAV covers. */
@@ -4064,11 +3829,6 @@ namespace RenderGraph::Engine::Native
 		void ContextClearRenderTargetView(ID3D11RenderTargetView* a_view, const FLOAT a_color[4])
 		{
 			const auto record = Resolve(a_view);
-			// Nothing reads what a dropped clear of an unbacked target would write.
-			if (record && record->kind == NativeResource::Kind::Unbacked && record->dropClears)
-				return;
-			if (record && RefuseUnbacked(*record, "ClearRenderTargetView"))
-				return;
 			if (!record || record->kind != NativeResource::Kind::Image || !a_color) {
 				static std::atomic_flag logged;
 				Unknown(logged, "ClearRenderTargetView", a_view);
@@ -4076,7 +3836,7 @@ namespace RenderGraph::Engine::Native
 			}
 			// The skeleton's static clear pass takes this clear on the graph.
 			if (Skeleton::Sites::TakeContextColourClear(a_view, a_color)) {
-				NoteRouted(OpCensus::Op::ClearRenderTarget, *record, OpCensus::Route::GraphPass);
+				MarkWritten(*record);
 				return;
 			}
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
@@ -4091,7 +3851,7 @@ namespace RenderGraph::Engine::Native
 					ClearImageRhi(a_list, a_descriptors, *record, a_handles[0].GetHandle(), range, color.data(), false, false, false, 0.0f, 0);
 				},
 				{ record }, &routed);
-			NoteRun(OpCensus::Op::ClearRenderTarget, *record, nullptr, a_view, routed);
+			NoteRun("ClearRenderTargetView", *record, routed);
 		}
 
 		/** @brief A buffer UAV's byte range. */
@@ -4121,9 +3881,6 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, a_operation, a_view);
 				return;
 			}
-			if (RefuseUnbacked(*record, a_operation))
-				return;
-			const auto op = a_float ? OpCensus::Op::ClearUavFloat : OpCensus::Op::ClearUavUint;
 			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
 			rhi::TextureSubresourceRange range{};
@@ -4140,7 +3897,7 @@ namespace RenderGraph::Engine::Native
 					ClearUnorderedRhi(a_list, a_descriptors, *record, a_handles[0], range, offset, size, a_value.uint32, a_float ? a_value.float32 : nullptr);
 				},
 				{ record }, &routed);
-			NoteRun(op, *record, nullptr, a_view, routed);
+			NoteRun(a_operation, *record, routed);
 		}
 
 		void ContextClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* a_view, const UINT a_values[4])
@@ -4164,8 +3921,6 @@ namespace RenderGraph::Engine::Native
 		void ContextClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
 		{
 			const auto record = Resolve(a_view);
-			if (record && RefuseUnbacked(*record, "ClearDepthStencilView"))
-				return;
 			if (!record || record->kind != NativeResource::Kind::Image) {
 				static std::atomic_flag logged;
 				Unknown(logged, "ClearDepthStencilView", a_view);
@@ -4173,7 +3928,7 @@ namespace RenderGraph::Engine::Native
 			}
 			// The skeleton's static clear pass takes this clear on the graph.
 			if (Skeleton::Sites::TakeContextDepthClear(a_view, a_flags, a_depth, a_stencil)) {
-				NoteRouted(OpCensus::Op::ClearDepthStencil, *record, OpCensus::Route::GraphPass);
+				MarkWritten(*record);
 				return;
 			}
 			VkImageAspectFlags aspects = 0;
@@ -4197,7 +3952,7 @@ namespace RenderGraph::Engine::Native
 					ClearImageRhi(a_list, a_descriptors, *record, a_handles[0].GetHandle(), rhiRange, nullptr, true, depth, stencil, a_depth, a_stencil);
 				},
 				{ record }, &routed);
-			NoteRun(OpCensus::Op::ClearDepthStencil, *record, nullptr, a_view, routed);
+			NoteRun("ClearDepthStencilView", *record, routed);
 		}
 
 		/** @brief The context's ID3DUserDefinedAnnotation. Native mode has no D3D11 capture tool, so it records nothing. */
@@ -4236,47 +3991,17 @@ namespace RenderGraph::Engine::Native
 
 		// ---- Queries ---------------------------------------------------------------------------------------------------------
 
-		/** @brief The context's submitted work at each query's End, keyed by the query handle. Entries are never removed. */
-		struct Queries
-		{
-			std::mutex lock;
-			std::unordered_map<const void*, uint64_t> ended;
-		};
-
-		Queries& GetQueries()
-		{
-			static Queries queries;
-			return queries;
-		}
-
-		void ContextEnd(ID3D11Asynchronous* a_query)
-		{
-			if (!a_query)
-				return;
-			auto& queries = GetQueries();
-			std::lock_guard guard(queries.lock);
-			queries.ended[a_query] = g_device->immediate.Submitted();
-		}
-
 		/**
-		 * @brief Answers a query once its work is done, S_FALSE before. Native mode measures nothing, so results are zero,
-		 * occlusion says hidden, and timestamps are marked disjoint so readers drop them.
+		 * @brief The engine's occlusion queries are detoured and measure nothing here. CS's own D3D11 timers still end queries at setup
+		 * and in menus; they get the answers below.
 		 */
+		void ContextEnd(ID3D11Asynchronous*) {}
+
+		/** @brief Answers at once with zeros, so a reader that polls never waits: occlusion says hidden, timestamps are disjoint. */
 		HRESULT ContextGetData(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT)
 		{
 			if (!a_query)
 				return E_INVALIDARG;
-			uint64_t ended = 0;
-			{
-				auto& queries = GetQueries();
-				std::lock_guard guard(queries.lock);
-				const auto found = queries.ended.find(a_query);
-				if (found == queries.ended.end())
-					return S_FALSE;  // never ended
-				ended = found->second;
-			}
-			if (!g_device->immediate.Done(ended))
-				return S_FALSE;
 			if (!a_data || !a_size)
 				return S_OK;
 			std::memset(a_data, 0, a_size);
@@ -4285,20 +4010,12 @@ namespace RenderGraph::Engine::Native
 				return S_OK;
 			D3D11_QUERY_DESC desc{};
 			query->GetDesc(&desc);
-			switch (desc.Query) {
-			case D3D11_QUERY_EVENT:
-				if (a_size >= sizeof(BOOL))
-					*static_cast<BOOL*>(a_data) = TRUE;
-				break;
-			case D3D11_QUERY_TIMESTAMP_DISJOINT:
-				if (a_size >= sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT)) {
-					auto* disjoint = static_cast<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT*>(a_data);
-					disjoint->Frequency = 1'000'000'000ull;
-					disjoint->Disjoint = TRUE;
-				}
-				break;
-			default:
-				break;  // occlusion, predicates, timestamps and statistics stay zero
+			if (desc.Query == D3D11_QUERY_TIMESTAMP_DISJOINT && a_size >= sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT)) {
+				auto* disjoint = static_cast<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT*>(a_data);
+				disjoint->Frequency = 1'000'000'000ull;
+				disjoint->Disjoint = TRUE;
+			} else if (desc.Query == D3D11_QUERY_EVENT && a_size >= sizeof(BOOL)) {
+				*static_cast<BOOL*>(a_data) = TRUE;
 			}
 			return S_OK;
 		}
@@ -4335,11 +4052,31 @@ namespace RenderGraph::Engine::Native
 		return g_device ? g_device->device : nullptr;
 	}
 
-	void OnGraphReady()
+	std::shared_ptr<org::VersionedTexture> BackBufferSlot()
+	{
+		return g_device ? g_device->backBufferSlot : nullptr;
+	}
+
+	void AdoptBackBufferSlot(const std::shared_ptr<org::VersionedTexture>& a_slot, winrt::com_ptr<ID3D11Texture2D> a_field)
 	{
 		if (!g_device)
 			return;
-		g_device->OnGraphReady();
+		g_device->AdoptBackBufferSlot(a_slot, std::move(a_field));
+	}
+
+	DXGI_FORMAT DeclaredBackBufferFormat()
+	{
+		return g_device ? g_device->format : DXGI_FORMAT_UNKNOWN;
+	}
+
+	bool EngineSwapChainExtent(std::uint32_t& a_width, std::uint32_t& a_height)
+	{
+		const std::uint64_t extent = g_engineExtent.load(std::memory_order_acquire);
+		if (!extent)
+			return false;
+		a_width = static_cast<std::uint32_t>(extent);
+		a_height = static_cast<std::uint32_t>(extent >> 32);
+		return true;
 	}
 
 	void OnShaderCompilerReady()
@@ -4351,6 +4088,11 @@ namespace RenderGraph::Engine::Native
 	bool OwnedResources()
 	{
 		return g_device != nullptr;
+	}
+
+	std::shared_ptr<org::Runtime> TakeOrgRuntime()
+	{
+		return g_device ? std::move(g_device->orgRuntime) : nullptr;
 	}
 
 	namespace
@@ -4369,30 +4111,6 @@ namespace RenderGraph::Engine::Native
 			}
 			return record && record->kind == NativeResource::Kind::Image ? record : nullptr;
 		}
-
-		std::shared_ptr<org::GloballyIndexedResource> TrackedOf(const std::shared_ptr<NativeResource>& a_record)
-		{
-			return a_record && a_record->ownership == NativeResource::Ownership::Tracked ? a_record->graphOwned : nullptr;
-		}
-	}
-
-	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOf(const IUnknown* a_object)
-	{
-		return g_device ? TrackedOf(ImageRecordOf(a_object)) : nullptr;
-	}
-
-	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t a_image)
-	{
-		if (!g_device || !a_image)
-			return nullptr;
-		std::shared_ptr<NativeResource> record;
-		{
-			auto& registry = GetRegistry();
-			std::lock_guard guard(registry.lock);
-			if (const auto found = registry.byImage.find(a_image); found != registry.byImage.end())
-				record = found->second->weak_from_this().lock();
-		}
-		return TrackedOf(record);
 	}
 
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown* a_texture, DXGI_FORMAT a_srvFormat)
@@ -4401,8 +4119,10 @@ namespace RenderGraph::Engine::Native
 		if (!record || record->ownership != NativeResource::Ownership::Exempt)
 			return nullptr;
 		std::lock_guard guard(record->graphLock);
-		if (record->exemptResource)
-			return record->exemptResource;
+		// Made on the first call, and found through the registry after it.
+		if (const auto entry = ::RenderGraph::ImageRegistry::Find(reinterpret_cast<std::uint64_t>(record->image.image)))
+			if (auto made = std::dynamic_pointer_cast<org::ExternalTextureResource>(entry->resource))
+				return made;
 		// No graph may read it before its transfer is done.
 		if (!g_device->immediate.Wait(record->readyValue)) {
 			logger::warn("[ORG native] {}: its transfer did not finish; not handed to the graph", record->name);
@@ -4444,9 +4164,9 @@ namespace RenderGraph::Engine::Native
 			logger::warn("[ORG native] {}: could not be made an exempt graph texture: {}", record->name, e.what());
 			return nullptr;
 		}
-		::RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(record->image.image), record->exemptResource, id);
 		// Registered so a read-only import returns this resource instead of importing the image again.
-		::RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(record->image.image), record->exemptResource, desc, id);
+		::RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(record->image.image),
+			{ record->exemptResource, nullptr, std::make_shared<const org::TextureDescription>(desc), "native", id, ::RenderGraph::ImageRegistry::Kind::Made });
 		return record->exemptResource;
 	}
 
@@ -4464,7 +4184,7 @@ namespace RenderGraph::Engine::Native
 		return record && record->ownership != NativeResource::Ownership::Exempt;
 	}
 
-	bool DescribeForCensus(const void* a_object, ResourceFacts& a_out)
+	bool DescribeFacts(const void* a_object, ResourceFacts& a_out)
 	{
 		auto record = a_object ? Resolve(a_object) : nullptr;
 		if (record && record->kind == NativeResource::Kind::Shell) {
@@ -4497,8 +4217,6 @@ namespace RenderGraph::Engine::Native
 
 		auto* state = new NativeState();
 		state->adapter.copy_from(a_adapter);
-		// Must run before the first context call.
-		OpCensus::Configure();
 		std::string reason;
 		if (!CreateBasicRhiDevice(a_adapter, state->device, reason))
 			Fail("the native device", reason);
@@ -4512,10 +4230,17 @@ namespace RenderGraph::Engine::Native
 			if (rhi::vulkan::ShareVulkanDevice(state->Rhi(), rhi::vulkan::QueueSubmissionHooks{ nullptr, &LockQueue, &UnlockQueue, nullptr }) != rhi::Result::Ok)
 				Fail("the native device", "BasicRHI could not take the queue lock hooks");
 		}
-		if (!state->commands.Init(state->Rhi()))
-			Fail("the native device", "the command lists or timeline for commands outside the graph could not be made");
+		// ORG's runtime and its external client, the one way to submit work outside the graphs, before the first context call.
+		try {
+			state->orgRuntime = RenderGraphRuntime::CreateOrgRuntime(*state->device);
+		} catch (const std::exception& e) {
+			Fail("the native device", fmt::format("ORG's runtime could not be made on it: {}", e.what()));
+		}
+		if (!state->orgRuntime)
+			Fail("the native device", "ORG's runtime could not be made on it");
+		::RenderGraph::ExternalWork::Start(state->orgRuntime, state->Rhi());
 		if (!state->immediate.Init(state->Rhi()))
-			Fail("the native device", "the context's command lists, timeline or descriptor heaps could not be made");
+			Fail("the native device", "the context's timeline or descriptor heaps could not be made");
 
 		// Native mode never takes exclusive fullscreen.
 		state->window = a_desc->OutputWindow;
@@ -4530,14 +4255,26 @@ namespace RenderGraph::Engine::Native
 			state->width = (std::max)(static_cast<uint32_t>(client.right - client.left), 1u);
 			state->height = (std::max)(static_cast<uint32_t>(client.bottom - client.top), 1u);
 		}
-		if (state->Rhi().CreateSwapchain(state->window, state->width, state->height, state->swapchainFormat, state->bufferCount, true, state->swapchain) !=
-				rhi::Result::Ok ||
-			!state->swapchain)
+		state->swapBufferCount = state->bufferCount;
+		state->swapWidth = state->width;
+		state->swapHeight = state->height;
+		rhi::SwapchainDesc swapchainDesc{};
+		swapchainDesc.hwnd = state->window;
+		swapchainDesc.width = state->width;
+		swapchainDesc.height = state->height;
+		swapchainDesc.format = state->swapchainFormat;
+		swapchainDesc.bufferCount = state->bufferCount;
+		swapchainDesc.allowTearing = true;
+		// DLSS-G attaches to every swap chain made while it is loaded, and this one has no presentation layer.
+		Streamline::GetSingleton()->UnloadDLSSGBeforeFirstSwapchain();
+		if (state->Rhi().CreateSwapchain(swapchainDesc, state->swapchain) != rhi::Result::Ok || !state->swapchain)
 			Fail("the native swap chain", "BasicRHI could not create a swap chain on the game's window");
 		// HDR Display switches the colour space later.
 		(void)ConfigureSwapchain(state->swapchain.Get(), { .hdr = false, .maximumFrameLatency = state->frameLatency });
+		state->PublishPresentation(0, false);
+		state->framePresentation = state->adoptedPresentation;
 		if (!state->MakePresentObjects())
-			Fail("the native swap chain", "the present's command lists or timeline could not be made");
+			Fail("the native swap chain", "the present's timeline could not be made");
 		g_device = state;
 		if (!state->MakeBackBuffer())
 			Fail("the native back buffer", "BasicRHI could not make it (see the [ORG native] line above)");
@@ -4597,6 +4334,14 @@ namespace RenderGraph::Engine::Native
 
 	bool DescribeResource(const IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info)
 	{
+		// An engine target the set keeps without memory is a tripwire unbacked handle, as in guest mode. No graph may import one.
+		if (Tripwire::IsUnbacked(a_object)) {
+			const auto name = Tripwire::Describe(a_object).name;
+			::RenderGraph::Frame::Driver::NoteUnbackedUse(name,
+				fmt::format("an import (DescribeResource) of \"{}\", an engine target the set keeps without memory (Engine/Targets/EngineTargetSet.cpp lists no user of it)",
+					name));
+			return false;
+		}
 		const auto record = Resolve(a_object);
 		if (!record)
 			return false;
@@ -4609,8 +4354,6 @@ namespace RenderGraph::Engine::Native
 			}
 			return window && DescribeResource(window.get(), a_info);
 		}
-		if (RefuseUnbacked(*record, "an import (DescribeResource)"))
-			return false;
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
 		if (record->kind == NativeResource::Kind::Buffer) {
@@ -4660,14 +4403,40 @@ namespace RenderGraph::Engine::Native
 	bool EmitCommands(void (*a_record)(void*, rhi::CommandList&), void* a_user, const rhi::TimelinePoint* a_waits, std::uint32_t a_waitCount,
 		const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, const char* a_label)
 	{
-		return g_device && g_device->commands.Run(a_record, a_user, { a_waits, a_waitCount }, { a_signals, a_signalCount }, a_label);
+		if (!g_device)
+			return false;
+		const std::string label = a_label ? a_label : "CS native commands";
+		Immediate::Work work;
+		work.waits = { a_waits, a_waitCount };
+		work.signals = { a_signals, a_signalCount };
+		// a_record starts with nothing bound.
+		work.bindHeaps = false;
+		// Full barriers make every access before and after visible, as DXVK's stream would.
+		const auto record = [&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+			auto full = rhi::FullMemoryBarrier();
+			rhi::BarrierBatch barriers{};
+			barriers.globals = { &full, 1u };
+			a_list.Barriers(barriers);
+			if (a_record)
+				a_record(a_user, a_list);
+			a_list.Barriers(barriers);
+		};
+		// a_record runs exactly once on true and never on false.
+		return g_device->immediate.Run(label, work, record, {}) != 0;
 	}
 
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
-		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data)
+		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data, WrapFlags a_flags)
 	{
 		if (!g_device)
 			return nullptr;
+		const bool deferred = a_flags == WrapFlags::DeferInitialize;
+		// Deferred contents come from the version's birth on the graph, so there is nothing to upload here.
+		if (deferred && a_data) {
+			static std::atomic<bool> logged = false;
+			LogOnce(logged, a_name ? a_name : "Native::Wrapped", "a deferred wrap was given initial data, which it cannot upload");
+			return nullptr;
+		}
 		const auto dimension = static_cast<D3D11_RESOURCE_DIMENSION>(a_wrap.dimension);
 		TextureRequest request{ dimension, a_wrap.width, a_wrap.height, (std::max)(a_wrap.depthOrArraySize, 1u), (std::max)(a_wrap.mipLevels, 1u),
 			(std::max)(a_wrap.sampleCount, 1u), static_cast<DXGI_FORMAT>(a_wrap.format), D3D11_USAGE_DEFAULT, a_wrap.bindFlags, 0, a_wrap.miscFlags, a_data,
@@ -4685,13 +4454,13 @@ namespace RenderGraph::Engine::Native
 			LogOnce(loggedDescribe, request.name, "BasicRHI did not describe the image to wrap");
 			return nullptr;
 		}
-		// Zeroed when there is no data, as DXVK's wrap does.
-		if (!g_device->Initialize(a_image.GetHandle(), request, format, request.mipLevels, layers, depth)) {
+		// Zeroed when there is no data, as DXVK's wrap does. A deferred wrap leaves both to the graph (WrapFlags::DeferInitialize).
+		if (!deferred && !g_device->Initialize(a_image.GetHandle(), request, format, request.mipLevels, layers, depth)) {
 			LogOnce(loggedInitialize, request.name, "the image to wrap could not be moved into GENERAL or given its contents");
 			return nullptr;
 		}
 		// Block-compressed images cannot be cleared, so they stay as made. Their owners write them before reading.
-		if (!a_data && !record->shape.blocks) {
+		if (!deferred && !a_data && !record->shape.blocks) {
 			const bool renderTarget = (request.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
 			const bool depthStencil = (request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
 			const bool unordered = (request.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
@@ -4839,87 +4608,6 @@ namespace RenderGraph::Engine::Native
 		return true;
 	}
 
-	namespace
-	{
-		std::shared_ptr<NativeResource> MakeUnbackedRecord(const char* a_name, D3D11_RESOURCE_DIMENSION a_dimension, UINT a_bindFlags, bool a_dropClears)
-		{
-			auto record = std::make_shared<NativeResource>();
-			record->kind = NativeResource::Kind::Unbacked;
-			record->name = a_name ? a_name : "Native::Unbacked";
-			record->dimension = a_dimension;
-			record->bindFlags = a_bindFlags;
-			record->dropClears = a_dropClears;
-			return record;
-		}
-	}
-
-	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_dropClears)
-	{
-		if (!g_device)
-			return nullptr;
-		D3D11_TEXTURE2D_DESC desc = a_desc;
-		if (!desc.MipLevels)
-			desc.MipLevels = FullMipCount(desc.Width, desc.Height, 1);
-		Tripwire::Options options;
-		options.name = a_name ? a_name : "Native::Unbacked";
-		options.owner = MakeUnbackedRecord(a_name, D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.BindFlags, a_dropClears);
-		return Tripwire::CreateTexture2D(desc, std::move(options));
-	}
-
-	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, const char* a_name)
-	{
-		if (!g_device)
-			return nullptr;
-		D3D11_TEXTURE3D_DESC desc = a_desc;
-		if (!desc.MipLevels)
-			desc.MipLevels = FullMipCount(desc.Width, desc.Height, desc.Depth);
-		Tripwire::Options options;
-		options.name = a_name ? a_name : "Native::Unbacked";
-		options.owner = MakeUnbackedRecord(a_name, D3D11_RESOURCE_DIMENSION_TEXTURE3D, desc.BindFlags, false);
-		return Tripwire::CreateTexture3D(desc, std::move(options));
-	}
-
-	FrameTransientScope::FrameTransientScope(const char* a_label)
-	{
-		// A nested scope adds to the outer group.
-		if (t_frameGroup || !g_device || !Frame::Transients::On())
-			return;
-		m_group = new FrameGroup{ a_label ? a_label : "frame transients", {}, {}, {} };
-		t_frameGroup = static_cast<FrameGroup*>(m_group);
-	}
-
-	FrameTransientScope::~FrameTransientScope()
-	{
-		if (!m_group)
-			return;
-		std::unique_ptr<FrameGroup> group(static_cast<FrameGroup*>(m_group));
-		t_frameGroup = nullptr;
-		if (group->textures.empty())
-			return;
-		std::shared_ptr<const void> placement;
-		try {
-			placement = Frame::Transients::Place(group->label, group->textures);
-		} catch (const std::exception& e) {
-			logger::error("[ORG native] frame arena: {} could not be placed ({}); its textures get memory of their own", group->label, e.what());
-		}
-		if (!placement)
-			for (const auto& texture : group->textures)
-				texture->Materialize();
-		std::uint32_t made = 0;
-		for (const auto& finish : group->finish)
-			made += finish() ? 1 : 0;
-		for (const auto& record : group->records)
-			record->arenaPlacement = placement;
-		logger::info("[ORG native] frame arena: {} placed, {} of {} textures ({})", group->label, made, group->textures.size(),
-			placement ? "in the frame arena, span derived from the graphs that use them" : "memory of their own");
-	}
-
-	bool IsUnbacked(const void* a_object)
-	{
-		const auto record = a_object && g_device ? Resolve(a_object) : nullptr;
-		return record && record->kind == NativeResource::Kind::Unbacked;
-	}
-
 	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView* a_shell, void(__stdcall*)(std::uint64_t), void(__stdcall* a_gone)(std::uint64_t),
 		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t a_user)
 	{
@@ -4968,49 +4656,6 @@ namespace RenderGraph::Engine::Native
 		return g_device && g_device->graphics ? g_device->graphics.Progress() : rhi::QueueProgress{};
 	}
 
-	void PaceHeldPresent()
-	{
-		if (!g_device || !g_device->graphics)
-			return;
-		static std::deque<rhi::QueueProgress> frames;
-		const auto progress = g_device->graphics.Progress();
-		if (!progress.timeline || !progress.submitted)
-			return;
-		frames.push_back(progress);
-		while (frames.size() > g_device->frameLatency) {
-			auto oldest = frames.front();
-			frames.pop_front();
-			ZoneScopedN("CS.Native.HeldPresentPace");
-			(void)oldest.timeline.HostWait(oldest.submitted, 250);
-		}
-	}
-
-	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us)
-	{
-		a_waits = g_device ? g_device->presentPaceWaits.exchange(0, std::memory_order_relaxed) : 0;
-		a_us = g_device ? g_device->presentPaceUs.exchange(0, std::memory_order_relaxed) : 0;
-	}
-
-	bool SetSwapChainColorSpace(bool a_hdr)
-	{
-		if (!g_device || !g_device->swapchain)
-			return false;
-		// A queued present uses the swap chain, so let it finish before taking the lock.
-		RenderGraphRuntime::Get().DrainSubmissions("a swap chain colour space change", true);
-		std::lock_guard guard(g_device->presentLock);
-		const auto wanted = a_hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
-		if (g_device->swapchain->ColorSpace() == wanted)
-			return true;
-		// The swap chain images are remade, so queued copies into them must finish first.
-		g_device->WaitPresents();
-		const bool configured = ConfigureSwapchain(g_device->swapchain.Get(), { .hdr = a_hdr, .maximumFrameLatency = g_device->frameLatency });
-		const bool applied = g_device->swapchain->ColorSpace() == wanted;
-		logger::info("[ORG native] swap chain colour space: {} asked, {} now ({} images, DXGI format {} back buffer){}", a_hdr ? "HDR10 (PQ, Rec. 2020)" : "SDR",
-			g_device->swapchain->ColorSpace() == rhi::SwapchainColorSpace::Hdr10St2084 ? "HDR10" : "SDR", g_device->swapchain->ImageCount(),
-			static_cast<int>(g_device->format), configured ? "" : "; the swap chain refused it (see the [ORG] line above)");
-		return applied;
-	}
-
 	namespace
 	{
 		/** @brief Vulkan views for external commands, destroyed with their last owner once the GPU is past them. */
@@ -5035,7 +4680,7 @@ namespace RenderGraph::Engine::Native
 			a_infos.assign(a_handles.size(), {});
 			a_nativeList = nullptr;
 			const auto nameOf = [&](std::size_t a_index) { return a_index < a_names.size() ? a_names[a_index] : fmt::format("image {}", a_index); };
-#	if defined(CS_ORG_HAS_D3D12)
+#if defined(CS_ORG_HAS_D3D12)
 			if (d3d12) {
 				// Use rhi_interop.h's getters because that header's d3d12.h is not this file's.
 				rhi::D3D12CmdListInfo list{};
@@ -5055,7 +4700,7 @@ namespace RenderGraph::Engine::Native
 						desc.DepthOrArraySize, 0 };
 				}
 			}
-#	endif
+#endif
 			if (!d3d12) {
 				// Native mode's own device, or in guest mode the one over DXVK's VkDevice.
 				const VkDevice device = rhi::vulkan::get_device(RenderGraphRuntime::Get().Host()->Device());
@@ -5159,63 +4804,159 @@ namespace RenderGraph::Engine::Native
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-namespace RenderGraph::Engine::Native
+namespace FrameGen
 {
-	bool Active() { return false; }
-	std::shared_ptr<rhi::DevicePtr> Device() { return nullptr; }
-	void OnGraphReady() {}
-	void OnShaderCompilerReady() {}
-	HRESULT CreateDeviceAndSwapChain(IDXGIAdapter*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**, ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**)
+	namespace
 	{
-		Fail("this build", "it was built without OpenRenderGraph");
+		namespace NativeDevice = RenderGraph::Engine::Native;
+
+		/** @brief What the swap chain is now. Any thread. */
+		NativeDevice::PresentationState AdoptedPresentation(NativeDevice::NativeState& a_device)
+		{
+			std::lock_guard guard(a_device.presentationLock);
+			return a_device.adoptedPresentation;
+		}
 	}
-	bool DescribeResource(const IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
-	bool DescribeForCensus(const void*, ResourceFacts&) { return false; }
-	bool OwnedResources() { return false; }
-	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOf(const IUnknown*) { return nullptr; }
-	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown*, DXGI_FORMAT) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> PromotedTextureOf(const IUnknown*) { return nullptr; }
-	bool IsTrackedTexture(const IUnknown*) { return false; }
-	HRESULT Present(UINT, UINT) { return E_FAIL; }
-	bool EmitCommands(void (*)(void*, rhi::CommandList&), void*, const rhi::TimelinePoint*, std::uint32_t, const rhi::TimelinePoint*, std::uint32_t, const char*)
+
+	NativePresenter& NativePresenter::Get()
 	{
-		return false;
+		static NativePresenter presenter;
+		return presenter;
 	}
-	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource&, const DxvkOrgInteropTextureWrap&, DxvkOrgInteropResourceInfo&, const char*, const D3D11_SUBRESOURCE_DATA*)
+
+	bool NativePresenter::Available() const
 	{
-		return nullptr;
+		if (!NativeDevice::Active())
+			return false;
+		const auto* streamline = Streamline::GetSingleton();
+		return streamline->IsFSRFGSupported() || streamline->IsDLSSGSupported();
 	}
-	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource&, const D3D11_BUFFER_DESC&, const char*) { return nullptr; }
-	void Shutdown() {}
-	bool SetSwapChainColorSpace(bool) { return false; }
-	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
-	void PaceHeldPresent() {}
-	rhi::QueueProgress GraphicsProgress() { return {}; }
-	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo&) { return false; }
-	uint64_t AdapterLuid() { return 0; }
-	bool DescribeForCommands(rhi::CommandList&, std::span<const rhi::Resource>, void*&, std::vector<ExternalImageInfo>&, std::shared_ptr<const void>&, std::string& a_why)
+
+	SurfaceState NativePresenter::Surface() const
 	{
-		a_why = "this build has no render graph";
-		return false;
+		const auto* device = NativeDevice::g_device;
+		if (!device)
+			return {};
+		const auto& state = device->framePresentation;
+		SurfaceState surface;
+		surface.format = static_cast<rhi::Format>(state.format);
+		surface.hdr10 = state.hdr10;
+		surface.serial = state.serial;
+		// Ready while no replacement is in flight, so the frame's inputs match what it presents into. A revision asks for one at
+		// a frame's Begin and is adopted with its result.
+		surface.ready = state.serial == RequestedSerial();
+		return surface;
 	}
-	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device*, void (*)(void*, VkQueue_T*), void*) { return E_FAIL; }
-	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC&, ID3D11Texture2D**, ID3D11ShaderResourceView**) { return false; }
-	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC&, const char*, bool) { return nullptr; }
-	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC&, const char*) { return nullptr; }
-	bool IsUnbacked(const void*) { return false; }
-	FrameTransientScope::FrameTransientScope(const char*) {}
-	FrameTransientScope::~FrameTransientScope() {}
-	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView*, void(__stdcall*)(std::uint64_t), void(__stdcall*)(std::uint64_t),
-		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t)
+
+	void NativePresenter::Adopt(const PresentationConfig& a_config, const PresentationChange& a_change)
 	{
-		return E_NOTIMPL;
+		auto* device = NativeDevice::g_device;
+		if (!device)
+			return;
+		// Frames see a new presentation only with the revision made for it.
+		if (!a_change.atAdoption) {
+			if (::FrameAnchors::IsRenderOwner())
+				device->framePresentation = AdoptedPresentation(*device);
+			return;
+		}
+		// A colour space change asked for inside the adoption point: the submission thread replaces the swap chain after the presents
+		// queued so far, so earlier frames present into the old swap chain and the frames of the adopted revision into the new one.
+		RequestConfig(a_config, "the colour space, at the frame revision's adoption");
+		if (!::FrameAnchors::IsRenderOwner())
+			return;
+		auto state = AdoptedPresentation(*device);
+		// ReplacePresentation presents SDR when the output does not take HDR10.
+		const bool hdr10 = a_config.hdr && device->hdr10Supported.load(std::memory_order_relaxed);
+		state.serial = RequestedSerial();
+		state.hdr10 = hdr10;
+		state.format = static_cast<std::uint32_t>(hdr10 ? rhi::Format::R10G10B10A2_UNorm : device->swapchainFormat);
+		device->framePresentation = state;
 	}
-	void __stdcall StreamSetWindow(ID3D11ShaderResourceView*, ID3D11ShaderResourceView*) {}
-	ID3D11ShaderResourceView* __stdcall StreamGetWindow(ID3D11ShaderResourceView*) { return nullptr; }
-	std::uint64_t __stdcall StreamGetBinds(ID3D11ShaderResourceView*) { return 0; }
+
+	void NativePresenter::RequestConfig(const PresentationConfig& a_config, const char* a_reason)
+	{
+		logger::info("[FrameGen] native presentation requested ({})", a_reason ? a_reason : "no reason given");
+		if (!NativeDevice::g_device)
+			return;
+		NativeDevice::RunPresentationLeaving();
+		const uint64_t serial = NextRequest();
+		logger::info("[ORG native] presentation request {}: {}; the submission thread replaces the swap chain", serial, std::format("{}", a_config));
+		// After the presents queued so far. The latest request wins, so a superseded one does nothing.
+		RenderGraphRuntime::Get().QueueOnSubmitThread([a_config, serial] {
+			auto* device = NativeDevice::g_device;
+			if (!device || Get().RequestedSerial() != serial)
+				return;
+			std::lock_guard guard(device->presentLock);
+			device->ReplacePresentation(a_config, serial);
+		});
+	}
+
+	uint64_t NativePresenter::Replace(const PresentationConfig& a_config, const char* a_reason)
+	{
+		RequestConfig(a_config, a_reason);
+		return NativeDevice::g_device ? RequestedSerial() : 0;
+	}
+
+	void NativePresenter::SetTornDown(std::function<bool()> a_tornDown)
+	{
+		// Also for replacements other callers ask for (HDR's colour space), so a pending feature load change goes through them.
+		StoreTornDown(std::move(a_tornDown));
+		auto* device = NativeDevice::g_device;
+		if (!device)
+			return;
+		// DLSS-G's mode goes off before every swap chain change, whoever asks for it: every request and the engine's ResizeBuffers.
+		std::lock_guard guard(device->presentationLock);
+		device->leaving = [] { Streamline::GetSingleton()->TurnDLSSGOffBeforeSwapchainChange(); };
+	}
+
+	bool NativePresenter::LayerPaces() const
+	{
+		const auto* device = NativeDevice::g_device;
+		return device && device->framePresentation.presentationLayer;
+	}
+
+	void NativePresenter::HoldPresent()
+	{
+		globals::d3d::context->Flush();
+		auto* device = NativeDevice::g_device;
+		if (!device || !device->graphics)
+			return;
+		// The CPU cannot run ahead and free per-frame resources, such as the upscaler's views, while the GPU still reads them.
+		static std::deque<rhi::QueueProgress> frames;
+		const auto progress = device->graphics.Progress();
+		if (!progress.timeline || !progress.submitted)
+			return;
+		frames.push_back(progress);
+		while (frames.size() > device->frameLatency) {
+			auto oldest = frames.front();
+			frames.pop_front();
+			ZoneScopedN("CS.Native.HeldPresentPace");
+			(void)oldest.timeline.HostWait(oldest.submitted, 250);
+		}
+	}
+
+	void NativePresenter::SetColorSpace(bool a_hdr)
+	{
+		const auto* device = NativeDevice::g_device;
+		if (!device)
+			return;
+		const auto& presentation = device->framePresentation;
+		if (a_hdr == presentation.hdr10)
+			logger::info("[HDR] swap chain color space is {} (native, request {})", a_hdr ? "HDR10 (PQ/BT.2020)" : "SDR (sRGB)", presentation.serial);
+		else
+			logger::warn("[HDR] the frame renders {} but the swap chain is {} (native, request {})", a_hdr ? "HDR" : "SDR", presentation.hdr10 ? "HDR10" : "SDR",
+				presentation.serial);
+	}
+
+	std::optional<bool> NativePresenter::LayerVsync() const
+	{
+		auto* device = NativeDevice::g_device;
+		if (!device)
+			return std::nullopt;
+		const auto adopted = AdoptedPresentation(*device);
+		if (adopted.serial != RequestedSerial() || !adopted.presentationLayer)
+			return std::nullopt;
+		return adopted.vsync;
+	}
 }
 
-#endif

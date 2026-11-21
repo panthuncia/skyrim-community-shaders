@@ -178,7 +178,7 @@ namespace DCLF::Features::Streaming
 
 		void Install(Api::InstallContext& a_context)
 		{
-			const auto master = a_context.RegisterSwitch({ .name = "CS_DCLF_TEX_STREAM", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero, .description = "0: the game's textures stay whole, not shells with streamed mip windows; read at the first texture load", .after = "CS_DCLF_GRASS" });
+			const auto master = a_context.RegisterSwitch({ .name = "CS_DCLF_TEX_STREAM", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero, .description = "0: the game's textures stay whole, not shells with streamed mip windows; read at the first texture load", .after = "CS_DCLF_PLAIN_SNOW_SPARKLE" });
 			a_context.RegisterSwitch({ .name = "CS_DCLF_TEX_STREAM_FULL", .kind = Api::SwitchKind::Test, .reduced = Api::SwitchReduced::Never, .description = "1: every window the full chain, made as the texture loads (the baseline)", .after = "CS_DCLF_TEX_STREAM" });
 			a_context.RegisterSwitch({ .name = "CS_DCLF_TEX_STREAM_BASE", .kind = Api::SwitchKind::Other, .reduced = Api::SwitchReduced::Never, .description = "the base window's largest side (default 128)", .after = "CS_DCLF_TEX_STREAM_FULL" });
 			a_context.RegisterSwitch({ .name = "CS_DCLF_TEX_STREAM_BUDGET_MB", .kind = Api::SwitchKind::Other, .reduced = Api::SwitchReduced::Never, .description = "the memory streaming keeps to, in MiB, above or below the driver's budget (default: the driver's budget)", .after = "CS_DCLF_TEX_STREAM_BASE" });

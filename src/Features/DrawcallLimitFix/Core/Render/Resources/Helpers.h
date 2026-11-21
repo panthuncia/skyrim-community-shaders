@@ -23,16 +23,10 @@
 
 namespace DCLF::Draws
 {
-	/** @brief Loads a setup's compute program off the render thread. Returns null with a_pending set until it is ready, and DCLF stays off meanwhile.
-	 * Null with a_pending clear means the load failed. Each desc is loaded once per device. Any thread. */
-	std::shared_ptr<const ComputeProgram> LoadProgram(rhi::Device a_device, const ComputeProgram::Desc& a_desc, bool& a_pending);
-
 	// Live override of CS_DCLF_ASYNC_COMPUTE from the test harness. -1 none, 0 graphics, 1 compute.
 	inline std::atomic<int> asyncComputeOverride{ -1 };
 	// The least a sun caster's bound may project to, in texels, or 0 for off. It is data only, so it can change live for A/B tests.
 	inline std::atomic<float> shadowMinTexels{ 0.0f };
-	// The shadow view label whose size probe counters every readback samples, or -1 for off.
-	inline std::atomic<int> shadowSizeProbe{ -1 };
 	// Native mode defaults these passes to the graphics queue. They take about 0.03 ms, but cross-queue waits cost
 	// the graphics queue about 0.13 ms a frame. CS_DCLF_ASYNC_COMPUTE overrides the choice.
 	inline org::QueueKind AsyncComputeQueue()

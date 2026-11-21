@@ -23,7 +23,6 @@ namespace DCLF::Scene
 		RefreshCharacterLightView();
 		// Every frame. Once a ProjectedUV object waits for them the engine draws none, so they cannot come from a native draw alone.
 		NoteProjectedTextures();
-		Diagnostics::Notify<Diagnostics::ScenePoint::PrepassConstantsBegin>();
 		if (!EngineShaders::Lighting())
 			return;
 		// Sampled here because only from Prepass is the eye the main camera's. At EarlyPrepass it is still the shadow-map camera's.
@@ -33,7 +32,7 @@ namespace DCLF::Scene
 		const bool pipelineInputsMoved = portFrame.sun && (!geometryPortFrame || !portFrame.SamePipelineInputs(*geometryPortFrame));
 		if (portFrame.sun) {
 			geometryPortFrame = portFrame;
-			geometryPortFrameNumber = frame;
+			geometryPortFrameNumber = sceneStep;
 			PostPipelineFrame(portFrame);
 		}
 		// Versioned only when it differs.
@@ -49,7 +48,6 @@ namespace DCLF::Scene
 			EvaluateTechnique(0, fog);
 			MergeFrameFog(fog, frameFog, fogWritten);
 		}
-		Diagnostics::Notify<Diagnostics::ScenePoint::PipelineConstantsBegin>();
 		frameTables.SyncPipelines(view.pipelines, view.pipelineBindingVersion, frameTablesGeneration, view.pipelinesStamp);
 		TracyCZoneN(pipelinesZone, "CS.DCLF.FrameConstants.Pipelines", true);
 		std::int64_t pipelinesVisited = 0;
@@ -101,7 +99,6 @@ namespace DCLF::Scene
 
 		constantsRefreshed = true;
 		++shadingFrames;
-		Diagnostics::Notify<Diagnostics::ScenePoint::PrepassConstantsEnd>();
 	}
 
 	void FrameView::RefreshCharacterLightView()

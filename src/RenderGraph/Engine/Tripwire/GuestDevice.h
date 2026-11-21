@@ -3,7 +3,7 @@
 #include <d3d11.h>
 
 /**
- * @brief The guest device and context, behind CS_ORG_TRIPWIRE_GUEST=1. Wrapping tripwire handles go in the engine's device and
+ * @brief The guest device and context, in guest mode. Wrapping tripwire handles go in the engine's device and
  * context pointers, so the engine can pass tripwire handles to D3D11 while DXVK is the host.
  *
  * DXVK casts every object it gets to its own class, so a handle reaching DXVK directly crashes. The guest handles unwrap
@@ -23,4 +23,11 @@ namespace RenderGraph::Engine::Tripwire
 
 	/** @brief Whether the engine's device and context pointers hold guest or native handles. Ports gate their installs on it. */
 	bool GuestContextInstalled();
+
+	/**
+	 * @brief The engine's immediate context: its guest or native handle once installed, else D3D11's own (globals::d3d::context).
+	 * The handle keeps what the engine binds, so CS code that reads the engine's state asks it. In guest mode CS's own binds are on
+	 * D3D11's context instead. Any thread.
+	 */
+	ID3D11DeviceContext* EngineContext();
 }

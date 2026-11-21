@@ -1,4 +1,4 @@
-// The menu and loading screen composites as CS passes, for native mode. Included by ImageSpace.cpp after StartSteps.inl.
+// The menu and loading screen composites as CS passes, in graph mode. Included by ImageSpace.cpp after StartSteps.inl.
 //
 // Outside the world chain the engine draws a few ImageSpace effects of its own:
 // - a menu's 3D scene runs the HDR effect and its tonemap into the framebuffer when its light scheme has an ImageSpace override,
@@ -7,19 +7,29 @@
 // Each is a step of the UI stage in every frame kind. The player's face tint at a load is a step of the start stage in a
 // world frame and of the UI stage in a loading screen. Hooks only stage the engine's constants, and the stage records at execution.
 
+/** @brief What the composites' registration is a function of. Their clients are declared on these variables (Frame/Declare.h). */
+struct MenuKey
+{
+	Frame::Vars::Extent2D display{};
+	std::uint32_t levels = 0, effects = 0, states = 0;
+	friend bool operator==(const MenuKey&, const MenuKey&) = default;
+};
+
+/** @brief The composites' clients, in their declarations' order. */
+constexpr std::array<PostPart, 3> kMenuParts{ PostPart::Menu, PostPart::Frozen, PostPart::FaceTint };
+
+/**
+* @brief The composites' build for a key. Part 0 is the menu client's steps. The frozen composite and the face tint are entry 0 of
+* parts 1 and 2, their own clients.
+*/
+struct MenuBuild : StepBuild<MenuKey, 3>
+{
+	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
+};
+
 struct MenuSteps
 {
-	bool on = false;          // native mode with CS's stages
-	bool registered = false;
-	bool retry = false;       // a pass was left out at a build, so register again later
-	bool pending = false;
-	std::uint64_t registeredFrame = 0;
-	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
-	std::map<StepKey, std::uint32_t> entries;
-	std::array<bool, kGateEntries> made{};
-	std::uint32_t count = 0;
-	bool frozenMade = false;
-	bool tintMade = false;
+	StepGroup<MenuBuild> group;
 	// Inside a menu scene's end-of-frame call, not the world chain's.
 	bool inEndOfFrame = false, inHdr = false;
 	std::int32_t source = -1, final = -1;
@@ -40,28 +50,27 @@ MenuSteps& Menu()
 	return menu;
 }
 
-void RegisterMenuSteps();
-
-/** @brief Re-registers when kMAIN's or the final target's size or the level count change, or a build left a pass out. Render owner. */
-void CheckMenuSteps()
+/** @brief The composites' key at a revision's values, or none while the engine is not ready for them. */
+template <class Values>
+std::optional<MenuKey> MenuKeyOf(const Values& a_values)
 {
-	auto& menu = Menu();
-	if (!menu.on || !IS().on || !RE::ImageSpaceManager::GetSingleton())
-		return;
-	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
-		return;
-	D3D11_TEXTURE2D_DESC main{};
-	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
-	const auto final = FinalSize();
-	constexpr std::uint64_t kRetryFrames = 120;
-	const auto frame = Frame::Driver::Current().frame;
-	if (menu.registered && menu.retry && frame - menu.registeredFrame < kRetryFrames)
-		return;
-	if (menu.registered && !menu.retry && menu.width == main.Width && menu.height == main.Height && menu.finalWidth == final.first &&
-		menu.finalHeight == final.second && menu.levels == Frame::PostChain::LuminanceLevels())
-		return;
-	RegisterAtBoundary(menu.pending, [] { return Menu().on && StepTargetsReady(); }, RegisterMenuSteps);
+	const auto shape = ReadyShape(a_values);
+	if (!shape || !IS().on)
+		return std::nullopt;
+	return MenuKey{ a_values.Get(Frame::Vars::DisplaySize()), shape->luminanceLevels, shape->effects, shape->states };
+}
+
+void BuildMenuSteps(MenuBuild& a_build);
+
+/**
+* @brief Setup. The composites' clients, declared on their variables. The first revision registers them, so the build is
+* ready for the main menu.
+*/
+void DeclareMenuSteps()
+{
+	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::EngineImageSpace());
+	Menu().group.Declare(kMenuParts, dependencies, [](const Frame::Inputs& a_in) { return MenuKeyOf(a_in); },
+		[](MenuBuild& a_build) { BuildMenuSteps(a_build); });
 }
 
 /** @brief Its own client, first in the UI stage. */
@@ -76,91 +85,49 @@ constexpr StepKey TintKey()
 	return { WorldScope::MenuCopy, Effects::ISAlphaBlend, 0 };
 }
 
-/** @brief Registers the UI stage's composite clients for the current sizes, in the engine's order. */
-void RegisterMenuSteps()
+/** @brief One composite step, before its spec is made. */
+struct MenuStep
 {
-	auto& state = IS();
-	auto& menu = Menu();
-	menu.registered = false;
-	menu.retry = false;
-	menu.registeredFrame = Frame::Driver::Current().frame;
-	menu.entries.clear();
-	menu.made.fill(false);
-	menu.count = 0;
+	StepKey key;
+	StepDesc desc;
+};
+
+/** @brief The composites' steps for a_levels luminance levels, in the engine's order. Empty before the engine made kMAIN. */
+std::vector<MenuStep> MenuStepList(std::uint32_t a_levels)
+{
+	std::vector<MenuStep> steps;
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	D3D11_TEXTURE2D_DESC main{};
-	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
-	menu.width = main.Width;
-	menu.height = main.Height;
-	std::tie(menu.finalWidth, menu.finalHeight) = FinalSize();
-	menu.levels = Frame::PostChain::LuminanceLevels();
+	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
+		return steps;
 	using E = Effects;
 	using T = RE::RENDER_TARGET;
 	const auto engine = [](std::int32_t a_target) { return StepTexture::Engine(a_target); };
-	constexpr StepSampler kPoint{ 0, 0 }, kLinear{ 0, 1 };
+	constexpr StepSampler kLinear{ 0, 1 };
 	constexpr std::int32_t kSource = T::kMAIN, kFinal = T::kFRAMEBUFFER;
-	struct Pending
-	{
-		StepKey key;
-		StepDesc desc;
-	};
-	std::vector<Pending> steps;
 	const auto add = [&](WorldScope a_scope, E::ImageSpaceEffectEnum a_effect, std::uint16_t a_variant, StepDesc a_desc) {
 		a_desc.effect = a_effect;
 		steps.push_back({ { a_scope, a_effect, a_variant }, std::move(a_desc) });
 	};
 	// A menu scene's HDR effect on the engine's own targets, ending with the tonemap into the final target.
-	constexpr std::int32_t kDownsample = T::kHDR_DOWNSAMPLE0, kFirstLevel = T::kHDR_DOWNSAMPLE1;
-	const auto levels = menu.levels;
-	const auto levelEffect = [](std::uint32_t a_level) { return a_level == 0 ? E::ISHDRDownSample4RGB2Lum : E::ISHDRDownSample16Lum; };
-	const auto levelInput = [&](std::uint32_t a_level) { return a_level == 0 ? kDownsample : kFirstLevel + static_cast<std::int32_t>(a_level) - 1; };
-	const auto lastTarget = [&](std::uint32_t a_parity) { return kFirstLevel + static_cast<std::int32_t>(levels) - 1 + 2 * static_cast<std::int32_t>(a_parity); };
-	if (levels > 0 && lastTarget(1) <= T::kHDR_DOWNSAMPLE13) {
+	const auto levels = a_levels;
+	if (HdrLevelsFit(levels)) {
 		{
-			StepDesc d{ .name = "hdr.downsample", .output = engine(kDownsample) };
+			StepDesc d{ .name = "hdr.downsample", .output = engine(T::kHDR_DOWNSAMPLE0) };
 			d.inputs[0] = engine(kSource);
 			d.samplers[0] = kLinear;
 			add(WorldScope::MenuHdr, E::ISHDRDownSample4, InOut(kSource, 0), std::move(d));
 		}
-		for (std::uint32_t level = 0; level + 1 < levels; ++level) {
-			StepDesc d{ .name = fmt::format("hdr.luminance{}", level), .output = engine(kFirstLevel + static_cast<std::int32_t>(level)) };
-			d.inputs[0] = engine(levelInput(level));
-			d.samplers[0] = level == 0 ? kLinear : kPoint;
-			add(WorldScope::MenuHdr, levelEffect(level), static_cast<std::uint16_t>(level), std::move(d));
-		}
-		const auto lastLevel = levels - 1;
-		for (std::uint16_t p = 0; p < 2; ++p) {
-			const auto variant = static_cast<std::uint16_t>(lastLevel | (1u << 8) | (static_cast<std::uint32_t>(p) << 9));
-			StepDesc l{ .name = fmt::format("hdr.luminance{}.p{}", lastLevel, p), .output = engine(lastTarget(p)) };
-			l.inputs[0] = engine(levelInput(lastLevel));
-			l.samplers[0] = lastLevel == 0 ? kLinear : kPoint;
-			add(WorldScope::MenuHdr, levelEffect(lastLevel), variant, std::move(l));
-			StepDesc a{ .name = fmt::format("hdr.adapt.p{}", p), .output = engine(lastTarget(p)) };
-			a.inputs[0] = engine(levelInput(lastLevel));
-			a.inputs[1] = engine(lastTarget(1 - p));
-			a.samplers[0] = kLinear;
-			add(WorldScope::MenuHdr, E::ISHDRDownSample16LightAdapt, variant, std::move(a));
-		}
-		constexpr std::array<E::ImageSpaceEffectEnum, 7> kBright{ E::ISBrightPassBlur3, E::ISBrightPassBlur5, E::ISBrightPassBlur7, E::ISBrightPassBlur9,
-			E::ISBrightPassBlur11, E::ISBrightPassBlur13, E::ISBrightPassBlur15 };
-		constexpr std::array<E::ImageSpaceEffectEnum, 7> kBlur{ E::ISBlur3, E::ISBlur5, E::ISBlur7, E::ISBlur9, E::ISBlur11, E::ISBlur13, E::ISBlur15 };
-		for (std::uint8_t r = 0; r < 7; ++r) {
-			for (std::uint16_t p = 0; p < 2; ++p) {
-				StepDesc b{ .name = fmt::format("bloom{}.bright.p{}", r, p), .output = engine(T::kHDR_BLURSWAP) };
-				b.inputs[0] = engine(kDownsample);
-				b.inputs[1] = engine(lastTarget(p));
-				add(WorldScope::MenuHdr, kBright[r], p, std::move(b));
-			}
-			StepDesc d{ .name = fmt::format("bloom{}.blur", r), .output = engine(T::kHDR_BLOOM) };
-			d.inputs[0] = engine(T::kHDR_BLURSWAP);
-			add(WorldScope::MenuHdr, kBlur[r], 0, std::move(d));
-		}
+		AddHdrSteps(levels,
+			{ .adapted = { engine(HdrLastTarget(levels, 0)), engine(HdrLastTarget(levels, 1)) }, .bloomSwap = engine(T::kHDR_BLURSWAP), .bloom = engine(T::kHDR_BLOOM) },
+			[&](std::uint8_t, E::ImageSpaceEffectEnum a_effect, std::uint16_t a_variant, StepDesc a_desc) {
+				add(WorldScope::MenuHdr, a_effect, a_variant, std::move(a_desc));
+			});
 		for (const bool fade : { false, true })
 			for (std::uint16_t p = 0; p < 2; ++p) {
 				StepDesc d{ .name = fmt::format("tonemap{}.p{}", fade ? ".fade" : "", p), .output = engine(kFinal) };
 				d.inputs[0] = engine(T::kHDR_BLOOM);
 				d.inputs[1] = engine(kSource);
-				d.inputs[2] = engine(lastTarget(p));
+				d.inputs[2] = engine(HdrLastTarget(levels, p));
 				d.samplers[0] = kLinear;
 				d.samplers[2] = kLinear;
 				add(WorldScope::MenuHdr, fade ? E::ISHDRTonemapBlendCinematicFade : E::ISHDRTonemapBlendCinematic, static_cast<std::uint16_t>((p << 15) | InOut(kSource, kFinal)),
@@ -182,94 +149,93 @@ void RegisterMenuSteps()
 		StepDesc d{ .name = "facetint", .output = engine(T::kPLAYER_FACEGEN_TINT), .latched = 0xFFFF };
 		add(WorldScope::MenuCopy, E::ISAlphaBlend, 0, std::move(d));
 	}
+	return steps;
+}
 
-	for (const auto part : { PostPart::Menu, PostPart::Frozen, PostPart::FaceTint }) {
-		state.post[static_cast<std::size_t>(part)].specs.clear();
-		state.post[static_cast<std::size_t>(part)].batch.clear();
+/**
+* @brief Render thread, at each Begin. Wants the composites' programs once the engine has made their effects and blend states,
+* which it does after CS's setup. So they build while the game starts, and the first revision with the composites finds them
+* built. Once per new shape. Makes the specs only for their programs and keeps nothing.
+*/
+void WantMenuPrograms(const Frame::Vars::ImageSpaceShape& a_shape)
+{
+	if (!IS().on || a_shape.effects == 0)
+		return;
+	std::size_t made = 0;
+	for (const auto& step : MenuStepList(a_shape.luminanceLevels)) {
+		std::string error;
+		made += MakeStepSpec(step.desc, 0, error) ? 1 : 0;
 	}
-	menu.frozenMade = false;
-	menu.tintMade = false;
-	std::vector<FrameAnchors::PassDesc> passes, frozenPasses, tintPasses;
+	logger::info("[ORG] ImageSpace: the composites' programs are wanted for {} steps ({} luminance levels), before their first revision", made,
+		a_shape.luminanceLevels);
+}
+
+/**
+* @brief The UI stage's composite clients' registrations for a_build's key, in the engine's order. Their declarations register them
+* when the revision starts, and the revision switches their builds in. Render thread.
+*/
+void BuildMenuSteps(MenuBuild& a_build)
+{
+	auto& state = IS();
+	const auto& table = a_build.table;
+	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
+		return;
+	D3D11_TEXTURE2D_DESC main{};
+	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
+	a_build.width = main.Width;
+	a_build.height = main.Height;
+	std::tie(a_build.finalWidth, a_build.finalHeight) = FinalSize();
+	a_build.levels = a_build.key.levels;
+	auto steps = MenuStepList(a_build.levels);
+
+	for (const auto part : kMenuParts)
+		state.post[static_cast<std::size_t>(part)].batch.clear();
+	std::array<std::vector<FrameAnchors::PassDesc>, 3> partPasses;
 	for (auto& step : steps) {
 		// The frozen composite and the face tint are entry 0 of their own clients. Other steps take the menu client's next entry.
-		const bool isFrozen = step.key == FrozenKey();
-		const bool isTint = step.key == TintKey();
-		auto& owner = state.post[static_cast<std::size_t>(isFrozen ? PostPart::Frozen : isTint ? PostPart::FaceTint : PostPart::Menu)];
-		const auto entry = isFrozen || isTint ? 0u : menu.count;
-		if (entry >= kGateEntries)
-			break;
+		const auto p = static_cast<std::uint8_t>(step.key == FrozenKey() ? 1 : step.key == TintKey() ? 2 : 0);
+		auto& owner = state.post[static_cast<std::size_t>(kMenuParts[p])];
+		const auto entry = table->parts[p].count;
+		if (entry >= kGateEntries || (p != 0 && entry != 0))
+			continue;
 		std::string error;
 		auto spec = MakeStepSpec(step.desc, entry, error);
 		if (!spec) {
 			logger::info("[ORG] ImageSpace: menu step {} has no pass ({})", step.desc.name, error);
 			continue;
 		}
-		if (!isFrozen && !isTint) {
-			++menu.count;
-			menu.entries[step.key] = entry;
-		}
-		NoteImports(*spec);
-		(isFrozen ? frozenPasses : isTint ? tintPasses : passes)
-			.push_back({ .name = fmt::format("{}.{}", owner.id, spec->name),
-				.anchor = Anchor::ImageSpace,
-				.order = static_cast<std::int32_t>(entry),
-				.kind = spec->key.compute ? FrameAnchors::PassKind::Compute : FrameAnchors::PassKind::Render,
-				.make = [spec, latch = std::shared_ptr<const org::LatchBlock>(owner.latch), gate = std::shared_ptr<const RunGate>(owner.gate), id = owner.id, entry,
-							isFrozen, isTint] {
-					auto pass = MakePass(spec, latch, gate, id);
-					if (isFrozen)
-						Menu().frozenMade = pass != nullptr;
-					else if (isTint)
-						Menu().tintMade = pass != nullptr;
-					else
-						Menu().made[entry] = pass != nullptr;
-					if (!pass)
-						Menu().retry = true;
-					return pass;
-				},
-				.atExecution = true,
-				// Every UI stage hook runs before its commit, so a step the engine did not draw skips and folds its barriers.
-				.gpuGated = false });
-		owner.specs.push_back(std::move(spec));
+		AddStep(*table, p, step.key, spec);
+		// Every UI stage hook runs before its commit, so a step the engine did not draw skips and folds its barriers.
+		auto pass = StepPassDesc(table, p, entry, owner, spec);
+		// The composites have no rows: every pass is on, and the engine opens the ones it draws.
+		pass.row = -1;
+		partPasses[p].push_back(std::move(pass));
 	}
 	const auto makeDesc = [](PostPart a_part, std::vector<FrameAnchors::PassDesc> a_passes) {
-		const auto part = static_cast<std::size_t>(a_part);
-		auto& owner = IS().post[part];
-		FrameAnchors::ClientDesc desc{};
-		desc.id = owner.id;
-		desc.passes = std::move(a_passes);
-		desc.sharedConstants = true;
-		desc.gates = { owner.gate };
-		desc.active = [part] { return !IS().post[part].batch.empty(); };
-		desc.commit = [part](const FrameAnchors::Point&) {
-			auto& current = IS().post[part];
-			CommitBatch(current.batch, *current.latch, *current.gate);
-		};
+		auto desc = PartClientDesc(static_cast<std::size_t>(a_part), std::move(a_passes));
 		// A frame's composites are several engine calls, each its own tap.
 		desc.repeats = true;
 		// A composite outside the stage windows is a mismatch.
 		desc.segmentOnly = true;
-		desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
 		return desc;
 	};
-	if (!FrameAnchors::Register(makeDesc(PostPart::Menu, std::move(passes)))) {
-		logger::error("[ORG] ImageSpace: the menu composites' client was refused");
-		menu.on = false;
-		return;
-	}
-	if (!frozenPasses.empty() && !FrameAnchors::Register(makeDesc(PostPart::Frozen, std::move(frozenPasses))))
-		logger::error("[ORG] ImageSpace: the frozen composite's client was refused; a menu over a frozen world draws no frozen frame");
-	if (!tintPasses.empty() && !FrameAnchors::Register(makeDesc(PostPart::FaceTint, std::move(tintPasses))))
-		logger::error("[ORG] ImageSpace: the face tint's client was refused; the player's face tint is not drawn");
-	menu.registered = true;
-	logger::info("[ORG] ImageSpace: the menus' and the loading screen's composites are CS passes: {} passes ({} luminance levels), {}x{} into {}x{}", menu.count,
-		menu.levels, menu.width, menu.height, menu.finalWidth, menu.finalHeight);
+	// An empty client is no client. Its declaration then registers none.
+	for (std::size_t part = 0; part < kMenuParts.size(); ++part)
+		if (!partPasses[part].empty())
+			a_build.descs[part] = makeDesc(kMenuParts[part], std::move(partPasses[part]));
+	if (!a_build.descs[1])
+		logger::info("[ORG] ImageSpace: the frozen composite has no pass; a menu over a frozen world draws no frozen frame");
+	logger::info("[ORG] ImageSpace: the menus' and the loading screen's composites are CS passes: {} passes ({} luminance levels), {}x{} into {}x{}, built "
+				 "for the revision starting now",
+		table->parts[0].count, a_build.levels, a_build.width, a_build.height, a_build.finalWidth, a_build.finalHeight);
 }
 
 bool MenuStepNow(std::size_t a_effect)
 {
 	const auto& menu = Menu();
-	return menu.on && menu.registered && (menu.inHdr || !menu.calls.empty() || kEffects[a_effect].id == Effects::ISAlphaBlend);
+	// Before the group registers, a menu scene's draw is still a menu step: TakeMenuStep counts it as lag.
+	return IS().on && (menu.inHdr || !menu.calls.empty() || kEffects[a_effect].id == Effects::ISAlphaBlend);
 }
 
 /**
@@ -281,7 +247,6 @@ void StageTintMasks(Pending& a_pending)
 	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 	auto owners = std::make_shared<std::vector<std::shared_ptr<const void>>>();
 	SourcesAt sources{};
-	constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
 	std::string targets;
 	for (std::uint32_t slot = 0; slot < kMaxSlots; ++slot) {
 		auto* view = shadow.PSTexture[slot];
@@ -290,9 +255,12 @@ void StageTintMasks(Pending& a_pending)
 		const auto target = input >= 0 && !(input & kDefaultTextureInput) ? input : -1;
 		if (target >= 0)
 			targets += fmt::format("{}t{} {}", targets.empty() ? "" : ", ", slot, NameForLog(target));
-		auto binding = view && target < 0 ? DCLF::GpuTextures::Get().ResolveBinding(view, kSourceTag) : DCLF::GpuTextures::Get().NullOf(DCLF::GpuTextures::ViewKind::Texture2D);
-		if (binding.index == DCLF::GpuTextures::kInvalid)
-			binding = DCLF::GpuTextures::Get().NullOf(DCLF::GpuTextures::ViewKind::Texture2D);
+		auto& textures = ::DCLF::GpuTextures::Get();
+		auto binding = view && target < 0 ? textures.ResolveBinding(view, kImageSpaceTag) : ::DCLF::GpuTextures::Binding{};
+		if (!binding)
+			binding = textures.NullOf(::DCLF::GpuTextures::ViewKind::Texture2D);
+		if (!binding)
+			RenderGraph::Fatal("ImageSpace", "the zero Texture2D view could not be made");
 		sources[slot] = binding.index;
 		if (binding.owner)
 			owners->push_back(std::move(binding.owner));
@@ -307,14 +275,20 @@ void StageTintMasks(Pending& a_pending)
 }
 
 /**
-* @brief Stages the step's constants, matched by effect and by a variant from the call's arguments and the luminance parity.
-* A draw with no pass, or with no open stage holding the client, is a mismatch. Before the stage's first build it is lag.
+* @brief Stages the step's constants, matched by effect and by a variant from the call's arguments and the luminance parity, in the
+* build the frame runs. A draw with no pass, or with no open stage holding the client, is a mismatch. Before the stage's first
+* build it is lag.
 */
 bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
 {
 	using E = Effects;
 	auto& state = IS();
 	auto& menu = Menu();
+	// The first revision registers the group; a menu scene can draw before it, such as the first loading screen's.
+	if (!menu.group.Registered()) {
+		Frame::Driver::NoteLaggedWork(Frame::SegmentId::Ui);
+		return true;
+	}
 	const auto id = kEffects[a_effect].id;
 	StepKey key{};
 	bool known = false;
@@ -329,9 +303,15 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 		case E::ISHDRDownSample16Lum:
 		case E::ISHDRDownSample16LightAdapt:
 			{
+				// Count against the build the frame holds for the menu part, not the newest. With none held the draw is not drawn.
+				const auto held = menu.group.Held(0);
 				const auto level = menu.lumLevel++;
-				const bool isLast = level + 1 == menu.levels;
-				key = { WorldScope::MenuHdr, id, static_cast<std::uint16_t>(isLast ? (level | (1u << 8) | (static_cast<std::uint32_t>(parity) << 9)) : level) };
+				if (!held) {
+					Frame::Driver::NoteLaggedWork(Frame::SegmentId::Ui);
+					return true;
+				}
+				const auto levels = held->levels;
+				key = { WorldScope::MenuHdr, id, LuminanceVariant(level, levels, parity) };
 				known = true;
 				break;
 			}
@@ -342,19 +322,11 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 			break;
 		default:
 			{
-				constexpr std::array<E::ImageSpaceEffectEnum, 7> kBright{ E::ISBrightPassBlur3, E::ISBrightPassBlur5, E::ISBrightPassBlur7, E::ISBrightPassBlur9,
-					E::ISBrightPassBlur11, E::ISBrightPassBlur13, E::ISBrightPassBlur15 };
-				for (const auto bright : kBright)
-					if (id == bright) {
-						key = { WorldScope::MenuHdr, id, parity };
-						known = true;
-					}
-				constexpr std::array<E::ImageSpaceEffectEnum, 7> kBlur{ E::ISBlur3, E::ISBlur5, E::ISBlur7, E::ISBlur9, E::ISBlur11, E::ISBlur13, E::ISBlur15 };
-				for (const auto blur : kBlur)
-					if (id == blur) {
-						key = { WorldScope::MenuHdr, id, 0 };
-						known = true;
-					}
+				bool bright = false;
+				if (BloomRadiusOf(id, bright) >= 0) {
+					key = { WorldScope::MenuHdr, id, static_cast<std::uint16_t>(bright ? parity : 0) };
+					known = true;
+				}
 				break;
 			}
 		}
@@ -369,37 +341,35 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 	// In a capture frame the post stage already copied the final image into kMENUBG and left it in the final target. Nothing to draw.
 	if (known && key == FrozenKey() && Frame::Driver::Current().kind == Frame::Kind::FrozenWorld && Frame::Driver::Current().capture)
 		return true;
-	const bool isFrozen = known && key == FrozenKey() && !IS().post[static_cast<std::size_t>(PostPart::Frozen)].specs.empty();
-	const bool isTint = known && key == TintKey() && !IS().post[static_cast<std::size_t>(PostPart::FaceTint)].specs.empty();
-	const auto found = known && !isFrozen && !isTint ? menu.entries.find(key) : menu.entries.end();
-	if (!isFrozen && !isTint && found == menu.entries.end()) {
-		// The engine may draw for new sizes before the next Begin registers them.
-		if (menu.pending) {
-			Frame::Driver::NoteLaggedWork(Frame::SegmentId::Ui);
-			return true;
-		}
+	const auto find = known ? menu.group.Find(key, Anchor::ImageSpace) : StepFind<MenuBuild>{ .found = menu.group.AheadOfNewest() ? StepFound::Behind : StepFound::NoPass };
+	if (find.found == StepFound::Behind) {
+		// The engine may draw for new sizes before the revision with their registration is adopted.
+		Frame::Driver::NoteLaggedWork(Frame::SegmentId::Ui);
+		return true;
+	}
+	if (find.found == StepFound::NoPass) {
 		const auto& call = menu.calls.empty() ? MenuSteps::EffectCall{} : menu.calls.back();
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, Frame::SegmentId::Count,
 			fmt::format("{} (variant {:#x}){} outside the world chain has no CS pass; it draws nothing", kEffects[a_effect].effectName, key.variant,
 				menu.inHdr ? " in a menu scene's HDR effect" : fmt::format(" (RenderEffect {} from rt{} into rt{})", call.effect, call.source, call.destination)));
 		return true;
 	}
-	const auto entry = isFrozen || isTint ? 0u : found->second;
-	auto& client = state.post[static_cast<std::size_t>(isFrozen ? PostPart::Frozen : isTint ? PostPart::FaceTint : PostPart::Menu)];
-	const auto hold = FrameAnchors::HeldNow(client.id, Anchor::ImageSpace);
-	if (!hold.held) {
+	const bool isTint = find.at.part == 2;
+	auto& client = state.post[static_cast<std::size_t>(menu.group.PartOf(find.at.part))];
+	if (!find.place.InStage()) {
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NotDeclared, isTint ? Frame::SegmentId::Count : Frame::SegmentId::Ui,
 			fmt::format("{} (variant {:#x}) of {} came while no open stage holds the client; it draws nothing", kEffects[a_effect].effectName, key.variant, client.id));
 		return true;
 	}
-	if (!(isFrozen ? menu.frozenMade : isTint ? menu.tintMade : menu.made[entry]) || !hold.scheduled) {
+	const auto entry = find.at.entry;
+	if (find.found == StepFound::NotHeld || !find.Part().Made(entry)) {
 		// The build runs off the render thread, so nothing is drawn until the schedule holds it.
 		if (menu.lagged++ == 0)
 			logger::info("[ORG] ImageSpace: {} waits for the build with the menu composites; it draws nothing until then (counted)", kEffects[a_effect].effectName);
 		return true;
 	}
 	const auto before = client.batch.size();
-	StageStep(client, entry, a_effect, a_compute, a_groups);
+	StageStep(client, entry, find.Part().SpecOf(entry), a_effect, a_compute, a_groups);
 	if (isTint && client.batch.size() > before)
 		StageTintMasks(client.batch.back());
 	return true;
@@ -425,7 +395,7 @@ struct MenuHdrGuard
 /** @brief RenderEffect's arguments, for the key of a copy outside the world chain. */
 struct MenuEffectCall
 {
-	MenuEffectCall(std::uint32_t a_effect, std::int32_t a_source, std::int32_t a_destination) : active(Menu().on && FrameAnchors::IsRenderOwner())
+	MenuEffectCall(std::uint32_t a_effect, std::int32_t a_source, std::int32_t a_destination) : active(IS().on && FrameAnchors::IsRenderOwner())
 	{
 		if (active)
 			Menu().calls.push_back({ a_effect, a_source, a_destination });

@@ -1,4 +1,4 @@
-// The world post chain as CS passes, for native mode. Included by ImageSpace.cpp after WorldSteps.inl, whose step helpers it uses.
+// The world post chain as CS passes, in graph mode. Included by ImageSpace.cpp after WorldSteps.inl, whose step helpers it uses.
 //
 // CS declares a pass for each step of RenderWorldPostProcess (SE 100430 / AE 107148), in the engine's order.
 // The engine's draw is withheld. Its hook only stages the constants the engine computed (TakeChainStep).
@@ -27,42 +27,37 @@ namespace ChainGroup
 	constexpr std::uint8_t kCount = 31;
 }
 
-constexpr std::uint16_t kNoCopy = 0xffff;
-
 constexpr std::array<PostPart, 3> kChainParts{ PostPart::Composites, PostPart::Hdr, PostPart::Final };
+
+/**
+* @brief What the chain's registration is a function of. Its three clients are declared on these variables (Frame/Declare.h), so
+* a change registers them again when a revision starts, and the revision switches the new builds in.
+*/
+struct ChainKey
+{
+	Frame::Vars::Extent2D display{};
+	Frame::Vars::TargetIdentity hdr{};  // HDR Display's scene texture, the final target while HDR is on
+	std::uint32_t levels = 0, effects = 0, states = 0;
+	friend bool operator==(const ChainKey&, const ChainKey&) = default;
+};
+
+/** @brief The chain's build for a key. Its three parts share the post stage's rows, in order. */
+struct ChainBuild : StepBuild<ChainKey, 3>
+{
+	std::uint32_t levels = 0;
+	// Part 2's frozen background copy and the routed build's pass-through copy, or kNoCopy.
+	std::uint16_t captureEntry = kNoCopy;
+	std::uint16_t throughEntry = kNoCopy;
+};
 
 struct ChainSteps
 {
-	bool on = false;          // native mode with the post stages
-	bool registered = false;
-	bool retry = false;       // a pass was left out at a build, so register again later
-	bool pending = false;
-	std::uint64_t registeredFrame = 0;
+	StepGroup<ChainBuild> group;
+	// The newest build's sizes, final target and HDR scene texture (null while HDR is off). Its specs and the hooks read them.
 	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
-	std::pair<float, float> ratios{ 1.0f, 1.0f };
 	std::int32_t final = RE::RENDER_TARGET::kFRAMEBUFFER;
-	const void* finalObject = nullptr;
-	struct Entry
-	{
-		std::uint8_t part = 0;
-		std::uint32_t entry = 0;
-	};
-	std::map<StepKey, Entry> entries;
-	// The three parts share the post stage's rows, in order. made[] is set on the build thread.
-	struct Part
-	{
-		std::array<StepKey, kGateEntries> keys{};
-		std::array<std::uint8_t, kGateEntries> group{};
-		std::array<bool, kGateEntries> made{};
-		std::array<bool, kGateEntries> copy{};
-		std::array<std::uint16_t, kGateEntries> copyBack{};
-		std::array<std::uint8_t, kGateEntries> route{};
-		std::uint32_t count = 0;
-		std::uint32_t rowBase = 0;
-	};
-	std::array<Part, 3> parts;
-	// Groups a hook found off, with the frame each was last asked for. A group stays on for kRequestFrames after a request. Render owner.
-	std::array<std::uint64_t, ChainGroup::kCount> requested{};
+	ID3D11Texture2D* hdrTarget = nullptr;
+	DXGI_FORMAT hdrFormat = DXGI_FORMAT_UNKNOWN;
 	OwnedTarget bloom, bloomSwap, dofDown, dofSwap;
 	std::array<OwnedTarget, 2> taaHistory;
 	OwnedTarget getHitA, getHitB, getHitSwap, fullBlurDown, fullBlurSwap;
@@ -77,9 +72,7 @@ struct ChainSteps
 	// Slot 6 or 7 while inside the full-screen blur or get-hit effect, -1 elsewhere.
 	std::int32_t slotScope = -1;
 	std::map<Effects::ImageSpaceEffectEnum, std::uint8_t> slotDraws;
-	std::uint16_t captureEntry = kNoCopy;
 	bool captureFrame = false;
-	std::uint16_t throughEntry = kNoCopy;
 	bool scratchWritten = false, taaRouted = false;
 };
 
@@ -102,26 +95,28 @@ ChainSteps& Chain()
 	return chain;
 }
 
+ID3D11Texture2D* ChainHdrTarget()
+{
+	return Chain().hdrTarget;
+}
+
 Frame::SegmentId SegmentOfPart(std::size_t)
 {
 	return Frame::SegmentId::Post;
 }
 
-/** @brief Whether any of the group's rows are set in a stage whose graph holds its client. */
+/** @brief Whether any of the group's rows are on in the post stage, in the builds the frame runs. Render owner. */
 bool GroupScheduled(std::uint8_t a_group)
 {
 	const auto& chain = Chain();
-	const auto& state = IS();
-	for (std::size_t p = 0; p < chain.parts.size(); ++p) {
-		const auto& part = chain.parts[p];
-		const auto& rows = Frame::Driver::Current().Segment(SegmentOfPart(p)).rows;
-		for (std::uint32_t entry = 0; entry < part.count; ++entry) {
-			if (part.group[entry] != a_group)
-				continue;
-			const auto row = part.rowBase + entry;
-			if (row < 256 && (rows[row / 64] >> (row % 64) & 1u) && FrameAnchors::CanTap(state.post[static_cast<std::size_t>(kChainParts[p])].id))
+	for (std::size_t p = 0; p < kChainParts.size(); ++p) {
+		const auto held = chain.group.Held(p);
+		if (!held)
+			continue;
+		const auto& part = held->table->parts[p];
+		for (std::uint32_t entry = 0; entry < part.count; ++entry)
+			if (part.group[entry] == a_group && RowOn(SegmentOfPart(p), part.RowOf(entry)))
 				return true;
-		}
 	}
 	return false;
 }
@@ -219,7 +214,7 @@ std::string ChainGroupName(std::uint8_t a_group)
 
 /**
 * @brief Replays the engine's end-of-frame loop (SE 0x141297410) only to check it against CS's description.
-* An active effect missing from the schedule is lagged work if the description or the current post fields have it, else a mismatch.
+* An active effect the schedule lacks is a mismatch unless the frame's description at Begin has it, which a later build brings.
 */
 void CheckEndOfFrame(std::int32_t a_source, std::int32_t a_final)
 {
@@ -242,9 +237,8 @@ void CheckEndOfFrame(std::int32_t a_source, std::int32_t a_final)
 	const auto base = reinterpret_cast<std::uintptr_t>(manager);
 	const auto member = [&](std::uintptr_t a_offset) { return reinterpret_cast<const std::byte*>(base + a_offset); };
 	const auto wanted = ChainGroupsOn(Frame::Driver::Current().post);
-	const auto now = ChainGroupsOn(Frame::PostChain::Read());
 	const auto check = [&](std::uint8_t a_group) {
-		if (GroupScheduled(a_group) || wanted[a_group] || now[a_group])
+		if (GroupScheduled(a_group) || wanted[a_group])
 			return;
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
 			fmt::format("{} runs in the engine's end-of-frame effects, and the frame's description at Begin does not have it", ChainGroupName(a_group)));
@@ -286,164 +280,6 @@ std::uint16_t InnerVariant(std::int32_t a_slot, Effects::ImageSpaceEffectEnum a_
 	return static_cast<std::uint16_t>((blends ? 0x8000u : 0u) | (a_occurrence & 7u) << 12 | (a_slot == 7 ? 0x800u : 0u) | 0x400u);
 }
 
-
-/**
-* @brief CS_ORG_ADAPT_READBACK=1 diagnostic. Copies the luminance chain's last level and both adapted targets into a readback ring.
-* CheckChainSteps logs them five frames later, every 30th frame.
-*/
-struct AdaptReadback
-{
-	static constexpr std::uint32_t kSlots = 8;
-	static constexpr std::uint32_t kEntries = 3;    // last input level, adapted parity 0, adapted parity 1
-	static constexpr std::uint32_t kEntryBytes = 4096;
-	std::shared_ptr<org::Buffer> buffer;
-	std::array<std::uint64_t, kSlots> frames{};    // render owner
-	RunSlots<std::uint64_t> runs;                   // stored by the final part's commit
-	std::array<rhi::Format, kEntries> formats{};
-	std::array<std::pair<std::uint32_t, std::uint32_t>, kEntries> sizes{};
-	std::uint64_t logged = 0;
-};
-
-AdaptReadback& Readback()
-{
-	static AdaptReadback readback;
-	return readback;
-}
-
-bool ReadbackOn()
-{
-	static const bool on = Switches::On("CS_ORG_ADAPT_READBACK");
-	return on;
-}
-
-struct ReadbackBindings
-{
-	std::array<org::ResourceBindingToken, AdaptReadback::kEntries> sources{};
-};
-
-struct ReadbackFrame
-{
-	std::shared_ptr<const std::uint64_t> frame;
-};
-
-/** @brief Recorded at execution, into the ring slot of its run's frame. */
-class ReadbackPass final : public org::TypedRenderGraphPass<ReadbackPass, ReadbackFrame, ReadbackBindings>
-{
-public:
-	explicit ReadbackPass(std::array<FrameAnchors::Texture, AdaptReadback::kEntries> a_sources) : sources(std::move(a_sources)) {}
-
-	ReadbackBindings Declare(org::PassBuilder& a_builder)
-	{
-		a_builder.PreferQueue(org::QueueKind::Graphics);
-		ReadbackBindings bindings{};
-		for (std::size_t i = 0; i < sources.size(); ++i)
-			bindings.sources[i] = a_builder.CopySource(sources[i]);
-		return bindings;
-	}
-
-	void Revision(std::vector<std::uint64_t>&) const {}
-
-	ReadbackFrame Prepare(const ReadbackBindings&, const org::PassPrepareContext&) const { return {}; }
-
-	static bool SkipsAtExecution(const ReadbackBindings&, const ReadbackFrame&, const org::PassRecordContext& a_recording)
-	{
-		return !Readback().runs.Find(a_recording.Run()) || !Readback().buffer;
-	}
-
-	static void Record(const ReadbackBindings& a_bindings, const ReadbackFrame&, org::PassRecordContext& a_recording)
-	{
-		auto& readback = Readback();
-		const auto frame = readback.runs.Take(a_recording.Run());
-		if (!frame || !readback.buffer)
-			return;
-		const auto slot = static_cast<std::uint32_t>(*frame % AdaptReadback::kSlots);
-		for (std::uint32_t i = 0; i < AdaptReadback::kEntries; ++i) {
-			const auto [width, height] = readback.sizes[i];
-			rhi::BufferTextureCopyFootprint copy{};
-			copy.texture = a_recording.Resolve(a_bindings.sources[i]).GetHandle();
-			copy.buffer = readback.buffer->GetAPIResource().GetHandle();
-			copy.mip = 0;
-			copy.arraySlice = 0;
-			copy.footprint = { (static_cast<std::uint64_t>(slot) * AdaptReadback::kEntries + i) * AdaptReadback::kEntryBytes, 256, width, height, 1 };
-			a_recording.Commands().CopyTextureToBuffer(copy);
-		}
-	}
-
-private:
-	std::array<FrameAnchors::Texture, AdaptReadback::kEntries> sources;
-};
-
-float ReadTexel(const std::byte* a_texel, rhi::Format a_format)
-{
-	const auto half = [](std::uint16_t a_bits) { return DirectX::PackedVector::XMConvertHalfToFloat(a_bits); };
-	switch (a_format) {
-	case rhi::Format::R11G11B10_Float:
-		{
-			// R11G11B10 red channel: 6 mantissa bits, 5 exponent bits, no sign.
-			const auto bits = *reinterpret_cast<const std::uint32_t*>(a_texel) & 0x7ffu;
-			const auto exponent = static_cast<int>(bits >> 6);
-			const auto mantissa = static_cast<float>(bits & 0x3fu) / 64.0f;
-			if (exponent == 0)
-				return std::ldexp(mantissa, -14);
-			if (exponent == 31)
-				return std::numeric_limits<float>::infinity();
-			return std::ldexp(1.0f + mantissa, exponent - 15);
-		}
-	case rhi::Format::R32_Float:
-	case rhi::Format::R32G32_Float:
-	case rhi::Format::R32G32B32A32_Float:
-		return *reinterpret_cast<const float*>(a_texel);
-	default:
-		return half(*reinterpret_cast<const std::uint16_t*>(a_texel));
-	}
-}
-
-/** @brief 8 when BasicRHI does not know the format. */
-std::uint32_t TexelBytes(rhi::Format a_format)
-{
-	const auto bytes = rhi::FormatByteSize(a_format);
-	return bytes ? bytes : 8;
-}
-
-/** @brief Render owner. */
-void LogReadback(std::uint64_t a_frame)
-{
-	auto& readback = Readback();
-	if (!ReadbackOn() || !readback.buffer || a_frame < 5 || a_frame - readback.logged < 30)
-		return;
-	const auto frame = a_frame - 5;
-	const auto slot = static_cast<std::uint32_t>(frame % AdaptReadback::kSlots);
-	if (readback.frames[slot] != frame)
-		return;
-	void* mapped = nullptr;
-	readback.buffer->GetAPIResource().Map(&mapped);
-	if (!mapped)
-		return;
-	readback.logged = a_frame;
-	std::array<std::string, AdaptReadback::kEntries> text;
-	for (std::uint32_t i = 0; i < AdaptReadback::kEntries; ++i) {
-		const auto* base = static_cast<const std::byte*>(mapped) + (static_cast<std::uint64_t>(slot) * AdaptReadback::kEntries + i) * AdaptReadback::kEntryBytes;
-		const auto [width, height] = readback.sizes[i];
-		const auto texel = TexelBytes(readback.formats[i]);
-		double sum = 0.0;
-		float least = 1e30f, most = -1e30f;
-		for (std::uint32_t y = 0; y < height; ++y)
-			for (std::uint32_t x = 0; x < width; ++x) {
-				const float value = ReadTexel(base + y * 256 + x * texel, readback.formats[i]);
-				sum += value;
-				least = (std::min)(least, value);
-				most = (std::max)(most, value);
-			}
-		text[i] = fmt::format("mean {:.5g} (min {:.5g}, max {:.5g}, {}x{})", sum / (std::max)(1u, width * height), least, most, width, height);
-	}
-	readback.buffer->GetAPIResource().Unmap(0, 0);
-	logger::info("[ORG] adaptation readback, frame {} (luminance parity {}; formats {} {} {}): last input level {}; adapted 0 {}; adapted 1 {}", frame,
-		Frame::PostChain::LuminanceParity(), static_cast<int>(readback.formats[0]), static_cast<int>(readback.formats[1]), static_cast<int>(readback.formats[2]),
-		text[0], text[1], text[2]);
-}
-
-void RegisterChainSteps();
-
 /**
 * @brief Read from the render target manager, a static at 524970 / 411451, not CommonLib's GetSingleton pointer.
 * The renderer's own entry holds no texture in native mode.
@@ -455,45 +291,73 @@ std::pair<std::uint32_t, std::uint32_t> FinalSize()
 	return { data.width, data.height };
 }
 
-/** @brief HDR Display's scene texture while HDR is on, else kFRAMEBUFFER. */
+/** @brief The registration's HDR scene texture while HDR is on, else kFRAMEBUFFER. */
 std::int32_t FinalName()
 {
-	return globals::features::hdrDisplay.PostChainTarget() ? kHdrSceneOutput : static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER);
+	return Chain().hdrTarget ? kHdrSceneOutput : static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER);
 }
 
-/** @brief Re-registers when a size, the level count or the ratios change, or a build left a pass out. Render owner. */
-void CheckChainSteps()
+/** @brief The engine target the adapted luminance of a_parity replaces for a_levels luminance levels, or -1 for none. */
+std::int32_t AdaptTargetOf(std::uint32_t a_levels, std::uint32_t a_parity)
 {
-	auto& chain = Chain();
-	if (!chain.on || !IS().on || !RE::ImageSpaceManager::GetSingleton())
-		return;
-	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
-		return;
-	D3D11_TEXTURE2D_DESC main{};
-	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
-	const auto final = FinalSize();
-	constexpr std::uint64_t kRetryFrames = 120;
-	const auto frame = Frame::Driver::Current().frame;
-	if (chain.registered)
-		LogReadback(frame);
-	if (chain.registered && chain.retry && frame - chain.registeredFrame < kRetryFrames)
-		return;
-	if (chain.registered && !chain.retry && chain.width == main.Width && chain.height == main.Height && chain.finalWidth == final.first &&
-		chain.finalHeight == final.second && chain.final == FinalName() && chain.finalObject == EngineObjectOf(chain.final) && chain.levels == Frame::PostChain::LuminanceLevels() && chain.ratios == DynamicRatios())
-		return;
-	RegisterAtBoundary(chain.pending, [] { return Chain().on && StepTargetsReady(); }, RegisterChainSteps);
+	using T = RE::RENDER_TARGET;
+	constexpr auto kFirst = static_cast<std::int32_t>(T::kHDR_DOWNSAMPLE1), kLast = static_cast<std::int32_t>(T::kHDR_DOWNSAMPLE13);
+	if (a_levels == 0 || kFirst + static_cast<std::int32_t>(a_levels) + 1 > kLast)
+		return -1;
+	return kFirst + static_cast<std::int32_t>(a_levels) - 1 + 2 * static_cast<std::int32_t>(a_parity);
 }
 
-/** @brief The chain groups a description has on, from its post fields plus every group a hook asked for. */
+/** @brief The chain's key at a revision's values, or none while the engine is not ready for it. */
+template <class Values>
+std::optional<ChainKey> ChainKeyOf(const Values& a_values)
+{
+	const auto shape = ReadyShape(a_values);
+	if (!shape || !IS().on)
+		return std::nullopt;
+	return ChainKey{ a_values.Get(Frame::Vars::DisplaySize()), a_values.Get(Frame::Vars::HdrOutputTarget()), shape->luminanceLevels, shape->effects,
+		shape->states };
+}
+
+void BuildChainSteps(ChainBuild& a_build);
+
+/** @brief Setup. The kept chain textures, the adapted pair published once, and the three clients declared on their variables. */
+void DeclareChainSteps()
+{
+	using T = RE::RENDER_TARGET;
+	auto& chain = Chain();
+	// Kept across frames so a frame whose bloom lags reads the last bloom, not an unwritten transient.
+	DeclareKept(chain.bloom, T::kHDR_BLOOM, "ImageSpace::Bloom");
+	DeclareKept(chain.taaHistory[0], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory0");
+	DeclareKept(chain.taaHistory[1], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory1");
+	// The pair follows the luminance chain's last level. One texel like the first level while the levels have no pair.
+	for (std::uint32_t parity = 0; parity < 2; ++parity)
+		DeclareKept(chain.adapt[parity], kAdaptedIds[parity], Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::EngineImageSpace()),
+			[parity](const Frame::Inputs& a_in, D3D11_TEXTURE2D_DESC& a_desc) {
+				const auto target = AdaptTargetOf(a_in.Get(Frame::Vars::EngineImageSpace()).luminanceLevels, parity);
+				if (target >= 0)
+					return OwnedDescLike(target, a_desc);
+				if (!OwnedDescLike(T::kHDR_DOWNSAMPLE1, a_desc))
+					return false;
+				a_desc.Width = a_desc.Height = 1;
+				return true;
+			});
+	// Published once, so DCLF's graphs read it by id. A new level count is a new version of each slot and publishes nothing.
+	for (const auto& target : chain.adapt)
+		if (!PublishedResources::Publish(*target.texture))
+			RenderGraph::Fatal("ImageSpace", "the adapted luminance pair could not be published");
+	// The ratios are no dependency: the VL composite's render-size viewport is latched at each draw.
+	const auto dependencies = Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::HdrOutputTarget(), Frame::Vars::EngineImageSpace());
+	chain.group.Declare(kChainParts, dependencies, [](const Frame::Inputs& a_in) { return ChainKeyOf(a_in); },
+		[](ChainBuild& a_build) { BuildChainSteps(a_build); });
+}
+
+/** @brief The chain groups a description has on, from its post fields read at Begin. */
 std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_post)
 {
-	const auto& chain = Chain();
 	const auto& post = a_post;
 	std::array<bool, ChainGroup::kCount> on{};
-	for (std::size_t group = 0; group < on.size(); ++group)
-		on[group] = RequestHolds(chain.requested[group]);
-	on[ChainGroup::kComposite] |= post.volumetric;
+	// The engine may start the VL composite after Begin read its fields. Gated, so frames without it skip it.
+	on[ChainGroup::kComposite] = true;
 	for (std::uint32_t slot = 0; slot < 8; ++slot) {
 		if (!(post.slots >> slot & 1u))
 			continue;
@@ -506,7 +370,9 @@ std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_po
 	on[ChainGroup::kBloom + (std::min)(post.bloom, std::uint8_t{ 6 })] |= post.hdr;
 	on[post.fade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap] |= post.hdr && !post.effects11;
 	on[ChainGroup::kTaa] |= post.taa;
-	on[ChainGroup::kUpsample] |= post.dynres;
+	// The engine's own dynamic-resolution upsample runs when its ratio is not 1 and unlocked. A ratio is no build input
+	// (decision 6a), so the upsample stays on. Gated, so frames without it skip it.
+	on[ChainGroup::kUpsample] = true;
 	// A save asks for the screenshot with at most a frame of notice, after Begin may have read the flag. Gated, so idle frames skip it.
 	on[ChainGroup::kScreenshot] = true;
 	// The capture frame is only known at its own Begin, too late for a build. Gated, so every other frame skips it.
@@ -524,12 +390,12 @@ std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_po
 }
 
 /** @brief A key routes when the frame has TAA, the HDR effect and CS's tonemap. A frame uses the routing its build holds. */
-bool ChainRouted(std::size_t a_part, const Frame::PostFields& a_post, bool a_key)
+bool ChainRouted(const StepPart& a_part, const Frame::PostFields& a_post, bool a_key)
 {
 	const bool wanted = a_post.taa && a_post.hdr && !a_post.effects11;
 	if (a_key)
 		return wanted;
-	const auto& part = Chain().parts[a_part];
+	const auto& part = a_part;
 	std::optional<bool> routed, direct;
 	for (std::uint32_t entry = 0; entry < part.count && (!routed || !direct); ++entry) {
 		if (part.route[entry] == ChainRoute::kAny)
@@ -544,14 +410,13 @@ bool ChainRouted(std::size_t a_part, const Frame::PostFields& a_post, bool a_key
 }
 
 /** @brief Per-frame variants such as the parities are all on. TAA only gets the history its frame slot's parity selects. */
-void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
+void ChainRows(const StepPart& a_part, std::array<std::uint64_t, 4>& a_rows)
 {
-	const auto& chain = Chain();
 	const auto& frame = Frame::Driver::Current();
 	const bool key = FrameAnchors::DescribingKey();
 	const auto on = ChainGroupsOn(frame.post);
-	const auto& part = chain.parts[a_part];
-	const bool routed = ChainRouted(a_part, frame.post, key);
+	const auto& part = a_part;
+	const bool routed = ChainRouted(part, frame.post, key);
 	for (std::uint32_t entry = 0; entry < part.count; ++entry) {
 		const auto group = part.group[entry];
 		if (!on[group])
@@ -567,20 +432,23 @@ void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
 	}
 }
 
-/** @brief Made with the engine target's size and RTV format, so a plain texel copy works. Also works for the final target, which has only a view in native mode. */
-bool MakeOwnedLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view a_name, GraphResources::Lifetime a_lifetime)
+/**
+* @brief A registration's transient texture with the engine target's size and RTV format, so a plain texel copy works. Also works
+* for the final target, which has only a view in native mode. Fatal when it cannot be made.
+*/
+void MakeTransientLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view a_name)
 {
 	const auto index = a_like;
 	const auto import = ImportOf(ImportOfName(index));
 	if (!import || !import.Width() || !import.Height())
-		return false;
+		RenderGraph::Fatal("ImageSpace", fmt::format("the texture {} is made like target {}, which has no import", a_name, index));
 	D3D11_RENDER_TARGET_VIEW_DESC view{};
 	if (index & kHdrSceneOutput)
-		view.Format = globals::features::hdrDisplay.hdrTexture->desc.Format;
+		view.Format = Chain().hdrFormat;
 	else if (auto* rtv = globals::game::renderer->GetRuntimeData().renderTargets[index].RTV)
 		rtv->GetDesc(&view);
 	else
-		return false;
+		RenderGraph::Fatal("ImageSpace", fmt::format("the texture {} is made like target {}, which has no RTV", a_name, index));
 	D3D11_TEXTURE2D_DESC desc{};
 	desc.Width = import.Width();
 	desc.Height = import.Height();
@@ -592,99 +460,160 @@ bool MakeOwnedLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view a_n
 	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
 	// A texel copy needs texels of the same size.
 	const auto bytes = rhi::FormatByteSize(rhi::helpers::ToRHI(view.Format));
-	if (!bytes || bytes != rhi::FormatByteSize(import.Format())) {
-		logger::warn("[ORG] ImageSpace: {}: target {}'s view format {} and its import's format {} differ in size; no copy between them", a_name, index,
-			static_cast<std::uint32_t>(view.Format), static_cast<std::uint32_t>(import.Format()));
-		return false;
-	}
-	auto made = Frame::Resources::Texture2D(a_name, desc, a_lifetime);
-	a_out.texture = std::move(made.texture);
-	a_out.fresh = made.fresh;
+	if (!bytes || bytes != rhi::FormatByteSize(import.Format()))
+		RenderGraph::Fatal("ImageSpace", fmt::format("{}: target {}'s view format {} and its import's format {} differ in size; no copy between them",
+			a_name, index, static_cast<std::uint32_t>(view.Format), static_cast<std::uint32_t>(import.Format())));
+	MakeTransient(a_out, desc, a_name);
 	a_out.format = RtvFormatOf(index, import);
-	return static_cast<bool>(a_out);
 }
 
-/** @brief One texel load per pixel, built once per format. Render thread. */
+/**
+* @brief One texel load per pixel, built once per format on the programs lane. Null while the build's revision has none: the
+* chain's build is then dropped, and the next revision makes it again (StepGroup::For). Render thread.
+*/
 std::shared_ptr<const RasterProgram> CaptureProgram(rhi::Format a_format)
 {
-	struct CopyBlock
-	{
-		ShaderBindings::Handle colorInput;
-	};
-	static std::map<rhi::Format, std::shared_ptr<const RasterProgram>> programs;
-	if (const auto found = programs.find(a_format); found != programs.end())
-		return found->second;
-	auto* host = RenderGraphRuntime::Get().Host();
-	if (!host)
-		return nullptr;
-	auto program = RasterProgram::Load(host->Device(),
-		{ .pixelSource = "Upscaling/CopyHudlessPS.hlsl", .constantWords = ShaderBindings::Words<CopyBlock>(), .targets = { { .format = a_format } } });
-	if (program)
-		programs.emplace(a_format, program);
-	return program;
+	return SpecProgram(CapturePrograms(), a_format);
 }
 
-/** @brief Registers the chain's three clients for the current sizes. The passes are a fixed list in the engine's order. */
-void RegisterChainSteps()
+/** @brief The bloom's bright passes and blurs by radius index (3 to 15 pixels). */
+constexpr std::array<Effects::ImageSpaceEffectEnum, 7> kBrightPasses{ Effects::ISBrightPassBlur3, Effects::ISBrightPassBlur5, Effects::ISBrightPassBlur7,
+	Effects::ISBrightPassBlur9, Effects::ISBrightPassBlur11, Effects::ISBrightPassBlur13, Effects::ISBrightPassBlur15 };
+constexpr std::array<Effects::ImageSpaceEffectEnum, 7> kBloomBlurs{ Effects::ISBlur3, Effects::ISBlur5, Effects::ISBlur7, Effects::ISBlur9, Effects::ISBlur11,
+	Effects::ISBlur13, Effects::ISBlur15 };
+
+/** @brief The radius index of a bloom bright pass or blur, or -1. a_bright says which of the two it is. */
+std::int32_t BloomRadiusOf(Effects::ImageSpaceEffectEnum a_effect, bool& a_bright)
+{
+	for (std::int32_t r = 0; r < static_cast<std::int32_t>(kBrightPasses.size()); ++r) {
+		if (a_effect == kBrightPasses[r] || a_effect == kBloomBlurs[r]) {
+			a_bright = a_effect == kBrightPasses[r];
+			return r;
+		}
+	}
+	return -1;
+}
+
+/** @brief A luminance level's variant. The last of a_levels levels carries a_parity, which picks the adapted target it writes. */
+constexpr std::uint16_t LuminanceVariant(std::uint32_t a_level, std::uint32_t a_levels, std::uint32_t a_parity)
+{
+	return static_cast<std::uint16_t>(a_level + 1 == a_levels ? (a_level | (1u << 8) | (a_parity << 9)) : a_level);
+}
+
+/** @brief The engine's target for the last of a_levels luminance levels of a_parity. */
+constexpr std::int32_t HdrLastTarget(std::uint32_t a_levels, std::uint32_t a_parity)
+{
+	return RE::RENDER_TARGET::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(a_levels) - 1 + 2 * static_cast<std::int32_t>(a_parity);
+}
+
+/** @brief Whether the last level's targets of both parities exist for a_levels levels. */
+constexpr bool HdrLevelsFit(std::uint32_t a_levels)
+{
+	return a_levels > 0 && HdrLastTarget(a_levels, 1) <= RE::RENDER_TARGET::kHDR_DOWNSAMPLE13;
+}
+
+/** @brief Where the HDR effect's steps after the downsample write: engine targets in a menu scene, CS's own in the world chain. */
+struct HdrStepTargets
+{
+	std::array<StepTexture, 2> adapted;  // the last level's adapted luminance of each parity
+	StepTexture bloomSwap, bloom;
+};
+
+/**
+* @brief The HDR effect's steps after its downsample, in the engine's order: the luminance levels, the last level and its light
+* adaptation of each parity while HdrLevelsFit, then the bloom of each radius. a_add(group, effect, variant, desc) takes each,
+* with its ChainGroup.
+*/
+template <class Add>
+void AddHdrSteps(std::uint32_t a_levels, const HdrStepTargets& a_targets, Add&& a_add)
+{
+	using E = Effects;
+	using T = RE::RENDER_TARGET;
+	const auto engine = [](std::int32_t a_target) { return StepTexture::Engine(a_target); };
+	constexpr StepSampler kPoint{ 0, 0 }, kLinear{ 0, 1 };
+	constexpr std::int32_t kDownsample = T::kHDR_DOWNSAMPLE0, kFirstLevel = T::kHDR_DOWNSAMPLE1;
+	const auto levelEffect = [](std::uint32_t a_level) { return a_level == 0 ? E::ISHDRDownSample4RGB2Lum : E::ISHDRDownSample16Lum; };
+	const auto levelInput = [&](std::uint32_t a_level) { return a_level == 0 ? kDownsample : kFirstLevel + static_cast<std::int32_t>(a_level) - 1; };
+	for (std::uint32_t level = 0; level + 1 < a_levels; ++level) {
+		StepDesc d{ .name = fmt::format("hdr.luminance{}", level), .output = engine(kFirstLevel + static_cast<std::int32_t>(level)) };
+		d.inputs[0] = engine(levelInput(level));
+		d.samplers[0] = level == 0 ? kLinear : kPoint;
+		a_add(ChainGroup::kHdr, levelEffect(level), static_cast<std::uint16_t>(level), std::move(d));
+	}
+	if (HdrLevelsFit(a_levels)) {
+		const auto lastLevel = a_levels - 1;
+		for (std::uint16_t p = 0; p < 2; ++p) {
+			const auto variant = LuminanceVariant(lastLevel, a_levels, p);
+			StepDesc l{ .name = fmt::format("hdr.luminance{}.p{}", lastLevel, p), .output = a_targets.adapted[p] };
+			l.inputs[0] = engine(levelInput(lastLevel));
+			l.samplers[0] = lastLevel == 0 ? kLinear : kPoint;
+			a_add(ChainGroup::kHdrLum, levelEffect(lastLevel), variant, std::move(l));
+			StepDesc a{ .name = fmt::format("hdr.adapt.p{}", p), .output = a_targets.adapted[p] };
+			a.inputs[0] = engine(levelInput(lastLevel));
+			a.inputs[1] = a_targets.adapted[1 - p];
+			a.samplers[0] = kLinear;
+			a_add(ChainGroup::kHdrAdapt, E::ISHDRDownSample16LightAdapt, variant, std::move(a));
+		}
+	}
+	for (std::uint8_t r = 0; r < 7; ++r) {
+		const auto group = static_cast<std::uint8_t>(ChainGroup::kBloom + r);
+		for (std::uint16_t p = 0; p < 2; ++p) {
+			StepDesc b{ .name = fmt::format("bloom{}.bright.p{}", r, p), .output = a_targets.bloomSwap };
+			b.inputs[0] = engine(kDownsample);
+			b.inputs[1] = a_targets.adapted[p];
+			a_add(group, kBrightPasses[r], p, std::move(b));
+		}
+		StepDesc d{ .name = fmt::format("bloom{}.blur", r), .output = a_targets.bloom };
+		d.inputs[0] = a_targets.bloomSwap;
+		a_add(group, kBloomBlurs[r], 0, std::move(d));
+	}
+}
+
+/**
+* @brief The chain's three clients' registrations for a_build's key. The passes are a fixed list in the engine's order. Their
+* declarations register them when the revision starts, and the revision switches their builds in. Render thread.
+*/
+void BuildChainSteps(ChainBuild& a_build)
 {
 	auto& state = IS();
 	auto& chain = Chain();
-	chain.registered = false;
-	chain.retry = false;
-	chain.registeredFrame = Frame::Driver::Current().frame;
-	chain.entries.clear();
-	chain.requested = {};
-	chain.captureEntry = kNoCopy;
-	for (auto& part : chain.parts) {
-		part.made.fill(false);
-		part.copy.fill(false);
-		part.copyBack.fill(kNoCopy);
-		part.route.fill(ChainRoute::kAny);
-		part.count = 0;
-	}
-	chain.throughEntry = kNoCopy;
+	const auto& a_key = a_build.key;
+	const auto& table = a_build.table;
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
+		return;
 	D3D11_TEXTURE2D_DESC main{};
 	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
 	chain.width = main.Width;
 	chain.height = main.Height;
 	std::tie(chain.finalWidth, chain.finalHeight) = FinalSize();
+	// The key's HDR target, not the live one, so the registration matches the revision that switches it in.
+	chain.hdrTarget = a_key.hdr.id ? reinterpret_cast<ID3D11Texture2D*>(a_key.hdr.id) : nullptr;
+	chain.hdrFormat = static_cast<DXGI_FORMAT>(a_key.hdr.format);
 	chain.final = FinalName();
-	chain.finalObject = EngineObjectOf(chain.final);
-	chain.ratios = DynamicRatios();
-	chain.levels = Frame::PostChain::LuminanceLevels();
-	using Lifetime = GraphResources::Lifetime;
+	chain.levels = a_key.levels;
+	a_build.levels = a_key.levels;
 	using T = RE::RENDER_TARGET;
-	bool adapted = chain.levels > 0 && T::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(chain.levels) + 1 <= T::kHDR_DOWNSAMPLE13;
-	for (std::uint32_t p = 0; adapted && p < 2; ++p)
-		adapted = MakeOwned(chain.adapt[p], static_cast<T>(T::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(chain.levels) - 1 + 2 * static_cast<std::int32_t>(p)),
-			kAdaptedIds[p], Lifetime::History);
-	if (!adapted) {
-		logger::warn("[ORG] ImageSpace: the adapted luminance pair could not be made for {} levels; registered again at a later frame", chain.levels);
-		chain.retry = true;
+	if (AdaptTargetOf(chain.levels, 1) < 0) {
+		// The kept pair is one texel then, and no step could write it.
+		logger::error("[ORG] ImageSpace: the luminance chain has {} levels, which the adapted pair cannot follow; the post chain has no CS passes", chain.levels);
 		return;
 	}
-	// Published so DCLF's graphs can read it by id. A new pair rebuilds every graph once.
-	for (const auto& target : chain.adapt)
-		(void)PublishedResources::Publish(*target.texture);
-	// Kept across frames so a frame whose bloom lags reads the last bloom, not an unwritten transient.
-	if (!MakeOwned(chain.bloom, T::kHDR_BLOOM, "ImageSpace::Bloom", Lifetime::History) ||
-		!MakeOwned(chain.bloomSwap, T::kHDR_BLURSWAP, "ImageSpace::BloomSwap", Lifetime::Transient) ||
-		!MakeOwned(chain.dofDown, T::kLDR_DOWNSAMPLE0, "ImageSpace::DofDownsample", Lifetime::Transient) ||
-		!MakeOwned(chain.dofSwap, T::kLDR_BLURSWAP, "ImageSpace::DofBlurSwap", Lifetime::Transient) ||
-		!MakeOwned(chain.taaHistory[0], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory0", Lifetime::History) ||
-		!MakeOwned(chain.taaHistory[1], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory1", Lifetime::History) ||
-		!MakeOwned(chain.getHitA, T::kGETHIT_BUFFER, "ImageSpace::GetHitA", Lifetime::Transient) ||
-		!MakeOwned(chain.getHitB, T::kGETHIT_BUFFER, "ImageSpace::GetHitB", Lifetime::Transient) ||
-		!MakeOwned(chain.getHitSwap, T::kGETHIT_BLURSWAP, "ImageSpace::GetHitSwap", Lifetime::Transient) ||
-		!MakeOwned(chain.fullBlurDown, T::kHDR_BLURSWAP, "ImageSpace::FullBlurDown", Lifetime::Transient) ||
-		!MakeOwned(chain.fullBlurSwap, T::kHDR_DOWNSAMPLE0, "ImageSpace::FullBlurSwap", Lifetime::Transient) ||
-		!MakeOwnedLike(chain.hdrScratch, T::kMAIN, "ImageSpace::HdrScratch", Lifetime::Transient) ||
-		!MakeOwnedLike(chain.ldrScratch, chain.final, "ImageSpace::LdrScratch", Lifetime::Transient)) {
-		logger::warn("[ORG] ImageSpace: the post chain's targets could not be made; registered again at a later frame");
-		chain.retry = true;
-		return;
-	}
+	for (std::uint32_t parity = 0; parity < 2; ++parity)
+		KeptExtentLike(chain.adapt[parity], AdaptTargetOf(chain.levels, parity));
+	KeptExtentLike(chain.bloom, T::kHDR_BLOOM);
+	for (auto& history : chain.taaHistory)
+		KeptExtentLike(history, T::kTEMPORAL_AA_ACCUMULATION_1);
+	MakeTransient(chain.bloomSwap, T::kHDR_BLURSWAP, "ImageSpace::BloomSwap");
+	MakeTransient(chain.dofDown, T::kLDR_DOWNSAMPLE0, "ImageSpace::DofDownsample");
+	MakeTransient(chain.dofSwap, T::kLDR_BLURSWAP, "ImageSpace::DofBlurSwap");
+	MakeTransient(chain.getHitA, T::kGETHIT_BUFFER, "ImageSpace::GetHitA");
+	MakeTransient(chain.getHitB, T::kGETHIT_BUFFER, "ImageSpace::GetHitB");
+	MakeTransient(chain.getHitSwap, T::kGETHIT_BLURSWAP, "ImageSpace::GetHitSwap");
+	MakeTransient(chain.fullBlurDown, T::kHDR_BLURSWAP, "ImageSpace::FullBlurDown");
+	MakeTransient(chain.fullBlurSwap, T::kHDR_DOWNSAMPLE0, "ImageSpace::FullBlurSwap");
+	MakeTransientLike(chain.hdrScratch, T::kMAIN, "ImageSpace::HdrScratch");
+	MakeTransientLike(chain.ldrScratch, chain.final, "ImageSpace::LdrScratch");
 
 	using E = Effects;
 	// effects[9] to [15] draw ISBlurN with the HDR flag at +0x95, else ISNonHDRBlurN. None is a bright pass.
@@ -870,53 +799,17 @@ void RegisterChainSteps()
 
 	// The HDR effect: downsample, luminance levels, last level, then the bloom of the frame's radius.
 	// The luminance targets stay the engine's because DCLF's character light reads them.
-	constexpr std::int32_t kDownsample = T::kHDR_DOWNSAMPLE0, kFirstLevel = T::kHDR_DOWNSAMPLE1;
 	{
-		StepDesc d{ .name = "hdr.downsample", .output = engine(kDownsample) };
+		StepDesc d{ .name = "hdr.downsample", .output = engine(T::kHDR_DOWNSAMPLE0) };
 		d.inputs[0] = engine(T::kMAIN);
 		d.samplers[0] = kLinear;
 		add(1, ChainGroup::kHdr, WorldScope::Hdr, E::ISHDRDownSample4, 0, std::move(d));
 	}
 	const auto levels = chain.levels;
-	const auto levelEffect = [](std::uint32_t a_level) { return a_level == 0 ? E::ISHDRDownSample4RGB2Lum : E::ISHDRDownSample16Lum; };
-	const auto levelInput = [&](std::uint32_t a_level) { return a_level == 0 ? kDownsample : kFirstLevel + static_cast<std::int32_t>(a_level) - 1; };
-	const auto lastTarget = [&](std::uint32_t a_parity) { return kFirstLevel + static_cast<std::int32_t>(levels) - 1 + 2 * static_cast<std::int32_t>(a_parity); };
-	for (std::uint32_t level = 0; level + 1 < levels; ++level) {
-		StepDesc d{ .name = fmt::format("hdr.luminance{}", level), .output = engine(kFirstLevel + static_cast<std::int32_t>(level)) };
-		d.inputs[0] = engine(levelInput(level));
-		d.samplers[0] = level == 0 ? kLinear : kPoint;
-		add(1, ChainGroup::kHdr, WorldScope::Hdr, levelEffect(level), static_cast<std::uint16_t>(level), std::move(d));
-	}
-	if (levels > 0 && lastTarget(1) <= T::kHDR_DOWNSAMPLE13) {
-		const auto lastLevel = levels - 1;
-		for (std::uint16_t p = 0; p < 2; ++p) {
-			const auto variant = static_cast<std::uint16_t>(lastLevel | (1u << 8) | (static_cast<std::uint32_t>(p) << 9));
-			StepDesc l{ .name = fmt::format("hdr.luminance{}.p{}", lastLevel, p), .output = owned(chain.adapt[p]) };
-			l.inputs[0] = engine(levelInput(lastLevel));
-			l.samplers[0] = lastLevel == 0 ? kLinear : kPoint;
-			add(1, ChainGroup::kHdrLum, WorldScope::Hdr, levelEffect(lastLevel), variant, std::move(l));
-			StepDesc a{ .name = fmt::format("hdr.adapt.p{}", p), .output = owned(chain.adapt[p]) };
-			a.inputs[0] = engine(levelInput(lastLevel));
-			a.inputs[1] = owned(chain.adapt[1 - p]);
-			a.samplers[0] = kLinear;
-			add(1, ChainGroup::kHdrAdapt, WorldScope::Hdr, E::ISHDRDownSample16LightAdapt, variant, std::move(a));
-		}
-	}
-	constexpr std::array<E::ImageSpaceEffectEnum, 7> kBright{ E::ISBrightPassBlur3, E::ISBrightPassBlur5, E::ISBrightPassBlur7, E::ISBrightPassBlur9,
-		E::ISBrightPassBlur11, E::ISBrightPassBlur13, E::ISBrightPassBlur15 };
-	constexpr std::array<E::ImageSpaceEffectEnum, 7> kBlur{ E::ISBlur3, E::ISBlur5, E::ISBlur7, E::ISBlur9, E::ISBlur11, E::ISBlur13, E::ISBlur15 };
-	for (std::uint8_t r = 0; r < 7; ++r) {
-		const auto group = static_cast<std::uint8_t>(ChainGroup::kBloom + r);
-		for (std::uint16_t p = 0; p < 2; ++p) {
-			StepDesc b{ .name = fmt::format("bloom{}.bright.p{}", r, p), .output = owned(chain.bloomSwap) };
-			b.inputs[0] = engine(kDownsample);
-			b.inputs[1] = owned(chain.adapt[p]);
-			add(1, group, WorldScope::Hdr, kBright[r], p, std::move(b));
-		}
-		StepDesc d{ .name = fmt::format("bloom{}.blur", r), .output = owned(chain.bloom) };
-		d.inputs[0] = owned(chain.bloomSwap);
-		add(1, group, WorldScope::Hdr, kBlur[r], 0, std::move(d));
-	}
+	AddHdrSteps(levels, { .adapted = { owned(chain.adapt[0]), owned(chain.adapt[1]) }, .bloomSwap = owned(chain.bloomSwap), .bloom = owned(chain.bloom) },
+		[&](std::uint8_t a_group, E::ImageSpaceEffectEnum a_effect, std::uint16_t a_variant, StepDesc a_desc) {
+			add(1, a_group, WorldScope::Hdr, a_effect, a_variant, std::move(a_desc));
+		});
 
 	// t0 bloom, t1 kMAIN, t2 adapted luminance of the frame's parity.
 	for (const bool routed : { false, true })
@@ -991,42 +884,32 @@ void RegisterChainSteps()
 	for (std::uint8_t p = 0; p < 3; ++p) {
 		const auto partIndex = static_cast<std::size_t>(kChainParts[p]);
 		auto& client = state.post[partIndex];
-		auto& part = chain.parts[p];
-		client.specs.clear();
+		auto& part = table->parts[p];
 		client.batch.clear();
 		part.rowBase = rowBase;
 		std::vector<FrameAnchors::PassDesc> passes;
-		// Clear a newly made target before any pass reads it.
-		if (p == 1 && chain.bloom.fresh) {
-			AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -5);
-			builder.Add(AnchorPasses::ClearOf("bloom.clear", *chain.bloom.texture), true);
-			for (auto& pass : builder.Take())
-				passes.push_back(std::move(pass));
-		}
-		if (p == 1)
-			for (std::uint32_t h = 0; h < 2; ++h) {
-				if (!chain.adapt[h].fresh)
-					continue;
-				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -3 - static_cast<std::int32_t>(h));
-				builder.Add(AnchorPasses::ClearOf(fmt::format("hdr.adapted{}.clear", h), *chain.adapt[h].texture), true);
-				for (auto& pass : builder.Take())
-					passes.push_back(std::move(pass));
-			}
-		if (p == 2)
-			for (std::uint32_t h = 0; h < 2; ++h) {
-				if (!chain.taaHistory[h].fresh)
-					continue;
-				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -1 - static_cast<std::int32_t>(h));
-				builder.Add(AnchorPasses::ClearOf(fmt::format("taa.history{}.clear", h), *chain.taaHistory[h].texture), true);
-				for (auto& pass : builder.Take())
-					passes.push_back(std::move(pass));
-			}
+		// A copy pass made here, at its entry: always made.
+		const auto addCopy = [&](const Pending& a_step, AnchorPasses::Builder& a_builder) -> std::optional<std::uint32_t> {
+			auto made = a_builder.Take();
+			if (a_builder.Failed() || made.size() != 1)
+				return std::nullopt;
+			const auto entry = AddStep(*table, p, a_step.key, nullptr, false);
+			part.group[entry] = a_step.group;
+			part.copy[entry] = true;
+			part.route[entry] = a_step.route;
+			part.made[entry].store(true, std::memory_order_release);
+			auto pass = std::move(made.front());
+			pass.order = static_cast<std::int32_t>(entry);
+			pass.row = static_cast<std::int16_t>(part.RowOf(entry));
+			passes.push_back(std::move(pass));
+			return entry;
+		};
 		std::vector<std::uint32_t> finals;
 		for (auto& step : steps) {
 			if (step.part != p)
 				continue;
 			const auto entry = part.count;
-			if (entry >= kGateEntries || part.rowBase + entry >= 256) {
+			if (entry >= kGateEntries || part.RowOf(entry) >= 256) {
 				logger::error("[ORG] ImageSpace: the post chain has more steps than a stage's rows hold; {} has no pass", step.desc.name);
 				continue;
 			}
@@ -1035,6 +918,9 @@ void RegisterChainSteps()
 				const auto source = ImportOf(ImportOfName(kFinal));
 				const auto target = ImportOf(ImportOfName(T::kMENUBG));
 				const auto program = source && target ? CaptureProgram(RtvFormatOf(T::kMENUBG, target)) : nullptr;
+				// Not in this revision yet: this build is dropped and made again by the next revision (StepGroup::For).
+				if (source && target && !program)
+					continue;
 				if (!program || source.Width() != target.Width() || source.Height() != target.Height()) {
 					logger::error("[ORG] ImageSpace: the final target and kMENUBG differ in size, or the copy's program could not be built; a frozen "
 								  "world's capture frame has no frozen background");
@@ -1045,25 +931,15 @@ void RegisterChainSteps()
 					.program = program,
 					.bindings = { AnchorPasses::Bind::Srv(source) },
 					.target = target,
-					.viewport = { .width = target.Width(), .height = target.Height() },
+					// A zero viewport is the whole target of the version bound at preparation.
 					.gate = entry });
-				auto made = builder.Take();
-				if (builder.Failed() || made.size() != 1) {
+				const auto added = addCopy(step, builder);
+				if (!added) {
 					logger::error("[ORG] ImageSpace: post step {} has no pass ({}); a frozen world's capture frame has no frozen background", step.desc.name,
 						builder.Failure());
 					continue;
 				}
-				state.importedObjects[T::kMENUBG] = EngineObjectOf(T::kMENUBG);
-				++part.count;
-				part.keys[entry] = step.key;
-				part.group[entry] = step.group;
-				part.copy[entry] = true;
-				part.made[entry] = true;
-				chain.captureEntry = static_cast<std::uint16_t>(entry);
-				auto pass = std::move(made.front());
-				pass.order = static_cast<std::int32_t>(entry);
-				pass.row = static_cast<std::int16_t>(part.rowBase + entry);
-				passes.push_back(std::move(pass));
+				a_build.captureEntry = static_cast<std::uint16_t>(*added);
 				continue;
 			}
 			if (step.copy) {
@@ -1073,32 +949,22 @@ void RegisterChainSteps()
 				builder.Add(AnchorPasses::Copy{ .name = step.desc.name,
 					.source = AnchorPasses::TextureOf(*from.texture),
 					.target = ImportOf(ImportOfName(step.ldr ? kFinal : T::kMAIN)),
-					.width = from.texture->Desc().Width,
-					.height = from.texture->Desc().Height,
+					// Sized at preparation: the smaller of the versions bound. On a resize the image's new version
+					// can be adopted while the scratch is still at the old size.
 					.gate = entry });
-				auto made = builder.Take();
-				if (builder.Failed() || made.size() != 1) {
+				const auto added = addCopy(step, builder);
+				if (!added) {
 					logger::error("[ORG] ImageSpace: post step {} has no pass ({}); the effects before it draw nothing", step.desc.name, builder.Failure());
 					finals.clear();
 					continue;
 				}
-				++part.count;
-				part.keys[entry] = step.key;
-				part.group[entry] = step.group;
-				part.copy[entry] = true;
-				part.made[entry] = true;
-				part.route[entry] = step.route;
 				if (step.through)
-					chain.throughEntry = static_cast<std::uint16_t>(entry);
+					a_build.throughEntry = static_cast<std::uint16_t>(*added);
 				else
 					for (const auto writer : finals)
 						if (part.group[writer] == step.group)
-							part.copyBack[writer] = static_cast<std::uint16_t>(entry);
+							part.copyBack[writer] = static_cast<std::uint16_t>(*added);
 				finals.clear();
-				auto pass = std::move(made.front());
-				pass.order = static_cast<std::int32_t>(entry);
-				pass.row = static_cast<std::int16_t>(part.rowBase + entry);
-				passes.push_back(std::move(pass));
 				continue;
 			}
 			std::string error;
@@ -1107,72 +973,18 @@ void RegisterChainSteps()
 				logger::info("[ORG] ImageSpace: post step {} has no pass ({})", step.desc.name, error);
 				continue;
 			}
-			if (chain.entries.contains(step.key))
+			if (table->entries.contains(step.key))
 				logger::error("[ORG] ImageSpace: post step {} has the key of an earlier step (variant {:#x}); the hook finds only the earlier one", step.desc.name,
 					step.key.variant);
-			++part.count;
-			part.keys[entry] = step.key;
+			AddStep(*table, p, step.key, spec);
 			part.group[entry] = step.group;
 			part.route[entry] = step.route;
-			chain.entries.try_emplace(step.key, ChainSteps::Entry{ p, entry });
 			if (step.final)
 				finals.push_back(entry);
-			NoteImports(*spec);
-			passes.push_back({ .name = fmt::format("{}.{}", client.id, spec->name),
-				.anchor = Anchor::ImageSpace,
-				.order = static_cast<std::int32_t>(entry),
-				.kind = spec->key.compute ? FrameAnchors::PassKind::Compute : FrameAnchors::PassKind::Render,
-				.make = [spec, latch = std::shared_ptr<const org::LatchBlock>(client.latch), gate = std::shared_ptr<const RunGate>(client.gate), id = client.id, entry, p] {
-					auto pass = MakePass(spec, latch, gate, id);
-					Chain().parts[p].made[entry] = pass != nullptr;
-					if (!pass)
-						Chain().retry = true;
-					return pass;
-				},
-				// Every step's hook has run by the commit, so a step the engine did not draw skips and folds its barriers.
-				.atExecution = true,
-				.gpuGated = false,
-				.row = static_cast<std::int16_t>(part.rowBase + entry) });
-			client.specs.push_back(std::move(spec));
+			passes.push_back(StepPassDesc(table, p, entry, client, spec));
 		}
 		rowBase += part.count;
-		FrameAnchors::ClientDesc desc{};
-		desc.id = client.id;
-		desc.passes = std::move(passes);
-		desc.sharedConstants = true;
-		desc.gates = { client.gate };
-		if (p == 2 && ReadbackOn() && levels > 1) {
-			auto& readback = Readback();
-			if (!readback.buffer) {
-				readback.buffer = org::Buffer::CreateShared(rhi::HeapType::Readback, AdaptReadback::kSlots * AdaptReadback::kEntries * AdaptReadback::kEntryBytes);
-				if (readback.buffer)
-					readback.buffer->SetName("ImageSpace::AdaptReadback");
-			}
-			const auto inputLevel = levelInput(levels - 1);
-			static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> manager{ REL::RelocationID(524970, 411451) };
-			const auto& input = manager.get()->renderTargetData[inputLevel];
-			readback.sizes = { std::pair{ input.width, input.height }, std::pair{ chain.adapt[0].texture->Desc().Width, chain.adapt[0].texture->Desc().Height },
-				std::pair{ chain.adapt[1].texture->Desc().Width, chain.adapt[1].texture->Desc().Height } };
-			readback.formats = { RtvFormatOf(inputLevel, ImportOf(inputLevel)), chain.adapt[0].format, chain.adapt[1].format };
-			std::array<FrameAnchors::Texture, AdaptReadback::kEntries> sources{ FrameAnchors::EngineTarget(static_cast<std::uint32_t>(inputLevel)), AnchorPasses::TextureOf(*chain.adapt[0].texture), AnchorPasses::TextureOf(*chain.adapt[1].texture) };
-			bool fits = readback.buffer != nullptr;
-			for (const auto& [width, height] : readback.sizes)
-				fits = fits && width * 16 <= 256 && height * 256 <= AdaptReadback::kEntryBytes;
-			if (fits) {
-				for (auto& source : sources)
-					if (!source)
-						fits = false;
-			}
-			if (fits)
-				desc.passes.push_back({ .name = fmt::format("{}.adapt-readback", client.id),
-					.anchor = Anchor::ImageSpace,
-					.order = 1 << 20,
-					.kind = FrameAnchors::PassKind::Compute,
-					.make = [sources] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ReadbackPass>(sources)); },
-					.atExecution = true });
-			else
-				logger::warn("[ORG] ImageSpace: the adaptation readback does not fit its ring; it is off");
-		}
+		auto desc = PartClientDesc(partIndex, std::move(passes));
 		if (p == 1)
 			// Only the targets kept across frames are registered. A registered resource gets a backing in every graph that holds the client.
 			desc.registerResources = [](org::RenderGraph& a_graph) {
@@ -1181,38 +993,23 @@ void RegisterChainSteps()
 					if (*target)
 						target->texture->Register(a_graph);
 			};
-		desc.active = [partIndex] { return !IS().post[partIndex].batch.empty(); };
-		desc.commit = [partIndex, p](const FrameAnchors::Point&) {
-			auto& current = IS().post[partIndex];
-			CommitBatch(current.batch, *current.latch, *current.gate);
-			if (p == 2 && ReadbackOn() && Readback().buffer) {
-				const auto frame = Frame::Driver::Current().frame;
-				Readback().frames[frame % AdaptReadback::kSlots] = frame;
-				Readback().runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), std::make_shared<const std::uint64_t>(frame));
-			}
-		};
-		desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
-		desc.declared = [] { return Frame::PostChain::On(); };
-		desc.rows = [p](std::array<std::uint64_t, 4>& a_rows) { ChainRows(p, a_rows); };
+		// Rows read the registration's own table, never a newer one's.
+		desc.rows = [rows = std::shared_ptr<const StepTable<3>>(table), p](std::array<std::uint64_t, 4>& a_rows) { ChainRows(rows->parts[p], a_rows); };
 		desc.repeats = true;
 		desc.segmentOnly = true;
-		if (!FrameAnchors::Register(std::move(desc))) {
-			logger::error("[ORG] ImageSpace: the post chain client {} was refused", client.id);
-			chain.on = false;
-			return;
-		}
+		// An empty client is no client. Its declaration then registers none.
+		if (!desc.passes.empty())
+			a_build.descs[p] = std::move(desc);
 	}
-	chain.registered = true;
 	logger::info("[ORG] ImageSpace: the post chain is CS passes: {} composite, {} pre-tonemap and {} post-tonemap passes ({} luminance levels), for {}x{} "
-				 "into {}x{} at ratios {:.3f}x{:.3f}",
-		chain.parts[0].count, chain.parts[1].count, chain.parts[2].count, chain.levels, chain.width, chain.height, chain.finalWidth, chain.finalHeight,
-		chain.ratios.first, chain.ratios.second);
+				 "into {}x{} (render-size viewports latched per draw), built for the revision starting now",
+		table->parts[0].count, table->parts[1].count, table->parts[2].count, chain.levels, chain.width, chain.height, chain.finalWidth, chain.finalHeight);
 }
 
 bool ChainStepNow()
 {
 	const auto& chain = Chain();
-	return chain.on && chain.registered && (chain.inComposites || chain.inEndOfFrame);
+	return IS().on && chain.group.Registered() && (chain.inComposites || chain.inEndOfFrame);
 }
 
 enum class ChainDraw : std::uint8_t
@@ -1258,10 +1055,17 @@ ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std
 		case E::ISHDRDownSample16Lum:
 		case E::ISHDRDownSample16LightAdapt:
 			{
+				// Count against the build the frame holds for the HDR part, not the newest. With none held the draw is not drawn.
+				const auto held = chain.group.Held(1);
 				const auto level = chain.lumLevel++;
-				const bool isLast = level + 1 == chain.levels;
+				if (!held) {
+					Frame::Driver::NoteLaggedWork(Frame::SegmentId::Post);
+					return ChainDraw::Nothing;
+				}
+				const auto levels = held->levels;
+				const bool isLast = level + 1 == levels;
 				a_group = isLast ? (a_effect == E::ISHDRDownSample16LightAdapt ? ChainGroup::kHdrAdapt : ChainGroup::kHdrLum) : ChainGroup::kHdr;
-				a_key = { WorldScope::Hdr, a_effect, static_cast<std::uint16_t>(isLast ? (level | (1u << 8) | (static_cast<std::uint32_t>(parity) << 9)) : level) };
+				a_key = { WorldScope::Hdr, a_effect, LuminanceVariant(level, levels, parity) };
 				return ChainDraw::Step;
 			}
 		case E::ISHDRTonemapBlendCinematic:
@@ -1272,17 +1076,13 @@ ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std
 		default:
 			break;
 		}
-		constexpr std::array<E::ImageSpaceEffectEnum, 7> kBright{ E::ISBrightPassBlur3, E::ISBrightPassBlur5, E::ISBrightPassBlur7, E::ISBrightPassBlur9,
-			E::ISBrightPassBlur11, E::ISBrightPassBlur13, E::ISBrightPassBlur15 };
-		constexpr std::array<E::ImageSpaceEffectEnum, 7> kBlur{ E::ISBlur3, E::ISBlur5, E::ISBlur7, E::ISBlur9, E::ISBlur11, E::ISBlur13, E::ISBlur15 };
-		for (std::uint8_t r = 0; r < 7; ++r) {
-			if (a_effect == kBright[r] || a_effect == kBlur[r]) {
-				a_group = static_cast<std::uint8_t>(ChainGroup::kBloom + r);
-				a_key = { WorldScope::Hdr, a_effect, static_cast<std::uint16_t>(a_effect == kBright[r] ? parity : 0) };
-				return ChainDraw::Step;
-			}
-		}
-		return ChainDraw::Unknown;
+		bool bright = false;
+		const auto radius = BloomRadiusOf(a_effect, bright);
+		if (radius < 0)
+			return ChainDraw::Unknown;
+		a_group = static_cast<std::uint8_t>(ChainGroup::kBloom + radius);
+		a_key = { WorldScope::Hdr, a_effect, static_cast<std::uint16_t>(bright ? parity : 0) };
+		return ChainDraw::Step;
 	}
 	switch (a_effect) {
 	case E::ISTemporalAA:
@@ -1320,8 +1120,8 @@ ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std
 }
 
 /**
-* @brief Captures the constants the engine bound and stages them for the step's pass, then withholds the engine's draw.
-* A draw with no pass is a mismatch. A group that is off draws nothing and asks the next description for it.
+* @brief Captures the constants the engine bound and stages them for the step's pass in the build the frame runs, then withholds
+* the engine's draw. A draw with no pass, or of a group the frame's description at Begin has off, is a mismatch.
 */
 bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
 {
@@ -1339,13 +1139,10 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			fmt::format("{} in the world post chain{} has no CS pass; it draws nothing", kEffects[a_effect].effectName, chain.inHdr ? " (the HDR effect)" : ""));
 		return true;
 	}
+	// The tonemap and TAA have a routed form. The held build's schedule says which one runs.
 	const auto heldOn = [&](const StepKey& a_key) {
-		const auto at = chain.entries.find(a_key);
-		if (at == chain.entries.end())
-			return false;
-		const auto row = chain.parts[at->second.part].rowBase + at->second.entry;
-		const auto& held = Frame::Driver::Current().Segment(segment).rows;
-		return row < 256 && (held[row / 64] >> (row % 64) & 1u) != 0;
+		const auto found = chain.group.Find(a_key);
+		return found.found == StepFound::Draw && RowOn(segment, found.Part().RowOf(found.at.entry));
 	};
 	bool routedTonemap = false, routedTaa = false;
 	if (key.scope == WorldScope::Tonemap) {
@@ -1368,40 +1165,30 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			routedTaa = true;
 		}
 	}
-	const auto found = chain.entries.find(key);
-	if (found == chain.entries.end()) {
-		// Shortly after a registration the frame may run on the old build while the engine draws for the new sizes. That is lag, not a mismatch.
-		constexpr std::uint64_t kRegistrationFrames = 300;
-		if (chain.pending || Frame::Driver::Current().frame - chain.registeredFrame < kRegistrationFrames) {
-			chain.requested[group] = Frame::Driver::Current().frame;
-			Frame::Driver::NoteLaggedWork(segment);
-			return true;
-		}
-		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
-			fmt::format("{} (variant {:#x}) in the world post chain has no CS pass; it draws nothing", kEffects[a_effect].effectName, key.variant));
+	const auto what = fmt::format("post step {} (variant {:#x}, {})", kEffects[a_effect].effectName, key.variant, ChainGroupName(group));
+	const auto find = chain.group.Find(key);
+	// Behind: the engine draws for variables the build the frame runs was not made for, such as new luminance levels.
+	if (!chain.group.Draws(find, segment, what, "in the world post chain"))
+		return true;
+	const auto entry = find.at.entry;
+	const auto& part = find.Part();
+	auto& client = state.post[static_cast<std::size_t>(chain.group.PartOf(find.at.part))];
+	if (!RowOn(segment, part.RowOf(entry))) {
+		// The description at Begin has the group on, so the build the frame runs was made for a key without it: lag. Else a mismatch.
+		if (ChainGroupsOn(Frame::Driver::Current().post)[group])
+			Frame::Driver::NoteStepLag(segment, client.id, what);
+		else
+			Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
+				fmt::format("{} is drawn, and the frame's description at Begin has its group off", what));
 		return true;
 	}
-	const auto [p, entry] = found->second;
-	auto& part = chain.parts[p];
-	auto& client = state.post[static_cast<std::size_t>(kChainParts[p])];
-	const auto& rows = Frame::Driver::Current().Segment(SegmentOfPart(p)).rows;
-	const auto row = part.rowBase + entry;
-	const bool scheduled = row < 256 && (rows[row / 64] >> (row % 64) & 1u) != 0 && FrameAnchors::CanTap(client.id);
-	if (!part.made[entry] || !scheduled) {
-		static std::array<std::uint64_t, ChainGroup::kCount> logged{};
-		if (Frame::Driver::Current().frame - logged[group] >= 600 && (logged[group] = Frame::Driver::Current().frame) != 0)
-			logger::info("[ORG] ImageSpace: post step {} (variant {:#x}, {}) lags at frame {}: made {}, row {} {}, client {}", kEffects[a_effect].effectName,
-				key.variant, ChainGroupName(group), Frame::Driver::Current().frame, part.made[entry], row, row < 256 && (rows[row / 64] >> (row % 64) & 1u) ? "on" : "off",
-				FrameAnchors::CanTap(client.id) ? "tappable" : "not tappable");
-		chain.requested[group] = Frame::Driver::Current().frame;
-		Frame::Driver::NoteStepLag(segment, client.id, fmt::format("post step {} (variant {:#x})", kEffects[a_effect].effectName, key.variant));
+	if (!part.Made(entry)) {
+		// Its graph build left the pass out (MakePass says why).
+		Frame::Driver::NoteStepLag(segment, client.id, what);
 		return true;
 	}
-	// A requested group stays on while the engine draws it, since Begin's fields may miss it, as with the VL composite.
-	if (RequestHolds(chain.requested[group]))
-		chain.requested[group] = Frame::Driver::Current().frame;
 	const auto staged = client.batch.size();
-	const bool taken = StageStep(client, entry, a_effect, a_compute, a_groups);
+	const bool taken = StageStep(client, entry, part.SpecOf(entry), a_effect, a_compute, a_groups);
 	// A step whose constants could not be staged opens nothing.
 	if (client.batch.size() > staged && part.copyBack[entry] != kNoCopy)
 		client.batch.push_back({ .entry = part.copyBack[entry] });
@@ -1419,16 +1206,14 @@ void OpenThrough()
 	auto& chain = Chain();
 	const bool written = std::exchange(chain.scratchWritten, false);
 	const bool taa = std::exchange(chain.taaRouted, false);
-	if (!written || taa || chain.throughEntry == kNoCopy)
+	if (!written || taa)
 		return;
 	constexpr std::size_t p = 2;
-	auto& part = chain.parts[p];
 	auto& client = IS().post[static_cast<std::size_t>(kChainParts[p])];
-	const auto entry = chain.throughEntry;
-	const auto row = part.rowBase + entry;
-	const auto& rows = Frame::Driver::Current().Segment(Frame::SegmentId::Post).rows;
-	if (row >= 256 || !(rows[row / 64] >> (row % 64) & 1u) || !part.made[entry] || !FrameAnchors::CanTap(client.id)) {
-		// The routed tonemap ran, so its build has the copy. A schedule without it is a mismatch.
+	// The routed tonemap drew from the held build, so that build has the copy. A schedule without it is a mismatch.
+	const auto held = chain.group.Held(p);
+	const auto entry = held ? held->throughEntry : kNoCopy;
+	if (entry == kNoCopy || !RowOn(Frame::SegmentId::Post, held->table->parts[p].RowOf(entry)) || !held->table->parts[p].Made(entry)) {
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, Frame::SegmentId::Post,
 			"the routed tonemap wrote the LDR scratch, and the pass-through copy is not in the frame's schedule");
 		return;
@@ -1445,15 +1230,14 @@ void OpenCapture()
 	auto& state = IS();
 	constexpr auto segment = Frame::SegmentId::Post;
 	constexpr std::size_t p = 2;
-	auto& part = chain.parts[p];
 	auto& client = state.post[static_cast<std::size_t>(kChainParts[p])];
-	const auto entry = chain.captureEntry;
-	const auto& rows = Frame::Driver::Current().Segment(segment).rows;
-	const auto row = entry == kNoCopy ? 256u : part.rowBase + entry;
-	const bool scheduled = row < 256 && (rows[row / 64] >> (row % 64) & 1u) != 0 && part.made[entry] && FrameAnchors::CanTap(client.id);
-	if (!scheduled) {
+	const auto held = chain.group.Held(p);
+	const auto entry = held ? held->captureEntry : kNoCopy;
+	const auto row = entry == kNoCopy ? 256u : held->table->parts[p].RowOf(entry);
+	const bool made = entry != kNoCopy && held->table->parts[p].Made(entry);
+	if (!RowOn(segment, row) || !made) {
 		logger::warn("[ORG] ImageSpace: the frozen background's copy is not in frame {}'s schedule (made {}, row {}); kMENUBG keeps its last image",
-			Frame::Driver::Current().frame, entry != kNoCopy && part.made[entry], row);
+			Frame::Driver::Current().frame, made, row);
 		Frame::Driver::NoteLaggedWork(segment);
 		return;
 	}
@@ -1468,7 +1252,7 @@ void OpenCapture()
 
 struct ChainCompositesGuard
 {
-	ChainCompositesGuard() : active(Chain().on && Frame::PostChain::InChain() && FrameAnchors::IsRenderOwner())
+	ChainCompositesGuard() : active(IS().on && Frame::PostChain::InChain() && FrameAnchors::IsRenderOwner())
 	{
 		if (active)
 			Chain().inComposites = true;
@@ -1524,14 +1308,17 @@ struct ChainSlotGuard
 std::string_view AdaptedLuminanceIdOf(const ID3D11ShaderResourceView* a_view)
 {
 	const auto& chain = Chain();
-	if (!chain.on || !chain.registered || !chain.adapt[0] || !chain.adapt[1] || !a_view || chain.levels == 0)
+	// The levels of the build the frame holds for the HDR part, as the draws count them.
+	const auto held = chain.group.Held(1);
+	const auto levels = held ? held->levels : 0u;
+	if (!IS().on || !chain.group.Registered() || !chain.adapt[0] || !chain.adapt[1] || !a_view || levels == 0)
 		return {};
 	auto* view = Tripwire::Unwrap(const_cast<ID3D11ShaderResourceView*>(a_view));
 	if (!view)
 		view = const_cast<ID3D11ShaderResourceView*>(a_view);
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 	for (std::uint32_t p = 0; p < 2; ++p) {
-		const auto index = RE::RENDER_TARGET::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(chain.levels) - 1 + 2 * static_cast<std::int32_t>(p);
+		const auto index = RE::RENDER_TARGET::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(levels) - 1 + 2 * static_cast<std::int32_t>(p);
 		if (index > RE::RENDER_TARGET::kHDR_DOWNSAMPLE13)
 			return {};
 		auto* engine = targets[index].SRV;

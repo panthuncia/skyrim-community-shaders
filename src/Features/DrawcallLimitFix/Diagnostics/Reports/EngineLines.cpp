@@ -1,10 +1,8 @@
 #include "Engine.h"
 
 #include "Schedule.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Accumulated.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/Registrations.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/ReleaseGuard.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Engine/WindowWriters.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
@@ -47,27 +45,5 @@ namespace DCLF::Reports
 						   "({} without a class name){}{}{}{}",
 			c.lane, c.pool, c.unnamed, c.lane || c.pool ? " <- LANE ENGINE RELEASE; first: " : " <- OK", c.first ? c.first : "", c.lane || c.pool ? ", last: " : "",
 			(c.lane || c.pool) && c.last ? c.last : "");
-	}
-
-	std::string AnimRateLine()
-	{
-		if (!Diagnostics::Observe().accumulated)
-			return {};
-		const auto r = Diagnostics::Accumulated::TakeAnimRate();
-		std::string sites;
-		std::uint64_t differ = 0;
-		std::string first;
-		for (std::size_t s = 0; s < r.sites.size(); ++s) {
-			const auto& c = r.sites[s];
-			differ += c.differ;
-			if (c.firstDiffer && first.empty())
-				first = fmt::format("; first: {:p} ({})", c.firstDiffer, Diagnostics::Accumulated::kAnimGateCallers[s]);
-			sites += fmt::format("; {}: {} stood-in calls ({} never fading, {} fading), {} rejected ({} never fading), {} written out of view ({} of them updated by "
-								 "their fade step), {} written visible but faded out, {} differ",
-				Diagnostics::Accumulated::kAnimGateCallers[s], c.calls, c.neverFade, c.fading, c.rejected, c.rejectedNeverFade, c.predictedOut, c.acceptedOut, c.fadedOut, c.differ);
-		}
-		return fmt::format("[DCLF] anim rate (T7b2): {} predictions, {:.1f} stood-in roots a frame ({:.1f} written visible){}{}{}\n", r.predictions,
-			r.predictions ? double(r.roots) / double(r.predictions) : 0.0, r.predictions ? double(r.set) / double(r.predictions) : 0.0, sites,
-			!r.predictions ? " <- NOT COMPARED" : differ ? " <- ANIM RATE" : " <- OK", first);
 	}
 }

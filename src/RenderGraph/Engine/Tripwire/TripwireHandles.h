@@ -19,14 +19,21 @@ namespace RenderGraph::Engine::Tripwire
 {
 	namespace Detail
 	{
-		extern std::atomic<ContextFilter> contextFilter;
+		extern std::atomic<ContextObserver> contextObserver;
 
 		extern std::atomic<const NativeServices*> nativeServices;
 
-		extern std::atomic<const GuestMapHooks*> guestMapHooks;
+		extern std::atomic<const MapHooks*> mapHooks;
 
 		extern std::atomic<GuestCopyHook> guestCopyHook;
 	}
+
+	/** @brief What a handle stands for besides its wrapped object. Immutable; Retarget swaps in a new one and retires the old. */
+	struct HandleState
+	{
+		std::shared_ptr<org::Resource> graph;
+		std::shared_ptr<const void> owner;
+	};
 
 	class HandleCore
 	{
@@ -40,19 +47,21 @@ namespace RenderGraph::Engine::Tripwire
 		/** @brief Set once by the factory, before the handle is handed out. */
 		void Init(Kind a_kind, Options&& a_options, IUnknown* a_wrap);
 
-		/** @brief Starts every tripwire method. Records the call when watched, and returns whether to forward it. A filter may drop it. */
+		/** @brief Starts every tripwire method. Records the call when watched, and returns whether to forward it. */
 		bool Enter(std::uint16_t a_slot, const char* a_method, void* a_caller)
 		{
-			if (kind == Kind::DeviceContext) {
-				// In native mode the filter decides which calls the latch drops silently and which the census counts.
-				if (const auto filter = Detail::contextFilter.load(std::memory_order_relaxed);
-					filter && (wrapped || Detail::nativeServices.load(std::memory_order_relaxed)) && !filter(a_slot, a_caller))
-					return false;
-			}
-			const bool forward = wrapped != nullptr;
-			if (!forward || watch.Test(a_slot))
+			const bool forward = Wrapped() != nullptr;
+			if (!forward || watchAll)
 				Record(a_slot, a_method, a_caller, forward, {});
 			return forward;
+		}
+
+		/** @brief A context call that reaches nothing, in either mode. The observer sees it first, then it is recorded. */
+		void Trip(std::uint16_t a_slot, const char* a_method, void* a_caller) const
+		{
+			if (const auto observer = Detail::contextObserver.load(std::memory_order_relaxed))
+				observer(a_slot, a_caller);
+			Record(a_slot, a_method, a_caller, false, {});
 		}
 
 		/** @brief Counts a call at a_caller. The first one from there is logged with a_detail. */
@@ -64,12 +73,30 @@ namespace RenderGraph::Engine::Tripwire
 		std::string Name() const;
 		void SetName(std::string a_name);
 
+		/** @brief The wrapped object. Retarget may swap it; the old one lives until ServiceRetired, so a stale load stays valid. */
+		IUnknown* Wrapped() const { return wrapped.load(std::memory_order_acquire); }
+		/** @brief The ORG resource the handle stands for now. */
+		std::shared_ptr<org::Resource> Graph() const
+		{
+			const auto* current = state.load(std::memory_order_acquire);
+			return current ? current->graph : nullptr;
+		}
+		/** @brief What the handle keeps alive now. */
+		std::shared_ptr<const void> Owner() const
+		{
+			const auto* current = state.load(std::memory_order_acquire);
+			return current ? current->owner : nullptr;
+		}
+
 		Kind kind = Kind::Count;
 		std::atomic<ULONG> refs{ 1 };
-		IUnknown* wrapped = nullptr;
-		WatchSet watch;
-		std::shared_ptr<org::Resource> graph;
-		std::shared_ptr<const void> owner;
+		std::atomic<IUnknown*> wrapped{ nullptr };
+		/** @brief Guest mode with CS_ORG_TRIPWIRE_WATCH_ALL: every forwarded call is recorded too. */
+		bool watchAll = false;
+		/** @brief Null when the handle has neither a graph resource nor an owner. Owned by the core; a replaced one is retired. */
+		std::atomic<const HandleState*> state{ nullptr };
+		/** @brief Nothing is behind the handle (CreateUnbacked*, or Retarget to null). */
+		std::atomic<bool> unbacked{ false };
 
 		/** @brief A native handle's private-data interfaces, held as D3D11 holds them until the handle goes or the GUID is set again. */
 		std::vector<std::pair<GUID, winrt::com_ptr<IUnknown>>> privateInterfaces;
@@ -142,99 +169,10 @@ namespace RenderGraph::Engine::Tripwire
 			return Unwrap(a_object);
 		}
 
-		/** @brief An interface array with handles replaced by what they wrap. The source itself when it holds none. */
-		template <class T>
-		class UnwrappedArray
-		{
-		public:
-			UnwrappedArray(T* const* a_source, UINT a_count, const CallSite* a_site = nullptr) :
-				result(a_source)
-			{
-				if (!a_source)
-					return;
-				UINT first = a_count;
-				for (UINT i = 0; i < a_count && first == a_count; ++i)
-					if (a_source[i] && IsHandle(a_source[i]))
-						first = i;
-				if (first == a_count)
-					return;
-				if (a_site)
-					NoteHandleArgument(*a_site, a_source[first]);
-				T** out = local.data();
-				if (a_count > local.size()) {
-					heap.resize(a_count);
-					out = heap.data();
-				}
-				for (UINT i = 0; i < a_count; ++i)
-					out[i] = Unwrap(a_source[i]);
-				result = out;
-			}
-			UnwrappedArray(const UnwrappedArray&) = delete;
-			UnwrappedArray& operator=(const UnwrappedArray&) = delete;
-
-			operator T* const*() const { return result; }
-
-		private:
-			T* const* result;
-			std::array<T*, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> local{};
-			std::vector<T*> heap;
-		};
-
-		template <class T>
-		UnwrappedArray<T> UnwrapArray(T* const* a_source, UINT a_count, const CallSite* a_site = nullptr)
-		{
-			return { a_source, a_count, a_site };
-		}
-
 		/** @brief Registers a handle class's vtable so IsHandle recognises its objects. */
 		void RegisterHandleClass(Kind a_kind, const void* a_vtable, HandleCore* (*a_core)(void*));
 
 		HandleCore* CoreOf(const void* a_object);
-
-		struct MeterCell
-		{
-			std::uint64_t calls = 0;
-			std::uint64_t cycles = 0;
-		};
-
-		/** @brief The thread that last ended a frame, which is the only one metered. 0 when off. */
-		inline std::atomic<std::uint32_t> g_meterThread{ 0 };
-		inline thread_local const std::uint32_t t_threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
-		/** @brief Cycles of nested handle methods, taken out of the current one's time. */
-		inline thread_local std::uint64_t t_meterChild = 0;
-		/** @brief Only the metered thread writes and reads these. */
-		inline MeterCell g_meter[static_cast<std::size_t>(Kind::Count)][WatchSet::kMaxSlots]{};
-
-		/** @brief Meters one handle method's own time on the metered thread. Costs one thread-local test elsewhere. */
-		class MeterScope
-		{
-		public:
-			MeterScope(Kind a_kind, std::uint16_t a_slot) noexcept
-			{
-				if (g_meterThread.load(std::memory_order_relaxed) != t_threadId || a_kind >= Kind::Count || a_slot >= WatchSet::kMaxSlots)
-					return;
-				cell = &g_meter[static_cast<std::size_t>(a_kind)][a_slot];
-				outer = t_meterChild;
-				t_meterChild = 0;
-				start = __rdtsc();
-			}
-			~MeterScope()
-			{
-				if (!cell)
-					return;
-				const std::uint64_t elapsed = __rdtsc() - start;
-				++cell->calls;
-				cell->cycles += elapsed > t_meterChild ? elapsed - t_meterChild : 0;
-				t_meterChild = outer + elapsed;
-			}
-			MeterScope(const MeterScope&) = delete;
-			MeterScope& operator=(const MeterScope&) = delete;
-
-		private:
-			MeterCell* cell = nullptr;
-			std::uint64_t outer = 0;
-			std::uint64_t start = 0;
-		};
 
 		/** @brief For the self-test. The calls counted for a_kind's a_method, after which every site is cleared. */
 		std::uint64_t Calls(Kind a_kind, std::string_view a_method);
@@ -250,7 +188,6 @@ namespace RenderGraph::Engine::Tripwire
 #define TW_ZERO_N_AT(p, n) ::RenderGraph::Engine::Tripwire::Detail::ZeroAt(p, n);
 #define TW_ZERO_BYTES(p, n) ::RenderGraph::Engine::Tripwire::Detail::ZeroBytes(p, n);
 #define TW_UNWRAP(p) ::RenderGraph::Engine::Tripwire::Detail::UnwrapAt(p, twSite)
-#define TW_UNWRAP_ARRAY(p, n) ::RenderGraph::Engine::Tripwire::Detail::UnwrapArray(p, n, &twSite)
 
 #define TW_SLOT_ENUM(Ret, Name, Params, Args, Fail) Name,
 #define TW_SLOT_NAME(Ret, Name, Params, Args, Fail) #Name,
@@ -259,28 +196,36 @@ namespace RenderGraph::Engine::Tripwire
 	Ret STDMETHODCALLTYPE Name Params override                                                         \
 	{                                                                                                  \
 		void* const twCaller = _ReturnAddress();                                                       \
-		const ::RenderGraph::Engine::Tripwire::Detail::MeterScope twMeter{ core.kind, static_cast<std::uint16_t>(Slot::Name) }; \
 		if (core.Enter(static_cast<std::uint16_t>(Slot::Name), #Name, twCaller)) {                     \
 			[[maybe_unused]] const ::RenderGraph::Engine::Tripwire::Detail::CallSite twSite{ &core,    \
 				static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };                             \
-			return static_cast<Interface*>(core.wrapped)->Name Args;                                   \
+			return static_cast<Interface*>(core.Wrapped())->Name Args;                                 \
 		}                                                                                              \
 		TW_STRIP Fail return ::RenderGraph::Engine::Tripwire::Detail::Failure<Ret>();                  \
 	}
 
+// The context forwards nothing it does not implement itself, in either mode. Its Args are never expanded.
+#define TW_TRIP_CONTEXT(Ret, Name, Params, Args, Fail)                                                 \
+	Ret STDMETHODCALLTYPE Name Params override                                                         \
+	{                                                                                                  \
+		core.Trip(static_cast<std::uint16_t>(Slot::Name), #Name, _ReturnAddress());                    \
+		TW_STRIP Fail return ::RenderGraph::Engine::Tripwire::Detail::Failure<Ret>();                  \
+	}
+
 // Each entry is an override, so a missed slot leaves the class abstract and the factories' static_asserts catch it.
-#define TW_DECLARE_TRIPS(Iface)                                                                                       \
+#define TW_DECLARE_TRIPS(Iface) TW_DECLARE_TRIPS_AS(Iface, TW_TRIP)
+#define TW_DECLARE_TRIPS_AS(Iface, TripMacro)                                                                         \
 	class Iface##Trips : public Iface                                                                                 \
 	{                                                                                                                 \
 	public:                                                                                                           \
 		using Interface = Iface;                                                                                      \
 		enum class Slot : std::uint16_t { QueryInterface, AddRef, Release, TW_SLOTS_##Iface(TW_SLOT_ENUM) Count };   \
 		static_assert(static_cast<std::uint16_t>(Slot::Count) == TW_SLOT_COUNT_##Iface);                             \
-		static_assert(static_cast<std::size_t>(Slot::Count) <= ::RenderGraph::Engine::Tripwire::WatchSet::kMaxSlots); \
+		static_assert(static_cast<std::size_t>(Slot::Count) <= ::RenderGraph::Engine::Tripwire::kMaxMethodSlots); \
 		static constexpr const char* kSlotNames[] = { "QueryInterface", "AddRef", "Release",                          \
 			TW_SLOTS_##Iface(TW_SLOT_NAME) };                                                                         \
 		static inline const IID kIids[] = { TW_IIDS_##Iface };                                                        \
-		TW_SLOTS_##Iface(TW_TRIP)                                                                                     \
+		TW_SLOTS_##Iface(TripMacro)                                                                                   \
 	protected:                                                                                                        \
 		Iface##Trips() = default;                                                                                     \
 		::RenderGraph::Engine::Tripwire::HandleCore core;                                                             \
@@ -306,7 +251,11 @@ namespace RenderGraph::Engine::Tripwire
 	TW_DECLARE_TRIPS(ID3D11RasterizerState)
 	TW_DECLARE_TRIPS(ID3D11SamplerState)
 	TW_DECLARE_TRIPS(ID3D11Query)
-	TW_DECLARE_TRIPS(ID3D11DeviceContext)
+	// The context's trips name parameters they never read.
+#pragma warning(push)
+#pragma warning(disable: 4100)
+	TW_DECLARE_TRIPS_AS(ID3D11DeviceContext, TW_TRIP_CONTEXT)
+#pragma warning(pop)
 	TW_DECLARE_TRIPS(ID3D11Device)
 	TW_DECLARE_TRIPS(IDXGISwapChain)
 
@@ -331,7 +280,6 @@ namespace RenderGraph::Engine::Tripwire
 
 		HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
 		{
-			const Detail::MeterScope meter{ this->core.kind, static_cast<std::uint16_t>(Slot::QueryInterface) };
 			return Detail::QueryInterface(this->core, static_cast<Interface*>(this), Trips::kIids, a_riid, a_out, _ReturnAddress());
 		}
 		ULONG STDMETHODCALLTYPE AddRef() override { return ++this->core.refs; }
@@ -344,17 +292,14 @@ namespace RenderGraph::Engine::Tripwire
 		}
 		HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID a_guid, UINT a_size, const void* a_data) override
 		{
-			const Detail::MeterScope meter{ this->core.kind, static_cast<std::uint16_t>(Slot::SetPrivateData) };
 			return Detail::SetPrivateData(this->core, static_cast<std::uint16_t>(Slot::SetPrivateData), a_guid, a_size, a_data, _ReturnAddress());
 		}
 		HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID a_guid, UINT* a_size, void* a_data) override
 		{
-			const Detail::MeterScope meter{ this->core.kind, static_cast<std::uint16_t>(Slot::GetPrivateData) };
 			return Detail::GetPrivateData(this->core, static_cast<std::uint16_t>(Slot::GetPrivateData), a_guid, a_size, a_data, _ReturnAddress());
 		}
 		HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID a_guid, const IUnknown* a_data) override
 		{
-			const Detail::MeterScope meter{ this->core.kind, static_cast<std::uint16_t>(Slot::SetPrivateDataInterface) };
 			return Detail::SetPrivateDataInterface(this->core, static_cast<std::uint16_t>(Slot::SetPrivateDataInterface), a_guid, a_data, _ReturnAddress());
 		}
 
@@ -382,11 +327,11 @@ namespace RenderGraph::Engine::Tripwire
 	{
 	public:
 		explicit ResourceHandle(const Desc& a_desc) :
-			desc(a_desc) {}
+			descs{ a_desc, a_desc } {}
 		void STDMETHODCALLTYPE GetDesc(Desc* a_out) override
 		{
 			if (a_out)
-				*a_out = desc;
+				*a_out = CurrentDesc();
 		}
 		void STDMETHODCALLTYPE GetType(D3D11_RESOURCE_DIMENSION* a_out) override
 		{
@@ -394,7 +339,18 @@ namespace RenderGraph::Engine::Tripwire
 				*a_out = Dimension;
 		}
 
-		const Desc desc;
+		Desc CurrentDesc() const { return descs[current.load(std::memory_order_acquire)]; }
+		/** @brief Render owner only. Fills the spare copy, then flips to it. */
+		void SetDesc(const Desc& a_desc)
+		{
+			const std::uint8_t next = current.load(std::memory_order_relaxed) ^ 1u;
+			descs[next] = a_desc;
+			current.store(next, std::memory_order_release);
+		}
+
+	private:
+		std::array<Desc, 2> descs;
+		std::atomic<std::uint8_t> current{ 0 };
 	};
 
 	/** @brief Views answer GetResource when made with their resource. */
@@ -403,14 +359,14 @@ namespace RenderGraph::Engine::Tripwire
 	{
 	public:
 		ViewHandle(ID3D11Resource* a_resource, const Desc& a_desc) :
-			desc(a_desc)
+			descs{ a_desc, a_desc }
 		{
 			resource.copy_from(a_resource);
 		}
 		void STDMETHODCALLTYPE GetDesc(Desc* a_out) override
 		{
 			if (a_out)
-				*a_out = desc;
+				*a_out = CurrentDesc();
 		}
 		void STDMETHODCALLTYPE GetResource(ID3D11Resource** a_out) override
 		{
@@ -420,14 +376,27 @@ namespace RenderGraph::Engine::Tripwire
 				return;
 			}
 			if (this->core.Enter(static_cast<std::uint16_t>(Trips::Slot::GetResource), "GetResource", _ReturnAddress())) {
-				static_cast<typename Trips::Interface*>(this->core.wrapped)->GetResource(a_out);
+				static_cast<typename Trips::Interface*>(this->core.Wrapped())->GetResource(a_out);
 				return;
 			}
 			Detail::Zero(a_out);
 		}
 
-		const Desc desc;
+		Desc CurrentDesc() const { return descs[current.load(std::memory_order_acquire)]; }
+		/** @brief Render owner only. Fills the spare copy, then flips to it. */
+		void SetDesc(const Desc& a_desc)
+		{
+			const std::uint8_t next = current.load(std::memory_order_relaxed) ^ 1u;
+			descs[next] = a_desc;
+			current.store(next, std::memory_order_release);
+		}
+
+		/** @brief The texture handle GetResource answers. Retarget leaves it: it is the field's stable texture handle. */
 		winrt::com_ptr<ID3D11Resource> resource;
+
+	private:
+		std::array<Desc, 2> descs;
+		std::atomic<std::uint8_t> current{ 0 };
 	};
 
 	template <class Trips, Kind K, class Desc>
@@ -508,13 +477,18 @@ namespace RenderGraph::Engine::Tripwire
 		winrt::com_ptr<ID3D11DeviceContext> immediate;
 	};
 
-	/** @brief The context. GetDevice answers the paired device handle. */
+	/**
+	 * @brief The context, in either graph mode. It keeps every bind and answers its getters, and drops draws, dispatches and
+	 * everything else it does not implement. A guest context forwards only Map, Unmap, UpdateSubresource, the copies, the clears,
+	 * GenerateMips, Begin, End, GetData and Flush to DXVK; a native one answers those through the native services.
+	 * GetDevice answers the paired device handle.
+	 */
 	class DeviceContextHandle final : public Handle<DeviceContextHandle, ID3D11DeviceContextTrips, Kind::DeviceContext>
 	{
 	public:
 		void STDMETHODCALLTYPE GetDevice(ID3D11Device** a_out) override;
 
-		/** @name Answered by a native handle, forwarded through the filter by a guest one, tripwires otherwise. */
+		/** @name Answered by a native handle, forwarded by a guest one, tripwires otherwise. */
 		/** @{ */
 		HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override;
 		HRESULT STDMETHODCALLTYPE Map(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out) override;
@@ -532,7 +506,7 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE Begin(ID3D11Asynchronous* a_query) override;
 		void STDMETHODCALLTYPE End(ID3D11Asynchronous* a_query) override;
 		HRESULT STDMETHODCALLTYPE GetData(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags) override;
-		/** @name Binds. In native mode a setter stores its bind unless the flush latch drops it, and a getter answers it. */
+		/** @name Binds. A setter stores its bind and a getter answers it, in both modes. Nothing draws with them. */
 		/** @{ */
 		void STDMETHODCALLTYPE VSSetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_items) override;
 		void STDMETHODCALLTYPE VSGetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView** a_out) override;
@@ -596,8 +570,8 @@ namespace RenderGraph::Engine::Tripwire
 		/** @brief The paired device without a reference, since the device holds this context. Cleared by the device's destructor. */
 		std::atomic<ID3D11Device*> device{ nullptr };
 
-		/** @brief What D3D11 code bound in native mode, for readers that ask the context. Nothing draws with it. */
-		struct NativeBindings
+		/** @brief What the engine bound, for readers that ask the context. Nothing draws with it. */
+		struct Bindings
 		{
 			struct Stage
 			{
@@ -637,15 +611,9 @@ namespace RenderGraph::Engine::Tripwire
 
 			void Reset();
 		};
-		NativeBindings bindings;
+		Bindings bindings;
 
 	private:
-		static bool NativeBindAllowed(std::uint16_t a_slot, void* a_caller)
-		{
-			const auto filter = Detail::contextFilter.load(std::memory_order_acquire);
-			return !filter || filter(a_slot, a_caller);
-		}
-
 		template <class T, std::size_t N>
 		void Store(std::array<winrt::com_ptr<T>, N>& a_slots, UINT a_start, UINT a_count, T* const* a_items)
 		{

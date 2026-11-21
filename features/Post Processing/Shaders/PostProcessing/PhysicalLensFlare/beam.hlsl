@@ -1,18 +1,43 @@
+// Dual-target (Common/OrgResources.hlsli). On ORG the draw is not indexed: the vertex stage reads its index from BeamIndices
+// by SV_VertexID. The band and area layer are push constants.
+#include "PostProcessing/PhysicalLensFlare/resources.hlsli"
+#define PHYSICAL_LENS_BEAM_RESOURCES(X)               \
+	X(SRV, StructuredBuffer<float4>, Rays, 0)         \
+	X(SRV, StructuredBuffer<Source>, Sources, 1)      \
+	X(SRV, StructuredBuffer<Job>, Jobs, 3)            \
+	X(SRV, StructuredBuffer<Bundle>, Bundles, 4)      \
+	X(SRV, Texture2D<float4>, ApertureField, 5)       \
+	X(SAMPLER, SamplerState, ApertureSampler, 0)
+#if defined(CS_ORG_BINDLESS)
+#	if defined(PHYSICAL_LENS_COMPACT_BEAMS) || defined(PHYSICAL_LENS_GATHER)
+#		error PHYSICAL_LENS_COMPACT_BEAMS and PHYSICAL_LENS_GATHER have no ORG build
+#	endif
+struct GhostChannelConstants
+{
+	uint RenderChannel, CoarsePass;
+	float2 ChannelPadding;
+};
+#	define PHYSICAL_LENS_BEAM_ORG_RESOURCES(X)    \
+		X(SRV, StructuredBuffer<uint>, BeamIndices, 7) \
+		X(PUSH, GhostChannelConstants, GhostChannel, 5)
+#else
+#	define PHYSICAL_LENS_BEAM_ORG_RESOURCES(X)
+#endif
+ORG_PUSH_BLOCK(PHYSICAL_LENS_OPTICS_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_BEAM_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_BEAM_ORG_RESOURCES(ORG_HANDLE))
 #include "PostProcessing/PhysicalLensFlare/optics.hlsli"
 #ifdef PHYSICAL_LENS_AREA_LAYERS
 #	include "PostProcessing/PhysicalLensFlare/area.hlsli"
 #endif
-StructuredBuffer<float4> Rays : register(t0);
+PHYSICAL_LENS_BEAM_RESOURCES(ORG_RESOURCE)
+PHYSICAL_LENS_BEAM_ORG_RESOURCES(ORG_RESOURCE)
 #ifdef PHYSICAL_LENS_COMPACT_BEAMS
 StructuredBuffer<uint> RasterQuads : register(t6);
 #endif
-StructuredBuffer<Source> Sources : register(t1);
-StructuredBuffer<Job> Jobs : register(t3);
-StructuredBuffer<Bundle> Bundles : register(t4);
-Texture2D<float4> ApertureField : register(t5);
-SamplerState ApertureSampler : register(s0);
 #ifdef PHYSICAL_LENS_GATHER
 static const uint CoarsePass = 0;
+#elif defined(CS_ORG_BINDLESS)
+static uint RenderChannel = GhostChannel.RenderChannel;
+static uint CoarsePass = GhostChannel.CoarsePass;
 #else
 cbuffer GhostChannel : register(b5)
 {
@@ -71,9 +96,16 @@ void BeamVertex(uint vertex, uint instance, uint band, uint cellStep, out Vertex
 #	else
 #		define RETURN_BEAM return output
 #	endif
+#	if defined(CS_ORG_BINDLESS)
+Vertex VSMain(uint vertexId : SV_VertexID, uint instance : SV_InstanceID)
+#	else
 Vertex VSMain(uint vertex : SV_VertexID, uint instance : SV_InstanceID)
+#	endif
 #endif
 {
+#if defined(CS_ORG_BINDLESS)
+	uint vertex = BeamIndices[vertexId];
+#endif
 #ifndef PHYSICAL_LENS_GATHER
 	uint band = RenderChannel;
 	uint cellStep = 1;

@@ -13,11 +13,16 @@
 #include "CloudShadows.h"
 #include "Deferred.h"
 #include "Effects11.h"
+#include "Features/PhysicalSky/ORGCloudInputs.h"
+#include "Features/PhysicalSky/ORGCloudMaps.h"
+#include "Features/PhysicalSky/ORGPhysicalSky.h"
+#include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #include "Features/ViewAtmosphere.h"
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
 #include "PostProcessing/ColorSpace.h"
 #include "PostProcessingMode.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "SkySync.h"
 #include "TerrainShadows.h"
 
@@ -519,6 +524,12 @@ namespace
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+PhysicalSky::PhysicalSky()
+{
+	settings.enabled.Bind(CS::SettingRegistry::Declare("PhysicalSky.enabled"));
+	settings.enableVolumetricClouds.Bind(CS::SettingRegistry::Declare("PhysicalSky.enableVolumetricClouds"));
+}
+
 void PhysicalSky::DataLoaded()
 {
 	cloudStormManager.LoadInstances();
@@ -578,10 +589,18 @@ void PhysicalSky::Settings::ApplyAerosolOptics()
 	aerosolPhaseG = optics.phaseG;
 }
 
+bool PhysicalSky::VolumetricCloudsEnabled() const
+{
+	// In the graph modes, native too, the clouds are the render graph's (ORGVolumetricClouds), and the toggle is the adopted one.
+	const bool clouds = ORGPhysicalSky::On() ? ORGPhysicalSky::FrameValue(settings.enableVolumetricClouds) : settings.enableVolumetricClouds.Get();
+	return clouds && !volumetricScreenResourcesFailed;
+}
+
 bool PhysicalSky::IsActive() const
 {
 	// Needs Linear Lighting, which only Post Processing mode runs.
-	return loaded && settings.enabled && PostProcessingMode::Get() == PostProcessingMode::Mode::PostProcessing;
+	const bool enabled = ORGPhysicalSky::On() ? ORGPhysicalSky::FrameValue(settings.enabled) : settings.enabled.Get();
+	return loaded && enabled && PostProcessingMode::Get() == PostProcessingMode::Mode::PostProcessing;
 }
 
 void PhysicalSky::DrawSettings()
@@ -659,7 +678,7 @@ void PhysicalSky::SettingsGeneral()
 		ImGui::EndTable();
 	}
 
-	ImGui::Checkbox(T(TKEY("enabled"), "Enabled"), &settings.enabled);
+	Util::Checkbox(T(TKEY("enabled"), "Enabled"), settings.enabled);
 	ImGui::SameLine();
 	ImGui::Checkbox(T(TKEY("enable_all_exterior_cells"), "Enable All Exterior Cells"), &settings.enableAllExteriorCells);
 	ImGui::SameLine();
@@ -976,7 +995,7 @@ void PhysicalSky::DrawCloudStatus()
 {
 	const bool scene = SceneWidgetInterceptor::IsArmed();
 
-	ImGui::Checkbox(T(TKEY("enable_volumetric_clouds"), "Enable Volumetric Clouds"), &settings.enableVolumetricClouds);
+	Util::Checkbox(T(TKEY("enable_volumetric_clouds"), "Enable Volumetric Clouds"), settings.enableVolumetricClouds);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::Text("%s", T(TKEY("enable_volumetric_clouds_tooltip"), "Enable ray-marched volumetric clouds with NDF-based cloud shapes."));
 
@@ -1141,7 +1160,8 @@ void PhysicalSky::SettingsWeatherEffects()
 		ImGui::ColorEdit3(T(TKEY("lightning_color"), "Lightning Color"), &settings.lightning.color.x, ImGuiColorEditFlags_Float);
 		settings.SanitizeLightning();
 		ImGui::Text(T(TKEY("lightning_duration"), "Discharge Duration: %.2f s"), ((settings.lightning.strokeCount - 1) * settings.lightning.strokeInterval + settings.lightning.strokeDuration) * 0.001f);
-		if (settings.enableVolumetricClouds && settings.lightningIntensity > 0.f && (!csLightningQuery || !csLightningComposite || !csLightningCubeComposite))
+		if (settings.enableVolumetricClouds && settings.lightningIntensity > 0.f && !ORGVolumetricClouds::On() &&
+			(!csLightningQuery || !csLightningComposite || !csLightningCubeComposite))
 			Util::Text::Error("%s", T(TKEY("lightning_unavailable"), "Lightning rendering is unavailable. Nonzero Lightning Intensity still suppresses vanilla flashes and thunder. See the log for details."));
 		if (ImGui::Button(T(TKEY("lightning_trigger"), "New Lightning")))
 			lightning.Trigger();
@@ -1706,26 +1726,35 @@ void PhysicalSky::SetupResources()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		texTrLut = eastl::make_unique<Texture2D>(tex2dDesc);
-		texTrLut->CreateSRV(srvDesc);
-		texTrLut->CreateUAV(uavDesc);
+		// Graph twins in graph mode (ORGPhysicalSky), else D3D11 textures.
+		using Lut = ORGPhysicalSky::Lut;
+		const auto makeLut2D = [&](eastl::unique_ptr<Texture2D>& a_texture, Lut a_lut) {
+			if (auto* twin = ORGPhysicalSky::MakeLut2D(a_lut, tex2dDesc)) {
+				a_texture.reset(twin);
+				return;
+			}
+			a_texture = eastl::make_unique<Texture2D>(tex2dDesc);
+			a_texture->CreateSRV(srvDesc);
+			a_texture->CreateUAV(uavDesc);
+		};
+		makeLut2D(texTrLut, Lut::Transmittance);
 
 		tex2dDesc.Width = kMsLutW;
 		tex2dDesc.Height = kMsLutH;
 
-		texMsLut = eastl::make_unique<Texture2D>(tex2dDesc);
-		texMsLut->CreateSRV(srvDesc);
-		texMsLut->CreateUAV(uavDesc);
+		makeLut2D(texMsLut, Lut::Multiscatter);
 
 		tex2dDesc.Width = kSvLutW;
 		tex2dDesc.Height = kSvLutH;
 
-		texSvLut = eastl::make_unique<Texture2D>(tex2dDesc);
-		texSvLut->CreateSRV(srvDesc);
-		texSvLut->CreateUAV(uavDesc);
-		texSkyTail = eastl::make_unique<Texture2D>(tex2dDesc, "PhysicalSky::SkyTail");
-		texSkyTail->CreateSRV(srvDesc);
-		texSkyTail->CreateUAV(uavDesc);
+		makeLut2D(texSvLut, Lut::SkyView);
+		if (auto* twin = ORGPhysicalSky::MakeSkyTail(tex2dDesc)) {
+			texSkyTail.reset(twin);
+		} else {
+			texSkyTail = eastl::make_unique<Texture2D>(tex2dDesc, "PhysicalSky::SkyTail");
+			texSkyTail->CreateSRV(srvDesc);
+			texSkyTail->CreateUAV(uavDesc);
+		}
 
 		D3D11_TEXTURE3D_DESC tex3dDesc{
 			.Width = kApLutW,
@@ -1743,9 +1772,13 @@ void PhysicalSky::SetupResources()
 		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D,
 		uavDesc.Texture3D = { .MipSlice = 0, .FirstWSlice = 0, .WSize = kApLutD };
 
-		texApLut = eastl::make_unique<Texture3D>(tex3dDesc);
-		texApLut->CreateSRV(srvDesc);
-		texApLut->CreateUAV(uavDesc);
+		if (auto* twin = ORGPhysicalSky::MakeLut3D(Lut::AerialPerspective, tex3dDesc)) {
+			texApLut.reset(twin);
+		} else {
+			texApLut = eastl::make_unique<Texture3D>(tex3dDesc);
+			texApLut->CreateSRV(srvDesc);
+			texApLut->CreateUAV(uavDesc);
+		}
 	}
 	{
 		D3D11_TEXTURE2D_DESC texDesc;
@@ -1768,9 +1801,14 @@ void PhysicalSky::SetupResources()
 			.Texture2D = { .MipSlice = 0 }
 		};
 
-		texApShadow = eastl::make_unique<Texture2D>(texDesc);
-		texApShadow->CreateSRV(srvDesc);
-		texApShadow->CreateUAV(uavDesc);
+		// A graph twin in graph mode (ORGPhysicalSky), else a D3D11 texture.
+		if (auto* twin = ORGPhysicalSky::MakeApShadow(texDesc)) {
+			texApShadow.reset(twin);
+		} else {
+			texApShadow = eastl::make_unique<Texture2D>(texDesc, "PhysicalSky::ApShadow");
+			texApShadow->CreateSRV(srvDesc);
+			texApShadow->CreateUAV(uavDesc);
+		}
 	}
 
 	{
@@ -1784,12 +1822,16 @@ void PhysicalSky::SetupResources()
 			.Usage = D3D11_USAGE_DEFAULT,
 			.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS
 		};
-		texDiskPhaseLut = eastl::make_unique<Texture2D>(desc, "PhysicalSky::DiskPhaseLut");
-		D3D11_SHADER_RESOURCE_VIEW_DESC srv{ .Format = desc.Format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D };
-		srv.Texture2D.MipLevels = 1;
-		texDiskPhaseLut->CreateSRV(srv);
-		const D3D11_UNORDERED_ACCESS_VIEW_DESC uav{ .Format = desc.Format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D };
-		texDiskPhaseLut->CreateUAV(uav);
+		if (auto* twin = ORGPhysicalSky::MakeLut2D(ORGPhysicalSky::Lut::DiskPhase, desc)) {
+			texDiskPhaseLut.reset(twin);
+		} else {
+			texDiskPhaseLut = eastl::make_unique<Texture2D>(desc, "PhysicalSky::DiskPhaseLut");
+			D3D11_SHADER_RESOURCE_VIEW_DESC srv{ .Format = desc.Format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D };
+			srv.Texture2D.MipLevels = 1;
+			texDiskPhaseLut->CreateSRV(srv);
+			const D3D11_UNORDERED_ACCESS_VIEW_DESC uav{ .Format = desc.Format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D };
+			texDiskPhaseLut->CreateUAV(uav);
+		}
 		diskPhaseCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<std::array<float, 12>>(), "PhysicalSky::DiskPhaseConstants");
 		diskPhaseValid = false;
 	}
@@ -1797,6 +1839,12 @@ void PhysicalSky::SetupResources()
 	SetupVolumetricResources();
 
 	UpdateShaders();
+	ORGPhysicalSky::Get().Setup(*this);
+	// The cloud map generators on the render graph, after the managers made their twins.
+	ORGCloudMaps::Get().Setup(*this);
+	// The cloud renderer reads the generators' outputs.
+	if (ORGVolumetricClouds::On())
+		ORGVolumetricClouds::Get().SetInputSource(&ORGCloudInputs::Gather);
 }
 
 void PhysicalSky::ClearShaderCache()
@@ -1855,27 +1903,37 @@ bool PhysicalSky::ShadersOK()
 	// The cloud maps themselves are created lazily by the first generation
 	// dispatch, so readiness is a property of the generation shaders. The render
 	// path still verifies every texture before binding.
-	const bool ndfReady = (ndfManager.texHeight && ndfManager.texModeling && ndfManager.generatorProgram && ndfManager.noiseProgram);
+	// The graph modes generate the maps on the render graph, without the D3D11 programs.
+	const bool ndfReady = ndfManager.texHeight && ndfManager.texModeling && ((ndfManager.generatorProgram && ndfManager.noiseProgram) || ORGCloudMaps::On());
 	const bool cirrusMapsReady = !settings.cloudLayer.cirrus.enabled || cirrusMapManager.ShadersReady(settings.cloudLayer.cirrus);
-	const bool ambientShadersOk = settings.cloudAmbientSHOnly ||
+	// The graph modes render the clouds with the render graph's programs (ORGVolumetricClouds), never the D3D11 ones.
+	const bool graphClouds = ORGVolumetricClouds::On();
+	const bool ambientShadersOk = graphClouds || settings.cloudAmbientSHOnly ||
 	                              (csCloudAmbientLighting && csCloudAmbientDensity && csCloudAmbientBoundary && csCloudAmbientSweep &&
 									  csCloudAmbientSweepFar && csCloudAmbientProject && csCloudAmbientLayout && csCloudAmbientView &&
 									  (!voxelCloudManager.Count() || csCloudAmbientDensityVoxel));
-	const bool reconstructionShadersOk = csVolFilter &&
-	                                     (settings.cloudFastReconstruction ? csVolReprojectFast && csVolFilterWideFast :
-																			 csVolReproject && csVolFilterWide);
+	const bool reconstructionShadersOk = graphClouds ||
+	                                     (csVolFilter && (settings.cloudFastReconstruction ? csVolReprojectFast && csVolFilterWideFast :
+																						  csVolReproject && csVolFilterWide));
+	const bool d3d11Programs = graphClouds ||
+	                           (vsCloudBoundary && psCloudBoundary && csCloudHeightBounds && csCloudHeightBoundsReduce &&
+								   csVolMainView && csUpperView && csUpperSunDepth && csVolMainWithoutStorm && csVolMainSingleVolcanic && csStormTiles &&
+								   csVolCubeReproject && csVolShadowVolume && csVolShadowResample && csCloudShadowMean && csCloudShadowMeanVolcanic && csVolCubemap &&
+								   csVolAmbientSH && csCloudAmbientReduce);
 	bool volumetricShadersOk = !VolumetricCloudsEnabled() ||
-	                           (vsCloudBoundary && psCloudBoundary && texCloudBoundary && cloudBoundaryCB && cloudBoundaryIndices && cloudBoundaryBlend && cloudBoundaryRasterizer && cloudBoundaryDepth &&
-								   csCloudHeightBounds && csCloudHeightBoundsReduce && texCloudHeightBounds && texCloudHeightBoundsTiles && texCloudWeatherBounds &&
-								   ambientShadersOk && cloudAmbientVolumeCB && reconstructionShadersOk &&
-								   csVolMainView && csUpperView && csUpperSunDepth && texUpperSunDepth && csVolMainWithoutStorm && csVolMainSingleVolcanic && csStormTiles && texStormTiles && csVolCubeReproject && csVolShadowVolume && csVolShadowResample && texShadowVolumeRaw && csCloudShadowMean && csCloudShadowMeanVolcanic && texCloudShadowMean && csVolCubemap && csVolAmbientSH && csCloudAmbientReduce && texVolCloudAmbientSH && texCloudAmbientPartial &&
+	                           (d3d11Programs && ambientShadersOk && reconstructionShadersOk && texCloudBoundary && cloudBoundaryCB && cloudBoundaryIndices && cloudBoundaryBlend && cloudBoundaryRasterizer && cloudBoundaryDepth &&
+								   texCloudHeightBounds && texCloudHeightBoundsTiles && texCloudWeatherBounds && cloudAmbientVolumeCB &&
+								   // The graph declares the ambient transport volumes, which it makes at setup (EnsureCloudAmbientTransportResources).
+								   (!graphClouds || texCloudAmbientSweep) &&
+								   texUpperSunDepth && texStormTiles && texShadowVolumeRaw && texCloudShadowMean && texVolCloudAmbientSH && texCloudAmbientPartial &&
 								   texVolTr && texVolLum && texVolAux && texVolLowTr && texVolLowLum && texVolLowAux &&
 								   texVolFilteredTr && texVolFilteredLum && texVolFilteredAux &&
 								   texVolHistoryTr && texVolHistoryLum && texVolHistoryAux && texVolCubeTr && texVolCubeLum &&
 								   texVolCubeAux && texVolCubeHistoryTr && texVolCubeHistoryLum && texVolCubeHistoryAux &&
 								   texVolCubeTraceTr && texVolCubeTraceLum && texVolCubeTraceAux &&
 								   texShadowVolume && baseShapeNoiseSrv && cloudProfileLutSrv && cloudAdjustmentLutSrv && ndfReady && cirrusMapsReady);
-	const bool voxelShadersOk = !voxelCloudManager.Count() || (cloudDispatchCb && csVoxelView && csVoxelLighting && csVolCubemapVoxel && csVolShadowVoxel && csCloudShadowMeanVoxel &&
+	const bool voxelShadersOk = !voxelCloudManager.Count() || (cloudDispatchCb &&
+																  (graphClouds || (csVoxelView && csVoxelLighting && csVolCubemapVoxel && csVolShadowVoxel && csCloudShadowMeanVoxel)) &&
 																  texVoxelTraceTr && texVoxelTraceLum && texVoxelTraceAux && texVoxelTraceMotion && texVoxelTraceLightning);
 	return baseShadersOk && volumetricShadersOk && voxelShadersOk;
 }
@@ -1931,7 +1989,10 @@ void PhysicalSky::Reset()
 
 	auto& linearLighting = globals::features::linearLighting;
 
-	bool allGood = IsActive() && ShadersOK() && skySync.loaded && skySync.settings.Enabled;
+	// What the sky needs besides its toggle, for Atmosphere and Fog's composite (RendersWhenEnabled).
+	const bool usable = loaded && !globals::features::effects11.OwnsFeature(E11Handoff::Feature::PhysicalSky) && ShadersOK() && skySync.loaded &&
+	                    skySync.settings.Enabled;
+	bool allGood = IsActive() && usable;
 
 	// check worldspace
 	bool worldspaceEnabled = false;
@@ -1958,7 +2019,9 @@ void PhysicalSky::Reset()
 		}
 	}
 	bool allowForcedInterior = inInterior && settings.forceEnableAllInteriorCells;
-	allGood &= (worldspaceEnabled || settings.enableAllExteriorCells || allowForcedInterior) && (!inInterior || allowForcedInterior) && !inMainLoadingMenu;
+	const bool here = (worldspaceEnabled || settings.enableAllExteriorCells || allowForcedInterior) && (!inInterior || allowForcedInterior) && !inMainLoadingMenu;
+	allGood &= here;
+	rendersWhenEnabled = usable && here;
 
 	if (!allGood) {
 		lightning.Update(*this, worldspaceID, false);
@@ -2046,7 +2109,8 @@ void PhysicalSky::Reset()
 		.lightSkyStatics = settings.lightSkyStatics ? 1u : 0u,
 		.skyStaticsBrightness = settings.skyStaticsBrightness,
 	};
-	lightning.Update(*this, worldspaceID, allGood && !inInterior && !globals::state->isMapMenuOpen && VolumetricCloudsEnabled() && csLightningQuery && csLightningComposite && csLightningCubeComposite);
+	lightning.Update(*this, worldspaceID, allGood && !inInterior && !globals::state->isMapMenuOpen && VolumetricCloudsEnabled() &&
+										 (ORGVolumetricClouds::On() || (csLightningQuery && csLightningComposite && csLightningCubeComposite)));
 	auto lightningColor = sRGBToWorkingGamut({ cbData.lightningColorIntensity.x, cbData.lightningColorIntensity.y, cbData.lightningColorIntensity.z });
 	// Same working-gamut Y and photometric scale as the solar illuminance control.
 	const float lightningY = wideGamut ? lightningColor.x * 0.2722287168f + lightningColor.y * 0.6740817658f + lightningColor.z * 0.0536895174f :
@@ -2120,16 +2184,30 @@ void PhysicalSky::Reset()
 	cbData.volCloudUseSun = sunDir.z > -std::sin(solarLimit) ? 1u : 0u;
 }
 
+void PhysicalSky::PostPostLoad()
+{
+	Hooks::Install();
+}
+
 void PhysicalSky::EarlyPrepass()
 {
-	if (cbData.enabled) {
-		UpdateDiskPhaseLut();
-		GenerateLuts();
+	// The adopted revision may have switched the sky or its clouds since Reset.
+	ORGPhysicalSky::Get().BeginFrame(*this);
+	if (!cbData.enabled)
+		return;
+	// On the render graph the LUTs run at the EarlyPrepass anchor; D3D11's cloud passes still read the disk phase LUT at t106.
+	if (ORGPhysicalSky::Get().GenerateLuts(*this)) {
+		auto* srv = texDiskPhaseLut->srv.get();
+		globals::d3d::context->CSSetShaderResources(106, 1, &srv);
+		return;
 	}
+	UpdateDiskPhaseLut();
+	GenerateLuts();
 }
 
 void PhysicalSky::ReflectionsPrepass()
 {
+	ORGPhysicalSky::Get().BeginFrame(*this);
 	if (cbData.enabled) {
 		auto* phaseSrv = texDiskPhaseLut->srv.get();
 		globals::d3d::context->PSSetShaderResources(106, 1, &phaseSrv);
@@ -2152,6 +2230,12 @@ void PhysicalSky::ReflectionsPrepass()
 
 void PhysicalSky::ClearVolumetricToNeutral()
 {
+	// On the render graph the cloud client's next run clears the targets (ORGVolumetricClouds).
+	if (ORGVolumetricClouds::On()) {
+		ORGVolumetricClouds::Get().RequestNeutral();
+		volumetricNeutralCleared = true;
+		return;
+	}
 	auto context = globals::d3d::context;
 	for (auto* texture : { texVolTr.get(), texVolLowTr.get(), texVolHistoryTr.get(), texVolFilteredTr.get(), texVolCubeTr.get() }) {
 		if (texture)
@@ -2175,6 +2259,7 @@ void PhysicalSky::ClearVolumetricToNeutral()
 
 void PhysicalSky::Prepass()
 {
+	ORGPhysicalSky::Get().BeginFrame(*this);
 	if (IsActive() && VolumetricCloudsEnabled() && cloudProfileLutSrv && importedAdjustmentLutSrv) {
 		const bool generatedShape = settings.cloudNoise.procedural || !importedShapeNoiseSrv;
 		const bool generatedAdjustment = settings.cloudNoise.procedural;
@@ -2272,12 +2357,24 @@ void PhysicalSky::Prepass()
 			}
 			if (cloudCrossSectionDirty)
 				RenderCloudCrossSection();
+			if (ORGCloudMaps::On()) {
+				// The NDF clouds' voxel noise is a file texture the cloud renderer reads (ORGCloudInputs::Gather).
+				if (settings.cloudNoise.useVoxelNoise)
+					voxelCloudManager.Noise();
+				// The managers' work this frame is queued; a new step registers the cloud maps client again.
+				ORGCloudMaps::Get().EndFrame();
+			}
 			RenderVolumetricClouds(VolumetricCloudPass::kShadowVolume);
+		} else if (ORGCloudMaps::On() && VolumetricCloudsEnabled()) {
+			// The cloud noise generates before the renderer is ready, and its work waits for the cloud maps client.
+			ORGCloudMaps::Get().EndFrame();
 		}
 
 		GenerateSkyTail();
-		if (!globals::features::viewAtmosphere.IsPrepared())
+		// On the render graph the AP shadow runs at the Prepass anchor, and the AP composite after the graph's deferred composite.
+		if (!globals::features::viewAtmosphere.IsPrepared() && !ORGPhysicalSky::Get().AccumShadow(*this))
 			AccumShadow();
+		ORGPhysicalSky::Get().StageComposite(*this);
 
 		// Volumetric clouds
 		if (renderVolumetricClouds && !globals::features::viewAtmosphere.CompositeEnabled()) {
@@ -2388,6 +2485,9 @@ void PhysicalSky::GenerateLuts()
 void PhysicalSky::GenerateSkyTail()
 {
 	if (!globals::features::viewAtmosphere.settings.enabled || !texSkyTail || !csSkyTailGen || !globals::features::viewAtmosphere.CompositeEnabled())
+		return;
+	// On the render graph the tail runs at the Prepass anchor.
+	if (ORGPhysicalSky::Get().GenerateSkyTail(*this))
 		return;
 	auto* context = globals::d3d::context;
 	ID3D11ShaderResourceView* nullSrv = nullptr;
@@ -2603,3 +2703,4 @@ void PhysicalSky::Hooks::BSWaterShader_RestoreGeometry::thunk(RE::BSShader* This
 	func(This, Pass, RenderFlags);
 	globals::features::physicalSky.RestoreWaterSampler();
 }
+

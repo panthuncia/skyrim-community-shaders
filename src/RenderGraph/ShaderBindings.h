@@ -1,15 +1,13 @@
 #pragma once
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include <Render/LatchBlock.h>
+#include <Render/OwnedDescriptorBinding.h>
+#include <rhi.h>
 
-#	include <Render/LatchBlock.h>
-#	include <Render/OwnedDescriptorBinding.h>
-#	include <rhi.h>
-
-#	include <cstdint>
-#	include <memory>
-#	include <span>
-#	include <type_traits>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <type_traits>
 
 /**
  * @brief The C++ side of dual-target shaders (package/Shaders/Common/OrgResources.hlsli).
@@ -70,6 +68,27 @@ namespace ShaderBindings
 
 	inline org::OwnedDescriptorBinding CreateSamplerFromD3D11(const D3D11_SAMPLER_DESC& a_desc) { return CreateSampler(SamplerFromD3D11(a_desc)); }
 
+	/** @brief The samplers most ports use. Linear ones filter mips linearly too; point ones are point in every filter. */
+	enum class SamplerPreset : std::uint8_t
+	{
+		LinearClamp,       // rhi::SamplerDesc{}
+		LinearWrap,
+		LinearMirror,      // mirrored on all three axes
+		LinearBorder,      // transparent black border
+		PointClamp,
+		PointBorderWhite,  // opaque white border
+		kCount
+	};
+
+	/** @brief The description a_preset stands for. */
+	rhi::SamplerDesc SamplerDescOf(SamplerPreset a_preset);
+
+	/**
+	 * @brief The shared sampler for a_preset, made on first use and kept for the device it was made on. Every port that asks for
+	 * a preset gets the same descriptor. Render thread or a graph callback, with the runtime active. Empty and logged on failure.
+	 */
+	org::OwnedDescriptorBinding Sampler(SamplerPreset a_preset);
+
 	/**
 	 * @brief An SRV in the graph's heap for a resource the graph does not track. a_owner keeps the resource alive.
 	 * The caller must keep the resource in its shader-read layout whenever a shader may read it. Render thread. Empty on failure.
@@ -77,4 +96,3 @@ namespace ShaderBindings
 	org::OwnedDescriptorBinding CreateShaderResourceView(rhi::Resource a_resource, std::shared_ptr<const void> a_owner, const rhi::SrvDesc& a_desc);
 }
 
-#endif

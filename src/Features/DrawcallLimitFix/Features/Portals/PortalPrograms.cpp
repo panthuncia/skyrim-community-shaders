@@ -19,7 +19,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBuffers.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/FrameRetirement.h"
+#include "RenderGraph/Async/Retirement.h"
 
 #include <ORGModuleServices/BackingPool.h>
 #include <ORGModuleServices/GrowableBufferTypes.h>
@@ -73,7 +73,7 @@ namespace DCLF::Features::Portals
 			scene->members = CreateBatch(a_setup, "cs.dclf.member-portal");
 			if (!scene->members)
 				return nullptr;
-			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), FrameRetirement(),
+			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = kProgramsName, .maxPerClass = 0, .spareFree = PooledBackings::PerFrameSpares() });
 			auto standIn = a_setup.StructuredBuffer(1, 4, kStandInName);
 			if (!standIn)
@@ -207,10 +207,6 @@ namespace DCLF::Features::Portals
 
 	void RegisterPrograms(Api::InstallContext& a_context)
 	{
-		RegisterBatchCapture("members", [](const Draws::SceneBuffers& a_scene) -> const Batch* {
-			const auto* scene = SceneOf(a_scene);
-			return scene ? scene->members.get() : nullptr;
-		});
 		sceneId = a_context.RegisterSceneResources({ .name = "portal-programs", .setup = &Setup, .registerGraph = &RegisterGraph, .require = &Require, .fit = &Fit, .postInputs = &PostInputs, .inputWords = kInputWords });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::MemberQueries, .name = "member-portal-queries", .select = &SelectMembers<Api::CullBindingSlot::MemberQueries> });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::MemberResults, .name = "member-portal-results", .select = &SelectMembers<Api::CullBindingSlot::MemberResults> });

@@ -1,6 +1,6 @@
 #pragma once
 
-// Engine views that Core's view machinery can draw in the engine's place, but only once a feature takes them under its toggle.
+// Engine views that Core's view machinery can draw in the engine's place, but only once a feature takes them.
 // Also the feature's work at a view's engine points, and the engine roots a covered view's faces draw instead of the engine.
 
 #include "Features/DrawcallLimitFix/Api/Settings.h"
@@ -66,11 +66,11 @@ namespace DCLF::Api
 		float depthRange = 1.0f;
 		bool frustumCull = true;
 	};
-	/** @brief Whether a view's shape stays while its toggle is off, or is dropped from the revision. */
+	/** @brief Whether a view keeps its last shape when no new one is made, or drops it from the revision. */
 	enum class ViewShapeLife : std::uint8_t
 	{
 		KeepLast,
-		DropWhenOff,
+		DropWhenNone,
 	};
 	/** @brief A view's render area. */
 	enum class ViewArea : std::uint8_t
@@ -92,19 +92,17 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A view that is DCLF's while its toggle is on. Its callbacks run once per frame.
+	 * @brief A view that is DCLF's. Its callbacks run once per frame.
 	 *
 	 * - forwardDecals: decals on the view's entries draw in the view's forward part instead of the engine.
 	 * - membership: CategoryRoot also stops the hidden-chain test at the root, whose hidden bit belongs to the view.
 	 * - covered: render thread at the frame's start. Returns whether the view's epochs draw its members this frame.
 	 * - captureRoot: CategoryRoot only. Returns the view's root and the engine pointers it is found from.
 	 * - accumulators: InMainRenderers only. Lists the engine accumulators its members register into.
-	 * - residueDue: OwnRenderers only, for diagnostics. False on the normal path.
 	 */
 	struct ViewContribution
 	{
 		EngineView view = EngineView::Count;
-		ToggleId toggle;
 		bool forwardDecals = false;
 		std::uint8_t phase = 0;
 		ViewMembership membership = ViewMembership::LodTechniques;
@@ -114,14 +112,13 @@ namespace DCLF::Api
 		ViewArea area = ViewArea::Target;
 		ViewWithholding withholding = ViewWithholding::OwnRenderers;
 		ViewTargetImport targetImport = ViewTargetImport::ColourWithOwnDepth;
-		bool coveredInitially = false, coveredOnFailedGraph = false;
+		bool coveredInitially = false;
 		bool (*covered)(const ViewCoverage& a_coverage) = nullptr;
 		void (*captureRoot)(ViewRootCapture& a_capture) = nullptr;
 		void (*accumulators)(ViewAccumulators& a_accumulators) = nullptr;
-		bool (*residueDue)() = nullptr;
 	};
 
-	/** @brief A feature's work for a view at an engine point. Runs once per frame on the render thread, whatever the view's toggle. */
+	/** @brief A feature's work for a view at an engine point. Runs once per frame on the render thread. */
 	struct ViewWork
 	{
 		EngineView view = EngineView::Count;

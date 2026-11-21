@@ -29,7 +29,7 @@ namespace DCLF::Api
 		AsyncWorkViews,
 		// Accumulated write lines, only when the scene has the visibility readback. Text.
 		AccumulatedWrites,
-		// Forward epoch lines, when the forward epoch ran since the last report or its toggle is on. Text.
+		// Forward epoch lines. Text.
 		AsyncWorkForward,
 		// The draws' async report, every report. Text.
 		AsyncWork,

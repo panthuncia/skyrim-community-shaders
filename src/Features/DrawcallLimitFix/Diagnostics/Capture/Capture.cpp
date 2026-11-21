@@ -99,7 +99,7 @@ namespace DCLF::Capture
 		void WriteRenderSnapshot(Session& a_session, std::string_view a_label)
 		{
 			const auto dir = a_session.dir / a_label;
-			std::string text = fmt::format("DCLF capture {} snapshot, frame {}\n", a_label, Scene::FrameView::Get().GetFrame());
+			std::string text = fmt::format("DCLF capture {} snapshot, frame {}\n", a_label, Scene::FrameView::Get().SceneStep());
 			const auto section = [&](std::string_view a_name, const std::vector<std::string>& a_lines) {
 				text += fmt::format("\n[{}]\n", a_name);
 				for (const auto& line : a_lines)
@@ -110,12 +110,12 @@ namespace DCLF::Capture
 			if (dclf.installed) {
 				section("this frame", Reports::FrameSummary());
 				std::vector<std::string> executor;
-				const auto stats = SceneScheduler::Executor().GetStatistics();
+				const auto stats = ::RenderGraph::Frame::SharedExecutor().GetStatistics();
 				executor.push_back(fmt::format("jobs: accepted {}, completed {}, cancelled {}, rejected {}, failed {}", stats.accepted, stats.completed,
 					stats.cancelled, stats.rejected, stats.failed));
 				for (std::size_t d = 0; d < stats.queued.size(); ++d)
 					executor.push_back(fmt::format("domain {}: queued {}, active {}, high water {}", d, stats.queued[d], stats.active[d], stats.highWater[d]));
-				for (const auto& loop : SceneScheduler::Executor().GetParallelForStatistics(false))
+				for (const auto& loop : ::RenderGraph::Frame::SharedExecutor().GetParallelForStatistics(false))
 					executor.push_back(fmt::format("parallel for {}: {} calls, {} chunks ({} by helpers), {} blocked for {:.3f} ms in all (longest {:.3f} ms)", loop.name,
 						loop.calls, loop.chunks, loop.helperChunks, loop.blocked, loop.blockedNanoseconds / 1e6, loop.maxBlockedNanoseconds / 1e6));
 				section("scene executor (cumulative since start)", executor);
@@ -151,7 +151,6 @@ namespace DCLF::Capture
 			}
 			a_session->laneAsked.fetch_add(1, std::memory_order_acq_rel);
 			laneWanted.store(true, std::memory_order_release);
-			Scene::Coordinator::Get().RequestActorProbe("capture-" + a_label);
 			WakeScenePass(SceneWake::FrameInput);
 		}
 
@@ -174,19 +173,14 @@ namespace DCLF::Capture
 			j["game"] = { { "runtime", std::string(magic_enum::enum_name(REL::Module::GetRuntime())) }, { "version", REL::Module::get().version().string() } };
 			j["gpu"] = globals::state ? globals::state->adapterDescription : std::string{};
 			j["dxvk"] = { { "loaded", DxvkLoader::IsLoaded() }, { "nativeRequested", DxvkLoader::NativeModeRequested() } };
-			j["dclf"] = { { "installed", dclf.installed }, { "switchedOn", dclf.switchedOn }, { "running", dclf.running }, { "faulted", dclf.faulted },
-				{ "pumpLagging", dclf.pumpLagging }, { "unavailableReason", dclf.unavailableReason } };
+			j["dclf"] = { { "installed", dclf.installed }, { "unavailableReason", dclf.unavailableReason } };
 			j["switches"] = SwitchSummary();
 			j["reducedFeatures"] = ReducedFeatures();
 			j["reportInterval"] = Reports::Interval();
 			const auto& o = Diagnostics::Observe();
-			const std::pair<const char*, bool> observers[] = { { "CS_DCLF_PERSISTENT_PARITY", o.scene }, { "CS_DCLF_SET_PARITY", o.claims },
-				{ "CS_DCLF_WALK_PARITY", o.walk }, { "CS_DCLF_CHANGE_LOG_PARITY", o.changeLog }, { "CS_DCLF_RESIDENT_PARITY", o.residents },
-				{ "CS_DCLF_BUILD_PARITY", o.builds }, { "CS_DCLF_MIRROR_PARITY", o.mirror }, { "CS_DCLF_CAPTURE_PARITY", o.capture },
-				{ "CS_DCLF_PARITY_BOTH", o.engineDrawsAll }, { "CS_DCLF_CAPTURE_POINT_PARITY", o.capturePoint },
-				{ "CS_DCLF_ACCUMULATED_PARITY", o.accumulated }, { "CS_DCLF_FOLIAGE_PARITY", o.foliage }, { "CS_DCLF_STATS", o.stats },
-				{ "CS_DCLF_PASS_STATS", o.passStats }, { "CS_DCLF_PROFILE", o.profile }, { "CS_DCLF_RELEASE_GUARD", o.releaseGuard },
-				{ "CS_DCLF_FRAME_TRACE", o.frameTrace }, { "CS_DCLF_TARGET_PROBE", !o.targetProbe.empty() } };
+			const std::pair<const char*, bool> observers[] = { { "CS_DCLF_PARITY", o.parity }, { "CS_DCLF_CAPTURE_PARITY", o.capture },
+				{ "CS_DCLF_PARITY_BOTH", o.engineDrawsAll }, { "CS_DCLF_STATS", o.stats }, { "CS_DCLF_PASS_STATS", o.passStats }, { "CS_DCLF_PROFILE", o.profile },
+				{ "CS_DCLF_RELEASE_GUARD", o.releaseGuard } };
 			json set = json::array();
 			for (const auto& [name, on] : observers)
 				if (on)
@@ -197,9 +191,9 @@ namespace DCLF::Capture
 			j["compatibilityMonitor"] = Diagnostics::PlayerParity::Active();
 			if (dclf.installed) {
 				j["toggles"] = { { "requested", ToggleText(Toggles::Get().Requested()) }, { "active", ToggleText(ActiveToggles()) } };
-				const auto& conditions = Draws::CurrentGraphConditions();
+				const auto& conditions = Draws::AttachedGraphConditions();
 				j["graph"] = { { "cpuPipeline", conditions.cpuPipeline }, { "interior", conditions.interior }, { "cpuForced", Draws::CpuPipelineForced() } };
-				j["frame"] = Scene::FrameView::Get().GetFrame();
+				j["frame"] = Scene::FrameView::Get().SceneStep();
 			}
 			FILETIME created{}, exited{}, kernel{}, user{};
 			if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
@@ -265,7 +259,7 @@ namespace DCLF::Capture
 			s->fromMenu = !armedImmediate;
 			s->startWall = std::chrono::system_clock::now();
 			s->start = std::chrono::steady_clock::now();
-			s->startFrame = dclf.installed ? Scene::FrameView::Get().GetFrame() : presentCount;
+			s->startFrame = dclf.installed ? Scene::FrameView::Get().SceneStep() : presentCount;
 			const auto logDir = logger::log_directory();
 			if (!logDir) {
 				std::lock_guard lock(statusMutex);
@@ -315,19 +309,18 @@ namespace DCLF::Capture
 			f.presentMs = static_cast<float>((now.QuadPart - lastPresent.QuadPart) * msPerTick);
 			lastPresent = now;
 			const auto dclf = Dclf();
-			f.running = dclf.running;
+			f.running = dclf.installed;
 			if (dclf.installed) {
-				f.frame = Scene::FrameView::Get().GetFrame();
+				f.frame = Scene::FrameView::Get().SceneStep();
 				f.loading = Scene::FrameView::IsLoadingScreenUp();
-				const auto& conditions = Draws::CurrentGraphConditions();
+				const auto& conditions = Draws::AttachedGraphConditions();
 				f.cpuPipeline = conditions.cpuPipeline;
 				f.interior = conditions.interior;
 				const auto done = IndirectDraws::Get().ScenePassDoneFrame();
 				f.sceneLag = f.frame > done ? f.frame - done : 0u;
 				f.notReady = IndirectDraws::Get().GetStats().notReady;
-				f.adoptWaitUs = IndirectDraws::Get().LastAdoptWaitUs();
 				f.dclfUs = static_cast<std::uint32_t>(RenderThreadBudget::Get().LastFrame().totalUs);
-				const auto stats = SceneScheduler::Executor().GetStatistics();
+				const auto stats = ::RenderGraph::Frame::SharedExecutor().GetStatistics();
 				for (std::size_t d = 0; d < f.queued.size() && d < stats.queued.size(); ++d)
 					f.queued[d] = static_cast<std::uint32_t>(stats.queued[d]);
 			} else
@@ -343,7 +336,7 @@ namespace DCLF::Capture
 			auto& s = *a_session;
 			const auto dclf = Dclf();
 			s.end = std::chrono::steady_clock::now();
-			s.endFrame = dclf.installed ? Scene::FrameView::Get().GetFrame() : presentCount;
+			s.endFrame = dclf.installed ? Scene::FrameView::Get().SceneStep() : presentCount;
 			logger::info("[DCLF] capture {}: the window ended at frame {} after {} Presents; the next report window covers the capture", s.id, s.endFrame,
 				s.frames.size() + s.framesDropped);
 			Reports::Flush();

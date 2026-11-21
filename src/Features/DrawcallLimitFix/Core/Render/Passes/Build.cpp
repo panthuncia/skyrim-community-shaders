@@ -16,7 +16,6 @@ namespace DCLF::Draws
 	struct BuildDrawsBindings
 	{
 		org::DeclaredViewToken sequences, count, hzb, visibility, frustum;
-		org::DeclaredViewToken writers;  // TEMP (CS_DCLF_SET_PARITY)
 		org::DeclaredViewToken memberQueries, memberResults, memberClaims;
 		org::DeclaredViewToken sortCounts, sortStaging, sortRanks;
 		org::DeclaredViewToken fadeRoots;
@@ -98,8 +97,9 @@ namespace DCLF::Draws
 	class BuildDrawsPass final : public org::TypedRenderGraphPass<BuildDrawsPass, BuildDrawsFrame, BuildDrawsBindings>
 	{
 	public:
-		BuildDrawsPass(std::shared_ptr<Resources> a_resources, RenderGraphRuntime::Segment a_segment, std::uint32_t a_phase = 0, bool a_queries = false) :
-			resources(std::move(a_resources)), segment(a_segment), fixedPhase(a_phase), queries(a_queries) {}
+		BuildDrawsPass(std::shared_ptr<Resources> a_resources, const GraphConditions& a_conditions, RenderGraphRuntime::Segment a_segment, std::uint32_t a_phase = 0,
+			bool a_queries = false) :
+			resources(std::move(a_resources)), conditions(a_conditions), segment(a_segment), fixedPhase(a_phase), queries(a_queries) {}
 
 		BuildDrawsBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -131,8 +131,6 @@ namespace DCLF::Draws
 			bindings.sequences = a_builder.UnorderedAccess(*resources->sequences).View();
 			bindings.count = a_builder.UnorderedAccess(resources->count).View();
 			bindings.visibility = a_builder.UnorderedAccess(*resources->visibility).View();
-			if (resources->writers)
-				bindings.writers = a_builder.UnorderedAccess(*resources->writers).View();
 			if (resources->frustum)
 				bindings.frustum = a_builder.UnorderedAccess(*resources->frustum).View();
 			// Every phase reads the fade roots' static rows. Last frame's FadeStateCS states are undeclared since nothing this frame writes them.
@@ -217,9 +215,6 @@ namespace DCLF::Draws
 			SetRowStrides(constants);
 			constants.phaseBits = (phase & 0xFu) << 4;
 			views.Set(constants, constants.visibilityIndex, a_bindings.visibility);
-			// TEMP (CS_DCLF_SET_PARITY): the writer records.
-			if (a_bindings.writers.layout)
-				views.Set(constants, constants.memberClaimsIndex, a_bindings.writers);
 			// Only depth phase 1 tests every candidate's frustum, so only it stamps.
 			if (resources->frustum && phase == 1)
 				views.Set(constants, constants.frustumIndex, a_bindings.frustum);
@@ -227,7 +222,7 @@ namespace DCLF::Draws
 			if (rootRows) {
 				views.Set(constants, constants.fadeRootsIndex, a_bindings.fadeRoots);
 			}
-			const bool occlusion = Draws::OcclusionTested(*resources, *frame);
+			const bool occlusion = Draws::OcclusionTested(conditions, *resources, *frame);
 			if (occlusion) {
 				views.Set(constants, constants.hzbIndex, a_bindings.hzb);
 				constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
@@ -260,20 +255,9 @@ namespace DCLF::Draws
 				views.Set(constants, constants.classCountsIndex, a_bindings.classCounts);
 			if (now == RenderGraphRuntime::Segment::MainOpaque && a_bindings.objectGates.layout)
 				views.Set(constants, constants.objectGatesIndex, a_bindings.objectGates);
-			// With the forward family on the CPU nothing reads these ranges, so they get no capacity and nothing is staged.
-			const bool forwardOnCpu = CurrentGraphConditions().forwardDirect;
-			if (now == RenderGraphRuntime::Segment::MainOpaque && frame->forwardCapacity && !forwardOnCpu) {
-				constants.forwardBase = static_cast<std::uint32_t>(ForwardStagingSlot(*frame));
-				constants.forwardCapacity = frame->forwardCapacity;
-			}
+			// The forward family draws on the CPU, so its ranges stay empty: forwardCapacity and refractionCapacity are 0.
 			if (now == RenderGraphRuntime::Segment::MainOpaque && resources->pool)
 				views.Set(constants, constants.poolFirstsIndex, a_bindings.poolFirsts);
-			// The refraction range follows the forward halves, so forwardBase is set even without forward capacity.
-			if (now == RenderGraphRuntime::Segment::MainOpaque && frame->refractionCapacity && resources->pool && !forwardOnCpu) {
-				constants.forwardBase = static_cast<std::uint32_t>(ForwardStagingSlot(*frame));
-				constants.refractionCapacity = frame->refractionCapacity;
-				views.Set(constants, constants.poolFirstsIndex, a_bindings.poolFirsts);
-			}
 			return prepared;
 		}
 
@@ -287,7 +271,7 @@ namespace DCLF::Draws
 				auto constants = viewed;
 				SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 				commands.BindLayout(a_frame.clearQueries->layout->GetHandle());
-				commands.BindPipeline(a_frame.clearQueries->Pipeline());
+				commands.BindPipeline(a_frame.clearQueries->Pipeline(a_recording));
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 				commands.Dispatch(std::min(a_frame.queryGroups, 65535u), (a_frame.queryGroups + 65534u) / 65535u, 1);
 				const auto barrier = rhi::FullMemoryBarrier();
@@ -295,7 +279,7 @@ namespace DCLF::Draws
 			}
 
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			if (a_frame.retestIndirect) {
 				auto constants = viewed;
 				SetLatchWords(constants, *a_frame.latch, a_recording.Run());
@@ -318,14 +302,16 @@ namespace DCLF::Draws
 		bool Sorts() const { return resources->sort && segment != RenderGraphRuntime::Segment::ZPrepass; }
 
 		std::shared_ptr<Resources> resources;
+		GraphConditions conditions;  // the build's
 		RenderGraphRuntime::Segment segment;
 		std::uint32_t fixedPhase = 0;
 		bool queries = false;
 	};
 
-	std::shared_ptr<org::RenderPass> MakeBuildDrawsPass(std::shared_ptr<Resources> a_resources, RenderGraphRuntime::Segment a_segment, std::uint32_t a_phase, bool a_queries)
+	std::shared_ptr<org::RenderPass> MakeBuildDrawsPass(std::shared_ptr<Resources> a_resources, const GraphConditions& a_conditions, RenderGraphRuntime::Segment a_segment,
+		std::uint32_t a_phase, bool a_queries)
 	{
-		return std::make_shared<BuildDrawsPass>(std::move(a_resources), a_segment, a_phase, a_queries);
+		return std::make_shared<BuildDrawsPass>(std::move(a_resources), a_conditions, a_segment, a_phase, a_queries);
 	}
 
 	struct SortSequencesBindings
@@ -390,7 +376,7 @@ namespace DCLF::Draws
 			constants.sequencesIndex = a_recording.Index(a_bindings.sequences);
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kSortSequencesConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 			commands.Dispatch(a_frame.groups, 1, 1);
 		}

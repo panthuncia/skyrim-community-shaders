@@ -20,7 +20,7 @@ namespace DCLF::PulledSource
 		std::array<bool, 128> materialTexture{};
 		std::uint32_t shadowMaskSlot = 14;  // read at the pipeline row's index, as its sampler is
 		std::uint32_t samplerSlots = 16;  // s0 to s(n-1) are read from the rows
-		// CS_DCLF_LAZY_ROWS: members kept as statics. Every other one is loaded where it is read. Null keeps every member a static.
+		// Members kept as statics. Every other one is loaded where it is read. Null keeps every member a static (the offline tool's --eager).
 		const std::unordered_set<std::string>* eager = nullptr;
 	};
 

@@ -4,10 +4,14 @@
 // The feature's hooks call it. It reads the scene through Scene::FrameView and drives IndirectDraws.
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
+#include "RenderGraph/Frame/Revision.h"
 
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <memory>
+#include <span>
+#include <string_view>
 
 namespace RE
 {
@@ -18,10 +22,14 @@ namespace RE
 namespace DCLF
 {
 	/**
-	 * @brief Native mode with segments. Runs the build point at Renderer::Begin, before the frame's schedule is chosen.
-	 * BeginFrame then skips it for that frame.
+	 * @brief Registers DCLF's scene as a fragment source of the frame revision (cleanup plan A5, step 4), like any other client.
+	 * Main thread, once, before the render graph initializes. The frame revision takes DCLF's newest snapshot at every main-thread
+	 * render-owner Begin, adopts it alone or with the revision it was recorded against, and BeginFrame hands its publication over.
 	 */
-	void BuildPointAtFrameStart(std::uint64_t a_frame);
+	void RegisterSceneSource();
+
+	/** @brief DCLF's scene source, from RegisterSceneSource. */
+	RenderGraph::Frame::Revision::FragmentSourceId SceneSource();
 
 	class FrameDriver
 	{
@@ -58,15 +66,12 @@ namespace DCLF
 		/** @brief Render thread. Returns and resets the occlusion map counts. */
 		OcclusionFrames TakeOcclusionFrames();
 
-		/**
-		 * @brief Main::Draw's early point, every frame. With a_running false the coordinator's passes still apply events.
-		 * True when DCLF runs this frame.
-		 */
-		bool BeginFrame(bool a_running, bool a_installed);
+		/** @brief Main::Draw's early point, every frame. */
+		void BeginFrame();
 		/** @brief Before Present, in menus too. Queues the CPU pipeline's frame signal and the frame values' signal before DXVK presents. */
 		void BeforePresent();
 		/** @brief After Present, in menus too. Ends the frame and writes its report. */
-		void EndFrame(bool a_running);
+		void EndFrame();
 		/**
 		 * @brief Called around the engine's shadow-light selection while DCLF runs. Coverage is decided before the first light is kept,
 		 * so every shadow view's registration follows this frame's coverage.
@@ -86,10 +91,10 @@ namespace DCLF
 		 * @brief At the shadow maps, whether DCLF draws the map in this frame's shadow epoch.
 		 * At the engine's occlusion point, whether the engine must render it whole.
 		 */
-		bool OcclusionReady(std::uint32_t a_map, bool a_running);
+		bool OcclusionReady(std::uint32_t a_map);
 		/** @brief Whether the map is held, which means it renders without the engine's cull. */
 		bool OcclusionHeld(std::uint32_t a_map) const;
-		bool OcclusionNeedsEngine(std::uint32_t a_map, bool a_running);
+		bool OcclusionNeedsEngine(std::uint32_t a_map);
 		/** @brief Start of the main pass's opaque batches. Applies the engine's pending state, then captures the main view. */
 		void BeforeOpaquePass();
 		/** @brief End of the opaque batches. Runs the main view's colour epoch. */
@@ -107,9 +112,9 @@ namespace DCLF
 		Counters counters;
 		double shadowViewsMs = 0.0;
 		OcclusionFrames occlusionFrames;  // native and engine only, the rest is read at the take
-		bool frameRan = false;  // since the last Present
 		std::uint32_t occlusionHeld = 0;
 		std::uint32_t occlusionWanted = 0;  // until AfterShadowMaps
+		std::uint32_t occlusionTaken = 0;   // the maps AfterShadowMaps asked the shadow epoch for, this frame
 		std::uint32_t occlusionDrawn = 0;
 		std::uint32_t occlusionEverDrawn = 0;  // an engine draw of one of these is a re-entry
 		// Per map, frames in a row the engine would have drawn it whole. A map DCLF never drew counts as a re-entry only

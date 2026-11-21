@@ -10,12 +10,14 @@
 #include "Features/DrawcallLimitFix/Integrations/IBL/IBL.h"
 #include "Features/DrawcallLimitFix/Integrations/ImprovedCamera/ImprovedCamera.h"
 #include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LightLimitFix.h"
+#include "Features/DrawcallLimitFix/Integrations/PhysicalSky/PhysicalSky.h"
 #include "Features/DrawcallLimitFix/Integrations/ScreenSpaceShadows/ScreenSpaceShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/Skylighting/Skylighting.h"
 #include "Features/DrawcallLimitFix/Integrations/SubsurfaceScattering/SubsurfaceScattering.h"
 #include "Features/DrawcallLimitFix/Integrations/TerrainBlending/TerrainBlending.h"
 #include "Features/DrawcallLimitFix/Integrations/TerrainShadows/TerrainShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/TruePBR/TruePBRIntegration.h"
+#include "Features/DrawcallLimitFix/Integrations/ViewAtmosphere/ViewAtmosphere.h"
 #include "Features/DrawcallLimitFix/Integrations/VolumetricShadows/VolumetricShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/WaterEffects/WaterEffects.h"
 
@@ -34,12 +36,14 @@ namespace DCLF::Integrations
 			ExtendedTranslucency::Integration(),
 			VolumetricShadows::Integration(),
 			ExponentialHeightFog::Integration(),
+			ViewAtmosphere::Integration(),
 			CloudShadows::Integration(),
 			DynamicCubemaps::Integration(),
 			Skylighting::Integration(),
 			TerrainShadows::Integration(),
 			WaterEffects::Integration(),
 			IBL::Integration(),
+			PhysicalSky::Integration(),
 			ScreenSpaceShadows::Integration(),
 			ImprovedCamera::Integration(),
 		};

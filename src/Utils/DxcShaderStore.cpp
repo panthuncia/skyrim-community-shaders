@@ -1,13 +1,11 @@
 #include "Utils/DxcShaderStore.h"
 
-#include "Utils/SharedShaderStore.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 #include "Utils/SpirvReflect.h"
 
 #include <ORGModuleServices/ShaderCompiler.h>
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/Backend.h"
-#endif
+#include "RenderGraph/Backend.h"
 
 #include <d3d12shader.h>
 #include <dxcapi.h>
@@ -16,6 +14,9 @@
 #include <cstring>
 #include <fstream>
 #include <regex>
+
+// Last: DXVK's interop header includes vulkan.h only when no Vulkan header is in, so volk users come first.
+#include "DxvkExports.h"
 
 namespace Util
 {
@@ -33,30 +34,20 @@ namespace Util
 			return static_cast<uint32_t>(a_tag[0]) | (static_cast<uint32_t>(a_tag[1]) << 8) | (static_cast<uint32_t>(a_tag[2]) << 16) | (static_cast<uint32_t>(a_tag[3]) << 24);
 		}
 
-		using PFN_IngestVersion = uint32_t(__stdcall*)();
-		using PFN_ContainerHash = void(__stdcall*)(const void*, size_t, uint32_t*);
-
-		HMODULE DxvkModule()
-		{
-			return GetModuleHandleW(L"dxvk_d3d11.dll");
-		}
+		using PFN_ContainerHash = DxvkExports::SpirvContainerHashFn;
 
 		PFN_ContainerHash ContainerHash()
 		{
-			static const auto hash = [] {
-				const auto module = DxvkModule();
-				return module ? reinterpret_cast<PFN_ContainerHash>(reinterpret_cast<void*>(GetProcAddress(module, "dxvkSpirvContainerHash"))) : nullptr;
-			}();
-			return hash;
+			return DxvkExports::Get().spirvContainerHash;
 		}
 
 		bool IngestAvailable()
 		{
 			static const bool available = [] {
-				const auto module = DxvkModule();
-				if (!module)
+				const auto& dxvk = DxvkExports::Get();
+				if (!dxvk.Loaded())
 					return false;
-				const auto version = reinterpret_cast<PFN_IngestVersion>(reinterpret_cast<void*>(GetProcAddress(module, "dxvkSpirvIngestVersion")));
+				const auto version = dxvk.spirvIngestVersion;
 				if (!version || version() != kIngestVersion || !ContainerHash()) {
 					logger::warn("DXVK does not take this version of DXC shaders, so they stay on FXC");
 					return false;
@@ -66,22 +57,10 @@ namespace Util
 			return available;
 		}
 
-		// Runs on the calling thread, which is already one of the shader cache's workers. Beside the DXVK DLLs, as the render graph's.
-		org::services::ShaderCompiler& Compiler()
+		// The render graph runtime's compiler. Null while the runtime is down, and then every shader stays on FXC.
+		org::services::ShaderCompiler* Compiler()
 		{
-			static auto* compiler = [] {
-				std::filesystem::path directory;
-				wchar_t path[MAX_PATH];
-				if (const auto module = DxvkModule(); module && GetModuleFileNameW(module, path, MAX_PATH))
-					directory = std::filesystem::path(path).parent_path();
-				auto* created = new org::services::ShaderCompiler({}, directory, SharedShaderStore());
-				created->Configure([](org::services::ServiceTask a_task) {
-					a_task();
-					return true;
-				});
-				return created;
-			}();
-			return *compiler;
+			return ::RenderGraphRuntime::Get().ShaderCompiler();
 		}
 
 		std::wstring Widen(std::string_view a_text)
@@ -315,11 +294,9 @@ namespace Util
 
 	bool UseDxc(const std::filesystem::path& a_root, std::string_view a_target, uint32_t a_descriptor)
 	{
-#if defined(CS_HAS_RENDER_GRAPH)
 		// The containers built here carry SPIR-V for DXVK. On D3D12 there is no DXVK to take them, so every game shader builds with FXC.
 		if (::RenderGraph::Backend::IsD3D12())
 			return false;
-#endif
 		static const std::optional<std::regex> pattern = []() -> std::optional<std::regex> {
 			// Without CS_SHADER_DXC, only the shaders measured faster through DXC on DXVK build with it: the image-space blurs.
 			// An empty CS_SHADER_DXC builds everything with FXC.
@@ -336,7 +313,7 @@ namespace Util
 				return std::nullopt;
 			}
 		}();
-		return pattern && IngestAvailable() && Compiler().Available() && std::regex_search(std::format("{}:{}:{:08X}", a_root.generic_string(), a_target, a_descriptor), *pattern);
+		return pattern && IngestAvailable() && Compiler() && std::regex_search(std::format("{}:{}:{:08X}", a_root.generic_string(), a_target, a_descriptor), *pattern);
 	}
 
 	DxcResult ResolveDxcShader(const DxcRequest& a_request)
@@ -375,8 +352,13 @@ namespace Util
 		auto interfaceRequest = request;
 		interfaceRequest.arguments.insert(interfaceRequest.arguments.end(), { L"-fcgl", L"-fspv-reflect" });
 
-		auto& compiler = Compiler();
-		const auto optimized = compiler.Compile(std::move(request));
+		// On the calling thread, which is already one of the shader cache's workers, not the compiler's submitter.
+		auto* compiler = Compiler();
+		if (!compiler) {
+			result.diagnostics = "the render graph runtime has no shader compiler";
+			return result;
+		}
+		const auto optimized = compiler->CompileHere(std::move(request));
 		result.diagnostics = optimized.diagnostics;
 		result.variantKey = optimized.variantKey;
 		if (!optimized)
@@ -387,7 +369,7 @@ namespace Util
 		std::vector<std::byte> inputs, outputs;
 		bool fromStore = optimized.fromCache;
 		if (hasInterface) {
-			const auto whole = compiler.Compile(std::move(interfaceRequest));
+			const auto whole = compiler->CompileHere(std::move(interfaceRequest));
 			if (!whole) {
 				result.diagnostics = whole.diagnostics;
 				return result;
@@ -416,16 +398,6 @@ namespace Util
 		result.blob = MakeContainer(std::move(inputs), std::move(outputs), placed);
 		result.fromStore = fromStore;
 		return result;
-	}
-
-	std::vector<uint32_t> DxcSpirvModule(std::span<const std::byte> a_container)
-	{
-		// Copied: a chunk need not be aligned for its words.
-		const auto code = FindChunk(a_container, Tag("SPRV"));
-		std::vector<uint32_t> words(code.size() / sizeof(uint32_t));
-		if (!words.empty())
-			std::memcpy(words.data(), code.data(), words.size() * sizeof(uint32_t));
-		return words;
 	}
 
 	const ShaderReflection::Buffer* ShaderReflection::FindBuffer(std::string_view a_name) const

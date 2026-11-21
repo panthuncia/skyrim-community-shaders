@@ -1,4 +1,5 @@
 #include "Files.h"
+#include "Utils/Hash.h"
 
 #include "../Runtime/Textures.h"
 #include "Utils/FileSystem.h"
@@ -59,10 +60,7 @@ namespace SkinEditor
 
 	uint64_t Fingerprint(std::span<const uint8_t> a_bytes)
 	{
-		uint64_t value = 14695981039346656037ULL;
-		for (auto byte : a_bytes)
-			value = (value ^ byte) * 1099511628211ULL;
-		return value;
+		return Util::Fnv1a{}.Bytes(a_bytes.data(), a_bytes.size()).Value();
 	}
 
 	std::optional<Bytes> FindResource(const std::string& a_path)

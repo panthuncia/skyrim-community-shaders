@@ -1,52 +1,40 @@
-#if defined(CS_HAS_RENDER_GRAPH)
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
-#endif
+#include <rhi_interop_vulkan.h>
 
 #include "Features/CloudShadows/ORGCloudShadows.h"
-#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Switches.h"
 
-bool ORGCloudShadows::Requested()
-{
-	static const bool requested = RenderGraph::Engine::Native::GraphMode();
-	return requested;
-}
+#include "Features/CloudShadows.h"
+#include "Globals.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/D3D11Wrapper.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "RenderGraph/ShaderBindings.h"
 
-ORGCloudShadows& ORGCloudShadows::Get()
-{
-	static ORGCloudShadows s_cloudShadows;
-	return s_cloudShadows;
-}
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/GloballyIndexedResource.h>
 
-#if defined(CS_HAS_RENDER_GRAPH)
-
-#	include "Features/CloudShadows.h"
-#	include "Globals.h"
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/PublishedResources.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
-#	include "RenderGraph/ShaderBindings.h"
-
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/GloballyIndexedResource.h>
-
-#	include <algorithm>
-#	include <array>
-#	include <cstddef>
-#	include <format>
-#	include <span>
-#	include <utility>
-#	include <string>
-#	include <vector>
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <format>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <utility>
+#include <string>
+#include <vector>
 
 namespace
 {
@@ -68,7 +56,7 @@ namespace
 
 struct ORGCloudShadows::Impl
 {
-	std::shared_ptr<const ComputeProgram> program;
+	RenderGraph::Programs::Fixed<ComputeProgram> program;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	std::unique_ptr<GraphResources::Texture2D> occlusion;
 	FrameAnchors::Texture lastLayer;
@@ -139,7 +127,7 @@ namespace
 					OcclusionCopyBlock block{};
 					block.faces.fill(a_recording.Index(a_bindings.layer[mip * kFaces + face]));
 					block.occlusion = a_recording.Index(a_bindings.targets[mip * kFaces + face]);
-					impl.gate->Dispatch(a_recording, *impl.program, ShaderBindings::Data(block), impl.Entry(face, mip));
+					impl.gate->Dispatch(a_recording, *impl.program.Get(), ShaderBindings::Data(block), impl.Entry(face, mip));
 				}
 			}
 		}
@@ -149,6 +137,24 @@ namespace
 		FrameAnchors::Texture from;
 		std::shared_ptr<org::Resource> to;
 	};
+
+
+	/**
+	* @brief The occlusion copy's client, declared at Setup on the reflection cubemap. Its key is the cubemap's edge. Kept here
+	* and not in Impl, since its functions hold the Impl.
+	*/
+	RenderGraph::Frame::DeclaredClient& CopyClient()
+	{
+		static RenderGraph::Frame::DeclaredClient s_client;
+		return s_client;
+	}
+
+	/** @brief The layer operations' declared client. Its registration never changes, so its key is constant. */
+	RenderGraph::Frame::DeclaredClient& LayersClient()
+	{
+		static RenderGraph::Frame::DeclaredClient s_client;
+		return s_client;
+	}
 
 	/** @brief Copies every face and mip on the run after the frame's first reflections prepass. */
 	void Commit(Impl& a_impl)
@@ -165,32 +171,31 @@ namespace
 	}
 }
 
-void ORGCloudShadows::Reserve()
-{
-	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::ReflectionsPrepass))
-		logger::warn("[ORG] Cloud Shadows stays on D3D11: the ReflectionsPrepass anchor could not be reserved");
-	// The frame's last propagation of the layers. SkyReflections is the sky family's to reserve.
-	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::EarlyPrepass))
-		logger::warn("[ORG] Cloud Shadows: the EarlyPrepass anchor could not be reserved; the layers' last propagation stays on D3D11");
-}
-
 namespace
 {
-	/** @brief A null entry is a D3D11 layer. */
+	/** @brief In graph mode every layer is a twin. A null entry is a layer not made yet. */
 	std::array<std::unique_ptr<GraphResources::Texture2D>, CloudShadows::kMaxCloudLayers>& LayerTwins()
 	{
 		static std::array<std::unique_ptr<GraphResources::Texture2D>, CloudShadows::kMaxCloudLayers> s_twins;
 		return s_twins;
 	}
+
+	/** @brief The layers' D3D11 wrappers' registrations, kept with their twins. */
+	std::array<GraphResources::D3D11Wrapper<::Texture2D>, CloudShadows::kMaxCloudLayers>& LayerWrappers()
+	{
+		static std::array<GraphResources::D3D11Wrapper<::Texture2D>, CloudShadows::kMaxCloudLayers> s_wrappers;
+		return s_wrappers;
+	}
 }
 
 Texture2D* ORGCloudShadows::MakeLayer(int a_layer, const D3D11_TEXTURE2D_DESC& a_desc, const D3D11_SHADER_RESOURCE_VIEW_DESC& a_srvDesc, const char* a_name)
 {
-	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers || !Requested() || !RenderGraphRuntime::Get().IsActive())
+	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers || !On())
 		return nullptr;
 	auto& twin = LayerTwins()[a_layer];
+	// Made again, the layer stays the twin it is.
 	if (twin)
-		return nullptr;
+		return LayerWrappers()[a_layer].Get();
 	// Drawn by D3D11 and the graph, written by layer ops, and sampled by engine draws, so exported and never aliased.
 	// A face keeps its clouds until the next frame draws it.
 	D3D11_TEXTURE2D_DESC desc = a_desc;
@@ -200,89 +205,52 @@ Texture2D* ORGCloudShadows::MakeLayer(int a_layer, const D3D11_TEXTURE2D_DESC& a
 	desc.Usage = D3D11_USAGE_DEFAULT;
 	auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(a_name),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
-	if (!*texture || !texture->D3D11() || !std::dynamic_pointer_cast<org::ExternalTextureResource>(texture->Graph())) {
-		logger::warn("[ORG] Cloud Shadows: {} could not be made on the render graph; it is a D3D11 texture", a_name);
-		return nullptr;
-	}
+	if (!texture->D3D11() || !std::dynamic_pointer_cast<org::ExternalTextureResource>(texture->Graph()))
+		Fatal(fmt::format("{} could not be made on the render graph", a_name));
 	// Published so every graph that declares it gets one resource.
-	if (!PublishedResources::Publish(*texture)) {
-		logger::warn("[ORG] Cloud Shadows: {} could not be published; it is a D3D11 texture", a_name);
-		return nullptr;
-	}
-	// The twin keeps the image, the wrapper keeps the D3D11 texture and its views.
-	auto* d3d11 = texture->D3D11();
-	d3d11->AddRef();
-	auto* wrapper = new Texture2D(d3d11, a_name);
-	try {
-		wrapper->CreateSRV(a_srvDesc);
-	} catch (const std::exception& e) {
-		logger::warn("[ORG] Cloud Shadows: {}'s SRV could not be made on the export ({}); it is a D3D11 texture", a_name, e.what());
-		delete wrapper;
-		return nullptr;
-	}
+	if (!PublishedResources::Publish(*texture))
+		Fatal(fmt::format("{} could not be published", a_name));
+	// The twin keeps the image, the wrapper keeps the D3D11 texture and its own SRV. A failed view is fatal there.
+	GraphResources::WrapperViews views;
+	views.srv = a_srvDesc;
+	auto wrapper = GraphResources::MakeWrapper(*texture, a_name, views);
+	LayerWrappers()[a_layer] = wrapper;
 	twin = std::move(texture);
 	if (a_layer == 0)
 		logger::info("[ORG] Cloud Shadows: the cloud layers are graph textures ({}x{}, {} mips), published by name", desc.Width, desc.Height, desc.MipLevels);
-	return wrapper;
+	return wrapper.Get();
 }
 
 std::string ORGCloudShadows::PublishedLayerId(int a_layer)
 {
-	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers || !LayerTwins()[a_layer] || !RenderGraphRuntime::Get().IsActive())
+	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers || !LayerTwins()[a_layer])
 		return {};
 	return LayerTwins()[a_layer]->Name();
 }
 
 FrameAnchors::Texture ORGCloudShadows::ImportLayer(int a_layer)
 {
-	auto& cloudShadows = globals::features::cloudShadows;
 	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers)
 		return nullptr;
-	if (const auto& twin = LayerTwins()[a_layer]; twin && RenderGraphRuntime::Get().IsActive())
-		return std::dynamic_pointer_cast<org::ExternalTextureResource>(twin->Graph());
-	auto* layer = cloudShadows.texCloudShadowLayers[a_layer];
-	if (!layer || !layer->resource || !layer->srv || !cloudShadows.cloudShadowLayerRTVs[a_layer][0])
-		return nullptr;
-	// A D3D11 layer, imported. Each lives as long as the feature.
-	return FrameAnchors::D3D11Texture(fmt::format("CloudShadows::Layer[{}]", a_layer), layer->resource.get(), layer->srv.get(), nullptr,
-		cloudShadows.cloudShadowLayerRTVs[a_layer][0]);
+	const auto& twin = LayerTwins()[a_layer];
+	return twin ? std::dynamic_pointer_cast<org::ExternalTextureResource>(twin->Graph()) : nullptr;
 }
 
-bool ORGCloudShadows::IsActive() const
-{
-	return impl && RenderGraphRuntime::Get().IsActive();
-}
 
 ID3D11ShaderResourceView* ORGCloudShadows::OcclusionSRV() const
 {
 	return IsActive() ? impl->occlusion->SRV() : nullptr;
 }
 
-void ORGCloudShadows::Stop()
-{
-	FrameAnchors::Unregister(kLayersClientId);
-	layerOps.reset();
-	FrameAnchors::Unregister(kClientId);
-	PublishedResources::Withdraw(kOcclusionId);
-	impl.reset();
-}
-
 bool ORGCloudShadows::Setup()
 {
-	impl.reset();
-	if (!Requested())
-		return false;
-	auto* host = RenderGraphRuntime::Get().Host();
-	if (!host || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::ReflectionsPrepass)) {
-		logger::warn("[ORG] Cloud Shadows stays on D3D11: the render graph or its ReflectionsPrepass anchor is not available");
-		return false;
-	}
+	// Once a session. The occlusion cubemap is published, so it is never torn down.
+	if (!BeginSetup())
+		return IsActive();
 	auto& cloudShadows = globals::features::cloudShadows;
 	auto* lastLayer = cloudShadows.texCloudShadowLayers[kLastLayer];
-	if (!lastLayer || !lastLayer->srv) {
-		logger::error("[ORG] Cloud Shadows: its layer textures are missing; it stays on D3D11");
-		return false;
-	}
+	if (!lastLayer || !lastLayer->srv)
+		Fatal("its layer textures are missing");
 
 	D3D11_TEXTURE2D_DESC layerDesc{};
 	lastLayer->resource->GetDesc(&layerDesc);
@@ -291,16 +259,8 @@ bool ORGCloudShadows::Setup()
 	next->height = layerDesc.Height;
 	next->mips = layerDesc.MipLevels;
 
-	next->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<OcclusionCopyBlock>() });
-	if (!next->program) {
-		logger::error("[ORG] Cloud Shadows: {} could not be compiled; it stays on D3D11", kShader);
-		return false;
-	}
+	next->program = RenderGraph::Programs::Queue("CloudShadows", ComputeProgram::Desc{ .source = kShader, .constantWords = ShaderBindings::Words<OcclusionCopyBlock>() });
 	next->gate = RenderGraph::RunGate::Create("CloudShadows::OcclusionCopyGate", kFaces * next->mips);
-	if (!next->gate) {
-		logger::error("[ORG] Cloud Shadows: its run gate could not be created; it stays on D3D11");
-		return false;
-	}
 
 	const D3D11_TEXTURE2D_DESC desc{ .Width = layerDesc.Width,
 		.Height = layerDesc.Height,
@@ -314,49 +274,56 @@ bool ORGCloudShadows::Setup()
 	// Engine draws read it at t25 and t26 until they are ported. A frame without the full sky keeps the last copy, so it is kept across frames.
 	next->occlusion = std::make_unique<GraphResources::Texture2D>(desc, std::string(kOcclusionId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
-	if (!*next->occlusion || !next->occlusion->SRV()) {
-		logger::error("[ORG] Cloud Shadows: the {}x{} occlusion cubemap could not be created; it stays on D3D11", desc.Width, desc.Height);
-		return false;
-	}
+	if (!next->occlusion->SRV())
+		Fatal(fmt::format("the {}x{} occlusion cubemap could not be created", desc.Width, desc.Height));
 	next->lastLayer = ImportLayer(kLastLayer);
-	if (!next->lastLayer) {
-		logger::error("[ORG] Cloud Shadows: the last cloud layer could not be imported; it stays on D3D11");
-		return false;
-	}
+	if (!next->lastLayer)
+		Fatal("the last cloud layer could not be imported");
 
-	FrameAnchors::ClientDesc client{};
-	client.id = kClientId;
-	client.passes.push_back({ .name = std::string(kClientId) + ".occlusion-copy",
-		.anchor = FrameAnchors::Anchor::ReflectionsPrepass,
-		.order = 0,
-		.kind = FrameAnchors::PassKind::Compute,
-		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); } });
-	client.registerResources = [next](org::RenderGraph& a_graph) { next->occlusion->Register(a_graph); };
-	client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
-	// The anchor runs at every cubemap render, but only the run after the frame's first reflections prepass copies, as on D3D11.
-	client.active = [next] { return next->pending; };
-	client.gates = { next->gate };
-	impl = next;
-	if (!FrameAnchors::Register(std::move(client))) {
-		impl.reset();
-		return false;
-	}
+	// The layers and the occlusion cubemap are sized once, from the engine's reflection cubemap, which the engine makes once a
+	// session (Q4). The client is declared on that cubemap, so a revision that carries another edge is fatal: the D3D11 layers
+	// and their views do not follow it. The first evaluation is at the next revision.
+	const UINT layerEdge = next->width;
+	CopyClient() = RenderGraph::Frame::DeclareClient<std::uint32_t>(
+		kClientId, RenderGraph::Frame::DependsOn(RenderGraph::Frame::Vars::ReflectionCubemap()),
+		[layerEdge](const RenderGraph::Frame::Inputs& a_in) -> std::optional<std::uint32_t> {
+			// Zero before the engine's targets raised it: the layers' edge.
+			const std::uint32_t edge = a_in.Get(RenderGraph::Frame::Vars::ReflectionCubemap()).size;
+			return edge ? edge : layerEdge;
+		},
+		[next](const std::uint32_t& a_edge, FrameAnchors::ClientDesc& a_client) {
+			if (a_edge != next->width)
+				RenderGraph::Fatal(kName, fmt::format("the reflection cubemap is {} wide, but the cloud layers were made {} wide", a_edge, next->width));
+			a_client.id = kClientId;
+			a_client.passes.push_back({ .name = std::string(kClientId) + ".occlusion-copy",
+				.anchor = FrameAnchors::Anchor::ReflectionsPrepass,
+				.order = 0,
+				.kind = FrameAnchors::PassKind::Compute,
+				.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); } });
+			a_client.registerResources = [next](org::RenderGraph& a_graph) { next->occlusion->Register(a_graph); };
+			a_client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
+			// The anchor runs at every cubemap render, but only the run after the frame's first reflections prepass copies, as on D3D11.
+			a_client.active = [next] { return next->pending; };
+			a_client.gates = { next->gate };
+			return true;
+		});
 	// DCLF's colour passes read it by name, ordered after the copy.
-	if (!PublishedResources::Publish(*next->occlusion)) {
-		logger::error("[ORG] Cloud Shadows: the occlusion cubemap could not be published; it stays on D3D11");
-		Stop();
-		return false;
-	}
-	logger::info("[ORG] Cloud Shadows: the occlusion copy runs on the render graph ({}x{}, {} mips)", desc.Width, desc.Height, desc.MipLevels);
-	if (!SetupLayerOps())
-		logger::warn("[ORG] Cloud Shadows: the layers' clears and copies stay on D3D11");
+	if (!PublishedResources::Publish(*next->occlusion))
+		Fatal("the occlusion cubemap could not be published");
+	impl = next;
+	logger::info("[ORG] Cloud Shadows: the occlusion copy runs on the render graph ({}x{}, {} mips); its client follows the frame revisions", desc.Width,
+		desc.Height, desc.MipLevels);
+	SetupLayerOps();
 	return true;
 }
 
 bool ORGCloudShadows::QueueOcclusionCopy()
 {
-	if (!IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::ReflectionsPrepass))
+	if (!IsActive()) {
+		if (On())
+			Fatal("an occlusion copy was asked for before setup");
 		return false;
+	}
 	impl->pending = true;
 	return true;
 }
@@ -380,7 +347,7 @@ namespace
 				return i;
 		return 0;
 	}
-	// The most distinct faces one run may read. More sends the rest to D3D11.
+	// The most distinct faces one run may read. More is fatal.
 	constexpr std::uint32_t kScratchSlots = 32;
 	// A tap's rows: the gather entries, then the scatter entries.
 	constexpr std::uint32_t kGatherWords = kScratchSlots;
@@ -436,7 +403,7 @@ namespace
 struct ORGCloudShadows::LayerOps
 {
 	// Made at setup, then only read on the graph host's thread.
-	std::shared_ptr<const ComputeProgram> gather, scatter;
+	RenderGraph::Programs::Fixed<ComputeProgram> gather, scatter;
 	std::shared_ptr<RenderGraph::RunGate> gate;  // per anchor: gather of layer l at l, scatter into layer l at kLayers + l
 	std::shared_ptr<org::LatchBlock> latch;
 	std::unique_ptr<GraphResources::Texture2D> scratch;
@@ -526,7 +493,7 @@ namespace
 		static void Record(const LayerBindings& a_bindings, const LayerFrame& a_frame, org::PassRecordContext& a_recording)
 		{
 			const auto& ops = *a_frame.ops;
-			const auto& program = a_frame.scatter ? *ops.scatter : *ops.gather;
+			const auto program = a_frame.scatter ? ops.scatter.Get() : ops.gather.Get();
 			std::array<std::uint32_t, kLayers> handles{};
 			for (std::uint32_t l = 0; l < kLayers; ++l) {
 				handles[l] = a_recording.Index(a_bindings.layers[l]);
@@ -540,7 +507,7 @@ namespace
 			for (std::uint32_t k = 0; k < a_frame.sets; ++k) {
 				const std::uint32_t rows = k * kLatchBytes + (a_frame.scatter ? kScatterRow : 0);
 				block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), rows);
-				ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), a_frame.base + k * kLayerEntries + (a_frame.scatter ? 1 : 0));
+				ops.gate->Dispatch(a_recording, *program, ShaderBindings::Data(block), a_frame.base + k * kLayerEntries + (a_frame.scatter ? 1 : 0));
 			}
 		}
 
@@ -605,40 +572,29 @@ namespace
 	}
 }
 
-bool ORGCloudShadows::SetupLayerOps()
+void ORGCloudShadows::SetupLayerOps()
 {
 	layerOps.reset();
-	auto* host = RenderGraphRuntime::Get().Host();
-	if (!host)
-		return false;
 	auto next = std::make_shared<LayerOps>();
 	next->Reset();
-	// The scatter needs unordered access, which a D3D11 layer's import lacks.
+	// In graph mode every layer is a twin.
 	for (std::uint32_t l = 0; l < kLayers; ++l) {
-		if (!LayerTwins()[l]) {
-			logger::warn("[ORG] Cloud Shadows: layer {} is a D3D11 texture, so the layer operations stay on D3D11", l);
-			return false;
-		}
 		next->layers[l] = ImportLayer(static_cast<int>(l));
 		if (!next->layers[l])
-			return false;
+			Fatal(fmt::format("layer {} could not be imported", l));
 	}
 	D3D11_TEXTURE2D_DESC layerDesc{};
 	globals::features::cloudShadows.texCloudShadowLayers[0]->resource->GetDesc(&layerDesc);
 	next->width = layerDesc.Width;
 	next->height = layerDesc.Height;
 
-	next->gather = ComputeProgram::Load(host->Device(),
-		{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerOpsBlock>(), .defines = { { L"LAYER_GATHER", L"" } } });
-	next->scatter = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerOpsBlock>() });
-	// One entry set per reflection face when the start stage holds the faces' sky.
-	next->instances = FrameAnchors::HeldByStage(FrameAnchors::Anchor::SkyReflections) ? kFaces : 1;
+	next->gather = RenderGraph::Programs::Queue("CloudShadows",
+		ComputeProgram::Desc{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerOpsBlock>(), .defines = { { L"LAYER_GATHER", L"" } } });
+	next->scatter = RenderGraph::Programs::Queue("CloudShadows", ComputeProgram::Desc{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerOpsBlock>() });
+	// One entry set per reflection face: the start stage holds the faces' sky.
+	next->instances = kFaces;
 	next->gate = RenderGraph::RunGate::Create("CloudShadows::LayerOpsGate", static_cast<std::uint32_t>(kLayerAnchors.size()) * next->instances * kLayerEntries);
 	next->latch = std::make_shared<org::LatchBlock>(std::string(kLayersClientId) + ".latch", next->instances * kLatchBytes);
-	if (!next->gather || !next->scatter || !next->gate) {
-		logger::error("[ORG] Cloud Shadows: {} or its run gate could not be made", kLayerShader);
-		return false;
-	}
 	// Every run writes the slots it reads.
 	const D3D11_TEXTURE2D_DESC scratchDesc{ .Width = layerDesc.Width,
 		.Height = layerDesc.Height,
@@ -650,18 +606,12 @@ bool ORGCloudShadows::SetupLayerOps()
 		.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS };
 	next->scratch = std::make_unique<GraphResources::Texture2D>(scratchDesc, "CloudShadows::LayerScratch",
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History });
-	if (!*next->scratch) {
-		logger::error("[ORG] Cloud Shadows: the layers' {}x{} scratch array could not be made", scratchDesc.Width, scratchDesc.Height);
-		return false;
-	}
 
-	// First at each anchor that follows a layer op. An anchor with no epoch keeps its ops on D3D11.
+	// First at each anchor that follows a layer op.
 	FrameAnchors::ClientDesc client{};
 	client.id = kLayersClientId;
 	for (const auto [anchor, label] : { std::pair{ FrameAnchors::Anchor::ReflectionsPrepass, "reflections-prepass" },
 			 std::pair{ FrameAnchors::Anchor::SkyReflections, "sky-reflections" }, std::pair{ FrameAnchors::Anchor::EarlyPrepass, "early-prepass" } }) {
-		if (!FrameAnchors::HasEpoch(anchor))
-			continue;
 		const std::uint32_t base = LayerSlot(anchor) * next->instances * kLayerEntries;
 		const std::uint32_t sets = anchor == FrameAnchors::Anchor::SkyReflections ? next->instances : 1;
 		for (const bool scatter : { false, true }) {
@@ -673,7 +623,7 @@ bool ORGCloudShadows::SetupLayerOps()
 		}
 	}
 	if (client.passes.empty())
-		return false;
+		Fatal("none of the layer operations' anchors has an epoch");
 	client.registerResources = [next](org::RenderGraph& a_graph) { next->scratch->Register(a_graph); };
 	client.commit = [next](const FrameAnchors::Point& a_point) { CommitLayerOps(*next, a_point.anchor); };
 	client.active = [next] { return !next->ops.empty(); };
@@ -681,27 +631,36 @@ bool ORGCloudShadows::SetupLayerOps()
 	// The start stage taps once per reflection face.
 	client.repeats = next->instances > 1;
 	layerOps = next;
-	if (!FrameAnchors::Register(std::move(client))) {
-		layerOps.reset();
-		return false;
-	}
-	logger::info("[ORG] Cloud Shadows: the layers' clears and copies run on the render graph ({} scratch slots{})", kScratchSlots,
-		FrameAnchors::HasEpoch(FrameAnchors::Anchor::SkyReflections) ? "" : "; SkyReflections has no epoch, so a face's run stays on D3D11");
-	return true;
+	// Registered at the next revision start, which waits for the stage builds that hold it.
+	LayersClient() = RenderGraph::Frame::DeclareClient<bool>(
+		kLayersClientId, {}, [](const RenderGraph::Frame::Inputs&) -> std::optional<bool> { return true; },
+		[client = std::move(client)](const bool&, FrameAnchors::ClientDesc& a_out) {
+			a_out = client;
+			return true;
+		});
+	logger::info("[ORG] Cloud Shadows: the layers' clears and copies run on the render graph ({} scratch slots)", kScratchSlots);
 }
 
 bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 {
+	// Outside graph mode every op is on D3D11. An engine-drawn face's ops go with its D3D11 draw.
+	if (!On() || a_point == LayerOpPoint::D3D11)
+		return false;
 	auto* ops = layerOps.get();
-	if (!ops || a_point == LayerOpPoint::D3D11 || !RenderGraphRuntime::Get().IsActive())
-		return false;
+	if (!ops)
+		Fatal("a layer operation came before setup");
 	if (a_op.dst >= kLayers || a_op.face >= kFaces || (a_op.src != kClearOp && a_op.src >= kLayers))
-		return false;
-	// Ops queued for another anchor whose run has not come go to D3D11 first.
+		Fatal(fmt::format("layer operation {} from {} on face {} is out of range", a_op.dst, a_op.src, a_op.face));
+	// An op is queued only while its anchor's run is scheduled, and that run takes the whole queue. Ops left for another
+	// anchor mean a scheduled run never came.
 	if (!ops->ops.empty() && ops->point != a_point)
-		return false;
-	if (ops->ops.empty() && !FrameAnchors::Scheduled(kLayersClientId, AnchorOf(a_point)))
-		return false;
+		Fatal(fmt::format("{} layer operations for anchor point {} were not taken by its run before an op for point {}", ops->ops.size(),
+			static_cast<int>(ops->point), static_cast<int>(a_point)));
+	if (ops->ops.empty()) {
+		const auto place = FrameAnchors::Place(kLayersClientId, AnchorOf(a_point));
+		if (!place.draws)
+			Fatal(fmt::format("no run of anchor point {} takes the layer operations ({})", static_cast<int>(a_point), FrameAnchors::ReasonName(place.reason)));
+	}
 	auto& target = ops->value[a_op.dst][a_op.face];
 	if (a_op.src == kClearOp) {
 		target = kZero;
@@ -716,7 +675,7 @@ bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 			if (value != kZero && !(ops->sources[a_op.face] & (1u << value))) {
 				// Slots taken by earlier face taps this frame are not free, since their gathers run with this one.
 				if (ops->sourceCount + (a_point == LayerOpPoint::SkyReflections ? ops->SlotsTaken() : 0) >= kScratchSlots)
-					return false;
+					Fatal(fmt::format("a run's layer operations read more than {} faces", kScratchSlots));
 				ops->sources[a_op.face] |= 1u << value;
 				++ops->sourceCount;
 			}
@@ -726,6 +685,13 @@ bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 	ops->point = a_point;
 	ops->ops.push_back(a_op);
 	return true;
+}
+
+void ORGCloudShadows::NoteD3D11Work()
+{
+	if (On())
+		RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::D3D11Path, RenderGraph::Frame::SegmentId::Count,
+			fmt::format("Cloud Shadows ({}) drew a cloud layer's occlusion on D3D11", kClientId));
 }
 
 std::vector<ORGCloudShadows::LayerOp> ORGCloudShadows::TakeLayerOps()
@@ -738,28 +704,6 @@ std::vector<ORGCloudShadows::LayerOp> ORGCloudShadows::TakeLayerOps()
 	return taken;
 }
 
+ORGCloudShadows::ORGCloudShadows() = default;
 ORGCloudShadows::~ORGCloudShadows() = default;
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-// Without OpenRenderGraph Cloud Shadows always copies on D3D11.
-struct ORGCloudShadows::Impl
-{};
-struct ORGCloudShadows::LayerOps
-{};
-
-void ORGCloudShadows::Reserve() {}
-std::string ORGCloudShadows::PublishedLayerId(int) { return {}; }
-FrameAnchors::Texture ORGCloudShadows::ImportLayer(int) { return nullptr; }
-Texture2D* ORGCloudShadows::MakeLayer(int, const D3D11_TEXTURE2D_DESC&, const D3D11_SHADER_RESOURCE_VIEW_DESC&, const char*) { return nullptr; }
-bool ORGCloudShadows::Setup() { return false; }
-bool ORGCloudShadows::IsActive() const { return false; }
-ID3D11ShaderResourceView* ORGCloudShadows::OcclusionSRV() const { return nullptr; }
-void ORGCloudShadows::Stop() {}
-bool ORGCloudShadows::QueueOcclusionCopy() { return false; }
-bool ORGCloudShadows::SetupLayerOps() { return false; }
-bool ORGCloudShadows::QueueLayerOp(LayerOpPoint, LayerOp) { return false; }
-std::vector<ORGCloudShadows::LayerOp> ORGCloudShadows::TakeLayerOps() { return {}; }
-ORGCloudShadows::~ORGCloudShadows() = default;
-
-#endif

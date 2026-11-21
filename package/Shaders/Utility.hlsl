@@ -598,9 +598,6 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 // active lane's draw and the lanes of that draw, so the loads are the draw's, not each lane's (one pass unless a wave mixes draws).
 VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 {
-#	if defined(DEVICE_REF_TRACE)
-	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
-#	endif
 	VS_OUTPUT vsout;
 	[loop] for (;;) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);
@@ -612,7 +609,7 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 	return vsout;
 }
 #	elif defined(DCLF_REFRACTION)
-// T7d's refraction draw (RefractionDrawPass): a plain indexed indirect draw over the refraction range, each draw a pooled sequence its
+// T7d's refraction draw (the forward site's refraction view): a plain indexed draw over the refraction range, each draw a pooled sequence its
 // instance names (BuildDrawsCS: StoreShadowSequence's), whose rows are a main draw's: the pipeline row's vertex layout, the material
 // row's TexcoordOffset (Lighting's PerMaterial c2, the same texCoordOffset and texCoordScale BSUtilityShader::SetupMaterial writes) and
 // its diffuse (t0), which is the refraction normal map BSUtilityShader binds as TexNormalSampler for RENDER_NORMAL. The draw's push
@@ -650,7 +647,7 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 	// The refraction LOD fade (EyePos.w): FUN_14147c470 at the fade node's metric, while the node's LOD fades apply (LodFadeNodeOf);
 	// else the property's, as it holds it (the shading row's MaterialData.x). Past the end the engine registers no pass: no draw.
 	// LodFadeFrame (LightingDescriptors.h), in the frame constants: the push word is the layout's device address on Vulkan, and its
-	// ref on D3D12, where no layout reads it (RefractionDrawPass).
+	// ref on D3D12, where no layout reads it.
 #		if defined(__spirv__)
 	const DeviceRef lodFrame = DCLFRefFromBacking(kDCLFBackingFrameConstants, DCLFMaterialRowsAddress);
 #		else
@@ -742,9 +739,6 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 // Keyed on a wave-uniform instance, as the shadow views' main is.
 VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 {
-#	if defined(DEVICE_REF_TRACE)
-	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
-#	endif
 	VS_OUTPUT vsout;
 	[loop] for (;;) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);

@@ -38,10 +38,6 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 	using FaceOriented = void (*)(const RE::NiCamera& a_camera, std::uint32_t a_face);
 	void SetFaceOriented(FaceOriented a_callback);
 
-	/** @brief Called after the engine's draws of each face, with its targets still bound. Render thread. */
-	using AfterFaceDraws = void (*)();
-	void SetAfterFaceDraws(AfterFaceDraws a_callback);
-
 	/**
 	 * @brief The cube camera's LOD roots DCLF draws in this update's faces. Their add-root calls are skipped, the sky's stays.
 	 * Values match Api::ViewRootBit.
@@ -57,7 +53,6 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 	struct RootStats
 	{
 		std::uint32_t updates = 0, lodSkipped = 0, treeSkipped = 0;
-		std::uint32_t engineOnlyRoots = 0;  // engine-only subset roots added under a skipped LOD root (Scene/EngineCasters.h)
 	};
 	RootStats TakeRootStats();
 }

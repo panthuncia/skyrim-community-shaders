@@ -1,0 +1,242 @@
+# Screen Space GI's shape settings changed mid-session (frame revision plan, 6.6). Each change is a frame revision: Enabled
+# switches the textures between one texel and the display size and the client between the chain and the history clears;
+# GI, specular GI and the temporal denoiser are programs built off the render thread before their revision starts (specular and
+# temporal also switch the specular textures); the blur and the resolution mode switch the client (the resolution mode swaps
+# which texture of each pair is the history). Option changes while SSGI is off change nothing. A preset button writes several
+# settings at once (a setting step with an object). It starts from the standard preset, injected into the saved settings before
+# launch. Each shot waits for the revision that holds the change before it (await = "adopted"), then its frames. Compose it: native-vulkan+ssgi, native-d3d12+ssgi,
+# guest+ssgi, d3d11+ssgi.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+ScreenSpaceGI = true
+
+# The standard preset (ScreenSpaceGI::ApplyPreset), as its menu button writes it.
+[saved_settings."Screen Space GI"]
+EnableBlur = true
+NumSlices = 4
+NumSteps = 8
+ResolutionMode = 1
+EnableGI = true
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "setting"
+arg = "ScreenSpaceGI.Enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+await = "adopted"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.Enabled=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+await = "adopted"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableGI=false"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableGI=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=1"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+await = "adopted"
+arg = "off-options"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.Enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+await = "adopted"
+arg = "on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableGI=false"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+await = "adopted"
+arg = "gi-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableGI=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableExperimentalSpecularGI=true"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+await = "adopted"
+arg = "specular"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableExperimentalSpecularGI=false"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableTemporalDenoiser=false"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+await = "adopted"
+arg = "temporal-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableTemporalDenoiser=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableBlur=false"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+await = "adopted"
+arg = "blur-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.EnableBlur=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=0"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+await = "adopted"
+arg = "full-res"
+
+[[steps]]
+# Two modes two frames apart: the latest wins.
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=1"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "ScreenSpaceGI.ResolutionMode=2"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+await = "adopted"
+arg = "quarter-res"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'ScreenSpaceGI={"EnableBlur":true,"NumSlices":4,"NumSteps":8,"ResolutionMode":0,"EnableGI":true}'
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+await = "adopted"
+arg = "preset-extreme"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'ScreenSpaceGI={"EnableBlur":true,"NumSlices":4,"NumSteps":8,"ResolutionMode":1,"EnableGI":true}'
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+await = "adopted"
+arg = "end"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "off", "off-options", "on", "gi-off", "specular", "temporal-off", "blur-off", "full-res", "quarter-res", "preset-extreme", "end"]
+no_log = ["frame tap error", "could not be built", "could not be made"]
+
+# The client ran on the render graph (the game's graph frame counts at exit; skipped in plain D3D11 mode).
+[expect.graph_frames]
+min = { "cs.ssgi" = 300 }

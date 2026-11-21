@@ -1,56 +1,45 @@
 #include "ORGDeferredComposite.h"
-#include "RenderGraph/Engine/Native/Native.h"
 
-#include "RenderGraph/Switches.h"
 #include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
-bool ORGDeferredComposite::Requested()
-{
-	return RenderGraph::Engine::Native::GraphMode();
-}
-
-ORGDeferredComposite& ORGDeferredComposite::Get()
-{
-	static ORGDeferredComposite s_composite;
-	return s_composite;
-}
-
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "Deferred.h"
-#	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
-#	include "Features/DynamicCubemaps.h"
-#	include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
-#	include "Features/IBL.h"
-#	include "Features/IBL/ORGIBL.h"
-#	include "Features/ScreenSpaceGI.h"
-#	include "Features/ScreenSpaceGI/ORGScreenSpaceGI.h"
-#	include "Features/Skylighting.h"
-#	include "Features/Skylighting/ORGSkylighting.h"
-#	include "Features/TerrainBlending.h"
-#	include "Globals.h"
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/PublishedResources.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
-#	include "RenderGraph/ShaderBindings.h"
-#	include "RenderGraph/SharedConstants.h"
-#	include "Utils/D3D.h"
+#include "Deferred.h"
+#include "Features/DynamicCubemaps.h"
+#include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
+#include "Features/IBL.h"
+#include "Features/IBL/ORGIBL.h"
+#include "Features/ScreenSpaceGI.h"
+#include "Features/ScreenSpaceGI/ORGScreenSpaceGI.h"
+#include "Features/Skylighting.h"
+#include "Features/Skylighting/ORGSkylighting.h"
+#include "Features/TerrainBlending.h"
+#include "Globals.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/Frame/Observed.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/SharedConstants.h"
+#include "Utils/D3D.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/ExternalTextureResource.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/ExternalTextureResource.h>
 
-#	include <atomic>
-#	include <cstring>
-#	include <optional>
-#	include <vector>
+#include <atomic>
+#include <cstring>
+#include <optional>
+#include <vector>
 
 namespace
 {
@@ -78,24 +67,24 @@ namespace
 	constexpr std::array<std::uint32_t, 11> kViewSlots{ 6, 7, 8, 10, 11, 12, 13, 14, 15, 21, 22 };
 	constexpr std::uint32_t kSkylightingCoverageSlot = 21;
 
-	/** @brief In kViewSlots order. */
+	/** @brief In kViewSlots order. The producer's published id; Deferred binds the uncompressed cubemaps. */
 	struct SlotSource
 	{
-		std::array<std::string_view, 2> ids;
+		std::string_view id;
 		bool cube = false;
 	};
 	constexpr std::array<SlotSource, kViewSlots.size()> kSlotSources{ {
-		{ { ORGDynamicCubemaps::kEnvId, ORGDynamicCubemaps::kEnvBC6HId }, true },
-		{ { ORGDynamicCubemaps::kEnvReflectionsId, ORGDynamicCubemaps::kEnvReflectionsBC6HId }, true },
-		{ { ORGSkylighting::kProbeArrayId, {} }, false },
-		{ { ORGScreenSpaceGI::kAoId, {} }, false },
-		{ { ORGScreenSpaceGI::kYId, {} }, false },
-		{ { ORGScreenSpaceGI::kCoCgId, {} }, false },
-		{ { ORGScreenSpaceGI::kSpecularId, {} }, false },
-		{ { ORGIBL::kEnvId, {} }, false },
-		{ { ORGIBL::kSkyId, {} }, false },
-		{ { ORGSkylighting::kCoverageId, {} }, false },
-		{ { ORGSkylighting::kZenithId, {} }, false },
+		{ ORGDynamicCubemaps::kEnvId, true },
+		{ ORGDynamicCubemaps::kEnvReflectionsId, true },
+		{ ORGSkylighting::kProbeArrayId, false },
+		{ ORGScreenSpaceGI::kAoId, false },
+		{ ORGScreenSpaceGI::kYId, false },
+		{ ORGScreenSpaceGI::kCoCgId, false },
+		{ ORGScreenSpaceGI::kSpecularId, false },
+		{ ORGIBL::kEnvId, false },
+		{ ORGIBL::kSkyId, false },
+		{ ORGSkylighting::kCoverageId, false },
+		{ ORGSkylighting::kZenithId, false },
 	} };
 
 	/** @brief The producer's published resource, ordered after its writes. Without one, the null descriptor, as D3D11 binds nothing there. */
@@ -120,6 +109,15 @@ namespace
 		std::array<SlotInput, kViewSlots.size()> inputs;
 
 		bool operator==(const Targets&) const = default;
+	};
+
+	/** @brief What SetFrame sees that is no variable yet: which main target the engine composites into, and the inputs' producers. */
+	struct Seen
+	{
+		std::uint32_t main = 0;
+		std::array<SlotInput, kViewSlots.size()> inputs;
+
+		bool operator==(const Seen&) const = default;
 	};
 
 	/** @brief Immutable once published. Recordings that read one keep it until their GPU work retires. */
@@ -164,8 +162,8 @@ namespace
 	class CompositePass final : public org::TypedRenderGraphPass<CompositePass, CompositeFrame, CompositeBindings>
 	{
 	public:
-		CompositePass(std::shared_ptr<Shared> a_shared, bool a_atExecution) :
-			shared(std::move(a_shared)), atExecution(a_atExecution) {}
+		explicit CompositePass(std::shared_ptr<Shared> a_shared) :
+			shared(std::move(a_shared)) {}
 
 		CompositeBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -197,18 +195,16 @@ namespace
 			return bindings;
 		}
 
-		// Recorded at execution, so the execution is not part of the revision. Otherwise the alternating normals target would re-prepare every frame.
+		// The deferred stage records it ahead, so the run's execution is part of the revision.
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
-			if (atExecution)
-				return;
 			const auto execution = shared->execution.load(std::memory_order_acquire);
 			a_out.push_back(execution ? execution->serial : 0);
 		}
 
 		CompositeFrame Prepare(const CompositeBindings&, const org::PassPrepareContext&) const
 		{
-			return { atExecution ? nullptr : shared->execution.load(std::memory_order_acquire), shared, static_cast<bool>(shared->targets.reflectance),
+			return { shared->execution.load(std::memory_order_acquire), shared, static_cast<bool>(shared->targets.reflectance),
 				static_cast<bool>(shared->targets.depth) };
 		}
 
@@ -261,7 +257,6 @@ namespace
 
 	private:
 		std::shared_ptr<Shared> shared;
-		bool atExecution = false;
 	};
 
 	/** @brief ComputeProgram adds the common defines, as Util::CompileShader does. */
@@ -278,121 +273,135 @@ namespace
 struct ORGDeferredComposite::Impl
 {
 	std::shared_ptr<Shared> shared;
-	std::shared_ptr<const ComputeProgram> exterior, interior;
-	bool programsDirty = false;
+	// Queued at Setup. Hot reload swaps their pipelines in place (RenderGraphRuntime::RequestShaderReload).
+	RenderGraph::Programs::Fixed<ComputeProgram> exterior, interior;
 	org::OwnedDescriptorBinding sampler;
 	DCLF::GpuTextures::Binding null;
-	bool registered = false;
-	bool failed = false;
+	// What SetFrame last saw, which the declared client's key reads. The engine targets are stable slots.
+	RenderGraph::Frame::Observed<Seen> seen{ "DeferredComposite.Targets" };
+	RenderGraph::Frame::DeclaredClient client;
 
 	Frame frame{};
 	std::uint32_t normals = 0;
 	bool frameReady = false;
+	// Why SetFrame could not give the graph this frame. Empty when it could.
+	std::string_view refusal;
 	// The engine alternates normals targets, so each frame reuses one of these.
 	std::array<std::shared_ptr<const Execution>, 2> byNormals;
 	bool composited = false;
 	std::uint64_t executions = 0;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 
-	bool LoadPrograms()
+	void QueuePrograms()
 	{
-		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host)
-			return false;
-		const auto load = [&](bool a_interior) {
-			return ComputeProgram::Load(host->Device(),
-				{ .source = kShader, .constantWords = ShaderBindings::Words<CompositeBlock>(), .defines = CompositeDefines(a_interior) });
+		const auto queue = [](bool a_interior) {
+			return RenderGraph::Programs::Queue("DeferredComposite",
+				ComputeProgram::Desc{ .source = kShader, .constantWords = ShaderBindings::Words<CompositeBlock>(), .defines = CompositeDefines(a_interior) });
 		};
-		exterior = load(false);
-		interior = load(true);
-		programsDirty = false;
-		return exterior && interior;
+		exterior = queue(false);
+		interior = queue(true);
 	}
 
-	/** @brief Nothing when one cannot be imported. */
-	std::optional<Targets> ImportTargets(const Frame& a_frame) const
+	/** @brief The main target and the inputs' producers of a_frame. */
+	static Seen SeenOf(const Frame& a_frame)
+	{
+		Seen seen{ .main = a_frame.main };
+		for (std::size_t i = 0; i < kViewSlots.size(); ++i) {
+			const auto slot = kViewSlots[i];
+			seen.inputs[i] = InputOf(i, slot < kSkylightingCoverageSlot ? a_frame.views[slot] : a_frame.skylightingCoverage[slot - kSkylightingCoverageSlot]);
+		}
+		return seen;
+	}
+
+	/** @brief Nothing when one cannot be imported. The engine targets' slots are the same for the session. */
+	static std::optional<Targets> TargetsFor(const Seen& a_seen)
 	{
 		Targets t;
-		t.specular = FrameAnchors::EngineTarget(SPECULAR);
-		t.albedo = FrameAnchors::EngineTarget(ALBEDO);
-		t.normalRoughness = FrameAnchors::EngineTarget(NORMALROUGHNESS);
-		t.masks = FrameAnchors::EngineTarget(MASKS);
-		t.masks2 = FrameAnchors::EngineTarget(MASKS2);
-		t.main = FrameAnchors::EngineTarget(a_frame.main);
+		t.specular = FrameAnchors::EngineTexture(FrameAnchors::Colour(SPECULAR));
+		t.albedo = FrameAnchors::EngineTexture(FrameAnchors::Colour(ALBEDO));
+		t.normalRoughness = FrameAnchors::EngineTexture(FrameAnchors::Colour(NORMALROUGHNESS));
+		t.masks = FrameAnchors::EngineTexture(FrameAnchors::Colour(MASKS));
+		t.masks2 = FrameAnchors::EngineTexture(FrameAnchors::Colour(MASKS2));
+		t.main = FrameAnchors::EngineTexture(FrameAnchors::Colour(a_seen.main));
 		for (std::size_t i = 0; i < kNormalsTargets.size(); ++i)
-			t.normals[i] = FrameAnchors::EngineTarget(kNormalsTargets[i]);
-		t.motionVectors = FrameAnchors::EngineTarget(RE::RENDER_TARGETS::kMOTION_VECTOR);
+			t.normals[i] = FrameAnchors::EngineTexture(FrameAnchors::Colour(kNormalsTargets[i]));
+		t.motionVectors = FrameAnchors::EngineTexture(FrameAnchors::Colour(RE::RENDER_TARGETS::kMOTION_VECTOR));
 		// As the D3D11 composite, depth and reflectance only with Dynamic Cubemaps.
 		if (globals::features::dynamicCubemaps.loaded) {
-			t.reflectance = FrameAnchors::EngineTarget(REFLECTANCE);
-			t.depth = FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
+			t.reflectance = FrameAnchors::EngineTexture(FrameAnchors::Colour(REFLECTANCE));
+			t.depth = FrameAnchors::EngineTexture(FrameAnchors::Depth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY));
 			if (!t.reflectance || !t.depth)
 				return std::nullopt;
 		}
 		if (!t.specular || !t.albedo || !t.normalRoughness || !t.masks || !t.masks2 || !t.main || !t.normals[0] || !t.normals[1] || !t.motionVectors)
 			return std::nullopt;
-		for (std::size_t i = 0; i < kViewSlots.size(); ++i) {
-			const auto slot = kViewSlots[i];
-			t.inputs[i] = InputOf(i, slot < kSkylightingCoverageSlot ? a_frame.views[slot] : a_frame.skylightingCoverage[slot - kSkylightingCoverageSlot]);
-		}
+		t.inputs = a_seen.inputs;
 		return t;
 	}
 
-	/** @brief The producer's published id while a_view is its export. Otherwise bind the null descriptor, since a D3D11 import is not ordered after its producer. */
+	/**
+	* @brief The producer's published id while D3D11 binds a view there and the id is published. The view only says the slot is
+	* bound; which resource it is does not matter. Otherwise the null descriptor, as D3D11 binds nothing there.
+	*/
 	static SlotInput InputOf(std::size_t a_slot, ID3D11ShaderResourceView* a_view)
 	{
 		const auto& source = kSlotSources[a_slot];
 		SlotInput input{ .cube = source.cube };
-		if (!a_view)
-			return input;
-		for (const auto id : source.ids)
-			if (!id.empty() && PublishedResources::IsExportOf(a_view, id)) {
-				input.published = id;
-				return input;
-			}
+		if (a_view && PublishedResources::IsPublished(source.id))
+			input.published = source.id;
 		return input;
 	}
 
-	bool Register(const Targets& a_targets)
+	/** @brief The registration for a_targets, made when a revision starts. The commit of the registration the frame holds sets shared. */
+	bool Make(const Targets& a_targets, FrameAnchors::ClientDesc& a_client)
 	{
 		if (!gate)
 			gate = RenderGraph::RunGate::Create(kClientId, 1);
-		if (!gate) {
-			logger::warn("[ORG] Deferred composite: no run gate; the composite stays on D3D11");
-			return false;
-		}
 		auto next = std::make_shared<Shared>();
 		next->targets = a_targets;
 		next->gate = gate;
-		auto previous = shared;
-		shared = next;
-		registered = FrameAnchors::Register({
+		a_client = FrameAnchors::ClientDesc{
 			.id = kClientId,
 			.passes = { { .name = "cs.deferred.composite",
 				.anchor = FrameAnchors::Anchor::DeferredComposite,
 				.order = 0,
 				.make = [next] {
 					return std::static_pointer_cast<org::RenderPass>(
-						std::make_shared<CompositePass>(next, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::DeferredComposite)));
+						std::make_shared<CompositePass>(next));
 				},
 				// The commit chooses the execution, so record then.
 				.atExecution = true } },
-			.commit = [this](const FrameAnchors::Point&) {
+			.commit = [this, next](const FrameAnchors::Point&) {
+				// The registration that commits is the one the frame's graph holds.
+				if (shared != next) {
+					shared = next;
+					// Recordings that read the old executions keep them.
+					byNormals = {};
+				}
 				Commit();
-				if (shared)
-					if (auto* host = RenderGraphRuntime::Get().Host())
-						shared->executions.Store(host->CurrentRun(), composited ? shared->execution.load(std::memory_order_acquire) : nullptr);
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					shared->executions.Store(host->CurrentRun(), composited ? shared->execution.load(std::memory_order_acquire) : nullptr);
 				if (composited)
 					gate->OpenDispatch(0, 1);
 			},
 			.active = [this] { return frameReady; },
 			.sharedConstants = true,
 			.gates = { gate },
-		});
-		// Recordings that read the old executions keep them.
-		if (previous)
-			byNormals = {};
-		return registered;
+		};
+		logger::info("[ORG] Deferred composite: a client for the next revision on the DeferredComposite anchor");
+		return true;
+	}
+
+	/** @brief Setup. The client follows what SetFrame saw (B2's interim, until the inputs are variables). */
+	void Declare()
+	{
+		client = RenderGraph::Frame::DeclareClient<Targets>(
+			kClientId, RenderGraph::Frame::DependsOn(seen.Var()),
+			[this](const RenderGraph::Frame::Inputs& a_in) -> std::optional<Targets> {
+				const auto* value = seen.Get(a_in);
+				return value ? TargetsFor(*value) : std::nullopt;
+			},
+			[this](const Targets& a_targets, FrameAnchors::ClientDesc& a_client) { return Make(a_targets, a_client); });
 	}
 
 	/** @brief Resolves a new execution only when the inputs changed. */
@@ -413,15 +422,12 @@ struct ORGDeferredComposite::Impl
 			samplerDesc.maxLod = D3D11_FLOAT32_MAX;
 			sampler = ShaderBindings::CreateSampler(samplerDesc);
 			null = DCLF::GpuTextures::Get().NullBinding();
-			if (!sampler || null.index == DCLF::GpuTextures::kInvalid) {
-				logger::error("[ORG] Deferred composite: no sampler or null descriptor; the composite returns to D3D11");
-				failed = true;
-				frameReady = false;
-				shared->execution.store(nullptr, std::memory_order_release);
-				return;
-			}
+			if (!sampler)
+				Fatal("its sampler could not be created");
+			if (!null)
+				Fatal("the null descriptor could not be made");
 		}
-		const auto& program = frame.interior ? interior : exterior;
+		const auto program = (frame.interior ? interior : exterior).Get();
 		auto& cached = byNormals[normals];
 		if (cached && cached->program == program && cached->groupsX == frame.groupsX && cached->groupsY == frame.groupsY) {
 			shared->execution.store(cached, std::memory_order_release);
@@ -444,29 +450,18 @@ struct ORGDeferredComposite::Impl
 	}
 };
 
+ORGDeferredComposite::ORGDeferredComposite() = default;
 ORGDeferredComposite::~ORGDeferredComposite() = default;
-
-void ORGDeferredComposite::Reserve()
-{
-	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::DeferredComposite))
-		logger::warn("[ORG] Deferred composite: the DeferredComposite anchor could not be reserved; the composite stays on D3D11");
-}
 
 void ORGDeferredComposite::Setup()
 {
-	if (!Requested() || impl)
+	if (!BeginSetup())
 		return;
-	if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::DeferredComposite)) {
-		logger::warn("[ORG] Deferred composite: CS_ORG_COMPOSITE=1 but the anchor has no epoch; the composite stays on D3D11");
-		return;
-	}
 	auto state = std::make_unique<Impl>();
-	if (!state->LoadPrograms()) {
-		logger::warn("[ORG] Deferred composite: the SPIR-V programs could not be built; the composite stays on D3D11");
-		return;
-	}
+	state->QueuePrograms();
+	state->Declare();
 	impl = std::move(state);
-	logger::info("[ORG] Deferred composite runs on the render graph (CS_ORG_COMPOSITE=1)");
+	logger::info("[ORG] Deferred composite runs on the render graph");
 }
 
 void ORGDeferredComposite::SetFrame(const Frame& a_frame)
@@ -475,32 +470,27 @@ void ORGDeferredComposite::SetFrame(const Frame& a_frame)
 		return;
 	impl->frameReady = false;
 	impl->composited = false;
-	if (impl->failed || !RenderGraphRuntime::Get().IsActive())
-		return;
-	if (impl->programsDirty && !impl->LoadPrograms()) {
-		logger::error("[ORG] Deferred composite: the programs failed to build again; the composite returns to D3D11");
-		impl->failed = true;
+	impl->refusal = {};
+	// D3D11 reads a null 3D texture here, which the graph has no descriptor for.
+	if (globals::features::skylighting.loaded && !a_frame.views[8]) {
+		impl->refusal = "Skylighting's probe array is null";
 		return;
 	}
-	// D3D11 reads a null 3D texture here, which the graph has no descriptor for.
-	if (globals::features::skylighting.loaded && !a_frame.views[8])
-		return;
 	const auto normals = std::ranges::find(kNormalsTargets, a_frame.normals);
 	if (normals == kNormalsTargets.end()) {
-		static bool warned = false;
-		if (!std::exchange(warned, true))
-			logger::warn("[ORG] Deferred composite: normals target {} is not one the pass declares; D3D11 composites", a_frame.normals);
+		impl->refusal = "the normals target is not one the pass declares";
 		return;
 	}
-	const auto targets = impl->ImportTargets(a_frame);
-	if (!targets)
+	const auto seen = Impl::SeenOf(a_frame);
+	if (!Impl::TargetsFor(seen)) {
+		impl->refusal = "an engine target could not be imported";
 		return;
-	if (!impl->registered || !impl->shared || !(impl->shared->targets == *targets)) {
-		if (!impl->Register(*targets))
-			return;
-		logger::info("[ORG] Deferred composite: registered on the DeferredComposite anchor (main target {}, normals {} and {})", a_frame.main,
-			kNormalsTargets[0], kNormalsTargets[1]);
 	}
+	// A new main target or producer registers the client again when the next revision starts. Until it switches in, the held one composites.
+	if (impl->seen.Observe(seen))
+		logger::info("[ORG] Deferred composite: new inputs (main target {}); the client is made again at the next revision", a_frame.main);
+	if (!impl->client.Registered())
+		return;
 	impl->frame = a_frame;
 	impl->normals = static_cast<std::uint32_t>(normals - kNormalsTargets.begin());
 	impl->frameReady = true;
@@ -513,27 +503,20 @@ bool ORGDeferredComposite::Composited() const
 
 bool ORGDeferredComposite::Lagged() const
 {
-	return impl && !impl->failed && impl->registered && impl->frameReady && !impl->composited;
+	return impl && !impl->composited && impl->refusal.empty();
 }
 
-void ORGDeferredComposite::ClearShaderCache()
+std::string_view ORGDeferredComposite::Refusal() const
 {
-	if (impl)
-		impl->programsDirty = true;
+	if (!impl)
+		return RenderGraph::Engine::GraphMode() ? "the composite was not set up" : std::string_view{};
+	return impl->composited ? std::string_view{} : impl->refusal;
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
+std::optional<ORGDeferredComposite::GraphFrame> ORGDeferredComposite::GraphComposite() const
+{
+	if (!impl || !impl->client.Registered() || !impl->frameReady)
+		return std::nullopt;
+	return GraphFrame{ impl->frame.main, impl->frame.interior };
+}
 
-// Without OpenRenderGraph the composite is always D3D11's.
-struct ORGDeferredComposite::Impl
-{};
-
-ORGDeferredComposite::~ORGDeferredComposite() = default;
-void ORGDeferredComposite::Reserve() {}
-void ORGDeferredComposite::Setup() {}
-void ORGDeferredComposite::SetFrame(const Frame&) {}
-bool ORGDeferredComposite::Composited() const { return false; }
-bool ORGDeferredComposite::Lagged() const { return false; }
-void ORGDeferredComposite::ClearShaderCache() {}
-
-#endif

@@ -6,8 +6,9 @@ Scans .cpp/.h files under src/ for ImGui/Util widget calls whose label (or text)
 bare string literal instead of T("key", "English"). Strings with no real words (format-only
 strings such as "%s", "##id" suffixes, punctuation, acronyms and units) are ignored.
 
-Existing violations are recorded per file in tools/hardcoded-ui-strings-baseline.json, so the
+Existing violations may be recorded per file in tools/hardcoded-ui-strings-baseline.json, so the
 check ratchets: a file may not gain violations, and fixing some lets you lower its baseline.
+The file is not committed: with no baseline, --check allows no violations at all.
 
 Usage:
     python tools/check-hardcoded-ui-strings.py                 # List every violation

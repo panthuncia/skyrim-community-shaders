@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialWrites.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Scene/Events.h"
+#include "RenderGraph/Fatal.h"
 
 #include <bit>
 
@@ -105,7 +106,6 @@ namespace DCLF::Scene
 			auto* root = reference ? reference->Get3D() : nullptr;
 			if (auto* fade = root ? root->AsFadeNode() : nullptr) {
 				PushNodeUpdate(fade, kFadeStatics | kFadeState);
-				Diagnostics::Notify(Diagnostics::FadeStaticsPlaced{ fade });
 			}
 		}
 
@@ -578,19 +578,19 @@ namespace DCLF::Scene
 		// PostPostLoad required these capabilities before any hook was written, so a refused subscription means SWF contradicted itself.
 		for (const auto& call : kCalls)
 			if (!SceneWriter::SubscribeCall(call.hook, call.handler, call.phases))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: the scene writer framework refused engine call hook {} after reporting it installed", call.hook));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the scene writer framework refused engine call hook {} after reporting it installed", call.hook));
 		lodFadeEventsInstalled = true;
 		// Switch selections are followed by event alone, and currentFade takes the inline resets through SWF's stores.
 		if (!SceneWriter::Subscribe(SWF_EVENT_SWITCH_INDEX, &OnSwitchIndex) || !SceneWriter::Subscribe(SWF_EVENT_FADE_RESET, &OnFadeReset) ||
 			!SceneWriter::Subscribe(SWF_EVENT_SWITCH_STRUCTURAL, &OnSwitchStructural))
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the switch or fade-reset subscriptions after reporting them installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the switch or fade-reset subscriptions after reporting them installed");
 		switchEventsInstalled = true;
 		// A provider before ABI minor 2 has no scene writes, and every writer stores itself.
 		if (const auto* api = SceneWriter::Api(); api && api->abiMinor >= 2 && !SceneWriter::Subscribe(SWF_EVENT_SCENE_WRITE, &OnSceneWrite))
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused its scene write events at ABI minor 2");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused its scene write events at ABI minor 2");
 		// Every ABI has NotifyWritten reports.
 		if (!SceneWriter::Subscribe(SWF_EVENT_WRITTEN, &OnWritten))
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused its written events");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused its written events");
 		logger::info("[DCLF] scene events subscribed to SceneWriterFramework ({} engine calls: fades, property flags, materials and material alpha, LOD fades, emittance, Havok node transforms, controllers)",
 			std::size(kCalls));
 		InstallMoveEvents();
@@ -643,7 +643,7 @@ namespace DCLF::Extensions
 	Api::MoveWriterId ReserveMoveWriter(std::string_view a_name)
 	{
 		if (a_name.empty())
-			stl::report_and_fail("Drawcall Limit Fix: a move writer was reserved without a name");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "a move writer was reserved without a name");
 		for (std::uint32_t slot = 0; slot < kMoveWriterSlots; ++slot) {
 			if (!Scene::moveWriterNames[slot].empty())
 				continue;
@@ -652,7 +652,7 @@ namespace DCLF::Extensions
 			++Scene::moveWritersPending;
 			return { slot };
 		}
-		stl::report_and_fail(fmt::format("Drawcall Limit Fix: the move writer {} is past Extensions::kMoveWriterSlots", a_name));
+		::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the move writer {} is past Extensions::kMoveWriterSlots", a_name));
 	}
 
 	void MoveWriterInstalled(Api::MoveWriterId a_writer)

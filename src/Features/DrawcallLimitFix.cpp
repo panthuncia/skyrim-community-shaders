@@ -1,78 +1,75 @@
 // The feature shell: install, the engine hook thunks and their installation, the menu toggle and the settings UI.
-// Lifecycle points forward to Draws/FrameDriver on the render thread. This is the one file that decides whether DCLF is built (CS_HAS_DCLF).
+// Lifecycle points forward to Draws/FrameDriver on the render thread.
 #include "DrawcallLimitFix.h"
 #include "DrawcallLimitFix/Diagnostics/Capture/Capture.h"
-#include "DrawcallLimitFix/Diagnostics/RefTrace.h"
 
-#if defined(CS_HAS_DCLF)
+#include "Deferred.h"
+#include "I18n/I18n.h"
+#include "Menu.h"
+#include "RenderGraph/Backend.h"
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/BufferRefs.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
+#include "Features/DrawcallLimitFix/Core/Engine/WindowWriters.h"
+#include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
+#include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
+#include "Features/DrawcallLimitFix/Features/FeatureList.h"
+#include "Features/DrawcallLimitFix/Integrations/IntegrationList.h"
+#include "Features/DrawcallLimitFix/Schedule/Schedule.h"
+#include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
+#include "DrawcallLimitFix/Core/Engine/Capture/SceneEvents.h"
+#include "DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
+#include "DrawcallLimitFix/Diagnostics/Hooks.h"
+#include "DrawcallLimitFix/Diagnostics/PlayerParity.h"
+#include "DrawcallLimitFix/Diagnostics/Reports/FrameSummary.h"
+#include "DrawcallLimitFix/Core/Shading/MaterialWrites.h"
+#include "DrawcallLimitFix/Core/Shading/MaterialSources.h"
+#include "DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
+#include "DrawcallLimitFix/Diagnostics/TestHarness.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DeclaredTargets.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
+#include "DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
+#include "Features/Skylighting.h"
+#include "ShaderCache.h"
+#include "TextureStreaming/Streamer.h"
 
-#	include "Deferred.h"
-#	include "RenderGraph/Backend.h"
-#	include "RenderGraph/BufferRefs.h"
-#	include "RenderGraph/Engine/Native/Native.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
-#	include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
-#	include "Features/DrawcallLimitFix/Core/Engine/WindowWriters.h"
-#	include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
-#	include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
-#	include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
-#	include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
-#	include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
-#	include "Features/DrawcallLimitFix/Features/FeatureList.h"
-#	include "Features/DrawcallLimitFix/Integrations/IntegrationList.h"
-#	include "Features/DrawcallLimitFix/Schedule/Schedule.h"
-#	include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
-#	include "DrawcallLimitFix/Core/Engine/Capture/SceneEvents.h"
-#	include "DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
-#	include "DrawcallLimitFix/Diagnostics/Hooks.h"
-#	include "DrawcallLimitFix/Diagnostics/PlayerParity.h"
-#	include "DrawcallLimitFix/Diagnostics/Reports/FrameSummary.h"
-#	include "DrawcallLimitFix/Diagnostics/Policy.h"
-#	include "DrawcallLimitFix/Core/Shading/MaterialWrites.h"
-#	include "DrawcallLimitFix/Core/Shading/MaterialSources.h"
-#	include "DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
-#	include "DrawcallLimitFix/Diagnostics/TestHarness.h"
-#	include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
-#	include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
-#	include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
-#	include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
-#	include "DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
-#	include "Features/Skylighting.h"
-#	include "ShaderCache.h"
-#	include "TextureStreaming/Streamer.h"
+#include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
+#include "DrawcallLimitFix/Core/Handoff/ShadowViews.h"
+#include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
+#include "DrawcallLimitFix/Core/Handoff/PassCapture.h"
+#include "DrawcallLimitFix/Core/Shading/FrameGlobals.h"
+#include "DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
+#include "DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
+#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "RenderGraph/MemoryWindow.h"
+#include "RenderGraph/ScheduleWindow.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include <OpenRenderGraph/GraphHost.h>
+#include "State.h"
+#include "DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
+#include "DrawcallLimitFix/Diagnostics/Scene/CaptureParity.h"
 
-#	include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
-#	include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
-#	include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
-#	include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
-#	include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
-#	include "DrawcallLimitFix/Core/Handoff/ShadowViews.h"
-#	include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
-#	include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
-#	include "DrawcallLimitFix/Core/Handoff/PassCapture.h"
-#	include "DrawcallLimitFix/Core/Shading/FrameGlobals.h"
-#	include "DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
-#	include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
-#	include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
-#	include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
-#	include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
-#	include "DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
-#	include "DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
-#	include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
-#	include "RenderGraph/MemoryWindow.h"
-#	include "RenderGraph/ScheduleWindow.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include <OpenRenderGraph/GraphHost.h>
-#	include "State.h"
-#	include "DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
-#	include "DrawcallLimitFix/Diagnostics/Scene/CaptureParity.h"
-#	include "DrawcallLimitFix/Diagnostics/Feature/TargetDump.h"
-#	include "Features/DrawcallLimitFix/Core/Runtime/FrameRetirement.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 
-#	include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
-
-#	include <ORGModuleServices/BackingPool.h>
+#include <ORGModuleServices/BackingPool.h>
 
 namespace
 {
@@ -87,7 +84,7 @@ namespace
 void DrawcallLimitFix::PostLoad()
 {
 	// SceneWriterFramework's election, only when PostPostLoad will install. Without CS's, the engine's stores stay unpatched unless another plugin's SWF elects.
-	if (SupportedGame() && DCLF::SwitchValue(DCLF::Switch::Dclf) != "0")
+	if (SupportedGame() && RenderGraph::Engine::GraphMode() && DCLF::SwitchValue(DCLF::Switch::Dclf) != "0")
 		DCLF::SceneWriter::Elect();
 }
 
@@ -95,6 +92,7 @@ void DrawcallLimitFix::DataLoaded()
 {
 	// Patches another plugin rewrote after SWF's install, each logged with its module, kept for the menu.
 	DCLF::SceneWriter::CheckIntegrity();
+	DCLF::DeclaredTargets::InitShadows();
 }
 
 namespace
@@ -102,22 +100,22 @@ namespace
 	// The scene writer framework's provider, its families and the integrity check's findings (the menu).
 	void DrawSceneWriterPanel()
 	{
-		if (!ImGui::TreeNodeEx("Scene writer framework"))
+		if (!ImGui::TreeNodeEx(T("feature.dclf.scene_writer.title", "Scene writer framework")))
 			return;
-		ImGui::TextWrapped("Provider: %s", DCLF::SceneWriter::ProviderLine().c_str());
-		ImGui::TextWrapped("Hook families: %s", DCLF::SceneWriter::CapsLine().c_str());
+		ImGui::TextWrapped(T("feature.dclf.scene_writer.provider", "Provider: %s"), DCLF::SceneWriter::ProviderLine().c_str());
+		ImGui::TextWrapped(T("feature.dclf.scene_writer.families", "Hook families: %s"), DCLF::SceneWriter::CapsLine().c_str());
 		const auto& changes = DCLF::SceneWriter::IntegrityChanges();
 		if (!DCLF::SceneWriter::IntegrityChecked())
-			ImGui::TextUnformatted("Integrity: not checked yet (it runs once the game's data has loaded).");
+			ImGui::TextUnformatted(T("feature.dclf.scene_writer.integrity_pending", "Integrity: not checked yet (it runs once the game's data has loaded)."));
 		else if (changes.empty())
-			ImGui::TextUnformatted("Integrity: every patch is as installed.");
+			ImGui::TextUnformatted(T("feature.dclf.scene_writer.integrity_ok", "Integrity: every patch is as installed."));
 		else {
-			ImGui::TextWrapped(
+			ImGui::TextWrapped(T("feature.dclf.scene_writer.integrity_changed",
 				"Integrity: %zu patch(es) rewritten by another plugin after install. A later hook that calls on still reaches SWF's; "
-				"one that does not hides those writes from DCLF.",
+				"one that does not hides those writes from DCLF."),
 				changes.size());
 			for (const auto& change : changes)
-				ImGui::BulletText("%s +0x%x: now leads to %s", change.family.c_str(), change.offset, change.module.empty() ? "no module" : change.module.c_str());
+				ImGui::BulletText(T("feature.dclf.scene_writer.integrity_change", "%s +0x%x: now leads to %s"), change.family.c_str(), change.offset, change.module.empty() ? T("feature.dclf.scene_writer.no_module", "no module") : change.module.c_str());
 		}
 		ImGui::TreePop();
 	}
@@ -129,9 +127,16 @@ void DrawcallLimitFix::PostPostLoad()
 		const auto game = REL::Module::get().version();
 		unavailableReason = fmt::format("DCLF supports Skyrim SE 1.5.97, AE 1.6.1170 and AE 1.7.104 only (this game is {})", game.string("."));
 		logger::info("[DCLF] {}; the game renders natively", unavailableReason);
+		RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 		return;
 	}
-	// CS_DCLF=0 is the baseline, with nothing installed. Unset means on.
+	// DCLF draws only through the render graph. In plain D3D11 mode (CS_ORG=0) it is not installed.
+	if (!RenderGraph::Engine::GraphMode()) {
+		unavailableReason = "DCLF draws only through the render graph, and this session runs without it";
+		logger::info("[DCLF] not installed: the session runs without the render graph; the game renders natively");
+		return;
+	}
+	// CS_DCLF=0 is the baseline, with nothing installed. Unset means on. Graph mode fails at its switch check before this.
 	if (DCLF::SwitchValue(DCLF::Switch::Dclf) == "0") {
 		logger::info("[DCLF] CS_DCLF=0; the feature stays off and the game renders natively");
 		return;
@@ -141,12 +146,14 @@ void DrawcallLimitFix::PostPostLoad()
 	if (const auto missing = DCLF::SceneWriter::MissingReason(); !missing.empty()) {
 		unavailableReason = missing;
 		logger::warn("[DCLF] {}; the game renders natively", unavailableReason);
+		RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 		return;
 	}
 	for (auto missing : { DCLF::PassCapture::SitesMissing() })
 		if (!missing.empty()) {
 			unavailableReason = fmt::format("{} DCLF hooks are not the engine's code (another plugin patched them first)", missing);
 			logger::warn("[DCLF] {}; the game renders natively", unavailableReason);
+			RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 			return;
 		}
 	// Every other site DCLF's hooks write. A chained hook needs a CALL there, and one that skips or replaces the engine's code needs the engine's own bytes.
@@ -156,6 +163,7 @@ void DrawcallLimitFix::PostPostLoad()
 	if (const auto conflicts = DCLF::HookSites::Conflicts(); !conflicts.empty()) {
 		unavailableReason = fmt::format("its hooks conflict with another plugin's ({})", conflicts);
 		logger::error("[DCLF] {}; DCLF stays off and the game renders natively", unavailableReason);
+		RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 		return;
 	}
 	logger::info("[DCLF] hook preflight: {} sites checked, no conflicts", DCLF::HookSites::Checked());
@@ -165,14 +173,10 @@ void DrawcallLimitFix::PostPostLoad()
 	DCLF::PassCapture::Get().Install();
 	// After every load, the loading menu stays up until DCLF draws the load's objects.
 	DCLF::LoadHold::Install();
-	// Whether DCLF runs, for engine hooks outside the shell, before any of them is installed.
-	DCLF::ShellState::InstallRunningQuery([] { return globals::features::drawcallLimitFix.Running(); });
 	// The features' early engine hooks, which must go in before DCLF's own engine side reads what they change,
 	// then the observers this run's switches ask for. All before DCLF's threads start.
 	DCLF::Extensions::InstallEarlyHooks(DCLF::Features::List());
 	DCLF::Diagnostics::Install();
-	// CS_DCLF_REF_CHECK checks every buffer view ref against BasicRHI's region as it is made and recorded.
-	RenderGraph::SetBufferRefChecks(DCLF::SwitchEnabled(DCLF::Switch::RefCheck));
 	DCLF::MaterialWrites::Install();
 	// Built now, so the render thread's first frame does not pay for it.
 	(void)DCLF::MaterialSources::FramePSFloats();
@@ -182,10 +186,13 @@ void DrawcallLimitFix::PostPostLoad()
 	DCLF::PrimaryCull::Get().Install();
 	// The features' extension points and engine hooks, then the integrations'. Registered before DCLF's threads start and read-only after.
 	DCLF::Extensions::InstallFeatures(DCLF::Features::List(), DCLF::Integrations::List(), DCLF::Schedule::Frame());
+	// DCLF's scene is a fragment source of the frame revision, like any other client. Its segments become lane-only build epochs
+	// when the render graph initializes.
+	DCLF::RegisterSceneSource();
 	// The schedule's epoch orders, handed to the render graph before it initializes.
 	{
 		const auto& orders = DCLF::Extensions::ScheduledFrameOrders();
-		RenderGraphRuntime::ConfigureFrame({ orders.epochOrder, orders.asyncOrder, orders.revisionEpochs });
+		RenderGraphRuntime::ConfigureFrame({ orders.epochOrder, orders.revisionEpochs });
 	}
 	// DCLF's threads and state graph, before the first frame dispatches a job.
 	(void)DCLF::SceneScheduler::Graph();
@@ -196,19 +203,19 @@ void DrawcallLimitFix::PostPostLoad()
 	// The menu's saved toggles, now that every toggle is seeded. Set switches win.
 	ApplySavedSettings();
 	// The coordinator's pump, from now on woken by its producers. Its passes only apply events until the first frame runs DCLF.
-	DCLF::Scene::Coordinator::Get().SetScenePassMode(false, DCLF::Policy::ScenePassInline());
+	DCLF::Scene::Coordinator::Get().SetScenePassMode(false);
 	DCLF::Scene::Coordinator::Get().StartScenePump();
 	// Log the switches this process actually sees, once, since a silent log looks the same as a switch that never reached the game.
 	logger::info("[DCLF] switches: {}", DCLF::SwitchSummary());
 	if (const auto reduced = DCLF::ReducedFeatures(); reduced.empty())
-		logger::info("[DCLF] featureset: full (every feature on; the menu can still turn some off live)");
+		logger::info("[DCLF] featureset: full (every feature on)");
 	else
 		logger::warn("[DCLF] featureset: REDUCED by {}; this run does not exercise DCLF's full featureset", reduced);
-	// A hook that passed preflight but failed to attach. The others are already written, so DCLF is forced off.
+	// A hook that passed preflight but failed to attach. The others are already written, and graph mode needs DCLF, so this is fatal.
 	if (const auto failed = DCLF::HookSites::Conflicts(); !failed.empty()) {
 		unavailableReason = fmt::format("its hooks did not all install ({})", failed);
 		logger::error("[DCLF] {}", unavailableReason);
-		ForceOff();
+		RenderGraph::Engine::Native::RequireDclf(unavailableReason);
 	}
 }
 
@@ -220,7 +227,7 @@ void DrawcallLimitFix::SetupResources()
 	if (installed && RenderGraphRuntime::Get().IsActive())
 		DCLF::ShaderPrograms::Get().StartPrecompile();
 	// Runs right after the render graph tried to adopt DXVK's device. The hooks went in before any device existed.
-	// Without the graph or indirect pipelines there is nothing to draw with, while the claims would still withhold the engine's passes, so DCLF is forced off.
+	// Without the graph or indirect pipelines there is nothing to draw with, and graph mode needs DCLF, so that is fatal.
 	if (!installed)
 		return;
 	auto& graph = RenderGraphRuntime::Get();
@@ -230,33 +237,23 @@ void DrawcallLimitFix::SetupResources()
 		unavailableReason = "the render graph has no host";
 	else if (!DCLF::DrawPipelines::Get().Enabled())
 		unavailableReason = "the GPU or driver lacks the indirect pipelines DCLF draws with (see the [DCLF] Indirect pipelines line)";
-	else {
-		if (d3d12)
-			logger::info("[DCLF] D3D12: on, the GPU pipeline with plain indirect draws (every part but the D3D12 switch table's); still off there: {}",
-				::RenderGraph::Engine::Native::D3D12DclfOff());
-		return;
+	if (!unavailableReason.empty()) {
+		logger::error("[DCLF] {}", unavailableReason);
+		RenderGraph::Engine::Native::RequireDclf(unavailableReason);
+		stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}", unavailableReason));
 	}
-	ForceOff();
-}
-
-void DrawcallLimitFix::ForceOff()
-{
-	installed = false;
-	DCLF::SceneTracker::Get().Stop();
-	// The scene passes only apply what the hooks still push, to keep the queues bounded.
-	DCLF::Scene::Coordinator::Get().SetScenePassMode(false, false);
-	DCLF::PassCapture::Get().SetBypassed(true);
-	TextureStreaming::SetScheduler({});
-	logger::warn("[DCLF] Forced off: {}; the game renders natively", unavailableReason);
+	// The device's indirect-command features, read once at DrawPipelines' setup, decide plain draws on D3D12. No switch is set for it.
+	if (d3d12)
+		logger::info("[DCLF] D3D12: on, the GPU pipeline; colour draws with {}",
+			DCLF::DrawPipelines::Get().DeviceGenerated() ? "device-generated commands" : "plain indirect draws (the device has no pipeline sets)");
+	// The frame-time setups read these, so CS's setup join builds them before the first frame.
+	DCLF::SetupPrograms::Queue();
 }
 
 void DrawcallLimitFix::BeforePresent()
 {
 	if (installed)
 		DCLF::FrameDriver::Get().BeforePresent();
-	// CS_DCLF_REF_TRACE: the table is made once the graph is up, and logged once a second.
-	DCLF::Diagnostics::RefTrace::Ensure();
-	DCLF::Diagnostics::RefTrace::Report();
 }
 
 void DrawcallLimitFix::Reset()
@@ -265,51 +262,40 @@ void DrawcallLimitFix::Reset()
 	DCLF::Diagnostics::TelemetryFrame();
 	// The diagnostic capture's steps (with DCLF on or off: a capture of a session it could not start is the most useful one).
 	DCLF::Capture::OnPresent();
-	// The frame's last target point, then Present's observers (with DCLF on or off).
-	DCLF::Diagnostics::Notify(DCLF::Diagnostics::TargetPoint{ "present" });
-	DCLF::Diagnostics::Notify<DCLF::Diagnostics::FramePoint::Present>();
 	// Every Present, menus included. The coordinator's queues hold references to attached subtrees and must not grow while the world is not rendered.
 	if (!installed)
 		return;
 	{
 		DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Present);
-		DCLF::FrameDriver::Get().EndFrame(Running());
-		// The menu's toggle, between frames. Scene events keep flowing while off, so the tracked set is current the moment it comes back on.
-		UpdateActive();
+		DCLF::FrameDriver::Get().EndFrame();
 	}
 	DCLF::RenderThreadBudget::Get().EndFrame();
 }
 
-void DrawcallLimitFix::UpdateActive()
+Feature::BootToggleLock DrawcallLimitFix::GetBootToggleLock() const
 {
-	if (!installed || faulted)
-		return;
-	if (const bool wanted = loaded && !globals::state->IsFeatureDisabled(GetShortName()); wanted != switchedOn)
-		SetActive(wanted);
+	if (!RenderGraph::Engine::GraphMode())
+		return {};
+	return { T("feature.dclf.graph_mode_locked", "Locked by the render graph"),
+		T("feature.dclf.graph_mode_locked_tooltip",
+			"The render graph draws the world through Drawcall Limit Fix, so it cannot be turned off while the game runs. "
+			"A change saved in the settings applies at the next launch.") };
 }
 
-void DrawcallLimitFix::SetActive(bool a_active)
+bool DrawcallLimitFix::ToggleAtBootSetting()
 {
-	switchedOn = a_active;
-	// While off the scene passes only apply events, so the tracked set stays current.
-	DCLF::Scene::Coordinator::Get().SetScenePassMode(Running(), DCLF::Policy::ScenePassInline());
-	if (!a_active)
-		DCLF::IndirectDraws::Get().DrainAsync();
-	auto& capture = DCLF::PassCapture::Get();
-	// Off: every pass reaches the batch renderers again and no claim survives. Back on, nothing is withheld until the first frame's commit publishes the set.
-	capture.SetBypassed(!a_active);
-	capture.PublishSet(nullptr);
-	if (a_active)
-		DCLF::Scene::FrameView::Get().RequestVerdictsInvalidated();
-	logger::info("[DCLF] {} from the menu", a_active ? "Switched on" : "Switched off; the game renders natively");
+	if (GetBootToggleLock().note) {
+		logger::info("[DCLF] the on/off toggle is locked in graph mode; nothing changed");
+		return globals::state->IsFeatureDisabled(GetShortName());
+	}
+	return Feature::ToggleAtBootSetting();
 }
 
 void DrawcallLimitFix::Hooks::Main_Update_Entry::thunk(void* a_stages)
 {
 	func(a_stages);
-	auto& feature = globals::features::drawcallLimitFix;
-	if (feature.installed)
-		DCLF::PrimaryCull::Get().AtUpdateEntry(feature.Running());
+	if (globals::features::drawcallLimitFix.installed)
+		DCLF::PrimaryCull::Get().AtUpdateEntry();
 }
 
 std::int64_t DrawcallLimitFix::Hooks::Main_Draw_Early::thunk(void* a_main)
@@ -319,63 +305,28 @@ std::int64_t DrawcallLimitFix::Hooks::Main_Draw_Early::thunk(void* a_main)
 	return result;
 }
 
-bool DrawcallLimitFix::BeginSceneFrame()
+void DrawcallLimitFix::BeginSceneFrame()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::SceneFrame);
-	if (Running())
-		WatchGraphFailure();
-	if (Running())
-		WatchScenePump();
-	// Called every frame, loaded or not, because it is the one place an unload is noticed.
-	UpdateActive();
-	return DCLF::FrameDriver::Get().BeginFrame(Running(), installed);
-}
-
-namespace
-{
-	/** @brief Render thread. The first failure of one of DCLF's epochs. */
-	std::string& GraphFailure()
-	{
-		static std::string s_failure;
-		return s_failure;
-	}
+	WatchScenePump();
+	DCLF::FrameDriver::Get().BeginFrame();
 }
 
 void DrawcallLimitFix::OnGraphEpochFailed(std::string_view a_epoch, const std::string& a_error)
 {
-	auto& failure = GraphFailure();
-	if (!failure.empty())
-		return;
-	failure = fmt::format("its render graph epoch '{}' failed: {}", a_epoch, a_error);
-	logger::error("[DCLF] {}; drawing goes back to the engine at the next frame start", failure);
-}
-
-const std::string& DrawcallLimitFix::GraphEpochFailure()
-{
-	return GraphFailure();
-}
-
-void DrawcallLimitFix::WatchGraphFailure()
-{
-	// Between frames, before this frame decides what it draws. A failed epoch draws nothing, and DCLF would wait for it forever.
-	// Handing drawing back here follows the menu toggle's path, which is safe at a frame start.
-	RenderGraphRuntime::Get().PollEpochFailures();
-	const auto& failure = GraphFailure();
-	if (failure.empty() || faulted)
-		return;
-	unavailableReason = failure + "; DCLF is off for the rest of the session";
-	logger::error("[DCLF] {}", unavailableReason);
-	faulted = true;
-	SetActive(false);
+	// A failed epoch draws nothing, and DCLF would wait for it forever. Graph mode draws the world through DCLF, so it cannot hand drawing back.
+	const auto failure = fmt::format("its render graph epoch '{}' failed: {}", a_epoch, a_error);
+	logger::error("[DCLF] {}", failure);
+	stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}. Graph mode draws the world through DCLF, so it cannot switch off", failure));
 }
 
 void DrawcallLimitFix::WatchScenePump()
 {
-	// Every running frame wakes a scene pass, and a pass ends a frame or two behind. A frame far ahead of the last pass for long means the pump stopped,
-	// so the builder would never publish again. Hand the game back for the session instead. The bounds leave room for a slow pass at a load.
+	// Every frame wakes a scene pass, and a pass ends a frame or two behind. A frame far ahead of the last pass for long means the pump stopped,
+	// so the builder would never publish again. That is fatal. The bounds leave room for a slow pass at a load.
 	constexpr std::uint32_t kLagFrames = 600;
 	constexpr auto kLagTime = std::chrono::seconds(30);
-	const auto frame = DCLF::Scene::FrameView::Get().GetFrame();
+	const auto frame = DCLF::Scene::FrameView::Get().SceneStep();
 	const auto done = DCLF::IndirectDraws::Get().ScenePassDoneFrame();
 	std::string reason;
 	if (DCLF::Scene::Coordinator::Get().ScenePumpFailed())
@@ -390,31 +341,29 @@ void DrawcallLimitFix::WatchScenePump()
 		pumpLagging = false;
 	if (reason.empty())
 		return;
-	unavailableReason = reason + "; DCLF is off for the rest of the session";
-	logger::error("[DCLF] {}", unavailableReason);
-	faulted = true;
-	SetActive(false);
+	// Graph mode draws the world through DCLF, so it cannot hand drawing back (D-3).
+	logger::error("[DCLF] {}", reason);
+	stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}. Graph mode draws the world through DCLF, so it cannot switch off", reason));
 }
 
 void DrawcallLimitFix::BeforeShadowMaps()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::BeforeShadowMaps);
-	if (Running())
+	if (installed)
 		DCLF::FrameDriver::Get().BeforeShadowMaps();
 }
 
 void DrawcallLimitFix::AfterShadowMaps()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::AfterShadowMaps);
-	RenderGraphRuntime::EpochBodyScope body(RenderGraphRuntime::Segment::ShadowView);
-	if (Running())
+	if (installed)
 		DCLF::FrameDriver::Get().AfterShadowMaps();
 }
 
 void DrawcallLimitFix::EarlyPrepass()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::EarlyPrepass);
-	if (Running())
+	if (installed)
 		DCLF::FrameDriver::Get().EarlyPrepass();
 }
 
@@ -423,7 +372,7 @@ bool DrawcallLimitFix::OcclusionReady(OcclusionMap a_map)
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Occlusion);
 	static_assert(kSkyOcclusion == static_cast<std::uint32_t>(DCLF::Api::OcclusionMap::Sky) &&
 				  kPrecipitationOcclusion == static_cast<std::uint32_t>(DCLF::Api::OcclusionMap::Precipitation));
-	return DCLF::FrameDriver::Get().OcclusionReady(a_map, Running());
+	return installed && DCLF::FrameDriver::Get().OcclusionReady(a_map);
 }
 
 bool DrawcallLimitFix::OcclusionHeld(OcclusionMap a_map) const
@@ -436,21 +385,12 @@ bool DrawcallLimitFix::LoadHoldsPresents() const
 	return installed && DCLF::LoadHold::PresentsHeld();
 }
 
-bool DrawcallLimitFix::OcclusionEngineOnlyMask(RE::Precipitation* a_precip)
-{
-	const auto& subset = DCLF::Scene::FrameView::Get().GetEngineCasters();
-	if (!a_precip || !Running() || !subset || subset->Of(DCLF::Scene::EngineOnlySubset::kCaster).roots.empty())
-		return false;
-	DCLF::EngineOnlyCull::RunInline(subset.get(), DCLF::Scene::EngineOnlySubset::kCaster, [a_precip] { a_precip->SetupMask(); });
-	return true;
-}
-
 void DrawcallLimitFix::OcclusionView(OcclusionMap a_map)
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Occlusion);
 	// The map's camera, from its entry.
 	const auto& map = DCLF::Extensions::OcclusionMapOf(a_map);
-	if (!Running() || !map.camera)
+	if (!installed || !map.camera)
 		return;
 	DCLF::Api::OcclusionCamera camera;
 	map.camera(camera);
@@ -462,7 +402,7 @@ void DrawcallLimitFix::OcclusionView(OcclusionMap a_map)
 bool DrawcallLimitFix::OcclusionNeedsEngine(OcclusionMap a_map)
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Occlusion);
-	return DCLF::FrameDriver::Get().OcclusionNeedsEngine(a_map, Running());
+	return !installed || DCLF::FrameDriver::Get().OcclusionNeedsEngine(a_map);
 }
 
 namespace
@@ -496,12 +436,11 @@ void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::
 {
 	// When DCLF draws the mask it draws every occluder from its own tables in the shadow epoch, so SetupMask is skipped
 	// and RenderMask only sets the camera and clears the mask. Otherwise the engine does it all.
-	const bool reference = a_dclf && OcclusionReferenceFrame(kPrecipitationOcclusion);
 	// Held by a load, so the engine's point renders it without its cull, as DCLF's variant does.
 	const bool held = !a_dclf && OcclusionHeld(kPrecipitationOcclusion);
-	if ((!a_dclf && !held) || reference) {
+	if (!a_dclf && !held) {
 		a_precip->SetupMask();
-	} else if (!OcclusionEngineOnlyMask(a_precip)) {
+	} else {
 		// What SetupMask sets: the projection and the accumulator's camera.
 		static REL::Relocation<void(RE::Precipitation*, RE::NiPointer<RE::NiCamera>)> computeProjection{ REL::RelocationID(25643, 26185) };
 		computeProjection(a_precip, a_precip->occlusionData.camera);
@@ -514,11 +453,6 @@ void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::
 
 	globals::profiler->BeginPass("Skylighting::PrecipMask");
 	a_precip->RenderMask(rain);
-	if (reference) {
-		// Announce the engine's mask, then clear the same view for DCLF's.
-		OcclusionReferenceRendered(kPrecipitationOcclusion);
-		a_precip->RenderMask(rain);
-	}
 	globals::profiler->EndPass();
 }
 
@@ -558,28 +492,10 @@ void DrawcallLimitFix::Hooks::Main_Precipitation_RenderOcclusion::thunk()
 		func();
 }
 
-bool DrawcallLimitFix::OcclusionReferenceFrame(OcclusionMap a_map)
-{
-	const auto& map = DCLF::Extensions::OcclusionMapOf(a_map);
-	const bool due = map.referenceDue && map.referenceDue();
-	// The engine's reference map registers every occluder from the whole scene lists.
-	if (due) {
-		DCLF::PrimaryCull::Get().RestoreSceneLists();
-		DCLF::PassCapture::Get().SetOcclusionPhase(0);
-	}
-	return due;
-}
-
-void DrawcallLimitFix::OcclusionReferenceRendered(OcclusionMap a_map)
-{
-	DCLF::Diagnostics::Notify(DCLF::Diagnostics::OcclusionReferenceRendered{ a_map });
-}
-
 void DrawcallLimitFix::Prepass()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Prepass);
-	DCLF::Diagnostics::Notify(DCLF::Diagnostics::PrepassBegin{ Running() });
-	if (Running())
+	if (installed)
 		DCLF::FrameDriver::Get().Prepass();
 }
 
@@ -595,16 +511,12 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth::thunk(bool a_firstPerson, bool a
 void DrawcallLimitFix::Hooks::Main_RenderDepth_WorldDrawn::thunk(void* a_accumulator, bool a_a2)
 {
 	func(a_accumulator, a_a2);
-	auto& feature = globals::features::drawcallLimitFix;
-	if (!DCLF::ShellState::Passes().inDepthPass || !feature.Running())
+	if (!DCLF::ShellState::Passes().inDepthPass)
 		return;
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::ZPrepass);
 	// The world's depth draws are done and its camera is still current. The engine's kPOST_ZPREPASS_COPY at the end of the pass will include
 	// DCLF's objects, and first-person depth goes in after the world's as it does natively, so nothing needs refreshing.
 	DCLF::FrameDriver::Get().DepthCommitted();
-	if (DCLF::Scene::FrameView::Get().GetTables().objects.size() >= 400)
-		// The trace compares DXVK's objects, and the field can be a tripwire handle.
-		globals::BeginDCLFDepthTrace(RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture));
 	// DCLF's epoch leaves the context's bindings to the engine's state tracking, so rebind its targets for the rest of the pass.
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
@@ -612,30 +524,14 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth_WorldDrawn::thunk(void* a_accumul
 template <int N>
 void DrawcallLimitFix::Hooks::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_alphaTest, std::uint32_t a_renderFlags)
 {
-	auto& feature = globals::features::drawcallLimitFix;
-	if (feature.Running())
-		DCLF::Diagnostics::Notify(DCLF::Diagnostics::NativePassOffered{ a_pass, a_technique, DCLF::ShellState::Passes().inDepthPass });
+	DCLF::Diagnostics::Notify(DCLF::Diagnostics::NativePassOffered{ a_pass, a_technique, DCLF::ShellState::Passes().inDepthPass });
 	func(a_pass, a_technique, a_alphaTest, a_renderFlags);
-	DCLF::Diagnostics::Notify(DCLF::Diagnostics::NativePassDrawn{ a_pass, DCLF::ShellState::Passes().inDepthPass });
 }
 
 void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::BSGraphics::BSShaderAccumulator* a_accumulator, std::uint32_t a_renderFlags)
 {
 	func(a_accumulator, a_renderFlags);
-	if (!globals::features::drawcallLimitFix.Running())
-		return;
 	const auto mode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
-	// The occlusion maps, render mode 0x1C: the first map in slot order whose entry owns the accumulator.
-	if (mode == 0x1C) {
-		DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Occlusion);
-		const DCLF::Api::OcclusionAccumulator accumulator{ reinterpret_cast<RE::BSShaderAccumulator*>(a_accumulator) };
-		for (std::uint32_t v = 0; v < DCLF::kOcclusionViews; ++v)
-			if (const auto& map = DCLF::Extensions::OcclusionMapOf(v); map.ownsAccumulator && map.ownsAccumulator(accumulator)) {
-				DCLF::IndirectDraws::Get().CaptureOcclusion(v);
-				break;
-			}
-		return;
-	}
 	if (mode < 0xD || mode > 0xF)
 		return;  // shadow-map modes only: plain, clamped, paraboloid
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::ShadowViewCapture);
@@ -672,7 +568,6 @@ void DrawcallLimitFix::Hooks::Preflight()
 
 void DrawcallLimitFix::Hooks::Install()
 {
-	// Always installed, because the shadow views are a live toggle. The thunk costs one compare per accumulator finish when off.
 	stl::write_vfunc<0x2A, BSShaderAccumulator_FinishAccumulating>(RE::VTABLE_BSShaderAccumulator[0]);
 	logger::info("[DCLF] shadow view hook installed on BSShaderAccumulator::FinishAccumulatingPreResolveDepth");
 	// The diagnostics' sites may already be redirected by another plugin, so only check for a CALL rel32, as write_thunk_call needs.
@@ -714,161 +609,174 @@ void DrawcallLimitFix::Hooks::Install()
 
 void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags)
 {
-	if (Running())
+	if (installed)
 		DCLF::FrameDriver::Get().NativeLightingDraw(a_pass, a_renderFlags);
 }
 
 void DrawcallLimitFix::BeforeOpaquePass()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::BeforeOpaque);
-	if (Running())
+	if (installed)
 		DCLF::FrameDriver::Get().BeforeOpaquePass();
 }
 
 void DrawcallLimitFix::AfterOpaquePass()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::AfterOpaque);
-	if (Running())
+	if (installed)
 		DCLF::FrameDriver::Get().AfterOpaquePass();
 }
 
+#define I18N_KEY_PREFIX "feature.drawcall_limit_fix."
+namespace
+{
+	/** @brief The rule violations a release build kept running past (Frame::Driver::ViolationWarnings), until the game exits. */
+	void DrawViolationWarning()
+	{
+		const auto kinds = RenderGraph::Frame::Driver::ViolationWarnings();
+		if (kinds.empty())
+			return;
+		std::string list;
+		for (const auto& kind : kinds)
+			list += fmt::format("{}{}", list.empty() ? "" : ", ", kind);
+		const auto folder = logger::log_directory();
+		const auto& theme = Menu::GetSingleton()->GetTheme();
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextColored(theme.StatusPalette.Warning, "%s",
+			T(TKEY("violation_title"), "Community Shaders found a rendering error and kept the game running. Some effects may be missing until you restart."));
+		ImGui::TextColored(theme.StatusPalette.Warning, "%s",
+			I18n::GetSingleton()->Format(TKEY("violation_kinds"), { { "kinds", list } }, "Error: {kinds}").c_str());
+		ImGui::TextColored(theme.StatusPalette.Warning, "%s",
+			I18n::GetSingleton()
+				->Format(TKEY("violation_logs"), { { "folder", folder ? folder->string() : std::string() } },
+					"Please send your logs to the Community Shaders developers: CommunityShaders.log, which also holds the DCLF log, from the SKSE "
+					"log folder ({folder}). This warning stays until you exit the game.")
+				.c_str());
+		ImGui::PopTextWrapPos();
+		ImGui::Separator();
+	}
+}
+#undef I18N_KEY_PREFIX
+
 void DrawcallLimitFix::DrawSettings()
 {
+	DrawViolationWarning();
 	if (!unavailableReason.empty()) {
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.3f, 1.0f));
-		ImGui::TextUnformatted("Unavailable this session: everything renders natively.");
+		ImGui::TextUnformatted(T("feature.dclf.not_installed_session", "Not installed this session: everything renders natively."));
 		ImGui::PopStyleColor();
-		ImGui::TextWrapped("Reason: %s", unavailableReason.c_str());
+		ImGui::TextWrapped(T("feature.dclf.not_installed_reason", "Reason: %s"), unavailableReason.c_str());
 		DCLF::Capture::DrawControls();
 		DrawSceneWriterPanel();
 		return;
 	}
 	if (!installed) {
-		ImGui::TextUnformatted("Not installed (CS_DCLF=0).");
+		ImGui::TextUnformatted(T("feature.dclf.not_installed_switch", "Not installed (CS_DCLF=0)."));
 		DCLF::Capture::DrawControls();
 		return;
 	}
 	// Developer tools, under a header a player can leave closed.
 	const auto drawTools = [] {
-		if (ImGui::Button("Reload shaders"))
+		if (ImGui::Button(T("feature.dclf.tools.reload_shaders", "Reload shaders")))
 			RenderGraphRuntime::RequestShaderReload();
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(
+			ImGui::TextUnformatted(T("feature.dclf.tools.reload_shaders_tooltip",
 				"Builds every live render graph pipeline (DCLF's graphics pipelines, every compute program) again from Data/Shaders as it is now. The "
-				"current pipelines draw until the new ones are swapped in at the graph's next build; one that fails to compile keeps its previous "
-				"pipeline (the log names the error).");
+				"current pipelines draw until every graph is built again with the new ones; one that fails to compile keeps its previous "
+				"pipeline (the log names the error)."));
 		ImGui::SameLine();
-		if (ImGui::Button("Render graph schedule"))
+		if (ImGui::Button(T("feature.dclf.tools.schedule", "Render graph schedule")))
 			RenderGraphSchedule::OpenWindow();
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(
+			ImGui::TextUnformatted(T("feature.dclf.tools.schedule_tooltip",
 				"Opens the persistent schedule inspector: each executable's batches per queue, their passes, the barriers before each pass and "
-				"every cross-queue wait with its cause. The graph traces its schedule while the window is open.");
+				"every cross-queue wait with its cause. The graph traces its schedule while the window is open."));
 		ImGui::SameLine();
-		if (ImGui::Button("VRAM attribution"))
+		if (ImGui::Button(T("feature.dclf.tools.vram", "VRAM attribution")))
 			RenderGraphMemory::OpenWindow();
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(
+			ImGui::TextUnformatted(T("feature.dclf.tools.vram_tooltip",
 				"Opens VRAM attribution: every D3D11 resource (DXVK's) and render graph resource (DCLF's tables, pools and targets among them) "
-				"with its owner and the size of its allocation, reconciled against the driver's heap usage.");
+				"with its owner and the size of its allocation, reconciled against the driver's heap usage."));
 	};
-	if (!switchedOn) {
-		ImGui::TextWrapped("Switched off with the feature's toggle: the game renders natively and DCLF does no frame work. Switch it back on to resume; no restart needed.");
-		DCLF::Capture::DrawControls();
-		if (ImGui::TreeNodeEx("Advanced")) {
-			drawTools();
-			ImGui::TreePop();
-		}
-		return;
-	}
 	// The player's capture to send back comes first, because a problem report needs it.
 	DCLF::Capture::DrawControls();
 	DCLF::Diagnostics::PlayerParity::DrawPanel();
 	DrawSceneWriterPanel();
-	// The live toggles, for A/B comparisons without a restart. These are the requested set, applied at the next frame's start.
-	auto& toggles = DCLF::Toggles::Get().Requested();
-	if (ImGui::TreeNodeEx("What DCLF draws", ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::TextWrapped("Each takes effect at the next frame, and Save Settings keeps it. What DCLF does not draw, the game draws as it would without DCLF.");
+	// The live toggles, for A/B comparisons without a restart. A copy of the requested set. An edit is committed below to the
+	// toggles' setting, and takes effect with the revision that carries it.
+	auto toggles = DCLF::Toggles::Get().Requested();
+	if (ImGui::TreeNodeEx(T("feature.dclf.draws.title", "How DCLF draws"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::TextWrapped("%s", T("feature.dclf.draws.intro", "Each takes effect at the next frame, and Save Settings keeps it."));
 		int cull = toggles.cullMode;
-		if (ImGui::Combo("GPU culling", &cull, "off\0frustum\0frustum + occlusion\0"))
+		if (ImGui::Combo(T("feature.dclf.draws.gpu_culling", "GPU culling"), &cull, "off\0frustum\0frustum + occlusion\0"))
 			toggles.cullMode = static_cast<std::uint8_t>(cull);
 		// The pipeline choice and the CPU-driven pipeline's options. Save Settings keeps the pipeline choice. The CPU options are seeded by their switches only.
 		int pipelineMode = toggles.pipelineMode == DCLF::PipelineMode::Manual ? 1 : 0;
-		if (ImGui::Combo("Pipeline", &pipelineMode, "Auto\0Manual\0"))
+		if (ImGui::Combo(T("feature.dclf.draws.pipeline", "Pipeline"), &pipelineMode, "Auto\0Manual\0"))
 			toggles.pipelineMode = pipelineMode == 1 ? DCLF::PipelineMode::Manual : DCLF::PipelineMode::Auto;
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(
+			ImGui::TextUnformatted(T("feature.dclf.draws.pipeline_tooltip",
 				"GPU-driven: the draws culled and recorded on the GPU. CPU-driven: culled on DCLF's worker threads and drawn with direct draws "
 				"recorded into DXVK's command buffer. Auto draws exteriors GPU-driven and interiors CPU-driven; Manual chooses for each. Takes "
-				"effect at the next graph build (entering or leaving an interior builds it); Save Settings keeps it (CS_DCLF_PIPELINE seeds it).");
+				"effect at the next graph build (entering or leaving an interior builds it); Save Settings keeps it (CS_DCLF_PIPELINE seeds it)."));
 		if (toggles.pipelineMode == DCLF::PipelineMode::Manual) {
 			ImGui::Indent();
 			int interior = toggles.interiorCpu ? 1 : 0, exterior = toggles.exteriorCpu ? 1 : 0;
-			if (ImGui::Combo("Interiors", &interior, "GPU-driven\0CPU-driven\0"))
+			if (ImGui::Combo(T("feature.dclf.draws.interiors", "Interiors"), &interior, "GPU-driven\0CPU-driven\0"))
 				toggles.interiorCpu = interior == 1;
-			if (ImGui::Combo("Exteriors", &exterior, "GPU-driven\0CPU-driven\0"))
+			if (ImGui::Combo(T("feature.dclf.draws.exteriors", "Exteriors"), &exterior, "GPU-driven\0CPU-driven\0"))
 				toggles.exteriorCpu = exterior == 1;
 			ImGui::Unindent();
 		}
-		ImGui::Text("Now: %s-driven (%s)", DCLF::Draws::CurrentGraphConditions().cpuPipeline ? "CPU" : "GPU", DCLF::Draws::CurrentGraphConditions().interior ? "interior" : "exterior");
+		ImGui::Text(T("feature.dclf.draws.now", "Now: %s-driven (%s)"), DCLF::Draws::AttachedGraphConditions().cpuPipeline ? "CPU" : "GPU",
+			DCLF::Draws::AttachedGraphConditions().interior ? T("feature.dclf.draws.interior", "interior") : T("feature.dclf.draws.exterior", "exterior"));
 		if (DCLF::Draws::CpuPipelineForced())
-			ImGui::TextWrapped("This GPU or driver has no counted indirect draws: every cell draws CPU-driven.");
+			ImGui::TextWrapped("%s", T("feature.dclf.draws.cpu_forced", "This GPU or driver has no counted indirect draws: every cell draws CPU-driven."));
 		// The CPU-driven pipeline's options, while it draws some kind of cell.
 		if (toggles.pipelineMode == DCLF::PipelineMode::Auto || toggles.interiorCpu || toggles.exteriorCpu) {
 			ImGui::Indent();
-			int record = toggles.cpuRecord;
-			if (ImGui::Combo("CPU recording", &record, "serial\0parallel\0indirect\0"))
-				toggles.cpuRecord = static_cast<std::uint8_t>(record);
+			// The combo lists serial then indirect. The toggle stores 0 and 2.
+			int record = toggles.cpuRecord == 0 ? 0 : 1;
+			if (ImGui::Combo(T("feature.dclf.draws.cpu_recording", "CPU recording"), &record, "serial\0indirect\0"))
+				toggles.cpuRecord = static_cast<std::uint8_t>(record == 0 ? 0 : 2);
 			if (auto _tt = Util::HoverTooltipWrapper())
-				ImGui::TextUnformatted(
+				ImGui::TextUnformatted(T("feature.dclf.draws.cpu_recording_tooltip",
 					"Indirect (default): the workers cull and write each batch's draws into a buffer, and DXVK's CS thread records one indirect draw per pipeline run. "
-					"Serial: the workers cull, and DXVK's CS thread records every batch's draws. Parallel: the workers also record each batch into "
-					"a secondary command list, which the CS thread only executes (decals, forward and refraction stay direct on the CS thread: one ordered stream). "
-					"CS_DCLF_CPU_RECORD seeds it.");
+					"Serial: the workers cull, and DXVK's CS thread records every batch's draws. CS_DCLF_CPU_RECORD seeds it."));
 			// Applied when changed, from the next snapshot. Each change rebuilds the view batches.
 			int lanes = static_cast<int>(DCLF::Draws::BatchLanes());
-			if (ImGui::InputInt("Batch lanes", &lanes, 256, 1024, ImGuiInputTextFlags_EnterReturnsTrue))
+			if (ImGui::InputInt(T("feature.dclf.draws.batch_lanes", "Batch lanes"), &lanes, 256, 1024, ImGuiInputTextFlags_EnterReturnsTrue))
 				DCLF::Draws::SetBatchLanes(static_cast<std::uint32_t>(std::max(lanes, 8)));
 			if (auto _tt = Util::HoverTooltipWrapper())
-				ImGui::TextUnformatted(
-					"The draws a culled batch holds (a multiple of 8, 8 to 65528; default 4096). More coalesce more draws into each batch and, in "
-					"parallel recording, into each secondary command list; fewer spread a view's culls over more jobs. Takes effect from the next "
-					"scene snapshot; CS_DCLF_CPU_BATCH seeds it.");
-			if (ImGui::TreeNodeEx("Views culled once per snapshot")) {
-				ImGui::TextWrapped("A view checked here is culled and recorded once per scene snapshot and replayed until the next; unchecked, every frame. "
-								   "The main view is always culled every frame. CS_DCLF_CPU_CADENCE seeds them.");
-				for (std::size_t v = 1; !DCLF::CpuViewName(v).empty(); ++v) {
-					const auto bit = static_cast<std::uint16_t>(1u << v);
-					bool snapshot = (toggles.cpuCadence & bit) != 0;
-					if (ImGui::Checkbox(std::string(DCLF::CpuViewName(v)).c_str(), &snapshot))
-						toggles.cpuCadence = snapshot ? static_cast<std::uint16_t>(toggles.cpuCadence | bit) : static_cast<std::uint16_t>(toggles.cpuCadence & ~bit);
-				}
-				ImGui::TreePop();
-			}
+				ImGui::TextUnformatted(T("feature.dclf.draws.batch_lanes_tooltip",
+					"The draws a culled batch holds (a multiple of 8, 8 to 65528; default 4096). More coalesce more draws into each batch; "
+					"fewer spread a view's culls over more jobs. Takes effect from the next "
+					"scene snapshot; CS_DCLF_CPU_BATCH seeds it."));
 			ImGui::Unindent();
 		}
 		for (const auto& toggle : DCLF::ToggleTable()) {
 			if (!toggle.section.empty())
 				ImGui::SeparatorText(toggle.section.data());
-			ImGui::BeginDisabled(!DCLF::Toggles::Get().Editable(toggle));
 			if (bool value = DCLF::ToggleValue(toggles, toggle); ImGui::Checkbox(toggle.label, &value))
 				DCLF::SetToggleValue(toggles, toggle, value);
 			// The tooltip names the toggle's switch, which overrides the saved setting at startup when set.
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				if (toggle.tooltip)
 					ImGui::TextUnformatted(toggle.tooltip);
-				const auto name = toggle.member ? DCLF::SwitchName(toggle.seed) : DCLF::SwitchName(toggle.registeredSeed);
-				const auto& seed = toggle.member ? DCLF::SwitchValue(toggle.seed) : DCLF::SwitchValue(toggle.registeredSeed);
+				const auto name = DCLF::SwitchName(toggle.seed);
+				const auto& seed = DCLF::SwitchValue(toggle.seed);
 				ImGui::TextDisabled("%.*s%s", static_cast<int>(name.size()), name.data(), seed.empty() ? "" : fmt::format(" = {} (set: it seeds this toggle, not the saved setting)", seed).c_str());
 			}
-			ImGui::EndDisabled();
 		}
+		// Writing the same set is no event, so this commits only an edit.
+		DCLF::Toggles::Get().Commit(toggles, "menu");
 		ImGui::TreePop();
 	}
-	if (!ImGui::TreeNodeEx("Advanced"))
+	if (!ImGui::TreeNodeEx(T("feature.dclf.advanced", "Advanced")))
 		return;
 	drawTools();
-	if (ImGui::TreeNodeEx("This frame", ImGuiTreeNodeFlags_DefaultOpen)) {
+	if (ImGui::TreeNodeEx(T("feature.dclf.this_frame", "This frame"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		// The first line, the active toggles, is long so it wraps. The rest are short.
 		const auto lines = DCLF::Reports::FrameSummary();
 		for (std::size_t i = 0; i < lines.size(); ++i) {
@@ -917,11 +825,11 @@ void DrawcallLimitFix::ApplySavedSettings()
 {
 	if (!savedSettings.is_object())
 		return;
-	auto& requested = DCLF::Toggles::Get().Requested();
+	auto requested = DCLF::Toggles::Get().Requested();
 	std::string applied;
 	if (const auto toggles = savedSettings.find("Toggles"); toggles != savedSettings.end() && toggles->is_object())
 		for (const auto& toggle : DCLF::ToggleTable()) {
-			const auto& seed = toggle.member ? DCLF::SwitchValue(toggle.seed) : DCLF::SwitchValue(toggle.registeredSeed);
+			const auto& seed = DCLF::SwitchValue(toggle.seed);
 			const auto saved = toggles->find(std::string(toggle.name));
 			if (!seed.empty() || saved == toggles->end() || !saved->is_boolean() || saved->get<bool>() == DCLF::ToggleValue(requested, toggle))
 				continue;
@@ -958,6 +866,7 @@ void DrawcallLimitFix::ApplySavedSettings()
 	}
 	if (!applied.empty())
 		logger::info("[DCLF] from the saved settings (where no switch is set): {}", applied);
+	DCLF::Toggles::Get().Commit(requested, "saved settings");
 }
 
 void DrawcallLimitFix::ClearShaderCache()
@@ -1017,9 +926,12 @@ void DrawcallLimitFix::PrecompileFamilyStages(const RE::BSShader& a_shader, bool
 
 void DrawcallLimitFix::PostSetupResources()
 {
+	if (!installed)
+		return;
+	// After Deferred made its targets and the engine target set is declared: the pipelines are built for these formats from here on.
+	DCLF::DeclaredTargets::Init();
 	// Their clients register before the setup's graph build, so they are in their anchors' graphs before the first world frame.
-	if (installed)
-		DCLF::Family::RunSetups();
+	DCLF::Family::RunSetups();
 }
 
 void DrawcallLimitFix::OnMap(ID3D11Resource* a_resource, void* a_data)
@@ -1044,103 +956,3 @@ void DrawcallLimitFix::OnUpdateSubresource(ID3D11Resource* a_resource, const D3D
 		mirror.OnUpdateSubresource(a_resource, a_box, a_data);
 }
 
-bool DrawcallLimitFix::TargetDumpArmed()
-{
-	return DCLF::TargetDump::Armed();
-}
-
-void DrawcallLimitFix::TargetDumpPoint(const char* a_label, ID3D11Texture2D* a_extra)
-{
-	DCLF::TargetDump::Point(a_label, a_extra);
-}
-
-void DrawcallLimitFix::OnGraphSubmissionsRetired(std::uint64_t a_submissions)
-{
-	// With CPU pipeline frames, a point retires only once its frames' signals did too.
-	DCLF::NoteGraphSubmissionsRetired(a_submissions);
-}
-
-#else  // !CS_HAS_DCLF: built without the render graph or ORGModuleServices; nothing is installed and every entry point is inert.
-
-#	include "RenderGraph/RenderGraphRuntime.h"
-
-void DrawcallLimitFix::PostLoad() {}
-void DrawcallLimitFix::DataLoaded() {}
-void DrawcallLimitFix::PostPostLoad()
-{
-	unavailableReason = "built without the render graph (CS_HAS_DCLF off)";
-	logger::info("[DCLF] {}; the game renders natively", unavailableReason);
-}
-void DrawcallLimitFix::SetupResources() {}
-void DrawcallLimitFix::Reset() {}
-void DrawcallLimitFix::BeforePresent() {}
-void DrawcallLimitFix::Prepass() {}
-void DrawcallLimitFix::EarlyPrepass() {}
-void DrawcallLimitFix::DrawSettings()
-{
-	ImGui::TextWrapped("Unavailable: %s", unavailableReason.c_str());
-}
-void DrawcallLimitFix::SaveSettings(json& o_json) { o_json = savedSettings; }
-void DrawcallLimitFix::LoadSettings(json& o_json) { savedSettings = o_json; }
-void DrawcallLimitFix::ApplySavedSettings() {}
-void DrawcallLimitFix::ClearShaderCache()
-{
-	// The render graph's live pipelines, such as Light Limit Fix's compute programs, when there is a graph.
-	RenderGraphRuntime::RequestShaderReload();
-}
-void DrawcallLimitFix::BeforeOpaquePass() {}
-void DrawcallLimitFix::AfterOpaquePass() {}
-void DrawcallLimitFix::ProbeOpaqueTarget(std::uint32_t) {}
-void DrawcallLimitFix::BeforeShadowMaps() {}
-void DrawcallLimitFix::AfterShadowMaps() {}
-void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass*, std::uint32_t) {}
-bool DrawcallLimitFix::OcclusionReady(OcclusionMap) { return false; }
-bool DrawcallLimitFix::OcclusionNeedsEngine(OcclusionMap) { return true; }
-void DrawcallLimitFix::OcclusionView(OcclusionMap) {}
-bool DrawcallLimitFix::OcclusionReferenceFrame(OcclusionMap) { return false; }
-bool DrawcallLimitFix::OcclusionEngineOnlyMask(RE::Precipitation*) { return false; }
-bool DrawcallLimitFix::LoadHoldsPresents() const { return false; }
-bool DrawcallLimitFix::OcclusionHeld(OcclusionMap) const { return false; }
-void DrawcallLimitFix::OcclusionReferenceRendered(OcclusionMap) {}
-void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::BSGeometry* a_precipObject, bool)
-{
-	a_precip->SetupMask();
-	auto* particleShaderProperty = netimmerse_cast<RE::BSParticleShaderProperty*>(a_precipObject->GetGeometryRuntimeData().shaderProperty.get());
-	globals::profiler->BeginPass("Skylighting::PrecipMask");
-	a_precip->RenderMask((RE::BSParticleShaderRainEmitter*)(particleShaderProperty->particleEmitter));
-	globals::profiler->EndPass();
-}
-void DrawcallLimitFix::RenderPrecipitationAtShadowMaps() {}
-void DrawcallLimitFix::NoteMaterialWritten(const RE::BSShaderMaterial*) {}
-void DrawcallLimitFix::WriteHidden(RE::NiAVObject* a_object, bool a_hidden)
-{
-	if (a_object)
-		a_object->SetAppCulled(a_hidden);
-}
-void DrawcallLimitFix::WriteShaderProperty(RE::BSGeometry* a_geometry, RE::BSShaderProperty* a_property)
-{
-	if (a_geometry)
-		a_geometry->GetGeometryRuntimeData().shaderProperty = RE::NiPointer(a_property);
-}
-void DrawcallLimitFix::WriteAlphaFlags(RE::NiAlphaProperty* a_alpha, std::uint16_t a_flags)
-{
-	if (a_alpha)
-		a_alpha->alphaFlags = a_flags;
-}
-void DrawcallLimitFix::PrecompileShader(const RE::BSShader&, bool, std::uint32_t) {}
-void DrawcallLimitFix::PrecompileFamilyStages(const RE::BSShader&, bool, std::uint32_t) {}
-void DrawcallLimitFix::PostSetupResources() {}
-void DrawcallLimitFix::OnMap(ID3D11Resource*, void*) {}
-void DrawcallLimitFix::OnUnmap(ID3D11Resource*) {}
-void DrawcallLimitFix::OnUpdateSubresource(ID3D11Resource*, const D3D11_BOX*, const void*) {}
-bool DrawcallLimitFix::TargetDumpArmed() { return false; }
-void DrawcallLimitFix::TargetDumpPoint(const char*, ID3D11Texture2D*) {}
-void DrawcallLimitFix::OnGraphSubmissionsRetired(std::uint64_t) {}
-void DrawcallLimitFix::OnGraphEpochFailed(std::string_view, const std::string&) {}
-const std::string& DrawcallLimitFix::GraphEpochFailure()
-{
-	static const std::string s_none;
-	return s_none;
-}
-
-#endif

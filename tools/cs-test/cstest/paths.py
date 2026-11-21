@@ -7,7 +7,7 @@ from pathlib import Path
 TOOL_DIR = Path(__file__).resolve().parents[1]
 REPO_DIR = TOOL_DIR.parents[1]
 CONFIG_DIR = TOOL_DIR / "configs"
-SCHEMA_PATH = TOOL_DIR / "schema.toml"
+SCHEMA_PATH = TOOL_DIR / "switches.json"  # the game's switch dump, copied by "cs_test.py schema"
 
 TEST_FILE = "CommunityShaders-Test.json"
 STATUS_FILE = "CommunityShaders-Test.status.json"

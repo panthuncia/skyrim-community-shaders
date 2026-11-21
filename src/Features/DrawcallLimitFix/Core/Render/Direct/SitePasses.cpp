@@ -114,21 +114,9 @@ namespace DCLF::Direct
 		 * @brief What a main site's draws read and write by buffer view ref, declared in every graph. External epochs have full
 		 * barriers, so the declarations are there for ordering.
 		 */
-		void DeclareFrameReads(org::PassBuilder& a_builder, const Draws::Resources& a_main, bool a_depth)
+		void DeclareFrameReads(org::PassBuilder& a_builder, const Draws::Resources& a_main)
 		{
 			a_builder.ShaderResource(a_main.frameConstants, std::span<const org::SrvView>{});
-			const auto& foliage = a_main.foliage;
-			if (!foliage)
-				return;
-			const std::span<const org::UavView> noUavs{};
-			if (a_depth) {
-				a_builder.UnorderedAccess(foliage->owners, noUavs);
-				return;
-			}
-			for (std::uint32_t h = 0; h < 2; ++h) {
-				a_builder.UnorderedAccess(foliage->ids[h], noUavs);
-				a_builder.UnorderedAccess(foliage->colours[h], noUavs);
-			}
 		}
 
 		SitePass::Textures MainColours(const Draws::Resources& a_resources)
@@ -143,7 +131,7 @@ namespace DCLF::Direct
 			std::vector<std::shared_ptr<Draws::ViewResources>> hosted(a_context.hosted.begin(), a_context.hosted.end());
 			return MakeSitePass(Site::Depth, {}, { main.nativeDepth },
 				[resources = a_context.Main(), hosted = std::move(hosted)](org::PassBuilder& a_builder) {
-					DeclareFrameReads(a_builder, *resources, true);
+					DeclareFrameReads(a_builder, *resources);
 					// The hosted views read their blocks through their push words. Their latched copies are this epoch's, so the graph knows them.
 					const std::span<const org::SrvView> noViews{};
 					for (const auto& view : hosted) {
@@ -160,15 +148,15 @@ namespace DCLF::Direct
 		{
 			const auto& main = *a_context.Main();
 			return MakeSitePass(Site::Colour, MainColours(main), { main.nativeDepth },
-				[resources = a_context.Main()](org::PassBuilder& a_builder) { DeclareFrameReads(a_builder, *resources, false); });
+				[resources = a_context.Main()](org::PassBuilder& a_builder) { DeclareFrameReads(a_builder, *resources); });
 		}
 
-		// forward: the forward range and refraction normals. Also in the GPU-driven graph under GraphConditions::forwardDirect.
+		// forward: the forward range and refraction normals. The GPU-driven graph draws its forward family here too.
 		std::shared_ptr<org::RenderPass> ForwardSite(const Api::PassContext& a_context)
 		{
-			const auto& conditions = Draws::CurrentGraphConditions();
+			const auto& conditions = a_context.Conditions();
 			const auto& main = *a_context.Main();
-			if (!conditions.cpuPipeline && (!conditions.forwardDirect || !main.pool))
+			if (!conditions.cpuPipeline && !main.pool)
 				return nullptr;
 			auto colours = MainColours(main);
 			colours.push_back(main.refractionNormals);
@@ -209,10 +197,10 @@ namespace DCLF::Direct
 		// fp.colour: first person's colour and forward part, into the main targets against kPOST_ZPREPASS_COPY.
 		std::shared_ptr<org::RenderPass> FirstPersonSite(const Api::PassContext& a_context)
 		{
-			const auto& conditions = Draws::CurrentGraphConditions();
+			const auto& conditions = a_context.Conditions();
 			// Use the build state's target and main resources, since the render thread imports the live ones.
 			const auto* view = a_context.Build().ViewOf(a_context.View().get());
-			if (!view || !view->main || (!conditions.cpuPipeline && (!conditions.firstPersonForwardDirect || !view->main->pool)))
+			if (!view || !view->main || (!conditions.cpuPipeline && !view->main->pool))
 				return nullptr;
 			SitePass::Reads reads;
 			if (!conditions.cpuPipeline)

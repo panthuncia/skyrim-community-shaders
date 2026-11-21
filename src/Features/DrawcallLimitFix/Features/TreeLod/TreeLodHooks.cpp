@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"
+#include "RenderGraph/Fatal.h"
 
 #include <algorithm>
 #include <bit>
@@ -126,7 +127,7 @@ namespace DCLF::Features::TreeLod
 		                        SceneWriter::SubscribeCall(SWF_HOOK_INSTANCE_ADD_GROUP, &OnAddGroup, SWF_PHASE_POST) &&
 		                        SceneWriter::SubscribeCall(SWF_HOOK_INSTANCE_REMOVE_GROUP, &OnRemoveGroup, SWF_PHASE_POST);
 		if (!subscribed)
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the tree LOD calls after reporting them installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the tree LOD calls after reporting them installed");
 		stl::write_thunk_call<BlockUpdate>(at(kBlockUpdateSite));
 		installed = true;
 	}

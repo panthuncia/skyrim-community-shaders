@@ -8,7 +8,7 @@ namespace DCLF::Features::Lod::Gates
 {
 	void RegisterGates(Api::InstallContext& a_context, Api::SwitchId a_switch)
 	{
-		LodGates::Install(a_switch, &ShellState::Running);
+		LodGates::Install(a_switch);
 		if (!LodGates::Enabled())
 			return;
 		// A stack channel keeps gate events in order with the incoming blocks' attaches.
@@ -17,16 +17,14 @@ namespace DCLF::Features::Lod::Gates
 			.apply = Api::ChannelApply::AfterBatch,
 			.wake = Api::WakeSource::Pass });
 		a_context.RegisterShowVeto({ .open = &LodGates::OpenGates(),
-			.vetoes = &LodGates::Vetoes,
-			.engineHid = &LodGates::NoteEngineHide,
-			.hideSites = LodGates::EngineHideSites() });
+			.vetoes = &LodGates::Vetoes });
 		LodGates::NoteRegistered(channel, a_context.ReserveHiddenSite());
 		// No adoption guard is needed. A forced release reaches the scene as ordinary hidden and tracker events and wakes a pass.
 		component = a_context.RegisterCoordinatorComponent({ .name = "LOD gates",
 			.make = &MakeState,
 			.retirement = { .forgot = &Forgot },
 			.events = { .keys = &ApplyOutcomes, .stacked = &ApplyGateEvent, .detached = &RootDetached, .underMark = &UnderMark },
-			.commit = { .settle = &Settle, .take = &Take, .published = &Published },
+			.commit = { .settle = &Settle, .take = &Take },
 			.adoption = { .adopt = &Adopt } });
 		a_context.RegisterReportLines({ .name = "LOD gates",
 			.point = Api::ReportPoint::SceneCoordinatorGates,

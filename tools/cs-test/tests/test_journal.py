@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 
 import pytest
 
@@ -34,20 +35,32 @@ def test_disable_and_enable_touch_only_named_lines(fake):
     assert "+Skyrim Engine Telemetry" in lines(fake) and "-Already Off" in lines(fake)
 
 
-def test_use_variant_stashes_and_restore(fake):
+def test_use_variant_shares_the_shader_cache(fake):
     previous = mo2.use_variant(fake, "p35")
     assert previous == "_original"
-    assert (fake.variants / "_original" / "ShaderCache" / "original.bin").exists()
-    assert not (fake.overwrite / "ShaderCache").exists()
+    # Every variant uses the one shader cache under overwrite: a swap leaves it in place.
+    assert (fake.overwrite / "ShaderCache" / "original.bin").exists()
+    assert not (fake.variants / "_original" / "ShaderCache").exists()
     state = mo2.get_state(fake)
     assert state == {"live": "p35", "originalMod": "CommunityShaders_ORG_Staging"}
-    (fake.overwrite / "ShaderCache").mkdir()
     (fake.overwrite / "ShaderCache" / "p35.bin").write_text("p35")
     assert mo2.restore_original(fake) == "CommunityShaders_ORG_Staging"
     assert (fake.overwrite / "ShaderCache" / "original.bin").exists()
-    assert (fake.variants / "p35" / "ShaderCache" / "p35.bin").exists()
+    assert (fake.overwrite / "ShaderCache" / "p35.bin").exists()
+    assert not (fake.variants / "p35" / "ShaderCache").exists()
     assert mo2.enabled_cs_mod(fake.modlist) == "CommunityShaders_ORG_Staging"
     assert not fake.state.exists()
+
+
+def test_undo_puts_back_a_cold_runs_shared_cache(fake):
+    live = fake.overwrite / "ShaderCache"
+    held = fake.root / "ShaderCache.cold-hold"
+    shutil.move(str(live), str(held))
+    live.mkdir()
+    (live / "cold.bin").write_text("cold")
+    data = {"entries": [{"do": "cold_cache", "live": str(live), "held": str(held)}]}
+    assert journal_mod.undo(fake, data, log=lambda *_: None, running=lambda: [])
+    assert (live / "original.bin").exists() and not (live / "cold.bin").exists() and not held.exists()
 
 
 def test_unknown_variant(fake):
@@ -157,3 +170,26 @@ def test_lock(fake):
     assert json.loads(fake.lock.read_text())["command"] == "run b"
     other.release()
     assert not fake.lock.exists()
+
+
+def test_undo_restores_a_changed_file(fake):
+    target = fake.overwrite / "SettingsUser.json"
+    target.write_bytes(b"\xef\xbb\xbf{\"a\": 1}\r\n")
+    backup = fake.root / "aside" / "R1-SettingsUser.json"
+    backup.parent.mkdir()
+    shutil.copy2(target, backup)
+    target.write_text("{\"a\": 2}")
+    data = {"entries": [{"do": "restore", "path": str(target), "backup": str(backup)}]}
+    assert journal_mod.undo(fake, data, log=lambda *_: None, running=lambda: [])
+    assert target.read_bytes() == b"\xef\xbb\xbf{\"a\": 1}\r\n" and not backup.exists()
+
+
+def test_undo_restore_without_its_backup_keeps_the_journal(fake):
+    target = fake.overwrite / "SettingsUser.json"
+    target.write_text("changed")
+    fake.journal.write_text("{}")
+    messages = []
+    data = {"entries": [{"do": "restore", "path": str(target), "backup": str(fake.root / "aside" / "gone.json")}]}
+    assert not journal_mod.undo(fake, data, log=messages.append, running=lambda: [])
+    assert target.read_text() == "changed" and fake.journal.exists()
+    assert any("is missing" in m for m in messages)

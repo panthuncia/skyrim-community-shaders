@@ -1,0 +1,21 @@
+# Capture parity: DCLF's tables against the engine's own lighting draws. The engine draws everything as well (CS_DCLF_PARITY_BOTH),
+# so the run double-draws. Read the log's "capture parity" lines: they must count checked draws, not "nothing compared".
+# Compose it: guest+dclf-capture-parity.
+extends = ["base"]
+
+[dclf]
+capture_parity = true
+parity_both = true
+stats = true
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 900
+do = "exit"
+
+[expect]
+reach = "world-ready"
+no_log = ["frame tap error"]

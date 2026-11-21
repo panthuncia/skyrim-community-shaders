@@ -1,4 +1,4 @@
-#if defined(CS_HAS_RENDER_GRAPH) && defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 
 // volk must precede every Vulkan header in this translation unit.
 #	include <rhi_interop_vulkan.h>

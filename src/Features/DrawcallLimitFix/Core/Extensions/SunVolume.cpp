@@ -3,6 +3,7 @@
 // Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SunVolume.h"
+#include "RenderGraph/Fatal.h"
 
 #include <cstring>
 
@@ -41,7 +42,7 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the sun volume was resolved twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the sun volume was resolved twice");
 		if (a_registered.name.empty())
 			return;
 		resolved = { true, std::string(a_registered.name), a_registered.cascades, a_registered.entryPlanes };

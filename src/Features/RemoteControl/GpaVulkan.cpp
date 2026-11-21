@@ -1,26 +1,25 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "Features/RemoteControl/Gpa.h"
+#include "DxvkExports.h"
+#include "Features/RemoteControl/Gpa.h"
 
-#	include "Globals.h"
-#	include "RenderGraph/BuildManager.h"
-#	include "RenderGraph/DxvkOrgInterop.h"
+#include "Globals.h"
+#include "RenderGraph/BuildManager.h"
+#include "RenderGraph/DxvkOrgInterop.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <gpu_performance_api/gpu_perf_api_vk.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <gpu_performance_api/gpu_perf_api_vk.h>
 
-#	include <atomic>
-#	include <cstring>
-#	include <format>
-#	include <map>
-#	include <mutex>
-#	include <set>
-#	include <string>
-#	include <unordered_set>
-#	include <vector>
+#include <atomic>
+#include <cstring>
+#include <format>
+#include <map>
+#include <mutex>
+#include <set>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 /*
  * GPUPerfAPI's Vulkan backend: DXVK's device (AMD GPUs), with the counters recorded in the command buffers the work is in.
@@ -104,9 +103,9 @@ namespace GpuCounters::detail
 					logger::warn("[GPA] {}; no Vulkan capture", unavailable);
 					return false;
 				}
-				const auto module = static_cast<HMODULE>(a_dxvkModule);
-				emitCommandBufferCallback = reinterpret_cast<PFN_dxvkEmitCommandBufferCallback>(::GetProcAddress(module, "dxvkEmitCommandBufferCallback"));
-				const auto setBoundaryCallbacks = reinterpret_cast<PFN_dxvkSetCommandBufferBoundaryCallbacks>(::GetProcAddress(module, "dxvkSetCommandBufferBoundaryCallbacks"));
+				const auto& dxvk = DxvkExports::Get();
+				emitCommandBufferCallback = dxvk.emitCommandBufferCallback;
+				const auto setBoundaryCallbacks = dxvk.setCommandBufferBoundaryCallbacks;
 				if (!emitCommandBufferCallback || !setBoundaryCallbacks) {
 					unavailable = "the DXVK build lacks the command buffer callbacks";
 					logger::warn("[GPA] {}; no Vulkan capture", unavailable);
@@ -246,7 +245,7 @@ namespace GpuCounters::detail
 						}
 						g_session.store(session, std::memory_order_release);
 						g_recording.store(true, std::memory_order_release);
-						RenderGraph::Builds::RequestAll("GPA profiling");
+						RenderGraph::Builds::Ask({ .all = true }, "GPA profiling");
 						armGeneration = host->BuildGeneration();
 						phaseFrame = frame;
 						phase = Phase::Arming;
@@ -266,7 +265,7 @@ namespace GpuCounters::detail
 				case Phase::Measuring:
 					// PresentBegin closed the measured frame: no more samples are recorded.
 					g_recording.store(false, std::memory_order_release);
-					RenderGraph::Builds::RequestAll("GPA profiling");
+					RenderGraph::Builds::Ask({ .all = true }, "GPA profiling");
 					disarmGeneration = host->BuildGeneration();
 					drainFrame = 0;
 					phase = Phase::Draining;
@@ -327,7 +326,7 @@ namespace GpuCounters::detail
 				SetRangesActive(false);
 				CloseEngineRanges();
 				if (g_recording.exchange(false))
-					RenderGraph::Builds::RequestAll("GPA profiling");
+					RenderGraph::Builds::Ask({ .all = true }, "GPA profiling");
 				// The session's command buffers may still execute: it is released once they cannot (Advance is not called
 				// without a capture, so the next capture's Begin waits for Idle and this drains on its own frames).
 				ReleaseSession();
@@ -499,7 +498,7 @@ namespace GpuCounters::detail
 				SetRangesActive(false);
 				CloseEngineRanges();
 				if (g_recording.exchange(false))
-					RenderGraph::Builds::RequestAll("GPA profiling");
+					RenderGraph::Builds::Ask({ .all = true }, "GPA profiling");
 				ReleaseSession();
 				return Finished(std::move(a_error));
 			}
@@ -580,21 +579,3 @@ namespace GpuCounters::detail
 	}
 }
 
-#else
-
-#	include "Features/RemoteControl/GpuCountersBackend.h"
-
-namespace GpuCounters::detail
-{
-	std::uint32_t VulkanVendor(const DxvkOrgInteropDeviceInfo&)
-	{
-		return 0;
-	}
-
-	std::unique_ptr<Backend> MakeGpaVulkanBackend(const DxvkOrgInteropDeviceInfo&, void*, org::GraphHost&)
-	{
-		return nullptr;
-	}
-}
-
-#endif

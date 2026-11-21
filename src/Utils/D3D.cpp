@@ -64,7 +64,7 @@ namespace Util
 			return zPrepassCopy;
 
 		auto& tb = globals::features::terrainBlending;
-		if (tb.loaded && tb.settings.Enabled) {
+		if (tb.loaded && tb.FrameEnabled()) {
 			// The graph's export on Terrain Blending's ORG path, else its D3D11 texture.
 			if (auto* srv = tb.GetBlendedDepthSRV(prefer16bit))
 				return srv;

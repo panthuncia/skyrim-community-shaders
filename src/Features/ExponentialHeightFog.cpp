@@ -15,9 +15,11 @@
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "State.h"
 #include "Utils/D3D.h"
 #include "Utils/Game.h"
+#include "Utils/GpuBlock.h"
 
 #define I18N_KEY_PREFIX "feature.exp_height_fog."
 
@@ -73,6 +75,17 @@ namespace
 	}
 }
 
+ExponentialHeightFog::ExponentialHeightFog()
+{
+	settings.enabled.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.enabled"));
+	settings.volumetricFogEnabled.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.volumetricFogEnabled"));
+	settings.useSkyIBL.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.useSkyIBL"));
+	settings.useDynamicCubemaps.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.useDynamicCubemaps"));
+	settings.fogDensity.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.fogDensity"));
+	settings.fogDensity2.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.fogDensity2"));
+	settings.volumetricFogExtinctionScale.Bind(CS::SettingRegistry::Declare("ExponentialHeightFog.volumetricFogExtinctionScale"));
+}
+
 void ExponentialHeightFog::RestoreDefaultSettings()
 {
 	settings = {};
@@ -88,18 +101,58 @@ void ExponentialHeightFog::SaveSettings(json& o_json)
 	o_json = settings;
 }
 
-ExponentialHeightFog::Settings ExponentialHeightFog::GetCommonBufferData() const
+namespace
 {
-	Settings data = settings;
-	auto& linearLighting = globals::features::linearLighting;
-	linearLighting.SRGBToWorking(&data.inscatteringTint.x);
-	linearLighting.SRGBToWorking(&data.fogInscatteringColor.x);
-	linearLighting.SRGBToWorking(&data.originalFogColorOverride.x);
-	linearLighting.SRGBToWorking(&data.volumetricFogAlbedo.x);
-	linearLighting.SRGBToWorking(&data.volumetricFogEmissive.x);
+	using FogCpu = ExponentialHeightFog::Settings;
+	using FogGpu = ExponentialHeightFog::GpuSettings;
+
+	// Every GPU field comes from the setting of the same name.
+	using FogGpuBlock = CS::GpuBlock<FogGpu,
+		CS::GpuField<&FogCpu::enabled, &FogGpu::enabled>,
+		CS::GpuField<&FogCpu::useDynamicCubemaps, &FogGpu::useDynamicCubemaps>,
+		CS::GpuField<&FogCpu::startDistance, &FogGpu::startDistance>,
+		CS::GpuField<&FogCpu::fogHeight, &FogGpu::fogHeight>,
+		CS::GpuField<&FogCpu::fogHeightFalloff, &FogGpu::fogHeightFalloff>,
+		CS::GpuField<&FogCpu::fogDensity, &FogGpu::fogDensity>,
+		CS::GpuField<&FogCpu::fogHeight2, &FogGpu::fogHeight2>,
+		CS::GpuField<&FogCpu::fogHeightFalloff2, &FogGpu::fogHeightFalloff2>,
+		CS::GpuField<&FogCpu::fogDensity2, &FogGpu::fogDensity2>,
+		CS::GpuField<&FogCpu::directionalInscatteringMultiplier, &FogGpu::directionalInscatteringMultiplier>,
+		CS::GpuField<&FogCpu::directionalInscatteringAnisotropy, &FogGpu::directionalInscatteringAnisotropy>,
+		CS::GpuField<&FogCpu::useSkyIBL, &FogGpu::useSkyIBL>,
+		CS::GpuColour<&FogCpu::inscatteringTint, &FogGpu::inscatteringTint>,
+		CS::GpuField<&FogCpu::cubemapMipLevel, &FogGpu::cubemapMipLevel>,
+		CS::GpuField<&FogCpu::sunlightAttenuationAmount, &FogGpu::sunlightAttenuationAmount>,
+		CS::GpuField<&FogCpu::respectVanillaFogFade, &FogGpu::respectVanillaFogFade>,
+		CS::GpuField<&FogCpu::disableVanillaFog, &FogGpu::disableVanillaFog>,
+		CS::GpuColour<&FogCpu::fogInscatteringColor, &FogGpu::fogInscatteringColor>,
+		CS::GpuField<&FogCpu::originalFogColorAmount, &FogGpu::originalFogColorAmount>,
+		CS::GpuField<&FogCpu::volumetricFogEnabled, &FogGpu::volumetricFogEnabled>,
+		CS::GpuField<&FogCpu::volumetricFogStartDistance, &FogGpu::volumetricFogStartDistance>,
+		CS::GpuField<&FogCpu::volumetricFogNearFadeInDistance, &FogGpu::volumetricFogNearFadeInDistance>,
+		CS::GpuColour<&FogCpu::volumetricFogAlbedo, &FogGpu::volumetricFogAlbedo>,
+		CS::GpuColour<&FogCpu::volumetricFogEmissive, &FogGpu::volumetricFogEmissive>,
+		CS::GpuField<&FogCpu::volumetricDirectionalScatteringIntensity, &FogGpu::volumetricDirectionalScatteringIntensity>,
+		CS::GpuField<&FogCpu::volumetricSkyLightingIntensity, &FogGpu::volumetricSkyLightingIntensity>,
+		CS::GpuField<&FogCpu::volumetricFogScatteringDistribution, &FogGpu::volumetricFogScatteringDistribution>,
+		CS::GpuField<&FogCpu::volumetricFogExtinctionScale, &FogGpu::volumetricFogExtinctionScale>,
+		CS::GpuField<&FogCpu::volumetricLocalLightScatteringIntensity, &FogGpu::volumetricLocalLightScatteringIntensity>,
+		CS::GpuField<&FogCpu::volumetricFogNoiseScale, &FogGpu::volumetricFogNoiseScale>,
+		CS::GpuField<&FogCpu::volumetricFogNoiseThreshold, &FogGpu::volumetricFogNoiseThreshold>,
+		CS::GpuField<&FogCpu::volumetricFogNoiseVelocity, &FogGpu::volumetricFogNoiseVelocity>,
+		CS::GpuColour<&FogCpu::originalFogColorOverride, &FogGpu::originalFogColorOverride>>;
+}
+
+ExponentialHeightFog::GpuSettings ExponentialHeightFog::GetCommonBufferData() const
+{
+	GpuSettings data = FogGpuBlock::Fill(settings, [](float* a_colour) { globals::features::linearLighting.SRGBToWorking(a_colour); });
 
 	if (IsSuppressed())
 		data.enabled = 0;
+	// On the graph the shaders read the volumes only once a run wrote the bound versions, as the D3D11 readers get them.
+	const auto& orgFog = ORGExponentialHeightFog::Get();
+	if (orgFog.IsActive() && ORGExponentialHeightFog::Debug() != 3 && !orgFog.NearSRV())
+		data.volumetricFogEnabled = 0;
 	return data;
 }
 
@@ -116,7 +169,7 @@ void ExponentialHeightFog::DrawSettings()
 		T("common.settings_managed_by_enb", "This setting is managed by Effects 11."));
 	const Util::DefaultsWhileActive<Settings> shownDefaults(settings, managedByEffects11);
 
-	ImGui::Checkbox(T(TKEY("enable_exp_height_fog"), "Enable Exponential Height Fog"), (bool*)&settings.enabled);
+	Util::Checkbox(T(TKEY("enable_exp_height_fog"), "Enable Exponential Height Fog"), settings.enabled);
 	ImGui::SliderFloat(T(TKEY("start_distance"), "Start Distance"), &settings.startDistance, 0.0f, 100000.0f, "%.1f");
 	ImGui::SliderFloat(T(TKEY("fog_height"), "Fog Height"), &settings.fogHeight, -22000.0f, 22000.0f, "%.1f");
 	ImGui::SliderFloat(T(TKEY("fog_height_falloff"), "Fog Height Falloff"), &settings.fogHeightFalloff, 0.001f, 2.0f, "%.3f");
@@ -128,11 +181,11 @@ void ExponentialHeightFog::DrawSettings()
 							  "Replaces the weather's fog colour used by Original Fog Color Amount.\n"
 							  "Alpha blends from the weather colour (0) to this colour (1)."));
 	}
-	ImGui::SliderFloat(T(TKEY("fog_density"), "Fog Density"), &settings.fogDensity, 0.0f, 1.0f, "%.3f");
+	Util::SliderFloat(T(TKEY("fog_density"), "Fog Density"), settings.fogDensity, 0.0f, 1.0f, "%.3f");
 	if (ImGui::TreeNode(T(TKEY("second_fog_layer"), "Second Fog Layer"))) {
 		ImGui::SliderFloat(T(TKEY("fog_height_2"), "Fog Height 2"), &settings.fogHeight2, -22000.0f, 22000.0f, "%.1f");
 		ImGui::SliderFloat(T(TKEY("fog_height_falloff_2"), "Fog Height Falloff 2"), &settings.fogHeightFalloff2, 0.001f, 2.0f, "%.3f");
-		ImGui::SliderFloat(T(TKEY("fog_density_2"), "Fog Density 2"), &settings.fogDensity2, 0.0f, 1.0f, "%.3f");
+		Util::SliderFloat(T(TKEY("fog_density_2"), "Fog Density 2"), settings.fogDensity2, 0.0f, 1.0f, "%.3f");
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("second_fog_layer_tooltip"),
 								  "Adds a second stacked exponential height fog layer with its own base height, density and height falloff.\n"
@@ -158,11 +211,11 @@ void ExponentialHeightFog::DrawSettings()
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("apply_vanilla_fade_tooltip"), "Applies vanilla fade brightness to exponential height fog."));
 	}
-	ImGui::Checkbox(T(TKEY("use_sky_ibl"), "Use Sky IBL for Exterior Inscattering"), (bool*)&settings.useSkyIBL);
+	Util::Checkbox(T(TKEY("use_sky_ibl"), "Use Sky IBL for Exterior Inscattering"), settings.useSkyIBL);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("use_sky_ibl_tooltip"), "Adds the sky IBL color to the fog inscattering in exteriors. Requires the Image Based Lighting feature."));
 	}
-	ImGui::Checkbox(T(TKEY("use_dynamic_cubemaps"), "Use Dynamic Cubemaps for Interior Inscattering"), (bool*)&settings.useDynamicCubemaps);
+	Util::Checkbox(T(TKEY("use_dynamic_cubemaps"), "Use Dynamic Cubemaps for Interior Inscattering"), settings.useDynamicCubemaps);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("use_dynamic_cubemaps_tooltip"), "Adds the dynamic environment cubemap color to the fog inscattering in interiors."));
 	}
@@ -171,7 +224,7 @@ void ExponentialHeightFog::DrawSettings()
 
 	ImGui::TextWrapped("%s", T("feature.view_atmosphere.quality_location", "Grid quality and temporal sampling are configured in Atmosphere and Fog."));
 	ImGui::SeparatorText(T(TKEY("volumetric_fog"), "Volumetric Fog"));
-	ImGui::Checkbox(T(TKEY("enable_volumetric_fog"), "Enable Volumetric Fog"), (bool*)&settings.volumetricFogEnabled);
+	Util::Checkbox(T(TKEY("enable_volumetric_fog"), "Enable Volumetric Fog"), settings.volumetricFogEnabled);
 	if (settings.volumetricFogEnabled) {
 		ImGui::SliderFloat(T(TKEY("volumetric_start_distance"), "Volumetric Start Distance"), &settings.volumetricFogStartDistance, 0.0f, 20000.0f, "%.0f");
 		ImGui::SliderFloat(T(TKEY("near_fade_in_distance"), "Near Fade In Distance"), &settings.volumetricFogNearFadeInDistance, 0.0f, 20000.0f, "%.0f");
@@ -188,7 +241,7 @@ void ExponentialHeightFog::DrawSettings()
 			}
 			ImGui::TreePop();
 		}
-		ImGui::SliderFloat(T(TKEY("volumetric_extinction_scale"), "Volumetric Extinction Scale"), &settings.volumetricFogExtinctionScale, 0.0f, 10.0f, "%.2f");
+		Util::SliderFloat(T(TKEY("volumetric_extinction_scale"), "Volumetric Extinction Scale"), settings.volumetricFogExtinctionScale, 0.0f, 10.0f, "%.2f");
 		ImGui::SliderFloat(T(TKEY("volumetric_scattering_distribution"), "Volumetric Scattering Distribution"), &settings.volumetricFogScatteringDistribution, -0.9f, 0.9f, "%.2f");
 		ImGui::ColorEdit4(T(TKEY("volumetric_albedo"), "Volumetric Albedo"), (float*)&settings.volumetricFogAlbedo);
 		ImGui::ColorEdit4(T(TKEY("volumetric_emissive"), "Volumetric Emissive"), (float*)&settings.volumetricFogEmissive);
@@ -280,12 +333,23 @@ void ExponentialHeightFog::ClearShaderCache()
 ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 {
 	const auto& quality = globals::features::viewAtmosphere.settings;
-	uint32_t pixelSize = std::clamp(quality.nearPixelSize, 4u, 64u);
-	const uint32_t gridZ = std::clamp(quality.nearSlices, 16u, 160u);
-	uint32_t farPixelSize = std::clamp(quality.middlePixelSize, 4u, 64u);
-	const uint32_t farGridZ = std::clamp(quality.middleSlices, 16u, 160u);
 	float2 screenSz{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
-	auto renderSize = Util::ConvertToDynamic(screenSz);
+	return GridSizesFor(Util::ConvertToDynamic(screenSz), quality.nearPixelSize, quality.nearSlices, quality.middlePixelSize, quality.middleSlices);
+}
+
+bool ExponentialHeightFog::VolumesOn(uint32_t a_enabled, uint32_t a_volumetricFogEnabled, float a_extinctionScale, float a_fogDensity, float a_fogDensity2)
+{
+	return a_enabled && a_volumetricFogEnabled && a_extinctionScale > 0.0f && (a_fogDensity > 0.0f || a_fogDensity2 > 0.0f);
+}
+
+ExponentialHeightFog::GridSizes ExponentialHeightFog::GridSizesFor(float2 a_size, uint32_t a_nearPixelSize, uint32_t a_nearSlices, uint32_t a_middlePixelSize,
+	uint32_t a_middleSlices)
+{
+	uint32_t pixelSize = std::clamp(a_nearPixelSize, 4u, 64u);
+	const uint32_t gridZ = std::clamp(a_nearSlices, 16u, 160u);
+	uint32_t farPixelSize = std::clamp(a_middlePixelSize, 4u, 64u);
+	const uint32_t farGridZ = std::clamp(a_middleSlices, 16u, 160u);
+	const float2 renderSize = a_size;
 
 	auto getGridSize = [&renderSize](uint32_t a_pixelSize, uint32_t a_gridZ) {
 		return DirectX::XMUINT4{
@@ -317,8 +381,8 @@ ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 	sizes.nearSize = gridSize;
 	sizes.farSize = farGridSize;
 	// From 8-pixel cells up, one thread group per cell reduces the cell's depth footprint in parallel.
-	sizes.nearGroupReduce = std::clamp(quality.nearPixelSize, 4u, 64u) >= 8;
-	sizes.farGroupReduce = sizes.nearGroupReduce || std::clamp(quality.middlePixelSize, 4u, 64u) >= 8;
+	sizes.nearGroupReduce = std::clamp(a_nearPixelSize, 4u, 64u) >= 8;
+	sizes.farGroupReduce = sizes.nearGroupReduce || std::clamp(a_middlePixelSize, 4u, 64u) >= 8;
 	return sizes;
 }
 
@@ -445,7 +509,6 @@ void ExponentialHeightFog::EnsureVolumetricResources()
 
 void ExponentialHeightFog::ReleaseVolumetricResources()
 {
-	ORGExponentialHeightFog::Get().Release();
 	vBufferA.reset();
 	vBufferAFar.reset();
 	conservativeDepth.reset();
@@ -472,6 +535,8 @@ void ExponentialHeightFog::ReleaseVolumetricResources()
 
 ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringView() const
 {
+	if (ORGExponentialHeightFog::Debug() == 2)
+		return nullptr;
 	if (auto* view = ORGExponentialHeightFog::Get().NearSRV())
 		return view;
 	return integratedLightScattering ? integratedLightScattering->srv.get() : nullptr;
@@ -479,6 +544,8 @@ ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringView() 
 
 ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringFarView() const
 {
+	if (ORGExponentialHeightFog::Debug() == 2)
+		return nullptr;
 	if (auto* view = ORGExponentialHeightFog::Get().FarSRV())
 		return view;
 	return integratedLightScatteringFar ? integratedLightScatteringFar->srv.get() : nullptr;
@@ -486,15 +553,12 @@ ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringFarView
 
 void ExponentialHeightFog::BindIntegratedLightScattering()
 {
-	ID3D11ShaderResourceView* srv = IntegratedLightScatteringView();
+	// CS_ORG_FOG_DEBUG=5: only the draws that still run on D3D11 get no volume. DCLF reads the views through its own callbacks.
+	const bool engineNone = ORGExponentialHeightFog::Debug() == 5;
+	ID3D11ShaderResourceView* srv = engineNone ? nullptr : IntegratedLightScatteringView();
 	globals::d3d::context->PSSetShaderResources(19, 1, &srv);
-	ID3D11ShaderResourceView* farSrv = IntegratedLightScatteringFarView();
+	ID3D11ShaderResourceView* farSrv = engineNone ? nullptr : IntegratedLightScatteringFarView();
 	globals::d3d::context->PSSetShaderResources(22, 1, &farSrv);
-}
-
-void ExponentialHeightFog::PostPostLoad()
-{
-	ORGExponentialHeightFog::Reserve();
 }
 
 ID3D11ShaderResourceView* ExponentialHeightFog::BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const
@@ -704,7 +768,11 @@ ExponentialHeightFog::VolumetricFogCB ExponentialHeightFog::BuildConstants(const
 		(a_inputs.directionalShadow ? 1u : 0u) |
 		(a_inputs.depth ? 2u : 0u) |
 		(a_inputs.ibl ? 4u : 0u) |
-		(a_inputs.skylighting ? 8u : 0u);
+		(a_inputs.skylighting ? 8u : 0u) |
+		(a_inputs.terrainShadows ? 256u : 0u) |
+		(a_inputs.cloudShadows ? 512u : 0u) |
+		(a_inputs.physSkyTransmittance ? 1024u : 0u) |
+		(a_inputs.physSkyShadowVolume ? 2048u : 0u);
 
 	VolumetricFogCB cb{};
 	cb.gridSizeAndFlags = {
@@ -775,6 +843,18 @@ void ExponentialHeightFog::Prepass()
 			ReleaseVolumetricResources();
 		return;
 	}
+	// The render-graph path: its volumes and passes follow the adopted revision, and run in the Prepass anchor's epoch.
+	// In graph mode the fog never runs on D3D11: a false Prepass means no volumetric fog this frame. Debug mode 3 runs the
+	// D3D11 path instead, in guest mode only, and the test census counts those frames.
+	auto& orgFog = ORGExponentialHeightFog::Get();
+	if (orgFog.IsActive() && ORGExponentialHeightFog::Debug() != 3) {
+		if (vBufferA || vBufferAFar)
+			ReleaseVolumetricResources();
+		if (!IsSuppressed() && orgFog.Prepass())
+			BindIntegratedLightScattering();
+		return;
+	}
+
 	if (!settings.enabled || !settings.volumetricFogEnabled || settings.volumetricFogExtinctionScale <= 0.0f) {
 		ReleaseVolumetricResources();
 		return;
@@ -783,11 +863,10 @@ void ExponentialHeightFog::Prepass()
 	if (IsSuppressed())
 		return;
 
-	// The render-graph path: its passes run in the Prepass anchor's epoch, right after the features' Prepass.
-	if ((settings.fogDensity > 0.0f || settings.fogDensity2 > 0.0f) && ORGExponentialHeightFog::Get().Prepass()) {
-		BindIntegratedLightScattering();
-		return;
-	}
+	// Graph mode never comes here.
+	if (ORGExponentialHeightFog::On())
+		RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::D3D11Path, RenderGraph::Frame::SegmentId::Count,
+			"Exponential Height Fog's volumetric fog (cs.exp-height-fog) ran on D3D11");
 
 	EnsureD3D11Objects();
 	EnsureVolumetricResources();
@@ -847,6 +926,11 @@ void ExponentialHeightFog::Prepass()
 	inputs.localLights = hasLocalLightData;
 	inputs.localShadows = hasLocalShadowData;
 	inputs.engineLocalShadows = engineLocalShadowMap != nullptr;
+	// The slots hold whatever the features bound, as before these flags.
+	inputs.terrainShadows = true;
+	inputs.cloudShadows = true;
+	inputs.physSkyTransmittance = true;
+	inputs.physSkyShadowVolume = true;
 	inputs.temporal = temporalReprojection;
 	inputs.historyValid = temporalHistoryValid;
 	inputs.historyValidFar = temporalHistoryValidFar;

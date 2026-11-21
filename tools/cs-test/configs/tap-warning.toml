@@ -1,0 +1,40 @@
+# The rule-violation warning (cleanup plan A3 step 9, D-5). CS_ORG_TAP_ERROR_TEST raises one tap error at the first frame, and
+# CS_ORG_MISMATCH_FATAL=0 keeps the game running as a release build does. Expect one "[ORG] frame tap error:
+# <mode>: a client could not draw ..." line naming CS_ORG_TAP_ERROR_TEST and "Raised at RenderGraph/Frame/FrameDriver.cpp:<line>",
+# then "[ORG] rule violation warning raised: tap error: refused". The menu shot shows the warning at the top of the Drawcall Limit
+# Fix page when that page is the one the menu opens on. Compose it: guest+tap-warning, native-vulkan+tap-warning.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[env]
+CS_ORG_TAP_ERROR_TEST = "1"
+CS_ORG_MISMATCH_FATAL = "0"
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "shot"
+arg = "menu"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["menu"]

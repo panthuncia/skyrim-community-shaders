@@ -87,8 +87,8 @@ whitespace removed it matches HEAD (134 files, 0 differences).
 - Scene/CaptureParity.h: a comment about the bone palettes at VS b9 and b10 sat above `treeSamples`, which it does not describe.
   The fields it described may have moved or been deleted. I removed the comment.
 - PlayerParity.cpp DrawPanel: uses `ImGui::Button("Clear")`, but the project convention is `Util::Button`.
-- Several `TEMP` diagnostics remain: DrawsState.h SetParityFrame (payloadTables, listedBy, inputsStaging, writersStaging), SetParity.cpp,
-  and BuildDrawsCS.hlsl RecordWriter. The TEMP marker is kept. Remove them once the set parity investigation is closed.
+- The `TEMP` set parity diagnostics (SetParityFrame's payloadTables, listedBy, inputsStaging and writersStaging, and BuildDrawsCS.hlsl
+  RecordWriter) were removed in the ORG cleanup (2026-11-20).
 - BuildDrawsCS.hlsl: the unbucketed fallback draw path ("Any other unbucketed draw") has no callers today, per its own comment,
   so it may be dead.
 - Policy.h: CheckAncestorKeys has no "normal path" answer in its brief, unlike every other question.

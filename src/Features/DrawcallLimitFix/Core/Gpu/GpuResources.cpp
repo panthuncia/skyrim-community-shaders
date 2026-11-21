@@ -137,7 +137,7 @@ namespace DCLF
 			if (!batch->described)
 				break;  // no batched export, described alone below
 			auto& reference = batch->references[i];
-			if (Diagnostics::Observe().claimsOrScene) {
+			if (Diagnostics::Observe().parity) {
 				Bump(counters.prefetchTaken, 1);
 				reference->AddRef();
 				Bump(counters.prefetchReleased, reference->Release() == 1 ? 1u : 0u);
@@ -301,7 +301,7 @@ namespace DCLF
 		Bump(counters.prefetchBatches, 1);
 		Bump(counters.prefetched, batch->objects.size());
 		// The job holds the batch, so its answers outlive whatever the owner drops. A refused job is left to Finish.
-		SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "DCLF buffer prefetch",
+		::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu, "DCLF buffer prefetch",
 			[batch](const auto&) {
 				DCLF_ZONE("CS.DCLF.Scene.PrefetchBuffers.Describe");
 				if (batch->claimed.exchange(true, std::memory_order_acq_rel))

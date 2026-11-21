@@ -91,8 +91,8 @@ struct FadeFrame
 	float4 Divisors[4];
 	uint RootCount;
 	uint SceneFrame;
-	uint LogBase;
-	uint Reserved;
+	uint Reserved0;
+	uint Reserved1;
 	float3 AnimEye;
 	float AnimLodAdjust;
 	int AnimCounter;
@@ -105,7 +105,7 @@ static const uint kFadeVerdictInView = 1u << 0;
 // The stamp in the low 28 bits, the fade drop in bit 31.
 static const uint kFrustumStampMask = 0x0FFFFFFFu;
 static const uint kFrustumFadeHidden = 0x80000000u;
-// A four-word header with the appended count, which may pass capacity, and the scene frame. Then four words per event.
+// A four-word header with the appended count, which may pass capacity, and the run's stamp, which the host writes. Then four words per event.
 static const uint kHeaderWords = 4;
 static const uint kKindRoot = 0;
 static const uint kKindObject = 1;
@@ -192,11 +192,6 @@ void ObjectSlot(uint a_slot)
 	const FadeFrame frame = frames[0];
 	SceneFrame = frame.SceneFrame;
 	const uint index = dispatchID.x;
-	if (index == 0) {
-		// The host checks the list's frame against the one it armed the readback for.
-		RWStructuredBuffer<uint> events = ResourceDescriptorHeap[EventsIndex];
-		events[1] = SceneFrame;
-	}
 	if (index < RootSlots)
 		RootSlot(index, frame);
 	else if (index - RootSlots < ObjectSlots)

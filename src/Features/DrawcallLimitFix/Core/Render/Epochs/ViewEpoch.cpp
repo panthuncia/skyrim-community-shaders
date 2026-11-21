@@ -354,7 +354,7 @@ namespace DCLF
 		const std::uint32_t slots = std::min(std::max(static_cast<std::uint32_t>(map.size()), InstalledPipelineSlots()), layout.slots);
 		WriteBucketMap(latchBlock, labels.map, latchRun, layout.MapOffset(), map, slots);
 		const bool classMap = WriteViewClassMap(a_shape, labels.map, latchRun);
-		const std::uint32_t frameNumber = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t frameNumber = Scene::FrameView::Get().SceneStep();
 		auto& state = View(a_shape.kind);
 		const auto* view = state.resources.get();
 		std::vector<std::uint32_t> table;

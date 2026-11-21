@@ -47,9 +47,7 @@ light culling is the first feature that does this. Its D3D11 path stays in place
     once the run's GPU work is done, and lease indices are reused, so memory follows the runs in flight. Nothing waits
     for a run of the same frame. The only waits are frame pacing (the synchronous path's run of `framesInFlight` frames
     back) and a revision-driven epoch's published copy (DCLF's epochs: `framesInFlight` copies of each recording, a
-    submission waiting only for a copy whose last run a Present sealed). `CS_ORG_EPOCH_STATS=1` logs `[ORG] Run memory:`
-    every window: leases in flight and their peak, lease indices made, the frame arena's chunks and live bytes, the
-    statistics ranges and the device's command memory (`rhi::Device::CommandMemoryStats`).
+    submission waiting only for a copy whose last run a Present sealed).
 
 ## Ordering against D3D11
 
@@ -70,8 +68,7 @@ wait on another queue splits that list:
     command, after a flush when the execution's `exitSplit` says so.
 5.  DXVK's images are imported at the layout DXVK reports for them (`DxvkImageImport`), which is their home: the runtime opts in
     to `DXVK_ORG_INTEROP_RESTING_LAYOUTS`, so DXVK no longer pins them to GENERAL, and the graph uses real layouts on them. With
-    external home states (`CS_ORG_EXTERNAL_HOME`, on), every epoch returns them to that layout on the graphics queue, where DXVK
-    uses them between the epochs. `CS_ORG_RESTING_LAYOUTS=0` (or `CS_ORG_EXTERNAL_HOME=0`) keeps the old GENERAL pinning.
+    external home states, every epoch returns them to that layout on the graphics queue, where DXVK uses them between the epochs.
     Memory dependencies against D3D11 are the queue-boundary barriers (below).
 
 In the tours (2026-11-01), DXVK's command list is split 1.3 times a frame by the epochs (the Z-prepass's compute entry),
@@ -83,8 +80,7 @@ DXVK creates queues it never submits to, for ORG's off-stream kinds:
 
 -   `DxvkOrgInteropDeviceInfo::computeQueue` is ORG's compute queue, the graph's alone.
 -   `DxvkOrgInteropDeviceInfo::copyQueue` (interop version 5), a spare queue of the transfer-only family, is ORG's copy queue.
-    Without one, ORG's copy queue shares the uploader's (`uploadQueue`). `CS_ORG_COPY_QUEUE=0`, or neither queue, leaves it
-    aliasing the graphics one.
+    Without one, ORG's copy queue shares the uploader's (`uploadQueue`). With neither queue it aliases the graphics one.
 
 A pass that touches a resource only DXVK's families may use (an exclusive import) stays on the graphics queue.
 
@@ -121,7 +117,6 @@ A pass that touches a resource only DXVK's families may use (an exclusive import
     -   Never a video family: a driver need not support copies there correctly. Visual corruption was seen with one.
 -   **Kept on graphics.** The small copies inside an epoch's graphics work (LLF's `cs.llf.latch-lights`, the cull counter
     and foliage readbacks) prefer the graphics queue. On the copy queue they would only add a stream entry or a split.
-    `ORG_PERSISTENT_COPIES_ON_COPY_QUEUE=1` moves every copy pass to the copy queue whatever it prefers, to exercise it.
 
 ### Enqueued epochs
 
@@ -147,10 +142,6 @@ BasicRHI's Vulkan `q_submit` serialises a submission only on its queue's `access
 (`ORG.Frame.SubmitPackets`) waited 20-40 ms behind a copy-queue upload (`CopyQueueUploadService`, which reaches the queue
 through DXVK's `LockSubmissionQueue`); it is now at most 0.88 ms. `sc_present` still holds `timelinesMutex` across the
 present (SARP and BasicRenderer only).
-
-With a DXVK build that lacks the export, each epoch instead flushes and
-waits for DXVK, then submits under the queue lock. This is undesirable, and will likely be downgraded 
-to a failure in the future.
 
 ## Hazard: external Vulkan work directly after a graph epoch
 
@@ -201,7 +192,7 @@ upscaler output").
 -   **Frame generation:** *not covered*. That is `Streamline::EvaluateFSRFrameGen` (`Upscaling/Streamline.cpp`) and the DLSS-G path.
     Frame generation was off in every run of the investigation. A later check of the inn with it on showed no corruption in a few
     screen grabs, which does not rule the hazard out.
-    With `CS_ORG_UPSCALING=1` the hudless copy is an epoch at the `FrameGeneration` anchor, a late anchor, so on that path the
+    In graph mode the hudless copy is an epoch at the `FrameGeneration` anchor, a late anchor, so on that path the
     separator does run between it and frame generation's calls.
 -   **Epochs that can end up last before the upscaler or Present.**
     -   DCLF's first-person colour epoch (`RenderFirstPersonView`) is the one that triggered this. It is the only epoch with no DXVK
@@ -213,10 +204,6 @@ upscaler output").
 
 -   The repro: `coc RiverwoodSleepingGiantInn` with DCLF and first person on, about 16 s and 5 screenshots. Without the separator,
     every run reproduced it.
--   `CS_DCLF_TARGET_DUMP` stages the upscaler output at every dump point, including "before upscale" and "after evaluate", and writes
-    raw texels.
--   The in-command-buffer readback (`InCbReadback` in `Upscaling/Streamline.cpp`) copies the consumer's inputs and output inside its
-    own command buffer. It runs on dump frames only: it allocates 512 MB host-visible and idles the device once.
 
 **Open questions; the workaround stays until one of these resolves the cause:**
 
@@ -330,8 +317,7 @@ stream order, on its own command buffer, outside any render pass. DCLF's CPU-dri
     whole submission did (the callback's retirement point; values grow in stream order per semaphore). DCLF waits for the frame
     values' timeline and signals its CPU-frame timeline once a frame, behind the frame's callbacks.
 -   **Lifetime.** DXVK tracks nothing the callback uses: every D3D11 object, view and buffer it reads or writes is held until its
-    signal completes. ORG's staged uploads a callback depends on are recorded on the render thread into a secondary
-    (`RenderGraph::RecordPendingUploads`) and executed at the callback's start, so DXVK's list is not ended for them. ORG's latch
+    signal completes. ORG's latch
     regions a callback's work reads are an external run's (`GraphHost::BeginExternalRun`), whose lease retires only after its
     frame's signal.
 -   Once the path has been used, DXVK no longer reorders transfers or layout transitions on interop images, or on buffers with a
@@ -379,13 +365,14 @@ stream order, on its own command buffer, outside any render pass. DCLF's CPU-dri
     -   The image has no mutable format, so D3D11 views use the texture's own typed format. 3D textures take no RTV.
 -   **Rule: exported means not aliasable**, whatever the lifetime. D3D11's use is outside the graph, which would otherwise reuse
     the memory across it. A resource becomes aliasable when its last D3D11 reader is ported and the export goes.
--   **Teardown and resize.** `Reset`, the destructor and `Resize` release the D3D11 views and resource first. Then
+-   **Teardown and new versions.** `Reset`, the destructor and a new version's adoption release the D3D11 views and resource first. Then
     `RenderGraphRuntime::ReleaseAfterD3D11` holds the graph resource until an event query issued after that release completes
     (checked every frame). When D3D11 cannot make the query then, the owner is parked and a later frame issues it: nothing waits,
     and the query still follows the release in the stream. DXVK keeps its own objects alive for in-flight work, but not the image's memory, which the graph owns.
-    A `Resize` bumps the twins' resize generation (`Resource::ResizeGeneration`). At their next run the anchors see it, build
-    their graphs again with the new resource, and `PublishedResources::Refresh` publishes it again under the twin's id: the owner
-    calls nothing. A pass reads `Graph()` when it is made, never across builds.
+    A twin keeps its size for life. A texture whose size follows a variable is declared (`Frame::DeclareTexture2D`,
+    `src/RenderGraph/Frame/Declare.h`): a new extent is a new version of the same slot, made on the revision lane and adopted
+    at a frame's Begin with every stage that declares it (docs/development/plans/frame-revision-plan.md). Passes declare the
+    slot (`Versioned()`), so no build follows. A pass reads `Graph()` when it is made, never across builds.
 
 ```cpp
 // A transient output written at DeferredPasses and bound by engine draws as a PS SRV until P5.
@@ -398,13 +385,9 @@ FrameAnchors::Register({ .id = "cs.myfeature",
 // Later in the frame, the D3D11 reader:
 ID3D11ShaderResourceView* srv = out.SRV();
 context->PSSetShaderResources(45, 1, &srv);
-// At a resolution change: the anchors build again and the published id follows by themselves.
-out.Resize(width, height);
 ```
 
-`CS_ORG_GRAPHRES_SELFTEST=1` proves the path: a compute pass at DeferredPasses writes an exported texture, D3D11 copies it into
-a staging texture right after the epoch and reads one texel back, then the texture is resized (the first one released through
-`ReleaseAfterD3D11`) and checked again.
+Declared textures' new versions are covered by the `resize` tests.
 
 ### Publishing a graph resource to other epochs
 
@@ -421,9 +404,8 @@ colour passes reading a feature's output), the producer publishes it (`src/Rende
 -   The host extension `cs.org.published-resources` is added once and registers the latest entries at every build. A new id
     rebuilds only the graphs that looked it up (`GraphHost::RequestRebuildFor`); a reader that registers with it builds its own
     epoch. A pass that skips an id until it is published declares it through `PublishedResources::IsDeclarable`: its publish
-    then rebuilds every graph once, since the skipping build never looked it up. A new resource under a known id (after a
-    `Resize`) rebuilds every graph, since each holds the old one. After a twin's `Resize` the anchors do it
-    (`PublishedResources::Refresh`); the producer need not publish again.
+    then rebuilds every graph once, since the skipping build never looked it up. A new resource under a known id rebuilds
+    every graph, since each holds the old one. A versioned twin is published as its slot, so its new versions need nothing.
 -   `Withdraw(id)` when the producer leaves its ORG path (a setting that turns it off, a runtime that stopped). Readers then go back to D3D11.
     The resource stays registered until the next `Publish` under that id, because a graph built earlier may still declare it.
 -   `ShaderResourceIndex(id, index)` gives the bindless index of the whole-resource SRV (every mip; a cube's `TextureCube` view, a 2D
@@ -483,8 +465,8 @@ Where the timings come from now:
 ## GPU timers from the graph
 
 The end state has no D3D11 and no DXVK, so every GPU timer must come from the graph's own timestamp queries (ORG's statistics
-service on BasicRHI query pools). `src/RenderGraph/GpuTimingSource.{h,cpp}` is that source. Two switches pick it; both keep
-the D3D11/DXVK path as the default until the DXVK-free build.
+service on BasicRHI query pools). `src/RenderGraph/GpuTimingSource.{h,cpp}` is that source. One switch picks it; the
+D3D11/DXVK path stays the default in guest mode.
 
 -   `CS_GPU_TIMERS=graph`. The profiler (`Profiler.cpp`) makes no D3D11 query and needs no D3D11 device. Its `BeginPass` /
     `EndPass` ranges keep their CPU times. The graph's passes report exactly as before, through `AddExternalSample`, and are
@@ -493,8 +475,6 @@ the D3D11/DXVK path as the default until the DXVK-free build.
     events: `[GpuEvents] graph N frames ...` with the graphics queue's span from the first graph range to the last, each queue's
     time inside graph ranges, then per range the inclusive and self (along its queue) time and calls. `dclf:gpu-window` windows work
     the same way. `CS_GPU_LOAD` becomes a compute pass at the Present anchor (`GpuLoadPass.cpp`, same shader arithmetic).
--   `CS_GPU_IDLE_SOURCE=graph`. `CS_GPU_IDLE_TRACE` takes its busy spans from the graph's graphics-queue ranges instead of
-    `dxvkSetSubmissionTrace` / `dxvkReadSubmissionTrace`. The analysis and the log are the same.
 
 Each epoch submission (`MarkEpoch`) records its host frame, the Present it belongs to and the CPU time. The completed-frame callback
 adds that host frame's timestamp pairs (`IStatisticsService::GetCompletedTimestamps`: passes, barrier batches of kept recordings,
@@ -503,17 +483,15 @@ sub-ranges) to the Present. A Present is handed on once every epoch submitted in
 What the graph source cannot see, compared with the DXVK trace:
 
 -   DXVK's own command lists. While the engine still draws through D3D11, the time between graph ranges is D3D11 work, not idle.
-    The idle trace on the graph is only an idle trace once the whole frame is graph passes.
 -   Work the graph does not time: barrier batches (timed only in recordings kept across frames), the kept recordings
     themselves unless `CS_ORG_RECORDING_TIMESTAMPS=1`, upload lists, the present and the presenter's blit.
 -   The exact queue submission time. The graph knows when the render thread submitted the epoch, which is no later than the
     queue submission, so it still bounds the GPU-to-CPU clock offset but less tightly. BasicRHI enables
     `VK_EXT_calibrated_timestamps` only for Tracy and does not expose it, so there is no exact calibration yet.
--   The flush type and the app, CS thread and queue times of each DXVK submission, and the compute queue's idle time (the trace
-    covers the graphics queue).
+-   The flush type and the app, CS thread and queue times of each DXVK submission.
 
 Remaining DXVK dependencies of the timers and diagnostics, all on the default path: `dxvkGetSubmissionCounter` (the
-profiler's split flag), `dxvkSetSubmissionTrace` / `dxvkReadSubmissionTrace` (the idle trace), and the Streamline interop
+profiler's split flag) and the Streamline interop
 ring's own timestamps (`DXVKInterop`, `Upscaling::Upscale`), which use DXVK's device and `dxvkEnqueueInteropSubmission`.
 `CS_PASS_SKIP`, `CS_GPU_OP_PROBE` and `CS_GPU_EVENT_STATS` hook or query the D3D11 context and have no graph equivalent.
 
@@ -525,11 +503,11 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | Anchor | Hook |
 | --- | --- |
 | `ReflectionsPrepass` | `Deferred::ReflectionsPrepasses` (`BSCubeMapCamera::RenderCubemap`) |
-| `SkyReflections` | DCLF's sky family (`Features/Sky`): a reflection face's sky batch, once per face (only with `CS_ORG_SKY=1`) |
+| `SkyReflections` | DCLF's sky family (`Features/Sky`): a reflection face's sky batch, once per face |
 | `EarlyPrepass` | `Deferred::EarlyPrepasses` (after `Main::RenderShadowMaps`) |
 | `DepthDone` | `TerrainBlending::BlendPrepassDepths` (`Main::RenderDepth` returned; only with Terrain Blending on) |
 | `Prepass` | `Deferred::PrepassPasses` (the main pass's first opaque batch) |
-| `Sky` | DCLF's sky family (`Features/Sky`): the main pass's sky batch, after the opaque groups (only with `CS_ORG_SKY=1`) |
+| `Sky` | DCLF's sky family (`Features/Sky`): the main pass's sky batch, after the opaque groups |
 | `DeferredPasses` | `Deferred::DeferredPasses`, after the final depth copy |
 | `DeferredComposite` | `Deferred::DeferredPasses`, after the D3D11 SSGI, SSS and cubemap update, where the composite runs |
 | `PostComposite` | the end of `Deferred::DeferredPasses`, after the composite (D3D11 or ORG), where Effects11's rays draw |
@@ -539,32 +517,34 @@ of adding a `Segment` and editing the epoch order. Each anchor is one of CS's ho
 | `FrameGeneration` | `Upscaling::CopyHudlessColor`, after the ImageSpace chain, where frame generation's hudless colour is captured |
 | `Present` | `IDXGISwapChain_Present` (`Hooks.cpp`), before DCLF's `BeforePresent` |
 | `Overlay` | `OverlayRenderer::FinalizeImGuiFrame`, where CS's ImGui frame is drawn (`ImGuiRenderer::RenderDrawData`) |
-| `HDROutput` | `HDRDisplay::ApplyHDR`, HDR's output composite inside its present chain (run only by `CS_ORG_HDR_DISPLAY`) |
+| `HDROutput` | `HDRDisplay::ApplyHDR`, HDR's output composite inside its present chain |
 | `Capture` | `ScreenshotFeature::ProcessCaptureRequest`, at the end of HDRDisplay's present chain, before the native Present |
 | `EngineShadowClear`, `EngineCubeClear`, `EngineFrameClear` | the engine skeleton's clear sites (`Renderer::ApplyState`, `SetDirtyStates`, `ClearColor`, `ClearDepthStencil`), before the engine's bind (`p5/skeleton.md`) |
 | `EngineDepthCopy` | the engine skeleton's `kPOST_ZPREPASS_COPY` copies: `Main::RenderDepth`, FinishAccumulating, `Deferred::DeferredPasses` |
-| `Interface` | each Scaleform `EndDisplay` the graph draws (`RenderGraph/Engine/Scaleform`, `CS_ORG_SCALEFORM`), inside `UI::DrawInterface`, several times a frame |
-| `ImageSpace` | a batch of the engine's ImageSpace draws the graph draws in the engine's place (`RenderGraph/Engine/ImageSpace`, `CS_ORG_IMAGESPACE`): at the end of the HDR effect's or the pre-tonemap composites' render, or before the first engine draw that is not the graph's; up to 4 times a frame (`p5/imagespace.md`) |
-| `EngineDraws` | DCLF's engine draw families drawn at their own call, up to five runs a frame: the world's shadow masks (Main::RenderShadowMasks) and a menu scene's (UI3DSceneManager::Render) with `CS_ORG_SHADOW_MASK=1`, the water mask (FinishAccumulating's Stencil batch) and the water (FinishAccumulatingPostResolveDepth's water batch) with `CS_ORG_WATER=1`, the screen blood (FinishAccumulatingScreenSplatter) with `CS_ORG_BLOOD_SPLATTER=1`. It is the 32nd segment, the most `TakeSubmittedSegments`' mask holds |
-| `EngineQueries` | the engine's occlusion queries the graph answers (`CS_ORG_OCCLUSION_QUERIES`): the sun's occlusion draw at `Sun::SubmitOcclusionQuery`'s call, up to three runs a frame (two seen). A client of its own (`cs.sky.sun`), so every run's queries are that client's |
-| `VolumetricLighting` | the engine's VL blur call in RenderWorldPostProcess (SE 100486, AE 107206), detoured by `Features/VolumetricLighting/ORGVolumetricLighting` (`CS_ORG_VOLUMETRIC_LIGHTING`): once a frame, the generate, raymarch, apply, blurs and the depth copy (docs/development/p5/volumetric-lighting.md) |
-| `DecalQueries` | the engine's decal occlusion tests (SE 35563, AE 36562) at the frame's start, one run per decal tested, only while decals wait to be placed (`CS_ORG_OCCLUSION_QUERIES`, DCLF's decal occlusion family). Its own anchor, not `EngineQueries`: an inactive client's passes run in another client's runs, and their query reset and resolve would overwrite counts its own last run left unread |
+| `Interface` | each Scaleform `EndDisplay` the graph draws (`RenderGraph/Engine/Scaleform`), inside `UI::DrawInterface`, several times a frame |
+| `ImageSpace` | a batch of the engine's ImageSpace draws the graph draws in the engine's place (`RenderGraph/Engine/ImageSpace`): at the end of the HDR effect's or the pre-tonemap composites' render, or before the first engine draw that is not the graph's; up to 4 times a frame (`p5/imagespace.md`) |
+| `EngineDraws` | DCLF's engine draw families drawn at their own call, up to five runs a frame: the world's shadow masks (Main::RenderShadowMasks) and a menu scene's (UI3DSceneManager::Render), the water mask (FinishAccumulating's Stencil batch) and the water (FinishAccumulatingPostResolveDepth's water batch), the screen blood (FinishAccumulatingScreenSplatter). It is the 32nd segment, the most `TakeSubmittedSegments`' mask holds |
+| `EngineQueries` | the engine's occlusion queries the graph answers: the sun's occlusion draw at `Sun::SubmitOcclusionQuery`'s call, up to three runs a frame (two seen). A client of its own (`cs.sky.sun`), so every run's queries are that client's |
+| `VolumetricLighting` | the engine's VL blur call in RenderWorldPostProcess (SE 100486, AE 107206), detoured by `Features/VolumetricLighting/ORGVolumetricLighting`: once a frame, the generate, raymarch, apply, blurs and the depth copy (docs/development/p5/volumetric-lighting.md) |
+| `DecalQueries` | the engine's decal occlusion tests (SE 35563, AE 36562) at the frame's start, one run per decal tested, only while decals wait to be placed (DCLF's decal occlusion family). Its own anchor, not `EngineQueries`: an inactive client's passes run in another client's runs, and their query reset and resolve would overwrite counts its own last run left unread |
 
 Each anchor's ordering rule is in [org-extension-api-notes.md](./org-extension-api-notes.md), "Attaching passes to the frame".
 
 **How a feature uses one.**
 
-1.  Before the graph initializes (`Load` or `PostPostLoad`, when its ORG path is on): `FrameAnchors::Reserve(anchor)`.
+1.  Name the client at the step of the stage its work belongs to (`src/RenderGraph/Frame/RecipeTable.h`). Every anchor is a stage's
+    step, so nothing is reserved before the graph starts.
 2.  Once the runtime is active (`SetupResources`): make its programs and resources, then `FrameAnchors::Register(client)`. A
     client is an id, its passes (name, anchor, order key, kind, and a `make` that returns a new `TypedRenderGraphPass` at each
     build), and optional callbacks: `registerResources`, `commit` (latch writes inside the epoch), `active` and
     `executed`, and its run gates (below, "Per-run work").
-3.  The passes declare what they read and write as any graph pass does. Engine targets come from
-    `FrameAnchors::EngineTarget(RE::RENDER_TARGET)` and `EngineDepth(...)`: DXVK images imported once (`DxvkImageImport`) and
-    registered with every anchor graph as `cs.engine.target.<n>` and `cs.engine.depth.<n>`. Cubemap targets come from
-    `EngineCubemap(RE::RENDER_TARGETS_CUBEMAP)` (`cs.engine.cubemap.<n>`, a cube default SRV), and a feature's own D3D11
-    texture that is not ported yet from `D3D11Texture(name, texture, srv, uav)` (`cs.d3d11.<name>`; Screen Space Shadows reads Terrain Blending's blended depth through it). Every import
-    describes all its mips and slices; a `D3D11_RESOURCE_MISC_TEXTURECUBE` texture gets cube views.
+3.  The passes declare what they read and write as any graph pass does. There are three import entry points. Engine targets
+    come from `FrameAnchors::EngineTexture(FrameAnchors::Colour(RE::RENDER_TARGET))`, or `Depth(...)` and `Cubemap(...)`: the
+    engine target set's declared slots, stable for the session. Any other D3D11 texture comes from
+    `ImportTexture(id, { .texture, .srv, .uav, .rtv })`, with `.depth` for a depth target outside the engine's table, `.views`
+    for exact views, and `.immutable` for a file texture. A feature's own texture is named `cs.d3d11.<name>`. `ShareImage` serves
+    an image a graph outside the anchors uses. Every import describes all its mips and slices; a
+    `D3D11_RESOURCE_MISC_TEXTURECUBE` texture gets cube views.
 4.  A graph mode has no D3D11 path to return a client to. When the anchor's epoch fails with the client in it, or the graph
     stops, the client fails (below, "Failure isolation").
 5.  CS's shared constant buffers (FrameBuffer, SharedData, FeatureData, Permutation): set `.sharedConstants = true`. The anchor's
@@ -590,8 +570,7 @@ class MyPass final : public org::TypedRenderGraphPass<MyPass, Frame, Bindings> {
 	// Revision, Prepare and Record as in ORGLightCulling.cpp: bind program->layout and Pipeline(), push indices, Dispatch.
 };
 
-FrameAnchors::Reserve(FrameAnchors::Anchor::DeferredPasses);  // at load
-auto main = FrameAnchors::EngineTarget(RE::RENDER_TARGET::kMAIN);
+auto main = FrameAnchors::EngineTexture(FrameAnchors::Colour(RE::RENDER_TARGET::kMAIN));
 FrameAnchors::Register({ .id = "cs.myfeature",
 	.passes = { { .name = "cs.myfeature.resolve", .anchor = FrameAnchors::Anchor::DeferredPasses, .order = 100,
 		.kind = FrameAnchors::PassKind::Compute, .make = [=] { return std::make_shared<MyPass>(main, out, program); } } },
@@ -600,31 +579,27 @@ FrameAnchors::Register({ .id = "cs.myfeature",
 
 **How anchors map onto epochs.**
 
--   Each anchor is a `Segment` of its own (`Segment::Anchor*`), and a reserved one is an epoch: in the host's epoch order (before
-    the first epoch the frame runs after it), a live async epoch, and in DXVK's stream with the others.
--   `RenderGraphRuntime::Initialize` asks `FrameAnchors::AddToFrame` for the reserved epochs, then `FrameAnchors::Attach` adds one
-    host extension (`cs.org.frame-anchors`). At each build it gives an anchor's graph that anchor's passes, sorted by key, and the
-    clients' resources. Other epochs' graphs get nothing from it.
+-   Anchors have no epochs of their own. Each CS stage of the recipe table is one epoch (`RenderGraphRuntime::StageSegment`), and
+    an anchor's passes go into the graphs of the stages with a step at it. Profiler names are the stages'.
+-   `RenderGraphRuntime::Initialize` asks `FrameAnchors::AddToFrame` for the stages' epochs, then `FrameAnchors::Attach` adds one
+    host extension (`cs.org.frame-anchors`). At each build it gives a stage's graph its steps' passes in order, and the clients'
+    resources. Other epochs' graphs get nothing from it.
 -   A client change rebuilds only its anchors' epochs (`GraphHost::RequestRebuild(epoch)`). DCLF's condition changes no longer
     rebuild them (`RenderGraphRuntime::IsDclfSegment`).
--   **Cost.** An anchor nobody reserved has no epoch: no graph, no run leases, and its hook is one load. A reserved anchor whose
-    clients are all inactive (`active`) submits nothing at its hook; its ticket waits, prepared, for the next run.
+-   **Cost.** An anchor whose clients are all inactive (`active`) submits nothing at its hook.
 -   **Runs a frame.** An anchor may run any number of times a frame (`ReflectionsPrepass` at each cubemap render, the engine
     skeleton's clears and depth copy, `ImageSpace`'s batches). Each run takes a run lease of its own and waits for nothing: a run's
     work is in DXVK's stream until Present, so a wait for a run of the same frame would deadlock (the host's thread waiting for
     work DXVK has not submitted while the render thread waits for the host's thread), and leases never make one. A run costs a
-    pooled upload list, the arena bytes its latches take and a statistics range while it is in flight. `CS_ORG_EPOCH_STATS=1`
-    logs every anchor's peak runs in one frame (`FrameAnchors::PeakRunsPerFrame`).
+    pooled upload list, the arena bytes its latches take and a statistics range while it is in flight.
     -   This used to be a ring of frame slots per anchor, sized by a runs-a-frame table and a slot budget of 512 (a run past the
         ring was skipped, `RunStatus::RingFull`). Run leases replaced both.
     -   Per-run CPU data handed from a commit to its pass goes through `RenderGraph::RunSlots<T>` (Store at
         `GraphHost::CurrentRun`, Take at `RecordingContext::Run`).
 -   **The render owner only.** A loading screen presents from a job thread (SE 38085) while the main thread loads, and the
     startup logo from the MoviePlayer thread. Anchors run only on the render owner (`FrameAnchors::IsRenderOwner`, a pure
-    query that never moves ownership). By default that is the main thread (latched in `SKSEPlugin_Load`): at a loading
-    screen's Present `Run` returns `RunStatus::Refused` and one-shot passes wait for the next main-thread frame. With
-    `CS_ORG_LOADING_THREAD=1` the owner is the thread that last began an engine frame: the one claim point is a detour of
-    `Renderer::Begin` (SE 75460, AE 77245; `RenderGraph/Engine/LoadingScreen`), whose only callers are the main frame, the
+    query that never moves ownership). The owner is the thread that last began an engine frame: the one claim point is a detour of
+    `Renderer::Begin` (SE 75460, AE 77245; `RenderGraph/Frame/FrameDriver.cpp`), whose only callers are the main frame, the
     loading loop and the logo's movie tick. `FrameAnchors::ClaimRenderOwnership` moves the graph's frame upload instance with
     it ([p5/loading-screen.md](./p5/loading-screen.md)). `Run` checks ownership under the anchors' mutex, which a claim takes
     too. Per-Present work that feeds an anchor checks the same query (texture streaming's `FrameTick`, Scaleform's capture,
@@ -633,9 +608,7 @@ FrameAnchors::Register({ .id = "cs.myfeature",
     `HDROutput`, `Capture`) have run an epoch, `Run` calls the late-epoch hook, which Upscaling installs in `PostPostLoad`
     (`FrameAnchors::SetLateEpochHook`, `Upscaling::SeparateFromGraphEpochs`). An upscaler, frame generation or the present can
     follow these, and none may run directly behind a graph epoch (above, "Hazard: external Vulkan work directly after a graph
-    epoch"). The earlier anchors are followed by the engine's own draws. The anchors' core calls no feature and no self-test:
-    the self-tests reserve in `RenderGraphRuntime::Initialize` and register as ordinary clients at the first frame's end
-    (`SignalFramePace`), and check their runs from `executed`.
+    epoch"). The earlier anchors are followed by the engine's own draws. The anchors' core calls no feature.
 -   **Imports.** An import is kept while its D3D11 texture stays the same, and replaced when it changes. A feature texture that
     is destroyed or renamed is dropped with `FrameAnchors::ReleaseImport(id)` (`cs.d3d11.<name>`): the anchors build again
     without it, and the texture goes through `ReleaseAfterD3D11`.
@@ -658,10 +631,8 @@ A failure in one epoch stays with that epoch. It never stops the graph host's th
         mode has no D3D11 path for them. Development builds stop with a critical line and a message box that name the clients and
         the error (`CS_ORG_MISMATCH_FATAL`). Release builds log it, unregister the clients and build their anchors again without
         them. The removed clients draw nothing, and clients at other anchors keep running.
-    -   **A DCLF epoch.** DCLF cannot hand drawing back inside a frame it draws. At its next frame start it turns itself off for
-        the session and the engine draws again, as when its scene pump stops (`[DCLF] its render graph epoch '<label>' failed`).
-        If a frame is already waiting for a scene snapshot when the failure arrives, DCLF ends the game with
-        `stl::report_and_fail` and the error. That is a clear stop instead of a 5 s wait and a GPU timeout.
+    -   **A DCLF epoch.** Graph mode draws the world through DCLF, so it cannot hand drawing back. A failed DCLF epoch ends the
+        game at once with `stl::report_and_fail` and the error (`[DCLF] its render graph epoch '<label>' failed`).
     -   **Any other epoch** (Light Limit Fix's light culling). `ExecuteEpoch` returns false for it, and the feature falls back
         to D3D11 as its contract says.
 -   **Recovery.** A failed epoch is not built again every frame. It is built again when a client registers, changes or is
@@ -674,14 +645,18 @@ A failure in one epoch stays with that epoch. It never stops the graph host's th
 Every port sets up the same way:
 
 ```cpp
-// PostPostLoad, when the ORG path is requested: the frame's epochs are fixed when the graph initializes.
-static void Reserve() { if (Requested()) FrameAnchors::Reserve(FrameAnchors::Anchor::DeferredPasses); }
-
-// SetupResources: programs, resources and the client. False keeps the D3D11 path (a shader that does not compile, a resource not made).
-bool Setup(rhi::Device a_device);
-
-// Every frame, before the D3D11 path would run: the graph path only while the runtime is still up.
-bool IsActive() const { return registered && RenderGraphRuntime::Get().IsActive(); }
+// SetupResources: Port<T>::BeginSetup is the prologue. It returns null outside graph mode or once set up, and is fatal when the
+// graph does not run. Then programs, resources and the client. Every setup factory (RunGate::Create, Declare*, the graph
+// textures) is fatal when it cannot make what it is asked for, so a port checks none of them.
+bool ORGFoo::Setup()
+{
+	if (!BeginSetup())
+		return IsActive();
+	auto state = std::make_unique<Impl>();
+	// ...
+	impl = std::move(state);
+	return true;
+}
 ```
 
 -   `Register` may be called before CS's first constant upload, also by a client that reads the shared constants (above).
@@ -700,11 +675,11 @@ fill and clear frame counts). A pass's revision stays a function of what it was 
     no work, and never repeats an older run's counts. A copy has no indirect form: one that runs on some runs only is a raster
     copy through a gate, or a separate one-shot pass.
 -   **One-shot passes** (`PassDesc::once`). A clear, an upload or a fill. The pass is in its anchor's graph until one run with it
-    has been submitted, then the graph is built again without it. `FrameAnchors::Rearm(id)` makes the client's one-shot passes
-    pending again (a reset, a resize that needs a clear). The anchor runs while one is pending, even with no active client. Its
+    has been submitted, then the graph is built again without it. A new registration of the client has them pending again.
+    A reset is a declared texture's renew count instead (a History version is born cleared). The anchor runs while one is pending, even with no active client. Its
     work must give the same result if it ran twice. The helpers in "Pass helpers" below make the clear and the upload.
 -   **The executed signal** (`ClientDesc::executed`). Called on the render thread after a run whose epoch was submitted with this
-    registration's passes in its graph (built from this registration, or from a later `Refresh` or resize) and whose commit ran.
+    registration's passes in its graph (built from this registration, or from a later `Refresh`) and whose commit ran.
     What that commit wrote is then in a submitted execution, and every later GPU use of the client's resources is ordered after
     it. Use it for work that counts as done once it ran (a regenerated table, a history reset), instead of counting frames.
 
@@ -723,40 +698,27 @@ The one pattern for a family that withholds the engine's work and draws it on th
 Scaleform):
 
 1.  **Join** with `FrameAnchors::RequestJoin(id, anchor)`: true once the anchor's built graph holds this registration. Until
-    then the engine draws. It never builds on the caller's path: `Register`, `Refresh` and `RequestJoin` ask for the anchor's
-    build, and it happens at the next build point, between frames. In a world frame with Drawcall Limit Fix on that is DCLF's
+    then the work is left to the engine, which drops it in graph mode ([below](#engine-draws-in-graph-mode)). It never builds
+    on the caller's path: `Register`, `Refresh` and `RequestJoin` ask for the anchor's build, and it happens at the next build point, between frames. In a world frame with Drawcall Limit Fix on that is DCLF's
     build point (`IndirectDraws::BuildPoint`, explicit builds). In a frame with no build point (a menu, a loading screen, a
-    blocking movie, or DCLF off) it is the frame's end: `RenderGraphRuntime::SealPresented` calls `FrameAnchors::OnFrameEnd`,
+    blocking movie) it is the frame's end: `RenderGraphRuntime::SealPresented` calls `FrameAnchors::OnFrameEnd`,
     which builds (`BuildIfRequested`) only when a client waits to join and nothing built during the frame (logged as
     `graphs built at the frame's end for clients joining them`). A joining client no longer runs its anchor's epoch just to
     trigger a build. A registration that changes every frame therefore rebuilds every frame: register once, gate per run.
 2.  **Check before withholding** with `FrameAnchors::CanRun(id, anchor)`: the caller owns rendering, the runtime is active, and
-    the registration is in the built graph. False: leave this batch to the engine.
+    the registration is in the built graph. False: leave this batch to the engine, which drops it.
 3.  **Run** with `FrameAnchors::Run(point)`, which returns a `RunResult`: `RunStatus::Ran` (submitted), `Idle` (nothing active,
     or no epoch), `Refused` (not the render owner, or no runtime) or `Failed` (the epoch failed; its clients
-    are dropped at the next poll). It converts to true only for `Ran`. Anything else after withholding: draw the withheld work
-    through the engine now.
+    are dropped at the next poll). It converts to true only for `Ran`. Anything else after withholding: the withheld work is not
+    drawn this frame, and the caller logs it as an error (`ReasonLog`; DCLF's families do it in `RunWithheld`).
 4.  **Count it done** in the client's `executed` callback, which runs only for a run that was submitted with this registration's
     passes in its graph. It is the standard signal that withheld work reached submission.
 
-#### Leaving a draw to the engine under the flush latch
+#### Engine draws in graph mode
 
-With the flush latch on (`CS_ORG_ENGINE_FLUSH_LATCH=1`, [p5/flush.md](p5/flush.md) "Allowed engine draws"), the engine's flushes
-bind nothing, and an engine draw that reaches D3D11 is skipped unless someone vouched for it. So every place that hands work back
-to the engine on purpose (an inherent refusal, a batch handed back, step 3's fallback, DCLF's objects not yet claimed) says so,
-with `src/RenderGraph/Engine/Flush/Flush.h`:
-
--   Make one `Flush::Reason` per reason, once (a function-local `static const`), its name starting with the owner:
-    `static const Flush::Reason kRefused{ "sky: batch handed back" };`.
--   Around a synchronous call of the engine's draw, batch or flush, open `Flush::EngineDraws scope(kRefused);` just before the call
-    and close it right after. Inside it, flushes apply the owed state, shader binds and dispatches reach D3D11, and draws go
-    through, counted under the reason.
--   For a pass the engine registers now and its batch walk draws later, call `Flush::VouchPass(pass, kReason)` where the pass is
-    registered (test `Flush::Vouching()` first if deciding costs anything). The latch's `RenderPassImmediately` detour opens the
-    scope for that pass's draws in that frame or the next.
-
-Both cost one flag test with the latch off. A draw nobody vouched for is still skipped and logged as an `[E]` line: that is a bug in
-whatever left it to the engine. The latch's periodic line lists the allowed draws by reason.
+In graph mode the engine's context (the guest or native handle) keeps every bind and drops every draw and dispatch
+(`src/RenderGraph/Engine/Flush/Flush.h`). So work left to the engine is not drawn. The engine draw census names each dropped
+draw once per caller chain. With `CS_ORG_ENGINE_DRAW_TAP=1` each one is a tap error.
 
 ### Rebuilds during play
 
@@ -847,16 +809,15 @@ and `RasterProgram` its draw signature (`DrawDesc::indirect`). `ShaderBindings::
 What every family that draws the engine's work on the graph needs, in one place each. The families move onto them in their own
 lanes; new code uses them from the start.
 
--   **Programs: `RenderGraph::ProgramCache<Program, Key>`** (`src/RenderGraph/ProgramCache.h`). A keyed cache of `RasterProgram`
-    or `ComputeProgram` builds made on one build thread. `Get(key, describe)` returns the program once built and null until then
-    (the caller keeps the engine's draw meanwhile); the first `Get` of a key calls `describe` on the caller's thread (CS's common
-    defines are resolved there: they read State) and queues the build. A failed key is logged once
-    (`[ORG] <name> programs: <label> could not be built`) and stays `Failed` until `ClearFailed`. Never load a program
-    synchronously on the render thread per batch. `RenderGraphRuntime::Shutdown` stops the builds before the device goes.
--   **Per-run CPU data: `RenderGraph::FrameStaging`** (`src/RenderGraph/FrameStaging.h`). Dedicated `LatchBlock`s
-    (`LatchBlock::CreateDedicated`) of at least the size asked for, reused once the recording that retained them is done; the
-    pool keeps `kGameFramesInFlight` times the client's runs a frame (plus one), so a steady frame makes none. `maxBlocks` caps
-    large pools (decoded movie frames). `RenderGraph::RunSlots<T>` hands one immutable frame object per run from the commit
+-   **Programs: the program service** (`src/RenderGraph/ProgramService.h`, `RenderGraph::Programs`). Every graph program is built
+    there, several at once on CS's executor. A program keyed on frame variables or observed state is declared with
+    `Frame::DeclareProgram` (`Frame/Declare.h`) or `Frame::ProgramSet`: its builds gate the next revision, so a revision starts only
+    once its programs are built. A fixed program is queued at setup, and CS's setup joins the batch once. A failed build is fatal.
+    The render thread never builds a program and never waits for one in a frame.
+-   **Per-run CPU data: `RenderGraph::AcquireStaging`** (`src/RenderGraph/FrameStaging.h`). An oversize region of ORG's frame
+    arena (`FrameArena::AcquireOversize`): a chunk of its own, at offset 0, of at least the size asked for. It goes back to the
+    arena when the recording that retained it is done, and a steady frame reuses the freed chunks. The engine constants' upload
+    ring takes its chunks the same way. `RenderGraph::RunSlots<T>` hands one immutable frame object per run from the commit
     (`Store` at `GraphHost::CurrentRun`) to `Record` (`Take` at `RecordingContext::Run`), which retains it. A pass without a
     revision is prepared again after the commit, for the same run, so its Take finds the object.
 -   **Main-thread tick: `RenderGraph::Engine::MainTick::Add(name, callback)`** (`src/RenderGraph/Engine/MainTick.h`). Runs on the
@@ -914,7 +875,7 @@ they are ported.
 
 ## ImGui on the graph
 
-With `CS_ORG_IMGUI=1`, CS's ImGui frames are drawn by a render-graph pass instead of `imgui_impl_dx11`
+In graph mode, CS's ImGui frames are drawn by a render-graph pass instead of `imgui_impl_dx11`
 (`src/RenderGraph/ImGuiBasicRHI.{h,cpp}`, chosen in `src/Menu/ImGuiRenderer.{h,cpp}`).
 
 -   **When.** `imgui_impl_dx11` draws the first frames: the graph starts after the menu. Once the runtime is active with the
@@ -970,16 +931,11 @@ and ORG presents. A development option: the DXVK build stays the default. The co
 
 Each stage logs one `[ORG native] stage <n>: <name>: ...` line, so a start that stops shows how far it got:
 
-1.  **switches** (`SKSEPlugin_Load`, right after `CommunityShaders.env`): every port switch native mode needs is turned on
-    in the process environment (the set of `latch-census-short.env`, without its diagnostics, and the flush latch). A port
-    switch set to `0`, or a conflicting one (`CS_NATIVE_D3D11=1`, `CS_ORG=0`, `CS_ORG=features`), is a
-    startup error. So is a switch that narrows a port (`CS_ORG_WATER_PARTS`, `CS_ORG_SHADOW_MASK_VIEWS`,
-    `CS_ORG_IMAGESPACE_EFFECTS` set to less than every part), and Drawcall Limit Fix off (`CS_DISABLE_FEATURES` naming
-    `DrawcallLimitFix`, or `CS_DCLF=0`): the parts left out would be engine draws, which native mode drops. So is a switch
-    something read before this point.
+1.  **switches** (`SKSEPlugin_Load`, right after `CommunityShaders.env`): a conflicting switch (`CS_NATIVE_D3D11=1`, `CS_ORG=0`,
+    `CS_ORG=features`) is a startup error. So is Drawcall Limit Fix off (`CS_DISABLE_FEATURES` naming `DrawcallLimitFix`, or
+    `CS_DCLF=0`), in both graph modes: the engine's draws are dropped there and DCLF draws the world.
 2.  **checks** (`Hooks::InstallEarlyHooks`): DXVK is not loaded (`DxvkLoader::Load` skips it), no DXVK DLL is in the
-    process, and the RenderDoc and Upscaling features are off (Upscaling's upscalers and frame generation take DXVK's
-    images; add it to `CS_DISABLE_FEATURES`).
+    process, and the RenderDoc feature is off.
 3.  **device** (the game's `D3D11CreateDeviceAndSwapChain`, SE 75589 / AE 77396, through CS's hook): `rhi::CreateVulkanDevice`
     on the adapter the game enumerated (its LUID), on descriptor buffers, with every supported core feature but
     robustBufferAccess and sparse binding, robustness2's null descriptors, and the Vulkan 1.2 features the graph asks
@@ -1008,7 +964,7 @@ A native device handle answers through the native services instead of failing:
 -   **The context's resource work**: `Map`/`Unmap` (buffers and staging textures in host memory; a read or a write waits only
     for the context's own GPU work that last used the memory, `DO_NOT_WAIT` returns `DXGI_ERROR_WAS_STILL_DRAWING`,
     `WRITE_NO_OVERWRITE` never waits), `UpdateSubresource`, `CopyResource`, `CopySubresourceRegion`, `GenerateMips` (a
-    compute mip chain with ORG's `GenerateMips.hlsl`), `ClearRenderTargetView`, `ClearDepthStencilView` and both UAV clears.
+    compute mip chain with ORGModuleServices' `GenerateMips.hlsl`), `ClearRenderTargetView`, `ClearDepthStencilView` and both UAV clears.
     They are BasicRHI commands on both backends ([parity/native-context.md](./parity/native-context.md)). Once the graph is
     up each goes through ORG's external client when the call is made: an image the graph tracks takes its barriers from its
     ledger, every other resource moves from Common into its command's state and back. Before the graph is up they go on the
@@ -1032,7 +988,7 @@ A native device handle answers through the native services instead of failing:
 -   **Binds**: the native context stores what D3D11 code binds (shaders, shader resources, constant buffers, samplers, compute
     UAVs, render targets and depth, blend, depth-stencil and rasterizer states, viewports, scissors, input layout, topology,
     vertex and index buffers) and its getters answer it, so readers such as DCLF's main-pass capture (`OMGetRenderTargets`)
-    work. A bind the flush latch drops is not stored, as it never reaches DXVK in guest mode. `ClearState` clears them.
+    work. `ClearState` clears them.
 -   **State descriptions** are stored as D3D11 and DXVK store them: blend targets copied from the first without independent
     blending and given the default factors when blending is off, depth and stencil defaults when those are off, valid sampler
     addresses and anisotropy. GetDesc then answers what the pipeline conversions expect.
@@ -1042,8 +998,6 @@ A native device handle answers through the native services instead of failing:
     `AttachGraphResource` and the pipeline descriptions' tokens work; other GUIDs answer `DXGI_ERROR_NOT_FOUND`.
 -   **Context queries**: `End` marks the context's work submitted so far, and `GetData` answers `S_FALSE` until it is done on
     the GPU. Nothing is measured: events are done, occlusion counts 0 samples, timestamps are 0 and disjoint.
--   **The flush latch and the residue census** run without the guest: the context filter sees the native context's calls,
-    so latched binds and skipped engine draws are dropped silently and counted as on the guest.
 -   **Queries**: `CheckFormatSupport` and `CheckFeatureSupport` (threading, doubles, format support 1 and 2, the D3D10.x,
     D3D11 and D3D9 options, architecture, min precision) answer from BasicRHI's format support. The context answers
     `ID3DUserDefinedAnnotation` with an object that reports no capture tool. The later device, context and swap chain
@@ -1092,9 +1046,8 @@ left to the process exit (no DXVK teardown callback).
 `Engine::CreateD3D12Device` on the game's adapter) and records it (`RenderGraph::Backend::SetActive`), so the runtime
 shaders build to DXIL. The rest of native mode is the same code, except:
 
--   **The context's work** is the same BasicRHI route as on Vulkan. `CS_ORG_NATIVE_HOME_STATES=0` and
-    `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1` mean the same here as on Vulkan; D3D12's imports of images resting in Common are
-    exclusive either way.
+-   **The context's work** is the same BasicRHI route as on Vulkan. D3D12's imports of images resting in Common are
+    exclusive.
 -   **Descriptions for imports**: `DescribeResource` puts the `ID3D12Resource` where the `VkImage` or `VkBuffer` goes, with
     a buffer's GPU virtual address and no Vulkan format. `ImportDxvkImage` imports it with `rhi::dx12::import_resource`.
     D3D12's Common layout cannot be a render target, depth or UAV, so a texture resting in Common is imported for
@@ -1103,14 +1056,12 @@ shaders build to DXIL. The rest of native mode is the same code, except:
 -   **Queue sharing**: BasicRHI's queue sharing hooks are not installed (no Vulkan queue lock).
 -   **Drawcall Limit Fix** draws the main view's Lighting geometry (Z-prepass and colour) with its pulled builds and plain
     counted draws only. Its layouts are root constants alone; a pulled build reads the pass's frame record itself (preprocessed,
-    then `FrameSource::Rewrite`), and its stages are reflected from DXIL (`DxilStages`). Stage 1 sets the switches of what has no
-    D3D12 port yet (the CPU pipeline, the shadow views, the forward epoch, the families, ...; `[ORG native] D3D12: Drawcall Limit
-    Fix switches set`). Shaders read DCLF's buffers through buffer view refs (`DeviceLoad`, `Common/DeviceRef.hlsli`: a raw view's
+    then `FrameSource::Rewrite`), and its stages are reflected from DXIL (`DxilStages`). D3D12 sets no DCLF switch: DCLF reads the
+    device's indirect-command features at setup, and without pipeline sets it draws colour with plain draws only. Shaders read DCLF's buffers through buffer view refs (`DeviceLoad`, `Common/DeviceRef.hlsli`: a raw view's
     heap slot and a byte offset, BasicRHI's `Device::GetBufferViewRef`), the same code on SPIR-V and DXIL.
     [org-full-port.md](./org-full-port.md), "DCLF on D3D12".
 
-Scenarios: `tools/cs-ab/scenarios/native-d3d12.env`, and `native-d3d12-validation.env` with the debug layer and GPU-based
-validation.
+cs-test configs: `native-d3d12-tour`, and `native-validation` with the debug layer and GPU-based validation.
 
 ### Known gaps
 
@@ -1118,8 +1069,8 @@ validation.
     `GraphResources::ExportTexture`) and installs tripwire handles that wrap them. In native mode those calls fail, so the
     engine's targets, file textures and geometry buffers are native textures and buffers instead (the native services),
     which the graph imports by their records. What reads them through the context (Map, UpdateSubresource, CopyResource,
-    the binds the latch keeps) gets nothing.
--   **Context work.** Draws, dispatches and binds still in the census do nothing. A DYNAMIC buffer is not renamed on
+    its binds) gets nothing.
+-   **Context work.** The engine's draws and dispatches do nothing. A DYNAMIC buffer is not renamed on
     `WRITE_DISCARD`, because no native GPU work reads a buffer except the context's own copies; the graph does not import
     native buffers yet.
 -   **HDR**: HDR Display's output is not shown through the swap chain (no `SetFrameSource` in native mode), and the colour
@@ -1141,12 +1092,12 @@ functions. The engine side of P4.1 (which interfaces the engine asks for, the gu
     handle's interface chain. `GetDesc` returns the creation description, and debug names are kept. Every other method
     logs its caller once per call site (module+offset, with the Address Library ID for the game) and fails with E_FAIL,
     null or zeroed outputs, or zero.
--   **Guest mode.** Made with a D3D11 object (`a_wrap`), the handle forwards every call and logs only the methods in its
-    `WatchSet` (`CS_ORG_TRIPWIRE_WATCH_ALL=1`: every method, except on the device, context and swap chain). Handle
+-   **Guest mode.** Made with a D3D11 object (`a_wrap`), the handle forwards every call
+    (`CS_ORG_TRIPWIRE_WATCH_ALL=1` also records every forwarded call). Handle
     arguments are unwrapped on the way, so a wrapping device or context passes DXVK its own objects. Each call site that
     passes a handle is logged once (`<Interface> handle "<name>" passed on`): those are the readers not ported yet.
     A handle given straight to DXVK crashes there.
--   **The guest device and context.** `CS_ORG_TRIPWIRE_GUEST=1` puts a wrapping device handle and a wrapping
+-   **The guest device and context.** Guest mode puts a wrapping device handle and a wrapping
     immediate-context handle in the engine's pointers (the device and context globals, `RendererData` +0x38/+0x40, which
     Scaleform also reads), right after the engine creates its device (`GuestDevice.h`). Ports install handles in engine
     fields only when `GuestContextInstalled()` is true. `globals::d3d::device`/`context` stay DXVK's own objects, so CS
@@ -1180,80 +1131,43 @@ To see what the persistent graph executes (batches per queue, the barriers befor
 ## Switches
 
 Every switch is read once, through `src/RenderGraph/Switches.h` (`Switches::On`, `Off`, `Equals`, `Value`, `Number`, `List`):
-the first read of a name is kept for the session, from any thread, whole at any length. New switches go through it and get a row
-here. The feature ports' own switches (`CS_ORG_<FEATURE>=1`) read through it too. A list switch (names or numbers separated by
+the first read of a name is kept for the session, from any thread, whole at any length. New switches go through it, get a row in
+the switch table (`kSwitches` in `src/Testing/SwitchRegistry.cpp`) and get a row here. A list switch (names or numbers separated by
 commas) is read with `Switches::List`: each item trimmed, empty items left out, case kept. Never parse one by hand.
 
 | Variable | Effect |
 | --- | --- |
 | `CS_ORG=0` | No feature request and no graph: every feature stays on D3D11. Native mode and guest mode run every engine and CS port; there is no switch per port. |
-| `CS_ORG_NATIVE=1` | No DXVK: CS creates a BasicRHI Vulkan device, the engine's device, context and swap chain are tripwire handles over it, the graph runs natively and ORG presents ("Native mode"). Turns on every port switch it needs; a conflicting switch or a feature that needs DXVK stops the start with a message that names it. Logs `[ORG native] stage <n>: ...` per startup stage. |
+| `CS_ORG_NATIVE=1` | No DXVK: CS creates a BasicRHI Vulkan device, the engine's device, context and swap chain are tripwire handles over it, the graph runs natively and ORG presents ("Native mode"). A conflicting switch or a feature that needs DXVK stops the start with a message that names it. Logs `[ORG native] stage <n>: ...` per startup stage. |
 | `CS_ORG_NATIVE_VALIDATION=1` | With `CS_ORG_NATIVE=1`, BasicRHI creates the device with Vulkan validation (P6.4). |
 | `CS_ORG_NATIVE_BACKEND=d3d12` | Native mode's device: `vulkan` (default) or `d3d12` ("Native mode on D3D12"). It needs `CS_ORG_NATIVE=1` and a build with `CS_ORG_D3D12` (default on); without either the graph is off with that reason. With `CS_ORG_NATIVE_VALIDATION=1` the D3D12 debug layer is on, and `SARP_D3D12_GPU_VALIDATION=1` adds GPU-based validation. |
-| `CS_ORG_NATIVE_PRESENT_PROBE=1` | Native mode: about once a second a present also copies the back buffer into a readback buffer, and a later one logs `[ORG native] present probe ...` with its mean colour and how much of it is not black. Tells "nothing was drawn" from "the capture is broken". |
 | `BASICRHI_D3D12_RESET_TRACE=1` | BasicRHI's D3D12 backend keeps the stack of each command list's last reset, and logs it with the warning for a list reset while it records. |
-| `CS_ORG_D3D12_SELFTEST=1` | Beside the game, on a D3D12 device of its own: builds `RenderGraph/D3D12SelfTest.hlsl` to DXIL, runs one dispatch through the descriptor heap and root constants and checks the readback, then presents 120 frames to a small window. Logs `[ORG] D3D12 self-test: passed` or the step that failed. `CS_ORG_D3D12_SELFTEST_HDR=1` asks the window for HDR10. Needs no native mode. |
-| `CS_ORG_D3D12_DEBUG=1` | The D3D12 debug layer on the self-test's device (and DRED with it). |
 | `CS_ORG_D3D12_SDK=<version>` | With `CS_ORG_NATIVE_BACKEND=d3d12`: load the Agility SDK of that `D3D12SDKVersion` through a device factory. Its `D3D12Core.dll` comes from `CS_ORG_D3D12_SDK_PATH`, else `Data/SKSE/Plugins/CommunityShaders/D3D12`. Unset: the system's D3D12 runtime. |
-| `CS_ORG_CRASH_MARKERS=0` | Native mode: BasicRHI's crash markers off even in hang mode. They cost about a third of the frame rate in Dragonsreach on the RX 6600 (43 against 60 fps, Dev-Fast). |
-| `BASICRHI_VK_CRASH_MARKERS=1` | BasicRHI's native crash markers and fault reports (`VK_AMD_buffer_marker`, `VK_NV_device_diagnostic_checkpoints`, `VK_EXT_device_fault`, whichever the device has) on any BasicRHI device, also the one adopted from DXVK, where `DeviceCreateInfo::enableCrashMarkers` is not set. Read by BasicRHI (`rhi.h`). They mark BasicRHI's own lists; DXVK's markers (`DXVK_DEBUG=hang`, which also enables `VK_AMD_buffer_marker`) cover only DXVK's commands. On device loss the first timeline that reads `UINT64_MAX` dumps them. A test run adds it with `-Env BASICRHI_VK_CRASH_MARKERS=1`. |
+| `BASICRHI_VK_CRASH_MARKERS=1` | BasicRHI's native crash markers and fault reports (`VK_AMD_buffer_marker`, `VK_NV_device_diagnostic_checkpoints`, `VK_EXT_device_fault`, whichever the device has) on any BasicRHI device, also the one adopted from DXVK, where `DeviceCreateInfo::enableCrashMarkers` is not set. Read by BasicRHI (`rhi.h`). They mark BasicRHI's own lists; DXVK's markers (`DXVK_DEBUG=hang`, which also enables `VK_AMD_buffer_marker`) cover only DXVK's commands. On device loss the first timeline that reads `UINT64_MAX` dumps them. A test run sets it in its config's `[env]`. |
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |
 | `CS_ORG_LLF_PARITY=1` | Every 300 frames, also run LLF's D3D11 culling and compare each cluster's light set with the graph's (logs `LLF parity OK` / `MISMATCH`). |
-| `CS_ORG_WATER_PARTS=mask,surface` | With `CS_ORG_WATER=1`: the water parts the graph takes, comma separated (`Switches::List`; `mask`: the Stencil technique's batch; `surface`: the water batch); the others stay the engine's. Default both. A fallback for a part the graph draws wrong. |
-| `CS_ORG_SHADOW_MASK_VIEWS=world,menu` | With `CS_ORG_SHADOW_MASK=1`: the views the graph takes, comma separated (`Switches::List`); the others stay the engine's. Default both. |
 | `CS_GRASS_COLLISION_STATS=1` | Every 120 frames, log the frame's collider and collision-shape counts and the path that ran them (`[GRASS COLLISION] frame N (ORG or D3D11): ...`). |
-| `CS_ORG_SSGI_DEBUG=<n>` | A diagnostic of the SSGI graph path: one change per run, to find the part that goes wrong. 1: nothing aliased (transients made history textures); 2: the composite gets null SSGI inputs, the chain still runs; 3: no dispatch, the outputs cleared each run; 4: the CoCg output cleared each run (luma only); 5: every history texture cleared each run; 6: blur off; 7: temporal denoiser off; 8: full resolution; 9: depth from kMAIN, not the final depth copy; 10-15: one transient kept out of the alias pool (10 WorkingDepth, 11 RadianceTemp, 12 Normal, 13 Radiance, 14 AccumFramesScratch, 15 both blur inputs); 16: `SSS::DiffuseNoAlbedo` kept out of the pool; 17: SSGI's transients in a pool of their own, aliased only with each other (`GraphResources::Options::aliasPool`). Logs `[ORG] Screen Space GI debug: ...` at setup. |
-| `CS_ORG_ANCHOR_SELFTEST=1` | Reserve every frame anchor and run a test client at each: a raster pass writes a texture, a compute pass reads it and one texel of kMAIN into a buffer, and a copy reads that back. Each anchor logs `[ORG] anchor self-test: <anchor> OK` once, then `every anchor OK`. |
-| `dclf:refresh=<client id>` | A `CS_DCLF_TEST_COMMANDS` command (`Diagnostics/TestHarness.cpp`), not a variable: `FrameAnchors::Refresh` of that anchor client at that frame, which rebuilds its anchors' epochs alone, as a client changing its passes or resources does. For stress runs (`tools/cs-ab/scenarios/refresh-leak.env` refreshes `cs.cloud-shadows` every 5 frames). `dclf:rebuild` requests a whole graph rebuild instead. |
-| `CS_ORG_GRAPHRES_SELFTEST=1` | Reserve DeferredPasses and test the graph-backed resources there (above, "Graph-backed feature resources"). Logs `[ORG] graph resource self-test: 16x16 OK ...`, then `resized to 32x32`, `32x32 OK ...` and `every check OK; the texture is released`; `MISMATCH` otherwise. |
+| `CS_ORG_SSGI_DEBUG=<n>` | A diagnostic of the SSGI graph path: one change per run, to find the part that goes wrong. 1: nothing aliased (transients made history textures); 2: the composite gets null SSGI inputs, the chain still runs; 3: no dispatch, the outputs cleared each run; 4: the CoCg output cleared each run (luma only); 5: every history texture cleared each run; 6: blur off; 7: temporal denoiser off; 8: full resolution; 9: depth from kMAIN, not the final depth copy; 10-15: one transient kept out of the alias pool (10 WorkingDepth, 11 RadianceTemp, 12 Normal, 13 Radiance, 14 AccumFramesScratch, 15 both blur inputs); 17: SSGI's transients in a pool of their own, aliased only with each other (`GraphResources::Options::aliasPool`). Logs `[ORG] Screen Space GI debug: ...` at setup. |
+| `CS_ORG_SSS_KEEP_APART=1` | Subsurface Scattering's `SSS::DiffuseNoAlbedo` is a history texture, born cleared, to test whether it overwrites other memory. |
+| `CS_ORG_VIEW_ATMOSPHERE_DEBUG=<n>` | A debug view in place of Atmosphere and Fog's post-water composite on the graph (`ViewAtmosphere/Composite.cs.hlsl`). It writes finite values only. 1: red where kMAIN held a non-finite value, green where the medium is non-finite, blue where the result is, else the scene dimmed; 2: the distance to each pixel, white at 10 km, red where the depth reads as the sky; 3: the medium's transmittance; 4: its luminance times 4; 5: red where the shared medium is on, green and blue where the near and far fog volumes have a size, dim while volumetric fog is off; 6: kMAIN written back unchanged; 7: the fog's constants as the composite reads them (red: fog on, green: a density above zero, blue: volumetric fog applies); 8 and 9: the near and far fog volume's transmittance at its last slice by screen position, with no depth mapping (magenta: non-finite, blue: no size); 10: the analytic fog's transmittance alone, without the volumes and without their range cut out. 11: the analytic fog's inputs in four horizontal bands, top to bottom: the camera's height below 0 over 10000 units, the height falloff over 0.4, the density over 0.01, then the pixel's world height over 10000 units (red above 0, green below); 12: red where any slice of the near volume's column holds a non-finite or over-60000 value, green for the far volume. 13: the analytic fog's colour by source, as luminance times 4: red the settings' colours, green the sky IBL term, blue the directional term (magenta where non-finite). Logs `[ORG] Atmosphere and Fog: the post-water composite draws debug view <n>`. |
+| `CS_ORG_FOG_DEBUG=<n>` | A diagnostic of Exponential Height Fog's graph path (`ORGExponentialHeightFog`). 1: the volumes ignore the scene depth (no conservative-depth culling); 2: the engine's draws and DCLF's get no volume at t19 and t22, while the graph readers (post-water composite, SSAO composite) still read them by id; 3: the graph path stays off and the D3D11 path runs (guest only); 4: the engine's draws and DCLF's get each volume version before any run wrote it, as before that was fixed (normally they get null until a submitted run wrote it, logged as `[ORG] Exponential Height Fog: a run wrote the volumes at frame N`); 5: only the draws that still run on D3D11 get no volume (the t19 and t22 slots Prepass binds), while every DCLF colour draw still reads them; 6: the reverse, every DCLF draw gets no volume (its frame textures give null instead of keeping the captured slot), while the D3D11 draws still read them; 7: the far volume is cleared to no fog every run instead of computed, so every reader sees only the near volume; 8: no temporal history (the volumes neither read nor copy one); 9: every run clears each volume's scattering, conservative depth and both histories to zero before its steps, so the history reads stay but read zeros (the fog looks faint, since 96% of each froxel is the zero history); 10: the same clears as one-shot passes of a second client (`cs.exp-height-fog.reset`): they run at the first run after each build, then again every 600 frames (`FrameAnchors::Rearm`, logged as `debug mode 10 clears the histories again at frame N`). Modes 9 and 10 also turn off the scattering's history check (`historyParameters.w`), so the original symptom shows. Reading them: 9 clean means the history contents are bad, not the reads or the reprojection; 10 clean from the first clear on means bad data got in once (a history read before anything was copied into it) and the blend kept it; 10 going bad again within frames of each clear means the copies keep bringing it in. The fog's textures are versioned, so ORG never aliases them. Outside these modes the scattering treats a history texel that is not finite or is above 65504 (where the half-float integrated volume overflows) as no history, on every path. The first graph frame logs its constants once (`[ORG] Exponential Height Fog: the first graph frame: ...`). |
+| `org:refresh[=<graph id>]` | A test command (`src/RenderGraph/Testing/OrgCommands.h`), not a variable: at the next adoption point, the graphs that looked that id up are built again (every graph without one), through `Builds::Ask`. For stress runs. `org:rebuild` builds every graph again. |
 | `CS_ORG_VRAM_SOURCE=org` | VRAM attribution (`Vram::Current`, the memory window, `dclf:vram-json`) and texture streaming's budget read the device's memory from BasicRHI (`VK_EXT_memory_budget`: video and system memory, with AMD's clamp flagged) and ORG's allocator by owner label (`Vram/OrgMemory.cpp`), instead of DXVK's heap reports. DXVK's resources are still listed while it is loaded. The JSON's `heapSource` says which applied. |
 | `CS_FG_DISPLAY_SUSPEND`, `CS_UPSCALE_UNFOCUSED`, `CS_FSRFG_QDEPTH`, `CS_SL_VERBOSE`, `CS_FORCE_FSR_FG` | Upscaling and frame generation diagnostics, read through `Switches`: display-off unloading and unfocused upscaling (dclf-validation.md), FSR frame generation's queue depth (1 to 8, default 2), Streamline's verbose log, and forcing the FSR frame generation path. |
 | `CS_VK_DRIVER_TRACE`, `CS_VK_PRIORITY`, `CS_VK_CLIENT_PRIORITY`, `CS_VK_SPILL` | The Vulkan driver trace and residency experiments (`Upscaling/VkDriverTrace.cpp`), described in [vram-spill-lab.md](./vram-spill-lab.md). |
 | `CS_ORG_TRIPWIRE_LOG=1` | Log every tripwire call site with its count ("Tripwire handles"): `[ORG] tripwire report (<reason>)`, a line per interface and one per site, every `CS_ORG_TRIPWIRE_LOG_INTERVAL` seconds (default 60, 0 = only at exit) when calls changed, and at exit. Without it each site still logs its first call (`[ORG] tripwire: <Interface>::<Method> from ...`). |
-| `CS_ORG_TRIPWIRE_WATCH_ALL=1` | Guest resource, view, shader, state and query handles log the first use of every method per call site, whatever their `WatchSet` says. |
+| `CS_ORG_TRIPWIRE_WATCH_ALL=1` | Guest resource, view, shader, state and query handles log the first use of every method per call site. |
 | `CS_ORG_TRIPWIRE_SELFTEST=1` | At startup, make every handle type standalone and check refcounting, `QueryInterface`, `GetDesc`, debug names, forbidden calls (fail, zeroed outputs, counted), guest forwarding and unwrapping (handle arguments recorded at their site), refusal of other D3D11 object interfaces without a trip, device and context pairing, `AttachGraphResource` lifetime, Release from several threads, and caller naming. Logs `[ORG] tripwire self-test: PASS (<n> checks, 20 interfaces)` or a `FAIL` line per check. |
-| `CS_ORG_RESIDUE_CENSUS=1` | The residual engine-draw census ([p5/flush.md](./p5/flush.md), needs `CS_ORG_TRIPWIRE_GUEST=1`): counts every engine draw and dispatch that still reaches D3D11 through the guest context, after DCLF and the families, classed by draw function, callers (Address Library IDs), last technique and view, plus the `SetDirtyStates` calls and shader binds no draw follows. Logs `[ORG] residue census: ...` lines every `CS_ORG_RESIDUE_CENSUS_FRAMES` main-thread frames (default 600) with the `CS_ORG_RESIDUE_CENSUS_TOP` biggest entries (default 25). Walks the stack per draw: frame times mean nothing with it on. |
-| `CS_ORG_ENGINE_TARGETS_DCLF=0` | With `CS_ORG_ENGINE_TARGETS=1`, DCLF imports the engine targets' images itself instead of reading their published textures (a bisecting aid). |
-| `CS_ORG_IMAGE_DUPLICATE_CHECK=1` | Logs `[ORG] duplicate image: ...` when two live graph resources wrap one image (any importer: the anchors, DCLF, Scaleform, ImGui, twins, native textures). Off by default; cheap. |
-| `CS_ORG_NATIVE_OWNED=0` | Native mode: `NativeDevice::MakeTexture` makes host textures again, instead of graph-owned textures and exempt immutable ones (on by default). See [org-native-frame-graph.md](./org-native-frame-graph.md). |
-| `CS_ORG_NATIVE_GRAPH_PRESENT=1` | Native Vulkan: the back buffer is a graph-owned slot with one version per present slot, copied into the swap chain image by an `ExternalWork` tail. `single` makes one version; `0` or unset (the default) keeps the hand-written copy. D3D12 logs "not on D3D12" and keeps the hand copy. |
-| `CS_ORG_NATIVE_IN_STREAM=1` | Native mode with `CS_ORG_NATIVE_HOME_STATES=0`: keeps in-stream epochs, and with them DCLF's direct forward and first-person families. Off by default. |
-| `CS_ORG_REGIONS=1` | Native mode: anchors whose passes are all gated run in six region epochs, and consecutive runs of a region share one execution. Needs epochs and async epochs. Off by default; guest mode refuses it with a warning. |
-| `CS_ORG_SCOPED_FRAME_WAIT=1` | Only the batches whose passes declare a read of DCLF's frame values (`DCLF::FrameValues::DeclareReads`) wait for the frame wait. Off by default: every batch waits for it. |
-| `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1` | With `CS_ORG_NATIVE=1`, makes the graph's imports exclusive (moved into each pass's layout) instead of shared (simultaneous access, Common-only). Off until `CS_ORG_IMAGE_DUPLICATE_CHECK=1` logs no duplicate image. |
-| `CS_ORG_NATIVE_HOME_STATES=0` | Native Vulkan: no home states. The graph leaves each image where its last pass did, and the ledgers carry it on. Implies exclusive native imports. Native mode has no in-stream epochs. The native context's work on tracked images, and the present's copy, go through `ExternalWork` (open submissions). See [org-native-frame-graph.md](./org-native-frame-graph.md), "Phase 4 item 3 lane". |
 | `CS_ORG_RAW_ACCESS_CHECK=1` | Native: logs `[ORG raw access] ...` for each raw use of an image the graph tracks (the immediate context's own path, DCLF's GENERAL views), flags races, and logs counts every 600 frames. |
-| `CS_ORG_ENGINE_CONSTANTS_CHECK=1` | With `CS_ORG_ENGINE_CONSTANTS=1`, about once a second one captured slot is compared with a staging read-back of its D3D11 buffer (stalls). The summary line adds `checked N, M differ`; a mismatch logs `[ORG] engine constants check: ... differs ...`. |
 | `CS_ORG_BINK_SHOT=<n>[,<n>...]` | Saves the Present of each listed decoded Bink frame (main thread, either path) as `dclf-shots/bink-<n>.png`. |
 | `CS_DISABLE_FEATURES=<short name>,...` | Not a graph switch, but read through `Switches::List` (`State.cpp`): those features are disabled at boot for this run only. See dclf-validation.md, "Test harness". |
 | `CS_ORG_RECORDING_TIMESTAMPS=1` | Kept recordings carry ORG's pass timestamps (they carry none by default). |
-| `CS_ORG_BATCH_SUBMIT=0` | Enqueue each of an epoch's submissions alone instead of one batch (`dxvkEnqueueInteropSubmissions`). |
-| `CS_ORG_EARLY_FLUSH=1` | Flush DXVK's command list before each in-stream epoch instead of when the epoch's first submission is enqueued. |
-| `CS_ORG_UPLOAD_QUEUE=0` | No dedicated upload queue: uploads go to the copy queue or the graphics queue. |
-| `CS_ORG_PINNED_IMPORTS=1` | Imported DXVK images are pinned instead of tracked (`dxvkTrackInteropResources` unused). |
-| `CS_ORG_RESTING_LAYOUTS=0` | DXVK keeps imported images in GENERAL instead of its own layouts (DxvkImageImport). |
-| `CS_ORG_DETAILED_CHECKPOINTS=1` | BasicRHI's crash checkpoints per command instead of per pass. |
-| `CS_ORG_ALIAS_LOG=1` | Log every alias plan's placements, ranks and exclusions (ORG's `autoAliasEnableLogging`), and each pair of one graph's transients that share memory (`Persistent alias overlap: ...`). Each plan line names its epoch and whether it runs in DXVK's stream (`inHostStream`); `Persistent alias epoch N: ... queue slots=...` lists the queues its batches use. Each epoch has alias pools of its own, so transients of different epochs never share memory; ORG's `ORG_PERSISTENT_ALIAS_SHARE_EPOCHS=1` shares them again, for VRAM comparisons only (the layout that gave SSGI's green streaks). |
+| `CS_ORG_ALIAS_LOG=1` | Log every alias plan's placements, ranks and exclusions (ORG's `autoAliasEnableLogging`), and each pair of one graph's transients that share memory (`Persistent alias overlap: ...`). Each plan line names its epoch and whether it runs in DXVK's stream (`inHostStream`); `Persistent alias epoch N: ... queue slots=...` lists the queues its batches use. The epochs share alias pools; the runtime's alias ledger orders their transients (`GraphHost::SetPrivateAliasEpochs` keeps an epoch out). |
 | `CS_ORG_SHARED_CONSTANTS_CHECK=1` | After each epoch that uploads CS's shared constants, read the D3D11 buffers back and log whether the bytes match (stalls). |
-| `CS_ORG_DEFERRED_CLEARS=0` | Leaves the six GBuffer clears to the engine (`SRTM_CLEAR`). By default, with the render graph up, one render pass clears them last at the Prepass anchor (`src/ORGDeferredClears.cpp`). |
-| `CS_ORG_TEST_CONTRIBUTOR=<dll>` | Load ORG's sample contributor into `CS_ORG_TEST_CONTRIBUTOR_EPOCH` (default `cs.light-culling`) for `CS_ORG_TEST_CONTRIBUTOR_FRAMES` frames (default 600). |
 | `CS_FRAME_LATENCY=<n>` | The frame-pace timeline's depth, 0 to `kGameFramesInFlight` (0 turns the render thread's own pacing off). |
 | `CS_GPU_LOAD=<groups>` | A synthetic GPU load of that many groups each frame (`GpuEventTimers`; a graph pass at the Present anchor with `CS_GPU_TIMERS=graph`). |
 | `CS_GPU_EVENT_TIMERS=<frames>` | Log the GPU event timers every that many frames ("GPU timers from the graph"). |
-| `CS_ORG_EPOCH_STATS=1` | Log render-thread CPU time per epoch (average and maximum every 600 epochs), and each reserved anchor's peak runs in one frame against its sizing (`[ORG] frame anchors, peak runs in one frame / sized for: ...`). With it, `[ORG] run shapes (<window>, N frames)` lines per window (world, menu, loading screen, map; every `CS_ORG_CENSUS_FRAMES` frames, default 600, and when the game leaves it): each anchor's peak and median runs a frame, and whether its runs within a frame differ in shape (the gate entries their commits opened, the point's targets and the active clients), `same` or `varies`, with the distinct shapes (`src/RenderGraph/RunShapes.cpp`). |
-| `CS_ORG_NATIVE_OP_CENSUS=1` | Native mode: every immediate-context operation (Map, Unmap upload, UpdateSubresource, copies, clears, GenerateMips) counted per window by kind and by target (name, bind flags, usage, dimension), and where in the frame it fell (after which epoch, with its run number). Logs `[ORG native] op census (<window>, N frames)`, `... target #i` and `... order #i` lines every `CS_ORG_CENSUS_FRAMES` frames (default 600) with the `CS_ORG_CENSUS_TOP` biggest (default 25) (`src/RenderGraph/Engine/Native/OpCensus.cpp`). |
-| `CS_ORG_NATIVE_WRITE_CENSUS=1` | Native mode: the textures made SRV-only and buffers made VB/IB-only that are written after creation (an update, a Map for writing, a copy into them, a clear). Logs the first write of each, then `[ORG native] write census (<window>, N frames)` lines with names and counts. Such resources cannot be exempt from tracking. |
-| `CS_ORG_VALIDATE_UNDECLARED=1` | The undeclared-access validator, log only: every raw bindless index or buffer ref CS makes (`GpuTextures::ResolveBinding`, `GpuResources::Acquire`, `PublishedResources::ShaderResourceIndex`, `BufferRefOf`) for a resource that is not exempt (exempt: ORG resources marked `ExternalImmutableShaderResource`, and SRV-only textures or VB/IB-only buffers that are IMMUTABLE, or in native mode made with data and never written, or in guest mode DEFAULT). Logs the first access of each site and resource (`[ORG] undeclared access: ...`, the first `CS_ORG_VALIDATE_UNDECLARED_LOG`, default 256), then per window `[ORG] undeclared access (<window>, N frames)` and `... site #i` lines. Accesses are attributed to the epoch running on the thread, else to capture on the render thread, else to another thread (`src/RenderGraph/UndeclaredAccess.h`). |
-| `CS_ORG_TICKETS_AHEAD=<n>` | The most tickets a frame anchor's epoch keeps prepared ahead (`GraphHost::SetEpochTicketsAhead`, `FrameAnchors::SetTicketsAhead`): as many as the anchor ran the frame before, at most this (default 16, at most 64). An anchor that runs many times a frame back to back (ImageSpace, the engine clears) then finds each run's ticket ready. `1` prepares the next ticket only after the last one was submitted. |
-| `CS_ORG_EXTERNAL_HOME=0` | Epochs no longer give DXVK's images back on the graphics queue in their home state (unsafe: DXVK expects them there). |
-| `CS_ORG_CLOSED=1` | Closed executions: every epoch returns every resource to its home state and starts with a full barrier. An interop fallback; by default the epochs' resources flow between them through ORG's ledgers. |
-| `CS_ORG_COMPUTE_QUEUE=0` | The graph's compute queue aliases the graphics one (no DXVK compute queue). |
-| `CS_ORG_COPY_QUEUE=0` | The graph's copy queue aliases the graphics one instead of a transfer-family queue. |
-| `ORG_PERSISTENT_COPIES_ON_COPY_QUEUE=1` | Every copy pass on the copy queue whatever it prefers (a test of that queue). ORG reads it with `getenv`: set it in the environment or in `CommunityShaders.env`, whose values the plugin also puts in the C runtime's copy (`_putenv_s`, `XSEPlugin.cpp`). The DCLF switches file does not carry it. |
-| `CS_ORG_QUEUE_UPLOADS=0` | Every upload of an epoch on the graphics queue, and every compute batch waits for them. |
-| `CS_GPU_IDLE_TRACE=<frames>` | Every that many frames, log one complete frame's GPU idle gaps and what the render thread was doing during each (`[GpuIdle]`). DXVK timestamps every submission on its queue (`dxvkSetSubmissionTrace`, two extra timestamp-only submissions per submission), the Streamline ring's buffers add their own spans, and the render thread's perf events are the CPU markers. Forces Frame Annotations on for the session (without saving it) but leaves out the per-draw geometry events, whose formatting would dominate the timeline. Diagnostics only: the trace's own overhead makes gaps somewhat longer than in a normal run. |
 | `CS_GPU_TIMERS=graph` | GPU timers from the render graph alone ("GPU timers from the graph"): the profiler makes no D3D11 query, its D3D11 ranges keep CPU times only, `CS_GPU_EVENT_TIMERS` logs the graph's ranges (`[GpuEvents] graph ...`), and `CS_GPU_LOAD` runs as a graph pass at the Present anchor. Default `d3d11`. |
-| `CS_GPU_IDLE_SOURCE=graph` | `CS_GPU_IDLE_TRACE` reads the graph's graphics-queue ranges instead of DXVK's submission trace. Default `dxvk`. |
 | `CS_PROFILER_LOG=<frames>` | Log the profiling window's rolling averages every that many collected frames, sorted by cost, with `[split N%]` on timers that straddle DXVK submissions. For comparing two configurations from their logs. |
 
 Every `CS_*` switch can also be set in `CommunityShaders.env`, beside `CommunityShaders.log`
@@ -1285,8 +1199,8 @@ which is not recursive.
     `volk`); `git submodule update --init` fetches them. `cmake/RenderGraph.cmake` builds them from
     source (Vulkan only) and compiles the SPIR-V at build time with BasicRHI's DXC flags
     (`BasicRHIShaderFlags.cmake`). Set `CS_ORG_ROOT` to another directory with the same side-by-side
-    layout to build against local changes to those libraries. If they are missing, the plugin builds
-    without the render graph.
+    layout to build against local changes to those libraries. They are required: configure fails if
+    any is missing.
 -   `tests/OrgDxvkInterop` runs the graph on DXVK's device without the game, in both submission modes
     (`OrgDxvkInteropTest.lock` / `.stream`). D3D11 writes a sentinel before the epoch and reads back
     after it, so either misordering fails the test.

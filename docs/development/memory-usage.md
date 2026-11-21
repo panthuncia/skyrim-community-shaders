@@ -173,14 +173,8 @@ These could change the case for a port, so they are worth settling first.
 
 1.  Disable Start On Save for the run. Moving `mods\Start On Save\SKSE\Plugins\po3_StartOnSave.dll` aside works, and it has to go
     back afterwards. Its ini's `Character Name` filter does not stop the load.
-2.  Put these in `CommunityShaders.env` beside the log:
-
-    ```ini
-    CS_VRAM_DEBUG=1
-    DXVK_MEMORY_STATS_LOG=5
-    CS_DCLF_TEST_COMMANDS=300:dclf:vram-json;1500:dclf:vram-json;2700:dclf:vram-json;2720:dclf:shot=menu
-    CS_DCLF_TEST_EXIT=3000
-    ```
+2.  Run a cs-test config with `cs.vram_debug = true` and `DXVK_MEMORY_STATS_LOG=5` in its `[env]`, and `vram-json` steps
+    a few times in the menu, then a `shot` step named `menu` and an `exit` step.
 
 3.  Check the screenshot. A compass HUD means a save loaded and the run is not valid.
 4.  In the JSON, skip rows with the `kRowNotCounted` flag (`flags & 2`) when adding up owners. They are ORG device memory and ORG's

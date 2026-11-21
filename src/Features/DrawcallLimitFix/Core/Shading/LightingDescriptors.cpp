@@ -27,12 +27,11 @@ namespace DCLF
 		constexpr std::uint64_t Bit(Flag a_flag) { return static_cast<std::uint64_t>(a_flag); }
 		constexpr std::uint32_t Bit(LightingFlag a_flag) { return static_cast<std::uint32_t>(a_flag); }
 
-		// A contributed technique is DCLF's while its toggle is on, plus its gate's toggle while the gate's input holds.
-		// Terrain Blending needs the gate because it redraws every terrain pass blended with its own depth state, which an opaque draw would break.
+		// A contributed technique is DCLF's once a feature took it.
 		bool ContributedTechniqueOn(std::uint32_t a_technique)
 		{
 			static const auto& techniques = Extensions::RegisteredTechniques();
-			return Extensions::TechniqueOn(techniques, ActiveToggles(), a_technique);
+			return Extensions::TechniqueOn(techniques, a_technique);
 		}
 
 		// Techniques DCLF supports. The rest stay native.
@@ -49,7 +48,7 @@ namespace DCLF
 				return true;
 			// A multi-index shape's ice or snow layer. SparkleParams comes from SetupMaterial, and SetupGeometry's projected textures replace slot 10.
 			case Technique::MultiIndexSparkle:
-				return Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Layer);
+				return Extensions::ObjectClassOn(Api::ObjectClass::Layer);
 			// Techniques the features contribute, such as actor skin, TreeAnim, MTLand and the LOD techniques, each only for its flags' geometry type.
 			default:
 				return ContributedTechniqueOn(a_technique);
@@ -282,7 +281,7 @@ namespace DCLF
 			if (a_layer) {
 				// A multi-index shape's layer: every pass goes in geometry group 2 with hint 12, and FUN_1414b3bb0 draws it after the opaque decals
 				// with their state. That is DCLF's decal group 3, between opaque and blended.
-				if (!Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Decal))
+				if (!Extensions::ObjectClassOn(Api::ObjectClass::Decal))
 					return Ineligible::Decal;
 				a_out.decalGroup = 3;
 				a_out.decalBlendMode = 0;
@@ -292,7 +291,7 @@ namespace DCLF
 				// Hint 3 is depth test only, blended bias, alpha property applied, write mode 1 with kZBufferWrite or else 11.
 				// Neither occludes more than its host, so DCLF draws them in a second pass without depth writes.
 				// Without an accumulated pass the hint is 2 + (material alpha < 1 or blending), as GetRenderPasses gives a settled object.
-				if (!Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Decal) || !(f & Bit(Flag::kZBufferTest)))
+				if (!Extensions::ObjectClassOn(Api::ObjectClass::Decal) || !(f & Bit(Flag::kZBufferTest)))
 					return Ineligible::Decal;
 				const std::uint32_t hint = a_accumulated ? a_accumulated->hint : (a_property.materialAlpha < 1.0f || blending) ? 3u : 2u;
 				if (hint == 2) {
@@ -322,14 +321,11 @@ namespace DCLF
 		Ineligible DeriveHeldGroup(LightingDescriptors& a_out, std::uint64_t f)
 		{
 			// Held groups a CS feature replays after the opaque pass, as Terrain Blending does. DCLF draws them in terrain groups 1 and 2,
-			// after its opaque and decal groups. With a group's toggle off they stay native, because DCLF would draw the meshes before the terrain
-			// blends over them. The first matching group takes the object.
+			// after its opaque and decal groups. The first matching group takes the object.
 			for (const auto& group : Extensions::HeldGroups()) {
 				if (!(f & group.propertyFlags) || !Extensions::ClassifyInputOn(group.heldWhile))
 					continue;
 				if (a_out.decalGroup)
-					return Ineligible::Held;
-				if (group.toggle && !ActiveToggles().On(group.toggle))
 					return Ineligible::Held;
 				a_out.terrainGroup = group.group;
 				break;
@@ -345,7 +341,7 @@ namespace DCLF
 			// Refraction: one Utility RENDER_NORMAL pass (hint 4) drawn into the refraction normals after the world, none past its LOD fade's end.
 			// The forward epoch draws it, fading as GetRenderPasses would. A material alpha of 0 registers nothing, so it stays native and undrawn.
 			if (f & (Bit(Flag::kRefraction) | Bit(Flag::kTempRefraction))) {
-				if (!Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Refraction) || !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward) ||
+				if (!Extensions::ObjectClassOn(Api::ObjectClass::Refraction) || !Extensions::ObjectClassOn(Api::ObjectClass::Forward) ||
 				    a_out.decalGroup || a_layer || a_out.terrainGroup || a_property.materialAlpha <= 0.0f) {
 					a_out.rejectedTechnique = kRefractionReject;
 					return Ineligible::Technique;
@@ -369,7 +365,7 @@ namespace DCLF
 			if (a_out.refraction) {
 				// The refraction draw's forward state. Alpha property not applied.
 			} else if (translucent && a_out.decalGroup == 0 && !a_layer && a_out.terrainGroup == 0 &&
-			           Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward)) {
+			           Extensions::ObjectClassOn(Api::ObjectClass::Forward)) {
 				// SetupAlphaBlend (FUN_14150bc80) uses source-alpha blending for material fades even without NiAlphaProperty blending.
 				// Mode 0 would make hidden outfit meshes with alpha 0 draw opaque.
 				const std::uint32_t blendMode = blending ? AlphaBlendModeOf(*alpha) : 1u;
@@ -441,18 +437,16 @@ namespace DCLF
 	{
 		std::uint64_t f = a_property.flags;
 
-		// The techniques' property flag rules, such as terrain and object LOD. A flagged object counts only with its geometry type and toggle on.
+		// The techniques' property flag rules, such as terrain and object LOD. A flagged object counts only with its geometry type.
 		for (const auto& rule : Extensions::PropertyFlagRules())
-			if ((f & rule.propertyFlags) && !(ActiveToggles().On(rule.toggle) && a_leaf.Type() == rule.geometryType))
+			if ((f & rule.propertyFlags) && a_leaf.Type() != rule.geometryType)
 				return Ineligible::Lod;
 		const bool blending = a_leaf.AlphaBlending();
 		if (const Ineligible reason = DeriveDecalGroup(a_property, a_leaf, a_accumulated, a_out, a_layer, f, blending); reason != Ineligible::None)
 			return reason;
 		// kSkinned selects the SKINNED permutation, whose palette comes from the skin instance. Without one, stay native.
-		if ((f & Bit(Flag::kSkinned)) && !(Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Skinned) && a_leaf.Skinned()))
+		if ((f & Bit(Flag::kSkinned)) && !(Extensions::ObjectClassOn(Api::ObjectClass::Skinned) && a_leaf.Skinned()))
 			return Ineligible::Skinned;
-		if ((f & Bit(Flag::kProjectedUV)) && !ActiveToggles().projectedUv)
-			return Ineligible::ProjectedUV;
 		if (const Ineligible reason = DeriveHeldGroup(a_out, f); reason != Ineligible::None)
 			return reason;
 		if (const Ineligible reason = DeriveForward(a_property, a_leaf, a_accumulated, a_out, a_layer, f, blending); reason != Ineligible::None)
@@ -491,7 +485,7 @@ namespace DCLF
 	{
 		if (!a_leaf.geometry || a_leaf.Skinned())
 			return Api::FrameValueItemClass::None;
-		const auto itemClass = Extensions::GeometryItemClassOn(ActiveToggles(), a_leaf.Type());
+		const auto itemClass = Extensions::GeometryItemClassOn(a_leaf.Type());
 		if (itemClass == Api::FrameValueItemClass::None)
 			return itemClass;
 		const auto& p = a_leaf.geometry->particles;

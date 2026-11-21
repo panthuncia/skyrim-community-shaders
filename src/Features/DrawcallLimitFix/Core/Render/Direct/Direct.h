@@ -3,13 +3,13 @@
 #include "RenderGraph/BufferRef.h"
 
 // The CPU-driven pipeline, an experiment beside the GPU one. Each snapshot makes per-view lists as fixed-size SoA batches.
-// They are culled on the CPU per frame or once per snapshot, then drawn with direct draws recorded into DXVK's command buffer.
+// They are culled on the CPU every frame, then drawn with direct draws recorded into DXVK's command buffer.
 // This header is the contract between the batches, the cull, the recorder and the sites.
 //
 // It suspends two standing policies, only while dclf:pipeline=cpu: "DCLF owns all culling, on the GPU" and "No per-view lists".
-// The GPU-driven graph also sends the forward family through this pipeline (GraphConditions::forwardDirect).
+// The GPU-driven graph also sends the forward family through this pipeline.
 
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 #include <array>
 #include <atomic>
@@ -45,8 +45,7 @@ namespace DCLF::Direct
 	struct StrictGates;  // Cull.h
 
 	/**
-	 * @brief Default lanes per batch, always a multiple of 8 for the SIMD tests. 4096 halves Parallel mode's cost against 256 in
-	 * heavy scenes. Larger leaves too few jobs and DXVK's CS thread waits for them.
+	 * @brief Default lanes per batch, always a multiple of 8 for the SIMD tests. Larger leaves too few jobs and DXVK's CS thread waits for them.
 	 */
 	inline constexpr std::uint32_t kDefaultBatchLanes = 4096;
 
@@ -68,59 +67,14 @@ namespace DCLF::Direct
 	};
 	inline constexpr std::size_t kViewTypes = static_cast<std::size_t>(ViewType::kCount);
 
-	/** @brief Whether a view type is culled and recorded every frame or once per snapshot, accepting pops. Main is always PerFrame. */
-	enum class Cadence : std::uint8_t
-	{
-		PerFrame,
-		PerSnapshot
-	};
-
-	/** @brief CPU pipeline A/B switches (dclf:cpu-exp=<bits>). All on by default. Clearing a bit restores the old behaviour for comparison. */
-	enum Experiment : std::uint32_t
-	{
-		kExpCullEarly = 1u << 0,  // CullBatch drops a lane outside the frustum before its other tests
-		kExpPortalEarly = 1u << 1,  // stop the portal plane test at the deciding plane
-		kExpParabolicPass = 1u << 3,  // paraboloid sphere test, four lanes at a time, before the lane tests
-		kExpPrefillLive = 1u << 4,  // MakeViewBatches fills both live columns
-		kExpPortalBatch = 1u << 2,  // main camera portal tests over the batch, four lanes at a time
-		kExpIncremental = 1u << 5,  // view batch sets from the incremental scene lists instead of a full build
-		// Frustum pass in the widest kernel the CPU has, AVX2 or AVX-512 with kExpCullAvx512. Off uses the SSE pass of four.
-		kExpCullWide = 1u << 6,
-		kExpCullAvx512 = 1u << 7,  // kExpCullWide may take AVX-512 (else AVX2 at most)
-		// Read only the lanes the pass kept, sixteen bytes at a time. Off reads every lane.
-		kExpCullPassedLanes = 1u << 8,
-		// The portal batch test walks the program once per call, routing each 16-bound chunk to its operator. Off walks per group of 16.
-		kExpPortalOpMajor = 1u << 9,
-		// Draw colour lists with each key's pushed colour pipeline, pushing the sequence's 24 words. Off uses the pulled pipelines,
-		// which cost 25-30 more registers on NVIDIA, one occupancy step. Vulkan only, D3D12 builds no unpulled pipelines.
-		kExpPushedColour = 1u << 10,
-		// The same for depth lists, except recordings with Terrain Blending's depth offset.
-		kExpPushedDepth = 1u << 11,
-		// Diagnostic. Times each per-lane section with a TSC read. Off by default because the reads cost a large part of what they time.
-		kExpCullProfileLanes = 1u << 27,
-		// Diagnostic. Checks kExpCullWide's verdicts against the SSE and paraboloid tests. Off by default.
-		kExpCullWideCheck = 1u << 28,
-		// Diagnostic. Checks every other incremental set against a full build.
-		kExpIncrementalCheck = 1u << 29,
-		// Diagnostic. Checks kExpPortalBatch's verdicts against the per-lane test. Off by default.
-		kExpPortalCheck = 1u << 30,
-		// Diagnostic. Times CullBatch's sections per view in TSC cycles. Off by default.
-		kExpCullProfile = 1u << 31,
-	};
-	inline std::atomic<std::uint32_t> experimentBits{ ~(kExpCullProfile | kExpPortalCheck | kExpIncrementalCheck | kExpCullWideCheck | kExpCullProfileLanes) };  // constant-initialised, so the hot paths need no guard
-	inline std::atomic<std::uint32_t>& ExperimentBits() { return experimentBits; }
-	inline bool ExperimentOn(std::uint32_t a_bit) { return (experimentBits.load(std::memory_order_relaxed) & a_bit) != 0; }
-
-	/** @brief How per-frame views are recorded (dclf:cpu-record). */
+	/** @brief How per-frame views are recorded (dclf:cpu-record). The values are the toggle word's. 1 was Parallel and reads as Indirect. */
 	enum class RecordMode : std::uint8_t
 	{
 		// Culled in parallel. The CS thread drains the batches in the site's callback and records them in list order.
-		Serial,
-		// Culled and recorded in parallel, one secondary per batch. The callback executes them in list order.
-		Parallel,
+		Serial = 0,
 		// Cull jobs write draws into the slot's draw buffer, and the callback records one indirect draw per pipeline run.
 		// Decals, forward, refraction and first person stay direct.
-		Indirect
+		Indirect = 2
 	};
 
 	enum LaneFlags : std::uint32_t
@@ -163,7 +117,7 @@ namespace DCLF::Direct
 		// and the cull picks the level's. Without LOD every sequence is drawn.
 		std::uint32_t* partitions = nullptr;
 		std::uint32_t* lodPartitions = nullptr;
-		// Snapshot spheres, read by per-snapshot culls and static lanes.
+		// Snapshot spheres, read by static lanes.
 		float *cx = nullptr, *cy = nullptr, *cz = nullptr, *r = nullptr;
 		// Live spheres per frame parity. Movers are written by FrameValues' producer before it signals done.
 		struct Spheres
@@ -252,8 +206,6 @@ namespace DCLF::Direct
 		}
 		// Decal group g covers lanes [decalGroupFirst[g], decalGroupFirst[g + 1]), counted as batch * lanes + lane. Empty means no decals.
 		std::vector<std::uint32_t> decalGroupFirst;
-		// A per-snapshot recording made against another pool serial is stale.
-		std::uint64_t indexPoolSerial = 0;
 		// Per geometry slot, the index buffer its sequences were resolved against. Held by `keep`, so no other buffer can take its address.
 		std::vector<std::uint64_t> geometryIndexAddress;
 		// object -> [moverLaneFirst[object], moverLaneFirst[object + 1]) in moverLanes. Only movers have lanes there.
@@ -266,8 +218,6 @@ namespace DCLF::Direct
 		std::shared_ptr<const void> keep;
 		std::shared_ptr<const void> shared;
 		std::vector<std::uint64_t> deadBits;
-		// The first frame of each parity fills the live columns' static lanes once.
-		mutable std::array<std::atomic<bool>, 2> liveFilled{};
 
 		const std::vector<ViewBatch>& List(ViewType a_view) const { return lists[static_cast<std::size_t>(a_view)]; }
 	};
@@ -337,8 +287,7 @@ namespace DCLF::Direct
 		const std::uint32_t* objectWords = nullptr;  // index, local shadow mask, cross-fade copy, sun miss
 		// Per kept lane: bits 0-15 the sequences drawn, bits 16-31 those drawn as the LOD cross-fade copy. Null draws every sequence.
 		const std::uint32_t* drawMasks = nullptr;
-		rhi::CommandList* commands = nullptr;        // Parallel mode's secondary (null in Serial mode)
-		bool last = false;                           // the view's list ends with it
+		bool last = false;  // the view's list ends with it
 		// Indirect mode's runs by part: 0 the pass's draws, 1 and 2 main colour's terrain groups. Null means the lanes draw directly.
 		const IndirectRun* runs = nullptr;
 		std::array<std::uint32_t, 4> runStart{};
@@ -346,7 +295,7 @@ namespace DCLF::Direct
 	};
 
 	/** @brief A site's queue of culled batches. Cull jobs push and the site's callback drains. */
-	using CulledQueue = EventQueue<const CulledBatch*, 1024>;
+	using CulledQueue = RenderGraph::Frame::EventQueue<const CulledBatch*, 1024>;
 
 	/** @brief One draw site per draw epoch it replaces, at the same trigger. */
 	enum class Site : std::uint8_t
@@ -359,12 +308,11 @@ namespace DCLF::Direct
 		kCount
 	};
 
-	/** @brief The live mode (dclf:pipeline, dclf:cpu-record, dclf:cpu-cadence-<view>). */
+	/** @brief The live mode (dclf:pipeline, dclf:cpu-record). */
 	struct Mode
 	{
 		bool cpu = false;
 		RecordMode record = RecordMode::Serial;
-		std::array<Cadence, kViewTypes> cadence{};  // Main's is always PerFrame
 
 		bool operator==(const Mode&) const = default;
 	};
@@ -376,10 +324,7 @@ namespace DCLF::Direct
 		std::array<std::uint32_t, kViewTypes> batches{}, drawn{};
 		std::array<double, kViewTypes> cullUs{};
 		std::array<double, static_cast<std::size_t>(Site::kCount)> recordUs{};  // on DXVK's CS thread
-		std::uint32_t secondaries = 0;
 		std::uint32_t waits = 0;  // callbacks waiting for a batch not yet published
-		// Per-snapshot recordings made and executed instead of a per-frame cull.
-		std::uint32_t snapshotRecorded = 0, snapshotExecuted = 0;
 		// Slots whose pool range moved to another buffer this frame. Their draws are skipped.
 		std::uint32_t staleGeometry = 0;
 		std::uint32_t binds = 0, sameBinds = 0, pushes = 0;

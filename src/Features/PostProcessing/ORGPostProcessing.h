@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/Port.h"
+
 #include <memory>
 
 namespace RenderGraph::Engine
@@ -8,22 +10,17 @@ namespace RenderGraph::Engine
 }
 
 /**
-* @brief Post Processing's tonemap chain on the render graph at the Tonemap anchor, with CS_ORG_POST_PROCESSING=1.
-* It runs on the graph only while every enabled sub-effect has an ORG port, otherwise on D3D11 that frame. See ORGPostEffect.h.
+* @brief Post Processing's tonemap chain on the render graph at the Tonemap anchor, in graph mode.
+* Every sub-effect has an ORG port. D3D11 never runs the chain in graph mode: a frame without a build that holds it draws no
+* chain, and an effect that cannot read its inputs is fatal. See ORGPostEffect.h.
 * Render thread. Free of ORG/Vulkan includes.
 */
-class ORGPostProcessing
+class ORGPostProcessing : public RenderGraph::Port<ORGPostProcessing>
 {
 public:
-	static bool Requested();
+	static constexpr std::string_view kName = "Post Processing";
 
-	/** @brief Render thread. */
-	static ORGPostProcessing& Get();
-
-	/** @brief PostProcessing::PostPostLoad, before the render graph initializes. */
-	static void Reserve();
-
-	/** @brief PostProcessing::SetupResources. */
+	/** @brief PostProcessing::SetupResources. Outside graph mode it does nothing; in graph mode a failure is fatal. */
 	void Setup();
 
 	/**
@@ -32,16 +29,16 @@ public:
 	*/
 	void BeforeTonemap(const RenderGraph::Engine::TonemapTargets& a_targets, bool a_refraction);
 
-	/** @brief After the anchor ran. When true PreProcess draws nothing. */
+	/** @brief After the anchor ran: the graph ran the chain this frame. In graph mode PreProcess draws nothing either way. */
 	bool Ran() const;
 
-	/** @brief The next frame rebuilds the chain, and a failed one is tried again. */
+	/** @brief A new shader generation: the next revision builds the chain's programs and client again. */
 	void ClearShaderCache();
-
 	~ORGPostProcessing();
 
 private:
-	ORGPostProcessing() = default;
+	friend class RenderGraph::Port<ORGPostProcessing>;
+	ORGPostProcessing();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

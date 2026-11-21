@@ -100,12 +100,6 @@ namespace DCLF::Extensions
 			states->contribution.kick();
 	}
 
-	void RootStatesWait()
-	{
-		if (const auto* states = RootStates(); states && states->contribution.wait)
-			states->contribution.wait();
-	}
-
 	void RootStatesFrameStart()
 	{
 		if (const auto* states = RootStates(); states && states->contribution.frameStart)

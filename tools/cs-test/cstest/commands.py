@@ -1,4 +1,4 @@
-"""sweep, compare, status, restore and check-schema."""
+"""sweep, compare, status, restore, schema and check-schema."""
 
 import json
 import subprocess
@@ -8,11 +8,12 @@ from pathlib import Path
 
 from . import collect, journal as journal_mod, mo2, procs
 from .config import diff
-from .paths import GAME_EXE, LOG_FILE, MO2_EXE, REPO_DIR, SWITCHES_FILE, TEST_FILE
+from . import schema as schema_mod
+from .paths import GAME_EXE, LOG_FILE, MO2_EXE, REPO_DIR, SCHEMA_PATH, SWITCHES_FILE, TEST_FILE
 from .runner import run
 from .schema import ConfigError, load_schema
 
-CS_AB = REPO_DIR / "tools" / "cs-ab"
+TOOLS = REPO_DIR / "tools" / "cs-test"
 
 
 # sweep
@@ -145,13 +146,13 @@ def compare(paths, a, b, log=print, shots=True, memory=True):
             log("Shots:")
             for name in common:
                 out = run_b / "shots" / f"{name}.diff-vs-{run_a.name}.png"
-                result = subprocess.run([sys.executable, str(CS_AB / "shotdiff.py"), str(sa[name]), str(sb[name]), str(out)], capture_output=True, text=True)
+                result = subprocess.run([sys.executable, str(TOOLS / "shotdiff.py"), str(sa[name]), str(sb[name]), str(out)], capture_output=True, text=True)
                 log((result.stdout or result.stderr).rstrip())
         for name in sorted(set(sa) ^ set(sb)):
             log(f"  shot {name} only in {'A' if name in sa else 'B'}")
     if memory and (run_a / "CS-AB-memory.csv").exists() and (run_b / "CS-AB-memory.csv").exists():
         log("Memory (compare.py):")
-        result = subprocess.run([sys.executable, str(CS_AB / "compare.py"), str(run_a), str(run_b)], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, str(TOOLS / "compare.py"), str(run_a), str(run_b)], capture_output=True, text=True)
         log((result.stdout or result.stderr).rstrip())
 
 
@@ -213,40 +214,67 @@ def restore(paths, original=True, log=print):
         lock.release()
 
 
-# check-schema
+# schema and check-schema
 
-def check_schema(paths, dump=None, log=print):
-    """Compares schema.toml with the game's switch dump. Returns the number of differences."""
+def _read_dump(paths, dump, log):
     path = Path(dump) if dump else paths.skse / SWITCHES_FILE
     if not path.exists():
-        log(f"No {path}: run the game once with CS_TEST_LIST_SWITCHES=1 (and DCLF on, for its features' switches)")
+        log(f"No {path}: make one with 'cs_test.py run list-switches --stage <name>' (DCLF on, for its features' switches)")
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def schema_differences(old, new):
+    """Lines naming what differs between two dumps: switches added or removed, fields changed, features."""
+    old, new = schema_mod.normalize(old), schema_mod.normalize(new)
+    lines = []
+    mine = {row["name"]: row for row in old["switches"]}
+    theirs = {row["name"]: row for row in new["switches"]}
+    for name in sorted(set(theirs) - set(mine)):
+        lines.append(f"added: {name} ({theirs[name]['family']}, {theirs[name]['kind']}){' key ' + theirs[name]['key'] if theirs[name]['key'] else ''}")
+    for name in sorted(set(mine) - set(theirs)):
+        lines.append(f"removed: {name}{' (key ' + mine[name]['key'] + ')' if mine[name]['key'] else ''}")
+    for name in sorted(set(mine) & set(theirs)):
+        for field in schema_mod.ROW_FIELDS[1:]:
+            if mine[name][field] != theirs[name][field]:
+                lines.append(f"{field} differs for {name}: {mine[name][field]!r} -> {theirs[name][field]!r}")
+    for feature in sorted(set(new["features"]) - set(old["features"])):
+        lines.append(f"feature added: {feature}")
+    for feature in sorted(set(old["features"]) - set(new["features"])):
+        lines.append(f"feature removed: {feature}")
+    if old["prefixes"] != new["prefixes"]:
+        lines.append(f"prefixes differ: {old['prefixes']} -> {new['prefixes']}")
+    return lines
+
+
+def write_schema(paths, dump=None, out=None, log=print):
+    """Copies the game's switch dump to switches.json. Returns False when the dump cannot be the schema."""
+    data = _read_dump(paths, dump, log)
+    if data is None:
+        return False
+    problems = schema_mod.check_dump(data)
+    for line in problems:
+        log(f"dump: {line}")
+    if problems:
+        return False
+    target = Path(out) if out else SCHEMA_PATH
+    if target.exists():
+        for line in schema_differences(json.loads(target.read_text(encoding="utf-8")), data):
+            log(line)
+    target.write_text(schema_mod.render(data), encoding="utf-8", newline="\n")
+    typed = sum(1 for row in data["switches"] if row.get("key"))
+    log(f"{len(data['switches'])} switches ({typed} typed keys) and {len(data['features'])} features -> {target}")
+    return True
+
+
+def check_schema(paths, dump=None, log=print):
+    """Compares switches.json with the game's switch dump. Returns the number of differences, or -1 without a dump."""
+    data = _read_dump(paths, dump, log)
+    if data is None:
         return -1
-    data = json.loads(path.read_text(encoding="utf-8"))
-    game = {s["name"]: s for s in data.get("switches", [])}
-    schema = load_schema()
-    ours = {}
-    for key, entry in schema.keys.items():
-        if "env" in entry:
-            ours[entry["env"]] = (key, entry)
-    problems = 0
-    for name in sorted(set(game) - set(ours)):
-        log(f"missing from the schema: {name} ({game[name].get('family')}, {game[name].get('kind')}): {game[name].get('description', '')[:100]}")
-        problems += 1
-    for name in sorted(set(ours) - set(game)):
-        key, entry = ours[name]
-        if entry.get("family") in ("dxvk", "vk"):
-            continue
-        log(f"not known to the game: {name} ({key})")
-        problems += 1
-    for name in sorted(set(ours) & set(game)):
-        key, entry = ours[name]
-        for field in ("kind", "family", "description"):
-            theirs = game[name].get(field, "")
-            mine = entry.get(field, "")
-            if field == "description" and not theirs:
-                continue
-            if theirs != mine:
-                log(f"{field} differs for {name} ({key}): schema {mine!r}, game {theirs!r}")
-                problems += 1
-    log(f"{problems} differences ({len(game)} switches in the dump, {len(ours)} in the schema)")
-    return problems
+    lines = [f"dump: {line}" for line in schema_mod.check_dump(data)]
+    lines += schema_differences(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")), data)
+    for line in lines:
+        log(line)
+    log(f"{len(lines)} differences ({len(data.get('switches', []))} switches in the dump); 'cs_test.py schema' copies the dump")
+    return len(lines)

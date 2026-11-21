@@ -3,7 +3,11 @@
 
 // Symmetric fourth-root cosine mapping resolves both narrow forward and backward lobes.
 static const uint DISK_PHASE_LUT_SIZE = 2048u;
-Texture2D<float4> TexDiskPhaseLut : register(t106);
+// A graph shader that lists the LUT in its own resources defines PS_DISK_PHASE_DECLARED.
+#ifndef PS_DISK_PHASE_DECLARED
+#	include "Common/OrgResources.hlsli"
+ORG_HEADER_SRV(Texture2D<float4>, TexDiskPhaseLut, 106)
+#endif
 
 float4 SampleDiskPhase(float cosine, uint lightIndex)
 {

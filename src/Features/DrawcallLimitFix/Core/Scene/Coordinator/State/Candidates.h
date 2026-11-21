@@ -23,13 +23,6 @@ namespace DCLF::Scene
 		std::uint32_t sunCandidatesGeneration = 0;
 		EntrySpaceTable sunTable, lightTable;
 		std::uint32_t candidateVersions = 0;
-		// Geometry whose shadow only the engine's cull draws. Their roots go out with each publication.
-		struct EngineOnlyEntry
-		{
-			Ineligible reason = Ineligible::None;
-			std::uint8_t views = 0;  // EngineOnlySubset::ViewBit of each view it is in
-		};
-		ankerl::unordered_dense::map<RE::BSGeometry*, EngineOnlyEntry> engineCasterGeometries;
 		using LightEntryChange = DCLF::LightEntryChange;
 		std::vector<LightEntryChange> lightEntryChanges;               // since the last publication
 	};
