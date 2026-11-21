@@ -751,8 +751,9 @@ VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
 
 // The draw's lookups keyed on a wave-uniform instance (Lighting.hlsl's pulled main): its rows, statics, object and billboard turn are
 // the draw's (scalar), not each lane's.
-VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
+VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID DCLF_START_INSTANCE_INPUT)
 {
+	DCLF_ADD_START_INSTANCE(a_instance);
 	VS_OUTPUT vsout;
 	[loop] for (;;) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);

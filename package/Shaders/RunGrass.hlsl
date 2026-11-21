@@ -25,9 +25,10 @@ cbuffer DCLFGrassPush : register(b190)
 	uint DCLFGrassPhase : packoffset(c0.z);
 	uint DCLFGrassProgram : packoffset(c0.w);
 	uint2 DCLFGrassUnused : packoffset(c1.x);
-#	if !defined(__spirv__)
+#	if !defined(__spirv__) && !defined(DCLF_START_INSTANCE)
 	// D3D12: SV_InstanceID does not count the draw's first instance. The family's signature writes it into this word per draw instead
-	// (DrawPipelines.h, kDrawPushInstance; GrassArgsCS stores it before the draw's arguments).
+	// (DrawPipelines.h, kDrawPushInstance; GrassArgsCS stores it before the draw's arguments). With Shader Model 6.8 the stage adds
+	// SV_StartInstanceLocation instead (DCLF_START_INSTANCE).
 	uint DCLFGrassInstanceWord : packoffset(c5.w);
 #	endif
 };
@@ -465,11 +466,12 @@ VS_OUTPUT DCLFGrassVertex(VS_INPUT input, float3 a_origin, uint4 a_frame, uint a
 // The draw's instance a_instance (SV_InstanceID counts from the draw's firstInstance: its range of the visible list) is the visible
 // list's entry, an instance slot; its owner is its shape. The vertex comes from the bucket's mesh for the instance's tier: R16
 // indices, attributes as the engine's input layout for the mesh's vertex layout has them (one stream).
-VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
+VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID DCLF_START_INSTANCE_INPUT)
 {
-#		if !defined(__spirv__)
+#		if !defined(__spirv__) && !defined(DCLF_START_INSTANCE)
 	a_instance += DCLFGrassInstanceWord;  // D3D12: the draw's first instance, from its push word
 #		endif
+	DCLF_ADD_START_INSTANCE(a_instance);
 	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFGrassTable(kDCLFGrassVisible), 4 * a_instance), 4);
 	const uint shapeSlot = DeviceLoad(uint, DeviceRefAdd(DCLFGrassTable(kDCLFGrassOwners), 4 * index), 4);
 	const DeviceRef shape = DeviceRefAdd(DCLFGrassTable(kDCLFGrassShapes), 32 * shapeSlot);

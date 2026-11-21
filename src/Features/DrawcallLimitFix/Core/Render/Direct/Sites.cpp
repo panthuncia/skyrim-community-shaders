@@ -962,7 +962,7 @@ namespace DCLF::Direct::detail
 		constexpr std::uint32_t kMinimumIndirectDraws = 1u << 15;
 
 		/**
-		 * @brief D3D12's indirect draw signature for a layout, made once per layout. A root constant argument names its root signature,
+		 * @brief D3D12's instance word signature for a layout (below Shader Model 6.8), made once per layout. A root constant argument names its root signature,
 		 * so each layout needs its own. Null when it cannot be made.
 		 */
 		rhi::CommandSignatureHandle IndirectSignatureFor(rhi::PipelineLayoutHandle a_layout)
@@ -1024,8 +1024,9 @@ namespace DCLF::Direct::detail
 				logger::error("[DCLF] CPU pipeline: the indirect draws' buffer has no {}; its views draw directly", mapped ? "buffer view ref" : "mapping");
 				return;
 			}
-			const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
-			a_slot.indirect = { s.indirectSignature->GetHandle(), d3d12 ? &IndirectSignatureFor : nullptr, d3d12 ? 0u : offsetof(IndirectDraw, indexCount), resource.GetHandle(),
+			// D3D12 below Shader Model 6.8 writes the instance word through a per-layout signature. Else the draws start past it.
+			const bool instanceWord = ::RenderGraph::Backend::D3D12InstanceWord();
+			a_slot.indirect = { s.indirectSignature->GetHandle(), instanceWord ? &IndirectSignatureFor : nullptr, instanceWord ? 0u : offsetof(IndirectDraw, indexCount), resource.GetHandle(),
 				ref, static_cast<IndirectDraw*>(mapped), capacity, &a_slot.drawCursor };
 		}
 	}
