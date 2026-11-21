@@ -118,3 +118,6 @@ Progress log for `org-cleanup-refactor-plan.md`. Decisions that need the user's 
 - Memory (2026-11-21): the oversize arena leak fixed (ORG assignment gate), D3D12 small buffers packed, D3D12's
   dropped refraction draws fixed (decisions 128-130). D3D12 river 1385 -> 1093 MB against Vulkan's 1068. 9 checks
   pass; perf-quick unchanged.
+- Library work (2026-11-21): submodule branches pushed (decision 131). lib-msaa, lib-errors, lib-builds, lib-arrays and
+  the MSAA Vulkan test fix merged; ORG and OMS on `lib/integ` (decisions 133-137). 20 game checks and library tests
+  pass; perf-quick unchanged.
