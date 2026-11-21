@@ -70,9 +70,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ORGModuleServic
 set(ORG_MODULE_SERVICES_IMGUI_TARGET "imgui::imgui" CACHE STRING "" FORCE)
 include("${CS_ORG_ROOT}/ORGModuleServices/cmake/ImGuiBackend.cmake")
 target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ImGui)
-# OMS's passes' shaders (GenerateMips, ResolveMultisample, PrefixSum, SortScatter, Hzb, ImGui and their includes, among them
-# HzbTest.hlsli and FidelityFX's ffx_a.h and ffx_spd.h), which CS compiles at runtime with ComputeProgram from
-# Data/Shaders/ORGModuleServices (org::services::kGenerateMipsShader). DCLF's cull shaders include HzbTest.hlsli by that
+# OMS's shaders (GenerateMips, ResolveMultisample, PrefixSum, SortScatter, Hzb, ImGui, the raster programs' FullscreenVS and
+# their includes, among them HzbTest.hlsli, OrgResources.hlsli and FidelityFX's ffx_a.h and ffx_spd.h), which CS compiles
+# at runtime with its programs from Data/Shaders/ORGModuleServices (org::services::kGenerateMipsShader). DCLF's cull shaders include HzbTest.hlsli by that
 # path. Copied into package/Shaders at configure time, with FidelityFX-LICENSE.txt, so every path that ships
 # package/Shaders ships them; the copies are generated (.gitignore) and follow the OMS checkout.
 if(ORG_MODULE_SERVICES_SHADER_DIR)

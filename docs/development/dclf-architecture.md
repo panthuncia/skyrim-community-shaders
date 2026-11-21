@@ -1397,8 +1397,8 @@ rebuilds the graph there, so a frame's passes always match its conditions.
     ranges, about 140 us of serialised NvPerf time, but only 0.03-0.04 ms of frame time (6.47 to 6.44 ms; DCLF off 5.74 ms). Phase 2
     rescued nothing there.
 
-**The HZB** (Features/GpuOcclusion: `HzbPass.cpp`, `Features/GpuOcclusion/HzbCS.hlsl`; the test is Core's `HzbTest.hlsli`, shared by
-BuildDrawsCS and TreeLodCullCS):
+**The HZB** (Features/GpuOcclusion: `HzbPass.cpp`, over OMS `Passes/HzbPass` and its `Hzb.hlsl`; the test is OMS's
+`ORGModuleServices/HzbTest.hlsli`, shared by BuildDrawsCS and TreeLodCullCS):
 -   Raw NDC depth, max reduction (the farthest surface). Mip 0 is half the next power of two of the depth. Texels past the rendered
     area read far (1.0); outside the domain or a level read 0 (the reduction's identity). UVs are scaled for the padding
     (`HzbView::UvScale`).
@@ -1418,7 +1418,7 @@ BuildDrawsCS and TreeLodCullCS):
     DrawIndexed). The main buffer's ranges (phase 1 and colour, phase 2, one per decal group) travel in `BuildDrawsConstants`
     (`phaseTwoBase`, `decalBase`, `decalStride`). Each indirect draw's max count is its epoch's own draws, grown as a power of two
     so the recording settles.
--   **The sort by pipeline** is a counting sort (`DrawSort`, `SortSequencesCS.hlsl`, `src/RenderGraph/PrefixSum.cpp`): BuildDraws
+-   **The sort by pipeline** is a counting sort (`DrawSort`, OMS `SortScatter.hlsl` and `Passes/PrefixSumPass`): BuildDraws
     stages each sequence and counts it per pipeline; the prefix sum turns the counts into each pipeline's first slot; the scatter
     writes each sequence at its pipeline's first slot plus its rank (the rank word: pipeline in the top 12 bits, rank in the low 20;
     `kSortRankLimit = 1 << 20`). It covers phase 1 and the colour segment, not phase 2's rescues. Not for the shadow views:
@@ -3084,7 +3084,7 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     pool at thresholds (delta above a quarter of the base, dead lanes above a quarter, dead sequences above a half). The
     asynchronous result is adopted at a later set and caught up from its snapshot's epochs. In the heavy exterior, turning, a set
     costs 1-2 ms on the builder against ~18 ms whole, and uploads ~440 KB against ~20 MB. A forward-only set is still built whole.
--   **Wide cull kernels** (`Core/Render/Direct/CullSimd.h`). The frustum pass and the portal programs' plane set test (16 bounds a group)
+-   **Wide cull kernels** (`Core/Render/Direct/CullSimd.h`, over OMS's sphere cull, `Cpu/SphereCull.h`). The frustum pass and the portal programs' plane set test (16 bounds a group)
     run in the widest kernels the CPU and OS support: AVX-512 (F and BW) or AVX2, else SSE. Each kernel lives in a file built for its
     instruction set alone (`CullAvx2.cpp`, `CullAvx512.cpp`; `cmake/RenderGraph.cmake` gives them their `/arch` and leaves the game's
     PCH out). The CPU's support is detected in `Cull.cpp`, which is built for the baseline. A group stops testing planes once every lane

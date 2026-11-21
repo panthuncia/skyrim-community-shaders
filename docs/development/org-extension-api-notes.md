@@ -682,7 +682,7 @@ Keys used so far:
 
 - **Need:** a history buffer that starts at zero, as a new D3D11 buffer does, before its first frame reads it.
 - **Who:** CS's Histogram Auto Exposure (histogram, adaptation); any plugin with an accumulating buffer.
-- **Where it fits:** UAV clears in CS (`GraphPasses::MakeUavClear`) cover textures only, and a one-shot clear must count
+- **Where it fits:** UAV clears (OMS `MakeUavClearPass`, `Passes/UavClearPass.h`) cover textures only, and a one-shot clear must count
   as done only when its pass ran. The exposure port adds a `CS_Reset` entry, dispatched indirectly with one group over
   its first few frames and zero after. An API would take an initial value (zero fill) for a History resource.
 - **Found by:** P3 W3, Post Processing (2026-11-09).
@@ -915,8 +915,8 @@ Keys used so far:
 - **Need:** clear a kept graph texture once (to match D3D11's zero-filled textures) without a UAV, whose storage format
   support varies (R11G11B10, R10G10B10A2).
 - **Who:** the ORG FX runtime's History textures; any port that keeps render targets across frames.
-- **Where it fits:** `GraphPasses::MakeUavClear` needs a UAV. The FX runtime records a render pass that only clears
-  (`LoadOp::Clear`, no draw). A shared `MakeRenderTargetClear` beside `MakeUavClear` would serve every port.
+- **Where it fits:** OMS `MakeUavClearPass` needs a UAV. The FX runtime records a render pass that only clears
+  (`LoadOp::Clear`, no draw). A shared `MakeRenderTargetClear` beside `MakeUavClearPass` would serve every port.
 - **Found by:** P3 W5, ORG FX runtime execution (2026-11-09).
 
 ### Copies between engine draws
@@ -1195,7 +1195,7 @@ Keys used so far:
 - **Who:** CS's Dynamic Cubemaps (capture and inferred cubemaps); Post Processing's bloom and others next.
 - **Where it fits:** done in simplification item 6.3. ORG no longer builds pipelines. The passes are in OMS
   (`ORGModuleServices/Passes/GenerateMipsPass.h`, `ResolveMultisamplePass.h`) and record through a host `ComputeKernel`.
-  CS's `ComputeProgram` is one. CS builds it from OMS's `shaders/` folder, which ships in `Data/Shaders/ORGModuleServices`
+  OMS's `ComputeProgram` (`Programs/ComputeProgram.h`) is one. CS builds it from OMS's `shaders/` folder, which ships in `Data/Shaders/ORGModuleServices`
   (copied into `package/Shaders` at configure time). A plugin API needs these passes exported.
 - **Found by:** P3 W2, Dynamic Cubemaps (2026-11-09).
 

@@ -28,7 +28,7 @@ static float4 RotationMatrix = OrgEngineRow(PerGeometryAt, 0);
 static float4 ScaleBias = OrgEngineRow(PerGeometryAt, 2);
 #	endif
 
-// The fullscreen triangle of RenderGraph/FullscreenVS.hlsl. The coordinate change is affine, so it interpolates over the larger
+// The fullscreen triangle of ORGModuleServices/FullscreenVS.hlsl. The coordinate change is affine, so it interpolates over the larger
 // triangle as it does over the engine's quad.
 VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {

@@ -28,7 +28,6 @@ namespace RenderGraph::PipelineVersions
 #include <OpenRenderGraph/GraphHost.h>
 
 #include <functional>
-#include <mutex>
 #include <utility>
 
 namespace RenderGraph::PipelineVersions
