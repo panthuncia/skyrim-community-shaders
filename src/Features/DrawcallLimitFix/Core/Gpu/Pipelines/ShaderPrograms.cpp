@@ -1,6 +1,7 @@
 // The stage cache, the compile requests and the pipeline lane's program entries.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
+#include "RenderGraph/Fatal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.h"
@@ -74,7 +75,6 @@ namespace DCLF
 		constexpr const char* kSourcePath = "Data/Shaders/Lighting.hlsl";
 		constexpr const char* kUtilitySourcePath = "Data/Shaders/Utility.hlsl";
 		constexpr const char* kShaderDirectory = RenderGraphRuntime::kShaderDirectory;
-		constexpr std::size_t kMaxLoggedBuildFailures = 8;
 
 		std::wstring Widen(const std::string& a_value)
 		{
@@ -797,10 +797,9 @@ namespace DCLF
 			(*requested)->done.wait(false, std::memory_order_acquire);
 			const auto& artifact = *(*requested)->artifact;
 			if (!artifact) {
-				static std::atomic<std::uint32_t> failures{ 0 };
-				if (failures.fetch_add(1) < kMaxLoggedBuildFailures)
-					logger::warn("[DCLF] ORG precompile {} {} {:08X} failed: {}", type == RE::BSShader::Type::Lighting ? "Lighting" : "Utility",
-						a_pixel ? "PS" : "VS", a_descriptor, artifact.diagnostics.substr(0, 1500));
+				// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
+				RenderGraph::Fatal("DCLF shaders", fmt::format("ORG precompile {} {} {:08X} failed: {}", type == RE::BSShader::Type::Lighting ? "Lighting" : "Utility",
+						a_pixel ? "PS" : "VS", a_descriptor, artifact.diagnostics.substr(0, 1500)));
 			}
 		}
 	}
@@ -1056,8 +1055,8 @@ namespace DCLF
 		const auto& family = Extensions::DrawFamilies()[f];
 		if (IsDrawFamilyForward(user)) {
 			FinishEntry(*drawFamilyForwardEntries[f], nullptr, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-				if (loggedFailures++ < kMaxLoggedBuildFailures)
-					logger::warn("[DCLF] SPIR-V build of the forward {} {} failed:\n{}", family.name, a_stage ? "PS" : "VS", a_artifact.diagnostics.substr(0, 1500));
+				// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
+				RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of the forward {} {} failed:\n{}", family.name, a_stage ? "PS" : "VS", a_artifact.diagnostics.substr(0, 1500)));
 			});
 			a_finished.drawFamilyForward[f] = true;
 			return;
@@ -1065,7 +1064,8 @@ namespace DCLF
 		auto& entry = *drawFamilyEntries[f];
 		FinishEntry(entry, nullptr, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
 			static constexpr const char* kStages[] = { "VS", "PS", "VS (depth)", "PS (depth)", "VS (colour 2)", "PS (colour 2)" };
-			logger::warn("[DCLF] SPIR-V build of {} {} failed; {}:\n{}", family.name, kStages[a_stage], family.nativeNote, a_artifact.diagnostics.substr(0, 1500));
+			// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
+			RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of {} {} failed; {}:\n{}", family.name, kStages[a_stage], family.nativeNote, a_artifact.diagnostics.substr(0, 1500)));
 		});
 		if (entry.program) {
 			KeepColourPrograms(static_cast<Api::DrawFamily>(f), *entry.program);
@@ -1109,17 +1109,17 @@ namespace DCLF
 					OnDemandOutcome(fmt::format("Utility technique {:08X}", technique).c_str(), entry.onDemand, entry.requested,
 						{ { kOnDemandVertex, &ArtifactOf(entry.stages[0]) }, { kOnDemandPixel, &ArtifactOf(entry.stages[1]) } });
 					FinishEntry(entry, &laneStats.shadowReady, laneStats.shadowFailed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-						if (loggedFailures++ < kMaxLoggedBuildFailures)
-							logger::warn("[DCLF] SPIR-V build of Utility {} {:08X} failed:\n{}", a_stage ? "PS" : "VS", technique, a_artifact.diagnostics.substr(0, 1500));
+						// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
+						RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of Utility {} {:08X} failed:\n{}", a_stage ? "PS" : "VS", technique, a_artifact.diagnostics.substr(0, 1500)));
 					});
 					a_finished.shadow.push_back(technique);
 				}
 				continue;
 			case StageUser::Forward:
 				FinishEntry(*forwardEntries.find(id)->second, nullptr, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-					if (loggedFailures++ < kMaxLoggedBuildFailures)
-						logger::warn("[DCLF] SPIR-V build of the forward {} {} failed:\n{}", fmt::format("Lighting VS {:08X} PS {:08X}", vertex, pixel), a_stage ? "PS" : "VS",
-							a_artifact.diagnostics.substr(0, 1500));
+					// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
+					RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of the forward {} {} failed:\n{}", fmt::format("Lighting VS {:08X} PS {:08X}", vertex, pixel), a_stage ? "PS" : "VS",
+							a_artifact.diagnostics.substr(0, 1500)));
 				});
 				a_finished.forward.push_back(id);
 				continue;
@@ -1137,10 +1137,10 @@ namespace DCLF
 					const auto familyVertex = static_cast<std::uint32_t>((id & ~kProgramFamilySlots[f].programIdBit) >> 32);
 					auto& entry = *familyEntries[f].find(id)->second;
 					FinishEntry(entry, &laneStats.ready, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-						if (loggedFailures++ < kMaxLoggedBuildFailures)
-							logger::warn("[DCLF] SPIR-V build of {} {}{} {:08X} failed; its {}:\n{}", family.name, a_stage == 0 || a_stage == 3 ? "VS" : "PS",
+						// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
+						RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of {} {}{} {:08X} failed; its {}:\n{}", family.name, a_stage == 0 || a_stage == 3 ? "VS" : "PS",
 								a_stage >= 3 ? " (pulled)" : "", a_stage == 0 || a_stage == 3 ? familyVertex : pixel,
-								family.nativeNote, a_artifact.diagnostics.substr(0, 1500));
+								family.nativeNote, a_artifact.diagnostics.substr(0, 1500)));
 					});
 					if (entry.program)
 						entry.program->vertexAttributes = entry.stages[0]->vertexAttributes;
@@ -1156,9 +1156,9 @@ namespace DCLF
 					{ kOnDemandPulledPixel, &ArtifactOf(entry.stages[5]) }, { kOnDemandPulledDepthVertex, &ArtifactOf(entry.stages[6]) } });
 			FinishEntry(entry, &laneStats.ready, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
 				static constexpr const char* kStages[] = { "VS", "PS", "PS (depth)", "VS (pulled)", "PS (pulled depth)", "PS (pulled)", "VS (pulled depth)" };
-				if (loggedFailures++ < kMaxLoggedBuildFailures)
-					logger::warn("[DCLF] SPIR-V build of Lighting {} {:08X} failed:\n{}", kStages[a_stage], a_stage == 0 || a_stage == 3 || a_stage == 6 ? vertex : pixel,
-						a_artifact.diagnostics.substr(0, 1500));
+				// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
+				RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of Lighting {} {:08X} failed:\n{}", kStages[a_stage], a_stage == 0 || a_stage == 3 || a_stage == 6 ? vertex : pixel,
+						a_artifact.diagnostics.substr(0, 1500)));
 			});
 			// DrawPipelines checks the key's vertex layout has these attributes.
 			if (entry.program)

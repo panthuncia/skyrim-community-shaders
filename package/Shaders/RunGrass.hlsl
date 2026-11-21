@@ -648,6 +648,10 @@ SamplerState DCLFGrassSamplerAt(uint a_index)
 	return s;
 }
 #		define SampBaseSampler DCLFGrassSamplerAt(DCLFGrassSampler)
+// Physical Sky's sun transmittance reads the engine's s1 and s7 here; the pulled draw has the bucket's linear sampler for both.
+// It clamps where s7 wraps, which only differs at the LUT's edge texels.
+#		define SampShadowMaskSampler SampBaseSampler
+#		define SampPhysicalSkyWrapSampler SampBaseSampler
 #		define TexBaseSampler DCLFGrassTextureAt(DCLFGrassDiffuse)
 #		define TexShadowMaskSampler DCLFGrassTextureAt(DCLFGrassShadowMask)
 #		if defined(GRASS_LIGHTING) && defined(TRUE_PBR)
