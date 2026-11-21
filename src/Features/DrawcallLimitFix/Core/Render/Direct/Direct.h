@@ -25,6 +25,7 @@ namespace rhi
 
 namespace org::services
 {
+	struct IndirectRun;
 	struct PublishedBufferVersion;
 }
 
@@ -276,7 +277,7 @@ namespace DCLF::Direct
 	 * @brief A batch's culled draws for one view. Lives in an arena owned by the job that culled it and reset when the frame slot retires.
 	 * Consumers get a pointer, never a copy.
 	 */
-	struct IndirectRun;
+	using IndirectRun = org::services::IndirectRun;  // ORGModuleServices/Passes/IndirectRuns.h
 
 	struct CulledBatch
 	{

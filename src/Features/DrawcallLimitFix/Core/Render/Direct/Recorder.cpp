@@ -334,39 +334,32 @@ namespace DCLF::Direct
 		/** @brief A batch's indirect draws for one part, one per run. */
 		void RecordRuns(RecordContext& a_context, const CulledBatch& a_batch, std::uint32_t a_part)
 		{
-			auto& list = a_context.list;
 			const IndirectBuffer& buffer = *a_context.indirect;
 			const rhi::CommandSignatureHandle signature = buffer.signatureFor ? buffer.signatureFor(a_context.layout) : buffer.signature;
 			if (!signature.valid())
 				return;
-			const auto sameHandle = [](rhi::PipelineHandle a, rhi::PipelineHandle b) { return a.index == b.index && a.generation == b.generation; };
-			std::uint32_t drawn = 0;
-			for (std::uint32_t r = a_batch.runStart[a_part]; r < a_batch.runStart[a_part + 1]; ++r) {
-				const IndirectRun& run = a_batch.runs[r];
-				const bool bind = !sameHandle(run.pipeline, a_context.boundPipeline);
-				if (bind) {
-					list.BindPipeline(run.pipeline);
-					++a_context.binds;
-				}
-				if (bind || !a_context.runWordsPushed) {
-					std::uint32_t words[kDirectDrawWords]{};
-					Split(words + kZDrawPushSequences, a_context.set.sequencesRef);
-					if (a_context.pass == RecordPass::Shadow)
-						Split(words + kShadowDrawPushVertexLayout, run.vertexLayout);
-					else
-						words[kZDrawPushOffsetDepth] = a_context.bindings.offsetDepth ? 1u : 0u;
-					words[kDirectDrawPushFlags] = kDirectFlagDrawRecords | kDirectFlagRelativeRows;
-					list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDirectDrawWords, words);
-					++a_context.pushes;
-					a_context.runWordsPushed = true;
-				}
+			const std::span<const IndirectRun> runs(a_batch.runs + a_batch.runStart[a_part], a_batch.runStart[a_part + 1] - a_batch.runStart[a_part]);
+			const org::services::IndirectRunSource source{ .signature = signature, .buffer = buffer.buffer, .stride = static_cast<std::uint64_t>(sizeof(IndirectDraw)), .argumentsOffset = buffer.argumentsOffset };
+			org::services::IndirectRunState state{ .bound = a_context.boundPipeline, .wordsPushed = a_context.runWordsPushed, .binds = a_context.binds, .pushes = a_context.pushes, .indirects = a_context.indirects };
+			const std::uint32_t drawn = org::services::RecordIndirectRuns(a_context.list, runs, source, state, [&a_context](rhi::CommandList& a_list, const IndirectRun& a_run) {
+				std::uint32_t words[kDirectDrawWords]{};
+				Split(words + kZDrawPushSequences, a_context.set.sequencesRef);
+				if (a_context.pass == RecordPass::Shadow)
+					Split(words + kShadowDrawPushVertexLayout, a_run.tag);  // a shadow pipeline's vertex layout
+				else
+					words[kZDrawPushOffsetDepth] = a_context.bindings.offsetDepth ? 1u : 0u;
+				words[kDirectDrawPushFlags] = kDirectFlagDrawRecords | kDirectFlagRelativeRows;
+				a_list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDirectDrawWords, words);
+			});
+			a_context.boundPipeline = state.bound;
+			a_context.runWordsPushed = state.wordsPushed;
+			a_context.binds = state.binds;
+			a_context.pushes = state.pushes;
+			a_context.indirects = state.indirects;
+			if (!runs.empty()) {
 				// Forces a later direct draw to bind its bucket again.
 				a_context.boundBucket = ~0u;
-				a_context.boundPipeline = run.pipeline;
-				a_context.boundVertexLayout = run.vertexLayout;
-				list.ExecuteIndirect(signature, buffer.buffer, std::uint64_t(run.first) * sizeof(IndirectDraw) + buffer.argumentsOffset, {}, 0, run.count);
-				++a_context.indirects;
-				drawn += run.count;
+				a_context.boundVertexLayout = runs.back().tag;
 			}
 			a_context.drawn += drawn;
 			CountDrawn(a_context, drawn);
@@ -451,35 +444,27 @@ namespace DCLF::Direct
 			return (flags & kLaneTerrainGroup1) ? 1u : (flags & kLaneTerrainGroup2) ? 2u : 0u;
 		};
 		// Each part's draws are consecutive in the buffer.
-		std::array<std::uint32_t, 3> mostDraws{}, mostRuns{}, lastBucket{ ~0u, ~0u, ~0u };
+		org::services::IndirectRunCounts<3> counts;
 		for (std::uint32_t k = 0; k < a_batch.count; ++k) {
 			const std::uint32_t lane = a_batch.lanes[k];
 			const std::uint32_t mask = MaskOf(a_batch, k);
 			const std::uint32_t count = batch.sequenceCount ? batch.sequenceCount[lane] : 1u;
 			if (!(mask & kRecorderDrawAll) || !count)
 				continue;
-			const std::uint32_t part = partOf(lane);
-			mostDraws[part] += (mask & kRecorderDrawAll) == kRecorderDrawAll ? count : static_cast<std::uint32_t>(std::popcount(mask & kRecorderDrawAll));
 			const std::uint32_t bucket = batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u;
-			if (bucket != lastBucket[part]) {
-				lastBucket[part] = bucket;
-				++mostRuns[part];
-			}
+			counts.Lane(partOf(lane), bucket, (mask & kRecorderDrawAll) == kRecorderDrawAll ? count : static_cast<std::uint32_t>(std::popcount(mask & kRecorderDrawAll)));
 		}
-		const std::uint32_t reserve = mostDraws[0] + mostDraws[1] + mostDraws[2];
-		if (!reserve)
+		const auto first = org::services::ReserveIndirectDraws(*a_buffer.cursor, a_buffer.capacity, counts.Draws());
+		if (!first)
 			return indices;
-		const std::uint32_t first = a_buffer.cursor->fetch_add(reserve, std::memory_order_relaxed);
-		if (first > a_buffer.capacity || reserve > a_buffer.capacity - first)
-			return indices;
-		auto* runs = a_arena.Make<IndirectRun>(mostRuns[0] + mostRuns[1] + mostRuns[2]);
-		std::array<std::uint32_t, 3> cursor{ first, first + mostDraws[0], first + mostDraws[0] + mostDraws[1] };
-		const std::array<std::uint32_t, 3> runBase{ 0u, mostRuns[0], mostRuns[0] + mostRuns[1] };
-		std::array<std::uint32_t, 3> runEnd = runBase;
-		lastBucket = { ~0u, ~0u, ~0u };
-		std::array<rhi::PipelineHandle, 3> pipeline{};
-		std::array<std::uint64_t, 3> layout{};
-		const auto sameHandle = [](rhi::PipelineHandle a, rhi::PipelineHandle b) { return a.index == b.index && a.generation == b.generation; };
+		auto* runs = a_arena.Make<IndirectRun>(counts.Runs());
+		org::services::IndirectRunWriter<3> writer(counts, *first, runs);
+		// The pulled pipeline a bucket binds, and a shadow view's vertex layout as the run's tag.
+		const auto bind = [&](std::uint32_t a_bucket) {
+			org::services::IndirectRunBinding binding;
+			binding.pipeline = PulledBucketPipeline(a_set, a_view, pass, a_bindings, a_bucket, binding.tag);
+			return binding;
+		};
 		IndirectDraw* const mapped = a_buffer.mapped;
 		const auto poolFirsts = a_bindings.poolFirsts;
 		for (std::uint32_t k = 0; k < a_batch.count; ++k) {
@@ -490,11 +475,7 @@ namespace DCLF::Direct
 				continue;
 			const std::uint32_t part = partOf(lane);
 			const std::uint32_t bucket = batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u;
-			if (bucket != lastBucket[part]) {
-				lastBucket[part] = bucket;
-				pipeline[part] = PulledBucketPipeline(a_set, a_view, pass, a_bindings, bucket, layout[part]);
-			}
-			if (!pipeline[part].valid())
+			if (!writer.Bucket(part, bucket, bind))
 				continue;
 			const std::uint32_t objectWord = a_batch.objectWords[k];
 			const std::uint32_t sequence = batch.sequence[lane];
@@ -508,12 +489,8 @@ namespace DCLF::Direct
 				const std::uint32_t poolFirst = poolFirsts[args->geometrySlot];
 				if (poolFirst == Draws::IndexPool::kNoRange)
 					continue;
-				const std::uint32_t at = cursor[part]++;
 				// Buckets sharing a pipeline, such as the Z groups, make one run.
-				IndirectRun* open = runEnd[part] > runBase[part] ? &runs[runEnd[part] - 1] : nullptr;
-				if (!open || !sameHandle(open->pipeline, pipeline[part]) || open->vertexLayout != layout[part])
-					open = new (&runs[runEnd[part]++]) IndirectRun{ pipeline[part], layout[part], at, 0u };
-				++open->count;
+				const std::uint32_t at = writer.Append(part);
 				// Write-combined memory, so write in order and never read.
 				IndirectDraw& draw = mapped[at];
 				draw.instance = at;
@@ -527,14 +504,7 @@ namespace DCLF::Direct
 				draw.objectWord = word;
 			}
 		}
-		std::uint32_t written = runEnd[0];
-		a_batch.runStart[0] = 0;
-		a_batch.runStart[1] = written;
-		for (std::uint32_t part = 1; part < 3; ++part) {
-			for (std::uint32_t r = runBase[part]; r < runEnd[part]; ++r)
-				runs[written++] = runs[r];
-			a_batch.runStart[part + 1] = written;
-		}
+		writer.Finish(a_batch.runStart);
 		a_batch.runs = runs;
 		a_batch.hasRuns = true;
 		return indices;
@@ -588,16 +558,7 @@ namespace DCLF::Direct
 			}
 		}
 		// Nearest slab first, each drawn by pipeline for fewer binds. With every caster at one distance, by distance alone.
-		if (farthest > nearest) {
-			const float scale = static_cast<float>(kSlabs) / (farthest - nearest);
-			for (auto& item : items)
-				item.slab = (std::min)(kSlabs - 1, static_cast<std::uint32_t>((item.distance - nearest) * scale));
-			std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
-				return a.slab != b.slab ? a.slab < b.slab : a.bucket != b.bucket ? a.bucket < b.bucket : a.distance < b.distance;
-			});
-		} else {
-			std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.distance < b.distance; });
-		}
+		org::services::OrderBySlabs(items, nearest, farthest, kSlabs);
 		const std::uint32_t before = a_context.drawn;
 		for (const Item& item : items) {
 			const CulledBatch& culled = *item.batch;

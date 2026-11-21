@@ -4,6 +4,8 @@
 #include <ORGModuleServices/Async/GraphScheduler.h>
 #include <ORGModuleServices/Async/StateGraphTypes.h>
 #include <ORGModuleServices/Async/VersionGrowthArtifact.h>
+#include <ORGModuleServices/Async/VersionedBufferPosts.h>
+#include <ORGModuleServices/Async/WindowGates.h>
 #include <ORGModuleServices/VersionedBufferBuild.h>
 
 #include <cstdint>
@@ -45,7 +47,7 @@ namespace DCLF::Runtime
 		std::function<void(const org::services::PublishedBufferVersion& a_version)> built;
 	};
 	/** @brief A payload part's outcome on the coordinator lane: the version once GPU ready, or null and why. */
-	using PayloadPartDone = std::function<void(std::shared_ptr<const org::services::PublishedBufferVersion> a_version, std::string a_error)>;
+	using PayloadPartDone = org::services::VersionedBufferDone;
 
 	class SceneGraph
 	{
@@ -82,11 +84,9 @@ namespace DCLF::Runtime
 		bool PostTextureGate(std::uint64_t a_texture, std::uint64_t a_revision, std::function<void()> a_run);
 
 	private:
-		struct PayloadPartPosts;
 		std::unique_ptr<Graph> graph;
-		std::unique_ptr<org::async::VersionGrowthPosts<org::async::DefaultStateGraphTypes>> growths;  // the posting thread's
-		std::unique_ptr<PayloadPartPosts> payloadParts;                                             // the snapshot builder's
-		struct TextureGates;
-		std::unique_ptr<TextureGates> textureGates;
+		std::unique_ptr<org::async::VersionGrowthPosts<org::async::DefaultStateGraphTypes>> growths;       // the posting thread's
+		std::unique_ptr<org::services::VersionedBufferPosts<org::async::DefaultStateGraphTypes>> payloadParts;  // the snapshot builder's
+		std::unique_ptr<org::async::WindowGates<org::async::DefaultStateGraphTypes>> textureGates;          // texture windows and their gates
 	};
 }
