@@ -81,11 +81,6 @@ namespace DCLF::Draws
 		return inputs.AttachedSerial();
 	}
 
-	void PublishBuiltBuildState(std::uint64_t a_serial)
-	{
-		inputs.PublishBuilt(a_serial);
-	}
-
 	std::uint64_t BuiltBuildSerial()
 	{
 		return inputs.BuiltSerial();

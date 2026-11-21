@@ -4,7 +4,6 @@
 #include <Render/ShaderBindings.h>
 #include <rhi.h>
 
-#include <cstdint>
 #include <memory>
 
 /**

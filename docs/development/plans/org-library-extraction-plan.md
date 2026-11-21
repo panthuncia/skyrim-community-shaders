@@ -3,34 +3,37 @@
 Status: revised (2026-11-20) after `org-simplification-plan.md` landed. First written after the cleanup plan
 (`org-cleanup-refactor-plan.md`) was merged into `integ/hard-ports` (decision 97). The simplification plan ran first
 (decision 98). It finished some items here, changed the target of others, and removed a few. This revision checks every
-item against the code at the commit below.
+item against the code at the commit below. Phases 0–4 have since been moved and integrated ("Progress").
 
 ## Handoff: start here
 
-### State when this plan was revised
+### State now (2026-11-21)
 
 - **Checkout and branch:** the main checkout is `c:\Users\matth\source\repos\SARP\external_refs\cs-org-dxvk`, on branch
-  `org_integration`. Its tip is one squash commit, "feat(org): hard ports, cleanup and simplification", which holds
-  all of `integ/hard-ports` (the cleanup and simplification plans, 892 commits, last code commit `0dbf0795d`). That
+  `org_integration` at `bb93e1016`. Its base is one squash commit, "feat(org): hard ports, cleanup and simplification",
+  which holds all of `integ/hard-ports` (the cleanup and simplification plans, last code commit `0dbf0795d`). That
   branch is kept as the detailed history; commit hashes in the decisions file and the director log point into it.
-  New work branches from `org_integration`.
+  - **The extraction is integrated, not merged into `org_integration`.** Phases 0–4 and the cleanup are merged on
+    `org-native/extract-integ` (worktree `../org-port-worktrees/extract-integ`). It compiles; the director is checking the
+    game runs. The cleanup is on `org-native/extract-cleanup`, based on the integration tip.
   - Nothing is pushed. PRs target `dev`, never `main`.
 - **Submodules.** Each is on a local branch. **These commits exist only locally.** Nothing is pushed.
 
-  | Submodule | Commit | Local branch |
-  |---|---|---|
-  | ORG (`extern/OpenRenderGraph`) | `7bd4aef` | `simplify/p8-lib` |
-  | OMS (`extern/ORGModuleServices`) | `b2a5cb2` | `simplify/p9-final` |
-  | BasicRHI (`extern/BasicRHI`) | `bcf4232` | `cs/simplify-p2-org-diag` |
-  | DXVK fork (`extern/dxvk`) | `4addc47d` | `simplify/p5` |
+  | Submodule | `org_integration` (`bb93e1016`) | `extract-integ` tip | Integration branch |
+  |---|---|---|---|
+  | ORG (`extern/OpenRenderGraph`) | `48c77dd` | `5003cbd` | `extract/integ` |
+  | OMS (`extern/ORGModuleServices`) | `b2a5cb2` | `66b2f49` | `extract/integ` |
+  | BasicTelemetry (`extern/BasicTelemetry`) | `9d540e8` | `6812937` | `extract/integ` |
+  | BasicRHI (`extern/BasicRHI`) | `28f8be8` | `28f8be8` | unchanged |
+  | DXVK fork (`extern/dxvk`) | `4addc47d` | `4addc47d` | unchanged |
 
-  - The cleanup's tips are still there as `cleanup/integ` (ORG `73b7d81`, OMS `5b2d206`). The simplify branches build on
-    them. Older tips are kept as `cleanup-p4-birth-tip` and `cleanup-p5-reload-tip`.
+  - The cleanup adds `extract/cleanup` on ORG and OMS over `extract/integ`.
+  - The submodule branches the parts made (`extract/<part>`) are merged into `extract/integ`.
+  - The cleanup's tips are still there as `cleanup/integ` (ORG `73b7d81`, OMS `5b2d206`), with the simplify branches
+    (`simplify/p8-lib`, `simplify/p9-final`) on top. Older tips are kept as `cleanup-p4-birth-tip` and
+    `cleanup-p5-reload-tip`.
   - OMS has `update = none` in the main checkout's `.git/config` (not in `.gitmodules`), so check out its commit by hand.
   - Worktrees get their submodules from the main checkout through `init-submodules-local.sh` (below), never from a remote.
-- **Cleanups merged:** p8-cs (CS dead code, export audit), p8-lib (ORG dead code, docs, tools), p8-backbuffer (native
-  uses one back buffer), p9-final (dead pipeline description chain, docs, tools) and p9-i18n. The lines above are the
-  state after them.
 - **Where the history is:**
   - Decisions: `docs/development/plans/director-decisions-2026-11.md`. 97 wrote this plan, 98 put the simplification
     first, 99–109 came from the simplification.
@@ -61,7 +64,7 @@ item against the code at the commit below.
   Dev-Fast: Ninja, /Od, the DLL only. The script builds the main checkout.
 - **Library tests:** ORG's and OMS's own unit tests (`extern/OpenRenderGraph/tests`, `extern/ORGModuleServices/tests`).
   ORG's tests bring a task service through `tests/TestTaskService.h`. CS's standalone tests are in `tests/` (for example
-  `tests/DrawcallLimitFixCPU/KeptStateTests.cpp`, `SceneExecutorTests.cpp`).
+  `tests/DrawcallLimitFixCPU/OwnerValuesTests.cpp`). The kept-state and executor tests moved to OMS `tests/Async`.
 - **Stage:** `python tools/cs-test/cs_test.py stage . --name nfg --preset Dev-Fast --base-aio "C:/Modding/MO2/mods/CS AB nfg"`
 - **Run one config:** `CS_TEST_BACKGROUND=1 DXVK_DEBUG=hang python tools/cs-test/cs_test.py run <mode>+<config> --stage nfg --wait 3600 --label <label>`.
   - Modes: `guest`, `native-vulkan`, `native-d3d12`. Quick runs: `guest-quick`, `native-quick`, `native-d3d12-quick`.
@@ -137,49 +140,18 @@ Not part of this plan unless a phase touches them:
 
 ### Progress (update as phases land)
 
-| Phase | State | Branches | Notes |
+Every part is code done and merged on `org-native/extract-integ`, with its submodule branches merged into
+`extract/integ`. Each part's CS branch is `org-native/extract-<part>`; its submodule branches are `extract/<part>` in the
+submodules named. The "<part> decisions" sections below say what each part decided.
+
+| Phase | State | Parts (submodules) | Summary |
 |---|---|---|---|
-| 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
-| 1 Small containers and async pieces | not started | | EventQueue already done. p1-frame (code only, not built): StarvationWatch and FrameClock to OMS `Async/`, the violation policy to OMS `ViolationPolicy`; CS keeps `Frame/Starvation.h` and `FrameClock.h` as facades. Branches `org-native/extract-p1-frame`, OMS `extract/p1-frame`. |
-
-| 1 Small containers and async pieces | in progress | `org-native/extract-p1-async`, OMS `extract/p1-async` | EventQueue already done. p1-async (code only, not built): LatestSlot, PublicationLog, SlotTable, KeptState in OMS `Async/`, RetirementChain and `Retired` in OMS `RetirementChain.h`; tests in OMS `tests/Async` (ORGKeptStateTests, ORGRetirementChainTests). |
-
-| 0 Review and push | code done (p0-lib), push waiting for the user | CS `org-native/extract-p0-lib`, ORG and OMS `extract/p0-lib` | Host-option off paths deleted, `RunReadback` error handler, OMS `Variables.h` wording, multisampled-SRV check (below). Not built or run yet. Push the submodule branches for review (decision 89): waiting for the user. Merge p8 first. |
-| 1 Small containers and async pieces | not started | | EventQueue already done. |
-| 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
-| 3 Programs and GPU primitives | in progress | p3-gates: `org-native/extract-p3-gates`, ORG and OMS `extract/p3-gates` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 3–4 written (p3-gates), not built: `org::RunGate`, `org::FirstRun`, `org::RunSlots` in ORG `Render/`, `org::services::MakeUavClearPass` in OMS `Passes/`; CS keeps `RunGate.h` and `FrameStaging.h` as adapters. See "p3-gates decisions". |
-
-| 2 Services with clean cuts | in progress | `org-native/extract-p2-executor`, OMS `extract/p2-executor` | Executor and lanes moved (code only, not built): OMS `Async/Executor.h`, `Async/Lanes.h`, `Async/ExecutorTaskService.h`; CS keeps `SharedExecutor()`, `OrgTaskService()` and forwarding headers. Needs its A/B perf run. Retirement join needs one too. |
-
-| 2 Services with clean cuts | in progress | p2-recordings: CS `org-native/extract-p2-recordings`, ORG `extract/p2-recordings` | Executor and retirement join need A/B perf runs. p2-recordings: EpochRecordings is ORG `OpenRenderGraph/EpochRecordings.h` (`org::epoch_recordings`); CS keeps a forwarding header whose `Cache` passes `RenderGraph::Fatal`. Not built yet. |
-
-| 2 Services with clean cuts | in progress | p2-retire: CS `org-native/extract-p2-retire`, OMS `extract/p2-retire` | Executor and retirement join need A/B perf runs. p2-retire (code only, unbuilt): retirement join is OMS `RetirementJoin` + `GraphHostRetirement` (CS `Async/Retirement` is a facade); pooled-backing defaults are OMS `GraphHostBackings.h` (DCLF `PooledBackings` passes its switches); CPU recording pools are OMS `RecordingPools.h` (`BumpArena`, `ResetPools`, `RecordingSlot`) + `SecondaryListPool.h`. Tests: OMS `ORGRetirementTests`. |
-
-| 2 Services with clean cuts | in progress | p2-birth: CS `org-native/extract-p2-birth`, OMS `extract/p2-birth` | Executor and retirement join need A/B perf runs. p2-birth (code only, not built): OMS `TexelEncoding.h` (`EncodeTexel` on `rhi::Format`, `ValueFillWriter`), `TextureContents::Value`; CS `Birth.cpp` deleted, `Birth::Fill` takes `org::TextureFillWriter`. |
-
-| 2 Services with clean cuts | in progress | p2-reflect: CS `org-native/extract-p2-reflect`, OMS `extract/p2-reflect` | Executor and retirement join need A/B perf runs. Shader reflection (p2-reflect): OMS `ShaderReflection.h` (SPIR-V parse, `IsDxil`, `ReflectDxil` with a `DxilBindingLayout`, `DxilFragment`), tests in OMS `tests/Reflection`; DCLF keeps `SpirvReflection` (subclass passing its shifts and push register) and `DxilStages` (frame-source preprocessing, aliases for `IsDxil`/`Fragment`). |
-
-| 2 Services with clean cuts | in progress | p2-cpu: `org-native/extract-p2-cpu`, OMS and BasicTelemetry `extract/p2-cpu` | Executor and retirement join need A/B perf runs. p2-cpu (code only, unbuilt): SIMD sphere cull is OMS `ORGModuleServices::SphereCull` (`Cpu/SphereCull.h`, `cmake/SphereCull.cmake`, `tests/Cpu`); DCLF keeps the paraboloid and portal kernels and logs the level. Zone tallies and the render-thread budget are BasicTelemetry `TallyScope` and `ThreadBudget<Bucket, Site, Splits>` (`TallyTests`); DCLF keeps the macros, enums and report lines. |
-| 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
-
-| 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
-
-| 3 Programs and GPU primitives | in progress | p3-pins: CS `org-native/extract-p3-pins`, ORG and OMS `extract/p3-pins` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Item 1 (p3-pins): done in code, not built. OMS `PipelinePins` and `VersionFor`; CS `PipelineVersions` keeps `Install`, `Adopted` and forwards the rest. |
-
-| 3 Programs and GPU primitives | in progress | `org-native/extract-p3-latched` (ORG `extract/p3-latched`) | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 7 and 8 (p3-latched): ORG `Render/LatchedCopies.h` (types, copy joining, `RecordLatchedCopies`) and `RenderPasses/LatchedCopiesPass.h` (`MakeLatchedCopiesPass`); `IDescriptorService::Null(owner, NullViewKind)` over `NullSrvDesc` (`Render/Runtime/NullViews.h`). DCLF's `Latched.h` is aliases, its pass factory a wrapper, `GpuTextures` null indices use `Null`. ORG test `OpenRenderGraphLatchedCopiesTests`. |
-
-| 3 Programs and GPU primitives | item 2 written, not built | p3-programs: CS `org-native/extract-p3-programs`, OMS `extract/p3-programs` | Item 2: `ComputeProgram`, `RasterProgram`, `ProgramService` (slots, `FixedProgram`, the pool, `Collect`, `JoinSetup`, `Load`), the build helpers and `ShaderTarget` are OMS `Programs/`. CS sets their `ProgramEnvironment` (shader root, backend, compiler, registry, common defines, request defines, pipeline pins, log) in `Programs::InstallEnvironment`; `ComputeProgram.h`, `RasterProgram.h`, `ProgramService.h`, `ProgramBuild.h` and `ShaderTarget.h` stay as forwarding headers. The pool sizes itself with OMS `PlanWaitingPool` from its stated compile domain. Fingerprints are OMS's XXH3 content hash. Tests: OMS `ORGProgramServiceTests`, `ORGAsyncExecutorTests`. See "p3-programs decisions". |
-| 4 Build and upload services | not started | | Needs phase 2's executor. |
-
-| 4 Build and upload services | in progress | p4-uploads: CS `org-native/extract-p4-uploads`, OMS `extract/p4-uploads` | Needs phase 2's executor. Commit uploads (p4-uploads, code only, not built): OMS `CommitUploads.h` (`CommitUploads`, `LatchedUploads`, `AcquireStagedBatch`, `CommitUploadHooks` with `onError` and an `IUploadBytesSink`), `OwnedRows.h` (`OwnedRow<Row, Binding>`, `DescriptorIndex`), `ContentOwners.h` (`Snapshot(seal)`); tests in OMS `tests/Uploads` (`ORGUploadsTests`, CPU only). DCLF keeps thin subclasses and aliases with its hooks (`RenderGraph::FatalHandler`, FrameData) and the frame-constants names. See "p4-uploads decisions". |
-
-| 4 Build and upload services | in progress | p4-build: CS `org-native/extract-p4-build`, OMS `extract/p4-build` | Needs its A/B perf run. p4-build (code only, not built): the staged build service is OMS `StagedBuilds.h` (`org::services::StagedBuilds`, on an OMS `JobLane`), with `BuildObserver` (poll scope, attach, refusal), `isSteadyState`, `afterBuild` and a log callback in its `Desc`. The build context is OMS `BuildContext.h` (`DeferToAttach`, `DeferToStaging`, `CurrentBuild`); DCLF's serials, built and attached, are OMS `BuildInputs.h`. CS `BuildManager.h` keeps the `Builds::` facade, `MakeBuildManager` and an alias. Tests: OMS `ORGBuildsTests`. See "p4-build decisions". |
-
-| 4 Build and upload services | in progress | p4-bufsets: CS `org-native/extract-p4-bufsets`, OMS `extract/p4-bufsets` | Needs phase 2's executor. Buffer sets and payload versions (p4-bufsets, code only, not built): OMS `GrowableBufferSet` gains `Make`/`GrowableBufferSpec`, buffer-keyed `Require`/`RequireNewer`/`Units`/`MostAsked`, `LatchRegions` registration, `NamedVersions::UnitsOf`, `GrowableUnitGroup` and `GrowableRows`; DCLF `SceneBufferSet`, `UnitGroup`, `GrowableRows` and `NamedUnits` forward to them. The payload's version chains are OMS `BufferChains` (`BufferChains.h`); `PayloadSource` implements `BufferChainSource`, and `PayloadPart`, the late-bound buffers and the frame payload stay in DCLF. OMS test `ORGBufferChainsTests` (no device). See "p4-bufsets decisions". |
-
-| 4 Build and upload services | in progress | p4-misc: CS `org-native/extract-p4-misc`, ORG and OMS `extract/p4-misc` | Needs phase 2's executor. p4-misc (code only, not built): scene graph helpers are OMS `Async/VersionedBufferPosts.h` (`PostVersionedBuffer`) and `Async/WindowGates.h` (texture windows and gates), `SceneArtifact` stays; indirect run coalescing is OMS `Passes/IndirectRuns.h` (`IndirectRunCounts`, `IndirectRunWriter` on the bucket binder, `RecordIndirectRuns`, `OrderBySlabs`), DCLF keeps `IndirectDraw` and the push words; the recipe read-order check is ORG `Render/RenderGraph/ReadOrderCheck.h` (`CheckReadOrder`), CS formats the findings; shader bindings are ORG `Render/ShaderBindings.h` and OMS `shaders/OrgResources.hlsli`, CS keeps forwarding files at the old paths. Tests: ORG `OpenRenderGraphReadOrderCheckTests`, OMS `ORGIndirectRunsTests`. |
-
-| 4 Build and upload services | ImGui backend written, not built | p4-imgui: CS `org-native/extract-p4-imgui`, OMS `extract/p4-imgui` | Needs phase 2's executor. ImGui backend (p4-imgui): OMS `ImGui/ImGuiBackend.{h,cpp}` (`org::services::imgui`), the optional target `ORGModuleServices::ImGui` (`cmake/ImGuiBackend.cmake` or `ORG_MODULE_SERVICES_ENABLE_IMGUI`) on the host's ImGui target or include folder. Its shader is OMS `shaders/ImGui.hlsl`. The host passes a `HostDesc` (graph host, texture maker, view and sampler makers, page publishing, error and log callbacks) and the program in each `Target`; the draw pass takes a `DrawTarget`. CS's `ImGuiBasicRHI` is an adapter that keeps `DeclareProgram`/`ProgramFor`. Test: OMS `ORGImGuiBackendTests`. See "p4-imgui decisions". |
+| 0 Review and push | code integrated; push waiting for the user | p0-lib (ORG, OMS) | Host-option off paths deleted, `RunReadback` error handler, OMS `Variables.h` wording, multisampled-SRV check read in code. Pushing the submodule branches for review (decision 89) waits for the user. |
+| 1 Small containers and async pieces | integrated, not run | p1-async (OMS), p1-frame (OMS) | LatestSlot, PublicationLog, SlotTable, KeptState in OMS `Async/`; RetirementChain and `Retired` in OMS `RetirementChain.h`; StarvationWatch and FrameClock in OMS `Async/`; the violation policy is OMS `ViolationPolicy`. CS keeps facades. |
+| 2 Services with clean cuts | integrated, not run; A/B perf runs pending | p2-executor (OMS), p2-recordings (ORG), p2-retire (OMS), p2-birth (OMS), p2-reflect (OMS), p2-cpu (OMS, BasicTelemetry) | Executor and lanes in OMS `Async/`; EpochRecordings in ORG; retirement join, pooled-backing defaults and recording pools in OMS; texel encoding in OMS `TexelEncoding.h`; shader reflection in OMS `ShaderReflection.h`; SIMD sphere cull in OMS `Cpu/`; zone tallies and the thread budget in BasicTelemetry. |
+| 3 Programs and GPU primitives | integrated, not run | p3-gates (ORG, OMS), p3-kernels (OMS), p3-pins (ORG, OMS), p3-latched (ORG), p3-programs (OMS) | `RunGate`, `FirstRun`, `RunSlots` and latched copies in ORG `Render/`; keyed recording tags and `IDescriptorService::Null` in ORG; UAV clear, prefix sum, sort scatter and HZB in OMS `Passes/` with their shaders; pipeline pins and the programs (`Programs/`) in OMS. |
+| 4 Build and upload services | integrated, not run; A/B perf run pending | p4-uploads (OMS), p4-build (OMS), p4-bufsets (OMS), p4-misc (ORG, OMS), p4-imgui (OMS) | Commit uploads, owned rows and content owners; the staged build service and build inputs; buffer sets and `BufferChains`; scene graph helpers, indirect runs, the read-order check and shader bindings (`OrgResources.hlsli` in OMS); the ImGui backend as `ORGModuleServices::ImGui`. |
+| Cleanup | written, not built | cleanup (ORG, OMS) | `FullscreenVS.hlsl` moved to OMS `shaders/`; this plan, docs, dead code and library comments tidied. See "cleanup decisions". |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
 ### Checks that need a run
@@ -223,8 +195,8 @@ CS should end up with thin adapters (aliases, injected callbacks, host enums) wh
   `PayloadPart`, segment ids, `Placement`.
 - No CS names, switches (`CS_*`) or decision numbers in library code or comments. Library options are `Desc` fields; the
   libraries read no environment switches since phase 6.10.
-- Tests move with the code. Several are already standalone (`tests/DrawcallLimitFixCPU/KeptStateTests.cpp`,
-  `SceneExecutorTests.cpp`).
+- Tests move with the code. The kept-state and executor tests moved to OMS `tests/Async` (`KeptStateTests.cpp`,
+  `ExecutorTests.cpp`).
 - Wait for a second user before moving a large coordinator (frame-revision plan step 4c). Those items are in phase 5.
 - Each move is one branch per library plus one CS branch. CS pins the submodule commit. The submodule branches are local
   only. Push them and have them reviewed upstream before phase 1 pins anything (decision 89).
@@ -254,7 +226,7 @@ From the simplification (phase 6 and the parts it pulled in):
   - `FrameArena::AcquireOversize` (`include/Render/FrameArena.h:82`): a region with a chunk of its own, for staging data.
     CS's `FrameStaging` is now `RenderGraph::AcquireStaging` on it.
   - Hosts bring the task service (`Runtime::Desc::tasks`, required). `ThreadPoolTaskService` is gone; CS passes
-    `Frame::OrgTaskService()` (`src/RenderGraph/Async/Lanes.cpp:215`), an `ITaskService` over its `Executor`.
+    `Frame::OrgTaskService()` (`src/RenderGraph/Async/Lanes.cpp:108`), an `ITaskService` over OMS's `Executor`.
   - Deleted: the pipeline library (`PipelineLibrary`, `PipelinePermutations`, `pipelineCompiler`,
     `RequestPassPipelines`/`AwaitPassPipelines`), the built-in mips and resolve passes, recorded uploads, closed
     executions, the decision trace, the library's env switches, `PassId.h`, `DescriptorSnapshots.h`,
@@ -263,7 +235,7 @@ From the simplification (phase 6 and the parts it pulled in):
 - OMS:
   - `BuildPipeline` (`PipelineRegistry.h:80`), a one-shot async pipeline build. DCLF's draw pipelines use it.
     `PipelineService` is deleted, so OMS has the only pipeline stack.
-  - `Passes/ComputeKernel.h`, `Passes/GenerateMipsPass.h`, `Passes/ResolveMultisamplePass.h`. CS's `ComputeProgram`
+  - `Passes/ComputeKernel.h`, `Passes/GenerateMipsPass.h`, `Passes/ResolveMultisamplePass.h`. `ComputeProgram`
     implements `ComputeKernel`.
   - `ShaderCompiler::CompileHere`. One compiler instance: `DxcShaderStore` uses the runtime's.
   - Deleted: BasicRenderer's journal mode (`BufferJournal`, `VersionedBufferFamily`, `BufferImage`, `JournaledBufferSet`,
@@ -284,7 +256,7 @@ From the simplification (phase 6 and the parts it pulled in):
 | "Explicit `Table::Want` + `HoldForPrograms` API" (3.2) | `Programs::Table` and `HoldForPrograms` are gone. Frame-met keys use `Frame::ProgramSet` (p3-declare2). |
 | UploadRing core to OMS (2) | Changed to stays in CS. The engine constants' chunks are arena staging regions now (6.8). What is left serves only the dynamic ring, whose chunks are D3D11-wrapped buffers released behind D3D11 work (`ReleaseAfterD3D11`, `UploadRing.cpp:66`). |
 | Frame transients to ORG (4) | They already place on ORG's `FrameAliasArena` and frame positions (`Frame/Transients.cpp`). What is left maps CS's `SegmentId` stages to positions. |
-| DCLF revision participant (5) | Its recording-variant cache is `EpochRecordings::Cache` (`Core/Render/Impl/Producer.h:104`). `Core/Render/Revision/Participant.h` now holds DCLF's per-`ShapeKind` participants, which are DCLF's own. |
+| DCLF revision participant (5) | Its recording-variant cache is `EpochRecordings::Cache` (`Core/Render/Impl/Producer.h:115`). `Core/Render/Revision/Participant.h` now holds DCLF's per-`ShapeKind` participants, which are DCLF's own. |
 | Keyed pass schedule (5) | The recipe and DCLF's schedule do different jobs. `kAsyncOrder` went (4.8). |
 | Two `DeclareClient` overloads (5) | One public `DeclareClient<Key, State>` returns `DeclaredClientOf<State>` (`Frame/Declare.h:460`, 3.2). |
 | Pooled list pools per thread (2) | The Parallel record mode is gone (4.5). Only one pool for DXVK's CS thread is left (phase 2). |
@@ -914,3 +886,21 @@ Decided by the agent, to confirm:
   `HostDesc::log`; CS adds the "[ORG] " prefix, so lines read as before.
 - **Host setup.** CS's adapter calls `SetHost` once (`std::call_once`) before any forwarded call that needs the host, since a
   pass may be made before `Init`. `ImGuiRenderer.cpp` and `IconLoader` are unchanged.
+
+### cleanup decisions
+
+Decided by the agent, to confirm:
+
+- **`FullscreenVS.hlsl` is OMS's.** It is generic (no CS includes or defines), so it moved to OMS `shaders/` and
+  `RasterProgram::kFullscreenVertexShader` is `ORGModuleServices/FullscreenVS.hlsl`. The body is unchanged; only its
+  comment is. No CS program named the old path. CS's configure-time copy ships it with the other OMS shaders.
+- **Packaging needed no change.** `cmake/RenderGraph.cmake` copies OMS `shaders/` into `package/Shaders/ORGModuleServices`
+  at configure time, before the AIO globs and the `install(DIRECTORY package/ ...)` rule run, so the AIO folder, the
+  install tree, the zip and the CI shader validation all carry it. Tools that run FXC on the source tree
+  (`verify-shader-refactor.ps1`, `check-dual-target-shaders.py`) need one configure first, as p4-misc noted.
+- **OMS `StagedBuilds::Desc` gains `maxSupersededInARow`, `maxRejectedInARow` and `statsFrames`,** defaulting to the old
+  constants (3, 3, 3000). CS sets none of them.
+- **Removed as unused:** OMS `MarkedList::RemoveAt` and `SlotTable::FreeCount` (no caller in the libraries or CS).
+- **Throws left in new OMS code** (executor `Desc` checks, `BufferChains` hook checks, required-argument checks in
+  `RecordingPools.h`, `RetirementJoin.cpp`, `ProgramService.cpp`, the backing allocate hook) are setup or misuse checks.
+  Converting them needs factories that return null and CS callers that check; left for a separate change.

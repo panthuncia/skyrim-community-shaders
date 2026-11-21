@@ -2,7 +2,7 @@
 // The pass records the whole output as its render area. This stage draws a quad, two triangles, in the part of it the draw's
 // latch names, so a new dynamic-resolution ratio is a new latch value and never a new recording (frame revision plan, step 8).
 // It covers the same pixels as a viewport of that size, and TEXCOORD0 runs from (0,0) to (1,1) across it, as the
-// fullscreen triangle's does across a viewport (FullscreenVS.hlsl).
+// fullscreen triangle's does across a viewport (ORGModuleServices/FullscreenVS.hlsl).
 //
 // The latch is the draw's OrgEngineConstantsAt (Common/OrgEngineConstants.hlsli); its Viewport holds the scale and offset
 // as fractions of the render area. ORG_VIEWPORT_LATCH_WORD is the push word of the latch's handle; the byte offset follows it.
