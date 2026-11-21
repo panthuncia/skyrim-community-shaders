@@ -27,6 +27,14 @@ namespace DCLF
 		return deferred->deferredBlendStates[a_blendMode][a_alphaToCoverage][a_writeMode][a_extra];
 	}
 
+	ID3D11BlendState* ForwardBlendState(std::uint32_t a_blendMode, std::uint32_t a_alphaToCoverage, std::uint32_t a_writeMode, std::uint32_t a_extra)
+	{
+		auto* deferred = globals::deferred;
+		if (!deferred || a_blendMode >= 7 || a_alphaToCoverage >= 2 || a_writeMode >= 13 || a_extra >= 2)
+			return nullptr;
+		return deferred->forwardBlendStates[a_blendMode][a_alphaToCoverage][a_writeMode][a_extra];
+	}
+
 	std::uint32_t DecalDepthBiasMode(std::uint32_t a_decalGroup)
 	{
 		// The byte the ToggleDepthBias console command flips, read by FUN_1414b3bb0. The same logic on SE 1.5.97.

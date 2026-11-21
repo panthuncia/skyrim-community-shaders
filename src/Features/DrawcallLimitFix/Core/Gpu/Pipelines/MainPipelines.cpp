@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/EngineStates.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
@@ -209,6 +210,8 @@ namespace DCLF
 		}
 		const auto asked = l.asked.find(a_key);
 		const std::uint32_t slot = asked != l.asked.end() ? asked->second : ~0u;
+		if (member && Extensions::FamilyRules(a_key.rasterFlags).deferredRanges)
+			return TryRequestDeferred(a_key, slot);
 		// A build here is one the precompile missed. Each is logged with its key, slot and nearest relative to find the gap.
 		std::uint8_t onDemand = 0;
 		bool programFailed = false;
@@ -361,6 +364,11 @@ namespace DCLF
 				l.counters.zDepthOnly.fetch_add(1, std::memory_order_relaxed);
 		}
 		l.zGroupOf.push_back(group->second);
+		// A deferred key draws only its range pipelines, which plain draws bind by handle, so it joins no state class.
+		if (a_built.deferredOnly) {
+			l.classOf.resize(std::max<std::size_t>(l.classOf.size(), std::size_t(a_index) + 1), kNoSetClass);
+			return;
+		}
 		AdmitToClass(a_built, a_index);
 	}
 
@@ -492,7 +500,14 @@ namespace DCLF
 			[&] { return fmt::format("the version holds {} pipelines and {} class words for {} applied, {} classes of the lane's {}", a_version.pipelines.size(),
 					  a_version.classOf.size(), applied, a_version.classes.size(), l.classMembers.size()); });
 		std::vector<std::uint8_t> seen(applied, 0);
+		// Deferred keys are in no class, and count as their own members.
 		std::uint64_t members = 0;
+		std::vector<std::uint8_t> deferred(applied, 0);
+		for (std::uint32_t g = 0; g < applied && g < a_version.pipelines.size(); ++g)
+			if (static_cast<const Built*>(a_version.pipelines[g].get())->deferredOnly) {
+				deferred[g] = 1;
+				++members;
+			}
 		ankerl::unordered_dense::map<StateClassKey, std::uint32_t, StateClassHash, StateClassEqual> initials;
 		for (std::uint32_t c = 0; c < a_version.classes.size() && c < l.classMembers.size(); ++c) {
 			const auto& sets = a_version.classes[c];
@@ -517,7 +532,7 @@ namespace DCLF
 		}
 		check(members == applied, [&] { return fmt::format("the classes apply {} pipelines in all, the version {}", members, applied); });
 		for (std::uint32_t g = 0; g < applied; ++g)
-			check(seen[g] == 1, [&] {
+			check(seen[g] == (deferred[g] ? 0 : 1), [&] {
 				return fmt::format("pipeline {} is in {} classes (class word {:#x})", g, seen[g], g < a_version.classOf.size() ? a_version.classOf[g] : kNoSetClass);
 			});
 		l.classParityChecks.store(parity.checks, std::memory_order_relaxed);
@@ -553,11 +568,9 @@ namespace DCLF
 		rhi::PipelineLayoutHandle a_layout, rhi::PipelineLayoutHandle a_zLayout, PipelineKey a_key, const ShaderPrograms::Program* a_program, TargetFormats a_targets,
 		EngineState a_state, bool a_frontCCW)
 	{
-		// The build point of ProgramBuild::DeferredRanges: one plain pipeline per deferred range the key draws in, into
-		// Built::pulledDeferred, in the Z-prepass layout. No family has that build yet, so its keys fail here and stay native,
-		// and no member is withheld with nothing to draw it.
+		// A DeferredRanges key is built by BuildDeferred (TryRequestDeferred), never here.
 		if (Extensions::FamilyRules(a_key.rasterFlags).deferredRanges)
-			throw std::runtime_error(fmt::format("{} key: no deferred range pipeline build", a_keyName));
+			throw std::runtime_error(fmt::format("{} key: a deferred range key reached the forward and decal build", a_keyName));
 		auto [vertex, pixel] = Parse<2>({ &a_program->vertex, &a_program->pixel });
 		const std::uint32_t decalGroup = RasterDecalGroup(a_key.rasterFlags);
 		if (!a_state.valid || (!RasterForward(a_key.rasterFlags) && decalGroup != 1 && decalGroup != 2))
@@ -720,6 +733,177 @@ namespace DCLF
 			pulled.blend = desc.blend;
 			pulled.targets = desc.targets;
 			pulled.Create(a_device, built->pulledDepth, "pulled depth");
+		}
+		return built;
+	}
+
+	std::uint64_t DrawPipelines::Impl::PackDeferredState(const Api::DeferredRangeState& a_state)
+	{
+		const std::array<std::uint8_t, 8> bytes{ a_state.blendMode, a_state.alphaToCoverage, a_state.writeMode, a_state.blendExtra, a_state.depthMode,
+			a_state.stencilMode, a_state.stencilWriteMask, static_cast<std::uint8_t>(a_state.twoSided ? 1 : 0) };
+		return std::bit_cast<std::uint64_t>(bytes);
+	}
+
+	Api::DeferredRangeState DrawPipelines::Impl::UnpackDeferredState(std::uint64_t a_packed)
+	{
+		const auto bytes = std::bit_cast<std::array<std::uint8_t, 8>>(a_packed);
+		return { .blendMode = bytes[0], .alphaToCoverage = bytes[1], .writeMode = bytes[2], .blendExtra = bytes[3], .depthMode = bytes[4], .stencilMode = bytes[5],
+			.stencilWriteMask = bytes[6], .twoSided = bytes[7] != 0 };
+	}
+
+	void DrawPipelines::Impl::TryRequestDeferred(const PipelineKey& a_key, std::uint32_t a_slot)
+	{
+		auto& l = lane;
+		const auto* input = l.input.get();  // TryRequest checked it
+		const auto family = KeyFamily(a_key.rasterFlags);
+		const auto f = static_cast<std::size_t>(family);
+		const auto& familyEntry = Extensions::ProgramFamilyOf(family);
+		const auto* shader = static_cast<const RE::BSShader*>(input->familySource[f]);
+		auto fail = [&](std::string_view a_why) {
+			// Its objects stay native until a shader reload makes its programs again.
+			l.FailForGood(a_key);
+			l.dirty = true;
+			l.programFamilyCounters[f].failed.fetch_add(1, std::memory_order_relaxed);
+			if (l.loggedFailures++ < kMaxLoggedFailures)
+				logger::warn("[DCLF] {} pipeline {} stays native: {}", familyEntry.name, DescribeKey(a_key), a_why);
+		};
+		bool programFailed = false;
+		const auto own = ShaderPrograms::Get().FindFamily(family, a_key, *shader, &programFailed);
+		if (programFailed)
+			return fail("its program failed");
+		if (!own) {
+			l.programWaiters[ShaderPrograms::FamilyProgramId(family, a_key)].push_back(a_key);
+			return;
+		}
+		const auto draws = Extensions::DeferredDrawsOf(a_key);
+		if (!draws.ranges)
+			return fail("no deferred range draws it");
+		const Api::DeferredKey key{ a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.rasterFlags, a_key.passDescriptor, a_key.vertexLayout };
+		std::array<DeferredRangeBuild, Api::kDeferredRanges> ranges{};
+		for (std::uint32_t r = 0; r < Api::kDeferredRanges; ++r) {
+			if (!((draws.ranges >> r) & 1u))
+				continue;
+			const auto& entry = Extensions::DeferredRanges()[r];
+			auto& range = ranges[r];
+			range.drawn = true;
+			// Another technique's program, such as the water mask's Stencil technique for a surface key.
+			if (entry.contribution.programKey) {
+				const auto programKey = entry.contribution.programKey(key);
+				PipelineKey other = a_key;
+				other.vertexDescriptor = programKey.vertexDescriptor;
+				other.pixelDescriptor = programKey.pixelDescriptor;
+				if (other.vertexDescriptor != a_key.vertexDescriptor || other.pixelDescriptor != a_key.pixelDescriptor) {
+					range.program = ShaderPrograms::Get().FindFamily(family, other, *shader, &programFailed);
+					if (programFailed)
+						return fail(fmt::format("range {}'s program (VS {:08X} PS {:08X}) failed", entry.name, other.vertexDescriptor, other.pixelDescriptor));
+					if (!range.program) {
+						l.programWaiters[ShaderPrograms::FamilyProgramId(family, other)].push_back(a_key);
+						return;
+					}
+				}
+			}
+			Api::DeferredRangeState wanted{};
+			if (!entry.contribution.state(key, wanted))
+				return fail(fmt::format("range {} has no state for it", entry.name));
+			range.twoSided = wanted.twoSided;
+			// The render thread reads the engine's state objects once, at its next capture, and the key waits for them.
+			const auto packed = PackDeferredState(wanted);
+			const auto* states = input->deferredStates.get();
+			const DeferredEngineState* state = nullptr;
+			if (states)
+				if (const auto found = states->find(packed); found != states->end())
+					state = &found->second;
+			if (!state) {
+				if (l.deferredStatesAsked.insert(packed).second)
+					completions->deferredStateRequests.Push(packed);
+				l.blocked.push_back(a_key);
+				return;
+			}
+			if (!state->valid)
+				return fail(fmt::format("the engine's state for range {} (blend [{}][{}][{}][{}], depth {}, stencil {}) cannot be built", entry.name, wanted.blendMode,
+					wanted.alphaToCoverage, wanted.writeMode, wanted.blendExtra, wanted.depthMode, wanted.stencilMode));
+			range.state = *state;
+			range.targets = input->deferredTargets[r];
+			if (!range.targets.read) {
+				l.blocked.push_back(a_key);
+				return;
+			}
+		}
+		if (l.Full()) {
+			l.blocked.push_back(a_key);
+			return;
+		}
+		const std::string_view keyName = familyEntry.keyName;
+		const std::string id = fmt::format("dclf.{}.{:08X}.{:08X}.{:08X}.{:X}.{:016X}", keyName, a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.passDescriptor,
+			a_key.rasterFlags, a_key.vertexLayout);
+		// A hot reload rebuilds the key's own program. Another range's program stays the one captured here until the sources move.
+		const auto build = [device = device, zLayout = zLayout->GetHandle(), key = a_key, ranges, depth = input->targets.depth, frontCCW = *input->frontCCW, family,
+							   keyName](const ShaderPrograms::Program& a_program) {
+			return BuildDeferred(ProgramFamilySlotOf(family), keyName, device, zLayout, key, a_program, ranges, depth, frontCCW);
+		};
+		auto live = MakeLive(id, ShaderPrograms::SourcePathOf(*shader), *own, [family, key = a_key, shader](ShaderPrograms::Rebuilt<ShaderPrograms::Program> a_done) {
+			ShaderPrograms::Get().RebuildFamily(family, key, *shader, std::move(a_done));
+		}, build);
+		l.entries.try_emplace(a_key);
+		RequestBuild([build, own] { return build(*own); },
+			[completions = completions, key = a_key, generation = l.generation, live = std::move(live)](Artifact a_artifact) {
+				completions->main.Push({ key, generation, a_artifact, live });
+				WakePipelineLane();
+			});
+		l.counters.requested.fetch_add(1, std::memory_order_relaxed);
+		l.programFamilyCounters[f].requested.fetch_add(1, std::memory_order_relaxed);
+		LogOnDemandBuild(a_key, family, a_slot);
+	}
+
+	org::services::PipelinePayload DrawPipelines::Impl::BuildDeferred(const ProgramFamilySlot& a_slot, std::string_view a_keyName, rhi::Device a_device,
+		rhi::PipelineLayoutHandle a_zLayout, PipelineKey a_key, const ShaderPrograms::Program& a_program, const std::array<DeferredRangeBuild, Api::kDeferredRanges>& a_ranges,
+		DXGI_FORMAT a_depthFormat, bool a_frontCCW)
+	{
+		auto built = std::make_shared<Built>();
+		built->deferredOnly = true;
+		// The key's own program names it: its constant tables, and a Z key that no bucket ever takes.
+		{
+			auto [vertex, pixel] = Parse<2>({ &a_program.vertex, &a_program.pixel });
+			built->tables = std::make_shared<const ConstantTables>(ConstantTables{ ConstantTableOf({ &vertex }, false, a_key), ConstantTableOf({ &pixel }, true, a_key) });
+		}
+		built->zKey.vertex = ModuleHash(a_program.vertex) ^ a_slot.zSalt;
+		built->zKey.vertexBytes = static_cast<std::uint32_t>(a_program.vertex.size());
+		built->zKey.pixel = ModuleHash(a_program.pixel);
+		built->zKey.pixelBytes = static_cast<std::uint32_t>(a_program.pixel.size());
+		for (std::uint32_t r = 0; r < Api::kDeferredRanges; ++r) {
+			const auto& range = a_ranges[r];
+			if (!range.drawn)
+				continue;
+			const auto& program = range.program ? *range.program : a_program;
+			auto [vertex, pixel, pulledVertex, pulledPixel] = Parse<4>({ &program.vertex, &program.pixel, &program.pulledVertex, &program.pulledPixel });
+			CheckPulledBindings(pulledVertex, false);
+			CheckPulledBindings(pulledPixel, true);
+			CheckVertexAttributes(program.vertexAttributes, a_key.vertexLayout);
+			// The device-generated stages bind the registers the pulled ones read, so the commit resolves them for both.
+			for (const auto variant : { kColorVariant, kDepthVariant }) {
+				AddUsage(vertex, false, built->usage[variant]);
+				AddUsage(pixel, true, built->usage[variant]);
+			}
+			PipelineDesc desc(a_zLayout, program.pulledVertex, program.pulledPixel, a_depthFormat);
+			desc.raster.rs.cull = range.twoSided ? rhi::CullMode::None : rhi::CullMode::Back;
+			desc.raster.rs.frontCCW = a_frontCCW;
+			desc.depth.ds = range.state.depthStencil;
+			desc.blend.bs = range.state.blend;
+			desc.blend.bs.independentBlend = true;
+			for (std::uint32_t i = 0; i < range.targets.count; ++i)
+				desc.targets.rt.formats[desc.targets.rt.count++] = range.targets.formats[i];
+			desc.blend.bs.numAttachments = desc.targets.rt.count;
+			// An attachment the pixel stage has no output for keeps its contents, as DXVK builds the engine's pipeline.
+			for (std::uint32_t i = 0; i < desc.targets.rt.count; ++i)
+				if (!((pulledPixel.outputLocations >> i) & 1u)) {
+					desc.blend.bs.attachments[i].enable = false;
+					desc.blend.bs.attachments[i].writeMask = static_cast<rhi::ColorWriteEnable>(0);
+				}
+			const auto& name = Extensions::DeferredRanges()[r].name;
+			desc.Create(a_device, built->pulledDeferred[r], fmt::format("{} {} VS {:08X} PS {:08X} layout {:016X}", a_keyName, name, a_key.vertexDescriptor,
+				a_key.pixelDescriptor, a_key.vertexLayout));
+			if (!built->pulledDeferred[r])
+				throw std::runtime_error(fmt::format("{} key: its {} pipeline was not created", a_keyName, name));
 		}
 		return built;
 	}

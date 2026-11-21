@@ -1016,7 +1016,7 @@ namespace DCLF::Extensions
 			void RegisterDeferredRange(const Api::DeferredRangeContribution& a_range) override
 			{
 				if (a_range.slot >= Api::DeferredRangeSlot::Count || a_range.name.empty() || a_range.family >= Api::ProgramFamily::Count || !a_range.draws ||
-					!a_range.target)
+					!a_range.target || !a_range.state)
 					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete deferred range", feature));
 				auto& entry = lists.deferredRanges[static_cast<std::size_t>(a_range.slot)];
 				if (entry.slot != Api::DeferredRangeSlot::Count)
