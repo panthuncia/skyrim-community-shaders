@@ -157,6 +157,7 @@ Not part of this plan unless a phase touches them:
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 
 | 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
+| 3 Programs and GPU primitives | item 2 written, not built | p3-programs: CS `org-native/extract-p3-programs`, OMS `extract/p3-programs` | Item 2: `ComputeProgram`, `RasterProgram`, `ProgramService` (slots, `FixedProgram`, the pool, `Collect`, `JoinSetup`, `Load`), the build helpers and `ShaderTarget` are OMS `Programs/`. CS sets their `ProgramEnvironment` (shader root, backend, compiler, registry, common defines, request defines, pipeline pins, log) in `Programs::InstallEnvironment`; `ComputeProgram.h`, `RasterProgram.h`, `ProgramService.h`, `ProgramBuild.h` and `ShaderTarget.h` stay as forwarding headers. The pool sizes itself with OMS `PlanWaitingPool` from its stated compile domain. Fingerprints are OMS's XXH3 content hash. Tests: OMS `ORGProgramServiceTests`, `ORGAsyncExecutorTests`. See "p3-programs decisions". |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
@@ -643,3 +644,36 @@ Decided by the agent, to confirm:
   thread pushes and one thread (the render thread) takes. "Retirement comes in as a callback" is `ResetPools`' `Defer`,
   which DCLF points at its executor's preparation lane, with the same zone.
 - **Library error text** for a structured backing past `uint32` elements drops the `[DCLF]` prefix.
+
+### p3-programs decisions
+
+Decided by the agent, to confirm:
+
+- **Layout.** OMS `include/ORGModuleServices/Programs/` (`ComputeProgram.h`, `RasterProgram.h`, `ProgramService.h`,
+  `ProgramBuild.h`, `ShaderTarget.h`), in `org::services`. The build helpers are `org::services::program_build`. CS keeps
+  `ComputeProgram`/`RasterProgram` as global aliases, and `Programs::Fixed<P>` and `Programs::Detail::Slot` as aliases of
+  `FixedProgram<P>` and `ProgramSlot`, so no feature file changed. The four forward declarations became alias declarations.
+- **A process-wide environment.** `ComputeProgram::Load(device, desc)` is static and called directly in about 15 CS files,
+  so the injected pieces live in one `ProgramEnvironment` the host sets once (`SetProgramEnvironment`), not in each call.
+  CS sets it at the top of `RenderGraphRuntime::Initialize`. Every callback resolves lazily, so the compiler and registry
+  are read when a program loads, as before.
+- **Injected pieces.** Shader root (`Data/Shaders`), backend (`Backend::Active`, mapped to the binary format by
+  `ShaderFormatFor`), compiler, registry, common defines (CS's `WithCommonDefines`, still resolved where programs are queued),
+  request defines (`CS_ORG_BINDLESS`, and `CS_GPU_AMD` on AMD, in the old order after the API define), the version a recording
+  binds (`PipelineVersions::VersionFor`; without it, the slot's newest), the pipeline-statistics label hook (BasicRHI's
+  Vulkan-only function, so OMS doesn't link it) and a log callback. CS's log adds the `[ORG] ` prefix, so log lines read as
+  before.
+- **Errors.** `ProgramService::Desc::onError` gets the refused build, a failed build at `Collect`, a fixed program read
+  before it was built and a stopped lane. CS passes `FatalHandler("Programs")`, so all stay fatal. A stopped programs lane
+  is now fatal under "Programs", not "lanes". A refused slot is marked done with its error, so a join doesn't hang when
+  the handler returns, and `Collect` doesn't report it twice. Load failures stay null and logged.
+- **The pool coupling.** An explicit dependency, not a new domain: `org::async::PlanWaitingPool(executor, runOn,
+  waitsOnDomain, fallback)` in `Async/Lanes.h`. `ProgramService::Desc::compileDomain` states where the builds' compiles run.
+  The arithmetic is unchanged (half the shared domain's workers, or one lane on the fallback class with one worker), so the
+  thread counts are the same. A new blocking domain would have added threads.
+- **The hash.** `HashBinary` is OMS's XXH3-128 (`HashShaderBytes`) folded to 64 bits; a raster pair hashes both through
+  `ShaderKeyBuilder`. The fingerprint is persisted nowhere: `PipelineRegistry` keeps it in memory and compares it only
+  within a session, at a reload. So no on-disk cache is invalidated; the shader store keys on its own variant keys.
+- **Log wording.** The pool's line says "on the compile domain's threads" or "on the fallback threads" instead of
+  "preparation"/"blocking", and the not-built error says "after the setup join" instead of "after CS's setup".
+- **ASCII names.** Entry points and define names are narrowed by casting, as CS's define code did. They are ASCII.
