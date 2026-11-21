@@ -12,6 +12,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
 
+#include <ORGModuleServices/RecordingPools.h>
+
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -38,39 +40,10 @@ namespace DCLF::Draws
 namespace DCLF::Direct
 {
 	/**
-	 * @brief A cull job's output memory for one frame slot. Bump allocation in chunks that never move, so a CulledBatch stays
-	 * put until Reset at the slot's retirement. One thread at a time.
+	 * @brief A cull job's output memory for one frame slot (OMS's bump arena). A CulledBatch stays put until Reset at the slot's
+	 * retirement. One thread at a time.
 	 */
-	class CullArena
-	{
-	public:
-		CullArena() = default;
-		CullArena(const CullArena&) = delete;
-		CullArena& operator=(const CullArena&) = delete;
-		CullArena(CullArena&&) = default;
-		CullArena& operator=(CullArena&&) = default;
-
-		/** @brief a_count uninitialised T, aligned for T. Trivial types only. */
-		template <class T>
-		T* Make(std::size_t a_count)
-		{
-			return static_cast<T*>(Allocate(a_count * sizeof(T), alignof(T)));
-		}
-		void* Allocate(std::size_t a_bytes, std::size_t a_align);
-		/** @brief Lets go of every allocation when the frame slot retires. The chunks are kept for the slot's next frame. */
-		void Reset();
-		std::size_t BytesUsed() const;
-
-	private:
-		static constexpr std::size_t kChunkBytes = 256 * 1024;
-		struct Chunk
-		{
-			std::unique_ptr<std::byte[]> bytes;
-			std::size_t size = 0;
-		};
-		std::vector<Chunk> chunks;
-		std::size_t current = 0, used = 0;
-	};
+	using CullArena = org::services::BumpArena;
 
 	/** @brief A portal-strict point light's gates on the CPU. hold keeps the gate words alive for the cull. */
 	struct StrictGates

@@ -152,6 +152,8 @@ Not part of this plan unless a phase touches them:
 | 2 Services with clean cuts | in progress | `org-native/extract-p2-executor`, OMS `extract/p2-executor` | Executor and lanes moved (code only, not built): OMS `Async/Executor.h`, `Async/Lanes.h`, `Async/ExecutorTaskService.h`; CS keeps `SharedExecutor()`, `OrgTaskService()` and forwarding headers. Needs its A/B perf run. Retirement join needs one too. |
 
 | 2 Services with clean cuts | in progress | p2-recordings: CS `org-native/extract-p2-recordings`, ORG `extract/p2-recordings` | Executor and retirement join need A/B perf runs. p2-recordings: EpochRecordings is ORG `OpenRenderGraph/EpochRecordings.h` (`org::epoch_recordings`); CS keeps a forwarding header whose `Cache` passes `RenderGraph::Fatal`. Not built yet. |
+
+| 2 Services with clean cuts | in progress | p2-retire: CS `org-native/extract-p2-retire`, OMS `extract/p2-retire` | Executor and retirement join need A/B perf runs. p2-retire (code only, unbuilt): retirement join is OMS `RetirementJoin` + `GraphHostRetirement` (CS `Async/Retirement` is a facade); pooled-backing defaults are OMS `GraphHostBackings.h` (DCLF `PooledBackings` passes its switches); CPU recording pools are OMS `RecordingPools.h` (`BumpArena`, `ResetPools`, `RecordingSlot`) + `SecondaryListPool.h`. Tests: OMS `ORGRetirementTests`. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 
 | 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
@@ -621,3 +623,23 @@ Decided by the agent, to confirm:
 - **The counters (`Read()`) stay process-wide in ORG.** A failed request is not counted, as before.
 - **`Cache::Post` has a requester overload** (`Post(entry, count, what, requester, settled)`) that the GraphHost overload
   uses. The tests post through it.
+
+### p2-retire decisions
+
+Decided by the agent, to confirm:
+
+- **Two layers for the join.** `RetirementJoin` (std plus ORG's header-only `EventQueue`) does the counting behind a
+  `Source` interface (`SubmissionsMade`, `CpuFramesCompleted`), so its logic is tested standalone. `GraphHostRetirement`
+  adds the graph host source and the GPU points (`SubmittedGpuPoint`, `SealedGpuPoint`, `Sealed`), which need `GraphHost.h`.
+- **The host comes in as a callback** (`GraphHostAccess`, returning the host or null), since CS's host comes and goes.
+- **New headers, not `BackingPool.h`.** The join and the pool defaults are in `RetirementJoin.h`, `GraphHostRetirement.h` and
+  `GraphHostBackings.h`. `BackingPool.h` stays std-only for its standalone tests, and p1-async adds beside it at the same time.
+- **Shrink is an enum** (`BackingShrink::Settled/Never/Eager`) and copies are `PerFrameCopies(asked, framesInFlight)`. DCLF
+  still parses `CS_DCLF_SHRINK` and `CS_DCLF_SCENE_COPIES` (empty means 3), so the values are unchanged.
+- **Secondaries stay generic.** The list pool holds only BasicRHI types (`rhi::CommandAllocatorPtr`, `rhi::CommandListPtr`),
+  nothing of D3D11 or DXVK, so `SecondaryListPool` moved whole to OMS. `ResetPools` and `RecordingSlot` still take the pool
+  type as a template parameter, for tests and other pools. DCLF keeps the slot, the worker index and its fatal check.
+- **The reset queue is ORG's `EventQueue`**, not TBB's `concurrent_queue`: OMS's core has no TBB. Both are lock-free, any
+  thread pushes and one thread (the render thread) takes. "Retirement comes in as a callback" is `ResetPools`' `Defer`,
+  which DCLF points at its executor's preparation lane, with the same zone.
+- **Library error text** for a structured backing past `uint32` elements drops the `[DCLF]` prefix.
