@@ -199,42 +199,10 @@ namespace DCLF::Direct
 			Simd::Spheres simd{ x, y, z, r };
 		};
 
-		/** @brief The frustum test over a batch's lanes, four at a time with SSE2. A negative radius means unknown and is kept. */
-		void FrustumPass(const Spheres& a_spheres, std::uint32_t a_count, const PlaneSet& a_set, std::uint8_t* a_pass)
-		{
-			std::uint32_t i = 0;
-			for (; i + 4 <= a_count; i += 4) {
-				const __m128 x = _mm_loadu_ps(a_spheres.x + i), y = _mm_loadu_ps(a_spheres.y + i), z = _mm_loadu_ps(a_spheres.z + i);
-				const __m128 r = _mm_loadu_ps(a_spheres.r + i);
-				const __m128 reach = _mm_sub_ps(_mm_setzero_ps(), r);
-				__m128 keep = _mm_castsi128_ps(_mm_set1_epi32(-1));
-				for (std::uint32_t p = 0; p < a_set.count; ++p) {
-					const auto& plane = a_set.planes[p];
-					const __m128 d = _mm_sub_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_set1_ps(plane[0]), x), _mm_mul_ps(_mm_set1_ps(plane[1]), y)),
-													_mm_mul_ps(_mm_set1_ps(plane[2]), z)),
-						_mm_set1_ps(plane[3]));
-					keep = _mm_and_ps(keep, _mm_cmpge_ps(d, reach));
-				}
-				keep = _mm_or_ps(keep, _mm_cmplt_ps(r, _mm_setzero_ps()));
-				const int bits = _mm_movemask_ps(keep);
-				for (std::uint32_t k = 0; k < 4; ++k)
-					a_pass[i + k] = static_cast<std::uint8_t>((bits >> k) & 1);
-			}
-			for (; i < a_count; ++i) {
-				bool keep = true;
-				for (std::uint32_t p = 0; p < a_set.count && keep; ++p) {
-					const auto& plane = a_set.planes[p];
-					keep = plane[0] * a_spheres.x[i] + plane[1] * a_spheres.y[i] + plane[2] * a_spheres.z[i] - plane[3] >= -a_spheres.r[i];
-				}
-				a_pass[i] = keep || a_spheres.r[i] < 0.0f ? 1u : 0u;
-			}
-		}
-
 		/** @brief The widest frustum kernel the CPU has, null for the SSE pass. */
-		Simd::FrustumFn WideFrustum()
+		org::cpu::FrustumFn WideFrustum()
 		{
-			const Simd::Level level = Simd::Supported();
-			return level == Simd::Level::Avx512 ? &Simd::FrustumAvx512 : level == Simd::Level::Avx2 ? &Simd::FrustumAvx2 : nullptr;
+			return org::cpu::WideFrustum(Simd::Supported());
 		}
 
 		/** @brief The wide paraboloid kernel the CPU has, null for the SSE pre-pass and per-lane test. */
@@ -688,48 +656,19 @@ namespace DCLF::Direct
 		return frame;
 	}
 
-	// ---- Wide kernel support, built for the baseline. CullAvx2.cpp may use AVX anywhere. ----
+	// ---- Wide kernel support. The level comes from ORGModuleServices' sphere cull. ----
 
 	namespace Simd
 	{
-		namespace
-		{
-			Level Detect()
-			{
-				int info[4]{};
-				__cpuid(info, 0);
-				const int leaves = info[0];
-				__cpuid(info, 1);
-				const bool osxsave = (info[2] & (1 << 27)) != 0, avx = (info[2] & (1 << 28)) != 0;
-				if (!osxsave || !avx || leaves < 7)
-					return Level::Sse;
-				const unsigned long long xcr0 = _xgetbv(0);
-				if ((xcr0 & 0x6) != 0x6)
-					return Level::Sse;  // the OS does not keep the YMM state
-				__cpuidex(info, 7, 0);
-				const bool avx2 = (info[1] & (1 << 5)) != 0;
-				const bool avx512 = (info[1] & (1 << 16)) != 0 && (info[1] & (1 << 30)) != 0;  // F and BW
-				if (!avx2)
-					return Level::Sse;
-				return avx512 && (xcr0 & 0xE6) == 0xE6 ? Level::Avx512 : Level::Avx2;  // the opmask and ZMM state must be kept too
-			}
-		}
-
 		Level Supported()
 		{
 			static const Level level = [] {
-				const Level detected = Detect();
+				const Level detected = org::cpu::Supported();
 				logger::info("[DCLF] CPU pipeline: the cull's widest kernels: {}", NameOf(detected));
 				return detected;
 			}();
 			return level;
 		}
-
-		const char* NameOf(Level a_level)
-		{
-			return a_level == Level::Avx512 ? "AVX-512" : a_level == Level::Avx2 ? "AVX2" : "SSE";
-		}
-
 	}
 
 	// ---- The cull ----
@@ -747,7 +686,7 @@ namespace DCLF::Direct
 					wide(a_spheres.simd, a_count, reinterpret_cast<const float (*)[4]>(planes.planes.data()), planes.count, a_batch.dead, a_pass);
 					deadFolded = true;
 				} else {
-					FrustumPass(a_spheres, a_count, planes, a_pass);
+					org::cpu::FrustumSse(a_spheres.simd, a_count, reinterpret_cast<const float (*)[4]>(planes.planes.data()), planes.count, a_pass);
 				}
 			} else if (a_view.frustumCull) {
 				if (const auto wide = WideParabolic()) {
