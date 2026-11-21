@@ -685,3 +685,10 @@ final until the user confirms it.
      now record their argument bytes (BasicRHI `d8a5ee8`); the warning no longer appears. Checks (`sb1`): river in
      all three modes, shader-reload in both native modes, guest dclf-toggles, perf-quick (Dev-Fast /Od, one sample:
      guest 56.3, Vulkan 56.6, D3D12 43.9 fps, unchanged).
+131. **Submodule branches pushed (user, 2026-11-21).** Decisions 89 and 116 are settled: the branches the superproject
+     pins are on their remotes for review: ORG and BasicRHI `d3d12-small-buffers`, OMS and BasicTelemetry
+     `extract/integ`, DXVK `simplify/p5`. No PRs opened; the CS branch is not pushed.
+132. **Next: the library work list (user, 2026-11-21).** Phase 5 stays gated on a second user. Four code-only leads
+     take the extraction plan's "library work CS needs but does not own": `lib-msaa` (ORG multisampled views),
+     `lib-builds` (an any-thread Builds snapshot, owner-thread checks on GraphHost), `lib-arrays` (array-size
+     versions, LLF's slot count live), `lib-errors` (the remaining library throws onto decision 115).
