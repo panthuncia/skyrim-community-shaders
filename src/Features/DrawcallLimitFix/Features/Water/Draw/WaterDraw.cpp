@@ -132,7 +132,18 @@ namespace DCLF::Features::Water::Indirect
 		}
 		void* RefractionView() { return ColourView(RE::RENDER_TARGET::kMAIN_COPY); }
 		void* DisplacementView() { return ColourView(RE::RENDER_TARGET::kWATER_DISPLACEMENT); }
-		void* FlowMapView() { return ColourView(RE::RENDER_TARGET::kWATER_FLOW); }
+		/**
+		 * @brief The flow map SetupGeometry binds at t8 for a Flowmap draw: the flow map source texture's view (AE 0x1414e2957).
+		 * Unified Water makes that source its world flow map; otherwise it is the ImageSpace port's map, which the commit reads by id.
+		 */
+		void* FlowMapView()
+		{
+			const auto offset = Port::Address::kFlowmapSource.Get();
+			if (!offset)
+				return nullptr;
+			const auto* source = reinterpret_cast<const RE::NiPointer<RE::NiSourceTexture>*>(REL::Module::get().base() + offset)->get();
+			return source && source->rendererTexture ? static_cast<void*>(source->rendererTexture->resourceView) : nullptr;
+		}
 		void* SsrView() { return ColourView(RE::RENDER_TARGET::kSSR); }
 		void* SsrRawView() { return ColourView(RE::RENDER_TARGET::kSSR_RAW); }
 		// The published ids of the engine's targets the surface reads. The renderer's SRVs are not their exports, so each frame texture
