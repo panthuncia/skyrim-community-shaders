@@ -202,7 +202,10 @@ namespace RenderGraph::Frame
 				};
 				auto& executor = SharedExecutor();
 				const bool critical = a_priority == org::runtime::TaskPriority::FrameCritical;
-				const auto taskClass = a_priority == org::runtime::TaskPriority::Background ? Executor::Streaming : Executor::Preparation;
+				// Never the streaming lane: its jobs may wait on the graph's locks (a texture window's immediate submission waits for the
+				// sequencer), and an ORG task behind them, such as a command-list pool's reset that a submission waits for while it holds
+				// the sequencer, deadlocked the render thread (2026-11-21).
+				const auto taskClass = Executor::Preparation;
 				if (critical && a_delay <= std::chrono::steady_clock::duration::zero())
 					return executor.DispatchFrameCritical(executorScope, a_name, std::move(task));
 				return executor.DispatchAfter(executorScope, (std::max)(a_delay, std::chrono::steady_clock::duration::zero()), taskClass, a_name, std::move(task));

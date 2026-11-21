@@ -83,6 +83,9 @@ namespace PublishedResources
 	/** @brief The id whose twin exports a_view, or empty. A pass reading the export through its own import is not ordered after the producer.
 	*  Allocates, so use IsExportOf on hot paths. */
 	std::string ExportedId(const ID3D11ShaderResourceView* a_view);
+
+	/** @brief Why ShaderResourceIndex(a_id) finds an index or not, for a refusal's log: the entry, its resource and its views. */
+	std::string DescribeIndex(std::string_view a_id);
 	/** @brief Whether a_view is a published resource's export. */
 	bool IsExport(const ID3D11ShaderResourceView* a_view);
 }
