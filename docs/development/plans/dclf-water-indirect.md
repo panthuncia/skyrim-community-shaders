@@ -438,3 +438,12 @@ Ids are Address Library ids, SE / AE.
   expression with precise floats, so a reassociated product would show as a LightColor mismatch.
 - **Frame scope.** The observer captures the frame values at the frame's first latched draw. A value that changes between the
   mask and the surface batch shows as a mismatch, which is the check that the frame row is a frame value.
+- **FresnelRI.x (2026-11-21).** In game the latch holds 0 for every water draw and the port reads 0.1 from material +0x170.
+  Ghidra does not explain it. SetupMaterial (AE 0x1414e168b, SE 0x1412f63d0) stores material +0x170 to the FresnelRI entry
+  (table byte +0x44) and nothing later stores to that float. Linear Lighting's hook only writes table entries 1-3. The material
+  is the pass property's +0x78 (RenderPassImmediately, AE 0x1414f3e8b, SE 100854), the same object the observer reads. Only two
+  functions write +0x170: TESWaterForm to material (AE 0x140300e20, from AddWater; it copies the form's DNAM fresnel at +0xE8)
+  and CopyMembers (0x1414ee24d). No CS hook writes it. CommonLib calls it `fresnelAmount`. So the engine should latch what the
+  port reads. The next step is a runtime probe in Linear Lighting's WaterMaterialUpload, before its Unmap: log material +0x170
+  and the mapped float at table[4]. If they agree with the port, the capture path (EnginePools' two copies, BufferContents)
+  loses the value. If they show 0, something writes the material outside the code searched here.
