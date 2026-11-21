@@ -663,3 +663,25 @@ final until the user confirms it.
 127. **DCLF water on by default (user, 2026-11-21).** `CS_DCLF_WATER` unset means 2: plain water is claimed and drawn by
      DCLF's water epochs. 0 turns the port off. Decision 126's "stays 0" is superseded; the waves and tile bands were
      fixed first (water plan section 11).
+128. **Leak: ORG's oversize frame arena grew about 3.5 MB/s (2026-11-21).** `Runtime::AssignmentScope` kept one flag
+     for "a submission is being assigned", so freed arena regions, descriptor releases and deferred deletions waited for
+     a moment with no assignment open, which a busy frame never reached. ORG `fix/assignment-gate` (`985d11d`) gives
+     each assignment an id; a release waits only for the assignments open when it was made (`AssignmentGate`). The
+     oversize arena now holds about 30 MB in all three modes, and the totals stay flat (river with `CS_DCLF_STATS=1`).
+     CS counts live staging regions per area (`6bad2acd9`).
+129. **D3D12 packs small buffers (2026-11-21).** Every small committed D3D12 buffer took a 64 KiB heap, so native
+     D3D12 used about 335 MB more than Vulkan, mostly `Engine::TriShape` vertex and index buffers. BasicRHI
+     `d3d12-small-buffers` places buffers up to 256 KiB at 512-byte starts in one buffer that spans each heap, as
+     Vulkan binds them in shared blocks. Views that cannot start inside it (strides or formats that don't divide 512,
+     UAV counters) get `RF_OwnResource` from ORG (`2e3a1b5`). Native mode's D3D11 wrap reads the buffer's offset
+     through `RHI_IID_D3D12_BUFFER_RANGE`; the light grid crash was a packed buffer queried as a whole resource.
+     River, at the end of the run: D3D12 1093 MB (TriShape VB 78, IB 16), Vulkan 1068 MB (76, 16), guest 1015 MB;
+     D3D12 was 1385 MB. Choices made by the implementing agent, not yet confirmed by the user: whole-heap buffers
+     instead of a page pool, the 256 KiB cap, same-heap copies through a second buffer over the same memory with
+     barriers on the first only, readback heaps kept mapped. Not run: frame generation, HDR, upscalers on D3D12.
+130. **D3D12 skipped draws whose arguments end the buffer.** BasicRHI's ExecuteIndirect check asked for
+     `stride * count` bytes past the offset, but the last command needs only its own arguments. DCLF's refraction
+     draws keep theirs at the end of each 136-byte record, so about 330 per D3D12 river run were dropped. Signatures
+     now record their argument bytes (BasicRHI `d8a5ee8`); the warning no longer appears. Checks (`sb1`): river in
+     all three modes, shader-reload in both native modes, guest dclf-toggles, perf-quick (Dev-Fast /Od, one sample:
+     guest 56.3, Vulkan 56.6, D3D12 43.9 fps, unchanged).

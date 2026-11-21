@@ -115,3 +115,6 @@ Progress log for `org-cleanup-refactor-plan.md`. Decisions that need the user's 
   Staged as `CS AB extract` because the water session used `nfg`.
 - Merge (2026-11-21): `dclf/water-indirect` fast-forwarded, then `org-native/extract-integ` merged (`a89cd1b4c`,
   decision 125). 11 checks pass; perf-quick unchanged.
+- Memory (2026-11-21): the oversize arena leak fixed (ORG assignment gate), D3D12 small buffers packed, D3D12's
+  dropped refraction draws fixed (decisions 128-130). D3D12 river 1385 -> 1093 MB against Vulkan's 1068. 9 checks
+  pass; perf-quick unchanged.
