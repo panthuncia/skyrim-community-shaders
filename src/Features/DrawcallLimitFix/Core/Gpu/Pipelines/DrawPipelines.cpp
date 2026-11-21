@@ -362,6 +362,7 @@ namespace DCLF
 		result.shadowRequested = shadowCounters.requested.load(std::memory_order_relaxed);
 		result.shadowReady = shadowCounters.ready.load(std::memory_order_relaxed);
 		result.shadowFailed = shadowCounters.failed.load(std::memory_order_relaxed);
+		result.buildsInFlight = Impl::buildsInFlight.load(std::memory_order_relaxed);
 		result.shadowSetPublishes = shadowCounters.setPublishes.load(std::memory_order_relaxed);
 		result.shadowSetWaits = shadowCounters.setWaits.load(std::memory_order_relaxed);
 		for (std::size_t f = 0; f < kDrawFamilyLanes; ++f) {
