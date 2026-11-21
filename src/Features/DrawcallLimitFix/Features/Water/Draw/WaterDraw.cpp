@@ -135,6 +135,16 @@ namespace DCLF::Features::Water::Indirect
 		void* FlowMapView() { return ColourView(RE::RENDER_TARGET::kWATER_FLOW); }
 		void* SsrView() { return ColourView(RE::RENDER_TARGET::kSSR); }
 		void* SsrRawView() { return ColourView(RE::RENDER_TARGET::kSSR_RAW); }
+		// The published ids of the engine's targets the surface reads. The renderer's SRVs are not their exports, so each frame texture
+		// names its id through graphId rather than matching the view. Only wading water reads the displacement swap, and it is not claimed.
+		constexpr std::string_view kRefractionId = "Engine::kMAIN_COPY", kDisplacementId = "Engine::kWATER_DISPLACEMENT",
+								   kDepthId = "Engine::Depth::kPOST_ZPREPASS_COPY", kSsrId = "Engine::kSSR", kSsrRawId = "Engine::kSSR_RAW";
+		std::string_view RefractionId() { return kRefractionId; }
+		std::string_view DisplacementId() { return kDisplacementId; }
+		std::string_view DepthId() { return kDepthId; }
+		std::string_view SsrId() { return kSsrId; }
+		std::string_view SsrRawId() { return kSsrRawId; }
+
 		void* DepthView()
 		{
 			return globals::game::renderer ?
@@ -177,15 +187,27 @@ namespace DCLF::Features::Water::Indirect
 			.variants = 2,
 			.variant = &SurfaceVariant,
 			.state = &SurfaceState });
-		a_context.RegisterFrameTexture({ .name = "water refraction", .textureRegister = kRefractionRegister, .view = &RefractionView });
-		a_context.RegisterFrameTexture({ .name = "water displacement", .textureRegister = kDisplacementRegister, .view = &DisplacementView });
-		a_context.RegisterFrameTexture({ .name = "water depth", .textureRegister = kDepthRegister, .view = &DepthView });
+		// The engine's targets are graph textures written by CS passes, published under their declared names. Their D3D11 views hold
+		// nothing, so each frame texture reads its graph resource, as the latch path reads them by published id.
+		a_context.RegisterFrameTexture({ .name = "water refraction",
+			.textureRegister = kRefractionRegister,
+			.view = &RefractionView,
+			.graphResources = { kRefractionId },
+			.graphId = &RefractionId });
+		a_context.RegisterFrameTexture({ .name = "water displacement",
+			.textureRegister = kDisplacementRegister,
+			.view = &DisplacementView,
+			.graphResources = { kDisplacementId },
+			.graphId = &DisplacementId });
+		a_context.RegisterFrameTexture(
+			{ .name = "water depth", .textureRegister = kDepthRegister, .view = &DepthView, .graphResources = { kDepthId }, .graphId = &DepthId });
 		a_context.RegisterFrameTexture({ .name = "water flow map",
 			.textureRegister = kFlowMapRegister,
 			.view = &FlowMapView,
 			.graphResources = { ::RenderGraph::Engine::ImageSpace::kFlowMapId } });
-		a_context.RegisterFrameTexture({ .name = "water SSR", .textureRegister = kSsrRegister, .view = &SsrView });
-		a_context.RegisterFrameTexture({ .name = "water SSR raw", .textureRegister = kSsrRawRegister, .view = &SsrRawView });
+		a_context.RegisterFrameTexture({ .name = "water SSR", .textureRegister = kSsrRegister, .view = &SsrView, .graphResources = { kSsrId }, .graphId = &SsrId });
+		a_context.RegisterFrameTexture(
+			{ .name = "water SSR raw", .textureRegister = kSsrRawRegister, .view = &SsrRawView, .graphResources = { kSsrRawId }, .graphId = &SsrRawId });
 		drawnInput = a_context.RegisterClassifyInput({ .name = "water drawn by dclf", .sample = &SampleDrawn });
 		::RenderGraph::Frame::Vars::OnAdopted(::RenderGraph::Frame::Vars::Interior(),
 			std::function<void(const bool&, const bool&)>([](const bool&, const bool& a_now) { waterInterior.store(a_now, std::memory_order_relaxed); }));
