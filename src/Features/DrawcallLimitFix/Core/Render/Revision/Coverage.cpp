@@ -166,9 +166,10 @@ namespace DCLF
 		auto* host = RenderGraphRuntime::Get().Host();
 		impl->DecideEpochCoverage(host);
 		// The frame claims draws only if every claims epoch is covered, or else DCLF would have nothing to draw them with.
+		// A dormant epoch draws nothing in this install, so it claims nothing either.
 		bool main = true;
 		for (std::uint32_t e = 0, epochs = EpochCount(); e < epochs && main; ++e)
-			main = !EpochTraitsOf(e).claims || rv.covered[e];
+			main = !EpochTraitsOf(e).claims || EpochTraitsOf(e).dormant || rv.covered[e];
 		rv.uncoveredFrames += main ? 0 : 1;
 		const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
 		// While DCLF draws, an epoch the recipe has it cover is covered or named the engine's. Anything else is a tap error. The claims
@@ -262,13 +263,17 @@ namespace DCLF
 					rv.covered[e] = false;
 			}
 		// Why the engine draws each uncovered epoch, from what this frame's Begin adopted only. None on an uncovered epoch is a defect.
+		// A dormant epoch has no recording, so it is never covered.
 		const bool notDrawing = Scene::FrameView::Get().NotDrawingYet();
 		const bool loading = Scene::FrameView::IsLoadingScreenUp();
 		for (std::uint32_t e = 0, epochs = EpochCount(); e < epochs; ++e) {
 			const auto& traits = EpochTraitsOf(e);
+			if (traits.dormant)
+				rv.covered[e] = false;
 			const bool shape = active && active->Fragment(R::kShapeSlot + e) != nullptr;
 			const bool hostEngine = traits.hostedBy != kNoEpoch && rv.engine[traits.hostedBy] != EngineState::None;
 			rv.engine[e] = rv.covered[e] ? EngineState::None :
+			               traits.dormant ? EngineState::Dormant :
 			               notDrawing    ? EngineState::NotDrawing :
 			               loading       ? EngineState::LoadScreen :
 			               !shape        ? EngineState::NoShape :
@@ -277,7 +282,7 @@ namespace DCLF
 		}
 		bool ran = false;
 		for (std::uint32_t e = 0, epochs = EpochCount(); e < epochs; ++e) {
-			rv.uncovered[e] += rv.covered[e] ? 0 : 1;
+			rv.uncovered[e] += rv.covered[e] || EpochTraitsOf(e).dormant ? 0 : 1;
 			ran = ran || rv.covered[e];
 		}
 		// A frame revision with DCLF epochs in its closure waits for DCLF's scene only while DCLF's epochs run (plan 7.8).
