@@ -36,15 +36,6 @@ namespace DCLF
 		using Draft = org::async::RevisionAssembler::Draft;
 		using RecordingCache = Revisions::RecordingCache;
 
-		/** @brief Hashes an epoch's recording inputs by the identity of each fragment. */
-		std::uint64_t HashRecordingInputs(const Revisions::RecordingInputs& a_inputs)
-		{
-			std::uint64_t hash = 0xcbf29ce484222325ull;
-			for (const auto& fragment : a_inputs.fragments)
-				hash = (hash ^ static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(fragment.get()))) * 0x100000001b3ull;
-			return hash;
-		}
-
 		/** @brief Put each epoch's shape in a_draft, keeping the old fragment while the shape is the same. */
 		void AssembleShapes(Revisions& a_rv, Draft& a_draft, const MadeShapes& a_shapes)
 		{
@@ -117,7 +108,7 @@ namespace DCLF
 		 */
 		std::shared_ptr<RevisionFragment> RequestRecordings(org::GraphHost& a_host, Revisions& a_rv, std::atomic<std::uint32_t>& a_outstanding, std::uint32_t a_epoch,
 			const std::shared_ptr<const NamedVersions>& a_versions, std::span<const std::shared_ptr<const RevisionFragment>> a_inputs, std::uint32_t a_hosted,
-			const RevisionInputs& a_frame, std::uint64_t a_hash, Revisions::RecordingInputs a_key, std::uint64_t a_use)
+			const RevisionInputs& a_frame, Revisions::RecordingInputs a_key, std::uint64_t a_use)
 		{
 			using R = Revisions;
 			const std::uint32_t e = a_epoch;
@@ -173,7 +164,7 @@ namespace DCLF
 			// A recording made on any other does not belong to this revision. The cache keeps only that build's recordings.
 			const std::uint64_t buildGeneration = a_frame.epochBuilds[static_cast<std::size_t>(traits.segment)];
 			auto& cache = a_rv.recordingCaches[e];
-			auto entry = cache.Add({ buildGeneration, 0 }, a_hash, std::move(a_key), a_use, requests.size());
+			auto entry = cache.Add({ buildGeneration, 0 }, std::move(a_key), a_use, requests.size());
 			entry->payload = fragment;
 			auto& stats = a_rv.epochs[e];
 			a_outstanding.fetch_add(1, std::memory_order_acq_rel);
@@ -196,8 +187,8 @@ namespace DCLF
 				a_outstanding.fetch_sub(1, std::memory_order_acq_rel);
 			};
 			const auto epoch = RenderGraphRuntime::EpochOf(traits.segment);
-			if (!cache.Post(a_host, entry, epoch, std::move(requests), buildGeneration, org::RunRef::kNoCopy, fmt::format("DCLF's {} epoch", traits.name),
-					std::move(settled))) {
+			if (cache.Post(a_host, entry, epoch, std::move(requests), buildGeneration, org::RunRef::kNoCopy, fmt::format("DCLF's {} epoch", traits.name),
+					std::move(settled)) == ::RenderGraph::Frame::EpochRecordings::Posting::Refused) {
 				// Async epochs stopped. The entry goes, so the next make asks again. What was posted still settles the fragment,
 				// which this revision does not name.
 				cache.EraseIf([&](const RecordingCache::Entry& a_kept) { return &a_kept == entry.get(); });
@@ -263,9 +254,8 @@ namespace DCLF
 			}
 			auto& cache = rv.recordingCaches[e];
 			R::RecordingInputs key{ inputs };
-			const auto hash = HashRecordingInputs(key);
 			const auto kept = cache.Find(
-				hash, key, a_frame, [](const RecordingCache::Status&) { return false; }, [&] { return fmt::format("DCLF's {} epoch", traits.name); });
+				key, a_frame, [](const RecordingCache::Status&) { return false; }, [&] { return fmt::format("DCLF's {} epoch", traits.name); });
 			if (kept) {
 				if (cache.Read(*kept).dropped)
 					draft.Set(slot, nullptr);
@@ -273,7 +263,7 @@ namespace DCLF
 					draft.Set(slot, kept->payload);
 				continue;
 			}
-			auto fragment = RequestRecordings(*host, rv, recordingsOutstanding, e, versions, inputs, hosted, producer.inputs, hash, std::move(key), a_frame);
+			auto fragment = RequestRecordings(*host, rv, recordingsOutstanding, e, versions, inputs, hosted, producer.inputs, std::move(key), a_frame);
 			if (!fragment) {
 				// Async epochs stopped. Anything already asked for still settles the fragment, which this revision does not name.
 				++rv.epochs[e].refused;

@@ -150,6 +150,8 @@ Not part of this plan unless a phase touches them:
 | 3 Programs and GPU primitives | in progress | p3-gates: `org-native/extract-p3-gates`, ORG and OMS `extract/p3-gates` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 3–4 written (p3-gates), not built: `org::RunGate`, `org::FirstRun`, `org::RunSlots` in ORG `Render/`, `org::services::MakeUavClearPass` in OMS `Passes/`; CS keeps `RunGate.h` and `FrameStaging.h` as adapters. See "p3-gates decisions". |
 
 | 2 Services with clean cuts | in progress | `org-native/extract-p2-executor`, OMS `extract/p2-executor` | Executor and lanes moved (code only, not built): OMS `Async/Executor.h`, `Async/Lanes.h`, `Async/ExecutorTaskService.h`; CS keeps `SharedExecutor()`, `OrgTaskService()` and forwarding headers. Needs its A/B perf run. Retirement join needs one too. |
+
+| 2 Services with clean cuts | in progress | p2-recordings: CS `org-native/extract-p2-recordings`, ORG `extract/p2-recordings` | Executor and retirement join need A/B perf runs. p2-recordings: EpochRecordings is ORG `OpenRenderGraph/EpochRecordings.h` (`org::epoch_recordings`); CS keeps a forwarding header whose `Cache` passes `RenderGraph::Fatal`. Not built yet. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 
 | 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
@@ -599,3 +601,23 @@ Decided by the agent, to confirm:
   results.
 - **Defines.** The moved programs keep `commonDefines` on, as before. `HzbTest.hlsli`'s depth margin is
   `ORG_HZB_DEPTH_MARGIN`, defaulting to the old 1e-4.
+
+### p2-recordings decisions
+
+Decided by the agent, to confirm:
+
+- **ORG, not OMS.** It wraps one GraphHost call and its types, and ORG's no-device tests can cover it. It lives beside
+  `GraphHost.h` as `include/OpenRenderGraph/EpochRecordings.h`, with `src/Host/EpochRecordings.cpp`.
+- **Failures go to an `OnFailure(what, error)` hook** given to the `Cache` constructor. A failed request reports when it
+  settles, then settles its entry with the error. A failed kept entry reports at `Find`, then goes and the lookup misses.
+  `Request` alone passes `Outcome::Failed` to its done. CS's `Cache` subclass passes `RenderGraph::Fatal`, so both stay
+  fatal at the same points with the same messages.
+- **`Posting { Posted, Refused }`** replaces the bool from `Request` and `Cache::Post`.
+- **The hash is a template parameter** (`Cache<Key, Keep, Rule, Hash, Payload>`). `Find` and `Add` hash the key. Frame
+  segments hash the fields only (`SegmentKeyHash`), as before, so its `AnyOf` checks by hash still work.
+- **Owner-thread fields stay on `Entry`; the locked part is a separate `Settle` block** that the host's thread holds alone.
+  Predicates read it through `Entry::LockedStatus()`. An erased entry's key and payload are now freed before its requests
+  settle. Nothing read them after the erase.
+- **The counters (`Read()`) stay process-wide in ORG.** A failed request is not counted, as before.
+- **`Cache::Post` has a requester overload** (`Post(entry, count, what, requester, settled)`) that the GraphHost overload
+  uses. The tests post through it.
