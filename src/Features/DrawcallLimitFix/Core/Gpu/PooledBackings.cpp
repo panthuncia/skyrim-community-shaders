@@ -1,4 +1,4 @@
-// DCLF's allocate and retire hooks for its backing pools.
+// DCLF's settings for OMS's graph host backing pools.
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -6,79 +6,35 @@
 
 #include <ORGModuleServices/BackingPool.h>
 #include <ORGModuleServices/ElasticCapacity.h>
-#include <OpenRenderGraph/GraphHost.h>
-#include <Render/Runtime/ResourceCleanupQueue.h>
-#include <Resources/Buffers/Buffer.h>
-#include <rhi.h>
+#include <ORGModuleServices/GraphHostBackings.h>
 
-#include <cassert>
-#include <stdexcept>
-#include <string>
+#include <cstdlib>
 
 namespace DCLF::PooledBackings
 {
+	namespace
+	{
+		const org::services::GraphHostAccess& Host()
+		{
+			static const org::services::GraphHostAccess host = []() -> const org::GraphHost* { return RenderGraphRuntime::Get().Host(); };
+			return host;
+		}
+	}
+
 	std::uint64_t DeviceAddressOf(const org::Buffer& a_buffer)
 	{
-		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host)
-			return 0;
-		auto device = host->Device();
-		return device.GetBufferDeviceAddress({ const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), 0 });
-	}
-
-	org::services::BackingAllocation Allocate(const org::services::BackingRequest& a_request)
-	{
-		org::Resource::ScopedECSRegistrationSuppression suppressECS;
-		std::shared_ptr<org::Buffer> buffer;
-		if (a_request.like) {
-			buffer = a_request.like->UnmaterializedLike();
-			if (a_request.stride)
-				buffer->ResizeStructured(static_cast<std::uint32_t>(a_request.capacityClass));
-			else
-				buffer->ResizeBytes(a_request.capacityClass);
-		} else if (a_request.stride) {
-			if (a_request.capacityClass > UINT32_MAX)
-				throw std::length_error(fmt::format("[DCLF] {}: {} rows are past a structured buffer's elements", a_request.name, a_request.capacityClass));
-			buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(static_cast<std::uint32_t>(a_request.capacityClass), a_request.stride,
-				a_request.flags.unorderedAccess);
-		} else {
-			buffer = org::Buffer::CreateSharedUnmaterialized(rhi::HeapType::DeviceLocal, a_request.capacityClass, a_request.flags.unorderedAccess);
-		}
-		if (!a_request.name.empty())
-			buffer->SetName(std::string(a_request.name).c_str());
-		buffer->Materialize();
-		org::services::BackingAllocation allocation;
-		allocation.address = a_request.flags.deviceAddress ? DeviceAddressOf(*buffer) : 0;
-		assert(allocation.address % 16 == 0);  // row and block offsets keep 16-byte alignment
-		allocation.srvIndex = buffer->HasSRV() ? buffer->GetSRVInfo(0).slot.index : 0;
-		allocation.buffer = std::move(buffer);
-		return allocation;
-	}
-
-	void Retire(std::shared_ptr<org::Buffer> a_buffer)
-	{
-		if (!a_buffer)
-			return;
-		auto* host = RenderGraphRuntime::Get().Host();
-		auto cleanup = host ? host->ResourceCleanup() : nullptr;
-		if (!cleanup)
-			return;  // no graph host at process exit
-		// The queue destroys the buffer on its cleanup lane.
-		(void)cleanup->Make<std::shared_ptr<org::Buffer>>(std::move(a_buffer));
+		return org::services::GraphHostDeviceAddress(Host(), a_buffer);
 	}
 
 	org::services::BackingPoolHooks Hooks()
 	{
-		org::services::BackingPoolHooks hooks;
-		hooks.allocate = [](const org::services::BackingRequest& a_request) { return Allocate(a_request); };
-		hooks.retire = [](std::shared_ptr<org::Buffer> a_buffer) { Retire(std::move(a_buffer)); };
-		return hooks;
+		return org::services::GraphHostBackingHooks(Host());
 	}
 
 	std::uint32_t PerFrameSpares()
 	{
 		// The newest frame's backing is still bound when the next is acquired. Measured: one fewer remakes a backing every few frames.
-		return RenderGraphRuntime::kGameFramesInFlight - 1;
+		return org::services::PerFrameSpares(RenderGraphRuntime::kGameFramesInFlight);
 	}
 
 	std::uint32_t SceneCopies()
@@ -86,7 +42,7 @@ namespace DCLF::PooledBackings
 		static const std::uint32_t copies = [] {
 			const auto& value = SwitchValue(Switch::SceneCopies);
 			const auto asked = value.empty() ? 3u : static_cast<std::uint32_t>(std::strtoul(value.c_str(), nullptr, 10));
-			return std::clamp(asked, 2u, RenderGraphRuntime::kGameFramesInFlight);
+			return org::services::PerFrameCopies(asked, RenderGraphRuntime::kGameFramesInFlight);
 		}();
 		return copies;
 	}
@@ -96,10 +52,10 @@ namespace DCLF::PooledBackings
 		static const org::services::ShrinkPolicy policy = [] {
 			const auto& value = SwitchValue(Switch::Shrink);
 			if (value == "off" || value == "0")
-				return org::services::ShrinkPolicy::Never();
+				return org::services::BackingShrinkPolicy(org::services::BackingShrink::Never);
 			if (value == "eager")
-				return org::services::ShrinkPolicy::WhenBelow(25, std::chrono::milliseconds(0), 1);
-			return org::services::ShrinkPolicy::WhenBelow(25, std::chrono::milliseconds(5000), 2);
+				return org::services::BackingShrinkPolicy(org::services::BackingShrink::Eager);
+			return org::services::BackingShrinkPolicy(org::services::BackingShrink::Settled);
 		}();
 		return policy;
 	}

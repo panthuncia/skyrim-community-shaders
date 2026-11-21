@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <string_view>
 
 namespace org
 {
@@ -12,38 +11,21 @@ namespace org
 namespace org::services
 {
 	struct ShrinkPolicy;
-	struct BackingAllocation;
 	struct BackingPoolHooks;
-	struct BackingRequest;
 }
 
 namespace DCLF
 {
-	/** @brief DCLF's hooks for org::services::BackingPool: how a backing is made and where a released one is destroyed. */
+	/** @brief DCLF's settings for OMS's graph host backing pools (GraphHostBackings.h), read from its switches. */
 	namespace PooledBackings
 	{
 		/** @brief The device address of a_buffer, or 0 without a graph host. */
 		std::uint64_t DeviceAddressOf(const org::Buffer& a_buffer);
 
-		/**
-		 * @brief BackingPoolHooks::allocate. Makes a buffer without an ECS entity, since an acquirer off the render thread may not touch
-		 * the host's world. Throws when it cannot be made.
-		 */
-		org::services::BackingAllocation Allocate(const org::services::BackingRequest& a_request);
-
-		/**
-		 * @brief BackingPoolHooks::retire. Destroys a released buffer on the graph host's cleanup lane, never on the releasing thread.
-		 * Lock-free.
-		 */
-		void Retire(std::shared_ptr<org::Buffer> a_buffer);
-
-		/** @brief Hooks with Allocate and Retire set. */
+		/** @brief OMS's graph host hooks on CS's graph host: allocate off the render thread, retire on the cleanup lane. */
 		org::services::BackingPoolHooks Hooks();
 
-		/**
-		 * @brief spareFree for pools that publish about once a frame. One free backing per frame in flight but the newest.
-		 * With fewer, the pool releases a surplus backing and remakes it a frame later.
-		 */
+		/** @brief spareFree for pools that publish about once a frame (OMS PerFrameSpares over CS's frames in flight). */
 		std::uint32_t PerFrameSpares();
 
 		/**
