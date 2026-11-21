@@ -18,7 +18,7 @@ namespace DCLF
 	{
 		Api::DrawFamily family;
 		std::uint32_t forwardFlags;  // 0 for no faces
-		std::uint64_t stageKeyBit;  // 36 up, 37 is the Effect program family's
+		std::uint64_t stageKeyBit;  // 36 up; 37 and 39 are the program families'
 		bool pulled;
 		std::uint64_t forwardProgramId;  // ~0 - family
 	};

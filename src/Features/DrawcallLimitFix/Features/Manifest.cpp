@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindScene.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ViewCommon.h"
@@ -427,6 +428,12 @@ namespace DCLF::Features
 	static_assert(ViewBitsValid(kViewBits, std::size(kViewBits), Draws::kCoreViewBits, 0xFFFFFFFFu), "a view's view bit is not one bit, or is Core's or another view's");
 	// BuildDrawsCS.hlsl's kViewFirstPerson. Reflection's and the occlusion maps' bits have no HLSL mirror, since their culls read them as data.
 	static_assert(FirstPerson::kViewFirstPerson == 1u << 11, "FirstPerson's view bit is not BuildDrawsCS's kViewFirstPerson");
+	// BuildDrawsCS.hlsl's kViewWater, kDeferredSection, kDeferredRanges and kCountDeferred* counters.
+	static_assert(Draws::kViewWater == 1u << 12 && (Draws::kViewWater & Draws::kColourViewBits) && !(Draws::kViewWater & Draws::kDepthViewBits),
+		"kViewWater is not BuildDrawsCS's bit 12, or the colour segment does not cull it, or the depth segment does");
+	static_assert(Draws::kDeferredRanges == Api::kDeferredRanges && Draws::DeferredMapHeaderWord(0) == 5 && Draws::kCountDeferredTestedWord * 4 == 176 &&
+	                  Draws::kCountDeferredDroppedWord * 4 == 188,
+		"the deferred ranges are not BuildDrawsCS's sections and counters");
 	static_assert(Reflection::kFaces <= Draws::kMaxViewFaces, "the reflection's faces are past Core's kMaxViewFaces");
 	// BindlessObject and BindlessShading mirror the frozen DCLFObjects.hlsli, so neither size nor place may move.
 	static_assert(sizeof(BindlessObject) == 64 && sizeof(BindlessShading) == 128, "an object row is not DCLFObjects.hlsli's size");

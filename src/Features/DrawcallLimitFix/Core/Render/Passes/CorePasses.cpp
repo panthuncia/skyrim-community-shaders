@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
+#include "Features/DrawcallLimitFix/Core/Render/Passes/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/IndexPoolPass.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/PassesInternal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
@@ -176,6 +177,8 @@ namespace DCLF::Draws
 		for (const auto& pass : ViewPassDefs())
 			RegisterPassDef(pass, "Core");
 		for (const auto& pass : Direct::SitePassDefs())
+			RegisterPassDef(pass, "Core");
+		for (const auto& pass : DeferredRangePassDefs())
 			RegisterPassDef(pass, "Core");
 	}
 }

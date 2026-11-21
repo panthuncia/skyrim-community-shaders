@@ -68,10 +68,12 @@ namespace DCLF::Draws
 		// Colour calls change only when a slot grows or the slots' classes move.
 		std::vector<std::uint32_t> slotCapacity;
 		std::uint64_t slotsLayout = 0;
-		// Phase 2's ranges in order: terrain groups, forward halves, then refraction. Each is the sum of its slots' capacities.
+		// Phase 2's ranges in order: terrain groups, forward halves, refraction, then the deferred ranges. Each is the sum of its slots'
+		// capacities.
 		std::array<std::uint32_t, kTerrainGroups> terrainCapacity{};
 		std::uint32_t forwardCapacity = 0;
 		std::uint32_t refractionCapacity = 0;
+		std::array<std::uint32_t, kDeferredRanges> deferredCapacity{};
 		bool operator==(const MainLayout&) const = default;
 	};
 	/** @brief The first main layout. CS_DCLF_TABLE_START=small starts with a few draws to test growth. */
@@ -234,10 +236,23 @@ namespace DCLF::Draws
 		 * stable. Empty while a decal set index lacks a plain colour pipeline or a needed Z-prepass one.
 		 */
 		std::vector<PlainBucket> decals;
-		// classCounts' words in order: per class and range, then main, terrain and decal buckets.
+		/**
+		 * Each deferred range's buckets in draw order: by stencil reference, then set index. Their map sections follow the decals'
+		 * (header words 5 and 6) and their count words follow the decal buckets'. Empty without a deferred family's key.
+		 */
+		std::array<std::vector<DeferredCall>, kDeferredRanges> deferred;
+		std::uint32_t DeferredBuckets() const
+		{
+			std::size_t buckets = 0;
+			for (const auto& range : deferred)
+				buckets += range.size();
+			return static_cast<std::uint32_t>(buckets);
+		}
+		// classCounts' words in order: per class and range, then main, terrain, decal and deferred buckets.
 		std::uint32_t Words() const
 		{
-			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(main.size() + terrain.size() + decals.size());
+			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(main.size() + terrain.size() + decals.size()) +
+			       DeferredBuckets();
 		}
 		std::uint32_t DecalCountWord(std::size_t a_bucket) const
 		{
@@ -253,6 +268,9 @@ namespace DCLF::Draws
 		}
 	};
 	void PlanSetClasses(const MainLayout& a_layout, const Lookups& a_lookups, const SceneTables& a_tables, const IndirectState& a_indirect, SetClassPlan& a_out);
+	/** @brief The deferred map header word of range a_range, which holds its bucket count. Must match BuildDrawsCS.hlsl. */
+	inline constexpr std::uint32_t DeferredMapHeaderWord(std::uint32_t a_range) { return 5 + a_range; }
+	static_assert(DeferredMapHeaderWord(kDeferredRanges - 1) < kClassHeaderWords);
 
 	/** @brief A main epoch's frame block sizes per stage and register, which its latched copies take. */
 	struct FrameBlockSizes

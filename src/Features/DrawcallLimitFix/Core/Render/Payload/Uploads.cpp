@@ -515,6 +515,7 @@ namespace DCLF
 			latched(epochResources->count, kZeroCounts, 4 * sizeof(std::uint32_t), kCountForwardWord * sizeof(std::uint32_t));
 			latched(epochResources->count, kZeroCounts, 4 * sizeof(std::uint32_t), kCountRefractionWord * sizeof(std::uint32_t));
 			latched(epochResources->count, kZeroCounts, 2 * sizeof(std::uint32_t), kCountClassUnplannedWord * sizeof(std::uint32_t));
+			latched(epochResources->count, kZeroCounts, 4 * sizeof(std::uint32_t), kCountDeferredTestedWord * sizeof(std::uint32_t));
 			// A forward bucket's count word follows the classes'.
 			if (const auto words = a_commit.shape.classPlan ? a_commit.shape.classPlan->Words() : static_cast<std::uint32_t>(a_commit.shape.classes.size()) * kClassRanges;
 				words && epochResources->classCounts) {

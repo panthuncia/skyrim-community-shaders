@@ -26,8 +26,12 @@ namespace DCLF
 
 	inline constexpr std::array<ProgramFamilySlot, static_cast<std::size_t>(Api::ProgramFamily::Count)> kProgramFamilySlots = { {
 		{ Api::ProgramFamily::Effect, 1u << 17, 21, 1ull << 37, 1ull << 63, 0xEFFEC7EFFEC7EFFEull },
+		// Spare bits 21-23 only: bits 24-27 read as terrain and forward bits on every key.
+		{ Api::ProgramFamily::Water, 1u << 18, 21, 1ull << 39, 1ull << 62, 0x3A7E53A7E53A7E5Full },
 	} };
-	static_assert(kProgramFamilySlots[static_cast<std::size_t>(Api::ProgramFamily::Effect)].family == Api::ProgramFamily::Effect, "kProgramFamilySlots is by family");
+	static_assert(kProgramFamilySlots[static_cast<std::size_t>(Api::ProgramFamily::Effect)].family == Api::ProgramFamily::Effect &&
+	                  kProgramFamilySlots[static_cast<std::size_t>(Api::ProgramFamily::Water)].family == Api::ProgramFamily::Water,
+		"kProgramFamilySlots is by family");
 
 	constexpr const ProgramFamilySlot& ProgramFamilySlotOf(Api::ProgramFamily a_family) { return kProgramFamilySlots[static_cast<std::size_t>(a_family)]; }
 

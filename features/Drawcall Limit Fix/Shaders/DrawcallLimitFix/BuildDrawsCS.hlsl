@@ -502,6 +502,9 @@ static const uint kViewRefraction = 1u << 10;
 // The first-person view frustum-culls a forward input and sends it to the forward range, staged with its sort key.
 static const uint kViewFirstPerson = 1u << 11;
 static const uint kBucketForward = 0x40000000u;
+// A deferred range family's object (water). The colour segment culls it once and appends it to the buckets of every deferred range
+// its set index has one in. GpuLayouts.h's kViewWater.
+static const uint kViewWater = 1u << 12;
 // Matches TerrainBlending.cpp's test exactly.
 bool TerrainNearOf(float4 a_bound) { return distance(a_bound.xyz, TerrainNear.xyz) - a_bound.w <= TerrainNear.w; }
 // This input may get a sequence. The depth segment submits every candidate so the published visibility is complete.
@@ -561,7 +564,12 @@ static const uint kCountClassOverflow = 164;
 // Phase 1's retest list length, and a sun view's casters below the size threshold.
 static const uint kCountRetests = 168;
 static const uint kCountBelowTexels = 172;
-// Words 176-207 are unused.
+// Deferred range inputs tested, in the frustum, rejected by the HZB, and draws dropped for want of a bucket or room.
+static const uint kCountDeferredTested = 176;
+static const uint kCountDeferredInView = 180;
+static const uint kCountDeferredOccluded = 184;
+static const uint kCountDeferredDropped = 188;
+// Words 192-207 are unused.
 // Casters a shadow view dropped for want of a caster row.
 static const uint kCountCasterRowsLost = 208;
 
@@ -646,6 +654,8 @@ bool TakeClassSlot(uint a_class, uint a_range, out uint a_slot)
 // index's bucket with its range, false for none, which drops and counts the draw.
 static const uint kNoPlainBucket = 0xFFFFFFFFu;  // GpuLayouts.h, kNoBucket
 static const uint kForwardSection = 1, kMainSection = 2, kTerrainSection = 3, kDecalSection = 4;  // their header words
+// The deferred ranges' sections follow, one per range (Resources.h, DeferredMapHeaderWord).
+static const uint kDeferredSection = 5, kDeferredRanges = 2;
 uint PlainBuckets(uint a_section)
 {
 	if (ClassMapOffset == 0)
@@ -831,6 +841,44 @@ void StageForwardKey(RWByteAddressBuffer sequences, uint a_slot, uint a_object)
 	sequences.Store(stagedAt + kSequenceFirstInstance, asuint(isnan(clipW) ? 0.0 : clipW));  // a NaN would break the rank
 }
 
+// Appends a deferred range object's draw to its set index's bucket in each deferred range. Pooled, the slot as instance, as the plain
+// main buckets' draws. One draw of the input's geometry: deferred families draw unskinned shapes.
+void AppendDeferred(uint a_set, uint4 a_rows, uint a_objectWord, uint a_geometry, uint a_streamIndex)
+{
+	ByteAddressBuffer geometries = ResourceDescriptorHeap[GeometriesBuffer];
+	RWByteAddressBuffer sequences = ResourceDescriptorHeap[SequencesIndex];
+	RWByteAddressBuffer count = ResourceDescriptorHeap[CountIndex];
+	RWByteAddressBuffer classCounts = ResourceDescriptorHeap[ClassCountsIndex];
+	ByteAddressBuffer poolFirsts = ResourceDescriptorHeap[PoolFirstsIndex];
+	const uint geometryOffset = a_geometry * kGeometryStride;
+	const uint4 vertexBuffer = geometries.Load4(geometryOffset);
+	const uint4 indexBuffer = geometries.Load4(geometryOffset + 16);
+	const uint firstIndex = geometries.Load(geometryOffset + 32);
+	const uint4 stream = a_streamIndex != kNoStream ? geometries.Load4(a_streamIndex * kGeometryStride) : vertexBuffer;
+	uint scratch;
+	bool any = false;
+	[loop] for (uint r = 0; r < kDeferredRanges; ++r) {
+		if (PlainBuckets(kDeferredSection + r) == 0)
+			continue;
+		uint bucket, countWord;
+		uint2 range;
+		if (!PlainBucketOf(kDeferredSection + r, a_set, bucket, range, countWord))
+			continue;  // the set index does not draw in this range
+		any = true;
+		uint taken;
+		classCounts.InterlockedAdd(countWord * 4, 1, taken);
+		if (taken >= range.y) {
+			count.InterlockedAdd(kCountDeferredDropped, 1, scratch);
+			continue;
+		}
+		StoreShadowSequence(sequences, range.x + taken, taken, a_rows, a_objectWord, vertexBuffer, stream, indexBuffer, indexBuffer.w, firstIndex,
+			poolFirsts.Load(a_geometry * 4));
+	}
+	// A deferred input whose set index has no bucket anywhere is drawn by nobody.
+	if (!any)
+		count.InterlockedAdd(kCountDeferredDropped, 1, scratch);
+}
+
 // Projects the bound's world AABB corner by corner, rejecting only when all eight are outside one clip plane. Tests are on
 // homogeneous coordinates, so corners behind the eye still work and an object wholly behind the camera fails the near plane.
 bool Culled(float3 boundCentre, float boundRadius)
@@ -963,7 +1011,7 @@ bool MainFrustumRejected(uint objectIndex)
 }
 
 // Decal, forward and refraction inputs still need the main camera's cull for kAccumulated, so phase 1 stamps their frustum verdict only.
-static const uint kStampOnlyViews = (1u << 8) | (1u << 9) | (1u << 10);
+static const uint kStampOnlyViews = (1u << 8) | (1u << 9) | (1u << 10) | (1u << 12);
 
 // Every slot is initialized before draw inputs claim their object. Shared skin-partition inputs perform just one bound test.
 [numthreads(64, 1, 1)] void ClearPortalQueries(uint3 id : SV_DispatchThreadID) {
@@ -1276,6 +1324,29 @@ void BuildInput(uint draw, DrawInputWords a_words)
 		visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | (forwardCulled ? kVisibilityRejectedFinal : (kVisibilityVisible | kVisibilityColourDrawn)));
 		if (forwardCulled)
 			return;
+	}
+
+	// A deferred range input is culled once, in the colour segment, and drawn by a later epoch from its ranges.
+	if (keyWord == 0 && (a_words.words[1].x & kViewWater) != 0) {
+		if (phase != kPhaseColour)
+			return;  // the depth segment never submits one
+		bool deferredCulled = !drawable;
+		if (drawable && CullMode() != 0) {
+			count.InterlockedAdd(kCountDeferredTested, 1, scratch);
+			const float4 bound = ObjectRow(objectIndex, kObjectBoundRow);
+			deferredCulled = Culled(bound.xyz, bound.w);
+			if (!deferredCulled) {
+				count.InterlockedAdd(kCountDeferredInView, 1, scratch);
+				if (CullMode() >= 2 && Occluded(bound.xyz, bound.w)) {
+					deferredCulled = true;
+					count.InterlockedAdd(kCountDeferredOccluded, 1, scratch);
+				}
+			}
+		}
+		visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | (deferredCulled ? kVisibilityRejectedFinal : (kVisibilityVisible | kVisibilityColourDrawn)));
+		if (!deferredCulled)
+			AppendDeferred(input.x, RowsOf(rowsWord), objectWord, input.z, a_words.words[2].w);
+		return;
 	}
 
 	// Reading the published decision keeps depth and colour drawing the same set. Under EQUAL, colour without depth is invisible and

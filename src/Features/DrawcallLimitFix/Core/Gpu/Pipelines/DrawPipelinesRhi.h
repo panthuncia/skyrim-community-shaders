@@ -7,6 +7,7 @@
 #include <vector>
 #include <rhi.h>
 
+#include "Features/DrawcallLimitFix/Api/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 
 namespace DCLF
@@ -38,6 +39,8 @@ namespace DCLF
 		std::vector<rhi::PipelineHandle> depth;
 		// By set index, the plain depth pipeline for the decal depth pass.
 		std::vector<rhi::PipelineHandle> plainDepth;
+		// Per deferred range and by set index, a deferred family key's plain pipeline there. Null for every other key.
+		std::array<std::vector<rhi::PipelineHandle>, Api::kDeferredRanges> deferred;
 		rhi::PipelineLayoutHandle zLayout{};
 		rhi::CommandSignatureHandle zDrawSignature{};
 		// Null while it waits or once it failed.
