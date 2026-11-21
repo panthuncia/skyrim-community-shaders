@@ -2222,7 +2222,7 @@ namespace DCLF
 		auto lease = a_pool.pool->Acquire({ .capacityClass = a_pool.capacity, .stride = a_stride, .flags = a_flags, .name = a_pool.backingName },
 			a_pool.newestContentEpoch.load(std::memory_order_acquire), &info);
 		if (!lease)
-			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the frame values' {} pool returned no backing", a_name));
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the frame values' {} pool returned no backing{}", a_name, info.error.empty() ? std::string() : ": " + info.error));
 		++a_pool.acquires;
 		if (info.allocated)
 			++a_pool.made;

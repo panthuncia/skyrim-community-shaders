@@ -407,7 +407,9 @@ regression.
   because `StagedGeneration` and `EpochRecordingCurrent` (`GraphHost.h:351,687`) are owner-thread calls.
 - **ORG multisampled SRVs.** Still missing (see "Checks that need a run").
 - **One error convention for library errors.** Decided (decision 115). `org::RunReadback` follows it (p0-lib): each
-  `Create*` takes an `ErrorHandler`, and CS passes `RenderGraph::FatalHandler`. Other ORG throws are not converted yet.
+  `Create*` takes an `ErrorHandler`, and CS passes `RenderGraph::FatalHandler`. lib-errors took the inventory and
+  converted what fit: OMS returns its allocation and growth failures, and ORG's runtime services report through
+  `Runtime::Desc::onError`. ORG's graph engine keeps its throws (see "lib-errors decisions").
 - **Thread rules in signatures** (tag types or debug asserts) instead of prose and runtime checks.
 - **OMS cleanup:** done (p0-lib). `Variables.h` no longer cites a decision.
 - **6.11 result:** guest runs with every one of these host options (decision 113). Their off paths went in phase 0.
@@ -904,3 +906,83 @@ Decided by the agent, to confirm:
 - **Throws left in new OMS code** (executor `Desc` checks, `BufferChains` hook checks, required-argument checks in
   `RecordingPools.h`, `RetirementJoin.cpp`, `ProgramService.cpp`, the backing allocate hook) are setup or misuse checks.
   Converting them needs factories that return null and CS callers that check; left for a separate change.
+
+### lib-errors decisions
+
+Decided by the agent, to confirm:
+
+- **Inventory** (library code only, at ORG 2e3a1b5 and OMS 63f9f93). Sorted by exception type and message, then the runtime
+  ones read by hand.
+  - **ORG: 682 throws.**
+    - About 540 setup or misuse checks: `invalid_argument` 273, `logic_error` 156, `out_of_range` 13, and `runtime_error`
+      used for misuse ("not set", "called before Initialize", invalid `ViewRequirements`, `Buffer.h`'s size checks,
+      `ImmediateCommandList`'s missing callbacks).
+    - About 110 runtime failures:
+      - GPU objects that fail to create, close or submit (`CommandListPool`, `ExternalClient`, `RhiExecution`, GraphHost's
+        timelines and submissions);
+      - maps that fail (`FrameArena`, `LatchBlock`, `PreparedTablePublisher`);
+      - exhaustion (descriptor heap space, GraphHost's lease indices, `DeviceRegistry` ids);
+      - failed GPU waits;
+      - the persistent graph's structural, ticket and execute failures during frames (19, 7 and 5).
+    - About 33 others: the typed control-flow errors (`EpochFailedError`, `EpochCopiesBusyError`, `EpochRecordingDropped`,
+      `failEpoch`), rethrows after a rollback (`catch (...) { Abandon(); throw; }`), and the UTF conversions in
+      `ORGUtilities.h`.
+    - Not throws, but in scope: two `__debugbreak` calls on an unmapped upload staging page (`UploadInstance`), which are a
+      library-side fatal. The copy-queue uploader's thread also swallowed its exception (log only), and its copies then
+      never completed.
+    - ORG reads one switch, its own (`ORG_GRAPH_REPLAY_OUTPUT`, a debug export), and no host switch.
+  - **OMS: 87 throws.**
+    - 80 setup or misuse checks: the executor `Desc`, `BufferChains` hooks, required arguments (`RecordingPools.h`,
+      `RetirementJoin.cpp`, `ProgramService.cpp`), the `BackingPool` hooks and clock, `Variables`, set registrations,
+      texture versions, the passes' formats, `RevisionAssembler` misuse, and `GrowthPolicy`'s 64-bit guards on its inputs.
+    - 5 runtime failures:
+      - `GrowVersion`'s "no backing" and "the uploader refused a fill";
+      - the graph-host allocate hook's structured-row limit, and the ORG throws it passes on;
+      - `BackingPoolHooks::allocate`, whose contract was "throws when it cannot be made";
+      - `GrowableBufferSet`'s structured element limit.
+    - 2 others: the executor's rethrow after a thread failed to start, and `BuildPipeline`'s throw into its own catch.
+- **Converted in OMS.**
+  - `BackingPoolHooks::allocate` returns `BackingAllocation::error` and must not throw. The pool then keeps no backing, and
+    `Acquire` returns an empty lease with `AcquireInfo::error`. The graph-host hook catches ORG's create and materialize
+    throws and returns their text, so the conversion from ORG's throws happens at OMS's boundary.
+  - `GrowVersion` and `GrowVersions` return `GrownVersion(s)::error` for a missing backing and a refused fill.
+    `VersionGrowthWork::Produced::error` carries it to `done`.
+  - `VersionedBufferBuild` fails with the allocation's error. A failed allocation would otherwise read as exhaustion and
+    suspend forever on CS's uncapped pools.
+  - `BuildPipeline` sets its error instead of throwing into its own catch.
+  - CS: the frame values' fatal, the light contexts and the portal programs now say why (`AcquireInfo::error`).
+  - Every failure still ends where it did: frame values are fatal; light contexts and portal programs are caught locally,
+    as before; a growth batch fails and the set's seal reports it; a versioned buffer fails its artifact.
+- **Converted in ORG.**
+  - `Runtime::Desc::onError` is ORG's module callback for failures that no call can return. `Runtime::ReportError` hands a
+    failure to it, or logs it as critical when there is no handler.
+  - The unmapped staging page (was `__debugbreak`) and the uploader thread's stop now report there.
+  - CS passes `RenderGraph::FatalHandler("ORG runtime")`, so both are fatal and log "fatal: ORG runtime".
+- **Setup and misuse checks stay throws, in both libraries** (decision 119).
+  - They are programming errors, found the first time the code runs.
+  - A factory that returns null would put a check in every CS caller for a case a correct build never hits.
+  - CS's task adapter and its unguarded commit paths already make them fatal.
+  - Their types stay as they are, although several ORG misuse checks are `runtime_error`. Retyping them would be churn in
+    files three other agents are changing.
+- **ORG's graph engine keeps its runtime throws.**
+  - Exceptions are ORG's unwinding. About 90 catch sites abandon admissions, roll back lifecycles and rethrow
+    (`RhiExecution.h`, `RenderGraphPersistentExecute.cpp`, `CommandListPool.cpp`).
+  - GraphHost already follows the convention for a graph's failure: `EpochFailedCallback`, `BuildInstance` returning false,
+    and `EpochFailedError` skipping the epoch. Failures on its own threads (the async host thread, the submission thread)
+    are returned by the owner's next call.
+  - A throw out of a host's call is that call's failure, returned. CS acts on each one. For example, `SubmitEpoch`'s catch
+    closes the compute epoch, flushes DXVK, signals untaken executions and logs the host state before it is fatal.
+  - Status returns would change GraphHost's and RenderGraph's signatures, where lib-builds is working, and they can't be
+    checked without a build. Decision 115 already keeps ORG's other throws; the inventory confirms it.
+  - A later change could convert at GraphHost's boundary (catch, report through a GraphHost `Desc` callback, return a
+    status) if a second host wants no exceptions.
+- **`GrowableBufferSet`'s structured element limit stays a throw.** No version can have that size, so a retry fails every
+  time. The throw leaves `Seal`, so today it is fatal. As a returned error, CS's seal would only log it (`SceneBufferSet`
+  logs 8 and retries), and a fatal would become a stall. It counts as a misuse: the host asked for an impossible size.
+  `GrowthPolicy`'s guards stay for the same reason, and its tests expect them.
+- **Not changed, open.**
+  - `PreparedPass` turns a throw in declared-view resolution into an invalid slot (`ORG.Execution.UnresolvedDeclaredViews`).
+    It is soft by design today, and making it fatal would change the game's behaviour.
+  - `ContributorHost` only logs a contributor's recording throw. Contributors are host callbacks, CS has none, and the file
+    is lib-msaa's.
+  - `TrackedAllocation`'s `std::terminate` on an impossible variant is an invariant, not an error.
