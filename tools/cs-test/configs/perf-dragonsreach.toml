@@ -1,0 +1,53 @@
+# A frame-rate sample inside Dragonsreach: god mode, a coc, 900 frames to settle, then 600 frames between the
+# "start" and "end" marks. The GPU event timers log those frames as one window ("[GpuEvents] window 'dr'") when the run
+# sets CS_GPU_EVENT_TIMERS to an interval it never reaches, for example --set env.CS_GPU_EVENT_TIMERS=1000000.
+# Compose it with a mode: native-vulkan+perf-dragonsreach, native-d3d12+perf-dragonsreach.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 900
+do = "mark"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 0
+do = "org:gpu-window"
+arg = "dr"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "org:gpu-window"
+arg = "-"
+
+[[steps]]
+at = "previous"
+frames = 0
+do = "mark"
+arg = "end"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
