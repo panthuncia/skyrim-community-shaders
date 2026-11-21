@@ -139,7 +139,7 @@ Not part of this plan unless a phase touches them:
 | Phase | State | Branches | Notes |
 |---|---|---|---|
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
-| 1 Small containers and async pieces | not started | | EventQueue already done. |
+| 1 Small containers and async pieces | not started | | EventQueue already done. p1-frame (code only, not built): StarvationWatch and FrameClock to OMS `Async/`, the violation policy to OMS `ViolationPolicy`; CS keeps `Frame/Starvation.h` and `FrameClock.h` as facades. Branches `org-native/extract-p1-frame`, OMS `extract/p1-frame`. |
 | 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
@@ -446,3 +446,22 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p1-frame decisions
+
+Decided by the agent, to confirm:
+
+- **Frame clock in OMS, not `GraphHost`.** `org::async::FrameClock` (`Async/FrameClock.h`) takes its slot count in the
+  constructor. `GraphHost` counts its own executions; CS's clock moves at `Renderer::Begin` and at the sealed present,
+  which ORG does not see, and it is read before the host exists. CS's `FrameClock.h` is a static facade over one
+  instance and keeps `kSlots = 4` as a `constexpr` (`SlotOf` still divides by the constant).
+- **Starvation callback gets the miss count too:** `onStarved(what, why, misses)`, so CS's tap error text stays the same.
+  CS's `Frame::StarvationWatch` derives from the OMS class and reports `TapError::Starved`. The unused `SegmentId`
+  argument of `NoteMiss` is gone (no caller passed one).
+- **Violation policy in the main OMS library** (`ViolationPolicy.h`, `src/ViolationPolicy.cpp`), not `Async/`: it logs
+  through spdlog as the rest of OMS does, and the header-only `AsyncPrimitives` target has no spdlog. Kinds are integers.
+  The log labels and notes are `Desc` strings, so CS's lines read as before; they lose CommonLib's `[file:line]` source
+  field. The policy is made at first use and reads `MismatchFatal` then, so that switch's info line can come earlier
+  (at the first violation warning, not the first tap error).
+- **CS still raises the menu warning** for the first tap error of a kind (`Outcome::First`); the library does not name
+  kinds.
