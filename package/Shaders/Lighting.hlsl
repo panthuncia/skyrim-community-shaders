@@ -746,8 +746,9 @@ struct DCLF_DEPTH_VS_OUTPUT
 // The draw's lookups (its sequence, rows, statics, object and geometry) keyed on a wave-uniform instance, as the shadow views' stage
 // (Utility.hlsl): each pass of the loop takes the first active lane's draw and that draw's lanes, so everything DCLFPulledVertex reads
 // per draw is the draw's (scalar), not each lane's. One pass unless a wave mixes draws.
-DCLF_PULLED_VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
+DCLF_PULLED_VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID DCLF_START_INSTANCE_INPUT)
 {
+	DCLF_ADD_START_INSTANCE(a_instance);
 	DCLF_PULLED_VS_OUTPUT vsout;
 #		if defined(DCLF_DEPTH_ONLY)
 	vsout.Position = DCLFPulledVertex(index, a_instance).Position;

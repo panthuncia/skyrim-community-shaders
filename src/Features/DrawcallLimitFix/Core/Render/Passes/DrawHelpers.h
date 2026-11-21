@@ -117,10 +117,10 @@ namespace DCLF::Draws
 	std::uint64_t LodFadeFrameAddress(std::uint64_t a_frameConstants);
 
 	/**
-	 * @brief Where a plain draw's arguments start in its sequence. On D3D12 it is one word earlier, the instance word the
-	 * Z-prepass's signature writes into kDrawPushInstance first.
+	 * @brief Where a plain draw's arguments start in its sequence. On D3D12 below Shader Model 6.8 it is one word earlier, the
+	 * instance word the Z-prepass's signature writes into kDrawPushInstance first.
 	 */
-	inline std::uint64_t PlainDrawArgumentsOffset() { return ::RenderGraph::Backend::IsD3D12() ? kSequenceDrawOffset - 4 : kSequenceDrawOffset; }
+	inline std::uint64_t PlainDrawArgumentsOffset() { return ::RenderGraph::Backend::D3D12InstanceWord() ? kSequenceDrawOffset - 4 : kSequenceDrawOffset; }
 
 	inline void RecordBucketDraw(rhi::CommandList& a_commands, rhi::CommandSignatureHandle a_signature, rhi::ResourceHandle a_sequences, RenderGraph::BufferRef a_sequencesRef,
 		std::uint64_t a_first, rhi::PipelineHandle a_pipeline, rhi::ResourceHandle a_counts, std::uint32_t a_bucket, std::uint32_t a_capacity, bool a_offsetDepth = false)

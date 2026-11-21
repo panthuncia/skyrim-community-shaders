@@ -9,6 +9,7 @@ namespace RenderGraph::Backend
 	namespace
 	{
 		std::atomic<rhi::Backend> s_active{ rhi::Backend::Vulkan };
+		std::atomic<bool> s_d3d12StartInstance{ false };
 	}
 
 	rhi::Backend Requested()
@@ -39,6 +40,21 @@ namespace RenderGraph::Backend
 	rhi::Backend Active()
 	{
 		return s_active.load(std::memory_order_acquire);
+	}
+
+	void SetD3D12StartInstance(bool a_supported)
+	{
+		// CS_ORG_D3D12_INSTANCE_WORD=1 keeps the root constant, to compare the two.
+		const bool used = a_supported && !Switches::On("CS_ORG_D3D12_INSTANCE_WORD");
+		s_d3d12StartInstance.store(used, std::memory_order_release);
+		logger::info("[ORG] D3D12 first instance: {}", used ? "SV_StartInstanceLocation (Shader Model 6.8)" :
+		                                                      a_supported ? "root constant per draw (CS_ORG_D3D12_INSTANCE_WORD=1)" :
+		                                                                    "root constant per draw (the device is below Shader Model 6.8)");
+	}
+
+	bool D3D12InstanceWord()
+	{
+		return IsD3D12() && !s_d3d12StartInstance.load(std::memory_order_acquire);
 	}
 
 	bool D3D12Built()

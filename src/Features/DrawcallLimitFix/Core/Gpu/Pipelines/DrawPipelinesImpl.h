@@ -554,7 +554,7 @@ namespace DCLF
 		rhi::CommandSignaturePtr zDrawSignature;
 		// Draw families' signatures. Their pipelines belong to the lane.
 		std::array<rhi::CommandSignaturePtr, kDrawFamilyLanes> familySignatures;
-		// A 20-byte record, an instance word then DrawInstanced's arguments. D3D12 reads both, Vulkan only the draw.
+		// A 20-byte record, an instance word then DrawInstanced's arguments. D3D12 below Shader Model 6.8 reads both, else only the draw.
 		rhi::CommandSignaturePtr familyInstanceWordSignature;
 		/** @brief a_family's draw signature, or null if it could not be made. Valid after InstallFeatures. */
 		const rhi::CommandSignaturePtr& FamilySignature(Api::DrawFamily a_family) const
@@ -572,11 +572,13 @@ namespace DCLF
 		bool refractionAsked = false;
 		ankerl::unordered_dense::set<ForwardPipelineKey, ForwardPipelineKeyHash> forwardAsked;
 		rhi::PipelineLayoutHandle ShadowLayout() const { return shadowLayout->GetHandle(); }
-		// The refraction's plain indirect draw. On D3D12 the instance word comes first.
+		// The refraction's plain indirect draw. With instanceWord the instance word comes first.
 		rhi::CommandSignaturePtr shadowDrawSignature;
 		rhi::CommandSignaturePtr shadowViewDrawSignature;
 		bool supported = false;
 		bool d3d12 = false;  // layouts of root constants alone, plain draws only
+		// D3D12 below Shader Model 6.8: the plain draws' signatures write the first instance into kDrawPushInstance (Backend::D3D12InstanceWord).
+		bool instanceWord = false;
 		bool deviceGenerated = false;
 		bool gpuDriven = false;
 		bool attempted = false;

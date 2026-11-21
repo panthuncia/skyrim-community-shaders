@@ -97,7 +97,7 @@ namespace DCLF
 		rhi::PipelineHandle depth{}, colour{}, colour2{};
 		// 16 bytes, or 20 with a first instance word before them.
 		rhi::CommandSignatureHandle drawSignature{};
-		// 4 for InstanceWordDrawInstanced on Vulkan, past the word, else 0.
+		// 4 for InstanceWordDrawInstanced past the word (Vulkan, and D3D12 with Shader Model 6.8), else 0.
 		std::uint64_t argumentsOffset = 0;
 	};
 

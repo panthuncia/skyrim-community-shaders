@@ -441,7 +441,9 @@ namespace DCLF
 			request.sourceName = a_sourceName;
 			request.source = a_source;
 			request.entryPoint = L"main";
-			request.target = a_pixel ? L"ps_6_6" : L"vs_6_6";
+			// D3D12 with Shader Model 6.8: the vertex stages add SV_StartInstanceLocation to their instance (DCLF_START_INSTANCE below).
+			const bool startInstance = ::RenderGraph::Backend::IsD3D12() && !::RenderGraph::Backend::D3D12InstanceWord();
+			request.target = startInstance ? (a_pixel ? L"ps_6_8" : L"vs_6_8") : (a_pixel ? L"ps_6_6" : L"vs_6_6");
 			// SPIR-V on Vulkan, DXIL on D3D12.
 			::RenderGraph::ShaderTarget::Apply(request);
 			request.warningsAsErrors = false;
@@ -452,6 +454,9 @@ namespace DCLF
 				request.defines.push_back({ Widen(name), Widen(value) });
 			const std::size_t communityShadersDefines = request.defines.size();
 			request.defines.push_back({ L"DCLF_ORG", L"1" });
+			// Both stages: the pixel stages also read a pulled draw's sequence by its instance (DCLFDrawSequence).
+			if (startInstance)
+				request.defines.push_back({ L"DCLF_START_INSTANCE", L"1" });
 			// The Z-prepass pixel build compiles away everything past the alpha test, so it reads none of the per-frame pixel bindings.
 			if (a_depthOnly)
 				request.defines.push_back({ L"DCLF_DEPTH_ONLY", L"1" });
