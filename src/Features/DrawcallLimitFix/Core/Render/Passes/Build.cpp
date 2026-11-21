@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -357,10 +358,10 @@ namespace DCLF::Draws
 				return prepared;
 			prepared.program = resources->sort->scatter;
 			auto& constants = prepared.constants;
-			constants.sequenceStride = static_cast<std::uint32_t>(sizeof(DrawSequence));
+			constants.stride = static_cast<std::uint32_t>(sizeof(DrawSequence));
 			const auto frame = CurrentFrame(a_preparation, segment);
-			constants.drawLimit = frame ? frame->sequenceDraws : 0;
-			prepared.groups = (constants.drawLimit + kSortSequencesGroup - 1) / kSortSequencesGroup;
+			constants.limit = frame ? frame->sequenceDraws : 0;
+			prepared.groups = (constants.limit + kSortSequencesGroup - 1) / kSortSequencesGroup;
 			return prepared;
 		}
 
@@ -369,16 +370,13 @@ namespace DCLF::Draws
 			if (!a_frame.program || !a_frame.groups)
 				return;
 			auto constants = a_frame.constants;
-			constants.stagingIndex = a_recording.Index(a_bindings.staging);
+			constants.itemsIndex = a_recording.Index(a_bindings.staging);
 			constants.ranksIndex = a_recording.Index(a_bindings.ranks);
 			constants.offsetsIndex = a_recording.Index(a_bindings.offsets);
 			constants.countIndex = a_recording.Index(a_bindings.count);
-			constants.sequencesIndex = a_recording.Index(a_bindings.sequences);
-			auto& commands = a_recording.Commands();
-			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
-			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kSortSequencesConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
-			commands.Dispatch(a_frame.groups, 1, 1);
+			constants.outputIndex = a_recording.Index(a_bindings.sequences);
+			a_frame.program->Dispatch(a_recording, std::span<const std::uint32_t>(reinterpret_cast<const std::uint32_t*>(&constants), kSortSequencesConstantWords),
+				a_frame.groups, 1, 1);
 		}
 
 	private:
