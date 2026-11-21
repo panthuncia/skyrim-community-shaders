@@ -73,11 +73,22 @@ namespace PublishedResources
 
 		// The snapshot the graph being built on this thread registers. Weak, so a thread's last build pins nothing.
 		thread_local std::weak_ptr<const Snapshot> t_building;
+		// This thread built a graph. Outside a build it reads the latest snapshot, never the live entries, which are the render
+		// thread's. The render thread reads the latest snapshot too once it has built one, and it holds every publish.
+		thread_local bool t_buildThread = false;
 
 		State& Published()
 		{
 			static State s_state;
 			return s_state;
+		}
+
+		/** @brief The snapshot this thread's lookups read: the build's, or the latest on a thread that built. Null: the live entries. */
+		std::shared_ptr<const Snapshot> ThreadSnapshot()
+		{
+			if (auto building = t_building.lock())
+				return building;
+			return t_buildThread ? Published().snapshot.load(std::memory_order_acquire) : nullptr;
 		}
 
 		/** @brief Logs once when called off the owning thread, since the entries are not locked. A loading screen's thread may own them. */
@@ -112,6 +123,13 @@ namespace PublishedResources
 		public:
 			explicit PublishedExtension(std::shared_ptr<const Snapshot> a_snapshot) :
 				snapshot(std::move(a_snapshot)) {}
+
+			// A build's snapshot ends with the build: a thread that kept it would never see a later publish.
+			void FinishBuild(org::RenderGraph&) override
+			{
+				t_building.reset();
+				t_buildThread = true;
+			}
 
 			void PrepareForBuild(org::RenderGraph& a_graph) override
 			{
@@ -329,7 +347,7 @@ namespace PublishedResources
 		/** @brief During a graph build on this thread, whether its snapshot holds a_id. Empty outside a build. */
 		std::optional<bool> InBuildingSnapshot(std::string_view a_id)
 		{
-			const auto snapshot = t_building.lock();
+			const auto snapshot = ThreadSnapshot();
 			if (!snapshot)
 				return std::nullopt;
 			return std::ranges::any_of(snapshot->resources, [&](const Snapshot::Registered& a_entry) { return a_entry.id == a_id; });
@@ -347,7 +365,7 @@ namespace PublishedResources
 		/** @brief During a build, from the snapshot that graph registers. Otherwise from the live entries, on the render thread. */
 		IndexSource IndexSourceOf(std::string_view a_id)
 		{
-			if (const auto snapshot = t_building.lock()) {
+			if (const auto snapshot = ThreadSnapshot()) {
 				const auto found = std::ranges::find(snapshot->resources, a_id, &Snapshot::Registered::id);
 				if (found == snapshot->resources.end())
 					return {};
@@ -427,9 +445,28 @@ namespace PublishedResources
 		return true;
 	}
 
+	std::string DescribeIndex(std::string_view a_id)
+	{
+		const auto source = IndexSourceOf(a_id);
+		if (!source.found)
+			return "not registered";
+		if (!source.published)
+			return "registered, not published";
+		if (!source.current)
+			return "published, with no current resource";
+		const auto* indexed = dynamic_cast<const org::GloballyIndexedResource*>(source.current.get());
+		if (!indexed)
+			return fmt::format("'{}' is not an indexed resource", source.current->GetName());
+		if (!source.view)
+			return fmt::format("'{}': primary view, {} slices, has SRV {}", source.current->GetName(), indexed->GetNumSRVSlices(), indexed->HasSRV());
+		const auto slices = indexed->GetNumSRVSlices(*source.view);
+		return fmt::format("'{}': view {}, {} slices, {} mips, has SRV {}", source.current->GetName(), static_cast<int>(*source.view), slices,
+			slices ? indexed->GetNumSRVMipLevels(*source.view) : 0u, indexed->HasSRV());
+	}
+
 	bool IsVersioned(std::string_view a_id)
 	{
-		if (const auto snapshot = t_building.lock()) {
+		if (const auto snapshot = ThreadSnapshot()) {
 			const auto found = std::ranges::find(snapshot->resources, a_id, &Snapshot::Registered::id);
 			return found != snapshot->resources.end() && (found->slot || found->bufferSlot);
 		}
