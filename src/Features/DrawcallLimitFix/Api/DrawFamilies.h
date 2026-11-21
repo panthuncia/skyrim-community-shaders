@@ -130,6 +130,8 @@ namespace DCLF::Api
 	{
 		// The Effect port's keys: key bit 17, spare bits 21-23, stage-key bit 37, program-id bit 63.
 		Effect,
+		// The water port's keys: key bit 18, spare bits 21-23, stage-key bit 39, program-id bit 62. Drawn by the deferred ranges.
+		Water,
 		Count,
 	};
 
@@ -144,6 +146,9 @@ namespace DCLF::Api
 	{
 		// Forward keys and decal groups. Decals use the DEFERRED pixel stage. Never part of the Z-prepass, and the Z key is never shared.
 		ForwardOrDecal,
+		// Keys drawn only by the deferred ranges (Api/DeferredRanges.h), each range by its own plain pipeline. No Z-prepass, no main
+		// range and no device-generated pipeline. Each key's object gets kViewWater alone.
+		DeferredRanges,
 	};
 
 	/**

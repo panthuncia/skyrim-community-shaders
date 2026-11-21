@@ -747,6 +747,8 @@ namespace DCLF
 			// Null when the pulled stages would not build. That range then draws device-generated.
 			rhi::PipelinePtr pulledColour;
 			rhi::PipelinePtr pulledDecalDepth;
+			// A deferred family key's plain pipeline per deferred range, null where it does not draw. Its family's build makes them.
+			std::array<rhi::PipelinePtr, Api::kDeferredRanges> pulledDeferred;
 			ZPipelineKey zKey;
 			std::shared_ptr<const ConstantTables> tables;
 			// Not the pulled depth pipeline's state, which plain draws bind.

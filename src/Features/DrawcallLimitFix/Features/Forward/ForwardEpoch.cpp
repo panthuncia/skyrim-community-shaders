@@ -90,7 +90,7 @@ namespace DCLF::Features::Forward
 		if (!Extensions::ObjectClassOn(Api::ObjectClass::Forward) || epoch == Draws::kNoEpoch)
 			return false;
 		const auto result = IndirectDraws::Get().SubmitSharedEpoch(epoch, { .prepare = &PrepareRefraction,
-			.empty = [](const Draws::PassFrame& a_shape) { return !a_shape.forwardCapacity && !a_shape.refractionCapacity; } });
+			.empty = [](const Draws::PassFrame& a_shape) { return !a_shape.forwardCapacity && !a_shape.refractionCapacity; }, .forwardSite = true });
 		if (!result.submitted || !result.optional)
 			return false;
 		refraction.frame = Scene::FrameView::Get().SceneStep();

@@ -306,10 +306,10 @@ namespace DCLF::Diagnostics
 		armed.sequenceDraws = shape->sequenceDraws;
 		armed.sequenceDecals = shape->sequenceDecals;
 		armed.sorted = resources->sort != nullptr;
-		// Each object's set indices, from the payload's inputs. Refraction is a plain draw outside the classes.
+		// Each object's set indices, from the payload's inputs. Refraction and the deferred ranges are plain draws outside the classes.
 		const Draws::MainPayload& payload = a_epoch.payload;
 		auto note = [&](const Draws::DrawInput& a_input) {
-			if (a_input.view.mask & Draws::kViewRefraction)
+			if (a_input.view.mask & (Draws::kViewRefraction | Draws::kViewWater))
 				return;
 			auto& sets = armed.setsOf[a_input.objectIndex];
 			if (std::ranges::find(sets, a_input.pipelineIndex) == sets.end())

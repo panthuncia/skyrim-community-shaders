@@ -262,6 +262,10 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 				!draws.refractionObserved ? std::string() :
 				fmt::format("; the engine registered {} refraction passes of members{}", draws.refractionEngine,
 					draws.refractionInView >= draws.refractionEngine ? " <- OK" : " <- REFRACTION"));
+		// Printed only while a deferred range has inputs.
+		if (draws.deferredTested || draws.deferredDropped)
+			logger::info("[DCLF] deferred ranges (sampled frame): {} inputs tested, {} in the frustum, {} occluded, {} draws dropped (no bucket or no room){}",
+				draws.deferredTested, draws.deferredInView, draws.deferredOccluded, draws.deferredDropped, draws.deferredDropped ? " <- DEFERRED DROP" : " <- OK");
 		if (draws.residentInputs || draws.residentResyncs)
 			logger::info("[DCLF] persistent draws (last frame, colour): {} kept inputs, {} sequences, {} pairs, {} not drawable; since the start {} region "
 						 "versions uploaded, {} resyncs (log {}, segment {}, shrunk {}, scope {}, fit {}), {} decal count moves",

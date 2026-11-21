@@ -106,7 +106,13 @@ namespace DCLF::Draws
 	// Length of depth phase 1's retest list. Phase 2's threads stop there.
 	constexpr std::uint32_t kCountRetestsWord = 42;
 	constexpr std::uint32_t kCountBelowTexelsWord = 43;
-	// Words 44-51 are unused.
+	// Deferred range counters: inputs tested, in the frustum, rejected by the HZB, and draws dropped for want of a bucket or room.
+	// Must match BuildDrawsCS.hlsl.
+	constexpr std::uint32_t kCountDeferredTestedWord = 44;
+	constexpr std::uint32_t kCountDeferredInViewWord = 45;
+	constexpr std::uint32_t kCountDeferredOccludedWord = 46;
+	constexpr std::uint32_t kCountDeferredDroppedWord = 47;
+	// Words 48-51 are unused.
 	// Phase 2's dispatch reset value. Phase 1 adds one group per 64 retests.
 	inline constexpr std::uint32_t kRetestDispatchReset[4] = { 0, 1, 1, 0 };
 	// Byte offset of a count word the indirect draws read. Must match BuildDrawsCS.hlsl.
@@ -201,12 +207,15 @@ namespace DCLF::Draws
 	constexpr std::uint32_t kViewForward = 1u << 9;      // a forward object: the colour segment's forward range only
 	constexpr std::uint32_t kViewRefraction = 1u << 10;  // a refraction object (kRasterRefraction): the refraction range only
 	// Bit 11 is First Person's.
+	// An object of a deferred range family (water): the colour segment culls it once into its deferred ranges, which a later epoch
+	// draws. Never a depth segment input, so it never writes the HZB.
+	constexpr std::uint32_t kViewWater = 1u << 12;
 	/** @brief Core's own view bits. A feature's view bit must be none of them. */
 	constexpr std::uint32_t kCoreViewBits = kViewMainCull | kViewMain | kViewSunCaster | kViewSpotCaster | kViewPointCaster | kViewDecal |
-	                                        kViewForward | kViewRefraction;
+	                                        kViewForward | kViewRefraction | kViewWater;
 	// The main segments' views of the one main list: depth culls every candidate; colour draws members and every decal's slot.
 	constexpr std::uint32_t kDepthViewBits = kViewMainCull;
-	constexpr std::uint32_t kColourViewBits = kViewMain | kViewDecal | kViewForward | kViewRefraction;
+	constexpr std::uint32_t kColourViewBits = kViewMain | kViewDecal | kViewForward | kViewRefraction | kViewWater;
 	static_assert(offsetof(DrawInput, view) == 16 && offsetof(DrawInput, shadowRow) == 52 && offsetof(DrawInput, fadeDistance) == 60);
 	// Main sequence buffer: phase 1 and colour draws, phase 2's range, then one decal sub-range per group and state class.
 	// Each decal owns its ordinal's slot in every sub-range of its group, so decals keep engine order. Unused slots draw zero indices.
@@ -232,6 +241,8 @@ namespace DCLF::Draws
 	// then ForwardSortCS fills the sorted half back to front per state class.
 	constexpr const char* kForwardSortShader = "DrawcallLimitFix/ForwardSortCS.hlsl";
 	// The refraction range follows the forward halves. It is drawn with one plain indexed indirect draw.
+	// The deferred ranges follow the refraction range, Range0 first (Api/DeferredRanges.h). Each is drawn by plain buckets.
+	constexpr std::uint32_t kDeferredRanges = 2;
 	// Marks a terrain group 1 bucket whose twin, the next bucket, takes the slot's near blocks.
 	constexpr std::uint32_t kBucketTerrainPair = 1u << 31;
 

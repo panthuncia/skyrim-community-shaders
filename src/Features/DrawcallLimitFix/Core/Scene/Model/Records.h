@@ -253,6 +253,8 @@ namespace DCLF
 		kRasterBlendExtra = 1u << 16,
 		// An Effect shader key. Not an engine state index, so RasterStateBits leaves it out.
 		kRasterEffect = 1u << 17,
+		// A Water shader key (ProgramFamily::Water). Not an engine state index, so RasterStateBits leaves it out.
+		kRasterWater = 1u << 18,
 		// The next three bits mean different things by key family. On Lighting keys they belong to Api::LightingKeyBits' claimant.
 		kRasterLightingSpareShift = 21,
 		// On Effect keys, the billboard mode + 1, or 0 when not under an NiBillboardNode.
@@ -277,7 +279,7 @@ namespace DCLF
 	inline constexpr std::uint32_t RasterBlendMode(std::uint32_t a_flags) { return (a_flags >> kRasterBlendModeShift) & 7u; }
 	inline constexpr std::uint32_t RasterWriteMode(std::uint32_t a_flags) { return (a_flags >> kRasterWriteModeShift) & 15u; }
 	inline constexpr std::uint32_t RasterTerrainGroup(std::uint32_t a_flags) { return (a_flags >> kRasterTerrainGroupShift) & 3u; }
-	inline constexpr std::uint32_t RasterStateBits(std::uint32_t a_flags) { return a_flags & ~(kRasterTwoSided | kRasterLightingSpareMask | kRasterEffect | kRasterDecalNudge); }
+	inline constexpr std::uint32_t RasterStateBits(std::uint32_t a_flags) { return a_flags & ~(kRasterTwoSided | kRasterLightingSpareMask | kRasterEffect | kRasterWater | kRasterDecalNudge); }
 	inline constexpr std::uint32_t RasterLightingSpare(std::uint32_t a_flags) { return (a_flags & kRasterLightingSpareMask) >> kRasterLightingSpareShift; }
 
 	inline constexpr std::uint32_t PackDecalRasterFlags(std::uint32_t a_group, std::uint32_t a_depthBiasMode, std::uint32_t a_blendMode,

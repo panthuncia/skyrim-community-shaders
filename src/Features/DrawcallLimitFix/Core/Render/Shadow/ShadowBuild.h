@@ -53,6 +53,10 @@ namespace DCLF::Draws
 		if (a_object < a_tables.setPhases.size())
 			if (const auto root = static_cast<std::uint8_t>(a_tables.setPhases[a_object] & Extensions::Views().rootPhases))
 				return ViewBitsOf(root);
+		// A deferred range family's object is culled once in the colour segment, never in the depth segment.
+		if (const std::uint32_t pipeline = a_object < a_tables.objects.size() ? a_tables.objects[a_object].pipelineIndex : ~0u;
+			!(flags & kObjectNoBindings) && pipeline < a_tables.pipelines.size() && Extensions::FamilyRules(a_tables.pipelines[pipeline].rasterFlags).deferredRanges)
+			return kViewWater;
 		if (ObjectDecalGroup(flags))
 			return kViewDecal;
 		// Forward objects never feed the depth segment. The engine's blended draws write no depth, so they occlude nothing.

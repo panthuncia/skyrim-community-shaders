@@ -70,6 +70,8 @@ namespace DCLF
 		void* context = nullptr;
 		// True when the shape gives the epoch nothing to draw. The epoch is then skipped entirely, boundary included.
 		bool (*empty)(const Draws::PassFrame& a_shape) = nullptr;
+		// The epoch holds the CPU pipeline's forward site, so the frame's forward run is handed to it (Direct::ForwardReached).
+		bool forwardSite = false;
 	};
 	/** @brief Whether a shared epoch was submitted, and whether its optional part draws. */
 	struct SharedEpochResult

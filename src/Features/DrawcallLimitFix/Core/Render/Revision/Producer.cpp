@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
@@ -80,6 +81,9 @@ namespace DCLF
 				const auto& entry = a_lookups.pipelines[a_slot];
 				const auto& key = a_tables.pipelines[a_slot];
 				if (entry.setIndex == Lookups::kNone || !(entry.key == key) || entry.setIndex >= a_indirect.classOf.size() || a_indirect.classOf[entry.setIndex] == kNoSetClass)
+					return false;
+				// The deferred ranges draw these keys, never a class call.
+				if (Extensions::FamilyRules(key.rasterFlags).deferredRanges)
 					return false;
 				a_class = a_indirect.classOf[entry.setIndex] >> kSetClassShift;
 				const std::uint32_t flags = key.rasterFlags;
@@ -243,6 +247,74 @@ namespace DCLF
 			}
 		}
 
+		namespace
+		{
+			/**
+			 * @brief The deferred ranges' buckets, one per set index a deferred family's key resolves to, and their map sections after the
+			 * decals'. A range's sequences follow the refraction range, Range0 first. A set index without a deferred pipeline gets no bucket,
+			 * and BuildDraws drops and counts its draws.
+			 */
+			void PlanDeferredRanges(const MainLayout& a_layout, const Lookups& a_lookups, const SceneTables& a_tables, const IndirectState& a_indirect, SetClassPlan& a_plan)
+			{
+				for (auto& range : a_plan.deferred)
+					range.clear();
+				const auto slots = static_cast<std::uint32_t>(std::min(a_layout.slotCapacity.size(), a_tables.pipelines.size()));
+				const auto sets = static_cast<std::uint32_t>(a_indirect.classOf.size());
+				std::uint64_t first = std::uint64_t(a_layout.sequenceDraws) + a_layout.terrainCapacity[0] + a_layout.terrainCapacity[1] + 2ull * a_layout.forwardCapacity +
+				                      a_layout.refractionCapacity;
+				std::uint32_t countWord = static_cast<std::uint32_t>(a_plan.classes.size()) * kClassRanges +
+				                          static_cast<std::uint32_t>(a_plan.main.size() + a_plan.terrain.size() + a_plan.decals.size());
+				std::uint32_t missing = kNoBucket, missingRange = 0;
+				for (std::uint32_t r = 0; r < kDeferredRanges; ++r) {
+					auto& buckets = a_plan.deferred[r];
+					for (std::uint32_t p = 0; p < slots; ++p) {
+						const auto& key = a_tables.pipelines[p];
+						if (!a_layout.slotCapacity[p] || !Extensions::FamilyRules(key.rasterFlags).deferredRanges || p >= a_lookups.pipelines.size())
+							continue;
+						const auto& entry = a_lookups.pipelines[p];
+						if (entry.setIndex == Lookups::kNone || !(entry.key == key) || entry.setIndex >= sets)
+							continue;
+						const auto draws = Extensions::DeferredDrawsOf(key);
+						if (!((draws.ranges >> r) & 1u))
+							continue;
+						const auto& pipelines = a_indirect.deferred[r];
+						if (entry.setIndex >= pipelines.size() || !pipelines[entry.setIndex].valid()) {
+							missing = entry.setIndex;
+							missingRange = r;
+							continue;
+						}
+						buckets.push_back({ entry.setIndex, 0u, a_layout.slotCapacity[p], 0u, draws.stencilRef[r], pipelines[entry.setIndex] });
+					}
+					// The engine sorts a batch's passes by pass id, so a range draws its references in order.
+					std::ranges::sort(buckets, [](const DeferredCall& a_left, const DeferredCall& a_right) {
+						return a_left.stencilRef != a_right.stencilRef ? a_left.stencilRef < a_right.stencilRef : a_left.set < a_right.set;
+					});
+					std::uint64_t at = first;
+					for (auto& bucket : buckets) {
+						bucket.first = static_cast<std::uint32_t>(at);
+						bucket.countWord = countWord++;
+						at += bucket.capacity;
+					}
+					first += a_layout.deferredCapacity[r];
+					if (buckets.empty())
+						continue;
+					std::vector<std::uint32_t> bucketOf(sets, kNoBucket);
+					for (std::size_t b = 0; b < buckets.size(); ++b)
+						bucketOf[buckets[b].set] = static_cast<std::uint32_t>(b);
+					a_plan.map[DeferredMapHeaderWord(r)] = static_cast<std::uint32_t>(buckets.size());
+					a_plan.map.insert(a_plan.map.end(), bucketOf.begin(), bucketOf.end());
+					for (const auto& bucket : buckets) {
+						a_plan.map.push_back(bucket.first);
+						a_plan.map.push_back(bucket.capacity);
+					}
+				}
+				static std::atomic<std::uint64_t> lastMissing{ ~0ull };
+				const std::uint64_t outcome = missing == kNoBucket ? ~0ull : (std::uint64_t(missingRange) << 32) | missing;
+				if (lastMissing.exchange(outcome, std::memory_order_relaxed) != outcome && missing != kNoBucket)
+					logger::warn("[DCLF] deferred range {}: set index {} has draws and no deferred pipeline; its draws are dropped until it has one", missingRange, missing);
+			}
+		}
+
 		void PlanSetClasses(const MainLayout& a_layout, const Lookups& a_lookups, const SceneTables& a_tables, const IndirectState& a_indirect, SetClassPlan& a_out)
 		{
 			a_out = {};
@@ -269,6 +341,7 @@ namespace DCLF
 				}
 			}
 			LayOutSetClasses(a_layout, a_indirect, decals, mainSets, terrainSets, terrainGroups, decalGroups, a_out);
+			PlanDeferredRanges(a_layout, a_lookups, a_tables, a_indirect, a_out);
 			static std::atomic<std::uint64_t> lastBuckets{ ~0ull };
 			const std::uint64_t buckets = std::uint64_t(a_out.main.size()) | (std::uint64_t(a_out.terrain.size()) << 16) | (std::uint64_t(a_out.decals.size()) << 32);
 			if (lastBuckets.exchange(buckets, std::memory_order_relaxed) != buckets)
@@ -320,6 +393,7 @@ namespace DCLF
 				add(a_resources.count.get(), 4 * sizeof(std::uint32_t), kCountForwardWord * sizeof(std::uint32_t));
 				add(a_resources.count.get(), 4 * sizeof(std::uint32_t), kCountRefractionWord * sizeof(std::uint32_t));
 				add(a_resources.count.get(), 2 * sizeof(std::uint32_t), kCountClassUnplannedWord * sizeof(std::uint32_t));
+				add(a_resources.count.get(), 4 * sizeof(std::uint32_t), kCountDeferredTestedWord * sizeof(std::uint32_t));
 				if (a_resources.classCounts)
 					add(a_resources.classCounts->Key(), std::size_t(a_classWords) * sizeof(std::uint32_t), 0);
 			}
@@ -392,6 +466,8 @@ namespace DCLF
 				frame->terrainCapacity = a_in.terrainCapacity;
 				frame->forwardCapacity = a_in.forwardCapacity;
 				frame->refractionCapacity = a_in.refractionCapacity;
+				if (a_in.classPlan)
+					frame->deferred = a_in.classPlan->deferred;
 			}
 			frame->width = a_in.viewport.width;
 			frame->height = a_in.viewport.height;

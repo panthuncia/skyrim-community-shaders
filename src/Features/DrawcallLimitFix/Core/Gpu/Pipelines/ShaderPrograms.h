@@ -20,6 +20,7 @@ namespace DCLF
 	static_assert(ProgramFamilySlotOf(Api::ProgramFamily::Effect).keyBit == kRasterEffect &&
 	                  ProgramFamilySlotOf(Api::ProgramFamily::Effect).spareShift == kRasterEffectBillboardShift,
 		"the Effect family's slot is not Records.h's kRasterEffect and kRasterEffectBillboardShift");
+	static_assert(ProgramFamilySlotOf(Api::ProgramFamily::Water).keyBit == kRasterWater, "the Water family's slot is not Records.h's kRasterWater");
 	/** @brief Register classes shifted onto separate binding ranges in set 0 (DXC -fvk-{b,t,s,u}-shift), so the layout maps each on its own. */
 	inline constexpr std::uint32_t kBindingShiftB = 0;
 	inline constexpr std::uint32_t kBindingShiftT = 200;
