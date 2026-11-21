@@ -20,6 +20,7 @@
 #include "Features/DrawcallLimitFix/Features/Decals/Decals.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
+#include "Features/DrawcallLimitFix/Features/Landscape/Landscape.h"
 #include "Features/DrawcallLimitFix/Features/Lod/Lod.h"
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/Reflection.h"
@@ -60,6 +61,7 @@ namespace DCLF::Features
 			kFadeSeedsRegister,
 			kPixelObjectsRegister,
 			Integrations::AdvancedSkin::kMaterialTableRegister,
+			Landscape::kSeamQuadsRegister,
 		};
 
 		constexpr bool FrameBindingRegistersValid()
