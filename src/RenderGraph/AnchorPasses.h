@@ -27,7 +27,11 @@ namespace GraphResources
 	class Resource;
 }
 
-struct ComputeProgram;
+namespace org::services
+{
+	struct ComputeProgram;
+}
+using ComputeProgram = org::services::ComputeProgram;
 
 namespace RenderGraph
 {

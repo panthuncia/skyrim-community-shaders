@@ -12,7 +12,11 @@ namespace org
 	class RecordingContext;
 }
 
-struct ComputeProgram;
+namespace org::services
+{
+	struct ComputeProgram;
+}
+using ComputeProgram = org::services::ComputeProgram;
 
 namespace RenderGraph
 {
