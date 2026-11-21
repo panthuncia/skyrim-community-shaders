@@ -52,7 +52,7 @@ The shipped configs:
 
 | Config | What |
 |---|---|
-| `base` | what every run shares: autoload save (`game.autoload_mod`, turned off when `game.save` names a save), Telemetry off, `DXVK_DEBUG=hang`, Nsight layer off, the live-image check (`expect.live_frames = 30`) |
+| `base` | what every run shares: autoload save (`game.autoload_mod`, turned off when `game.save` names a save), Telemetry off, `DXVK_DEBUG=hang`, Nsight layer off, the live-image check, off (`expect.live_frames = 0`; its D3D11 fallback shots read black in guest) |
 | `guest`, `native-vulkan`, `native-d3d12` | the three modes; guest and native run every port |
 | `d3d11` | plain D3D11 mode, the render graph off (`CS_ORG=0`); compose it, `d3d11+quick` |
 | `quick` | a shot 60 frames after world-ready, then exit; compose it, `native-vulkan+quick` |
@@ -186,9 +186,11 @@ Do not edit `switches.json` by hand. A new typed key is a `.key` on the table's 
    - `CommunityShaders-Test.json` written.
 4. Launches MO2 (`-p Default moshortcut://:SKSE`), keeps the displays on, nudges the mouse and focuses the game once. With `CS_TEST_BACKGROUND=1` it does neither (the game needs `bAlwaysActive=1`), so the computer stays usable during a run. It also sets `CS_UPSCALE_UNFOCUSED=1` unless the config sets it: Upscaling stops while another process has the foreground, so an unfocused run would never run DLSS, FSR or XeSS.
 5. Watches `CommunityShaders-Test.status.json` until an outcome: the game's own, or `never-launched`, `crashed`, `never-loaded`, `hang` (a stalled status file) or `timeout`.
-6. Kills the game and closes MO2. Then it undoes the journal, editing single lines of `modlist.txt` only after MO2 has exited.
+6. Kills the game and closes MO2. A game still running is dumped first: `CommunityShadersCrashDump.exe --pid` from the staged mod writes
+   every thread's stack and a minidump into the run folder (`CommunityShaders-Kill-*.txt`, `.dmp`). Then it undoes the journal,
+   editing single lines of `modlist.txt` only after MO2 has exited.
 7. Collects this run's files (logs by time, first and last 64 MB at most), checks the expectations, and writes `result.json`.
-   - The live-image check (`expect.live_frames`): in a run that expects `world-ready`, the game's two shots `_live-a` and `_live-b`,
+   - The live-image check (`expect.live_frames`, off unless a config sets it): in a run that expects `world-ready`, the game's two shots `_live-a` and `_live-b`,
      taken that many frames apart at the exit, must differ in their pixels. Two identical ones mean a frozen final target and fail
      the run. They are not listed among the run's shots; `result.json`'s `live_image` has the comparison.
    - The graph-frames check (`expect.graph_frames`), read from the final status (`status.json` in the run folder).

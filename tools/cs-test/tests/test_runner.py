@@ -89,7 +89,7 @@ def test_run_passed_and_cleaned_up(fake, game):
     # What the game saw while it ran.
     assert game.seen_test_file["env"]["CS_DCLF_PLAIN_SNOW_SPARKLE"] == "0"
     assert game.seen_test_file["features_disabled"] == []
-    assert game.seen_test_file["expect"]["live_frames"] == 30
+    assert game.seen_test_file["expect"]["live_frames"] == 0  # the frozen-image check is off by default
     assert "-ImprovedCameraSE" in game.seen_modlist and "+CS AB p35" in game.seen_modlist
     # Everything undone afterwards.
     assert not (fake.skse / TEST_FILE).exists()
@@ -99,7 +99,7 @@ def test_run_passed_and_cleaned_up(fake, game):
     run_dir = fake.runs / result["run_id"]
     saved = json.loads((run_dir / "result.json").read_text())
     assert saved["shots"] == ["start"] and saved["milestones"]["world-ready"]["frame"] == 352
-    assert saved["live_image"]["checked"] and not saved["live_image"]["same"]
+    assert not saved["live_image"]["checked"]
     assert (run_dir / "resolved.json").exists() and (run_dir / "CommunityShaders.log").exists()
     assert result["summary"] == "native-vulkan+quick [t]: passed; shots: start"
 
@@ -112,14 +112,14 @@ def test_missing_shot_fails(fake, game):
 
 def test_frozen_image_fails(fake, game):
     game.live = (10, 10)
-    result = runner.run(fake, "guest+quick", [], stage="p35", log=lambda *_: None)
+    result = runner.run(fake, "guest+quick", ["expect.live_frames=30"], stage="p35", log=lambda *_: None)
     assert result["outcome"] == "failed" and "frozen final target" in result["reason"]
     assert result["live_image"]["same"]
 
 
 def test_missing_live_shots_fail(fake, game):
     game.live = None
-    result = runner.run(fake, "guest+quick", [], stage="p35", log=lambda *_: None)
+    result = runner.run(fake, "guest+quick", ["expect.live_frames=30"], stage="p35", log=lambda *_: None)
     assert result["outcome"] == "failed" and "live-image shots missing" in result["reason"]
 
 
