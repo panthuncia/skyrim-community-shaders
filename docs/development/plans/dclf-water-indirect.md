@@ -353,3 +353,88 @@ Rough, in new lines of C++ and HLSL. No code was written.
 
 Total about 5,000-7,500 new lines, about 4,000-6,000 net after phase 5. Phases 0-3 are the bulk and give most of the CPU saving.
 The longest unknowns are phase 0's Ghidra checks and the shared-epoch range in Core.
+
+## 8. Phase 0 findings
+
+Written with phase 0's code (branch `dclf/water-p0`, 2026-11-21). Read with GhidraMCP on SE 1.5.97 and AE 1.6.1170. Both runtimes
+compute the same values in the same order; only the addresses differ. Nothing here was run in game yet: the parity observer
+is what checks it.
+
+### 8.1 The code
+
+- `DCLF/Features/Water/Port/WaterPort.h`, `WaterPortEvaluate.cpp`, `WaterPortCapture.cpp`: the port. `CaptureFrame` and
+  `CaptureObject` read the engine. `EvaluateTechnique`, `EvaluateMaterial`, `EvaluateObject`, `EvaluateGeometry`, `EvaluateLights`,
+  `Assemble` and `DeriveRenderPasses` are pure. `Assemble` writes through a shader's constant tables in the engine's order, so a
+  variable the shader lacks lands where the engine's write does (`CanonicalTables` is Water.hlsl's packoffsets).
+- `WaterParity.cpp`: the observer, called from `WaterCapture.cpp`'s `TryLatchDraw` after a draw is latched. `WaterCensus.cpp`: the census.
+- The switch: `CS_DCLF_WATER_PARITY=1` (a Parity switch, read once at install). It needs the latch path (graph mode, `CS_ORG_WATER=1`).
+- Log lines: `[DCLF] water port: differs: <stage> b<n> c<row> <variable>.<component> (<context>), latched ..., port ... <- WATER PORT`
+  once per field and context, `[DCLF] water port: N draws checked in the last 600 frames (...) <- OK` (or `<- WATER PORT`),
+  `[DCLF] water census: '<shape>' (<RTTI>) technique ... chain ...` once per shape and technique, and `[DCLF] water census: N roots
+  held drawn water in the last 600 frames ...`.
+- Unified Water gained two read-only accessors for the port: `GetFlowRewrite()` (what its SetupGeometry hook rewrites from) and
+  `GetWaterLODRoot()`.
+
+### 8.2 Settled from Ghidra
+
+Ids are Address Library ids, SE / AE.
+
+- **Fog (SetupMaterial).** The scene graph's fog property: `BSShaderManager::State.shadowSceneNode[State.sceneGraph]->fogProperty`
+  (+0x220). Near and far colours at +0x38 and +0x44, distances +0x50 and +0x54, `power` +0x84, `clamp` +0x88. Without a fog
+  property both colours are the global 523935 / 410515 and the distances 0. `VSFogParam` and `FogParam` are `(near / (far - near),
+  1 / (far - near), material +0x158, +0x15C)`. The near colours' w is the material's +0x160, the far colours' w is the fog's clamp.
+  The fog's `power` also lands in `NormalsScale.w` and `FresnelRI.y`.
+- **The timer.** `ReflectionColor.w` is `State.timerValues[0]` (513213 / 390953). The normal scrolls are the material's own
+  `normalScroll1-3` (+0x100..+0x11F) copied whole, not times a timer. So the scroll moves only when the material is written.
+- **The water lighting.** Vanilla multiplies all four components of ShallowColor (rgb and sun sparkle power), DeepColor and
+  ReflectionColor (before its w is set) by the global 527901 / 414848. Linear Lighting then rewrites rgb only.
+- **The framebuffer range.** `State +0x9C` (CommonLib's `invFrameBufferRange`, 513233 / 390973) is `PosAdjust.w` and `QPosAdjust.w`;
+  `WaterParams.w` is 1 / it.
+- **QPosAdjust** is plain `RendererShadowState::posAdjust`, w as above.
+- **SSR.** `SSRParams = (ImageSpaceManager +0x1C0's +0x10 byte ? 513715 : 0, 513717, 1 / width, 1 / height)`, `SSRParams2 = (513719, 0,
+  0, 0)`; the render size is 524972 / 411453 and the next word.
+- **TextureProj** includes the object's world: `texture space (0.5 scale and offset on x, y, z) x transpose(world x viewProj)`, with
+  the world less `posAdjust`. It is written for every technique but the light ones (1-7).
+- **The view-projection.** WorldViewProj and TextureProj use the jittered `cameraData.viewProjMat` when 513713 / 391664 is set,
+  otherwise `viewProjMatrixUnjittered`.
+- **PreviousWorld** is the current world with `previousPosAdjust`, not the object's previous transform.
+- **ReflectPlane** is the property's plane as stored (+0xA0, world space) with w = `(n.y e.y + e.x n.x + n.z e.z) - d`, e the
+  current accumulator's `eyePosition`. **ProjData** is `cameraData.projMat` [0][0] and [1][1], zw not written.
+- **ObjectUV.** Property flag bit 8 (0x100): x = 1 only. `kEnableFlowmap` (0x8000): `((float)527644, 528164.x, 1 - 528164.y)`.
+  Otherwise x = 0 only. Unified Water rewrites 527644 and 528164 before each call (width, height, 1 - local scale).
+- **CellTexCoordOffset** (descriptor Flowmap only): `(flowX, (527644 - flowY) - 1, cellX, -cellY)` from the property, or 528184 /
+  415129 with the Wading bit (the displacement mesh).
+- **Light passes** write `LightPos = (NiLight world translate, radius.x)` (world space, no posAdjust) and `LightColor = diffuse x
+  (fade x lodDimmer) x material +0xAC`, w 0. A light that does not affect water gets position 0 and colour 512012 / 388604.
+  `NumLights` is not in CS's Water.hlsl, so its table entry is 0 and the engine writes the light count over PS b2's first float.
+- **Components never written:** BlendRadius.w, ProjData.zw, ObjectUV.yz without kEnableFlowmap, VPOSOffset without the Depth bit,
+  CellTexCoordOffset without the Flowmap bit, TextureProj in light passes, lights past the count. They hold stale bytes, so the
+  observer does not compare them.
+- **GetRenderPasses' globals.** The gate is 513342 / 391120 (TESWaterSystem::Enable writes it); render modes 12-17 make no passes;
+  527793 / 414746 takes the local map's path. Interior is `State.interior` (+0x44). NormalTexCoord is property bit 0 or the
+  vertex desc's TEXCOORD0 offset nibble (`desc & 0xF00`). Vc is property bit 8 or 9. Refractions is bit 7, Depth bit 2, Reflections
+  `kUseReflections`, VertexAlphaDepth bit 9, Cubemap `kUseCubemapReflections`. The stencil pass is 6E (or 70 with hint 13) when the
+  vertex desc has a colour offset, and it is cached at property +0xC0 the first time.
+- **kUnderwater** is written by GetRenderPasses itself: it copies the global 528166 / 415111 into property bit 5 (and clears the
+  passes when it changes). `TESWaterSystem::SetUnderwaterVariables` writes the global.
+- **Where LOD water hangs.** 516171 / 402322 is `BGSTerrainManager`'s water node, named "WaterLOD", made beside "LandLOD" and
+  "DistantRefLOD" and attached to "LODRoot" (a BSClearZNode, 516928). Vanilla LOD water is attached under it by
+  `TESWaterSystem::AddLODWater` from `BGSTerrainChunk::Attach`; Unified Water's tiles go under it too. Vanilla LOD water has the
+  property's LOD bit (0x2); Unified Water's tiles never do, which is how the census tells them apart.
+- **Hooks that change bindings, not constants.** Physical Sky's ModifyWater only swaps sampler s13. The cubemap fix only unbinds
+  t3 when it holds kREFLECTIONS in an interior. Light Limit Fix's water hook only writes PS b3 (its strict lights). None of them
+  changes the six groups. `EvaluateBindingRewrites` gives the first two.
+
+### 8.3 Not settled
+
+- **LODRoot's parent** and the cells' water node: the census names them.
+- **The displacement mesh.** Which object it is was not found. The census marks water system objects and shapes under
+  `TESWaterSystem::waterRoot`; `defaultDisplacementWaterObject` (+0x128) is a candidate.
+- **Who writes `unk8C`** (the stencil bit) and `plane` after attach, and who writes SunDir and SunColor (528168, 528172).
+- **Light Limit Fix's PS b3** (the room index) is not ported here; DCLF's object record already has it (plan section 4).
+- **Bit-exact matrices.** The port uses DirectXMath, which CS's D3DX9MathUpgrade puts behind the engine's D3DX imports. With
+  `CS_NO_D3DX_UPGRADE=1` the engine runs the real D3DX and the matrices may differ in the last bit.
+- **Linear Lighting's light colour** is computed in its own file, which is built with /fp:fast. The port computes the same
+  expression with precise floats, so a reassociated product would show as a LightColor mismatch.
+- **Frame scope.** The observer captures the frame values at the frame's first latched draw. A value that changes between the
+  mask and the surface batch shows as a mismatch, which is the check that the frame row is a frame value.
