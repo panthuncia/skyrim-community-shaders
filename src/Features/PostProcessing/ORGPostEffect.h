@@ -381,7 +381,7 @@ namespace ORGPostChain
 	class RunReadback
 	{
 	public:
-		/** @brief One part per copy, a_parts[i] bytes each. Null and logged when the buffer cannot be made. */
+		/** @brief One part per copy, a_parts[i] bytes each. Its errors are fatal (RenderGraph::FatalHandler). */
 		static std::shared_ptr<RunReadback> Create(std::string_view a_name, std::vector<std::uint32_t> a_parts);
 
 		/** @brief At every build, before AddBuffer and AddTexture. Returns the build's stamp region, for its Run's Commit. */

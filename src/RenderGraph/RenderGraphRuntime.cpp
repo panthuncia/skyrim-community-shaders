@@ -1816,17 +1816,8 @@ bool RenderGraphRuntime::Initialize()
 		if (state->native)
 			logger::info("[ORG] native: no home states; the graph imports native images exclusively and its ledgers carry their layouts");
 		// Tickets record replayable recordings, which the revision-driven epochs need (their published copies are submitted again).
+		// A live run also reuses its copy's kept recording while every pass revision holds.
 		desc.reuseRecordings = true;
-		// Submission options, on in every mode (decision 113: guest runs with each of them).
-		// A live run reuses its copy's kept recording while every pass revision holds.
-		desc.reuseLiveRecordings = true;
-		// An epoch's consecutive batches on one queue go in one submission, with one list of entry barriers, and a ticket's
-		// uploads go in its first queue submission.
-		desc.coalesceSubmissions = true;
-		desc.mergeHandoffs = true;
-		desc.uploadsWithBatches = true;
-		// A late batch of only gated copies and clears resubmits its list while gate answers repeat.
-		desc.keepGatedInline = true;
 		// The commit runs on the render thread and the rest of the submission on a host thread.
 		desc.submissionThread = state->native;
 		if (desc.submissionThread)
