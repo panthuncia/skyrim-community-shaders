@@ -532,6 +532,19 @@ bool UnifiedWater::IsWaterDataReady() const
 	return waterCache && waterMesh;
 }
 
+UnifiedWater::FlowRewrite UnifiedWater::GetFlowRewrite() const
+{
+	// The same test as BSWaterShader_SetupGeometry's. A feature that never loaded has no flowmap.
+	if (!flowmap || !IsExteriorWorldspaceActive())
+		return {};
+	return { true, flowmap->GetWidth(), flowmap->GetHeight(), flowmap->GetOffsetX(), flowmap->GetOffsetY() };
+}
+
+RE::NiNode* UnifiedWater::GetWaterLODRoot() const
+{
+	return gWaterLOD ? *gWaterLOD : nullptr;
+}
+
 bool UnifiedWater::IsExteriorWorldspaceActive() const
 {
 	// Interior cells may still inherit stale exterior worldspace state during transitions

@@ -1,6 +1,7 @@
 // Water: the engine's BSWaterShader draws drawn by the render graph in graph mode.
 // The engine side is WaterCapture.cpp and the graph side WaterDraws.cpp.
 
+#include "Features/DrawcallLimitFix/Features/Water/Port/WaterParity.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
@@ -13,8 +14,9 @@ namespace DCLF::Features::Water
 {
 	namespace
 	{
-		void Install(Api::InstallContext&)
+		void Install(Api::InstallContext& a_context)
 		{
+			Port::RegisterSwitches(a_context);
 			if (!Enabled())
 				return;
 			InstallHooks();
