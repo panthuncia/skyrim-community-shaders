@@ -1,9 +1,8 @@
 # Light Limit Fix's local light shadows (frame revision plan, 6.13; cleanup plan A13, D-1) in Dragonsreach, whose fires cast shadows.
 # They start on (saved_settings: their hooks install only at startup). Then mid-session the cache's resolution changes (a new
-# version), its slot count twice in a row (a new slice count is a new texture, published again under the same id when its revision
-# is adopted; the second change supersedes or follows the first), the cache goes off and on again (one texel while off), and every
-# setting goes back. A shot after each. In a graph mode the slot count is fixed for the session (it applies at the next launch),
-# so the slot steps change nothing there.
+# version), its slot count twice in a row (a new slice count is a version too, switched in with graphs built for it in a graph mode;
+# the second change supersedes or follows the first), the cache goes off and on again (one texel per slot while off), and every
+# setting goes back. A shot after each. llf-slots-live checks the slot changes on their own.
 # In a graph mode the cache follows Drawcall Limit Fix's shadow views: DCLF draws the shadow maps of the lights it selects, and
 # the cache copies the slices of the local lights it drew ("[LLF] Local light shadows follow Drawcall Limit Fix's shadow views").
 # In plain D3D11 mode the cache rotates the lights the engine draws, as before.

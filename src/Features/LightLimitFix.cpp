@@ -110,9 +110,6 @@ void LightLimitFix::DrawLocalShadowSettings()
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("local_shadow_slots_tooltip"), "Maximum number of lights that can hold a cached shadow map at the same time. Each slot costs video memory at the cache resolution."));
 		}
-		// The render graph's cache keeps the slot count it was made with (ORGLocalShadows).
-		if (LocalShadowsFollowDCLF())
-			ImGui::TextColored(globals::menu->GetTheme().StatusPalette.RestartNeeded, "%s", T(TKEY("local_shadow_slots_restart"), "A new slot count applies after a restart."));
 
 		const char* resolutionOptions[] = { T(TKEY("local_shadow_resolution_match_game"), "Match Game"), "512", "1024", "2048" };
 		int resolutionIndex = settings.LocalShadowResolution.Get() == 0 ? 0 : 1 + FindOptionIndex(LOCAL_SHADOW_RESOLUTION_OPTIONS, settings.LocalShadowResolution.Get());

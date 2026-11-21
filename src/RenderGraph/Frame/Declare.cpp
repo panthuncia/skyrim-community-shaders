@@ -286,10 +286,10 @@ namespace RenderGraph::Frame
 			if constexpr (std::is_same_v<Desc, D3D11_TEXTURE3D_DESC>)
 				return { a_desc.Width, a_desc.Height, a_desc.Depth };
 			else
-				return { a_desc.Width, a_desc.Height, 1u };
+				return { a_desc.Width, a_desc.Height, a_desc.ArraySize };
 		}
 
-		/** @brief Whether two descriptions differ in more than their extent. */
+		/** @brief Whether two descriptions differ in more than their extent. A 2D texture's slice count is part of its extent. */
 		template <class Desc>
 		bool ShapeDiffers(Desc a_left, Desc a_right)
 		{
@@ -297,6 +297,8 @@ namespace RenderGraph::Frame
 			a_left.Height = a_right.Height;
 			if constexpr (std::is_same_v<Desc, D3D11_TEXTURE3D_DESC>)
 				a_left.Depth = a_right.Depth;
+			else
+				a_left.ArraySize = a_right.ArraySize;
 			return std::memcmp(&a_left, &a_right, sizeof(Desc)) != 0;
 		}
 

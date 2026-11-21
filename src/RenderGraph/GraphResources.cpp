@@ -39,6 +39,7 @@
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <vector>
 
 namespace GraphResources
@@ -765,6 +766,12 @@ namespace GraphResources
 		if (!options.versioned || Aliasable() || !image)
 			return false;
 		try {
+			// A version may change the slice count only through a revision that switches in graphs built for it (ORG array-size
+			// versions). A join publishes at once, so another slice count is a new slot, as before.
+			const auto previous = a_previous ? a_previous->CurrentResource() : nullptr;
+			const bool sameSlices = previous && previous->GetArraySize() == image->GetArraySize();
+			if (a_previous && a_sameShape && !sameSlices)
+				throw std::invalid_argument(fmt::format("{} slices, not the slot's {}", image->GetArraySize(), previous ? previous->GetArraySize() : 0u));
 			if (a_previous && a_sameShape) {
 				const RenderGraph::Frame::Boundary::Caller caller("twin");
 				a_previous->PublishImage(std::move(image));
@@ -854,7 +861,7 @@ namespace GraphResources
 		if (Exported() && !d3d11)
 			return "its D3D11 export does not exist";
 		if (!ShapeAt(a_next, a_shape))
-			return "the extent changes its shape class (mip count or slices), or it is not a texture";
+			return "the extent changes its shape class (its mip count, a cube's faces, or whether its views are arrays), or it is not a texture";
 		return nullptr;
 	}
 
@@ -1195,7 +1202,7 @@ namespace GraphResources
 
 	Extent Texture2D::CurrentExtent() const
 	{
-		return { desc.Width, desc.Height, 1u };
+		return { desc.Width, desc.Height, desc.ArraySize };
 	}
 
 	bool Texture2D::ShapeAt(const Extent& a_extent, ExportDesc& a_out) const
@@ -1203,13 +1210,17 @@ namespace GraphResources
 		auto next = desc;
 		next.Width = a_extent[0];
 		next.Height = a_extent[1];
-		if (a_extent[2] != 1 || MipsOf(next) != MipsOf(desc))
+		next.ArraySize = a_extent[2];
+		// A version may change the slice count (ORG array-size versions), but not a cube's faces, nor whether its views are arrays.
+		const bool cube = (desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+		const bool arrayViewsChange = !options.array && (next.ArraySize > 1) != (desc.ArraySize > 1);
+		if (!next.ArraySize || MipsOf(next) != MipsOf(desc) || (cube && next.ArraySize != desc.ArraySize) || arrayViewsChange)
 			return false;
 		a_out = {};
 		a_out.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
 		a_out.width = next.Width;
 		a_out.height = next.Height;
-		a_out.depthOrArraySize = desc.ArraySize;
+		a_out.depthOrArraySize = next.ArraySize;
 		a_out.mips = desc.MipLevels;
 		a_out.samples = desc.SampleDesc.Count;
 		a_out.format = desc.Format;
@@ -1223,6 +1234,7 @@ namespace GraphResources
 	{
 		desc.Width = a_extent[0];
 		desc.Height = a_extent[1];
+		desc.ArraySize = a_extent[2];
 	}
 
 	Extent Texture3D::CurrentExtent() const
