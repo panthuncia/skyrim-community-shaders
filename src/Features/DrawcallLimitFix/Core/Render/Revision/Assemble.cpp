@@ -161,10 +161,12 @@ namespace DCLF
 			auto fragment = std::make_shared<RevisionFragment>(std::move(requirements));
 			const std::uint32_t hosted = traits.shape == ShapeKind::Main ? a_hosted : 0u;
 			// Recorded on the build the inputs name, the staged one while one is staged. It attaches with the snapshot (plan step 10a).
-			// A recording made on any other does not belong to this revision. The cache keeps only that build's recordings.
+			// A recording made on any other does not belong to this revision.
 			const std::uint64_t buildGeneration = a_frame.epochBuilds[static_cast<std::size_t>(traits.segment)];
+			const auto epoch = RenderGraphRuntime::EpochOf(traits.segment);
 			auto& cache = a_rv.recordingCaches[e];
-			auto entry = cache.Add({ buildGeneration, 0 }, std::move(a_key), a_use, requests.size());
+			// The cache keeps the recordings of the builds the host has now, attached and staged, read here on the builder thread.
+			auto entry = cache.Add(a_host, epoch, std::move(a_key), a_use, requests.size());
 			entry->payload = fragment;
 			auto& stats = a_rv.epochs[e];
 			a_outstanding.fetch_add(1, std::memory_order_acq_rel);
@@ -186,7 +188,6 @@ namespace DCLF
 				}
 				a_outstanding.fetch_sub(1, std::memory_order_acq_rel);
 			};
-			const auto epoch = RenderGraphRuntime::EpochOf(traits.segment);
 			if (cache.Post(a_host, entry, epoch, std::move(requests), buildGeneration, org::RunRef::kNoCopy, fmt::format("DCLF's {} epoch", traits.name),
 					std::move(settled)) == ::RenderGraph::Frame::EpochRecordings::Posting::Refused) {
 				// Async epochs stopped. The entry goes, so the next make asks again. What was posted still settles the fragment,
