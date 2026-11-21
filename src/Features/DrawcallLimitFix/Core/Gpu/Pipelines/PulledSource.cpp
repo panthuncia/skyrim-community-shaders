@@ -64,12 +64,18 @@ namespace DCLF::PulledSource
 			const auto& block = a_rewrite.block;
 			const std::string type = a_match[3].str(), name = a_match[4].str();
 			const bool matrix = type.find('x') != std::string::npos;
-			// A column-major matrix's registers are its columns. Arrays of matrices are not supported.
-			if (matrix && (!a_match[2].matched || a_match[5].matched))
+			// Arrays of matrices are not supported. A column-major matrix's registers are its columns, so it is the transpose of the rows.
+			if (matrix && a_match[5].matched)
 				return false;
+			const bool columns = matrix && !a_match[2].matched;
+			if (columns && type != "float4x4" && type != "float3x3")
+				return false;  // the transpose of a non-square load has another type
 			const std::uint32_t component = a_match[7].matched ? static_cast<std::uint32_t>(std::string("xyzw").find(a_match[7].str()[0])) : 0u;
 			const std::uint32_t offset = static_cast<std::uint32_t>(std::stoul(a_match[6].str())) * 16 + component * 4;
-			const auto source = [&](std::uint32_t a_offset) { return std::format("{}({}, {} + {})", PulledRowLoad(type), block.row, block.offset, a_offset); };
+			const auto source = [&](std::uint32_t a_offset) {
+				const auto load = std::format("{}({}, {} + {})", PulledRowLoad(type), block.row, block.offset, a_offset);
+				return columns ? "transpose(" + load + ")" : load;
+			};
 			// With eager names set, a member nothing writes is loaded where it is read. Statics loaded at entry hold registers for the whole
 			// stage, and a large block like Landscape's spills.
 			if (a_rewrite.options->eager && !a_match[5].matched && !a_rewrite.options->eager->contains(name)) {
