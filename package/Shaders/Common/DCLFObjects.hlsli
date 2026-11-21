@@ -54,7 +54,8 @@ struct DCLFShadingRow
 	float4 SkinPerGeometry;
 	uint DCLFShadingWritten;  // the CPU's (which components the pass writes)
 	uint SkinMaterial;        // Advanced Skin's material table row (Skin.hlsli), 0 for the disabled profile
-	uint2 DCLFShadingPadding;
+	uint WaterMaterial;       // the water material pool's row (DCLF Features/Water/Scene), 0 for none
+	uint DCLFShadingPadding;
 	// T6b1a: TreeParams and WindTimers (xy) for a TreeAnim property, from its tree node as the frame has it: what a member draws with
 	// until TreeWindCS's entry of its tree's listing (DCLFTreeParamsOf).
 	float4 DCLFShadingTreeParams;

@@ -217,95 +217,70 @@ void WaterOrgPermutation()
 // 0, 9 and 11) in range 1. Each range draws plain indexed indirect draws (DCLF_PULLED), so a stage finds its draw's sequence by its
 // instance, as Effect.hlsl's and Lighting.hlsl's pulled stages do.
 // - World and PreviousWorld come from the placement row, made relative to the eye here.
-// - The material values come from the water material pool's row, which the shading row names. They move every frame (fog, scroll,
-//   colours times the water lighting), so a material row's block cannot hold them.
-// - The per-object values (ObjectUV, CellTexCoordOffset, the plane) come from the water object row, which the object record names.
-// - The frame values (SetupTechnique's rows) come from the water frame row.
+// - The material values come from the water material pool's row, which the shading row names (WaterMaterial). They move every
+//   frame (fog, scroll, colours times the water lighting), so a material row's block cannot hold them.
+// - The water object row holds what SetupGeometry reads of the property. ObjectUV and CellTexCoordOffset are computed from it here,
+//   with the frame row's flowmap values and Unified Water's rewrite, as Port::EvaluateObject computes them.
+// - The camera comes from DCLF's own frame constants (FrameBuffer), which are this frame's. The water frame row is captured at the
+//   frame's start, so its camera rows may be a frame old; only its other rows are read.
 // - The headers, t98 and Physical Sky's resources are the frame record's, as Lighting's are. Light Limit Fix's room index is the
 //   object record's (LightLimitFix.hlsli, RoomIndexOf).
 // The three row buffers are frame bindings. The vertex stage's layout maps no register there, so both stages read them through the
-// frame record's descriptor indices. Features/Water/Draw/WaterDrawLayout.h must match every constant below.
+// frame record's descriptor indices. Features/Water/Scene/WaterScene.h and Features/Water/Draw/WaterDraw.h must match the constants below.
 #		include "Common/DCLFObjects.hlsli"
 
-// The water material pool's row (Port::MaterialRow): VS b1 c0-c5, then PS b1 c0-c13.
+// The water material pool's row (WaterScene::WaterMaterialRow): VS b1 c0-c5, then PS b1 c0-c13. Row 0 is none.
 struct DCLFWaterMaterial
 {
 	float4 VS[6];
 	float4 PS[14];
 };
 
-// The water object row: ObjectUV (VS b2 c12), CellTexCoordOffset (VS b2 c13) and the property's plane (world space, normal and constant).
+// The water object row (WaterScene::WaterObjectRow): the property's cell and flow offsets, its plane, its flags and stencil bit.
 struct DCLFWaterObject
 {
-	float4 ObjectUV;
-	float4 CellTexCoordOffset;
-	float4 Plane;
+	int4 Offsets;  // cellX, cellY, flowX, flowY, as the property holds them
+	float4 Plane;  // world space, normal and constant
+	uint WaterFlags;
+	uint StencilBit;
+	uint SurfaceDescriptor;
+	uint Generation;
 };
 
-// The frame bindings' registers (WaterDrawLayout.h: kMaterialPoolRegister, kObjectRowsRegister, kFrameRowRegister).
-static const uint kDCLFWaterMaterialsRegister = 42;
-static const uint kDCLFWaterObjectsRegister = 43;
-static const uint kDCLFWaterFrameRegister = 44;
-// The water frame row's float4s (Port::TechniqueRows): QPosAdjust, then PS b0 c0-c4.
+// The frame bindings' registers (WaterScene.h: kMaterialPoolRegister, kFrameRowRegister; WaterDraw.h: kObjectRowsRegister).
+static const uint kDCLFWaterMaterialsRegister = 58;
+static const uint kDCLFWaterFrameRegister = 59;
+static const uint kDCLFWaterObjectsRegister = 42;
+// The frame row's float4s (WaterScene::FrameRowEntry).
 static const uint kDCLFWaterFrameQPosAdjust = 0;
-static const uint kDCLFWaterFramePS = 1;
-// Where the object record holds the water object row (WaterDrawLayout.h: kObjectRecordWord, kObjectRecordShift, kObjectRecordBias),
-// and the shading row word that names the material pool row (kMaterialShadingWord).
-static const uint kDCLFWaterObjectRecordWord = 4;
-static const uint kDCLFWaterObjectRecordShift = 0;
-static const uint kDCLFWaterObjectRecordBias = 0;
-static const uint kDCLFWaterMaterialShadingWord = 14;
+static const uint kDCLFWaterFrameVposOffset = 1;
+static const uint kDCLFWaterFramePosAdjust = 2;
+static const uint kDCLFWaterFrameCameraData = 3;
+static const uint kDCLFWaterFrameSunDir = 4;
+static const uint kDCLFWaterFrameSunColor = 5;
+static const uint kDCLFWaterFrameFlowmap = 9;
+static const uint kDCLFWaterFrameUnifiedWaterFlow = 10;
+static const uint kDCLFWaterFrameDisplacementOffset = 11;
+// The water flags and descriptor bits ObjectUV and CellTexCoordOffset depend on (Port::EvaluateObject).
+static const uint kDCLFWaterFlagVertexColors = 0x100;
+static const uint kDCLFWaterFlagFlowmap = 0x8000;
+static const uint kDCLFWaterDescriptorWading = 1u << 6;
+static const uint kDCLFWaterDescriptorFlowmap = 1u << 9;
 
 // The descriptor index the frame record holds for register a_register (DrawBindings::textures).
 uint DCLFWaterFrameIndex(uint a_register) { return DCLFFrameRecordWord(kDCLFRecordTextures + 4 * a_register); }
 
-// Word a_word of a record, by DCLFObjectRecord's fields. The word is a constant, so this folds to one field.
-uint DCLFWaterRecordWord(DCLFObjectRecord a_record, uint a_word)
-{
-	switch (a_word) {
-	case 4:
-		return asuint(a_record.DCLFTreeParams.x);
-	case 5:
-		return asuint(a_record.DCLFTreeParams.y);
-	case 6:
-		return asuint(a_record.DCLFTreeParams.z);
-	case 7:
-		return asuint(a_record.DCLFTreeParams.w);
-	case 8:
-		return asuint(a_record.DCLFWindTimers.x);
-	case 9:
-		return asuint(a_record.DCLFWindTimers.y);
-	default:
-		return 0;
-	}
-}
-
-// Word a_word of a shading row, by DCLFShadingRow's fields. A constant word, as above.
-uint DCLFWaterShadingWord(DCLFShadingRow a_row, uint a_word)
-{
-	switch (a_word) {
-	case 13:
-		return a_row.SkinMaterial;
-	case 14:
-		return a_row.DCLFShadingPadding.x;
-	case 15:
-		return a_row.DCLFShadingPadding.y;
-	default:
-		return 0;
-	}
-}
-
 DCLFWaterMaterial DCLFWaterMaterialOf(uint a_object)
 {
 	StructuredBuffer<DCLFWaterMaterial> materials = ResourceDescriptorHeap[DCLFWaterFrameIndex(kDCLFWaterMaterialsRegister)];
-	return materials[DCLFWaterShadingWord(DCLFShading[a_object], kDCLFWaterMaterialShadingWord)];
+	return materials[DCLFShading[a_object].WaterMaterial];
 }
 
+// The water row is the object record's word 4 (WaterScene::kWaterRecordWord: DCLFTreeParams.x), its tag in word 5.
 DCLFWaterObject DCLFWaterObjectOf(uint a_object)
 {
 	StructuredBuffer<DCLFWaterObject> objects = ResourceDescriptorHeap[DCLFWaterFrameIndex(kDCLFWaterObjectsRegister)];
-	const uint word = DCLFWaterRecordWord(DCLFObjects[a_object], kDCLFWaterObjectRecordWord);
-	return objects[(word >> kDCLFWaterObjectRecordShift) - kDCLFWaterObjectRecordBias];
+	return objects[asuint(DCLFObjects[a_object].DCLFTreeParams.x)];
 }
 
 float4 DCLFWaterFrameRow(uint a_row)
@@ -321,6 +296,45 @@ float4x4 DCLFWaterWorld(uint a_object, float3 a_eye)
 	const DCLFPlacement placement = DCLFPlacements[a_object];
 	return float4x4(placement.World[0] - float4(0, 0, 0, a_eye.x), placement.World[1] - float4(0, 0, 0, a_eye.y), placement.World[2] - float4(0, 0, 0, a_eye.z),
 		float4(0, 0, 0, 1));
+}
+
+// A frame row's position adjust with this frame's eye: the frame row's w (the framebuffer range) stays.
+float4 DCLFWaterPosAdjust(uint a_row) { return float4(FrameBuffer::CameraPosAdjust.xyz, DCLFWaterFrameRow(a_row).w); }
+
+/**
+ * @brief ObjectUV (xyz) and CellTexCoordOffset of a_object for a_descriptor, as Port::EvaluateObject computes them: the property's
+ * values after Unified Water's SetupGeometry rewrite, which takes the cell from the world translate (Util::WorldToCell).
+ * Unified Water's local scale is the placement's world scale here: its tiles hang under the LOD water root without a scale of their own.
+ */
+void DCLFWaterObjectValues(uint a_object, uint a_descriptor, out float3 a_objectUV, out float4 a_cellTexCoordOffset)
+{
+	const DCLFWaterObject object = DCLFWaterObjectOf(a_object);
+	const float4 flowmap = DCLFWaterFrameRow(kDCLFWaterFrameFlowmap);
+	float flowmapSize = flowmap.x;
+	float2 meshFlowCellOffset = flowmap.yz;
+	int2 cell = object.Offsets.xy;
+	int2 flow = object.Offsets.zw;
+	if (flowmap.w != 0) {
+		const float4 unified = DCLFWaterFrameRow(kDCLFWaterFrameUnifiedWaterFlow);  // width, height, offsets
+		const DCLFPlacement placement = DCLFPlacements[a_object];
+		const float scale = length(float3(placement.World[0].x, placement.World[1].x, placement.World[2].x));
+		flowmapSize = unified.x;
+		meshFlowCellOffset = float2(unified.y, 1.0 - scale);
+		cell = int2(floor(float2(placement.World[0].w, placement.World[1].w) / 4096.0));
+		flow = int2(cell.x + int(unified.z), cell.y + int(unified.w) + int(unified.x) - int(unified.y));
+	}
+	a_objectUV = 0;
+	if (object.WaterFlags & kDCLFWaterFlagVertexColors)
+		a_objectUV.x = 1;
+	else if (object.WaterFlags & kDCLFWaterFlagFlowmap)
+		a_objectUV = float3(flowmapSize, meshFlowCellOffset.x, 1.0 - meshFlowCellOffset.y);
+	a_cellTexCoordOffset = 0;
+	if (a_descriptor & kDCLFWaterDescriptorFlowmap) {
+		if (a_descriptor & kDCLFWaterDescriptorWading)
+			a_cellTexCoordOffset = DCLFWaterFrameRow(kDCLFWaterFrameDisplacementOffset);
+		else
+			a_cellTexCoordOffset = float4(flow.x, (flowmapSize - flow.y) - 1, cell.x, -cell.y);
+	}
 }
 
 #		if defined(DCLF_PULLED)
@@ -454,8 +468,7 @@ static float4 CellTexCoordOffset;
 void DCLFWaterVertexStatics()
 {
 	const DCLFWaterMaterial material = DCLFWaterMaterialOf(DCLFObjectIndex);
-	const DCLFWaterObject object = DCLFWaterObjectOf(DCLFObjectIndex);
-	QPosAdjust = DCLFWaterFrameRow(kDCLFWaterFrameQPosAdjust);
+	QPosAdjust = DCLFWaterPosAdjust(kDCLFWaterFrameQPosAdjust);
 	VSFogParam = material.VS[0];
 	VSFogNearColor = material.VS[1];
 	VSFogFarColor = material.VS[2];
@@ -466,8 +479,7 @@ void DCLFWaterVertexStatics()
 	PreviousWorld = DCLFWaterWorld(DCLFObjectIndex, FrameBuffer::CameraPreviousPosAdjust.xyz);
 	// The engine's WorldViewProj takes the jittered view-projection while TAA jitters (SE 513713), as the main pass's CameraViewProj.
 	WorldViewProj = mul(FrameBuffer::CameraViewProj, World);
-	ObjectUV = object.ObjectUV.xyz;
-	CellTexCoordOffset = object.CellTexCoordOffset;
+	DCLFWaterObjectValues(DCLFObjectIndex, Permutation::VertexShaderDescriptor, ObjectUV, CellTexCoordOffset);
 }
 #		else
 cbuffer PerTechnique : register(b0)
@@ -824,9 +836,9 @@ SamplerState ApSampler : register(s13);
 #		endif
 
 #			if defined(DCLF_BINDLESS)
-// The samplers and the material's textures (t0, t3-t6) are the material row's. The frame's textures are frame textures, the same for
-// every water draw of a frame (WaterDrawLayout.h, kFrameTextureRegisters: kMAIN's copy, the displacement, the depth copy, the flow map
-// and its normals, the SSR targets).
+// The samplers and the material's textures (t0, t3-t6, t9) are the material row's. The frame's textures are frame textures, the same
+// for every water draw of a frame (Features/Water/Draw/WaterDraw.h, kFrameTextureRegisters: kMAIN's copy, the displacement, the depth
+// copy, the flow map, the SSR targets).
 Texture2D<float4> ReflectionTex : register(t0);
 Texture2D<float4> RefractionTex : register(t46);
 Texture2D<float4> DisplacementTex : register(t47);
@@ -836,9 +848,9 @@ Texture2D<float4> Normals02Tex : register(t5);
 Texture2D<float4> Normals03Tex : register(t6);
 Texture2D<float4> DepthTex : register(t48);
 Texture2D<float4> FlowMapTex : register(t49);
-Texture2D<float4> FlowMapNormalsTex : register(t54);
+Texture2D<float4> FlowMapNormalsTex : register(t9);
 Texture2D<float4> SSRReflectionTex : register(t56);
-Texture2D<float4> RawSSRReflectionTex : register(t58);
+Texture2D<float4> RawSSRReflectionTex : register(t75);
 #			else
 Texture2D<float4> ReflectionTex : register(t0);
 Texture2D<float4> RefractionTex : register(t1);
@@ -888,11 +900,11 @@ static float4 LightColor[8];
 void DCLFWaterPixelStatics()
 {
 	const uint object = DCLFObjectIndex;
-	VPOSOffset = DCLFWaterFrameRow(kDCLFWaterFramePS + 0);
-	PosAdjust = DCLFWaterFrameRow(kDCLFWaterFramePS + 1);
-	CameraDataWater = DCLFWaterFrameRow(kDCLFWaterFramePS + 2);
-	SunDir = DCLFWaterFrameRow(kDCLFWaterFramePS + 3);
-	SunColor = DCLFWaterFrameRow(kDCLFWaterFramePS + 4);
+	VPOSOffset = DCLFWaterFrameRow(kDCLFWaterFrameVposOffset);
+	PosAdjust = DCLFWaterPosAdjust(kDCLFWaterFramePosAdjust);
+	CameraDataWater = DCLFWaterFrameRow(kDCLFWaterFrameCameraData);
+	SunDir = DCLFWaterFrameRow(kDCLFWaterFrameSunDir);
+	SunColor = DCLFWaterFrameRow(kDCLFWaterFrameSunColor);
 
 	const DCLFWaterMaterial material = DCLFWaterMaterialOf(object);
 	ShallowColor = material.PS[0];
@@ -915,7 +927,7 @@ void DCLFWaterPixelStatics()
 	const float4x4 textureSpace = float4x4(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
 	const float3 eye = FrameBuffer::CameraPosAdjust.xyz;
 	TextureProj = transpose(mul(textureSpace, mul(FrameBuffer::CameraViewProj, DCLFWaterWorld(object, eye))));
-	// The property's plane as stored, with w its distance to the eye.
+	// The property's plane as stored, with w its distance to the eye (this frame's, as the camera above).
 	const float4 plane = DCLFWaterObjectOf(object).Plane;
 	ReflectPlane[0] = float4(plane.xyz, dot(plane.xyz, eye) - plane.w);
 	ProjData = float4(FrameBuffer::CameraProj[0][0], FrameBuffer::CameraProj[1][1], 0, 0);
