@@ -23,6 +23,10 @@ namespace LandscapeSeams
 	static const float GridCells = 16.0;
 
 #if defined(DCLF_BINDLESS_DRAW)
+	// Drawcall Limit Fix's quad table (Features/Landscape/LandscapeSeams.cpp), a frame binding. The shading row's slot 1 names the
+	// quad's row. Row 0 is all zero.
+	StructuredBuffer<QuadData> DCLFSeamQuads : register(t39);
+
 	uint Descriptor(uint index)
 	{
 		return DCLFShading[DCLFObjectIndex].LandscapeSeamsTextures[index >> 2][index & 3];
@@ -77,9 +81,10 @@ namespace LandscapeSeams
 		Data = (QuadData)0;
 		if (min(Descriptor(0), Descriptor(1)) == 0u)
 			return;
-		StructuredBuffer<QuadData> Quad = ResourceDescriptorHeap[HeapIndex(1)];
-#endif
+		Data = DCLFSeamQuads[Descriptor(1)];
+#else
 		Data = Quad[0];
+#endif
 		[branch] if ((Data.Flags & FlagValid) != 0)
 		{
 			float2 grid = saturate((worldXY - Data.Origin) / QuadSize) * GridCells;

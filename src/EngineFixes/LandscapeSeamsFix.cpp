@@ -476,6 +476,7 @@ std::shared_ptr<LandscapeSeamsFix::Resources> LandscapeSeamsFix::CreateResources
 	if (FAILED(device->CreateShaderResourceView(buffer.get(), &bufferViewDesc, resources->data.put())))
 		return nullptr;
 	Util::SetResourceName(resources->data.get(), "LandscapeSeamsFix::QuadData SRV");
+	resources->quad = data;
 
 	return resources;
 }

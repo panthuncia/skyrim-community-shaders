@@ -5,8 +5,13 @@
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
+#include <cstdint>
+
 namespace DCLF::Features::Landscape
 {
+	// The seams quad table, a frame binding. LandscapeSeams.hlsli's DCLFSeamQuads declares the same register.
+	inline constexpr std::uint32_t kSeamQuadsRegister = 39;
+
 	Api::Feature Feature();
 	/** @brief Registers per-quad landscape seam resources for the batched terrain shaders. */
 	void InstallSeams(Api::InstallContext& a_context);

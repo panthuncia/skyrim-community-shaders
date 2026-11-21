@@ -133,6 +133,14 @@ namespace DCLF
 		Binding ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag = ~0u, ResolveFailure* a_failure = nullptr,
 			std::source_location a_where = std::source_location::current());
 
+		/**
+		 * @brief ResolveBinding for a holder that follows a streamed texture's window: it imports the window there is now, never
+		 * waiting for the full one. The import is superseded when the window changes (RelocatedViews names it, Superseded says so),
+		 * and the holder resolves again then.
+		 */
+		Binding ResolveFollowingWindow(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag = ~0u, ResolveFailure* a_failure = nullptr,
+			std::source_location a_where = std::source_location::current());
+
 		/** @brief Render thread. A zero-reading binding of a_kind for an empty slot, or kInvalid if it could not be made. */
 		Binding NullOf(ViewKind a_kind);
 
@@ -212,6 +220,7 @@ namespace DCLF
 
 	private:
 		GpuTextures();
+		Binding Resolve(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, ResolveFailure* a_failure, std::source_location a_where, bool a_pinFull);
 
 		std::atomic<std::uint32_t> generation{ 0 };
 

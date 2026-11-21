@@ -72,6 +72,7 @@ struct LandscapeSeamsFix : EngineFix
 		winrt::com_ptr<ID3D11ShaderResourceView> weights;
 		winrt::com_ptr<ID3D11ShaderResourceView> data;
 		std::array<std::array<RE::NiSourceTexturePtr, TexturesPerExtra>, MaxExtraLayers> extras;
+		QuadData quad{};  // data's contents, for renderers that keep their own table of quads
 	};
 
 	struct Quad

@@ -165,6 +165,14 @@ namespace DCLF
 
 	struct GpuTextures::Impl
 	{
+		/** @brief NullOf's binding per view kind and the generation it was resolved in. Render thread. */
+		struct NullCache
+		{
+			Binding binding;
+			std::uint32_t generation = ~0u;
+		};
+		std::array<NullCache, 4> nullOf;
+
 		struct Entry;
 		struct Registry
 		{
@@ -848,7 +856,31 @@ namespace DCLF
 	GpuTextures::Binding GpuTextures::ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, ResolveFailure* a_failure,
 		std::source_location a_where)
 	{
+		return Resolve(a_view, a_sourceTag, a_failure, a_where, true);
+	}
+
+	GpuTextures::Binding GpuTextures::ResolveFollowingWindow(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, ResolveFailure* a_failure,
+		std::source_location a_where)
+	{
+		return Resolve(a_view, a_sourceTag, a_failure, a_where, false);
+	}
+
+	GpuTextures::Binding GpuTextures::Resolve(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, ResolveFailure* a_failure,
+		std::source_location a_where, bool a_pinFull)
+	{
 		DCLF_ZONE("CS.DCLF.Texture.ResolveBinding");
+		// The caller, so a capture shows who resolves: "Grass/GrassTables.cpp:158".
+		if (TracyIsConnected) {
+			std::string_view file = a_where.file_name();
+			const auto slash = file.find_last_of("/\\");
+			if (slash != std::string_view::npos && slash > 0) {
+				const auto parent = file.find_last_of("/\\", slash - 1);
+				file.remove_prefix(parent == std::string_view::npos ? 0 : parent + 1);
+			}
+			char text[160];
+			const auto written = fmt::format_to_n(text, sizeof(text), "{}:{}", file, a_where.line());
+			ZoneText(text, written.size < sizeof(text) ? written.size : sizeof(text));
+		}
 		ResolveFailure ignored = ResolveFailure::None;
 		auto& failure = a_failure ? *a_failure : ignored;
 		failure = ResolveFailure::None;
@@ -857,8 +889,8 @@ namespace DCLF
 		// A second import means no pass declared what the index reads.
 		if (RenderGraph::UndeclaredAccess::On())
 			RenderGraph::UndeclaredAccess::NoteView(a_view, SourceName(a_sourceTag), a_where);
-		// These holders keep the full window and do not follow a swap. They ask again until it exists.
-		if (!TextureStreaming::PinFull(a_view)) {
+		// ResolveBinding's holders keep the full window and do not follow a swap. They ask again until it exists.
+		if (a_pinFull && !TextureStreaming::PinFull(a_view)) {
 			failure = ResolveFailure::StreamedWindow;
 			return { kInvalid, {} };
 		}
@@ -985,8 +1017,15 @@ namespace DCLF
 	{
 		if (a_kind == ViewKind::Buffer)
 			return { .index = NullBufferIndex(false) };
+		// The null views never change: an empty slot of every draw reuses the one binding until the device's generation moves.
+		auto& cached = impl->nullOf[static_cast<std::size_t>(a_kind)];
+		if (cached.binding.index != kInvalid && cached.generation == Generation() && !Superseded(cached.binding.owner.get()))
+			return cached.binding;
 		auto* view = NullView(a_kind);
-		return view ? ResolveBinding(view, Tag(Source::FamilyNull, static_cast<std::uint32_t>(a_kind))) : Binding{};
+		auto binding = view ? ResolveBinding(view, Tag(Source::FamilyNull, static_cast<std::uint32_t>(a_kind))) : Binding{};
+		if (binding.index != kInvalid && !binding.pending)
+			cached = { binding, Generation() };
+		return binding;
 	}
 
 	std::string GpuTextures::DescribeFailure(ID3D11ShaderResourceView* a_view, std::uint32_t a_slot, ResolveFailure a_failure)
