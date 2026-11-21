@@ -174,6 +174,8 @@ Not part of this plan unless a phase touches them:
 | 4 Build and upload services | in progress | p4-uploads: CS `org-native/extract-p4-uploads`, OMS `extract/p4-uploads` | Needs phase 2's executor. Commit uploads (p4-uploads, code only, not built): OMS `CommitUploads.h` (`CommitUploads`, `LatchedUploads`, `AcquireStagedBatch`, `CommitUploadHooks` with `onError` and an `IUploadBytesSink`), `OwnedRows.h` (`OwnedRow<Row, Binding>`, `DescriptorIndex`), `ContentOwners.h` (`Snapshot(seal)`); tests in OMS `tests/Uploads` (`ORGUploadsTests`, CPU only). DCLF keeps thin subclasses and aliases with its hooks (`RenderGraph::FatalHandler`, FrameData) and the frame-constants names. See "p4-uploads decisions". |
 
 | 4 Build and upload services | in progress | p4-build: CS `org-native/extract-p4-build`, OMS `extract/p4-build` | Needs its A/B perf run. p4-build (code only, not built): the staged build service is OMS `StagedBuilds.h` (`org::services::StagedBuilds`, on an OMS `JobLane`), with `BuildObserver` (poll scope, attach, refusal), `isSteadyState`, `afterBuild` and a log callback in its `Desc`. The build context is OMS `BuildContext.h` (`DeferToAttach`, `DeferToStaging`, `CurrentBuild`); DCLF's serials, built and attached, are OMS `BuildInputs.h`. CS `BuildManager.h` keeps the `Builds::` facade, `MakeBuildManager` and an alias. Tests: OMS `ORGBuildsTests`. See "p4-build decisions". |
+
+| 4 Build and upload services | in progress | p4-bufsets: CS `org-native/extract-p4-bufsets`, OMS `extract/p4-bufsets` | Needs phase 2's executor. Buffer sets and payload versions (p4-bufsets, code only, not built): OMS `GrowableBufferSet` gains `Make`/`GrowableBufferSpec`, buffer-keyed `Require`/`RequireNewer`/`Units`/`MostAsked`, `LatchRegions` registration, `NamedVersions::UnitsOf`, `GrowableUnitGroup` and `GrowableRows`; DCLF `SceneBufferSet`, `UnitGroup`, `GrowableRows` and `NamedUnits` forward to them. The payload's version chains are OMS `BufferChains` (`BufferChains.h`); `PayloadSource` implements `BufferChainSource`, and `PayloadPart`, the late-bound buffers and the frame payload stay in DCLF. OMS test `ORGBufferChainsTests` (no device). See "p4-bufsets decisions". |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
 ### Checks that need a run
@@ -829,3 +831,26 @@ Decided by the agent, to confirm:
   conditions). DCLF's `buildState` member and its free functions stay; their storage is one namespace-scope `BuildInputs`.
 - **No device-free test of `StagedBuilds` itself**: it drives an `org::GraphHost`, which needs a device. `ORGBuildsTests` covers
   the build context and the build inputs.
+
+### p4-bufsets decisions
+
+Decided by the agent, to confirm:
+
+- Payload versions did not merge into `ComposedVersions`/`NamedVersions`. The payload parts are late-bound buffers that the
+  frame publishes per version (`LateRefBuffer`), not `VersionedBuffer`s that a recording resolves through
+  `IResourceVersions`. Naming them in a set would change how the frame binds them. The chains became OMS `BufferChains`
+  over `VersionedBufferBuild` instead: change detection, the journal floor, the held versions, settle and finish, the
+  counters. DCLF keeps the part list, the journals' readers and the frame payload.
+- `BufferChains` makes no pools and posts no graph work itself. The host passes `makePool` (it gets the library's
+  suspension counter as the pool's telemetry), `post` (it gets a `built` hook to run before the version freezes), `wake`
+  and `failed`. DCLF's `post` wraps `built` in its `PayloadPartTag` and calls `SceneGraph::PostPayloadPart` as before, so
+  p4-misc's scene graph helpers are untouched.
+- A failed build calls `failed` every time. DCLF still logs only a part's first failure (its own `reported` flags).
+- `PayloadSource` derives from `BufferChainSource`: its fields are unchanged, and it gains the per-part overrides.
+  `PayloadPools::PartReport` is an alias of `BufferChains::Report` (same fields).
+- `LatchRegions` moved to OMS with the enumerators `PerRun` and `Shared` (OMS style, no `k`). Producer.cpp's two uses
+  changed. `Shared` registers one region (a dedicated block), `PerRun` two (a frame-arena block), as before.
+- DCLF keeps its own `GrowableSpec` (no shrink or address fields). `SceneBufferSet::Make` adds DCLF's shrink policy and
+  `address = true` when it builds the OMS `GrowableBufferSpec`.
+- No device-free test covers the `GrowableBufferSet` additions: a seal needs real `org::Buffer`s. They are thin
+  forwards of what DCLF did; the in-game runs cover them.
