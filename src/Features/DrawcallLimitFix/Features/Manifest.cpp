@@ -67,6 +67,7 @@ namespace DCLF::Features
 			Landscape::kSeamQuadsRegister,
 			Water::WaterScene::kMaterialPoolRegister,
 			Water::WaterScene::kFrameRowRegister,
+			Water::Indirect::kObjectRowsRegister,
 		};
 
 		constexpr bool FrameBindingRegistersValid()
