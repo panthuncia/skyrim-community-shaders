@@ -141,7 +141,7 @@ Not part of this plan unless a phase touches them:
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
 | 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
-| 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
+| 3 Programs and GPU primitives | in progress | `org-native/extract-p3-latched` (ORG `extract/p3-latched`) | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 7 and 8 (p3-latched): ORG `Render/LatchedCopies.h` (types, copy joining, `RecordLatchedCopies`) and `RenderPasses/LatchedCopiesPass.h` (`MakeLatchedCopiesPass`); `IDescriptorService::Null(owner, NullViewKind)` over `NullSrvDesc` (`Render/Runtime/NullViews.h`). DCLF's `Latched.h` is aliases, its pass factory a wrapper, `GpuTextures` null indices use `Null`. ORG test `OpenRenderGraphLatchedCopiesTests`. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
@@ -446,3 +446,24 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p3-latched decisions
+
+Decided by the agent, to confirm:
+
+- The latched copy types and the copy pass go to ORG as two headers: `Render/LatchedCopies.h` (no pass machinery, so
+  DCLF's widely included `Latched.h` pulls in nothing new) and `RenderPasses/LatchedCopiesPass.h`. `LatchedTarget`,
+  `LatchRegionsHeld` and `SetLatchWords` moved too, since they serve only latched copies.
+- `LatchedSource` renamed its host words: `shape` is `owner`, `hosted` is `groups`, `zeros` is `copyFixed`. The
+  aggregate order is unchanged, so only one DCLF line (`source.groups`) changed. DCLF keeps `MakeLatchedCopiesPass` as a
+  wrapper that passes `!cpuPipeline` as `copyFixed`.
+- The copy joining is `org::LatchedCopyRuns`, split out so it can be tested without a device.
+- `IDescriptorService::Null` is virtual with a default over `CreateOwnedShaderResourceView` and makes a new descriptor
+  each call (no cache in the service), because a cached binding would hold the device owner past a device change. Callers
+  keep the binding, as DCLF does.
+- `NullViewKind` covers Texture2D, 2D array, 3D, cube, cube array, typed, structured and raw buffers. Every texture kind
+  gets R8G8B8A8_UNorm with one mip: D3D12 needs a format for a null texture view, and Vulkan's null descriptor depends only
+  on the descriptor type. DCLF's Texture2D, typed (R32_UInt) and structured (stride 4) descriptions are unchanged.
+- DCLF's `NullOf` keeps its D3D11 1x1 views for array, cube and 3D slots. Swapping them for per-dimension null
+  descriptors would change what the engine's draws read (a D3D11 view through the import, not a null descriptor), so it
+  is left for a separate change.
