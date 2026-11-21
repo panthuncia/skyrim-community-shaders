@@ -1576,7 +1576,12 @@ std::shared_ptr<org::Runtime> RenderGraphRuntime::CreateOrgRuntime(const rhi::De
 	org::runtime::SetOpenRenderGraphSettings(settings);
 #endif
 	// The runtime's first run capacity. Its per-lease lists grow past it. ORG's tasks run on CS's executor.
-	return org::Runtime::Create({ .device = a_device.Get(), .backend = RenderGraph::Backend::Active(), .slots = kRunCapacity, .tasks = RenderGraph::Frame::OrgTaskService() });
+	// A failure deep in ORG's services (an unmapped staging page, the uploader's thread stopping) is fatal.
+	return org::Runtime::Create({ .device = a_device.Get(),
+		.backend = RenderGraph::Backend::Active(),
+		.slots = kRunCapacity,
+		.tasks = RenderGraph::Frame::OrgTaskService(),
+		.onError = RenderGraph::FatalHandler("ORG runtime") });
 }
 
 bool RenderGraphRuntime::Initialize()
