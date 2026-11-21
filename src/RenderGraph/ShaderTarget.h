@@ -1,10 +1,11 @@
 #pragma once
 
-// The shader binary format the graph's backend takes. Vulkan takes SPIR-V, D3D12 takes DXIL where the same HLSL
-// indexes the SM 6.6 descriptor heaps. Only for translation units built with the render graph and ORGModuleServices' compiler.
+// The shader binary format the graph's backend takes, from OMS's (ORGModuleServices/Programs/ShaderTarget.h). Vulkan takes
+// SPIR-V, D3D12 takes DXIL. Only for translation units built with the render graph and ORGModuleServices' compiler.
 
 #include "RenderGraph/Backend.h"
 
+#include <ORGModuleServices/Programs/ShaderTarget.h>
 #include <ORGModuleServices/ShaderCompiler.h>
 
 #include <string>
@@ -12,17 +13,14 @@
 
 namespace RenderGraph::ShaderTarget
 {
-	inline org::services::ShaderBinaryFormat Format()
-	{
-		return Backend::IsD3D12() ? org::services::ShaderBinaryFormat::Dxil : org::services::ShaderBinaryFormat::Spirv;
-	}
+	inline org::services::ShaderBinaryFormat Format() { return org::services::ShaderFormatFor(Backend::Active()); }
 
 	inline bool IsSpirv() { return Format() == org::services::ShaderBinaryFormat::Spirv; }
 
-	inline const char* FormatName() { return IsSpirv() ? "SPIR-V" : "DXIL"; }
+	inline const char* FormatName() { return org::services::ShaderFormatName(Format()); }
 
 	/** @brief The define that names the shader API to BasicRHI's shared HLSL. */
-	inline const wchar_t* ApiDefine() { return IsSpirv() ? L"BASICRHI_SHADER_API_VULKAN" : L"BASICRHI_SHADER_API_D3D12"; }
+	inline const wchar_t* ApiDefine() { return org::services::ShaderApiDefine(Format()); }
 
 	/** @brief Sets the request's format. It adds no define, so a Vulkan request keeps its cache key. */
 	inline void Apply(org::services::ShaderCompileRequest& a_request) { a_request.format = Format(); }
