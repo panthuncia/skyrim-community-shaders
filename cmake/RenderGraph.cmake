@@ -93,7 +93,8 @@ if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE TBB::tbb)
-# CS's executor (src/RenderGraph/Async): the frame's lanes, graph and program builds, and DCLF's jobs run on it.
+# CS's executor, OMS's org::async::Executor (src/RenderGraph/Async/Lanes.h): the frame's lanes, graph and program builds, and
+# DCLF's jobs run on it.
 include(${CMAKE_CURRENT_LIST_DIR}/FrameExecutor.cmake)
 target_link_libraries(${PROJECT_NAME} PRIVATE FrameExecutor)
 if(CS_ORG_D3D12)
@@ -114,8 +115,6 @@ message(STATUS "Render graph: OpenRenderGraph from ${CS_ORG_ROOT}")
 
 # Drawcall Limit Fix (src/Features/DrawcallLimitFix/), on ORGModuleServices.
 get_target_property(_cs_dclf_plugin_sources ${PROJECT_NAME} SOURCES)
-# The source glob also finds the executor; it is compiled only in its own library (FrameExecutor), without the game's PCH.
-list(FILTER _cs_dclf_plugin_sources EXCLUDE REGEX "/src/RenderGraph/Async/Executor\.cpp$")
 include("${CS_ORG_ROOT}/ORGModuleServices/cmake/AsyncPrimitives.cmake")
 target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::AsyncPrimitives)
 # DCLF's CPU publication graph shares ORGModuleServices' scheduler/runtime; it is linked explicitly and can be exercised
