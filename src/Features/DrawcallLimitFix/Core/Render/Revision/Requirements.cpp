@@ -77,9 +77,9 @@ namespace DCLF
 					++a_layout.slotsLayout;
 				// A deferred family's key takes room in each deferred range it draws in, and none in the main range.
 				if (Extensions::FamilyRules(flags).deferredRanges) {
-					const auto draws = Extensions::DeferredDrawsOf(a_tables.pipelines[p]);
+					const auto deferredDraws = Extensions::DeferredDrawsOf(a_tables.pipelines[p]);
 					for (std::uint32_t r = 0; r < kDeferredRanges; ++r)
-						if ((draws.ranges >> r) & 1u)
+						if ((deferredDraws.ranges >> r) & 1u)
 							deferred[r] += capacity;
 				} else if (RasterForward(flags))
 					forward += capacity;
