@@ -822,9 +822,9 @@ frame time is unchanged by either, since the worst frames are outside the lane.
 ### Persistent draw state
 
 Every structure built from the tables follows what changed, by log, and sends GPU holders only the runs changed since what they
-hold (`Core/Runtime/KeptState.h`). One implementation each:
+hold (OMS `ORGModuleServices/Async/KeptState.h`, aliased into DCLF by `Core/Runtime/KeptState.h`). One implementation each:
 
--   **Slot tables** (`Core/Runtime/SlotTable.h`). The shared tables (geometries, pipelines, materials) keep slots with generations
+-   **Slot tables** (OMS `ORGModuleServices/Async/SlotTable.h`). The shared tables (geometries, pipelines, materials) keep slots with generations
     and reference counts. Liveness is by reference, never by idle time: `DrainUnreferenced` frees a slot after a complete batch of
     reference changes, in the batch where the last reference went. A freed slot is retired and returns to the free list only once
     no publication names it. References: an object's geometry slot while it has a record, its pipeline and material slots while it
@@ -871,7 +871,7 @@ change), the toggles, a `RevisionRequest`, the oldest event it is the first publ
 -   **A revision is its publication's alone** (tables, lookups, catalog); it never reads what the frame installed. Not a revision
     made from a publication's tables with the frame's installed lookups: it lags a publication and starts a self-sustaining loop of
     superseded revisions.
--   **The publication log** (`Core/Runtime/PublicationLog.h`, forward-linked, one producer, one consumer; nodes are
+-   **The publication log** (OMS `ORGModuleServices/Async/PublicationLog.h`, forward-linked, one producer, one consumer; nodes are
     `PublicationDeltas`): each publication's claims changes (joined, left) and the frame inputs its passes made: placement plans,
     shading names, seed requests, switches applied, retired imports, class membership changes, light-entry changes, component
     deltas (gate flips). The frame start walks the frame inputs up to the newest publication taken and the claims changes up to the
@@ -896,7 +896,7 @@ change), the toggles, a `RevisionRequest`, the oldest event it is the first publ
 
 ### The retirement chain
 
-Nothing is logically freed while a publication that names it lives (`Core/Runtime/Retirement.h`, `RetirementChain`). Each
+Nothing is logically freed while a publication that names it lives (OMS `ORGModuleServices/RetirementChain.h`, `RetirementChain`). Each
 publication holds the chain node opened with it. A node's batch (object, tree, fade-root, extras, bone and face-stream slots, the
 slot tables' slots, lookup retirements, geometry buffer owners, material references, engine references) returns to the
 coordinator's free lists (`RecycleRetired`, first in each pass) once no publication up to it lives. GPU memory has its own,

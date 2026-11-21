@@ -224,10 +224,10 @@ namespace DCLF::Scene
 	{
 		auto& r = slotReferences;
 		using Reference = SlotReferences::Reference;
-		auto referenceTo = [](const SlotTable& a_table, std::uint32_t a_slot) {
+		auto referenceTo = [](const org::async::SlotTable& a_table, std::uint32_t a_slot) {
 			return a_table.Alive(a_slot) ? Reference{ a_slot, a_table.Generation(a_slot) } : Reference{};
 		};
-		auto move = [&](SlotTable& a_table, Reference& a_counted, const Reference& a_now) {
+		auto move = [&](org::async::SlotTable& a_table, Reference& a_counted, const Reference& a_now) {
 			if (a_counted == a_now)
 				return;
 			if (a_counted.slot != SlotReferences::kNone)

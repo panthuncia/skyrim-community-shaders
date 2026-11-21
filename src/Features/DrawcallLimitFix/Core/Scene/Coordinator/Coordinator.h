@@ -29,13 +29,13 @@
 #include "Features/DrawcallLimitFix/Api/EntryRanges.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneIdentity.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/SlotTable.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/Retirement.h"
+#include <ORGModuleServices/Async/SlotTable.h>
+#include <ORGModuleServices/RetirementChain.h>
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
 #include "RenderGraph/Async/EventQueue.h"
 #include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/PublicationLog.h"
+#include <ORGModuleServices/Async/PublicationLog.h>
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
@@ -443,7 +443,7 @@ namespace DCLF
 			std::uint64_t lastPublication = 0;           // the last publication that held its node (EngineReleases::NoteReleased)
 			bool Empty() const { return slots.empty() && imports.empty() && references.empty() && owners.empty(); }
 		};
-		RetirementChain<RetiredBatch> retirement;
+		org::services::RetirementChain<RetiredBatch> retirement;
 		std::size_t referencesReleased = 0;  // since the last report
 		void ReleaseMaterial(MaterialReference&& a_material)
 		{
