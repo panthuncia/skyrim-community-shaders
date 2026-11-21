@@ -692,3 +692,32 @@ final until the user confirms it.
      take the extraction plan's "library work CS needs but does not own": `lib-msaa` (ORG multisampled views),
      `lib-builds` (an any-thread Builds snapshot, owner-thread checks on GraphHost), `lib-arrays` (array-size
      versions, LLF's slot count live), `lib-errors` (the remaining library throws onto decision 115).
+133. **lib-msaa: ORG multisampled views (to confirm).** Textures with a sample count above 1 get MS SRVs, RTVs and
+     DSVs; misuse (UAV, mips, cube, 3D) throws; `ContributorHost` accepts MS 2D textures. The Vulkan failure of the
+     new OMS `ORGResolveMultisampleTests` was the test's: it declared `RenderTargetClear` for a load-op clear, which
+     Vulkan lays out as TRANSFER_DST, not COLOR_ATTACHMENT (D3D12 uses one layout for both). ORG's contributor host
+     declared its CLEAR kinds the same way; now `RenderTarget`/`DepthReadWrite` (ORG `ff2fc5b`). The test passes on
+     WARP, the RX 6600's D3D12 and Vulkan with validation clean. The agent's choices are in the plan's "lib-msaa
+     decisions".
+134. **lib-errors: the convention reaches the runtime and OMS pools (to confirm).** ORG `Runtime::Desc::onError`
+     (CS passes the fatal handler) takes the upload staging debug breaks and the copy-queue thread's exceptions. OMS
+     backing allocation and growth return their failures. Setup and misuse checks stay throws, and ORG's graph engine
+     keeps its throws, which it unwinds with; GraphHost already maps a failed graph. Inventory and reasons in the
+     plan's "lib-errors decisions".
+135. **lib-builds: `GraphHost::BuildsOf` and owner-thread asserts (to confirm).** Any thread reads one consistent
+     {attached, staged} pair (a sequence count the owner writes). DCLF's prune moved into ORG's cache, so the attached
+     build's recordings stay while a build is staged. GraphHost's "Owner thread" calls assert the thread when
+     `ORG_THREAD_CHECKS` is set (default without `NDEBUG`), so Dev-Fast and Release don't check; no checked CS run
+     yet. Calls whose thread was unconfirmed are listed in the plan.
+136. **lib-arrays: array-size versions; LLF's slot count switches in live (to confirm).** Supersedes decision 88's
+     restart. A pending version of another slice count is the resource's reshaped version; detached builds lower for
+     it, and the frame revision adopts once no epoch awaits graphs of the old count. `llf-slots-live` (16, 8, 32, 4,
+     24, 16 slots in Dragonsreach) passes in all three modes with each change logged and no tap errors. The test
+     needed `RenderGraph::PersistentDeclaredVersions` public (ORG `lib/integ`).
+137. **Library work merged and checked (2026-11-21).** ORG and OMS `lib/integ` hold the four items and the MSAA fix.
+     Library tests 76 of 79 (the Leases timeouts). Game checks `lib1` and `lib2`: river and shader-reload in all three
+     modes, guest shader-reload-resize, dclf-toggles in guest and native Vulkan, llf-slots-live in all three; all pass.
+     Perf-quick (Dev-Fast /Od, one sample): guest 56.2, Vulkan 57.0, D3D12 43.8 fps, unchanged. Open:
+     `OpenRenderGraphCopyQueueUploadTests` failed twice (a ticket never reached Submitted in 5 s) and then passed four
+     times on builds with and without the new code, so it is intermittent; the D3D12 llf-slots-live run averaged
+     22.3 fps against Vulkan's 63.8 in Dragonsreach, with no older D3D12 sample there to compare.
