@@ -3,6 +3,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
 
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
@@ -436,6 +437,7 @@ namespace DCLF::Family
 
 	bool DescribeStates(ProgramKey& a_key, ID3D11BlendState* a_blend, ID3D11DepthStencilState* a_depthStencil, ID3D11RasterizerState* a_raster)
 	{
+		DCLF_ZONE("CS.DCLF.Family.DescribeStates");
 		const auto blend = a_blend ? Pipeline::FindBlend(a_blend) : nullptr;
 		const auto raster = a_raster ? Pipeline::FindRaster(a_raster) : nullptr;
 		if (!blend || !raster)

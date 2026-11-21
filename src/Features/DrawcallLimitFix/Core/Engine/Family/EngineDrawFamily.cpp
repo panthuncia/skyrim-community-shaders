@@ -3,6 +3,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
@@ -68,11 +69,15 @@ namespace DCLF::Family
 		{
 			static void thunk(void* a_renderer, TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 			{
+				DCLF_ZONE("CS.DCLF.Family.DrawTriShape");
 				if (a_shape)
 					SetDrawState(a_shape->vertexDesc);
 				for (const auto& taker : Takers())
-					if (taker.take(a_shape, a_start, a_triangles))
+					if (taker.take(a_shape, a_start, a_triangles)) {
+						ZoneText(taker.family.data(), taker.family.size());
 						return;
+					}
+				ZoneText("engine", 6);
 				func(a_renderer, a_shape, a_start, a_triangles);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -96,11 +101,14 @@ namespace DCLF::Family
 		{
 			static void thunk(void* a_renderer, DynamicDrawData* a_data, void* a_arg3, std::uint32_t a_start, std::uint32_t a_triangles)
 			{
+				DCLF_ZONE("CS.DCLF.Family.DrawDynamic");
 				if (a_data) {
 					SetDrawState(a_data->vertexDesc);
 					for (const auto& taker : DynamicTakers())
-						if (taker.take(a_data, a_start, a_triangles))
+						if (taker.take(a_data, a_start, a_triangles)) {
+							ZoneText(taker.family.data(), taker.family.size());
 							return;
+						}
 				}
 				func(a_renderer, a_data, a_arg3, a_start, a_triangles);
 			}
@@ -282,6 +290,7 @@ namespace DCLF::Family
 	GeometryResult LatchGeometry(const TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::uint64_t a_shaderVertexDesc,
 		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners, std::string* a_detail)
 	{
+		DCLF_ZONE("CS.DCLF.Family.LatchGeometry");
 		if (!a_shape || !a_shape->vertexBuffer || !a_shape->indexBuffer)
 			return GeometryResult::Missing;
 		if (a_topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
@@ -410,10 +419,42 @@ namespace DCLF::Family
 	SlotResult SlotTexture(ID3D11ShaderResourceView* a_view, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, std::uint32_t& a_index, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure)
 	{
+		DCLF_ZONE("CS.DCLF.Family.SlotTexture");
 		auto& textures = GpuTextures::Get();
 		if (a_view && PublishedResources::IsExport(a_view))
 			return SlotResult::Published;
+		// A frame's draws mostly share their textures (water's distant tiles, the sky's layers), so a view resolves once a frame.
+		// The cache holds a reference to each view, so a freed view's address cannot name another texture within the frame.
+		struct Cached
+		{
+			winrt::com_ptr<ID3D11ShaderResourceView> view;
+			GpuTextures::Binding binding;
+		};
+		thread_local std::vector<Cached> cache;
+		thread_local std::uint64_t cacheFrame = ~0ull;
+		thread_local std::uint32_t cacheGeneration = ~0u;
+		if (a_view) {
+			const std::uint64_t frame = ::RenderGraph::Frame::Driver::Current().frame;
+			if (cacheFrame != frame || cacheGeneration != textures.Generation()) {
+				cache.clear();
+				cacheFrame = frame;
+				cacheGeneration = textures.Generation();
+			}
+			for (const auto& entry : cache)
+				if (entry.view.get() == a_view && !GpuTextures::Superseded(entry.binding.owner.get())) {
+					a_index = entry.binding.index;
+					if (entry.binding.owner)
+						a_owners.push_back(entry.binding.owner);
+					return SlotResult::Ok;
+				}
+		}
 		auto binding = a_view ? textures.ResolveBinding(a_view, a_tag, a_failure) : textures.NullOf(a_kind);
+		if (a_view && binding.index != GpuTextures::kInvalid && !binding.pending && cache.size() < 256) {
+			Cached entry;
+			entry.view.copy_from(a_view);
+			entry.binding = binding;
+			cache.push_back(std::move(entry));
+		}
 		if (binding.index == GpuTextures::kInvalid)
 			return SlotResult::Failed;
 		a_index = binding.index;

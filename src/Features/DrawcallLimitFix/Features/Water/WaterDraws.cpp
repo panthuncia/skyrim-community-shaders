@@ -6,6 +6,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "RenderGraph/Engine/Engine.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/FamilyClient.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
@@ -45,7 +46,8 @@ namespace DCLF::Features::Water::WaterDraws
 		constexpr const char* kShader = "Water.hlsl";
 		constexpr std::uint32_t kMaxDraws = 64;
 		// A declared segment commits all of a view's runs of a frame into one run, so one execution holds several runs' draws.
-		constexpr std::uint32_t kExecutionDraws = 4 * kMaxDraws;
+		// Unified Water's distant water reached 301 at Riverwood's river (2026-11-20).
+		constexpr std::uint32_t kExecutionDraws = 8 * kMaxDraws;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawLatch));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
@@ -306,7 +308,8 @@ namespace DCLF::Features::Water::WaterDraws
 					const auto& earlier = *client->committed;
 					if (earlier.headerIndices != run->headerIndices || earlier.draws.size() + run->draws.size() > kExecutionDraws) {
 						logger::error("[DCLF] water: a second {} run in one segment run {}; it draws nothing", client->id,
-							earlier.headerIndices != run->headerIndices ? "reads other headers" : "has too many draws");
+							earlier.headerIndices != run->headerIndices ? std::string("reads other headers") :
+																		  fmt::format("has too many draws ({} after {}, {} at most)", run->draws.size(), earlier.draws.size(), kExecutionDraws));
 						return;
 					}
 					auto merged = std::make_shared<Run>();
@@ -389,6 +392,7 @@ namespace DCLF::Features::Water::WaterDraws
 
 	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
 	{
+		DCLF_ZONE("CS.DCLF.Water.Program");
 		return GetState().programs.Get(a_key, a_shader);
 	}
 

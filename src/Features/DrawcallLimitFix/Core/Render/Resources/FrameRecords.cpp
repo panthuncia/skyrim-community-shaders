@@ -1,4 +1,5 @@
 // Writers for the frame record, the frame-wide rows and the frame buffers' copies. Render thread.
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
 #include "RenderGraph/BufferRefs.h"
@@ -216,6 +217,7 @@ namespace DCLF::Draws
 		}
 		// A superseded import holds its old storage and that storage's chunk for as long as it is held here.
 		if (a_heldView != a_view || !a_held.owner || a_held.index == GpuTextures::kInvalid || GpuTextures::Superseded(a_held.owner.get())) {
+			DCLF_ZONE("CS.DCLF.FrameRecords.HoldFrameTexture");
 			a_heldView = a_view;
 			a_held = GpuTextures::Get().ResolveBinding(a_view, GpuTextures::Tag(GpuTextures::Source::FrameSlot, a_register));
 		}
