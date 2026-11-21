@@ -140,7 +140,7 @@ Not part of this plan unless a phase touches them:
 |---|---|---|---|
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
-| 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
+| 2 Services with clean cuts | in progress | p2-recordings: CS `org-native/extract-p2-recordings`, ORG `extract/p2-recordings` | Executor and retirement join need A/B perf runs. p2-recordings: EpochRecordings is ORG `OpenRenderGraph/EpochRecordings.h` (`org::epoch_recordings`); CS keeps a forwarding header whose `Cache` passes `RenderGraph::Fatal`. Not built yet. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
@@ -446,3 +446,23 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p2-recordings decisions
+
+Decided by the agent, to confirm:
+
+- **ORG, not OMS.** It wraps one GraphHost call and its types, and ORG's no-device tests can cover it. It lives beside
+  `GraphHost.h` as `include/OpenRenderGraph/EpochRecordings.h`, with `src/Host/EpochRecordings.cpp`.
+- **Failures go to an `OnFailure(what, error)` hook** given to the `Cache` constructor. A failed request reports when it
+  settles, then settles its entry with the error. A failed kept entry reports at `Find`, then goes and the lookup misses.
+  `Request` alone passes `Outcome::Failed` to its done. CS's `Cache` subclass passes `RenderGraph::Fatal`, so both stay
+  fatal at the same points with the same messages.
+- **`Posting { Posted, Refused }`** replaces the bool from `Request` and `Cache::Post`.
+- **The hash is a template parameter** (`Cache<Key, Keep, Rule, Hash, Payload>`). `Find` and `Add` hash the key. Frame
+  segments hash the fields only (`SegmentKeyHash`), as before, so its `AnyOf` checks by hash still work.
+- **Owner-thread fields stay on `Entry`; the locked part is a separate `Settle` block** that the host's thread holds alone.
+  Predicates read it through `Entry::LockedStatus()`. An erased entry's key and payload are now freed before its requests
+  settle. Nothing read them after the erase.
+- **The counters (`Read()`) stay process-wide in ORG.** A failed request is not counted, as before.
+- **`Cache::Post` has a requester overload** (`Post(entry, count, what, requester, settled)`) that the GraphHost overload
+  uses. The tests post through it.
