@@ -154,6 +154,8 @@ Not part of this plan unless a phase touches them:
 | 2 Services with clean cuts | in progress | p2-recordings: CS `org-native/extract-p2-recordings`, ORG `extract/p2-recordings` | Executor and retirement join need A/B perf runs. p2-recordings: EpochRecordings is ORG `OpenRenderGraph/EpochRecordings.h` (`org::epoch_recordings`); CS keeps a forwarding header whose `Cache` passes `RenderGraph::Fatal`. Not built yet. |
 
 | 2 Services with clean cuts | in progress | p2-retire: CS `org-native/extract-p2-retire`, OMS `extract/p2-retire` | Executor and retirement join need A/B perf runs. p2-retire (code only, unbuilt): retirement join is OMS `RetirementJoin` + `GraphHostRetirement` (CS `Async/Retirement` is a facade); pooled-backing defaults are OMS `GraphHostBackings.h` (DCLF `PooledBackings` passes its switches); CPU recording pools are OMS `RecordingPools.h` (`BumpArena`, `ResetPools`, `RecordingSlot`) + `SecondaryListPool.h`. Tests: OMS `ORGRetirementTests`. |
+
+| 2 Services with clean cuts | in progress | p2-birth: CS `org-native/extract-p2-birth`, OMS `extract/p2-birth` | Executor and retirement join need A/B perf runs. p2-birth (code only, not built): OMS `TexelEncoding.h` (`EncodeTexel` on `rhi::Format`, `ValueFillWriter`), `TextureContents::Value`; CS `Birth.cpp` deleted, `Birth::Fill` takes `org::TextureFillWriter`. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 
 | 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
@@ -643,3 +645,23 @@ Decided by the agent, to confirm:
   thread pushes and one thread (the render thread) takes. "Retirement comes in as a callback" is `ResetPools`' `Defer`,
   which DCLF points at its executor's preparation lane, with the same zone.
 - **Library error text** for a structured backing past `uint32` elements drops the `[DCLF]` prefix.
+
+### p2-birth decisions
+
+Decided by the agent, to confirm:
+
+- **The encoder lives in its own OMS header**, `TexelEncoding.h` (included by `VersionedTextureGrowth.h`), so a CPU-only test
+  can cover it without a device.
+- **OMS converts half floats and R11G11B10 itself**, a bit-for-bit port of DirectXMath's software paths
+  (`XMConvertFloatToHalf`, `XMStoreFloat3PK`), since the library is not Windows-only. CS built without F16C, so it ran the
+  same software path. `ORGTexelEncodingTests` compares every format against the old DXGI-keyed encoder on DirectXMath.
+  DirectXMath's blue channel shifts a value below about 1e-13 by 32 or more (undefined in C++); OMS masks the count to five
+  bits as x86 does, and the test skips that range.
+- **`TextureVersionRequest` names the value's format** (`valueFormat`), since an image version has no common format
+  accessor. Unknown reads it from a `PixelBuffer` or `ExternalTextureResource`. CS passes the declared format, which is what
+  `EncodeTexel` was keyed on before.
+- **CS still builds the Value writer in `Prepare`**: a guest export takes the birth as DXVK's wrap data, and a format with no
+  encoding still fails there with the same message. Graph-only and native exports now go as `TextureContents::Value`.
+- **Floating-point mode:** CS's code built with `/fp:fast`, OMS builds with the default. Only the sRGB `pow` could differ, in
+  the last bit before rounding to 8 bits. No CS birth uses an sRGB format (they use R16G16B16A16_FLOAT, R16_FLOAT, R8_UNORM,
+  R8_UINT, and R32_UINT for a Fill).
