@@ -212,6 +212,9 @@ namespace RenderGraph::Frame::Revision
 			std::vector<Extent> from;  // each twin's extent when planned
 			std::vector<Extent> to;
 			std::vector<std::uint64_t> renews;  // each twin's renew serial when planned
+			// The 2D slots whose slice count it changes, or whose pending new count it takes back, with the count each gets (ORG
+			// array-size versions). Graphs built for those counts switch in with it.
+			std::vector<std::pair<std::shared_ptr<org::VersionedTexture>, std::uint32_t>> reshapes;
 			std::vector<BufferRequest> bufferRequests;
 			std::vector<TextureRequest> textureRequests;  // kept until adoption, so a superseded revision can give them back
 			// The newest variables when it started, and the names of those changed since the revision before.
@@ -249,6 +252,9 @@ namespace RenderGraph::Frame::Revision
 			std::uint64_t askedAgain = 0;
 			std::uint32_t recordingCount = 0;
 			std::uint32_t buildCount = 0;
+			// Render thread: whether the builds for its reshapes were asked for, and the epochs asked.
+			bool reshapeBuildsAsked = false;
+			std::vector<std::uint32_t> reshapeEpochs;
 		};
 
 		struct RevisionStats
@@ -474,6 +480,53 @@ namespace RenderGraph::Frame::Revision
 			return true;
 		}
 
+		/** @brief The epochs whose attached or staged graph declares a slot a_revision gives a new slice count. Render thread. */
+		std::vector<std::uint32_t> ReshapeClosure(const PreparedRevision& a_revision)
+		{
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (!host || a_revision.reshapes.empty())
+				return {};
+			std::vector<const org::IVersionedResource*> slots;
+			for (const auto& [slot, slices] : a_revision.reshapes)
+				slots.push_back(slot.get());
+			return host->EpochsDeclaring(slots);
+		}
+
+		/**
+		* @brief Whether a_fragment would attach a staged build of an epoch that declares a slot a_revision reshapes. Such a build may
+		* be lowered for the new slice count, so it attaches only with that revision. Render thread.
+		*/
+		bool TouchesReshape(const PreparedRevision& a_revision, const Fragment& a_fragment)
+		{
+			if (a_revision.reshapes.empty())
+				return false;
+			std::vector<std::uint32_t> staged;
+			std::string why;
+			if (!FragmentBuildsReady(a_fragment, staged, why) || staged.empty())
+				return false;
+			const auto closure = ReshapeClosure(a_revision);
+			return std::ranges::any_of(staged, [&](std::uint32_t a_epoch) { return std::ranges::find(closure, a_epoch) != closure.end(); });
+		}
+
+		/**
+		* @brief Whether a_fragment's recordings are on the staged builds of a_revision's reshape epochs, where one is staged. Those
+		* builds are lowered for the new slice counts. Render thread.
+		*/
+		bool FragmentOnReshapeBuilds(const PreparedRevision& a_revision, const Fragment& a_fragment)
+		{
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (!host)
+				return true;
+			for (const auto& [epoch, build] : a_fragment.builds) {
+				if (std::ranges::find(a_revision.reshapeEpochs, epoch) == a_revision.reshapeEpochs.end())
+					continue;
+				const std::uint64_t staged = host->StagedGeneration(epoch);
+				if (staged && build != staged)
+					return false;
+			}
+			return true;
+		}
+
 		/**
 		* @brief Attaches the staged builds a_fragment was recorded on. False when it cannot be adopted: it is dropped then. Render
 		* thread, inside the adoption point.
@@ -533,6 +586,11 @@ namespace RenderGraph::Frame::Revision
 				const auto text = fmt::format("its recordings name the frame versions of revision {}, and the frame runs those of revision {}", fragment.frameVersions,
 					state.adoptedVersions);
 				DropFragment(a_coordinator, state, std::move(fragment), FragmentDrop::Stale, text);
+				return false;
+			}
+			if (const auto* preparing = a_coordinator.preparing.get(); preparing && TouchesReshape(*preparing, fragment)) {
+				DropFragment(a_coordinator, state, std::move(fragment), FragmentDrop::Superseded,
+					"its staged builds are for a new slice count, which attach with their frame revision");
 				return false;
 			}
 			if (!AttachFragmentBuilds(a_coordinator, state, fragment))
@@ -825,10 +883,17 @@ namespace RenderGraph::Frame::Revision
 			if (host && !a_coordinator.extents.empty() && a_coordinator.plannedSerial != a_coordinator.extentSerial) {
 				for (auto it = a_coordinator.extents.begin(); it != a_coordinator.extents.end();) {
 					auto& [twin, input] = *it;
-					if (input.alive.expired() || (!input.renew && twin->CurrentExtent() == input.extent)) {
+					// A 2D texture's slice count is the extent's third value. A new one is a reshape (ORG array-size versions), and so is
+					// a pending one that this extent takes back: graphs may be staged for it, and must be built again.
+					const bool array2D = dynamic_cast<GraphResources::Texture2D*>(twin) != nullptr;
+					const auto& slot = twin->Versioned();
+					const bool reshapePending = !input.alive.expired() && array2D && slot && slot->Reshaped();
+					if (input.alive.expired() || (!input.renew && twin->CurrentExtent() == input.extent && !reshapePending)) {
 						it = a_coordinator.extents.erase(it);
 						continue;
 					}
+					if (array2D && slot && (reshapePending || twin->CurrentExtent()[2] != input.extent[2]))
+						job->reshapes.emplace_back(slot, input.extent[2]);
 					auto plan = twin->PlanPrepare(input.extent);
 					if (!plan)
 						RenderGraph::Fatal("frame revision", fmt::format("{} has no version at {}: {}", twin->Name(), ExtentText(input.extent),
@@ -1149,6 +1214,41 @@ namespace RenderGraph::Frame::Revision
 			return slots;
 		}
 
+		/**
+		* @brief For a revision that changes slice counts (ORG array-size versions): asks once, after its versions are made, for new
+		* graphs of every epoch that declares those slots. They are lowered for the new counts (GraphHost::BuildEpochGraph). Then
+		* whether no epoch would run a graph lowered for another count after the adoption (GraphHost::EpochsAwaitingSlices). True
+		* without reshapes. Render thread.
+		*/
+		bool ReshapeBuildsReady(PreparedRevision& a_revision)
+		{
+			if (a_revision.reshapes.empty() || !a_revision.host)
+				return true;
+			if (!a_revision.reshapeBuildsAsked) {
+				a_revision.reshapeBuildsAsked = true;
+				a_revision.reshapeEpochs = ReshapeClosure(a_revision);
+				std::vector<std::string> counts;
+				for (const auto& [slot, slices] : a_revision.reshapes) {
+					const auto current = slot->CurrentResource();
+					counts.push_back(fmt::format("{} {} to {}", current ? current->GetName() : std::string("?"), current ? current->GetArraySize() : 0u, slices));
+				}
+				logger::info("[ORG] frame revision {}: new slice counts ({}); graphs of epochs [{}] are built for them and switch in with it", a_revision.serial,
+					fmt::join(counts, ", "), fmt::join(a_revision.reshapeEpochs, ", "));
+				if (!a_revision.reshapeEpochs.empty())
+					RenderGraph::Builds::Ask({ .epochs = a_revision.reshapeEpochs }, fmt::format("frame revision {}: new slice counts", a_revision.serial));
+			}
+			std::vector<std::uint32_t> awaiting;
+			for (const auto& [slot, slices] : a_revision.reshapes)
+				for (const auto epoch : a_revision.host->EpochsAwaitingSlices(*slot, slices))
+					if (std::ranges::find(awaiting, epoch) == awaiting.end())
+						awaiting.push_back(epoch);
+			if (awaiting.empty())
+				return true;
+			static Util::ReasonLog s_awaiting("[ORG] frame revision: a new slice count waits for graphs built for it");
+			s_awaiting.Report(fmt::format("epochs [{}]", fmt::join(awaiting, ", ")), fmt::format("revision {}", a_revision.serial));
+			return false;
+		}
+
 		/** @brief Whether every build a_fragment's recordings are of pins pipeline generation a_generation or a newer one. */
 		bool FragmentPinned(const Fragment& a_fragment, std::uint64_t a_generation)
 		{
@@ -1231,6 +1331,9 @@ namespace RenderGraph::Frame::Revision
 			const bool buffersReady = FragmentReady(revision, revision.buffersFragment.get(), "buffer uploads");
 			if (!texturesReady || !buffersReady)
 				return;
+			// A new slice count records and adopts only on graphs built for it. Frames keep the adopted revision meanwhile.
+			if (!ReshapeBuildsReady(revision))
+				return;
 			std::vector<std::shared_ptr<org::VersionedBuffer>> held;
 			if (!revision.recordings) {
 				std::shared_ptr<const org::IResourceVersions> textures = revision.made ? revision.made->named : nullptr;
@@ -1286,6 +1389,13 @@ namespace RenderGraph::Frame::Revision
 				if (HasSourceMember(&revision, s) && state.drawing && !state.held) {
 					static Util::ReasonLog s_noFragment("[ORG] frame revision: a revision waits for a drawing source's fragment");
 					s_noFragment.Report(fmt::format("source {}{}", s, revision.pipelineGeneration ? " (shader reload)" : ""));
+					return;
+				}
+				// After a new slice count the fragment must be on the graphs built for it. The source records one on them, as they are
+				// staged, and it replaces this one.
+				if (!revision.reshapeEpochs.empty() && HasSourceMember(&revision, s) && state.held && !FragmentOnReshapeBuilds(revision, *state.held)) {
+					static Util::ReasonLog s_reshapeFragment("[ORG] new slice count: the revision waits for a fragment on the graphs built for it");
+					s_reshapeFragment.Report(fmt::format("source {}", s));
 					return;
 				}
 				// After a shader reload the fragment must be on the rebuilt graphs. The source records one on them once they are

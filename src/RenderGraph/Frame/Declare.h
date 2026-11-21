@@ -157,7 +157,11 @@ namespace RenderGraph::Frame
 	using DeclaredTexture2D = DeclaredTexture<GraphResources::Texture2D>;
 	using DeclaredTexture3D = DeclaredTexture<GraphResources::Texture3D>;
 
-	/** @brief A description from the inputs. Only the extent may change between revisions (same format, mips, slices, flags). */
+	/**
+	* @brief A description from the inputs. Only the extent may change between revisions (same format, mips, flags). A 2D texture's
+	* ArraySize may change too (ORG array-size versions): its revision switches in with graphs built for the new count, so it takes
+	* a few frames longer than a new extent. A cube's faces and whether its views are arrays stay.
+	*/
 	using Texture2DDescFn = std::function<D3D11_TEXTURE2D_DESC(const Inputs&)>;
 	using Texture3DDescFn = std::function<D3D11_TEXTURE3D_DESC(const Inputs&)>;
 
@@ -601,7 +605,7 @@ namespace RenderGraph::Frame
 			return Values().Get(a_setting);
 		}
 
-		/** @brief The extent of the bound version (width, height, depth). */
+		/** @brief The extent of the bound version: width, height, and depth (3D) or slice count (2D). */
 		template <class Twin>
 		std::array<std::uint32_t, 3> Extent(const DeclaredTexture<Twin>& a_texture) const
 		{

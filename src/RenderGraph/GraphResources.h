@@ -179,7 +179,7 @@ namespace GraphResources
 	*/
 	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads, UploadGate a_gate = {});
 
-	/** @brief A texture's width, height and depth (1 for a 2D texture). */
+	/** @brief A texture's width, height, and depth (3D) or slice count (2D). A version may change any of them (ORG array-size versions for the slices). */
 	using Extent = std::array<UINT, 3>;
 
 	/** @brief What a new version holds before its first write. */
@@ -266,7 +266,7 @@ namespace GraphResources
 		virtual Extent CurrentExtent() const { return {}; }
 
 		/** @brief Why Prepare makes no version at a_next, or nothing when it makes one. Prepare needs a versioned texture, live,
-		*  whose shape class holds there (format, mip count, slice count). Any thread. */
+		*  whose shape class holds there (format, mip count, a cube's faces, array views). Any thread. */
 		std::optional<std::string> WhyNotPreparable(const Extent& a_next) const;
 
 		/**
