@@ -70,7 +70,7 @@ namespace DCLF::Features::Water::Port
 			auto match = [&](auto a_count, auto a_name) -> std::string {
 				for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(a_count); ++i) {
 					const auto place = PlacementOf(static_cast<decltype(a_count)>(i));
-					if (!place.present || place.group != a_group || a_row < place.row || a_row >= place.row + place.rows)
+					if (!place.present || place.group != a_group || a_row < place.row || a_row >= static_cast<std::uint32_t>(place.row + place.rows))
 						continue;
 					const std::string name = a_name(static_cast<decltype(a_count)>(i));
 					return place.rows > 1 ? std::format("{}[{}]", name, a_row - place.row) : name;
