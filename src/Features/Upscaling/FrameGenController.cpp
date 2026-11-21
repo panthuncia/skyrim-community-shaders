@@ -2,11 +2,12 @@
 
 #include "../HDRDisplay.h"
 #include "../Upscaling.h"
-#include "DXVKInterop.h"
+#include "FramePresenter.h"
+#include "PresentationRevision.h"
 #include "Streamline.h"
 
 #include "../../Globals.h"
-#include "../../RenderGraph/Switches.h"
+#include "../../RenderGraph/Engine/Native/Native.h"
 #include "../../Utils/Game.h"
 
 namespace FrameGen
@@ -16,7 +17,8 @@ namespace FrameGen
 		Method DesiredMethod()
 		{
 			auto& upscaling = globals::features::upscaling;
-			if (!upscaling.IsFrameGenerationActive())
+			// Not IsFrameGenerationActive: its surface is not ready while a replacement the controller asked for is in flight.
+			if (!upscaling.IsFrameGenerationSelected())
 				return Method::kNone;
 			return upscaling.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG
 			           ? Method::kDLSSG
@@ -53,10 +55,20 @@ namespace FrameGen
 			return hdr.loaded && hdr.IsHDREnabledForFrame();
 		}
 
-		void BeginPresenterRecreateTransition()
-		{
-			DXVKInterop::GetSingleton()->BeginPresenterColorSpaceTransition(IsHDRActive(), true);
-		}
+	}
+
+	PresentationConfig Controller::Presentation(Method a_method)
+	{
+		const auto& upscaling = globals::features::upscaling;
+		// Native bakes the vsync into a presentation layer's swap chain, so DLSS-G's own vsync limit (SL-VSYNC-011) applies here.
+		// Guest forces the sync interval per present instead (Hooks.cpp).
+		const bool dlssgNoVsync = a_method == Method::kDLSSG && RenderGraph::Engine::Native::Active() && !Streamline::GetSingleton()->IsDLSSGVsyncSupported();
+		return { .method = a_method, .hdr = IsHDRActive(), .vsync = upscaling.settings.vsync && !dlssgNoVsync, .tearing = upscaling.GetPresentModePreference() != 0 };
+	}
+
+	void Controller::RequestPresentation(Method a_method, const char* a_reason)
+	{
+		awaitedRequest = PresentationRevision::Request(Presentation(a_method), a_reason);
 	}
 
 	const char* Controller::Name(Method a_method)
@@ -86,30 +98,11 @@ namespace FrameGen
 		auto* streamline = Streamline::GetSingleton();
 
 		if (faultRecoveryRequested) {
-			if (!faultRecoveryRequested) {
-				auto* dxvk = DXVKInterop::GetSingleton();
-				const bool completionProven = dxvk->WaitDeviceIdle();
-				if (!completionProven) {
-					// Once only: this re-enters every reconcile, and a fault that cannot prove
-					// completion would otherwise log on every frame for the rest of the session.
-					static bool deferralReported = false;
-					if (!std::exchange(deferralReported, true))
-						logger::error("[FrameGen] fault teardown deferred because GPU completion could not be proven");
-					return;
-				}
-				streamline->SetDLSSGDesiredLoaded(false);
-				streamline->SetFSRFGDesiredLoaded(false);
-				faultRecoveryRequested = true;
-				BeginPresenterRecreateTransition();
-				Streamline::RequestDxvkSwapchainRecreate("frame-generation fault teardown");
-				phase = Phase::kTransitioning;
-				logger::error("[FrameGen] fault reported; forcing frame-generation teardown at swapchain recreation");
-			}
 			if (phase == Phase::kTransitioning) {
 				if (!streamline->IsDLSSGLoadSettled() || !streamline->IsFSRFGLoadSettled() ||
 					streamline->IsDLSSGLoaded() || streamline->IsFSRFGLoaded())
 					return;
-				if (!DXVKInterop::GetSingleton()->DrainCommandRing()) {
+				if (!ActivePresenter().Quiesce(Method::kFSR)) {
 					logger::error("[FrameGen] fault cleanup deferred because command completion could not be proven");
 					return;
 				}
@@ -127,6 +120,19 @@ namespace FrameGen
 			return;
 		StepLoadState(target);
 		StepFSRDelivery(target);
+		StepDLSSGVsync(target);
+	}
+
+	void Controller::StepDLSSGVsync(Method a_target)
+	{
+		// A presentation layer that keeps the vsync its swap chain was made with (native's) makes a change a replacement.
+		if (a_target != Method::kDLSSG || phase != Phase::kIdle || owner != Method::kDLSSG || !Streamline::GetSingleton()->IsDLSSGLoaded())
+			return;
+		const auto layerVsync = ActivePresenter().LayerVsync();
+		if (PresentationRevision::Pending() || !layerVsync)
+			return;
+		if (Presentation(Method::kDLSSG).vsync != *layerVsync)
+			RequestPresentation(Method::kDLSSG, "DLSS-G vsync change");
 	}
 
 	void Controller::StepPhaseCompletion()
@@ -135,7 +141,10 @@ namespace FrameGen
 			return;
 
 		auto* sl = Streamline::GetSingleton();
-		if (!sl->IsDLSSGLoadSettled() || !sl->IsFSRFGLoadSettled())
+		auto& presenter = ActivePresenter();
+		// The adopted revision's swap chain has the config asked for, and the features' load changes ran with it.
+		if (presenter.AdoptedSerial() < awaitedSerial || !PresentationRevision::Has(awaitedRequest) || !sl->IsDLSSGLoadSettled() ||
+			!sl->IsFSRFGLoadSettled())
 			return;
 
 		if (sl->IsDLSSGLoaded()) {
@@ -151,30 +160,13 @@ namespace FrameGen
 			owner = Method::kFSR;
 		} else {
 			owner = Method::kNone;
-			Streamline::PushDxvkSyncPresent(false);
 		}
 
 		phaseCompletionRetries = 0;
 		phase = Phase::kIdle;
 		logger::info("[FrameGen] FG method switch settled - present owner: {}", Name(owner));
 
-		// The proxy is installed and steady now, so relax the fully-synchronous present used across
-		// the switch itself into a bounded overlap. Depth zero blocks the render thread in
-		// waitForSubmission on every present; measured with FSR-FG that left the GPU idle 33% of the
-		// frame while the CPU was the limiter.
-		//
-		// This needs the bounded middle regime specifically -- neither extreme of dxvkSetSyncPresent
-		// works. Fully synchronous wedges the swapchain recreate that installs the FFX wrap, and
-		// unrestricted wedges shortly after it; both present a black screen with a frozen log.
-		if (owner == Method::kFSR) {
-			// Depth is a pacing knob as well as a throughput one: it decides how far DXVK's
-			// presenter may run ahead of FFX's paced present. Overridable for sweeping.
-			static const uint32_t s_depth = [] {
-				const auto v = Switches::Number("CS_FSRFG_QDEPTH", 2);
-				return v >= 1 && v <= 8 ? static_cast<uint32_t>(v) : 2u;
-			}();
-			Streamline::PushDxvkPresentQueueDepth(s_depth);
-		}
+		presenter.Settled(owner);
 	}
 
 	bool Controller::StepModeTeardown(Method a_target)
@@ -202,7 +194,7 @@ namespace FrameGen
 			// A lost device has nothing left in flight to drain, and waiting on it can never
 			// succeed, so deferring here spins forever -- 17.6k of these in one session even after
 			// the wait itself was latched. Treat the mode as torn down and let the controller move
-			if (!DXVKInterop::GetSingleton()->WaitDeviceIdle()) {
+			if (!ActivePresenter().Quiesce(Method::kDLSSG)) {
 				static bool deferralReported = false;
 				if (!std::exchange(deferralReported, true))
 					logger::error("[FrameGen] DLSS-G teardown deferred because device idle could not be proven");
@@ -214,7 +206,7 @@ namespace FrameGen
 		}
 
 		if (fsrDelivered == FSRDeliveryState::kDelivered && a_target != Method::kFSR) {
-			if (!DXVKInterop::GetSingleton()->DrainCommandRing()) {
+			if (!ActivePresenter().Quiesce(Method::kFSR)) {
 				// Once only: this re-enters every reconcile.
 				static bool fsrDeferralReported = false;
 				if (!std::exchange(fsrDeferralReported, true))
@@ -244,10 +236,6 @@ namespace FrameGen
 		const bool wantDLSSG = a_target == Method::kDLSSG;
 		const bool wantFSRFG = a_target == Method::kFSR;
 
-		// Enable synchronous present before installing either present proxy.
-		if (wantDLSSG || wantFSRFG)
-			Streamline::PushDxvkSyncPresent(true);
-
 		if (sl->IsDLSSGLoaded() == wantDLSSG && sl->IsFSRFGLoaded() == wantFSRFG) {
 			if (wantDLSSG && owner != Method::kDLSSG) {
 				const auto dims = CurrentDims(false);
@@ -262,15 +250,11 @@ namespace FrameGen
 			return;
 		}
 
-		// One rule for both methods, as in the Streamline sample: the present mode follows the
-		// sync interval, never the frame-generation method. Presenter::pickPresentMode reads this
-		// at swapchain creation, so it has to be set before the recreate below -- which a method
-		// switch performs anyway, so no extra recreate is introduced here.
-		Streamline::PushDxvkTearingPreference(globals::features::upscaling.GetPresentModePreference());
+		// One rule for both methods, as in the Streamline sample: the present mode follows the sync interval, never the
+		// frame generation method. The replacement carries it, so no extra recreate is introduced here.
 		sl->SetDLSSGDesiredLoaded(wantDLSSG);
 		sl->SetFSRFGDesiredLoaded(wantFSRFG);
-		BeginPresenterRecreateTransition();
-		Streamline::RequestDxvkSwapchainRecreate("FG method switch");
+		RequestPresentation(a_target, "FG method switch");
 		phase = Phase::kTransitioning;
 		if (owner == Method::kDLSSG && !wantDLSSG)
 			owner = Method::kNone;
@@ -296,8 +280,7 @@ namespace FrameGen
 			} else {
 				fsrVsyncRebakePending = false;
 				fsrWrapVsync = upscaling.settings.vsync;
-				BeginPresenterRecreateTransition();
-				Streamline::RequestDxvkSwapchainRecreate("FSR-FG vsync change");
+				RequestPresentation(a_target, "FSR-FG vsync change");
 			}
 		} else {
 			fsrVsyncRebakePending = false;
@@ -322,13 +305,10 @@ namespace FrameGen
 			logger::info("[FrameGen] FSR-FG enable delivered - present owner: {}", Name(owner));
 
 			// FFX installs its interpolation swapchain during vkCreateSwapchainKHR.
-			if (enableEdge) {
-				BeginPresenterRecreateTransition();
-				Streamline::RequestDxvkSwapchainRecreate("FSR-FG wrap");
-			} else if (hdrChanged) {
-				BeginPresenterRecreateTransition();
-				Streamline::RequestDxvkSwapchainRecreate("FSR-FG HDR transfer change");
-			}
+			if (enableEdge)
+				RequestPresentation(a_target, "FSR-FG wrap");
+			else if (hdrChanged)
+				RequestPresentation(a_target, "FSR-FG HDR transfer change");
 		}
 	}
 
@@ -338,9 +318,7 @@ namespace FrameGen
 			!Streamline::GetSingleton()->IsFSRFGLoaded())
 			return false;
 
-		const bool hdr = IsHDRActive();
-		return fsrHDRDelivered == hdr &&
-		       DXVKInterop::GetSingleton()->IsPresenterStateReadyForFrame(hdr);
+		return fsrHDRDelivered == IsHDRActive() && ActivePresenter().Surface().ready;
 	}
 
 	void Controller::EngageDLSSG()
@@ -367,6 +345,7 @@ namespace FrameGen
 
 	void Controller::NotifyFaultTeardownRequested()
 	{
+		awaitedSerial = ActivePresenter().RequestedSerial();
 		dlssgModeOn = false;
 		fsrDelivered = FSRDeliveryState::kTornDown;
 		fsrVsyncRebakePending = false;

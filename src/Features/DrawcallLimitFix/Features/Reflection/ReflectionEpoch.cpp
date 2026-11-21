@@ -47,7 +47,7 @@ namespace DCLF::Features::Reflection
 			return;
 		auto& reflection = FrameState();
 		++reflection.updates;
-		reflection.executedFrame = Scene::FrameView::Get().GetFrame();
+		reflection.executedFrame = Scene::FrameView::Get().SceneStep();
 		// Taken whatever happens, so the next frame captures its own.
 		auto faces = reflection.faces;
 		for (auto& face : reflection.faces)
@@ -114,17 +114,9 @@ namespace DCLF::Features::Reflection
 			s[5] ? " <- EPOCH FAILED" : "", capture.viewWithheld[v], capture.viewFamilyWithheld[v][static_cast<std::size_t>(Api::DrawFamily::TreeInstances)], facesOwned ? "DCLF's" : "the engine's",
 			reflection.epochs ? NullFaceTextures(reflection.nullTextures) : std::string("no epochs"));
 		const auto roots = ReflectionFaces::TakeRootStats();
-		const auto residue = PassCapture::Get().TakeViewResidue(kView);
-		const std::string residueKinds = ResidueKinds();
-		auto& parity = FaceCameraCounts();
 		text += fmt::format("[DCLF] reflection faces (T4: DCLF's cameras, the engine's tree LOD root skipped; T6b6: its LOD land and objects roots while gated): {} updates, {} without the "
-							"tree root, {} without the LOD roots ({} engine-only roots added under them); parity: {} faces, {} blocks "
-							"and {} slices differ (registers {:#x}, largest {:.3g}){}{}; residue: {} tree LOD passes{}, {} under the LOD land and objects roots (kept on every "
-							"30th update){}{}\n",
-			roots.updates, roots.treeSkipped, roots.lodSkipped, roots.engineOnlyRoots, parity.faces, parity.blocks, parity.slices, parity.registers, parity.largest,
-			parity.blocks || parity.slices ? " <- FACE CAMERA" : (parity.faces ? " <- OK" : ""), parity.first.empty() ? "" : " (first: " + parity.first + ")",
-			residue.treePasses, residue.treePasses ? " <- REFLECTION RESIDUE" : "", residue.lodPasses, residue.first.empty() ? "" : " (first: " + residue.first + ")", residueKinds);
-		parity = {};
+							"tree root, {} without the LOD roots\n",
+			roots.updates, roots.treeSkipped, roots.lodSkipped);
 		reflection.facesCaptured = reflection.updates = reflection.epochs = reflection.facesDrawn = reflection.lateFaces = 0;
 		reflection.skipped = {};
 		reflection.nullTextures = {};

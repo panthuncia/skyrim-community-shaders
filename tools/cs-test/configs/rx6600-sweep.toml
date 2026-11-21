@@ -9,9 +9,6 @@ extends = ["guest"]
 [dxvk]
 filter_device_name = "AMD Radeon RX 6600"
 
-[basicrhi]
-vk_crash_markers = "1"   # the adopted device's own markers (DXVK enables VK_AMD_buffer_marker under DXVK_DEBUG=hang): a loss or hang names the graph pass
-
 [[steps]]
 at = "world-ready"
 frames = 0

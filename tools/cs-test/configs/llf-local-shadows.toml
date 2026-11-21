@@ -1,0 +1,129 @@
+# Light Limit Fix's local light shadows (frame revision plan, 6.13; cleanup plan A13, D-1) in Dragonsreach, whose fires cast shadows.
+# They start on (saved_settings: their hooks install only at startup). Then mid-session the cache's resolution changes (a new
+# version), its slot count twice in a row (a new slice count is a new texture, published again under the same id when its revision
+# is adopted; the second change supersedes or follows the first), the cache goes off and on again (one texel while off), and every
+# setting goes back. A shot after each. In a graph mode the slot count is fixed for the session (it applies at the next launch),
+# so the slot steps change nothing there.
+# In a graph mode the cache follows Drawcall Limit Fix's shadow views: DCLF draws the shadow maps of the lights it selects, and
+# the cache copies the slices of the local lights it drew ("[LLF] Local light shadows follow Drawcall Limit Fix's shadow views").
+# In plain D3D11 mode the cache rotates the lights the engine draws, as before.
+# Compose it: guest+llf-local-shadows, native-vulkan+llf-local-shadows, d3d11+llf-local-shadows.
+extends = ["base"]
+
+[run]
+timeout_s = 480
+
+# Local shadows on in the saved settings: their hooks install only at startup.
+[saved_settings."Light Limit Fix"]
+EnableLocalShadows = true
+
+[features]
+LightLimitFix = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "LightLimitFix.EnableLocalShadows=true"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowResolution=512"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "res512"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowSlots=8"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "LightLimitFix.LocalShadowSlots=32"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "slots32"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.EnableLocalShadows=false"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.EnableLocalShadows=true"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "on"
+
+# The slot count goes back first: 32 slots at the engine's 4096 resolution are 2 GiB of R32F, which
+# native Vulkan cannot make on an 8 GB card.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowSlots=16"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "LightLimitFix.LocalShadowResolution=0"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "restored"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "res512", "slots32", "off", "on", "restored"]
+no_log = ["frame tap error", "fatal: frame revision:", "fatal: frame declaration:"]
+
+# The cache's copies and the culling ran on the render graph, never on D3D11 (skipped in plain D3D11 mode). The cache is off for
+# about 300 frames of the run.
+[expect.graph_frames]
+min = { "cs.llf.local-shadows" = 1000, "cs.llf.light-culling" = 1500 }

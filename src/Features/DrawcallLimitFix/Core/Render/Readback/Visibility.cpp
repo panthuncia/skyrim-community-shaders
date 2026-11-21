@@ -6,9 +6,9 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Accumulated.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/EntrySpaceTable.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
@@ -56,7 +56,7 @@ namespace DCLF
 			std::vector<std::vector<std::uint32_t>> entryMembers;
 			std::vector<std::uint32_t> entryListed, entryVisible, entryResidue;
 			// CS_DCLF_STATS counters since the last line.
-			std::uint64_t serial = 0, passes = 0, prepareNs = 0, visits = 0, wholePasses = 0, parityFrames = 0, parityDiffs = 0;
+			std::uint64_t serial = 0, passes = 0, prepareNs = 0, visits = 0, wholePasses = 0;
 		};
 
 		/** @brief The decode task's state, made on first use. Only the decode task touches it. */
@@ -147,203 +147,6 @@ namespace DCLF
 			a_readback.batches.fetch_add(1, std::memory_order_relaxed);
 			a_readback.events.fetch_add(a_batch.events.size(), std::memory_order_relaxed);
 			a_readback.stale.fetch_add(stale, std::memory_order_relaxed);
-		}
-
-		/** @brief The asks PrepareWrites compares with, copied for the parity observer's reference pass. */
-		struct Asked
-		{
-			std::vector<std::uint32_t> rootWrittenGeneration;
-			std::vector<std::uint8_t> rootWritten, objectWritten;
-			std::vector<const void*> objectWrittenGeometry;
-			std::vector<std::uint8_t> rootWrittenWide, objectWrittenWide, entryWritten;
-			std::vector<std::uint32_t> entryWrittenVersion;
-			const EntrySpace* entryCandidates = nullptr;
-			std::vector<std::uint32_t> objectEntry;
-			std::vector<const void*> objectEntryGeometry;
-
-			explicit Asked(const Readback& a_readback) :
-				rootWrittenGeneration(a_readback.rootWrittenGeneration), rootWritten(a_readback.rootWritten), objectWritten(a_readback.objectWritten),
-				objectWrittenGeometry(a_readback.objectWrittenGeometry), rootWrittenWide(a_readback.rootWrittenWide), objectWrittenWide(a_readback.objectWrittenWide),
-				entryWritten(a_readback.entryWritten), entryWrittenVersion(a_readback.entryWrittenVersion), entryCandidates(a_readback.entryCandidates),
-				objectEntry(a_readback.objectEntry), objectEntryGeometry(a_readback.objectEntryGeometry)
-			{}
-		};
-
-		/** @brief Shared inputs, asks and writes for the reference pass. */
-		struct ReferencePass
-		{
-			const Readback& readback;
-			Asked& asked;
-			const SceneTables& tables;
-			const Api::RootListView& rootList;
-			std::size_t roots, objects;
-			std::uint32_t window;
-			bool full, cutPending;
-			std::vector<Readback::Writes::Write>& writes;
-		};
-
-		/** @brief The reference's roots. Fills each root slot's class (1 stood in, 2 wide). */
-		void ReferenceRoots(const ReferencePass& a_ref, std::vector<std::uint8_t>& a_rootClass)
-		{
-			const auto& rootList = a_ref.rootList;
-			auto& rootClass = a_rootClass;
-			for (std::size_t r = 0; r < a_ref.roots; ++r) {
-				const void* node = rootList.nodes[r];
-				const bool stoodIn = node && r < rootList.rows.size() && (rootList.rows[r].bits & kFadeRootStoodIn);
-				if (!node || r >= rootList.rows.size()) {
-					a_ref.asked.rootWritten[r] = Readback::kWrittenNone;
-					continue;
-				}
-				const auto& row = rootList.rows[r];
-				rootClass[r] = stoodIn ? 1 : 2;
-				bool visible = a_ref.cutPending;
-				const bool listed = r < a_ref.readback.roots.size() && a_ref.readback.roots[r].generation == row.generation && a_ref.readback.roots[r].known;
-				if (!visible)
-					visible = !listed || a_ref.readback.roots[r].visible || a_ref.readback.roots[r].outFrame > a_ref.window;
-				const std::uint8_t wanted = visible ? Readback::kWrittenSet : Readback::kWrittenClear;
-				const std::uint8_t wideBit = stoodIn ? 0 : 1;
-				if (!a_ref.full && a_ref.asked.rootWritten[r] == wanted && a_ref.asked.rootWrittenGeneration[r] == row.generation && a_ref.asked.rootWrittenWide[r] == wideBit)
-					continue;
-				a_ref.asked.rootWritten[r] = wanted;
-				a_ref.asked.rootWrittenGeneration[r] = row.generation;
-				a_ref.asked.rootWrittenWide[r] = wideBit;
-				a_ref.writes.push_back({ const_cast<void*>(node), node, visible, Readback::kWriteRoot, !stoodIn });
-			}
-		}
-
-		/** @brief The reference's objects. Each drawn geometry is written by its root's class or its plain entry's. */
-		void ReferenceObjects(const ReferencePass& a_ref, const EntrySpace* a_candidates, std::uint32_t a_entries, const std::vector<std::uint8_t>& a_rootClass,
-			std::vector<std::uint8_t>& a_entryState, std::vector<std::uint8_t>& a_entryResidue)
-		{
-			const auto& tables = a_ref.tables;
-			const auto& rootList = a_ref.rootList;
-			const auto* candidates = a_candidates;
-			const std::uint32_t entries = a_entries;
-			const auto& rootClass = a_rootClass;
-			auto& asked = a_ref.asked;
-			auto& entryState = a_entryState;
-			auto& entryResidue = a_entryResidue;
-			for (std::size_t o = 0; o < a_ref.objects; ++o) {
-				auto* geometry = tables.objectGeometry[o];
-				const std::uint32_t root = rootList.RootOf(static_cast<std::uint32_t>(o));
-				std::uint8_t objectClass = 0;
-				const void* rootNode = nullptr;
-				std::uint32_t entry = EntrySpace::kNone;
-				if (geometry && !tables.IsLayer(static_cast<std::uint32_t>(o))) {
-					if (root != kNoFadeRoot && root < a_ref.roots && rootClass[root]) {
-						objectClass = rootClass[root];
-						rootNode = rootList.nodes[root];
-					} else if (root == kNoFadeRoot && candidates) {
-						if (asked.objectEntryGeometry[o] != geometry) {
-							asked.objectEntryGeometry[o] = geometry;
-							asked.objectEntry[o] = EntrySpace::kNone;
-							if (const auto it = candidates->geometries.find(geometry); it != candidates->geometries.end() && it->second < candidates->geometryEntry.size())
-								asked.objectEntry[o] = candidates->geometryEntry[it->second];
-						}
-						entry = asked.objectEntry[o];
-						const bool entryIsRoot = entry < entries && candidates->entryNodes[entry] && rootList.Contains(candidates->entryNodes[entry]);
-						if (entry < entries && candidates->entryNodes[entry] && !entryIsRoot) {
-							objectClass = 2;
-							rootNode = candidates->entryNodes[entry];
-						} else {
-							entry = EntrySpace::kNone;
-						}
-					}
-				}
-				if (objectClass == 2 && o < tables.objects.size() &&
-					(!(tables.objects[o].flags & kObjectMember) || (tables.objects[o].flags & (kObjectNoBindings | kObjectShadowOnly | kObjectFree)))) {
-					if (entry != EntrySpace::kNone)
-						entryResidue[entry] = 1;
-					objectClass = 0;
-				}
-				if (!objectClass) {
-					asked.objectWrittenGeometry[o] = nullptr;
-					continue;
-				}
-				bool visible = a_ref.cutPending;
-				if (!visible && o < a_ref.readback.objects.size())
-					visible = a_ref.readback.objects[o].visible || a_ref.readback.objects[o].outFrame > a_ref.window;
-				if (entry != EntrySpace::kNone)
-					entryState[entry] = std::max<std::uint8_t>(entryState[entry], visible ? 2 : 1);
-				const std::uint8_t wideBit = objectClass == 2 ? 1 : 0;
-				const std::uint8_t wanted = visible ? Readback::kWrittenSet : Readback::kWrittenClear;
-				if (!a_ref.full && asked.objectWritten[o] == wanted && asked.objectWrittenGeometry[o] == geometry && asked.objectWrittenWide[o] == wideBit)
-					continue;
-				asked.objectWritten[o] = wanted;
-				asked.objectWrittenGeometry[o] = geometry;
-				asked.objectWrittenWide[o] = wideBit;
-				a_ref.writes.push_back({ geometry, rootNode, visible, Readback::kWriteGeometry, wideBit != 0 });
-			}
-		}
-
-		/** @brief The reference's plain entry roots. An entry is not written while one of its geometries is engine residue. */
-		void ReferenceEntries(const ReferencePass& a_ref, const EntrySpace* a_candidates, std::uint32_t a_entries, const std::vector<std::uint8_t>& a_entryState,
-			const std::vector<std::uint8_t>& a_entryResidue)
-		{
-			const auto* candidates = a_candidates;
-			const std::uint32_t entries = a_entries;
-			const auto& entryState = a_entryState;
-			const auto& entryResidue = a_entryResidue;
-			auto& asked = a_ref.asked;
-			if (asked.entryWritten.size() < entries) {
-				asked.entryWritten.resize(entries, Readback::kWrittenNone);
-				asked.entryWrittenVersion.resize(entries, 0u);
-			}
-			for (std::uint32_t e = 0; e < entries; ++e) {
-				if (!entryState[e] || entryResidue[e]) {
-					asked.entryWritten[e] = Readback::kWrittenNone;
-					continue;
-				}
-				const bool visible = a_ref.cutPending || entryState[e] == 2;
-				const std::uint8_t wanted = visible ? Readback::kWrittenSet : Readback::kWrittenClear;
-				const std::uint32_t version = e < candidates->entryVersion.size() ? candidates->entryVersion[e] : 0u;
-				if (!a_ref.full && asked.entryWritten[e] == wanted && asked.entryWrittenVersion[e] == version)
-					continue;
-				asked.entryWritten[e] = wanted;
-				asked.entryWrittenVersion[e] = version;
-				const void* node = candidates->entryNodes[e];
-				a_ref.writes.push_back({ const_cast<void*>(node), node, visible, Readback::kWriteEntry, true });
-			}
-		}
-
-		/** @brief The parity observer's reference. Judges every listed slot from scratch, as PrepareWrites did before it visited only changes. */
-		std::vector<Readback::Writes::Write> ReferenceWrites(const Readback& a_readback, Asked& a_asked, const Readback::Batch& a_newest, bool a_full, bool a_cutPending)
-		{
-			const auto& tables = *a_newest.tables;
-			const auto rootList = Extensions::RootListOf(tables);
-			const bool full = a_full, cutPending = a_cutPending;
-			const std::size_t roots = rootList.nodes.size(), objects = tables.objectGeometry.size();
-			if (a_asked.rootWritten.size() < roots) {
-				a_asked.rootWritten.resize(roots, Readback::kWrittenNone);
-				a_asked.rootWrittenGeneration.resize(roots, 0u);
-				a_asked.rootWrittenWide.resize(roots, 0u);
-			}
-			if (a_asked.objectWritten.size() < objects) {
-				a_asked.objectWritten.resize(objects, Readback::kWrittenNone);
-				a_asked.objectWrittenGeometry.resize(objects, nullptr);
-				a_asked.objectWrittenWide.resize(objects, 0u);
-			}
-			const std::uint32_t window = a_readback.previousDecodedFrame;
-			std::vector<Readback::Writes::Write> writes;
-			const ReferencePass ref{ a_readback, a_asked, tables, rootList, roots, objects, window, full, cutPending, writes };
-			std::vector<std::uint8_t> rootClass(roots, 0u);
-			ReferenceRoots(ref, rootClass);
-			const EntrySpace* candidates = a_newest.candidates.get();
-			if (candidates != a_asked.entryCandidates) {
-				a_asked.entryCandidates = candidates;
-				a_asked.objectEntry.assign(a_asked.objectEntry.size(), EntrySpace::kNone);
-				a_asked.objectEntryGeometry.assign(a_asked.objectEntryGeometry.size(), nullptr);
-			}
-			if (a_asked.objectEntry.size() < objects) {
-				a_asked.objectEntry.resize(objects, EntrySpace::kNone);
-				a_asked.objectEntryGeometry.resize(objects, nullptr);
-			}
-			const std::uint32_t entries = candidates ? candidates->Capacity() : 0u;
-			// An entry with an engine-residue geometry keeps the engine's bit.
-			std::vector<std::uint8_t> entryState(entries, 0u), entryResidue(entries, 0u);
-			ReferenceObjects(ref, candidates, entries, rootClass, entryState, entryResidue);
-			ReferenceEntries(ref, candidates, entries, entryState, entryResidue);
-			return writes;
 		}
 
 		struct Pass
@@ -650,51 +453,6 @@ namespace DCLF
 			a_pass.list.writes.push_back({ const_cast<void*>(node), node, visible, Readback::kWriteEntry, true });
 		}
 
-		/** @brief The parity observer (CS_DCLF_PERSISTENT_PARITY). A write only one side makes is logged as a difference. */
-		void CompareWrites(VisibilityDecode& a_decode, const Pass& a_pass, std::uint32_t a_frame, std::vector<Readback::Writes::Write> a_reference)
-		{
-			using Write = Readback::Writes::Write;
-			const auto key = [](const Write& a_write) { return std::tuple(a_write.kind, a_write.node, a_write.set, a_write.wide, a_write.root); };
-			const auto less = [&](const Write& a_left, const Write& a_right) { return key(a_left) < key(a_right); };
-			auto made = a_pass.list.writes;
-			std::sort(made.begin(), made.end(), less);
-			std::sort(a_reference.begin(), a_reference.end(), less);
-			std::uint64_t diffs = 0;
-			std::string first;
-			const auto note = [&](const Write& a_write, bool a_referenceOnly) {
-				if (++diffs > 8)
-					return;
-				static constexpr std::array<const char*, 3> kKinds{ "root", "entry", "geometry" };
-				std::uint32_t slot = ~0u;
-				if (a_write.kind == Readback::kWriteRoot) {
-					if (const std::uint32_t root = a_pass.rootList.Find(a_write.node); root != kNoFadeRoot)
-						slot = root;
-				} else if (a_write.kind == Readback::kWriteEntry) {
-					if (a_pass.candidates)
-						if (const auto it = a_pass.candidates->entries.find(static_cast<const RE::NiAVObject*>(a_write.node)); it != a_pass.candidates->entries.end())
-							slot = it->second;
-				} else if (const auto it = a_decode.geometrySlot.find(a_write.node); it != a_decode.geometrySlot.end()) {
-					slot = it->second;
-				}
-				first += fmt::format("{}{} {} {}{} ({})", first.empty() ? "" : ", ", kKinds[std::min<std::size_t>(a_write.kind, 2)], static_cast<std::int64_t>(slot == ~0u ? -1 : slot),
-					a_write.set ? "set" : "clear", a_write.wide ? " wide" : "", a_referenceOnly ? "reference's alone" : "pass's alone");
-			};
-			std::size_t i = 0, j = 0;
-			while (i < made.size() || j < a_reference.size()) {
-				if (j == a_reference.size() || (i < made.size() && less(made[i], a_reference[j])))
-					note(made[i++], false);
-				else if (i == made.size() || less(a_reference[j], made[i]))
-					note(a_reference[j++], true);
-				else
-					++i, ++j;
-			}
-			++a_decode.parityFrames;
-			a_decode.parityDiffs += diffs;
-			if (diffs)
-				logger::info("[DCLF] accumulated writes parity (A5): frame {}, {} writes, the reference's {}, {} differ <- WRITES DIFFER; first: {}", a_frame, made.size(),
-					a_reference.size(), diffs, first);
-		}
-
 		/** @brief Visits the object slots changed since the last pass. Returns whether the pass must visit everything. */
 		bool VisitChangedObjects(VisibilityDecode& a_decode, const SceneTables& a_tables, bool a_full, std::uint32_t a_cut, bool a_cutPending)
 		{
@@ -802,13 +560,10 @@ namespace DCLF
 		{
 			if (++a_decode.passes >= 300) {
 				if (Diagnostics::Observe().stats)
-					logger::info("[DCLF] accumulated writes decode (A5): {} passes, {:.1f} us preparing ({:.2f} us a pass), {} slots visited ({:.1f} a pass), {} whole{}",
+					logger::info("[DCLF] accumulated writes decode (A5): {} passes, {:.1f} us preparing ({:.2f} us a pass), {} slots visited ({:.1f} a pass), {} whole",
 						a_decode.passes, double(a_decode.prepareNs) / 1000.0, double(a_decode.prepareNs) / 1000.0 / double(a_decode.passes), a_decode.visits,
-						double(a_decode.visits) / double(a_decode.passes), a_decode.wholePasses,
-						Diagnostics::Observe().scene ? fmt::format("; parity {} frames, {} write differences{}", a_decode.parityFrames, a_decode.parityDiffs,
-														   !a_decode.parityFrames ? " <- NOT COMPARED" : a_decode.parityDiffs ? " <- WRITES DIFFER" : " <- OK") :
-													   std::string());
-				a_decode.passes = a_decode.prepareNs = a_decode.visits = a_decode.wholePasses = a_decode.parityFrames = a_decode.parityDiffs = 0;
+						double(a_decode.visits) / double(a_decode.passes), a_decode.wholePasses);
+				a_decode.passes = a_decode.prepareNs = a_decode.visits = a_decode.wholePasses = 0;
 			}
 		}
 
@@ -840,10 +595,6 @@ namespace DCLF
 			}
 			const EntrySpace* candidates = a_newest.candidates.get();
 			const std::uint32_t entries = candidates ? candidates->Capacity() : 0u;
-			// The parity reference starts from the asks before this pass.
-			std::optional<Asked> asked;
-			if (Diagnostics::Observe().scene && Diagnostics::ParityDue(a_decode.serial, 23))
-				asked.emplace(a_readback);
 			++a_decode.serial;
 			bool everything = VisitChangedObjects(a_decode, tables, full, cut, cutPending);
 			VisitMovedEntries(a_readback, a_decode, a_newest, entries, everything);
@@ -877,8 +628,6 @@ namespace DCLF
 			a_decode.objects.Clear();
 			a_decode.entries.Clear();
 			a_decode.prepareNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
-			if (asked)
-				CompareWrites(a_decode, pass, a_newest.frame, ReferenceWrites(a_readback, *asked, a_newest, full, cutPending));
 			ReportDecode(a_decode);
 			if (list->writes.empty()) {
 				delete list;
@@ -944,13 +693,6 @@ namespace DCLF
 			}
 		}
 
-		void Count(Readback::Counts& a_counts, bool a_dclf, bool a_engine)
-		{
-			auto& counter = a_dclf ? (a_engine ? a_counts.both : a_counts.dclfOnly) : (a_engine ? a_counts.engineOnly : a_counts.neither);
-			counter.fetch_add(1, std::memory_order_relaxed);
-		}
-
-
 		/** @brief Main thread. Sets kAccumulated on the object root's non-hidden children, as DrawWorld_BuildSceneLists does each frame. */
 		void CellRoots(Readback& a_readback)
 		{
@@ -984,97 +726,24 @@ namespace DCLF
 			}
 		}
 
-		/** @brief The <- ACCUMULATED observer. Compares verdicts with the engine's bit as the sample's frame left it. */
-		void Compare(Readback& a_readback, Readback::Batch& a_batch, const Diagnostics::Accumulated::Sample& a_sample)
+		/** @brief Render thread. Frees a decoded batch and its tables. */
+		void Release(Readback::Batch* a_batch)
 		{
-			const auto& tables = *a_batch.tables;
-			const auto rootList = Extensions::RootListOf(tables);
-			std::array<std::uint32_t, Readback::kCategories> kept{};
-			const auto keep = [&](Readback::Category a_category, const void* a_node) {
-				if (kept[a_category]++ < 2)
-					a_batch.firsts.emplace_back(static_cast<std::uint8_t>(a_category), a_node);
-			};
-			std::uint64_t moved = 0, staleGeometry = 0, noVerdictEngine = 0, noVerdictNeither = 0, hiddenDclfOnly = 0;
-			for (std::size_t r = 0; r < a_sample.rootNodes.size(); ++r) {
-				const void* node = a_sample.rootNodes[r];
-				if (!node)
-					continue;
-				if (r >= rootList.nodes.size() || rootList.nodes[r] != node) {
-					++moved;
-					continue;
-				}
-				const std::uint8_t bits = a_sample.rootBits[r];
-				const bool engine = (bits & Diagnostics::Accumulated::kSampleAccumulated) != 0;
-				const bool listed = r < a_readback.roots.size() && a_readback.roots[r].generation == rootList.rows[r].generation;
-				if (!listed || !a_readback.roots[r].known) {
-					++(engine ? noVerdictEngine : noVerdictNeither);
-					continue;
-				}
-				const bool dclf = a_readback.roots[r].visible;
-				if (dclf && !engine && (bits & Diagnostics::Accumulated::kSampleHidden)) {
-					++hiddenDclfOnly;
-					continue;
-				}
-				const bool stoodIn = (bits & Diagnostics::Accumulated::kSampleStoodIn) != 0;
-				Count(stoodIn ? a_readback.stoodInRootCounts : a_readback.rootCounts, dclf, engine);
-				if (!stoodIn && dclf != engine)
-					keep(dclf ? Readback::kRootDclfOnly : Readback::kRootEngineOnly, node);
-			}
-			for (std::size_t o = 0; o < a_sample.objectGeometry.size(); ++o) {
-				const void* geometry = a_sample.objectGeometry[o];
-				if (!geometry)
-					continue;
-				if (o >= tables.objectGeometry.size() || tables.objectGeometry[o] != geometry) {
-					++moved;
-					continue;
-				}
-				const std::uint8_t bits = a_sample.objectBits[o];
-				const bool engine = (bits & Diagnostics::Accumulated::kSampleAccumulated) != 0;
-				const bool dclf = o < a_readback.objects.size() && a_readback.objects[o].visible;
-				if (dclf && !engine && (bits & Diagnostics::Accumulated::kSampleHidden)) {
-					++hiddenDclfOnly;
-					continue;
-				}
-				const bool stoodIn = (bits & Diagnostics::Accumulated::kSampleStoodIn) != 0;
-				Count(stoodIn ? a_readback.stoodInGeometryCounts : a_readback.geometryCounts, dclf, engine);
-				if (stoodIn || dclf == engine)
-					continue;
-				// Engine-only under a root its cull failed is a stale bit from an earlier cull.
-				if (engine && !(bits & Diagnostics::Accumulated::kSampleRootAccumulated))
-					++staleGeometry;
-				keep(dclf ? Readback::kGeometryDclfOnly : Readback::kGeometryEngineOnly, geometry);
-			}
-			a_readback.moved.fetch_add(moved, std::memory_order_relaxed);
-			a_readback.staleGeometry.fetch_add(staleGeometry, std::memory_order_relaxed);
-			a_readback.noVerdictEngine.fetch_add(noVerdictEngine, std::memory_order_relaxed);
-			a_readback.noVerdictNeither.fetch_add(noVerdictNeither, std::memory_order_relaxed);
-			a_readback.hiddenDclfOnly.fetch_add(hiddenDclfOnly, std::memory_order_relaxed);
-			a_readback.framesCompared.fetch_add(1, std::memory_order_relaxed);
-		}
-
-		/** @brief Render thread. Resolves a decoded batch's finds, then frees the batch and its tables. */
-		void Release(Readback& a_readback, Readback::Batch* a_batch)
-		{
-			for (const auto& [category, node] : a_batch->firsts) {
-				auto& names = a_readback.firstNames[category];
-				if (names.size() > 400)
-					continue;
-				const auto* object = static_cast<const RE::NiAVObject*>(node);
-				names += fmt::format("{}'{}' (frame {})", names.empty() ? "" : ", ", object->name.c_str() ? object->name.c_str() : "?", a_batch->frame);
-			}
 			delete a_batch;
 		}
 
-		/** @brief Render thread, at a frame slot's depth commit. Copies the slot's last events into a batch if they belong to the armed frame.
-		 * The host has waited for that execution, and the next one is not submitted yet. */
-		void Harvest(Readback& a_readback, std::uint32_t a_frameSlot)
+		/** @brief Render thread, at a region's depth commit. Copies the region's last events into a batch if its copy was found.
+		 * That run's lease retired, and the next one is not submitted yet. */
+		void Harvest(Readback& a_readback, const org::RunReadback::ListRead& a_read)
 		{
-			auto& armed = a_readback.armed[a_frameSlot];
+			if (a_read.region >= a_readback.armed.size())
+				return;
+			auto& armed = a_readback.armed[a_read.region];
 			if (!armed.armed)
 				return;
 			armed.armed = false;
 			// Events past the list's end are appended again next frame, and the list grows.
-			const bool found = a_readback.Harvest(a_frameSlot, armed.frame, [&](const std::uint32_t* a_words, std::uint32_t a_count, std::uint32_t a_capacity) {
+			if (a_read.words) {
 				auto* batch = new Readback::Batch();
 				batch->frame = armed.frame;
 				batch->reset = armed.reset || std::exchange(a_readback.carryReset, false);
@@ -1082,13 +751,12 @@ namespace DCLF
 				batch->publication = armed.publication;
 				batch->retirement = std::move(armed.retirement);
 				batch->candidates = std::move(armed.candidates);
-				batch->complete = a_count <= a_capacity;
-				const auto* list = reinterpret_cast<const VisibilityEvent*>(a_words + kVisibilityEventHeaderWords);
-				batch->events.assign(list, list + std::min(a_count, a_capacity));
+				batch->complete = a_read.count <= a_read.capacity;
+				const auto* list = reinterpret_cast<const VisibilityEvent*>(a_read.words + kVisibilityEventHeaderWords);
+				batch->events.assign(list, list + std::min(a_read.count, a_read.capacity));
 				a_readback.pending.push_back(batch);
-			});
-			if (found)
 				return;
+			}
 			// No readback ran for that frame, so the GPU reports its changes next frame. A carried reset goes with the next batch.
 			a_readback.carryReset = a_readback.carryReset || armed.reset;
 			armed.tables.reset();
@@ -1105,7 +773,7 @@ namespace DCLF
 			auto* batch = a_readback.decoded.exchange(nullptr, std::memory_order_acquire);
 			while (batch) {
 				auto* following = batch->next;
-				Release(a_readback, batch);
+				Release(batch);
 				batch = following;
 			}
 		}
@@ -1114,50 +782,26 @@ namespace DCLF
 		void Dispatch(const std::shared_ptr<Readback>& a_readback)
 		{
 			auto& readback = *a_readback;
-			// Samples older than every armed frame and waiting batch will never be matched.
-			std::uint32_t oldestPending = Scene::FrameView::Get().GetFrame();
-			for (const auto& armed : readback.armed)
-				if (armed.armed)
-					oldestPending = std::min(oldestPending, armed.frame);
-			for (const auto* batch : readback.pending)
-				oldestPending = std::min(oldestPending, batch->frame);
 			if (bool idle = false; !readback.running.compare_exchange_strong(idle, true, std::memory_order_acq_rel)) {
 				readback.busy.fetch_add(1, std::memory_order_relaxed);
 				return;
 			}
 			if (readback.pending.empty()) {
-				readback.samplesUnmatched.fetch_add(Diagnostics::Accumulated::DropSamples(oldestPending), std::memory_order_relaxed);
 				readback.running.store(false, std::memory_order_release);
 				readback.running.notify_all();
 				return;
 			}
 			auto batches = std::exchange(readback.pending, {});
 			std::stable_sort(batches.begin(), batches.end(), [](const auto* a_a, const auto* a_b) { return a_a->frame < a_b->frame; });
-			// Engine samples, only taken under CS_DCLF_ACCUMULATED_PARITY.
-			auto samples = std::make_shared<std::vector<std::unique_ptr<Diagnostics::Accumulated::Sample>>>(Diagnostics::Accumulated::TakeSamples(batches.back()->frame));
-			readback.samplesUnmatched.fetch_add(Diagnostics::Accumulated::DropSamples(oldestPending), std::memory_order_relaxed);
-			auto decode = [readback = a_readback, batches = std::move(batches), holder = std::move(samples)] {
+			auto decode = [readback = a_readback, batches = std::move(batches)] {
 				DCLF_ZONE("CS.DCLF.VisibilityDecode");
-				const auto& samples = *holder;
 				auto& state = DecodeOf(*readback);
 				const auto start = std::chrono::steady_clock::now();
-				std::size_t next = 0;
 				bool reset = false;
 				for (auto* batch : batches) {
 					reset = reset || batch->reset;
 					Apply(*readback, state, *batch);
-					// Earlier samples had no batch. This frame's is compared only if the batch is complete.
-					for (; next < samples.size() && samples[next]->frame < batch->frame; ++next)
-						readback->samplesUnmatched.fetch_add(1, std::memory_order_relaxed);
-					if (next < samples.size() && samples[next]->frame == batch->frame) {
-						if (batch->complete)
-							Compare(*readback, *batch, *samples[next]);
-						else
-							readback->framesIncomplete.fetch_add(1, std::memory_order_relaxed);
-						++next;
-					}
 				}
-				readback->samplesUnmatched.fetch_add(samples.size() - next, std::memory_order_relaxed);
 				if (auto* writes = PrepareWrites(*readback, state, *batches.back(), reset)) {
 					writes->next = readback->writes.load(std::memory_order_relaxed);
 					while (!readback->writes.compare_exchange_weak(writes->next, writes, std::memory_order_release, std::memory_order_relaxed)) {}
@@ -1172,28 +816,29 @@ namespace DCLF
 				readback->running.store(false, std::memory_order_release);
 				readback->running.notify_all();
 			};
-			if (!SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "visibility decode",
+			if (!::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu, "visibility decode",
 					[decode = std::move(decode)](const auto&) { decode(); }))
-				stl::report_and_fail("Drawcall Limit Fix: the visibility decode was refused by DCLF's executor");
+				::RenderGraph::Fatal("Drawcall Limit Fix", "the visibility decode was refused by DCLF's executor");
 		}
 	}
 
 	void IndirectDraws::Impl::ArmVisibilityReadback(SceneBuffers& a_scene, CommitUploads& a_uploads)
 	{
-		if (!a_scene.visibilityReadback || !a_scene.visibilityEvents)
+		if (!a_scene.visibilityReadback || !a_scene.visibilityReadback->list || !a_scene.visibilityEvents)
 			return;
 		auto& readback = *a_scene.visibilityReadback;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return;
-		// The run's range. Its last copy is done because the lease retired.
-		const std::uint32_t frameSlot = readback.ranges.Of(host->CurrentRun());
+		// Reads the run's region, whose last copy is done because the lease retired, and stamps this run.
+		const std::size_t harvested = readback.pending.size();
+		const auto commit = readback.list->CommitList(host->CurrentRun(), [&](const org::RunReadback::ListRead& a_read) { Harvest(readback, a_read); });
+		const std::uint32_t frameSlot = commit.region;
 		if (frameSlot >= readback.armed.size())
 			return;
-		const std::size_t harvested = readback.pending.size();
-		Harvest(readback, frameSlot);
-		static constexpr std::uint32_t kZeroHeader[kVisibilityEventHeaderWords]{};
-		a_uploads(a_scene.visibilityEvents, kZeroHeader, sizeof(kZeroHeader), 0);
+		// A zero count and the run's stamp, which the read matches.
+		const std::uint32_t header[kVisibilityEventHeaderWords]{ 0u, commit.stamp, 0u, 0u };
+		a_uploads(a_scene.visibilityEvents, header, sizeof(header), 0);
 		// A reported-words version the decoder has not followed is zero-filled from growth, so decoding restarts with this batch.
 		bool reset = false;
 		auto& followed = a_scene.visibilityReportedFollowed;
@@ -1205,7 +850,7 @@ namespace DCLF
 		}
 		auto& armed = readback.armed[frameSlot];
 		armed.armed = true;
-		armed.frame = Scene::FrameView::Get().GetFrame();
+		armed.frame = Scene::FrameView::Get().SceneStep();
 		armed.reset = reset;
 		armed.tables = Scene::FrameView::Get().AcceptedTables();
 		armed.publication = Scene::FrameView::Get().InstalledSequence();
@@ -1254,7 +899,7 @@ namespace DCLF
 			impl->scene->visibilityReadback->refreshWanted.store(true, std::memory_order_release);
 	}
 
-	void IndirectDraws::WriteAccumulated(bool a_live, const std::function<bool(const void*)>& a_stoodIn)
+	void IndirectDraws::WriteAccumulated(const std::function<bool(const void*)>& a_stoodIn)
 	{
 		if (!impl->scene || !impl->scene->visibilityReadback)
 			return;
@@ -1268,20 +913,6 @@ namespace DCLF
 			ordered = list;
 			list = following;
 		}
-		// While DCLF is not live, write nothing and ask for a full rewrite later. The engine's cull writes the roots meanwhile.
-		if (!a_live) {
-			for (auto* list = ordered; list;) {
-				auto* following = list->next;
-				delete list;
-				list = following;
-			}
-			r.writtenTables.reset();
-			r.writtenRoots = {};
-			r.writtenCandidates.reset();
-			r.rootVerdicts.clear();
-			r.refreshWanted.store(true, std::memory_order_release);
-			return;
-		}
 		const std::uint32_t cut = r.cutFrame.load(std::memory_order_acquire);
 		const bool wrote = ordered != nullptr;
 		for (auto* list = ordered; list;) {
@@ -1290,14 +921,14 @@ namespace DCLF
 			// Its nodes stay alive while it holds its publication's retirement node. If the publication was released anyway, which is a defect,
 			// it writes nothing and asks for a full write.
 			const bool alive = EngineReleases::Alive(list->publication);
-			const std::uint32_t age = Scene::FrameView::Get().GetFrame() - list->frame;
+			const std::uint32_t age = Scene::FrameView::Get().SceneStep() - list->frame;
 			for (std::uint32_t seen = r.writeAgeMax.load(std::memory_order_relaxed); age > seen && !r.writeAgeMax.compare_exchange_weak(seen, age, std::memory_order_relaxed);) {}
 			if (!alive) {
 				static std::uint32_t expiredLogged = 0;
 				if (expiredLogged++ < 6)
 					logger::info("[DCLF] readback writes of a released publication: list publication {} (frame {}), released through {}, handed over through {}, installed {} (frame {})",
 						list->publication, list->frame, EngineReleases::releasedThrough.load(), EngineReleases::pushedThrough.load(), Scene::FrameView::Get().InstalledSequence(),
-						Scene::FrameView::Get().GetFrame());
+						Scene::FrameView::Get().SceneStep());
 				r.writesExpired.fetch_add(list->writes.size(), std::memory_order_relaxed);
 				r.refreshWanted.store(true, std::memory_order_release);
 			}
@@ -1402,13 +1033,5 @@ namespace DCLF
 		return true;
 	}
 
-	void IndirectDraws::Impl::WaitVisibilityReadback()
-	{
-		if (!scene || !scene->visibilityReadback)
-			return;
-		auto& running = scene->visibilityReadback->running;
-		while (running.load(std::memory_order_acquire))
-			running.wait(true, std::memory_order_acquire);
-	}
 
 }

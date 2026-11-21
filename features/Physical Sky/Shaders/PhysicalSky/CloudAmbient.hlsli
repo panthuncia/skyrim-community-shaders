@@ -3,39 +3,44 @@ float2 CloudMaterialAmbient(NDFInfo ndf);
 #ifndef PHYSICAL_SKY_CLOUD_AMBIENT_HLSLI
 #define PHYSICAL_SKY_CLOUD_AMBIENT_HLSLI
 
-Texture2D<float4> TexCloudAmbientLighting : register(t40);
-Texture3D<float2> TexCloudAmbientDensity : register(t41);
-Texture3D<float4> TexCloudAmbientSource0 : register(t42);
-Texture3D<float4> TexCloudAmbientSource1 : register(t43);
-Texture3D<float4> TexCloudAmbientSource2 : register(t44);
-Texture3D<float4> TexCloudAmbientSweep : register(t45);
-Texture2D<float4> TexCloudAmbientPreviousLayout : register(t46);
-Texture2D<float4> TexCloudAmbientBoundary : register(t47);
-Texture2D<float4> TexCloudAmbientLayout : register(t48);
-Texture3D<float4> TexCloudAmbientSource3 : register(t49);
-Texture3D<float4> TexCloudAmbientView0 : register(t50);
-Texture3D<float4> TexCloudAmbientView1 : register(t51);
-Texture3D<float4> TexCloudAmbientView2 : register(t52);
-Texture3D<float4> TexCloudAmbientView3 : register(t53);
-RWTexture3D<float4> RWCloudAmbientView0 : register(u0);
-RWTexture3D<float4> RWCloudAmbientView1 : register(u1);
-RWTexture3D<float4> RWCloudAmbientView2 : register(u2);
-RWTexture3D<float4> RWCloudAmbientView3 : register(u3);
-RWTexture2D<float4> RWCloudAmbientLighting : register(u0);
-RWTexture3D<float2> RWCloudAmbientDensity : register(u0);
-RWTexture3D<float4> RWCloudAmbientSweep : register(u0);
-RWTexture2D<float4> RWCloudAmbientBoundary : register(u0);
-RWTexture3D<float4> RWCloudAmbientSource : register(u1);
-RWTexture2D<float4> RWCloudAmbientLayout : register(u1);
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudAmbientLighting, 40)
+ORG_HEADER_SRV(Texture3D<float2>, TexCloudAmbientDensity, 41)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientSource0, 42)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientSource1, 43)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientSource2, 44)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientSweep, 45)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudAmbientPreviousLayout, 46)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudAmbientBoundary, 47)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudAmbientLayout, 48)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientSource3, 49)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientView0, 50)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientView1, 51)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientView2, 52)
+ORG_HEADER_SRV(Texture3D<float4>, TexCloudAmbientView3, 53)
+ORG_HEADER_UAV(RWTexture3D<float4>, RWCloudAmbientView0, 0)
+ORG_HEADER_UAV(RWTexture3D<float4>, RWCloudAmbientView1, 1)
+ORG_HEADER_UAV(RWTexture3D<float4>, RWCloudAmbientView2, 2)
+ORG_HEADER_UAV(RWTexture3D<float4>, RWCloudAmbientView3, 3)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWCloudAmbientLighting, 0)
+ORG_HEADER_UAV(RWTexture3D<float2>, RWCloudAmbientDensity, 0)
+ORG_HEADER_UAV(RWTexture3D<float4>, RWCloudAmbientSweep, 0)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWCloudAmbientBoundary, 0)
+ORG_HEADER_UAV(RWTexture3D<float4>, RWCloudAmbientSource, 1)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWCloudAmbientLayout, 1)
 
-cbuffer CloudAmbientVolumeConstants : register(b2)
-{
-	float4 CloudAmbientPhase;
-	uint CloudAmbientCascade;
-	uint CloudAmbientWidth;
-	uint CloudAmbientReset;
-	uint CloudAmbientIterations;
-};
+// ORG: the CloudAmbientVolumeConstants latch (Volumetrics.cs.hlsl's push block).
+#define CLOUD_AMBIENT_VOLUME_FIELDS(M, A) \
+	M(float4, CloudAmbientPhase)          \
+	M(uint, CloudAmbientCascade)          \
+	M(uint, CloudAmbientWidth)            \
+	M(uint, CloudAmbientReset)            \
+	M(uint, CloudAmbientIterations)
+ORG_GLOBAL_LATCH_BEGIN(CloudAmbientVolumeData, CloudAmbientVolumeConstants, 2)
+CLOUD_AMBIENT_VOLUME_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(CloudAmbientVolumeData, CloudAmbientVolumeConstants, 2)
+#define ORG_GLOBAL_LATCH CloudAmbientVolumeConstants
+CLOUD_AMBIENT_VOLUME_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
 
 namespace CloudAmbientTransport
 {

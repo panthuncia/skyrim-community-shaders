@@ -13,10 +13,5 @@ namespace DCLF::Features::Shadows::Local
 {
 	Api::Feature Feature();
 
-	// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY observers, subscribed at install.
-	void SubscribeLightParity();
-	void SubscribeFocusParity();
-	void SubscribeShadowVolumeParity();
-
 	void PointCullLines(std::uint32_t a_frame);
 }

@@ -10,7 +10,6 @@ namespace DCLF::Scene
 		constexpr std::uint32_t kProjectedSourceTag = GpuTextures::Tag(GpuTextures::Source::Projected);
 		constexpr std::uint32_t kMaskSourceTag = GpuTextures::Tag(GpuTextures::Source::Mask);
 		constexpr std::uint32_t kShadowSourceTag = GpuTextures::Tag(GpuTextures::Source::ShadowDiffuse);
-		constexpr std::uint32_t kMaskParityOffset = 41;
 	}
 
 	void Coordinator::UpdateSharedBindings()
@@ -191,13 +190,6 @@ namespace DCLF::Scene
 				for (const std::uint32_t slot : dirty)
 					resolve(slot);
 			}
-			if (Diagnostics::Observe().scene && Diagnostics::ParityDue(passSerial, kMaskParityOffset))
-				Tables::ForEachBit(tables.usedPipelineBits, [&](std::uint32_t a_slot) {
-					if (a_slot >= tables.pipelines.size() || a_slot >= sb.masks.size() || !tables.TechniqueConstantsValid(a_slot))
-						return;
-					w.parity.Check(sb.masks[a_slot].listed || stands(a_slot),
-						[&] { return fmt::format("pipeline {}: its technique mask moved outside the change set", a_slot); });
-				});
 		}
 	}
 

@@ -1,13 +1,14 @@
 #pragma once
 
-// Host sides of the event lists the depth epoch's GPU work appends to, read back without a stall.
+// Host sides of the event lists the depth epoch's GPU work appends to, read back without a stall through RunReadback lists.
 // The render thread arms and harvests, a task on DCLF's executor decodes, and the main thread writes to the engine at Main::Update's entry.
 // Features include this header directly, so it must stay self-contained.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
-#include "Features/DrawcallLimitFix/Core/Render/Readback/RunRanges.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
+#include "RenderGraph/Fatal.h"
+#include <Render/RunReadback.h>
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/LatchBlock.h>
@@ -24,6 +25,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -37,100 +39,28 @@ namespace DCLF::Draws
 {
 	struct SceneBuffers;
 
-	/** @brief An event list the depth epoch appends to, read back without a stall. The header holds the count, then the armed frame.
-	 * The depth commit harvests its range's last run, whose lease has retired, then arms it again. DCLF never waits. */
-	struct HostEventRing
+	/** @brief Enough regions for every published copy of the epochs that record a DCLF readback. */
+	inline constexpr std::uint32_t kReadbackRanges = 16;
+
+	/**
+	 * @brief An event list the depth epoch appends to, read back without a stall: a RunReadback list with a 4-word header (the count,
+	 * then the stamp) and a_itemBytes an event. The depth commit reads its region's last run, whose lease has retired, then stamps
+	 * the list again. DCLF never waits.
+	 */
+	inline std::shared_ptr<org::RunReadback> MakeEventList(std::string_view a_name, std::uint32_t a_itemBytes, std::uint32_t a_events)
 	{
-		/** @brief The host buffers for one list capacity, one per range. Append-only and kept until the ring goes, since a kept recording may name any of them. */
-		struct StagingSet
-		{
-			std::uint32_t events = 0;
-			std::vector<std::shared_ptr<org::Buffer>> buffers;  // by range
-			StagingSet* next = nullptr;
-		};
-		explicit HostEventRing(std::uint64_t (*a_bytesFor)(std::uint32_t)) :
-			bytesFor(a_bytesFor) {}
-		~HostEventRing()
-		{
-			for (StagingSet* set = sets.exchange(nullptr); set;) {
-				StagingSet* following = set->next;
-				delete set;
-				set = following;
-			}
-		}
-		std::uint64_t (*bytesFor)(std::uint32_t);  // header included
-		RunRanges ranges{ kReadbackRanges };
-		std::atomic<StagingSet*> sets{ nullptr };
-		// The largest count a harvest saw past its list. The list grows to it, and what was left out is appended again.
-		std::atomic<std::uint32_t> wanted{ 0 };
-		// Report counters since the last report.
-		std::atomic<std::uint64_t> overflowed{ 0 }, missed{ 0 }, setsAdded{ 0 };
+		return org::RunReadback::CreateList(a_name, { .headerBytes = 16, .stampOffset = 4, .itemBytes = a_itemBytes, .regions = kReadbackRanges }, a_events);
+	}
 
-		/** @brief The staging set for a_events, or null if none was added. */
-		const StagingSet* SetFor(std::uint32_t a_events) const
-		{
-			for (const StagingSet* set = sets.load(std::memory_order_acquire); set; set = set->next)
-				if (set->events == a_events)
-					return set;
-			return nullptr;
-		}
-		/** @brief Adds a staging set for a list of a_events. One thread at a time. */
-		void AddSet(std::uint32_t a_events)
-		{
-			if (SetFor(a_events))
-				return;
-			auto* set = new StagingSet();
-			set->events = a_events;
-			for (std::uint32_t i = 0; i < ranges.Count(); ++i) {
-				set->buffers.push_back(org::Buffer::CreateShared(rhi::HeapType::Readback, bytesFor(a_events)));
-				set->buffers.back()->SetName("cs.dclf.event-ring-readback");
-			}
-			set->next = sets.load(std::memory_order_relaxed);
-			while (!sets.compare_exchange_weak(set->next, set, std::memory_order_release, std::memory_order_relaxed)) {}
-			setsAdded.fetch_add(1, std::memory_order_relaxed);
-		}
-		/** @brief Calls a_take on whichever set's buffer holds the range's run armed for a_frame, and asks for growth on overflow.
-		 * Returns false, counted as missed, when no buffer holds it. */
-		template <class Take>
-		bool Harvest(std::uint32_t a_range, std::uint32_t a_frame, Take&& a_take)
-		{
-			for (const auto* set = sets.load(std::memory_order_acquire); set; set = set->next) {
-				if (a_range >= set->buffers.size())
-					continue;
-				auto resource = set->buffers[a_range]->GetAPIResource();
-				void* mapped = nullptr;
-				resource.Map(&mapped);
-				if (!mapped)
-					continue;
-				const auto* words = static_cast<const std::uint32_t*>(mapped);
-				if (words[1] != a_frame) {
-					resource.Unmap(0, 0);
-					continue;
-				}
-				const std::uint32_t count = words[0];
-				if (count > set->events) {
-					std::uint32_t asked = wanted.load(std::memory_order_relaxed);
-					while (asked < count && !wanted.compare_exchange_weak(asked, count, std::memory_order_release, std::memory_order_relaxed)) {}
-					overflowed.fetch_add(1, std::memory_order_relaxed);
-				}
-				a_take(words, count, set->events);
-				resource.Unmap(0, 0);
-				return true;
-			}
-			missed.fetch_add(1, std::memory_order_relaxed);
-			return false;
-		}
-	};
-
-	/** @brief Copies a ring's events into its staging buffer for the run's range. */
-	std::shared_ptr<org::RenderPass> MakeEventReadbackPass(std::shared_ptr<SceneBuffers> a_scene, Versioned a_events, std::shared_ptr<HostEventRing> a_ring);
+	/** @brief Copies an event list, header and full capacity, into its readback's region for the run. */
+	std::shared_ptr<org::RenderPass> MakeEventReadbackPass(std::shared_ptr<SceneBuffers> a_scene, Versioned a_events, std::shared_ptr<org::RunReadback> a_list);
 
 	/** @brief The visibility readback. Holds the VisibilityEventsCS list, the decoder's state, and the kAccumulated writes it prepares.
 	 * See dclf-architecture.md, "The visibility events" and "kAccumulated written by DCLF". */
-	struct VisibilityReadback : HostEventRing
+	struct VisibilityReadback
 	{
-		VisibilityReadback() :
-			HostEventRing(&VisibilityEventBytes) {}
+		// The event list's readback. Its regions are the armed slots.
+		std::shared_ptr<org::RunReadback> list;
 		/** @brief A root slot's verdict, valid only for the listing of its generation. */
 		struct RootVisibility
 		{
@@ -287,10 +217,10 @@ namespace DCLF::Draws
 			}
 			for (Batch* batch : pending)
 				delete batch;
-			for (Writes* list = writes.exchange(nullptr); list;) {
-				Writes* following = list->next;
-				delete list;
-				list = following;
+			for (Writes* prepared = writes.exchange(nullptr); prepared;) {
+				Writes* following = prepared->next;
+				delete prepared;
+				prepared = following;
 			}
 		}
 	};
@@ -298,23 +228,22 @@ namespace DCLF::Draws
 	/** @brief Any thread. Posts a frame's CPU-made events, which go to the decoder with the harvested batches in frame order. */
 	void PostCpuVisibility(VisibilityReadback::Batch* a_batch);
 
-	/** @brief The culling counters, read back without a stall. Each execution copies each source's count words and its latch's stamp.
-	 * The render thread arms one source and reads it once that range's copy is done. The stamp says which frame the words are from. */
+	/** @brief The culling counters, read back without a stall. Each execution copies each source's count words and its latch's stamp
+	 * into its run's region of a RunReadback region readback. The render thread arms one source and reads it once that region's
+	 * copy is done. The stamp says which frame the words are from. */
 	struct CounterReadback
 	{
 		static constexpr std::uint32_t kSourceWords = kCountWords + 1;  // the count words, then the latch's stamp
 		explicit CounterReadback(std::uint32_t a_sources) :
-			sources(a_sources)
-		{
-			for (std::uint32_t i = 0; i < ranges.Count(); ++i) {
-				buffers.push_back(org::Buffer::CreateShared(rhi::HeapType::Readback, std::uint64_t(std::max(a_sources, 1u)) * kSourceWords * sizeof(std::uint32_t)));
-				buffers.back()->SetName("cs.dclf.cull-counter-readback");
-			}
-		}
+			sources(a_sources),
+			readback(org::RunReadback::CreateRegions("cs.dclf.cull-counter-readback",
+				std::max(a_sources, 1u) * kSourceWords * static_cast<std::uint32_t>(sizeof(std::uint32_t)), kReadbackRanges))
+		{}
 		static constexpr std::uint32_t StampOf(std::uint32_t a_frame) { return a_frame & 0x0FFFFFFFu; }  // as the commits write it
 		std::uint32_t sources = 0;
-		RunRanges ranges{ kReadbackRanges };
-		std::vector<std::shared_ptr<org::Buffer>> buffers;  // by range, sources x kSourceWords words
+		std::shared_ptr<org::RunReadback> readback;  // one region per stable run, sources x kSourceWords words
+		/** @brief The run's region, or org::RunReadback::kNoRegion. Any thread. */
+		std::uint32_t RangeOf(const org::RunRef& a_run) const { return readback->RegionOf(a_run); }
 		/** @brief The armed sample. Render thread. */
 		struct Armed
 		{
@@ -325,23 +254,20 @@ namespace DCLF::Draws
 		} armed;
 		std::uint64_t harvested = 0, missed = 0;  // render thread
 
-		/** @brief Calls a_take with the source's count words if the range's buffer holds them as of a_stamp.
+		/** @brief Calls a_take with the source's count words if the range holds them as of a_stamp.
 		 * The caller must know the copy is done and no later execution writes it. */
 		template <class Take>
 		bool Read(std::uint32_t a_range, std::uint32_t a_source, std::uint32_t a_stamp, Take&& a_take) const
 		{
-			if (a_range >= buffers.size() || a_source >= sources)
+			if (a_range >= readback->Regions() || a_source >= sources)
 				return false;
-			auto resource = buffers[a_range]->GetAPIResource();
-			void* mapped = nullptr;
-			resource.Map(&mapped);
-			if (!mapped)
-				return false;
-			const auto* words = static_cast<const std::uint32_t*>(mapped) + std::size_t(a_source) * kSourceWords;
-			const bool held = words[kCountWords] == a_stamp;
-			if (held)
-				a_take(words);
-			resource.Unmap(0, 0);
+			bool held = false;
+			readback->ReadRegion(a_range, [&](const std::byte* a_bytes) {
+				const auto* words = reinterpret_cast<const std::uint32_t*>(a_bytes) + std::size_t(a_source) * kSourceWords;
+				held = words[kCountWords] == a_stamp;
+				if (held)
+					a_take(words);
+			});
 			return held;
 		}
 	};

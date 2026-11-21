@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from cstest.config import diff, parse_value, resolve
@@ -154,7 +156,7 @@ def test_contract_shape(configs):
     contract, _ = r("b", configs)
     assert set(contract) == {"version", "name", "run_id", "run_dir", "env", "features_disabled", "features_enabled", "dclf_ini", "game", "timeouts", "steps", "expect"}
     assert contract["timeouts"] == {"launch": 60, "compile": 600, "load": 120, "step_wait": 60}
-    assert contract["expect"] == {"reach": "", "shots": [], "no_log": [], "live_frames": 0}
+    assert contract["expect"] == {"reach": "", "shots": [], "no_log": [], "live_frames": 0, "graph_frames": {}}
 
 
 def test_label_argument(configs):
@@ -198,3 +200,64 @@ def test_named_save_turns_the_autoload_mod_off(configs):
     assert contract["game"]["save"] == "MySave"
     assert harness["mods_off"] == ["Telemetry", "Start On Save"]
     assert harness["autoload_off"] == "Start On Save"
+
+
+def test_step_await(configs):
+    contract, _ = r("base", configs, ['steps=[{at="world-ready", do="shot", await="adopted", wait_s=5}]'])
+    assert contract["steps"][0] == {"at": "world-ready", "frames": 0, "do": "shot", "arg": "", "wait_s": 5, "await": "adopted"}
+    with pytest.raises(ConfigError, match="step 1: await takes adopted, not 'later'"):
+        r("base", configs, ['steps=[{at="world-ready", do="shot", await="later"}]'])
+    with pytest.raises(ConfigError, match="await takes a string"):
+        r("base", configs, ['steps=[{at="world-ready", do="shot", await=true}]'])
+
+
+@pytest.mark.parametrize("arg", ["org.rebuild", "org.reload-shaders=all", "cs.ssgi_x=a=b c", "Owner-1.name_2="])
+def test_call_step_takes_owner_and_name(configs, arg):
+    contract, _ = r("base", configs, [f'steps=[{{at="world-ready", do="call", arg="{arg}"}}]'])
+    assert contract["steps"][0]["arg"] == arg
+
+
+@pytest.mark.parametrize("arg", ["", "rebuild", "org.", ".rebuild", "org rebuild", "org.re build", "a.b.c", "org.x\n"])
+def test_call_step_errors(configs, arg):
+    with pytest.raises(ConfigError, match="step 1: call takes <owner>.<name>"):
+        r("base", configs, [f'steps=[{{at="world-ready", do="call", arg={json.dumps(arg)}}}]'])
+
+
+def test_org_step_needs_no_check(configs):
+    contract, _ = r("base", configs, ['steps=[{at="world-ready", do="org:rebuild"}]'])
+    assert contract["steps"][0]["do"] == "org:rebuild"
+
+
+def test_graph_frames_contract(configs, tmp_path):
+    contract, _ = r("base", configs)
+    assert contract["expect"]["graph_frames"] == {}
+    (tmp_path / "g.toml").write_text('extends = ["base"]\n[expect.graph_frames]\nmin = { "cs.ssgi" = 300, "cs.fog" = 1 }\n', encoding="utf-8")
+    contract, _ = r("g", configs)
+    assert contract["expect"]["graph_frames"] == {"min": {"cs.ssgi": 300, "cs.fog": 1}}
+
+
+@pytest.mark.parametrize("value, message", [
+    ('{min={"cs.ssgi"=0}}', "at least 1"),
+    ('{min={"cs.ssgi"=true}}', "at least 1"),
+    ('{min={"cs.ssgi"="many"}}', "at least 1"),
+    ('{min=["cs.ssgi"]}', "must be a table of client id"),
+    ('{no_d3d11=["cs.ssgi"]}', "unknown key 'expect.graph_frames.no_d3d11'"),
+    ('{max={"cs.ssgi"=3}}', "unknown key 'expect.graph_frames.max'"),
+    ('5', "expect.graph_frames must be a table"),
+])
+def test_graph_frames_errors(configs, value, message):
+    with pytest.raises(ConfigError, match=message):
+        r("base", configs, [f"expect.graph_frames={value}"])
+
+
+def test_saved_settings(configs, tmp_path):
+    contract, harness = r("base", configs)
+    assert harness["saved_settings"] == {} and "saved_settings" not in contract
+    (tmp_path / "s.toml").write_text('extends = ["base"]\n[saved_settings."Screen Space GI"]\nEnabled = true\nQuality = 2\n', encoding="utf-8")
+    (tmp_path / "t.toml").write_text('[saved_settings."Screen Space GI"]\nQuality = 3\n[saved_settings."Disable at Boot"]\n"Light Limit Fix" = false\n', encoding="utf-8")
+    _, harness = r("s+t", configs)
+    assert harness["saved_settings"] == {"Screen Space GI": {"Enabled": True, "Quality": 3}, "Disable at Boot": {"Light Limit Fix": False}}
+    _, harness = r("s", configs, ['saved_settings.Light Limit Fix={"Enable Light Limit Visualization"=false}'])
+    assert harness["saved_settings"]["Light Limit Fix"] == {"Enable Light Limit Visualization": False}
+    with pytest.raises(ConfigError, match="saved_settings.Light Limit Fix must be a table"):
+        r("s", configs, ["saved_settings.Light Limit Fix=3"])

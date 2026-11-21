@@ -7,9 +7,6 @@ extends = ["guest"]
 [cs]
 vram_debug = true
 
-[org]
-census = true
-
 [[steps]]
 at = "world-ready"
 frames = 500

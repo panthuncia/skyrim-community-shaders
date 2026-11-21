@@ -191,7 +191,8 @@ namespace DCLF::Extensions
 	Api::DrawFamily DrawFamilyOfShader(std::uint8_t a_shaderType);
 	/** @brief Any thread, after InstallFeatures. Bytes of a trees view's face latch values, rounded to 256. */
 	std::uint32_t DrawFamilyFaceBytes();
-	bool DrawFamilyOn(const ToggleSet& a_toggles, Api::DrawFamily a_family);
+	/** @brief Whether a_family is taken and its object class is DCLF's. */
+	bool DrawFamilyOn(Api::DrawFamily a_family);
 	/** @brief Whether a_family draws in a trees view's faces. Grass has no faces. */
 	inline bool DrawFamilyHasFaces(Api::DrawFamily a_family)
 	{

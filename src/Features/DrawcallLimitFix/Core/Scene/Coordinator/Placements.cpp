@@ -65,7 +65,6 @@ namespace DCLF::Scene
 			const auto* record = mirror.Node(a_key);
 			return record ? record->userData : nullptr;
 		});
-		Diagnostics::Notify(Diagnostics::MoveKeyRead{ *this, a_geometry, a_categoryNode, key });
 		return key;
 	}
 
@@ -214,27 +213,25 @@ namespace DCLF::Scene
 			placementDirty = true;
 	}
 
-	std::optional<Coordinator::PlannedKey> Coordinator::PlannedMoverNow(RE::BSGeometry* a_geometry, bool a_prune)
+	std::optional<Coordinator::PlannedKey> Coordinator::PlannedMoverNow(RE::BSGeometry* a_geometry)
 	{
 		if (!moverSet.contains(a_geometry))
 			return std::nullopt;
 		const auto it = tracked.find(a_geometry);
 		if (it == tracked.end() || !IsPlacedMover(it->second)) {
-			if (a_prune)
-				moverSet.erase(a_geometry);
+			moverSet.erase(a_geometry);
 			return std::nullopt;
 		}
 		return PlacedKeyOf(a_geometry, it->second);
 	}
 
-	bool Coordinator::PlannedRootNow(const RE::NiAVObject* a_root, bool a_prune)
+	bool Coordinator::PlannedRootNow(const RE::NiAVObject* a_root)
 	{
 		if (!movingRoots.contains(a_root) && !stillRoots.contains(a_root))
 			return false;
 		if (rootDependents.contains(a_root) && rootOwners.contains(a_root))
 			return true;
-		if (a_prune)
-			stillRoots.erase(a_root);
+		stillRoots.erase(a_root);
 		return false;
 	}
 
@@ -297,7 +294,7 @@ namespace DCLF::Scene
 		d.rootsTouched += placementRootsTouched.size();
 		d.dependentsTouched += placementDependentsTouched.size();
 		for (auto* geometry : placementMoversTouched) {
-			const auto now = PlannedMoverNow(geometry, true);
+			const auto now = PlannedMoverNow(geometry);
 			const auto planned = plannedMovers.find(geometry);
 			const PlannedOwner owner{ geometry, nullptr };
 			if (!now) {
@@ -336,7 +333,7 @@ namespace DCLF::Scene
 			return item;
 		};
 		for (const auto* root : placementRootsTouched) {
-			const bool listed = PlannedRootNow(root, true);
+			const bool listed = PlannedRootNow(root);
 			const auto planned = plannedRoots.find(root);
 			if (!listed) {
 				if (planned != plannedRoots.end()) {
@@ -395,41 +392,6 @@ namespace DCLF::Scene
 		placementDependentsTouched.clear();
 	}
 
-	PlacementPlan::Check Coordinator::RebuildPlacementSet()
-	{
-		PlacementPlan::Check check;
-		auto byObject = [](const PlannedKey& a_left, const PlannedKey& a_right) { return a_left.object < a_right.object; };
-		for (auto* geometry : moverSet) {
-			const auto it = tracked.find(geometry);
-			if (it != tracked.end() && IsPlacedMover(it->second))
-				check.movers.push_back(PlacedKeyOf(geometry, it->second));
-		}
-		std::sort(check.movers.begin(), check.movers.end(), byObject);
-		std::vector<const RE::NiAVObject*> listed;
-		listed.reserve(movingRoots.size() + stillRoots.size());
-		for (const auto& [root, moving] : movingRoots)
-			listed.push_back(root);
-		for (const auto* root : stillRoots)
-			if (!movingRoots.contains(root))
-				listed.push_back(root);
-		std::sort(listed.begin(), listed.end());
-		for (const auto* root : listed) {
-			const auto dependents = rootDependents.find(root);
-			if (dependents == rootDependents.end() || !rootOwners.contains(root))
-				continue;
-			auto& [node, keys] = check.roots.emplace_back(root, std::vector<PlannedKey>{});
-			for (auto* geometry : dependents->second) {
-				const auto it = tracked.find(geometry);
-				if (it == tracked.end() || it->second.slot == kNoObjectSlot || it->second.slot >= tables.objects.size())
-					continue;
-				const std::uint32_t layer = it->second.layerSlot != kNoObjectSlot && tables.IsLayer(it->second.layerSlot) ? it->second.layerSlot : kNoObjectSlot;
-				keys.push_back({ geometry, it->second.slot, layer });
-			}
-			std::sort(keys.begin(), keys.end(), byObject);
-		}
-		return check;
-	}
-
 	void Coordinator::PublishPlacementPlan()
 	{
 		DCLF_SCENE_PART(Placements, "CS.DCLF.Scene.Placements");
@@ -445,46 +407,10 @@ namespace DCLF::Scene
 		const bool sized = objectSlots != plannedObjectSlots || boneCapacity != plannedBoneCapacity;
 		const bool reset = placementDirty;
 		const bool touched = reset || !placementMoversTouched.empty() || !placementRootsTouched.empty() || !placementDependentsTouched.empty();
-		auto parity = [&]() -> std::shared_ptr<const PlacementPlan::Check> {
-			if (!hiddenWitness)
-				return nullptr;
-			auto rebuilt = std::make_shared<PlacementPlan::Check>(RebuildPlacementSet());
-			auto byObject = [](const PlannedKey& a_left, const PlannedKey& a_right) { return a_left.object < a_right.object; };
-			PlacementPlan::Check planned;
-			planned.movers.reserve(plannedMovers.size());
-			for (const auto& [geometry, key] : plannedMovers)
-				planned.movers.push_back(key);
-			std::sort(planned.movers.begin(), planned.movers.end(), byObject);
-			for (const auto& [root, dependents] : plannedRoots) {
-				auto& [node, keys] = planned.roots.emplace_back(root, std::vector<PlannedKey>{});
-				for (const auto& [geometry, key] : dependents)
-					keys.push_back(key);
-				std::sort(keys.begin(), keys.end(), byObject);
-			}
-			std::sort(planned.roots.begin(), planned.roots.end(), [](const auto& a_left, const auto& a_right) { return a_left.first < a_right.first; });
-			++d.parityChecks;
-			if (planned.movers != rebuilt->movers || planned.roots != rebuilt->roots) {
-				++d.parityDiffer;
-				if (d.parityFirst.empty()) {
-					std::size_t m = 0;
-					while (m < planned.movers.size() && m < rebuilt->movers.size() && planned.movers[m] == rebuilt->movers[m])
-						++m;
-					std::size_t r = 0;
-					while (r < planned.roots.size() && r < rebuilt->roots.size() && planned.roots[r] == rebuilt->roots[r])
-						++r;
-					d.parityFirst = fmt::format("pass {}: movers {} planned / {} rebuilt (first difference at {}: {} vs {}), roots {} planned / {} rebuilt (first difference at {}: {} vs {})",
-						passSerial, planned.movers.size(), rebuilt->movers.size(), m, m < planned.movers.size() ? planned.movers[m].object : nullptr,
-						m < rebuilt->movers.size() ? rebuilt->movers[m].object : nullptr, planned.roots.size(), rebuilt->roots.size(), r,
-						r < planned.roots.size() ? planned.roots[r].first : nullptr, r < rebuilt->roots.size() ? rebuilt->roots[r].first : nullptr);
-				}
-			}
-			return rebuilt;
-		};
 		auto none = [&](bool a_compared) {
 			placementPlan.reset();
 			g.candidatesSame += a_compared ? 1u : 0u;
 			g.perFrameWithoutPlan += perFrameWalked ? 1u : 0u;
-			(void)parity();
 			ReportPlacementDeltas();
 		};
 		if (!written && !sized && !touched) {
@@ -514,7 +440,6 @@ namespace DCLF::Scene
 		placementStats.roots += plan.roots.size();
 		plan.slots = objectSlots;
 		plan.boneCapacity = boneCapacity;
-		plan.check = parity();
 		// A plan no publication took yet is kept for the next one. Each plan is a delta, so none may be replaced.
 		if (placementPlanReady)
 			placementPlansHeld.push_back(std::move(placementPlanReady));
@@ -530,19 +455,15 @@ namespace DCLF::Scene
 			return;
 		placementDeltaWindow = window;
 		auto& d = placementDeltaStats;
-		const bool finding = d.parityDiffer || d.rootWitnessDiffer || d.scanParityDiffer;
-		if ((Diagnostics::Observe().stats || finding) && (d.plans || d.dirtyRoots || d.scans || d.parityChecks)) {
+		if (Diagnostics::Observe().stats && (d.plans || d.dirtyRoots || d.scans)) {
 			const double plans = d.plans ? static_cast<double>(d.plans) : 1.0;
 			logger::info("[DCLF] placement deltas: {} plans ({} resets, {} resized); per plan movers +{:.1f} ~{:.1f} -{:.1f}, roots +{:.1f} -{:.1f}, dependents +{:.1f} ~{:.1f} "
 						 "-{:.1f}; touched {} movers, {} roots, {} dependents, {} planned slots in the change log; dirty roots {} ({} whole), dependents scheduled {} of {} "
-						 "listed; geometry scans {} ({} whole), {} stale slots, {} object slots checked of {}, {} scheduled; parity: set {} checks, {} differ{}{}; "
-						 "root witnesses {} checks ({} skipped), {} differ{}{}; scans {} checks, {} differ{}",
+						 "listed; geometry scans {} ({} whole), {} stale slots, {} object slots checked of {}, {} scheduled",
 				d.plans, d.resets, d.sized, d.moversJoined / plans, d.moversChanged / plans, d.moversLeft / plans, d.rootsListed / plans, d.rootsLeft / plans,
 				d.dependentsJoined / plans, d.dependentsChanged / plans, d.dependentsLeft / plans, d.moversTouched, d.rootsTouched, d.dependentsTouched, d.logSlots,
 				d.dirtyRoots, d.dirtyRootsWhole, d.rootDependentsScheduled, d.rootDependentsListed, d.scans, d.scansWhole, d.staleSlots, d.scanChecked, d.scanObjects,
-				d.scanScheduled, d.parityChecks, d.parityDiffer, !d.parityChecks ? "" : d.parityDiffer ? " <- PLACEMENT DELTAS DIFFER; first: " : " <- OK", d.parityFirst,
-				d.rootWitnessChecks, d.rootWitnessSkipped, d.rootWitnessDiffer, !d.rootWitnessChecks ? "" : d.rootWitnessDiffer ? " <- ROOT SCHEDULE MISSED; first: " : " <- OK", d.rootWitnessFirst,
-				d.scanParityChecks, d.scanParityDiffer, !d.scanParityChecks ? "" : d.scanParityDiffer ? " <- GEOMETRY SCAN MISSED" : " <- OK");
+				d.scanScheduled);
 		}
 		d = {};
 	}

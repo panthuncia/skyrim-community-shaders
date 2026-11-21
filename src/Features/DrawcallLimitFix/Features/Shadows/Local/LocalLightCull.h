@@ -36,11 +36,10 @@ namespace DCLF::Features::Shadows::Local
 		/** @brief Whether the skip went in. */
 		bool Installed();
 		/** @brief Selects this frame's exclusion from the one the shadow epoch published. Render thread, at frame start. */
-		void SelectFrame(std::uint32_t a_frame, std::shared_ptr<SunExclusion> a_pending);
+		void SelectFrame(std::shared_ptr<SunExclusion> a_pending);
 
 		/** @brief The counters since the last Take, reset. */
 		inline constexpr std::uint32_t kReachKindCount = 3;  // untested, sphere, portals (and "not reached" after them)
-		extern const std::array<const char*, kReachKindCount + 1> kReachNames;
 		struct Counters
 		{
 			std::uint64_t accumulateCalls = 0;
@@ -55,11 +54,9 @@ namespace DCLF::Features::Shadows::Local
 			std::size_t filterNodes = 0;
 			// The lights' bits.
 			std::uint64_t bitLights = 0, overflow = 0, given = 0, withBits = 0;
-			// Empty-cull counters, and parity sphere checks.
+			// Empty-cull counters.
 			std::uint64_t emptyLights = 0, emptyNotCovered = 0, emptyPortalStrict = 0, emptyGiven = 0, emptyWithBits = 0, emptyUnstamped = 0;
-			std::uint64_t emptySubset = 0;  // covered lights culled for the engine-only subset alone (Scene/EngineCasters.h)
 			std::uint64_t emptyLate = 0;    // lights culled empty before DCLF made their views (no shadow that frame)
-			std::uint64_t spheresChecked = 0, spheresDiffer = 0;
 			std::uint64_t spotCalls = 0, emptySpots = 0, spotsNotCovered = 0, spotsStrict = 0;
 			std::int64_t spotTicks = 0;
 			// Portal-strict counters. No graph means nothing to gate.

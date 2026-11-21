@@ -1,6 +1,6 @@
 #pragma once
 
-// TreeLod (CS_DCLF_LOD_TREES): draws the tree LOD instances in the engine's place as the TreeInstances draw family.
+// TreeLod: draws the tree LOD instances in the engine's place as the TreeInstances draw family.
 // Early hooks feed an event channel (TreeLodHooks.cpp), the render thread keeps a mirror of the instance records (TreeLodMirror.h),
 // and the depth commit uploads them to GPU tables (TreeLodTables.cpp). TreeLodCullCS culls them in the depth segment's two phases.
 // Core keeps the family's slot: its pipelines, the ownership that withholds the engine's tree LOD passes, and trees views' lists.
@@ -40,9 +40,4 @@ namespace DCLF::Features::TreeLod
 	Api::DrawFamilyContribution::Faces FacesContribution();
 	void RegisterFacesCull(Api::InstallContext& a_context);
 	void RegisterReport(Api::InstallContext& a_context);
-	void SubscribeParity();
-
-	// CS_DCLF_TREE_LOD_AUDIT=1 compares attached LOD instances with their references' full trees each frame, with or without DCLF.
-	// An instance shown over a visible full tree is drawn over it. One hidden without a visible full tree leaves a hole.
-	void SubscribeAudit(Api::SwitchId a_switch);
 }

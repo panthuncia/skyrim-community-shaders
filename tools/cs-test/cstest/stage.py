@@ -107,8 +107,8 @@ def shader_files(worktree, log=print):
     """package/Shaders, then each features/<Name>/Shaders over it, as relative path -> source."""
     worktree = Path(worktree)
     files = tree(worktree / "package" / "Shaders")
-    if not (worktree / "package" / "Shaders" / "OpenRenderGraph").exists():
-        log("warning: package/Shaders/OpenRenderGraph is missing (CMake copies it at configure time); ORG's built-in shaders will be missing")
+    if not (worktree / "package" / "Shaders" / "ORGModuleServices").exists():
+        log("warning: package/Shaders/ORGModuleServices is missing (CMake copies it at configure time); the GenerateMips and resolve shaders will be missing")
     features = worktree / "features"
     if features.exists():
         for feature in sorted(p for p in features.iterdir() if p.is_dir()):
@@ -150,6 +150,10 @@ def stage(paths, source, name, preset="Dev-Fast", base_aio=None, pad_count=0, pd
             log(f"First stage of {name}: mirroring the base AIO {base}")
             mirror_map(tree(base, ("*.pdb",)), mod, ("*.pdb",))
             manifest["base_aio"] = str(base)
+        # Without the AIO's plugin MO2 turns TerrainHelper.esp off in the shared profile, and every tester's loads hang.
+        if not any(mod.glob("*TerrainHelper.esp")):
+            raise StageError(f"{mod} has no TerrainHelper.esp: its base AIO lacks the AIO's plugin. Pass --base-aio with a full AIO "
+                             f"(for example C:/Modding/MO2/mods/CS AB nfg), or copy the plugin in")
         plugins = mod / "SKSE" / "Plugins"
         plugins.mkdir(parents=True, exist_ok=True)
         for file in PLUGIN_FILES:

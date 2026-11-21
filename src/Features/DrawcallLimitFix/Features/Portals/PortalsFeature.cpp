@@ -1,6 +1,5 @@
-// Portals: the walk's thunk, the main cull input and its programs buffer, RoomVisibility's detours, and the parity.
+// Portals: the walk's thunk, the main cull input and its programs buffer, and RoomVisibility's detours.
 
-#include "Features/DrawcallLimitFix/Features/Portals/Diagnostics/PortalParity.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalPrograms.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"
 #include "Features/DrawcallLimitFix/Features/Portals/Portals.h"
@@ -10,7 +9,6 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 namespace DCLF::Features::Portals
 {
@@ -19,7 +17,7 @@ namespace DCLF::Features::Portals
 		constexpr Engine::Offset kPortalWalkCallSite{ { 36564, 0x9bf }, { 35571, 0xdb }, { 36564, 0x9d1 } };  // Main::Update -> FUN_1401a43c0, the main camera's portal walk
 		constexpr Engine::Offset kPortalWalk{ { 13408 }, { 13257 } };
 
-		// Parity only: the programs as encoded now, which a fade log window saves.
+		// For set parity: the programs as encoded now.
 		std::span<const std::uint32_t> ProgramWords()
 		{
 			return PortalViews::Get().Encoded();
@@ -81,10 +79,9 @@ namespace DCLF::Features::Portals
 		{
 			a_context.RegisterSwitch({ .name = "CS_DCLF_PORTAL_UNIFORM_SCAN", .kind = Api::SwitchKind::Diagnostic, .description = "Evaluate portal batches with the diagnostic uniform instruction scan" });
 			a_context.RegisterSwitch({ .name = "CS_DCLF_PORTAL_TRACE", .kind = Api::SwitchKind::Diagnostic,
-				.description = "Inline portal batches write each query's decision trace; CS_DCLF_PORTAL_CAPTURE checks it against the CPU" });
+				.description = "Inline portal batches write each query's decision trace" });
 			a_context.RegisterSwitch({ .name = "CS_DCLF_PORTAL_EVALUATOR", .kind = Api::SwitchKind::Test,
 				.description = "Portal batches' evaluation: inline (one dispatch, the default) or batched (by program: count, scan, scatter, evaluate)" });
-			InstallPortalCapture(a_context);
 			a_context.RegisterMainCullInput({ .name = "portals",
 				.noProgram = kPortalNoProgram,
 				.unboundVisible = &UnboundVisible,
@@ -96,9 +93,6 @@ namespace DCLF::Features::Portals
 			RegisterPrograms(a_context);
 			a_context.RegisterStandInObserver({ .updateEntry = &RoomVisibility::SetLive });
 			RoomVisibility::Install();
-			// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY: the portal views against the engine's entry.
-			if (Diagnostics::Observe().claimsOrScene)
-				Diagnostics::PortalParity::Install();
 		}
 	}
 

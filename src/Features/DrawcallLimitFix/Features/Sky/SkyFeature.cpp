@@ -1,4 +1,4 @@
-// Sky: the engine's BSSkyShader draws drawn by the render graph (CS_ORG_SKY=1, default off).
+// Sky: the engine's BSSkyShader draws drawn by the render graph in graph mode.
 // The engine side is SkyCapture.cpp and the graph side SkyDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
@@ -16,10 +16,8 @@ namespace DCLF::Features::Sky
 		{
 			if (!Enabled())
 				return;
-			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
-			SkyDraws::Reserve();
 			InstallHooks();
-			logger::info("[DCLF] sky: on (CS_ORG_SKY=1): the engine's sky batches and cloud layers are drawn at the Sky and SkyReflections anchors");
+			logger::info("[DCLF] sky: on (graph mode): the engine's sky batches and cloud layers are drawn at the Sky and SkyReflections anchors");
 		}
 
 		std::string Status()
@@ -30,7 +28,7 @@ namespace DCLF::Features::Sky
 
 	bool Enabled()
 	{
-		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
+		static const bool enabled = ::RenderGraph::Engine::GraphMode();
 		return enabled;
 	}
 

@@ -13,7 +13,6 @@
 
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Channels.h"
-#include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/FrameTables.h"
 
 namespace DCLF
@@ -36,7 +35,13 @@ namespace DCLF::Scene
 	public:
 		using Tables = SceneTables;
 		static FrameView& Get();
-		std::uint32_t GetFrame() const { return frame; }
+		/** @brief DCLF's scene step: moves at each BeginFrame, only while DCLF runs. Not the CS frame (RenderGraph::FrameClock). */
+		std::uint32_t SceneStep() const { return sceneStep; }
+		/**
+		* @brief At a CS Begin, before DCLF's BeginFrame of that frame: the scene step the beginning frame runs. The frame driver's
+		* adoption point runs before DCLF's BeginFrame in both modes.
+		*/
+		std::uint32_t NextSceneStep() const { return sceneStep + 1; }
 		/** @brief 0 before the first publication. A reader that keeps data checks it against EngineReleases::Alive. */
 		std::uint64_t InstalledSequence() const;
 		/** @brief For a reader whose slot indices must outlive the frame. */
@@ -68,8 +73,8 @@ namespace DCLF::Scene
 		};
 		/** @brief Render thread. On the first sighting of a load screen, withdraws the set and raises Channels::loadingSeen. */
 		bool NoteLoadingScreen();
-		/** @brief Render thread, frame start, not during a load. a_running false serves only switch catch-ups and tree LOD. */
-		void ServeFrameRequests(bool a_running);
+		/** @brief Render thread, frame start, not during a load. */
+		void ServeFrameRequests();
 		/**
 		 * @brief NiSwitchNode::OnVisible's catch-up (AE 0x140d29700), run outside the cull. True when it ran.
 		 * Render thread only, since engine code writes the subtree's transforms.
@@ -117,10 +122,18 @@ namespace DCLF::Scene
 		bool HasInstalled() const { return installed != nullptr; }
 		const ScenePublication* InstalledPublication() const { return installed.get(); }
 		/**
-		 * @brief True before DCLF's first covered frame, whose epochs draw nothing. Once installed the claims are never withdrawn,
-		 * a frame waits for a snapshot it can draw from instead.
+		 * @brief True before DCLF's first covered frame, and after an adoption stopped it (StopDrawing) until its next covered frame.
+		 * Its epochs draw nothing then, and the engine draws the scene. While DCLF draws the claims stay: the adopted snapshot stays
+		 * in use until a Begin adopts a newer current one.
 		 */
-		bool NotDrawingYet() const { return !drawingStarted; }
+		bool NotDrawingYet() const { return !drawingStarted || stopped; }
+		/** @brief Whether DCLF ever drew in the session. What its graphs are built for may not change after that. */
+		bool EverDrew() const { return drawingStarted; }
+		/**
+		 * @brief Render thread, inside a Begin's adoption point. A frame revision left DCLF's scene on old versions, so DCLF stops
+		 * drawing. Every claim is withdrawn, as at a load, until the next covered frame installs them again whole.
+		 */
+		void StopDrawing();
 		/** @brief Render thread, frame start before the culls. The deltas are by component, oldest first, cleared by ClearAdoptedDeltas. */
 		const SetSnapshot* AdoptedClaims() const;
 		std::span<const std::vector<std::shared_ptr<const void>>> AdoptedDeltas() const { return frameComponentDeltas; }
@@ -133,7 +146,6 @@ namespace DCLF::Scene
 		/** @brief 0 before the first. Moves on a slot table reset or InvalidateVerdicts. */
 		std::uint32_t GetTablesGeneration() const { return frameTablesGeneration; }
 		std::shared_ptr<const EntrySpace> GetSunCandidates() const { return frameSunCandidates; }
-		const std::shared_ptr<const EngineOnlySubset>& GetEngineCasters() const { return frameEngineCasters; }
 		/** @brief Entries whose every tracked geometry is a table object, so DCLF can take them out of the point lights' culls. */
 		std::shared_ptr<const EntrySpace> GetLightCandidates() const { return frameLightCandidates; }
 		/** @brief An entry LocalLightCull cut for holding no geometry is judged again when this moves. */
@@ -268,7 +280,6 @@ namespace DCLF::Scene
 		bool categoryCapturePending = false;
 		std::vector<RE::NiAVObject*> attachedRoots;  // the ingestion's attached subtrees, for CatchUpSwitches (scratch)
 		std::shared_ptr<const EntrySpace> frameSunCandidates, frameLightCandidates;
-		std::shared_ptr<const EngineOnlySubset> frameEngineCasters;
 		std::uint64_t frameLightEntriesAppeared = 0;
 		std::uint32_t frameTablesGeneration = 0;  // GetTablesGeneration
 		std::vector<const RE::NiAVObject*> frameSwitchChanges;
@@ -300,12 +311,13 @@ namespace DCLF::Scene
 		std::array<std::uint32_t, 3> frameLackingCount{};
 		PublicationStats publicationStats;
 		bool drawingStarted = false;  // the first claims installed (InstallClaims; NotDrawingYet until then), never cleared
+		bool stopped = false;         // an adoption stopped DCLF (StopDrawing) and no covered frame installed the claims since
 		std::optional<GeometryPort::PipelineFrame> geometryPortFrame;
 		std::uint32_t geometryPortFrameNumber = ~0u;
 		// The first refresh evaluates every pipeline in full. That seeds frame lighting variables the sample's pipeline does not write.
 		bool constantsRefreshed = false;
 		std::uint32_t verdictsRequested = 0;  // render thread: bumped by each request to drop the cached verdicts
-		std::uint32_t frame = 0;
+		std::uint32_t sceneStep = 0;  // SceneStep
 		struct GeometryStats
 		{
 			std::uint64_t frames = 0, full = 0, samples = 0, changed = 0, lightingVersions = 0;

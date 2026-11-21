@@ -2,11 +2,11 @@
 
 #include "CrashDump.h"
 #include "Testing/Testing.h"
-#ifdef CS_HAS_RENDER_GRAPH
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <rhi_interop_vulkan.h>
-#endif
+#include "RenderGraph/RenderGraphRuntime.h"
+#include <OpenRenderGraph/GraphHost.h>
+#include <rhi_interop_vulkan.h>
+// After volk (rhi_interop_vulkan.h): DXVK's interop header includes vulkan.h only when no Vulkan header is in.
+#include "DxvkExports.h"
 
 #include <ctime>
 #include <thread>
@@ -85,16 +85,6 @@ namespace HangWatchdog
 				std::filesystem::remove(reports[i].path(), error);
 		}
 
-		/** @brief dxvk_d3d11's DxvkViewTraceEntry (d3d11_view_srv.cpp, DXVK_VIEW_TRACE=1). */
-		struct DestroyedView
-		{
-			std::uintptr_t view, viewEnd, stream, streamEnd;
-			std::uint32_t kind, thread;
-			std::uint64_t tick;
-			std::uint32_t frameCount;
-			void* frames[24];
-		};
-
 		std::string ModuleOffset(const void* a_address)
 		{
 			HMODULE module = nullptr;
@@ -111,9 +101,7 @@ namespace HangWatchdog
 		 */
 		void LogFreedViews(std::uint32_t a_thread)
 		{
-			const auto dxvk = GetModuleHandleW(L"dxvk_d3d11.dll");
-			using Find = std::uint32_t(__stdcall*)(std::uintptr_t, DestroyedView*, std::uint32_t);
-			const auto find = dxvk ? reinterpret_cast<Find>(GetProcAddress(dxvk, "dxvkFindDestroyedView")) : nullptr;
+			const auto find = DxvkExports::Get().findDestroyedView;
 			if (!find)
 				return;
 			const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, a_thread);
@@ -141,7 +129,7 @@ namespace HangWatchdog
 			}
 			std::unordered_set<std::uintptr_t> reported;
 			for (const auto& [name, value] : values) {
-				DestroyedView entries[4]{};
+				DxvkDestroyedView entries[4]{};
 				const auto count = find(value, entries, 4);
 				for (std::uint32_t i = 0; i < count; ++i) {
 					const auto& e = entries[i];
@@ -169,14 +157,13 @@ namespace HangWatchdog
 			logger::critical("[HANG] the render thread (thread {}) has not presented for {:.1f} s; writing every thread's stack to {}", thread,
 				a_stalledMs / 1000.0, text.filename().string());
 			LogFreedViews(thread);
-#ifdef CS_HAS_RENDER_GRAPH
 			// The render graph host's runs in flight and what each waits for (read racily): a stall waiting on the GPU names its points.
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				logger::critical("[HANG] render graph host state: {}", host->DescribeAsyncState());
 			// The order of the graph's work in DXVK's stream and on the compute and copy queues: a GPU wait cycle shows here.
 			if (RenderGraphRuntime::Get().Host())
 				logger::critical("[HANG] render graph stream order: {}", RenderGraphRuntime::Get().DescribeStreamOrder());
-			// BasicRHI's crash markers (DXVK_DEBUG=hang; DXVK's adopted device also needs BASICRHI_VK_CRASH_MARKERS=1): each command
+			// BasicRHI's crash markers (DXVK_DEBUG=hang, on native and DXVK's adopted device alike): each command
 			// list's last begun and finished marker. A begun marker is written at the top of the pipe, so a list "in flight" at a
 			// pass's begin can still be draining the pass before it (Radeon GPU Detective tells the two apart). No lines on D3D12
 			// or with the markers off.
@@ -184,7 +171,6 @@ namespace HangWatchdog
 				const auto lines = rhi::vulkan::DumpCrashDiagnostics(host->Device(), false);
 				logger::critical("[HANG] render graph crash markers: {} lines logged above", lines);
 			}
-#endif
 			spdlog::default_logger()->flush();
 			PruneReports(*dir);
 			const auto begin = GetTickCount64();

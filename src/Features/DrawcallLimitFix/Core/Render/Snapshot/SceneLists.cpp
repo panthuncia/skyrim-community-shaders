@@ -2,6 +2,7 @@
 // changed inputs and volatile lanes rebuilt every set. Persistent sequences live in an append-only store.
 
 #include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatchesInternal.h"
+#include "Utils/Hash.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
@@ -626,8 +627,6 @@ namespace DCLF::Draws::detail
 			for (std::size_t g = 1; g < groupFirst.size(); ++g)
 				groupFirst[g] += groupFirst[g - 1];
 		}
-		set->liveFilled[0].store(true, std::memory_order_relaxed);
-		set->liveFilled[1].store(true, std::memory_order_relaxed);
 		auto parts = std::make_shared<SharedParts>();
 		parts->base = base;
 		parts->args = args;
@@ -667,7 +666,7 @@ namespace DCLF::Draws::detail
 			auto job = std::make_shared<Compaction>();
 			job->in = a_in;
 			job->spheres = a_spheres;
-			const bool dispatched = SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu,
+			const bool dispatched = ::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu,
 				"dclf scene lists compaction", [job](const auto&) {
 					auto made = std::make_unique<State>();
 					Scratch scratch;
@@ -747,46 +746,6 @@ namespace DCLF::Draws::detail
 			}
 	}
 
-	const DrawSequence* SceneLists::Sequence(const Direct::ViewBatchSet& a_set, std::uint32_t a_sequence) const
-	{
-		const auto* parts = static_cast<const SharedParts*>(a_set.shared.get());
-		if (a_sequence < a_set.persistentSequences)
-			return parts ? &parts->sequences->At(a_sequence) : nullptr;
-		a_sequence -= a_set.persistentSequences;
-		return a_sequence < state->volatileSequences.size() ? &state->volatileSequences[a_sequence] : nullptr;
-	}
-
-	std::string SceneLists::Explain(std::uint32_t a_object, const ViewBatchInputs& a_in) const
-	{
-		const auto& s = *state;
-		std::string text;
-		if (a_object < s.owned.size() && s.owned[a_object].present) {
-			const auto& own = s.owned[a_object];
-			std::uint32_t base = 0, delta = 0;
-			for (const auto& at : own.lanes)
-				(at.base ? base : delta) += 1;
-			text = fmt::format("owned ({} base lanes, {} delta; in base {}), input geometry {} partitions {:x} lod {:x} record {:x} stream {:x}, slots [", base, delta, own.inBase,
-				own.input.geometryIndex, own.input.partitions, own.input.lodPartitions, own.input.recordIndex, own.input.streamIndex);
-			for (const std::uint32_t slot : own.slots)
-				text += fmt::format("{} ", slot);
-			text += "]";
-		} else {
-			text = "not owned";
-		}
-		const auto& region = RegionOf(a_in);
-		for (std::size_t i = 0; i < region.Count(); ++i)
-			if (const DrawInput* input = region.At(i); (input->objectIndex & kObjectIndexMask) == a_object)
-				text += fmt::format("; region entry {}: geometry {} partitions {:x} lod {:x} record {:x} stream {:x} volatile {}", i, input->geometryIndex, input->partitions,
-					input->lodPartitions, input->recordIndex, input->streamIndex, Volatile(*input));
-		const auto& geometries = GeometriesOf(a_in);
-		if (a_object < s.owned.size())
-			for (const std::uint32_t slot : s.owned[a_object].slots)
-				if (const GeometryDraw* g = geometries.slots.At(slot))
-					text += fmt::format("; slot {} now: ib {:x} count {} first {} next {}", slot, g->indexBufferAddress, g->indexCount, g->firstIndex, g->nextPartition);
-		text += fmt::format("; geometry epoch held {} now {}", s.geometryEpoch, geometries.ContentEpoch());
-		return text;
-	}
-
 	std::string SceneLists::TakeReport()
 	{
 		auto& s = *state;
@@ -799,97 +758,6 @@ namespace DCLF::Draws::detail
 			w.sets, w.setMs / w.sets, w.compactions, w.compactions ? w.compactMs / w.compactions : 0.0, w.asyncCompactions,
 			w.asyncCompactions ? w.asyncMs / w.asyncCompactions : 0.0, double(w.reemitted) / w.sets, double(w.resphered) / w.sets,
 			s.base ? s.base->laneCount : 0, s.deadLanes, s.deltaLanes, s.persistent, s.deadSequences, double(w.uploaded) / w.sets / 1024.0);
-	}
-
-	namespace
-	{
-		/** @brief One lane as the equivalence check compares it. */
-		struct LaneKey
-		{
-			std::uint32_t object, flags, fadeRoot, fadeDistance, partitions, lodPartitions, pipeline, slot, count;
-			std::array<std::uint32_t, 4> sphere;
-			std::uint64_t sequences;  // hash of its sequences' bytes
-			std::uint32_t firstSequence;  // for the log only
-			auto Tied() const { return std::tie(object, flags, fadeRoot, fadeDistance, partitions, lodPartitions, pipeline, slot, count, sphere, sequences); }
-			bool operator<(const LaneKey& a_other) const { return Tied() < a_other.Tied(); }
-		};
-
-		template <class SequenceOf>
-		void KeysOf(const Direct::ViewBatchSet& a_set, std::size_t a_view, SequenceOf&& a_sequence, std::vector<LaneKey>& a_keys)
-		{
-			a_keys.clear();
-			const auto& buckets = a_set.buckets[a_view];
-			for (const auto& batch : a_set.lists[a_view])
-				for (std::uint32_t l = 0; l < batch.count; ++l) {
-					if (batch.dead && ((batch.dead[l >> 6] >> (l & 63)) & 1u))
-						continue;
-					LaneKey key{};
-					key.object = batch.object[l];
-					key.flags = batch.flags[l];
-					key.fadeRoot = batch.fadeRoot[l];
-					key.fadeDistance = std::bit_cast<std::uint32_t>(batch.fadeDistance[l]);
-					key.partitions = batch.partitions[l];
-					key.lodPartitions = batch.lodPartitions[l];
-					const std::uint32_t bucket = batch.pipelineBucket[l];
-					const bool cullOnly = (batch.flags[l] & Direct::kLaneCullOnly) != 0;
-					key.pipeline = !cullOnly && bucket < buckets.pipeline.size() ? buckets.pipeline[bucket] : ~0u;
-					key.slot = !cullOnly && bucket < buckets.pipelineSlot.size() ? buckets.pipelineSlot[bucket] : ~0u;
-					key.count = batch.sequenceCount[l];
-					key.sphere = { std::bit_cast<std::uint32_t>(batch.cx[l]), std::bit_cast<std::uint32_t>(batch.cy[l]), std::bit_cast<std::uint32_t>(batch.cz[l]),
-						std::bit_cast<std::uint32_t>(batch.r[l]) };
-					std::uint64_t hash = 14695981039346656037ull;
-					for (std::uint32_t q = 0; q < key.count; ++q) {
-						const DrawSequence* sequence = a_sequence(batch.sequence[l] + q);
-						const auto* bytes = reinterpret_cast<const unsigned char*>(sequence);
-						for (std::size_t i = 0; sequence && i < sizeof(DrawSequence); ++i)
-							hash = (hash ^ bytes[i]) * 1099511628211ull;
-						hash = (hash ^ (sequence ? 1u : 0u)) * 1099511628211ull;
-					}
-					key.sequences = hash;
-					key.firstSequence = batch.sequence[l];
-					a_keys.push_back(key);
-				}
-			std::sort(a_keys.begin(), a_keys.end());
-		}
-	}
-
-	std::size_t CompareSets(const SceneLists& a_lists, const Direct::ViewBatchSet& a_incremental, const Direct::ViewBatchSet& a_full,
-		const std::vector<DrawSequence>& a_fullSequences, const ViewBatchInputs& a_in)
-	{
-		DCLF_ZONE("CS.DCLF.SceneLists.Check");
-		static std::atomic<std::uint32_t> logged{ 0 };
-		std::vector<LaneKey> mine, theirs;
-		std::size_t differ = 0;
-		for (std::size_t v = 0; v < Direct::kViewTypes; ++v) {
-			KeysOf(a_incremental, v, [&](std::uint32_t a_sequence) { return a_lists.Sequence(a_incremental, a_sequence); }, mine);
-			KeysOf(a_full, v, [&](std::uint32_t a_sequence) { return a_sequence < a_fullSequences.size() ? &a_fullSequences[a_sequence] : nullptr; }, theirs);
-			std::vector<LaneKey> onlyMine, onlyTheirs;
-			std::set_difference(mine.begin(), mine.end(), theirs.begin(), theirs.end(), std::back_inserter(onlyMine));
-			std::set_difference(theirs.begin(), theirs.end(), mine.begin(), mine.end(), std::back_inserter(onlyTheirs));
-			differ += onlyMine.size() + onlyTheirs.size();
-			if ((!onlyMine.empty() || !onlyTheirs.empty()) && logged.fetch_add(1) < 8) {
-				const auto describe = [](const std::vector<LaneKey>& a_keys, auto&& a_sequence) {
-					std::string text;
-					for (std::size_t i = 0; i < std::min<std::size_t>(a_keys.size(), 3); ++i) {
-						const auto& k = a_keys[i];
-						text += fmt::format("{}{{object {} flags {:x} pipeline {} slot {} sequences {} ({:x}) sphere r {}", text.empty() ? "" : ", ", k.object, k.flags,
-							k.pipeline, k.slot, k.count, k.sequences, std::bit_cast<float>(k.sphere[3]));
-						if (const DrawSequence* q = k.count ? a_sequence(k.firstSequence) : nullptr)
-							text += fmt::format(" [{}: pipeline {:x} rows {:x} {:x} object {:x} vb {}+{:x}/{}/{} stream {}+{:x}/{}/{} ib {:x}/{} count {} first {}]", k.firstSequence,
-								q->pipelineIndex, q->pipelineRowAddress, q->materialRowAddress, q->objectIndex, q->vertexBufferRef.viewSlot, q->vertexBufferRef.byteOffset,
-								q->vertexBufferSize, q->vertexStride, q->streamBufferRef.viewSlot, q->streamBufferRef.byteOffset, q->streamBufferSize, q->streamStride, q->indexBufferAddress, q->indexBufferSize, q->indexCount, q->firstIndex);
-						text += "}";
-					}
-					return text;
-				};
-				logger::warn("[DCLF] scene lists check: view {}: {} lanes only incremental ({}), {} only the full build's ({}) <- SCENE LISTS DIFFER", CpuViewName(v),
-					onlyMine.size(), describe(onlyMine, [&](std::uint32_t a_q) { return a_lists.Sequence(a_incremental, a_q); }), onlyTheirs.size(),
-					describe(onlyTheirs, [&](std::uint32_t a_q) { return a_q < a_fullSequences.size() ? &a_fullSequences[a_q] : nullptr; }));
-				if (!onlyMine.empty())
-					logger::warn("[DCLF] scene lists check: object {}: {}", onlyMine.front().object, a_lists.Explain(onlyMine.front().object, a_in));
-			}
-		}
-		return differ;
 	}
 }
 

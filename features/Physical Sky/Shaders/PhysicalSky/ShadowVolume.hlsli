@@ -1,6 +1,7 @@
 #ifndef PHYSICAL_SKY_SHADOW_VOLUME_HLSLI
 #define PHYSICAL_SKY_SHADOW_VOLUME_HLSLI
 
+#include "Common/OrgResources.hlsli"
 #include "PhysicalSky/CloudGeometry.hlsli"
 
 namespace CloudShadowVolume
@@ -13,7 +14,7 @@ namespace CloudShadowVolume
 
 	// Row 0: bottom/top altitude, curvature radius, valid flag. Remaining rows
 	// store mean transmittance at evenly spaced heights, including both endpoints.
-	Texture2D<float4> MeanProfile : register(t69);
+	ORG_HEADER_SRV(Texture2D<float4>, MeanProfile, 69)
 
 	float FarTransmittance(float3 pos, float3 lightDir, float4 shadowSample, uint2 dimensions, out float localWeight)
 	{

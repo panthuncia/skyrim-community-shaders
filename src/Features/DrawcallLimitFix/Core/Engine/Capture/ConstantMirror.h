@@ -23,8 +23,8 @@ namespace DCLF
 	public:
 		static ConstantMirror& Get();
 
-		/** @brief Starts mirroring a buffer. Its copy is invalid until the next full write. */
-		void Watch(ID3D11Buffer* a_buffer);
+		/** @brief Starts mirroring a buffer. Its copy is invalid until the next full write. True when this call started it. */
+		bool Watch(ID3D11Buffer* a_buffer);
 
 		/**
 		 * @brief The buffer's current contents, or empty. A mapped buffer is re-read from its last mapping, which DXVK keeps valid until the

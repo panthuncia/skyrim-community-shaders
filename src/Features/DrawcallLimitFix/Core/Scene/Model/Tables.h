@@ -468,7 +468,7 @@ namespace DCLF
 		/** @brief Returns a slot to the free state, but not to the free list. */
 		void ResetObject(std::uint32_t a_slot);
 
-		void ClearFrame(bool a_keepObjects);
+		void ClearFrame();
 		void Clear();
 	};
 }

@@ -230,7 +230,7 @@ namespace DCLF::Draws
 	 * so it can run beside the main build. The region half then writes the shadow words into that region.
 	 */
 	void BuildShadowPayloadShared(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out,
-		std::shared_ptr<const StreamViews> a_streams, ShadowKept* a_kept, bool a_sharedRegion, ShadowBuildSplit& a_split);
+		std::shared_ptr<const StreamViews> a_streams, ShadowKept* a_kept, ShadowBuildSplit& a_split);
 	void BuildShadowPayloadRegion(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out, ShadowKept* a_kept,
 		ResidentRegion* a_scene, ShadowBuildSplit& a_split);
 
@@ -248,9 +248,6 @@ namespace DCLF::Draws
 
 		bool operator==(const ShadowLookupInputs&) const = default;
 	};
-
-	/** @brief Fills the pipeline lookups for every pipeline slot the tables use. Writes only entries that changed. */
-	void ResolvePipelineLookups(const SceneTables& a_tables, const PipelineCatalog* a_catalog, Lookups& a_lookups);
 
 	/** @brief Resolves the shadow pipelines of the modes in use, from this catalog only. The catalog is published with the lookups. */
 	void ResolveShadowLookups(const SceneTables& a_tables, const PipelineCatalog* a_catalog, const ShadowLookupInputs& a_inputs, LookupsResolveState& a_state,

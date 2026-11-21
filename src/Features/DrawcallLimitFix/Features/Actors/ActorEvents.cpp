@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
+#include "RenderGraph/Fatal.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -75,7 +76,7 @@ namespace DCLF::Features::Actors
 	{
 		// PostPostLoad already required these calls, so a refusal here is fatal.
 		if (!SceneWriter::SubscribeCall(SWF_HOOK_ACTOR_SET_ALPHA, &OnSetAlpha))
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused Actor::SetAlpha after reporting it installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused Actor::SetAlpha after reporting it installed");
 		// All move writers or none, so only when Core's are installed.
 		if (!Extensions::CoreMoveWritersLive())
 			return;
@@ -86,7 +87,7 @@ namespace DCLF::Features::Actors
 		                        SceneWriter::SubscribeCall(SWF_HOOK_ACTOR_SKY_CELL_SKIN, &OnSkyCellSkin, SWF_PHASE_POST) &&
 		                        SceneWriter::SubscribeCall(SWF_HOOK_ACTOR_RAGDOLL_JOB, &OnRagdollJob, SWF_PHASE_POST);
 		if (!subscribed)
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the actors' move writers after reporting them installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the actors' move writers after reporting them installed");
 		for (const auto writer : { actor3DPosition, skyCellSkin, ragdoll })
 			Extensions::MoveWriterInstalled(writer);
 	}

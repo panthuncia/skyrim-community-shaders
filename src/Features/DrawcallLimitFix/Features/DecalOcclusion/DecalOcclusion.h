@@ -2,7 +2,7 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Decal occlusion (CS_ORG_OCCLUSION_QUERIES): the render graph draws the engine's decal occlusion test and answers its query.
+// Decal occlusion, in graph mode: the render graph draws the engine's decal occlusion test and answers its query.
 // See docs/development/p5/occlusion-queries.md.
 //
 // Before Main::Draw the engine tests each decal waiting to be placed (SE 35563, AE 36562). It draws the decal's target
@@ -58,11 +58,14 @@ namespace DCLF::Features::DecalOcclusion
 		std::int32_t query = -1;  // Engine query ring slot.
 		std::uint64_t revision = 0;
 		Family::Owners owners;  // Leases on the geometry.
+
+		/** @brief What the recording depends on: everything but the latched values and counts (DecalOcclusionDraws.cpp). */
+		std::uint64_t Hash() const;
 	};
 
 	Api::Feature Feature();
 
-	/** @brief CS_ORG_OCCLUSION_QUERIES=1, read at install. */
+	/** @brief Graph mode, read at install. */
 	bool Enabled();
 
 	// No preflight needed. The detour always calls the engine's test, so it chains with other plugins.
@@ -71,8 +74,6 @@ namespace DCLF::Features::DecalOcclusion
 	// Render thread.
 	namespace DecalDraws
 	{
-		/** @brief Must run before the render graph initializes. */
-		void Reserve();
 		/** @brief Stays false for good once the client has failed. */
 		bool Available();
 		/** @brief Main thread. Returns true once done or refused for good, false while the graph has no host. */

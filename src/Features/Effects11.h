@@ -2,8 +2,10 @@
 
 #include "Buffer.h"
 #include "Effects11/SceneHandoff.h"
+#include "Utils/Setting.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <winrt/base.h>
 
@@ -14,6 +16,8 @@
 struct Effects11 : Feature
 {
 public:
+	Effects11();
+
 	virtual inline std::string GetName() override { return "Effects11"; }
 	virtual inline std::string GetShortName() override { return "Effects11"; }
 	virtual inline std::string GetDisplayName() override { return "Effects 11"; }
@@ -228,6 +232,23 @@ public:
 	/** @brief Per-channel sunlight before over after the [ENVIRONMENT] direct lighting grade, from the last OverrideWeather. */
 	float3 directLightingUngradeScale = { 1.0f, 1.0f, 1.0f };
 
+	/**
+	* @brief What the render graph's declarations follow (frame revision plan, 6.10 and 6.11). Not saved.
+	* The writers below raise them: Effects11's SettingManager, its effects' UI variables, reloads and shader cache clears.
+	*/
+	static constexpr std::uint32_t kVolumetricRaysBit = 1u;
+	static constexpr std::uint32_t kSunRaysBit = 2u;
+	static constexpr std::uint32_t kMoonRaysBit = 4u;
+	CS::Setting<std::uint32_t> raysToggles = 0;        // EnableVolumetricRays, EnableSunRays and EnableMoonRays, a bit each
+	CS::Setting<std::uint32_t> shaderCacheClears = 0;  // ClearShaderCache calls: the rays' programs are built again
+	CS::Setting<std::uint32_t> fxShapeWrites = 0;      // writes to what the ORG FX runtime plans its chain from
+
+	/**
+	* @brief Any thread, with SettingManager's lock released. A setting, a UI variable or the effects changed, so the FX chain's
+	* shape and the rays' toggles may have. Raises fxShapeWrites and sets raysToggles.
+	*/
+	void NoteShapeWrite();
+
 	PerFrame GetCommonBufferData();
 	/** @brief Fills the [SKYSCATTERING] and cloud lighting fields of the per-frame buffer. */
 	void UpdateSkyScattering(PerFrame& a_data);
@@ -236,8 +257,6 @@ public:
 	virtual void Load() override;
 	virtual void SetupResources() override;
 	virtual void PostSetupResources() override;
-	/** @brief Reserves the anchors of the ORG rays (CS_ORG_E11_RAYS=1) and FX runtime (CS_ORG_FX=1). */
-	virtual void PostPostLoad() override;
 	virtual void Reset() override;
 	virtual void ClearShaderCache() override;
 

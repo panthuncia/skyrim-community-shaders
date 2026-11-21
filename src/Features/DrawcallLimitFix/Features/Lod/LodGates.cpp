@@ -5,7 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Utils/SwitchFile.h"
 
-#include "Features/DrawcallLimitFix/Core/Engine/FrameClock.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -22,7 +22,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 namespace DCLF::Features::Lod::LodGates
 {
@@ -73,7 +72,6 @@ namespace DCLF::Features::Lod::LodGates
 		inline constexpr Offset kDetachTerrain{ { 31739 }, { 30936 } };   // FUN_140509770(block): unregisters its LOD water too
 		inline constexpr Offset kReleaseObject{ { 31633 }, { 30811 } };   // FUN_140501d00(handle): one reference (SE: (cache, handle), Release)
 		inline constexpr Offset kReleaseTerrain{ { 31794 }, { 31007 } };  // FUN_14050d170(handle) (SE: (cache, handle))
-		inline constexpr Offset kLodVisibleTest{ { 31865 }, { 31073 } };  // FUN_140512160(node, cell, objects): the update's show test
 		// Data.
 		inline constexpr Offset kManagerLock{ { 402330 }, { 516179 } };  // DAT_14315b8c8: the terrain manager's recursive BSSpinLock, held around the drain
 		inline constexpr Offset kLoadScreen{ { 402259 }, { 516108 } };   // DAT_14315b6a0: load screen up (FUN_1401a1150 sets it; its close runs the LOD full update, then clears it)
@@ -104,8 +102,8 @@ namespace DCLF::Features::Lod::LodGates
 			{ kFullRebuild, 0xE8, kFullRebuildCallee },
 		} };
 		// Every one must resolve on the running runtime.
-		constexpr std::array<Offset, 18> kFunctions{ { kLodDrain, kRetire, kDeactivate, kMapHideAll, kMapEnter, kMapExit, kTerrainCacheFlush,
-			kObjectCacheFlush, kDetachObject, kDetachTerrain, kReleaseObject, kReleaseTerrain, kLodVisibleTest, kManagerLock, kLoadScreen, kTlsIndex,
+		constexpr std::array<Offset, 17> kFunctions{ { kLodDrain, kRetire, kDeactivate, kMapHideAll, kMapEnter, kMapExit, kTerrainCacheFlush,
+			kObjectCacheFlush, kDetachObject, kDetachTerrain, kReleaseObject, kReleaseTerrain, kManagerLock, kLoadScreen, kTlsIndex,
 			kObjectCache, kTerrainCache } };
 
 		std::uintptr_t Base()
@@ -306,7 +304,7 @@ namespace DCLF::Features::Lod::LodGates
 			return word == Word(a_token, kOpen) || word == Word(a_token, kFlipping);
 		}
 
-		// Flipped gates keep their veto entries until release, for the coverage observer.
+		// Flipped gates keep their veto entries until release.
 		bool Unreleased(const Gate* a_gate, std::uint64_t a_token)
 		{
 			return Live(a_gate, a_token) || a_gate->word.load(std::memory_order_acquire) == Word(a_token, kFlipped);
@@ -319,8 +317,6 @@ namespace DCLF::Features::Lod::LodGates
 			std::atomic<std::uintptr_t> key{ 0 };  // 0 empty, kTomb removed, else the NiAVObject
 			const Gate* gate = nullptr;
 			std::uint64_t token = 0;
-			// The engine store that hid the node again after its flip, or 0.
-			std::atomic<std::uint32_t> rehidSite{ 0 };
 		};
 		constexpr std::uintptr_t kTomb = 1;
 
@@ -367,7 +363,7 @@ namespace DCLF::Features::Lod::LodGates
 		struct Counters
 		{
 			std::atomic<std::uint64_t> opened{ 0 }, flipped{ 0 }, flipMisses{ 0 }, forced{ 0 }, superseded{ 0 }, held{ 0 }, released{ 0 }, reused{ 0 },
-				handedOff{ 0 }, deferred{ 0 }, vetoes{ 0 }, orphansShown{ 0 }, coverageBoth{ 0 }, coverageNeither{ 0 }, coverageEngineHid{ 0 }, engineRehides{ 0 },
+				handedOff{ 0 }, deferred{ 0 }, vetoes{ 0 }, orphansShown{ 0 },
 				reattached{ 0 }, reusedHidden{ 0 }, kept{ 0 }, initialOpened{ 0 }, initialLoadScreen{ 0 };
 			std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(Flush::Count)> flushes{};
 			std::atomic<std::int64_t> flipTicks{ 0 }, flipTicksMax{ 0 }, releaseTicks{ 0 }, releaseTicksMax{ 0 };
@@ -424,8 +420,6 @@ namespace DCLF::Features::Lod::LodGates
 
 		bool installed = false;
 		bool detoursInstalled = false;
-		bool (*running)() = nullptr;
-		bool coverageObserver = false;
 
 		// Engine-side state, only touched under the manager's lock.
 		struct GateRef
@@ -494,7 +488,6 @@ namespace DCLF::Features::Lod::LodGates
 						slot = (slot + 1) & (capacity - 1);
 					fresh->entries[slot].gate = entry.gate;
 					fresh->entries[slot].token = entry.token;
-					fresh->entries[slot].rehidSite.store(entry.rehidSite.load(std::memory_order_relaxed), std::memory_order_relaxed);
 					fresh->entries[slot].key.store(key, std::memory_order_relaxed);
 					++fresh->filled;
 				}
@@ -504,22 +497,6 @@ namespace DCLF::Features::Lod::LodGates
 			a_side.table = std::move(fresh);
 			FreeRetiredTables(a_side);
 			return *a_side.table;
-		}
-
-		const VetoEntry* FindVeto(const EngineSide& a_side, const RE::NiAVObject* a_object, std::uint64_t a_token)
-		{
-			const auto key = reinterpret_cast<std::uintptr_t>(a_object);
-			const VetoTable* table = a_side.table.get();
-			if (!table || key <= kTomb)
-				return nullptr;
-			for (auto slot = Hash(key, table->capacity);; slot = (slot + 1) & (table->capacity - 1)) {
-				const auto& entry = table->entries[slot];
-				const auto at = entry.key.load(std::memory_order_relaxed);
-				if (!at)
-					return nullptr;
-				if (at == key && entry.token == a_token)
-					return &entry;
-			}
 		}
 
 		void VetoInsert(EngineSide& a_side, const RE::NiAVObject* a_object, const Gate* a_gate, std::uint64_t a_token)
@@ -556,7 +533,7 @@ namespace DCLF::Features::Lod::LodGates
 
 		bool Active()
 		{
-			return installed && Extensions::HiddenEventsLive() && (!running || running());
+			return installed && Extensions::HiddenEventsLive();
 		}
 
 		Gate* AllocateGate(EngineSide& a_side)
@@ -703,63 +680,8 @@ namespace DCLF::Features::Lod::LodGates
 					block.handoff.store(kHandedOff, std::memory_order_relaxed);
 		}
 
-		// Parity check. At a flipped gate's release exactly one level should be shown. The engine's own update hides LOD
-		// under loaded cells, which NoteEngineHide marks. Any other hidden incoming block is a hole.
-		void CheckCoverage(EngineSide& a_side, const Gate& a_gate)
-		{
-			std::uint32_t incoming = 0, incomingShown = 0, engineHid = 0, outgoingShown = 0;
-			std::string detail;
-			auto* player = RE::PlayerCharacter::GetSingleton();
-			// FUN_140512160 reads the cell's worldspace, which is null in an interior.
-			auto* cell = player ? player->GetParentCell() : nullptr;
-			if (cell && (At<const volatile std::uint8_t>(reinterpret_cast<std::uintptr_t>(cell), 0x40) & 1) != 0)
-				cell = nullptr;
-			using Test = std::uint64_t (*)(std::uintptr_t, RE::TESObjectCELL*, std::uint8_t);
-			const auto test = reinterpret_cast<Test>(Base() + kLodVisibleTest);
-			for (const auto& block : a_gate.incoming) {
-				const auto it = a_side.pending.find(block.block);
-				if (it == a_side.pending.end() || it->second.ref.token != a_gate.token || !Attached(block.block, block.kind) || !block.nodes[0])
-					continue;
-				++incoming;
-				if (!IsHidden(block.nodes[0])) {
-					++incomingShown;
-					continue;
-				}
-				const auto* entry = FindVeto(a_side, block.nodes[0], a_gate.token);
-				const std::uint32_t site = entry ? entry->rehidSite.load(std::memory_order_relaxed) : 0u;
-				engineHid += site != 0;
-				const auto node = At<std::uintptr_t>(block.block, 0x00);
-				const std::uint32_t flags = At<const volatile std::uint32_t>(node, 0x40);
-				const bool levelAttached = (flags & (block.kind == Kind::Object ? 0x80u : 0x4u)) != 0;
-				const int wanted = cell ? static_cast<int>(test(node, cell, block.kind == Kind::Object ? std::uint8_t(1) : std::uint8_t(0)) & 0xFF) : -1;
-				if (detail.size() < 400)
-					detail += fmt::format("{}{} level {} (attached at it {}): hidden by {}, the engine's test {}", detail.empty() ? "" : "; ",
-						block.kind == Kind::Object ? "object" : "terrain", (flags >> 21) & 0x3FC, levelAttached,
-						site ? fmt::format("{:#x}", 0x140000000ull + site) : std::string("none seen"),
-						wanted < 0 ? "-" : wanted ? "show" : "hide (the loaded cells)");
-			}
-			for (const auto& block : a_gate.outgoing)
-				if (const auto handoff = block.handoff.load(std::memory_order_relaxed); (handoff == kFlipHidden || handoff == kOwned) && block.nodes[0] &&
-																						  Attached(block.block, block.kind))
-					outgoingShown += !IsHidden(block.nodes[0]);
-			const bool both = incomingShown && outgoingShown;
-			const bool neither = incoming && !incomingShown && !outgoingShown;
-			if (!both && !neither)
-				return;
-			if (neither && engineHid == incoming) {
-				counters.coverageEngineHid.fetch_add(1, std::memory_order_relaxed);
-				return;
-			}
-			const auto count = (both ? counters.coverageBoth : counters.coverageNeither).fetch_add(1, std::memory_order_relaxed);
-			if (count < 8)
-				logger::warn("[DCLF] LOD gate {}: at its release {} of {} incoming blocks shown ({} hidden again by the engine) and {} of {} outgoing{}{} <- GATE COVERAGE",
-					a_gate.token, incomingShown, incoming, engineHid, outgoingShown, a_gate.outgoing.size(), detail.empty() ? "" : ": ", detail);
-		}
-
 		void ReleaseFlipped(EngineSide& a_side, Gate& a_gate)
 		{
-			if (coverageObserver)
-				CheckCoverage(a_side, a_gate);
 			for (const auto& block : a_gate.outgoing) {
 				EraseIfHeldBy(a_side, block.block, a_gate.token);
 				ReleaseHeld(a_side, block, false);
@@ -960,7 +882,7 @@ namespace DCLF::Features::Lod::LodGates
 						gate->outgoingNodes.push_back(node);
 			}
 			gate->openedTicks = Ticks();
-			gate->openedFrame = FrameClock::Frame();
+			gate->openedFrame = SceneClock::Step();
 			gate->word.store(Word(gate->token, kOpen), std::memory_order_release);
 			openGates.fetch_add(1, std::memory_order_acq_rel);
 			for (const auto& block : gate->incoming) {
@@ -1016,7 +938,7 @@ namespace DCLF::Features::Lod::LodGates
 			std::uint32_t openNow = 0, oldestFrames = 0;
 			std::int64_t oldestTicks = 0;
 			const auto now = Ticks();
-			const auto frame = FrameClock::Frame();
+			const auto frame = SceneClock::Step();
 			for (const auto* gate : side.open)
 				if ((gate->word.load(std::memory_order_acquire) & 7) == kOpen) {
 					++openNow;
@@ -1240,11 +1162,10 @@ namespace DCLF::Features::Lod::LodGates
 		}
 	}
 
-	void Install(Api::SwitchId a_switch, bool (*a_running)())
+	void Install(Api::SwitchId a_switch)
 	{
 		if (installed)
 			return;
-		running = a_running;
 		if (SwitchValue(a_switch) == "0") {
 			logger::info("[DCLF] LOD gates (T6b5) off (CS_DCLF_LOD_GATES=0): the engine's LOD swaps ungated");
 			return;
@@ -1287,10 +1208,8 @@ namespace DCLF::Features::Lod::LodGates
 		HookSites::NoteDetour("the LOD gates' map exit detour", MapExit::func.address());
 		HookSites::NoteDetour("the LOD gates' terrain cache flush detour", TerrainCacheFlush::func.address());
 		HookSites::NoteDetour("the LOD gates' object cache flush detour", ObjectCacheFlush::func.address());
-		coverageObserver = Diagnostics::Observe().claimsOrScene;
 		installed = true;
-		logger::info("[DCLF] LOD gates (T6b5): {} call sites (the swaps', the initial loads', the early return's, the full rebuild's), the drain, the retirement and 6 forced paths' functions hooked{}", kCallSites.size(),
-			coverageObserver ? "; the coverage invariant checked at each release (parity)" : "");
+		logger::info("[DCLF] LOD gates (T6b5): {} call sites (the swaps', the initial loads', the early return's, the full rebuild's), the drain, the retirement and 6 forced paths' functions hooked", kCallSites.size());
 	}
 
 	bool Enabled()
@@ -1341,29 +1260,6 @@ namespace DCLF::Features::Lod::LodGates
 		return vetoed;
 	}
 
-	void NoteEngineHide(const void* a_object, std::uint32_t a_siteOffset)
-	{
-		const auto key = reinterpret_cast<std::uintptr_t>(a_object);
-		if (!coverageObserver || key <= kTomb)
-			return;
-		vetoReaders.fetch_add(1, std::memory_order_seq_cst);
-		if (auto* table = vetoTable.load(std::memory_order_seq_cst)) {
-			for (auto slot = Hash(key, table->capacity);; slot = (slot + 1) & (table->capacity - 1)) {
-				auto& entry = table->entries[slot];
-				const auto at = entry.key.load(std::memory_order_acquire);
-				if (!at)
-					break;
-				if (at == key) {
-					if (entry.gate->word.load(std::memory_order_acquire) == Word(entry.token, kFlipped)) {
-						entry.rehidSite.store(a_siteOffset, std::memory_order_relaxed);
-						counters.engineRehides.fetch_add(1, std::memory_order_relaxed);
-					}
-					break;
-				}
-			}
-		}
-		vetoReaders.fetch_sub(1, std::memory_order_release);
-	}
 
 	bool Flip(std::uint64_t a_token)
 	{
@@ -1398,7 +1294,7 @@ namespace DCLF::Features::Lod::LodGates
 					Extensions::PushReservedHidden(node, gatesHiddenSite);
 		}
 		gate->flippedTicks = Ticks();
-		gate->flippedFrame = FrameClock::Frame();
+		gate->flippedFrame = SceneClock::Step();
 		const auto ticks = gate->flippedTicks - gate->openedTicks;
 		counters.flipTicks.fetch_add(ticks, std::memory_order_relaxed);
 		NoteMax(counters.flipTicksMax, ticks);
@@ -1449,11 +1345,6 @@ namespace DCLF::Features::Lod::LodGates
 		t.orphansShown = take(counters.orphansShown), t.vetoes = take(counters.vetoes);
 		t.open = counters.open.load(std::memory_order_relaxed), t.oldestFrames = counters.oldestFrames.load(std::memory_order_relaxed);
 		t.oldestTicks = counters.oldestTicks.load(std::memory_order_relaxed);
-		t.coverage = coverageObserver;
-		if (coverageObserver) {
-			t.coverageBoth = take(counters.coverageBoth), t.coverageNeither = take(counters.coverageNeither);
-			t.coverageEngineHid = take(counters.coverageEngineHid), t.engineRehides = take(counters.engineRehides);
-		}
 		return t;
 	}
 

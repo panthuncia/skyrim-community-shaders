@@ -2,6 +2,7 @@
 // and table snapshots it carries. Scene lane.
 
 #include "Internal.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 
@@ -13,7 +14,6 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
-#include "Utils/SwitchFile.h"
 
 #include <algorithm>
 #include <atomic>
@@ -24,11 +24,10 @@ namespace DCLF::Scene
 	std::uint32_t Coordinator::SetCapability()
 	{
 		// Main always. Shadow and occlusion once set up. Each view's phase once it is drawable.
-		const auto toggles = ActiveToggles();
-		std::uint32_t phases = kSetMain | (toggles.shadows ? IndirectDraws::Get().ShadowCapability() : 0u);
+		std::uint32_t phases = kSetMain | IndirectDraws::Get().ShadowCapability();
 		const auto& views = Extensions::Views();
 		for (std::size_t v = 0; v < views.views.size(); ++v)
-			if (views.views[v].phase && IndirectDraws::Get().ViewDrawable(static_cast<Api::EngineView>(v), toggles))
+			if (views.views[v].phase && IndirectDraws::Get().ViewDrawable(static_cast<Api::EngineView>(v)))
 				phases |= views.views[v].phase;
 		return phases;
 	}
@@ -240,11 +239,6 @@ namespace DCLF::Scene
 		const std::uint8_t drawn = static_cast<std::uint8_t>(setPhaseMask);
 		claimsFresh = false;
 		RefreshPending();
-		if (pacedCheckDue) {
-			claimsReference = std::make_shared<SetSnapshot>(*setBuilding);
-			claimsReference->frame = sceneFrame;
-			claimsReference->drawn = drawn;
-		}
 		if (claimsPublished < claimsPool.size() && publicationClaims == claimsPool[claimsPublished].snapshot && !setSnapshotDirty && !setPendingChanged) {
 			const auto& last = claimsPool[claimsPublished];
 			if (last.edited.empty() && last.cursor.Continues(setPhaseLog, 0) && last.cursor.position == setPhaseLog.End() && last.snapshot->drawn == drawn) {
@@ -300,9 +294,6 @@ namespace DCLF::Scene
 		std::uint8_t phases = participation;
 		const auto& views = Extensions::Views();
 		if (!phases) {
-			if ((a_drawn & views.rootPhases) && Diagnostics::Armed<Diagnostics::SetSlotDecided>())
-				if (const auto view = ViewRootOfSlot(a_slot); view != Api::EngineView::Count)
-					d.rootViewExcluded = (a_drawn & Extensions::ViewEntryOf(view).phase) != 0;
 			return d;
 		}
 		auto waiting = [&](std::uint32_t a_why) {
@@ -510,7 +501,6 @@ namespace DCLF::Scene
 		if (a_slot < setWaitCause.size())
 			setWaitCause[a_slot] = 0;
 		const SlotDecision decision = DecideSlot(a_slot, a_commit.live, a_commit.drawn);
-		const std::uint8_t whyBefore = a_slot < setWaitWhy.size() ? setWaitWhy[a_slot] : std::uint8_t{ 0 };
 		a_wait = decision.wait;
 		if (a_partial && decision.partial)
 			*a_partial = true;
@@ -524,33 +514,6 @@ namespace DCLF::Scene
 				if (const auto* geometry = tables.objectGeometry[a_slot])
 					setStats.firstWaiting = fmt::format("'{}' (slot {}, reason {})", geometry->name.c_str() ? geometry->name.c_str() : "?", a_slot, why);
 		}
-		if (decision.rootViewExcluded || decision.rootViewHeld)
-			Diagnostics::Notify(Diagnostics::SetSlotDecided{ *this, a_slot, decision, decision.heldWhyCount ? decision.whys[0] : whyBefore });
-		static const bool cellTrace = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
-		static ankerl::unordered_dense::map<std::uint32_t, std::pair<std::uint32_t, PipelineKey>> cellTraceReady;
-		if (cellTrace)
-			if (auto* geometry = const_cast<RE::BSGeometry*>(tables.objectGeometry[a_slot]))
-				if (const auto it = tracked.find(geometry); it != tracked.end() && it->second.ownerReference) {
-					const auto& object = tables.objects[a_slot];
-					const std::uint32_t p = object.pipelineIndex;
-					const PipelineKey key = p < tables.pipelines.size() ? tables.pipelines[p] : PipelineKey{};
-					if (!decision.wait) {
-						cellTraceReady[a_slot] = { p, key };
-					} else {
-						std::string whys;
-						for (std::uint8_t w = 0; w < decision.whyCount; ++w)
-							whys += fmt::format("{}{}", w ? "," : "", kSetWaitReasonNames[(std::min<std::size_t>)(decision.whys[w], kSetWaitReasons - 1)]);
-						const auto ready = cellTraceReady.find(a_slot);
-						const auto describe = [](std::uint32_t a_p, const PipelineKey& a_key) {
-							return fmt::format("{} [vs {:x} ps {:x} pass {:x} raster {:x} layout {:x}]", a_p, a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.passDescriptor, a_key.rasterFlags,
-								a_key.vertexLayout);
-						};
-						logger::info("[DCLF] cell trace: pass {} frame {} ref {} slot {} {} waits for {} (resident {}, no bindings {}, tracked since frame {}); pipeline {}, last ready {}",
-							passSerial, sceneFrame, static_cast<const void*>(it->second.ownerReference), a_slot, static_cast<const void*>(geometry), whys, IsResidentSlot(a_slot),
-							(object.flags & kObjectNoBindings) != 0, it->second.trackedFrame, describe(p, key),
-							ready != cellTraceReady.end() ? describe(ready->second.first, ready->second.second) : std::string("none"));
-					}
-				}
 		return decision.phases;
 	}
 
@@ -582,12 +545,6 @@ namespace DCLF::Scene
 		MarkSetApply(a_slot);  // the record's kObjectMember and Tables::setPhases, at ApplySet
 		if (!before || !a_phases)
 			++(a_phases ? setStats.joined : setStats.left);
-		static const bool cellTrace = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
-		if (cellTrace && (a_phases & kSetMain) && !(before & kSetMain))
-			if (auto* geometry = const_cast<RE::BSGeometry*>(tables.objectGeometry[a_slot]))
-				if (const auto it = tracked.find(geometry); it != tracked.end() && it->second.ownerReference)
-					logger::info("[DCLF] cell trace: pass {} frame {} ref {} slot {} {} joins the main phase (tracked since frame {})", passSerial, sceneFrame,
-						static_cast<const void*>(it->second.ownerReference), a_slot, static_cast<const void*>(geometry), it->second.trackedFrame);
 		if (before && !a_phases) {
 			const std::uint8_t participation = live ? SetParticipation(a_slot, drawn) : std::uint8_t{ 0 };
 			const std::size_t cause = !live                                                    ? 0 :
@@ -710,7 +667,6 @@ namespace DCLF::Scene
 		CommitQueuedSlots(commit);
 		if (gatesLive)
 			CommitComponentsSettle(commit);
-		Diagnostics::Notify(Diagnostics::SetCommitted{ *this, live, drawn, gatesLive });
 		setStats.evaluated += setQueue.size();
 		for (const std::uint32_t slot : setQueue)
 			if (slot < objects)
@@ -931,7 +887,6 @@ namespace DCLF::Scene
 		publication->sunCandidates = sunCandidates;
 		publication->lightCandidates = lightCandidates;
 		publication->lightEntriesAppeared = lightEntriesAppeared;
-		publication->engineCasters = PublishEngineCasters();
 		if (std::exchange(nodeSetsDirty, false) || !publishedCategoryNodes) {
 			DCLF_ZONE("CS.DCLF.Scene.PublishCategoryNodes");
 			publishedCategoryNodes = std::make_shared<const ankerl::unordered_dense::set<RE::NiNode*>>(categoryNodes);
@@ -947,7 +902,7 @@ namespace DCLF::Scene
 		publication->eventFrame = std::exchange(unpublishedFrame, 0u);
 		if (publication->eventNs) {
 			const auto nowNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-			const std::uint32_t frameNow = SceneCapture::Frame();
+			const std::uint32_t frameNow = DCLF::SceneClock::Step();
 			pumpStats.publishMs.push_back(nowNs > publication->eventNs ? static_cast<double>(nowNs - publication->eventNs) / 1.0e6 : 0.0);
 			pumpStats.publishFrames.push_back(frameNow >= publication->eventFrame ? frameNow - publication->eventFrame : 0u);
 		}
@@ -1020,7 +975,7 @@ namespace DCLF::Scene
 		}
 	}
 
-	void Coordinator::PublishIfDue(bool a_task)
+	void Coordinator::PublishIfDue()
 	{
 		// A publication the builder has not taken would only be replaced, so the pass defers and its changes ride the next one.
 		DCLF_SCENE_PART(Publish, "CS.DCLF.Scene.Publish");
@@ -1038,21 +993,14 @@ namespace DCLF::Scene
 			needed = PublicationNeeded();
 		}
 		if (needed) {
-			if (PublishReason why{}; PublicationDue(a_task, why)) {
+			if (PublishReason why{}; PublicationDue(why)) {
 				const std::uint32_t folded = std::exchange(passesDeferred, 0u);
-				pacedCheckDue = folded && Policy::CheckPacedPublication(pacedPublications + 1);
-				pacedPublications += folded ? 1u : 0u;
 				PublishScene();
 				NotePublished();
 				++pace.published;
 				++pace.byReason[static_cast<std::size_t>(why)];
 				pace.folded += folded;
 				pace.maxPublished = (std::max)(pace.maxPublished, ++pace.publishedThisFrame);
-				if (std::exchange(pacedCheckDue, false) && publishedTables && publicationClaims) {
-					DCLF_ZONE("CS.DCLF.Scene.CheckPacedPublication");
-					CheckPacedPublication(*publishedTables, *publicationClaims);
-				}
-				claimsReference.reset();
 			} else {
 				++passesDeferred;
 				passDeferred = true;
@@ -1061,10 +1009,10 @@ namespace DCLF::Scene
 		}
 	}
 
-	void Coordinator::RunSceneWork(bool a_task)
+	void Coordinator::RunSceneWork()
 	{
 		// A record bound in this pass is committed in it and published with it or the next publishing pass.
-		inSceneTask = a_task;
+		inSceneTask = true;
 		holdPrimaryNotes = true;
 		const auto workStart = std::chrono::steady_clock::now();
 		{
@@ -1146,7 +1094,7 @@ namespace DCLF::Scene
 			DCLF_SCENE_PART(Commit, "CS.DCLF.Scene.Commit");
 			CommitSet();
 		}
-		PublishIfDue(a_task);
+		PublishIfDue();
 		holdLostMembers = false;
 		{
 			DCLF_ZONE("CS.DCLF.Scene.EndSceneFrame");
@@ -1186,7 +1134,7 @@ namespace DCLF::Scene
 		++publication.lookupsCopied;
 		publication.lookupsMs += ms;
 		publication.lookupsMaxMs = std::max(publication.lookupsMaxMs, ms);
-		const std::uint64_t copies = lookups.pipelines.Copies() + lookups.materials.Copies();
+		const std::uint64_t copies = lookups.pipelines.Stats().chunkCopies + lookups.materials.Stats().chunkCopies;
 		publication.lookupsChunks += copies >= lookupsChunkCopies ? copies - lookupsChunkCopies : copies;
 		lookupsChunkCopies = copies;
 	}
@@ -1691,7 +1639,7 @@ namespace DCLF::Scene
 		const auto replayStart = std::chrono::steady_clock::now();
 		const bool worth = slots.size() >= kReplayMinSlots || materialSlots.size() >= kReplayMinMaterials;
 		if (jobs && worth && FanoutMode(jobs, 2) == 2) {
-			SceneScheduler::Executor().ParallelFor("CS.DCLF.Scene.PublishTables.Replay", jobs, 1, run);
+			::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.Scene.PublishTables.Replay", jobs, 1, run);
 			++pace.replayPooled;
 		} else if (jobs) {
 			run(0, jobs);
@@ -1874,8 +1822,8 @@ namespace DCLF::Scene
 				state->busy.store(false, std::memory_order_release);
 				state->busy.notify_all();
 			};
-			if (Policy::SerialFanout() || !SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu,
-											  "DCLF tables spare", [job](const auto&) { job(); }))
+			if (!::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu,
+					"DCLF tables spare", [job](const auto&) { job(); }))
 				job();
 		}
 	}
@@ -1961,10 +1909,9 @@ namespace DCLF::Scene
 			ReplayExtras(snapshot, tables, plan);
 		}
 		auto assign = [](auto& a_to, auto& a_from) { a_to = a_from; };
-		std::uint32_t keptFamilies = 0;
 		{
 			DCLF_ZONE("CS.DCLF.Scene.PublishTables.TableFamilies");
-			keptFamilies = snapshot.families.Publish(tables.families, tablesPoolReplayable[index] != 0, publication.familiesKept);
+			(void)snapshot.families.Publish(tables.families, tablesPoolReplayable[index] != 0, publication.familiesKept);
 		}
 		if (!plan.keepConstants) {
 			DCLF_ZONE("CS.DCLF.Scene.PublishTables.Constants");
@@ -1980,7 +1927,6 @@ namespace DCLF::Scene
 		}
 		tablesPoolReplayable[index] = 1;
 
-		Diagnostics::Notify(Diagnostics::TablesReplayed{ *this, snapshot, publication.published, plan.position, plan.geometryPosition, keptFamilies, plan.keepConstants });
 		// The snapshots are its only readers. One behind the bound is copied whole.
 		tables.publicationLog.Trim(1u << 16);
 		{
@@ -1999,87 +1945,6 @@ namespace DCLF::Scene
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		publication.ms += ms;
 		publication.maxMs = std::max(publication.maxMs, ms);
-	}
-
-	namespace
-	{
-		std::string FirstTablesDifference(const SceneTables& a_published, const SceneTables& a_tables)
-		{
-			std::string first;
-			const auto& t = a_tables;
-			auto differ = [&](std::string a_what) {
-				if (first.empty())
-					first = std::move(a_what);
-			};
-			if (a_published.objects.size() != t.objects.size())
-				differ(fmt::format("{} object slots against {}", a_published.objects.size(), t.objects.size()));
-			else
-				for (std::uint32_t slot = 0; slot < t.objects.size() && first.empty(); ++slot)
-					if (const auto causes = SceneTables::CausesBetween(a_published.ColumnsOf(slot), t.ColumnsOf(slot)))
-						differ(fmt::format("object slot {} (causes {:#x})", slot, causes));
-			if (a_published.setPhases != t.setPhases || a_published.rangeOrdinal != t.rangeOrdinal || a_published.layerBase != t.layerBase || a_published.layerOf != t.layerOf)
-				differ("a column replayed by slot (set phases, decal ordinals, layer links)");
-			if (a_published.materials.size() != t.materials.size() || a_published.materialVersion != t.materialVersion || a_published.materialFrameVersion != t.materialFrameVersion)
-				differ("the material versions");
-			else
-				for (std::size_t slot = 0; slot < t.materials.size() && first.empty(); ++slot)
-					if (!(a_published.materials[slot] == t.materials[slot]))
-						differ(fmt::format("material slot {}", slot));
-			if (a_published.geometries.size() != t.geometries.size())
-				differ("the geometry slots' count");
-			else
-				for (std::size_t slot = 0; slot < t.geometries.size() && first.empty(); ++slot)
-					if (std::memcmp(&a_published.geometries[slot], &t.geometries[slot], sizeof(GeometryBuffers)) != 0 || a_published.geometrySlotKey[slot] != t.geometrySlotKey[slot])
-						differ(fmt::format("geometry slot {}", slot));
-			if (a_published.pipelines != t.pipelines || a_published.pipelineBindingVersion != t.pipelineBindingVersion)
-				differ("the pipeline family");
-			if (a_published.changeLog.End() != t.changeLog.End() || a_published.geometryLog.End() != t.geometryLog.End() || a_published.materialLog.End() != t.materialLog.End() ||
-				a_published.extrasBlockLog.End() != t.extrasBlockLog.End() || !a_published.families.SameStamps(t.families) ||
-				a_published.constantsStamp != t.constantsStamp || a_published.pipelinesStamp != t.pipelinesStamp || a_published.extraRows != t.extraRows)
-				differ("a log's end, a family's stamp or the extras rows");
-			return first;
-		}
-
-		std::string FirstClaimsDifference(const SetSnapshot& a_reference, const SetSnapshot& a_claims)
-		{
-			std::string claimsFirst;
-			for (const auto& [geometry, phases] : a_reference.phases)
-				if (const std::uint8_t published = a_claims.PhasesOf(geometry); published != phases) {
-					claimsFirst = fmt::format("geometry {} published {:#x}, made whole {:#x}", static_cast<const void*>(geometry), published, phases);
-					break;
-				}
-			if (claimsFirst.empty())
-				for (const auto& [geometry, phases] : a_claims.phases)
-					if (a_reference.phases.find(geometry) == a_reference.phases.end()) {
-						claimsFirst = fmt::format("geometry {} published {:#x}, made whole 0x0", static_cast<const void*>(geometry), phases);
-						break;
-					}
-			if (claimsFirst.empty() && a_reference.drawn != a_claims.drawn)
-				claimsFirst = fmt::format("drawn phases published {:#x}, made whole {:#x}", a_claims.drawn, a_reference.drawn);
-			return claimsFirst;
-		}
-	}
-
-	void Coordinator::CheckPacedPublication(const Tables& a_published, const SetSnapshot& a_claims)
-	{
-		// A publication that folded deferred passes in must equal what an every-pass publication would have made.
-		auto& p = paceStats;
-		++p.parityChecks;
-		const std::string first = FirstTablesDifference(a_published, tables);
-		if (!first.empty()) {
-			++p.parityTables;
-			if (p.parityFirst.empty())
-				p.parityFirst = fmt::format("tables: {} (publication {})", first, publicationSequence);
-		}
-		if (!claimsReference)
-			return;
-		const std::string claimsFirst = FirstClaimsDifference(*claimsReference, a_claims);
-		if (!claimsFirst.empty()) {
-			++p.parityClaims;
-			if (p.parityFirst.empty())
-				p.parityFirst = fmt::format("claims: {} ({} members against {} made whole; publication {})", claimsFirst, a_claims.phases.size(),
-					claimsReference->phases.size(), publicationSequence);
-		}
 	}
 }
 

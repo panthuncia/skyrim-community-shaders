@@ -33,7 +33,6 @@ namespace DCLF::Api
 		std::span<const std::uint32_t> dirtyMaterials;
 		bool everyMaterial = true;
 		const std::shared_ptr<const void>* previous = nullptr;  // null or empty when there is none
-		bool check = false;  // builder parity: also build the product whole and compare
 	};
 }
 

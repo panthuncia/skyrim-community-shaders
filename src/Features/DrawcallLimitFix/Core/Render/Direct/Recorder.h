@@ -97,14 +97,14 @@ namespace DCLF::Direct
 		// Per geometry slot, the first index of its range as of the frame's first drawing commit. kNoRange is not drawn.
 		std::span<const std::uint32_t> poolFirsts;
 		std::array<std::uint32_t, kFramePushWords> framePush{};
-		// A shadow view's push words are addresses of its latched blocks, so a per-snapshot recording stays valid while the shadow shape does.
+		// A shadow view's push words are addresses of its latched blocks.
 		std::array<std::uint32_t, kShadowPushWords> shadowPush{};
 		// Per key slot, the ShadowIndirectState::pipelines index. Lookups::kNone skips the draws.
 		std::span<const std::uint32_t> shadowMapRow;
 		std::uint64_t lodFadeFrame = 0;
 		// D3D12 pushes the ref instead, since no layout turns the address into a view there.
 		RenderGraph::BufferRef lodFadeFrameRef;
-		// The frame's animated material rows, 0 for the installed rows. Per frame, so a per-snapshot recording keeps 0.
+		// The frame's animated material rows, 0 for the installed rows.
 		std::uint64_t animatedRows = 0;
 		RenderGraph::BufferRef animatedRowsRef;
 		// Terrain Blending's depth offset on every draw, for a terrain group 1 twin's recording.
@@ -167,10 +167,10 @@ namespace DCLF::Direct
 	void RecordBatch(RecordContext& a_context, const CulledBatch& a_batch);
 
 	/**
-	 * @brief Records batches nearest a_plane first, in a_slabs depth slabs sorted by bucket within each, or by distance alone with 0.
+	 * @brief Records batches nearest a_plane first, in 8 depth slabs sorted by bucket within each.
 	 * Only for depth-only draws, whose result does not depend on order.
 	 */
-	void RecordSortedBatches(RecordContext& a_context, std::span<const CulledBatch* const> a_batches, const std::array<float, 4>& a_plane, std::uint32_t a_slabs);
+	void RecordSortedBatches(RecordContext& a_context, std::span<const CulledBatch* const> a_batches, const std::array<float, 4>& a_plane);
 
 	/** @brief A terrain group's colour draws, called at the group's main range position in the second pass. */
 	void RecordTerrainGroup(RecordContext& a_context, std::uint32_t a_group, std::span<const CulledBatch* const> a_batches);
@@ -189,9 +189,4 @@ namespace DCLF::Direct
 	 * before more DCLF draws.
 	 */
 	void RecordFamilyDraws(RecordContext& a_context);
-
-	/**
-	 * @brief Records a_batch into a_secondary. False when it could not begin or had nothing valid. The secondary is then empty and must not be executed.
-	 */
-	bool RecordSecondary(RecordContext& a_context, const rhi::SecondaryInheritance& a_inheritance, const CulledBatch& a_batch, rhi::CommandList& a_secondary);
 }

@@ -116,6 +116,9 @@ struct PostProcessing : Feature
 
 	void UpdateVanillaEffects(bool active);
 
+	/** @brief Binds a sub-feature's on/off to its frame variable, "PostProcessing.<slot>.enabled". At each new instance. */
+	static void BindPipelineSettings(PostProcessFeature& a_feature, FeaturePipelineIndex a_index);
+
 	/** @brief Creates the sub-feature at a pipeline slot, at its defaults and without GPU resources. */
 	static std::shared_ptr<PostProcessFeature> MakePipelineFeature(FeaturePipelineIndex idx);
 
@@ -168,7 +171,7 @@ struct PostProcessing : Feature
 
 	/**
 	 * @brief At the tonemap hook, before the Tonemap anchor runs: lets the render graph take the chain this frame
-	 * (ORGPostProcessing, CS_ORG_POST_PROCESSING=1). PreProcess then draws nothing.
+	 * (ORGPostProcessing, in graph mode). PreProcess then draws nothing.
 	 */
 	void BeforeTonemapAnchor(const RenderGraph::Engine::TonemapTargets& a_targets);
 

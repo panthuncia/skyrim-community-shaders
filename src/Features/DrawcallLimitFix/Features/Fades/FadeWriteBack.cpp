@@ -9,10 +9,10 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/SceneExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
+#include "RenderGraph/Fatal.h"
 
 #include <chrono>
 #include <memory>
@@ -42,7 +42,7 @@ namespace DCLF::Features::Fades
 		}
 	}
 
-	void WriteFadeStores(bool a_live, const std::function<bool(const void*)>& a_written)
+	void WriteFadeStores(const std::function<bool(const void*)>& a_written)
 	{
 		const auto* fades = CurrentScene();
 		if (!fades || !fades->fadeWriteBack)
@@ -54,9 +54,9 @@ namespace DCLF::Features::Fades
 			return;
 		writeBack.readyStores.store(0, std::memory_order_relaxed);
 		// A released publication means the nodes may be gone. That would be a defect, so the stores are dropped and logged.
-		if (!a_live || !EngineReleases::Alive(stores->publication)) {
+		if (!EngineReleases::Alive(stores->publication)) {
 			for (const auto& store : stores->stores)
-				LogLost("[DCLF] fade write-back: store dropped ({}): node {} fade {:.3f}", a_live ? "publication released" : "not live", store.node, store.fade);
+				LogLost("[DCLF] fade write-back: store dropped (publication released): node {} fade {:.3f}", store.node, store.fade);
 			writeBack.dropped.fetch_add(stores->stores.size(), std::memory_order_relaxed);
 			return;
 		}
@@ -181,25 +181,9 @@ namespace DCLF::Features::Fades
 			state.running.store(false, std::memory_order_release);
 			state.running.notify_all();
 		};
-		if (!SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "fade write-back",
+		if (!::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu, "fade write-back",
 				[find = std::move(find)](const auto&) { find(); }))
-			stl::report_and_fail("Drawcall Limit Fix: the fade write-back was refused by DCLF's executor");
-	}
-
-	void WaitFadeWriteBack()
-	{
-		const auto* fades = CurrentScene();
-		if (!fades || !fades->fadeWriteBack)
-			return;
-		auto& running = fades->fadeWriteBack->running;
-		while (running.load(std::memory_order_acquire))
-			running.wait(true, std::memory_order_acquire);
-		// Called on teardown, toggle or load, when the roots may no longer stand in, so the stores are dropped.
-		std::unique_ptr<FadeWriteBack::Stores> dropped{ fades->fadeWriteBack->ready.exchange(nullptr, std::memory_order_acq_rel) };
-		fades->fadeWriteBack->readyStores.store(0, std::memory_order_relaxed);
-		if (dropped)
-			for (const auto& store : dropped->stores)
-				LogLost("[DCLF] fade write-back: store dropped (write-back wait): node {} fade {:.3f}", store.node, store.fade);
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the fade write-back was refused by DCLF's executor");
 	}
 
 	void ForgetWriteBackCensus(const FadeWriteBack* a_writeBack)
@@ -226,9 +210,10 @@ namespace DCLF::Features::Fades
 		census.harvested = w.harvested.load(std::memory_order_relaxed);
 		census.harvestedWithEvents = w.harvestedWithEvents.load(std::memory_order_relaxed);
 		census.events = w.events.load(std::memory_order_relaxed);
-		census.overflowed = w.overflowed.load(std::memory_order_relaxed);
-		census.missed = w.missed.load(std::memory_order_relaxed);
-		census.setsAdded = w.setsAdded.load(std::memory_order_relaxed);
+		const auto list = w.list->Stats(false);
+		census.overflowed = list.overflowed;
+		census.missed = list.missed;
+		census.setsAdded = list.setsAdded;
 		census.pendingBatches = w.pendingBatches.load(std::memory_order_relaxed);
 		census.readyStores = w.readyStores.load(std::memory_order_relaxed);
 		census.appliedFrameSize = w.appliedFrame.size();

@@ -39,7 +39,7 @@ namespace GpuEventTimers
 	/**
 	 * @brief Render thread: the frames from the next one on are a new window, labelled a_label, logged as one block once its last frame
 	 * is read back ("[GpuEvents] window '<label>': ..."); "-" is not logged. Once a window is started, the interval no longer logs, so
-	 * a test's phases are timed exactly, frames in flight included (CS_DCLF_TEST_COMMANDS' dclf:gpu-window).
+	 * a test's phases are timed exactly, frames in flight included (the org:gpu-window test command).
 	 */
 	void StartWindow(std::string_view a_label);
 }

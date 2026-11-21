@@ -1,13 +1,11 @@
 #pragma once
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include "RenderGraph/ComputeProgram.h"
 
-#	include "RenderGraph/ComputeProgram.h"
-
-#	include <cstdint>
-#	include <functional>
-#	include <memory>
-#	include <vector>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <vector>
 
 namespace org
 {
@@ -36,8 +34,9 @@ namespace PrefixSum
 		std::shared_ptr<const ComputeProgram> blockScan, blockOffsets;
 	};
 
-	/** @brief Null when either program could not be created. Share them between passes. */
-	std::shared_ptr<const Programs> Load(rhi::Device a_device);
+	/** @brief The two programs' descriptions. The owner queues them at setup (Programs::Queue) and shares them between passes. */
+	ComputeProgram::Desc BlockScanDesc();
+	ComputeProgram::Desc BlockOffsetsDesc();
 
 	struct Desc
 	{
@@ -59,4 +58,3 @@ namespace PrefixSum
 	std::shared_ptr<org::RenderPass> CreatePass(Desc a_desc);
 }
 
-#endif

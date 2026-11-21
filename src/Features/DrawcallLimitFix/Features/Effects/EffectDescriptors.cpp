@@ -44,16 +44,16 @@ namespace DCLF::Features::Effects
 			a_draw.blending = a_leaf.AlphaBlending();
 			// Opaque effects such as forge coals draw through decal group 1. Only passes that are hint 0 every frame qualify.
 			// When a fade drops property alpha below one the engine blends it, but DCLF keeps it opaque (dclf-architecture.md, "Opaque effects").
-			const bool opaqueEffects = Extensions::ObjectClassTaken(Api::ObjectClass::OpaqueEffect);
+			const bool opaqueEffects = Extensions::ObjectClassOn(Api::ObjectClass::OpaqueEffect);
 			a_draw.opaque = !a_draw.blending && !a_draw.decal;
 			// GetRenderPasses (0x1414bd890) makes an unblended Falloff pass hint 1, so it goes to the forward epoch drawn unblended.
 			if (a_draw.opaque && ported.falloff && (f & Bit(Flag::kFalloff)) && !ParticleGeometryType(a_leaf.Type()))
 				a_draw.opaque = false;
-			if (a_draw.opaque && (!opaqueEffects || !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Decal) || (f & Bit(Flag::kFalloff)) || !(f & Bit(Flag::kZBufferTest)) ||
+			if (a_draw.opaque && (!opaqueEffects || !Extensions::ObjectClassOn(Api::ObjectClass::Decal) || (f & Bit(Flag::kFalloff)) || !(f & Bit(Flag::kZBufferTest)) ||
 									 !(f & Bit(Flag::kZBufferWrite)) || ParticleGeometryType(a_leaf.Type())))
 				return Ineligible::EffectOpaque;
 			// Everything else needs the forward epoch, as blended Lighting passes do.
-			if (!a_draw.opaque && !a_draw.decal && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward))
+			if (!a_draw.opaque && !a_draw.decal && !Extensions::ObjectClassOn(Api::ObjectClass::Forward))
 				return Ineligible::AlphaBlend;
 			a_draw.particles = ParticleGeometryType(a_leaf.Type());
 			if (variants & kEffectVariantBlendPair)
@@ -160,7 +160,7 @@ namespace DCLF::Features::Effects
 	std::uint32_t ParticleRejectionOf(const SceneCapture::LeafView& a_leaf, std::uint64_t a_flags)
 	{
 		// Particle passes are always hint 1, so an unblended one would take its blend mode from the frame's alpha (FUN_14150bc80).
-		if (!Extensions::GeometryTypeOn(ActiveToggles(), a_leaf.Type()))
+		if (!Extensions::GeometryTypeOn(a_leaf.Type()))
 			return kEffectVariantParticle;
 		const auto* g = a_leaf.geometry;
 		if (!g || a_leaf.Type() != static_cast<std::uint8_t>(RE::BSGeometry::Type::kParticles) || !g->particles.system || a_leaf.Skinned())
@@ -190,12 +190,12 @@ namespace DCLF::Features::Effects
 		// A skin instance without the Skinned bit is a rigid skin. The engine draws it with the unskinned shader, as rigidSkins does.
 		// The Skinned bit without a skin instance would read bones nothing set, so it stays a variant.
 		const bool effectSkinned = EffectSkinned(a_property, a_leaf);
-		if ((a_leaf.Skinned() && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Skinned)) || (effectSkinned && !a_leaf.Skinned()) ||
+		if ((a_leaf.Skinned() && !Extensions::ObjectClassOn(Api::ObjectClass::Skinned)) || (effectSkinned && !a_leaf.Skinned()) ||
 			(!effectSkinned && a_leaf.Skinned() && !ported.rigidSkins))
 			variants |= kEffectVariantSkinned;
 		// kTempRefraction with kDynamicDecal registers no pass in the engine, so it stays a variant.
 		if ((f & (Bit(Flag::kDecal) | Bit(Flag::kDynamicDecal))) &&
-			(!Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Decal) || ((f & Bit(Flag::kTempRefraction)) && (f & Bit(Flag::kDynamicDecal)))))
+			(!Extensions::ObjectClassOn(Api::ObjectClass::Decal) || ((f & Bit(Flag::kTempRefraction)) && (f & Bit(Flag::kDynamicDecal)))))
 			variants |= kEffectVariantDecal;
 		if (f & Bit(Flag::kBillboard))
 			variants |= kEffectVariantSkyObject;

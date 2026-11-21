@@ -2,11 +2,15 @@
 
 #include "Buffer.h"
 #include "GrassShared/GrassFrame.h"
+#include "Utils/Setting.h"
 #include "Utils/VersionedRelocation.h"
 
 struct GrassCollision : Feature
 {
 public:
+	/** @brief Binds the settings that shape the frame. */
+	GrassCollision();
+
 	virtual inline std::string GetName() override { return "Grass Collision"; }
 	virtual std::string GetDisplayName() override { return T("feature.grass_collision.name", "Grass Collision"); }
 	virtual inline std::string GetShortName() override { return "GrassCollision"; }
@@ -31,7 +35,7 @@ public:
 
 	struct Settings
 	{
-		bool EnableGrassCollision = 1;
+		CS::Setting<bool> EnableGrassCollision = true;
 		bool TrackRagdolls = 1;
 		bool EnableBlur = 1;
 	};

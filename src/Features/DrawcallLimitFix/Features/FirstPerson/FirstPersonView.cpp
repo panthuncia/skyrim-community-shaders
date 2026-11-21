@@ -18,8 +18,6 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 
 namespace DCLF::Features::FirstPerson
@@ -81,8 +79,6 @@ namespace DCLF::Features::FirstPerson
 					if ((tables.objects[o].flags & kObjectForward) && claims && (claims->PhasesOf(tables.objectGeometry[o]) & kSetFirstPerson))
 						++f.forwardMembersNow;
 				}
-			if (claims)
-				Diagnostics::Notify(Diagnostics::FirstPersonSkeletonWalked{ tables, skeleton, geometry.size(), *claims });
 		}
 	}
 
@@ -95,7 +91,7 @@ namespace DCLF::Features::FirstPerson
 			return;
 		auto& f = FrameState();
 		const std::uint32_t frame = a_context.frame;
-		const bool on = Extensions::ViewOn(ActiveToggles(), kView) && !a_context.failed && Draws::CurrentGraphConditions().firstPerson;
+		const bool on = Extensions::ViewRegistered(kView);
 		f.latch = false;
 		f.latchFrame = frame;
 		if (!on)
@@ -134,10 +130,8 @@ namespace DCLF::Features::FirstPerson
 	{
 		const auto& f = FrameState();
 		const auto& c = a_coverage;
-		// The forward part has no plain buckets. A GPU-driven graph without device-generated commands can only draw it through the
-		// direct forward family, so otherwise the engine keeps the whole view.
 		return c.main && c.on && f.latch && f.latchFrame == c.frame && c.epochsCovered && c.targetImported && !c.rebuildPending && c.mainResourcesCurrent &&
-		       !c.rebuildRequested && Draws::CurrentGraphConditions().firstPerson;
+		       !c.rebuildRequested;
 	}
 
 	void CaptureRoot(Api::ViewRootCapture& a_capture)

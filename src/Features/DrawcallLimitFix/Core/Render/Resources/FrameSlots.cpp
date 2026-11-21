@@ -1,7 +1,9 @@
 // The main pass's captured bindings, the frame textures at t16 and up, and the names of the frame constants buffer's parts.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
-
-#include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Draws
 {
@@ -65,40 +67,79 @@ namespace DCLF::Draws
 		if (slot == kFrameSlotLighting)
 			return within < sizeof(FrameLighting)                                   ? "frame constants: frame lighting" :
 			       within < sizeof(FrameLighting) + sizeof(LodFadeFrame)           ? "frame constants: LOD fade frame" :
-			       within < kExtrasPixelFrameOffset % kFrameSlotBytes               ? "frame constants: foliage parity" :
+			       within < kExtrasPixelFrameOffset % kFrameSlotBytes               ? "frame constants: unused rows" :
 			                                                                         "frame constants PS b13 (extras frame)";
 		if (slot == kFrameSlotRecord)
 			return "frame constants: frame record";
 		return "frame constants: ?";
 	}
 
+	namespace
+	{
+		/**
+		 * @brief In guest mode the engine's binds stay in its context handle and CS's reach DXVK's context. A slot takes CS's bind,
+		 * as it did when both met on DXVK's context (CS binds after the engine's flush), or else the engine's, unwrapped to DXVK's
+		 * object. Native mode and plain D3D11 have one context. a_out gets one reference per slot.
+		 */
+		template <class T, std::size_t N, class Get>
+		void ReadBound(std::array<T*, N>& a_out, Get&& a_get)
+		{
+			auto* own = globals::d3d::context;
+			a_get(own, a_out.data());
+			auto* engine = RenderGraph::Engine::Tripwire::EngineContext();
+			if (!engine || engine == own)
+				return;
+			std::array<T*, N> theirs{};
+			a_get(engine, theirs.data());
+			for (std::size_t i = 0; i < N; ++i) {
+				if (!theirs[i])
+					continue;
+				if (!a_out[i]) {
+					a_out[i] = RenderGraph::Engine::Tripwire::Unwrap(theirs[i]);
+					if (a_out[i])
+						a_out[i]->AddRef();
+				}
+				theirs[i]->Release();
+			}
+		}
+
+		/** @brief The texture behind a bound view, as DXVK's object in guest mode. */
+		template <class View>
+		winrt::com_ptr<ID3D11Texture2D> TextureOf(View* a_view)
+		{
+			auto* view = RenderGraph::Engine::Tripwire::Unwrap(a_view);
+			if (!view)
+				return nullptr;
+			winrt::com_ptr<ID3D11Resource> resource;
+			view->GetResource(resource.put());
+			return resource.try_as<ID3D11Texture2D>();
+		}
+	}
+
 	Capture CaptureBindings()
 	{
 		RenderThreadBudget::Part budget(RenderThreadBudget::Bucket::Capture);
-		auto* context = globals::d3d::context;
+		// In graph mode the engine's binds stay in its context handle, and D3D11's context holds none of them.
+		if (RenderGraph::Engine::GraphMode() && !RenderGraph::Engine::Tripwire::GuestContextInstalled())
+			RenderGraph::Fatal("DCLF capture", "the engine's bindings were read before its context handle was in place");
 		Capture capture;
-		context->VSGetConstantBuffers(0, kConstantBufferRegisters, capture.vsBuffers.data());
-		context->PSGetConstantBuffers(0, kConstantBufferRegisters, capture.psBuffers.data());
-		context->PSGetShaderResources(0, kTextureRegisters, capture.psViews.data());
-		// A null where CS bound a view DXVK dropped is logged by the state readers' trace.
-		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t)
-			RenderGraph::Engine::Flush::NoteRead("DCLF CaptureBindings", t, capture.psViews[t]);
+		ReadBound(capture.vsBuffers, [](ID3D11DeviceContext* a_context, ID3D11Buffer** a_out) { a_context->VSGetConstantBuffers(0, kConstantBufferRegisters, a_out); });
+		ReadBound(capture.psBuffers, [](ID3D11DeviceContext* a_context, ID3D11Buffer** a_out) { a_context->PSGetConstantBuffers(0, kConstantBufferRegisters, a_out); });
+		ReadBound(capture.psViews, [](ID3D11DeviceContext* a_context, ID3D11ShaderResourceView** a_out) { a_context->PSGetShaderResources(0, kTextureRegisters, a_out); });
+		// The targets and the viewport are the engine's alone. CS binds none for an engine draw.
+		auto* engine = RenderGraph::Engine::Tripwire::EngineContext();
 		ID3D11RenderTargetView* views[kColorTargets] = {};
 		ID3D11DepthStencilView* depth = nullptr;
-		context->OMGetRenderTargets(kColorTargets, views, &depth);
+		engine->OMGetRenderTargets(kColorTargets, views, &depth);
 		for (std::uint32_t i = 0; i < kColorTargets; ++i) {
 			if (!views[i])
 				continue;
-			winrt::com_ptr<ID3D11Resource> resource;
-			views[i]->GetResource(resource.put());
-			capture.targets[i] = resource.try_as<ID3D11Texture2D>();
+			capture.targets[i] = TextureOf(views[i]);
 			capture.targetCount = i + 1;
 			views[i]->Release();
 		}
 		if (depth) {
-			winrt::com_ptr<ID3D11Resource> resource;
-			depth->GetResource(resource.put());
-			capture.depth = resource.try_as<ID3D11Texture2D>();
+			capture.depth = TextureOf(depth);
 			depth->Release();
 		}
 		// CS binds b5 SharedData and b6 FeatureData from Renderer_ResetState, so whether they are bound here depends on the last reset.
@@ -118,7 +159,7 @@ namespace DCLF::Draws
 		capture.previousEye = shadowState.previousPosAdjust.getEye();
 		D3D11_VIEWPORT viewport{};
 		UINT count = 1;
-		context->RSGetViewports(&count, &viewport);
+		engine->RSGetViewports(&count, &viewport);
 		capture.viewportWidth = static_cast<std::uint32_t>(viewport.Width);
 		capture.viewportHeight = static_cast<std::uint32_t>(viewport.Height);
 		capture.minDepth = viewport.MinDepth;

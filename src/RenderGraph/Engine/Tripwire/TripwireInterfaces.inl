@@ -92,37 +92,37 @@
 
 // ID3D11DeviceContext : ID3D11DeviceChild, 108 own slots
 #define TW_OWN_ID3D11DeviceContext(X) \
-	X(void, VSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, TW_UNWRAP_ARRAY(ppConstantBuffers, NumBuffers)), ()) \
-	X(void, PSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, TW_UNWRAP_ARRAY(ppShaderResourceViews, NumViews)), ()) \
-	X(void, PSSetShader, (ID3D11PixelShader* pPixelShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pPixelShader), TW_UNWRAP_ARRAY(ppClassInstances, NumClassInstances), NumClassInstances), ()) \
-	X(void, PSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, TW_UNWRAP_ARRAY(ppSamplers, NumSamplers)), ()) \
-	X(void, VSSetShader, (ID3D11VertexShader* pVertexShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pVertexShader), TW_UNWRAP_ARRAY(ppClassInstances, NumClassInstances), NumClassInstances), ()) \
+	X(void, VSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, ppConstantBuffers), ()) \
+	X(void, PSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, ppShaderResourceViews), ()) \
+	X(void, PSSetShader, (ID3D11PixelShader* pPixelShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pPixelShader), ppClassInstances, NumClassInstances), ()) \
+	X(void, PSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, ppSamplers), ()) \
+	X(void, VSSetShader, (ID3D11VertexShader* pVertexShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pVertexShader), ppClassInstances, NumClassInstances), ()) \
 	X(void, DrawIndexed, (UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation), (IndexCount, StartIndexLocation, BaseVertexLocation), ()) \
 	X(void, Draw, (UINT VertexCount, UINT StartVertexLocation), (VertexCount, StartVertexLocation), ()) \
 	X(HRESULT, Map, (ID3D11Resource* pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE* pMappedResource), (TW_UNWRAP(pResource), Subresource, MapType, MapFlags, pMappedResource), (TW_ZERO(pMappedResource))) \
 	X(void, Unmap, (ID3D11Resource* pResource, UINT Subresource), (TW_UNWRAP(pResource), Subresource), ()) \
-	X(void, PSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, TW_UNWRAP_ARRAY(ppConstantBuffers, NumBuffers)), ()) \
+	X(void, PSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, ppConstantBuffers), ()) \
 	X(void, IASetInputLayout, (ID3D11InputLayout* pInputLayout), (TW_UNWRAP(pInputLayout)), ()) \
-	X(void, IASetVertexBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppVertexBuffers, const UINT* pStrides, const UINT* pOffsets), (StartSlot, NumBuffers, TW_UNWRAP_ARRAY(ppVertexBuffers, NumBuffers), pStrides, pOffsets), ()) \
+	X(void, IASetVertexBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppVertexBuffers, const UINT* pStrides, const UINT* pOffsets), (StartSlot, NumBuffers, ppVertexBuffers, pStrides, pOffsets), ()) \
 	X(void, IASetIndexBuffer, (ID3D11Buffer* pIndexBuffer, DXGI_FORMAT Format, UINT Offset), (TW_UNWRAP(pIndexBuffer), Format, Offset), ()) \
 	X(void, DrawIndexedInstanced, (UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation, UINT StartInstanceLocation), (IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation), ()) \
 	X(void, DrawInstanced, (UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation), (VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation), ()) \
-	X(void, GSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, TW_UNWRAP_ARRAY(ppConstantBuffers, NumBuffers)), ()) \
-	X(void, GSSetShader, (ID3D11GeometryShader* pShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pShader), TW_UNWRAP_ARRAY(ppClassInstances, NumClassInstances), NumClassInstances), ()) \
+	X(void, GSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, ppConstantBuffers), ()) \
+	X(void, GSSetShader, (ID3D11GeometryShader* pShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pShader), ppClassInstances, NumClassInstances), ()) \
 	X(void, IASetPrimitiveTopology, (D3D11_PRIMITIVE_TOPOLOGY Topology), (Topology), ()) \
-	X(void, VSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, TW_UNWRAP_ARRAY(ppShaderResourceViews, NumViews)), ()) \
-	X(void, VSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, TW_UNWRAP_ARRAY(ppSamplers, NumSamplers)), ()) \
+	X(void, VSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, ppShaderResourceViews), ()) \
+	X(void, VSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, ppSamplers), ()) \
 	X(void, Begin, (ID3D11Asynchronous* pAsync), (TW_UNWRAP(pAsync)), ()) \
 	X(void, End, (ID3D11Asynchronous* pAsync), (TW_UNWRAP(pAsync)), ()) \
 	X(HRESULT, GetData, (ID3D11Asynchronous* pAsync, void* pData, UINT DataSize, UINT GetDataFlags), (TW_UNWRAP(pAsync), pData, DataSize, GetDataFlags), (TW_ZERO_BYTES(pData, DataSize))) \
 	X(void, SetPredication, (ID3D11Predicate* pPredicate, BOOL PredicateValue), (TW_UNWRAP(pPredicate), PredicateValue), ()) \
-	X(void, GSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, TW_UNWRAP_ARRAY(ppShaderResourceViews, NumViews)), ()) \
-	X(void, GSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, TW_UNWRAP_ARRAY(ppSamplers, NumSamplers)), ()) \
-	X(void, OMSetRenderTargets, (UINT NumViews, ID3D11RenderTargetView* const* ppRenderTargetViews, ID3D11DepthStencilView* pDepthStencilView), (NumViews, TW_UNWRAP_ARRAY(ppRenderTargetViews, NumViews), TW_UNWRAP(pDepthStencilView)), ()) \
-	X(void, OMSetRenderTargetsAndUnorderedAccessViews, (UINT NumRTVs, ID3D11RenderTargetView* const* ppRenderTargetViews, ID3D11DepthStencilView* pDepthStencilView, UINT UAVStartSlot, UINT NumUAVs, ID3D11UnorderedAccessView* const* ppUnorderedAccessViews, const UINT* pUAVInitialCounts), (NumRTVs, TW_UNWRAP_ARRAY(ppRenderTargetViews, NumRTVs), TW_UNWRAP(pDepthStencilView), UAVStartSlot, NumUAVs, TW_UNWRAP_ARRAY(ppUnorderedAccessViews, NumUAVs), pUAVInitialCounts), ()) \
+	X(void, GSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, ppShaderResourceViews), ()) \
+	X(void, GSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, ppSamplers), ()) \
+	X(void, OMSetRenderTargets, (UINT NumViews, ID3D11RenderTargetView* const* ppRenderTargetViews, ID3D11DepthStencilView* pDepthStencilView), (NumViews, ppRenderTargetViews, TW_UNWRAP(pDepthStencilView)), ()) \
+	X(void, OMSetRenderTargetsAndUnorderedAccessViews, (UINT NumRTVs, ID3D11RenderTargetView* const* ppRenderTargetViews, ID3D11DepthStencilView* pDepthStencilView, UINT UAVStartSlot, UINT NumUAVs, ID3D11UnorderedAccessView* const* ppUnorderedAccessViews, const UINT* pUAVInitialCounts), (NumRTVs, ppRenderTargetViews, TW_UNWRAP(pDepthStencilView), UAVStartSlot, NumUAVs, ppUnorderedAccessViews, pUAVInitialCounts), ()) \
 	X(void, OMSetBlendState, (ID3D11BlendState* pBlendState, const FLOAT BlendFactor[4], UINT SampleMask), (TW_UNWRAP(pBlendState), BlendFactor, SampleMask), ()) \
 	X(void, OMSetDepthStencilState, (ID3D11DepthStencilState* pDepthStencilState, UINT StencilRef), (TW_UNWRAP(pDepthStencilState), StencilRef), ()) \
-	X(void, SOSetTargets, (UINT NumBuffers, ID3D11Buffer* const* ppSOTargets, const UINT* pOffsets), (NumBuffers, TW_UNWRAP_ARRAY(ppSOTargets, NumBuffers), pOffsets), ()) \
+	X(void, SOSetTargets, (UINT NumBuffers, ID3D11Buffer* const* ppSOTargets, const UINT* pOffsets), (NumBuffers, ppSOTargets, pOffsets), ()) \
 	X(void, DrawAuto, (), (), ()) \
 	X(void, DrawIndexedInstancedIndirect, (ID3D11Buffer* pBufferForArgs, UINT AlignedByteOffsetForArgs), (TW_UNWRAP(pBufferForArgs), AlignedByteOffsetForArgs), ()) \
 	X(void, DrawInstancedIndirect, (ID3D11Buffer* pBufferForArgs, UINT AlignedByteOffsetForArgs), (TW_UNWRAP(pBufferForArgs), AlignedByteOffsetForArgs), ()) \
@@ -144,19 +144,19 @@
 	X(FLOAT, GetResourceMinLOD, (ID3D11Resource* pResource), (TW_UNWRAP(pResource)), ()) \
 	X(void, ResolveSubresource, (ID3D11Resource* pDstResource, UINT DstSubresource, ID3D11Resource* pSrcResource, UINT SrcSubresource, DXGI_FORMAT Format), (TW_UNWRAP(pDstResource), DstSubresource, TW_UNWRAP(pSrcResource), SrcSubresource, Format), ()) \
 	X(void, ExecuteCommandList, (ID3D11CommandList* pCommandList, BOOL RestoreContextState), (TW_UNWRAP(pCommandList), RestoreContextState), ()) \
-	X(void, HSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, TW_UNWRAP_ARRAY(ppShaderResourceViews, NumViews)), ()) \
-	X(void, HSSetShader, (ID3D11HullShader* pHullShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pHullShader), TW_UNWRAP_ARRAY(ppClassInstances, NumClassInstances), NumClassInstances), ()) \
-	X(void, HSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, TW_UNWRAP_ARRAY(ppSamplers, NumSamplers)), ()) \
-	X(void, HSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, TW_UNWRAP_ARRAY(ppConstantBuffers, NumBuffers)), ()) \
-	X(void, DSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, TW_UNWRAP_ARRAY(ppShaderResourceViews, NumViews)), ()) \
-	X(void, DSSetShader, (ID3D11DomainShader* pDomainShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pDomainShader), TW_UNWRAP_ARRAY(ppClassInstances, NumClassInstances), NumClassInstances), ()) \
-	X(void, DSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, TW_UNWRAP_ARRAY(ppSamplers, NumSamplers)), ()) \
-	X(void, DSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, TW_UNWRAP_ARRAY(ppConstantBuffers, NumBuffers)), ()) \
-	X(void, CSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, TW_UNWRAP_ARRAY(ppShaderResourceViews, NumViews)), ()) \
-	X(void, CSSetUnorderedAccessViews, (UINT StartSlot, UINT NumUAVs, ID3D11UnorderedAccessView* const* ppUnorderedAccessViews, const UINT* pUAVInitialCounts), (StartSlot, NumUAVs, TW_UNWRAP_ARRAY(ppUnorderedAccessViews, NumUAVs), pUAVInitialCounts), ()) \
-	X(void, CSSetShader, (ID3D11ComputeShader* pComputeShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pComputeShader), TW_UNWRAP_ARRAY(ppClassInstances, NumClassInstances), NumClassInstances), ()) \
-	X(void, CSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, TW_UNWRAP_ARRAY(ppSamplers, NumSamplers)), ()) \
-	X(void, CSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, TW_UNWRAP_ARRAY(ppConstantBuffers, NumBuffers)), ()) \
+	X(void, HSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, ppShaderResourceViews), ()) \
+	X(void, HSSetShader, (ID3D11HullShader* pHullShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pHullShader), ppClassInstances, NumClassInstances), ()) \
+	X(void, HSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, ppSamplers), ()) \
+	X(void, HSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, ppConstantBuffers), ()) \
+	X(void, DSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, ppShaderResourceViews), ()) \
+	X(void, DSSetShader, (ID3D11DomainShader* pDomainShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pDomainShader), ppClassInstances, NumClassInstances), ()) \
+	X(void, DSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, ppSamplers), ()) \
+	X(void, DSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, ppConstantBuffers), ()) \
+	X(void, CSSetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView* const* ppShaderResourceViews), (StartSlot, NumViews, ppShaderResourceViews), ()) \
+	X(void, CSSetUnorderedAccessViews, (UINT StartSlot, UINT NumUAVs, ID3D11UnorderedAccessView* const* ppUnorderedAccessViews, const UINT* pUAVInitialCounts), (StartSlot, NumUAVs, ppUnorderedAccessViews, pUAVInitialCounts), ()) \
+	X(void, CSSetShader, (ID3D11ComputeShader* pComputeShader, ID3D11ClassInstance* const* ppClassInstances, UINT NumClassInstances), (TW_UNWRAP(pComputeShader), ppClassInstances, NumClassInstances), ()) \
+	X(void, CSSetSamplers, (UINT StartSlot, UINT NumSamplers, ID3D11SamplerState* const* ppSamplers), (StartSlot, NumSamplers, ppSamplers), ()) \
+	X(void, CSSetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer* const* ppConstantBuffers), (StartSlot, NumBuffers, ppConstantBuffers), ()) \
 	X(void, VSGetConstantBuffers, (UINT StartSlot, UINT NumBuffers, ID3D11Buffer** ppConstantBuffers), (StartSlot, NumBuffers, ppConstantBuffers), (TW_ZERO_N(ppConstantBuffers, NumBuffers))) \
 	X(void, PSGetShaderResources, (UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView** ppShaderResourceViews), (StartSlot, NumViews, ppShaderResourceViews), (TW_ZERO_N(ppShaderResourceViews, NumViews))) \
 	X(void, PSGetShader, (ID3D11PixelShader** ppPixelShader, ID3D11ClassInstance** ppClassInstances, UINT* pNumClassInstances), (ppPixelShader, ppClassInstances, pNumClassInstances), (TW_ZERO_N_AT(ppClassInstances, pNumClassInstances) TW_ZERO(ppPixelShader) TW_ZERO(pNumClassInstances))) \

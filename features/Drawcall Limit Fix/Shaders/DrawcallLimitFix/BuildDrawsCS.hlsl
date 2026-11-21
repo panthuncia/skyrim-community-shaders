@@ -461,8 +461,6 @@ bool MinRadius() { return (CullFlags & 0x2000) != 0; }
 bool FadeOnVisible() { return (CullFlags & 0x4000) != 0; }
 // A sun view skips casters whose radius projects to fewer texels than the threshold.
 bool MinTexels() { return (CullFlags & 0x8000) != 0; }
-// A sun view's size probe counts drawn casters and triangles by bound radius.
-bool SizeProbe() { return (CullFlags & 0x40000) != 0; }
 // A point light hemisphere is culled by the light's sphere and equatorial plane, as BSParabolicCullingProcess does, not by the
 // view-projection. Front takes FUN_14151a1e0's codes 1 and 3, back takes 2 and 3.
 bool Parabolic() { return (CullFlags & 0x80000) != 0; }
@@ -563,9 +561,7 @@ static const uint kCountClassOverflow = 164;
 // Phase 1's retest list length, and a sun view's casters below the size threshold.
 static const uint kCountRetests = 168;
 static const uint kCountBelowTexels = 172;
-// Size probe casters and triangles, by bound radius below 256, 1024, 4096 and the rest.
-static const uint kCountProbeCasters = 176;
-static const uint kCountProbeTriangles = 192;
+// Words 176-207 are unused.
 // Casters a shadow view dropped for want of a caster row.
 static const uint kCountCasterRowsLost = 208;
 
@@ -803,13 +799,9 @@ uint2 MaterialRowAddress(uint a_materialSlot)
 	// 0 means no copy this frame, so use the installed row.
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
 	const uint2 copyRows = latch.Load2(LatchOffset + 348);
-	// The copy's address and the installed rows' ref slot.
-	DEVICE_REF_TRACE_VALUE(uint2(copyRows.x, MaterialRowsRef.x));
 	if ((copyRows.x | copyRows.y) == 0)
 		return installed;
 	const uint animatedRow = DeviceLoad(uint, DeviceRefAdd(MaterialRowsRef, a_materialSlot * MaterialRowStride + 768), 4);
-	// A slot and the copy's row its header names.
-	DEVICE_REF_TRACE_VALUE(uint2(a_materialSlot, animatedRow));
 	if (animatedRow == 0xFFFFFFFFu)
 		return installed;
 	return AddressOf(copyRows.x, copyRows.y, animatedRow * 1024);  // kMaterialRowBytes
@@ -1070,15 +1062,6 @@ DrawInputWords LoadInputWords(ByteAddressBuffer a_inputs, uint a_draw)
 	return loaded;
 }
 
-// TEMP. Records who wrote an object's visibility word, 16 bytes per segment for set parity.
-void RecordWriter(uint a_objectIndex, uint a_draw, uint a_site)
-{
-	if (MemberClaimsIndex == 0)
-		return;
-	RWByteAddressBuffer writers = ResourceDescriptorHeap[MemberClaimsIndex];
-	writers.Store4(a_objectIndex * 32 + (CullPhase() == kPhaseColour ? 16 : 0), uint4(VisibilityStamp, InputsBuffer, a_draw, a_site | (CullPhase() << 4) | (DrawCount << 8)));
-}
-
 // One input's culling and draws for the loaded view.
 void BuildInput(uint draw, DrawInputWords a_words)
 {
@@ -1249,10 +1232,8 @@ void BuildInput(uint draw, DrawInputWords a_words)
 				decalGeometry = geometries.Load(geometryOffset + 36);  // GeometryDraw::nextPartition
 		}
 		// A decal is never drawn in depth, and drawn in colour unless culled.
-		if (phase == kPhaseColour) {
+		if (phase == kPhaseColour)
 			visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | (culled ? kVisibilityRejectedFinal : (kVisibilityVisible | kVisibilityColourDrawn)));
-			RecordWriter(objectIndex, draw, 1);
-		}
 		return;
 	}
 
@@ -1293,7 +1274,6 @@ void BuildInput(uint draw, DrawInputWords a_words)
 			}
 		}
 		visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | (forwardCulled ? kVisibilityRejectedFinal : (kVisibilityVisible | kVisibilityColourDrawn)));
-		RecordWriter(objectIndex, draw, 2);
 		if (forwardCulled)
 			return;
 	}
@@ -1345,7 +1325,6 @@ void BuildInput(uint draw, DrawInputWords a_words)
 		const uint decided = (frustumRejected || fadeHidden) ? kVisibilityRejectedFinal :
 			(occlusionRejected ? (phase == kPhaseOne ? kVisibilityOccludedRetest : kVisibilityRejectedFinal) : kVisibilityVisible);
 		visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | decided | (draws ? kVisibilityDepthDrawn : 0));
-		RecordWriter(objectIndex, draw, 3);
 		if (phase == kPhaseTwo && !occlusionRejected)
 			count.InterlockedAdd(kCountRescuedByPhaseTwo, 1, scratch);
 		if (phase == kPhaseOne && decided == kVisibilityOccludedRetest && RetestsIndex != 0)
@@ -1356,7 +1335,6 @@ void BuildInput(uint draw, DrawInputWords a_words)
 			visibility.InterlockedOr(objectIndex * 4, kVisibilityColourDrawn, scratch);
 		else
 			visibility.Store(objectIndex * 4, (VisibilityStamp << kVisibilityStampShift) | kVisibilityColourDrawn | kVisibilityUnpublished);
-		RecordWriter(objectIndex, draw, publishedThisFrame ? 4 : 5);
 	}
 
 	if (cullRejected)
@@ -1373,13 +1351,6 @@ void BuildInput(uint draw, DrawInputWords a_words)
 	}
 	if (min(pipeline ^ kNoPipeline, bucketKey ^ kNoPipeline) == 0u)
 		return;
-	if (SizeProbe()) {
-		const float radius = ObjectRow(objectIndex, kObjectBoundRow).w;
-		const uint sizeClass = radius < 256.0 ? 0u : radius < 1024.0 ? 1u : radius < 4096.0 ? 2u : 3u;
-		const uint probeIndexCount = geometries.Load(input.z * kGeometryStride + 28);  // the index buffer's count
-		count.InterlockedAdd(kCountProbeCasters + sizeClass * 4, 1, scratch);
-		count.InterlockedAdd(kCountProbeTriangles + sizeClass * 4, probeIndexCount / 3, scratch);
-	}
 	// kBucketForward entries take forward inputs only, and forward inputs only those.
 	const bool forwardBucket = BucketMapOffset != 0 && (bucketKey & kBucketForward) != 0;
 	bucketKey &= ~kBucketForward;

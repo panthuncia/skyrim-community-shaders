@@ -11,7 +11,7 @@
 #include <winrt/base.h>
 
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialWrites.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPortFrame.h"
@@ -96,7 +96,7 @@ namespace DCLF
 		};
 		/** @brief The captures for the scene work, its only consumer. */
 		// No wake of its own. Requests and attaches wake the pass themselves, and writers' captures wait for the frame's pass.
-		inline EventQueue<std::unique_ptr<HeldSnapshot>> captures;
+		inline RenderGraph::Frame::EventQueue<std::unique_ptr<HeldSnapshot>> captures;
 		/** @brief Any thread where a_material is alive and readable. Pushes its snapshot with a reference onto captures. */
 		void PushCapture(const RE::BSShaderMaterial* a_material);
 

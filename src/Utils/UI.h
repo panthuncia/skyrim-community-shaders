@@ -17,6 +17,7 @@
 #include "../Menu/Icons/helpers/IconFonts.h"
 #include "../Menu/ThemeManager.h"
 #include "Utils/Input.h"
+#include "Utils/Setting.h"
 
 // Forward declarations
 struct ID3D11Device;
@@ -943,6 +944,44 @@ namespace Util
 
 	/** @brief Slider that shows a 0..1 member as a percentage (lb..ub) and writes back only on edit. */
 	bool PercentageSlider(const char* label, float* data, float lb = 0.f, float ub = 100.f, const char* format = "%.1f %%", ImGuiSliderFlags flags = 0);
+
+	// Controls over a CS::Setting. Each edits a copy and calls Set on an edit, so the write raises the setting's event.
+	// The copy stands for the setting in scene authoring, as PercentageSlider's temporary does.
+
+	/** @brief ImGui::Checkbox over a bool setting. @return True when the control edited the value. */
+	bool Checkbox(const char* label, CS::Setting<bool>& setting);
+
+	/** @brief ImGui::Checkbox over an unsigned setting used as a flag. An edit stores 0 or 1. */
+	bool Checkbox(const char* label, CS::Setting<std::uint32_t>& setting);
+
+	/** @brief ImGui::SliderInt over an int setting. @return True when the control edited the value. */
+	bool SliderInt(const char* label, CS::Setting<int>& setting, int min, int max, const char* format = "%d", ImGuiSliderFlags flags = 0);
+
+	/** @brief ImGui::SliderInt over an unsigned setting. Negative slider values clamp to zero. */
+	bool SliderInt(const char* label, CS::Setting<std::uint32_t>& setting, int min, int max, const char* format = "%d", ImGuiSliderFlags flags = 0);
+
+	/** @brief ImGui::SliderFloat over a float setting. @return True when the control edited the value. */
+	bool SliderFloat(const char* label, CS::Setting<float>& setting, float min, float max, const char* format = "%.3f", ImGuiSliderFlags flags = 0);
+
+	/** @brief ImGui::SliderFloat over one element of an array setting. An edit sets the whole array. */
+	template <class S>
+	bool SliderFloat(const char* label, CS::SettingElement<S, float> element, float min, float max, const char* format = "%.3f", ImGuiSliderFlags flags = 0)
+	{
+		float value = element.Get();
+		if (!ImGui::SliderFloat(label, &value, min, max, format, flags))
+			return false;
+		element = value;
+		return true;
+	}
+
+	/** @brief ImGui::Combo over an int setting holding the item index. @return True when the control edited the value. */
+	bool Combo(const char* label, CS::Setting<int>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems = -1);
+
+	/** @brief ImGui::Combo over an unsigned setting holding the item index. */
+	bool Combo(const char* label, CS::Setting<std::uint32_t>& setting, const char* const items[], int itemCount, int popupMaxHeightInItems = -1);
+
+	/** @brief ImGui::RadioButton over an int setting: a click stores v_button. @return True when the control edited the value. */
+	bool RadioButton(const char* label, CS::Setting<int>& setting, int v_button);
 
 	/**
 	 * Draws a 2-4 component float slider. Holding Shift edits all components from the first component.

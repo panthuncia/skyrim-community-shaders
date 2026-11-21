@@ -21,6 +21,8 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Draws.h"
 
+#include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/UndeclaredAccess.h"
 
@@ -51,7 +53,6 @@ namespace DCLF
 
 	void Draws::CommitUploads::Stage(const Versioned& a_target, const void* a_data, std::size_t a_bytes, std::uint64_t a_offset)
 	{
-		Diagnostics::Notify(Diagnostics::CommitTargetStaged{ adopted, a_target });
 		Stage(TargetOf(a_target), a_data, a_bytes, a_offset);
 	}
 
@@ -62,7 +63,7 @@ namespace DCLF
 			auto views = std::make_shared<StreamViews>();
 			views->tables = std::move(a_hold);
 			views->generation = a_generation;
-			// The three stores are independent, so they run as pool tasks unless Policy::SerialFanout keeps them on this thread.
+			// The three stores are independent, so they run as pool tasks.
 			GeometryDrawsOut geometries;
 			const auto store = [&](std::size_t a_store) {
 				switch (a_store) {
@@ -77,16 +78,11 @@ namespace DCLF
 					break;
 				}
 			};
-			if (Policy::SerialFanout()) {
-				for (std::size_t s = 0; s < 3; ++s)
+			::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.MakeStreamViews.Stores", 3, 1, [&](std::size_t a_begin, std::size_t a_end) {
+				DCLF_ZONE("CS.DCLF.MakeStreamViews.StoresShards");
+				for (std::size_t s = a_begin; s < a_end; ++s)
 					store(s);
-			} else {
-				SceneScheduler::Executor().ParallelFor("CS.DCLF.MakeStreamViews.Stores", 3, 1, [&](std::size_t a_begin, std::size_t a_end) {
-					DCLF_ZONE("CS.DCLF.MakeStreamViews.StoresShards");
-					for (std::size_t s = a_begin; s < a_end; ++s)
-						store(s);
-				});
-			}
+			});
 			views->geometries = std::move(geometries.slots);
 			return views;
 		}
@@ -126,6 +122,36 @@ namespace DCLF
 
 	namespace
 	{
+		/** @brief A draw input defect: fatal in development builds. Release counts it, logs the first and draws on. */
+		void NoteDrawInputs(std::string_view a_what)
+		{
+			::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::DrawInputs, ::RenderGraph::Frame::SegmentId::Count, a_what);
+		}
+
+		/** @brief What is bound at an unresolved frame texture register, for its tap error. */
+		std::string DescribeFrameTexture(ID3D11ShaderResourceView* a_view)
+		{
+			if (!a_view)
+				return "nothing is bound there at the capture";
+			D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+			a_view->GetDesc(&viewDesc);
+			std::string what = fmt::format("bound natively: view dimension {}, format {}", static_cast<std::uint32_t>(viewDesc.ViewDimension),
+				static_cast<std::uint32_t>(viewDesc.Format));
+			winrt::com_ptr<ID3D11Resource> resource;
+			a_view->GetResource(resource.put());
+			if (auto buffer = resource.try_as<ID3D11Buffer>()) {
+				D3D11_BUFFER_DESC bufferDesc{};
+				buffer->GetDesc(&bufferDesc);
+				what += fmt::format(", buffer of {} bytes, stride {}, usage {}, CPU access {:X}, bind {:X}, misc {:X}", bufferDesc.ByteWidth,
+					bufferDesc.StructureByteStride, static_cast<std::uint32_t>(bufferDesc.Usage), bufferDesc.CPUAccessFlags, bufferDesc.BindFlags, bufferDesc.MiscFlags);
+			}
+			char name[128]{};
+			UINT size = sizeof(name) - 1;
+			if (resource && SUCCEEDED(resource->GetPrivateData(WKPDID_D3DDebugObjectName, &size, name)))
+				what += fmt::format(", '{}'", name);
+			return what;
+		}
+
 		// Unresolved frame textures read zero, like an unbound view. They are counted because the build could not skip their draws.
 		void CountMissingFrameTextures(const MainCommit& a_commit, const std::array<std::uint32_t, kTextureRegisters>& a_frameTextures)
 		{
@@ -136,7 +162,10 @@ namespace DCLF
 					continue;
 				++frameTexturesMissing;
 				missingRegisters[t / 64] |= 1ull << (t % 64);
-				Diagnostics::Notify(Diagnostics::FrameTextureUnresolved{ t, a_commit.capture.psViews[t] });
+				// Described once per register. Later ones only count.
+				static std::array<bool, kTextureRegisters> s_described{};
+				NoteDrawInputs(std::exchange(s_described[t], true) ? fmt::format("frame texture t{} is read but not resolved", t) :
+				                                                        fmt::format("frame texture t{} is read but not resolved: {}", t, DescribeFrameTexture(a_commit.capture.psViews[t])));
 			}
 			a_commit.stats.frameTexturesMissing = frameTexturesMissing;
 			a_commit.stats.frameTexturesMissingRegisters = missingRegisters;
@@ -167,16 +196,6 @@ namespace DCLF
 			}
 			ZeroSharedLightOnce(uploads, resources->frameConstants, resources->sharedLightZeroed);
 			LatchFrameRows(latched, resources->frameConstants);
-			// The Z-prepass reads the owners' index and size as the previous colour commit left them.
-			if (const auto& foliage = resources->foliage; foliage && !a_commit.depthOnly) {
-				const std::uint32_t epoch = ++foliage->epoch, h = epoch & 1;
-				const std::uint32_t words[8] = { foliage->idsRef[h].viewSlot, foliage->idsRef[h].byteOffset, foliage->coloursRef[h].viewSlot,
-					foliage->coloursRef[h].byteOffset, foliage->width, foliage->height, epoch & 0xFFu, foliage->ownersIndex };
-				latched(resources->frameConstants, words, sizeof(words),
-					std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame));
-				static const std::array<std::uint32_t, kFoliageCounters> zeros{};
-				uploads(foliage->results, zeros.data(), sizeof(zeros), 0);
-			}
 		}
 
 		void CopyResidentStats(const MainCommit& a_commit)
@@ -215,8 +234,17 @@ namespace DCLF
 			if (payload.body->shortBuffers) {
 				const bool first = stats.shortBuffers == 0;
 				stats.shortBuffers += payload.body->shortBuffers;
-				if (first)
-					Diagnostics::Notify(Diagnostics::ShortBuffersDrawn{ a_commit.tables, payload });
+				const auto& tables = a_commit.tables;
+				const auto& shortBuffer = payload.body->shortBuffer;
+				if (first && shortBuffer.object < tables.objects.size()) {
+					const auto& geometry = tables.geometries[tables.objects[shortBuffer.object].geometryIndex];
+					const auto* source = tables.objectGeometry[shortBuffer.object];
+					NoteDrawInputs(fmt::format("'{}' draws past its buffers: {} vertices x {} bytes needs {}, the slice holds {}; indices to {} need {}, the slice holds {}",
+						source && source->name.c_str() ? source->name.c_str() : "?", geometry.vertexCount, geometry.vertexStride, shortBuffer.vertexNeeded,
+						geometry.vertexBytes, geometry.firstIndex + geometry.indexCount, shortBuffer.indexNeeded, geometry.indexBytes));
+				} else {
+					NoteDrawInputs(fmt::format("{} draws past their buffers", payload.body->shortBuffers));
+				}
 			}
 			// The snapshot builder's payload uploads are counted separately in PayloadVersions.
 			stats.uploadBytes = (payload.materialRowsWritten * sizeof(MaterialRow)) + (payload.pipelineRowsWritten * sizeof(PipelineRow)) +
@@ -243,10 +271,10 @@ namespace DCLF
 			a_cull.inputCount = static_cast<std::uint32_t>(payload.body->inputList.size() + (payload.resident.Count()));
 			// The revision sized the sequences for the scene's draw bound, so a count past it is a bug in that bound.
 			if (drawCount > shape.sequenceDraws)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} draws past the sequence buffer's {} (the scene's draw bound missed them)", drawCount, shape.sequenceDraws));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} draws past the sequence buffer's {} (the scene's draw bound missed them)", drawCount, shape.sequenceDraws));
 			for (std::uint32_t group = 0; group < kDecalGroups; ++group)
 				if (decalCount[group] > shape.sequenceDecals)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} decals past the sequence buffer's {} per group", decalCount[group], shape.sequenceDecals));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} decals past the sequence buffer's {} per group", decalCount[group], shape.sequenceDecals));
 			// The culling must use the draws' ViewProj from VS_PerFrame c8.
 			if (auto* buffer = a_commit.capture.vsBuffers[kPerFrameVertexRegister]) {
 				a_commit.mirror.Watch(buffer);
@@ -303,7 +331,6 @@ namespace DCLF
 			FoldEyeIntoViewProj(a_cull.viewProj, a_commit.capture.eye, foldedViewProj);
 			std::copy(std::begin(foldedViewProj), std::end(foldedViewProj), a_commit.payload.cullViewProj.begin());
 			a_commit.payload.culled = a_latch.cullFlags != 0;
-			Diagnostics::Notify(Diagnostics::MainCullViewProj{ a_latch, shape.width, shape.height, frameNumber, depthOnly, a_commit.tables });
 			if (depthOnly) {
 				// Captured at frame start by Features/Fades.
 				Extensions::RootStatesLatchGlobals(a_latch.fadeEye, a_latch.treeHeight);
@@ -391,7 +418,7 @@ namespace DCLF
 				continue;
 			}
 			if (texture &&
-				Extensions::GraphTextureIndex(Extensions::GraphTextureReader::Colour, t, texture->name, view, texture->graphResources, graphIndex)) {
+				Extensions::FrameTextureIndex(Extensions::GraphTextureReader::Colour, t, *texture, view, graphIndex)) {
 				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
 				a_frameTextures[t] = graphIndex;
 				continue;
@@ -436,11 +463,13 @@ namespace DCLF
 		}
 		for (const auto& frameBuffer : depthOnly ? decltype(epochResources->frameBuffers){} : epochResources->frameBuffers) {
 			auto* buffer = BufferOf(capture.psViews[frameBuffer.textureRegister]);
-			mirror.Watch(buffer);
+			// The mirror sees only writes after it starts watching, so a buffer's first watched frame reads zero and is no defect.
+			const bool firstWatched = mirror.Watch(buffer);
 			const auto contents = mirror.Contents(buffer);
 			// An unfillable copy reads zero but is still written, because the latched copies name it.
-			if (!LatchFrameBuffer(a_commit.latched, frameBuffer, contents))
-				Diagnostics::Notify(Diagnostics::FrameBufferUnfilled{ frameBuffer.textureRegister, frameBuffer.elements, frameBuffer.stride, contents.size() });
+			if (!LatchFrameBuffer(a_commit.latched, frameBuffer, contents) && !firstWatched)
+				NoteDrawInputs(fmt::format("frame buffer t{} ({} elements of {} bytes) is not filled: the mirror holds {} bytes of it", frameBuffer.textureRegister,
+					frameBuffer.elements, frameBuffer.stride, contents.size()));
 			a_frameTextures[frameBuffer.textureRegister] = frameBuffer.copy->GetSRVInfo(0).slot.index;
 		}
 	}
@@ -453,7 +482,7 @@ namespace DCLF
 		const bool depthOnly = a_commit.depthOnly;
 		Extensions::UploadVertexStream(adopted, a_commit.payload.body->streamRows, *epochResources->scene, a_commit.uploads);
 		Extensions::RunCommitHooks({ depthOnly ? Api::CommitKind::Depth : Api::CommitKind::Colour, adopted, Scene::FrameView::Get().GetTables(),
-			Scene::FrameView::Get().GetFrame(), *epochResources->scene, a_commit.uploads, &a_commit.latched, a_commit.bindingOwners });
+			Scene::FrameView::Get().SceneStep(), *epochResources->scene, a_commit.uploads, &a_commit.latched, a_commit.bindingOwners });
 	}
 
 	void IndirectDraws::Impl::ZeroCommitCounts(const MainCommit& a_commit)
@@ -586,20 +615,6 @@ namespace DCLF
 		// The installed PayloadVersions already hold the committed payload. Nothing of it is uploaded here.
 		const PayloadVersions& parts = *InstalledPayload();
 		const std::uint32_t frameNumber = in.frameNumber;
-		// TEMP (set parity): a segment committed twice with one frame number stamps two frames' visibility words alike.
-		if (Diagnostics::Observe().claims) {
-			static std::array<std::uint32_t, 2> lastFrame{ ~0u, ~0u };
-			static std::uint32_t repeats = 0;
-			if (std::exchange(lastFrame[depthOnly ? 1 : 0], frameNumber) == frameNumber && repeats++ < 40)
-				logger::warn("[DCLF] {} commit: frame number {} committed again (the visibility stamp repeats)", depthOnly ? "depth" : "colour", frameNumber);
-		}
-		// TEMP (set parity): the installed publication must come from this payload's body.
-		if (Diagnostics::Observe().claims && parts.main && (parts.mainBody != a_payload.body.get() || parts.regionCount != a_payload.resident.Count())) {
-			static std::uint32_t logged = 0;
-			if (logged++ < 40)
-				logger::warn("[DCLF] {} commit at frame {}: the installed payload (serial {}, region {}, main inputs at {}) is not this payload's (region {}, {} frame inputs)",
-					depthOnly ? "depth" : "colour", frameNumber, parts.serial, parts.regionCount, parts.mainInputsAt, a_payload.resident.Count(), a_payload.body->inputList.size());
-		}
 		auto& textures = GpuTextures::Get();
 		auto& mirror = ConstantMirror::Get();
 		const bool replayVertexInputs = !depthOnly && prepassInputs;
@@ -711,10 +726,13 @@ namespace DCLF
 			lap(6);
 			return true;
 		}
-		if (!depthOnly && CurrentGraphConditions().forwardDirect)
-			Direct::ColourCommitted({ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchRun, poolCopies });
-		if (depthOnly && CurrentGraphConditions().firstPersonForwardDirect)
-			Direct::DepthCommitted({ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchRun, poolCopies });
+		// The GPU-driven graph's forward families draw on the CPU pipeline's sites, from this commit.
+		const Direct::MainCommitInputs forwardSite{ revisionShape, a_resources, &adopted, &latch, sunCascades, std::span(shadowVolumes.data(), shadowVolumesLatched), latchRun,
+			poolCopies };
+		if (depthOnly)
+			Direct::DepthCommitted(forwardSite);
+		else
+			Direct::ColourCommitted(forwardSite);
 		const auto& recordings = *a_revision.recordings;
 		const std::size_t variant = depthOnly && !poolCopies && recordings.Variants() > 1 ? 1 : 0;
 		SubmitRevisionRecording(revisionEpoch, recordings, recordings.IndexOf(variant, hostedDrawn));

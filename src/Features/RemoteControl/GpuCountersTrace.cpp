@@ -828,7 +828,7 @@ namespace GpuCounters::Trace
 				report.confidence = t.confidence;
 				report.relativeHalfWidth = t.relativeHalfWidth;
 			}
-			report.converged = Statistics::Available() && CheckConvergence(report).All();
+			report.converged = CheckConvergence(report).All();
 
 			// What the captures could not see, or saw unreliably.
 			if (!otherQueue.empty()) {
@@ -855,7 +855,7 @@ namespace GpuCounters::Trace
 					unstable += std::format("{}{} ({:.0f}-{:.0f} us)", unstable.empty() ? "" : ", ", row.name, row.timeMinUs, row.timeMaxUs);
 			if (unstableCount)
 				report.warnings.push_back(std::format("{} rows vary by more than half their median across samples: {}{}", unstableCount, unstable, unstableCount > 6 ? ", ..." : ""));
-			if (t.maxRepeats > t.repeats && !report.converged && Statistics::Available()) {
+			if (t.maxRepeats > t.repeats && !report.converged) {
 				std::size_t open = 0;
 				const auto rows = Unconverged(report, open);
 				report.warnings.push_back(std::format("not converged after {} rounds ({} rows open, +/-{:.1f}% at {:.0f}% confidence asked): {}{}", a_runner.rounds, open,
@@ -1043,7 +1043,7 @@ namespace GpuCounters::Trace
 				report.groups.push_back(std::move(entry));
 			}
 			const auto convergence = CheckConvergence(report);
-			report.converged = Statistics::Available() && convergence.All();
+			report.converged = convergence.All();
 
 			if (otherQueue)
 				report.warnings.push_back(std::format("{} ranges ran on the compute or copy queue: their own rows (\"[compute]\"), left out of the groups and the total",
@@ -1059,14 +1059,12 @@ namespace GpuCounters::Trace
 				report.warnings.push_back(std::format("{} frames dropped: their epochs did not all come back", run.dropped));
 			if (run.untimed)
 				report.warnings.push_back(std::format("{} frames carried no timestamps and were skipped", run.untimed));
-			if (!report.converged && Statistics::Available()) {
+			if (!report.converged) {
 				std::size_t open = 0;
 				const auto rows = Unconverged(report, open);
 				report.warnings.push_back(std::format("not converged after {} frames ({} rows open, +/-{:.1f}% at {:.0f}% confidence asked): {}{}", run.frames, open,
 					100.0 * t.relativeHalfWidth, 100.0 * t.confidence, rows.empty() ? "only groups" : rows, open > 6 ? ", ..." : ""));
 			}
-			if (!Statistics::Available())
-				report.warnings.push_back("built without BasicTelemetry: no confidence intervals, nothing converges (the trace ran to maxSamples)");
 			report.success = !report.rows.empty();
 			if (!report.success)
 				report.error = run.frames ? "no selected range was timestamped" : "no frame was sampled";
@@ -1195,10 +1193,6 @@ namespace GpuCounters::Trace
 			const auto& t = a_runner.request.t;
 			if (t.timingSource != TimingSource::NvPerf || t.maxRepeats <= t.repeats || a_runner.results.empty())
 				return false;
-			if (!Statistics::Available()) {
-				a_runner.warnings.push_back("built without BasicTelemetry: no convergence, the trace captured its repeats only");
-				return false;
-			}
 			const auto report = BuildReport(a_runner);
 			const auto convergence = CheckConvergence(report);
 			SetConvergence(a_runner, convergence, report.samples);

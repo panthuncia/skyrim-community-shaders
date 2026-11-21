@@ -266,6 +266,19 @@ public:
 	 */
 	virtual bool AppliesBootToggleLive() const { return false; }
 
+	/** @brief Why the menu's on/off toggle is locked this session. Both are null when it is not locked. */
+	struct BootToggleLock
+	{
+		const char* note = nullptr;  // short, shown in place of the toggle's caption
+		const char* why = nullptr;   // the toggle's tooltip
+	};
+
+	/**
+	 * @brief Whether the menu's on/off toggle is locked this session, and why. A locked toggle is drawn disabled, and the
+	 * feature's ToggleAtBootSetting should refuse the change too.
+	 */
+	virtual BootToggleLock GetBootToggleLock() const { return {}; }
+
 	/**
 	 * Weather analysis configuration for features that want to provide weather analysis.
 	 * If sectionName is empty, the feature will not appear in weather analysis UI.

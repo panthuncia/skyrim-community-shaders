@@ -3,9 +3,14 @@
 #include "PostProcessFeature.h"
 
 #include "Buffer.h"
+#include "Utils/Setting.h"
+
+#include <array>
 
 struct CODBloom : public PostProcessFeature
 {
+	CODBloom();
+
 	bool outputReady = false;
 	virtual inline std::string GetType() const override { return "COD Bloom"; }
 	virtual inline std::string GetDisplayName() const override { return T("feature.post_processing.codbloom.name", "COD Bloom"); }
@@ -23,7 +28,8 @@ struct CODBloom : public PostProcessFeature
 		float Threshold = 0.f;  // Scene EV100: 0 EV100 = 0.125 cd/m^2, K = 12.5, before exposure.
 		float UpsampleRadius = 5.f;
 		float BlendFactor = .01f;
-		std::array<float, s_BloomMips - 1> MipBlendFactor = { 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 0.f };
+		// Its used mip count sets the pass count. The render graph follows that count, not the factors (UsedMipsFor).
+		CS::Setting<std::array<float, s_BloomMips - 1>> MipBlendFactor = std::array<float, s_BloomMips - 1>{ 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 0.f };
 	} settings;
 
 	struct alignas(16) BloomCB
@@ -45,6 +51,9 @@ struct CODBloom : public PostProcessFeature
 
 	/** @brief The mips the chain runs: one fewer when the last mip's blend leaves the result unchanged. */
 	int UsedMips() const;
+
+	/** @brief UsedMips for a_factors, the blend factors. */
+	static int UsedMipsFor(const std::array<float, s_BloomMips - 1>& a_factors);
 
 	winrt::com_ptr<ID3D11SamplerState> colorSampler = nullptr;
 

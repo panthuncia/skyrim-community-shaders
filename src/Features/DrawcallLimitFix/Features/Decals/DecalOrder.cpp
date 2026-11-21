@@ -6,7 +6,6 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 #include <span>
 
@@ -65,14 +64,6 @@ namespace DCLF::Features::Decals
 
 	namespace
 	{
-		std::string PathText(const std::vector<std::uint32_t>& a_path)
-		{
-			std::string text;
-			for (const auto at : a_path)
-				text += fmt::format("{}{}", text.empty() ? "" : " ", at);
-			return text;
-		}
-
 		const RE::NiAVObject* DecalNodeOf(const Api::CoordinatorComponentContext& a_context, const void* a_object)
 		{
 			const auto record = a_object ? a_context.MirroredNodeOf(a_object) : Api::MirroredNode{};
@@ -198,10 +189,7 @@ namespace DCLF::Features::Decals
 			// The engine draws a decal chain in reverse registration order. A decal's key is taken when it joins,
 			// and a change re-keys only the decals it names.
 			auto& order = a_context.State<DecalOrder>();
-			// When an observer checks this pass, the upkeep runs even with no change.
-			bool checked = false;
-			Diagnostics::Notify(OrderDue{ a_context.PassSerial(), checked });
-			if (!order.decalsRebuild && order.decalsChanged.empty() && !checked)
+			if (!order.decalsRebuild && order.decalsChanged.empty())
 				return;
 			const auto ordinals = a_context.SizedRangeOrdinals();
 
@@ -209,14 +197,8 @@ namespace DCLF::Features::Decals
 				order.kept = WholeDecalOrder(a_context, order.memberDecals);
 			else if (!order.decalsChanged.empty())
 				RekeyChanged(order, a_context);
-			const bool changed = order.decalsRebuild || !order.decalsChanged.empty();
 			order.decalsChanged.clear();
 			order.decalsRebuild = false;
-
-			if (checked)
-				Diagnostics::Notify(Ordered{ order, a_context, order.parity });
-			if (!changed)
-				return;
 			CountOrdinals(order, a_context, ordinals);
 		}
 
@@ -271,38 +253,6 @@ namespace DCLF::Features::Decals
 		if (decals[0] || decals[1] || decals[2])
 			a_text += fmt::format("[DCLF] decals (the last pass): {} candidates ({} in the opaque group, {} multi-index layers, {} in the blended group)",
 				decals[0] + decals[1] + decals[2], decals[0], decals[2], decals[1]);
-	}
-
-	DecalOrderComparison CompareDecalOrder(const DecalOrder& a_order, const Api::CoordinatorComponentContext& a_context)
-	{
-		DecalOrderComparison out;
-		const auto& kept = a_order.kept;
-		const auto reference = WholeDecalOrder(a_context, a_order.memberDecals);
-		out.decals = reference.size();
-		bool same = reference.size() == kept.size();
-		for (std::size_t i = 0; same && i < kept.size(); ++i)
-			same = reference[i].object == kept[i].object && reference[i].chain == kept[i].chain;
-		// A stale key is counted but is not a difference, because a decal node's places shift together and keep their order.
-		for (const auto& entry : kept) {
-			OrderedDecal now;
-			if (KeyedDecal(a_context, entry.object, entry.chain, now) && (Before(now.key, entry.key) || Before(entry.key, now.key)) && out.staleKeys++ == 0) {
-				const auto* geometry = a_context.ObjectGeometry(entry.object);
-				out.staleFirst = fmt::format("object {} '{}' (decal node {}, now {}): kept ordered {} path [{}], now ordered {} path [{}]", entry.object,
-					geometry && geometry->name.c_str() ? geometry->name.c_str() : "?", fmt::ptr(entry.decalNode), fmt::ptr(now.decalNode), entry.key.ordered,
-					PathText(entry.key.path), now.key.ordered, PathText(now.key.path));
-			}
-		}
-		for (std::size_t i = 1; i < reference.size(); ++i)
-			out.unordered += DrawnBefore(reference[i], reference[i - 1]) ? 1u : 0u;
-		if (!same) {
-			out.differ = true;
-			std::size_t at = 0;
-			while (at < kept.size() && at < reference.size() && reference[at].object == kept[at].object)
-				++at;
-			out.first = fmt::format("{} kept, {} whole; first difference at {}: kept object {}, whole object {}", kept.size(), reference.size(), at,
-				at < kept.size() ? kept[at].object : ~0u, at < reference.size() ? reference[at].object : ~0u);
-		}
-		return out;
 	}
 
 	Api::CoordinatorComponentId RegisterOrder(Api::InstallContext& a_context)

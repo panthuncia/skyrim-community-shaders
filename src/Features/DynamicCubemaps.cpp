@@ -13,12 +13,27 @@
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
+#include "Utils/GpuBlock.h"
 
-DynamicCubemaps::Settings DynamicCubemaps::GetCommonBufferData() const
+DynamicCubemaps::DynamicCubemaps()
 {
-	auto data = settings;
-	globals::features::linearLighting.SRGBToWorking(&data.CubemapColor.x);
-	return data;
+	settings.EnabledSSR.Bind(CS::SettingRegistry::Declare("DynamicCubemaps.EnabledSSR"));
+}
+
+namespace
+{
+	using CubemapsCpu = DynamicCubemaps::Settings;
+	using CubemapsGpu = DynamicCubemaps::GpuSettings;
+
+	using CubemapsGpuBlock = CS::GpuBlock<CubemapsGpu,
+		CS::GpuField<&CubemapsCpu::EnabledCreator, &CubemapsGpu::EnabledCreator>,
+		CS::GpuField<&CubemapsCpu::EnabledSSR, &CubemapsGpu::EnabledSSR>,
+		CS::GpuColour<&CubemapsCpu::CubemapColor, &CubemapsGpu::CubemapColor>>;
+}
+
+DynamicCubemaps::GpuSettings DynamicCubemaps::GetCommonBufferData() const
+{
+	return CubemapsGpuBlock::Fill(settings, [](float* a_colour) { globals::features::linearLighting.SRGBToWorking(a_colour); });
 }
 
 #define I18N_KEY_PREFIX "feature.dynamic_cubemaps."
@@ -33,7 +48,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 std::vector<std::pair<std::string_view, std::string_view>> DynamicCubemaps::GetShaderDefineOptions()
 {
 	std::vector<std::pair<std::string_view, std::string_view>> result;
-	if (settings.EnabledSSR) {
+	if (settings.EnabledSSR.Get()) {
 		result.push_back({ "ENABLESSR", "" });
 	}
 
@@ -42,7 +57,7 @@ std::vector<std::pair<std::string_view, std::string_view>> DynamicCubemaps::GetS
 
 void DynamicCubemaps::DrawSettings()
 {
-	recompileFlag |= ImGui::Checkbox(T(TKEY("enable_ssr"), "Enable Screen Space Reflections"), reinterpret_cast<bool*>(&settings.EnabledSSR));
+	recompileFlag |= Util::Checkbox(T(TKEY("enable_ssr"), "Enable Screen Space Reflections"), settings.EnabledSSR);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("enable_ssr_tooltip"), "Enable Screen Space Reflections on Water"));
 	}
@@ -145,11 +160,6 @@ void DynamicCubemaps::RestoreDefaultSettings()
 void DynamicCubemaps::DataLoaded()
 {
 	MenuOpenCloseEventHandler::Register();
-}
-
-void DynamicCubemaps::PostPostLoad()
-{
-	ORGDynamicCubemaps::Reserve();
 }
 
 RE::BSEventNotifyControl MenuOpenCloseEventHandler::ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
@@ -688,6 +698,9 @@ void DynamicCubemaps::PostDeferred()
 		cubemapValid[0] ? envTextureBC6H->srv.get() : nullptr
 	};
 	boundReflectionsView = views[0];
+	boundReflectionsId = !cubemapValid[activeReflections ? 1 : 0] ? std::string_view{} :
+	                     activeReflections                       ? ORGDynamicCubemaps::kEnvReflectionsBC6HId :
+	                                                               ORGDynamicCubemaps::kEnvBC6HId;
 	context->PSSetShaderResources(30, 2, views);
 }
 
@@ -739,9 +752,9 @@ void DynamicCubemaps::SetupResources()
 		Util::SetResourceName(defaultCubemap, "DynamicCubemaps::DefaultCubemap SRV");
 	}
 
-	// CS_ORG_DYNAMIC_CUBEMAPS=1: the update runs on the render graph, whose exported textures the readers of the D3D11 path's take.
+	// In graph mode the update runs on the render graph, whose exported textures the readers of the D3D11 path's take.
 	auto& graph = ORGDynamicCubemaps::Get();
-	if (graph.Setup([this] { ReturnToD3D11(); })) {
+	if (graph.Setup()) {
 		const auto outputs = graph.Exported();
 		envTexture = WrapExported(outputs.env, outputs.envSRV);
 		envReflectionsTexture = WrapExported(outputs.envReflections, outputs.envReflectionsSRV);
@@ -944,20 +957,6 @@ void DynamicCubemaps::CreateD3D11Textures()
 			Util::SetResourceName(uavArray[level - 1], "DynamicCubemaps::EnvFiltered UAV mip%u", level);
 		}
 	}
-}
-
-void DynamicCubemaps::ReturnToD3D11()
-{
-	// The exported textures go once the render graph's resources are released: nothing of this feature may keep them.
-	for (auto** texture : { &envTexture, &envReflectionsTexture, &envTextureBC6H, &envReflectionsTextureBC6H }) {
-		delete *texture;
-		*texture = nullptr;
-	}
-	boundReflectionsView = nullptr;
-	CreateD3D11Textures();
-	resetCapture[0] = resetCapture[1] = true;
-	cubemapValid[0] = cubemapValid[1] = false;
-	nextTask = NextTask::kCaptureInferAndIrradianceA;
 }
 
 void DynamicCubemaps::Reset()

@@ -1,0 +1,37 @@
+# Physical Sky with its volumetric clouds turned on after world-ready, a shot once the temporal history has filled and one
+# 900 frames later, exit. The saved settings keep the clouds off. Compose it: guest+clouds, native-vulkan+clouds,
+# native-d3d12+clouds, d3d11+clouds.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+PhysicalSky = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "PhysicalSky.enableVolumetricClouds=true"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "clouds"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "clouds-late"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["clouds", "clouds-late"]

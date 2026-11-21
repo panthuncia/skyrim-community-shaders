@@ -17,8 +17,7 @@
  * come back; TakeFrames hands complete frames over in frame order, and drops a frame whose epochs have not all come back
  * kMaxLagFrames frames later.
  *
- * Render thread only, apart from Collecting() and CurrentFrame() (any thread). Needs the render graph (CS_HAS_RENDER_GRAPH):
- * without it Start fails.
+ * Render thread only, apart from Collecting() and CurrentFrame() (any thread).
  */
 namespace GpuCounters::Timestamps
 {

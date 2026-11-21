@@ -1,5 +1,6 @@
 #include "CloudNoiseGenerator.h"
 
+#include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "I18n/I18n.h"
 #include "State.h"
 #include "Util.h"
@@ -54,7 +55,9 @@ void CloudNoiseGenerator::CompileShaders(Util::AsyncShaderSet& a_shaders)
 
 bool CloudNoiseGenerator::Update(const CloudNoiseSettings& settings, ID3D11ShaderResourceView* source)
 {
-	if (!parameters || !shapeProgram || !adjustmentProgram || !adjustmentMipProgram || !source)
+	// The graph modes generate on the render graph, never with the D3D11 programs.
+	const bool graph = ORGCloudMaps::On();
+	if (!parameters || (!graph && (!shapeProgram || !adjustmentProgram || !adjustmentMipProgram)) || !source)
 		return false;
 
 	winrt::com_ptr<ID3D11Resource> sourceResource;
@@ -98,7 +101,7 @@ bool CloudNoiseGenerator::Update(const CloudNoiseSettings& settings, ID3D11Shade
 			desc.Usage = D3D11_USAGE_DEFAULT;
 			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET;
 			desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-			pendingShape = eastl::make_unique<Texture3D>(desc, "PhysicalSky::GeneratedCloudNoise");
+			pendingShape = ORGCloudMaps::MakeTexture3D(desc, "PhysicalSky::GeneratedCloudNoise");
 			D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
 			srv.Format = desc.Format;
 			srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
@@ -120,7 +123,7 @@ bool CloudNoiseGenerator::Update(const CloudNoiseSettings& settings, ID3D11Shade
 			desc.SampleDesc.Count = 1;
 			desc.Usage = D3D11_USAGE_DEFAULT;
 			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-			pendingAdjustment = eastl::make_unique<Texture2D>(desc, "PhysicalSky::GeneratedCloudAdjustment");
+			pendingAdjustment = ORGCloudMaps::MakeTexture2D(desc, "PhysicalSky::GeneratedCloudAdjustment");
 			D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
 			srv.Format = desc.Format;
 			srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -132,6 +135,9 @@ bool CloudNoiseGenerator::Update(const CloudNoiseSettings& settings, ID3D11Shade
 			pendingAdjustment->CreateUAV(uav);
 		}
 	}
+
+	if (graph)
+		return UpdateGraph(data, source, width, height, mipCount);
 
 	globals::profiler->BeginPass("PhysicalSky::CloudNoiseGeneration");
 	data.firstSlice = nextSlice;
@@ -193,6 +199,61 @@ bool CloudNoiseGenerator::Update(const CloudNoiseSettings& settings, ID3D11Shade
 	context->CSSetConstantBuffers(1, 1, &cb);
 	context->CSSetShader(nullptr, nullptr, 0);
 	globals::profiler->EndPass();
+	return complete;
+}
+
+bool CloudNoiseGenerator::UpdateGraph(Parameters data, ID3D11ShaderResourceView* source, uint32_t width, uint32_t height, uint32_t mipCount)
+{
+	using Input = ORGCloudMaps::Input;
+	using Program = ORGCloudMaps::Program;
+	auto* shapeTexture = pendingShape->resource.get();
+	auto* adjustmentTexture = pendingAdjustment->resource.get();
+	// Step names follow the twin: the shape and its pending copy swap, so each has its own steps.
+	const auto shapeId = reinterpret_cast<uintptr_t>(shapeTexture);
+	const auto adjustmentId = reinterpret_cast<uintptr_t>(adjustmentTexture);
+	ORGCloudMaps::Work work;
+	// The list order: SourceAdjustment, PreviousAdjustment, PreviousShape, ShapeOutput, AdjustmentOutput, Parameters.
+	const auto dispatch = [&](std::string a_step, std::int32_t a_order, Program a_program, std::vector<Input> a_inputs, std::array<uint32_t, 3> a_groups) {
+		ORGCloudMaps::Dispatch step{ .step = std::move(a_step), .order = a_order, .program = a_program, .inputs = std::move(a_inputs), .groups = a_groups };
+		step.Constants(data);
+		work.dispatches.push_back(std::move(step));
+	};
+	data.firstSlice = nextSlice;
+	dispatch(std::format("noise.shape.{:x}", shapeId), ORGCloudMaps::kNoiseOrder, Program::Shape,
+		{ Input::Srv(nullptr), Input::Srv(nullptr), Input::Srv(nullptr), Input::Uav(shapeTexture, 0), Input::Srv(nullptr), Input::Latch() },
+		{ kShapeSize / 4u, kShapeSize / 4u, kSlicesPerFrame / 4u });
+	const bool complete = nextSlice + kSlicesPerFrame == kShapeSize;
+	if (complete) {
+		// The graph has no 3D GenerateMips, so each mip averages the one above (generateShapeMip).
+		for (uint32_t mip = 1; mip < pendingShape->desc.MipLevels; ++mip) {
+			const uint32_t size = std::max(kShapeSize >> mip, 1u);
+			dispatch(std::format("noise.shape.{:x}.mip{}", shapeId, mip), ORGCloudMaps::kNoiseOrder + static_cast<std::int32_t>(mip), Program::ShapeMip,
+				{ Input::Srv(nullptr), Input::Srv(nullptr), Input::SrvMip(shapeTexture, mip - 1u), Input::Uav(shapeTexture, mip), Input::Srv(nullptr), Input::Latch() },
+				{ (size + 3u) / 4u, (size + 3u) / 4u, (size + 3u) / 4u });
+		}
+		dispatch(std::format("noise.adjustment.{:x}", adjustmentId), ORGCloudMaps::kNoiseOrder + 20, Program::Adjustment,
+			{ Input::Srv(source), Input::Srv(nullptr), Input::Srv(nullptr), Input::Srv(nullptr), Input::Uav(adjustmentTexture, 0), Input::Latch() },
+			{ (width + 7u) / 8u, (height + 7u) / 8u, 1 });
+		for (uint32_t mip = 1; mip < mipCount; ++mip) {
+			data.mip = mip;
+			dispatch(std::format("noise.adjustment.{:x}.mip{}", adjustmentId, mip), ORGCloudMaps::kNoiseOrder + 20 + static_cast<std::int32_t>(mip), Program::AdjustmentMip,
+				{ Input::Srv(source), Input::SrvMip(adjustmentTexture, mip - 1u), Input::Srv(nullptr), Input::Srv(nullptr), Input::Uav(adjustmentTexture, mip), Input::Latch() },
+				{ (std::max(width >> mip, 1u) + 7u) / 8u, (std::max(height >> mip, 1u) + 7u) / 8u, 1 });
+		}
+	}
+	// Each slice must run, in order.
+	work.owner = "noise";
+	work.sequential = true;
+	ORGCloudMaps::Get().Submit(std::move(work));
+	nextSlice += kSlicesPerFrame;
+	if (complete) {
+		shape.swap(pendingShape);
+		adjustment.swap(pendingAdjustment);
+		generated = requested;
+		generatedSource = pendingSource;
+		valid = true;
+		pending = false;
+	}
 	return complete;
 }
 

@@ -1,7 +1,8 @@
-// Decal occlusion feature registration (CS_ORG_OCCLUSION_QUERIES=1, default off).
+// Decal occlusion feature registration. On in graph mode.
 
 #include "Features/DrawcallLimitFix/Features/DecalOcclusion/DecalOcclusion.h"
 
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Queries/OcclusionQueries.h"
 
 #include <string>
@@ -14,10 +15,8 @@ namespace DCLF::Features::DecalOcclusion
 		{
 			if (!Enabled())
 				return;
-			// Must happen before the render graph initializes, which fixes the anchors' epochs.
-			DecalDraws::Reserve();
 			InstallHooks();
-			logger::info("[DCLF] decal occlusion: on (CS_ORG_OCCLUSION_QUERIES=1): the decal occlusion tests are drawn at the DecalQueries anchor");
+			logger::info("[DCLF] decal occlusion: on (graph mode): the decal occlusion tests are drawn at the DecalQueries anchor");
 		}
 
 		std::string Status()
@@ -28,7 +27,7 @@ namespace DCLF::Features::DecalOcclusion
 
 	bool Enabled()
 	{
-		return ::RenderGraph::Engine::OcclusionQueries::Requested();
+		return ::RenderGraph::Engine::GraphMode();
 	}
 
 	Api::Feature Feature()

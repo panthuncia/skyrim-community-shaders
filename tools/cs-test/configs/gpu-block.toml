@@ -1,0 +1,175 @@
+# GPU settings blocks (CS::GpuBlock) follow the adopted settings (cleanup plan B14). Each change below shapes the frame, so the
+# constants and the frame's shape must switch in the same frame: a shot on the frame the change is adopted and one on the next
+# frame must agree (no frame with fog constants for one grid or toggle and passes for the other). Covers Exponential Height
+# Fog's toggles, View Atmosphere's grid, Terrain Blending's Enabled and Screen Space Shadows' Enable. Compose it:
+# native-vulkan+gpu-block, native-d3d12+gpu-block, guest+gpu-block, d3d11+gpu-block.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+ExponentialHeightFog = true
+TerrainBlending = true
+ScreenSpaceShadows = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "ExponentialHeightFog.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=1"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "fog-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearPixelSize=12"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+arg = "grid"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "grid-next"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=0"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+arg = "volumetric-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "volumetric-off-next"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=1"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+arg = "volumetric-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "volumetric-on-next"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "TerrainBlending.Enabled=0"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+arg = "blend-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "blend-off-next"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "TerrainBlending.Enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+arg = "blend-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "blend-on-next"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceShadows.Enable=0"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+arg = "sss-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "sss-off-next"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceShadows.Enable=1"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "shot"
+await = "adopted"
+arg = "sss-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "sss-on-next"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["fog-on", "grid", "grid-next", "volumetric-off", "volumetric-off-next", "volumetric-on", "volumetric-on-next", "blend-off", "blend-off-next", "blend-on", "blend-on-next", "sss-off", "sss-off-next", "sss-on", "sss-on-next"]
+no_log = ["frame tap error", "declared view mismatch:", "binds a version the frame does not read"]

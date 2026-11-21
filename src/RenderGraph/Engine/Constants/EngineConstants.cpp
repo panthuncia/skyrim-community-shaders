@@ -1,44 +1,38 @@
 // The per-use capture of the engine's constant buffers. See EngineConstants.h.
 
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
-#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Fatal.h"
 
 #include "RenderGraph/Switches.h"
 
-namespace RenderGraph::Engine::Constants
-{
-	bool Requested()
-	{
-		static const bool requested = RenderGraph::Engine::Native::GraphMode();
-		return requested;
-	}
-}
+#include "Globals.h"
+#include "RenderGraph/Engine/Buffers/UploadRing.h"
+#include "RenderGraph/Engine/Constants/BufferContents.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include <d3d11_1.h>
 
-#	include "Globals.h"
-#	include "RenderGraph/Engine/Constants/BufferContents.h"
-#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "Utils/D3D.h"
-
-#	include <Render/LatchBlock.h>
-
-#	include <d3d11_1.h>
-
-#	include <algorithm>
-#	include <array>
-#	include <bit>
-#	include <cstring>
-#	include <deque>
-#	include <exception>
-#	include <mutex>
-#	include <optional>
-#	include <unordered_map>
-#	include <utility>
-#	include <vector>
-#	include <winrt/base.h>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <bit>
+#include <cstring>
+#include <deque>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <utility>
+#include <vector>
+#include <winrt/base.h>
 
 namespace RenderGraph::Engine::Constants
 {
@@ -130,13 +124,28 @@ namespace RenderGraph::Engine::Constants
 			std::uint64_t peakBytes = 0;
 			std::uint32_t peakChunks = 0;
 			std::array<std::uint64_t, kGroups> copiesByGroup{};
-			std::uint64_t checks = 0, mismatches = 0;
 		};
 
 		// The custom mapper's size bound for its upcoming Map on this thread. 0 for none.
 		thread_local std::uint32_t customBound = 0;
 
-		/** @brief Retired chunks come back from ReleaseAfterD3D11's service under their own lock. */
+		/** @brief An upload ring chunk that shaders read as a ByteAddressBuffer: a frame arena staging region, kept for the process. */
+		struct ConstantsChunk final : Buffers::UploadRing::Chunk
+		{
+			RenderGraph::Staging region;
+		};
+
+		/** @brief Fatal when it cannot be made: without the capture no engine draw the graph takes has its constants. */
+		std::unique_ptr<Buffers::UploadRing::Chunk> MakeConstantsChunk(std::uint32_t a_bytes)
+		{
+			auto chunk = std::make_unique<ConstantsChunk>();
+			chunk->region = RenderGraph::AcquireStaging("engine constants", a_bytes);
+			chunk->data = chunk->region->mapped;
+			chunk->size = chunk->region->size;
+			return chunk;
+		}
+
+		/** @brief The capture's chunks come from an upload ring, which takes the retired ones back. */
 		class Tracker
 		{
 		public:
@@ -149,7 +158,7 @@ namespace RenderGraph::Engine::Constants
 
 			bool Enabled() const { return enabled; }
 
-			bool Active() const { return enabled && !failed && RenderGraphRuntime::Get().IsActive(); }
+			bool Active() const { return enabled && RenderGraphRuntime::Get().IsActive(); }
 
 			void Enable() { enabled = true; }
 
@@ -225,17 +234,10 @@ namespace RenderGraph::Engine::Constants
 						const auto slot = static_cast<std::uint32_t>(std::countr_zero(mask));
 						const Binding& binding = bindings[stage][slot];
 						auto captured = CaptureSlot(*binding.entry, binding, static_cast<Stage>(stage), slot);
-						if (!captured) {
-							if (failed) {
-								slots.resize(record.first);
-								return {};
-							}
+						if (!captured)
 							continue;
-						}
 						slots.push_back(*captured);
 						++record.count;
-						if (checkRequested)
-							MaybeCheck(*binding.entry, *captured);
 					}
 				}
 				uses.push_back(record);
@@ -263,15 +265,18 @@ namespace RenderGraph::Engine::Constants
 			{
 				if (a_slot.chunk >= frameChunks.size())
 					return {};
-				const auto& block = frameChunks[a_slot.chunk];
-				return { block, block->SrvIndex(), a_slot.offset, a_slot.size };
+				const auto& region = frameChunks[a_slot.chunk]->region;
+				return { region, region->srvIndex, static_cast<std::uint32_t>(region->offset) + a_slot.offset, a_slot.size };
 			}
 
 			void EndFrame()
 			{
 				if (!enabled || !FrameAnchors::IsRenderOwner())
 					return;
-				Retire();
+				// Every execution of the frame has been submitted, so its chunks go behind the work issued by now.
+				ring.Retire();
+				ring.ReleaseParked(UINT64_MAX);
+				frameChunks.clear();
 				window.peakChunks = (std::max)(window.peakChunks, peakChunksThisFrame);
 				window.peakBytes = (std::max)(window.peakBytes, bytesThisFrame);
 				peakChunksThisFrame = 0;
@@ -290,18 +295,19 @@ namespace RenderGraph::Engine::Constants
 			Stats GetStats() const
 			{
 				Stats stats = totals;
-				stats.chunks = chunksMade;
+				stats.chunks = ring.Made();
 				return stats;
 			}
 
 			void ReadSwitches()
 			{
-				checkRequested = Switches::On("CS_ORG_ENGINE_CONSTANTS_CHECK");
 				logFrames = (std::max<std::uint64_t>)(1, Switches::Number("CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES", 600));
 			}
 
 		private:
-			Tracker() = default;
+			Tracker() :
+				ring({ .name = "engine constants", .chunkBytes = kChunkBytes, .alignment = kAlignment, .make = &MakeConstantsChunk })
+			{}
 
 
 			static std::uint32_t Hash(const void* a_pointer)
@@ -442,121 +448,26 @@ namespace RenderGraph::Engine::Constants
 				return slot;
 			}
 
-			/** @brief Nullopt on failure, which stops the capture. */
+			/** @brief Where the bytes went: the frame's chunk index and the offset in it. */
 			std::optional<std::pair<std::uint16_t, std::uint32_t>> Copy(const std::byte* a_data, std::uint32_t a_size)
 			{
-				std::uint32_t at = (offset + kAlignment - 1) & ~(kAlignment - 1);
-				if (frameChunks.empty() || at + a_size > kChunkBytes) {
-					if (!NextChunk())
-						return std::nullopt;
-					at = 0;
+				const auto at = ring.Allocate(a_size);
+				if (!at)
+					RenderGraph::Fatal("engine constants", "a ring chunk could not be made");
+				auto* chunk = static_cast<ConstantsChunk*>(at->chunk);
+				if (frameChunks.empty() || frameChunks.back() != chunk) {
+					if (frameChunks.size() >= UINT16_MAX)
+						RenderGraph::Fatal("engine constants", "a frame filled every ring chunk it may have");
+					frameChunks.push_back(chunk);
+					if (mirrors.size() < frameChunks.size())
+						mirrors.push_back(std::make_unique<std::byte[]>(kChunkBytes));
+					peakChunksThisFrame = (std::max)(peakChunksThisFrame, static_cast<std::uint32_t>(frameChunks.size()));
 				}
 				// Copy into the CPU mirror first so the source, possibly upload memory, is read only once.
-				std::byte* mirror = mirrors[frameChunks.size() - 1].get() + at;
+				std::byte* mirror = mirrors[frameChunks.size() - 1].get() + at->offset;
 				std::memcpy(mirror, a_data, a_size);
-				std::memcpy(frameChunks.back()->Bytes().data() + at, mirror, a_size);
-				offset = at + a_size;
-				return std::pair{ static_cast<std::uint16_t>(frameChunks.size() - 1), at };
-			}
-
-			bool NextChunk()
-			{
-				if (frameChunks.size() >= UINT16_MAX)
-					return Fail("a frame filled every ring chunk it may have");
-				std::shared_ptr<org::LatchBlock> chunk;
-				{
-					std::scoped_lock lock(freeMutex);
-					if (!freeChunks.empty()) {
-						chunk = std::move(freeChunks.back());
-						freeChunks.pop_back();
-					}
-				}
-				if (!chunk) {
-					try {
-						chunk = org::LatchBlock::CreateDedicated("Engine::Constants", kChunkBytes);
-					} catch (const std::exception& e) {
-						return Fail(fmt::format("a ring chunk could not be made ({})", e.what()));
-					}
-					++chunksMade;
-					totals.chunks = chunksMade;
-					if (chunksMade > 4 && std::has_single_bit(chunksMade))
-						logger::info("[ORG] engine constants: the ring has {} chunks ({} MiB)", chunksMade, (std::uint64_t(chunksMade) * kChunkBytes) >> 20);
-				}
-				frameChunks.push_back(std::move(chunk));
-				if (mirrors.size() < frameChunks.size())
-					mirrors.push_back(std::make_unique<std::byte[]>(kChunkBytes));
-				offset = 0;
-				peakChunksThisFrame = (std::max)(peakChunksThisFrame, static_cast<std::uint32_t>(frameChunks.size()));
-				return true;
-			}
-
-			void Retire()
-			{
-				auto& runtime = RenderGraphRuntime::Get();
-				for (auto& chunk : frameChunks) {
-					const org::LatchBlock* raw = chunk.get();
-					std::shared_ptr<const void> token(raw, [this, kept = std::move(chunk)](const void*) mutable {
-						std::scoped_lock lock(freeMutex);
-						freeChunks.push_back(std::move(kept));
-					});
-					runtime.ReleaseAfterD3D11(std::move(token));
-				}
-				frameChunks.clear();
-				offset = 0;
-			}
-
-			bool Fail(std::string_view a_why)
-			{
-				failed = true;
-				logger::error("[ORG] engine constants: {}; the capture stops (consumers get no constants)", a_why);
-				return false;
-			}
-
-			// Debug check (CS_ORG_ENGINE_CONSTANTS_CHECK=1).
-
-			/** @brief About once a second, reads back the D3D11 buffer and compares. It stalls, so it is debug only. */
-			void MaybeCheck(const Entry& a_entry, const SlotConstants& a_slot)
-			{
-				if (frame < nextCheckFrame)
-					return;
-				nextCheckFrame = frame + 60;
-				auto* context = globals::d3d::context;
-				if (!context)
-					return;
-				auto& staging = stagingBySize[a_entry.byteWidth];
-				if (!staging) {
-					D3D11_BUFFER_DESC desc{};
-					desc.ByteWidth = a_entry.byteWidth;
-					desc.Usage = D3D11_USAGE_STAGING;
-					desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-					if (FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, staging.put())))
-						return;
-					Util::SetResourceName(staging.get(), "Engine::ConstantsCheck");
-				}
-				context->CopyResource(staging.get(), a_entry.buffer);
-				D3D11_MAPPED_SUBRESOURCE mapped{};
-				if (FAILED(context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped)))
-					return;
-				const auto captured = Bytes(a_slot);
-				const auto* gpu = static_cast<const std::byte*>(mapped.pData) + a_entry.copiedBegin;
-				const bool same = captured.size() == a_slot.size && std::memcmp(gpu, captured.data(), captured.size()) == 0;
-				context->Unmap(staging.get(), 0);
-				++window.checks;
-				if (!same) {
-					++window.mismatches;
-					if (mismatchesLogged < 16) {
-						++mismatchesLogged;
-						logger::warn("[ORG] engine constants check: {} b{} ({}, pool {}) differs from the D3D11 buffer ({} bytes at {})",
-							StageName(a_slot.stage), a_slot.slot, GroupName(a_slot.group), a_slot.poolIndex, a_slot.size, a_entry.copiedBegin);
-					}
-				}
-			}
-
-
-			static const char* StageName(Stage a_stage)
-			{
-				constexpr const char* names[] = { "VS", "PS", "CS" };
-				return names[static_cast<std::uint32_t>(a_stage)];
+				std::memcpy(at->data, mirror, a_size);
+				return std::pair{ static_cast<std::uint16_t>(frameChunks.size() - 1), at->offset };
 			}
 
 			static const char* GroupName(Group a_group)
@@ -576,17 +487,14 @@ namespace RenderGraph::Engine::Constants
 				}
 				logger::info(
 					"[ORG] engine constants: {} frames: per frame {} uses, {} slots, {} copies, {} KiB (peak {} KiB, {} chunks); copies per frame by "
-					"group: {}; unwritten slots {}, dropped uses {}{}",
+					"group: {}; unwritten slots {}, dropped uses {}",
 					frames, window.uses / frames, window.slots / frames, window.copies / frames, (window.bytes / frames) >> 10, window.peakBytes >> 10,
-					window.peakChunks, groups.empty() ? "none" : groups, window.unwritten, window.dropped,
-					checkRequested ? fmt::format("; checked {}, {} differ", window.checks, window.mismatches) : std::string{});
+					window.peakChunks, groups.empty() ? "none" : groups, window.unwritten, window.dropped);
 				window = {};
 			}
 
 			bool enabled = false;
-			bool failed = false;
 			bool warnedFull = false;
-			bool checkRequested = false;
 			std::uint64_t logFrames = 600;
 
 			std::deque<Entry> entries;  // stable addresses
@@ -599,24 +507,163 @@ namespace RenderGraph::Engine::Constants
 			std::vector<UseRecord> uses;
 			std::vector<SlotConstants> slots;
 
-			std::vector<std::shared_ptr<org::LatchBlock>> frameChunks;
+			Buffers::UploadRing ring;
+			std::vector<ConstantsChunk*> frameChunks;  // this frame's, in the order it took them
 			// Kept for the session at the frame's peak count.
 			std::vector<std::unique_ptr<std::byte[]>> mirrors;
-			std::uint32_t offset = 0;
-			std::mutex freeMutex;
-			std::vector<std::shared_ptr<org::LatchBlock>> freeChunks;
-			std::uint32_t chunksMade = 0;
 			std::uint32_t peakChunksThisFrame = 0;
 			std::uint64_t bytesThisFrame = 0;
 
-			std::uint64_t nextCheckFrame = 0;
-			std::uint32_t mismatchesLogged = 0;
-			std::unordered_map<std::uint32_t, winrt::com_ptr<ID3D11Buffer>> stagingBySize;
 
 			Stats totals;
 			Window window;
 		};
 
+
+		/**
+		* @brief The engine's pool buffers, answered from CS memory in graph mode. Each has two copies: a discard map takes the other
+		* one, so the last mapping stays readable until the map after next, as BufferContents and DCLF's mirror expect of DXVK.
+		* Runs on whichever thread drives the immediate context, under Renderer::Lock.
+		*/
+		class EnginePools
+		{
+		public:
+			static EnginePools& Get()
+			{
+				// Never destroyed, since the engine may map during shutdown.
+				static EnginePools* pools = new EnginePools;
+				return *pools;
+			}
+
+			bool Map(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, D3D11_MAPPED_SUBRESOURCE* a_out)
+			{
+				if (a_subresource != 0 || !Answering())
+					return false;
+				Pool* pool = Find(a_resource);
+				if (!pool) {
+					// Native mode's context keeps no service for the pool buffers: these maps answer every one of them.
+					if (Native::Requested() && !built.load(std::memory_order_acquire) && InEngineBlock(a_resource))
+						RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::EngineWork, RenderGraph::Frame::SegmentId::Count,
+							"the engine mapped a pool constant buffer before the pools exist, so the map reached the native context");
+					return false;
+				}
+				if (a_type == D3D11_MAP_WRITE_DISCARD)
+					pool->current ^= 1u;
+				else if (a_type != D3D11_MAP_WRITE_NO_OVERWRITE)
+					RenderGraph::Fatal("engine constants", fmt::format("the engine mapped a pool constant buffer with map type {}, which graph mode has no D3D11 buffer for", static_cast<int>(a_type)));
+				pool->mapped = true;
+				a_out->pData = pool->copies[pool->current].get();
+				a_out->RowPitch = a_out->DepthPitch = pool->byteWidth;
+				// Guest mode hooks DXVK's context, which this map never reaches. Native mode hooks the handle, which calls it after this returns.
+				if (!Native::Requested())
+					globals::OnContextMap(a_resource, a_type, a_out);
+				return true;
+			}
+
+			/** @brief Only for a map this answered, so a map made before graph mode took over goes on to D3D11. */
+			bool Unmap(ID3D11Resource* a_resource, UINT a_subresource)
+			{
+				if (a_subresource != 0)
+					return false;
+				Pool* pool = Find(a_resource);
+				if (!pool || !pool->mapped)
+					return false;
+				if (!Native::Requested())
+					globals::OnContextUnmap(a_resource);
+				pool->mapped = false;
+				return true;
+			}
+
+		private:
+			/** @brief kEngineBlockSlots buffers in a list this short: a sorted array of their keys. */
+			struct Pool
+			{
+				const void* key = nullptr;
+				std::uint32_t byteWidth = 0;
+				std::uint32_t current = 0;
+				bool mapped = false;
+				std::array<std::unique_ptr<std::byte[]>, 2> copies;
+			};
+
+			/** @brief Native mode has no D3D11 path at all. Guest mode answers once the engine's context drops its draws, so none reaches DXVK. */
+			static bool Answering() { return Native::Requested() || Flush::EngineDrawsDropped(); }
+
+			/** @brief In guest mode the hook gets DXVK's buffer, in native mode the handle the engine holds. */
+			static const void* KeyOf(ID3D11Buffer* a_engine)
+			{
+				if (Native::Requested())
+					return a_engine;
+				return Tripwire::Unwrap(a_engine);
+			}
+
+			/** @brief Whether a_resource is one of the engine's pool buffers, before the index exists. */
+			static bool InEngineBlock(const ID3D11Resource* a_resource)
+			{
+				ID3D11Buffer* const* block = EngineBlock();
+				for (std::uint32_t i = 0; i < kEngineBlockSlots; ++i)
+					if (block[i] && KeyOf(block[i]) == a_resource)
+						return true;
+				return false;
+			}
+
+			/** @brief Null for any other resource. The pools exist before the first frame, so the index is built once. */
+			Pool* Find(const ID3D11Resource* a_resource)
+			{
+				if (!built.load(std::memory_order_acquire) && !Build())
+					return nullptr;
+				const auto it = std::ranges::lower_bound(pools, static_cast<const void*>(a_resource), {}, &Pool::key);
+				return it != pools.end() && it->key == a_resource ? &*it : nullptr;
+			}
+
+			bool Build()
+			{
+				std::scoped_lock lock(buildMutex);
+				if (built.load(std::memory_order_relaxed))
+					return true;
+				ID3D11Buffer* const* block = EngineBlock();
+				// The instance-group buffer is the last the engine makes.
+				if (!block[kEngineBlockSlots - 1])
+					return false;
+				std::vector<Pool> made;
+				made.reserve(kEngineBlockSlots);
+				for (std::uint32_t i = 0; i < kEngineBlockSlots; ++i) {
+					ID3D11Buffer* buffer = block[i];
+					if (!buffer)
+						continue;
+					D3D11_BUFFER_DESC desc{};
+					buffer->GetDesc(&desc);
+					if (desc.Usage != D3D11_USAGE_DYNAMIC || !desc.ByteWidth)
+						RenderGraph::Fatal("engine constants", fmt::format("the engine's pool constant buffer {} is not a dynamic buffer", i));
+					Pool pool;
+					pool.key = KeyOf(buffer);
+					pool.byteWidth = desc.ByteWidth;
+					for (auto& copy : pool.copies) {
+						copy = std::make_unique<std::byte[]>(desc.ByteWidth);
+						std::memset(copy.get(), 0, desc.ByteWidth);
+					}
+					made.push_back(std::move(pool));
+				}
+				std::ranges::sort(made, {}, &Pool::key);
+				pools = std::move(made);
+				built.store(true, std::memory_order_release);
+				logger::info("[ORG] engine constants: the engine's {} pool constant buffers are answered from CS memory in graph mode", pools.size());
+				return true;
+			}
+
+			std::mutex buildMutex;
+			std::atomic<bool> built{ false };
+			std::vector<Pool> pools;  // sorted by key, fixed once built
+		};
+
+		bool MapEnginePool(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT, D3D11_MAPPED_SUBRESOURCE* a_out)
+		{
+			return EnginePools::Get().Map(a_resource, a_subresource, a_type, a_out);
+		}
+
+		bool UnmapEnginePool(ID3D11Resource* a_resource, UINT a_subresource)
+		{
+			return EnginePools::Get().Unmap(a_resource, a_subresource);
+		}
 
 		/** @brief Context vtable 7, 16, 71. */
 		template <Stage S>
@@ -644,6 +691,36 @@ namespace RenderGraph::Engine::Constants
 
 		/** @brief Vtable 110. Renderer::Begin calls it every frame. */
 		struct ClearState
+		{
+			static void thunk(ID3D11DeviceContext* a_this)
+			{
+				func(a_this);
+				Tracker::Get().Unbind();
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief The engine context handle's vtable 7, 16, 71 in guest mode, where the engine's binds stay in the handle and never
+		 * reach DXVK's context. Tracked as DXVK's buffers, which the map hooks name.
+		 */
+		template <Stage S>
+		struct EngineSetConstantBuffers
+		{
+			static void thunk(ID3D11DeviceContext* a_this, UINT a_start, UINT a_count, ID3D11Buffer* const* a_buffers)
+			{
+				func(a_this, a_start, a_count, a_buffers);
+				std::array<ID3D11Buffer*, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> buffers{};
+				const UINT count = (std::min)(a_count, static_cast<UINT>(buffers.size()));
+				for (UINT i = 0; i < count; ++i)
+					buffers[i] = a_buffers ? Tripwire::Unwrap(a_buffers[i]) : nullptr;
+				Tracker::Get().Bind(S, a_start, count, buffers.data(), nullptr, nullptr);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/** @brief The engine context handle's vtable 110 in guest mode. */
+		struct EngineClearState
 		{
 			static void thunk(ID3D11DeviceContext* a_this)
 			{
@@ -699,18 +776,19 @@ namespace RenderGraph::Engine::Constants
 
 	void InstallGameHooks()
 	{
-		if (!Requested())
+		if (!Engine::GraphMode())
 			return;
 		auto& tracker = Tracker::Get();
 		tracker.ReadSwitches();
 		tracker.Enable();
-		logger::info("[ORG] engine constants: capturing every engine constant-buffer use (CS_ORG_ENGINE_CONSTANTS=1)");
+		logger::info("[ORG] engine constants: capturing every engine constant-buffer use");
 		stl::detour_thunk<MapCustomConstantBuffer>(REL::RelocationID(75561, 77362));
+		Tripwire::SetMapHooks({ .map = &MapEnginePool, .unmap = &UnmapEnginePool });
 	}
 
 	void InstallD3DHooks(ID3D11DeviceContext* a_context)
 	{
-		if (!Requested() || !a_context)
+		if (!Engine::GraphMode() || !a_context)
 			return;
 		stl::detour_vfunc<7, SetConstantBuffers<Stage::Vertex>>(a_context);
 		stl::detour_vfunc<16, SetConstantBuffers<Stage::Pixel>>(a_context);
@@ -723,6 +801,13 @@ namespace RenderGraph::Engine::Constants
 			stl::detour_vfunc<124, SetConstantBuffers1<Stage::Compute>>(context1.get());
 		} else {
 			logger::warn("[ORG] engine constants: no ID3D11DeviceContext1; windowed constant-buffer binds are not seen");
+		}
+		// Guest mode: a_context is DXVK's, which sees CS's binds. The engine's stay in its context handle. Native mode has one context.
+		if (auto* engine = Tripwire::EngineContext(); engine && engine != a_context && Tripwire::IsHandle(engine)) {
+			stl::detour_vfunc<7, EngineSetConstantBuffers<Stage::Vertex>>(engine);
+			stl::detour_vfunc<16, EngineSetConstantBuffers<Stage::Pixel>>(engine);
+			stl::detour_vfunc<71, EngineSetConstantBuffers<Stage::Compute>>(engine);
+			stl::detour_vfunc<110, EngineClearState>(engine);
 		}
 	}
 
@@ -749,24 +834,3 @@ namespace RenderGraph::Engine::Constants
 	Stats GetStats() { return Tracker::Get().GetStats(); }
 }
 
-#else  // !CS_HAS_RENDER_GRAPH: nothing is captured.
-
-namespace RenderGraph::Engine::Constants
-{
-	bool Active() { return false; }
-	UseId Capture(std::uint32_t) { return {}; }
-	std::span<const SlotConstants> Slots(UseId) { return {}; }
-	const SlotConstants* Find(UseId, Stage, std::uint32_t) { return nullptr; }
-	std::span<const std::byte> Bytes(const SlotConstants&) { return {}; }
-	Location Where(const SlotConstants&) { return {}; }
-	ID3D11Buffer* EngineComputeBuffer() { return nullptr; }
-	void InstallGameHooks() {}
-	void InstallD3DHooks(ID3D11DeviceContext*) {}
-	void OnMap(ID3D11Resource*, D3D11_MAP, void*) {}
-	void OnUnmap(ID3D11Resource*) {}
-	void OnUpdateSubresource(ID3D11Resource*, const D3D11_BOX*, const void*) {}
-	void EndFrame() {}
-	Stats GetStats() { return {}; }
-}
-
-#endif

@@ -7,16 +7,11 @@
 
 #include <algorithm>
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	if __has_include("RenderGraph/Engine/Tripwire/GuestDevice.h")
-#		include "RenderGraph/Engine/Tripwire/GuestDevice.h"
-#		define CS_ORG_ENGINE_HANDLES_GUEST_CONTEXT 1
-#	endif
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 
-#	include <format>
-#	include <span>
-#	include <unordered_map>
-#endif
+#include <format>
+#include <span>
+#include <unordered_map>
 
 namespace RenderGraph::Engine::Pipeline
 {
@@ -37,7 +32,6 @@ namespace RenderGraph::Engine::Pipeline
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-#if defined(CS_HAS_RENDER_GRAPH)
 		std::span<const std::uint8_t> Bytes(const void* a_data, SIZE_T a_size)
 		{
 			return a_data ? std::span(static_cast<const std::uint8_t*>(a_data), a_size) : std::span<const std::uint8_t>();
@@ -86,7 +80,7 @@ namespace RenderGraph::Engine::Pipeline
 			{
 				const HRESULT result = func(a_this, a_elements, a_count, a_bytecode, a_size, a_out);
 				if (SUCCEEDED(result) && a_out && *a_out && a_elements)
-					RecordInputLayout(*a_out, std::span(a_elements, a_count), Bytes(a_bytecode, a_size));
+					RecordInputLayout(*a_out, std::span(a_elements, a_count));
 				return result;
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -95,11 +89,7 @@ namespace RenderGraph::Engine::Pipeline
 		// Only through the guest context, which unwraps handles for DXVK.
 		bool HandlesWanted()
 		{
-#	if defined(CS_ORG_ENGINE_HANDLES_GUEST_CONTEXT)
 			return Tripwire::GuestContextInstalled();
-#	else
-			return false;
-#	endif
 		}
 
 		/** @brief The handle takes over the field's reference, so the engine's later Release frees the handle and then the object. */
@@ -219,7 +209,6 @@ namespace RenderGraph::Engine::Pipeline
 				ID3D11InputLayout* layout = func(a_key);
 				if (!layout)
 					return layout;
-				RecordEngineInputLayoutKey(layout, a_key);
 				if (HandlesWanted()) {
 					const auto description = FindInputLayout(layout);
 					const auto elements = description ? std::span<const D3D11_INPUT_ELEMENT_DESC>(description->elements) : std::span<const D3D11_INPUT_ELEMENT_DESC>();
@@ -305,7 +294,6 @@ namespace RenderGraph::Engine::Pipeline
 			return true;
 		}
 
-#endif
 	}
 
 	D3D11_SAMPLER_DESC CapSamplerAnisotropy(const D3D11_SAMPLER_DESC& a_desc)
@@ -324,32 +312,27 @@ namespace RenderGraph::Engine::Pipeline
 		if (!a_device)
 			return;
 		stl::detour_vfunc<23, ID3D11Device_CreateSamplerState>(a_device);
-#if defined(CS_HAS_RENDER_GRAPH)
-		if (!Enabled())
+		if (!GraphMode())
 			return;
-		logger::info("[ORG] engine pipeline descriptions: recording shader and input layout creation (CS_ORG_ENGINE_SHADERS=1)");
+		logger::info("[ORG] engine pipeline descriptions: recording shader and input layout creation");
 		stl::detour_vfunc<11, ID3D11Device_CreateInputLayout>(a_device);
 		stl::detour_vfunc<12, ID3D11Device_CreateVertexShader>(a_device);
 		stl::detour_vfunc<15, ID3D11Device_CreatePixelShader>(a_device);
 		stl::detour_vfunc<18, ID3D11Device_CreateComputeShader>(a_device);
-#endif
 	}
 
 	void InstallEngineHandlesOnce()
 	{
-#if defined(CS_HAS_RENDER_GRAPH)
 		// Set only once it worked, so a call without the guest context changes nothing.
 		static bool installed = false;
-		if (!Enabled() || installed)
+		if (!GraphMode() || installed)
 			return;
 		installed = InstallEngineHandles();
-#endif
 	}
 
 	void InstallGameHooks()
 	{
-#if defined(CS_HAS_RENDER_GRAPH)
-		if (!Enabled())
+		if (!GraphMode())
 			return;
 		logger::info("[ORG] engine pipeline descriptions: hooking BSGraphics::Renderer's shader, input layout and state creation");
 		stl::detour_thunk<LoadVertexShader>(REL::RelocationID(75547, 77348));
@@ -358,6 +341,5 @@ namespace RenderGraph::Engine::Pipeline
 		stl::detour_thunk<LoadPixelShader>(REL::RelocationID(75552, 77353));
 		stl::detour_thunk<LoadComputeShader>(REL::RelocationID(75556, 77357));
 		stl::detour_thunk<EngineCreateInputLayout>(REL::RelocationID(75583, 77389));
-#endif
 	}
 }

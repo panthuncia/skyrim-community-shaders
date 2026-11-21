@@ -1,30 +1,31 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "ComputeProgram.h"
+#include "ComputeProgram.h"
 
-#	include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#	include <Render/LatchBlock.h>
-#	include <Render/PreparedPass.h>
-#	include <Resources/Buffers/Buffer.h>
+#include <Render/LatchBlock.h>
+#include <Render/PreparedPass.h>
+#include <Resources/Buffers/Buffer.h>
 
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-#		include "RenderGraph/ProgramBuild.h"
-#		include "RenderGraph/ShaderTarget.h"
+#include <ORGModuleServices/Passes/GenerateMipsPass.h>
 
-#		include <ORGModuleServices/PipelineRegistry.h>
-#		include <ORGModuleServices/ShaderCompiler.h>
-#	endif
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
+#	include "RenderGraph/PipelineVersions.h"
+#	include "RenderGraph/ProgramBuild.h"
+#	include "RenderGraph/ShaderTarget.h"
 
-#	include <filesystem>
-#	include <span>
+#	include <ORGModuleServices/PipelineRegistry.h>
+#	include <ORGModuleServices/ShaderCompiler.h>
+#endif
+
+#include <filesystem>
+#include <span>
 
 namespace
 {
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	using RenderGraph::ProgramBuild::HashBinary;
 	using RenderGraph::ProgramBuild::ReadSource;
 
@@ -82,17 +83,27 @@ namespace
 				});
 		};
 	}
-#	endif
+#endif
 }
 
-rhi::PipelineHandle ComputeProgram::Pipeline() const
+rhi::PipelineHandle ComputeProgram::Pipeline(const org::RecordingContext& a_recording) const
 {
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-	// Non-owning. The registry keeps a replaced payload until every submission that may use it has completed.
-	return (*static_cast<const rhi::PipelinePtr*>(slot->Peek()))->GetHandle();
-#	else
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
+	// Non-owning. The recording's pin keeps the version.
+	return (*static_cast<const rhi::PipelinePtr*>(RenderGraph::PipelineVersions::VersionFor(*slot, a_recording)->payload.get()))->GetHandle();
+#else
+	(void)a_recording;
 	return {};
-#	endif
+#endif
+}
+
+rhi::PipelineHandle ComputeProgram::CurrentPipeline() const
+{
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
+	return (*static_cast<const rhi::PipelinePtr*>(slot->Current()->payload.get()))->GetHandle();
+#else
+	return {};
+#endif
 }
 
 void ComputeProgram::Dispatch(org::RecordingContext& a_recording, std::span<const std::uint32_t> a_constants, std::uint32_t a_x, std::uint32_t a_y,
@@ -102,7 +113,7 @@ void ComputeProgram::Dispatch(org::RecordingContext& a_recording, std::span<cons
 		return;
 	auto& commands = a_recording.Commands();
 	commands.BindLayout(layout->GetHandle());
-	commands.BindPipeline(Pipeline());
+	commands.BindPipeline(Pipeline(a_recording));
 	if (!a_constants.empty())
 		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<std::uint32_t>(a_constants.size()), a_constants.data());
 	commands.Dispatch(a_x, a_y, a_z);
@@ -115,7 +126,7 @@ void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::s
 		return;
 	auto& commands = a_recording.Commands();
 	commands.BindLayout(layout->GetHandle());
-	commands.BindPipeline(Pipeline());
+	commands.BindPipeline(Pipeline(a_recording));
 	if (!a_constants.empty())
 		commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<std::uint32_t>(a_constants.size()), a_constants.data());
 	commands.ExecuteIndirect(dispatchSignature->GetHandle(), a_arguments, a_offset, {}, 0, 1);
@@ -130,7 +141,7 @@ void ComputeProgram::DispatchIndirect(org::RecordingContext& a_recording, std::s
 
 std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device, const Desc& a_desc)
 {
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	// Resolved once here, so a hot reload compiles the same permutation.
 	Desc desc = a_desc;
 	if (desc.commonDefines)
@@ -184,11 +195,19 @@ std::shared_ptr<const ComputeProgram> ComputeProgram::Load(rhi::Device a_device,
 	live.rebuild = Rebuild(program, a_device, desc);
 	program->slot = registry.Register(std::move(live), std::make_shared<rhi::PipelinePtr>(std::move(pipeline)), HashBinary(artifact.binary), builtFor);
 	return program;
-#	else
+#else
 	(void)a_device;
 	logger::warn("[ORG] {}: built without ORGModuleServices' compiler", a_desc.source);
 	return {};
-#	endif
+#endif
 }
 
-#endif
+ComputeProgram::Desc ComputeProgram::GenerateMips(bool a_array)
+{
+	// OMS's shader has no D3D11 build, so it takes none of CS's defines.
+	Desc desc{ .source = org::services::kGenerateMipsShader, .constantWords = org::services::kGenerateMipsConstantWords, .commonDefines = false };
+	if (a_array)
+		desc.defines.push_back({ org::services::kGenerateMipsArrayDefine, L"1" });
+	return desc;
+}
+

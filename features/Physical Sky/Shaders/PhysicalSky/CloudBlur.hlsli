@@ -1,12 +1,12 @@
 #ifndef PHYSICAL_SKY_CLOUD_BLUR_HLSLI
 #define PHYSICAL_SKY_CLOUD_BLUR_HLSLI
 
-Texture2D<float> TexCloudResultTr : register(t29);
-Texture2D<float4> TexCloudResultLum : register(t30);
-Texture2D<float4> TexCloudResultAux : register(t31);
-RWTexture2D<float> RWTexFilteredTr : register(u3);
-RWTexture2D<float4> RWTexFilteredLum : register(u4);
-RWTexture2D<float4> RWTexFilteredAux : register(u5);
+ORG_HEADER_SRV(Texture2D<float>, TexCloudResultTr, 29)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudResultLum, 30)
+ORG_HEADER_SRV(Texture2D<float4>, TexCloudResultAux, 31)
+ORG_HEADER_UAV(RWTexture2D<float>, RWTexFilteredTr, 3)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWTexFilteredLum, 4)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWTexFilteredAux, 5)
 
 #ifndef CLOUD_BLUR_RADIUS
 #	define CLOUD_BLUR_RADIUS 1

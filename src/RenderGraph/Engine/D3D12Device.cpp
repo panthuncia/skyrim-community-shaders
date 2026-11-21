@@ -1,23 +1,21 @@
 #include "RenderGraph/Engine/D3D12Device.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include "RenderGraph/Backend.h"
+#include "RenderGraph/Switches.h"
 
-#	include "RenderGraph/Backend.h"
-#	include "RenderGraph/Switches.h"
+#include <rhi.h>
+#include <rhi_shader_abi.h>
 
-#	include <rhi.h>
-#	include <rhi_shader_abi.h>
+#if defined(CS_ORG_HAS_D3D12)
+#	include <d3d12.h>
+#	include <winrt/base.h>
+#endif
 
-#	if defined(CS_ORG_HAS_D3D12)
-#		include <d3d12.h>
-#		include <winrt/base.h>
-#	endif
-
-#	include <filesystem>
+#include <filesystem>
 
 namespace RenderGraph::Engine
 {
-#	if defined(CS_ORG_HAS_D3D12)
+#if defined(CS_ORG_HAS_D3D12)
 	namespace
 	{
 		// D3D12 refuses a shader-visible heap above 1,000,000 descriptors, and BasicRHI adds the buffer view refs' region past this.
@@ -134,16 +132,16 @@ namespace RenderGraph::Engine
 			return {};
 		}
 	}
-#	endif
+#endif
 
 	bool CreateD3D12Device(const D3D12DeviceOptions& a_options, std::shared_ptr<rhi::DevicePtr>& a_device, std::string& a_reason)
 	{
 		a_device.reset();
-#	if !defined(CS_ORG_HAS_D3D12)
+#if !defined(CS_ORG_HAS_D3D12)
 		(void)a_options;
 		a_reason = "this build has no D3D12 backend (built with CS_ORG_D3D12=OFF)";
 		return false;
-#	else
+#else
 		auto fail = [&](std::string a_why) {
 			a_device.reset();
 			a_reason = "D3D12 device: " + std::move(a_why);
@@ -183,7 +181,7 @@ namespace RenderGraph::Engine
 			a_options.debug || a_options.crashMarkers ? "on" : "off", a_options.framesInFlight, factory ? "Agility SDK" : "system");
 		a_reason.clear();
 		return true;
-#	endif
+#endif
 	}
 
 	bool ConfigureSwapchain(rhi::Swapchain& a_swapchain, const D3D12PresentOptions& a_options)
@@ -207,17 +205,3 @@ namespace RenderGraph::Engine
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-namespace RenderGraph::Engine
-{
-	bool CreateD3D12Device(const D3D12DeviceOptions&, std::shared_ptr<rhi::DevicePtr>&, std::string& a_reason)
-	{
-		a_reason = "this build has no render graph";
-		return false;
-	}
-
-	bool ConfigureSwapchain(rhi::Swapchain&, const D3D12PresentOptions&) { return false; }
-}
-
-#endif

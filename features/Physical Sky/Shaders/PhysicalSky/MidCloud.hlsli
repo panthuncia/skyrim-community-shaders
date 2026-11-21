@@ -5,10 +5,10 @@
 
 // Independent As/Ac weather. RGBA stores density and density-weighted
 // bottom, top and type. Detail is evaluated from the shared mipmapped noises.
-Texture2D<float4> TexMiddleWeather : register(t99);
-Texture2D<float2> TexUpperSunDepth : register(t100);
-Texture2D<float> TexMiddleWarp : register(t101);
-Texture2D<float> TexMiddleCell : register(t103);
+ORG_HEADER_SRV(Texture2D<float4>, TexMiddleWeather, 99)
+ORG_HEADER_SRV(Texture2D<float2>, TexUpperSunDepth, 100)
+ORG_HEADER_SRV(Texture2D<float>, TexMiddleWarp, 101)
+ORG_HEADER_SRV(Texture2D<float>, TexMiddleCell, 103)
 
 float2 UpperSunGridCenter()
 {

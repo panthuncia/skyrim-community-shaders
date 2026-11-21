@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Feature.h"
+#include "Utils/Setting.h"
 #include <array>
 #include <atomic>
 #include <d3d11_4.h>
@@ -13,6 +14,9 @@ private:
 	static constexpr std::string_view MOD_ID = "156952";
 
 public:
+	/** @brief Binds the settings that raise frame revision events. */
+	Upscaling();
+
 	// Feature interface
 	virtual inline std::string GetName() override { return "Upscaling"; }
 	virtual std::string GetDisplayName() override { return T("feature.upscaling.name", "Upscaling"); }
@@ -50,18 +54,19 @@ public:
 
 	struct Settings
 	{
-		uint upscaleMethod = (uint)UpscaleMethod::kFSR;
-		uint upscaleMethodNoDLSS = (uint)UpscaleMethod::kFSR;
-		uint qualityMode = 1;
+		// The method, the quality and frame generation choose textures, clients and the render size: frame revision events.
+		CS::Setting<uint> upscaleMethod = (uint)UpscaleMethod::kFSR;
+		CS::Setting<uint> upscaleMethodNoDLSS = (uint)UpscaleMethod::kFSR;
+		CS::Setting<uint> qualityMode = 1;
 		float sharpnessFSR = 0.0f;
 		bool reflexEnabled = false;
 		bool reflexBoost = false;
 		// Legacy fields kept for JSON backward compatibility.
 		bool reflexLowLatencyMode = false;
 		bool reflexLowLatencyBoost = false;
-		bool frameGeneration = false;
-		uint frameGenMethod = (uint)FrameGenMethod::kDLSSG;
-		uint frameGenMultiplier = 2;
+		CS::Setting<bool> frameGeneration = false;
+		CS::Setting<uint> frameGenMethod = (uint)FrameGenMethod::kDLSSG;
+		CS::Setting<uint> frameGenMultiplier = 2;
 		bool dlssgDynamic = false;
 		bool fgShowOnlyGenerated = false;
 		bool fgDebugView = false;
@@ -93,11 +98,11 @@ public:
 
 	static void NotifyWindowFocus(bool a_focused);        // WM_ACTIVATEAPP / WM_ACTIVATE
 	/**
-	 * @brief Any thread (a test run's dclf:fg command): frame generation set as the menu's method stepper sets it, at the frame
-	 * boundary after the next render frame's start. 0: off, 1: FSR-FG, 2: DLSS-G.
+	 * @brief Any thread (a test run's dclf:fg command): frame generation set as the menu's method stepper sets it. The render
+	 * thread writes the settings at the next render frame's start, and a frame revision carries them. 0: off, 1: FSR-FG, 2: DLSS-G.
 	 */
 	static void RequestFrameGenTest(int a_method);
-	/** @brief A test run's upscale method (the "upscale" command: an UpscaleMethod), applied at the frame boundary after the next render frame's start. */
+	/** @brief A test run's upscale method (the "upscale" command: an UpscaleMethod), written as RequestFrameGenTest writes its settings. */
 	static void RequestUpscaleTest(int a_method);
 	static void NotifyWindowModifying(bool a_modifying);  // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE
 	static void NotifyDisplayState(bool a_on);            // GUID_CONSOLE_DISPLAY_STATE
@@ -133,12 +138,19 @@ public:
 	virtual void PostPostLoad() override;
 	virtual void SetupResources() override;
 
+	/** @brief The method the settings choose, after falling back for missing SDK support. What the next frame revision carries. */
 	UpscaleMethod GetUpscaleMethod() const;
 	FrameGenMethod GetFrameGenMethod() const;
 
-	void ApplyHardwareDefaults();
+	/**
+	 * @brief Render thread. The method this frame runs: the adopted revision's with the render graph, so it switches in with the
+	 * textures and builds made for it. GetUpscaleMethod in plain D3D11 mode.
+	 */
+	UpscaleMethod FrameUpscaleMethod() const;
+	/** @brief Render thread. The quality mode this frame runs, chosen as FrameUpscaleMethod is. */
+	uint FrameQualityMode() const;
 
-	void CheckResources(UpscaleMethod a_upscalemethod);
+	void ApplyHardwareDefaults();
 
 	winrt::com_ptr<ID3D11PixelShader> depthRefractionUpscalePS;
 	ID3D11PixelShader* GetDepthRefractionUpscalePS();
@@ -165,7 +177,10 @@ public:
 	 */
 	void SeparateFromGraphEpochs();
 
+	/** @brief Frame generation is selected and its presenter's surface is ready for this frame's inputs. */
 	bool IsFrameGenerationActive() const;
+	/** @brief Frame generation is selected and can run, whether or not a presentation replacement is still in flight. */
+	bool IsFrameGenerationSelected() const;
 
 	/** @brief Returns the Reflex state required by the active frame generator. */
 	[[nodiscard]] bool GetEffectiveReflex() const;
@@ -200,7 +215,9 @@ public:
 
 	// D3D11 textures
 	Texture2D* upscaledTexture = nullptr;
+	// This frame's hudless texture, one of hudlessTextures (ORGUpscaling::kHudlessFormats' order).
 	Texture2D* hudlessTexture = nullptr;
+	std::array<Texture2D*, 3> hudlessTextures{};
 	// A small typed UAV DXVK clears before each evaluate (SeparateFromGraphEpochs).
 	winrt::com_ptr<ID3D11UnorderedAccessView> epochSeparator;
 
@@ -211,8 +228,6 @@ public:
 
 	float dynamicResolutionWidthRatio = 1.0f;
 	float dynamicResolutionHeightRatio = 1.0f;
-
-	bool previousUpscalingWasActive = false;
 
 	bool depthUpscaleUseWideKernel = false;
 
@@ -229,12 +244,15 @@ private:
 
 
 	void BeginRenderFrame();
+	/** @brief Plain D3D11: the upscaled texture at the display size, made once on first need and kept. The graph declares its own. */
 	void CreateUpscaledTexture();
-	void DestroyUpscaledTexture();
-	void CreateHudlessTexture();
-	bool DestroyHudlessTexture(bool a_commandRingDrained = false);
+	/**
+	 * @brief Plain D3D11: this frame's hudless texture, one per format, each made on first need and kept, so an HDR or presenter
+	 * change selects another and destroys nothing. Null while the presenter has no usable format.
+	 */
+	Texture2D* SelectD3D11Hudless();
 	ID3D11Resource* CaptureHudlessColor();
-	/** @brief The upscaler's output as ORGUpscaling::Texture chooses it (the graph's export with CS_ORG_UPSCALING); null when neither exists. */
+	/** @brief The upscaler's output as ORGUpscaling::Texture chooses it (the graph's export in graph mode); null when neither exists. */
 	ID3D11Texture2D* UpscaledResource() const;
 	/** @brief Frame generation's hudless colour, as UpscaledResource. */
 	ID3D11Texture2D* HudlessResource() const;

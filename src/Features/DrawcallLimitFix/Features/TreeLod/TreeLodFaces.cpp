@@ -104,7 +104,7 @@ namespace DCLF::Draws
 				viewed.instancesIndex = a_recording.Index(a_bindings.instances);
 				auto& commands = a_recording.Commands();
 				commands.BindLayout(a_prepared.program->layout->GetHandle());
-				commands.BindPipeline(a_prepared.program->Pipeline());
+				commands.BindPipeline(a_prepared.program->Pipeline(a_recording));
 				const auto at = a_prepared.latch->At(a_recording.Run());
 				const auto region = static_cast<std::uint32_t>(at.offset);
 				for (std::uint32_t f = 0; f < a_prepared.faces; ++f) {

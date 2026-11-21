@@ -14,7 +14,6 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Lookups.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
-#include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
 namespace DCLF
@@ -84,8 +83,6 @@ namespace DCLF
 		std::shared_ptr<const PipelineCatalog> catalog;
 		std::shared_ptr<const EntrySpace> sunCandidates, lightCandidates;
 		std::uint64_t lightEntriesAppeared = 0;
-		// Shadow casters only the engine's cull draws, by root. Null for none.
-		std::shared_ptr<const Scene::EngineOnlySubset> engineCasters;
 		// Copied only when a cell attaches or detaches. The light entries change with every tracked root, so they travel as log changes instead.
 		std::shared_ptr<const ankerl::unordered_dense::set<RE::NiNode*>> categoryNodes;
 		RevisionRequest revision;
@@ -140,12 +137,6 @@ namespace DCLF
 			RE::NiPointer<RE::NiAVObject> root;
 			std::vector<Item> dependents;  // joined or changed (by geometry); their sun entry is the root's bound (listedRoot unused)
 		};
-		/** @brief Parity only. The coordinator's full rebuild of the set after this plan, sorted. */
-		struct Check
-		{
-			std::vector<Key> movers;
-			std::vector<std::pair<const void*, std::vector<Key>>> roots;
-		};
 		// Applied in this order: what left, then what joined or changed.
 		std::vector<const void*> moversLeft;                             // by geometry
 		std::vector<const void*> rootsLeft;                              // by node, with every dependent
@@ -157,7 +148,6 @@ namespace DCLF
 		std::uint32_t slots = 0;         // the object slots the tables held
 		std::uint32_t boneCapacity = 0;  // the palette rows their blocks span (SceneTables::BoneCapacity)
 		std::uint64_t walk = 0;          // the walk that made it
-		std::shared_ptr<const Check> check;  // parity only (the set after this plan, rebuilt whole): FrameValues compares its kept set
 	};
 
 	/** @brief A slot whose shading FrameValues samples at the next frame start. Holds its property so the sample never reads a freed one. */

@@ -25,10 +25,13 @@
 #include "Features/RenderDoc.h"
 #include "Features/TreeWind.h"
 #include "Features/DrawcallLimitFix.h"
-#include "RenderGraph/Engine/Pipeline/Descriptions.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include "Plugin.h"
+
+// Last: DXVK's interop header includes vulkan.h only when no Vulkan header is in, so volk users come first.
+#include "DxvkExports.h"
 
 namespace SIE
 {
@@ -790,9 +793,10 @@ namespace SIE
 			return;
 		}
 
-		static void GetShaderDefines(const RE::BSShader& shader, uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines)
+		/** @brief A permutation's defines from its shader type alone. ImageSpace's come from the shader object, so it gets none here. */
+		static void GetShaderDefines(RE::BSShader::Type type, uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines)
 		{
-			switch (shader.shaderType.get()) {
+			switch (type) {
 			case RE::BSShader::Type::Grass:
 				GetGrassShaderDefines(descriptor, defines);
 				break;
@@ -804,9 +808,6 @@ namespace SIE
 				break;
 			case RE::BSShader::Type::BloodSplatter:
 				GetBloodSplaterShaderDefines(descriptor, defines);
-				break;
-			case RE::BSShader::Type::ImageSpace:
-				GetImagespaceShaderDefines(shader, defines);
 				break;
 			case RE::BSShader::Type::Lighting:
 				GetLightingShaderDefines(descriptor, defines);
@@ -823,7 +824,17 @@ namespace SIE
 			case RE::BSShader::Type::Utility:
 				GetUtilityShaderDefines(descriptor, defines);
 				break;
+			default:
+				break;
 			}
+		}
+
+		static void GetShaderDefines(const RE::BSShader& shader, uint32_t descriptor, std::span<D3D_SHADER_MACRO> defines)
+		{
+			if (shader.shaderType.get() == RE::BSShader::Type::ImageSpace)
+				GetImagespaceShaderDefines(shader, defines);
+			else
+				GetShaderDefines(shader.shaderType.get(), descriptor, defines);
 		}
 
 		static std::array<std::array<std::unordered_map<std::string, int32_t>,
@@ -2673,11 +2684,7 @@ namespace SIE
 		// Null clears it.
 		void SetNextDxvkShaderName(ShaderClass a_class, const RE::BSShader* a_shader, uint32_t a_descriptor)
 		{
-			using SetNextShaderName = void(__stdcall*)(const char*);
-			static const auto setName = []() -> SetNextShaderName {
-				const auto module = ::GetModuleHandleW(L"dxvk_d3d11.dll");
-				return module ? reinterpret_cast<SetNextShaderName>(::GetProcAddress(module, "dxvkSetNextShaderName")) : nullptr;
-			}();
+			const auto setName = DxvkExports::Get().setNextShaderName;
 			if (!setName)
 				return;
 			if (!a_shader) {
@@ -2703,29 +2710,6 @@ namespace SIE
 		}
 	}
 
-	namespace
-	{
-		// CS_ORG_ENGINE_SHADERS=1: the source of a shader this cache built, added to the description the device recorded (P4.6).
-		void RecordEngineShaderSource(void* a_object, const RE::BSShader& a_shader, ShaderClass a_class, uint32_t a_descriptor)
-		{
-#if defined(CS_HAS_RENDER_GRAPH)
-			if (!a_object || !RenderGraph::Engine::Pipeline::Enabled())
-				return;
-			RenderGraph::Engine::Pipeline::ShaderSource source;
-			source.shaderType = static_cast<uint32_t>(a_shader.shaderType.get());
-			source.descriptor = a_descriptor;
-			source.path = SShaderCache::GetShaderPath(SShaderCache::GetSourceName(a_shader));
-			source.defines = ShaderCache::GetCompileDefines(a_shader, a_class, a_descriptor);
-			RenderGraph::Engine::Pipeline::RecordShaderSource(static_cast<IUnknown*>(a_object), std::move(source));
-#else
-			(void)a_object;
-			(void)a_shader;
-			(void)a_class;
-			(void)a_descriptor;
-#endif
-		}
-	}
-
 	RE::BSGraphics::VertexShader* ShaderCache::MakeAndAddVertexShader(const RE::BSShader& shader,
 		uint32_t descriptor)
 	{
@@ -2747,7 +2731,6 @@ namespace SIE
 					newShader->shader->Release();
 				}
 			} else {
-				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Vertex, descriptor);
 				std::lock_guard lockGuard(vertexShadersMutex);
 				auto& entry = vertexShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
@@ -2785,7 +2768,6 @@ namespace SIE
 					Util::SetResourceName(reinterpret_cast<ID3D11PixelShader*>(newShader->shader), "%s", static_cast<const RE::BSImagespaceShader&>(shader).name);
 				else
 					Util::SetResourceName(reinterpret_cast<ID3D11PixelShader*>(newShader->shader), "%s:%X", std::string(magic_enum::enum_name(shader.shaderType.get())).c_str(), descriptor);
-				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Pixel, descriptor);
 				std::lock_guard lockGuard(pixelShadersMutex);
 				auto& entry = pixelShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
@@ -2823,7 +2805,6 @@ namespace SIE
 					Util::SetResourceName(reinterpret_cast<ID3D11ComputeShader*>(newShader->shader), "%s", static_cast<const RE::BSImagespaceShader&>(shader).name);
 				else
 					Util::SetResourceName(reinterpret_cast<ID3D11ComputeShader*>(newShader->shader), "%s:%X", std::string(magic_enum::enum_name(shader.shaderType.get())).c_str(), descriptor);
-				RecordEngineShaderSource(newShader->shader, shader, ShaderClass::Compute, descriptor);
 				std::lock_guard lockGuard(computeShadersMutex);
 				auto& entry = computeShaders[static_cast<size_t>(shader.shaderType.get())][descriptor];
 				if (entry && entry->shader)
@@ -2843,9 +2824,9 @@ namespace SIE
 		return SIE::SShaderCache::MergeDefinesString(defines, true);
 	}
 
-	std::vector<std::pair<std::string, std::string>> ShaderCache::GetCompileDefines(const RE::BSShader& shader, ShaderClass shaderClass, uint32_t descriptor)
+	/** @brief The shader-class define, the global feature defines, then the permutation's, as the D3DCompile path in CompileShader. */
+	static std::vector<std::pair<std::string, std::string>> ComposeCompileDefines(ShaderClass shaderClass, std::span<const D3D_SHADER_MACRO> permutation)
 	{
-		// Same composition as the D3DCompile path in CompileShader.
 		std::vector<std::pair<std::string, std::string>> result;
 		if (shaderClass == ShaderClass::Vertex)
 			result.emplace_back("VSHADER", "");
@@ -2857,17 +2838,26 @@ namespace SIE
 			for (const auto& define : *stateDefines)
 				result.push_back(define);
 		}
-		std::array<D3D_SHADER_MACRO, 64> defines{};
-		SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines });
-		for (const auto& define : defines) {
+		for (const auto& define : permutation) {
 			if (!define.Name)
 				break;
-			// Only render graph builds come here, and the graph binds none of Physical Sky's resources yet.
-			if (std::string_view(define.Name) == "PHYSICAL_SKY")
-				continue;
 			result.emplace_back(define.Name, define.Definition ? define.Definition : "");
 		}
 		return result;
+	}
+
+	std::vector<std::pair<std::string, std::string>> ShaderCache::GetCompileDefines(const RE::BSShader& shader, ShaderClass shaderClass, uint32_t descriptor)
+	{
+		std::array<D3D_SHADER_MACRO, 64> defines{};
+		SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines });
+		return ComposeCompileDefines(shaderClass, defines);
+	}
+
+	std::vector<std::pair<std::string, std::string>> ShaderCache::GetCompileDefines(RE::BSShader::Type type, ShaderClass shaderClass, uint32_t descriptor)
+	{
+		std::array<D3D_SHADER_MACRO, 64> defines{};
+		SIE::SShaderCache::GetShaderDefines(type, descriptor, std::span{ defines });
+		return ComposeCompileDefines(shaderClass, defines);
 	}
 
 	uint64_t ShaderCache::GetCachedHitTasks()

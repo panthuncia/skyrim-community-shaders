@@ -1,5 +1,6 @@
 #include "Vram/SpillLab.h"
 
+#include "DxvkExports.h"
 #include "Features/Upscaling/VkDriverTrace.h"
 #include "Globals.h"
 #include "RenderGraph/DxvkOrgInterop.h"
@@ -86,7 +87,7 @@ namespace Vram::SpillLab
 		void Place(const std::vector<std::uint64_t>& a_cookies, bool a_toSystem, std::uint32_t& a_queued)
 		{
 			a_queued = 0;
-			static const auto force = reinterpret_cast<PFN_dxvkForceResourcePlacement>(reinterpret_cast<void*>(::GetProcAddress(::GetModuleHandleW(L"dxvk_d3d11.dll"), "dxvkForceResourcePlacement")));
+			const auto force = DxvkExports::Get().forceResourcePlacement;
 			if (force && globals::d3d::device && !a_cookies.empty())
 				force(globals::d3d::device, static_cast<std::uint32_t>(a_cookies.size()), a_cookies.data(), a_toSystem ? TRUE : FALSE, &a_queued);
 		}
@@ -101,7 +102,7 @@ namespace Vram::SpillLab
 						cookies.push_back(row.cookie);
 						bytes += row.size;
 					}
-				static const auto mark = reinterpret_cast<PFN_dxvkSetResourcesSpillable>(reinterpret_cast<void*>(::GetProcAddress(::GetModuleHandleW(L"dxvk_d3d11.dll"), "dxvkSetResourcesSpillable")));
+				const auto mark = DxvkExports::Get().setResourcesSpillable;
 				std::uint32_t queued = 0;
 				if (mark && globals::d3d::device && !cookies.empty())
 					mark(globals::d3d::device, static_cast<std::uint32_t>(cookies.size()), cookies.data(), TRUE, &queued);

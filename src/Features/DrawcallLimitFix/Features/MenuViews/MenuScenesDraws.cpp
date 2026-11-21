@@ -1,16 +1,21 @@
 // The menu scenes family's render graph side. One client per batch at the EngineDraws anchor draws the latched draws in engine order.
 // The clients are steps of the UI stage in every frame kind. The draw list is a frame input stored per run, so the stage's kept
 // recording never changes with the draws.
+// The clients are declared at setup and registered by the next frame revision (frame revision plan, 6.19).
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
+
+#include "Features/DrawcallLimitFix/Core/Engine/Family/FamilyClient.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
@@ -20,6 +25,7 @@
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
 #include "ShaderCache.h"
+#include "Utils/Hash.h"
 #include "Utils/Logging.h"
 
 #include <OpenRenderGraph/GraphHost.h>
@@ -56,10 +62,9 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		};
 		static_assert(sizeof(UtilityBlock) == 40, "the scene builds' push block is 40 bytes");
 
-		struct Client
+		struct Client : Family::ClientState<Run>
 		{
 			View view = View::LocalMap;
-			std::string id;
 			std::shared_ptr<org::LatchBlock> latch;
 			// Only this client's commit opens the gate.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
@@ -72,12 +77,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			std::uint32_t depthSlices = 1;  // the slices its passes draw into
 			// Fixed at setup, so a new Publish needs no new client.
 			Family::PublishedInputs inputs;
-			// Written by the render thread, read by the host's thread.
-			std::shared_ptr<const Run> run;
 			::RenderGraph::RunSlots<Run> runs;
-			bool pending = false;
 			bool targetLogged = false;
-			std::atomic<std::uint64_t> executed{ 0 };
 		};
 
 		struct Bindings
@@ -140,14 +141,14 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			{
 				if (atExecution)
 					return;
-				const auto run = std::atomic_load(&client->run);
+				const auto run = client->Current();
 				a_out.push_back(run ? run->revision : 0);
 			}
 
 			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, client->id);
-				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
+				return { atExecution ? nullptr : client->Current(), client };
 			}
 
 			/** @brief A run whose commit opened none of the gate entries records only the pass's barriers. */
@@ -225,7 +226,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		/** @brief Render-thread state. */
 		struct DrawsState
 		{
-			std::array<std::shared_ptr<Client>, kViews> clients;
+			Family::Client<Run, Client, kViews> clients{ "menu scenes" };
 			Family::EngineDrawPrograms utility{ "menu scenes (Utility)", { .source = "Utility.hlsl",
 																			 .constantWords = ShaderBindings::Words<UtilityBlock>(),
 																			 .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Utility),
@@ -239,10 +240,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 																		   .languageVersion = L"2018",
 																		   .constantWords = ShaderBindings::Words<UtilityBlock>(),
 																		   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Effect) } };
-			bool reserved = false;
-			bool setUp = false;
-			std::uint64_t runs = 0, draws = 0;
-			Family::KeptOwners kept;
 		};
 
 		DrawsState& GetState()
@@ -256,7 +253,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			if (!a_rtv)
 				return 0;
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
-			Unwrap(a_rtv)->GetDesc(&desc);
+			a_rtv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -265,7 +262,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			if (!a_dsv)
 				return 0;
 			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
-			Unwrap(a_dsv)->GetDesc(&desc);
+			a_dsv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -293,15 +290,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			client->id = std::string("cs.menu-scenes.") + NameOf(a_view);
 			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kLatchBytes);
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
-			if (!client->gate) {
-				logger::warn("[DCLF] menu scenes: the {} run gate could not be made; that batch stays the engine's", client->id);
-				return nullptr;
-			}
 			for (const auto target : TargetsOf(a_view)) {
 				if (client->colourCount >= kMaxImports)
 					break;
 				const auto index = client->colourCount++;
-				client->colours[index] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
+				client->colours[index] = FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(target)));
 				client->colourFormats[index] = FormatOf(renderer->GetRuntimeData().renderTargets[target].RTV);
 				if (!client->colours[index] || !client->colourFormats[index]) {
 					logger::warn("[DCLF] menu scenes: render target {} cannot be imported; the {} batch stays the engine's", target, client->id);
@@ -310,11 +303,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			}
 			client->depthTarget = static_cast<std::uint32_t>(a_view == View::MenuShadow ? RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS : RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
 			const auto& depthData = renderer->GetDepthStencilData().depthStencils[client->depthTarget];
-			client->depth = FrameAnchors::EngineDepth(client->depthTarget);
+			client->depth = FrameAnchors::EngineTexture(FrameAnchors::Depth(client->depthTarget));
 			client->depthFormat = FormatOf(depthData.views[0]);
 			if (a_view == View::MenuShadow && depthData.texture) {
 				D3D11_TEXTURE2D_DESC desc{};
-				Unwrap(depthData.texture)->GetDesc(&desc);
+				depthData.texture->GetDesc(&desc);
 				client->depthSlices = (std::min)(desc.ArraySize, kMaxShadowSlices);
 			}
 			if (!client->depth || !client->depthFormat || !client->depthSlices) {
@@ -322,21 +315,25 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				return nullptr;
 			}
 			ListInputs(client->inputs);
+			return client;
+		}
 
-			FrameAnchors::ClientDesc desc{};
-			desc.id = client->id;
-			desc.sharedConstants = true;
-			desc.gates = { client->gate };
-			desc.passes.push_back({ .name = client->id + ".draws",
+		/** @brief The registration of a_client. Its targets were imported at setup. */
+		bool MakeDesc(const std::shared_ptr<Client>& a_client, FrameAnchors::ClientDesc& a_desc)
+		{
+			a_desc.id = a_client->id;
+			a_desc.sharedConstants = true;
+			a_desc.gates = { a_client->gate };
+			a_desc.passes.push_back({ .name = a_client->id + ".draws",
 				.anchor = FrameAnchors::Anchor::EngineDraws,
-				.order = 5 + static_cast<int>(a_view),
+				.order = 5 + static_cast<int>(a_client->view),
 				.kind = FrameAnchors::PassKind::Render,
-				.make = [client]() -> std::shared_ptr<org::RenderPass> {
+				.make = [client = a_client]() -> std::shared_ptr<org::RenderPass> {
 					return std::make_shared<ScenePass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
 				},
 				.atExecution = true });
-			desc.commit = [client](const FrameAnchors::Point&) {
-				const auto run = std::atomic_load(&client->run);
+			a_desc.commit = [client = a_client](const FrameAnchors::Point&) {
+				const auto run = client->Current();
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!host)
 					return;
@@ -350,109 +347,79 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 					if (run->draws[i].program)
 						client->gate->OpenDraw(i, run->draws[i].indexCount, 1);
 			};
-			desc.executed = [client](const FrameAnchors::Point&) {
-				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
+			a_desc.executed = [client = a_client](const FrameAnchors::Point&) {
+				if (client->CountExecuted())
 					logger::info("[DCLF] menu scenes: the first {} run drawn by the graph", client->id);
 			};
-			desc.active = [client] { return client->pending; };
+			a_desc.active = [client = a_client] { return client->pending; };
 			// UI stage passes only. A batch while no open stage holds the client is a mismatch.
-			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
-			if (!FrameAnchors::Register(std::move(desc))) {
-				logger::warn("[DCLF] menu scenes: the {} client could not be registered; that batch stays the engine's", client->id);
-				return nullptr;
-			}
-			logger::info("[DCLF] menu scenes: the {} client registered at setup", client->id);
-			return client;
+			a_desc.segmentOnly = FrameAnchors::NamedByStage(a_desc.id);
+			logger::info("[DCLF] menu scenes: the {} client is made", a_client->id);
+			return true;
 		}
 
-		/** @brief What a run's recording depends on. */
-		std::uint64_t RevisionOf(const Run& a_run)
+		const std::shared_ptr<Client>& ClientOf(View a_view)
 		{
-			std::uint64_t hash = 1469598103934665603ull;
-			const auto mix = [&](std::uint64_t a_value) { hash = (hash ^ a_value) * 1099511628211ull; };
-			mix(static_cast<std::uint64_t>(a_run.view));
-			mix(a_run.draws.size());
-			for (const auto& draw : a_run.draws) {
-				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
-				mix(draw.stencilRef);
-				mix((std::uint64_t(draw.latchOffset) << 32) | draw.bonesOffset);
-				mix(draw.frameOffset);
-				mix(draw.depthSlice);
-				mix(draw.colourCount);
-				for (std::uint32_t k = 0; k < draw.colourCount; ++k)
-					mix(draw.colours[k]);
-				for (const auto v : draw.viewport.rect)
-					mix(v);
-				std::uint32_t range[2];
-				std::memcpy(range, draw.viewport.depthRange.data(), sizeof(range));
-				mix((std::uint64_t(range[0]) << 32) | range[1]);
-			}
-			return hash;
-		}
-
-		std::shared_ptr<Client> ClientOf(View a_view)
-		{
-			return a_view < View::Count ? GetState().clients[static_cast<std::size_t>(a_view)] : nullptr;
+			return GetState().clients.At(static_cast<std::size_t>(a_view));
 		}
 	}
 
 	bool Available()
 	{
-		const auto& state = GetState();
-		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
-	}
-
-	void Reserve()
-	{
-		auto& state = GetState();
-		state.reserved = FrameAnchors::Reserve(FrameAnchors::Anchor::EngineDraws);
-		if (!state.reserved)
-			logger::warn("[DCLF] menu scenes: the EngineDraws anchor could not be reserved; the menu scenes stay the engine's");
+		return GetState().clients.Available();
 	}
 
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.setUp)
-			return true;
-		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
-			return false;
-		state.setUp = true;
+		if (const auto result = state.clients.BeginSetup())
+			return *result;
 		Family::StartStagePrecompile();
 		state.utility.Prebuild();
 		state.lighting.Prebuild();
 		state.effect.Prebuild();
-		if (!::RenderGraph::Engine::Constants::Requested()) {
-			logger::warn("[DCLF] menu scenes: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the menu scenes stay the engine's");
+		if (!::RenderGraph::Engine::GraphMode()) {
+			logger::warn("[DCLF] menu scenes: needs graph mode; the menu scenes stay the engine's");
 			return true;
 		}
-		for (std::size_t v = 0; v < kViews; ++v)
-			if (ViewEnabled(static_cast<View>(v)))
-				state.clients[v] = MakeClient(static_cast<View>(v));
+		namespace RF = ::RenderGraph::Frame;
+		for (std::size_t v = 0; v < kViews; ++v) {
+			if (!ViewEnabled(static_cast<View>(v)))
+				continue;
+			auto client = MakeClient(static_cast<View>(v));
+			if (!client)
+				continue;
+			// The targets are imported above. A target made again later is another import, which CanTake refuses.
+			state.clients.Declare<Family::NoKey>(
+				v, client, RF::DependsOn(), [](const RF::Inputs&) -> std::optional<Family::NoKey> { return Family::NoKey{}; },
+				[client](const Family::NoKey&, FrameAnchors::ClientDesc& a_desc) { return MakeDesc(client, a_desc); }, "that batch stays the engine's");
+		}
 		return true;
 	}
 
 	bool CanTake(View a_view)
 	{
-		const auto client = ClientOf(a_view);
+		const auto& state = GetState();
+		// Until a revision registers the client, the engine draws the batch.
+		const auto& client = state.clients.Registered(static_cast<std::size_t>(a_view));
 		if (!client)
 			return false;
 		// A target made again after a resolution change is another import, so the batch stays the engine's until the next start.
-		bool same = FrameAnchors::EngineDepth(client->depthTarget) == client->depth;
+		bool same = FrameAnchors::EngineTexture(FrameAnchors::Depth(client->depthTarget)) == client->depth;
 		const auto targets = TargetsOf(a_view);
 		for (std::uint32_t i = 0; i < client->colourCount && same; ++i)
-			same = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(targets[i])) == client->colours[i];
+			same = FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(targets[i]))) == client->colours[i];
 		if (!same) {
 			if (!std::exchange(client->targetLogged, true))
 				logger::warn("[DCLF] menu scenes: a target changed since the {} client registered; that batch stays the engine's", client->id);
 			return false;
 		}
-		return Family::HeldForBatch("menu scenes", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Ui));
+		return state.clients.Held(*client, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Ui));
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
 	{
-		const auto client = ClientOf(a_view);
+		const auto& client = ClientOf(a_view);
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
@@ -473,47 +440,61 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 
 	std::uint32_t ColourFormat(View a_view, std::uint32_t a_index)
 	{
-		const auto client = ClientOf(a_view);
+		const auto& client = ClientOf(a_view);
 		return client && a_index < client->colourCount ? client->colourFormats[a_index] : 0;
 	}
 
 	std::uint32_t DepthFormat(View a_view)
 	{
-		const auto client = ClientOf(a_view);
+		const auto& client = ClientOf(a_view);
 		return client ? client->depthFormat : 0;
 	}
 
 	void Keep(Family::Owners&& a_owners)
 	{
-		GetState().kept.Keep(std::move(a_owners));
+		GetState().clients.Keep(std::move(a_owners));
 	}
 
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
-		auto& state = GetState();
 		if (!a_run)
 			return false;
-		const auto client = ClientOf(a_run->view);
-		if (!client)
-			return false;
-		a_run->revision = RevisionOf(*a_run);
-		state.kept.Keep(std::move(a_run->owners));
-		++state.runs;
-		state.draws += a_run->draws.size();
-		std::atomic_store(&client->run, std::shared_ptr<const Run>(std::move(a_run)));
-		return Family::RunWithheld("menu scenes", client->id, FrameAnchors::Anchor::EngineDraws, client->pending);
+		const auto view = static_cast<std::size_t>(a_run->view);
+		return GetState().clients.Submit(view, std::move(a_run));
 	}
 
 	std::string Status()
 	{
 		const auto& state = GetState();
 		if (!AnyEnabled())
-			return "off (CS_ORG_MAP, CS_ORG_MENU3D)";
-		std::uint64_t executed = 0;
-		for (const auto& client : state.clients)
-			if (client)
-				executed += client->executed.load(std::memory_order_relaxed);
-		return fmt::format("{} runs ({} drawn), {} draws, {} Utility, {} Lighting and {} Effect programs", state.runs, executed, state.draws, state.utility.Built(),
-			state.lighting.Built(), state.effect.Built());
+			return "off (not graph mode)";
+		return fmt::format("{} runs ({} drawn), {} draws, {} Utility, {} Lighting and {} Effect programs", state.clients.Runs(), state.clients.Executed(),
+			state.clients.Draws(), state.utility.Built(), state.lighting.Built(), state.effect.Built());
+	}
+}
+
+namespace DCLF::Features::MenuViews::Scenes
+{
+	std::uint64_t Run::Hash() const
+	{
+		Util::Fnv1a hash;
+		hash.Mix(static_cast<std::uint64_t>(view));
+		hash.Mix(draws.size());
+		for (const auto& draw : draws) {
+			hash.Mix(draw.program.get());
+			hash.Mix(draw.stencilRef);
+			hash.Mix((std::uint64_t(draw.latchOffset) << 32) | draw.bonesOffset);
+			hash.Mix(draw.frameOffset);
+			hash.Mix(draw.depthSlice);
+			hash.Mix(draw.colourCount);
+			for (std::uint32_t k = 0; k < draw.colourCount; ++k)
+				hash.Mix(draw.colours[k]);
+			for (const auto v : draw.viewport.rect)
+				hash.Mix(v);
+			std::uint32_t range[2];
+			std::memcpy(range, draw.viewport.depthRange.data(), sizeof(range));
+			hash.Mix((std::uint64_t(range[0]) << 32) | range[1]);
+		}
+		return hash.Value();
 	}
 }

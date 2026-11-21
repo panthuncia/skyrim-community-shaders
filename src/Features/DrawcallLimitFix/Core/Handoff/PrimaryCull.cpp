@@ -1,6 +1,7 @@
 // The list jobs' stand-in, the render thread's frame around them, the cut's plans and admission, and the synthetic membership passes.
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
-#include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
+#include "Utils/Hash.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
@@ -23,7 +24,6 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Accumulated.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include <Tracy/Tracy.hpp>
@@ -36,9 +36,9 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
@@ -132,7 +132,7 @@ namespace DCLF
 	bool PrimaryCull::FreshSyntheticPass(const SceneCapture::LeafView& a_leaf, AccumulatedPass& a_out)
 	{
 		const auto* lighting = SceneCapture::LeafView::Lighting(a_leaf.property);
-		if (const auto* port = lighting ? nullptr : SceneCapture::LeafView::Port(a_leaf.property); port && Extensions::PortOn(ActiveToggles(), port->port)) {
+		if (const auto* port = lighting ? nullptr : SceneCapture::LeafView::Port(a_leaf.property); port && Extensions::PortOn(port->port)) {
 			if (!PortMembershipPass(a_leaf, *port, a_out, nullptr))
 				return false;
 			a_out.resident = true;
@@ -151,8 +151,8 @@ namespace DCLF
 
 	std::uint32_t PrimaryCull::MembershipWitness(const FrameGlobals& a_g)
 	{
-		std::uint32_t witness = 2166136261u;
-		const auto mix = [&](std::uint32_t a_value) { witness = (witness ^ a_value) * 16777619u; };
+		std::uint32_t witness = Util::Fnv1a32::kOffset;
+		const auto mix = [&](std::uint32_t a_value) { witness = (witness ^ a_value) * Util::Fnv1a32::kPrime; };
 		mix(a_g.noSunShadowDir | (a_g.accumulator && a_g.accumulatorDeferredShadow ? 2u : 0u) | (a_g.screenDoorFades ? 4u : 0u));
 		// The root test's globals, such as the fade distances.
 		Extensions::RootStatesGlobalsKey(a_g, witness);
@@ -165,7 +165,7 @@ namespace DCLF
 		answer.derived = a_cached;
 		answer.fail = 2;  // not lighting
 		const auto* lighting = SceneCapture::LeafView::Lighting(a_leaf.property);
-		if (const auto* port = lighting ? nullptr : SceneCapture::LeafView::Port(a_leaf.property); port && Extensions::PortOn(ActiveToggles(), port->port)) {
+		if (const auto* port = lighting ? nullptr : SceneCapture::LeafView::Port(a_leaf.property); port && Extensions::PortOn(port->port)) {
 			std::uint32_t derived = kNotDerived;
 			answer.ok = PortMembershipPass(a_leaf, *port, answer.pass, &derived);
 			answer.derived = { port->key, port->material, port->flags, 0, derived };
@@ -343,7 +343,7 @@ namespace DCLF
 					trace += now[i] * cutCamera[i];
 				const float cosine = std::clamp((trace - 1.0f) * 0.5f, -1.0f, 1.0f);
 				if (dx * dx + dy * dy + dz * dz > kCutDistance * kCutDistance || cosine < kCutTurnCosine)
-					IndirectDraws::Get().NoteCameraCut(Scene::FrameView::Get().GetFrame());
+					IndirectDraws::Get().NoteCameraCut(Scene::FrameView::Get().SceneStep());
 			}
 			cutCamera = now;
 			cutCameraKnown = true;
@@ -354,7 +354,7 @@ namespace DCLF
 	{
 		++cutStats.frames;
 		// A frame without FrameView's inputs samples the witness here.
-		if (sampledWitnessFrame != Scene::FrameView::Get().GetFrame())
+		if (sampledWitnessFrame != Scene::FrameView::Get().SceneStep())
 			SampleMembershipWitness();
 		// A frame the cut skips drops the switch changes, so the next one reads every switch.
 		const bool switchResync = Scene::FrameView::Get().TakeSwitchChanges(switchChanges);
@@ -364,22 +364,18 @@ namespace DCLF
 		auto** processes = Global<RE::NiCullingProcess**>(Engine::Address::kListProcesses);
 		frameSet = Scene::FrameView::Get().FrameClaims();
 		standInLive = false;
-		Diagnostics::Notify(Diagnostics::CutFrameBegin{ processes, count });
 		if (!processes || !count || count > cut.processes.size())
 			return;
 		// The leaf exclusion applies whenever the list processes are known.
 		cut.processCount = count;
 		for (std::uint32_t i = 0; i < count; ++i) {
 			cut.processes[i] = processes[i];
-			auto& out = jobOut[i];
-			out = JobOut{ std::move(out.visible) };
-			out.visible.clear();
+			jobOut[i] = JobOut{};
 		}
-		Diagnostics::Notify(Diagnostics::CutSlotsReset{ count });
 		// Without a current snapshot the engine culls every entry. The sun's exclusion is not a precondition, since withheld casters'
 		// passes are handled by PassCapture.
 		if (!candidates) {
-			EngineOnlyCull::NoteWholeCull(EngineOnlyCull::WholeCull::PrimaryNoSnapshot);
+			WholeCull::Note(WholeCull::Reason::PrimaryNoSnapshot);
 			++(candidates ? cutStats.skippedPreconditions : cutStats.skippedStale);
 			liveStale = true;
 			// The engine writes their kAccumulated this frame. The next decode writes them all.
@@ -397,7 +393,6 @@ namespace DCLF
 			ChangedEntriesByLog(cut.candidates.get(), *candidates, changedEntries);
 			SyncCut(candidates, changedEntries);
 		}
-		Diagnostics::Notify<Diagnostics::EnginePoint::CutSynced>();
 		// Switch events name the entries to read again. A resync or skipped frame reads all.
 		cut.liveEvents = Scene::SwitchEventsLive();
 		if (cut.liveEvents) {
@@ -421,7 +416,6 @@ namespace DCLF
 		KickPlans();
 		cutStats.awaiting += cut.planQueue.size() + plansOutstanding;
 		standInLive = true;
-		walkEverything = Policy::WalkEveryEntry();
 		for (const std::uint32_t e : std::exchange(walkRefresh, {}))
 			RefreshWalk(e);
 		RunAdmission();
@@ -637,7 +631,7 @@ namespace DCLF
 		plansOutstanding += batch->entries.size();
 		// The subtree walks read engine memory, so take a lease per entry and the window's Close waits on one entry at most.
 		// The batch holds the installed publication's retirement node, which keeps the roots alive.
-		if (!SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "CS.DCLF.CutPlans",
+		if (!::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu, "CS.DCLF.CutPlans",
 				[this, batch = batch.release()](const auto&) {
 					DCLF_ZONE("CS.DCLF.CutPlans");
 					for (auto& planned : batch->entries) {
@@ -649,34 +643,7 @@ namespace DCLF
 					}
 					plansReady.Push(batch);
 				}))
-			stl::report_and_fail("Drawcall Limit Fix: the cut's plans were refused by DCLF's executor");
-	}
-
-	PrimaryCull::Cut PrimaryCull::PlanWholeCut()
-	{
-		if (!cut.candidates)
-			return {};
-		Cut kept = std::move(cut);
-		const auto keptWalkRefresh = walkRefresh;
-		const auto keptGarbage = cutGarbage;
-		const auto keptDirty = filterDirty;
-		const bool keptDirtyAll = filterDirtyAll;
-		const auto keptOwnDirty = ownDirty;
-		cut = Cut{};
-		cut.processes = kept.processes;
-		cut.processCount = kept.processCount;
-		cut.admittedRoots = kept.admittedRoots;
-		std::vector<std::uint32_t> all;
-		ChangedEntries(nullptr, *kept.candidates, all);
-		SyncCut(kept.candidates, all, true);
-		Cut whole = std::move(cut);
-		cut = std::move(kept);
-		walkRefresh = keptWalkRefresh;
-		cutGarbage = keptGarbage;
-		filterDirty = keptDirty;
-		filterDirtyAll = keptDirtyAll;
-		ownDirty = keptOwnDirty;
-		return whole;
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the cut's plans were refused by DCLF's executor");
 	}
 
 	void PrimaryCull::CompactCut()
@@ -790,7 +757,7 @@ namespace DCLF
 	std::uint32_t PrimaryCull::SampleMembershipWitness()
 	{
 		sampledWitness = FrameGlobals::Current().membershipWitness;
-		sampledWitnessFrame = Scene::FrameView::Get().GetFrame();
+		sampledWitnessFrame = Scene::FrameView::Get().SceneStep();
 		return sampledWitness;
 	}
 
@@ -910,18 +877,17 @@ namespace DCLF
 			ownDirty.push_back(e);
 	}
 
-	void PrimaryCull::AtUpdateEntry(bool a_running)
+	void PrimaryCull::AtUpdateEntry()
 	{
 		if (!installed)
 			return;
 		DCLF_ZONE("CS.DCLF.AccumulatedWrites");
 		// Roots no longer stood in are left to the engine's cull this frame.
-		IndirectDraws::Get().WriteAccumulated(a_running, [this](const void* a_root) { return standInRoots.contains(a_root); });
+		IndirectDraws::Get().WriteAccumulated([this](const void* a_root) { return standInRoots.contains(a_root); });
 		// The tree manager's loop later in this Main::Update reads these writes. Features/Fades' fade writers run last.
-		Extensions::StandInUpdateEntry(a_running);
-		Diagnostics::Notify(Diagnostics::UpdateEntry{ a_running });
+		Extensions::StandInUpdateEntry();
 		// The stand-in observers' late point, after the writes.
-		Extensions::StandInAfterWrites(a_running);
+		Extensions::StandInAfterWrites();
 	}
 
 	std::uint64_t PrimaryCull::MemberSignature(std::uint32_t a_e) const
@@ -952,7 +918,6 @@ namespace DCLF
 		const auto plan = cut.plans[e];
 		auto& out = jobOut[a_slot];
 		++out.seen;
-		Diagnostics::Notify(Diagnostics::StandInEntry{ a_slot, e, a_object });
 		const bool fadeRoot = plan == EntryPlan::FadeRoot || plan == EntryPlan::LeafRoot || plan == EntryPlan::TreeRoot;
 		// Fades and LOD cross-fades are FadeStateCS's, and a faded-out root draws nothing. Crossing roots (+0x153 bits 4-6 not 2) are counted.
 		if (fadeRoot && (At<std::uint8_t>(a_object, 0x153) & 0x70) != 0x20)
@@ -982,7 +947,7 @@ namespace DCLF
 		}
 		++out.skipped;
 		// Nothing for the registration. The GPU culls and draws it whole.
-		if (!cut.walk[e] && !walkEverything)
+		if (!cut.walk[e])
 			return true;
 		++out.walked;
 		// Test against the job's own planes, set up from the list's first entry.
@@ -1010,8 +975,6 @@ namespace DCLF
 			// In the frame's set, the GPU draws it. Otherwise the engine registers it.
 			if (!member.engine && MemberDrawable(cut.memberObject[m])) {
 				++out.inView;
-				if (collectVisible)
-					out.visible.push_back(geometry);
 				continue;
 			}
 			if (!member.engine && Scene::FrameView::Get().IsMember(cut.memberObject[m]))
@@ -1026,7 +989,6 @@ namespace DCLF
 					a_process->AppendVirtual(*const_cast<RE::BSGeometry*>(geometry), a_arg);
 				}
 				++(member.engine ? out.engineMembers : out.unbound);
-				Diagnostics::Notify(Diagnostics::StandInHandedOver{ a_slot, e, m, geometry });
 			}
 		}
 		return true;
@@ -1035,15 +997,11 @@ namespace DCLF
 	void PrimaryCull::AfterListJobs()
 	{
 		Extensions::StandInListJobsDone();
-		Diagnostics::Notify<Diagnostics::EnginePoint::ListJobsDone>();
 		if (!frameLive.exchange(false, std::memory_order_acq_rel))
 			return;
 		const std::int64_t start = Now();
-		frameVisible.clear();
 		for (std::uint32_t i = 0; i < cut.processCount; ++i) {
 			auto& out = jobOut[i];
-			if (collectVisible)
-				frameVisible.insert(frameVisible.end(), out.visible.begin(), out.visible.end());
 			auto& s = cutStats;
 			s.members += out.inView;
 			s.seen += out.seen, s.skipped += out.skipped, s.visibleEntries += out.visibleEntries, s.notSettled += out.notSettled;
@@ -1059,7 +1017,6 @@ namespace DCLF
 			s.unselected += out.unselected;
 		}
 		// No activeLightMask clear, since the shadow lights' registrations leave an owned geometry's at 0.
-		Diagnostics::Notify<Diagnostics::EnginePoint::ListJobsMerged>();
 		cutStats.afterTicks += Now() - start;
 	}
 
@@ -1072,18 +1029,9 @@ namespace DCLF
 		const bool live = sun.registered && sun.fullFrustumWindowEnd();
 		if (ListsFiltered() && !live && !Global<std::uint8_t>(Engine::Address::kSunOff))
 			++listStats.unexcluded;
-		// With DCLF off the main camera's cull is the engine's alone until DCLF runs again. This hook runs every frame.
-		if (!ShellState::Running()) {
-			standInLive = false;
-			// Nothing is owned, so the engine draws every main pass.
-			frameSet = {};
-			Diagnostics::Notify<Diagnostics::EnginePoint::FullFrustumDone>();
-			return;
-		}
 		// CS_DCLF_PARITY_BOTH: the engine culls and registers everything.
 		if (!!Policy::WithholdFromEngine())
 			PrepareFrame();
-		Diagnostics::Notify<Diagnostics::EnginePoint::FullFrustumDone>();
 	}
 
 	std::uint32_t PrimaryCull::SunShadowStatic(const SceneCapture::LeafView& a_leaf, const SceneCapture::PropertyRecord* a_property)
@@ -1128,17 +1076,17 @@ namespace DCLF
 			hint = kLayerHint;
 		} else if (flags & 0x8004ull) {
 			// Refraction is one Utility RENDER_NORMAL pass, hint 4, whatever the alpha.
-			if (!Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Refraction) ||
-			    !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward))
+			if (!Extensions::ObjectClassOn(Api::ObjectClass::Refraction) ||
+			    !Extensions::ObjectClassOn(Api::ObjectClass::Forward))
 				return false;
 			hint = 4;
 		} else if (flags & 0xc000000ull)
 			hint = translucent ? 3 : 2;  // the decal groups
-		else if (!t_settledPass && BlendFading(a_leaf, lighting) && Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward)) {
+		else if (!t_settledPass && BlendFading(a_leaf, lighting) && Extensions::ObjectClassOn(Api::ObjectClass::Forward)) {
 			// The engine's fading pass (hint 9), drawn by the forward epoch while the fade lasts. Translucent, so no shadow bits.
 			hint = kFadingHint;
 			sun = 0;
-		} else if (translucent && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward))
+		} else if (translucent && !Extensions::ObjectClassOn(Api::ObjectClass::Forward))
 			return false;
 		else if (translucent)
 			hint = 1;  // the blended group, drawn by the forward epoch
@@ -1188,8 +1136,6 @@ namespace DCLF
 					if (const int slot = self.SlotOf(a_process); slot >= 0 && self.Owned(a_geometry)) {
 						auto& out = self.jobOut[slot];
 						++out.inView;
-						if (self.collectVisible)
-							out.visible.push_back(&a_geometry);
 						++out.excluded;
 						return;
 					}
@@ -1245,7 +1191,7 @@ namespace DCLF
 		const auto afterFullFrustum = base + kAfterFullFrustumCallSite;
 		const auto finish = base + kListJobsFinishCallSite;
 		// The main walk and root states hooks must be in, or nothing builds the programs or lists the stood-in roots.
-		// One missing means a failed install, and DCLF is forced off at the end of PostPostLoad.
+		// One missing means a failed install, and PostPostLoad fails at its end.
 		if (!Extensions::MainWalkInstalled() || !Extensions::RootStatesInstalled()) {
 			HookSites::NoteFailed("the primary cull", !Extensions::MainWalkInstalled() ? "the main walk's hook (Features/Portals) is not installed" :
 																						   "the root states' hooks (Features/Fades) are not installed");
@@ -1262,7 +1208,6 @@ namespace DCLF
 		stl::write_vfunc<0x18, Hooks::AppendVirtual>(RE::VTABLE_BSGeometryListCullingProcess[0]);
 		InstallSceneLists();
 		Extensions::NoteStandInInstalled();
-		Diagnostics::Notify<Diagnostics::EnginePoint::PrimaryCullInstalled>();
 		REL::Relocation<std::uintptr_t> triShape{ RE::VTABLE_BSTriShape[0] };
 		geometryOnVisible = reinterpret_cast<const std::uintptr_t*>(triShape.address())[0x34];
 		// A slot may hold another hook that ends in the engine's function, so both the slot and the engine's NiNode::OnVisible count.

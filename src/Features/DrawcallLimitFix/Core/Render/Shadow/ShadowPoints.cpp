@@ -13,7 +13,7 @@ namespace DCLF
 	 */
 	bool DrawsShadowViews()
 	{
-		return ActiveToggles().shadows && ShadowViews::Get().DclfDraws();
+		return ShadowViews::Get().DclfDraws();
 	}
 }
 
@@ -23,7 +23,7 @@ namespace DCLF::Draws
 	{
 		// Set the capacity before any shadow light registers, so every later check sees this frame's value.
 		auto& draws = IndirectDraws::Get();
-		ShadowViews::Get().SetViewCapacity(ActiveToggles().shadows ? draws.ShadowViewCapacity() : UINT32_MAX);
+		ShadowViews::Get().SetViewCapacity(draws.ShadowViewCapacity());
 		ShadowViews::Get().BeginCasters();
 	}
 

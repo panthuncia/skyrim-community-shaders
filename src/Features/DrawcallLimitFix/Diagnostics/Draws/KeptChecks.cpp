@@ -1,4 +1,4 @@
-// Kept stores against a rebuild from the tables. Each check runs on its store's thread.
+// Kept stores against a rebuild from the tables, each check on its store's thread, and the shading rows' sampling (set parity).
 
 #include "DrawsState.h"
 #include "Events.h"
@@ -204,9 +204,27 @@ namespace DCLF::Diagnostics
 		}
 	}
 
-	void CheckExclusionReuse(const ExclusionRebuilt& a_rebuilt)
+	void CheckShadingSampled(const SceneTables& a_tables)
 	{
-		auto& kept = DrawsState::Get().kept;
-		(a_rebuilt.parabolic ? kept.parabolicExclusion : kept.sunExclusion).Check(a_rebuilt.same);
+		// A shading row is sampled once, when named. A row still zero at two checks was never sampled and draws with alpha 0.
+		// Never wait for the producer here, since waiting holds every lease. Frames whose rows are not done are skipped.
+		const auto* shading = FrameValues::Get().ShadingIfDone(false);
+		if (!shading)
+			return;
+		auto& s = DrawsState::Get().frameValues;
+		auto& before = DrawsState::Get().shadingUnsampledBefore;
+		const std::size_t count = std::min(a_tables.objects.size(), a_tables.residentSlot.size());
+		before.resize(count, 0);
+		for (std::uint32_t slot = 0; slot < count; ++slot) {
+			const bool resident = a_tables.residentSlot[slot] && !(a_tables.objects[slot].flags & (kObjectNoBindings | kObjectFree));
+			const bool unsampled = resident && (slot >= shading->size() || (*shading)[slot].written == 0);
+			s.shadingChecks += resident ? 1 : 0;
+			if (unsampled && before[slot] && s.shadingUnsampled++ == 0) {
+				const auto* geometry = slot < a_tables.objectGeometry.size() ? a_tables.objectGeometry[slot] : nullptr;
+				s.shadingFirst = fmt::format("slot {} '{}' (flags {:08X})", slot, geometry && geometry->name.c_str() ? geometry->name.c_str() : "?",
+					a_tables.objects[slot].flags);
+			}
+			before[slot] = unsampled ? 1 : 0;
+		}
 	}
 }

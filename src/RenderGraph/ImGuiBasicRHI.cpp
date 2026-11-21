@@ -1,39 +1,40 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/ImGuiBasicRHI.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/FrameStaging.h"
-#	include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/ImGuiBasicRHI.h"
+#include "RenderGraph/Engine/UiTargets.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/Frame/Revision.h"
 
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/RasterProgram.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/ShaderBindings.h"
-#	include "RenderGraph/UndeclaredAccess.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/RasterProgram.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/LatchBlock.h>
-#	include <Render/PreparedPass.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/PixelBuffer.h>
-#	include <Resources/VersionedTexture.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/FrameArena.h>
+#include <Render/PreparedPass.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/Buffers/Buffer.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/PixelBuffer.h>
+#include <Resources/VersionedTexture.h>
+#include <rhi_helpers.h>
 
-#	include <algorithm>
-#	include <array>
-#	include <atomic>
-#	include <bit>
-#	include <cstring>
-#	include <map>
-#	include <mutex>
-#	include <optional>
-#	include <unordered_map>
-#	include <unordered_set>
-#	include <vector>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <bit>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace ImGuiBasicRHI
 {
@@ -46,8 +47,6 @@ namespace ImGuiBasicRHI
 		// D3D12's copy rules, which Vulkan's satisfy: rows of a texture copy 256-byte aligned, a copy's start 512.
 		constexpr std::uint32_t kRowAlignment = 256;
 		constexpr std::uint64_t kPlacementAlignment = 512;
-		constexpr std::uint32_t kMinimumStaging = 256u << 10;
-		constexpr std::size_t kSpareStaging = 4;
 		// The font atlas pages the passes declare. A resize makes a new page while the old one is drawn for a frame.
 		// A texture past the last page is not drawn.
 		constexpr std::size_t kAtlasPages = 4;
@@ -122,7 +121,7 @@ namespace ImGuiBasicRHI
 		struct Frame
 		{
 			std::shared_ptr<const RasterProgram> program;
-			std::shared_ptr<org::LatchBlock> staging;
+			RenderGraph::Staging staging;
 			std::vector<Upload> uploads;
 			std::vector<Draw> draws;
 			std::uint32_t sampler = kNoIndex;
@@ -136,7 +135,8 @@ namespace ImGuiBasicRHI
 		using Slots = ::RenderGraph::RunSlots<Frame>;
 
 		/** @brief The font atlas pages, a fixed set of versioned RGBA8 textures. Each ImGui texture is a version of one page.
-		*  An unused page holds a 1x1 placeholder. Versions change only at frame boundaries. */
+		*  An unused page holds a 1x1 placeholder. A new version is a pending version of the next frame revision, adopted with
+		*  the stages that declare the page. */
 		struct Atlas
 		{
 			std::array<std::shared_ptr<org::VersionedTexture>, kAtlasPages> pages;
@@ -149,13 +149,6 @@ namespace ImGuiBasicRHI
 			std::shared_ptr<Slots> uploadSlots = std::make_shared<Slots>();
 			std::shared_ptr<Slots> drawSlots = std::make_shared<Slots>();
 			std::shared_ptr<const Atlas> atlas;  // render thread: set once, before any pass is made
-		};
-
-		/** @brief Host-visible staging buffers, reused once the frame that used one retired (its last owner gave it back). */
-		struct StagingPool
-		{
-			std::mutex mutex;
-			std::vector<std::shared_ptr<org::LatchBlock>> spare;
 		};
 
 		/** @brief A pending texture upload's pixels: where they are now, before Commit copies them. */
@@ -179,15 +172,11 @@ namespace ImGuiBasicRHI
 			bool callbackLogged = false;
 			std::unordered_map<std::uint64_t, std::shared_ptr<Texture>> textures;    // ImGui's, by ImTextureID
 			std::vector<std::weak_ptr<Texture>> made;                                // MakeTexture's, until uploaded
-			std::array<std::shared_ptr<Texture>, kAtlasPages> pages;                 // the ImGui texture each page holds
-			// Each page's next version, published at the next frame boundary (PublishPages). Null stands for its placeholder.
-			std::array<std::optional<std::shared_ptr<Texture>>, kAtlasPages> nextPages;
-			bool publishQueued = false;
+			std::array<std::shared_ptr<Texture>, kAtlasPages> pages;                 // the ImGui texture each page holds, adopted or pending
 			bool pagesLogged = false;
-			std::map<std::uint32_t, std::shared_ptr<const RasterProgram>> programs;  // by target format
-			std::map<std::uint32_t, bool> failedPrograms;
+			// Keyed on the interface's target format, built on the programs lane.
+			RenderGraph::Frame::DeclaredProgram<RasterProgram> program;
 			org::OwnedDescriptorBinding sampler;
-			std::shared_ptr<StagingPool> pool = std::make_shared<StagingPool>();
 			std::shared_ptr<Shared> shared = std::make_shared<Shared>();
 		};
 
@@ -198,44 +187,6 @@ namespace ImGuiBasicRHI
 		}
 
 		std::uint64_t IdOf(const Texture* a_texture) { return kOwnTag | reinterpret_cast<std::uintptr_t>(a_texture); }
-
-		/** @brief A staging buffer of at least a_bytes, given back to the pool when its last owner lets it go. */
-		std::shared_ptr<org::LatchBlock> AcquireStaging(const std::shared_ptr<StagingPool>& a_pool, std::uint64_t a_bytes)
-		{
-			std::shared_ptr<org::LatchBlock> block;
-			{
-				std::scoped_lock lock(a_pool->mutex);
-				auto best = a_pool->spare.end();
-				for (auto it = a_pool->spare.begin(); it != a_pool->spare.end(); ++it)
-					if ((*it)->Stride() >= a_bytes && (best == a_pool->spare.end() || (*it)->Stride() < (*best)->Stride()))
-						best = it;
-				if (best != a_pool->spare.end()) {
-					block = std::move(*best);
-					a_pool->spare.erase(best);
-				}
-			}
-			if (!block) {
-				const std::uint64_t size = std::bit_ceil(std::max<std::uint64_t>(a_bytes, kMinimumStaging));
-				if (size > 0xFFFFFFFFull)
-					return nullptr;
-				try {
-					block = org::LatchBlock::CreateDedicated("cs.imgui.staging", static_cast<std::uint32_t>(size));
-				} catch (const std::exception& e) {
-					logger::error("[ORG] ImGui: a staging buffer of {} bytes could not be made: {}", size, e.what());
-					return nullptr;
-				}
-			}
-			// The pool is held weakly: after Shutdown a buffer coming back is released.
-			std::weak_ptr<StagingPool> pool = a_pool;
-			auto* raw = block.get();
-			return std::shared_ptr<org::LatchBlock>(raw, [pool, block = std::move(block)](org::LatchBlock*) mutable {
-				if (auto owner = pool.lock()) {
-					std::scoped_lock lock(owner->mutex);
-					if (owner->spare.size() < kSpareStaging)
-						owner->spare.push_back(std::move(block));
-				}
-			});
-		}
 
 		/** @brief A persistent graph-only RGBA8 texture. a_views adds the views the exempt class reads through. */
 		std::shared_ptr<Texture> CreateTexture(std::uint32_t a_width, std::uint32_t a_height, std::uint32_t a_mips, const std::string& a_name, bool a_views)
@@ -299,36 +250,18 @@ namespace ImGuiBasicRHI
 			return true;
 		}
 
-		/** @brief The pages' next versions published. Frame boundary, render thread. */
-		void PublishPages()
-		{
-			auto& state = Backend();
-			state.publishQueued = false;
-			if (!state.installed || !state.shared->atlas)
-				return;
-			const auto& atlas = *state.shared->atlas;
-			for (std::size_t page = 0; page < kAtlasPages; ++page) {
-				auto next = std::exchange(state.nextPages[page], std::nullopt);
-				if (!next)
-					continue;
-				const auto& backing = *next ? *next : atlas.placeholders[page];
-				try {
-					atlas.pages[page]->Publish(backing->image, backing);
-				} catch (const std::exception& e) {
-					const auto message = fmt::format("Community Shaders: ImGui's atlas page {} could not take a new version: {}", page, e.what());
-					logger::critical("[ORG] {}", message);
-					stl::report_and_fail(message);
-				}
-			}
-		}
-
-		/** @brief Sets a page's next version, published at the next frame boundary. Until then, work on a texture the page does not bind is skipped. */
+		/**
+		* @brief Makes a_texture its page's next version, or the page's placeholder when null. The version is pending until a frame
+		* revision adopts it. Until then, work on a texture the page does not bind is skipped. Render thread.
+		*/
 		void SetPage(State& a_state, std::size_t a_page, const std::shared_ptr<Texture>& a_texture)
 		{
-			a_state.nextPages[a_page] = a_texture;
 			a_state.pages[a_page] = a_texture;
-			if (!std::exchange(a_state.publishQueued, true))
-				RenderGraph::Frame::Driver::AtNextBegin(PublishPages);
+			if (!a_state.shared->atlas)
+				return;
+			const auto& atlas = *a_state.shared->atlas;
+			const auto& backing = a_texture ? a_texture : atlas.placeholders[a_page];
+			RenderGraph::Frame::Revision::PublishTexture(atlas.pages[a_page], backing->image, backing);
 		}
 
 		/** @brief One rectangle of ImGui's pixels to stage. */
@@ -436,15 +369,8 @@ namespace ImGuiBasicRHI
 			});
 		}
 
-		const RasterProgram* ProgramFor(State& a_state, std::uint32_t a_format)
+		RasterProgram::Desc ProgramDesc(std::uint32_t a_format)
 		{
-			if (const auto found = a_state.programs.find(a_format); found != a_state.programs.end())
-				return found->second.get();
-			if (a_state.failedPrograms.contains(a_format))
-				return nullptr;
-			auto* host = RenderGraphRuntime::Get().Host();
-			if (!host)
-				return nullptr;
 			RasterProgram::Desc desc{};
 			desc.vertexSource = kShader;
 			desc.vertexEntry = L"VSMain";
@@ -459,16 +385,17 @@ namespace ImGuiBasicRHI
 			target.blend.srcAlpha = rhi::BlendFactor::One;
 			target.blend.dstAlpha = rhi::BlendFactor::InvSrcAlpha;
 			desc.targets = { target };
-			auto program = RasterProgram::Load(host->Device(), desc);
-			if (!program) {
-				a_state.failedPrograms[a_format] = true;
-				logger::error("[ORG] ImGui: the pipeline for target format {} could not be made", a_format);
-				return nullptr;
-			}
-			auto* raw = program.get();
-			a_state.programs[a_format] = std::move(program);
-			return raw;
+			return desc;
 		}
+
+		/** @brief What the pipeline is built from: the target format and its description. Equal when the formats are. */
+		struct ProgramKey
+		{
+			std::uint32_t format = 0;  // rhi::Format, as its value
+			RasterProgram::Desc desc;
+
+			bool operator==(const ProgramKey& a_other) const { return format == a_other.format; }
+		};
 
 		/** @brief Whether a run bound a_texture to its page: the handle its page's declaration resolves to is the texture's. */
 		bool Bound(const rhi::ResourceHandle& a_bound, const Texture& a_texture)
@@ -528,8 +455,8 @@ namespace ImGuiBasicRHI
 				return bindings;
 			}
 
-			// Record reads the run's slot, which the commit stores (FrameAnchors::CommitReadRevision).
-			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadRevision(atExecution, a_out); }
+			// Record reads the run's slot, which the commit stores (FrameAnchors::CommitReadTicket).
+			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadTicket(atExecution, a_out); }
 
 			PassFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { shared->uploadSlots }; }
 
@@ -543,7 +470,7 @@ namespace ImGuiBasicRHI
 				// The staging buffer and the textures stay until this recording's GPU work retires.
 				a_recording.Retain(frame);
 				auto& commands = a_recording.Commands();
-				const auto staging = frame->staging->Resource()->GetAPIResource().GetHandle();
+				const auto staging = frame->staging->buffer->GetAPIResource().GetHandle();
 				for (const auto& upload : frame->uploads) {
 					const bool exempt = upload.texture->exempt;
 					rhi::ResourceHandle texture{};
@@ -567,7 +494,7 @@ namespace ImGuiBasicRHI
 						copy.arraySlice = 0;
 						copy.x = region.x;
 						copy.y = region.y;
-						copy.footprint = { region.offset, region.rowPitch, region.width, region.height, 1 };
+						copy.footprint = { frame->staging->offset + region.offset, region.rowPitch, region.width, region.height, 1 };
 						commands.CopyBufferToTexture(copy);
 					}
 					if (exempt) {
@@ -607,8 +534,8 @@ namespace ImGuiBasicRHI
 				return bindings;
 			}
 
-			// Record reads the run's slot, which the commit stores (FrameAnchors::CommitReadRevision).
-			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadRevision(atExecution, a_out); }
+			// Record reads the run's slot, which the commit stores (FrameAnchors::CommitReadTicket).
+			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadTicket(atExecution, a_out); }
 
 			PassFrame Prepare(const DrawBindings&, const org::PassPrepareContext&) const { return { shared->drawSlots }; }
 
@@ -638,9 +565,9 @@ namespace ImGuiBasicRHI
 				commands.BeginPass(begin);
 				commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 				commands.BindLayout(frame->program->layout->GetHandle());
-				commands.BindPipeline(frame->program->Pipeline());
+				commands.BindPipeline(frame->program->Pipeline(a_recording));
 				DrawConstants constants{};
-				constants.geometryIndex = frame->staging->SrvIndex();
+				constants.geometryIndex = frame->staging->srvIndex;
 				constants.indexSize = sizeof(ImDrawIdx);
 				constants.samplerIndex = frame->sampler;
 				std::memcpy(constants.scale, frame->scale, sizeof(constants.scale));
@@ -712,14 +639,11 @@ namespace ImGuiBasicRHI
 			return;
 		InvalidateTextures();
 		state.made.clear();
-		state.programs.clear();
-		state.failedPrograms.clear();
+		state.program = {};
 		state.sampler = {};
 		state.shared = std::make_shared<Shared>();
 		state.pages = {};
-		state.nextPages = {};
 		state.pagesLogged = false;
-		state.pool = std::make_shared<StagingPool>();
 		auto& io = ImGui::GetIO();
 		io.BackendRendererName = nullptr;
 		io.BackendRendererUserData = nullptr;
@@ -765,7 +689,26 @@ namespace ImGuiBasicRHI
 		return { kNoIndex, a_texture, a_texture, a_mip };
 	}
 
-	bool Prepare(std::uint32_t a_format) { return ProgramFor(Backend(), a_format) != nullptr; }
+	void DeclareProgram()
+	{
+		namespace RF = RenderGraph::Frame;
+		// The description is made on the render thread, when a revision starts. The build runs on the programs lane.
+		Backend().program = RF::DeclareProgram(
+			"ImGui", RF::DependsOn(RF::Vars::HdrEnabled()),
+			[](const RF::Inputs& a_in) {
+				const auto format = static_cast<std::uint32_t>(rhi::helpers::ToRHI(RenderGraph::Engine::UiTargets::Current(a_in).uiFormat));
+				ProgramKey key{ format, ProgramDesc(format) };
+				RenderGraph::Programs::ResolveDefines(key.desc);
+				return key;
+			},
+			[](const ProgramKey& a_key) { return RenderGraph::Programs::Load(a_key.desc); });
+	}
+
+	std::shared_ptr<const RasterProgram> ProgramFor(const RenderGraph::Frame::Inputs& a_in)
+	{
+		const auto& program = Backend().program;
+		return program ? program.For(a_in) : nullptr;
+	}
 
 	bool Commit(ImDrawData* a_drawData, const Target& a_target, const Resolver& a_resolve)
 	{
@@ -773,8 +716,7 @@ namespace ImGuiBasicRHI
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!state.installed || !host || !a_drawData)
 			return false;
-		const RasterProgram* program = ProgramFor(state, a_target.format);
-		if (!program || !EnsureAtlas(state))
+		if (!a_target.program || !EnsureAtlas(state))
 			return false;
 		if (!state.sampler) {
 			// imgui_impl_dx11's: bilinear, clamped, the top level only (an icon's view starts at the level it wants).
@@ -841,11 +783,8 @@ namespace ImGuiBasicRHI
 				bytes = AlignUp(bytes + std::uint64_t(region.region.rowPitch) * region.region.height, kPlacementAlignment);
 			}
 
-		frame->staging = AcquireStaging(state.pool, std::max<std::uint64_t>(bytes, 4));
-		if (!frame->staging)
-			return false;
-		const auto span = frame->staging->Bytes();
-		std::byte* const base = span.data();
+		frame->staging = RenderGraph::AcquireStaging("ImGui", bytes);
+		std::byte* const base = frame->staging->mapped;
 		for (auto& upload : pending) {
 			Upload copy{ upload.texture, upload.whole, {} };
 			for (const auto& region : upload.regions) {
@@ -860,7 +799,7 @@ namespace ImGuiBasicRHI
 		const ImVec2 position = a_drawData->DisplayPos;
 		const ImVec2 size = a_drawData->DisplaySize;
 		const ImVec2 scale = a_drawData->FramebufferScale;
-		frame->program = state.programs[a_target.format];
+		frame->program = a_target.program;
 		frame->sampler = state.sampler.Index();
 		frame->owners.push_back(state.sampler.Owner());
 		frame->width = a_target.width;
@@ -923,9 +862,8 @@ namespace ImGuiBasicRHI
 		auto& state = Backend();
 		if (!a_target || !RenderGraphRuntime::Get().Host() || !EnsureAtlas(state))
 			return nullptr;
-		// The draw list is the run's, so it records after the commit.
-		const bool late = FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay) || FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay);
-		return std::make_shared<OverlayPass>(std::move(a_target), state.shared, state.shared->atlas, late);
+		// The draw list is the run's, so it records after the UI stage's commit.
+		return std::make_shared<OverlayPass>(std::move(a_target), state.shared, state.shared->atlas, true);
 	}
 
 	std::shared_ptr<org::RenderPass> MakeUploadPass()
@@ -933,31 +871,7 @@ namespace ImGuiBasicRHI
 		auto& state = Backend();
 		if (!RenderGraphRuntime::Get().Host() || !EnsureAtlas(state))
 			return nullptr;
-		const bool late = FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay) || FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay);
-		return std::make_shared<UploadPass>(state.shared, state.shared->atlas, late);
+		return std::make_shared<UploadPass>(state.shared, state.shared->atlas, true);
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-#	include "RenderGraph/ImGuiBasicRHI.h"
-#	include "RenderGraph/FrameAnchors.h"
-
-namespace ImGuiBasicRHI
-{
-	class Texture
-	{};
-	void Init() {}
-	void Shutdown() {}
-	bool Installed() { return false; }
-	void InvalidateTextures() {}
-	bool IsOwnTexture(std::uint64_t) { return false; }
-	std::shared_ptr<Texture> MakeTexture(std::uint32_t, std::uint32_t, std::span<const std::span<const std::byte>>, const char*) { return nullptr; }
-	Binding BindingOf(const std::shared_ptr<Texture>&, int) { return {}; }
-	bool Prepare(std::uint32_t) { return false; }
-	bool Commit(ImDrawData*, const Target&, const Resolver&) { return false; }
-	std::shared_ptr<org::RenderPass> MakePass(FrameAnchors::Texture) { return nullptr; }
-	std::shared_ptr<org::RenderPass> MakeUploadPass() { return nullptr; }
-}
-
-#endif

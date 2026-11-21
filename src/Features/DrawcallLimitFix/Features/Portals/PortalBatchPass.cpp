@@ -84,7 +84,7 @@ namespace DCLF::Features::Portals
 				const auto& b = *prepared.batch;
 				auto& c = prepared.constants;
 				if (b.trace)
-					c.traceFrame = Scene::FrameView::Get().GetFrame();
+					c.traceFrame = Scene::FrameView::Get().SceneStep();
 				c.queryCount = static_cast<std::uint32_t>(Draws::NamedUnitsOf(a_preparation, b.queries));
 				c.bucketCount = static_cast<std::uint32_t>(std::min(Draws::NamedUnitsOf(a_preparation, b.counts), Draws::NamedUnitsOf(a_preparation, b.offsets)) / 2);
 				return prepared;
@@ -111,7 +111,7 @@ namespace DCLF::Features::Portals
 				const auto bind = [&](std::size_t stage) {
 					const auto& program = *batch.programs[stage];
 					commands.BindLayout(program.layout->GetHandle());
-					commands.BindPipeline(program.Pipeline());
+					commands.BindPipeline(program.Pipeline(a_recording));
 					commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, reinterpret_cast<const std::uint32_t*>(&c));
 				};
 				if (a_prepared.evaluate && batch.inlineEvaluation) {

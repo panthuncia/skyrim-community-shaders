@@ -6,6 +6,7 @@
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/ImageRegistry.h"
 #include "RenderGraph/Switches.h"
 
 #include <Resources/ExternalTextureResource.h>
@@ -51,32 +52,6 @@ namespace RenderGraph
 
 	namespace
 	{
-		/** @brief The newest graph import of each image, held weakly. */
-		struct GraphImports
-		{
-			std::mutex mutex;
-			std::unordered_map<std::uint64_t, std::weak_ptr<org::ExternalTextureResource>> byImage;
-			std::size_t pruneAt = 256;
-		};
-		GraphImports& Imported()
-		{
-			static GraphImports imports;
-			return imports;
-		}
-
-		void NoteGraphImport(std::uint64_t a_image, const std::shared_ptr<org::ExternalTextureResource>& a_resource)
-		{
-			if (!a_image || !a_resource || !Engine::Native::Active())
-				return;
-			auto& imports = Imported();
-			const std::lock_guard lock(imports.mutex);
-			imports.byImage[a_image] = a_resource;
-			if (imports.byImage.size() >= imports.pruneAt) {
-				std::erase_if(imports.byImage, [](const auto& a_entry) { return a_entry.second.expired(); });
-				imports.pruneAt = (std::max<std::size_t>)(256, 2 * imports.byImage.size());
-			}
-		}
-
 		rhi::ResourcePtr ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name, bool a_exclusive)
 		{
 			if (!HomeLayoutOf(a_image.layout))
@@ -148,8 +123,9 @@ namespace RenderGraph
 		auto result = org::ExternalTextureResource::CreateShared(std::move(resource), a_desc, commonOnly);
 		if (result) {
 			result->SetName(a_name);
-			NoteImageResource(reinterpret_cast<std::uint64_t>(a_image.image), result, a_name ? a_name : "");
-			NoteGraphImport(reinterpret_cast<std::uint64_t>(a_image.image), result);
+			// The image's one graph resource. A second live one is fatal.
+			ImageRegistry::Register(reinterpret_cast<std::uint64_t>(a_image.image),
+				{ result, nullptr, std::make_shared<const org::TextureDescription>(a_desc), "ImportDxvkTexture", a_name ? a_name : "", ImageRegistry::Kind::Import });
 		}
 		return result;
 	}
@@ -158,20 +134,6 @@ namespace RenderGraph
 	{
 		// Native mode has one model on both backends, where the graph's ledgers carry every image's state.
 		return Engine::Native::Active();
-	}
-
-	std::shared_ptr<org::Resource> GraphResourceOfImage(std::uint64_t a_image)
-	{
-		if (!a_image)
-			return nullptr;
-		if (auto owned = Engine::Native::GraphTextureOfImage(a_image))
-			return owned;
-		if (auto made = MadeImageOf(a_image); made.resource)
-			return made.resource;
-		auto& imports = Imported();
-		const std::lock_guard lock(imports.mutex);
-		const auto found = imports.byImage.find(a_image);
-		return found != imports.byImage.end() ? found->second.lock() : nullptr;
 	}
 
 	namespace RawAccess
@@ -240,203 +202,6 @@ namespace RenderGraph
 
 	namespace
 	{
-		struct ImageResource
-		{
-			std::weak_ptr<org::Resource> resource;
-			const org::Resource* key = nullptr;
-			std::string name;
-			bool retired = false;
-		};
-		struct ImageResources
-		{
-			std::mutex mutex;
-			std::unordered_map<std::uint64_t, std::vector<ImageResource>> byImage;
-			std::unordered_map<const org::Resource*, std::uint64_t> imageOf;
-			std::size_t pruneAt = 256;
-			std::uint32_t logged = 0;
-			std::uint64_t found = 0;
-		};
-		ImageResources& Images()
-		{
-			static ImageResources images;
-			return images;
-		}
-		bool DuplicateCheckOn()
-		{
-			static const bool on = Switches::On("CS_ORG_IMAGE_DUPLICATE_CHECK");
-			return on;
-		}
-		void Prune(ImageResources& a_images, std::vector<ImageResource>& a_entries)
-		{
-			std::erase_if(a_entries, [&](const ImageResource& a_entry) {
-				if (!a_entry.resource.expired())
-					return false;
-				a_images.imageOf.erase(a_entry.key);
-				return true;
-			});
-		}
-		void PruneAll(ImageResources& a_images)
-		{
-			for (auto it = a_images.byImage.begin(); it != a_images.byImage.end();) {
-				Prune(a_images, it->second);
-				it = it->second.empty() ? a_images.byImage.erase(it) : std::next(it);
-			}
-			a_images.pruneAt = (std::max<std::size_t>)(256, 2 * a_images.imageOf.size());
-		}
-	}
-
-	void NoteImageResource(std::uint64_t a_image, const std::shared_ptr<org::Resource>& a_resource, std::string_view a_name)
-	{
-		if (!DuplicateCheckOn() || !a_image || !a_resource)
-			return;
-		auto& images = Images();
-		const std::lock_guard lock(images.mutex);
-		if (images.imageOf.size() >= images.pruneAt)
-			PruneAll(images);
-		auto& entries = images.byImage[a_image];
-		Prune(images, entries);
-		std::string other;
-		bool duplicate = false;
-		bool known = false;
-		for (auto& entry : entries) {
-			if (entry.key == a_resource.get()) {
-				entry.retired = false;
-				known = true;
-			} else if (!entry.retired) {
-				other = entry.name;
-				duplicate = true;
-			}
-		}
-		if (!known) {
-			entries.push_back({ a_resource, a_resource.get(), std::string(a_name), false });
-			images.imageOf[a_resource.get()] = a_image;
-		}
-		if (!duplicate)
-			return;
-		++images.found;
-		if (images.logged++ < 32)
-			logger::warn(
-				"[ORG] duplicate image: '{}' and '{}' are two live graph resources of image 0x{:x}; each tracks its layout, and their moves "
-				"are not ordered with each other ({} found so far)",
-				a_name, other, a_image, images.found);
-	}
-
-	void RetireImageResource(const org::Resource* a_resource)
-	{
-		if (!DuplicateCheckOn() || !a_resource)
-			return;
-		auto& images = Images();
-		const std::lock_guard lock(images.mutex);
-		const auto image = images.imageOf.find(a_resource);
-		if (image == images.imageOf.end())
-			return;
-		const auto entries = images.byImage.find(image->second);
-		if (entries == images.byImage.end())
-			return;
-		for (auto& entry : entries->second)
-			if (entry.key == a_resource)
-				entry.retired = true;
-	}
-
-	namespace
-	{
-		/** @brief A registered made image, held weakly since its maker decides its life. */
-		struct MadeEntry
-		{
-			std::weak_ptr<org::Resource> resource;
-			const org::Resource* key = nullptr;
-			std::weak_ptr<org::VersionedTexture> slot;
-			std::shared_ptr<const org::TextureDescription> views;
-			std::string name;
-		};
-		struct MadeImages
-		{
-			std::mutex mutex;
-			std::unordered_map<std::uint64_t, MadeEntry> byImage;
-			std::unordered_map<const org::Resource*, std::uint64_t> imageOf;
-			std::size_t pruneAt = 256;
-		};
-		MadeImages& Made()
-		{
-			static MadeImages made;
-			return made;
-		}
-	}
-
-	void RegisterMadeImage(std::uint64_t a_image, const std::shared_ptr<org::Resource>& a_resource, const org::TextureDescription& a_views,
-		std::string_view a_name)
-	{
-		if (!a_image || !a_resource)
-			return;
-		auto& made = Made();
-		const std::lock_guard lock(made.mutex);
-		if (made.byImage.size() >= made.pruneAt) {
-			std::erase_if(made.byImage, [&](const auto& a_entry) {
-				if (!a_entry.second.resource.expired())
-					return false;
-				made.imageOf.erase(a_entry.second.key);
-				return true;
-			});
-			made.pruneAt = (std::max<std::size_t>)(256, 2 * made.byImage.size());
-		}
-		// A new image under a handle an old entry still names means the old image is gone.
-		if (const auto old = made.byImage.find(a_image); old != made.byImage.end())
-			made.imageOf.erase(old->second.key);
-		made.byImage[a_image] = { a_resource, a_resource.get(), {}, std::make_shared<const org::TextureDescription>(a_views), std::string(a_name) };
-		made.imageOf[a_resource.get()] = a_image;
-	}
-
-	void SetMadeImageSlot(const org::Resource* a_resource, const std::shared_ptr<org::VersionedTexture>& a_slot)
-	{
-		if (!a_resource)
-			return;
-		auto& made = Made();
-		const std::lock_guard lock(made.mutex);
-		const auto image = made.imageOf.find(a_resource);
-		if (image == made.imageOf.end())
-			return;
-		if (const auto entry = made.byImage.find(image->second); entry != made.byImage.end() && entry->second.key == a_resource)
-			entry->second.slot = a_slot;
-	}
-
-	void ForgetMadeImage(const org::Resource* a_resource)
-	{
-		if (!a_resource)
-			return;
-		auto& made = Made();
-		const std::lock_guard lock(made.mutex);
-		const auto image = made.imageOf.find(a_resource);
-		if (image == made.imageOf.end())
-			return;
-		if (const auto entry = made.byImage.find(image->second); entry != made.byImage.end() && entry->second.key == a_resource)
-			made.byImage.erase(entry);
-		made.imageOf.erase(image);
-	}
-
-	MadeImage MadeImageOf(std::uint64_t a_image)
-	{
-		if (!a_image)
-			return {};
-		auto& made = Made();
-		const std::lock_guard lock(made.mutex);
-		const auto entry = made.byImage.find(a_image);
-		if (entry == made.byImage.end())
-			return {};
-		MadeImage result;
-		result.resource = entry->second.resource.lock();
-		if (!result.resource)
-			return {};
-		result.slot = entry->second.slot.lock();
-		// A slot that moved on to another version no longer stands for this resource.
-		if (result.slot && result.slot->CurrentResource() != result.resource)
-			result.slot.reset();
-		result.views = entry->second.views;
-		result.name = entry->second.name;
-		return result;
-	}
-
-	namespace
-	{
 		// One import per native buffer, shared by every range of it. Held weakly, since the leases keep them alive.
 		struct ImportedBuffer
 		{
@@ -481,8 +246,8 @@ namespace RenderGraph
 			// A reused handle value of another buffer would read the old buffer's memory, so import again.
 			const std::uint64_t base = a_address >= a_offset ? a_address - a_offset : 0;
 			if (imported && !Backend::IsD3D12() && a_address && imported->described && imported->described != base) {
-				if (BufferRefChecksOn() && LogImportMismatch())
-					logger::error("[ORG] ref check: the cached import of VkBuffer 0x{:x} was of a buffer at 0x{:x}, but the buffer described now starts at 0x{:x} "
+				if (LogImportMismatch())
+					logger::error("[ORG] the cached import of VkBuffer 0x{:x} was of a buffer at 0x{:x}, but the buffer described now starts at 0x{:x} "
 								  "(offset {}, address 0x{:x}) from {}:{}: a reused handle; imported again",
 						a_buffer, imported->described, base, a_offset, a_address, std::filesystem::path(a_where.file_name()).filename().string(), a_where.line());
 				imported.reset();
@@ -507,8 +272,8 @@ namespace RenderGraph
 						fresh->base = info.deviceAddress;
 					fresh->described = a_address ? base : 0;
 					// The views are written from the import's address, so it must match the description's.
-					if (fresh->resource && a_address && fresh->base != base && BufferRefChecksOn() && LogImportMismatch())
-						logger::error("[ORG] ref check: VkBuffer 0x{:x} imported at 0x{:x}, but described at 0x{:x} (offset {}, address 0x{:x})", a_buffer,
+					if (fresh->resource && a_address && fresh->base != base && LogImportMismatch())
+						logger::error("[ORG] VkBuffer 0x{:x} imported at 0x{:x}, but described at 0x{:x} (offset {}, address 0x{:x})", a_buffer,
 							fresh->base, base, a_offset, a_address);
 				}
 				if (!fresh->resource)
@@ -522,14 +287,6 @@ namespace RenderGraph
 			}
 		}
 		const BufferRef ref = ToBufferRef(a_device.GetBufferViewRef({ imported->resource->GetHandle(), a_offset }));
-		if (ref && BufferRefChecksOn() && !Backend::IsD3D12()) {
-			// The import must still be this buffer's.
-			const std::uint64_t now = rhi::vulkan::get_vk_buffer_device_address(a_device, reinterpret_cast<VkBuffer>(a_buffer));
-			if (now != imported->base && LogImportMismatch())
-				logger::error("[ORG] ref check: VkBuffer 0x{:x} is at 0x{:x} now, its import at 0x{:x} (offset {}, {} bytes, described address 0x{:x}) from {}:{}",
-					a_buffer, now, imported->base, a_offset, a_bytes, a_address, std::filesystem::path(a_where.file_name()).filename().string(), a_where.line());
-			CheckBufferRef(a_device, ref, imported->resource->GetHandle(), a_address, a_bytes, "ImportBufferRef", a_where);
-		}
 		if (ref)
 			a_keep = std::move(imported);
 		return ref;

@@ -28,7 +28,7 @@ namespace DCLF::Features::Fades
 	{
 		// Once a frame.
 		void SampleFadeInputs(const Draws::NamedVersions& a_adopted, Draws::CommitUploads& a_uploads, FadeScene& a_buffers, std::uint32_t a_rootSlots,
-			FadeFrame& a_inputs, std::uint32_t& a_logBase)
+			FadeFrame& a_inputs)
 		{
 			a_inputs = FadeState::SampleFrame(nullptr);
 			const auto eye = FadeState::FadeEye();
@@ -62,7 +62,7 @@ namespace DCLF::Features::Fades
 			if (animatedWords.size() < a_rootSlots)
 				animatedWords.resize(a_rootSlots, 0u);
 			for (const std::uint32_t root : stamped) {
-				animatedWords[root] = FadeAnimatedWord(Scene::FrameView::Get().GetFrame(), counts[root]);
+				animatedWords[root] = FadeAnimatedWord(Scene::FrameView::Get().SceneStep(), counts[root]);
 				counts[root] = 0;
 			}
 			std::sort(stamped.begin(), stamped.end());
@@ -76,15 +76,12 @@ namespace DCLF::Features::Fades
 				a_uploads(a_buffers.fadeAnimated, animatedWords.data() + a_first, std::size_t(a_count) * sizeof(std::uint32_t), std::uint64_t(a_first) * sizeof(std::uint32_t));
 			});
 			if (anim.varied)
-				Diagnostics::Notify(Diagnostics::FadeInputsVaried{ Scene::FrameView::Get().GetFrame() });
-			// A diagnostics observer may set a log window.
-			a_logBase = ~0u;
-			Diagnostics::Notify(Diagnostics::FadeLogWindow{ Scene::FrameView::Get().GetFrame(), Scene::FrameView::Get().GetTables(), a_inputs, a_logBase });
+				Diagnostics::Notify(Diagnostics::FadeInputsVaried{ Scene::FrameView::Get().SceneStep() });
 		}
 
 		/** @brief Uploads the static rows the sealed version is missing, and the frame row. */
 		void UploadFadeRoots(const Draws::NamedVersions& a_sealed, const SceneTables& a_tables, std::uint32_t a_frame, const FadeFrame& a_inputs,
-			std::uint32_t a_logBase, FadeScene& a_scene, Draws::CommitUploads& a_uploads)
+			FadeScene& a_scene, Draws::CommitUploads& a_uploads)
 		{
 			if (!a_scene.fadeState || !a_scene.fadeRoots)
 				return;
@@ -105,11 +102,9 @@ namespace DCLF::Features::Fades
 			if (a_scene.fadeFrameNumber != a_frame) {
 				a_scene.fadeFrameNumber = a_frame;
 				a_scene.fadeFrame = a_inputs;
-				a_scene.fadeLogBase = a_logBase;
 			}
 			a_scene.fadeFrame.rootCount = a_scene.fadeRootCount;
 			a_scene.fadeFrame.sceneFrame = a_scene.fadeFrameNumber;
-			a_scene.fadeFrame.logBase = a_scene.fadeLogBase;
 			a_uploads(a_scene.fadeFrameBuffer, &a_scene.fadeFrame, sizeof(FadeFrame), 0);
 		}
 
@@ -204,31 +199,30 @@ namespace DCLF::Features::Fades
 			auto* host = RenderGraphRuntime::Get().Host();
 			if (!host)
 				return;
-			const std::uint32_t frameSlot = writeBack.ranges.Of(host->CurrentRun());
+			// If the epoch did not run for the armed run, FadeStateCS did not report either, so the next run reports those changes.
+			const auto commit = writeBack.list->CommitList(host->CurrentRun(), [&](const org::RunReadback::ListRead& a_read) {
+				if (a_read.region >= writeBack.armed.size() || !std::exchange(writeBack.armed[a_read.region].armed, false) || !a_read.words)
+					return;
+				if (const std::uint32_t events = std::min(a_read.count, a_read.capacity)) {
+					auto* batch = new FadeWriteBack::Batch();
+					batch->frame = writeBack.armed[a_read.region].frame;
+					const auto* list = reinterpret_cast<const FadeEvent*>(a_read.words + kFadeEventHeaderWords);
+					batch->events.assign(list, list + events);
+					writeBack.Push(batch);
+					writeBack.harvestedWithEvents.fetch_add(1, std::memory_order_relaxed);
+					writeBack.events.fetch_add(events, std::memory_order_relaxed);
+				}
+				writeBack.harvested.fetch_add(1, std::memory_order_relaxed);
+			});
+			const std::uint32_t frameSlot = commit.region;
 			if (frameSlot >= writeBack.armed.size())
 				return;
-			// If the epoch did not run for the armed frame, FadeStateCS did not report either, so the next run reports those changes.
-			if (auto& armed = writeBack.armed[frameSlot]; armed.armed) {
-				armed.armed = false;
-				writeBack.Harvest(frameSlot, armed.frame, [&](const std::uint32_t* a_words, std::uint32_t a_count, std::uint32_t a_capacity) {
-					if (const std::uint32_t events = std::min(a_count, a_capacity)) {
-						auto* batch = new FadeWriteBack::Batch();
-						batch->frame = armed.frame;
-						const auto* list = reinterpret_cast<const FadeEvent*>(a_words + kFadeEventHeaderWords);
-						batch->events.assign(list, list + events);
-						writeBack.Push(batch);
-						writeBack.harvestedWithEvents.fetch_add(1, std::memory_order_relaxed);
-						writeBack.events.fetch_add(events, std::memory_order_relaxed);
-					}
-					writeBack.harvested.fetch_add(1, std::memory_order_relaxed);
-				});
-			}
-			// Header with a zero count and the frame the harvest will match.
-			const std::uint32_t header[kFadeEventHeaderWords]{ 0u, Scene::FrameView::Get().GetFrame(), 0u, 0u };
+			// Header with a zero count and the run's stamp, which the read matches.
+			const std::uint32_t header[kFadeEventHeaderWords]{ 0u, commit.stamp, 0u, 0u };
 			a_uploads(a_scene.fadeEvents, header, sizeof(header), 0);
 			auto& armed = writeBack.armed[frameSlot];
 			armed.armed = true;
-			armed.frame = Scene::FrameView::Get().GetFrame();
+			armed.frame = Scene::FrameView::Get().SceneStep();
 		}
 
 		void CommitFadeRoots(const Api::CommitContext& a_commit)
@@ -242,11 +236,10 @@ namespace DCLF::Features::Fades
 			auto& uploads = a_commit.uploads;
 			auto& buffers = *fades;
 			const auto rootSlots = static_cast<std::uint32_t>(adopted.Of(buffers.fadeRoots).units);
-			std::uint32_t logBase = buffers.fadeLogBase;
 			FadeFrame inputs = buffers.fadeFrame;
 			if (buffers.fadeFrameNumber != a_commit.frame)
-				SampleFadeInputs(adopted, uploads, buffers, rootSlots, inputs, logBase);
-			UploadFadeRoots(adopted, a_commit.tables, a_commit.frame, inputs, logBase, buffers, uploads);
+				SampleFadeInputs(adopted, uploads, buffers, rootSlots, inputs);
+			UploadFadeRoots(adopted, a_commit.tables, a_commit.frame, inputs, buffers, uploads);
 			// Programs past the bucket scratch still get the same verdict, unbatched. This only reports the shortfall.
 			if (buffers.portalBatch)
 				Portals::CheckMainBatchCapacity(*buffers.portalBatch, a_commit.frame,

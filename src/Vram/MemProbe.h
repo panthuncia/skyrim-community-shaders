@@ -19,7 +19,7 @@
  * @brief One memory measure for A/B runs of different builds, native D3D11 or DXVK alike.
  *
  * It asks the kernel, so what it reads does not depend on the API or on either build's own accounting. CS_AB_PROBE=1 writes
- * CS-AB-memory.csv beside the log: a row a second, and a row at each Mark. Tools: tools/cs-ab. The same file is in both builds.
+ * CS-AB-memory.csv beside the log: a row a second, and a row at each Mark. Tools: tools/cs-test/compare.py. The same file is in both builds.
  */
 namespace MemProbe
 {

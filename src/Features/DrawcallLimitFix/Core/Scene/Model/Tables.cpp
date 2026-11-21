@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Internal.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
@@ -12,7 +13,7 @@ namespace DCLF
 			return;
 		// A draw's object word carries the index below its local shadow lights (kObjectIndexMask).
 		if (a_count > std::size_t(kObjectIndexMask) + 1)
-			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} object slots do not fit a draw's object word ({} at most)", a_count, kObjectIndexMask + 1u));
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} object slots do not fit a draw's object word ({} at most)", a_count, kObjectIndexMask + 1u));
 		objects.resize(a_count, FreeObjectRecord());
 		objectGeometry.resize(a_count, nullptr);
 		objectIdentity.resize(a_count, 0);
@@ -245,55 +246,8 @@ namespace DCLF
 		index = kNoStreamRow;
 	}
 
-	void SceneTables::ClearFrame(bool a_keepObjects)
+	void SceneTables::ClearFrame()
 	{
-		if (!a_keepObjects) {
-			ClearClassMembers();
-			objects.clear();
-			objectGeometry.clear();
-			objectIdentity.clear();
-			objectGroup.clear();
-			ancestorValue.clear();
-			skinPartitions.clear();
-			skinLodPartitions.clear();
-			draws.clear();
-			boneOffset.clear();
-			boneRows.clear();
-			boneFree.clear();
-			boneTop = 0;
-			boneCapacity = 0;
-			extraOffset.clear();
-			extraRows.clear();
-			extraFree.clear();
-			shadowTechnique.clear();
-			shadowReject.clear();
-			for (auto& column : occlusionTechnique)
-				column.clear();
-			listedRoot.clear();
-			hasFadeNode.clear();
-			fadeDistance.clear();
-			residentSlot.clear();
-			InvalidateChangeLog();
-			for (const auto& row : streamRows)
-				if (row.object != Api::VertexStreamRow::kNoObject)
-					streamRowsReleased.emplace_back(row.source, row.first);
-			streamRows.clear();
-			streamRowFree.clear();
-			streamRow.clear();
-			shadowDiffuse.clear();
-			shadowMaterial.clear();
-			objectSeen.clear();
-			sceneFlags.clear();
-			layerBase.clear();
-			layerOf.clear();
-			objectFree.clear();
-			liveObjects = 0;
-			retiring.clear();
-			objectsRetiring = 0;
-			++slotEpoch;
-			rangeOrdinal.clear();
-			rangeCount = {};
-		}
 		// Every walk refills these lists and rewrites the slots' offsets into them.
 		for (auto& members : classMembers)
 			members.objects.clear();

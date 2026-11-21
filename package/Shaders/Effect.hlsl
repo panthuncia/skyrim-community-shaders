@@ -18,6 +18,7 @@
 #	undef VOLUMETRIC_SHADOWS
 #	undef SCREEN_SPACE_SHADOWS
 #	undef EXP_HEIGHT_FOG
+#	undef PHYSICAL_SKY
 #	undef WETNESS_EFFECTS
 #	undef CS_HAIR
 #	undef CS_SKIN
@@ -715,7 +716,7 @@ void DCLFPermutationStatics()
 	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);
 }
 
-// Drawcall Limit Fix's plain draws (DCLF_PULLED; ForwardDrawPass): one per pipeline, which cannot push data per draw. So this stage
+// Drawcall Limit Fix's plain draws (DCLF_PULLED; the CPU pipeline's sites): one per pipeline, which cannot push data per draw. So this stage
 // reads its draw's sequence (BuildDrawsCS: DrawSequence, at DCLFSequencesAddress plus its instance's stride), and through it the draw's
 // object word, rows and geometry (Lighting.hlsl's pulled main); a particle system pulls its quads from its object's block. The rows'
 // blocks the pulled source reads (ShaderPrograms.cpp, PulledLightingSource) are assigned first; Effect's PerTechnique is the frame's

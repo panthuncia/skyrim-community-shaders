@@ -7,6 +7,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 
+#include <array>
+#include <atomic>
 #include <map>
 #include <numeric>
 
@@ -26,7 +28,7 @@ namespace DCLF::Scene
 					a_out[i] = a_verdict(i);
 			};
 			if (a_parallel)
-				SceneScheduler::Executor().ParallelFor("CS.DCLF.Scene.SunCandidates.Verdicts", a_count, 128, run);
+				::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.Scene.SunCandidates.Verdicts", a_count, 128, run);
 			else
 				run(0, a_count);
 		}
@@ -93,7 +95,7 @@ namespace DCLF::Scene
 		if (!lightEntriesDirty.empty()) {
 			std::sort(lightEntriesDirty.begin(), lightEntriesDirty.end());
 			lightEntriesDirty.erase(std::unique(lightEntriesDirty.begin(), lightEntriesDirty.end()), lightEntriesDirty.end());
-			const bool switchNodes = Extensions::ParentAdmits(ActiveToggles(), Api::EngineParent::Switch, Api::ParentLeaves::SelectedLeaves);
+			const bool switchNodes = Extensions::ParentAdmits(Api::EngineParent::Switch, Api::ParentLeaves::SelectedLeaves);
 			std::vector<std::pair<bool, std::uint64_t>> verdicts;
 			DirtyVerdicts(inSceneTask, lightEntriesDirty.size(), verdicts, [this] { return ShardScope(*this, true); }, [&](std::size_t a_index) {
 				const auto* dependents = LightDependentsOf(lightEntriesDirty[a_index]);
@@ -106,7 +108,7 @@ namespace DCLF::Scene
 							candidate = false;
 							break;
 						}
-						Fnv1a member;
+						Util::Fnv1a member;
 						member.Mix(reinterpret_cast<std::uintptr_t>(geometry));
 						member.Mix(entry->second.slot);
 						signature += member.value;
@@ -149,85 +151,22 @@ namespace DCLF::Scene
 			lightCandidates = lightTable.Publish(lightCandidatesGeneration, publicationSequence + 1, [this](const RE::NiAVObject* a_root) { return OwnedRoot(a_root); });
 		for (auto& root : lightTable.TakeRetiredRoots())
 			HandBack(std::move(root));
-		Diagnostics::Notify(Diagnostics::CandidatesUpdated{ *this, false });
 		(void)changed;
 	}
 
-	void Coordinator::NoteEngineCaster(RE::BSGeometry* a_geometry, Ineligible a_reason)
+	void Coordinator::NoteRefusedCaster(RE::BSGeometry* a_geometry, Ineligible a_reason)
 	{
-		using Subset = EngineOnlySubset;
-		std::uint8_t views = 0;
-		ShadowReject reject = ShadowReject::None;
-		if (Eligibility::EngineCasterReason(a_reason)) {
-			const auto leaf = mirror.Leaf(a_geometry);
-			reject = leaf ? ShadowCasterReject(leaf) : ShadowReject::None;
-			if (leaf && (reject == ShadowReject::None || reject == ShadowReject::VolumetricOnly))
-				views |= Subset::ViewBit(Subset::kCaster);
-		}
-		if (Eligibility::EngineColourReason(a_reason))
-			if (const auto entry = tracked.find(a_geometry); entry != tracked.end() && entry->second.categoryNode)
-				for (const auto categoryRoot : Extensions::RegisteredCategoryRoots())
-					if (categoryRoot && categoryRoot() == entry->second.categoryNode) {
-						views |= Subset::ViewBit(Subset::kColour);
-						break;
-					}
-		if (!views) {
-			engineCasterGeometries.erase(a_geometry);
+		if (!Eligibility::EngineCasterReason(a_reason))
 			return;
-		}
-		const auto [it, inserted] = engineCasterGeometries.insert_or_assign(a_geometry, EngineOnlyEntry{ a_reason, views });
-		static std::uint32_t logged = 0;
-		if (inserted && logged++ < 16)
-			logger::info("[DCLF] '{}' stays the engine's ({}, caster rule {}): the engine culls its root for {}{} ({} such)", a_geometry->name.c_str(),
-				kIneligibleNames[static_cast<std::size_t>(a_reason)], ShadowRejectName(reject), (views & Subset::ViewBit(Subset::kCaster)) ? "shadows" : "",
-				(views & Subset::ViewBit(Subset::kColour)) ? ((views & 1u) ? " and the LOD views" : "the LOD views") : "", engineCasterGeometries.size());
-	}
-
-	std::shared_ptr<const EngineOnlySubset> Coordinator::PublishEngineCasters()
-	{
-		if (engineCasterGeometries.empty())
-			return nullptr;
-		// A root is safe to name only while it is owned now, so this is made again for every publication. Every caster gets a root,
-		// so no view falls back to a whole cull.
-		auto out = std::make_shared<EngineOnlySubset>();
-		bool any = false;
-		for (const auto& [geometry, engineOnly] : engineCasterGeometries) {
-			const auto entry = tracked.find(geometry);
-			if (entry == tracked.end())
-				continue;
-			const RE::NiAVObject* root = geometry;
-			if (entry->second.lightRoot && rootOwners.contains(entry->second.lightRoot))
-				root = entry->second.lightRoot;
-			else if (entry->second.listedRoot && rootOwners.contains(entry->second.listedRoot))
-				root = entry->second.listedRoot;
-			++out->geometries;
-			for (std::uint8_t v = 0; v < EngineOnlySubset::kViewCount; ++v) {
-				if (!(engineOnly.views & (1u << v)))
-					continue;
-				auto& view = out->views[v];
-				if (!view.rootSet.insert(root).second)
-					continue;
-				any = true;
-				view.roots.push_back(root);
-				view.category.push_back(entry->second.categoryNode);
-				out->geometryRoots += root == geometry ? 1 : 0;
-				for (const void* parent = mirror.Parent(root); parent && view.ancestors.insert(parent).second; parent = mirror.Parent(parent)) {
-				}
-			}
-		}
-		return any ? out : nullptr;
-	}
-
-	std::string Coordinator::DescribeSunCandidate(const void* a_geometry) const
-	{
-		const auto it = tracked.find(static_cast<RE::BSGeometry*>(const_cast<void*>(a_geometry)));
-		if (it == tracked.end() || !it->second.geometry)
-			return "not tracked";
-		const auto& entry = it->second;
-		const auto leaf = mirror.Leaf(entry.geometry.get());
-		const auto* rtti = leaf.property ? static_cast<const RE::NiRTTI*>(leaf.property->rtti) : nullptr;
-		return fmt::format("{}, {} (classified at frame {}), {} property, caster rule {}", entry.slot != kNoObjectSlot ? "record" : "no record",
-			kIneligibleNames[static_cast<std::size_t>(entry.candidateReason)], entry.candidateFrame, rtti ? rtti->name : "no", ShadowRejectName(ShadowCasterReject(leaf)));
+		const auto leaf = mirror.Leaf(a_geometry);
+		const auto reject = leaf ? ShadowCasterReject(leaf) : ShadowReject::None;
+		if (!leaf || (reject != ShadowReject::None && reject != ShadowReject::VolumetricOnly))
+			return;
+		// The engine's draws are skipped in graph mode, so the refused caster casts no shadow. Logged at the first refusal of each reason.
+		static std::array<std::atomic<bool>, static_cast<std::size_t>(Ineligible::Count)> logged{};
+		if (const auto i = static_cast<std::size_t>(a_reason); i < logged.size() && !logged[i].exchange(true, std::memory_order_relaxed))
+			logger::info("[DCLF] '{}' stays the engine's ({}, caster rule {}): it casts no shadow, since graph mode skips the engine's draws (logged once per reason)",
+				a_geometry->name.c_str(), kIneligibleNames[i], ShadowRejectName(reject));
 	}
 
 	void Coordinator::UpdateSunCandidates(bool a_full)
@@ -244,7 +183,7 @@ namespace DCLF::Scene
 		if (!sunEntriesDirty.empty()) {
 			std::sort(sunEntriesDirty.begin(), sunEntriesDirty.end());
 			sunEntriesDirty.erase(std::unique(sunEntriesDirty.begin(), sunEntriesDirty.end()), sunEntriesDirty.end());
-			const bool switchNodes = Extensions::ParentAdmits(ActiveToggles(), Api::EngineParent::Switch, Api::ParentLeaves::SelectedLeaves);
+			const bool switchNodes = Extensions::ParentAdmits(Api::EngineParent::Switch, Api::ParentLeaves::SelectedLeaves);
 			std::vector<std::pair<bool, std::uint64_t>> verdicts;
 			DirtyVerdicts(inSceneTask, sunEntriesDirty.size(), verdicts, [this] { return ShardScope(*this, true); }, [&](std::size_t a_index) {
 				bool candidate = false;
@@ -259,7 +198,7 @@ namespace DCLF::Scene
 							break;
 						}
 						const std::uint64_t allows = Eligibility::PrimaryVerdict(VerdictOf(entry->second), [&] { return mirror.Leaf(geometry); });
-						Fnv1a member;
+						Util::Fnv1a member;
 						member.Mix(reinterpret_cast<std::uintptr_t>(geometry) * 4 + allows);
 						member.Mix(entry->second.slot);
 						signature += member.value;
@@ -307,7 +246,6 @@ namespace DCLF::Scene
 			sunCandidates = sunTable.Publish(sunCandidatesGeneration, publicationSequence + 1, [this](const RE::NiAVObject* a_root) { return OwnedRoot(a_root); });
 		for (auto& root : sunTable.TakeRetiredRoots())
 			HandBack(std::move(root));
-		Diagnostics::Notify(Diagnostics::CandidatesUpdated{ *this, true });
 		(void)changed;
 	}
 }

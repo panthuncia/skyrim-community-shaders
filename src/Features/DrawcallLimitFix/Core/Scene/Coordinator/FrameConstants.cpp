@@ -10,7 +10,6 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 
-#include "Features/DrawcallLimitFix/Diagnostics/ParityCounter.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Schedule.h"
 
@@ -26,13 +25,8 @@ namespace DCLF::Scene
 		{
 			std::optional<MaterialPort::FrameComponentsWitness> applied;
 			std::uint64_t passes = 0, moved = 0, held = 0;
-			Diagnostics::ParityCounter parity;
 		} signatureWitness;
-		constexpr std::uint32_t kSignatureParityOffset = 31;
 		constexpr std::uint64_t kSignatureReportPasses = 600;
-
-		/** @brief Parity for the capture deduplication. A record a rewrite would change is a capture the deduplication lost. */
-		Diagnostics::ParityCounter materialDedupParity;
 	}
 
 	bool Coordinator::PrepareMaterials(std::string_view a_zone, std::size_t a_count, const std::function<void(std::size_t, std::size_t)>& a_body)
@@ -44,7 +38,7 @@ namespace DCLF::Scene
 			a_body(a_begin, a_end);
 		};
 		if (pool) {
-			SceneScheduler::Executor().ParallelFor(a_zone, a_count, kFanoutGrain, [&](std::size_t a_begin, std::size_t a_end) { chunk(a_begin, a_end, true); });
+			::RenderGraph::Frame::SharedExecutor().ParallelFor(a_zone, a_count, kFanoutGrain, [&](std::size_t a_begin, std::size_t a_end) { chunk(a_begin, a_end, true); });
 			return true;
 		}
 		for (std::size_t begin = 0; begin < a_count; begin += kFanoutGrain)
@@ -89,29 +83,23 @@ namespace DCLF::Scene
 		auto& r = materialRecordStats;
 		auto& s = materialSnapshotStats;
 		const std::uint32_t window = sceneFrame / Reports::Interval();
-		const bool parityRan = materialDedupParity.checks || sharedBindings.work.parity.checks || lookupsResolve.pipelineParity.checks;
-		if (window != materialReportWindow && (Diagnostics::Observe().stats || parityRan)) {
+		if (window != materialReportWindow && Diagnostics::Observe().stats) {
 			materialReportWindow = window;
 			logger::info("[DCLF] material captures: {} deduplicated ({} transforms only), {} relisted; evaluations pooled {} in {} rounds, joins' {} prepared "
-						 "{} inline; transform captures left to the frame values {}; applications pooled {}; dedup parity {} checks, {} differ{}",
-				s.deduped, s.transformsOnly, s.relisted, r.evaluationsPooled, r.poolRounds, r.joinPrepared, r.joinInline, r.transformsWatched, r.appliedPooled,
-				materialDedupParity.checks, materialDedupParity.mismatches, materialDedupParity.Verdict(true));
+						 "{} inline; transform captures left to the frame values {}; applications pooled {}",
+				s.deduped, s.transformsOnly, s.relisted, r.evaluationsPooled, r.poolRounds, r.joinPrepared, r.joinInline, r.transformsWatched, r.appliedPooled);
 			auto& mw = materialBindings.work;
 			auto& sw = sharedBindings.work;
 			auto& lr = lookupsResolve;
-			logger::info("[DCLF] material bindings: owner blocks sealed {} shared {}, waiters deduplicated {}; masks resolved {} of {} checked, {} sweeps, parity {} "
-						 "checks, {} differ{}; pipeline lookups resolved {} of {} witnessed, {} sweeps, parity {} checks, {} differ{}; shadow lookups resolved {} skipped {}",
-				mw.sealed, mw.sealShared, mw.waitersDeduped, sw.masksResolved, sw.masksChecked, sw.maskSweeps, sw.parity.checks, sw.parity.mismatches,
-				sw.parity.Verdict(true), lr.pipelinesResolved, lr.pipelinesChecked, lr.pipelineSweeps, lr.pipelineParity.checks, lr.pipelineParity.mismatches,
-				lr.pipelineParity.Verdict(true), lr.shadowResolved, lr.shadowSkipped);
+			logger::info("[DCLF] material bindings: owner blocks sealed {} shared {}, waiters deduplicated {}; masks resolved {} of {} checked, {} sweeps; "
+						 "pipeline lookups resolved {} of {} witnessed, {} sweeps; shadow lookups resolved {} skipped {}",
+				mw.sealed, mw.sealShared, mw.waitersDeduped, sw.masksResolved, sw.masksChecked, sw.maskSweeps, lr.pipelinesResolved, lr.pipelinesChecked,
+				lr.pipelineSweeps, lr.shadowResolved, lr.shadowSkipped);
 			s.deduped = s.transformsOnly = s.relisted = 0;
 			r.evaluationsPooled = r.poolRounds = r.joinPrepared = r.joinInline = r.watchesSkipped = r.watchesDropped = r.appliedPooled = 0;
-			materialDedupParity.Reset();
 			mw = {};
 			sw.masksChecked = sw.masksResolved = sw.maskSweeps = 0;
-			sw.parity.Reset();
 			lr.pipelinesChecked = lr.pipelinesResolved = lr.pipelineSweeps = lr.shadowResolved = lr.shadowSkipped = 0;
-			lr.pipelineParity.Reset();
 		}
 	}
 
@@ -123,8 +111,7 @@ namespace DCLF::Scene
 		const std::size_t captured = materials.size();
 		materials.insert(materials.end(), materialRewritesPending.begin(), materialRewritesPending.end());
 		materialRewritesPending.clear();
-		std::vector<const RE::BSShaderMaterial*> deduped = std::exchange(materialsDeduped, {});
-		if (materials.empty() && deduped.empty())
+		if (materials.empty())
 			return;
 		std::sort(materials.begin(), materials.end());
 		materials.erase(std::unique(materials.begin(), materials.end()), materials.end());
@@ -133,7 +120,7 @@ namespace DCLF::Scene
 		const auto& sources = FrameGlobals::Current().material;
 		auto& items = materialRewriteItems;
 		items.clear();
-		auto gather = [&](const RE::BSShaderMaterial* a_material, bool a_parity) {
+		auto gather = [&](const RE::BSShaderMaterial* a_material) {
 			const auto held = materialSnapshots.find(a_material);
 			if (held != materialSnapshots.end())
 				held->second.listed = false;
@@ -143,19 +130,13 @@ namespace DCLF::Scene
 			if (held == materialSnapshots.end() || !held->second.held)
 				return;  // let go: no slot has used it for kMaterialSnapshotFrames, and its next capture comes with its next write
 			const auto& snapshot = held->second.held->snapshot;
-			if (!a_parity)
-				held->second.frame = sceneFrame;
+			held->second.frame = sceneFrame;
 			for (const std::uint32_t slot : dependents->second)
 				if (slot < tables.materials.size() && tables.materialSlots.Alive(slot) && tables.materialSlotKey[slot].first == a_material)
-					items.push_back({ a_material, &snapshot, slot, a_parity });
+					items.push_back({ a_material, &snapshot, slot });
 		};
 		for (const auto* material : materials)
-			gather(material, false);
-		std::sort(deduped.begin(), deduped.end());
-		deduped.erase(std::unique(deduped.begin(), deduped.end()), deduped.end());
-		for (const auto* material : deduped)
-			if (!std::binary_search(materials.begin(), materials.end(), material))
-				gather(material, true);
+			gather(material);
 		if (items.empty())
 			return;
 		auto& results = materialRewriteResults;
@@ -173,14 +154,6 @@ namespace DCLF::Scene
 		for (std::size_t i = 0; i < items.size(); ++i) {
 			const auto& item = items[i];
 			auto& result = results[i];
-			if (item.parity) {
-				if (result.outcome == Outcome::Made)
-					materialDedupParity.Check(result.same, [&] {
-						return fmt::format("material {} slot {} (pass {:#x}): a deduplicated capture's rewrite would change the record", static_cast<const void*>(item.material),
-							item.slot, tables.materialSlotKey[item.slot].second);
-					});
-				continue;
-			}
 			if (result.outcome == Outcome::Retry) {
 				// The slot keeps its record meanwhile.
 				if (retried != item.material) {
@@ -220,7 +193,6 @@ namespace DCLF::Scene
 			w.applied = sources.components;
 		++w.passes;
 		w.moved += moved ? 1 : 0;
-		const bool parity = !moved && Diagnostics::Observe().scene && Diagnostics::ParityDue(passSerial, kSignatureParityOffset);
 		auto keyed = [&](std::uint32_t a_slot, std::uint32_t a_signature) {
 			return a_slot < tables.materials.size() && tables.materialSlots.Alive(a_slot) && tables.materialSlotKey[a_slot].first &&
 			       MaterialSources::Signature(tables.materialSlotKey[a_slot].second) == a_signature;
@@ -229,30 +201,15 @@ namespace DCLF::Scene
 			if (!entry.probeValid)
 				continue;
 			const bool held = !moved && entry.appliedValid && !entry.probeFailed;
-			if (held && !parity) {
+			if (held) {
 				++w.held;
 				continue;
 			}
 			MaterialRecord live;
 			if (!MaterialPort::Evaluate(entry.probe, entry.probePass, sources, live)) {
-				if (held) {
-					w.parity.Check(false, [&] { return fmt::format("signature {:#x}: its probe no longer evaluates", signature); });
-					continue;
-				}
 				// Not evaluable with these sources yet, so tried again next pass. Its slots keep components of an older witness.
 				entry.probeFailed = true;
 				entry.appliedValid = false;
-				continue;
-			}
-			if (held) {
-				// Parity only. Changes nothing.
-				MaterialRecord probe = entry.applied;
-				bool floatsChanged = false;
-				const bool texturesChanged = MaterialSources::ApplyFrameComponents(live, probe, entry.probePass, &floatsChanged);
-				w.parity.Check(!texturesChanged && !floatsChanged, [&] {
-					return fmt::format("signature {:#x} (pass {:#x}): {} moved under an unchanged witness", signature, entry.probePass,
-						texturesChanged ? "t11" : "a frame float");
-				});
 				continue;
 			}
 			entry.probeFailed = false;
@@ -304,10 +261,8 @@ namespace DCLF::Scene
 			r.slotsApplied += slots.size();
 		}
 		if (w.passes >= kSignatureReportPasses && Diagnostics::Observe().stats) {
-			logger::info("[DCLF] material signature witness: moved on {} of {} passes, {} signature evaluations held; parity {} checks, {} differ{}", w.moved,
-				w.passes, w.held, w.parity.checks, w.parity.mismatches, w.parity.Verdict(true));
+			logger::info("[DCLF] material signature witness: moved on {} of {} passes, {} signature evaluations held", w.moved, w.passes, w.held);
 			w.passes = w.moved = w.held = 0;
-			w.parity.Reset();
 		}
 	}
 
@@ -425,7 +380,7 @@ namespace DCLF::Scene
 			}
 		};
 		if (FanoutMode(a_keys.size()) == 2) {
-			SceneScheduler::Executor().ParallelFor("CS.DCLF.Scene.ShadingShards", a_keys.size(), kGrain, [&](std::size_t a_begin, std::size_t a_end) {
+			::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.Scene.ShadingShards", a_keys.size(), kGrain, [&](std::size_t a_begin, std::size_t a_end) {
 				DCLF_ZONE("CS.DCLF.Scene.ShadingShards");
 				const auto scope = ShardScope(*this, true);
 				prepare(a_begin, a_end);

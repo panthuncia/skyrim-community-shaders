@@ -106,55 +106,13 @@ namespace DCLF::Draws
 	// Length of depth phase 1's retest list. Phase 2's threads stop there.
 	constexpr std::uint32_t kCountRetestsWord = 42;
 	constexpr std::uint32_t kCountBelowTexelsWord = 43;
-	// Sun size probe counters, binned by bound radius below 256, 1024, 4096 and above.
-	constexpr std::uint32_t kCountProbeCastersWord = 44;
-	constexpr std::uint32_t kCountProbeTrianglesWord = 48;
+	// Words 44-51 are unused.
 	// Phase 2's dispatch reset value. Phase 1 adds one group per 64 retests.
 	inline constexpr std::uint32_t kRetestDispatchReset[4] = { 0, 1, 1, 0 };
 	// Byte offset of a count word the indirect draws read. Must match BuildDrawsCS.hlsl.
 	constexpr std::uint64_t kCountDrawnPhaseTwoBytes = 68;
 	constexpr const char* kBuildDrawsShader = "DrawcallLimitFix/BuildDrawsCS.hlsl";
 	constexpr const char* kSortSequencesShader = "DrawcallLimitFix/SortSequencesCS.hlsl";
-	// Diagnostic foliage record (CS_DCLF_FOLIAGE_PARITY). Alpha-tested colour draws write each pixel's object, albedo and diffuse.
-	// The compare pass writes kFoliageCounters counters, then samples of kFoliageSampleWords words each.
-	enum FoliageCounter : std::uint32_t
-	{
-		// Compared with the frame before, for a still camera.
-		kFoliageCompared,    // pixels the frame before had a foliage object at
-		kFoliageVanished,    // ... and this frame has none of that object at or beside
-		kFoliageAppeared,    // pixels this frame has an object at that the frame before had none of at or beside
-		kFoliageRecoloured,  // the same object both frames, its albedo or diffuse moved by more than the pass's step
-		kFoliageWhitened,    // ... towards white (every albedo channel at least 0.85, from under 0.6)
-		kFoliageFrameSampleCount,
-		// Within the frame: pixels an alpha-tested Z-prepass draw owns, and of them those shaded with no object or another one.
-		kFoliageOwned,
-		kFoliageUnshaded,
-		kFoliageOtherObject,
-		// This frame's foliage pixels whose albedo, or diffuse, is near white (every channel at least 0.85).
-		kFoliageWhiteAlbedo,
-		kFoliageWhiteDiffuse,
-		kFoliageEpochTag,  // the frame's tag, written by the pass
-		// Motion vectors more than 1 and 8 pixels off a static object's. Tree clocks are frozen.
-		kFoliageMotion,
-		kFoliageMotionFar,
-		kFoliageInFrameSampleCount,
-		kFoliageWhiteSampleCount,
-		// Against the frame before, reprojected: the lit colour brighter by more than 0.3 in luminance.
-		kFoliageBrightened,
-		// Of the owned pixels, terrain LOD's, and of them those unshaded or shaded with another object.
-		kFoliageLandOwned,
-		kFoliageLandUnshaded,
-		kFoliageLandOtherObject,
-		kFoliageLandSampleCount,
-		kFoliageCounters = 24
-	};
-	// A sample is x | y << 16, then its kind, then words that depend on the kind. Diagnostics/Draws/Foliage.cpp reads them.
-	constexpr std::uint32_t kFoliageSampleWords = 8, kFoliageFrameSamples = 24, kFoliageInFrameSamples = 32, kFoliageWhiteSamples = 16, kFoliageLandSamples = 16;
-	constexpr std::uint32_t kFoliageFrameSampleBase = 0, kFoliageInFrameSampleBase = kFoliageFrameSampleBase + kFoliageFrameSamples,
-							kFoliageWhiteSampleBase = kFoliageInFrameSampleBase + kFoliageInFrameSamples,
-							kFoliageLandSampleBase = kFoliageWhiteSampleBase + kFoliageWhiteSamples;
-	constexpr std::uint32_t kFoliageResultWords = kFoliageCounters + (kFoliageLandSampleBase + kFoliageLandSamples) * kFoliageSampleWords;
-	constexpr std::uint32_t kFoliageColourWords = 4;  // a pixel's: albedo, diffuse, motion error, motion vector
 	constexpr const char* kIndexPoolShader = "DrawcallLimitFix/IndexPoolCS.hlsl";
 	struct IndexPoolConstants
 	{
@@ -191,7 +149,7 @@ namespace DCLF::Draws
 	constexpr std::uint32_t kVisibilityBitInMargin = 1u << 1;    // reserved, not implemented
 	constexpr std::uint32_t kVisibilityBitVerdict = 1u << 2;     // root: FadeStateCS updated it this frame
 	constexpr std::uint32_t kVisibilityBitFadeHidden = 1u << 3;  // object: in view but hidden by its root's fade
-	// Header: the appended count, which can pass capacity and sets how far the list grows, then the scene frame.
+	// Header: the appended count, which can pass capacity and sets how far the list grows, then the run's readback stamp.
 	constexpr std::uint32_t kVisibilityEventHeaderWords = 4;
 	constexpr std::uint32_t kInitialVisibilityEvents = 4096;
 	inline constexpr std::uint64_t VisibilityEventBytes(std::uint32_t a_events)
@@ -670,8 +628,6 @@ namespace DCLF::Draws
 	// A sun caster whose bound projects to fewer texels than the threshold draws nothing.
 	// DCLF is the only source of those casters, so a culled one casts no shadow at all.
 	constexpr std::uint32_t kCullMinTexels = 0x8000;
-	// Diagnostic only. Counts a sun view's drawn casters and triangles by bound radius.
-	constexpr std::uint32_t kCullSizeProbe = 0x40000;
 	// A point light hemisphere (BSParabolicCullingProcess), tested against the light's sphere and plane instead of frustum corners.
 	// Follows FUN_14151a1e0's codes (ParabolicSphereMask).
 	constexpr std::uint32_t kCullParabolic = 0x80000;

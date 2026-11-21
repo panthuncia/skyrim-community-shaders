@@ -35,15 +35,10 @@ namespace RenderGraph::Frame
 	{
 		bool declared = false;        // the frame contains the segment, so its end tap is expected
 		std::uint64_t graph = 0;      // 0 when not built yet
-		// Moves when a slot the graph binds publishes a new version, such as after a resize.
-		// A recording binds the versions it was recorded with, so a new version needs a new recording.
-		std::uint64_t versions = 0;
 		std::uint32_t clients = 0;
 		std::uint32_t clientsOn = 0;  // a bit per client in the graph's client order
 		// Per client, how many instances of its passes run this frame. 0 for a client without instances.
 		std::array<std::uint8_t, kSegmentClients> instances{};
-		// A bit per step that holds another module's epoch, such as light culling.
-		std::uint32_t foreignOn = 0;
 		// A hash of the pass revisions. A pass whose recording depends on more than its bindings names that in its revision.
 		std::uint64_t passes = 0;
 		// A bit per declared row of the segment's clients. A pass whose row bit is clear records only its barriers.
@@ -74,7 +69,6 @@ namespace RenderGraph::Frame
 		bool taa = false;
 		std::uint8_t taaMode = 0;   // 0 plain, 1 with the mask swap, 2 the UI form
 		bool taaWater = false;
-		bool dynres = false;        // the upsample runs
 		bool dofCompute = false;
 		bool screenshot = false;    // +0x211
 		bool upscaler = false;      // DLSS, FSR or XeSS
@@ -112,10 +106,11 @@ namespace RenderGraph::Frame
 	{
 		Kind kind = Kind::MainMenu;
 		bool capture = false;      // FrozenWorld only, the frame that draws the world once
-		// DCLF has started drawing the world, which never stops once started. Before that every clear keeps its own ticket.
-		bool dclfDraws = false;
-		std::uint64_t frame = 0;   // every Renderer::Begin, any thread
-		std::uint32_t slot = 0;    // selects the published copy and latch regions
+		// A fragment source has started drawing the world, which never stops once started. Before that every clear
+		// keeps its own ticket.
+		bool sceneDraws = false;
+		std::uint64_t frame = 0;   // the frame clock's beginFrame at this Begin (RenderGraph::FrameClock)
+		std::uint32_t slot = 0;    // the frame clock's slot: selects the published copy and latch regions
 		std::uint32_t parity = 0;  // a slot always has the same parity
 		std::array<SegmentFields, kSegments> segments{};
 		PostFields post{};

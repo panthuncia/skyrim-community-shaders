@@ -16,9 +16,6 @@
 #include <span>
 #include <Tracy/Tracy.hpp>
 
-#include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 
 namespace DCLF::Features::Shadows::Local
 {
@@ -456,25 +453,25 @@ namespace DCLF::Features::Shadows::Local
 		}
 
 		/** @brief Rebuilds the index, inputs and every verdict. */
-		std::shared_ptr<SunExclusion> WholeExclusion(SunExclusionBuild& b, bool a_judgedWhole, std::vector<std::uint8_t>& a_whole)
+		std::shared_ptr<SunExclusion> WholeExclusion(SunExclusionBuild& b)
 		{
+			std::vector<std::uint8_t> whole;
 			auto& c = b.c;
 			auto& x = b.x;
 			x.Grow(b.objects, b.count);
 			x.Reindex(b.tables);
 			CollectWhole(b, false);
 			x.modeBits = b.modeBits;
-			if (!a_judgedWhole)
-				JudgeAll(b.candidates, b.tables, x.inputMark, 1, a_whole);
+			JudgeAll(b.candidates, b.tables, x.inputMark, 1, whole);
 			auto exclusion = std::make_shared<SunExclusion>();
 			exclusion->candidates = b.candidatesRef;
 			exclusion->builtFrame = b.build.frameNumber;
-			exclusion->excludedCount = static_cast<std::uint32_t>(std::count(a_whole.begin(), a_whole.end(), std::uint8_t(1)));
+			exclusion->excludedCount = static_cast<std::uint32_t>(std::count(whole.begin(), whole.end(), std::uint8_t(1)));
 			// A whole build matching the cache keeps its version.
-			const bool same = c.valid && c.candidates == b.candidatesRef && c.excluded == a_whole;
+			const bool same = c.valid && c.candidates == b.candidatesRef && c.excluded == whole;
 			exclusion->version = same ? c.version : NextExclusionVersion();
-			exclusion->excluded = a_whole;
-			c.excluded = std::move(a_whole);
+			exclusion->excluded = whole;
+			c.excluded = std::move(whole);
 			c.excludedCount = exclusion->excludedCount;
 			c.cursor.Restart(b.build.tablesGeneration);
 			c.valid = true;
@@ -514,25 +511,11 @@ namespace DCLF::Features::Shadows::Local
 		c.cursor.Advance(tables.changeLog);
 		c.membership = membership;
 		c.keptBuild = a_build.keptBuild;
-		// Policy::ReuseShadowExclusion may judge every object to compare against the kept verdicts.
-		std::vector<std::uint8_t> whole;
-		bool judgedWhole = false;
-		if (kept && !Policy::ReuseShadowExclusion(a_build.frameNumber)) {
-			std::vector<std::uint8_t> isInput(objects, 0);
-			std::vector<std::uint32_t> list;
-			CollectInputs(a_build, isInput, 1, list);
-			JudgeAll(candidates, tables, isInput, 1, whole);
-			judgedWhole = true;
-			const bool same = whole == c.excluded;
-			if (Diagnostics::Armed<Diagnostics::ExclusionRebuilt>())
-				Diagnostics::Notify(Diagnostics::ExclusionRebuilt{ paraboloid, same });
-			kept = same;  // a difference is judged whole from here (and reported)
-		}
 		std::shared_ptr<SunExclusion> exclusion;
 		if (kept)
 			exclusion = KeptExclusion(b, flipped, candidatesMoved);
 		else
-			exclusion = WholeExclusion(b, judgedWhole, whole);
+			exclusion = WholeExclusion(b);
 		if (exclusion != x.last) {
 			x.EnsureStamps(count, geometryCount, paraboloid);
 			x.GiveStamps(*exclusion);

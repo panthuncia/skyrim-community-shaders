@@ -3,7 +3,7 @@
 #include <mutex>
 #include <vector>
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneGraph.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/SceneExecutor.h"
+#include "RenderGraph/Async/Executor.h"
 
 #include <ORGModuleServices/Async/StateGraph.h>
 #include <ORGModuleServices/Async/VersionGrowthArtifact.h>
@@ -21,7 +21,7 @@ namespace DCLF::Runtime
 		org::async::StateGraphHooks<org::async::DefaultStateGraphTypes> Hooks()
 		{
 			org::async::StateGraphHooks<org::async::DefaultStateGraphTypes> hooks;
-			hooks.scheduling = SceneExecutor::Layout;
+			hooks.scheduling = ::RenderGraph::Frame::Executor::Layout;
 			hooks.producerDispatch = { org::async::TaskDispatch::Controlled, org::async::TaskDispatch::Cpu, org::async::TaskDispatch::Controlled, org::async::TaskDispatch::Cpu };  // per domain: coordinator, preparation, scene, streaming
 			static_assert(static_cast<std::size_t>(SceneArtifact::Count) <= org::async::DefaultStateGraphTypes::kArtifactKindCount);
 			// The scene's revisions are its events, in order, so none is replaced by a later one.
@@ -78,20 +78,20 @@ namespace DCLF::Runtime
 
 	SceneGraph::SceneGraph(std::shared_ptr<org::async::GraphScheduler> a_scheduler) :
 		graph(std::make_unique<Graph>(std::move(a_scheduler), "DCLF scene", Hooks())),
-		growths(std::make_unique<org::async::VersionGrowthPosts<org::async::DefaultStateGraphTypes>>(kBufferVersion, SceneExecutor::Coordinator.lane,
-			SceneExecutor::Coordinator.domain)),
+		growths(std::make_unique<org::async::VersionGrowthPosts<org::async::DefaultStateGraphTypes>>(kBufferVersion, ::RenderGraph::Frame::Executor::Coordinator.lane,
+			::RenderGraph::Frame::Executor::Coordinator.domain)),
 		payloadParts(std::make_unique<PayloadPartPosts>()),
 		textureGates(std::make_unique<TextureGates>())
 	{
 		// A window does blocking file reads and texture creation on the streaming domain. A failed read still completes, so its gate opens
 		// on a texture that reads zero instead of waiting forever. A window the render graph uploads is GPU ready once its copy pass was submitted.
-		graph->RegisterTypedProducer<TextureWindowInput, TextureWindowBuilt>(kTextureWindow, SceneExecutor::Streaming.lane, SceneExecutor::Streaming.domain, "DCLF texture window",
+		graph->RegisterTypedProducer<TextureWindowInput, TextureWindowBuilt>(kTextureWindow, ::RenderGraph::Frame::Executor::Streaming.lane, ::RenderGraph::Frame::Executor::Streaming.domain, "DCLF texture window",
 			[](const Graph::ArtifactBuildContext&, std::shared_ptr<const TextureWindowInput> a_input) {
 				auto pending = a_input->build();
 				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureWindowBuilt>()), std::move(pending));
 			});
 		// A gate runs its request once the base window is ready. The graph does the wake.
-		graph->RegisterTypedProducer<TextureGateInput, TextureGateRan>(kTextureGate, SceneExecutor::Preparation.lane, SceneExecutor::Preparation.domain, "DCLF texture gate",
+		graph->RegisterTypedProducer<TextureGateInput, TextureGateRan>(kTextureGate, ::RenderGraph::Frame::Executor::Preparation.lane, ::RenderGraph::Frame::Executor::Preparation.domain, "DCLF texture gate",
 			[gates = textureGates.get()](const Graph::ArtifactBuildContext& a_context, std::shared_ptr<const TextureGateInput> a_input) {
 				a_input->run();
 				{
@@ -101,7 +101,7 @@ namespace DCLF::Runtime
 				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureGateRan>()));
 			});
 		// Growth runs on the preparation pool and is ready once its uploads complete.
-		org::async::RegisterVersionGrowthProducer(*graph, kBufferVersion, SceneExecutor::Preparation.lane, SceneExecutor::Preparation.domain, "DCLF buffer version");
+		org::async::RegisterVersionGrowthProducer(*graph, kBufferVersion, ::RenderGraph::Frame::Executor::Preparation.lane, ::RenderGraph::Frame::Executor::Preparation.domain, "DCLF buffer version");
 		// A payload part version is built from its predecessor on the preparation pool, ready once its copy and upload complete.
 		// Its tag's built runs on the producer's thread before it is frozen.
 		org::services::VersionedBufferProducerHooks<org::async::DefaultStateGraphTypes> hooks;
@@ -110,8 +110,8 @@ namespace DCLF::Runtime
 				tag->built(a_version);
 		};
 		static constexpr std::array<std::uint16_t, 1> kPayloadKinds{ kPayloadPart };
-		org::services::RegisterVersionedBufferProducer(*graph, std::span<const std::uint16_t>(kPayloadKinds), SceneExecutor::Preparation.lane,
-			SceneExecutor::Preparation.domain, "DCLF payload part", std::move(hooks));
+		org::services::RegisterVersionedBufferProducer(*graph, std::span<const std::uint16_t>(kPayloadKinds), ::RenderGraph::Frame::Executor::Preparation.lane,
+			::RenderGraph::Frame::Executor::Preparation.domain, "DCLF payload part", std::move(hooks));
 	}
 
 	bool SceneGraph::PostTextureWindow(std::uint64_t a_texture, std::uint64_t a_revision, std::function<std::shared_ptr<const org::async::GpuSubmissionSet>()> a_build)
@@ -174,8 +174,8 @@ namespace DCLF::Runtime
 			if (const auto held = weak.lock())
 				held->finished.store(true, std::memory_order_release);
 		};
-		wait->awaiter = graph->AwaitExact(request.Handle(), org::async::ArtifactReadiness::GpuReady, SceneExecutor::Coordinator.lane,
-			SceneExecutor::Coordinator.domain,
+		wait->awaiter = graph->AwaitExact(request.Handle(), org::async::ArtifactReadiness::GpuReady, ::RenderGraph::Frame::Executor::Coordinator.lane,
+			::RenderGraph::Frame::Executor::Coordinator.domain,
 			[finish](const Graph::ArtifactSnapshot& a_snapshot) {
 				auto version = a_snapshot.payload.Get<org::services::PublishedBufferVersion>();
 				if (a_snapshot.gpuSubmissions && a_snapshot.gpuSubmissions->Failed())

@@ -1,9 +1,9 @@
 #ifndef PHYSICAL_SKY_CLOUD_BOUNDS_HLSLI
 #define PHYSICAL_SKY_CLOUD_BOUNDS_HLSLI
 
-RWTexture2D<float2> RWCloudHeightBounds : register(u6);
-RWTexture2D<float4> RWCloudHeightTiles : register(u6);
-RWTexture2D<float2> RWCloudWeatherBounds : register(u5);
+ORG_HEADER_UAV(RWTexture2D<float2>, RWCloudHeightBounds, 6)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWCloudHeightTiles, 6)
+ORG_HEADER_UAV(RWTexture2D<float2>, RWCloudWeatherBounds, 5)
 groupshared float4 CloudHeightBoundsShared[256];
 
 void ReduceCloudHeightBounds(uint index, uint count)

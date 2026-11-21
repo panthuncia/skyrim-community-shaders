@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Extensions
 {
@@ -45,7 +46,7 @@ namespace DCLF::Extensions
 				if (ports[k].shaderType == registered.shaderType)
 					kind = k;
 			if (!kind)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: program family {} takes shader type {}, which no material port has", registered.name,
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("program family {} takes shader type {}, which no material port has", registered.name,
 					static_cast<std::uint32_t>(registered.shaderType)));
 			auto& entry = table.families[f];
 			entry.taken = true;

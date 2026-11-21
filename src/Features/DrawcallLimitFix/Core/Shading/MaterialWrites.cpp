@@ -7,9 +7,10 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialWrites.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
+#include "RenderGraph/Fatal.h"
 
 #include <array>
 #include <atomic>
@@ -22,25 +23,25 @@ namespace DCLF::MaterialWrites
 	namespace
 	{
 		// ---- The write queue, only for CS_DCLF_CAPTURE_PARITY diagnostics. The render thread drains it once a frame and producers never block.
-		EventQueue<const RE::BSShaderMaterial*, 8192>& GetQueue()
+		RenderGraph::Frame::EventQueue<const RE::BSShaderMaterial*, 8192>& GetQueue()
 		{
-			static EventQueue<const RE::BSShaderMaterial*, 8192> queue;
+			static RenderGraph::Frame::EventQueue<const RE::BSShaderMaterial*, 8192> queue;
 			return queue;
 		}
 		bool WritesQueued()
 		{
 			return Diagnostics::Observe().capture;
 		}
-		EventQueue<const void*, 8192>& ShadingQueue()
+		RenderGraph::Frame::EventQueue<const void*, 8192>& ShadingQueue()
 		{
 			// The scene pass drains this for the next frame's shading sample. It is per frame, so it wakes no pass.
-			static EventQueue<const void*, 8192> queue;
+			static RenderGraph::Frame::EventQueue<const void*, 8192> queue;
 			return queue;
 		}
 		// The transform moves, for the kept shadow build.
-		EventQueue<const RE::BSShaderMaterial*, 8192>& TransformMoves()
+		RenderGraph::Frame::EventQueue<const RE::BSShaderMaterial*, 8192>& TransformMoves()
 		{
-			static EventQueue<const RE::BSShaderMaterial*, 8192> queue;
+			static RenderGraph::Frame::EventQueue<const RE::BSShaderMaterial*, 8192> queue;
 			return queue;
 		}
 		// The kept shadow build only runs while DCLF draws shadows. Without a drain a full queue allocates on every push,
@@ -242,7 +243,7 @@ namespace DCLF::MaterialWrites
 				 SWF_HOOK_MATERIAL_RECEIVE_VALUES })
 			subscribed = subscribed && SceneWriter::SubscribeCall(hook, &OnMaterialRewrite, SWF_PHASE_POST);
 		if (!subscribed)
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the material write hooks after reporting them installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the material write hooks after reporting them installed");
 		logger::info("[DCLF] material write hooks subscribed: float and colour controllers, 14 material classes");
 	}
 

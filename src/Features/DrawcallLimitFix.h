@@ -8,7 +8,6 @@
  *
  * This is the feature's shell: install, engine hook thunks, render-thread lifecycle points, the menu toggle and settings UI.
  * Render thread unless noted. It is DCLF's one integration point with the rest of CS, and other CS code calls DCLF only through this header.
- * Without the render graph and ORGModuleServices (CS_HAS_DCLF), the rest of Features/DrawcallLimitFix/ is not built and every entry point is inert.
  */
 struct DrawcallLimitFix : Feature
 {
@@ -34,7 +33,10 @@ struct DrawcallLimitFix : Feature
 	virtual void SetupResources() override;
 	/** @brief After every feature's SetupResources. Sets up the engine draw families. */
 	virtual void PostSetupResources() override;
-	virtual bool AppliesBootToggleLive() const override { return true; }
+	/** @brief Locked in graph mode, which draws the world through DCLF (D-3). A saved change applies at the next launch. */
+	virtual BootToggleLock GetBootToggleLock() const override;
+	/** @brief Refuses the change while the toggle is locked. */
+	virtual bool ToggleAtBootSetting() override;
 	virtual void Reset() override;
 	/** @brief The Present hook, before the present. */
 	void BeforePresent();
@@ -54,8 +56,6 @@ struct DrawcallLimitFix : Feature
 	 * the G-buffer or tests against opaque depth, so DCLF's objects must already be drawn: Terrain Blending's terrain, then blended decals.
 	 */
 	void AfterOpaquePass();
-	/** @brief CS_DCLF_TARGET_PROBE=x,y: every bound G-buffer target averaged over a 64 x 64 block where the opaque pass ends. */
-	void ProbeOpaqueTarget(std::uint32_t a_stage);
 
 	/**
 	 * @brief Before the engine draws the shadow maps. The scene graph and main camera cull are final, but the main accumulator's passes are not,
@@ -90,18 +90,10 @@ struct DrawcallLimitFix : Feature
 	bool OcclusionNeedsEngine(OcclusionMap a_map);
 	/** @brief Once the map's camera is set up, before RenderMask. DCLF's view of the map, from that camera. */
 	void OcclusionView(OcclusionMap a_map);
-	/** @brief After OcclusionReady. Whether the engine also renders the map whole first as a parity reference. */
-	bool OcclusionReferenceFrame(OcclusionMap a_map);
-	/**
-	 * @brief When DCLF draws the map, the engine's SetupMask culls only the engine-only occluders, so what DCLF cannot draw still occludes.
-	 * Returns false when there are none, and the caller sets the projection and camera alone.
-	 */
-	bool OcclusionEngineOnlyMask(RE::Precipitation* a_precip);
 	/** @brief Render thread, at Present. Whether to skip the present and keep the last frame, during a load without a loading menu. */
 	bool LoadHoldsPresents() const;
 	/** @brief After OcclusionNeedsEngine. The map is held by a load, so render it without the engine's cull. */
 	bool OcclusionHeld(OcclusionMap a_map) const;
-	void OcclusionReferenceRendered(OcclusionMap a_map);
 	/**
 	 * @brief Renders the precipitation mask, for Skylighting at its two points or for DCLF alone without Skylighting.
 	 * With a_dclf, the engine's cull and registration are skipped except on a reference frame, and RenderMask sets the camera and clears it.
@@ -135,30 +127,19 @@ struct DrawcallLimitFix : Feature
 	static void OnMap(ID3D11Resource* a_resource, void* a_data);
 	static void OnUnmap(ID3D11Resource* a_resource);
 	static void OnUpdateSubresource(ID3D11Resource* a_resource, const D3D11_BOX* a_box, const void* a_data);
-	/** @brief CS_DCLF_TARGET_DUMP's points from other features, such as Upscaling. */
-	static bool TargetDumpArmed();
-	static void TargetDumpPoint(const char* a_label, ID3D11Texture2D* a_extra = nullptr);
-	/** @brief Every render graph submission up to a_submissions completed on the GPU. Drives DCLF's retirement clock. */
-	static void OnGraphSubmissionsRetired(std::uint64_t a_submissions);
 	/**
-	 * @brief Render thread. One of DCLF's epochs failed to build or prepare. DCLF hands drawing back to the engine for the session
-	 * at its next frame start. The first failure is kept.
+	 * @brief Render thread. One of DCLF's epochs failed to build or prepare. Graph mode draws the world through DCLF, so this is fatal.
 	 */
 	static void OnGraphEpochFailed(std::string_view a_epoch, const std::string& a_error);
-	/** @brief Render thread. Why one of DCLF's epochs failed, or empty. */
-	static const std::string& GraphEpochFailure();
 
 	/** @brief The feature's state for the diagnostic capture. */
 	struct CaptureInfo
 	{
-		bool installed = false, switchedOn = false, running = false, faulted = false, pumpLagging = false;
+		bool installed = false;
 		std::string unavailableReason;
 	};
 	/** @brief Render thread. The feature's state, for the diagnostic capture. */
-	CaptureInfo GetCaptureInfo() const { return { installed, switchedOn, Running(), faulted, pumpLagging, unavailableReason }; }
-
-	/** @brief Render thread. Whether the hooks are installed. */
-	bool HooksInstalled() const { return installed; }
+	CaptureInfo GetCaptureInfo() const { return { installed, unavailableReason }; }
 
 private:
 	struct Hooks
@@ -225,28 +206,17 @@ private:
 		static void Install();
 	};
 
+	// DCLF installs only in graph mode, and once installed it stays on for the session.
 	bool installed = false;
-	// The menu's on/off toggle, applied at the next Present. Off keeps the hooks and scene tracking, so turning back on needs no rescan,
-	// but does no frame work at all.
-	bool switchedOn = true;
-	bool Running() const { return installed && switchedOn; }
 
-	// The frame's start, from Main::Draw's early hook. Returns Running().
-	bool BeginSceneFrame();
-	// Off when the menu toggle is off or the feature is unloaded. Either way nothing may keep drawing, skipping or withholding.
-	void UpdateActive();
-	void SetActive(bool a_active);
-	// The scene pump's watchdog. A stopped pump turns DCLF off for the session with the reason in the menu, rather than keeping the last snapshot forever.
+	// The frame's start, from Main::Draw's early hook.
+	void BeginSceneFrame();
+	// The scene pump's watchdog. A stopped pump is fatal, rather than keeping the last snapshot forever.
 	void WatchScenePump();
-	// The graph's watchdog. A failed DCLF epoch turns DCLF off for the session, as a stopped pump does.
-	void WatchGraphFailure();
-	bool faulted = false;
 	bool pumpLagging = false;
 	std::chrono::steady_clock::time_point pumpLagSince;
-	// Why DCLF is off for the session, shown in the menu.
+	// Why DCLF did not install, shown in the menu.
 	std::string unavailableReason;
-	/** @brief Off for the session after its hooks went in. The hooks pass straight through, scene tracking stops and nothing is withheld. */
-	void ForceOff();
 	// The settings LoadSettings read, applied to the requested toggles once they are seeded, and again at each load.
 	json savedSettings;
 	void ApplySavedSettings();

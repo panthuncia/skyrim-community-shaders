@@ -140,11 +140,11 @@ namespace DCLF::Draws
 			rhi::PassBeginInfo decalBegin;
 			rhi::PassBeginInfo decalDepthBegin;
 			rhi::ResourceHandle count, classCounts;  // the decal groups' count words; every other sub-range's (ClassCountWord)
-			// CS_DCLF_MAIN_PLAIN replaces the classes' main calls with plain bucket draws.
+			// Plain bucket draws replace the classes' main calls.
 			bool plainMain = false;
-			// CS_DCLF_TERRAIN_PLAIN replaces the terrain groups' calls.
+			// Plain bucket draws replace the terrain groups' calls.
 			bool plainTerrain = false;
-			// CS_DCLF_DECAL_PLAIN replaces the decal groups' calls.
+			// Plain bucket draws replace the decal groups' calls.
 			bool plainDecals = false;
 			bool anyDecals = false;  // any range of the second pass drawn
 			bool anyDecalDepth = false;  // any depth-prepass range drawn
@@ -427,9 +427,6 @@ namespace DCLF::Draws
 				bindings.bucketCounts = a_builder.IndirectArguments(*resources->zBucketCounts[phaseTwo ? 1 : 0]).Resource();
 				if (resources->terrainDepth)
 					bindings.terrainDepth = a_builder.DepthReadWrite(resources->terrainDepth).View();
-				// Alpha-tested draws write each pixel's owner for the foliage record.
-				if (const auto& foliage = resources->foliage)
-					a_builder.UnorderedAccess(foliage->owners, std::span<const org::UavView>{});
 			} else {
 				bindings.classCounts = a_builder.IndirectArguments(*resources->classCounts).Resource();
 				if (resources->pool) {
@@ -438,13 +435,6 @@ namespace DCLF::Draws
 				}
 				if (resources->scene->vertexStream)
 					a_builder.ShaderResource(*resources->scene->vertexStream, noViews);
-				if (const auto& foliage = resources->foliage) {
-					const std::span<const org::UavView> noUavs{};
-					for (std::uint32_t h = 0; h < 2; ++h) {
-						a_builder.UnorderedAccess(foliage->ids[h], noUavs);
-						a_builder.UnorderedAccess(foliage->colours[h], noUavs);
-					}
-				}
 			}
 			DeclareFrameBuffers(a_builder, *resources);
 			a_builder.ShaderResource(resources->frameConstants, noViews);  // the frame record's slots, by address

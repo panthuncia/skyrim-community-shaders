@@ -14,6 +14,7 @@
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "Utils/Logging.h"
 
 #include <array>
 #include <atomic>
@@ -296,6 +297,23 @@ namespace DCLF::Family
 	const char* ReasonOf(InputResult a_result);
 
 	/**
+	 * @brief Why the engine drew work a family should have taken (cleanup plan A3, step 6). Each reason is logged once. In graph
+	 * mode CS_ORG_ENGINE_DRAW_TAP=1 makes a report a tap error (TapError::Refused); a texture a later batch takes is never one.
+	 */
+	class RefusalLog
+	{
+	public:
+		explicit RefusalLog(std::string a_prefix) :
+			log(std::move(a_prefix), spdlog::level::warn) {}
+
+		/** @brief Render thread. Reports a_reason, with a_detail when given. */
+		void Report(std::string_view a_reason, std::string_view a_detail = {});
+
+	private:
+		Util::ReasonLog log;
+	};
+
+	/**
 	 * @brief The published ids a family client's draws can read, fixed when the client is made at setup.
 	 * Each graph build declares a read of every listed id that is registered, for ordering. The set only grows.
 	 * An id first published during play is an error until the graphs rebuild, and that batch goes to the engine.
@@ -354,7 +372,7 @@ namespace DCLF::Family
 
 	/**
 	 * @brief Resolves PS t<a_register> as CS binds it for the batch. Registers below 16 are refused.
-	 * CS binds these on DXVK's own context, not the engine's guest context, so the read stays true under the flush latch.
+	 * CS binds these on DXVK's own context, not the engine's guest context, which keeps only the engine's binds.
 	 */
 	HeaderResult ResolveHeader(std::uint32_t a_register, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, Header& a_out, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure = nullptr, ID3D11ShaderResourceView** a_view = nullptr);

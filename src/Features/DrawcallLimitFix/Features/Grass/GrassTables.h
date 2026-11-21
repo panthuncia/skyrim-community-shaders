@@ -5,12 +5,12 @@
 // Grass's GPU tables, cull programs and count readbacks, held with the scene's tables.
 
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
-#include "Features/DrawcallLimitFix/Core/Render/Readback/RunRanges.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassLayout.h"
 #include "Features/DrawcallLimitFix/Features/Grass/Grass.h"
 
 #include "RenderGraph/ComputeProgram.h"
 #include <ORGModuleServices/GrowableBufferTypes.h>
+#include <Render/RunReadback.h>
 #include <Resources/Buffers/Buffer.h>
 
 #include <array>
@@ -52,12 +52,11 @@ namespace DCLF::Features::Grass
 	inline constexpr std::uint32_t kGrassArgsConstantWords = sizeof(GrassArgsConstants) / 4;
 	static_assert(kGrassArgsConstantWords == 8);
 
-	/** @brief Cull counts read back per run range, on the graph host's thread. */
+	/** @brief Cull counts read back per run region, on the graph host's thread. */
 	struct GrassCounts
 	{
-		Draws::RunRanges ranges{ Draws::kReadbackRanges };
-		std::vector<std::shared_ptr<org::Buffer>> readback;  // by range
-		std::vector<std::uint8_t> filled;                    // by range: its copy holds a frame's counts
+		std::shared_ptr<org::RunReadback> readback;  // one draws header per stable run
+		std::vector<std::uint8_t> filled;            // by region: its copy holds a frame's counts
 		std::atomic<std::uint64_t> frames{ 0 }, live{ 0 }, beyond{ 0 }, outside{ 0 }, thinned{ 0 }, faded{ 0 }, tested{ 0 }, phaseOne{ 0 }, retests{ 0 }, phaseTwo{ 0 };
 		std::atomic<std::uint64_t> phaseOneDraws{ 0 }, phaseTwoDraws{ 0 }, colourDraws{ 0 }, pbrDraws{ 0 };
 	};

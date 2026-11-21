@@ -53,7 +53,6 @@ namespace DCLF
 			std::shared_ptr<ShadowPayload> payload;
 			ShadowInputs in;
 			ShadowBuildSplit split;
-			bool sharedRegion = false;            // the region half writes into the main build's region
 			const void* publication = nullptr;    // the build whose shared half ran
 			std::uint32_t frame = 0;
 		} aheadShadow;
@@ -109,6 +108,8 @@ namespace DCLF
 		std::atomic<std::uint8_t> shadowCapability{ 0 };
 		bool shadowCatalogBuilt = false;
 		DXGI_FORMAT shadowTargetFormat = DXGI_FORMAT_UNKNOWN;
+		// The shadow pipelines' depth format. Taken from the engine's shadow map once it exists, before DCLF draws, and fixed from then on.
+		DXGI_FORMAT pipelineShadowFormat = DXGI_FORMAT_UNKNOWN;
 		/** @brief Fills the catalog with every solid-fill engine state a shadow view can use, plus the cascades' clones. */
 		void BuildShadowCatalog();
 		/** @brief The capability changed, so every caster is decided again. a_defect marks a view the catalog did not foresee. */
@@ -146,10 +147,10 @@ namespace DCLF
 		std::size_t PlacementOf(const PendingView& a_view) const;
 		std::uint32_t placementDefectsLogged = 0;
 		/**
-		 * @brief The occlusion maps' layouts as last set up, filtered by a_toggles.
-		 * Null toggles returns every set-up map, which is what the revision input uses.
+		 * @brief The occlusion maps' layouts as last set up, only the maps DCLF draws with a_onlyOn.
+		 * Without it every set-up map, which is what the revision input uses.
 		 */
-		std::vector<ShadowViewLayout> PredictedOcclusion(const ToggleSet* a_toggles) const;
+		std::vector<ShadowViewLayout> PredictedOcclusion(bool a_onlyOn) const;
 		// How many recent sets of drawn views get their own variant.
 		static constexpr std::size_t kRecentActiveViews = 4;
 		/** @brief The buckets of a rasterizer state's map row, cached. */

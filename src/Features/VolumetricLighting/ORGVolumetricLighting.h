@@ -1,48 +1,45 @@
 #pragma once
 
+#include "RenderGraph/Port.h"
+
 #include <memory>
 #include <string_view>
 
 /**
-* @brief Volumetric Lighting's GPU work on the render graph, with CS_ORG_VOLUMETRIC_LIGHTING=1.
+* @brief Volumetric Lighting's GPU work on the render graph, in graph mode.
 *
 * The engine's CPU side runs as before. Inside the VL render every DispatchCSShader is withheld, and the apply and blur are
 * detoured whole. The blur's call runs the VolumetricLighting anchor, which holds all the passes, each gated except the depth copy.
-* A frame the graph cannot run is skipped and logged once per reason, with no fallback to the engine.
+* The density volume is declared on the feature's size settings and the Interior variable (frame revision plan 6.12), and the
+* client on the inputs the VL render finds. A change switches in with its revision; until then the old one draws. The feature
+* gives the engine the adopted revision's quality, so the engine's volume size is always the bound version's (a mismatch is fatal).
 * The engine subsystems install it, not the feature. Native mode installs it with the feature off too, since it has no D3D11 path,
 * and then draws the engine's own volumetric lighting. Render thread throughout. Free of ORG/Vulkan includes.
 */
-class ORGVolumetricLighting
+class ORGVolumetricLighting : public RenderGraph::Port<ORGVolumetricLighting>
 {
 public:
-	static bool Requested();
-
-	static ORGVolumetricLighting& Get();
-
-	/** @brief Before the render graph initializes. */
-	static void Reserve();
+	static constexpr std::string_view kName = "Volumetric Lighting";
 
 	static void Install();
 
 	/**
-	* @brief After the features' SetupResources. An input missing now, such as the noise gradient before the sky loads, registers at the first VL render.
-	* @return False keeps the D3D11 path.
+	* @brief After the features' SetupResources. Declares the volume and the client. The client registers in the first revision
+	* after a VL render found its inputs (the sky's noise gradient loads late). Outside graph mode it does nothing; in graph mode a
+	* failure is fatal. Once set up (IsActive), the detours take the engine's work.
 	*/
-	bool Setup();
-
-	/** @brief The detours then take the engine's work. */
-	bool IsActive() const;
+	void Setup();
 
 	/** @brief True when the dispatch is the VL render's on the ORG path, and the caller skips it. a_computeShader is for the log. */
 	bool TakeEngineDispatch(std::string_view a_computeShader);
-
 	~ORGVolumetricLighting();
 
 private:
+	friend class RenderGraph::Port<ORGVolumetricLighting>;
 	friend struct ORGVolumetricLightingDetours;
 	struct Impl;
 
-	ORGVolumetricLighting() = default;
+	ORGVolumetricLighting();
 
 	std::unique_ptr<Impl> impl;
 };

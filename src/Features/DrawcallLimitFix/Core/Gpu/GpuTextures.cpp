@@ -6,6 +6,7 @@
 
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/ImageRegistry.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -295,7 +296,7 @@ namespace DCLF
 		// The thread shares this, so the last owner only signals it and never joins.
 		struct Importer
 		{
-			EventQueue<Work, 1024> queue;
+			RenderGraph::Frame::EventQueue<Work, 1024> queue;
 			std::atomic<std::uint64_t> wake{ 0 };
 			std::atomic<bool> stop{ false };
 			std::atomic<std::shared_ptr<const Published>> published;
@@ -493,10 +494,6 @@ namespace DCLF
 		{
 			TextureStreaming::Census::NoteRendererUse(a_view);
 			TracyPlot("CS.DCLF.Texture.ImportSource", static_cast<std::int64_t>(a_sourceTag));
-			if (!SwitchValue(Switch::TraceTexturePaths).empty()) {
-				TracyPlot("CS.DCLF.Texture.ImportView", static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(a_view)));
-				TracyPlot("CS.DCLF.Texture.ImportImage", static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(a_image)));
-			}
 		}
 
 		/** @brief An engine texture ORG owns. The image is ORG's, so it never moves and needs no tracking or pin. */
@@ -641,9 +638,12 @@ namespace DCLF
 					reinterpret_cast<std::uintptr_t>(image.image), reinterpret_cast<std::uintptr_t>(view));
 				// A raw import of a GENERAL image names GENERAL, but a graph that moves images holds it in a read-only layout during the read.
 				// So the view is made on the graph resource's own image instead.
+				// Outside native mode an import is DXVK's image shared with the graph, and no ledger follows it for raw work.
 				if (image.layout == VK_IMAGE_LAYOUT_GENERAL && (RenderGraph::NativeGraphMovesImages() || RenderGraph::RawAccess::On()))
-					if (auto graph = RenderGraph::GraphResourceOfImage(reinterpret_cast<std::uint64_t>(image.image)); graph && !graph->CommonLayoutOnly())
-						graphResource = std::move(graph);
+					if (auto entry = RenderGraph::ImageRegistry::Find(reinterpret_cast<std::uint64_t>(image.image));
+						entry && entry->resource && (entry->kind != RenderGraph::ImageRegistry::Kind::Import || RenderGraph::NativeGraphMovesImages()) &&
+						!entry->resource->CommonLayoutOnly())
+						graphResource = std::move(entry->resource);
 				if (graphResource && RenderGraph::NativeGraphMovesImages()) {
 					RenderGraph::RawAccess::Count(RenderGraph::RawAccess::Kind::ViewFromGraph);
 				} else {
@@ -823,7 +823,9 @@ namespace DCLF
 	std::string GpuTextures::SourceName(std::uint32_t a_tag)
 	{
 		// Highest first, since a tag is its source's first value plus a slot.
-		static constexpr std::pair<Source, const char*> kSources[] = { { Source::Scaleform, "Scaleform" }, { Source::ImGui, "ImGui" },
+		static constexpr std::pair<Source, const char*> kSources[] = { { Source::DeferredComposite, "deferred composite" },
+			{ Source::VolumetricClouds, "volumetric clouds" }, { Source::PhysicalSky, "physical sky" }, { Source::CloudMaps, "cloud maps" },
+			{ Source::Scaleform, "Scaleform" }, { Source::ImGui, "ImGui" },
 			{ Source::ShadowDiffuse, "shadow diffuse" }, { Source::FamilyNull, "family null view" }, { Source::FamilyHeader, "family header" },
 			{ Source::FrameSlot, "frame slot" }, { Source::Mask, "pipeline mask" }, { Source::Projected, "projected decal" },
 			{ Source::Feature, "material feature" }, { Source::Material, "material slot" } };
@@ -919,10 +921,10 @@ namespace DCLF
 		}
 	}
 
-	GpuTextures::Binding GpuTextures::NullOf(ViewKind a_kind)
+	ID3D11ShaderResourceView* GpuTextures::NullView(ViewKind a_kind)
 	{
 		if (a_kind == ViewKind::Buffer)
-			return { .index = NullBufferIndex(false) };
+			return nullptr;
 		// Made once on the render thread. The null descriptor is a 2D view.
 		struct NullViews
 		{
@@ -973,10 +975,17 @@ namespace DCLF
 				logger::error("[DCLF] textures: the null views by kind could not be made; an engine draw with an empty slot stays the engine's");
 			return out;
 		}();
-		ID3D11ShaderResourceView* view = a_kind == ViewKind::Cube           ? nulls.cube.get() :
-		                                 a_kind == ViewKind::Texture3D      ? nulls.texture3D.get() :
-		                                 a_kind == ViewKind::Texture2DArray ? nulls.texture2DArray.get() :
-		                                                                      nulls.texture2D.get();
+		return a_kind == ViewKind::Cube           ? nulls.cube.get() :
+		       a_kind == ViewKind::Texture3D      ? nulls.texture3D.get() :
+		       a_kind == ViewKind::Texture2DArray ? nulls.texture2DArray.get() :
+		                                            nulls.texture2D.get();
+	}
+
+	GpuTextures::Binding GpuTextures::NullOf(ViewKind a_kind)
+	{
+		if (a_kind == ViewKind::Buffer)
+			return { .index = NullBufferIndex(false) };
+		auto* view = NullView(a_kind);
 		return view ? ResolveBinding(view, Tag(Source::FamilyNull, static_cast<std::uint32_t>(a_kind))) : Binding{};
 	}
 

@@ -12,9 +12,6 @@ namespace DCLF::Scene
 		// Per-frame entries are walked once per frame input.
 		std::uint32_t perFrameFrame = ~0u;
 		bool perFrameWalked = true;
-		// Only for CS_DCLF_WALK_PARITY's dense rebuild.
-		bool denseWalk = false;
-		ankerl::unordered_dense::map<const RE::BSGeometry*, Ineligible> referenceReasons;
 		// Read once by the walk and reused by the joins, so both halves agree.
 		bool sceneBuilt = false;  // the walk ran: the records are this frame's
 		bool frameResolveBuffers = false;
@@ -38,10 +35,8 @@ namespace DCLF::Scene
 		{
 			std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> ineligible{};
 			std::array<std::uint32_t, 64> techniqueRejects{};
-			std::uint32_t classifyHits = 0, classifyChecked = 0, classifyDiffers = 0;
-			std::string classifyDiffersFirst;
-			std::uint64_t verdictsChecked = 0, verdictsSkipped = 0, verdictsMissed = 0;
-			std::string firstVerdictMissed;
+			std::uint32_t classifyHits = 0;
+			std::uint64_t verdictsChecked = 0, verdictsSkipped = 0;
 			std::uint64_t leafMissing = 0;  // leafStats.missing
 			std::array<double, static_cast<std::size_t>(BuildPart::Count)> partMs{};  // the chunk's PartTimer (CS_DCLF_PROFILE)
 			std::array<double, static_cast<std::size_t>(EvaluateKind::Count)> evaluateKindMs{};
@@ -77,7 +72,6 @@ namespace DCLF::Scene
 			std::uint32_t skinRows = 0;
 			std::uint16_t skinPartitions = 0;
 			std::uint32_t skinLodPartitions = 0;
-			bool verdictUnannounced = false;  // the frame verdict changed with no hidden event
 			Write write = Write::None;
 			TrackedDelta delta;
 			SceneCapture::LeafView leaf;
@@ -85,7 +79,6 @@ namespace DCLF::Scene
 			bool shadowOnly = false;
 			bool focusOnly = false;  // with shadowOnly: a hidden actor part, drawn only by focus views (kObjectFocusOnly)
 			bool entryTaken = false;       // a taken entry class's: its snapshot is the merge's (ComponentsResolve)
-			bool referenceReason = false;  // the dense walk's: reason into referenceReasons
 			std::uint16_t partitionMask = 0;
 			bool lodChain = false;
 			bool skinCandidate = false;  // in this walk's skinnedObjects

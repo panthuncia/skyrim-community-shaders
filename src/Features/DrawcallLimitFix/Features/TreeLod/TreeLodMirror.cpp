@@ -1,7 +1,6 @@
 // Tree LOD: the hooks' push, the refill's packing rule, and the render thread's Mirror the depth commit uploads from.
 
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"
-#include "Features/DrawcallLimitFix/Features/TreeLod/Diagnostics/TreeLodEvents.h"
 
 #include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -9,13 +8,11 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 
 #include <cstring>
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 namespace DCLF::Features::TreeLod
 {
 	namespace
 	{
-		constexpr Engine::Offset kLodTreesRoot{ { 402321 }, { 516170 } };  // NiNode*: the shapes' parent
 		// SE's two are jmp thunks to the conversions, as its refill calls them.
 		constexpr Engine::Offset kHalfToFloat{ { 76218 }, { 74492 } }, kFloatToHalf{ { 76217 }, { 74491 } };
 		constexpr Engine::Offset kCos{ { 109720 }, { 102264 } }, kSin{ { 109721 }, { 102265 } };  // the CRT's, as the refill calls them
@@ -76,22 +73,16 @@ namespace DCLF::Features::TreeLod
 		Pack(a_allVisible, a_group, a_out);
 	}
 
-	RE::NiNode* LodTreesRoot()
-	{
-		return Engine::Global<RE::NiNode*>(kLodTreesRoot);
-	}
-
 	Mirror& RenderMirror()
 	{
 		static Mirror mirror;
 		return mirror;
 	}
 
-	void Mirror::Drain(std::uint32_t a_frame)
+	void Mirror::Drain(std::uint32_t)
 	{
 		drainThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
 		events.Drain([&](Event&& a_event) {
-			Diagnostics::Notify(TreeLodEventDrained{ a_event.shape });
 			if (a_event.kind == Event::Kind::Remove) {
 				++stats.removes;
 				if (const auto it = groups.find(a_event.shape); it != groups.end()) {
@@ -135,7 +126,6 @@ namespace DCLF::Features::TreeLod
 			row.mesh = mesh != meshes.end() ? mesh->second.slot : ~0u;
 			MarkSlot(group.slot);
 		});
-		Diagnostics::Notify(TreeLodDrained{ *this, a_frame });
 	}
 
 	std::uint32_t Mirror::AcquireSlot()

@@ -9,11 +9,12 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/MainTick.h"
-#include "RenderGraph/Engine/Targets/EngineTargets.h"
-#include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Switches.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -454,6 +455,24 @@ namespace DCLF::Family
 		return ids;
 	}
 
+	void RefusalLog::Report(std::string_view a_reason, std::string_view a_detail)
+	{
+		(void)log.Report(a_reason, a_detail);
+		if (!::RenderGraph::Engine::GraphMode())
+			return;
+		// A texture still importing or streaming its window in is asked for, and a later frame takes it: that draw lags. The log
+		// above names it once.
+		if (a_detail.find(GpuTextures::kLaterBatch) != std::string_view::npos)
+			return;
+		// Routine refusals (the sun query's depth, menu views) have no classification rule yet. They are logged, and the engine's
+		// call is left out as before, unless CS_ORG_ENGINE_DRAW_TAP=1 makes them tap errors.
+		static const bool strict = ::Switches::On("CS_ORG_ENGINE_DRAW_TAP");
+		if (!strict)
+			return;
+		::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::Refused, ::RenderGraph::Frame::SegmentId::Count,
+			a_detail.empty() ? fmt::format("DCLF: {}", a_reason) : fmt::format("DCLF: {}, {}", a_reason, a_detail));
+	}
+
 	const char* ReasonOf(InputResult a_result)
 	{
 		switch (a_result) {
@@ -482,30 +501,25 @@ namespace DCLF::Family
 
 	void PublishedInputs::AddEngine(RE::RENDER_TARGET a_target)
 	{
-		FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_target));
+		FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(a_target)));
 		Add(EngineTargetId(a_target));
 	}
 
 	void PublishedInputs::AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL a_target)
 	{
-		FrameAnchors::EngineDepth(static_cast<std::uint32_t>(a_target));
+		FrameAnchors::EngineTexture(FrameAnchors::Depth(static_cast<std::uint32_t>(a_target)));
 		Add(EngineTargetId(a_target));
 	}
 
 	void PublishedInputs::AddEngine(RE::RENDER_TARGET_CUBEMAP a_target)
 	{
-		FrameAnchors::EngineCubemap(static_cast<std::uint32_t>(a_target));
+		FrameAnchors::EngineTexture(FrameAnchors::Cubemap(static_cast<std::uint32_t>(a_target)));
 		Add(EngineTargetId(a_target));
 	}
 
 	void PublishedInputs::AddEngineCopy(RE::RENDER_TARGET a_target)
 	{
-		// Published only while ORG owns the target. Otherwise it stays a D3D11 texture and the id is never declarable.
-		const auto index = static_cast<std::uint32_t>(a_target);
-		if (auto* renderer = globals::game::renderer; renderer && index < static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL)) {
-			if (auto* copy = renderer->GetRuntimeData().renderTargets[index].textureCopy)
-				RenderGraph::Engine::Targets::Find(reinterpret_cast<ID3D11Resource*>(copy));
-		}
+		// The engine target set publishes the copy under its id at setup.
 		Add(EngineTargetId(a_target) + " Copy");
 	}
 
@@ -577,7 +591,6 @@ namespace DCLF::Family
 			return HeaderResult::Texture;
 		ID3D11ShaderResourceView* view = nullptr;
 		globals::d3d::context->PSGetShaderResources(a_register, 1, &view);
-		RenderGraph::Engine::Flush::NoteRead("engine draw family ResolveHeader", a_register, view);
 		if (a_view)
 			*a_view = view;
 		if (!view) {
@@ -635,20 +648,20 @@ namespace DCLF::Family
 	{
 		namespace Driver = ::RenderGraph::Frame::Driver;
 		if (FrameAnchors::NamedByStage(a_client)) {
-			const auto hold = FrameAnchors::HeldNow(a_client, a_anchor);
-			if (!hold.held) {
+			const auto hold = FrameAnchors::Place(a_client, a_anchor);
+			if (!hold.InStage()) {
 				Driver::NoteTapError(Driver::TapError::NotDeclared, static_cast<::RenderGraph::Frame::SegmentId>(a_segment),
 					std::format("the {} batch of {} came while no open stage holds the client; it draws nothing", a_family, a_client));
 				return false;
 			}
-			if (!hold.scheduled) {
+			if (!hold.draws) {
 				static Util::ReasonLog log("[DCLF] engine draw families: a batch lags (its stage's schedule does not hold its client yet); nothing is drawn");
 				log.Report(std::format("{} {}", a_family, a_client));
 				return false;
 			}
 			return true;
 		}
-		if (!FrameAnchors::Scheduled(a_client, a_anchor)) {
+		if (!FrameAnchors::Place(a_client, a_anchor).draws) {
 			static Util::ReasonLog log("[DCLF] engine draw families: the engine draws a batch (the anchor's built graph does not hold its client yet)", spdlog::level::err);
 			log.Report(std::format("{} {}", a_family, a_client));
 			return false;

@@ -1,17 +1,15 @@
 #pragma once
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include <rhi.h>
 
-#	include <rhi.h>
-
-#	include <array>
-#	include <cstdint>
-#	include <memory>
-#	include <optional>
-#	include <span>
-#	include <string>
-#	include <utility>
-#	include <vector>
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace org
 {
@@ -31,7 +29,7 @@ namespace org::services
 * The raster twin of ComputeProgram. Both stages are HLSL under Data/Shaders, compiled to SPIR-V at runtime with BasicRHI's
 * descriptor-heap ABI. Shaders fetch resources by heap index, and their constants are the push block at b0.
 * The default vertex stage is a fullscreen triangle with TEXCOORD0 from (0,0) top left to (1,1) bottom right.
-* The viewport is the pass's render area. Hot reload swaps a new pipeline into the same slot at the graph's next build.
+* The viewport is the pass's render area. Hot reload adds a new version to the same slot, which graphs built after it bind.
 */
 struct RasterProgram
 {
@@ -39,7 +37,7 @@ struct RasterProgram
 	static constexpr const char* kFullscreenVertexShader = "RenderGraph/FullscreenVS.hlsl";
 
 	rhi::PipelineLayoutPtr layout;
-	// Bind Pipeline() at record time. Never keep a handle across recordings.
+	// Bind Pipeline(recording) at record time. Never keep a handle across recordings.
 	std::shared_ptr<org::services::LivePipelineSlot> slot;
 	std::uint32_t constantWords = 0;
 	std::uint32_t targetCount = 0;
@@ -47,8 +45,11 @@ struct RasterProgram
 	// The draw command signature under the program's layout, for DrawDesc::indirect.
 	rhi::CommandSignaturePtr drawSignature;
 
-	/** @brief The pipeline to bind at record time. It changes only at a graph build, where nothing records. */
-	rhi::PipelineHandle Pipeline() const;
+	/**
+	* @brief The pipeline a_recording binds: the slot's version at its graph's pipeline pin (RenderGraph/PipelineVersions.h). A shader
+	* reload never changes it; the pin keeps it alive while the recording lives.
+	*/
+	rhi::PipelineHandle Pipeline(const org::RecordingContext& a_recording) const;
 
 	/** @brief A colour target's format and blending. */
 	struct Target
@@ -80,7 +81,7 @@ struct RasterProgram
 		// Also give each stage CS's common defines, as its D3D11 build gets, so dual-target shaders compile the same permutation.
 		// Off for generated stages, which have no D3D11 build.
 		bool commonDefines = true;
-		// Each stage's full define list, used as is when not empty. Set by ProgramCache on the requesting thread,
+		// Each stage's full define list, used as is when not empty. Set by the program service on the requesting thread,
 		// since CS's common defines read State, which a build thread must not.
 		std::vector<std::pair<std::wstring, std::wstring>> vertexStageDefines;
 		std::vector<std::pair<std::wstring, std::wstring>> pixelStageDefines;
@@ -138,6 +139,10 @@ struct RasterProgram
 		// so a kept recording can skip work by its data alone.
 		const org::LatchBlock* indirect = nullptr;
 		std::uint32_t indirectOffset = 0;
+		// Or reads them from this buffer at this offset, which a GPU pass wrote and the pass declares as indirect arguments.
+		// Non-indexed: vertex count, instances, first vertex, first instance.
+		rhi::ResourceHandle indirectBuffer{};
+		std::uint64_t indirectBufferOffset = 0;
 		// An occlusion query around this draw alone. The caller resets it before and resolves it after.
 		rhi::QueryPoolHandle occlusionPool{};
 		std::uint32_t occlusionIndex = 0;
@@ -148,4 +153,3 @@ struct RasterProgram
 	bool Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const;
 };
 
-#endif

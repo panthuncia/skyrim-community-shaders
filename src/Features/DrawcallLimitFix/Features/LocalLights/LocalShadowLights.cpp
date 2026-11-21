@@ -9,8 +9,6 @@
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "State.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Scene/Events.h"
 
 namespace DCLF
 {
@@ -18,7 +16,7 @@ namespace DCLF
 	{
 		LocalShadowLights out;
 		// Each light appears once. Its volumes are the planes each descriptor's cull tests (Process2).
-		const std::uint32_t sceneFrame = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t sceneFrame = Scene::FrameView::Get().SceneStep();
 		const auto* selection = LightSelection::Get().Current(sceneFrame);
 		if (!selection)
 			return out;
@@ -53,7 +51,6 @@ namespace DCLF
 				for (std::uint32_t q = 0; q < 6; ++q)
 					volume.planes[q] = view->cull.plane[q];
 				volume.masks[0] = view->cull.mask & 0x3Fu;
-				Diagnostics::Notify(Diagnostics::ShadowVolumeSampled{ *view, *process });
 				sampled.volumes.push_back(volume);
 			}
 			out.lights.push_back(std::move(sampled));
@@ -82,7 +79,7 @@ namespace DCLF
 			out.shadowMaskIndex = a_maskIndex;
 			out.affectsLand = a_light->affectLand;
 		};
-		if (const auto* selection = LightSelection::Get().Current(Scene::FrameView::Get().GetFrame()))
+		if (const auto* selection = LightSelection::Get().Current(Scene::FrameView::Get().SceneStep()))
 			for (const auto& selected : selection->locals)
 				if (selected.light != selection->sun)
 					put(selected.light, selected.maskIndex);

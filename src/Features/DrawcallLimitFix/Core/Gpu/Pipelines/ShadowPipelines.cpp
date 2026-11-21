@@ -12,8 +12,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -29,7 +29,7 @@
 #include <Tracy/Tracy.hpp>
 
 #include <OpenRenderGraph/GraphHost.h>
-#include <ORGModuleServices/PipelineService.h>
+#include <ORGModuleServices/PipelineRegistry.h>
 #include <rhi_helpers.h>
 
 #include <algorithm>
@@ -40,6 +40,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesImpl.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
@@ -96,11 +97,19 @@ namespace DCLF
 		WakePipelineLane();
 	}
 
-	void DrawPipelines::SetShadowInputs(DXGI_FORMAT a_format, RE::BSShader& a_utility)
+	void DrawPipelines::InitShadowInputs(DXGI_FORMAT a_format, RE::BSShader& a_utility)
 	{
 		auto& input = impl->renderInput;
-		// Unknown until the engine has drawn a shadow map, and then not posted.
-		if (a_format == DXGI_FORMAT_UNKNOWN || (input.shadowFormat == a_format && input.utility == &a_utility) || !Enabled())
+		if (a_format == DXGI_FORMAT_UNKNOWN)
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the engine's shadow map has no declared format");
+		// D3D11 mode runs CS's setup again after a resize. The format is the same then, so that call does nothing.
+		if (input.shadowFormat != DXGI_FORMAT_UNKNOWN) {
+			if (input.shadowFormat != a_format)
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the shadow map format changed ({} -> {}); it is fixed for the session",
+					static_cast<int>(input.shadowFormat), static_cast<int>(a_format)));
+			return;
+		}
+		if (!Enabled())
 			return;
 		input.shadowFormat = a_format;
 		input.utility = &a_utility;
@@ -125,8 +134,7 @@ namespace DCLF
 			}
 		}
 		if (!nearest)
-			return lane.shadow.recreatedBy.empty() ? std::string("the first shadow pipeline") :
-			                                         fmt::format("no other shadow pipeline since the set was recreated ({})", lane.shadow.recreatedBy);
+			return std::string("the first shadow pipeline");
 		return fmt::format("nearest requested shadow pipeline differs in {}", best.fields);
 	}
 
@@ -173,49 +181,24 @@ namespace DCLF
 		}
 		const ShadowRasterState rasterState = (*input->shadowStates)[a_key.viewState - 1];
 		const DXGI_FORMAT depthFormat = input->shadowFormat;
-		org::services::PipelineRecipe recipe;
-		recipe.id = fmt::format("dclf.shadow.{:08X}.{:X}.{:016X}.{}", a_key.technique, a_key.rasterFlags, a_key.vertexLayout, a_key.viewState);
-		recipe.shaderKey = ShadowPipelineKeyHash{}(a_key) ^ (program->fingerprint * 0x9E3779B97F4A7C15ull);
-		recipe.fixedFunctionKey = static_cast<std::uint64_t>(depthFormat) ^ kPulledVerticesSalt;
+		const std::string id = fmt::format("dclf.shadow.{:08X}.{:X}.{:016X}.{}", a_key.technique, a_key.rasterFlags, a_key.vertexLayout, a_key.viewState);
 		const auto build = [device = device, layout = ShadowLayout(), key = a_key, depthFormat, rasterState](const ShaderPrograms::ShadowProgram& a_program) {
 			return BuildShadow(device, layout, key, &a_program, depthFormat, rasterState);
 		};
-		recipe.build = [build, program] { return build(*program); };
-		auto live = MakeLive(recipe.id, ShaderPrograms::SourcePathOf(*input->utility), *program,
+		auto live = MakeLive(id, ShaderPrograms::SourcePathOf(*input->utility), *program,
 			[technique = a_key.technique, utility = input->utility](ShaderPrograms::Rebuilt<ShaderPrograms::ShadowProgram> a_done) {
 				ShaderPrograms::Get().RebuildShadow(technique, *utility, std::move(a_done));
 			},
 			build);
 		s.entries.try_emplace(a_key);
-		(void)service.Request(std::move(recipe),
-			[completions = completions, key = a_key, generation = s.generation, live = std::move(live)](const org::services::PipelineArtifact& a_artifact) {
+		RequestBuild([build, program] { return build(*program); },
+			[completions = completions, key = a_key, generation = s.generation, live = std::move(live)](Artifact a_artifact) {
 				completions->shadow.Push({ key, generation, a_artifact, live });
 				WakePipelineLane();
 			});
 		s.counters.requested.fetch_add(1, std::memory_order_relaxed);
 		logger::warn("[DCLF] on-demand pipeline build: shadow technique {:08X}, raster {:X}, vertex layout {:016X}, view state {}, format {}, {}; {}", a_key.technique,
 			a_key.rasterFlags, a_key.vertexLayout, a_key.viewState, static_cast<int>(depthFormat), casters, NearestShadowKey(a_key));
-	}
-
-	void DrawPipelines::Impl::RecreateShadowSet(DXGI_FORMAT a_from, DXGI_FORMAT a_to)
-	{
-		auto& s = lane.shadow;
-		logger::info("[DCLF] pipeline lane: shadow map format {} -> {}; rebuilding {} shadow pipelines", static_cast<int>(a_from), static_cast<int>(a_to),
-			s.setPipelines.size());
-		ResetShadowSet(fmt::format("shadow map format {} -> {}", static_cast<int>(a_from), static_cast<int>(a_to)));
-	}
-
-	void DrawPipelines::Impl::ResetShadowSet(std::string a_by)
-	{
-		auto& s = lane.shadow;
-		s.StartOver();
-		s.versions.Retire();
-		s.setPipelines.clear();
-		s.setSlots.clear();
-		s.layouts.clear();
-		s.discards.clear();
-		s.recreatedBy = std::move(a_by);
-		lane.dirty = true;
 	}
 
 	void DrawPipelines::Impl::AdmitShadow()
@@ -286,26 +269,17 @@ namespace DCLF
 
 	std::uint32_t DrawPipelines::ShadowRasterStateId(const D3D11_RASTERIZER_DESC& a_desc, std::uint32_t a_renderMode)
 	{
-		// The epoch's pass is bounded by the viewport, so no scissor. Depth clipping off becomes depth clamp, as DXVK draws it,
-		// where the device has it and CS_DCLF_SHADOW_DEPTH_CLAMP is not 0.
-		static const bool depthClamp = SwitchOnUnlessZero(Switch::ShadowDepthClamp);
-		const bool clampable = depthClamp && Enabled() && impl->depthClipDisable;
+		// The epoch's pass is bounded by the viewport, so no scissor. Depth clipping off becomes depth clamp, as DXVK draws it.
+		// Setup fails on a device without depth clamp.
+		const bool clampable = Enabled();
 		if (a_desc.FillMode != D3D11_FILL_SOLID || (!a_desc.DepthClipEnable && !clampable)) {
-			if (impl->loggedShadowRasterFailures++ < kMaxLoggedFailures) {
-				const char* clampText = "available";
-				if (!depthClamp)
-					clampText = "off (CS_DCLF_SHADOW_DEPTH_CLAMP=0)";
-				else if (!impl->depthClipDisable)
-					clampText = "not supported by the device";
-				logger::warn("[DCLF] shadow view rasterizer state not expressible (fill {}, depth clip {}; depth clamp {}); the view stays native",
-					static_cast<int>(a_desc.FillMode), a_desc.DepthClipEnable, clampText);
-			}
+			if (impl->loggedShadowRasterFailures++ < kMaxLoggedFailures)
+				logger::warn("[DCLF] shadow view rasterizer state not expressible (fill {}, depth clip {}; pipelines {}); the view stays native",
+					static_cast<int>(a_desc.FillMode), a_desc.DepthClipEnable, clampable ? "ready" : "not ready");
 			return 0;
 		}
-		// CS_DCLF_TEST_SHADOW_CLAMP clamps every state, to exercise that path with the engine's states.
-		static const bool testClamp = SwitchEnabled(Switch::TestShadowClamp);
 		Impl::ShadowRasterState state;
-		state.depthClip = a_desc.DepthClipEnable != FALSE && !(testClamp && clampable);
+		state.depthClip = a_desc.DepthClipEnable != FALSE;
 		state.depthBias = static_cast<float>(a_desc.DepthBias);
 		state.depthBiasClamp = a_desc.DepthBiasClamp;
 		state.slopeScaledDepthBias = a_desc.SlopeScaledDepthBias;

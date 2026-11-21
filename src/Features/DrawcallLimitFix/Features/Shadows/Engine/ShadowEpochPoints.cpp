@@ -19,14 +19,12 @@ namespace DCLF::Features::Shadows::Engine
 		void BeforeShadowCasters()
 		{
 			// The frame's views are DCLF's only while the selected revision recorded the shadow payload, decided before any of them registers.
-			if (ActiveToggles().shadows)
-				IndirectDraws::Get().DecideShadowCoverage();
+			IndirectDraws::Get().DecideShadowCoverage();
 		}
 
 		void BeforeShadowMaps()
 		{
-			if (ActiveToggles().shadows)
-				IndirectDraws::Get().BeginShadowFrame();
+			IndirectDraws::Get().BeginShadowFrame();
 		}
 
 		std::uint32_t AfterShadowMaps(std::uint32_t a_maps)

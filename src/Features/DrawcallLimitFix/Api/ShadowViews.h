@@ -17,7 +17,6 @@ namespace DCLF::Api
 	class OcclusionTargetImport;
 	class OccluderLeaf;
 	class OcclusionCamera;
-	class OcclusionAccumulator;
 	class ShadowLightKept;
 	class ShadowSourceCamera;
 	// Defined in Core/Render/Shadow/ShadowExclusionBuild.h.
@@ -42,19 +41,17 @@ namespace DCLF::Api
 		std::string_view list, report, target;
 	};
 	/**
-	 * @brief An occlusion map, DCLF's while `available` is set and its toggle is on.
+	 * @brief An occlusion map, DCLF's while `available` is set.
 	 *
 	 * - technique: pure, per walked non-LOD Lighting object. Returns the Utility technique to draw it with, or 0 if it occludes nothing.
 	 *   LOD never occludes, because the engine's mask cull does not visit the LOD root.
 	 * - minRadius: skip objects with a bound radius of 32 or less, matching Skylighting's size test.
 	 * - floorHeight: optional. Skip objects wholly below this height, since they cannot block any probe's view of the sky.
-	 * - ownsAccumulator: asked in slot order until one map claims the 0x1C accumulator.
 	 * - importTarget: called once, Precipitation first, then Sky.
 	 */
 	struct OcclusionMapContribution
 	{
 		OcclusionMap map = OcclusionMap::Count;
-		ToggleId toggle;
 		const bool* available = nullptr;
 		ViewBits bits;
 		std::uint32_t (*technique)(const OccluderLeaf& a_leaf) = nullptr;
@@ -63,9 +60,7 @@ namespace DCLF::Api
 		OcclusionTarget target = OcclusionTarget::EngineMask;
 		OcclusionLabels labels;
 		void (*importTarget)(OcclusionTargetImport& a_import) = nullptr;
-		bool (*referenceDue)() = nullptr;
 		void (*camera)(OcclusionCamera& a_camera) = nullptr;
-		bool (*ownsAccumulator)(const OcclusionAccumulator& a_accumulator) = nullptr;
 	};
 
 	/** @brief The lights whose views the shadow engine draws. Sun and Spot share the clamped render mode. Point is the paraboloid. */

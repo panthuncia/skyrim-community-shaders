@@ -2,6 +2,7 @@
 
 #ifdef CS_ENABLE_AFTERMATH
 
+#	include "DxvkExports.h"
 #	include "DxvkLoader.h"
 #	include "Globals.h"
 
@@ -161,9 +162,7 @@ namespace
 		}
 		if (!globals::d3d::device)
 			return;
-		using ResolveCheckpoint = BOOL(__stdcall*)(ID3D11Device*, const void*, char*, UINT);
-		const auto module = ::GetModuleHandleW(L"dxvk_d3d11.dll");
-		const auto resolve = module ? reinterpret_cast<ResolveCheckpoint>(::GetProcAddress(module, "dxvkResolveCheckpointMarker")) : nullptr;
+		const auto resolve = DxvkExports::Get().resolveCheckpointMarker;
 		char text[120]{};
 		if (resolve && resolve(globals::d3d::device, a_marker, text, sizeof(text)))
 			a_resolve(text, static_cast<uint32_t>(std::strlen(text) + 1));
@@ -237,18 +236,6 @@ bool Aftermath::IsEnabled()
 	return g_enabled.load(std::memory_order_acquire);
 }
 
-bool Aftermath::WantsCrashAnalysis()
-{
-	// Deliberately not gated on g_enabled: on AMD the SDK never arms, and that is exactly the
-	// case where the markers matter most, because Radeon GPU Detective is the tool that will read
-	// them. Opt-in: DXVK's hang mode serialises concurrent command recording.
-	static const bool requested = [] {
-		char buf[8] = {};
-		return ::GetEnvironmentVariableA("CS_GPU_CRASH_ANALYSIS", buf, sizeof(buf)) && buf[0] == '1';
-	}();
-	return requested;
-}
-
 const void* Aftermath::RegisterOrgCheckpoint(void*, const char* a_name) noexcept
 {
 	if (!g_enabled.load(std::memory_order_acquire))
@@ -280,7 +267,6 @@ void Aftermath::Disable()
 
 bool Aftermath::Enable() { return false; }
 bool Aftermath::IsEnabled() { return false; }
-bool Aftermath::WantsCrashAnalysis() { return false; }
 const void* Aftermath::RegisterOrgCheckpoint(void*, const char*) noexcept { return nullptr; }
 void Aftermath::Disable() {}
 

@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalPrograms.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -32,18 +33,19 @@ namespace DCLF::Features::Fades
 		// Render thread. The scene owns the write-back.
 		std::weak_ptr<FadeWriteBack> postedWriteBack;
 
+		const SetupPrograms::Compute kFadeStateProgram{ "DCLF fade state",
+			[] { return ComputeProgram::Desc{ .source = Draws::kFadeStateShader, .constantWords = Draws::kFadeStateConstantWords }; } };
+		const SetupPrograms::Compute kPortalQueriesProgram{ "DCLF fade portal queries",
+			[] { return ComputeProgram::Desc{ .source = Draws::kFadeStateShader, .entry = L"PreparePortalQueries", .constantWords = Draws::kFadeStateConstantWords }; } };
+
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			using org::services::GrowableContents;
-			auto fadeState = ComputeProgram::Load(a_setup.device, { .source = Draws::kFadeStateShader, .constantWords = Draws::kFadeStateConstantWords });
-			if (!fadeState) {
-				logger::warn("[DCLF] The fade state program could not be created; fades stay the CPU's");
-				return nullptr;
-			}
+			auto fadeState = kFadeStateProgram.Get();
 			auto scene = std::make_shared<FadeScene>();
 			scene->portalBatch = Portals::CreateBatch(a_setup);
-			scene->portalQueries = ComputeProgram::Load(a_setup.device, { .source = Draws::kFadeStateShader, .entry = L"PreparePortalQueries", .constantWords = Draws::kFadeStateConstantWords });
-			if (!scene->portalBatch || !scene->portalQueries) {
+			scene->portalQueries = kPortalQueriesProgram.Get();
+			if (!scene->portalBatch) {
 				logger::error("[DCLF] Fade root portal query pipeline is not ready");
 				return nullptr;
 			}
@@ -60,7 +62,6 @@ namespace DCLF::Features::Fades
 			scene->fadeFrameBuffer = a_setup.StructuredBuffer(1, sizeof(FadeFrame), "cs.dclf.fade-frame");
 			scene->fadeRootPrograms = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, sizeof(std::uint32_t), "cs.dclf.fade-root-programs"), { .extent = { 0, 4, 4 } });
 			scene->fadeAnimated = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, sizeof(std::uint32_t), "cs.dclf.fade-animated"), { .extent = { 0, 4, 4 } });
-			scene->fadeLog = a_setup.StructuredBuffer(kFadeLogEntries, sizeof(FadeLogEntry), "cs.dclf.fade-log", true);
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				const std::uint32_t events = a_setup.smallStart ? 4u : kInitialFadeEvents;
 				scene->fadeEvents = Draws::MakeVersioned(Draws::CreateWords(FadeWriteBack::BytesFor(events) / 4, true, "cs.dclf.fade-events"),
@@ -68,8 +69,8 @@ namespace DCLF::Features::Fades
 				scene->fadeReported = Draws::MakeVersioned(a_setup.StructuredBuffer(roots, 2 * sizeof(std::uint32_t), "cs.dclf.fade-reported", true),
 					{ .extent = { 0, 8, 8 }, .contents = GrowableContents::Zero });
 				auto writeBack = std::make_shared<FadeWriteBack>();
-				writeBack->armed.resize(writeBack->ranges.Count());
-				writeBack->AddSet(events);
+				writeBack->list = Draws::MakeEventList("cs.dclf.fade-events-readback", sizeof(FadeEvent), events);
+				writeBack->armed.resize(writeBack->list->Regions());
 				postedWriteBack = writeBack;
 				scene->fadeWriteBack = std::move(writeBack);
 			}
@@ -87,7 +88,6 @@ namespace DCLF::Features::Fades
 			Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.fade-states-out1"), fades.fadeStatesOut[1]);
 			Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.fade-frame"), fades.fadeFrameBuffer);
 			Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.fade-root-programs"), fades.fadeRootPrograms);
-			Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.fade-log"), fades.fadeLog);
 			if (fades.fadeEvents) {
 				Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.fade-events"), fades.fadeEvents);
 				Draws::Register(a_graph.graph, org::ResourceIdentifier("cs.dclf.fade-reported"), fades.fadeReported);
@@ -116,7 +116,7 @@ namespace DCLF::Features::Fades
 			const auto& encoded = PortalViews::Get().Encoded();
 			a_words[kBucketsInput] = encoded.size() > kPortalSetBytes / 4 ? encoded[kPortalSetBytes / 4] : 0u;
 			if (const auto writeBack = postedWriteBack.lock())
-				a_words[kEventsWantedInput] = writeBack->wanted.load(std::memory_order_acquire);
+				a_words[kEventsWantedInput] = writeBack->list->Wanted();
 		}
 
 		// How many root rows the sealed versions hold. Rows past that wait for the buffers to grow.
@@ -136,7 +136,7 @@ namespace DCLF::Features::Fades
 		void Sealed(const Api::SceneResourcesSealed& a_sealed)
 		{
 			if (const auto& fades = a_sealed.State<FadeScene>(); fades.fadeEvents && fades.fadeWriteBack)
-				fades.fadeWriteBack->AddSet(static_cast<std::uint32_t>(a_sealed.sealed.Of(fades.fadeEvents).units));
+				fades.fadeWriteBack->list->Grow(static_cast<std::uint32_t>(a_sealed.sealed.Of(fades.fadeEvents).units));
 		}
 	}
 

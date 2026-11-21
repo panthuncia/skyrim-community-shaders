@@ -12,9 +12,5 @@ namespace DCLF::Features::Shadows::Sun
 {
 	Api::Feature Feature();
 
-	// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY observers, subscribed at install.
-	void SubscribeSunViewParity();
-	void SubscribeSunEntryPlanesParity();
-
 	void SunAccumulationLines(std::uint32_t a_frame);
 }

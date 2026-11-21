@@ -37,7 +37,7 @@ namespace DCLF::Integrations::IBL
 
 		void Install(Api::InstallContext& a_context)
 		{
-			// With CS_ORG_IBL=1 the SH views are the graph's exports, so commits read them ordered after the projection at the Prepass anchor.
+			// In graph mode the SH views are the graph's exports, so commits read them ordered after the projection at the Prepass anchor.
 			a_context.RegisterFrameTexture({ .name = "ibl environment", .textureRegister = kEnvironmentRegister, .view = &ShView<&::IBL::EnvIBLSRV>,
 				.capturedWhenNull = true, .graphResources = { ORGIBL::kEnvId } });
 			a_context.RegisterFrameTexture({ .name = "ibl sky", .textureRegister = kSkyRegister, .view = &ShView<&::IBL::SkyIBLSRV>,

@@ -240,8 +240,8 @@ CloudMsProfile PrepareCloudMsProfile(NDFInfo ndf)
 		return result;
 	const float coordinate = clamp((log2(referenceDepth) + 12.0) * 2.0, 0.0, 48.0);
 	const uint index = min((uint)coordinate, 47u);
-	float4 low = ndf.stormVolume ? CloudStorms[ndf.stormIndex].msCalibration[index] : CloudMsCalibration[index];
-	float4 high = ndf.stormVolume ? CloudStorms[ndf.stormIndex].msCalibration[index + 1u] : CloudMsCalibration[index + 1u];
+	float4 low = ndf.stormVolume ? CLOUD_STORM_MS_CALIBRATION(CloudStorms[ndf.stormIndex], ndf.stormIndex, index) : CloudMsCalibration[index];
+	float4 high = ndf.stormVolume ? CLOUD_STORM_MS_CALIBRATION(CloudStorms[ndf.stormIndex], ndf.stormIndex, index + 1u) : CloudMsCalibration[index + 1u];
 	[branch] if (ndf.stormVolume && ndf.stormBlend < 1.0)
 	{
 		low = lerp(CloudMsCalibration[index], low, ndf.stormBlend);

@@ -11,8 +11,6 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
 #include "State.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 namespace DCLF::Features::Shadows::Local
 {
@@ -59,10 +57,8 @@ namespace DCLF::Features::Shadows::Local
 	{
 		auto& board = FocusBoard();
 		auto& hosts = board.hosts;
-		const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
 		if (frame != board.sceneFrame) {
-			if (!hosts.empty())
-				Diagnostics::Notify<Diagnostics::EnginePoint::FocusViewsFrame>();
 			hosts.clear();
 			board.sceneFrame = frame;
 		}

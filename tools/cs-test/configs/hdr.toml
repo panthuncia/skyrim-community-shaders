@@ -22,9 +22,16 @@ frames = 60
 do = "hdr"
 arg = "1"
 
+# Two frames after the switch: the old swap chain presents until the revision is adopted, so no black frame (plan, step 9a).
 [[steps]]
 at = "previous"
-frames = 120
+frames = 2
+do = "shot"
+arg = "hdr-2"
+
+[[steps]]
+at = "previous"
+frames = 118
 do = "shot"
 arg = "hdr"
 
@@ -54,7 +61,13 @@ arg = "0"
 
 [[steps]]
 at = "previous"
-frames = 120
+frames = 2
+do = "shot"
+arg = "sdr-2"
+
+[[steps]]
+at = "previous"
+frames = 118
 do = "shot"
 arg = "sdr-after"
 
@@ -65,4 +78,9 @@ do = "exit"
 
 [expect]
 reach = "world-ready"
-shots = ["sdr", "hdr", "hdr-menu", "sdr-after"]
+shots = ["sdr", "hdr-2", "hdr", "hdr-menu", "sdr-2", "sdr-after"]
+no_log = ["frame tap error", "fatal: frame revision:", "the engine is creating its render targets again"]
+
+# HDR Display's composite is registered at setup's build and never composes on D3D11 in graph mode (phase 6 holds).
+[expect.graph_frames]
+min = { "cs.hdr" = 60 }

@@ -6,9 +6,11 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string_view>
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDrawStats.h"
+#include "RenderGraph/Frame/Revision.h"
 
 struct ID3D11Texture2D;
 
@@ -177,18 +179,37 @@ namespace DCLF
 		/** @brief Records the age of the oldest event an installed publication carried, for the snapshot report. */
 		void NoteEventAdoption(double a_ms, std::uint32_t a_frames);
 		/**
-		 * @brief Render thread, frame start. Adopts the newest posted snapshot unless it is stale, otherwise keeps the previous one.
-		 * Returns its ScenePublication, or null before the first.
+		 * @brief Render thread, main thread, at Begin. The frame revision took a_scene, a snapshot the builder posted (plan step 10b),
+		 * whether it adopts it or not. Opens the builder's publication gate.
 		 */
-		std::shared_ptr<const void> AdoptSnapshot();
+		void SceneTaken(const std::shared_ptr<const void>& a_scene);
 		/**
-		 * @brief Adopts a snapshot and, with a_wait, blocks until the builder delivers one the frame can draw from.
-		 * This is a one-off stall after a graph build or resource change, so DCLF never hands a frame back to the engine.
-		 * Nothing the builder needs may be posted later in the frame. Five seconds without a snapshot is a fatal defect.
+		 * @brief Render thread, inside the adoption point: the frame revision adopts a_scene, alone or with the frame revision it was
+		 * recorded against, after its staged builds attached. The scene fragment's install.
 		 */
-		std::shared_ptr<const void> AdoptCurrentSnapshot(bool a_wait);
+		void InstallScene(const std::shared_ptr<const void>& a_scene);
+		/** @brief Render thread. The frame revision did not adopt a_scene. It is released on the builder, which makes a new one. */
+		void DropScene(const std::shared_ptr<const void>& a_scene, RenderGraph::Frame::Revision::FragmentDrop a_why, std::string_view a_text,
+			std::span<const std::uint32_t> a_epochs);
+		/**
+		 * @brief Any thread. The frames whose coverage ran at least one DCLF epoch, in the session. While it moves, a frame revision with
+		 * DCLF epochs needs a scene recorded for it.
+		 */
+		std::uint64_t SceneRecordedFrames() const;
+		/**
+		 * @brief Render thread, after the frame revision's scene step at every main-thread Begin. Updates the graph conditions and counts a
+		 * Begin that took no scene. It never waits: a shader reload's rebuilt graphs come with a frame revision (RenderGraph/PipelineVersions.h).
+		 */
+		void AfterSceneStep();
+		/** @brief Render thread. The adopted snapshot's ScenePublication, or null before the first. */
+		std::shared_ptr<const void> AdoptedPublication() const;
 		/** @brief Render thread, at Present. Ties the frame's pooled versions to its retirement point so they are not reused early. */
 		void BindAdopted();
+		/**
+		 * @brief Render thread. What DCLF's graphs and snapshots are built for changed after DCLF first drew (plan step 10a-0).
+		 * No revision carries such a change, so it is a tap error (TapError::ClientInputChanged), fatal in development builds.
+		 */
+		static void NoteInputChanged(std::string_view a_what);
 		/** @brief Render thread, frame start. Builds the frame's payload from the installed snapshot. False without one. */
 		bool MakeFramePayload();
 		/** @brief Render thread, frame start. Posts the resources and fits the next builds need, latest wins. */
@@ -202,9 +223,9 @@ namespace DCLF
 		void KickVisibilityReadback();
 		/**
 		 * @brief Main thread at Main::Update's entry, while no cull or job list runs. Writes the decoder's kAccumulated results with atomics.
-		 * kAccumulated is the engine's cull side effect that DCLF must reproduce where it stands in for the culls. a_live false drops them.
+		 * kAccumulated is the engine's cull side effect that DCLF must reproduce where it stands in for the culls.
 		 */
-		void WriteAccumulated(bool a_live, const std::function<bool(const void*)>& a_stoodIn);
+		void WriteAccumulated(const std::function<bool(const void*)>& a_stoodIn);
 		/** @brief Main thread. DCLF's last verdict for a stood-in root, visible if not written yet. Reads no engine memory. */
 		bool AccumulatedVerdict(const void* a_root) const;
 		/** @brief Main thread. DCLF's verdict for any root it lists, false when it has none. Reads no engine memory. */
@@ -309,8 +330,8 @@ namespace DCLF
 			std::uint32_t* a_drawn = nullptr, std::array<std::uint64_t, 2>* a_nullTextures = nullptr);
 		/** @brief Any thread. Whether the view's epochs draw its members this frame. */
 		bool ViewCovered(Api::EngineView a_view) const;
-		/** @brief Whether the view's phase can be drawn, meaning its toggle is on and its targets are published. */
-		bool ViewDrawable(Api::EngineView a_view, const ToggleSet& a_toggles) const;
+		/** @brief Whether the view's phase can be drawn, meaning a feature took the view and its targets are published. */
+		bool ViewDrawable(Api::EngineView a_view) const;
 		/**
 		 * @brief Scene lane. Whether a_slot's pipelines for the view are in a_catalog. Reads nothing the render thread writes per frame.
 		 * a_why: 1 no catalog or targets, 2 forward key not drawable, 3 no key, 4 not in catalog, 5 no Z-prepass group pipeline.
@@ -326,23 +347,16 @@ namespace DCLF
 		 */
 		void BuildPoint();
 		/**
-		 * @brief Whether the adopted snapshot covers the main epochs. False only before the first covered frame or under a load screen.
-		 * After that, false is a defect.
+		 * @brief Whether the adopted snapshot covers the main epochs. False only while DCLF does not draw (FrameView::NotDrawingYet) or
+		 * under a load screen. Otherwise false is a tap error. Each other uncovered epoch gets an EngineState; an epoch the recipe has
+		 * DCLF cover (Recipes::Table::CoveredSegment) with none is a tap error too (TapError::Uncovered).
 		 */
 		bool DecideCoverage();
 		/** @brief The coverage inputs and verdicts as text, for a defect report. */
 		std::string CoverageState() const;
-		/** @brief Whether DCLF cannot draw. Set once, and the frame then has no claims. */
-		bool Failed() const { return failed.load(std::memory_order_relaxed); }
-
-		/** @brief Waits for async builds, the root states' task and the visibility decode. */
-		void DrainAsync();
 
 		/** @brief The async report lines. Resets their counters. */
 		std::string AsyncReport();
-
-		/** @brief A named main-pass point for target dumps (CS_DCLF_TARGET_DUMP). */
-		void ProbeTargets(const char* a_label);
 
 		/** @brief Starts the shadow frame. Shadow views are captured from here on. */
 		void BeginShadowFrame();
@@ -360,7 +374,6 @@ namespace DCLF
 		 * @brief Occlusion maps such as Skylighting's sky map and the precipitation mask. When the shadow epoch cannot draw a map,
 		 * the engine's SetupMask registers its scene at its own occlusion point.
 		 */
-		void CaptureOcclusion(std::uint32_t a_view);
 		void OcclusionView(std::uint32_t a_view, const RE::NiCamera& a_camera);
 		bool OcclusionReady(std::uint32_t a_view) const;
 
@@ -368,8 +381,6 @@ namespace DCLF
 		void ResetShadowStats() { shadowStats = {}; }
 
 		const Stats& GetStats() const { return stats; }
-		/** @brief Render thread. How long this frame's start waited for a current snapshot, in microseconds. */
-		std::uint32_t LastAdoptWaitUs() const { return lastAdoptWaitUs; }
 
 		~IndirectDraws();
 
@@ -383,10 +394,7 @@ namespace DCLF
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 		Stats stats;
-		std::uint32_t lastAdoptWaitUs = 0;
 		ShadowStats shadowStats;
-		// Set once by the render thread but also read by the scene lane.
-		std::atomic<bool> failed{ false };
 	};
 
 }

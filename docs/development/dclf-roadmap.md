@@ -330,8 +330,8 @@ Small pieces still on the render thread, each with its route off it:
 
 ### 2.6 Smaller pool gaps
 
--   **Readback staging sets.** `HostEventRing::StagingSet` (`Core/Render/Readback/Readbacks.h`) is append-only: a set for a
-    capacity no sealed set names is kept until the ring goes. Release it on the retirement clock once no sealed set names its
+-   **Readback buffer sets.** `RunReadback::ListSet` (`RenderGraph/RunReadback.cpp`) is append-only: a set for a
+    capacity no sealed set names is kept until the readback goes. Release it on the retirement clock once no sealed set names its
     capacity and no frame bound one that did. Low priority: it grows only with the event lists. The frame-slot ring itself
     stays (GPU-to-CPU, rewritten whole every frame, retired by reuse).
 -   **First versions outside the pools.** A `GrowableBufferSet` Zero registration's first version comes from the pool, but
@@ -352,7 +352,7 @@ Small pieces still on the render thread, each with its route off it:
 -   **Design.** The view batch builder (`Core/Render/Snapshot/ViewBatches.cpp`, `SceneLists.cpp`) writes a column per batch
     with each lane's sun entry sphere, contiguous by lane like the frustum's sphere columns, so the sun entry and cascade tests
     load it directly in `CullSimd.h` kernels. The column follows the lanes through the scene lists' deltas and compaction. The
-    verdicts must match the current loop bit for bit (a `dclf:cpu-exp` check bit, as the frustum and portal kernels have).
+    verdicts must match the current loop bit for bit (checked against the scalar loop before it lands).
 -   **Needs.** Nothing.
 
 ---
@@ -408,8 +408,7 @@ dclf-open-defects.md). These items cut DCLF's fixed GPU cost.
 -   **Goal.** A shadow view's raster state is a value per draw, chosen with an indirect execution set.
 -   **Why.** Views take one state from the table entry (`Core/Render/Shadow/ShadowBuild.cpp`, `modeRasterStates`). A view whose
     entry turns depth clipping off draws with depth clamped (`ShadowRasterState::depthClip`, BasicRHI's
-    `RasterState::depthClip`, `CS_DCLF_SHADOW_DEPTH_CLAMP`); only a wireframe entry, or depth clip off on a device without
-    `depthClamp`, stays native (`not ready (raster-state=N)` in the `[DCLF] shadow views:` line).
+    `RasterState::depthClip`; a device without `depthClamp` fails setup); only a wireframe entry stays native (`not ready (raster-state=N)` in the `[DCLF] shadow views:` line).
 -   **State.** Not started.
 -   **Needs.** The indirect execution sets' validation errors closed first (dclf-open-defects.md).
 

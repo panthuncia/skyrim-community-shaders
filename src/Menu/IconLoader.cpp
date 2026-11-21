@@ -6,6 +6,7 @@
 #include "Menu.h"
 #include "Menu/ImGuiRenderer.h"
 #include "Menu/ThemeManager.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
 
@@ -216,7 +217,7 @@ namespace Util
 			if (holder->views[i])
 				holder->views[i]->SetPrivateData(kIconLevelGuid, sizeof(tag), &tag);
 		}
-		if (ImGuiRenderer::OrgRequested())
+		if (::RenderGraph::Engine::GraphMode())
 			holder->levels = std::move(levels);
 		(*out_srv)->SetPrivateDataInterface(kIconMipViewsGuid, holder);
 		holder->Release();  // The view keeps its own reference

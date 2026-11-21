@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
+#include "RenderGraph/Fatal.h"
 
 #include <ORGModuleServices/ElasticCapacity.h>
 
@@ -28,10 +29,7 @@ namespace DCLF
 		/** @brief Fatal. Draws are not split across calls yet, so a range over the limit cannot be drawn. */
 		[[noreturn]] void SequenceLimitFailure(const char* a_what, std::uint32_t a_draws, std::uint32_t a_limit)
 		{
-			const auto message = fmt::format("Drawcall Limit Fix: {} needs {} draws in one indirect draw, over the limit of {}", a_what, a_draws, a_limit);
-			logger::critical("[DCLF] {}", message);
-			spdlog::default_logger()->flush();
-			stl::report_and_fail(message);
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} needs {} draws in one indirect draw, over the limit of {}", a_what, a_draws, a_limit));
 		}
 
 		void CheckSequenceLimits(const char* a_what, std::uint32_t a_draws, bool a_sorted)
@@ -98,8 +96,6 @@ namespace DCLF
 		objects.Add(s.visibilityObjectReported);
 		if (inputs.main)
 			objects.Add(inputs.main->visibility).Add(inputs.main->frustum).Add(inputs.main->retests);
-		if (inputs.main && inputs.main->writers)
-			objects.Add(inputs.main->writers);
 		if (inputs.shadow)
 			objects.Add(inputs.shadow->visibility).Add(inputs.shadow->casterFirsts);
 		objects.Require(a_build, a_tables.objects.size());
@@ -108,7 +104,7 @@ namespace DCLF
 			buffers.Require(a_build, s.visibilityRootReported, Extensions::TableFamilyRows(a_tables.families, Extensions::RootStatesFamily()));
 		// Size the event list to the most a frame wanted, because dropped roots append again.
 		if (s.visibilityEvents && s.visibilityReadback)
-			buffers.Require(a_build, s.visibilityEvents, s.visibilityReadback->wanted.load(std::memory_order_acquire));
+			buffers.Require(a_build, s.visibilityEvents, s.visibilityReadback->list->Wanted());
 		for (std::size_t d = 0; d < Extensions::kDrawFamilies; ++d) {
 			const auto family = static_cast<Api::DrawFamily>(d);
 			const auto& entry = Extensions::DrawFamilyOf(family);

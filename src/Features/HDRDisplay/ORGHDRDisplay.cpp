@@ -1,73 +1,87 @@
-#if defined(CS_HAS_RENDER_GRAPH)
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
-#endif
+#include <rhi_interop_vulkan.h>
 
 #include "Features/HDRDisplay/ORGHDRDisplay.h"
-#include "RenderGraph/Engine/Native/Native.h"
+
+#include <winrt/base.h>
 
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
 
-bool ORGHDRDisplay::Requested()
-{
-	static const bool requested = RenderGraph::Engine::Native::GraphMode();
-	return requested;
-}
+#include "Globals.h"
+#include "RenderGraph/AnchorPasses.h"
+#include "RenderGraph/Engine/UiTargets.h"
+#include "RenderGraph/Frame/SegmentId.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/RunGate.h"
+#include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/SharedConstants.h"
+#include "Util.h"
+#include "Utils/Logging.h"
 
-ORGHDRDisplay& ORGHDRDisplay::Get()
-{
-	static ORGHDRDisplay s_hdrDisplay;
-	return s_hdrDisplay;
-}
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/LatchBlock.h>
+#include <rhi_helpers.h>
 
-bool ORGHDRDisplay::IsActive() const
-{
-	return impl && !failed && RenderGraphRuntime::Get().IsActive();
-}
+#include "RenderGraph/Frame/Declare.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-
-#	include "Globals.h"
-#	include "RenderGraph/AnchorPasses.h"
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/PublishedResources.h"
-#	include "RenderGraph/RunGate.h"
-#	include "RenderGraph/ShaderBindings.h"
-#	include "RenderGraph/SharedConstants.h"
-#	include "Util.h"
-
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/LatchBlock.h>
-#	include <Resources/ExternalTextureResource.h>
-
-#	include <array>
-#	include <utility>
+#include <array>
+#include <optional>
+#include <utility>
+#include <vector>
 
 namespace
 {
-	/** @brief A null entry is a D3D11 texture. */
-	std::array<std::unique_ptr<GraphResources::Texture2D>, static_cast<std::size_t>(ORGHDRDisplay::Texture::Count)>& Twins()
+	namespace Vars = RenderGraph::Frame::Vars;
+
+	constexpr std::size_t kTextureCount = static_cast<std::size_t>(ORGHDRDisplay::Texture::Count);
+
+	/** @brief The declared twins, kept for the session: their ids are published once. A null entry is a D3D11 texture. */
+	struct DeclaredTextures
 	{
-		static std::array<std::unique_ptr<GraphResources::Texture2D>, static_cast<std::size_t>(ORGHDRDisplay::Texture::Count)> s_twins;
-		return s_twins;
+		std::array<RenderGraph::Frame::DeclaredTexture2D, kTextureCount> twins;
+		// The D3D11 texture HDR Display wraps now. It can be the last version's for a few calls after an adoption.
+		std::array<ID3D11Texture2D*, kTextureCount> wrapped{};
+	};
+
+	DeclaredTextures& Declared()
+	{
+		static DeclaredTextures s_declared;
+		return s_declared;
+	}
+
+	/** @brief A wrapper of a twin's bound export. HDR Display makes the views. */
+	Texture2D* HdrWrapTwin(const RenderGraph::Frame::DeclaredTexture2D& a_twin, const char* a_name)
+	{
+		auto* d3d11 = a_twin->D3D11();
+		d3d11->AddRef();
+		return new Texture2D(d3d11, a_name);
+	}
+
+	/** @brief A declared twin as passes declare it: its slot. */
+	FrameAnchors::Texture SlotOf(const RenderGraph::Frame::DeclaredTexture2D& a_texture)
+	{
+		return a_texture && a_texture->Versioned() ? FrameAnchors::Texture(a_texture->Name(), a_texture->Versioned()) : FrameAnchors::Texture();
 	}
 
 	constexpr const char* kClientId = "cs.hdr";
 	constexpr const char* kShader = "HDRDisplay/HDROutputCS.hlsl";
 	constexpr const char* kClearShader = "HDRDisplay/ClearSceneCS.hlsl";
-	// ClearSceneCS's numthreads.
+	// ClearSceneCS's and HDROutputCS's numthreads.
 	constexpr std::uint32_t kClearGroupSize = 8;
-	constexpr const char* kSceneName = "hdr.scene";
-	constexpr const char* kOutputName = "hdr.output";
-	constexpr const char* kUiName = "hdr.ui";
-	constexpr const char* kBackBufferName = "hdr.back-buffer";
+	constexpr std::uint32_t kOutputGroupSize = 8;
 	// The scene clear, composite, back buffer copy and UI clear take order keys from here up.
 	constexpr std::int32_t kOrderBase = 100;
-	// A movie frame's scene clear.
-	constexpr std::uint32_t kSceneClearEntry = 0;
+	// The run gate's entries. Every pass is gated: the UI stage runs them on every frame, also when ApplyHDR did not tap.
+	constexpr std::uint32_t kSceneClearEntry = 0;  // a movie frame's scene clear
+	constexpr std::uint32_t kOutputEntry = 1;
+	constexpr std::uint32_t kCopyEntry = 2;
+	constexpr std::uint32_t kUiClearEntry = 3;
+	constexpr std::uint32_t kGateEntries = 4;
 
 	using ShaderBindings::Handle;
 
@@ -86,19 +100,28 @@ namespace
 		Handle scene;
 	};
 
-	/** @brief A change registers the client again. */
+	/** @brief What the client's registration depends on: variables, and kFRAMEBUFFER's slot (stable once the target set has it). */
+	struct CompositeKey
+	{
+		Vars::Extent2D display{};
+		FrameAnchors::Texture backBuffer;  // empty before the target set took the back buffer: no copy pass
+		bool operator==(const CompositeKey&) const = default;
+	};
+
+	/** @brief What one registration was made from. The commit reads the adopted one's. */
 	struct Inputs
 	{
 		std::shared_ptr<const ComputeProgram> program;
 		FrameAnchors::Texture scene, ui, output;
-		FrameAnchors::Texture backBuffer;  // null means no copy pass
+		FrameAnchors::Texture backBuffer;  // kFRAMEBUFFER's slot; null means no copy pass
 		// Null means no scene clear pass, and PrepareMovieDraw clears on D3D11.
 		std::shared_ptr<const ComputeProgram> clearProgram;
 		FrameAnchors::Texture clearTarget;
+		// ClearSceneCS clears any float4 UAV, so it clears the UI texture too. Null means an ungated clear.
+		std::shared_ptr<const ComputeProgram> uiClearProgram;
+		std::uint32_t uiGroupsX = 0, uiGroupsY = 0;
 		std::uint32_t groupsX = 0, groupsY = 0;
-		std::uint32_t width = 0, height = 0;  // the copy's extent
-
-		bool operator==(const Inputs&) const = default;
+		std::uint32_t width = 0, height = 0;  // the display size: the textures' and the copy's extent
 	};
 
 	ComputeProgram::Desc ProgramDesc()
@@ -108,8 +131,8 @@ namespace
 	}
 
 	/**
-	* @brief The gated movie scene clear, the composite, the back buffer copy, then the UI clear after the composite read it.
-	* Every pass but the gated clear runs at every run of the anchor.
+	* @brief The movie scene clear, the composite, the back buffer copy, then the UI clear after the composite read it.
+	* Each pass runs only on runs whose commit opened its gate entry. Without the clear program the UI clear is ungated.
 	*/
 	RenderGraph::AnchorPasses::Builder MakePasses(const Inputs& a_in, std::shared_ptr<const org::LatchBlock> a_latch, std::shared_ptr<const RenderGraph::RunGate> a_gate)
 	{
@@ -123,160 +146,251 @@ namespace
 		builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "output",
 			.program = a_in.program,
 			.bindings = { Bind::Shared(), Bind::Srv(a_in.scene), Bind::Srv(a_in.ui), Bind::Uav(a_in.output), Bind::Latch(0) },
-			.groups = { a_in.groupsX, a_in.groupsY, 1 } });
+			.gate = kOutputEntry });
 		if (a_in.backBuffer)
-			builder.Add(RenderGraph::AnchorPasses::Copy{ .name = "back-buffer", .source = a_in.output, .target = a_in.backBuffer, .width = a_in.width, .height = a_in.height });
-		builder.Add(RenderGraph::AnchorPasses::Clear{ .name = "ui-clear", .target = a_in.ui }, false);
+			builder.Add(RenderGraph::AnchorPasses::Copy{
+				.name = "back-buffer", .source = a_in.output, .target = a_in.backBuffer, .width = a_in.width, .height = a_in.height, .gate = kCopyEntry });
+		if (a_in.uiClearProgram)
+			builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "ui-clear", .program = a_in.uiClearProgram, .bindings = { Bind::Uav(a_in.ui) }, .gate = kUiClearEntry });
+		else
+			builder.Add(RenderGraph::AnchorPasses::Clear{ .name = "ui-clear", .target = a_in.ui });
 		return builder;
 	}
 
-	/** @brief Only one back buffer is allowed. With several, DXVK rotates their images at present on its own thread, which a single import cannot follow. */
-	bool CanCopyInto(ID3D11Texture2D* a_backBuffer, const D3D11_TEXTURE2D_DESC& a_output)
+	/** @brief A declared twin's slot. In graph mode HDR Display's textures are always twins (MakeTexture), so there is no import. */
+	FrameAnchors::Texture TwinSlot(const Texture2D& a_texture)
 	{
-		D3D11_TEXTURE2D_DESC desc{};
-		a_backBuffer->GetDesc(&desc);
-		if (desc.Format != a_output.Format || desc.Width != a_output.Width || desc.Height != a_output.Height)
-			return false;
-		DXGI_SWAP_CHAIN_DESC swapChain{};
-		if (!globals::d3d::swapChain || FAILED(globals::d3d::swapChain->GetDesc(&swapChain)))
-			return false;
-		const bool sequential = swapChain.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL || swapChain.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-		return !sequential || swapChain.BufferCount <= 1;
+		return ORGHDRDisplay::Get().GraphOf(a_texture.resource.get());
 	}
 }
 
 // C4324: the aligned HDR constants pad the struct.
-#	pragma warning(push)
-#	pragma warning(disable: 4324)
+#pragma warning(push)
+#pragma warning(disable: 4324)
 struct ORGHDRDisplay::Impl
 {
-	std::shared_ptr<const ComputeProgram> program;
-	bool programDirty = false;
+	// Queued at setup.
+	RenderGraph::Programs::Fixed<ComputeProgram> program;
 	std::shared_ptr<org::LatchBlock> latch;
 
-	// Null program means it did not build and PrepareMovieDraw clears on D3D11.
-	std::shared_ptr<const ComputeProgram> clearProgram;
+	RenderGraph::Programs::Fixed<ComputeProgram> clearProgram;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	// Zero for none.
 	std::uint32_t clearGroupsX = 0, clearGroupsY = 0;
 
-	winrt::com_ptr<ID3D11Texture2D> backBufferTexture;
-	FrameAnchors::Texture backBuffer;
-
-	// Null before the first registration.
-	std::shared_ptr<const Inputs> registered;
+	// Declare keeps each registration's inputs. The commit reads the adopted one's (Adopted()): null before the first, and once a
+	// revision drops the client.
+	RenderGraph::Frame::DeclaredClientOf<const Inputs> client;
 
 	HDRDisplay::HDRDataCB constants{};
+	// Why a frame composed nothing, each reason logged once.
+	Util::ReasonLog lagReasons{ "[ORG] HDR Display" };
 };
-#	pragma warning(pop)
+#pragma warning(pop)
 
+ORGHDRDisplay::ORGHDRDisplay() = default;
 ORGHDRDisplay::~ORGHDRDisplay() = default;
 
-void ORGHDRDisplay::Reserve()
+namespace
 {
-	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::HDROutput))
-		logger::warn("[ORG] HDR Display stays on D3D11: the HDROutput anchor could not be reserved");
+	/** @brief The registration for a_key and its inputs. Null is fatal (Declare.h). */
+	std::shared_ptr<const Inputs> MakeComposite(ORGHDRDisplay::Impl& a_state, const CompositeKey& a_key, FrameAnchors::ClientDesc& a_client)
+	{
+		auto& hdr = globals::features::hdrDisplay;
+		if (!hdr.hdrTexture || !hdr.hdrTexture->srv || !hdr.outputTexture || !hdr.outputTexture->uav || !hdr.outputTexture->srv || !hdr.uiTexture ||
+			!hdr.uiTexture->srv || !hdr.uiTexture->uav) {
+			logger::error("[ORG] HDR Display: the composite has no scene, output or UI texture with its views");
+			return nullptr;
+		}
+		auto inputs = std::make_shared<Inputs>();
+		inputs->program = a_state.program.Get();
+		inputs->scene = TwinSlot(*hdr.hdrTexture);
+		inputs->output = TwinSlot(*hdr.outputTexture);
+		// Scaleform, Bink and the ImGui overlay draw into the same slot (Engine::UiTargets).
+		inputs->ui = TwinSlot(*hdr.uiTexture);
+		if (!inputs->scene || !inputs->output || !inputs->ui) {
+			logger::error("[ORG] HDR Display: the {} is not a graph texture", !inputs->ui ? "UI texture" : !inputs->scene ? "scene" : "output texture");
+			return nullptr;
+		}
+		inputs->width = a_key.display.width;
+		inputs->height = a_key.display.height;
+		// The composite goes into kFRAMEBUFFER's slot, which the present copies into the swap chain. Both have the swap chain's format.
+		if (a_key.backBuffer) {
+			if (a_key.backBuffer.Format() != rhi::helpers::ToRHI(hdr.outputTexture->desc.Format)) {
+				logger::error("[ORG] HDR Display: the back buffer (RHI format {}) and the output (DXGI format {}) differ in format",
+					static_cast<int>(a_key.backBuffer.Format()), static_cast<int>(hdr.outputTexture->desc.Format));
+				return nullptr;
+			}
+			inputs->backBuffer = a_key.backBuffer;
+		}
+		if (a_state.clearProgram) {
+			inputs->clearTarget = ORGHDRDisplay::Get().GraphOf(hdr.hdrTexture->resource.get());
+			if (inputs->clearTarget)
+				inputs->clearProgram = a_state.clearProgram.Get();
+		}
+		inputs->groupsX = (inputs->width + kOutputGroupSize - 1) / kOutputGroupSize;
+		inputs->groupsY = (inputs->height + kOutputGroupSize - 1) / kOutputGroupSize;
+		inputs->uiClearProgram = a_state.clearProgram.Get();
+		inputs->uiGroupsX = (inputs->width + kClearGroupSize - 1) / kClearGroupSize;
+		inputs->uiGroupsY = (inputs->height + kClearGroupSize - 1) / kClearGroupSize;
+
+		auto builder = MakePasses(*inputs, a_state.latch, a_state.gate);
+		if (builder.Failed()) {
+			logger::error("[ORG] HDR Display: {}", builder.Failure());
+			return nullptr;
+		}
+		a_client.sharedConstants = builder.ReadsSharedConstants();
+		a_client.passes = builder.Take();
+		a_client.gates = { a_state.gate };
+		// The newest registration's commit runs for the one the schedule holds (it taps by id), so the commit reads the adopted inputs.
+		logger::info("[ORG] HDR Display: the composite is registered for the next revision ({}x{}, back buffer copy {})", inputs->width, inputs->height,
+			inputs->backBuffer ? "on the graph" : "not on the graph");
+		return inputs;
+	}
 }
 
 bool ORGHDRDisplay::Setup()
 {
-	if (impl)
-		return true;
-	if (!Requested() || failed)
-		return false;
-	auto& runtime = RenderGraphRuntime::Get();
-	auto* host = runtime.Host();
-	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::HDROutput)) {
-		Fail("the render graph or its HDROutput anchor is not available");
-		return false;
-	}
-	auto program = ComputeProgram::Load(host->Device(), ProgramDesc());
-	if (!program) {
-		Fail("HDROutputCS could not be built for the graph");
-		return false;
-	}
+	if (!BeginSetup())
+		return IsActive();
+	// Hot reload swaps the pipeline in place (RenderGraphRuntime::RequestShaderReload), so the program is queued once.
 	auto state = std::make_unique<Impl>();
-	state->program = std::move(program);
+	state->program = RenderGraph::Programs::Queue("HDRDisplay", ProgramDesc());
 	state->latch = std::make_shared<org::LatchBlock>("cs.hdr.latch", static_cast<std::uint32_t>(sizeof(HDRDisplay::HDRDataCB)));
-	state->gate = RenderGraph::RunGate::Create("cs.hdr.gate");
-	if (!state->gate) {
-		Fail("its run gate could not be made");
-		return false;
-	}
-	// Optional. Without it a movie frame's scene clear stays on D3D11.
-	state->clearProgram = ComputeProgram::Load(host->Device(), { .source = kClearShader, .constantWords = ShaderBindings::Words<ClearBlock>(), .commonDefines = false });
-	if (!state->clearProgram)
-		logger::warn("[ORG] HDR Display: {} could not be built; a movie frame's scene clear stays on D3D11", kClearShader);
+	state->gate = RenderGraph::RunGate::Create("cs.hdr.gate", kGateEntries);
+	state->clearProgram = RenderGraph::Programs::Queue("HDRDisplay",
+		ComputeProgram::Desc{ .source = kClearShader, .constantWords = ShaderBindings::Words<ClearBlock>(), .commonDefines = false });
 	impl = std::move(state);
+
+	using RenderGraph::Frame::DependsOn;
+	impl->client = RenderGraph::Frame::DeclareClient<CompositeKey, const Inputs>(
+		kClientId, DependsOn(Vars::DisplaySize()),
+		[](const RenderGraph::Frame::Inputs& a_in) -> std::optional<CompositeKey> {
+			auto& self = Get();
+			if (!self.impl)
+				return std::nullopt;
+			// Registered whatever the HDR state, so an HDR switch never leaves a frame without its registration. Only an HDR frame
+			// (ApplyHDR) runs the anchor, so an SDR frame commits nothing.
+			// kFRAMEBUFFER's slot: the target set declares it at Engine::Setup, before the setup evaluation. Guest mode installs
+			// the field handles later, so the key reads the slot, not the handle. Compose is fatal without it.
+			FrameAnchors::Texture backBuffer = RenderGraph::Engine::UiTargets::Current(a_in).backBuffer;
+			return CompositeKey{ a_in.Get(Vars::DisplaySize()), std::move(backBuffer) };
+		},
+		[](const CompositeKey& a_key, FrameAnchors::ClientDesc& a_client) -> std::shared_ptr<const Inputs> {
+			auto& self = Get();
+			auto inputs = self.impl ? MakeComposite(*self.impl, a_key, a_client) : nullptr;
+			if (!inputs)
+				return nullptr;
+			a_client.commit = [](const FrameAnchors::Point&) {
+				auto& owner = Get();
+				if (!owner.impl)
+					return;
+				auto& current = *owner.impl;
+				const auto held = current.client.Adopted();
+				if (!held)
+					return;
+				current.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, current.constants);
+				// Every run closes the gate first, so only a movie frame's run clears.
+				if (current.clearGroupsX)
+					current.gate->OpenDispatch(kSceneClearEntry, current.clearGroupsX, current.clearGroupsY, 1);
+				const auto& in = *held;
+				current.gate->OpenDispatch(kOutputEntry, in.groupsX, in.groupsY, 1);
+				if (in.backBuffer)
+					current.gate->OpenDraw(kCopyEntry);
+				if (in.uiClearProgram)
+					current.gate->OpenDispatch(kUiClearEntry, in.uiGroupsX, in.uiGroupsY, 1);
+			};
+			return inputs;
+		},
+		[](const CompositeKey& a_key, const Inputs& a_inputs) {
+			logger::info("[ORG] HDR Display composes on the render graph from this frame ({}x{}, back buffer copy {})", a_key.display.width,
+				a_key.display.height, a_inputs.backBuffer ? "on the graph" : "not on the graph");
+		});
 	return true;
-}
-
-void ORGHDRDisplay::Fail(const char* a_why)
-{
-	if (!failed)
-		logger::error("[ORG] HDR Display returns to D3D11: {}", a_why);
-	failed = true;
-	FrameAnchors::Unregister(kClientId);
-	impl.reset();
-}
-
-void ORGHDRDisplay::ClearShaderCache()
-{
-	if (impl)
-		impl->programDirty = true;
 }
 
 Texture2D* ORGHDRDisplay::MakeTexture(Texture a_texture, const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name)
 {
-	if (a_texture >= Texture::Count || !Requested() || !RenderGraphRuntime::Get().IsActive())
+	if (a_texture >= Texture::Count || !On())
 		return nullptr;
-	auto& twin = Twins()[static_cast<std::size_t>(a_texture)];
-	if (twin)
-		return nullptr;
+	auto& declared = Declared();
+	const auto index = static_cast<std::size_t>(a_texture);
+	// A rebuild of HDR Display's resources wraps the twin it declared before: its id is published once, for the session.
+	if (const auto& kept = declared.twins[index]) {
+		if (kept->Desc().Format != a_desc.Format)
+			Fatal(fmt::format("{} was declared in format {} and is asked for in format {}; a declared texture keeps its format", a_name,
+				static_cast<int>(kept->Desc().Format), static_cast<int>(a_desc.Format)));
+		declared.wrapped[index] = kept->D3D11();
+		return HdrWrapTwin(kept, a_name);
+	}
 	// D3D11 writes and reads it too, so exported and never aliased. HDR Display makes its own views.
-	auto texture = std::make_unique<GraphResources::Texture2D>(a_desc, std::string(a_name),
+	auto texture = RenderGraph::Frame::DeclareTexture2D(a_name, RenderGraph::Frame::DisplaySized(a_desc),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
-	if (!*texture || !texture->D3D11() || !std::dynamic_pointer_cast<org::ExternalTextureResource>(texture->Graph())) {
-		logger::warn("[ORG] HDR Display: {} could not be made on the render graph; it is a D3D11 texture", a_name);
-		return nullptr;
-	}
-	// The composite, Bink, Scaleform and Upscaling's hudless copy declare it in their graphs.
-	if (!PublishedResources::Publish(*texture)) {
-		logger::warn("[ORG] HDR Display: {} could not be published; it is a D3D11 texture", a_name);
-		return nullptr;
-	}
+	if (!texture->D3D11() || !texture->Versioned())
+		Fatal(fmt::format("{} could not be declared on the render graph", a_name));
+	// The composite, Bink, Scaleform and Upscaling's hudless copy declare it in their graphs, by its slot.
+	if (!PublishedResources::Publish(*texture))
+		Fatal(fmt::format("{} could not be published", a_name));
 	// The twin keeps the image, the wrapper keeps the D3D11 texture and its views.
 	auto* d3d11 = texture->D3D11();
-	d3d11->AddRef();
-	auto* wrapper = new Texture2D(d3d11, a_name);
-	logger::info("[ORG] HDR Display: {} is a graph texture ({}x{}, DXGI format {})", a_name, a_desc.Width, a_desc.Height, static_cast<int>(a_desc.Format));
-	twin = std::move(texture);
+	auto* wrapper = HdrWrapTwin(texture, a_name);
+	const auto& desc = texture->Desc();
+	logger::info("[ORG] HDR Display: {} is a graph texture ({}x{}, DXGI format {}), declared on the display size", a_name, desc.Width, desc.Height,
+		static_cast<int>(desc.Format));
+	declared.twins[index] = std::move(texture);
+	declared.wrapped[index] = d3d11;
 	return wrapper;
+}
+
+ID3D11Texture2D* ORGHDRDisplay::NewExport(Texture a_texture, ID3D11Texture2D* a_current)
+{
+	if (a_texture >= Texture::Count)
+		return nullptr;
+	auto& declared = Declared();
+	const auto index = static_cast<std::size_t>(a_texture);
+	const auto& twin = declared.twins[index];
+	// The export changes only when a revision adopts a new version.
+	if (!twin || !twin->D3D11() || twin->D3D11() == a_current)
+		return nullptr;
+	auto* d3d11 = twin->D3D11();
+	d3d11->AddRef();
+	declared.wrapped[index] = d3d11;
+	logger::info("[ORG] HDR Display: {} follows its adopted version ({}x{})", twin->Name(), twin->Desc().Width, twin->Desc().Height);
+	return d3d11;
 }
 
 void ORGHDRDisplay::ReleaseTextures()
 {
-	for (auto& twin : Twins())
-		twin.reset();
+	// The twins stay: their ids are published for the session, and the next MakeTexture wraps them again.
+	Declared().wrapped.fill(nullptr);
 }
 
-std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::GraphOf(ID3D11Texture2D* a_texture) const
+FrameAnchors::Texture ORGHDRDisplay::GraphOf(ID3D11Texture2D* a_texture) const
 {
-	if (!a_texture || !RenderGraphRuntime::Get().IsActive())
+	if (!a_texture)
 		return nullptr;
-	for (const auto& twin : Twins())
-		if (twin && twin->D3D11() == a_texture)
-			return std::dynamic_pointer_cast<org::ExternalTextureResource>(twin->Graph());
+	// The last wrapped texture counts too: a revision's key may read the wrappers before HDR Display wraps the adopted version.
+	const auto& declared = Declared();
+	for (std::size_t i = 0; i < kTextureCount; ++i)
+		if (const auto& twin = declared.twins[i]; twin && (twin->D3D11() == a_texture || declared.wrapped[i] == a_texture))
+			return SlotOf(twin);
 	return nullptr;
+}
+
+FrameAnchors::Texture ORGHDRDisplay::Slot(Texture a_texture) const
+{
+	if (a_texture >= Texture::Count)
+		return nullptr;
+	return SlotOf(Declared().twins[static_cast<std::size_t>(a_texture)]);
 }
 
 FrameAnchors::Texture ORGHDRDisplay::ImportOf(ID3D11Texture2D* a_texture) const
 {
-	if (!impl || !impl->registered || !a_texture)
+	const auto held = impl ? impl->client.Adopted() : nullptr;
+	if (!held || !a_texture)
 		return nullptr;
-	const auto& inputs = *impl->registered;
-	if (inputs.backBuffer && a_texture == impl->backBufferTexture.get())
-		return inputs.backBuffer;
+	const auto& inputs = *held;
+	// The back buffer is kFRAMEBUFFER's slot, which a capture reaches as an engine target.
 	const auto& hdr = globals::features::hdrDisplay;
 	if (inputs.output && hdr.outputTexture && a_texture == hdr.outputTexture->resource.get())
 		return inputs.output;
@@ -288,137 +402,49 @@ bool ORGHDRDisplay::TakeUIClear()
 	return std::exchange(uiCleared, false);
 }
 
+void ORGHDRDisplay::FollowWithD3D11()
+{
+	// The stage's end point, as the present would tap it. A capture after it uses D3D11.
+	(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
+}
+
 bool ORGHDRDisplay::CanClearScene() const
 {
 	const auto& hdr = globals::features::hdrDisplay;
 	return IsActive() && impl->clearProgram && hdr.hdrTexture && GraphOf(hdr.hdrTexture->resource.get());
 }
 
-ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_constants, ID3D11Texture2D* a_backBuffer, bool a_clearScene)
+ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_constants, ID3D11Texture2D*, bool a_clearScene)
 {
 	uiCleared = false;
 	if (!IsActive())
 		return Composed::None;
 
-	auto& hdr = globals::features::hdrDisplay;
-	if (!hdr.outputTexture || !hdr.outputTexture->uav || !hdr.outputTexture->srv || !hdr.uiTexture || !hdr.uiTexture->srv || !hdr.uiTexture->uav)
-		return Composed::None;
-
 	auto& state = *impl;
-	if (state.programDirty) {
-		state.programDirty = false;
-		// A failed reload keeps the old program, as the D3D11 shader cache does.
-		if (auto program = ComputeProgram::Load(RenderGraphRuntime::Get().Host()->Device(), ProgramDesc()))
-			state.program = std::move(program);
-		else
-			logger::warn("[ORG] HDR Display: HDROutputCS failed to build again; the graph keeps the last program");
+	// The setup build holds the registration, adopted at setup, so every frame has one. D3D11 never composes in graph mode.
+	const auto held = state.client.Adopted();
+	if (!held)
+		Fatal("an HDR frame has no adopted composite");
+	if (!held->backBuffer)
+		Fatal("the composite has no kFRAMEBUFFER slot to copy into");
+	if (a_clearScene && !held->clearTarget)
+		Fatal("a movie frame's scene clear has no pass");
+	// A stage that runs an older schedule than the client lags: this frame composes nothing. One that never will is fatal.
+	const auto place = FrameAnchors::Place(kClientId, FrameAnchors::Anchor::HDROutput);
+	if (!place.draws) {
+		if (!place.MayLag())
+			Fatal(fmt::format("the UI stage will never hold the composite ({})", FrameAnchors::ReasonName(place.reason)));
+		state.lagReasons.Report(fmt::format("this frame composes nothing (the UI stage lags: {})", FrameAnchors::ReasonName(place.reason)));
+		return Composed::Nothing;
 	}
-
-	// HDR's float texture, else the framebuffer, as ApplyHDR picks it.
-	const bool hdrScene = hdr.IsHDREnabledForFrame() && hdr.hdrTexture && hdr.hdrTexture->srv;
-	FrameAnchors::Texture scene = !hdrScene ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)) : FrameAnchors::Texture(GraphOf(hdr.hdrTexture->resource.get()));
-	if (hdrScene && !scene)
-		scene = FrameAnchors::D3D11Texture(kSceneName, hdr.hdrTexture->resource.get(), hdr.hdrTexture->srv.get(), nullptr);
-	FrameAnchors::Texture output = GraphOf(hdr.outputTexture->resource.get());
-	if (!output)
-		output = FrameAnchors::D3D11Texture(kOutputName, hdr.outputTexture->resource.get(), hdr.outputTexture->srv.get(), hdr.outputTexture->uav.get());
-	// Bink's graph path draws into it through the same import, and a name's first import decides its views, so include the RTV.
-	FrameAnchors::Texture ui = GraphOf(hdr.uiTexture->resource.get());
-	if (!ui)
-		ui = FrameAnchors::D3D11Texture(kUiName, hdr.uiTexture->resource.get(), hdr.uiTexture->srv.get(), hdr.uiTexture->uav.get(), hdr.uiTexture->rtv.get());
-	if (!scene || !output || !ui) {
-		Fail(!ui ? "the UI texture cannot be imported" : !scene ? "the scene cannot be imported" :
-																"the output texture cannot be imported");
-		return Composed::None;
-	}
-
-	const D3D11_TEXTURE2D_DESC& outputDesc = hdr.outputTexture->desc;
-	if (a_backBuffer != state.backBufferTexture.get()) {
-		state.backBufferTexture.copy_from(a_backBuffer);
-		state.backBuffer = a_backBuffer && CanCopyInto(a_backBuffer, outputDesc) ? FrameAnchors::D3D11Texture(kBackBufferName, a_backBuffer, nullptr, nullptr) : nullptr;
-		if (a_backBuffer)
-			logger::info("[ORG] HDR Display: the output goes into the back buffer {}", state.backBuffer ? "on the graph" : "with D3D11 (it cannot be copied on the graph)");
-	}
-
-	auto inputs = std::make_shared<Inputs>();
-	inputs->program = state.program;
-	inputs->scene = std::move(scene);
-	inputs->ui = std::move(ui);
-	inputs->output = std::move(output);
-	inputs->backBuffer = state.backBuffer;
-	if (state.clearProgram && hdr.hdrTexture) {
-		inputs->clearTarget = GraphOf(hdr.hdrTexture->resource.get());
-		if (inputs->clearTarget)
-			inputs->clearProgram = state.clearProgram;
-	}
-	// A clear asked for with no pass to make it, so the caller clears and composes with D3D11.
-	if (a_clearScene && !inputs->clearTarget)
-		return Composed::None;
-	const auto groups = Util::GetScreenDispatchCount(false);
-	inputs->groupsX = groups.x;
-	inputs->groupsY = groups.y;
-	inputs->width = outputDesc.Width;
-	inputs->height = outputDesc.Height;
-
-	if (!state.registered || !(*state.registered == *inputs)) {
-		auto builder = MakePasses(*inputs, state.latch, state.gate);
-		if (builder.Failed()) {
-			Fail(builder.Failure().c_str());
-			return Composed::None;
-		}
-		FrameAnchors::ClientDesc client{};
-		client.id = kClientId;
-		client.sharedConstants = builder.ReadsSharedConstants();
-		client.passes = builder.Take();
-		client.gates = { state.gate };
-		client.commit = [](const FrameAnchors::Point&) {
-			auto& self = Get();
-			if (!self.impl)
-				return;
-			self.impl->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, self.impl->constants);
-			// Every run closes the gate first, so only a movie frame's run clears.
-			if (self.impl->clearGroupsX)
-				self.impl->gate->OpenDispatch(kSceneClearEntry, self.impl->clearGroupsX, self.impl->clearGroupsY, 1);
-		};
-		if (!FrameAnchors::Register(std::move(client))) {
-			Fail("its client could not be registered on the HDROutput anchor");
-			return Composed::None;
-		}
-		const bool first = !state.registered;
-		state.registered = std::move(inputs);
-		logger::info("[ORG] HDR Display {} on the render graph ({}x{}, scene from {}, back buffer copy {})", first ? "runs" : "registered again", outputDesc.Width,
-			outputDesc.Height, hdrScene ? "the HDR texture" : "the framebuffer", state.registered->backBuffer ? "on the graph" : "not on the graph");
-	}
-
 	state.constants = a_constants;
-	const D3D11_TEXTURE2D_DESC& sceneDesc = hdr.hdrTexture ? hdr.hdrTexture->desc : outputDesc;
-	state.clearGroupsX = a_clearScene ? (sceneDesc.Width + kClearGroupSize - 1) / kClearGroupSize : 0;
-	state.clearGroupsY = a_clearScene ? (sceneDesc.Height + kClearGroupSize - 1) / kClearGroupSize : 0;
-	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::HDROutput);
+	state.clearGroupsX = a_clearScene ? (held->width + kClearGroupSize - 1) / kClearGroupSize : 0;
+	state.clearGroupsY = a_clearScene ? (held->height + kClearGroupSize - 1) / kClearGroupSize : 0;
+	const auto ran = FrameAnchors::Run(FrameAnchors::Anchor::HDROutput);
 	state.clearGroupsX = state.clearGroupsY = 0;
 	if (!ran)
-		return Composed::None;
+		Fatal(fmt::format("the HDROutput anchor did not run its scheduled composite (status {})", static_cast<int>(ran.status)));
 	uiCleared = true;
-	return state.registered->backBuffer ? Composed::OutputAndBackBuffer : Composed::Output;
+	return Composed::OutputAndBackBuffer;
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-// Without OpenRenderGraph HDR Display always composes with D3D11.
-struct ORGHDRDisplay::Impl
-{};
-
-ORGHDRDisplay::~ORGHDRDisplay() = default;
-void ORGHDRDisplay::Reserve() {}
-bool ORGHDRDisplay::Setup() { return false; }
-void ORGHDRDisplay::Fail(const char*) {}
-void ORGHDRDisplay::ClearShaderCache() {}
-FrameAnchors::Texture ORGHDRDisplay::ImportOf(ID3D11Texture2D*) const { return nullptr; }
-Texture2D* ORGHDRDisplay::MakeTexture(Texture, const D3D11_TEXTURE2D_DESC&, const char*) { return nullptr; }
-void ORGHDRDisplay::ReleaseTextures() {}
-std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::GraphOf(ID3D11Texture2D*) const { return nullptr; }
-bool ORGHDRDisplay::TakeUIClear() { return false; }
-bool ORGHDRDisplay::CanClearScene() const { return false; }
-ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB&, ID3D11Texture2D*, bool) { return Composed::None; }
-
-#endif

@@ -4,6 +4,10 @@ Plan, 2026-11-18. It implements option (c) of `_notes/central-resize-events.md` 
 user's decisions below. It was written read-only against worktree `org-port-worktrees/test-runner`, CS branch `org-native/phases`
 at `8dd3e865e`, ORG `6028568`, OMS `0185120`. Nothing was built or run.
 
+Updated 2026-11-19, read-only, against `integ/hard-ports` at `5668ec493`: upstream sync batch 16, the parity round on
+`org_integration`, and the hard ports (Physical Sky, ViewAtmosphere, Advanced Skin in DCLF, Physical Lens, Tree Wind for object
+LOD). Their sites are in sections 3.2, 5, 6.4, 7.12, 8 and 9. Each port's design note is in `docs/development/plans/`.
+
 Paths are relative to the worktree. `DCLF/` is `src/Features/DrawcallLimitFix/`. `ORG/` is `extern/OpenRenderGraph/`. `OMS/` is
 `extern/ORGModuleServices/include/ORGModuleServices/`. Citations are `file:function`. **(inferred)** marks what was concluded, not read.
 
@@ -27,6 +31,11 @@ revision*. Nothing inside a frame asks "did a size change". Nothing inside a fra
 - At **Begin**, the frame adopts the latest sealed revision whole: its versions become current, its staged graphs attach, every member
   stage's schedule switches, its variable values become the frame's. Or nothing changes and the frame runs the last revision.
 - Late-bound data (DCLF frame values, light contexts, portal programs, latch regions) is outside this. It may change any time, as today.
+  The ports added more of it: frame-value pools (Advanced Skin's material table at t38), per-draw latch handles (the sky and water
+  families' `PhysSkyOrgHandles`), run gates for on-change passes (Physical Sky's disk phase LUT, Physical Lens's caches), GPU
+  argument seeds in a latch block, and readback results (the lens focus, the adaptation). None of them is a revision input.
+- What replays: a CS stage is one revision-driven epoch. Its recordings are made once per description and frame slot and submitted
+  again every frame. So everything a CS stage records must be replayable (rule R9, section 2.2).
 
 **Vocabulary.**
 
@@ -128,6 +137,14 @@ Section 8 is the checklist.
 - **Never touch `extern/dxvk`.**
 - **Bound vs late-bound (R1).** Bound: anything a recording binds (declared versioned textures and buffers, graph structure, programs,
   prepared constants). It changes only by adoption. Late-bound (bindless index or latch, stand-in declaration): may change any time.
+- **Replayable stages (R9).** A CS stage's recording is replayed (`GraphHost.cpp`, "A revision-driven epoch's recording is not
+  replayable (a pass with lifecycle effects, or a late-bound slot)", fatal). A recording is kept only when
+  (`RenderGraphPersistentExecute.cpp`, `keepable`): every packet is replayable (no submission, completion or abandonment callback,
+  no external signal, no dependency lifecycle effect: `PreparedPass::IsReplayable`), every pass recorded at execution is
+  replayable too (the upscaler evaluate is one), the segment has no per-frame resource (a swap chain image) and its admission has
+  no incoming effects. A readback capture (`PreparedPass::WithTrailer`, the `IReadbackService` plans) is never replayable.
+  Per-run work in a replayed recording reads its counts from a latch or a GPU buffer seeded from one, as Physical Lens's indirect
+  work does. Readbacks and versioned uploads stay out of CS stage recordings, or ORG gives them a replayable form (Q11).
 
 ---
 
@@ -164,6 +181,10 @@ A compact map. Mechanisms are described in the investigation; this lists where t
 | Published ids | `src/RenderGraph/PublishedResources.h` (rules), `PublishedResources.cpp:PublishEntry/Store/Withdraw`: a new resource under a known id is `RequestStructuralRebuild` of every graph. |
 | Engine targets | `src/RenderGraph/Engine/Targets/EngineTargets.cpp:BeginSet/EndSet/Settle/Move`, called around the engine's `BSShaderRenderTargets::Create` in `src/Hooks.cpp` (the thunk with `Targets::BeginSet`). `Enabled()` = `Native::GraphMode()`. |
 | Frame transients | `src/RenderGraph/Frame/Transients.cpp:Place` (callers: `Engine/Native/NativeDevice.cpp` engine target groups, `Engine/Scaleform/Passes.cpp` scratch). |
+| Previous-frame reads | `src/RenderGraph/Frame/RecipeTable.h:kPreviousFrame` (15 ids; checked by `Recipe.cpp`): a stage reads a resource before the stage that writes it, so it gets last frame's contents. New: Physical Sky's `TransmittanceLut`, `SkyViewLut`, `ApLut`, `DiskPhaseLut`, read by the sky's reflection faces in the start stage before the pre-depth stage writes them (`4e219be6c`). |
+| Schedule gate | `FrameAnchors.h:Scheduled(id, anchor)`. A client registered inside the frame runs nothing until a build that holds it switches in. Users: the screenshot's clean scene (`ORGScreenshot.cpp`). ViewAtmosphere's post-water composite used it until 6.21. |
+| Staged buffers | `ORGPhysicalLens.cpp` `StagedBuffer::Poll`: a new ghost paths version uploads on the uploader's worker path (`WorkerOwnedDestination::PendingVersion`), the render thread polls the ticket each frame, then `AtNextBegin` adopts it and calls `NoteNewVersions`. |
+| Readbacks | `org::runtime::IReadbackService` through readback passes: `ORGPhysicalLens.cpp:FocusReadbackPass` (new), `ORGHistogramAutoExposure.cpp:ReadbackPass` (now feeds the pre-exposure metering, `eb71d2e7f`), the screenshot's readback buffers (Capture anchor), and Physical Sky's lightning ring (planned, `physical-sky-port.md` section 6). |
 
 ### 3.3 DCLF
 
@@ -174,6 +195,9 @@ A compact map. Mechanisms are described in the investigation; this lists where t
 | Build point | `DCLF/Core/Render/Revision/Coverage.cpp:IndirectDraws::BuildPoint` (`RegisterGraphBuilds`, `RefreshGraphConditions`, `BuildIfAsked`); `RenderGraphRuntime.cpp:AttachDclfBuilds`. |
 | Toggles | `DCLF/Core/Settings/Toggles.h/.cpp` (`ToggleSet`, `BeginFrame`, `Adopt`, `Generation`). Conditions: `DCLF/Core/Render/Epochs/GraphConditions.cpp:RefreshGraphConditions`. |
 | Published reads | `DCLF/Core/Extensions/FrameBindings.cpp:DeclareGraphTextures/DeclarePublishedRead/CheckDeclaredReads/GraphTextureIndex`. |
+| Frame textures from ports | `Features/Manifest.cpp:kFrameTextureRegisters`: Physical Sky (t61-t63, t106 LUTs by published id; t64, t66, t67, t69, t105, t109-t115 from the captured D3D11 view in guest, a zero view in native), ViewAtmosphere's medium (t104, t107, t108). Reflection faces will read the reflection medium through per-epoch views (`view-atmosphere-port.md` open question 2). |
+| Frame-value pools from ports | Advanced Skin's `skin-materials` table at t38 (`dclf-skin-per-geometry.md`): rows captured at the frame start in `CaptureShadingFields`, sent in `FrameValues::Kick`, `GpuTextures` replies drained at capture, every member re-put on a `GpuTextures` generation change. `kFrameBindingSlots` 5 to 6. |
+| Feature buffers (planned) | Tree Wind for object LOD (`dclf-tree-wind-object-lod.md`, deferred and flagged for redesign): `Draws::Versioned` `cs.dclf.tree-lod-bend`, grown with the scene buffers and published with a sealed set; regions uploaded by a commit hook against the adopted version's tags. |
 
 ### 3.4 Corrections to the investigation
 
@@ -213,6 +237,14 @@ A compact map. Mechanisms are described in the investigation; this lists where t
    `SceneSettingsManager::SceneLayerGuard` writes scene-controlled features twice around every base read (save, undo capture, dirty
    check), so an event must compare values; cs-test's `setting` step (`Testing/Commands.cpp:SetSetting`) patches top-level keys only;
    the Upscaling test requests assign fields on the render thread. Section 6 has the full list.
+10. **The hard ports added sites of every kind this plan handles** (2026-11-19): new `RequestSize` users (ViewAtmosphere's atlas,
+    Physical Sky's AP shadow, both planned), clients registered inside the frame with a schedule gate (ViewAtmosphere's composite,
+    the screenshot's clean scene), a staged buffer adopted through `AtNextBegin` (Physical Lens's ghost paths), readback passes
+    inside the post stage (the lens focus, the adaptation), and previous-frame reads of History textures (Physical Sky's LUTs).
+    They are rows in section 5 (6.9, 6.20 to 6.23) and items in 7.12. The post stage now fails with the R9 error when the Post
+    Processing chain runs on the graph (it held for Physical Lens until `aa221de9b`). The readback passes are the obvious
+    candidates **(inferred; which pass trips it is being found separately)**. Either way it is the conflict this plan must settle
+    before step 4 records stages against pending versions (Q11).
 
 ---
 
@@ -267,6 +299,9 @@ test: an observer sees `Publish` and `Adopt`, not `PublishLate` (`ORG/tests/Pers
 
 **Size.** Small. One agent. Serial (first).
 
+**As built (2026-11-19, `org-native/rev-step1`).** `src/RenderGraph/Frame/BoundaryCheck.{h,cpp}`, ORG
+`VersionedResource::SetAdoptionObserver`. Where it differs from the scope above, see section 9, "Decided by the agent (step 1)".
+
 ---
 
 ### Step 2. Name texture versions (record against pending versions)
@@ -300,6 +335,11 @@ recording for other named versions is another cache entry.
 
 **Size.** Small. Two agents in parallel (OMS and CS are disjoint), or one. Parallel with step 3.
 
+**As built (2026-11-19, `org-native/rev-step2`).** OMS `rev-step2-named-versions`: `NamedVersions::Textures`, `FindTexture`,
+`Names(const VersionedTexture&)`, `AdoptAll` over textures, `OMS/ComposedVersions.h`, test `ORGNamedVersionsTests`. CS:
+`FrameAnchors.cpp` `RecordVersions`, `SegmentHostData::versions`, `RequestDeclared(..., a_versions)`. Where it differs from the
+scope above, see section 9, "Decided by the agent (step 2)".
+
 ---
 
 ### Step 3. ORG: atomic multi-epoch staged attach, and the closure query
@@ -329,6 +369,10 @@ graph and not in an unrelated one. CS: bump ORG, standard set.
 **Acceptance.** Tests pass. CS unchanged in behaviour.
 
 **Size.** Medium. One agent. Parallel with step 2.
+
+**As built (2026-11-19, `org-native/rev-step3`).** ORG `rev-step3-staged-attach`: `GraphHost::AttachStagedEpochGraphs`,
+`EpochsDeclaring`, `AttachRefusal` with `AttachStatsTotal`, and `RenderGraph::PersistentDeclaredVersions`. CS counts refusals in the
+`[ORG] boundary:` census. Where it differs from the scope above, see section 9, "Decided by the agent (step 3)".
 
 ---
 
@@ -361,8 +405,9 @@ Split in five sub-steps, serial.
 **4c. CS: the frame revision coordinator.** `src/RenderGraph/Frame/Revision.{h,cpp}` (new). Generic parts go to OMS later only if a
 second user appears; today everything generic it needs is already OMS's (`RevisionAssembler`, `SerializedTaskPump`, `StateGraph`).
 - The lane: one `org::async::SerializedTaskPump` on the executor the runtime already uses for graph builds **(open question Q3: which)**.
-- Slots of its `RevisionAssembler`: `kInputs` (empty until step 5), `kTextures`, `kBuilds`, `kRecordings` (one fragment per member
-  declared segment, requiring the `kTextures` and `kBuilds` fragments it was recorded against).
+- Slots of its `RevisionAssembler`: `kInputs` (empty until step 5), `kTextures`, `kBuffers` (CS-owned versioned buffers: Physical
+  Lens's ghost paths, 4e; DCLF's buffer set joins it in 10b), `kBuilds`, `kRecordings` (one fragment per member declared segment,
+  requiring the `kTextures`, `kBuffers` and `kBuilds` fragments it was recorded against).
 - On a wake: collect wishes (`RequestSize` now; variables from step 5), post texture versions (4a), compute the closure with
   `GraphHost::EpochsDeclaring` over the changed slots, map epochs to declared segments, and for each member segment and frame slot call
   `RequestDeclared` with `versions = ComposedVersions{pending textures}` and the staged generation when the segment has one.
@@ -389,7 +434,15 @@ coordinator (section 7.8).
 - **Intermediate:** the version-lag branch stays for slots that publish outside revisions (engine imports via `JoinSlot`/
   `EnsureViews`, native back buffer). It counts its uses per slot in the census. Deleted in step 9.
 - **Intermediate:** `Builds::SwitchStaged` stays for staged epochs that are not CS declared segments (guest own-epoch anchors
-  HDROutput and FrameGeneration's hudless copy). Deleted in step 7 (sub-step 7b).
+  HDROutput and FrameGeneration's hudless copy). Deleted in step 7 (sub-step 7b). The FrameGeneration ticket now also holds the
+  screenshot's clean scene copy (`cs.screenshot.clean`, `027887780`), so 7b moves both clients.
+- **Buffer versions outside DCLF.** Physical Lens's ghost paths (`ORGPhysicalLens.cpp:StagedBuffer`) are a CS-owned
+  `org::VersionedBuffer` whose new version is made on a CPU change (a new lens model), uploaded on the uploader's worker path,
+  polled each frame and adopted through `AtNextBegin`. It joins revisions here: the lens model is the event, the upload is a
+  `kBuffers` fragment that resolves when its tracked upload completes (the same shape as `PostVersionGrowth` for DCLF), and the
+  post stage is a closure member through `EpochsDeclaring` of the paths slot. The flare constants that must match the version
+  (surfaces, path count, sensor plane, focal length, pupil, coating) become the fragment's payload, read from `Adopted()`. That
+  deletes the per-frame `Poll` of the ticket and the lens's `AtNextBegin` user. A cancelled upload stays fatal.
 
 **Design choices.**
 - Recordings are requested through the existing `RequestDeclared`, not a new path, so descriptions, parity and the absent-pass key keep
@@ -414,11 +467,23 @@ first wish to adoption (p50/p95/max)`.
 
 **Risks.**
 - Recording count (section 7.2). Detect: census `recordings per revision`.
+- A member stage whose recording is not replayable (R9). The coordinator records every member against pending versions through
+  `RequestEpochRecording`, which throws for such a recording. The post stage hits this today whenever the Post Processing chain
+  runs on the graph. Step 4 cannot start until Q11 is decided and the post stage records replayable recordings again. Detect: run
+  `guest-quick` and `native-quick` with the post chain on and Physical Lens's ghosts and starburst on.
 - A member segment absent in this frame kind (menu): it still needs recordings for every slot, as today's "ahead" recordings. Detect:
   a `menu` run with a resize in it (add one `setting` step to `menu` while the menu is open).
 - Exports: a D3D11 reader that cached the old SRV pointer. Today's `Resize` already re-makes exports, so features already re-read them.
 
 **Size.** Large. One agent per sub-step, serial (4a can run alongside 4b).
+
+**As built (2026-11-19, `org-native/rev-step4`).** 4a: ORG `rev-step4` (`bfd13bb`, `IUploadService::QueueTrackedStreamingTextureZeroFill`),
+OMS `rev-step4` (`d2ec1c6`, `VersionedTextureGrowth.h`: `MakeTextureVersions`, `FragmentWhenReady`, `PostTextureVersions`). 4b:
+`GraphResources` `Preparable`/`PlanPrepare`/`Prepare`/`AdoptPrepared`, `SetSizeWishHook`. 4c/4d: `src/RenderGraph/Frame/Revision.{h,cpp}`,
+`Frame/RevisionRecordings.h` (implemented in `FrameAnchors.cpp`), `AdoptLatest` first in `OnBegin`. 4e: staged CS stage builds join
+revisions (`Builds::AttachStaged` over `AttachStagedEpochGraphs`), Physical Lens's ghost paths are a `kBuffers` fragment
+(`Revision::PublishBuffer`/`AdoptedPayload`). New configs `resize-drag`, `menu-resize`. Where it differs from the scope above, see
+section 9, "Decided by the agent (step 4)".
 
 ---
 
@@ -444,6 +509,7 @@ headers), namespace `RenderGraph::Frame::Vars`:
 | `RenderSize`, `DynamicRatios` | `Extent2D`, `float2` (constants only) | `Upscaling.cpp:ConfigureUpscaling`, which writes `graphicsState` ratios each frame today: `Set` raises only on change |
 | `UpscaleMethod` | enum | `Upscaling` settings (`upscaleMethod`/`upscaleMethodNoDLSS` through `GetUpscaleMethod`) |
 | `HdrEnabled`, `HdrOutputTarget` | `bool`, identity | `HDRDisplay.cpp:BeginRenderFrame` (it latches `hdrEnabledForFrame` today), `HDRDisplay::PostChainTarget` |
+| `PresenterFormat` | DXGI format, HDR10 | `Upscaling.cpp:BeginRenderFrame`, from `FrameGen::ActivePresenter().Surface()` (added in 6.14) |
 | `EngineShadowMap` | size, format, slices | the engine shadow map's creation (find the creation point; open question Q6) |
 | `ReflectionCubemap` | size | engine target creation (`EngineTargets`) |
 
@@ -479,6 +545,16 @@ with no edits should be zero after load.
 **Size.** Medium to large. 5a and 5d can run in parallel (OMS vs `src/Utils`, `cmake/`); 5b and 5c after 5a, in parallel with each
 other (disjoint files except `Feature.h`, which only 5c touches).
 
+**As built (2026-11-19, `org-native/rev-step5`).** 5a: OMS `rev-step5` (`d48c924`, `Variables.h`: `VariableSet`, `Variable<T>`,
+`VariableSnapshot`, `Derive`, `RequireSizes`; tests in `tests/Variables/`). 5b: `Frame/Variables.{h,cpp}` (typed `Set...`/`Adopted...`
+per variable, `RaiseFeatureSettings`, `RaiseSetting`), `Frame/VariablesLane.h`; a revision carries the snapshot it started with in
+`kRevisionInputs`, and a variables-only revision is adopted in the Begin that starts it. 5c: `Feature::ProjectSizeSettings`,
+`SettingsWritten`, `ApplySettings`/`ApplyDefaults`, `SettingsWriteBatch`; the check is `CS_ORG_MISSED_WRITER_CHECK` (on by default).
+5d: `Utils/Setting.{h,cpp}` (`CS::Setting<T>`, `CS::SettingRegistry`), widget overloads in `Utils/UI.h`, the generator unwraps
+`CS::Setting<T>`, the interceptor's `Guard::Finish` calls `RaiseAt`; pilot in `GraphResourcesSelfTest.cpp`. Nested cs-test keys in
+`Testing/Commands.cpp:SetSetting`. Native frame generation step 9 (`PresentationConfig` as a variable, input producers) landed with
+it. See "Decided by the agent (step 5)" in section 9.
+
 ---
 
 ### Step 6. Migrate features, one at a time
@@ -507,13 +583,19 @@ size/shape settings to `Setting<T>`, and deletes its in-frame checks and resets.
 3. Reads sizes for constants, group counts and viewports from `Adopted()`, never from live settings or `Desc()` of a twin in flight.
 4. Uses `FirstFrame` for temporal reset. Deletes `ResetHistories`, `Rearm`, `fresh` users, `clearPending`.
 5. Deletes its prepass polling, its `RequestSize` calls, its `Register` re-calls and any `DrainCommandRing` for resizes.
-6. Adds its change to a cs-test config (`resize` grows one block per feature, or a feature config) and runs it.
+6. Deletes its `FrameAnchors::Scheduled` gate, if it has one: the client and every frame-wide value that tells other shaders it
+   runs (ViewAtmosphere's `PostWaterComposite`) switch in the same adoption, so there is no frame where one is on and the other
+   is not.
+7. Adds its change to a cs-test config (`resize` grows one block per feature, or a feature config) and runs it.
 
 **Intermediate.** None new. Each migration deletes the feature's share of earlier intermediates.
 
 **Test per migration.** The feature's config block in three modes (`native-vulkan`, `native-d3d12`, `guest`), standard set,
 `latch-census-short` once per three migrations. Shots of the feature before and after a change compared against the pre-migration
-build (section 7.10).
+build (section 7.10). Two open defects make some baselines unusable (`dclf-open-defects.md`, "Graph-mode port gaps"): guest kMAIN
+goes non-finite with the fog's volumetric fog on, and native's fog volumes hold almost no fog. Until they are fixed, 6.1 and
+6.21 compare against plain D3D11 shots and the fog's debug views (`CS_ORG_FOG_DEBUG`, `CS_ORG_VIEW_ATMOSPHERE_DEBUG`), not
+against the pre-migration graph build.
 
 **Acceptance per migration.** Zero `stale recording`, zero `structural rebuild` lines caused by the feature's change, the boundary
 census shows none of its sites, the feature's grep in section 8 is empty.
@@ -523,6 +605,498 @@ accessors (`ORGExponentialHeightFog::Slices` and similar) and move them to `Adop
 
 **Size.** Large overall; each migration small or medium. Parallel across features with disjoint files, at most three agents at once
 (game launches and builds, section 10).
+
+**As built (2026-11-19, 6.1, `org-native/rev-step6-1`).** The declaration API is `src/RenderGraph/Frame/Declare.{h,cpp}` (its
+coordinator side is `Frame/DeclareLane.h`). Its shape, for 6.2 to 6.23:
+
+```cpp
+namespace RenderGraph::Frame {
+// Dependencies: frame-wide variables (Vars::DisplaySize(), Vars::HdrEnabled(), ...) and bound CS::Setting fields.
+Dependencies DependsOn(const D&... a_dependencies);
+class Inputs {  // one revision's values
+    template <class T> T Get(Vars::Var<T>) const;
+    template <class T> T Get(const CS::Setting<T>&) const;  // T up to 32 bytes
+};
+DeclaredTexture2D DeclareTexture2D(std::string name, Dependencies, std::function<D3D11_TEXTURE2D_DESC(const Inputs&)>, const GraphResources::Options&);
+DeclaredTexture3D DeclareTexture3D(std::string name, Dependencies, std::function<D3D11_TEXTURE3D_DESC(const Inputs&)>, const GraphResources::Options&);
+// DeclaredTexture<Twin>: operator* / -> give the versioned GraphResources twin passes declare.
+template <class Key>
+DeclaredClient DeclareClient(std::string id, Dependencies,
+    std::function<std::optional<Key>(const Inputs&)> key,               // nullopt: no client
+    std::function<bool(const Key&, FrameAnchors::ClientDesc&)> make);  // false is fatal
+// DeclaredClient::Invalidate(): the key reads state that is not a variable yet and it changed.
+class AdoptedRevision {
+    template <class T> T Get(Vars::Var<T>) const;
+    template <class T> T Get(const CS::Setting<T>&) const;
+    std::array<std::uint32_t, 3> Extent(const DeclaredTexture<Twin>&) const;  // the bound version's
+    bool FirstFrame(const DeclaredTexture<Twin>&) const;                     // first frame of a new version
+    bool Has(const DeclaredTexture<Twin>&) const;
+};
+namespace Revision { const AdoptedRevision& Adopted(); }
+}
+```
+
+- Declarations are evaluated when a revision starts (`Revision.cpp:StartPreparation`), against the snapshot that revision carries,
+  only when a dependency's serial moved (or the declaration is new or invalidated). A new extent is a size wish on the twin, so the
+  step 4 path makes the version on the lane (born cleared for History). A new client key registers the client there and the revision
+  waits for every stage build that holds it (`FrameAnchors::StageBuildNeed`, checked in `AdvanceRevisionRecordings`). So the values,
+  the versions and the client switch in at one Begin.
+- `CS::Setting` variables now carry the value (`Vars::Lane::SettingValue`, up to 32 bytes); the raise hook passes the bytes.
+- Exponential Height Fog: twelve textures declared at Setup on `DisplaySize` (decision 6a: the grid covers the display, the shaders
+  already map the dynamic-resolution depth region), ViewAtmosphere's `nearPixelSize`, `nearSlices`, `middlePixelSize`,
+  `middleSlices`, and EHF's `enabled`, `volumetricFogEnabled`, `volumetricFogExtinctionScale`, `fogDensity`, `fogDensity2`. They are one
+  texel while the volumes are off and are published once. The client is declared on the toggles and pixel sizes; its key adds the
+  inputs the last Prepass found. Constants, group counts and `Slices()` read `Adopted().Extent`; history validity reads `FirstFrame`.
+  `FollowSizes`, `ResetHistories`, `Build`/`Register` from the Prepass, the per-frame release and debug mode 10 are gone.
+- Worker rv61a split the GPU-copied structs (`ExponentialHeightFog::GpuSettings`, `ViewAtmosphere::GpuSettings`) and ported the fields;
+  EHF's `ProjectSizeSettings` is gone and ViewAtmosphere's keeps `enabled`, `distantPixelSize`, `distantSlices`.
+
+**As built (2026-11-19, 6.2, `org-native/rev-step6-2`).** ImGui's atlas pages publish through the revision.
+- `Frame::Revision::PublishTexture(slot, image, owner)` (any thread) is a new revision input beside `PublishBuffer`: a texture the
+  caller made becomes a pending version of a `VersionedTexture`. The lane adds it to the revision's `MakeTextureVersions` call as an
+  image request with undefined contents, so it lands in the same `NamedVersions` set and fragment as the twins' versions. Its slot
+  joins the closure, the member stages record against it, and `AdoptAll` makes it current with the rest. Latest wins per slot. A
+  superseded revision gives its textures back unless newer ones came. The adoption line lists them under twins as
+  `name (published)`.
+- `ImGuiBasicRHI.cpp:SetPage` calls it for the page's texture or its placeholder. `PublishPages`, `nextPages`, `publishQueued` and the
+  `AtNextBegin` call are gone. The upload and draw passes still skip work on a texture their page does not bind, and the whole
+  texture is restaged until a recorded upload copied its bound version, so nothing else changed.
+
+**As built (2026-11-19, 6.8, `org-native/rev-step6-8`).** LLF's cluster buffers keep their Setup size, the display size's grid,
+which `ORGLightCulling::Setup` now takes as the capacity. The passes dispatch for that capacity, and the push constants carry
+only it. The run's grid travels in the latch (`LLFLatch::clusterSize`); the shaders clamp it to the capacity and skip clusters
+outside it. The light copy always moves the whole capacity. So no pass revision follows the grid or the light count, and
+`pending`, `BeginFrame` and the atomic shape are gone. `LightLimitFix::UpdateClusterParameters` takes the grid from
+`ORGLightCulling::AdoptedClusterGrid` (adopted `DisplaySize` times adopted `DynamicRatios`, 64 pixels a cluster) while the graph
+culls, so the culling and the frame's readers (`PerFrame::ClusterSize`) use one grid. Plain D3D11 keeps the live formula.
+
+**As built (2026-11-19, 6.13, `org-native/rev-step6-13`).** LLF's local shadow cache follows the revisions.
+- `EnableLocalShadows`, `LocalShadowSlots` and `LocalShadowResolution` are `CS::Setting`s. LLF's `ProjectSizeSettings` is gone.
+- `ORGLocalShadows::Setup` runs once, at `SetupResources`, when the local shadow hooks are installed. It declares the cache with
+  `DeclareTexture2D` on `EnableLocalShadows`, `LocalShadowResolution` and `EngineShadowMap`: a new resolution is a new version, and
+  the cache is one texel while it is off. The client is `DeclareClient` on `EnableLocalShadows`, `LocalShadowSlots` and
+  `EngineShadowMap`, and its key is the slot count. There is no key while the cache is off, or the engine has no shadow map array.
+- **A new slot count is a new slice count, so another shape class.** The client's make declares a new cache texture for that
+  count. A new client registration then waits for its EarlyPrepass stage build inside the revision. The revision that adopts it
+  publishes the new texture under `LightLimitFix::LocalShadowCache`. That is one structural rebuild, at that boundary, for the
+  readers that declare the id. Each shape class's texture has a graph name of its own (`... (N slots)`), so it never meets the
+  published id. Going back to the adopted count takes the adopted texture again.
+- `Frame::DeclareClient` takes an optional fifth argument, `adopted(key)`. It is called inside the adoption point (at
+  `Declarations::NoteBegin`), once per registration, at the first Begin whose adopted values give the registered key. LLF uses it to
+  switch the cache it binds at t103 and publishes. Additive: EHF and the other callers pass nothing.
+- The slot data buffer holds every slot the setting allows (64 times 112 bytes), so a slot count changes nothing there. No buffer
+  declaration was needed. The data copy and the latch always move the whole capacity, with the slots past the adopted count zeroed.
+- The frame reads the cache's shape only from `ORGLocalShadows::Adopted()`: the adopted texture's slots, its bound extent and the
+  adopted `EngineShadowMap`. `LightLimitFix::FollowLocalShadowGraph` makes the CPU side follow it and forgets the slice
+  assignments when it changes. The copy constants and group counts are written per run from it.
+- Gone: the mid-frame `EnsureLocalShadowResources` on the graph path, `ORGLocalShadows::Release`, `Desc`, Setup's same-shape
+  guard (`SameShape`), `WithdrawCache`, `localShadowGraphFailed` and the move to D3D11 when the graph lost the cache. Plain D3D11
+  keeps `EnsureLocalShadowResources` as it was.
+- `CS_LLF_LOCAL_SHADOWS=1` (tests) turns local shadows on at PostPostLoad, so their hooks install. The config is
+  `llf-local-shadows`.
+
+**As built (2026-11-19, 6.16, `org-native/rev-step6-16`).** IBL's client is declared once, at Setup, on `ReflectionCubemap` and
+IBL's `DALCMode`. Its key holds whether the reflection cubemap exists, whether the DALC mode reads the environment SH (modes 0
+and 1) and whether Dynamic Cubemaps publishes its cubemap (read at evaluation: it is published once, at Dynamic Cubemaps' setup).
+`make` takes the sources from the key. `Refresh`, `declared` and the per-frame source compare in `ORGIBL::Prepass` are gone; the
+scene switch (`IsDisabledForCurrentScene`) stays the client's `active`, a per-frame gate. `EnableIBL`, `UseStaticIBL` and
+`DALCMode` are `CS::Setting<std::uint32_t>`, bound in `IBL::IBL()`; IBL's `ProjectSizeSettings` is gone. Exponential Height Fog's
+key now holds IBL's SH from `EnableIBL` (a dependency) and IBL being on the graph, and Skylighting's probes from Skylighting being
+on the graph. The scene switch is a constant (`ConstantInputs::ibl`), so the fog's client no longer changes at loading screens or
+the map. Test: `ibl` (new).
+
+**As built (2026-11-19, 6.17, `org-native/rev-step6-16`).** Skylighting's five probe volumes are declared at Setup on a reset count,
+`Skylighting::resets` (a `CS::Setting<std::uint32_t>` named `Skylighting.resets`, not saved). `ORGSkylighting::QueueReset` raises it.
+Declare.h gained `RenewFn`, an optional last argument of `DeclareTexture2D/3D`: a new count makes a new version at the same
+extent. The revision's wish path carries it (`RevisionWish::renew`, a serial, so a second reset while one prepares is not lost).
+A new version is born zero, which is not Skylighting's reset state (unit SH, lit history bits, full visibility, unknown coverage),
+so the five clears stay as gated passes (run gate entry 3, recorded at execution) that the commit opens on the first run after
+`FirstFrame` of a volume or a new adopted count. The client is declared on its imports (the key, set by `Update`, `Invalidate` on a
+change: an interim, as EHF's inputs). The one-shot clears, `QueueReset` → `Rearm` and `Refresh` are gone, so SSGI is the last
+`Rearm` user. The zenith copy stays a gate. `FrameAnchors::Scheduled` in `ZenithReady` and the guest map clear became "a commit
+of the client ran". Test: `skylighting-reset` (new).
+
+**As built (2026-11-19, 6.14, `org-native/rev-step6-14`).** Upscaling's textures and clients follow variables.
+- `upscaleMethod`, `upscaleMethodNoDLSS`, `qualityMode`, `frameGeneration`, `frameGenMethod`, `frameGenMultiplier` are
+  `CS::Setting`s, bound in the new `Upscaling::Upscaling()`. Upscaling's `ProjectSizeSettings` and its `SettingsWritten` calls are
+  gone. The test requests write the settings in `BeginRenderFrame` (the `AtNextBegin` calls are gone), and the revision that
+  carries them switches the method in.
+- The frame runs `Upscaling::FrameUpscaleMethod()` and `FrameQualityMode()`: the adopted `UpscaleMethod` and `qualityMode` with the
+  render graph, the live values in plain D3D11. `ConfigureUpscaling` (render size, ratios, jitter), `ConfigureTAA`, `Upscale`,
+  `IsUpscalingActive`, `Main_PostProcessing`, `PostChain.cpp`'s `post.upscaler` and `State.cpp`'s mip bias read them.
+  `UpscaleMethod` is still written from `GetUpscaleMethod()`, the live choice the next revision carries.
+- `ORGUpscaling::Setup` declares the upscaled texture on `DisplaySize`, `UpscaleMethod` and `frameGeneration`: display size while
+  an SDK upscaler (or guest DLSS-G's evaluate) writes it, one texel otherwise. So it now follows a size change. The hudless colour
+  has three textures, one per format of `ORGUpscaling::kHudlessFormats`, declared on `DisplaySize`, `HdrEnabled`, the new frame
+  variable `PresenterFormat` and `frameGeneration`. The one `HudlessFormatIndex` picks is display size, the others one texel. So
+  an HDR toggle changes extents only, never a format. `PresenterFormat` (`Vars::SurfaceFormat`, DXGI format and HDR10) is written
+  every frame from `Upscaling::BeginRenderFrame`, skipping frames with no committed format.
+- The Upscale client (copy into kMAIN and the depth upscale) is declared on `DisplaySize`, `UpscaleMethod` and `qualityMode`; its
+  key holds the copy's render area and whether the depth upscale runs (SDK method below native). Its make also registers the
+  evaluate client. The hudless client is declared on the hudless textures' variables; its key holds the format. Passes declare
+  the textures through their slots. `RegisterUpscale`, `RegisterHudless`, `UpscaleChanged`, `HudlessChanged`,
+  `CreateTexture`/`DestroyTexture`/`Desc` and RunUpscale's registration are gone.
+- `CheckResources`, `previousUpscaleMode`, `previousUpscalingWasActive`, `DestroyUpscaledTexture`, `CreateHudlessTexture` and
+  `DestroyHudlessTexture` are gone, and with them the two resize `DrainCommandRing` calls. Plain D3D11 makes its upscaled
+  texture and one hudless texture per format on first need and keeps them. The interop ring already holds every D3D11
+  resource its submissions use until their slot completes (`QueueResourcesForDeferredRelease`).
+- `Streamline::EvaluateDLSS/XeSS/FSR` set their SDK options where the evaluate records: inside the evaluate pass's record in graph
+  modes, just before the ring's evaluate in plain D3D11. The options carry the frame's quality, output size and pre-exposure
+  (native frame generation plan, decision 10a).
+- Interims left: engine imports (kMAIN, depth, the copies, the hudless source) are still found by the frame. A change bumps a
+  serial in the client's key and calls `DeclaredClient::Invalidate` (step 9b). The `FrameAnchors::Scheduled` gates stay on the
+  evaluate's copy, the hudless copy and the frame generation inputs. See "Decided by the agent (step 6.14)" in section 9.
+
+**As built (2026-11-19, 6.21, `org-native/rev-step6-21`).** Atmosphere and Fog's medium and post-water composite follow the
+revisions.
+- `enabled`, `distantPixelSize` and `distantSlices` are `CS::Setting`s too, so all seven size and toggle fields are. ViewAtmosphere's
+  `ProjectSizeSettings` is gone. The atlas layout is one function, `ViewAtmosphere::LayoutFor`, which D3D11's `Prepare` and the
+  graph's declaration share.
+- The luminance and transmittance atlases are `DeclareTexture3D` on `DisplaySize` and the seven fields (at most 8 M texels),
+  published once at Setup. While the shared volume is off they are one texel (the existence rule). It is always off on the graph,
+  since its inject and integrate passes wait on Physical Sky's media (`view-atmosphere-port.md` 3.6), so no setting change makes
+  a version yet.
+- Both clients are declared at Setup. The medium has no dependencies and registers at the first revision, no longer from the first
+  Prepass. The composite is `DeclareClient` on EHF's `enabled`. Its key is what the last Prepass observed: Physical Sky off, the
+  program built (the newest build of `ProgramCache`), the inputs published, and kMAIN and its depth. These are not variables yet,
+  so a change calls `Invalidate()`, as EHF does with its inputs.
+- `CompositeActive()`, and so `PostWaterComposite`, is the registration the adopted revision holds: the client's `adopted` call
+  sets it, so the composite and the flag switch in at one Begin. A removal (fog off, Physical Sky on) stops both at once: the gate
+  closes when the client is unregistered, and the shaders do their own fog from that frame on.
+- Every composite registration sets `matchesById`, keeps the gate and commits the same run, so a registration for new inputs lets
+  the older one compose until its revision is adopted. No frame has the flag on without the composite.
+- Gone: the `FrameAnchors::Scheduled` gate in `CompositeAfterWater`, `CompositeActive()`'s `ScheduledThisFrame` (Q12's point fix),
+  the in-frame registration of both clients (`UpdateComposite`, `RegisterComposite`, `RegisterMedium`, `compositeWanted`).
+- The shared volume's switch (`SharedVolumeActive`, still false) uses the existence rule when it lands: the fog's volumes go one
+  texel through their declaration, and their ids stay published. `view-atmosphere-port.md` 3.3 says so now.
+- The config is `view-atmosphere`.
+
+**As built (2026-11-19, 6.6, `org-native/rev-step6-6`).** Screen Space GI's textures, programs and client follow the revisions.
+- `Enabled`, `EnableGI`, `EnableExperimentalSpecularGI`, `EnableTemporalDenoiser`, `EnableBlur` and `ResolutionMode` are
+  `CS::Setting`. The menu's preset buttons call `ScreenSpaceGI::ApplyPreset`, whose writes are `Setting` writes. The
+  `ProjectSizeSettings` entry and `recompileFlag` are gone. The D3D11 path recompiles when the settings its defines come from differ
+  from the compiled ones (`CompiledDefines`, checked in `DrawSSGI`).
+- Ten History textures are declared on `DisplaySize` and `Enabled` (the specular pair also on the specular and temporal
+  settings), one texel while they do not exist: the accumulation count, the previous geometry, and two textures per composite input.
+  The four outputs are exported and published once at Setup under the composite's ids; their partners are not exported. At full
+  resolution an output is also the history and its partner the scratch; below it the partner is the history and the upsample
+  writes the output. So the resolution mode swaps roles in the client and makes no texture change. The working textures (depth,
+  normals, radiance, accumulation scratch, blur inputs) are transients made at each registration at the key's display size.
+- One `DeclareProgram` (`ScreenSpaceGI::Chain`) on the define settings builds the seven step programs for a define set. Every step's
+  defines with the common ones are resolved at Setup (`ResolveDefines`), so a build reads no State.
+- The client `cs.ssgi` is declared on `DisplaySize` and the six settings; its key adds the engine inputs the last Prepass found
+  (`Invalidate` on a change). While SSGI is off, or before the inputs are found, the client holds only the history clears.
+- `cs.ssgi.reset`, `RegisterReset`, `RegisterChain`, `Rearm`, `PublishOutputs`, `RequestSize`, the program prebuild and the D3D11
+  fallback after Setup are gone. A history reset is a clear of every declared texture behind one gate entry, which the commit opens
+  on a loading screen or shader reload (`queuedResetHistory`), on `FirstFrame` of any declared texture, and on the first run of a
+  registration made for another configuration or size. Dispatches, `TexDim` and the clamp read `Adopted().Extent`.
+- The composite always gets the published outputs while the graph path runs (zero while off), and takes the specular texture by
+  the adopted `EnableExperimentalSpecularGI` (`ScreenSpaceGI::FrameSpecularGI`).
+- cs-test: `ssgi` config and the feature's `ssgi-preset` command. EHF's client key reads no SSGI state.
+
+**As built (2026-11-19, 6.9, `org-native/rev-step6-9`).** The post chain is one declared client, `cs.pp`
+(`ORGPostProcessing.cpp`), composed of per-effect declarations (`ORGPostEffect.h`):
+- `Effect::Declare` adds the effect's settings to the client's dependencies and declares its kept textures; `Effect::Key` appends
+  what its passes depend on from the revision's values; `Effect::Update` still observes each frame what is no variable yet
+  (imports, loaded LUTs and shapes, Cinematic Camera); `Effect::BuildRun` builds from its key words and returns a `Run`.
+- The chain's key is the observed state (order, kMAIN's shape and imports, linear lighting, the Update words) plus the per-effect
+  key words. A new observed state invalidates the client. (Superseded by the 6.9 fixes below: the build is in the make function
+  and a failed build is fatal.)
+- Each registration holds its build and its effects' `Run`s, and registers with `matchesById` and its `generation`, so the frames
+  until the revision is adopted commit the build their schedule holds (`FrameAnchors::HeldNow`). The `ScheduledThisFrame`/`Scheduled`
+  gates are gone. Physical Lens and Camera FX kept the legacy form until 6.20, which removed it.
+- `Shape::dynamicWidth/Height` are gone from the key. `DynamicViewport()` is the whole of kMAIN and effects take
+  `CommitContext::DynamicSize()` for their constants until step 8 puts the viewport in the latch.
+- Ported to `CS::Setting`: `PostProcessFeature::enabled` (bound per slot as `PostProcessing.<slot>.enabled`), COD Bloom's
+  `MipBlendFactor` (`std::array<float, 8>`), DoF's `UseAdaptiveGather`, `GatherQuality`, `BokehMode`, `HighlightShape`, Physical
+  Glare's `FFTResolution`, `ApertureMode`, Lens Flare's `FFTResolution`, `GhostModeInt`. Their `ProjectSizeSettings` entries are gone;
+  LUT, Color Grading and Physical Lens keep theirs.
+- `Frame::DeriveFromSetting` (Declare.h) makes a derived variable of one setting (OMS `Derive`, `Vars::Lane::DeriveUint`). COD Bloom's
+  `Derived.PostProcessing.CODBloom.usedMips` is its key, so a blend of the factors builds nothing unless the count changes.
+  `CS::Setting` gained a read-only `operator[]` and `size()` for array values.
+- Declared textures: Color Grading's LUT, Motion Blur's horizontal grid, Local Exposure's levels, blur and grid, Physical Glare's
+  aperture and PSF spectra (on `FFTResolution`), Lens Flare's spectra (on `FFTResolution`, `GhostModeInt`), each one texel while
+  its effect is off. `Builder::Register` registers a declared twin's slot; `Bind::Srv/Uav(twin)` and `ImageOf` bind it.
+- Histogram Auto Exposure: `clearPending` and the one-shot reset are gone; the buffers' first frame opens a gated `CS_Reset` until a
+  frame with it reached the GPU. Its readback stays a per-frame late-bound value (the pre-exposure), each build with its own stamp
+  region (`RunReadback::BuildStamp`). DoF's focus resets on a frame that does not follow its last commit, as D3D11 does.
+- Test: `tools/cs-test/configs/post-effects.toml` (needs the profile's Post Processing mode on).
+
+**As built (2026-11-19, 6.18, `org-native/rev-step6-18`).** The setup-only features follow the revisions.
+- Subsurface Scattering: the two working textures are declared on `DisplaySize` (`DeclareTexture2D`, kMAIN's description). The
+  mode's programs are a `DeclareProgram` on `SSMode` (separable: extraction, horizontal, vertical; Burley: its extraction and
+  blur), with the common defines resolved at setup. The client is declared on `SSMode`; its key is the mode's programs and the
+  imported engine targets, which `AfterDeferredPasses` observes (`Invalidate` when they are first imported). Only the mode's
+  passes are in a registration. `programsDirty`, `ClearShaderCache` and `Refresh` are gone; losing a target after import is
+  fatal. `SSMode` and `EnableCharacterLighting` are `CS::Setting`s; `ProjectSizeSettings` is gone. `Util::RadioButton` takes a
+  `CS::Setting<int>`. Test: `sss` (new).
+- Dynamic Cubemaps: the client is declared on `ReflectionCubemap`; its key is the cubemap's edge and the capture's imports
+  (`Invalidate` when the first update moves the colour source to the forward target). The textures stay made once for the
+  engine's cubemap: another edge is fatal at the key's registration. The BC6H copies are in the graph from the start, their gate
+  entries closed until an encode, so the first encodes no longer rebuild it. `programsDirty`, `copying` and `Refresh` are gone.
+  A failure after setup is fatal (the 6.16 note): `Fail`, the `onFailed` callback and `DynamicCubemaps::ReturnToD3D11` are gone.
+  `EnabledSSR` is a `CS::Setting`; the feature buffer takes `DynamicCubemaps::GpuSettings`, built from the settings. Test:
+  `dynamic-cubemaps` (new).
+- Volumetric Shadows (worker): the client is declared on `EngineShadowMap`; its key is the imported cascades, the volumetric copy
+  and the cascades' width, observed at EarlyPrepass (`Invalidate`). The commit's group counts come from the key's width. Losing
+  the cascades after import and a wrong t4 are fatal; `Stop` is gone. The 512 x 512 copies follow nothing. Test:
+  `volumetric-shadows` (new).
+- Cloud Shadows (worker): the occlusion copy's client is declared on `ReflectionCubemap`, keyed on its edge; another edge than the
+  layers' is fatal. The layer client stays registered at setup (no inputs change). Test: `cloud-shadows` (new).
+- Hot reload needs no feature code: `DrawcallLimitFix::ClearShaderCache` asks `RenderGraphRuntime::RequestShaderReload`, which
+  swaps every live pipeline. That is why `programsDirty` could go without a replacement where no define follows a setting.
+
+**As built (2026-11-19, 6.19, `org-native/rev-step6-19`).** The DCLF family clients and Bink are declared at setup with
+`DeclareClient` and registered by the first frame revision.
+- Each view keeps one client state for the session (latch, gate, run slots, query ring). A registration's passes take their target
+  by value, so the old and the new registration share everything else and the target mutexes are gone.
+- **Blood splatter**: on `DisplaySize` and `PresenterFormat`; the key is the back buffer's graph slot (`EngineTarget(0)`).
+  **Shadow mask** (both views): on `DisplaySize`; the key is kSHADOW_MASK's slot. A new slot is a new key, so the revision that
+  carries it registers the client again. The `CanTake` compare and `Refresh` are gone.
+- **Sky** (main, faces, sun) and **decal occlusion**: their targets are engine targets made once (Q4), imported at setup. The key is
+  the query ring's readback count (0 without a ring). A chunk made at a commit calls `DeclaredClient::Invalidate`, so the next
+  revision registers the client with it. That replaces the commit's `Refresh`.
+- `CanTake` (and `CanTakeSun`) also need `DeclaredClient::Registered()`, so a batch before the first revision is the engine's.
+- **Bink**: on `DisplaySize`, `PresenterFormat` and `HdrOutputTarget`. The key is the framebuffer's and HDR's UI texture's graph
+  slots and view formats, imported when a revision starts. Each registration's commit reads its own targets, and a frame's size
+  comes from the bound version (`Texture::Width/Height`). `UpdateTargets`, `Update`, the between-frames `BuildPending` and
+  `Begin`'s flag (with BinkHooks' `InFrame`) are gone. `Begin` refuses until a revision registered the client and the UI stage's
+  schedule holds it.
+- A target that cannot be imported or drawn onto at a revision is fatal (make returns false). At setup it still keeps the
+  engine's path for the session, as before.
+- Tests: `dclf-family` and `bink` (new). See "Decided by the agent (step 6.19)" in section 9.
+
+**As built (2026-11-19, 6.11, `org-native/rev-step6-10`).** Effects11's ORG FX chain follows the revisions.
+- Every texture the chain plans with is declared on first use with `DeclareTexture2D` on `DisplaySize` (screen-size ones follow it,
+  the fixed ones keep their size) and kept for the session. Passes declare the slots (`AnchorPasses::TextureOf`), so a new display
+  size is a new version of each, with no build. The per-size `Resources` set is gone.
+- The client is `DeclareClient` on `DisplaySize` and `Effects11.fxShapeWrites`, a `CS::Setting<std::uint32_t>` count that
+  `Effects11::NoteShapeWrite` raises. Its writers: `SettingManager::SetValue`, `SetStoredValue` and `Load` (in place of their
+  `SettingsWritten` calls) and `Effect::UpdateUIVariables` (the editor's variable and technique edits, and loads). Its key is the plan:
+  the shape text `ShapeKey` built before (now with the effects' compiled pointers and the kMAIN copy flag), the planned `Frame` and its
+  `ClientDesc`. It is made when a revision starts, so a new plan, its stage builds and the textures' new versions switch in at one
+  Begin. A plan with the same text is not made again.
+- The tonemap's targets, kMAIN, its depth and FX11's compiled effects are not variables: `Prepare` observes them each tonemap and calls
+  `Invalidate` when they change (an interim until step 9b). `ORGFxRuntime::Invalidate` (before FX11 reloads) resets the parsed
+  effects and invalidates the key. The per-frame `ShapeKey` poll, `Register`, `running`/`frame` and the two-shape commit are gone: each
+  registration's commit writes its own plan, since the commit that runs is the held registration's.
+- The tonemap owner is the client's `declared` (`State::PeekTonemapOwner` at Begin): while Post Processing or the game owns the
+  tonemap (every loading screen and the main menu) the client stays registered and its passes record only barriers. It was
+  unregistered before.
+- One-shot clears are gone. A kept (History or Persistent) texture's clear is a render-target clear recorded at execution, skipped
+  unless the commit opened its row of a run gate (`cs.effects11.clears`, a row per `kTextures` entry). The commit opens it for each
+  kept texture whose bound version no submitted run has cleared yet (`executed` records it). That covers `FirstFrame` and the first,
+  not born-cleared, version made at declaration.
+- Effects11's `ProjectSizeSettings` is gone.
+
+**As built (2026-11-19, 6.10, `org-native/rev-step6-10`).** Effects11's rays follow the revisions.
+- The five half-size textures are declared at `ORGSunRays::Setup` on `DisplaySize` and `Effects11.raysToggles` (a bit each for
+  `EnableVolumetricRays`, `EnableSunRays` and `EnableMoonRays`, set by `NoteShapeWrite`): half the display size while their effect
+  is on, one texel while it is off.
+- The seven programs are `DeclareProgram("Effects11::Rays")` on `Effects11.raysTargetFormat` (kMAIN's format, written each frame the
+  rays are drawn) and `Effects11.shaderCacheClears` (raised by `Effects11::ClearShaderCache`). Their defines are resolved at setup,
+  so the builds on the programs lane read no State. `ORGSunRays::Release` and the per-shape program maps are gone.
+- The client is `DeclareClient` on `DisplaySize`, `DynamicRatios`, the toggles and the programs' two settings. Its key holds the
+  areas (`Util::ConvertToDynamic` of the display size at the revision's start, as 6.4), the programs, which effects' passes it has
+  and the observed sources (kMAIN, the depth at t17, Terrain Shadows' heights, Cloud Shadows' cubemap; `Invalidate` on a change,
+  an interim). No client while both effects are off.
+- The commit runs every run and writes the run's latch at the held registration's areas: the VL size and the sun passes' `uvScale`,
+  `uvMax` and `invScreenWidth`. An Effects11 `Draw*` call gives the graph its effect only when the registration whose commit ran last
+  frame has it, else the frame draws on D3D11. `PrepareFrame`'s per-frame `Shape` compare and `Build` are gone.
+- Test: `effects11` (new), with a new cs-test step `e11` (`<CATEGORY>.<Key>=<value>`, `clear-shader-cache`).
+
+**As built (2026-11-19, 6.9 fixes, `org-native/rev-step6-20`).** The render thread never compiles a chain program, and a failed
+build is fatal.
+- The chain's programs are one `DeclareProgram` (`PostProcessing::Chain`) on the client's dependencies. Its key is the chain's
+  *plan*: every program the build of the revision's chain key asks for, by key string (source, entry, words, defines, targets and
+  blend, vertex stage). Each effect lists its programs in `Effect::Programs(ProgramSource&, feature, key words)`, through the same
+  `Raster`/`RasterTargets`/`Compute` calls its `BuildRun` makes (one helper per effect serves both), and names what it publishes
+  (`Publishes`), so Composite's `HAS_*` set follows from what earlier effects publish. The plan resolves the common defines on the
+  render thread (kept per key); the build compiles the new ones on the programs lane into a session store keyed by generation
+  and key. So DoF's `GATHER_RING_COUNT`, Color Grading's `TONEMAP_FUNC`, Physical Glare's `FFT_SIZE` and tear film, Lens Flare's
+  `FFT_SIZE` and fast or FFT path, Composite's `HAS_*` set and every fixed program are built on the lane before their revision
+  starts.
+- `Builder` only looks programs up (`ChainPrograms`). A program `Programs` did not list fails the build. `Builder` and the plan
+  share `ProgramSource` (`GetShape`, `Linear`, `Published`).
+- The plan reads observed state (order, formats, Update's members), so `DeclaredProgram::Invalidate()` (new in Declare.h) is called
+  with the client's `Invalidate` when the observed state changes, and at shader reload. `ProgramsReady` re-keys an invalidated
+  program.
+- The key function reads values and the plan's programs (`DeclaredProgram::For`). The make function builds the chain; a failed
+  build logs `the chain could not be built` and returns false, which `Declare.cpp` makes fatal. `failedKey`, `pendingKey` and the
+  D3D11 fall-back on a failed build are gone. An effect's `Update` reason (a D3D11 readback the chain cannot do) still runs that
+  frame's chain on D3D11, as before.
+- Shader reload (`ClearShaderCache`) clears the store, bumps the generation and invalidates both declarations, so the lane builds
+  every program again.
+
+**As built (2026-11-19, 6.20, `org-native/rev-step6-20`).** Physical Lens and Camera FX follow the revisions.
+- `PhysicalLens::Settings::ImageEffects`, `Diffraction` (`CS::Setting<bool>`) and `Intensity` (`CS::Setting<float>`) are bound in
+  the new `PhysicalLens::PhysicalLens()` as `PostProcessing.PhysicalLens.*`. The ghosts are `Derived.PostProcessing.PhysicalLens.ghosts`
+  (`DeriveFromSetting`: `Intensity > 0`). The lens's `Declare` adds the three to the chain's dependencies, and `Key` gives three
+  words. Physical Lens's `ProjectSizeSettings` entries are gone.
+- The lens model (preset, f-number, focus, zoom, coating) stays CPU input: the latch, the caches (still gates) and the ghost paths
+  (a `kBuffers` fragment since 4e) take it. The ghosts use the model of the paths version the adopted revision holds
+  (`AdoptedPayload`).
+- Both effects have per-build `Run`s. The lens's `LensRun` holds its parts, latch regions, gate entries, its readback stamp region
+  (`RunReadback::BuildStamp`) and its size's resources (`LensSized`: a new chain size is a new set, and an older build keeps its
+  own). The session's resources, the caches' made-state and the focus resolve stay in the effect. Commit reads the build's parts,
+  not the live settings, so they switch in with the revision.
+- With every part off the lens publishes nothing, so Composite builds without `HAS_PHYSICAL_LENS`. Composite's permutation reads
+  what earlier effects published and linear lighting from the chain (`ProgramSource::Linear`), not live state.
+- Camera FX's lens image stays a transient of the chain. Camera is declared on its `enabled`, like every effect.
+- The legacy form is gone: `Effect::Legacy`, `Build`/`Commit`/`Executed`, `LegacyRun`, `RunReadback::Build` and the one-argument
+  `Commit`, and the "older build" D3D11 branch of `HeldBuild`. Every registration sets `matchesById`.
+- The focus and adaptation readbacks stay `RunReadback`s (Q11). The atlas's mip program is a `DeclareProgram` with no inputs
+  (`PostProcessing::PhysicalLens::GenerateMips`), built at Setup.
+- Tests: `post-lens` (new), `post-programs` (new), `post-effects`. All need the profile's Post Processing mode on.
+
+**As built (2026-11-19, 6.22, `org-native/rev-step6-22`).** Physical Sky's textures and clients follow the revisions.
+- `enabled` and `enableVolumetricClouds` are `CS::Setting<bool>`, bound in the new `PhysicalSky::PhysicalSky()`. Physical Sky's
+  `ProjectSizeSettings` is gone. `halfResApShadow` stays a plain field: it picks a dispatch, not a size.
+- On the graph the frame runs the adopted toggles: `IsActive()` and `VolumetricCloudsEnabled()` read a copy that
+  `PhysicalSky::FollowFrameToggles` takes from `ORGPhysicalSky::FrameValue` (the adopted revision's value) at Reset and again
+  after the frame's Begin. Reset runs before the Begin that adopts, so `ORGPhysicalSky::BeginFrame`, at the feature's first hook
+  of the frame, clears the shader flags (`cbData`) when that adoption switched the sky or its clouds off. An on switch shows one
+  frame later, with its clients already in the graph.
+- The LUTs are `DeclareTexture2D/3D` with no dependencies (one version each, published once). Their client
+  `cs.physical-sky.luts` is `DeclareClient` with no dependencies, registered from the first revision on; its gate keeps a frame
+  with the sky off idle, so a toggle changes nothing in the pre-depth stage. The `FrameAnchors::Scheduled` gate and the D3D11
+  fallback in `GenerateLuts` are gone.
+- The AP shadow is `DeclareTexture2D` on `DisplaySize` (decision 6a), published once. The dispatch covers the dynamic region,
+  clamped to `Adopted().Extent`. A new version is exported, so not born cleared: a gated clear runs once per version in place
+  of the one-shot `ap-shadow.init`. It is in the LUT client (`cs.physical-sky.luts.ap-shadow.clear`, entry 5), which is in the
+  graph from the first revision on, so the first sky-on frame clears it before the Prepass and the draws.
+- `cs.physical-sky` (AP shadow and sky tail) is `DeclareClient` on `enabled`; its key adds the inputs the last Prepass found
+  (shadow map import, Terrain Shadows' heights, Cloud Shadows' layer, the clouds' shadow volume), with `Invalidate()` on a
+  change. `matchesById`, so the adopted registration keeps running until a new one is adopted. `cs.physical-sky.composite` is
+  `DeclareClient` on `enabled` and `enableVolumetricClouds`, key: the main target, Dynamic Cubemaps loaded (depth) and the
+  clouds (observed, and the toggle); its `adopted` call records the registration its commit checks the frame's target against.
+  The in-frame registrations (`RegisterPrepass`, `RegisterComposite`), the `Scheduled` gate and the D3D11 fallbacks for the AP
+  shadow and the sky tail are gone. A missing Terrain Shadows or Cloud Shadows input is left out (logged); a shadow map that
+  cannot be imported is fatal.
+- `cs.physical-sky.clouds` is `DeclareClient` on `DisplaySize`, `enabled` and `enableVolumetricClouds`. Its key is what the last
+  `Stage` found plus the screen targets' extent, which its copies bake in. `matchesById`; `Stage` renders once an `adopted`
+  call saw a registration, and stops while there is none. `cs.physical-sky.cloud-maps` is `DeclareClient` on the two toggles;
+  its key is the newest registration `EndFrame` built, and the managers' work waits until the adopted revision holds it. Both
+  `Scheduled` gates and the in-frame `FrameAnchors::Register` calls are gone.
+- **Existence rule for the cloud targets.** The twelve full-resolution targets (`kScreenTargets`) are made at setup on the graph
+  (`ORGVolumetricClouds::MakeScreenTarget`), declared on `DisplaySize`, `enabled` and `enableVolumetricClouds`: the display size
+  while both are on, one texel otherwise. Their ids are published from the start, so the first clouds-on no longer publishes
+  new ids. The other cloud textures were already made at setup. `OutputsWritten()` now means "a commit opened the neutral
+  clears of the bound versions": false from the frame a new version is bound and while the clouds are off.
+- The D3D11 wrappers of declared textures (`texApShadow`, the screen targets) follow the bound version in place at
+  `BeginFrame` (`resource`, `desc`, views), so D3D11 binds and DCLF's `IsExportOf` checks see the adopted export. A new screen
+  target version asks for the neutral clears and drops the cloud history, as new D3D11 targets do.
+- Atmosphere and Fog's composite key reads Physical Sky's `enabled` (a dependency) with what the last Prepass found
+  (`PhysicalSky::RendersWhenEnabled`: worldspace, interior and shaders, the toggle left out), so it switches in the same revision
+  as the sky's clients, and keeps today's behaviour in cells the sky does not render.
+- The lightning readback ring is already `RenderGraph::RunReadback` inside `cs.physical-sky.clouds` (Q11's (b)); unchanged.
+- Linear Lighting's handling in Physical Sky is unchanged.
+- The config is `physical-sky`.
+
+**As built (2026-11-19, step 6 follow-ups, `org-native/rev-step6-followups`).** Cross-feature items the migrations left open.
+- **`Frame::DeclareBuffer`** (Declare.h): a structured buffer as a function of variables, by analogy with `DeclareTexture2D`. The
+  description function returns a `D3D11_BUFFER_DESC`, and only `ByteWidth` may change (whole elements). A new element count is a
+  new version of the same slot. `AdoptedRevision::Elements(buffer)` and `FirstFrame(buffer)` read the bound version.
+  - The twin is a versioned `GraphResources::StructuredBuffer`. It holds an `org::VersionedBuffer` slot (`BufferVersions()`), which
+    `Register` registers as the name's resolver and passes declare (`org::ResourceResolverAndRange(*slot)`).
+  - The step 4 buffer fragment carries it: `Declarations::Evaluate` gives a new count to the coordinator (`OnBufferWish`), the lane
+    makes the version with `MakeStructured` and nothing to upload, and the fragment resolves at once. At adoption the slot adopts
+    the version, then `StructuredBuffer::AdoptVersion` makes the D3D11 export and views, updates `Count()` and `Graph()`, and
+    releases the old export after D3D11's last use.
+  - `PublishedResources` publishes a declared buffer as its slot (`Entry::bufferSlot`), so its readers resolve every version
+    without a build, `ShaderResourceIndex` follows the current one, and `IsExportOf` follows the twin's export.
+- **Light Limit Fix's cluster buffers** (clusters, light index list, light grid) are declared on `DisplaySize`. A larger native
+  display is a new version of each. The lights and the counter keep their size.
+  - The dispatches are indirect through a run gate (`LightLimitFix::CullingGate`): each run's commit writes the group counts of
+    the bound buffers' grid. That grid also goes in the latch (`LLFLatch::clusterCapacity`), where the shaders clamp the run's grid
+    to it, so the push constants hold only view and latch indices. No recording follows the display size.
+  - `BoundGrid` is the adopted display's grid when the bound clusters buffer holds it, else the first versions' grid (only before
+    the first adoption); anything else is fatal. `AdoptedClusterGrid` clamps to it. The "larger than at setup" warning is gone.
+- **Histogram Auto Exposure's two buffers** are declared buffers of a fixed size, made at the effect's `Declare`. Only their
+  creation changed; the passes, the reset gate and the readback are as 6.9 left them.
+- **ImageSpace's world clients depend on `DynamicCubemaps.EnabledSSR`** (6.18's open item). `WorldKey::ssr` holds it (while Dynamic
+  Cubemaps is loaded), so a toggle registers both world clients again with a revision. The SSR raymarch steps carry it as their
+  spec's `permutation`, which is part of the ImageSpace program key, and `DefinesOf` sets `ENABLESSR` from it in place of the live
+  define. So the revision that switches the clients in also switches the program. The engine's own shader-cache clear stays for
+  plain D3D11.
+- **Volumetric Shadows follows a new frame variable, `ShadowCascades`** (`Vars::ShadowMapShape` of `kSHADOWMAPS_ESRAM`, raised
+  with the engine's other targets in `RaiseTargetVariables`), 6.18's open item. The client is declared on it, and its key imports
+  the cascades and the volumetric copy when a revision carries the change, with the width from the variable. `Observe`, the
+  EarlyPrepass compare and `Invalidate` are gone. `UpdateImports` only checks that the cascades' view is still there (fatal if
+  not), without importing.
+- **Section 8 greps after the follow-ups** (over `src/`, `e9674777b` plus this branch):
+  - `ResetHistories`, `RegisterAgain`: none.
+  - `clearPending`: only `DrawcallLimitFix/Diagnostics/PlayerParity.cpp`, a diagnostic's own flag, not a history reset (no owner).
+  - `Rearm`: only the definition (`FrameAnchors.{h,cpp}`) and `AnchorPasses.h`'s one-shot comments. No caller is left; step 7a
+    deletes it with the one-shot passes (Terrain Shadows' heightmap upload, 6.3).
+  - `AtNextBegin`: the hook (`FrameDriver.{h,cpp}`), `GraphResources.cpp`'s `ApplySizeRequests` and `GraphResourcesSelfTest.cpp`.
+    Step 7a.
+  - `RequestSize`: only `GraphResources.{h,cpp}`'s definitions and `Revision.{h,cpp}`'s wish hook comments. No feature calls it.
+    Step 7a.
+  - `Refresh(`, the frame-revision ones: `FrameAnchors::Refresh` in DCLF's Sky, DecalOcclusion, BloodSplatter and ShadowMask
+    clients and its test harness, and in `BinkGraph.cpp` (6.19); in `Menu/ImGuiRenderer.cpp` when the overlay's target import
+    changes (no migration owns it: an engine import, step 9b, or 6.15 if the HDR toggle is what moves it); in
+    `GraphResourcesSelfTest.cpp`, and `PublishedResources::Refresh` from the anchors' resize poll (step 7a). The other matches
+    (`BaselineManager`, `GoToIndex`, `FormEditSources`, `LightEditor`, Terrain Shadows' `NeedsRefresh`, DCLF's
+    `RequestAccumulatedRefresh`) are other mechanisms.
+
+**As built (2026-11-19, 6.15, `org-native/rev-step7b`).** HDR Display's textures and composite follow the revisions.
+- The scene, output and UI textures are `DeclareTexture2D` on `DisplaySize` (`ORGHDRDisplay::MakeTexture`), published once as
+  their slots. A new display size is a new version of each, adopted with its revision. They were made once and never resized.
+- `ORGHDRDisplay::GraphOf` returns the twin's slot (`FrameAnchors::Texture`), not the version's resource, for the current or
+  the last wrapped D3D11 texture. So ImageSpace, Bink, Scaleform and Upscaling's hudless source keep one graph resource across
+  versions, and a key read between the adoption and the rewrap still finds the slot.
+- HDR Display makes its own D3D11 views. `HDRDisplay::FollowGraphTextures` (in `BeginRenderFrame`, after the adoption point)
+  wraps a new export (`ORGHDRDisplay::NewExport`) and makes the views again from the old ones' descriptions.
+- The `cs.hdr` client is `DeclareClient` at Setup on `HdrEnabled` and `DisplaySize`. No key while HDR is off. Its key is the
+  display size and a back buffer serial: the back buffer is not a variable yet, so `Compose` calls `Invalidate()` when it sees a
+  new one (the 6.14/6.19 interim). `make` imports the textures and the back buffer and sizes the dispatches and the copy from
+  the key. The `adopted` call sets the held registration, which the commit reads (`matchesById`).
+- `Compose` composes on the graph only while the held registration was made for the frame's back buffer. Otherwise ApplyHDR
+  composes with D3D11, as before a registration switched in. The per-present `Inputs` compare, the re-registration, the
+  `Scheduled` gate and the import failures' `Fail` in `Compose` are gone.
+- No `DeclareProgram`: no define of HDROutputCS follows a setting, and hot reload swaps its live pipeline
+  (`RequestShaderReload`), as 6.18 found. `programDirty` and `ORGHDRDisplay::ClearShaderCache` are gone.
+- HDR's `ProjectSizeSettings` and its `SettingsWritten` call are gone. `enableHDR` reaches the frame as `HdrEnabled`, which
+  `RaiseHdrVariables` writes every frame.
+- Test: `hdr-resize` (new), and `hdr`. See "Decided by the agent (step 6.15)" in section 9.
+
+**As built (2026-11-19, 6.23, `org-native/rev-step7b`, worker mig623).** The screenshot's clean scene follows the revisions.
+- The texture `Screenshot::CleanScene` and the client `cs.screenshot.clean` are declared once, at `ORGScreenshot::Setup`, on
+  `DisplaySize` and `HdrEnabled`. kFRAMEBUFFER is the back buffer at the snapshot point, and its format is fixed when the swap
+  chain is made, so no format variable is needed: the texture takes kFRAMEBUFFER's format at setup.
+- The clean scene is read only in SDR. With HDR on, the texture is one texel and the key is empty, so there is no client.
+- The key is the display size and kFRAMEBUFFER's import. The import is not a variable yet: `SnapshotCleanScene` calls
+  `Invalidate()` when it changes, as Upscaling's hudless source does.
+- The `adopted` call records the key the adopted revision holds. The frame copies only while that key was made for
+  kFRAMEBUFFER's import at its current size. Otherwise the capture uses the D3D11 snapshot, as before.
+- Every registration shares the gate and the commit and sets `matchesById`. The capture reads the clean scene through its slot,
+  at the adopted size. The readback buffers stay on the Capture anchor's placed epoch.
+- Gone: `const bool same`, the in-frame twin and client (`RegisterCleanClient`) and the `Scheduled` gate in
+  `SnapshotCleanScene`. The first `shot-ui` of a session can already read the clean scene.
+- Test: `screenshot-clean` (new). See "Decided by the agent (step 6.23)" in section 9.
+
+**As built (2026-11-19, Effects11 rules fixes, `org-native/fix-e11-rules`).** 6.10 and 6.11 follow the 6.9 fixes and 6.20.
+- The FX chain's programs are one `DeclareProgram` (`Effects11::FxChain`) on `DisplaySize` and `Effects11.fxShapeWrites`, keyed on
+  the chain's plan: the `Planner` runs in a listing mode that describes every program it asks for (each .fx pass by its lowered
+  source's hash, target format and pass state; CS's colour correction, downsample, sun mask and copies) without compiling. The
+  lane compiles the new ones into a session store keyed by generation and key (`BuildPlan`), and the revision starts once it is
+  done. An equal shape text gives the last plan without planning again. Each pass is lowered once per effect build
+  (`FxEffect::passes`).
+- The client's key reads values, the observed state and the plan's programs (`DeclaredProgram::For`). Its make runs the `Planner`
+  in its building mode, which only looks programs up, and builds the registration. A program the listing did not give fails the build.
+- A failed plan (an effect that does not parse or lower, a missing import of the tonemap's targets or kMAIN's depth), a failed
+  program build or chain build, and anything thrown at the tonemap hook, a revision's start or the commit are fatal. `failed`,
+  `Fail` ("returns to FX11 for the session") and the no-client fall-back are gone.
+- The chain's registrations set `matchesById` and a `generation`. `Prepare` sets the client active from `HeldNow` (held and
+  scheduled), so a new plan's lag frames commit the plan the schedule holds. A tonemap after this frame's stage leaves the observed
+  state alone (`StagePassed`, as the post chain). `Invalidate` (FX11 reload) bumps the generation, clears the store and invalidates
+  both declarations.
+- The rays' registrations set `matchesById` and a `generation`. `PrepareFrame` finds the registration the frame's schedule holds
+  (`HeldNow`), and the frame draws the effects that one has: none while the client lags. Effects11's `DrawVolumetricRays` and
+  `DrawSunRays` read the adopted revision's `raysToggles` (`ORGSunRays::AdoptedToggles`) in place of the live settings while the
+  rays are on the graph, so a toggle switches with the revision and no frame draws them on D3D11. The last-frame `Holds` is gone.
+- Tests: `effects11` (no_log updated), `effects11-programs` (new).
 
 ---
 
@@ -535,19 +1109,97 @@ in step 6, `AtNextBegin` (no users after Terrain Shadows and ImGui migrate), `Fe
 `ProjectSizeSettings` (all fields are `Setting<T>`), the `RequestSize` input of the lane. `GraphResources.h`'s header rules rewritten
 for revisions.
 
+**As built (7a, 2026-11-19, `org-native/rev-step7a`).** Code only; not built or run by the agent.
+- **Gone:** `RequestSize`, `RequestExtent`, `RequestedExtent`, `ApplySizeRequests`, the size-wish hook (`SetSizeWishHook`), the
+  twins' `Resize`/`ResizeTo`, `ResizeGeneration`, `BumpResizeGeneration`, `ResizeCauses`, `FrameAnchors.cpp:Service`'s resize
+  block, `PublishedResources::Refresh`, `FrameAnchors::Rearm` (and `AnchorMask`'s one-shot-only form), `Driver::AtNextBegin`.
+  `Frame::Resources`' `fresh` was already gone.
+- **A twin keeps its size for life.** Only a declared texture gets a new extent, as a new version made on the lane. The
+  coordinator's old "resize at the next Begin" for an extent no version serves (`ApplyResizes`) is now fatal, at the
+  declaration's evaluation (`Preparable`) and at planning (`PlanPrepare`). Declare.cpp already fails a description that changes
+  more than the extent, so this only catches a mip chain (`MipLevels = 0`) or depth that changes the shape class.
+- **The lane's `RequestSize` input** is gone. What is left of the coordinator's wish path is the declarations' extents, renamed
+  (`ExtentRequest`, `extents`, `BufferRequest`, `TextureRequest`, `firstInput`). The census line lost its "resized at Begin
+  without a version" counts.
+- **Engine targets:** `Settle`'s generation bump for a held image replaced in another shape class is now
+  `FrameAnchors::RebuildForReplacedImports` (the snapshot, the clients marked current and a structural rebuild of every anchor
+  epoch: the old poll's work, minus the republish, which `Republish` already does). Still not a revision path: step 9a's row.
+- **`GraphResources.h`**'s header rules are written for revisions (declared textures only, slots, no in-frame versions).
+- **Self-test:** the resize step and the prepared part (a manual adoption through `AtNextBegin`) are gone. What is left writes
+  and reads back one exported texture, and runs the setting pilot. The lane's `Prepare`/`AdoptPrepared` are covered by `resize`.
+- **Kept:**
+  - the one-shot passes (`PassDesc::once`, `armed`): users are Terrain Shadows' heightmap upload, Dynamic Cubemaps' zero pass,
+    TruePBR's glints noise fill, ImageSpace's first-version clear (`WorldSteps.inl:ClearFirstVersion`) and `AnchorPasses`'s
+    `Clear`/`Upload` defaults. They need no `Rearm`: a new registration arms them. Replacing them needs a first-run gate on
+    declared resources' `FirstFrame` (open);
+  - `Feature::SettingsWritten`, `ProjectSizeSettings`, `SizeProjection`: not every field is a `Setting<T>`. Left in projections:
+    HDRDisplay `enableHDR` (6.15, with 7b's owner), Post Processing's strings (`LUT.LutPath`, `ColorGrading.currentTonemapper`)
+    and ColorGrading's `useOpenDrt`, `enableTonemap`, `enableAutoHDR`, `skipLUT`, Grass Collision `EnableGrassCollision`, Terrain
+    Shadows `EnableTerrainShadow`. Strings need a `Setting` form for non-trivially-copyable values. Gone in cleanup A7: Grass
+    Collision and Terrain Shadows ported, Post Processing's fields need no variable (the ORG chain keys on the tonemap function
+    and the loaded LUT), HDR's was already gone, and the shims and `FindMissedSettingsWriters` were deleted;
+  - `FrameAnchors::Refresh`: `Menu/ImGuiRenderer.cpp:149` (step 9b) and DCLF's test harness command `dclf:refresh=<id>`
+    (`Diagnostics/TestHarness.cpp`, a stress tool, no owner). 6.19's client uses are gone.
+- **Section 8 greps after 7a:** `RequestSize|RequestExtent|ApplySizeRequests`, `AtNextBegin`, `ResizeGeneration|ResizeCauses`,
+  `BumpResizeGeneration|BumpGeneration`, `PublishedResources::Refresh`, `fresh`, `Wish|wishes` in `Revision.*` and
+  `GraphResources.h`'s `RequestSize|resize generation` are empty. `Rearm(` is empty; `.once`/`armed` stay (above).
+  `SettingsWritten|ProjectSizeSettings|SizeProjection` stay (above).
+- Test: the step 7 full set below.
+
 **7b. Guest own-epoch anchors.** HDROutput and FrameGeneration's hudless copy run on their anchors' own tickets and can take a build
 mid-frame (`FrameDriver.cpp:OnBegin` comment; cleanup plan piece A7). Make them staged members of revisions (or CS stage steps if A7
 lands first; check `docs/development/org-native-frame-graph.md` for A7's state). Then delete `Builds::SwitchStaged` and
 `BuildManager::SwitchStaged`.
+
+**As built (2026-11-19, 7b, `org-native/rev-step7b`).** Nothing was left to move. A7 made HDR output, the hudless copy and the
+clean scene copy UI-stage steps, so they are ordinary revision members, and 4e removed `SwitchStaged` (no caller, and none in ORG
+or OMS). 7b rewrote `FrameDriver.cpp:OnBegin`'s comment: guest keeps DCLF's build point at Main::Draw because DCLF's epochs are
+external until 10a, not because of own epochs. The section 8 greps for 7b are empty. HDR's and the clean scene's `Scheduled` gates go with 6.15 and 6.23, the hudless copy's with 9b.
 
 **7c. Shader reload.** `RenderGraphRuntime::RequestShaderReload` → `ServicePipelineReload` → `Builds::RequestAllSynchronous` becomes an
 event (`Vars::ShaderGeneration`) whose revision has every epoch as a member, built async and staged. The pipeline swap that needs the host
 thread held happens inside `AdoptLatest` **(not investigated; open question Q5)**. If the swap cannot be made safe that way, keep
 `RequestAllSynchronous` for the pipeline swap only and record why in the dated doc.
 
+**As built (7c, 2026-11-19, `org-native/rev-step7c`).** Q5 is answered no (section 9), so the swap stays a render-thread build
+of every graph, now inside the adoption of the revision that carries the event.
+- `Vars::ShaderGeneration` (a serial, `sizes = false`). `ServicePipelineReload` writes it once the registry stages a set: one event
+  per staged set, written again only after the last one's swap was adopted. The frame-end poll no longer builds anything for a
+  reload.
+- `Revision::Adopt` compares the adopted generation before and after the values switch. On a change it calls
+  `RenderGraphRuntime::SwapStagedPipelines` after the staged attach and the schedules, under `Boundary::Caller("revision")`.
+  That is `BuildManager::SwapPipelines` (it replaces `RequestAllSynchronous` and the poll's `synchronousAll` branch): every graph
+  built at once with the host's thread held, where the registry extension publishes. Every epoch takes the new pipelines in that
+  Begin, in all three modes. In guest the build no longer happens at Main::Draw's or the frame end's poll.
+- `DeclareProgram`'s programs need neither a generation key nor a cleared cache: each build is a `ComputeProgram::Load`, a live
+  registry entry, so the reload rebuilds every kept key in place (section 9, step 7c).
+- Test: `shader-reload` (new).
+
 **7d. Fatal.** The boundary check's late versions and late attaches become `NoteTapError` (a new `TapError::OutsideAdoption`), fatal
 in development builds. Allowed callers left: `dclf` (until 10a), the engine-import exception (until 9). Late changes (in-frame build
 requests) stay counted until step 10c.
+
+**As built (7d, 2026-11-19, `org-native/rev-step7d`).** Code only; not built or run by the agent.
+- **Fatal.** A late version (a version number above 1 adopted on the render thread outside `Boundary::Scope`) and a late attach
+  are `Driver::NoteTapError(TapError::OutsideAdoption)`, so they stop the game unless `CS_ORG_MISMATCH_FATAL=0`. The census line
+  still counts them first.
+- **Exceptions in one place.** `Boundary::Exception` (`BoundaryCheck.h`) with its table in `BoundaryCheck.cpp`
+  (`kBoundaryExceptions`, name and owning step). A site opens `Boundary::Allow(Exception::...)` around the adoption or attach.
+  Caller tags stay labels only, so the old caller-tag allowance (`kAllowedCallers`) is gone.
+  - `Dclf` (step 10a): `Snapshot.cpp:AdoptSnapshot`'s `AdoptAll`, and every attach of DCLF's epochs
+    (`BuildManager`'s `NoteAttached`: the external builder's and owner-built epochs, which are DCLF's only). That covers its
+    build point at Main::Draw, its wait for a snapshot, the main-resource rebuild and the frame-end `Poll(Attach::All)`.
+  - `EngineImports` (step 9): `EngineTargets.cpp:EngineTexture::Adopt` (engine targets, 9a; this is the guest
+    `Engine::3D::VOLUMETRIC_LIGHTING_ACCUMULATION(_COPY)` pair, tagged `twin`), `FrameAnchors.cpp:JoinSlot` (mid-frame imports,
+    9b) and `NativeDevice.cpp:NextGraphVersion` (the native back buffer's per-present version, 9a).
+- **Counted, not fatal:** new resources' first versions, late changes (until 10c, so `RebuildForReplacedImports`, ImGui's
+  `Refresh` and `dclf:refresh` are counted), build refusals and version lags.
+- **The census line** gives each exception's versions and attaches by name, for the window and the session ("allowed
+  exceptions: dclf (until step 10a) versions N attaches M, engine imports (until step 9) ..."). Adoptions inside the scope are now
+  always "at Begin", also under an exception, so the dclf number no longer includes DCLF adoptions made inside `OnBegin`.
+- **Census before the change** (runs `*-integ-6b3*`, `*-integ-6b4*`, 2026-11-19): late attaches 0 in every run; late versions only
+  the volumetric lighting pair under `twin`, in guest runs (2 to 4 per run). Both are covered above.
+- Test: the step 7 full set below, with no tap error.
 
 **Test.** Full set: standard set, `resize`, `resize-drag`, `menu`, `hdr`, `fg` (guest and `d3d11+fg`), `guest+map`,
 `latch-census-short`, `upscalers` with `native-vulkan`.
@@ -575,6 +1227,54 @@ constants), no key build, shots match.
 
 **Size.** Medium. One agent.
 
+**As built (2026-11-19, `org-native/rev-step8`).** Code only; not built or run by the agent.
+- **ImageSpace render-size steps take their viewport from the latch.** `StepArea::Render` steps (SSR, SAO, the snow copy, the
+  water blend, the VL composite) record the whole output as their render area. Their program uses a new vertex stage,
+  `RenderGraph/FullscreenLatchViewportVS.hlsl`, which draws a quad (six vertices, two triangles) in the viewport the draw's latch
+  holds. `ConstantsAt` (and `OrgEngineConstantsAt`) gained `viewport` (scale and offset as fractions of the render area); it is
+  48 bytes, `kLatchStride` 112. `StageStep` writes it at each draw from the engine's dynamic-resolution ratios
+  (`RenderViewportOf`, snapped as `OriginViewport` snaps), and opens the draw with six vertices. The program key carries
+  `latchViewport`; `DescribeRaster` passes the latch's push word as `ORG_VIEWPORT_LATCH_WORD`.
+- **No ratios in the step keys.** `WorldKey::ratios`, `ChainKey::ratios`, `BuildRatiosScope`, `g_buildRatios` and
+  `DynamicRatios()` are gone, and the world and chain clients no longer depend on `DynamicRatios`.
+- **`post.dynres` is gone** from `PostChain::Read`, `PostFields` and `DiffPost`. The engine's dynamic-resolution upsample group
+  is always on, gated like the screenshot, so a ratio changes no rows and no build key.
+- **Upscaling: the quality mode builds nothing.** The Upscale client depends on `DisplaySize` and `UpscaleMethod` only. Its key
+  holds the depth upscale for any SDK method; the depth, refraction and underwater copies are gated on the depth entry with the
+  depth upscale, so a native-quality frame skips them as D3D11 does. The copy into kMAIN and the evaluate were already per run.
+- **Enforcement.** `Frame::DeclareTexture2D/3D` and `DeclareBuffer` fail (`FailDeclaration`) when a dependency is a
+  constants-only variable (`Vars::Lane::ConstantsOnly`: `RenderSize`, `DynamicRatios`, `ShaderGeneration`). No declaration did.
+- **Left as they are:** Screen Space Shadows' sample count (6.4) and Effects11's rays areas (6.10) still read
+  `Util::ConvertToDynamic` at the revision's start and depend on `DynamicRatios`. Upscaling holds the dynamic-resolution lock then,
+  so their keys compare equal and nothing registers again. The post chain's `DynamicViewport()` stays the whole of kMAIN. See
+  "Decided by the agent (step 8)" in section 9.
+- **What a ratio change is now:** a quality mode write raises `Setting.Upscaling.qualityMode`; the next frame's
+  `ConfigureUpscaling` raises `DynamicRatios`, `RenderSize` and `UpscalerOptions`. Each is a variables-only revision: twins `[]`,
+  staged builds 0, member stages none.
+
+**Measurement (for the director to run).** The VRAM cost of decision 6a, at a 3840x2160 display:
+1. `python tools/cs-test/cs_test.py run native-vulkan+dynres-vram`. It sets FSR, quality 4 (a third per axis), takes two
+   `vram-json` dumps, then quality 0 and two more. `cs.vram_debug` and `org.vram_source = "org"` are on. If FSR does not run on the
+   device, change the config's upscale step to the method that does.
+2. Read the second dump of each pair (the first writes the previous snapshot). The device-local totals at quality 4 and at
+   quality 0 must be equal within a few MB: no allocation follows the ratio.
+3. The cost: sum the bytes of the CS rows (owners under `CS/` and `ORG/`, not `Game/`) whose extent is 3840x2160 or half of it and
+   that hold render-size content (SSGI's histories and working textures, SSS, Screen Space Shadows, the ImageSpace kept textures,
+   the upscaler's inputs, Effects11's rays). The saving that render-size textures would give at quality 4 is that sum times 8/9.
+   Record the totals, the sum and the saving here, under this step, with the build's hash.
+
+**Tests (for the director to run).**
+- `python tools/cs-test/cs_test.py run native-vulkan+upscalers`, `native-d3d12+upscalers`, `guest+upscalers`: every method's
+  shot matches the pre-step-8 build's; no tap error, no "has no CS pass" line.
+- `python tools/cs-test/cs_test.py run native-vulkan+flicker-taa`: no new flicker against the pre-step-8 build (TAA history at
+  display size).
+- `python tools/cs-test/cs_test.py run native-vulkan+dynres` (and `native-d3d12+dynres`, `guest+dynres`): each quality change's
+  `[ORG] frame revision N: adopted` lines show twins `[]`, `staged builds 0` and `member stages [none]`; no `[ORG] frame
+  declaration: client ... registered` and no `[ORG] ImageSpace: ... are CS passes` line follows a quality change (only the
+  `upscale` steps). The shots of one quality match the pre-step-8 build's, and `-q1-back` matches `-q1` of the same method.
+- `python tools/cs-test/cs_test.py run d3d11+dynres` once, as the reference: at quality 4 SSR, SAO and the water blend cover only
+  the render-size part, and the graph modes' `-q4` shots match it.
+
 ---
 
 ### Step 9. Engine imports through events
@@ -600,15 +1300,84 @@ constants), no key build, shots match.
 naming the import and the caller. Work through each source the step 1 census listed: an import whose texture follows a variable gets a
 declared dependency instead (ImageSpace `CheckImports`, Upscaling's `QueueEvaluate`/`QueueCopyToMain`/`QueueDepthUpscale`/`RunUpscale`/
 `CopyHudless`, HDR `Compose`, `BinkGraph.cpp:UpdateTargets`, `Menu/ImGuiRenderer.cpp:UpdateTarget`). `EnsureViews` (more views on an
-import) becomes "declare the views at registration".
+import) becomes "declare the views at registration". Sources added since: the cubemap capture imports kMAIN until Dynamic
+Cubemaps' first update and Deferred's forward main target after it (`110daff05`), so its import switches once in a session;
+the fog takes Deferred's frame-checked directional shadow map (`07608f8e8`). Each becomes a declared dependency (the forward
+target as the import from the start, with Dynamic Cubemaps' "first update done" as a variable if the two really differ).
 - Delete the version-lag branch in `Schedule` (the step 4 intermediate) once its census count is zero by construction.
 
 **Test.** Standard set, `hdr` in four modes (acceptance: no black frame in a shot taken 2 frames after the switch, a new `shot` step at
 `frames = 2`), `menu`, `fg`, `guest+map`, `latch-census-short`. A window-resize test is not possible today (correction 4).
 
+**As built (9a, 2026-11-19, `org-native/rev-step9a`).** Code only; not built or run by the agent. Q4 is answered in section 9.
+- **Engine targets.** `EngineTexture::Adopt` no longer publishes. A remake in the same shape class (format, mips, slices) hands
+  the new image to `Revision::PublishTexture`: a pending version of the same slot, adopted with the next revision together with
+  every stage that declares it. The made-image registry points the new image at the slot at once. Another shape class gives a
+  new slot when no reader holds the old one, and is fatal when one does. `Settle`, the `heldReplaced`/`heldResized` and
+  `changed` flags, its `Builds::RequestAll` and `FrameAnchors::RebuildForReplacedImports` are gone.
+- **`EngineTargets` variable** (a serial: `Vars::RaiseEngineTargets`, `AdoptedEngineTargets`). `EndSet`, `TakeOver` and every
+  target made outside a set (`Move`) raise it. `EndSet` raises `DisplaySize` and the shape variables as before.
+- **A second set is fatal.** `BeginSet` calls `report_and_fail` while the graph is active (Q4, decision of 2026-11-18). Plain
+  D3D11 and an inactive graph keep the old warning and the second `State::Setup`.
+- **Native back buffer.** A `ResizeBuffers` at the same size and format keeps the back buffer and its slot. A new size at the
+  same format makes the next texture a pending version of the slot (`PendGraphBackBuffer`, through `PublishTexture`). The
+  engine's handles take it at once, and `DisplaySize` is raised. The structural rebuild is gone from this path. A new format
+  still makes a new slot with a structural rebuild (counted as a late change). `NextGraphVersion` was dead (one version) and is
+  gone, with the multi-version fields.
+- **HDR colour space at adoption.** In native mode, a `PresentationConfig` change of the colour space alone, with no frame
+  generation, is no longer an input wait. `ProducePresentation` returns a ready input whose `adopt` asks for the replacement
+  inside the adoption point (`AskPresenter`), and `Native::AdoptRequestedPresentation` makes the requested presentation the
+  frame's. The submission thread replaces the swap chain after the presents queued so far. So the old swap chain presents every
+  frame of the old revision, and the new one every frame of the adopted revision (section 11, 4.1). Guest already worked this
+  way: HDR Display calls `SetColorSpace1` in `BeginRenderFrame`, after the adoption point, from `AdoptedHdrEnabled`, and
+  `hdrEnabledForFrame` was already the adopted value. No new HDR variable: `HdrEnabled`, `PresentationConfig.hdr` and
+  `PresenterFormat` carry it.
+- **Boundary exceptions.** `EngineImports` keeps one site, `FrameAnchors.cpp:JoinSlot`, labelled "until step 9b". The engine
+  target and back buffer sites are gone.
+- Test: `hdr` gains `hdr-2` and `sdr-2` shots two frames after each switch, and `no_log` lines. See "Decided by the agent
+  (step 9a)" in section 9.
+
 **Acceptance.** The boundary census shows zero engine-import late versions. `hdr` shows no black frame.
 
 **Size.** Medium to large. 9a and 9b separate agents; 9b's sources can split by feature.
+
+**As built (9b, 2026-11-19, `org-native/rev-step9b`).** Code only; not built or run by the agent. Merge after 9a: it deletes
+`Boundary::Exception::EngineImports`, whose other two sites (`EngineTargets.cpp`, `NativeDevice.cpp`) 9a removes.
+- **Census before the change** (the `*-integ-6b4` runs, 2026-11-19: quick in all modes, hdr, hdr-resize, resize, resize-drag,
+  menu, fg, guest-map, upscalers, dclf-family): no `JoinSlot`, no `EnsureViews`, no import replaced or moved, no version lag. The
+  only late versions were 9a's volumetric lighting twins. Most sources had already moved their imports into declared clients'
+  keys in step 6.
+- **The rule** (`FrameAnchors.cpp`, `Import`, `EnsureViews`, `JoinSlot`, `RefusedOutsideAdoption`): a new texture under an id, an id
+  moving to another import's slot, or a view a slot lacks is a change. Inside the adoption point (`Boundary::InAdoptionPoint`, new:
+  declared clients' keys, makes and adopted calls) a same-class texture becomes a pending version through
+  `Revision::PublishTexture`, recorded with and adopted with the revision. The key runs in `Declarations::Evaluate`, before
+  `StartPreparation` takes the texture requests, so it joins the revision that re-keys the client. Another shape class is a new slot
+  and a structural rebuild, as before. Outside the adoption point it is `TapError::OutsideAdoption`, naming the id and the caller,
+  and the slot keeps its version. The import functions take a defaulted `std::source_location`, so every caller is named.
+- **The replaced D3D11 texture lives with the new version** (an `EngineImport` owner holds it), since frames bind the old version
+  until adoption. Before, it was released after D3D11 at once.
+- **Views declared at the first import** (`DeclareBindFlagViews`): an SRV and an RTV wherever the bind flags allow them, in the
+  texture's typed format, plus the caller's. `EnsureViews` stays only for a view in another format or one the flags do not give, and
+  it is a pending version inside the adoption point and a tap error outside.
+- **The version-lag branch is gone.** `SegmentFields::versions`, `versionGeneration`, `frameVersionsCurrent` and
+  `Boundary::NoteVersionLag` (and the census's "version lags") are deleted. A schedule that binds a replaced version at Begin is
+  `TapError::StaleRecording` and the slot has no schedule. `RequestDeclared` drops a kept recording of the current versions that a
+  revision replaced since, so a later description records again.
+- **Sources** (worker audit: every import site classified as in a key/make, mid-frame on a slot that cannot change, or moved):
+  - moved into the key, with the observed texture as the interim input: Dynamic Cubemaps' capture colour source (`captureMain`, the
+    key imports it; `AfterUpdate` only compares the target index), Upscaling's hudless source (`HudlessSourceOf` in the key;
+    `CopyHudless` compares the texture and view), Screenshot's clean scene (the key imports kFRAMEBUFFER; `SnapshotCleanScene`
+    compares the texture), Terrain Blending's depths (the key imports them; `Observe` compares pointers);
+  - ImGui (`Menu/ImGuiRenderer.cpp`): a declared client whose key imports the target the last draw observed. The draw invalidates
+    on a new target and draws only once the adopted registration is for the bound texture (`adopted` sets it). The last
+    `FrameAnchors::Refresh` outside DCLF's harness is gone;
+  - Post Processing's 2D LUT imports each loaded texture under its own id (`pp.lut.<address>`), since a new file is another shape;
+  - unchanged, already in keys or makes: ImageSpace, HDR's composite, Bink, Physical Sky, Effects11's files, View Atmosphere;
+    unchanged, mid-frame on ORG-owned engine targets (`Targets::Find` returns first, so no version can be published): Upscaling's
+    inputs, EHF's and Physical Sky's shadow maps (the fog's frame-checked map is kSHADOWMAPS, owned), Skylighting, Effects11's
+    observations, DCLF's family draws.
+- **Not audited:** DCLF `Resources.cpp`'s `ShareImage` calls, Scaleform `Passes.cpp`, `Skeleton.cpp`'s `engine.kMAIN.copy`,
+  Cloud Shadows. Any of them that changes an import mid-frame now stops the game with its file and line.
 
 ---
 
@@ -626,6 +1395,100 @@ import) becomes "declare the views at registration".
   revision at this point, 10a stops and that source is moved first.
 - **Intermediate:** DCLF's snapshot is still its own `LatestSlot`, adopted in the same call. Deleted in 10b.
 
+**As found (10a, 2026-11-19, `org-native/rev-step10a`): stopped at the correction 5 check.** Code read only; no code changed.
+All three generations can still change outside a revision. Each is an observation of engine D3D11 state in the middle of a
+frame, and no event carries it. So 10a stops here, as its rule says, and these sources move first (10a-0 below).
+- **`kStaleTargets`.** `MainViewPoints.cpp:CaptureMainPass` calls `DrawPipelines::SetTargetFormats` with the formats bound at
+  the main pass's opaque start. Any change after the first one bumps `DrawPipelines::generation`. The catalog for the new
+  formats then arrives from the pipeline lane (the 120 s wait). Since 9a the engine targets are made once, so this changes
+  only if the engine binds other targets there **(not measured)**.
+- **`kStaleShadowFormat`.** `MaterialLookups.cpp:PostLookupInputs` calls `DrawPipelines::SetShadowInputs` each frame with the
+  shadow views' DSV format from the last frame (`lastShadow.dsvFormat`), or an occlusion map's format while no shadow view has
+  drawn. A change remakes the shadow pipeline set (`RecreateShadowSet`). The switch from the occlusion format to the DSV format
+  can come after DCLF first draws **(inferred; whether the two formats differ is not known)**.
+- **`kStaleMain`.** `Resources.cpp:Impl::Setup` makes the main resources again when, at the colour capture, any of these differ:
+  the target formats or size, the CPU-written structured buffers bound at t16 and up (`FrameSlots.cpp:FrameBuffersOf`, compared
+  by register, stride, first element and count), or which registered frame graph buffers have indices
+  (`FrameBindings.cpp:FrameGraphBufferIndices`). The buffers are CS features' D3D11 buffers, so a feature that grows or binds
+  one changes it. `MainEpochs.cpp:RunEpoch` then builds DCLF's epochs on the render thread mid-frame (`BuildOwnerEpochsNow`)
+  and attaches them, so the frame's colour epoch draws with the new resources. That attach is the `Dclf` exception's.
+- **Census to read first** (existing lines, step 9 baseline runs of the step 10 set): `[DCLF] scene snapshots (T6b3b): ...
+  passed over as stale: build N, targets N, shadow format N, main resources N`, the count of `[DCLF] Main-pass graph
+  resources:` lines (more than one per session is a remake), `[DCLF] Main pass targets changed`, and `[DCLF] frame N waited`.
+
+**Also blocking 10a, not in its list above:**
+- **Shader reload.** `BuildManager::SwapPipelines` (7c) rebuilds every graph inside the adoption, DCLF's too. Afterwards the
+  adopted DCLF snapshot's recordings are of the old build, so no DCLF epoch is covered until a new snapshot is recorded. Today
+  the next frame waits for it. Without the wait the frame is uncovered, which is fatal once DCLF draws. Q5 rules out keeping
+  the old recordings (they bind replaced pipelines). So 10a needs a decision here: a recording that names its pipelines (Q5's
+  end state), or shader reload with DCLF drawing becomes unsupported.
+- **`CS_DCLF_ASYNC_BUILDS=0`.** Its epochs are `ownerBuilt`: built and attached on the render thread at every poll. Either a
+  synchronous build stages too (`BuildManager::Impl::Finish` skips staging for `a_synchronous`), or the switch goes.
+- **"From `external` to `staged`" should be "`external` and `staged`".** The external builder runs DCLF's builds on its scene
+  worker inside a `Draws::BuildScope` of the build state made at the poll. On the build manager's thread there is no scope,
+  and `Draws::SetBuildStateSource`'s fallback reads `CurrentBuildState()`, render-thread state. So DCLF's epochs stay built by
+  the external builder and are staged at any poll: `AttachFinished` must collect a staged external group at `Attach::Live`.
+- **Recording on the staged generation.** `GraphHost::StagedGeneration` is owner-thread only, so the render thread must carry
+  it to the snapshot builder in `RevisionInputs::epochBuilds` (staged when one is staged, else attached), and
+  `Assemble.cpp:RequestRecordings` must pass it as `RequestEpochRecording`'s `generation`. ORG sets a staged recording's
+  `buildGeneration` to the staged generation (`GraphHost.cpp`, the recording result), so `RecordingCompleted`'s check holds.
+  `SettleBuildState` must then publish the build serial once DCLF's builds are staged, not attached, and `StaleKindOf` must
+  accept, per epoch, the attached or the staged generation and return the staged epochs for `Builds::AttachStaged`.
+
+**10a-0. Move the three sources (proposed, to confirm).** Rule: "Remove the trigger", and decision 3a ("any discovered mid-frame
+import is fatal until its source is found").
+- Targets: since 9a they are fixed for the session. A change after DCLF first draws is a tap error naming the old and new formats.
+- Shadow format: take it from the engine's shadow map and occlusion targets when they are made (engine targets are fixed since 9a;
+  Q6, where they are made, is still open), not from the views each frame. Then it cannot change.
+- Main resources: each CPU structured buffer the main pass binds at t16 and up becomes a registered frame graph buffer of its
+  feature, made at setup (a 1-element stand-in while the feature is off), growing through `kBuffers` fragments. Then
+  `FrameBuffersOf` sees none, the graph buffer bits are fixed, and a remake after DCLF first draws is a tap error. Which
+  features bind such buffers is the first thing to list (log the registers in `Setup`'s line).
+- Then 10a as written, with the four items above.
+
+**As built (10a-0 and 10a, 2026-11-19, `org-native/rev-step10a2`).** Code only, not built or run here. Two commits.
+- **10a-0** (`fix(dclf): late input changes become tap errors`). A new tap error, `TapError::DclfInputChanged`, fatal in
+  development builds (`IndirectDraws::NoteInputChanged`).
+  - Targets: `MainViewPoints.cpp:CaptureMainPass` refuses a format change once DCLF draws. It is the tap error, and the colour
+    epoch is skipped. `SetTargetFormats` is no longer called with it.
+  - Main resources: `Resources.cpp:Impl::Setup` refuses a remake once DCLF draws, naming what changed (formats, size, t16+
+    buffers, graph buffer bits). `MainEpochs.cpp:RunEpoch`'s `BuildOwnerEpochsNow` after a remake is gone. A remake before DCLF
+    draws builds like any other DCLF build. The t16+ buffers are not registered (director, item 57).
+  - Shadow format: `MaterialLookups.cpp:PostLookupInputs` latches `ShadowEngine::pipelineShadowFormat` from the engine's
+    `kSHADOWMAPS_ESRAM` depth view, or `kPRECIPITATION_OCCLUSION_MAP`'s without one, at the first frame start. It is posted every
+    frame, with shadows on or off. A shadow view that draws into another format (`ShadowEpochs.cpp`) re-latches it before DCLF
+    draws, and is the tap error after. No counted exception was needed.
+- **10a** (`fix(dclf): stage epochs, no frame-start wait`). DCLF's epochs are `external` (or `ownerBuilt`) **and** `staged`
+  (`RenderGraphRuntime.cpp`, the `BuildManager::Desc` setup).
+  - Build manager: `Attach` is gone. Every poll takes every finished group, external ones too, and `Finish` stages a staged
+    epoch's synchronous build as well. So `CS_DCLF_ASYNC_BUILDS=0` stays and stages too (blocker 3). `ExternalBuilder::boundary`
+    runs after every poll, with whether a DCLF build was staged. `BuildOwnerEpochsNow` and `AttachDclfBuilds` are deleted. The
+    frame-end poll is a plain poll.
+  - Build state: `Draws::PublishBuiltBuildState` (all builds of a state staged or attached) is what `MakeRevision` and
+    `StaleKindOf` gate on. `PublishAttachedBuildState`, and so the attached graph conditions, move to the adoption of a snapshot
+    made for that state. Before any DCLF graph exists both are published together. `SettleBuildState` publishes the built serial.
+  - Recording on the staged build (blocker 2): `PostRevisionInputs` puts each segment's staged generation, else its attached one,
+    in `RevisionInputs::epochBuilds`; `buildGeneration` is their sum over DCLF's segments. `RequestRecordings` passes it as
+    `RequestEpochRecording`'s `generation`. The snapshot carries `epochBuilds` and its `BuildState`.
+  - `StaleKindOf(snapshot, &staged)`: per DCLF segment, the recorded build must be the attached or the staged one; the staged
+    epochs come back for the attach. Then the built serial, then targets, shadow format and main resources as before.
+    `AdoptedCurrent` also requires no staged epoch left.
+  - Adoption: `Frame::Revision::AdoptLatest` calls `DCLF::AdoptSnapshotAtBegin` at every render-owner Begin on the main thread,
+    after the frame revision (and its pipeline swap), with or without a revision. `AdoptSnapshot` attaches the snapshot's staged
+    epochs with `Builds::AttachStaged`, publishes its build state, then adopts as before. Its frame bookkeeping uses
+    `FrameView::GetFrame() + 1` (Q7). `BeginFrame` hands `AdoptedPublication()` to the frame view.
+  - `DecideEpochCoverage` requires the adopted snapshot to be current (`AdoptedCurrent`) instead of "the newest taken was not
+    stale". A newer snapshot that was stale leaves the adopted one, recorded on the graphs that run.
+  - Shader reload (blocker 4, director item 57): `RenderGraphRuntime::PipelineSwaps` counts swaps. After one, the first Begin
+    that draws waits in `Impl::WaitAfterPipelineSwap` for a snapshot on the rebuilt graphs. Named "[DCLF] shader-reload wait N:
+    frame F waited X ms at its Begin after the pipeline swap ...", counted (`shaderReloadWaits`, the report's "shader-reload
+    waits" line), zone `CS.DCLF.WaitAfterPipelineSwap`. It polls the build manager while it waits, so a build staged meanwhile
+    attaches with the snapshot inside the wait.
+  - Deleted: `AdoptCurrentSnapshot`, its wait and the "frame N waited" line, `AttachDclfBuilds`, `BuildOwnerEpochsNow`, the
+    frame-end `Attach::All`, and the boundary check's `Exception`/`Allow` (the `Dclf` row was the last).
+  - A staged attach that ORG refuses at the adoption (the host's configuration changed since the build started) leaves the
+    snapshot stale, asks for the refused epochs' builds again and logs "[DCLF] snapshot N's staged builds were refused".
+
 **10b. The snapshot as a fragment.** DCLF's `RevisionAssembler` sealing moves into the frame revision: `kScene` (publication, draws,
 payload) and DCLF's buffer `NamedVersions` become fragments of the frame assembler.
 - DCLF recordings name `ComposedVersions{DCLF buffers, frame textures}`, so a CS texture change has DCLF epochs in its closure and they
@@ -634,10 +1497,158 @@ payload) and DCLF's buffer `NamedVersions` become fragments of the frame assembl
   soon as its recordings are ready (risk, section 7.2).
 - Delete `snapshotSlot` (`LatestSlot` of snapshots), `Impl::StaleKindOf`'s build and generation checks, `AdoptSnapshot` as a separate
   adoption (its body becomes the `kScene` install callback).
+- Ports' DCLF data, and where each lands:
+  - Physical Sky's and ViewAtmosphere's frame textures read published ids, so a new version of a LUT or of the medium has DCLF's
+    colour and face epochs in its closure through `ComposedVersions`, like any CS texture. The guest-only captured D3D11 views
+    (AP shadow, clouds) stay late-bound until those resources are graph twins.
+  - ViewAtmosphere's reflection medium through per-epoch views (decided): the view a frame texture names per epoch is part of
+    the bound set of that epoch's recording, so it changes only with a revision. It is not a late-bound per-frame switch
+    **(inferred: the per-epoch frame-texture API is not built yet; build it as bound)**.
+  - Advanced Skin's material table is a frame-value pool: late-bound, outside revisions, nothing to move. The frame binding
+    count (6 since t38) is bound and set at setup. Its `GpuTextures` generation re-put is DCLF's own event, not a frame variable.
+  - Tree Wind for object LOD (deferred, redesign pending): its `Draws::Versioned` buffer grows with the scene buffers, so it is
+    one more entry of DCLF's buffer `NamedVersions`, adopted with `kScene`. Its commit-hook uploads tag each region, which keeps
+    a record from reading a region the adopted version does not hold yet. If the redesign keeps the CPU copy path, its pool jobs
+    stay DCLF's scene-lane work, never revision work.
+
+**As built (10b, 2026-11-19, `org-native/rev-step10b`).** Code only, not built or run here. One commit for the scene fragment,
+one for the per-epoch views and the configs.
+- **The scene is a fragment of the frame revision.** `Frame::Revision` has two more slots, `kRevisionScene` and
+  `kRevisionSceneBuffers` (DCLF's buffer set, by serial). DCLF's builder posts each snapshot with `Revision::PublishScene` (latest
+  wins, a replaced one is released on the builder). `snapshotSlot` is gone. The fragments name the scene; DCLF owns it, so nothing
+  of a snapshot is released on the render thread. DCLF's own `RevisionAssembler` stays: it is the builder's assembly of shapes and
+  recordings, and decides when a scene is complete. What moved is the adoption.
+- **Frame versions in DCLF's recordings.** `Revision::SceneFrameVersions()` is the revision in preparation's `versionSet` once its
+  closure has DCLF epochs (`dclfMembers`, from `others`), else null with the serial of the last adopted such revision.
+  `PostRevisionInputs` carries it in `RevisionInputs::frameVersions`/`frameVersionsSerial`. A new serial makes a new versions
+  fragment (`SceneRevisions::frameVersions`), so every epoch records again, and `EpochRevisionData::composed` is
+  `ComposedVersions{DCLF's NamedVersions, frame versions}`. The snapshot carries the serial (`SceneSnapshot::frameVersions`).
+- **Adoption rules** (`AdoptLatest`, main thread). The newest posted scene is taken first. One tagged with the revision in
+  preparation is held for it. Then the revision advances. A revision with DCLF epochs in its closure adopts only with its held
+  scene, while DCLF's epochs run recordings (`DCLF::SceneRecorded`); without that it adopts alone. After it, a scene tagged with
+  the adopted serial (or with none: no recordings) is adopted alone, as a seal of the two scene slots. Any other is dropped
+  (`SceneDrop::Stale`) and DCLF makes a new one. So a resize does not wait for the scene cadence beyond DCLF's re-record, and a
+  scene alone seals as soon as its recordings are ready.
+- **Builds requirement.** A scene lists `(epoch, build)` for every DCLF segment. At adoption each must be attached or staged
+  (`SceneBuildsReady`); the staged ones attach first (`AttachSceneBuilds`), before the revision's own adoption. A replaced build
+  drops the scene (`BuildReplaced`); a refusal drops it (`Refused`), and DCLF builds the refused epochs again. The revision waits
+  for the next scene.
+- **Deleted:** `snapshotSlot`, `AdoptSnapshot`, `AdoptAtBegin`, `AdoptSnapshotAtBegin`, `StaleKindOf` and the `kStale*` kinds, the
+  snapshot's `buildSerial`, `targetsGeneration` and `shadowFormat`, and the shader-reload wait's catalog branch. `AdoptSnapshot`'s
+  body is `IndirectDraws::InstallScene`, the scene fragment's install. `AdoptedCurrent` is now a currency check: complete draws
+  for the main resources the frame runs, and every epoch's recordings of its attached build.
+- **Shader-reload wait kept** (`AfterSceneStep`, after the scene step of every main-thread Begin). It adopts scenes through
+  `Revision::AdoptScene`.
+- **Re-staging tap error** (10a's open item): `TapError::Starved` once more than `4 x kGameFramesInFlight` scenes in a row are
+  dropped for their builds with no new DCLF build state. Reset by any install.
+- **Declared view mismatch.** `DeclarePublishedRead` latches no build-time index for a versioned slot (`PublishedResources::
+  IsVersioned`), so `CheckDeclaredReads` no longer compares those. The lines after a resize came from that compare (DCLF families'
+  CS stage clients: water, precipitation, shadow mask, menu scenes), which a correct pending-version recording also fails. The
+  version check that replaces it: each installed scene's epoch recordings must be version-current
+  (`Impl::CheckSceneVersions`, "binds a version the frame does not read", a counted warning). CS stages keep the anchors'
+  `StaleRecording` check.
+- **Ports.** Physical Sky's and ViewAtmosphere's frame textures needed no code: they are versioned published ids, so their epochs
+  are in the closure and record through `composed`. Per-epoch views: `Api::FrameTexture::facesGraphResources`, read by the faces
+  by id (`Extensions::DeclaredTextureIndex`), declared by the faces' graphs (`FacesGraphTextureIds`), never through the view
+  callback. ViewAtmosphere does not set it yet: its reflection medium is not on the graph (view-atmosphere-port.md 3.7). Advanced
+  Skin: nothing. Tree Wind: not landed.
+- **Census.** "[DCLF] scene snapshots" says "not adopted by the frame revision: stale frame versions N, replaced build N, refused N,
+  superseded N". New line "[ORG] frame revision scenes:". The adopted line ends with "DCLF scene N recorded with it", "kept" or
+  "none (DCLF records nothing)". Each dropped scene logs "[DCLF] scene N not adopted (...)" (16 lines, then every 100th).
+- **Open.** (1) A shader-reload wait while a revision with DCLF epochs prepares cannot finish: the scene it needs is held for that
+  revision, which adopts only at a later Begin. The wait then fails after its idle timeout. (2) A revision waiting for DCLF's scene
+  has no starvation rule; if DCLF's builder posts nothing (a frame kind without a scene pass), it waits for as long. `menu-resize`
+  shows whether that happens. (3) Whether `EpochRecordingVersionsCurrent` lists late-bound slots, which would make the new warning
+  fire every scene.
+
+**As built (10b fix, 2026-11-19, `org-native/rev-step10b-fix`).** Code only, not built or run here. Closes the three open items.
+- **(1) Shader reload during a DCLF revision.** At its start the shader-reload wait calls `Revision::SupersedeForSceneWait`. A
+  revision in preparation whose closure has DCLF epochs is superseded (the usual supersession: its held scene is dropped as
+  superseded, its inputs are prepared again from the next Begin). `SceneFrameVersions` then names the adopted versions, so the
+  scenes the wait takes are adopted alone. The wait stays the one named, counted wait: its line ends with "frame revision
+  superseded for it: N (M in the session)". New config `shader-reload-resize`.
+- **(2) The starvation rule for the scene** (7.8). DCLF counts the frames whose coverage ran at least one of its epochs
+  (`SceneRecordedFrames`, replacing `SceneRecorded`). The coordinator notes at each Begin when that count last moved. A revision with
+  DCLF epochs in its closure waits for its scene only while DCLF's epochs ran in one of the last `kSceneIdleFrames`
+  (4 x `kGameFramesInFlight`) Begins; otherwise it adopts alone ("DCLF scene none (DCLF's epochs did not run)"). While DCLF draws,
+  each scene posted on other frame versions, or held and dropped for its builds, is a miss; more than `kRevisionStarvedAfter`
+  misses with no new input is `TapError::Starved` naming the revision. Supersession, adoption and any new input reset the count.
+- **(3) Late-bound slots.** `EpochRecordingVersionsCurrent` does not list them. ORG stamps a recording's versions from the graph's
+  versioned entries (`RenderGraphPersistent.cpp`, `versionStamps`), and lowering gives a late-bound resource no versioned entry
+  (`PersistentLowering.cpp:PreparedVersions` skips `LateBound()`). The swapchain is listed, but its versions are always number 0.
+  So the warning cannot fire for them, and nothing changed.
 
 **10c. Toggles and conditions as variables.** `Toggles` (`ToggleSet` fields) and `GraphConditions` become variables in `kInputs`.
 Delete `Toggles::BeginFrame`/`Adopt` and `RefreshGraphConditions`' polling at the build point. Then make in-frame build requests
-(step 1's late changes) fatal too.
+(step 1's late changes) fatal too. Tree Wind's `TreeModSupport` (when its port lands) changes the classification of DCLF members,
+not a graph or a bound resource: its `Setting<T>` event wakes DCLF's scene lane to re-classify, and the result arrives with a
+later `kScene` fragment.
+
+**As built (10c, 2026-11-20, `org-native/rev-step10c`).** Code only, not built or run here. One commit.
+- **The failure.** The `dclf-toggles` hang (`*native-vulkan-dclf-toggles-integ-10a`, forward and both first-person epochs
+  uncovered after `dclf:pipeline gpu`) came from the revision inputs. `PostRevisionInputs` took `cpuPipeline`, `forwardDirect`
+  and `firstPersonForwardDirect` from the attached conditions (CPU), while `build`, the state the recordings were made on, was
+  the new GPU one. The scene recorded on the staged GPU builds then had CPU view batches (`forwardOnly` false). Its adoption
+  attached the GPU conditions. `Direct::FrameStart` keeps a forward slot only for a forward-only set, so `Direct::ForwardBatches()`
+  was null, and `DecideEpochCoverage` left forward and first person uncovered. Now those three fields come from
+  `next.build->conditions` (`Coverage.cpp`), so a scene, its builds and its conditions match by construction. The snapshot's view
+  batches and `Assemble.cpp`'s "CPU pipeline: record only CPU-pipeline epochs" follow the same fields.
+- **A second path to the same mismatch, closed.** The snapshot builder's pass-through (a deltas-only publication posts the last
+  revision again) used the newest inputs. While a new build state's builds were pending, it could post the old recordings with
+  the new state, and `InstallScene` would publish that state's conditions over the old graphs. The pass-through now requires the
+  inputs' build state to be built (`Snapshot.cpp`, `inputsBuilt`). Otherwise the publication takes the make path, which waits.
+- **Toggles are a variable.** `DclfToggles`, the packed word (`Frame/Variables.h`). Writers edit `Toggles::Requested()` and call
+  `Toggles::Commit(writer)`: the menu (after "What DCLF draws"), cs-test's `dclf:` prefix (after every command) and
+  `ApplySavedSettings`. An input producer (`Draws::RegisterConditionInputs`, at install) applies the revision's value at its
+  adoption (`Toggles::ApplyAdopted`: the active set, its generation, and the classification flag that `FrameDriver::BeginFrame`
+  takes with `TakeClassifyChange`). `Toggles::BeginFrame` is deleted. `Toggles::Adopt` is now `InstallFrame`, called where the
+  installed publication is handed over: the frame set is the adopted scene's publication's, so it switches with the scene.
+- **Graph conditions follow variables.** Their inputs are `DclfToggles`, `Interior` (DCLF now writes it at its frame start too,
+  beside Volumetric Lighting) and `DclfPassCuts` (a serial that `SetPassCuts` raises). Each has a producer whose adopt marks the
+  inputs moved. `Draws::UpdateGraphConditions` runs in `IndirectDraws::AfterSceneStep` (main thread, inside the adoption point).
+  Only when the inputs moved does it make the conditions, set the external epochs and ask for DCLF's builds, all there.
+  `RefreshGraphConditions` and its poll at every build point are gone. The first build point still makes the first conditions
+  once (`FirstGraphConditions`), so a main menu Begin never asks for DCLF builds.
+- **Cull modes** take the same path. They passed before because `OcclusionTested` needs both the conditions' `twoPassOcclusion`
+  and the publication's `cullMode`, so a mismatch only skipped occlusion for a scene. Nothing else changed for them.
+- **`dclf:pipeline`.** `RunDclfCommand` edits the requested set, and the prefix handler commits it, which raises `DclfToggles`.
+- **Late changes stay counted, not fatal** (to confirm, section 9). DCLF's own (the guest build point's "graph conditions
+  changed") is gone except at the first build point. The other sources in the 10a census are not DCLF's. In native: "one-shot
+  passes ran" x 13, `cs.scaleform` and `cs.screenshot` registered again, `cs.deferred` registered. In guest also the skeleton depth
+  copies, imports and published resources added, and 16 more the census did not name. The census now logs every session site
+  ("[ORG] boundary: session late changes by site: ..."), so the follow-up has the full list.
+- **Config.** `dclf-toggles` describes 10c and also fails on "is not covered by the snapshot".
+
+**As built (late changes, 2026-11-20, `org-native/rev-late-changes`).** Code only, not built or run here. The last item of the plan:
+in-frame build requests are fatal.
+- **The census names sites.** `Boundary::Change` and `NoteBuildRequest` take a `std::source_location`, and so do
+  `FrameAnchors::Register/Unregister/Refresh`, `Builds::Request/RequestAll/RequestFor/Change` and
+  `GraphResources::RequestStructuralRebuild` (defaulted, so callers are unchanged). A late change's key is
+  "caller what at file:line"; the session line lists them.
+- **Fatal.** A late change is `Driver::NoteTapError(TapError::LateChange)` ("late change"), after it is counted. Fatal in
+  development builds unless `CS_ORG_MISMATCH_FATAL=0`.
+- **One-shot passes are first-run gates.** `PassDesc::once`, `Client::armed`, `HasPendingOnce`, `SegmentHoldsPass` and the
+  "one-shot passes ran" rebuild are gone, with `AnchorPasses::Upload`, `Builder::Add`'s `a_once` and Post Processing's unused
+  `ComputeDispatch::once`. `RenderGraph::FirstRun` (`RunGate.h`) is per-registration state: the commit opens a gate entry while
+  the work is pending, the executed callback ends it. Users: Terrain Shadows' heightmap upload (an entry after the refresh
+  entries), Dynamic Cubemaps' zeros (`kZeroEntry`), TruePBR glints' fill (its own gate), ViewAtmosphere's medium first contents
+  (not in 7a's list) and ImageSpace's kept-texture clears (a gate per kept texture, state on the texture, since later versions are
+  born cleared). `GraphResources::MakeUploadPass` and `AnchorPasses::Clear` take a gate entry and skip closed runs at execution.
+- **Re-registrations are declared clients** on observed state, with `Invalidate` as the interim: Scaleform (surfaces and tracked
+  reads; idle reads are dropped in the make), the screenshot's capture copy (`wanted`/`made` serials so a capture waits for the
+  registration of its source), the deferred composite (its targets; the commit of the held registration sets `shared`), frame
+  generation's inputs (`inputsWanted`/`inputsMade`) and TruePBR glints (a program serial raised by a shader reload).
+- **Moved into the adoption point:** the engine skeleton's remade clear groups and copies register again in `Skeleton::BeginFrame`
+  (inside `OnBegin`), not at a clear or copy; a copy whose textures change inside a frame goes to D3D11 for that frame. DCLF's
+  first graph conditions are made at its first build point only inside the adoption point (native); guest's build point marks them
+  wanted and the next `UpdateGraphConditions` makes them.
+- **Requests that bind nothing new wait for the next Begin:** `Builds::RequestAtAdoption` keeps a request made inside a frame and
+  `IssueAdoptionRequests` (first thing in `OnBegin`) makes it. Used for an added import id, an added published resource (and the
+  skipped-build case), DCLF's test-harness switches and the GPA and NvPerf profilers.
+- **Left as late changes (fatal if reached):** failure paths that unregister inside a frame (Bink, ImGui fall-back, Upscaling's
+  release, Dynamic Cubemaps' give-up), the DCLF harness `dclf:refresh=<id>` (a stress tool), and any site the census had not
+  named; the tap error names its line.
+- **Config.** `native-census` fails on "session late changes by site" and on tap errors.
 
 **Test.** Everything in step 7's list plus `native-census`, `native-tour` (long), `river` with `native-vulkan`, `rain` with `guest`,
 `flicker-taa`. DCLF-specific: the DCLF settings menu toggles (cull mode, CPU/GPU pipeline) through `setting` steps in a new
@@ -668,7 +1679,7 @@ display size wherever a texture followed it.
 | 6.6 | Screen Space GI | `DisplaySize` (kMAIN), `ResolutionMode`, `Enabled`, `EnableGI`, `EnableExperimentalSpecularGI`, `EnableTemporalDenoiser`, `EnableBlur`, debug overrides | `ORGScreenSpaceGI.cpp:Prepass` (`Config::Current`, `recompileFlag`, `MainDesc`) | same-shape kept, else new twins; `RegisterReset` + `RegisterChain`; `PublishOutputs` of new objects (rebuild every graph); `Rearm(kResetClientId)` | textures on `DisplaySize` + `ResolutionMode`; outputs keep one slot each (1-texel when off); programs on the define fields; client on config | `Rearm` → `FirstFrame`. Dispatch clamp from `Adopted()`. Quality preset buttons in `DrawSettings` assign fields: they become `Setting` writes. |
 | 6.7 | ImageSpace kept textures and chain | `DisplaySize`, final target (HDR's `PostChainTarget`), luminance levels, SAO levels, water copy widths, flow map | `ImageSpace.cpp:BeginFrame` (first ImageSpace call): `CheckImports`, `CheckChainSteps`, `CheckWorldSteps`, `CheckStartSteps`, `CheckMenuSteps`, `CheckFlowMap` | `Frame::Resources::Texture2D` (`RequestSize`, `fresh`, new twins); re-register 3 chain clients; publish adapt pair and flow map (rebuild every graph) | kept textures declared on `DisplaySize`; chain clients on `HdrOutputTarget`, levels; adapt pair keeps its slots | Viewports from `DynamicRatios` move to step 8. Delete the retry every 120 frames. `flicker-taa`, `hdr`, `guest+map`. |
 | 6.8 | LLF clusters | `DynamicRatios` (cluster grid = dynamic screen / 64) | `LightLimitFix.cpp:UpdateClusterParameters` → `ORGLightCulling.cpp:Execute`; `pending` shape applied in `ORGLightCulling::BeginFrame` | pass revision, recording | cluster buffers sized for `DisplaySize` (they already use the non-dynamic size at `SetupResources`); grid count from `Adopted()` as a constant | Delete `pending`. No resource change: the pass reads the count from constants. |
-| 6.9 | Post effects | effect list and order (`enabled` per effect), CODBloom used mips (derived from `MipBlendFactor`), DoF (`UseAdaptiveGather`, `GatherQuality`, `BokehMode`, `HighlightShape`), PhysicalGlare (`FFTResolution`, `ApertureMode`), LensFlare (`FFTResolution`, `GhostModeInt`), LUT (`LutPath`), ColorGrading tonemapper, kMAIN size and format | `ORGPostProcessing.cpp:BeforeTonemap` (`key`, `Impl::Rebuild`); per-effect `Update`/`Build` | new transient twins, `Register`; kept twins in effect `Build` (MotionBlur `horizontal`, PhysicalGlare, DoF, LUT, LocalExposure, ColorGrading LUT, LensFlare spectra, HistogramAutoExposure buffers) | per-effect `DeclareClient` on its fields; kept textures declared; `dynamicWidth` out of the key (step 8 for the viewport) | HistogramAutoExposure `clearPending` → `FirstFrame`. Derived variable for CODBloom so a scene-layer blend of floats does not rebuild unless the mip count changes. Needs the nested `setting` step (5). Split by effect across agents. |
+| 6.9 | Post effects | effect list and order (`enabled` per effect), CODBloom used mips (derived from `MipBlendFactor`), DoF (`UseAdaptiveGather`, `GatherQuality`, `BokehMode`, `HighlightShape`), PhysicalGlare (`FFTResolution`, `ApertureMode`), LensFlare (`FFTResolution`, `GhostModeInt`), LUT (`LutPath`), ColorGrading tonemapper, kMAIN size and format | `ORGPostProcessing.cpp:BeforeTonemap` (`key`, `Impl::Rebuild`); per-effect `Update`/`Build` | new transient twins, `Register`; kept twins in effect `Build` (MotionBlur `horizontal`, PhysicalGlare, DoF, LUT, LocalExposure, ColorGrading LUT, LensFlare spectra, HistogramAutoExposure buffers) | per-effect `DeclareClient` on its fields; kept textures declared; `dynamicWidth` out of the key (step 8 for the viewport) | HistogramAutoExposure `clearPending` → `FirstFrame`. Derived variable for CODBloom so a scene-layer blend of floats does not rebuild unless the mip count changes. Needs the nested `setting` step (5). Split by effect across agents. Physical Lens and Camera FX are 6.20. DoF publishes its focus to the chain (`Published::kDoFFocus`), so the lens declares it. HistogramAutoExposure's readback now feeds the pre-exposure (`State::UpdateSharedData`), which stays a per-frame late-bound value. |
 | 6.10 | Sun Rays (Effects11) | `DisplaySize` (half sizes were dynamic), kMAIN format, `EnableSunRays`, inputs | `ORGSunRays.cpp:PrepareFrame` | 5 transient twins, programs, `Register` | textures on `DisplaySize`; client on inputs | `Effects11::ClearShaderCache` → `Release`: a program variable. |
 | 6.11 | Effects11 kept textures | display size (`screenWidth/Height`), technique enable bits, tonemap owner | `ORGFxRuntime.cpp:Prepare` | new `Resources` set with one-shot clears; `Planner::Build` + `Register` | kept textures on `DisplaySize`; client on `ShapeKey` | one-shot clears → `FirstFrame`. Effects11's own `SettingManager` (string keys): its writes raise the shape variable at its setter. |
 | 6.12 | Volumetric Lighting | interior/exterior quality and custom size, engine VL descriptor, `DynamicRatios` (blur area, latch only) | `ORGVolumetricLighting.cpp:EndRender/Blur` (`DescriptorSize`, `SettingsSizes`) | `RegisterAgain`: new transient Texture3D; frame skipped until scheduled | textures on the size settings and an `Interior` variable; blur area stays a constant | Delete the skipped frame (the old revision draws until adoption). `guest-interior`/`native-interior`. |
@@ -676,9 +1687,13 @@ display size wherever a texture followed it.
 | 6.14 | Upscaling | `UpscaleMethod`, `qualityMode` (→ `RenderSize`), `frameGeneration`, `frameGenMethod`, `frameGenMultiplier`, HDR and presenter format for hudless | `Upscaling.cpp:CheckResources` (static `previousUpscaleMode`), `CaptureHudlessColor` → `CreateHudlessTexture` every frame; `ORGUpscaling.cpp:QueueEvaluate/...` re-register | `DrainCommandRing`, destroy/create upscaled and hudless twins; `UpscaleChanged`/`HudlessChanged`; `FrameGen::Controller::Reconcile` | upscaled texture on `DisplaySize` + `UpscaleMethod` (today it never follows a size change: a gap); hudless on `HdrEnabled` + presenter format; client on method | Delete every resize `DrainCommandRing` and `previousUpscaleMode`. Test requests (`RequestUpscaleTest`/`RequestFrameGenTest`) write `Setting`s. `upscalers`, `fg`. |
 | 6.15 | HDR Display and HDR output | `HdrEnabled`, `HdrOutputTarget`, back buffer identity, program | `HDRDisplay.cpp:BeginRenderFrame`; `ORGHDRDisplay.cpp:Compose` per present | re-register HDROutput client (own epoch, mid-frame) | composite client on those variables; HDR textures on `DisplaySize` (setup-only today, never resized: a gap) | Depends on 7b for the own epoch. `hdr`. |
 | 6.16 | IBL | `EnableIBL`, `UseStaticIBL`, reflection cubemap, Dynamic Cubemaps' env published | `ORGIBL.cpp:Prepass` | `Refresh`, `declared` | client on those variables | — |
-| 6.17 | Skylighting | reset event, occlusion/cascade imports | `ORGSkylighting.cpp:ResolveInputs` (from `Update`) → `Refresh`; `QueueReset` → `Rearm` | `Refresh`, one-shot reset | client on imports; `SkylightingReset` variable → `FirstFrame` of its probe textures (a new version, born cleared) | Removes the last `Rearm` user with SSGI. |
+| 6.17 | Skylighting | reset event, occlusion/cascade imports | `ORGSkylighting.cpp:ResolveInputs` (from `Update`) → `Refresh`; `QueueReset` → `Rearm` | `Refresh`, one-shot reset | client on imports; `SkylightingReset` variable → `FirstFrame` of its probe textures (a new version, born cleared) | Removes the last `Rearm` user with SSGI. The roof-leak fix (`204f6072f`) adds a published zenith map and a probe coverage volume; the zenith copy runs on zenith frames only, as a gate (late-bound), not a revision. |
 | 6.18 | Setup-only features made correct: SSS (`SSMode`, `EnableCharacterLighting`, working textures), Dynamic Cubemaps (`EnabledSSR`, reflection cubemap size), Volumetric Shadows (cascade width), Cloud Shadows, Subsurface Scattering `Refresh` sites | engine target and shadow map variables, their define fields | `AfterDeferredPasses`, `AfterUpdate`, `UpdateImports` (`Refresh`, `programsDirty`) | nothing (sized once) | textures and programs declared on the engine variables and settings | Correct rather than lucky (investigation 3.4 item 5). |
 | 6.19 | DCLF family clients' `Refresh` (Sky, DecalOcclusion, BloodSplatter, ShadowMask) and Bink | their targets, `HdrOutputTarget` | `CanTake`/`MakeClient` `Refresh`, `BinkGraph.cpp:UpdateTargets` (+ `BuildPending`) | `Refresh`, a build between frames | clients on target variables | Bink's `BuildPending` goes. These run in CS stages, so they are step 6, not step 10. |
+| 6.20 | Physical Lens and Camera FX (post chain, with 6.9) | Lens: `ImageEffects`, `Diffraction`, ghosts on (derived: `Intensity > 0`), the lens model (preset, f-number, focus, zoom, coating: CPU inputs, not variables). Camera FX: its effect `enabled`. Composite: `HAS_PHYSICAL_LENS` while the lens publishes outputs; linear lighting (Composite always draws then, `eb71d2e7f`) | `ORGPhysicalLens.cpp` Commit compares cache inputs each frame (gates, not builds); `StagedBuffer::Poll` each frame; focus readback each camera frame | chain rebuild when Diffraction or ghosts toggle; a new paths version per lens model; Composite's permutation | per-effect `DeclareClient` on those fields and on linear lighting; ghost paths as a `kBuffers` fragment (4e); Camera FX's transient lens image is a frame transient of the chain, no declaration | The caches stay gates (an on-change pass is late-bound work, not a revision). The focus and adaptation readbacks need Q11's answer before the post stage can be a revision member. The ghosts keep the model of the adopted paths version, read from `Adopted()`. |
+| 6.21 | ViewAtmosphere (medium and post-water composite) | medium: `enabled`, `{near,middle,distant}{PixelSize,Slices}` (atlas size, at most 8 M texels), `DisplaySize`; composite: EHF on, Physical Sky off (until its media are on the graph), program built, inputs published (`CompositeActive`) | `ViewAtmosphere::Prepare` → `ORGViewAtmosphere::Prepass` (latches parameters each frame); atlas through `RequestSize` (planned); `CompositeActive()` re-registers the composite inside the frame; `CompositeAfterWater` skips frames while `FrameAnchors::Scheduled` is false | versioned Texture3D medium; composite client registered again on an input change | atlas declared on the size settings and `DisplaySize`; composite `DeclareClient` on those variables; `PostWaterComposite` is `Adopted().Get(...)` | Today `PostWaterComposite` (read by Lighting, Effect, Water, Sky and the SSAO composite to skip their own fog) turns on with the registration, while the composite waits for its build: those frames have no fog at all (`view-atmosphere-port.md` open question 4). In a revision both switch together; delete the `Scheduled` gate. The shared volume's switch (`SharedVolumeActive`, planned) withdraws the fog's ids: use the existence rule (keep slots, 1-texel versions) instead. Reflections: per-epoch frame-texture views, bound per epoch (10b). Baselines: see the fog defects above. |
+| 6.22 | Physical Sky (done 2026-11-19, see Step 6's "As built") | `enabled`, `enableVolumetricClouds` (native reports clouds off until phase 4), `halfResApShadow` (use only, not size), `DisplaySize` (AP shadow), Dynamic Cubemaps loaded (AP depth, decision 7 of the port) | LUTs every enabled frame at EarlyPrepass (gated); disk phase LUT only when its 12 constants change (gate); AP shadow `RequestSize` on a resolution change (planned, phase 2) | nothing yet: LUTs are fixed-size History/Persistent twins | LUTs declared at setup (no dependency); AP shadow on `DisplaySize`; `cs.physical-sky.composite` (phase 2, after `cs.deferred`) and `cs.physical-sky` (clouds) `DeclareClient` on `enabled`, clouds and Dynamic Cubemaps | Previous-frame reads (7.12): the reflection faces read the LUTs before this frame writes them. A newly enabled sky's first frame gives the faces born-cleared LUTs (decision 5a: one frame of black sky in reflections) unless the faces take `FirstFrame` and skip. Guest frame textures read captured D3D11 views (late-bound); native gets zero views of the declared kind, so phase 4 switches a register's source from a zero view to a graph resource: give the cloud targets their slots from the start (existence rule). The lightning readback ring (planned) is a readback in the pre-main CS stage: Q11. |
+| 6.23 | Screenshot clean scene | kFRAMEBUFFER size and format (`DisplaySize`, `HdrEnabled`/presenter format) | `ORGScreenshot.cpp` compares kFRAMEBUFFER's size and format with its texture on every capture; then `FrameAnchors::Scheduled` | a new Persistent twin and a new client inside the frame; the capture falls back to the D3D11 snapshot until its build switches in | texture and client declared once on `DisplaySize` and the format variable | Moves with the hudless copy in 7b (same FrameGeneration ticket). The capture's own readback buffers are on the Capture anchor's placed epoch, outside the UI stage's recording. |
 
 ---
 
@@ -813,6 +1828,13 @@ Order follows section 5. **S** = size, **Sh** = shape (pass set, program, format
 | 6.18 | DynamicCubemaps (GPU-style struct: check) | `EnabledSSR` : uint | define | Sh |
 | 6.18 | TerrainShadows | `EnableTerrainShadow` : bool | client | T |
 | 6.18 | GrassCollision | `EnableGrassCollision` : bool | client | T |
+| 6.20 | PhysicalLens | `ImageEffects`, `Diffraction` : bool | mapping cache client; diffraction passes in the build | Sh |
+| 6.20 | | `Intensity` : float | ghost passes in the build (derived `> 0`) | Sh (derived) |
+| 6.20 | Camera FX | effect `enabled` : bool | chain list (two passes, transient lens image) | Sh |
+| 6.21 | ViewAtmosphere (`Settings`, GPU-copied by `FeatureBuffer.cpp:ViewAtmosphereBufferData`: split) | `nearPixelSize`, `nearSlices`, `middlePixelSize`, `middleSlices`, `distantPixelSize`, `distantSlices` : uint | atlas extent | S |
+| 6.21 | | `enabled` : uint | medium, composite client, `PostWaterComposite` | T, Sh |
+| 6.22 | PhysicalSky | `enabled` : bool | LUT, AP and cloud clients | T |
+| 6.22 | | `enableVolumetricClouds` : bool | cloud passes, frame texture sources | Sh |
 | 10c | DCLF (`ToggleSet`) | `cullMode`, `pipelineMode`, `interiorCpu`, `exteriorCpu`, `shadows`, `projectedUv`, `cpuRecord`, `cpuCadence`, `registered` | graph conditions, revision | Sh |
 
 Not size-relevant (no port): MotionBlur `SampleCount` (constant only), SSS `BurleySamples`/`ScatterMode`, HistogramAutoExposure,
@@ -858,6 +1880,12 @@ A new version of a `History` texture is zero-filled on the uploader before it is
 true for exactly the first frame after the revision that gave it a new version. Features pass it to their temporal pass as "history
 invalid". Frame-kind switches (load screens) do not reset history unless a feature declares that.
 
+Previous-frame readers (`kPreviousFrame`) see the born-cleared contents on that first frame too, because they run before the
+writer. Physical Sky's reflection faces are such readers: on the first frame after a new LUT version they read zero LUTs. That is
+allowed by decision 5a, but a reader that would turn zeros into a visible artefact (black sky in the faces) should read
+`FirstFrame` of the texture it reads and skip. A `kPreviousFrame` id whose writer and reader are in different stages makes both
+stages closure members of a new version, which `EpochsDeclaring` already finds.
+
 ### 7.6 Shader reload
 
 Step 7c. Today `RequestAllSynchronous` rebuilds every epoch on the owner thread with the host thread held. The end state is an event
@@ -870,6 +1898,11 @@ whose revision has every epoch as a member. Open question Q5 on the pipeline swa
   FrameGeneration hudless copy) become revision members in 7b.
 - **Native.** The back buffer's versions and the swap chain colour space and format become revision inputs (9a). The HDR switch's
   black frames go away because the old chain keeps drawing until the new one is adopted. Frame generation is off in native (no change).
+- **Ports with a per-mode source.** Physical Sky's AP shadow and cloud registers read the captured D3D11 view in guest and a zero
+  view in native (no D3D11 pass writes them there). Guest's capture is late-bound. Native's zero view is a fixed declaration. When
+  those passes move onto the graph, both modes read the graph twin and the per-mode difference goes. Native reports volumetric
+  clouds off until then (`PhysicalSky::VolumetricCloudsEnabled`), so the clouds variable has a mode-dependent value, not a
+  mode-dependent path.
 
 ### 7.8 The starvation rule (decision 4a)
 
@@ -897,6 +1930,31 @@ Compare shots with `python tools/cs-test/cs_test.py compare <A> <B>`. Brightness
 sections quote 0.1 to 1.8 for the quick configs and up to 26 for Dragonsreach's windows in the census; treat those as noise and look at
 the image before calling a regression.
 
+### 7.12 Readbacks, uploads, gates and lagging registrations (from the hard ports)
+
+Each mechanism the ports added, what event drives it, what it carries and what replays.
+
+| Mechanism | Port | Event | Carries | Replays? | Fits the model |
+|---|---|---|---|---|---|
+| LUT client at EarlyPrepass | Physical Sky | none (every enabled frame); `enabled` for the client | History LUTs, fixed size | yes: a gated pass in the pre-depth stage's recording | yes. The client is declared on `enabled` (6.22). |
+| Disk phase LUT on change | Physical Sky | its 12 constants (CPU compare at commit) | a Persistent LUT, rewritten in place | yes: the gate is late-bound | yes. An on-change pass is a gate, never a revision. |
+| Previous-frame reads | Physical Sky (faces) | none | last frame's LUT contents | yes | yes, with 7.5's first-frame note. |
+| Per-draw latch handles | Physical Sky (sky, water families) | none | heap indices per draw | yes (late-bound) | yes. |
+| Medium client with latched parameters | ViewAtmosphere | `enabled`, atlas sizes (6.21) | versioned Texture3D medium, parameters copied from the latch each run | yes | yes, once the atlas is declared on its settings. |
+| Post-water composite with a lagging registration | ViewAtmosphere | `CompositeActive()` inputs | a client at EngineDraws, `PostWaterComposite` | yes | yes (6.21): `PostWaterComposite` is the registration the adopted revision holds, and the `Scheduled` gate is gone. |
+| Skin material pool | Advanced Skin in DCLF | per-slot resolve each frame; `GpuTextures` replies and generation | table rows at t38, descriptor owners | n/a (FrameValues) | yes: late-bound. |
+| Staged ghost paths | Physical Lens | a new lens model (CPU) | a `VersionedBuffer` version and the model fields it was built for | the post stage's recording binds the slot: the version must be adopted at a boundary | yes, as a `kBuffers` fragment (4e). Today: `AtNextBegin` (intermediate). |
+| Lens caches (mapping, diffraction, ghost wave, planning) | Physical Lens | inputs compared at commit | Persistent textures and buffers | yes: gates, and the indirect argument seeds are copied from the latch every run, zeros when idle | yes. |
+| GPU-argument draws and dispatches | Physical Lens | none | arguments written by compute | yes, by design (seeded every run) | yes. |
+| DoF focus readback | Physical Lens | the camera active | a texel to the CPU a few frames late | **no** on frames that want it (an empty pass otherwise): a readback capture | conflicts with R9 (Q11). |
+| Adaptation readback | Histogram Auto Exposure | every frame | the adaptation and histogram, the adaptation now feeding the pre-exposure | **no** on frames that want it (`ORGHistogramAutoExposure.cpp:ReadbackPass::Prepare`) | conflicts with R9 (Q11). |
+| Lightning readback ring (planned) | Physical Sky | gated query | candidates to the CPU | **no** | conflicts with R9 (Q11). Design it after Q11. |
+| Clean scene copy | Screenshot | a pending SDR capture | a Persistent texture | yes (own ticket today) | yes, after 6.23 and 7b. |
+| Pre-exposure | the post chain, FSR, XeSS, DLSS | every frame (from the adaptation readback, `State::UpdateSharedData`) | one float in SharedData and in the SDK options | the value is late-bound | yes, but the SDK options are set on the render thread (`Streamline.cpp:EvaluateXeSS/FSR/DLSS` read `globals::state->preExposure`) while the evaluate records at execution later **(inferred race: in native the next frame's options can be set before this frame's evaluate records)**. The value must travel with the frame's evaluate, as the frame's other SDK options must (section 11, 4.3). |
+
+The readbacks are the one real conflict with the plan. A revision records every member stage against pending versions and replays
+the result, so a stage that cannot be replayed cannot be a member. Q11 decides how readbacks live beside replay.
+
 ---
 
 ## 8. Scaffolding-removed checklist (final form)
@@ -907,30 +1965,36 @@ return nothing (or only the stated exception) at the end.
 | Item | Removed in | Proof |
 |---|---|---|
 | `RequestSize`, `RequestExtent`, `ApplySizeRequests` | 7a | `rg -n "RequestSize\|RequestExtent\|ApplySizeRequests" src` |
-| `AtNextBegin` (RequestSize, Terrain Shadows, ImGui users and the hook itself) | 4b, 6.2, 6.3, 7a | `rg -n "AtNextBegin\|atNextBegin" src` |
+| `AtNextBegin` (RequestSize, Terrain Shadows, ImGui, Physical Lens's staged paths, Upscaling's test requests, and the hook itself) | 4b, 4e, 6.2, 6.3, 6.14, 7a | `rg -n "AtNextBegin\|atNextBegin" src` |
 | Prepass size checks (`FollowSizes`, `CheckChainSteps`, `CheckImports`, `CheckWorldSteps`, `CheckStartSteps`, `CheckMenuSteps`, `CheckFlowMap`, `previousUpscaleMode`, LLF `pending` shape, `SettingsSizes` re-checks, `RegisterAgain`) | 6.x | `rg -n "FollowSizes\|Check(Chain\|World\|Start\|Menu)Steps\|CheckImports\|CheckFlowMap\|previousUpscaleMode\|RegisterAgain" src` and `rg -n "pending" src/Features/LightLimitFix/ORGLightCulling.cpp` |
 | Resize `DrainCommandRing` calls | 6.14, 6.15 | `rg -n "DrainCommandRing" src/Features` (left: only fault paths in `FrameGenController.cpp`, if still needed) |
 | `FrameAnchors::Service` resize poll | 7a | `rg -n "ResizeGeneration\|resizeGeneration\|ResizeCauses" src` |
 | `ResizeGeneration`, `BumpResizeGeneration` | 7a | `rg -n "BumpResizeGeneration\|BumpGeneration" src` |
 | `PublishedResources::Refresh` | 7a | `rg -n "PublishedResources::Refresh\|void Refresh\(\)" src/RenderGraph/PublishedResources.*` |
-| `Rearm` for reset, one-shot `once`/`armed` passes | 6.6, 6.17, 7a | `rg -n "Rearm\(\|\.once\b\|armed" src/RenderGraph src/Features` |
+| `Rearm` for reset, one-shot `once`/`armed` passes | 6.6, 6.17, 7a, late changes (first-run gates) | `rg -n "Rearm\(\|\.once\b\|armed" src/RenderGraph src/Features` |
 | `ResetHistories`, `clearPending` | 6.1, 6.9 | `rg -n "ResetHistories\|clearPending" src` |
 | `Frame::Resources` `fresh` | 7a | `rg -n "\bfresh\b" src/RenderGraph/Frame src/RenderGraph/Engine/ImageSpace*` |
 | Per-stage staged switch (`SwitchStaged`, `stagedAsked*`, `kAskedAgainLimit` in `Schedule`) | 4e, 7b | `rg -n "SwitchStaged\|stagedAsked\|kAskedAgainLimit" src` |
-| Version-lag branch in `Schedule` (`versionGeneration` bumps, `frameVersionsCurrent` exception) | 9b | `rg -n "versionGeneration\|frameVersionsCurrent" src/RenderGraph/FrameAnchors.cpp` |
-| Mid-frame import publishing (`JoinSlot`/`EnsureViews` outside adoption) | 9b | `rg -n "JoinSlot\|EnsureViews" src/RenderGraph/FrameAnchors.cpp` shows calls only from the revision's adoption path |
+| Version-lag branch in `Schedule` (`versionGeneration` bumps, `frameVersionsCurrent` exception). Gone in 9b | 9b | `rg -n "versionGeneration\|frameVersionsCurrent" src/RenderGraph/FrameAnchors.cpp` |
+| Mid-frame import publishing (`JoinSlot`/`EnsureViews` outside adoption). 9b: both are called from `Import`/`ShareImage`, and refuse outside `Boundary::InAdoptionPoint` | 9b | `rg -n "JoinSlot\|EnsureViews" src/RenderGraph/FrameAnchors.cpp` shows calls only behind `RefusedOutsideAdoption`; `rg -n "EngineImports" src` empty |
 | `EngineTargets` `Settle` builds and generation bump | 9a | `rg -n "Settle\(\|heldReplaced\|heldResized" src/RenderGraph/Engine/Targets` |
-| DCLF frame-start wait | 10a | `rg -n "AdoptCurrentSnapshot\|WaitCurrentSnapshot\|kCatalogTimeout" src` |
-| `RenderGraphRuntime::AttachDclfBuilds`, DCLF `external` epochs, frame-end `Attach::All` for DCLF | 10a | `rg -n "AttachDclfBuilds\|Attach::All\|\.external" src` |
-| DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat" src` |
+| DCLF frame-start wait (the shader-reload wait stays, director item 57) | 10a | `rg -n "AdoptCurrentSnapshot\|WaitCurrentSnapshot\|at its start for a snapshot current" src` |
+| `RenderGraphRuntime::AttachDclfBuilds`, `BuildOwnerEpochsNow`, frame-end `Attach::All` for DCLF (its epochs stay `external`, and are `staged` too) | 10a | `rg -n "AttachDclfBuilds\|BuildOwnerEpochsNow\|Attach::All" src` |
+| DCLF `snapshotSlot`, separate `AdoptSnapshot` adoption, `StaleKindOf` generation checks | 10b | `rg -n "snapshotSlot\|StaleKindOf\|kStaleBuild\|kStaleTargets\|kStaleMain\|kStaleShadowFormat\|AdoptSnapshot\|AdoptAtBegin" src` |
 | `Toggles::BeginFrame`/`Adopt`, `RefreshGraphConditions` polling | 10c | `rg -n "Toggles::BeginFrame\|Toggles::Adopt\|RefreshGraphConditions" src` |
-| `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5) | `rg -n "RequestAllSynchronous" src` |
-| Boundary check's allowed callers (`dclf`, engine-import exception) and its counted (non-fatal) mode | 10a, 9b, 7d/10c | `rg -n "Allowed\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` |
+| `Builds::RequestAllSynchronous` for shader reload | 7c (or kept with a recorded reason, Q5). Gone in 7c; the swap's render-thread build is `BuildManager::SwapPipelines`, called only from `Revision::Adopt` (Q5) | `rg -n "RequestAllSynchronous" src` empty; `rg -n "SwapPipelines" src` only in BuildManager and RenderGraphRuntime |
+| Boundary check's allowed exceptions (`Exception::Dclf`, `Exception::EngineImports`) and its counted (non-fatal) mode for late changes (late changes are `TapError::LateChange` since the late-changes item) | 10a, 9, 7d (versions and attaches fatal), late changes (after 10c) | `rg -n "Allowed\|Exception::\|allowedCaller\|kCounted" src/RenderGraph/Frame/BoundaryCheck.cpp` and `rg -n "Boundary::Allow" src` empty; `rg -n "TapError::LateChange" src/RenderGraph/Frame/BoundaryCheck.cpp` one hit |
 | Writer shims: `Feature::SettingsWritten`, `ProjectSizeSettings`, `SizeProjection`, and the wrappers' event calls | 7a | `rg -n "SettingsWritten\|ProjectSizeSettings\|SizeProjection" src` |
 | The lane's `RequestSize` input and the coordinator's "wish" path | 7a | `rg -n "Wish\|wishes" src/RenderGraph/Frame/Revision.*` |
 | Structural rebuilds from publishing under an existing id (EHF, SSGI, LLF, adapt pair, flow map) | 6.x | `rg -n "RequestStructuralRebuild" src` shows only revision-driven shape-class changes; the census shows no `structural rebuild` after `resize` and the toggles |
 | `GraphResources.h` header rules for `RequestSize`/resize generation | 7a | `rg -n "RequestSize\|resize generation" src/RenderGraph/GraphResources.h` |
 | The guest own-epoch path that takes builds mid-frame | 7b | `rg -n "own epoch" src/RenderGraph/Frame/FrameDriver.cpp` (comment gone) and no `OwnEpoch` build attaches in the census |
+| Schedule gates for clients registered inside the frame (ViewAtmosphere's composite, the screenshot's clean scene) | 6.21, 6.23, 7a | `rg -n "FrameAnchors::Scheduled\|bool Scheduled" src` |
+| Render-thread compiles in the post chain, and its D3D11 fall-back on a failed build | 6.9 fixes | `rg -n "RasterProgram::Load\|ComputeProgram::Load\|LoadGenerateMips\|failedKey\|Legacy\(" src/Features/PostProcessing` shows only `BuildPlan` (the lane) and the lens's `GenerateMips` declaration |
+| Render-thread compiles in the Effects11 FX chain, and its FX11 fall-back on a failed plan | Effects11 rules fixes | `rg -n "RasterProgram::Load\|ComputeProgram::Load\|returns to FX11\|BuildCsPrograms" src/Features/Effects11/ORG` shows only `BuildPlan` (the lane) |
+| The lens's per-frame upload poll (`StagedBuffer::Poll`) | 4e | `rg -n "StagedBuffer\|Poll\(\)" src/Features/PostProcessing/ORG/ORGPhysicalLens.cpp` |
+| Readback captures inside CS stage recordings | Q11's answer | `rg -n "PlanReadbackCapture" src` shows only the places Q11 allows |
+| The screenshot's per-capture size and format compare | 6.23 | `rg -n "const bool same" src/Features/Screenshot/ORGScreenshot.cpp` |
 
 Kept on purpose (not scaffolding): `ComposedVersions`, `NamedVersions` texture entries, `AttachStagedEpochGraphs`, `EpochsDeclaring`,
 the ORG adoption observer (development check), the missed-writer check, `Setting<T>` and its registry, late-bound data paths.
@@ -944,13 +2008,896 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 | Q1 | Exactly which data `EpochsDeclaring` should use: the graph's declared versioned resolvers at build, or each recording's `versions` list. | Read `ORG/src/Render/RenderGraph/RenderGraphPersistent.cpp` around the comment "the one its host data's revision names" and where `PersistentRecording::versions` is filled. Prefer build-time data (staged graphs have no recording yet). |
 | Q2 | Cost of making a twin's D3D11 export at adoption on the render thread (DXVK interop wrap of existing memory). | Tracy zone around `AdoptPrepared` in a `resize` run. If it costs more than about 0.2 ms per twin, investigate making exports on the lane (D3D11 device creation is free-threaded, the interop call is not known to be). |
 | Q3 | Which executor the revision lane runs on. | Read `RenderGraphRuntime.cpp` for the executors used by `BuildManager`'s build thread and DCLF's pumps (`DCLF/Core/Scene/Coordinator/ScenePump.cpp`). Do not add a thread if a serialized pump on an existing executor works. |
-| Q4 | Does the engine use its new targets between `BSShaderRenderTargets::Create` and the next `Renderer::Begin`? Can a window resize happen in a session at all? | Grep run logs for "creating its render targets again". Read `Hooks.cpp`'s thunk caller (`Renderer::WindowSizeChanged`). If it never runs mid-session, implement 9a's event path without a test and say so in the dated doc. |
-| Q5 | Can shader reload's pipeline swap happen inside `AdoptLatest` (host thread held briefly) instead of `RequestAllSynchronous`? | Read `RenderGraphRuntime::ServicePipelineReload` and ORG's `BuildIfRequested` with the host held. |
+| Q4 | Does the engine use its new targets between `BSShaderRenderTargets::Create` and the next `Renderer::Begin`? Can a window resize happen in a session at all? | **Answered (9a, 2026-11-19, from the code): yes, so a pending version cannot serve the engine's own objects.** (1) The `Create` thunk (`Hooks.cpp`) runs `globals::ReInit` and `State::Setup` right after `EndSet`, and they read the new targets (`HDRDisplay::SetupResources` takes kMAIN's description; HDR and Deferred call `Targets::Recreate`). (2) The engine fills its own fields, so it binds the new D3D11 objects from its next draw. (3) The 3D targets are made inside the frame, when volumetric lighting first renders (`Create3DRenderTarget`), and drawn at once. (4) In native mode `ResizeBuffers` comes from `Renderer::WindowSizeChanged`, which then calls `Create`. No CS code calls it alone, and `WndProc_Hook` keeps the window size unless the user drags the frame. So the first set is made before the graph exists (`State::Setup` initializes the graph after `Create`), and `TakeOver` makes first versions. A second set while the graph runs is now fatal at `BeginSet` (decision of 2026-11-18). What is left in a session: targets the engine remakes outside a set (the volumes, guest only, read by no graph) and a native `ResizeBuffers`. Both become pending versions that join the next revision. In the frames before the adoption the graph reads the old version while the engine writes the new one. That is accepted, since no graph declares the volumes and a native resize is followed by the fatal `Create`. `EndSet` is not made a boundary. |
+| Q5 | Can shader reload's pipeline swap happen inside `AdoptLatest` (host thread held briefly) instead of `RequestAllSynchronous`? | **Answered (7c, 2026-11-19): not as a swap of slots alone.** The swap now runs inside `AdoptLatest`, but as a render-thread build of every graph (`BuildManager::SwapPipelines`). Why, from the code: (1) `ComputeProgram`/`RasterProgram::Pipeline()` read the slot (`LivePipelineSlot::Peek`) when a pass records, and keep no reference. (2) A revision's recordings are made before its adoption, on the host's thread, so they would bind the old payloads. (3) `Publish` retires a replaced payload at `SubmissionsMade()`, and a kept recording made before the swap may replay after it: a freed pipeline. (4) `AttachStagedEpochGraphs` holds the host's thread, but gives no hook to publish inside the hold. Making it safe needs pipelines named by the revision: the registry's staged set as host data (`IResourceVersions`-like, OMS), a recording that can read its host data or retains its payloads (ORG `RecordingContext`), and programs that bind through it. |
 | Q6 | Where the engine shadow map's size and format are created and whether they change in a session. | Read `LightLimitFix.cpp:EnsureLocalShadowResources` (it reads `kSHADOWMAPS`) and the engine target plan in `docs/development/p4/render-targets.md`. |
-| Q7 | In guest, do any CS stages submit between `Renderer::Begin` and DCLF's `Main::Draw` build point? If yes, moving DCLF adoption to Begin changes nothing for them; if DCLF's guest build point must stay at `Main::Draw`, adoption for DCLF members must still be at Begin. | Read `FrameDriver.cpp:OnBegin`'s comment and `DCLF/Core/Render/FrameDriver.cpp:BeginFrame`'s caller in guest; check the epoch order in a `guest-quick` census. |
+| Q7 | In guest, do any CS stages submit between `Renderer::Begin` and DCLF's `Main::Draw` build point? If yes, moving DCLF adoption to Begin changes nothing for them; if DCLF's guest build point must stay at `Main::Draw`, adoption for DCLF members must still be at Begin. | **Answered (10a, 2026-11-19, from the code; to confirm with a `guest-quick` census): yes, safe, with three conditions.** In guest every CS stage step and every DCLF epoch is an engine draw hook inside `Main::Draw`, after DCLF's `BeginFrame` (the start stage's first anchors are `DecalQueries`, `ReflectionsPrepass`, `SkyReflections`) **(inferred: the anchors' hook sites were not read one by one)**. So nothing submits between `Renderer::Begin` and the build point, and adopting at Begin changes what no CS stage reads mid-frame. Conditions: (1) no DCLF epoch may attach between Begin and `Main::Draw`. That holds once DCLF's builds are staged, since the guest build point's `Poll(Live)` then only stages; the synchronous paths in 10a's "As found" must go first. (2) `AdoptSnapshot`'s frame bookkeeping (`snapshotTakenFrame` for the publication gate, `adoptionLatency`, `growthAdoptedFrame`, `SnapshotAdopted`) reads `Scene::FrameView::GetFrame()`, which DCLF's `BeginFrame` increments (`FrameView.cpp:53`). At Begin it is still last frame's number, so these need `GetFrame() + 1` there. This applies to native too, whose adoption is also in `BeginFrame` today. (3) `AdoptLatest` returns early unless the coordinator is installed and the thread is the render owner; DCLF's adoption must run at every render-owner Begin, also with no frame revision to adopt. |
 | Q8 | TextureStreaming `BaseSize` and WetnessEffects `RaindropGridSize`: size-relevant or not. | Read `TextureStreaming.cpp:SetSettings` and the wetness shaders. Port only if a texture size follows them. |
 | Q9 | How often `AttachStagedEpochGraph` is refused in practice. | Step 3's counter over the full test set. Any refusal after step 4 is fatal by design; if refusals occur in normal runs, find the configuration change that causes them. |
-| Q10 | A7 (HDR output as a UI-stage step) is in another plan. If it lands first, 7b shrinks. | Check `docs/development/org-native-frame-graph.md` and the cleanup plan for A7's state before 7b. |
+| Q10 | A7 (HDR output as a UI-stage step) is in another plan. If it lands first, 7b shrinks. | A7 landed 2026-11-19 (`org-native/fg-a7`): the hudless copy, the clean scene copy and HDR output are UI steps, and no anchor runs an epoch of its own. 7b is left with `SwitchStaged` and FrameDriver's mid-frame build comment. |
+| Q11 | **Decided 2026-11-19: (b), replayable readbacks.** The post chain already uses this form in CS (`RunReadback` in `ORGPostProcessing.cpp`: a host buffer with a region per run lease, a stamp and the data copied by revisioned copy passes, read when the lease comes round). Readbacks against replayed recordings (R9). A revision records every member stage once per frame slot and replays it, and a readback capture is never replayable. Today the post stage holds the lens focus and adaptation readbacks, and the planned lightning ring would put one in the pre-main stage. The post stage already fails with the R9 error when the Post Processing chain runs on the graph (being fixed separately). | Options: (a) readbacks leave CS stages: each runs on a placed epoch or ticket of its own after the stage, reading the published texture; (b) ORG gets a replayable readback: the copy targets a ring entry picked by a run-latched index, and the CPU learns completion from the retirement clock instead of a lifecycle callback; (c) a stage that holds a readback is recorded every frame and never replayed, which makes it unable to be a revision member, so the readback would block any revision touching that stage. Recommended: (b), since it keeps one stage and no extra epochs, and Physical Sky's lightning ring is already designed that way (ring entry per frame in flight, non-blocking completion query). Whatever fixes the post stage now should be checked against this choice. |
+| Q12 | **Decided 2026-11-19: the recommendation.** Keep the gate until 6.21 and tie `PostWaterComposite` to `Scheduled`. Lagging registrations (`FrameAnchors::Scheduled`) as an interim. ViewAtmosphere's composite and the screenshot's clean scene skip frames until their build holds them. Before 6.21 and 6.23 land, keep the gate, or make the switch of `PostWaterComposite` wait for the same frame as the composite? | Recommended: keep the gate until 6.21, but tie `PostWaterComposite` to `Scheduled` (not to the registration) so the frames between have the shaders' own fog instead of none. That is a point fix, deleted by 6.21. |
+
+**Decided by the agent (step 1, 2026-11-19), to confirm:**
+- **Render thread.** The census counts the thread that last opened `Boundary::Scope` (the thread that runs `OnBegin`), not
+  `FrameAnchors::IsRenderOwner`. It keeps `BoundaryCheck` free of `FrameAnchors.h`. A loading screen's thread that begins frames
+  takes the count over while it does.
+- **Late changes cover every build request.** Besides `Register`/`Unregister`/`Refresh`/`Rearm` and `RequestStructuralRebuild`, every
+  `RenderGraph::Builds::Request/RequestAll/RequestFor/Change` call is counted. Many requests reach neither (an import added, engine
+  targets resized, DCLF's graph conditions, a published resource added, a stage key change). A `Boundary::Change` scope at the named
+  sites keeps their own requests from counting twice.
+- **Late attaches are counted at the attach.** In `BuildManager` (`Finish` for an attached build, `SwitchStaged`), keyed by epoch and
+  build point (the `Poll`/`BuildOwnerEpochsNow` caller). `Schedule`'s switches run inside `OnBegin`, so they never count. The
+  frame-end `Poll(Attach::All)` and guest's DCLF build point at `Main::Draw` count as late: both are section 8 scaffolding.
+- **More in the census line.** It also gives adoptions inside the scope ("at Begin"), the allowed `dclf` adoptions apart, the callers
+  of late versions, and session totals, so the last line of a run is its total.
+- **A new resource's first version is counted apart** ("new resources made late"). It replaces nothing a recording bound. In the first
+  runs nearly every late version was a first version (one per resource), which hid the replacements. Mid-frame imports still show
+  there, for step 9.
+- **The census also logs at a test run's exit** (`Testing::RegisterExitReport`). The `[ORG] declared frame:` window
+  (`Driver::LogStats`) never closes in a quick run unless `CS_ORG_EPOCH_STATS=1`, so without this a quick run printed no census.
+- **Caller tags.** `dclf` (allowed, `AdoptSnapshot`), `engine import` (`FrameAnchors.cpp:JoinSlot`), `twin`
+  (`GraphResources.cpp:Resource::JoinSlot`). Other sites are `untagged` and named by resource.
+- **ORG test in its own executable.** `tests/VersionedResourceTests.cpp` (`OpenRenderGraphVersionedResourceTests`, WARP), not a
+  scenario in `RebindingGpuTests.cpp`: `OpenRenderGraphExternalResourceTests` stops early on this base with an uncaught
+  `std::system_error` ("resource deadlock would occur"), also without this change, so a scenario there never runs. A standalone ORG
+  configure also needs `-DDirectX-Headers_DIR` (ORG's `vcpkg.json` lacks `directx-headers`, which BasicRHI requires).
+- **Since the plan was written.** A7 removed the own-epoch anchors, so guest's late attaches come from DCLF's build point and the frame
+  end only. Native swap chain replacement runs on the submission thread, so its adoptions are not counted. The back buffer's
+  per-present version (`NativeDevice.cpp:NextGraphVersion`) is on the render thread and counts. Physical Sky's handle tables and
+  `RunReadback` adopt no versions.
+
+**Decided by the agent (step 2, 2026-11-19), to confirm:**
+- **Misses count only the set's own kind.** A buffer set counts `Find` misses, a texture set `FindTexture` misses. Asking for
+  the other kind is not a miss. DCLF's named parity check (`NamedParity.cpp:CheckNamedResolves`) warns on any growth of a buffer
+  set's `Misses()`, and DCLF's recordings resolve CS textures through the same set, so counting those would raise false warnings.
+- **Texture sets hold textures weakly**, like buffer sets. `AdoptAll` skips an expired one. `Textures` throws on a null texture
+  or version and on a texture named twice. It takes `NamedVersions::TextureEntry` pairs (texture, version).
+- **`ComposedVersions` is a constructor** over up to four `IResourceVersions` (null parts skipped, a fifth throws). It gets its
+  own serial from the sequence `NamedVersions` uses (`src/VersionsSerial.h`), so one cache key space covers both. The lane makes
+  one per revision, so recordings of a revision share it.
+- **The CS argument carries a serial.** `IResourceVersions` has no serial and ORG stays untouched, so `RequestDeclared` takes
+  `RecordVersions { versions, serial }`. Versions without a serial, or a serial without versions, is fatal. Serial 0 is "current
+  versions", today's only caller.
+- **The ORG test moved to OMS, at resolver level.** Step 3 edits ORG at the same time, so ORG is untouched. `ORGNamedVersionsTests`
+  (WARP) resolves through `VersionedResource::SelectVersion` with host data naming a `Make`d texture version, which is the call a
+  recording's preparation makes: the pending version is selected, then the same one after `AdoptAll`.
+  `EpochRecordingVersionsCurrent` compares version numbers per slot whatever the resource kind, and the buffer case is covered by
+  `OpenRenderGraphPersistentVulkanHostTests`. A texture case there (record against a `Make`d texture, not current, current
+  after `Adopt`) is left for after step 3 merges. OMS tests need a parent project with ORG's targets: a two-line CMake project
+  that adds `extern/OpenRenderGraph` and `extern/ORGModuleServices` with CS's ORG cache settings (BasicTelemetry artifacts off,
+  UIs off), `-DORG_MODULE_SERVICES_BUILD_TESTS=ON -DORG_MODULE_SERVICES_ENABLE_DXC=OFF`, and the worktree's
+  `build/Dev-Fast/vcpkg_installed` (`x64-windows-static-md-release`). ORG needs Vulkan and D3D12 both on.
+- **Since the plan was written.** Frame generation (steps 1-8) and Physical Sky's port added no other segment host data. The only
+  other host data naming versions is DCLF's `EpochRevisionData`, which keeps using its buffer `NamedVersions` directly.
+
+**Decided by the agent (step 3, 2026-11-19), to confirm:**
+- **Q1: build-time data, kept current.** Each graph keeps the set of versioned resources its passes declare
+  (`RenderGraph::PersistentDeclaredVersions`, keys of `PersistentInstanceState::entries` with a `versioned` slot). Its first build
+  sets it (`PrepareFirstPersistentBuild`, so a staged graph answers before it is ever prepared) and each preparation refreshes it,
+  only when a versioned slot was added or a slot retired. It is not the recordings' `versions` lists: a staged graph has none.
+  A graph built on the owner thread (`BuildIfRequested`) answers nothing until its first preparation; CS's staged builds all go
+  through `BuildEpochGraph`, so that never matters for a revision.
+- **`EpochsDeclaring` takes `IVersionedResource`**, not `VersionedResource`, and matches by `Key()`, so a clone matches its original.
+  The host keeps each instance's attached and staged sets under a mutex, published on the owner thread at install, staging and
+  retirement, so the query is safe on the revision lane.
+- **"Not being submitted" means:** no ticket of the epoch is held (`HoldEpochTicket`), and the call is not inside a submission on the
+  same thread (without a submission thread). The single form never checked either. CS holds no tickets today.
+- **"No newer build" means a newer build attached** (the single form's serial check). A build still running is not visible to the
+  host; superseding it is the revision lane's job (latest wins).
+- **Check order.** The set itself first (unknown epoch, an epoch named twice), then each epoch in the order given. The result names
+  the first refused epoch.
+- **Refusals counted twice over.** ORG counts every refusal of `AttachEpochGraph`, `StageEpochGraph` and both staged attaches by
+  reason (`AttachStatsTotal`, host lifetime). CS counts the ones `BuildManager` meets (staging, attach, switch) in the
+  `[ORG] boundary:` line as "build refusals", by site and reason, on any thread. That is Q9's counter.
+- **CS does not call the new functions yet.** Step 4 does. The plan's acceptance is "CS unchanged in behaviour".
+- **Since the plan was written.** Native frame generation (A7, swap chain replacement on the submission thread) and Physical Sky's
+  full port change nothing here: staged builds still switch per epoch through `FrameAnchors.cpp:Schedule` and
+  `BuildManager::SwitchStaged`, which step 4 replaces with one `AttachStagedEpochGraphs` per revision.
+- **`OpenRenderGraphExternalResourceTests`** still stops early (exit 127 on this base, after the device is made, before any scenario
+  line); not fixed here. The step 3 test is a scenario of `OpenRenderGraphPersistentVulkanHostTests built` instead, which runs on the
+  RX 6600.
+- **`PersistentVulkanHostTests leases`** fails with "Synchronous frame capacity exhausted" and then hangs, on ORG `2b22711` as well;
+  not fixed here.
+- **Q9 answered for the quick set:** 0 refusals in `guest-quick`, `native-quick`, `native-d3d12-quick`, `d3d11+quick`.
+
+**Decided by the agent (step 4, 2026-11-19), to confirm:**
+- **4c and 4d were one worker**, since the coordinator cannot be tested without adoption. 4a ran alongside 4b as planned.
+- **Q2 answered: exports at adoption are cheap in guest, not in native.** `AdoptPrepared` wraps on the render thread (option (a): the
+  image and graph resource are made on the lane in the previous version's home layout, the wrap's layout is checked, fatal if it
+  differs). Guest 0.007 to 0.053 ms per twin. Native Vulkan 19 to 75 ms, native D3D12 41 to 102 ms per exported twin (Dev-Fast, /Od):
+  `NativeDevice.cpp:WrapTexture` runs `Initialize` (an immediate submission that waits) and a `RunOp` clear on the render thread.
+  Today's `Resize` paid the same. Wrapping on the lane was rejected: DXVK's wrap injects a chunk into the immediate context
+  (`LockImage`/`PinGeneral`), and native's waits. **Open:** in native, give exported versions `Contents::Zero` on the lane and skip
+  the wrap's initialize, so adoption does not wait.
+- **Q3 answered: the lane is a `SerializedTaskPump` on DCLF's `SceneExecutor`** (`DCLF::SceneScheduler::MakeLanePump`, scope "CS frame
+  revision"). `BuildManager` runs a bare thread with its own queue, not an executor. DCLF joins revisions in step 10 anyway.
+- **Zero-filled versions are `QueueSharing::Concurrent`.** The copy-queue zero fill needs no ownership transfer then. Only graph-only
+  History twins are Zero. Exported versions are `Undefined`: their wrap at adoption zero-fills them, and nothing may touch the image
+  before that (it is still UNDEFINED). Depth, MSAA and multi-device textures are refused for Zero.
+- **Twins are snapshotted on the render thread** (`PlanPrepare`), and the lane makes the version from the snapshot. The lane never
+  touches a twin, so a twin destroyed meanwhile needs no lock.
+- **Wishes reach the lane only at Begin**, so the twins one feature resizes in a frame land in one revision (about a frame of latency).
+- **The render thread owns the `RevisionAssembler`.** The lane makes versions and the closure. Recordings are requested at Begin
+  (descriptions and schedules are render-owner state); the Begin that finds everything ready seals and selects. So "superseded"
+  counts only revisions dropped because a twin was destroyed or remade (0 in every run).
+- **A newer wish does not supersede the revision in preparation.** It is prepared after that one is adopted (a drag adopts the first
+  and later values, 7.2). A twin wished to A and back may briefly adopt A.
+- **Only slots whose schedule is current get a revision recording.** `Schedule` fills empty slots against the adopted versions
+  afterwards. `NoteNewVersions` is kept after `AdoptAll` for per-frame tickets (DCLF).
+- **Staged builds join the revision in preparation**, or a builds-only revision when none is (while a build is staged the attached
+  graph takes no new recording). A staged member records all four slots on the staged build's description. A new staged generation
+  is a new input for the starvation rule, not a drop. The rule lives in the coordinator only.
+- **`Builds::SwitchStaged` was removed in 4e, not 7b**: since A7 every staged epoch is a CS declared segment, so it had no caller. It
+  became `Builds::AttachStaged(epochs)` over `AttachStagedEpochGraphs`; a refusal is fatal.
+- **The version-lag branch stays** for slots published outside revisions; each use is counted by slot in the `[ORG] boundary:` line
+  ("version lags outside revisions"). In the runs: `TerrainShadows::ShadowHeight` (resized directly at Begin, 6.x) and
+  `ImGui::Texture N` (`AtNextBegin`, 6.3).
+- **The buffer fragment is CS-local** (`RevisionBuffers` in `Revision.cpp`, an `IResourceVersions` over pending buffer versions and
+  their payloads), not OMS: no second user yet. Buffer versions are made and uploaded on the lane.
+- **Not done: non-preparable wishes** (another shape class) still take `ResizeTo` at Begin and a structural rebuild
+  (`Revision.cpp:ApplyResizes`). No run hit it. The end state is a revision with a new slot and a `kBuilds` fragment.
+- **Since the plan was written.** Native frame generation and Physical Sky's port changed nothing here. Guest's 2 to 4 late versions
+  are `Engine::3D::VOLUMETRIC_LIGHTING_ACCUMULATION(_COPY)` (twin `JoinSlot` of engine targets), present before step 4; no late
+  version comes from a `RequestSize` site. "Declared view mismatch" lines remain (18 per resize run); not checked one by one that
+  each is a DCLF reader.
+- **Native self-test.** `CS_ORG_GRAPHRES_SELFTEST=1` fails its first (old) part in native, `16x16 MISMATCH: D3D11 read 0`, on the base
+  stage too, so the prepared part is tested in guest only.
+
+**Decided by the agent (step 5, 2026-11-19), to confirm:**
+- **Q6 answered.** `kSHADOWMAPS` is made once, in `BSShaderRenderTargets::Create` (through `CreateDepthStencilTarget`, which
+  `EngineTargets` hooks). A second `Create` is fatal (Q4), so `EngineShadowMap` has one event per session, at `EngineTargets.cpp:EndSet`.
+  Its size following `iShadowMapResolution` is inferred.
+- **Variables are typed setters and getters, not handles.** `Frame/Variables.h` exposes `SetDisplaySize(value, writer)` and
+  `AdoptedDisplaySize()` and so on, so features never see OMS types. Writers pass a `std::string_view` writer name.
+- **Declaring a variable is a change** (OMS): it wakes and bumps the set's serial, so late-declared per-feature variables reach the
+  lane. `Derive` rejects a `sizes = true` result over a `sizes = false` input. A throwing derive function is fatal through `Take`.
+- **Setters record in every runtime mode** when the graph is compiled in, so `CS_ORG=0` logs `[ORG] variable` lines too. Only the
+  compile-time stub is a no-op. Variables-only revisions also run without a graph host.
+- **A variables-only revision is adopted in the Begin that starts it.** A change while a revision is in preparation waits for the
+  next one. A value set A to B and back to A before a revision starts still lists the variable as changed (its serial moved).
+- **`HdrOutputTarget` is written each frame from `BeginRenderFrame`** (address, size and format of `PostChainTarget()`).
+  `UpscalerOptions.hdr` is the HDR display state; the SDK's `colorBuffersHDR` is always true today.
+- **`CS::Setting<T>` needs a trivially copyable `T`.** `RaiseAt` and the check compare raw bytes with the last raised bytes. Every 6.4
+  field fits. `SettingRegistry::Declare` returns the existing id for a name declared again. A bound setting's destructor detaches it.
+  The raise hook takes `(id, name)` and is wired to `Vars::RaiseSetting` in `Revision::Install`. Widget overloads cover `bool`,
+  `int`, `uint32_t` and `float` only.
+- **The setting pilot is the graph resource self-test** (`CS_ORG_GRAPHRES_SELFTEST=1`, `setting pilot OK`), since it has a switch and
+  log lines cs-test reads. The generator path is covered by a Python test.
+- **Nested keys** match a member with its spaces dropped (`CODBloom` finds `"COD Bloom"`) and look inside an object's `"settings"`
+  member, where PostProcessing keeps each effect's settings. The flat form is tried first.
+- **The projection is a list of named fields** (`Feature::SizeProjection`, integer, real or text), kept in a side table in
+  `Feature.cpp` so the `Feature` layout is unchanged. The first projection of a feature is its baseline and raises nothing.
+  Derived fields project the derived value (EHF `fogDensity > 0`, CODBloom used mips, PhysicalLens `Intensity > 0`,
+  `volumetricFogExtinctionScale > 0`).
+- **The fog grid fields are projected under ViewAtmosphere**, where they live now (`nearSlices` and the rest). EHF keeps its toggles.
+- **`SettingsWriteBatch`** holds a feature's events while a scene layer is suspended (`SceneLayerGuard`, `RestoreFeatureLayers`), so a
+  round trip raises nothing. The menu's per-frame `SettingsWritten("menu")` after `DrawSettings` covers the scene widget
+  interceptor's copies.
+- **The missed-writer check reports a field only when two checks in a row see it**, so a writer on another thread caught between
+  its write and its `SettingsWritten` is no miss. Its tap error (`TapError::MissedSettingsWriter`) is fatal under
+  `CS_ORG_MISMATCH_FATAL`, as tap errors are. The check found writers the 6.2 table lacks, now routed: cs-test's `hdr` command and
+  the native menu's HDR and SSGI rows (`NativeMenu/Rows_HDR.cpp`, `Rows_SSGI.cpp`). The FG fault teardown
+  (`Upscaling::PresentWithFrameGeneration`) raises too.
+- **Writers left on purpose.** `LoadSettings`/`RestoreDefaultSettings` calls inside a feature's own `LoadSettings` (the outer
+  wrapper covers them), `PostProcessing::SyncPipelineResources` (covered by the call after `UpdatePipeline`), CSEditor widgets.
+- **Upscaler options are not read from the adopted revision yet.** `ConfigureUpscaling` computes the render size from the live
+  `qualityMode` in the evaluate's frame. Reading only the options from the adopted revision would pair an old mode with a new
+  render size. It moves with `RenderSize`/`DynamicRatios` in 6.14.
+
+**Decided by the agent (step 6.1, 2026-11-19), to confirm:**
+- **Declarations are evaluated at the start of a revision, on the render thread**, not on the lane. Description and key functions
+  are cheap, and the client registration needs the render owner. Versions are still made on the lane. Evaluating only when a
+  revision starts (never while one is in preparation) keeps a staged build of a new client from joining an older revision.
+- **Texture descriptions may change only their extent.** Another format or flag is fatal. No 6.x user needs more yet; a shape-class
+  change needs a new slot and staged builds of its readers, left for the first user that needs it.
+- **No `DeclareProgram` yet.** EHF's programs are fixed at Setup. Programs that follow settings (6.4, 6.6) can be part of a client's
+  key (its `make` loads them) or get their own declaration then; loading on the render thread at revision start would block a Begin
+  for a compile, so 6.4 should decide.
+- **Client keys may read state that is not a variable** through `DeclaredClient::Invalidate()` (an interim). EHF's inputs (IBL,
+  Skylighting, LLF, Terrain and Cloud Shadows, Physical Sky publishing, the directional shadow map, temporal) are found by its Prepass;
+  a change invalidates the key and the next revision registers the new client. They become variables as those features migrate.
+- **The first enable registers the client one revision after the volumes.** The key needs one Prepass's inputs, so the volumes and
+  values adopt first and the client about four frames later. Volumetric fog stays off in those frames (below). A later enable reuses the
+  inputs already seen, so all of it switches in one revision.
+- **The shaders' volumetric flag follows the written volumes.** On the graph, `GetCommonBufferData` clears `volumetricFogEnabled`
+  while `NearSRV()` is null (no run wrote the bound versions yet). Every reader then skips the volumes in the frames after a new
+  version, instead of the D3D11 readers getting null views and the graph readers an unwritten volume. A frame the graph path cannot
+  run (inputs missing) has no volumetric fog; it no longer falls back to the D3D11 path (debug mode 3 still runs it).
+- **Declarations live until process exit.** Dropping a `DeclaredClient` stops following and leaves the registration; unregistering
+  from a static destructor at exit was the alternative and is unsafe.
+- **Debug mode 10 (one-shot history clears through `Rearm`) is removed**, so EHF has no `Rearm` or `once` pass left. Mode 9 stays.
+- **ViewAtmosphere's four grid fields were ported in 6.1**, since EHF's volumes depend on them. 6.21 ports the rest.
+- **Density and extinction drags raise events.** They are plain `Setting<float>`; the declarations quantise them (`VolumesOn`), so a
+  drag adopts variables-only revisions and never a new version.
+
+**Decided by the agent (step 6.2, 2026-11-19), to confirm:**
+- **A general texture input, not an ImGui variable.** Pages change on ImGui's texture requests, not on a value, so they are not
+  variables or declarations. `PublishTexture` sits beside `PublishBuffer` in `Revision.h` and is small and additive. Terrain
+  Shadows (6.3) could publish its height map the same way if it keeps its own twin.
+- **The page's contents stay written in the frame.** The version is not uploaded on the lane: ImGui's pixels change on the render
+  thread between requests, and the existing upload pass already restages a texture whole until a recorded copy wrote its bound
+  version. So the version is born undefined and written by the first frame that binds it.
+- **A new atlas texture draws a few frames later than before.** It is drawn once a revision adopts it (its UI stage recordings
+  are made first), not at the next Begin. Text on a re-created atlas is missing for those frames, as it was for one frame before.
+  The `menu` config's font reload shows it.
+- **No fallback without ORGModuleServices.** A build with the graph but without OMS has no revisions, so pages would keep their
+  placeholders. Every real build has OMS (DCLF needs it).
+
+**Decided by the agent (step 6.3, 2026-11-19), to confirm:**
+- **`HeightMap` is a frame variable** (`Vars::HeightMap()`, `HeightMapIdentity { id, size }` in `Frame/Variables.h`, an additive
+  change). The id counts `ORGTerrainShadows::SetHeightmap` calls in the session, so a worldspace visited again is a new value.
+- **Only the shadow height map is a declared texture.** The heightmap itself (its contents, R16 or BC4 as the file has them) stays
+  a plain Persistent texture made per heightmap and held by that heightmap's client, which uploads it once. A declared texture may
+  change only its extent, and a new heightmap is a new client anyway.
+- **The client's make takes the heightmap its key names** from a map of staged heightmaps, and drops the older ones. A revision
+  that started with an older value registers that one, and the next revision registers the newest.
+- **Failures after Setup are fatal.** The mid-session fall-back to D3D11 (`Stop`, the `onFailed` callback, the reload block in
+  `TerrainShadows::EarlyPrepass`) is gone: it unregistered the client and withdrew the published id outside a revision.
+- **The shaders' scale and offset still read the live heightmap size.** `NeedsRefresh` keeps terrain shadows off until a refresh
+  ran in a graph holding the new client, which is adopted with the new version, so the two sizes agree whenever shadows are on.
+- **The heightmap upload stays a one-shot pass** (`PassDesc::once`). The one-shot machinery is step 7a's.
+
+**Decided by the agent (step 6.8, 2026-11-19), to confirm:**
+- **The grid is a run value, not a recorded constant.** It goes into the latch, and the dispatches cover the Setup grid. A push
+  constant read from `Adopted()` would make every ratio change a new pass revision, so a re-recording outside any revision.
+- **The grid applies the adopted ratios always.** `Util::ConvertToDynamic` ignored the ratios while the engine's
+  `dynamicResolutionLock` was set; that is live engine state, not a variable. With an upscaler the grid may now be smaller than
+  before (64 render pixels a cluster). Watch for lights dropped by `CLUSTER_MAX_LIGHTS` in dense scenes.
+- **No buffer declaration.** Declare.h has none, and the buffers already follow the display size at Setup. A display larger than at
+  Setup (a native swap chain resize) keeps the buffers and gets larger clusters, with one warning. Declaring the buffers on
+  `DisplaySize` waits for a buffer declaration.
+- **Before the first adopted `DisplaySize`, the grid is the Setup grid.**
+- **Guest also copies the whole light capacity each run** (1024 lights, about 80 KB), as native did. Its recordings then stop
+  changing as the light count grows.
+
+**Decided by the agent (step 6.12, Volumetric Lighting), to confirm:**
+- **`Interior` is a frame variable** (`Vars::Interior()`, `SetInterior`), not a feature setting, since other features may want it.
+  Its only writer is Volumetric Lighting's EarlyPrepass, every frame, so it is not written while that feature is off.
+- **The engine is given the adopted values.** EarlyPrepass gives the engine its VL on/off, quality and High-slot size from
+  `Adopted()` (live settings without the graph), so the engine's descriptor size is the bound version's. A mismatch at the VL
+  render is fatal. This assumes `SetVLQuality` changes the descriptor size at once; the old code's re-registration hints that
+  it does, but it is not checked. Until a revision is adopted the engine renders with the old values (a few frames of the
+  exterior's quality after entering an interior). Menu edits no longer call `SetupVL` at once, in D3D11 mode too (next frame).
+- **One persistent volume** at the adopted location's size replaces the two transient ones (exterior and interior sizes). A
+  non-exported transient cannot be versioned (`Resource::Aliasable`), so a transient's new size would be a structural rebuild.
+  It is one texel while the adopted location's VL is off (existence rule). The custom size's memory (up to 640^3 R16F) stays
+  allocated while that size is in use, as before.
+- **The feature off (native's engine VL)** declares the volume once at the engine's size, with no dependencies, at Setup or, when
+  the descriptor has no size yet, at the first VL render (a first version made mid-frame). A later size change is fatal.
+- **The client has no dependencies.** Its key is the sky's noise gradient view and Terrain and Cloud Shadows' published ids, which
+  the VL render finds and invalidates on a change (the 6.1 interim). The engine-target identity check is gone (Q4: a mid-session
+  `Create` is fatal elsewhere). Each registration keeps its own pass list and commit, so the old build draws until adoption.
+- **`ExteriorEnabled` and `InteriorEnabled` are ported too** (`Setting<bool>`), so `ProjectSizeSettings` is gone for the feature.
+- **A frame without VL after the first one ran logs a warning** (the first 16, "has no volumetric lighting after the first one
+  ran"), so a test can show none.
+
+**Decided by the agent (step 6.5, Terrain Blending, 2026-11-19), to confirm:**
+- **The frame follows the adopted `Enabled` on the graph path.** `TerrainBlending::FrameEnabled()` is the adopted value while
+  `ORGTerrainBlending` is active, and the live setting otherwise (plain D3D11 untouched). The depth hook, the draw hook, the deferred
+  terrain passes, `TerrainShaderHacks`, the HiZ source, `Util::GetCurrentSceneDepthSRV`, the GPU `Enabled` and DCLF's
+  `DefersTerrain` all read it, so they switch in the revision that switches the blend's client. It is read once a frame (keyed on
+  `State::frameCount`), since the draw hook asks per pass. DCLF's classification runs off the render thread and reads the last
+  render-thread answer (`LastFrameEnabled`).
+- **The blend's key is its depth imports**, observed at every depth pass while the depth table holds the engine's views (`Observe`,
+  on and off), with `Invalidate` on a change. The first enable after startup can still be one revision late if no depth pass has run.
+  The frames between blend on D3D11, as a missed anchor did before.
+- **Group counts come from the bound version at commit** (`Adopted().Extent`), so a new display size is a new version and no new
+  registration.
+- **The terrain depth twin stays made once.** It is not declared on `DisplaySize`: its D3D11 views live in `terrainDepth`, read by the
+  engine's draws and DCLF's import of the plain resource, which would have to follow a slot first. Guest never changes the display
+  size; native's window resize already left it at its first size. Its clear is now a declared client on `Enabled`.
+- **The GPU block is split** (`GpuSettings`, the same 16 bytes). `ProjectSizeSettings` is gone.
+
+**Decided by the agent (step 6.4, Screen Space Shadows and `DeclareProgram`, 2026-11-19), to confirm:**
+- **`DeclareProgram(name, DependsOn(...), key, build)`** in `Frame/Declare.h`, for 6.6 (SSGI's `recompileFlag`), 6.15 (HDR's
+  `programDirty`), 6.18 (SSS's and Dynamic Cubemaps' `programsDirty`) and Effects11. `key` (render thread) gives what the program is
+  built from, `build` (any thread) makes it, returning a `shared_ptr` to any program type. The first key is built at declaration,
+  since setup may compile. Later keys are built on a programs lane: a `SerializedTaskPump` on DCLF's executor, streaming class,
+  because builds compile synchronously and must not take a preparation thread a compile may need. Every key built is kept. A failed
+  build after the first is fatal.
+- **The revision waits for a program before it starts, not inside it.** `Revision.cpp:StartPreparation` asks
+  `Declarations::ProgramsReady(newest values)` first; while a build runs, no revision starts and frames keep the adopted one. That way
+  a client's key or make reads the new program at the revision's start (`DeclaredProgram::For(inputs)`), and its stage builds hold
+  it, so values, program and builds still adopt together. An in-revision wait would have the client registered before its program
+  exists. The cost: a compile also delays unrelated inputs that arrive meanwhile (latest wins, as always). The frame reads
+  `Revision::Adopted().Program(p)`, found from the adopted values at each Begin (`NoteBegin`).
+- **A build must not read State.** `ProgramBuild::WithCommonDefines` reads State's defines, so SSS resolves them at setup and passes
+  them with `commonDefines = false`. The same permutation as before, so the shader store hits.
+- **The sample count's key is `ScaleSampleCount(SampleCount, Util::ConvertToDynamic(DisplaySize))`**, declared on `DisplaySize`,
+  `DynamicRatios` and `SampleCount`. `ConvertToDynamic` reads the engine's ratio and lock live at the revision's start, as
+  `GetScaledSampleCount` does on D3D11 (Upscaling sets the lock, which returns the full size). Only the program changes with it.
+  Setup no longer builds every count; the others build on the lane.
+- **`Enable` off keeps the client with the clear only.** Readers `Load` t45 by pixel, so a one-texel output or no clear would read
+  zero, a full shadow. The raymarch pass is in the client only while enabled.
+- **The output is declared on `DisplaySize`** (was the shadow mask's size), published once. Dispatches take the bound extent at commit
+  (`BuildDispatches(size)`), the D3D11 path the engine's screen size.
+- **The depth source is in the client's key**: Terrain Blending's published blended depth while its graph path is up and the
+  revision's `TerrainBlending.Enabled` is on, else the z-prepass copy. So it switches in the revision that switches Terrain Blending's
+  blend. The z-prepass import and Terrain Blending's graph state are observed at Prepass, with `Invalidate` on a change.
+- **`BendSettings` is split** (`GpuBendSettings`, 32 bytes, in `RaymarchCB`). `ProjectSizeSettings` is gone.
+
+**Decided by the agent (step 6.7, 2026-11-19), to confirm:**
+- **One new frame variable, `EngineImageSpace`** (`Vars::ImageSpaceShape`: luminance levels, SAO levels, the displacement and flow copy
+  widths, the flow map's identity, and how many covered effects and blend states the engine has made). The engine raises no event
+  for any of these, so ImageSpace writes it at Setup and at each Begin (`OnFrameBegin`, after the adoption point). Only a change is
+  an event, as with `HdrOutputTarget` and `DynamicRatios`. Additive in `Variables.{h,cpp}` and one instantiation in `Declare.cpp`.
+- **The retry every 120 frames became events.** A pass left out at a build waited for one of three things: the engine making its
+  effect, the engine filling its blend table, or a feature publishing an output. The first two are counts in `EngineImageSpace`, so
+  making them registers the clients again. The third already rebuilds every graph at the publish, which makes the pass then.
+  The 300-frame grace in `TakeChainStep` and the `pending` flags became `Lagging()`: the registration was built for other values
+  than the newest written or the adopted ones.
+- **Kept means History.** Bloom, the TAA pair, the adapted pair and the SAO textures are declared at Setup on `DisplaySize` (the
+  adapted pair also on `EngineImageSpace`, since its size follows the last luminance level). Their descriptions read the engine
+  target they replace: the engine makes its targets once a session with the display size (Q4), so a native swap chain resize finds
+  the same extent and makes no version. Transients (scratches, swaps, downsamples) are made at each registration through
+  `Frame::Resources`, which is now transient only (no `RequestSize`, no `fresh`).
+- **One-shot clears of a kept texture's first version stay.** A declared twin's first version is not born cleared (only later
+  versions are), so the first registration clears it once (`ClearFirstVersion`). Later registrations clear nothing.
+- **The adapted pair is published once at Setup**, one texel like the first level while the levels have no pair. A level count the
+  pair cannot follow logs an error and builds no chain clients; it never happens with the engine's targets.
+- **One declaration per client, one build per group.** Each step group (world, chain, start, composites) declares each of its clients
+  with the group's key. The key function builds the group's registrations once per key and gives each client its own; an empty client
+  is no client. The face tint is the composites' third client, so the revision waits for its start stage build too.
+- **The chain's final target comes from the key** (`HdrOutputTarget`), not the live `PostChainTarget()`, so a registration and the
+  imports it names match the revision that switches it in.
+- **The layout switches when the registration is built, not when it is adopted**, as before (the hooks read the new entries while the
+  old build runs until the revision adopts). Entries rarely move (HDR and ratio changes keep them), so this was left. Versioning the
+  layout with the registration (`ClientDesc::generation`, `FrameAnchors::HeldNow`) is the fix if a test shows wrong draws in that window.
+- **`CheckImports` is deleted without a replacement.** Engine targets are made once a session (Q4) and their imports are slots;
+  `EndSet` raises `DisplaySize`, which every step client follows. The flow map's republish moved from `CheckFlowMap` into the start
+  registration, driven by the flow map's identity in `EngineImageSpace`; it still rebuilds every graph once (step 9 makes it a
+  declared import).
+- **Missing engine targets and texture failures at a registration are fatal**, not a later retry.
+
+**Decided by the agent (step 6.13, 2026-11-19), to confirm:**
+- **The readers of the cache follow a new slot count one revision later.** The revision that adopts a new slot count holds LLF's
+  own stage build. The new texture is published under the old id when that revision is adopted, so the readers' graphs (the fog's
+  Prepass stage, and DCLF's while it is on) are built then, staged, and switch in with a following revision. Until then they read
+  the old texture, which nothing writes any more. A new slot count forgets every slice assignment, so no light points into it then.
+  Making the readers members of the same revision needs the closure of a published id (who declares it) in the revision, which
+  nothing gives yet. Publishing at the start of the revision instead would make the fog's export check (`IsExportOf`) fail and
+  send the fog to D3D11 for the frames in between.
+- **Slice counts are not part of `DeclareTexture2D`.** It stays extent-only. LLF makes one declaration per slice count, in the
+  client's make, at the start of a revision on the render thread. Its first extent is made from the newest values, and the next
+  revision corrects it if they differ. `ORGLocalShadows::Adopted` reads the bound extent, and is empty when that extent is not a
+  power-of-two fraction of the engine's.
+- **The data buffer is sized for the most slots**, so it never changes (the trigger is removed). 7 KB.
+- **No D3D11 fall-back at runtime.** Once the graph holds the cache, it does for the session. The graph path needs an engine shadow
+  map array (more than one slice): without one it has no cache, where D3D11 used to take it.
+- **New test switch `CS_LLF_LOCAL_SHADOWS`.** The hooks install only at startup, and cs-test cannot write saved settings before
+  launch. The native modes need DCLF, which blocks local shadows, so only guest and plain D3D11 run the cache.
+- **Before the first adoption of the client, the frame has no cache.** The adopted call sets it, so the engine never binds a cache
+  no copy wrote.
+
+**Decided by the agent (step 6.16, 2026-11-19), to confirm:**
+- **IBL's client does not depend on `EnableIBL` or `UseStaticIBL`.** The D3D11 path projects the SH whatever `EnableIBL` says,
+  and with Effects 11 managing IBL the shaders turn IBL on with `EnableIBL` off (`GetCommonBufferData`). `UseStaticIBL` is a shader
+  constant only. Both are ported to `Setting`; `EnableIBL` is a dependency of the fog's key. The client depends on `DALCMode`
+  instead, which decides the environment pass.
+- **Dynamic Cubemaps' published cubemap is read at key evaluation, not as a variable.** It is published once at its setup. Its
+  mid-session D3D11 fallback (`ORGDynamicCubemaps::Fail`) withdraws the id outside a revision, which a built IBL graph then lacks;
+  6.18 should make that failure fatal.
+- **The runtime going down keeps IBL's D3D11 return** (`ORGIBL::Fail`), without unregistering or withdrawing: the state is kept,
+  since the declaration's functions hold it.
+- **The scene switch stays per-frame** (the client's `active`, and a constant for the fog). It is engine menu state, not a
+  setting, and a gate keeps loading screens from rebuilding.
+
+**Decided by the agent (step 6.17, 2026-11-19), to confirm:**
+- **A reset is a new version, as the plan says, plus gated clears.** Born zero is not Skylighting's reset state, so the clears stay,
+  as gated passes on the version's first run. A gate-only reset (no new version) would give the same picture without a revision;
+  the version costs about 120 MB of prepared volumes per reset, briefly twice that during preparation, at every loading screen.
+  Measure it with the VRAM census on the RX 6600 before keeping it.
+- **`RenewFn` in Declare.h and a renew serial in `Revision.cpp`'s wish path.** The smallest change that makes a same-extent
+  version; the rest of the version path (plan, prepare, adopt, `FirstFrame`) is unchanged.
+- **The reset count is a feature `Setting`, not a frame variable,** to keep `Frame/Variables.{h,cpp}` out of this migration.
+- **The reset is detected from the adopted count as well as `FirstFrame`.** `Update` runs only in exteriors, so a version adopted in
+  an interior would miss its one `FirstFrame`. The volumes read zero until the next exterior update clears them.
+- **The client exists from the first frame whose imports resolve**, about one revision after setup, not from Setup. Readers see
+  zero volumes until then.
+- **"The frame's graph holds the client" is a commit having run**, in place of `FrameAnchors::Scheduled`, since an adopted client
+  stays in the graph and only its key changes.
+
+**Decided by the agent (step 6.14, 2026-11-19), to confirm:**
+- **The frame's method is the adopted `UpscaleMethod`, `None` before the first adoption.** `Revision::Adopted().Get` would read
+  the newest written value before then, which could ask for an evaluate whose client no build holds yet. A frame or two at
+  startup run without upscaling.
+- **The hudless colour is three textures, not one with a format change.** `DeclareTexture2D` allows extent changes only, and a
+  new slot needs staged builds of its readers that Declare.cpp does not do yet. Only the chosen one is display size.
+- **`PresenterFormat` is a new frame variable.** Nothing carried the presenter's format. It is written from the presenter's
+  surface each frame, as `HdrOutputTarget` is.
+- **The upscaled texture also depends on `frameGeneration`,** since guest DLSS-G evaluates into it without an upscaler. That
+  evaluate now skips while the adopted texture is smaller than the display.
+- **Scheduled gates kept.** The evaluate's copy gate covers the post stage's keyed build (the evaluate client's `declared`
+  follows `post.upscaler`), which ORG switches on its own, so a revision cannot promise it. The hudless and inputs gates cover
+  registrations made from observed engine imports. Both go with step 9b and 7a.
+- **The ORG failure path stays.** `ORGUpscaling::Failed` still drains the ring once and returns to D3D11 (`Upscaling.cpp`,
+  `BeginRenderFrame`). It is a fallback, against rule 2.2, and not a resize drain; making it fatal is a separate change.
+- **No `DeclareProgram` used.** The depth upscale reloads its programs on the render thread when the engine's target formats
+  change, as before. It needs `DeclareProgram` (6.4) on the engine target formats once those are variables (step 9).
+- **Builder failures in a client's make are fatal now** (Declare.cpp: "false is fatal"). They returned the feature to D3D11
+  before.
+
+**Decided by the agent (step 6.21, Atmosphere and Fog, 2026-11-19), to confirm:**
+- **The composite does not follow ViewAtmosphere's `enabled`.** On D3D11 `CompositeEnabled` never reads it, and section 6.4 lists it
+  for the composite. Only the atlas depends on it, through the shared volume. Changing this would change D3D11 parity.
+- **The atlas is one texel while the shared volume is off**, and it is always off on the graph today (`Impl::sharedVolumePasses`,
+  set once the inject and integrate passes exist). Sizing it from the settings with no writer would cost up to 128 MB for nothing.
+- **A removal switches `PostWaterComposite` off at the revision's start, not at its adoption.** `Declarations::Evaluate`
+  unregisters at once, which closes the gate, so the composite stops then. The flag follows it in the same frame. A deferred
+  removal would need the declaration API to keep an empty key's registration until adoption.
+- **`matchesById` on the composite.** Without it, a registration for new inputs leaves the stage running the old one without its
+  commit, so frames between registration and adoption would have the flag on and no fog. Scaleform uses it for the same reason.
+- **The composite's program stays on `ProgramCache`**, not `DeclareProgram`: its defines are fixed for the session, and only
+  `ClearShaderCache` builds it again. The key carries the program, so a rebuild is a new registration with the next revision.
+- **Physical Sky's `enabled` is observed, not a variable**, until 6.22 ports it. Then it joins the composite's dependencies.
+  (6.22 did: see its entry below.)
+
+**Decided by the agent (step 6.22, Physical Sky, 2026-11-19), to confirm:**
+- **Previous-frame reads of the LUTs: decision 5a is accepted, the faces do not skip.** The LUTs have no dependency, so they
+  are never made again. A newly enabled sky's reflection faces read the LUTs its last enabled frame wrote (one frame stale), and
+  only the session's first enabled frame reads LUTs nothing wrote yet, as on D3D11 (which reads them a frame late too).
+  `FirstFrame` of a LUT is true only for the session's first frame, so it could not express "newly enabled" anyway. The same
+  holds for the AP shadow's new version after a display size change: the faces read it once before its clear.
+- **The LUT client has no dependencies**, not "declared on `enabled`" as 7.12 says. The gate already keeps a disabled frame
+  idle, and a client that never changes takes the toggle out of the pre-depth stage's builds (remove the trigger).
+- **The frame reads the adopted toggles, copied per frame.** `Revision::Adopted()` is render-thread only, and `IsActive()` is
+  also read by game-thread hooks (Interior Sun, Sky Sync), so they read the copy. An off switch clears `cbData` at
+  `BeginFrame`, since its clients left at the revision's start and its targets shrink at the adoption; an on switch shows a frame
+  late. Interim until Reset runs after the adoption point.
+- **Observed inputs in the keys** (`Invalidate()`), as EHF and ViewAtmosphere do, until Terrain Shadows, Cloud Shadows, the
+  deferred composite's target and the cloud managers' maps are variables. An input that changes on every frame would keep a
+  client from being adopted (starvation would report it).
+- **The cloud readers keep their `clouds` key field.** They bind the cloud ids only once a run wrote the bound versions
+  (`OutputsWritten`). The composite reads screen targets, so its key also takes the clouds toggle: its bindings switch in with
+  their versions. So after the clouds go on the shader flag is on for a few frames while readers bind no cloud outputs, the
+  window the clouds had at startup (physical-sky-port.md open question 24). Binding the ids always would need the one-texel
+  versions written while the clouds are off, which no client does.
+- **The screen targets are one texel while the clouds are off** (the existence rule), rather than full size from setup, which
+  would cost about 150 MB at 1080p with the clouds off by default.
+- **D3D11 wrappers follow in place at the feature's first hook of the frame.** A D3D11 or DCLF read between the Begin and that
+  hook would see the old version, which the graph frees after D3D11's last use. DCLF's shadow epochs run there; they read no
+  Physical Sky texture, to confirm in a run.
+- **A missing Terrain Shadows or Cloud Shadows input is left out of the AP shadow** (warned once) instead of falling back to
+  D3D11 for the frame. Both are on the graph in the graph modes, so it should not happen.
+- **The sky tail stays a plain twin** (fixed shape, not declared), and **Atmosphere and Fog's composite** reads Physical Sky's
+  toggle with `RendersWhenEnabled` (everything Reset checks but the toggle), so cells the sky does not render keep the
+  composite as before.
+
+**Decided by the agent (step 6.6, Screen Space GI, 2026-11-19), to confirm:**
+- **No texture depends on `ResolutionMode`.** Every texture keeps the display size, as before (the chain uses the top-left part below
+  full resolution, and the shaders' `TexDim` is the full size). The mode swaps which texture of each output pair is the history, so
+  a mode change is a new client only, and each composite input keeps one slot. The cost: at full resolution the partners are
+  History, not aliased scratch, about 14 bytes a pixel more (22 with the specular pair), about 115 to 180 MB at 4K. Below full
+  resolution the memory is as before.
+- **The history reset is a gated clear, not only `FirstFrame`.** `FirstFrame` covers new versions. A new configuration (which makes no
+  version), the first version (not born cleared, and its client may come a revision later) and the loading-screen reset need a
+  clear too, so the commit opens one gate entry for all of them. New engine inputs keep the history, as before.
+- **The composite's inputs are always the published outputs on the graph path.** Off, they are one zero texel each (exported
+  versions are zeroed at adoption, and the clear runs too), which reads as no SSGI. So the composite's registration no longer follows
+  the toggle. Its t11-t13 choice reads the adopted specular setting.
+- **Programs build on demand.** The setup prebuild of all 24 define sets is gone. A define set used for the first time compiles on
+  the programs lane before its revision starts, so the change shows a few frames later. Shader reload does not rebuild the graph
+  programs (step 7c).
+- **Failures after Setup are fatal.** A missing input at Prepass or a client that cannot be made ends the process; the fall-back to
+  D3D11 is gone.
+- **The preset test step is a feature command** (`ssgi-preset`, registered in `ScreenSpaceGI::PostPostLoad`), since cs-test has no
+  menu click. It calls the same `ApplyPreset` as the buttons.
+- **`cs.ssgi.reset` is removed from `RecipeTable.h`.**
+
+**Decided by the agent (step 6.9, Post effects), to confirm:**
+- **One client for the chain, composed of per-effect declarations**, not a client per effect. The chain's images are transients
+  of one build and effects find each other's outputs inside it (`Builder::Find`), so per-effect clients would need published
+  ids and orders for every intermediate image.
+- **The effect order stays observed.** `enabled` is a dependency (a toggle wakes the lane), but the order comes from the last
+  observed `ChainOrder`, since it also depends on `IsActive` overrides, the menu, the upscaler and the pre-exposure. A toggle can
+  take two revisions: one for the event, one after the next frame observes the order.
+- **A chain build that fails takes the client off** (D3D11 runs the chain, logged) instead of failing the revision, so a shader
+  compile failure disables cleanly. The key function builds the chain, and the make function only takes that build.
+- **`LutPath` and Color Grading's tonemapper stay observed:** strings cannot be `CS::Setting`. The LUT's 3D copy is no declared
+  texture, since a new file has its own size and format. The tonemapper define is a program choice for `DeclareProgram` (6.4).
+- **Program permutations noted for `DeclareProgram`:** DoF's `GATHER_RING_COUNT` (GatherQuality), Color Grading's `TONEMAP_FUNC`,
+  Physical Glare's `FFT_SIZE` passes and tear film, Lens Flare's `FFT_SIZE` passes and its fast or FFT path, Composite's `HAS_*`
+  set. They are chosen in the build from the key for now.
+- **The dynamic viewport is the whole of kMAIN until step 8.** At the tonemap the ratio is 1 with CS's upscalers (they lock it);
+  only the engine's own dynamic resolution without an upscaler would now draw past the dynamic part, with constants from
+  `DynamicSize`.
+- **Histogram Auto Exposure's buffers are not declared** (no buffer declaration exists); the effect keeps their first-frame state.
+  DoF's 1x1 focus is not declared either: Physical Lens reads it as a plain resource for its readback.
+- **Declared sizes come from `DisplaySize`, the passes from kMAIN's observed size.** They are the same texture size today; if they
+  ever differ, the extents and the passes disagree.
+- **COD Bloom's level slider edits a copy** of the factors and sets the whole array, so the scene widget interceptor no longer sees
+  the element's address. The scene editor may lose that slider's per-scene binding; the catalog entries stay.
+- **The scene catalog generator accepts `feat->enabled`** without `&` (Util::Checkbox over the setting) for sub-feature toggles.
+- **Lens Flare in Ultra keeps every spectrum at full size** while on (up to 56 MB at 1024), as the ghosts' kernel groups are no
+  variable yet. D3D11 frees the unused ones.
+
+**Decided by the agent (step 6.18, 2026-11-19), to confirm:**
+- **Dynamic Cubemaps' and Cloud Shadows' textures are not declared on `ReflectionCubemap`.** The passes are made for nine mips
+  (256 only) and Cloud Shadows' D3D11 layers and views cannot follow a new edge, so a declared texture could only fail. The client
+  is declared on the variable instead and another edge is fatal there. The engine makes the cubemap once a session (Q4).
+- **Volumetric Shadows' width is read from the cascade texture, not from `EngineShadowMap`.** The variable is raised from
+  `kSHADOWMAPS`, the passes read `kSHADOWMAPS_ESRAM`, so the variable only makes the key evaluate. A cascade variable in
+  `Variables.h` is the fix if they can differ.
+- **SSS's `EnableCharacterLighting` is in no declaration.** It sets the engine's character light each frame (`Reset`), which no
+  graph state depends on. It is a `Setting` so its writes are events.
+- **`EnabledSSR` is a `Setting`, but the engine SSR shader still changes through the shader cache.** ImageSpace's world client
+  should depend on it (its key holding the SSR permutation); that is ImageSpace's file, left to its owner.
+- **Dynamic Cubemaps' zero pass stays a one-shot pass of the client.** A new registration arms it again, and zeroes the published
+  cubemaps until their next publish. The only re-registration is the first update's colour source, before the first publish. A
+  separate setup-only client would register the same twins in a second client of the same graph.
+- **Dynamic Cubemaps' runtime going inactive is fatal too**, unlike IBL's D3D11 return (6.16), since returning would withdraw the
+  published cubemaps outside a revision.
+- **An import Dynamic Cubemaps cannot make at an update is still skipped, not fatal**, as before; a lost import after setup was
+  never seen.
+- **Between setup and the first adopted registration** Volumetric and Cloud Shadows report active with no client, so their maps
+  are unwritten for those frames (as before, until the first build). SSS and Dynamic Cubemaps draw D3D11 or nothing then, as before.
+
+**Decided by the agent (step 6.19, 2026-11-19), to confirm:**
+- **Blood follows `PresenterFormat`, not `HdrOutputTarget`.** The screen splatter draws after `RenderWorldPostProcess`, when HDR
+  has put kFRAMEBUFFER back, so it never draws onto HDR's texture. Native keeps its back buffer across an HDR switch, and guest's
+  swap chain keeps its format. `HdrOutputTarget` is a dependency of Bink only, whose UI texture HDR makes with its other textures.
+- **Sky and decal occlusion have no target variable.** Their targets are engine targets, made once a session (Q4). The query
+  ring's fifth chunk stays a trigger, now through the key and `Invalidate` (an interim, as EHF's inputs). Removing it means
+  making the chunks a session can reach at setup and making a later one fatal, in `OcclusionQueries.cpp`, outside this lane.
+- **The key functions import.** `EngineTarget`, HDR's `GraphOf` and `D3D11Texture` run when a revision starts, on the render
+  thread, as `CanTake` and Bink's tick did before. An import of a new image still asks for its holders' builds itself.
+- **Registration at the first revision, not at setup's build point.** Declarations are first evaluated when a revision starts,
+  so `BuildPending("CS's setup")` no longer holds these clients. The startup logo's first ticks are the engine's until the
+  revision with the Bink client is adopted. In native mode the engine's tile draw is skipped, so those few frames may be black.
+  If a run shows it, Declare.cpp could evaluate declarations at setup's build point.
+- **A guest back buffer image replaced with no event** (same size and format) is no longer joined by Bink's tick, which
+  imported the framebuffer every tick. Other importers of kFRAMEBUFFER (HDR's compose) still join it. Step 9b makes it an event.
+- **HDR's UI texture made again while HDR is off raises no event**, since `HdrOutputTarget` is none then. Bink keeps the old
+  import until HDR turns on, which raises it. Bink draws onto that texture only with HDR on.
+
+**Decided by the agent (steps 6.10 and 6.11, Effects11, 2026-11-19), to confirm:**
+- **The FX shape variable is a write count, and the key reads FX11's live state.** The chain's shape is spread over FX11's
+  objects (the `use*` settings, each technique's enable bindings on UI variables, the selected technique), so no value of it fits a
+  variable. Every write raises the count; a revision whose plan text is unchanged registers nothing.
+- **The tonemap owner is `declared`, not part of the key.** It flips at every loading screen and the main menu, which would remove
+  and register the client each time. Off, the passes record only barriers. The kept textures stay allocated meanwhile.
+- **Planning stays on the render thread, now at a revision's start.** Parsing, lowering and each pass's DXC compile ran at the
+  tonemap hook before and run in the key function now. Moving the pass compiles to `DeclareProgram` needs a program per pass and
+  state key; left for later. A plan that fails is no client (FX11 runs), not a fatal make.
+- **Kept textures clear on each new version's first submitted run, not on `FirstFrame`.** The client can register frames after a
+  version's first frame, and the version made at declaration is not born cleared. A revision's History version is born cleared and
+  cleared once more: harmless.
+- **Textures are declared lazily, from inside the key function.** Declaring all 36 at setup would allocate every display-size
+  history while Effects11 is unused. A texture declared there joins the next revision's evaluation.
+- **The rays' kMAIN format and shader cache clears are `CS::Setting`s on Effects11**, as Skylighting's reset count (6.17), to keep
+  `Frame/Variables.{h,cpp}` out of this migration. Every program key built is kept, so each shader cache clear keeps one more set
+  of seven programs for the session.
+- **"The graph holds the rays' effect" is a commit of a registration with it having run last frame**, as 6.17. So the rays'
+  client is always active and commits every run. A toggle shows one frame on D3D11.
+- **No variable for Effects11's ownership of Exponential Height Fog.** EHF's key does not read it: `IsSuppressed` is read by EHF's
+  Prepass and `GetCommonBufferData` each frame. None fell out of these migrations.
+
+**Decided by the agent (step 7c, shader reload, 2026-11-19), to confirm:**
+- **The swap stays a render-thread build of every graph (Q5).** It runs inside the adoption of the revision that carries
+  `ShaderGeneration`, after the staged attach (a build before it would make the attach refuse its staged graphs, which is fatal).
+  The same cost as before, at a frame boundary in every mode. It takes the build mutex, so it waits for a managed build in
+  progress, as the old poll did. The rest of a reload (the compiles) was already off the render thread.
+- **No revision members of its own.** The event's revision carries the variable only; the build at its adoption rebuilds every
+  epoch, which is what "every epoch as a member" asked for. Recording every member ahead would bind the old pipelines (Q5).
+- **`DeclareProgram` keys get no generation, and the kept builds are not cleared.** Every build is a registry entry, so the
+  registry rebuilds each kept key in place. A generation key would compile each program twice per reload and register a second
+  slot set. A future `DeclareProgram` whose build is not a registry entry would need `ShaderGeneration` in its dependencies.
+- **One event per staged set.** `ServicePipelineReload` writes `adopted + 1` only while the last written value is adopted, so a
+  set staged across several frames is one event. A set still staged after its swap (a slot that missed `Publish`) asks again.
+- **Render owner only.** `ServicePipelineReload` runs at every `SignalFramePace`, which a loading screen's thread also calls; the
+  write is skipped there, since it reads the adopted values.
+
+**Decided by the agent (6.9 fixes and step 6.20, 2026-11-19), to confirm:**
+- **One program declaration for the whole chain**, keyed on the plan of the chain key, not one per effect. Effect programs
+  depend on observed state (kMAIN's formats, the tonemapper string, which effects publish), which a per-effect key of variables
+  cannot read. The cost: each effect lists its programs in `Programs` beside `BuildRun` (one shared helper), and a mismatch is a
+  fatal build at the first revision that uses it.
+- **The plan's key reads observed state**, with `DeclaredProgram::Invalidate` as the interim (as `DeclaredClient::Invalidate`).
+  `NoteBegin` re-keys it at each adoption, which plans again on the render thread (CPU only, no compile).
+- **Physical Lens lists every one of its programs in every plan**, whichever parts are on, so a part that turns on compiles
+  nothing. The first plan with the lens compiles about 30 lens programs once a session.
+- **The first chain waits for the lane** at session start: the chain runs on D3D11 until its first plan is built, and other
+  inputs' revisions wait behind that compile (the 6.4 rule).
+- **The lens publishes nothing with every part off**, so Composite drops `HAS_PHYSICAL_LENS`. The focus and its readback still
+  run then.
+- **The lens's focus restarts for a few commits at each new build** (`focusReset` per run), as before, since a build may switch
+  between DoF's focus and its own.
+- **Programs are built with `RasterProgram::Load`/`ComputeProgram::Load` on the programs lane**, with the common defines resolved
+  on the render thread (`ProgramCacheDetail::ResolveDefines`), as SSGI and SSS build theirs.
+- **LUT, Lens Flare and Physical Glare read the values Update observed** (LUT type, kernel groups and blur passes, tear film)
+  in `BuildRun` and `Programs`, no longer the live settings, so the plan and the build agree.
+
+**Decided by the agent (guest without DCLF, 2026-11-19), to confirm:**
+- **Guest and native need DCLF; without it they stop at startup.** Both run the flush latch (`Flush::LatchRequested()` is
+  `GraphMode()`), which drops every engine draw no port vouches for, and DCLF is the port for the world's geometry. With DCLF off
+  the world was empty (`guest+llf-local-shadows`: sky colour and HUD only, `flush latch` lines for DrawTriShape). Native already
+  failed on `CS_DCLF=0`; `Native::RequireDclf` now does it in both modes, also when DCLF's feature did not load or its
+  PostPostLoad leaves it off (unsupported game, missing or conflicting hook sites).
+- **`llf-local-shadows` is D3D11 only.** LLF's local shadows need DCLF off and the graph modes need it on, so 6.13's graph cache
+  (`ORGLocalShadows`, on when `GraphMode()`) has no supported configuration today. It is left in place for a later decision:
+  delete it, or let the cache follow DCLF's shadow views.
+
+**Decided by the agent (step 6 follow-ups, 2026-11-19), to confirm:**
+- **A buffer version has undefined contents.** Every declared buffer so far is written before it is read (LLF's cluster buffers
+  every run). A buffer that needs zeros or data would need the fragment's upload path, which `PublishBuffer` already has.
+- **The lights buffer and the counter are not declared.** Their size follows the light capacity, a constant.
+- **LLF's grid comes from the bound buffers, not a recorded constant.** The gate and the latch carry it per run, as 6.8 did for the
+  run's grid. Push-constant capacity would make every display size a new pass revision outside a revision.
+- **The guest culling epoch is no CS stage**, so it is not a member of the revision that adopts the new buffers. It takes them
+  after adoption through `NoteNewVersions`, as DCLF's readers of other slots do. Not checked in a run: that the first frame after a
+  resize binds the new buffers in that epoch. If it binds the old ones, the dispatch covers a grid larger than they hold.
+- **Histogram Auto Exposure keeps one version, with no one-element version while off.** The chain binds the buffers' graph
+  resources (`Bind::Uav(Graph())`, the readback's `AddBuffer`, Composite's `Image` of the adaptation). A new version would leave
+  those bindings on the old one. Binding a buffer slot there needs `AnchorPasses::Bind`, `RunReadback` and the chain's `Image` to
+  take a `VersionedBuffer`, which is the post chain's code (6.20). The buffers are 1 KB.
+- **The new SSR permutation compiles at the world clients' build**, on first use, as any ImageSpace program not built before
+  (`GetNow`, logged as built at the graph's build). Setup builds neither permutation ahead. `DeclareProgram` would move the compile
+  before the revision starts; it was not used, since the ImageSpace program cache keys every pass shape, not only defines.
+- **Volumetric Shadows imports in its key function**, at the start of a revision on the render thread, not at EarlyPrepass. The
+  engine makes the maps once a session, before the variable's event. Cascades the engine has but that cannot be imported then are
+  fatal, since no later event would register the client again (before, the passes stayed out until an EarlyPrepass found them).
+
+**Decided by the agent (step 6.15, HDR Display, 2026-11-19), to confirm:**
+- **The client is not declared on `HdrOutputTarget`.** It is written from `PostChainTarget`, which reads the adopted HDR state, so
+  it changes one revision after `HdrEnabled`. Choosing the scene by it would compose from kFRAMEBUFFER for a revision. The
+  composite runs only for HDR frames, so its scene is always HDR's texture now (the kFRAMEBUFFER branch was dead).
+- **The back buffer is observed, not a variable.** Its serial is in the key and `Compose` invalidates the client on a new one. Setup
+  seeds it from the swap chain's buffer 0. Step 9a makes it an event with the swap chain.
+- **No `DeclareProgram`**, despite row 6.15: there is one permutation, and hot reload already swaps it.
+- **The textures are display size also while HDR is off.** The existence rule (one texel) would save three display-size textures
+  for SDR users, but every HDR toggle would then be a version change of each. Not done; a cheap follow-up if VRAM matters.
+- **The wrappers follow the export by a pointer compare each Begin** (`NewExport`), not by `FirstFrame`. A frame without
+  `BeginRenderFrame` would miss `FirstFrame` for good.
+- **`enableHDR` is not a `CS::Setting`.** It is read under `settingsMutex` in many places, and `HdrEnabled` already carries it into
+  every revision. Its projection only raised an event nothing declares on.
+- **Frames between a new registration and its adoption compose with D3D11**, as before (no wait). That includes the frames after
+  HDR is turned off and before that revision is adopted, since the key clears the held registration when it gives no client.
+- **The re-setup `DrainCommandRing` in `HDRDisplay::SetupResources` stays.** It is not a resize drain: `SetupResources` runs once.
+
+**Decided by the agent (step 6.23, Screenshot clean scene, 2026-11-19), to confirm:**
+- **One texture, no format variable** (not 6.14's three). kFRAMEBUFFER is the back buffer at the snapshot, and an HDR toggle
+  changes only its colour space. If the game ever changed its format through `ResizeBuffers`, nothing would check it.
+- **`HdrEnabled` decides existence** (one texel, no client with HDR on). It saves a display-size texture for HDR users.
+- **A per-frame check of the held key against the live import and its size stays.** It is not the old rebuild compare: it stops
+  a copy of the wrong extent in the frames between a resize and its adoption.
+- **The capture client is still registered again in-frame by `SetSource`** when its source or size changes, and `CopyBuilt`
+  still asks `FrameAnchors::Scheduled` for it without a UI stage. Out of this row's scope; it is the section 8 grep's last hit in
+  this file.
+
+**Decided by the agent (Effects11 rules fixes, 2026-11-19), to confirm:**
+- **One program declaration for the FX chain, keyed on its plan**, as the post chain. The plan reads FX11's live objects and the
+  observed targets, so `DeclaredProgram::Invalidate` goes with the client's. Supersedes "Planning stays on the render thread" (6.11):
+  parsing and lowering still run on the render thread (CPU text work), the DXC compiles run on the lane.
+- **An .fx pass's program key holds a hash of its lowered source**, not the effect's compiled pointer, since a reload can reuse an
+  address. The store is still cleared at each reload (`Invalidate`), as the old per-effect program maps were, so a reload compiles
+  every pass again. Every plan key built is kept for the session, so each reload keeps one more set.
+- **Missing tonemap imports are fatal**, once a preset is loaded and the tonemap is Effects11's. To keep a menu scene's tonemap from
+  tripping it, a tonemap after this frame's stage is no longer observed (`StagePassed`). If a native frame kind with unbacked
+  targets still reaches it, that is a fatal log naming the import.
+- **The rays switch with the adopted revision's toggles**, read by Effects11's `Draw*`. Turning both off removes the client at the
+  revision's start (no client while both are off), so the rays stop then, up to the revision's adoption early. Nothing draws on
+  D3D11 meanwhile. Supersedes "A toggle shows one frame on D3D11" (6.10).
+- **D3D11 fall-throughs kept, each logged when it starts:**
+  - FX: the graph inactive or the Tonemap anchor missing; a tonemap after this frame's stage; a frame kind with no stage holding the
+    chain, and the frames before the first registration is scheduled (as the post chain); FX11 reloaded an effect after the held plan
+    (`Write` returns false, so FX11 draws until the new plan is adopted); a held plan for other tonemap targets than this frame's.
+  - Rays: inputs the graph cannot read (kMAIN, the t17 depth, Terrain Shadows' heights or Cloud Shadows' cubemap not on the graph);
+    a frame kind with no stage holding the rays; a failed setup (D3D11 for the session).
+  - `GetCommonBufferData`'s `EnableVolumetricRays` still reads the live setting, so for the frames of a toggle's revision a shader
+    that reads it can disagree with the drawn rays.
+
+**Decided by the agent (step 7a, 2026-11-19), to confirm:**
+- **An extent no version serves is fatal.** The old path resized the twin at Begin and rebuilt every anchor epoch through the
+  resize poll, outside any revision. Declarations already fail any other description change.
+- **Engine targets keep their rebuild, under a new name.** `FrameAnchors::RebuildForReplacedImports` replaces the resize
+  generation bump, since Q4 makes a mid-session `Create` fatal and this only fires while the first set is taken over. Step 9a
+  removes it with `Settle`.
+- **The one-shot passes stay.** They have five users and no `Rearm` caller; a new registration arms them, and that is
+  revision-driven for declared clients.
+- **The settings shims stay.** Fields in projections are not `Setting<T>` yet (list in 7a's "As built"), so the missed-writer
+  check still needs them.
+- **The self-test's prepared part was deleted, not ported.** It adopted versions by hand at `AtNextBegin`, the pattern step 7
+  removes; the lane does the same work in every `resize` run.
+- **The coordinator's wish names were renamed**, not only the `RequestSize` input removed, so the section 8 grep holds.
+
+**Decided by the agent (step 7d, 2026-11-19), to confirm:**
+- **Exceptions are scopes, not caller tags.** `Boundary::Allow(Exception)` at each site, with one table of names and owning steps.
+  A tag-based allowance would also have allowed `twin`, which every twin uses, not only engine targets.
+- **Two exceptions, not one engine-import row.** `Dclf` (10a) and `EngineImports` (9, covering 9a's engine targets and back
+  buffer and 9b's imports). Splitting 9a from 9b would need a third row; the sites name their substep in a comment.
+- **The native back buffer's per-present version is an engine import.** No run had more than one back buffer version, so it never
+  counted, but it would have been fatal with two.
+- **DCLF's attaches are recognised by epoch**, not by build point: `BuildManager` allows the attach of any epoch in its
+  `ownerBuilt` or `external` set, which `RenderGraphRuntime` fills with DCLF's segments only. A non-DCLF build that attaches at the
+  frame end is fatal.
+- **First versions stay counted, not fatal.** A new resource made inside the frame replaces nothing a recording bound. In the
+  runs they are 90 to 136 per session, mostly DCLF buffers made at load.
+- **The tap error is reported outside the census lock**, with `SegmentId::Count` ("hosted work"). With `CS_ORG_MISMATCH_FATAL=0`
+  it logs once per kind, and the adoption has already happened (the observer runs after it), so nothing is dropped.
+
+**Decided by the agent (step 8, 2026-11-19), to confirm:**
+- **The latched viewport is the engine's live ratio of the draw, not the adopted `DynamicRatios`.** The engine renders the world,
+  and computes the steps' constants, at the ratio `ConfigureUpscaling` sets that frame, while the adopted value is one revision
+  behind. The hook writes it at each draw, so it is late-bound (R1). It applies whatever the lock, as the baked viewports did.
+- **A quad drawn by the vertex stage, not a recorded viewport.** A viewport or scissor is recorded state, so it cannot come from a
+  latch. Six vertices cover exactly the viewport's pixels, with TEXCOORD0 across it, as the engine's viewport does. The vertex
+  stage finds the latch by push word, which `DescribeRaster` computes from the bindings `MakePass` makes (the words before the
+  sources' latch); a new binding before the latch must keep that formula.
+- **The viewport's area comes from the newest registration's spec** (`SpecOfEntry`), as the hooks already take the newest entries
+  (6.7's "layout switches when the registration is built"). Only a display size change moves it, so the window is the same.
+- **The engine's upsample group is always on, gated.** It runs only with the engine's own dynamic resolution unlocked, which CS's
+  Upscaling never leaves at the post chain; keeping it on costs a closed gate.
+- **Upscaling's depth upscale is in the registration for every SDK method,** gated, with its copies. The first time a session goes
+  below native the depth inputs are found then, which still registers the client once (`UpscaleInputsChanged`).
+- **Screen Space Shadows and Effects11's rays keep their `DynamicRatios` dependency.** SSS's program does depend on the render
+  size (its scaled sample count is a define), so it stays a program key. Effects11's areas are baked viewports of its own shaders;
+  putting them in a latch needs the same vertex-stage change in Effects11's programs. Both read `Util::ConvertToDynamic` at the
+  revision's start, which returns the display size while Upscaling holds the lock (it sets it in `ConfigureUpscaling` and at the
+  upscale; only the precipitation and face-gen hooks clear it, until the next set). If `dynres` shows `client cs.e11.rays
+  registered` or a `ScreenSpaceShadows::Raymarch` build after a quality change, make both read the display size, or move
+  Effects11's areas to a latch.
+- **The post chain's viewport stays the whole of kMAIN.** It runs after the upscale, where the dynamic part is the whole image.
+  Its constants keep `CommitContext::DynamicSize`.
+- **The enforcement lists the constants-only variables in CS** (`Vars::Lane::ConstantsOnly`), since OMS's `VariableSet` gives no
+  traits without a snapshot, and taking one at declaration would race the lane. It also covers `DeclareBuffer`.
+
+**Decided by the agent (step 9a, 2026-11-19), to confirm:**
+- **A second `Create` while the graph runs is now an explicit `report_and_fail` at `BeginSet`.** It was a warning and a second
+  `State::Setup`. The decision calls it fatal, and with the exception gone its versions would be pending anyway. A user dragging
+  the window frame in windowed mode now stops the game with that message.
+- **`EndSet` is not the boundary.** Q4 is yes, but a second set is fatal, so no supported change needs a boundary there. The
+  in-frame volume remakes join the next revision. No graph declares them, so the frames between are not wrong.
+- **The colour space switches at adoption only without frame generation.** With a presentation layer the replacement keeps the
+  input wait: DLSS-G turns off before a swap chain change, and a layer's inputs are tagged while the frame renders, so a
+  replacement between them is not checked. The next frame's present may wait once for the replacement on the submission thread
+  (the present pacing that exists already). The render thread adds no wait of its own.
+- **The predicted presentation's HDR10 comes from the last replacement's support check** (`hdr10Supported`). If Windows HDR was
+  turned off in between, the frame renders HDR into an SDR swap chain until the next change, and `UpdateSwapChainColorSpace`
+  logs the mismatch.
+- **A native resize to a new size takes a pending version.** Frames before its adoption present the new texture while the graph
+  writes the old one. A native resize is always followed by the fatal `Create` (Q4), so these frames never show.
+- **A back buffer resize to another format keeps the new slot and structural rebuild.** No caller changes the format. The rebuild
+  is counted as a late change (step 10c).
+- **The engine target's pending version has no owner.** The version holds the image and ORG owns its memory, so the old image
+  lives while its version is still current or held.
+
+**Decided by the agent (step 9b, 2026-11-19), to confirm:**
+- **A change inside the adoption point is a pending version, not a direct publish.** A direct publish at Begin would leave every
+  stage's schedule binding the old version, which is the lag 9b deletes.
+- **Observed inputs stay where the texture is no variable** (the hudless source, the cubemap capture's target, the clean scene's
+  back buffer, Terrain Blending's depths, ImGui's bound target): the frame compares a raw pointer and calls `Invalidate`, and only
+  the key imports. A back buffer identity variable raised by 9a's resize path would retire the three back buffer ones.
+- **The cubemap capture keeps the switch.** `forwardRenderTargets[0]` is kFRAMEBUFFER until Deferred's first `StartDeferred`, so the
+  forward target cannot be the import from the start.
+- **SRV and RTV are declared from the bind flags; UAVs and depth views are not.** Typed UAVs and depth SRVs need formats only the
+  caller knows, so a widened guess could make an invalid view.
+- **A refused change keeps the old slot** in builds where tap errors are not fatal (`CS_ORG_MISMATCH_FATAL=0`, Release profile).
+- **Each loaded LUT is its own import.** Old LUT imports stay in the import table for the session (one entry per file loaded).
+- **ImGui's key holds the observed format,** read at the draw that observed the texture, so the adopted call's key matches.
+
+**Decided by the agent (step 10a, 2026-11-19), to confirm:**
+- **10a stopped at the correction 5 check, with no code change.** The targets, shadow format and main resources generations all
+  come from mid-frame observations (step 10a, "As found"). The step's own rule says to stop, and a partial 10a that kept the wait
+  for those three would still need the `Dclf` exception for that wait's adoptions and for the main-resource attach.
+- **The three are not moved yet.** Each move is a design call, and the main-resources one spans features. Moving them takes a
+  run first: the census lines in "As found" show which ones change in practice. 10a-0 holds the proposed moves.
+- **Q7 answered yes, with three conditions** (the Q7 row). Any CS stage between `Renderer::Begin` and `Main::Draw` is inferred
+  from the stage table, not checked against a census.
+- **Shader reload is a fourth blocker.** Q5 leaves no wait-free way to keep DCLF covered after `SwapPipelines`. Proposed: say
+  shader reload with DCLF drawing is unsupported until recordings name their pipelines, and make it a clear fatal error.
+
+**Decided by the agent (step 10a-0 and 10a, 2026-11-19, `org-native/rev-step10a2`), to confirm:**
+- **A new tap error, `DclfInputChanged`,** not `OutsideAdoption`. It names a DCLF input, not a version or attach, and keeps
+  "no `OutsideAdoption`" a clean acceptance grep.
+- **After a refused target or main-resource change, the colour epoch is skipped** (when tap errors are not fatal). Remaking
+  would leave the running graphs and snapshot on the old resources with no revision to switch them.
+- **The shadow format needs no exception.** The engine's shadow map exists before DCLF's first frame start, so the latch is
+  set before DCLF draws. Before then a shadow view's own format may still replace it; after, it is the tap error.
+- **`CS_DCLF_ASYNC_BUILDS=0` stays, and its builds stage too** (one condition in `BuildManager::Impl::Finish`). Removing it
+  touched more files for no gain in 10a.
+- **Every poll takes every finished group,** and the external builder hears of every poll. Staging inside a frame is safe; only
+  attaching is not.
+- **DCLF adopts in `AdoptLatest`, on the main thread only.** With `CS_ORG_LOADING_THREAD`, a loading screen's thread owns
+  rendering, and DCLF's state is the main thread's. DCLF does not draw there.
+- **The attached build state, and so the attached graph conditions, change at the adoption** that attaches the staged builds,
+  not at the staging. So the frame's conditions always match the graphs it runs.
+- **Coverage checks that the adopted snapshot is current,** not that the newest taken one was. Before 10a both meant the same,
+  since a frame-end attach made the adopted one stale too.
+- **A staged attach ORG refuses at the adoption is not fatal.** The snapshot is stale, the refused epochs are built again, and
+  a snapshot is made on the new builds. It is counted and logged ("staged builds were refused"). Frame revisions make the same
+  refusal fatal; DCLF's builds can meet a host configuration change from DCLF's own conditions (`SetExternalEpochs`).
+- **The shader-reload wait** runs at the first Begin that draws after the swap, so a swap made while DCLF does not draw is
+  still waited for, unless a current snapshot is adopted first.
+- **Section 8's 10a rows change:** `.external` stays (decision: `external` and `staged`), and `kCatalogTimeout` stays inside
+  the shader-reload wait. The rows grep for the deleted names instead.
+
+**Decided by the agent (step 10b, 2026-11-19, `org-native/rev-step10b`), to confirm:**
+- **DCLF's own assembler stays.** It assembles shapes and recordings on the builder and says when a scene is complete. Moving its
+  2 x 12 epoch slots into the frame assembler would change the builder's flow for no gain; what joins the frame revision is the
+  adoption: two scene slots, sealed with the revision or alone.
+- **The scene fragments name the scene, DCLF owns it.** A frame assembler slot holding the snapshot could release it on the render
+  thread when a later seal replaces the slot. DCLF's rule is that snapshots are released on the builder.
+- **Scenes are tagged with a frame versions serial,** not checked with `EpochRecordingVersionsCurrent` before adoption: that check
+  can only run after the versions are adopted. A scene recorded with null frame versions is tagged with the adopted serial; if a
+  DCLF-member revision is adopted before it, the tag no longer matches and it is dropped. A scene re-posted on an older versions
+  fragment is tagged unknown and dropped.
+- **While a revision with DCLF epochs prepares, new scenes wait for it.** They are recorded against its pending versions, so they
+  cannot run before it. Frames keep the adopted scene meanwhile (no wait). Scenes posted before the revision's versions reached
+  DCLF are still adopted alone.
+- **A revision waits for DCLF's scene only while DCLF's epochs run recordings** (`SceneRecorded`: an adopted snapshot with a
+  revision, DCLF not failed). Otherwise it adopts alone, and DCLF's next scene is recorded on it.
+- **The builds check moved, not deleted.** "Recorded on the attached or the staged build" is the scene fragment's requirement,
+  checked by the coordinator at selection. The built-serial check is deleted: `MakeRevision` already makes no revision before its
+  state's builds are staged.
+- **Targets and shadow format checks deleted; the main resources one became currency.** Since 10a-0 none changes after DCLF draws.
+  Before that, a main-resources remake could leave a scene for the old ones, so `AdoptedCurrent` requires the scene's main
+  payloads to be for the resources the frame runs. The catalog check (`targetsGeneration` of ~0) is gone with the rest.
+- **A staged refusal at adoption stays non-fatal** (10a's call): the scene is dropped, the epochs are built again, and a revision
+  waiting for that scene waits for the next one. The refusal comes before anything of the revision is adopted.
+- **The mismatch check skips versioned slots.** Its build-time index cannot tell a correct pending-version recording from a stale
+  one. Version currency is checked once per installed scene with ORG's `EpochRecordingVersionsCurrent` on copy 0 of each epoch's
+  first recording, as a counted warning, not a tap error: whether a recording's version list holds late-bound slots (which change
+  per frame) was not checked.
+- **Per-epoch views are a second id list on the frame texture** (`facesGraphResources`), not per-epoch view callbacks: an id is
+  declared by the faces' graphs and read by id, so it is bound. Faces with their own ids read the null texture until one is
+  published. ViewAtmosphere sets them with its reflection medium port, not here, so the faces keep reading the main medium today.
+- **The re-staging rule counts scenes dropped for their builds**, reset by a new DCLF build state serial or any install. A rebuild
+  asked from outside DCLF's conditions (a structural rebuild) is not a new build state, so a burst of those could fire it.
+- **`stagedAdoptions` now counts scenes adopted on other builds than the previous scene's**: the coordinator does the attach.
+
+**Decided by the agent (step 10b fix, 2026-11-19, `org-native/rev-step10b-fix`), to confirm:**
+- **The shader-reload wait supersedes a preparing DCLF revision,** rather than adopting it inside the wait or accepting its held
+  scene. That scene binds versions the frame does not run yet, and adopting a revision mid-wait would need its CS recordings ready
+  in the same Begin. Shader reload is development only, so preparing the resize again is cheap enough.
+- **"DCLF's epochs ran" is a frame whose coverage covered at least one DCLF epoch,** counted in `DecideEpochCoverage`. It moves
+  only while DCLF's frame start runs, so a menu without a scene pass, a load screen or a failed DCLF stop it.
+- **`kSceneIdleFrames` is 4 x `kGameFramesInFlight` Begins,** the same size as the starvation threshold. It is a frame count only
+  for "is DCLF drawing", not a limit on the revision; a revision never fails for waiting.
+- **After a revision adopted alone while DCLF was idle, DCLF's first frames back run its old scene** on the old versions until a
+  scene recorded on the new ones is adopted alone (one scene cadence). The recordings hold their versions' backings, so nothing
+  freed is read; the shots may show the old size for those frames. Treating it as uncovered would be fatal by DCLF's rule.
+- **Scene misses count scenes, not frames.** A scene posted on other frame versions while the revision waits, or a held scene
+  dropped for its builds, is a drop asked again. A builder that posts nothing while DCLF draws is not caught by it.
+
+**Decided by the agent (step 10c, 2026-11-20, `org-native/rev-step10c`), to confirm:**
+- **Late changes are not made fatal in 10c.** Every run in the 10a batch has 16 (native) to 50 (guest), and only DCLF's belong to
+  this step. Making them fatal now would stop every run. Proposed follow-up: move each source the new session line names into the
+  adoption point (the one-shot rebuild can be asked for at the next Begin, from the latch that saw the pass run), then make
+  `NoteLateChange` a tap error.
+- **The frame set of toggles stays the installed publication's,** not the adopted variable's. The publication was committed under
+  its toggles, so the frame must draw under those. It is installed with the scene the frame revision adopted. `Toggles::Adopt` is
+  renamed `InstallFrame` rather than deleted.
+- **The graph conditions are made from adopted variables, not held as a variable themselves.** They hold a string (the cuts) and
+  read device facts (`CpuPipelineForced`, device-generated commands, which epochs record at execution) that are fixed once the host
+  exists. A derived variable would need a non-trivial type for no gain.
+- **DCLF registers the `Interior` producer.** It had none. A second one (Volumetric Lighting, say) would fail its registration; the
+  two would then have to share one.
+- **The cuts' string is read when the conditions are made,** not from the revision. It is a diagnostic. Its event is what the
+  revision carries.
+- **Adopted toggles may be applied on a loading-screen thread** (`CS_ORG_LOADING_THREAD`). That only stores atomics. The conditions
+  and their builds wait for the next main-thread Begin, as DCLF's adoption does since 10a.
+- **The first build point makes the first conditions and asks for builds** as before. In guest that counts one late change. Before
+  DCLF's first build point a Begin leaves them alone, so a main menu does not build DCLF's epochs.
+- **Record-time reads of the conditions are left (inferred, not fatal).** Pass preparations (`Build.cpp`: `OcclusionTested`,
+  `forwardOnCpu`) run when a staged build is recorded, with no build scope, so they read the attached, old conditions. The first
+  scene after a pipeline or cull change can then record without occlusion, or with an unused forward range, until it is recorded
+  again. Fixing it needs the recording's build state in its host data.
+
+**Decided by the agent (late changes, 2026-11-20, `org-native/rev-late-changes`), to confirm:**
+- **A new tap error, `LateChange`,** not `OutsideAdoption`, so a run's error names which rule broke.
+- **Added ids and diagnostic switches are deferred, not moved.** `Builds::RequestAtAdoption` keeps them to the next Begin. An added
+  import or published id changes nothing a running recording binds; only graphs that looked it up are rebuilt, and those attach at a
+  boundary anyway.
+- **The first-run gate's state is per registration, ImageSpace's per texture.** A registration that never submits keeps its work
+  pending; only a submitted run whose commit opened the entry ends it.
+- **ImageSpace's clears open in the step client's commit, not by making the client active.** An active segment-only client would
+  tap at other stages' ImageSpace taps. The clear opens with the step's batch, before the first reads in the same run.
+- **The skeleton's copies go to D3D11 for a frame whose textures changed inside it,** and register again at the next Begin.
+- **Observed declared clients use serials** (`wanted`/`made`) where the frame must not use the old registration for new state
+  (screenshot, frame generation inputs, glints). Scaleform keeps its generation and `HeldNow` check, and `surfacesRegistration`
+  names the registration to come.
+- **Failure paths stay late changes.** An unregister on a failure inside a frame is now also a tap error; failures are fatal anyway.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

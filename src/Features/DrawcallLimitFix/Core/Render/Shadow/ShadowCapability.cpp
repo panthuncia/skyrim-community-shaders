@@ -144,11 +144,10 @@ namespace DCLF
 
 	void IndirectDraws::UpdateShadowCapability()
 	{
-		// Scene side only. It reads the newest toggles, which the next publication commits under.
-		// The frame's shadow epochs read ActiveToggles and readyModes instead.
+		// Scene side only. The frame's shadow epochs read readyModes instead.
 		auto& i = *impl->shadowEngine;
 		std::uint8_t phases = 0;
-		if (!failed && SceneToggles().shadows && DrawPipelines::Get().Enabled() && globals::game::utilityShader && i.SetupShadow()) {
+		if (DrawPipelines::Get().Enabled() && globals::game::utilityShader && i.SetupShadow()) {
 			if (!i.shadowCatalogBuilt) {
 				i.BuildShadowCatalog();
 				if (i.shadowCatalogBuilt) {
@@ -197,7 +196,7 @@ namespace DCLF
 				for (std::uint32_t m = 0; m < kFirstOcclusionMode; ++m)
 					phases |= i.readyModes[m] ? phaseOfMode[m] : 0;
 				for (std::uint32_t v = 0; v < kOcclusionViews; ++v)
-					phases |= i.readyModes[OcclusionModeOf(v)] && i.occlusion[v].dsvFormat != DXGI_FORMAT_UNKNOWN && Extensions::OcclusionOn(SceneToggles(), v) ?
+					phases |= i.readyModes[OcclusionModeOf(v)] && i.occlusion[v].dsvFormat != DXGI_FORMAT_UNKNOWN && Extensions::OcclusionOn(v) ?
 					              phaseOfMode[OcclusionModeOf(v)] :
 					              0;
 			}
@@ -206,7 +205,7 @@ namespace DCLF
 		auto& views = i.lastShadow;
 		views.known = phases != 0;
 		for (std::uint32_t m = 0; m < kShadowModeCount; ++m) {
-			views.modes[m] = phases && i.readyModes[m] && (!IsOcclusionMode(m) || Extensions::OcclusionOn(SceneToggles(), OcclusionOfMode(m)));
+			views.modes[m] = phases && i.readyModes[m] && (!IsOcclusionMode(m) || Extensions::OcclusionOn(OcclusionOfMode(m)));
 			views.rasterStates[m] = views.modes[m] ? i.readyStates[m] : ModeRasterStates{};
 		}
 		views.dsvFormat = i.shadowTargetFormat;
@@ -215,7 +214,7 @@ namespace DCLF
 
 	std::uint8_t IndirectDraws::ShadowCapability() const
 	{
-		return failed ? 0 : impl->shadowEngine->shadowCapability.load(std::memory_order_acquire);
+		return impl->shadowEngine->shadowCapability.load(std::memory_order_acquire);
 	}
 
 	bool IndirectDraws::PhaseReady(const void* a_tables, const Lookups& a_lookups, std::uint32_t a_slot, std::uint8_t a_phase, std::uint32_t* a_why) const

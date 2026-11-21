@@ -50,7 +50,7 @@ namespace RenderGraph::Frame::Recipes
 	enum class Owner : std::uint8_t
 	{
 		Cs,    // a CS stage: one revision-driven epoch, recorded per description and frame slot, one ticket
-		Dclf,  // Drawcall Limit Fix's own graphs
+		Fragment,  // a fragment source's own graphs (Drawcall Limit Fix's), recorded off the frame and adopted as its fragment
 	};
 
 	/** @brief "pre-main". */
@@ -89,7 +89,4 @@ namespace RenderGraph::Frame::Recipes
 	/** @brief At Renderer::Begin, rechecks and prints the recipe when an epoch runs a build not seen yet.
 	*  A read whose only producers come later in the frame is a mismatch. */
 	void Check(org::GraphHost& a_host);
-
-	/** @brief The census line for CS_ORG_EPOCH_STATS: the recipe's passes, its inputs by kind, and its findings. */
-	void LogStats();
 }

@@ -59,6 +59,7 @@
 #include "State.h"
 #include "TruePBR.h"
 
+#include <algorithm>
 #include <unordered_map>
 
 void Feature::Load(json& o_json)

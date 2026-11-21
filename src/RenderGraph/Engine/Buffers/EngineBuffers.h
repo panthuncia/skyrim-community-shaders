@@ -14,18 +14,15 @@ namespace org
 }
 
 /**
-* @brief The engine's vertex and index buffers as ORG buffers, with CS_ORG_ENGINE_BUFFERS=1.
+* @brief The engine's vertex and index buffers as ORG buffers, in graph mode (Engine::GraphMode).
 *
 * Static geometry buffers are ORG buffers in GPUUpload memory, and the engine's fields get DXVK buffers made from them.
 * The dynamic ring is an ORG upload ring of persistently mapped chunks. A full chunk is retired through ReleaseAfterD3D11
 * instead of the engine's event query, so nothing spins. Each chunk is a version of one late-bound buffer, and every pass
-* that reads the ring declares it. Anything that fails falls back to D3D11 for that buffer, or for the whole ring.
+* that reads the ring declares it. Buffers made before the graph runs stay D3D11. A failure once it runs is fatal.
 */
 namespace RenderGraph::Engine::Buffers
 {
-	/** @brief Any thread. */
-	bool Requested();
-
 	void InstallGameHooks();
 
 	/** @brief After InitD3D. Detours the device's CreateBuffer when requested. */
@@ -42,7 +39,7 @@ namespace RenderGraph::Engine::Buffers
 		BufferRef ref;               // null without a graph host
 	};
 
-	/** @brief Nullopt for a plain D3D11 buffer or when the switch is off. a_buffer must stay alive during the call. Any thread. */
+	/** @brief Nullopt for a plain D3D11 buffer or outside graph mode. a_buffer must stay alive during the call. Any thread. */
 	std::optional<Direct> Resolve(ID3D11Buffer* a_buffer);
 
 	/** @brief Like Resolve, without making a ref. Any thread. */

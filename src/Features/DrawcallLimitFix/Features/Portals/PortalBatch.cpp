@@ -6,6 +6,10 @@
 #include "Features/DrawcallLimitFix/Features/Portals/PortalContext.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalPrograms.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
+
+#include <array>
+#include <cstddef>
 
 namespace DCLF::Features::Portals
 {
@@ -41,33 +45,56 @@ namespace DCLF::Features::Portals
 		Draws::Register(a_graph, org::ResourceIdentifier(a_batch.name + "-dispatch"), a_batch.dispatch);
 	}
 
+	namespace
+	{
+		constexpr std::size_t kBatchPrograms = 9;
+
+		/** @brief Inline by default. The portal bench measured count, scan and scatter at about 25 us a batch over the evaluation itself
+		* (dclf-portal-query-batches.md, "Portal culling bench"). */
+		bool InlineEvaluation() { return RegisteredSwitchValue("CS_DCLF_PORTAL_EVALUATOR") != "batched"; }
+		bool Traced() { return RegisteredSwitchValue("CS_DCLF_PORTAL_TRACE") == "1"; }
+
+		ComputeProgram::Desc BatchDesc(std::size_t a_program, bool a_contextAtlas)
+		{
+			const wchar_t* entries[]{ L"Clear", L"Count", L"TaskCounts", L"Scan", L"AddOffsets", L"Scatter", L"MakeTasks", L"Evaluate", L"Inline" };
+			ComputeProgram::Desc desc{ .source = "DrawcallLimitFix/PortalBatchCS.hlsl", .entry = entries[a_program], .constantWords = 20 };
+			// Count evaluates past-capacity queries itself, so it addresses programs as Evaluate does.
+			if ((a_program == 1 || a_program == 7 || a_program == 8) && a_contextAtlas)
+				desc.defines.emplace_back(L"DCLF_PORTAL_CONTEXT_ATLAS", L"1");
+			if ((a_program == 7 || a_program == 8) && RegisteredSwitchValue("CS_DCLF_PORTAL_UNIFORM_SCAN") == "1")
+				desc.defines.emplace_back(L"DCLF_PORTAL_UNIFORM_SCAN", L"1");
+			if (a_program == 8 && InlineEvaluation() && Traced())
+				desc.defines.emplace_back(L"DCLF_PORTAL_TRACE", L"1");
+			return desc;
+		}
+
+		/** @brief Each batch program with and without the context atlas, queued at CS's setup (SetupPrograms). */
+		using BatchPrograms = std::array<std::array<SetupPrograms::Compute, kBatchPrograms>, 2>;
+		BatchPrograms MakeBatchPrograms()
+		{
+			BatchPrograms programs;
+			for (std::size_t atlas = 0; atlas < 2; ++atlas)
+				for (std::size_t i = 0; i < kBatchPrograms; ++i)
+					programs[atlas][i] = SetupPrograms::Compute("DCLF portal batch", [i, atlas] { return BatchDesc(i, atlas != 0); });
+			return programs;
+		}
+		const BatchPrograms kBatchProgramSets = MakeBatchPrograms();
+	}
+
 	std::shared_ptr<Batch> CreateBatch(const Api::SceneResourcesSetup& a_setup, std::string a_name, bool a_contextAtlas)
 	{
 		auto batch = std::make_shared<Batch>();
 		batch->name = std::move(a_name);
-		const wchar_t* entries[]{ L"Clear", L"Count", L"TaskCounts", L"Scan", L"AddOffsets", L"Scatter", L"MakeTasks", L"Evaluate", L"Inline" };
-		// Inline by default. The portal bench measured count, scan and scatter at about 25 us a batch over the evaluation itself
-		// (dclf-portal-query-batches.md, "Portal culling bench").
 		const auto& evaluator = RegisteredSwitchValue("CS_DCLF_PORTAL_EVALUATOR");
-		batch->inlineEvaluation = evaluator != "batched";
-		batch->trace = RegisteredSwitchValue("CS_DCLF_PORTAL_TRACE") == "1";
+		batch->inlineEvaluation = InlineEvaluation();
+		batch->trace = Traced();
 		if (batch->trace && !batch->inlineEvaluation)
 			logger::warn("[DCLF] CS_DCLF_PORTAL_TRACE traces inline batches only; {} is batched", batch->name);
 		if (!evaluator.empty() && evaluator != "inline" && evaluator != "batched")
 			logger::warn("[DCLF] CS_DCLF_PORTAL_EVALUATOR '{}' is neither batched nor inline; {} is inline", evaluator, batch->name);
-		for (std::size_t i = 0; i < batch->programs.size(); ++i) {
-			ComputeProgram::Desc desc{ .source = "DrawcallLimitFix/PortalBatchCS.hlsl", .entry = entries[i], .constantWords = 20 };
-			// Count evaluates past-capacity queries itself, so it addresses programs as Evaluate does.
-			if ((i == 1 || i == 7 || i == 8) && a_contextAtlas)
-				desc.defines.emplace_back(L"DCLF_PORTAL_CONTEXT_ATLAS", L"1");
-			if ((i == 7 || i == 8) && RegisteredSwitchValue("CS_DCLF_PORTAL_UNIFORM_SCAN") == "1")
-				desc.defines.emplace_back(L"DCLF_PORTAL_UNIFORM_SCAN", L"1");
-			if (i == 8 && batch->inlineEvaluation && batch->trace)
-				desc.defines.emplace_back(L"DCLF_PORTAL_TRACE", L"1");
-			batch->programs[i] = ComputeProgram::Load(a_setup.device, desc);
-			if (!batch->programs[i])
-				return nullptr;
-		}
+		static_assert(std::tuple_size_v<decltype(batch->programs)> == kBatchPrograms);
+		for (std::size_t i = 0; i < kBatchPrograms; ++i)
+			batch->programs[i] = kBatchProgramSets[a_contextAtlas ? 1 : 0][i].Get();
 		batch->signature = Draws::CreateDispatchSignature(a_setup.device, batch->programs[7]->layout->GetHandle());
 		if (!batch->signature)
 			return nullptr;

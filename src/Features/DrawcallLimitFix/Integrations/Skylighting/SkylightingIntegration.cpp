@@ -21,7 +21,7 @@ namespace DCLF::Integrations::Skylighting
 			return sky && sky->mode.get() == RE::Sky::Mode::kFull;
 		}
 
-		// Persistent textures that Prepass updates before binding: D3D11 ones, or the graph's exports while CS_ORG_SKYLIGHTING=1.
+		// Persistent textures that Prepass updates before binding: D3D11 ones, or the graph's exports in graph mode.
 		void* ProbeArrayView()
 		{
 			return Binds() ? globals::features::skylighting.ProbeArraySRV() : nullptr;

@@ -82,8 +82,6 @@ namespace DCLF::Draws
 		bool shadow = false;  // the shadow parts (shadow rows, the shadow inputs) are present
 		Extensions::PayloadProducts products;  // the source's
 		std::uint64_t serial = 0;              // the source's
-		// TEMP (set parity): the source's main body, used only as an identity for CommitMainPayload's pairing check.
-		const void* mainBody = nullptr;
 	};
 
 	/** @brief The frame's payload. Render thread. The epochs read it by value. */
@@ -94,10 +92,6 @@ namespace DCLF::Draws
 		bool main = false;    // the main parts (material and pipeline rows, the main inputs) are present
 		bool shadow = false;  // the shadow parts (shadow rows, the shadow inputs) are present
 		std::uint64_t serial = 0;  // the source's
-		// TEMP (set parity): the source's main body, used only as an identity for CommitMainPayload's pairing check.
-		const void* mainBody = nullptr;
-		// Diagnostics only. Set parity reads its copy of the scene list from these.
-		std::array<std::shared_ptr<const org::services::Backing>, kPayloadParts> backings;
 
 		[[nodiscard]] const PayloadBuffer& operator[](PayloadPart a_part) const { return parts[static_cast<std::size_t>(a_part)]; }
 	};

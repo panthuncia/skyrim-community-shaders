@@ -444,8 +444,8 @@ namespace DCLF
 		float treeHeightLimit = 0.0f;     // 0x142032fa0, +infinity while the test is off
 		std::uint32_t padding = 0;
 		float divisors[16]{};             // 0x142032e00, per LOD type
-		// Per-frame values, since the invocation is prepared ahead of the commit.
-		std::uint32_t rootCount = 0, sceneFrame = 0, logBase = ~0u, reserved = 0;
+		// Per-frame values, since the invocation is prepared ahead of the commit. The two reserved words keep the shaders' layout.
+		std::uint32_t rootCount = 0, sceneFrame = 0, reserved0 = 0, reserved1 = 0;
 		// Inputs for the animation job's fade update (FUN_1402cff60) on a root its last cull missed.
 		float animEye[3]{};
 		float animLodAdjust = 0.0f;

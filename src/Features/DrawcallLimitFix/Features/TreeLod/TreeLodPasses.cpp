@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -46,8 +47,8 @@ namespace DCLF::Draws
 	{
 	public:
 		TreeLodCullPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const Features::TreeLod::TreeLodTables> a_tables, std::uint32_t a_phase,
-			RenderGraphRuntime::Segment a_segment) :
-			resources(std::move(a_resources)), tables(std::move(a_tables)), phase(a_phase), segment(a_segment) {}
+			RenderGraphRuntime::Segment a_segment, const GraphConditions& a_conditions) :
+			resources(std::move(a_resources)), tables(std::move(a_tables)), phase(a_phase), segment(a_segment), conditions(a_conditions) {}
 
 		TreeLodCullBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -78,7 +79,7 @@ namespace DCLF::Draws
 			constants.phase = phase;
 			const std::uint64_t records = shapes * TreeInstances::kMaxGroupInstances;
 			constants.retestOffset = static_cast<std::uint32_t>(sizeof(TreeInstances::VisibleHeader) + records * sizeof(std::uint32_t));
-			if (Draws::OcclusionTested(*resources, *frame)) {
+			if (Draws::OcclusionTested(conditions, *resources, *frame)) {
 				prepared.occlusion = true;
 				constants.hzbSizePacked = (resources->hzbWidth & 0xFFFF) | (resources->hzbHeight << 16);
 				constants.hzbMips = resources->hzbMips;
@@ -102,7 +103,7 @@ namespace DCLF::Draws
 			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, Features::TreeLod::kTreeLodCullConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 			commands.Dispatch(a_frame.groups, 1, 1);
 		}
@@ -112,6 +113,7 @@ namespace DCLF::Draws
 		std::shared_ptr<const Features::TreeLod::TreeLodTables> tables;
 		std::uint32_t phase = 1;
 		RenderGraphRuntime::Segment segment;
+		GraphConditions conditions;  // the build's
 	};
 
 	struct TreeLodReadbackBindings
@@ -203,32 +205,28 @@ namespace DCLF::Draws
 			if (!a_frame.counts)
 				return;
 			auto& counts = *a_frame.counts;
-			// The range's last copy is done, since its lease retired before it recorded again.
-			const std::uint32_t slot = counts.ranges.Of(a_recording.Run());
-			if (slot >= counts.readback.size())
+			// The region's last copy is done, since its lease retired before it recorded again.
+			const std::uint32_t region = counts.readback->RegionOf(a_recording.Run());
+			if (region >= counts.filled.size())
 				return;
-			if (counts.filled[slot]) {
-				auto resource = counts.readback[slot]->GetAPIResource();
-				void* mapped = nullptr;
-				resource.Map(&mapped);
-				if (mapped) {
+			if (counts.filled[region]) {
+				counts.readback->ReadRegion(region, [&](const std::byte* a_bytes) {
 					TreeInstances::VisibleHeader header;
-					std::memcpy(&header, mapped, sizeof(header));
+					std::memcpy(&header, a_bytes, sizeof(header));
 					counts.frames.fetch_add(1, std::memory_order_relaxed);
 					counts.phaseOne.fetch_add(header.phaseOne[1], std::memory_order_relaxed);
 					counts.retests.fetch_add(header.retests, std::memory_order_relaxed);
 					counts.phaseTwo.fetch_add(header.phaseTwo[1], std::memory_order_relaxed);
 					if (a_frame.stages)
-						JudgeTreeLodStages(counts, reinterpret_cast<const std::uint32_t*>(static_cast<const std::byte*>(mapped) + sizeof(header)));
-					resource.Unmap(0, 0);
-				}
+						JudgeTreeLodStages(counts, reinterpret_cast<const std::uint32_t*>(a_bytes + sizeof(header)));
+				});
 			}
-			a_recording.Commands().CopyBufferRegion(counts.readback[slot]->GetAPIResource().GetHandle(), 0, a_recording.Resolve(a_bindings.visible).GetHandle(), 0,
-				sizeof(TreeInstances::VisibleHeader));
+			auto& commands = a_recording.Commands();
+			counts.readback->RecordCopy(commands, region, 0, a_recording.Resolve(a_bindings.visible).GetHandle(), 0, sizeof(TreeInstances::VisibleHeader));
 			if (a_frame.stages)
-				a_recording.Commands().CopyBufferRegion(counts.readback[slot]->GetAPIResource().GetHandle(), sizeof(TreeInstances::VisibleHeader),
-					a_frame.stages->GetAPIResource().GetHandle(), 0, TreeInstances::kStageSlots * TreeInstances::kStageWords * 4);
-			counts.filled[slot] = 1;
+				counts.readback->RecordCopy(commands, region, sizeof(TreeInstances::VisibleHeader), a_frame.stages->GetAPIResource().GetHandle(), 0,
+					TreeInstances::kStageSlots * TreeInstances::kStageWords * 4);
+			counts.filled[region] = 1;
 		}
 
 	private:
@@ -257,7 +255,7 @@ namespace DCLF::Features::TreeLod
 		{
 			if (a_context.Interior())  // no tree LOD in an interior: its passes are left out
 				return nullptr;
-			return std::make_shared<Draws::TreeLodCullPass>(a_context.Main(), a_context.State<TreeLodTables>(), 1, a_context.segment);
+			return std::make_shared<Draws::TreeLodCullPass>(a_context.Main(), a_context.State<TreeLodTables>(), 1, a_context.segment, a_context.Conditions());
 		}
 
 		// Phase 2's retest only runs with the HZB rebuilt this frame.
@@ -267,7 +265,7 @@ namespace DCLF::Features::TreeLod
 				return nullptr;
 			if (!a_context.PhaseTwo())
 				return nullptr;
-			return std::make_shared<Draws::TreeLodCullPass>(a_context.Main(), a_context.State<TreeLodTables>(), 2, a_context.segment);
+			return std::make_shared<Draws::TreeLodCullPass>(a_context.Main(), a_context.State<TreeLodTables>(), 2, a_context.segment, a_context.Conditions());
 		}
 
 		std::shared_ptr<org::RenderPass> MakeCounts(const Api::PassContext& a_context)

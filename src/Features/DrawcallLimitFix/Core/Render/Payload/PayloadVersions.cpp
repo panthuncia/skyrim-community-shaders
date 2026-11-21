@@ -5,7 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
 #include <ORGModuleServices/ElasticCapacity.h>
-#include "Features/DrawcallLimitFix/Core/Runtime/FrameRetirement.h"
+#include "RenderGraph/Async/Retirement.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 
 #include <ORGModuleServices/BackingPool.h>
@@ -210,56 +210,6 @@ namespace DCLF::Draws
 			}
 		}
 
-		/**
-		 * @brief TEMP (CS_DCLF_SET_PARITY): mirrors each inputs version as built, to compare against the whole scene list.
-		 * A difference is an input the GPU reads that the list lacks. Serial, on the inputs' producer.
-		 */
-		std::vector<DrawInput>& MirrorInputs(std::uint64_t a_version, std::uint64_t a_previous, std::size_t a_units)
-		{
-			static ankerl::unordered_dense::map<std::uint64_t, std::vector<DrawInput>> mirrors;
-			std::vector<DrawInput> base;
-			if (const auto it = mirrors.find(a_previous); a_previous && it != mirrors.end())
-				base = it->second;
-			// Keep the predecessor's mirror because a failed build is redone from it.
-			for (auto it = mirrors.begin(); it != mirrors.end();)
-				it = it->first != a_previous ? mirrors.erase(it) : std::next(it);
-			auto& mirror = mirrors[a_version] = std::move(base);
-			mirror.resize(a_units, DrawInput{});
-			return mirror;
-		}
-
-		void CheckInputs(const PayloadSource& a_source, const std::vector<DrawInput>& a_mirror, std::uint64_t a_version, std::optional<std::uint64_t> a_from)
-		{
-			static std::uint64_t checks = 0, differ = 0;
-			static std::string first;
-			const auto& region = *a_source.region;
-			++checks;
-			const auto expected = [&](std::size_t a_i) -> const DrawInput* {
-				if (a_i < region.Count())
-					return region.At(a_i);
-				if (a_source.mainList && a_i >= a_source.mainInputsAt && a_i < a_source.mainInputsAt + a_source.mainList->size())
-					return &(*a_source.mainList)[a_i - a_source.mainInputsAt];
-				if (a_source.shadowList && a_i >= a_source.shadowInputsAt && a_i < a_source.shadowInputsAt + a_source.shadowList->size())
-					return &(*a_source.shadowList)[a_i - a_source.shadowInputsAt];
-				return nullptr;
-			};
-			for (std::size_t i = 0; i < a_mirror.size(); ++i) {
-				const auto* want = expected(i);
-				if (!want || std::memcmp(want, &a_mirror[i], sizeof(DrawInput)) == 0)
-					continue;
-				++differ;
-				if (first.empty())
-					first = fmt::format("version {}: input {} of {} (region {}, built from journal position {}): object {} built, {} listed", a_version, i, a_mirror.size(),
-						region.Count(), a_from ? fmt::format("{}", *a_from) : std::string("none (whole)"), a_mirror[i].objectIndex, want->objectIndex);
-				break;
-			}
-			if (checks >= 300) {
-				logger::info("[DCLF] payload inputs versions (set parity): {} versions checked, {} differ{}{}", checks, differ, differ ? " <- INPUTS DIFFER; first: " : " <- OK", first);
-				checks = differ = 0;
-				first.clear();
-			}
-		}
-
 		using DeltaWrite = std::function<void(const void* a_data, std::size_t a_bytes, std::uint64_t a_offset)>;
 
 		/**
@@ -302,20 +252,12 @@ namespace DCLF::Draws
 				break;
 			}
 			case PayloadPart::Inputs: {
-				std::vector<DrawInput>* mirror =
-					Diagnostics::Observe().claims ? &MirrorInputs(a_version, a_previous, static_cast<std::size_t>(a_source.units[Part(PayloadPart::Inputs)])) : nullptr;
-				const auto put = [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) {
-					if (mirror && a_offset + a_bytes <= mirror->size() * sizeof(DrawInput))
-						std::memcpy(reinterpret_cast<std::byte*>(mirror->data()) + a_offset, a_data, a_bytes);
-					a_write(a_data, a_bytes, a_offset);
-				};
+				const auto put = [&](const void* a_data, std::size_t a_bytes, std::size_t a_offset) { a_write(a_data, a_bytes, a_offset); };
 				a_source.region->Emit(from, put);
 				if (a_source.mainList && !a_source.mainList->empty())
 					put(a_source.mainList->data(), a_source.mainList->size() * sizeof(DrawInput), a_source.mainInputsAt * sizeof(DrawInput));
 				if (a_source.shadowList && !a_source.shadowList->empty())
 					put(a_source.shadowList->data(), a_source.shadowList->size() * sizeof(DrawInput), a_source.shadowInputsAt * sizeof(DrawInput));
-				if (mirror)
-					CheckInputs(a_source, *mirror, a_version, a_from);
 				break;
 			}
 			case PayloadPart::ShadowRows:
@@ -351,7 +293,7 @@ namespace DCLF::Draws
 			};
 			// One spare is enough. A fresh backing costs a GPU copy, not an upload, so more spares only hold VRAM.
 			// On HexRim five pipeline-row backings took 40 MB.
-			return org::services::BackingPool::Create(std::move(hooks), FrameRetirement(),
+			return org::services::BackingPool::Create(std::move(hooks), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = fmt::format("cs.dclf.payload.{}", kPools[a_part].name), .maxPerClass = kBackingsPerClass,
 					.framesInFlight = RenderGraphRuntime::kGameFramesInFlight, .spareFree = 1 });
 		}
@@ -495,7 +437,6 @@ namespace DCLF::Draws
 				input.flags.deviceAddress = kPools[k].deviceAddress;
 				input.previous = chain.last;
 				input.backingPool = chain.pool;
-				input.predecessorCopy = true;
 				input.keep = a_source;
 				// What a backing at a_from lacks. The journal's runs since then, plus everything from the earlier tail start on.
 				input.changedSince = [view, part, versions, previousTail = previous.tailStart](std::uint64_t a_from) -> std::optional<std::vector<BufferByteRange>> {
@@ -558,7 +499,6 @@ namespace DCLF::Draws
 			out->shadow = a_source.shadow != nullptr;
 			out->products = a_source.products;
 			out->serial = a_source.serial;
-			out->mainBody = a_source.main ? a_source.main->body.get() : nullptr;
 			return out;
 		}
 
@@ -590,8 +530,6 @@ namespace DCLF::Draws
 				// Shaders read rows through the ref. The layouts use the address.
 				a_out.parts[k] = { backing->srvIndex, kPools[k].deviceAddress ? backing->address : 0,
 					kPools[k].deviceAddress ? published : RenderGraph::BufferRef{}, payload.units[k] };
-				a_out.backings[k] = backing.Get();
-				RenderGraph::CheckBufferRef(a_out.parts[k].ref, a_out.parts[k].address, backing->byteCapacity, "payload part");
 				if (!a_out.parts[k].srvIndex)
 					return false;
 			}
@@ -601,7 +539,6 @@ namespace DCLF::Draws
 			a_out.main = payload.main;
 			a_out.shadow = payload.shadow;
 			a_out.serial = payload.serial;
-			a_out.mainBody = payload.mainBody;
 			return true;
 		}
 

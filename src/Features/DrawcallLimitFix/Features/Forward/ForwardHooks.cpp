@@ -9,7 +9,6 @@
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Triggers.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Globals.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -55,7 +54,6 @@ namespace DCLF::Features::Forward
 				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 				const bool main = a_accumulator && a_accumulator == *mainAccumulator;
 				if (main) {
-					Diagnostics::Notify(Diagnostics::TargetPoint{ "before forward" });
 					// Under water, the water comes after this point, so the sun stage's water steps draw it.
 					if constexpr (N == 0) {
 						static bool logged = false;
@@ -64,17 +62,13 @@ namespace DCLF::Features::Forward
 					}
 					(void)FrameAnchors::TapPoint(::RenderGraph::Frame::SegmentId::Deferred);
 				}
-				if (main && ShellState::Running()) {
+				if (main) {
 					Extensions::TriggerScope trigger(blendedDraw);
 					IndirectDraws::Get().NoteBlendedFrameParams(globals::game::frameBufferCached.GetFrameParams().z);
 					if (SubmitForwardEpoch())
 						MarkRefractionNormals();
 				}
-				if (main)
-					Diagnostics::Notify(Diagnostics::TargetPoint{ "after DCLF forward" });
 				func(a_accumulator, a_renderFlags);
-				if (main)
-					Diagnostics::Notify(Diagnostics::TargetPoint{ "after engine blended" });
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -85,7 +79,7 @@ namespace DCLF::Features::Forward
 		{
 			static std::uint32_t thunk(void* a_accumulator)
 			{
-				if (a_accumulator && ShellState::Running() && RefractionDrawnThisFrame()) {
+				if (a_accumulator && RefractionDrawnThisFrame()) {
 					using ClearGroup = void (*)(void*, std::int32_t);
 					static REL::Relocation<ClearGroup> clearGroup{ REL::Offset(Address::kClearGroup) };
 					clearGroup(a_accumulator, 6);

@@ -1,25 +1,64 @@
-// The start stage's water effects as CS passes, for native mode. Included by ImageSpace.cpp after WorldSteps.inl and ChainSteps.inl.
+// The start stage's water effects as CS passes, in graph mode. Included by ImageSpace.cpp after WorldSteps.inl and ChainSteps.inl.
 //
 // Main::RenderWaterEffects runs the displacement simulation and the flow copies inside the start stage's window.
-// How many ripples, heightmap steps and flow copies a frame makes is the engine's late decision. So each is a fixed set of
+// How many ripples, heightmap steps and flow copies a frame makes is the engine's late decision. So each is a set of
 // instances, all on, and the k-th draw of its kind is instance k. Unused instances stay closed in the run gate.
+// The heightmap steps' count is the engine's bound from its timer settings (HeightmapStepBound), part of the shape.
 
 /** @brief Instances of each repeated water step a frame. More in one frame is a mismatch. */
-constexpr std::uint16_t kRippleInstances = 8;    // per target of the pair
-constexpr std::uint16_t kHeightmapInstances = 4;  // 0.025 s each, so a 0.1 s frame makes four
+constexpr std::uint16_t kRippleInstances = 8;  // per target of the pair
 constexpr std::uint16_t kFlowInstances = 32;
+
+/** @brief The water update's heightmap step in seconds (0x3ccccccd, set by ImageSpaceEffectWaterDisplacement's Render). */
+constexpr double kHeightmapStep = 0.025;
+
+/**
+* @brief The most heightmap steps one water update can run (ImageSpaceEffectWaterDisplacement's Render, SE 0x141303da0,
+* AE 0x1414ef370). The update adds the frame's game delta to its clock, then steps while the clock is more than one step
+* ahead of the steps. So it carries at most one step into a frame and runs at most ceil(delta / step) steps.
+* The delta comes from BSTimer::Update (66987 / 68244), the same on SE and AE:
+* - each sample is the fixed step in fixed mode (iFPSClamp), else the frame's time, set to 1/6 s past 166.7 ms;
+* - with bCompensateUnstableFrameTime (on by default), the delta is the mean of the last samples without the smallest,
+*   and without the largest clamped to 0.05 s. With all samples at the largest value s, that is ((n - 1) s - min(s, 0.05)) / (n - 2);
+* - the global time multiplier then scales it.
+* One step more covers the float rounding of the update's clock.
+*/
+std::uint32_t HeightmapStepBound()
+{
+	const auto* timer = RE::BSTimer::GetSingleton();
+	const double sample = timer->clamp > 0.0f ? static_cast<double>(timer->clamp) * 0.001 : 1.0 / 6.0;
+	double delta = sample;
+	const std::uint32_t history = timer->smoothingSampleCount;
+	if (history >= 3)
+		delta = ((history - 1) * sample - std::min(sample, 0.05)) / (history - 2);
+	// The game only slows time. A faster multiplier counts as its next whole multiple, so ramps do not change the bound.
+	const float multiplier = std::max({ 1.0f, RE::BSTimer::QGlobalTimeMultiplier(), RE::BSTimer::QGlobalTimeMultiplierTarget() });
+	delta *= std::ceil(static_cast<double>(multiplier));
+	// Past the gate's entries the build reports it. The clamp only keeps the cast defined.
+	const double steps = std::min(std::ceil(delta / kHeightmapStep) + 1.0, static_cast<double>(kGateEntries));
+	return static_cast<std::uint32_t>(steps);
+}
+
+/** @brief What the start steps' registration is a function of. Its client is declared on these variables (Frame/Declare.h). */
+struct StartKey
+{
+	std::uint32_t displacementSize = 0, flowCopySize = 0;
+	std::uint64_t flowMap = 0;
+	std::uint32_t effects = 0, states = 0;
+	std::uint32_t heightmaps = 0;
+	friend bool operator==(const StartKey&, const StartKey&) = default;
+};
+
+/** @brief The start steps' build for a key. */
+struct StartBuild : StepBuild<StartKey, 1>
+{
+	std::uint32_t displacementSize = 0, flowSize = 0;
+	std::uint16_t heightmapInstances = 0;  // per target, from the key
+};
 
 struct StartSteps
 {
-	bool on = false;          // native mode with the start stage
-	bool registered = false;
-	bool retry = false;       // a pass was left out at a build, so register again later
-	bool pending = false;
-	std::uint64_t registeredFrame = 0;
-	std::uint32_t displacementSize = 0, flowSize = 0;
-	std::map<StepKey, std::uint32_t> entries;
-	std::array<bool, kGateEntries> made{};
-	std::uint32_t count = 0;
+	StepGroup<StartBuild> group;
 	// The target the next step writes, whether the pair swapped after the ripples, and each step's count so far.
 	WorldScope scope = WorldScope::None;
 	std::int32_t target = -1;
@@ -41,67 +80,54 @@ std::int32_t WaterDisplacementTarget()
 	return *target.get();
 }
 
-void RegisterStartSteps();
-
-/** @brief Re-registers when the displacement pair or flow map is remade, or a build left a pass out. Render owner. */
-void CheckStartSteps()
+/** @brief The start steps' key at a revision's values, or none while the engine has no displacement pair. */
+template <class Values>
+std::optional<StartKey> StartKeyOf(const Values& a_values)
 {
-	auto& start = Start();
-	if (!start.on || !IS().on || !RE::ImageSpaceManager::GetSingleton())
-		return;
-	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	auto* displacement = targets[RE::RENDER_TARGET::kWATER_DISPLACEMENT].texture;
-	if (!displacement)
-		return;
-	D3D11_TEXTURE2D_DESC desc{};
-	displacement->GetDesc(&desc);
-	auto* flow = FlowCopyTexture();
-	D3D11_TEXTURE2D_DESC flowDesc{};
-	if (flow)
-		flow->GetDesc(&flowDesc);
-	constexpr std::uint64_t kRetryFrames = 120;
-	const auto frame = Frame::Driver::Current().frame;
-	if (start.registered && start.retry && frame - start.registeredFrame < kRetryFrames)
-		return;
-	if (start.registered && !start.retry && start.displacementSize == desc.Width && start.flowSize == flowDesc.Width)
-		return;
-	RegisterAtBoundary(start.pending, [] {
-		return Start().on && IS().on && RE::ImageSpaceManager::GetSingleton() &&
-		       globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kWATER_DISPLACEMENT].texture;
-	}, RegisterStartSteps);
+	const auto shape = ReadyShape(a_values);
+	if (!shape || !IS().on || !shape->displacementSize)
+		return std::nullopt;
+	return StartKey{ shape->displacementSize, shape->flowCopySize, shape->flowMap, shape->effects, shape->states, shape->heightmapSteps };
+}
+
+void BuildStartSteps(StartBuild& a_build);
+
+/** @brief Setup. The start client, declared on the engine's ImageSpace shape. */
+void DeclareStartSteps()
+{
+	Start().group.Declare({ PostPart::Start }, Frame::DependsOn(Frame::Vars::EngineImageSpace()), [](const Frame::Inputs& a_in) { return StartKeyOf(a_in); },
+		[](StartBuild& a_build) { BuildStartSteps(a_build); });
 }
 
 /** @brief All on. Each pass only works where the engine opens its gate entry. */
-void StartRows(std::array<std::uint64_t, 4>& a_rows)
+void StartRows(const StepPart& a_part, std::array<std::uint64_t, 4>& a_rows)
 {
-	const auto& start = Start();
-	for (std::uint32_t entry = 0; entry < start.count && entry < 256; ++entry)
-		a_rows[entry / 64] |= 1ull << (entry % 64);
+	for (std::uint32_t entry = 0; entry < a_part.count; ++entry)
+		if (const auto row = a_part.RowOf(entry); row < 256)
+			a_rows[row / 64] |= 1ull << (row % 64);
 }
 
-void RegisterStartSteps()
+/**
+* @brief The start client's registration for a_build's key. Its declaration registers it when the revision starts, and the
+* revision switches its build in. Render thread.
+*/
+void BuildStartSteps(StartBuild& a_build)
 {
 	auto& state = IS();
-	auto& start = Start();
-	start.registered = false;
-	start.retry = false;
-	start.registeredFrame = Frame::Driver::Current().frame;
-	start.entries.clear();
-	start.made.fill(false);
-	start.count = 0;
+	const auto& a_key = a_build.key;
+	const auto& table = a_build.table;
+	auto& part = table->parts[0];
 	using E = Effects;
 	using T = RE::RENDER_TARGET;
-	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	if (auto* displacement = targets[T::kWATER_DISPLACEMENT].texture) {
-		D3D11_TEXTURE2D_DESC desc{};
-		displacement->GetDesc(&desc);
-		start.displacementSize = desc.Width;
-	}
-	start.flowSize = 0;
-	if (auto* flow = FlowCopyTexture()) {
-		D3D11_TEXTURE2D_DESC desc{};
-		flow->GetDesc(&desc);
-		start.flowSize = desc.Width;
+	a_build.displacementSize = a_key.displacementSize;
+	a_build.flowSize = a_key.flowCopySize;
+	a_build.heightmapInstances = static_cast<std::uint16_t>(a_key.heightmaps);
+	// Another texture in the flow map's slot (Unified Water's) is published in its place, for the water draws.
+	// A new resource under the id rebuilds every graph once (step 9 makes it a declared import).
+	if (state.publishedFlowMap && a_key.flowMap && a_key.flowMap != reinterpret_cast<std::uint64_t>(state.publishedFlowMap)) {
+		logger::info("[ORG] ImageSpace: another texture took the flow map's slot; it is published in its place{}",
+			a_key.flowCopySize ? "" : " (it has no UAV, so there are no flow copies)");
+		PublishFlowMap();
 	}
 	const auto engine = [](std::int32_t a_target) { return StepTexture::Engine(a_target); };
 	constexpr StepSampler kPoint{ 0, 0 }, kLinear{ 0, 1 };
@@ -128,7 +154,7 @@ void RegisterStartSteps()
 		for (std::uint16_t r = 0; r < kRippleInstances; ++r)
 			add(WorldScope::WaterDisplacement, E::ISWaterDisplacementWadingRipple, static_cast<std::uint16_t>(high | r),
 				StepDesc{ .name = fmt::format("water.ripple.{}.{}", out, r), .output = engine(out) });
-		for (std::uint16_t h = 0; h < kHeightmapInstances; ++h) {
+		for (std::uint16_t h = 0; h < a_build.heightmapInstances; ++h) {
 			StepDesc d{ .name = fmt::format("water.heightmap.{}.{}", out, h), .output = engine(out) };
 			d.inputs[0] = engine(in);
 			d.samplers[0] = kLinear;
@@ -136,75 +162,47 @@ void RegisterStartSteps()
 		}
 	}
 	// Each reads its loaded texture by heap index, with no declared input.
-	if (start.flowSize)
+	if (a_build.flowSize)
 		for (std::uint16_t k = 0; k < kFlowInstances; ++k)
 			add(WorldScope::FlowCopy, E::ISCopySubRegionCS, k, StepDesc{ .name = fmt::format("flow.copy.{}", k), .output = engine(kFlowMapOutput) });
 
 	auto& client = state.post[static_cast<std::size_t>(PostPart::Start)];
-	client.specs.clear();
 	client.batch.clear();
 	std::vector<FrameAnchors::PassDesc> passes;
 	for (auto& step : steps) {
-		const auto entry = start.count;
-		if (entry >= kGateEntries)
+		if (part.count >= kGateEntries) {
+			logger::error("[ORG] ImageSpace: the start steps do not fit the gate's {} entries ({} heightmap steps per target); {} and later have no pass",
+				kGateEntries, a_build.heightmapInstances, step.desc.name);
 			break;
+		}
 		std::string error;
-		auto spec = MakeStepSpec(step.desc, entry, error);
+		auto spec = MakeStepSpec(step.desc, part.count, error);
 		if (!spec) {
 			logger::info("[ORG] ImageSpace: start step {} has no pass ({})", step.desc.name, error);
 			continue;
 		}
-		++start.count;
-		start.entries[step.key] = entry;
-		NoteImports(*spec);
-		passes.push_back({ .name = fmt::format("{}.{}", client.id, spec->name),
-			.anchor = Anchor::ImageSpace,
-			.order = static_cast<std::int32_t>(entry),
-			.kind = spec->key.compute ? FrameAnchors::PassKind::Compute : FrameAnchors::PassKind::Render,
-			.make = [spec, latch = std::shared_ptr<const org::LatchBlock>(client.latch), gate = std::shared_ptr<const RunGate>(client.gate), id = client.id, entry] {
-				auto pass = MakePass(spec, latch, gate, id);
-				Start().made[entry] = pass != nullptr;
-				if (!pass)
-					Start().retry = true;
-				return pass;
-			},
-			// Most instances are empty most frames, so record at execution and let unused ones skip and fold their barriers.
-			.atExecution = true,
-			.gpuGated = false,
-			.row = static_cast<std::int16_t>(entry) });
-		client.specs.push_back(std::move(spec));
+		// Most instances are empty most frames, so they record at execution and unused ones skip and fold their barriers.
+		const auto entry = AddStep(*table, 0, step.key, spec);
+		passes.push_back(StepPassDesc(table, 0, entry, client, spec));
 	}
-	FrameAnchors::ClientDesc desc{};
-	desc.id = client.id;
-	desc.passes = std::move(passes);
-	desc.sharedConstants = true;
-	desc.gates = { client.gate };
-	desc.active = [] { return !IS().post[static_cast<std::size_t>(PostPart::Start)].batch.empty(); };
-	desc.commit = [](const FrameAnchors::Point&) {
-		auto& current = IS().post[static_cast<std::size_t>(PostPart::Start)];
-		CommitBatch(current.batch, *current.latch, *current.gate);
-	};
-	desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
-	desc.rows = StartRows;
+	auto desc = PartClientDesc(static_cast<std::size_t>(PostPart::Start), std::move(passes));
+	desc.rows = [rows = std::shared_ptr<const StepTable<1>>(table)](std::array<std::uint64_t, 4>& a_rows) { StartRows(rows->parts[0], a_rows); };
 	// Each water update and flow copy taps its own instances, and the frame's taps add up.
 	desc.repeats = true;
 	desc.segmentOnly = true;
-	if (!FrameAnchors::Register(std::move(desc))) {
-		logger::error("[ORG] ImageSpace: the start step client was refused");
-		start.on = false;
-		return;
-	}
-	start.registered = true;
+	// An empty client is no client. Its declaration then registers none.
+	if (!desc.passes.empty())
+		a_build.descs[0] = std::move(desc);
 	logger::info("[ORG] ImageSpace: the water effects are start stage passes: {} passes ({} ripples and {} heightmap steps per target, {} flow copies), "
-				 "displacement {}x{}, flow map {}x{}",
-		start.count, kRippleInstances, kHeightmapInstances, start.flowSize ? kFlowInstances : 0, start.displacementSize, start.displacementSize, start.flowSize,
-		start.flowSize);
+				 "displacement {}x{}, flow map {}x{}, built for the revision starting now",
+		part.count, kRippleInstances, a_build.heightmapInstances, a_build.flowSize ? kFlowInstances : 0, a_build.displacementSize, a_build.displacementSize,
+		a_build.flowSize, a_build.flowSize);
 }
 
 WorldScope StartStepScope()
 {
 	const auto& start = Start();
-	if (!start.on || !start.registered)
+	if (!IS().on || !start.group.Registered())
 		return WorldScope::None;
 	return start.scope;
 }
@@ -234,8 +232,8 @@ std::string StageGeometry(Pending& a_pending)
 }
 
 /**
-* @brief Stages the step's constants, matched by effect, the current target and the instance number.
-* A step past the declared instances, or with no pass, is a mismatch.
+* @brief Stages the step's constants, matched by effect, the current target and the instance number, in the build the frame runs.
+* A step past the build's instances, or with no pass, is a mismatch unless the engine draws for newer variables.
 */
 bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
 {
@@ -275,7 +273,6 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 				start.target = other(start.target);
 			}
 			instance = start.heightmaps++;
-			limit = kHeightmapInstances;
 			variant = static_cast<std::uint16_t>((start.target << 8) | instance);
 			start.target = other(start.target);
 			break;
@@ -295,29 +292,39 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		if (bound != planned && !std::exchange(logged, true))
 			logger::error("[ORG] ImageSpace: the water update's {} writes rt{}, and CS planned rt{}", kEffects[a_effect].effectName, bound, planned);
 	}
+	auto& client = state.post[static_cast<std::size_t>(PostPart::Start)];
+	const auto what = fmt::format("water step {} (variant {:#x})", kEffects[a_effect].effectName, variant);
+	// The heightmap steps' count is the held build's, from the engine's timer settings it was made for.
+	const auto held = start.group.Held(0);
+	if (start.scope == WorldScope::WaterDisplacement && id == E::ISWaterWadingHeightmap)
+		limit = held ? held->heightmapInstances : std::uint16_t{ 0 };
 	if (instance >= limit) {
+		if (!held) {
+			Frame::Driver::NoteStepLag(segment, client.id, what);
+			return true;
+		}
+		// The engine may run more heightmap steps for new timer settings before the revision with them is adopted.
+		if (id == E::ISWaterWadingHeightmap && start.group.Ahead(&held->key)) {
+			Frame::Driver::NoteLaggedWork(segment);
+			return true;
+		}
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
 			fmt::format("{} instance {} of the frame is past the start stage's {} instances; it draws nothing", kEffects[a_effect].effectName, instance, limit));
 		return true;
 	}
 	const StepKey key{ start.scope, id, variant };
-	const auto found = start.entries.find(key);
-	if (found == start.entries.end()) {
-		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
-			fmt::format("{} (variant {:#x}) in the water effects has no CS pass; it draws nothing", kEffects[a_effect].effectName, variant));
+	const auto find = start.group.Find(key);
+	if (!start.group.Draws(find, segment, what, "in the water effects"))
 		return true;
-	}
-	const auto entry = found->second;
-	auto& client = state.post[static_cast<std::size_t>(PostPart::Start)];
-	const auto& rows = Frame::Driver::Current().Segment(segment).rows;
-	const bool scheduled = entry < 256 && (rows[entry / 64] >> (entry % 64) & 1u) != 0 && FrameAnchors::CanTap(client.id);
-	if (!start.made[entry] || !scheduled) {
-		// The schedule does not hold the client yet, so nothing is drawn this frame.
-		Frame::Driver::NoteStepLag(segment, client.id, fmt::format("water step {} (variant {:#x})", kEffects[a_effect].effectName, variant));
+	const auto entry = find.at.entry;
+	const auto& part = find.Part();
+	// Every row is on, so a row off is a build the key left it out of. A pass not made was left out by its graph build (MakePass).
+	if (!RowOn(segment, part.RowOf(entry)) || !part.Made(entry)) {
+		Frame::Driver::NoteStepLag(segment, client.id, what);
 		return true;
 	}
 	const auto before = client.batch.size();
-	StageStep(client, entry, a_effect, a_compute, a_groups);
+	StageStep(client, entry, part.SpecOf(entry), a_effect, a_compute, a_groups);
 	if (client.batch.size() == before)
 		return true;
 	auto& pending = client.batch.back();
@@ -329,9 +336,8 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	} else if (id == E::ISCopySubRegionCS) {
 		// BGSAutoWater loads these and never writes them, so the graph exempts them from declarations. Held until the run retires.
 		auto* view = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().CSTexture[0];
-		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
-		auto binding = view ? DCLF::GpuTextures::Get().ResolveBinding(view, kSourceTag) : DCLF::GpuTextures::Binding{};
-		if (!view || binding.index == DCLF::GpuTextures::kInvalid) {
+		auto binding = view ? ::DCLF::GpuTextures::Get().ResolveBinding(view, kImageSpaceTag) : ::DCLF::GpuTextures::Binding{};
+		if (!binding) {
 			client.batch.pop_back();
 			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment, "a flow copy's source texture has no heap index");
 		} else {
@@ -345,7 +351,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 /** @brief The water update (31385 / 32176). */
 struct WaterUpdateGuard
 {
-	WaterUpdateGuard() : active(Start().on && Start().registered && FrameAnchors::IsRenderOwner())
+	WaterUpdateGuard() : active(IS().on && Start().group.Registered() && FrameAnchors::IsRenderOwner())
 	{
 		if (!active)
 			return;
@@ -367,7 +373,7 @@ struct WaterUpdateGuard
 /** @brief Each dispatch is the frame's next flow copy instance. */
 struct FlowCopyGuard
 {
-	explicit FlowCopyGuard(bool a_flowCopy) : active(a_flowCopy && Start().on && Start().registered && FrameAnchors::IsRenderOwner())
+	explicit FlowCopyGuard(bool a_flowCopy) : active(a_flowCopy && IS().on && Start().group.Registered() && FrameAnchors::IsRenderOwner())
 	{
 		if (active) {
 			previous = Start().scope;

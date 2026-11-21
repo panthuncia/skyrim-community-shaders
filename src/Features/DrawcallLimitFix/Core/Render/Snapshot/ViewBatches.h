@@ -50,7 +50,6 @@ namespace DCLF::Draws
 		const SceneTables* tables = nullptr;
 		const Lookups* lookups = nullptr;
 		const PipelineCatalog* catalog = nullptr;
-		std::uint32_t targetsGeneration = 0;
 		const ScenePayload* payload = nullptr;
 		const MainPayload* main = nullptr;
 		const ShadowPayload* shadow = nullptr;
@@ -92,7 +91,7 @@ namespace DCLF::Draws
 		bool failed = false;         // Ready returns true with no set until the payload changes
 		// Kept across payloads.
 		std::unique_ptr<detail::SceneLists> lists;
-		std::uint64_t listSets = 0, checks = 0, checkedSets = 0, differingLanes = 0;
+		std::uint64_t listSets = 0;
 	};
 
 	/**

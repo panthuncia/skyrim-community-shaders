@@ -4,7 +4,7 @@
 #include "Features/DrawcallLimitFix/Features/Lod/LodGateComponent.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
-#include "Features/DrawcallLimitFix/Core/Engine/FrameClock.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Features/Lod/LodGates.h"
 
 #include <algorithm>
@@ -257,7 +257,7 @@ namespace DCLF::Features::Lod::Gates
 			flip.requestNs = gate.stampNs;
 			flip.requestFrame = gate.stampFrame;
 			gate.flipNs = GateNowNs();
-			gate.flipFrame = FrameClock::Frame();
+			gate.flipFrame = SceneClock::Step();
 			flip.flipNs = gate.flipNs;
 			flip.flipFrame = gate.flipFrame;
 			for (auto* geometry : gate.incomingGeometries) {
@@ -266,10 +266,6 @@ namespace DCLF::Features::Lod::Gates
 					continue;
 				// Each slot takes the phases recorded at its last evaluation.
 				a_context.SetEntryVeto(geometry, 0);
-				// Claims are by base geometry. A layer is claimed with its base.
-				if (entry.slot != kNoSlot)
-					if (const auto observed = a_context.ObservedSlot(entry.slot); observed.geometry == geometry && observed.phases && !a_context.LayerSlot(entry.slot))
-						flip.incoming.emplace_back(geometry, observed.phases);
 			}
 			for (auto* geometry : gate.outgoingGeometries) {
 				const auto entry = a_context.TrackedStateOf(geometry);
@@ -279,7 +275,6 @@ namespace DCLF::Features::Lod::Gates
 				if (entry.veto != Api::kVetoHold)
 					++gateStats.heldOut;
 				a_context.SetEntryVeto(geometry, Api::kVetoHold);
-				flip.outgoing.push_back(geometry);
 			}
 			gate.state = LodGate::State::Flipped;
 			++gateStats.flipped;

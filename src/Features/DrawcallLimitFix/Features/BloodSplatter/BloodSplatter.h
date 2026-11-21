@@ -60,6 +60,9 @@ namespace DCLF::Features::BloodSplatter
 		std::vector<Draw> draws;
 		std::uint64_t revision = 0;
 		Family::Owners owners;
+
+		/** @brief What the recording depends on: the draws' programs and viewports (BloodSplatterDraws.cpp). */
+		std::uint64_t Hash() const;
 	};
 
 	Api::Feature Feature();
@@ -75,7 +78,6 @@ namespace DCLF::Features::BloodSplatter
 	{
 		/** @brief False for good once the client failed. */
 		bool Available();
-		void Reserve();
 		/**
 		 * @brief Main thread. Starts the stage precompile, queues the programs and makes the client.
 		 * True once done or refused for good. False while the render graph has no host yet.

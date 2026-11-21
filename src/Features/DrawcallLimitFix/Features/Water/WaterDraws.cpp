@@ -1,16 +1,21 @@
 // The water family's render graph side. One client per view at the EngineDraws anchor, made once, draws a batch's latched draws in
 // engine order with the engine's stencil state and reference per draw.
+// The clients are declared at setup and registered by the next frame revision (frame revision plan, 6.19).
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/Engine.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Family/FamilyClient.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "Utils/Hash.h"
 #include "Utils/Logging.h"
+#include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
@@ -57,10 +62,9 @@ namespace DCLF::Features::Water::WaterDraws
 
 		const std::array<std::int32_t, 3>& TargetListOf(const Shape& a_shape) { return a_shape.view == View::Mask ? kMaskTargets : kSurfaceTargets; }
 
-		struct Client
+		struct Client : Family::ClientState<Run>
 		{
 			Shape shape;
-			std::string id;
 			std::shared_ptr<org::LatchBlock> latch;
 			// Only this client's commit opens the gate, so a run another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
@@ -68,15 +72,11 @@ namespace DCLF::Features::Water::WaterDraws
 			FrameAnchors::Texture depth;
 			// Fixed at setup, so a new Publish needs no new client.
 			Family::PublishedInputs inputs;
-			// Written by the render thread, read by the host's thread.
-			std::shared_ptr<const Run> run;
 			// The run each commit drew. The pass may record on the submission thread after the render thread published the next run.
 			::RenderGraph::RunSlots<Run> runs;
 			// The draws committed into the declared segment's run so far this frame.
 			std::shared_ptr<const Run> committed;
 			std::uint64_t committedFrame = UINT64_MAX;
-			bool pending = false;
-			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
 
 		struct Bindings
@@ -123,14 +123,14 @@ namespace DCLF::Features::Water::WaterDraws
 			{
 				if (atExecution)
 					return;
-				const auto run = std::atomic_load(&client->run);
+				const auto run = client->Current();
 				a_out.push_back(run ? run->revision : 0);
 			}
 
 			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, client->id);
-				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
+				return { atExecution ? nullptr : client->Current(), client };
 			}
 
 			/** @brief A run whose commit opened none of the gate entries records only the pass's barriers. */
@@ -212,15 +212,11 @@ namespace DCLF::Features::Water::WaterDraws
 		/** @brief Render-thread state. */
 		struct DrawsState
 		{
-			std::array<std::shared_ptr<Client>, kViews> clients;
+			Family::Client<Run, Client, kViews> clients{ "water" };
 			Family::EngineDrawPrograms programs{ "water", { .source = kShader,
 															  .constantWords = ShaderBindings::Words<WaterBlock>(),
 															  .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Water),
 															  .stagesOf = &StagesOf } };
-			bool reserved = false;
-			bool setUp = false;
-			std::uint64_t runs = 0, draws = 0;
-			Family::KeptOwners kept;
 		};
 
 		/**
@@ -234,6 +230,7 @@ namespace DCLF::Features::Water::WaterDraws
 			using Colour = RE::RENDER_TARGET;
 			using Depth = RE::RENDER_TARGET_DEPTHSTENCIL;
 			a_inputs.Add(Family::RegisteredIdsAt(kHeaderRegisters));
+			a_inputs.Add(Family::RegisteredIdsAt(Integrations::PhysicalSky::kOrgTextureRegisters));
 			for (const auto depth : { Depth::kPOST_ZPREPASS_COPY, Depth::kMAIN_COPY, Depth::kPRECIPITATION_OCCLUSION_MAP })
 				a_inputs.AddEngine(depth);
 			for (const auto colour : { Colour::kMAIN_COPY, Colour::kREFRACTION_NORMALS, Colour::kWATER_DISPLACEMENT, Colour::kWATER_DISPLACEMENT_SWAP,
@@ -263,41 +260,41 @@ namespace DCLF::Features::Water::WaterDraws
 			client->id = a_shape.view == View::Mask ? "cs.water.mask" : "cs.water.surface";
 			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kExecutionDraws * kDrawStride);
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kExecutionDraws);
-			if (!client->gate) {
-				logger::warn("[DCLF] water: the {} run gate could not be made; the water stays the engine's", client->id);
-				return nullptr;
-			}
 			const auto& targets = TargetListOf(a_shape);
 			for (std::size_t i = 0; i < targets.size(); ++i) {
 				if (targets[i] < 0)
 					continue;
-				client->colours[i] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(targets[i]));
+				client->colours[i] = FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(targets[i])));
 				if (!client->colours[i]) {
 					logger::warn("[DCLF] water: the engine target {} cannot be imported; the {} stays the engine's", targets[i], client->id);
 					return nullptr;
 				}
 			}
-			client->depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
+			client->depth = FrameAnchors::EngineTexture(FrameAnchors::Depth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)));
 			if (!client->depth) {
 				logger::warn("[DCLF] water: the main depth cannot be imported; the {} stays the engine's", client->id);
 				return nullptr;
 			}
 			ListInputs(a_shape.view, client->inputs);
+			return client;
+		}
 
-			FrameAnchors::ClientDesc desc{};
-			desc.id = client->id;
-			desc.sharedConstants = true;
-			desc.gates = { client->gate };
-			desc.passes.push_back({ .name = client->id + ".draws",
+		/** @brief The registration of a_client. Its targets were imported at setup. */
+		bool MakeDesc(const std::shared_ptr<Client>& a_client, FrameAnchors::ClientDesc& a_desc)
+		{
+			a_desc.id = a_client->id;
+			a_desc.sharedConstants = true;
+			a_desc.gates = { a_client->gate };
+			a_desc.passes.push_back({ .name = a_client->id + ".draws",
 				.anchor = FrameAnchors::Anchor::EngineDraws,
-				.order = a_shape.view == View::Mask ? 0 : 1,
+				.order = a_client->shape.view == View::Mask ? 0 : 1,
 				.kind = FrameAnchors::PassKind::Render,
-				.make = [client]() -> std::shared_ptr<org::RenderPass> {
+				.make = [client = a_client]() -> std::shared_ptr<org::RenderPass> {
 					return std::make_shared<WaterPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
 				},
 				.atExecution = true });
-			desc.commit = [client](const FrameAnchors::Point&) {
-				const auto run = std::atomic_load(&client->run);
+			a_desc.commit = [client = a_client](const FrameAnchors::Point&) {
+				const auto run = client->Current();
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!host)
 					return;
@@ -334,97 +331,59 @@ namespace DCLF::Features::Water::WaterDraws
 						client->gate->OpenDraw(first + i, draw.indexCount, 1);
 				}
 			};
-			desc.repeats = true;
-			desc.executed = [client](const FrameAnchors::Point&) {
-				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
+			a_desc.repeats = true;
+			a_desc.executed = [client = a_client](const FrameAnchors::Point&) {
+				if (client->CountExecuted())
 					logger::info("[DCLF] water: the first {} run drawn by the graph", client->id);
 			};
-			desc.active = [client] { return client->pending; };
-			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
-			if (!FrameAnchors::Register(std::move(desc))) {
-				logger::warn("[DCLF] water: the {} client could not be registered; the water stays the engine's", client->id);
-				return nullptr;
-			}
-			const auto late = client->inputs.Unregistered();
-			logger::info("[DCLF] water: the {} client registered at setup (published inputs it may read: {}{})", client->id, client->inputs.Describe(),
+			a_desc.active = [client = a_client] { return client->pending; };
+			a_desc.segmentOnly = FrameAnchors::NamedByStage(a_desc.id);
+			const auto late = a_client->inputs.Unregistered();
+			logger::info("[DCLF] water: the {} client is made (published inputs it may read: {}{})", a_client->id, a_client->inputs.Describe(),
 				late.empty() ? std::string() : std::format("; not published yet: {}", late));
-			return client;
-		}
-
-		/** @brief What a run's recording depends on: everything but the latched values and counts. */
-		std::uint64_t RevisionOf(const Run& a_run)
-		{
-			std::uint64_t hash = 1469598103934665603ull;
-			const auto mix = [&](std::uint64_t a_value) { hash = (hash ^ a_value) * 1099511628211ull; };
-			mix(static_cast<std::uint64_t>(a_run.view));
-			mix(a_run.draws.size());
-			for (const auto index : a_run.headerIndices)
-				mix(index);
-			for (const auto& draw : a_run.draws) {
-				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
-				mix((std::uint64_t(draw.colours[0]) << 8) | draw.colours[1]);
-				mix(draw.stencilRef);
-				for (const auto v : draw.viewport.rect)
-					mix(v);
-				std::uint32_t range[2];
-				std::memcpy(range, draw.viewport.depthRange.data(), sizeof(range));
-				mix((std::uint64_t(range[0]) << 32) | range[1]);
-			}
-			return hash;
+			return true;
 		}
 	}
 
 	bool Available()
 	{
-		const auto& state = GetState();
-		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
-	}
-
-	void Reserve()
-	{
-		auto& state = GetState();
-		state.reserved = FrameAnchors::Reserve(FrameAnchors::Anchor::EngineDraws);
-		if (!state.reserved)
-			logger::warn("[DCLF] water: the EngineDraws anchor could not be reserved; the water stays the engine's");
+		return GetState().clients.Available();
 	}
 
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.setUp)
-			return true;
-		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
-			return false;
-		state.setUp = true;
+		if (const auto result = state.clients.BeginSetup())
+			return *result;
 		Family::StartStagePrecompile();
 		state.programs.Prebuild();
-		if (!::RenderGraph::Engine::Constants::Requested()) {
-			logger::warn("[DCLF] water: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the water stays the engine's");
+		if (!::RenderGraph::Engine::GraphMode()) {
+			logger::warn("[DCLF] water: needs graph mode; the water stays the engine's");
 			return true;
 		}
-		for (const auto view : { View::Mask, View::Surface })
-			if (TakesView(view))
-				state.clients[static_cast<std::size_t>(view)] = MakeClient({ .view = view });
+		namespace RF = ::RenderGraph::Frame;
+		for (const auto view : { View::Mask, View::Surface }) {
+			auto client = MakeClient({ .view = view });
+			if (!client)
+				continue;
+			// The targets are the engine's, made once with its other targets, and imported above. Nothing changes the registration.
+			state.clients.Declare<Family::NoKey>(
+				static_cast<std::size_t>(view), client, RF::DependsOn(), [](const RF::Inputs&) -> std::optional<Family::NoKey> { return Family::NoKey{}; },
+				[client](const Family::NoKey&, FrameAnchors::ClientDesc& a_desc) { return MakeDesc(client, a_desc); }, "the water stays the engine's");
+		}
 		return true;
 	}
 
 	bool CanTake(View a_view)
 	{
-		auto& state = GetState();
-		if (a_view >= View::Count)
-			return false;
-		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
-		if (!client)
-			return false;
+		// Until a revision registers the client, the engine draws the batch.
 		// The mask and the above-water surface are the deferred+water stage's. Under water the surface is the sun stage's.
-		return Family::HeldForBatch("water", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Deferred));
+		return GetState().clients.CanTake(static_cast<std::size_t>(a_view), static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Deferred));
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
 	{
-		if (a_view >= View::Count)
-			return Family::InputResult::NotListed;
-		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
+		const auto& client = GetState().clients.At(static_cast<std::size_t>(a_view));
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
@@ -435,34 +394,45 @@ namespace DCLF::Features::Water::WaterDraws
 
 	void Keep(Family::Owners&& a_owners)
 	{
-		GetState().kept.Keep(std::move(a_owners));
+		GetState().clients.Keep(std::move(a_owners));
 	}
 
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
-		auto& state = GetState();
 		if (!a_run)
 			return false;
-		const auto& client = state.clients[static_cast<std::size_t>(a_run->view)];
-		if (!client)
-			return false;
-		a_run->revision = RevisionOf(*a_run);
-		state.kept.Keep(std::move(a_run->owners));
-		++state.runs;
-		state.draws += a_run->draws.size();
-		std::atomic_store(&client->run, std::shared_ptr<const Run>(std::move(a_run)));
-		return Family::RunWithheld("water", client->id, FrameAnchors::Anchor::EngineDraws, client->pending);
+		const auto view = static_cast<std::size_t>(a_run->view);
+		return GetState().clients.Submit(view, std::move(a_run));
 	}
 
 	std::string Status()
 	{
 		const auto& state = GetState();
 		if (!Enabled())
-			return "off (CS_ORG_WATER)";
-		std::uint64_t executed = 0;
-		for (const auto& client : state.clients)
-			if (client)
-				executed += client->executed.load(std::memory_order_relaxed);
-		return fmt::format("{} runs ({} drawn), {} draws, {} programs", state.runs, executed, state.draws, state.programs.Built());
+			return "off (not graph mode)";
+		return fmt::format("{} runs ({} drawn), {} draws, {} programs", state.clients.Runs(), state.clients.Executed(), state.clients.Draws(), state.programs.Built());
+	}
+}
+
+namespace DCLF::Features::Water
+{
+	std::uint64_t Run::Hash() const
+	{
+		Util::Fnv1a hash;
+		hash.Mix(static_cast<std::uint64_t>(view));
+		hash.Mix(draws.size());
+		for (const auto index : headerIndices)
+			hash.Mix(index);
+		for (const auto& draw : draws) {
+			hash.Mix(draw.program.get());
+			hash.Mix((std::uint64_t(draw.colours[0]) << 8) | draw.colours[1]);
+			hash.Mix(draw.stencilRef);
+			for (const auto v : draw.viewport.rect)
+				hash.Mix(v);
+			std::uint32_t range[2];
+			std::memcpy(range, draw.viewport.depthRange.data(), sizeof(range));
+			hash.Mix((std::uint64_t(range[0]) << 32) | range[1]);
+		}
+		return hash.Value();
 	}
 }

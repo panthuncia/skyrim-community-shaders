@@ -7,7 +7,7 @@ import zlib
 import pytest
 from conftest import FIXTURES
 
-from cstest import procs, runner
+from cstest import collect, procs, runner
 from cstest.paths import GAME_EXE, STATUS_FILE, TEST_FILE
 
 
@@ -30,14 +30,20 @@ class FakeGame:
         self.die = die
         self.seen_test_file = None
         self.seen_modlist = None
+        self.report = None  # the status file's exit report, when set
+        self.seen_settings = None
 
     def launch(self, paths):
         contract = json.loads((paths.skse / TEST_FILE).read_text())
         self.seen_test_file = contract
         self.seen_modlist = paths.modlist.read_text()
+        settings = paths.overwrite / runner.SETTINGS_USER
+        self.seen_settings = json.loads(settings.read_text(encoding="utf-8-sig")) if settings.exists() else None
         self.running = True
         status = json.loads((FIXTURES / f"status-{self.status_name}.json").read_text())
         status["run_id"] = contract["run_id"]
+        if self.report is not None:
+            status["report"] = self.report
         if not self.die:
             (paths.skse / STATUS_FILE).write_text(json.dumps(status))
         (paths.skse / "CommunityShaders.log").write_text("[15:22:16.927] [1] [I] CommunityShaders v1-9-0-0\n")
@@ -78,10 +84,10 @@ def game(fake, monkeypatch):
 def test_run_passed_and_cleaned_up(fake, game):
     before = fake.modlist.read_text()
     (fake.skse / "CommunityShaders.env").write_text("MANUAL=1\n")
-    result = runner.run(fake, "native-vulkan+quick", ["dclf.shadows=false"], label="t", stage="p35", log=lambda *_: None)
+    result = runner.run(fake, "native-vulkan+quick", ["dclf.plain_snow_sparkle=false"], label="t", stage="p35", log=lambda *_: None)
     assert result["outcome"] == "passed", result["reason"]
     # What the game saw while it ran.
-    assert game.seen_test_file["env"]["CS_DCLF_SHADOWS"] == "0"
+    assert game.seen_test_file["env"]["CS_DCLF_PLAIN_SNOW_SPARKLE"] == "0"
     assert game.seen_test_file["features_disabled"] == []
     assert game.seen_test_file["expect"]["live_frames"] == 30
     assert "-ImprovedCameraSE" in game.seen_modlist and "+CS AB p35" in game.seen_modlist
@@ -156,3 +162,101 @@ def test_dry_run_touches_nothing(fake, game):
 def test_no_stage(fake, game):
     result = runner.run(fake, "guest+quick", [], log=lambda *_: None)
     assert result["outcome"] == "config-error"
+
+
+GRAPH_REPORT = {"graph_frames": {"frames": 900, "clients": {
+    "cs.ssgi": {"graph": 812, "first_graph_frame": 4100},
+    "cs.e11-rays": {"graph": 400, "first_graph_frame": 4000},
+}}}
+
+
+def test_graph_frames_held(fake, game):
+    game.report = GRAPH_REPORT
+    result = runner.run(fake, "guest+quick", ['expect.graph_frames={min={"cs.ssgi"=300}}'], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "passed", result["reason"]
+    assert result["graph_frames"]["failures"] == [] and result["graph_frames"]["report"] == GRAPH_REPORT["graph_frames"]
+    # The copy of the final status in the run folder is what the check read.
+    assert json.loads((fake.runs / result["run_id"] / "status.json").read_text())["report"] == GRAPH_REPORT
+
+
+def test_graph_frames_fail(fake, game):
+    game.report = GRAPH_REPORT
+    sets = ['expect.graph_frames={min={"cs.ssgi"=1000, "cs.fog"=1}}']
+    result = runner.run(fake, "guest+quick", sets, stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "failed" and result["outcome_by"] == "harness"
+    assert result["reason"] == ("cs.ssgi ran on the graph in 812 frames, at least 1000 expected; cs.fog ran on the graph in 0 frames, at least 1 expected "
+                                "(harness)")
+    saved = json.loads((fake.runs / result["run_id"] / "result.json").read_text())
+    assert len(saved["graph_frames"]["failures"]) == 2
+
+
+def test_graph_frames_missing_report(fake, game):
+    result = runner.run(fake, "guest+quick", ['expect.graph_frames={min={"cs.ssgi"=1}}'], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "failed"
+    assert result["reason"] == "no graph_frames report in the status file (a Release build or an older build) (harness)"
+
+
+def test_graph_frames_skipped_in_d3d11_mode(fake, game):
+    result = runner.run(fake, "d3d11+quick", ['expect.graph_frames={min={"cs.ssgi"=300}}'], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "passed", result["reason"]
+    assert result["graph_frames"]["skipped"] == "skipped (CS_ORG=0)"
+
+
+def test_graph_frames_unit():
+    contract = {"env": {}, "expect": {"graph_frames": {"min": {"cs.e11-rays": 500}}}}
+    status = {"report": GRAPH_REPORT}
+    got = collect.graph_frames(contract, status)
+    assert got["failures"] == ["cs.e11-rays ran on the graph in 400 frames, at least 500 expected"] and got["skipped"] == ""
+    assert collect.graph_frames({"env": {}, "expect": {"graph_frames": {}}}, status)["failures"] == []
+
+
+SSGI = {"Screen Space GI": {"Enabled": True, "Settings": {"Quality": 3}}}
+
+
+def test_saved_settings_over_an_existing_file(fake, game):
+    target = fake.overwrite / runner.SETTINGS_USER
+    target.parent.mkdir(parents=True)
+    original = b'\xef\xbb\xbf{\r\n "Screen Space GI": {"Enabled": false, "Settings": {"Quality": 1, "Blur": 2}},\r\n "Other": 5\r\n}'
+    target.write_bytes(original)
+    messages = []
+    sets = ['saved_settings.Screen Space GI={Enabled=true, Settings={Quality=3}}']
+    result = runner.run(fake, "guest+quick", sets, stage="p35", log=messages.append)
+    assert result["outcome"] == "passed", result["reason"]
+    assert game.seen_settings == {"Screen Space GI": {"Enabled": True, "Settings": {"Quality": 3, "Blur": 2}}, "Other": 5}
+    assert any(m.startswith("Saved settings: Screen Space GI written into") for m in messages)
+    # Put back byte for byte, and the copy set aside is gone.
+    assert target.read_bytes() == original
+    assert not list((fake.root / "aside").glob("*SettingsUser.json"))
+
+
+def test_saved_settings_new_file_from_the_staged_mod(fake, game):
+    staged = fake.mods / "CS AB p35" / runner.SETTINGS_USER
+    staged.parent.mkdir(parents=True)
+    staged.write_text('{"Screen Space GI": {"Enabled": false, "Settings": {"Blur": 2}}}', encoding="utf-8")
+    result = runner.run(fake, "guest+quick", ['saved_settings.Screen Space GI={Enabled=true, Settings={Quality=3}}'], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "passed", result["reason"]
+    assert game.seen_settings == {"Screen Space GI": {"Enabled": True, "Settings": {"Blur": 2, "Quality": 3}}}
+    assert not (fake.overwrite / runner.SETTINGS_USER).exists()
+    assert staged.read_text(encoding="utf-8") == '{"Screen Space GI": {"Enabled": false, "Settings": {"Blur": 2}}}'
+
+
+def test_saved_settings_new_file_from_nothing(fake, game):
+    result = runner.run(fake, "guest+quick", ['saved_settings.Disable at Boot={"Light Limit Fix"=true}'], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "passed", result["reason"]
+    assert game.seen_settings == {"Disable at Boot": {"Light Limit Fix": True}}
+    assert not (fake.overwrite / runner.SETTINGS_USER).exists()
+
+
+def test_saved_settings_unreadable_file_is_left_alone(fake, game):
+    target = fake.overwrite / runner.SETTINGS_USER
+    target.parent.mkdir(parents=True)
+    target.write_text("{ not json", encoding="utf-8")
+    result = runner.run(fake, "guest+quick", ['saved_settings.Screen Space GI={Enabled=true}'], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "not-run" and "does not parse" in result["reason"]
+    assert target.read_text(encoding="utf-8") == "{ not json"
+    assert game.seen_test_file is None and not fake.journal.exists()
+
+
+def test_format_diff_shows_await():
+    steps = [{"at": "world-ready", "frames": 5, "do": "call", "arg": "org.rebuild", "await": "adopted"}]
+    assert runner.format_diff([("steps", [], steps)]) == ["  steps: 0 -> 1: world-ready+5 call org.rebuild await adopted"]

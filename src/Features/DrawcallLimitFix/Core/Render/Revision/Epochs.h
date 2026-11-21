@@ -30,6 +30,37 @@ namespace DCLF::Draws
 	// The shadow epoch has one shape, which holds both the shadow views and the occlusion maps.
 	constexpr std::uint32_t kShadowShape = 0, kShadowShapes = 1;
 
+	/**
+	 * @brief Why the engine draws an epoch's work in a frame (cleanup plan A3, step 6). Each is decided from what the frame's Begin
+	 * adopted: the drawing state, the toggles and the scene. An uncovered epoch the recipe has DCLF cover, with no state, is a tap
+	 * error (TapError::Uncovered).
+	 */
+	enum class EngineState : std::uint8_t
+	{
+		None,        // DCLF covers the epoch
+		NotDrawing,  // DCLF has not drawn yet, or an adoption stopped it (FrameView::NotDrawingYet)
+		LoadScreen,  // a load screen is up
+		NoShape,     // the adopted scene has no shape for the epoch, so nothing of it is in the scene
+		HostEngine,  // a hosted epoch whose host is the engine's
+	};
+
+	constexpr const char* EngineStateName(EngineState a_state)
+	{
+		switch (a_state) {
+		case EngineState::None:
+			return "DCLF's";
+		case EngineState::NotDrawing:
+			return "not drawing";
+		case EngineState::LoadScreen:
+			return "load screen";
+		case EngineState::NoShape:
+			return "no shape";
+		case EngineState::HostEngine:
+			return "host is the engine's";
+		}
+		return "?";
+	}
+
 	/** @brief What kind of shape an epoch records against. */
 	enum class ShapeKind : std::uint8_t
 	{
@@ -48,7 +79,6 @@ namespace DCLF::Draws
 		ShapeKind shape = ShapeKind::Main;
 		std::uint32_t index = 0;
 		std::uint32_t sharesWith = kNoEpoch;
-		Api::ObjectClass gate = Api::ObjectClass::Count;
 		bool claims = false;
 		std::uint32_t hostedBy = kNoEpoch;
 		std::uint32_t hostsMask = 0;

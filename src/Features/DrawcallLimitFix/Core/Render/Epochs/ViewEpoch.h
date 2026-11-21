@@ -192,7 +192,6 @@ namespace DCLF::Draws
 		bool rebuildPending = false;
 		std::shared_ptr<const ComputeProgram> buildDraws;
 		rhi::CommandSignaturePtr dispatchSignature;
-		std::shared_ptr<PreprocessStates> preprocessForward;
 	};
 
 	struct BuildState;

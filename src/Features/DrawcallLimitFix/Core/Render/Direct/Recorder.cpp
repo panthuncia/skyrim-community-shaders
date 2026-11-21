@@ -239,7 +239,7 @@ namespace DCLF::Direct
 
 		// Records.h's kObjectCrossfadeCopy.
 		constexpr std::uint32_t kCrossfadeCopyBit = 1u << 30;
-		constexpr std::uint32_t kDrawAll = 0xFFFFu;
+		constexpr std::uint32_t kRecorderDrawAll = 0xFFFFu;
 
 		/**
 		 * @brief Whether a lane's sequence is drawn under a_mask, and its object word. Sequences past the mask's 16 are drawn only
@@ -249,7 +249,7 @@ namespace DCLF::Direct
 		{
 			a_word = a_objectWord;
 			if (a_sequence >= 16)
-				return (a_mask & kDrawAll) == kDrawAll;
+				return (a_mask & kRecorderDrawAll) == kRecorderDrawAll;
 			if (!((a_mask >> a_sequence) & 1u))
 				return false;
 			if ((a_mask >> (16 + a_sequence)) & 1u)
@@ -262,7 +262,7 @@ namespace DCLF::Direct
 		{
 			// A cull-only lane has no sequences and draws nothing.
 			const std::uint32_t count = a_batch.sequenceCount ? a_batch.sequenceCount[a_lane] : 1u;
-			if (!(a_mask & kDrawAll) || !count)
+			if (!(a_mask & kRecorderDrawAll) || !count)
 				return;
 			const std::uint32_t bucket = a_batch.pipelineBucket ? a_batch.pipelineBucket[a_lane] : 0u;
 			if (!BindBucket(a_context, bucket))
@@ -275,7 +275,7 @@ namespace DCLF::Direct
 			}
 		}
 
-		std::uint32_t MaskOf(const CulledBatch& a_batch, std::uint32_t a_kept) { return a_batch.drawMasks ? a_batch.drawMasks[a_kept] : kDrawAll; }
+		std::uint32_t MaskOf(const CulledBatch& a_batch, std::uint32_t a_kept) { return a_batch.drawMasks ? a_batch.drawMasks[a_kept] : kRecorderDrawAll; }
 
 		constexpr std::uint32_t kTerrainLanes = kLaneTerrainGroup1 | kLaneTerrainGroup2;
 		std::uint32_t FlagsOf(const ViewBatch& a_batch, std::uint32_t a_lane) { return a_batch.flags ? a_batch.flags[a_lane] : 0u; }
@@ -415,9 +415,9 @@ namespace DCLF::Direct
 		// Pushed pipelines are built for the main pass's formats. The reflection faces draw into an R16G16B16A16 cube, so they keep
 		// their view pipelines (VUID-vkCmdDrawIndexed-dynamicRenderingUnusedAttachments-08911). D3D12 builds no unpulled pipelines.
 		a_context.pushedColour = !a_context.indirect && !::RenderGraph::Backend::IsD3D12() && bindings.main && bindings.main->layout.valid() &&
-		                         ((a_context.pass == RecordPass::Colour && a_context.view != ViewType::Reflection && a_context.mainTargets && ExperimentOn(kExpPushedColour) &&
+		                         ((a_context.pass == RecordPass::Colour && a_context.view != ViewType::Reflection && a_context.mainTargets &&
 		                              !bindings.main->colour.empty()) ||
-		                          (a_context.pass == RecordPass::Depth && ExperimentOn(kExpPushedDepth) && !bindings.offsetDepth && !bindings.main->depth.empty()));
+		                          (a_context.pass == RecordPass::Depth && !bindings.offsetDepth && !bindings.main->depth.empty()));
 		BindListLayout(a_context, false);
 		a_context.runWordsPushed = false;
 		if (a_context.indirect) {
@@ -456,10 +456,10 @@ namespace DCLF::Direct
 			const std::uint32_t lane = a_batch.lanes[k];
 			const std::uint32_t mask = MaskOf(a_batch, k);
 			const std::uint32_t count = batch.sequenceCount ? batch.sequenceCount[lane] : 1u;
-			if (!(mask & kDrawAll) || !count)
+			if (!(mask & kRecorderDrawAll) || !count)
 				continue;
 			const std::uint32_t part = partOf(lane);
-			mostDraws[part] += (mask & kDrawAll) == kDrawAll ? count : static_cast<std::uint32_t>(std::popcount(mask & kDrawAll));
+			mostDraws[part] += (mask & kRecorderDrawAll) == kRecorderDrawAll ? count : static_cast<std::uint32_t>(std::popcount(mask & kRecorderDrawAll));
 			const std::uint32_t bucket = batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u;
 			if (bucket != lastBucket[part]) {
 				lastBucket[part] = bucket;
@@ -486,7 +486,7 @@ namespace DCLF::Direct
 			const std::uint32_t lane = a_batch.lanes[k];
 			const std::uint32_t mask = MaskOf(a_batch, k);
 			const std::uint32_t count = batch.sequenceCount ? batch.sequenceCount[lane] : 1u;
-			if (!(mask & kDrawAll) || !count)
+			if (!(mask & kRecorderDrawAll) || !count)
 				continue;
 			const std::uint32_t part = partOf(lane);
 			const std::uint32_t bucket = batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u;
@@ -560,8 +560,9 @@ namespace DCLF::Direct
 		CountDrawn(a_context, a_context.drawn - before);
 	}
 
-	void RecordSortedBatches(RecordContext& a_context, std::span<const CulledBatch* const> a_batches, const std::array<float, 4>& a_plane, std::uint32_t a_slabs)
+	void RecordSortedBatches(RecordContext& a_context, std::span<const CulledBatch* const> a_batches, const std::array<float, 4>& a_plane)
 	{
+		constexpr std::uint32_t kSlabs = 8;
 		struct Item
 		{
 			float distance;
@@ -586,11 +587,11 @@ namespace DCLF::Direct
 				items.push_back({ distance, 0u, batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u, culled, k });
 			}
 		}
-		// Nearest slab first, each drawn by pipeline for fewer binds. With a_slabs 0, sort by distance alone.
-		if (a_slabs && farthest > nearest) {
-			const float scale = static_cast<float>(a_slabs) / (farthest - nearest);
+		// Nearest slab first, each drawn by pipeline for fewer binds. With every caster at one distance, by distance alone.
+		if (farthest > nearest) {
+			const float scale = static_cast<float>(kSlabs) / (farthest - nearest);
 			for (auto& item : items)
-				item.slab = (std::min)(a_slabs - 1, static_cast<std::uint32_t>((item.distance - nearest) * scale));
+				item.slab = (std::min)(kSlabs - 1, static_cast<std::uint32_t>((item.distance - nearest) * scale));
 			std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
 				return a.slab != b.slab ? a.slab < b.slab : a.bucket != b.bucket ? a.bucket < b.bucket : a.distance < b.distance;
 			});
@@ -738,21 +739,5 @@ namespace DCLF::Direct
 		a_context.boundBucket = ~0u;
 		a_context.boundPipeline = {};
 		a_context.mainLayoutBound = false;
-	}
-
-	bool RecordSecondary(RecordContext& a_context, const rhi::SecondaryInheritance& a_inheritance, const CulledBatch& a_batch, rhi::CommandList& a_secondary)
-	{
-		if (a_secondary.BeginSecondary(a_inheritance) != rhi::Result::Ok)
-			return false;
-		RecordContext context{ a_secondary, a_context.set, a_context.view, a_context.viewIndex, a_context.site, a_context.depthPass, a_context.bindings, a_context.counters };
-		context.mainTargets = a_context.mainTargets;
-		const bool begun = BeginList(context);
-		if (begun)
-			RecordBatch(context, a_batch);
-		a_secondary.End();
-		a_context.drawn += context.drawn;
-		if (begun && a_context.counters)
-			std::atomic_ref<std::uint32_t>(a_context.counters->secondaries).fetch_add(1, std::memory_order_relaxed);
-		return begun;
 	}
 }

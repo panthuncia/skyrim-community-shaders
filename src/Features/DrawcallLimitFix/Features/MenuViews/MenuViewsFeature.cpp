@@ -1,4 +1,4 @@
-// MenuViews: the menu scene renders as DCLF views (CS_ORG_MENU3D, CS_ORG_MAP, default off). The rest is MenuViewsProbe.cpp.
+// MenuViews: the menu scene renders as DCLF views (on in graph mode).
 
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -14,11 +14,6 @@ namespace DCLF::Features::MenuViews
 {
 	namespace
 	{
-		void Lines(std::string& a_text)
-		{
-			a_text += Report();
-		}
-
 		/**
 		 * @brief UI3DSceneManager::Render (SE 51855, AE 52727). Its registrations are no world view's, so a load's hold leaves them to the engine.
 		 */
@@ -43,7 +38,7 @@ namespace DCLF::Features::MenuViews
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The menu scenes' scopes for a load's hold, whatever CS_ORG_MENU3D and CS_ORG_MAP say. */
+		/** @brief The menu scenes' scopes for a load's hold, whether or not the menu scenes are on. */
 		void InstallSceneHooks()
 		{
 			stl::detour_thunk<Menu3DRender>(REL::RelocationID(51855, 52727));
@@ -55,22 +50,10 @@ namespace DCLF::Features::MenuViews
 					Menu3DRender::func.address() != 0, LocalMapRender::func.address() != 0);
 		}
 
-		void Install(Api::InstallContext& a_context)
+		void Install(Api::InstallContext&)
 		{
 			InstallSceneHooks();
-			// Before the render graph initializes, since the anchors' epochs are fixed then.
-			if (Scenes::AnyEnabled())
-				Scenes::SceneDraws::Reserve();
-			if (!Menu3DEnabled() && !MapEnabled()) {
-				Scenes::InstallHooks();
-				return;
-			}
-			InstallHooks();
-			// After the probe's, since the family's thunks chain onto the probe's at the same calls.
 			Scenes::InstallHooks();
-			a_context.RegisterReportLines({ .name = "menu views", .point = Api::ReportPoint::AsyncWork, .text = &Lines });
-			logger::info("[DCLF] menu views: probe on (CS_ORG_MENU3D={}, CS_ORG_MAP={}); the switched-on scenes' batches are the menu scenes family's", Menu3DEnabled() ? 1 : 0,
-				MapEnabled() ? 1 : 0);
 		}
 	}
 
@@ -78,7 +61,6 @@ namespace DCLF::Features::MenuViews
 	{
 		void Preflight()
 		{
-			PreflightHooks();
 			Scenes::PreflightHooks();
 		}
 
@@ -90,13 +72,13 @@ namespace DCLF::Features::MenuViews
 
 	bool Menu3DEnabled()
 	{
-		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
+		static const bool enabled = ::RenderGraph::Engine::GraphMode();
 		return enabled;
 	}
 
 	bool MapEnabled()
 	{
-		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
+		static const bool enabled = ::RenderGraph::Engine::GraphMode();
 		return enabled;
 	}
 

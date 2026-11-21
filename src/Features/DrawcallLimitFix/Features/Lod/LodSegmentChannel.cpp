@@ -4,7 +4,6 @@
 #include "Features/DrawcallLimitFix/Features/Lod/LodSegmentEvents.h"
 #include "Features/DrawcallLimitFix/Features/Lod/LodSegments.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 #include <memory>
 #include <span>
@@ -39,27 +38,23 @@ namespace DCLF::Features::Lod
 					++stats.changed;
 				a_context.SetEntryRanges(key, std::move(next), changed);
 			}
-			Diagnostics::Notify(SegmentsApplied{ a_context });
 		}
 
 		void SegmentLines(const Api::CoordinatorComponentContext& a_context, std::string& a_text)
 		{
 			auto& segments = a_context.State<SegmentState>();
 			auto& l = segments.stats;
-			auto& lp = segments.parity;
 			const auto& ranges = a_context.EntryRanges();
-			if (!l.events && !lp.checks && ranges.empty())
+			if (!l.events && ranges.empty())
 				return;
 			std::size_t partial = 0;
 			for (const auto& [shape, shapeRanges] : ranges) {
 				const std::uint32_t whole = LodSegments::At<std::uint16_t>(shape, LodSegments::kTriangleCount) * 3u;
 				partial += shapeRanges.size() != 1 || shapeRanges[0].firstIndex != 0 || shapeRanges[0].indexCount != whole ? 1 : 0;
 			}
-			a_text += fmt::format("[DCLF] object LOD segments: {} shapes ({} partly hidden){}; {} segment events, {} drawn-range changes; parity {} checks, {} shapes compared, {} differ{}{}\n",
-				ranges.size(), partial, SegmentHooksInstalled() ? "" : ", events not installed", l.events, l.changed, lp.checks, lp.shapes, lp.differ,
-				lp.checks ? (lp.differ ? " <- LOD SEGMENTS; first: " : " <- OK") : "", lp.first);
+			a_text += fmt::format("[DCLF] object LOD segments: {} shapes ({} partly hidden){}; {} segment events, {} drawn-range changes\n",
+				ranges.size(), partial, SegmentHooksInstalled() ? "" : ", events not installed", l.events, l.changed);
 			l = {};
-			lp = { .pass = lp.pass };
 		}
 	}
 

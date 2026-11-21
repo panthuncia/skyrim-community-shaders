@@ -1,15 +1,42 @@
 // Community Shaders. Supercell NDF generation from a back template and mesocyclone core.
+// Dual-target (Common/OrgResources.hlsli). The graph reads the storm data from a latch.
+#include "Common/OrgResources.hlsli"
 #include "PhysicalSky/StormData.hlsli"
 
+#define STORM_NDF_RESOURCES(X)                    \
+	X(SRV, Texture2D<float>, Pattern, 0)          \
+	X(SRV, Texture2D<float2>, BackHeight, 1)      \
+	X(SRV, Texture2D<float4>, BackModeling, 2)    \
+	X(SRV, Texture2D<float2>, CoreHeight, 3)      \
+	X(SRV, Texture2D<float4>, CoreModeling, 4)    \
+	X(UAV, RWTexture2DArray<float4>, Height, 0)   \
+	X(UAV, RWTexture2DArray<float4>, Modeling, 1) \
+	X(SAMPLER, SamplerState, WrapSampler, 0)      \
+	X(LATCH, CloudStormData, Storm, 1)            \
+	X(EXTERN, uint, OutputSlice, 0)
+ORG_PUSH_BLOCK(STORM_NDF_RESOURCES(ORG_HANDLE))
+
+// D3D11 keeps the cbuffer name StormGeneration.
+#if defined(CS_ORG_BINDLESS)
+ORG_RESOURCE(LATCH, CloudStormData, Storm, 1)
+#else
 cbuffer StormGeneration : register(b1) { CloudStormData Storm; };
-Texture2D<float> Pattern : register(t0);
-Texture2D<float2> BackHeight : register(t1);
-Texture2D<float4> BackModeling : register(t2);
-Texture2D<float2> CoreHeight : register(t3);
-Texture2D<float4> CoreModeling : register(t4);
-SamplerState WrapSampler : register(s0);
-RWTexture2DArray<float4> Height : register(u0);
-RWTexture2DArray<float4> Modeling : register(u1);
+#endif
+ORG_RESOURCE(SRV, Texture2D<float>, Pattern, 0)
+ORG_RESOURCE(SRV, Texture2D<float2>, BackHeight, 1)
+ORG_RESOURCE(SRV, Texture2D<float4>, BackModeling, 2)
+ORG_RESOURCE(SRV, Texture2D<float2>, CoreHeight, 3)
+ORG_RESOURCE(SRV, Texture2D<float4>, CoreModeling, 4)
+ORG_RESOURCE(SAMPLER, SamplerState, WrapSampler, 0)
+ORG_RESOURCE(UAV, RWTexture2DArray<float4>, Height, 0)
+ORG_RESOURCE(UAV, RWTexture2DArray<float4>, Modeling, 1)
+
+#if defined(CS_ORG_BINDLESS)
+// The graph writes a whole-array view, so the push block names the instance's slice.
+#	define STORM_OUTPUT_SLICE OrgHandle_OutputSlice
+#else
+#	define STORM_OUTPUT_SLICE 0
+#endif
 
 float2 Rotate(float2 p, float angle)
 {
@@ -97,17 +124,17 @@ float2 Rotate(float2 p, float angle)
 		}
 	}
 	if (((uint)Storm.generation.w & 4u) != 0u) {
-		Height[uint3(pixel, 0)] = float4(saturate(bounds), 0, 0);
-		Modeling[uint3(pixel, 0)] = saturate(float4(model, stormMask));
+		Height[uint3(pixel, STORM_OUTPUT_SLICE)] = float4(saturate(bounds), 0, 0);
+		Modeling[uint3(pixel, STORM_OUTPUT_SLICE)] = saturate(float4(model, stormMask));
 	} else if (authoredCore) {
-		Height[uint3(pixel, 0)] = float4(bounds - float2(level, 1.0) * authoredResidual, 1.0 - authoredResidual, 0);
-		Modeling[uint3(pixel, 0)] = float4(model, stormMask);
+		Height[uint3(pixel, STORM_OUTPUT_SLICE)] = float4(bounds - float2(level, 1.0) * authoredResidual, 1.0 - authoredResidual, 0);
+		Modeling[uint3(pixel, STORM_OUTPUT_SLICE)] = float4(model, stormMask);
 	} else {
 		const float heightResidual = (1.0 - strength * back.a) * (1.0 - strength * saturate(stormMask * 7.0));
 		// RG: height intercept; B: back alpha; A: back coverage contribution.
 		// Modeling R holds the core contribution so the max/lerp coverage
 		// expression can be evaluated against live weather, not an empty baseline.
-		Height[uint3(pixel, 0)] = float4(bounds - float2(level, 1.0) * heightResidual, back.a, strength * back.a * back.r);
-		Modeling[uint3(pixel, 0)] = float4(coreCoverageContribution, model.gb, stormMask);
+		Height[uint3(pixel, STORM_OUTPUT_SLICE)] = float4(bounds - float2(level, 1.0) * heightResidual, back.a, strength * back.a * back.r);
+		Modeling[uint3(pixel, STORM_OUTPUT_SLICE)] = float4(coreCoverageContribution, model.gb, stormMask);
 	}
 }

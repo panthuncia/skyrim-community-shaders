@@ -6,10 +6,14 @@
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "Deferred.h"
 #include "ScreenSpaceGI/ORGScreenSpaceGI.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
 #include "Util.h"
 #include "Utils/DebugSection.h"
+
+#include <array>
+#include <string_view>
 
 #define I18N_KEY_PREFIX "feature.screen_space_gi."
 
@@ -41,17 +45,71 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 ////////////////////////////////////////////////////////////////////////////////////
 
+ScreenSpaceGI::ScreenSpaceGI()
+{
+	historyResets.Bind(CS::SettingRegistry::Declare("ScreenSpaceGI.historyResets"));
+	settings.Enabled.Bind(CS::SettingRegistry::Declare("ScreenSpaceGI.Enabled"));
+	settings.EnableGI.Bind(CS::SettingRegistry::Declare("ScreenSpaceGI.EnableGI"));
+	settings.EnableExperimentalSpecularGI.Bind(CS::SettingRegistry::Declare("ScreenSpaceGI.EnableExperimentalSpecularGI"));
+	settings.ResolutionMode.Bind(CS::SettingRegistry::Declare("ScreenSpaceGI.ResolutionMode"));
+	settings.EnableTemporalDenoiser.Bind(CS::SettingRegistry::Declare("ScreenSpaceGI.EnableTemporalDenoiser"));
+	settings.EnableBlur.Bind(CS::SettingRegistry::Declare("ScreenSpaceGI.EnableBlur"));
+}
+
 void ScreenSpaceGI::RestoreDefaultSettings()
 {
 	settings = {};
-	recompileFlag = true;
+}
+
+void ScreenSpaceGI::ApplyPreset(Preset a_preset)
+{
+	settings.EnableBlur = true;
+	switch (a_preset) {
+	case Preset::AOOnly:
+		settings.NumSlices = 1;
+		settings.NumSteps = 6;
+		settings.EnableGI = false;
+		break;
+	case Preset::Low:
+		settings.NumSlices = 10;
+		settings.NumSteps = 12;
+		settings.ResolutionMode = 2;
+		settings.EnableGI = true;
+		break;
+	case Preset::Standard:
+		settings.NumSlices = 4;
+		settings.NumSteps = 8;
+		settings.ResolutionMode = 1;
+		settings.EnableGI = true;
+		break;
+	case Preset::Extreme:
+		settings.NumSlices = 4;
+		settings.NumSteps = 8;
+		settings.ResolutionMode = 0;
+		settings.EnableGI = true;
+		break;
+	case Preset::Reference:
+		settings.NumSlices = 8;
+		settings.NumSteps = 10;
+		settings.ResolutionMode = 0;
+		settings.EnableGI = true;
+		break;
+	}
+}
+
+bool ScreenSpaceGI::FrameSpecularGI() const
+{
+	if (ORGScreenSpaceGI::Get().IsActive())
+		return settings.EnableExperimentalSpecularGI.Adopted();
+	return settings.EnableExperimentalSpecularGI;
 }
 
 void ScreenSpaceGI::DrawSettings()
 {
 	static bool showAdvanced;
 
-	if (!ShadersOK())
+	// In graph mode the D3D11 shaders are not compiled.
+	if (!RenderGraph::Engine::GraphMode() && !ShadersOK())
 		Util::Text::Error("%s", T(TKEY("shader_compile_error"), "Compute shaders failed to compile!"));
 
 	///////////////////////////////
@@ -61,7 +119,7 @@ void ScreenSpaceGI::DrawSettings()
 
 	if (ImGui::BeginTable("Toggles", 4)) {
 		ImGui::TableNextColumn();
-		ImGui::Checkbox(T(TKEY("enabled"), "Enabled"), &settings.Enabled);
+		Util::Checkbox(T(TKEY("enabled"), "Enabled"), settings.Enabled);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("enabled_tooltip"), "Enable Screen Space Global Illumination. When disabled, all other settings are ignored."));
 		}
@@ -69,7 +127,7 @@ void ScreenSpaceGI::DrawSettings()
 		ImGui::TableNextColumn();
 		{
 			auto ilToggleGuard = Util::DisableGuard(!settings.Enabled);
-			recompileFlag |= ImGui::Checkbox(T(TKEY("indirect_lighting"), "Indirect Lighting (IL)"), &settings.EnableGI);
+			Util::Checkbox(T(TKEY("indirect_lighting"), "Indirect Lighting (IL)"), settings.EnableGI);
 		}
 		ImGui::TableNextColumn();
 		{
@@ -80,7 +138,7 @@ void ScreenSpaceGI::DrawSettings()
 		}
 		ImGui::TableNextColumn();
 		if (showAdvanced) {
-			recompileFlag |= ImGui::Checkbox(T(TKEY("hq_specular_il"), "(Experimental) HQ Specular IL"), &settings.EnableExperimentalSpecularGI);
+			Util::Checkbox(T(TKEY("hq_specular_il"), "(Experimental) HQ Specular IL"), settings.EnableExperimentalSpecularGI);
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::Text("%s", T(TKEY("hq_specular_il_tooltip"), "An experimental specular GI that is more accurate but requires more samples. Won't be blurred."));
 		}
@@ -98,62 +156,33 @@ void ScreenSpaceGI::DrawSettings()
 		// cannot represent, so hide it while a Scene Manager replica is borrowing this panel.
 		if (!SceneWidgetInterceptor::IsArmed() && ImGui::BeginTable("Presets", 5)) {
 			ImGui::TableNextColumn();
-			if (Util::Button(T(TKEY("ao_only"), "AO only"), { -1, 0 })) {
-				settings.NumSlices = 1;
-				settings.NumSteps = 6;
-				settings.EnableBlur = true;
-				settings.EnableGI = false;
-				recompileFlag = true;
-			}
+			if (Util::Button(T(TKEY("ao_only"), "AO only"), { -1, 0 }))
+				ApplyPreset(Preset::AOOnly);
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::Text("%s", T(TKEY("minimal_preset_tooltip"), "1 Slice, 6 Steps, blur enabled, no GI\n"));
 			}
 
 			ImGui::TableNextColumn();
-			if (Util::Button(T(TKEY("low"), "Low"), { -1, 0 })) {
-				settings.NumSlices = 10;
-				settings.NumSteps = 12;
-				settings.ResolutionMode = 2;
-				settings.EnableBlur = true;
-				settings.EnableGI = true;
-				recompileFlag = true;
-			}
+			if (Util::Button(T(TKEY("low"), "Low"), { -1, 0 }))
+				ApplyPreset(Preset::Low);
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::Text("%s", T(TKEY("low_tooltip"), "Quarter res and blurry."));
 
 			ImGui::TableNextColumn();
-			if (Util::Button(T(TKEY("standard"), "Standard"), { -1, 0 })) {
-				settings.NumSlices = 4;
-				settings.NumSteps = 8;
-				settings.ResolutionMode = 1;
-				settings.EnableBlur = true;
-				settings.EnableGI = true;
-				recompileFlag = true;
-			}
+			if (Util::Button(T(TKEY("standard"), "Standard"), { -1, 0 }))
+				ApplyPreset(Preset::Standard);
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::Text("%s", T(TKEY("standard_tooltip"), "Half res and somewhat stable."));
 
 			ImGui::TableNextColumn();
-			if (Util::Button(T(TKEY("extreme"), "Extreme"), { -1, 0 })) {
-				settings.NumSlices = 4;
-				settings.NumSteps = 8;
-				settings.ResolutionMode = 0;
-				settings.EnableBlur = true;
-				settings.EnableGI = true;
-				recompileFlag = true;
-			}
+			if (Util::Button(T(TKEY("extreme"), "Extreme"), { -1, 0 }))
+				ApplyPreset(Preset::Extreme);
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::Text("%s", T(TKEY("extreme_tooltip"), "Full res and clean."));
 
 			ImGui::TableNextColumn();
-			if (Util::Button(T(TKEY("reference"), "Reference"), { -1, 0 })) {
-				settings.NumSlices = 8;
-				settings.NumSteps = 10;
-				settings.ResolutionMode = 0;
-				settings.EnableBlur = true;
-				settings.EnableGI = true;
-				recompileFlag = true;
-			}
+			if (Util::Button(T(TKEY("reference"), "Reference"), { -1, 0 }))
+				ApplyPreset(Preset::Reference);
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::Text("%s", T(TKEY("reference_tooltip"), "Reference mode."));
 
@@ -176,11 +205,12 @@ void ScreenSpaceGI::DrawSettings()
 
 		if (ImGui::BeginTable("Less Work", 3, ImGuiTableFlags_SizingStretchSame)) {
 			ImGui::TableNextColumn();
-			recompileFlag |= ImGui::RadioButton(T(TKEY("full_res"), "Full Res"), &settings.ResolutionMode, 0);
+			// A click writes the setting, so it raises its event.
+			Util::RadioButton(T(TKEY("full_res"), "Full Res"), settings.ResolutionMode, 0);
 			ImGui::TableNextColumn();
-			recompileFlag |= ImGui::RadioButton(T(TKEY("half_res"), "Half Res"), &settings.ResolutionMode, 1);
+			Util::RadioButton(T(TKEY("half_res"), "Half Res"), settings.ResolutionMode, 1);
 			ImGui::TableNextColumn();
-			recompileFlag |= ImGui::RadioButton(T(TKEY("quarter_res"), "Quarter Res"), &settings.ResolutionMode, 2);
+			Util::RadioButton(T(TKEY("quarter_res"), "Quarter Res"), settings.ResolutionMode, 2);
 
 			ImGui::EndTable();
 		}
@@ -279,10 +309,10 @@ void ScreenSpaceGI::DrawSettings()
 
 		if (ImGui::BeginTable("denoisers", 2)) {
 			ImGui::TableNextColumn();
-			recompileFlag |= ImGui::Checkbox(T(TKEY("temporal_denoiser"), "Temporal Denoiser"), &settings.EnableTemporalDenoiser);
+			Util::Checkbox(T(TKEY("temporal_denoiser"), "Temporal Denoiser"), settings.EnableTemporalDenoiser);
 
 			ImGui::TableNextColumn();
-			ImGui::Checkbox(T(TKEY("blur"), "Blur"), &settings.EnableBlur);
+			Util::Checkbox(T(TKEY("blur"), "Blur"), settings.EnableBlur);
 
 			ImGui::EndTable();
 		}
@@ -354,20 +384,11 @@ void ScreenSpaceGI::DrawDebugSection()
 
 void ScreenSpaceGI::LoadSettings(json& o_json)
 {
-	const auto previous = settings;
-
+	// The D3D11 path recompiles when a setting its defines come from changed (DrawSSGI), the graph path with a frame revision.
 	settings = o_json;
-	settings.ResolutionMode = std::clamp(settings.ResolutionMode, 0, 2);
+	settings.ResolutionMode = std::clamp(settings.ResolutionMode.Get(), 0, 2);
 	settings.NumSlices = std::clamp(settings.NumSlices, 1u, 10u);
 	settings.NumSteps = std::clamp(settings.NumSteps, 1u, 20u);
-
-	// Scene overrides reload settings on every value change, so recompile only when a setting
-	// CompileComputeShaders turns into a define changed.
-	recompileFlag = recompileFlag ||
-	                settings.ResolutionMode != previous.ResolutionMode ||
-	                settings.EnableTemporalDenoiser != previous.EnableTemporalDenoiser ||
-	                settings.EnableGI != previous.EnableGI ||
-	                settings.EnableExperimentalSpecularGI != previous.EnableExperimentalSpecularGI;
 }
 
 void ScreenSpaceGI::SaveSettings(json& o_json)
@@ -400,7 +421,6 @@ bool ScreenSpaceGI::MenuOpenCloseEventHandler::Register()
 void ScreenSpaceGI::PostPostLoad()
 {
 	MenuOpenCloseEventHandler::Register();
-	ORGScreenSpaceGI::Reserve();
 }
 
 void ScreenSpaceGI::SetupResources()
@@ -466,16 +486,14 @@ void ScreenSpaceGI::SetupResources()
 		Util::SetResourceName(pointClampSampler.get(), "SSGI::PointClampSampler");
 	}
 
-	// The graph path makes its own textures; the D3D11 ones only when it does not run.
-	// When the graph path stops later, DrawSSGI makes them before its first D3D11 frame.
-	bool onGraph = false;
-	if (ORGScreenSpaceGI::Requested()) {
+	// The graph path makes its own textures; the D3D11 ones only outside graph mode. In graph mode a failed setup is fatal.
+	if (ORGScreenSpaceGI::On()) {
 		D3D11_TEXTURE2D_DESC mainDesc;
 		renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&mainDesc);
-		onGraph = ORGScreenSpaceGI::Get().Setup(mainDesc, [] { logger::warn("[ORG] Screen Space GI: drawing with D3D11 from now on"); });
-	}
-	if (!onGraph)
+		(void)ORGScreenSpaceGI::Get().Setup(mainDesc);
+	} else {
 		CreateTextures();
+	}
 
 	CompileComputeShaders();
 }
@@ -668,6 +686,10 @@ void ScreenSpaceGI::ClearShaderCache()
 
 void ScreenSpaceGI::CompileComputeShaders()
 {
+	// The graph path draws in graph mode, so the D3D11 shaders are not needed.
+	if (RenderGraph::Engine::GraphMode())
+		return;
+
 	struct ShaderCompileInfo
 	{
 		winrt::com_ptr<ID3D11ComputeShader>* programPtr;
@@ -705,7 +727,12 @@ void ScreenSpaceGI::CompileComputeShaders()
 			info.programPtr->attach(rawPtr);
 	}
 
-	recompileFlag = false;
+	compiledDefines = CurrentDefines();
+}
+
+ScreenSpaceGI::CompiledDefines ScreenSpaceGI::CurrentDefines() const
+{
+	return { settings.ResolutionMode, settings.EnableTemporalDenoiser, settings.EnableGI, settings.EnableExperimentalSpecularGI };
 }
 
 bool ScreenSpaceGI::ShadersOK()
@@ -793,8 +820,6 @@ void ScreenSpaceGI::DrawSSGI()
 	// The graph path ran in the DeferredPasses anchor, just before this.
 	if (ORGScreenSpaceGI::Get().IsActive())
 		return;
-	if (!texRadiance)
-		CreateTextures();
 
 	if (!(settings.Enabled && ShadersOK())) {
 		FLOAT clr[4] = { 0.f, 0.f, 0.f, 0.f };
@@ -823,7 +848,8 @@ void ScreenSpaceGI::DrawSSGI()
 
 	//////////////////////////////////////////////////////
 
-	if (recompileFlag)
+	// A setting the defines come from changed.
+	if (CurrentDefines() != compiledDefines)
 		ClearShaderCache();
 
 	UpdateSB();
@@ -1055,12 +1081,15 @@ void ScreenSpaceGI::DrawSSGI()
 
 std::tuple<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*, ID3D11ShaderResourceView*, ID3D11ShaderResourceView*> ScreenSpaceGI::GetOutputTextures()
 {
-	if (!loaded || !settings.Enabled)
+	if (!loaded)
 		return { nullptr, nullptr, nullptr, nullptr };
+	// The graph path's outputs are always there: zero and one texel each while the adopted revision has SSGI off.
 	if (ORGScreenSpaceGI::Get().IsActive()) {
 		const auto outputs = ORGScreenSpaceGI::Get().GetOutputs();
 		return { outputs.ao, outputs.y, outputs.coCg, outputs.specular };
 	}
+	if (!settings.Enabled)
+		return { nullptr, nullptr, nullptr, nullptr };
 	if (!texAo[outputAoIdx])
 		return { nullptr, nullptr, nullptr, nullptr };
 	return { texAo[outputAoIdx]->srv.get(), texIlY[outputIlIdx]->srv.get(), texIlCoCg[outputIlIdx]->srv.get(), texGiSpecular[outputAoIdx]->srv.get() };

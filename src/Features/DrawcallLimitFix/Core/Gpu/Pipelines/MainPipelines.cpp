@@ -12,8 +12,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -29,7 +29,7 @@
 #include <Tracy/Tracy.hpp>
 
 #include <OpenRenderGraph/GraphHost.h>
-#include <ORGModuleServices/PipelineService.h>
+#include <ORGModuleServices/PipelineRegistry.h>
 #include <rhi_helpers.h>
 
 #include <algorithm>
@@ -189,7 +189,7 @@ namespace DCLF
 			}
 		}
 		if (!nearest)
-			return lane.recreatedBy.empty() ? std::string("the first pipeline") : fmt::format("no other pipeline since the set was recreated ({})", lane.recreatedBy);
+			return std::string("the first pipeline");
 		return fmt::format("nearest requested pipeline differs in {}", best.fields);
 	}
 
@@ -264,30 +264,22 @@ namespace DCLF
 			state.blendOnly = true;
 		}
 		const auto& inputTargets = input->targets;
-		org::services::PipelineRecipe recipe;
-		recipe.id = fmt::format("dclf.{}.{:08X}.{:08X}.{:08X}.{:X}.{:016X}", member ? std::string_view(Extensions::ProgramFamilyOf(family).keyName) : std::string_view("lighting"),
+		const std::string id = fmt::format("dclf.{}.{:08X}.{:08X}.{:08X}.{:X}.{:016X}", member ? std::string_view(Extensions::ProgramFamilyOf(family).keyName) : std::string_view("lighting"),
 			a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.passDescriptor, a_key.rasterFlags, a_key.vertexLayout);
-		// A program rebuilt from edited files must be a new pipeline, never the service's active one.
-		recipe.shaderKey = PipelineKeyHash{}(a_key) ^ (program->fingerprint * 0x9E3779B97F4A7C15ull);
-		recipe.fixedFunctionKey = ankerl::unordered_dense::detail::wyhash::hash(&inputTargets, sizeof(inputTargets));
-		// The write masks are the engine's, so other masks mean another pipeline.
-		recipe.fixedFunctionKey ^= ankerl::unordered_dense::detail::wyhash::hash(&state.blend, sizeof(state.blend)) * 0x9E3779B97F4A7C15ull;
-		recipe.fixedFunctionKey ^= kPulledVerticesSalt;
 		// The same build serves the lane's program and a hot reload's.
 		const auto build = [device = device, layout = layout->GetHandle(), zLayout = zLayout->GetHandle(), key = a_key, formats = inputTargets, state,
 							   frontCCW = *input->frontCCW](const ShaderPrograms::Program& a_program) {
 			return Build(device, layout, zLayout, key, &a_program, formats, state, frontCCW);
 		};
-		recipe.build = [build, program] { return build(*program); };
-		auto live = MakeLive(recipe.id, ShaderPrograms::SourcePathOf(*shader), *program, [family, member, key = a_key, shader](ShaderPrograms::Rebuilt<ShaderPrograms::Program> a_done) {
+		auto live = MakeLive(id, ShaderPrograms::SourcePathOf(*shader), *program, [family, member, key = a_key, shader](ShaderPrograms::Rebuilt<ShaderPrograms::Program> a_done) {
 			if (member)
 				ShaderPrograms::Get().RebuildFamily(family, key, *shader, std::move(a_done));
 			else
 				ShaderPrograms::Get().RebuildLighting(key, *shader, std::move(a_done));
 		}, build);
 		l.entries.try_emplace(a_key);
-		(void)service.Request(std::move(recipe),
-			[completions = completions, key = a_key, generation = l.generation, live = std::move(live)](const org::services::PipelineArtifact& a_artifact) {
+		RequestBuild([build, program] { return build(*program); },
+			[completions = completions, key = a_key, generation = l.generation, live = std::move(live)](Artifact a_artifact) {
 				completions->main.Push({ key, generation, a_artifact, live });
 				WakePipelineLane();
 			});
@@ -302,57 +294,6 @@ namespace DCLF
 		logger::warn("[DCLF] on-demand pipeline build: {} pipeline slot {}: {}; {}",
 			a_family != Api::ProgramFamily::Count ? std::string_view(Extensions::ProgramFamilyOf(a_family).name) : std::string_view("Lighting"), a_slot, DescribeKey(a_key),
 			NearestKey(a_key));
-	}
-
-	void DrawPipelines::Impl::RecreateMainSet(const TargetFormats& a_from, const TargetFormats& a_to)
-	{
-		auto& l = lane;
-		auto describe = [](const TargetFormats& a_formats) {
-			std::string text;
-			for (std::uint32_t i = 0; i < a_formats.colorCount; ++i)
-				text += fmt::format("{} ", static_cast<int>(a_formats.colors[i]));
-			return text + fmt::format("depth {}", static_cast<int>(a_formats.depth));
-		};
-		logger::info("[DCLF] pipeline lane: main pass targets {} -> {}; rebuilding {} indirect pipelines", describe(a_from), describe(a_to), l.setPipelines.size());
-		ResetMainSet(fmt::format("main pass targets {} -> {}", describe(a_from), describe(a_to)));
-	}
-
-	void DrawPipelines::Impl::ResetMainSet(std::string a_by)
-	{
-		auto& l = lane;
-		l.StartOver();
-		l.versions.Retire();
-		l.setPipelines.clear();
-		l.setSlots.clear();
-		l.zGroupOf.clear();
-		l.zGroupFirst.clear();
-		l.zGroups.clear();
-		l.usage.clear();
-		l.constantTables.clear();
-		l.classOf.clear();
-		l.classMembers.clear();
-		l.classIndex.clear();
-		l.stateClasses.store(0, std::memory_order_relaxed);
-		l.largestClass.store(0, std::memory_order_relaxed);
-		for (auto& programCounters : l.programFamilyCounters)
-			for (auto* counter : { &programCounters.requested, &programCounters.ready, &programCounters.failed })
-				counter->store(0, std::memory_order_relaxed);
-		l.recreatedBy = std::move(a_by);
-		// The draw families depend on the targets too. The last builds are kept for the process.
-		for (auto& t : l.families) {
-			if (t.built)
-				t.retired.push_back(std::move(t.built));
-			t.built = {};
-			t.slot = {};
-			t.requested = false;
-			t.failed = t.programFailed;
-			for (auto* counter : { &t.counters.requested, &t.counters.ready, &t.counters.failed })
-				counter->store(0, std::memory_order_relaxed);
-			t.counters.failed.store(t.programFailed ? 1u : 0u, std::memory_order_relaxed);
-		}
-		// The refraction pipeline tests the main depth.
-		l.refraction.Reset();
-		l.dirty = true;
 	}
 
 	void DrawPipelines::Impl::AdmitLane()
@@ -403,7 +344,7 @@ namespace DCLF
 			if (const auto family = KeyFamily(a_key.rasterFlags); family != Api::ProgramFamily::Count)
 				l.programFamilyCounters[static_cast<std::size_t>(family)].ready.fetch_add(1, std::memory_order_relaxed);
 		});
-		if (published == Versions<SetVersion>::PublishResult::Published && Diagnostics::Observe().claims)
+		if (published == Versions<SetVersion>::PublishResult::Published && Diagnostics::Observe().parity)
 			if (const auto version = l.versions.published.load())
 				if (deviceGenerated)
 					CheckClasses(*version);
@@ -689,9 +630,7 @@ namespace DCLF
 		// Both vertex stages read the same attributes.
 		CheckVertexAttributes(a_program->vertexAttributes, a_key.vertexLayout);
 		auto built = std::make_shared<Built>();
-		// CS_DCLF_FOLIAGE_PARITY: terrain LOD's depth stage records its pixels, so it keeps its pixel stage.
-		const std::uint32_t technique = (a_key.passDescriptor >> 24) & 0x3f;
-		const bool pulledPixel = FragmentDefersDepth(a_program->pulledDepthPixel) || (Policy::RecordFoliagePixels() && (technique == 9 || technique == 18));
+		const bool pulledPixel = FragmentDefersDepth(a_program->pulledDepthPixel);
 		AddUsage(vertex, false, built->usage[kColorVariant]);
 		AddUsage(pixel, true, built->usage[kColorVariant]);
 		AddUsage(vertex, false, built->usage[kDepthVariant]);
@@ -800,13 +739,12 @@ namespace DCLF
 		return device.CreateCommandSignature(desc, layout->GetHandle(), a_class.signatures[a_variant]) == rhi::Result::Ok;
 	}
 
-	IndirectState GetIndirectState(const PipelineCatalog& a_catalog, std::uint32_t a_targetsGeneration)
+	IndirectState GetIndirectState(const PipelineCatalog& a_catalog)
 	{
-		// Invalid once the targets differ from the set's.
 		const auto& pipelines = DrawPipelines::Get();
 		const auto& impl = *pipelines.impl;
 		IndirectState state;
-		if (!IndirectStateValid(a_catalog, a_targetsGeneration))
+		if (!IndirectStateValid(a_catalog))
 			return state;
 		auto version = std::static_pointer_cast<const DrawPipelines::Impl::SetVersion>(a_catalog.setVersion);
 		state.classes.resize(version->classes.size());
@@ -857,14 +795,14 @@ namespace DCLF
 		return state;
 	}
 
-	bool IndirectStateValid(const PipelineCatalog& a_catalog, std::uint32_t a_targetsGeneration)
+	bool IndirectStateValid(const PipelineCatalog& a_catalog)
 	{
-		return a_catalog.setVersion && a_catalog.targetsGeneration == a_targetsGeneration && DrawPipelines::Get().impl->layout;
+		return a_catalog.setVersion && DrawPipelines::Get().impl->layout;
 	}
 
-	bool ZGroupPipelineReady(const PipelineCatalog& a_catalog, std::uint32_t a_targetsGeneration, std::uint32_t a_setIndex)
+	bool ZGroupPipelineReady(const PipelineCatalog& a_catalog, std::uint32_t a_setIndex)
 	{
-		if (!IndirectStateValid(a_catalog, a_targetsGeneration))
+		if (!IndirectStateValid(a_catalog))
 			return false;
 		const auto& version = *static_cast<const DrawPipelines::Impl::SetVersion*>(a_catalog.setVersion.get());
 		if (a_setIndex >= version.zGroupOf.size())
@@ -879,12 +817,12 @@ namespace DCLF
 	bool FrameIndirectStateValid()
 	{
 		const auto* catalog = FrameCatalog();
-		return catalog && IndirectStateValid(*catalog, DrawPipelines::Get().Generation());
+		return catalog && IndirectStateValid(*catalog);
 	}
 
 	IndirectState FrameIndirectState()
 	{
 		const auto* catalog = FrameCatalog();
-		return catalog ? GetIndirectState(*catalog, DrawPipelines::Get().Generation()) : IndirectState{};
+		return catalog ? GetIndirectState(*catalog) : IndirectState{};
 	}
 }

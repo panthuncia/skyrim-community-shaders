@@ -10,51 +10,28 @@
 
 namespace DCLF
 {
-	/** @brief Every CS_* switch Core reads, in the registry's order. Features register their own and read them by Api::SwitchId. */
+	/**
+	 * @brief Every CS_* switch Core reads, in the startup summary's order. Each is a row of the switch table
+	 * (src/Testing/SwitchRegistry.cpp), which has its kind and description. Features register their own and read them by Api::SwitchId.
+	 */
 	enum class Switch : std::uint8_t
 	{
 		// Features: unset is DCLF's full featureset; the startup log names a run that narrows one.
 		Dclf,
-		AsyncPriority,
 		AsyncCompute,
-		ForwardPlain,
-		ForwardDirect,
-		AsyncGraphBuilds,
-		MainPlain,
-		TerrainPlain,
-		DecalPlain,
-		ShadowMerge,
-		ShadowDepthClamp,
-		LazyRows,
-		Workers,
-		FrameWorkers,
 		SceneCopies,
 		Shrink,
-		Fanout,
-		Precompile,
 		Cull,
 		CpuPipeline,
 		CpuRecord,
-		CpuCadence,
 		CpuBatch,
-		ShadowOrder,
-		ProjectedUv,
 		PlainSnowSparkle,
-		Shadows,
 
 		// Parity checks: a live path against a from-scratch reference, logging each mismatch.
-		PersistentParity,
-		WalkParity,
-		ChangeLogParity,
-		ResidentParity,
-		BuildParity,
-		SetParity,
-		MirrorParity,
+		Parity,
 		PlayerParity,
 		CaptureParity,
 		ParityBoth,
-		CapturePointParity,
-		AccumulatedParity,
 
 		// Diagnostics: stats, shader debugging, and probes. See dclf-validation.md, "Probes and diagnostics".
 		Stats,
@@ -63,35 +40,8 @@ namespace DCLF
 		ShaderDebug,
 		ShaderSourceDir,
 		StageDump,
-		TraceTexturePaths,
-		Census,
-		PrecisionCensus,
-		MirrorWatch,
 		TableStart,
-		DepthTrace,
-		DrawTrace,
-		TargetProbe,
-		TargetDump,
-		FoliageParity,
-		ShadowDebugOutput,
 		ReleaseGuard,
-		ScheduleDump,
-		FrameTrace,
-		RefCheck,
-		RefTrace,
-
-		// Test harness: scripted input for unattended runs.
-		TestCommands,
-		TestMove,
-		TestTurn,
-		TestToggle,
-		TestExit,
-		TestRefuse,
-		TestShadowClamp,
-
-		// Other features' switches, read through the same file.
-		UpscaleSubmit,
-		StreamlineReflex,
 
 		Count
 	};
@@ -130,8 +80,11 @@ namespace DCLF
 	/** @brief Any thread after registration. A feature switch's value by name, for readers outside the feature that have no id. */
 	const std::string& RegisteredSwitchValue(std::string_view a_name);
 
-	/** @brief Every switch row, Core's then the features'. a_row gets the name, the lower-case kind and the description. */
-	void ForEachSwitchRow(const std::function<void(std::string_view, std::string_view, std::string_view)>& a_row);
+	/**
+	 * @brief Every switch the features registered, in registration order. Core's are rows of the switch table.
+	 * a_row gets the name, the lower-case kind, whether it is on by default (a feature that only "0" turns off) and the description.
+	 */
+	void ForEachFeatureSwitch(const std::function<void(std::string_view, std::string_view, bool, std::string_view)>& a_row);
 
 	/** @brief Whether the registry is complete. */
 	bool FeatureSwitchesRegistered();

@@ -10,7 +10,7 @@
 #include "Features/DrawcallLimitFix/Features/Fades/FadesAddresses.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
@@ -46,7 +46,7 @@ namespace DCLF::Features::Fades
 
 		// Lock-free queue of the animation job's fade updates. The inputs are the same for every call in one animation update.
 		// The first caller claims and publishes them. Later callers compare and set animatedVaried if they differ.
-		EventQueue<AnimatedFadeRoot> animatedNodes;
+		RenderGraph::Frame::EventQueue<AnimatedFadeRoot> animatedNodes;
 		std::vector<AnimatedFadeRoot> animatedBatch;  // render thread
 		enum : std::uint32_t
 		{
@@ -57,7 +57,7 @@ namespace DCLF::Features::Fades
 		std::atomic<std::uint32_t> animatedState{ kAnimatedEmpty };
 		AnimatedFadeInputs animatedInputs{};  // written by the claimer only, read once published
 		std::atomic<std::uint32_t> animatedVaried{ 0 };
-		EventQueue<AnimatedFadeInputs, 64> animatedUnpublished;  // inputs seen before the claimer published, compared at drain
+		RenderGraph::Frame::EventQueue<AnimatedFadeInputs, 64> animatedUnpublished;  // inputs seen before the claimer published, compared at drain
 		AnimatedFadeInputs batchInputs{};  // render thread, or the CPU stage's producer while a drain is handed off
 		std::atomic<bool> animatedDrainHanded{ false };
 		void EndAnimatedDrain()
@@ -77,12 +77,10 @@ namespace DCLF::Features::Fades
 			return static_cast<const SceneTables*>(a_tables)->families.Columns<Scene::FadeRootTables>(Scene::FadeRootFamilyId());
 		}
 
-		void PublishWriterTables(bool a_running)
+		void PublishWriterTables()
 		{
 			// Safe to release the old tables here because the last job cycle has finished, so nothing still reads them.
-			std::shared_ptr<const void> tables;
-			if (a_running)
-				tables = Scene::FrameView::Get().AcceptedTables();
+			std::shared_ptr<const void> tables = Scene::FrameView::Get().AcceptedTables();
 			fadeWriterTables.store(tables.get(), std::memory_order_release);
 			fadeWriterTablesHeld = std::move(tables);
 		}
@@ -237,13 +235,13 @@ namespace DCLF::Features::Fades
 		}
 	}
 
-	void WriteFadeWriters(bool a_running)
+	void WriteFadeWriters()
 	{
 		// Main::Update's jobs start pushing again soon, so a drain handed off last frame must end first. It is normally long done.
 		WaitAnimatedDrain();
 		// Publish the writer set before writing, so the engine writers skip the same roots the write-back covers.
-		PublishWriterTables(a_running);
-		WriteFadeStores(a_running, [](const void* a_root) { return FadeWrittenByDclf(a_root); });
+		PublishWriterTables();
+		WriteFadeStores([](const void* a_root) { return FadeWrittenByDclf(a_root); });
 	}
 
 	bool FadeWrittenByDclf(const void* a_node)

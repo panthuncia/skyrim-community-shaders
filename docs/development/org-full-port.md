@@ -864,7 +864,7 @@ no D3D12 device to share with it. Select it with `CS_ORG_NATIVE_BACKEND=d3d12`.
 `tools/cs-ab/scenarios/native-d3d12.env` (and `native-d3d12-validation.env`). What differs from native Vulkan is in
 render-graph.md, "Native mode on D3D12". `CS_ORG_D3D12_SELFTEST=1` (optionally `CS_ORG_D3D12_DEBUG=1`,
 `CS_ORG_D3D12_SELFTEST_HDR=1`) still runs device creation, the DXIL build, a dispatch and 120 presents on a D3D12 device
-beside a DXVK game (`src/RenderGraph/Engine/D3D12SelfTest.cpp`).
+beside a DXVK game (`src/RenderGraph/Testing/D3D12SelfTest.cpp`).
 
 ### DCLF on D3D12: the port's plan (2026-11-12)
 

@@ -16,6 +16,8 @@
 #include <rhi.h>
 
 #include <algorithm>
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
+
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -127,7 +129,7 @@ namespace DCLF::Draws
 			const std::uint32_t counterIndex = a_recording.Index(a_bindings.counter);
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			for (std::size_t i = 0; i < a_frame.dispatches.size(); ++i) {
 				const auto& dispatch = a_frame.dispatches[i];
 				if (i != 0) {
@@ -157,6 +159,8 @@ namespace DCLF::Features::GpuOcclusion
 {
 	namespace
 	{
+		const SetupPrograms::Compute kHzbProgram{ "DCLF HZB", [] { return ComputeProgram::Desc{ .source = kHzbShader, .constantWords = kHzbConstantWords }; } };
+
 		// Mip 0 is half the depth's next power of two, so log2 of a screen extent picks the mip.
 		// Padding holds the far plane, which can only prevent culling, never cause it.
 		std::shared_ptr<const void> Setup(const Api::DepthPyramidSetup& a_setup, Api::DepthPyramid& a_out)
@@ -187,11 +191,7 @@ namespace DCLF::Features::GpuOcclusion
 			auto state = std::make_shared<HzbState>();
 			a_out.scratch = Draws::CreateWords(1, true, "cs.dclf.hzb-counter");
 
-			state->program = ComputeProgram::Load(a_setup.device, { .source = kHzbShader, .constantWords = kHzbConstantWords });
-			if (!state->program) {
-				logger::warn("[DCLF] The HZB compute program could not be created; occlusion culling stays off");
-				a_out.texture.reset();
-			}
+			state->program = kHzbProgram.Get();
 			return state;
 		}
 

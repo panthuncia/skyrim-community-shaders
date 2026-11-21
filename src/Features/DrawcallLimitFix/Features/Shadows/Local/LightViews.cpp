@@ -10,8 +10,6 @@
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
 
 #include "State.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 namespace DCLF::Features::Shadows::Local
 {
@@ -36,11 +34,9 @@ namespace DCLF::Features::Shadows::Local
 	{
 		auto& board = LightsBoard();
 		auto& lights = board.lights;
-		const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
 		if (frame != board.sceneFrame) {
-			// A new frame: last frame's views go; the observers count frames that had local lights.
-			if (!lights.empty())
-				Diagnostics::Notify<Diagnostics::EnginePoint::LightViewsFrame>();
+			// A new frame: last frame's views go.
 			lights.clear();
 			board.sceneFrame = frame;
 		}

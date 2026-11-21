@@ -107,7 +107,7 @@ namespace DCLF
 
 	IndirectDraws::ViewInputsTaken IndirectDraws::TakeViewInputs(Api::EngineView a_view, ViewInputsFrom a_from, ViewListed& a_listed)
 	{
-		const std::uint32_t frameNumber = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t frameNumber = Scene::FrameView::Get().SceneStep();
 		a_listed = {};
 		if (a_from == ViewInputsFrom::ColourThisFrame) {
 			if (impl->committedFrame[kAsyncColour] != frameNumber || Scene::FrameView::Get().NotDrawingYet())
@@ -157,13 +157,24 @@ namespace DCLF
 			for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t) {
 				const auto at = frameTextureAt[t];
 				const auto* const texture = at != Extensions::kNoFrameTexture && at < frameTextures.size() ? &frameTextures[at] : nullptr;
+				// A per-epoch view: the faces read their own published ids here, bound by their graphs, never the main view's texture.
+				if (texture && texture->FacesOwnIds()) {
+					std::uint32_t own = 0;
+					if (Extensions::DeclaredTextureIndex(Extensions::GraphTextureReader::Faces, t, texture->name, texture->facesGraphResources, own)) {
+						HoldFrameTexture(a_state.frameTextureViews[t], a_state.frameTextureBindings[t], nullptr, t, 0u, a_owners);
+						a_state.frameTextures[t] = own;
+					} else {
+						a_state.frameTextures[t] = HoldFrameTexture(a_state.frameTextureViews[t], a_state.frameTextureBindings[t], nullptr, t, textures.NullIndex(), a_owners);
+					}
+					continue;
+				}
 				// A registration without a view reads null.
 				auto* const view = t == kCharacterLightRegister ? Scene::FrameView::Get().GetFrameCapture().characterLightView :
 				                   texture && texture->view     ? static_cast<ID3D11ShaderResourceView*>(texture->view()) :
 				                                                  nullptr;
 				std::uint32_t graphIndex = 0;
 				const auto reader = Extensions::GraphTextureReader::Faces;
-				if (texture && Extensions::GraphTextureIndex(reader, t, texture->name, view, texture->graphResources, graphIndex)) {
+				if (texture && Extensions::FrameTextureIndex(reader, t, *texture, view, graphIndex)) {
 					// The graph owns the published texture, so there is no import to hold.
 					HoldFrameTexture(a_state.frameTextureViews[t], a_state.frameTextureBindings[t], nullptr, t, 0u, a_owners);
 					a_state.frameTextures[t] = graphIndex;
@@ -243,7 +254,7 @@ namespace DCLF
 		const auto type = a_view == Api::EngineView::Reflection ? Direct::ViewType::Reflection : Direct::ViewType::FirstPerson;
 		// Build each drawn face's cull from the same values CommitView latches.
 		std::vector<Direct::CullView> faces;
-		const std::uint32_t frameNumber = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t frameNumber = Scene::FrameView::Get().SceneStep();
 		for (std::uint32_t f = 0; f < a_faces.size() && f < traits.faces; ++f) {
 			if (!a_faces[f].drawn)
 				continue;
@@ -309,7 +320,7 @@ namespace DCLF
 		if (EpochTraitsOf(epoch).hostedBy != kNoEpoch) {
 			const auto submitted = impl->CommitHostedView(a_view, epoch, a_listed, a_faces, a_drawn, a_nullTextures);
 			// A GPU-driven frame posts only first person, whose forward part the CPU draws.
-			const bool posted = Direct::CpuFrame() || (a_view == Api::EngineView::FirstPerson && CurrentGraphConditions().firstPersonForwardDirect);
+			const bool posted = Direct::CpuFrame() || a_view == Api::EngineView::FirstPerson;
 			if (!posted || submitted != ViewSubmit::Submitted || a_faces.empty())
 				return submitted;
 			impl->PostHostedView(a_view, epoch, a_faces);
@@ -347,7 +358,7 @@ namespace DCLF
 			rows = impl->ViewFaceRows(a_view, *shape, owners.List());
 		std::uint32_t drawn = 0;
 		// First person's forward part is drawn by the CPU, and its run is handed to the epoch's late pass ahead of execution.
-		const bool handedOff = a_faces.empty() && a_view == Api::EngineView::FirstPerson && CurrentGraphConditions().firstPersonForwardDirect && Direct::FirstPersonColourReached();
+		const bool handedOff = a_faces.empty() && a_view == Api::EngineView::FirstPerson && Direct::FirstPersonColourReached();
 		const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(epochs.segments[a_epoch], [&](org::RenderGraph&) {
 			if (!a_faces.empty())
 				drawn = impl->CommitView(*shape, a_faces, a_listed.inputs, trees ? &rows : nullptr);
@@ -371,11 +382,11 @@ namespace DCLF
 		return impl && impl->ViewCovered(a_view);
 	}
 
-	bool IndirectDraws::ViewDrawable(Api::EngineView a_view, const ToggleSet& a_toggles) const
+	bool IndirectDraws::ViewDrawable(Api::EngineView a_view) const
 	{
 		// A capability, not a per-frame state. It reads the published targets, never the render thread's own copy.
 		// Each member still waits for its own pipelines, and the engine draws it until the epochs are covered.
-		return impl && Extensions::ViewOn(a_toggles, a_view) && !failed && impl->View(a_view).LaneTargets().colour != DXGI_FORMAT_UNKNOWN;
+		return impl && Extensions::ViewRegistered(a_view) && impl->View(a_view).LaneTargets().colour != DXGI_FORMAT_UNKNOWN;
 	}
 
 	bool IndirectDraws::ViewSlotReady(Api::EngineView a_view, const void* a_tables, const void* a_lookups, const PipelineCatalog* a_catalog, std::uint32_t a_slot,
@@ -408,7 +419,7 @@ namespace DCLF
 		// the main pass's format.
 		if (p < tables.pipelines.size() && RasterForward(tables.pipelines[p].rasterFlags))
 			return (!RasterRefraction(tables.pipelines[p].rasterFlags) && state.forwardCompatible.load(std::memory_order_acquire) &&
-			           IndirectStateValid(*a_catalog, a_catalog->targetsGeneration)) ||
+			           IndirectStateValid(*a_catalog)) ||
 			       fail(2);
 		ForwardPipelineKey key;
 		if (p >= tables.pipelines.size() || !ViewForwardKey(a_view, tables, p, key))
@@ -418,6 +429,6 @@ namespace DCLF
 		// Read in place, because building the indirect state per slot copied every pipeline's handles.
 		const auto* lookups = static_cast<const Lookups*>(a_lookups);
 		const auto setIndex = lookups && p < lookups->pipelines.size() ? lookups->pipelines[p].setIndex : Lookups::kNone;
-		return (setIndex != Lookups::kNone && ZGroupPipelineReady(*a_catalog, a_catalog->targetsGeneration, setIndex)) || fail(5);
+		return (setIndex != Lookups::kNone && ZGroupPipelineReady(*a_catalog, setIndex)) || fail(5);
 	}
 }

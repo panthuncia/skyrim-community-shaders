@@ -27,6 +27,7 @@ public:
 	/// Advances the pause-aware event and fills Physical Sky's shared shader data.
 	void Update(PhysicalSky& sky, const std::string& worldspace, bool available);
 	/// Submits a density-only placement query using the cloud renderer's current resources.
+	/// On the render graph it asks the cloud client for the query instead, and the shader is unused.
 	void QuerySource(ID3D11ComputeShader* shader);
 	/// Counts successful cloud updates, rather than display frames, for mask preparation.
 	void CloudFrameComplete(bool historyValid);
@@ -40,6 +41,8 @@ public:
 	void SuppressVanilla(RE::Sky* sky) const;
 	ID3D11ShaderResourceView* Segments() const { return segments ? segments->SRV() : nullptr; }
 	bool HasSource() const { return phase == Phase::Preparing || phase == Phase::Flashing; }
+	/// The channel Segments() holds, without its padding, for the render graph's latch (ORGVolumetricClouds).
+	const std::vector<Segment>& Channel() const { return channel; }
 
 private:
 	enum class Phase
@@ -90,6 +93,7 @@ private:
 	float Random();
 	void Cancel();
 	void ReadSource(PhysicalSky& sky);
+	void SelectSource(PhysicalSky& sky, const float4* positions);
 	void PromoteSource(PhysicalSky& sky);
 	void BuildChannel(float bottomZ);
 	void StartFlash(const PhysicalSky& physicalSky);

@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectDescriptors.h"
+#include "RenderGraph/Fatal.h"
 
 #include <bit>
 #include <cstring>
@@ -174,6 +175,6 @@ namespace DCLF::Features::Effects
 			.emissiveOf = &EffectEmissive,
 		};
 		if (a_context.RegisterMaterialPort(port) != kMaterialKindEffect)
-			stl::report_and_fail("Drawcall Limit Fix: the Effect port did not take material kind 1 (a feature before Effects registered a port)");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the Effect port did not take material kind 1 (a feature before Effects registered a port)");
 	}
 }

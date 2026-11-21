@@ -31,7 +31,8 @@ namespace DCLF::Api
 
 	/**
 	 * @brief The pyramid's producer. One contribution only.
-	 * setup runs on the render thread when Core makes the main view's resources, including after a target change.
+	 * setup runs on the render thread when Core makes the main view's resources, including after a target change, and on the
+	 * build executor when Core makes them for a new display size. It must be safe on both.
 	 */
 	struct DepthPyramidContribution
 	{

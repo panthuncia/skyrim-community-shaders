@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 struct ID3D11ShaderResourceView;
 
@@ -62,6 +62,7 @@ namespace DCLF
 			std::uint32_t index = kInvalid;
 			std::shared_ptr<const void> owner;
 			bool pending = false;  // asked for and not answered yet
+			explicit operator bool() const { return index != kInvalid; }
 		};
 		/** @brief Request's answer. Never pending. A rejected view gets kInvalid with no owner. */
 		struct Reply
@@ -70,7 +71,7 @@ namespace DCLF
 			std::uint64_t cookie = 0;
 			Binding binding;
 		};
-		using Replies = EventQueue<Reply, 1024>;
+		using Replies = RenderGraph::Frame::EventQueue<Reply, 1024>;
 		static constexpr std::uint32_t kSamplerCount = 4 * 5;  // the engine's (address mode, filter mode) table
 		/** @brief Bindings that never change once made: the null descriptor and the engine's samplers by address * 5 + filter. */
 		struct FixedBindings
@@ -92,6 +93,10 @@ namespace DCLF
 			ShadowDiffuse = 192,
 			ImGui = 256,
 			Scaleform = 257,
+			CloudMaps = 258,
+			PhysicalSky = 259,
+			VolumetricClouds = 260,
+			DeferredComposite = 261,
 		};
 
 		static constexpr std::uint32_t Tag(Source a_source, std::uint32_t a_offset = 0) { return static_cast<std::uint32_t>(a_source) + a_offset; }
@@ -130,6 +135,12 @@ namespace DCLF
 
 		/** @brief Render thread. A zero-reading binding of a_kind for an empty slot, or kInvalid if it could not be made. */
 		Binding NullOf(ViewKind a_kind);
+
+		/** @brief Render thread. The 1x1 zero D3D11 view of a_kind that NullOf imports, or null for a buffer or when it could not be made. */
+		static ID3D11ShaderResourceView* NullView(ViewKind a_kind);
+
+		/** @brief The words DescribeFailure ends with for a texture still on its way (importing, or streaming its window in). */
+		static constexpr std::string_view kLaterBatch = "a later batch takes it";
 
 		/** @brief One log line describing a refusal. */
 		static std::string DescribeFailure(ID3D11ShaderResourceView* a_view, std::uint32_t a_slot, ResolveFailure a_failure);

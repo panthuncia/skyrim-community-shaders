@@ -5,7 +5,7 @@
 #include <string_view>
 
 /**
-* @brief The engine's ImageSpace draws on the render graph, with CS_ORG_IMAGESPACE=1 (default off).
+* @brief The engine's ImageSpace draws on the render graph, in graph mode (Engine::GraphMode).
 *
 * The engine's CPU side is unchanged. It picks the effects, binds targets and writes constants. At the engine's draw the draw is
 * withheld, the constants capture holds its bytes, and a CS pass that stands for the step draws through its run gate with CS's
@@ -13,8 +13,6 @@
 *
 * Each engine effect step is a CS pass held by a CS stage (WorldSteps.inl, ChainSteps.inl, StartSteps.inl, MenuSteps.inl).
 * A draw with no pass is a mismatch. Effects whose vertex shader writes no SV_Position are taken with no pass.
-*
-* CS_ORG_IMAGESPACE_EFFECTS=<list> narrows the port to some effects or groups, for bisecting.
 */
 namespace RenderGraph::Engine
 {
@@ -26,14 +24,8 @@ namespace RenderGraph::Engine::ImageSpace
 	/** @brief Published at Setup so the water draws read the texture the flow copies write. Not published without the flow copy port. */
 	inline constexpr std::string_view kFlowMapId = "cs.d3d11.engine.flow-map";
 
-	/** @brief Any thread. */
-	bool Requested();
-
 	/** @brief Call with the other engine hooks. Installs nothing unless requested. */
 	void Install();
-
-	/** @brief State::Setup, before the render graph initializes. Reserves the ImageSpace anchor. */
-	void Reserve();
 
 	/** @brief State::Setup, once the graph is up. */
 	void Setup();
@@ -58,6 +50,10 @@ namespace RenderGraph::Engine::ImageSpace
 	/** @brief Native mode, world chain HDR effect only: kMAIN before the tonemap and the final target after. False elsewhere. Render owner. */
 	bool ChainTonemapTargets(TonemapTargets& a_out);
 
-	/** @brief Main thread. */
-	std::string Status();
+	/**
+	* @brief Whether CS's steps draw the world chain's ImageSpace effects now, inside its RenderEndOfFrameEffects.
+	* Then the scene the HDR tonemap reads is in kMAIN, whatever target the engine names. CS's refraction step copies back into kMAIN,
+	* where the engine's refraction wrote kMAIN_COPY. Render owner.
+	*/
+	bool SceneInMain();
 }

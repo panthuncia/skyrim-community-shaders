@@ -1,8 +1,6 @@
 #pragma once
 #include "RenderGraph/BufferRef.h"
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/BufferRefs.h"
-#endif
+#include "RenderGraph/BufferRefs.h"
 
 // The main pass's capture and the layout of the per-frame constant blocks at their frame slots, with the push words that name them.
 
@@ -94,7 +92,7 @@ namespace DCLF::Draws
 	{
 		return (std::uint64_t(a_pixelStage ? kConstantBufferRegisters : 0u) + a_register) * kFrameSlotBytes;
 	}
-	// The lighting slot's rows (PS b13): frame lighting c0-c5, LOD fades c6-c13, foliage record c14-c15, extras c16.
+	// The lighting slot's rows (PS b13): frame lighting c0-c5, LOD fades c6-c13, c14-c15 unused, extras c16.
 	constexpr std::uint64_t kExtrasPixelFrameOffset = std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame) + 32;
 	static_assert(sizeof(FrameLighting) + sizeof(LodFadeFrame) + 32 == 16 * 16);
 	// The record and every slot's block are read through 16-byte-aligned pointers on Vulkan's descriptor-buffer model.
@@ -157,10 +155,6 @@ namespace DCLF::Draws
 		const RenderGraph::BufferRef recordRef = a_frameConstantsRef + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
 		words[kFramePushRecordRef] = recordRef.viewSlot;
 		words[kFramePushRecordRef + 1] = recordRef.byteOffset;
-#if defined(CS_HAS_RENDER_GRAPH)
-		// CS_DCLF_REF_CHECK. The stages reach the record and every row through these two words.
-		RenderGraph::CheckBufferRef(recordRef, record, kFrameSlotBytes, "frame record (frame push words 2-3)");
-#endif
 		return words;
 	}
 

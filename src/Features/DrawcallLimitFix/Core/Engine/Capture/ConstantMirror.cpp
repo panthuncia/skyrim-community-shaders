@@ -26,10 +26,10 @@ namespace DCLF
 		return const_cast<ConstantMirror*>(this)->Find(a_resource);
 	}
 
-	void ConstantMirror::Watch(ID3D11Buffer* a_buffer)
+	bool ConstantMirror::Watch(ID3D11Buffer* a_buffer)
 	{
 		if (!a_buffer || Find(reinterpret_cast<ID3D11Resource*>(a_buffer)))
-			return;
+			return false;
 		D3D11_BUFFER_DESC desc{};
 		a_buffer->GetDesc(&desc);
 		a_buffer->AddRef();
@@ -37,6 +37,7 @@ namespace DCLF
 		entry.buffer = a_buffer;
 		entry.byteWidth = desc.ByteWidth;
 		entries.push_back(std::move(entry));
+		return true;
 	}
 
 	std::span<const std::byte> ConstantMirror::Contents(const ID3D11Buffer* a_buffer)

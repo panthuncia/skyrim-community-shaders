@@ -19,18 +19,24 @@ void Skin::Invalidate(bool a_resources)
 	}
 }
 
-void Skin::SetupResources()
+D3D11_SAMPLER_DESC Skin::DetailSamplerDesc()
 {
-	std::lock_guard lock(mutex);
-	RestoreSampler();
-	detailSampler = nullptr;
-	PerGeometryCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<PerGeometryData>(), "Skin::PerGeometryCB");
 	D3D11_SAMPLER_DESC sampler{};
 	sampler.Filter = D3D11_FILTER_ANISOTROPIC;
 	sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
 	sampler.MaxAnisotropy = 16;
 	sampler.ComparisonFunc = D3D11_COMPARISON_NEVER;
 	sampler.MaxLOD = D3D11_FLOAT32_MAX;
+	return sampler;
+}
+
+void Skin::SetupResources()
+{
+	std::lock_guard lock(mutex);
+	RestoreSampler();
+	detailSampler = nullptr;
+	PerGeometryCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<PerGeometryData>(), "Skin::PerGeometryCB");
+	const auto sampler = DetailSamplerDesc();
 	DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&sampler, detailSampler.put()));
 	Invalidate(true);
 }
@@ -312,6 +318,35 @@ void Skin::RestoreSampler()
 	}
 }
 
+Skin::GeometryMaterial Skin::ResolveGeometryMaterial(RE::BSGeometry* a_geometry, RE::BSShaderProperty* a_property)
+{
+	std::lock_guard lock(mutex);
+	GeometryMaterial result;
+	result.profile = MakeData(Resolve({}, settings.DefaultProfile), false);
+	result.profile.skinParams.w = 0;
+	if (!a_geometry || SkinSurfaces::IsRaceMenuOverlay(a_geometry, a_property) || !SkinMaterials::IsCompatible(a_property))
+		return result;
+	auto& entry = Observe(a_geometry, a_property);
+	result.profile = MakeData(Resolve({}, settings.DefaultProfile), entry.head);
+	result.profile.skinDetailParams.w = 0;
+	if (!entry.ready || entry.revision != revision || entry.characterRevision != characterRevision)
+		return result;
+	result.profile = MakeData(entry.effective, entry.head);
+	for (size_t i = 0; i < result.views.size(); ++i) {
+		if (entry.textures[i] && (i == 2 || !entry.textures[i]->resource.reconstructNormal))
+			result.views[i] = entry.textures[i]->resource.view;
+	}
+	result.materialFlags = { float(bool(result.views[0])), float(bool(result.views[1])),
+		float(entry.textures[2] && entry.textures[2]->resource.reconstructNormal), float(entry.thickness) };
+	if (!result.views[2])
+		result.profile.skinDetailParams.w = 0;
+	if (editor.open && editor.previewWetness >= 0 &&
+		((!editor.draftKey.empty() && (entry.activeKey == editor.draftKey || entry.diffuseKey == editor.draftKey || entry.normalKey == editor.draftKey)) ||
+			(!entry.target.empty() && entry.target == editor.draftTarget.key)))
+		result.previewWetness = editor.previewWetness;
+	return result;
+}
+
 void Skin::BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass)
 {
 	std::lock_guard lock(mutex);
@@ -320,33 +355,18 @@ void Skin::BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass)
 	texturesDirty = true;
 	if (!PerGeometryCB)
 		return;
+	auto* geometry = a_pass ? a_pass->geometry : nullptr;
+	auto* property = a_pass ? a_pass->shaderProperty : nullptr;
 	PerGeometryData data{};
-	data.profile = MakeData(Resolve({}, settings.DefaultProfile), false);
-	data.profile.skinParams.w = 0;
-	if (a_pass && a_pass->geometry && !SkinSurfaces::IsRaceMenuOverlay(a_pass->geometry, a_pass->shaderProperty)) {
-		data.skinPerGeometry = GetWetness(a_pass->geometry);
-		if (SkinMaterials::IsCompatible(a_pass->shaderProperty)) {
-			auto& entry = Observe(a_pass->geometry, a_pass->shaderProperty);
-			data.profile = MakeData(Resolve({}, settings.DefaultProfile), entry.head);
-			data.profile.skinDetailParams.w = 0;
-			if (entry.ready && entry.revision == revision && entry.characterRevision == characterRevision) {
-				data.profile = MakeData(entry.effective, entry.head);
-				for (size_t i = 0; i < entry.textures.size(); ++i) {
-					if (entry.textures[i] && (i == 2 || !entry.textures[i]->resource.reconstructNormal))
-						pendingViews[i] = entry.textures[i]->resource.view;
-				}
-				data.materialFlags = { float(bool(pendingViews[0])), float(bool(pendingViews[1])),
-					float(entry.textures[2] && entry.textures[2]->resource.reconstructNormal), float(entry.thickness) };
-				if (!pendingViews[2])
-					data.profile.skinDetailParams.w = 0;
-				if (editor.open && editor.previewWetness >= 0 &&
-					((!editor.draftKey.empty() && (entry.activeKey == editor.draftKey || entry.diffuseKey == editor.draftKey || entry.normalKey == editor.draftKey)) ||
-						(!entry.target.empty() && entry.target == editor.draftTarget.key)))
-					data.skinPerGeometry = { editor.previewWetness, 0, 0, 0 };
-			}
-		}
-	}
-	currentWetness = data.skinPerGeometry;
+	if (geometry && !SkinSurfaces::IsRaceMenuOverlay(geometry, property))
+		data.skinPerGeometry = GetWetness(geometry);
+	auto material = ResolveGeometryMaterial(geometry, property);
+	data.materialFlags = material.materialFlags;
+	data.profile = material.profile;
+	if (material.previewWetness)
+		data.skinPerGeometry = { *material.previewWetness, 0, 0, 0 };
+	pendingViews = std::move(material.views);
+	lastGeometryData = data;
 	PerGeometryCB->Update(data);
 	ID3D11Buffer* buffer = PerGeometryCB->CB();
 	globals::d3d::context->PSSetConstantBuffers(7, 1, &buffer);

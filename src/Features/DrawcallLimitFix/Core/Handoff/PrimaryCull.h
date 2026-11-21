@@ -26,7 +26,7 @@ namespace DCLF::SceneCapture
 
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Channels.h"
@@ -78,9 +78,9 @@ namespace DCLF
 		void BeginFrameCamera();
 		/**
 		 * @brief Main thread at Main::Update's entry, where no cull or animation job writes the flags. Writes the stood-in roots'
-		 * kAccumulated from DCLF's visibility, then calls the stand-in observers. a_running false drops the writes.
+		 * kAccumulated from DCLF's visibility, then calls the stand-in observers.
 		 */
-		void AtUpdateEntry(bool a_running);
+		void AtUpdateEntry();
 		/** @brief Whether the cut stands in for a_root. Render thread. */
 		bool StoodIn(const void* a_root) const { return standInRoots.contains(a_root); }
 		/** @brief Render thread. Whether a_geometry is under an entry the cut has whole. */
@@ -157,7 +157,7 @@ namespace DCLF
 		/** @brief Render thread. The scene lists' counters since the last call. */
 		struct ListCounters
 		{
-			std::uint64_t frames = 0, published = 0, built = 0, dryRuns = 0;
+			std::uint64_t frames = 0, published = 0, built = 0;
 			std::uint64_t notToggled = 0, notCurrent = 0, noExclusion = 0, noOcclusion = 0;
 			std::uint64_t restored = 0, restoreDetached = 0, unexcluded = 0, lostWhileOut = 0, engineFrames = 0, notKeepable = 0;
 			std::array<std::uint64_t, 5> notKeepableBy{};
@@ -329,7 +329,7 @@ namespace DCLF
 			const RE::NiAVObject* parent = nullptr;
 			bool attached = false;
 		};
-		EventQueue<ListEvent> listEvents;
+		RenderGraph::Frame::EventQueue<ListEvent> listEvents;
 		/** @brief The build's job, Keep mode. Applies the queued roots. False when the lists need a rebuild. */
 		bool ApplyListEvents(const ListFilter* a_filter);
 		/** @brief The build's job. Drops the queued events, since the build reads the current structure. */
@@ -343,7 +343,7 @@ namespace DCLF
 		bool listsKeepInstalled = false;
 		struct ListStats
 		{
-			std::uint64_t frames = 0, published = 0, built = 0, dryRuns = 0;
+			std::uint64_t frames = 0, published = 0, built = 0;
 			std::uint64_t notToggled = 0, notCurrent = 0, noExclusion = 0, noOcclusion = 0;
 			std::uint64_t restored = 0;
 			std::uint64_t restoreDetached = 0;  // roots detached since the snapshot, not restored
@@ -480,7 +480,7 @@ namespace DCLF
 			std::shared_ptr<const void> retirement;  // keeps the roots alive until taken
 			std::vector<PlannedEntry> entries;
 		};
-		EventQueue<PlanBatch*, 64> plansReady;
+		RenderGraph::Frame::EventQueue<PlanBatch*, 64> plansReady;
 		std::uint64_t planTickets = 0;  // never reused
 		std::size_t plansOutstanding = 0;
 		std::atomic<bool> frameLive{ false };  // set before the list jobs when the cut applies, cleared after them
@@ -489,7 +489,6 @@ namespace DCLF
 		/** @brief One list job's output and counters. Written by its job thread, read after Finish. */
 		struct JobOut
 		{
-			std::vector<const RE::BSGeometry*> visible;  // only while collectVisible
 			std::uint64_t inView = 0;
 			std::uint64_t seen = 0, skipped = 0, visibleEntries = 0, notSettled = 0, notAdmitted = 0, walked = 0;
 			std::uint64_t hidden = 0, engineMembers = 0, switchStale = 0, unselected = 0;
@@ -501,9 +500,6 @@ namespace DCLF
 		std::array<JobOut, 16> jobOut;
 
 		CutCounters cutStats;
-		std::vector<const RE::BSGeometry*> frameVisible;
-		// The jobs list the members in view only for an observer that reads them. The counters stand either way.
-		bool collectVisible = false;
 		std::vector<const RE::NiAVObject*> switchChanges;  // scratch
 		const void* frameCamera = nullptr;
 		std::shared_ptr<const SetSnapshot> frameSet;
@@ -535,12 +531,9 @@ namespace DCLF
 		bool cutCameraKnown = false;
 		/** @brief Updates the stand-in roots and observers from the entries that changed. */
 		void SyncRootOwnership();
-		/** @brief Render thread. Plans the whole cut from nothing, for the cut observer. */
-		Cut PlanWholeCut();
 		/** @brief Render thread, between the jobs. Recomputes an entry's walk flag. */
 		void RefreshWalk(std::uint32_t a_e);
 		std::vector<std::uint32_t> walkRefresh;  // refreshed at the next PrepareFrame
-		bool walkEverything = false;
 		std::uint32_t sampledWitness = 0;
 		std::uint32_t sampledWitnessFrame = ~0u;
 		/** @brief List jobs and render thread. Whether a member is in the frame's set with the main phase. */

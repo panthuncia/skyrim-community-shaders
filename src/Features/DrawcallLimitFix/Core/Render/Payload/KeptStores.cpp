@@ -72,9 +72,9 @@ namespace DCLF::Draws
 			// Rebuild every record on the first build, on new tables, or when this store fell behind the log.
 			auto& records = s.records.Mutable();
 			records.resize(count);
-			if (count >= kRecordsFanoutMin && !Policy::SerialFanout()) {
+			if (count >= kRecordsFanoutMin) {
 				PrepareKeptWrites(s.records, 0, count);
-				SceneScheduler::Executor().ParallelFor("CS.DCLF.Build.Objects.Resync", count, kRecordsGrain, [&](std::size_t a_begin, std::size_t a_end) {
+				::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.Build.Objects.Resync", count, kRecordsGrain, [&](std::size_t a_begin, std::size_t a_end) {
 					DCLF_ZONE("CS.DCLF.Build.Objects.ResyncShards");
 					for (std::size_t r = a_begin; r < a_end; ++r)
 						BuildObjectRecord(a_tables, static_cast<std::uint32_t>(r), GeometryPort::kMainPassRenderFlags, records[r]);

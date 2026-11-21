@@ -1,7 +1,5 @@
-#if defined(CS_HAS_RENDER_GRAPH)
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
-#endif
+#include <rhi_interop_vulkan.h>
 
 #include "Vram/VramLedger.h"
 
@@ -13,14 +11,12 @@
 #include "Vram/DxvkMemory.h"
 #include "Vram/OrgMemory.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/MemoryIntrospectionAPI.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <Render/Runtime/IStatisticsService.h>
-#endif
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/MemoryIntrospectionAPI.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <Render/Runtime/IStatisticsService.h>
 
 #include <nlohmann/json.hpp>
 
@@ -130,7 +126,6 @@ namespace Vram
 			}
 		}
 
-#if defined(CS_HAS_RENDER_GRAPH)
 		// BasicRHI's live ledger: every vkAllocateMemory it made and has not freed, by site and memory kind. It is the one count of the
 		// graph's device memory, in native and guest mode alike. Listed by site (not counted: the resources' rows count it).
 		void ReadOrgLedger(OrgPart& a_part)
@@ -240,14 +235,6 @@ namespace Vram
 			}
 			return part;
 		}
-#else
-		void ReadOrgLedger(OrgPart&) {}
-
-		OrgPart ReadOrg()
-		{
-			return {};
-		}
-#endif
 
 		std::string ImageDetail(const DxvkMemoryResourceRow& a_row)
 		{
@@ -617,30 +604,6 @@ namespace Vram
 			if (SUCCEEDED(swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put()))))
 				tag(backBuffer.get(), "SwapChain", "Back buffer");
 		}
-	}
-
-	std::string ReportLine(std::size_t a_owners)
-	{
-		const auto snapshot = Current();
-		if (snapshot.rows.empty() && snapshot.heaps.empty())
-			return {};
-
-		std::unordered_map<std::string, std::uint64_t> owners;
-		for (const auto& row : snapshot.rows)
-			if (row.deviceLocal && !(row.flags & kRowNotCounted))
-				owners[row.owner] += row.bytes;
-		std::vector<std::pair<std::string, std::uint64_t>> sorted(owners.begin(), owners.end());
-		std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
-
-		std::string largest;
-		for (std::size_t i = 0; i < sorted.size() && i < a_owners; ++i)
-			largest += fmt::format("{}{} {:.1f} MB", i ? ", " : "", sorted[i].first, MiB(sorted[i].second));
-
-		std::string breakdown;
-		for (const auto& line : snapshot.reconciliation)
-			breakdown += fmt::format("{}{}{} {:.1f} MB", breakdown.empty() ? "" : "; ", std::string(static_cast<std::size_t>(line.depth), '>'),
-				line.label, MiB(line.bytes));
-		return fmt::format("VRAM attribution: {}; largest owners (device-local): {}", breakdown, largest);
 	}
 
 	std::filesystem::path WriteJson(const std::filesystem::path& a_directory, std::string_view a_fileName)

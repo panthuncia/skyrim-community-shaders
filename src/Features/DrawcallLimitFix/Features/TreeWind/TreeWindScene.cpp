@@ -10,7 +10,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
+
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -58,23 +59,19 @@ namespace DCLF::Features::TreeWind
 			return frame;
 		}
 
+		const SetupPrograms::Compute kTreeWindProgram{ "DCLF tree wind", [] { return ComputeProgram::Desc{ .source = kShader, .constantWords = kTreeWindConstantWords }; } };
+
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			using org::services::GrowableContents;
 			auto scene = std::make_shared<TreeWindScene>();
-			// Without the program, trees keep the wind they joined with. The wind buffers at t124 exist and stay zero.
-			scene->treeWind = ComputeProgram::Load(a_setup.device, { .source = kShader, .constantWords = kTreeWindConstantWords });
-			std::uint32_t trees = 0;
-			if (scene->treeWind) {
-				trees = a_setup.smallStart ? 4u : kInitialTrees;
-				scene->trees = Draws::MakeVersioned(a_setup.StructuredBuffer(trees, sizeof(TreeStatic), "cs.dclf.trees"), { .extent = { 0, sizeof(TreeStatic), sizeof(TreeStatic) } });
-				// New clocks restart from each tree's static row.
-				scene->treeClocks = Draws::MakeVersioned(a_setup.StructuredBuffer(trees, sizeof(TreeClock), "cs.dclf.tree-clocks", true),
-					{ .extent = { 0, sizeof(TreeClock), sizeof(TreeClock) } });
-				scene->treeFrameBuffer = a_setup.StructuredBuffer(1, sizeof(TreeWindFrameRow), "cs.dclf.tree-frame");
-			} else {
-				logger::warn("[DCLF] The tree wind program could not be created; trees keep the wind they joined with");
-			}
+			scene->treeWind = kTreeWindProgram.Get();
+			const std::uint32_t trees = a_setup.smallStart ? 4u : kInitialTrees;
+			scene->trees = Draws::MakeVersioned(a_setup.StructuredBuffer(trees, sizeof(TreeStatic), "cs.dclf.trees"), { .extent = { 0, sizeof(TreeStatic), sizeof(TreeStatic) } });
+			// New clocks restart from each tree's static row.
+			scene->treeClocks = Draws::MakeVersioned(a_setup.StructuredBuffer(trees, sizeof(TreeClock), "cs.dclf.tree-clocks", true),
+				{ .extent = { 0, sizeof(TreeClock), sizeof(TreeClock) } });
+			scene->treeFrameBuffer = a_setup.StructuredBuffer(1, sizeof(TreeWindFrameRow), "cs.dclf.tree-frame");
 			// The nodeless entry, then one unit per tree slot. Zero-filled, since a zero generation is never a listing's.
 			for (std::uint32_t h = 0; h < 2; ++h)
 				scene->treeWindRows[h] = Draws::MakeVersioned(a_setup.StructuredBuffer((trees + 1) * kTreeWindEntryRows, 16, h ? "cs.dclf.tree-wind1" : "cs.dclf.tree-wind0", true),
@@ -131,8 +128,6 @@ namespace DCLF::Features::TreeWind
 				a_scene.previousTreesContentEpoch = a_scene.frameTreesContentEpoch;
 				a_scene.treeFrame = a_frame;
 				a_scene.treeInputs = SampleTreeWindFrame();
-				if (Policy::FreezeTreeWind())
-					a_scene.treeInputs.deltaTime = 0.0f;
 			}
 			if (a_frameRow && a_scene.treeFrameBuffer) {
 				const TreeWindFrameRow row{ a_scene.treeCount, 0, a_scene.treeFrame, SeedsIndex(), a_scene.treeInputs, {} };

@@ -1,5 +1,6 @@
 #include "Streamer.h"
 
+#include "DxvkExports.h"
 #include "Features/TextureStreaming.h"
 #include "Globals.h"
 #include "Policy.h"
@@ -33,13 +34,13 @@ namespace TextureStreaming
 {
 	namespace
 	{
-		using PFN_Missing = void(__stdcall*)(std::uint64_t);
-		using PFN_Gone = void(__stdcall*)(std::uint64_t);
-		using PFN_Fill = const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL);
-		using PFN_EnableView = HRESULT(__stdcall*)(ID3D11ShaderResourceView*, PFN_Missing, PFN_Gone, PFN_Fill, std::uint64_t);
-		using PFN_SetWindow = void(__stdcall*)(ID3D11ShaderResourceView*, ID3D11ShaderResourceView*);
-		using PFN_GetWindow = ID3D11ShaderResourceView*(__stdcall*)(ID3D11ShaderResourceView*);
-		using PFN_GetBinds = std::uint64_t(__stdcall*)(ID3D11ShaderResourceView*);
+		using PFN_Missing = DxvkExports::StreamMissingFn;
+		using PFN_Gone = DxvkExports::StreamGoneFn;
+		using PFN_Fill = DxvkExports::StreamFillFn;
+		using PFN_EnableView = DxvkExports::StreamEnableViewFn;
+		using PFN_SetWindow = DxvkExports::StreamSetWindowFn;
+		using PFN_GetWindow = DxvkExports::StreamGetWindowFn;
+		using PFN_GetBinds = DxvkExports::StreamGetBindsFn;
 
 		// The DDS file's header: the magic, DDS_HEADER, and DDS_HEADER_DXT10 when its four-cc says so.
 		constexpr std::uint32_t kDdsMagic = 0x20534444;
@@ -71,14 +72,8 @@ namespace TextureStreaming
 				return native;
 			}
 			static const Exports exports = [] {
-				Exports result;
-				if (HMODULE module = ::GetModuleHandleW(L"dxvk_d3d11.dll")) {
-					result.enable = reinterpret_cast<PFN_EnableView>(reinterpret_cast<void*>(::GetProcAddress(module, "dxvkStreamEnableView")));
-					result.setWindow = reinterpret_cast<PFN_SetWindow>(reinterpret_cast<void*>(::GetProcAddress(module, "dxvkStreamSetWindow")));
-					result.getWindow = reinterpret_cast<PFN_GetWindow>(reinterpret_cast<void*>(::GetProcAddress(module, "dxvkStreamGetWindow")));
-					result.getBinds = reinterpret_cast<PFN_GetBinds>(reinterpret_cast<void*>(::GetProcAddress(module, "dxvkStreamGetBinds")));
-				}
-				return result;
+				const auto& dxvk = DxvkExports::Get();
+				return Exports{ dxvk.streamEnableView, dxvk.streamSetWindow, dxvk.streamGetWindow, dxvk.streamGetBinds };
 			}();
 			return exports;
 		}

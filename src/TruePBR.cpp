@@ -434,7 +434,7 @@ void TruePBR::Prepass()
 	// the texture unfilled.
 	const auto& orgNoise = ORGGlintsNoise::Get();
 	ID3D11ShaderResourceView* srv = nullptr;
-	if (orgNoise.Active())
+	if (orgNoise.IsActive())
 		srv = orgNoise.NoiseSRV();
 	else {
 		if (!glintsNoiseTexture)
@@ -2055,8 +2055,6 @@ void TruePBR::PostPostLoad()
 
 	logger::info("[TruePBR] Hooking BSLightingShader::SetupMaterial");
 	stl::write_vfunc<0x4, PBR_BSLightingShader_SetupMaterial>(RE::VTABLE_BSLightingShader[0]);
-
-	ORGGlintsNoise::Reserve();
 }
 
 void TruePBR::DataLoaded()

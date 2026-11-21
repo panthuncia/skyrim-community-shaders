@@ -19,7 +19,7 @@ namespace DCLF::Extensions
 		const auto products = RegisteredProducts();
 		a_out.resize(products.size());
 		for (std::size_t i = 0; i < products.size(); ++i) {
-			const Api::PayloadProductBuild build{ a_build.rows, a_build.tables, a_build.dirtyMaterials, a_build.everyMaterial, &ProductAt(&a_previous, i), a_build.check };
+			const Api::PayloadProductBuild build{ a_build.rows, a_build.tables, a_build.dirtyMaterials, a_build.everyMaterial, &ProductAt(&a_previous, i) };
 			a_out[i] = products[i].build(build);
 		}
 	}

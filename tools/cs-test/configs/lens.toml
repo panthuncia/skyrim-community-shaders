@@ -1,0 +1,50 @@
+# Physical Lens image effects (distortion, vignetting, colour fringing) A/B: the lens on with ghosts (Intensity 0) and the
+# diffraction starburst off, the settings the ORG chain implements. A 24 mm lens wide open (Canon RF 24-70, preset 5), where the
+# effects are strong; ImageEffects off for the first shot, on for the second. Cinematic Camera must stay off (it drives the lens).
+# The wait covers D3D11's on-demand compile of Composite's lens variant. Compose it: guest+lens, native-vulkan+lens, d3d11+lens.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+PostProcessing = true
+
+# The chain runs only in Post Processing mode. The test profile saves "Vanilla", which bypasses it.
+[saved_settings.General]
+"Post Processing Mode" = "PostProcessing"
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = 'PostProcessing.Physical Lens={"enabled":true,"settings":{"LensPreset":5,"ZoomPosition":0.0,"FNumber":1.0,"FocusDistanceM":0,"Intensity":0.0,"Diffraction":false,"ImageEffects":false}}'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "flat"
+
+# On the render graph a run's first shot is copied only once a build that holds the copy switches in, some frames after the
+# shot step (22 capture points on native Vulkan). The next setting must come after that, or the "flat" shot shows the lens.
+[[steps]]
+at = "previous"
+frames = 60
+do = "setting"
+arg = 'PostProcessing.Physical Lens={"enabled":true,"settings":{"LensPreset":5,"ZoomPosition":0.0,"FNumber":1.0,"FocusDistanceM":0,"Intensity":0.0,"Diffraction":false,"ImageEffects":true}}'
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "lens"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["flat", "lens"]

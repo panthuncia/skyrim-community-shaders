@@ -28,6 +28,32 @@
 #include "Utils/Game.h"
 #include "Utils/Moon.h"
 
+#include <mutex>
+
+Effects11::Effects11()
+{
+	raysToggles.Bind(CS::SettingRegistry::Declare("Effects11.raysToggles"));
+	shaderCacheClears.Bind(CS::SettingRegistry::Declare("Effects11.shaderCacheClears"));
+	fxShapeWrites.Bind(CS::SettingRegistry::Declare("Effects11.fxShapeWrites"));
+}
+
+void Effects11::NoteShapeWrite()
+{
+	// Writers come from the render, menu and cs-test threads, and the count is read, then written.
+	static std::mutex s_mutex;
+	const std::lock_guard lock(s_mutex);
+	auto& settingManager = SettingManager::GetSingleton();
+	std::uint32_t toggles = 0;
+	if (settingManager.GetValue<bool>("EnableVolumetricRays", "EFFECT"))
+		toggles |= kVolumetricRaysBit;
+	if (settingManager.GetValue<bool>("EnableSunRays", "EFFECT"))
+		toggles |= kSunRaysBit;
+	if (settingManager.GetValue<bool>("EnableMoonRays", "EFFECT"))
+		toggles |= kMoonRaysBit;
+	raysToggles = toggles;
+	fxShapeWrites = fxShapeWrites.Get() + 1u;
+}
+
 bool Effects11::HasShaderDefine(RE::BSShader::Type)
 {
 	return IsActive();
@@ -468,12 +494,6 @@ void Effects11::SetupResources()
 	ORGSunRays::Get().Setup();
 }
 
-void Effects11::PostPostLoad()
-{
-	ORGSunRays::Reserve();
-	ORGFxRuntime::Reserve();
-}
-
 void Effects11::PostSetupResources()
 {
 	resourcesReady = true;
@@ -532,7 +552,8 @@ void Effects11::ClearShaderCache()
 			*shader = nullptr;
 		}
 	}
-	ORGSunRays::Get().Release();
+	// The rays' graph programs are a function of this count: the next revision builds them again off the render thread.
+	shaderCacheClears = shaderCacheClears.Get() + 1u;
 
 	auto& effectManager = EffectManager::GetSingleton();
 	effectManager.enbAdaptation.ClearShaderCache();
@@ -1087,11 +1108,14 @@ bool Effects11::RenderTonemap(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_out
 	if (!effectManager.IsInitialized())
 		return false;
 
-	// The ORG FX runtime (CS_ORG_FX=1) ran the chain in the Tonemap anchor's epoch, just before this.
+	// The ORG FX runtime ran the chain in the Tonemap anchor's epoch, just before this.
 	if (ORGFxRuntime::Get().RanThisFrame()) {
 		tonemapReplacedFrame = globals::state->frameCount;
 		return true;
 	}
+	// Graph mode: a frame without the graph's chain draws the game's tonemap. FX11 never runs it.
+	if (ORGFxRuntime::Get().IsActive())
+		return false;
 
 	auto& renderTargets = globals::game::renderer->GetRuntimeData().renderTargets;
 	// Only report replacement after the effect chain actually wrote the output.
@@ -1146,8 +1170,11 @@ void Effects11::DrawVolumetricRays()
 
 	// The apply pass lights the rays with SunColor, which is premultiplied by the sun's visibility,
 	// so with the sun faded out (overcast, rain, fog, night) the passes would only add black
+	// On the graph the adopted revision's toggle decides, so the rays switch with the revision that registers their passes.
 	auto& settingManager = SettingManager::GetSingleton();
-	if (!settingManager.GetValue<bool>("EnableVolumetricRays", "EFFECT") || Util::GetSunVisibility(sky->sun) <= 0.0f)
+	const bool onGraph = ORGSunRays::Get().IsActive();
+	const bool volumetricRays = onGraph ? (raysToggles.Adopted() & kVolumetricRaysBit) != 0 : settingManager.GetValue<bool>("EnableVolumetricRays", "EFFECT");
+	if (!volumetricRays || Util::GetSunVisibility(sky->sun) <= 0.0f)
 		return;
 
 	auto& effectManager = EffectManager::GetSingleton();
@@ -1171,7 +1198,7 @@ void Effects11::DrawVolumetricRays()
 	const uint32_t halfDynWidth = (dynWidth + 1) / 2;
 	const uint32_t halfDynHeight = (dynHeight + 1) / 2;
 
-	// On the ORG path (CS_ORG_E11_RAYS=1) the PostComposite anchor draws them
+	// In graph mode the PostComposite anchor draws them
 	if (ORGSunRays::Get().VolumetricRays({ halfTexWidth, halfTexHeight, halfDynWidth, halfDynHeight, dynWidth, dynHeight }))
 		return;
 
@@ -1395,9 +1422,12 @@ void Effects11::DrawSunRays()
 	if (globals::state->IsFullScreenMenuOpen())
 		return;
 
+	// On the graph the adopted revision's toggles decide, so the rays switch with the revision that registers their passes.
 	auto& settingManager = SettingManager::GetSingleton();
-	const bool sunRays = settingManager.GetValue<bool>("EnableSunRays", "EFFECT");
-	const bool moonRays = settingManager.GetValue<bool>("EnableMoonRays", "EFFECT");
+	const bool onGraph = ORGSunRays::Get().IsActive();
+	const std::uint32_t adoptedToggles = onGraph ? raysToggles.Adopted() : 0;
+	const bool sunRays = onGraph ? (adoptedToggles & kSunRaysBit) != 0 : settingManager.GetValue<bool>("EnableSunRays", "EFFECT");
+	const bool moonRays = onGraph ? (adoptedToggles & kMoonRaysBit) != 0 : settingManager.GetValue<bool>("EnableMoonRays", "EFFECT");
 	if (!sunRays && !moonRays)
 		return;
 
@@ -1477,7 +1507,7 @@ void Effects11::DrawSunRays()
 	data.useNoise = qualityIndex == 4;
 	passes[4] = data;
 
-	// On the ORG path (CS_ORG_E11_RAYS=1) the PostComposite anchor draws them
+	// In graph mode the PostComposite anchor draws them
 	const ORGSunRays::Sizes sizes{ halfTexWidth, halfTexHeight, halfDynWidth, halfDynHeight, static_cast<uint32_t>(resolution.x), static_cast<uint32_t>(resolution.y) };
 	if (ORGSunRays::Get().SunRays(sizes, passes))
 		return;

@@ -37,7 +37,7 @@ namespace DCLF::Scene
 		std::array<std::vector<ShadowPipelineKey>, kOcclusionViews> shadowEmittedOcclusionKeys;
 		struct ShadowSetStats
 		{
-			std::uint64_t refreshes = 0, rebuilds = 0;  // calls; of them index rebuilds (an explicit invalidation, or parity's)
+			std::uint64_t refreshes = 0, rebuilds = 0;  // calls; of them index rebuilds (an explicit invalidation)
 			std::uint64_t journaled = 0, applied = 0;   // slots the journal named (deduplicated); of them with inputs or liveness moved
 			std::uint64_t unjournaled = 0;              // dirty with nothing journaled: the lists emitted again, the index untouched
 			std::uint64_t listsEmitted = 0;             // public lists made again from their order (texture, key, per occlusion view)

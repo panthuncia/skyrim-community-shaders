@@ -1,0 +1,62 @@
+# A Bink movie on the render graph (the bink step plays Data\Video\BGS_Logo.bik), in SDR, then again with HDR on (the hdr step),
+# where the movie draws onto HDR's UI texture. Bink's client is declared on DisplaySize, PresenterFormat and HdrOutputTarget
+# (frame revision plan, 6.19): the HDR toggle evaluates its key again, and the same graph resources give no new registration.
+# CS_ORG_BINK_SHOT captures decoded frames 40 and 120 of each movie. Expect "[ORG] Bink: a ... movie ended: N frames drawn by the
+# render graph, 0 or 1 by the engine" twice, and "the client is made for" once (at the first revision). Compose it:
+# native-vulkan+bink, native-d3d12+bink, guest+bink.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[org]
+bink_shot = "40,120"
+
+[features]
+HDRDisplay = true
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "bink"
+arg = "BGS_Logo.bik"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "after-sdr"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "hdr"
+arg = "1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "bink"
+arg = "BGS_Logo.bik"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "after-hdr"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "hdr"
+arg = "0"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["after-sdr", "after-hdr"]
+no_log = ["frame tap error", "fatal: frame declaration:", "cannot be drawn onto", "a movie frame queued for its anchor did not draw"]

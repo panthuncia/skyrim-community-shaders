@@ -1,4 +1,4 @@
-// Terrain Blending: the classify input, its switch and toggle, the terrain technique gates, its held groups, its mask (t55),
+// Terrain Blending: the classify input, its held groups, its mask (t55),
 // the scene depth (t17) and its near depth twin. Callbacks read the feature live.
 
 #include "Features/DrawcallLimitFix/Integrations/TerrainBlending/TerrainBlending.h"
@@ -15,15 +15,17 @@ namespace DCLF::Integrations::TerrainBlending
 {
 	namespace
 	{
-		using Technique = SIE::ShaderCache::LightingShaderTechniques;
 		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
 
 		// Any thread. Whether Terrain Blending draws its terrain after the opaque pass in a frame DCLF draws.
 		// Classification takes it once per pass and a change drops the verdicts.
 		bool DefersTerrain()
 		{
+			// On the graph path, the adopted Enabled the frame follows, so DCLF defers terrain in the frames Terrain Blending draws it.
 			const auto& terrainBlending = globals::features::terrainBlending;
-			return terrainBlending.loaded && terrainBlending.settings.Enabled;
+			if (!terrainBlending.loaded)
+				return false;
+			return terrainBlending.FrameEnabled();
 		}
 
 		// The mask (t55) is bound by its replay after this epoch, so it is named here instead of captured.
@@ -64,23 +66,14 @@ namespace DCLF::Integrations::TerrainBlending
 		{
 			// Switching it moves the terrain and its no-blend meshes between their held groups and the native loop.
 			const auto defers = a_context.RegisterClassifyInput({ .name = "terrain blending defers", .sample = &DefersTerrain });
-			// Listed right after Features/Landscape's CS_DCLF_MTLAND, and its toggle right after the terrain's.
-			const auto terrainSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_TB_TERRAIN", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::UnlessOne,
-				.description = "0: terrain under Terrain Blending, and the meshes that feature redraws after it, stay native (T7c1; live toggle's seed)",
-				.after = "CS_DCLF_MTLAND" });
-			const auto terrain = a_context.RegisterToggle({ .name = "terrain under TB", .label = "Terrain under Terrain Blending",
-				.tooltip = "With Terrain Blending on, DCLF draws the terrain as that feature does: its near blocks' depth into its terrain depth and, offset, into the main depth, and its colour blended after the opaque and decal draws, then the meshes it redraws after the terrain.",
-				.seed = terrainSwitch, .entersClassification = true, .after = "terrain", .needs = { "terrain" } });
-			// While Terrain Blending holds the terrain, MTLand and MTLandLODBlend also need this toggle, because it redraws every terrain pass blended
-			// with its own depth state, which an opaque draw would break. DCLF then draws the terrain the same way in its terrain group.
-			for (const auto technique : { Technique::MTLand, Technique::MTLandLODBlend })
-				a_context.RegisterTechniqueGate({ .technique = static_cast<std::uint32_t>(technique), .whileOn = defers, .needs = terrain });
+			// While Terrain Blending holds the terrain, it redraws every terrain pass blended with its own depth state, so DCLF draws the
+			// terrain the same way in its terrain group, as Terrain Blending does: its near blocks' depth into its terrain depth and, offset,
+			// into the main depth, and its colour blended after the opaque and decal draws, then the meshes it redraws after the terrain.
 			// The terrain blocks use blend mode 1 with LESS_EQUAL and depth writes, and the no-blend meshes after them EQUAL, replayed before the blended decals.
-			// Without the toggle the no-blend meshes stay native, because DCLF would draw them before the terrain blends over them.
 			a_context.RegisterHeldGroup({ .heldWhile = defers, .slot = kTerrainRange, .name = "terrain", .order = 2,
 				.propertyFlags = static_cast<std::uint64_t>(Flag::kMultiTextureLandscape) });
 			a_context.RegisterHeldGroup({ .heldWhile = defers, .slot = kNoBlendRange, .name = "terrain-no-blend", .order = 3,
-				.propertyFlags = static_cast<std::uint64_t>(Flag::kNoTransparencyMultiSample), .toggle = terrain });
+				.propertyFlags = static_cast<std::uint64_t>(Flag::kNoTransparencyMultiSample) });
 			// Its mask, t55, each colour commit.
 			a_context.RegisterFrameTexture({ .name = "terrain blending mask", .textureRegister = kMaskRegister, .view = &MaskView,
 				.capturedWhenNull = true, .graphResources = { ::ORGTerrainBlending::kMaskId } });

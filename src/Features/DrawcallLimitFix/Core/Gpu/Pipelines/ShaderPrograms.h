@@ -192,8 +192,6 @@ namespace DCLF
 
 		/** @brief Any thread. The sources generation the next stage is compiled for. */
 		static std::uint64_t CurrentSourcesGeneration();
-		/** @brief Any thread. Extra defines for every DCLF stage compiled from now on, for shader A/B tests. */
-		static void SetTestDefines(std::string_view a_defines);
 		/** @brief The shader file a shader's programs are compiled from. */
 		static std::string SourcePathOf(const RE::BSShader& a_shader);
 

@@ -1,10 +1,14 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Utils/Setting.h"
 
 struct IBL : Feature
 {
 public:
+	/** @brief Binds the settings the frame revisions follow (EnableIBL, UseStaticIBL, DALCMode). */
+	IBL();
+
 	virtual bool IsCore() const override { return true; };
 
 	virtual inline std::string GetName() override { return "Image Based Lighting"; }
@@ -42,23 +46,22 @@ public:
 	virtual void Prepass() override;
 	/** @brief Creates IBL textures, compiles the diffuse IBL compute shader, and loads static fallback cubemaps. */
 	virtual void SetupResources() override;
-	/** @brief Reserves the render graph's Prepass anchor when CS_ORG_IBL=1 (ORGIBL). */
-	virtual void PostPostLoad() override;
 	/** @brief Releases the cached diffuse IBL compute shader so it can be recompiled. */
 	virtual void ClearShaderCache() override;
 
 	struct Settings
 	{
-		uint EnableIBL = 0;
+		// Exponential Height Fog's client reads EnableIBL. IBL's own client reads DALCMode (whether the environment SH is projected).
+		CS::Setting<std::uint32_t> EnableIBL = 0;
 		uint PreserveFogLuminance = 0;
-		uint UseStaticIBL = 1;
+		CS::Setting<std::uint32_t> UseStaticIBL = 1;
 		float DALCAmount = 1.0f;
 		float EnvIBLScale = 1.0f;
 		float SkyIBLScale = 1.0f;
 		float EnvIBLSaturation = 1.0f;
 		float SkyIBLSaturation = 1.0f;
 		float FogAmount = 0.0f;
-		uint DALCMode = 2;  // 0: Luminance Ratio, 1: Color Ratio, 2: DALC + Sky, 3: DALC + Sky (Directional)
+		CS::Setting<std::uint32_t> DALCMode = 2;  // 0: Luminance Ratio, 1: Color Ratio, 2: DALC + Sky, 3: DALC + Sky (Directional)
 		bool DisableInWorldMap = true;
 		bool DisableInLoadingScreen = true;
 		uint EnableReflectionFallback = 1;
@@ -99,7 +102,7 @@ public:
 	ID3D11ComputeShader* GetDiffuseIBLCS();
 
 	/**
-	 * @brief The environment and sky SH (3x1 RGBA16F) as D3D11 views: the render graph's exports while it projects the SH (CS_ORG_IBL=1),
+	 * @brief The environment and sky SH (3x1 RGBA16F) as D3D11 views: the render graph's exports while it projects the SH (graph mode),
 	 * else the D3D11 textures. Null before SetupResources.
 	 */
 	ID3D11ShaderResourceView* EnvIBLSRV() const;

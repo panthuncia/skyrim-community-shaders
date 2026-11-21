@@ -1,3 +1,4 @@
+#include "PostProcessing/PhysicalLensFlare/resources.hlsli"
 #include "PostProcessing/PhysicalLensImaging/aperture.hlsli"
 #ifndef PHYSICAL_LENS_OPTICS
 #	define PHYSICAL_LENS_OPTICS
@@ -18,22 +19,30 @@ struct GhostPath
 	float4 Spectrum[3];
 	float4 Constraints[120];
 };
+#	define PHYSICAL_LENS_FIELDS(M, A) 		M(uint, Width)                		M(uint, Height)               		M(uint, SurfaceCount)         		M(uint, PathCount)            		M(float, SensorWidth)         		M(float, SensorHeight)        		M(float, SensorZ)             		M(float, FocalLength)         		M(float, PupilRadius)         		M(float, Threshold)           		M(float, Intensity)           		M(float, Coating)             		M(uint, Blades)               		M(float, Rotation)            		M(float, OutputWidth)         		M(float, OutputHeight)        		A(Interface, Surfaces, 40)    		M(uint, MaxSources)           		M(float, ExposureDecode)      		M(float, ManualExposure)      		M(float, AutoExposureEnabled) 		M(float, BladeCurvature)      		M(float, GhostDiffraction)    		M(float, FNumber)             		M(float, BeamState)           		M(float, CutoffRelease)       		M(float, AlignmentVariation)  		M(float, LensSeed)            		M(float, Reserved)
+// Dual-target. D3D11 keeps the cbuffer. On ORG it is a constant buffer the effect copies from its latch block
+// (ORG/ORGPhysicalLens.cpp). Each value field is a static copied from it, and Surfaces reads it in place, since it is
+// indexed dynamically. So the code reads the same names on both paths.
+#	if defined(CS_ORG_BINDLESS)
+struct LensConstants
+{
+	PHYSICAL_LENS_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+};
+ORG_RESOURCE(CBUFFER, LensConstants, Lens, 0)
+#		define PHYSICAL_LENS_STATIC(T, N) static T N = ORG_CB(Lens).N;
+#		define PHYSICAL_LENS_STATIC_ARRAY(T, N, C)
+PHYSICAL_LENS_FIELDS(PHYSICAL_LENS_STATIC, PHYSICAL_LENS_STATIC_ARRAY)
+#		undef PHYSICAL_LENS_STATIC
+#		undef PHYSICAL_LENS_STATIC_ARRAY
+#		define Surfaces ORG_CB(Lens).Surfaces
+#	else
 cbuffer LensParameters : register(b0)
 {
-	uint Width, Height, SurfaceCount, PathCount;
-	float SensorWidth, SensorHeight, SensorZ, FocalLength;
-	float PupilRadius, Threshold, Intensity, Coating;
-	uint Blades;
-	float Rotation, OutputWidth, OutputHeight;
-	Interface Surfaces[40];
-	uint MaxSources;
-	float ExposureDecode, ManualExposure, AutoExposureEnabled;
-	float BladeCurvature;
-	float GhostDiffraction, FNumber, BeamState;
-	float CutoffRelease, AlignmentVariation, LensSeed, Reserved;
+	PHYSICAL_LENS_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
 };
+#	endif
 static const float PI = 3.14159265359;
-StructuredBuffer<GhostPath> Paths : register(t2);
+PHYSICAL_LENS_OPTICS_RESOURCES(ORG_RESOURCE)
 struct Source
 {
 	float4 Color;

@@ -149,6 +149,7 @@ namespace PostProcessingMode
 		const Mode mode = IsAvailable(chosen) ? chosen : ResolveDefaultMode();
 		heldMode = mode != chosen ? std::optional(chosen) : std::nullopt;
 		Apply(mode);
+		logger::info("Post Processing Mode: {} (chosen {})", magic_enum::enum_name(mode), magic_enum::enum_name(chosen));
 		// Set() turns Linear Lighting on with Post Processing; a pack's choice gets the same at startup.
 		if (std::exchange(pendingFromPack, false) && mode == Mode::PostProcessing && !heldMode)
 			globals::features::linearLighting.settings.enableLinearLighting = true;

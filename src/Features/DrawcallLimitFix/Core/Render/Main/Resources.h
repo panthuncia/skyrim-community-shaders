@@ -95,6 +95,10 @@ namespace DCLF::Draws
 		}
 	};
 
+	/**
+	 * @brief The main epochs' resources. A new display size makes a second one that shares every part the display does not size
+	 * (Resources.cpp, CopySizeless), so a new field goes there unless the display sizes it.
+	 */
 	struct Resources
 	{
 		std::vector<FrameBuffer> frameBuffers;
@@ -108,26 +112,6 @@ namespace DCLF::Draws
 		std::shared_ptr<const ComputeProgram> buildDraws, clearPortalQueries, preparePortalQueries;
 		rhi::CommandSignaturePtr portalQuerySignature;
 		winrt::com_ptr<ID3D11Buffer> countD3D11;
-		// The foliage record (Policy::RecordFoliagePixels). Per frame parity, each pixel's object and colours plus the compare
-		// pass's results, read back per run lease index.
-		struct FoliageRecord
-		{
-			std::array<std::shared_ptr<org::Buffer>, 2> ids, colours;
-			std::array<RenderGraph::BufferRef, 2> idsRef{}, coloursRef{};
-			std::shared_ptr<org::Buffer> results;
-			RenderGraph::BufferRef resultsRef;
-			// The Z-prepass's alpha-tested fragment owner per pixel.
-			std::shared_ptr<org::Buffer> owners;
-			std::uint32_t ownersIndex = 0;
-			std::uint32_t epoch = 0;  // colour commits so far, used as parity and tag because the scene frame can repeat or skip
-			std::shared_ptr<const ComputeProgram> program;
-			std::vector<std::shared_ptr<org::Buffer>> readback;
-			std::vector<std::uint32_t> readbackFrame;  // 1 where the range's copy holds a frame's results
-			std::vector<std::uint32_t> rangeOf;  // by lease index, UINT32_MAX for none
-			std::uint32_t ranges = 0;
-			std::uint32_t width = 0, height = 0;
-		};
-		std::shared_ptr<FoliageRecord> foliage;
 		// The per-frame constant blocks sit at fixed slots so a build can name them before their contents exist.
 		std::shared_ptr<org::Buffer> frameConstants;
 		// Targets declared for the latched copies. Anything else is staged.
@@ -157,13 +141,10 @@ namespace DCLF::Draws
 		// Inputs depth phase 1 left OccludedRetest, which phase 2 runs over. An object has one input, so the list never
 		// holds more entries than there are visibility words.
 		Versioned retests;
-		// TEMP (CS_DCLF_SET_PARITY): per object, who wrote its visibility word. Null otherwise.
-		Versioned writers;
 		// Phase 2's dispatch arguments. The depth commit resets them, phase 1 adds a group per 64 retest entries.
 		std::shared_ptr<org::Buffer> retestDispatch;
 		std::shared_ptr<PassStats> passStats;
 		std::shared_ptr<PreprocessStates> preprocessMain;
-		std::shared_ptr<PreprocessStates> preprocessForward;
 		std::shared_ptr<const ComputeProgram> forwardSort;
 		// Null without the depth pyramid's producer. nativeDepth is imported with SRV and DSV so the graph sees one depth resource.
 		std::shared_ptr<org::PixelBuffer> hzb;
@@ -232,48 +213,43 @@ namespace DCLF::Draws
 		// bucket kind present, each set index's bucket (kNoBucket for none) and each bucket's (first, capacity).
 		std::vector<std::uint32_t> map;
 		std::uint32_t decalRanges = 0;
-		/**
-		 * The forward range's plain draws (CS_DCLF_FORWARD_PLAIN), a bucket per set index with a staging and a sorted half.
-		 * Empty when off, or while a forward set index has no plain colour pipeline, in which case the class calls draw it.
-		 */
+		// A plain draw bucket. The forward header word stays 0, since the CPU pipeline's forward site draws the forward family.
 		struct PlainBucket
 		{
 			std::uint32_t set = 0, first = 0, capacity = 0;
 			std::uint32_t group = 0;  // a terrain bucket's group (1 or 2), 0 otherwise
 		};
-		std::vector<PlainBucket> forward;
 		/**
-		 * The main range's plain draws (CS_DCLF_MAIN_PLAIN), drawn in any order since they test EQUAL against the Z-prepass.
-		 * Empty when off, or while a main set index has no plain colour pipeline.
+		 * The main range's plain draws, drawn in any order since they test EQUAL against the Z-prepass.
+		 * Empty while a main set index has no plain colour pipeline.
 		 */
 		std::vector<PlainBucket> main;
 		/**
-		 * The terrain groups' plain draws (CS_DCLF_TERRAIN_PLAIN), group 1 first, drawn in any order.
-		 * Empty when off, or while a terrain set index has no plain colour pipeline.
+		 * The terrain groups' plain draws, group 1 first, drawn in any order.
+		 * Empty while a terrain set index has no plain colour pipeline.
 		 */
 		std::vector<PlainBucket> terrain;
 		/**
-		 * The decal groups' plain draws (CS_DCLF_DECAL_PLAIN). The sorted half ranks decals by engine ordinal so the order is
-		 * stable. Empty when off, or while a decal set index lacks a plain colour pipeline or a needed Z-prepass one.
+		 * The decal groups' plain draws. The sorted half ranks decals by engine ordinal so the order is
+		 * stable. Empty while a decal set index lacks a plain colour pipeline or a needed Z-prepass one.
 		 */
 		std::vector<PlainBucket> decals;
-		// classCounts' words in order: per class and range, then forward, main, terrain and decal buckets.
+		// classCounts' words in order: per class and range, then main, terrain and decal buckets.
 		std::uint32_t Words() const
 		{
-			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(forward.size() + main.size() + terrain.size() + decals.size());
+			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(main.size() + terrain.size() + decals.size());
 		}
 		std::uint32_t DecalCountWord(std::size_t a_bucket) const
 		{
-			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(forward.size() + main.size() + terrain.size() + a_bucket);
+			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(main.size() + terrain.size() + a_bucket);
 		}
 		std::uint32_t TerrainCountWord(std::size_t a_bucket) const
 		{
-			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(forward.size() + main.size() + a_bucket);
+			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(main.size() + a_bucket);
 		}
-		std::uint32_t ForwardCountWord(std::size_t a_bucket) const { return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(a_bucket); }
 		std::uint32_t MainCountWord(std::size_t a_bucket) const
 		{
-			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(forward.size() + a_bucket);
+			return static_cast<std::uint32_t>(classes.size()) * kClassRanges + static_cast<std::uint32_t>(a_bucket);
 		}
 	};
 	void PlanSetClasses(const MainLayout& a_layout, const Lookups& a_lookups, const SceneTables& a_tables, const IndirectState& a_indirect, SetClassPlan& a_out);

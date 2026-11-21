@@ -53,7 +53,8 @@ struct DCLFShadingRow
 	// DCLF_BINDLESS_DRAW is also defined (Skin.hlsli).
 	float4 SkinPerGeometry;
 	uint DCLFShadingWritten;  // the CPU's (which components the pass writes)
-	uint3 DCLFShadingPadding;
+	uint SkinMaterial;        // Advanced Skin's material table row (Skin.hlsli), 0 for the disabled profile
+	uint2 DCLFShadingPadding;
 	// T6b1a: TreeParams and WindTimers (xy) for a TreeAnim property, from its tree node as the frame has it: what a member draws with
 	// until TreeWindCS's entry of its tree's listing (DCLFTreeParamsOf).
 	float4 DCLFShadingTreeParams;
@@ -251,16 +252,14 @@ static const uint kDCLFGeometryBlock = 768;
 #		endif
 uint DCLFMaterialTextureIndex(uint a_register)
 {
-	// MaterialRowHeader: four words (the animated row, reserved), textures[16], samplers[16], features (t71, t74, then TruePBR's t80-t91: kFeatureMaterialRegisters).
-	const uint slot = a_register == 71 ? 32 : a_register == 74 ? 33 : a_register >= 80 ? 34 + (a_register - 80) : a_register;
+	// MaterialRowHeader: four words (the animated row, reserved), textures[16], samplers[16], features (TruePBR's t80-t91: Manifest.cpp).
+	const uint slot = a_register >= 80 ? 32 + (a_register - 80) : a_register;
 	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFMaterialRowAddress, kDCLFMaterialRowHeader + 16 + 4 * slot), 4);
-	DEVICE_REF_TRACE_ZERO_INDEX(index, uint2(a_register, DCLFMaterialRowAddress.y));  // CS_DCLF_REF_TRACE: the register, the row's offset
 	return index;
 }
 uint DCLFMaterialSamplerIndex(uint a_register)
 {
 	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFMaterialRowAddress, kDCLFMaterialRowHeader + 80 + 4 * a_register), 4);
-	DEVICE_REF_TRACE_ZERO_INDEX(index, uint2(a_register, DCLFMaterialRowAddress.y));
 	return index;
 }
 // PipelineRowHeader: six reserved addresses, the shadow mask's texture and sampler, the vertex layout.

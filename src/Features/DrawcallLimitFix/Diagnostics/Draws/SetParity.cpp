@@ -23,7 +23,6 @@ namespace DCLF::Diagnostics
 		auto& setParityFrames = diagnostics.setParityFrames;
 		auto& setParityStaging = diagnostics.setParityStaging;
 		auto& gapHistory = diagnostics.gapHistory;
-		auto& fadeLogFocus = diagnostics.fadeLogFocus;
 		using SetParityFrame = DrawsState::SetParityFrame;
 		// A gap's first frame, by what rejected it.
 		static constexpr const char* kGapClasses[] = { "?", "the frustum", "an owned fade root", "the resident fade test",
@@ -54,44 +53,6 @@ namespace DCLF::Diagnostics
 			}
 			const auto* words = static_cast<const std::uint32_t*>(mapped.pData);
 			const std::uint32_t stamp = snapshot.frame & 0x0FFFFFFFu;
-			// TEMP. Per segment, the word's writers as BuildDrawsCS's RecordWriter stores them.
-			const auto writersOf = [&](std::size_t a_object) -> std::string {
-				if (!snapshot.writersStaging)
-					return "; writers not copied";
-				D3D11_MAPPED_SUBRESOURCE writersMapped{};
-				if (FAILED(context->Map(snapshot.writersStaging.get(), 0, D3D11_MAP_READ, 0, &writersMapped)))
-					return "; writers not mapped";
-				D3D11_BUFFER_DESC writersDesc{};
-				snapshot.writersStaging->GetDesc(&writersDesc);
-				std::string text = fmt::format("; installed inputs SRV {}", snapshot.inputsSrv);
-				if ((a_object + 1) * 32 <= writersDesc.ByteWidth) {
-					const auto* w = static_cast<const std::uint32_t*>(writersMapped.pData) + a_object * 8;
-					for (std::uint32_t s = 0; s < 2; ++s, w += 4)
-						text += fmt::format("; {} writer: stamp {}{}, inputs SRV {}, input {}, site {}, phase {}, dispatch inputs {}", s ? "colour" : "depth", w[0],
-							w[0] == stamp ? " (this frame)" : "", w[1], w[2], w[3] & 0xF, (w[3] >> 4) & 0xF, w[3] >> 8);
-				}
-				context->Unmap(snapshot.writersStaging.get(), 0);
-				return text;
-			};
-			// TEMP. Where the GPU's scene list names an object.
-			const auto gpuInputs = [&](std::size_t a_object) -> std::string {
-				if (!snapshot.inputsStaging)
-					return "; GPU inputs not copied";
-				D3D11_MAPPED_SUBRESOURCE inputsMapped{};
-				if (FAILED(context->Map(snapshot.inputsStaging.get(), 0, D3D11_MAP_READ, 0, &inputsMapped)))
-					return "; GPU inputs not mapped";
-				D3D11_BUFFER_DESC inputsDesc{};
-				snapshot.inputsStaging->GetDesc(&inputsDesc);
-				const auto* gpu = static_cast<const DrawInput*>(inputsMapped.pData);
-				const std::size_t held = inputsDesc.ByteWidth / sizeof(DrawInput);
-				std::string at;
-				for (std::size_t i = 0; i < held && at.size() < 120; ++i)
-					if (gpu[i].objectIndex == a_object)
-						at += fmt::format(" {}", i);
-				context->Unmap(snapshot.inputsStaging.get(), 0);
-				return fmt::format("; the GPU's inputs (backing {}, {} held; colour dispatched {}, depth {}) name it at:{}", snapshot.inputsGeneration, held,
-					snapshot.inputCount, snapshot.depthInputCount, at.empty() ? " none" : at) + writersOf(a_object);
-			};
 			D3D11_MAPPED_SUBRESOURCE frustumMapped{};
 			const std::uint32_t* frustum = nullptr;
 			std::size_t frustumWords = 0;
@@ -124,15 +85,14 @@ namespace DCLF::Diagnostics
 				const bool forward = snapshot.tables && o < snapshot.tables->objects.size() && (snapshot.tables->objects[o].flags & kObjectForward);
 				const bool decal = (o < snapshot.colourState.size() && snapshot.colourState[o] == kObjectStateDecal) || forward;
 				// With the forward family on the CPU the GPU builds none of them, so its words say nothing.
-				const bool forwardOnCpu = forward && Draws::CurrentGraphConditions().forwardDirect;
+				const bool forwardOnCpu = forward && !Draws::AttachedGraphConditions().cpuPipeline;
 				counts.recordDisagrees += (flags & 8) ? 1 : 0;
 				if (!withheld && (depthDrawn || colourDrawn)) {
 					++counts.outsideDrawn;
 					if (counts.samples++ < 40) {
 						const auto* geometry = o < snapshot.geometry.size() ? snapshot.geometry[o] : nullptr;
-						logger::info("[DCLF] set parity, frame {}: drawn outside the set - object {} '{}' ({}{}); listed by {:#x} (input flags {:#x}){}", snapshot.frame, o,
-							geometry && geometry->name.c_str() ? geometry->name.c_str() : "?", depthDrawn ? "depth" : "", colourDrawn ? " colour" : "",
-							o < snapshot.listedBy.size() ? snapshot.listedBy[o] : 0, o < snapshot.listedFlags.size() ? snapshot.listedFlags[o] : 0, gpuInputs(o));
+						logger::info("[DCLF] set parity, frame {}: drawn outside the set - object {} '{}' ({}{})", snapshot.frame, o,
+							geometry && geometry->name.c_str() ? geometry->name.c_str() : "?", depthDrawn ? "depth" : "", colourDrawn ? " colour" : "");
 					}
 				}
 				// Only the colour segment's decal pass draws a decal, so a decal is only checked for being withheld and undrawn.
@@ -236,7 +196,6 @@ namespace DCLF::Diagnostics
 							}
 							// FadeStateCS tests the root at its chosen member's placement row 8, against the root node's own bound.
 							if (fadeHidden && root < roots.Size()) {
-								fadeLogFocus.store(root, std::memory_order_relaxed);
 								const std::uint32_t member = roots.rows[root].object;
 								const auto* memberGeometry = member < tables.objectGeometry.size() ? tables.objectGeometry[member] : nullptr;
 								const auto* property = memberGeometry ? memberGeometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
@@ -342,14 +301,6 @@ namespace DCLF::Diagnostics
 					const auto* geometry = o < snapshot.geometry.size() ? snapshot.geometry[o] : nullptr;
 					const bool alive = geometry != nullptr;  // held by snapshot.tables
 					static constexpr const char* kVerdicts[] = { "occluded (retest)", "visible", "rejected", "no verdict" };
-					// TEMP. A payload built from newer tables names objects these lack.
-					const auto* payloadGeometry = snapshot.payloadTables && o < snapshot.payloadTables->objectGeometry.size() ? snapshot.payloadTables->objectGeometry[o] : nullptr;
-					logger::info("[DCLF] set parity, frame {}: listed by {:#x} (input flags {:#x})", snapshot.frame, o < snapshot.listedBy.size() ? snapshot.listedBy[o] : 0,
-						o < snapshot.listedFlags.size() ? snapshot.listedFlags[o] : 0);
-					logger::info("[DCLF] set parity, frame {}: payload tables {} ({} objects against {}), there '{}'", snapshot.frame,
-						!snapshot.payloadTables ? "none" : snapshot.payloadTables == snapshot.tables ? "the snapshot's" : "other",
-						snapshot.payloadTables ? snapshot.payloadTables->objects.size() : 0, snapshot.flags.size(),
-						payloadGeometry && payloadGeometry->name.c_str() ? payloadGeometry->name.c_str() : "?");
 					logger::info("[DCLF] set parity, frame {}: {} - object {} '{}'{}: verdict {}, depth build {}, colour build {}, {}{}{}", snapshot.frame, kind, o,
 						alive ? geometry->name.c_str() : "?", alpha ? " (alpha tested)" : "", current ? kVerdicts[verdict] : "not this frame's",
 						stateName(o < snapshot.depthState.size() ? snapshot.depthState[o] : kObjectStateAbsent),
@@ -443,33 +394,12 @@ namespace DCLF::Diagnostics
 				context->CopyResource(snapshot.frustumStaging.get(), frustumView);
 		}
 		// The frame the epochs drew, not the one the payloads were built in ahead.
-		snapshot.frame = Scene::FrameView::Get().GetFrame();
+		snapshot.frame = Scene::FrameView::Get().SceneStep();
 		snapshot.framesLeft = 3;
 		snapshot.depthState = a_depth.body->objectState;
 		snapshot.colourState = a_colour.body->objectState;
 		// Only a publication's tables. The coordinator's own are not the render thread's to hold.
 		snapshot.tables = Scene::FrameView::Get().AcceptedTables();
-		snapshot.payloadTables = a_colour.body->streams ? a_colour.body->streams->tables : nullptr;
-		{
-			const std::size_t count = Scene::FrameView::Get().GetTables().objects.size();
-			snapshot.listedBy.assign(count, 0);
-			snapshot.listedFlags.assign(count, 0);
-			const auto note = [&](const DrawInput& a_input, std::uint8_t a_bit) {
-				if (a_input.objectIndex >= count)
-					return;
-				if (!snapshot.listedBy[a_input.objectIndex])
-					snapshot.listedFlags[a_input.objectIndex] = a_input.flags;
-				snapshot.listedBy[a_input.objectIndex] |= a_bit;
-			};
-			for (std::size_t i = 0; i < a_colour.resident.Count(); ++i)
-				note(*a_colour.resident.At(i), 1);
-			for (const auto& input : a_colour.body->inputList)
-				note(input, 2);
-			for (std::size_t i = 0; i < a_depth.resident.Count(); ++i)
-				note(*a_depth.resident.At(i), 4);
-			for (const auto& input : a_depth.body->inputList)
-				note(input, 8);
-		}
 		if (!snapshot.tables) {
 			setParityStaging.push_back(std::move(snapshot.staging));
 			if (snapshot.frustumStaging)
@@ -538,53 +468,6 @@ namespace DCLF::Diagnostics
 				for (std::size_t o = 0; o < objects; ++o)
 					if (snapshot.geometry[o])
 						snapshot.claims[o] = set->PhasesOf(snapshot.geometry[o]);
-			}
-		}
-		// TEMP. Who wrote each word.
-		if (a_resources->writers) {
-			if (auto* const writersView = diagnostics.setParityWriters.Of(a_resources->writers)) {
-				D3D11_BUFFER_DESC staging{};
-				writersView->GetDesc(&staging);
-				staging.Usage = D3D11_USAGE_STAGING;
-				staging.BindFlags = 0;
-				staging.MiscFlags = 0;
-				staging.StructureByteStride = 0;
-				staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-				if (SUCCEEDED(globals::d3d::device->CreateBuffer(&staging, nullptr, snapshot.writersStaging.put())))
-					context->CopyResource(snapshot.writersStaging.get(), writersView);
-			}
-		}
-		// TEMP. The GPU's scene list, copied after the colour epoch like the words.
-		if (const auto* versions = a_epoch.payloadVersions) {
-			snapshot.inputsSrv = (*versions)[Draws::PayloadPart::Inputs].srvIndex;
-			if (const auto& lease = versions->backings[static_cast<std::size_t>(Draws::PayloadPart::Inputs)]; lease && lease->buffer) {
-				static std::uint64_t wrappedGeneration = 0;
-				static winrt::com_ptr<ID3D11Buffer> wrapped;
-				if (!wrapped || wrappedGeneration != lease->generation) {
-					D3D11_BUFFER_DESC wrap{};
-					wrap.ByteWidth = static_cast<UINT>(lease->buffer->GetSize());
-					wrap.Usage = D3D11_USAGE_DEFAULT;
-					wrap.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-					wrap.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-					wrap.StructureByteStride = sizeof(std::uint32_t);
-					wrapped = RenderGraphRuntime::Get().WrapBuffer(*lease->buffer, wrap);
-					wrappedGeneration = lease->generation;
-				}
-				if (wrapped) {
-					D3D11_BUFFER_DESC staging{};
-					wrapped->GetDesc(&staging);
-					staging.Usage = D3D11_USAGE_STAGING;
-					staging.BindFlags = 0;
-					staging.MiscFlags = 0;
-					staging.StructureByteStride = 0;
-					staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-					if (SUCCEEDED(globals::d3d::device->CreateBuffer(&staging, nullptr, snapshot.inputsStaging.put()))) {
-						context->CopyResource(snapshot.inputsStaging.get(), wrapped.get());
-						snapshot.inputsGeneration = lease->generation;
-						snapshot.inputCount = static_cast<std::uint32_t>(a_colour.body->inputList.size() + a_colour.resident.Count());
-						snapshot.depthInputCount = static_cast<std::uint32_t>(a_depth.body->inputList.size() + a_depth.resident.Count());
-					}
-				}
 			}
 		}
 		setParityFrames.push_back(std::move(snapshot));

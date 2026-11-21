@@ -32,15 +32,11 @@ namespace DCLF::Features::Lod::Gates
 				"[DCLF] LOD gates (T6b5, over {} frames): {} opened ({} initial loads; {} initial loads under a load screen passed through), {} flipped ({} flips "
 				"missed), {} forced ({} superseded; flushes: {}); {} blocks held, {} released ({} reused, {} handed off, {} deferred past a flip), {} reattached "
 				"before their flip, {} kept notices to the scene, {} reused still hidden by the flip with no gate pending, {} orphans shown, {} shows vetoed; {} "
-				"open, the oldest {} frames {:.1f} ms; request to flip {:.1f} frames {:.2f} ms average, {:.2f} ms max; flip to release {:.2f} ms average, {:.2f} ms max{}",
+				"open, the oldest {} frames {:.1f} ms; request to flip {:.1f} frames {:.2f} ms average, {:.2f} ms max; flip to release {:.2f} ms average, {:.2f} ms max",
 				a_frames, t.opened, t.initialOpened, t.initialLoadScreen, t.flipped, t.flipMisses, t.forced, t.superseded, flushes.empty() ? "none" : flushes, t.held,
 				t.released, t.reused, t.handedOff, t.deferred, t.reattached, t.kept, t.reusedHidden, t.orphansShown, t.vetoes, t.open, t.oldestFrames, ms(t.oldestTicks),
 				t.flipped ? static_cast<double>(t.flipFrames) / static_cast<double>(t.flipped) : 0.0, t.flipped ? ms(t.flipTicks) / static_cast<double>(t.flipped) : 0.0,
-				ms(t.flipTicksMax), t.releases ? ms(t.releaseTicks) / static_cast<double>(t.releases) : 0.0, ms(t.releaseTicksMax),
-				t.coverage ? fmt::format("; coverage: both levels shown {}, neither {}, neither with every incoming hidden again by the engine (LOD under the "
-										 "loaded cells) {}; incoming hidden by the engine between flip and release {}",
-								 t.coverageBoth, t.coverageNeither, t.coverageEngineHid, t.engineRehides) :
-							 std::string());
+				ms(t.flipTicksMax), t.releases ? ms(t.releaseTicks) / static_cast<double>(t.releases) : 0.0, ms(t.releaseTicksMax));
 		}
 	}
 
@@ -50,8 +46,7 @@ namespace DCLF::Features::Lod::Gates
 		auto& s = state.gateStats;
 		const auto& lodGates = state.lodGates;
 		const std::uint32_t gateHeldOutCount = a_context.VetoCount(Api::kVetoHold);
-		const auto& parity = state.observed.parity;
-		if (!s.opened && !s.retiredFlipped && !s.retiredForced && lodGates.empty() && !gateHeldOutCount && !s.unknownOutcomes && !s.keptNotices && !parity.checks)
+		if (!s.opened && !s.retiredFlipped && !s.retiredForced && lodGates.empty() && !gateHeldOutCount && !s.unknownOutcomes && !s.keptNotices)
 			return;
 		// Count what each open gate's pending geometries are waiting for.
 		const std::uint64_t now = GateNowNs();
@@ -103,33 +98,18 @@ namespace DCLF::Features::Lod::Gates
 		text += fmt::format("; reused blocks: {} kept notices, {} geometries released from their "
 							"hold-out (committed again), {} outgoing tags dropped before their flip",
 			s.keptNotices, s.keptCleared, s.keptUntagged);
-		auto& observed = state.observed;
-		if (observed.publishHoles)
-			text += fmt::format("; {} flipped incoming geometries not claimed by the flip's own publication, first {} <- GATE HOLE (publication)", observed.publishHoles,
-				observed.firstPublishHole);
-		if (const auto& p = observed.parity; p.checks)
-			text += fmt::format("; parity {} checks, {} gates compared ({} full sweeps, {} entries, {} outgoing tags under no root for a sweep), {} differ{}", p.checks, p.gates,
-				p.sweeps, p.entries, p.unmarked, p.differ,
-				p.differ ? " <- GATE PARITY; first: " + p.first : std::string(" <- OK"));
 		s = {};
-		// The parity's flip and shown roots carry over to the next commit and sweep.
-		observed = { .parity = { .pass = observed.parity.pass, .lastFlip = observed.parity.lastFlip, .shown = std::move(observed.parity.shown),
-			.unmarkedOutgoing = std::move(observed.parity.unmarkedOutgoing) } };
 		a_text += text;
 	}
 
 	void ReleaseLines([[maybe_unused]] std::uint32_t a_frame)
 	{
 		auto& rs = Releases();
-		auto& observed = rs.observed;
 		if (rs.any)
 			logger::info("[DCLF] LOD gate releases (T6b5): {} released, {} refused (forced or unknown by then), {} in a frame before DCLF draws (no claims installed yet); flip to release: ms "
-						 "(p50/p95/max) {}, frames (p50/p95/max) {}; request to release ms (p50/p95/max) {}; checked {} (the set or persistent parity): "
-						 "{} incoming not claimed as flipped{}{}{} ({} in refused flips), {} outgoing still claimed{}{}{}",
+						 "(p50/p95/max) {}, frames (p50/p95/max) {}; request to release ms (p50/p95/max) {}",
 				rs.released, rs.refused, rs.beforeDrawing, Percentiles(rs.flipToReleaseMs), Percentiles(rs.flipToReleaseFrames),
-				Percentiles(rs.requestToReleaseMs), observed.checked, observed.holes, observed.firstHole.empty() ? "" : ", first ", observed.firstHole,
-				observed.holes ? " <- GATE HOLE" : "", observed.refusedHoles, observed.coverage, observed.firstCoverage.empty() ? "" : ", first ", observed.firstCoverage,
-				observed.coverage ? " <- GATE COVERAGE" : "");
+				Percentiles(rs.requestToReleaseMs));
 		if (LodGates::Enabled())
 			if (const auto engine = EngineLine(Reports::Interval()); !engine.empty())
 				logger::info("{}", engine);

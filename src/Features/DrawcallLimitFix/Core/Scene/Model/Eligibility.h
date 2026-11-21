@@ -125,8 +125,8 @@ namespace DCLF::Eligibility
 	}
 
 	/**
-	 * @brief Whether a refusal is permanent, leaving only the engine's cull to draw the shadow. Reasons that settle within a few frames,
-	 * or that the engine's shadows skip anyway, are not counted.
+	 * @brief Whether a refusal is permanent, leaving the shadow to the engine, whose draws graph mode skips. Reasons that settle within a
+	 * few frames, or that the engine's shadows skip anyway, are not counted.
 	 */
 	inline bool EngineCasterReason(Ineligible a_reason)
 	{
@@ -141,12 +141,6 @@ namespace DCLF::Eligibility
 		default:
 			return true;
 		}
-	}
-
-	/** @brief Whether the engine would draw a refused geometry in a colour view DCLF takes over by root. Hidden parts and unselected switch children are not drawn by the engine either. */
-	inline bool EngineColourReason(Ineligible a_reason)
-	{
-		return a_reason != Ineligible::None && a_reason != Ineligible::Hidden && a_reason != Ineligible::Switch;
 	}
 
 	/**

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/Port.h"
+
 #include <cstdint>
 #include <d3d11.h>
 #include <functional>
@@ -26,47 +28,45 @@ namespace FrameAnchors
 }
 
 /**
-* @brief Cloud Shadows' occlusion copy and layer operations on the render graph, with CS_ORG_CLOUD_SHADOWS=1.
+* @brief Cloud Shadows' occlusion copy and layer operations on the render graph, in graph mode.
 *
 * Each cloud layer drawn into a reflection face also writes its occlusion into one of 32 layer cubemaps. At the first
 * reflections prepass of a frame the last layer is copied into the occlusion cubemap every reader samples. A copy has no
 * indirect form, so this is a gated compute copy and the recording stays the same.
 * The clears and copies of layer faces between draws are queued as layer operations and run at the next anchor as a gather
 * pass then a scatter pass. Before any D3D11 use of the layers, whatever is queued is done on D3D11 first.
-* Faces the engine draws keep their operations on D3D11. Render thread throughout. Free of ORG/Vulkan includes.
+* Graph mode never draws a face on D3D11. NoteD3D11Work raises a tap error when one comes.
+* In graph mode a setup failure, and any other refusal of the occlusion copy or a layer operation, is fatal. Render thread
+* throughout. Free of ORG/Vulkan includes.
 */
-class ORGCloudShadows
+class ORGCloudShadows : public RenderGraph::Port<ORGCloudShadows>
 {
 public:
+	static constexpr std::string_view kName = "Cloud Shadows";
+
 	/** @brief The occlusion cubemap's published id. */
 	static constexpr std::string_view kOcclusionId = "CloudShadows::Occlusion";
 
-	static bool Requested();
-
-	/** @brief Call in PostPostLoad, before the render graph initializes. */
-	static void Reserve();
-
-	static ORGCloudShadows& Get();
-
-	/** @brief Every graph user takes a layer through this, so one resource serves them all. Null without layers or an active runtime. */
+	/** @brief Every graph user takes a layer through this: its twin, so one resource serves them all. Null before the layer is made. */
 	static FrameAnchors::Texture ImportLayer(int a_layer);
 
-	/** @brief Empty when the layer has no twin or the runtime is not active. */
+	/** @brief Empty before the layer is made. */
 	static std::string PublishedLayerId(int a_layer);
 
 	/**
 	* @brief Makes a persistent, exported, published cube twin for a layer. It lives as long as the game, since D3D11 keeps drawing into its export.
-	* @return A wrapper with an SRV for Cloud Shadows, or null to make a D3D11 texture.
+	* @return A wrapper with an SRV for Cloud Shadows, the same one when made again. Null outside graph mode: make a D3D11 texture.
+	* In graph mode a failure is fatal.
 	*/
 	static Texture2D* MakeLayer(int a_layer, const D3D11_TEXTURE2D_DESC& a_desc, const D3D11_SHADER_RESOURCE_VIEW_DESC& a_srvDesc, const char* a_name);
 
-	/** @brief Call at SetupResources after the layers exist. @return False keeps the copy on D3D11. */
+	/** @brief Call at SetupResources after the layers exist. @return Whether the graph path runs: false outside graph mode. In graph mode a failure is fatal. */
 	bool Setup();
 
-	/** @brief With the runtime still up. */
-	bool IsActive() const;
-
-	/** @brief The ReflectionsPrepass anchor runs it right after the features' reflection prepasses. @return False when the copy stays on D3D11. */
+	/**
+	* @brief The ReflectionsPrepass anchor runs it right after the features' reflection prepasses.
+	* @return False outside graph mode, where the copy is on D3D11. In graph mode true, or fatal before setup.
+	*/
 	bool QueueOcclusionCopy();
 
 	/** @brief t25 and t26. Null when inactive. */
@@ -91,14 +91,17 @@ public:
 	static constexpr std::uint8_t kClearOp = 0xFF;
 
 	/**
-	* @brief Render thread. False means the caller does it on D3D11 after doing what TakeLayerOps returns.
-	* That happens when the point is D3D11 or cannot run now, another point's ops are still queued, or the scratch array is full.
+	* @brief Render thread. False means the caller does it on D3D11 after doing what TakeLayerOps returns: outside graph mode,
+	* or for an engine-drawn face (point D3D11). In graph mode every other refusal is fatal: no setup, an op out of range,
+	* another anchor's ops still queued, no scheduled run of the anchor, or a full scratch array.
 	*/
 	bool QueueLayerOp(LayerOpPoint a_point, LayerOp a_op);
 
 	/** @brief In call order, for the caller to do on D3D11. Render thread. */
 	std::vector<LayerOp> TakeLayerOps();
 
+	/** @brief In graph mode, counts this frame as one where Cloud Shadows' work ran on D3D11 (GraphFrames). Render thread. */
+	static void NoteD3D11Work();
 	~ORGCloudShadows();
 
 	struct Impl;
@@ -106,13 +109,11 @@ public:
 	struct LayerOps;
 
 private:
-	ORGCloudShadows() = default;
+	friend class RenderGraph::Port<ORGCloudShadows>;
+	ORGCloudShadows();
 
-	/** @brief For good. */
-	void Stop();
-
-	/** @brief Only when every layer is a twin. False keeps them on D3D11. */
-	bool SetupLayerOps();
+	/** @brief After Setup. Every layer is a twin in graph mode, so a failure is fatal. */
+	void SetupLayerOps();
 
 	std::shared_ptr<Impl> impl;
 	std::shared_ptr<LayerOps> layerOps;

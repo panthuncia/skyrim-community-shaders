@@ -1,0 +1,42 @@
+# Exponential Height Fog and its volumetric fog turned on after world-ready, a shot soon after and one 1200 frames later (after the graph composite has switched in), exit. The saved settings keep the fog off,
+# so the quick configs never run it. Compose it: guest+fog, native-vulkan+fog, native-d3d12+fog, d3d11+fog.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+ExponentialHeightFog = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "ExponentialHeightFog.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=1"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "fog"
+
+[[steps]]
+at = "previous"
+frames = 1200
+do = "shot"
+arg = "fog-late"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["fog", "fog-late"]

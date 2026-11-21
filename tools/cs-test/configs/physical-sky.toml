@@ -1,0 +1,111 @@
+# Physical Sky's toggles changed mid-session (frame revision plan 6.22). The sky goes off and on: its AP shadow and composite
+# clients leave and come back with a revision, and Atmosphere and Fog's composite follows the toggle in the same revision. Then
+# the volumetric clouds go on, off and on: their screen targets take the display size and one texel again as new versions,
+# and the cloud and cloud map clients switch in with them. Last the sky goes off and on with the clouds on. A shot after each
+# change. Compose it: native-vulkan+physical-sky, native-d3d12+physical-sky, guest+physical-sky, d3d11+physical-sky.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[features]
+PhysicalSky = true
+
+[[steps]]
+at = "world-ready"
+frames = 120
+do = "shot"
+arg = "sky"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PhysicalSky.enabled=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "sky-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PhysicalSky.enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "sky-on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PhysicalSky.enableVolumetricClouds=true"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "clouds"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PhysicalSky.enableVolumetricClouds=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "clouds-off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PhysicalSky.enableVolumetricClouds=true"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "clouds-back"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PhysicalSky.enabled=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "sky-off-clouds"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PhysicalSky.enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "sky-back"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["sky", "sky-off", "sky-on", "clouds", "clouds-off", "clouds-back", "sky-off-clouds", "sky-back"]

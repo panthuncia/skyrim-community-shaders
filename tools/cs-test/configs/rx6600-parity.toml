@@ -5,7 +5,7 @@
 extends = ["guest"]
 
 [dclf]
-set_parity = true
+parity = true
 stats = true
 
 [dxvk]

@@ -1,13 +1,12 @@
 #pragma once
 
-#if defined(CS_HAS_RENDER_GRAPH)
-
-#	include <array>
-#	include <atomic>
-#	include <cstdint>
-#	include <memory>
-#	include <span>
-#	include <string_view>
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <string_view>
+#include <utility>
 
 namespace org
 {
@@ -33,7 +32,7 @@ namespace RenderGraph
 		/** @brief Three group counts and a pad, or four draw words. */
 		static constexpr std::uint32_t kEntryBytes = 16;
 
-		/** @brief A closed gate. Render thread, with the runtime active. Null and logged without a host. */
+		/** @brief A closed gate. Render thread, with the runtime active. Never null: no host or no entries is fatal. */
 		static std::shared_ptr<RunGate> Create(std::string_view a_name, std::uint32_t a_entries = 1);
 
 		std::uint32_t Entries() const { return entries; }
@@ -96,6 +95,38 @@ namespace RenderGraph
 		std::uint32_t words = 0;
 		std::unique_ptr<std::atomic<std::uint64_t>[]> open;
 	};
+
+	/**
+	 * @brief A first-run gate: work that runs until one run with it submits, such as a first fill or clear.
+	 * The client's commit opens its entry while the work is pending, and its executed callback ends it. Keep one per registration
+	 * (captured by the desc's callbacks), so a new registration runs the work again. The work must be safe to run twice.
+	 * The client must be active while Pending(), so its commit runs. Render thread.
+	 */
+	class FirstRun
+	{
+	public:
+		bool Pending() const { return pending; }
+
+		/** @brief In the commit: opens a_entry with a_x x a_y x a_z groups while the work is pending. A copy or clear takes one group. */
+		void Open(const RunGate& a_gate, std::uint32_t a_entry, std::uint32_t a_x = 1, std::uint32_t a_y = 1, std::uint32_t a_z = 1)
+		{
+			opened = pending;
+			if (pending)
+				a_gate.OpenDispatch(a_entry, a_x, a_y, a_z);
+		}
+
+		/** @brief In the executed callback: the run submitted. True when its commit had opened the work, which is then done. */
+		bool Executed()
+		{
+			if (!std::exchange(opened, false))
+				return false;
+			pending = false;
+			return true;
+		}
+
+	private:
+		bool pending = true;  // no run whose commit opened the work has submitted yet
+		bool opened = false;  // the last commit opened the work
+	};
 }
 
-#endif

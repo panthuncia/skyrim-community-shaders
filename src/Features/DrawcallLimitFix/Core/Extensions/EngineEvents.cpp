@@ -63,18 +63,18 @@ namespace DCLF::Extensions
 				observer.cleared();
 	}
 
-	void StandInUpdateEntry(bool a_running)
+	void StandInUpdateEntry()
 	{
 		for (const auto& observer : RegisteredStandInObservers())
 			if (observer.updateEntry)
-				observer.updateEntry(a_running);
+				observer.updateEntry();
 	}
 
-	void StandInAfterWrites(bool a_running)
+	void StandInAfterWrites()
 	{
 		for (const auto& observer : RegisteredStandInObservers())
 			if (observer.afterWrites)
-				observer.afterWrites(a_running);
+				observer.afterWrites();
 	}
 
 	void StandInStructure(const void* a_parent)

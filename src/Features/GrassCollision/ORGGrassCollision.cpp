@@ -1,46 +1,29 @@
-#if defined(CS_HAS_RENDER_GRAPH)
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
-#endif
+#include <rhi_interop_vulkan.h>
 
 #include "ORGGrassCollision.h"
-#include "RenderGraph/Engine/Native/Native.h"
-
-#include "RenderGraph/Switches.h"
 
 #include <algorithm>
 #include <cstring>
 #include <vector>
 
-ORGGrassCollision& ORGGrassCollision::Get()
-{
-	static ORGGrassCollision s_instance;
-	return s_instance;
-}
+#include "Features/GrassCollision.h"
+#include "Globals.h"
+#include "GrassShared/GrassFrame.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "RenderGraph/ShaderBindings.h"
 
-bool ORGGrassCollision::Requested()
-{
-	static const bool requested = RenderGraph::Engine::Native::GraphMode();
-	return requested;
-}
-
-#if defined(CS_HAS_RENDER_GRAPH)
-
-#	include "Features/GrassCollision.h"
-#	include "Globals.h"
-#	include "GrassShared/GrassFrame.h"
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/PublishedResources.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
-#	include "RenderGraph/ShaderBindings.h"
-
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/LatchBlock.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/LatchBlock.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
 
 namespace
 {
@@ -71,7 +54,7 @@ namespace
 
 	struct Resources
 	{
-		std::shared_ptr<const ComputeProgram> program;
+		RenderGraph::Programs::Fixed<ComputeProgram> program;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
 		Layout layout;
@@ -164,7 +147,7 @@ namespace
 	{
 	public:
 		explicit UpdateCollisionPass(const Resources& a_resources) :
-			program(a_resources.program), latch(a_resources.latch), gate(a_resources.gate), boxes(a_resources.boxes->Graph()),
+			program(a_resources.program.Get()), latch(a_resources.latch), gate(a_resources.gate), boxes(a_resources.boxes->Graph()),
 			instances(a_resources.instances->Graph()), collision(a_resources.collision->Graph()) {}
 
 		UpdateBindings Declare(org::PassBuilder& a_builder)
@@ -216,6 +199,8 @@ namespace
 struct ORGGrassCollision::Impl
 {
 	std::shared_ptr<Resources> resources;
+	// Registered at the next revision start, which waits for the stage builds that hold it.
+	RenderGraph::Frame::DeclaredClient client;
 	Limits limits;
 	// Laid out as a latch slot. The commit writes the regions in use.
 	std::vector<std::byte> staged;
@@ -225,25 +210,15 @@ struct ORGGrassCollision::Impl
 	bool stagedFrame = false;  // Stage ran since the last commit
 };
 
+ORGGrassCollision::ORGGrassCollision() = default;
 ORGGrassCollision::~ORGGrassCollision() = default;
-
-void ORGGrassCollision::Reserve()
-{
-	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::EarlyPrepass))
-		logger::warn("[ORG] Grass Collision: the EarlyPrepass anchor could not be reserved; Grass Collision stays on D3D11");
-}
 
 bool ORGGrassCollision::Setup(const Limits& a_limits)
 {
 	impl.reset();
-	if (!Requested())
+	if (!On())
 		return false;
-	auto& runtime = RenderGraphRuntime::Get();
-	auto* host = runtime.Host();
-	if (!runtime.IsActive() || !host || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::EarlyPrepass)) {
-		logger::warn("[ORG] Grass Collision: the render graph or its EarlyPrepass anchor is not available; Grass Collision stays on D3D11");
-		return false;
-	}
+	SetupHost();
 	auto resources = std::make_shared<Resources>();
 	auto& layout = resources->layout;
 	layout.boxesOffset = AlignRegion(a_limits.perFrameBytes);
@@ -253,7 +228,7 @@ bool ORGGrassCollision::Setup(const Limits& a_limits)
 	layout.slotBytes = layout.instancesOffset + layout.instancesBytes;
 	resources->width = a_limits.texture.Width;
 	resources->height = a_limits.texture.Height;
-	resources->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<CollisionUpdateBlock>() });
+	resources->program = RenderGraph::Programs::Queue("GrassCollision", ComputeProgram::Desc{ .source = kShader, .constantWords = ShaderBindings::Words<CollisionUpdateBlock>() });
 	try {
 		resources->latch = std::make_shared<org::LatchBlock>("GrassCollision::Latch", layout.slotBytes);
 	} catch (const std::exception& e) {
@@ -268,11 +243,8 @@ bool ORGGrassCollision::Setup(const Limits& a_limits)
 	// Read by the next frame's update and by the engine's grass through D3D11. DCLF's grass draws read it by name.
 	resources->collision = std::make_unique<GraphResources::Texture2D>(a_limits.texture, std::string(GrassShared::kCollisionGraphId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
-	if (!resources->program || !resources->latch || !resources->gate || !*resources->boxes || !*resources->instances || !*resources->collision ||
-		!resources->collision->SRV()) {
-		logger::error("[ORG] Grass Collision: its program, latch block or graph resources could not be made; Grass Collision stays on D3D11");
-		return false;
-	}
+	if (!resources->latch || !*resources->boxes || !*resources->instances || !resources->collision->SRV())
+		Fatal("its latch block or graph resources could not be made");
 
 	auto state = std::make_unique<Impl>();
 	state->resources = resources;
@@ -321,25 +293,19 @@ bool ORGGrassCollision::Setup(const Limits& a_limits)
 	// When another client runs the anchor without a staged frame, the update stays closed.
 	client.active = [self] { return self->impl && self->impl->stagedFrame; };
 	impl = std::move(state);
-	if (!FrameAnchors::Register(std::move(client))) {
-		impl.reset();
-		return false;
-	}
+	// The client never changes, so its key is constant.
+	impl->client = RenderGraph::Frame::DeclareClient<bool>(
+		std::string(kClientId), {}, [](const RenderGraph::Frame::Inputs&) -> std::optional<bool> { return true; },
+		[client = std::move(client)](const bool&, FrameAnchors::ClientDesc& a_out) {
+			a_out = client;
+			return true;
+		});
 	// DCLF's grass draws read it by name, ordered after the update.
-	if (!PublishedResources::Publish(*resources->collision)) {
-		logger::error("[ORG] Grass Collision: the collision texture could not be published; Grass Collision stays on D3D11");
-		FrameAnchors::Unregister(kClientId);
-		impl.reset();
-		return false;
-	}
+	if (!PublishedResources::Publish(*resources->collision))
+		Fatal("the collision texture could not be published");
 	logger::info("[ORG] Grass Collision: the collision update runs on the render graph (EarlyPrepass anchor, {}x{}, {} latch bytes a run)",
 		resources->width, resources->height, layout.slotBytes);
 	return true;
-}
-
-bool ORGGrassCollision::IsActive() const
-{
-	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
 void ORGGrassCollision::Stage(const Frame& a_frame)
@@ -373,17 +339,3 @@ ID3D11ShaderResourceView* ORGGrassCollision::CollisionSRV() const
 	return IsActive() ? impl->resources->collision->SRV() : nullptr;
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-// Without OpenRenderGraph Grass Collision always updates with D3D11.
-struct ORGGrassCollision::Impl
-{};
-
-ORGGrassCollision::~ORGGrassCollision() = default;
-void ORGGrassCollision::Reserve() {}
-bool ORGGrassCollision::Setup(const Limits&) { return false; }
-bool ORGGrassCollision::IsActive() const { return false; }
-void ORGGrassCollision::Stage(const Frame&) {}
-ID3D11ShaderResourceView* ORGGrassCollision::CollisionSRV() const { return nullptr; }
-
-#endif

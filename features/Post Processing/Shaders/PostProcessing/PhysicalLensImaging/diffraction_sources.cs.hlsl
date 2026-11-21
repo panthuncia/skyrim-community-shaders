@@ -1,20 +1,16 @@
+// Dual-target (Common/OrgResources.hlsli). The push block holds optics.hlsli's and exposure.hlsli's lists, then these.
+#include "PostProcessing/PhysicalLensFlare/resources.hlsli"
+#define PHYSICAL_LENS_WAVE_KERNEL_INPUT_RESOURCES(X) X(SRV, StructuredBuffer<float4>, SourceWaveKernel, 3)
+#define PHYSICAL_LENS_WAVE_SOURCE_RESOURCES(X)               	X(EXTERN_LATCH, DiffractionConstants, Diffraction, 2)   	X(SRV, Texture2DArray<float>, WaveMaxDensity, 4)        	X(SRV, Texture2DArray<float4>, WaveTileMapping, 1)      	X(SRV, StructuredBuffer<float4>, WaveTileRegions, 3)    	X(SRV, StructuredBuffer<Source>, WaveInputSources, 1)   	X(SRV, Texture2DArray<float4>, WaveMapping, 0)          	X(UAV, RWStructuredBuffer<float4>, WaveSourceOutput, 0) 	X(SRV, StructuredBuffer<float4>, WaveSourceInput, 2)    	X(UAV, RWStructuredBuffer<uint>, WaveTileOutput, 1)     	X(UAV, RWByteAddressBuffer, WaveDispatch, 2)            	X(UAV, RWStructuredBuffer<uint>, WaveWorkTiles, 3)
+ORG_PUSH_BLOCK(PHYSICAL_LENS_OPTICS_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_EXPOSURE_RESOURCES(ORG_HANDLE)
+		PHYSICAL_LENS_WAVE_KERNEL_INPUT_RESOURCES(ORG_HANDLE) PHYSICAL_LENS_WAVE_SOURCE_RESOURCES(ORG_HANDLE))
 #include "PostProcessing/PhysicalLensFlare/exposure.hlsli"
 #include "PostProcessing/PhysicalLensFlare/optics.hlsli"
-StructuredBuffer<float4> SourceWaveKernel : register(t3);
+PHYSICAL_LENS_WAVE_KERNEL_INPUT_RESOURCES(ORG_RESOURCE)
 #include "PostProcessing/PhysicalLensImaging/diffraction_domain.hlsli"
 #include "PostProcessing/PhysicalLensImaging/diffraction_parameters.hlsli"
 #include "PostProcessing/PhysicalLensImaging/regions.hlsli"
-Texture2DArray<float> WaveMaxDensity : register(t4);
-Texture2DArray<float4> WaveTileMapping : register(t1);
-StructuredBuffer<float4> WaveTileRegions : register(t3);
-
-StructuredBuffer<Source> WaveInputSources : register(t1);
-Texture2DArray<float4> WaveMapping : register(t0);
-RWStructuredBuffer<float4> WaveSourceOutput : register(u0);
-StructuredBuffer<float4> WaveSourceInput : register(t2);
-RWStructuredBuffer<uint> WaveTileOutput : register(u1);
-RWByteAddressBuffer WaveDispatch : register(u2);
-RWStructuredBuffer<uint> WaveWorkTiles : register(u3);
+PHYSICAL_LENS_WAVE_SOURCE_RESOURCES(ORG_RESOURCE)
 
 // Bilinear table evaluation and its exact local Jacobian. Extrapolate the
 // outer cell for sources just beyond the sensor, whose wings may remain visible.

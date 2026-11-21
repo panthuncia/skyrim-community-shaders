@@ -20,7 +20,7 @@ namespace DCLF
 
 	/**
 	 * @brief The coordinator's copy of the engine's scene, built from the records the hooks captured and applied in event order.
-	 * Only ApplyEvents writes it. Pool evaluations read it while it is unchanged. CS_DCLF_MIRROR_PARITY checks it against live captures.
+	 * Only ApplyEvents writes it. Pool evaluations read it while it is unchanged. CS_DCLF_PARITY checks it against live captures.
 	 */
 	class SceneMirror
 	{
@@ -67,10 +67,8 @@ namespace DCLF
 			std::uint64_t replaysWalked = 0;   // captures whose keys were looked up in the kept updates
 			std::uint64_t remembered = 0;      // updates kept for the replays
 			std::uint64_t forgotten = 0;       // updates two batches old let go
-			std::uint64_t skipsChecked = 0, skipsWrong = 0, preparedChecked = 0, preparedWrong = 0, logsChecked = 0, logsWrong = 0;
 		};
 		Work TakeWork() { return std::exchange(work, {}); }
-		void SetChecking(bool a_checking) { checking = a_checking; }
 		/** @brief Updates older than two batches go. */
 		void BeginBatch();
 		void Clear();
@@ -155,7 +153,6 @@ namespace DCLF
 		/** @brief Newest first. */
 		void Later(std::uintptr_t a_key, std::uint64_t a_after, std::vector<const SceneCapture::Update*>& a_out) const;
 		Work work;
-		bool checking = false;
 		std::uint64_t batch = 0;
 		std::uint64_t writes = 0;  // Writes()
 		KeySet gated;              // SetGated

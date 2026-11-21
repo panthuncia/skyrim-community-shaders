@@ -7,7 +7,6 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
-#include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
 #include <array>
@@ -27,8 +26,6 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			inline constexpr Engine::Offset kUpdate{ { 32160 }, { 31373 } };
 			inline constexpr Engine::Offset kOrientCall{ { 107564, 0xe0 }, { 100780, 0xe5 } };  // the face render's FUN_1414ed500(camera, face)
 			inline constexpr Engine::Offset kOrient{ { 107563 }, { 100779 } };
-			inline constexpr Engine::Offset kAccumulatorRenderCall{ { 107564, 0x2d8 }, { 100780, 0x2d6 } };  // the face render's FUN_1414a90f0(camera, accumulator, 8)
-			inline constexpr Engine::Offset kAccumulatorRender{ { 106436 }, { 99789 } };
 			// The update's LOD add-roots. AE calls FUN_1405275e0(camera, root). SE calls the shared array append FUN_1401d05c0 directly,
 			// so AddLodRoot's first argument is the array there. It only forwards it.
 			inline constexpr std::array<Engine::Offset, 3> kAddRootCalls{ { { { 32160, 0x29d }, { 31373, 0x28e } }, { { 32160, 0x2b6 }, { 31373, 0x2ae } }, { { 32160, 0x2cf }, { 31373, 0x2ce } } } };
@@ -40,7 +37,6 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 		std::uint32_t faceMask = 0;
 		bool plain = false;
 		FaceOriented faceOriented = nullptr;
-		AfterFaceDraws afterFaceDraws = nullptr;
 		RootsOwned rootsOwned = nullptr;
 		std::uint32_t skipRoots = 0;
 		RootStats rootStats;
@@ -66,28 +62,14 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief The add-root at a LOD call site, skipped when DCLF draws that root.
-		 * Engine-only colour roots under it are still added, and the engine draws them in the faces.
-		 */
+		/** @brief The add-root at a LOD call site, skipped when DCLF draws that root. */
 		template <std::uint32_t Bit, std::uint32_t Site>
 		struct AddLodRoot
 		{
 			static void thunk(void* a_camera, void* a_root)
 			{
-				if (!(skipRoots & Bit)) {
+				if (!(skipRoots & Bit))
 					func(a_camera, a_root);
-					return;
-				}
-				const auto& subset = Scene::FrameView::Get().GetEngineCasters();
-				if (!subset)
-					return;
-				const auto& colour = subset->Of(Scene::EngineOnlySubset::kColour);
-				for (std::size_t r = 0; r < colour.roots.size(); ++r)
-					if (colour.category[r] == a_root) {
-						func(a_camera, const_cast<RE::NiAVObject*>(colour.roots[r]));
-						++rootStats.engineOnlyRoots;
-					}
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -100,18 +82,6 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 				func(a_camera, a_face);
 				if (faceOriented && a_camera)
 					faceOriented(*a_camera, a_face);
-			}
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		/** @brief The face's accumulator render (FUN_1414a90f0(camera, accumulator, 8)). */
-		struct AccumulatorRender
-		{
-			static void thunk(RE::NiCamera* a_camera, void* a_accumulator, std::uint32_t a_flags)
-			{
-				func(a_camera, a_accumulator, a_flags);
-				if (afterFaceDraws)
-					afterFaceDraws();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -152,7 +122,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 		bool Known()
 		{
 			using namespace Address;
-			for (const auto& offset : { kReflectSky, kOrientCall, kOrient, kAccumulatorRenderCall, kAccumulatorRender, kUpdateCall, kUpdate, kAddRootCalls[0],
+			for (const auto& offset : { kReflectSky, kOrientCall, kOrient, kUpdateCall, kUpdate, kAddRootCalls[0],
 					 kAddRootCalls[1], kAddRootCalls[2], kAddRoot })
 				if (!offset.Known())
 					return false;
@@ -167,7 +137,6 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			return;
 		const auto base = REL::Module::get().base();
 		HookSites::RequireCall("the water reflection's face orientation call", base + kOrientCall);
-		HookSites::RequireCall("the water reflection's accumulator render call", base + kAccumulatorRenderCall);
 		HookSites::RequireCall("the water reflection's update call", base + kUpdateCall);
 		for (const auto& site : kAddRootCalls)
 			HookSites::RequireCallTo("the water reflection's LOD add-root calls", base + site, base + kAddRoot);
@@ -181,23 +150,21 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			logger::warn("[DCLF] reflection face hooks not installed: this runtime lacks their addresses");
 			return;
 		}
-		// Preflight checked every call. The orientation, accumulator render and update chain onto whatever they call.
+		// Preflight checked every call. The orientation and update chain onto whatever they call.
 		stl::write_vfunc<0x35, FaceRender>(RE::VTABLE_BSCubeMapCamera[0]);
 		stl::write_thunk_call<Orient>(base + kOrientCall);
-		stl::write_thunk_call<AccumulatorRender>(base + kAccumulatorRenderCall);
 		stl::write_thunk_call<Update>(base + kUpdateCall);
 		// LOD land 0x14315b898, LOD objects 0x14315b8a0, LOD trees 0x14315b880.
 		stl::write_thunk_call<AddLodRoot<kLodRoots, 0>>(base + kAddRootCalls[0]);
 		stl::write_thunk_call<AddLodRoot<kLodRoots, 1>>(base + kAddRootCalls[1]);
 		stl::write_thunk_call<AddLodRoot<kTreeRoot, 2>>(base + kAddRootCalls[2]);
-		logger::info("[DCLF] reflection face hooks installed: the update, its LOD add-roots, the face render (vfunc 0x35), its orientation and draws");
+		logger::info("[DCLF] reflection face hooks installed: the update, its LOD add-roots, the face render (vfunc 0x35) and its orientation");
 	}
 
 	bool InFace() { return camera != nullptr; }
 	std::uint32_t FaceMask() { return faceMask; }
 	bool Plain() { return plain; }
 	void SetFaceOriented(FaceOriented a_callback) { faceOriented = a_callback; }
-	void SetAfterFaceDraws(AfterFaceDraws a_callback) { afterFaceDraws = a_callback; }
 	void SetRootsOwned(RootsOwned a_callback) { rootsOwned = a_callback; }
 
 	RootStats TakeRootStats()

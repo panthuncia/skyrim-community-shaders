@@ -1,24 +1,34 @@
 #pragma once
 
+#include "RenderGraph/Port.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <d3d11.h>
-#include <functional>
 #include <memory>
 #include <span>
 #include <string_view>
 
 /**
-* @brief Light Limit Fix's local shadow cache at EarlyPrepass, with CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1.
+* @brief Light Limit Fix's local shadow cache at EarlyPrepass, on the render graph (guest and native graph modes).
 *
-* Right after the engine renders its shadow maps, a compute pass copies the fresh slices into the cache and a copy moves the slot
-* data into its buffer. Both are Persistent, exported for the engine at t102 and t103, and published for DCLF.
+* Right after the shadow maps are drawn, a compute pass copies the fresh slices into the cache and a copy moves the slot data into
+* its buffer. With Drawcall Limit Fix the slices are the ones its shadow epoch drew for the local lights' views, and Light Limit Fix
+* names them (LightLimitFix::FollowDCLFShadowViews). Both are Persistent, exported for the engine at t102 and t103, and published for DCLF and the fog.
 * Per-frame values go through the latch and each possible copy is gated, so the recordings stay the same.
+*
+* The cache follows the frame revisions (frame revision plan, 6.13). It is declared once at setup on EnableLocalShadows,
+* LocalShadowResolution and the engine's shadow map (EngineShadowMap): a new resolution is a new version, adopted with its revision,
+* and it is one texel while the cache is off. A new slot count is a new slice count, so another shape class: the client's next
+* registration takes a new texture, and the revision that adopts it publishes it under the same id. The data buffer holds every
+* slot the setting allows, so it never changes.
 * Render thread only. Free of ORG/Vulkan includes.
 */
-class ORGLocalShadows
+class ORGLocalShadows : public RenderGraph::Port<ORGLocalShadows>
 {
 public:
+	static constexpr std::string_view kName = "LLF local shadows";
+
 	/** @brief The published ids of the slot data (t102) and the cache (t103). */
 	static constexpr std::string_view kDataId = "LightLimitFix::LocalShadowData";
 	static constexpr std::string_view kCacheId = "LightLimitFix::LocalShadowCache";
@@ -32,47 +42,43 @@ public:
 		std::uint32_t targetSlot;
 	};
 
-	struct Desc
+	/** @brief The cache the frame binds. No slots while the cache is off. */
+	struct Shape
 	{
 		std::uint32_t slots = 0;
-		std::uint32_t resolution = 0;
-		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // R32_FLOAT or R16_UNORM
-		std::uint32_t scale = 1;                   // engine texels per cache texel per axis, a power of two
-		std::uint32_t dataStride = 0;              // sizeof(LightLimitFix::LocalShadowData)
+		std::uint32_t resolution = 0;        // the cache's, square
+		std::uint32_t engineResolution = 0;  // the engine's shadow maps', a power of two times the cache's
+		std::uint32_t engineSlices = 0;
+		explicit operator bool() const { return slots != 0; }
+		friend bool operator==(const Shape&, const Shape&) = default;
 	};
 
-	static ORGLocalShadows& Get();
+	/**
+	* @brief Render thread, once at SetupResources. Declares the cache, its client and the data buffer, which follow Light Limit
+	* Fix's settings from then on. a_dataStride is sizeof(LightLimitFix::LocalShadowData), a_capacity the most slots the setting
+	* allows. In graph mode a failure is fatal. @return False outside graph mode, where the cache stays on D3D11.
+	*/
+	bool Setup(std::uint32_t a_dataStride, std::uint32_t a_capacity);
 
-	static bool Requested();
-
-	/** @brief Call in PostPostLoad, before the render graph initializes. */
-	static void Reserve();
+	/** @brief Render thread. The adopted revision's cache. Empty when inactive, off, or before its client switched in. */
+	Shape Adopted() const;
 
 	/**
-	* @brief Called when Light Limit Fix sizes its cache, which follows its settings, so not at SetupResources.
-	* @return False, holding nothing, keeps Light Limit Fix on D3D11.
+	* @brief Written into the latch when the anchor runs, for the adopted cache. Copies past kMaxCopies are dropped. Without a call
+	* nothing is copied and the slot data stays.
 	*/
-	bool Setup(const Desc& a_desc);
-
-
-	/** @brief Releases D3D11 views first, then the graph's after D3D11's last use, and withdraws them. */
-	void Release();
-
-	bool IsActive() const;
-
-	/** @brief Written into the latch when the anchor runs. Copies past kMaxCopies are dropped. Without a call nothing is copied and the slot data stays. */
 	void SetFrame(std::span<const Copy> a_copies, std::span<const std::byte> a_data);
 
-	/** @brief t103. Null when inactive. */
+	/** @brief t103. Null while Adopted() is empty. */
 	ID3D11ShaderResourceView* GetCacheSRV() const;
 
-	/** @brief t102. Null when inactive. */
+	/** @brief t102. Null while Adopted() is empty. */
 	ID3D11ShaderResourceView* GetDataSRV() const;
-
 	~ORGLocalShadows();
 
 private:
-	ORGLocalShadows() = default;
+	friend class RenderGraph::Port<ORGLocalShadows>;
+	ORGLocalShadows();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

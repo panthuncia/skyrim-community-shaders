@@ -9,7 +9,6 @@ namespace DCLF::Scene
 	{
 		ankerl::unordered_dense::map<const void*, std::vector<RE::BSGeometry*>> hiddenDependents;
 		bool hiddenGating = false;
-		bool hiddenWitness = false;
 		struct BatchHidden
 		{
 			const void* key = nullptr;

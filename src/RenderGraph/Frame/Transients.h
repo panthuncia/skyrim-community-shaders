@@ -24,7 +24,6 @@ namespace org
  * frame needs only the most memory live at one stage. Each stage's graph places its own transients. Resources several stages
  * use are placed with Place, and ORG derives their span from the graphs that declare them.
  * A resource whose bytes were reused since its last use starts from Undefined, so the first pass of its span must write it.
- * CS_ORG_FRAME_ARENA=0 gives each stage its own pools, for A/B runs.
  */
 namespace RenderGraph::Frame::Transients
 {
@@ -40,21 +39,18 @@ namespace RenderGraph::Frame::Transients
 	/** @brief Such as "pre-main to deferred+water". */
 	std::string Describe(Span a_span);
 
-	/** @brief Native mode with CS stages, and CS_ORG_FRAME_ARENA not 0. Set by Install. */
+	/** @brief Native mode with CS stages. Set by Install. */
 	bool On();
 
-	/** @brief Gives the host every stage's frame position before the graphs are built. False when the arena is off. */
+	/** @brief Gives the host every stage's frame position before the graphs are built. */
 	bool Install(org::GraphHost& a_host);
 
 	/**
 	 * @brief Places textures several stages use as frame transients and materializes them. The owner keeps the returned object.
-	 * Null when the arena is off, so the caller materializes them itself. Throws when the memory cannot be allocated.
+	 * Null in guest mode, so the caller materializes them itself. Throws when the memory cannot be allocated.
 	 */
 	std::shared_ptr<const void> Place(std::string a_label, std::span<const std::shared_ptr<org::PixelBuffer>> a_textures);
 
 	/** @brief A frame transient's label and current span, by graph name. Empty for anything else. Any thread. */
 	std::optional<std::pair<std::string, Span>> FrameTransientOf(std::string_view a_name);
-
-	/** @brief The census line for CS_ORG_EPOCH_STATS. */
-	void LogStats();
 }

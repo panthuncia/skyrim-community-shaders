@@ -2,15 +2,16 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Features/Lod/LodSegmentEvents.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Features::Lod
 {
 	namespace
 	{
 		// No wake. Writes happen constantly as the camera moves and mostly leave the ranges unchanged, so the next pass takes them.
-		EventQueue<const void*> segmentEvents;
+		RenderGraph::Frame::EventQueue<const void*> segmentEvents;
 		bool segmentHooksInstalled = false;
 
 		void OnSegmentWrite(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
@@ -29,7 +30,7 @@ namespace DCLF::Features::Lod
 			}
 			for (const std::uint32_t hook : { SWF_HOOK_LOD_SEGMENT_SHOW, SWF_HOOK_LOD_SEGMENT_HIDE, SWF_HOOK_LOD_SEGMENT_SHOW_ALL })
 				if (!SceneWriter::SubscribeCall(hook, &OnSegmentWrite, SWF_PHASE_POST))
-					stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused a LOD segment writer after reporting it installed");
+					::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused a LOD segment writer after reporting it installed");
 			return true;
 		}
 	}

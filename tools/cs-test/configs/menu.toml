@@ -62,3 +62,5 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["start", "menu", "menu-font", "closed"]
+# The font reload makes new atlas page versions, adopted by frame revisions (plan step 6.2).
+no_log = ["frame tap error"]

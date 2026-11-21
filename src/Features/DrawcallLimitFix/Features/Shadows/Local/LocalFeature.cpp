@@ -1,5 +1,5 @@
 // Shadows/Local: the Spot, Point and Focus sources, the kept lights' views, the point lights' culls, the focus camera hook, the
-// entry exclusions, and their report lines and parity.
+// entry exclusions, and their report lines.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
@@ -9,10 +9,6 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/LightViews.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/Local.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/LocalLightCull.h"
-#include "Features/DrawcallLimitFix/Features/Shadows/Local/Diagnostics/LightCulls.h"
-#include "Features/DrawcallLimitFix/Features/Shadows/Local/Diagnostics/StrictLightParity.h"
-
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 namespace DCLF::Features::Shadows::Local
 {
@@ -37,7 +33,7 @@ namespace DCLF::Features::Shadows::Local
 		}
 
 		/** @brief At frame start, the point lights' culls select the exclusion the shadow epoch published. */
-		void PointFrameStart(std::uint32_t a_frame) { LocalLightCull::SelectFrame(a_frame, ParabolicExclusionSlot::Get().Pending()); }
+		void PointFrameStart(std::uint32_t) { LocalLightCull::SelectFrame(ParabolicExclusionSlot::Get().Pending()); }
 
 		/** @brief Puts the shadow epoch's exclusion of a_source into its slot. */
 		void PublishExclusion(Api::ShadowSource a_source, std::shared_ptr<void> a_exclusion)
@@ -66,9 +62,6 @@ namespace DCLF::Features::Shadows::Local
 
 		void Install(Api::InstallContext& a_context)
 		{
-			const auto strictParity = a_context.RegisterSwitch({ .name = "CS_DCLF_STRICT_LIGHT_PARITY", .kind = Api::SwitchKind::Parity,
-				.description = "1: the portal-strict point lights' native culls against DCLF's model of them, on the parity frames (AE)" });
-			StrictLightParity::Configure(SwitchEnabled(strictParity));
 			a_context.RegisterShadowSource({ .source = Api::ShadowSource::Spot, .camera = &LightCamera, .lightKept = &LightKept });
 			a_context.RegisterShadowSource({ .source = Api::ShadowSource::Point, .camera = &LightCamera, .lightKept = &LightKept, .frameStart = &PointFrameStart,
 				.frameEnd = &LocalLightCull::EndFrame });
@@ -77,15 +70,6 @@ namespace DCLF::Features::Shadows::Local
 				.frameStart = &ExclusionFrameStart, .listExclusion = &ListExclusion });
 			a_context.RegisterStandInObserver({ .structure = &LocalLightCull::NoteStructure });
 			a_context.RegisterReportLines({ .name = "point light culls", .point = Api::ReportPoint::PrimaryCullSources, .lines = &PointCullLines });
-			// CS_DCLF_SET_PARITY or CS_DCLF_PERSISTENT_PARITY observers.
-			if (Diagnostics::Observe().claimsOrScene) {
-				SubscribeLightParity();
-				SubscribeFocusParity();
-				SubscribeShadowVolumeParity();
-			}
-			// CS_DCLF_PERSISTENT_PARITY: the point lights' culls on frames that skip nothing.
-			if (Diagnostics::Observe().scene)
-				LightCulls::Install();
 		}
 	}
 

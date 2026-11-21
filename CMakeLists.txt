@@ -423,9 +423,9 @@ if(GPA_RUNTIME_DIR)
     )
 endif()
 
-# OpenRenderGraph on DXVK's Vulkan device; defines CS_HAS_RENDER_GRAPH.
+# OpenRenderGraph on DXVK's Vulkan device. Every build has it.
 include(cmake/RenderGraph.cmake)
-# The persistent shader cache. Every build needs it, with or without the render graph.
+# The persistent shader cache.
 include("${CS_ORG_ROOT}/ORGModuleServices/cmake/ShaderStore.cmake")
 target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ShaderStore)
 # https://gitlab.kitware.com/cmake/cmake/-/issues/24922#note_1371990

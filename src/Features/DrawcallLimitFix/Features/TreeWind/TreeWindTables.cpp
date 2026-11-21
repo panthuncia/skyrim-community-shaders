@@ -136,9 +136,6 @@ namespace DCLF::Features::TreeWind
 		/** @brief A resident's tree slot: taken for a tree member, given back otherwise (as it leaves: UnlistTree). */
 		void ListTree(const Api::CoordinatorComponentContext& a_context, std::uint32_t a_slot)
 		{
-			// The walk parity's dense walk restores the tables, not the owners kept beside them.
-			if (a_context.DenseWalk())
-				return;
 			auto& tables = a_context.tables;
 			auto& family = tables.families.Mutable(treeFamily);
 			auto& trees = *static_cast<TreeTables*>(family.columns.get());

@@ -37,20 +37,12 @@ namespace DCLF::Diagnostics
 		{
 			return a_plan == PrimaryCull::EntryPlan::Rejected;
 		}
-		/** @brief The cut planned whole for its snapshot, leaving the cut itself unchanged. */
-		static auto PlanWholeCut() { return PrimaryCull::Get().PlanWholeCut(); }
 		/** @brief DCLF's enumeration of the object root's roots. The build's job. */
 		static bool ListRoots(const RE::NiAVObject*& a_objectRoot, std::vector<const RE::NiAVObject*>& a_roots) { return PrimaryCull::ListRoots(a_objectRoot, a_roots); }
 		/** @brief The cut's frames since its counters were last taken. */
 		static std::uint64_t CutFrames() { return Self().cutStats.frames; }
 		/** @brief Whether this frame's snapshot is current, so the stand-in runs. */
 		static bool StandInLive() { return Self().standInLive; }
-		/** @brief Whether every entry is walked this frame. */
-		static bool WalkEverything() { return Self().walkEverything; }
-		/** @brief Makes the list jobs collect the members in view for FrameVisible. Install only, the one write. */
-		static void CollectVisible() { PrimaryCull::Get().collectVisible = true; }
-		/** @brief This frame's members in view under stood-in entries. Valid after AfterListJobs, only after CollectVisible. */
-		static const auto& FrameVisible() { return Self().frameVisible; }
 		/** @brief The frame's set, or null. */
 		static const auto& FrameSet() { return Self().frameSet; }
 		/** @brief Whether the cut stands in for a_node whole this frame, so the engine's cull does not write its bit. */

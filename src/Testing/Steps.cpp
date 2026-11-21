@@ -1,4 +1,4 @@
-// The step runner, the exit, and the old CS_DCLF_TEST_* command list, driven from Present.
+// The step runner and the exit, driven from Present.
 #include "Testing/Internal.h"
 
 #include "Features/ScreenshotFeature.h"
@@ -9,6 +9,7 @@
 #include "Vram/SpillLab.h"
 
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/Revision.h"
 
 namespace Testing
 {
@@ -17,6 +18,13 @@ namespace Testing
 		// The step runner's state. Render thread only.
 		std::uint32_t lastRunFrame = 0;  // the frame the previous step ran at
 		double waitStart = -1.0;         // when the current step's wait started; below zero: none
+
+		// An "adopted" await. The previous step's writes, and what the main thread does with them in the frame after, are taken
+		// by the Begins of the next two frames. So the variables' serial is read two Presents after that step ran.
+		constexpr std::uint32_t kAwaitReadFrames = 2;
+		bool awaitRead = false;          // the serial below was read for the current step
+		std::uint64_t awaitSerial = 0;   // the variables' change serial the adopted revision must carry
+		bool awaitHeld = false;          // the current step's await held (its wait may still hold it)
 
 		std::mutex queuedMutex;
 		std::vector<std::string> queuedLines;
@@ -157,6 +165,34 @@ namespace Testing
 				SetStepState(fmt::format("waiting for frame {}", *anchor + step.frames));
 				return;
 			}
+			if (!step.awaitCondition.empty() && !awaitHeld) {
+				const double limit = step.waitSeconds > 0.0 ? step.waitSeconds : stepWait;
+				if (waitStart < 0.0)
+					waitStart = Now();
+				if (!awaitRead) {
+					if (a_frame < lastRunFrame + kAwaitReadFrames) {
+						SetStepState("waiting to read the previous step's variable serial");
+						return;
+					}
+					awaitSerial = RenderGraph::Frame::Revision::Mark().takenVariables;
+					awaitRead = true;
+				}
+				const auto mark = RenderGraph::Frame::Revision::Mark();
+				// Without the render graph no revision adopts anything: the write is in effect already.
+				if (mark.running && mark.adoptedVariables < awaitSerial) {
+					if (Now() - waitStart > limit) {
+						Finish("failed", fmt::format("step {}: await 'adopted' timed out after {:.0f} s (variables {} not adopted; the last adopted revision {} carried {})", index, limit,
+											 awaitSerial, mark.revision, mark.adoptedVariables),
+							0u);
+						return;
+					}
+					SetStepState(fmt::format("waiting for a revision that carries variables {} (adopted: {})", awaitSerial, mark.adoptedVariables));
+					return;
+				}
+				logger::info("[TEST] step {}: await 'adopted' held at frame {}: variables {} adopted by revision {}{}", index, a_frame, awaitSerial, mark.revision,
+					mark.running ? "" : " (no frame revisions in this run)");
+				awaitHeld = true;
+			}
 			if (!step.wait.empty()) {
 				if (waitStart < 0.0)
 					waitStart = Now();
@@ -189,6 +225,8 @@ namespace Testing
 			}
 			lastRunFrame = a_frame;
 			waitStart = -1.0;
+			awaitRead = false;
+			awaitHeld = false;
 			{
 				std::scoped_lock lock(run.mutex);
 				++run.stepIndex;
@@ -233,25 +271,18 @@ namespace Testing
 		for (const auto& failure : failures)
 			reason += (reason.empty() ? "" : "; ") + failure;
 		if (!configured)
-			reason = "the old CS_DCLF_TEST_EXIT";
+			reason = "an exit outside a cs-test run";
 		Finish(failures.empty() ? "passed" : "failed", std::move(reason), 0u);
 	}
 
 	bool RunCommandLine(const std::string& a_line, std::string& a_error)
 	{
-		if (!a_line.starts_with("dclf:"))
-			return RunCommand("console", a_line, a_error);
+		// "<command>[=<arg>]" runs a registered command by its cs-test name. Any other line is a console command.
 		const auto equals = a_line.find('=');
 		const std::string name = a_line.substr(0, equals);
+		if (!HasCommand(name))
+			return RunCommand("console", a_line, a_error);
 		const std::string arg = equals == std::string::npos ? std::string{} : a_line.substr(equals + 1);
-		if (name == "dclf:wait") {
-			a_error = "a wait holds the old command list; sent alone it does nothing";
-			return false;
-		}
-		// A generic command under its old "dclf:" name runs as itself, unless a feature registered the full name.
-		const std::string shortName = name.substr(5);
-		if (!HasCommand(name) && HasCommand(shortName))
-			return RunCommand(shortName, arg, a_error);
 		return RunCommand(name, arg, a_error);
 	}
 
@@ -354,7 +385,6 @@ namespace Testing
 			}
 		}
 		RunSteps(frame);
-		RunLegacy(frame);
 		TickCommands();
 		// The exit waits for the shots still being read back or encoded: a process ended mid-write leaves a broken PNG.
 		if (exitRequested && LiveProbeDone(frame)) {

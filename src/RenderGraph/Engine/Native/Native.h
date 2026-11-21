@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/Engine/Engine.h"
+
 #include <d3d11.h>
 #include <dxgi.h>
 
@@ -31,7 +33,8 @@ namespace rhi
 namespace org
 {
 	class ExternalTextureResource;
-	class GloballyIndexedResource;
+	class Runtime;
+	class VersionedTexture;
 }
 
 /**
@@ -59,11 +62,12 @@ namespace RenderGraph::Engine::Native
 	/** @brief Stage 1. Fails on a switch that conflicts with native mode. Must run before any other switch is read. */
 	void ApplySwitches();
 
-	/** @brief Whether the frame runs on the render graph, in native or guest mode. Any thread. */
-	bool GraphMode();
-
-	/** @brief On D3D12, the DCLF switches ApplySwitches turned off for lack of a D3D12 port, for DCLF's log line. */
-	std::string D3D12DclfOff();
+	/**
+	 * @brief In native or guest mode, logs why Drawcall Limit Fix will not run, then ends the process with a message box. Outside
+	 * them it returns. Both modes withhold the engine's draws (the flush latch) and DCLF draws the world, so without it the world
+	 * would be empty.
+	 */
+	void RequireDclf(std::string_view a_cause);
 
 	/** @brief Stage 2. Fails on anything that still needs DXVK. Needs the features' boot state. */
 	void CheckStartup();
@@ -81,8 +85,35 @@ namespace RenderGraph::Engine::Native
 	/** @brief BasicRHI's device once stage 3 made it, else null. */
 	std::shared_ptr<rhi::DevicePtr> Device();
 
-	/** @brief Makes the back buffer a graph-owned slot with one version per present slot. Must run before any import. */
-	void OnGraphReady();
+	/**
+	 * @brief ORG's runtime, made with the device at stage 3 for the external client. RenderGraphRuntime::Initialize takes it once;
+	 * null after that and off native mode.
+	 */
+	std::shared_ptr<org::Runtime> TakeOrgRuntime();
+
+	/**
+	 * @brief kFRAMEBUFFER's slot, made with the swap chain at stage 3. Every present copies its current version through the ledger.
+	 * Native makes its versions (InitD3D's GetBuffer, a resize before Engine::Setup) until the engine target set adopts it. Null off
+	 * native mode. Render thread.
+	 */
+	std::shared_ptr<org::VersionedTexture> BackBufferSlot();
+
+	/**
+	 * @brief The engine target set adopted BackBufferSlot (phase 3 section 3.7): its kFRAMEBUFFER twin's versions join it. From then on
+	 * GetBuffer answers a_field and a swap chain resize makes no version. A different slot is fatal. Render thread, once, at
+	 * Engine::Setup.
+	 */
+	void AdoptBackBufferSlot(const std::shared_ptr<org::VersionedTexture>& a_slot, winrt::com_ptr<ID3D11Texture2D> a_field);
+
+	/** @brief The format the set declares kFRAMEBUFFER in: the swap chain's format without sRGB. UNKNOWN off native mode. Any thread after stage 3. */
+	DXGI_FORMAT DeclaredBackBufferFormat();
+
+	/**
+	 * @brief The size the engine's last swap chain resize asked for, once the set owns the back buffer. False before that. The
+	 * engine reads its size from GetBuffer's description, which is kFRAMEBUFFER's adopted one, so the set writes this into the
+	 * engine's size state at a later set. Any thread.
+	 */
+	bool EngineSwapChainExtent(std::uint32_t& a_width, std::uint32_t& a_height);
 
 	/** @brief Loads GenerateMips' compute programs. Must run after the shader compiler exists, or engine mip builds do nothing. */
 	void OnShaderCompilerReady();
@@ -93,16 +124,12 @@ namespace RenderGraph::Engine::Native
 	/**
 	 * @name Graph-owned textures. Shader-only textures made with contents are "exempt" and rest in the shader-read state untracked,
 	 * until a context write promotes them. Every other texture is tracked as a persistent ORG texture once the graph is up.
+	 * Each image's graph resource is found through ImageRegistry: a tracked texture's is registered as Owned when made, an exempt
+	 * one's as Made on its first ImmutableTextureOf.
 	 */
 	/** @{ */
 	/** @brief Whether native mode is active and sorts its textures as above. Any thread. */
 	bool OwnedResources();
-
-	/** @brief The graph-owned ORG texture behind a texture, view, port handle or stream shell. Null otherwise. Any thread. */
-	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOf(const IUnknown* a_object);
-
-	/** @brief GraphTextureOf for a VkImage handle, for DCLF's imports. */
-	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t a_image);
 
 	/** @brief An exempt texture as a read-only graph resource, made on first call. Null when the texture is not exempt. Any thread. */
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown* a_texture, DXGI_FORMAT a_srvFormat);
@@ -121,29 +148,15 @@ namespace RenderGraph::Engine::Native
 		std::uint32_t usage = 0;      // D3D11_USAGE
 		std::uint32_t dimension = 0;  // D3D11_RESOURCE_DIMENSION
 		bool initialData = false;     // made with initial data
-		bool written = false;         // only marked while a census or the validator is on
+		bool written = false;         // written by the immediate context since it was made
 	};
 
 	/** @brief The facts of the native resource behind a_object. False when native mode did not make it. Any thread. */
-	bool DescribeForCensus(const void* a_object, ResourceFacts& a_out);
+	bool DescribeFacts(const void* a_object, ResourceFacts& a_out);
 
 	/** @brief The engine's Present. Copies the back buffer into the swap chain image after the frame's graph work. */
 	HRESULT Present(UINT a_syncInterval, UINT a_flags);
 
-	/**
-	 * @brief Switches the swap chain between HDR10 and SDR. HDR Display calls this because the native handle has no IDXGISwapChain3.
-	 * @return Whether the swap chain now presents in the asked colour space.
-	 */
-	bool SetSwapChainColorSpace(bool a_hdr);
-
-	/** @brief Queued-present waits and their total time in microseconds since the last call. Any thread. */
-	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us);
-
-	/**
-	 * @brief Ends a frame whose present is held. Waits for the GPU as a present would, so the CPU cannot run ahead and
-	 * free per-frame resources such as the upscaler's views while the GPU still reads them. Render thread.
-	 */
-	void PaceHeldPresent();
 
 	/** @brief The native graphics queue's progress. Empty off native mode. */
 	rhi::QueueProgress GraphicsProgress();
@@ -178,41 +191,31 @@ namespace RenderGraph::Engine::Native
 	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device* a_device, void (*a_callback)(void*, VkQueue_T*), void* a_user);
 	/** @} */
 
-	/** @brief A native texture handle over a port's BasicRHI image, so D3D11 users and graph imports reach the same image. */
+	/** @brief How WrapTexture treats the image. */
+	enum class WrapFlags : std::uint32_t
+	{
+		None = 0,
+		/**
+		 * @brief Fill the record and make the handle only: no initialize, no zero, no submission and no wait. CPU-only, so any thread
+		 * (the revision lane). The image is still Undefined, so its graph resource must say so and give its first contents.
+		 */
+		DeferInitialize = 1,
+	};
+
+	/**
+	 * @brief A native texture handle over a port's BasicRHI image, so D3D11 users and graph imports reach the same image.
+	 * Without DeferInitialize it moves the image into Common and zeroes it (or uploads a_data), and waits for that.
+	 */
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
-		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data);
+		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data, WrapFlags a_flags = WrapFlags::None);
 
 	/** @brief A native buffer handle over a port's BasicRHI buffer. Null on failure. */
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc, const char* a_name);
 
 	/**
-	 * @name Unbacked engine targets. A texture handle with no memory, for an engine target native mode never uses.
-	 * GPU work that reaches one is a recipe mismatch. It is fatal in development builds and skipped in release.
+	 * @brief Records and submits a_record now on the graphics queue, between full memory barriers, through the one path for work
+	 * outside the graphs (ORG's external client). a_record runs exactly once on success.
 	 */
-	/** @{ */
-	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_dropClears);
-	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, const char* a_name);
-	/** @brief Whether a_object is an unbacked engine target. Any thread. */
-	bool IsUnbacked(const void* a_object);
-	/** @} */
-
-	/**
-	 * @brief While alive, tracked textures made on this thread become frame transients placed in the arena when the scope ends.
-	 * Until then they have no image, so GPU work that reaches them is a recipe mismatch.
-	 */
-	class FrameTransientScope
-	{
-	public:
-		explicit FrameTransientScope(const char* a_label);
-		~FrameTransientScope();
-		FrameTransientScope(const FrameTransientScope&) = delete;
-		FrameTransientScope& operator=(const FrameTransientScope&) = delete;
-
-	private:
-		void* m_group = nullptr;
-	};
-
-	/** @brief Records and submits a_record now in its own command list on the graphics queue. a_record runs exactly once on success. */
 	bool EmitCommands(void (*a_record)(void*, rhi::CommandList&), void* a_user, const rhi::TimelinePoint* a_waits, std::uint32_t a_waitCount,
 		const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, const char* a_label);
 

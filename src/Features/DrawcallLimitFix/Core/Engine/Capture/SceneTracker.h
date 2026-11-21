@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 #include <atomic>
 #include <memory>
@@ -63,9 +63,6 @@ namespace DCLF
 		void Install();
 		bool IsInstalled() const { return installed; }
 
-		/** @brief Stops queueing and frees pending events for good. The detours pass straight through. Used when DCLF is forced off after install. */
-		void Stop();
-
 		/** @brief Takes every pending event, oldest first. The caller owns the list. */
 		Event* Drain();
 		static void FreeEvents(Event* a_head);
@@ -113,7 +110,7 @@ namespace DCLF
 		 */
 		static void WatchSubtreeMembers(std::vector<const void*> a_members);
 		/** @brief The watched subtree's edits, for their one consumer on the render thread. */
-		static EventQueue<SubtreeEvent>& SubtreeEvents();
+		static RenderGraph::Frame::EventQueue<SubtreeEvent>& SubtreeEvents();
 
 		/** @brief Render thread. The nodes the category capture finds category nodes through. Their edits count CategoryEdits. */
 		static void WatchCategoryNodes(std::vector<const void*> a_nodes);
@@ -160,7 +157,6 @@ namespace DCLF
 		static bool NoteEdit(const RE::NiAVObject* a_child, const RE::NiAVObject* a_parent, bool a_inWorld);
 
 		std::atomic<Event*> head{ nullptr };
-		std::atomic<bool> stopped{ false };
 		bool installed = false;
 	};
 }

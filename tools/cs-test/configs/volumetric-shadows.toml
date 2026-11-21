@@ -1,0 +1,54 @@
+# Volumetric Shadows' client across loading screens: coc into Dragonsreach (no directional shadows, so the per-frame gate shuts
+# the passes) and back out to Whiterun. The feature has no settings, and the engine makes its shadow maps once a session, so
+# its client is registered once, by the frame revision after the engine's targets (frame revision plan, 6.18). Nothing here
+# may make a new registration, a stale recording or a structural rebuild. Compose it: native-vulkan+volumetric-shadows,
+# native-d3d12+volumetric-shadows, guest+volumetric-shadows.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "interior"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "exterior"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "interior", "exterior"]
+no_log = ["frame tap error"]
+
+# The client ran on the render graph (the game's graph frame counts at exit; skipped in plain D3D11 mode).
+[expect.graph_frames]
+min = { "cs.volumetric-shadows" = 60 }

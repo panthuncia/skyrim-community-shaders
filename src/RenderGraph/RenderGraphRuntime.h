@@ -1,6 +1,8 @@
 #pragma once
 
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Frame/SegmentId.h"
+#include "RenderGraph/FrameClock.h"
 
 #include <d3d11.h>
 #include <chrono>
@@ -53,6 +55,7 @@ namespace org
 	class GraphHost;
 	class RenderGraph;
 	class Resource;
+	class Runtime;
 }
 
 /**
@@ -71,7 +74,6 @@ public:
 	*  segment (CurrentSegment) and includes it in its revision. */
 	enum class Segment : std::uint32_t
 	{
-		LightCulling,  // Light Limit Fix, before the main pass
 		ZPrepass,      // Drawcall Limit Fix's depth, inside Main::RenderDepth after the world's depth draws, before kPOST_ZPREPASS_COPY
 		MainOpaque,    // Drawcall Limit Fix's colour, where the main pass's opaque batches end
 		ShadowView,    // Drawcall Limit Fix's shadow casters, inside one shadow view's draw
@@ -80,35 +82,6 @@ public:
 		Forward, // Drawcall Limit Fix's forward epoch: blended Lighting, at the engine's blended draw after the composite
 		FirstPersonDepth, // Drawcall Limit Fix's first-person depth, at RenderDepth's first-person draw, before kPOST_ZPREPASS_COPY
 		FirstPerson, // Drawcall Limit Fix's first-person colour, at Main::RenderFirstPersonView's accumulator render
-		// The frame anchors' epochs, in FrameAnchors::Anchor's order. Each is an epoch only if its anchor was reserved before Initialize.
-		AnchorReflectionsPrepass,
-		AnchorSkyReflections,
-		AnchorEarlyPrepass,
-		AnchorDepthDone,
-		AnchorPrepass,
-		AnchorSky,
-		AnchorDeferredPasses,
-		AnchorDeferredComposite,
-		AnchorPostComposite,
-		AnchorPostProcessing,
-		AnchorUpscale,
-		AnchorTonemap,
-		AnchorFrameGeneration,
-		AnchorPresent,
-		AnchorOverlay,
-		AnchorHDROutput,
-		AnchorCapture,
-		AnchorEngineShadowClear,
-		AnchorEngineCubeClear,
-		AnchorEngineFrameClear,
-		AnchorEngineDepthCopy,
-		AnchorInterface,
-		AnchorImageSpace,
-		AnchorEngineDraws,
-		AnchorEngineQueries,
-		AnchorVolumetricLighting,
-		AnchorDecalQueries,
-		AnchorEngineCopy,
 		// The CS stages' epochs, one per RenderGraph::Frame::SegmentId in that order.
 		Declared,
 		Count = Declared + RenderGraph::Frame::kSegments
@@ -121,7 +94,7 @@ public:
 
 	/** @brief Game frames the graph's work may run behind the render thread. Revision-driven epochs publish this many copies.
 	*  Fewer than DXVK's frame latency would stall the render thread every few frames on those copies. */
-	static constexpr std::uint32_t kGameFramesInFlight = 4;
+	static constexpr std::uint32_t kGameFramesInFlight = RenderGraph::FrameClock::kSlots;
 
 	/** @brief The first capacity of run-indexed services, which grow past it when more runs are in flight. */
 	static constexpr std::uint32_t kRunCapacity = 256;
@@ -143,24 +116,30 @@ public:
 	/** @brief Asks DXVK to enable the device features BasicRHI needs. Call before the D3D11 device exists. */
 	static void RequestDeviceFeatures(HMODULE a_dxvkD3D11);
 
-	/** @brief Whether a segment is Drawcall Limit Fix's: neither Light Limit Fix's light culling nor a frame anchor's. */
-	static constexpr bool IsDclfSegment(Segment a_segment) { return a_segment != Segment::LightCulling && a_segment < Segment::AnchorReflectionsPrepass; }
-
-	/** @brief The frame's epochs as Segment values: frame order, async ticket order, and which are revision-driven. */
+	/** @brief The frame's epochs as Segment values: the frame order, which is also the async ticket order, and which are revision-driven. */
 	struct FrameConfig
 	{
-		std::vector<std::uint32_t> epochOrder, asyncOrder, revisionEpochs;
+		std::vector<std::uint32_t> epochOrder, revisionEpochs;
 	};
-	/** @brief Sets the frame's epochs from DCLF's schedule, once before Initialize. Without it Initialize uses the built-in orders. */
+	/** @brief Sets the frame's epochs from DCLF's schedule, once before Initialize. Without it Initialize fails, which is fatal in graph mode. */
 	static void ConfigureFrame(FrameConfig a_config);
 
 	/** @brief Adopts DXVK's Vulkan device. Safe to call repeatedly; returns whether the runtime is active. */
 	bool Initialize();
 
+	/**
+	* @brief Makes ORG's runtime on a_device with CS's settings (pass statistics, alias logging) applied first, since the runtime
+	* reads them when it is made. Native mode makes it with its device (stage 3), guest mode in Initialize. A failure throws.
+	*/
+	static std::shared_ptr<org::Runtime> CreateOrgRuntime(const rhi::DevicePtr& a_device);
+
 	/** @brief Retires all graph work and releases the adopted device (never destroys it). */
 	void Shutdown();
 
-	/** @brief Whether graph epochs can run. */
+	/**
+	* @brief Whether the graph is set up. In graph mode a failed start or a fault is fatal, so this is false only before setup.
+	* Outside graph mode (CS_ORG=features) a fault turns it off and callers use D3D11.
+	*/
 	bool IsActive() const;
 
 	/** @brief The adopted Vulkan device's PCI vendor (0x1002 AMD, 0x10DE NVIDIA, 0x8086 Intel); 0 before a device was adopted. */
@@ -202,21 +181,19 @@ public:
 	EpochResult TryExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare = {},
 		std::shared_ptr<const void> a_resourceOwner = {});
 
-	/** @brief Render thread. Hands each epoch whose graph failed since the last call to its owner. Call where no epoch is running. */
+	/** @brief The render owner, inside the frame's adoption point (Frame::Driver::OnBegin) only. Hands each epoch whose graph failed
+	*  since the last call to its owner. */
 	void PollEpochFailures();
 
 	/** @brief Owner thread, at a frame boundary. Attaches finished builds and hands requested ones to the build thread.
 	*  Use this, never the host's BuildIfRequested, so a failed host thread stops the graph instead of throwing into the frame. */
 	bool BuildIfRequested(std::string_view a_caller = "build point");
 
-	/** @brief Owner thread, mid-frame. Builds requested owner-built epochs now. Not a build point. */
-	bool BuildOwnerEpochsNow(std::string_view a_caller);
-
-	/** @brief Owner thread, at a frame's start before DCLF submits. Attaches only DCLF's finished builds. Not a build point. */
-	bool AttachDclfBuilds(std::string_view a_caller);
-
-	/** @brief Owner thread. Whether no DCLF epoch is requested, building or waiting to attach. True while inactive. */
-	bool DclfBuildsSettled() const;
+	/**
+	* @brief Owner thread. Whether no lane-only epoch (DCLF's) is requested or building, and each has its first graph once builds have
+	* an input. A staged build is settled. True while inactive.
+	*/
+	bool BuildsSettled() const;
 
 	/** @brief Owner thread. Whether a requested rebuild leaves frames without the graph until built. Staged CS stages never do. */
 	bool RebuildRequestedUnstaged() const;
@@ -251,19 +228,6 @@ public:
 	/** @brief The segment of the epoch being executed (valid while passes prepare and record). */
 	Segment CurrentSegment() const { return segment; }
 
-	/** @brief CS_ORG_EPOCH_STATS. Times a feature's whole call around one epoch, counted only when an epoch ran inside it. */
-	class EpochBodyScope
-	{
-	public:
-		explicit EpochBodyScope(Segment a_segment);
-		~EpochBodyScope();
-		EpochBodyScope(const EpochBodyScope&) = delete;
-		EpochBodyScope& operator=(const EpochBodyScope&) = delete;
-
-	private:
-		Segment segment;
-		std::chrono::steady_clock::time_point start;
-	};
 
 	/**
 	* @brief The render thread's pacing point. DXVK's frame-latency wait is off, so without this the slot rings stall mid-frame in bursts.
@@ -271,9 +235,14 @@ public:
 	*/
 	void SignalFramePace(bool a_active);
 	void WaitFramePace();
-	/** @brief Render owner, at Renderer::Begin. Measures how far frame a_frame runs ahead of the GPU, logged every 600 frames. */
-	void NoteFrameBegin(std::uint64_t a_frame);
-	/** @brief Render thread, after a successful present. Seals everything submitted so far, the points a mid-frame producer may wait for. */
+	/**
+	* @brief Renderer::Begin's detour (Frame/FrameDriver.cpp), after the render owner's claim and before Frame::Driver::OnBegin.
+	* Moves the frame clock's beginFrame (RenderGraph::FrameClock), so Begin reads the frame it starts. On the render owner it also
+	* measures how far the frame runs ahead of the GPU, logged every 600 frames. Any thread that begins a frame.
+	*/
+	static void OnRendererBegin();
+	/** @brief Render thread, after a successful present. Seals everything submitted so far, the points a mid-frame producer may wait for.
+	*  Moves the frame clock's presentSerial. */
 	void SealPresented();
 	/** @brief Makes the calling thread the owner of the graph's frame upload instance, when rendering changes threads. */
 	void MoveOwnerThread();
@@ -284,9 +253,6 @@ public:
 
 	/** @brief Whether the present goes onto the submission thread's queue. Render owner only. */
 	bool QueuesPresent() const;
-
-	/** @brief The host's submission and host thread native handles for RtSampler. Null when one does not run. */
-	void HostThreadHandles(void*& a_submit, void*& a_host);
 
 	/** @brief Render owner. Runs a_closure on the submission thread after the epochs queued so far, or at once without one. */
 	void QueueOnSubmitThread(std::function<void()> a_closure);
@@ -306,7 +272,7 @@ public:
 	/** @brief DescribeResource for many objects with one sync. False when DXVK lacks the batched export. */
 	bool DescribeResources(std::span<IUnknown* const> a_objects, std::span<DxvkOrgInteropResourceInfo> a_infos, std::span<HRESULT> a_results);
 
-	/** @brief Whether imports can be tracked instead of pinned. Fixed once the runtime is up. CS_ORG_PINNED_IMPORTS=1 turns it off. */
+	/** @brief Whether imports can be tracked instead of pinned. Fixed once the runtime is up. False when DXVK lacks the exports. */
 	bool PinlessImports() const;
 	/** @brief DescribeResources without pinning. DXVK may move the resource, reported by PollRelocations.
 	*  End each success with UntrackResources while the D3D11 object is still referenced. */
@@ -356,43 +322,25 @@ public:
 	/** @brief Shader hot reload. Every live pipeline built from Data/Shaders registers here and binds through its slot.
 	*  Lives for the whole process, since a rebuild may complete at teardown. */
 	static org::services::PipelineRegistry* PipelineRegistry();
-	/** @brief Any thread. Rebuilds the live pipelines built from a_changedFile, or all. Swapped in at the graph's next build. */
+	/**
+	* @brief Any thread. Rebuilds the live pipelines built from a_changedFile, or all, off the render thread. Their new versions
+	* are published at a new pipeline generation, every graph is built again with them, and the frame revision that carries the
+	* new ShaderGeneration adopts the rebuilt graphs (RenderGraph/PipelineVersions.h).
+	*/
 	static void RequestShaderReload(std::string_view a_changedFile = {}, bool a_force = false);
 	/** @brief Any thread: the next a_epochs completed epochs log each graphics timestamp range in GPU order ("[TSDUMP]"). */
 	static void RequestTimestampDump(std::uint32_t a_epochs);
-	/** @brief Diagnostics. DCLF's epochs in a_segments report submitted without submitting.
-	*  a_boundary keeps parts of the epoch boundary: 1 flush, 2 plus an empty submission, 3 with a timeline signal instead. */
-	static void SkipDclfEpochs(std::uint32_t a_segments, std::uint32_t a_boundary = 0);
-	/** @brief Diagnostics. The epochs of a_segments defer their submissions to the next epoch's enqueue. Timing only. */
-	static void HoldDclfSubmissions(std::uint32_t a_segments);
-	/** @brief Diagnostics. Each skipped epoch, or with a_submitted each submitted DCLF epoch, busy-waits on the render thread. */
-	static void SetSkippedEpochSpin(std::uint32_t a_microseconds, bool a_submitted = false);
-	/** @brief Diagnostics. The next a_epochs epochs log their enqueued submissions' waits and signals. */
-	static void RequestSubmissionDump(std::uint32_t a_epochs);
-	/** @brief Diagnostics. Each epoch's batched submissions go to DXVK as one submit. Unsafe with cross-queue work, timing only. */
-	static void CoalesceEpochSubmits(bool a_coalesce, bool a_split = false);
-	/** @brief Diagnostics. DCLF's epochs run on the CPU but submit only their signals. Unsafe beyond empty epochs, timing only. */
-	static void DropDclfLists(bool a_drop);
-	/** @brief Diagnostics. Each skipped epoch makes DXVK's worker busy-wait, and with a_sync the render thread waits for it. */
-	static void SetSkippedEpochWorkerLoad(std::uint32_t a_microseconds, bool a_sync);
-	/** @brief Any thread (diagnostics): the D3D11 flush before each epoch on (1), off (0) or as CS_ORG_EARLY_FLUSH says (-1). */
-	static void SetEarlyFlush(int a_flush);
 
 	/** @brief Wraps a materialized graph-owned buffer as a D3D11 buffer (DEFAULT usage, no CPU access). */
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(org::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc);
 
 	/**
 	* @brief Wraps a BasicRHI image the caller owns as a D3D11 texture. a_info.image.layout is its resting layout between DXVK's commands.
-	* DXVK zeroes it, or uploads a_initialData. Any thread. Null when inactive, unsupported or rejected.
+	* DXVK zeroes it, or uploads a_initialData. Any thread. Null when inactive or rejected.
 	*/
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
-		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_initialData = nullptr);
-
-	/** @brief Whether WrapTexture can work: the runtime is active and DXVK has the export (interop version 6). */
-	bool CanWrapTextures() const;
-
-	/** @brief Whether WrapTexture can take initial data: CanWrapTextures, and DXVK has dxvkCreateTextureFromVkImageWithData. */
-	bool CanWrapTexturesWithData() const;
+		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_initialData = nullptr,
+		RenderGraph::Engine::Native::WrapFlags a_flags = RenderGraph::Engine::Native::WrapFlags::None);
 
 	/** @brief Render thread. Holds a_owner until the GPU finishes every D3D11 command issued so far, so exports outlive D3D11's last use. */
 	void ReleaseAfterD3D11(std::shared_ptr<const void> a_owner);
@@ -408,8 +356,12 @@ public:
 
 private:
 	RenderGraphRuntime() = default;
-	/** @brief Every frame, serves the registry's reload and asks for its staged pipelines' build. Render thread. */
+	/** @brief Every frame, serves the registry's reload, raises ShaderGeneration for new versions and releases unpinned ones. Render thread. */
 	void ServicePipelineReload();
+	/** @brief Render owner, at Renderer::Begin. Measures how far frame a_frame runs ahead of the GPU, logged every 600 frames. */
+	void NoteFrameBegin(std::uint64_t a_frame);
+	/** @brief The host's thread, when an epoch completes: moves the frame clock's gpuCompleted forward to a_frame. */
+	static void NoteGpuCompleted(std::uint64_t a_frame);
 	/** @brief Every frame, drops ReleaseAfterD3D11 owners whose query completed. Render thread. */
 	void ServiceD3D11Releases();
 	/** @brief Routes an epoch failure to the epoch's owner. */
@@ -424,7 +376,9 @@ private:
 	EpochCpuTotals epochTotals;
 	std::uint64_t buildPoints = 0;  // BuildIfRequested's calls
 	std::uint64_t buildPointsAtSeal = 0;  // buildPoints at the last SealPresented
-	Segment segment = Segment::LightCulling;
+	std::uint64_t pipelineGenerationPublished = 0;  // the registry's newest generation its Service published. Render thread
+	std::uint64_t pipelineGenerationRaised = 0;     // the last ShaderGeneration that ServicePipelineReload wrote. Render thread
+	Segment segment = Segment::Count;
 	bool attempted = false;
 	FrameConfig frameConfig;  // ConfigureFrame's (frameConfigured)
 	bool frameConfigured = false;

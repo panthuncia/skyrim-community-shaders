@@ -7,17 +7,6 @@
 
 namespace DCLF::Reports
 {
-	void ConstantTableLines()
-	{
-		const auto ct = std::exchange(Diagnostics::DrawsState::Get().constantTables, {});
-		if (ct.checks)
-			logger::info("[DCLF] constant tables (T6b2c: DCLF's modules' against ShaderCache's): {} checks, {} entries ({} without ShaderCache's shaders yet), {} "
-						 "variables in both, {} at another offset{}{}; in one table only: {} DCLF's (a variable the game's shader lacks{}), {} ShaderCache's (DCLF_BINDLESS's "
-						 "own blocks, a block the stage never reads)",
-				ct.checks, ct.entries, ct.uncached, ct.variables, ct.differ, ct.differ ? " <- CONSTANT TABLE; first: " : " <- OK", ct.first, ct.catalogOnly,
-				ct.catalogOnly ? "; first: " + ct.catalogOnlyFirst : std::string(), ct.cacheOnly);
-	}
-
 	void PassStatsLine(const std::array<std::array<std::uint64_t, 4>, 4>& a_totals, const std::array<std::uint32_t, 4>& a_samples)
 	{
 		static constexpr const char* kNames[4] = { "Z-prepass", "Z-prepass phase 2", "colour", "decals" };

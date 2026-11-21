@@ -47,10 +47,6 @@ namespace DCLF::Portals
 			return true;
 		}
 
-		// Direct::kExpCullProfile: the main camera's tests' steps and plane evaluations, logged every 2^20 tests (diagnostic).
-		std::atomic<std::uint64_t> profileTests{ 0 }, profileSteps{ 0 }, profilePlanes{ 0 }, profileOps{ 0 };
-		thread_local std::uint64_t threadSteps = 0, threadPlanes = 0;
-
 		/**
 		 * @brief PortalPlaneSetTest. The verdict is an OR over the active planes, so stopping at the first deciding plane gives the
 		 * same answer as the shader's fixed six-plane calculation.
@@ -58,23 +54,12 @@ namespace DCLF::Portals
 		bool PlaneSetTest(const Words& a_w, std::size_t a_set, std::uint32_t a_kind, const float a_c[3], float a_r)
 		{
 			const std::uint32_t mask = a_w[a_set + kMaskWord];
-			if (Direct::ExperimentOn(Direct::kExpPortalEarly)) {
-				for (std::uint32_t rest = mask & 0x3Fu; rest; rest &= rest - 1) {
-					++threadPlanes;
-					const float d = Distance(a_w, a_set + std::size_t(std::countr_zero(rest)) * 4, a_c);
-					if (a_kind == 7u ? d <= -a_r : (d <= -a_r || d < a_r))
-						return a_kind != 7u;
-				}
-				return a_kind == 7u;
+			for (std::uint32_t rest = mask & 0x3Fu; rest; rest &= rest - 1) {
+				const float d = Distance(a_w, a_set + std::size_t(std::countr_zero(rest)) * 4, a_c);
+				if (a_kind == 7u ? d <= -a_r : (d <= -a_r || d < a_r))
+					return a_kind != 7u;
 			}
-			bool outside = false, notContained = false;
-			for (std::uint32_t p = 0; p < 6; ++p) {
-				const bool active = (mask & (1u << p)) != 0;
-				const float d = Distance(a_w, a_set + p * 4, a_c);
-				outside = outside || (active && d <= -a_r);
-				notContained = notContained || (active && (d <= -a_r || d < a_r));
-			}
-			return a_kind == 7u ? !outside : notContained;
+			return a_kind == 7u;
 		}
 
 		/** @brief PortalProgramRun's default (short-circuit) walk: a producer invariant failure never accepts a bound. */
@@ -95,7 +80,6 @@ namespace DCLF::Portals
 				const std::uint32_t set = a_w[record + 1];
 				if ((kind != 7u && kind != 8u) || set >= sets)
 					return false;
-				++threadSteps;
 				op = PlaneSetTest(a_w, setBase + std::size_t(set) * kSetWords, kind, a_c, a_r) ? a_w[record + 2] : a_w[record + 3];
 			}
 			return false;
@@ -149,28 +133,18 @@ namespace DCLF::Portals
 
 	int PortalTestCpu(std::span<const std::uint32_t> a_programs, std::uint32_t a_program, const float a_centre[3], float a_radius, std::uint32_t a_nodeFlags)
 	{
-		if (!Direct::ExperimentOn(Direct::kExpCullProfile))
-			return PortalTestCpuAt(a_programs, 0, a_program, a_centre, a_radius, a_nodeFlags);
-		threadSteps = threadPlanes = 0;
-		const int verdict = PortalTestCpuAt(a_programs, 0, a_program, a_centre, a_radius, a_nodeFlags);
-		profileSteps.fetch_add(threadSteps, std::memory_order_relaxed);
-		profilePlanes.fetch_add(threadPlanes, std::memory_order_relaxed);
-		const Words w{ a_programs };
-		profileOps.fetch_add(a_program < w[kSetWords] ? w[kHeaderWords + std::size_t(a_program) * kEntryWords + 1] : 0u, std::memory_order_relaxed);
-		if (const auto n = profileTests.fetch_add(1, std::memory_order_relaxed) + 1; (n & ((1u << 20) - 1)) == 0) {
-			const auto steps = profileSteps.exchange(0), planes = profilePlanes.exchange(0), ops = profileOps.exchange(0);
-			logger::info("[DCLF] portal profile: {} programs; a test's program {:.1f} operators, {:.1f} plane set steps, {:.1f} planes evaluated (last 2^20 tests)",
-				w[kSetWords], ops / 1048576.0, steps / 1048576.0, planes / 1048576.0);
-		}
-		return verdict;
+		return PortalTestCpuAt(a_programs, 0, a_program, a_centre, a_radius, a_nodeFlags);
 	}
 
 	namespace
 	{
-		// The most bounds a group walk carries (without kExpPortalOpMajor: 16; the kernels take up to 32).
+		// The most bounds PlaneGroupSse carries.
 		constexpr std::uint32_t kGroup = 32;
 
-		/** @brief Simd::PlaneGroupFn in SSE: eight vectors of four, a vector only while a bound of a_lanes is in it. */
+		/**
+		 * @brief PortalPrograms' plane set test in SSE over up to 32 bounds, as a mask of a_lanes: eight vectors of four, a vector only
+		 * while a bound of a_lanes is in it. Stops once every bound is decided. Keeps PortalDistance's order.
+		 */
 		std::uint32_t PlaneGroupSse(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
 			std::uint32_t a_lanes)
 		{
@@ -270,13 +244,6 @@ namespace DCLF::Portals
 			for (std::uint32_t k = 0; k < a_count; ++k)
 				a_rejected[a_lanes[k]] = (inView[k / 16] >> (k % 16)) & 1u ? 0u : 1u;
 		}
-
-		Direct::Simd::PlaneGroupFn PlaneGroupOf(Direct::Simd::Level a_level)
-		{
-			return a_level == Direct::Simd::Level::Avx512 ? &Direct::Simd::PlaneGroupAvx512 :
-			       a_level == Direct::Simd::Level::Avx2   ? &Direct::Simd::PlaneGroupAvx2 :
-			                                                &PlaneGroupSse;
-		}
 	}
 
 	void PortalTestCpuBatch(std::span<const std::uint32_t> a_programs, std::uint32_t a_program, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
@@ -304,60 +271,14 @@ namespace DCLF::Portals
 		else if (cullMode == 1u)
 			whole = 1;
 		const bool viewOnly = cullMode == 3u || ops == 0u;
-		const auto planeGroup = PlaneGroupOf(Direct::Simd::Chosen());
-		if (whole < 0 && Direct::ExperimentOn(Direct::kExpPortalOpMajor)) {
-			WalkOpMajor(w, records, programSets, sets, ops, first, flags, viewOnly, PlaneChunksOf(Direct::Simd::Chosen()), a_x, a_y, a_z, a_r, a_lanes, a_count, a_rejected);
+		if (whole < 0) {
+			WalkOpMajor(w, records, programSets, sets, ops, first, flags, viewOnly, PlaneChunksOf(Direct::Simd::Supported()), a_x, a_y, a_z, a_r, a_lanes, a_count, a_rejected);
 			return;
 		}
-		const std::uint32_t group = 16u;
-		// Zero between calls, because the walk clears each operator's bounds as it takes them.
-		thread_local std::vector<std::uint32_t> masks;
-		if (masks.size() < ops)
-			masks.resize(ops, 0u);
-		const std::uint16_t* lanes = a_lanes;
-		for (std::uint32_t k = 0; k < a_count; k += group) {
-			const std::uint32_t n = std::min(group, a_count - k);
-			alignas(64) float x[kGroup]{}, y[kGroup]{}, z[kGroup]{}, r[kGroup]{};
-			std::uint32_t live = 0;  // the group's bounds with a radius (a zero radius: culled)
-			for (std::uint32_t j = 0; j < n; ++j) {
-				const std::uint16_t i = lanes[k + j];
-				x[j] = a_x[i], y[j] = a_y[i], z[j] = a_z[i], r[j] = a_r[i];
-				if (r[j] != 0.0f)
-					live |= 1u << j;
-			}
-			std::uint32_t inView = 0;
-			if (whole >= 0) {
-				inView = whole == 1 ? live : 0u;
-			} else if (live) {
-				const std::uint32_t inCamera = planeGroup(w, 7u, x, y, z, r, live);
-				if (viewOnly) {
-					inView = inCamera;
-				} else {
-					const std::uint32_t walk = (flags & kPortalSkipView) ? live : inCamera;
-					if (walk && first < ops) {
-						masks[first] = walk;
-						for (std::uint32_t op = first; op < ops; ++op) {
-							const std::uint32_t m = masks[op];
-							if (!m)
-								continue;
-							masks[op] = 0;
-							const std::uint32_t* record = records + std::size_t(op) * kOpWords;
-							const std::uint32_t kind = record[0], set = record[1];
-							if (kind == 2u)
-								inView |= m;
-							if ((kind != 7u && kind != 8u) || set >= sets)
-								continue;  // a terminal, or false
-							const std::uint32_t pass = planeGroup(programSets + std::size_t(set) * kSetWords, kind, x, y, z, r, m);
-							if (pass && record[2] < ops)
-								masks[record[2]] |= pass;
-							if ((m & ~pass) && record[3] < ops)
-								masks[record[3]] |= m & ~pass;
-						}
-					}
-				}
-			}
-			for (std::uint32_t j = 0; j < n; ++j)
-				a_rejected[lanes[k + j]] = (inView >> j) & 1u ? 0u : 1u;
+		// The room decides every bound. A zero radius is culled.
+		for (std::uint32_t k = 0; k < a_count; ++k) {
+			const std::uint16_t i = a_lanes[k];
+			a_rejected[i] = whole == 1 && a_r[i] != 0.0f ? 0u : 1u;
 		}
 	}
 

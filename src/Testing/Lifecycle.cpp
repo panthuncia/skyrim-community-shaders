@@ -19,7 +19,6 @@ namespace Testing
 		bool worldReady = false;
 		std::uint32_t readyFrames = 0;
 		double loadTimerStart = -1.0;  // when the wait for world-ready started; below zero: none
-		bool worldFrame = false;       // the last Present was a world frame (render thread only)
 
 		// FPS over the last second.
 		double fpsWindowStart = 0.0;
@@ -113,15 +112,12 @@ namespace Testing
 		}
 	}
 
-	bool WorldFrame() { return worldFrame; }
-
 	void UpdateLifecycle(std::uint32_t a_frame)
 	{
 		auto* state = globals::state;
 		const bool mainMenu = state && state->isMainMenuOpen;
 		const bool loading = state && state->isLoadingMenuOpen;
 		const bool held = Holds::Any();
-		worldFrame = !loading && !held;
 		bool playerReady = false;
 		if (!loading && !mainMenu) {
 			// The player's cell attached and their 3D loaded: the world around them is drawn.

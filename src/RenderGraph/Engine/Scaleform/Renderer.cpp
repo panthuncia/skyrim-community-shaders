@@ -1,13 +1,15 @@
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Scaleform/Display.h"
 #include "RenderGraph/Engine/Scaleform/GRendererLayout.h"
 #include "RenderGraph/Engine/Scaleform/GfxTextures.h"
-#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Scaleform/Passes.h"
-#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
 
@@ -823,9 +825,9 @@ namespace RenderGraph::Engine::Scaleform
 			if (capture.active)
 				EndDangling(a_renderer);
 			if (!Passes::Ready()) {
-				CountLost("a whole display while the graph path is off (not set up, or failed)");
+				CountLost("a whole display while the graph path is not set up");
 				if (StageDrawsDisplays()) {
-					NoteRefused("the graph path is off (not set up, or failed)");
+					NoteRefused("the graph path is not set up");
 					return;
 				}
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
@@ -1622,10 +1624,8 @@ namespace RenderGraph::Engine::Scaleform
 		void Wrap(void* a_renderer)
 		{
 			auto** vtable = *static_cast<void***>(a_renderer);
-			if (!IsD3D1xRenderer(vtable)) {
-				logger::warn("[ORG] Scaleform: the renderer is not the GRendererD3D1x CS knows; the D3D11 renderer draws");
-				return;
-			}
+			if (!IsD3D1xRenderer(vtable))
+				RenderGraph::Fatal("Scaleform", "the renderer is not the GRendererD3D1x CS knows");
 			std::memcpy(g_original.data(), vtable - 1, sizeof(g_original));
 			g_vtable = g_original;
 			auto set = [](Slot a_slot, auto a_function) { g_vtable[a_slot + 1] = reinterpret_cast<void*>(a_function); };
@@ -1663,28 +1663,11 @@ namespace RenderGraph::Engine::Scaleform
 		};
 	}
 
-	bool Requested()
-	{
-		return RenderGraph::Engine::Native::GraphMode();
-	}
-
-	void Setup()
-	{
-		if (Requested())
-			Passes::Setup();
-	}
-
 	void Install()
 	{
-		if (!Requested())
+		if (!Engine::GraphMode())
 			return;
-#if !defined(CS_HAS_RENDER_GRAPH)
-		logger::warn("[ORG] Scaleform: CS_ORG_SCALEFORM=1, but CS was built without the render graph; the D3D11 renderer draws");
-		return;
-#endif
-		if (!Passes::Reserve())
-			return;
-		logger::info("[ORG] Scaleform: CS_ORG_SCALEFORM=1, hooking the renderer's factory");
+		logger::info("[ORG] Scaleform: hooking the renderer's factory");
 		stl::detour_thunk<CreateRenderer>(REL::RelocationID(82831, 84952));
 		GfxTextures::Install();
 	}

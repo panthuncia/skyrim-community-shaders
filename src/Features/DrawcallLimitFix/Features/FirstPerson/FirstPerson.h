@@ -1,6 +1,6 @@
 #pragma once
 
-// FirstPerson (CS_DCLF_FIRST_PERSON, CS_DCLF_FIRST_PERSON_DECALS): DCLF draws the player's first-person skeleton
+// FirstPerson (CS_DCLF_FIRST_PERSON_DECALS): DCLF draws the player's first-person skeleton
 // (arms, weapons, shield, magic hands) as a view of the one scene. Its members are found under the first-person root,
 // withheld from the engine's accumulators, and drawn by two epochs, one at the depth commit and one at the colour render.
 // Core keeps what every bucketed view shares, keyed by the view's slot (Core/Render/Views/ViewSlots.h, Core/Extensions/Views.h).
@@ -36,8 +36,6 @@ namespace DCLF::Features::FirstPerson
 	// Must run before any hook is written. Both sites are CALLs, so the thunks chain.
 	void PreflightHooks();
 
-	void SubscribeSkeletonParity();
-
+	/** @brief The first-person subtree's logs, subscribed to Core's root view events. */
 	void SubscribeRootViewChecks();
-	void SetLines(std::uint32_t a_sceneFrame);
 }

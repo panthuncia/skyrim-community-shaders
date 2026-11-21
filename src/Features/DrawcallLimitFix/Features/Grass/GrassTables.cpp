@@ -15,6 +15,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
+#include "Features/DrawcallLimitFix/Core/Render/Readback/Readbacks.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBuffers.h"
 #include "Features/DrawcallLimitFix/Features/Grass/Diagnostics/GrassEvents.h"
@@ -31,6 +32,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
+
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -220,15 +223,14 @@ namespace DCLF::Features::Grass
 			}
 		}
 
+		const SetupPrograms::Compute kCullProgram{ "DCLF grass cull", [] { return ComputeProgram::Desc{ .source = kGrassCullShader, .constantWords = kGrassCullConstantWords }; } };
+		const SetupPrograms::Compute kArgsProgram{ "DCLF grass arguments", [] { return ComputeProgram::Desc{ .source = kGrassArgsShader, .constantWords = kGrassArgsConstantWords }; } };
+
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			auto tables = std::make_shared<GrassTables>();
-			tables->cull = ComputeProgram::Load(a_setup.device, { .source = kGrassCullShader, .constantWords = kGrassCullConstantWords });
-			tables->args = ComputeProgram::Load(a_setup.device, { .source = kGrassArgsShader, .constantWords = kGrassArgsConstantWords });
-			if (!tables->cull || !tables->args) {
-				logger::warn("[DCLF] The grass cull or arguments program could not be created; grass stays native");
-				return nullptr;
-			}
+			tables->cull = kCullProgram.Get();
+			tables->args = kArgsProgram.Get();
 			const bool smallStart = a_setup.smallStart;
 			tables->smallStart = smallStart;
 			const std::uint32_t instances = smallStart ? 4u : kInitialInstances;
@@ -259,11 +261,8 @@ namespace DCLF::Features::Grass
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				auto counts = std::make_shared<GrassCounts>();
-				for (std::uint32_t i = 0; i < counts->ranges.Count(); ++i) {
-					counts->readback.push_back(org::Buffer::CreateShared(rhi::HeapType::Readback, sizeof(DrawsHeader)));
-					counts->readback.back()->SetName("cs.dclf.grass-counts-readback");
-				}
-				counts->filled.assign(counts->ranges.Count(), 0u);
+				counts->readback = org::RunReadback::CreateRegions("cs.dclf.grass-counts-readback", sizeof(DrawsHeader), Draws::kReadbackRanges);
+				counts->filled.assign(counts->readback->Regions(), 0u);
 				tables->counts = std::move(counts);
 			}
 			return tables;

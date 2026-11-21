@@ -25,10 +25,12 @@
 #include "Hooks.h"
 #include "ORGDeferredClears.h"
 #include "ORGDeferredComposite.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/Transients.h"
 #include "RenderGraph/FrameAnchors.h"
 
@@ -86,8 +88,8 @@ void SetupRenderTarget(RE::RENDER_TARGET target, const char* name, D3D11_TEXTURE
 	rtvDesc.Format = format;
 	uavDesc.Format = format;
 
-	// CS_ORG_ENGINE_TARGETS: ORG makes the target again with this description.
-	if (RenderGraph::Engine::Targets::Recreate(target, texDesc, name))
+	// Graph modes: the engine target set declares the target with this shape from the start (PlanTargets).
+	if (RenderGraph::Engine::GraphMode())
 		return;
 
 	auto& data = renderer->GetRuntimeData().renderTargets[target];
@@ -177,21 +179,8 @@ void Deferred::SetupResources()
 		// TEMPORAL_AA_WATER_2
 
 		// The GBuffer and the water targets. With CS_ORG_ENGINE_TARGETS, ORG made them in these shapes already (PlanTargets).
-		// Native mode: the GBuffer is frame transients (Frame/Transients.h), placed together when the scope ends; ORG derives their
-		// span from the graphs that use them. Its content lives within a frame. The water targets keep memory of their own: they
-		// are the water's TAA history.
-		const auto water = [](const DeferredTarget& a_target) {
-			return a_target.target == RE::RENDER_TARGETS::kWATER_1 || a_target.target == RE::RENDER_TARGETS::kWATER_2;
-		};
-		{
-			RenderGraph::Engine::Native::FrameTransientScope gbuffer("Deferred's G-buffer");
-			for (const auto& target : kDeferredTargets)
-				if (!water(target))
-					SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
-		}
 		for (const auto& target : kDeferredTargets)
-			if (water(target))
-				SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
+			SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
 	}
 
 	{
@@ -235,10 +224,10 @@ void Deferred::SetupResources()
 		directionalShadowLights->CreateSRV(srvDesc);
 	}
 
-	// The composite on the render graph, when CS_ORG_COMPOSITE=1 reserved its anchor.
+	// The composite on the render graph, in graph mode.
 	ORGDeferredComposite::Get().Setup();
 	// The GBuffer clears at the Prepass anchor, once the targets exist.
-	ORGDeferredClears::Setup();
+	ORGDeferredClears::Get().Setup();
 }
 
 void Deferred::PlanTargets()
@@ -355,7 +344,7 @@ void Deferred::StartDeferred()
 
 	// Dirty from last frame: SRTM_CLEAR makes the engine's next state flush call ClearRenderTargetView once per target. On the render
 	// graph the Prepass anchor's pass clears them instead (ORGDeferredClears), so they are bound without a clear.
-	const auto mode = ORGDeferredClears::TakeClears() ? RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR : RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR;
+	const auto mode = ORGDeferredClears::Get().TakeClears() ? RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR : RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR;
 	for (uint i = 2; i < 8; i++) {
 		renderTargets[i] = targets[i];  // We must use unused targets to be indexable
 		setRenderTargetMode[i] = mode;
@@ -424,7 +413,7 @@ void Deferred::DeferredPasses()
 	if (ssgi.loaded)
 		ssgi.DrawSSGI();
 	auto [ssgi_ao, ssgi_y, ssgi_cocg, ssgi_gi_spec] = ssgi.GetOutputTextures();
-	bool ssgi_hq_spec = ssgi.settings.EnableExperimentalSpecularGI;
+	bool ssgi_hq_spec = ssgi.FrameSpecularGI();
 
 	auto dispatchCount = Util::GetScreenDispatchCount(true);
 
@@ -478,8 +467,8 @@ void Deferred::DeferredPasses()
 			skylighting.loaded ? skylighting.ZenithSRV() : nullptr,         // t22 SkylightingZenithDepth
 		};
 
-		// The render graph's passes here, after the D3D11 SSGI, SSS and cubemap update; the ORG composite among them
-		// (CS_ORG_COMPOSITE=1), which the D3D11 dispatch below then replaces.
+		// The render graph's passes here, after the D3D11 SSGI, SSS and cubemap update; the ORG composite among them.
+		// The D3D11 dispatch below runs only outside graph mode.
 		auto& orgComposite = ORGDeferredComposite::Get();
 		orgComposite.SetFrame({ .interior = interior,
 			.main = static_cast<std::uint32_t>(forwardRenderTargets[0]),
@@ -493,7 +482,13 @@ void Deferred::DeferredPasses()
 		if (orgComposite.Lagged()) {
 			static Util::ReasonLog s_lag("[ORG] Deferred composite: the composite lags (its stage's schedule does not hold it yet); nothing composites this frame");
 			s_lag.Report("first build");
-		} else if (!orgComposite.Composited()) {
+		} else if (orgComposite.Composited()) {
+			// The graph composited.
+		} else if (RenderGraph::Engine::GraphMode()) {
+			// The engine context cannot run a CS dispatch in graph mode (native has none to run it on).
+			RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::Refused, RenderGraph::Frame::SegmentId::Count,
+				fmt::format("the deferred composite could not run on the graph: {}", orgComposite.Refusal()));
+		} else {
 			ID3D11SamplerState* samplers[]{
 				dynamicCubemaps.loaded ? linearSampler : nullptr,
 				physSky.loaded ? physSky.sampSv.get() : nullptr,
@@ -546,7 +541,7 @@ void Deferred::DeferredPasses()
 		globals::features::effects11.DrawSunRays();
 	}
 
-	// The render graph's passes here, after the composite: Effects11's rays on the ORG path (CS_ORG_E11_RAYS=1).
+	// The render graph's passes here, after the composite: Effects11's rays in graph mode.
 	FrameAnchors::Run(FrameAnchors::Anchor::PostComposite);
 }
 
@@ -572,8 +567,6 @@ void Deferred::EndDeferred()
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
 
 	DeferredPasses();  // Perform deferred passes and composite forward buffers
-	if (globals::features::drawcallLimitFix.loaded)
-		globals::features::drawcallLimitFix.ProbeOpaqueTarget(3);
 
 	stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
@@ -701,23 +694,28 @@ bool Deferred::GetDirectionalShadowLightData(DirectionalShadowLightData& a_out)
 	return true;
 }
 
+namespace
+{
+	// The last sun shadow record. t98 is written from it every frame, so a frame with no sun shadow light keeps the last one.
+	Deferred::DirectionalShadowLightData g_lastDirectionalShadow{};
+}
+
 void Deferred::CopyShadowLightData()
 {
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "CopyShadowLightData");
-	directionalShadowDataFrame = UINT32_MAX;
+	if (DirectionalShadowLightData dd{}; GetDirectionalShadowLightData(dd)) {
+		g_lastDirectionalShadow = dd;
+		directionalShadowDataFrame = globals::state->frameCount;
+	} else
+		directionalShadowDataFrame = UINT32_MAX;
 
-	DirectionalShadowLightData dd{};
-	if (!GetDirectionalShadowLightData(dd))
-		return;
-
+	// Written every frame, so DCLF's mirror always holds it. A frame with no sun shadow light keeps the last record.
 	auto context = globals::d3d::context;
-
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	DX::ThrowIfFailed(context->Map(directionalShadowLights->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
-	memcpy(mapped.pData, &dd, sizeof(DirectionalShadowLightData));
+	memcpy(mapped.pData, &g_lastDirectionalShadow, sizeof(DirectionalShadowLightData));
 	context->Unmap(directionalShadowLights->resource.get(), 0);
-	directionalShadowDataFrame = globals::state->frameCount;
 
 	ID3D11ShaderResourceView* srv = directionalShadowLights->srv.get();
 	context->PSSetShaderResources(98, 1, &srv);
@@ -754,7 +752,6 @@ ID3D11ShaderResourceView* Deferred::GetDirectionalShadowMap() const
 
 void Deferred::ClearShaderCache()
 {
-	ORGDeferredComposite::Get().ClearShaderCache();
 	if (mainCompositeCS) {
 		mainCompositeCS->Release();
 		mainCompositeCS = nullptr;
@@ -903,19 +900,14 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 	if (globals::shaderCache->IsEnabled() && globals::state->inWorld) {
 		// The opaque batches are done: DCLF draws its objects where the engine would have, before anything
 		// that blends onto or tests against them.
-		if (globals::features::drawcallLimitFix.loaded) {
-			globals::features::drawcallLimitFix.ProbeOpaqueTarget(0);
+		if (globals::features::drawcallLimitFix.loaded)
 			globals::features::drawcallLimitFix.AfterOpaquePass();
-			globals::features::drawcallLimitFix.ProbeOpaqueTarget(1);
-		}
 
 		auto& terrainBlending = globals::features::terrainBlending;
 		// Defer terrain rendering until after everything else
-		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
+		if (terrainBlending.loaded && terrainBlending.FrameEnabled()) {
 			terrainBlending.RenderTerrainBlendingPasses();
 		}
-		if (globals::features::drawcallLimitFix.loaded)
-			globals::features::drawcallLimitFix.ProbeOpaqueTarget(2);
 	}
 
 	// Deferred blended decals

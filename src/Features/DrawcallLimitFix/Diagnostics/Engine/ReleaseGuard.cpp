@@ -4,6 +4,7 @@
 
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
+#include "RenderGraph/Async/Lanes.h"
 
 #include <array>
 #include <cstring>
@@ -35,7 +36,7 @@ namespace DCLF
 	{
 		if (!a_object)
 			return;
-		if (EngineReadWindow::sceneWork || dclfThread)
+		if (EngineReadWindow::sceneWork || ::RenderGraph::Frame::OnExecutorThread())
 			Note(a_object);
 		// The scalar deleting destructor, vtable slot 0, called with 1 to delete.
 		using Destroy = void (*)(void*, std::uint32_t);
@@ -44,7 +45,7 @@ namespace DCLF
 
 	void ReleaseGuard::Note(void* a_object)
 	{
-		(EngineReadWindow::sceneWork || dclfThread == 1 ? laneReleases : poolReleases).fetch_add(1, std::memory_order_relaxed);
+		(EngineReadWindow::sceneWork || ::RenderGraph::Frame::OnExecutorThread(::RenderGraph::Frame::Executor::Scene) ? laneReleases : poolReleases).fetch_add(1, std::memory_order_relaxed);
 		// The object is whole until its destructor runs. A class name lives as long as the module.
 		const char* name = nullptr;
 		try {

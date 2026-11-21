@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/ContentOwners.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Latched.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
+#include "RenderGraph/Fatal.h"
 
 #include <Render/LatchBlock.h>
 #include <Render/Runtime/IUploadService.h>
@@ -122,7 +123,7 @@ namespace DCLF::Draws
 			if (content)
 				content->Set(a_key, a_offset, a_bytes, a_owners);
 			else if (!a_owners.empty())
-				stl::report_and_fail("Drawcall Limit Fix: a row naming descriptors was uploaded by a commit with no content owners (its descriptors would outlive their owners)");
+				::RenderGraph::Fatal("Drawcall Limit Fix", "a row naming descriptors was uploaded by a commit with no content owners (its descriptors would outlive their owners)");
 		}
 
 		std::shared_ptr<org::runtime::StagedUploadBatch> batch;

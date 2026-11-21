@@ -83,8 +83,7 @@ float2 QuadraticEdgeIntegral(float a, float b, float c0, float c1)
 	float2 i1 = float2(endpoints.y, -endpoints.x) / (2 * a) - shift * i0;
 	return c0 * i0 + c1 * i1;
 }
-StructuredBuffer<float4> WaveBoundary : register(t3);
-RWStructuredBuffer<float4> WaveBoundaryOutput : register(u0);
+PHYSICAL_LENS_WAVE_BOUNDARY_RESOURCES(ORG_RESOURCE)
 float4 PupilBoundaryPoint(float angle, uint band)
 {
 	float4 transfer = PupilTransfer[band];

@@ -6,6 +6,7 @@
 #include <span>
 
 struct ImDrawData;
+struct RasterProgram;
 
 namespace org
 {
@@ -15,6 +16,11 @@ namespace org
 namespace FrameAnchors
 {
 	class Texture;
+}
+
+namespace RenderGraph::Frame
+{
+	class Inputs;
 }
 
 /**
@@ -46,12 +52,13 @@ namespace ImGuiBasicRHI
 	/** @brief Turns an ImTextureID the backend does not own into a binding; kNoIndex skips the draws that use it. */
 	using Resolver = std::function<Binding(std::uint64_t a_texture)>;
 
-	/** @brief What a frame draws onto: the size of the pass's target and its colour format (rhi::Format, as its value). */
+	/** @brief What a frame draws onto: the size of the pass's target, its colour format (rhi::Format, as its value) and its pipeline. */
 	struct Target
 	{
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
 		std::uint32_t format = 0;
+		std::shared_ptr<const RasterProgram> program;  // ProgramFor, for the revision the registration was made for
 	};
 
 	/** @brief Becomes the context's renderer backend. Call with no other renderer backend installed. */
@@ -76,8 +83,14 @@ namespace ImGuiBasicRHI
 	/** @brief A texture's binding. a_mip -1 means the whole chain, sampled at its top level. */
 	Binding BindingOf(const std::shared_ptr<Texture>& a_texture, int a_mip);
 
-	/** @brief Loads the pipeline for a target format now, blocking on a compile. Render thread. False, logged, on failure. */
-	bool Prepare(std::uint32_t a_format);
+	/**
+	 * @brief Render owner, before the overlay's client is declared. Declares the pipeline on the interface's target format
+	 * (Engine::UiTargets), so on HdrEnabled. A revision starts once its format's pipeline is built.
+	 */
+	void DeclareProgram();
+
+	/** @brief Render thread, in a client's key or make that depends on HdrEnabled. The pipeline for a revision's values. */
+	std::shared_ptr<const RasterProgram> ProgramFor(const RenderGraph::Frame::Inputs& a_in);
 
 	/** @brief Answers texture requests, stages geometry and uploads, and stores the draws for the current run. Inside the pass's epoch.
 	*  False, logged, when the frame cannot be drawn, so the caller falls back. */

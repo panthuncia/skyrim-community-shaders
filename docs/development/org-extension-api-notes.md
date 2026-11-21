@@ -1189,15 +1189,14 @@ Keys used so far:
   (`Deferred::GetDirectionalShadowLightData`) is latched instead.
 - **Found by:** P3 Skylighting (2026-11-09).
 
-### ORG's built-in passes in a host without a pipeline compiler
+### Built-in passes on the host's programs
 
 - **Need:** generate mips (and resolve MSAA) on the graph.
 - **Who:** CS's Dynamic Cubemaps (capture and inferred cubemaps); Post Processing's bloom and others next.
-- **Where it fits:** `org::GenerateMipsPass` declares its pipeline through `PassBuilder::Pipeline`, which needs an
-  `org::PipelineCompiler` in `Runtime::Desc`; CS's runtime has none (its programs are `ComputeProgram`s). CS runs ORG's own
-  shader through `ComputeProgram` instead (`GraphPasses::MakeGenerateMips`), and ships ORG's `shaders/` folder in
-  `Data/Shaders/OpenRenderGraph` (copied into `package/Shaders` at configure time). A plugin API needs either a
-  `PipelineCompiler` in CS's runtime, so ORG's built-in passes work as they are, or these wrappers exported.
+- **Where it fits:** done in simplification item 6.3. ORG no longer builds pipelines. The passes are in OMS
+  (`ORGModuleServices/Passes/GenerateMipsPass.h`, `ResolveMultisamplePass.h`) and record through a host `ComputeKernel`.
+  CS's `ComputeProgram` is one. CS builds it from OMS's `shaders/` folder, which ships in `Data/Shaders/ORGModuleServices`
+  (copied into `package/Shaders` at configure time). A plugin API needs these passes exported.
 - **Found by:** P3 W2, Dynamic Cubemaps (2026-11-09).
 
 ### Register-bound shaders on a pass

@@ -1,0 +1,78 @@
+# The test harness's own features (plan B23). Screen Space GI starts from injected saved settings, then: a call step
+# (org.rebuild), a setting step that writes several settings at once (an object), shots that wait for the revision holding
+# the change before them (await = "adopted"), an org: step (org:refresh) and the graph frame counts at the exit.
+# Expect in the log:
+# - "[TEST] step N: await 'adopted' held at frame F: variables V adopted by revision R" for each shot, R rising;
+# - "[TEST] settings ScreenSpaceGI = {...}" and "[ORG] graph frames at exit";
+# - in cs-test's output, "Saved settings: Screen Space GI written into ..."; SettingsUser.json is the same after the run.
+# result.json's graph_frames has no failures. --set 'expect.graph_frames={min={"cs.ssgi"=10000000}}' must fail the run with
+# "cs.ssgi ran on the graph in N frames, at least 10000000 expected". Compose it: native-vulkan+harness-selftest,
+# guest+harness-selftest, d3d11+harness-selftest (the awaits hold at once and graph_frames is skipped).
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+ScreenSpaceGI = true
+
+[saved_settings."Screen Space GI"]
+Enabled = true
+NumSlices = 4
+NumSteps = 8
+ResolutionMode = 1
+EnableGI = true
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "call"
+arg = "org.rebuild"
+
+[[steps]]
+at = "previous"
+await = "adopted"
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'ScreenSpaceGI={"NumSlices":10,"NumSteps":12,"ResolutionMode":2}'
+
+[[steps]]
+at = "previous"
+await = "adopted"
+do = "shot"
+arg = "low"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ScreenSpaceGI.Enabled=false"
+
+[[steps]]
+at = "previous"
+await = "adopted"
+do = "shot"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "org:refresh"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "low", "off"]
+no_log = ["frame tap error"]
+
+[expect.graph_frames]
+min = { "cs.ssgi" = 30 }

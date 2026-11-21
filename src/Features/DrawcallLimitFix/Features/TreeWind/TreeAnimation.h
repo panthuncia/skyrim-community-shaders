@@ -33,13 +33,11 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 	 * The animation list is scanned only when a root joined. Main thread.
 	 */
 	void UpdateOwned(const std::vector<const RE::NiAVObject*>& a_left, const std::vector<const RE::NiAVObject*>& a_joined);
-	/** @brief Records at Main::Update's entry whether DCLF runs this frame. Off means no tree is written. */
-	void AtUpdateEntry(bool a_running);
+	/** @brief Main thread, at Main::Update's entry. No tree is written before the first. */
+	void AtUpdateEntry();
 	/** @brief Writes the stood-in trees' multibound results from DCLF's verdicts before the tree list loop. AE only. */
 	void BeforeListLoop(std::byte* a_manager);
 	void AfterListLoop();
-	/** @brief Counts owned roots still on the animation list, a missed add. False when not installed. Render thread. */
-	bool OwnedOnList(std::uint64_t& a_count);
 
 	/** @brief The counters since the last Take, reset. */
 	struct Counters

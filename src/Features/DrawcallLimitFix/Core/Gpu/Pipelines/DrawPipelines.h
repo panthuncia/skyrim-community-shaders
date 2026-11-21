@@ -312,8 +312,7 @@ namespace DCLF
 			std::shared_ptr<const ConstantTables> tables;
 		};
 		ankerl::unordered_dense::map<PipelineKey, Entry, PipelineKeyHash> entries;
-		std::uint32_t generation = 0;  // a target change starts a new set and every earlier index is stale
-		std::uint32_t targetsGeneration = 0;
+		std::uint32_t generation = 0;  // a reset of the set starts a new one and every earlier index is stale
 		std::uint64_t revision = 0;
 		std::shared_ptr<const void> setVersion;  // holds every setIndex above
 
@@ -323,11 +322,11 @@ namespace DCLF
 			bool failed = false;
 		};
 		ankerl::unordered_dense::map<ShadowPipelineKey, ShadowEntry, ShadowPipelineKeyHash> shadowEntries;
-		std::uint32_t shadowGeneration = 0;  // a format change starts a new set
+		std::uint32_t shadowGeneration = 0;  // a reset of the shadow set starts a new one
 		DXGI_FORMAT shadowFormat = DXGI_FORMAT_UNKNOWN;
 		std::shared_ptr<const void> shadowSetVersion;
 
-		// A failed program fails for good. A failed build retries after the next target change.
+		// A failed program fails for good, and so does a failed build until a shader reload.
 		struct FamilyEntry
 		{
 			std::shared_ptr<const void> pipelines;
@@ -393,7 +392,6 @@ namespace DCLF
 			std::uint32_t zPipelines = 0, zDepthOnly = 0;
 			std::uint32_t stateClasses = 0, largestClass = 0;
 			std::uint64_t classParityChecks = 0, classParityMismatches = 0;
-			std::uint32_t targetChanges = 0;
 			std::uint32_t shadowRequested = 0;
 			std::uint32_t shadowReady = 0;
 			std::uint32_t shadowFailed = 0;
@@ -425,12 +423,15 @@ namespace DCLF
 		/** @brief Whether the main set's pipelines are built indirect-bindable. */
 		bool IndirectBindable() const;
 
-		/** @brief Render thread. The native main pass's targets. A change rebuilds the pipelines. */
-		void SetTargetFormats(const TargetFormats& a_formats);
+		/**
+		 * @brief Render thread, once at setup. The main pass's target formats, from the engine target set's declarations. They never
+		 * change in a session. A second call with other formats is fatal.
+		 */
+		void InitTargetFormats(const TargetFormats& a_formats);
 		bool HasTargetFormats() const { return targets.colorCount != 0; }
 		const TargetFormats& Targets() const { return targets; }
 
-		/** @brief Any thread. Asks the lane for a key's program and pipeline. The lane keeps every key and rebuilds on target changes. */
+		/** @brief Any thread. Asks the lane for a key's program and pipeline. The lane keeps every key. */
 		void RequestLighting(const PipelineKey& a_key, std::uint32_t a_slot);
 		/** @brief Scene lane only. The newest catalog since the last call, or null if none is newer. */
 		std::shared_ptr<const PipelineCatalog> TakeCatalog();
@@ -441,11 +442,14 @@ namespace DCLF
 
 		/**
 		 * @brief Any thread. Asks the lane for a shadow view key's pipeline. Shadow pipelines are a separate set, depth only, with the
-		 * view's rasterizer state. Rebuilt after a format change.
+		 * view's rasterizer state.
 		 */
 		void RequestShadow(const ShadowPipelineKey& a_viewKey, const ShadowPipelineKey& a_casterKey, std::uint32_t a_occlusion);
-		/** @brief Render thread. The shadow map DSV format and the Utility shader, posted on change. */
-		void SetShadowInputs(DXGI_FORMAT a_format, RE::BSShader& a_utility);
+		/**
+		 * @brief Render thread, once at setup. The shadow map DSV format, from the engine target set's declarations, and the Utility
+		 * shader. A second call with another format is fatal.
+		 */
+		void InitShadowInputs(DXGI_FORMAT a_format, RE::BSShader& a_utility);
 
 		/**
 		 * @brief Render thread. An id for a shadow view's rasterizer state, or 0 if a pipeline cannot express it.
@@ -486,16 +490,11 @@ namespace DCLF
 		void CaptureEngineStates();
 
 
-		/** @brief Render thread. Increments whenever the targets change. */
-		std::uint32_t Generation() const { return generation; }
-		/** @brief Render thread. The shadow map format last posted. */
+		/** @brief Render thread. The shadow map format set at setup. */
 		DXGI_FORMAT ShadowFormat() const;
 
 		/** @brief Any thread. Counters for the report, read relaxed. */
 		Stats GetStats() const;
-
-		/** @brief Any thread. Pipeline builds queued or running. */
-		std::size_t BuildsInFlight() const;
 
 		/** @brief Lighting constant variable names by index, per stage. */
 		static std::span<const std::string_view> LightingVariableNames(bool a_pixel);
@@ -508,12 +507,11 @@ namespace DCLF
 		std::unique_ptr<Impl> impl;
 		TargetFormats targets;
 		std::shared_ptr<const PipelineCatalog> heldCatalog;
-		std::uint32_t generation = 0;
 		Stats stats;
 
-		friend struct IndirectState GetIndirectState(const PipelineCatalog&, std::uint32_t);
-		friend bool IndirectStateValid(const PipelineCatalog&, std::uint32_t);
-		friend bool ZGroupPipelineReady(const PipelineCatalog&, std::uint32_t, std::uint32_t);
+		friend struct IndirectState GetIndirectState(const PipelineCatalog&);
+		friend bool IndirectStateValid(const PipelineCatalog&);
+		friend bool ZGroupPipelineReady(const PipelineCatalog&, std::uint32_t);
 		friend struct ForwardPipelineAccess;  // CatalogFamilyPipelines
 		friend struct ShadowIndirectState GetShadowIndirectState(const PipelineCatalog&, DXGI_FORMAT);
 	};

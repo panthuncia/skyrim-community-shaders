@@ -31,7 +31,6 @@ namespace DCLF
 		Technique,           // technique outside the supported set
 		AlphaBlend,          // transparency
 		Decal,               // decal batches
-		ProjectedUV,         // snow/moss projection
 		UnsupportedParent,   // a blended leaf under a BSOrderedNode (its opaque children are eligible)
 		Hidden,              // app-culled or hidden this frame (per frame)
 		Fading,              // fade node not fully faded in (per frame)
@@ -41,10 +40,10 @@ namespace DCLF
 		SkinShape,           // a skin the skinned path does not take: dismember instance, several partitions, too many bones
 		Billboard,           // under an NiBillboardNode (the main cull turns it to the camera)
 		Switch,              // under an NiSwitchNode not selecting it (or its leaves not admitted: Features/SwitchNodes)
-		Held,                // a CS feature redraws it after the opaque pass (Api::HeldGroupContribution): its group's toggle off, or a decal
+		Held,                // a CS feature redraws it after the opaque pass (Api::HeldGroupContribution) and a decal
 		MultiIndex,          // BSMultiIndexTriShape: its main pass is the engine's (the snow layer), its shadow a tri-shape's
-		EffectOpaque,        // CS_DCLF_EFFECTS: an effect without a blending alpha property
-		EffectVariant,       // CS_DCLF_EFFECTS: an effect permutation not ported
+		EffectOpaque,        // an effect without a blending alpha property
+		EffectVariant,       // an effect permutation not ported
 		Count
 	};
 
@@ -57,7 +56,6 @@ namespace DCLF
 		"technique",
 		"alpha-blend",
 		"decal",
-		"projected-uv",
 		"unsupported-parent",
 		"hidden",
 		"fading",

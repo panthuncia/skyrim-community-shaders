@@ -3,9 +3,7 @@
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
-#include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Scene/Events.h"
 
 #include <algorithm>
@@ -19,70 +17,7 @@ namespace DCLF::Features::FirstPerson
 	{
 		using V = Diagnostics::SceneView;
 
-		// Walks the live tree, so it must run on the render thread inside the frame.
-		void LiveSubtree(const RE::NiAVObject* a_root, std::vector<RootSubtreeNode>& a_out)
-		{
-			a_out.clear();
-			if (!const_cast<RE::NiAVObject*>(a_root)->AsNode())
-				return;
-			Engine::ForEachLive(a_root, [&](RE::NiAVObject& a_object, std::uint32_t a_depth) {
-				if (a_depth)
-					a_out.push_back({ &a_object, a_object.AsGeometry() != nullptr, Engine::IsHidden(&a_object) });
-			});
-			std::ranges::sort(a_out, {}, &RootSubtreeNode::key);
-		}
-
 		bool CulledBit(const Diagnostics::RootSubtreeSynced& a_subtree, const RootSubtreeNode& a_node) { return a_subtree.culled && a_node.saved ? a_node.culled : a_node.hidden; }
-
-		// CS_DCLF_PERSISTENT_PARITY: compares the event-tracked subtree with a walk of the live tree.
-		struct SubtreeParity
-		{
-			std::uint64_t checks = 0, compared = 0, membership = 0, bits = 0, walks = 0;
-			std::string first;
-			std::vector<RootSubtreeNode> live;
-		} subtreeParity;
-		bool subtreeParityOn = false;
-
-		void CheckSubtree(const Diagnostics::RootSubtreeSynced& a_subtree)
-		{
-			auto& p = subtreeParity;
-			++p.checks;
-			LiveSubtree(a_subtree.root, p.live);
-			std::size_t i = 0, j = 0;
-			auto note = [&](const RE::NiAVObject* a_key, const char* a_what) {
-				if (std::ranges::count(p.first, ';') < 6)
-					p.first += fmt::format("{}{} '{}' {} ({})", p.first.empty() ? "" : "; ", a_what, a_key->name.c_str() ? a_key->name.c_str() : "", static_cast<const void*>(a_key), a_subtree.moment);
-			};
-			std::vector<RootSubtreeNode> kept;
-			for (const auto& node : a_subtree.nodes)
-				if (node.key)
-					kept.push_back(node);
-			while (i < p.live.size() || j < kept.size()) {
-				if (j == kept.size() || (i < p.live.size() && p.live[i].key < kept[j].key)) {
-					++p.membership;
-					note(p.live[i].key, "not kept");
-					++i;
-				} else if (i == p.live.size() || kept[j].key < p.live[i].key) {
-					++p.membership;
-					++j;  // Gone from the tree, so never dereferenced.
-				} else {
-					++p.compared;
-					if (p.live[i].hidden != kept[j].hidden) {
-						++p.bits;
-						note(p.live[i].key, p.live[i].hidden ? "hidden, kept shown" : "shown, kept hidden");
-					}
-					++i;
-					++j;
-				}
-			}
-			if (p.checks % 600)
-				return;
-			logger::info("[DCLF] first-person bits by events (C3 parity): {} checks, {} nodes compared, {} membership and {} bit differences against the live walk; {} walks{}{}",
-				p.checks, p.compared, p.membership, p.bits, a_subtree.walks - std::exchange(p.walks, a_subtree.walks), p.membership || p.bits ? " <- FLAG" : " <- OK",
-				p.first.empty() ? "" : "; first: " + p.first);
-			p.compared = p.membership = p.bits = 0;
-			p.first.clear();
-		}
 
 		void LogSubtreeChain(const Diagnostics::RootSubtreeSynced& a_subtree)
 		{
@@ -134,8 +69,6 @@ namespace DCLF::Features::FirstPerson
 
 		void OnSubtreeSynced(const Diagnostics::RootSubtreeSynced& a_subtree)
 		{
-			if (subtreeParityOn)
-				CheckSubtree(a_subtree);
 			if (!a_subtree.frameStart)
 				return;
 			LogSubtreeChain(a_subtree);
@@ -168,81 +101,11 @@ namespace DCLF::Features::FirstPerson
 				listed ? fmt::format("listed hidden {} in the frame's capture", it->second) : std::string("not in the frame's capture"), a_hidden.recordHidden,
 				cullHidden.size(), chain);
 		}
-
-		// Misfiled entries reach the first-person root but are filed under another category node, so the view never takes them.
-		// The counters are written from the evaluation threads.
-		struct FilingState
-		{
-			std::atomic<std::uint64_t> misfiled{ 0 };
-			std::atomic<const void*> misfiledGeometry{ nullptr }, misfiledCategory{ nullptr };
-			std::uint64_t excluded = 0;
-			std::string firstExcluded;
-			std::uint64_t held = 0;
-			std::string firstHeld;
-		} filing;
-
-		void OnMisfiled(const Diagnostics::ViewMisfiled& a_event)
-		{
-			filing.misfiled.fetch_add(1, std::memory_order_relaxed);
-			filing.misfiledGeometry.store(a_event.geometry, std::memory_order_relaxed);
-			filing.misfiledCategory.store(a_event.category, std::memory_order_relaxed);
-		}
-
-		void NoteLeftOut(const Scene::Coordinator& a_store, std::uint32_t a_slot, const V::SlotDecision& a_decision, std::uint8_t a_waitWhy)
-		{
-			auto& fp = filing;
-			const auto& tables = V::tables(a_store);
-			if (a_decision.rootViewExcluded) {
-				++fp.excluded;
-				if (fp.firstExcluded.empty())
-					if (const auto* geometry = tables.objectGeometry[a_slot]) {
-						const auto p = tables.objects[a_slot].pipelineIndex;
-						fp.firstExcluded = fmt::format("'{}' (slot {}, flags {:#x}, raster {:#x})", geometry->name.c_str() ? geometry->name.c_str() : "?",
-							a_slot, tables.objects[a_slot].flags, p < tables.pipelines.size() ? tables.pipelines[p].rasterFlags : 0u);
-					}
-			}
-			if (a_decision.rootViewHeld) {
-				++fp.held;
-				if (fp.firstHeld.empty())
-					if (const auto* geometry = tables.objectGeometry[a_slot])
-						fp.firstHeld = fmt::format("'{}' (slot {}, {}, waiting reason {}, first-person readiness cause {}, pipeline slot {} raster {:#x})",
-							geometry->name.c_str() ? geometry->name.c_str() : "?", a_slot, V::IsResidentSlot(a_store, a_slot) ? "resident" : "not resident",
-							a_waitWhy, a_decision.rootViewSlotWhy, tables.objects[a_slot].pipelineIndex,
-							tables.objects[a_slot].pipelineIndex < tables.pipelines.size() ? tables.pipelines[tables.objects[a_slot].pipelineIndex].rasterFlags : 0u);
-			}
-		}
-
-		void OnSlotDecided(const Diagnostics::SetSlotDecided& a_event) { NoteLeftOut(a_event.store, a_event.slot, a_event.decision, a_event.waitWhy); }
-		void OnSlotRedecided(const Diagnostics::SetSlotRedecided& a_event) { NoteLeftOut(a_event.store, a_event.slot, a_event.decision, a_event.waitWhy); }
 	}
 
 	void SubscribeRootViewChecks()
 	{
-		const auto& o = Diagnostics::Observe();
-		subtreeParityOn = o.scene;
 		Diagnostics::Subscribe<Diagnostics::RootSubtreeSynced>(&OnSubtreeSynced);
 		Diagnostics::Subscribe<Diagnostics::RootViewHidden>(&OnHidden);
-		if (o.claims) {
-			Diagnostics::Subscribe<Diagnostics::ViewMisfiled>(&OnMisfiled);
-			Diagnostics::Subscribe<Diagnostics::SetSlotDecided>(&OnSlotDecided);
-			Diagnostics::Subscribe<Diagnostics::SetSlotRedecided>(&OnSlotRedecided);
-		}
-	}
-
-	void SetLines(std::uint32_t)
-	{
-		if (const auto misfiled = filing.misfiled.exchange(0, std::memory_order_relaxed))
-			logger::info("[DCLF] first-person entries filed under another category node (T7e, CS_DCLF_SET_PARITY): {} evaluations; last geometry {} under {} "
-						 "(the first-person root {}) <- FIRST-PERSON FILING",
-				misfiled, filing.misfiledGeometry.load(std::memory_order_relaxed), filing.misfiledCategory.load(std::memory_order_relaxed),
-				static_cast<const void*>(V::firstViewRoot(Scene::Coordinator::Get())));
-		const auto held = std::exchange(filing.held, 0);
-		const auto firstHeld = std::exchange(filing.firstHeld, {});
-		const auto excluded = std::exchange(filing.excluded, 0);
-		const auto firstExcluded = std::exchange(filing.firstExcluded, {});
-		if (held)
-			logger::info("[DCLF] first-person slots held out of the first-person view (T7e, CS_DCLF_SET_PARITY): {} slot evaluations; first: {}", held, firstHeld);
-		if (excluded)
-			logger::info("[DCLF] first-person entries the first-person view takes no part in (T7e, CS_DCLF_SET_PARITY): {} slot evaluations; first: {}", excluded, firstExcluded);
 	}
 }

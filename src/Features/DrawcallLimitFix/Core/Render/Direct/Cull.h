@@ -178,12 +178,9 @@ namespace DCLF::Direct
 	// ---- The cull ----
 
 	/**
-	 * @brief Any pool thread: culls a_batch for a_view into a_arena. a_live selects the per-frame cull, otherwise the snapshot's
-	 * spheres. The caller sets `last` and `commands`.
+	 * @brief Any pool thread: culls a_batch for a_view into a_arena with the live spheres of a_parity. The caller sets `last`.
 	 */
-	const CulledBatch& CullBatch(const ViewBatch& a_batch, bool a_live, std::uint32_t a_parity, const CullView& a_view, const CullFrame& a_frame, CullArena& a_arena);
-	/** @brief Render thread: kExpCullProfile's sections by view since the last take, or empty. */
-	std::string TakeCullProfileLine();
+	const CulledBatch& CullBatch(const ViewBatch& a_batch, std::uint32_t a_parity, const CullView& a_view, const CullFrame& a_frame, CullArena& a_arena);
 
 	const CulledBatch& ColourObjectWords(const CulledBatch& a_depth, const CullView& a_colour, const CullFrame& a_frame, CullArena& a_arena);
 

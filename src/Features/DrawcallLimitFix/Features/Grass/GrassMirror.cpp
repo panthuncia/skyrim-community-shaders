@@ -1,10 +1,8 @@
 // The render-thread grass mirror. See GrassMirror.h.
 
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
-#include "Features/DrawcallLimitFix/Features/Grass/Diagnostics/GrassEvents.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 #include "GrassShared/GrassFrame.h"
 #include "GrassShared/GrassMeshLibrary.h"
@@ -79,13 +77,12 @@ namespace DCLF::Features::Grass
 		return mirror;
 	}
 
-	void Mirror::Drain(std::uint32_t a_frame)
+	void Mirror::Drain(std::uint32_t)
 	{
 		++drains;
 		if (const auto* state = globals::game::smState)
 			fadeClock += state->timerValues[1];
 		events.Drain([&](Event&& a_event) {
-			Diagnostics::Notify(GrassEventDrained{ a_event.shape });
 			if (Stale(a_event)) {
 				++stats.stale;
 				return;
@@ -94,7 +91,6 @@ namespace DCLF::Features::Grass
 		});
 		ResolveLods();
 		PruneTombstones();
-		Diagnostics::Notify(GrassDrained{ *this, a_frame });
 	}
 
 	bool Mirror::Stale(const Event& a_event) const

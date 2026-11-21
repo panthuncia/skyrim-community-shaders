@@ -1,43 +1,57 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/GraphResources.h"
+#include "RenderGraph/GraphResources.h"
 
-#	include "Globals.h"
-#	include "RenderGraph/Backend.h"
-#	include "RenderGraph/BuildManager.h"
-#	include "RenderGraph/DxvkImageImport.h"
-#	include "RenderGraph/DxvkOrgInterop.h"
-#	include "RenderGraph/Frame/FrameDriver.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "Utils/D3D.h"
+#include "Globals.h"
+#include "RenderGraph/Backend.h"
+#include "RenderGraph/BuildManager.h"
+#include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/BoundaryCheck.h"
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/ImageRegistry.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "Utils/D3D.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/PassBuilders.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/PixelBuffer.h>
-#	include <Resources/TextureDescription.h>
-#	include <Resources/VersionedTexture.h>
-#	include <rhi_helpers.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/PassBuilders.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/Buffers/Buffer.h>
+#include <Resources/Buffers/VersionedBuffer.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/PixelBuffer.h>
+#include <Resources/TextureDescription.h>
+#include <Resources/VersionedTexture.h>
+#include <rhi_helpers.h>
 
-#	include <algorithm>
-#	include <atomic>
-#	include <bit>
-#	include <deque>
-#	include <map>
-#	include <mutex>
-#	include <shared_mutex>
-#	include <vector>
+#include <algorithm>
+#include <atomic>
+#include <bit>
+#include <chrono>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <shared_mutex>
+#include <vector>
 
 namespace GraphResources
 {
 	namespace
 	{
+		/** @brief In graph mode a texture that could not be made is fatal, since nothing draws in its place. Its log line says why. */
+		void RequireMade(const Resource& a_resource, const std::string& a_name)
+		{
+			if (!a_resource && RenderGraph::Engine::GraphMode())
+				RenderGraph::Fatal("graph resources", fmt::format("{} could not be made", a_name));
+		}
+
 		struct Shape
 		{
 			D3D11_RESOURCE_DIMENSION dimension;
@@ -50,17 +64,22 @@ namespace GraphResources
 			UINT miscFlags;
 			D3D11_USAGE usage;
 			UINT cpuAccess;
+			bool array = false;  // array views even with one slice
 		};
 
 		struct Created
 		{
 			std::shared_ptr<org::Resource> graph;
 			winrt::com_ptr<ID3D11Resource> d3d11;
+			std::uint32_t layout = 0;  // an exported texture's resting VkImageLayout
 		};
 
 		bool Is3D(const Shape& a_shape) { return a_shape.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D; }
 
 		bool IsDepth(const Shape& a_shape) { return (a_shape.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0; }
+
+		// The most slices a depth texture has, as the engine's shadow maps do (DepthStencilData's eight DSVs).
+		constexpr UINT kMaxDepthSlices = 8;
 
 		/** @brief A texture's image and view formats. A typeless depth texture gets its view formats from Texture2D's rule. */
 		struct Formats
@@ -110,7 +129,7 @@ namespace GraphResources
 			desc.format = format;
 			desc.isCubemap = cube;
 			desc.arraySize = cube ? slices / 6 : slices;
-			desc.isArray = slices > (cube ? 6u : 1u);
+			desc.isArray = a_shape.array || slices > (cube ? 6u : 1u);
 			desc.depth = Is3D(a_shape) ? a_shape.depthOrArraySize : 1u;
 			desc.sampleCount = static_cast<std::uint8_t>((std::max)(a_shape.samples, 1u));
 			desc.hasSRV = true;
@@ -133,10 +152,13 @@ namespace GraphResources
 
 		/** @brief A graph-only texture. Transient ones are placed by the graph, others are made now. */
 		std::shared_ptr<org::Resource> CreateGraphTexture(const Shape& a_shape, const std::string& a_name, bool a_aliasable,
-			std::optional<std::uint64_t> a_pool = std::nullopt)
+			std::optional<std::uint64_t> a_pool = std::nullopt, bool a_concurrent = false)
 		{
 			auto desc = Describe(a_shape, false);
 			desc.allowAlias = a_aliasable;
+			// The uploader zero-fills a version on its copy queue, which only a concurrent texture allows.
+			if (a_concurrent)
+				desc.queueSharing = rhi::QueueSharing::Concurrent;
 			if (a_aliasable)
 				desc.aliasingPoolID = a_pool;
 			auto texture = a_aliasable ? org::PixelBuffer::CreateSharedUnmaterialized(desc) : org::PixelBuffer::CreateShared(desc);
@@ -144,8 +166,15 @@ namespace GraphResources
 			return texture;
 		}
 
-		/** @brief An exported twin texture with every view in its own format. */
-		Created CreateExportedTexture(const Shape& a_shape, const std::string& a_name)
+		/** @brief A twin's shape, from the description ShapeAt gives. */
+		Shape TwinShapeOf(const ExportDesc& a_desc)
+		{
+			return { a_desc.dimension, a_desc.width, a_desc.height, a_desc.depthOrArraySize, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
+				a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0, a_desc.array };
+		}
+
+		/** @brief What ExportTexture makes for an exported twin texture: every view in its own format. */
+		ExportDesc TwinExportDescOf(const Shape& a_shape)
 		{
 			const auto formats = FormatsOf(a_shape);
 			ExportDesc desc{};
@@ -162,8 +191,15 @@ namespace GraphResources
 			desc.rtv = (a_shape.bindFlags & D3D11_BIND_RENDER_TARGET) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.uav = (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.dsv = formats.dsv;
-			auto exported = ExportTexture(desc, a_name);
-			return { std::move(exported.graph), std::move(exported.d3d11) };
+			desc.array = a_shape.array;
+			return desc;
+		}
+
+		/** @brief An exported twin texture. */
+		Created CreateExportedTexture(const Shape& a_shape, const std::string& a_name)
+		{
+			auto exported = ExportTexture(TwinExportDescOf(a_shape), a_name);
+			return { std::move(exported.graph), std::move(exported.d3d11), exported.layout };
 		}
 
 		Created CreateTexture(const Shape& a_shape, const std::string& a_name, const Options& a_options)
@@ -177,9 +213,10 @@ namespace GraphResources
 				logger::error("[ORG] {}: not created: graph textures are DEFAULT usage, without CPU access, typed, and only cube misc flags", a_name);
 				return {};
 			}
-			if (IsDepth(a_shape) && (Is3D(a_shape) || a_shape.depthOrArraySize > 1 || a_shape.samples > 1 || a_shape.miscFlags ||
+			if (IsDepth(a_shape) && (Is3D(a_shape) || a_shape.depthOrArraySize > kMaxDepthSlices || a_shape.samples > 1 || a_shape.miscFlags ||
 										(a_shape.bindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS)))) {
-				logger::error("[ORG] {}: not created: a graph depth texture is one 2D texture with one sample, without RTVs or UAVs", a_name);
+				logger::error("[ORG] {}: not created: a graph depth texture is a 2D texture or array of up to {} slices with one sample, without RTVs or UAVs",
+					a_name, kMaxDepthSlices);
 				return {};
 			}
 			try {
@@ -194,7 +231,8 @@ namespace GraphResources
 
 		/**
 		 * @brief The exported texture's whole-texture views, false when D3D11 refuses one.
-		 * Depth views are 2D views in explicit formats, since a typeless texture cannot default to them.
+		 * Depth views are in explicit formats, since a typeless texture cannot default to them. A depth texture of more than one
+		 * slice gets array views of every slice, read from the texture's description.
 		 */
 		bool CreateTextureViews(ID3D11Resource* a_texture, Export a_export, winrt::com_ptr<ID3D11ShaderResourceView>& a_srv,
 			winrt::com_ptr<ID3D11UnorderedAccessView>& a_uav, winrt::com_ptr<ID3D11RenderTargetView>& a_rtv, winrt::com_ptr<ID3D11DepthStencilView>& a_dsv,
@@ -202,15 +240,33 @@ namespace GraphResources
 		{
 			auto* device = globals::d3d::device;
 			if (a_depth) {
+				winrt::com_ptr<ID3D11Texture2D> texture;
+				if (FAILED(a_texture->QueryInterface(IID_PPV_ARGS(texture.put()))) || !texture)
+					return false;
+				D3D11_TEXTURE2D_DESC textureDesc{};
+				texture->GetDesc(&textureDesc);
+				const UINT slices = (std::max)(textureDesc.ArraySize, 1u);
 				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 				srvDesc.Format = a_depth->srv;
-				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-				srvDesc.Texture2D.MipLevels = static_cast<UINT>(-1);
-				if (Has(a_export, Export::SRV) && FAILED(device->CreateShaderResourceView(a_texture, &srvDesc, a_srv.put())))
-					return false;
 				D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
 				dsvDesc.Format = a_depth->dsv;
-				dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+				if (slices > 1) {
+					srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+					srvDesc.Texture2DArray.MostDetailedMip = 0;
+					srvDesc.Texture2DArray.MipLevels = static_cast<UINT>(-1);
+					srvDesc.Texture2DArray.FirstArraySlice = 0;
+					srvDesc.Texture2DArray.ArraySize = slices;
+					dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+					dsvDesc.Texture2DArray.MipSlice = 0;
+					dsvDesc.Texture2DArray.FirstArraySlice = 0;
+					dsvDesc.Texture2DArray.ArraySize = slices;
+				} else {
+					srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+					srvDesc.Texture2D.MipLevels = static_cast<UINT>(-1);
+					dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+				}
+				if (Has(a_export, Export::SRV) && FAILED(device->CreateShaderResourceView(a_texture, &srvDesc, a_srv.put())))
+					return false;
 				return !Has(a_export, Export::DSV) || SUCCEEDED(device->CreateDepthStencilView(a_texture, &dsvDesc, a_dsv.put()));
 			}
 			if (Has(a_export, Export::DSV))
@@ -320,13 +376,14 @@ namespace GraphResources
 		struct UploadFrame
 		{
 			std::shared_ptr<const StagedUploads> uploads;
+			UploadGate gate;
 		};
 
 		class UploadCopyPass final : public org::TypedRenderGraphPass<UploadCopyPass, UploadFrame, UploadBindings>
 		{
 		public:
-			explicit UploadCopyPass(std::shared_ptr<const StagedUploads> a_uploads) :
-				uploads(std::move(a_uploads)) {}
+			UploadCopyPass(std::shared_ptr<const StagedUploads> a_uploads, UploadGate a_gate) :
+				uploads(std::move(a_uploads)), gate(std::move(a_gate)) {}
 
 			UploadBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -342,7 +399,16 @@ namespace GraphResources
 			// Everything it records is fixed with its uploads.
 			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(uploads.get())); }
 
-			UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { uploads }; }
+			UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { uploads, gate }; }
+
+			// Its commands depend on the run only through SkipsAtExecution, so a kept late batch keeps its list.
+			static constexpr bool kRecordKeyedBySkip = true;
+
+			// A gated upload whose entry the run left closed is not recorded.
+			static bool SkipsAtExecution(const UploadBindings&, const UploadFrame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				return a_frame.gate.gate && !a_frame.gate.gate->IsOpen(a_recording.Run(), a_frame.gate.entry);
+			}
 
 			static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
 			{
@@ -368,37 +434,60 @@ namespace GraphResources
 
 		private:
 			std::shared_ptr<const StagedUploads> uploads;
+			UploadGate gate;
 		};
 	}
 
-	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads)
+	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads, UploadGate a_gate)
 	{
 		std::erase(a_uploads, nullptr);
 		if (a_uploads.empty())
 			return nullptr;
-		return std::make_shared<UploadCopyPass>(std::make_shared<const StagedUploads>(std::move(a_uploads)));
+		return std::make_shared<UploadCopyPass>(std::make_shared<const StagedUploads>(std::move(a_uploads)), std::move(a_gate));
 	}
 
-	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name)
+	struct PreparedExport
 	{
-		auto& runtime = RenderGraphRuntime::Get();
-		if (!runtime.CanWrapTextures()) {
-			logger::warn("[ORG] {}: not exported, the DXVK build cannot wrap images (dxvkCreateTextureFromVkImage)", a_name);
-			return {};
-		}
-		const bool is3D = a_desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
-		const bool cube = (a_desc.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
-		const UINT layers = (std::max)(a_desc.depthOrArraySize, 1u);
-		const Shape shape{ a_desc.dimension, a_desc.width, a_desc.height, layers, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
-			a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0 };
-		const UINT mips = MipCount(shape);
-		// A typeless format names no image format, so a depth image uses its DSV's format.
-		const auto imageFormat = rhi::helpers::ToRHI(a_desc.dsv != DXGI_FORMAT_UNKNOWN ? a_desc.dsv : a_desc.format);
-		if (imageFormat == rhi::Format::Unknown) {
-			logger::error("[ORG] {}: not exported, format {} has no image format", a_name, static_cast<int>(a_desc.format));
-			return {};
-		}
-		try {
+		rhi::Resource image;  // the image the version's graph resource holds
+		DxvkOrgInteropTextureWrap wrap{};
+		org::TextureDescription views;  // the graph resource's description, for the made-image registry
+		std::uint64_t vkImage = 0;      // what the wrap reported
+		std::uint32_t layout = 0;
+		// The D3D11 wrap and its views, made on the revision lane. Adoption only moves them into the twin.
+		// In guest mode the wrap carries the graph resource (AttachGraphResource), so the image outlives DXVK's use of it.
+		winrt::com_ptr<ID3D11Resource> d3d11;
+		winrt::com_ptr<ID3D11ShaderResourceView> srv;
+		winrt::com_ptr<ID3D11UnorderedAccessView> uav;
+		winrt::com_ptr<ID3D11RenderTargetView> rtv;
+		winrt::com_ptr<ID3D11DepthStencilView> dsv;
+	};
+
+	namespace
+	{
+		/** @brief An exported texture's image before D3D11 wraps it, and the graph description of it without a layout. */
+		struct TwinExportImage
+		{
+			rhi::ResourcePtr image;
+			DxvkOrgInteropTextureWrap wrap{};
+			org::TextureDescription graphDesc;
+		};
+
+		/**
+		 * @brief Makes the image of an exported texture. Any thread. Throws when the format has no image format or the image is refused.
+		 * a_concurrent makes it usable from every queue, so the uploader's copy queue can zero it (Contents::Zero).
+		 */
+		TwinExportImage MakeExportImage(const ExportDesc& a_desc, const std::string& a_name, bool a_concurrent = false)
+		{
+			const bool is3D = a_desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+			const bool cube = (a_desc.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+			const UINT layers = (std::max)(a_desc.depthOrArraySize, 1u);
+			const Shape shape{ a_desc.dimension, a_desc.width, a_desc.height, layers, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
+				a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0, a_desc.array };
+			const UINT mips = MipCount(shape);
+			// A typeless format names no image format, so a depth image uses its DSV's format.
+			const auto imageFormat = rhi::helpers::ToRHI(a_desc.dsv != DXGI_FORMAT_UNKNOWN ? a_desc.dsv : a_desc.format);
+			if (imageFormat == rhi::Format::Unknown)
+				throw std::runtime_error(fmt::format("format {} has no image format", static_cast<int>(a_desc.format)));
 			rhi::ResourceDesc desc{};
 			desc.type = is3D ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
 			desc.heapType = rhi::HeapType::DeviceLocal;
@@ -419,12 +508,12 @@ namespace GraphResources
 			desc.texture.depthOrLayers = static_cast<std::uint16_t>(layers);
 			desc.texture.mipLevels = static_cast<std::uint16_t>(mips);
 			desc.texture.sampleCount = (std::max)(a_desc.samples, 1u);
-			rhi::ResourcePtr image;
-			if (runtime.Host()->Device().CreateCommittedResource(desc, image) != rhi::Result::Ok || !image) {
-				logger::error("[ORG] {}: the image could not be created", a_name);
-				return {};
-			}
-			DxvkOrgInteropTextureWrap wrap{};
+			if (a_concurrent)
+				desc.queueSharing = rhi::QueueSharing::Concurrent;
+			TwinExportImage made;
+			if (RenderGraphRuntime::Get().Host()->Device().CreateCommittedResource(desc, made.image) != rhi::Result::Ok || !made.image)
+				throw std::runtime_error("the image could not be created");
+			auto& wrap = made.wrap;
 			wrap.dimension = static_cast<std::uint32_t>(a_desc.dimension);
 			wrap.width = a_desc.width;
 			wrap.height = a_desc.height;
@@ -434,19 +523,8 @@ namespace GraphResources
 			wrap.sampleCount = (std::max)(a_desc.samples, 1u);
 			wrap.bindFlags = a_desc.bindFlags;
 			wrap.miscFlags = a_desc.miscFlags;
-			DxvkOrgInteropResourceInfo info{};
-			ExportedTexture exported;
-			exported.d3d11 = runtime.WrapTexture(image.Get(), wrap, info, a_name.c_str());
-			const auto home = exported.d3d11 ? RenderGraph::HomeLayoutOf(info.image.layout) : std::nullopt;
-			if (!home) {
-				if (exported.d3d11)
-					logger::error("[ORG] {}: DXVK rests it in layout {}, which the graph has no equivalent of", a_name, static_cast<int>(info.image.layout));
-				// DXVK's stream may still initialize the image, so it goes once D3D11 is past this point.
-				exported.d3d11 = nullptr;
-				runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(image)));
-				return {};
-			}
-			auto graphDesc = Describe(shape, true);
+			auto& graphDesc = made.graphDesc;
+			graphDesc = Describe(shape, true);
 			graphDesc.format = imageFormat;
 			graphDesc.hasSRV = a_desc.srv != DXGI_FORMAT_UNKNOWN;
 			graphDesc.srvFormat = rhi::helpers::ToRHI(a_desc.srv);
@@ -457,8 +535,23 @@ namespace GraphResources
 			graphDesc.rtvFormat = rhi::helpers::ToRHI(a_desc.rtv);
 			graphDesc.hasDSV = a_desc.dsv != DXGI_FORMAT_UNKNOWN;
 			graphDesc.dsvFormat = imageFormat;
-			graphDesc.initialLayout = *home;
-			std::shared_ptr<org::ExternalTextureResource> texture;
+			if (a_concurrent)
+				graphDesc.queueSharing = rhi::QueueSharing::Concurrent;
+			return made;
+		}
+
+		/**
+		* @brief The graph texture of an exported image, a_info describing it in the layout D3D11 rests it in. Any thread.
+		* Takes a_image on success. Null when the layout has no graph equivalent or the import fails, with a_image kept.
+		* An import in Common registers itself in ImageRegistry. The caller registers the texture as made once D3D11 has it.
+		*/
+		std::shared_ptr<org::ExternalTextureResource> MakeExportGraph(rhi::ResourcePtr& a_image, const DxvkOrgInteropImageInfo& a_info,
+			org::TextureDescription& a_graphDesc, const std::string& a_name)
+		{
+			const auto home = RenderGraph::HomeLayoutOf(a_info.layout);
+			if (!home)
+				return nullptr;
+			a_graphDesc.initialLayout = *home;
 			if (*home == rhi::ResourceLayout::Common) {
 				// Native mode keeps the image in Common and the graph moves it between layouts. Other users go through this resource.
 				// The import does not own the image, so the import is released first and then the image.
@@ -467,71 +560,159 @@ namespace GraphResources
 					rhi::ResourcePtr image;
 					std::shared_ptr<org::ExternalTextureResource> texture;
 				};
-				auto imported = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, graphDesc, a_name.c_str());
-				if (!imported) {
-					logger::error("[ORG] {}: not exported, the graph could not import it in GENERAL", a_name);
-					exported.d3d11 = nullptr;
-					runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(image)));
-					return {};
-				}
-				auto kept = std::make_shared<Kept>(Kept{ std::move(image), std::move(imported) });
-				texture = std::shared_ptr<org::ExternalTextureResource>(kept, kept->texture.get());
-			} else {
-				// Guest mode rests the texture in its own layout and the graph moves it into each pass's layout and back.
-				texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc, false);
-				texture->SetName(a_name);
-				// For the duplicate-image check.
-				RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(info.image.image), texture, a_name);
+				auto imported = RenderGraph::ImportDxvkTexture(RenderGraphRuntime::Get().Host()->Device(), a_info, a_graphDesc, a_name.c_str());
+				if (!imported)
+					return nullptr;
+				auto kept = std::make_shared<Kept>(Kept{ std::move(a_image), std::move(imported) });
+				return std::shared_ptr<org::ExternalTextureResource>(kept, kept->texture.get());
 			}
-			exported.image = reinterpret_cast<std::uint64_t>(info.image.image);
-			// An import of the D3D11 texture finds this resource instead of importing it again.
-			RenderGraph::RegisterMadeImage(exported.image, texture, graphDesc, a_name);
-			exported.graph = std::move(texture);
-			return exported;
-		} catch (const std::exception& e) {
-			logger::error("[ORG] {}: not exported: {}", a_name, e.what());
-			return {};
+			// Guest mode rests the texture in its own layout and the graph moves it into each pass's layout and back.
+			auto texture = org::ExternalTextureResource::CreateShared(std::move(a_image), a_graphDesc, false);
+			texture->SetName(a_name);
+			return texture;
+		}
+
+		/** @brief An exported image as D3D11's wrap of it will describe it, in a_layout. Any thread. False when BasicRHI does not say. */
+		bool DescribeExportImage(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, VkImageLayout a_layout, DxvkOrgInteropImageInfo& a_out)
+		{
+			a_out = {};
+			if (RenderGraph::Backend::IsD3D12()) {
+				// D3D12 native mode: the image field carries the ID3D12Resource, as native's wrap gives it.
+				rhi::D3D12ResourceInfo info{};
+				if (!rhi::QueryNativeResource(a_image, rhi::RHI_IID_D3D12_RESOURCE, &info, sizeof(info)) || !info.resource)
+					return false;
+				a_out.image = reinterpret_cast<VkImage>(info.resource);
+			} else {
+				// D3D11 keeps the format, create flags and usage the image was made with.
+				rhi::VulkanResourceInfo info{};
+				if (!rhi::vulkan::get_resource_info(a_image, info) || !info.resource)
+					return false;
+				a_out.image = rhi::vulkan::from_native_void<VkImage>(info.resource);
+				a_out.format = static_cast<VkFormat>(info.nativeFormat);
+				a_out.flags = static_cast<VkImageCreateFlags>(info.flags);
+				a_out.usage = static_cast<VkImageUsageFlags>(info.usage);
+			}
+			const bool is3D = a_wrap.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+			a_out.type = is3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+			a_out.extent = { a_wrap.width, a_wrap.height, is3D ? a_wrap.depthOrArraySize : 1u };
+			a_out.mipLevels = a_wrap.mipLevels;
+			a_out.arrayLayers = is3D ? 1u : a_wrap.depthOrArraySize;
+			a_out.samples = static_cast<VkSampleCountFlagBits>(a_wrap.sampleCount);
+			a_out.layout = a_layout;
+			return true;
 		}
 	}
 
 	namespace
 	{
-		std::atomic<std::uint64_t> resizeGeneration{ 0 };
+		/**
+		* @brief An exported texture: its image, D3D11's wrap of it and its graph texture, registered in ImageRegistry as made. Any thread.
+		* Throws when a step fails. a_wrapped then holds the image when DXVK's stream may still name it, for the caller to keep.
+		*/
+		ExportedTexture MakeExportedTexture(const ExportDesc& a_desc, const std::string& a_name, RenderGraph::Engine::Native::WrapFlags a_flags,
+			std::string_view a_owner, rhi::ResourcePtr& a_wrapped)
+		{
+			auto made = MakeExportImage(a_desc, a_name);
+			DxvkOrgInteropResourceInfo info{};
+			ExportedTexture exported;
+			exported.d3d11 = RenderGraphRuntime::Get().WrapTexture(made.image.Get(), made.wrap, info, a_name.c_str(), nullptr, a_flags);
+			if (!exported.d3d11) {
+				a_wrapped = std::move(made.image);
+				throw std::runtime_error("D3D11 did not wrap its image");
+			}
+			auto texture = MakeExportGraph(made.image, info.image, made.graphDesc, a_name);
+			if (!texture) {
+				a_wrapped = std::move(made.image);
+				throw std::runtime_error(fmt::format("DXVK rests it in layout {}, which the graph has no equivalent of, or the graph could not import it",
+					static_cast<int>(info.image.layout)));
+			}
+			exported.image = reinterpret_cast<std::uint64_t>(info.image.image);
+			exported.layout = static_cast<std::uint32_t>(info.image.layout);
+			// An import of the D3D11 texture finds this resource instead of importing it again.
+			RenderGraph::ImageRegistry::Register(exported.image, { texture, nullptr, std::make_shared<const org::TextureDescription>(made.graphDesc),
+																	   std::string(a_owner), a_name, RenderGraph::ImageRegistry::Kind::Made });
+			exported.graph = std::move(texture);
+			return exported;
+		}
 
-		// The last resize generation bumps with their causes, named when the anchors build again.
-		constexpr std::size_t kResizeCauses = 16;
-		std::mutex resizeCauseLock;
-		std::deque<std::pair<std::uint64_t, std::string>> resizeCauses;
-		std::atomic<std::uint64_t> structuralRebuilds{ 0 };
+		/** @brief Keeps an image whose export failed for the session, since DXVK's stream may name it and nothing says when it is done. */
+		void KeepFailedExportImage(rhi::ResourcePtr a_image)
+		{
+			static std::mutex mutex;
+			static auto* kept = new std::vector<rhi::ResourcePtr>;
+			const std::lock_guard lock(mutex);
+			kept->push_back(std::move(a_image));
+		}
+	}
 
-		/** @brief Register may run on the build thread while Resize replaces a twin on the render thread. Register holds it shared. */
+	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name)
+	{
+		auto& runtime = RenderGraphRuntime::Get();
+		if (!runtime.IsActive()) {
+			logger::warn("[ORG] {}: not exported, the render graph is not running", a_name);
+			return {};
+		}
+		rhi::ResourcePtr wrapped;
+		try {
+			return MakeExportedTexture(a_desc, a_name, RenderGraph::Engine::Native::WrapFlags::None, "GraphResources::ExportTexture", wrapped);
+		} catch (const std::exception& e) {
+			logger::error("[ORG] {}: not exported: {}", a_name, e.what());
+			// DXVK's stream may still initialize the image, so it goes once D3D11 is past this point.
+			if (wrapped)
+				runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(wrapped)));
+			return {};
+		}
+	}
+
+	EngineExport ExportForEngine(const ExportDesc& a_desc, std::string a_name, RenderGraph::Engine::Native::WrapFlags a_flags)
+	{
+		if (!RenderGraphRuntime::Get().IsActive())
+			throw std::runtime_error(fmt::format("{}: not exported, the render graph is not running", a_name));
+		rhi::ResourcePtr wrapped;
+		ExportedTexture exported;
+		try {
+			exported = MakeExportedTexture(a_desc, a_name, a_flags, "GraphResources::ExportForEngine", wrapped);
+		} catch (const std::exception& e) {
+			if (wrapped)
+				KeepFailedExportImage(std::move(wrapped));
+			throw std::runtime_error(fmt::format("{}: not exported: {}", a_name, e.what()));
+		}
+		const bool native = RenderGraph::Engine::Native::Active();
+		// DXVK may still run the wrap's zero fill after the export is dropped, so the wrap keeps the image.
+		if (!native)
+			(void)RenderGraph::Engine::Tripwire::AttachGraphResource(exported.d3d11.get(), exported.graph);
+		// A deferred native wrap left the image Undefined, so its first use discards rather than reads a layout it never had.
+		const bool deferred =
+			(static_cast<std::uint32_t>(a_flags) & static_cast<std::uint32_t>(RenderGraph::Engine::Native::WrapFlags::DeferInitialize)) != 0;
+		if (native && deferred)
+			exported.graph->SeedInitialLayout(rhi::ResourceLayout::Undefined);
+		Util::SetResourceName(exported.d3d11.get(), "%s", a_name.c_str());
+		EngineExport result;
+		result.graph = std::move(exported.graph);
+		result.d3d11 = std::move(exported.d3d11);
+		result.image = exported.image;
+		return result;
+	}
+
+	void Retire(EngineExport&& a_export)
+	{
+		EngineExport retired = std::move(a_export);
+		// No lookup finds the image after this, though frames may still finish with it.
+		RenderGraph::ImageRegistry::Retire(retired.graph.get());
+		// The D3D11 side goes first, as in Resource::Reset. The image goes once D3D11's last use is done.
+		retired.d3d11 = nullptr;
+		if (retired.graph)
+			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(retired.graph));
+	}
+
+	namespace
+	{
+		/** @brief Register may run on the build thread while adoption replaces a twin's resource on the render thread. Register holds it shared. */
 		std::shared_mutex& RegisterMutex()
 		{
 			static std::shared_mutex s_mutex;
 			return s_mutex;
 		}
-	}
-
-	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs)
-	{
-		// The build manager builds this off the render thread and attaches it at a frame boundary.
-		if (!RenderGraphRuntime::Get().Host())
-			return;
-		const auto count = structuralRebuilds.fetch_add(1, std::memory_order_relaxed) + 1;
-		const auto reason = fmt::format("structural: {}", a_reason);
-		if (a_epochs.empty()) {
-			logger::info("[ORG] structural rebuild {} (every epoch): {}", count, a_reason);
-			RenderGraph::Builds::RequestAll(reason);
-			return;
-		}
-		logger::info("[ORG] structural rebuild {} ({} epochs): {}", count, a_epochs.size(), a_reason);
-		for (const auto epoch : a_epochs)
-			RenderGraph::Builds::Request(epoch, reason);
-	}
-
-	std::uint64_t StructuralRebuilds()
-	{
-		return structuralRebuilds.load(std::memory_order_relaxed);
 	}
 
 	namespace
@@ -573,7 +754,7 @@ namespace GraphResources
 		const bool joined = JoinSlot(std::move(a_previous), a_sameShape);
 		// An import of the export returns the slot, which passes follow across versions.
 		if (slot && graph)
-			RenderGraph::SetMadeImageSlot(graph.get(), slot);
+			RenderGraph::ImageRegistry::SetSlot(graph.get(), slot);
 		return joined;
 	}
 
@@ -585,6 +766,7 @@ namespace GraphResources
 			return false;
 		try {
 			if (a_previous && a_sameShape) {
+				const RenderGraph::Frame::Boundary::Caller caller("twin");
 				a_previous->PublishImage(std::move(image));
 				slot = std::move(a_previous);
 				// Tickets prepared before resolved the old version, so they are prepared again.
@@ -599,50 +781,41 @@ namespace GraphResources
 			slot = org::VersionedTexture::CreateImage(std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph));
 		}
 		if (a_previous)
-			logger::info("[ORG] {}: another shape class after a resize; a new slot, built again", name);
+			logger::info("[ORG] {}: another shape class; a new slot, built again", name);
 		return false;
-	}
-
-	std::uint64_t Resource::ResizeGeneration()
-	{
-		return resizeGeneration.load(std::memory_order_acquire);
-	}
-
-	void Resource::BumpResizeGeneration(std::string_view a_who)
-	{
-		std::scoped_lock lock(resizeCauseLock);
-		const auto generation = resizeGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
-		resizeCauses.emplace_back(generation, std::string(a_who));
-		if (resizeCauses.size() > kResizeCauses)
-			resizeCauses.pop_front();
-	}
-
-	std::string Resource::ResizeCauses(std::uint64_t a_since)
-	{
-		std::scoped_lock lock(resizeCauseLock);
-		std::string causes;
-		for (const auto& [generation, who] : resizeCauses) {
-			if (generation <= a_since)
-				continue;
-			if (!causes.empty())
-				causes += ", ";
-			causes += who;
-		}
-		return causes.empty() ? std::string("unknown") : causes;
 	}
 
 	void Resource::Register(org::RenderGraph& a_graph) const
 	{
 		std::shared_lock lock(RegisterMutex());
-		if (slot) {
-			// PublishedResources may have registered the same id already, and a graph takes one resolver per id.
-			const org::ResourceIdentifier id(name);
-			if (!a_graph._resolverMap.contains(id))
+		const org::ResourceIdentifier id(name);
+		if (slot || bufferSlot) {
+			// PublishedResources may have registered the same slot already, and a graph takes one resolver per id. Another
+			// resolver under the id is two resources with one name.
+			const org::IResourceResolver* mine = slot ? static_cast<const org::IResourceResolver*>(slot.get()) :
+			                                            static_cast<const org::IResourceResolver*>(bufferSlot.get());
+			if (const auto found = a_graph._resolverMap.find(id); found != a_graph._resolverMap.end()) {
+				if (found->second.get() != mine)
+					RenderGraph::Fatal(fmt::format("registering {} with a graph", name), "another resolver is registered under its id");
+				return;
+			}
+			if (slot)
 				a_graph.RegisterResolver(id, slot);
+			else
+				a_graph.RegisterResolver(id, bufferSlot);
 			return;
 		}
-		if (graph)
-			a_graph.RegisterResource(org::ResourceIdentifier(name), graph);
+		if (!graph)
+			return;
+		if (a_graph._resolverMap.contains(id))
+			RenderGraph::Fatal(fmt::format("registering {} with a graph", name), "a versioned slot is registered under its id");
+		// The same twin from two clients is one registration. Another resource under the name is fatal (cleanup plan A12).
+		if (const auto registered = a_graph.RegisteredResource(id)) {
+			if (registered != graph)
+				RenderGraph::Fatal(fmt::format("registering {} with a graph", name), fmt::format("{} is registered under its id", registered->GetName()));
+			return;
+		}
+		a_graph.RegisterResource(id, graph);
 	}
 
 	void Resource::Reset()
@@ -654,12 +827,447 @@ namespace GraphResources
 		dsv = nullptr;
 		const bool exported = d3d11 != nullptr;
 		d3d11 = nullptr;
-		RenderGraph::ForgetMadeImage(graph.get());
+		RenderGraph::ImageRegistry::Retire(graph.get());
 		if (exported && graph)
 			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(graph));
 		graph.reset();
 		// The slot's versions keep their textures while a frame or a recording holds them.
 		slot.reset();
+		bufferSlot.reset();
+	}
+
+	bool Resource::ShapeAt(const Extent&, ExportDesc&) const
+	{
+		return false;
+	}
+
+	const char* Resource::NotPreparableCause(const Extent& a_next, ExportDesc& a_shape) const
+	{
+		if (!options.versioned)
+			return "it is not versioned";
+		if (Aliasable())
+			return "it is transient and aliased, so it has no versions";
+		if (!slot)
+			return "it has no version slot (it was not created)";
+		if (!graph)
+			return "it has no graph resource (it was not created, or it was reset)";
+		if (Exported() && !d3d11)
+			return "its D3D11 export does not exist";
+		if (!ShapeAt(a_next, a_shape))
+			return "the extent changes its shape class (mip count or slices), or it is not a texture";
+		return nullptr;
+	}
+
+	std::optional<std::string> Resource::WhyNotPreparable(const Extent& a_next) const
+	{
+		std::shared_lock lock(RegisterMutex());
+		ExportDesc shape{};
+		if (const char* cause = NotPreparableCause(a_next, shape))
+			return std::string(cause);
+		return std::nullopt;
+	}
+
+	/** @brief What Prepare reads of a twin, copied on the render thread. */
+	struct PreparePlan
+	{
+		std::shared_ptr<org::VersionedTexture> slot;
+		std::string name;
+		ExportDesc shape{};
+		std::uint32_t layout = 0;
+		bool exported = false;
+		Export d3d11 = Export::None;  // the views the export makes
+		Lifetime lifetime = Lifetime::Transient;
+		RenderGraph::Frame::Birth birth;  // Options::birth
+		Extent extent{};
+		const void* twin = nullptr;
+	};
+
+	namespace
+	{
+		/** @brief Whether the lane can write a version of a_shape: single-sampled colour. */
+		bool BirthWritable(const Shape& a_shape)
+		{
+			return !IsDepth(a_shape) && a_shape.samples <= 1;
+		}
+
+		/** @brief The texel bytes of a_shape's format, or 0 when it has no encoding (Frame::EncodeTexel). */
+		std::uint32_t TexelBytesOf(const Shape& a_shape)
+		{
+			std::array<std::byte, 16> texel{};
+			return RenderGraph::Frame::EncodeTexel(static_cast<std::uint32_t>(a_shape.format), {}, texel);
+		}
+
+		/**
+		* @brief The writer of a Value or Fill birth for a_shape's format. Value repeats one encoded texel; Fill calls the birth's
+		* function. Null for another birth or a format with no encoding. Any thread.
+		*/
+		TexelWriter BirthWriterOf(const RenderGraph::Frame::Birth& a_birth, const Shape& a_shape)
+		{
+			using Kind = RenderGraph::Frame::Birth::Kind;
+			std::array<std::byte, 16> texel{};
+			const std::uint32_t bytes = RenderGraph::Frame::EncodeTexel(static_cast<std::uint32_t>(a_shape.format), a_birth.GetValue(), texel);
+			if (!bytes)
+				return {};
+			if (a_birth.GetKind() == Kind::Value)
+				return [texel, bytes](std::uint32_t, std::uint32_t, std::uint32_t a_width, std::uint32_t a_rows, std::uint32_t a_depth, std::uint32_t a_rowPitch,
+						   std::byte* a_destination) {
+					if (a_rowPitch < a_width * bytes)
+						return false;
+					for (std::uint32_t row = 0; row < a_rows * a_depth; ++row) {
+						auto* line = a_destination + static_cast<std::size_t>(row) * a_rowPitch;
+						for (std::uint32_t x = 0; x < a_width; ++x)
+							std::memcpy(line + static_cast<std::size_t>(x) * bytes, texel.data(), bytes);
+					}
+					return true;
+				};
+			if (a_birth.GetKind() == Kind::Fill && a_birth.GetFill())
+				return [fill = a_birth.GetFill(), bytes](std::uint32_t a_mip, std::uint32_t a_slice, std::uint32_t a_width, std::uint32_t a_rows, std::uint32_t a_depth,
+						   std::uint32_t a_rowPitch, std::byte* a_destination) {
+					if (a_rowPitch < a_width * bytes)
+						return false;
+					const RenderGraph::Frame::BirthTexels texels{ .mip = a_mip,
+						.slice = a_slice,
+						.width = a_width,
+						.height = a_rows,
+						.depth = a_depth,
+						.rowPitch = a_rowPitch,
+						.texels = { a_destination, static_cast<std::size_t>(a_rowPitch) * a_rows * a_depth } };
+					return (*fill)(texels);
+				};
+			return {};
+		}
+
+		/** @brief A guest export's initial data: every subresource written by a_writer, tightly packed, in D3D11's subresource order. */
+		struct BirthData
+		{
+			std::vector<std::vector<std::byte>> bytes;
+			std::vector<D3D11_SUBRESOURCE_DATA> subresources;
+		};
+
+		bool MakeBirthData(const Shape& a_shape, const TexelWriter& a_writer, BirthData& a_out)
+		{
+			const std::uint32_t texel = TexelBytesOf(a_shape);
+			if (!texel || !a_writer)
+				return false;
+			const UINT mips = MipCount(a_shape);
+			const UINT slices = Is3D(a_shape) ? 1u : (std::max)(a_shape.depthOrArraySize, 1u);
+			for (UINT slice = 0; slice < slices; ++slice)
+				for (UINT mip = 0; mip < mips; ++mip) {
+					const UINT width = (std::max)(a_shape.width >> mip, 1u);
+					const UINT height = (std::max)(a_shape.height >> mip, 1u);
+					const UINT depth = Is3D(a_shape) ? (std::max)(a_shape.depthOrArraySize >> mip, 1u) : 1u;
+					const UINT rowPitch = width * texel;
+					auto& bytes = a_out.bytes.emplace_back(static_cast<std::size_t>(rowPitch) * height * depth);
+					if (!a_writer(mip, slice, width, height, depth, rowPitch, bytes.data()))
+						return false;
+					a_out.subresources.push_back({ bytes.data(), rowPitch, rowPitch * height });
+				}
+			return true;
+		}
+	}
+
+	RenderGraph::Frame::Birth Resource::BirthOf() const
+	{
+		ExportDesc shape{};
+		{
+			std::shared_lock lock(RegisterMutex());
+			if (!ShapeAt(CurrentExtent(), shape))
+				return RenderGraph::Frame::Birth::Undefined();
+		}
+		return options.birth.Resolved(options.lifetime == Lifetime::History, BirthWritable(TwinShapeOf(shape)));
+	}
+
+	std::optional<std::string> Resource::WhyUnborn() const
+	{
+		using Kind = RenderGraph::Frame::Birth::Kind;
+		const auto kind = options.birth.GetKind();
+		if (kind == Kind::Unset || kind == Kind::Undefined)
+			return std::nullopt;
+		ExportDesc desc{};
+		{
+			std::shared_lock lock(RegisterMutex());
+			if (!ShapeAt(CurrentExtent(), desc))
+				return std::string("only a texture has a birth");
+		}
+		if (!slot)
+			return std::string("only a declared texture has a birth: its versions are made on the revision lane");
+		const Shape shape = TwinShapeOf(desc);
+		if (!BirthWritable(shape))
+			return std::string("a depth or multisampled texture is born Undefined; its first writer clears it");
+		if (kind == Kind::Zero)
+			return std::nullopt;
+		if (!TexelBytesOf(shape))
+			return fmt::format("format {} has no texel encoding for a Value or Fill birth", static_cast<int>(shape.format));
+		if (kind == Kind::Fill && !options.birth.GetFill())
+			return std::string("its Fill birth has no function");
+		return std::nullopt;
+	}
+
+	std::shared_ptr<const PreparePlan> Resource::PlanPrepare(const Extent& a_next) const
+	{
+		auto plan = std::make_shared<PreparePlan>();
+		// Only a twin's own adoption changes what is read here, so the lock is held briefly and never while memory is made.
+		std::shared_lock lock(RegisterMutex());
+		if (NotPreparableCause(a_next, plan->shape))
+			return nullptr;
+		plan->slot = slot;
+		plan->name = name;
+		plan->layout = exportLayout;
+		plan->exported = Exported();
+		plan->d3d11 = options.d3d11;
+		plan->lifetime = options.lifetime;
+		plan->birth = options.birth;
+		plan->extent = a_next;
+		plan->twin = this;
+		return plan;
+	}
+
+	PreparedVersion Resource::Prepare(const Extent& a_next) const
+	{
+		const auto plan = PlanPrepare(a_next);
+		return plan ? Prepare(*plan) : PreparedVersion{};
+	}
+
+	PreparedVersion Resource::Prepare(const PreparePlan& a_plan)
+	{
+		ZoneScopedN("CS.Frame.Revision.Prepare");
+		const auto& name = a_plan.name;
+		const auto& a_next = a_plan.extent;
+		PreparedVersion prepared;
+		prepared.slot = a_plan.slot;
+		prepared.extent = a_next;
+		prepared.twin = a_plan.twin;
+		const auto failure = [&](std::string_view a_why) {
+			return std::runtime_error(fmt::format("{}: no version at {}x{}x{}: {}", name, a_next[0], a_next[1], a_next[2], a_why));
+		};
+		const Shape next = TwinShapeOf(a_plan.shape);
+		// The birth (Frame/Birth.h), made before the revision is ready:
+		// - graph-only: the uploader zeroes or fills the version on its copy queue;
+		// - guest export: DXVK's wrap queues zeros, or the birth's data, in its stream before any graph use;
+		// - native export: the wrap does nothing on the GPU (WrapFlags::DeferInitialize), so the uploader zeroes or fills a colour
+		//   version. An Undefined one is zeroed too, for the D3D11 readers that bind it.
+		// The uploader cannot write depth or multisampled images; those are born Undefined and their first writer clears them.
+		using BirthKind = RenderGraph::Frame::Birth::Kind;
+		const bool native = RenderGraph::Engine::Native::Active();
+		const bool writable = BirthWritable(next);
+		const auto birth = a_plan.birth.Resolved(a_plan.lifetime == Lifetime::History, writable);
+		if (birth.Writes() && !writable)
+			throw failure("a depth or multisampled texture is born Undefined");
+		const bool filled = birth.GetKind() == BirthKind::Value || birth.GetKind() == BirthKind::Fill;
+		TexelWriter writer;
+		if (filled) {
+			writer = BirthWriterOf(birth, next);
+			if (!writer)
+				throw failure("its birth has no texel encoding in its format");
+		}
+		const bool nativeWrites = native && a_plan.exported && writable;
+		if (!a_plan.exported || nativeWrites)
+			prepared.contents = filled ? Contents::Fill : (birth.Writes() || nativeWrites ? Contents::Zero : Contents::Undefined);
+		if (prepared.contents == Contents::Fill)
+			prepared.fill = writer;
+		const bool nativeZero = nativeWrites;
+		if (!a_plan.exported) {
+			try {
+				prepared.resource = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
+					CreateGraphTexture(next, name, false, std::nullopt, prepared.contents != Contents::Undefined));
+			} catch (const std::exception& e) {
+				throw failure(e.what());
+			}
+			if (!prepared.resource)
+				throw failure("the graph texture could not be made");
+			return prepared;
+		}
+		const std::uint32_t layout = a_plan.layout;
+		TwinExportImage made;
+		try {
+			made = MakeExportImage(TwinExportDescOf(next), name, nativeZero);
+		} catch (const std::exception& e) {
+			throw failure(e.what());
+		}
+		DxvkOrgInteropImageInfo info{};
+		if (!DescribeExportImage(made.image.Get(), made.wrap, static_cast<VkImageLayout>(layout), info))
+			throw failure("BasicRHI did not describe its image");
+		auto exported = std::make_shared<PreparedExport>();
+		exported->image = made.image.Get();
+		exported->wrap = made.wrap;
+		exported->vkImage = reinterpret_cast<std::uint64_t>(info.image);
+		exported->layout = layout;
+		// The graph texture first: once DXVK wraps the image, the wrap keeps it (below), so a failure after it frees nothing early.
+		auto texture = MakeExportGraph(made.image, info, made.graphDesc, name);
+		if (!texture)
+			throw failure(fmt::format("the graph could not take it in layout {}", layout));
+		// The D3D11 wrap and views, here on the lane, so adoption only moves pointers. A guest export born with a value or
+		// contents takes them as the wrap's data, which DXVK writes in place of its zeros.
+		const auto wrapStart = std::chrono::steady_clock::now();
+		BirthData birthData;
+		if (!native && filled && !MakeBirthData(next, writer, birthData))
+			throw failure("its birth's data could not be written");
+		DxvkOrgInteropResourceInfo wrapped{};
+		exported->d3d11 = RenderGraphRuntime::Get().WrapTexture(exported->image, exported->wrap, wrapped, name.c_str(),
+			birthData.subresources.empty() ? nullptr : birthData.subresources.data(),
+			native ? RenderGraph::Engine::Native::WrapFlags::DeferInitialize : RenderGraph::Engine::Native::WrapFlags::None);
+		if (!exported->d3d11)
+			throw failure("D3D11 did not wrap its image");
+		// DXVK may still run the wrap's zero fill after a dropped revision lets the version go, so the wrap keeps the image.
+		if (!native)
+			(void)RenderGraph::Engine::Tripwire::AttachGraphResource(exported->d3d11.get(), texture);
+		// The previous version's resting layout, since D3D11 rests every image of a shape class alike.
+		if (reinterpret_cast<std::uint64_t>(wrapped.image.image) != exported->vkImage || static_cast<std::uint32_t>(wrapped.image.layout) != layout)
+			throw failure(fmt::format("D3D11 wrapped image 0x{:X} in layout {}, but it was made as image 0x{:X} for layout {}",
+				reinterpret_cast<std::uint64_t>(wrapped.image.image), static_cast<int>(wrapped.image.layout), exported->vkImage, layout));
+		const auto formats = FormatsOf(next);
+		const bool typed = Is3D(next) ? static_cast<bool>(exported->d3d11.try_as<ID3D11Texture3D>()) : static_cast<bool>(exported->d3d11.try_as<ID3D11Texture2D>());
+		if (!typed || !CreateTextureViews(exported->d3d11.get(), a_plan.d3d11, exported->srv, exported->uav, exported->rtv, exported->dsv,
+						  IsDepth(next) ? &formats : nullptr))
+			throw failure("D3D11 refused a view of the exported texture");
+		// Nothing moved a deferred native image out of Undefined. A zeroed one leaves the uploader in Common, which the uploader
+		// sets; any other starts from Undefined, so its first use, graph or context, discards rather than reads a layout it never had.
+		if (native && !nativeZero)
+			texture->SeedInitialLayout(rhi::ResourceLayout::Undefined);
+		const double wrapMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wrapStart).count();
+		logger::info("[ORG] {}: prepared its version at {}x{}x{} with its D3D11 wrap and views on the revision lane ({:.3f} ms, {})", name, a_next[0],
+			a_next[1], a_next[2], wrapMs,
+			nativeZero ? (filled ? "filled by the uploader" : "zeroed by the uploader") :
+						 (native ? "born undefined" : (filled ? "filled by DXVK" : "zeroed by DXVK")));
+		exported->views = made.graphDesc;
+		prepared.resource = std::move(texture);
+		prepared.exported = std::move(exported);
+		return prepared;
+	}
+
+	void Resource::AdoptPrepared(const PreparedVersion& a_prepared)
+	{
+		const auto& extent = a_prepared.extent;
+		const auto fail = [&](std::string_view a_why) {
+			RenderGraph::Fatal(name, fmt::format("its version at {}x{}x{} could not be adopted: {}", extent[0], extent[1], extent[2], a_why));
+		};
+		if (a_prepared.twin != static_cast<const void*>(this) || !a_prepared.resource)
+			fail("it was prepared for another twin");
+		std::unique_lock lock(RegisterMutex());
+		if (!slot || a_prepared.slot != slot)
+			fail("the twin has another slot since it was prepared");
+		if (slot->CurrentResource() != std::static_pointer_cast<org::Resource>(a_prepared.resource))
+			fail("its slot has not adopted the version");
+		if (Exported() != (a_prepared.exported != nullptr))
+			fail("it was prepared with another export");
+		// The wrap and views were made on the revision lane (Prepare), so adoption only checks and moves pointers.
+		winrt::com_ptr<ID3D11Resource> nextD3D11;
+		winrt::com_ptr<ID3D11ShaderResourceView> nextSrv;
+		winrt::com_ptr<ID3D11UnorderedAccessView> nextUav;
+		winrt::com_ptr<ID3D11RenderTargetView> nextRtv;
+		winrt::com_ptr<ID3D11DepthStencilView> nextDsv;
+		if (a_prepared.exported) {
+			const auto& exported = *a_prepared.exported;
+			if (!exported.d3d11)
+				fail("it was prepared without its D3D11 wrap");
+			if (exported.layout != exportLayout)
+				fail(fmt::format("it was prepared for layout {}, but the twin rests in layout {}", exported.layout, exportLayout));
+			ExportDesc shape{};
+			if (!ShapeAt(extent, shape))
+				fail("its shape class changed");
+			nextD3D11 = exported.d3d11;
+			nextSrv = exported.srv;
+			nextUav = exported.uav;
+			nextRtv = exported.rtv;
+			nextDsv = exported.dsv;
+		}
+		// The old D3D11 side goes first, as in Reset. The slot's old version keeps its graph texture while frames hold it.
+		srv = nullptr;
+		uav = nullptr;
+		rtv = nullptr;
+		dsv = nullptr;
+		d3d11 = nullptr;
+		RenderGraph::ImageRegistry::Retire(graph.get());
+		if (a_prepared.exported && graph)
+			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(graph));
+		graph = a_prepared.resource;
+		d3d11 = std::move(nextD3D11);
+		srv = std::move(nextSrv);
+		uav = std::move(nextUav);
+		rtv = std::move(nextRtv);
+		dsv = std::move(nextDsv);
+		SetExtent(extent);
+		if (a_prepared.exported) {
+			const auto& exported = *a_prepared.exported;
+			// An import of the D3D11 texture finds this resource, and through it the slot.
+			RenderGraph::ImageRegistry::Register(exported.vkImage, { graph, slot, std::make_shared<const org::TextureDescription>(exported.views),
+																	   "GraphResources", name, RenderGraph::ImageRegistry::Kind::Made });
+		}
+		NameViews();
+		logger::info("[ORG] {}: adopted its prepared version at {}x{}x{}", name, extent[0], extent[1], extent[2]);
+	}
+
+	namespace
+	{
+		UINT TwinMipsOf3D(const D3D11_TEXTURE3D_DESC& a_desc)
+		{
+			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, a_desc.Depth, 1u })));
+		}
+	}
+
+	Extent Texture2D::CurrentExtent() const
+	{
+		return { desc.Width, desc.Height, 1u };
+	}
+
+	bool Texture2D::ShapeAt(const Extent& a_extent, ExportDesc& a_out) const
+	{
+		auto next = desc;
+		next.Width = a_extent[0];
+		next.Height = a_extent[1];
+		if (a_extent[2] != 1 || MipsOf(next) != MipsOf(desc))
+			return false;
+		a_out = {};
+		a_out.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+		a_out.width = next.Width;
+		a_out.height = next.Height;
+		a_out.depthOrArraySize = desc.ArraySize;
+		a_out.mips = desc.MipLevels;
+		a_out.samples = desc.SampleDesc.Count;
+		a_out.format = desc.Format;
+		a_out.bindFlags = desc.BindFlags;
+		a_out.miscFlags = desc.MiscFlags;
+		a_out.array = options.array;
+		return true;
+	}
+
+	void Texture2D::SetExtent(const Extent& a_extent)
+	{
+		desc.Width = a_extent[0];
+		desc.Height = a_extent[1];
+	}
+
+	Extent Texture3D::CurrentExtent() const
+	{
+		return { desc.Width, desc.Height, desc.Depth };
+	}
+
+	bool Texture3D::ShapeAt(const Extent& a_extent, ExportDesc& a_out) const
+	{
+		auto next = desc;
+		next.Width = a_extent[0];
+		next.Height = a_extent[1];
+		next.Depth = a_extent[2];
+		if (TwinMipsOf3D(next) != TwinMipsOf3D(desc))
+			return false;
+		a_out = {};
+		a_out.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+		a_out.width = next.Width;
+		a_out.height = next.Height;
+		a_out.depthOrArraySize = next.Depth;
+		a_out.mips = desc.MipLevels;
+		a_out.samples = 1;
+		a_out.format = desc.Format;
+		a_out.bindFlags = desc.BindFlags;
+		a_out.miscFlags = desc.MiscFlags;
+		return true;
+	}
+
+	void Texture3D::SetExtent(const Extent& a_extent)
+	{
+		desc.Width = a_extent[0];
+		desc.Height = a_extent[1];
+		desc.Depth = a_extent[2];
 	}
 
 	void Resource::NameViews() const
@@ -677,17 +1285,27 @@ namespace GraphResources
 	Texture2D::Texture2D(const D3D11_TEXTURE2D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc)
 	{
+		auto join = std::exchange(options.joinSlot, nullptr);
 		Create();
-		AdoptSlot(nullptr, false);
+		RequireMade(*this, name);
+		if (!join) {
+			AdoptSlot(nullptr, false);
+			return;
+		}
+		if (!options.versioned)
+			RenderGraph::Fatal("graph resources", fmt::format("{} joins a slot but is not versioned", name));
+		if (!AdoptSlot(join, true) || slot != join)
+			RenderGraph::Fatal("graph resources", fmt::format("{} could not join its slot: another shape class (see the warning above)", name));
 	}
 
 	void Texture2D::Create()
 	{
 		const Shape shape{ D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.Width, desc.Height, desc.ArraySize, desc.MipLevels, desc.Format,
-			desc.SampleDesc.Count, desc.BindFlags, desc.MiscFlags, desc.Usage, desc.CPUAccessFlags };
+			desc.SampleDesc.Count, desc.BindFlags, desc.MiscFlags, desc.Usage, desc.CPUAccessFlags, options.array };
 		auto created = CreateTexture(shape, name, options);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
+		exportLayout = created.layout;
 		const auto formats = FormatsOf(shape);
 		const Formats* depth = IsDepth(shape) ? &formats : nullptr;
 		if (d3d11 && (!d3d11.try_as<ID3D11Texture2D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv, dsv, depth))) {
@@ -721,94 +1339,12 @@ namespace GraphResources
 		return Stage(subresources);
 	}
 
-	bool Texture2D::Resize(UINT a_width, UINT a_height)
-	{
-		if (a_width == desc.Width && a_height == desc.Height)
-			return false;
-		std::unique_lock lock(RegisterMutex());
-		const UINT mips = MipsOf(desc);
-		auto previous = slot;
-		Reset();
-		desc.Width = a_width;
-		desc.Height = a_height;
-		Create();
-		if (AdoptSlot(std::move(previous), MipsOf(desc) == mips)) {
-			logger::info("[ORG] {}: resized to {}x{} as a new version", name, a_width, a_height);
-			return true;
-		}
-		BumpResizeGeneration(name);
-		return true;
-	}
-
-	namespace
-	{
-		struct SizeRequest
-		{
-			std::weak_ptr<const void> alive;
-			std::function<void()> apply;
-		};
-
-		std::vector<SizeRequest>& SizeRequests()
-		{
-			static std::vector<SizeRequest> s_requests;
-			return s_requests;
-		}
-
-		/** @brief Applies every waiting resize at the frame boundary. A twin destroyed since has none. */
-		void ApplySizeRequests()
-		{
-			for (auto& request : std::exchange(SizeRequests(), {}))
-				if (const auto alive = request.alive.lock())
-					request.apply();
-		}
-	}
-
-	void Resource::RequestExtent(const std::array<UINT, 3>& a_size, bool a_current, std::function<void(const std::array<UINT, 3>&)> a_resize)
-	{
-		if (a_current) {
-			requestedSize.reset();
-			return;
-		}
-		if (requestedSize == a_size)
-			return;
-		const bool queued = requestedSize.has_value();
-		requestedSize = a_size;
-		if (queued)
-			return;
-		auto apply = [this, resize = std::move(a_resize)] {
-			const auto size = std::exchange(requestedSize, std::nullopt);
-			if (!size)
-				return;
-			resize(*size);
-			if (!graph || (Exported() && !d3d11)) {
-				const auto message = fmt::format("Community Shaders: {} could not be made again at {}x{}x{} at a frame boundary", name, (*size)[0], (*size)[1], (*size)[2]);
-				logger::critical("[ORG] {}", message);
-				stl::report_and_fail(message);
-			}
-		};
-		auto& requests = SizeRequests();
-		requests.push_back({ alive, std::move(apply) });
-		if (requests.size() == 1)
-			RenderGraph::Frame::Driver::AtNextBegin(ApplySizeRequests);
-	}
-
-	void Texture2D::RequestSize(UINT a_width, UINT a_height)
-	{
-		RequestExtent({ a_width, a_height, 1 }, a_width == desc.Width && a_height == desc.Height,
-			[this](const std::array<UINT, 3>& a_size) { Resize(a_size[0], a_size[1]); });
-	}
-
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc)
 	{
 		Create();
+		RequireMade(*this, name);
 		AdoptSlot(nullptr, false);
-	}
-
-	void Texture3D::RequestSize(UINT a_width, UINT a_height, UINT a_depth)
-	{
-		RequestExtent({ a_width, a_height, a_depth }, a_width == desc.Width && a_height == desc.Height && a_depth == desc.Depth,
-			[this](const std::array<UINT, 3>& a_size) { Resize(a_size[0], a_size[1], a_size[2]); });
 	}
 
 	void Texture3D::Create()
@@ -822,6 +1358,7 @@ namespace GraphResources
 		auto created = CreateTexture(shape, name, options);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
+		exportLayout = created.layout;
 		if (d3d11 && (!d3d11.try_as<ID3D11Texture3D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv, dsv))) {
 			logger::error("[ORG] {}: D3D11 refused a view of the exported texture", name);
 			Reset();
@@ -835,31 +1372,8 @@ namespace GraphResources
 		return StageTexture(graph, name, desc.Format, desc.Width, desc.Height, desc.Depth, 1, 1, a_depthSlices);
 	}
 
-	bool Texture3D::Resize(UINT a_width, UINT a_height, UINT a_depth)
-	{
-		if (a_width == desc.Width && a_height == desc.Height && a_depth == desc.Depth)
-			return false;
-		std::unique_lock lock(RegisterMutex());
-		const auto mipsOf = [](const D3D11_TEXTURE3D_DESC& a_desc) {
-			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, a_desc.Depth, 1u })));
-		};
-		const UINT mips = mipsOf(desc);
-		auto previous = slot;
-		Reset();
-		desc.Width = a_width;
-		desc.Height = a_height;
-		desc.Depth = a_depth;
-		Create();
-		if (AdoptSlot(std::move(previous), mipsOf(desc) == mips)) {
-			logger::info("[ORG] {}: resized to {}x{}x{} as a new version", name, a_width, a_height, a_depth);
-			return true;
-		}
-		BumpResizeGeneration(name);
-		return true;
-	}
-
 	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC& a_desc, UINT a_count, std::string a_name, Options a_options) :
-		Resource(std::move(a_name), a_options), count(a_count)
+		Resource(std::move(a_name), a_options), count(a_count), stride(a_desc.StructureByteStride), bindFlags(a_desc.BindFlags)
 	{
 		if (!CheckBufferDesc(a_desc, name) || !a_count || !a_desc.StructureByteStride || Has(options.d3d11, Export::RTV))
 			return;
@@ -868,42 +1382,90 @@ namespace GraphResources
 			auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(a_count, a_desc.StructureByteStride, unordered);
 			PlaceBuffer(*buffer, name, Aliasable());
 			if (Exported()) {
-				D3D11_BUFFER_DESC wrapDesc{};
-				wrapDesc.ByteWidth = a_count * a_desc.StructureByteStride;
-				wrapDesc.Usage = D3D11_USAGE_DEFAULT;
-				wrapDesc.BindFlags = a_desc.BindFlags & (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
-				wrapDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-				wrapDesc.StructureByteStride = a_desc.StructureByteStride;
-				auto wrapped = RenderGraphRuntime::Get().WrapBuffer(*buffer, wrapDesc);
-				d3d11.copy_from(wrapped.get());
-				graph = std::move(buffer);
-				if (!wrapped) {
+				winrt::com_ptr<ID3D11Resource> wrapped;
+				const bool viewed = Export(*buffer, a_count, wrapped, srv, uav);
+				d3d11 = std::move(wrapped);
+				graph = buffer;
+				if (!d3d11) {
 					Reset();
 					return;
 				}
-				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-				srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-				srvDesc.Buffer.NumElements = a_count;
-				D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-				uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-				uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-				uavDesc.Buffer.NumElements = a_count;
-				auto* device = globals::d3d::device;
-				if ((Has(options.d3d11, Export::SRV) && FAILED(device->CreateShaderResourceView(wrapped.get(), &srvDesc, srv.put()))) ||
-					(Has(options.d3d11, Export::UAV) && FAILED(device->CreateUnorderedAccessView(wrapped.get(), &uavDesc, uav.put())))) {
+				if (!viewed) {
 					logger::error("[ORG] {}: D3D11 refused a view of the exported buffer", name);
 					Reset();
 					return;
 				}
 				NameViews();
-				return;
+			} else {
+				graph = buffer;
 			}
-			graph = std::move(buffer);
+			// Passes declare the slot, so a new element count is a new version, not a new resource.
+			if (options.versioned && !Aliasable())
+				bufferSlot = org::VersionedBuffer::Create(std::move(buffer));
 		} catch (const std::exception& e) {
 			logger::error("[ORG] {}: not created: {}", name, e.what());
 			Reset();
 		}
+	}
+
+	bool StructuredBuffer::Export(org::Resource& a_buffer, UINT a_count, winrt::com_ptr<ID3D11Resource>& a_d3d11, winrt::com_ptr<ID3D11ShaderResourceView>& a_srv,
+		winrt::com_ptr<ID3D11UnorderedAccessView>& a_uav) const
+	{
+		D3D11_BUFFER_DESC wrapDesc{};
+		wrapDesc.ByteWidth = a_count * stride;
+		wrapDesc.Usage = D3D11_USAGE_DEFAULT;
+		wrapDesc.BindFlags = bindFlags & (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+		wrapDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		wrapDesc.StructureByteStride = stride;
+		auto wrapped = RenderGraphRuntime::Get().WrapBuffer(a_buffer, wrapDesc);
+		a_d3d11.copy_from(wrapped.get());
+		if (!wrapped)
+			return false;
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		srvDesc.Buffer.NumElements = a_count;
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+		uavDesc.Buffer.NumElements = a_count;
+		auto* device = globals::d3d::device;
+		if (Has(options.d3d11, Export::SRV) && FAILED(device->CreateShaderResourceView(wrapped.get(), &srvDesc, a_srv.put())))
+			return false;
+		if (Has(options.d3d11, Export::UAV) && FAILED(device->CreateUnorderedAccessView(wrapped.get(), &uavDesc, a_uav.put())))
+			return false;
+		return true;
+	}
+
+	void StructuredBuffer::AdoptVersion(const std::shared_ptr<const org::BufferVersion>& a_version, UINT a_count)
+	{
+		const auto fail = [&](std::string_view a_why) {
+			RenderGraph::Fatal(name, fmt::format("its version of {} elements could not be adopted: {}", a_count, a_why));
+		};
+		std::unique_lock lock(RegisterMutex());
+		if (!bufferSlot || !a_version || !a_version->buffer)
+			fail("it has no slot, or the version no buffer");
+		if (bufferSlot->Current() != a_version)
+			fail("its slot has not adopted the version");
+		winrt::com_ptr<ID3D11Resource> nextD3D11;
+		winrt::com_ptr<ID3D11ShaderResourceView> nextSrv;
+		winrt::com_ptr<ID3D11UnorderedAccessView> nextUav;
+		if (Exported() && !Export(*a_version->buffer, a_count, nextD3D11, nextSrv, nextUav))
+			fail("D3D11 did not wrap it or refused a view");
+		// The old D3D11 side goes first, as in Reset. The slot's old version keeps its buffer while frames hold it.
+		srv = nullptr;
+		uav = nullptr;
+		d3d11 = nullptr;
+		if (Exported() && graph)
+			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(graph));
+		graph = a_version->buffer;
+		d3d11 = std::move(nextD3D11);
+		srv = std::move(nextSrv);
+		uav = std::move(nextUav);
+		count = a_count;
+		if (Exported())
+			NameViews();
+		logger::info("[ORG] {}: adopted its version of {} elements", name, a_count);
 	}
 
 	Buffer::Buffer(const D3D11_BUFFER_DESC& a_desc, std::string a_name, Options a_options) :
@@ -950,53 +1512,3 @@ namespace GraphResources
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-#	include "RenderGraph/GraphResources.h"
-
-// Without OpenRenderGraph no twin is created and every feature keeps its D3D11 path.
-namespace GraphResources
-{
-	ExportedTexture ExportTexture(const ExportDesc&, const std::string&) { return {}; }
-	void RequestStructuralRebuild(std::string_view, std::span<const std::uint32_t>) {}
-	std::uint64_t StructuralRebuilds() { return 0; }
-	bool IsTransientName(std::string_view) { return false; }
-	void NoteTransientName(const std::string&, bool) {}
-	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture>, bool) { return false; }
-	std::uint64_t Resource::ResizeGeneration() { return 0; }
-	std::string Resource::ResizeCauses(std::uint64_t) { return {}; }
-	void Resource::BumpResizeGeneration(std::string_view) {}
-	void Resource::Register(org::RenderGraph&) const {}
-	void Resource::Reset() {}
-	void Resource::NameViews() const {}
-	Texture2D::Texture2D(const D3D11_TEXTURE2D_DESC& a_desc, std::string a_name, Options a_options) :
-		Resource(std::move(a_name), a_options), desc(a_desc) {}
-	void Texture2D::Create() {}
-	struct StagedUpload
-	{};
-	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>>) { return nullptr; }
-	std::shared_ptr<const StagedUpload> Texture2D::Stage(std::span<const SubresourceData>, UINT, UINT) const { return nullptr; }
-	std::shared_ptr<const StagedUpload> Texture2D::StageZeros() const { return nullptr; }
-	bool Texture2D::Resize(UINT, UINT) { return false; }
-	void Texture2D::RequestSize(UINT, UINT) {}
-	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :
-		Resource(std::move(a_name), a_options), desc(a_desc) {}
-	void Texture3D::Create() {}
-	std::shared_ptr<const StagedUpload> Texture3D::Stage(std::span<const SubresourceData>) const { return nullptr; }
-	bool Texture3D::Resize(UINT, UINT, UINT) { return false; }
-	void Texture3D::RequestSize(UINT, UINT, UINT) {}
-	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC&, UINT a_count, std::string a_name, Options a_options) :
-		Resource(std::move(a_name), a_options), count(a_count) {}
-	Buffer::Buffer(const D3D11_BUFFER_DESC&, std::string a_name, Options a_options) :
-		Resource(std::move(a_name), a_options) {}
-	bool Buffer::CreateSRV(const D3D11_SHADER_RESOURCE_VIEW_DESC&) { return false; }
-	bool Buffer::CreateUAV(const D3D11_UNORDERED_ACCESS_VIEW_DESC&) { return false; }
-	namespace SelfTest
-	{
-		bool Requested() { return false; }
-		void Reserve() {}
-		void Setup() {}
-	}
-}
-
-#endif

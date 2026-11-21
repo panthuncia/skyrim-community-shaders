@@ -38,7 +38,7 @@ namespace DCLF::Extensions
 		constexpr std::uint16_t kTransformsFirst = 0xc, kTransformsEnd = 0x2c;
 
 		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
-		MaterialPortEntries& Table()
+		MaterialPortEntries& PortTable()
 		{
 			static MaterialPortEntries table;
 			return table;
@@ -57,7 +57,7 @@ namespace DCLF::Extensions
 
 	void ResolveMaterialPorts(std::span<const Api::MaterialPortContribution> a_byKind, std::size_t a_count)
 	{
-		auto& table = Table();
+		auto& table = PortTable();
 		for (std::size_t kind = 0; kind < a_count && kind < table.size(); ++kind) {
 			const auto& port = a_byKind[kind];
 			auto& entry = table[kind];
@@ -105,7 +105,7 @@ namespace DCLF::Extensions
 		}
 	}
 
-	const MaterialPortEntries& MaterialPorts() { return Table(); }
+	const MaterialPortEntries& MaterialPorts() { return PortTable(); }
 
 	bool DifferOutsideFrameSpans(std::uint8_t a_kind, const std::byte* a_left, const std::byte* a_right, std::size_t a_first, std::size_t a_end)
 	{
@@ -114,7 +114,7 @@ namespace DCLF::Extensions
 		};
 		std::size_t at = a_first;
 		if (a_kind < kMaterialKinds)
-			for (const auto& [first, end] : Table()[a_kind].frameSpans) {
+			for (const auto& [first, end] : PortTable()[a_kind].frameSpans) {
 				if (first >= a_end)
 					break;
 				if (differ(at, first))
@@ -128,7 +128,7 @@ namespace DCLF::Extensions
 	{
 		if (a_kind >= kMaterialKinds)
 			return false;
-		for (const auto& [first, end] : Table()[a_kind].frameSpans) {
+		for (const auto& [first, end] : PortTable()[a_kind].frameSpans) {
 			const std::size_t begin = std::max<std::size_t>(first, a_first), stop = std::min<std::size_t>(end, a_end);
 			if (begin < stop && std::memcmp(a_left + (begin - a_first), a_right + (begin - a_first), stop - begin) != 0)
 				return true;
@@ -138,19 +138,19 @@ namespace DCLF::Extensions
 
 	void CapturePort(std::uint8_t a_kind, const RE::BSShaderProperty& a_property, const void*& a_emissive, std::uint32_t& a_feature)
 	{
-		Table()[a_kind].capture({ a_property, a_emissive, a_feature });
+		PortTable()[a_kind].capture({ a_property, a_emissive, a_feature });
 	}
 
 	Ineligible DerivePort(std::uint8_t a_kind, const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf, LightingDescriptors& a_out)
 	{
 		Api::MaterialPortDerivation derivation{ a_property, a_leaf, &a_out, Ineligible{} };
-		Table()[a_kind].derive(derivation);
+		PortTable()[a_kind].derive(derivation);
 		return derivation.reason;
 	}
 
 	std::uint32_t PortVariants(std::uint8_t a_kind, const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf)
 	{
-		const auto variants = Table()[a_kind].variants;
+		const auto variants = PortTable()[a_kind].variants;
 		return variants ? variants({ a_property, a_leaf, nullptr, Ineligible{} }) : 0u;
 	}
 
@@ -158,13 +158,13 @@ namespace DCLF::Extensions
 		MaterialRecord& a_out)
 	{
 		Api::MaterialPortEvaluation evaluation{ a_snapshot, a_passDescriptor, a_frame, a_out };
-		return Table()[a_kind].evaluate(evaluation);
+		return PortTable()[a_kind].evaluate(evaluation);
 	}
 
 	void SamplePortShading(std::uint8_t a_kind, const RE::BSShaderProperty& a_property, std::uint32_t a_pass, bool a_member, BindlessShading& a_out)
 	{
 		Api::MaterialPortShading shading{ a_property, a_pass, a_member, a_out };
-		Table()[a_kind].shading(shading);
+		PortTable()[a_kind].shading(shading);
 	}
 }
 

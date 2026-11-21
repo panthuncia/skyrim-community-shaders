@@ -14,7 +14,6 @@ namespace org::runtime
  * @brief GPU timings from the render graph's own timestamp queries, with no D3D11 query and no DXVK export.
  *
  * CS_GPU_TIMERS=graph makes the profiler and event timers read GPU time from the graph only. D3D11 ranges then have no GPU time.
- * CS_GPU_IDLE_SOURCE=graph makes the idle trace read the graph's ranges instead of DXVK's submission trace.
  * Native mode always reads the graph. Kept recordings are timed per list by default, or per pass with
  * CS_ORG_RECORDING_TIMESTAMPS=1. A Present's ranges are handed on once every epoch submitted in it has completed.
  * This header stays free of ORG and Vulkan includes.
@@ -30,9 +29,6 @@ namespace GpuTimingSource
 
 	/** @brief CS_GPU_TIMERS, d3d11 by default and always graph in native mode. Read once. */
 	Timers SelectedTimers();
-
-	/** @brief Whether the idle trace reads the graph's ranges. Read once. */
-	bool IdleFromGraph();
 
 	/** @brief The queue a range ran on. Ticks compare only within one queue. */
 	enum class Queue : std::uint8_t
@@ -79,6 +75,13 @@ namespace GpuTimingSource
 
 	/** @brief The host's completed-frame callback, on the host thread with async epochs. */
 	void OnCompletedFrame(std::uint64_t a_hostFrame, const org::runtime::IStatisticsService& a_stats);
+
+	/**
+	 * @brief Any thread. A range timed outside the graph's own queries, such as the native present copy. It joins the newest Present
+	 * still waiting for its epochs, or the next one to submit an epoch, so it adds no frame of its own. Use RangeKind::Sub to keep it
+	 * out of the queue walk.
+	 */
+	void AddExternalRange(Range a_range);
 
 	/** @brief Render thread, at Present. Hands on every earlier Present whose epochs have all completed, oldest first. */
 	void OnPresent();

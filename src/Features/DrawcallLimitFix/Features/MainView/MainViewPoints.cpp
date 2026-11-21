@@ -6,24 +6,31 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
+#include "RenderGraph/Fatal.h"
 
 #include <d3d11.h>
 
 #include <cstdint>
+#include <string>
 
 namespace DCLF::Features::MainView
 {
 	namespace
 	{
 		Api::TriggerId opaqueAfter;
-		bool loggedCaptureFailure = false;
 
-		TargetFormats CurrentTargetFormats()
+#if !defined(CS_RELEASE_PROFILE)
+		TargetFormats BoundTargetFormats()
 		{
 			TargetFormats formats;
+			if (RenderGraph::Engine::GraphMode() && !RenderGraph::Engine::Tripwire::GuestContextInstalled())
+				RenderGraph::Fatal("DCLF main view", "the engine's targets were read before its context handle was in place");
 			ID3D11RenderTargetView* views[8] = {};
 			ID3D11DepthStencilView* depth = nullptr;
-			globals::d3d::context->OMGetRenderTargets(8, views, &depth);
+			// The engine's targets are in its context handle in graph mode.
+			RenderGraph::Engine::Tripwire::EngineContext()->OMGetRenderTargets(8, views, &depth);
 			for (std::uint32_t i = 0; i < 8; ++i) {
 				if (!views[i])
 					continue;
@@ -42,13 +49,31 @@ namespace DCLF::Features::MainView
 			return formats;
 		}
 
-		/** @brief The main pass's targets and bindings for this frame's colour epoch; false when its targets are not bound. */
+		std::string DescribeFormats(const TargetFormats& a_formats)
+		{
+			std::string text;
+			for (std::uint32_t i = 0; i < a_formats.colorCount; ++i)
+				text += fmt::format("{} ", static_cast<int>(a_formats.colors[i]));
+			return text + fmt::format("depth {}", static_cast<int>(a_formats.depth));
+		}
+
+		/** @brief Development builds: the bound targets must be the declared ones DCLF's pipelines were built for at setup. */
+		void CheckBoundFormats()
+		{
+			const auto bound = BoundTargetFormats();
+			const auto& declared = DrawPipelines::Get().Targets();
+			if (!(bound == declared))
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the main pass binds targets in formats {}, not the declared {} its pipelines were built for",
+					DescribeFormats(bound), DescribeFormats(declared)));
+		}
+#endif
+
+		/** @brief The main pass's bindings for this frame's colour epoch. Its formats were fixed at setup (DeclaredTargets). */
 		bool CaptureMainPass()
 		{
-			const auto formats = CurrentTargetFormats();
-			if (formats.colorCount == 0 || formats.depth == DXGI_FORMAT_UNKNOWN)
-				return false;
-			DrawPipelines::Get().SetTargetFormats(formats);
+#if !defined(CS_RELEASE_PROFILE)
+			CheckBoundFormats();
+#endif
 			IndirectDraws::Get().CaptureMainPass();
 			// Read here because inside the deferred pass the blend table holds the deferred variants.
 			DrawPipelines::Get().CaptureEngineStates();
@@ -58,12 +83,7 @@ namespace DCLF::Features::MainView
 		// The engine binds the G-buffer only when a draw applies its state, so FrameDriver applied the pending state first.
 		bool BeforeOpaque()
 		{
-			const bool captured = CaptureMainPass();
-			if (!captured && !loggedCaptureFailure) {
-				loggedCaptureFailure = true;
-				logger::warn("[DCLF] the main pass's targets are not bound where its opaque batches start; the colour epoch is skipped");
-			}
-			return captured;
+			return CaptureMainPass();
 		}
 
 		void AfterOpaque()
@@ -72,10 +92,8 @@ namespace DCLF::Features::MainView
 			// would be missing from what the terrain blended onto, and the terrain's depth writes would fail DCLF's EQUAL test.
 			auto& draws = IndirectDraws::Get();
 			globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);  // the epoch writes the G-buffer the context has bound
-			draws.ProbeTargets("before colour");
 			Extensions::TriggerScope trigger(opaqueAfter);
 			draws.ExecuteColour();  // the colour pass, against the depth written at the first draw
-			draws.ProbeTargets("after colour");
 			// DCLF's epoch leaves bindings to the engine's state tracking, so the targets are rebound for the rest of the pass.
 			globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 		}

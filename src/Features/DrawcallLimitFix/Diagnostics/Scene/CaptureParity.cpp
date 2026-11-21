@@ -9,7 +9,6 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Draws/DrawnLocalShadows.h"
 
 #include <algorithm>
 #include <cstring>
@@ -485,7 +484,7 @@ namespace DCLF
 			static_cast<CaptureParity*>(a_owner)->NoteMismatch(fmt::format("{} {}", Describe(a_note), a_message));
 		};
 
-		// t71 and t74, AdvancedSkin's.
+		// t71, t74, t72 and b7's material, AdvancedSkin's.
 		skinTextures.Compare(a_context, a_geometry, a_objectIndex, tables, note, this);
 
 		// b7 and actor ownership, AdvancedSkin's.
@@ -642,16 +641,8 @@ namespace DCLF
 			}
 		}
 
-		// PS b3, LightLimitFix's.
-		Diagnostics::DrawnLocalShadows drawn;
-		const bool drawnKnown = Diagnostics::DrawnLocalShadowsOf(static_cast<std::uint32_t>(index), drawn);
-		const std::uint32_t drawnWords[2]{ drawn.mask, drawn.gated };
-		// Moved since the readback was armed three epochs ago, so its lights may differ from the native pass's.
-		const auto& bound = geometry->worldBound;
-		const bool moved = drawnKnown && (bound.center.x != drawn.bound[0] || bound.center.y != drawn.bound[1] || bound.center.z != drawn.bound[2] || bound.radius != drawn.bound[3]);
-		// Channels reassigned since, so the readback's bits name other lights than the native pass's.
-		const bool reassigned = drawnKnown && drawn.channels != Diagnostics::ChannelLights();
-		lightData.Compare(geometry, static_cast<std::uint32_t>(index), tables, drawnKnown ? &drawnWords : nullptr, moved, reassigned,
+		// PS b3, LightLimitFix's. The build parity's readback of the drawn lights went with it, so only the tables are compared.
+		lightData.Compare(geometry, static_cast<std::uint32_t>(index), tables, nullptr, false, false,
 			[](void* a_owner, const RE::BSGeometry* a_note, std::string a_message) {
 				static_cast<CaptureParity*>(a_owner)->NoteMismatch(fmt::format("{} {}", Describe(a_note), a_message));
 			},
@@ -755,7 +746,7 @@ namespace DCLF
 			} else if (Eligibility::Static(SceneCapture::LiveLeaf(*geometry).view, nullptr) == Ineligible::None) {
 				if (auto* category = store.CategoryNodeOf(geometry)) {
 					++untrackedEligible;  // followed below and reported with its parents
-					const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
+					const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
 					auto [it, inserted] = untracked.try_emplace(geometry);
 					if (inserted) {
 						it->second.firstFrame = frame;
@@ -879,7 +870,7 @@ namespace DCLF
 			++materialMismatches;
 			const auto* drawn = a_pass->shaderProperty ? a_pass->shaderProperty->material : nullptr;
 			const auto* recorded = object.materialIndex < tables.materialSlotKey.size() ? tables.materialSlotKey[object.materialIndex].first : nullptr;
-			const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
+			const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
 			auto& follow = materialMismatchFollow[drawn];
 			if (follow.frames == 0)
 				follow.firstFrame = frame;
@@ -966,10 +957,10 @@ namespace DCLF
 		// Every main pass starts a new baseline.
 		baselineValid = false;
 		pendingRewrites = 0;
-		ResolveUntracked(Scene::Coordinator::Get().GetFrame());
+		ResolveUntracked(Scene::Coordinator::Get().SceneStep());
 		{
 			// Resolve mismatched materials a frame later, since this frame's drain ran in the accumulate phase.
-			const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
+			const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
 			std::erase_if(materialMismatchFollow, [&](const auto& a_entry) {
 				const auto& [material, follow] = a_entry;
 				if (follow.lastFrame >= frame)
@@ -1062,7 +1053,7 @@ namespace DCLF
 		logger::info("[DCLF] draw parity {}: {} draws checked, {} with different arguments or bound buffers", drawMismatches == 0 ? "OK" : "MISMATCH",
 			drawsChecked, drawMismatches);
 		lightData.Report();
-		logger::info("[DCLF] skin parity {}: {} draws' t71/t74 checked, {} differ; {} draws' wetness checked ({} wet), {} differ, {} with a different actor ownership",
+		logger::info("[DCLF] skin parity {}: {} t71/t74/t72 and material checks, {} differ; {} draws' wetness checked ({} wet), {} differ, {} with a different actor ownership",
 			skinTextures.Ok() && skinWetness.Ok() ? "OK" : "MISMATCH", skinTextures.checks, skinTextures.mismatches, skinWetness.checks,
 			skinWetness.wetDraws, skinWetness.mismatches, skinWetness.ownerMismatches);
 		truePBRTextures.Report();

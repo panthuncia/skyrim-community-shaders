@@ -1,6 +1,6 @@
 #pragma once
 
-// The scene mirror and its reads: the mirror, the mirror-read parity's counters and rechecks, and the batch's pins.
+// The scene mirror and its reads: the mirror, the read counters, and the batch's pins.
 // A private base of Scene::Coordinator. Its functions are declared in Coordinator.h.
 
 namespace DCLF::Scene
@@ -17,26 +17,17 @@ namespace DCLF::Scene
 			MoveKey,
 			LightEntry,
 			SunEntry,
-			Reference,  // a geometry the mirror's walk found with no pin (lagged: the live scene no longer has it there)
+			Reference,  // a geometry the mirror's walk found with no pin
 			kCount
 		};
 		static constexpr std::array<const char*, static_cast<std::size_t>(MirrorRead::kCount)> kMirrorReadNames{ "category node", "subtree", "switch event", "node event",
 			"hidden chain", "move key", "light entry", "sun entry", "unpinned geometry" };
 		struct MirrorReadStats
 		{
-			std::array<std::uint64_t, static_cast<std::size_t>(MirrorRead::kCount)> reads{}, checked{}, lagged{}, differ{}, unmirrored{}, refused{};
-			std::array<std::string, static_cast<std::size_t>(MirrorRead::kCount)> first;
+			std::array<std::uint64_t, static_cast<std::size_t>(MirrorRead::kCount)> reads{}, unmirrored{};
 		};
 		mutable MirrorReadStats mirrorReads;
 		static inline thread_local MirrorReadStats* mirrorReadSink = nullptr;
-		/** @brief A differing read, checked again after the next batch. If it then agrees, the mirror only lagged. */
-		struct DeferredRead
-		{
-			MirrorRead read;
-			std::string what;
-			std::function<bool()> recheck;
-		};
-		mutable std::vector<DeferredRead> deferredReads;
 		std::vector<SceneMirror::Prepared> mirrorPreps;
 		static constexpr std::size_t kMirrorFanoutRecords = 256;
 		/** @brief The applied batch's pins by key, valid while it is applied. */

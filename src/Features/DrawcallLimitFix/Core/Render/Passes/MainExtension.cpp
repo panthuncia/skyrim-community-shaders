@@ -49,22 +49,12 @@ namespace DCLF::Draws
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.frame-constants"), resources->frameConstants);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.z.bucket-counts"), resources->zBucketCounts[0]);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.z.bucket-counts2"), resources->zBucketCounts[1]);
-			if (const auto& foliage = resources->foliage) {
-				for (std::uint32_t h = 0; h < 2; ++h) {
-					Register(a_graph, org::ResourceIdentifier(fmt::format("cs.dclf.foliage-ids{}", h)), foliage->ids[h]);
-					Register(a_graph, org::ResourceIdentifier(fmt::format("cs.dclf.foliage-colours{}", h)), foliage->colours[h]);
-				}
-				Register(a_graph, org::ResourceIdentifier("cs.dclf.foliage-results"), foliage->results);
-				Register(a_graph, org::ResourceIdentifier("cs.dclf.foliage-owners"), foliage->owners);
-			}
 			if (resources->shadowMask)
 				Register(a_graph, org::ResourceIdentifier("cs.dclf.shadow-mask"), resources->shadowMask);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.visibility"), resources->visibility);
 			if (resources->frustum)
 				Register(a_graph, org::ResourceIdentifier("cs.dclf.frustum"), resources->frustum);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.retests"), resources->retests);
-			if (resources->writers)
-				Register(a_graph, org::ResourceIdentifier("cs.dclf.writers"), resources->writers);
 			Register(a_graph, org::ResourceIdentifier("cs.dclf.retest-dispatch"), resources->retestDispatch);
 			for (const auto& frameBuffer : resources->frameBuffers)
 				Register(a_graph, org::ResourceIdentifier(fmt::format("cs.dclf.frame-buffer.t{}", frameBuffer.textureRegister)), frameBuffer.copy);

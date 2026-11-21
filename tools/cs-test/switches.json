@@ -1,0 +1,1851 @@
+{
+	"version": 2,
+	"dclf_complete": true,
+	"prefixes": [
+		"CS_GPU_COUNTERS_",
+		"CS_NVPERF_",
+		"DXVK_",
+		"VK_"
+	],
+	"features": [
+		"CSEditor",
+		"CloudShadows",
+		"DeveloperTools",
+		"DrawcallLimitFix",
+		"DynamicCubemaps",
+		"Effects11",
+		"ExponentialHeightFog",
+		"ExtendedMaterials",
+		"ExtendedTranslucency",
+		"GraphicsAPI",
+		"GrassCollision",
+		"GrassLighting",
+		"GrassOptimizations",
+		"HDRDisplay",
+		"HairSpecular",
+		"HorizonFix",
+		"ImageBasedLighting",
+		"InteriorSun",
+		"LODBlending",
+		"LightLimitFix",
+		"LinearLighting",
+		"PerformanceOverlay",
+		"PhysicalSky",
+		"PostProcessing",
+		"ProceduralAurora",
+		"ProceduralSun",
+		"RainRefraction",
+		"SceneManager",
+		"ScreenSpaceGI",
+		"ScreenSpaceShadows",
+		"Screenshot",
+		"Skin",
+		"SkySync",
+		"Skylighting",
+		"SubsurfaceScattering",
+		"TerrainBlending",
+		"TerrainHelper",
+		"TerrainShadows",
+		"TerrainVariation",
+		"TextureStreaming",
+		"TreeWind",
+		"TruePBR",
+		"UnifiedWater",
+		"Upscaling",
+		"VRAMBudget",
+		"ViewAtmosphere",
+		"VolumetricLighting",
+		"VolumetricShadows",
+		"WaterEffects",
+		"WetnessEffects"
+	],
+	"switches": [
+		{
+			"name": "BASICRHI_BARRIER_PROBE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_BARRIER_PROBE_FILE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_COMMAND_POOL_PROBE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_COMMAND_POOL_PROBE_SHARED",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_COMMAND_POOL_SITES",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_D3D12_RESET_TRACE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_DEVICE_MEMORY_REPORT",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_DX12_FULL_BARRIERS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_DX12_TEST_NO_DEPTH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_HEAP_BIND_REPEAT",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_MEMORY_DUMP",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_PAD_LISTS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_RELEASE_COMMAND_MEMORY",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_SPLIT_SUBMITS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_VK_BINDING",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_VK_CRASH_MARKERS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_VK_DUMP_ISA",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_VK_DUMP_LOWERED",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_VK_LIMITS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_VK_MAX_DESCRIPTORS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_VK_VALIDATE_LOWERING",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "CS_AB_PROBE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_D3D12_SOURCE_DUMP",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_DCLF",
+			"key": "dclf.enabled",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: DCLF does not install"
+		},
+		{
+			"name": "CS_DCLF_ASYNC_COMPUTE",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue; unset: on in guest mode, off in native mode (1 turns it on there)"
+		},
+		{
+			"name": "CS_DCLF_BILLBOARD_PARTICLES",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "default on (T7f item 7): particle systems under NiBillboardNodes (the magic hands' fire cores and embers) drawn by DCLF's particle path like any other (their world and particles are their last update's); 0 they stay the engine's (billboard)"
+		},
+		{
+			"name": "CS_DCLF_CAPTURE_PARITY",
+			"key": "dclf.capture_parity",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "parity",
+			"family": "dclf",
+			"description": "1: the tables against the engine's own lighting draws (run with CS_DCLF_PARITY_BOTH=1, so the engine draws what DCLF draws)"
+		},
+		{
+			"name": "CS_DCLF_CPU_BATCH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "the CPU pipeline's batch lanes (default 4096, rounded up to a multiple of 8; the live setting's seed: dclf:cpu-batch, the menu)"
+		},
+		{
+			"name": "CS_DCLF_CPU_RECORD",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "indirect|serial (default indirect on every vendor): the CPU pipeline's per-frame views as indirect draws the cull jobs write, or direct draws DXVK's CS thread records (live toggle's seed)"
+		},
+		{
+			"name": "CS_DCLF_CULL",
+			"key": "dclf.cull",
+			"type": "enum",
+			"default": "occlusion",
+			"choices": [
+				"off",
+				"frustum",
+				"occlusion"
+			],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "off|frustum|occlusion (default): GPU culling, the live toggle's seed"
+		},
+		{
+			"name": "CS_DCLF_EFFECT_CLOUD_LIGHT",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "default on: effect meshes with kEffectLighting and kCloudLOD (lit by the cloud light, not the sun) drawn by DCLF with the cloud light's colour as a frame row; 0 they stay native (cloud-lighting)"
+		},
+		{
+			"name": "CS_DCLF_EFFECT_FALLOFF",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "default on: effect meshes with Falloff and no blending alpha property (the engine's hint 1, unblended while their alpha is one) drawn by DCLF's forward epoch unblended, sorted with the blended objects; 0 they stay native (effect-opaque)"
+		},
+		{
+			"name": "CS_DCLF_EFFECT_RIGID_SKINS",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "1: effect meshes with a skin instance whose pass has no Skinned bit (the property without kSkinned: dog eyes) drawn by DCLF, each partition with the unskinned vertex stage and the geometry's world, as the engine draws them; 0 (default) they stay native (effect-variant (skinned))"
+		},
+		{
+			"name": "CS_DCLF_EMPTY_FADE_NODE",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "default on (T7f item 7): the engine's empty fade node (the BSFadeNode 0x14332a2a0 holds, which every BSShaderProperty starts with and the engine reads as none) is no fade root: such geometry (terrain, object LOD, some clutter) takes its entry's root; 0: it is listed as one fade root of all of them, outside the scene graph"
+		},
+		{
+			"name": "CS_DCLF_FIRST_PERSON_DECALS",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "default on (T7f item 7): a decal on a first-person entry (an effect's skinned blood decal on the arms, a weapon's BloodLighting) drawn by the first-person forward part as a forward object with its decal group's depth bias, test and blend; 0 it stays the engine's"
+		},
+		{
+			"name": "CS_DCLF_LATE_POSE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "test",
+			"family": "dclf",
+			"description": "0: the player's parts Improved Camera hides after the shadow maps are not looked for; 1: they are looked for in first person without the plugin too"
+		},
+		{
+			"name": "CS_DCLF_LOD_GATES",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: the engine's LOD swaps ungated (T6b5: by default an object or terrain LOD swap keeps the outgoing level shown, and the incoming hidden, until DCLF's claims cover the incoming)"
+		},
+		{
+			"name": "CS_DCLF_MAP_HOLD",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dclf",
+			"description": ""
+		},
+		{
+			"name": "CS_DCLF_MASTER_PARTICLES",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4); 0 they stay the engine's"
+		},
+		{
+			"name": "CS_DCLF_OPAQUE_EFFECTS",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "default on (T7f item 7): opaque BSEffectShaderProperty meshes (hint 0: no blending alpha property, no Falloff, depth tested and written; forge coals, slag) drawn by DCLF in the G-buffer with the DEFERRED effect variant, through the opaque decal group's fixed slots and its decal depth pass without the bias; 0 they stay the engine's (effect-opaque)"
+		},
+		{
+			"name": "CS_DCLF_PARITY",
+			"key": "dclf.parity",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "parity",
+			"family": "dclf",
+			"description": "1: set parity (the claims against the engine's registrations, and the visibility words read back after the colour epoch against the CPU's decisions), the kept stores against a rebuild every 60 frames, and the scene mirror against the live objects every frame"
+		},
+		{
+			"name": "CS_DCLF_PARITY_BOTH",
+			"key": "dclf.parity_both",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "parity",
+			"family": "dclf",
+			"description": "1: nothing is withheld from the engine, which draws everything while DCLF draws its set as well (capture parity compares the two; it double-draws)"
+		},
+		{
+			"name": "CS_DCLF_PASS_STATS",
+			"key": "dclf.pass_stats",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "1: per-pass counts in the report"
+		},
+		{
+			"name": "CS_DCLF_PIPELINE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "auto (default: exteriors GPU-driven, interiors CPU-driven)|manual|gpu|cpu: the draws culled and recorded on the GPU, or culled on the CPU and recorded as direct draws into DXVK's command buffer; gpu and cpu are manual with both kinds of cell (live toggle's seed)"
+		},
+		{
+			"name": "CS_DCLF_PLAIN_SNOW_SPARKLE",
+			"key": "dclf.plain_snow_sparkle",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: a snow layer whose material is the plain class draws without sparkle instead of the Snow class's default (live toggle's seed)"
+		},
+		{
+			"name": "CS_DCLF_PLAYER_PARITY",
+			"key": "dclf.player_parity",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "parity",
+			"family": "dclf",
+			"description": "1: the compatibility monitor starts on (the menu switches it live): engine state other plugins change with no hook DCLF sees, by reference and plugin"
+		},
+		{
+			"name": "CS_DCLF_PORTAL_EVALUATOR",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "test",
+			"family": "dclf",
+			"description": "Portal batches' evaluation: inline (one dispatch, the default) or batched (by program: count, scan, scatter, evaluate)"
+		},
+		{
+			"name": "CS_DCLF_PORTAL_TRACE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "Inline portal batches write each query's decision trace"
+		},
+		{
+			"name": "CS_DCLF_PORTAL_UNIFORM_SCAN",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "Evaluate portal batches with the diagnostic uniform instruction scan"
+		},
+		{
+			"name": "CS_DCLF_PROFILE",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "1: scene-phase timings in the report"
+		},
+		{
+			"name": "CS_DCLF_RELEASE_GUARD",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "1: the engine objects' last releases on DCLF's threads (the scene lane, the pool) counted and named by class (NiRefObject::DeleteThis patched; T6b3e)"
+		},
+		{
+			"name": "CS_DCLF_SCENE_COPIES",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "the copies a frame's scene values keep per pool class (FrameValues' rows; default 3, 2 to the frames in flight): a frame's producer reuses the copy the oldest in-flight frame bound, its uploads waiting on the GPU for that frame"
+		},
+		{
+			"name": "CS_DCLF_SHADER_DEBUG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "default on (off in the release profile, 1 turns it on): SPIR-V with debug info, and the HLSL sources copied beside the log; 0: without"
+		},
+		{
+			"name": "CS_DCLF_SHADER_SOURCE_DIR",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "where CS_DCLF_SHADER_DEBUG copies the HLSL sources"
+		},
+		{
+			"name": "CS_DCLF_SHRINK",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "when the growable scene buffers give memory back (one policy for all, PooledBackings::Shrink): default once a buffer was asked at most a quarter of its capacity for 5 s; off: grow-only; eager: at the first such ask (stress and parity runs)"
+		},
+		{
+			"name": "CS_DCLF_SITE_STATS",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dclf",
+			"description": ""
+		},
+		{
+			"name": "CS_DCLF_STAGE_DUMP",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "<dir>: every DCLF stage request's compile inputs, the Lighting programs' descriptor pairs and the pulled rewrite's options, as JSON lines in <dir>/stages.jsonl, for tools/shader-compare"
+		},
+		{
+			"name": "CS_DCLF_STATS",
+			"key": "dclf.stats",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "1: the periodic report"
+		},
+		{
+			"name": "CS_DCLF_TABLE_START",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "small: the growable GPU tables start with a few rows, so that growth runs early and often"
+		},
+		{
+			"name": "CS_DCLF_TEX_DISTANCE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: no distance floor (over the menu's setting)"
+		},
+		{
+			"name": "CS_DCLF_TEX_FEEDBACK",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: no shader feedback (over the menu's setting)"
+		},
+		{
+			"name": "CS_DCLF_TEX_STREAM",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: the game's textures stay whole, not shells with streamed mip windows; read at the first texture load"
+		},
+		{
+			"name": "CS_DCLF_TEX_STREAM_BASE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dclf",
+			"description": "the base window's largest side (default 128)"
+		},
+		{
+			"name": "CS_DCLF_TEX_STREAM_BUDGET_MB",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dclf",
+			"description": "the memory streaming keeps to, in MiB, above or below the driver's budget (default: the driver's budget)"
+		},
+		{
+			"name": "CS_DCLF_TEX_STREAM_DELAY_MS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "test",
+			"family": "dclf",
+			"description": "a delay before each background window build, to see late windows"
+		},
+		{
+			"name": "CS_DCLF_TEX_STREAM_DISTANCE_SCALE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dclf",
+			"description": "the distance floor's sharpness: above 1 finer mips (default 1)"
+		},
+		{
+			"name": "CS_DCLF_TEX_STREAM_FULL",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "test",
+			"family": "dclf",
+			"description": "1: every window the full chain, made as the texture loads (the baseline)"
+		},
+		{
+			"name": "CS_DCLF_TEX_STREAM_RATE_MB",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dclf",
+			"description": "upgrades started per second, in MiB (default 256)"
+		},
+		{
+			"name": "CS_DCLF_TEX_STREAM_VISIBLE_OFFSET",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dclf",
+			"description": "over the budget, how many mips what is on screen may step down (default 0: it loads what it asks for)"
+		},
+		{
+			"name": "CS_DCLF_TREE_LIST_ALL",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "1 (T7f; off by default): the tree manager's list loop given DCLF's verdict for every BSTreeNode DCLF lists; off: the stood-in trees alone (T7b5's fix)"
+		},
+		{
+			"name": "CS_DCLF_TREE_LOD_STAGES",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "1: each stage of the main tree LOD draws (depth and colour vertex and pixel stages) stamps the frame; frames a stage missed are logged"
+		},
+		{
+			"name": "CS_DCLF_TREE_LOD_TINT",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "1: DCLF's tree LOD colour draws write solid magenta, so screen captures find its pixels"
+		},
+		{
+			"name": "CS_DISABLE_FEATURES",
+			"key": "cs.disable_features",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "comma-separated feature short names disabled at boot (write [features] instead)"
+		},
+		{
+			"name": "CS_EDITOR",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_ENABLE_FEATURES",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_FG_DISPLAY_SUSPEND",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_FORCE_FSR_FG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_FRAME_LATENCY",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_FSRFG_QDEPTH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_FXC_REQUEST_DUMP",
+			"key": "cs.fxc_request_dump",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "<folder>: one line per FXC request in fxc-requests.jsonl there, to repeat the build outside the game"
+		},
+		{
+			"name": "CS_GPA",
+			"key": "cs.gpa",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "1: GPUPerfAPI loads at startup (it must exist before the device)"
+		},
+		{
+			"name": "CS_GPA_DIR",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_GPU_COUNTERS_RANGES",
+			"key": "cs.gpu_counters_ranges",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "a headless run's hardware counter capture, queued once the counter backend is ready"
+		},
+		{
+			"name": "CS_GPU_COUNTERS_SAMPLES",
+			"key": "cs.gpu_counters_samples",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "that capture's samples (default 3)"
+		},
+		{
+			"name": "CS_GPU_COUNTERS_START_FRAME",
+			"key": "cs.gpu_counters_start_frame",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "the frame that capture starts at"
+		},
+		{
+			"name": "CS_GPU_EVENT_STATS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_GPU_EVENT_TIMERS",
+			"key": "cs.gpu_event_timers",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "<frames>: the GPU event timers on, their counts logged every that many frames"
+		},
+		{
+			"name": "CS_GPU_LOAD",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_GPU_OP_PROBE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_GPU_TIMERS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_GRASS_COLLISION_STATS",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_HANG_WATCHDOG",
+			"key": "cs.hang_watchdog",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "seconds without progress before the hang watchdog writes its report (default 15)"
+		},
+		{
+			"name": "CS_NATIVE_D3D11",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NO_D3DX_UPGRADE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NO_PASS_PREFETCH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_BASELINE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_HALF_WIDTH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_LABEL",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_MAX_REPEATS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_MAX_SAMPLES",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_MIN_SAMPLES",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_REPEATS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_SAMPLES",
+			"key": "",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_START_FRAME",
+			"key": "",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_NVPERF_TEMPLATE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG",
+			"key": "org.enabled",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "0: the render graph is off; features: only its interop device features, without the graph"
+		},
+		{
+			"name": "CS_ORG_ALIAS_LOG",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_BINK_SHOT",
+			"key": "org.bink_shot",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_D3D12_SDK",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_D3D12_SDK_PATH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES",
+			"key": "",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_ENGINE_DRAW_TAP",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_FOG_DEBUG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_GRAPH_RESOURCES_FRAME",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_LLF_PARITY",
+			"key": "org.llf_parity",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "1: the parity frame's D3D11 light culling against the render graph's, cluster by cluster"
+		},
+		{
+			"name": "CS_ORG_MISMATCH_FATAL",
+			"key": "org.mismatch_fatal",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "0: a frame anchor mismatch is not fatal (it is in every build but the Release profile)"
+		},
+		{
+			"name": "CS_ORG_NATIVE",
+			"key": "org.native",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "true: native mode, no DXVK; BasicRHI's device and ORG present (render-graph.md, \"Native mode\")"
+		},
+		{
+			"name": "CS_ORG_NATIVE_BACKEND",
+			"key": "org.backend",
+			"type": "enum",
+			"default": "vulkan",
+			"choices": [
+				"vulkan",
+				"d3d12"
+			],
+			"kind": "other",
+			"family": "org",
+			"description": "native mode's backend; d3d12 needs org.native"
+		},
+		{
+			"name": "CS_ORG_NATIVE_SYNC_PRESENT",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_NATIVE_VALIDATION",
+			"key": "org.validation",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "true: BasicRHI's API validation in native mode (Vulkan layers or the D3D12 debug layer)"
+		},
+		{
+			"name": "CS_ORG_OCCLUSION_QUERY_LOG",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_PRESENT_COPY_SKIP",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_RAW_ACCESS_CHECK",
+			"key": "org.raw_access_check",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "native: log and count work on graph-tracked images that skips the graph's state tracking ([ORG raw access] lines)"
+		},
+		{
+			"name": "CS_ORG_RECORDING_TIMESTAMPS",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_SHARED_CONSTANTS_CHECK",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_SHOT_TARGET",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_SSGI_DEBUG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_SSS_KEEP_APART",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_TAP_ERROR_TEST",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_TRIPWIRE_LOG",
+			"key": "org.tripwire_log",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "1: Tripwire logs every call site with its count"
+		},
+		{
+			"name": "CS_ORG_TRIPWIRE_LOG_INTERVAL",
+			"key": "org.tripwire_log_interval",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "seconds between Tripwire's call site reports (default 60)"
+		},
+		{
+			"name": "CS_ORG_TRIPWIRE_SELFTEST",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_TRIPWIRE_WATCH_ALL",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_VIEW_ATMOSPHERE_DEBUG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "CS_ORG_VRAM_SOURCE",
+			"key": "org.vram_source",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "org: ORG's allocator counts beside DXVK's memory, for the VRAM heaps and texture streaming's budget"
+		},
+		{
+			"name": "CS_PASS_ROUNDS",
+			"key": "",
+			"type": "int",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_PASS_SAMPLE",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_PASS_SKIP",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_PROFILER_LOG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_RENDERDOC_DLL",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_RENDERDOC_REF_ALL",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_RHI_CENSUS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_SHADER_DXC",
+			"key": "cs.shader_dxc",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "a regular expression on <path>:<target>:<descriptor>: the shaders that build with DXC; empty: every shader with FXC"
+		},
+		{
+			"name": "CS_SL_VERBOSE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_STREAMLINE_DLSS",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_STREAMLINE_REFLEX",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "0: Streamline does not load Reflex, PCL or DLSS-G (for Nsight captures)"
+		},
+		{
+			"name": "CS_SUBMIT_TRACE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_TEST_CRASH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_TEST_HANG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_TEST_LIST_SWITCHES",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "1: the game writes CommunityShaders-Switches.json (every switch) at kPostPostLoad and exits"
+		},
+		{
+			"name": "CS_TEX_CENSUS",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_UPSCALE_SUBMIT",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "direct: upscaling's ring submissions wait for DXVK's command stream"
+		},
+		{
+			"name": "CS_UPSCALE_UNFOCUSED",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_VK_CLIENT_PRIORITY",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_VK_DRIVER_TRACE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_VK_PRIORITY",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_VK_SPILL",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": ""
+		},
+		{
+			"name": "CS_VRAM_DEBUG",
+			"key": "cs.vram_debug",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "cs",
+			"description": "1: the VRAM attribution's debug mode: creation call sites and ORG's allocation ledger"
+		},
+		{
+			"name": "DXVK_CONFIG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_DEBUG",
+			"key": "dxvk.debug",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": "DXVK's debug options (hang: its hang markers; DRED on D3D12)"
+		},
+		{
+			"name": "DXVK_DEFER_TEXTURE_ALLOCATION",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_DEVICE_MEMORY_REPORT",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_FILTER_DEVICE_NAME",
+			"key": "dxvk.filter_device_name",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": "DXVK uses only the adapter whose name contains this"
+		},
+		{
+			"name": "DXVK_HDR",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_HUD",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_LOG_LEVEL",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_LOG_PATH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_PIPELINE_STATS",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_SHADER_DUMP_PATH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "DXVK_VIEW_TRACE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "dxvk",
+			"description": ""
+		},
+		{
+			"name": "ORG_GRAPH_REPLAY_OUTPUT",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
+			"name": "SARP_D3D12_DRED",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "SARP_D3D12_GPU_VALIDATION",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "VK_INSTANCE_LAYERS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "vk",
+			"description": ""
+		},
+		{
+			"name": "VK_LAYER_PATH",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "vk",
+			"description": ""
+		},
+		{
+			"name": "VK_LOADER_DEBUG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "vk",
+			"description": ""
+		},
+		{
+			"name": "VK_LOADER_LAYERS_DISABLE",
+			"key": "vk.loader_layers_disable",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "vk",
+			"description": "the Vulkan loader leaves out these layers (comma-separated globs)"
+		},
+		{
+			"name": "VK_LOADER_LAYERS_ENABLE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "vk",
+			"description": ""
+		}
+	]
+}

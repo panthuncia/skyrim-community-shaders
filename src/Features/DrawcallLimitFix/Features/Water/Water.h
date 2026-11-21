@@ -2,7 +2,7 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Water (CS_ORG_WATER): the render graph draws the main camera's BSWaterShader passes in the engine's place.
+// Water, in graph mode: the render graph draws the main camera's BSWaterShader passes in the engine's place.
 // That covers the water mask (Stencil technique) and the water itself. Details are in docs/development/p5/water.md.
 // The engine's CPU code runs unchanged. Each water batch runs with DrawTriShape latched, so every pass still goes through the
 // engine's setup and other mods' hooks, and the draw is recorded instead of issued (WaterCapture.cpp). An ORG pass at the
@@ -14,6 +14,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
+#include "Features/DrawcallLimitFix/Integrations/PhysicalSky/PhysicalSky.h"
 
 #include <array>
 #include <cstddef>
@@ -122,8 +123,9 @@ namespace DCLF::Features::Water
 		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t padding2[2];
+		Integrations::PhysicalSky::OrgHandles physSky;  // the run's, the same for every draw
 	};
-	static_assert(sizeof(DrawConstants) == 1152, "WaterOrgDraw's layout");
+	static_assert(sizeof(DrawConstants) == 1232, "WaterOrgDraw's layout");
 
 	/** @brief Light Limit Fix's PS b3 (StrictLightDataValues), 1232 bytes. */
 	inline constexpr std::size_t kStrictLightBytes = 1232;
@@ -138,7 +140,7 @@ namespace DCLF::Features::Water
 		std::byte strictLights[kStrictLightBytes];
 		std::byte directionalShadow[kDirectionalShadowBytes];
 	};
-	static_assert(sizeof(DrawLatch) == 2656 && sizeof(DrawLatch) % 16 == 0, "a draw's latch region keeps 16-byte rows");
+	static_assert(sizeof(DrawLatch) == 2736 && sizeof(DrawLatch) % 16 == 0, "a draw's latch region keeps 16-byte rows");
 
 	struct Draw
 	{
@@ -167,16 +169,17 @@ namespace DCLF::Features::Water
 		View view = View::Surface;
 		std::vector<Draw> draws;
 		std::array<std::uint32_t, kHeaderRegisters.size()> headerIndices{};  // every header's heap index (an import, a published id's, a null view)
-		std::uint64_t revision = 0;                                          // what the recording depends on (WaterDraws.cpp, RevisionOf)
+		Integrations::PhysicalSky::OrgHandles physSky{};                     // Physical Sky's resources and samplers, latched with every draw
+		std::uint64_t revision = 0;                                          // what the recording depends on (WaterDraws.cpp, Run::Hash)
 		Family::Owners owners;                                               // the textures' imports and the buffers' leases
-	};
 
-	/** @brief Whether the graph takes a_view's batches. CS_ORG_WATER_PARTS can keep one part on the engine. Read once. */
-	bool TakesView(View a_view);
+		/** @brief What the recording depends on: everything but the latched values and counts (WaterDraws.cpp). */
+		std::uint64_t Hash() const;
+	};
 
 	Api::Feature Feature();
 
-	/** @brief Whether CS_ORG_WATER=1 turned the family on (read at install). */
+	/** @brief Whether the family is on, which is graph mode (read at install). */
 	bool Enabled();
 
 	void InstallHooks();
@@ -186,8 +189,6 @@ namespace DCLF::Features::Water
 	{
 		/** @brief Whether the anchor and runtime are up. False for good once a client failed. */
 		bool Available();
-		/** @brief Reserves the EngineDraws anchor. Must run before the render graph initializes. */
-		void Reserve();
 		/** @brief Makes both views' clients and queues their programs. Main thread. False while the graph has no host. */
 		bool Setup();
 		/** @brief Whether a_view's batch is taken now. False is logged once, and the engine draws the batch. */

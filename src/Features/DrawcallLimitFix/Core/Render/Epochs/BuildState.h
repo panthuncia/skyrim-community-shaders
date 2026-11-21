@@ -4,9 +4,11 @@
 //
 // The render thread makes a new value when its live state changes and posts it with the revision inputs. Builds run on
 // the scene worker while the render thread keeps changing, so a build reads only this value, never the live resources.
-// A finished build attaches at a frame's end, and from then on its value is the attached one.
+// Finished builds are staged. Once every one is, the value is the built one, and snapshots are made for it. The value is
+// the attached one from the Begin that adopts a snapshot made for it, with the staged builds (plan step 10a).
 //
-// Per-frame fields stay on the live resources, since only a pass's preparation or recording reads them.
+// Per-frame fields stay on the live resources, since only a pass's preparation or recording reads them. A pass takes the
+// conditions it needs from the state it was made with, never from the attached graphs' ones.
 // Self-contained so features can include it.
 
 // volk must come before every Vulkan header, so Main/Resources.h goes first.
@@ -59,7 +61,7 @@ namespace DCLF::Draws
 	/** @brief What every DCLF epoch graph is built from. Immutable once made. */
 	struct BuildState
 	{
-		// Moves with every new value. A snapshot made from inputs of another serial than the attached one is stale.
+		// Moves with every new value. A snapshot is made only for the built value or an older one.
 		std::uint64_t serial = 0;
 		std::shared_ptr<const GraphConditions> conditions;
 		std::shared_ptr<Resources> main;
@@ -74,44 +76,28 @@ namespace DCLF::Draws
 		const ViewBuild& View(ViewKind a_kind) const { return views[static_cast<std::size_t>(a_kind)]; }
 		/** @brief The part whose resources are a_view, null for none. */
 		const ViewBuild* ViewOf(const ViewResources* a_view) const;
+		/** @brief The conditions this state builds for. Defaults when it has none. */
+		const GraphConditions& Conditions() const;
 	};
-
-	/** @brief Sets the calling thread's build state for one graph build. Extensions made meanwhile read it, and so does CurrentGraphConditions. */
-	class BuildScope
-	{
-	public:
-		explicit BuildScope(std::shared_ptr<const BuildState> a_state);
-		~BuildScope();
-		BuildScope(const BuildScope&) = delete;
-		BuildScope& operator=(const BuildScope&) = delete;
-
-		/** @brief The state this scope builds from. */
-		const std::shared_ptr<const BuildState>& State() const { return state; }
-
-	private:
-		std::shared_ptr<const BuildState> state;
-		const BuildScope* previous = nullptr;
-	};
-
-	/** @brief The calling thread's build scope's state, null outside one. */
-	const BuildState* ScopedBuildState();
 
 	/**
-	 * @brief Inside a graph build, the state it builds from. Outside a BuildScope this is an error logged with a_who,
-	 * except on the render thread, where the host builds at an epoch's first submission.
+	 * @brief Inside a graph build, the state it builds from: the value the build manager took for it on the render thread when it
+	 * handed the build out (RenderGraph::Builds::Input). The extension holds it for the build, and its passes capture what they read
+	 * from it. Null, with a warning logged with a_who, outside a build.
 	 */
 	std::shared_ptr<const BuildState> BuildingState(const char* a_who);
 
-	/** @brief Render thread, once at install: where BuildingState takes the render thread's newest value from. */
-	void SetBuildStateSource(std::function<std::shared_ptr<const BuildState>()> a_source);
-
-	/** @brief Render thread: a_state is what the attached graphs are built from. Its conditions become the attached conditions. */
+	/**
+	 * @brief Render thread: a_state is what the attached graphs are built from. Its conditions become the attached conditions.
+	 * Called when a snapshot made for it is adopted, with the staged builds it was recorded on.
+	 */
 	void PublishAttachedBuildState(std::shared_ptr<const BuildState> a_state);
 	/** @brief Any thread: the attached build state, null before the first. */
 	std::shared_ptr<const BuildState> AttachedBuildState();
 	/** @brief Any thread: the attached build state's serial, 0 before the first. */
 	std::uint64_t AttachedBuildSerial();
-
-	/** @brief Whether DCLF's epochs build on the scene worker and attach at a frame's end (CS_DCLF_ASYNC_BUILDS, default on). */
-	bool AsyncGraphBuilds();
+	/** @brief Render thread: every build a_state asked for is staged or attached, so snapshots may be made for it. */
+	void PublishBuiltBuildState(std::uint64_t a_serial);
+	/** @brief Any thread: the built build state's serial, 0 before the first. */
+	std::uint64_t BuiltBuildSerial();
 }

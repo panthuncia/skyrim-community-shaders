@@ -44,7 +44,6 @@ namespace DCLF::Extensions
 		Api::ClassifyInputId heldWhile;
 		std::uint32_t group = 0;
 		std::uint64_t propertyFlags = 0;
-		Api::ToggleId toggle;
 	};
 	/** @brief Any thread, after InstallFeatures. In registration order, where the first whose flags match takes the object. */
 	std::span<const HeldGroupEntry> HeldGroups();

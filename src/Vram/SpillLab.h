@@ -5,7 +5,8 @@
 /**
  * @brief Tests of what it costs when a given resource is in system memory, as a driver under memory pressure would leave it.
  *
- * The commands run from the test harness (CS_DCLF_TEST_COMMANDS). Nothing happens until one does.
+ * The commands run as cs-test steps: spill, demote, frame-window and ballast (Testing/Commands.cpp) pass their lines here.
+ * Nothing happens until one does.
  *
  *   dclf:spill=<filter>         Moves the D3D11 resources a filter picks to system memory, and holds them there.
  *   dclf:demote=<filter>        Moves the images a filter picks into DXVK's spill pool: still video memory, demoted first under pressure.

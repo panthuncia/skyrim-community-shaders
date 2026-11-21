@@ -14,7 +14,7 @@
 #	include <vulkan/vulkan.h>
 #endif
 
-// Version 6: the guest-device exports. Version 7: dxvkCreateTextureFromVkImage (DxvkOrgInteropTextureWrap).
+// Version 6 added the guest-device exports, which were removed later. Version 7: dxvkCreateTextureFromVkImage (DxvkOrgInteropTextureWrap).
 #define DXVK_ORG_INTEROP_VERSION 7u
 
 extern "C" {

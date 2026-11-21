@@ -1,33 +1,32 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "RenderGraph/RasterProgram.h"
+#include "RenderGraph/RasterProgram.h"
 
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "Utils/Logging.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "Utils/Logging.h"
 
-#	include <format>
+#include <format>
 
-#	include <Render/LatchBlock.h>
-#	include <Render/PreparedPass.h>
-#	include <Render/ResourceUseDeclaration.h>
-#	include <Resources/Buffers/Buffer.h>
+#include <Render/LatchBlock.h>
+#include <Render/PreparedPass.h>
+#include <Render/ResourceUseDeclaration.h>
+#include <Resources/Buffers/Buffer.h>
 
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-#		include "RenderGraph/ProgramBuild.h"
-#		include "RenderGraph/ShaderTarget.h"
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
+#	include "RenderGraph/PipelineVersions.h"
+#	include "RenderGraph/ProgramBuild.h"
+#	include "RenderGraph/ShaderTarget.h"
 
-#		include <ORGModuleServices/PipelineRegistry.h>
-#		include <ORGModuleServices/ShaderCompiler.h>
-#	endif
+#	include <ORGModuleServices/PipelineRegistry.h>
+#	include <ORGModuleServices/ShaderCompiler.h>
+#endif
 
-#	include <filesystem>
+#include <filesystem>
 
 namespace
 {
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	namespace Build = RenderGraph::ProgramBuild;
 
 	// Kept for the registry's rebuilds.
@@ -204,12 +203,12 @@ namespace
 			fmt::format("{} ({})", std::filesystem::path(a_desc.pixelSource).stem().string(), Util::WStringToString(a_desc.pixelEntry)), a_desc.vertexText,
 			a_desc.pixelText, a_desc.languageVersion };
 	}
-#	endif
+#endif
 }
 
 bool RasterProgram::CompileStages(const Desc& a_desc)
 {
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	auto* compiler = RenderGraphRuntime::Get().ShaderCompiler();
 	if (!compiler)
 		return false;
@@ -217,25 +216,26 @@ bool RasterProgram::CompileStages(const Desc& a_desc)
 	// A precompile failure is only a warning. A Load that needs it logs its own error.
 	return !CompileStage(*compiler, stages.vertexSource, stages.vertexText, stages.vertexEntry, L"vs_6_6", stages, spdlog::level::warn).empty() &&
 	       !CompileStage(*compiler, stages.pixelSource, stages.pixelText, stages.pixelEntry, L"ps_6_6", stages, spdlog::level::warn).empty();
-#	else
+#else
 	(void)a_desc;
 	return false;
-#	endif
+#endif
 }
 
-rhi::PipelineHandle RasterProgram::Pipeline() const
+rhi::PipelineHandle RasterProgram::Pipeline(const org::RecordingContext& a_recording) const
 {
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-	// Non-owning. The registry keeps a replaced payload until every submission that may use it has completed.
-	return (*static_cast<const rhi::PipelinePtr*>(slot->Peek()))->GetHandle();
-#	else
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
+	// Non-owning. The recording's pin keeps the version.
+	return (*static_cast<const rhi::PipelinePtr*>(RenderGraph::PipelineVersions::VersionFor(*slot, a_recording)->payload.get()))->GetHandle();
+#else
+	(void)a_recording;
 	return {};
-#	endif
+#endif
 }
 
 std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, const Desc& a_desc)
 {
-#	if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	// A depth-only program is allowed, since the engine skeleton's depth clears draw one.
 	if ((a_desc.targets.empty() && a_desc.depthFormat == rhi::Format::Unknown) || a_desc.targets.size() > 8) {
 		logger::error("[ORG] {}: a raster program needs 1 to 8 colour targets, or none with a depth format, not {}", a_desc.pixelSource, a_desc.targets.size());
@@ -291,11 +291,11 @@ std::shared_ptr<const RasterProgram> RasterProgram::Load(rhi::Device a_device, c
 	live.rebuild = Rebuild(program, a_device, state, stages);
 	program->slot = registry.Register(std::move(live), std::make_shared<rhi::PipelinePtr>(std::move(pipeline)), Fingerprint(vertex, pixel), builtFor);
 	return program;
-#	else
+#else
 	(void)a_device;
 	logger::warn("[ORG] {}: built without ORGModuleServices' compiler", a_desc.pixelSource);
 	return {};
-#	endif
+#endif
 }
 
 bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_draw) const
@@ -316,6 +316,8 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 		return skip("an empty viewport");
 	if (!slot)
 		return skip("no pipeline slot");
+	if (a_draw.indirectBuffer.valid() && !drawSignature)
+		return skip("an indirect buffer without the program's draw signature");
 	std::array<rhi::ColorAttachment, 8> colours{};
 	for (std::uint32_t i = 0; i < targetCount; ++i) {
 		const auto& colour = a_draw.colours[i];
@@ -359,7 +361,7 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	commands.BeginPass(begin);
 	commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 	commands.BindLayout(layout->GetHandle());
-	commands.BindPipeline(Pipeline());
+	commands.BindPipeline(Pipeline(a_recording));
 	// Set every draw, since the reference holds across the list's passes.
 	commands.SetStencilRef(a_draw.stencilReference);
 	// BeginPass set viewport 0 and the scissor to the render area. A draw's own replace them inside this pass.
@@ -388,7 +390,9 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	if (a_draw.indirect && drawSignature) {
 		const auto region = a_draw.indirect->At(a_recording.Run());
 		commands.ExecuteIndirect(drawSignature->GetHandle(), region.buffer->GetAPIResource().GetHandle(), region.offset + a_draw.indirectOffset, {}, 0, 1);
-	} else
+	} else if (a_draw.indirectBuffer.valid() && drawSignature)
+		commands.ExecuteIndirect(drawSignature->GetHandle(), a_draw.indirectBuffer, a_draw.indirectBufferOffset, {}, 0, 1);
+	else
 		commands.Draw(a_draw.vertexCount, a_draw.instanceCount, 0, 0);
 	if (counted)
 		commands.EndQuery(a_draw.occlusionPool, a_draw.occlusionIndex);
@@ -396,4 +400,3 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	return true;
 }
 
-#endif

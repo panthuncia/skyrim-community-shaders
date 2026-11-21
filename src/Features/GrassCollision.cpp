@@ -44,9 +44,14 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	EnableGrassCollision,
 	TrackRagdolls)
 
+GrassCollision::GrassCollision()
+{
+	settings.EnableGrassCollision.Bind(CS::SettingRegistry::Declare("GrassCollision.EnableGrassCollision"));
+}
+
 void GrassCollision::DrawSettings()
 {
-	ImGui::Checkbox(T(TKEY("enable"), "Enable Grass Collision"), (bool*)&settings.EnableGrassCollision);
+	Util::Checkbox(T(TKEY("enable"), "Enable Grass Collision"), settings.EnableGrassCollision);
 }
 
 void GrassCollision::QueueCollisions()
@@ -275,7 +280,6 @@ void GrassCollision::PostPostLoad()
 {
 	Hooks::Install();
 	GrassShared::OnStoodDownFrame(&GrassCollision::StoodDownUpdate);
-	ORGGrassCollision::Reserve();
 }
 
 ID3D11ShaderResourceView* GrassCollision::CollisionSRV() const

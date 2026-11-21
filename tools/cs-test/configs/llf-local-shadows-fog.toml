@@ -1,0 +1,60 @@
+# Exponential Height Fog's volumetric fog reading Light Limit Fix's local shadow cache (cleanup plan A13, D-1) in Dragonsreach,
+# whose fires cast shadows. Local shadows start on (saved_settings: their hooks install only at startup), the fog and its volumetric
+# fog go on after world-ready, two shots, exit. In a graph mode the fog's client reads the cache by its published ids, so no
+# "Light Limit Fix's local shadows are on D3D11" fallback is logged. The shots should show the fires' shadows in the fog.
+# Compose it: guest+llf-local-shadows-fog, native-vulkan+llf-local-shadows-fog, d3d11+llf-local-shadows-fog.
+extends = ["base"]
+
+[run]
+timeout_s = 400
+
+[saved_settings."Light Limit Fix"]
+EnableLocalShadows = true
+
+[features]
+LightLimitFix = true
+ExponentialHeightFog = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 300
+do = "setting"
+arg = "ExponentialHeightFog.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=1"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fog"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "fog-late"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["fog", "fog-late"]
+no_log = ["frame tap error", "fatal: frame revision:", "Light Limit Fix's local shadows are on D3D11"]
+
+[expect.graph_frames]
+min = { "cs.llf.local-shadows" = 1000, "cs.exp-height-fog" = 900 }

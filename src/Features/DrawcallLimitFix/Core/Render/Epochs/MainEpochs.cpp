@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF
 {
@@ -26,12 +27,37 @@ namespace DCLF
 		return draws;
 	}
 
+	namespace
+	{
+		/**
+		* @brief Whether a_bound is the engine's kMAIN depth in the version the frame runs. In guest mode the context answers the
+		* D3D11 object of the current version, and the field holds a handle over it. In native mode the context answers a handle,
+		* the field's or a port's around the same resource.
+		*/
+		bool IsEngineMainDepth(ID3D11Texture2D* a_bound)
+		{
+			auto* renderer = globals::game::renderer;
+			if (!renderer || !a_bound)
+				return false;
+			auto* field = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
+			if (a_bound == field)
+				return true;
+			namespace Tripwire = RenderGraph::Engine::Tripwire;
+			if (auto* object = Tripwire::Unwrap(field); object && Tripwire::Unwrap(a_bound) == object)
+				return true;
+			const auto graph = Tripwire::GraphResourceOf(field);
+			return graph && Tripwire::GraphResourceOf(a_bound) == graph;
+		}
+	}
+
 	void IndirectDraws::CaptureMainPass()
 	{
 		if (impl->pending)
 			impl->pending->Release();
 		impl->pending = CaptureBindings();
-		impl->mainPassDepth = impl->pending->depth;
+		// Checked now, in this frame's version. A later frame may run a new version of kMAIN after a resize.
+		if (globals::game::renderer)
+			impl->mainPassBindsMainDepth = IsEngineMainDepth(impl->pending->depth.get());
 		impl->mainMinDepth = impl->pending->minDepth;
 		impl->mainMaxDepth = impl->pending->maxDepth;
 	}
@@ -51,10 +77,10 @@ namespace DCLF
 				capture.depth.copy_from(main);
 			}
 		}
-		// The Z-prepass must write the depth the main pass tests against, or nothing reads DCLF's objects.
-		// Compare the objects underneath, since in native mode the capture can hold a port's handle around the same texture.
-		if (!capture.depth ||
-			(impl->mainPassDepth && RenderGraph::Engine::Tripwire::Unwrap(capture.depth.get()) != RenderGraph::Engine::Tripwire::Unwrap(impl->mainPassDepth.get()))) {
+		// The Z-prepass must write the depth the main pass tests against, or nothing reads DCLF's objects. It writes kMAIN, so the
+		// main pass must bind kMAIN. This asks about the slot, not last frame's D3D11 object. After a resize the frame runs a new
+		// version, and the Z-prepass must still run with the main opaque epoch: it hosts the main depth clear.
+		if (!capture.depth || (impl->mainPassBindsMainDepth && !*impl->mainPassBindsMainDepth)) {
 			if (!impl->loggedDepthMismatch) {
 				impl->loggedDepthMismatch = true;
 				logger::warn("[DCLF] The depth pass and the main pass bind different depth textures; the Z-prepass stays with the main pass");
@@ -65,17 +91,10 @@ namespace DCLF
 		if (impl->pending)
 			impl->pending->Release();
 		impl->pending = std::move(capture);
-		ProbeTargets("before z-prepass");
 		// The depth commit runs the hosted epochs' work, the reflection faces and first-person depth, inside its execution.
 		impl->hostedWork = a_hostedWork ? &a_hostedWork : nullptr;
 		RunEpoch(true);
 		impl->hostedWork = nullptr;
-		ProbeTargets("after z-prepass");
-	}
-
-	void IndirectDraws::ProbeTargets(const char* a_label)
-	{
-		Diagnostics::Notify(Diagnostics::TargetPoint{ a_label });
 	}
 
 	void IndirectDraws::ExecuteColour()
@@ -87,11 +106,11 @@ namespace DCLF
 
 	SharedEpochResult IndirectDraws::SubmitSharedEpoch(std::uint32_t a_epoch, const SharedEpochSubmit& a_submit)
 	{
-		if (!impl || failed || a_epoch >= EpochCount())
+		if (!impl || a_epoch >= EpochCount())
 			return {};
 		const auto& traits = EpochTraitsOf(a_epoch);
 		auto& f = impl->sharedEpochs[a_epoch];
-		const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
 		// Once a frame. The engine's blended draw has two call sites, under water before the water and otherwise after it.
 		if (f.submittedFrame == frame)
 			return {};
@@ -128,8 +147,8 @@ namespace DCLF
 		}
 		bool drawn = true;
 		// In the GPU-driven graph, the CPU draws the forward family. Its run is handed to the epoch's late pass ahead of its execution.
-		const bool forwardDirect = !revision.direct && Draws::CurrentGraphConditions().forwardDirect;
-		if (forwardDirect && !Direct::ForwardReached(result.optional)) {
+		const bool cpuForwardHandOff = !revision.direct;
+		if (cpuForwardHandOff && !Direct::ForwardReached(result.optional)) {
 			++f.noSharedPayload;
 			return {};
 		}
@@ -145,7 +164,7 @@ namespace DCLF
 			return {};
 		}
 		if (!ok) {
-			if (forwardDirect)
+			if (cpuForwardHandOff)
 				Direct::ForwardHandOffCancel();
 			++f.failed;
 			return {};
@@ -160,47 +179,31 @@ namespace DCLF
 	{
 		const auto segment = a_depthOnly ? RenderGraphRuntime::Segment::ZPrepass : RenderGraphRuntime::Segment::MainOpaque;
 		DCLF_ZONE("CS.DCLF.RunEpoch");
-		RenderGraphRuntime::EpochBodyScope body(segment);
 		ScopedPerfEvent event(segment == RenderGraphRuntime::Segment::ZPrepass ? "CS DCLF: Z-prepass (CPU)" : "CS DCLF: main opaque (CPU)");
 		const auto start = std::chrono::steady_clock::now();
 		const bool depthOnly = a_depthOnly;
 		const std::size_t jobIndex = depthOnly ? kAsyncZPrepass : kAsyncColour;
-		// The epoch's outcome every frame, for diagnostics.
-		const auto outcome = [&](const char* a_outcome, bool a_executed = false) {
-			if (Diagnostics::Armed<Diagnostics::MainEpochOutcome>())
-				Diagnostics::Notify(Diagnostics::MainEpochOutcome{ Scene::FrameView::Get().GetFrame(), a_outcome, impl->InstalledPayload(),
-					impl->adoptedSnapshot ? impl->adoptedSnapshot->serial : 0, depthOnly, a_executed, Scene::FrameView::Get().NotDrawingYet() });
-		};
 		if (!impl->pending) {
-			outcome("no capture, not submitted");
 			return;
 		}
 		auto capture = std::move(*impl->pending);
 		impl->pending.reset();
 		auto& pipelines = DrawPipelines::Get();
 		auto* lighting = EngineShaders::Lighting();
-		if (failed || !lighting || !pipelines.Enabled() || !FrameIndirectStateValid()) {
-			outcome("failed, no lighting, pipelines off or indirect state invalid, not submitted");
+		if (!lighting || !pipelines.Enabled() || !FrameIndirectStateValid()) {
 			capture.Release();
 			return;
 		}
 		bool ready = false;
 		const auto resourcesBefore = impl->resources;
 		try {
+			// New main resources are made only before DCLF draws, so their graphs build like any other DCLF build.
 			ready = impl->Setup(capture, depthOnly);
-			// New main resources under claims. The graph is built now on this thread because the colour epoch, the frame's last,
-			// draws with them. Only DCLF's epochs are built here, and the next frame waits at its start for a matching snapshot.
-			if (ready && impl->resources != resourcesBefore && resourcesBefore) {
-				(void)RenderGraphRuntime::Get().BuildOwnerEpochsNow("Drawcall Limit Fix: main resources made again under claims");
-				impl->SettleBuildState();
-			}
 		} catch (const std::exception& e) {
-			// Never retried. The feature stays on the native path.
-			logger::error("[DCLF] Main-pass graph resources could not be created: {}", e.what());
-			failed = true;
+			// Graph mode has no engine fallback, so this stops the game.
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the main pass's graph resources could not be created: {}", e.what()));
 		}
 		if (!ready) {
-			outcome("Setup not ready, not submitted");
 			capture.Release();
 			++stats.notReady;
 			return;
@@ -247,10 +250,9 @@ namespace DCLF
 		// Post new resources' context for the snapshot builder now, so the next frame's wait needs nothing posted after its adoption.
 		const bool newResources = resources != resourcesBefore && resourcesBefore;
 		if (newResources)
-			impl->PostResourcesAhead(failed);
+			impl->PostResourcesAhead();
 		// Before DCLF's first covered frame there is nothing to draw, so nothing is submitted.
 		if (Scene::FrameView::Get().NotDrawingYet()) {
-			outcome("not drawing yet, not submitted");
 			capture.Release();
 			return;
 		}
@@ -260,15 +262,14 @@ namespace DCLF
 		std::shared_ptr<MainPayload> ahead = impl->installedDraws ? impl->installedDraws->payloads[jobIndex] : nullptr;
 		if (!revision || !ahead || ahead->inputs.addresses.identity != resources.get()) {
 			// Only resources made at this frame's Setup lead here. Adopting a new payload mid-frame would mismatch the claims, so this
-			// frame's colour epoch is not DCLF's and the next frame waits for a matching snapshot. Anything else is a defect.
+			// frame's colour epoch is not DCLF's, and a later Begin adopts a matching snapshot. Anything else is a defect.
 			if (newResources)
 				logger::info("[DCLF] main resources made at frame {}'s colour pass ({}x{}): its colour epoch is not drawn (no revision of the frame's is for them); "
-							 "the next frame waits at its start for a snapshot made for them",
-					Scene::FrameView::Get().GetFrame(), resources->width, resources->height);
+							 "a later Begin adopts a snapshot made for them",
+					Scene::FrameView::Get().SceneStep(), resources->width, resources->height);
 			else if (revision && resources == resourcesBefore && impl->unbuilt[jobIndex]++ == 0)
 				logger::warn("[DCLF] the {} epoch of frame {} has no payload for its resources in the installed publication: not submitted <- UNBUILT",
-					depthOnly ? "Z-prepass" : "colour", Scene::FrameView::Get().GetFrame());
-			outcome(!revision ? "no revision, not submitted" : !ahead ? "no installed payload, not submitted" : "payload for other resources, not submitted");
+					depthOnly ? "Z-prepass" : "colour", Scene::FrameView::Get().SceneStep());
 			capture.Release();
 			return;
 		}
@@ -278,7 +279,6 @@ namespace DCLF
 
 		auto owners = ExecutionOwners::Make();
 		if (!owners) {
-			outcome("no cleanup lane, not submitted");
 			capture.Release();
 			++stats.notReady;
 			return;
@@ -300,17 +300,16 @@ namespace DCLF
 			owners.Seal(impl->scene.get());
 		}, owners.Handle());
 		impl->committedPayload[jobIndex] = committed;
-		impl->committedFrame[jobIndex] = Scene::FrameView::Get().GetFrame();
+		impl->committedFrame[jobIndex] = Scene::FrameView::Get().SceneStep();
 		capture.Release();
 		++stats.epochs;
-		outcome(!ok ? "FAILED" : committed ? "submitted" : "NOT COMMITTED", true);
 		if (!committed) {
 			stats.cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 			return;
 		}
 		// Only the colour epoch reads back culling counters, since both epochs write the same count buffer.
 		if (ok) {
-			const MainPayload* depth = !depthOnly && impl->committedFrame[kAsyncZPrepass] == Scene::FrameView::Get().GetFrame() ? impl->committedPayload[kAsyncZPrepass] : nullptr;
+			const MainPayload* depth = !depthOnly && impl->committedFrame[kAsyncZPrepass] == Scene::FrameView::Get().SceneStep() ? impl->committedPayload[kAsyncZPrepass] : nullptr;
 			Diagnostics::Notify(Diagnostics::MainEpochDone{ resources, *committed, depth, depthOnly, impl->InstalledPayload(), stats });
 		}
 
@@ -319,14 +318,6 @@ namespace DCLF
 		stats.partMs[7] = stats.cpuMs;
 		if (!ok)
 			logger::error("[DCLF] The main-pass epoch failed; the render graph is disabled");
-	}
-
-	void IndirectDraws::DrainAsync()
-	{
-		impl->WaitAhead();
-		// Wait for Fades' root state write-back.
-		Extensions::RootStatesWait();
-		impl->WaitVisibilityReadback();
 	}
 
 	const Draws::SceneBuffers* IndirectDraws::Scene() const
@@ -462,7 +453,7 @@ namespace DCLF
 				if (const std::uint32_t bit = 1u << (slot + (vertex ? 0 : 16) + (a_depthOnly ? 0 : 8)); !(carriedLogged & bit)) {
 					carriedLogged |= bit;
 					logger::info("[DCLF] {} epoch, frame {}: {} b{} not bound at the capture, supplied from an earlier one ({} bytes)", a_depthOnly ? "zprepass" : "colour",
-						Scene::FrameView::Get().GetFrame(), vertex ? "VS" : "PS", slot, out->size());
+						Scene::FrameView::Get().SceneStep(), vertex ? "VS" : "PS", slot, out->size());
 				}
 				if (vertex && a_depthOnly)
 					prepassVS[slot] = *out;
@@ -473,7 +464,7 @@ namespace DCLF
 	MainInputs IndirectDraws::Impl::PrepareMainInputs(bool a_depthOnly, const Resources& a_resources, std::uint32_t a_vsMask, std::uint32_t a_psMask)
 	{
 		MainInputs in;
-		in.frameNumber = Scene::FrameView::Get().GetFrame();
+		in.frameNumber = Scene::FrameView::Get().SceneStep();
 		in.depthOnly = a_depthOnly;
 		in.vsFrameMask = a_vsMask;
 		in.psFrameMask = a_psMask;

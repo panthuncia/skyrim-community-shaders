@@ -94,7 +94,7 @@ void VolumetricShadows::CopyShadowLightData(ID3D11ShaderResourceView* a_shadowMa
 			return;
 		}
 
-		// The render graph path (CS_ORG_VOLUMETRIC_SHADOWS=1): its passes ran at EarlyPrepass; only the binding happens here.
+		// The render graph path, in graph mode: its passes ran at EarlyPrepass; only the binding happens here.
 		if (auto& orgPath = ORGVolumetricShadows::Get(); orgPath.IsActive()) {
 			ID3D11ShaderResourceView* shadowMap = a_shadowMap;
 			if (shadowMap)
@@ -419,7 +419,6 @@ void VolumetricShadows::EarlyPrepass()
 
 void VolumetricShadows::PostPostLoad()
 {
-	ORGVolumetricShadows::Reserve();
 	stl::write_thunk_call<CreateDepthStencil_VolumetricLighting>(REL::RelocationID(100458, 107175).address() + REL::Relocate(0x9DC, 0x9DC));
 }
 

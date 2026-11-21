@@ -7,17 +7,15 @@
 #include <memory>
 #include <span>
 
-namespace org
-{
-	class LatchBlock;
-}
-
 /**
-* @brief Captures the engine's constant-buffer contents for draws that ORG passes take over, with CS_ORG_ENGINE_CONSTANTS=1.
+* @brief Captures the engine's constant-buffer contents for draws that ORG passes take over, in graph mode (Engine::GraphMode).
 *
 * The engine pools its constant buffers by size and rewrites them with WRITE_DISCARD before each use. So a buffer never
 * identifies a shader, and D3D11 only holds the latest use. The hooks track every write and bind. When a consumer withholds a
 * draw it calls Capture, which copies the bound buffers into a per-frame upload ring, once per buffer version.
+*
+* In graph mode the engine's pool buffers (the 146 that CreateConstantBufferPools makes) are answered from CS memory: a Map of
+* one never reaches DXVK or the native context, and their D3D11 buffers are never written. Only captures read them.
 *
 * Hooks run on whichever thread drives the immediate context, under Renderer::Lock. Captures and the frame end happen on the
 * render owner thread only. A frame's chunks are retired after Present, so a location is only valid within that frame.
@@ -25,8 +23,6 @@ namespace org
 */
 namespace RenderGraph::Engine::Constants
 {
-	bool Requested();
-
 	enum class Stage : std::uint8_t
 	{
 		Vertex,
@@ -76,10 +72,10 @@ namespace RenderGraph::Engine::Constants
 		std::uint32_t size = 0;
 	};
 
-	/** @brief A ByteAddressBuffer at a byte offset. Valid while a_block is held, with this frame's contents until the frame retires. */
+	/** @brief A ByteAddressBuffer at a byte offset. Valid while owner is held, with this frame's contents until the frame retires. */
 	struct Location
 	{
-		std::shared_ptr<const org::LatchBlock> block;
+		std::shared_ptr<const void> owner;  // the ring chunk's frame arena region
 		std::uint32_t srvIndex = 0;
 		std::uint32_t offset = 0;
 		std::uint32_t size = 0;
@@ -116,7 +112,7 @@ namespace RenderGraph::Engine::Constants
 	/** @name Hooks that feed the capture. Inert unless requested. */
 	///@{
 
-	/** @brief Hooks the custom-buffer mapper (75561 / 77362). */
+	/** @brief Hooks the custom-buffer mapper (75561 / 77362), and answers the pool buffers' maps (Tripwire::SetMapHooks). */
 	void InstallGameHooks();
 
 	void InstallD3DHooks(ID3D11DeviceContext* a_context);

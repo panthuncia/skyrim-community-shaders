@@ -1,25 +1,26 @@
 #include "RenderGraph/Frame/Recipe.h"
+#include "RenderGraph/Fatal.h"
+#include "Utils/Hash.h"
 #include "RenderGraph/Frame/Transients.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/RecipeTable.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameClock.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 
-#	include "RenderGraph/Frame/FrameDriver.h"
-#	include "RenderGraph/Frame/RecipeTable.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/Switches.h"
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <Render/RenderGraph/ScheduleTrace.h>
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <Render/RenderGraph/ScheduleTrace.h>
-
-#	include <algorithm>
-#	include <map>
-#	include <mutex>
-#	include <set>
-#	include <string>
-#	include <vector>
+#include <algorithm>
+#include <map>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace RenderGraph::Frame::Recipes
 {
@@ -29,15 +30,14 @@ namespace RenderGraph::Frame::Recipes
 
 		namespace Table = Recipes::Table;
 
-		/** @brief Visits every stage's own graphs and the tickets after them. */
+		/** @brief Visits every stage's own graphs. */
 		template <class F>
 		void ForCheckedEpochs(F&& a_visit)
 		{
 			for (std::uint32_t s = 0; s < kStages; ++s) {
 				const auto& stage = Table::kStageTable[s];
 				for (std::uint32_t e = 0; e < Table::EpochCount(stage); ++e)
-					if (stage.epochs[e].role != Table::Role::Placed)
-						a_visit(s, stage.epochs[e]);
+					a_visit(s, stage.epochs[e]);
 			}
 		}
 
@@ -60,7 +60,7 @@ namespace RenderGraph::Frame::Recipes
 			std::uint64_t printedHash = 0;
 			std::uint32_t prints = 0, unprinted = 0;
 			std::uint32_t passes = 0, previousInputs = 0, outsideInputs = 0, findings = 0, fallbackTraces = 0;
-			std::uint32_t dclfLater = 0;  // resources DCLF's stages declare and only later stages write
+			std::uint32_t sourceLater = 0;  // resources the fragment sources' stages declare and only later stages write
 			std::uint32_t accepted = 0;   // builds the check accepted before their attach
 			std::set<std::string> loggedFindings;
 			bool complete = false;  // a check has seen every epoch's build traced
@@ -138,14 +138,11 @@ namespace RenderGraph::Frame::Recipes
 			for (const auto& finding : a_findings) {
 				if (!a_state.loggedFindings.insert(finding).second)
 					continue;
-				const bool fatal = Switches::Number("CS_ORG_RECIPE_FATAL", Driver::MismatchFatal() ? 1 : 0) != 0;
+				const bool fatal = Driver::MismatchFatal();
 				logger::error("[ORG] world recipe{}: {}", a_when, finding);
-				if (fatal) {
-					const auto message = fmt::format("Community Shaders native mode: the world recipe reads a resource before the pass that writes it{}: {}", a_when, finding);
-					logger::critical("[ORG] world recipe: {}", message);
-					spdlog::default_logger()->flush();
-					stl::report_and_fail(message);
-				}
+				if (fatal)
+					RenderGraph::Fatal("world recipe", fmt::format("{}: the world recipe reads a resource before the pass that writes it{}: {}", Driver::ModeName(), a_when, finding));
+				Driver::RaiseViolationWarning("world recipe order");
 			}
 		}
 
@@ -183,7 +180,7 @@ namespace RenderGraph::Frame::Recipes
 			for (std::uint32_t i = 0; i < a_passes.size(); ++i)
 				for (const auto& name : a_passes[i].writes)
 					firstWriter.try_emplace(name, i);
-			std::set<std::string> previous, outside, found, dclfLater;
+			std::set<std::string> previous, outside, found, sourceLater;
 			for (std::uint32_t i = 0; i < a_passes.size(); ++i)
 				for (const auto& name : a_passes[i].reads) {
 					const auto writer = firstWriter.find(name);
@@ -197,8 +194,8 @@ namespace RenderGraph::Frame::Recipes
 						previous.insert(name);
 						continue;
 					}
-					if (Table::kStageTable[a_passes[i].stage].owner == Owner::Dclf) {
-						dclfLater.insert(name);
+					if (Table::kStageTable[a_passes[i].stage].owner == Owner::Fragment) {
+						sourceLater.insert(name);
 						continue;
 					}
 					if (!found.insert(name).second)
@@ -235,13 +232,13 @@ namespace RenderGraph::Frame::Recipes
 			a_state.previousInputs = static_cast<std::uint32_t>(previous.size());
 			a_state.outsideInputs = static_cast<std::uint32_t>(outside.size());
 			a_state.findings = static_cast<std::uint32_t>(a_findings.size());
-			a_state.dclfLater = static_cast<std::uint32_t>(dclfLater.size());
+			a_state.sourceLater = static_cast<std::uint32_t>(sourceLater.size());
 		}
 	}
 
 	namespace
 	{
-		const char* OwnerMark(Owner a_owner) { return a_owner == Owner::Dclf ? "*" : ""; }
+		const char* OwnerMark(Owner a_owner) { return a_owner == Owner::Fragment ? "*" : ""; }
 
 		bool SameStages(const Table::KindRecipe& a_left, const Table::KindRecipe& a_right)
 		{
@@ -306,7 +303,7 @@ namespace RenderGraph::Frame::Recipes
 		std::vector<PositionedEpoch> out;
 		// A stage's own graphs only. HDR output and frame generation keep their own tickets and stay outside the frame arena.
 		ForCheckedEpochs([&](std::uint32_t a_stage, const Table::Epoch& a_epoch) {
-			if (a_epoch.role == Table::Role::Graph && !FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(a_epoch.segment)))
+			if (!FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(a_epoch.segment)))
 				out.push_back({ EpochOfSegment(a_epoch.segment), Table::kStageTable[a_stage].id, Table::kStageTable[a_stage].owner });
 		});
 		return out;
@@ -342,7 +339,7 @@ namespace RenderGraph::Frame::Recipes
 	static void LogGraphResources(org::GraphHost& a_host)
 	{
 		static const auto at = Switches::Number("CS_ORG_GRAPH_RESOURCES_FRAME", 0);
-		if (!at || Driver::Current().frame != at)
+		if (!at || RenderGraph::FrameClock::BeginFrame() != at)
 			return;
 		for (std::size_t i = 0; i < a_host.GraphCount(); ++i) {
 			auto* graph = a_host.GraphAt(i);
@@ -404,10 +401,10 @@ namespace RenderGraph::Frame::Recipes
 		Validate(state, passes, findings);
 		Report(state, findings, "");
 		// Printed when its passes changed.
-		std::uint64_t hash = 1469598103934665603ull;
+		Util::Fnv1a fnv;
 		for (const auto& pass : passes)
-			for (const char c : pass.name)
-				hash = (hash ^ static_cast<std::uint8_t>(c)) * 1099511628211ull;
+			fnv.Bytes(pass.name);
+		const std::uint64_t hash = fnv.Value();
 		if (hash == state.printedHash)
 			return;
 		state.printedHash = hash;
@@ -415,9 +412,9 @@ namespace RenderGraph::Frame::Recipes
 			++state.unprinted;
 			return;
 		}
-		logger::info("[ORG] world recipe ({} passes; {} inputs from the previous frame, {} from outside the graphs, {} declared by Drawcall Limit Fix's stages "
+		logger::info("[ORG] world recipe ({} passes; {} inputs from the previous frame, {} from outside the graphs, {} declared by the fragment sources' stages "
 					 "and written later; {} findings):",
-			passes.size(), state.previousInputs, state.outsideInputs, state.dclfLater, findings.size());
+			passes.size(), state.previousInputs, state.outsideInputs, state.sourceLater, findings.size());
 		for (std::uint32_t s = 0; s < kStages; ++s) {
 			std::string text;
 			std::uint32_t count = 0;
@@ -447,32 +444,5 @@ namespace RenderGraph::Frame::Recipes
 		++state.accepted;
 		Report(state, findings, fmt::format(" (epoch {}'s new build, before its attach)", a_epoch));
 	}
-
-	void LogStats()
-	{
-		auto& state = Get();
-		const std::lock_guard lock(state.mutex);
-		logger::info("[ORG] world recipe: {} passes, {} inputs from the previous frame, {} from outside the graphs, {} declared by Drawcall Limit Fix's stages and "
-					 "written later, {} findings; {} schedules traced on the render owner; {} changed recipes not printed; {} builds checked before their attach",
-			state.passes, state.previousInputs, state.outsideInputs, state.dclfLater, state.findings, state.fallbackTraces, state.unprinted, state.accepted);
-	}
 }
 
-#else
-
-namespace RenderGraph::Frame::Recipes
-{
-	const char* StageName(StageId) { return "?"; }
-	std::vector<PositionedEpoch> PositionedEpochs() { return {}; }
-	bool KindHas(Kind a_kind, bool a_capture, SegmentId) { return a_kind == Kind::World || (a_kind == Kind::FrozenWorld && a_capture); }
-	std::string DescribeKind(Kind, bool) { return {}; }
-	std::string DiffKinds(Kind, bool, Kind, bool) { return {}; }
-	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph&, std::uint32_t) { return {}; }
-	bool Traced(std::uint32_t) { return false; }
-	void NoteTrace(std::uint32_t, std::uint64_t, std::shared_ptr<const org::ScheduleTrace>) {}
-	void Accept(std::uint32_t, const std::shared_ptr<const org::ScheduleTrace>&) {}
-	void Check(org::GraphHost&) {}
-	void LogStats() {}
-}
-
-#endif

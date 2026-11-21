@@ -371,7 +371,7 @@ public:
 	void SetAdapterDescription(const std::wstring& description);
 
 	bool frameAnnotations = false;
-	// The saved "Frame Annotations" value while CS_GPU_IDLE_TRACE forces annotations on.
+	// The saved "Frame Annotations" value while the GPU event timers or counters force annotations on.
 	std::optional<bool> frameAnnotationsSetting;
 	/** @brief Debugger events are being emitted (Frame Annotations, or a capture tool is attached). */
 	bool debuggerEvents = false;

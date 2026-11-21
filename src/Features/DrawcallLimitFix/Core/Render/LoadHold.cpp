@@ -3,7 +3,6 @@
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
-#include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
@@ -11,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "Testing/Testing.h"
 #include "Utils/SwitchFile.h"
 
@@ -123,11 +123,9 @@ namespace DCLF::LoadHold
 			return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
 		}
 
-		/** @brief Main thread. Starts a hold while DCLF runs. True when the menu's close is kept. */
+		/** @brief Main thread. Starts a hold. True when the menu's close is kept. */
 		bool Begin()
 		{
-			if (!ShellState::Running())
-				return false;
 			const bool menu = MenuOpen();
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
@@ -377,7 +375,7 @@ namespace DCLF::LoadHold
 		const auto now = state.load(std::memory_order_acquire);
 		// The first world frames after a load's hold can still need a re-entry, because the graph rebuilds for re-made targets
 		// and shadow views and occlusion maps are not DCLF's for a frame.
-		if ((now == HoldState::Idle || now == HoldState::Releasing) && !reentryBlocked && ShellState::Running() && !Scene::FrameView::Get().NotDrawingYet() &&
+		if ((now == HoldState::Idle || now == HoldState::Releasing) && !reentryBlocked && !Scene::FrameView::Get().NotDrawingYet() &&
 			!Scene::FrameView::LoadShown()) {
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
@@ -389,17 +387,26 @@ namespace DCLF::LoadHold
 		NoteHeld(View::Shadow);
 	}
 
-	void OnFrameStart(bool a_running)
+	void NoteUndrawable(View a_view, std::string_view a_why)
 	{
-		if (a_running)
-			WatchMapStart();
+		if (Active()) {
+			NoteHeld(a_view);
+			return;
+		}
+		// Before the world draws, or under a loading screen, nothing is drawn yet.
+		auto& view = Scene::FrameView::Get();
+		if (view.NotDrawingYet() || Scene::FrameView::LoadShown())
+			return;
+		::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::Uncovered, ::RenderGraph::Frame::SegmentId::Count,
+			fmt::format("DCLF: frame {}: {}", view.SceneStep(), a_why));
+	}
+
+	void OnFrameStart()
+	{
+		WatchMapStart();
 		const auto now = state.load(std::memory_order_acquire);
 		if (now == HoldState::Idle || now == HoldState::Releasing)
 			return;
-		if (!a_running) {
-			Release("Drawcall Limit Fix does not run", false);
-			return;
-		}
 		// The world's first frame under the kept menu. The load is done, so tables are built from here.
 		if (now == HoldState::Closing) {
 			StoreState(HoldState::Holding);
@@ -408,7 +415,7 @@ namespace DCLF::LoadHold
 		}
 	}
 
-	void OnFrameEnd(bool a_running)
+	void OnFrameEnd()
 	{
 		WatchMap();
 		const auto now = state.load(std::memory_order_acquire);
@@ -422,12 +429,8 @@ namespace DCLF::LoadHold
 			reentryBlocked = false;
 		if (now != HoldState::Holding) {
 			// Outside a load, what is not ready is withheld, never handed to the engine.
-			if (now == HoldState::Idle && a_running && !Scene::FrameView::LoadShown())
+			if (now == HoldState::Idle && !Scene::FrameView::LoadShown())
 				WatchAfterHold();
-			return;
-		}
-		if (!a_running) {
-			Release("Drawcall Limit Fix does not run", false);
 			return;
 		}
 		if (withMenu.load(std::memory_order_relaxed) && !MenuOpen()) {
@@ -435,7 +438,7 @@ namespace DCLF::LoadHold
 			return;
 		}
 		// Only frames that drew the world count.
-		const std::uint32_t scene = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t scene = Scene::FrameView::Get().SceneStep();
 		if (scene == 0 || scene == std::exchange(hold.lastScene, scene)) {
 			hold.heldThisFrame = false;
 			return;

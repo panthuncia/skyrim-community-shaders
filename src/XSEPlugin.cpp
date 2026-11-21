@@ -12,10 +12,10 @@
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
 #include "NativeMenu/NativeMenu.h"
-#include "RenderGraph/Engine/D3D12SelfTest.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Testing/OrgCommands.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/LogTee.h"
@@ -132,8 +132,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 			if (errors.empty()) {
 				// Tripwire handles: self-test and report only (CS_ORG_TRIPWIRE_SELFTEST, CS_ORG_TRIPWIRE_LOG); no engine hooks.
 				RenderGraph::Engine::Tripwire::Start();
-				// CS_ORG_D3D12_SELFTEST=1: the D3D12 backend on a device of its own, beside the game.
-				RenderGraph::Engine::D3D12SelfTest::Start();
+				// The render graph's test commands (org:). Not in Release builds.
+				RenderGraph::TestSupport::Install();
 				Deferred::Hooks::Install();
 				Hooks::Install();
 				EngineFix::InstallOnPostPostLoadFixes();
@@ -147,6 +147,9 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 
 				// Run feature PostPostLoad() first so features can disable themselves if needed
 				Feature::ForEachLoadedFeature("PostPostLoad", [](Feature* feature) { feature->PostPostLoad(); });
+				// Native and guest mode draw the world through DCLF, so a DCLF that did not load is a startup error there.
+				if (!globals::features::drawcallLimitFix.loaded)
+					RenderGraph::Engine::Native::RequireDclf("its feature did not load (see its line above)");
 				// The test runner, once DCLF's switches and commands are registered.
 				Testing::OnSkseMessage(message->type);
 

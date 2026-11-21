@@ -3,6 +3,7 @@
 // commits share.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
+#include "Utils/Hash.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
@@ -95,7 +96,7 @@ namespace DCLF
 
 			/** @brief Lay out a_plan's sub-ranges from their capacities, and fill its latch words. */
 			void LayOutSetClasses(const MainLayout& a_layout, const IndirectState& a_indirect, std::span<const std::array<bool, kDecalGroups>> a_decals,
-				std::span<const std::uint32_t> a_forwardSets, std::span<const std::uint32_t> a_mainSets, std::span<const std::uint32_t> a_terrainSets,
+				std::span<const std::uint32_t> a_mainSets, std::span<const std::uint32_t> a_terrainSets,
 				std::span<const std::uint32_t> a_terrainGroups, std::span<const std::uint32_t> a_decalGroups, SetClassPlan& a_plan)
 			{
 				auto& classes = a_plan.classes;
@@ -141,16 +142,7 @@ namespace DCLF
 				a_plan.map.assign(kClassHeaderWords, 0u);
 				a_plan.map[0] = static_cast<std::uint32_t>(a_indirect.classOf.size());
 				a_plan.map.insert(a_plan.map.end(), a_indirect.classOf.begin(), a_indirect.classOf.end());
-				// Without device-generated commands the plain buckets are the only colour draws, so their switches are ignored.
 				const bool deviceGenerated = DrawPipelines::Get().DeviceGenerated();
-				const auto plainOn = [&](Switch a_switch) {
-					if (SwitchOnUnlessZero(a_switch))
-						return true;
-					static std::atomic<bool> logged{ false };
-					if (!deviceGenerated && !logged.exchange(true))
-						logger::warn("[DCLF] plain buckets: a CS_DCLF_*_PLAIN switch is off, ignored without device-generated commands");
-					return !deviceGenerated;
-				};
 				// Plain buckets for one range. All or nothing: if any set index with draws lacks a plain colour pipeline, there are none,
 				// or a frame would draw some draws twice or not at all.
 				const auto plan = [&](bool a_on, std::span<const std::uint32_t> a_sets, std::span<const std::uint32_t> a_groups, std::span<std::uint32_t> a_firsts,
@@ -189,11 +181,11 @@ namespace DCLF
 						a_plan.map.push_back(bucket.capacity);
 					}
 				};
-				std::array<std::uint32_t, 1> forwardFirst{ a_layout.sequenceDraws + a_layout.terrainCapacity[0] + a_layout.terrainCapacity[1] }, mainFirst{ 0u };
+				// The forward section has no buckets: the CPU pipeline's forward site draws the forward family.
+				std::array<std::uint32_t, 1> mainFirst{ 0u };
 				std::array<std::uint32_t, kTerrainGroups> terrainFirsts{ a_layout.sequenceDraws, a_layout.sequenceDraws + a_layout.terrainCapacity[0] };
-				plan(plainOn(Switch::ForwardPlain), a_forwardSets, {}, forwardFirst, 2, a_plan.forward, 1);
-				plan(plainOn(Switch::MainPlain), a_mainSets, {}, mainFirst, 1, a_plan.main, 2);
-				plan(plainOn(Switch::TerrainPlain), a_terrainSets, a_terrainGroups, terrainFirsts, 1, a_plan.terrain, 3);
+				plan(true, a_mainSets, {}, mainFirst, 1, a_plan.main, 2);
+				plan(true, a_terrainSets, a_terrainGroups, terrainFirsts, 1, a_plan.terrain, 3);
 				// Decal buckets take two decal sub-ranges per set index, after the classes' ones. All or nothing again, and groups with a
 				// depth prepass also need a plain depth pipeline.
 				a_plan.decals.clear();
@@ -201,7 +193,7 @@ namespace DCLF
 				for (const auto& range : Extensions::MainRanges().drawn)
 					if (range.slot < kDecalGroups && range.depthPrepass)
 						depthPrepass[range.slot] = true;
-				bool plainDecals = plainOn(Switch::DecalPlain) && std::ranges::any_of(a_decalGroups, [](std::uint32_t a_group) { return a_group != 0; });
+				bool plainDecals = std::ranges::any_of(a_decalGroups, [](std::uint32_t a_group) { return a_group != 0; });
 				std::uint32_t declinedSet = kNoBucket;
 				const char* declined = "";
 				for (std::uint32_t set = 0; plainDecals && set < a_decalGroups.size(); ++set) {
@@ -224,9 +216,9 @@ namespace DCLF
 				                                            (1ull << 32) | declinedSet;
 				if (lastOutcome.exchange(outcome, std::memory_order_relaxed) != outcome) {
 					if (plainDecals)
-						logger::info("[DCLF] decal buckets (CS_DCLF_DECAL_PLAIN): {} decal set indices drawn plain", outcome);
+						logger::info("[DCLF] decal buckets: {} decal set indices drawn plain", outcome);
 					else if (declinedSet != kNoBucket)
-						logger::info("[DCLF] decal buckets (CS_DCLF_DECAL_PLAIN): none, decal set index {} (group {}) has {}", declinedSet, a_decalGroups[declinedSet], declined);
+						logger::info("[DCLF] decal buckets: none, decal set index {} (group {}) has {}", declinedSet, a_decalGroups[declinedSet], declined);
 				}
 				if (plainDecals) {
 					std::vector<std::uint32_t> bucketOf(a_indirect.classOf.size(), kNoBucket);
@@ -256,7 +248,7 @@ namespace DCLF
 			a_out = {};
 			a_out.classes.resize(a_indirect.classes.size());
 			std::vector<std::array<bool, kDecalGroups>> decals(a_indirect.classes.size());
-			std::vector<std::uint32_t> forwardSets(a_indirect.classOf.size(), 0u), mainSets(a_indirect.classOf.size(), 0u), terrainSets(a_indirect.classOf.size(), 0u),
+			std::vector<std::uint32_t> mainSets(a_indirect.classOf.size(), 0u), terrainSets(a_indirect.classOf.size(), 0u),
 				terrainGroups(a_indirect.classOf.size(), 0u), decalGroups(a_indirect.classOf.size(), 0u);
 			const auto slots = static_cast<std::uint32_t>(std::min(a_layout.slotCapacity.size(), a_tables.pipelines.size()));
 			for (std::uint32_t p = 0; p < slots; ++p) {
@@ -268,9 +260,7 @@ namespace DCLF
 					decalGroups[a_lookups.pipelines[p].setIndex] = r - ClassRangeOfSlot(0) + 1;
 				} else
 					a_out.classes[c].ranges[r].capacity += a_layout.slotCapacity[p];
-				if (r == kClassRangeForward)
-					forwardSets[a_lookups.pipelines[p].setIndex] += a_layout.slotCapacity[p];
-				else if (r == kClassRangeMain)
+				if (r == kClassRangeMain)
 					mainSets[a_lookups.pipelines[p].setIndex] += a_layout.slotCapacity[p];
 				else if (r >= ClassRangeOfSlot(kDecalGroups) && r < ClassRangeOfSlot(kDecalGroups + kTerrainGroups)) {
 					const std::uint32_t set = a_lookups.pipelines[p].setIndex;
@@ -278,13 +268,12 @@ namespace DCLF
 					terrainGroups[set] = r - ClassRangeOfSlot(kDecalGroups) + 1;
 				}
 			}
-			LayOutSetClasses(a_layout, a_indirect, decals, forwardSets, mainSets, terrainSets, terrainGroups, decalGroups, a_out);
+			LayOutSetClasses(a_layout, a_indirect, decals, mainSets, terrainSets, terrainGroups, decalGroups, a_out);
 			static std::atomic<std::uint64_t> lastBuckets{ ~0ull };
-			const std::uint64_t buckets = std::uint64_t(a_out.main.size()) | (std::uint64_t(a_out.terrain.size()) << 16) | (std::uint64_t(a_out.decals.size()) << 32) |
-			                              (std::uint64_t(a_out.forward.size()) << 48);
+			const std::uint64_t buckets = std::uint64_t(a_out.main.size()) | (std::uint64_t(a_out.terrain.size()) << 16) | (std::uint64_t(a_out.decals.size()) << 32);
 			if (lastBuckets.exchange(buckets, std::memory_order_relaxed) != buckets)
-				logger::info("[DCLF] plain buckets: main {}, terrain {}, decals {}, forward {} (of {} set indices, {} with main slots)", a_out.main.size(),
-					a_out.terrain.size(), a_out.decals.size(), a_out.forward.size(), a_indirect.classOf.size(),
+				logger::info("[DCLF] plain buckets: main {}, terrain {}, decals {} (of {} set indices, {} with main slots)", a_out.main.size(),
+					a_out.terrain.size(), a_out.decals.size(), a_indirect.classOf.size(),
 					std::ranges::count_if(mainSets, [](std::uint32_t a_capacity) { return a_capacity != 0; }));
 		}
 
@@ -315,8 +304,6 @@ namespace DCLF
 			}
 			auto addConstants = [&](std::size_t a_bytes, std::uint64_t a_offset) { add(constants, a_bytes, a_offset); };
 			FrameRowWrites([](void* a_add, std::size_t a_bytes, std::uint64_t a_offset) { (*static_cast<decltype(addConstants)*>(a_add))(a_bytes, a_offset); }, &addConstants);
-			if (!a_depthOnly && a_resources.foliage)
-				add(constants, 8 * sizeof(std::uint32_t), std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame));
 			if (a_depthOnly)
 				Extensions::LatchSceneResources(a_resources.scene->sceneResources,
 					[](void* a_add, const std::shared_ptr<org::Buffer>& a_buffer, const Versioned& a_versioned, std::size_t a_bytes) {
@@ -429,7 +416,7 @@ namespace DCLF
 	{
 		void MixWitness(std::uint64_t& a_hash, std::uint64_t a_value)
 		{
-			a_hash = (a_hash ^ a_value) * 0x100000001b3ull;
+			a_hash = (a_hash ^ a_value) * Util::Fnv1a::kPrime;
 			a_hash ^= a_hash >> 29;
 		}
 
@@ -439,7 +426,7 @@ namespace DCLF
 		 */
 		std::uint64_t LookupsWitness(const Lookups& a_lookups, const SceneTables& a_tables)
 		{
-			std::uint64_t hash = 0xcbf29ce484222325ull;
+			std::uint64_t hash = Util::Fnv1a::kOffset;
 			const std::size_t slots = a_lookups.pipelines.size(), tabled = a_tables.pipelines.size();
 			MixWitness(hash, a_lookups.instance);
 			MixWitness(hash, slots);
@@ -458,7 +445,7 @@ namespace DCLF
 		/** @brief A hash of the map rows of every mode and rasterizer state pair the shadow layouts draw. */
 		std::uint64_t ShadowRowsWitness(const Lookups& a_lookups, const std::vector<ShadowViewLayout>& a_placements, const std::vector<ShadowViewLayout>& a_occlusion)
 		{
-			std::uint64_t hash = 0xcbf29ce484222325ull;
+			std::uint64_t hash = Util::Fnv1a::kOffset;
 			std::array<std::uint64_t, 16> seen{};
 			std::size_t pairs = 0;
 			const auto rows = [&](const std::vector<ShadowViewLayout>& a_layouts) {
@@ -483,7 +470,7 @@ namespace DCLF
 		/** @brief A hash of the frame-moved values the requirement pass reads besides the inputs and the publication. */
 		std::uint64_t VolatileWitness(const RevisionInputs& a_inputs)
 		{
-			std::uint64_t hash = 0xcbf29ce484222325ull;
+			std::uint64_t hash = Util::Fnv1a::kOffset;
 			const auto targets = [&hash](const auto& a_latched) {
 				const auto keys = a_latched.load(std::memory_order_acquire);
 				MixWitness(hash, keys ? keys->size() + 1 : 0);
@@ -492,7 +479,7 @@ namespace DCLF
 						MixWitness(hash, reinterpret_cast<std::uintptr_t>(key));
 			};
 			if (const auto& s = a_inputs.scene) {
-				MixWitness(hash, s->visibilityEvents && s->visibilityReadback ? s->visibilityReadback->wanted.load(std::memory_order_acquire) : 0u);
+				MixWitness(hash, s->visibilityEvents && s->visibilityReadback ? s->visibilityReadback->list->Wanted() : 0u);
 				MixWitness(hash, s->pool ? s->pool->fragmentedAt.load(std::memory_order_relaxed) : 0u);
 			}
 			if (a_inputs.main)
@@ -518,7 +505,7 @@ namespace DCLF
 		 */
 		std::uint64_t TablesWitness(const SceneTables& a_tables, const Draws::DrawBoundStore& a_bound)
 		{
-			std::uint64_t hash = 0xcbf29ce484222325ull;
+			std::uint64_t hash = Util::Fnv1a::kOffset;
 			MixWitness(hash, a_tables.objects.size());
 			MixWitness(hash, a_bound.draws);
 			MixWitness(hash, a_bound.shadowVersion);
@@ -580,224 +567,6 @@ namespace DCLF
 			return a_reuse.valid ? MovedRequirements(a_reuse.key, a_key) : ~0u;
 		}
 
-		/** @brief For CS_DCLF_PERSISTENT_PARITY. Whether every made shape matches the kept one. */
-		bool SameMadeShapes(const MadeShapes& a_kept, const MadeShapes& a_made)
-		{
-			const auto same = [](const auto& a_old, const auto& a_new) { return a_old == a_new || (a_old && a_new && a_old->SameShape(*a_new)); };
-			for (std::size_t s = 0; s < a_kept.main.size(); ++s)
-				if (!same(a_kept.main[s], a_made.main[s]))
-					return false;
-			for (std::size_t v = 0; v < a_kept.views.size(); ++v)
-				if (!same(a_kept.views[v], a_made.views[v]))
-					return false;
-			if (a_kept.shadow.size() != a_made.shadow.size())
-				return false;
-			for (std::size_t i = 0; i < a_kept.shadow.size(); ++i)
-				if (!same(a_kept.shadow[i], a_made.shadow[i]))
-					return false;
-			return true;
-		}
-
-		// The CS_DCLF_PERSISTENT_PARITY report helpers. Each names the first differing field, in the same order SameShape compares.
-		template <class H>
-		std::string HandleText(const H& a_handle)
-		{
-			return fmt::format("{}:{}", a_handle.index, a_handle.generation);
-		}
-
-		template <class H>
-		std::string HandleDifference(const char* a_what, const H& a_old, const H& a_new)
-		{
-			return SameHandle(a_old, a_new) ? std::string() : fmt::format("{} {} -> {}", a_what, HandleText(a_old), HandleText(a_new));
-		}
-
-		template <class T>
-		std::string ValueDifference(const char* a_what, const T& a_old, const T& a_new)
-		{
-			return a_old == a_new ? std::string() : fmt::format("{} {} -> {}", a_what, a_old, a_new);
-		}
-
-		std::string LatchedDifference(const char* a_what, const LatchedList& a_old, const LatchedList& a_new)
-		{
-			if (a_old.latch != a_new.latch)
-				return fmt::format("{}: latch block {} -> {}", a_what, fmt::ptr(a_old.latch.get()), fmt::ptr(a_new.latch.get()));
-			if (a_old.fixed != a_new.fixed)
-				return fmt::format("{}: fixed {} -> {}", a_what, a_old.fixed, a_new.fixed);
-			if (a_old.copies.size() != a_new.copies.size())
-				return fmt::format("{}: copies {} -> {}", a_what, a_old.copies.size(), a_new.copies.size());
-			for (std::size_t c = 0; c < a_old.copies.size(); ++c)
-				if (const auto &o = a_old.copies[c], &n = a_new.copies[c]; !(o == n))
-					return fmt::format("{}: copy {} (target {} at {} bytes {} to {}) -> (target {} at {} bytes {} to {})", a_what, c, fmt::ptr(o.target), o.latchOffset,
-						o.bytes, o.dstOffset, fmt::ptr(n.target), n.latchOffset, n.bytes, n.dstOffset);
-			return {};
-		}
-
-		std::string IndirectDifference(const IndirectState& a_old, const IndirectState& a_new)
-		{
-			if (a_old.valid != a_new.valid)
-				return fmt::format("indirect valid {} -> {}", a_old.valid, a_new.valid);
-			if (a_old.classes.size() != a_new.classes.size())
-				return fmt::format("indirect state classes {} -> {}", a_old.classes.size(), a_new.classes.size());
-			for (std::size_t c = 0; c < a_old.classes.size(); ++c) {
-				const auto &o = a_old.classes[c], &n = a_new.classes[c];
-				if (auto d = ValueDifference("indirect class pipelines", o.pipelines, n.pipelines); !d.empty())
-					return fmt::format("{} (class {})", d, c);
-				for (std::size_t i = 0; i < o.sets.size(); ++i) {
-					if (auto d = HandleDifference("indirect set", o.sets[i], n.sets[i]); !d.empty())
-						return fmt::format("{} (class {} variant {})", d, c, i);
-					if (auto d = HandleDifference("indirect signature", o.signatures[i], n.signatures[i]); !d.empty())
-						return fmt::format("{} (class {} variant {})", d, c, i);
-				}
-			}
-			for (auto d : { HandleDifference("indirect layout", a_old.layout, a_new.layout), HandleDifference("indirect zLayout", a_old.zLayout, a_new.zLayout),
-					 HandleDifference("indirect zDrawSignature", a_old.zDrawSignature, a_new.zDrawSignature),
-					 HandleDifference("indirect refraction pipeline", a_old.refraction, a_new.refraction),
-					 ValueDifference("indirect refraction format", static_cast<int>(a_old.refractionFormat), static_cast<int>(a_new.refractionFormat)) })
-				if (!d.empty())
-					return d;
-			return {};
-		}
-
-		std::string ShapeDifference(const PassFrame& a_old, const PassFrame& a_new)
-		{
-			if (!(a_old.zCalls == a_new.zCalls)) {
-				if (a_old.zCalls.size() != a_new.zCalls.size())
-					return fmt::format("zCalls {} -> {}", a_old.zCalls.size(), a_new.zCalls.size());
-				for (std::size_t c = 0; c < a_old.zCalls.size(); ++c)
-					if (const auto &o = a_old.zCalls[c], &n = a_new.zCalls[c]; !(o == n))
-						return fmt::format("zCall {} (bucket {} first {} capacity {} pipeline {} near {}) -> (bucket {} first {} capacity {} pipeline {} near {})", c, o.bucket,
-							o.first, o.capacity, HandleText(o.pipeline), o.terrainNear, n.bucket, n.first, n.capacity, HandleText(n.pipeline), n.terrainNear);
-			}
-			if (auto d = LatchedDifference("latched", a_old.latched, a_new.latched); !d.empty())
-				return d;
-			if (a_old.classes.size() != a_new.classes.size())
-				return fmt::format("state classes {} -> {}", a_old.classes.size(), a_new.classes.size());
-			for (std::size_t c = 0; c < a_old.classes.size(); ++c) {
-				const auto &o = a_old.classes[c], &n = a_new.classes[c];
-				if (o.keyBase != n.keyBase || o.size != n.size)
-					return fmt::format("class {} keys (first {} size {}) -> (first {} size {})", c, o.keyBase, o.size, n.keyBase, n.size);
-				for (std::size_t r = 0; r < o.ranges.size(); ++r)
-					if (!(o.ranges[r] == n.ranges[r]))
-						return fmt::format("class {} range {} (first {} capacity {}) -> (first {} capacity {})", c, r, o.ranges[r].first, o.ranges[r].capacity, n.ranges[r].first,
-							n.ranges[r].capacity);
-			}
-			for (std::size_t g = 0; g < a_old.terrainCapacity.size(); ++g)
-				if (auto d = ValueDifference("terrainCapacity", a_old.terrainCapacity[g], a_new.terrainCapacity[g]); !d.empty())
-					return fmt::format("{} (group {})", d, g);
-			for (auto d : { ValueDifference("forwardCapacity", a_old.forwardCapacity, a_new.forwardCapacity),
-					 ValueDifference("refractionCapacity", a_old.refractionCapacity, a_new.refractionCapacity),
-					 ValueDifference("sequenceDraws", a_old.sequenceDraws, a_new.sequenceDraws), ValueDifference("sequenceDecals", a_old.sequenceDecals, a_new.sequenceDecals),
-					 ValueDifference("cullMode", a_old.cullMode, a_new.cullMode), ValueDifference("width", a_old.width, a_new.width),
-					 ValueDifference("height", a_old.height, a_new.height), ValueDifference("minDepth", a_old.minDepth, a_new.minDepth),
-					 ValueDifference("maxDepth", a_old.maxDepth, a_new.maxDepth), HandleDifference("resourceHeap", a_old.resourceHeap, a_new.resourceHeap),
-					 HandleDifference("samplerHeap", a_old.samplerHeap, a_new.samplerHeap), IndirectDifference(a_old.indirect, a_new.indirect) })
-				if (!d.empty())
-					return d;
-			if (a_old.latch != a_new.latch)
-				return fmt::format("latch block {} -> {}", fmt::ptr(a_old.latch.get()), fmt::ptr(a_new.latch.get()));
-			return {};
-		}
-
-		std::string ShapeDifference(const ViewFrame& a_old, const ViewFrame& a_new)
-		{
-			if (a_old.latch != a_new.latch)
-				return fmt::format("latch block {} -> {}", fmt::ptr(a_old.latch.get()), fmt::ptr(a_new.latch.get()));
-			for (std::size_t l = 0; l < a_old.latched.size(); ++l)
-				if (auto d = LatchedDifference(l == 0 ? "latched (from latch)" : l == 1 ? "latched (zeros)" : "latched (frame)", a_old.latched[l], a_new.latched[l]); !d.empty())
-					return d;
-			for (auto d : { HandleDifference("resourceHeap", a_old.resourceHeap, a_new.resourceHeap), HandleDifference("samplerHeap", a_old.samplerHeap, a_new.samplerHeap),
-					 IndirectDifference(a_old.indirect, a_new.indirect), ValueDifference("width", a_old.width, a_new.width), ValueDifference("height", a_old.height, a_new.height),
-					 ValueDifference("depthRange", a_old.depthRange, a_new.depthRange), ValueDifference("sequenceDraws", a_old.sequenceDraws, a_new.sequenceDraws) })
-				if (!d.empty())
-					return d;
-			if (a_old.buckets.size() != a_new.buckets.size())
-				return fmt::format("buckets {} -> {}", a_old.buckets.size(), a_new.buckets.size());
-			for (std::size_t b = 0; b < a_old.buckets.size(); ++b)
-				if (const auto &o = a_old.buckets[b], &n = a_new.buckets[b]; !(o == n))
-					return fmt::format("bucket {} (depth {} colour {} first {} capacity {}) -> (depth {} colour {} first {} capacity {})", b, HandleText(o.depth), HandleText(o.colour),
-						o.first, o.capacity, HandleText(n.depth), HandleText(n.colour), n.first, n.capacity);
-			if (a_old.push.size() != a_new.push.size())
-				return fmt::format("push faces {} -> {}", a_old.push.size(), a_new.push.size());
-			for (std::size_t f = 0; f < a_old.push.size(); ++f)
-				for (std::size_t w = 0; w < a_old.push[f].size(); ++w)
-					if (a_old.push[f][w] != a_new.push[f][w])
-						return fmt::format("push face {} word {} {:#x} -> {:#x}", f, w, a_old.push[f][w], a_new.push[f][w]);
-			if (auto d = ValueDifference("forwardEntry", a_old.forwardEntry, a_new.forwardEntry); !d.empty())
-				return d;
-			if (a_old.forwardRanges.size() != a_new.forwardRanges.size())
-				return fmt::format("forward classes {} -> {}", a_old.forwardRanges.size(), a_new.forwardRanges.size());
-			for (std::size_t c = 0; c < a_old.forwardRanges.size(); ++c)
-				if (const auto &o = a_old.forwardRanges[c], &n = a_new.forwardRanges[c]; !(o == n))
-					return fmt::format("forward class {} (first {} capacity {}) -> (first {} capacity {})", c, o.first, o.capacity, n.first, n.capacity);
-			for (std::size_t d = 0; d < a_old.faces.size(); ++d)
-				if (const auto &o = a_old.faces[d], &n = a_new.faces[d]; !(o == n))
-					return fmt::format("faces of family {} (pipeline {} signature {} groups {}) -> (pipeline {} signature {} groups {})", d, HandleText(o.pipeline),
-						HandleText(o.signature), o.groups, HandleText(n.pipeline), HandleText(n.signature), n.groups);
-			return {};
-		}
-
-		std::string ShapeDifference(const ShadowFrame& a_old, const ShadowFrame& a_new)
-		{
-			if (a_old.latch != a_new.latch)
-				return fmt::format("latch block {} -> {}", fmt::ptr(a_old.latch.get()), fmt::ptr(a_new.latch.get()));
-			for (std::size_t l = 0; l < a_old.latched.size(); ++l)
-				if (auto d = LatchedDifference(l == 0 ? "latched (from latch)" : l == 1 ? "latched (zeros)" : "latched (commit)", a_old.latched[l], a_new.latched[l]); !d.empty())
-					return d;
-			for (auto d : { HandleDifference("resourceHeap", a_old.resourceHeap, a_new.resourceHeap), HandleDifference("samplerHeap", a_old.samplerHeap, a_new.samplerHeap),
-					 ValueDifference("indirect valid", a_old.indirect.valid, a_new.indirect.valid), HandleDifference("indirect layout", a_old.indirect.layout, a_new.indirect.layout) })
-				if (!d.empty())
-					return d;
-			if (a_old.indirect.version != a_new.indirect.version)
-				return fmt::format("indirect version {} -> {}", fmt::ptr(a_old.indirect.version.get()), fmt::ptr(a_new.indirect.version.get()));
-			if (a_old.views.size() != a_new.views.size())
-				return fmt::format("views {} -> {}", a_old.views.size(), a_new.views.size());
-			for (std::size_t v = 0; v < a_old.views.size(); ++v) {
-				const auto &o = a_old.views[v], &n = a_new.views[v];
-				if (o == n)
-					continue;
-				const auto inView = [&](const std::string& a_field) { return fmt::format("view {} (slot {} mode {}): {}", v, o.slot, o.modeIndex, a_field); };
-				for (auto d : { ValueDifference("slot", o.slot, n.slot), ValueDifference("modeIndex", o.modeIndex, n.modeIndex),
-						 ValueDifference("capacity", o.capacity, n.capacity), ValueDifference("x", o.x, n.x), ValueDifference("y", o.y, n.y),
-						 ValueDifference("width", o.width, n.width), ValueDifference("height", o.height, n.height), ValueDifference("minDepth", o.minDepth, n.minDepth),
-						 ValueDifference("maxDepth", o.maxDepth, n.maxDepth), ValueDifference("target", o.target, n.target), ValueDifference("slice", o.slice, n.slice),
-						 ValueDifference("sequenceDraws", o.sequenceDraws, n.sequenceDraws), ValueDifference("rasterState", o.rasterState, n.rasterState) })
-					if (!d.empty())
-						return inView(d);
-				for (std::size_t w = 0; w < o.push.size(); ++w)
-					if (o.push[w] != n.push[w])
-						return inView(fmt::format("push word {} {:#x} -> {:#x}", w, o.push[w], n.push[w]));
-				if (o.buckets.size() != n.buckets.size())
-					return inView(fmt::format("buckets {} -> {}", o.buckets.size(), n.buckets.size()));
-				for (std::size_t b = 0; b < o.buckets.size(); ++b)
-					if (const auto &ob = o.buckets[b], &nb = n.buckets[b]; !(ob == nb))
-						return inView(fmt::format("bucket {} (pipeline {} first {} capacity {}) -> (pipeline {} first {} capacity {})", b, ob.pipeline, ob.first, ob.capacity,
-							nb.pipeline, nb.first, nb.capacity));
-			}
-			return {};
-		}
-
-		/** @brief For CS_DCLF_PERSISTENT_PARITY. Names the first shape and field that differ. */
-		std::string MadeShapesDifference(const MadeShapes& a_kept, const MadeShapes& a_made)
-		{
-			const auto shape = [](const std::string& a_what, const auto& a_old, const auto& a_new) -> std::string {
-				if (a_old == a_new)
-					return {};
-				if (!a_old || !a_new)
-					return fmt::format("{}: {} -> {}", a_what, a_old ? "a shape" : "none", a_new ? "a shape" : "none");
-				auto field = ShapeDifference(*a_old, *a_new);
-				return field.empty() ? std::string() : fmt::format("{}: {}", a_what, field);
-			};
-			std::string out;
-			for (std::size_t s = 0; s < a_kept.main.size() && out.empty(); ++s)
-				out = shape(s == kDepthShape ? "main depth" : "main colour", a_kept.main[s], a_made.main[s]);
-			if (out.empty() && a_kept.shadow.size() != a_made.shadow.size())
-				out = fmt::format("shadow: variants {} -> {}", a_kept.shadow.size(), a_made.shadow.size());
-			for (std::size_t i = 0; i < a_kept.shadow.size() && i < a_made.shadow.size() && out.empty(); ++i)
-				out = shape(fmt::format("shadow variant {}", i), a_kept.shadow[i], a_made.shadow[i]);
-			for (std::size_t v = 0; v < a_kept.views.size() && out.empty(); ++v)
-				out = shape(ImplProducer::kKeyGroupNames[kViewSlots[v].keyGroup], a_kept.views[v], a_made.views[v]);
-			return "a shape differs from the kept one: " + (out.empty() ? std::string("(no field found)") : out);
-		}
 	}
 
 	void IndirectDraws::Impl::EnsureRevisionLatches()
@@ -853,7 +622,6 @@ namespace DCLF
 	{
 		const auto& request = a_publication.revision;
 		DCLF_ZONE("CS.DCLF.MakeRevisionShapes");
-		auto& made = producer.made;
 		auto& reuse = revisionReuse;
 		reuse.reusedNow = false;
 		revisionInputsSlot.TakeInto(producer.inputs);
@@ -864,8 +632,9 @@ namespace DCLF
 		buffers.SetUploads(producer.inputs.uploads);
 		const auto& inputs = producer.inputs;
 		auto* host = RenderGraphRuntime::Get().Host();
-		// Wait until the newer build attaches, or recordings would be of the old graphs. The attach posts inputs again.
-		if (inputs.build && inputs.build->serial > AttachedBuildSerial())
+		// Wait until every build of the newer state is staged, or recordings would be of the old graphs. SettleBuildState posts inputs
+		// again then, naming the staged builds to record on (plan step 10a).
+		if (inputs.build && inputs.build->serial > BuiltBuildSerial())
 			return;
 		if (!inputs.claims || !inputs.main || !inputs.main->scene || !host || !a_publication.tables) {
 			reuse.valid = false;
@@ -879,16 +648,13 @@ namespace DCLF
 		const PipelineCatalog* catalog = a_publication.catalog.get();
 		EnsureRevisionLatches();
 		// If nothing the requirement pass reads has moved, this make would seal the same revision, so keep the last one.
-		// CS_DCLF_PERSISTENT_PARITY makes it anyway and compares.
 		ImplSnapshotBuilder::RevisionReuse::Key key;
 		std::uint32_t moved = RequirementsMoved(*this, reuse, a_publication, lookups, key);
 		// A due shrink changes what the pass seals without moving the key, so run the pass.
 		if (!moved && (SceneBufferSet::Get().ShrinkPending() ||
 						  producer.mainWindows.Due(PooledBackings::Shrink(), org::services::ShrinkWindow::Clock::now())))
 			moved = 1u << ImplSnapshotBuilder::RevisionReuse::kMovedShrink;
-		const bool unchanged = moved == 0;
-		const bool parity = Diagnostics::Observe().scene;
-		if (unchanged && !parity) {
+		if (moved == 0) {
 			++reuse.kept;
 			reuse.reusedNow = true;
 			return;
@@ -896,18 +662,12 @@ namespace DCLF
 		reuse.NoteRan(moved);
 		reuse.valid = false;
 		const std::uint64_t sequenceBefore = revisions.assembler.LatestSequence();
-		const auto assemble = [&](bool a_shapesKept) {
+		const auto assemble = [&] {
 			DCLF_ZONE("CS.DCLF.MakeRevisionShapes.Assemble");
 			AssembleRevision(a_frame);
-			if (revisions.assembler.LatestSequence() == sequenceBefore) {
-				if (parity && unchanged)
-					reuse.parity.Check(false, [] { return std::string("nothing sealed for an unchanged key"); });
+			if (revisions.assembler.LatestSequence() == sequenceBefore)
 				return;
-			}
 			const std::uint64_t setSerial = revisions.sealed.named->Serial();
-			if (parity && unchanged)
-				reuse.parity.Check(a_shapesKept && setSerial == reuse.setSerial,
-					[&] { return fmt::format("set serial {} -> {}, shapes {}", reuse.setSerial, setSerial, a_shapesKept ? "kept" : "made again"); });
 			reuse.key = std::move(key);
 			reuse.setSerial = setSerial;
 			reuse.valid = true;
@@ -930,8 +690,6 @@ namespace DCLF
 		}();
 		if (!seal) {
 			++revisions.growthWaits;
-			if (parity && unchanged)
-				reuse.parity.Check(false, [] { return std::string("a growth for an unchanged key"); });
 			return;
 		}
 		const auto& sealed = *seal.named;
@@ -939,7 +697,7 @@ namespace DCLF
 		if (const auto& s = inputs.scene) {
 			Extensions::SealSceneResources(sealed, s->sceneResources);
 			if (s->visibilityEvents && s->visibilityReadback)
-				s->visibilityReadback->AddSet(static_cast<std::uint32_t>(sealed.Of(s->visibilityEvents).units));
+				s->visibilityReadback->list->Grow(static_cast<std::uint32_t>(sealed.Of(s->visibilityEvents).units));
 		}
 		if (!revisions.layout || !(*revisions.layout == producer.mainLayout))
 			revisions.layout = std::make_shared<const MainLayout>(producer.mainLayout);
@@ -954,15 +712,7 @@ namespace DCLF
 		}();
 		if (shapesKey == revisionShapesKey) {
 			++shapesKept;
-			// CS_DCLF_PERSISTENT_PARITY makes the shapes anyway and compares, but keeps the old ones.
-			if (parity) {
-				const MadeShapes kept = made;
-				for (auto* participant : participants)
-					participant->MakeShapes(make, sealed, mainLayout);
-				reuse.shapesParity.Check(SameMadeShapes(kept, made), [&] { return MadeShapesDifference(kept, made); });
-				made = kept;
-			}
-			assemble(true);
+			assemble();
 			return;
 		}
 		for (std::size_t g = 0; g < shapesKey.size(); ++g)
@@ -974,8 +724,7 @@ namespace DCLF
 			for (auto* participant : participants)
 				participant->MakeShapes(make, sealed, mainLayout);
 		}
-		Diagnostics::Notify(Diagnostics::RevisionShapesMade{ sealed, mainLayout, made, inputs, tables.geometries.size() });
-		assemble(false);
+		assemble();
 	}
 
 	void IndirectDraws::Impl::RequireRevisionSet(RevisionMake& a_make, GrowthBuild& a_build)
@@ -988,9 +737,9 @@ namespace DCLF
 		if (inputs.scene)
 			RequireSceneTables(a_build, *inputs.scene, tables);
 		// Must come before RequireMain, which lays out sub-ranges by its state classes.
-		a_make.indirect = a_make.catalog ? GetIndirectState(*a_make.catalog, inputs.targetsGeneration) : IndirectState{};
+		a_make.indirect = a_make.catalog ? GetIndirectState(*a_make.catalog) : IndirectState{};
 		for (std::size_t d = 0; d < Extensions::kDrawFamilies; ++d)
-			a_make.familyOn[d] = CatalogFamilyPipelines(a_make.catalog, static_cast<Api::DrawFamily>(d), inputs.targetsGeneration, a_make.familyPipelines[d]);
+			a_make.familyOn[d] = CatalogFamilyPipelines(a_make.catalog, static_cast<Api::DrawFamily>(d), a_make.familyPipelines[d]);
 		RequireMain(a_build, r, a_make);
 		if (inputs.scene)
 			RequireIndexPool(a_build, *inputs.scene, tables, a_make.publication.tablesGeneration);
@@ -1017,13 +766,13 @@ namespace DCLF
 			const std::size_t v = ViewIndex(kind);
 			const auto& traits = TraitsOf(kind);
 			const auto& view = inputs.views[v];
-			viewOn[v] = view.targets.colour != DXGI_FORMAT_UNKNOWN && Extensions::ViewOn(producer.toggles, kind) && inputs.claims;
+			viewOn[v] = view.targets.colour != DXGI_FORMAT_UNKNOWN && inputs.claims;
 			ViewPipelinesOf(kind, a_make.catalog, tables, view.targets, viewOn[v], viewRevisionPipelines[v]);
 			if (traits.forwardPart)
-				ViewForwardSlotsOf(tables, viewOn[v] && !producer.inputs.firstPersonForwardDirect, viewForwardSlots);
+				ViewForwardSlotsOf(tables, viewOn[v] && producer.inputs.cpuPipeline, viewForwardSlots);
 			for (std::size_t d = 0; traits.trees && d < Extensions::kDrawFamilies; ++d) {
 				const auto family = static_cast<Api::DrawFamily>(d);
-				viewRevisionFaces[d] = viewOn[v] && Extensions::DrawFamilyHasFaces(family) && Extensions::DrawFamilyOn(producer.toggles, family) ?
+				viewRevisionFaces[d] = viewOn[v] && Extensions::DrawFamilyHasFaces(family) && Extensions::DrawFamilyOn(family) ?
 				                           ForwardPipelineOf(a_make.catalog, ForwardPipelineKey{ 0, 0, FamilySlotOf(family).forwardFlags }, view.targets) :
 				                           rhi::PipelineHandle{};
 			}
@@ -1165,7 +914,7 @@ namespace DCLF
 	IndirectDraws::Impl::ShapesKey IndirectDraws::Impl::RevisionShapesKey(const NamedVersions& a_sealed, const RevisionMake& a_make, std::size_t a_pipelines) const
 	{
 		ShapesKey key;
-		key.fill(0xcbf29ce484222325ull);
+		key.fill(Util::Fnv1a::kOffset);
 		ShapesKeyMixer mixer{ key };
 		auto& group = mixer.group;
 		auto mix = [&mixer](std::uint64_t a_value) { mixer.Mix(a_value); };
@@ -1302,10 +1051,5 @@ namespace DCLF
 					a_mixer.Mix(FamilySetUp(*sceneState, static_cast<Api::DrawFamily>(d)) ? 1u : 0u);
 				}
 		}
-		for (const auto& slot : kViewSlots)
-			if (Extensions::Views().views[ViewIndex(slot.view)].life == Api::ViewShapeLife::DropWhenOff) {
-				a_mixer.group = slot.keyGroup;
-				a_mixer.Mix(Extensions::ViewOn(producer.toggles, slot.view));
-			}
 	}
 }

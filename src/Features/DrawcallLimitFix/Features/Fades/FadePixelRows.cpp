@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
@@ -69,9 +70,9 @@ namespace DCLF::Draws
 	{
 	public:
 		PixelRowsPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const ComputeProgram> a_program, RenderGraphRuntime::Segment a_segment,
-			Api::FrameValuePoolId a_pool) :
+			Api::FrameValuePoolId a_pool, const GraphConditions& a_conditions) :
 			resources(std::move(a_resources)), program(std::move(a_program)), segment(a_segment), pool(a_pool),
-			outerBarriers(!CurrentGraphConditions().cpuPipeline) {}
+			outerBarriers(!a_conditions.cpuPipeline) {}
 
 		PixelRowsBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -98,17 +99,19 @@ namespace DCLF::Draws
 
 		static void Record(const PixelRowsBindings&, const PixelRowsPrepared& a_frame, org::PassRecordContext& a_recording)
 		{
-			RecordRows(a_recording.Commands(), a_frame, a_recording.Run());
+			RecordRows(a_recording, a_frame);
 		}
 
-		static void RecordRows(rhi::CommandList& a_commands, const PixelRowsPrepared& a_frame, const org::RunRef& a_run)
+		static void RecordRows(org::PassRecordContext& a_recording, const PixelRowsPrepared& a_frame)
 		{
 			if (!a_frame.program || !a_frame.latch || !a_frame.frameConstants)
 				return;
+			auto& commands = a_recording.Commands();
+			const org::RunRef& run = a_recording.Run();
 			const RenderGraph::BufferRef textures = a_frame.frameConstants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes + offsetof(DrawBindings, textures);
 			const RenderGraph::BufferRef lodFadeFrame = a_frame.frameConstants + LodFadeFrameAddress(0);
 			PixelRowsConstants constants{};
-			SetLatchWords(constants, *a_frame.latch, a_run);
+			SetLatchWords(constants, *a_frame.latch, run);
 			constants.recordTexturesLo = textures.viewSlot;
 			constants.recordTexturesHi = textures.byteOffset;
 			constants.lodFadeFrameLo = lodFadeFrame.viewSlot;
@@ -116,12 +119,12 @@ namespace DCLF::Draws
 			const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
 			const rhi::BarrierBatch batch{ {}, {}, { &global, 1 } };
 			if (!a_frame.outerBarriers) {
-				RecordDispatch(a_commands, *a_frame.program, constants, kPixelRowsGroups);
+				RecordDispatch(a_recording, *a_frame.program, constants, kPixelRowsGroups);
 				return;
 			}
-			a_commands.Barriers(batch);
-			RecordDispatch(a_commands, *a_frame.program, constants, kPixelRowsGroups);
-			a_commands.Barriers(batch);
+			commands.Barriers(batch);
+			RecordDispatch(a_recording, *a_frame.program, constants, kPixelRowsGroups);
+			commands.Barriers(batch);
 		}
 
 	private:
@@ -164,17 +167,17 @@ namespace DCLF::Features::Fades
 			return { address, ref, ref ? kickedRows : 0u };
 		}
 
-		std::shared_ptr<const void> PixelRowsSetup(const Api::PassSetup& a_setup)
+		const SetupPrograms::Compute kPixelRowsProgram{ "DCLF object rows",
+			[] { return ComputeProgram::Desc{ .source = Draws::kPixelRowsShader, .constantWords = Draws::kPixelRowsConstantWords }; } };
+
+		std::shared_ptr<const void> PixelRowsSetup(const Api::PassSetup&)
 		{
-			auto program = ComputeProgram::Load(a_setup.device, { .source = Draws::kPixelRowsShader, .constantWords = Draws::kPixelRowsConstantWords });
-			if (!program)
-				logger::error("[DCLF] The object rows program could not be created; DCLF's pixel stages read no object rows");
-			return program;
+			return kPixelRowsProgram.Get();
 		}
 
 		std::shared_ptr<org::RenderPass> MakePixelRows(const Api::PassContext& a_context)
 		{
-			return std::make_shared<Draws::PixelRowsPass>(a_context.Main(), a_context.State<ComputeProgram>(), a_context.segment, pixelRowsPool);
+			return std::make_shared<Draws::PixelRowsPass>(a_context.Main(), a_context.State<ComputeProgram>(), a_context.segment, pixelRowsPool, a_context.Conditions());
 		}
 	}
 

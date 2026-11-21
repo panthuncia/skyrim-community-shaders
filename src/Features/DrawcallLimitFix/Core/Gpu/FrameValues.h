@@ -109,8 +109,6 @@ namespace DCLF
 			float farthest = 0.0f;
 		};
 		static FirstPersonPaletteStats TakeFirstPersonPaletteStats();
-		/** @brief Render thread. A frame with no producer, so no batch waits for one. */
-		void Skip();
 		/** @brief Render thread, before Present. Waits until the last producer's signal is on the copy queue. See the .cpp for why. */
 		void WaitSignalSubmitted();
 		/** @brief Render thread, after the frame's last submission. Binds the frame's backings to it. */

@@ -8,6 +8,7 @@
 #include "PhysicalLensPresets.h"
 #include "PhysicalLensZoom.h"
 #include "PostProcessFeature.h"
+#include "Utils/Setting.h"
 
 struct PhysicalLens : PostProcessFeature
 {
@@ -16,7 +17,9 @@ struct PhysicalLens : PostProcessFeature
 	{
 		int LensPreset = 0;
 		int MaxSources = 8;
-		float Intensity = 1.f;
+		// Intensity (ghosts on while above zero), ImageEffects and Diffraction set the render graph's pass list, so they are
+		// frame variables (CS::Setting).
+		CS::Setting<float> Intensity = 1.f;
 		float ThresholdEV = 3.f;
 		float FNumber = 5.6f;
 		int ApertureBlades = 0;  // Zero follows the lens preset; existing manual values remain explicit.
@@ -24,8 +27,8 @@ struct PhysicalLens : PostProcessFeature
 		float Coating = 1.f;
 		float FocusDistanceM = 0.f;  // Zero denotes infinity.
 		float ZoomPosition = 0.f;
-		bool ImageEffects = true;
-		bool Diffraction = true;
+		CS::Setting<bool> ImageEffects = true;
+		CS::Setting<bool> Diffraction = true;
 		float StarburstSize = 10.f;
 		float StarburstIntensity = .02f;
 		float DirtOpacity = 1.f;
@@ -37,6 +40,8 @@ struct PhysicalLens : PostProcessFeature
 		float GhostDiffraction = .6f;
 		float AlignmentVariation = .2f;
 	} settings;
+
+	PhysicalLens();
 
 	std::string GetType() const override { return "Physical Lens"; }
 	std::string GetDisplayName() const override { return T("feature.post_processing.physical_lens.name", "Physical Lens"); }
@@ -74,10 +79,58 @@ struct PhysicalLens : PostProcessFeature
 
 	winrt::com_ptr<ID3D11SamplerState> sampler;
 
+	/// focus.cs.hlsl's FocusConstants.
+	struct alignas(16) FocusInputs
+	{
+		float2 uv;
+		float manualKM, speed;
+		unsigned automatic, reset;
+		float padding[2]{};
+	};
+	static_assert(sizeof(FocusInputs) == 32);
+	/// The focus shader's inputs for this frame: the camera's focus point, its target or the race menu's player.
+	FocusInputs FocusInputsFor(const CinematicCamera::PhysicalCameraState& camera, bool reset);
+	/// Sets the optical state from the settings or the camera, and rebuilds the lens model when it changed. False when
+	/// the lens cannot be configured this frame. Call SanitizeSettings first. Shared by the D3D11 and ORG paths.
+	bool PrepareOptics(float aspect, const CinematicCamera::PhysicalCameraState* camera, float cameraFocusM);
+	/// BuildCameraMaps' two constant blocks for the current lens model.
+	std::pair<PhysicalLensImaging::GPUParameters, PhysicalLensImaging::CameraTableParameters> CameraMapping(float aspect) const;
+	void SanitizeSettings();
+	using Parameters = PhysicalLensOptics::Parameters;
+	/// The flare passes' constants for an input of this size, from the current lens model. The caller sets beamState.
+	Parameters FlareParameters(unsigned width, unsigned height, unsigned outputWidth, unsigned outputHeight, bool autoExposure) const;
+	/// The diffraction cache's and the per-frame diffraction passes' constants for an input of this size.
+	struct DiffractionInputs
+	{
+		PhysicalLensImaging::GPUParameters optics;
+		PhysicalLensImaging::CameraTableParameters table;
+		PhysicalLensImaging::DiffractionParameters sampling;
+	};
+	DiffractionInputs DiffractionFor(unsigned width, unsigned height) const;
+	/// Whether two inputs give the same diffraction cache.
+	static bool DiffractionCacheEqual(const DiffractionInputs& a_left, const DiffractionInputs& a_right);
+	/// The ghost-wave cache's constants (stage left zero).
+	PhysicalLensGhostWave::Parameters GhostWaveFor() const;
+	/// The current lens model's ghost paths, MaxPaths entries. The version changes with every new model.
+	const std::vector<PhysicalLensOptics::GhostPath>& GhostPaths() const { return ghostPaths; }
+	std::uint64_t GhostPathsVersion() const { return ghostPathsVersion; }
+	/// For the settings readout when the ORG path resolves the focus.
+	void SetResolvedFocus(float metres) { resolvedFocusM = metres; }
+	// C4324: the aligned diffraction block pads the struct.
+#pragma warning(push)
+#pragma warning(disable: 4324)
+	/// What the ORG Composite reads this frame, set by the ORG effect's commit before Composite's.
+	struct OrgComposite
+	{
+		bool cameraMap = false, flare = false;
+		PhysicalLensImaging::DiffractionParameters diffraction{};
+	} orgComposite;
+#pragma warning(pop)
+
+	static constexpr unsigned SourceCount = PhysicalLensOptics::SourceCount, TileCount = 64 * 36, CandidateCount = 2 * TileCount;
+
 private:
 	bool resourcesReady = false, shadersRequested = false;
-	static constexpr unsigned SourceCount = PhysicalLensOptics::SourceCount, TileCount = 64 * 36, CandidateCount = 2 * TileCount;
-	using Parameters = PhysicalLensOptics::Parameters;
 	struct OpticalState
 	{
 		float fNumber = 5.6f, focusM = 0, rotation = 0, roundness = 0;
@@ -161,5 +214,8 @@ private:
 	PhysicalLensImaging::DiffractionParameters cachedWaveParameters{};
 	bool UpdateDiffraction(unsigned width, unsigned height);
 	void CompileShaders();
-	void SanitizeSettings();
+	// The lens model's ghost paths, uploaded by the D3D11 path when changed.
+	std::vector<PhysicalLensOptics::GhostPath> ghostPaths;
+	bool ghostPathsChanged = false;
+	std::uint64_t ghostPathsVersion = 0;
 };

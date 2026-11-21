@@ -9,8 +9,9 @@ TripwireHandle.h expands them into the handle classes. The compiler checks the r
 The SAL annotations decide two things:
 - Failure: _Out_ / _Outptr_ / _COM_Outptr_ / _Inout_ pointees are zeroed, _Out_writes_*(N) arrays are zeroed
   for N elements, _Out_writes_bytes_*(N) buffers for N bytes when N is a parameter.
-- Forwarding: interface pointers (_In_, or none) and _In_reads_*(N) interface arrays are unwrapped, so a
-  tripwire handle passed to a wrapped D3D11 object reaches it as the object it wraps.
+- Forwarding: interface pointers (_In_, or none) are unwrapped, so a tripwire handle passed to a wrapped D3D11 object
+  reaches it as the object it wraps. Interface arrays (_In_reads_*(N)) only occur on the context, whose forward args
+  are never expanded, so they are passed as they are.
 
 Usage: python tools/generate-tripwire-interfaces.py [--sdk <Include/10.0.x.y dir>]
 """
@@ -144,7 +145,7 @@ class Param:
         if m and is_interface(m.group(1)):
             for name, arg in self.sal:
                 if name.startswith("_In_reads"):
-                    return f"TW_UNWRAP_ARRAY({self.name}, {arg})"
+                    return self.name
             raise ValueError(f"interface array without a count: {self.decl()}")
         return self.name
 

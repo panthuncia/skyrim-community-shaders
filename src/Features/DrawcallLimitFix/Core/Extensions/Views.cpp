@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Extensions
 {
@@ -38,7 +39,6 @@ namespace DCLF::Extensions
 		void FillRegistered(ViewEntry& a_entry, const Api::ViewContribution& a_view)
 		{
 			a_entry.registered = true;
-			a_entry.toggle = a_view.toggle;
 			a_entry.forwardDecals = a_view.forwardDecals;
 			a_entry.phase = a_view.phase;
 			a_entry.viewBit = a_view.shape.viewBits;
@@ -50,11 +50,9 @@ namespace DCLF::Extensions
 			a_entry.withholding = a_view.withholding;
 			a_entry.targetImport = a_view.targetImport;
 			a_entry.coveredInitially = a_view.coveredInitially;
-			a_entry.coveredOnFailedGraph = a_view.coveredOnFailedGraph;
 			a_entry.covered = a_view.covered;
 			a_entry.captureRoot = a_view.captureRoot;
 			a_entry.accumulators = a_view.accumulators;
-			a_entry.residueDue = a_view.residueDue;
 		}
 
 		/** @brief The set's phases and view bits from its entries. */
@@ -102,12 +100,12 @@ namespace DCLF::Extensions
 					continue;
 				const std::uint32_t bits = entry.keys.keyFlags;
 				if (bits & claimed)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: view {}'s forward key flags {:#x} overlap Core's or another view's", static_cast<std::uint32_t>(v), bits));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("view {}'s forward key flags {:#x} overlap Core's or another view's", static_cast<std::uint32_t>(v), bits));
 				claimed |= bits;
 				if (bits)
 					continue;
 				if (a_set.plainKeyView != Api::EngineView::Count)
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: views {} and {} both have forward keys without key flags", static_cast<std::uint32_t>(a_set.plainKeyView), static_cast<std::uint32_t>(v)));
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("views {} and {} both have forward keys without key flags", static_cast<std::uint32_t>(a_set.plainKeyView), static_cast<std::uint32_t>(v)));
 				a_set.plainKeyView = static_cast<Api::EngineView>(v);
 			}
 		}
@@ -118,7 +116,7 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the views were resolved twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the views were resolved twice");
 		ViewSet set;
 		for (const auto& view : a_views)
 			if (view.view < Api::EngineView::Count)
@@ -126,7 +124,7 @@ namespace DCLF::Extensions
 		for (const auto& work : a_work) {
 			auto& entry = EntryOf(set, work.view);
 			if (!entry.registered)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: work was registered for view {}, which no feature contributes", static_cast<std::uint32_t>(work.view)));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("work was registered for view {}, which no feature contributes", static_cast<std::uint32_t>(work.view)));
 			WorkAt(entry, work.point).push_back(work.run);
 		}
 		DeriveViewPhases(set);

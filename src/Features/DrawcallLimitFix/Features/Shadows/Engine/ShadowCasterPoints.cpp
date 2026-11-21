@@ -15,7 +15,7 @@ namespace DCLF::Features::Shadows::Engine
 {
 	namespace
 	{
-		// Sampled once at the selection's start so the three points agree.
+		// Inside the selection, so the three points agree.
 		bool castersRunning = false;
 
 		/** @brief Main::Draw's call of CalculateAndDrawShadowCasterLights (AE 0x140644674). The views are begun before and listed after. */
@@ -23,12 +23,10 @@ namespace DCLF::Features::Shadows::Engine
 		{
 			static void thunk(void* a_camera)
 			{
-				castersRunning = ShellState::Running();
-				if (castersRunning)
-					FrameDriver::Get().BeforeShadowCasters();
+				castersRunning = true;
+				FrameDriver::Get().BeforeShadowCasters();
 				func(a_camera);
-				if (castersRunning)
-					FrameDriver::Get().ShadowCastersSelected();
+				FrameDriver::Get().ShadowCastersSelected();
 				castersRunning = false;
 			}
 			static inline REL::Relocation<decltype(thunk)> func;

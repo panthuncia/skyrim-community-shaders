@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Utils/Setting.h"
 
 #define SSSS_N_SAMPLES 21
 
@@ -8,6 +9,9 @@
 struct SubsurfaceScattering : Feature
 {
 public:
+	/** @brief Binds the settings the frame revisions follow (SSMode, EnableCharacterLighting). */
+	SubsurfaceScattering();
+
 	struct DiffusionProfile
 	{
 		float BlurRadius;
@@ -25,9 +29,11 @@ public:
 
 	struct Settings
 	{
-		uint EnableCharacterLighting = false;
+		// Applied to the engine's character light each frame (Reset). No graph state depends on it.
+		CS::Setting<std::uint32_t> EnableCharacterLighting = 0;
 		float CharacterLightingStrength = 1.0f;
-		int SSMode = 1;
+		// The render graph's programs and passes follow it through a frame revision.
+		CS::Setting<int> SSMode = 1;
 		int ScatterMode = kPreAndPostScatter;
 		DiffusionProfile BaseProfile{ 1.0f, 1.0f, { 0.48f, 0.41f, 0.28f }, { 0.56f, 0.56f, 0.56f } };
 		DiffusionProfile HumanProfile{ 1.0f, 1.0f, { 0.48f, 0.41f, 0.28f }, { 1.0f, 0.37f, 0.3f } };

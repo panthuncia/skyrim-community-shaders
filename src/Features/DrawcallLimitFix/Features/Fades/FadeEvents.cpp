@@ -7,7 +7,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/NodeCaptures.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Fatal.h"
 
 #include <algorithm>
 #include <atomic>
@@ -23,14 +24,14 @@ namespace DCLF::Features::Fades
 		 * A root listed before its snap must be reseeded from the node.
 		 */
 		// No wake needed, because the snap's cell attach already wakes the pass.
-		EventQueue<const void*> fadeSnapEvents;
+		RenderGraph::Frame::EventQueue<const void*> fadeSnapEvents;
 
 		/**
 		 * @brief Actor::SetAlpha (vfunc 0xE1) writes the actor root's fadeAmount at +0x100 every frame of an actor fade-in.
 		 * Without these events an actor listed mid-fade would keep that alpha.
 		 */
 		// No wake needed, because a fade writes every frame and the next pass takes them.
-		EventQueue<const void*> fadeAmountEvents;
+		RenderGraph::Frame::EventQueue<const void*> fadeAmountEvents;
 
 		// Rare. About one per newly seeded actor root.
 		std::mutex recheckMutex;
@@ -114,7 +115,7 @@ namespace DCLF::Features::Fades
 	{
 		// The primary cull will not install without NoteRootStatesInstalled.
 		if (!SceneWriter::SubscribeCall(SWF_HOOK_FADE_SNAP, &OnFadeSnap, SWF_PHASE_POST))
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the fade snap after reporting it installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the fade snap after reporting it installed");
 		Extensions::NoteRootStatesInstalled();
 	}
 }

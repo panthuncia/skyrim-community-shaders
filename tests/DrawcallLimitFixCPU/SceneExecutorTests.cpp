@@ -1,4 +1,4 @@
-#include "Features/DrawcallLimitFix/Core/Runtime/SceneExecutor.h"
+#include "RenderGraph/Async/Executor.h"
 
 #include <algorithm>
 #include <atomic>
@@ -11,7 +11,7 @@
 #include <thread>
 #include <vector>
 
-using Executor = DCLF::SceneExecutor;
+using Executor = RenderGraph::Frame::Executor;
 using namespace std::chrono_literals;
 
 template <class T>

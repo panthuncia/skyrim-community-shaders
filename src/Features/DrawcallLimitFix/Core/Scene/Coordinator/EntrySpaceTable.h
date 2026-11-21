@@ -93,8 +93,6 @@ namespace DCLF::Scene
 		std::vector<RE::NiPointer<RE::NiRefObject>> TakeRetiredRoots() { return std::exchange(retiredRoots, {}); }
 		/** @brief Teardown only. */
 		void ReleaseOwned();
-		/** @brief Parity check. Returns the first difference, or empty. */
-		std::string CheckSnapshot(const EntrySpace& a_snapshot) const;
 
 		EntrySpaceTable() = default;
 		EntrySpaceTable(const EntrySpaceTable&) = delete;

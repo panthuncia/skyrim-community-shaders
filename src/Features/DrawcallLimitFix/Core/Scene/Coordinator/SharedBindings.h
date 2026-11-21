@@ -14,7 +14,6 @@
 
 #include <ankerl/unordered_dense.h>
 
-#include "Features/DrawcallLimitFix/Diagnostics/ParityCounter.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Lookups.h"
@@ -99,7 +98,6 @@ namespace DCLF
 		struct Work
 		{
 			std::uint64_t masksChecked = 0, masksResolved = 0, maskSweeps = 0;
-			Diagnostics::ParityCounter parity;
 		} work;
 		ankerl::unordered_dense::map<ID3D11ShaderResourceView*, ShadowTexture> shadowTextures;
 		std::uint32_t shadowPending = 0;

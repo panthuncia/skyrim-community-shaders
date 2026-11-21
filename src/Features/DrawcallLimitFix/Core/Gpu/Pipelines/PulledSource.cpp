@@ -70,7 +70,7 @@ namespace DCLF::PulledSource
 			const std::uint32_t component = a_match[7].matched ? static_cast<std::uint32_t>(std::string("xyzw").find(a_match[7].str()[0])) : 0u;
 			const std::uint32_t offset = static_cast<std::uint32_t>(std::stoul(a_match[6].str())) * 16 + component * 4;
 			const auto source = [&](std::uint32_t a_offset) { return std::format("{}({}, {} + {})", PulledRowLoad(type), block.row, block.offset, a_offset); };
-			// With CS_DCLF_LAZY_ROWS a member nothing writes is loaded where it is read. Statics loaded at entry hold registers for the whole
+			// With eager names set, a member nothing writes is loaded where it is read. Statics loaded at entry hold registers for the whole
 			// stage, and a large block like Landscape's spills.
 			if (a_rewrite.options->eager && !a_match[5].matched && !a_rewrite.options->eager->contains(name)) {
 				out << a_match[1].str() << "#define " << name << " (" << source(offset) << ")" << a_match[8].str() << "\n";

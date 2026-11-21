@@ -10,9 +10,11 @@
 #include "Observers.h"
 #include "CullCounters.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/Registrations.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Diagnostics
 {
@@ -143,12 +145,9 @@ namespace DCLF::Diagnostics
 		if (!host)
 			return;
 		const auto readback = Draws::CullCounterReadback(Draws::CullCounterView::kColour);
-		counters.colourSlot = readback ? readback->ranges.Of(host->CurrentRun()) : Draws::RunRanges::kNone;
+		counters.colourSlot = readback ? readback->RangeOf(host->CurrentRun()) : org::RunReadback::kNoRegion;
 		counters.colourStamp = a_written.latch.visibilityStamp;
 		counters.colourNoted = true;
-		// The slot's last colour counts, every frame.
-		if (Diagnostics::Observe().frameTrace && readback)
-			TraceColourCounts(*readback, counters.colourSlot);
 		auto& sample = counters.sample;
 		if (!readback || !readback->armed.armed || readback->armed.range != counters.colourSlot || !sample || sample->read || sample->on.lock() != readback)
 			return;
@@ -242,19 +241,19 @@ namespace DCLF::Diagnostics
 			sample.reset();
 			return;
 		}
-		if ((counters.epochs++ % 120) != 0 || !readback || !noted || counters.colourSlot == Draws::RunRanges::kNone)
+		if ((counters.epochs++ % 120) != 0 || !readback || !noted || counters.colourSlot == org::RunReadback::kNoRegion)
 			return;
 		// Armed on this execution's range and stamp.
 		readback->armed = { true, counters.colourSlot, 0, counters.colourStamp, 0, 0, {} };
 		auto& sample = counters.sample.emplace();
 		sample.on = readback;
 		sample.forwardEngine = forwardEngine;
-		sample.forwardObserved = Diagnostics::Observe().claims && Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward);
+		sample.forwardObserved = Diagnostics::Observe().parity && Extensions::ObjectClassOn(Api::ObjectClass::Forward);
 		sample.refractionEngine = refractionEngine;
-		sample.refractionObserved = Diagnostics::Observe().claims && Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward) &&
-		                            Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Refraction);
+		sample.refractionObserved = Diagnostics::Observe().parity && Extensions::ObjectClassOn(Api::ObjectClass::Forward) &&
+		                            Extensions::ObjectClassOn(Api::ObjectClass::Refraction);
 		const auto& terrainNearUpload = DrawsState::Get().terrainNearUpload;
-		sample.terrainCpu = Diagnostics::Observe().claims && terrainNearUpload[3] > 0.0f;
+		sample.terrainCpu = Diagnostics::Observe().parity && terrainNearUpload[3] > 0.0f;
 		// The CPU side, off the render thread. The window stays open until Present, and a task that finds it closed drops the sample.
 		auto cpu = std::make_shared<CpuSide>();
 		cpu->resident = a_payload.resident.elements;
@@ -265,8 +264,8 @@ namespace DCLF::Diagnostics
 		cpu->terrain = sample.terrainCpu;
 		cpu->terrainNear = terrainNearUpload;
 		sample.cpu = cpu;
-		if (!SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "DCLF cull counters",
+		if (!::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu, "DCLF cull counters",
 				[cpu = std::move(cpu)](const auto&) { cpu->Run(); }))
-			stl::report_and_fail("Drawcall Limit Fix: the culling counters' CPU side was refused by DCLF's executor");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the culling counters' CPU side was refused by DCLF's executor");
 	}
 }

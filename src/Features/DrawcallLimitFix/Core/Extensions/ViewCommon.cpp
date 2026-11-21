@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ViewCommon.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
+#include "RenderGraph/Fatal.h"
 
 #include <bit>
 
@@ -16,7 +17,7 @@ namespace DCLF::Extensions
 		void TakeViewBits(const char* a_family, std::size_t a_index, std::uint8_t a_phase, std::uint32_t a_viewBit, std::uint32_t& a_phases, std::uint32_t& a_viewBits)
 		{
 			if (!std::has_single_bit(static_cast<std::uint32_t>(a_phase)) || (a_phase & a_phases) || !std::has_single_bit(a_viewBit) || (a_viewBit & a_viewBits))
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} {} has a set phase ({:#x}) or view bit ({:#x}) that is none, more than one, or Core's or another view's",
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} {} has a set phase ({:#x}) or view bit ({:#x}) that is none, more than one, or Core's or another view's",
 					a_family, a_index, a_phase, a_viewBit));
 			a_phases |= a_phase;
 			a_viewBits |= a_viewBit;
@@ -72,7 +73,7 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the view bits were resolved twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the view bits were resolved twice");
 		CheckViewBits(Views(), ShadowViewsSet());
 		ViewBitTable table;
 		DeriveViewBits(Views(), ShadowViewsSet(), table);

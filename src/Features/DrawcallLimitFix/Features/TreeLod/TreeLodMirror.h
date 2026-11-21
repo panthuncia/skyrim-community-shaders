@@ -13,7 +13,7 @@
 #include <winrt/base.h>
 
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeInstancesLayout.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 struct ID3D11Buffer;
 
@@ -55,7 +55,7 @@ namespace DCLF::Features::TreeLod
 	};
 
 	/** @brief The engine's tree LOD groups as events, pushed by the hooks on any thread and drained by the render thread. */
-	inline EventQueue<Event> events;
+	inline RenderGraph::Frame::EventQueue<Event> events;
 	inline bool installed = false;
 
 	/** @brief Pushes a_event from a hook on any thread. Pushes off the drain's thread are counted. */
@@ -63,8 +63,6 @@ namespace DCLF::Features::TreeLod
 
 	/** @brief Packs a group's records by the refill's rule (FUN_140504a40), with the engine's own conversions. */
 	void PackGroup(bool a_allVisible, const RE::BGSDistantTreeBlock::TreeGroup& a_group, std::vector<TreeInstances::Instance>& a_out);
-	/** @brief The LOD trees root, the shapes' parent (0x14315b880). */
-	RE::NiNode* LodTreesRoot();
 	/** @brief Events pushed off the drain's thread since the last call. */
 	std::uint64_t TakeOffThread();
 
@@ -110,8 +108,6 @@ namespace DCLF::Features::TreeLod
 		std::size_t Size() const { return groups.size(); }
 		std::size_t InstanceCount() const;
 		Stats TakeStats() { return std::exchange(stats, {}); }
-		/** @brief The mirrored groups by shape, for parity. */
-		const Groups& MirroredGroups() const { return groups; }
 
 		/** @brief The slot high-water marks, which the GPU's tables must hold. */
 		std::uint32_t ShapeSlots() const { return static_cast<std::uint32_t>(slotGroups.size()); }

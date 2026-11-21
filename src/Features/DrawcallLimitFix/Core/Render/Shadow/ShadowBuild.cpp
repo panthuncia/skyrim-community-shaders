@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialWrites.h"
+#include "RenderGraph/Fatal.h"
 
 namespace DCLF::Draws
 {
@@ -35,7 +36,7 @@ namespace DCLF::Draws
 			const auto& object = a_tables.objects[a_object];
 			// The record must fit the material field of the input's rows word, which BuildDrawsCS.hlsl reads.
 			if (a_record > kRowMaterialMask)
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: shadow material row {} past an input's row fields", a_record));
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("shadow material row {} past an input's row fields", a_record));
 			std::uint32_t mask = 0;
 			bool caster = false;
 			for (std::uint32_t m = 0; m < kShadowModeCount; ++m)
@@ -386,14 +387,12 @@ namespace DCLF::Draws
 		 * @brief Starts the kept build. Empties ShadowKept on a resync, when the log was trimmed or the identity or scene buffers moved.
 		 * Returns whether it resynced.
 		 */
-		bool BeginKeptBuild(KeptShadowBuild& b, bool a_sharedRegion)
+		bool BeginKeptBuild(KeptShadowBuild& b)
 		{
 			const auto& in = b.in;
 			auto& k = b.k;
 			// The journal keeps what the oldest payload backing still lacks.
 			k.rows.BeginBuild(in.materialRowsOldestContentEpoch);
-			if (!a_sharedRegion)
-				k.scene.inputs.BeginBuild(in.inputsOldestContentEpoch);
 			const bool resync = !k.cursor.Continues(b.tables.changeLog, in.tablesGeneration) || k.identity != in.addresses.identity ||
 			                    k.objectRecord.size() > b.objects || k.fit != in.addresses.fit;
 			if (resync) {
@@ -563,7 +562,7 @@ namespace DCLF::Draws
 
 	/** @brief The kept path's shared half. Updates rows and records in ShadowKept and notes the objects for the region half. */
 	void BuildKeptShadowShared(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out, ShadowKept& k,
-		const ShadowMaterialRow& a_plain, bool a_sharedRegion, ShadowBuildSplit& a_split)
+		const ShadowMaterialRow& a_plain, ShadowBuildSplit& a_split)
 	{
 		DCLF_ZONE("CS.DCLF.BuildShadow.KeptShared");
 		const std::uint32_t objects = static_cast<std::uint32_t>(a_tables.objects.size());
@@ -577,7 +576,7 @@ namespace DCLF::Draws
 			b.touched.clear();
 			a_split.changed.clear();
 		}
-		const bool resync = BeginKeptBuild(b, a_sharedRegion);
+		const bool resync = BeginKeptBuild(b);
 		if (resync) {
 			// Every object is read and touched again below.
 			b.touched.clear();
@@ -786,9 +785,9 @@ namespace DCLF::Draws
 					chunks[0].keySlots[m] = a_counts->keyDraws[m];
 				}
 				countRange(regionCount, count, chunks[1]);
-			} else if (count >= kCountFanoutMin && !Policy::SerialFanout()) {
+			} else if (count >= kCountFanoutMin) {
 				chunks.resize((count + kCountGrain - 1) / kCountGrain);
-				SceneScheduler::Executor().ParallelFor("CS.DCLF.BuildShadow.CountModeDraws", count, kCountGrain, [&](std::size_t a_begin, std::size_t a_end) {
+				::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.BuildShadow.CountModeDraws", count, kCountGrain, [&](std::size_t a_begin, std::size_t a_end) {
 					DCLF_ZONE("CS.DCLF.BuildShadow.CountModeDrawsShards");
 					countRange(a_begin, a_end, chunks[a_begin / kCountGrain]);
 				});
@@ -842,7 +841,7 @@ namespace DCLF::Draws
 			const auto blocks = ShadowArenaBlocksOf();
 			const std::uint64_t end = std::max({ blocks.zeros + kShadowZeroBlockBytes, blocks.sharedData + blocks.sharedBytes, blocks.featureData + blocks.featureBytes });
 			if (block(nullptr, static_cast<std::size_t>(end)) != base)
-				stl::report_and_fail("Drawcall Limit Fix: the shadow arena's blocks were not laid out from its start");
+				::RenderGraph::Fatal("Drawcall Limit Fix", "the shadow arena's blocks were not laid out from its start");
 			if (a_in.sharedData.size() == blocks.sharedBytes)
 				std::memcpy(arena.At(blocks.sharedData, blocks.sharedBytes).data(), a_in.sharedData.data(), blocks.sharedBytes);
 			if (blocks.featureBytes && a_in.featureData.size() == blocks.featureBytes)
@@ -995,7 +994,7 @@ namespace DCLF::Draws
 	}
 
 	void BuildShadowPayloadShared(const ShadowInputs& a_in, const SceneTables& a_tables, const Lookups& a_lookups, ShadowPayload& a_out,
-		std::shared_ptr<const StreamViews> a_streams, ShadowKept* a_kept, bool a_sharedRegion, ShadowBuildSplit& a_split)
+		std::shared_ptr<const StreamViews> a_streams, ShadowKept* a_kept, ShadowBuildSplit& a_split)
 	{
 		DCLF_ZONE("CS.DCLF.BuildShadowPayload.Shared");
 		const std::uint32_t nullIndex = WriteSharedBlocks(a_in, a_tables, a_lookups, a_out, a_streams);
@@ -1003,7 +1002,7 @@ namespace DCLF::Draws
 		ShadowMaterialRow plain;
 		plain.diffuse = nullIndex;
 		if (a_kept)
-			BuildKeptShadowShared(a_in, a_tables, a_lookups, a_out, *a_kept, plain, a_sharedRegion, a_split);
+			BuildKeptShadowShared(a_in, a_tables, a_lookups, a_out, *a_kept, plain, a_split);
 		else
 			BuildMaterialRows(a_in, a_tables, a_lookups, a_out, plain);
 		a_split.pending = true;
@@ -1029,7 +1028,7 @@ namespace DCLF::Draws
 	{
 		DCLF_ZONE("CS.DCLF.BuildShadowPayload");
 		ShadowBuildSplit split;
-		BuildShadowPayloadShared(a_in, a_tables, a_lookups, a_out, std::move(a_streams), a_kept, a_scene != nullptr, split);
+		BuildShadowPayloadShared(a_in, a_tables, a_lookups, a_out, std::move(a_streams), a_kept, split);
 		BuildShadowPayloadRegion(a_in, a_tables, a_lookups, a_out, a_kept, a_scene, split);
 	}
 }

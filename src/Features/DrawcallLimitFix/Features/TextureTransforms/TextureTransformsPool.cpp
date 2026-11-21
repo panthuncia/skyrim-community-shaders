@@ -3,6 +3,7 @@
 
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransformsPool.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
@@ -62,7 +63,7 @@ namespace DCLF::Features::TextureTransforms
 				std::uint64_t refused = 0, variablesChanged = 0;
 			};
 			std::vector<Chunk> chunks((a_count + kGrain - 1) / kGrain);
-			SceneScheduler::Executor().ParallelFor("CS.DCLF.FrameValues.TextureTransforms", a_count, kGrain, [&](std::size_t a_begin, std::size_t a_end) {
+			::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.FrameValues.TextureTransforms", a_count, kGrain, [&](std::size_t a_begin, std::size_t a_end) {
 				DCLF_ZONE("CS.DCLF.FrameValues.TextureTransformsShards");
 				auto& mine = chunks[a_begin / kGrain];
 				// One engine-read lease for the chunk. If it cannot be had, each entry is unread.
@@ -104,7 +105,7 @@ namespace DCLF::Features::TextureTransforms
 		void Sample(Api::FrameValuePoolProducer& a_producer)
 		{
 			// Main::Update flips the TexcoordOffset buffer and the controllers write the other one, so a read anywhere in the window gets this
-			// frame's value. The frame variables are read as the window finds them, and parity reads them again at the producer's end.
+			// frame's value. The frame variables are read as the window finds them.
 			DCLF_ZONE("CS.DCLF.FrameValues.TextureTransforms");
 			auto& p = produced;
 			a_producer.BeginBuild(p.transforms);
@@ -137,8 +138,6 @@ namespace DCLF::Features::TextureTransforms
 			// The buffer the frame's shaders read. The controllers write the other one.
 			const std::size_t buffer = a_producer.TextureTransformBuffer() & 1u;
 			const auto sampled = SampleEntries(a_producer, list, count, buffer, out);
-			if (a_producer.parity)
-				CheckPoolParity(a_producer, list, count, buffer, out, p.materials);
 			CountPoolLine(count, sampled.changed, sampled.refused, list ? list->variables : 0u, sampled.variablesChanged);
 		}
 

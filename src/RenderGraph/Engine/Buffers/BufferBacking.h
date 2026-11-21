@@ -27,12 +27,12 @@ namespace RenderGraph::Engine::Buffers::detail
 		std::uint8_t* data = nullptr;
 	};
 
-	/** @brief Nullopt when the graph is inactive, the memory cannot be had or mapped, or DXVK refuses the wrap. Logged once per kind. Any thread. */
+	/** @brief Nullopt when the graph is inactive. Any other failure is fatal. Any thread. */
 	std::optional<Backing> MakeBacking(const D3D11_BUFFER_DESC& a_desc, const char* a_name);
 
 	/**
 	* @brief A tripwire handle while the guest context is installed, else the guest buffer with the ORG buffer attached.
-	* Either way the ORG buffer retires after the last reference. Null on failure, and the caller drops the backing. Any thread.
+	* Either way the ORG buffer retires after the last reference. A failure is fatal. Any thread.
 	*/
 	winrt::com_ptr<ID3D11Buffer> EngineView(const D3D11_BUFFER_DESC& a_desc, const Backing& a_backing, const char* a_name);
 
@@ -47,7 +47,7 @@ namespace RenderGraph::Engine::Buffers::detail
 	/** @brief The map (75484) and the three unmaps. */
 	void InstallRingHooks();
 
-	/** @brief Made at the first call. Null, logged once, when it could not be made. Any thread. */
+	/** @brief Made at the first call. Fatal when it cannot be made. Any thread. */
 	const std::shared_ptr<org::VersionedBuffer>& RingVersions();
 
 	/** @brief Any thread. */

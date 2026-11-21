@@ -1,4 +1,5 @@
 #include "RenderGraph/Frame/FrameDescription.h"
+#include "Utils/Hash.h"
 
 #include <fmt/format.h>
 
@@ -47,11 +48,10 @@ namespace RenderGraph::Frame
 	std::uint64_t FieldsHash(const SegmentFields& a_fields)
 	{
 		// FNV-1a over the fields, one word each.
-		std::uint64_t hash = 1469598103934665603ull;
-		const auto mix = [&](std::uint64_t a_word) { hash = (hash ^ a_word) * 1099511628211ull; };
+		Util::Fnv1a fnv;
+		const auto mix = [&](std::uint64_t a_word) { fnv.Mix(a_word); };
 		mix(a_fields.declared);
 		mix(a_fields.graph);
-		mix(a_fields.versions);
 		mix(a_fields.clients);
 		mix(a_fields.clientsOn);
 		for (std::size_t i = 0; i < a_fields.instances.size(); i += 8) {
@@ -60,10 +60,10 @@ namespace RenderGraph::Frame
 				word |= static_cast<std::uint64_t>(a_fields.instances[i + k]) << (8 * k);
 			mix(word);
 		}
-		mix(a_fields.foreignOn);
 		mix(a_fields.passes);
 		for (const auto word : a_fields.rows)
 			mix(word);
+		const std::uint64_t hash = fnv.Value();
 		return hash ? hash : 1;
 	}
 
@@ -82,7 +82,6 @@ namespace RenderGraph::Frame
 		std::string out;
 		Append(out, "declared", a_before.declared ? "yes" : "no", a_after.declared ? "yes" : "no");
 		Append(out, "graph", std::to_string(a_before.graph), std::to_string(a_after.graph));
-		Append(out, "versions", std::to_string(a_before.versions), std::to_string(a_after.versions));
 		Append(out, "clients", std::to_string(a_before.clients), std::to_string(a_after.clients));
 		Append(out, "clientsOn", fmt::format("{:#x}", a_before.clientsOn), fmt::format("{:#x}", a_after.clientsOn));
 		const auto instances = [](const SegmentFields& a_fields) {
@@ -93,7 +92,6 @@ namespace RenderGraph::Frame
 			return text.empty() ? std::string("none") : text;
 		};
 		Append(out, "instances", instances(a_before), instances(a_after));
-		Append(out, "foreignOn", fmt::format("{:#x}", a_before.foreignOn), fmt::format("{:#x}", a_after.foreignOn));
 		Append(out, "passes", fmt::format("{:#x}", a_before.passes), fmt::format("{:#x}", a_after.passes));
 		const auto rows = [](const SegmentFields& a_fields) {
 			return fmt::format("{:016x}{:016x}{:016x}{:016x}", a_fields.rows[3], a_fields.rows[2], a_fields.rows[1], a_fields.rows[0]);
@@ -123,7 +121,6 @@ namespace RenderGraph::Frame
 		flag("taa", a_before.taa, a_after.taa);
 		number("taa form", a_before.taaMode, a_after.taaMode);
 		flag("taa water", a_before.taaWater, a_after.taaWater);
-		flag("dynamic resolution", a_before.dynres, a_after.dynres);
 		flag("dof compute", a_before.dofCompute, a_after.dofCompute);
 		flag("screenshot", a_before.screenshot, a_after.screenshot);
 		flag("upscaler", a_before.upscaler, a_after.upscaler);
@@ -135,7 +132,7 @@ namespace RenderGraph::Frame
 		std::string out;
 		Append(out, "kind", KindName(a_before.kind), KindName(a_after.kind));
 		Append(out, "capture", a_before.capture ? "yes" : "no", a_after.capture ? "yes" : "no");
-		Append(out, "DCLF draws", a_before.dclfDraws ? "yes" : "no", a_after.dclfDraws ? "yes" : "no");
+		Append(out, "scene draws", a_before.sceneDraws ? "yes" : "no", a_after.sceneDraws ? "yes" : "no");
 		return out;
 	}
 }

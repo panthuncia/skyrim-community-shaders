@@ -1,7 +1,7 @@
 #pragma once
 
 // The extension registry: what features registered at install, read-only afterwards.
-// Switches and toggles register with Core/Settings, which owns them.
+// Switches register with Core/Settings, which owns them.
 
 #include "Features/DrawcallLimitFix/Api/Epochs.h"
 #include "Features/DrawcallLimitFix/Api/Feature.h"
@@ -24,10 +24,10 @@ namespace DCLF::Extensions
 	void PreflightFeatures(std::span<const Api::Feature> a_features);
 	/** @brief Main thread, once, before InstallFeatures. Every feature's source hooks, source by source in Api::ShadowSource order. */
 	void InstallSourceHooks(std::span<const Api::Feature> a_features);
-	/** @brief The frame's epoch orders as RenderGraphRuntime::Segment values: the frame order, the async order and its revision-driven subset. */
+	/** @brief The frame's epoch order as RenderGraphRuntime::Segment values, also the async order, and its revision-driven subset. */
 	struct FrameOrders
 	{
-		std::vector<std::uint32_t> epochOrder, asyncOrder, revisionEpochs;
+		std::vector<std::uint32_t> epochOrder, revisionEpochs;
 	};
 	/** @brief Main thread, after InstallFeatures. Passed to RenderGraphRuntime::ConfigureFrame before the runtime initializes. */
 	const FrameOrders& ScheduledFrameOrders();
@@ -95,6 +95,16 @@ namespace DCLF::Extensions
 		decltype(Api::FrameTexture::view) view = nullptr;  // null means the captured view, graph only
 		bool capturedWhenNull = false;
 		decltype(Api::FrameTexture::graphResources) graphResources{};  // static strings. Empty ones are unused.
+		decltype(Api::FrameTexture::facesGraphResources) facesGraphResources{};  // the same, read by the reflection faces in place of the above
+		decltype(Api::FrameTexture::graphId) graphId = nullptr;  // the id of graphResources the producer reads this commit
+		/** @brief Whether the faces read ids of their own here (per-epoch views). */
+		bool FacesOwnIds() const
+		{
+			for (const auto id : facesGraphResources)
+				if (!id.empty())
+					return true;
+			return false;
+		}
 	};
 	/** @brief A feature's registered report lines. */
 	struct ReportLinesEntry
@@ -142,7 +152,6 @@ namespace DCLF::Extensions
 		Api::CoordinatorComponent::Residency residency;
 		Api::CoordinatorComponent::Accumulate accumulate;
 		Api::CoordinatorComponent::Walk walk;
-		Api::CoordinatorComponent::DenseWalk dense;
 		Api::CoordinatorComponent::Retirement retirement;
 		Api::CoordinatorComponent::EntryClassHooks entryClass;
 		Api::CoordinatorComponent::Events events;

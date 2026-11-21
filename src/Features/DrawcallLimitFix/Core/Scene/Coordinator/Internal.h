@@ -5,12 +5,13 @@
 
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/Hash.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "Utils/Hash.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialSources.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialWrites.h"
@@ -214,8 +215,6 @@ namespace DCLF
 			return a_a.filterModes == a_b.filterModes && a_a.shadowMask == a_b.shadowMask && a_a.shadowMaskTexture == a_b.shadowMaskTexture;
 		}
 
-		/** @brief Read once. 0 interleaved, 1 evaluated then merged on the lane, 2 on the pool. */
-		std::uint32_t ConfiguredFanout();
 
 
 		// Only the columns the accumulator patch can change. It never writes placement, geometry, bones, wetness or shadow inputs.

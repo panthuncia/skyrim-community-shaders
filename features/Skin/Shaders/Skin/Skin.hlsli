@@ -22,16 +22,53 @@ namespace Skin
 
 #if defined(PSHADER)
 #	if defined(DCLF_BINDLESS_DRAW)
-	// Drawcall Limit Fix: per object, from its shading row rather than a buffer of its own, so that b7 is not part
-	// of what makes a draw's binding record unique.
+	// Drawcall Limit Fix: b7 is per draw, so the object's shading row names a row of a material table instead
+	// (Integrations/AdvancedSkin/SkinMaterials.cpp, MaterialRow). Row 0 is the disabled profile.
+	struct DCLFSkinMaterialRow
+	{
+		float4 MaterialFlags;
+		SharedData::SkinData Profile;
+		uint4 Descriptors;  // t71, t74, t72 and s15, each heap index + 1, 0 for none
+		float4 WetnessOverride;  // x replaces the actor's sweat when w is 1: the editor's preview
+	};
+	StructuredBuffer<DCLFSkinMaterialRow> DCLFSkinMaterials : register(t38);
+
 	// Read where used: a plain draw's object index (DCLF_PULLED) is set by its main, after statics are initialised.
-#		define skinPerGeometry (DCLFShading[DCLFObjectIndex].SkinPerGeometry)
-	// The shading row has no per-geometry material yet: no extra, wetness or detail textures, and the common profile.
-	static const float4 skinMaterialFlags = float4(0.0f, 0.0f, 0.0f, 0.0f);
+	DCLFSkinMaterialRow DCLFSkinMaterial()
+	{
+		return DCLFSkinMaterials[DCLFShading[DCLFObjectIndex].SkinMaterial];
+	}
+	float4 DCLFSkinPerGeometry()
+	{
+		const float4 skinOverride = DCLFSkinMaterial().WetnessOverride;
+		return skinOverride.w > 0.5f ? float4(skinOverride.x, 0.0f, 0.0f, 0.0f) : DCLFShading[DCLFObjectIndex].SkinPerGeometry;
+	}
+	float4 DCLFSkinMaterialFlags()
+	{
+		return DCLFSkinMaterial().MaterialFlags;
+	}
+	// A zero descriptor stays in the heap: every read is behind a flag or the detail switch, but a load may still be hoisted above it.
+	Texture2D<float4> DCLFSkinTexture(uint a_index)
+	{
+		const uint descriptor = max(DCLFSkinMaterial().Descriptors[a_index], 1u) - 1u;
+		Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(descriptor)];
+		return t;
+	}
+	SamplerState DCLFSkinDetailSampler()
+	{
+		const uint descriptor = max(DCLFSkinMaterial().Descriptors.w, 1u) - 1u;
+		SamplerState s = SamplerDescriptorHeap[NonUniformResourceIndex(descriptor)];
+		return s;
+	}
+#		define skinPerGeometry DCLFSkinPerGeometry()
+#		define skinMaterialFlags DCLFSkinMaterialFlags()
+	// Lighting.hlsl declares t71 and t74 before including this file, so its uses below become the row's views.
+#		define TexSkinExtraSampler Skin::DCLFSkinTexture(0)
+#		define TexSkinWetnessSampler Skin::DCLFSkinTexture(1)
 
 	SharedData::SkinData GetSkinData()
 	{
-		return SharedData::skinData;
+		return DCLFSkinMaterial().Profile;
 	}
 #	else
 	cbuffer SkinPerGeometry : register(b7)
@@ -55,8 +92,13 @@ namespace Skin
 	}
 #endif
 #if defined(CS_SKIN_SHADING)
+#	if defined(PSHADER) && defined(DCLF_BINDLESS_DRAW)
+#		define TexSkinDetailNormal DCLFSkinTexture(2)
+#		define DetailSampler DCLFSkinDetailSampler()
+#	else
 	Texture2D<float4> TexSkinDetailNormal : register(t72);
 	SamplerState DetailSampler : register(s15);
+#	endif
 
 	float3x3 SurfaceBasis(float3 position, float3 normal, float2 uv)
 	{

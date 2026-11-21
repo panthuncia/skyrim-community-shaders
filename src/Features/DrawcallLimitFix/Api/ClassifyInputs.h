@@ -1,6 +1,6 @@
 #pragma once
 
-// A world fact outside the toggles that classification reads, such as whether Terrain Blending is holding terrain back.
+// A world fact that classification reads, such as whether Terrain Blending is holding terrain back.
 // Core samples every input once per frame, and a scene pass takes them at its start so it classifies by one answer throughout.
 // A change drops the classification caches.
 

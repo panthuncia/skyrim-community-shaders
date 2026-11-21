@@ -1,12 +1,10 @@
 #include "RenderGraph/Engine/Pipeline/StateConversion.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include <rhi_helpers.h>
 
-#	include <rhi_helpers.h>
-
-#	include <algorithm>
-#	include <format>
-#	include <initializer_list>
+#include <algorithm>
+#include <format>
+#include <initializer_list>
 
 namespace RenderGraph::Engine::Pipeline
 {
@@ -184,61 +182,4 @@ namespace RenderGraph::Engine::Pipeline
 		out.depthClip = a_desc.DepthClipEnable != FALSE;
 		return out;
 	}
-
-	rhi::PrimitiveTopology TopologyFromD3D11(D3D11_PRIMITIVE_TOPOLOGY a_topology)
-	{
-		switch (a_topology) {
-		case D3D11_PRIMITIVE_TOPOLOGY_POINTLIST:
-			return rhi::PrimitiveTopology::PointList;
-		case D3D11_PRIMITIVE_TOPOLOGY_LINELIST:
-			return rhi::PrimitiveTopology::LineList;
-		case D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP:
-			return rhi::PrimitiveTopology::LineStrip;
-		case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST:
-			return rhi::PrimitiveTopology::TriangleList;
-		case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:
-			return rhi::PrimitiveTopology::TriangleStrip;
-		default:
-			return rhi::PrimitiveTopology::Unknown;
-		}
-	}
-
-	org::PipelineInputLayout InputLayoutFromD3D11(std::span<const D3D11_INPUT_ELEMENT_DESC> a_elements, std::string& a_error)
-	{
-		org::PipelineInputLayout out;
-		for (const auto& element : a_elements) {
-			const auto format = rhi::helpers::ToRHI(element.Format);
-			if (format == rhi::Format::Unknown) {
-				a_error = std::format("{}{} has DXGI format {}, which BasicRHI has no value for", element.SemanticName ? element.SemanticName : "?", element.SemanticIndex,
-					static_cast<int>(element.Format));
-				continue;
-			}
-			const bool perInstance = element.InputSlotClass == D3D11_INPUT_PER_INSTANCE_DATA;
-			const auto binding = std::ranges::find(out.bindings, element.InputSlot, &rhi::InputBindingDesc::binding);
-			if (binding == out.bindings.end()) {
-				out.bindings.push_back({ .binding = element.InputSlot,
-					.stride = 0,
-					.rate = perInstance ? rhi::InputRate::PerInstance : rhi::InputRate::PerVertex,
-					.instanceStepRate = perInstance ? (std::max)(1u, element.InstanceDataStepRate) : 1u });
-			}
-			// D3D11_APPEND_ALIGNED_ELEMENT and rhi::APPEND_ALIGNED are both 0xffffffff.
-			out.attributes.push_back({ .binding = element.InputSlot,
-				.offset = element.AlignedByteOffset,
-				.format = format,
-				.semanticName = element.SemanticName ? element.SemanticName : "",
-				.semanticIndex = element.SemanticIndex });
-		}
-		return out;
-	}
-
-	org::PipelineInputLayout WithStrides(org::PipelineInputLayout a_layout, std::span<const std::uint32_t> a_strides)
-	{
-		for (auto& binding : a_layout.bindings) {
-			if (binding.binding < a_strides.size() && a_strides[binding.binding])
-				binding.stride = a_strides[binding.binding];
-		}
-		return a_layout;
-	}
 }
-
-#endif

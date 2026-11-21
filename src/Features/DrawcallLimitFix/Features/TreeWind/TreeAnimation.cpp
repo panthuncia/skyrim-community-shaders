@@ -9,7 +9,8 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Fatal.h"
 
 #include <ankerl/unordered_dense.h>
 
@@ -46,7 +47,7 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 		// Never destroyed, because nothing may release engine objects while the process is torn down.
 		auto& detached = *new ankerl::unordered_dense::map<const RE::NiAVObject*, RE::NiAVObject*>();
 		// Nodes the engine added (FUN_1404376f0), for the render thread to take off again if owned. Identity only.
-		auto& added = *new EventQueue<const RE::NiAVObject*>();
+		auto& added = *new RenderGraph::Frame::EventQueue<const RE::NiAVObject*>();
 		std::atomic<std::uint32_t> held{ 0 };
 
 		// The stood-in tree nodes, each held while stood in, and the results written for the running loop.
@@ -177,7 +178,7 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 		                        SceneWriter::AddFilter(SWF_FILTER_CALL(SWF_HOOK_TREE_ANIM_REMOVE), &Hooks::Remove) &&
 		                        SceneWriter::SubscribeCall(SWF_HOOK_TREE_ANIM_CLEAR, &Hooks::Clear, SWF_PHASE_POST);
 		if (!subscribed)
-			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the tree animation calls after reporting them installed");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the tree animation calls after reporting them installed");
 		installed = enabled = true;
 		logger::info("[DCLF] tree animation list: owned trees are taken off the tree manager's animation list");
 	}
@@ -265,9 +266,9 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 		stats.putBack += putBack.size();
 	}
 
-	void AtUpdateEntry(bool a_running)
+	void AtUpdateEntry()
 	{
-		running = a_running;
+		running = true;
 	}
 
 	void BeforeListLoop(std::byte* a_manager)
@@ -332,22 +333,6 @@ namespace DCLF::Features::TreeWind::TreeAnimation
 		for (auto& entry : written)
 			*entry.result = entry.engine;
 		written.clear();
-	}
-
-	bool OwnedOnList(std::uint64_t& a_count)
-	{
-		auto* manager = Manager();
-		if (!installed || !manager)
-			return false;
-		DrainAdds(manager);
-		auto& lock = Lock(manager);
-		lock.Lock();
-		const auto& list = AnimationList(manager);
-		a_count = 0;
-		for (std::uint32_t i = 0; i < list.size(); ++i)
-			a_count += list[i] && owned.contains(list[i]) ? 1 : 0;
-		lock.Unlock();
-		return true;
 	}
 
 	Counters Take()

@@ -4,10 +4,8 @@
 #include "Schedule.h"
 #include "Spread.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Reports.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Scene/MirrorWatch.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Scene/SceneState.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Scene/SoleHolds.h"
-#include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/Diagnostics/WetnessParity.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Internal.h"
 
 // The render thread's scene lines, and the lines at the gate releases' point.
@@ -20,36 +18,20 @@ namespace DCLF::Reports
 	{
 		// Only what the render thread keeps. Nothing of the coordinator's.
 		std::string text;
-		auto& diagnostics = Diagnostics::SceneDiagnostics();
 		if (auto& g = V::geometryStats(); g.frames) {
-			auto& t = diagnostics.techniques;
-			text += fmt::format("[DCLF] pipeline constants: {:.2f} full geometry evaluations and {:.2f} frame samples a frame, {:.1f} pipelines changed, frame lighting changed {:.2f}; parity {} checks, {} of {} technique blocks differ ({} more late: the sample moved since the row's write){}{}\n",
+			text += fmt::format("[DCLF] pipeline constants: {:.2f} full geometry evaluations and {:.2f} frame samples a frame, {:.1f} pipelines changed, frame lighting changed {:.2f}\n",
 				static_cast<double>(g.full) / g.frames, static_cast<double>(g.samples) / g.frames, static_cast<double>(g.changed) / g.frames,
-				static_cast<double>(g.lightingVersions) / g.frames, t.checks, t.techniquesDiffer, t.techniquesChecked, t.techniquesLate,
-				t.checks ? (t.techniquesDiffer ? " <- DIFFER" : " <- OK") : "", t.techniquesDiffer ? "; technique: " + t.techniqueFirst : std::string());
+				static_cast<double>(g.lightingVersions) / g.frames);
 			g = {};
-			t = {};
 		}
 		if (auto& ss = V::shadingStats(Scene::Coordinator::Get()); V::shadingFrames()) {
 			const double frames = static_cast<double>(std::exchange(V::shadingFrames(), 0));
-			auto& sp = diagnostics.shading;
 			text += fmt::format("[DCLF] shading (sampled at the frame's start for the slots its events name): {:.1f} LOD fade events, {:.1f} emittance events, {:.1f} "
-								"named a frame; parity at Prepass against the frame's rows: {} checks, {} slots compared, changed since the frame's start: {} named for "
-								"the next frame, {} queued, {} missed{}{}{}\n",
-				static_cast<double>(ss.lodFadeEvents) / frames, static_cast<double>(ss.emittanceEvents) / frames, static_cast<double>(ss.resampled) / frames, sp.checks,
-				sp.slots, sp.named, sp.late, sp.missing, sp.checks ? (sp.missing ? " <- MISSED; first: " : " <- OK") : "", sp.first,
-				Integrations::AdvancedSkin::TakeRowWetnessText());
+								"named a frame\n",
+				static_cast<double>(ss.lodFadeEvents) / frames, static_cast<double>(ss.emittanceEvents) / frames, static_cast<double>(ss.resampled) / frames);
 			ss = {};
-			sp = {};
-		}
-		if (auto& ep = diagnostics.extras; ep.objects) {
-			text += fmt::format("[DCLF] extras parity (the draw's completion against the engine's routines): {} objects, {} differ, largest difference {}, {} static rows "
-								"stale with no event{}{}\n",
-				ep.objects, ep.differ, ep.maxDifference, ep.staleStatic, ep.differ || ep.staleStatic ? " <- DIFFER" : " <- OK", ep.differ ? "; first: " + ep.first : std::string());
-			ep = {};
 		}
 		Extensions::ReportTextAt(Api::ReportPoint::SceneFrame, text);
-		text += MirrorWatch::TakeReport(V::frame());
 		auto& captureNs = V::captureNs();
 		auto& categoryCaptureNs = V::categoryCaptureNs();
 		auto& categoryCapturesMade = V::categoryCapturesMade();

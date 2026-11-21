@@ -1,5 +1,6 @@
 #include "Profiler.h"
 
+#include "DxvkExports.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/GpuTimingSource.h"
 
@@ -83,12 +84,8 @@ void Profiler::Initialize(ID3D11Device* device, ID3D11DeviceContext* a_context)
 	// interop or render-graph submission) also counts the time the queue waited for the later submission,
 	// so those samples are flagged.
 	submissionCounter = nullptr;
-	if (HMODULE dxvk = GetModuleHandleW(L"dxvk_d3d11.dll")) {
-		if (auto getCounter = reinterpret_cast<PFN_dxvkGetSubmissionCounter>(
-				reinterpret_cast<void*>(GetProcAddress(dxvk, "dxvkGetSubmissionCounter")));
-			getCounter && FAILED(getCounter(device, &submissionCounter)))
-			submissionCounter = nullptr;
-	}
+	if (const auto getCounter = DxvkExports::Get().getSubmissionCounter; getCounter && FAILED(getCounter(device, &submissionCounter)))
+		submissionCounter = nullptr;
 	logger::info("[Profiler] DXVK submission counter {}", submissionCounter ? "found: split timers are flagged" : "unavailable");
 
 	writeFrame = 0;

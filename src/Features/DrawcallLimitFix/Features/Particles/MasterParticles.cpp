@@ -8,7 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
@@ -65,7 +65,7 @@ namespace DCLF::Features::Particles::MasterParticles
 		{
 			std::atomic<std::uint64_t> attaches{ 0 }, detaches{ 0 }, removals{ 0 }, gathers{ 0 };
 		} counts;
-		EventQueue<const void*> exits;
+		RenderGraph::Frame::EventQueue<const void*> exits;
 
 		// A master read at a gather, and how many of its references are DCLF's capture pins.
 		struct MasterRead
@@ -240,7 +240,7 @@ namespace DCLF::Features::Particles::MasterParticles
 
 	void Install(Api::InstallContext& a_context)
 	{
-		masterSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_MASTER_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero, .description = "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4; needs CS_DCLF_PARTICLES); 0 they stay the engine's", .after = "CS_DCLF_PARTICLES" });
+		masterSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_MASTER_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero, .description = "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4); 0 they stay the engine's", .after = "CS_DCLF_BILLBOARD_PARTICLES" });
 		if (SwitchValue(masterSwitch) == "0" || installed)
 			return;
 		observing = Diagnostics::Observe().stats;

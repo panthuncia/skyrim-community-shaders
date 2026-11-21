@@ -4,6 +4,7 @@ A lost device once flooded the log to 12 GB, and copying it hung the old harness
 chunks, and only their first and last 64 MB when they are bigger.
 """
 
+import json
 import re
 import shutil
 import zlib
@@ -91,6 +92,46 @@ def scan_log(path, limit_lines=5_000_000):
         "error_kinds": dict((counts["E"] + counts["C"]).most_common(50)),
         "warning_kinds": dict(counts["W"].most_common(50)),
     }
+
+
+FGTEST = re.compile(r"^\[(?P<time>[0-9:.]+)\] .*\[FGTEST\] (?P<fps>\d+) fps, (?P<presents>\d+) FSR-FG presents")
+
+
+def fgtest_seconds(path, day):
+    """The [FGTEST] seconds in which FSR-FG presented, as (wall time, rendered fps). day: the run's start (epoch seconds)."""
+    import datetime
+
+    base = datetime.datetime.fromtimestamp(day).replace(hour=0, minute=0, second=0, microsecond=0)
+    out = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = FGTEST.search(line)
+                if m and int(m["presents"]) > 0:
+                    h, mi, s = m["time"].split(":")
+                    when = base + datetime.timedelta(hours=int(h), minutes=int(mi), seconds=float(s))
+                    out.append((when.timestamp(), int(m["fps"])))
+    except OSError:
+        pass
+    return out
+
+
+def fgtest_rates(path):
+    """Median rendered frames and FSR-FG presents per second over the [FGTEST] seconds in which FSR-FG presented."""
+    rows = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = FGTEST.search(line)
+                if m and int(m["presents"]) > 0:
+                    rows.append((int(m["fps"]), int(m["presents"])))
+    except OSError:
+        pass
+    if not rows:
+        return {"fgtest_seconds": 0}
+    fps = sorted(r[0] for r in rows)
+    presents = sorted(r[1] for r in rows)
+    return {"fgtest_seconds": len(rows), "rendered_fps_median": fps[len(fps) // 2], "fsrfg_presents_median": presents[len(presents) // 2]}
 
 
 def log_contains(path, needles):
@@ -248,3 +289,34 @@ def shots_in(run_dir):
         return []
     # The live-image shots are the check's own (live_image), not the config's.
     return sorted(p.stem for p in folder.iterdir() if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".dds", ".bmp") and p.stem not in LIVE_SHOTS)
+
+
+def final_status(run_dir, watched):
+    """The game's last status: run_dir/status.json (copied after the exit) when it reads, else the one the watch saw."""
+    try:
+        return json.loads((Path(run_dir) / "status.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return watched
+
+
+def graph_frames(contract, status):
+    """expect.graph_frames against the game's exit report (status "report.graph_frames"). "failures" is empty when it held."""
+    expected = contract["expect"].get("graph_frames") or {}
+    report = ((status or {}).get("report") or {}).get("graph_frames")
+    result = {"expected": expected, "report": report, "failures": [], "skipped": ""}
+    if not expected:
+        result["skipped"] = "nothing expected"
+        return result
+    if contract.get("env", {}).get("CS_ORG") == "0":
+        # Plain D3D11 mode: nothing runs on the graph.
+        result["skipped"] = "skipped (CS_ORG=0)"
+        return result
+    if not isinstance(report, dict):
+        result["failures"].append("no graph_frames report in the status file (a Release build or an older build)")
+        return result
+    clients = report.get("clients") or {}
+    for client, least in expected.get("min", {}).items():
+        frames = (clients.get(client) or {}).get("graph", 0)
+        if frames < least:
+            result["failures"].append(f"{client} ran on the graph in {frames} frames, at least {least} expected")
+    return result

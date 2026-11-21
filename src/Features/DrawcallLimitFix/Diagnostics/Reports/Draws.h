@@ -13,7 +13,6 @@ namespace DCLF::Reports
 	/** @brief Frame data through the render thread, bytes per frame by where, largest first. Empty when none. */
 	std::string FrameDataLine();
 	/** @brief Logs the constant tables against ShaderCache's since the last call. */
-	void ConstantTableLines();
 	/** @brief Main pass pipeline statistics per frame, over a_samples frames each. */
 	void PassStatsLine(const std::array<std::array<std::uint64_t, 4>, 4>& a_totals, const std::array<std::uint32_t, 4>& a_samples);
 	/** @brief Logs the colour commits whose sun test ran without the sun's cascades. */

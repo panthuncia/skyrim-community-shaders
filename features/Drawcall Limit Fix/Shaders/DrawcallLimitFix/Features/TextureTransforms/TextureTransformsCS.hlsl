@@ -38,8 +38,6 @@ static const uint kThreads = 64 * 32;
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
 	const uint transformsIndex = latch.Load(LatchOffset + kLatchStageWord);
-	// The pass ran, with this stage word, in this phase.
-	DEVICE_REF_TRACE_VALUE(uint2(transformsIndex, Phase));
 	if (transformsIndex == 0)
 		return;  // no producer this frame, so the draws read the installed rows
 	const DeviceRef base = latch.Load2(LatchOffset + kLatchMaterialRowsRef);
@@ -50,8 +48,6 @@ static const uint kThreads = 64 * 32;
 	const bool rowsValid = !DeviceRefIsNull(base) && !DeviceRefIsNull(copyBase);
 	const uint count = rowsValid ? transforms[0].RowOffset : 0;
 	const uint animated = rowsValid ? transforms[0].Mask : 0;
-	// The entries and animated rows the header counts.
-	DEVICE_REF_TRACE_VALUE(uint2(count, animated));
 	if (Phase == 0) {
 		// Each animated row whole, one 16-byte word per thread.
 		const uint kWords = kMaterialRowBytes / 16;

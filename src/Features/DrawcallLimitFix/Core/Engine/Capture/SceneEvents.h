@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
@@ -87,9 +87,9 @@ namespace DCLF::Scene
 	 * @brief Structural events, pushed on any thread and drained by the scene pass. Property events are keys only, never dereferenced.
 	 * Node events hold a reference, because the drain walks the node's subtree and ancestors.
 	 */
-	inline EventQueue<const void*> propertyEvents{ &WakeScenePropertyEvent };
+	inline RenderGraph::Frame::EventQueue<const void*> propertyEvents{ &WakeScenePropertyEvent };
 	// No wake, since Havok writes movers' transforms every frame. The next pass takes them.
-	inline EventQueue<RE::NiPointer<RE::NiAVObject>> nodeEvents;
+	inline RenderGraph::Frame::EventQueue<RE::NiPointer<RE::NiAVObject>> nodeEvents;
 
 	inline void PushProperty(const void* a_property) { propertyEvents.Push(a_property); }
 
@@ -104,7 +104,7 @@ namespace DCLF::Scene
 	 * the object, possibly after the patch was sampled. Pushed from cull and accumulation jobs.
 	 */
 	// Per frame, so no wake.
-	inline EventQueue<const void*> lodFadeEvents;
+	inline RenderGraph::Frame::EventQueue<const void*> lodFadeEvents;
 	inline bool lodFadeEventsInstalled = false;
 
 	inline void DrainLodFadeEvents(std::vector<const void*>& a_out)
@@ -117,7 +117,7 @@ namespace DCLF::Scene
 	 * Both updates write through Sky::SetColor (0x14040d970), whose detour pushes on change.
 	 */
 	// Per frame, so no wake.
-	inline EventQueue<const void*> emittanceEvents;
+	inline RenderGraph::Frame::EventQueue<const void*> emittanceEvents;
 
 	inline void DrainEmittanceEvents(std::vector<const void*>& a_out)
 	{
@@ -141,7 +141,7 @@ namespace DCLF::Scene
 	 * feature writers. Pushed after the write from the animation and cell jobs.
 	 */
 	// Thousands a frame, so no wake.
-	inline EventQueue<const void*> moveEvents;
+	inline RenderGraph::Frame::EventQueue<const void*> moveEvents;
 	// Calls per writer, for the report.
 	inline std::array<std::atomic<std::uint64_t>, Extensions::kMoveWriterSlots> moveWriterCalls{};
 	// Core's writers at their slots. Empty slots belong to reserved writers, named at their reservation.
@@ -183,7 +183,7 @@ namespace DCLF::Scene
 		std::int32_t before = 0;
 		bool structural = false;
 	};
-	inline EventQueue<SwitchEvent> switchEvents{ &WakeSceneSwitchEvent };
+	inline RenderGraph::Frame::EventQueue<SwitchEvent> switchEvents{ &WakeSceneSwitchEvent };
 	constexpr std::size_t kSwitchIndex = 0x12C;
 
 	inline std::int32_t& SwitchIndexOf(RE::NiAVObject* a_switch)

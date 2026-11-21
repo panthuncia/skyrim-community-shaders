@@ -3,7 +3,8 @@
 
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/Hash.h"
+#include "RenderGraph/Fatal.h"
+#include "Utils/Hash.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
@@ -18,8 +19,6 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
@@ -35,13 +34,13 @@ namespace DCLF::Scene
 
 		constexpr std::uint32_t kObjectClasses = static_cast<std::uint32_t>(Api::ObjectClass::Count);
 
-		/** @brief One bit per object class on under a_toggles that lists a category root. */
-		std::uint32_t RootListing(const ToggleSet& a_toggles)
+		/** @brief One bit per object class taken that lists a category root. */
+		std::uint32_t RootListing()
 		{
 			const auto& roots = Extensions::RegisteredCategoryRoots();
 			std::uint32_t listing = 0;
 			for (std::uint32_t c = 0; c < kObjectClasses; ++c)
-				if (roots[c] && Extensions::ObjectClassOn(a_toggles, static_cast<Api::ObjectClass>(c)))
+				if (roots[c] && Extensions::ObjectClassOn(static_cast<Api::ObjectClass>(c)))
 					listing |= 1u << c;
 			return listing;
 		}
@@ -195,13 +194,9 @@ namespace DCLF::Scene
 		void DispatchFrameStartJob(FrameStartJob& a_job)
 		{
 			a_job.running.store(true, std::memory_order_release);
-			if (Policy::ScenePassInline()) {
-				RunFrameStartJob(a_job);
-				return;
-			}
-			if (!SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "frame-start captures",
+			if (!::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu, "frame-start captures",
 					[job = &a_job](const auto&) { RunFrameStartJob(*job); }))
-				stl::report_and_fail("Drawcall Limit Fix: the frame start's captures were refused by DCLF's executor");
+				::RenderGraph::Fatal("Drawcall Limit Fix", "the frame start's captures were refused by DCLF's executor");
 		}
 
 		template <class Mix>
@@ -210,7 +205,7 @@ namespace DCLF::Scene
 			const auto& views = Extensions::Views();
 			for (std::uint32_t i = 0; i < views.rootCount; ++i) {
 				const auto view = views.rootViews[i];
-				if (!Extensions::ViewOn(SceneToggles(), view))
+				if (!Extensions::ViewRegistered(view))
 					continue;
 				Api::ViewRootCapture capture;
 				Extensions::ViewEntryOf(view).captureRoot(capture);
@@ -222,11 +217,11 @@ namespace DCLF::Scene
 		/** @brief The signature inputs that cost O(1) to read, compared every frame. The rest is read only after a watched edit or a change here. */
 		std::uint64_t CategoryInputs()
 		{
-			Fnv1a hash;
+			Util::Fnv1a hash;
 			const auto& views = Extensions::Views();
-			std::uint32_t listing = RootListing(SceneToggles());
+			std::uint32_t listing = RootListing();
 			for (std::uint32_t i = 0; i < views.rootCount; ++i)
-				listing |= Extensions::ViewOn(SceneToggles(), views.rootViews[i]) ? 1u << (kObjectClasses + i) : 0u;
+				listing |= Extensions::ViewRegistered(views.rootViews[i]) ? 1u << (kObjectClasses + i) : 0u;
 			hash.Mix(listing);
 			for (const auto root : Extensions::RegisteredCategoryRoots())
 				if (root)
@@ -254,7 +249,7 @@ namespace DCLF::Scene
 		 */
 		std::uint64_t ReadCategorySignature(std::vector<const void*>* a_watch)
 		{
-			Fnv1a hash;
+			Util::Fnv1a hash;
 			auto mix = [&hash](const void* a_value) { hash.Mix(a_value); };
 			auto watch = [a_watch](const void* a_node) {
 				if (a_watch && a_node)
@@ -289,7 +284,7 @@ namespace DCLF::Scene
 					hash.Mix(objRoot->GetChildren().size());
 				mix(tes->objRoot);
 				watch(tes->objRoot);
-				const std::uint32_t rootListing = RootListing(SceneToggles());
+				const std::uint32_t rootListing = RootListing();
 				const auto& roots = Extensions::RegisteredCategoryRoots();
 				for (std::uint32_t c = 0; c < kObjectClasses; ++c)
 					if (roots[c])
@@ -312,36 +307,10 @@ namespace DCLF::Scene
 			bool read = false;
 			std::uint64_t edits = 0, inputs = 0, signature = 0;
 			std::uint64_t unheldEdits = 0;  // SceneTracker::UnheldEdits at the last gather of the unheld roots
-			std::uint64_t frames = 0, reads = 0, checked = 0, missed = 0, jobs = 0, jobItems = 0, deferred = 0, resumed = 0, unheldDiffs = 0;
-			std::uint64_t windowRender = 0, windowOther = 0;
-			std::uint32_t windowThread = 0;
 		} categoryWatch;
 
-		void ReportCategoryWatch()
-		{
-			auto& w = categoryWatch;
-			if (!Diagnostics::Observe().scene)
-				return;
-			const auto edits = SceneTracker::TakeWindowEdits();
-			w.windowRender += edits.renderThread;
-			w.windowOther += edits.otherThreads;
-			if (!w.windowThread)
-				w.windowThread = edits.firstThread;
-			if (++w.frames % 600)
-				return;
-			logger::info("[DCLF] frame-start captures by events (C2 parity): {} frames, the category signature read on {} (an edit or an input moved), {} others "
-						 "checked against a full read, {} moved unseen{}; {} unheld roots diffs; {} leased jobs ({} items; {} deferred behind a running job, {} resumed in a "
-						 "later window); in-world attaches and detaches inside the read window (why the mirror's captures stay on the render thread): {} by the render "
-						 "thread, {} by others{}",
-				w.frames, w.reads, w.checked, w.missed, w.missed ? " <- FLAG" : " <- OK", w.unheldDiffs, w.jobs, w.jobItems, w.deferred, w.resumed, w.windowRender,
-				w.windowOther, w.windowRender || w.windowOther ? fmt::format(" (first on thread {})", w.windowThread) : std::string());
-			w.frames = w.reads = w.checked = w.missed = w.jobs = w.jobItems = w.deferred = w.resumed = w.unheldDiffs = 0;
-			w.windowRender = w.windowOther = 0;
-			w.windowThread = 0;
-		}
-
-		/** @brief Read again on a forced capture, a watched edit or a moved input. Otherwise checked against a full read under parity. */
-		std::uint64_t RefreshCategorySignature(bool a_force, std::uint32_t a_frame)
+		/** @brief Read again on a forced capture, a watched edit or a moved input. */
+		std::uint64_t RefreshCategorySignature(bool a_force)
 		{
 			// Take the edits first. An edit made during the read moves them again, and the next frame reads again.
 			auto& watch = categoryWatch;
@@ -356,14 +325,6 @@ namespace DCLF::Scene
 				watch.read = true;
 				watch.edits = edits;
 				watch.inputs = inputs;
-				++watch.reads;
-			} else if (Diagnostics::Observe().scene) {
-				// Parity found a signature that moved with no edit seen and no input moved.
-				++watch.checked;
-				static std::uint64_t flagged = 0;
-				if (const std::uint64_t full = ReadCategorySignature(nullptr); full != watch.signature && std::exchange(flagged, full) != full)
-					if (watch.missed++ < 8)
-						logger::warn("[DCLF] category signature (C2 parity): moved with no watched edit and no input moved (frame {}) <- FLAG", a_frame);
 			}
 			return watch.signature;
 		}
@@ -431,7 +392,7 @@ namespace DCLF::Scene
 					}
 				}
 				// A root two classes list is one node.
-				if (const std::uint32_t rootListing = RootListing(SceneToggles())) {
+				if (const std::uint32_t rootListing = RootListing()) {
 					const auto& roots = Extensions::RegisteredCategoryRoots();
 					for (std::uint32_t c = 0; c < kObjectClasses; ++c)
 						if (rootListing & (1u << c))
@@ -446,7 +407,7 @@ namespace DCLF::Scene
 				const auto& views = Extensions::Views();
 				for (std::uint32_t i = 0; i < views.rootCount; ++i) {
 					const auto view = views.rootViews[i];
-					if (!Extensions::ViewOn(SceneToggles(), view))
+					if (!Extensions::ViewRegistered(view))
 						continue;
 					Api::ViewRootCapture root;
 					Extensions::ViewEntryOf(view).captureRoot(root);
@@ -524,7 +485,7 @@ namespace DCLF::Scene
 		}
 	}
 
-	void FrameView::ServeFrameRequests(bool a_running)
+	void FrameView::ServeFrameRequests()
 	{
 		DCLF_ZONE("CS.DCLF.FrameRequests");
 		RenderThreadBudget::Part budget(RenderThreadBudget::Bucket::SceneCaptures);
@@ -545,7 +506,7 @@ namespace DCLF::Scene
 			if (worldCatchUpPending)
 				CatchUpSwitches({}, {});
 		}
-		if (a_running) {
+		{
 			// A job left unfinished when a load came between is dropped, since it names the old world.
 			if (frameStartJob && !frameStartJob->running.load(std::memory_order_acquire)) {
 				if (frameStartJob->next >= frameStartJob->Items())
@@ -554,11 +515,8 @@ namespace DCLF::Scene
 					frameStartJob.reset();  // an unposted capture's roots were pushed by the render thread; the forced capture follows them
 			}
 			if (frameStartJob) {
-				++categoryWatch.deferred;
-				if (!frameStartJob->running.load(std::memory_order_acquire)) {
-					++categoryWatch.resumed;
+				if (!frameStartJob->running.load(std::memory_order_acquire))
 					DispatchFrameStartJob(*frameStartJob);
-				}
 			} else {
 				frameStartJob = std::make_unique<FrameStartJob>();
 				// Forced after a detach, which can take a category node before the signature sees its cell go, or after a load.
@@ -567,17 +525,13 @@ namespace DCLF::Scene
 				ServeFadeNodeRequests();
 				if (frameStartJob->Empty())
 					frameStartJob.reset();
-				else {
-					++categoryWatch.jobs;
-					categoryWatch.jobItems += frameStartJob->Items();
+				else
 					DispatchFrameStartJob(*frameStartJob);
-				}
 			}
 			CaptureMirrorRequests();
 			Diagnostics::Notify<Diagnostics::ScenePoint::MirrorProbePoint>();
-			ReportCategoryWatch();
 		}
-		Extensions::ServeDrawFamilies(frame);
+		Extensions::ServeDrawFamilies(sceneStep);
 	}
 
 	void FrameView::ServeFadeNodeRequests()
@@ -680,7 +634,7 @@ namespace DCLF::Scene
 		for (const auto& held : categoryCapturesHeld)
 			if (held->generation <= pinsReleased && !held->pins.empty())
 				std::exchange(held->pins, {});
-		const std::uint64_t signature = RefreshCategorySignature(a_force, frame);
+		const std::uint64_t signature = RefreshCategorySignature(a_force);
 		// Read before the gather. An edit made during it moves them again.
 		const std::uint64_t unheldEdits = SceneTracker::UnheldEdits();
 		const bool full = a_force || loadSinceCapture || !categoryCapture || signature != categoryCapture->signature;
@@ -696,7 +650,6 @@ namespace DCLF::Scene
 			++categoryCapturesMade;
 			GatherCategoryNodes(*capture);
 		} else {
-			++categoryWatch.unheldDiffs;
 			DeriveUnheldCapture(*categoryCapture, *capture);
 		}
 		capture->held.reserve(capture->nodes.size());
@@ -767,7 +720,6 @@ namespace DCLF::Scene
 	{
 		DCLF_ZONE("CS.DCLF.Accumulate.Inputs");
 		DrainCapture();
-		Diagnostics::Notify<Diagnostics::FramePoint::RegistrationsDone>();
 		PostAncestorMap();
 	}
 
@@ -776,9 +728,8 @@ namespace DCLF::Scene
 		auto& capture = PassCapture::Get();
 		if (!capture.Installed())
 			return;
-		// Always drained, since the buffer is fixed-capacity and would overflow. Only observers read it.
-		const auto entries = capture.Drain();
-		Diagnostics::Notify(Diagnostics::CaptureDrained{ *this, entries });
+		// Always drained, since the buffer is fixed-capacity and would overflow. Nothing reads it.
+		(void)capture.Drain();
 	}
 
 	void FrameView::PostAncestorMap()

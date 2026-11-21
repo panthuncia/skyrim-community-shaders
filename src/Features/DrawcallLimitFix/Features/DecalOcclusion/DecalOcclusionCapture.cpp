@@ -26,9 +26,9 @@ namespace DCLF::Features::DecalOcclusion
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		namespace Queries = ::RenderGraph::Engine::OcclusionQueries;
 
-		Util::ReasonLog& Skips()
+		Family::RefusalLog& Skips()
 		{
-			static Util::ReasonLog log("[DCLF] decal occlusion: a decal test is skipped, its query answers visible", spdlog::level::warn);
+			static Family::RefusalLog log("[DCLF] decal occlusion: a decal test is skipped, its query answers visible");
 			return log;
 		}
 
@@ -181,7 +181,7 @@ namespace DCLF::Features::DecalOcclusion
 				auto run = std::make_shared<Run>();
 				run->clear = a_decal && *reinterpret_cast<const std::uint8_t*>(a_decal + 0x31) != 0;
 				const char* refusal = nullptr;
-				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !DecalDraws::Available())
+				if (!FrameAnchors::IsRenderOwner() || !DecalDraws::Available())
 					refusal = "the graph cannot draw now";
 				else if (!DecalDraws::CanTake())
 					refusal = "its anchor cannot run now";

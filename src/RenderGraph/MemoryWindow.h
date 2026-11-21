@@ -1,9 +1,7 @@
 #pragma once
 
-#if defined(CS_HAS_RENDER_GRAPH)
-
-#	include <cstddef>
-#	include <string>
+#include <cstddef>
+#include <string>
 
 /**
  * @brief The VRAM attribution window and the render graph's memory report line.
@@ -23,4 +21,3 @@ namespace RenderGraphMemory
 	std::string ReportLine(std::size_t a_families, std::size_t a_names);
 }
 
-#endif

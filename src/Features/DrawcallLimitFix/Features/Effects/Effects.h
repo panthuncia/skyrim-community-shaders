@@ -14,16 +14,6 @@
 namespace DCLF::Features::Effects
 {
 	Api::Feature Feature();
-	Api::ToggleId Toggle();
-
-	// Parity check for Effect Lighting passes. Counts those whose light 0 is not the sun or cloud light that the port reads.
-	void SubscribeLight();
-	struct LightCounts
-	{
-		std::uint32_t checked = 0, other = 0, cloud = 0;
-	};
-	/** @brief Render thread, once per report. */
-	LightCounts TakeLight();
 
 	void RegisterReport(Api::InstallContext& a_context);
 
@@ -33,6 +23,5 @@ namespace DCLF::Features::Effects
 	const void* EffectEmissive(const RE::BSShaderProperty& a_property);
 	void RegisterPrograms(Api::InstallContext& a_context);
 	void RegisterFrame(Api::InstallContext& a_context);
-	// Installed whatever the toggle. The controllers capture nothing while it is off.
 	void InstallWrites();
 }

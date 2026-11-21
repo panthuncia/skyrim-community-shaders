@@ -13,10 +13,7 @@ namespace RenderGraph::Engine::Scaleform
  */
 namespace RenderGraph::Engine::Scaleform::Passes
 {
-	/** @brief Reserves the Interface anchor at load. False, logged, when it cannot. */
-	bool Reserve();
-
-	/** @brief Makes the samplers, run gate, surfaces and pipelines, and registers the client. Logged and off on any failure. */
+	/** @brief Makes the samplers, run gate, surfaces and pipelines, and declares the client. Graph mode only. A failure is fatal. */
 	void Setup();
 
 	/** @brief Whether displays are captured for the graph. */

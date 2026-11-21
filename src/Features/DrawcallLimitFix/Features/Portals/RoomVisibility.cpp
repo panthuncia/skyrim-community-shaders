@@ -65,9 +65,9 @@ namespace DCLF::RoomVisibility
 			HookSites::RequireCallTo("a Main::IsRoomVisible call", base + site, base + kIsRoomVisible);
 	}
 
-	void SetLive(bool a_live)
+	void SetLive()
 	{
-		live.store(a_live, std::memory_order_release);
+		live.store(true, std::memory_order_release);
 	}
 
 	bool DclfAnswer(const void* a_key)

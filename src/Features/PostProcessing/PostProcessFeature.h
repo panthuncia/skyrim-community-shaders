@@ -2,6 +2,7 @@
 
 #include "Feature.h"
 #include "ShaderCache.h"
+#include "Utils/Setting.h"
 
 #include <atomic>
 #include <memory>
@@ -16,7 +17,8 @@ struct PostProcessFeature : public std::enable_shared_from_this<PostProcessFeatu
 {
 	virtual ~PostProcessFeature() = default;
 
-	bool enabled = true;
+	/// The effect's on/off. A variable of the frame revisions, bound by PostProcessing (BindPipelineSettings).
+	CS::Setting<bool> enabled = true;
 	PostProcessing* owner = nullptr;
 
 	/// Whether SetupResources has run on this instance. PostProcessing sets a sub-feature up when the

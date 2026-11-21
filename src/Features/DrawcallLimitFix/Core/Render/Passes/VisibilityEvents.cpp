@@ -49,7 +49,7 @@ namespace DCLF::Draws
 			const auto& scene = *resources->scene;
 			const auto events = static_cast<std::uint32_t>(NamedUnitsOf(a_preparation, scene.visibilityEvents));
 			// Only with a staging set that holds the whole list, so the copy misses nothing.
-			if (!scene.visibilityEventsProgram || !scene.visibilityReadback || !events || !scene.visibilityReadback->SetFor(events))
+			if (!scene.visibilityEventsProgram || !scene.visibilityReadback || !events || !scene.visibilityReadback->list->SetFor(events))
 				return prepared;
 			prepared.program = scene.visibilityEventsProgram;
 			auto& constants = prepared.constants;
@@ -78,7 +78,7 @@ namespace DCLF::Draws
 			constants.eventsIndex = a_recording.Index(a_bindings.events);
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kVisibilityEventsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 			commands.Dispatch(a_frame.groups, 1, 1);
 		}

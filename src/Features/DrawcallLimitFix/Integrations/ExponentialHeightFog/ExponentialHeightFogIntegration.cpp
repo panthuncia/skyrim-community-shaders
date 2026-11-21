@@ -14,6 +14,9 @@ namespace DCLF::Integrations::ExponentialHeightFog
 		// or the previous textures while Prepass remakes them on a grid change. Null without the feature or volumes.
 		bool Binds()
 		{
+			// CS_ORG_FOG_DEBUG=6: DCLF's draws get no volume, while the draws that still run on D3D11 do.
+			if (ORGExponentialHeightFog::Debug() == 6)
+				return false;
 			const auto& fog = globals::features::exponentialHeightFog;
 			const auto& settings = fog.settings;
 			return fog.loaded && settings.enabled && settings.volumetricFogEnabled && settings.volumetricFogExtinctionScale > 0.0f;
@@ -32,10 +35,12 @@ namespace DCLF::Integrations::ExponentialHeightFog
 		// On the ORG path the views are the graph volumes' exports, so commits read them ordered after the integration at the Prepass anchor.
 		void Install(Api::InstallContext& a_context)
 		{
+			// A null view keeps the captured engine binding, which is the volume itself. CS_ORG_FOG_DEBUG=6 wants null there too.
+			const bool capturedWhenNull = ORGExponentialHeightFog::Debug() != 6;
 			a_context.RegisterFrameTexture({ .name = "exponential height fog light scattering", .textureRegister = kLightScatteringRegister,
-				.view = &LightScatteringView, .capturedWhenNull = true, .graphResources = { ORGExponentialHeightFog::kNearIntegratedId } });
+				.view = &LightScatteringView, .capturedWhenNull = capturedWhenNull, .graphResources = { ORGExponentialHeightFog::kNearIntegratedId } });
 			a_context.RegisterFrameTexture({ .name = "exponential height fog far light scattering", .textureRegister = kLightScatteringFarRegister,
-				.view = &LightScatteringFarView, .capturedWhenNull = true, .graphResources = { ORGExponentialHeightFog::kFarIntegratedId } });
+				.view = &LightScatteringFarView, .capturedWhenNull = capturedWhenNull, .graphResources = { ORGExponentialHeightFog::kFarIntegratedId } });
 		}
 	}
 

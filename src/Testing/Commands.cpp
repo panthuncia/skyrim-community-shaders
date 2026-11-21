@@ -4,6 +4,8 @@
 
 #include "CSEditor/EditorWindow.h"
 #include "Feature.h"
+#include "Features/Effects11.h"
+#include "Features/Effects11/SettingManager.h"
 #include "Features/HDRDisplay.h"
 #include "Features/PostProcessing.h"
 #include "Features/ScreenshotFeature.h"
@@ -11,18 +13,16 @@
 #include "Globals.h"
 #include "Menu.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
-#include "RenderGraph/Engine/Native/RtSampler.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Vram/MemProbe.h"
 #include "Vram/SpillLab.h"
 #include "Vram/VramLedger.h"
 
-#if defined(CS_HAS_DCLF)
-#	include "Features/DrawcallLimitFix/Diagnostics/Capture/Capture.h"
-#	include "Features/DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
-#endif
+#include "Features/DrawcallLimitFix/Diagnostics/Capture/Capture.h"
+#include "Features/DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
 
+#include <charconv>
 #include <set>
 
 namespace Testing
@@ -37,6 +37,7 @@ namespace Testing
 			std::map<std::string, Command, std::less<>> commands;
 			std::vector<std::pair<std::string, PrefixCommand>> prefixes;
 			std::map<std::string, std::function<bool()>, std::less<>> waits;
+			std::map<std::string, Command, std::less<>> featureCommands;  // "<owner>.<name>", for the "call" step
 			std::set<std::string, std::less<>> signals;  // "signal" commands not yet taken by a wait
 		};
 
@@ -53,6 +54,41 @@ namespace Testing
 			float amount = 0.0f;
 		};
 		Motion moving, turning;
+
+		/**
+		 * @brief "window drag:<W>x<H>:<frames>": a frame drag as Windows sends it. WM_ENTERSIZEMOVE, then one SetWindowPos a frame from
+		 * the window's size to <W>x<H> (the client area), then WM_EXITSIZEMOVE on the frame after the last step. Render thread.
+		 */
+		struct Drag
+		{
+			HWND window = nullptr;
+			LONG fromWidth = 0, fromHeight = 0;  // the window's outer size when the drag started
+			LONG toWidth = 0, toHeight = 0;      // the outer size for the client area asked for
+			std::uint32_t frames = 0;
+			std::uint32_t step = 0;  // steps sent so far
+			bool active = false;
+		};
+		Drag dragging;
+
+		/** @brief One frame of a drag. */
+		void TickDrag()
+		{
+			auto& drag = dragging;
+			if (!drag.active)
+				return;
+			if (drag.step >= drag.frames) {
+				const bool sent = ::PostMessageW(drag.window, WM_EXITSIZEMOVE, 0, 0);
+				logger::info("[TEST] window drag: ended at {}x{} after {} steps ({})", drag.toWidth, drag.toHeight, drag.frames, sent ? "sent" : "failed");
+				drag.active = false;
+				return;
+			}
+			++drag.step;
+			const auto lerp = [&](LONG a_from, LONG a_to) {
+				return a_from + static_cast<LONG>((static_cast<std::int64_t>(a_to) - a_from) * drag.step / drag.frames);
+			};
+			::SetWindowPos(drag.window, nullptr, 0, 0, lerp(drag.fromWidth, drag.toWidth), lerp(drag.fromHeight, drag.toHeight),
+				SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+		}
 
 		/** @brief The a_index-th nearest actor (by distance to the player) that a_filter accepts, or null. Main thread. */
 		template <class Filter>
@@ -312,9 +348,28 @@ namespace Testing
 				a_error = "the game has no swap chain window yet";
 				return false;
 			}
-			unsigned width = 0, height = 0;
+			unsigned width = 0, height = 0, frames = 0;
 			bool done = false;
-			if (a_arg == "minimize" || a_arg == "restore") {
+			if (a_arg.starts_with("drag:")) {
+				if (std::sscanf(a_arg.c_str(), "drag:%ux%u:%u", &width, &height, &frames) != 3 || !width || !height || !frames) {
+					a_error = fmt::format("'{}' is not drag:<W>x<H>:<frames>", a_arg);
+					return false;
+				}
+				if (dragging.active) {
+					a_error = "a window drag is still running";
+					return false;
+				}
+				RECT outer{};
+				if (!::GetWindowRect(window, &outer)) {
+					a_error = "the window's size cannot be read";
+					return false;
+				}
+				RECT rect{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
+				::AdjustWindowRectEx(&rect, static_cast<DWORD>(::GetWindowLongPtrW(window, GWL_STYLE)), FALSE, static_cast<DWORD>(::GetWindowLongPtrW(window, GWL_EXSTYLE)));
+				dragging = { window, outer.right - outer.left, outer.bottom - outer.top, rect.right - rect.left, rect.bottom - rect.top, frames, 0, true };
+				// Posted before the first step, so the window thread sees the drag start first, as in a real drag.
+				done = ::PostMessageW(window, WM_ENTERSIZEMOVE, 0, 0);
+			} else if (a_arg == "minimize" || a_arg == "restore") {
 				done = ::PostMessageW(window, WM_SYSCOMMAND, a_arg == "minimize" ? SC_MINIMIZE : SC_RESTORE, 0);
 			} else if (a_arg == "background") {
 				done = ::SetForegroundWindow(::GetShellWindow());
@@ -326,7 +381,7 @@ namespace Testing
 				::AdjustWindowRectEx(&rect, static_cast<DWORD>(::GetWindowLongPtrW(window, GWL_STYLE)), FALSE, static_cast<DWORD>(::GetWindowLongPtrW(window, GWL_EXSTYLE)));
 				done = ::SetWindowPos(window, nullptr, 0, 0, rect.right - rect.left, rect.bottom - rect.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 			} else {
-				a_error = fmt::format("'{}' is not minimize, restore, background, foreground or <W>x<H>", a_arg);
+				a_error = fmt::format("'{}' is not minimize, restore, background, foreground, <W>x<H> or drag:<W>x<H>:<frames>", a_arg);
 				return false;
 			}
 			logger::info("[TEST] window {}: {}", a_arg, done ? "sent" : "failed");
@@ -371,10 +426,14 @@ namespace Testing
 
 		bool SetFeature(const std::string& a_arg, std::string& a_error)
 		{
-			// "<ShortName>=0|1"; the old "dclf:feature=0|1" names DCLF.
+			// "<ShortName>=0|1".
 			const auto equals = a_arg.rfind('=');
-			const std::string name = equals == std::string::npos ? std::string("DrawcallLimitFix") : a_arg.substr(0, equals);
-			const std::string value = equals == std::string::npos ? a_arg : a_arg.substr(equals + 1);
+			if (equals == std::string::npos) {
+				a_error = fmt::format("'{}' is not <ShortName>=0|1", a_arg);
+				return false;
+			}
+			const std::string name = a_arg.substr(0, equals);
+			const std::string value = a_arg.substr(equals + 1);
 			const auto& list = Feature::GetFeatureList();
 			if (std::ranges::none_of(list, [&](Feature* a_feature) { return a_feature && a_feature->GetShortName() == name; })) {
 				a_error = fmt::format("no feature '{}'", name);
@@ -384,13 +443,124 @@ namespace Testing
 			return true;
 		}
 
+		// A key segment names an object member, or with "[n]" an array element. A member name matches with its spaces
+		// dropped ("CODBloom" names "COD Bloom"). A segment absent from an object passes through the object's "settings"
+		// member, which is where PostProcessing keeps each sub-effect's settings.
+		json* FindSettingMember(json& a_object, std::string_view a_name, std::string& a_path)
+		{
+			if (!a_object.is_object())
+				return nullptr;
+			if (const auto exact = a_object.find(std::string(a_name)); exact != a_object.end()) {
+				a_path += a_name;
+				return &*exact;
+			}
+			const auto withoutSpaces = [](std::string_view a_text) {
+				std::string out;
+				std::ranges::copy_if(a_text, std::back_inserter(out), [](char a_char) { return a_char != ' '; });
+				return out;
+			};
+			json* match = nullptr;
+			for (auto& [key, member] : a_object.items()) {
+				if (withoutSpaces(key) != a_name)
+					continue;
+				if (match)
+					return nullptr;  // ambiguous
+				match = &member;
+				a_path += key;
+			}
+			if (match)
+				return match;
+			if (const auto nested = a_object.find("settings"); nested != a_object.end() && nested->is_object()) {
+				const auto size = a_path.size();
+				a_path += "settings.";
+				if (auto* found = FindSettingMember(*nested, a_name, a_path))
+					return found;
+				a_path.resize(size);
+			}
+			return nullptr;
+		}
+
+		/** @brief The value a_key ("a.b[3].c") names inside a_settings, or null. a_path gets the key with the names as stored. */
+		json* FindSettingByKey(json& a_settings, std::string_view a_key, std::string& a_path)
+		{
+			json* current = &a_settings;
+			std::size_t at = 0;
+			while (at <= a_key.size()) {
+				const auto end = std::min(a_key.find('.', at), a_key.size());
+				const auto segment = a_key.substr(at, end - at);
+				const auto bracket = segment.find('[');
+				const auto name = segment.substr(0, bracket);
+				if (name.empty())
+					return nullptr;
+				if (!a_path.empty())
+					a_path += '.';
+				current = FindSettingMember(*current, name, a_path);
+				if (!current)
+					return nullptr;
+				// Then each "[n]" in turn.
+				for (auto open = bracket; open != std::string_view::npos; open = segment.find('[', open)) {
+					const auto close = segment.find(']', open);
+					if (close == std::string_view::npos)
+						return nullptr;
+					std::size_t index = 0;
+					const auto digits = segment.substr(open + 1, close - open - 1);
+					const auto [last, error] = std::from_chars(digits.data(), digits.data() + digits.size(), index);
+					if (digits.empty() || error != std::errc{} || last != digits.data() + digits.size() || !current->is_array() || index >= current->size())
+						return nullptr;
+					current = &(*current)[index];
+					a_path += fmt::format("[{}]", index);
+					open = close + 1;
+					if (open < segment.size() && segment[open] != '[')
+						return nullptr;
+				}
+				at = end + 1;
+			}
+			return current;
+		}
+
+		/** @brief "<ShortName>={...}": a_object merged into the feature's settings JSON, applied once, as a preset button writes. */
+		bool SetSettings(const std::string& a_name, const std::string& a_object, std::string& a_error)
+		{
+			const auto& list = Feature::GetFeatureList();
+			const auto found = std::ranges::find_if(list, [&](Feature* a_feature) { return a_feature && a_feature->GetShortName() == a_name; });
+			if (found == list.end()) {
+				a_error = fmt::format("no feature '{}'", a_name);
+				return false;
+			}
+			const auto patch = json::parse(a_object, nullptr, false);
+			if (patch.is_discarded() || !patch.is_object() || patch.empty()) {
+				a_error = fmt::format("'{}' is not a JSON object of settings", a_object);
+				return false;
+			}
+			json settings;
+			(*found)->SaveSettings(settings);
+			if (!settings.is_object()) {
+				a_error = fmt::format("{} has no settings object", a_name);
+				return false;
+			}
+			for (const auto& [key, value] : patch.items()) {
+				if (!settings.contains(key)) {
+					a_error = fmt::format("{} has no setting '{}'", a_name, key);
+					return false;
+				}
+				settings[key] = value;
+			}
+			(*found)->LoadSettings(settings);
+			logger::info("[TEST] settings {} = {}", a_name, patch.dump());
+			return true;
+		}
+
 		bool SetSetting(const std::string& a_arg, std::string& a_error)
 		{
 			// "<ShortName>.<key>=<JSON value>", one setting written as a menu widget writes it (through the feature's settings JSON).
-			const auto dot = a_arg.find('.');
+			// The key may be a path into nested objects and arrays, "PostProcessing.CODBloom.MipBlendFactor[3]=0.2".
+			// "<ShortName>={...}" writes several settings at once, as a preset button does: the object is merged into the settings.
 			const auto equals = a_arg.find('=');
+			if (const auto dot = a_arg.find('.'); equals != std::string::npos && (dot == std::string::npos || dot > equals))
+				return SetSettings(a_arg.substr(0, equals), a_arg.substr(equals + 1), a_error);
+			const auto dot = a_arg.find('.');
 			if (dot == std::string::npos || equals == std::string::npos || equals < dot) {
-				a_error = fmt::format("'{}' is not <feature>.<key>=<value>", a_arg);
+				a_error = fmt::format("'{}' is not <feature>.<key>=<value> or <feature>={{...}}", a_arg);
 				return false;
 			}
 			const auto name = a_arg.substr(0, dot);
@@ -403,7 +573,15 @@ namespace Testing
 			}
 			json settings;
 			(*found)->SaveSettings(settings);
-			if (!settings.is_object() || !settings.contains(key)) {
+			std::string path;
+			json* target = nullptr;
+			if (settings.is_object() && settings.contains(key)) {
+				target = &settings[key];  // the flat form, whatever the key holds
+				path = key;
+			} else {
+				target = FindSettingByKey(settings, key, path);
+			}
+			if (!target) {
 				a_error = fmt::format("{} has no setting '{}'", name, key);
 				return false;
 			}
@@ -412,9 +590,9 @@ namespace Testing
 				a_error = fmt::format("'{}' is not a JSON value", a_arg.substr(equals + 1));
 				return false;
 			}
-			settings[key] = value;
+			*target = value;
 			(*found)->LoadSettings(settings);
-			logger::info("[TEST] setting {}.{} = {}", name, key, value.dump());
+			logger::info("[TEST] setting {}.{} = {}", name, path, value.dump());
 			return true;
 		}
 
@@ -431,6 +609,18 @@ namespace Testing
 			RegisterCommand("weather", Weather);
 			RegisterCommand("feature", SetFeature);
 			RegisterCommand("setting", SetSetting);
+			// "call": <owner>.<name>[=<arg>], a feature's registered test command (RegisterFeatureCommand).
+			RegisterCommand("call", [](const std::string& a_arg, std::string& a_error) {
+				const auto equals = a_arg.find('=');
+				const std::string target = a_arg.substr(0, equals);
+				const auto dot = target.find('.');
+				if (dot == std::string::npos || dot == 0 || dot + 1 == target.size()) {
+					a_error = fmt::format("'{}' is not <owner>.<name>[=<arg>]", a_arg);
+					return false;
+				}
+				const std::string arg = equals == std::string::npos ? std::string{} : a_arg.substr(equals + 1);
+				return RunFeatureCommand(std::string_view(target).substr(0, dot), std::string_view(target).substr(dot + 1), arg, a_error);
+			});
 			RegisterCommand("cast", Cast::Start);
 			RegisterCommand("move", [](const std::string& a_arg, std::string& a_error) { return ParseMotion(a_arg, moving, a_error); });
 			RegisterCommand("turn", [](const std::string& a_arg, std::string& a_error) { return ParseMotion(a_arg, turning, a_error); });
@@ -442,9 +632,6 @@ namespace Testing
 			});
 			RegisterCommand("mark", [](const std::string& a_arg, std::string&) {
 				MemProbe::Mark(a_arg, Run().frame);
-				// CS_ORG_RT_SAMPLE: the render thread's sampling profile starts with the measured window.
-				if (a_arg == "start")
-					RenderGraph::Engine::Native::RtSampler::Begin();
 				return true;
 			});
 			RegisterCommand("vram-json", [](const std::string&, std::string&) {
@@ -561,6 +748,11 @@ namespace Testing
 				});
 				return true;
 			});
+			// "shot-ui": a capture as the menu's button takes it, of the next frame's clean scene, into the user's screenshot folder.
+			RegisterCommand("shot-ui", [](const std::string&, std::string&) {
+				globals::features::screenshotFeature.captureRequested = true;
+				return true;
+			});
 			// "cs-menu": open|close, Community Shaders' own menu. font=<px> sets a fixed font size (a font reload) and font=saved puts the
 			// saved size back, so closing the menu saves the user's settings unchanged.
 			RegisterCommand("cs-menu", [](const std::string& a_arg, std::string& a_error) {
@@ -660,6 +852,56 @@ namespace Testing
 					a_error = fmt::format("no Post Processing effect '{}'", type);
 				return found;
 			});
+			// "e11": <CATEGORY>.<Key>=<value>, an Effects11 setting as its editor writes it (a bool as true|false|1|0, else a float),
+			// "EFFECT.EnableBloom=false". "e11": clear-shader-cache, the menu's shader cache clear for Effects11.
+			RegisterCommand("e11", [](const std::string& a_arg, std::string& a_error) {
+				auto& effects11 = globals::features::effects11;
+				if (!effects11.loaded) {
+					a_error = "Effects11 is not loaded";
+					return false;
+				}
+				if (a_arg == "clear-shader-cache") {
+					effects11.ClearShaderCache();
+					logger::info("[TEST] e11 clear-shader-cache");
+					return true;
+				}
+				const auto dot = a_arg.find('.');
+				const auto equals = a_arg.find('=');
+				if (dot == std::string::npos || equals == std::string::npos || equals < dot) {
+					a_error = fmt::format("'{}' is not <CATEGORY>.<Key>=<value> or clear-shader-cache", a_arg);
+					return false;
+				}
+				const auto category = a_arg.substr(0, dot);
+				const auto key = a_arg.substr(dot + 1, equals - dot - 1);
+				const auto value = a_arg.substr(equals + 1);
+				auto& settings = SettingManager::GetSingleton();
+				const auto* info = settings.GetSettingInfo(key, category);
+				if (!info) {
+					a_error = fmt::format("Effects11 has no setting {}.{}", category, key);
+					return false;
+				}
+				const auto id = info->id;
+				if (info->type == SettingType::Bool) {
+					if (value != "true" && value != "false" && value != "1" && value != "0") {
+						a_error = fmt::format("'{}' is not true, false, 1 or 0", value);
+						return false;
+					}
+					settings.SetValue<bool>(id, value == "true" || value == "1");
+				} else if (info->type == SettingType::Float) {
+					float number = 0.0f;
+					const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
+					if (error != std::errc{} || end != value.data() + value.size()) {
+						a_error = fmt::format("'{}' is not a number", value);
+						return false;
+					}
+					settings.SetValue<float>(id, number);
+				} else {
+					a_error = fmt::format("{}.{} is a time-of-day setting, which e11 does not write", category, key);
+					return false;
+				}
+				logger::info("[TEST] e11 {}.{} = {}", category, key, value);
+				return true;
+			});
 			// "hdr": 0|1, HDR Display's Enable HDR as its Advanced override sets it.
 			RegisterCommand("hdr", [](const std::string& a_arg, std::string& a_error) {
 				auto& hdr = globals::features::hdrDisplay;
@@ -667,11 +909,12 @@ namespace Testing
 					a_error = "HDR Display is not loaded";
 					return false;
 				}
-				std::lock_guard lock(hdr.settingsMutex);
-				hdr.settings.enableHDR = a_arg == "1";
+				{
+					std::lock_guard lock(hdr.settingsMutex);
+					hdr.settings.enableHDR = a_arg == "1";
+				}
 				return true;
 			});
-#if defined(CS_HAS_DCLF)
 			// "capture": [<seconds>], the menu's diagnostic capture. "telemetry": <label>|off, a BasicTelemetry session for this phase.
 			RegisterCommand("capture", [](const std::string& a_arg, std::string&) {
 				DCLF::Capture::Request(a_arg.empty() ? 10.0f : std::strtof(a_arg.c_str(), nullptr), true);
@@ -681,7 +924,6 @@ namespace Testing
 				DCLF::Diagnostics::TelemetryPhase(a_arg);
 				return true;
 			});
-#endif
 
 			// The VRAM spill lab's commands (Vram/SpillLab.h), which take their old "dclf:" lines.
 			for (const char* name : { "spill", "demote", "frame-window", "ballast" })
@@ -719,6 +961,35 @@ namespace Testing
 		if (registry.commands.contains(a_name))
 			return true;
 		return std::ranges::any_of(registry.prefixes, [&](const auto& a_prefix) { return a_name.starts_with(a_prefix.first); });
+	}
+
+	void RegisterFeatureCommand(std::string a_owner, std::string a_name, Command a_command)
+	{
+		auto& registry = Commands();
+		std::scoped_lock lock(registry.mutex);
+		registry.featureCommands[a_owner + "." + a_name] = std::move(a_command);
+	}
+
+	bool RunFeatureCommand(std::string_view a_owner, std::string_view a_name, const std::string& a_arg, std::string& a_error)
+	{
+		auto& registry = Commands();
+		const std::string key = fmt::format("{}.{}", a_owner, a_name);
+		Command command;
+		std::string known;
+		{
+			std::scoped_lock lock(registry.mutex);
+			if (const auto found = registry.featureCommands.find(key); found != registry.featureCommands.end())
+				command = found->second;
+			else
+				for (const auto& entry : registry.featureCommands)
+					if (entry.first.starts_with(fmt::format("{}.", a_owner)))
+						known += (known.empty() ? "" : ", ") + entry.first;
+		}
+		if (!command) {
+			a_error = fmt::format("no test command '{}' is registered (known for {}: {})", key, a_owner, known.empty() ? "none" : known);
+			return false;
+		}
+		return command(a_arg, a_error);
 	}
 
 	void RegisterWait(std::string a_name, std::function<bool()> a_holds)
@@ -800,6 +1071,7 @@ namespace Testing
 	void TickCommands()
 	{
 		Cast::OnFrame();
+		TickDrag();
 		if (moving.frames) {
 			--moving.frames;
 			MovePlayer(moving.amount);

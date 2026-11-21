@@ -25,14 +25,28 @@ namespace DCLF::Integrations::DynamicCubemaps
 			return dynamicCubemaps.loaded ? dynamicCubemaps.boundReflectionsView : nullptr;
 		}
 
+		// The published id of that view: which of the two cubemaps PostDeferred picked. Empty when it bound none.
+		std::string_view ReflectionsId()
+		{
+			const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
+			return dynamicCubemaps.loaded ? dynamicCubemaps.boundReflectionsId : std::string_view{};
+		}
+
+		// The environment cubemap's id while PostDeferred binds it at t31.
+		std::string_view EnvironmentId()
+		{
+			const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
+			return dynamicCubemaps.loaded && dynamicCubemaps.cubemapValid[0] ? ORGDynamicCubemaps::kEnvBC6HId : std::string_view{};
+		}
+
 		void Install(Api::InstallContext& a_context)
 		{
 			// t30 holds the reflections cubemap while water reflections were active, else the environment one.
 			a_context.RegisterFrameTexture({ .name = "dynamic cubemaps reflections", .textureRegister = kReflectionsRegister,
 				.view = &ReflectionsView, .capturedWhenNull = true,
-				.graphResources = { ORGDynamicCubemaps::kEnvReflectionsBC6HId, ORGDynamicCubemaps::kEnvBC6HId } });
+				.graphResources = { ORGDynamicCubemaps::kEnvReflectionsBC6HId, ORGDynamicCubemaps::kEnvBC6HId }, .graphId = &ReflectionsId });
 			a_context.RegisterFrameTexture({ .name = "dynamic cubemaps environment", .textureRegister = kEnvironmentRegister,
-				.view = &EnvironmentView, .capturedWhenNull = true, .graphResources = { ORGDynamicCubemaps::kEnvBC6HId } });
+				.view = &EnvironmentView, .capturedWhenNull = true, .graphResources = { ORGDynamicCubemaps::kEnvBC6HId }, .graphId = &EnvironmentId });
 		}
 	}
 

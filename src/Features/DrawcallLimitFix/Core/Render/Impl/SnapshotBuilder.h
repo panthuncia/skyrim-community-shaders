@@ -2,6 +2,8 @@
 
 // IndirectDraws::Impl's builds ahead and snapshot builder state. Included by Impl.h, before the struct.
 
+#include "RenderGraph/Frame/Starvation.h"
+
 namespace DCLF
 {
 	namespace Direct
@@ -53,16 +55,15 @@ namespace DCLF
 			std::array<SceneFit, 2> fit{};
 			std::uint64_t fitSerial = 0;
 		};
-		LatestSlot<AheadPost> aheadSlot;
+		::RenderGraph::Frame::LatestSlot<AheadPost> aheadSlot;
 		AheadPost aheadTaken;  // the coordinator's
 		// Context for main resources made at a frame's Setup, so a snapshot for new resources never waits for a coordinator publication.
-		LatestSlot<AheadContext> resourcesAheadSlot;
+		::RenderGraph::Frame::LatestSlot<AheadContext> resourcesAheadSlot;
 		AheadContext resourcesAhead;  // the builder's
 		std::vector<std::shared_ptr<MainPayload>> payloadPool;  // the snapshot builder's
 		// Builds ahead posted by the coordinator and done by the builder. Fallback streams are refused while one is pending.
 		std::atomic<std::uint64_t> aheadKicked{ 0 };
 		std::atomic<std::uint64_t> aheadDone{ 0 };
-		std::atomic<bool> aheadRunning{ false };  // a build ahead running now (WaitAhead)
 		/** @brief The coordinator's hand-off to the snapshot builder, latest wins. */
 		struct SnapshotWork
 		{
@@ -85,10 +86,13 @@ namespace DCLF
 			bool drawsComplete = false;
 			// Its toggles are its publication's, which become the frame's once installed, so they are never stale.
 			std::uint64_t buildGeneration = 0, mainGeneration = 0;
-			// Stale while newer than the attached build state.
-			std::uint64_t buildSerial = 0;
-			std::uint32_t targetsGeneration = 0;
-			DXGI_FORMAT shadowFormat = DXGI_FORMAT_UNKNOWN;
+			// The build each segment's recordings are of: its attached or its staged one when the inputs were posted.
+			std::array<std::uint64_t, static_cast<std::size_t>(RenderGraphRuntime::Segment::Count)> epochBuilds{};
+			// What its graphs are built from. It becomes the attached build state when the snapshot is adopted.
+			std::shared_ptr<const Draws::BuildState> build;
+			// The frame versions its recordings named (Frame::Revision::FragmentVersions::serial). The frame revision adopts it alone only
+			// while the frame runs those, and with the revision of that serial while it is in preparation.
+			std::uint64_t frameVersions = RenderGraph::Frame::Revision::kAnyFrameVersions;
 			// CPU pipeline view batches, made only while the graph is the CPU pipeline's. Null otherwise or on failure.
 			std::shared_ptr<const Direct::ViewBatchSet> viewBatches;
 		};
@@ -98,13 +102,10 @@ namespace DCLF
 			double aheadMs = 0.0, shapesMs = 0.0, recordingsMs = 0.0;
 			bool ahead = false;
 		};
-		LatestSlot<SnapshotWork> snapshotWorkSlot;  // the coordinator -> the builder
-		LatestSlot<SceneSnapshot> snapshotSlot;     // the builder -> the frame's start
-		// Polled by a frame waiting for a current snapshot, so it takes the slot only when something new is there.
-		std::atomic<std::uint64_t> snapshotsPosted{ 0 };
-		// The publication gate's scene pass half is open while the frame waits at its start. Its own scene pass only wakes after its start
-		// ends, so a payload held for that pass would never be published.
-		std::atomic<bool> frameWaiting{ false };
+		// A snapshot whose recordings named frame versions the builder no longer knows. The frame revision never adopts one.
+		static constexpr std::uint64_t kUnknownFrameVersions = UINT64_MAX - 1;
+		::RenderGraph::Frame::LatestSlot<SnapshotWork> snapshotWorkSlot;  // the coordinator -> the builder
+		// The builder posts its snapshots to the frame revision (Frame::Revision::PublishFragment), which adopts them (plan step 10b).
 		// Publication pacing. The builder stores with release and the coordinator loads with acquire.
 		std::atomic<std::uint64_t> snapshotWorkTaken{ 0 };
 		// Gate for publishing a payload only for a snapshot the frame will adopt. The frame stores the frame first, then the serial,
@@ -117,16 +118,15 @@ namespace DCLF
 		std::atomic<bool> publicationGated{ false };
 		std::atomic<std::uint64_t> passDoneWakesSkipped{ 0 };
 		/**
-		 * @brief The gate is closed while the frame has not taken the last snapshot, or that frame's scene pass has not ended,
-		 * unless the frame is waiting at its start. No build starts while it is closed.
+		 * @brief The gate is closed while the frame has not taken the last snapshot, or that frame's scene pass has not ended. No build
+		 * starts while it is closed.
 		 */
 		bool PublicationGateClosed() const
 		{
 			const std::uint64_t taken = snapshotTaken.load(std::memory_order_acquire);
 			if (taken < snapshotBuilder.serial)
 				return true;
-			return !frameWaiting.load(std::memory_order_seq_cst) &&
-			       scenePassDoneFrame.load(std::memory_order_seq_cst) < snapshotTakenFrame.load(std::memory_order_acquire);
+			return scenePassDoneFrame.load(std::memory_order_seq_cst) < snapshotTakenFrame.load(std::memory_order_acquire);
 		}
 		// Whether the newest snapshot found was stale. No claims until a current one arrives.
 		std::shared_ptr<const SceneSnapshot> adoptedSnapshot;
@@ -145,9 +145,26 @@ namespace DCLF
 			return adoptedSnapshot ? adoptedSnapshot->viewBatches : kNone;
 		}
 		bool snapshotStale = false;
-		// Frame-start waits for a current snapshot since the last report.
-		std::uint64_t snapshotWaits = 0;
-		double snapshotWaitMs = 0.0, snapshotWaitMaxMs = 0.0;
+		// Render thread. Whether this Begin took a scene; Begins that took none are counted (snapshotFramesKept).
+		bool sceneTakenThisBegin = false;
+		// Scenes not adopted since the last report, by Frame::Revision::FragmentDrop, and in the session for the log's rate limit.
+		std::array<std::uint64_t, 4> scenesDropped{};
+		std::uint64_t scenesDroppedLogged = 0;
+		// Scenes dropped for their builds since the last new build state (restageInputSerial): the one starvation rule (cleanup plan B10).
+		::RenderGraph::Frame::StarvationWatch restageWatch{ "DCLF's staged builds" };
+		std::uint64_t restageInputSerial = 0;
+		// Adopted scenes with a recording of a version the frame does not read, in the session (CheckSceneVersions).
+		std::uint64_t staleSceneVersions = 0;
+		// Render thread. Whether the adopted scene binds a version the frame does not read, checked at each adoption that could change it.
+		// Such a scene covers nothing.
+		bool sceneVersionsStale = false;
+		std::uint64_t versionsCheckedRevision = ~0ull;
+		std::uint64_t versionsCheckedScene = ~0ull;  // the serial of the scene checked last
+		// Frames whose coverage ran at least one DCLF epoch, in the session. The frame revision waits for DCLF's scene only while
+		// this moves (Frame::Revision, plan 7.8).
+		std::atomic<std::uint64_t> sceneRecordedFrames{ 0 };
+		// Snapshots adopted with staged builds since the last report.
+		std::uint64_t stagedAdoptions = 0;
 		// Commits and latch writes take every versioned buffer's address, SRV index and capacity from this.
 		const NamedVersions* adoptedSet = nullptr;
 		/** @brief The adopted set. Names nothing before the first revision is adopted. */
@@ -217,7 +234,6 @@ namespace DCLF
 		} snapshotBuilder;
 		/**
 		 * @brief What the last make that sealed a revision read. A make with the same key keeps that revision.
-		 * CS_DCLF_PERSISTENT_PARITY runs the pass anyway and compares.
 		 */
 		struct RevisionReuse
 		{
@@ -269,7 +285,6 @@ namespace DCLF
 				for (std::size_t part = 0; part < movedBy.size(); ++part)
 					movedBy[part] += (a_moved >> part) & 1u;
 			}
-			Diagnostics::ParityCounter parity, shapesParity;
 		} revisionReuse;
 		std::atomic<bool> snapshotInputsMoved{ false };  // the frame posted revision inputs since the builder's last make
 		/**
@@ -277,7 +292,7 @@ namespace DCLF
 		 */
 		std::unique_ptr<SnapshotWork> WorkToBuild();
 		std::atomic<bool> producerReportWanted{ false };
-		LatestSlot<std::string> producerReportSlot;      // the builder's report lines, for the frame's report
+		::RenderGraph::Frame::LatestSlot<std::string> producerReportSlot;      // the builder's report lines, for the frame's report
 		std::string producerReport;                      // the frame's: the newest taken
 	};
 }

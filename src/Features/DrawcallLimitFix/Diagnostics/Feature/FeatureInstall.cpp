@@ -1,7 +1,6 @@
-// Observers of the frame events, all on the render thread. Frame-level parities, probes, the leak count and the target dump.
+// Observers of the frame events, all on the render thread. The capture parity and the leak count.
 #include "Features/DrawcallLimitFix/Diagnostics/Install.h"
 
-#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Scene/CaptureParity.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
@@ -9,11 +8,9 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Schedule.h"
 #include "Deferred.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Feature/OpenDefectProbes.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Feature/TargetDump.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
-#include "Features/TerrainBlending.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 
 namespace DCLF::Reports
 {
@@ -28,7 +25,10 @@ namespace DCLF::Diagnostics
 {
 	namespace
 	{
-		/** @brief A main-view native pass of a frame set member is a leak, since its registration should have withheld it. Skipped when the engine draws all. */
+		/**
+		 * @brief A main-view native pass of a frame set member is a leak, since its registration should have withheld it. It is a tap
+		 * error where it is found. Skipped when the engine draws all.
+		 */
 		void NoteLeak(const NativePassOffered& a_offered)
 		{
 			const auto* pass = a_offered.pass;
@@ -42,6 +42,10 @@ namespace DCLF::Diagnostics
 			if (!set || !(set->PhasesOf(pass->geometry) & kSetMain))
 				return;
 			++(a_offered.inDepthPass ? leaks.leakedInDepth : leaks.leakedInOpaque);
+			// The engine drew what DCLF draws too: fatal in development builds. Release counts it and the reports keep their samples.
+			::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::EngineLeak, ::RenderGraph::Frame::SegmentId::Count,
+				fmt::format("'{}' ({} pass, technique {:08X}, hint {})", pass->geometry->name.c_str() ? pass->geometry->name.c_str() : "?",
+					a_offered.inDepthPass ? "depth" : "opaque", a_offered.technique, static_cast<std::uint32_t>(pass->accumulationHint)));
 			// For the compatibility monitor, keyed by the geometry's reference, since another plugin's registration is the likely cause.
 			if (PlayerParity::Active()) {
 				std::uint32_t form = 0;
@@ -55,50 +59,13 @@ namespace DCLF::Diagnostics
 				leaks.samples.push_back(fmt::format("'{}' ({}, hint {}, technique {:08X})", pass->geometry->name.c_str() ? pass->geometry->name.c_str() : "?",
 					a_offered.inDepthPass ? "depth" : "opaque", static_cast<std::uint32_t>(pass->accumulationHint), a_offered.technique));
 		}
-
-		/** @brief The blend state a native main-pass Lighting draw left bound, once per distinct write mode. */
-		void DumpNativeBlend(const NativePassDrawn& a_drawn)
-		{
-			const auto* pass = a_drawn.pass;
-			if (a_drawn.inDepthPass || !pass->shader || pass->shader->shaderType.get() != RE::BSShader::Type::Lighting)
-				return;
-			static std::uint32_t loggedModes = 0;
-			auto& state = globals::game::shadowState->GetRuntimeData();
-			const std::uint32_t writeMode = state.alphaBlendWriteMode;
-			if (writeMode >= 32 || ((loggedModes >> writeMode) & 1))
-				return;
-			loggedModes |= 1u << writeMode;
-			winrt::com_ptr<ID3D11BlendState> blend;
-			float factor[4];
-			UINT mask = 0;
-			globals::d3d::context->OMGetBlendState(blend.put(), factor, &mask);
-			std::string masks;
-			if (blend) {
-				D3D11_BLEND_DESC desc{};
-				blend->GetDesc(&desc);
-				for (std::uint32_t i = 0; i < 8; ++i) {
-					const auto& rt = desc.RenderTarget[desc.IndependentBlendEnable ? i : 0];
-					masks += fmt::format(" rt{} {}{:X}", i, rt.BlendEnable ? "blend " : "", rt.RenderTargetWriteMask);
-				}
-			}
-			ID3D11ShaderResourceView* t55 = nullptr;
-			globals::d3d::context->PSGetShaderResources(55, 1, &t55);
-			const auto& terrain = globals::features::terrainBlending;
-			logger::info("[DCLF] native main-pass blend: alphaBlendMode {}, alphaBlendWriteMode {}, alpha to coverage {}, '{}':{}; t55 {} (Terrain Blending's mask view {})",
-				state.alphaBlendMode, writeMode, state.alphaBlendAlphaToCoverage, pass->geometry && pass->geometry->name.c_str() ? pass->geometry->name.c_str() : "?", masks,
-				static_cast<const void*>(t55), static_cast<const void*>(terrain.GetMaskSRV()));
-			if (t55)
-				t55->Release();
-		}
 	}
 
 	void InstallFeature()
 	{
 		const auto& o = Observe();
-		if (o.claims)
-			Subscribe<FramePoint::ClaimsInstalled>([](const On<FramePoint::ClaimsInstalled>&) { ObservePlayerClaims(); });
 		if (o.capture)
-			Subscribe<FramePoint::PrepassEnd>([](const On<FramePoint::PrepassEnd>&) { CaptureParity::Get().Report(Scene::FrameView::Get().GetFrame(), 300); });
+			Subscribe<FramePoint::PrepassEnd>([](const On<FramePoint::PrepassEnd>&) { CaptureParity::Get().Report(Scene::FrameView::Get().SceneStep(), 300); });
 		if (o.capture)
 			Subscribe<NativeLightingDraw>([](const NativeLightingDraw& a_event) {
 				// Inside a reflection face render.
@@ -108,12 +75,5 @@ namespace DCLF::Diagnostics
 					CaptureParity::Get().OnNativeLightingDraw(a_event.pass, a_event.renderFlags);
 			});
 		Subscribe<NativePassOffered>(&NoteLeak);
-		if (!o.targetProbe.empty())
-			Subscribe<NativePassDrawn>(&DumpNativeBlend);
-		// Copies at the frame's points. At Present the count advances and finished copies are written.
-		if (!SwitchValue(Switch::TargetDump).empty()) {
-			Subscribe<TargetPoint>([](const TargetPoint& a_point) { TargetDump::Point(a_point.label, a_point.extra); });
-			Subscribe<FramePoint::Present>([](const On<FramePoint::Present>&) { TargetDump::Present(); });
-		}
 	}
 }

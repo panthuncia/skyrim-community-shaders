@@ -4,13 +4,23 @@
 #include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LightLimitFix.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LocalShadowViews.h"
 
 #include "Features/LightLimitFix.h"
 #include "Features/LightLimitFix/ORGLightCulling.h"
 #include "Features/LightLimitFix/ORGLocalShadows.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <span>
+
+namespace DCLF
+{
+	// Core/Render/Shadow/ShadowPoints.cpp.
+	bool DrawsShadowViews();
+}
 
 namespace DCLF::Integrations::LightLimitFix
 {
@@ -74,6 +84,25 @@ namespace DCLF::Integrations::LightLimitFix
 				.graphResources = { ORGLocalShadows::kCacheId } });
 			// StrictLightData, bound per draw, so frame blocks and capture checks leave PS b3 out.
 			a_context.DeclarePerDrawBuffer({ .name = "StrictLightData", .stage = Api::ShaderStage::Pixel, .constantRegister = kStrictLightDataRegister });
+		}
+	}
+
+	void DrawnLocalShadowViews(std::vector<LocalShadowView>& a_out)
+	{
+		a_out.clear();
+		const auto& views = ShadowViews::Get();
+		// This frame's list only: the selection publishes the light slots for its scene frame, and the list is rebuilt from them.
+		if (!DrawsShadowViews() || !views.Valid() || !ShadowViews::LightSlots().Current(Scene::FrameView::Get().SceneStep()))
+			return;
+		for (const auto& view : views.All()) {
+			const bool local = view.kind == ShadowViews::Kind::Frustum || view.kind == ShadowViews::Kind::Parabolic;
+			// Uncovered views are the engine's, which draws them from its own selection.
+			if (!local || view.focus || !view.covered || view.descriptor != 0 || !view.light)
+				continue;
+			// A light's views repeat per slot it takes, but it draws once.
+			if (std::ranges::any_of(a_out, [&](const LocalShadowView& a_seen) { return a_seen.light == view.light; }))
+				continue;
+			a_out.push_back({ view.light, view.drawTarget, view.drawSlice });
 		}
 	}
 

@@ -1,0 +1,78 @@
+# Effects11's FX chain programs are built on the programs lane before their revision starts, never on the render thread
+# (frame revision plan, Effects11 rules fixes). Bloom off (a new plan with fewer programs, all built: "(0 new)"), bloom on (the
+# kept plan: no lane line), then a shader cache clear (FX11 reloads: a new generation, so the lane builds every program again).
+# NEEDS: an Effects11 preset in the instance and "Post Processing Mode": "Effects11" in the saved settings for the run (the
+# config cannot set it; switch it back after), and a preset whose enbeffect.fx has a bloom stage.
+# The log must show, after the start and after the shader cache clear, in this order:
+#   "[ORG] frame declaration: program Effects11::FxChain is built for new values; the next revision starts once it is",
+#   "[ORG] Effects11: the FX chain's N programs are built on the programs lane (M new)" with M > 0,
+#   "[ORG] frame declaration: program Effects11::FxChain built on the programs lane in X ms",
+#   then "[ORG] Effects11: FX chain G built for the next revision".
+# Bloom on again builds nothing new: no lane line between its step and the next "FX chain G built".
+# No render-thread compile: the render thread's Tracy zone has no shader compile at those frames, and no FX11 frame in between
+# ("Effects11 runs on FX11 this frame" only for "a tonemap after this frame's stage").
+# Compose it: native-vulkan+effects11-programs (and guest+effects11-programs).
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+Effects11 = true
+
+# The chain runs only in Effects11 mode, so [saved_settings] sets it for the run.
+[saved_settings.General]
+"Post Processing Mode" = "Effects11"
+
+[[steps]]
+at = "world-ready"
+frames = 120
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableBloom=false"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "no-bloom"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "EFFECT.EnableBloom=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "bloom-again"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "e11"
+arg = "clear-shader-cache"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "shaders-cleared"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "no-bloom", "bloom-again", "shaders-cleared"]
+no_log = ["frame tap error", "fatal: frame declaration:", "fatal: Effects11:", "the FX chain could not be built",
+	"is not among the plan's programs", "did not build on the programs lane"]

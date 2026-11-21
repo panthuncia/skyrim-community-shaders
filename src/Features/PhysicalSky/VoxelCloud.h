@@ -55,10 +55,23 @@ struct VoxelCloudManager
 	/** Load the shared noise independently of whether a voxel placement is active. */
 	ID3D11ShaderResourceView* Noise();
 	void UpdateLighting(ID3D11ComputeShader* shader, float3 direction);
+	/**
+	* @brief UpdateLighting's choice without its D3D11 work, for the render graph (ORGVolumetricClouds), which dispatches it.
+	* @return The first slice and the slice count to update this frame, or nothing.
+	*/
+	std::optional<std::array<uint32_t, 2>> PlanLighting(float3 direction);
+	/** @brief The placements as the data buffer holds them, for the render graph's latch. */
+	const std::vector<VoxelCloudData>& Instances() const { return active; }
 	void DrawSettings(SceneBlend& selection, const std::string& worldspace, float3 cameraMeters);
 	uint32_t Count() const { return static_cast<uint32_t>(active.size()); }
 	float2 Altitude() const { return altitude; }
 	std::array<uint32_t, 4> ScreenRect(float bottomZ, uint32_t width, uint32_t height) const;
+	/** @brief The views Bind binds at t60..t77: modeling 0-7, distance 0-7, the noise volume, the placements. */
+	const std::array<ID3D11ShaderResourceView*, kAssetSlots * 2 + 2>& Bindings() const { return bindings; }
+	/** @brief The noise volume if Noise() loaded it, else null. */
+	ID3D11ShaderResourceView* LoadedNoise() const { return noiseVoxel.get(); }
+	/** @brief The lighting cache (t85), null before UpdateLighting made it. */
+	ID3D11ShaderResourceView* Lighting() const { return lighting ? lighting->srv.get() : nullptr; }
 
 private:
 	struct Resource
@@ -79,6 +92,7 @@ private:
 	float3 lightingDirection{};
 	uint32_t lightingNextSlice = 0, lightingRemaining = 0;
 	bool lightingValid = false;
+	uint32_t plannedSlices = 0;  // PlanLighting's lighting array size
 	uint32_t capacity = 0;
 	float2 altitude = {};
 	std::string key, error;

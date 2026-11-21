@@ -11,23 +11,8 @@
 
 namespace DCLF::Diagnostics
 {
-	void InstallRegistrations(bool a_parity);
-	void InstallCensus();
-	void InstallPrecisionCensus();
-	void InstallWalkParity();
-	void InstallChangeLogParity();
-	void InstallResidentParity();
-	void InstallSlotDrainCheck();
-	void InstallFrameParity();
-	void InstallCandidateParity();
-	void InstallShadowSetParity();
-	void InstallReplayParity();
-	void InstallMirrorReads();
 	void InstallMirrorParity(bool a_switchable = false);
-	void InstallCommitParity();
-	void InstallMirrorWatchPlacement();
 
 	/** @brief The mirror parity's lines since the last call, newline-terminated, or empty. */
 	std::string TakeMirrorParityLines();
-
 }

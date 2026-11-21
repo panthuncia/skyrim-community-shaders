@@ -1,42 +1,32 @@
-#if defined(CS_HAS_RENDER_GRAPH)
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
-#endif
+#include <rhi_interop_vulkan.h>
 
 #include "TextureStreaming/ORGWindows.h"
 
 #include "RenderGraph/Switches.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "Globals.h"
-#	include "RenderGraph/DxvkImageImport.h"
-#	include "RenderGraph/DxvkOrgInterop.h"
-#	include "RenderGraph/Engine/Native/Native.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "Utils/D3D.h"
-#	include "Vram/Debug.h"
+#include "Globals.h"
+#include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/ImageRegistry.h"
+#include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "Utils/D3D.h"
+#include "Vram/Debug.h"
 
-#	include <OpenRenderGraph/DeviceMemory.h>
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Resources/ExternalTextureResource.h>
-#	include <Resources/TextureDescription.h>
-#	include <rhi_helpers.h>
+#include <OpenRenderGraph/DeviceMemory.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/TextureDescription.h>
+#include <rhi_helpers.h>
 
-#	include <atomic>
-#	include <format>
-#	include <mutex>
-#endif
+#include <atomic>
+#include <format>
+#include <mutex>
 
 namespace TextureStreaming::ORG
 {
-	bool Requested()
-	{
-		static const bool requested = RenderGraph::Engine::Native::GraphMode();
-		return requested;
-	}
-
-#if defined(CS_HAS_RENDER_GRAPH)
 	namespace
 	{
 		/** @brief Done once its window is installed, or handed back to D3D11. */
@@ -138,7 +128,7 @@ namespace TextureStreaming::ORG
 		~Window()
 		{
 			// No import may find the texture after this.
-			RenderGraph::ForgetMadeImage(texture.get());
+			RenderGraph::ImageRegistry::Retire(texture.get());
 			auto& state = S();
 			std::scoped_lock lock(state.mutex);
 			state.retired.push_back({ std::move(view), std::move(d3d11), std::move(texture), std::move(image) });
@@ -224,7 +214,8 @@ namespace TextureStreaming::ORG
 			if (!window->texture)
 				return false;
 			// An import of the window's texture returns this one.
-			RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(info.image.image), window->texture, desc, name);
+			RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(info.image.image), { window->texture, nullptr,
+				std::make_shared<const org::TextureDescription>(desc), "ORGWindows", name, RenderGraph::ImageRegistry::Kind::Made });
 			window->index = window->texture->GetSRVInfo(0).slot.index;
 			a_item.window = std::move(window);
 			return true;
@@ -250,15 +241,15 @@ namespace TextureStreaming::ORG
 
 	void FrameTick()
 	{
-		// Off the render thread, made windows wait for the main thread's next frame. With CS_ORG_LOADING_THREAD=1 the loading loop runs this too.
-		if (!Requested() || !FrameAnchors::IsRenderOwner())
+		// Off the render thread, made windows wait for the main thread's next frame. In the graph modes the loading loop runs this too.
+		if (!RenderGraph::Engine::GraphMode() || !FrameAnchors::IsRenderOwner())
 			return;
 		auto& state = S();
 		ServiceRetired();
 		if (state.failed.load(std::memory_order_acquire))
 			return;
 		auto& runtime = RenderGraphRuntime::Get();
-		const bool up = TextureStreaming::Enabled() && !TextureStreaming::FullMode() && runtime.IsActive() && runtime.CanWrapTexturesWithData();
+		const bool up = TextureStreaming::Enabled() && !TextureStreaming::FullMode() && runtime.IsActive();
 		if (up != state.ready.load(std::memory_order_acquire)) {
 			state.ready.store(up, std::memory_order_release);
 			if (up)
@@ -359,16 +350,4 @@ namespace TextureStreaming::ORG
 		const auto& state = S();
 		return { state.made.load(std::memory_order_relaxed), state.installFrames.load(std::memory_order_relaxed), state.retried.load(std::memory_order_relaxed) };
 	}
-#else
-	class Window
-	{
-	};
-
-	void FrameTick() {}
-	bool Available() { return false; }
-	ID3D11ShaderResourceView* ViewOf(const Window&) { return nullptr; }
-	std::uint32_t IndexOf(const Window&) { return 0; }
-	std::shared_ptr<PendingWindow> Queue(Upload) { return nullptr; }
-	Counters GetCounters() { return {}; }
-#endif
 }

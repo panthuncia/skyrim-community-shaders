@@ -51,9 +51,9 @@ std::pair<unsigned char*, size_t> _GetFeatureBufferData(Ts... feat_datas)
 namespace
 {
 	// The render graph's fog volumes take a new slice count at the next frame boundary, so the readers use the count they have.
-	ViewAtmosphere::Settings ViewAtmosphereBufferData()
+	ViewAtmosphere::GpuSettings ViewAtmosphereBufferData()
 	{
-		auto data = globals::features::viewAtmosphere.settings;
+		auto data = globals::features::viewAtmosphere.GetCommonBufferData();
 		if (const auto slices = ORGExponentialHeightFog::Get().Slices()) {
 			data.nearSlices = slices->first;
 			data.middleSlices = slices->second;
@@ -80,7 +80,7 @@ std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 		globals::features::extendedTranslucency.GetCommonBufferData(),
 		globals::features::linearLighting.GetCommonBufferData(),
 		globals::features::effects11.GetCommonBufferData(),
-		globals::features::terrainBlending.settings,
+		globals::features::terrainBlending.GetCommonBufferData(),
 		globals::features::exponentialHeightFog.GetCommonBufferData(),
 		globals::features::truePBR.settings,
 		globals::features::skin.GetCommonBufferData(),

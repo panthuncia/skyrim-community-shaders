@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Utils/Setting.h"
+
 /** @brief Simulates realistic ambient lighting by calculating sky occlusion via a 3D probe array. */
 struct Skylighting : Feature
 {
@@ -7,6 +9,9 @@ private:
 	static constexpr std::string_view MOD_ID = "139352";
 
 public:
+	/** @brief Binds the reset count the probe volumes are declared on. */
+	Skylighting();
+
 	virtual inline std::string GetName() override { return "Skylighting"; }
 	virtual std::string GetDisplayName() override { return T("feature.skylighting.name", "Skylighting"); }
 	virtual inline std::string GetShortName() override { return "Skylighting"; }
@@ -118,6 +123,9 @@ public:
 
 	// cached variables
 	bool queuedResetSkylighting = true;
+	// Raised by each reset on the render graph: the probe volumes are declared on it, so a reset is a new version of each.
+	// Not a saved setting.
+	CS::Setting<std::uint32_t> resets = 0;
 	bool inOcclusion = false;
 	// World height of the probe grid's bottom layer, from the snapped grid origin.
 	float probeGridBottomZ = -FLT_MAX;
@@ -151,9 +159,7 @@ public:
 	void ResetSkylighting();
 	/** @brief Creates the D3D11 probe volumes (texProbeArray and the rest), unless they exist. */
 	void CreateProbeVolumes();
-	/** @brief Releases the D3D11 probe volumes, once the render graph's replace them. */
-	void ReleaseProbeVolumes();
-	/** @brief The probe update on the render graph (CS_ORG_SKYLIGHTING=1), its volumes then replacing the D3D11 ones; false: D3D11's dispatch. */
+	/** @brief The probe update on the render graph in graph mode, whose volumes replace the D3D11 ones; false: D3D11's dispatch. */
 	bool UpdateProbesOnGraph();
 	/** @brief Keeps a_shadowMap, the sun's shadow cascades (the shadow mask's t4). */
 	void CaptureShadowCascadeSRV(ID3D11ShaderResourceView* a_shadowMap);

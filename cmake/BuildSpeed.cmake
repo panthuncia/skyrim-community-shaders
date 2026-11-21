@@ -7,9 +7,7 @@ set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_SCAN_FOR_MODULES OFF)
 
 # The render graph's heavy submodule headers join the precompiled header (include/PCHRenderGraph.h).
 # Kept out of include/PCH.h, which is upstream's.
-if(CS_HAS_RENDER_GRAPH)
-    target_precompile_headers(${PROJECT_NAME} PRIVATE include/PCHRenderGraph.h)
-endif()
+target_precompile_headers(${PROJECT_NAME} PRIVATE include/PCHRenderGraph.h)
 
 # Unity builds: several sources compile as one translation unit, so their shared headers are
 # parsed once per batch instead of once per file. Most of a file's compile time is header parsing
@@ -87,9 +85,7 @@ if(SC_UNITY_BUILD)
     # may have included vulkan.h on its own. Including volk at the top of each batch keeps the
     # order. It defines VK_NO_PROTOTYPES; a batched file that calls Vulkan's exported functions
     # directly would fail to compile, and would have to be marked SKIP_UNITY_BUILD_INCLUSION.
-    if(CS_HAS_RENDER_GRAPH)
-        set_property(TARGET ${PROJECT_NAME} PROPERTY UNITY_BUILD_CODE_BEFORE_INCLUDE "#include <volk.h>")
-    endif()
+    set_property(TARGET ${PROJECT_NAME} PROPERTY UNITY_BUILD_CODE_BEFORE_INCLUDE "#include <volk.h>")
 
     message(STATUS "Unity build: on, ${SC_UNITY_BATCH_SIZE} sources per batch")
 endif()

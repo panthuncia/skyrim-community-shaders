@@ -20,7 +20,7 @@ float CirrusSunDepth(float3 position)
 	return depth / max(cosine, 0.1);
 }
 
-RWTexture2D<float2> RWUpperSunDepth : register(u0);
+ORG_HEADER_UAV(RWTexture2D<float2>, RWUpperSunDepth, 0)
 [numthreads(8, 8, 1)] void buildUpperSunDepth(uint2 pixel : SV_DispatchThreadID) {
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];
 	const float2 xy = UpperSunGridCenter() + ((float2(pixel) + 0.5) / 256.0 - 0.5) * (2.0 * info.rayMarchRange);
@@ -182,8 +182,8 @@ VolumetricCloudResult RenderUpperCloudRay(float3 direction, float3 eye, float sc
 	const float2 steps = float2(MiddleViewStepSize(direction, origin, segments.nearSegment), MiddleViewStepSize(direction, origin, segments.farSegment));
 	const float2 counts = ceil(max(float2(segments.nearSegment.y - segments.nearSegment.x, segments.farSegment.y - segments.farSegment.x), 0.0) / steps);
 	const float2 indices = floor(raySegment * (counts.x + counts.y));
-	const float2 mapped = indices <= counts.x ? min(segments.nearSegment.xx + indices * steps.x, segments.nearSegment.yy) :
-	                                            min(segments.farSegment.xx + (indices - counts.x) * steps.y, segments.farSegment.yy);
+	const float2 mapped = CLOUD_SELECT(indices <= counts.x, min(segments.nearSegment.xx + indices * steps.x, segments.nearSegment.yy),
+		min(segments.farSegment.xx + (indices - counts.x) * steps.y, segments.farSegment.yy));
 	raySegment = float2(raySegment.x == 0.0 ? 0.0 : mapped.x, raySegment.y == 1.0 ? 1e30 : mapped.y);
 	if (sheetDistance < raySegment.x || sheetDistance >= raySegment.y)
 		sheetDistance = -1.0;

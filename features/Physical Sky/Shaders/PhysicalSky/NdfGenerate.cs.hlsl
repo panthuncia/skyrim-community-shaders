@@ -2,6 +2,9 @@
 #	define COMPUTESHADER
 #endif
 
+// Dual-target (Common/OrgResources.hlsli). The graph reads the constants from a latch.
+#include "Common/OrgResources.hlsli"
+
 struct NoiseLayer
 {
 	uint noise;
@@ -13,41 +16,61 @@ struct NoiseLayer
 	float4 range;
 };
 
-cbuffer CB : register(b1)
-{
-	NoiseLayer primary;
-	NoiseLayer secondary;
-	NoiseLayer coverageGain;
-	NoiseLayer modeling;
-	NoiseLayer modelingGain;
-	NoiseLayer heightVariation;
-	float4 heightAuxiliaryRange;
-	float4 bottomTypeRange;
-	float2 baseHeight;
-	float bottomTypeExponent;
-	uint heightFromCoverage;
-	uint localBlendMode;
-	float localModelingWeight;
-	float localHeightWeight;
-	float localWindScale;
-	float2 windOffset;
-	uint hasLocalMask;
-	uint imported;
-	uint preview;
-	float3 padding;
-};
+#define NDF_GENERATE_FIELDS(M, A)   \
+	M(NoiseLayer, primary)          \
+	M(NoiseLayer, secondary)        \
+	M(NoiseLayer, coverageGain)     \
+	M(NoiseLayer, modeling)         \
+	M(NoiseLayer, modelingGain)     \
+	M(NoiseLayer, heightVariation)  \
+	M(float4, heightAuxiliaryRange) \
+	M(float4, bottomTypeRange)      \
+	M(float2, baseHeight)           \
+	M(float, bottomTypeExponent)    \
+	M(uint, heightFromCoverage)     \
+	M(uint, localBlendMode)         \
+	M(float, localModelingWeight)   \
+	M(float, localHeightWeight)     \
+	M(float, localWindScale)        \
+	M(float2, windOffset)           \
+	M(uint, hasLocalMask)           \
+	M(uint, imported)               \
+	M(uint, preview)                \
+	M(float3, padding)
 
-Texture2D<float4> Noise0 : register(t0);
-Texture2D<float4> Noise1 : register(t1);
-Texture2D<float4> Noise2 : register(t2);
-Texture2D<float4> Noise3 : register(t3);
-Texture2D<float4> LocalModeling : register(t4);
-Texture2D<float2> LocalHeight : register(t5);
-Texture2D<float> LocalMask : register(t6);
-SamplerState NoiseSampler : register(s0);
-RWTexture2D<float4> OutputHeight : register(u0);
-RWTexture2D<float4> OutputModeling : register(u1);
-RWTexture2D<float4> OutputPreview : register(u2);
+#define NDF_GENERATE_RESOURCES(X)                  \
+	X(SRV, Texture2D<float4>, Noise0, 0)           \
+	X(SRV, Texture2D<float4>, Noise1, 1)           \
+	X(SRV, Texture2D<float4>, Noise2, 2)           \
+	X(SRV, Texture2D<float4>, Noise3, 3)           \
+	X(SRV, Texture2D<float4>, LocalModeling, 4)    \
+	X(SRV, Texture2D<float2>, LocalHeight, 5)      \
+	X(SRV, Texture2D<float>, LocalMask, 6)         \
+	X(UAV, RWTexture2D<float4>, OutputHeight, 0)   \
+	X(UAV, RWTexture2D<float4>, OutputModeling, 1) \
+	X(UAV, RWTexture2D<float4>, OutputPreview, 2)  \
+	X(SAMPLER, SamplerState, NoiseSampler, 0)      \
+	X(LATCH, NdfGenerateConstants, CB, 1)
+ORG_PUSH_BLOCK(NDF_GENERATE_RESOURCES(ORG_HANDLE))
+
+ORG_GLOBAL_LATCH_BEGIN(NdfGenerateConstants, CB, 1)
+NDF_GENERATE_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(NdfGenerateConstants, CB, 1)
+#define ORG_GLOBAL_LATCH CB
+NDF_GENERATE_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+
+ORG_RESOURCE(SRV, Texture2D<float4>, Noise0, 0)
+ORG_RESOURCE(SRV, Texture2D<float4>, Noise1, 1)
+ORG_RESOURCE(SRV, Texture2D<float4>, Noise2, 2)
+ORG_RESOURCE(SRV, Texture2D<float4>, Noise3, 3)
+ORG_RESOURCE(SRV, Texture2D<float4>, LocalModeling, 4)
+ORG_RESOURCE(SRV, Texture2D<float2>, LocalHeight, 5)
+ORG_RESOURCE(SRV, Texture2D<float>, LocalMask, 6)
+ORG_RESOURCE(SAMPLER, SamplerState, NoiseSampler, 0)
+ORG_RESOURCE(UAV, RWTexture2D<float4>, OutputHeight, 0)
+ORG_RESOURCE(UAV, RWTexture2D<float4>, OutputModeling, 1)
+ORG_RESOURCE(UAV, RWTexture2D<float4>, OutputPreview, 2)
 
 float NoiseMip(Texture2D<float4> source, float frequency, uint2 outputSize)
 {

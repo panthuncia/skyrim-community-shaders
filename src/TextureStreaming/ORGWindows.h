@@ -20,9 +20,6 @@
 */
 namespace TextureStreaming::ORG
 {
-	/** @brief Read once. */
-	bool Requested();
-
 	/** @brief Render thread, after each Present. Releases let-go windows and installs new ones. */
 	void FrameTick();
 

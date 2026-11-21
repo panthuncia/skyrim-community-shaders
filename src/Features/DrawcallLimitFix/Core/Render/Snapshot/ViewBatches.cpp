@@ -9,7 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
 #include <ORGModuleServices/ElasticCapacity.h>
-#include "Features/DrawcallLimitFix/Core/Runtime/FrameRetirement.h"
+#include "RenderGraph/Async/Retirement.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneGraph.h"
 
 #include <ORGModuleServices/BackingPool.h>
@@ -121,8 +121,6 @@ namespace DCLF::Draws
 			set->storage = StoragePool::Get().Take(batches * batchBytes);
 		}
 		DCLF_ZONE_NAMED(fillZone, "CS.DCLF.ViewBatches.Fill", true);
-		// When off, FrameValues fills the static lanes at the set's first frame instead.
-		const bool prefill = Direct::ExperimentOn(Direct::kExpPrefillLive);
 		const std::size_t objects = a_in.tables->objects.size();
 		auto& moverCount = scratch.moverCount;
 		moverCount.assign(objects + 1, 0u);
@@ -159,18 +157,15 @@ namespace DCLF::Draws
 					batch.cz[l] = sphere[2];
 					batch.r[l] = sphere[3];
 					// Both live columns start from the snapshot. FrameValues rewrites the movers every frame.
-					if (prefill)
-						for (const auto& live : batch.liveSpheres) {
-							live.cx[l] = sphere[0];
-							live.cy[l] = sphere[1];
-							live.cz[l] = sphere[2];
-							live.r[l] = sphere[3];
-						}
+					for (const auto& live : batch.liveSpheres) {
+						live.cx[l] = sphere[0];
+						live.cy[l] = sphere[1];
+						live.cz[l] = sphere[2];
+						live.r[l] = sphere[3];
+					}
 				}
 			}
 		}
-		set->liveFilled[0].store(prefill, std::memory_order_relaxed);
-		set->liveFilled[1].store(prefill, std::memory_order_relaxed);
 		// FrameValues writes the movers' live spheres every frame.
 		auto& first = set->moverLaneFirst;
 		first.assign(objects + 1, 0u);
@@ -213,7 +208,7 @@ namespace DCLF::Draws
 		/** @brief The sequences' backing pool. Never destroyed, because a lease may return late. */
 		const std::shared_ptr<org::services::BackingPool>& SequencesPool()
 		{
-			static const auto* pool = new std::shared_ptr<org::services::BackingPool>(org::services::BackingPool::Create(PooledBackings::Hooks(), FrameRetirement(),
+			static const auto* pool = new std::shared_ptr<org::services::BackingPool>(org::services::BackingPool::Create(PooledBackings::Hooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = "cs.dclf.cpu.sequences",
 					// A frame in flight's set, the installed one's, the one being built, and a set a site still holds per frame slot.
 					.maxPerClass = RenderGraphRuntime::kGameFramesInFlight + 3,
@@ -268,31 +263,16 @@ namespace DCLF::Draws
 					spheres = std::move(taken);
 				values.RequestSnapshotSpheres();
 			}
-			// Use the incremental lists when enabled. Turning them off forgets them, so turning them back on compacts.
+			// The incremental lists make the set. A forward-only set is a full build.
 			SequencesUpload upload;
-			const bool incremental = Direct::ExperimentOn(Direct::kExpIncremental);
-			if (!incremental)
-				lists.reset();
-			else if (!lists)
+			if (!lists)
 				lists = std::make_unique<SceneLists>();
-			if (lists && !a_in.forwardOnly)
+			if (!a_in.forwardOnly)
 				building = lists->Make(a_in, spheres, versions + 1, upload);
 			const bool fromLists = building != nullptr;
-			if (fromLists && Direct::ExperimentOn(Direct::kExpIncrementalCheck) && ++checks % 2 == 0) {
-				// The equivalence check compares a full build of the same snapshot against the lists' set.
-				std::vector<DrawSequence> full;
-				if (const auto fullSet = MakeViewBatches(a_in, spheres.get(), full)) {
-					const std::size_t differ = CompareSets(*lists, *building, *fullSet, full, a_in);
-					checkedSets += 1;
-					differingLanes += differ;
-				}
-			}
-			if (fromLists && ++listSets % 128 == 0) {
+			if (fromLists && ++listSets % 128 == 0)
 				if (const auto line = lists->TakeReport(); !line.empty())
-					logger::info("{}{}", line,
-						checkedSets ? fmt::format("; check: {} sets, {} lanes differ{}", checkedSets, differingLanes, differingLanes ? " <- SCENE LISTS DIFFER" : "") : std::string());
-				checkedSets = differingLanes = 0;
-			}
+					logger::info("{}", line);
 			if (!building) {
 				auto sequences = std::make_shared<std::vector<DrawSequence>>();
 				building = MakeViewBatches(a_in, a_in.forwardOnly ? nullptr : spheres.get(), *sequences);
@@ -374,7 +354,6 @@ namespace DCLF::Draws
 			input.flags.deviceAddress = true;
 			input.backingPool = SequencesPool();
 			// Never patch a backing in place. An incremental version copies its predecessor on the GPU, then adds its own writes.
-			input.predecessorCopy = true;
 			input.previous = std::move(a_upload.previous);
 			input.keep = std::move(a_upload.keep);
 			input.changedSince = a_upload.changedSince ? std::move(a_upload.changedSince) :

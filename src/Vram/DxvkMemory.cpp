@@ -1,8 +1,10 @@
 #include "Vram/DxvkMemory.h"
 
+#include "DxvkExports.h"
 #include "Globals.h"
 #include "RenderGraph/DxvkOrgInterop.h"
-#include "RenderGraph/Engine/Native/Native.h"
+
+#include <atomic>
 
 namespace Vram
 {
@@ -20,46 +22,23 @@ namespace Vram
 			bool Complete() const { return push && pop && setOwner && requestSnapshot && readSnapshot && heapReports; }
 		};
 
-		template <class T>
-		T Resolve(HMODULE a_module, const char* a_name)
-		{
-			return a_module ? reinterpret_cast<T>(reinterpret_cast<void*>(::GetProcAddress(a_module, a_name))) : nullptr;
-		}
-
-		// Resolved once dxvk_d3d11.dll is loaded (feature callbacks can run before DxvkLoader loads it); all or nothing, so a
-		// DXVK build with only some of them is treated as one without.
+		// From DXVK's table once dxvk_d3d11.dll is loaded (feature callbacks can run before DxvkLoader loads it). All or nothing:
+		// plain D3D11 mode may run on a DXVK with only some of them, which counts as one without. Native mode has none.
 		const Exports& Get()
 		{
-			static Exports exports;
-			static std::atomic<bool> resolved = false;
-			static std::mutex mutex;
-			if (resolved.load(std::memory_order_acquire))
-				return exports;
-
 			static const Exports none;
-			// Native mode never loads DXVK: no module lookup on every call (an owner scope is opened for each engine draw).
-			if (RenderGraph::Engine::Native::Active())
+			static std::atomic<const Exports*> resolved{ nullptr };
+			if (const auto* exports = resolved.load(std::memory_order_acquire))
+				return *exports;
+			const auto& dxvk = DxvkExports::Get();
+			if (!dxvk.Loaded())
 				return none;
-			HMODULE d3d11 = ::GetModuleHandleW(L"dxvk_d3d11.dll");
-			if (!d3d11)
-				return none;
-
-			std::lock_guard lock(mutex);
-			if (!resolved.load(std::memory_order_relaxed)) {
-				Exports e;
-				e.push = Resolve<PFN_dxvkPushResourceOwner>(d3d11, "dxvkPushResourceOwner");
-				e.pop = Resolve<PFN_dxvkPopResourceOwner>(d3d11, "dxvkPopResourceOwner");
-				e.setOwner = Resolve<PFN_dxvkSetResourceOwner>(d3d11, "dxvkSetResourceOwner");
-				e.requestSnapshot = Resolve<PFN_dxvkRequestMemorySnapshot>(d3d11, "dxvkRequestMemorySnapshot");
-				e.readSnapshot = Resolve<PFN_dxvkReadMemorySnapshot>(d3d11, "dxvkReadMemorySnapshot");
-				e.heapReports = Resolve<PFN_dxvkGetMemoryHeapReports>(d3d11, "dxvkGetMemoryHeapReports");
-				if (!e.Complete()) {
-					logger::info("[VRAM] dxvk_d3d11.dll has no VRAM attribution exports; D3D11 memory is not attributed");
-					e = {};
-				}
-				exports = e;
-				resolved.store(true, std::memory_order_release);
-			}
+			static const Exports exports = [&dxvk] {
+				Exports e{ dxvk.pushResourceOwner, dxvk.popResourceOwner, dxvk.setResourceOwner, dxvk.requestMemorySnapshot, dxvk.readMemorySnapshot,
+					dxvk.getMemoryHeapReports };
+				return e.Complete() ? e : Exports{};
+			}();
+			resolved.store(&exports, std::memory_order_release);
 			return exports;
 		}
 	}
@@ -125,10 +104,7 @@ namespace Vram
 
 	void SetDxvkDefragPressure(float a_percent)
 	{
-		static const auto set = [] {
-			const HMODULE d3d11 = ::GetModuleHandleW(L"dxvk_d3d11.dll");
-			return d3d11 ? reinterpret_cast<PFN_dxvkSetDefragPressurePercent>(reinterpret_cast<void*>(::GetProcAddress(d3d11, "dxvkSetDefragPressurePercent"))) : nullptr;
-		}();
+		const auto set = DxvkExports::Get().setDefragPressurePercent;
 		if (set && globals::d3d::device)
 			set(globals::d3d::device, static_cast<std::uint32_t>(a_percent));
 	}

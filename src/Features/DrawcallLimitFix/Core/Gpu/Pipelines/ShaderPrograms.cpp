@@ -3,7 +3,6 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
-#include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
 
@@ -33,13 +32,11 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/ShaderTarget.h"
 #include "ShaderCache.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 
 #include <ORGModuleServices/ShaderCompiler.h>
-#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "TextureStreaming/Streamer.h"
 
 namespace DCLF
@@ -145,10 +142,10 @@ namespace DCLF
 		using StagePtr = std::shared_ptr<Stage>;
 
 		/** @brief Completed stage keys, pushed from any thread and drained by the pipeline lane. */
-		EventQueue<std::uint64_t>& StageCompletions()
+		RenderGraph::Frame::EventQueue<std::uint64_t>& StageCompletions()
 		{
 			// Never destroyed, because a compile may complete while the process tears down.
-			static auto* queue = new EventQueue<std::uint64_t>;
+			static auto* queue = new RenderGraph::Frame::EventQueue<std::uint64_t>;
 			return *queue;
 		}
 
@@ -198,38 +195,6 @@ namespace DCLF
 		return registry ? registry->SourcesGeneration() : 0;
 	}
 
-	namespace
-	{
-		struct TestDefines
-		{
-			std::mutex mutex;
-			std::vector<std::pair<std::wstring, std::wstring>> defines;
-		};
-		TestDefines& GetTestDefines()
-		{
-			// CS_TEST_SHADER_DEFINES sets defines from the start, so a probe needs no reload. A D3D12 run does not survive a reload yet.
-			static TestDefines defines;
-			static std::once_flag seeded;
-			std::call_once(seeded, [] {
-				char value[1024]{};
-				const DWORD length = ::GetEnvironmentVariableA("CS_TEST_SHADER_DEFINES", value, sizeof(value));
-				if (!length || length >= sizeof(value))
-					return;
-				const auto wide = [](std::string_view a_text) { return std::wstring(a_text.begin(), a_text.end()); };
-				std::string_view rest(value, length);
-				while (!rest.empty()) {
-					const auto comma = rest.find(',');
-					const auto item = rest.substr(0, comma);
-					rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
-					if (item.empty())
-						continue;
-					const auto equals = item.find('=');
-					defines.defines.emplace_back(wide(item.substr(0, equals)), equals == std::string_view::npos ? std::wstring{} : wide(item.substr(equals + 1)));
-				}
-			});
-			return defines;
-		}
-	}
 
 	namespace
 	{
@@ -277,26 +242,6 @@ namespace DCLF
 				out += fmt::format("{}[{},{}]", i ? "," : "", JsonString(Util::WStringToString(a_defines[i].name)), JsonString(Util::WStringToString(a_defines[i].value)));
 			return out + "]";
 		}
-	}
-
-	void ShaderPrograms::SetTestDefines(std::string_view a_defines)
-	{
-		std::vector<std::pair<std::wstring, std::wstring>> parsed;
-		std::string text;
-		while (!a_defines.empty()) {
-			const auto comma = a_defines.find(',');
-			const auto item = a_defines.substr(0, comma);
-			a_defines = comma == std::string_view::npos ? std::string_view{} : a_defines.substr(comma + 1);
-			if (item.empty())
-				continue;
-			const auto equals = item.find('=');
-			parsed.emplace_back(Widen(std::string(item.substr(0, equals))), equals == std::string_view::npos ? std::wstring(L"1") : Widen(std::string(item.substr(equals + 1))));
-			text += fmt::format(" {}", item);
-		}
-		logger::info("[DCLF] test defines for DCLF's stages:{}", text.empty() ? std::string(" none") : text);
-		auto& defines = GetTestDefines();
-		std::lock_guard lock(defines.mutex);
-		defines.defines = std::move(parsed);
 	}
 
 	namespace
@@ -374,16 +319,15 @@ namespace DCLF
 			return;
 		}
 		const auto& dependencies = RenderGraphRuntime::ShaderSourceFiles();
-		static const bool lazyRows = SwitchOnUnlessZero(Switch::LazyRows);
-		const auto eager = lazyRows ? PulledSource::EagerRowNames(dependencies) : std::unordered_set<std::string>{};
-		const auto pulledOptions = PulledOptions(lazyRows ? &eager : nullptr);
+		const auto eager = PulledSource::EagerRowNames(dependencies);
+		const auto pulledOptions = PulledOptions(&eager);
 		if (!SwitchValue(Switch::StageDump).empty()) {
 			std::string textures;
 			for (std::size_t r = 0; r < pulledOptions.materialTexture.size(); ++r)
 				if (pulledOptions.materialTexture[r])
 					textures += fmt::format("{}{}", textures.empty() ? "" : ",", r);
-			DumpStageLine(fmt::format(R"({{"kind":"options","generation":{},"materialTextures":[{}],"shadowMaskSlot":{},"samplerSlots":{},"lazyRows":{}}})", a_generation,
-				textures, pulledOptions.shadowMaskSlot, pulledOptions.samplerSlots, lazyRows));
+			DumpStageLine(fmt::format(R"({{"kind":"options","generation":{},"materialTextures":[{}],"shadowMaskSlot":{},"samplerSlots":{},"lazyRows":true}})", a_generation,
+				textures, pulledOptions.shadowMaskSlot, pulledOptions.samplerSlots));
 		}
 		pulledSource = PulledLightingSource(source, pulledOptions);
 		utilitySource = ReadShaderFile(kUtilitySourcePath);
@@ -498,19 +442,6 @@ namespace DCLF
 				request.defines.push_back({ Widen(name), Widen(value) });
 			const std::size_t communityShadersDefines = request.defines.size();
 			request.defines.push_back({ L"DCLF_ORG", L"1" });
-			// CS_DCLF_REF_TRACE records the refs a stage loads and stores through.
-			if (SwitchEnabled(Switch::RefTrace)) {
-				const std::uint32_t traceSlot = Diagnostics::RefTrace::Slot();
-				if (traceSlot != 0)
-					request.defines.push_back({ L"DEVICE_REF_TRACE", std::to_wstring(traceSlot) });
-				Diagnostics::RefTrace::NoteRequest(traceSlot != 0);
-			}
-			{
-				auto& defines = GetTestDefines();
-				std::lock_guard lock(defines.mutex);
-				for (const auto& [name, value] : defines.defines)
-					request.defines.push_back({ name, value });
-			}
 			// The Z-prepass pixel build compiles away everything past the alpha test, so it reads none of the per-frame pixel bindings.
 			if (a_depthOnly)
 				request.defines.push_back({ L"DCLF_DEPTH_ONLY", L"1" });
@@ -542,12 +473,6 @@ namespace DCLF
 			if (!a_pixel && !a_pulled && (a_sourceName == kSourcePath || a_family)) {
 				request.defines.push_back({ L"DCLF_PULLED_VERTICES", L"1" });
 				a_vertexAttributes = VertexAttributesOf(request.defines, a_sourceName == kSourcePath);
-			}
-			// The foliage record. Colour draws write what each pixel shows and the Z-prepass writes which draw owns its depth.
-			if (a_pixel && a_depthOnly == a_pulled && a_sourceName == kSourcePath && Policy::RecordFoliagePixels()) {
-				request.defines.push_back({ L"DCLF_FOLIAGE_PARITY", L"1" });
-				if (Diagnostics::Observe().foliageLand)
-					request.defines.push_back({ L"DCLF_FOLIAGE_PARITY_ALL", L"1" });
 			}
 			// A define, so a run without streaming keeps the shaders and pipelines it had.
 			if (a_pixel && !a_depthOnly && a_sourceName == kSourcePath && TextureStreaming::Enabled() && !TextureStreaming::FullMode())
@@ -845,9 +770,6 @@ namespace DCLF
 
 	void ShaderPrograms::Precompile(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor)
 	{
-		const bool enabled = SwitchValue(Switch::Precompile) != "0";
-		if (!enabled)
-			return;
 		const auto type = a_shader.shaderType.get();
 		if (type != RE::BSShader::Type::Lighting && type != RE::BSShader::Type::Utility)
 			return;
@@ -867,8 +789,7 @@ namespace DCLF
 		auto pulledColour = lighting && a_pixel ? stages->Request(*this, a_shader, true, a_descriptor, false, nullptr, true) : StagePtr{};
 		auto pulledDepthVertex = lighting && !a_pixel ? stages->Request(*this, a_shader, false, a_descriptor, true, nullptr, true) : StagePtr{};
 		// The shadow views' merged pipelines draw with a technique's canonical form.
-		static const bool shadowMerge = SwitchOnUnlessZero(Switch::ShadowMerge);
-		const std::uint32_t canonical = !lighting && shadowMerge ? CanonicalShadowTechnique(a_descriptor) : a_descriptor;
+		const std::uint32_t canonical = !lighting ? CanonicalShadowTechnique(a_descriptor) : a_descriptor;
 		auto merged = canonical != a_descriptor ? stages->Request(*this, a_shader, a_pixel, canonical) : StagePtr{};
 		// Hold CS's bounded compilation worker until this is done. The compiles run on DCLF's pool, which never waits on these.
 		for (const auto* requested : { &stage, &depth, &pulled, &pulledColour, &pulledDepthVertex, &merged }) {

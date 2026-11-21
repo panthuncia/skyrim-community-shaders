@@ -56,7 +56,7 @@ namespace DCLF::Api
 	 * - heldWhile: outside this input they are ordinary objects.
 	 * - slot: Appended0 or Appended1. Registered as a main range too.
 	 * - propertyFlags: the first group in registration order whose flags match takes the object.
-	 * - toggle: optional. Objects are Ineligible::Held while it is off. Decals and layers are always Ineligible::Held.
+	 * - Decals and layers in a held group are always Ineligible::Held.
 	 */
 	struct HeldGroupContribution
 	{
@@ -65,7 +65,6 @@ namespace DCLF::Api
 		std::string_view name;
 		std::uint8_t order = 0;
 		std::uint64_t propertyFlags = 0;
-		ToggleId toggle;
 	};
 
 	/**

@@ -28,80 +28,11 @@ namespace RE
 namespace DCLF
 {
 	/**
-	 * @brief A growable array in fixed chunks, shared copy-on-write with published copies. After a copy, Freeze moves the stamp so the
-	 * next write to a chunk copies it first. Sharing is decided by the stamp, never by a reference count another thread moves.
+	 * @brief A lookup table: 64 entries a chunk, shared copy-on-write with published copies. Sharing is decided by a stamp that
+	 * Snapshot moves, never by a reference count a releasing thread moves, and a replaced chunk goes with its last holder.
 	 */
-	template <class T, std::size_t kChunkSize = 64>
-	class SharedChunks
-	{
-	public:
-		class Iterator
-		{
-		public:
-			Iterator(const SharedChunks* a_owner, std::size_t a_index) :
-				owner(a_owner), index(a_index) {}
-			const T& operator*() const { return (*owner)[index]; }
-			Iterator& operator++()
-			{
-				++index;
-				return *this;
-			}
-			bool operator!=(const Iterator& a_other) const { return index != a_other.index; }
-
-		private:
-			const SharedChunks* owner;
-			std::size_t index;
-		};
-
-		std::size_t size() const { return count; }
-		bool empty() const { return count == 0; }
-		const T& operator[](std::size_t a_index) const { return (*chunks[a_index / kChunkSize].items)[a_index % kChunkSize]; }
-		Iterator begin() const { return { this, 0 }; }
-		Iterator end() const { return { this, count }; }
-
-		/** @brief Writer. Copies the chunk first when a published copy shares it. */
-		T& Mutable(std::size_t a_index)
-		{
-			auto& chunk = chunks[a_index / kChunkSize];
-			if (chunk.stamp != stamp) {
-				chunk.items = std::make_shared<Items>(*chunk.items);
-				chunk.stamp = stamp;
-				++copies;
-			}
-			++writes;
-			return (*chunk.items)[a_index % kChunkSize];
-		}
-		/** @brief Writer. A shrink resets the dropped entries, so a later growth exposes defaults. */
-		void resize(std::size_t a_count)
-		{
-			for (std::size_t i = a_count; i < count; ++i)
-				Mutable(i) = T{};
-			count = a_count;
-			const std::size_t needed = (a_count + kChunkSize - 1) / kChunkSize;
-			if (chunks.size() > needed)
-				chunks.resize(needed);
-			while (chunks.size() < needed)
-				chunks.push_back({ std::make_shared<Items>(), stamp });
-			++writes;
-		}
-		/** @brief Writer, after a copy was taken. Every chunk is shared from here on. */
-		void Freeze() { ++stamp; }
-		/** @brief A copy inherits the counts. */
-		std::uint64_t Writes() const { return writes; }
-		std::uint64_t Copies() const { return copies; }
-
-	private:
-		using Items = std::array<T, kChunkSize>;
-		struct Chunk
-		{
-			std::shared_ptr<Items> items;
-			std::uint64_t stamp = 0;
-		};
-		std::vector<Chunk> chunks;
-		std::size_t count = 0;
-		std::uint64_t stamp = 1;
-		std::uint64_t writes = 0, copies = 0;
-	};
+	template <class T>
+	using LookupChunks = KeptChunkStore<T, 64, KeptSharing::kByStamp>;
 
 	/**
 	 * @brief What a build needs from the render thread's services, resolved ahead of it. A build may not call the engine, D3D11,
@@ -171,8 +102,8 @@ namespace DCLF
 		};
 
 		// A publication copies only the chunks written since the last one.
-		SharedChunks<Pipeline> pipelines;
-		SharedChunks<Material> materials;
+		LookupChunks<Pipeline> pipelines;
+		LookupChunks<Material> materials;
 		std::vector<std::uint32_t> materialVersions;
 		// Copies keep logGeneration, so a reader continues across publications. A reader on another instance or behind the trim starts again.
 		EventLog<std::uint32_t> materialLog;
@@ -273,6 +204,5 @@ namespace DCLF
 		std::vector<std::uint64_t> shadowResolvedScratch;
 		std::array<std::vector<std::uint32_t>, 5> shadowModeStates;
 		std::uint64_t calls = 0, pipelinesChecked = 0, pipelinesResolved = 0, pipelineSweeps = 0, shadowSkipped = 0, shadowResolved = 0;
-		Diagnostics::ParityCounter pipelineParity;
 	};
 }

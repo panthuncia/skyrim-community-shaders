@@ -1,32 +1,37 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "ORGLocalShadows.h"
+#include "ORGLocalShadows.h"
 
-#	include "Globals.h"
-#	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/Engine/Native/Native.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/PublishedResources.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
-#	include "RenderGraph/ShaderBindings.h"
-#	include "RenderGraph/Switches.h"
+#include "Features/LightLimitFix.h"
+#include "Globals.h"
+#include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/ProgramService.h"
+#include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/Switches.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/LatchBlock.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <Resources/ExternalTextureResource.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/LatchBlock.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/Buffers/Buffer.h>
+#include <Resources/ExternalTextureResource.h>
+#include <Resources/VersionedTexture.h>
 
-#	include <algorithm>
-#	include <cstring>
-#	include <utility>
-#	include <vector>
+#include <algorithm>
+#include <bit>
+#include <cstring>
+#include <optional>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -46,13 +51,6 @@ namespace
 	};
 	static_assert(sizeof(CopyConstants) == 16);
 
-	/** @brief Readers return to their D3D11 views. */
-	void WithdrawCache()
-	{
-		PublishedResources::Withdraw(ORGLocalShadows::kDataId);
-		PublishedResources::Withdraw(ORGLocalShadows::kCacheId);
-	}
-
 	// The copies, then the slots' data.
 	constexpr std::uint32_t kDataOffset = ORGLocalShadows::kMaxCopies * sizeof(CopyConstants);
 
@@ -63,21 +61,96 @@ namespace
 		ShaderBindings::Latch copy;
 	};
 
-	struct Resources
+	/** @brief Made once at Setup and kept for the session, whatever the cache's shape. */
+	struct LocalShadowShared
 	{
-		ORGLocalShadows::Desc desc;
-		std::shared_ptr<const ComputeProgram> program;
-		std::unique_ptr<GraphResources::Texture2D> cache;
+		RenderGraph::Programs::Fixed<ComputeProgram> program;
+		// Every slot the setting allows, so a new slot count changes nothing here.
 		std::unique_ptr<GraphResources::StructuredBuffer> data;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
-		std::uint32_t groups = 0;
+		std::uint32_t capacity = 0;
+		std::uint32_t dataStride = 0;
 		// Written into the latch at the commit. staged means SetFrame ran since the last commit.
 		std::vector<CopyConstants> copies = std::vector<CopyConstants>(ORGLocalShadows::kMaxCopies);
 		std::uint32_t copyCount = 0;
+		std::uint32_t groups = 0;
 		std::vector<std::byte> slotData;
 		bool staged = false;
 	};
+
+	/** @brief One shape class of the cache: its slice count. Its resolution changes by versions. */
+	struct LocalShadowCacheClass
+	{
+		std::uint32_t slots = 0;
+		RenderGraph::Frame::DeclaredTexture2D texture;
+	};
+
+	/** @brief What the client's registration depends on. A new resolution is a version, not a new client. */
+	struct LocalShadowClientKey
+	{
+		std::uint32_t slots = 0;
+		friend bool operator==(const LocalShadowClientKey&, const LocalShadowClientKey&) = default;
+	};
+
+	const LightLimitFix::Settings& LocalShadowSettings()
+	{
+		return globals::features::lightLimitFix.settings;
+	}
+
+	/** @brief Whether the cache is on for one revision's values: the setting, and an engine shadow map array to copy from. */
+	template <class Values>
+	bool LocalShadowCacheOn(const Values& a_values)
+	{
+		const auto engine = a_values.Get(RenderGraph::Frame::Vars::EngineShadowMap());
+		return a_values.Get(LocalShadowSettings().EnableLocalShadows) && engine.size.width != 0 && engine.slices > 1;
+	}
+
+	/** @brief The cache's resolution for one revision's values, while it is on (the declaration's existence rule). */
+	template <class Values>
+	std::uint32_t LocalShadowCacheResolution(const Values& a_values)
+	{
+		const auto engine = a_values.Get(RenderGraph::Frame::Vars::EngineShadowMap());
+		return LightLimitFix::LocalShadowResolutionFor(a_values.Get(LocalShadowSettings().LocalShadowResolution), engine.size.width);
+	}
+
+	/** @brief The graph's copy writes the cache as a 32-bit float storage image. */
+	D3D11_TEXTURE2D_DESC LocalShadowCacheDesc(std::uint32_t a_resolution, std::uint32_t a_slots)
+	{
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = a_resolution;
+		desc.Height = a_resolution;
+		desc.MipLevels = 1;
+		desc.ArraySize = a_slots;
+		desc.Format = DXGI_FORMAT_R32_FLOAT;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		return desc;
+	}
+
+	/**
+	* @brief Declares the cache for a_slots slices. Each shape class is its own texture, named apart so that its graph name never
+	* meets the published id. Fatal when it cannot be made.
+	*/
+	std::shared_ptr<const LocalShadowCacheClass> DeclareLocalShadowCache(std::uint32_t a_slots)
+	{
+		using namespace RenderGraph::Frame;
+		const auto& settings = LocalShadowSettings();
+		auto made = std::make_shared<LocalShadowCacheClass>();
+		made->slots = a_slots;
+		// Never aliased, and exported for the engine's pixel shaders at t103.
+		const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV };
+		// One texel while the cache is off (the existence rule). The slot count is the session's: a published id holds one resource,
+		// and a version changes only the extent.
+		made->texture = DeclareTexture2D(fmt::format("{} ({} slots)", ORGLocalShadows::kCacheId, a_slots),
+			DependsOn(settings.LocalShadowResolution, Vars::EngineShadowMap()),
+			[a_slots](const Inputs& a_in) { return LocalShadowCacheDesc(LocalShadowCacheResolution(a_in), a_slots); },
+			exported, ExistsWhen(DependsOn(settings.EnableLocalShadows, Vars::EngineShadowMap()), [](const Inputs& a_in) { return LocalShadowCacheOn(a_in); }));
+		if (!made->texture->SRV() || !made->texture->Versioned())
+			RenderGraph::Fatal(ORGLocalShadows::kName, fmt::format("the cache for {} slots could not be made and exported", a_slots));
+		return made;
+	}
 
 	// A gated dispatch per possible copy, each reading its latch row.
 	struct CopyBindings
@@ -95,9 +168,8 @@ namespace
 	class ShadowCopyPass final : public org::TypedRenderGraphPass<ShadowCopyPass, CopyFrame, CopyBindings>
 	{
 	public:
-		// At the build, on the render thread, so it sees the resources as they are now.
-		ShadowCopyPass(const Resources& a_resources, FrameAnchors::Texture a_source) :
-			program(a_resources.program), latch(a_resources.latch), gate(a_resources.gate), source(std::move(a_source)), cache(a_resources.cache->Graph()) {}
+		ShadowCopyPass(const LocalShadowShared& a_shared, const LocalShadowCacheClass& a_cache, FrameAnchors::Texture a_source) :
+			program(a_shared.program.Get()), latch(a_shared.latch), gate(a_shared.gate), source(std::move(a_source)), cache(a_cache.texture->Versioned()) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -105,7 +177,8 @@ namespace
 			// The shader reads and writes both arrays whole, so use the whole-array views.
 			const org::SrvView sourceView{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
 			const org::UavView cacheView{ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull) };
-			return { a_builder.ShaderResource(source, sourceView).View(), a_builder.UnorderedAccess(cache, cacheView).View() };
+			// The cache is declared through its slot, so a new resolution is a new version of the same declaration.
+			return { a_builder.ShaderResource(source, sourceView).View(), a_builder.UnorderedAccess(org::ResourceResolverAndRange(*cache), cacheView).View() };
 		}
 
 		void Revision(std::vector<std::uint64_t>& a_out) const
@@ -113,6 +186,7 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program.get()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(gate.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(cache.get()));
 		}
 
 		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { program, latch, gate }; }
@@ -134,7 +208,7 @@ namespace
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 		FrameAnchors::Texture source;  // the engine's shadow maps slot
-		std::shared_ptr<org::Resource> cache;
+		std::shared_ptr<org::VersionedTexture> cache;
 	};
 
 	// Into the buffer the engine's pixel shaders read at t102.
@@ -152,8 +226,9 @@ namespace
 	class ShadowDataPass final : public org::TypedRenderGraphPass<ShadowDataPass, DataFrame, DataBindings>
 	{
 	public:
-		explicit ShadowDataPass(const Resources& a_resources) :
-			latch(a_resources.latch), data(a_resources.data->Graph()), bytes(a_resources.desc.slots * a_resources.desc.dataStride) {}
+		// The whole capacity moves every run, so the pass does not follow the slot count.
+		explicit ShadowDataPass(const LocalShadowShared& a_shared) :
+			latch(a_shared.latch), data(a_shared.data->Graph()), bytes(a_shared.capacity * a_shared.dataStride) {}
 
 		DataBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -184,238 +259,200 @@ namespace
 		std::uint32_t bytes = 0;
 	};
 
-	bool SameShape(const ORGLocalShadows::Desc& a_left, const ORGLocalShadows::Desc& a_right)
+	/** @brief The registration for a key: the copies of a_cache, at the start of the revision that adopts it. */
+	void MakeLocalShadowClient(const std::shared_ptr<LocalShadowShared>& a_shared, const std::shared_ptr<const LocalShadowCacheClass>& a_cache, FrameAnchors::ClientDesc& a_client)
 	{
-		return a_left.slots == a_right.slots && a_left.resolution == a_right.resolution && a_left.format == a_right.format &&
-		       a_left.scale == a_right.scale && a_left.dataStride == a_right.dataStride;
+		a_client.id = kClientId;
+		// The slots' data first. The copy does not depend on it.
+		a_client.passes.push_back({ .name = "cs.llf.local-shadow-data",
+			.anchor = FrameAnchors::Anchor::EarlyPrepass,
+			.order = 100,
+			.kind = FrameAnchors::PassKind::Copy,
+			.make = [a_shared]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowDataPass>(*a_shared); } });
+		a_client.passes.push_back({ .name = "cs.llf.local-shadow-copy",
+			.anchor = FrameAnchors::Anchor::EarlyPrepass,
+			.order = 101,
+			.kind = FrameAnchors::PassKind::Compute,
+			.make = [a_shared, a_cache]() -> std::shared_ptr<org::RenderPass> {
+				// A new engine texture is a new import, which rebuilds the anchors.
+				auto shadowMaps = FrameAnchors::EngineTexture(FrameAnchors::Depth(kShadowMaps));
+				if (!shadowMaps)
+					return nullptr;
+				return std::make_shared<ShadowCopyPass>(*a_shared, *a_cache, std::move(shadowMaps));
+			} });
+		a_client.registerResources = [a_shared, a_cache](org::RenderGraph& a_graph) {
+			a_cache->texture->Register(a_graph);
+			a_shared->data->Register(a_graph);
+		};
+		a_client.commit = [a_shared](const FrameAnchors::Point&) {
+			auto* graphHost = RenderGraphRuntime::Get().Host();
+			if (!graphHost)
+				return;
+			const org::RunRef run = graphHost->CurrentRun();
+			// A frame that staged nothing opens no copy, since the engine's slices are not this frame's. The data stays as last staged.
+			if (std::exchange(a_shared->staged, false)) {
+				a_shared->latch->Write(run, 0, std::as_bytes(std::span(a_shared->copies)));
+				for (std::uint32_t copy = 0; copy < a_shared->copyCount; ++copy)
+					a_shared->gate->OpenDispatch(copy, a_shared->groups, a_shared->groups);
+			}
+			a_shared->latch->Write(run, kDataOffset, a_shared->slotData);
+		};
+		a_client.gates = { a_shared->gate };
 	}
 }
 
 struct ORGLocalShadows::Impl
 {
-	std::shared_ptr<Resources> resources;
-	std::shared_ptr<const ComputeProgram> program;  // kept across shapes, which it does not depend on
+	std::shared_ptr<LocalShadowShared> shared;
+	// The session's cache: kCacheId publishes it and every registration copies into it. Its slot count is fixed at setup.
+	std::shared_ptr<const LocalShadowCacheClass> adopted;
+	std::shared_ptr<const LocalShadowCacheClass> registered;
+	RenderGraph::Frame::DeclaredClient client;
+	// Whether a registration switched in. Before the first, the frame has no cache.
+	bool clientAdopted = false;
+	// Adopted() once per frame.
+	mutable std::uint64_t shapeFrame = UINT64_MAX;
+	mutable Shape shape;
+
+	/** @brief The session's cache. Fatal for another slot count: a published id holds one resource. */
+	std::shared_ptr<const LocalShadowCacheClass> CacheFor(std::uint32_t a_slots)
+	{
+		if (!adopted || adopted->slots != a_slots)
+			Fatal(fmt::format("a registration asked for {} slots; the session's cache has {}", a_slots, adopted ? adopted->slots : 0u));
+		return adopted;
+	}
+
+	/** @brief Inside the adoption point of the revision that switched in the registration for a_key. */
+	void Adopt(const LocalShadowClientKey& a_key)
+	{
+		if (!registered || registered->slots != a_key.slots || registered != adopted)
+			Fatal(fmt::format("the adopted registration's {} slots are not the session cache's", a_key.slots));
+		clientAdopted = true;
+		shapeFrame = UINT64_MAX;
+	}
 };
 
-ORGLocalShadows& ORGLocalShadows::Get()
-{
-	static ORGLocalShadows s_shadows;
-	return s_shadows;
-}
-
+ORGLocalShadows::ORGLocalShadows() = default;
 ORGLocalShadows::~ORGLocalShadows() = default;
 
-bool ORGLocalShadows::Requested()
+bool ORGLocalShadows::Setup(std::uint32_t a_dataStride, std::uint32_t a_capacity)
 {
-	static const bool requested = RenderGraph::Engine::Native::GraphMode();
-	return requested;
-}
+	// Once a session. The cache and its data are published, so they are never torn down.
+	if (!BeginSetup())
+		return IsActive();
+	if (!a_dataStride || !a_capacity)
+		Fatal("the cache needs slots and slot data");
 
-void ORGLocalShadows::Reserve()
-{
-	if (Requested())
-		FrameAnchors::Reserve(FrameAnchors::Anchor::EarlyPrepass);
-}
-
-bool ORGLocalShadows::Setup(const Desc& a_desc)
-{
-	if (impl && impl->resources && SameShape(impl->resources->desc, a_desc) && IsActive())
-		return true;
-	Release();
-
-	auto& runtime = RenderGraphRuntime::Get();
-	auto* host = runtime.Host();
-	if (!Requested())
-		return false;
-	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::EarlyPrepass)) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the render graph is not active or EarlyPrepass has no epoch");
-		return false;
-	}
-	// The graph's copy writes the cache as a 32-bit float storage image.
-	if (a_desc.format != DXGI_FORMAT_R32_FLOAT || !a_desc.slots || !a_desc.resolution || !a_desc.dataStride) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the cache must be R32_FLOAT with slots, a resolution and data");
-		return false;
-	}
-	auto source = FrameAnchors::EngineDepth(kShadowMaps);
-	if (!source) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the engine's shadow maps could not be imported");
-		return false;
-	}
-
-	auto state = std::make_unique<Impl>();
-	if (impl)
-		state->program = impl->program;
-	if (!state->program)
-		state->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<CopyBlock>() });
-	if (!state->program) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the SPIR-V program could not be created");
-		return false;
-	}
-
-	auto resources = std::make_shared<Resources>();
-	resources->desc = a_desc;
-	resources->program = state->program;
+	auto shared = std::make_shared<LocalShadowShared>();
+	shared->capacity = a_capacity;
+	shared->dataStride = a_dataStride;
+	shared->program = RenderGraph::Programs::Queue("LightLimitFix", ComputeProgram::Desc{ .source = kShader, .constantWords = ShaderBindings::Words<CopyBlock>() });
 	const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV };
-
-	D3D11_TEXTURE2D_DESC cacheDesc{};
-	cacheDesc.Width = a_desc.resolution;
-	cacheDesc.Height = a_desc.resolution;
-	cacheDesc.MipLevels = 1;
-	cacheDesc.ArraySize = a_desc.slots;
-	cacheDesc.Format = a_desc.format;
-	cacheDesc.SampleDesc.Count = 1;
-	cacheDesc.Usage = D3D11_USAGE_DEFAULT;
-	cacheDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-	resources->cache = std::make_unique<GraphResources::Texture2D>(cacheDesc, std::string(kCacheId), exported);
-
 	D3D11_BUFFER_DESC dataDesc{};
 	dataDesc.Usage = D3D11_USAGE_DEFAULT;
 	dataDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 	dataDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-	dataDesc.StructureByteStride = a_desc.dataStride;
-	dataDesc.ByteWidth = a_desc.slots * a_desc.dataStride;
-	resources->data = std::make_unique<GraphResources::StructuredBuffer>(dataDesc, a_desc.slots, std::string(kDataId), exported);
-
-	if (!*resources->cache || !resources->cache->SRV() || !*resources->data || !resources->data->SRV()) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the cache or its data could not be created and exported");
-		return false;
-	}
+	dataDesc.StructureByteStride = a_dataStride;
+	dataDesc.ByteWidth = a_capacity * a_dataStride;
+	shared->data = std::make_unique<GraphResources::StructuredBuffer>(dataDesc, a_capacity, std::string(kDataId), exported);
+	if (!*shared->data || !shared->data->SRV())
+		Fatal("the slot data could not be created and exported");
 	try {
-		resources->latch = org::LatchBlock::Create("LightLimitFix::LocalShadowLatch", kDataOffset + a_desc.slots * a_desc.dataStride);
+		shared->latch = org::LatchBlock::Create("LightLimitFix::LocalShadowLatch", kDataOffset + a_capacity * a_dataStride);
 	} catch (const std::exception& e) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the latch could not be created: {}", e.what());
-		return false;
+		Fatal(fmt::format("the latch could not be created: {}", e.what()));
 	}
-	resources->gate = RenderGraph::RunGate::Create("LightLimitFix::LocalShadowCopyGate", kMaxCopies);
-	if (!resources->gate) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the copies' run gate could not be created");
-		return false;
-	}
-	const std::uint32_t threadsPerTexel = (std::min)(a_desc.scale, kGroupSize);
-	resources->groups = (a_desc.resolution * threadsPerTexel + kGroupSize - 1) / kGroupSize;
-	resources->slotData.assign(static_cast<std::size_t>(a_desc.slots) * a_desc.dataStride, std::byte{ 0 });
+	shared->gate = RenderGraph::RunGate::Create("LightLimitFix::LocalShadowCopyGate", kMaxCopies);
+	shared->slotData.assign(static_cast<std::size_t>(a_capacity) * a_dataStride, std::byte{ 0 });
 
-	FrameAnchors::ClientDesc client{};
-	client.id = kClientId;
-	// The slots' data first. The copy does not depend on it.
-	client.passes.push_back({ .name = "cs.llf.local-shadow-data",
-		.anchor = FrameAnchors::Anchor::EarlyPrepass,
-		.order = 100,
-		.kind = FrameAnchors::PassKind::Copy,
-		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowDataPass>(*resources); } });
-	client.passes.push_back({ .name = "cs.llf.local-shadow-copy",
-		.anchor = FrameAnchors::Anchor::EarlyPrepass,
-		.order = 101,
-		.kind = FrameAnchors::PassKind::Compute,
-		.make = [resources]() -> std::shared_ptr<org::RenderPass> {
-			// A new engine texture is a new import, which rebuilds the anchors.
-			auto shadowMaps = FrameAnchors::EngineDepth(kShadowMaps);
-			if (!shadowMaps)
-				return nullptr;
-			return std::make_shared<ShadowCopyPass>(*resources, std::move(shadowMaps));
-		} });
-	client.registerResources = [resources](org::RenderGraph& a_graph) {
-		resources->cache->Register(a_graph);
-		resources->data->Register(a_graph);
-	};
-	client.commit = [resources](const FrameAnchors::Point&) {
-		auto* graphHost = RenderGraphRuntime::Get().Host();
-		if (!graphHost)
-			return;
-		const org::RunRef run = graphHost->CurrentRun();
-		// A frame that staged nothing opens no copy, since the engine's slices are not this frame's. The data stays as last staged.
-		if (std::exchange(resources->staged, false)) {
-			resources->latch->Write(run, 0, std::as_bytes(std::span(resources->copies)));
-			for (std::uint32_t copy = 0; copy < resources->copyCount; ++copy)
-				resources->gate->OpenDispatch(copy, resources->groups, resources->groups);
-		}
-		resources->latch->Write(run, kDataOffset, resources->slotData);
-	};
-	client.gates = { resources->gate };
-	if (!FrameAnchors::Register(std::move(client))) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the EarlyPrepass client could not be registered");
-		return false;
-	}
-	// DCLF's colour passes read them by name, ordered after the copies.
-	if (!PublishedResources::Publish(*resources->data) || !PublishedResources::Publish(*resources->cache)) {
-		logger::warn("[ORG] LLF local shadows stay on D3D11: the cache or its data could not be published");
-		FrameAnchors::Unregister(kClientId);
-		WithdrawCache();
-		return false;
-	}
-	state->resources = std::move(resources);
-	impl = std::move(state);
-	logger::info("[ORG] LLF local shadows run on the render graph: {} slots at {}x{}, scale {}, at EarlyPrepass", a_desc.slots, a_desc.resolution,
-		a_desc.resolution, a_desc.scale);
+	auto made = std::make_unique<Impl>();
+	made->shared = shared;
+	// The slot count is fixed for the session: the setting applies at the next launch (the menu says so).
+	const auto setupSlots = LightLimitFix::LocalShadowSlotsFor(LocalShadowSettings().LocalShadowSlots.Get());
+	made->adopted = made->registered = DeclareLocalShadowCache(setupSlots);
+	// Published once. A new resolution is a version readers follow.
+	// DCLF's colour passes and the fog read them by name, ordered after the copies.
+	if (!PublishedResources::Publish(*shared->data) || !PublishedResources::Publish(kCacheId, *made->adopted->texture))
+		Fatal("the cache or its data could not be published");
+
+	using namespace RenderGraph::Frame;
+	const auto& settings = LocalShadowSettings();
+	auto* state = made.get();
+	made->client = DeclareClient<LocalShadowClientKey>(
+		kClientId, DependsOn(settings.EnableLocalShadows, Vars::EngineShadowMap()),
+		[setupSlots](const Inputs& a_in) -> std::optional<LocalShadowClientKey> {
+			if (!LocalShadowCacheOn(a_in))
+				return std::nullopt;
+			return LocalShadowClientKey{ setupSlots };
+		},
+		[state](const LocalShadowClientKey& a_key, FrameAnchors::ClientDesc& a_client) {
+			state->registered = state->CacheFor(a_key.slots);
+			MakeLocalShadowClient(state->shared, state->registered, a_client);
+			logger::info("[ORG] LLF local shadows: a client for the next revision, copying into the cache for {} slots", a_key.slots);
+			return true;
+		},
+		[state](const LocalShadowClientKey& a_key) { state->Adopt(a_key); });
+	impl = std::move(made);
+	logger::info("[ORG] LLF local shadows run on the render graph at EarlyPrepass; the cache and its client follow the frame revisions");
 	return true;
 }
 
-void ORGLocalShadows::Release()
+ORGLocalShadows::Shape ORGLocalShadows::Adopted() const
 {
-	if (!impl)
-		return;
-	if (impl->resources) {
-		FrameAnchors::Unregister(kClientId);
-		WithdrawCache();
-		impl->resources.reset();
-	}
-}
-
-bool ORGLocalShadows::IsActive() const
-{
-	return impl && impl->resources && RenderGraphRuntime::Get().IsActive();
+	if (!IsActive())
+		return {};
+	const auto frame = RenderGraph::Frame::Driver::Current().frame;
+	if (impl->shapeFrame == frame)
+		return impl->shape;
+	impl->shapeFrame = frame;
+	impl->shape = {};
+	const auto& adopted = RenderGraph::Frame::Revision::Adopted();
+	if (!impl->clientAdopted || !impl->adopted || !LocalShadowCacheOn(adopted))
+		return impl->shape;
+	const auto engine = adopted.Get(RenderGraph::Frame::Vars::EngineShadowMap());
+	Shape shape;
+	shape.slots = impl->adopted->slots;
+	// The bound version's, which the copies write.
+	shape.resolution = adopted.Extent(impl->adopted->texture)[0];
+	shape.engineResolution = engine.size.width;
+	shape.engineSlices = engine.slices;
+	// The copy tree-reduces the engine's texels, so the ratio must be a power of two. A cache made for newer values waits for them.
+	const bool copyable = shape.resolution > 1 && shape.engineResolution % shape.resolution == 0 && std::has_single_bit(shape.engineResolution / shape.resolution);
+	if (copyable)
+		impl->shape = shape;
+	return impl->shape;
 }
 
 void ORGLocalShadows::SetFrame(std::span<const Copy> a_copies, std::span<const std::byte> a_data)
 {
-	if (!IsActive())
+	const auto shape = Adopted();
+	if (!shape)
 		return;
-	auto& resources = *impl->resources;
-	const auto& desc = resources.desc;
-	resources.copyCount = static_cast<std::uint32_t>((std::min)(a_copies.size(), static_cast<std::size_t>(kMaxCopies)));
+	auto& shared = *impl->shared;
+	const std::uint32_t scale = shape.engineResolution / shape.resolution;
+	shared.copyCount = static_cast<std::uint32_t>((std::min)(a_copies.size(), static_cast<std::size_t>(kMaxCopies)));
 	for (std::uint32_t i = 0; i < kMaxCopies; ++i) {
-		if (i < resources.copyCount)
-			resources.copies[i] = { a_copies[i].sourceSlice, a_copies[i].targetSlot, desc.scale, desc.resolution };
+		if (i < shared.copyCount)
+			shared.copies[i] = { a_copies[i].sourceSlice, a_copies[i].targetSlot, scale, shape.resolution };
 		else
-			resources.copies[i] = {};
+			shared.copies[i] = {};
 	}
-	const std::size_t bytes = (std::min)(a_data.size(), resources.slotData.size());
-	std::memcpy(resources.slotData.data(), a_data.data(), bytes);
-	resources.staged = true;
+	const std::uint32_t threadsPerTexel = (std::min)(scale, kGroupSize);
+	shared.groups = (shape.resolution * threadsPerTexel + kGroupSize - 1) / kGroupSize;
+	// Slots past the adopted count stay zero, so no reader finds an old slot's data there.
+	const std::size_t bytes = (std::min)(a_data.size(), shared.slotData.size());
+	std::memcpy(shared.slotData.data(), a_data.data(), bytes);
+	std::fill(shared.slotData.begin() + static_cast<std::ptrdiff_t>(bytes), shared.slotData.end(), std::byte{ 0 });
+	shared.staged = true;
 }
 
 ID3D11ShaderResourceView* ORGLocalShadows::GetCacheSRV() const
 {
-	return IsActive() ? impl->resources->cache->SRV() : nullptr;
+	return Adopted() ? impl->adopted->texture->SRV() : nullptr;
 }
 
 ID3D11ShaderResourceView* ORGLocalShadows::GetDataSRV() const
 {
-	return IsActive() ? impl->resources->data->SRV() : nullptr;
+	return Adopted() ? impl->shared->data->SRV() : nullptr;
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-// Without OpenRenderGraph the local shadow cache always stays on D3D11.
-#	include "ORGLocalShadows.h"
-
-struct ORGLocalShadows::Impl
-{};
-
-ORGLocalShadows& ORGLocalShadows::Get()
-{
-	static ORGLocalShadows s_shadows;
-	return s_shadows;
-}
-
-ORGLocalShadows::~ORGLocalShadows() = default;
-bool ORGLocalShadows::Requested() { return false; }
-void ORGLocalShadows::Reserve() {}
-bool ORGLocalShadows::Setup(const Desc&) { return false; }
-
-void ORGLocalShadows::Release() {}
-bool ORGLocalShadows::IsActive() const { return false; }
-void ORGLocalShadows::SetFrame(std::span<const Copy>, std::span<const std::byte>) {}
-ID3D11ShaderResourceView* ORGLocalShadows::GetCacheSRV() const { return nullptr; }
-ID3D11ShaderResourceView* ORGLocalShadows::GetDataSRV() const { return nullptr; }
-#endif

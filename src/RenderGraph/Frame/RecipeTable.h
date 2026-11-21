@@ -15,7 +15,8 @@
 *
 * Frame kinds name their stages in order. A stage is a CS stage, with one graph and one ticket, or a Drawcall Limit Fix graph.
 * A CS stage is an ordered list of steps. A step is one engine hook: an anchor with the client ids it holds, another module's
-* epoch, or a point that only ends the stage. A whole step holds its anchor, which then has no epoch of its own.
+* epoch, or a point that only ends the stage. A whole step holds its anchor: no other stage has a step there. Anchors have no
+* epochs of their own.
 * Membership is explicit. A client may register only where a step names it, or it is a recipe mismatch.
 * The header stays free of ORG includes.
 */
@@ -24,8 +25,9 @@ namespace RenderGraph::Frame::Recipes::Table
 	using Anchor = FrameAnchors::Anchor;
 	using Segment = RenderGraphRuntime::Segment;
 
-	inline constexpr std::size_t kMaxNames = 8;
-	inline constexpr std::size_t kMaxSteps = 19;
+	// Prepass holds eleven with Physical Sky's cloud clients (cs.physical-sky.cloud-maps and cs.physical-sky.clouds) and Light Limit Fix's culling.
+	inline constexpr std::size_t kMaxNames = 11;
+	inline constexpr std::size_t kMaxSteps = 21;
 	inline constexpr std::size_t kMaxEpochs = 10;
 	inline constexpr std::size_t kMaxCommitBefore = 20;
 
@@ -43,11 +45,10 @@ namespace RenderGraph::Frame::Recipes::Table
 	/** @brief One step of a CS stage. */
 	struct Step
 	{
-		Anchor anchor = Anchor::Count;     // Count for a foreign or point step
+		Anchor anchor = Anchor::Count;     // Count for a point step
 		Names clients{};                   // the clients the step holds at its anchor
-		Segment foreign = Segment::Count;  // a foreign step's module epoch
-		bool whole = false;                // the stage holds the anchor wholly: it has no epoch of its own
-		bool point = false; // a CS point that is no anchor and no module epoch. It holds no passes and ends the stage
+		bool whole = false;                // the stage holds the anchor wholly: no other stage has a step at it
+		bool point = false; // a CS point that is no anchor. It holds no passes and ends the stage
 		// Takes taps only until a later step of its stage has tapped this frame. Then its anchor's taps go to the next step there.
 		bool untilLater = false;
 		// The instance range this step makes and taps, from firstInstance. A count of 0 means every instance from there.
@@ -55,23 +56,16 @@ namespace RenderGraph::Frame::Recipes::Table
 		std::uint8_t firstInstance = 0;
 		std::uint8_t instanceCount = 0;
 
-		constexpr bool Empty() const { return anchor == Anchor::Count && foreign == Segment::Count && !point; }
+		constexpr bool Empty() const { return anchor == Anchor::Count && !point; }
 	};
 
-	/** @brief What an epoch of a stage's part of the frame is to the recipe. */
-	enum class Role : std::uint8_t
-	{
-		Graph,   // the stage's own graph: a CS stage's epoch, or one of Drawcall Limit Fix's
-		Ticket, // an anchor that keeps its own ticket after the stage in native mode, such as frame generation
-		Placed,  // an anchor's own epoch (or a module's) placed here only for the host's epoch order
-	};
-
-	/** @brief An epoch in a stage's part of the frame, with the clients that run on it when it is an anchor's own epoch. */
+	/** @brief An epoch in a stage's part of the frame: a CS stage's own graph, or one of Drawcall Limit Fix's. */
 	struct Epoch
 	{
 		Segment segment = Segment::Count;
-		Role role = Role::Graph;
-		Names clients{};  // an anchor's own epoch: the clients that run on it there (without the stages)
+		// A fragment source's stage epoch it must cover whenever it draws (cleanup plan A3, step 6). The source names each frame the
+		// engine draws it instead, by an engine state set at the adoption point. Any other uncovered frame is TapError::Uncovered.
+		bool covered = false;
 	};
 
 	/** @brief A list of epochs; the unused tail is Segment::Count. */
@@ -111,21 +105,12 @@ namespace RenderGraph::Frame::Recipes::Table
 
 	constexpr Segment StageSegment(SegmentId a_segment) { return RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(a_segment)); }
 
-	constexpr Segment AnchorSegment(Anchor a_anchor)
-	{
-		return static_cast<Segment>(static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + static_cast<std::uint32_t>(a_anchor));
-	}
-
-	constexpr Epoch Own(Segment a_segment) { return { a_segment, Role::Graph }; }
-	constexpr Epoch Placed(Anchor a_anchor, Names a_clients = {}) { return { AnchorSegment(a_anchor), Role::Placed, a_clients }; }
-	constexpr Epoch Ticket(Anchor a_anchor, Names a_clients) { return { AnchorSegment(a_anchor), Role::Ticket, a_clients }; }
+	constexpr Epoch Own(Segment a_segment) { return { a_segment }; }
+	/** @brief A fragment source's own epoch that it covers whenever it draws. */
+	constexpr Epoch Covered(Segment a_segment) { return { a_segment, true }; }
 
 	// Epochs whose submission commits the point-ended world stages when their usual next GPU work does not come.
-	inline constexpr Segment kEndsWorld[] = { Segment::Forward, Segment::FirstPerson, Segment::AnchorVolumetricLighting, Segment::AnchorPostProcessing,
-		Segment::AnchorUpscale, Segment::AnchorInterface, Segment::AnchorPresent, StageSegment(SegmentId::Post) };
-
-	/** @brief Clients a diagnostic switch registers at every anchor. Every whole step holds them. Never in a test or play run. */
-	inline constexpr Names kDiagnosticClients{ "cs.org.anchor-selftest" };
+	inline constexpr Segment kEndsWorld[] = { Segment::Forward, Segment::FirstPerson, StageSegment(SegmentId::Post) };
 
 	/** @brief The world's stages in frame order. Recipe order is pass order. Each CS stage's comment names its commit point. */
 	inline constexpr std::array<Stage, kStages> kStageTable{ {
@@ -135,7 +120,7 @@ namespace RenderGraph::Frame::Recipes::Table
 			.owner = Owner::Cs,
 			.name = "start",
 			.segment = SegmentId::Start,
-			.names = { "CS stage: start", "CS stage: start inputs", "FrameSegments::Start / ", "cs.segment.start" },
+			.names = { "CS stage: start", "CS stage: start inputs", "FrameSegments::Start / " },
 			.steps = { {
 				{ .anchor = Anchor::DecalQueries, .clients = { "cs.decals.occlusion" }, .whole = true },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.facetint" } },
@@ -145,123 +130,122 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineShadowClear, .clients = { "cs.engine.skeleton.shadow@start" } },
 				{ .point = true },
 			} },
-			.commitBefore = Segments({ Segment::ShadowView, Segment::SkyOcclusion, Segment::ZPrepass, Segment::FirstPersonDepth, Segment::LightCulling, Segment::MainOpaque,
-				StageSegment(SegmentId::PreDepth), StageSegment(SegmentId::PreMain), StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2],
-				kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
+			.commitBefore = Segments({ Segment::ShadowView, Segment::SkyOcclusion, Segment::ZPrepass, Segment::FirstPersonDepth, Segment::MainOpaque,
+				StageSegment(SegmentId::PreDepth), StageSegment(SegmentId::PreMain), StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
 			.commit = "just before DCLF's shadow view epoch, or Main::RenderShadowMaps' return",
 			.commitSite = "BeforeGpuWork, before DCLF's shadow view epoch or later GPU work; at the latest the EarlyPrepass hook's start (Deferred::EarlyPrepasses)",
-			.epochs = { Own(StageSegment(SegmentId::Start)), Placed(Anchor::DecalQueries), Placed(Anchor::EngineShadowClear, { "cs.engine.skeleton.shadow" }) } },
+			.epochs = { Own(StageSegment(SegmentId::Start)) } },
 		{ .id = StageId::Shadows,
-			.owner = Owner::Dclf,
+			.owner = Owner::Fragment,
 			.name = "shadows",
 			.commit = "Drawcall Limit Fix's shadow views",
-			.epochs = { Own(Segment::ShadowView), Own(Segment::SkyOcclusion), Placed(Anchor::EarlyPrepass) } },
+			.epochs = { Covered(Segment::ShadowView), Covered(Segment::SkyOcclusion) } },
 		// Pre-depth: the EarlyPrepass clients, then the main depth clear when DCLF's Z-prepass does not host it.
 		// Commits before DCLF's Z-prepass or a later stage, since the clear must reach the GPU before the Z-prepass draws.
 		{ .id = StageId::PreDepth,
 			.owner = Owner::Cs,
 			.name = "pre-depth",
 			.segment = SegmentId::PreDepth,
-			.names = { "CS segment: pre-depth", "CS segment: pre-depth inputs", "FrameSegments::PreDepth / ", "cs.segment.pre-depth" },
+			.names = { "CS segment: pre-depth", "CS segment: pre-depth inputs", "FrameSegments::PreDepth / " },
 			.steps = { {
 				{ .anchor = Anchor::EarlyPrepass,
-					.clients = { "cs.cloud-shadows.layers", "cs.grass-collision", "cs.llf.local-shadows", "cs.terrain-blending.terrain-depth-clear", "cs.terrain-shadows",
-						"cs.true-pbr.glints", "cs.volumetric-shadows" },
+					.clients = { "cs.cloud-shadows.layers", "cs.grass-collision", "cs.llf.local-shadows", "cs.physical-sky.luts", "cs.terrain-blending.terrain-depth-clear",
+						"cs.terrain-shadows", "cs.true-pbr.glints", "cs.volumetric-shadows" },
 					.whole = true },
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@pre-depth" } },
 				{ .point = true },
 			} },
-			.commitBefore = Segments({ Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection, Segment::LightCulling, Segment::MainOpaque, StageSegment(SegmentId::PreMain),
-				StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
+			.commitBefore = Segments({ Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection, Segment::MainOpaque, StageSegment(SegmentId::PreMain),
+				StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
 			.commit = "just before DCLF's Z-prepass, or Main::RenderDepth's depth copy",
 			.commitSite = "BeforeGpuWork, before DCLF's Z-prepass or later GPU work; at the latest Main::RenderDepth's depth copy (Engine/Skeleton, RunCopy)",
-			.epochs = { Own(StageSegment(SegmentId::PreDepth)), Placed(Anchor::EngineFrameClear, { "cs.engine.skeleton.frame" }) } },
+			.epochs = { Own(StageSegment(SegmentId::PreDepth)) } },
 		// Drawcall Limit Fix's water reflection faces come after the Z-prepass (TESWaterReflections::Update).
 		{ .id = StageId::Depth,
-			.owner = Owner::Dclf,
+			.owner = Owner::Fragment,
 			.name = "depth",
 			.commit = "Main::RenderDepth",
-			.epochs = { Own(Segment::ZPrepass), Own(Segment::FirstPersonDepth), Placed(Anchor::EngineDepthCopy), Placed(Anchor::DepthDone),
-				Placed(Anchor::EngineCubeClear, { "cs.engine.skeleton.cube" }), Own(Segment::Reflection), Placed(Anchor::ReflectionsPrepass), Placed(Anchor::SkyReflections),
-				{ Segment::LightCulling, Role::Placed } } },
-		// Pre-main: the depth copy, light culling, the Prepass clients and the main pass's sky batch. Nothing else runs in between.
+			.epochs = { Covered(Segment::ZPrepass), Covered(Segment::FirstPersonDepth), Covered(Segment::Reflection) } },
+		// Pre-main: the depth copy, the Prepass clients (Light Limit Fix's culling first) and the main pass's sky batch. Nothing else runs in between.
 		// The sky batch does not run every frame, so it ends at a point just before DCLF's main opaque epoch or a later stage.
 		{ .id = StageId::PreMain,
 			.owner = Owner::Cs,
 			.name = "pre-main",
 			.segment = SegmentId::PreMain,
-			.names = { "CS segment: pre-main", "CS segment: pre-main inputs", "FrameSegments::PreMain / ", "cs.segment.pre-main" },
+			.names = { "CS segment: pre-main", "CS segment: pre-main inputs", "FrameSegments::PreMain / " },
 			.steps = { {
 				{ .anchor = Anchor::EngineDepthCopy, .clients = { "cs.engine.skeleton.depth-copy" } },
 				{ .anchor = Anchor::DepthDone, .clients = { "cs.terrain-blending" }, .whole = true },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.engine.skeleton.frame@engine-draws", "cs.shadow-mask.world" } },
-				{ .foreign = Segment::LightCulling },
 				{ .anchor = Anchor::Prepass,
-					.clients = { "cs.deferred.clears", "cs.engine.skeleton.frame@prepass", "cs.exp-height-fog", "cs.ibl", "cs.screen-space-shadows", "cs.skylighting" },
+					.clients = { "cs.deferred.clears", "cs.engine.skeleton.frame@prepass", "cs.exp-height-fog", "cs.ibl", "cs.llf.light-culling", "cs.physical-sky",
+						"cs.physical-sky.cloud-maps", "cs.physical-sky.clouds", "cs.screen-space-shadows", "cs.skylighting", "cs.view-atmosphere" },
 					.whole = true },
 				{ .anchor = Anchor::Sky, .clients = { "cs.sky.main" }, .whole = true },
 				{ .point = true },
 			} },
-			.commitBefore = Segments({ Segment::MainOpaque, StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4],
-				kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
+			.commitBefore = Segments({ Segment::MainOpaque, StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
 			.commit = "just before DCLF's main opaque epoch (the main pass's sky)",
 			.commitSite = "BeforeGpuWork, before DCLF's main opaque epoch or later GPU work; at the latest CS's depth copy in Deferred::DeferredPasses (Engine/Skeleton, RunCopy)",
-			.epochs = { Own(StageSegment(SegmentId::PreMain)), Placed(Anchor::Prepass), Placed(Anchor::Sky) } },
-		{ .id = StageId::Opaque, .owner = Owner::Dclf, .name = "opaque", .commit = "the main pass's opaque batches", .epochs = { Own(Segment::MainOpaque) } },
+			.epochs = { Own(StageSegment(SegmentId::PreMain)) } },
+		{ .id = StageId::Opaque, .owner = Owner::Fragment, .name = "opaque", .commit = "the main pass's opaque batches", .epochs = { Covered(Segment::MainOpaque) } },
 		// Deferred+water: the deferred passes, composite, water mask, reflections, SSAO, kMAIN copy and water, after DCLF's main opaque.
 		// Commits just before DCLF's forward epoch. The water steps are gated and do nothing when no water is in view.
 		{ .id = StageId::Deferred,
 			.owner = Owner::Cs,
 			.name = "deferred+water",
 			.segment = SegmentId::Deferred,
-			.names = { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" },
+			.names = { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / " },
 			.steps = { {
 				{ .anchor = Anchor::DeferredPasses,
-					.clients = { "cs.dyncubemaps", "cs.engine.skeleton.depth-copy@deferred-passes", "cs.org.graphres-selftest", "cs.ssgi", "cs.ssgi.reset", "cs.subsurface" },
+					.clients = { "cs.dyncubemaps", "cs.engine.skeleton.depth-copy@deferred-passes", "cs.ssgi", "cs.subsurface" },
 					.whole = true },
-				{ .anchor = Anchor::DeferredComposite, .clients = { "cs.deferred" }, .whole = true },
+				// Physical Sky's aerial perspective right after the composite, which is built without it (ORGPhysicalSky).
+				{ .anchor = Anchor::DeferredComposite, .clients = { "cs.deferred", "cs.physical-sky.composite" }, .whole = true },
 				{ .anchor = Anchor::PostComposite, .clients = { "cs.e11-rays" }, .whole = true },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.engine.skeleton.frame@engine-draws", "cs.water.mask" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.world.scopes" } },
 				{ .anchor = Anchor::EngineCopy, .clients = { "cs.engine.skeleton.main-copy" } },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.water.surface" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
+				// The post-water composite of the medium into kMAIN, after the water is blended in (ViewAtmosphere's post-water hook).
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.view-atmosphere.composite" } },
 				{ .point = true },
 			} },
-			.commitBefore = Segments({ kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
+			.commitBefore = Segments({ kEndsWorld[0], kEndsWorld[1], kEndsWorld[2] }),
 			.commit = "the engine's blended draw (just before DCLF's forward epoch)",
 			.commitSite = "the engine's blended draw for the main accumulator (Features/Forward's ForwardHooks.cpp), else BeforeGpuWork",
-			.epochs = { Own(StageSegment(SegmentId::Deferred)), Placed(Anchor::DeferredPasses), Placed(Anchor::DeferredComposite), Placed(Anchor::PostComposite),
-				Placed(Anchor::EngineDraws) } },
-		{ .id = StageId::Forward, .owner = Owner::Dclf, .name = "forward", .commit = "the engine's blended draw", .epochs = { Own(Segment::Forward) } },
+			.epochs = { Own(StageSegment(SegmentId::Deferred)) } },
+		{ .id = StageId::Forward, .owner = Owner::Fragment, .name = "forward", .commit = "the engine's blended draw", .epochs = { Covered(Segment::Forward) } },
 		// Sun: precipitation draws, then the sun occlusion query, which must reach the GPU before first-person geometry occludes the sun.
 		// Commits before the first-person epoch. Under water the engine's blended draw comes first, so the water steps land here instead.
 		{ .id = StageId::Sun,
 			.owner = Owner::Cs,
 			.name = "sun",
 			.segment = SegmentId::Sun,
-			.names = { "CS stage: sun", "CS stage: sun inputs", "FrameSegments::Sun / ", "cs.segment.sun" },
+			.names = { "CS stage: sun", "CS stage: sun inputs", "FrameSegments::Sun / " },
 			.steps = { {
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.precipitation" } },
 				{ .anchor = Anchor::EngineCopy, .clients = { "cs.engine.skeleton.main-copy" } },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.water.surface" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
+				// The post-water composite of the medium into kMAIN, after the water is blended in (ViewAtmosphere's post-water hook).
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.view-atmosphere.composite" } },
 				{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun" }, .instanceCount = 2 },
 				{ .point = true },
 			} },
-			.commitBefore = Segments({ Segment::FirstPerson, Segment::AnchorVolumetricLighting, Segment::AnchorPostProcessing, Segment::AnchorUpscale, Segment::AnchorInterface,
-				Segment::AnchorPresent, StageSegment(SegmentId::Post) }),
+			.commitBefore = Segments({ Segment::FirstPerson, StageSegment(SegmentId::Post) }),
 			.commit = "just before DCLF's first-person epoch, or RenderWorldPostProcess' entry",
 			.commitSite = "BeforeGpuWork, before DCLF's first-person epoch or later GPU work; at the latest RenderWorldPostProcess' entry (Frame/PostChain.cpp)",
-			.epochs = { Own(StageSegment(SegmentId::Sun)), Placed(Anchor::EngineQueries) } },
-		{ .id = StageId::FirstPerson, .owner = Owner::Dclf, .name = "first person", .commit = "Main::RenderFirstPersonView", .epochs = { Own(Segment::FirstPerson) } },
+			.epochs = { Own(StageSegment(SegmentId::Sun)) } },
+		{ .id = StageId::FirstPerson, .owner = Owner::Fragment, .name = "first person", .commit = "Main::RenderFirstPersonView", .epochs = { Covered(Segment::FirstPerson) } },
 		// Post: RenderWorldPostProcess (SE 100430, AE 107148). First person's sun query, VL, the pre-tonemap composite, upscale and tonemap.
 		// Ends at a point at RenderEndOfFrameEffects' return. The upscaler's evaluate is recorded at execution in both modes.
 		{ .id = StageId::Post,
 			.owner = Owner::Cs,
 			.name = "post",
 			.segment = SegmentId::Post,
-			.names = { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" },
+			.names = { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / " },
 			.steps = { {
 				{ .anchor = Anchor::EngineCopy, .clients = { "cs.engine.skeleton.main-copy" } },
 				{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun" }, .instanceCount = 2 },
@@ -276,17 +260,18 @@ namespace RenderGraph::Frame::Recipes::Table
 			} },
 			.commit = "RenderEndOfFrameEffects' return",
 			.commitSite = "RenderEndOfFrameEffects' return (Frame/PostChain.cpp)",
-			.epochs = { Own(StageSegment(SegmentId::Post)), Placed(Anchor::VolumetricLighting), Placed(Anchor::PostProcessing), Placed(Anchor::Upscale),
-				Placed(Anchor::ImageSpace), Placed(Anchor::EngineCopy), Placed(Anchor::Tonemap),
-				Ticket(Anchor::FrameGeneration, { "cs.upscaling.hudless", "cs.screenshot.clean" }), Placed(Anchor::Interface), Placed(Anchor::Present) } },
-		// UI, in every frame kind: screen blood, menu scenes, Scaleform displays, clears at three places, the present's clients, overlay and capture.
-		// Ends at a point just before the present, or before HDR output, which keeps its own ticket.
+			.epochs = { Own(StageSegment(SegmentId::Post)) } },
+		// UI, in every frame kind: frame generation's hudless copy and the screenshot's clean scene, screen blood, menu scenes, Scaleform
+		// displays, clears at three places, the present's clients, overlay, HDR output and capture. Ends at a point just before the present.
 		{ .id = StageId::Ui,
 			.owner = Owner::Cs,
 			.name = "UI",
 			.segment = SegmentId::Ui,
-			.names = { "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" },
+			.names = { "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / " },
 			.steps = { {
+				// Main_PostProcessing after the post chain: kFRAMEBUFFER without the HUD, with the pre-exposure divided out. Then frame
+				// generation's inputs pass, which reads the hudless copy (a whole anchor's taps all reach its first step).
+				{ .anchor = Anchor::FrameGeneration, .clients = { "cs.upscaling.hudless", "cs.upscaling.fg-inputs", "cs.screenshot.clean" }, .whole = true },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.blood-splatter" } },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.frozen" } },
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" } },
@@ -304,15 +289,16 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.facetint" } },
 				{ .anchor = Anchor::Present, .clients = { "cs.bink", "cs.gpu-load" }, .whole = true },
 				{ .anchor = Anchor::Overlay, .clients = { "cs.imgui" }, .whole = true },
+				// HDR Display's composite reads the UI texture the steps above drew.
+				{ .anchor = Anchor::HDROutput, .clients = { "cs.hdr" }, .whole = true },
 				{ .anchor = Anchor::Capture, .clients = { "cs.screenshot" }, .whole = true },
 				{ .point = true },
 			} },
 			.opensLast = true,
 			.switchesEverySlot = true,
-			.commitBefore = Segments({ Segment::AnchorHDROutput, Segment::AnchorCapture }),
-			.commit = "just before the present (or HDR output)",
-			.commitSite = "the present hook, before the capture and the present (Hooks.cpp); BeforeGpuWork before HDR output or the Capture anchor",
-			.epochs = { Own(StageSegment(SegmentId::Ui)), Placed(Anchor::Overlay), Ticket(Anchor::HDROutput, { "cs.hdr" }), Placed(Anchor::Capture) } },
+			.commit = "just before the present",
+			.commitSite = "the present hook, after the capture and before the present (Hooks.cpp)",
+			.epochs = { Own(StageSegment(SegmentId::Ui)) } },
 	} };
 
 	/** @brief The stage of a StageId. */
@@ -362,9 +348,18 @@ namespace RenderGraph::Frame::Recipes::Table
 	* @brief Resources a stage reads before the stage that writes them, so it reads the previous frame's contents. Checked by hand.
 	* DCLF's stages are exempt, since their graphs declare the whole binding table their shaders may read.
 	*/
-	inline constexpr std::array<std::string_view, 11> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
+	// Physical Sky's LUTs, AP shadow, sky tail and cloud outputs: the sky's reflection faces draw in the start stage, before the pre-depth
+	// and pre-main stages make this frame's. D3D11 does the same (the faces render before EarlyPrepass and Prepass), and they keep their
+	// contents across frames (History/Persistent).
+	// IBL's two SH textures: the sky faces (start) read last frame's, since the projection runs at Prepass (pre-main). Both are History.
+	// Dynamic Cubemaps' env: IBL's projection (pre-main) reads last frame's, as on D3D11; it is published (deferred+water) and Persistent.
+	inline constexpr std::array<std::string_view, 29> kPreviousFrame{ "DynamicCubemaps::Env", "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
 		"Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT", "Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320",
-		"Engine::kMAIN_COPY", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY" };
+		"Engine::kMAIN_COPY", "IBL::EnvIBL", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY", "PhysicalSky::TransmittanceLut",
+		"PhysicalSky::SkyViewLut", "PhysicalSky::ApLut", "PhysicalSky::DiskPhaseLut", "PhysicalSky::ApShadow",
+		"PhysicalSky::SkyTail", "PhysicalSky::ShadowVolume", "PhysicalSky::CloudShadowMean", "PhysicalSky::VolTr", "PhysicalSky::VolLum",
+		"PhysicalSky::VolAux", "PhysicalSky::VolCubeTr", "PhysicalSky::VolCubeLum", "PhysicalSky::VolCubeDepth", "PhysicalSky::LightningChannels",
+		"PhysicalSky::LightningReflection" };
 
 	// What is derived from the table.
 
@@ -403,7 +398,7 @@ namespace RenderGraph::Frame::Recipes::Table
 		return mask;
 	}
 
-	/** @brief The anchors a CS stage holds wholly, a bit each: they have no epoch of their own. */
+	/** @brief The anchors a CS stage holds wholly, a bit each. */
 	constexpr std::uint32_t WholeAnchors(std::uint32_t a_segment)
 	{
 		std::uint32_t mask = 0;
@@ -422,6 +417,16 @@ namespace RenderGraph::Frame::Recipes::Table
 			for (std::uint32_t e = 0; e < EpochCount(stage) && n < out.size(); ++e)
 				out[n++] = stage.epochs[e].segment;
 		return out;
+	}
+
+	/** @brief Whether the recipe has a fragment source cover a_segment whenever the source draws (Epoch::covered). */
+	constexpr bool CoveredSegment(Segment a_segment)
+	{
+		for (const auto& stage : kStageTable)
+			for (std::uint32_t e = 0; e < EpochCount(stage); ++e)
+				if (stage.epochs[e].segment == a_segment)
+					return stage.epochs[e].covered;
+		return false;
 	}
 
 	// The table's own checks, at compile time.
@@ -445,16 +450,16 @@ namespace RenderGraph::Frame::Recipes::Table
 				for (std::uint32_t k = steps; k < kMaxSteps; ++k)
 					if (!stage.steps[k].Empty())
 						return false;
-				// Exactly one Graph epoch, the stage's own.
-				std::uint32_t own = 0;
-				for (std::uint32_t e = 0; e < EpochCount(stage); ++e)
-					if (stage.epochs[e].role == Role::Graph)
-						own += stage.epochs[e].segment == StageSegment(stage.segment) ? 1 : 100;
-				if (own != 1)
+				// Exactly one epoch, the stage's own.
+				if (EpochCount(stage) != 1 || stage.epochs[0].segment != StageSegment(stage.segment))
 					return false;
 			} else if (StepCount(stage) != 0) {
 				return false;
 			}
+			// Only a fragment source's own epochs are covered.
+			for (std::uint32_t e = 0; e < EpochCount(stage); ++e)
+				if (stage.epochs[e].covered && stage.owner == Owner::Cs)
+					return false;
 		}
 		if (cs != kSegments)
 			return false;

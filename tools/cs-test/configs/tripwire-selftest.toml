@@ -1,0 +1,15 @@
+# The tripwire handles' self-test (tests/Tripwire/TripwireSelfTest.cpp), run at kPostPostLoad. It needs no device.
+# Expect "[ORG] tripwire self-test: PASS (<n> checks, <m> interfaces)" in the log, and no FAIL line.
+extends = ["base"]
+
+[env]
+CS_ORG_TRIPWIRE_SELFTEST = "1"
+
+[[steps]]
+at = "shaders-ready"
+frames = 0
+do = "exit"
+
+[expect]
+reach = "shaders-ready"
+no_log = ["tripwire self-test: FAIL"]

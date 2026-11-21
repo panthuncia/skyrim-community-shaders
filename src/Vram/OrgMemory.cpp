@@ -1,19 +1,15 @@
-#if defined(CS_HAS_RENDER_GRAPH)
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
-#endif
+#include <rhi_interop_vulkan.h>
 
 #include "Vram/OrgMemory.h"
 
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Switches.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#	include <OpenRenderGraph/DeviceMemory.h>
-#	include <OpenRenderGraph/GraphHost.h>
-#endif
+#include <OpenRenderGraph/DeviceMemory.h>
+#include <OpenRenderGraph/GraphHost.h>
 
 namespace Vram::Org
 {
@@ -29,7 +25,6 @@ namespace Vram::Org
 		return a_label.empty() ? std::string("ORG/Allocator") : std::string(a_label);
 	}
 
-#if defined(CS_HAS_RENDER_GRAPH)
 	namespace
 	{
 		Segment ReadSegment(rhi::Device a_device, rhi::MemorySegmentGroup a_group, const rhi::ma::Budget& a_allocator, bool a_hasAllocator)
@@ -92,20 +87,4 @@ namespace Vram::Org
 			spilled += owner.spilledBytes;
 		return spilled;
 	}
-#else
-	Heaps ReadHeaps()
-	{
-		return {};
-	}
-
-	std::vector<Owner> ReadOwners()
-	{
-		return {};
-	}
-
-	std::uint64_t SpilledBytes()
-	{
-		return 0;
-	}
-#endif
 }

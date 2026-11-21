@@ -8,6 +8,7 @@
 #include <pystring/pystring.h>
 
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "State.h"
 #include "TerrainShadows/ORGTerrainShadows.h"
 #include "Util.h"
@@ -162,11 +163,15 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	TerrainShadows::Settings,
 	EnableTerrainShadow)
 
+TerrainShadows::TerrainShadows()
+{
+	settings.EnableTerrainShadow.Bind(CS::SettingRegistry::Declare("TerrainShadows.EnableTerrainShadow"));
+}
+
 void TerrainShadows::PostPostLoad()
 {
 	ConsoleCommandHook::Install();
 	PapyrusSetGlobalValueHook::Install();
-	ORGTerrainShadows::Reserve();
 }
 
 void TerrainShadows::DataLoaded()
@@ -208,7 +213,7 @@ void TerrainShadows::SaveSettings(json& o_json)
 
 void TerrainShadows::DrawSettings()
 {
-	ImGui::Checkbox(T(TKEY("enable_terrain_shadow"), "Enable Terrain Shadow"), &settings.EnableTerrainShadow);
+	Util::Checkbox(T(TKEY("enable_terrain_shadow"), "Enable Terrain Shadow"), settings.EnableTerrainShadow);
 }
 
 void TerrainShadows::DrawDebugSection()
@@ -344,18 +349,21 @@ void TerrainShadows::SetupResources()
 
 	CompileComputeShaders();
 
-	// The render graph's update, when requested and a heightmap is installed. Each heightmap gets textures of its own size there.
-	// If a heightmap switch fails, EarlyPrepass loads the heightmap again on D3D11.
-	if (ORGTerrainShadows::Requested()) {
+	// The render graph's update, in graph mode with a heightmap installed. Each heightmap gets textures of its own size there.
+	if (ORGTerrainShadows::On()) {
 		if (heightmaps.empty())
-			logger::info("[ORG] Terrain Shadows: no heightmap is installed; it stays on D3D11");
+			logger::info("[ORG] Terrain Shadows: no heightmap is installed, so the render graph has nothing to update");
 		else
-			ORGTerrainShadows::Get().Setup([] { UnbindShadowHeight(); });
+			ORGTerrainShadows::Get().Setup();
 	}
 }
 
 void TerrainShadows::CompileComputeShaders()
 {
+	// The graph updates the shadows in graph mode, so the D3D11 shader is not needed.
+	if (RenderGraph::Engine::GraphMode())
+		return;
+
 	logger::debug("Compiling shaders...");
 	{
 		auto program_ptr = reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\TerrainShadows\\ShadowUpdate.cs.hlsl", {}, "cs_5_0"));
@@ -439,7 +447,7 @@ void TerrainShadows::LoadHeightmap()
 		heightMapWidth = static_cast<uint>(metadata.width);
 		heightMapHeight = static_cast<uint>(metadata.height);
 
-		// The ORG path takes the heightmap when it is on: it makes both textures. D3D11 makes them otherwise, or when it fails.
+		// The ORG path takes the heightmap when it is on: it makes both textures. D3D11 makes them otherwise.
 		auto& orgShadows = ORGTerrainShadows::Get();
 		if (orgShadows.IsActive()) {
 			UnbindShadowHeight();
@@ -690,12 +698,6 @@ void TerrainShadows::ReflectionsPrepass()
 
 void TerrainShadows::EarlyPrepass()
 {
-	// The heightmap's textures went with the render graph: it is loaded again on the D3D11 path.
-	if (cachedHeightmap && !texHeightMap && !ORGTerrainShadows::Get().ShadowHeightSRV()) {
-		UnbindShadowHeight();
-		cachedHeightmap = nullptr;
-	}
-
 	LoadHeightmap();
 
 	const auto requestedRefreshGeneration = Util::GetCompletedCelestialTransitionGeneration();
@@ -703,7 +705,7 @@ void TerrainShadows::EarlyPrepass()
 	if (!settings.EnableTerrainShadow)
 		return;
 
-	// The render graph asks for refreshes until one ran with the new heightmap's passes (its graphs switch in a few frames later).
+	// The render graph asks for refreshes until one ran with the new heightmap's client (its revision is adopted a few frames later).
 	const bool refreshImmediately = needPrecompute || timeJumpRefresh || ORGTerrainShadows::Get().NeedsRefresh();
 	if (needPrecompute)
 		Precompute();

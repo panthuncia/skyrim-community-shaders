@@ -1,0 +1,20 @@
+# Simplify: native/guest mode layers (agent report, condensed)
+C1 Required DXVK fork exports in one table (src/DxvkExports.h): optional exports + fallbacks RenderGraphRuntime.cpp:2135-2175, 3340-3343, 2236-2247, CanWrapTextures* 3974-3982 (+callers), DxvkPresenter own DxvkExports :24-62, ad-hoc GetProcAddress in ~15 files. ~400-600, S.
+C2 Retire guest stream timing knobs ("DXVK GPU gap" investigation): RenderGraphRuntime.cpp:3236-3322, 96-109, 3522-3567 setters; OrgCommands.cpp:202-271 commands. No config uses. ~250.
+C3 Always-on switches -> constants: native CS_ORG_KEEP_LIVE/COALESCE_SUBMITS/MERGE_HANDOFFS/UPLOADS_WITH_BATCHES/KEEP_GATED/SUBMIT_THREAD/MERGE_TICKETS/QUEUE_PRESENT; guest PINNED_IMPORTS/BATCH_SUBMIT/EARLY_FLUSH/RESTING_LAYOUTS/EXTERNAL_HOME/CLOSED/COMPUTE_/COPY_/UPLOAD_QUEUE/QUEUE_UPLOADS/SCOPED_FRAME_WAIT. Removes native sync present path (NativeDevice.cpp:2212-2224). ORG GraphHost::Desc flags removable where guest also uses on. ~150.
+C4 Native profiling tools: RtSampler 620, AllocCounter 341 (replaces global new/delete!), OpCensus 451+150 (native-census.toml only checks no tap error/late change; keep NoteRaw outside-ledgers line or make tap error), present probe/sync present, RawAccess check, TripwireMeter 190, WatchSet dead, tripwire selftest -> tests/. Keep CS_ORG_TRIPWIRE_LOG. ~1.7k.
+C5 Dead: Native::FrameTransientScope/FrameGroup (only Deferred.cpp:188, never collects in graph), Targets::Find/FindImage (0 callers), Native::OnGraphReady, DxvkImageImport forwarders -> ImageRegistry. ~200.
+C6 DXVK fork: guest device + headless swap chain exports (commit 3c6affbd, +759; dxvkSetGuestDevice etc.) unused since owned frame retired. ~760 in fork.
+C7 Port-narrowing switches CS_ORG_WATER_PARTS/SHADOW_MASK_VIEWS/IMAGESPACE_EFFECTS (Native.cpp:34-67 kNarrowings). ~120.
+C8 One unbacked-target mechanism (native Kind::Unbacked vs guest tripwire unbacked) -> tripwire unbacked both modes. ~100.
+C9 Remove Unwrap before GetDesc in DCLF captures (~15 sites); LATENT BUG: UnwrapObject null for unbacked guest handle -> null deref. Unwrap(a)==Unwrap(b) compares in 7 ports -> Targets::Identify.
+C10 Guest engine context like native (store binds, drop draws; only NativeServices reach DXVK): removes latch half of Flush (1043), StateTrace 529, UnwrapArray forwarding 89 methods, handle-reached-DXVK crash class. ~1.5k, L. Blocker: CS D3D11 work in guest depending on engine-bound state reaching DXVK (PayOwed, Hooks.cpp:283-293,1326-1373 shader binds, ImGui OMGetRenderTargets).
+C11 Presenter interface takes per-frame duties (Hooks.cpp:612-660 mode branches, DxvkPresenter::Get direct in Upscaling/HDRDisplay); common base; NativePresenter forwards to 9 Native.h functions -> implement inside NativeDevice. ~200, M.
+C12 One way to submit native work outside the graph (Immediate::RunRhi, Route, Commands for EmitCommands, present lists) -> create ORG runtime + ExternalWork at device creation. ~250, M.
+C13 Native swap chain one back buffer (startup backBufferRecord vs kFRAMEBUFFER slot), pairs with C12. ~150.
+C14 Native image lookup only through ImageRegistry. ~100.
+C15 No-ORG build: ~1070 stub lines + 326 #if guards.
+RC: DXVKInterop command ring for Streamline (~800-1000), ~110 Unwrap in D3D11 paths, D3D11Wrapper + twin exports, CS_NATIVE_D3D11, DxvkPresenter plain role.
+Not removable: field handle over native handle, exempt texture class, skeleton Take* + context services, present copy, ReleaseAfterD3D11 two forms, guest stream integration, DescribeResource, CheckFields.
+Native emulation entries no longer reached: End/GetData (engine occlusion detoured; Queries map can shrink to stub), engine pool CB Map. Still reached: loading-screen UpdateSubresource/copies, GenerateMips, UAV clears, CheckFeature, fullscreen no-op, bind store reads.
+Qs: guest device revive? (no); guest D3D11 draws depending on engine state reaching DXVK (no, fatal checks) - C10 precondition; native-only ORG host options try in guest so ORG drops off paths; no-ORG build now; missing export fatal where; tripwire selftest -> tests.

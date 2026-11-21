@@ -1,7 +1,7 @@
 // Engine-side hooks for the shadow mask family. The world's and menu scene's shadow mask calls run with their draws latched,
 // DrawTriShape latches each mask draw, and SetupGeometry counts the passes. Render thread.
-// A call the family cannot take reaches the engine with nobody vouching for it. Under the flush latch it is skipped and the
-// residue census counts it, because each such case is a family defect.
+// A call the family cannot take reaches the engine with nobody vouching for it. Under the flush latch it is skipped.
+// Each such case is a family defect, and its reason is logged once.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -38,9 +38,9 @@ namespace DCLF::Features::ShadowMask
 		constexpr std::size_t kMaxLatched = 32;
 
 		/** @brief The inherent refusals, each logged once per reason. */
-		Util::ReasonLog& Refusals()
+		Family::RefusalLog& Refusals()
 		{
-			static Util::ReasonLog log("[DCLF] shadow mask: the engine draws", spdlog::level::warn);
+			static Family::RefusalLog log("[DCLF] shadow mask: the engine draws");
 			return log;
 		}
 
@@ -65,7 +65,7 @@ namespace DCLF::Features::ShadowMask
 			if (!a_rtv)
 				return 0;
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
-			Unwrap(a_rtv)->GetDesc(&desc);
+			a_rtv->GetDesc(&desc);
 			return static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 		}
 
@@ -183,18 +183,18 @@ namespace DCLF::Features::ShadowMask
 			return nullptr;
 		}
 
-		/** @brief A shadow mask call hook. For a taken view, the draws are latched and the anchor's pass draws them here. */
+		/** @brief A shadow mask call hook. The draws are latched and the anchor's pass draws them here. */
 		template <View kView>
 		struct MaskBatch
 		{
 			static void thunk(void* a_arg1, void* a_arg2, void* a_arg3, void* a_arg4)
 			{
 				auto& capture = GetCapture();
-				if (capture.active || !TakesView(kView)) {
+				if (capture.active) {
 					func(a_arg1, a_arg2, a_arg3, a_arg4);
 					return;
 				}
-				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !ShadowMaskDraws::Available() || !ShadowMaskDraws::CanTake(kView)) {
+				if (!FrameAnchors::IsRenderOwner() || !ShadowMaskDraws::Available() || !ShadowMaskDraws::CanTake(kView)) {
 					func(a_arg1, a_arg2, a_arg3, a_arg4);
 					return;
 				}

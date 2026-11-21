@@ -1,8 +1,6 @@
-# Dragonsreach interior: coc after world-ready, two shots a few seconds apart (adaptation settles), exit. Native Vulkan.
+# Dragonsreach interior: coc after world-ready, two shots a few seconds apart (adaptation settles), then Volumetric
+# Lighting's size changes (a custom interior size, a coc back out) with a shot after each, exit. Native Vulkan.
 extends = ["native-vulkan"]
-
-[env]
-CS_ORG_EPOCH_STATS = "1"
 
 [[steps]]
 at = "world-ready"
@@ -22,6 +20,44 @@ frames = 300
 do = "shot"
 arg = "dragonsreach2"
 
+# Volumetric Lighting (frame revision plan 6.12): a custom interior size while inside is a new version of the volume, and the
+# coc back out is another (the Interior variable). Each switches in with its revision; every frame has volumetric lighting.
+[[steps]]
+at = "previous"
+frames = 10
+do = "setting"
+arg = 'VolumetricLighting.InteriorCustomSize={"Width":256,"Height":160,"Depth":60}'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "VolumetricLighting.InteriorQuality=3"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "vl-custom"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "vl-exterior"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "VolumetricLighting.InteriorQuality=2"
+
 [[steps]]
 at = "previous"
 frames = 10
@@ -29,4 +65,4 @@ do = "exit"
 
 [expect]
 reach = "world-ready"
-shots = ["dragonsreach", "dragonsreach2"]
+shots = ["dragonsreach", "dragonsreach2", "vl-custom", "vl-exterior"]

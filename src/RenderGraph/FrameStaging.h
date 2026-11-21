@@ -1,71 +1,29 @@
 #pragma once
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include <Render/FrameArena.h>
+#include <Render/RunRef.h>
 
-#	include <Render/RunRef.h>
-
-#	include <atomic>
-#	include <cstdint>
-#	include <memory>
-#	include <mutex>
-#	include <string>
-#	include <utility>
-#	include <vector>
-
-namespace org
-{
-	class LatchBlock;
-}
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace RenderGraph
 {
+	/** @brief A client's staging region: an oversize region of the runtime's frame arena (org::FrameArena::AcquireOversize). */
+	using Staging = std::shared_ptr<const org::FrameArena::Region>;
+
 	/**
-	 * @brief A pool of host-visible staging buffers for a client's per-run CPU data, reused instead of made every run.
+	 * @brief A staging region of at least a_bytes for a client's per-run CPU data, such as vertices and texture rows.
 	 *
-	 * A block returns to the pool when its last holder lets it go. That holder must be the recording that used it, so the block
-	 * comes back only once the GPU is done with it. The pool keeps kGameFramesInFlight times runsPerFrame spares, so a steady
-	 * frame makes no block. With maxBlocks set, Acquire returns null when none is spare and the caller keeps the engine's path.
-	 * Acquire runs on the render thread. Blocks come back on any thread, and may outlive the pool.
-	 *
-	 * Usage: `auto staging = RenderGraph::FrameStaging::Create({ .name = "cs.scaleform.staging", .minimumBytes = 256u << 10,
-	 * .runsPerFrame = 6 });` then, in the commit,
-	 * `frame->staging = staging->Acquire(bytes);` and in Record `a_recording.Retain(frame);`.
+	 * It has a chunk of the frame arena to itself and starts at the chunk's first byte, so the chunk's view reads it at offset 0.
+	 * It is not zeroed. It goes back to the arena when its last holder lets it go, which must be the recording that reads it
+	 * (`a_recording.Retain(frame)`), so it comes back once the GPU is done with it. A steady frame reuses the freed chunks.
+	 * Fatal, naming a_area, when it cannot be made. Any thread, in graph mode.
 	 */
-	class FrameStaging : public std::enable_shared_from_this<FrameStaging>
-	{
-	public:
-		struct Desc
-		{
-			std::string name;
-			std::uint32_t minimumBytes = 64u << 10;  // the smallest block made
-			std::uint32_t runsPerFrame = 1;          // each run holds one block
-			std::uint32_t maxBlocks = 0;             // 0 means no limit
-		};
-
-		/** @brief A pool. Any thread. */
-		static std::shared_ptr<FrameStaging> Create(Desc a_desc);
-
-		/** @brief A block of at least a_bytes. Null when it cannot be made or maxBlocks are out. */
-		std::shared_ptr<org::LatchBlock> Acquire(std::uint64_t a_bytes);
-
-		/** @brief Blocks that exist now, out or spare. */
-		std::uint32_t Made() const { return made.load(std::memory_order_relaxed); }
-
-		/** @brief Blocks in the pool now. */
-		std::uint32_t Spare() const;
-
-		explicit FrameStaging(Desc a_desc);
-
-	private:
-		void GiveBack(std::shared_ptr<org::LatchBlock> a_block);
-
-		Desc desc;
-		std::uint32_t keep = 0;  // the most spare blocks kept
-		mutable std::mutex mutex;
-		std::vector<std::shared_ptr<org::LatchBlock>> spare;
-		std::atomic<std::uint32_t> made{ 0 };
-		std::atomic_flag churnLogged;
-	};
+	Staging AcquireStaging(std::string_view a_area, std::uint64_t a_bytes);
 
 	/** @brief Every live RunSlots, so a stage's commit can move its staging run's values onto the run it submits. Thread-safe. */
 	class RunSlotsRegistry
@@ -174,4 +132,3 @@ namespace RenderGraph
 	};
 }
 
-#endif

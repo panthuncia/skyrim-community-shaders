@@ -2,22 +2,30 @@
 // into kDECAL_OCCLUSION and counts them with occlusion queries.
 // In native mode the start stage runs several tests. The k-th test uses instance k, with its own gate entries,
 // latch region and share of the query range.
+// The client is declared once (frame revision plan, 6.19). A new readback chunk of its query ring registers it again with the
+// next frame revision.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Features/DecalOcclusion/DecalOcclusion.h"
 
+#include "Features/DrawcallLimitFix/Core/Engine/Family/FamilyClient.h"
+
 #include "Globals.h"
 #include "RenderGraph/Engine/Queries/OcclusionQueries.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Observed.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/ProgramService.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
+#include "Utils/Hash.h"
 #include "Utils/Logging.h"
 
 #include <OpenRenderGraph/GraphHost.h>
@@ -33,6 +41,7 @@
 #include <atomic>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <vector>
 
 namespace DCLF::Features::DecalOcclusion::DecalDraws
@@ -56,20 +65,20 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			ShaderBindings::Latch draw;
 		};
 
-		struct Client
+		struct Client : Family::ClientState<Run>
 		{
-			std::shared_ptr<const RasterProgram> program;
+			// Queued at setup. Passes read it after the revision start that collected it.
+			::RenderGraph::Programs::Fixed<RasterProgram> program;
 			std::shared_ptr<org::LatchBlock> latch;
 			// Opened by the commit for its own run only.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			FrameAnchors::Texture depth;  // kDECAL_OCCLUSION
 			std::uint32_t width = 0, height = 0;                  // Render areas are clamped to this.
 			std::shared_ptr<Queries::QueryRing> queries;
-			// run is the test the next tap commits. Render thread.
-			std::shared_ptr<const Run> run;
+			// The ring's readback count, observed at setup and when a commit adds a chunk. The client's key reads it.
+			::RenderGraph::Frame::Observed<std::size_t> readbacks{ "DCLF.DecalOcclusion.Readbacks" };
+			// The base's run is the test the next tap commits.
 			std::array<::RenderGraph::RunSlots<Run>, kInstances> runs;
-			bool pending = false;
-			std::atomic<std::uint64_t> executed{ 0 };
 		};
 
 		struct Bindings
@@ -172,11 +181,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 		// Render thread.
 		struct DrawsState
 		{
-			std::shared_ptr<Client> client;
-			bool reserved = false;
-			bool setUp = false;
-			std::uint64_t runs = 0, draws = 0;
-			Family::KeptOwners kept;
+			Family::Client<Run, Client> clients{ "decal occlusion" };
 		};
 
 		DrawsState& GetState()
@@ -213,6 +218,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			return rhi::helpers::ToRHI(desc.Format);
 		}
 
+		/** @brief The client's program, latch, gate, depth import and queries. Null, logged, when a part cannot be made. */
 		std::shared_ptr<Client> MakeClient()
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -225,6 +231,8 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 				return nullptr;
 			}
 			auto client = std::make_shared<Client>();
+			client->id = kClientId;
+			client->anchor = kAnchor;
 			client->width = width;
 			client->height = height;
 			// Depth only, both faces, like the engine's silhouette pass. Only whether samples pass matters.
@@ -238,32 +246,44 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			desc.depth = { .depthEnable = true, .depthWrite = true, .depthFunc = rhi::CompareOp::LessEqual };
 			desc.raster = { .cull = rhi::CullMode::None };
 			desc.commonDefines = false;
-			client->program = RasterProgram::Load(host->Device(), desc);
+			client->program = ::RenderGraph::Programs::Queue("DCLF decal occlusion", std::move(desc));
 			client->latch = std::make_shared<org::LatchBlock>(std::string(kClientId) + ".latch", kInstances * kMaxDraws * kDrawStride);
 			client->gate = ::RenderGraph::RunGate::Create(std::string(kClientId) + ".gate", kInstances * kMaxDraws);
-			client->depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(kDepthTarget));
+			client->depth = FrameAnchors::EngineTexture(FrameAnchors::Depth(static_cast<std::uint32_t>(kDepthTarget)));
 			client->queries = Queries::QueryRing::Create(std::string(kClientId) + ".queries", kInstances * kMaxDraws);
-			if (!client->program || !client->gate || !client->depth || !client->queries) {
-				logger::warn("[DCLF] decal occlusion: the client cannot be made (program {}, run gate {}, kDECAL_OCCLUSION {}, query ring {}); the decal tests stay the engine's",
-					client->program ? "made" : "failed", client->gate ? "made" : "failed", client->depth ? "imported" : "failed", client->queries ? "made" : "failed");
+			if (!client->program || !client->depth || !client->queries) {
+				logger::warn("[DCLF] decal occlusion: the client cannot be made (program {}, kDECAL_OCCLUSION {}, query ring {}); the decal tests stay the engine's",
+					client->program ? "queued" : "failed", client->depth ? "imported" : "failed", client->queries ? "made" : "failed");
 				return nullptr;
 			}
+			client->readbacks.Observe(client->queries->Readbacks().size());
+			return client;
+		}
 
-			FrameAnchors::ClientDesc clientDesc{};
-			clientDesc.id = kClientId;
-			clientDesc.gates = { client->gate };
-			clientDesc.passes.push_back({ .name = std::string(kClientId) + ".draws",
+		/** @brief What a registration is made for: how many query readbacks its pass declares. */
+		struct ClientKey
+		{
+			std::size_t readbacks = 0;
+			bool operator==(const ClientKey&) const = default;
+		};
+
+		/** @brief The registration of a_client. Its pass declares every readback chunk the ring has now. */
+		bool MakeDesc(const std::shared_ptr<Client>& a_client, FrameAnchors::ClientDesc& a_desc)
+		{
+			a_desc.id = kClientId;
+			a_desc.gates = { a_client->gate };
+			a_desc.passes.push_back({ .name = std::string(kClientId) + ".draws",
 				.anchor = kAnchor,
 				.order = 0,
 				.kind = FrameAnchors::PassKind::Render,
-				.makeInstance = [client](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionPass>(client, a_instance); },
+				.makeInstance = [client = a_client](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionPass>(client, a_instance); },
 				// The draws are only known after the commit.
 				.atExecution = true });
-			clientDesc.maxInstances = kInstances;
+			a_desc.maxInstances = kInstances;
 			// Declare every instance, because the engine decides late how many decals it tests. Unused ones stay closed.
-			clientDesc.instances = [] { return kInstances; };
-			clientDesc.commit = [client](const FrameAnchors::Point&) {
-				const auto run = std::atomic_load(&client->run);
+			a_desc.instances = [] { return kInstances; };
+			a_desc.commit = [client = a_client](const FrameAnchors::Point&) {
+				const auto run = client->Current();
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!host)
 					return;
@@ -281,113 +301,102 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 					client->gate->OpenDraw(entry, draw.indexCount, 1);
 					slots.push_back(run->query);
 				}
-				// Every draw counts into the test's ring slot, which answers the sum. A new readback applies from the next build.
+				// Every draw counts into the test's ring slot, which answers the sum. A new readback chunk changes the key, so the
+				// next revision registers the client again with it.
 				if (client->queries->Commit(latchRun, slots, instance * kMaxDraws))
-					FrameAnchors::Refresh(kClientId);
+					client->readbacks.Observe(client->queries->Readbacks().size());
 			};
-			clientDesc.executed = [client](const FrameAnchors::Point&) {
+			a_desc.executed = [client = a_client](const FrameAnchors::Point&) {
 				client->queries->Executed();
-				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
+				if (client->CountExecuted())
 					logger::info("[DCLF] decal occlusion: the first {} run drawn by the graph", kClientId);
 			};
-			clientDesc.active = [client] { return client->pending; };
-			if (!FrameAnchors::Register(std::move(clientDesc))) {
-				logger::warn("[DCLF] decal occlusion: the {} client could not be registered; the decal tests stay the engine's", kClientId);
-				return nullptr;
-			}
-			logger::info("[DCLF] decal occlusion: the {} client registered at setup (kDECAL_OCCLUSION, {} queries a test, {} tests a frame)", kClientId, kMaxDraws, kInstances);
-			return client;
+			a_desc.active = [client = a_client] { return client->pending; };
+			logger::info("[DCLF] decal occlusion: the {} client is made (kDECAL_OCCLUSION, {} queries a test, {} tests a frame, {} readback chunks)", kClientId,
+				kMaxDraws, kInstances, a_client->queries->Readbacks().size());
+			return true;
 		}
-
-		// Everything about the draws except the latched values.
-		std::uint64_t RevisionOf(const Run& a_run)
-		{
-			std::uint64_t hash = 1469598103934665603ull;
-			const auto mix = [&](std::uint64_t a_value) { hash = (hash ^ a_value) * 1099511628211ull; };
-			mix(a_run.clear);
-			mix(a_run.draws.size());
-			for (const auto& draw : a_run.draws) {
-				for (const auto v : draw.viewport.rect)
-					mix(v);
-				std::uint32_t range[2];
-				std::memcpy(range, draw.viewport.depthRange.data(), sizeof(range));
-				mix((std::uint64_t(range[0]) << 32) | range[1]);
-			}
-			return hash;
-		}
-	}
-
-	void Reserve()
-	{
-		auto& state = GetState();
-		state.reserved = FrameAnchors::Reserve(kAnchor);
-		if (!state.reserved)
-			logger::warn("[DCLF] decal occlusion: the DecalQueries anchor could not be reserved; the decal tests stay the engine's");
 	}
 
 	bool Available()
 	{
-		const auto& state = GetState();
-		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(kAnchor);
+		return GetState().clients.Available();
 	}
 
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.setUp || !state.reserved)
-			return true;
-		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
-			return false;
-		state.setUp = true;
+		if (const auto result = state.clients.BeginSetup())
+			return *result;
 		if (!Queries::Active()) {
 			logger::warn("[DCLF] decal occlusion: the occlusion query detours are not installed; the decal tests stay the engine's");
 			return true;
 		}
-		state.client = MakeClient();
+		auto client = MakeClient();
+		if (!client)
+			return true;
+		namespace RF = ::RenderGraph::Frame;
+		// kDECAL_OCCLUSION is made once with the engine's targets. The key is the ring's readback count, so a chunk the ring makes
+		// later (more than its setup's lease indices) registers the client again with the next revision.
+		state.clients.Declare<ClientKey>(
+			0, client, RF::DependsOn(client->readbacks.Var()),
+			[client](const RF::Inputs& a_in) -> std::optional<ClientKey> {
+				// MakeClient observed the setup count, so a revision always carries one.
+				const auto* readbacks = client->readbacks.Get(a_in);
+				return ClientKey{ readbacks ? *readbacks : 0 };
+			},
+			[client](const ClientKey&, FrameAnchors::ClientDesc& a_desc) { return MakeDesc(client, a_desc); },
+			"the decal tests stay the engine's");
 		return true;
 	}
 
 	bool HasClient()
 	{
-		const auto& state = GetState();
-		return state.client != nullptr;
+		return GetState().clients.At(0) != nullptr;
 	}
 
 	bool CanTake()
 	{
-		const auto& state = GetState();
-		if (!state.client)
-			return false;
-		return Family::HeldForBatch("decal occlusion", kClientId, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Start), kAnchor);
+		// Until a revision registers the client, the engine's test answers.
+		return GetState().clients.CanTake(0, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Start));
 	}
 
 	void Keep(Family::Owners&& a_owners)
 	{
-		GetState().kept.Keep(std::move(a_owners));
+		GetState().clients.Keep(std::move(a_owners));
 	}
 
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
-		auto& state = GetState();
-		if (!a_run || !state.client)
-			return false;
-		const auto& client = state.client;
-		a_run->revision = RevisionOf(*a_run);
-		state.kept.Keep(std::move(a_run->owners));
-		++state.runs;
-		state.draws += a_run->draws.size();
-		std::atomic_store(&client->run, std::shared_ptr<const Run>(std::move(a_run)));
-		return Family::RunWithheld("decal occlusion", kClientId, kAnchor, client->pending);
+		return GetState().clients.Submit(0, std::move(a_run));
 	}
 
 	std::string Status()
 	{
 		const auto& state = GetState();
 		if (!Enabled())
-			return "off (CS_ORG_OCCLUSION_QUERIES)";
-		if (!state.client)
-			return state.setUp ? "no client: the engine draws the decal tests" : "not set up yet";
-		return std::format("{} tests ({} drawn), {} draws; occlusion queries: {}", state.runs, state.client->executed.load(std::memory_order_relaxed), state.draws,
+			return "off (not graph mode)";
+		if (!state.clients.At(0))
+			return state.clients.SetUp() ? "no client: the engine draws the decal tests" : "not set up yet";
+		return std::format("{} tests ({} drawn), {} draws; occlusion queries: {}", state.clients.Runs(), state.clients.Executed(), state.clients.Draws(),
 			Queries::Status());
+	}
+}
+
+namespace DCLF::Features::DecalOcclusion
+{
+	std::uint64_t Run::Hash() const
+	{
+		Util::Fnv1a hash;
+		hash.Mix(clear);
+		hash.Mix(draws.size());
+		for (const auto& draw : draws) {
+			for (const auto v : draw.viewport.rect)
+				hash.Mix(v);
+			std::uint32_t range[2];
+			std::memcpy(range, draw.viewport.depthRange.data(), sizeof(range));
+			hash.Mix((std::uint64_t(range[0]) << 32) | range[1]);
+		}
+		return hash.Value();
 	}
 }

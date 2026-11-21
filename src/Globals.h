@@ -296,7 +296,4 @@ namespace globals
 	void OnContextMap(ID3D11Resource* a_resource, D3D11_MAP a_type, D3D11_MAPPED_SUBRESOURCE* a_mapped);
 	/** @brief What the Unmap hook does before the Unmap: the per-frame cache, the mirror and the capture. As OnContextMap. */
 	void OnContextUnmap(ID3D11Resource* a_resource);
-	/** @brief Opt-in DCLF diagnostic: record D3D11 operations affecting main depth between the two epochs. */
-	void BeginDCLFDepthTrace(ID3D11Texture2D* a_depth);
-	void EndDCLFDepthTrace();
 }

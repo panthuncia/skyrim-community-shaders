@@ -2,12 +2,11 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
-#include "Features/DrawcallLimitFix/Core/Engine/FrameClock.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/PlacementRows/BillboardRow.h"
 
-#include "Features/DrawcallLimitFix/Diagnostics/Scene/MirrorWatch.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
@@ -100,11 +99,9 @@ namespace DCLF::SceneCapture
 					a_out.pins.emplace_back(&a_object);
 				if (const auto* geometry = a_object.AsGeometry()) {
 					CaptureLeaf(*geometry, a_out, a_out.pinning ? &a_out.pins : nullptr);
-					MirrorWatch::ArmGeometry(geometry);
 					return;
 				}
 				a_out.nodes.push_back(CaptureNode(a_object));
-				MirrorWatch::ArmNode(&a_object);
 			});
 		}
 	}
@@ -239,7 +236,7 @@ namespace DCLF::SceneCapture
 			captured = a_o.captured;
 		if (a_f & kName)
 			name = a_o.name;
-		updatedFrame = Frame();
+		updatedFrame = SceneClock::Step();
 	}
 
 	void GeometryRecord::Assign(const GeometryRecord& a_o, std::uint32_t a_f)
@@ -322,7 +319,7 @@ namespace DCLF::SceneCapture
 		if (a_f & kShadowPasses)
 			shadowPasses = a_o.shadowPasses;
 		writer = 2;
-		writtenFrame = Frame();
+		writtenFrame = SceneClock::Step();
 	}
 
 	void AlphaRecord::Assign(const AlphaRecord& a_o, std::uint32_t a_f)
@@ -402,7 +399,7 @@ namespace DCLF::SceneCapture
 		auto& object = const_cast<RE::NiAVObject&>(a_object);
 		NodeRecord r;
 		r.key = &a_object;
-		r.capturedFrame = Frame();
+		r.capturedFrame = SceneClock::Step();
 		r.thread = ::GetCurrentThreadId();
 		r.parent = a_object.parent;
 		r.rtti = object.GetRTTI();
@@ -635,7 +632,7 @@ namespace DCLF::SceneCapture
 		auto& property = const_cast<RE::BSShaderProperty&>(a_property);
 		PropertyRecord r;
 		r.key = &a_property;
-		r.capturedFrame = Frame();
+		r.capturedFrame = SceneClock::Step();
 		r.thread = ::GetCurrentThreadId();
 		r.rtti = property.GetRTTI();
 		r.flags = a_property.flags.underlying();
@@ -703,7 +700,7 @@ namespace DCLF::SceneCapture
 					}
 		// A material shared by several leaves is pushed by each. The scene work keeps the newest.
 		auto pushMaterial = [&](const PropertyRecord& a_property) {
-			if (a_pins && (a_property.lighting || Extensions::PortOn(SceneToggles(), a_property.port)) && a_property.material)
+			if (a_pins && (a_property.lighting || Extensions::PortOn(a_property.port)) && a_property.material)
 				MaterialPort::PushCapture(static_cast<const RE::BSShaderMaterial*>(a_property.material));
 		};
 		if (g.property) {
@@ -823,16 +820,6 @@ namespace DCLF::SceneCapture
 	std::uint64_t NextSequence()
 	{
 		return sequence.fetch_add(1, std::memory_order_acq_rel) + 1;
-	}
-
-	void SetFrame(std::uint32_t a_frame)
-	{
-		FrameClock::Set(a_frame);
-	}
-
-	std::uint32_t Frame()
-	{
-		return FrameClock::Frame();
 	}
 
 	void SetMainThread(std::uint32_t a_thread)

@@ -56,19 +56,19 @@ namespace DCLF
 		std::uint32_t cullDrawnPhaseTwo = 0;      // depth draws it added
 		std::uint32_t cullRescuedByPhaseTwo = 0;  // objects it brought back
 		std::uint32_t cullRetests = 0;  // the inputs phase 1 left OccludedRetest
-		// Decals (CS_DCLF_DECALS) submitted to the second colour pass, and what its single-phase culling did with them.
+		// Decals submitted to the second colour pass, and what its single-phase culling did with them.
 		std::uint32_t decalsDrawn = 0;
 		std::uint32_t decalsCulled = 0;
 		std::uint32_t decalsTested = 0;
 		// The GPU sun test's tested and missed counts, against the same test run on the CPU.
 		std::uint32_t sunTested = 0, sunMissed = 0, sunCpuTested = 0, sunCpuMissed = 0;
-		// Terrain inputs within Terrain Blending's near distance, against the CPU's test (CS_DCLF_SET_PARITY).
+		// Terrain inputs within Terrain Blending's near distance, against the CPU's test (CS_DCLF_PARITY).
 		std::uint32_t terrainNearTested = 0, terrainNear = 0, terrainCpuTested = 0, terrainCpuNear = 0;
 		bool terrainCpu = false;
-		// Forward inputs through the culling. forwardEngine counts blended passes the engine handed in under CS_DCLF_SET_PARITY.
+		// Forward inputs through the culling. forwardEngine counts blended passes the engine handed in under CS_DCLF_PARITY.
 		std::uint32_t forwardTested = 0, forwardInView = 0, forwardOccluded = 0, forwardDrawn = 0, forwardEngine = 0;
 		bool forwardObserved = false;
-		// Refraction inputs through the culling. refractionEngine counts hint 4 passes the engine handed in under CS_DCLF_SET_PARITY.
+		// Refraction inputs through the culling. refractionEngine counts hint 4 passes the engine handed in under CS_DCLF_PARITY.
 		std::uint32_t refractionTested = 0, refractionInView = 0, refractionOccluded = 0, refractionDrawn = 0, refractionEngine = 0;
 		bool refractionObserved = false;
 		// Colour draws dropped for lack of a state class sub-range, either unplanned or past its capacity.
@@ -121,7 +121,6 @@ namespace DCLF
 	struct ShadowDrawStats
 	{
 		std::uint32_t views = 0;           // views offered (captured by the hook), per report interval
-		std::uint64_t sunEntryChecks = 0, sunEntryMismatches = 0;  // CS_DCLF_PERSISTENT_PARITY, GPU sun-entry test vs CPU verdict
 		std::uint32_t viewsDrawn = 0;      // views drawn by an epoch
 		std::uint32_t narrowedEpochs = 0;  // epochs that drew a variant recording only the placements in use (ShadowFrame::activeViews)
 		std::uint32_t retainedViews = 0;   // view slots kept in an epoch's shape with no work (a view that comes and goes)
@@ -137,8 +136,6 @@ namespace DCLF
 		// The sampled view's caster inputs and the ones dropped before culling, by reason.
 		std::uint32_t cullClass = 0, cullSunEntryOut = 0, cullMinRadius = 0, cullRootFading = 0, cullBelowTexels = 0, cullRowsLost = 0;
 		std::uint32_t cullSampledView = ~0u, cullSampledMode = 0;
-		// Casters and triangles drawn in the sampled view, by bound radius class.
-		std::array<std::uint32_t, 4> probeCasters{}, probeTriangles{};
 		// Casters per render mode at the last epoch, and set members a mode could not draw. The latter is a defect.
 		std::array<std::uint32_t, 3> casters{};
 		std::uint64_t setWaiting = 0;

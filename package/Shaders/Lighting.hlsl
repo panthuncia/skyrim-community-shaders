@@ -11,7 +11,7 @@
 // (the engine's VS_PerFrame), SharedData and FeatureData are the shared constants, written at the anchor's run right after the
 // engine's batch, so they hold the camera the engine's draw would have read.
 // The world's CS features are off in this build: a menu scene has none of their frame inputs (light clusters, skylighting, the
-// cubemaps, the world's shadows, fog, wetness), so it shades as the vanilla shader with CS's material path.
+// cubemaps, the world's shadows, fog, wetness, Physical Sky's LUTs), so it shades as the vanilla shader with CS's material path.
 #	define LIGHTING_ORG
 #	undef LIGHT_LIMIT_FIX
 #	undef SKYLIGHTING
@@ -30,6 +30,7 @@
 #	undef EXTENDED_MATERIALS
 #	undef EXTENDED_TRANSLUCENCY
 #	undef EXP_HEIGHT_FOG
+#	undef PHYSICAL_SKY
 #	undef SSS
 #	undef CS_SKIN
 #	undef CS_SKIN_SHADING
@@ -747,9 +748,6 @@ struct DCLF_DEPTH_VS_OUTPUT
 // per draw is the draw's (scalar), not each lane's. One pass unless a wave mixes draws.
 DCLF_PULLED_VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 {
-#			if defined(DEVICE_REF_TRACE)
-	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
-#			endif
 	DCLF_PULLED_VS_OUTPUT vsout;
 #		if defined(DCLF_DEPTH_ONLY)
 	vsout.Position = DCLFPulledVertex(index, a_instance).Position;
@@ -765,9 +763,6 @@ DCLF_PULLED_VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_Instan
 // address, whose row holds the layout; the object statics above keep their initialisers (the object word is pushed too).
 VS_OUTPUT main(uint index : SV_VertexID)
 {
-#		if defined(DEVICE_REF_TRACE)
-	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
-#		endif
 	DCLFDrawVertexLayout = DCLFPushedVertexLayout();
 	DCLFStream first, second;
 	first.address = DCLFVertexBuffer.xy;
@@ -1397,19 +1392,6 @@ cbuffer DCLFFrameLighting : register(b13)
 	float4 DCLFLodFadeMetric : packoffset(c8);       // metric scale, default scale, the override metric, 1 when overridden
 	float4 DCLFLodFadeDivisors[4] : packoffset(c9);  // per LOD type
 	float4 DCLFLodFadeState : packoffset(c13);       // x: 1 when the engine updates the metric at all (else the property's fades stand)
-// CS_DCLF_FOLIAGE_PARITY's draws: the alpha-tested ones, and terrain LOD (whose depth the Z-prepass and the colour pass each
-// compute from HighDetailRange); with CS_DCLF_FOLIAGE_PARITY=land every draw (DCLF_FOLIAGE_PARITY_ALL), so that a pixel no draw
-// shaded is told from one another object took at the same depth. Each records the pixels it owns in the Z-prepass (those with a
-// pixel stage there) and those the colour pass shaded.
-#	if defined(DCLF_FOLIAGE_PARITY) && (defined(DO_ALPHA_TEST) || defined(LODLANDNOISE) || defined(LODLANDSCAPE) || defined(DCLF_FOLIAGE_PARITY_ALL))
-#		define DCLF_OWNED_PARITY
-#	endif
-#	if defined(DCLF_FOLIAGE_PARITY)
-	// CS_DCLF_FOLIAGE_PARITY (IndirectDraws GpuLayouts.h, FoliageParityConstants): the frame's buffers' refs (each pixel's
-	// object word; its albedo and diffuse), the render size, the frame's tag and the Z-prepass owners' UAV.
-	uint4 DCLFFoliageParityBuffers : packoffset(c14);
-	uint4 DCLFFoliageParityFrame : packoffset(c15);
-#	endif
 	// The extras' pixel input (LightingConstants.h, ExtrasFrame): ProjectedUVParams3, the frame's (the two tilings, 0, the
 	// projected-normals switch).
 	float4 DCLFExtrasProjectedGlobals : packoffset(c16);
@@ -1910,18 +1892,15 @@ void DCLFTextureFeedback(float2 a_uv, uint2 a_pixel)
 #	if defined(DCLF_PULLED)
 PS_OUTPUT DCLFShadePS(PS_INPUT input, bool frontFace)
 #	else
-#		if defined(DCLF_OWNED_PARITY) || DCLF_WRITES_TEX_FEEDBACK
-// The parity write below must be the visible fragment's: the colour pass tests EQUAL and writes no depth, so testing first
-// changes nothing else. So must texture streaming's feedback: occluded surfaces ask for nothing. Its stage has no alpha test (a
+#		if DCLF_WRITES_TEX_FEEDBACK
+// Texture streaming's feedback must be the visible fragment's: occluded surfaces ask for nothing. The colour pass tests EQUAL
+// and writes no depth, so testing first changes nothing else. Its stage has no alpha test (a
 // draw that writes depth here would otherwise write it for a fragment it then discards).
 [earlydepthstencil]
 #		endif
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 {
-#	if defined(DEVICE_REF_TRACE)
-	DEVICE_REF_TRACE_SAMPLE((uint(input.Position.x) & 7u) | ((uint(input.Position.y) & 7u) << 3));  // CS_DCLF_REF_TRACE: a pixel in 64
-#	endif
 	PS_OUTPUT psout;
 
 	float3 viewPosition = mul(FrameBuffer::CameraView, float4(input.WorldPosition.xyz, 1)).xyz;
@@ -4047,9 +4026,6 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	directionalAmbientColor *= outputAlbedo;
 
-#	if defined(DCLF_SHADOW_DEBUG)
-	float dbgBeforeSky = dot(color.xyz, float3(0.2126, 0.7152, 0.0722));
-#	endif
 #	if defined(SKYLIGHTING)
 	float3 skylightingAlbedo = outputAlbedo;
 #		if defined(TRUE_PBR)
@@ -4392,12 +4368,6 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	psout.MotionVectors = outputColorToAuxiliaryTarget ? float4(1, 0, 0, 1) : float4(screenMotionVector, 0, 1);
 #	endif
 
-#		if defined(DCLF_SHADOW_DEBUG) && defined(DEFERRED)
-	// [TEMP] Native and DCLF alike: the sun's shadow terms in place of the colour, read back with CS_DCLF_TARGET_PROBE
-	// (dclf-validation.md, "Shader debug output (`CS_DCLF_SHADOW_DEBUG_OUTPUT`)"): x the VSM soft shadow, y its detailed term, z the detailed
-	// shadow the lighting uses.
-	psout.Diffuse = float4(dirSoftShadow, dirVSMDetailedShadow, dirDetailedShadow, 1);
-#		endif
 #	endif  // !DCLF_DEPTH_ONLY
 
 #	if defined(EMAT)
@@ -4406,24 +4376,6 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		undef LANDSCAPE_PARALLAX_ENABLED
 #	endif
 
-#	if defined(DCLF_DEPTH_ONLY) && defined(DCLF_OWNED_PARITY)
-	// CS_DCLF_FOLIAGE_PARITY: the fragment the alpha test kept, as its pixel's owner if it is the closest (its depth inverted
-	// above its object): the compare pass checks that the colour pass shaded the owner of each pixel whose depth it is.
-	{
-		const uint2 pixel = uint2(input.Position.xy);
-		if (pixel.x < DCLFFoliageParityFrame.x && pixel.y < DCLFFoliageParityFrame.y) {
-			RWStructuredBuffer<uint64_t> owners = ResourceDescriptorHeap[DCLFFoliageParityFrame.w];
-			// Bit 31: terrain LOD's, counted on its own by the compare pass.
-#		if defined(LODLANDNOISE) || defined(LODLANDSCAPE)
-			const uint ownerTag = 0x80000000u;
-#		else
-			const uint ownerTag = 0;
-#		endif
-			const uint64_t owner = (uint64_t(0xFFFFFFFFu - asuint(input.Position.z)) << 32) | uint64_t(((DCLFObjectIndex + 1) & 0x00FFFFFFu) | ownerTag);
-			InterlockedMax(owners[pixel.y * DCLFFoliageParityFrame.x + pixel.x], owner);
-		}
-	}
-#	endif
 #	if defined(DCLF_DEPTH_ONLY)
 	// Drawcall Limit Fix's Z-prepass builds this permutation with DCLF_DEPTH_ONLY: the pass has no render
 	// targets and only needs the depth, so it keeps the alpha test and nothing else - the lighting before it
@@ -4438,43 +4390,6 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		else
 	if (outputColorToAuxiliaryTarget)
 		psout.NormalGlossiness.rgb = PreExposure::EncodeScene(psout.NormalGlossiness.rgb);
-#		endif
-#		if defined(DCLF_OWNED_PARITY)
-	// CS_DCLF_FOLIAGE_PARITY: what this pixel shows of the object, for the compare pass (FoliageParityCS.hlsl).
-	{
-		const uint2 pixel = uint2(input.Position.xy);
-		if (pixel.x < DCLFFoliageParityFrame.x && pixel.y < DCLFFoliageParityFrame.y) {
-			const uint index = pixel.y * DCLFFoliageParityFrame.x + pixel.x;
-			const DeviceRef ids = DCLFFoliageParityBuffers.xy;
-			const DeviceRef colours = DCLFFoliageParityBuffers.zw;
-#			if defined(DEFERRED)
-			const uint4 albedo = uint4(round(saturate(psout.Albedo) * 255.0));
-#			else
-			const uint4 albedo = uint4(round(saturate(psout.Diffuse) * 255.0));
-#			endif
-			const uint4 diffuse = uint4(round(saturate(psout.Diffuse) * 255.0));
-			DeviceStore(uint, DeviceRefAdd(ids, index * 4), (DCLFFoliageParityFrame.z << 24) | ((DCLFObjectIndex + 1) & 0x00FFFFFFu));
-			// The motion vector against a static object's: the same point where the camera saw it the frame before (its absolute
-			// position, from this frame's eye, made relative to the frame before's). In pixels, with the motion vector itself.
-			float2 motionError = 0;
-#			if !defined(SKINNED)
-			const float4 staticPrevious = float4(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz - FrameBuffer::CameraPreviousPosAdjust.xyz, 1);
-			const float2 renderSize = float2(DCLFFoliageParityFrame.xy);
-			motionError = (psout.MotionVectors.xy - MotionBlur::GetSSMotionVector(input.WorldPosition, staticPrevious)) * renderSize;
-#			endif
-			const float2 motion = psout.MotionVectors.xy * float2(DCLFFoliageParityFrame.xy);
-			// The albedo's alpha byte carries the motion error's length (tenths of a pixel); the specular is the pass's.
-			const uint error = uint(min(round(length(motionError) * 10.0), 255.0));
-#			if defined(DEFERRED)
-			const uint4 specular = uint4(round(saturate(psout.Specular) * 255.0));
-#			else
-			const uint4 specular = 0;
-#			endif
-			DeviceStore(uint4, DeviceRefAdd(colours, index * 16),
-				uint4(albedo.x | (albedo.y << 8) | (albedo.z << 16) | (error << 24), diffuse.x | (diffuse.y << 8) | (diffuse.z << 16) | (diffuse.w << 24),
-					specular.x | (specular.y << 8) | (specular.z << 16) | (specular.w << 24), f32tof16(motion.x) | (f32tof16(motion.y) << 16)));
-		}
-	}
 #		endif
 	return psout;
 #	endif
@@ -4518,9 +4433,6 @@ void DCLFPixelObjectStatics()
 #		endif
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 {
-#		if defined(DEVICE_REF_TRACE)
-	DEVICE_REF_TRACE_SAMPLE((uint(input.Position.x) & 7u) | ((uint(input.Position.y) & 7u) << 3));  // CS_DCLF_REF_TRACE: a pixel in 64
-#		endif
 	const DeviceRef sequence = DCLFDrawSequence(input.DCLFDrawInstance);
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
 	DCLFRowStatics(DCLFSequenceRows(sequence));

@@ -1,10 +1,8 @@
 #include "Features/RemoteControl/GpuTimestamps.h"
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#endif
+#include <OpenRenderGraph/GraphHost.h>
 
 #include <atomic>
 #include <iterator>
@@ -36,12 +34,10 @@ namespace GpuCounters::Timestamps
 			return state;
 		}
 
-#if defined(CS_HAS_RENDER_GRAPH)
 		org::GraphHost* Host()
 		{
 			return RenderGraphRuntime::Get().Host();
 		}
-#endif
 	}
 
 	bool Collecting() noexcept
@@ -87,7 +83,6 @@ namespace GpuCounters::Timestamps
 
 	bool Start(std::string& a_error)
 	{
-#if defined(CS_HAS_RENDER_GRAPH)
 		auto* host = Host();
 		if (!host) {
 			a_error = std::format("the render graph is not active ({})", RenderGraphRuntime::Get().GetDisabledReason());
@@ -102,10 +97,6 @@ namespace GpuCounters::Timestamps
 		state.collecting.store(true, std::memory_order_release);
 		logger::info("[NvPerf] timestamps: recording timestamps on (graph rebuild requested: {})", host->RebuildRequested());
 		return true;
-#else
-		a_error = "built without the render graph: no pass timestamps";
-		return false;
-#endif
 	}
 
 	void Stop()
@@ -117,21 +108,15 @@ namespace GpuCounters::Timestamps
 			std::lock_guard lock(state.mutex);
 			state.frames.clear();
 		}
-#if defined(CS_HAS_RENDER_GRAPH)
 		if (auto* host = Host())
 			host->SetRecordingTimestamps(false);
 		logger::info("[NvPerf] timestamps: recording timestamps off");
-#endif
 	}
 
 	bool Ready()
 	{
-#if defined(CS_HAS_RENDER_GRAPH)
 		const auto* host = Host();
 		return Collecting() && host && host->RecordingTimestamps() && !host->RebuildRequested();
-#else
-		return false;
-#endif
 	}
 
 	std::vector<Frame> TakeFrames(std::uint32_t& a_dropped)

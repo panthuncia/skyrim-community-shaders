@@ -26,7 +26,7 @@ namespace DCLF::Draws
 {
 	struct FadeStateBindings
 	{
-		org::DeclaredViewToken roots, states, frame, log, rootPrograms, animated, events, reported;
+		org::DeclaredViewToken roots, states, frame, rootPrograms, animated, events, reported;
 		org::DeclaredViewToken queries, results;
 		std::array<org::DeclaredViewToken, 2> published;
 	};
@@ -67,7 +67,6 @@ namespace DCLF::Draws
 				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::Programs });
 			bindings.rootPrograms = a_builder.ShaderResource(*scene.fadeRootPrograms).View();
 			bindings.animated = a_builder.ShaderResource(*scene.fadeAnimated).View();
-			bindings.log = a_builder.UnorderedAccess(scene.fadeLog).View();
 			if (scene.fadeEvents) {
 				bindings.events = a_builder.UnorderedAccess(*scene.fadeEvents).View();
 				bindings.reported = a_builder.UnorderedAccess(*scene.fadeReported).View();
@@ -98,7 +97,7 @@ namespace DCLF::Draws
 			prepared.queries = queryStage;
 			// Bind events only when a staging set can hold the whole list.
 			if (const auto events = static_cast<std::uint32_t>(NamedUnitsOf(a_preparation, scene.fadeEvents));
-				scene.fadeEvents && scene.fadeWriteBack && scene.fadeWriteBack->SetFor(events)) {
+				scene.fadeEvents && scene.fadeWriteBack && scene.fadeWriteBack->list->SetFor(events)) {
 				prepared.events = true;
 				constants.eventCapacity = events;
 			}
@@ -115,7 +114,6 @@ namespace DCLF::Draws
 			constants.rootsIndex = a_recording.Index(a_bindings.roots);
 			constants.statesIndex = a_recording.Index(a_bindings.states);
 			constants.frameIndex = a_recording.Index(a_bindings.frame);
-			constants.logIndex = a_recording.Index(a_bindings.log);
 			constants.rootProgramsIndex = a_recording.Index(a_bindings.rootPrograms);
 			if (a_frame.queries)
 				constants.portalQueriesIndex = a_recording.Index(a_bindings.queries);
@@ -131,7 +129,7 @@ namespace DCLF::Draws
 			SetLatchWords(constants, *a_frame.latch, a_recording.Run());
 			auto& commands = a_recording.Commands();
 			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline());
+			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kFadeStateConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 			commands.Dispatch(std::min(a_frame.groups, 65535u), (a_frame.groups + 65534u) / 65535u, 1);
 		}
@@ -178,7 +176,7 @@ namespace DCLF::Features::Fades
 		std::shared_ptr<org::RenderPass> MakeFadeEventsStage(const Api::PassContext& a_context)
 		{
 			const auto fades = a_context.State<FadeScene>();
-			return Draws::MakeEventReadbackPass(a_context.Main()->scene, fades->fadeEvents, fades->fadeWriteBack);
+			return Draws::MakeEventReadbackPass(a_context.Main()->scene, fades->fadeEvents, fades->fadeWriteBack->list);
 		}
 	}
 

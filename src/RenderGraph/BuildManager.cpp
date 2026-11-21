@@ -1,25 +1,27 @@
-#if defined(CS_HAS_RENDER_GRAPH)
+#include "RenderGraph/BuildManager.h"
 
-#	include "RenderGraph/BuildManager.h"
+#include "RenderGraph/Async/Lanes.h"
+#include "RenderGraph/CensusWindow.h"
+#include "RenderGraph/Frame/BoundaryCheck.h"
+#include "RenderGraph/Frame/Recipe.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#	include "RenderGraph/CensusWindow.h"
-#	include "RenderGraph/Frame/Recipe.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <Resources/ResourceIdentifier.h>
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <Resources/ResourceIdentifier.h>
-
-#	include <algorithm>
-#	include <atomic>
-#	include <chrono>
-#	include <condition_variable>
-#	include <deque>
-#	include <map>
-#	include <mutex>
-#	include <thread>
-#	include <unordered_map>
-#	include <unordered_set>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <deque>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace RenderGraph
 {
@@ -38,6 +40,7 @@ namespace RenderGraph
 			std::vector<std::function<void()>> attached;
 			std::vector<std::function<void(const std::string&)>> failed;
 			std::vector<std::function<void()>> staged;  // run when the graph is staged
+			std::shared_ptr<const void> input;  // what the build is made from (SetBuildInput), taken when it was handed out
 		};
 
 		thread_local BuildContext* t_context = nullptr;
@@ -63,7 +66,6 @@ namespace RenderGraph
 				Epoch,
 				All,
 				For,
-				AllSynchronous,
 				Change
 			};
 			Kind kind = Kind::All;
@@ -95,6 +97,8 @@ namespace RenderGraph
 			std::uint64_t generation = 0;  // the epoch's build generation then
 			std::uint64_t frame = 0;
 			std::string reason;
+			// Taken on the owner thread when the job is made, so a build on any thread reads the state of its hand-out.
+			std::shared_ptr<const void> input;
 		};
 
 		struct Done
@@ -108,33 +112,19 @@ namespace RenderGraph
 		struct Group
 		{
 			std::size_t remaining = 0;
-			bool external = false;  // attached only at Attach::All and Attach::External polls
 			std::vector<std::unique_ptr<Done>> done;
 		};
 
-		/** @brief Checked by a posted external build before it runs, since the manager may be gone by then. */
-		struct ExternalLife
-		{
-			std::mutex mutex;
-			std::condition_variable idle;
-			bool stopped = false;
-			std::uint32_t running = 0;
-		};
-
 		Desc desc;
-		std::unordered_set<std::uint32_t> ownerBuilt;
-		std::unordered_set<std::uint32_t> external;
 		std::unordered_set<std::uint32_t> staged;
-		// Owner thread. Run by SwitchStaged.
+		std::unordered_set<std::uint32_t> laneOnly;
+		// Owner thread. Run by AttachStaged.
 		std::unordered_map<std::uint32_t, std::vector<std::function<void()>>> stagedAttach;
-		ExternalBuilder externalBuilder;  // owner thread
-		std::shared_ptr<ExternalLife> externalLife = std::make_shared<ExternalLife>();
+		std::function<void(std::span<const std::uint32_t>)> pollListener;  // owner thread
+		std::function<std::shared_ptr<const void>()> input;  // owner thread
 
-		// Build thread.
-		std::thread thread;
-		mutable std::mutex mutex;  // queue, finished, stop
-		std::condition_variable wake;
-		std::deque<Job> queue;
+		// The build lane's results.
+		mutable std::mutex mutex;  // finished, stop
 		std::vector<std::unique_ptr<Done>> finished;
 		bool stop = false;
 		// Held around every build on either thread. Extensions' build-time state assumes one build at a time.
@@ -150,8 +140,6 @@ namespace RenderGraph
 		std::uint64_t groupSerial = 0;
 		std::uint64_t frames = 0;
 		bool worldStarted = false;
-		bool synchronousAll = false;
-		std::string synchronousReason;
 		std::uint64_t warnings = 0;
 		std::uint64_t attachLogs = 0;
 		Window window;
@@ -159,11 +147,12 @@ namespace RenderGraph
 		std::mutex pendingMutex;
 		std::vector<PendingRequest> pending;
 
+		// The build lane: one build at a time, in request order, on the shared executor's preparation pool. Last, so it stops first.
+		Frame::JobLane<Job> lane;
+
 		explicit Impl(Desc a_desc) :
-			desc(std::move(a_desc)), ownerBuilt(desc.ownerBuilt.begin(), desc.ownerBuilt.end()), external(desc.external.begin(), desc.external.end()),
-			staged(desc.staged.begin(), desc.staged.end())
+			desc(std::move(a_desc)), staged(desc.staged.begin(), desc.staged.end()), laneOnly(desc.laneOnly.begin(), desc.laneOnly.end()), lane({ "CS graph builds", Frame::Executor::Preparation, org::async::TaskDispatch::Cpu }, [this](Job& a_job) { RunJob(std::move(a_job)); })
 		{
-			thread = std::thread([this] { Run(); });
 		}
 
 		std::string Label(std::uint32_t a_epoch) const
@@ -173,28 +162,19 @@ namespace RenderGraph
 
 		bool OnOwner() const { return std::this_thread::get_id() == owner.load(std::memory_order_acquire); }
 
-		void Run()
+		/** @brief One queued build, on the build lane. */
+		void RunJob(Job a_job)
 		{
-			for (;;) {
-				Job job;
-				{
-					std::unique_lock lock(mutex);
-					wake.wait(lock, [&] { return stop || !queue.empty(); });
-					if (stop)
-						return;
-					job = std::move(queue.front());
-					queue.pop_front();
-				}
-				auto done = Build(std::move(job));
-				std::scoped_lock lock(mutex);
-				finished.push_back(std::move(done));
-			}
+			auto done = Build(std::move(a_job));
+			std::scoped_lock lock(mutex);
+			finished.push_back(std::move(done));
 		}
 
 		std::unique_ptr<Done> Build(Job a_job)
 		{
 			auto done = std::make_unique<Done>();
 			done->job = std::move(a_job);
+			done->context.input = done->job.input;
 			std::scoped_lock lock(buildMutex);
 			ContextScope scope(done->context);
 			try {
@@ -217,15 +197,16 @@ namespace RenderGraph
 			return done;
 		}
 
-		std::shared_ptr<void> OwnerScope() const
+		/** @brief Owner thread: the input a build made now reads. */
+		std::shared_ptr<const void> TakeInput() const
 		{
-			return externalBuilder.ownerScope ? externalBuilder.ownerScope() : nullptr;
+			return input ? input() : nullptr;
 		}
 
-		/** @brief Whether the owner thread builds a_epoch, which includes an external one with no builder to post to. */
-		bool BuiltOnOwner(std::uint32_t a_epoch) const
+		/** @brief Tells the boundary check of an attach. */
+		void NoteAttached(std::uint32_t a_epoch) const
 		{
-			return ownerBuilt.contains(a_epoch) || (external.contains(a_epoch) && !externalBuilder.post);
+			Frame::Boundary::NoteAttach(Label(a_epoch));
 		}
 
 		void Apply(const PendingRequest& a_request)
@@ -240,11 +221,6 @@ namespace RenderGraph
 				break;
 			case PendingRequest::Kind::For:
 				(void)host.RequestRebuildFor(org::ResourceIdentifier(a_request.id), a_request.reason);
-				break;
-			case PendingRequest::Kind::AllSynchronous:
-				host.RequestRebuild(a_request.reason);
-				synchronousAll = true;
-				synchronousReason = a_request.reason;
 				break;
 			case PendingRequest::Kind::Change:
 				// No build may capture what the change edits while it runs. A build handed out before is dropped at its attach and built again.
@@ -279,15 +255,23 @@ namespace RenderGraph
 				Apply(request);
 		}
 
-		/** @brief The epoch is asked for, has a graph to keep running, and is not being built or known to fail. */
+		/**
+		* @brief The epoch is asked for and has a graph to keep running, or is lane-only and has no graph yet. It is not being built
+		* or known to fail.
+		*/
 		bool Due(std::uint32_t a_epoch) const
 		{
 			auto& host = *desc.host;
-			if (!host.RebuildRequested(a_epoch) || inFlight.contains(a_epoch))
+			if (inFlight.contains(a_epoch))
 				return false;
-			// No graph yet means the host builds it at its first submission.
-			if (!host.Graph(a_epoch))
+			if (!host.Graph(a_epoch)) {
+				// Other epochs with no graph yet are built by the host at their first submission. A lane-only one is built here once
+				// there is a build input, and its build attaches when it is staged. A failed one waits to be asked for again.
+				if (!laneOnly.contains(a_epoch) || !input || host.EpochFailed(a_epoch))
+					return false;
+			} else if (!host.RebuildRequested(a_epoch)) {
 				return false;
+			}
 			const auto failed = failedAt.find(a_epoch);
 			return failed == failedAt.end() || failed->second != host.RebuildRequests(a_epoch);
 		}
@@ -304,6 +288,7 @@ namespace RenderGraph
 			job.reason = host.RebuildReasons(a_epoch);
 			if (job.reason.empty())
 				job.reason = "no request named";
+			job.input = TakeInput();
 			return job;
 		}
 
@@ -347,7 +332,7 @@ namespace RenderGraph
 		}
 
 		/** @brief Attaches one finished build or drops it. Returns whether it was attached. */
-		bool Finish(Done& a_done, bool a_synchronous)
+		bool Finish(Done& a_done)
 		{
 			auto& host = *desc.host;
 			const auto epoch = a_done.job.epoch;
@@ -357,21 +342,20 @@ namespace RenderGraph
 			}
 			// Read now, since an attach takes the graph.
 			const double buildMs = a_done.graph->BuildMilliseconds();
-			if (!a_synchronous) {
-				++window.builds;
-				window.buildMs += buildMs;
-				window.buildMaxMs = (std::max)(window.buildMaxMs, buildMs);
-			}
+			++window.builds;
+			window.buildMs += buildMs;
+			window.buildMaxMs = (std::max)(window.buildMaxMs, buildMs);
 			// Requested again since it was handed out, so drop it and rebuild.
 			// After too many in a row it goes in anyway, since it is newer than the running graph.
-			if (!a_synchronous && host.RebuildRequests(epoch) != a_done.job.requests && supersededInARow[epoch] < kMaxSupersededInARow) {
+			if (host.RebuildRequests(epoch) != a_done.job.requests && supersededInARow[epoch] < kMaxSupersededInARow) {
 				++supersededInARow[epoch];
 				++window.superseded;
 				return false;
 			}
 			const auto begin = Clock::now();
-			// A staged epoch is recorded by the host's thread first, and its owner switches it in.
-			if (staged.contains(epoch) && !a_synchronous) {
+			// A staged epoch is recorded by the host's thread first, and a frame revision (or a fragment adoption) attaches it.
+			// The host attaches an epoch's first build at once, since it has no graph to keep.
+			if (staged.contains(epoch)) {
 				const auto stagedResult = host.StageEpochGraph(a_done.graph);
 				if (stagedResult.staged) {
 					supersededInARow.erase(epoch);
@@ -381,13 +365,15 @@ namespace RenderGraph
 						if (fn)
 							fn();
 					stagedAttach[epoch] = std::move(a_done.context.attached);
-					logger::info("[ORG] build manager: {} staged as build {}: built in {:.2f} ms off the render thread, staged in {:.3f} ms, {} frames after it was "
-								 "asked for; it switches in with its recordings; why: {}",
-						Label(epoch), stagedResult.generation, buildMs, MillisecondsSince(begin), frames - a_done.job.frame, a_done.job.reason);
+					logger::info("[ORG] build manager: {} staged as build {}: built in {:.2f} ms off the render thread, staged in {:.3f} ms, {} frames after "
+								 "it was asked for; it attaches with a frame revision; why: {}",
+						Label(epoch), stagedResult.generation, buildMs, MillisecondsSince(begin),
+						frames - a_done.job.frame, a_done.job.reason);
 					return true;
 				}
 				if (!stagedResult.attached) {
 					++window.rejected;
+					RenderGraph::Frame::Boundary::NoteRefusal("staging", org::GraphHost::AttachRefusalName(stagedResult.refusal));
 					logger::info("[ORG] build manager: {}'s build rejected at its staging ({}); built again", Label(epoch), stagedResult.reason);
 					host.RequestRebuild(epoch, "its last build was rejected at its staging");
 					return false;
@@ -397,6 +383,7 @@ namespace RenderGraph
 			const double attachMs = MillisecondsSince(begin);
 			if (!result.attached) {
 				++window.rejected;
+				RenderGraph::Frame::Boundary::NoteRefusal("attach", org::GraphHost::AttachRefusalName(result.refusal));
 				// If no other build answered meanwhile, ask again so the next poll builds against the host as it is now.
 				const bool replaced = host.BuildGeneration(epoch) != a_done.job.generation;
 				logger::info("[ORG] build manager: {}'s build rejected at the attach ({}){}", Label(epoch), result.reason,
@@ -414,6 +401,8 @@ namespace RenderGraph
 			supersededInARow.erase(epoch);
 			rejectedInARow.erase(epoch);
 			failedAt.erase(epoch);
+			if (a_done.graph)
+				NoteAttached(epoch);
 			++window.attached;
 			window.attachMs += attachMs;
 			window.attachMaxMs = (std::max)(window.attachMaxMs, attachMs);
@@ -421,30 +410,29 @@ namespace RenderGraph
 				if (attached)
 					attached();
 			if (++attachLogs <= 200 || attachLogs % 100 == 0)
-				logger::info("[ORG] build manager: {} attached{}: built in {:.2f} ms {}, attached in {:.3f} ms on the render thread, {} frames after "
-							 "it was asked for; why: {}",
-					Label(epoch), attachLogs > 200 ? fmt::format(" (attach {})", attachLogs) : std::string(), buildMs,
-					a_synchronous ? "on the render thread" : "off the render thread", attachMs, frames - a_done.job.frame, a_done.job.reason);
+				logger::info("[ORG] build manager: {} attached{}: built in {:.2f} ms off the render thread, attached in {:.3f} ms on the render thread, "
+							 "{} frames after it was asked for; why: {}",
+					Label(epoch), attachLogs > 200 ? fmt::format(" (attach {})", attachLogs) : std::string(), buildMs, attachMs, frames - a_done.job.frame,
+					a_done.job.reason);
 			return true;
 		}
 
-		/** @brief Attaches every group whose builds have all finished and that a_attach names. */
-		bool AttachFinished(Attach a_attach, bool* a_external = nullptr)
+		/** @brief Attaches or stages every group whose builds have all finished. a_changed gets each epoch staged or attached. */
+		bool AttachFinished(std::vector<std::uint32_t>& a_changed)
 		{
 			Collect();
 			bool attached = false;
 			for (auto it = groups.begin(); it != groups.end();) {
-				const bool named = it->second.external ? a_attach != Attach::Live : a_attach != Attach::External;
-				if (it->second.remaining || !named) {
+				if (it->second.remaining) {
 					++it;
 					continue;
 				}
 				for (auto& done : it->second.done) {
 					inFlight.erase(done->job.epoch);
-					const bool one = Finish(*done, false);
+					const bool one = Finish(*done);
 					attached = one || attached;
-					if (one && it->second.external && a_external)
-						*a_external = true;
+					if (one)
+						a_changed.push_back(done->job.epoch);
 				}
 				it = groups.erase(it);
 			}
@@ -473,71 +461,22 @@ namespace RenderGraph
 					a_caller);
 		}
 
-		/**
-		 * @brief Builds the owner thread's epochs now. With a_all it also builds epochs being built elsewhere.
-		 * Those other builds are then rejected at their attach, since this one started later.
-		 */
-		bool BuildOwnerEpochs(std::string_view a_caller, bool a_all = false)
-		{
-			auto& host = *desc.host;
-			bool built = false;
-			std::shared_ptr<void> scope;
-			for (std::size_t i = 0; i < host.GraphCount(); ++i) {
-				const auto epoch = host.EpochAt(i);
-				const bool chosen = a_all ? (ownerBuilt.contains(epoch) || external.contains(epoch)) : BuiltOnOwner(epoch);
-				if (!chosen)
-					continue;
-				if (a_all ? !host.RebuildRequested(epoch) || !host.Graph(epoch) : !Due(epoch))
-					continue;
-				WarnSynchronous(Label(epoch), a_caller);
-				++window.synchronous;
-				if (!scope)
-					scope = OwnerScope();
-				auto done = Build(MakeJob(epoch, 0));
-				built = Finish(*done, true) || built;
-			}
-			return built;
-		}
-
-		/** @brief Hands one group's external epochs to the external builder. Returns the jobs it refused. */
-		std::vector<Job> PostExternal(std::vector<Job> a_jobs)
-		{
-			std::vector<Job> refused;
-			for (auto& job : a_jobs) {
-				auto life = externalLife;
-				auto run = [this, life, job]() mutable {
-					{
-						std::scoped_lock lock(life->mutex);
-						if (life->stopped)
-							return;
-						++life->running;
-					}
-					auto done = Build(std::move(job));
-					{
-						std::scoped_lock lock(mutex);
-						finished.push_back(std::move(done));
-					}
-					std::scoped_lock lock(life->mutex);
-					--life->running;
-					life->idle.notify_all();
-				};
-				if (!externalBuilder.post(std::move(run)))
-					refused.push_back(job);
-			}
-			return refused;
-		}
-
 		bool Settled() const
 		{
 			auto& host = *desc.host;
 			for (std::size_t i = 0; i < host.GraphCount(); ++i) {
 				const auto epoch = host.EpochAt(i);
-				if (!ownerBuilt.contains(epoch) && !external.contains(epoch))
+				if (!laneOnly.contains(epoch))
 					continue;
 				if (inFlight.contains(epoch))
 					return false;
-				if (!host.Graph(epoch) || !host.RebuildRequested(epoch))
+				// A lane-only epoch with no graph waits for its first build, once there is a build input, unless that failed.
+				if (!host.Graph(epoch)) {
+					if (!input || host.EpochFailed(epoch))
+						continue;
+				} else if (!host.RebuildRequested(epoch)) {
 					continue;
+				}
 				const auto failed = failedAt.find(epoch);
 				if (failed == failedAt.end() || failed->second != host.RebuildRequests(epoch))
 					return false;
@@ -545,56 +484,28 @@ namespace RenderGraph
 			return true;
 		}
 
-		void Dispatch(std::string_view a_point)
+		/** @brief Hands the due epochs to the build lane: the lane-only ones as one group, the others as another. */
+		void Dispatch()
 		{
 			auto& host = *desc.host;
-			// The external builder's epochs form their own group, attached at a frame's end.
-			if (externalBuilder.post) {
-				std::vector<Job> posted;
+			// Each group is attached or staged at the poll that finds all its builds finished.
+			for (const bool laneOnlyGroup : { true, false }) {
+				std::vector<Job> jobs;
 				const auto group = ++groupSerial;
 				for (std::size_t i = 0; i < host.GraphCount(); ++i) {
 					const auto epoch = host.EpochAt(i);
-					if (!external.contains(epoch) || !Due(epoch))
+					if (laneOnly.contains(epoch) != laneOnlyGroup || !Due(epoch))
 						continue;
-					posted.push_back(MakeJob(epoch, group));
+					jobs.push_back(MakeJob(epoch, group));
 					inFlight.insert(epoch);
 				}
-				if (!posted.empty()) {
-					auto& entry = groups[group];
-					entry.external = true;
-					entry.remaining = posted.size();
-					// Refused jobs are built here on the owner thread and attached with the group.
-					auto refused = PostExternal(std::move(posted));
-					if (!refused.empty()) {
-						auto scope = OwnerScope();
-						for (auto& job : refused) {
-							WarnSynchronous(Label(job.epoch), fmt::format("{} (the external builder refused it)", a_point));
-							++window.synchronous;
-							auto done = Build(std::move(job));
-							std::scoped_lock lock(mutex);
-							finished.push_back(std::move(done));
-						}
-					}
-				}
-			}
-			std::vector<Job> jobs;
-			const auto group = ++groupSerial;
-			for (std::size_t i = 0; i < host.GraphCount(); ++i) {
-				const auto epoch = host.EpochAt(i);
-				if (ownerBuilt.contains(epoch) || external.contains(epoch) || !Due(epoch))
+				if (jobs.empty())
 					continue;
-				jobs.push_back(MakeJob(epoch, group));
-				inFlight.insert(epoch);
-			}
-			if (jobs.empty())
-				return;
-			groups[group].remaining = jobs.size();
-			{
-				std::scoped_lock lock(mutex);
+				groups[group].remaining = jobs.size();
 				for (auto& job : jobs)
-					queue.push_back(std::move(job));
+					if (!lane.Post(std::move(job)))
+						return;  // stopped: the manager is shutting down
 			}
-			wake.notify_one();
 		}
 
 		void LogWindow()
@@ -613,20 +524,12 @@ namespace RenderGraph
 		{
 			{
 				std::scoped_lock lock(mutex);
-				if (stop && !thread.joinable())
+				if (stop)
 					return;
 				stop = true;
-				queue.clear();
 			}
-			wake.notify_all();
-			if (thread.joinable())
-				thread.join();
-			// Posted builds that have not started return at once. Running ones are waited for.
-			{
-				std::unique_lock lock(externalLife->mutex);
-				externalLife->stopped = true;
-				externalLife->idle.wait(lock, [&] { return externalLife->running == 0; });
-			}
+			// Drops the queued builds and waits for a running one.
+			lane.Stop();
 			// Never attached, so never run. Dropped here on the owner thread.
 			finished.clear();
 			groups.clear();
@@ -638,9 +541,9 @@ namespace RenderGraph
 		impl(std::make_unique<Impl>(std::move(a_desc)))
 	{
 		logger::info(
-			"[ORG] build manager: structural builds run on a thread of their own and are attached at frame boundaries; {} owner-built epochs, "
-			"{} built by an external builder and attached at a frame's end",
-			impl->ownerBuilt.size(), impl->external.size());
+			"[ORG] build manager: structural builds run on a lane of their own and are attached at frame boundaries; {} staged and attached "
+			"with a frame revision or a fragment, {} of them never built at a submission",
+			impl->staged.size(), impl->laneOnly.size());
 	}
 
 	BuildManager::~BuildManager()
@@ -669,11 +572,6 @@ namespace RenderGraph
 		impl->Submit({ PendingRequest::Kind::For, 0, std::string(a_id), std::string(a_reason) });
 	}
 
-	void BuildManager::RequestAllSynchronous(std::string_view a_reason)
-	{
-		impl->Submit({ PendingRequest::Kind::AllSynchronous, 0, {}, std::string(a_reason) });
-	}
-
 	void BuildManager::Change(std::function<void()> a_change, std::string_view a_reason)
 	{
 		PendingRequest request{ PendingRequest::Kind::Change, 0, {}, std::string(a_reason) };
@@ -681,59 +579,59 @@ namespace RenderGraph
 		impl->Submit(std::move(request));
 	}
 
-	bool BuildManager::SwitchStaged(std::uint32_t a_epoch)
+	std::string BuildManager::AttachStaged(std::span<const std::uint32_t> a_epochs)
 	{
 		auto& m = *impl;
 		auto& host = *m.desc.host;
-		if (!host.StagedGeneration(a_epoch))
-			return false;
 		const auto begin = Clock::now();
-		const auto result = host.AttachStagedEpochGraph(a_epoch);
-		auto deferred = std::move(m.stagedAttach[a_epoch]);
-		m.stagedAttach.erase(a_epoch);
+		const auto result = host.AttachStagedEpochGraphs(a_epochs);
 		if (!result.attached) {
-			logger::info("[ORG] build manager: {}'s staged graph was refused at its switch ({}); built again", m.Label(a_epoch), result.reason);
-			return false;
+			RenderGraph::Frame::Boundary::NoteRefusal("revision", org::GraphHost::AttachRefusalName(result.refusal));
+			return result.reason.empty() ? std::string("refused") : result.reason;
 		}
-		++m.window.attached;
 		const double ms = MillisecondsSince(begin);
 		m.window.attachMs += ms;
 		m.window.attachMaxMs = (std::max)(m.window.attachMaxMs, ms);
-		for (auto& fn : deferred)
-			if (fn)
-				fn();
-		return true;
+		for (const auto epoch : a_epochs) {
+			RenderGraph::Frame::Boundary::NoteAttach(m.Label(epoch));
+			++m.window.attached;
+			auto deferred = std::move(m.stagedAttach[epoch]);
+			m.stagedAttach.erase(epoch);
+			for (auto& fn : deferred)
+				if (fn)
+					fn();
+		}
+		return {};
 	}
 
-	void BuildManager::SetExternalBuilder(ExternalBuilder a_builder)
+	void BuildManager::SetPollListener(std::function<void(std::span<const std::uint32_t>)> a_listener)
 	{
-		impl->externalBuilder = std::move(a_builder);
-		logger::info("[ORG] build manager: external builder set ({} epochs; {})", impl->external.size(),
-			impl->externalBuilder.post ? "built on its worker, attached at a frame's end" : "built on the render thread");
+		impl->pollListener = std::move(a_listener);
 	}
 
-	bool BuildManager::Poll(std::string_view a_point, Attach a_attach)
+	void BuildManager::SetBuildInput(std::function<std::shared_ptr<const void>()> a_input)
+	{
+		impl->input = std::move(a_input);
+	}
+
+	std::shared_ptr<const void> BuildManager::OwnerInput() const
+	{
+		return impl->OnOwner() ? impl->TakeInput() : nullptr;
+	}
+
+	bool BuildManager::Poll(std::string_view a_point)
 	{
 		auto& m = *impl;
+		const Frame::Boundary::Caller caller(a_point);
 		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
-		bool changed = false;
-		// Shader reload's safe point builds every graph here with the host's thread held. Earlier builds are rejected at attach.
-		if (std::exchange(m.synchronousAll, false)) {
-			WarnSynchronous(fmt::format("every graph asked for ({})", m.synchronousReason), a_point);
-			++m.window.synchronous;
-			auto scope = m.OwnerScope();
-			std::scoped_lock lock(m.buildMutex);
-			changed = m.desc.host->BuildIfRequested() || changed;
-		}
-		bool externalAttached = false;
-		changed = m.AttachFinished(a_attach, &externalAttached) || changed;
+		std::vector<std::uint32_t> changedEpochs;
+		const bool changed = m.AttachFinished(changedEpochs);
 		m.RequestStale();
-		changed = m.BuildOwnerEpochs(a_point) || changed;
-		m.Dispatch(a_point);
-		// The external builder hears of every boundary that may attach its epochs, attached or not.
-		if (a_attach != Attach::Live && m.externalBuilder.boundary)
-			m.externalBuilder.boundary(externalAttached);
+		m.Dispatch();
+		// The listener hears of every poll, since any may stage its epochs.
+		if (m.pollListener)
+			m.pollListener(changedEpochs);
 		return changed;
 	}
 
@@ -751,13 +649,6 @@ namespace RenderGraph
 		return false;
 	}
 
-	bool BuildManager::BuildOwnerEpochsNow(std::string_view a_caller)
-	{
-		impl->owner.store(std::this_thread::get_id(), std::memory_order_release);
-		impl->ApplyPending();
-		return impl->BuildOwnerEpochs(a_caller, true);
-	}
-
 	bool BuildManager::BuildSetupGraphs(std::string_view a_caller)
 	{
 		auto& m = *impl;
@@ -767,7 +658,6 @@ namespace RenderGraph
 		}
 		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
-		auto scope = m.OwnerScope();
 		std::scoped_lock lock(m.buildMutex);
 		(void)m.desc.host->BuildIfRequested();
 		return true;
@@ -806,30 +696,93 @@ namespace RenderGraph
 			}
 		}
 
-		void Request(std::uint32_t a_epoch, std::string_view a_reason)
+		namespace
 		{
-			if (auto* manager = Manager())
-				manager->Request(a_epoch, a_reason);
+			/** @brief A request Ask keeps for the next adoption point. */
+			struct AskedBuild
+			{
+				Wanted wanted;
+				std::string why;
+			};
+
+			struct AskQueue
+			{
+				std::mutex mutex;
+				std::vector<AskedBuild> kept;
+				bool framesBegun = false;
+			};
+
+			AskQueue& Asked()
+			{
+				static AskQueue queue;
+				return queue;
+			}
+
+			std::atomic<std::uint64_t> structuralBuilds{ 0 };
+
+			/** @brief Makes a request: before the first frame, or inside the adoption point. */
+			void IssueAsked(Wanted a_wanted, std::string_view a_why)
+			{
+				auto* manager = Manager();
+				if (!manager) {
+					// Nothing is built while the graph is inactive, so a change applies at once.
+					if (a_wanted.change)
+						a_wanted.change();
+					return;
+				}
+				std::string reason(a_why);
+				if (a_wanted.structural) {
+					const auto count = structuralBuilds.fetch_add(1, std::memory_order_relaxed) + 1;
+					const bool every = a_wanted.all || static_cast<bool>(a_wanted.change);
+					logger::info("[ORG] structural rebuild {} ({}): {}", count,
+						every ? std::string("every epoch") : fmt::format("{} epochs, {} ids", a_wanted.epochs.size(), a_wanted.ids.size()), a_why);
+					reason = fmt::format("structural: {}", a_why);
+				}
+				// A change rebuilds every epoch on its own.
+				if (a_wanted.change) {
+					manager->Change(std::move(a_wanted.change), reason);
+					return;
+				}
+				if (a_wanted.all) {
+					manager->RequestAll(reason);
+					return;
+				}
+				for (const auto epoch : a_wanted.epochs)
+					manager->Request(epoch, reason);
+				for (const auto& id : a_wanted.ids)
+					manager->RequestFor(id, reason);
+			}
 		}
 
-		void RequestAll(std::string_view a_reason)
+		void Ask(Wanted a_wanted, std::string_view a_why, const std::source_location& a_where)
 		{
-			if (auto* manager = Manager())
-				manager->RequestAll(a_reason);
+			// A structural request means an identity no version covers changed. Inside the frame on the render thread that is a late
+			// change, counted here once (a registration's own Change covers the requests it makes).
+			std::optional<Frame::Boundary::Change> late;
+			if (a_wanted.structural)
+				late.emplace(a_why, "structural rebuild", a_where);
+			{
+				auto& queue = Asked();
+				const std::lock_guard lock(queue.mutex);
+				if (queue.framesBegun && !Frame::Boundary::InAdoptionPoint()) {
+					queue.kept.push_back({ std::move(a_wanted), std::string(a_why) });
+					return;
+				}
+			}
+			IssueAsked(std::move(a_wanted), a_why);
 		}
 
-		void RequestFor(std::string_view a_id, std::string_view a_reason)
+		void IssueAdoptionRequests()
 		{
-			if (auto* manager = Manager())
-				manager->RequestFor(a_id, a_reason);
-		}
-
-		void Change(std::function<void()> a_change, std::string_view a_reason)
-		{
-			if (auto* manager = Manager())
-				manager->Change(std::move(a_change), a_reason);
-			else if (a_change)
-				a_change();
+			std::vector<AskedBuild> kept;
+			{
+				auto& queue = Asked();
+				const std::lock_guard lock(queue.mutex);
+				queue.framesBegun = true;
+				kept = std::exchange(queue.kept, {});
+			}
+			for (auto& asked : kept)
+				IssueAsked(std::move(asked.wanted), asked.why);
 		}
 
 		bool Defer(std::function<void()> a_attached, std::function<void(const std::string&)> a_failed)
@@ -852,37 +805,14 @@ namespace RenderGraph
 			return true;
 		}
 
-		bool SwitchStaged(std::uint32_t a_epoch)
+		std::shared_ptr<const void> Input()
 		{
+			if (t_context)
+				return t_context->input;
+			// The host's own builds on the owner thread (an epoch's first build, setup) read the owner's state now.
 			auto* manager = Manager();
-			return manager && manager->SwitchStaged(a_epoch);
-		}
-
-		bool InManagedBuild()
-		{
-			return t_context != nullptr;
+			return manager ? manager->OwnerInput() : nullptr;
 		}
 	}
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-#	include "RenderGraph/BuildManager.h"
-
-namespace RenderGraph::Builds
-{
-	void Request(std::uint32_t, std::string_view) {}
-	void RequestAll(std::string_view) {}
-	void RequestFor(std::string_view, std::string_view) {}
-	void Change(std::function<void()> a_change, std::string_view)
-	{
-		if (a_change)
-			a_change();
-	}
-	bool Defer(std::function<void()>, std::function<void(const std::string&)>) { return false; }
-	bool DeferStaged(std::function<void()>) { return false; }
-	bool SwitchStaged(std::uint32_t) { return false; }
-	bool InManagedBuild() { return false; }
-}
-
-#endif

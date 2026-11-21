@@ -1,19 +1,10 @@
 #pragma once
 
-// Shell state that engine hooks outside the shell read: whether DCLF runs this frame, and where the engine's passes are.
+// Shell state that engine hooks outside the shell read: where the engine's passes are.
+// DCLF's hooks go in only when it installs, and it stays on for the session once installed, so no hook asks whether it runs.
 
 namespace DCLF::ShellState
 {
-	namespace Detail
-	{
-		inline bool (*runningQuery)() = nullptr;
-	}
-
-	/** @brief Main thread, once at PostPostLoad, before the early hooks. Sets how Running asks the shell. */
-	inline void InstallRunningQuery(bool (*a_running)()) { Detail::runningQuery = a_running; }
-	/** @brief Any hook. Whether DCLF runs. False before the query is installed. */
-	inline bool Running() { return Detail::runningQuery && Detail::runningQuery(); }
-
 	/** @brief Where the engine's passes are. Render thread only, written by the shell's Main::RenderDepth thunk. */
 	struct EnginePasses
 	{

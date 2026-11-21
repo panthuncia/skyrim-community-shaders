@@ -3,7 +3,6 @@
 #include "Features/DrawcallLimitFix/Features/Grass/GrassTables.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
 #include "Features/DrawcallLimitFix/Features/Grass/Diagnostics/GrassEvents.h"
-#include "Features/DrawcallLimitFix/Features/Grass/Diagnostics/GrassParity.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/DrawsView.h"
@@ -68,18 +67,11 @@ namespace DCLF::Features::Grass
 		std::string MirrorLine(Mirror& a_mirror)
 		{
 			const auto s = a_mirror.TakeStats();
-			auto& p = ParityState();
-			const bool failed = p.missing || p.stale || p.differ;
 			const auto ready = a_mirror.ReadinessOf();
-			auto text = fmt::format("[DCLF] grass mirror: {} shapes, {} instances, {} buckets ({} drawable), {} meshes ({} leased, {} failed, {} pending){}; {} adds, {} shape removes, {} group removes, {} stale-seq drops, {} rejected ({} live); "
-									"parity {} checks, {} shapes compared ({} captured instances, {} mirrored), {} missing, {} stale, {} late, {} differ{}{}; "
-									"placed: {} mirrored instances within {:.0f} of the eye, the nearest at {:.0f}\n",
+			return fmt::format("[DCLF] grass mirror: {} shapes, {} instances, {} buckets ({} drawable), {} meshes ({} leased, {} failed, {} pending){}; {} adds, {} shape removes, {} group removes, {} stale-seq drops, {} rejected ({} live)\n",
 				a_mirror.Size(), a_mirror.InstanceCount(), a_mirror.BucketCount(), ready.bucketsDrawable, a_mirror.MeshCount(), ready.meshesResolved, ready.meshesFailed,
 				ready.meshesPending, installed ? "" : ", sink not installed", s.adds, s.removes, s.groupRemoves,
-				s.stale, s.rejected, a_mirror.RejectedLive(), p.checks, p.shapes, p.liveInstances, p.mirroredInstances, p.missing, p.stale, p.late, p.differ,
-				p.checks ? (failed ? " <- GRASS MIRROR; first: " : " <- OK") : "", p.first, p.withinDistance, p.maxDistance, p.nearest);
-			p = { .suspects = std::move(p.suspects), .frame = p.frame };
-			return text;
+				s.stale, s.rejected, a_mirror.RejectedLive());
 		}
 
 		void MirrorText(std::string& a_text)

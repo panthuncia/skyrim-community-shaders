@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <vector>
 
-struct ID3D11Texture2D;
 namespace RE
 {
 	class BSRenderPass;
@@ -13,7 +12,7 @@ namespace RE
 namespace DCLF::Diagnostics
 {
 	/**
-	 * @brief Hook points where the main path announces what happened, for parity checks, probes and dumps to observe.
+	 * @brief Hook points where the main path announces what happened, for parity checks and the compatibility monitor to observe.
 	 *
 	 * The main path reaches diagnostics only through Observe(), Policy:: questions and these hook points. It never reads a parity switch.
 	 * Observers subscribe at Install, before DCLF's threads start, and the registry is read-only after that, so Notify takes no lock.
@@ -61,7 +60,7 @@ namespace DCLF::Diagnostics
 	{
 	};
 
-	/** @brief Announces an On event, for example Notify<FramePoint::Present>(). */
+	/** @brief Announces an On event, for example Notify<FramePoint::PrepassEnd>(). */
 	template <auto Point>
 	inline void Notify()
 	{
@@ -117,24 +116,12 @@ namespace DCLF::Diagnostics
 	/** @brief Frame points that carry no data, in frame order. */
 	enum class FramePoint : std::uint8_t
 	{
-		LookupsInstalled,   // lookups are the installed publication's, before the scene lane's inputs are posted
-		ClaimsInstalled,    // claims installed, before the culls
-		ShadowViewsBegin,   // BeforeShadowMaps, with the frame's shadow views already listed
-		RegistrationsDone,  // EarlyPrepass, registrations drained
-		PrepassEnd,         // Prepass with DCLF running, after the frame constants are refreshed
-		Present,            // Present, every frame, first thing
+		PrepassEnd,  // Prepass with DCLF running, after the frame constants are refreshed
 	};
 
 	/** @brief Main::Draw's early hook, every frame. */
 	struct FrameBegin
 	{
-		bool running;
-	};
-
-	/** @brief Prepass, every frame, before DCLF's prepass work. */
-	struct PrepassBegin
-	{
-		bool running;
 	};
 
 	/** @brief A native Lighting draw after its SetupGeometry, while DCLF runs. */
@@ -153,32 +140,6 @@ namespace DCLF::Diagnostics
 		const RE::BSRenderPass* pass;
 		std::uint32_t technique;
 		bool inDepthPass;
-	};
-
-	/** @brief A native pass the batch renderers drew. */
-	struct NativePassDrawn
-	{
-		const RE::BSRenderPass* pass;
-		bool inDepthPass;
-	};
-
-	/** @brief The engine's reference render of an occlusion map, before it is cleared for DCLF's. Map 0 is Skylighting, 1 the precipitation mask. */
-	struct OcclusionReferenceRendered
-	{
-		std::uint32_t map;
-	};
-
-	/** @brief The occlusion maps DCLF's shadow epoch drew, a bit per map. Sent every frame it runs. */
-	struct OcclusionMapsDrawn
-	{
-		std::uint32_t drawn;
-	};
-
-	/** @brief A named frame point where the bound targets may be inspected. a_extra is another texture to keep. */
-	struct TargetPoint
-	{
-		const char* label;
-		ID3D11Texture2D* extra = nullptr;
 	};
 
 }

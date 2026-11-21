@@ -86,10 +86,10 @@ namespace DCLF::Extensions
 
 	std::uint32_t DrawFamilyFaceBytes() { return FaceBytes(); }
 
-	bool DrawFamilyOn(const ToggleSet& a_toggles, Api::DrawFamily a_family)
+	bool DrawFamilyOn(Api::DrawFamily a_family)
 	{
 		const auto& entry = DrawFamilyOf(a_family);
-		return entry.taken && ObjectClassOn(a_toggles, entry.contribution.objectClass);
+		return entry.taken && ObjectClassOn(entry.contribution.objectClass);
 	}
 
 	void ServeDrawFamilies(std::uint32_t a_frame)

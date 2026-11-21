@@ -2,7 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "RenderGraph/Engine/Native/Native.h"
-#include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -10,17 +10,19 @@
 #include "Deferred.h"
 #include "Features/DrawcallLimitFix.h"
 #include "Globals.h"
+#include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Testing/Testing.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Scene.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Schedule.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameData.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/Segments.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -39,7 +41,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowPoints.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/FrameRetirement.h"
+#include "RenderGraph/Async/Retirement.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
@@ -64,14 +66,90 @@ namespace DCLF
 	{
 		// The frame whose build point already ran at Renderer::Begin.
 		std::uint64_t s_buildPointFrame = 0;
+		// DCLF's scene source (RegisterSceneSource).
+		RenderGraph::Frame::Revision::FragmentSourceId s_sceneSource = RenderGraph::Frame::Revision::kMaxFragmentSources;
+		// Main thread: IndirectDraws::SceneRecordedFrames at the last Begin.
+		std::uint64_t s_sceneRecordedSeen = 0;
 	}
 
-	void BuildPointAtFrameStart(std::uint64_t a_frame)
+	// Scene/FrameView/FrameView.cpp. Whether DCLF's first claims are installed. Render thread.
+	bool DrawsWorld();
+
+	void RegisterSceneSource()
 	{
-		if (!globals::features::drawcallLimitFix.HooksInstalled())
-			return;
-		IndirectDraws::Get().BuildPoint();
-		s_buildPointFrame = a_frame;
+		namespace Revision = RenderGraph::Frame::Revision;
+		Revision::FragmentSource source;
+		source.name = "DCLF's scene";
+		// The GPU traces sum an epoch under the feature its label names.
+		const auto label = [](RenderGraphRuntime::Segment a_segment) -> std::pair<std::string, std::string> {
+			using S = RenderGraphRuntime::Segment;
+			switch (a_segment) {
+			case S::ZPrepass:
+				return { "CS DCLF: Z-prepass", "CS DCLF: Z-prepass inputs" };
+			case S::MainOpaque:
+				return { "CS DCLF: main opaque", "CS DCLF: main opaque inputs" };
+			case S::ShadowView:
+				return { "CS DCLF: shadow view", "CS DCLF: shadow view inputs" };
+			case S::SkyOcclusion:
+				return { "CS DCLF: Skylighting occlusion", "CS DCLF: Skylighting occlusion inputs" };
+			case S::Reflection:
+				return { "CS DCLF: reflection faces", "CS DCLF: reflection faces inputs" };
+			case S::Forward:
+				return { "CS DCLF: forward", "CS DCLF: forward inputs" };
+			case S::FirstPersonDepth:
+				return { "CS DCLF: first-person depth", "CS DCLF: first-person depth inputs" };
+			case S::FirstPerson:
+				return { "CS DCLF: first person", "CS DCLF: first-person inputs" };
+			default:
+				return { "CS DCLF", "CS DCLF: inputs" };
+			}
+		};
+		for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
+			if (IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment))) {
+				source.segments.push_back(segment);
+				source.labels.push_back(label(static_cast<RenderGraphRuntime::Segment>(segment)));
+			}
+		// DCLF draws on the main thread only.
+		source.mainThreadOnly = true;
+		source.taken = [](const std::shared_ptr<const void>& a_scene) { IndirectDraws::Get().SceneTaken(a_scene); };
+		source.adopt = [](const std::shared_ptr<const void>& a_scene) { IndirectDraws::Get().InstallScene(a_scene); };
+		source.drop = [](const std::shared_ptr<const void>& a_scene, Revision::FragmentDrop a_why, std::string_view a_text, std::span<const std::uint32_t> a_epochs) {
+			IndirectDraws::Get().DropScene(a_scene, a_why, a_text, a_epochs);
+		};
+		// Whether DCLF draws and a frame's coverage ran a DCLF epoch since the last Begin. A menu without a scene pass or a load screen
+		// posts no scene, so a revision with DCLF's epochs adopts without one then, and DCLF stops (left).
+		source.drawing = [] {
+			const std::uint64_t runs = IndirectDraws::Get().SceneRecordedFrames();
+			const bool ran = std::exchange(s_sceneRecordedSeen, runs) != runs;
+			return ran && !Scene::FrameView::Get().NotDrawingYet();
+		};
+		// A revision left DCLF's scene on old versions. DCLF stops drawing here, at the adoption point, until its next scene covers a frame.
+		source.left = [](std::uint64_t) { Scene::FrameView::Get().StopDrawing(); };
+		// The graph conditions for the adopted variables, after the adoption point's revision work.
+		source.afterAdoption = [] {
+			TracyCZoneN(afterScene, "CS.DCLF.AfterSceneStep", true);
+			IndirectDraws::Get().AfterSceneStep();
+			TracyCZoneEnd(afterScene);
+		};
+		// Native mode with segments: the build point at Renderer::Begin, before the frame's schedule is chosen. BeginFrame then skips it.
+		source.frameStart = [](std::uint64_t a_frame) {
+			IndirectDraws::Get().BuildPoint();
+			s_buildPointFrame = a_frame;
+		};
+		source.drawsWorld = [] { return DrawsWorld(); };
+		source.epochFailed = [](std::string_view a_label, std::string_view a_error) { DrawcallLimitFix::OnGraphEpochFailed(a_label, std::string(a_error)); };
+		s_sceneSource = Revision::RegisterFragmentSource(std::move(source));
+	}
+
+	RenderGraph::Frame::Revision::FragmentSourceId SceneSource()
+	{
+		return s_sceneSource;
+	}
+
+	void IndirectDraws::NoteInputChanged(std::string_view a_what)
+	{
+		RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::ClientInputChanged, RenderGraph::Frame::SegmentId::Count,
+			fmt::format("DCLF: {}", a_what));
 	}
 
 	FrameDriver& FrameDriver::Get()
@@ -80,44 +158,28 @@ namespace DCLF
 		return driver;
 	}
 
-	bool FrameDriver::BeginFrame(bool a_running, bool a_installed)
+	void FrameDriver::BeginFrame()
 	{
 		// The engine's update is over, so a detach still waiting for a re-attach is a removal.
 		SceneTracker::Get().PushHeldDetaches();
 		// Start a load's hold before anything checks whether a load screen is up.
-		if (a_installed)
-			LoadHold::OnFrameStart(a_running);
-		Diagnostics::Notify(Diagnostics::FrameBegin{ a_running });
-		occlusionWanted = occlusionDrawn = 0;
+		LoadHold::OnFrameStart();
+		Diagnostics::Notify(Diagnostics::FrameBegin{});
+		occlusionWanted = occlusionDrawn = occlusionTaken = 0;
 		// An extension added or removed last frame is built here, before anything decides what the frame's recordings cover.
 		// In native mode with segments this already ran at Renderer::Begin, and no build may attach after that.
 		if (s_buildPointFrame != RenderGraph::Frame::Driver::Current().frame)
 			IndirectDraws::Get().BuildPoint();
 		auto& scene = Scene::Coordinator::Get();
 		auto& view = Scene::FrameView::Get();
-		// Inline scene passes drop the pump's wakes and run the pass at frame start instead.
-		const bool inlinePass = Policy::ScenePassInline();
-		if (!a_running) {
-			// While DCLF is off, the passes still apply events so the tracked set stays current.
-			if (a_installed) {
-				scene.SetScenePassMode(false, inlinePass);
-				if (!view.NoteLoadingScreen())
-					view.ServeFrameRequests(false);
-			}
-			FrameValues::Get().Skip();
-			return false;
-		}
 		// The engine's update is done, so workers may read its scene graph until Present.
 		EngineReadWindow::Open();
 		// The posts below wake the coordinator once, when this scope ends.
 		ScenePassWakeBatch wakes;
-		scene.SetScenePassMode(true, inlinePass);
-		// Apply requested toggles before the frame inputs carry them to the coordinator. Frames keep the installed publication's
-		// toggles until one committed under the new ones is installed. A classify input change also drops the cached verdicts.
+		scene.SetScenePassMode(true);
+		// A classify input change drops the cached verdicts, because the caches witness the objects, not the inputs.
 		static Extensions::ClassifyInputSet inputsSeen = Extensions::SampleClassifyInputs();
-		const auto inputs = Extensions::SampleClassifyInputs();
-		const bool togglesClassify = Toggles::Get().BeginFrame();
-		if (togglesClassify || inputs != std::exchange(inputsSeen, inputs))
+		if (const auto inputs = Extensions::SampleClassifyInputs(); inputs != std::exchange(inputsSeen, inputs))
 			view.RequestVerdictsInvalidated();
 		ScopedPerfEvent event("CS DCLF: scene tables");
 		{
@@ -136,13 +198,10 @@ namespace DCLF
 		// Load screen frames have no claims, so they are never waited for or required to be covered.
 		const bool loading = Scene::FrameView::IsLoadingScreenUp();
 		{
-			// Once DCLF draws, a frame with a stale snapshot waits here for a current one rather than hand drawing back to the engine.
-			// Everything the builder needs has been posted by now.
+			// The frame revision adopted the snapshot at this frame's Begin (plan step 10b), with the staged builds it was recorded on.
+			// Nothing waits here: a newer snapshot not ready yet leaves the adopted one, recorded on the graphs that run.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
-			TracyCZoneN(bfAdoptSnapshot, "CS.DCLF.BF.AdoptCurrentSnapshot", true);
-			auto adopted = draws.AdoptCurrentSnapshot(!view.NotDrawingYet() && !loading);
-			TracyCZoneEnd(bfAdoptSnapshot);
-			view.HandOverAtFrameStart(std::move(adopted));
+			view.HandOverAtFrameStart(draws.AdoptedPublication());
 			{
 				DCLF_ZONE("CS.DCLF.BF.SyncFrameTables");
 				view.SyncFrameTables();
@@ -154,20 +213,20 @@ namespace DCLF
 		RunViewWork(Api::ViewPoint::FrameStartBeforeCoverage);
 		// Entries changed since the sun exclusion's snapshot leave it, and the engine culls them.
 		Extensions::ShadowExclusionFrameStart();
-		Diagnostics::Notify<Diagnostics::FramePoint::LookupsInstalled>();
 		draws.PostLookupInputs();
 		TracyCZoneEnd(bfViewsStart);
 		{
 			DCLF_ZONE("CS.DCLF.BF.Claims");
-			// Before the first covered frame the engine draws everything. After it, an uncovered frame is a defect,
-			// because the frame already waited for a snapshot it can draw from. Load screen frames are the exception.
+			// While DCLF does not draw (before its first covered frame, or after an adoption stopped it) the engine draws everything. While
+			// it draws, an uncovered frame is a tap error, because the adopted snapshot stays current until a Begin adopts a newer one with
+			// its builds. Load screen frames are the engine's (EngineState::LoadScreen).
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			const bool covered = draws.DecideCoverage();
 			// Native mode bring-up: log why claims are not installed, once every 300 such frames.
 			if (!(covered && view.HasInstalled()) && RenderGraph::Engine::Native::Active()) {
 				static std::uint32_t s_uncovered = 0;
 				if (s_uncovered++ % 300 == 0)
-					logger::info("[DCLF] native: frame {} has no claims (covered {}, a publication installed {}, loading {}): {}", view.GetFrame(), covered,
+					logger::info("[DCLF] native: frame {} has no claims (covered {}, a publication installed {}, loading {}): {}", view.SceneStep(), covered,
 						view.HasInstalled(), loading, draws.CoverageState());
 			}
 			if (covered && view.HasInstalled())
@@ -181,26 +240,24 @@ namespace DCLF
 					const auto reason = fmt::format("Drawcall Limit Fix: the GPU device was lost (D3D11's removed reason {:#x}, BasicRHI saw it {}) before frame {}; "
 													"the game ends. The GPU work it was running is in the log above (crash markers with DXVK_DEBUG=hang, or the hang "
 													"report's stream order)",
-						static_cast<std::uint32_t>(removed), Testing::DeviceLossSeen(), view.GetFrame());
+						static_cast<std::uint32_t>(removed), Testing::DeviceLossSeen(), view.SceneStep());
 					logger::critical("{}", reason);
 					Testing::ReportDeviceLost("D3D11 device removed at DCLF's frame start", 0, "", "");
 					spdlog::default_logger()->flush();
 					::TerminateProcess(::GetCurrentProcess(), 0xDEAD0007u);
 				}
 				if (auto& runtime = RenderGraphRuntime::Get(); !runtime.IsActive())
-					stl::report_and_fail(fmt::format("Drawcall Limit Fix: the render graph stopped before frame {} ({}), and DCLF draws only through it once it "
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the render graph stopped before frame {} ({}), and DCLF draws only through it once it "
 													 "draws. D3D11's device removed reason: {:#x}",
-						view.GetFrame(), runtime.GetDisabledReason(), static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason())));
-				stl::report_and_fail(fmt::format("Drawcall Limit Fix: frame {} is not covered by the snapshot it adopted after waiting for a current one, and DCLF "
-												 "does not hand drawing back to the engine once it draws: {}",
-					view.GetFrame(), draws.CoverageState()));
+						view.SceneStep(), runtime.GetDisabledReason(), static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason())));
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::Uncovered, RenderGraph::Frame::SegmentId::Count,
+					fmt::format("DCLF: frame {} is not covered by the scene it adopted at its Begin: {}", view.SceneStep(), draws.CoverageState()));
 			}
-			Reports::GateReleases(view.GetFrame());
+			Reports::GateReleases(view.SceneStep());
 			// Release the LOD gates the installed publications flipped, before the culls.
-			Extensions::ComponentsAdopt(view.GetFrame(), view.AdoptedClaims(), view.AdoptedDeltas());
+			Extensions::ComponentsAdopt(view.SceneStep(), view.AdoptedClaims(), view.AdoptedDeltas());
 			view.ClearAdoptedDeltas();
 		}
-		Diagnostics::Notify<Diagnostics::FramePoint::ClaimsInstalled>();
 		TracyCZoneN(bfKicks, "CS.DCLF.BF.AheadAndKicks", true);
 		// First person's rows and palettes must be taken before Main::Draw moves the skeleton into its root's space.
 		bool rootViewsCovered = false;
@@ -225,13 +282,13 @@ namespace DCLF
 		{
 			const auto eventsStart = std::chrono::steady_clock::now();
 			if (!view.NoteLoadingScreen())
-				view.ServeFrameRequests(true);
+				view.ServeFrameRequests();
 			counters.timing.eventsMs += MillisecondsSince(eventsStart);
 		}
 		TracyCZoneN(bfFamilies, "CS.DCLF.BF.SourcesAndFamilies", true);
 		{
 			DCLF_ZONE("CS.DCLF.BF.ShadowSourcesFrameStart");
-			Extensions::ShadowSourcesFrameStart(view.GetFrame());
+			Extensions::ShadowSourcesFrameStart(view.SceneStep());
 		}
 		{
 			DCLF_ZONE("CS.DCLF.BF.RefreshMainRenderers");
@@ -240,7 +297,7 @@ namespace DCLF
 		// Draw families decide before the main camera's cull registers its passes.
 		{
 			DCLF_ZONE("CS.DCLF.BF.DecideDrawFamilies");
-			draws.DecideDrawFamilies(view.GetFrame());
+			draws.DecideDrawFamilies(view.SceneStep());
 		}
 		{
 			DCLF_ZONE("CS.DCLF.BF.ViewWorkAfterTreeLod");
@@ -258,7 +315,7 @@ namespace DCLF
 			auto fields = Extensions::CaptureShadingFields(view);
 			TracyCZoneEnd(bfFields);
 			// Producers' uploads may only wait for CPU frames signalled before the last present.
-			SealCpuFrames();
+			::RenderGraph::Frame::Retirement::SealCpuFrames();
 			FrameValues::Get().SetLatePoses(LatePoses::PrepareFrame());
 			(void)FrameValues::Get().Kick(view.TakePlacementPlans(), view.TakeShadingItems(), std::move(fields), view.FrameGlobalsOfFrame());
 		}
@@ -266,11 +323,6 @@ namespace DCLF
 			DCLF_ZONE("CS.DCLF.BF.MakeFramePayload");
 			(void)draws.MakeFramePayload();
 		}
-		// Parity modes run the scene pass inline here so render-thread observers stay in place. The normal path never waits for a pass.
-		if (inlinePass)
-			scene.RunScenePassInline();
-		frameRan = true;
-		return true;
 	}
 
 	void FrameDriver::DepthCommitted()
@@ -295,7 +347,7 @@ namespace DCLF
 	void FrameDriver::RunViewWork(Api::ViewPoint a_point)
 	{
 		const auto& frame = Scene::FrameView::Get();
-		const Api::ViewPointContext context{ frame.GetFrame(), IndirectDraws::Get().Failed(), &frame.GetTables(), FrameCatalog() };
+		const Api::ViewPointContext context{ frame.SceneStep(), &frame.GetTables(), FrameCatalog() };
 		const auto point = static_cast<std::size_t>(a_point);
 		for (const auto& view : Extensions::Views().views)
 			for (const auto run : view.work[point])
@@ -310,9 +362,9 @@ namespace DCLF
 		LatePoses::CheckAtPresent();
 	}
 
-	void FrameDriver::EndFrame(bool a_running)
+	void FrameDriver::EndFrame()
 	{
-		LoadHold::OnFrameEnd(a_running);
+		LoadHold::OnFrameEnd();
 		// The engine's next update follows Present, so no worker may be inside its memory from here.
 		{
 			RenderThreadBudget::Part boundary(RenderThreadBudget::Bucket::EngineBoundary);
@@ -332,15 +384,10 @@ namespace DCLF
 		TracyCZoneEnd(efBind);
 		TracyCZoneN(efReports, "CS.DCLF.EF.ReportsAndReleases", true);
 		// Once per frame number. Menus and loads hold the number still while Presents continue.
-		if (a_running) {
-			static std::uint32_t reportedFrame = ~0u;
-			if (const std::uint32_t frame = Scene::FrameView::Get().GetFrame(); std::exchange(reportedFrame, frame) != frame)
-				Reports::RenderThread(frame);
-		}
+		static std::uint32_t reportedFrame = ~0u;
+		if (const std::uint32_t frame = Scene::FrameView::Get().SceneStep(); std::exchange(reportedFrame, frame) != frame)
+			Reports::RenderThread(frame);
 		Scene::FrameView::Get().NoteLoadingScreen();
-		// In parity modes passes only run inline at frame start. With no frame since the last Present, run one here so the queues do not stall.
-		if (const bool ran = std::exchange(frameRan, false); Policy::ScenePassInline() && !ran)
-			Scene::Coordinator::Get().ApplyEventsInline();
 		// Dropped on the engine's main thread, where nothing reads them.
 		EngineReleases::Release();
 		TracyCZoneEnd(efReports);
@@ -389,7 +436,6 @@ namespace DCLF
 	{
 		ScopedPerfEvent event("CS DCLF: shadow views");
 		const auto start = std::chrono::steady_clock::now();
-		Diagnostics::Notify<Diagnostics::FramePoint::ShadowViewsBegin>();
 		Draws::NoteShadowRevisionInputs();
 		if (const auto* epochs = Extensions::ShadowEpochs())
 			epochs->beforeShadowMaps();
@@ -402,6 +448,7 @@ namespace DCLF
 	{
 		// One epoch draws the shadow views and the occlusion maps taken before the engine drew the shadow maps.
 		const std::uint32_t wanted = std::exchange(occlusionWanted, 0u);
+		occlusionTaken = wanted;
 		PassCapture::Get().SetOcclusionPhase(0);
 		const auto* epochs = Extensions::ShadowEpochs();
 		occlusionDrawn = epochs ? epochs->afterShadowMaps(wanted) : 0u;
@@ -409,7 +456,6 @@ namespace DCLF
 		for (std::uint32_t map = 0; map < occlusionNeedStreak.size(); ++map)
 			if (occlusionDrawn & (1u << map))
 				occlusionNeedStreak[map] = 0;
-		Diagnostics::Notify(Diagnostics::OcclusionMapsDrawn{ occlusionDrawn });
 	}
 
 	void FrameDriver::EarlyPrepass()
@@ -436,12 +482,11 @@ namespace DCLF
 		Diagnostics::Notify<Diagnostics::FramePoint::PrepassEnd>();
 	}
 
-	bool FrameDriver::OcclusionReady(std::uint32_t a_map, bool a_running)
+	bool FrameDriver::OcclusionReady(std::uint32_t a_map)
 	{
 		auto& capture = PassCapture::Get();
 		capture.SetOcclusionPhase(0);
-		// In the CPU pipeline the engine renders the maps until the shadow site is live.
-		if (!a_running || a_map >= Extensions::kOcclusionMaps || !Extensions::OcclusionOn(ActiveToggles(), a_map) || (Direct::CpuFrame() && !Direct::ShadowSiteLive()))
+		if (a_map >= Extensions::kOcclusionMaps || !Extensions::OcclusionOn(a_map))
 			return false;
 		// DCLF draws the map in this frame's shadow epoch when the revision's shadow shape has its view. Otherwise the engine renders it whole.
 		const auto* epochs = Extensions::ShadowEpochs();
@@ -461,20 +506,25 @@ namespace DCLF
 
 	bool FrameDriver::OcclusionHeld(std::uint32_t a_map) const { return a_map < 32 && (occlusionHeld & (1u << a_map)); }
 
-	bool FrameDriver::OcclusionNeedsEngine(std::uint32_t a_map, bool a_running)
+	bool FrameDriver::OcclusionNeedsEngine(std::uint32_t a_map)
 	{
 		if (a_map < 32)
 			occlusionHeld &= ~(1u << a_map);
-		const bool needed = !a_running || a_map >= Extensions::kOcclusionMaps || !(occlusionDrawn & (1u << a_map));
+		const bool needed = a_map >= Extensions::kOcclusionMaps || !(occlusionDrawn & (1u << a_map));
+		// A map this frame took for DCLF's shadow epoch (OcclusionReady) is DCLF's. Not drawing it is a tap error, not the engine's map.
+		if (needed && a_map < Extensions::kOcclusionMaps && (occlusionTaken & (1u << a_map)) && !Scene::FrameView::Get().NotDrawingYet())
+			RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::Uncovered, RenderGraph::Frame::SegmentId::Count,
+				fmt::format("DCLF: occlusion map {} of frame {} was taken for the shadow epoch, which did not draw it", a_map, Scene::FrameView::Get().SceneStep()));
 		// The engine's cull of the map reads the scene lists, so make them whole again.
 		if (needed)
 			PrimaryCull::Get().RestoreSceneLists();
 		if (a_map < Extensions::kOcclusionMaps)
 			occlusionFrames.engine[a_map] += needed ? 1 : 0;
 		// A map DCLF should draw but the engine must render. Held during a load's hold, otherwise counted.
-		if (needed && a_running && a_map < Extensions::kOcclusionMaps && Extensions::OcclusionOn(ActiveToggles(), a_map)) {
+		if (needed && a_map < Extensions::kOcclusionMaps && Extensions::OcclusionOn(a_map)) {
 			// A held map still renders at the engine's point but without the engine's cull, so it has no occluders until DCLF takes it.
-			// After a coc or the first load DCLF cannot draw a map for a few frames, and the map is held meanwhile.
+			// A map gets a new layout when it first draws (rain starts the precipitation map), and DCLF cannot draw it for a few
+			// frames: a re-entry holds those frames. A map DCLF never drew counts only for kOcclusionReentryFrames.
 			const std::uint32_t streak = ++occlusionNeedStreak[a_map];
 			if (!LoadHold::Active() && ((occlusionEverDrawn & (1u << a_map)) || streak <= kOcclusionReentryFrames))
 				LoadHold::BeginReentry("an occlusion map DCLF cannot draw this frame (its layout is new, or the graph rebuilds)");
@@ -483,7 +533,7 @@ namespace DCLF
 				occlusionHeld |= 1u << a_map;
 				return needed;
 			}
-			EngineOnlyCull::NoteWholeCull(EngineOnlyCull::WholeCull::OcclusionNotTaken);
+			WholeCull::Note(WholeCull::Reason::OcclusionNotTaken);
 		}
 		return needed;
 	}
@@ -502,9 +552,8 @@ namespace DCLF
 		// The engine binds and clears the G-buffer only when a draw applies its state, so apply it here as the first draw would.
 		// A frame where DCLF owns every lighting draw has no native draw to do it. The pass end is too late, the clouds have rebound t26.
 		Engine::ApplyPendingState();
-		globals::EndDCLFDepthTrace();
 		if (const auto* view = Extensions::PrimaryView(); view && view->beforeOpaque())
-			captureFrame = Scene::FrameView::Get().GetFrame();
+			captureFrame = Scene::FrameView::Get().SceneStep();
 	}
 
 	void FrameDriver::AfterOpaquePass()
@@ -520,7 +569,7 @@ namespace DCLF
 		if (globals::deferred->deferredPass && (PassDescriptorOf(a_pass->passEnum) & 0x8000u) && ((PassDescriptorOf(a_pass->passEnum) >> 24) & 0x3f) != 6)
 			view.NoteProjectedTextures();
 		if (Diagnostics::Armed<Diagnostics::NativeLightingDraw>()) {
-			const std::uint32_t frame = view.GetFrame();
+			const std::uint32_t frame = view.SceneStep();
 			Diagnostics::Notify(Diagnostics::NativeLightingDraw{ a_pass, a_renderFlags, frame, globals::deferred->deferredPass, captureFrame == frame });
 		}
 	}

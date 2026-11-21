@@ -1,6 +1,6 @@
 #pragma once
 
-// The decal draw order: its key, the coordinator component's state, and the parity comparison.
+// The decal draw order: its key and the coordinator component's state.
 
 #include <ankerl/unordered_dense.h>
 
@@ -54,19 +54,11 @@ namespace DCLF::Features::Decals
 		const RE::NiAVObject* decalNode = nullptr;
 	};
 
-	/** @brief CS_DCLF_PERSISTENT_PARITY sums, reset by each report. */
-	struct DecalOrderParity
-	{
-		std::uint64_t checks = 0, decals = 0, differ = 0, staleKeys = 0, unordered = 0;
-		std::string first, staleFirst;
-	};
-
 	/** @brief The coordinator component's state. Scene lane. */
 	struct DecalOrder
 	{
 		// By group, which is (chain >> 60) - 1.
 		std::array<std::uint32_t, 3> candidates{};
-		DecalOrderParity parity;
 		// Object -> chain. The chain packs group, technique and sub-pass.
 		ankerl::unordered_dense::map<std::uint32_t, std::uint64_t> memberDecals;
 		std::vector<std::uint32_t> decalsChanged;
@@ -74,30 +66,5 @@ namespace DCLF::Features::Decals
 		// Kept in draw order, so a change re-keys only the decals it names.
 		std::vector<OrderedDecal> kept;
 		std::vector<std::uint32_t> decalOrdered;
-	};
-
-	/** @brief The kept order compared with one rebuilt from scratch. */
-	struct DecalOrderComparison
-	{
-		std::uint64_t decals = 0, staleKeys = 0, unordered = 0;
-		bool differ = false;
-		std::string first, staleFirst;  // The first difference and the first stale key.
-	};
-
-	/** @brief A key goes stale when a parent's children are re-indexed under a kept decal. */
-	DecalOrderComparison CompareDecalOrder(const DecalOrder& a_order, const Api::CoordinatorComponentContext& a_context);
-
-	/** @brief Observers set `checked` to force the upkeep even with no change. */
-	struct OrderDue
-	{
-		std::uint64_t passSerial;
-		bool& checked;
-	};
-
-	struct Ordered
-	{
-		const DecalOrder& order;
-		const Api::CoordinatorComponentContext& context;
-		DecalOrderParity& parity;
 	};
 }

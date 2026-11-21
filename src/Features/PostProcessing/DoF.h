@@ -3,11 +3,14 @@
 #include "BokehResources.h"
 #include "Buffer.h"
 #include "PostProcessFeature.h"
+#include "Utils/Setting.h"
 
 #include <array>
 
 struct DoF : public PostProcessFeature
 {
+	DoF();
+
 	virtual inline std::string GetType() const override { return "Depth of Field"; }
 	virtual inline std::string GetDisplayName() const override { return T("feature.post_processing.do_f.name", "Depth of Field"); }
 	virtual inline std::string GetDesc() const override { return T("feature.post_processing.do_f.description", "Depth of Field, based on CinematicDOF by Frans Bouma."); }
@@ -24,9 +27,10 @@ struct DoF : public PostProcessFeature
 		float SensorWidthMM = 36.0f;
 		float FarPlaneMaxBlur = 1.0f;
 		float NearPlaneMaxBlur = 0.2f;
-		bool UseAdaptiveGather = true;
-		int GatherQuality = 0;
-		int BokehMode = 0;
+		// These four set the render graph's pass list, so they are frame variables (CS::Setting).
+		CS::Setting<bool> UseAdaptiveGather = true;
+		CS::Setting<int> GatherQuality = 0;
+		CS::Setting<int> BokehMode = 0;
 		int BokehBladeCount = 6;
 		float BokehBladeRoundness = 1.0f;
 		float BlurQuality = 7.0f;
@@ -35,7 +39,7 @@ struct DoF : public PostProcessFeature
 		float HighlightBoost = 0.0f;
 		float PostBlurSmoothing = 0.0f;
 		float PetzvalStrength = 0.0f;
-		int HighlightShape = 0;
+		CS::Setting<int> HighlightShape = 0;
 		float HighlightShapeRotationAngle = 0.0f;
 		// Max blur disc radius, as a fraction of the screen width.
 		float MaxNearCoCRadius = 0.025f;

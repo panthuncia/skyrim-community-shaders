@@ -74,6 +74,9 @@ void CloudShadows::FlushQueuedLayerOps()
 
 void CloudShadows::ApplyLayerOps(const std::vector<ORGCloudShadows::LayerOp>& a_ops)
 {
+	// In graph mode only an engine-drawn face's ops get here (QueueLayerOp is fatal for the rest).
+	if (!a_ops.empty())
+		ORGCloudShadows::NoteD3D11Work();
 	auto context = globals::d3d::context;
 	float black[4] = { 0, 0, 0, 0 };
 	for (const auto& op : a_ops) {
@@ -170,9 +173,11 @@ void CloudShadows::SkyShaderHacks()
 {
 	auto context = globals::d3d::context;
 
-	// Outside the capture, a cloud layer reads the occlusion of the layers up to and including itself
+	// Outside the capture, a cloud layer reads the occlusion of the layers up to and including itself. In graph mode this
+	// runs only for a cloud draw the engine makes on D3D11 (DCLF clears the flags of the draws it takes).
 	if (bindLayerSelfShadow) {
 		bindLayerSelfShadow = false;
+		ORGCloudShadows::NoteD3D11Work();
 		FlushQueuedLayerOps();
 		ID3D11ShaderResourceView* selfShadowSRV = texCloudShadowLayers[currentLayerForDraw]->srv.get();
 		context->PSSetShaderResources(26, 1, &selfShadowSRV);
@@ -186,8 +191,8 @@ void CloudShadows::SkyShaderHacks()
 
 	auto reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS];
 
-	// The draw's targets, from the engine's shadow state (the flush has just applied it; under the flush latch, P5.13, it bound
-	// nothing). A reflection face is the cube target with its face as the view, and SetDirtyStates then binds that face alone.
+	// The draw's targets, from the engine's shadow state (the flush has just applied it; in graph mode its binds stay in the
+	// engine's context handle). A reflection face is the cube target with its face as the view, and SetDirtyStates then binds that face alone.
 	// The faces can be tripwire handles: DXVK's context takes what they wrap.
 	using RenderGraph::Engine::Tripwire::Unwrap;
 	const auto& shadowState = globals::game::shadowState->GetRuntimeData();
@@ -201,6 +206,7 @@ void CloudShadows::SkyShaderHacks()
 
 	if (side >= 0) {
 		// The engine draws this face's cloud layer on D3D11: what the graph has queued for the layers comes first.
+		ORGCloudShadows::NoteD3D11Work();
 		FlushQueuedLayerOps();
 		CheckResourcesSide(side);
 
@@ -305,7 +311,8 @@ void CloudShadows::ReflectionsPrepass()
 			occlusionClearedWithoutClouds = false;
 		}
 
-		// On the ORG path the ReflectionsPrepass anchor, which follows, copies into the graph's cubemap
+		// On the ORG path the ReflectionsPrepass anchor, which follows, copies into the graph's cubemap. It refuses only
+		// outside graph mode.
 		if (!ORGCloudShadows::Get().QueueOcclusionCopy()) {
 			FlushQueuedLayerOps();
 			context->CopyResource(OcclusionCopy()->resource.get(), texCloudShadowLayers[kMaxCloudLayers - 1]->resource.get());
@@ -344,7 +351,6 @@ ID3D11ShaderResourceView* CloudShadows::OcclusionSRV() const
 void CloudShadows::PostPostLoad()
 {
 	Hooks::Install();
-	ORGCloudShadows::Reserve();
 }
 
 void CloudShadows::EarlyPrepass()
@@ -379,7 +385,7 @@ void CloudShadows::SetupResources()
 		for (int layer = 0; layer < kMaxCloudLayers; ++layer) {
 			char name[64];
 			snprintf(name, sizeof(name), "CloudShadows::Layer[%d]", layer);
-			// CS_ORG_CLOUD_SHADOWS=1: a graph-owned layer exported to D3D11, else a D3D11 texture.
+			// In graph mode a graph-owned layer exported to D3D11, else a D3D11 texture.
 			texCloudShadowLayers[layer] = ORGCloudShadows::MakeLayer(layer, texDesc, srvDesc, name);
 			if (!texCloudShadowLayers[layer]) {
 				texCloudShadowLayers[layer] = new Texture2D(texDesc, name);

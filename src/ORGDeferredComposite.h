@@ -1,21 +1,28 @@
 #pragma once
 
+#include "RenderGraph/Port.h"
+
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string_view>
 
 struct ID3D11ShaderResourceView;
 
 /**
-* @brief The deferred composite as a compute pass at the DeferredComposite anchor, with CS_ORG_COMPOSITE=1.
+* @brief The deferred composite as a compute pass at the DeferredComposite anchor, in graph mode.
 *
-* Engine targets are imported once. Other features' outputs are read by published id when their producer runs on the graph,
-* so the read is ordered after the writes. A producer on D3D11 is imported in guest mode and bound null in native mode.
-* When a frame cannot run on the graph, Deferred runs the D3D11 composite. Render thread. Free of ORG/Vulkan includes.
+* Engine targets are imported once. Other features' outputs are read by their published ids, so the read is ordered after
+* the writes. A slot D3D11 binds nothing at, or whose id is not published, reads the null descriptor.
+* Outside graph mode Deferred runs the D3D11 composite. In graph mode a frame the graph cannot composite is a tap error.
+* Render thread. Free of ORG/Vulkan includes.
 */
-class ORGDeferredComposite
+class ORGDeferredComposite : public RenderGraph::Port<ORGDeferredComposite>
 {
 public:
+	static constexpr std::string_view kName = "Deferred composite";
+
 	/** @brief As Deferred::DeferredPasses gathers it for the D3D11 dispatch. */
 	struct Frame
 	{
@@ -29,32 +36,41 @@ public:
 		std::array<ID3D11ShaderResourceView*, 2> skylightingCoverage{};
 	};
 
-	static ORGDeferredComposite& Get();
-
-	static bool Requested();
-
-	/** @brief Call before the render graph initializes. */
-	static void Reserve();
-
-	/** @brief At Deferred::SetupResources. */
+	/** @brief At Deferred::SetupResources. Outside graph mode it does nothing; in graph mode a failure is fatal. */
 	void Setup();
 
 	/** @brief Before the anchor runs. Nothing when the ORG path is off. */
 	void SetFrame(const Frame& a_frame);
 
-	/** @brief After the anchor ran. False means Deferred runs the D3D11 composite. */
+	/** @brief After the anchor ran. Outside graph mode always false, and Deferred runs the D3D11 composite. */
 	bool Composited() const;
 
-	/** @brief After the anchor ran. The schedule does not hold the composite yet, so nothing composites and Deferred must not run D3D11's either. */
+	/**
+	* @brief After the anchor ran. The client is not registered yet, or the schedule does not hold the composite yet. Nothing
+	* composites this frame, and Deferred must not run D3D11's either.
+	*/
 	bool Lagged() const;
 
-	/** @brief Programs rebuild at the next frame. */
-	void ClearShaderCache();
+	/** @brief After the anchor ran. Why the graph could not composite this frame. Empty when it composited or lagged. In graph mode it is a tap error. */
+	std::string_view Refusal() const;
 
+	/** @brief The frame the graph composite takes, as SetFrame gave it. */
+	struct GraphFrame
+	{
+		std::uint32_t main = 0;
+		bool interior = false;
+	};
+
+	/**
+	* @brief After SetFrame, before the anchor's commit. Set when the graph composites this frame, so a pass after it reads its output.
+	* The D3D11 composite runs on the other frames. Render thread.
+	*/
+	std::optional<GraphFrame> GraphComposite() const;
 	~ORGDeferredComposite();
 
 private:
-	ORGDeferredComposite() = default;
+	friend class RenderGraph::Port<ORGDeferredComposite>;
+	ORGDeferredComposite();
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

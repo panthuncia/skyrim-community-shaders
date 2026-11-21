@@ -73,13 +73,6 @@ namespace DCLF::Api
 		const RE::NiCamera* camera = nullptr;
 	};
 
-	/** @brief The 0x1C accumulator that finished accumulating. */
-	class OcclusionAccumulator
-	{
-	public:
-		const RE::BSShaderAccumulator* accumulator = nullptr;
-	};
-
 	/** @brief A light the selection kept, and the scene frame of the selection. */
 	class ShadowLightKept
 	{
@@ -115,8 +108,7 @@ namespace DCLF::Extensions
 	struct OcclusionMapEntry
 	{
 		bool registered = false;
-		Api::ToggleId toggle;
-		const bool* available = nullptr;              // read whenever the toggle is
+		const bool* available = nullptr;              // read whenever the map is
 		std::uint8_t phase = 0;
 		std::uint32_t viewBit = 0;
 		std::uint32_t (*technique)(const Api::OccluderLeaf&) = nullptr;  // per walked entry
@@ -125,9 +117,7 @@ namespace DCLF::Extensions
 		Api::OcclusionTarget target = Api::OcclusionTarget::EngineMask;
 		std::string list, report, targetName;         // owned here
 		void (*importTarget)(Api::OcclusionTargetImport&) = nullptr;
-		bool (*referenceDue)() = nullptr;
 		void (*camera)(Api::OcclusionCamera&) = nullptr;
-		bool (*ownsAccumulator)(const Api::OcclusionAccumulator&) = nullptr;
 	};
 	struct ShadowSourceEntry
 	{
@@ -214,14 +204,14 @@ namespace DCLF::Extensions
 	void ShadowSourcesFrameEnd();
 
 	/**
-	 * @brief Whether DCLF draws occlusion map a_map: taken, available and toggled on.
+	 * @brief Whether DCLF draws occlusion map a_map: taken and available.
 	 * The available flag comes from Skylighting, whose hook drives both maps.
 	 */
-	inline bool OcclusionOn(const ToggleSet& a_toggles, std::uint32_t a_map)
+	inline bool OcclusionOn(std::uint32_t a_map)
 	{
 		if (a_map >= kOcclusionMaps)
 			return false;
 		const auto& map = OcclusionMapOf(a_map);
-		return map.registered && *map.available && a_toggles.On(map.toggle);
+		return map.registered && *map.available;
 	}
 }

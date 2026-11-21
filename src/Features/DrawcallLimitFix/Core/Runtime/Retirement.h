@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 #include <atomic>
 #include <memory>
@@ -121,6 +121,6 @@ namespace DCLF
 		}
 
 	private:
-		EventQueue<std::shared_ptr<const T>, 64> queue;
+		RenderGraph::Frame::EventQueue<std::shared_ptr<const T>, 64> queue;
 	};
 }

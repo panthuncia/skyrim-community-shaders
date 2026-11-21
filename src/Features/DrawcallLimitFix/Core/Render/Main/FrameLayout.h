@@ -189,16 +189,12 @@ namespace DCLF::Draws
 
 		static constexpr std::uint32_t kKeys = DrawPipelines::kMaxPipelines;
 
-		/** @brief Null, logged, when either program could not be created. Staging and ranks are sized for a_draws. */
-		static std::shared_ptr<DrawSort> Create(rhi::Device a_device, std::uint32_t a_draws)
+		/** @brief With the programs queued at setup (SetupPrograms). Staging and ranks are sized for a_draws. */
+		static std::shared_ptr<DrawSort> Create(std::shared_ptr<const PrefixSum::Programs> a_prefixSum, std::shared_ptr<const ComputeProgram> a_scatter, std::uint32_t a_draws)
 		{
 			auto sort = std::make_shared<DrawSort>();
-			sort->prefixSum = PrefixSum::Load(a_device);
-			sort->scatter = ComputeProgram::Load(a_device, { .source = kSortSequencesShader, .constantWords = kSortSequencesConstantWords });
-			if (!sort->prefixSum || !sort->scatter) {
-				logger::warn("[DCLF] The draws are not sorted by pipeline: its programs could not be created");
-				return {};
-			}
+			sort->prefixSum = std::move(a_prefixSum);
+			sort->scatter = std::move(a_scatter);
 			sort->counts = CreateWords(kKeys, true, "cs.dclf.sort-counts");
 			sort->offsets = CreateWords(kKeys, true, "cs.dclf.sort-offsets");
 			sort->blockSums = CreateWords(PrefixSum::Blocks(kKeys), true, "cs.dclf.sort-block-sums");

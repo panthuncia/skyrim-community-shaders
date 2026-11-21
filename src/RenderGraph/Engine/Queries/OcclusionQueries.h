@@ -1,11 +1,12 @@
 #pragma once
 
-// The engine's occlusion queries answered by the render graph, with CS_ORG_OCCLUSION_QUERIES=1 (default off).
+// The engine's occlusion queries answered by the render graph, in graph mode (Engine::GraphMode).
 //
-// The engine keeps a ring of 64 D3D11 occlusion queries, used by the sun glare and the decals. With the switch on, BeginQuery,
+// The engine keeps a ring of 64 D3D11 occlusion queries, used by the sun glare and the decals. In graph mode BeginQuery,
 // EndQuery and GetQueryData are detoured. A port opens a Bracket around the engine call that issues a query. The query inside
 // goes nowhere, and the port counts the draw with an ORG query instead. GetQueryData answers from the readback once that run's
-// GPU work is done, and returns not-ready until then, as D3D11 does. Queries outside any bracket stay on D3D11.
+// GPU work is done, and returns not-ready until then, as D3D11 does. A query outside any bracket is a tap error (EngineWork)
+// and answers its last count. D3D11 never sees it.
 //
 // Free of ORG and Vulkan includes, except BasicRHI's rhi.h for the record-time helpers.
 
@@ -16,24 +17,19 @@
 #include <string_view>
 #include <vector>
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include <Render/RunRef.h>
-#	include <rhi.h>
+#include <Render/RunRef.h>
+#include <rhi.h>
 
 namespace org
 {
 	class Resource;
 }
-#endif
 
 namespace RenderGraph::Engine::OcclusionQueries
 {
 	inline constexpr std::uint32_t kRingSlots = 64;
 
 	inline constexpr std::int32_t kNoSlot = -1;
-
-	/** @brief Read once. */
-	bool Requested();
 
 	bool Active();
 
@@ -72,7 +68,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 		std::uint32_t skipAnswer = 0;
 	};
 
-#if defined(CS_HAS_RENDER_GRAPH)
 	/**
 	* @brief The ORG queries of one client's runs. Each run's lease index owns a range of PerRun() queries.
 	* Ranges come in chunks of kRunsPerChunk lease indices, each with its own pool and readback buffer. Chunks never move.
@@ -123,7 +118,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 	private:
 		std::shared_ptr<State> state;
 	};
-#endif
 
 	std::string Status();
 }

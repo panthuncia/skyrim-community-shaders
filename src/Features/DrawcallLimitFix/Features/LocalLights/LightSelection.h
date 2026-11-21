@@ -13,11 +13,6 @@ namespace RE
 	class BSShadowLight;
 }
 
-namespace DCLF::Diagnostics
-{
-	struct LightSelectionView;
-}
-
 namespace DCLF
 {
 	/**
@@ -25,7 +20,7 @@ namespace DCLF
 	 * The engine keeps at most four lights, the sun first, each visible and sharing a room with the camera. Render thread.
 	 *
 	 * DCLF does the room test on its own portal walk of this frame. The engine instead tests each light's rooms as its
-	 * last walk left them, so the two can differ for a light that moved. The engine's own results are only compared by the parity observer.
+	 * last walk left them, so the two can differ for a light that moved.
 	 * The focus-shadow flag (+0x558) persists across frames, so DCLF keeps its own copy per light.
 	 */
 	class LightSelection
@@ -83,7 +78,6 @@ namespace DCLF
 		LightSelection() = default;
 		struct Hooks;
 		friend struct Hooks;
-		friend struct Diagnostics::LightSelectionView;
 		bool SharesRoomWithCamera(const RE::BSShadowLight* a_light);
 		void Select();
 		static void TellKeptLights(const Frame& a_frame);

@@ -114,7 +114,6 @@ namespace DCLF::Api
 	{
 		/**
 		 * @brief Follows a slot's record, not its residency.
-		 * Also called during the parity dense walk, so a component that must not touch its listing there checks DenseWalk.
 		 *
 		 * - written: may be called again for a slot already listed.
 		 * - released: called after Residency::left, right before the slot's object is reset.
@@ -152,22 +151,12 @@ namespace DCLF::Api
 			void (*joinsDone)(const CoordinatorComponentContext& a_context) = nullptr;
 		};
 
-		/** @brief The walk. Called for both the delta walk and the parity dense walk. */
+		/** @brief The walk. */
 		struct Walk
 		{
 			void (*begun)(const CoordinatorComponentContext& a_context) = nullptr;
 			void (*scheduling)(const CoordinatorComponentContext& a_context, WalkScheduling& a_scheduling) = nullptr;
 			void (*rewritten)(const CoordinatorComponentContext& a_context, std::uint32_t a_slot, const SlotRewrite& a_rewrite) = nullptr;
-			void (*ended)(const CoordinatorComponentContext& a_context) = nullptr;
-		};
-
-		/**
-		 * @brief Brackets the parity dense walk. The coordinator restores its own tables afterwards but not the components' state.
-		 * Save in begun and restore in ended.
-		 */
-		struct DenseWalk
-		{
-			void (*begun)(const CoordinatorComponentContext& a_context) = nullptr;
 			void (*ended)(const CoordinatorComponentContext& a_context) = nullptr;
 		};
 
@@ -243,7 +232,6 @@ namespace DCLF::Api
 		Residency residency;
 		Accumulate accumulate;
 		Walk walk;
-		DenseWalk dense;
 		Retirement retirement;
 		EntryClassHooks entryClass;
 		Events events;

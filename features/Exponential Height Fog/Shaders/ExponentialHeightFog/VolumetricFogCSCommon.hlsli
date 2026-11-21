@@ -34,6 +34,11 @@
 #define VolumetricFogHasLocalLights ((VOLUMETRIC_FOG_FLAGS & 32u) != 0u)
 #define VolumetricFogHasLocalShadowCache ((VOLUMETRIC_FOG_FLAGS & 64u) != 0u)
 #define VolumetricFogHasEngineLocalShadows ((VOLUMETRIC_FOG_FLAGS & 128u) != 0u)
+// The world shadow inputs the scattering binds (VolumetricFogLighting.hlsli). The D3D11 path sets them all.
+#define VolumetricFogHasTerrainShadows ((VOLUMETRIC_FOG_FLAGS & 256u) != 0u)
+#define VolumetricFogHasCloudShadows ((VOLUMETRIC_FOG_FLAGS & 512u) != 0u)
+#define VolumetricFogHasPhysSkyTransmittance ((VOLUMETRIC_FOG_FLAGS & 1024u) != 0u)
+#define VolumetricFogHasPhysSkyShadowVolume ((VOLUMETRIC_FOG_FLAGS & 2048u) != 0u)
 #define VolumetricFogInvGridSize VOLUMETRIC_FOG_INV_GRID_SIZE
 #define VolumetricFogNearFadeInDistanceInv VOLUMETRIC_FOG_NEAR_FADE_INV
 #define VolumetricFogHistoryWeight VOLUMETRIC_FOG_HISTORY_WEIGHT

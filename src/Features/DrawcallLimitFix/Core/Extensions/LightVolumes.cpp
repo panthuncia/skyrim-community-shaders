@@ -3,6 +3,7 @@
 // Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
+#include "RenderGraph/Fatal.h"
 
 #include <algorithm>
 #include <cstring>
@@ -38,12 +39,12 @@ namespace DCLF::Extensions
 	{
 		static bool once = false;
 		if (std::exchange(once, true))
-			stl::report_and_fail("Drawcall Limit Fix: the light volumes were resolved twice");
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the light volumes were resolved twice");
 		if (a_registered.name.empty())
 			return;
 		// A table needs both: whether it is read, and what fills it.
 		if (!a_registered.pointLightsActive != !a_registered.pointLights)
-			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s point lights need both pointLightsActive and pointLights", a_registered.name));
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{}'s point lights need both pointLightsActive and pointLights", a_registered.name));
 		resolvedVolumes = { true, std::string(a_registered.name), a_registered.landscapeFlags, a_registered.sample, a_registered.pointLightsActive, a_registered.pointLights };
 	}
 

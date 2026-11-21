@@ -36,7 +36,7 @@ namespace DCLF::Eligibility
 		{
 			const auto& g = a_geometry;
 			if (g.skin) {
-				if (!Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Skinned))
+				if (!Extensions::ObjectClassOn(Api::ObjectClass::Skinned))
 					return Ineligible::Skinned;
 				// For a skinned shape each drawn partition is one draw of that partition's buffer, not rendererData, which is a different TriShape.
 				// The native shader can index at most 240 palette rows.
@@ -48,7 +48,7 @@ namespace DCLF::Eligibility
 				const auto partitions = static_cast<std::uint32_t>(g.partitions.size());
 				if (!g.skinPartition || !g.skinData || partitions == 0 || !SkinPalettes::Fits(g.boneCount * SkinPalettes::kRowsPerBone))
 					return Ineligible::SkinShape;
-				if ((partitions > 1 || dismember) && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::SkinPartitions))
+				if ((partitions > 1 || dismember) && !Extensions::ObjectClassOn(Api::ObjectClass::SkinPartitions))
 					return Ineligible::SkinShape;
 				if (partitions > kMaxSkinPartitions)
 					return Ineligible::SkinShape;
@@ -68,26 +68,6 @@ namespace DCLF::Eligibility
 				return Ineligible::NoRendererData;
 			}
 			return Ineligible::None;
-		}
-
-		bool TestRefused(const SceneCapture::LeafView& a_leaf)
-		{
-			static const std::vector<std::string> names = [] {
-				std::vector<std::string> out;
-				const std::string value = SwitchValue(Switch::TestRefuse);
-				std::size_t start = 0;
-				while (start < value.size()) {
-					const auto end = value.find(',', start);
-					if (auto name = value.substr(start, end == std::string::npos ? std::string::npos : end - start); !name.empty())
-						out.push_back(std::move(name));
-					start = end == std::string::npos ? value.size() : end + 1;
-				}
-				return out;
-			}();
-			if (names.empty() || !a_leaf.node->name)
-				return false;
-			const std::string_view name = a_leaf.node->name;
-			return std::ranges::any_of(names, [&](const std::string& a_name) { return name.find(a_name) != std::string_view::npos; });
 		}
 
 		/** @brief Logs a refused skin once per geometry, a few times a session. The engine keeps such a shape, so its shadow is the engine's alone. */
@@ -134,16 +114,16 @@ namespace DCLF::Eligibility
 		if (const auto& flagged = Extensions::GeometryTypeContributionOf(g.type); flagged.propertyFlags) {
 			const auto* flaggedProperty = SceneCapture::LeafView::Lighting(a_leaf.property);
 			if (flaggedProperty && (flaggedProperty->flags & flagged.propertyFlags)) {
-				if (!ActiveToggles().On(flagged.toggle))
+				if (!flagged.ported)
 					return Ineligible::Lod;
 				flaggedShape = true;
 			}
 		}
 		if (type != RE::BSGeometry::Type::kTriShape && !multiIndex && !flaggedShape) {
 			// A particle geometry with a material port's property is that port's to classify. It has no renderer data, its vertices come from ParticleSnapshots.
-			if (ParticleGeometryType(g.type) && Extensions::GeometryTypeOn(ActiveToggles(), g.type)) {
+			if (ParticleGeometryType(g.type) && Extensions::GeometryTypeOn(g.type)) {
 				const auto* port = SceneCapture::LeafView::Port(a_leaf.property);
-				if (!port || !Extensions::PortTakesParticles(ActiveToggles(), port->port))
+				if (!port || !Extensions::PortTakesParticles(port->port))
 					return Ineligible::NotLightingShader;
 				LightingDescriptors descriptors;
 				const Ineligible reason = Extensions::DerivePort(port->port, *port, a_leaf, descriptors);
@@ -155,9 +135,6 @@ namespace DCLF::Eligibility
 				return Ineligible::NotTriShape;
 		}
 
-		// CS_DCLF_TEST_REFUSE refuses the named geometry, so a test run has engine-only geometry of any class.
-		if (TestRefused(a_leaf))
-			return Ineligible::UnstableBuffer;
 		if (const Ineligible buffers = BufferVerdict(g); buffers != Ineligible::None) {
 			if (buffers == Ineligible::SkinShape)
 				NoteSkinShape(a_leaf);
@@ -167,7 +144,7 @@ namespace DCLF::Eligibility
 		const auto* property = SceneCapture::LeafView::Lighting(a_leaf.property);
 		if (!property) {
 			const auto* port = SceneCapture::LeafView::Port(a_leaf.property);
-			if (!port || !Extensions::PortOn(ActiveToggles(), port->port))
+			if (!port || !Extensions::PortOn(port->port))
 				return Ineligible::NotLightingShader;
 			if (type != RE::BSGeometry::Type::kTriShape)
 				return Ineligible::EffectVariant;
@@ -179,7 +156,7 @@ namespace DCLF::Eligibility
 		}
 
 		// GetRenderPasses treats material alpha below one as transparent.
-		if (property->materialAlpha < 1.0f && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward))
+		if (property->materialAlpha < 1.0f && !Extensions::ObjectClassOn(Api::ObjectClass::Forward))
 			return Ineligible::AlphaBlend;
 
 		LightingDescriptors descriptors;
@@ -196,7 +173,7 @@ namespace DCLF::Eligibility
 			return reason;
 		if (!g.layerProperty)
 			return Ineligible::None;  // nothing but its own passes: a tri-shape
-		return Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Layer) && Layer(a_leaf, nullptr, nullptr) == Ineligible::None ? Ineligible::None : Ineligible::MultiIndex;
+		return Extensions::ObjectClassOn(Api::ObjectClass::Layer) && Layer(a_leaf, nullptr, nullptr) == Ineligible::None ? Ineligible::None : Ineligible::MultiIndex;
 	}
 
 	Ineligible Layer(const SceneCapture::LeafView& a_leaf, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated)
@@ -225,9 +202,9 @@ namespace DCLF::Eligibility
 		if (!a_entry.record || !a_entry.classified || a_entry.reason != Ineligible::None || !a_leaf.property)
 			return false;
 		const bool decal = (a_leaf.property->flags & 0xc000000ull) != 0;
-		if (decal && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Decal))
+		if (decal && !Extensions::ObjectClassOn(Api::ObjectClass::Decal))
 			return false;
-		if (Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward))
+		if (Extensions::ObjectClassOn(Api::ObjectClass::Forward))
 			return true;
 		return decal || !a_leaf.AlphaBlending();
 	}

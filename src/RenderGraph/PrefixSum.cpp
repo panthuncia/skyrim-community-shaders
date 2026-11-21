@@ -1,14 +1,12 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "PrefixSum.h"
+#include "PrefixSum.h"
 
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <rhi_helpers.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/Buffers/Buffer.h>
+#include <rhi_helpers.h>
 
 namespace PrefixSum
 {
@@ -92,7 +90,7 @@ namespace PrefixSum
 				auto& commands = a_recording.Commands();
 				const auto& scan = *a_frame.programs->blockScan;
 				commands.BindLayout(scan.layout->GetHandle());
-				commands.BindPipeline(scan.Pipeline());
+				commands.BindPipeline(scan.Pipeline(a_recording));
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 				commands.Dispatch(constants.blocks, 1, 1);
 				// One pass with a barrier rather than two passes, since the second dispatch reads and writes the offsets the first wrote.
@@ -100,7 +98,7 @@ namespace PrefixSum
 				commands.Barriers(rhi::BarrierBatch{ {}, {}, { &global, 1 } });
 				const auto& offsets = *a_frame.programs->blockOffsets;
 				commands.BindLayout(offsets.layout->GetHandle());
-				commands.BindPipeline(offsets.Pipeline());
+				commands.BindPipeline(offsets.Pipeline(a_recording));
 				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 				commands.Dispatch(1, 1, 1);
 			}
@@ -110,14 +108,14 @@ namespace PrefixSum
 		};
 	}
 
-	std::shared_ptr<const Programs> Load(rhi::Device a_device)
+	ComputeProgram::Desc BlockScanDesc()
 	{
-		auto programs = std::make_shared<Programs>();
-		programs->blockScan = ComputeProgram::Load(a_device, { .source = kSource, .entry = L"BlockScan", .constantWords = kConstantWords });
-		programs->blockOffsets = ComputeProgram::Load(a_device, { .source = kSource, .entry = L"BlockOffsets", .constantWords = kConstantWords });
-		if (!programs->blockScan || !programs->blockOffsets)
-			return {};
-		return programs;
+		return { .source = kSource, .entry = L"BlockScan", .constantWords = kConstantWords };
+	}
+
+	ComputeProgram::Desc BlockOffsetsDesc()
+	{
+		return { .source = kSource, .entry = L"BlockOffsets", .constantWords = kConstantWords };
 	}
 
 	std::shared_ptr<org::RenderPass> CreatePass(Desc a_desc)
@@ -126,4 +124,3 @@ namespace PrefixSum
 	}
 }
 
-#endif

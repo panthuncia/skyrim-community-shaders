@@ -1,27 +1,10 @@
 #include "ORGScreenshot.h"
-#include "RenderGraph/Engine/Native/Native.h"
 
-#include "RenderGraph/Switches.h"
+#include <winrt/base.h>
 
 #include <DirectXTex.h>
 
 #include <cstring>
-
-bool ORGScreenshot::Requested()
-{
-#if defined(CS_HAS_RENDER_GRAPH)
-	static const bool requested = RenderGraph::Engine::Native::GraphMode();
-	return requested;
-#else
-	return false;
-#endif
-}
-
-ORGScreenshot& ORGScreenshot::Get()
-{
-	static ORGScreenshot s_screenshot;
-	return s_screenshot;
-}
 
 bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_width, std::uint32_t a_height, DXGI_FORMAT a_format,
 	DirectX::ScratchImage& a_image)
@@ -46,37 +29,40 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 	return true;
 }
 
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
-#	include <rhi_interop_vulkan.h>
+#include <rhi_interop_vulkan.h>
 
-#	include "Features/HDRDisplay/ORGHDRDisplay.h"
-#	include "Globals.h"
-#	include "RenderGraph/AnchorPasses.h"
-#	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/FrameStaging.h"
-#	include "RenderGraph/GraphResources.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/RunGate.h"
-#	include "State.h"
+#include "Features/HDRDisplay/ORGHDRDisplay.h"
+#include "Globals.h"
+#include "RenderGraph/AnchorPasses.h"
+#include "RenderGraph/Engine/UiTargets.h"
+#include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/Frame/Observed.h"
+#include "RenderGraph/Frame/Variables.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/GraphResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/RunGate.h"
+#include "State.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <OpenRenderGraph/Runtime.h>
-#	include <Render/RenderGraph/RenderGraph.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/ExternalTextureResource.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <OpenRenderGraph/Runtime.h>
+#include <Render/RenderGraph/RenderGraph.h>
+#include <Resources/Buffers/Buffer.h>
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
+#include <Resources/ExternalTextureResource.h>
 
-#	include <atomic>
-#	include <mutex>
-#	include <string>
-#	include <utility>
+#include <atomic>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <utility>
 
 namespace
 {
 	constexpr const char* kClientId = "cs.screenshot";
-	// The clean scene's copy, at the FrameGeneration anchor (RecipeTable.h names it on that anchor's ticket).
+	// The clean scene's copy, at the UI stage's FrameGeneration step (RecipeTable.h).
 	constexpr const char* kCleanClientId = "cs.screenshot.clean";
 	// How many capture points a capture may wait for its copy and readback before it is reported lost.
 	constexpr std::uint64_t kPatience = 600;
@@ -97,6 +83,13 @@ namespace
 		org::GraphHost::GpuPoint point;
 	};
 
+	/** @brief What the capture copy's registration depends on: the source SetSource last set. */
+	struct CaptureKey
+	{
+		std::uint64_t source = 0;
+		bool operator==(const CaptureKey&) const = default;
+	};
+
 	struct Shared
 	{
 		// Render thread. A change rebuilds the client.
@@ -109,15 +102,36 @@ namespace
 		std::shared_ptr<Request> armed;
 		// Render thread, read by the commit.
 		std::uint64_t points = 0;
-		// Render thread. The source's name and resource when the graph owns it (the clean scene), for the client's graph.
-		std::pair<std::string, std::shared_ptr<org::Resource>> own;
+		// Render thread. The source's twin when the graph owns it (the clean scene), for the client's graph.
+		const GraphResources::Texture2D* own = nullptr;
+		// Render thread. SetSource raises wanted for a new source. Each registration keeps the key it was made for.
+		std::uint64_t wanted = 0;
+		// SetSource observes wanted. The client's key reads it, so a new source is an event.
+		RenderGraph::Frame::Observed<std::uint64_t> wantedSeen{ "Screenshot.Source" };
+		// The capture copy, declared on the source SetSource observes (an interim until the source is a variable).
+		RenderGraph::Frame::DeclaredClientOf<const CaptureKey> client;
 	};
 
-	/** @brief The clean scene's copy, shared with its client's callbacks. Render thread. */
-	struct CleanCopy
+	namespace Vars = RenderGraph::Frame::Vars;
+
+	/** @brief What the clean copy's registration depends on. */
+	struct CleanKey
 	{
-		bool armed = false;            // SnapshotCleanScene is running the anchor for it
-		std::uint32_t copied = ~0u;    // the frame whose run's commit opened the copy
+		Vars::Extent2D display{};      // the copy's size
+		FrameAnchors::Texture source;  // kFRAMEBUFFER's slot (Engine::UiTargets), stable for the session
+		bool operator==(const CleanKey&) const = default;
+	};
+
+	/** @brief The clean scene: its texture, its client and the copy's state, shared with the client's callbacks. Render thread. */
+	struct CleanScene
+	{
+		RenderGraph::Frame::DeclaredTexture2D texture;
+		// Each registration keeps its key. The copy reads the adopted one's (Adopted()), cleared with the client.
+		RenderGraph::Frame::DeclaredClientOf<const CleanKey> client;
+		std::shared_ptr<RenderGraph::RunGate> gate;
+		D3D11_TEXTURE2D_DESC desc{};  // the texture's description at the copy's size, for the capture
+		bool armed = false;           // SnapshotCleanScene is running the anchor for it
+		std::uint32_t copied = ~0u;   // the frame whose run's commit opened the copy
 	};
 
 	struct CaptureBindings
@@ -181,65 +195,69 @@ namespace
 
 	FrameAnchors::Texture Import(const ORGScreenshot::Source& a_source)
 	{
+		// The swap chain's back buffer is written only by the present copy, after every capture point. Once the target set holds
+		// kFRAMEBUFFER, its slot has the frame (HDR's composite included).
+		if (auto* field = RenderGraph::Engine::UiTargets::BackBufferTexture(); field && a_source.texture && !a_source.cleanScene) {
+			winrt::com_ptr<ID3D11Texture2D> swapChainBuffer;
+			if (globals::d3d::swapChain)
+				globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(swapChainBuffer.put()));
+			if (a_source.texture == field || (swapChainBuffer && a_source.texture == swapChainBuffer.get()))
+				return RenderGraph::Engine::UiTargets::Current().backBuffer;
+		}
 		if (a_source.engineTarget >= 0) {
 			auto* renderer = globals::game::renderer;
 			// Use the engine's own import so the graph orders it with other anchors' uses.
 			if (renderer && renderer->GetRuntimeData().renderTargets[static_cast<std::size_t>(a_source.engineTarget)].texture == a_source.texture)
-				return FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_source.engineTarget));
+				return FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(a_source.engineTarget)));
 		}
 		// HDR Display's ORG passes write these, so use their import to order the copy after those writes.
 		if (auto hdr = ORGHDRDisplay::Get().ImportOf(a_source.texture))
 			return hdr;
-		return a_source.importName ? FrameAnchors::D3D11Texture(a_source.importName, a_source.texture, a_source.srv, nullptr) : nullptr;
+		return a_source.importName ? FrameAnchors::ImportTexture(fmt::format("cs.d3d11.{}", a_source.importName), { .texture = a_source.texture, .srv = a_source.srv }) : nullptr;
 	}
 }
 
 struct ORGScreenshot::Impl
 {
 	std::shared_ptr<Shared> shared = std::make_shared<Shared>();
-	bool registered = false;
 	bool importWarned = false;
 	std::uint64_t nextId = 0;
 	std::uint64_t points = 0;
 	std::vector<std::shared_ptr<Request>> outstanding;  // taken, not read back yet
 	std::uint64_t built = 0;                            // the registration the client's passes were made for
 
-	// The pre-UI clean scene: kFRAMEBUFFER's copy at the FrameGeneration anchor.
-	std::unique_ptr<GraphResources::Texture2D> clean;
-	FrameAnchors::Texture cleanSource;
-	std::shared_ptr<RenderGraph::RunGate> cleanGate;
-	std::shared_ptr<CleanCopy> cleanCopy = std::make_shared<CleanCopy>();
-	bool cleanRegistered = false;
+	// The pre-UI clean scene: kFRAMEBUFFER's copy at the FrameGeneration anchor. Null when kFRAMEBUFFER had no texture at setup.
+	std::shared_ptr<CleanScene> clean;
 	bool cleanWarned = false;
 };
 
+ORGScreenshot::ORGScreenshot() = default;
 ORGScreenshot::~ORGScreenshot() = default;
-
-void ORGScreenshot::Reserve()
-{
-	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::Capture))
-		logger::warn("[ORG] Screenshot: CS_ORG_SCREENSHOT=1, but the Capture anchor could not be reserved; captures use D3D11");
-}
 
 namespace
 {
 	/**
 	* @brief Whether the run copies with the current registration. Without the stages the anchor runs whatever graph it built,
-	* so a capture taken before the new build switches in would read back an unwritten, black buffer.
+	* so a capture taken before the new build switches in would read back an unwritten, black buffer. A source set since the
+	* last registration waits for the registration the next revision makes.
 	*/
-	bool CopyBuilt()
+	bool CopyBuilt(const Shared& a_shared)
 	{
-		return FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) || FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Capture);
+		const auto held = a_shared.client.Held(FrameAnchors::Anchor::Capture);
+		return held && held->source == a_shared.wanted;
 	}
 
-	/** @brief In native mode with the UI stage the Capture anchor is its step after the overlay. Otherwise it runs its own epoch. */
-	bool RegisterClient(const std::shared_ptr<Shared>& a_shared)
+	/**
+	* @brief The capture copy's registration for the current source, made when a revision starts. In native mode with the UI
+	* stage the Capture anchor is its step after the overlay. Otherwise it runs its own epoch.
+	*/
+	bool MakeClient(const std::shared_ptr<Shared>& a_shared, FrameAnchors::ClientDesc& a_client)
 	{
 		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Capture, kClientId, 100);
 		builder.Add("copy", FrameAnchors::PassKind::Copy, [a_shared, source = a_shared->source, buffers = a_shared->buffers]() -> std::shared_ptr<org::RenderPass> {
 			return source ? std::make_shared<CapturePass>(a_shared, source, buffers) : nullptr;
 		});
-		FrameAnchors::ClientDesc client{};
+		auto& client = a_client;
 		client.id = kClientId;
 		client.passes = builder.Take();
 		for (auto& pass : client.passes)
@@ -251,12 +269,12 @@ namespace
 		};
 		// A graph-owned source is registered with the graph by name.
 		client.registerResources = [own = a_shared->own](org::RenderGraph& a_graph) {
-			if (own.second)
-				a_graph.RegisterResource(org::ResourceIdentifier(own.first), own.second);
+			if (own)
+				own->Register(a_graph);
 		};
 		client.commit = [weak = std::weak_ptr<Shared>(a_shared)](const FrameAnchors::Point&) {
 			const auto owner = weak.lock();
-			if (!owner || !owner->armed || !CopyBuilt())
+			if (!owner || !owner->armed || !CopyBuilt(*owner))
 				return;
 			auto request = std::exchange(owner->armed, nullptr);
 			request->taken = true;
@@ -264,35 +282,46 @@ namespace
 			owner->runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), request);
 		};
 		// No executed callback, since in a stage it would run before the commit submits. The next capture point takes the GPU point instead.
-		return FrameAnchors::Register(std::move(client));
+		return true;
 	}
+
+	/** @brief Setup. The capture copy follows the source SetSource sets. */
+	RenderGraph::Frame::DeclaredClientOf<const CaptureKey> DeclareCaptureClient(const std::shared_ptr<Shared>& a_shared)
+	{
+		const std::weak_ptr<Shared> weak = a_shared;
+		return RenderGraph::Frame::DeclareClient<CaptureKey, const CaptureKey>(
+			kClientId, RenderGraph::Frame::DependsOn(a_shared->wantedSeen.Var()),
+			[weak](const RenderGraph::Frame::Inputs& a_in) -> std::optional<CaptureKey> {
+				const auto owner = weak.lock();
+				if (!owner)
+					return std::nullopt;
+				// Null before the first SetSource: no source yet.
+				const auto* wanted = owner->wantedSeen.Get(a_in);
+				return CaptureKey{ wanted ? *wanted : 0 };
+			},
+			[weak](const CaptureKey& a_key, FrameAnchors::ClientDesc& a_client) -> std::shared_ptr<const CaptureKey> {
+				const auto owner = weak.lock();
+				if (!owner || !MakeClient(owner, a_client))
+					return nullptr;
+				return std::make_shared<const CaptureKey>(a_key);
+			});
+	}
+
+	/** @brief Defined with the clean scene's copy, below. */
+	std::shared_ptr<CleanScene> DeclareCleanScene();
 }
 
-bool ORGScreenshot::Setup()
+void ORGScreenshot::Setup()
 {
-	if (!Requested() || impl)
-		return impl && impl->registered;
-	auto& runtime = RenderGraphRuntime::Get();
-	auto* host = runtime.Host();
-	if (!host || !runtime.IsActive() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::Capture)) {
-		logger::warn("[ORG] Screenshot: CS_ORG_SCREENSHOT=1, but the render graph or its Capture anchor is not available; captures use D3D11");
-		return false;
-	}
-	impl = std::make_unique<Impl>();
-	// No pass until the first capture names a source.
-	if (!RegisterClient(impl->shared)) {
-		logger::warn("[ORG] Screenshot: the Capture anchor refused the client; captures use D3D11");
-		return false;
-	}
-	impl->registered = true;
-	logger::info("[ORG] Screenshot: captures are read back through the render graph ({})",
-		FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) ? "a pass of the UI stage" : "the Capture anchor");
-	return true;
-}
-
-bool ORGScreenshot::IsActive() const
-{
-	return impl && impl->registered && RenderGraphRuntime::Get().IsActive();
+	if (!BeginSetup())
+		return;
+	auto state = std::make_unique<Impl>();
+	// No pass until the first capture names a source. The client registers at the first revision.
+	state->shared->client = DeclareCaptureClient(state->shared);
+	// Without it captures still work, but read kFRAMEBUFFER at the capture point.
+	state->clean = DeclareCleanScene();
+	impl = std::move(state);
+	logger::info("[ORG] Screenshot: captures are read back through the render graph (a pass of the UI stage)");
 }
 
 bool ORGScreenshot::SetSource(const Source& a_source)
@@ -302,12 +331,13 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 	const bool clean = a_source.cleanScene && state.clean;
 	if (a_source.cleanScene && !clean)
 		return false;
-	FrameAnchors::Texture source = clean ? FrameAnchors::Texture(state.clean->Graph()) : Import(a_source);
+	FrameAnchors::Texture source = clean ? RenderGraph::AnchorPasses::TextureOf(*state.clean->texture) : Import(a_source);
 	if (!source)
 		return false;
 	D3D11_TEXTURE2D_DESC desc{};
+	// The clean scene's size is the copy's, so the adopted version's. Its twin's Desc() may be a version still in flight.
 	if (clean)
-		desc = state.clean->Desc();
+		desc = state.clean->desc;
 	else
 		a_source.texture->GetDesc(&desc);
 	const auto bytes = rhi::FormatByteSize(source.Format());
@@ -317,7 +347,7 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 	if (source == shared.source && shared.width == desc.Width && shared.height == desc.Height && shared.texelBytes == bytes)
 		return true;
 	shared.source = std::move(source);
-	shared.own = clean ? std::pair{ state.clean->Name(), state.clean->Graph() } : std::pair<std::string, std::shared_ptr<org::Resource>>{};
+	shared.own = clean ? state.clean->texture.Get() : nullptr;
 	shared.width = desc.Width;
 	shared.height = desc.Height;
 	shared.texelBytes = bytes;
@@ -328,10 +358,9 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 			return false;
 		shared.buffers[i]->SetName(fmt::format("cs.screenshot.readback{}", i));
 	}
-	// A capture waits for the client's next build.
-	if (!RegisterClient(state.shared))
-		return false;
-	logger::info("[ORG] Screenshot: the copy now reads {} ({}x{}, {} bytes a texel); its build switches in before the next capture copies",
+	// A capture waits for the registration the next revision makes, and for its build.
+	shared.wantedSeen.Observe(++shared.wanted);
+	logger::info("[ORG] Screenshot: the copy now reads {} ({}x{}, {} bytes a texel); its registration and build switch in before the next capture copies",
 		clean ? "the clean scene" : (a_source.importName ? a_source.importName : "the source"), desc.Width, desc.Height, bytes);
 	return true;
 }
@@ -355,7 +384,10 @@ namespace
 	{
 		if (!a_shared.armed)
 			return;
-		if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) ? !FrameAnchors::CanTap(kClientId) : !CopyBuilt())
+		if (!CopyBuilt(a_shared))
+			return;
+		// In the UI stage, a tap commits only while its window is open with a build that holds the copy.
+		if (!FrameAnchors::Place(kClientId).built)
 			return;
 		(void)FrameAnchors::Run(FrameAnchors::Anchor::Capture);
 	}
@@ -458,112 +490,170 @@ void ORGScreenshot::Poll()
 
 namespace
 {
-	/** @brief The clean scene's client: one gated copy, opened only by a commit SnapshotCleanScene armed. */
-	bool RegisterCleanClient(const std::shared_ptr<RenderGraph::RunGate>& a_gate, const GraphResources::Texture2D& a_clean, const FrameAnchors::Texture& a_source,
-		const std::shared_ptr<CleanCopy>& a_copy)
+	/** @brief The clean copy's registration for a_key: one gated copy, opened only by a commit SnapshotCleanScene armed. */
+	bool MakeCleanClient(const std::shared_ptr<CleanScene>& a_clean, const CleanKey& a_key, FrameAnchors::ClientDesc& a_client)
 	{
-		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::FrameGeneration, kCleanClientId, 100, nullptr, a_gate);
-		builder.Add(RenderGraph::AnchorPasses::Copy{
-			.name = "copy", .source = a_source, .target = a_clean.Graph(), .width = a_clean.Desc().Width, .height = a_clean.Desc().Height, .gate = 0u });
+		auto& clean = *a_clean;
+		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::FrameGeneration, kCleanClientId, 100, nullptr, clean.gate);
+		builder.Add(RenderGraph::AnchorPasses::Copy{ .name = "copy",
+			.source = a_key.source,
+			.target = RenderGraph::AnchorPasses::TextureOf(*clean.texture),
+			.width = a_key.display.width,
+			.height = a_key.display.height,
+			.gate = 0u });
 		if (builder.Failed()) {
 			logger::error("[ORG] Screenshot: the clean scene's copy could not be built: {}", builder.Failure());
 			return false;
 		}
-		FrameAnchors::ClientDesc client{};
-		client.id = kCleanClientId;
-		client.passes = builder.Take();
-		client.gates = { a_gate };
-		client.registerResources = [name = a_clean.Name(), resource = a_clean.Graph()](org::RenderGraph& a_graph) {
-			a_graph.RegisterResource(org::ResourceIdentifier(name), resource);
+		a_client.passes = builder.Take();
+		a_client.gates = { clean.gate };
+		a_client.registerResources = [twin = clean.texture.Get()](org::RenderGraph& a_graph) { twin->Register(a_graph); };
+		const std::weak_ptr<CleanScene> weak = a_clean;
+		a_client.active = [weak] {
+			const auto current = weak.lock();
+			return current && current->armed;
 		};
-		client.active = [weak = std::weak_ptr<CleanCopy>(a_copy)] {
-			const auto copy = weak.lock();
-			return copy && copy->armed;
-		};
-		client.commit = [weak = std::weak_ptr<CleanCopy>(a_copy), gate = a_gate](const FrameAnchors::Point&) {
-			const auto copy = weak.lock();
-			if (!copy || !copy->armed)
+		a_client.commit = [weak](const FrameAnchors::Point&) {
+			const auto current = weak.lock();
+			if (!current || !current->armed)
 				return;
-			gate->OpenDraw(0);
-			copy->copied = globals::state->frameCount;
+			current->gate->OpenDraw(0);
+			current->copied = globals::state->frameCount;
 		};
-		return FrameAnchors::Register(std::move(client));
+		// The UI stage's frame generation step also takes the hudless copy's tap in the same frame.
+		a_client.repeats = true;
+		// Every registration shares the gate and the commit. A registration for a new key taps as the one the frame's build holds
+		// (by id). SnapshotCleanScene copies only while that one fits the source.
+		logger::info("[ORG] Screenshot: the clean scene's copy is made for the next revision ({}x{})", a_key.display.width, a_key.display.height);
+		return true;
+	}
+
+	/** @brief kFRAMEBUFFER's texture, for its description: the field (the target set's handle), else the texture behind a view. */
+	winrt::com_ptr<ID3D11Texture2D> FramebufferTexture()
+	{
+		winrt::com_ptr<ID3D11Texture2D> framebuffer;
+		if (!globals::game::renderer)
+			return framebuffer;
+		const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+		if (target.texture) {
+			framebuffer.copy_from(target.texture);
+			return framebuffer;
+		}
+		if (ID3D11View* view = target.SRV ? static_cast<ID3D11View*>(target.SRV) : static_cast<ID3D11View*>(target.RTV)) {
+			winrt::com_ptr<ID3D11Resource> resource;
+			view->GetResource(resource.put());
+			if (resource)
+				framebuffer = resource.try_as<ID3D11Texture2D>();
+		}
+		return framebuffer;
+	}
+
+	/** @brief kFRAMEBUFFER's description. */
+	bool FramebufferDesc(D3D11_TEXTURE2D_DESC& a_desc)
+	{
+		const auto framebuffer = FramebufferTexture();
+		if (!framebuffer)
+			return false;
+		framebuffer->GetDesc(&a_desc);
+		return true;
+	}
+
+	/**
+	* @brief Declares the clean scene's texture and client, once, at setup. Null, logged, when kFRAMEBUFFER has no texture.
+	* Fatal when the texture or client cannot be declared.
+	* kFRAMEBUFFER is the back buffer here. Its format is fixed when the swap chain is made (R10G10B10A2 with HDR Display
+	* loaded), so only its size follows a variable. The clean scene is read only in SDR, so with HDR on the texture is one
+	* texel and there is no client.
+	*/
+	std::shared_ptr<CleanScene> DeclareCleanScene()
+	{
+		using namespace RenderGraph::Frame;
+		D3D11_TEXTURE2D_DESC framebuffer{};
+		if (!FramebufferDesc(framebuffer)) {
+			logger::warn("[ORG] Screenshot: kFRAMEBUFFER has no texture at setup, so there is no clean scene on the graph; captures read kFRAMEBUFFER at the capture point");
+			return nullptr;
+		}
+		auto clean = std::make_shared<CleanScene>();
+		clean->desc = D3D11_TEXTURE2D_DESC{ .Width = framebuffer.Width,
+			.Height = framebuffer.Height,
+			.MipLevels = 1,
+			.ArraySize = 1,
+			.Format = framebuffer.Format,
+			.SampleDesc = { .Count = 1 },
+			.Usage = D3D11_USAGE_DEFAULT,
+			.BindFlags = D3D11_BIND_SHADER_RESOURCE };
+		clean->gate = RenderGraph::RunGate::Create("cs.screenshot.clean.gate");
+		// The display size in SDR, one texel with HDR on (the existence rule).
+		clean->texture = DeclareTexture2D("Screenshot::CleanScene", DisplaySized(clean->desc), GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent },
+			ExistsWhen(DependsOn(Vars::HdrEnabled()), [](const Inputs& a_in) { return !a_in.Get(Vars::HdrEnabled()); }));
+		if (!clean->texture->Versioned())
+			RenderGraph::Fatal(ORGScreenshot::kName,
+				fmt::format("the clean scene's texture could not be declared ({}x{}, format {})", framebuffer.Width, framebuffer.Height,
+					static_cast<int>(framebuffer.Format)));
+		const std::weak_ptr<CleanScene> weak = clean;
+		clean->client = DeclareClient<CleanKey, const CleanKey>(
+			kCleanClientId, DependsOn(Vars::DisplaySize(), Vars::HdrEnabled()),
+			[weak](const Inputs& a_in) -> std::optional<CleanKey> {
+				const auto current = weak.lock();
+				if (!current)
+					return std::nullopt;
+				// No client, so none is adopted from here on.
+				if (a_in.Get(Vars::HdrEnabled()))
+					return std::nullopt;
+				// kFRAMEBUFFER's slot never changes, so a new display size is only a new version of it.
+				auto source = RenderGraph::Engine::UiTargets::Current(a_in).backBuffer;
+				if (!source)
+					RenderGraph::Fatal(ORGScreenshot::kName, "kFRAMEBUFFER has no graph slot for the clean scene's copy");
+				return CleanKey{ a_in.Get(Vars::DisplaySize()), std::move(source) };
+			},
+			[weak](const CleanKey& a_key, FrameAnchors::ClientDesc& a_client) -> std::shared_ptr<const CleanKey> {
+				const auto current = weak.lock();
+				if (!current || !MakeCleanClient(current, a_key, a_client))
+					return nullptr;
+				return std::make_shared<const CleanKey>(a_key);
+			},
+			[](const CleanKey& a_key, const CleanKey&) {
+				logger::info("[ORG] Screenshot: the clean scene's copy switches in with the revision adopted at frame {} ({}x{})", globals::state->frameCount,
+					a_key.display.width, a_key.display.height);
+			});
+		return clean;
 	}
 }
 
 bool ORGScreenshot::SnapshotCleanScene()
 {
-	if (!IsActive() || !globals::game::renderer)
+	if (!IsActive() || !impl->clean)
 		return false;
 	auto& state = *impl;
-	auto* framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER].texture;
-	auto source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
-	if (!framebuffer || !source)
-		return false;
-	D3D11_TEXTURE2D_DESC desc{};
-	framebuffer->GetDesc(&desc);
-	const bool same = state.clean && state.clean->Desc().Width == desc.Width && state.clean->Desc().Height == desc.Height &&
-	                  state.clean->Desc().Format == desc.Format && state.cleanSource == source;
-	if (!same) {
-		// A new size or format makes a new texture and client. Its build switches in at a later frame, so this frame does not copy.
-		D3D11_TEXTURE2D_DESC cleanDesc{};
-		cleanDesc.Width = desc.Width;
-		cleanDesc.Height = desc.Height;
-		cleanDesc.MipLevels = 1;
-		cleanDesc.ArraySize = 1;
-		cleanDesc.Format = desc.Format;
-		cleanDesc.SampleDesc = { 1, 0 };
-		cleanDesc.Usage = D3D11_USAGE_DEFAULT;
-		cleanDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		auto clean = std::make_unique<GraphResources::Texture2D>(cleanDesc, "Screenshot::CleanScene", GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
-		if (!state.cleanGate)
-			state.cleanGate = RenderGraph::RunGate::Create("cs.screenshot.clean.gate");
-		state.clean.reset();
-		state.cleanRegistered = false;
-		if (*clean && state.cleanGate) {
-			state.clean = std::move(clean);
-			state.cleanSource = std::move(source);
-			state.cleanRegistered = RegisterCleanClient(state.cleanGate, *state.clean, state.cleanSource, state.cleanCopy);
-		}
-		if (!state.cleanRegistered && !std::exchange(state.cleanWarned, true))
-			logger::error("[ORG] Screenshot: the clean scene's copy could not be set up ({}x{}, format {}); captures read kFRAMEBUFFER at the capture point",
-				desc.Width, desc.Height, static_cast<int>(desc.Format));
+	auto& clean = *state.clean;
+	const auto framebuffer = FramebufferTexture();
+	if (!framebuffer) {
+		if (!std::exchange(state.cleanWarned, true))
+			logger::warn("[ORG] Screenshot: kFRAMEBUFFER has no texture, so this capture has no clean scene; captures read kFRAMEBUFFER at the capture point");
 		return false;
 	}
-	if (!state.cleanRegistered)
+	// The frame's build holds the adopted registration. It copies only while that one was made for kFRAMEBUFFER's adopted size.
+	// Otherwise the revision with the new size is still on its way.
+	D3D11_TEXTURE2D_DESC framebufferDesc{};
+	framebuffer->GetDesc(&framebufferDesc);
+	const auto held = clean.client.Adopted();
+	if (!held || held->display.width != framebufferDesc.Width || held->display.height != framebufferDesc.Height)
 		return false;
-	state.cleanCopy->armed = true;
-	const bool ran = FrameAnchors::Scheduled(kCleanClientId, FrameAnchors::Anchor::FrameGeneration) && FrameAnchors::Run(FrameAnchors::Anchor::FrameGeneration);
-	state.cleanCopy->armed = false;
+	clean.desc.Width = held->display.width;
+	clean.desc.Height = held->display.height;
+	clean.armed = true;
+	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::FrameGeneration);
+	clean.armed = false;
 	return ran && HasFreshCleanScene();
 }
 
 bool ORGScreenshot::HasFreshCleanScene() const
 {
-	return impl && impl->clean && impl->cleanCopy->copied == globals::state->frameCount;
+	return impl && impl->clean && impl->clean->copied == globals::state->frameCount;
 }
 
 const D3D11_TEXTURE2D_DESC* ORGScreenshot::CleanSceneDesc() const
 {
-	return impl && impl->clean ? &impl->clean->Desc() : nullptr;
+	return impl && impl->clean ? &impl->clean->desc : nullptr;
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-// Without OpenRenderGraph screenshots always copy with D3D11.
-struct ORGScreenshot::Impl
-{};
-
-ORGScreenshot::~ORGScreenshot() = default;
-
-void ORGScreenshot::Reserve() {}
-bool ORGScreenshot::Setup() { return false; }
-bool ORGScreenshot::IsActive() const { return false; }
-bool ORGScreenshot::SetSource(const Source&) { return false; }
-bool ORGScreenshot::Capture(const Source&, OnPixels) { return false; }
-void ORGScreenshot::Poll() {}
-bool ORGScreenshot::SnapshotCleanScene() { return false; }
-bool ORGScreenshot::HasFreshCleanScene() const { return false; }
-const D3D11_TEXTURE2D_DESC* ORGScreenshot::CleanSceneDesc() const { return nullptr; }
-
-#endif

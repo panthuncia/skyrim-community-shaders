@@ -3,7 +3,6 @@
 #include "GpuEventTimers.h"
 #include "HangWatchdog.h"
 #include "Testing/Testing.h"
-#include "GpuIdleTrace.h"
 #include <intrin.h>
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Engine.h"
@@ -14,7 +13,6 @@
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Pipeline/EngineHooks.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
-#include "RenderGraph/FrameSequence.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "ShaderTools/BSShaderHooks.h"
@@ -57,6 +55,7 @@
 #include "Features/Upscaling.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/Upscaling/DXVKInterop.h"
+#include "Features/Upscaling/FramePresenter.h"
 #include "Features/Upscaling/Streamline.h"
 #include "Features/VolumetricLighting.h"
 #include "Features/VolumetricLighting/ORGVolumetricLighting.h"
@@ -278,8 +277,8 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 			shaderFound = false;
 		} else {
 			state->settingCustomShader = true;
-			// Through the flush latch, so a latched frame owes this shader rather than an older one.
-			RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), _ReturnAddress());
+			// Through the engine's context, which keeps the bind in graph mode.
+			RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader));
 			state->customVertexShader = vertexShader;
 			*globals::game::currentVertexShader = vertexShader;
 			globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
@@ -289,7 +288,7 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 			*globals::game::currentPixelShader = pixelShader;
 			state->customPixelShader = pixelShader;
 			if (pixelShader)
-				RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), _ReturnAddress());
+				RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader));
 			state->settingCustomShader = false;
 			shaderFound = true;
 		}
@@ -541,6 +540,8 @@ struct IDXGISwapChain_Present
 	{
 		// Nsight Perf passes span one frame's rendering: ended before the overlay and Present, begun after.
 		GpuCounters::OnPresentBegin();
+		// A feature or the engine writing a target field is fatal in graph modes.
+		RenderGraph::Engine::Targets::CheckFields("at the present");
 
 		ZoneScopedN("CS.Present");
 		{
@@ -556,7 +557,7 @@ struct IDXGISwapChain_Present
 			QueryPerformanceCounter(&qpc);
 			QueryPerformanceFrequency(&freq);
 			if (lastTsc && tsc > lastTsc) {
-				const double wallMs = static_cast<double>(qpc.QuadPart - lastQpc.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+				[[maybe_unused]] const double wallMs = static_cast<double>(qpc.QuadPart - lastQpc.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
 				TracyPlot("CS.RenderThread.CpuMs", wallMs * static_cast<double>(cycles - lastCycles) / static_cast<double>(tsc - lastTsc));
 			}
 			lastCycles = cycles;
@@ -566,7 +567,6 @@ struct IDXGISwapChain_Present
 		{
 			ZoneScopedN("CS.Present.Begin");
 			GpuTimingSource::OnPresent();
-			GpuIdleTrace::OnPresent();
 			HangWatchdog::OnPresent();
 			GpuEventTimers::OnPresent();
 		}
@@ -605,7 +605,9 @@ struct IDXGISwapChain_Present
 		// features' Reset, EndFrame, runs after the present); then the render thread's pacing point (RenderGraphRuntime::SignalFramePace),
 		// unless frame generation paces the present itself. After the commit, they follow the UI stage's block in stream order, and their
 		// D3D11 work (a flush, release queries) is outside the stage's window.
-		const bool pacedByCS = !globals::features::upscaling.IsFrameGenerationActive();
+		// The presenter knows whether a presentation layer paces the presents.
+		auto& presenter = FrameGen::ActivePresenter();
+		const bool pacedByCS = !presenter.LayerPaces();
 		bool frameEndQueued = false;
 		const auto queueFrameEnd = [&] {
 			if (std::exchange(frameEndQueued, true))
@@ -613,6 +615,46 @@ struct IDXGISwapChain_Present
 			if (globals::features::drawcallLimitFix.loaded)
 				globals::features::drawcallLimitFix.BeforePresent();
 			RenderGraphRuntime::Get().SignalFramePace(pacedByCS);
+		};
+
+		using PresentFn = std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>;
+		// The frame's end, then a_present. HDR Display's deferred composite runs it at its own present, after HDR output.
+		const auto frameEnd = [&](IDXGISwapChain* sc, UINT si, UINT f, const PresentFn& a_present) -> HRESULT {
+			ZoneScopedN("CS.Present.NativeWait");
+			// The UI stage's commit point: just before the present. The capture point comes first in native mode with the UI stage, so
+			// a screenshot is a pass of the stage (its Capture step, after the overlay).
+			if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture))
+				globals::features::screenshotFeature.ProcessCaptureRequest();
+			(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
+			// The UI stage commits before the present (BeforeGpuWork).
+			FrameAnchors::BeforeGpuWork("the present");
+			queueFrameEnd();
+			// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
+			// presenting without owning rendering drains too: it copies what the owner's epochs draw.
+			// Native mode: the render owner's present is an entry on the submission thread's queue,
+			// after the frame's epochs, so it does not drain (Native's QueuePresent).
+			const bool holdsPresent = globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
+			                          !globals::features::upscaling.IsFrameGenerationActive();
+			// Native keeps the queued present with frame generation on: the swap chain's layer presents on the submission thread.
+			// Only native mode has a submission thread.
+			const bool queuedPresent = !holdsPresent && RenderGraphRuntime::Get().QueuesPresent();
+			if (!queuedPresent)
+				RenderGraphRuntime::Get().DrainSubmissions("the present", true);
+			GpuEventTimers::BeginEvent("mark before native present");
+			GpuEventTimers::EndEvent();
+			// A load without a loading menu (or a re-entry), held until Drawcall Limit Fix draws its objects: the previous frame
+			// stays on screen. The frame's work is sent on as a present would send it. Not with frame generation, which presents
+			// itself.
+			if (holdsPresent) {
+				presenter.HoldPresent();
+				return S_OK;
+			}
+			// kFRAMEBUFFER is a CS slot: guest copies its current version into DXVK's back buffer (lane P), native's present copies it.
+			presenter.CopyFrame(sc);
+			const auto presented = a_present(sc, si, f);
+			GpuEventTimers::BeginEvent("mark after native present");
+			GpuEventTimers::EndEvent();
+			return presented;
 		};
 
 		HRESULT retval;
@@ -626,51 +668,19 @@ struct IDXGISwapChain_Present
 				return globals::features::upscaling.PresentWithFrameGeneration(
 					swapChain, syncInterval, presentFlags,
 					[&](IDXGISwapChain* sc, UINT si, UINT f) {
-						ZoneScopedN("CS.Present.NativeWait");
-						// The UI stage's commit point: just before the present. The capture point comes first in native mode with the UI stage, so
-						// a screenshot is a pass of the stage (its Capture step, after the overlay).
-						if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture))
-							globals::features::screenshotFeature.ProcessCaptureRequest();
-						(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
-						// The UI stage commits before the present (BeforeGpuWork).
-						FrameAnchors::BeforeGpuWork("the present");
-						queueFrameEnd();
-						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
-						// presenting without owning rendering drains too: it copies what the owner's epochs draw.
-						// Native mode with CS_ORG_QUEUE_PRESENT: the render owner's present is an entry on the submission thread's queue,
-						// after the frame's epochs, so it does not drain (Native's QueuePresent).
-						const bool holdsPresent = globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
-						                          !globals::features::upscaling.IsFrameGenerationActive();
-						const bool queuedPresent = !holdsPresent && RenderGraph::Engine::Native::Active() && !globals::features::upscaling.IsFrameGenerationActive() &&
-						                           RenderGraphRuntime::Get().QueuesPresent();
-						if (!queuedPresent)
-							RenderGraphRuntime::Get().DrainSubmissions("the present", true);
-						RenderGraph::FrameSequence::NoteBoundary("the present");
-						GpuEventTimers::BeginEvent("mark before native present");
-						GpuEventTimers::EndEvent();
-						// A load without a loading menu (or a re-entry), held until Drawcall Limit Fix draws its objects: the previous frame
-						// stays on screen. The frame's work is sent on as a present would send it. Not with frame generation, which presents
-						// itself.
-						if (holdsPresent) {
-							globals::d3d::context->Flush();
-							// Native: the held frame is paced as a present would pace it.
-							if (RenderGraph::Engine::Native::Active())
-								RenderGraph::Engine::Native::PaceHeldPresent();
-							return S_OK;
-						}
-						const auto presented = func(sc, si, f);
-						GpuEventTimers::BeginEvent("mark after native present");
-						GpuEventTimers::EndEvent();
-						return presented;
+						// HDR Display's deferred composite ends the frame at its own present.
+						if (globals::features::hdrDisplay.IsPresentSuppressed())
+							return func(sc, si, f);
+						return frameEnd(sc, si, f, [](IDXGISwapChain* a_sc, UINT a_si, UINT a_f) { return func(a_sc, a_si, a_f); });
 					});
-			});
+			},
+			frameEnd);
 		}
 
 		// A chain that returned without presenting (occluded, a failed frame generation present).
 		queueFrameEnd();
 		streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);
 
-		auto* dxvk = DXVKInterop::GetSingleton();
 		const bool presentSucceeded = SUCCEEDED(retval);
 		// A removed device (DXVK's or native D3D11's Present): the test run ends with device-lost.
 		if (retval == DXGI_ERROR_DEVICE_REMOVED || retval == DXGI_ERROR_DEVICE_RESET || retval == DXGI_ERROR_DEVICE_HUNG) {
@@ -679,8 +689,7 @@ struct IDXGISwapChain_Present
 		}
 		{
 			ZoneScopedN("CS.Present.SurfaceState");
-			if (presentSucceeded)
-				dxvk->RefreshPresenterSurfaceState();
+			presenter.AfterPresent(presentSucceeded);
 			streamline->CaptureDLSSGPresentState();
 		}
 
@@ -897,7 +906,9 @@ struct BSShaderRenderTargets_Create
 	static void thunk()
 	{
 		static int calls = 0;
-		if (++calls > 1)
+		// Graph modes: after the first set CS owns the targets. A later set only records shapes, and the set's declarations follow.
+		const bool laterSet = RenderGraph::Engine::Targets::OwnsSets();
+		if (++calls > 1 && !laterSet)
 			logger::warn("[Hooks] the engine is creating its render targets again (call {}); CS's resources are not made for that", calls);
 		Util::SetGameSettingValue<std::int32_t>("iNumFocusShadow:Display", iNumFocusShadow, 0);
 		if (globals::features::hdrDisplay.loaded)
@@ -905,11 +916,13 @@ struct BSShaderRenderTargets_Create
 		{
 			// Everything the game creates here is its render targets (VRAM attribution); each is then labeled by name.
 			Vram::OwnerScope vramScope("Game/RenderTarget");
-			// CS_ORG_ENGINE_TARGETS: ORG makes the set, and publishes it once it is complete.
 			RenderGraph::Engine::Targets::BeginSet();
 			func();
 			RenderGraph::Engine::Targets::EndSet();
 		}
+		// State::Setup and ReInit run once a session in graph modes. Features follow their declarations.
+		if (laterSet)
+			return;
 		globals::ReInit();
 		Vram::TagGameRenderTargets(true);
 		globals::state->Setup();
@@ -1080,12 +1093,20 @@ namespace Hooks
 			// answers by creating its render targets again. CS's resources are not made for that: State::Setup runs a second time
 			// (about 1 GB more each time), and with Drawcall Limit Fix the game crashes recording its shadow views. Nothing the
 			// player asked for changed, so the window keeps its size. Moving and minimizing still work.
-			if (a_msg == WM_WINDOWPOSCHANGING && menu->initialized && !Upscaling::s_windowModifying.load(std::memory_order_relaxed) && !IsIconic(a_hwnd)) {
+			// Dragging the window frame resizes it on purpose, and keeps the size lock off. In graph modes CS owns the engine's
+			// targets (Engine/Targets/EngineTargetSet.h): a new set only records shapes, so no size is locked there at all.
+			const bool dragging = Upscaling::s_windowModifying.load(std::memory_order_relaxed);
+			static bool s_dragLogged = false;
+			if (!dragging)
+				s_dragLogged = false;
+			if (a_msg == WM_WINDOWPOSCHANGING && menu->initialized && !dragging && !RenderGraph::Engine::GraphMode() && !IsIconic(a_hwnd)) {
 				auto* position = reinterpret_cast<WINDOWPOS*>(a_lParam);
 				RECT rect{};
 				if (!(position->flags & SWP_NOSIZE) && position->x > -32000 && GetWindowRect(a_hwnd, &rect) &&
 					(position->cx != rect.right - rect.left || position->cy != rect.bottom - rect.top)) {
-					logger::info("[Hooks] window kept at {}x{}, not resized to {}x{}", rect.right - rect.left, rect.bottom - rect.top, position->cx, position->cy);
+					if (!dragging || !std::exchange(s_dragLogged, true))
+						logger::info("[Hooks] window kept at {}x{}, not resized to {}x{}{}", rect.right - rect.left, rect.bottom - rect.top, position->cx,
+							position->cy, dragging ? " (a frame drag in a graph mode; later sizes of this drag are not logged)" : "");
 					position->flags |= SWP_NOSIZE | SWP_NOMOVE;
 				}
 			}
@@ -1296,7 +1317,7 @@ namespace Hooks
 					if (state->ShaderEnabled(type)) {
 						RE::BSGraphics::VertexShader* vertexShader = shaderCache->GetVertexShader(*currentShader, state->modifiedVertexDescriptor);
 						if (vertexShader) {
-							RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader), _ReturnAddress());
+							RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader));
 							state->customVertexShader = vertexShader;
 							*globals::game::currentVertexShader = a_vertexShader;
 							globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
@@ -1310,8 +1331,7 @@ namespace Hooks
 
 			state->customVertexShader = nullptr;
 			*globals::game::currentVertexShader = a_vertexShader;
-			// An engine shader can be a tripwire handle (P4.6), which DXVK's own context cannot take.
-			RenderGraph::Engine::Flush::BindVertexShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader)), _ReturnAddress());
+			RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(a_vertexShader->shader));
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1330,7 +1350,7 @@ namespace Hooks
 					if (state->ShaderEnabled(type)) {
 						RE::BSGraphics::PixelShader* pixelShader = shaderCache->GetPixelShader(*currentShader, state->modifiedPixelDescriptor);
 						if (pixelShader) {
-							RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader), _ReturnAddress());
+							RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(pixelShader->shader));
 							state->customPixelShader = pixelShader;
 							*globals::game::currentPixelShader = a_pixelShader;
 							return;
@@ -1343,7 +1363,7 @@ namespace Hooks
 			state->customPixelShader = nullptr;
 
 			if (a_pixelShader)
-				RenderGraph::Engine::Flush::BindPixelShader(RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader)), _ReturnAddress());
+				RenderGraph::Engine::Flush::BindPixelShader(reinterpret_cast<ID3D11PixelShader*>(a_pixelShader->shader));
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};

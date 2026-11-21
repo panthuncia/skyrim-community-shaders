@@ -12,8 +12,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/LatestSlot.h"
+#include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -29,7 +29,7 @@
 #include <Tracy/Tracy.hpp>
 
 #include <OpenRenderGraph/GraphHost.h>
-#include <ORGModuleServices/PipelineService.h>
+#include <ORGModuleServices/PipelineRegistry.h>
 #include <rhi_helpers.h>
 
 #include <algorithm>
@@ -128,24 +128,19 @@ namespace DCLF
 		const DXGI_FORMAT format = input->refractionFormat, depthFormat = input->targets.depth;
 		const std::uint8_t writeMask = input->refractionWriteMask;
 		const bool frontCCW = *input->frontCCW;
-		org::services::PipelineRecipe recipe;
-		recipe.id = "dclf.refraction";
-		recipe.shaderKey = ModuleHash(program->vertex) ^ ModuleHash(program->pixel) * 0x9E3779B97F4A7C15ull;
-		const std::uint64_t fixedFunction[] = { static_cast<std::uint64_t>(format), static_cast<std::uint64_t>(depthFormat), writeMask, frontCCW ? 1ull : 0ull };
-		recipe.fixedFunctionKey = ankerl::unordered_dense::detail::wyhash::hash(fixedFunction, sizeof(fixedFunction));
+		const std::string id = "dclf.refraction";
 		const auto build = [device = device, layout = ShadowLayout(), format, depthFormat, writeMask, frontCCW](const ShaderPrograms::ShadowProgram& a_program) {
 			return BuildRefraction(device, layout, &a_program, format, depthFormat, writeMask, frontCCW);
 		};
-		recipe.build = [build, program] { return build(*program); };
-		auto live = MakeLive(recipe.id, ShaderPrograms::SourcePathOf(*input->refractionUtility), *program,
+		auto live = MakeLive(id, ShaderPrograms::SourcePathOf(*input->refractionUtility), *program,
 			[utility = input->refractionUtility](ShaderPrograms::Rebuilt<ShaderPrograms::ShadowProgram> a_done) {
 				ShaderPrograms::Get().RebuildShadow(kRefractionTechnique, *utility, std::move(a_done));
 			},
 			build);
 		r.requested = true;
 		r.format = format;
-		(void)service.Request(std::move(recipe),
-			[completions = completions, generation = lane.generation, format, live = std::move(live)](const org::services::PipelineArtifact& a_artifact) {
+		RequestBuild([build, program] { return build(*program); },
+			[completions = completions, generation = lane.generation, format, live = std::move(live)](Artifact a_artifact) {
 				completions->refraction.Push({ generation, format, a_artifact, live });
 				WakePipelineLane();
 			});
@@ -185,18 +180,13 @@ namespace DCLF
 		}
 		const ForwardTargets forwardTargets = *keyTargets;
 		const auto cull = (a_key.flags & ForwardPipelineKey::kForwardTwoSided) ? rhi::CullMode::None : cullBack ? rhi::CullMode::Back : rhi::CullMode::Front;
-		org::services::PipelineRecipe recipe;
-		recipe.id = familyKey ? fmt::format("dclf.forward.{}", Extensions::DrawFamilyOf(family).keyName) :
+		const std::string id = familyKey ? fmt::format("dclf.forward.{}", Extensions::DrawFamilyOf(family).keyName) :
 		                        fmt::format("dclf.forward.{:08X}.{:08X}.{:X}", a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.flags);
-		recipe.shaderKey = ModuleHash(program->vertex) ^ ModuleHash(program->pixel) * 0x9E3779B97F4A7C15ull;
-		recipe.fixedFunctionKey = ankerl::unordered_dense::detail::wyhash::hash(&forwardTargets, sizeof(forwardTargets)) ^
-		                          static_cast<std::uint64_t>(cull) * 0x9E3779B97F4A7C15ull;
 		const auto build = [device = device, zLayout = zLayout->GetHandle(), forwardTargets, cull, frontCCW = *input->frontCCW](const ShaderPrograms::ForwardProgram& a_program) {
 			return BuildForward(device, zLayout, &a_program, forwardTargets, cull, frontCCW);
 		};
-		recipe.build = [build, program] { return build(*program); };
 		const RE::BSShader* shader = familyKey ? input->drawFamilySource[d] : input->lighting;
-		auto live = MakeLive(recipe.id, ShaderPrograms::SourcePathOf(*shader), *program,
+		auto live = MakeLive(id, ShaderPrograms::SourcePathOf(*shader), *program,
 			[family, familyKey, shader, key = a_key](ShaderPrograms::Rebuilt<ShaderPrograms::ForwardProgram> a_done) {
 				if (familyKey)
 					ShaderPrograms::Get().RebuildDrawFamilyForward(family, *shader, std::move(a_done));
@@ -205,8 +195,8 @@ namespace DCLF
 			},
 			build);
 		f.entries.try_emplace(a_key).first->second.requested = true;
-		(void)service.Request(std::move(recipe),
-			[completions = completions, key = a_key, generation = f.generation, live = std::move(live)](const org::services::PipelineArtifact& a_artifact) {
+		RequestBuild([build, program] { return build(*program); },
+			[completions = completions, key = a_key, generation = f.generation, live = std::move(live)](Artifact a_artifact) {
 				completions->forward.Push({ key, generation, a_artifact, live });
 				WakePipelineLane();
 			});

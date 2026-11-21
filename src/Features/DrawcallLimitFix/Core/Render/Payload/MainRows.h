@@ -203,7 +203,6 @@ namespace DCLF::Draws
 			double resolveMs = 0, resolveMaxMs = 0, inputsMs = 0, bundleMs = 0;
 			std::uint64_t aheads = 0, overlapped = 0;
 			double streamsMs = 0, mainMs = 0, stagesMs = 0, shadowMs = 0, exclusionsMs = 0;
-			std::uint64_t parityChecks = 0, parityMismatches = 0, packingChecks = 0, packingConflicts = 0;
 		} pairStats;
 	};
 	/** @brief Formats the `[DCLF] main pairs` report line and resets the counters. */

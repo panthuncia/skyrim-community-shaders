@@ -15,19 +15,15 @@ namespace DCLF::Scene
 		PublishKey publishedKey;
 		bool publishedKeyValid = false;
 		bool publishForced = false;  // an input TakeCoordinatorInputs took publishes
-		// A pass publishes only once the snapshot builder took the last publication, unless it is the frame's own pass, inline or the first.
+		// A pass publishes only once the snapshot builder took the last publication, unless it is the frame's own pass or the first.
 		// Otherwise it defers and its changes ride the next one.
 		std::uint32_t passSources = 0;      // the SceneWake bits the running pass took
 		bool passTookFrameInputs = false;   // the running pass took new frame inputs (TakeFrameInputs)
 		bool passDeferred = false;          // the running pass needed a publication and deferred it
 		std::uint32_t passesDeferred = 0;   // passes deferred since the last publication (folded into the next)
-		std::uint64_t pacedPublications = 0;  // publications that folded deferred passes in (the paced parity's schedule)
-		bool pacedCheckDue = false;           // this publication is the paced parity's (Policy::CheckPacedPublication)
-		std::shared_ptr<SetSnapshot> claimsReference;  // its claims made whole (PublishClaims), compared after
 		enum class PublishReason : std::uint8_t
 		{
 			First,   // nothing published yet
-			Inline,  // the parities' inline pass
 			Frame,   // the frame's own pass
 			Taken,   // the builder took the last publication
 			Count
@@ -47,8 +43,6 @@ namespace DCLF::Scene
 						  replayPooled = 0, replayNearer = 0;
 			double replayMs = 0.0;
 			std::uint64_t forwardCounted = 0, forwardKept = 0, waitingCompacted = 0, waitingKept = 0;
-			std::uint64_t parityChecks = 0, parityTables = 0, parityClaims = 0;
-			std::string parityFirst;
 		} paceStats;
 		std::uint32_t paceWindow = ~0u;
 		struct PumpStats
@@ -57,7 +51,7 @@ namespace DCLF::Scene
 			std::vector<std::uint32_t> passEvents;     // tracker events and queue entries drained
 			std::vector<double> publishMs;             // oldest unpublished event to its publication
 			std::vector<std::uint32_t> publishFrames;  // the same in render-thread frames
-			std::uint64_t passes = 0, eventsOnly = 0, loading = 0, unchanged = 0, published = 0, inlinePasses = 0, failed = 0;
+			std::uint64_t passes = 0, eventsOnly = 0, loading = 0, unchanged = 0, published = 0, failed = 0;
 			std::array<std::uint64_t, static_cast<std::size_t>(SceneWake::Count) + 1> bySource{}, unchangedBySource{};
 			std::uint64_t perFrameWalks = 0, eventWalks = 0;
 			double fullMs = 0.0, fullMaxMs = 0.0;  // whole passes (not events alone)
@@ -66,7 +60,7 @@ namespace DCLF::Scene
 		} pumpStats;
 		bool holdLostMembers = false;  // from the joins on: members RunSceneWork drops are held for PrimaryCull
 		// What a scene pass holds for the render thread while it runs.
-		bool inSceneTask = false;       // on the lane, not inline
+		bool inSceneTask = false;       // inside a scene pass on the lane
 		bool holdPrimaryNotes = false;  // PrimaryCull's notes held (primaryNotes)
 	};
 }

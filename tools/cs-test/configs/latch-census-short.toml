@@ -1,15 +1,8 @@
-# Converted from tools/cs-ab/scenarios/latch-census-short.env. Old frame N became world-ready + (N - 100) for the first
-# command, then each command at 'previous' plus the old gap.
-# latch-census.env without Blackreach and the race menu (fewer locations, less VRAM): Whiterun, the inventory, map and journal,
-# a save and its load, then Dragonsreach. The Phase 5.5 working census; check with tools/cs-ab/census.py.
-# p5-all-census-misc.env with the flush latch on (P5.13, docs/development/p5/flush.md "The latch" and "Allowed engine draws"). Against
-# latch-census-off.env: the census's draws should be the same classes (allowed ones still reach D3D11), "[ORG] flush latch: N frames:"
-# names the allowed draws by reason, and every "[ORG] flush latch: engine ... nobody vouched for it ... skipped" [E] line is a draw no
-# port vouched for. Keep the switch lines in step with p5-all-census-misc.env.
+# A guest tour: Whiterun, the inventory, map and journal, a save and its load, then Dragonsreach.
+# In graph mode the engine's context keeps binds and drops draws. A game draw outside the engine's draw functions is an EngineDraw
+# tap error, which stops a development build. Read "[ORG] engine draws: N frames:" for the dropped draws, and any
+# "[ORG] engine draws: engine ... was dropped" [E] line for a draw no port takes.
 extends = ["guest"]
-
-[org]
-census = true
 
 [[steps]]
 at = "world-ready"

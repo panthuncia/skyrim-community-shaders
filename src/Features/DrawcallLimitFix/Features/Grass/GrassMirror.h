@@ -14,7 +14,7 @@
 #include <winrt/base.h>
 
 #include "Features/DrawcallLimitFix/Features/Grass/GrassLayout.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 struct ID3D11Buffer;
 
@@ -90,7 +90,7 @@ namespace DCLF::Features::Grass
 	};
 
 	/** @brief Pushed from any thread by GrassShared's capture sink, drained on the render thread. */
-	inline EventQueue<Event> events;
+	inline RenderGraph::Frame::EventQueue<Event> events;
 	inline bool installed = false;
 
 	/** @brief Safe from any thread. */
@@ -197,8 +197,6 @@ namespace DCLF::Features::Grass
 			std::uint32_t meshesResolved = 0, meshesFailed = 0, meshesPending = 0, bucketsDrawable = 0;
 		};
 		Readiness ReadinessOf() const;
-		const Shapes& MirroredShapes() const { return shapes; }
-		const Buckets& MirroredBuckets() const { return buckets; }
 
 		/** @brief High-water marks, which the GPU tables must hold. */
 		std::uint32_t InstanceSlots() const { return instanceSlots; }

@@ -2,7 +2,7 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Precipitation (CS_ORG_PRECIPITATION): the render graph draws the engine's rain and snow (BSParticleShader ENVCUBE techniques)
+// Precipitation, in graph mode: the render graph draws the engine's rain and snow (BSParticleShader ENVCUBE techniques)
 // in the engine's place.
 // They draw through the grouped alphas (AE 107673 +0x1F3), mixed with every other blended draw, so there is no batch to hook.
 // Each draw is latched at DrawTriShape and drawn at once as its own run at the EngineDraws anchor, with CS's Particle.hlsl.
@@ -98,11 +98,14 @@ namespace DCLF::Features::Precipitation
 		std::array<std::uint32_t, Water::kHeaderRegisters.size()> headerIndices{};
 		std::uint64_t revision = 0;
 		Family::Owners owners;
+
+		/** @brief What the recording depends on: everything but the latched values and counts (PrecipitationDraws.cpp). */
+		std::uint64_t Hash() const;
 	};
 
 	Api::Feature Feature();
 
-	/** @brief Whether CS_ORG_PRECIPITATION=1 turned the family on (read at install). */
+	/** @brief Whether the family is on, which is graph mode (read at install). */
 	bool Enabled();
 
 	void InstallHooks();
@@ -112,8 +115,6 @@ namespace DCLF::Features::Precipitation
 	{
 		/** @brief Whether the anchor and runtime are up. False for good once the client failed. */
 		bool Available();
-		/** @brief Reserves the EngineDraws anchor. */
-		void Reserve();
 		/** @brief Makes the client and queues its programs. Main thread. False while the render graph has no host yet. */
 		bool Setup();
 		/** @brief Whether a draw is taken now. False is logged once. */

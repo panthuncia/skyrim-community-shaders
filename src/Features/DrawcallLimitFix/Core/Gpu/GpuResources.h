@@ -14,7 +14,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
 #include "RenderGraph/BufferRef.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 struct DxvkOrgInteropTrackedResource;
 
@@ -117,7 +117,7 @@ namespace DCLF
 			std::uint64_t cookie = 0, serial = 0;  // pinless only
 		};
 		// Keys whose last lease went, pushed by whichever thread released it and drained by BeginFrame.
-		using Released = EventQueue<ID3D11Buffer*, 1024>;
+		using Released = RenderGraph::Frame::EventQueue<ID3D11Buffer*, 1024>;
 		// Written by the owner alone with relaxed load and store, read by any thread.
 		struct Counters
 		{

@@ -1,12 +1,10 @@
 #pragma once
 
-#if defined(CS_HAS_RENDER_GRAPH)
+#include "RenderGraph/ShaderBindings.h"
 
-#	include "RenderGraph/ShaderBindings.h"
+#include <RenderPasses/Base/TypedRenderGraphPass.h>
 
-#	include <RenderPasses/Base/TypedRenderGraphPass.h>
-
-#	include <memory>
+#include <memory>
 
 namespace org
 {
@@ -42,19 +40,19 @@ namespace SharedConstants
 	/** @brief Record time. */
 	Handles Index(const org::RecordingContext& a_recording, const Bindings& a_bindings);
 
-	/** @brief Creates the buffers and the latch once. False and logged until CS has uploaded the buffers, since FeatureData's size is unknown. */
+	/**
+	* @brief Setup, once (Engine::Setup), after the runtime initialized and CS sized FeatureData (State::SetupResources). Creates the
+	* buffers and the latch. False and logged when they cannot be made; their clients then fail to register.
+	*/
 	bool Ensure();
 
 	bool Ready();
-
-	/** @brief Whether the buffers could not be created, so clients waiting for them never get them. */
-	bool Failed();
 
 	/** @brief Registers the four buffers with an anchor's graph. */
 	void Register(org::RenderGraph& a_graph);
 
 	/** @brief One upload point per step of a declared segment, each with its own latch block. A step past the last would read another's values. */
-	inline constexpr std::uint32_t kUploadPoints = 19;
+	inline constexpr std::uint32_t kUploadPoints = 21;
 
 	/**
 	 * @brief A pass that copies upload point a_point's latch region into the four buffers. Null for a point out of range.
@@ -70,4 +68,3 @@ namespace SharedConstants
 	void CheckAfterRun();
 }
 
-#endif

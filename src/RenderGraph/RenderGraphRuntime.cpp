@@ -1,11 +1,10 @@
-#if defined(CS_HAS_RENDER_GRAPH)
-
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
 #include "RenderGraphRuntime.h"
 
 #include "Aftermath.h"
+#include "DxvkExports.h"
 #include "DxvkLoader.h"
 #include "Features/Upscaling/DXVKInteropInterfaces.h"
 #include "Globals.h"
@@ -15,29 +14,26 @@
 #include "RenderGraph/BuildManager.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/ExternalWork.h"
+#include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Recipe.h"
+#include "RenderGraph/Frame/Revision.h"
 #include "RenderGraph/Frame/Transients.h"
-#include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
-#include "RenderGraph/Engine/Native/OpCensus.h"
-#include "RenderGraph/Engine/Native/RtSampler.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
-#include "RenderGraph/ProgramCache.h"
-#include "RenderGraph/RunShapes.h"
-#include "RenderGraph/FrameSequence.h"
+#include "RenderGraph/ProgramService.h"
 #include "RenderGraph/UndeclaredAccess.h"
 #include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
 #include "Features/RemoteControl/GpuCounters.h"
-#include "Features/DrawcallLimitFix.h"
-#include "GpuIdleTrace.h"
 #include "State.h"
 #include "Utils/SharedShaderStore.h"
 
@@ -45,14 +41,13 @@
 #include <OpenRenderGraph/Runtime.h>
 #include <Render/Runtime/IUploadService.h>
 #include <Render/Runtime/OpenRenderGraphSettings.h>
-// This module exports the contributor ABI's table (ORG_GetRenderGraphAPI, below).
-#define ORG_RENDER_GRAPH_HOST_EXPORTS
-#include <OpenRenderGraph/ContributorHost.h>
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
-#	include <ORGModuleServices/PipelineRegistry.h>
-#endif
-#if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
-#	include <ORGModuleServices/ShaderCompiler.h>
+#include "RenderGraph/Async/Lanes.h"
+#include "RenderGraph/Async/Retirement.h"
+#include "RenderGraph/PipelineVersions.h"
+#include <ORGModuleServices/BackingPool.h>
+#include <ORGModuleServices/PipelineRegistry.h>
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
+#include <ORGModuleServices/ShaderCompiler.h>
 #endif
 #include <Render/RenderGraph/RhiExecution.h>
 #include <Resources/Resource.h>
@@ -88,21 +83,6 @@ namespace
 {
 	// RequestTimestampDump's: the completed epochs still to dump.
 	std::atomic<int> timestampDumps{ 0 };
-	// Diagnostics for dclf:epochs= and dclf:early-flush=. A flush override of -1 keeps CS_ORG_EARLY_FLUSH.
-	std::atomic<std::uint32_t> dclfEpochsSkipped{ 0 };  // by Segment bit
-	std::atomic<int> earlyFlushOverride{ -1 };
-	std::atomic<std::uint32_t> skippedEpochsBoundary{ 0 };  // SkipDclfEpochs' a_boundary: what a skipped epoch still does at its point
-	std::atomic<std::uint32_t> heldSegments{ 0 };           // HoldDclfSubmissions': by Segment bit
-	std::atomic<std::uint32_t> skippedEpochSpinUs{ 0 };     // SetSkippedEpochSpin's: the render thread's busy wait in each skipped epoch
-	std::atomic<std::uint32_t> submittedEpochSpinUs{ 0 };   // and in each submitted one, after its enqueue (a_submitted)
-	std::atomic<bool> coalesceSubmits{ false };             // CoalesceEpochSubmits'
-	std::atomic<bool> splitSubmits{ false };                // CoalesceEpochSubmits' a_split
-	std::atomic<bool> dropLists{ false };                   // DropDclfLists'
-	std::atomic<std::uint32_t> submissionDumps{ 0 };        // RequestSubmissionDump's: epochs left to log their enqueued submissions
-	std::atomic<std::uint32_t> workerSpinUs{ 0 };           // SetSkippedEpochWorkerLoad's: DXVK's worker busy-waits in each skipped epoch
-	std::atomic<bool> workerSync{ false };                  // and the render thread waits for the worker to reach the epoch
-	// Submission dump counters since the last dump.
-	std::atomic<std::uint64_t> describeCalls{ 0 }, describeObjects{ 0 }, describeNs{ 0 };
 }
 #include <fmt/ranges.h>
 
@@ -232,10 +212,18 @@ namespace
 		return Switches::Equals("CS_ORG", "features");
 	}
 
-	template <class T>
-	T ResolveExport(HMODULE a_module, const char* a_name)
+	/**
+	* @brief A graph fault in graph mode ends the game. The engine's draws are withheld there and nothing else draws the frame.
+	* Outside graph mode (CS_ORG=0 or features, native D3D11, VR) the graph stays off and the game runs on D3D11.
+	*/
+	void FaultIsFatal(std::string_view a_what)
 	{
-		return a_module ? reinterpret_cast<T>(reinterpret_cast<void*>(::GetProcAddress(a_module, a_name))) : nullptr;
+		if (!RenderGraph::Engine::GraphMode())
+			return;
+		RenderGraph::Fatal(fmt::format("the render graph in {}", RenderGraph::Engine::Native::Requested() ? "native mode" : "guest mode"),
+			fmt::format("{}. Graph mode has no D3D11 path, so the game stops. Send CommunityShaders.log to the developers, or set CS_ORG=0 to play "
+						"without the render graph.",
+				a_what));
 	}
 
 	bool HasExtension(const DxvkOrgInteropDeviceInfo& a_info, const char* a_name)
@@ -262,8 +250,9 @@ struct RenderGraphRuntime::Impl
 {
 	winrt::com_ptr<IDXGIVkInteropDevice> interop;
 	PFN_dxvkCreateBufferFromVkBuffer createBufferFromVkBuffer = nullptr;
-	PFN_dxvkCreateTextureFromVkImage createTextureFromVkImage = nullptr;  // optional (interop version 6): WrapTexture
-	PFN_dxvkCreateTextureFromVkImageWithData createTextureFromVkImageWithData = nullptr;  // optional: WrapTexture with contents
+	// Guest mode has every DXVK export: DxvkLoader stops graph mode without one. Native mode has none of them.
+	PFN_dxvkCreateTextureFromVkImage createTextureFromVkImage = nullptr;
+	PFN_dxvkCreateTextureFromVkImageWithData createTextureFromVkImageWithData = nullptr;
 	// ReleaseAfterD3D11: owners held until an event query issued after their release completes, oldest first.
 	struct D3D11Release
 	{
@@ -288,53 +277,22 @@ struct RenderGraphRuntime::Impl
 	std::atomic<std::uint64_t> retiredSubmissions{ 0 };
 	PFN_dxvkSetDeviceTeardownCallback setTeardownCallback = nullptr;
 	PFN_dxvkEnqueueInteropSubmission enqueueSubmission = nullptr;
-	// Optional (newer DXVK): an epoch's submissions go to DXVK as one enqueue (CS_ORG_BATCH_SUBMIT=0 turns it off).
+	// An epoch's submissions go to DXVK as one enqueue.
 	PFN_dxvkEnqueueInteropSubmissions enqueueSubmissions = nullptr;
 	PFN_dxvkGetInteropResourceInfo getResourceInfo = nullptr;
 	PFN_dxvkGetInteropResourceInfos getResourceInfos = nullptr;
-	// Optional (newer DXVK), all four or none: pinless imports (CS_ORG_PINNED_IMPORTS=1 keeps pinning).
+	// Pinless imports.
 	PFN_dxvkTrackInteropResources trackResources = nullptr;
 	PFN_dxvkUntrackInteropResources untrackResources = nullptr;
 	PFN_dxvkPollInteropRelocations pollRelocations = nullptr;
 	PFN_dxvkReleaseInteropStorage releaseStorage = nullptr;
-#if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	std::unique_ptr<org::services::ShaderCompiler> shaderCompiler;
 #endif
 	PFN_vkQueueSubmit2 queueSubmit2 = nullptr;
-	PFN_dxvkEmitCommandBufferCallback emitCommandBufferCallback = nullptr;  // diagnostics: SetSkippedEpochWorkerLoad
-	PFN_dxvkEmitExternalCommands emitExternalCommands = nullptr;            // optional: EmitExternalCommands
-	// For SkipDclfEpochs boundaries 4 and 5, an empty graphics command buffer made on first use.
+	PFN_dxvkEmitExternalCommands emitExternalCommands = nullptr;
 	PFN_vkGetDeviceProcAddr deviceProcAddr = nullptr;
 	VkDevice adoptedDevice = VK_NULL_HANDLE;
-	uint32_t graphicsFamily = 0;
-	VkCommandBuffer emptyCommands = VK_NULL_HANDLE;
-
-	VkCommandBuffer EmptyCommandBuffer()
-	{
-		if (emptyCommands || !deviceProcAddr)
-			return emptyCommands;
-		const auto createPool = reinterpret_cast<PFN_vkCreateCommandPool>(deviceProcAddr(adoptedDevice, "vkCreateCommandPool"));
-		const auto allocate = reinterpret_cast<PFN_vkAllocateCommandBuffers>(deviceProcAddr(adoptedDevice, "vkAllocateCommandBuffers"));
-		const auto begin = reinterpret_cast<PFN_vkBeginCommandBuffer>(deviceProcAddr(adoptedDevice, "vkBeginCommandBuffer"));
-		const auto end = reinterpret_cast<PFN_vkEndCommandBuffer>(deviceProcAddr(adoptedDevice, "vkEndCommandBuffer"));
-		VkCommandPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-		poolInfo.queueFamilyIndex = graphicsFamily;
-		VkCommandPool pool = VK_NULL_HANDLE;
-		if (!createPool || !allocate || !begin || !end || createPool(adoptedDevice, &poolInfo, nullptr, &pool) != VK_SUCCESS)
-			return VK_NULL_HANDLE;
-		VkCommandBufferAllocateInfo allocateInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-		allocateInfo.commandPool = pool;
-		allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		allocateInfo.commandBufferCount = 1;
-		VkCommandBuffer commands = VK_NULL_HANDLE;
-		if (allocate(adoptedDevice, &allocateInfo, &commands) != VK_SUCCESS)
-			return VK_NULL_HANDLE;
-		VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
-		if (begin(commands, &beginInfo) != VK_SUCCESS || end(commands) != VK_SUCCESS)
-			return VK_NULL_HANDLE;
-		return emptyCommands = commands;
-	}
 	// DXVK's compute-only queue, used by the graph directly. Submissions still take DXVK's submission lock.
 	// Compute and DXVK submissions made at the same time lost the device, with a page fault at address 0.
 	VkQueue computeQueue = VK_NULL_HANDLE;
@@ -563,7 +521,6 @@ struct RenderGraphRuntime::Impl
 		}
 		if (flush) {
 			globals::d3d::context->Flush();
-			++epochEnqueues;
 			NoteStreamClosed("guard flush", a_label);
 			std::uint32_t logged = 0;
 			{
@@ -876,14 +833,11 @@ struct RenderGraphRuntime::Impl
 	bool framePaceSignalled = false;  // this frame enqueued one
 	std::vector<std::function<void()>> presentWaits;  // WaitBeforePresent: the next present's, render owner only
 	std::shared_ptr<rhi::DevicePtr> device = std::make_shared<rhi::DevicePtr>();
-	// ORG's runtime on the adopted device: outlives the host and the contributors, goes before the device.
+	// ORG's runtime on the adopted device: outlives the host, goes before the device.
 	std::shared_ptr<org::Runtime> orgRuntime;
 	std::unique_ptr<org::GraphHost> host;
 	// The host's structural builds, off the render thread. Destroyed before the host, so its thread stops and its graphs drop first.
 	std::unique_ptr<RenderGraph::BuildManager> builds;
-	// The contributor ABI's host (OpenRenderGraph/ContributorAPI.h): other modules' passes, in the epochs named after the segments.
-	std::unique_ptr<org::contributor::ContributorHost> contributors;
-	rhi::PipelineLayoutPtr contributorLayout;  // the pipeline service's layout: bindless, 16 root constants
 	std::shared_ptr<rhi::TimelinePtr> frameWaitTimeline;  // FrameWaitTimeline
 	// Any device timeline, for NativeTimelinePoint. The frame-wait timeline cannot serve, since devices without a transfer family lack it.
 	rhi::TimelinePtr nativeTimelines;
@@ -899,29 +853,9 @@ struct RenderGraphRuntime::Impl
 	std::atomic<uint64_t> streamEnqueued = 0;
 	std::atomic<uint64_t> streamSubmitted = 0;
 
-	// CS_ORG_EPOCH_STATS=1: render-thread CPU time per epoch, by segment and by phase of the host's frame,
-	// logged every kEpochStatsWindow epochs.
-	static constexpr uint32_t kEpochStatsWindow = 600;
-	// Native mode reports every kNativeStatsFrames presents instead, since a frame's epoch count varies.
-	static constexpr uint64_t kNativeStatsFrames = 300;
-	bool epochStats = false;
-	// The furthest DCLF stage the frame's epochs reached so far, for the segment census.
-	std::uint32_t frameStage = 0;
-	// CS_ORG_EARLY_FLUSH (default on, =0 off): hand DXVK's pending D3D11 work to the GPU when an epoch starts.
-	bool earlyFlush = false;
 	// RenderGraphRuntime::InStreamEpochs: the async epochs executed in DXVK's own command stream.
 	std::vector<std::uint32_t> inStreamEpochs;
-	uint32_t epochCount = 0;
-	// Queue submissions the graph hands to the hook during the current epoch (each is one DXVK enqueue).
-	uint32_t epochHookCalls = 0;
 	std::uint64_t submittedSegments = 0;  // since TakeSubmittedSegments
-	// CS_ORG_EPOCH_STATS: the executions submitted this frame and the epochs they ran (a bit by segment), and their totals over the
-	// frames since the last report.
-	std::uint32_t frameExecutions = 0;
-	std::uint64_t frameEpochs = 0;
-	std::uint64_t statFrames = 0, statExecutions = 0, statEpochs = 0;
-	// DXVK enqueues during the current epoch: one per hook call, or one for the whole epoch when batching.
-	uint32_t epochEnqueues = 0;
 
 	// With enqueueSubmissions, the hook's submissions are copied here and sent to DXVK together at the epoch's end.
 	// The submit info is only valid during the call. Nothing waits on them on the CPU before then.
@@ -932,44 +866,10 @@ struct RenderGraphRuntime::Impl
 		std::vector<VkSemaphoreSubmitInfo> signals;
 	};
 	bool batching = false;
-	bool holding = false; // HoldDclfSubmissions kept the last epoch's submissions for the next enqueue
 	std::atomic<uint64_t> offThreadSubmits = 0;
 	std::vector<PendingSubmit> pendingSubmits;  // [0, pendingCount) in use; capacity kept across epochs
 	std::size_t pendingCount = 0;
 	std::vector<VkSubmitInfo2> pendingInfos;
-
-	// Diagnostics. Logs each submission's waits with their current values, lists and signals.
-	void DumpPendingSubmits(const char* a_label)
-	{
-		if (!deviceProcAddr)
-			return;
-		static const auto counterValue = reinterpret_cast<PFN_vkGetSemaphoreCounterValue>(deviceProcAddr(adoptedDevice, "vkGetSemaphoreCounterValue"));
-		const auto name = [&](VkSemaphore a_semaphore) -> std::string {
-			if (a_semaphore == streamPoint)
-				return "streamPoint";
-			if (a_semaphore == computeExit)
-				return "computeExit";
-			if (a_semaphore == copyExit)
-				return "copyExit";
-			return fmt::format("{:x}", reinterpret_cast<std::uintptr_t>(a_semaphore));
-		};
-		std::string text;
-		for (std::size_t i = 0; i < pendingCount; ++i) {
-			const auto& pending = pendingSubmits[i];
-			text += fmt::format("\n    [{}] {} lists; waits:", i, pending.commandBuffers.size());
-			for (const auto& wait : pending.waits) {
-				std::uint64_t now = 0;
-				if (counterValue)
-					(void)counterValue(adoptedDevice, wait.semaphore, &now);
-				text += fmt::format(" {}>={} (now {}{})", name(wait.semaphore), wait.value, now, now >= wait.value ? "" : ", PENDING");
-			}
-			text += "; signals:";
-			for (const auto& signal : pending.signals)
-				text += fmt::format(" {}={}", name(signal.semaphore), signal.value);
-		}
-		logger::info("[ORG] submission dump {}: {} submissions; resource descriptions since the last: {} calls, {} objects, {:.1f} us{}", a_label,
-			pendingCount, describeCalls.exchange(0), describeObjects.exchange(0), describeNs.exchange(0) / 1000.0, text);
-	}
 
 	// Hands the epoch's collected submissions to DXVK as one enqueue. False when DXVK rejected them.
 	bool FlushPendingSubmits(const char* a_label)
@@ -977,78 +877,6 @@ struct RenderGraphRuntime::Impl
 		batching = false;
 		if (!pendingCount)
 			return true;
-		if (submissionDumps.load(std::memory_order_relaxed)) {
-			submissionDumps.fetch_sub(1, std::memory_order_relaxed);
-			DumpPendingSubmits(a_label);
-		}
-		if (dropLists.load(std::memory_order_relaxed) && RenderGraphRuntime::IsDclfSegment(RenderGraphRuntime::Get().CurrentSegment())) {
-			// Diagnostics (DropDclfLists): the signals alone, so the graph's tracking advances while the GPU runs none of its work.
-			for (std::size_t i = 0; i < pendingCount; ++i) {
-				pendingSubmits[i].commandBuffers.clear();
-				pendingSubmits[i].waits.clear();
-			}
-		}
-		if (pendingCount > 1 && coalesceSubmits.load(std::memory_order_relaxed)) {
-			// Diagnostics (CoalesceEpochSubmits): one submission of every list, waiting for every wait on a semaphore the epoch does not
-			// signal itself, and signalling each semaphore's highest value once.
-			auto& first = pendingSubmits[0];
-			std::vector<VkSemaphoreSubmitInfo> waits, signals;
-			for (std::size_t i = 0; i < pendingCount; ++i) {
-				for (const auto& signal : pendingSubmits[i].signals) {
-					auto found = std::find_if(signals.begin(), signals.end(), [&](const auto& s) { return s.semaphore == signal.semaphore; });
-					if (found == signals.end())
-						signals.push_back(signal);
-					else
-						found->value = (std::max)(found->value, signal.value);
-				}
-			}
-			for (std::size_t i = 0; i < pendingCount; ++i) {
-				for (const auto& wait : pendingSubmits[i].waits) {
-					if (std::any_of(signals.begin(), signals.end(), [&](const auto& s) { return s.semaphore == wait.semaphore; }))
-						continue;
-					auto found = std::find_if(waits.begin(), waits.end(), [&](const auto& w) { return w.semaphore == wait.semaphore; });
-					if (found == waits.end())
-						waits.push_back(wait);
-					else
-						found->value = (std::max)(found->value, wait.value);
-				}
-				if (i)
-					first.commandBuffers.insert(first.commandBuffers.end(), pendingSubmits[i].commandBuffers.begin(), pendingSubmits[i].commandBuffers.end());
-			}
-			first.waits = std::move(waits);
-			first.signals = std::move(signals);
-			pendingCount = 1;
-		}
-		if (pendingCount > 1 && splitSubmits.load(std::memory_order_relaxed)) {
-			// Diagnostics: one enqueue per submission, so DXVK's submission trace times each ("<epoch> #<i>").
-			static std::array<std::string, 16> labels;
-			for (std::size_t i = 0; i < pendingCount; ++i) {
-				const auto& pending = pendingSubmits[i];
-				auto& label = labels[(std::min)(i, labels.size() - 1)];
-				label = fmt::format("{} #{}", a_label, i);
-				DxvkOrgInteropSubmission submission{};
-				submission.version = DXVK_ORG_INTEROP_VERSION;
-				submission.waitCount = static_cast<uint32_t>(pending.waits.size());
-				submission.waits = pending.waits.data();
-				submission.commandBufferCount = static_cast<uint32_t>(pending.commandBuffers.size());
-				submission.commandBuffers = pending.commandBuffers.data();
-				submission.signalCount = static_cast<uint32_t>(pending.signals.size());
-				submission.signals = pending.signals.data();
-				submission.onSubmitted = &Impl::OnStreamSubmitted;
-				submission.user = this;
-				submission.label = label.c_str();
-				++epochEnqueues;
-				streamEnqueued.fetch_add(1, std::memory_order_acq_rel);
-				if (FAILED(enqueueSubmission(globals::d3d::device, &submission))) {
-					streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
-					pendingCount = 0;
-					return false;
-				}
-				NoteEnqueued("graph submission", a_label, pending.waits, pending.signals);
-			}
-			pendingCount = 0;
-			return true;
-		}
 		pendingInfos.assign(pendingCount, VkSubmitInfo2{ VK_STRUCTURE_TYPE_SUBMIT_INFO_2 });
 		for (std::size_t i = 0; i < pendingCount; ++i) {
 			const auto& pending = pendingSubmits[i];
@@ -1069,7 +897,6 @@ struct RenderGraphRuntime::Impl
 		batch.label = a_label;
 		const std::size_t enqueued = pendingCount;
 		pendingCount = 0;
-		++epochEnqueues;
 		streamEnqueued.fetch_add(1, std::memory_order_acq_rel);
 		if (FAILED(enqueueSubmissions(globals::d3d::device, &batch))) {
 			streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
@@ -1079,34 +906,6 @@ struct RenderGraphRuntime::Impl
 			NoteEnqueued("graph submission", a_label, pendingSubmits[i].waits, pendingSubmits[i].signals);
 		return true;
 	}
-	static constexpr std::size_t kEpochPhases = 12;
-	// The render thread's phases. SubmitEpoch's, plus ExecuteEpoch's own around it.
-	static constexpr std::array<const char*, kEpochPhases> kAsyncEpochPhaseNames{
-		"ticket wait", "releases", "inputs", "check", "native flush", "completions", "stream close", "uploads", "submit", "post", "rebuild check", "other"
-	};
-	// ExecuteEpoch's own parts of the epoch being recorded (render thread).
-	double flushUs = 0.0, completionsUs = 0.0, closeUs = 0.0;
-	struct EpochSegmentStats
-	{
-		uint32_t epochs = 0;
-		double totalUs = 0.0;
-		double maxUs = 0.0;
-		std::array<double, kEpochPhases> phaseUs{};
-		uint64_t hookCalls = 0;
-		uint64_t enqueues = 0;
-		uint64_t segments = 0;
-		uint64_t cachedAdmissions = 0;
-		uint64_t batches = 0;
-		// The feature's whole call around the epoch (EpochBodyScope), and the ExecuteEpoch time inside those calls.
-		uint32_t bodies = 0;
-		double bodyUs = 0.0;
-		double bodyEpochUs = 0.0;
-	};
-	// The open EpochBodyScope (render thread only): whether an epoch ran inside it, and its time.
-	bool bodyOpen = false;
-	bool bodyRanEpoch = false;
-	double bodyEpochUs = 0.0;
-	std::array<EpochSegmentStats, static_cast<std::size_t>(Segment::Count)> epochSegmentStats{};
 
 	// ORG's pass timestamps per segment. Each run's segment is kept by frame number until its timestamps return.
 	static constexpr std::size_t kSegments = static_cast<std::size_t>(Segment::Count);
@@ -1128,10 +927,8 @@ struct RenderGraphRuntime::Impl
 	std::array<std::atomic<Segment>, kSegmentRing> frameSegments{};
 	// The frame each host frame's epoch ran in while a timestamp trace collects. 0 when not collected.
 	std::array<std::atomic<std::uint64_t>, kSegmentRing> frameTimestampFrames{};
-	// Pacing measurement. Each host frame's game frame, the latest completed game frame, and how far Begin ran ahead.
+	// Pacing measurement. Each host frame's begin frame (RenderGraph::FrameClock), and how far Begin ran ahead.
 	std::array<std::atomic<std::uint64_t>, kSegmentRing> frameGameFrames{};
-	std::atomic<std::uint64_t> completedGameFrame{ 0 };
-	std::uint64_t gameFrame = 0;
 	std::array<std::uint64_t, 10> aheadCounts{};
 	std::uint64_t aheadPeak = 0, aheadPeakSession = 0, aheadFrames = 0;
 	std::array<SegmentTime, kSegments> segmentTimes{};
@@ -1220,10 +1017,8 @@ struct RenderGraphRuntime::Impl
 	void OnCompletedFrame(std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats)
 	{
 		GpuTimingSource::OnCompletedFrame(a_frameNumber, a_stats);
-		// The pacing measurement: the game frame of the epoch that completed.
-		const auto game = frameGameFrames[a_frameNumber % kSegmentRing].load(std::memory_order_acquire);
-		for (auto seen = completedGameFrame.load(std::memory_order_relaxed); game > seen && !completedGameFrame.compare_exchange_weak(seen, game, std::memory_order_acq_rel);) {
-		}
+		// The frame clock's gpuCompleted: the begin frame of the epoch that completed.
+		RenderGraphRuntime::NoteGpuCompleted(frameGameFrames[a_frameNumber % kSegmentRing].load(std::memory_order_acquire));
 		CompletedEpoch epoch;
 		ReadCompletedEpoch(a_frameNumber, a_stats, epoch);
 		hostPending.push_back(std::move(epoch));
@@ -1265,7 +1060,7 @@ struct RenderGraphRuntime::Impl
 			std::ranges::sort(sorted, [](auto* a, auto* b) { return a->beginTick < b->beginTick || (a->beginTick == b->beginTick && a->endTick < b->endTick); });
 			const std::uint64_t origin = sorted.empty() ? 0 : sorted.front()->beginTick;
 			logger::info("[TSDUMP] frame {} ({}): {} graphics ranges of {} timestamp pairs", a_frameNumber,
-				segmentIndex < kSegments ? SegmentLabel(static_cast<Segment>(segmentIndex)) : "not DCLF's", sorted.size(), timestamps.size());
+				segmentIndex < kSegments ? SegmentLabel(static_cast<Segment>(segmentIndex)) : "no fragment source's", sorted.size(), timestamps.size());
 			for (const auto* t : sorted)
 				logger::info("[TSDUMP] {:10.2f} {:10.2f} {:8.2f} k{} r{} o{} {}", double(t->beginTick - origin) * toMs * 1000.0,
 					double(t->endTick - origin) * toMs * 1000.0, double(t->endTick - t->beginTick) * toMs * 1000.0, static_cast<int>(t->kind),
@@ -1341,12 +1136,14 @@ struct RenderGraphRuntime::Impl
 			{ "cs.subsurface", "SubsurfaceScattering" },
 			{ "cs.skylighting", "Skylighting" },
 			{ "cs.exp-height-fog", "ExponentialHeightFog" },
+			{ "cs.view-atmosphere", "ViewAtmosphere" },
 			{ "cs.ssgi", "ScreenSpaceGI" },
 			{ "cs.screen-space-shadows", "ScreenSpaceShadows" },
 			{ "cs.cloud-shadows", "CloudShadows" },
 			{ "cs.terrain-blending", "TerrainBlending" },
 			{ "cs.terrain-shadows", "TerrainShadows" },
 			{ "cs.ibl", "ImageBasedLighting" },
+			{ "cs.physical-sky", "PhysicalSky" },
 			{ "cs.grass-collision", "GrassCollision" },
 			{ "cs.texstream", "TextureStreaming" },
 			{ "cs.dclf", "DrawcallLimitFix" },
@@ -1370,8 +1167,6 @@ struct RenderGraphRuntime::Impl
 	static std::string ProfilerName(Segment a_segment, const std::string& a_pass)
 	{
 		switch (a_segment) {
-		case Segment::LightCulling:
-			return "LightLimitFix::RenderGraphCull / " + a_pass;
 		case Segment::ZPrepass:
 			return "DrawcallLimitFix::Z-prepass / " + a_pass;
 		case Segment::MainOpaque:
@@ -1408,214 +1203,10 @@ struct RenderGraphRuntime::Impl
 		const std::uint64_t timestampFrame = GpuCounters::Timestamps::Collecting() ? GpuCounters::Timestamps::CurrentFrame() + 1 : 0;
 		frameTimestampFrames[a_hostFrame % kSegmentRing].store(timestampFrame, std::memory_order_release);
 		frameSegments[a_hostFrame % kSegmentRing].store(a_segment, std::memory_order_release);
-		frameGameFrames[a_hostFrame % kSegmentRing].store(gameFrame, std::memory_order_release);
+		frameGameFrames[a_hostFrame % kSegmentRing].store(RenderGraph::FrameClock::BeginFrame(), std::memory_order_release);
 		if (timestampFrame)
 			GpuCounters::Timestamps::Submitted(timestampFrame);
 		GpuTimingSource::OnEpochSubmitted(a_hostFrame, SegmentLabel(a_segment));
-	}
-
-	void RecordEpoch(Segment a_segment, std::chrono::steady_clock::duration a_elapsed)
-	{
-		const double us = std::chrono::duration<double, std::micro>(a_elapsed).count();
-		const auto index = static_cast<std::size_t>(a_segment);
-		if (index < epochSegmentStats.size()) {
-			auto& stats = epochSegmentStats[index];
-			const auto& t = host->LastFrameTimings();
-			const auto& e = t.execute;
-			const std::array<double, kEpochPhases> phases = t.async ?
-				std::array<double, kEpochPhases>{ t.ticketWaitUs, t.releaseUs, t.beforePrepareUs, t.checkUs, flushUs, completionsUs, closeUs, t.uploadsUs, t.submitUs, t.postUs, t.buildUs, 0.0 } :
-				std::array<double, kEpochPhases>{ t.waitUs, t.releaseUs, t.beforePrepareUs, t.updateUs, e.retireUs, e.admissionUs, e.acquireUs, e.recordUs, e.submitUs, e.commitUs, t.signalUs, 0.0 };
-			double accounted = 0.0;
-			for (std::size_t i = 0; i + 1 < kEpochPhases; ++i) {
-				stats.phaseUs[i] += phases[i];
-				accounted += phases[i];
-			}
-			stats.phaseUs[kEpochPhases - 1] += (std::max)(0.0, us - accounted);
-			++stats.epochs;
-			stats.totalUs += us;
-			stats.maxUs = (std::max)(stats.maxUs, us);
-			stats.hookCalls += epochHookCalls;
-			stats.enqueues += epochEnqueues;
-			stats.segments += e.segments;
-			stats.cachedAdmissions += e.cachedAdmissions;
-			stats.batches += e.batches;
-		}
-		if (++epochCount < kEpochStatsWindow)
-			return;
-		ReportEpochStats();
-	}
-
-	// Logs the submission census's per-frame counts of lists, submissions, split reasons, handoff misses and waits.
-	static void LogSubmissionCensus(double a_frames)
-	{
-		using Census = org::diagnostics::SubmissionCensus;
-		const auto c = org::diagnostics::Census().Take();
-		const auto f = [&](uint64_t a_value) { return double(a_value) / a_frames; };
-		const auto list = [&](Census::List a_kind) { return f(c.lists[size_t(a_kind)]); };
-		logger::info("[ORG] Submission census, command lists a frame: {:.1f} batch, {:.1f} inline ({:.1f} barriers only), {:.1f} handoff recorded, "
-					 "{:.1f} handoff reused, {:.1f} release, {:.1f} home acquire, {:.1f} upload ({:.1f} empty), {:.1f} queue-scoped upload ({:.1f} empty); "
-					 "handoff cache misses a frame: {:.1f} planned admission, {:.1f} several segments, {:.1f} new plan",
-			list(Census::List::Batch), list(Census::List::Inline), list(Census::List::InlineBarriersOnly), list(Census::List::Handoff),
-			list(Census::List::HandoffReused), list(Census::List::Release), list(Census::List::HomeAcquire), list(Census::List::Upload),
-			list(Census::List::UploadEmpty), list(Census::List::QueueUpload), list(Census::List::QueueUploadEmpty),
-			f(c.handoffMisses[0]), f(c.handoffMisses[1]), f(c.handoffMisses[2]));
-		std::string recordedInline;
-		for (const auto& [why, count] : c.inlineRecorded)
-			if (f(count) >= 0.05)
-				recordedInline += fmt::format("{}{} {:.2f}", recordedInline.empty() ? "" : ", ", why, f(count));
-		logger::info("[ORG] Submission census, inline lists a frame: {:.1f} recorded, {:.1f} kept by their gates; recorded because of: {}",
-			list(Census::List::Inline), list(Census::List::InlineKept), recordedInline.empty() ? "-" : recordedInline);
-		logger::info("[ORG] Submission census, open admissions a frame: {:.1f} predicted, {:.1f} predicted by an earlier plan, {:.1f} not entry-only, {:.1f} alias "
-					 "invalidated, {:.1f} new prediction slot, {:.1f} states differ",
-			f(c.admissions[0]), f(c.admissions[1]), f(c.admissions[2]), f(c.admissions[3]), f(c.admissions[4]), f(c.admissions[5]));
-		static constexpr const char* kKinds[] = { "batches", "uploads", "release", "leading uploads", "home acquire" };
-		std::string kinds;
-		for (size_t k = 0; k < size_t(Census::Submission::Count); ++k) {
-			const auto& by = c.submissions[k];
-			const uint64_t total = by[0] + by[1] + by[2] + by[3];
-			if (!total)
-				continue;
-			kinds += fmt::format("; {} {:.1f} ({:.1f} lists; apart because: other queue {:.1f}, same ticket {:.1f}, earlier ticket, a new wait {:.1f}, earlier ticket, waits covered {:.1f})",
-				kKinds[k], f(total), f(c.submittedLists[k]), f(by[0]), f(by[1]), f(by[2]), f(by[3]));
-		}
-		logger::info("[ORG] Submission census, queue submissions a frame{}; new waits after an earlier ticket: {:.1f} on another queue, {:.1f} on the frame's values, "
-					 "{:.1f} other; sequencer: held {:.3f} ms a frame, {:.1f} waits for another thread ({:.3f} ms)",
-			kinds, f(c.uncoveredWaits[0]), f(c.uncoveredWaits[1]), f(c.uncoveredWaits[2]), f(c.sequencerHeldNs) / 1e6, f(c.sequencerWaits),
-			f(c.sequencerWaitNs) / 1e6);
-	}
-
-	// The statistics report. Guest mode reports every kEpochStatsWindow epochs, native mode every kNativeStatsFrames presents.
-	void ReportEpochStats()
-	{
-		for (std::size_t i = 0; i < epochSegmentStats.size(); ++i) {
-			auto& stats = epochSegmentStats[i];
-			if (!stats.epochs)
-				continue;
-			std::string phases;
-			for (std::size_t p = 0; p < kEpochPhases; ++p)
-				if (kAsyncEpochPhaseNames[p][0] != '-')
-					phases += fmt::format("{}{} {:.1f}", p ? ", " : "", kAsyncEpochPhaseNames[p], stats.phaseUs[p] / stats.epochs);
-			if (stats.bodies) {
-				// The feature's own render-thread work around ExecuteEpoch.
-				logger::info("[ORG] Epoch body {}: avg {:.1f} us over {} calls; ExecuteEpoch {:.1f}, outside it {:.1f}",
-					SegmentLabel(static_cast<Segment>(i)), stats.bodyUs / stats.bodies, stats.bodies, stats.bodyEpochUs / stats.bodies,
-					(stats.bodyUs - stats.bodyEpochUs) / stats.bodies);
-			}
-			logger::info("[ORG] Epoch CPU {} ({}): avg {:.1f} us, max {:.1f} us over {} epochs; {:.1f} batches, {:.1f} queue submissions ({:.1f} DXVK enqueues) each; {}/{} segment admissions cached; by phase (us): {}",
-				SegmentLabel(static_cast<Segment>(i)), native ? "native" : enqueueSubmission ? "stream" : "flush", stats.totalUs / stats.epochs, stats.maxUs, stats.epochs,
-				double(stats.batches) / stats.epochs, double(stats.hookCalls) / stats.epochs, double(stats.enqueues) / stats.epochs, stats.cachedAdmissions, stats.segments, phases);
-			stats = {};
-		}
-		{
-			const auto async = host->TakeAsyncStats();
-			logger::info("[ORG] Async epochs: {} submitted, {} waited for their ticket, {} prepared again after the feature's inputs changed, {} carried uploads ({} lists recorded ahead by their producers; "
-						 "{} copies recorded on the queue that first uses them, {} other-queue batches spared the graphics uploads' wait; "
-						 "late-bound versions: {} uploads taken to a declaring batch's queue, {} waited for off the graphics queue; "
-						 "{} undeclared destinations made every other-queue batch wait); "
-						 "{} completions left to the host's next GPU wake-up instead of a signal; {} tickets stale only by a new version; {} epoch graphs built again; "
-						 "recordings: {} made, {} revision copies recorded, {} revision submissions ({} waited for a sealed copy, {} skipped with every copy busy); admissions: {} predicted, {} planned; "
-						 "live epochs: {} runs bound a kept recording, {} recordings kept, {} not replayable, {} runs found no kept copy free",
-				async.submitted, async.waited, async.stale, async.uploads, async.recordedUploadLists, async.queueUploadCopies, async.sparedUploadWaits,
-				async.lateRoutedUploads, async.lateUploadWaits, async.undeclaredUploads, async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.revisionCopiesRecorded, async.revisionSubmissions, async.copyWaits,
-				async.copiesBusy, async.predicted, async.planned, async.liveReused, async.liveKept, async.liveUnkeepable, async.liveSpilled);
-		}
-		{
-			// What the runs in flight hold (run leases, the frame arena, statistics ranges) and the device's command memory.
-			const auto runs = host->TakeRunMemoryStats();
-			const auto commands = host->Device().CommandMemoryStats();
-			constexpr double kKiB = 1.0 / 1024.0;
-			logger::info("[ORG] Run memory: {} leases in flight (peak {}; {} lease indices made, {} external runs, {} published copies' leases); {} statistics "
-						 "ranges; frame arena {} chunks ({:.0f} KiB, {} pinned), {:.1f} KiB live (peak {:.1f} KiB, {:.1f} KiB pinned) in {} regions of {} runs, {} chunks "
-						 "trimmed; command memory: {} pools, {} lists, root-constant scratch {} pages held ({:.0f} KiB) and {} pooled ({:.0f} KiB), DGC preprocess {} held "
-						 "({:.0f} KiB) and {} pooled ({:.0f} KiB)",
-				runs.leasesInFlight, runs.leasesPeak, runs.leaseIndices, runs.externalRuns, runs.copyLeases, runs.statisticsRanges, runs.arena.chunks,
-				runs.arena.chunkBytes * kKiB, runs.arena.pinnedChunks, runs.arena.liveBytes * kKiB, runs.arena.peakLiveBytes * kKiB, runs.arena.pinnedBytes * kKiB,
-				runs.arena.liveRegions, runs.arena.runs, runs.arena.trimmed, commands.commandPools, commands.commandLists, commands.scratchPagesHeld,
-				commands.scratchBytesHeld * kKiB, commands.scratchPagesPooled, commands.scratchBytesPooled * kKiB, commands.dgcPagesHeld, commands.dgcBytesHeld * kKiB,
-				commands.dgcPagesPooled, commands.dgcBytesPooled * kKiB);
-		}
-		if (statFrames) {
-			logger::info("[ORG] executions a frame: {:.1f} over {:.1f} epochs (averages over {} frames)", double(statExecutions) / double(statFrames),
-				double(statEpochs) / double(statFrames), statFrames);
-			LogSubmissionCensus(double(statFrames));
-			if (host && host->SubmissionThreadOn()) {
-				// The submission thread (CS_ORG_SUBMIT_THREAD): its time, its queue's depth and who waited for it.
-				const auto t = host->TakeSubmitThreadStats();
-				const double frames = double(statFrames);
-				std::string callers;
-				for (const auto& [why, counts] : t.drainsByCaller)
-					callers += fmt::format("{}{} {:.2f}/frame {:.3f} ms", callers.empty() ? "" : ", ", why, double(counts.first) / frames, counts.second / 1000.0 / frames);
-				logger::info("[ORG] Submission thread: busy {:.3f} ms a frame, {:.1f} tickets a frame in {:.1f} groups, {:.1f} a frame joined by the next "
-							 "ticket's queue submission ({} given back after a failure), peak depth {}; "
-							 "backpressure {:.2f} waits a frame ({:.3f} ms); drains that waited {:.2f} a frame ({:.3f} ms): {}",
-					t.busyUs / 1000.0 / frames, double(t.tickets) / frames, double(t.groups) / frames, double(t.joined) / frames, t.discarded, t.peakDepth,
-					double(t.backpressureWaits) / frames,
-					t.backpressureUs / 1000.0 / frames, double(t.drains) / frames, t.drainUs / 1000.0 / frames, callers.empty() ? "-" : callers);
-				const auto segments = host->TakeSegmentStats();
-				if (segments.frames) {
-					static constexpr const char* kSegmentNames[] = { "pre-shadow", "DCLF shadows", "pre-depth", "DCLF depth", "pre-main", "DCLF main",
-						"deferred+water", "DCLF forward+1st", "post", "interface" };
-					const double segmentFrames = double(segments.frames);
-					std::string text;
-					double changed = 0.0, runs = 0.0;
-					for (std::size_t i = 0; i < std::size(kSegmentNames); ++i) {
-						const auto& s = segments.segments[i];
-						if (!s.runs)
-							continue;
-						changed += double(s.changed) / segmentFrames;
-						runs += double(s.runs) / segmentFrames;
-						text += fmt::format("; {} {:.2f} runs, {:.1f} executions, {:.2f} changed (order {:.2f}, recordings {:.2f}, plans {:.2f}), {:.2f} unplanned",
-							kSegmentNames[i], double(s.runs) / segmentFrames, double(s.executions) / segmentFrames, double(s.changed) / segmentFrames,
-							double(s.order) / segmentFrames, double(s.recordings) / segmentFrames, double(s.plans) / segmentFrames, double(s.unplanned) / segmentFrames);
-					}
-					std::string fresh;
-					for (std::size_t e = 0; e < segments.newRecordings.size(); ++e)
-						if (double(segments.newRecordings[e]) / segmentFrames >= 0.05)
-							fresh += fmt::format("{}{} {:.2f}", fresh.empty() ? "" : ", ", Impl::SegmentLabel(static_cast<Segment>(e)), double(segments.newRecordings[e]) / segmentFrames);
-					logger::info("[ORG] Segment census, a frame: {:.2f} segment runs, {:.2f} with a changed signature{}; epochs with a recording none of "
-								 "their last four: {}",
-						runs, changed, text, fresh.empty() ? "-" : fresh);
-					// Barriers each epoch's tickets recorded a frame, split into entry, body and closed-execution barriers.
-					std::string barriers;
-					double entryTotal = 0.0, bodyTotal = 0.0;
-					for (std::size_t e = 0; e < segments.barriers.size(); ++e) {
-						const auto& b = segments.barriers[e];
-						if (!b.tickets)
-							continue;
-						entryTotal += double(b.entry) / segmentFrames;
-						bodyTotal += double(b.body) / segmentFrames;
-						barriers += fmt::format("; {} {:.2f} tickets, entry {:.1f}, body {:.1f}, full {:.1f}", Impl::SegmentLabel(static_cast<Segment>(e)),
-							double(b.tickets) / segmentFrames, double(b.entry) / segmentFrames, double(b.body) / segmentFrames, double(b.full) / segmentFrames);
-					}
-					// The body counts are the lists' as built. A late batch's passes that skip their run fold their barriers at execution
-					// (org::compiler::FoldBarriersOfSkipped); those left out are counted here.
-					static std::uint64_t foldedSeen = 0;
-					const auto folded = org::diagnostics::FoldedAtExecutionBarriers().load(std::memory_order_relaxed);
-					const double foldedFrame = double(folded - foldedSeen) / segmentFrames;
-					foldedSeen = folded;
-					// The entry counts are the admissions' plans. A submission leaves out the entry barriers of resources no running pass
-					// of the execution touched (org::compiler::UntouchedResources); those are counted here.
-					static std::uint64_t untouchedSeen = 0;
-					const auto untouched = org::diagnostics::UntouchedEntryBarriers().load(std::memory_order_relaxed);
-					const double untouchedFrame = double(untouched - untouchedSeen) / segmentFrames;
-					untouchedSeen = untouched;
-					logger::info("[ORG] Barriers a frame, by epoch: entry {:.1f}, body {:.1f} in all{}; late barriers folded at execution: {:.1f} a frame (body less "
-								 "these: {:.1f}); entry barriers left out (untouched): {:.1f} a frame (entry less these: {:.1f})",
-						entryTotal, bodyTotal, barriers, foldedFrame, bodyTotal - foldedFrame, untouchedFrame, entryTotal - untouchedFrame);
-				}
-				std::uint64_t paceWaits = 0, paceUs = 0;
-				RenderGraph::Engine::Native::TakePresentPace(paceWaits, paceUs);
-				logger::info("[ORG] Queued presents: the render thread waited for the previous present {:.2f} times a frame ({:.3f} ms a frame)",
-					double(paceWaits) / frames, double(paceUs) / 1000.0 / frames);
-			}
-			statFrames = statExecutions = statEpochs = 0;
-		}
-		FrameAnchors::LogRunStats();
-		RenderGraph::Frame::Driver::LogStats();
-		RenderGraph::Frame::Recipes::LogStats();
-		RenderGraph::Frame::Transients::LogStats();
-		RenderGraph::Frame::PostChain::LogStats();
-		epochCount = 0;
 	}
 
 	// DXVK's stream signals streamPoint here, after every D3D11 command so far and ahead of the epoch's graph work.
@@ -1636,7 +1227,6 @@ struct RenderGraphRuntime::Impl
 			return false;
 		}
 		++streamPointValue;
-		++epochEnqueues;
 		NoteEnqueued("stream point", submission.label, {}, { &signal, 1 });
 		return true;
 	}
@@ -1687,7 +1277,6 @@ struct RenderGraphRuntime::Impl
 			const auto& streamSegment = a_execution->segments[index];
 			if (streamSegment.split && index) {
 				globals::d3d::context->Flush();
-				++epochEnqueues;
 				NoteStreamClosed("segment split", a_label);
 			}
 			waits.clear();
@@ -1726,7 +1315,6 @@ struct RenderGraphRuntime::Impl
 		if (a_inStream) {
 			if (a_split) {
 				globals::d3d::context->Flush();
-				++epochEnqueues;
 				NoteStreamClosed("exit split", a_label);
 			}
 			std::vector<RenderGraphRuntime::ExternalCommandsWait> waits;
@@ -1754,7 +1342,6 @@ struct RenderGraphRuntime::Impl
 				streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
 				result = false;
 			} else {
-				++epochEnqueues;
 				NoteEnqueued("exit wait", a_label, computeTail, {});
 			}
 		}
@@ -1790,8 +1377,10 @@ struct RenderGraphRuntime::Impl
 	static void OnStreamSubmitted(void* a_user, VkResult a_result)
 	{
 		auto* self = static_cast<Impl*>(a_user);
-		if (a_result != VK_SUCCESS && !self->faulted.exchange(true))
+		if (a_result != VK_SUCCESS && !self->faulted.exchange(true)) {
 			logger::error("[ORG] DXVK failed to submit render graph work ({}); disabling the graph", static_cast<int>(a_result));
+			FaultIsFatal(fmt::format("DXVK failed to submit render graph work (VkResult {})", static_cast<int>(a_result)));
+		}
 		self->streamSubmitted.fetch_add(1, std::memory_order_release);
 	}
 
@@ -1809,153 +1398,29 @@ struct RenderGraphRuntime::Impl
 		return true;
 	}
 
-	// The contributor ABI's names for the segments' epochs.
-	static const char* ContributorEpochId(Segment a_segment)
-	{
-		switch (a_segment) {
-		case Segment::LightCulling:
-			return "cs.light-culling";
-		case Segment::ZPrepass:
-			return "cs.z-prepass";
-		case Segment::MainOpaque:
-			return "cs.main-opaque";
-		case Segment::ShadowView:
-			return "cs.shadow-view";
-		case Segment::SkyOcclusion:
-			return "cs.sky-occlusion";
-		case Segment::Reflection:
-			return "cs.reflection";
-		case Segment::Forward:
-			return "cs.forward";
-		case Segment::FirstPersonDepth:
-			return "cs.first-person-depth";
-		case Segment::FirstPerson:
-			return "cs.first-person";
-		default:
-			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
-				return anchor->contributor;
-			return "cs.unknown";
-		}
-	}
-
-	// Other modules reach the graph through ORG_GetRenderGraphAPI. Their passes run in the segments' epochs. No game targets are exported yet.
-	void CreateContributorHost()
-	{
-		try {
-			const rhi::PushConstantRangeDesc constants{ .visibility = rhi::ShaderStage::All, .num32BitValues = 16 };
-			if ((*device)->CreatePipelineLayout(rhi::PipelineLayoutDesc{ .pushConstants = { &constants, 1 },
-					.flags = rhi::PipelineLayoutFlags::PF_None }, contributorLayout) != rhi::Result::Ok)
-				throw std::runtime_error("the contributor pipeline layout could not be created");
-			org::contributor::ContributorHost::Desc desc{};
-			desc.id = "cs";
-			desc.displayName = "Community Shaders";
-			desc.version = std::string(Plugin::VERSION.string());
-			desc.device = device->Get();
-			desc.backend = rhi::Backend::Vulkan;
-			desc.anchors = { { "cs.frame.begin", "Frame begin", "__rg_begin__" }, { "cs.frame.end", "Frame end", "__rg_end__" } };
-			for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(Segment::Count); ++index) {
-				const auto value = static_cast<Segment>(index);
-				if (FrameAnchors::IsUnusedSegment(index))
-					continue;  // an anchor nobody reserved has no epoch
-				desc.epochs.push_back({ ContributorEpochId(value), SegmentLabel(value), EpochOf(value) });
-			}
-			desc.graphicsLayout = desc.computeLayout = contributorLayout->GetHandle();
-			contributors = std::make_unique<org::contributor::ContributorHost>(std::move(desc));
-			host->AddExtension("cs.org.contributors", [self = this] { return self->contributors->CreateExtension(); });
-			LoadTestContributor();
-		} catch (const std::exception& e) {
-			logger::warn("[ORG] Contributors unavailable: {}", e.what());
-			contributors.reset();
-		}
-	}
-
-	// CS_ORG_TEST_CONTRIBUTOR=<dll path> loads ORG's sample contributor as a plugin would be loaded.
-	// CS_ORG_TEST_CONTRIBUTOR_EPOCH and _FRAMES pick its epoch and lifetime. It logs to CommunityShaders-ContributorSample.log.
-	void LoadTestContributor()
-	{
-		const auto pathValue = Switches::Value("CS_ORG_TEST_CONTRIBUTOR");
-		if (pathValue.empty())
-			return;
-		const std::filesystem::path path = std::filesystem::u8path(pathValue);
-		std::string epoch = Switches::Value("CS_ORG_TEST_CONTRIBUTOR_EPOCH");
-		if (epoch.empty())
-			epoch = "cs.light-culling";
-		const auto frames = static_cast<std::uint32_t>(Switches::Number("CS_ORG_TEST_CONTRIBUTOR_FRAMES", 600));
-		const HMODULE module = LoadLibraryW(path.c_str());
-		using Start = int(ORG_RG_CALL*)(const wchar_t*, const char*, std::uint32_t, const char*);
-		const auto start = module ? reinterpret_cast<Start>(GetProcAddress(module, "ORGContributorSampleStart")) : nullptr;
-		if (!start) {
-			logger::warn("[ORG] CS_ORG_TEST_CONTRIBUTOR: no ORGContributorSampleStart in {}", path.string());
-			return;
-		}
-		const auto log = (logger::log_directory().value_or(std::filesystem::path{}) / "CommunityShaders-ContributorSample.log").string();
-		const int status = start(L"CommunityShaders.dll", epoch.c_str(), frames, log.c_str());
-		logger::info("[ORG] test contributor {} started: {} (epoch {}, log {})", std::filesystem::path(path).filename().string(), status, epoch, log);
-	}
-
 	static const char* SegmentLabel(Segment a_segment)
 	{
-		switch (a_segment) {
-		case Segment::LightCulling:
-			return "CS LLF: light culling";
-		case Segment::ZPrepass:
-			return "CS DCLF: Z-prepass";
-		case Segment::MainOpaque:
-			return "CS DCLF: main opaque";
-		case Segment::ShadowView:
-			return "CS DCLF: shadow view";
-		case Segment::SkyOcclusion:
-			return "CS DCLF: Skylighting occlusion";
-		case Segment::Reflection:
-			return "CS DCLF: reflection faces";
-		case Segment::Forward:
-			return "CS DCLF: forward";
-		case Segment::FirstPersonDepth:
-			return "CS DCLF: first-person depth";
-		case Segment::FirstPerson:
-			return "CS DCLF: first person";
-		default:
-			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
-				return anchor->label;
-			break;
-		}
+		// A fragment source's segment is named by its source.
+		if (const char* label = RenderGraph::Frame::Revision::FragmentSegmentLabel(static_cast<std::uint32_t>(a_segment), false))
+			return label;
+		if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
+			return anchor->label;
 		return "CS render graph";
 	}
 
 	// Named after the segment's feature so the GPU idle trace sums it under that feature.
 	static const char* InputsLabel(Segment a_segment)
 	{
-		switch (a_segment) {
-		case Segment::LightCulling:
-			return "CS LLF: light culling inputs";
-		case Segment::ZPrepass:
-			return "CS DCLF: Z-prepass inputs";
-		case Segment::MainOpaque:
-			return "CS DCLF: main opaque inputs";
-		case Segment::ShadowView:
-			return "CS DCLF: shadow view inputs";
-		case Segment::SkyOcclusion:
-			return "CS DCLF: Skylighting occlusion inputs";
-		case Segment::Reflection:
-			return "CS DCLF: reflection faces inputs";
-		case Segment::Forward:
-			return "CS DCLF: forward inputs";
-		case Segment::FirstPersonDepth:
-			return "CS DCLF: first-person depth inputs";
-		case Segment::FirstPerson:
-			return "CS DCLF: first-person inputs";
-		default:
-			if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
-				return anchor->inputs;
-			break;
-		}
+		if (const char* label = RenderGraph::Frame::Revision::FragmentSegmentLabel(static_cast<std::uint32_t>(a_segment), true))
+			return label;
+		if (const auto* anchor = FrameAnchors::NamesOf(static_cast<std::uint32_t>(a_segment)))
+			return anchor->inputs;
 		return "CS render graph: feature inputs";
 	}
 
 	static VkResult Submit(void* a_user, VkQueue a_queue, const VkSubmitInfo2& a_submit)
 	{
 		auto* self = static_cast<Impl*>(a_user);
-		++self->epochHookCalls;
 		// The compute and copy queues are the graph's alone. Timeline waits on values still in DXVK's stream are legal.
 		// On a copy queue shared with the uploader, only the render thread's submissions are the graph's.
 		const bool copy = a_queue == self->copyQueue && (a_queue != self->uploadQueue || ::GetCurrentThreadId() == self->streamThread.load(std::memory_order_relaxed));
@@ -2024,7 +1489,6 @@ struct RenderGraphRuntime::Impl
 				return VK_SUCCESS;
 			}
 			// In D3D11 stream order, after every D3D11 command so far. Nothing is waited for here.
-			++self->epochEnqueues;
 			DxvkOrgInteropSubmission submission{};
 			submission.version = DXVK_ORG_INTEROP_VERSION;
 			submission.waitCount = a_submit.waitSemaphoreInfoCount;
@@ -2064,7 +1528,6 @@ struct RenderGraphRuntime::Impl
 	static void OnDxvkTeardown(void*, VkDevice)
 	{
 		logger::info("[ORG] DXVK is destroying its device; retiring the render graph first");
-		GpuIdleTrace::Shutdown();
 		RenderGraphRuntime::Get().Shutdown();
 	}
 };
@@ -2079,21 +1542,37 @@ void RenderGraphRuntime::RequestDeviceFeatures(HMODULE a_dxvkD3D11)
 {
 	if (EnvDisabled())
 		return;
-	auto request = ResolveExport<PFN_dxvkRequestDeviceFeatures>(a_dxvkD3D11, "dxvkRequestDeviceFeatures");
-	if (!request) {
-		logger::warn("[ORG] dxvkRequestDeviceFeatures is unavailable - this DXVK build cannot host the render graph");
+	// The shared table resolves the same module.
+	static_cast<void>(a_dxvkD3D11);
+	const auto& dxvk = DxvkExports::Get();
+	// Graph mode has both: DxvkLoader stops it without them. CS_ORG=features and VR may run on a DXVK without them.
+	if (!dxvk.requestDeviceFeatures || !dxvk.setBindingModelCallback)
 		return;
-	}
 	const DxvkOrgInteropFeatureRequest desc{ DXVK_ORG_INTEROP_VERSION, static_cast<uint32_t>(std::size(kRequestedFeatures)), kRequestedFeatures };
-	if (FAILED(request(&desc)))
+	if (FAILED(dxvk.requestDeviceFeatures(&desc)))
 		logger::warn("[ORG] DXVK rejected the render graph device feature request");
-	// Without it (an older DXVK) DXVK keeps its own model, and the graph runs only if BasicRHI happens to support it.
-	auto setBindingModelCallback = ResolveExport<PFN_dxvkSetBindingModelCallback>(a_dxvkD3D11, "dxvkSetBindingModelCallback");
 	const DxvkOrgInteropBindingModelNegotiation negotiation{ DXVK_ORG_BINDING_MODEL_NEGOTIATION_VERSION, &NegotiateBindingModel, nullptr };
-	if (!setBindingModelCallback)
-		logger::warn("[ORG] dxvkSetBindingModelCallback is unavailable - DXVK picks its descriptor model without asking the render graph");
-	else if (FAILED(setBindingModelCallback(&negotiation)))
+	if (FAILED(dxvk.setBindingModelCallback(&negotiation)))
 		logger::warn("[ORG] DXVK rejected the render graph's binding model callback");
+}
+
+std::shared_ptr<org::Runtime> RenderGraphRuntime::CreateOrgRuntime(const rhi::DevicePtr& a_device)
+{
+	// Diagnostic: CS_ORG_ALIAS_LOG=1 logs every alias plan's placements, ranks and exclusions.
+	if (Switches::Equals("CS_ORG_ALIAS_LOG", "1")) {
+		auto settings = org::runtime::GetOpenRenderGraphSettings();
+		settings.autoAliasEnableLogging = true;
+		org::runtime::SetOpenRenderGraphSettings(settings);
+	}
+#if defined(CS_RELEASE_PROFILE)
+	// No pass timestamps and no readback of them: the statistics take this when the runtime below creates them.
+	auto settings = org::runtime::GetOpenRenderGraphSettings();
+	settings.collectPassStatistics = false;
+	settings.collectPipelineStatistics = false;
+	org::runtime::SetOpenRenderGraphSettings(settings);
+#endif
+	// The runtime's first run capacity. Its per-lease lists grow past it. ORG's tasks run on CS's executor.
+	return org::Runtime::Create({ .device = a_device.Get(), .backend = RenderGraph::Backend::Active(), .slots = kRunCapacity, .tasks = RenderGraph::Frame::OrgTaskService() });
 }
 
 bool RenderGraphRuntime::Initialize()
@@ -2108,6 +1587,7 @@ bool RenderGraphRuntime::Initialize()
 		disabledReason = std::move(a_reason);
 		logger::info("[ORG] Render graph disabled: {}", disabledReason);
 		impl.reset();
+		FaultIsFatal(fmt::format("it could not start ({})", disabledReason));
 		return false;
 	};
 
@@ -2115,6 +1595,9 @@ bool RenderGraphRuntime::Initialize()
 		return disable("CS_ORG=0");
 	if (EnvFeaturesOnly())
 		return disable("CS_ORG=features (device features requested, graph not created)");
+	// The frame's epochs come from Drawcall Limit Fix's schedule. The runtime has no orders of its own.
+	if (!frameConfigured)
+		return disable("Drawcall Limit Fix did not configure the frame's epochs (it did not install: CS_DCLF=0 or an unsupported game)");
 	// CS_ORG_NATIVE_BACKEND=d3d12 without native mode or a D3D12 build is an error, never a silent Vulkan fallback.
 	if (auto backendError = RenderGraph::Backend::RequestError(); !backendError.empty()) {
 		logger::critical("[ORG] {}", backendError);
@@ -2126,6 +1609,9 @@ bool RenderGraphRuntime::Initialize()
 		return disable("DXVK is not loaded (native D3D11)");
 
 	HMODULE d3d11 = native ? nullptr : ::GetModuleHandleW(L"dxvk_d3d11.dll");
+	// Native mode resolves nothing from DXVK.
+	static const DxvkExports noDxvk{};
+	const auto& dxvk = native ? noDxvk : DxvkExports::Get();
 	auto state = std::make_unique<Impl>();
 	DxvkOrgInteropDeviceInfo info{};
 	info.version = DXVK_ORG_INTEROP_VERSION;
@@ -2151,51 +1637,38 @@ bool RenderGraphRuntime::Initialize()
 		}
 		RenderGraph::Engine::Native::Stage("render graph", "the graph host runs natively on BasicRHI's device (epochs submit directly)");
 	} else {
-		auto getInfo = ResolveExport<PFN_dxvkGetInteropDeviceInfo>(d3d11, "dxvkGetInteropDeviceInfo");
-		state->createBufferFromVkBuffer = ResolveExport<PFN_dxvkCreateBufferFromVkBuffer>(d3d11, "dxvkCreateBufferFromVkBuffer");
-		state->setTeardownCallback = ResolveExport<PFN_dxvkSetDeviceTeardownCallback>(d3d11, "dxvkSetDeviceTeardownCallback");
-		// Optional: graph textures that D3D11 still reads (GraphResources' exports).
-		state->createTextureFromVkImage = ResolveExport<PFN_dxvkCreateTextureFromVkImage>(d3d11, "dxvkCreateTextureFromVkImage");
-		// Optional: engine textures created on graph images with their contents (Engine/Textures).
-		state->createTextureFromVkImageWithData = ResolveExport<PFN_dxvkCreateTextureFromVkImageWithData>(d3d11, "dxvkCreateTextureFromVkImageWithData");
-		if (!getInfo || !state->createBufferFromVkBuffer || !state->setTeardownCallback)
-			return disable("the DXVK build lacks the render graph interop exports");
-		// Optional: game resources for the graph (Drawcall Limit Fix).
-		state->getResourceInfo = ResolveExport<PFN_dxvkGetInteropResourceInfo>(d3d11, "dxvkGetInteropResourceInfo");
-		state->getResourceInfos = ResolveExport<PFN_dxvkGetInteropResourceInfos>(d3d11, "dxvkGetInteropResourceInfos");
-		if (!Switches::Equals("CS_ORG_PINNED_IMPORTS", "1")) {
-			state->trackResources = ResolveExport<PFN_dxvkTrackInteropResources>(d3d11, "dxvkTrackInteropResources");
-			state->untrackResources = ResolveExport<PFN_dxvkUntrackInteropResources>(d3d11, "dxvkUntrackInteropResources");
-			state->pollRelocations = ResolveExport<PFN_dxvkPollInteropRelocations>(d3d11, "dxvkPollInteropRelocations");
-			state->releaseStorage = ResolveExport<PFN_dxvkReleaseInteropStorage>(d3d11, "dxvkReleaseInteropStorage");
-			if (!state->trackResources || !state->untrackResources || !state->pollRelocations || !state->releaseStorage) {
-				state->trackResources = nullptr;
-				state->untrackResources = nullptr;
-				state->pollRelocations = nullptr;
-				state->releaseStorage = nullptr;
-			}
-		}
-		state->emitCommandBufferCallback = ResolveExport<PFN_dxvkEmitCommandBufferCallback>(d3d11, "dxvkEmitCommandBufferCallback");
-		// Optional: recordings into DXVK's own command buffer (Drawcall Limit Fix's CPU-driven pipeline).
-		state->emitExternalCommands = ResolveExport<PFN_dxvkEmitExternalCommands>(d3d11, "dxvkEmitExternalCommands");
-		// Optional: without it, each epoch flushes and waits for DXVK's command stream instead.
-		state->enqueueSubmission = ResolveExport<PFN_dxvkEnqueueInteropSubmission>(d3d11, "dxvkEnqueueInteropSubmission");
-		if (state->enqueueSubmission && !Switches::Equals("CS_ORG_BATCH_SUBMIT", "0"))
-			state->enqueueSubmissions = ResolveExport<PFN_dxvkEnqueueInteropSubmissions>(d3d11, "dxvkEnqueueInteropSubmissions");
-		state->earlyFlush = Switches::Equals("CS_ORG_EARLY_FLUSH", "1");
+		// DxvkLoader stops graph mode on a DXVK without every export. This covers VR, where the graph may start outside graph mode.
+		if (const auto missing = dxvk.Missing(); !missing.empty())
+			return disable(fmt::format("the DXVK build lacks exports the render graph needs ({})", missing));
+		auto getInfo = dxvk.getInteropDeviceInfo;
+		state->createBufferFromVkBuffer = dxvk.createBufferFromVkBuffer;
+		state->setTeardownCallback = dxvk.setDeviceTeardownCallback;
+		// Graph textures that D3D11 still reads (GraphResources' exports), and engine textures made on graph images (Engine/Textures).
+		state->createTextureFromVkImage = dxvk.createTextureFromVkImage;
+		state->createTextureFromVkImageWithData = dxvk.createTextureFromVkImageWithData;
+		// Game resources for the graph (Drawcall Limit Fix).
+		state->getResourceInfo = dxvk.getInteropResourceInfo;
+		state->getResourceInfos = dxvk.getInteropResourceInfos;
+		state->trackResources = dxvk.trackInteropResources;
+		state->untrackResources = dxvk.untrackInteropResources;
+		state->pollRelocations = dxvk.pollInteropRelocations;
+		state->releaseStorage = dxvk.releaseInteropStorage;
+		// Recordings into DXVK's own command buffer (EmitCommands, the in-stream epochs).
+		state->emitExternalCommands = dxvk.emitExternalCommands;
+		// Graph submissions in DXVK's command stream.
+		state->enqueueSubmission = dxvk.enqueueInteropSubmission;
+		state->enqueueSubmissions = dxvk.enqueueInteropSubmissions;
 
 		auto d3dDevice = globals::d3d::device;
 		if (!d3dDevice || FAILED(d3dDevice->QueryInterface(__uuidof(IDXGIVkInteropDevice), state->interop.put_void())))
 			return disable("IDXGIVkInteropDevice is unavailable");
 
 		// Resting layouts keep imported images in DXVK's own layouts instead of GENERAL, which keeps compression on AMD's Windows driver.
-		// They need external home states too. CS_ORG_RESTING_LAYOUTS=0 keeps the images in GENERAL.
-		if (!Switches::Equals("CS_ORG_RESTING_LAYOUTS", "0") && !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0")) {
-			const auto setOptions = ResolveExport<PFN_dxvkSetInteropOptions>(d3d11, "dxvkSetInteropOptions");
-			const bool resting = setOptions && SUCCEEDED(setOptions(d3dDevice, DXVK_ORG_INTEROP_RESTING_LAYOUTS));
-			logger::info("[ORG] imported images {}", resting ? "rest in DXVK's layouts" : "rest in GENERAL (this DXVK build has no dxvkSetInteropOptions)");
-		} else {
-			logger::info("[ORG] imported images rest in GENERAL (CS_ORG_RESTING_LAYOUTS=0 or CS_ORG_EXTERNAL_HOME=0)");
+		// They need external home states too.
+		{
+			if (FAILED(dxvk.setInteropOptions(d3dDevice, DXVK_ORG_INTEROP_RESTING_LAYOUTS)))
+				return disable("DXVK rejected resting layouts for imported images (dxvkSetInteropOptions)");
+			logger::info("[ORG] imported images rest in DXVK's layouts");
 		}
 
 		if (FAILED(getInfo(d3dDevice, &info)))
@@ -2243,7 +1716,9 @@ bool RenderGraphRuntime::Initialize()
 			logger::info("[ORG] adopted device: {} extensions, VK_EXT_memory_budget {}", info.enabledExtensionCount, budget ? "on" : "off");
 		}
 		adopt.diagnostics.registerMarker = &Aftermath::RegisterOrgCheckpoint;
-		adopt.diagnostics.detailedCommands = Switches::Equals("CS_ORG_DETAILED_CHECKPOINTS", "1");
+		// DXVK's hang mode turns on BasicRHI's own crash markers and the detailed checkpoints.
+		adopt.diagnostics.crashMarkers = Switches::Equals("DXVK_DEBUG", "hang");
+		adopt.diagnostics.detailedCommands = adopt.diagnostics.crashMarkers;
 		// Whether VK_EXT_debug_utils is on, so that BasicRHI names objects and labels passes only then.
 		adopt.enabledInstanceExtensions = info.enabledInstanceExtensions;
 		adopt.enabledInstanceExtensionCount = info.enabledInstanceExtensionCount;
@@ -2252,20 +1727,18 @@ bool RenderGraphRuntime::Initialize()
 		adopt.bindingRequirements = GraphBindingRequirements(info.getInstanceProcAddr, info.instance, info.physicalDevice);
 		adopt.queues[0] = { info.graphicsQueue, info.graphicsQueueFamily, info.graphicsQueueIndex };
 		adopt.submissionHooks = { state.get(), &Impl::LockQueue, &Impl::UnlockQueue, nullptr };
-		if (state->enqueueSubmission) {
+		{
+			// Graph submissions go through DXVK's stream (Impl::Submit), and the off-stream queues submit with vkQueueSubmit2.
 			auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(info.getInstanceProcAddr(info.instance, "vkGetDeviceProcAddr"));
 			state->queueSubmit2 = getDeviceProcAddr ? reinterpret_cast<PFN_vkQueueSubmit2>(getDeviceProcAddr(info.device, "vkQueueSubmit2")) : nullptr;
+			if (!state->queueSubmit2)
+				return disable("DXVK's Vulkan device has no vkQueueSubmit2");
 			state->deviceProcAddr = getDeviceProcAddr;
 			state->adoptedDevice = info.device;
-			state->graphicsFamily = info.graphicsQueueFamily;
-			if (state->queueSubmit2) {
-				adopt.submissionHooks.submit = &Impl::Submit;
-				state->streamThread = ::GetCurrentThreadId();
-			} else {
-				state->enqueueSubmission = nullptr;
-			}
+			adopt.submissionHooks.submit = &Impl::Submit;
+			state->streamThread = ::GetCurrentThreadId();
 			// The frame-pace timeline (SignalFramePace): signalled from DXVK's stream, so it needs the stream.
-			if (state->enqueueSubmission && getDeviceProcAddr) {
+			{
 				if (Switches::IsSet("CS_FRAME_LATENCY"))
 					state->frameLatency = static_cast<uint32_t>(std::clamp<std::uint64_t>(Switches::Number("CS_FRAME_LATENCY", 0), 0, kGameFramesInFlight));
 				const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
@@ -2281,8 +1754,8 @@ bool RenderGraphRuntime::Initialize()
 				logger::info("[ORG] frame pacing: {}", state->framePace ? std::format("the GPU at most {} frames behind the render thread (CS_FRAME_LATENCY)", state->frameLatency - 1) : std::string("off"));
 			}
 			// DXVK's compute-only queue, ordered against the stream by the host (EnqueueStreamPoint, CloseComputeEpoch), which
-			// needs the stream. CS_ORG_COMPUTE_QUEUE=0 leaves BasicRHI's compute queue aliasing the graphics one.
-			if (state->enqueueSubmission && info.computeQueue && !Switches::Equals("CS_ORG_COMPUTE_QUEUE", "0") && getDeviceProcAddr) {
+			// needs the stream.
+			if (info.computeQueue && getDeviceProcAddr) {
 				const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
 				state->destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(getDeviceProcAddr(info.device, "vkDestroySemaphore"));
 				state->waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(getDeviceProcAddr(info.device, "vkWaitSemaphores"));
@@ -2297,12 +1770,11 @@ bool RenderGraphRuntime::Initialize()
 					state->computeQueue = info.computeQueue;
 					state->computeSubmitter.Start(*state, L"CS ORG compute submit", false);
 					adopt.queues[1] = { info.computeQueue, info.computeQueueFamily, info.computeQueueIndex };
-					// CS_ORG_COPY_QUEUE moves graph copies off DXVK's stream to a transfer-only queue, DXVK's spare or the shared uploader's.
+					// Graph copies move off DXVK's stream to a transfer-only queue, DXVK's spare or the shared uploader's.
 					// Never the compute queue, where a copy waits behind a running dispatch.
-					const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue && !Switches::Equals("CS_ORG_UPLOAD_QUEUE", "0");
+					const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue;
 					const bool shared = !info.copyQueue && uploadOffered;
-					if ((info.copyQueue || shared) && !Switches::Equals("CS_ORG_COPY_QUEUE", "0") &&
-						createSemaphore(info.device, &create, nullptr, &state->copyExit) == VK_SUCCESS) {
+					if ((info.copyQueue || shared) && createSemaphore(info.device, &create, nullptr, &state->copyExit) == VK_SUCCESS) {
 						state->copyQueue = shared ? info.uploadQueue : info.copyQueue;
 						adopt.queues[2] = shared ? rhi::vulkan::AdoptedQueue{ info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex } :
 						                           rhi::vulkan::AdoptedQueue{ info.copyQueue, info.copyQueueFamily, info.copyQueueIndex };
@@ -2311,9 +1783,9 @@ bool RenderGraphRuntime::Initialize()
 				}
 			}
 		}
-		// The upload queue, offered to ORG's copy-queue uploader. Its submissions are direct, under the lock. CS_ORG_UPLOAD_QUEUE=0 offers none.
+		// The upload queue, offered to ORG's copy-queue uploader. Its submissions are direct, under the lock.
 		rhi::vulkan::AdoptedQueue uploadSpare{};
-		if (adopt.submissionHooks.submit && info.uploadQueue && !Switches::Equals("CS_ORG_UPLOAD_QUEUE", "0")) {
+		if (adopt.submissionHooks.submit && info.uploadQueue) {
 			state->uploadQueue = info.uploadQueue;
 			uploadSpare = { info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex };
 			adopt.spareQueues = &uploadSpare;
@@ -2326,9 +1798,6 @@ bool RenderGraphRuntime::Initialize()
 		if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
 			return disable("BasicRHI could not adopt DXVK's Vulkan device");
 	}
-	state->epochStats = Switches::Equals("CS_ORG_EPOCH_STATS", "1");
-	// The submission census (command lists and queue submissions by kind) counts only with the statistics on.
-	org::diagnostics::Census().enabled.store(state->epochStats, std::memory_order_relaxed);
 	// CS_SUBMIT_TRACE=<file> turns on BasicRHI's submission trace before any list is recorded, so every kept list is named.
 	if (char path[8]{}; GetEnvironmentVariableA("CS_SUBMIT_TRACE", path, sizeof(path)))
 		rhi::submittrace::Enable(true);
@@ -2341,72 +1810,49 @@ bool RenderGraphRuntime::Initialize()
 		desc.queueBoundary = { .entry = !state->native, .exit = !state->native };
 		// Game frames in flight, for frame pacing and published copies. Every run takes its own run lease.
 		desc.framesInFlight = kGameFramesInFlight;
-		// CS_ORG_CLOSED=1 makes each epoch leave resources home and start with a full barrier. An interop fallback to ORG's ledgers.
-		desc.closedExecutions = Switches::Equals("CS_ORG_CLOSED", "1");
-		// CS_ORG_EXTERNAL_HOME returns DXVK's imported images to GENERAL on the graphics queue after each epoch.
+		// Guest mode returns DXVK's imported images to their home layouts on the graphics queue after each epoch.
 		// Native mode has no home states. The ledgers carry each image's layout between executions.
-		desc.externalHomeStates = !state->native && !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0");
+		desc.externalHomeStates = !state->native;
 		if (state->native)
 			logger::info("[ORG] native: no home states; the graph imports native images exclusively and its ledgers carry their layouts");
 		// Tickets record replayable recordings, which the revision-driven epochs need (their published copies are submitted again).
 		desc.reuseRecordings = true;
-		// CS_ORG_KEEP_LIVE, native only. A live run reuses its copy's kept recording while every pass revision holds.
-		desc.reuseLiveRecordings = state->native && Switches::Number("CS_ORG_KEEP_LIVE", 1) != 0;
-		// CS_ORG_COALESCE_SUBMITS, native only. An epoch's consecutive batches on one queue go in one submission.
-		desc.coalesceSubmissions = state->native && Switches::Number("CS_ORG_COALESCE_SUBMITS", 1) != 0;
-		// CS_ORG_MERGE_HANDOFFS, native only. One list of entry barriers per queue submission instead of per batch.
-		desc.mergeHandoffs = desc.coalesceSubmissions && Switches::Number("CS_ORG_MERGE_HANDOFFS", 1) != 0;
-		// CS_ORG_UPLOADS_WITH_BATCHES, native only. A ticket's uploads go in its first queue submission.
-		desc.uploadsWithBatches = desc.coalesceSubmissions && Switches::Number("CS_ORG_UPLOADS_WITH_BATCHES", 1) != 0;
-		// CS_ORG_KEEP_GATED, native only. A late batch of only gated copies and clears resubmits its list while gate answers repeat.
-		desc.keepGatedInline = state->native && Switches::Number("CS_ORG_KEEP_GATED", 1) != 0;
-		// CS_ORG_SUBMIT_THREAD, native only. The commit runs on the render thread and the rest of the submission on a host thread.
-		desc.submissionThread = state->native && Switches::Number("CS_ORG_SUBMIT_THREAD", 1) != 0;
+		// Submission options, on in every mode (decision 113: guest runs with each of them).
+		// A live run reuses its copy's kept recording while every pass revision holds.
+		desc.reuseLiveRecordings = true;
+		// An epoch's consecutive batches on one queue go in one submission, with one list of entry barriers, and a ticket's
+		// uploads go in its first queue submission.
+		desc.coalesceSubmissions = true;
+		desc.mergeHandoffs = true;
+		desc.uploadsWithBatches = true;
+		// A late batch of only gated copies and clears resubmits its list while gate answers repeat.
+		desc.keepGatedInline = true;
+		// The commit runs on the render thread and the rest of the submission on a host thread.
+		desc.submissionThread = state->native;
 		if (desc.submissionThread)
-			logger::info("[ORG] native: epochs submit on a submission thread (CS_ORG_SUBMIT_THREAD=0 turns it off)");
-		// CS_ORG_MERGE_TICKETS, native only. Tickets queued together share queue submissions where they can.
-		desc.mergeTicketSubmissions = desc.submissionThread && desc.coalesceSubmissions && Switches::Number("CS_ORG_MERGE_TICKETS", 1) != 0;
-		// CS_ORG_QUEUE_PRESENT, native only. The seal and present queue on the submission thread after the frame's epochs.
+			logger::info("[ORG] native: epochs submit on a submission thread");
+		// Tickets queued together share queue submissions where they can.
+		desc.mergeTicketSubmissions = state->native;
+		// The seal and present queue on the submission thread after the frame's epochs.
 		// The render thread waits only when the previous present is still queued.
-		desc.queuedSeals = desc.submissionThread && Switches::Number("CS_ORG_QUEUE_PRESENT", 1) != 0;
-		// CS_ORG_QUEUE_UPLOADS records uploads on the compute queue when that queue uses them first. A pass must declare every upload it reads.
+		desc.queuedSeals = state->native;
+		// Uploads are recorded on the compute queue when that queue uses them first. A pass must declare every upload it reads.
 		// DCLF's per-frame publications are read through late-bound buffers for this. An undeclared read once hung the RX 6600.
-		desc.queueScopedUploads = !Switches::Equals("CS_ORG_QUEUE_UPLOADS", "0");
-		// CS_ORG_SCOPED_FRAME_WAIT=1 makes only batches that declare DCLF frame value reads wait for the frame wait.
-		desc.scopedFrameWait = Switches::Equals("CS_ORG_SCOPED_FRAME_WAIT", "1");
+		desc.queueScopedUploads = true;
 		// Stale alias placements are rebuilt off the render thread by the build manager, like other rebuilds.
 		desc.reportStaleAliasPlacements = true;
-		// The segments in frame order, from DCLF's schedule when it configured the frame, else the built-in order.
-		if (frameConfigured)
-			desc.epochOrder = EpochsOf(frameConfig.epochOrder);
-		else
-			desc.epochOrder = { EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::Reflection), EpochOf(Segment::FirstPersonDepth),
-				EpochOf(Segment::SkyOcclusion), EpochOf(Segment::LightCulling), EpochOf(Segment::MainOpaque), EpochOf(Segment::Forward), EpochOf(Segment::FirstPerson) };
-		// The self-tests reserve their anchors as any client does, before the reservations freeze.
-		FrameAnchors::SelfTest::Reserve();
-		GraphResources::SelfTest::Reserve();
-		// The frame anchors' reserved epochs, where the frame reaches them (FrameAnchors.h).
+		// The segments in frame order, from DCLF's schedule.
+		desc.epochOrder = EpochsOf(frameConfig.epochOrder);
+		// The CS stages' epochs, where the frame reaches them (FrameAnchors.h).
 		FrameAnchors::AddToFrame(desc.epochOrder);
 		if (!desc.epochOrder.empty())
 			logger::info("[ORG] epoch order: {}", fmt::join(desc.epochOrder, ","));
-		// Diagnostic: CS_ORG_ALIAS_LOG=1 logs every alias plan's placements, ranks and exclusions.
-		if (Switches::Equals("CS_ORG_ALIAS_LOG", "1")) {
-			auto settings = org::runtime::GetOpenRenderGraphSettings();
-			settings.autoAliasEnableLogging = true;
-			org::runtime::SetOpenRenderGraphSettings(settings);
-		}
-#if defined(CS_RELEASE_PROFILE)
-		// No pass timestamps and no readback of them: the statistics take this when the runtime below creates them.
-		auto settings = org::runtime::GetOpenRenderGraphSettings();
-		settings.collectPassStatistics = false;
-		settings.collectPipelineStatistics = false;
-		org::runtime::SetOpenRenderGraphSettings(settings);
-#endif
-		// The runtime's first run capacity. Its per-lease lists grow past it.
-		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = RenderGraph::Backend::Active(), .slots = kRunCapacity });
+		// Native mode made the runtime with its device, for its external client.
+		state->orgRuntime = state->native ? RenderGraph::Engine::Native::TakeOrgRuntime() : CreateOrgRuntime(*state->device);
+		if (!state->orgRuntime)
+			return disable("native mode made no ORG runtime with its device");
 		desc.runtime = state->orgRuntime;
 		state->host = std::make_unique<org::GraphHost>(std::move(desc));
-		state->host->SetSegmentCensus(state->epochStats && state->native);
 		// The build manager makes every rebuild off the render thread and attaches it at a frame boundary.
 		// An epoch with no graph is still built at its first submission.
 		state->host->SetExplicitBuilds(true);
@@ -2437,46 +1883,29 @@ bool RenderGraphRuntime::Initialize()
 	state->host->SetCompletedFrameCallback([self = state.get()](std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats) {
 		self->OnCompletedFrame(a_frameNumber, a_stats);
 	});
-	// Every submission up to a_submissions is done on the GPU, so DCLF's pooled versions and replaced pipelines can go.
+	// Every submission up to a_submissions is done on the GPU, so pooled versions can go.
 	// Runs on the host's thread with async epochs.
 	state->host->SetRetiredCallback([self = state.get()](std::uint64_t a_submissions) {
 		self->retiredSubmissions.store(a_submissions, std::memory_order_release);
-		DrawcallLimitFix::OnGraphSubmissionsRetired(a_submissions);
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
-		PipelineRegistry()->Retire(a_submissions);
-#endif
+		// With CPU pipeline frames, a point retires only once its frames' signals did too.
+		RenderGraph::Frame::Retirement::NoteGraphSubmissionsRetired(a_submissions);
 	});
 	// One epoch failed to build or prepare. The others run on, and its owner decides what to do.
 	state->host->SetEpochFailedCallback([this](const org::GraphHost::EpochFailure& a_failure) {
 		OnEpochFailed(a_failure.epoch, a_failure.keptGraph, a_failure.error);
 	});
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
-	// Shader hot reload's safe point. An owner-thread build publishes the registry's staged pipelines while the host's thread is stopped.
-	// Managed builds run while old graphs record, so they leave the staged pipelines alone.
-	state->host->AddExtension("cs.org.pipeline-registry", [self = state.get()]() -> std::unique_ptr<org::RenderGraph::IRenderGraphExtension> {
-		if (RenderGraph::Builds::InManagedBuild())
-			return {};
-		if (const auto published = PipelineRegistry()->Publish(self->host->SubmissionsMade()))
-			logger::info("[ORG] shader reload: {} pipelines swapped in at graph build {} (registry generation {})", published, self->host->BuildGeneration() + 1,
-				PipelineRegistry()->Generation());
-		return {};
-	});
-#endif
+	// Every graph build pins the pipeline versions its recordings bind, so a shader reload never changes what a graph or a kept
+	// recording binds (cleanup plan A4). The revision that carries a reload's ShaderGeneration adopts the rebuilt graphs.
+	RenderGraph::PipelineVersions::Attach(*state->host);
+	RenderGraph::PipelineVersions::Install();
 	// The frame anchors' passes, before any graph is built (so adding the extension rebuilds nothing).
 	FrameAnchors::Attach(*state->host);
-	state->CreateContributorHost();
 	{
 		try {
-			std::vector<std::uint32_t> epochs{ EpochOf(Segment::Reflection), EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::SkyOcclusion),
-				EpochOf(Segment::LightCulling), EpochOf(Segment::MainOpaque), EpochOf(Segment::Forward), EpochOf(Segment::FirstPersonDepth), EpochOf(Segment::FirstPerson) };
-			// DCLF's epochs are revision-driven, so each submission carries its revision's recording and needs no live ticket.
-			std::vector<std::uint32_t> revisionEpochs{ EpochOf(Segment::Reflection), EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass),
-				EpochOf(Segment::SkyOcclusion), EpochOf(Segment::MainOpaque), EpochOf(Segment::Forward), EpochOf(Segment::FirstPersonDepth), EpochOf(Segment::FirstPerson) };
-			// Drawcall Limit Fix's schedule's lists instead, when it configured the frame.
-			if (frameConfigured) {
-				epochs = EpochsOf(frameConfig.asyncOrder);
-				revisionEpochs = EpochsOf(frameConfig.revisionEpochs);
-			}
+			// The async epochs run in DCLF's frame order. Its revision-driven epochs need no live ticket: each submission carries
+			// its revision's recording.
+			std::vector<std::uint32_t> epochs = EpochsOf(frameConfig.epochOrder);
+			std::vector<std::uint32_t> revisionEpochs = EpochsOf(frameConfig.revisionEpochs);
 			// The frame anchors' epochs are live async epochs, in DXVK's stream with the others.
 			FrameAnchors::AddToFrame(epochs);
 			// The CS stages are revision-driven and recorded per description. Their entry barriers come from the ledgers at each submission.
@@ -2489,7 +1918,7 @@ bool RenderGraphRuntime::Initialize()
 				logger::info("[ORG] frame segments: epochs {} are revision-driven and open", fmt::join(segments, ","));
 			}
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
-			// Guest mode runs epochs in DXVK's stream when DXVK takes external commands. Native mode has no external epochs,
+			// Guest mode runs the async epochs in DXVK's stream. Native mode has no external epochs,
 			// and passes recorded at execution go inline into the epoch's own list.
 			if (state->native) {
 				state->host->SetInlineAtExecution(true);
@@ -2497,35 +1926,35 @@ bool RenderGraphRuntime::Initialize()
 					"[ORG] native: no external epochs; every epoch submits directly, and passes recorded at execution are recorded "
 					"inline into their epoch's command list");
 			}
-			if (state->emitExternalCommands) {
+			if (!state->native) {
 				state->inStreamEpochs = epochs;
 				std::ranges::sort(state->inStreamEpochs);
 				logger::info("[ORG] in-stream epochs: {} (their graphics work in DXVK's command list, split only where a wait needs it)",
 					fmt::join(state->inStreamEpochs, ","));
 			}
 			state->host->SetExternalEpochs(state->inStreamEpochs);
-			FrameAnchors::SetTicketsAhead(*state->host);
 			state->host->SetAsyncEpochs(std::move(epochs), std::move(revisionEpochs));
-			logger::info("[ORG] Async epochs: each epoch is prepared and recorded ahead on the graph host's thread; the render thread submits (DCLF's from its scene revisions)");
+			logger::info("[ORG] Async epochs: each epoch is prepared and recorded ahead on the graph host's thread; the render thread submits (the fragment sources' from their fragments)");
 		} catch (const std::exception& e) {
 			return disable(std::string("async epochs unavailable: ") + e.what());
 		}
 	}
 	{
-		// DCLF builds its epochs on its scene worker and attaches them at a frame's end.
-		// Until it registers, or with CS_DCLF_ASYNC_BUILDS=0, they build on the render thread.
+		// Fragment sources' epochs build on the build manager's lane like the others, their first builds too. They are staged, and
+		// attach with the fragment recorded on them at a Begin (Frame::Revision::RegisterFragmentSource).
 		RenderGraph::BuildManager::Desc builds{};
 		builds.host = state->host.get();
-		const bool dclfAsync = !Switches::Equals("CS_DCLF_ASYNC_BUILDS", "0");
-		for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(Segment::Count); ++index)
-			if (IsDclfSegment(static_cast<Segment>(index))) {
-				const auto epoch = EpochOf(static_cast<Segment>(index));
-				auto& list = dclfAsync ? builds.external : builds.ownerBuilt;
-				if (std::ranges::find(list, epoch) == list.end())
-					list.push_back(epoch);
+		for (const auto fragmentSegment : RenderGraph::Frame::Revision::FragmentSegments())
+			if (fragmentSegment < static_cast<std::uint32_t>(Segment::Count)) {
+				const auto epoch = EpochOf(static_cast<Segment>(fragmentSegment));
+				if (std::ranges::find(builds.laneOnly, epoch) == builds.laneOnly.end())
+					builds.laneOnly.push_back(epoch);
 			}
 		// A finished stage build is staged and recorded on the host's thread, then switched in whole at a frame boundary, so it never blanks a stage.
 		builds.staged = FrameAnchors::SegmentEpochs();
+		for (const auto epoch : builds.laneOnly)
+			if (std::ranges::find(builds.staged, epoch) == builds.staged.end())
+				builds.staged.push_back(epoch);
 		builds.label = [](std::uint32_t a_epoch) -> std::string {
 			return a_epoch < static_cast<std::uint32_t>(Segment::Count) ? std::string(Impl::SegmentLabel(static_cast<Segment>(a_epoch))) :
 			                                                              fmt::format("epoch {}", a_epoch);
@@ -2540,8 +1969,6 @@ bool RenderGraphRuntime::Initialize()
 	impl = std::move(state);
 	disabledReason.clear();
 	if (impl->native) {
-		// Before any import, since this makes the native present's back buffer slot.
-		RenderGraph::Engine::Native::OnGraphReady();
 		logger::info("[ORG] Render graph runs natively on BasicRHI's {} device; submissions go to its queues directly",
 			RenderGraph::Backend::Name(RenderGraph::Backend::Active()));
 		// Nsight Perf's Vulkan backend on the native device: frame boundaries under the native queue lock, the graph's passes as ranges.
@@ -2552,11 +1979,10 @@ bool RenderGraphRuntime::Initialize()
 	} else {
 		// Nsight Perf's Vulkan backend: its captures run on DXVK's graphics queue, with the graph's passes as ranges.
 		GpuCounters::RegisterVulkanDevice(info, d3d11, *impl->host);
-		logger::info("[ORG] Render graph adopted DXVK's Vulkan device (queue family {}, index {}); submissions {}",
-			info.graphicsQueueFamily, info.graphicsQueueIndex,
-			impl->enqueueSubmission ? "go through DXVK's command stream" : "flush DXVK each epoch");
+		logger::info("[ORG] Render graph adopted DXVK's Vulkan device (queue family {}, index {}); submissions go through DXVK's command stream",
+			info.graphicsQueueFamily, info.graphicsQueueIndex);
 	}
-#if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	{
 		// Load DXC from beside the DXVK DLLs, not by name. Another dxcompiler.dll without SPIR-V may already be loaded.
 		wchar_t dxvkPath[MAX_PATH]{};
@@ -2584,18 +2010,17 @@ bool RenderGraphRuntime::Initialize()
 		RenderGraph::Engine::Native::OnShaderCompilerReady();
 	IndirectCommandsFeatureInfo indirect{};
 	if ((*impl->device)->QueryFeatureInfo(&indirect.header) == rhi::Result::Ok) {
-		logger::info("[ORG] Indirect commands: generated commands {}, index buffer arguments {}, pipeline sets {} (up to {} pipelines); game resource export {}{}{}",
+		logger::info("[ORG] Indirect commands: generated commands {}, index buffer arguments {}, pipeline sets {} (up to {} pipelines); game resource imports {}",
 			indirect.constantArguments, indirect.indexBufferArguments, indirect.pipelineSets, indirect.maxPipelineSetCount,
-			impl->getResourceInfo ? "available" : "missing", impl->getResourceInfos ? " (batched)" : " (not batched)",
-			impl->trackResources ? ", pinless (relocations followed)" : ", pinned");
+			impl->native ? "native" : impl->trackResources ? "pinless (relocations followed)" : "pinned");
 	}
 	return true;
 }
 
 void RenderGraphRuntime::Shutdown()
 {
-	// No program build may create a pipeline on a device being torn down (ProgramCache).
-	RenderGraph::StopProgramBuilds();
+	// No program build may create a pipeline on a device being torn down (ProgramService).
+	RenderGraph::Programs::Stop();
 	if (!impl)
 		return;
 	// Let the build thread finish and drop unattached graphs before anything of the host goes.
@@ -2613,7 +2038,6 @@ void RenderGraphRuntime::Shutdown()
 		if (state->device && *state->device)
 			rhi::vulkan::abandon_device(state->device->Get());
 		(void)state->host.release();
-		(void)state->contributors.release();
 		(void)state.release();
 		disabledReason = "shut down";
 		return;
@@ -2628,16 +2052,13 @@ void RenderGraphRuntime::Shutdown()
 		state->d3d11Releases.clear();
 	}
 	try {
-		// Waits only for the graph's own timelines, then releases every graph object; the contributors after it.
+		// Waits only for the graph's own timelines, then releases every graph object.
 		state->host.reset();
-		state->contributors.reset();
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Render graph shutdown failed: {}", e.what());
 	}
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
-	// The pipelines a shader reload replaced or staged, while the device is still there (its work is done).
+	// The pipeline versions no graph pins any more, while the device is still there (its work is done).
 	PipelineRegistry()->DrainRetired();
-#endif
 	if (state->streamPoint) {
 		// Every point was waited for by a compute submission the graph's timelines have seen complete.
 		VkSemaphoreWaitInfo wait{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
@@ -2693,7 +2114,6 @@ RenderGraphRuntime::~RenderGraphRuntime()
 		if (impl->device && *impl->device)
 			rhi::vulkan::abandon_device(impl->device->Get());
 		(void)impl->host.release();
-		(void)impl->contributors.release();
 		(void)impl.release();
 	}
 }
@@ -2706,11 +2126,6 @@ bool RenderGraphRuntime::IsActive() const
 const std::string& RenderGraphRuntime::GetDisabledReason() const
 {
 	return disabledReason;
-}
-
-extern "C" ORGStatus ORG_RG_CALL ORG_GetRenderGraphAPI(std::uint32_t a_version, ORGRenderGraphAPI* a_out)
-{
-	return org::contributor::ContributorHost::GetAPI(a_version, a_out);
 }
 
 org::GraphHost* RenderGraphRuntime::Host()
@@ -2731,7 +2146,6 @@ std::uint64_t RenderGraphRuntime::FlushPendingStreamWork()
 	FrameAnchors::BeforeGpuWork("a wait for the GPU");
 	// So do the epochs still on the submission thread.
 	DrainSubmissions("a wait for the GPU");
-	RenderGraph::FrameSequence::NoteBoundary("a wait for the GPU");
 	const uint64_t enqueued = impl->streamEnqueued.load(std::memory_order_acquire);
 	const uint64_t submitted = impl->streamSubmitted.load(std::memory_order_acquire);
 	if (enqueued <= submitted)
@@ -2756,34 +2170,6 @@ std::shared_ptr<const void> RenderGraphRuntime::DeviceOwner() const
 	return IsActive() ? impl->device : std::shared_ptr<const void>{};
 }
 
-RenderGraphRuntime::EpochBodyScope::EpochBodyScope(Segment a_segment) :
-	segment(a_segment), start(std::chrono::steady_clock::now())
-{
-	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.impl || !runtime.impl->epochStats)
-		return;
-	auto& state = *runtime.impl;
-	state.bodyOpen = true;
-	state.bodyRanEpoch = false;
-	state.bodyEpochUs = 0.0;
-}
-
-RenderGraphRuntime::EpochBodyScope::~EpochBodyScope()
-{
-	auto& runtime = RenderGraphRuntime::Get();
-	if (!runtime.impl || !runtime.impl->bodyOpen)
-		return;
-	auto& state = *runtime.impl;
-	state.bodyOpen = false;
-	const auto index = static_cast<std::size_t>(segment);
-	if (!state.bodyRanEpoch || index >= state.epochSegmentStats.size())
-		return;
-	auto& stats = state.epochSegmentStats[index];
-	++stats.bodies;
-	stats.bodyUs += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
-	stats.bodyEpochUs += state.bodyEpochUs;
-}
-
 std::uint64_t RenderGraphRuntime::TakeSubmittedSegments()
 {
 	return impl ? std::exchange(impl->submittedSegments, std::uint64_t{ 0 }) : 0;
@@ -2803,7 +2189,6 @@ void RenderGraphRuntime::PollEpochFailures()
 bool RenderGraphRuntime::GuardedBuild(const std::function<bool()>& a_build)
 {
 	FrameAnchors::BeforeGpuWork("a build point");
-	RenderGraph::FrameSequence::NoteBoundary("a build point");
 	try {
 		return a_build();
 	} catch (const std::exception& e) {
@@ -2811,6 +2196,7 @@ bool RenderGraphRuntime::GuardedBuild(const std::function<bool()>& a_build)
 		logger::error("[ORG] Render graph build failed, disabling the graph: {}", e.what());
 		impl->faulted = true;
 		disabledReason = e.what();
+		FaultIsFatal(fmt::format("a build failed ({})", e.what()));
 		return false;
 	}
 }
@@ -2823,21 +2209,7 @@ bool RenderGraphRuntime::BuildIfRequested(std::string_view a_caller)
 	return GuardedBuild([&] { return impl->builds->Poll(a_caller); });
 }
 
-bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view a_caller)
-{
-	if (!IsActive())
-		return false;
-	return GuardedBuild([&] { return impl->builds->BuildOwnerEpochsNow(a_caller); });
-}
-
-bool RenderGraphRuntime::AttachDclfBuilds(std::string_view a_caller)
-{
-	if (!IsActive())
-		return false;
-	return GuardedBuild([&] { return impl->builds->Poll(a_caller, RenderGraph::BuildManager::Attach::External); });
-}
-
-bool RenderGraphRuntime::DclfBuildsSettled() const
+bool RenderGraphRuntime::BuildsSettled() const
 {
 	return !impl || !impl->builds || impl->builds->Settled();
 }
@@ -2867,22 +2239,23 @@ void RenderGraphRuntime::OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, 
 		logger::error("[ORG] Render graph failed, disabling the graph: {}", a_error);
 		impl->faulted = true;
 		disabledReason = a_error;
+		FaultIsFatal(a_error);
 		return;
 	}
 	const auto epochSegment = static_cast<Segment>(a_epoch);
+	// Graph mode does not drop a failed epoch's clients or hand its work back to the engine.
+	FaultIsFatal(fmt::format("{} failed ({})", Impl::SegmentLabel(epochSegment), a_error));
 	logger::error("[ORG] {} failed ({}); the other epochs run on: {}", Impl::SegmentLabel(epochSegment),
 		a_keptGraph ? "its previous graph still runs" : "it runs nothing until it is built again", a_error);
-	// The frame anchors drop the clients of the anchor's failed build and build the anchor again without them.
+	// The frame anchors drop the clients of the stage's failed build and build the stage again without them.
 	if (FrameAnchors::NamesOf(a_epoch)) {
 		FrameAnchors::OnEpochFailed(a_epoch, a_error, a_keptGraph);
 		return;
 	}
-	// Drawcall Limit Fix hands drawing back to the engine at its next frame start.
-	if (IsDclfSegment(epochSegment)) {
-		DrawcallLimitFix::OnGraphEpochFailed(Impl::SegmentLabel(epochSegment), a_error);
+	// A fragment source's epoch goes to its source.
+	if (RenderGraph::Frame::Revision::FragmentEpochFailed(a_epoch, Impl::SegmentLabel(epochSegment), a_error))
 		return;
-	}
-	// Any other epoch, such as light culling, now fails ExecuteEpoch, and its feature falls back to D3D11.
+	// Outside graph mode any other epoch now fails ExecuteEpoch, and its feature falls back to D3D11.
 }
 
 void RenderGraphRuntime::SignalFramePace(bool a_active)
@@ -2891,14 +2264,7 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 	ServicePipelineReload();
 	ServiceD3D11Releases();
 	RenderGraph::Engine::Tripwire::ServiceRetired();
-	// Between frames: the epochs that failed since the last poll go to their owners.
-	PollEpochFailures();
-	RenderGraph::Engine::Targets::ServiceRetired();
-	// The self-tests register after the first frame, once the engine targets they import exist.
-	if (IsActive()) {
-		FrameAnchors::SelfTest::Setup();
-		GraphResources::SelfTest::Setup();
-	}
+	// Epoch failures go to their owners at the next adoption point (Frame::Driver::OnBegin), not here.
 	if (!IsActive() || !impl->framePace || !a_active)
 		return;
 	auto& state = *impl;
@@ -2921,13 +2287,26 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 	state.framePaceSignalled = true;
 }
 
+void RenderGraphRuntime::OnRendererBegin()
+{
+	const auto frame = RenderGraph::FrameClock::beginFrame.fetch_add(1, std::memory_order_acq_rel) + 1;
+	if (FrameAnchors::IsRenderOwner())
+		Get().NoteFrameBegin(frame);
+}
+
+void RenderGraphRuntime::NoteGpuCompleted(std::uint64_t a_frame)
+{
+	auto& completed = RenderGraph::FrameClock::gpuCompleted;
+	for (auto seen = completed.load(std::memory_order_relaxed); a_frame > seen && !completed.compare_exchange_weak(seen, a_frame, std::memory_order_acq_rel);) {
+	}
+}
+
 void RenderGraphRuntime::NoteFrameBegin(std::uint64_t a_frame)
 {
 	if (!impl)
 		return;
 	auto& state = *impl;
-	state.gameFrame = a_frame;
-	const auto completed = state.completedGameFrame.load(std::memory_order_acquire);
+	const auto completed = RenderGraph::FrameClock::GpuCompleted();
 	if (!completed)
 		return;
 	const auto ahead = a_frame > completed ? a_frame - completed : 0;
@@ -2952,27 +2331,8 @@ void RenderGraphRuntime::SealPresented()
 {
 	// Before the seal.
 	FrameAnchors::BeforeGpuWork("the frame's end");
-	if (impl && impl->epochStats) {
-		++impl->statFrames;
-		impl->statExecutions += impl->frameExecutions;
-		impl->statEpochs += static_cast<std::uint64_t>(std::popcount(impl->frameEpochs));
-		if (impl->native && impl->statFrames >= Impl::kNativeStatsFrames)
-			impl->ReportEpochStats();
-	}
-	if (impl) {
-		impl->frameExecutions = 0;
-		impl->frameEpochs = 0;
-		impl->frameStage = 0;
-	}
-	// The native frame graph diagnostics close their frame (cheap when their switches are off).
-	RenderGraph::Engine::Native::OpCensus::EndFrame();
-	RenderGraph::Engine::Tripwire::MeterFrame();
-	RenderGraph::Engine::Native::RtSampler::Frame();
-	RenderGraph::RunShapes::EndFrame();
-	RenderGraph::FrameSequence::EndFrame();
-	RenderGraph::UndeclaredAccess::EndFrame();
-	// What a site latches from here on is the next frame's.
-	RenderGraph::AdvanceRefFrame();
+	// What a site latches from here on goes to the next present.
+	RenderGraph::FrameClock::presentSerial.fetch_add(1, std::memory_order_acq_rel);
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
 	// Every stage committed and the present sent the frame's work on, so this release is outside every stage window.
@@ -2998,11 +2358,11 @@ void RenderGraphRuntime::SealPresented()
 			logger::info("[ORG native] host state after {} presents: {}", s_presents, impl->host->DescribeAsyncState());
 	}
 	// The build point for frames DCLF does not run. Render owner only, since a loading screen's thread presents too.
-	// DCLF's finished builds also attach here, since its epochs were submitted by now.
+	// DCLF's finished builds are staged here like at any poll. They attach with a snapshot at a Begin.
 	if (impl && impl->builds && IsActive() && FrameAnchors::IsRenderOwner()) {
 		if (buildPoints == buildPointsAtSeal)
 			++buildPoints;
-		(void)GuardedBuild([&] { return impl->builds->Poll("frame end", RenderGraph::BuildManager::Attach::All); });
+		(void)GuardedBuild([&] { return impl->builds->Poll("frame end"); });
 		buildPointsAtSeal = buildPoints;
 		impl->builds->NoteFrameEnd();
 	}
@@ -3017,52 +2377,9 @@ void RenderGraphRuntime::DrainSubmissions(const char* a_why, bool a_anyThread)
 	impl->host->DrainSubmissions(a_why);
 }
 
-/**
-* @brief The segment census's frame segment for an epoch about to submit, out of ten slots cut at DCLF's epochs.
-* Anchor epochs take the gap after the furthest DCLF stage the frame reached.
-*/
-static std::uint32_t FrameSegmentOf(RenderGraphRuntime::Segment a_segment, std::uint32_t& a_stage)
-{
-	std::uint32_t stage = 0;
-	switch (a_segment) {
-	case RenderGraphRuntime::Segment::ShadowView:
-	case RenderGraphRuntime::Segment::SkyOcclusion:
-	case RenderGraphRuntime::Segment::Reflection:
-		stage = 1;
-		break;
-	case RenderGraphRuntime::Segment::ZPrepass:
-	case RenderGraphRuntime::Segment::FirstPersonDepth:
-		stage = 2;
-		break;
-	case RenderGraphRuntime::Segment::MainOpaque:
-		stage = 3;
-		break;
-	case RenderGraphRuntime::Segment::Forward:
-	case RenderGraphRuntime::Segment::FirstPerson:
-		stage = 4;
-		break;
-	case RenderGraphRuntime::Segment::AnchorInterface:
-	case RenderGraphRuntime::Segment::AnchorOverlay:
-	case RenderGraphRuntime::Segment::AnchorHDROutput:
-	case RenderGraphRuntime::Segment::AnchorCapture:
-	case RenderGraphRuntime::Segment::AnchorPresent:
-		return 9;
-	default:
-		return a_stage * 2;
-	}
-	a_stage = (std::max)(a_stage, stage);
-	return stage * 2 - 1;
-}
-
 bool RenderGraphRuntime::QueuesPresent() const
 {
-	return impl && impl->host && impl->host->SubmissionThreadOn() && impl->host->GetDesc().queuedSeals && FrameAnchors::IsRenderOwner();
-}
-
-void RenderGraphRuntime::HostThreadHandles(void*& a_submit, void*& a_host)
-{
-	a_submit = impl && impl->host ? impl->host->SubmitThreadNativeHandle() : nullptr;
-	a_host = impl && impl->host ? impl->host->HostThreadNativeHandle() : nullptr;
+	return impl && impl->host && impl->host->SubmissionThreadOn() && FrameAnchors::IsRenderOwner();
 }
 
 void RenderGraphRuntime::QueueOnSubmitThread(std::function<void()> a_closure)
@@ -3166,8 +2483,6 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	const char* label = Impl::SegmentLabel(a_segment);
 	RenderGraph::UndeclaredAccess::EpochScope undeclaredScope(label);
 	try {
-		if (impl->epochStats)
-			impl->host->SetSubmissionSegment(FrameSegmentOf(a_segment, impl->frameStage));
 		impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, std::move(a_resourceOwner));
 	} catch (...) {
 		// The ticket may have submitted its compute work before the throw. Its execution, if the host made one, is signalled
@@ -3183,9 +2498,6 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 		throw;
 	}
 	impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
-	RenderGraph::Engine::Native::OpCensus::NoteEpoch(label);
-	++impl->frameExecutions;
-	impl->frameEpochs |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
 	auto execution = impl->host->TakeExternalExecution();
 	// Open until the caller emits the execution and calls CloseExternalEpoch.
 	impl->externalOpen = true;
@@ -3258,125 +2570,24 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		starting(a_segment);
 	// Stages whose commit point this epoch is commit first.
 	FrameAnchors::BeforeGpuWork("another epoch", static_cast<std::uint32_t>(a_segment));
-	RenderGraph::FrameSequence::NoteEpoch(Impl::SegmentLabel(a_segment));
 	impl->CloseLeftOpenExternal();
-	// Diagnostics for dclf:epochs=0. DCLF's epochs report submitted without submitting, to time the frame without their boundaries.
-	// Their objects are then drawn by nobody.
-	if (IsDclfSegment(a_segment) && (dclfEpochsSkipped.load(std::memory_order_relaxed) >> static_cast<std::uint32_t>(a_segment) & 1u)) {
-		if (const std::uint32_t spinUs = skippedEpochSpinUs.load(std::memory_order_relaxed)) {
-			const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spinUs);
-			while (std::chrono::steady_clock::now() < until) {
-			}
-		}
-		const std::uint32_t boundary = skippedEpochsBoundary.load(std::memory_order_relaxed);
-		if (boundary >= 1)
-			globals::d3d::context->Flush();
-		if (boundary == 2 && impl->enqueueSubmission) {
-			// An empty submission in DXVK's stream: its command list closed and one vkQueueSubmit2 with nothing in it.
-			DxvkOrgInteropSubmission submission{};
-			submission.version = DXVK_ORG_INTEROP_VERSION;
-			submission.onSubmitted = &Impl::OnStreamSubmitted;
-			submission.user = impl.get();
-			submission.label = Impl::SegmentLabel(a_segment);
-			impl->streamEnqueued.fetch_add(1, std::memory_order_acq_rel);
-			if (FAILED(impl->enqueueSubmission(globals::d3d::device, &submission)))
-				impl->streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
-		}
-		if (boundary == 3)
-			(void)impl->EnqueueStreamPoint();  // the same with a timeline signal (ALL_COMMANDS)
-		// DXVK's worker: a busy wait there, and/or the render thread waiting for the worker to reach this point.
-		const std::uint32_t workerUs = workerSpinUs.load(std::memory_order_relaxed);
-		const bool sync = workerSync.load(std::memory_order_relaxed);
-		if ((workerUs || sync) && impl->emitCommandBufferCallback) {
-			struct Load
-			{
-				std::uint32_t us;
-				std::atomic<bool> reached{ false };
-			};
-			static Load load;
-			load.us = workerUs;
-			load.reached.store(false, std::memory_order_relaxed);
-			(void)impl->emitCommandBufferCallback(globals::d3d::device, [](void* a_user, VkCommandBuffer) {
-				auto& l = *static_cast<Load*>(a_user);
-				const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(l.us);
-				while (std::chrono::steady_clock::now() < until) {
-				}
-				l.reached.store(true, std::memory_order_release);
-			}, &load);
-			if (sync) {
-				globals::d3d::context->Flush();
-				while (!load.reached.load(std::memory_order_acquire))
-					std::this_thread::yield();
-			}
-		}
-		if ((boundary == 4 || boundary == 5) && impl->enqueueSubmissions && impl->EmptyCommandBuffer()) {
-			// One submission of an empty command buffer (4), or three such (5), each signalling the stream point as the graph's batches do.
-			const std::uint32_t count = boundary == 4 ? 1u : 3u;
-			std::array<VkCommandBufferSubmitInfo, 3> commands{};
-			std::array<VkSemaphoreSubmitInfo, 3> signals{};
-			std::array<VkSubmitInfo2, 3> infos{};
-			for (std::uint32_t i = 0; i < count; ++i) {
-				commands[i] = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, nullptr, impl->emptyCommands, 0 };
-				signals[i] = { VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, impl->streamPoint, ++impl->streamPointValue, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0 };
-				infos[i] = { VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
-				infos[i].commandBufferInfoCount = 1;
-				infos[i].pCommandBufferInfos = &commands[i];
-				infos[i].signalSemaphoreInfoCount = impl->streamPoint ? 1u : 0u;
-				infos[i].pSignalSemaphoreInfos = &signals[i];
-			}
-			DxvkOrgInteropSubmissionBatch batch{};
-			batch.version = DXVK_ORG_INTEROP_VERSION;
-			batch.submitCount = count;
-			batch.submits = infos.data();
-			batch.onSubmitted = &Impl::OnStreamSubmitted;
-			batch.user = impl.get();
-			batch.label = Impl::SegmentLabel(a_segment);
-			impl->streamEnqueued.fetch_add(1, std::memory_order_acq_rel);
-			if (FAILED(impl->enqueueSubmissions(globals::d3d::device, &batch)))
-				impl->streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
-		}
-		return EpochResult::Submitted;
-	}
 	// Read by passes while the frame prepares and records, all before ExecuteFrame returns.
 	segment = a_segment;
 	ZoneText(Impl::SegmentLabel(a_segment), std::strlen(Impl::SegmentLabel(a_segment)));
-	// CS_ORG_VALIDATE_UNDECLARED: raw accesses made meanwhile on this thread (the commits, the inputs) are this epoch's.
+	// Undeclared accesses made meanwhile on this thread (the commits, the inputs) name this epoch.
 	RenderGraph::UndeclaredAccess::EpochScope undeclaredScope(Impl::SegmentLabel(a_segment));
 	// The epoch's CPU side in capture tools. Its submissions carry a queue label of the same name.
 	ScopedPerfEvent epochEvent(Impl::SegmentLabel(a_segment));
 	const auto start = std::chrono::steady_clock::now();
-	auto lap = [last = start](double& a_into) mutable {
-		const auto now = std::chrono::steady_clock::now();
-		a_into = std::chrono::duration<double, std::micro>(now - last).count();
-		last = now;
-	};
-	impl->flushUs = impl->completionsUs = impl->closeUs = 0.0;
-	if (impl->enqueueSubmission) {
+	if (!impl->native) {
 		// The graph's batches land in DXVK's stream between the D3D11 work issued before and after. Entry and exit barriers order the memory.
 		impl->streamThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
-		// DXVK closes its current list only at the epoch's first enqueue, so D3D11 work just before the epoch waits briefly.
-		// CS_ORG_EARLY_FLUSH flushes it here instead. Both cost the same frame time in a GPU-bound test.
-		if (const int flush = earlyFlushOverride.load(std::memory_order_relaxed); flush < 0 ? impl->earlyFlush : flush != 0) {
-			ZoneScopedN("CS.ORG.FlushNativeProducer");
-			globals::d3d::context->Flush();
-			impl->NoteStreamClosed("early flush", Impl::SegmentLabel(a_segment));
-		}
-	} else if (impl->interop) {
-		// Older DXVK. Submit and wait for all D3D11 work so far, then submit the graph under DXVK's queue lock.
-		impl->interop->FlushRenderingCommands();
 	}
-	lap(impl->flushUs);
 	impl->TakeCompletedEpochs();
-	lap(impl->completionsUs);
-	impl->epochHookCalls = 0;
-	impl->epochEnqueues = 0;
+	const auto completed = std::chrono::steady_clock::now();
 	impl->batching = impl->enqueueSubmission && impl->enqueueSubmissions;
-	if (!std::exchange(impl->holding, false))
-		impl->pendingCount = 0;
+	impl->pendingCount = 0;
 	try {
-		// Not during a managed build, whose contributor compile writes what Poll reads. Builds only start from this thread.
-		if (impl->contributors && impl->builds->Idle())
-			impl->contributors->Poll(*impl->host);
 		// An epoch with no graph builds at its submission on this thread. That is logged after the first world frame.
 		if (!impl->host->Graph(EpochOf(a_segment)) && !impl->host->EpochFailed(EpochOf(a_segment)))
 			impl->builds->WarnSynchronous(fmt::format("{} has no graph and is built at its submission", Impl::SegmentLabel(a_segment)), "ExecuteEpoch");
@@ -3390,8 +2601,6 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 				a_beforePrepare(a_graph);
 			};
 		}
-		if (impl->epochStats)
-			impl->host->SetSubmissionSegment(FrameSegmentOf(a_segment, impl->frameStage));
 		impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, a_resourceOwner);
 		impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
 		// An in-stream epoch: its graphics work into DXVK's own command stream, here.
@@ -3400,45 +2609,25 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 			throw std::runtime_error("DXVK took no external commands for an in-stream epoch");
 		if (!impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment), execution != nullptr, execution && execution->exitSplit))
 			throw std::runtime_error("DXVK rejected the compute queue's exit wait");
-		if (impl->batching && (heldSegments.load(std::memory_order_relaxed) >> static_cast<std::uint32_t>(a_segment) & 1u)) {
-			impl->batching = false;
-			impl->holding = true;
-		} else if (impl->batching && !impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment)))
+		if (impl->batching && !impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment)))
 			throw std::runtime_error("DXVK rejected the epoch's submissions");
-		if (const std::uint32_t spinUs = submittedEpochSpinUs.load(std::memory_order_relaxed); spinUs && IsDclfSegment(a_segment)) {
-			const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spinUs);
-			while (std::chrono::steady_clock::now() < until) {
-			}
-		}
 		const auto elapsed = std::chrono::steady_clock::now() - start;
 		{
 			// Since ExecuteEpoch's last lap (the completions): the host's call and the stream's close.
 			const double totalUs = std::chrono::duration<double, std::micro>(elapsed).count();
 			const auto& t = impl->host->LastFrameTimings();
-			double sinceCompletions = 0.0;
-			lap(sinceCompletions);
+			const double sinceCompletions = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - completed).count();
 			const double hostUs = t.buildUs + t.ticketWaitUs + t.releaseUs + t.beforePrepareUs + t.checkUs + t.uploadsUs + t.submitUs + t.postUs;
-			impl->closeUs = (std::max)(0.0, sinceCompletions - hostUs);
+			const double closeUs = (std::max)(0.0, sinceCompletions - hostUs);
 			const double inputsUs = t.beforePrepareUs;
-			const double submitUs = t.ticketWaitUs + t.submitUs + impl->closeUs;
+			const double submitUs = t.ticketWaitUs + t.submitUs + closeUs;
 			epochTotals.inputsUs += inputsUs;
 			epochTotals.submitUs += submitUs;
 			epochTotals.overheadUs += (std::max)(0.0, totalUs - inputsUs - submitUs);
 			++epochTotals.epochs;
 		}
-		if (impl->epochStats) {
-			impl->RecordEpoch(a_segment, elapsed);
-			if (impl->bodyOpen) {
-				impl->bodyRanEpoch = true;
-				impl->bodyEpochUs += std::chrono::duration<double, std::micro>(elapsed).count();
-			}
-		}
 		impl->submittedSegments |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
 		impl->failedEpochsLogged &= ~(std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment));
-		++impl->frameExecutions;
-		impl->frameEpochs |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
-		// CS_ORG_NATIVE_OP_CENSUS: the immediate context's operations from here on fall after this epoch.
-		RenderGraph::Engine::Native::OpCensus::NoteEpoch(Impl::SegmentLabel(a_segment));
 		return EpochResult::Submitted;
 	} catch (const org::GraphHost::EpochCopiesBusyError& e) {
 		// A revision-driven epoch ran more often since Present than it has published copies.
@@ -3453,8 +2642,9 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		}
 		return EpochResult::Skipped;
 	} catch (const org::GraphHost::EpochFailedError& e) {
-		// Only this epoch's graph failed and nothing was submitted. Its owner hears at the next PollEpochFailures,
-		// and the caller falls back until then.
+		// Only this epoch's graph failed and nothing was submitted. Fatal in graph mode. Otherwise its owner hears at the next
+		// PollEpochFailures, and the caller falls back until then.
+		FaultIsFatal(fmt::format("{} did not run, its graph failed ({})", Impl::SegmentLabel(a_segment), e.what()));
 		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
 		if (impl->batching)
 			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
@@ -3476,13 +2666,14 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
 		if (impl->batching)
 			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
-		// A failed graph must not take the game down: callers fall back to D3D11.
+		// Fatal in graph mode. Outside it the graph stops and callers fall back to D3D11.
 		logger::error("[ORG] Render graph epoch failed, disabling the graph: {}", e.what());
 		// What the host held when it failed: its runs in flight, what each waits for, and the timelines (read racily, for the report).
 		if (impl->host)
 			logger::error("[ORG] host state at the failure: {}", impl->host->DescribeAsyncState());
 		impl->faulted = true;
 		disabledReason = e.what();
+		FaultIsFatal(fmt::format("{} failed ({})", Impl::SegmentLabel(a_segment), e.what()));
 		return EpochResult::Stopped;
 	}
 }
@@ -3524,7 +2715,7 @@ void RenderGraphRuntime::ReportGpuTimings(std::uint32_t a_frames, bool a_log)
 
 org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler()
 {
-#if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
+#if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	return impl ? impl->shaderCompiler.get() : nullptr;
 #else
 	return nullptr;
@@ -3533,13 +2724,9 @@ org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler()
 
 org::services::PipelineRegistry* RenderGraphRuntime::PipelineRegistry()
 {
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
 	// Never destroyed: a rebuild may complete while the process tears down (Shutdown releases what it holds of the device's).
 	static auto* registry = new org::services::PipelineRegistry;
 	return registry;
-#else
-	return nullptr;
-#endif
 }
 
 void RenderGraphRuntime::RequestTimestampDump(std::uint32_t a_epochs)
@@ -3547,85 +2734,50 @@ void RenderGraphRuntime::RequestTimestampDump(std::uint32_t a_epochs)
 	timestampDumps.store(static_cast<int>(a_epochs), std::memory_order_relaxed);
 }
 
-void RenderGraphRuntime::SetSkippedEpochWorkerLoad(std::uint32_t a_microseconds, bool a_sync)
-{
-	workerSpinUs.store(a_microseconds, std::memory_order_relaxed);
-	workerSync.store(a_sync, std::memory_order_relaxed);
-}
-
-void RenderGraphRuntime::DropDclfLists(bool a_drop)
-{
-	dropLists.store(a_drop, std::memory_order_relaxed);
-}
-
-void RenderGraphRuntime::CoalesceEpochSubmits(bool a_coalesce, bool a_split)
-{
-	coalesceSubmits.store(a_coalesce, std::memory_order_relaxed);
-	splitSubmits.store(a_split, std::memory_order_relaxed);
-}
-
-void RenderGraphRuntime::RequestSubmissionDump(std::uint32_t a_epochs)
-{
-	submissionDumps.store(a_epochs, std::memory_order_relaxed);
-}
-
-void RenderGraphRuntime::SetSkippedEpochSpin(std::uint32_t a_microseconds, bool a_submitted)
-{
-	(a_submitted ? submittedEpochSpinUs : skippedEpochSpinUs).store(a_microseconds, std::memory_order_relaxed);
-}
-
-void RenderGraphRuntime::HoldDclfSubmissions(std::uint32_t a_segments)
-{
-	heldSegments.store(a_segments, std::memory_order_relaxed);
-}
-
-void RenderGraphRuntime::SkipDclfEpochs(std::uint32_t a_segments, std::uint32_t a_boundary)
-{
-	skippedEpochsBoundary.store(a_boundary, std::memory_order_relaxed);
-	dclfEpochsSkipped.store(a_segments, std::memory_order_relaxed);
-}
-
-void RenderGraphRuntime::SetEarlyFlush(int a_flush)
-{
-	earlyFlushOverride.store(a_flush, std::memory_order_relaxed);
-}
-
 void RenderGraphRuntime::RequestShaderReload(std::string_view a_changedFile, bool a_force)
 {
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
 	logger::info("[ORG] shader reload asked: {}{}", a_changedFile.empty() ? std::string("every live pipeline") : fmt::format("the live pipelines built from {}", a_changedFile),
 		a_force ? ", each swapped even if unchanged" : "");
 	PipelineRegistry()->RequestReload(a_changedFile, a_force);
-#else
-	(void)a_changedFile;
-	(void)a_force;
-#endif
 }
 
 void RenderGraphRuntime::ServicePipelineReload()
 {
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
 	auto& registry = *PipelineRegistry();
 	const auto result = registry.Service();
 	if (result.finished) {
 		const auto outcome = registry.LastReload();
-		logger::info("[ORG] shader reload: {} of {} pipelines rebuilt ({} failed, {} unchanged) in {:.2f} s", outcome.rebuilt, outcome.entries, outcome.failed,
-			outcome.unchanged, outcome.seconds);
+		logger::info("[ORG] shader reload: {} of {} pipelines rebuilt ({} failed, {} unchanged) in {:.2f} s off the render thread; {} new versions at pipeline "
+					 "generation {}",
+			outcome.rebuilt, outcome.entries, outcome.failed, outcome.unchanged, outcome.seconds, result.published, outcome.generation);
 		for (const auto& error : outcome.errors)
 			logger::error("[ORG] shader reload: {} (it keeps its pipeline)", error.substr(0, 2000));
 	}
-	if (!result.staged)
-		return;
-	// Swapped in at the next owner-thread build, where nothing records. The build manager's next poll builds every graph there.
-	// With no graph, at once.
-	if (impl && impl->builds) {
-		impl->builds->RequestAllSynchronous("shader reload: pipelines staged");
-	} else if (impl && impl->host) {
-		impl->host->RequestRebuild("shader reload: pipelines staged");
-	} else if (registry.Publish(0)) {
+	if (result.published)
+		pipelineGenerationPublished = (std::max)(pipelineGenerationPublished, registry.Generation());
+	// The new versions are an event: every graph is built again off the render thread, and the revision that carries the new
+	// ShaderGeneration adopts them once every graph is at it (RenderGraph/PipelineVersions.h). Frames keep the old versions meanwhile.
+	// Render owner only: a loading screen's thread presents too, and the adopted values are the render thread's.
+	if (pipelineGenerationPublished > pipelineGenerationRaised && impl && impl->builds && FrameAnchors::IsRenderOwner()) {
+		pipelineGenerationRaised = pipelineGenerationPublished;
+		const auto why = fmt::format("shader reload {}: pipeline generation {}", registry.LastReload().serial, pipelineGenerationRaised);
+		RenderGraph::Builds::Wanted wanted;
+		wanted.all = true;
+		RenderGraph::Builds::Ask(std::move(wanted), why);
+		(void)RenderGraph::Frame::Vars::Set(RenderGraph::Frame::Vars::ShaderGeneration(), pipelineGenerationRaised, why);
+		logger::info("[ORG] {}: every graph is built again off the render thread; the revision that carries it adopts them", why);
+	} else if (result.published && impl && impl->host && !impl->builds) {
+		// No build manager: the host builds again at its next build point, and those builds pin the new versions.
+		impl->host->RequestRebuild("shader reload: new pipeline versions");
+	}
+	// The versions no graph or kept recording pins any more go once the retirement clock passes everything submitted so far.
+	if (impl && impl->host) {
+		registry.Release(RenderGraph::Frame::Retirement::SubmittedPoint());
+		registry.Retire(RenderGraph::Frame::Retirement::Clock()->Completed());
+	} else {
+		registry.Release(0);
 		registry.Retire(~0ull);
 	}
-#endif
 }
 
 const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles()
@@ -3635,11 +2787,7 @@ const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles(
 	static std::shared_ptr<const std::vector<std::filesystem::path>> current;
 	static std::uint64_t scannedFor = ~0ull;
 	thread_local std::shared_ptr<const std::vector<std::filesystem::path>> held;
-#if defined(CS_HAS_ORG_MODULE_SERVICES)
 	const std::uint64_t generation = PipelineRegistry()->SourcesGeneration();
-#else
-	const std::uint64_t generation = 0;
-#endif
 	std::scoped_lock lock(mutex);
 	if (!current || scannedFor != generation) {
 		auto found = std::make_shared<std::vector<std::filesystem::path>>();
@@ -3663,15 +2811,11 @@ bool RenderGraphRuntime::DescribeResource(IUnknown* a_object, DxvkOrgInteropReso
 		return RenderGraph::Engine::Native::DescribeResource(a_object, a_info);
 	// An engine field may hold a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES): DXVK describes the object it wraps.
 	a_object = RenderGraph::Engine::Tripwire::UnwrapObject(a_object);
-	if (!impl || !impl->getResourceInfo || !a_object)
+	if (!impl || !a_object)
 		return false;
 	a_info = {};
 	a_info.version = DXVK_ORG_INTEROP_VERSION;
-	const auto start = std::chrono::steady_clock::now();
 	const bool described = SUCCEEDED(impl->getResourceInfo(globals::d3d::device, a_object, &a_info));
-	describeCalls.fetch_add(1, std::memory_order_relaxed);
-	describeObjects.fetch_add(1, std::memory_order_relaxed);
-	describeNs.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(), std::memory_order_relaxed);
 	return described;
 }
 
@@ -3702,17 +2846,13 @@ bool RenderGraphRuntime::DescribeResources(std::span<IUnknown* const> a_objects,
 	}
 	std::vector<IUnknown*> scratch;
 	a_objects = UnwrapBatch(a_objects, scratch);
-	if (!impl || !impl->getResourceInfos || a_infos.size() != a_objects.size() || a_results.size() != a_objects.size())
+	if (!impl || a_infos.size() != a_objects.size() || a_results.size() != a_objects.size())
 		return false;
 	for (auto& info : a_infos) {
 		info = {};
 		info.version = DXVK_ORG_INTEROP_VERSION;
 	}
-	const auto start = std::chrono::steady_clock::now();
 	const bool described = SUCCEEDED(impl->getResourceInfos(globals::d3d::device, static_cast<UINT>(a_objects.size()), a_objects.data(), a_infos.data(), a_results.data()));
-	describeCalls.fetch_add(1, std::memory_order_relaxed);
-	describeObjects.fetch_add(a_objects.size(), std::memory_order_relaxed);
-	describeNs.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(), std::memory_order_relaxed);
 	return described;
 }
 
@@ -3732,11 +2872,7 @@ bool RenderGraphRuntime::TrackResources(std::span<IUnknown* const> a_objects, st
 		resource.version = DXVK_ORG_TRACKED_RESOURCE_VERSION;
 		resource.info.version = DXVK_ORG_INTEROP_VERSION;
 	}
-	const auto start = std::chrono::steady_clock::now();
 	const bool described = SUCCEEDED(impl->trackResources(globals::d3d::device, static_cast<UINT>(a_objects.size()), a_objects.data(), a_resources.data(), a_results.data()));
-	describeCalls.fetch_add(1, std::memory_order_relaxed);
-	describeObjects.fetch_add(a_objects.size(), std::memory_order_relaxed);
-	describeNs.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(), std::memory_order_relaxed);
 	return described;
 }
 
@@ -3779,8 +2915,6 @@ bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkC
 				a_label ? a_label : "");
 		return false;
 	}
-	if (!impl->emitExternalCommands)
-		return false;
 	// Stages whose commit point this is commit first.
 	FrameAnchors::BeforeGpuWork("external commands");
 	// DXVK copies the semaphores at the call: one scratch per calling thread (the render thread), reused.
@@ -3860,14 +2994,13 @@ namespace
 bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::CommandList& a_commands), void* a_user, const rhi::TimelinePoint* a_waits,
 	std::uint32_t a_waitCount, const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, bool a_bindsState, const char* a_label, bool a_fullBarrier)
 {
-	if (!impl || !impl->host || (!impl->native && !impl->emitExternalCommands))
+	if (!impl || !impl->host)
 		return false;
 	if (impl->native) {
 		// Stages whose commit point this is commit first.
 		FrameAnchors::BeforeGpuWork("commands");
 		// And after the epochs still on the submission thread.
 		DrainSubmissions("commands");
-		RenderGraph::FrameSequence::NoteBoundary(a_label ? a_label : "commands");
 		return RenderGraph::Engine::Native::EmitCommands(a_record, a_user, a_waits, a_waitCount, a_signals, a_signalCount, a_label);
 	}
 	// DXVK takes Vulkan semaphores: each point through the host's timelines.
@@ -3921,12 +3054,6 @@ winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource& a_buf
 	// Native mode: a native buffer handle over the graph's buffer.
 	if (impl->native)
 		return RenderGraph::Engine::Native::WrapBuffer(a_buffer.GetAPIResource(), a_desc, a_buffer.GetName().c_str());
-	if (!impl->createBufferFromVkBuffer) {
-		static std::atomic_flag logged;
-		if (!logged.test_and_set())
-			logger::warn("[ORG] WrapBuffer: '{}' has no D3D11 buffer, there is no DXVK to make one (logged once)", a_buffer.GetName());
-		return result;
-	}
 	rhi::VulkanResourceInfo info{};
 	const auto api = a_buffer.GetAPIResource();
 	if (!rhi::vulkan::get_resource_info(api, info) || !info.resource) {
@@ -3945,13 +3072,13 @@ winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource& a_buf
 }
 
 winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap,
-	DxvkOrgInteropResourceInfo& a_info, const char* a_name, const D3D11_SUBRESOURCE_DATA* a_initialData)
+	DxvkOrgInteropResourceInfo& a_info, const char* a_name, const D3D11_SUBRESOURCE_DATA* a_initialData, RenderGraph::Engine::Native::WrapFlags a_flags)
 {
 	winrt::com_ptr<ID3D11Resource> result;
-	// Native mode: a native texture handle over the port's image.
+	// Native mode: a native texture handle over the port's image. DXVK's wrap only queues its zero fill, so guest ignores a_flags.
 	if (IsActive() && impl->native)
-		return RenderGraph::Engine::Native::WrapTexture(a_image, a_wrap, a_info, a_name, a_initialData);
-	if (!IsActive() || !impl->createTextureFromVkImage || (a_initialData && !impl->createTextureFromVkImageWithData))
+		return RenderGraph::Engine::Native::WrapTexture(a_image, a_wrap, a_info, a_name, a_initialData, a_flags);
+	if (!IsActive())
 		return result;
 	rhi::VulkanResourceInfo info{};
 	if (!rhi::vulkan::get_resource_info(a_image, info) || !info.resource) {
@@ -3977,16 +3104,6 @@ winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resour
 		Util::SetResourceName(result.get(), "%s (D3D11)", a_name);
 	}
 	return result;
-}
-
-bool RenderGraphRuntime::CanWrapTextures() const
-{
-	return IsActive() && (impl->native || impl->createTextureFromVkImage);
-}
-
-bool RenderGraphRuntime::CanWrapTexturesWithData() const
-{
-	return CanWrapTextures() && (impl->native || impl->createTextureFromVkImageWithData);
 }
 
 namespace
@@ -4052,105 +3169,3 @@ void RenderGraphRuntime::ServiceD3D11Releases()
 		releases.pop_front();
 }
 
-#else  // !CS_HAS_RENDER_GRAPH
-
-// Built without OpenRenderGraph (CS_ORG_ROOT missing): the runtime never activates
-// and every feature keeps its D3D11 path.
-#	include "RenderGraphRuntime.h"
-
-struct RenderGraphRuntime::Impl
-{};
-
-RenderGraphRuntime& RenderGraphRuntime::Get()
-{
-	static RenderGraphRuntime s_runtime;
-	return s_runtime;
-}
-
-void RenderGraphRuntime::RequestDeviceFeatures(HMODULE) {}
-void RenderGraphRuntime::ConfigureFrame(FrameConfig) {}
-
-bool RenderGraphRuntime::Initialize()
-{
-	disabledReason = "built without OpenRenderGraph";
-	return false;
-}
-
-void RenderGraphRuntime::Shutdown() {}
-RenderGraphRuntime::~RenderGraphRuntime() = default;
-bool RenderGraphRuntime::IsActive() const { return false; }
-const std::string& RenderGraphRuntime::GetDisabledReason() const { return disabledReason; }
-org::GraphHost* RenderGraphRuntime::Host() { return nullptr; }
-std::uint64_t RenderGraphRuntime::FlushPendingStreamWork() { return 0; }
-void RenderGraphRuntime::CloseExternalEpoch(bool) {}
-void RenderGraphRuntime::SignalExecutionUnexecuted(const org::ExternalEpochExecution&, std::size_t, const char*) {}
-void RenderGraphRuntime::SplitStream() {}
-std::string RenderGraphRuntime::DescribeStreamOrder(std::size_t) const { return {}; }
-std::shared_ptr<rhi::TimelinePtr> RenderGraphRuntime::FrameWaitTimeline() const { return nullptr; }
-std::shared_ptr<const void> RenderGraphRuntime::DeviceOwner() const { return {}; }
-bool RenderGraphRuntime::ExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&,
-	std::shared_ptr<const void>) { return false; }
-RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&, std::shared_ptr<const void>) { return EpochResult::Stopped; }
-void RenderGraphRuntime::SetEpochHooks(EpochHooks) {}
-bool RenderGraphRuntime::DescribeResource(IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
-bool RenderGraphRuntime::DescribeResources(std::span<IUnknown* const>, std::span<DxvkOrgInteropResourceInfo>, std::span<HRESULT>) { return false; }
-bool RenderGraphRuntime::PinlessImports() const { return false; }
-bool RenderGraphRuntime::TrackResources(std::span<IUnknown* const>, std::span<DxvkOrgInteropTrackedResource>, std::span<HRESULT>) { return false; }
-void RenderGraphRuntime::UntrackResources(std::span<IUnknown* const>) {}
-std::uint32_t RenderGraphRuntime::PollRelocations(std::span<DxvkOrgInteropRelocation>) { return 0; }
-void RenderGraphRuntime::ReleaseStorage(std::span<void* const>) {}
-bool RenderGraphRuntime::EmitExternalCommands(void (*)(void*, VkCommandBuffer), void*, std::span<const ExternalCommandsWait>,
-	std::span<const ExternalCommandsWait>, bool, const char*, bool) { return false; }
-RenderGraphRuntime::ExternalCommandsWait RenderGraphRuntime::NativeTimelinePoint(const rhi::TimelinePoint&) { return {}; }
-std::vector<std::uint32_t> RenderGraphRuntime::InStreamEpochs() const { return {}; }
-bool RenderGraphRuntime::EmitCommands(void (*)(void*, rhi::CommandList&), void*, const rhi::TimelinePoint*, std::uint32_t, const rhi::TimelinePoint*, std::uint32_t,
-	bool, const char*, bool) { return false; }
-bool RenderGraphRuntime::RecordsAtExecution(std::uint32_t) const { return false; }
-std::uint32_t RenderGraphRuntime::VendorId() { return 0; }
-org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler() { return nullptr; }
-const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles()
-{
-	static const std::vector<std::filesystem::path> none;
-	return none;
-}
-winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource&, const D3D11_BUFFER_DESC&) { return nullptr; }
-winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resource&, const DxvkOrgInteropTextureWrap&, DxvkOrgInteropResourceInfo&,
-	const char*, const D3D11_SUBRESOURCE_DATA*) { return nullptr; }
-bool RenderGraphRuntime::CanWrapTextures() const { return false; }
-bool RenderGraphRuntime::CanWrapTexturesWithData() const { return false; }
-void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void>) {}
-void RenderGraphRuntime::ServiceD3D11Releases() {}
-void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
-std::uint64_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
-void RenderGraphRuntime::PollEpochFailures() {}
-bool RenderGraphRuntime::BuildIfRequested(std::string_view) { return false; }
-bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view) { return false; }
-bool RenderGraphRuntime::AttachDclfBuilds(std::string_view) { return false; }
-bool RenderGraphRuntime::DclfBuildsSettled() const { return true; }
-bool RenderGraphRuntime::RebuildRequestedUnstaged() const { return false; }
-bool RenderGraphRuntime::BuildSetupGraphs(std::string_view) { return false; }
-RenderGraph::BuildManager* RenderGraphRuntime::Builds() { return nullptr; }
-void RenderGraphRuntime::SignalFramePace(bool) {}
-void RenderGraphRuntime::SealPresented() {}
-void RenderGraphRuntime::NoteFrameBegin(std::uint64_t) {}
-void RenderGraphRuntime::MoveOwnerThread() {}
-void RenderGraphRuntime::DrainSubmissions(const char*, bool) {}
-bool RenderGraphRuntime::QueuesPresent() const { return false; }
-void RenderGraphRuntime::HostThreadHandles(void*& a_submit, void*& a_host) { a_submit = a_host = nullptr; }
-void RenderGraphRuntime::QueueOnSubmitThread(std::function<void()> a_closure) { a_closure(); }
-void RenderGraphRuntime::WaitBeforePresent(std::function<void()> a_wait) { a_wait(); }
-std::vector<std::function<void()>> RenderGraphRuntime::TakePresentWaits() { return {}; }
-void RenderGraphRuntime::WaitFramePace() {}
-org::services::PipelineRegistry* RenderGraphRuntime::PipelineRegistry() { return nullptr; }
-void RenderGraphRuntime::RequestShaderReload(std::string_view, bool) {}
-void RenderGraphRuntime::RequestTimestampDump(std::uint32_t) {}
-void RenderGraphRuntime::SkipDclfEpochs(std::uint32_t, std::uint32_t) {}
-void RenderGraphRuntime::HoldDclfSubmissions(std::uint32_t) {}
-void RenderGraphRuntime::SetSkippedEpochSpin(std::uint32_t, bool) {}
-void RenderGraphRuntime::RequestSubmissionDump(std::uint32_t) {}
-void RenderGraphRuntime::CoalesceEpochSubmits(bool, bool) {}
-void RenderGraphRuntime::DropDclfLists(bool) {}
-void RenderGraphRuntime::SetSkippedEpochWorkerLoad(std::uint32_t, bool) {}
-void RenderGraphRuntime::SetEarlyFlush(int) {}
-void RenderGraphRuntime::ServicePipelineReload() {}
-#endif

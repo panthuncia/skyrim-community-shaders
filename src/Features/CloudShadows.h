@@ -80,7 +80,7 @@ private:
 	Util::FrameChecker frameChecker;
 	Util::FrameChecker frame_checker[6];
 
-	/** @brief Face a_face of layer a_layer cleared: queued for a_point's anchor, else on D3D11 after what is queued. */
+	/** @brief Face a_face of layer a_layer cleared: queued for a_point's anchor, else (point D3D11, or outside graph mode) on D3D11 after what is queued. */
 	void ClearLayerFace(int a_layer, int a_face, LayerOpPoint a_point);
 	/** @brief Face a_face of layer a_from copied into layer a_to: queued for a_point's anchor, else on D3D11 after what is queued. */
 	void CopyLayerFace(int a_to, int a_from, int a_face, LayerOpPoint a_point);

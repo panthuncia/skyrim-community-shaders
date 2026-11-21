@@ -43,41 +43,6 @@ namespace DCLF::Direct::Simd
 		}
 	}
 
-	std::uint32_t PlaneGroupAvx512(const std::uint32_t* a_set, std::uint32_t a_kind, const float* a_x, const float* a_y, const float* a_z, const float* a_r,
-		std::uint32_t a_lanes)
-	{
-		// Two vectors of sixteen. The second is tested only while a bound of a_lanes is in it.
-		const bool high = (a_lanes >> 16) != 0;
-		const __m512 x0 = _mm512_loadu_ps(a_x), y0 = _mm512_loadu_ps(a_y), z0 = _mm512_loadu_ps(a_z), r0 = _mm512_loadu_ps(a_r);
-		const __m512 minus0 = _mm512_sub_ps(_mm512_setzero_ps(), r0);
-		__m512 x1 = x0, y1 = y0, z1 = z0, r1 = r0, minus1 = minus0;
-		if (high) {
-			x1 = _mm512_loadu_ps(a_x + 16), y1 = _mm512_loadu_ps(a_y + 16), z1 = _mm512_loadu_ps(a_z + 16), r1 = _mm512_loadu_ps(a_r + 16);
-			minus1 = _mm512_sub_ps(_mm512_setzero_ps(), r1);
-		}
-		std::uint32_t outside = 0, notContained = 0;
-		std::uint32_t mask;
-		std::memcpy(&mask, a_set + 24, 4);
-		for (std::uint32_t rest = mask & 0x3Fu; rest; rest &= rest - 1) {
-			float n[4];
-			std::memcpy(n, a_set + std::size_t(_tzcnt_u32(rest)) * 4, 16);
-			const __m512 nx = _mm512_set1_ps(n[0]), ny = _mm512_set1_ps(n[1]), nz = _mm512_set1_ps(n[2]), d0 = _mm512_set1_ps(n[3]);
-			const __m512 d = _mm512_sub_ps(_mm512_add_ps(_mm512_add_ps(_mm512_mul_ps(ny, y0), _mm512_mul_ps(nx, x0)), _mm512_mul_ps(z0, nz)), d0);
-			std::uint32_t behind = _mm512_cmp_ps_mask(d, minus0, _CMP_LE_OQ);
-			std::uint32_t near = _mm512_cmp_ps_mask(d, r0, _CMP_LT_OQ);
-			if (high) {
-				const __m512 e = _mm512_sub_ps(_mm512_add_ps(_mm512_add_ps(_mm512_mul_ps(ny, y1), _mm512_mul_ps(nx, x1)), _mm512_mul_ps(z1, nz)), d0);
-				behind |= static_cast<std::uint32_t>(_mm512_cmp_ps_mask(e, minus1, _CMP_LE_OQ)) << 16;
-				near |= static_cast<std::uint32_t>(_mm512_cmp_ps_mask(e, r1, _CMP_LT_OQ)) << 16;
-			}
-			outside |= behind;
-			notContained |= behind | near;
-			if (((a_kind == 7u ? outside : notContained) & a_lanes) == a_lanes)
-				break;
-		}
-		return (a_kind == 7u ? ~outside : notContained) & a_lanes;
-	}
-
 	void ParabolicAvx512(const Spheres& a_spheres, std::uint32_t a_count, const float* a_sphere, const float* a_plane, std::uint32_t a_flags, const std::uint64_t* a_dead,
 		std::uint8_t* a_pass)
 	{

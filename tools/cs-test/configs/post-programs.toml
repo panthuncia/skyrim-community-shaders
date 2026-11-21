@@ -1,0 +1,88 @@
+# A shader permutation change on the post chain waits for the programs lane, never the render thread (frame revision plan 6.9,
+# fixes after it). Depth of Field on, then its gather ring count (GATHER_RING_COUNT), back, and again.
+# The chain runs only in Post Processing mode, so [saved_settings] sets it for the run.
+# The log must show, after each first use of a ring count:
+#   "[ORG] frame declaration: program PostProcessing::Chain is built for new values; the next revision starts once it is",
+#   "[ORG] Post Processing: the chain's N programs are built on the programs lane (M new)" with M > 0,
+#   "[ORG] frame declaration: program PostProcessing::Chain built on the programs lane in X ms",
+#   then "chain N built for the next revision".
+# Going back to a ring count used before builds nothing new ("(0 new)", or no lane line at all: the plan is kept).
+# No render-thread compile: no "building it now" line, and the render thread's Tracy zone has no shader compile in the frame.
+# Compose it: native-vulkan+post-programs (and guest+post-programs).
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+PostProcessing = true
+
+# The chain runs only in Post Processing mode. The test profile saves "Vanilla", which bypasses it.
+[saved_settings.General]
+"Post Processing Mode" = "PostProcessing"
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "setting"
+arg = "PostProcessing.DepthofField.enabled=true"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "dof-4"
+
+# Five rings: a new permutation, built on the programs lane before its revision starts.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.DepthofField.GatherQuality=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "dof-5"
+
+# Back to four rings: the kept plan, no compile.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.DepthofField.GatherQuality=0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "dof-4-again"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "PostProcessing.DepthofField.GatherQuality=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "dof-5-again"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["dof-4", "dof-5", "dof-4-again", "dof-5-again"]
+no_log = ["the chain could not be built", "building it now", "stale recording", "fatal: frame declaration:", "is not among the programs its Programs lists",
+	"the chain runs on D3D11", "fatal: Post Processing:"]
+
+# The chain never runs on D3D11 in graph mode: a frame without a held build draws no chain (phase 6 holds). It runs on the graph
+# in most frames of the run.
+[expect.graph_frames]
+min = { "cs.pp" = 300 }

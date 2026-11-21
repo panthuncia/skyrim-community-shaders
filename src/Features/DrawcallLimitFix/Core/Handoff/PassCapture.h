@@ -14,7 +14,7 @@
 
 #include "Features/DrawcallLimitFix/Api/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
+#include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
 
@@ -115,8 +115,6 @@ namespace DCLF
 		bool IsOwnViewRenderer(Api::EngineView a_view, const RE::BSBatchRenderer* a_batch) const { return IsViewRenderer(a_view, a_batch); }
 		/** @brief Render thread. Whether an OwnRenderers view's render is running. */
 		bool OwnViewRendering() const;
-		/** @brief Whether an OwnRenderers view's render withholds its members now. */
-		bool OwnViewWithholding() const;
 		/** @brief An InMainRenderers view's pass counts since the last call. */
 		struct ViewCounts
 		{
@@ -128,20 +126,6 @@ namespace DCLF
 			return { view.withheld.exchange(0, std::memory_order_relaxed), view.memberKept.exchange(0, std::memory_order_relaxed),
 				view.registered.exchange(0, std::memory_order_relaxed) };
 		}
-		/**
-		 * @brief Render thread, at a render's start. The roots to watch in an OwnRenderers view, or 0 for none.
-		 * While set, passes the engine still draws into the view are counted by root.
-		 */
-		void WatchViewResidue(Api::EngineView a_view, std::uint32_t a_roots) { viewRenderers[static_cast<std::size_t>(a_view)].residueWatch.store(a_roots, std::memory_order_release); }
-		struct ViewResidue
-		{
-			std::uint32_t lodPasses = 0, treePasses = 0;
-			std::string first;
-		};
-		/** @brief A view's residue since the last call. */
-		ViewResidue TakeViewResidue(Api::EngineView a_view);
-		/** @brief A view's residue geometries under the LOD roots since the last call. Pointers only, never dereferenced. */
-		std::vector<const RE::BSGeometry*> TakeViewResidueGeometries(Api::EngineView a_view);
 
 		static constexpr std::uint32_t kShadowModes = 3;
 
@@ -164,8 +148,6 @@ namespace DCLF
 		};
 
 		/** @brief Makes the hook a plain pass-through while set. */
-		void SetBypassed(bool a_bypassed) { bypassed.store(a_bypassed, std::memory_order_release); }
-		bool Bypassed() const { return bypassed.load(std::memory_order_acquire); }
 
 		/**
 		 * @brief Render thread. The frame's DCLF set, immutable and swapped whole, so every registration of the frame reads the same one.
@@ -228,8 +210,6 @@ namespace DCLF
 		/** @brief Which batch renderers belong to shadow views, with each view's render mode index. */
 		using ShadowRendererMap = ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint8_t>;
 		void SetShadowBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers);
-		/** @brief The covered focus views' renderers, by focus descriptor. */
-		void SetFocusBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers);
 		/**
 		 * @brief The covered shadow views' accumulators. A pass into a renderer none of the sets names, made by the engine during this
 		 * registration, belongs to the view whose accumulator registers it.
@@ -249,8 +229,6 @@ namespace DCLF
 		bool CastersWithheld(std::uint8_t a_phase) const;
 		/** @brief The render graph draws the shadow views and CS_DCLF_PARITY_BOTH is off. */
 		static bool ShadowWithholdingEnabled();
-		/** @brief Passes this thread has handed on so far. The difference across a registration call is how many it built. */
-		static std::uint32_t PassesOnThisThread();
 
 		/** @brief Render thread. Takes everything registered since the last call. */
 		std::span<const Entry> Drain();
@@ -273,7 +251,6 @@ namespace DCLF
 		static constexpr std::size_t kCapacity = 32768;
 
 		bool installed = false;
-		std::atomic<bool> bypassed{ false };
 		std::vector<Entry> entries{ kCapacity };
 		std::atomic<std::size_t> cursor{ 0 };
 		std::atomic<std::uint32_t> overflow{ 0 };
@@ -283,7 +260,6 @@ namespace DCLF
 		// Valid until the next frame's registrations.
 		std::span<const Entry> lastDrain;
 		std::shared_ptr<const ShadowRendererMap> shadowRenderers;
-		std::shared_ptr<const ShadowRendererMap> focusRenderers;
 		std::shared_ptr<const ShadowAccumulatorMap> shadowAccumulators;
 		std::array<std::atomic<std::uint32_t>, kShadowModes> shadowWithheld{};
 		std::atomic<std::uint32_t> volumetricWithheld{ 0 };
@@ -329,13 +305,8 @@ namespace DCLF
 			std::atomic<std::uint32_t> familyOwned{ 0 };  // a bit per draw family
 			std::atomic<std::uint32_t> ownWithheld{ 0 };
 			std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Api::DrawFamily::Count)> ownFamilyWithheld{};
-			std::atomic<std::uint32_t> residueWatch{ 0 }, residueLod{ 0 }, residueTree{ 0 };
-			std::mutex residueLock;
-			std::string residueFirst;
-			std::vector<const RE::BSGeometry*> residueGeometries;
 		};
 		std::array<ViewRenderers, Extensions::kEngineViews> viewRenderers;
-		static void NoteViewResidue(ViewRenderers& a_view, const RE::BSRenderPass* a_pass, bool a_treeLod);
 		/**
 		 * @brief The main-view test at every insertion point. A main view's group renderer made this frame counts too.
 		 */
@@ -363,10 +334,8 @@ namespace DCLF
 		struct Hook;
 		friend struct Hook;
 		void Record(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint32_t a_technique, bool a_withheld);
-		/** @brief A pass handed on to the engine, for observers. */
-		void NoteKept(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint8_t a_site, std::uint8_t a_occlusionPhase = 0) const;
 		bool Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass);
-		/** @brief Counts a pass handed to the engine, with a sample by geometry. Nothing is vouched for under the flush latch. */
+		/** @brief Counts a pass handed to the engine, with a sample by geometry. Nothing is vouched for: the engine's context drops its draws. */
 		void KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const;
 		/**
 		 * @brief Whether a_batch is a main-view renderer now, read live. The engine makes a group's renderer at its first pass, after the

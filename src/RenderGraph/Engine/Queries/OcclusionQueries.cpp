@@ -1,7 +1,10 @@
 // The engine's occlusion queries answered by the render graph. See OcclusionQueries.h.
 
 #include "RenderGraph/Engine/Queries/OcclusionQueries.h"
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 
 #include "RenderGraph/Switches.h"
 #include "Utils/Logging.h"
@@ -13,15 +16,16 @@
 #include <mutex>
 #include <utility>
 
-#if defined(CS_HAS_RENDER_GRAPH)
-#	include "RenderGraph/FrameStaging.h"
-#	include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
-#	include <OpenRenderGraph/GraphHost.h>
-#	include <Resources/Buffers/Buffer.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Render/RunRef.h>
+#include <Resources/Buffers/Buffer.h>
 
-#	include <vector>
-#endif
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace RenderGraph::Engine::OcclusionQueries
 {
@@ -33,12 +37,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		constexpr std::uint32_t kLoggedAnswers = 12;
 		constexpr std::uint32_t kSummaryReads = 100;
 
-#if defined(CS_HAS_RENDER_GRAPH)
 		using Ring = QueryRing::State;
-#else
-		struct Ring
-		{};
-#endif
 
 		struct Slot
 		{
@@ -60,7 +59,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 		struct Counters
 		{
-			std::atomic<std::uint64_t> graphAnswers{ 0 }, d3d11Answers{ 0 }, notReady{ 0 }, skipped{ 0 }, waits{ 0 };
+			std::atomic<std::uint64_t> graphAnswers{ 0 }, notReady{ 0 }, skipped{ 0 }, waits{ 0 };
 		};
 
 		struct Globals
@@ -145,13 +144,10 @@ namespace RenderGraph::Engine::OcclusionQueries
 			Skips().Report(a_why);
 		}
 
-#if defined(CS_HAS_RENDER_GRAPH)
 		/** @brief Mutex held. Reads a range's counts once its work is done, either at the lease's next commit or when its GPU point is reached. */
 		bool Harvest(Globals& a_globals, Ring& a_ring, std::uint32_t a_range, bool a_retired);
-#endif
 	}
 
-#if defined(CS_HAS_RENDER_GRAPH)
 	struct QueryRing::State
 	{
 		struct Run
@@ -178,7 +174,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 		// Grown at commit on the render thread and read at record time on any thread. A chunk never moves.
 		mutable std::mutex chunkMutex;
 		mutable std::vector<std::unique_ptr<Chunk>> chunks;
-		mutable bool chunkFailed = false;
 		std::vector<Run> runs;  // by lease index, guarded by the globals' mutex
 		std::uint32_t lastCommitted = ~0u;
 		std::uint64_t generations = 0;
@@ -225,11 +220,8 @@ namespace RenderGraph::Engine::OcclusionQueries
 				if (made->readback)
 					made->readback->SetName(std::format("{}.readback{}", name, index));
 			}
-			if (!made->pool || !made->readback) {
-				if (!std::exchange(chunkFailed, true))
-					logger::warn("[ORG] occlusion queries: {}: no query pool or readback for lease indices from {}", name, index * QueryRing::kRunsPerChunk);
-				return nullptr;
-			}
+			if (!made->pool || !made->readback)
+				RenderGraph::Fatal("occlusion queries", std::format("{}: no query pool or readback for lease indices from {}", name, index * QueryRing::kRunsPerChunk));
 			chunk = std::move(made);
 			if (a_made)
 				*a_made = true;
@@ -314,10 +306,8 @@ namespace RenderGraph::Engine::OcclusionQueries
 			desc.type = rhi::QueryType::Occlusion;
 			desc.count = kRunsPerChunk * a_perRun;
 			rhi::QueryPoolPtr probe;
-			if (state->device.CreateQueryPool(desc, probe) != rhi::Result::Ok || !probe) {
-				logger::warn("[ORG] occlusion queries: {}: no occlusion query pool of {}", state->name, desc.count);
-				return nullptr;
-			}
+			if (state->device.CreateQueryPool(desc, probe) != rhi::Result::Ok || !probe)
+				RenderGraph::Fatal("occlusion queries", std::format("{}: no occlusion query pool of {}", state->name, desc.count));
 			state->stride = (std::max)(probe->GetQueryResultInfo().elementSize, 8u);
 		}
 		// Make every chunk play reaches now, so the first build declares their readbacks and no commit forces a rebuild mid-play.
@@ -474,13 +464,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 		run.point = host->SubmittedPoint();
 		run.seals = host->Seals();
 	}
-#endif
-
-	bool Requested()
-	{
-		static const bool requested = !REL::Module::IsVR() && RenderGraph::Engine::Native::GraphMode();
-		return requested;
-	}
 
 	bool Active()
 	{
@@ -494,8 +477,13 @@ namespace RenderGraph::Engine::OcclusionQueries
 			static void thunk(void* a_renderer, ID3D11Query** a_entry)
 			{
 				const auto index = SlotOf(a_entry);
-				if (index != kNoSlot) {
-					auto& globals = Get();
+				if (index == kNoSlot) {
+					func(a_renderer, a_entry);
+					return;
+				}
+				auto& globals = Get();
+				bool second = false;
+				{
 					const std::scoped_lock lock(globals.mutex);
 					auto& slot = globals.slots[index];
 					if (current && current->slot == kNoSlot) {
@@ -508,14 +496,16 @@ namespace RenderGraph::Engine::OcclusionQueries
 						slot.ring.reset();
 						return;
 					}
-					if (current)
-						Skips().Report("a second query begun inside one bracket is the engine's");
-					slot.graph = false;
+					// Graph mode has no place for a query outside a bracket. It answers its last count, and D3D11 never sees it.
+					second = current != nullptr;
+					slot.graph = true;
 					slot.begun = false;
 					slot.hasSkipAnswer = false;
 					slot.ring.reset();
+					SkipSlot(globals, slot, second ? "a second query begun inside one bracket" : "a query begun outside a bracket");
 				}
-				func(a_renderer, a_entry);
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::EngineWork, RenderGraph::Frame::SegmentId::Count,
+					std::format("occlusion query ring slot {}: {}", index, second ? "a second query begun inside one bracket" : "a query begun outside a bracket"));
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -554,8 +544,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 					lock.unlock();
 					const auto value = func(a_renderer, a_entry, a_wait, a_flush);
 					lock.lock();
-					if (value != kNotReady)
-						globals.counters.d3d11Answers.fetch_add(1, std::memory_order_relaxed);
 					NoteRead(globals, index, slot, value, false);
 					return value;
 				}
@@ -578,7 +566,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 				// D3D11 would not have the count yet either.
 				if (a_slot.begun || !a_slot.ring)
 					return kNotReady;
-#if defined(CS_HAS_RENDER_GRAPH)
 				auto ring = a_slot.ring;
 				const auto range = a_slot.range;
 				if (Harvest(a_globals, *ring, range, false))
@@ -601,9 +588,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 				if (ring->runs[range].generation == generation && waited)
 					Harvest(a_globals, *ring, range, false);
 				return a_slot.ready ? a_slot.value : kNotReady;
-#else
-				return kNotReady;
-#endif
 			}
 		};
 	};
@@ -611,7 +595,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 	void Install()
 	{
 		// With only CS_ORG_OCCLUSION_QUERY_LOG=1, log D3D11's answers for comparison.
-		if (!Requested()) {
+		if (!Engine::GraphMode()) {
 			if (REL::Module::IsVR() || !Switches::On("CS_ORG_OCCLUSION_QUERY_LOG"))
 				return;
 			stl::detour_thunk<Hooks::GetQueryData>(REL::RelocationID(75569, 77370));
@@ -622,12 +606,10 @@ namespace RenderGraph::Engine::OcclusionQueries
 		stl::detour_thunk<Hooks::BeginQuery>(REL::RelocationID(75567, 77368));
 		stl::detour_thunk<Hooks::EndQuery>(REL::RelocationID(75568, 77369));
 		stl::detour_thunk<Hooks::GetQueryData>(REL::RelocationID(75569, 77370));
-		if (!Hooks::BeginQuery::func.address() || !Hooks::EndQuery::func.address() || !Hooks::GetQueryData::func.address()) {
-			logger::error("[ORG] occlusion queries: a detour failed; the engine's queries stay on D3D11");
-			return;
-		}
+		if (!Hooks::BeginQuery::func.address() || !Hooks::EndQuery::func.address() || !Hooks::GetQueryData::func.address())
+			RenderGraph::Fatal("occlusion queries", "a detour failed");
 		Get().active = true;
-		logger::info("[ORG] occlusion queries: on (CS_ORG_OCCLUSION_QUERIES=1): the queries a port brackets are answered by the graph");
+		logger::info("[ORG] occlusion queries: on: the queries a port brackets are answered by the graph");
 	}
 
 	Bracket::Bracket()
@@ -654,13 +636,11 @@ namespace RenderGraph::Engine::OcclusionQueries
 		if (!entry.graph || entry.ready)
 			return;
 		bool submitted = false;
-#if defined(CS_HAS_RENDER_GRAPH)
 		// A stage run is submitted at the stage's commit, after the bracket. Its count comes then, or the slot skips when the lease comes round.
 		if (entry.ring) {
 			const auto& run = entry.ring->runs[entry.range];
 			submitted = run.generation == entry.generation && run.committed;
 		}
-#endif
 		if (!submitted)
 			SkipSlot(globals, entry, "its bracket's draw was not submitted");
 	}
@@ -691,9 +671,9 @@ namespace RenderGraph::Engine::OcclusionQueries
 	std::string Status()
 	{
 		if (!Active())
-			return Requested() ? "requested, not installed" : "off (CS_ORG_OCCLUSION_QUERIES)";
+			return Engine::GraphMode() ? "graph mode, not installed" : "off (not graph mode)";
 		const auto& c = Get().counters;
-		return std::format("{} answers from the graph, {} from D3D11, {} not-ready polls, {} skipped, {} blocking waits", c.graphAnswers.load(),
-			c.d3d11Answers.load(), c.notReady.load(), c.skipped.load(), c.waits.load());
+		return std::format("{} answers from the graph, {} not-ready polls, {} skipped, {} blocking waits", c.graphAnswers.load(), c.notReady.load(),
+			c.skipped.load(), c.waits.load());
 	}
 }

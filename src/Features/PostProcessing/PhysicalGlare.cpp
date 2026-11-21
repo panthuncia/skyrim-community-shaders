@@ -4,6 +4,7 @@
 
 #include "Features/LinearLighting.h"
 #include "Features/PostProcessing.h"
+#include "Features/PostProcessing/ORGPostProcessing.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "Menu/MenuIcons.h"
@@ -56,6 +57,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ScratchLength,
 	ScratchWidth)
 
+PhysicalGlare::PhysicalGlare()
+{
+	settings.FFTResolution.Bind(CS::SettingRegistry::Declare("PostProcessing.PhysicalGlare.FFTResolution"));
+	settings.ApertureMode.Bind(CS::SettingRegistry::Declare("PostProcessing.PhysicalGlare.ApertureMode"));
+}
+
 void PhysicalGlare::DrawSettings()
 {
 	ImGui::SliderFloat(T("feature.post_processing.physical_glare.threshold", "Threshold (Neutral EV100)"), &settings.ThresholdEV, -7.f, 23.f, "%+.2f EV100");
@@ -76,7 +83,7 @@ void PhysicalGlare::DrawSettings()
 			T("feature.post_processing.physical_glare.aperture_mode_lens", "Lens (N-polygon)"),
 			T("feature.post_processing.physical_glare.aperture_mode_pupil", "Pupil (Circle)")
 		};
-		ImGui::Combo(T("feature.post_processing.physical_glare.aperture_mode", "Aperture Mode"), &settings.ApertureMode, modeNames, 2);
+		Util::Combo(T("feature.post_processing.physical_glare.aperture_mode", "Aperture Mode"), settings.ApertureMode, modeNames, 2);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextUnformatted(T("feature.post_processing.physical_glare.lens_camera_lens_polygon_starburst_pupil_circular_human", "Lens: camera lens polygon starburst. Pupil: circular human eye aperture."));
 	}
@@ -349,6 +356,11 @@ void PhysicalGlare::DrawSettings()
 void PhysicalGlare::DrawDebugSection()
 {
 	Util::SectionCard card("##PhysicalGlarePsf", ICON_TI_SPARKLES, T("feature.post_processing.physical_glare.debug_card_psf", "Glare Kernel"));
+	// In graph mode the kernel is the graph's, and this view shows the D3D11 one, so it draws nothing.
+	if (ORGPostProcessing::Get().IsActive()) {
+		Util::SettingHint(T("feature.post_processing.physical_glare.debug_on_graph", "The glare kernel is drawn on the render graph, so it is not shown here."), false);
+		return;
+	}
 	if (!texGlarePacked) {
 		Util::SettingHint(T("feature.post_processing.physical_glare.debug_no_kernel", "The glare kernel has not been generated yet."), false);
 		return;

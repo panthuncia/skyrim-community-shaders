@@ -11,8 +11,6 @@
 #include <algorithm>
 
 #include "State.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 
 namespace DCLF::Features::Shadows::Sun
 {
@@ -38,7 +36,7 @@ namespace DCLF::Features::Shadows::Sun
 		auto& light = *const_cast<RE::BSShadowDirectionalLight*>(sun);
 		// Written in place on this thread. Registration threads read the cascades only after SunAccumulation's bitsReady release.
 		SunFrame& next = SunBoard();
-		next.sceneFrame = Scene::FrameView::Get().GetFrame();
+		next.sceneFrame = Scene::FrameView::Get().SceneStep();
 		next.valid = false;
 		next.cascades = {};
 		const auto& descriptors = light.GetRuntimeData().shadowmapDescriptors;
@@ -64,7 +62,6 @@ namespace DCLF::Features::Shadows::Sun
 				if (process)
 					ShadowCameras::CullPlanes(process.get(), *camera, next.fullFrusta.emplace_back());
 		next.valid = true;
-		Diagnostics::Notify<Diagnostics::EnginePoint::SunViewsUpdated>();
 	}
 
 	void SunCamera(Api::ShadowSourceCamera& a_camera)
@@ -77,7 +74,7 @@ namespace DCLF::Features::Shadows::Sun
 		// Every frame's cascades, whether or not the exclusion ran. Without them every pass with the sun's bits would draw unshadowed.
 		// None when UpdateCamera did not run for the sun, as in an interior, where no pass has the sun's bits either.
 		const auto& views = SunBoard();
-		const std::uint32_t frame = Scene::FrameView::Get().GetFrame();
+		const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
 		if (!views.valid || views.sceneFrame != frame)
 			return;
 		for (std::uint32_t d = 0; d < views.count && d < views.cascades.size(); ++d)

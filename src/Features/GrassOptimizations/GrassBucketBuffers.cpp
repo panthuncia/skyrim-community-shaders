@@ -1,6 +1,7 @@
 #include "Features/GrassLighting.h"
 #include "Features/GrassOptimizations.h"
 #include "Features/LinearLighting.h"
+#include "RenderGraph/Engine/Engine.h"
 
 #include <bit>
 
@@ -20,7 +21,8 @@ void GrassOptimizations::SetupResources()
 		ctx1 = nullptr;
 	}
 
-	ownsGrass.store(ctx1 && GetCullCS(), std::memory_order_release);
+	// Graph mode: DCLF draws grass. These draws would take the engine's state from DXVK's context, which holds none of it there.
+	ownsGrass.store(!RenderGraph::Engine::GraphMode() && ctx1 && GetCullCS(), std::memory_order_release);
 }
 
 bool GrassOptimizations::EnsureCullBucketCapacity(uint32_t slots)

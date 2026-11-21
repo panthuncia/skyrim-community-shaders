@@ -22,12 +22,12 @@ namespace DCLF
 		const auto percentile = [this](std::size_t a_percent) {
 			return adoptionLatency.empty() ? 0u : adoptionLatency[(std::min)(adoptionLatency.size() - 1, adoptionLatency.size() * a_percent / 100)];
 		};
-		std::string text = fmt::format("[DCLF] scene snapshots (T6b3b): {} built, {} publications coalesced by the builder, {} adopted, {} frames adopting nothing new; "
-									   "passed over as stale: build {}, targets {}, shadow format {}, main resources {}; built without draws for the main "
-									   "resources {}\n",
-			snapshotsBuilt.exchange(0, std::memory_order_relaxed), snapshotsCoalesced.exchange(0, std::memory_order_relaxed), snapshotsAdopted, snapshotFramesKept,
-			snapshotsStale[kStaleBuild], snapshotsStale[kStaleTargets], snapshotsStale[kStaleShadowFormat], snapshotsStale[kStaleMain],
-			snapshotsWithoutDraws.exchange(0, std::memory_order_relaxed));
+		std::string text = fmt::format("[DCLF] scene snapshots (T6b3b): {} built, {} publications coalesced by the builder, {} adopted ({} on new builds), "
+									   "{} Begins taking nothing new; not adopted by the frame revision: stale frame versions {}, "
+									   "replaced build {}, refused {}, superseded {}; built without draws for the main resources {}\n",
+			snapshotsBuilt.exchange(0, std::memory_order_relaxed), snapshotsCoalesced.exchange(0, std::memory_order_relaxed), snapshotsAdopted,
+			std::exchange(stagedAdoptions, 0), snapshotFramesKept, scenesDropped[0], scenesDropped[1], scenesDropped[2],
+			scenesDropped[3], snapshotsWithoutDraws.exchange(0, std::memory_order_relaxed));
 		text += fmt::format("[DCLF] snapshot builds (ms, avg/p95/max): draws ahead {} ({} built), shapes {}, recordings wait {}; commit to adoption (frames): p50 {}, p95 {}, "
 							"max {}\n",
 			Reports::Spread(ahead, 2), aheadBuilt, Reports::Spread(shapes, 2), Reports::Spread(recordings, 2), percentile(50), percentile(95), adoptionLatency.empty() ? 0u : adoptionLatency.back());
@@ -52,7 +52,7 @@ namespace DCLF
 			growthToDraws.empty() ? 0u : growthToDraws[growthToDraws.size() / 2], growthToDraws.empty() ? 0u : growthToDraws.back());
 		growthToDraws.clear();
 		snapshotsAdopted = snapshotFramesKept = 0;
-		snapshotsStale = {};
+		scenesDropped = {};
 		adoptionLatency.clear();
 		// The builder's own lines are a report behind.
 		producerReportSlot.TakeInto(producerReport);
@@ -102,20 +102,16 @@ namespace DCLF
 				std::exchange(b.buildsStarted, 0), std::exchange(b.buildsDiscarded, 0), std::exchange(b.heldPasses, 0), std::exchange(b.stagesInline, 0),
 				std::exchange(b.stagesPooled, 0), std::exchange(b.contextsReplaced, 0));
 		}
-		// Revision makes that kept the last revision, those that ran and why, and the parity runs for unchanged keys.
+		// Revision makes that kept the last revision, and those that ran and why.
 		if (auto& reuse = revisionReuse; reuse.kept || reuse.ran) {
 			std::string moved;
 			for (std::size_t part = 0; part < reuse.movedBy.size(); ++part)
 				if (reuse.movedBy[part])
 					moved += fmt::format("{}{} {}", moved.empty() ? "" : ", ", reuse.kMovedNames[part], reuse.movedBy[part]);
-			text += fmt::format("[DCLF] revision reuse: {} makes kept the last revision (requirement pass unchanged), {} ran it ({} with none to keep; moved: {}); "
-								"parity: unchanged passes {} checked, {} differ{}; kept shapes {} checked, {} differ{}\n",
-				reuse.kept, reuse.ran, reuse.ranUnkept, moved.empty() ? std::string("nothing") : moved, reuse.parity.checks, reuse.parity.mismatches,
-				reuse.parity.Verdict(true), reuse.shapesParity.checks, reuse.shapesParity.mismatches, reuse.shapesParity.Verdict(true));
+			text += fmt::format("[DCLF] revision reuse: {} makes kept the last revision (requirement pass unchanged), {} ran it ({} with none to keep; moved: {})\n",
+				reuse.kept, reuse.ran, reuse.ranUnkept, moved.empty() ? std::string("nothing") : moved);
 			reuse.kept = reuse.ran = reuse.ranUnkept = 0;
 			reuse.movedBy = {};
-			reuse.parity.Reset();
-			reuse.shapesParity.Reset();
 		}
 		text += fmt::format("[DCLF] scene revisions (R3c, the snapshot builder's): {} sealed ({} version sets), {} pending; assembler {} published, {} failed, {} superseded, "
 							"{} abandoned; {}{}\n",
@@ -165,13 +161,12 @@ namespace DCLF
 				uncovered += fmt::format("{}{} {}", e ? ", " : "", EpochTraitsOf(e).name, std::exchange(rv.uncovered[e], 0));
 			const std::uint64_t unbuiltTotal = unbuilt[kAsyncZPrepass] + unbuilt[kAsyncColour] + shadowUnbuilt;
 			text += fmt::format("[DCLF] strict epochs: {} frames without the adopted snapshot's main recordings (DCLF not drawing yet, or a load screen up); "
-								"waits at the frame's start for a snapshot current for the graph as built: {} ({:.2f} ms, max {:.2f} ms); {} graph builds at the "
+								"{} graph builds at the "
 								"build point, {} tickets of epochs not submitted given back for recordings; frames whose revision lacked an epoch's current recordings: {}; "
 								"shadow views left to the engine: {} frames without the revision's shadow recording or the installed shadow payload; occlusion maps "
 								"left to the engine for want of the revision's shape: {}; covered epochs without the installed publication's payload: Z-prepass {}, "
 								"colour {}, shadow {}{}\n",
-				std::exchange(rv.uncoveredFrames, 0), std::exchange(snapshotWaits, 0), std::exchange(snapshotWaitMs, 0.0), std::exchange(snapshotWaitMaxMs, 0.0),
-				std::exchange(rv.builds, 0), std::exchange(rv.ticketsReleased, 0), uncovered, std::exchange(shadowUnrecorded, 0), std::exchange(occlusionUnrecorded, 0),
+				std::exchange(rv.uncoveredFrames, 0), std::exchange(rv.builds, 0), std::exchange(rv.ticketsReleased, 0), uncovered, std::exchange(shadowUnrecorded, 0), std::exchange(occlusionUnrecorded, 0),
 				unbuilt[kAsyncZPrepass], unbuilt[kAsyncColour], shadowUnbuilt, unbuiltTotal ? " <- UNBUILT" : "");
 			unbuilt = {};
 			shadowUnbuilt = 0;
@@ -272,14 +267,12 @@ namespace DCLF
 		auto& sunExclusionCache = Features::Shadows::Local::ExclusionCacheOf(Api::ShadowSource::Sun);
 		for (auto* cache : { &sunExclusionCache, &Features::Shadows::Local::ExclusionCacheOf(Api::ShadowSource::Point) }) {
 			if (auto& c = *cache; c.builds) {
-				auto& parity = cache == &sunExclusionCache ? kept.sunExclusion : kept.parabolicExclusion;
 				text += fmt::format("[DCLF] {} exclusion: {} builds: {} the same exclusion again (nothing moved), {} updated by what moved ({} for newer candidates), {} judged whole; "
-									"{:.4f} ms a build (max {:.3f}); parity {} checked, {} differ{}\n",
+									"{:.4f} ms a build (max {:.3f})\n",
 					cache == &sunExclusionCache ? "sun" : "paraboloid", c.builds, c.same, c.reused - c.same, c.translated, c.builds - c.reused, c.buildMs / c.builds,
-					c.buildMaxMs, parity.checks, parity.mismatches, parity.Verdict());
+					c.buildMaxMs);
 				c.builds = c.reused = c.translated = c.same = 0;
 				c.buildMs = c.buildMaxMs = 0.0;
-				parity.Reset();
 			}
 		}
 		return text;
