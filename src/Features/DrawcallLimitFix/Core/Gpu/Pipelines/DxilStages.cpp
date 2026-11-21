@@ -115,7 +115,7 @@ namespace DCLF::DxilStages
 			return false;
 		}
 		a_storage = std::move(rewritten.source);
-		// CS_D3D12_SOURCE_DUMP=<dir> dumps the first rewritten sources to inspect offline.
+		// CS_D3D12_SOURCE_DUMP=<dir> dumps the first rewritten sources to inspect offline. A comment line first names the source and its defines.
 		static const std::string dumpDirectory = [] {
 			char value[MAX_PATH]{};
 			const DWORD length = ::GetEnvironmentVariableA("CS_D3D12_SOURCE_DUMP", value, sizeof(value));
@@ -124,10 +124,20 @@ namespace DCLF::DxilStages
 		if (!dumpDirectory.empty()) {
 			static std::atomic<std::uint32_t> dumped = 0;
 			const auto index = dumped.fetch_add(1);
-			if (index < 24) {
+			if (index < 512) {
 				std::error_code error;
 				std::filesystem::create_directories(dumpDirectory, error);
-				std::ofstream(std::filesystem::path(dumpDirectory) / std::format("{:02}_{}.hlsl", index, options.pixel ? "ps" : "vs"), std::ios::binary) << a_storage;
+				const auto narrow = [](const std::wstring& a_text) {
+					std::string text;
+					for (const wchar_t c : a_text)
+						text += static_cast<char>(c);
+					return text;
+				};
+				std::string header = "// " + std::string(a_request.sourceName) + " defines:";
+				for (const auto& define : a_request.defines)
+					header += " " + narrow(define.name) + (define.value.empty() ? "" : "=" + narrow(define.value));
+				const std::string stem = std::filesystem::path(a_request.sourceName).stem().string();
+				std::ofstream(std::filesystem::path(dumpDirectory) / std::format("{:03}_{}_{}.hlsl", index, stem, options.pixel ? "ps" : "vs"), std::ios::binary) << header << "\n" << a_storage;
 			}
 		}
 		// Includes and defines are resolved, so the compile reads this text alone. Its #line directives name the files.
