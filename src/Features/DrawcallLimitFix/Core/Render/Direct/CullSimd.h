@@ -62,5 +62,5 @@ namespace DCLF::Direct::Simd
 	using Level = org::cpu::Level;
 	/** @brief org::cpu::Supported, logged the first time. */
 	Level Supported();
-	inline const char* NameOf(Level a_level) { return org::cpu::NameOf(a_level); }
+	using org::cpu::NameOf;
 }
