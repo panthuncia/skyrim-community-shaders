@@ -650,3 +650,13 @@ final until the user confirms it.
      SRVs (ORG lacks them, p0-lib checked), a `Builds` snapshot readable from any thread, thread rules in signatures.
      The cleanup pass listed host-choice constants still hardcoded (ImGui's 4 atlas pages, KeptState's spare views,
      the shrink presets, the commit upload page sizes) and older CS mentions in ORG docs outside the diff.
+125. **Water port and extraction merged into `org_integration` (2026-11-21).** The water branch fast-forwarded
+     (`b8304d362`), the extraction merged on top (`a89cd1b4c`; one conflict, `FrameLayout.h`, both sides kept). The
+     extraction's ORG, OMS and BasicTelemetry commits were fetched from its worktree's submodules first. The merged build
+     needed no fixes. Checks (stage `nfg`): river in all three modes, native-vulkan river with `CS_DCLF_WATER=2`,
+     guest dclf-toggles, shader-reload in both native modes, guest post-effects: all pass. Perf-quick uncapped, Dev-Fast
+     /Od, one sample each: guest 56.3, native Vulkan 57.5, native D3D12 43.9 fps, as decision 121's.
+126. **DCLF water: claimed water ran no mask (water plan section 11).** FinishAccumulating skips its water mask block
+     when the engine holds no mask pass, which is the case once DCLF claims every water shape. A thunk on that check
+     runs the block for the main camera while DCLF's mask epoch is live. `CS_DCLF_WATER` stays 0 by default; claimed
+     water still differs from the engine's (section 11's list).

@@ -113,3 +113,5 @@ Progress log for `org-cleanup-refactor-plan.md`. Decisions that need the user's 
   the starvation segment tag, the cull level name. Checkpoint `ck2` 16 of 17 (native-d3d12+shader-reload's uncovered
   epoch once, two reruns pass); perf-quick unchanged. Library tests 75 of 78 (Leases* older than the extraction).
   Staged as `CS AB extract` because the water session used `nfg`.
+- Merge (2026-11-21): `dclf/water-indirect` fast-forwarded, then `org-native/extract-integ` merged (`a89cd1b4c`,
+  decision 125). 11 checks pass; perf-quick unchanged.
