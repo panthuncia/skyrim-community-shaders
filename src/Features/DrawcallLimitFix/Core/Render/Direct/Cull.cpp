@@ -574,44 +574,6 @@ namespace DCLF::Direct
 		void DiffVisibility(const CullFrame& a_frame);
 	}
 
-	// ---- CullArena ----
-
-	void* CullArena::Allocate(std::size_t a_bytes, std::size_t a_align)
-	{
-		for (;;) {
-			if (current < chunks.size()) {
-				auto& chunk = chunks[current];
-				const std::size_t at = (used + a_align - 1) & ~(a_align - 1);
-				if (at + a_bytes <= chunk.size) {
-					used = at + a_bytes;
-					return chunk.bytes.get() + at;
-				}
-				++current;
-				used = 0;
-				continue;
-			}
-			// A request larger than a chunk gets its own size. Old chunks never move.
-			const std::size_t size = std::max(kChunkBytes, a_bytes + a_align);
-			chunks.push_back({ std::make_unique<std::byte[]>(size), size });
-			current = chunks.size() - 1;
-			used = 0;
-		}
-	}
-
-	void CullArena::Reset()
-	{
-		current = 0;
-		used = 0;
-	}
-
-	std::size_t CullArena::BytesUsed() const
-	{
-		std::size_t bytes = used;
-		for (std::size_t c = 0; c < current && c < chunks.size(); ++c)
-			bytes += chunks[c].size;
-		return bytes;
-	}
-
 	// ---- The frame state ----
 
 	void KickCpuFrameState(std::shared_ptr<const ViewBatchSet> a_set, bool a_observer)
