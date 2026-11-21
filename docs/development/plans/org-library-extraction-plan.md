@@ -178,6 +178,8 @@ Not part of this plan unless a phase touches them:
 | 4 Build and upload services | in progress | p4-bufsets: CS `org-native/extract-p4-bufsets`, OMS `extract/p4-bufsets` | Needs phase 2's executor. Buffer sets and payload versions (p4-bufsets, code only, not built): OMS `GrowableBufferSet` gains `Make`/`GrowableBufferSpec`, buffer-keyed `Require`/`RequireNewer`/`Units`/`MostAsked`, `LatchRegions` registration, `NamedVersions::UnitsOf`, `GrowableUnitGroup` and `GrowableRows`; DCLF `SceneBufferSet`, `UnitGroup`, `GrowableRows` and `NamedUnits` forward to them. The payload's version chains are OMS `BufferChains` (`BufferChains.h`); `PayloadSource` implements `BufferChainSource`, and `PayloadPart`, the late-bound buffers and the frame payload stay in DCLF. OMS test `ORGBufferChainsTests` (no device). See "p4-bufsets decisions". |
 
 | 4 Build and upload services | in progress | p4-misc: CS `org-native/extract-p4-misc`, ORG and OMS `extract/p4-misc` | Needs phase 2's executor. p4-misc (code only, not built): scene graph helpers are OMS `Async/VersionedBufferPosts.h` (`PostVersionedBuffer`) and `Async/WindowGates.h` (texture windows and gates), `SceneArtifact` stays; indirect run coalescing is OMS `Passes/IndirectRuns.h` (`IndirectRunCounts`, `IndirectRunWriter` on the bucket binder, `RecordIndirectRuns`, `OrderBySlabs`), DCLF keeps `IndirectDraw` and the push words; the recipe read-order check is ORG `Render/RenderGraph/ReadOrderCheck.h` (`CheckReadOrder`), CS formats the findings; shader bindings are ORG `Render/ShaderBindings.h` and OMS `shaders/OrgResources.hlsli`, CS keeps forwarding files at the old paths. Tests: ORG `OpenRenderGraphReadOrderCheckTests`, OMS `ORGIndirectRunsTests`. |
+
+| 4 Build and upload services | ImGui backend written, not built | p4-imgui: CS `org-native/extract-p4-imgui`, OMS `extract/p4-imgui` | Needs phase 2's executor. ImGui backend (p4-imgui): OMS `ImGui/ImGuiBackend.{h,cpp}` (`org::services::imgui`), the optional target `ORGModuleServices::ImGui` (`cmake/ImGuiBackend.cmake` or `ORG_MODULE_SERVICES_ENABLE_IMGUI`) on the host's ImGui target or include folder. Its shader is OMS `shaders/ImGui.hlsl`. The host passes a `HostDesc` (graph host, texture maker, view and sampler makers, page publishing, error and log callbacks) and the program in each `Target`; the draw pass takes a `DrawTarget`. CS's `ImGuiBasicRHI` is an adapter that keeps `DeclareProgram`/`ProgramFor`. Test: OMS `ORGImGuiBackendTests`. See "p4-imgui decisions". |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
 ### Checks that need a run
@@ -884,3 +886,31 @@ Decided by the agent, to confirm:
 - p4-misc check that needs a run: FXC output of the D3D11 shaders that include `Common/OrgResources.hlsli` is identical
   (`tools/verify-shader-refactor.ps1` on Lighting.hlsl, ISHDR.hlsl, Effect.hlsl), and `tools/check-dual-target-shaders.py`
   passes; both need `package/Shaders/ORGModuleServices` staged by a configure first.
+
+### p4-imgui decisions
+
+Decided by the agent, to confirm:
+
+- **Layout.** OMS `include/ORGModuleServices/ImGui/ImGuiBackend.h` and `src/ImGui/ImGuiBackend.cpp`, in
+  `org::services::imgui`. A separate static target, `ORGModuleServices::ImGui`, from `cmake/ImGuiBackend.cmake` (as
+  `SphereCull`), so OMS builds without ImGui. It links the host's target named by `ORG_MODULE_SERVICES_IMGUI_TARGET`
+  (`imgui::imgui`), or uses `ORG_MODULE_SERVICES_IMGUI_INCLUDE_DIR`. It never runs `find_package` for ImGui.
+- **The program.** OMS gives `ProgramDesc(format)` and `kShader`. CS keeps the `DeclareProgram` keyed on the UI target's
+  format, resolves its defines and passes the built program in `Target::program`, as before. The shader path is now
+  `ORGModuleServices/ImGui.hlsl`; the source is unchanged apart from its comment, and CS compiles it with the same defines.
+- **Host callbacks, not library code, for CS's pieces.** Textures come from `HostDesc::createTexture` (CS makes the same
+  persistent `GraphResources::Texture2D`), views and the sampler from `createShaderResourceView`/`createSampler` (CS passes
+  `ShaderBindings`, which p4-misc is moving), page versions from `publishPageVersion` (`Frame::Revision::PublishTexture`), and
+  the undeclared-access note from `noteImmutable`. The graph host comes from `graphHost`. Kept as callbacks so this part
+  does not depend on p4-misc's move; once `ShaderBindings` is in ORG, OMS can call it directly.
+- **Staging.** OMS acquires the staging region from `org::Runtime::Current()->Arena()` itself, as CS's `AcquireStaging` did.
+  A failure goes to `HostDesc::onError` and `Commit` returns false. CS passes `FatalHandler("ImGui")`, so it stays fatal with
+  the same message.
+- **The draw target.** `MakePass` takes `DrawTarget` (a resolver or a plain resource, like `UavClearTarget`). CS's adapter
+  builds it from `FrameAnchors::Texture::Slot()` and `Plain()`.
+- **Revision values.** Both passes were always made with `atExecution = true`, so `CommitReadTicket` always pushed 0. The
+  passes now push 0 directly, and the unused ahead-of-time branch is gone.
+- **Names.** The draw pass's debug label is `HostDesc::passName`; CS passes "CS ImGui". Log lines go through
+  `HostDesc::log`; CS adds the "[ORG] " prefix, so lines read as before.
+- **Host setup.** CS's adapter calls `SetHost` once (`std::call_once`) before any forwarded call that needs the host, since a
+  pass may be made before `Init`. `ImGuiRenderer.cpp` and `IconLoader` are unchanged.
