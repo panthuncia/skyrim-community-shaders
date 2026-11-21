@@ -16,6 +16,7 @@
 #include "RenderGraph/Backend.h"
 
 #include <Render/LatchBlock.h>
+#include <RenderPasses/LatchedCopiesPass.h>
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <rhi.h>
 
@@ -51,22 +52,10 @@ namespace DCLF::Draws
 		rhi::CommandSignatureHandle a_signature, std::uint32_t a_latchOffset, org::PassRecordContext& a_recording);
 
 	/**
-	 * @brief What a latched copies pass copies: the shape and its lists. A host epoch also copies each hosted view's shape
-	 * after its own, one entry per hosted view in the host's order.
+	 * @brief What a latched copies pass copies: the shape (owner) and its lists. A host epoch also copies each hosted view's
+	 * shape after its own, one group per hosted view in the host's order. copyFixed false leaves out the zeroed count lists.
 	 */
-	struct LatchedSource
-	{
-		struct Hosted
-		{
-			std::shared_ptr<const void> shape;
-			std::span<const LatchedList> lists;
-		};
-		std::shared_ptr<const void> shape;
-		std::span<const LatchedList> lists;
-		std::vector<Hosted> hosted;
-		// The zeroed count lists too. A CPU pipeline graph leaves them out because nothing in a CPU frame reads them.
-		bool zeros = true;
-	};
+	using LatchedSource = org::LatchedSource;
 	/**
 	 * @brief An epoch's first pass, which copies its latched values to where its passes read them. A copy to a target
 	 * a_targets() did not declare is skipped. A host epoch copies its hosted shapes' lists in the same pass. a_conditions are

@@ -1,4 +1,4 @@
-// Shared pass helpers: the eye fold, DXVK image import, scene buffer registration, the latched copies pass, frame
+// Shared pass helpers: the eye fold, DXVK image import, scene buffer registration, the latched copies pass (ORG's), frame
 // buffer declaration and the preprocessed indirect draw.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
@@ -58,111 +58,11 @@ namespace DCLF::Draws
 		}
 	}
 
-	namespace
-	{
-		/**
-		 * @brief Records the latched copies a_source names, the epoch's own lists then each hosted shape's. A target that is not
-		 * declared resolves to a null handle and is skipped. a_withZeros false leaves out the zeroed count lists.
-		 */
-		template <class TargetOf>
-		void CopyLatchedLists(rhi::CommandList& a_commands, const LatchedSource& a_source, const org::RunRef& a_run, const TargetOf& a_target,
-			bool a_withZeros = true)
-		{
-			// A copy adjacent to the one before it, with the same latch and target, joins it into one command.
-			struct Run
-			{
-				rhi::ResourceHandle target, latch;
-				std::uint64_t dst = 0, src = 0, bytes = 0;
-			} run;
-			constexpr rhi::HandleEqual<rhi::ResourceHandle> same{};
-			auto flush = [&] {
-				if (!run.bytes)
-					return;
-				a_commands.CopyBufferRegion(run.target, run.dst, run.latch, run.src, run.bytes);
-				run.bytes = 0;
-			};
-			auto copyLists = [&](std::span<const LatchedList> a_lists) {
-				for (const auto& list : a_lists) {
-					if (!list.latch || (list.fixed && !a_withZeros))
-						continue;
-					const auto at = list.latch->At(a_run);
-					const auto latch = at.buffer->GetAPIResource().GetHandle();
-					const std::uint64_t region = at.offset;
-					for (const auto& copy : list.copies) {
-						const auto target = a_target(copy.target);
-						if (!target.valid())
-							continue;
-						const std::uint64_t src = region + copy.latchOffset;
-						if (run.bytes && same(run.target, target) && same(run.latch, latch) && run.dst + run.bytes == copy.dstOffset && run.src + run.bytes == src) {
-							run.bytes += copy.bytes;
-							continue;
-						}
-						flush();
-						run = { target, latch, copy.dstOffset, src, copy.bytes };
-					}
-				}
-			};
-			copyLists(a_source.lists);
-			for (const auto& hosted : a_source.hosted)
-				copyLists(hosted.lists);
-			flush();
-		}
-
-		struct LatchedCopiesBindings
-		{
-			std::vector<std::pair<const void*, org::ResourceBindingToken>> targets;  // LatchedTarget::Key
-		};
-
-		class LatchedCopiesPass final : public org::TypedRenderGraphPass<LatchedCopiesPass, LatchedSource, LatchedCopiesBindings>
-		{
-		public:
-			LatchedCopiesPass(const GraphConditions& a_conditions, std::function<std::vector<LatchedTarget>()> a_targets,
-				std::function<LatchedSource(const org::PassPrepareContext&)> a_source, std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared) :
-				targets(std::move(a_targets)), source(std::move(a_source)), declared(a_declared), zeros(!a_conditions.cpuPipeline) {}
-
-			LatchedCopiesBindings Declare(org::PassBuilder& a_builder)
-			{
-				a_builder.PreferQueue(org::QueueKind::Graphics);
-				LatchedCopiesBindings bindings{};
-				auto keys = std::make_shared<std::vector<const void*>>();
-				for (const auto& target : targets()) {
-					bindings.targets.emplace_back(target.Key(), target.versioned ? a_builder.CopyDestination(*target.versioned).Resource() : a_builder.CopyDestination(target.buffer));
-					keys->push_back(target.Key());
-				}
-				if (declared)
-					declared->store(std::move(keys), std::memory_order_release);
-				return bindings;
-			}
-
-			void Revision(std::vector<std::uint64_t>&) const {}
-
-			LatchedSource Prepare(const LatchedCopiesBindings&, const org::PassPrepareContext& a_preparation) const
-			{
-				auto prepared = source(a_preparation);
-				prepared.zeros = zeros;
-				return prepared;
-			}
-
-			static void Record(const LatchedCopiesBindings& a_bindings, const LatchedSource& a_prepared, org::PassRecordContext& a_recording)
-			{
-				CopyLatchedLists(a_recording.Commands(), a_prepared, a_recording.Run(), [&](const void* a_key) {
-					const auto target = std::find_if(a_bindings.targets.begin(), a_bindings.targets.end(), [&](const auto& a_target) { return a_target.first == a_key; });
-					return target != a_bindings.targets.end() ? a_recording.Resolve(target->second).GetHandle() : rhi::ResourceHandle{};
-				}, a_prepared.zeros);
-			}
-
-		private:
-			std::function<std::vector<LatchedTarget>()> targets;
-			std::function<LatchedSource(const org::PassPrepareContext&)> source;
-			std::atomic<std::shared_ptr<const std::vector<const void*>>>* declared = nullptr;
-			bool zeros = true;  // a CPU pipeline graph's pass copies no zeroed lists
-		};
-	}
-
 	std::shared_ptr<org::RenderPass> MakeLatchedCopiesPass(const GraphConditions& a_conditions, std::function<std::vector<LatchedTarget>()> a_targets,
 		std::function<LatchedSource(const org::PassPrepareContext&)> a_source, std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared)
 	{
-		return std::make_shared<LatchedCopiesPass>(a_conditions, std::move(a_targets), std::move(a_source), a_declared);
+		// A CPU pipeline graph's pass copies no zeroed count lists, since nothing in a CPU frame reads them.
+		return org::MakeLatchedCopiesPass(!a_conditions.cpuPipeline, std::move(a_targets), std::move(a_source), a_declared);
 	}
 
 	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights)

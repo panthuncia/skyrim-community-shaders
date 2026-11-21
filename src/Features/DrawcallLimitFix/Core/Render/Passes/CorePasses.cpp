@@ -47,7 +47,7 @@ namespace DCLF::Draws
 					LatchedSource source{ frame, std::span(&frame->latched, 1) };
 					if (const auto* shapes = views.empty() ? nullptr : RevisionShapesOf(a_preparation))
 						for (const auto view : views) {
-							auto& out = source.hosted.emplace_back();
+							auto& out = source.groups.emplace_back();
 							if (const auto& viewFrame = shapes->views[ViewIndex(view)])
 								out = { viewFrame, viewFrame->latched };
 						}
