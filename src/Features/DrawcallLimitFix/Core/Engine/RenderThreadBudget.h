@@ -1,7 +1,7 @@
 #pragma once
 
-#include <array>
-#include <chrono>
+#include <BasicTelemetry/ThreadBudget.h>
+
 #include <cstdint>
 #include <string>
 
@@ -10,7 +10,7 @@ namespace DCLF
 	/**
 	 * @brief DCLF's render-thread time per frame, by bucket. Every DCLF hook the render thread enters is a Hook, counted by site.
 	 * Parts nested in it go to their bucket, the epochs are split by ORG's totals, and the rest is Other. Per-draw hooks and the hooks
-	 * on job threads report their own times. Render thread only.
+	 * on job threads report their own times. Render thread only. The counting is BasicTelemetry's ThreadBudget.
 	 */
 	class RenderThreadBudget
 	{
@@ -44,48 +44,44 @@ namespace DCLF
 			Count
 		};
 
+		using Budget = basic_telemetry::ThreadBudget<Bucket, Site, 2>;
+
 		static RenderThreadBudget& Get();
 
 		/** @brief A DCLF hook's whole call. Nested hooks count once, to the outermost's site. */
 		class Hook
 		{
 		public:
-			explicit Hook(Site a_site);
-			~Hook();
+			explicit Hook(Site a_site) :
+				hook(Get().budget, a_site) {}
 			Hook(const Hook&) = delete;
 			Hook& operator=(const Hook&) = delete;
 
 		private:
-			bool counted = false;
+			Budget::Hook hook;
 		};
 
 		/** @brief A part of a hook counted to a_bucket rather than Other. */
 		class Part
 		{
 		public:
-			explicit Part(Bucket a_bucket);
-			~Part();
+			explicit Part(Bucket a_bucket) :
+				part(Get().budget, a_bucket) {}
 			Part(const Part&) = delete;
 			Part& operator=(const Part&) = delete;
 
 		private:
-			Bucket bucket;
-			bool counted = false;
-			std::chrono::steady_clock::time_point start;
+			Budget::Part part;
 		};
 
 		/** @brief One frame's total and buckets, in microseconds. */
-		struct FrameTime
-		{
-			double totalUs = 0.0;
-			std::array<double, static_cast<std::size_t>(Bucket::Count)> bucketUs{};
-		};
+		using FrameTime = Budget::FrameTime;
 
 		/** @brief At Present. The frame's total joins the report's maximum. */
-		void EndFrame();
+		void EndFrame() { budget.EndFrame(); }
 
 		/** @brief Render thread. The last frame EndFrame closed. */
-		const FrameTime& LastFrame() const { return lastFrame; }
+		const FrameTime& LastFrame() const { return budget.LastFrame(); }
 
 		/** @brief A bucket's name in the report. */
 		static const char* BucketName(Bucket a_bucket);
@@ -94,24 +90,8 @@ namespace DCLF
 		std::string Report();
 
 	private:
-		RenderThreadBudget() = default;
-		bool OnRenderThread() const;
+		RenderThreadBudget();
 
-		std::uint32_t renderThread = 0;
-		std::uint32_t depth = 0;
-		Site site = Site::Present;
-		std::chrono::steady_clock::time_point hookStart;
-		double hookPartsUs = 0.0;
-		double epochSubmitStart = 0.0, epochOverheadStart = 0.0;
-
-		std::array<double, static_cast<std::size_t>(Bucket::Count)> bucketUs{};
-		std::array<double, static_cast<std::size_t>(Site::Count)> siteUs{};
-		std::array<std::uint32_t, static_cast<std::size_t>(Site::Count)> siteCalls{};
-		double frameUs = 0.0;
-		std::array<double, static_cast<std::size_t>(Bucket::Count)> frameBucketUs{};
-		FrameTime lastFrame;
-		double frameMaxUs = 0.0;
-		double totalUs = 0.0;
-		std::uint32_t frames = 0;
+		Budget budget;
 	};
 }

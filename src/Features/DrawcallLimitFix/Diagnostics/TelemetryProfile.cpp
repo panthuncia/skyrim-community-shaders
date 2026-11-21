@@ -85,7 +85,7 @@ namespace DCLF::Diagnostics
 		/** @brief DCLF's zones by thread, to <label>.threads.csv and the log. */
 		void WriteThreads(const std::filesystem::path& a_dir)
 		{
-			auto rows = Zones::TakeThreadRows();
+			auto rows = basic_telemetry::TakeTallies();
 			std::ranges::sort(rows, [](const auto& a, const auto& b) { return a.threadId != b.threadId ? a.threadId < b.threadId : a.totalNs > b.totalNs; });
 			std::ofstream out(a_dir / (phase + ".threads.csv"));
 			out << "thread_id,thread,scope,count,total_ns,max_ns,top_level_ns\n";
@@ -111,7 +111,7 @@ namespace DCLF::Diagnostics
 		{
 			if (!session)
 				return;
-			Zones::recording.store(false, std::memory_order_relaxed);
+			basic_telemetry::talliesRecording.store(false, std::memory_order_relaxed);
 			frame.reset();
 			const auto snapshot = session->Snapshot();
 			session.reset();
@@ -137,8 +137,8 @@ namespace DCLF::Diagnostics
 		config.retainStallEvents = true;
 		config.stallEventThresholdNs = 2'000'000;
 		session = std::make_unique<basic_telemetry::Session>(std::move(config));
-		Zones::ResetThreadRows();
-		Zones::recording.store(true, std::memory_order_relaxed);
+		basic_telemetry::ResetTallies();
+		basic_telemetry::talliesRecording.store(true, std::memory_order_relaxed);
 	}
 
 	void TelemetryFrame()

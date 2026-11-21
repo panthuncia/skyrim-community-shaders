@@ -1,4 +1,4 @@
-// Per-frame render-thread time by bucket and hook site, and its report line. Render thread only.
+// Per-frame render-thread time by bucket and hook site, and its report line. Render thread only. BasicTelemetry's ThreadBudget counts.
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
 
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -16,9 +16,10 @@ namespace DCLF
 		static_assert(std::size(kBucketNames) == static_cast<std::size_t>(RenderThreadBudget::Bucket::Count));
 		static_assert(std::size(kSiteNames) == static_cast<std::size_t>(RenderThreadBudget::Site::Count));
 
-		double Microseconds(std::chrono::steady_clock::duration a_duration)
+		RenderThreadBudget::Budget::SplitTotals EpochSplits()
 		{
-			return std::chrono::duration<double, std::micro>(a_duration).count();
+			const auto& epochs = RenderGraphRuntime::Get().RenderThreadEpochTotals();
+			return { epochs.submitUs, epochs.overheadUs };
 		}
 	}
 
@@ -28,88 +29,11 @@ namespace DCLF
 		return budget;
 	}
 
-	bool RenderThreadBudget::OnRenderThread() const
-	{
-		return renderThread == ::GetCurrentThreadId();
-	}
-
-	RenderThreadBudget::Hook::Hook(Site a_site)
-	{
-		auto& b = Get();
-		// A load screen's Present runs on another thread, which is not the frame's.
-		if (a_site == Site::SceneFrame)
-			b.renderThread = ::GetCurrentThreadId();
-		if (!b.OnRenderThread())
-			return;
-		counted = true;
-		if (b.depth++)
-			return;
-		b.site = a_site;
-		b.hookPartsUs = 0.0;
-		const auto& epochs = RenderGraphRuntime::Get().RenderThreadEpochTotals();
-		b.epochSubmitStart = epochs.submitUs;
-		b.epochOverheadStart = epochs.overheadUs;
-		b.hookStart = std::chrono::steady_clock::now();
-	}
-
-	RenderThreadBudget::Hook::~Hook()
-	{
-		auto& b = Get();
-		if (!counted || --b.depth)
-			return;
-		const double us = Microseconds(std::chrono::steady_clock::now() - b.hookStart);
-		const auto& epochs = RenderGraphRuntime::Get().RenderThreadEpochTotals();
-		const double submit = epochs.submitUs - b.epochSubmitStart;
-		const double overhead = epochs.overheadUs - b.epochOverheadStart;
-		const double other = (std::max)(0.0, us - b.hookPartsUs - submit - overhead);
-		b.bucketUs[static_cast<std::size_t>(Bucket::Submit)] += submit;
-		b.bucketUs[static_cast<std::size_t>(Bucket::OrgOverhead)] += overhead;
-		b.bucketUs[static_cast<std::size_t>(Bucket::Other)] += other;
-		b.frameBucketUs[static_cast<std::size_t>(Bucket::Submit)] += submit;
-		b.frameBucketUs[static_cast<std::size_t>(Bucket::OrgOverhead)] += overhead;
-		b.frameBucketUs[static_cast<std::size_t>(Bucket::Other)] += other;
-		b.siteUs[static_cast<std::size_t>(b.site)] += us;
-		++b.siteCalls[static_cast<std::size_t>(b.site)];
-		b.frameUs += us;
-		b.totalUs += us;
-	}
-
-	RenderThreadBudget::Part::Part(Bucket a_bucket) :
-		bucket(a_bucket)
-	{
-		if (!Get().OnRenderThread())
-			return;
-		counted = true;
-		start = std::chrono::steady_clock::now();
-	}
-
-	RenderThreadBudget::Part::~Part()
-	{
-		if (!counted)
-			return;
-		auto& b = Get();
-		const double us = Microseconds(std::chrono::steady_clock::now() - start);
-		b.bucketUs[static_cast<std::size_t>(bucket)] += us;
-		b.frameBucketUs[static_cast<std::size_t>(bucket)] += us;
-		if (b.depth) {
-			b.hookPartsUs += us;
-			return;
-		}
-		// Outside any hook, so it is its own time.
-		b.frameUs += us;
-		b.totalUs += us;
-	}
-
-	void RenderThreadBudget::EndFrame()
-	{
-		if (!OnRenderThread())
-			return;
-		frameMaxUs = (std::max)(frameMaxUs, frameUs);
-		lastFrame = { frameUs, frameBucketUs };
-		frameUs = 0.0;
-		frameBucketUs = {};
-		++frames;
-	}
+	// A load screen's Present runs on another thread, which is not the frame's, so the scene frame's hook claims the thread.
+	// The epochs' submission and other ORG work inside a hook go to their buckets.
+	RenderThreadBudget::RenderThreadBudget() :
+		budget(Budget::Desc{ Site::SceneFrame, Bucket::Other, { Bucket::Submit, Bucket::OrgOverhead }, &EpochSplits })
+	{}
 
 	const char* RenderThreadBudget::BucketName(Bucket a_bucket)
 	{
@@ -119,23 +43,17 @@ namespace DCLF
 
 	std::string RenderThreadBudget::Report()
 	{
-		if (!frames)
+		const auto totals = budget.Take();
+		if (!totals)
 			return {};
-		const double n = frames;
+		const double n = totals->frames;
 		std::string buckets, sites;
-		for (std::size_t i = 0; i < bucketUs.size(); ++i)
-			buckets += fmt::format("{}{} {:.3f}", i ? ", " : "", kBucketNames[i], bucketUs[i] / n / 1000.0);
-		for (std::size_t i = 0; i < siteUs.size(); ++i)
-			if (siteCalls[i])
-				sites += fmt::format("{}{} {:.3f} ({:.1f} calls)", sites.empty() ? "" : ", ", kSiteNames[i], siteUs[i] / n / 1000.0, siteCalls[i] / n);
-		auto line = fmt::format("[DCLF] render thread, ms per frame over {} frames: {:.3f} (max {:.3f}); by bucket: {}; by hook: {}", frames, totalUs / n / 1000.0,
-			frameMaxUs / 1000.0, buckets, sites);
-		bucketUs = {};
-		siteUs = {};
-		siteCalls = {};
-		frameMaxUs = 0.0;
-		totalUs = 0.0;
-		frames = 0;
-		return line;
+		for (std::size_t i = 0; i < totals->bucketUs.size(); ++i)
+			buckets += fmt::format("{}{} {:.3f}", i ? ", " : "", kBucketNames[i], totals->bucketUs[i] / n / 1000.0);
+		for (std::size_t i = 0; i < totals->siteUs.size(); ++i)
+			if (totals->siteCalls[i])
+				sites += fmt::format("{}{} {:.3f} ({:.1f} calls)", sites.empty() ? "" : ", ", kSiteNames[i], totals->siteUs[i] / n / 1000.0, totals->siteCalls[i] / n);
+		return fmt::format("[DCLF] render thread, ms per frame over {} frames: {:.3f} (max {:.3f}); by bucket: {}; by hook: {}", totals->frames,
+			totals->totalUs / n / 1000.0, totals->frameMaxUs / 1000.0, buckets, sites);
 	}
 }

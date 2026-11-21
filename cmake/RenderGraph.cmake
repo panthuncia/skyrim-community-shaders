@@ -129,8 +129,15 @@ target_link_libraries(${PROJECT_NAME} PRIVATE swf::embedded)
 # The plugin's source glob also finds these two; they are compiled only in their independently testable libraries, without
 # the game's PCH.
 list(FILTER _cs_dclf_plugin_sources EXCLUDE REGEX "/SceneGraph\.cpp$")
-# The CPU cull's wide kernels (Core/Render/Direct/CullSimd.h): each file built for its instruction set alone, without the game's PCH
-# (built for the baseline), and chosen at run time by what the CPU supports.
+# The CPU cull's frustum kernels and CPU detection: ORGModuleServices' sphere cull. Its kernels get the plugin's floating-point and
+# optimisation options, so they build as they did inside the plugin.
+include("${CS_ORG_ROOT}/ORGModuleServices/cmake/SphereCull.cmake")
+if(MSVC)
+    target_compile_options(ORGSphereCull PRIVATE "$<$<CONFIG:DEBUG>:${SC_DEBUG_OPTS}>" "$<$<CONFIG:RELEASE>:${SC_RELEASE_OPTS}>")
+endif()
+target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::SphereCull)
+# The CPU cull's paraboloid and portal kernels (Core/Render/Direct/CullSimd.h): each file built for its instruction set alone, without
+# the game's PCH (built for the baseline), and chosen at run time by what the CPU supports.
 set(_cs_dclf_simd ${CMAKE_SOURCE_DIR}/src/Features/DrawcallLimitFix/Core/Render/Direct)
 if(MSVC)
     set(_cs_dclf_avx2 /arch:AVX2)
