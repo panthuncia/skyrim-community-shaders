@@ -695,6 +695,7 @@ namespace DCLF
 			std::array<std::atomic<bool>, kDrawFamilyLanes> familyRequest{};
 			std::atomic<bool> refractionRequest{ false };
 			RenderGraph::Frame::EventQueue<std::uint32_t, 64> stateRequests;
+			RenderGraph::Frame::EventQueue<std::uint64_t, 64> deferredStateRequests;
 		};
 		// Never freed, because a build may complete while the process tears down.
 		Completions* completions = new Completions;
@@ -749,6 +750,8 @@ namespace DCLF
 			rhi::PipelinePtr pulledDecalDepth;
 			// A deferred family key's plain pipeline per deferred range, null where it does not draw. Its family's build makes them.
 			std::array<rhi::PipelinePtr, Api::kDeferredRanges> pulledDeferred;
+			// A DeferredRanges key's: only pulledDeferred is drawn, so it has no state class and no set pipelines.
+			bool deferredOnly = false;
 			ZPipelineKey zKey;
 			std::shared_ptr<const ConstantTables> tables;
 			// Not the pulled depth pipeline's state, which plain draws bind.
@@ -777,6 +780,31 @@ namespace DCLF
 
 		EngineState ReadEngineState(std::uint32_t a_stateBits, std::string& a_error);
 
+		/** @brief A deferred range's state as the engine's state objects describe it, read once on the render thread. */
+		struct DeferredEngineState
+		{
+			rhi::BlendState blend{};
+			rhi::DepthStencilState depthStencil{};
+			bool valid = false;  // false when an object was missing, the RHI cannot express it, or its stencil write mask is not the wanted one
+		};
+		/** @brief A deferred range's colour targets' formats, read from its registration's targets on the render thread. */
+		struct DeferredTargets
+		{
+			std::array<rhi::Format, Api::kDeferredRangeTargets> formats{};
+			std::uint32_t count = 0;
+			bool read = false;  // every target had a format
+			bool operator==(const DeferredTargets&) const = default;
+		};
+		/** @brief A DeferredRangeState as a map key. */
+		static std::uint64_t PackDeferredState(const Api::DeferredRangeState& a_state);
+		static Api::DeferredRangeState UnpackDeferredState(std::uint64_t a_packed);
+		/** @brief Render thread. The engine's state objects at a_state's indices, in RHI terms. */
+		static DeferredEngineState ReadDeferredState(const Api::DeferredRangeState& a_state, std::string& a_error);
+		ankerl::unordered_dense::map<std::uint64_t, DeferredEngineState> deferredEngineStates;
+		std::vector<std::uint64_t> pendingDeferredStates;  // asked for by the lane, read at the next capture
+		/** @brief Render thread, from CaptureEngineStates. Reads asked deferred states and the ranges' target formats. True when the input changed. */
+		bool CaptureDeferredInputs();
+
 		/** @brief What the builds need that only the render thread can read. Posted whole, latest wins. */
 		struct FrameInput
 		{
@@ -791,6 +819,9 @@ namespace DCLF
 			std::shared_ptr<const std::vector<ShadowRasterState>> shadowStates;
 			std::array<RE::BSShader*, kDrawFamilyLanes> drawFamilySource{};
 			std::array<ForwardTargets, Extensions::kEngineViews> viewTargets{};
+			// Every deferred state asked for, valid or not, and each range's target formats.
+			std::shared_ptr<const ankerl::unordered_dense::map<std::uint64_t, DeferredEngineState>> deferredStates;
+			std::array<DeferredTargets, Api::kDeferredRanges> deferredTargets{};
 			RE::BSShader* refractionUtility = nullptr;
 			DXGI_FORMAT refractionFormat = DXGI_FORMAT_UNKNOWN;
 			std::uint8_t refractionWriteMask = 0xF;
@@ -890,6 +921,7 @@ namespace DCLF
 		{
 			std::shared_ptr<const FrameInput> input;
 			ankerl::unordered_dense::set<std::uint32_t> statesAsked;
+			ankerl::unordered_dense::set<std::uint64_t> deferredStatesAsked;
 			ShaderPrograms::Finished finishedPrograms;
 			Versions<SetVersion> versions;
 			std::vector<org::services::PipelinePayload> setPipelines;  // admitted, not necessarily published
@@ -1001,6 +1033,11 @@ namespace DCLF
 		void DrainLane();
 		/** @brief Requests a key's program, then its pipeline, or parks it until what it lacks arrives. */
 		void TryRequest(const PipelineKey& a_key);
+		/**
+		 * @brief TryRequest for a DeferredRanges family's key: each range's program and engine state, then one build of every range's
+		 * pipeline. A key that a range cannot draw in fails, so its objects stay native.
+		 */
+		void TryRequestDeferred(const PipelineKey& a_key, std::uint32_t a_slot);
 		/** @brief Warns about an on-demand build, with its nearest requested relative. */
 		void LogOnDemandBuild(const PipelineKey& a_key, Api::ProgramFamily a_family, std::uint32_t a_slot) const;
 		/** @brief Starts the forward pipelines over, keeping the built ones for the process. */
@@ -1168,6 +1205,23 @@ namespace DCLF
 
 		static org::services::PipelinePayload Build(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, rhi::PipelineLayoutHandle a_zLayout, PipelineKey a_key,
 			const ShaderPrograms::Program* a_program, TargetFormats a_targets, EngineState a_state, bool a_frontCCW);
+
+		/** @brief What one deferred range's pipeline of a key is built from. A null program draws the key's own. */
+		struct DeferredRangeBuild
+		{
+			bool drawn = false;
+			std::shared_ptr<const ShaderPrograms::Program> program;
+			DeferredEngineState state;
+			DeferredTargets targets;
+			bool twoSided = true;
+		};
+		/**
+		 * @brief A DeferredRanges key's pipelines: a plain pipeline per range it draws in, in the Z-prepass layout, from the pulled stages,
+		 * with the engine's blend, depth and stencil state. Throws when a range's pipeline cannot be built, so the key stays native.
+		 */
+		static org::services::PipelinePayload BuildDeferred(const ProgramFamilySlot& a_slot, std::string_view a_keyName, rhi::Device a_device,
+			rhi::PipelineLayoutHandle a_zLayout, PipelineKey a_key, const ShaderPrograms::Program& a_program,
+			const std::array<DeferredRangeBuild, Api::kDeferredRanges>& a_ranges, DXGI_FORMAT a_depthFormat, bool a_frontCCW);
 
 		/** @brief One shadow pipeline, depth only with LESS and writes. A two-sided caster draws without culling, as the engine's Utility pass does. */
 		static org::services::PipelinePayload BuildShadow(rhi::Device a_device, rhi::PipelineLayoutHandle a_layout, ShadowPipelineKey a_key,

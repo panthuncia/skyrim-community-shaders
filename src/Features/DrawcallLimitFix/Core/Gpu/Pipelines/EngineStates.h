@@ -19,6 +19,8 @@ namespace DCLF
 	BlendStateArray& EngineBlendStates();
 	/** @brief The G-buffer pass's blend state at these indices, or null until Deferred has made them. */
 	ID3D11BlendState* DeferredBlendState(std::uint32_t a_blendMode, std::uint32_t a_alphaToCoverage, std::uint32_t a_writeMode, std::uint32_t a_extra);
+	/** @brief The engine's own blend state at these indices, which the deferred variants replace during the G-buffer pass. Null until Deferred kept the table. */
+	ID3D11BlendState* ForwardBlendState(std::uint32_t a_blendMode, std::uint32_t a_alphaToCoverage, std::uint32_t a_writeMode, std::uint32_t a_extra);
 
 	/**
 	 * @brief The depth-bias mode the engine's decal groups draw with (FUN_1414b3bb0, FUN_1414b3d50, checked against real draws).

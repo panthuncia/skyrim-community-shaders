@@ -42,14 +42,33 @@ namespace DCLF::Api
 	};
 
 	/**
+	 * @brief A range pipeline's fixed-function state, as indices into the engine's state tables. Core reads the engine's state objects
+	 * on the render thread. A range draws after the deferred pass, so its blend state is the engine's own table entry, not Community
+	 * Shaders' deferred variant.
+	 */
+	struct DeferredRangeState
+	{
+		std::uint8_t blendMode = 0, alphaToCoverage = 0, writeMode = 0, blendExtra = 0;  // the blend table, [7][2][13][2]
+		std::uint8_t depthMode = 0, stencilMode = 0;                                     // the depth-stencil table
+		// The stencil write mask the engine's state at these indices must have. Another mask keeps the key native, so a wrong mode
+		// index is caught at the state read. 0 skips the check.
+		std::uint8_t stencilWriteMask = 0;
+		bool twoSided = true;
+		bool operator==(const DeferredRangeState&) const = default;
+	};
+
+	/**
 	 * @brief A deferred range.
 	 *
 	 * - family: the program family whose keys the range draws. Its build must be ProgramBuild::DeferredRanges.
 	 * - name: the nvperf range "cs.dclf.deferred.<name>" and the report name.
 	 * - draws: snapshot builder, once per key slot per plan. Whether a key draws in this range, and its stencil reference there.
 	 *   A pure function of the key. Core groups the range's draws into buckets by set index, ordered by stencil reference.
-	 * - target: render thread, at the graph's build. The pass's colour target a_index, or a null texture past the last one.
-	 *   The pass loads and stores them. Depth and stencil are the main depth, loaded and stored.
+	 * - target: render thread, at the graph's build and when the pipelines read the targets' formats. The pass's colour target a_index,
+	 *   or a null texture past the last one. The pass loads and stores them. Depth and stencil are the main depth, loaded and stored.
+	 * - programKey: the pipeline lane, pure. The key whose program draws this range, such as another technique of the same shape.
+	 *   Null draws the key's own program.
+	 * - state: the pipeline lane, pure. The range pipeline's state for a key. False keeps the key native.
 	 */
 	struct DeferredRangeContribution
 	{
@@ -58,5 +77,7 @@ namespace DCLF::Api
 		ProgramFamily family = ProgramFamily::Count;
 		bool (*draws)(const DeferredKey& a_key, std::uint8_t& a_stencilRef) = nullptr;
 		FrameAnchors::Texture (*target)(std::uint32_t a_index) = nullptr;
+		DeferredKey (*programKey)(const DeferredKey& a_key) = nullptr;
+		bool (*state)(const DeferredKey& a_key, DeferredRangeState& a_state) = nullptr;
 	};
 }

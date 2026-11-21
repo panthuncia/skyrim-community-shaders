@@ -385,7 +385,8 @@ namespace DCLF
 		}
 
 		// The attributes a pulled vertex stage reads, from its defines. Kept by hand to match DCLFPulledInput in Lighting.hlsl and
-		// Effect.hlsl, so change both together. Lighting.hlsl defines VC itself under TREE_ANIM or LANDSCAPE.
+		// Effect.hlsl, and WaterPulledInput in Water.hlsl, so change both together. Lighting.hlsl defines VC itself under TREE_ANIM or
+		// LANDSCAPE.
 		std::uint32_t VertexAttributesOf(std::span<const org::services::ShaderDefine> a_defines, bool a_lighting)
 		{
 			constexpr std::uint32_t kPosition = 1u << 0, kTexcoord0 = 1u << 1, kNormal = 1u << 3, kBinormal = 1u << 4, kColor = 1u << 5,
@@ -407,6 +408,15 @@ namespace DCLF
 			// A particle system's quads read no stream.
 			if (has(L"PARTICLES"))
 				return 0;
+			// Water: the texture coordinate only for the techniques whose input has it.
+			if (has(L"WATER")) {
+				attributes = kPosition;
+				if (has(L"NORMAL_TEXCOORD") && (has(L"SPECULAR") || has(L"UNDERWATER") || has(L"STENCIL") || has(L"SIMPLE")))
+					attributes |= kTexcoord0;
+				if (has(L"VC"))
+					attributes |= kColor;
+				return attributes;
+			}
 			attributes = kPosition;
 			if (has(L"TEXCOORD"))
 				attributes |= kTexcoord0;
@@ -768,9 +778,39 @@ namespace DCLF
 		return SourcesLocked();
 	}
 
+	namespace
+	{
+		// The engine shader per program family, as Precompile last saw it (FamilyShader).
+		std::array<std::atomic<const RE::BSShader*>, Extensions::kProgramFamilies> precompileFamilyShaders{};
+	}
+
+	const RE::BSShader* ShaderPrograms::FamilyShader(Api::ProgramFamily a_family)
+	{
+		const auto f = static_cast<std::size_t>(a_family);
+		return f < precompileFamilyShaders.size() ? precompileFamilyShaders[f].load(std::memory_order_acquire) : nullptr;
+	}
+
 	void ShaderPrograms::Precompile(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor)
 	{
 		const auto type = a_shader.shaderType.get();
+		// A deferred range family's stages are drawn only once a pipeline has both, so they are asked for here and never waited for.
+		// A stage that fails leaves its keys native, as a family's stage compiled on demand does.
+		const auto family = Extensions::FamilyOfShader(static_cast<std::uint8_t>(type));
+		if (family != Api::ProgramFamily::Count)
+			precompileFamilyShaders[static_cast<std::size_t>(family)].store(&a_shader, std::memory_order_release);
+		if (family != Api::ProgramFamily::Count && Extensions::FamilyRules(ProgramFamilySlotOf(family).keyBit).deferredRanges) {
+			{
+				std::lock_guard lock(stages->mutex);
+				if (!stages->started) {
+					stages->pending.push_back({ &a_shader, a_pixel, a_descriptor });
+					return;
+				}
+			}
+			DCLF_ZONE("CS.DCLF.Shaders.PrecompileFamily");
+			(void)stages->Request(*this, a_shader, a_pixel, a_descriptor);
+			(void)stages->Request(*this, a_shader, a_pixel, a_descriptor, false, nullptr, true);
+			return;
+		}
 		if (type != RE::BSShader::Type::Lighting && type != RE::BSShader::Type::Utility)
 			return;
 		{
