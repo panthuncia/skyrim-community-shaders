@@ -25,5 +25,11 @@ namespace RenderGraph::Frame
 
 		/** @brief a_what names the watched work in the tap error, as "the frame revision's member recordings". */
 		explicit StarvationWatch(std::string_view a_what);
+
+		/** @brief One miss; a_segment names the segment in the tap error. Returns true when this miss was the tap error. */
+		bool NoteMiss(std::string_view a_why, SegmentId a_segment = SegmentId::Count)
+		{
+			return org::async::StarvationWatch::NoteMiss(a_why, static_cast<std::uint64_t>(a_segment));
+		}
 	};
 }
