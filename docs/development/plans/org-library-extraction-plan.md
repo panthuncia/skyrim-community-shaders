@@ -158,6 +158,8 @@ Not part of this plan unless a phase touches them:
 | 2 Services with clean cuts | in progress | p2-birth: CS `org-native/extract-p2-birth`, OMS `extract/p2-birth` | Executor and retirement join need A/B perf runs. p2-birth (code only, not built): OMS `TexelEncoding.h` (`EncodeTexel` on `rhi::Format`, `ValueFillWriter`), `TextureContents::Value`; CS `Birth.cpp` deleted, `Birth::Fill` takes `org::TextureFillWriter`. |
 
 | 2 Services with clean cuts | in progress | p2-reflect: CS `org-native/extract-p2-reflect`, OMS `extract/p2-reflect` | Executor and retirement join need A/B perf runs. Shader reflection (p2-reflect): OMS `ShaderReflection.h` (SPIR-V parse, `IsDxil`, `ReflectDxil` with a `DxilBindingLayout`, `DxilFragment`), tests in OMS `tests/Reflection`; DCLF keeps `SpirvReflection` (subclass passing its shifts and push register) and `DxilStages` (frame-source preprocessing, aliases for `IsDxil`/`Fragment`). |
+
+| 2 Services with clean cuts | in progress | p2-cpu: `org-native/extract-p2-cpu`, OMS and BasicTelemetry `extract/p2-cpu` | Executor and retirement join need A/B perf runs. p2-cpu (code only, unbuilt): SIMD sphere cull is OMS `ORGModuleServices::SphereCull` (`Cpu/SphereCull.h`, `cmake/SphereCull.cmake`, `tests/Cpu`); DCLF keeps the paraboloid and portal kernels and logs the level. Zone tallies and the render-thread budget are BasicTelemetry `TallyScope` and `ThreadBudget<Bucket, Site, Splits>` (`TallyTests`); DCLF keeps the macros, enums and report lines. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 
 | 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
@@ -721,3 +723,20 @@ Decided by the agent, to confirm:
 - DCLF's `NullOf` keeps its D3D11 1x1 views for array, cube and 3D slots. Swapping them for per-dimension null
   descriptors would change what the engine's draws read (a D3D11 view through the import, not a null descriptor), so it
   is left for a separate change.
+
+### p2-cpu decisions
+
+Decided by the agent, to confirm:
+
+- **Zone tallies and the budget go to BasicTelemetry, not OMS.** The tally scope wraps `basic_telemetry::Scope` and
+  `Callsite`, and the budget is plain CPU timing with no graph types. In OMS both would add a BasicTelemetry dependency to a
+  module that has none outside `AsyncStateGraph`.
+- **The budget's epoch split is a parameter.** `ThreadBudget` takes `Splits` running totals through a function pointer, read
+  at an outermost hook's ends, plus the bucket each goes to. DCLF passes ORG's submit and overhead totals. The claiming site
+  (`SceneFrame`) and the rest bucket (`Other`) are `Desc` fields. The thread is a `std::thread::id`, not a Win32 id.
+- **The sphere cull gets the plugin's compile options.** CS adds `SC_DEBUG_OPTS`/`SC_RELEASE_OPTS` (`/fp:fast`, `/O2`...) to
+  `ORGSphereCull`, so the moved kernels build as they did in the plugin. The per-file `/arch` flags are set in
+  `SphereCull.cmake` for the OMS files and stay in `RenderGraph.cmake` for DCLF's `CullAvx2.cpp`/`CullAvx512.cpp`.
+- **The SSE pass is `org::cpu::FrustumSse`, taking a plane array and count** in place of DCLF's `PlaneSet`. It still leaves
+  dead lanes to the caller, as before. The level is `org::cpu::Supported()` (CPUID and XCR0, no logging); DCLF's
+  `Simd::Supported()` wraps it and keeps its log line.
