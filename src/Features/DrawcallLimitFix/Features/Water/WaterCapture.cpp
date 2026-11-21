@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterParity.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
@@ -363,9 +364,17 @@ namespace DCLF::Features::Water
 			return nullptr;
 		}
 
+		enum Site : std::uint32_t
+		{
+			kMaskSite,
+			kGroup10Site,
+			kSurfaceSite,
+		};
+
 		/**
 		 * @brief A water batch hook. The draws are latched, then the anchor's pass draws them here.
 		 * kSite tells apart the mask, the surface, and the geometry group 10 batch just before the surface.
+		 * The mask and surface batches first submit DCLF's water epoch for what it claims. The engine's batch then draws the rest.
 		 */
 		template <View kView, std::uint32_t kSite>
 		struct WaterBatch
@@ -373,6 +382,9 @@ namespace DCLF::Features::Water
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& capture = GetCapture();
+				if constexpr (kSite != kGroup10Site)
+					if (!capture.active)
+						(void)Indirect::ReachBatch(kView, a_accumulator);
 				// A batch nested in a latched one feeds the outer batch. Otherwise the engine draws batches the family cannot run.
 				if (capture.active || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
@@ -404,13 +416,6 @@ namespace DCLF::Features::Water
 				FlushLatched(capture);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
-		enum Site : std::uint32_t
-		{
-			kMaskSite,
-			kGroup10Site,
-			kSurfaceSite,
 		};
 
 		/** @brief Latches a draw during a latched water batch instead of drawing it. */
@@ -464,11 +469,11 @@ namespace DCLF::Features::Water
 			HookSites::RequireCall("geometry group 10's batch (FinishAccumulatingPostResolveDepth, before the water)", REL::Offset(Address::kGroup10Batch).address());
 	}
 
-	void InstallHooks()
+	bool InstallHooks()
 	{
 		if (!Address::kMaskBatch.Known() || !Address::kSurfaceBatch.Known() || !Family::AddDrawTaker("water", &TakeDraw)) {
 			logger::warn("[DCLF] water: this runtime has no address for the water batches; the water stays the engine's");
-			return;
+			return false;
 		}
 		stl::write_thunk_call<WaterBatch<View::Mask, kMaskSite>>(REL::Offset(Address::kMaskBatch).address());
 		stl::write_thunk_call<WaterBatch<View::Surface, kSurfaceSite>>(REL::Offset(Address::kSurfaceBatch).address());
@@ -477,5 +482,6 @@ namespace DCLF::Features::Water
 		Family::WatchSetupGeometry<RE::BSShader::Type::Water>(RE::VTABLE_BSWaterShader[0], &OnSetupGeometry);
 		Family::AddSetup("water", [] { return WaterDraws::Setup(); });
 		logger::info("[DCLF] water: hooks installed (the water mask, geometry group 10 and water batches, BSWaterShader::SetupGeometry)");
+		return true;
 	}
 }

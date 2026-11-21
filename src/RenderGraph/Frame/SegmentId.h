@@ -16,7 +16,10 @@ namespace RenderGraph::Frame
 		PreDepth,
 		PreMain,
 		Deferred,        // deferred passes, composite, water mask, RenderWorld scopes, kMAIN copy and water
+		Water,           // after DCLF's water mask: the engine's water mask, RenderWorld scopes, kMAIN copy and water
+		PostWater,       // after DCLF's water surface: the engine's water, its blend and the post-water composite
 		Sun,             // the sun's occlusion query, after DCLF's forward epoch and before the first-person one
+		SunWater,        // under water, after DCLF's water surface: the engine's water, its blend and the sun's query
 		Post,            // volumetric lighting through the tonemap, up to RenderEndOfFrameEffects' return
 		Ui,              // every frame kind, the menus, movies and overlay up to just before the present
 		Count

@@ -34,8 +34,14 @@ namespace RenderGraph::Frame
 			return "pre-main";
 		case SegmentId::Deferred:
 			return "deferred+water";
+		case SegmentId::Water:
+			return "water";
+		case SegmentId::PostWater:
+			return "post-water";
 		case SegmentId::Sun:
 			return "sun";
+		case SegmentId::SunWater:
+			return "sun water";
 		case SegmentId::Post:
 			return "post";
 		case SegmentId::Ui:
