@@ -20,6 +20,6 @@ namespace DCLF::Draws
 	void ExecutionOwners::Seal(SceneBuffers* a_scene)
 	{
 		if (a_scene)
-			Add(a_scene->content.Snapshot());
+			Add(a_scene->content.Snapshot([](std::vector<std::shared_ptr<const void>> a_owners) { return GpuTextures::Get().Seal(std::move(a_owners)); }));
 	}
 }

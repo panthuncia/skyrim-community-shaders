@@ -257,7 +257,7 @@ Small pieces still on the render thread, each with its route off it:
     commit's end) into the version the adopted set names: the face positions, the tree rows, the fade roots with their
     programs and animation stamps, the index pool's copy list, the readbacks' arm headers, and a few zeroings. This is safe
     (copies are ordered on the queue) but breaks the rule that a version is immutable once named.
--   **State.** Not started. `AcquireStagedBatch` (`Core/Render/Payload/Uploads.h`) is used by
+-   **State.** Not started. `CommitUploads` (`Core/Render/Payload/Uploads.h`, over OMS `ORGModuleServices/CommitUploads.h`) is used by
     `Features/TreeWind/TreeWindScene.cpp`, `Features/Fades/FadeCommit.cpp`, `Core/Render/Shadow/ShadowIndexPool.cpp`,
     `Core/Render/Readback/Visibility.cpp`, `Core/Render/Resources/FrameRecords.cpp` and `Features/Portals/PortalPrograms.cpp`.
 -   **Design.**
