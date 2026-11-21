@@ -156,6 +156,8 @@ Not part of this plan unless a phase touches them:
 | 2 Services with clean cuts | in progress | p2-retire: CS `org-native/extract-p2-retire`, OMS `extract/p2-retire` | Executor and retirement join need A/B perf runs. p2-retire (code only, unbuilt): retirement join is OMS `RetirementJoin` + `GraphHostRetirement` (CS `Async/Retirement` is a facade); pooled-backing defaults are OMS `GraphHostBackings.h` (DCLF `PooledBackings` passes its switches); CPU recording pools are OMS `RecordingPools.h` (`BumpArena`, `ResetPools`, `RecordingSlot`) + `SecondaryListPool.h`. Tests: OMS `ORGRetirementTests`. |
 
 | 2 Services with clean cuts | in progress | p2-birth: CS `org-native/extract-p2-birth`, OMS `extract/p2-birth` | Executor and retirement join need A/B perf runs. p2-birth (code only, not built): OMS `TexelEncoding.h` (`EncodeTexel` on `rhi::Format`, `ValueFillWriter`), `TextureContents::Value`; CS `Birth.cpp` deleted, `Birth::Fill` takes `org::TextureFillWriter`. |
+
+| 2 Services with clean cuts | in progress | p2-reflect: CS `org-native/extract-p2-reflect`, OMS `extract/p2-reflect` | Executor and retirement join need A/B perf runs. Shader reflection (p2-reflect): OMS `ShaderReflection.h` (SPIR-V parse, `IsDxil`, `ReflectDxil` with a `DxilBindingLayout`, `DxilFragment`), tests in OMS `tests/Reflection`; DCLF keeps `SpirvReflection` (subclass passing its shifts and push register) and `DxilStages` (frame-source preprocessing, aliases for `IsDxil`/`Fragment`). |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 
 | 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
@@ -682,3 +684,17 @@ Decided by the agent, to confirm:
   static object, as it kept one static table.
 - **CS `RenderGraph/PipelineVersions.h` stays as the facade.** Its users (Compute and Raster programs, `Revision.cpp`,
   `RenderGraphRuntime.cpp`) don't change. Phase 3 item 2 can call `org::services::VersionFor` directly once programs move.
+
+### p2-reflect decisions
+
+Decided by the agent, to confirm:
+
+- DXIL's binding shifts and the skipped push register (DCLF's `kBindingShift*`, `kFramePushBinding`) became
+  `DxilBindingLayout`, a `Parse`/`ReflectDxil` parameter. DCLF's `SpirvReflection` is a subclass whose `Parse` passes
+  them, so its users are unchanged.
+- No new dependencies: the SPIR-V reader is hand-written (no SPIRV-Reflect or SPIR-V headers). DXIL uses `dxcapi.h`,
+  which OMS already finds for `ShaderCompiler`, and the Windows SDK's `d3d12shader.h`. `DxilReflection.cpp` builds only
+  on Windows with DXC; otherwise `ReflectDxil` returns false and `DxilFragment` the defaults.
+- DXIL reflection still finds `dxcompiler.dll` by name in the process (`GetModuleHandleW`), as before, instead of
+  asking a `ShaderCompiler` for its module. DCLF's `DxilStages.cpp` keeps its own per-thread DXC objects for the
+  frame-source preprocess.
