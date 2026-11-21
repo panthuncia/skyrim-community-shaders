@@ -667,7 +667,7 @@ bool ORGFoo::Setup()
 Three primitives replace the per-port workarounds (mismatch counters pushed into `Revision`, `prepared` atomics set in `Prepare`,
 fill and clear frame counts). A pass's revision stays a function of what it was made with, so its recording is kept.
 
--   **Run gates** (`src/RenderGraph/RunGate.h`). A dispatch or draw that runs on some runs of its anchor only records
+-   **Run gates** (`src/RenderGraph/RunGate.h`, over ORG's `org::RunGate` in `Render/RunGate.h`). A dispatch or draw that runs on some runs of its anchor only records
     `RunGate::Dispatch` (`ComputeProgram::DispatchIndirect`) or a `RasterProgram::DrawDesc` with `indirect` set to the gate's
     latch and offset. The group or vertex counts are in a latch block, so a zero there does no work. List the gate in
     `ClientDesc::gates`: each run of the client's anchors closes it before any commit, and the commit opens the entries this run
@@ -817,7 +817,7 @@ lanes; new code uses them from the start.
 -   **Per-run CPU data: `RenderGraph::AcquireStaging`** (`src/RenderGraph/FrameStaging.h`). An oversize region of ORG's frame
     arena (`FrameArena::AcquireOversize`): a chunk of its own, at offset 0, of at least the size asked for. It goes back to the
     arena when the recording that retained it is done, and a steady frame reuses the freed chunks. The engine constants' upload
-    ring takes its chunks the same way. `RenderGraph::RunSlots<T>` hands one immutable frame object per run from the commit
+    ring takes its chunks the same way. `RenderGraph::RunSlots<T>` (ORG's `org::RunSlots`, `Render/RunSlots.h`) hands one immutable frame object per run from the commit
     (`Store` at `GraphHost::CurrentRun`) to `Record` (`Take` at `RecordingContext::Run`), which retains it. A pass without a
     revision is prepared again after the commit, for the same run, so its Take finds the object.
 -   **Main-thread tick: `RenderGraph::Engine::MainTick::Add(name, callback)`** (`src/RenderGraph/Engine/MainTick.h`). Runs on the

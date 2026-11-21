@@ -13,8 +13,8 @@
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
-#include "RenderGraph/UavClearPass.h"
 
+#include <ORGModuleServices/Passes/UavClearPass.h>
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/LatchBlock.h>
 #include <Render/RenderGraph/RenderGraph.h>
@@ -620,9 +620,10 @@ namespace RenderGraph::AnchorPasses
 
 	std::shared_ptr<org::RenderPass> MakeClear(const Clear& a_clear, std::shared_ptr<const RunGate> a_gate)
 	{
-		const GraphPasses::ClearGate gate = a_clear.gate ? GraphPasses::ClearGate{ std::move(a_gate), *a_clear.gate } : GraphPasses::ClearGate{};
-		return a_clear.uintValue ? GraphPasses::MakeUavClearUint(a_clear.target, *a_clear.uintValue, gate) :
-		                           GraphPasses::MakeUavClear(a_clear.target, a_clear.value, gate);
+		const org::services::UavClearGate gate = a_clear.gate ? org::services::UavClearGate{ std::move(a_gate), *a_clear.gate } : org::services::UavClearGate{};
+		org::services::UavClearTarget target{ a_clear.target.Slot(), a_clear.target.Plain() };
+		return a_clear.uintValue ? org::services::MakeUavClearPassUint(std::move(target), *a_clear.uintValue, gate) :
+		                           org::services::MakeUavClearPass(std::move(target), a_clear.value, gate);
 	}
 
 	Copy CopyOf(std::string a_name, const GraphResources::Resource& a_source, const GraphResources::Resource& a_target, std::uint32_t a_width,
