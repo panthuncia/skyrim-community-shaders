@@ -140,7 +140,7 @@ Not part of this plan unless a phase touches them:
 |---|---|---|---|
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
-| 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
+| 2 Services with clean cuts | in progress | p2-retire: CS `org-native/extract-p2-retire`, OMS `extract/p2-retire` | Executor and retirement join need A/B perf runs. p2-retire (code only, unbuilt): retirement join is OMS `RetirementJoin` + `GraphHostRetirement` (CS `Async/Retirement` is a facade); pooled-backing defaults are OMS `GraphHostBackings.h` (DCLF `PooledBackings` passes its switches); CPU recording pools are OMS `RecordingPools.h` (`BumpArena`, `ResetPools`, `RecordingSlot`) + `SecondaryListPool.h`. Tests: OMS `ORGRetirementTests`. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
@@ -446,3 +446,23 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p2-retire decisions
+
+Decided by the agent, to confirm:
+
+- **Two layers for the join.** `RetirementJoin` (std plus ORG's header-only `EventQueue`) does the counting behind a
+  `Source` interface (`SubmissionsMade`, `CpuFramesCompleted`), so its logic is tested standalone. `GraphHostRetirement`
+  adds the graph host source and the GPU points (`SubmittedGpuPoint`, `SealedGpuPoint`, `Sealed`), which need `GraphHost.h`.
+- **The host comes in as a callback** (`GraphHostAccess`, returning the host or null), since CS's host comes and goes.
+- **New headers, not `BackingPool.h`.** The join and the pool defaults are in `RetirementJoin.h`, `GraphHostRetirement.h` and
+  `GraphHostBackings.h`. `BackingPool.h` stays std-only for its standalone tests, and p1-async adds beside it at the same time.
+- **Shrink is an enum** (`BackingShrink::Settled/Never/Eager`) and copies are `PerFrameCopies(asked, framesInFlight)`. DCLF
+  still parses `CS_DCLF_SHRINK` and `CS_DCLF_SCENE_COPIES` (empty means 3), so the values are unchanged.
+- **Secondaries stay generic.** The list pool holds only BasicRHI types (`rhi::CommandAllocatorPtr`, `rhi::CommandListPtr`),
+  nothing of D3D11 or DXVK, so `SecondaryListPool` moved whole to OMS. `ResetPools` and `RecordingSlot` still take the pool
+  type as a template parameter, for tests and other pools. DCLF keeps the slot, the worker index and its fatal check.
+- **The reset queue is ORG's `EventQueue`**, not TBB's `concurrent_queue`: OMS's core has no TBB. Both are lock-free, any
+  thread pushes and one thread (the render thread) takes. "Retirement comes in as a callback" is `ResetPools`' `Defer`,
+  which DCLF points at its executor's preparation lane, with the same zone.
+- **Library error text** for a structured backing past `uint32` elements drops the `[DCLF]` prefix.

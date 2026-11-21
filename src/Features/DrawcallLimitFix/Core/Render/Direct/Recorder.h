@@ -24,9 +24,14 @@ namespace DCLF
 	struct BindlessPlacement;
 }
 
+namespace org::services
+{
+	class BumpArena;
+}
+
 namespace DCLF::Direct
 {
-	class CullArena;
+	using CullArena = org::services::BumpArena;
 
 	/**
 	 * @brief One draw in a frame slot's draw buffer, also the stride of an indirect run. D3D12's SV_InstanceID does not count
