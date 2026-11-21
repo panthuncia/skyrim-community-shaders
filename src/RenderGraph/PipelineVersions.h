@@ -19,8 +19,8 @@ namespace org::services
 /**
 * @brief Shader hot reload's pipeline versions (cleanup plan A4).
 *
-* Every graph build pins the pipeline registry's generation it is made at (RenderGraph::SetRecordingTag). Its recordings bind each
-* live pipeline's version at that generation, and hold the pin, so a version lives while a graph or a kept recording binds it.
+* Every graph build pins the pipeline registry's generation it is made at (org::services::PipelinePins, under its recording tag).
+* Its recordings bind each live pipeline's version at that generation, and hold the pin, so a version lives while a graph or a kept recording binds it.
 * A reload publishes new versions off the render thread. The graphs built after it bind them. Frames keep the old ones until the
 * revision that carries the new ShaderGeneration is adopted with every graph rebuilt and each drawing fragment source's fragment
 * recorded on its rebuilt graphs. Nothing waits for it on the render thread.

@@ -141,7 +141,7 @@ Not part of this plan unless a phase touches them:
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
 | 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
-| 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
+| 3 Programs and GPU primitives | in progress | p3-pins: CS `org-native/extract-p3-pins`, ORG and OMS `extract/p3-pins` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Item 1 (p3-pins): done in code, not built. OMS `PipelinePins` and `VersionFor`; CS `PipelineVersions` keeps `Install`, `Adopted` and forwards the rest. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
@@ -383,8 +383,9 @@ regression.
 ## Library work CS needs but does not own
 
 - **ORG array-size versions.** LLF's slot count can't change in a session (decision 88).
-- **ORG keyed recording tags**, so more than one extension can tag a graph. Today one tag per graph
-  (`RenderGraph.h:762`). Pipeline pins (phase 3 item 1) need it.
+- **ORG keyed recording tags**, so more than one extension can tag a graph. Done in p3-pins: `RecordingTagKey`,
+  `RecordingTags` (`Render/RecordingTags.h`), `RenderGraph::SetRecordingTag(key, tag)`, `RecordingContext::Tag(key)`.
+  The single-tag API is gone; its one user was the pipeline pins.
 - **ORG `Builds{attached, staged}` snapshot readable from any thread.** DCLF prunes its cache on its builder thread only
   because `StagedGeneration` and `EpochRecordingCurrent` (`GraphHost.h:351,687`) are owner-thread calls.
 - **ORG multisampled SRVs.** To check (see "Checks that need a run").
@@ -446,3 +447,17 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p3-pins decisions
+
+Decided by the agent, to confirm:
+
+- **Single-tag API removed, not kept as a default key.** It had one user (the pipeline pins), so the keyed form replaced
+  it. Keys are compared by address, so two extensions can't collide on a name.
+- **A tag set is immutable and shared.** Each `SetRecordingTag` makes a new set. A recording list holds one
+  `shared_ptr` to the set, as it held one to the single tag, so the per-batch cost is unchanged.
+- **OMS `PipelinePins` takes two callbacks** (`Desc::pin`, `Desc::defer`) instead of CS's `BuildManager`. CS's `defer`
+  calls `Builds::DeferStaged` then `Builds::Defer`, as before. The pin table is per `PipelinePins` object; CS keeps one
+  static object, as it kept one static table.
+- **CS `RenderGraph/PipelineVersions.h` stays as the facade.** Its users (Compute and Raster programs, `Revision.cpp`,
+  `RenderGraphRuntime.cpp`) don't change. Phase 3 item 2 can call `org::services::VersionFor` directly once programs move.
