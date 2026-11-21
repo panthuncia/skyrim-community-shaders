@@ -67,7 +67,8 @@ namespace DCLF::Extensions
 			rules.spareShift = slot.spareShift;
 			rules.kind = kind;
 			rules.rowBlocks = registered.rowBlocks;
-			rules.depthSegment = registered.build != Api::ProgramBuild::ForwardOrDecal;
+			rules.deferredRanges = registered.build == Api::ProgramBuild::DeferredRanges;
+			rules.depthSegment = registered.build != Api::ProgramBuild::ForwardOrDecal && !rules.deferredRanges;
 			rules.rootViewsForwardOnly = registered.rootViewsForwardOnly;
 			rules.turnedKeyBits = registered.turnedKeyBits;
 			rules.projectedPassBit = ports[kind].rules.projectedPassBit;

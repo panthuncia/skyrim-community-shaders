@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
@@ -106,6 +107,8 @@ namespace DCLF::Extensions
 			// A null near twin target means none.
 			std::vector<HeldGroupEntry> heldGroups;
 			NearTwinEntry nearTwin;
+			// Per slot, its range. Count means none.
+			std::array<Api::DeferredRangeContribution, kDeferredRanges> deferredRanges{};
 			// An input's index is its id.
 			std::vector<ClassifyInputEntry> classifyInputs;
 			std::vector<std::string> classifyInputNeeds;
@@ -1008,6 +1011,18 @@ namespace DCLF::Extensions
 			void RegisterHeldGroup(const Api::HeldGroupContribution& a_group) override { AddHeldGroup(lists, feature, a_group); }
 			void RegisterNearTwin(const Api::NearTwinContribution& a_twin) override { SetNearTwin(lists, feature, a_twin); }
 
+			void RegisterDeferredRange(const Api::DeferredRangeContribution& a_range) override
+			{
+				if (a_range.slot >= Api::DeferredRangeSlot::Count || a_range.name.empty() || a_range.family >= Api::ProgramFamily::Count || !a_range.draws ||
+					!a_range.target)
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} registered an incomplete deferred range", feature));
+				auto& entry = lists.deferredRanges[static_cast<std::size_t>(a_range.slot)];
+				if (entry.slot != Api::DeferredRangeSlot::Count)
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} contributes deferred range slot {}, which {} has", feature,
+						static_cast<std::uint32_t>(a_range.slot), entry.name));
+				entry = a_range;
+			}
+
 			void RegisterVertexStream(const Api::VertexStreamContribution& a_stream) override
 			{
 				// Its scene resources and the component following its entry class must be registered first.
@@ -1217,6 +1232,7 @@ namespace DCLF::Extensions
 		ResolveMaterialPorts(lists.materialPorts, lists.materialPortCount);
 		ResolveMaterialContributors(lists.materialContributors);
 		ResolveProgramFamilies(lists.programFamilies);
+		ResolveDeferredRanges(lists.deferredRanges);
 		std::ranges::sort(lists.frameConstantRows, {}, &FrameConstantRowEntry::row);
 		// A schedule key that nobody registered fails the install.
 		Draws::ResolveSchedule(a_schedule);

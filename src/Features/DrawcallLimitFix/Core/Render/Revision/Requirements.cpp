@@ -1,12 +1,15 @@
 // What the scene's buffer set must hold for a revision made now, computed on the snapshot builder.
 // A set is sealed only once it holds every requirement, so a shape made from it never indexes past a buffer.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 #include "RenderGraph/Fatal.h"
 
 #include <ORGModuleServices/ElasticCapacity.h>
+
+#include <numeric>
 
 namespace DCLF
 {
@@ -59,6 +62,7 @@ namespace DCLF
 			a_windows.slots.resize(slots);
 			std::uint64_t main = 0, forward = 0, refractionDraws = 0;
 			std::array<std::uint64_t, kTerrainGroups> terrain{};
+			std::array<std::uint64_t, kDeferredRanges> deferred{};
 			for (std::uint32_t p = 0; p < slots; ++p) {
 				const std::uint32_t flags = a_tables.pipelines[p].rasterFlags;
 				const std::uint32_t draws = a_bound.PipelineDraws(p);
@@ -71,7 +75,13 @@ namespace DCLF
 				auto& capacity = a_layout.slotCapacity[p];
 				if (org::services::FitCapacity(capacity, a_windows.slots[p], std::min(draws, 1u << 30), kSlotGrowth, shrink, a_now))
 					++a_layout.slotsLayout;
-				if (RasterForward(flags))
+				// A deferred family's key takes room in each deferred range it draws in, and none in the main range.
+				if (Extensions::FamilyRules(flags).deferredRanges) {
+					const auto draws = Extensions::DeferredDrawsOf(a_tables.pipelines[p]);
+					for (std::uint32_t r = 0; r < kDeferredRanges; ++r)
+						if ((draws.ranges >> r) & 1u)
+							deferred[r] += capacity;
+				} else if (RasterForward(flags))
 					forward += capacity;
 				else if (const std::uint32_t group = RasterTerrainGroup(flags))
 					terrain[group - 1] += capacity;
@@ -81,6 +91,8 @@ namespace DCLF
 			for (std::uint32_t g = 0; g < kTerrainGroups; ++g)
 				a_layout.terrainCapacity[g] = static_cast<std::uint32_t>(std::min<std::uint64_t>(terrain[g], 1u << 31));
 			a_layout.forwardCapacity = static_cast<std::uint32_t>(std::min<std::uint64_t>(forward, 1u << 30));
+			for (std::uint32_t r = 0; r < kDeferredRanges; ++r)
+				a_layout.deferredCapacity[r] = static_cast<std::uint32_t>(std::min<std::uint64_t>(deferred[r], 1u << 30));
 			org::services::FitCapacity(a_layout.refractionCapacity, a_windows.refraction, std::min<std::uint64_t>(refractionDraws, 1u << 30), kSlotGrowth, shrink, a_now);
 			return main;
 		}
@@ -170,7 +182,8 @@ namespace DCLF
 		// The forward range counts twice, once for staging and once for the sorted half.
 		const std::uint64_t mainDraws = GrowSlotRanges(layout, windows, drawBound, tables, now);
 		const std::uint64_t phaseDraws = (layout.zBucketFirst.empty() ? 0ull : std::uint64_t(layout.zBucketFirst.back()) + layout.zBucketCapacity.back()) + terrainTwins;
-		const std::uint64_t terrainRange = std::uint64_t(layout.terrainCapacity[0]) + layout.terrainCapacity[1] + 2ull * layout.forwardCapacity + layout.refractionCapacity;
+		const std::uint64_t terrainRange = std::uint64_t(layout.terrainCapacity[0]) + layout.terrainCapacity[1] + 2ull * layout.forwardCapacity + layout.refractionCapacity +
+		                                   std::accumulate(layout.deferredCapacity.begin(), layout.deferredCapacity.end(), std::uint64_t{ 0 });
 		draws = static_cast<std::uint32_t>(std::min<std::uint64_t>(std::max<std::uint64_t>({ draws, phaseDraws, terrainRange, mainDraws }), UINT32_MAX));
 		layout.buckets = static_cast<std::uint32_t>(layout.zBucketCapacity.size() + terrainSlots);
 		UnitGroup{}.Add(r.zBucketCounts[0]).Add(r.zBucketCounts[1]).Require(a_build, layout.buckets);

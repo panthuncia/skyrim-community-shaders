@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Api/Commits.h"
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
 #include "Features/DrawcallLimitFix/Api/CullInputs.h"
+#include "Features/DrawcallLimitFix/Api/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Api/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Api/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Api/LatePoses.h"
@@ -129,6 +130,8 @@ namespace DCLF::Api
 		virtual void RegisterHeldGroup(const HeldGroupContribution& a_group) = 0;
 		/** @brief Registers the one near twin. */
 		virtual void RegisterNearTwin(const NearTwinContribution& a_twin) = 0;
+		/** @brief Registers a deferred range. Each slot has one registration, with every field set. */
+		virtual void RegisterDeferredRange(const DeferredRangeContribution& a_range) = 0;
 		/** @brief Registers the one second vertex stream. Its scene resources must be registered first. */
 		virtual void RegisterVertexStream(const VertexStreamContribution& a_stream) = 0;
 		/** @brief Registers palette rows for an item class. A pow2 rule needs a power-of-two maxUnits. */

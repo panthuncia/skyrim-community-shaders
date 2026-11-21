@@ -53,7 +53,7 @@ namespace DCLF::Draws
 
 	// ---- The scene list. One entry per object, whose main part the main build writes and whose shadow words the shadow build writes.
 	// A main view bit missing here is dropped when an entry's parts merge, and BuildDraws then skips that view's input entirely.
-	constexpr std::uint32_t kMainCoreSideBits = kViewMainCull | kViewMain | kViewDecal | kViewForward | kViewRefraction;
+	constexpr std::uint32_t kMainCoreSideBits = kViewMainCull | kViewMain | kViewDecal | kViewForward | kViewRefraction | kViewWater;
 	inline std::uint32_t MainSideBits() { return kMainCoreSideBits | Extensions::Views().viewBits; }
 	constexpr std::uint8_t kSideMain = 1;
 	constexpr std::uint8_t kSideShadow = 2;

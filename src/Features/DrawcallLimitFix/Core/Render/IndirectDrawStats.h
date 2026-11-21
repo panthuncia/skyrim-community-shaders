@@ -73,6 +73,8 @@ namespace DCLF
 		bool refractionObserved = false;
 		// Colour draws dropped for lack of a state class sub-range, either unplanned or past its capacity.
 		std::uint32_t classUnplanned = 0, classOverflow = 0;
+		// Deferred range inputs through the culling, and their draws dropped for want of a bucket or room.
+		std::uint32_t deferredTested = 0, deferredInView = 0, deferredOccluded = 0, deferredDropped = 0;
 		// Inputs found under a fade root, and those dropped past their fade-out distance.
 		std::uint32_t fadeTested = 0, fadeHidden = 0;
 		std::uint32_t fadeRoots = 0;  // the fade roots listed

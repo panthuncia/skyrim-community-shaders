@@ -25,7 +25,8 @@ namespace DCLF::Extensions
 		std::uint32_t spareShift = 0;
 		std::uint8_t kind = 0;         // material kind of its keys' shader
 		bool rowBlocks = true;
-		bool depthSegment = true;      // false for ForwardOrDecal, with no depth segment input or Z-prepass bucket
+		bool depthSegment = true;      // false for ForwardOrDecal and DeferredRanges, with no depth segment input or Z-prepass bucket
+		bool deferredRanges = false;   // DeferredRanges: drawn only by the deferred ranges, view bit kViewWater
 		bool rootViewsForwardOnly = false;
 		bool turnedKeyBits = false;
 		std::uint32_t projectedPassBit = 0;  // 0 means no ProjectedUV binding
