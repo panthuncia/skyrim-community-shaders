@@ -1955,7 +1955,7 @@ bool RenderGraphRuntime::Initialize()
 			if (!FrameAnchors::NamesOf(a_epoch))
 				OnEpochFailed(a_epoch, a_kept, a_error);
 		};
-		state->builds = std::make_unique<RenderGraph::BuildManager>(std::move(builds));
+		state->builds = RenderGraph::MakeBuildManager(std::move(builds));
 	}
 	impl = std::move(state);
 	disabledReason.clear();
