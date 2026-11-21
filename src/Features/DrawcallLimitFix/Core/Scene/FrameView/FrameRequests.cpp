@@ -34,15 +34,44 @@ namespace DCLF::Scene
 
 		constexpr std::uint32_t kObjectClasses = static_cast<std::uint32_t>(Api::ObjectClass::Count);
 
-		/** @brief One bit per object class taken that lists a category root. */
+		/** @brief One bit per object class taken that lists a category root, by categoryRoot or categoryRoots. */
 		std::uint32_t RootListing()
 		{
 			const auto& roots = Extensions::RegisteredCategoryRoots();
+			const auto& gathers = Extensions::RegisteredCategoryRootGathers();
 			std::uint32_t listing = 0;
 			for (std::uint32_t c = 0; c < kObjectClasses; ++c)
-				if (roots[c] && Extensions::ObjectClassOn(static_cast<Api::ObjectClass>(c)))
+				if ((roots[c] || gathers[c]) && Extensions::ObjectClassOn(static_cast<Api::ObjectClass>(c)))
 					listing |= 1u << c;
 			return listing;
+		}
+
+		template <class AddFn>
+		class CategoryRootVisitor final : public Api::CategoryRootSink
+		{
+		public:
+			explicit CategoryRootVisitor(AddFn& a_add) :
+				add(a_add) {}
+			void Add(RE::NiNode* a_root) override
+			{
+				if (a_root)
+					add(a_root);
+			}
+
+		private:
+			AddFn& add;
+		};
+
+		/** @brief Every root the classes in a_listing gather through categoryRoots. Render thread. */
+		template <class AddFn>
+		void ForEachGatheredRoot(std::uint32_t a_listing, AddFn&& a_add)
+		{
+			const auto& gathers = Extensions::RegisteredCategoryRootGathers();
+			for (std::uint32_t c = 0; c < kObjectClasses; ++c)
+				if ((a_listing & (1u << c)) && gathers[c]) {
+					CategoryRootVisitor<std::remove_reference_t<AddFn>> visitor(a_add);
+					gathers[c](visitor);
+				}
 		}
 
 		template <class AddFn>
@@ -226,6 +255,7 @@ namespace DCLF::Scene
 			for (const auto root : Extensions::RegisteredCategoryRoots())
 				if (root)
 					hash.Mix(root());
+			ForEachGatheredRoot(listing, [&hash](RE::NiNode* a_root) { hash.Mix(a_root); });
 			if (const auto& unheld = Extensions::RegisteredUnheldRoots(); unheld.owner)
 				hash.Mix(unheld.owner());
 			if (auto* tes = RE::TES::GetSingleton()) {
@@ -289,6 +319,7 @@ namespace DCLF::Scene
 				for (std::uint32_t c = 0; c < kObjectClasses; ++c)
 					if (roots[c])
 						mix(rootListing & (1u << c) ? roots[c]() : nullptr);
+				ForEachGatheredRoot(rootListing, [&mix](RE::NiNode* a_root) { mix(a_root); });
 				hash.Mix(rootListing);
 				MixViewRootInputs(mix);
 				mix(tes->interiorCell);
@@ -395,9 +426,10 @@ namespace DCLF::Scene
 				if (const std::uint32_t rootListing = RootListing()) {
 					const auto& roots = Extensions::RegisteredCategoryRoots();
 					for (std::uint32_t c = 0; c < kObjectClasses; ++c)
-						if (rootListing & (1u << c))
+						if ((rootListing & (1u << c)) && roots[c])
 							if (auto* root = roots[c]())
 								current.insert(root);
+					ForEachGatheredRoot(rootListing, [&current](RE::NiNode* a_root) { current.insert(a_root); });
 				}
 				Engine::ForEachLoadedCell(*tes, addCell);
 			}
