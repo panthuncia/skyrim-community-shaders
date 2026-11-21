@@ -40,8 +40,14 @@ namespace RenderGraph::Frame::Transients
 			return Pos(StageId::PreMain);
 		case SegmentId::Deferred:
 			return Pos(StageId::Deferred);
+		case SegmentId::Water:
+			return Pos(StageId::Water);
+		case SegmentId::PostWater:
+			return Pos(StageId::PostWater);
 		case SegmentId::Sun:
 			return Pos(StageId::Sun);
+		case SegmentId::SunWater:
+			return Pos(StageId::SunWater);
 		case SegmentId::Post:
 			return Pos(StageId::Post);
 		case SegmentId::Ui:

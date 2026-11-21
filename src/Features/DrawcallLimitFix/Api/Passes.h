@@ -56,6 +56,8 @@ namespace DCLF::Api
 	 * - cpuPipeline: also record the pass in the CPU-driven pipeline, always on the graphics queue. False leaves the work to the CPU there.
 	 * - recordAtExecution: CPU-driven pipeline only, recorded late when the commit opens its site.
 	 * - gpuLate: with recordAtExecution, also in the GPU-driven graph, recorded at execution by its epoch.
+	 * - present: optional, asked once at the end of InstallFeatures. False means the pass is never made in this install. An epoch
+	 *   whose every pass says so is dormant (Draws::EpochTraits::dormant). Null means present.
 	 */
 	struct PassDef
 	{
@@ -72,5 +74,6 @@ namespace DCLF::Api
 		bool cpuPipeline = false;
 		bool recordAtExecution = false;
 		bool gpuLate = false;
+		bool (*present)() = nullptr;
 	};
 }

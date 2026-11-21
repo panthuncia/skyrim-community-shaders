@@ -127,10 +127,12 @@ namespace DCLF::Features::Water::WaterScene
 	};
 	static_assert(sizeof(WaterFrameRow) == kFrameRows * 16);
 
-	/** @brief Install time, main thread. Registers CS_DCLF_WATER and, when it is 1, everything else in this folder. */
+	/** @brief Install time, main thread. Registers CS_DCLF_WATER and, when it is 1 or 2, everything else in this folder. */
 	void Install(Api::InstallContext& a_context);
-	/** @brief Whether CS_DCLF_WATER is 1. Read once at install. A water program family must register only when this is true. */
+	/** @brief Whether CS_DCLF_WATER is 1 or 2. Read once at install. A water program family must register only when this is true. */
 	bool On();
+	/** @brief Whether CS_DCLF_WATER is 2: the port claims plain water while Indirect::DrawnInput is on. Read once at install. */
+	bool Claims();
 
 	// Within this folder.
 

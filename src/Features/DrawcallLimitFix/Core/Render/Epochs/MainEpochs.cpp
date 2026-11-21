@@ -153,6 +153,8 @@ namespace DCLF
 			return {};
 		}
 		const bool ok = Direct::ExecuteEpoch(traits.segment, [&] {
+			if (a_submit.commit)
+				a_submit.commit(a_submit.context);
 			if (revision.direct && a_submit.forwardSite)
 				drawn = Direct::ForwardReached(result.optional);
 			if (revision.recordings && !revision.recordings->recordings.empty())

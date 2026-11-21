@@ -256,8 +256,8 @@ namespace DCLF
 						inputs.push_back(hostedFragment);
 						hosted |= 1u << h;
 					}
-			// With the CPU pipeline, epochs without CPU pipeline passes have nothing to record.
-			if (!recordable || !shapeFragment || traits.hostedBy != kNoEpoch || (producer.inputs.cpuPipeline && !CpuPipelineRecords(e))) {
+			// With the CPU pipeline, epochs without CPU pipeline passes have nothing to record. Nor has a dormant epoch.
+			if (!recordable || !shapeFragment || traits.hostedBy != kNoEpoch || traits.dormant || (producer.inputs.cpuPipeline && !CpuPipelineRecords(e))) {
 				draft.Set(slot, nullptr);
 				continue;
 			}

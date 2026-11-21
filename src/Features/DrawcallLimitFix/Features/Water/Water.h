@@ -182,7 +182,8 @@ namespace DCLF::Features::Water
 	/** @brief Whether the family is on, which is graph mode (read at install). */
 	bool Enabled();
 
-	void InstallHooks();
+	/** @brief Installs the batch hooks. False when this runtime has no address for them, so nothing triggers DCLF's water epochs. */
+	bool InstallHooks();
 	void PreflightHooks();
 
 	namespace WaterDraws

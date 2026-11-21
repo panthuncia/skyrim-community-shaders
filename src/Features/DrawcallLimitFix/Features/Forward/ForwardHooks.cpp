@@ -1,6 +1,6 @@
 // The forward epoch's engine hooks: the main pass's blended draw (FUN_1414b39d0) and Main::Draw's refraction point.
-// The blended draw is also where CS's deferred+water stage commits in native mode, every world frame, even when the
-// forward epoch does not run.
+// The blended draw is also where CS's deferred+water stage (and the water and post-water stages that DCLF's water epochs split
+// off it) commits in native mode, every world frame, even when the forward epoch does not run.
 
 #include "Features/DrawcallLimitFix/Features/Forward/Forward.h"
 
@@ -60,7 +60,9 @@ namespace DCLF::Features::Forward
 						if (!std::exchange(logged, true))
 							logger::info("[DCLF] forward: the main pass's blended draw came before the water (the camera is under water)");
 					}
-					(void)FrameAnchors::TapPoint(::RenderGraph::Frame::SegmentId::Deferred);
+					// The stages before the blended draw end here, in frame order: DCLF's water epochs may have split deferred+water.
+					for (const auto stage : { ::RenderGraph::Frame::SegmentId::Deferred, ::RenderGraph::Frame::SegmentId::Water, ::RenderGraph::Frame::SegmentId::PostWater })
+						(void)FrameAnchors::TapPoint(stage);
 				}
 				if (main) {
 					Extensions::TriggerScope trigger(blendedDraw);
