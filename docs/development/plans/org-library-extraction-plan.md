@@ -159,6 +159,8 @@ Not part of this plan unless a phase touches them:
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 
 | 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
+
+| 3 Programs and GPU primitives | in progress | p3-pins: CS `org-native/extract-p3-pins`, ORG and OMS `extract/p3-pins` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Item 1 (p3-pins): done in code, not built. OMS `PipelinePins` and `VersionFor`; CS `PipelineVersions` keeps `Install`, `Adopted` and forwards the rest. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
@@ -408,8 +410,9 @@ regression.
 ## Library work CS needs but does not own
 
 - **ORG array-size versions.** LLF's slot count can't change in a session (decision 88).
-- **ORG keyed recording tags**, so more than one extension can tag a graph. Today one tag per graph
-  (`RenderGraph.h:762`). Pipeline pins (phase 3 item 1) need it.
+- **ORG keyed recording tags**, so more than one extension can tag a graph. Done in p3-pins: `RecordingTagKey`,
+  `RecordingTags` (`Render/RecordingTags.h`), `RenderGraph::SetRecordingTag(key, tag)`, `RecordingContext::Tag(key)`.
+  The single-tag API is gone; its one user was the pipeline pins.
 - **ORG `Builds{attached, staged}` snapshot readable from any thread.** DCLF prunes its cache on its builder thread only
   because `StagedGeneration` and `EpochRecordingCurrent` (`GraphHost.h:351,687`) are owner-thread calls.
 - **ORG multisampled SRVs.** Still missing (see "Checks that need a run").
@@ -665,3 +668,17 @@ Decided by the agent, to confirm:
 - **Floating-point mode:** CS's code built with `/fp:fast`, OMS builds with the default. Only the sRGB `pow` could differ, in
   the last bit before rounding to 8 bits. No CS birth uses an sRGB format (they use R16G16B16A16_FLOAT, R16_FLOAT, R8_UNORM,
   R8_UINT, and R32_UINT for a Fill).
+
+### p3-pins decisions
+
+Decided by the agent, to confirm:
+
+- **Single-tag API removed, not kept as a default key.** It had one user (the pipeline pins), so the keyed form replaced
+  it. Keys are compared by address, so two extensions can't collide on a name.
+- **A tag set is immutable and shared.** Each `SetRecordingTag` makes a new set. A recording list holds one
+  `shared_ptr` to the set, as it held one to the single tag, so the per-batch cost is unchanged.
+- **OMS `PipelinePins` takes two callbacks** (`Desc::pin`, `Desc::defer`) instead of CS's `BuildManager`. CS's `defer`
+  calls `Builds::DeferStaged` then `Builds::Defer`, as before. The pin table is per `PipelinePins` object; CS keeps one
+  static object, as it kept one static table.
+- **CS `RenderGraph/PipelineVersions.h` stays as the facade.** Its users (Compute and Raster programs, `Revision.cpp`,
+  `RenderGraphRuntime.cpp`) don't change. Phase 3 item 2 can call `org::services::VersionFor` directly once programs move.
