@@ -2289,16 +2289,14 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 
 void RenderGraphRuntime::OnRendererBegin()
 {
-	const auto frame = RenderGraph::FrameClock::beginFrame.fetch_add(1, std::memory_order_acq_rel) + 1;
+	const auto frame = RenderGraph::FrameClock::clock.Begin();
 	if (FrameAnchors::IsRenderOwner())
 		Get().NoteFrameBegin(frame);
 }
 
 void RenderGraphRuntime::NoteGpuCompleted(std::uint64_t a_frame)
 {
-	auto& completed = RenderGraph::FrameClock::gpuCompleted;
-	for (auto seen = completed.load(std::memory_order_relaxed); a_frame > seen && !completed.compare_exchange_weak(seen, a_frame, std::memory_order_acq_rel);) {
-	}
+	RenderGraph::FrameClock::clock.NoteGpuCompleted(a_frame);
 }
 
 void RenderGraphRuntime::NoteFrameBegin(std::uint64_t a_frame)
@@ -2332,7 +2330,7 @@ void RenderGraphRuntime::SealPresented()
 	// Before the seal.
 	FrameAnchors::BeforeGpuWork("the frame's end");
 	// What a site latches from here on goes to the next present.
-	RenderGraph::FrameClock::presentSerial.fetch_add(1, std::memory_order_acq_rel);
+	RenderGraph::FrameClock::clock.SealPresent();
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
 	// Every stage committed and the present sent the frame's work on, so this release is outside every stage window.
