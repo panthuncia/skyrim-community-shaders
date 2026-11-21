@@ -85,6 +85,7 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_PLAYER_PARITY` | `1`: the [compatibility monitor](#the-compatibility-monitor) starts on. The menu switches it live. |
 | `CS_DCLF_CAPTURE_PARITY` | `1`: the tables against the engine's own Lighting draws. Run with `CS_DCLF_PARITY_BOTH=1`. |
 | `CS_DCLF_PARITY_BOTH` | `1`: nothing is withheld from the engine, which draws everything while DCLF draws its set too (double draws). |
+| `CS_DCLF_WATER_PARITY` | `1`: every water draw the latch path takes (`CS_ORG_WATER=1`) is checked against the water port bit for bit, and a census logs where drawn water hangs ([dclf-water-indirect.md](plans/dclf-water-indirect.md), "Phase 0 findings"). |
 
 ### Probes and diagnostics
 
