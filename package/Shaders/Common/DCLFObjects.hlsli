@@ -96,9 +96,10 @@ cbuffer DCLFPushData : register(b190)
 	uint4 DCLFRowBases : packoffset(c2);      // kDirectFlagRelativeRows: the rows' bases' refs (xy: the pipeline rows', zw: the material rows')
 	uint2 DCLFAnimatedRows : packoffset(c3.x);  // kDirectFlagRelativeRows: the frame's copy of the animated material rows' ref (null: none)
 	uint2 DCLFDrawRecords : packoffset(c3.z);   // kDirectFlagDrawRecords: the frame's draw buffer's ref
-#		if !defined(__spirv__)
+#		if !defined(__spirv__) && !defined(DCLF_START_INSTANCE)
 	// D3D12: SV_InstanceID does not count the draw's first instance. The plain draws' command signature writes the draw's instance
 	// into this word per draw instead (DrawPipelines, kDrawPushInstance; BuildDrawsCS stores it before the draw's arguments).
+	// With Shader Model 6.8 (DCLF_START_INSTANCE) the vertex stage adds SV_StartInstanceLocation instead (DCLF_START_INSTANCE_ADD).
 	uint DCLFInstanceWord : packoffset(c5.w);
 #		endif
 };
@@ -170,7 +171,7 @@ static const uint kDCLFSequenceStride = 136;  // BuildDrawsCS's DrawSequence
 static uint DCLFDrawRecordWord;
 DeviceRef DCLFDrawSequence(uint a_instance)
 {
-#		if !defined(__spirv__)
+#		if !defined(__spirv__) && !defined(DCLF_START_INSTANCE)
 	a_instance += DCLFInstanceWord;  // D3D12: the draw's instance from its push word (DCLFPushData)
 #		endif
 	if ((DCLFDirectFlags & 4u) != 0) {

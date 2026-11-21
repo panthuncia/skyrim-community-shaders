@@ -61,7 +61,8 @@ namespace DCLF
 				  offsetof(DrawSequence, psGeometryAddress) == 4 + 4 * kDrawPushGeometryPS && offsetof(DrawSequence, permutationAddress) == 4 + 4 * kDrawPushPermutation &&
 				  offsetof(DrawSequence, psMaterialAddress) == 4 + 4 * kDrawPushMaterialPS &&
 				  offsetof(DrawSequence, indexBufferAddress) == 4 + 4 * kDrawPushArgumentWords);
-	// D3D12 plain draws push the instance per draw, because D3D12's SV_InstanceID does not count the first instance (DCLFInstanceWord).
+	// D3D12 plain draws below Shader Model 6.8 push the instance per draw, because D3D12's SV_InstanceID does not count the first
+	// instance (DCLFInstanceWord). With 6.8 the stages read SV_StartInstanceLocation (Backend::D3D12InstanceWord).
 	inline constexpr std::uint32_t kDrawPushInstance = 23;
 	static_assert(kDrawPushInstance < kDrawPushWords);
 	// Z-prepass plain draw push word. A call draws every slot sharing its depth pipeline, so rows are read per draw through the sequence.

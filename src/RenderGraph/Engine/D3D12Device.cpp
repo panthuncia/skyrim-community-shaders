@@ -129,6 +129,8 @@ namespace RenderGraph::Engine
 			if (shader.maxShaderVisibleResourceDescriptors && shader.maxShaderVisibleResourceDescriptors < kResourceDescriptors)
 				return fmt::format("the device's shader-visible heap holds {} descriptors, and the render graph needs {}",
 					shader.maxShaderVisibleResourceDescriptors, kResourceDescriptors);
+			// Shader Model 6.8's vertex stages read the draw's first instance, so DCLF's indirect draws need no root constant for it.
+			::RenderGraph::Backend::SetD3D12StartInstance(shader.maxShaderModel >= ::ShaderModel::SM_6_8);
 			return {};
 		}
 	}

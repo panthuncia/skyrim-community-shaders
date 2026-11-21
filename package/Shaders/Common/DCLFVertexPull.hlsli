@@ -15,6 +15,18 @@
 // instance's mesh row (RunGrass.hlsl).
 static uint2 DCLFDrawVertexLayout;
 
+// D3D12's SV_InstanceID does not count the draw's first instance. With Shader Model 6.8 (DCLF_START_INSTANCE, D3D12 only) a vertex
+// entry also takes SV_StartInstanceLocation (DCLF_START_INSTANCE_INPUT, after its SV_InstanceID) and adds it to its instance
+// (DCLF_ADD_START_INSTANCE), so the draw needs no root constant for it. Without it both are empty: Vulkan counts the first
+// instance, and D3D12 below 6.8 reads it from a push word.
+#	if defined(DCLF_START_INSTANCE)
+#		define DCLF_START_INSTANCE_INPUT , uint a_dclfStartInstance : SV_StartInstanceLocation
+#		define DCLF_ADD_START_INSTANCE(a_instance) a_instance += a_dclfStartInstance
+#	else
+#		define DCLF_START_INSTANCE_INPUT
+#		define DCLF_ADD_START_INSTANCE(a_instance)
+#	endif
+
 // A stream of the geometry: the vertex buffer (stream 0) or a dynamic shape's positions (stream 1), by its buffer view ref.
 struct DCLFStream
 {

@@ -134,6 +134,7 @@ namespace DCLF
 		device = RenderGraphRuntime::Get().Host()->Device();
 		// On D3D12 every layout is root constants alone and the stages read the rest themselves. Only plain indirect draws exist there.
 		d3d12 = ::RenderGraph::Backend::IsD3D12();
+		instanceWord = ::RenderGraph::Backend::D3D12InstanceWord();
 
 		// Device-generated commands with pipeline sets draw the GPU path's colour classes. Without them (RDNA2 and older AMD, most Intel)
 		// colour uses a counted plain draw per pipeline bucket. Without counted draws every cell draws CPU-driven.
@@ -221,23 +222,24 @@ namespace DCLF
 		rhi::CommandSignatureDesc drawDesc{};
 		drawDesc.args = { &draw, 1 };
 		drawDesc.byteStride = sizeof(DrawSequence);
-		// D3D12's SV_InstanceID does not count the first instance, so each plain draw also writes it into a push word the pulled stages add.
+		// D3D12's SV_InstanceID does not count the first instance. Below Shader Model 6.8 each plain draw also writes it into a push word
+		// the pulled stages add. With 6.8 the stages add SV_StartInstanceLocation, and the signatures are Vulkan's.
 		rhi::IndirectArg instanceDraw[2]{};
 		instanceDraw[0].kind = rhi::IndirectArgKind::Constant;
 		instanceDraw[0].u.rootConstants = { 0, kDrawPushInstance, 1 };
 		instanceDraw[1].kind = rhi::IndirectArgKind::DrawIndexed;
 		rhi::CommandSignatureDesc refractionDrawDesc = drawDesc;
-		if (d3d12)
+		if (instanceWord)
 			refractionDrawDesc.args = { instanceDraw, 2 };
 		if (device.CreateCommandSignature(refractionDrawDesc, ShadowLayout(), shadowDrawSignature) != rhi::Result::Ok) {
 			supported = false;
 			logger::error("[DCLF] Could not create the refraction's draw signature");
 			return false;
 		}
-		// A shadow view's draw is its first instance, then its arguments. D3D12 reads both, Vulkan only the arguments.
+		// A shadow view's draw is its first instance, then its arguments. The instance word signature reads both, else only the arguments.
 		rhi::CommandSignatureDesc shadowViewDrawDesc = drawDesc;
 		shadowViewDrawDesc.byteStride = Draws::kShadowDrawBytes;
-		if (d3d12)
+		if (instanceWord)
 			shadowViewDrawDesc.args = { instanceDraw, 2 };
 		if (device.CreateCommandSignature(shadowViewDrawDesc, ShadowLayout(), shadowViewDrawSignature) != rhi::Result::Ok) {
 			supported = false;
@@ -245,7 +247,7 @@ namespace DCLF
 			return false;
 		}
 		rhi::CommandSignatureDesc zDrawDesc = drawDesc;
-		if (d3d12)
+		if (instanceWord)
 			zDrawDesc.args = { instanceDraw, 2 };
 		if (device.CreateCommandSignature(zDrawDesc, zLayout->GetHandle(), zDrawSignature) != rhi::Result::Ok) {
 			supported = false;
@@ -264,14 +266,15 @@ namespace DCLF
 				logger::warn("[DCLF] Could not create {}'s draw signature; {}", family.taken ? std::string_view(family.label) : std::string_view("a draw family"),
 					family.taken ? std::string_view(family.nativeNote) : std::string_view("it stays native"));
 			}
-		// The first instance word, then the draw. D3D12 writes the word into kDrawPushInstance and Vulkan starts past it.
+		// The first instance word, then the draw. The instance word signature writes the word into kDrawPushInstance, else the draw
+		// starts past it.
 		rhi::IndirectArg instanceFamilyDraw[2]{};
 		instanceFamilyDraw[0].kind = rhi::IndirectArgKind::Constant;
 		instanceFamilyDraw[0].u.rootConstants = { 0, kDrawPushInstance, 1 };
 		instanceFamilyDraw[1].kind = rhi::IndirectArgKind::Draw;
 		rhi::CommandSignatureDesc instanceFamilyDesc = familyDesc;
 		instanceFamilyDesc.byteStride = 5 * sizeof(std::uint32_t);
-		if (d3d12)
+		if (instanceWord)
 			instanceFamilyDesc.args = { instanceFamilyDraw, 2 };
 		if (device.CreateCommandSignature(instanceFamilyDesc, zLayout->GetHandle(), familyInstanceWordSignature) != rhi::Result::Ok)
 			logger::warn("[DCLF] Could not create the draw families' first instance word signature; the families that draw with it stay native");

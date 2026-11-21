@@ -399,8 +399,8 @@ namespace DCLF::Draws
 				}
 				return push;
 			};
-			// D3D12's signature also reads the instance word before the arguments. Vulkan reads only the arguments.
-			const std::uint64_t argumentsOffset = d3d12 ? 0u : kShadowDrawArgumentsOffset;
+			// The instance word signature (D3D12 below Shader Model 6.8) also reads the word before the arguments. Else only the arguments.
+			const std::uint64_t argumentsOffset = ::RenderGraph::Backend::D3D12InstanceWord() ? 0u : kShadowDrawArgumentsOffset;
 			void* const nvCommands = GpuCounters::CommandBufferRangesActive() ? rhi::vulkan::get_cmd_list(commands) : nullptr;
 			std::uint32_t recordedDraws = 0;
 			static constexpr const char* kViewRanges[] = { "cs.dclf.shadow.view-0", "cs.dclf.shadow.view-1", "cs.dclf.shadow.view-2", "cs.dclf.shadow.view-3",

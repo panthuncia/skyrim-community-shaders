@@ -175,7 +175,7 @@ namespace DCLF::GrassInstances
 	inline constexpr std::uint32_t kStatLive = 0, kStatOutside = 1, kStatThinned = 2, kStatFaded = 3, kStatFar = 4;
 
 	/**
-	 * @brief The instance word, then non-indexed DrawInstanced arguments. D3D12 writes the word into a push constant.
+	 * @brief The instance word, then non-indexed DrawInstanced arguments. D3D12 below Shader Model 6.8 writes the word into a push constant.
 	 * Vulkan skips it and starts at vertexCount (FamilyPipelines::argumentsOffset).
 	 */
 	struct DrawArgs
