@@ -188,12 +188,12 @@ namespace GraphResources
 	{
 		Undefined,  // whatever the memory held: written before any read, or zeroed by its D3D11 export
 		Zero,       // zero-filled before the version is ready (a history is born cleared)
-		Fill,       // written by PreparedVersion::fill before the version is ready (Birth::Value, Birth::Fill)
+		Value,      // every texel PreparedVersion::value in valueFormat, written before the version is ready (Birth::Value)
+		Fill,       // written by PreparedVersion::fill before the version is ready (Birth::Fill)
 	};
 
-	/** @brief Writes one subresource of a Contents::Fill version. The same signature as org::TextureFillWriter. Any thread. */
-	using TexelWriter = std::function<bool(std::uint32_t a_mip, std::uint32_t a_slice, std::uint32_t a_width, std::uint32_t a_rows, std::uint32_t a_depth,
-		std::uint32_t a_rowPitch, std::byte* a_destination)>;
+	/** @brief Writes one subresource of a Contents::Fill version. Any thread. */
+	using TexelWriter = org::TextureFillWriter;
 
 	/** @brief What adoption needs of an exported twin's prepared version. Opaque outside GraphResources.cpp. */
 	struct PreparedExport;
@@ -212,6 +212,8 @@ namespace GraphResources
 		std::shared_ptr<org::GloballyIndexedResource> resource;  // the version's graph resource, its memory made
 		Contents contents = Contents::Undefined;
 		TexelWriter fill;  // Contents::Fill only
+		std::array<float, 4> value{};                    // Contents::Value only
+		DXGI_FORMAT valueFormat = DXGI_FORMAT_UNKNOWN;  // Contents::Value only: the format value is encoded in
 		Extent extent{};
 		const void* twin = nullptr;                      // the Resource it was prepared for
 		std::shared_ptr<const PreparedExport> exported;  // null for a graph-only twin
@@ -270,7 +272,7 @@ namespace GraphResources
 
 		/**
 		* @brief Why the lane cannot make Options::birth, or nothing when it can. A birth that writes needs a versioned, single-sampled
-		* colour texture; Value and Fill need a format with a texel encoding (Frame::EncodeTexel), and a guest export needs DXVK's
+		* colour texture; Value and Fill need a format with a texel encoding (org::services::EncodeTexel), and a guest export needs DXVK's
 		* wrap with data. Render thread.
 		*/
 		std::optional<std::string> WhyUnborn() const;
@@ -283,7 +285,7 @@ namespace GraphResources
 		* Any thread. An exported twin's D3D11 wrap and views are made here too (native: WrapFlags::DeferInitialize, no GPU work), so
 		* adoption only moves pointers. Empty when WhyNotPreparable names a cause. Throws, naming the twin, when memory or a resource
 		* cannot be made. First contents follow the birth (BirthOf): graph-only versions and native colour exports are filled by the
-		* uploader (Contents::Zero or Fill; a native colour export is zeroed even when Undefined), guest exports by DXVK's wrap (zeros,
+		* uploader (Contents::Zero, Value or Fill; a native colour export is zeroed even when Undefined), guest exports by DXVK's wrap (zeros,
 		* or the birth's data), and depth or multisampled versions are born Undefined.
 		*/
 		PreparedVersion Prepare(const Extent& a_next) const;

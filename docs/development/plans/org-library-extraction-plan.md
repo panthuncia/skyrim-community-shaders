@@ -140,7 +140,7 @@ Not part of this plan unless a phase touches them:
 |---|---|---|---|
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
-| 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
+| 2 Services with clean cuts | in progress | p2-birth: CS `org-native/extract-p2-birth`, OMS `extract/p2-birth` | Executor and retirement join need A/B perf runs. p2-birth (code only, not built): OMS `TexelEncoding.h` (`EncodeTexel` on `rhi::Format`, `ValueFillWriter`), `TextureContents::Value`; CS `Birth.cpp` deleted, `Birth::Fill` takes `org::TextureFillWriter`. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
@@ -446,3 +446,23 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p2-birth decisions
+
+Decided by the agent, to confirm:
+
+- **The encoder lives in its own OMS header**, `TexelEncoding.h` (included by `VersionedTextureGrowth.h`), so a CPU-only test
+  can cover it without a device.
+- **OMS converts half floats and R11G11B10 itself**, a bit-for-bit port of DirectXMath's software paths
+  (`XMConvertFloatToHalf`, `XMStoreFloat3PK`), since the library is not Windows-only. CS built without F16C, so it ran the
+  same software path. `ORGTexelEncodingTests` compares every format against the old DXGI-keyed encoder on DirectXMath.
+  DirectXMath's blue channel shifts a value below about 1e-13 by 32 or more (undefined in C++); OMS masks the count to five
+  bits as x86 does, and the test skips that range.
+- **`TextureVersionRequest` names the value's format** (`valueFormat`), since an image version has no common format
+  accessor. Unknown reads it from a `PixelBuffer` or `ExternalTextureResource`. CS passes the declared format, which is what
+  `EncodeTexel` was keyed on before.
+- **CS still builds the Value writer in `Prepare`**: a guest export takes the birth as DXVK's wrap data, and a format with no
+  encoding still fails there with the same message. Graph-only and native exports now go as `TextureContents::Value`.
+- **Floating-point mode:** CS's code built with `/fp:fast`, OMS builds with the default. Only the sRGB `pow` could differ, in
+  the last bit before rounding to 8 bits. No CS birth uses an sRGB format (they use R16G16B16A16_FLOAT, R16_FLOAT, R8_UNORM,
+  R8_UINT, and R32_UINT for a Fill).
