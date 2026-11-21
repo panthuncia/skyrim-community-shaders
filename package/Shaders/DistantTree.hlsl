@@ -297,6 +297,8 @@ Texture2D<float4> DCLFTreeTexture()
 	return t;
 }
 #		define SampDiffuse DCLFTreeSampler()
+// Physical Sky's sun transmittance reads the engine's s14 here; the pulled draw has the row's linear sampler.
+#		define SampShadowMaskSampler DCLFTreeSampler()
 #		define TexDiffuse DCLFTreeTexture()
 #		define AlphaTestRefRS asfloat(DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeAlphaRef), 4))
 // CS_DCLF_TREE_LOD_STAGES: the stage's entry stamp and what its texture resolves to (TreeInstancesLayout.h, kStageProbeWords).
