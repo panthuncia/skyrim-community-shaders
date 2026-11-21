@@ -17,6 +17,7 @@
 #include "Features/HDRDisplay/ORGHDRDisplay.h"
 #include "Features/IBL/ORGIBL.h"
 #include "Features/PhysicalSky/ORGPhysicalSky.h"
+#include "Features/UnifiedWater.h"
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -2055,7 +2056,9 @@ namespace RenderGraph::Engine::ImageSpace
 		RaiseShape("ImageSpace::Setup");
 		logger::info("[ORG] ImageSpace: on; every covered effect; every ImageSpace draw is a CS step's pass");
 		// Make the flow map now if the engine has not, so the flow copies' pass can name it at registration.
-		if (EffectNamed("ISCopySubRegionCS") >= 0) {
+		// Unified Water puts its own flow map in the slot at DataLoaded, which comes later. Ours would then be a second
+		// texture under the published id, which is fatal. So the build publishes Unified Water's when it first sees it.
+		if (EffectNamed("ISCopySubRegionCS") >= 0 && !globals::features::unifiedWater.loaded) {
 			MakeFlowMap();
 			PublishFlowMap();
 			RaiseShape("ImageSpace::Setup, the flow map");

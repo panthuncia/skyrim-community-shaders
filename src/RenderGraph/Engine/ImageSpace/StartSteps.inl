@@ -122,10 +122,10 @@ void BuildStartSteps(StartBuild& a_build)
 	a_build.displacementSize = a_key.displacementSize;
 	a_build.flowSize = a_key.flowCopySize;
 	a_build.heightmapInstances = static_cast<std::uint16_t>(a_key.heightmaps);
-	// Another texture in the flow map's slot (Unified Water's) is published in its place, for the water draws.
-	// A new resource under the id rebuilds every graph once (step 9 makes it a declared import).
-	if (state.publishedFlowMap && a_key.flowMap && a_key.flowMap != reinterpret_cast<std::uint64_t>(state.publishedFlowMap)) {
-		logger::info("[ORG] ImageSpace: another texture took the flow map's slot; it is published in its place{}",
+	// The first texture seen in the flow map's slot is published for the water draws: Unified Water's, or the engine's
+	// when Setup did not make one. The id is published once, so a later texture in the slot is fatal (PublishedResources).
+	if (a_key.flowMap && a_key.flowMap != reinterpret_cast<std::uint64_t>(state.publishedFlowMap)) {
+		logger::info("[ORG] ImageSpace: {} the flow map's slot; it is published{}", state.publishedFlowMap ? "another texture took" : "a texture is in",
 			a_key.flowCopySize ? "" : " (it has no UAV, so there are no flow copies)");
 		PublishFlowMap();
 	}
