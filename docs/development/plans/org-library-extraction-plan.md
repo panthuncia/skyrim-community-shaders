@@ -3,34 +3,37 @@
 Status: revised (2026-11-20) after `org-simplification-plan.md` landed. First written after the cleanup plan
 (`org-cleanup-refactor-plan.md`) was merged into `integ/hard-ports` (decision 97). The simplification plan ran first
 (decision 98). It finished some items here, changed the target of others, and removed a few. This revision checks every
-item against the code at the commit below.
+item against the code at the commit below. Phases 0–4 have since been moved and integrated ("Progress").
 
 ## Handoff: start here
 
-### State when this plan was revised
+### State now (2026-11-21)
 
 - **Checkout and branch:** the main checkout is `c:\Users\matth\source\repos\SARP\external_refs\cs-org-dxvk`, on branch
-  `org_integration`. Its tip is one squash commit, "feat(org): hard ports, cleanup and simplification", which holds
-  all of `integ/hard-ports` (the cleanup and simplification plans, 892 commits, last code commit `0dbf0795d`). That
+  `org_integration` at `bb93e1016`. Its base is one squash commit, "feat(org): hard ports, cleanup and simplification",
+  which holds all of `integ/hard-ports` (the cleanup and simplification plans, last code commit `0dbf0795d`). That
   branch is kept as the detailed history; commit hashes in the decisions file and the director log point into it.
-  New work branches from `org_integration`.
+  - **The extraction is integrated, not merged into `org_integration`.** Phases 0–4 and the cleanup are merged on
+    `org-native/extract-integ` (worktree `../org-port-worktrees/extract-integ`). It compiles; the director is checking the
+    game runs. The cleanup is on `org-native/extract-cleanup`, based on the integration tip.
   - Nothing is pushed. PRs target `dev`, never `main`.
 - **Submodules.** Each is on a local branch. **These commits exist only locally.** Nothing is pushed.
 
-  | Submodule | Commit | Local branch |
-  |---|---|---|
-  | ORG (`extern/OpenRenderGraph`) | `7bd4aef` | `simplify/p8-lib` |
-  | OMS (`extern/ORGModuleServices`) | `b2a5cb2` | `simplify/p9-final` |
-  | BasicRHI (`extern/BasicRHI`) | `bcf4232` | `cs/simplify-p2-org-diag` |
-  | DXVK fork (`extern/dxvk`) | `4addc47d` | `simplify/p5` |
+  | Submodule | `org_integration` (`bb93e1016`) | `extract-integ` tip | Integration branch |
+  |---|---|---|---|
+  | ORG (`extern/OpenRenderGraph`) | `48c77dd` | `5003cbd` | `extract/integ` |
+  | OMS (`extern/ORGModuleServices`) | `b2a5cb2` | `66b2f49` | `extract/integ` |
+  | BasicTelemetry (`extern/BasicTelemetry`) | `9d540e8` | `6812937` | `extract/integ` |
+  | BasicRHI (`extern/BasicRHI`) | `28f8be8` | `28f8be8` | unchanged |
+  | DXVK fork (`extern/dxvk`) | `4addc47d` | `4addc47d` | unchanged |
 
-  - The cleanup's tips are still there as `cleanup/integ` (ORG `73b7d81`, OMS `5b2d206`). The simplify branches build on
-    them. Older tips are kept as `cleanup-p4-birth-tip` and `cleanup-p5-reload-tip`.
+  - The cleanup adds `extract/cleanup` on ORG and OMS over `extract/integ`.
+  - The submodule branches the parts made (`extract/<part>`) are merged into `extract/integ`.
+  - The cleanup's tips are still there as `cleanup/integ` (ORG `73b7d81`, OMS `5b2d206`), with the simplify branches
+    (`simplify/p8-lib`, `simplify/p9-final`) on top. Older tips are kept as `cleanup-p4-birth-tip` and
+    `cleanup-p5-reload-tip`.
   - OMS has `update = none` in the main checkout's `.git/config` (not in `.gitmodules`), so check out its commit by hand.
   - Worktrees get their submodules from the main checkout through `init-submodules-local.sh` (below), never from a remote.
-- **Cleanups merged:** p8-cs (CS dead code, export audit), p8-lib (ORG dead code, docs, tools), p8-backbuffer (native
-  uses one back buffer), p9-final (dead pipeline description chain, docs, tools) and p9-i18n. The lines above are the
-  state after them.
 - **Where the history is:**
   - Decisions: `docs/development/plans/director-decisions-2026-11.md`. 97 wrote this plan, 98 put the simplification
     first, 99–109 came from the simplification.
@@ -61,7 +64,7 @@ item against the code at the commit below.
   Dev-Fast: Ninja, /Od, the DLL only. The script builds the main checkout.
 - **Library tests:** ORG's and OMS's own unit tests (`extern/OpenRenderGraph/tests`, `extern/ORGModuleServices/tests`).
   ORG's tests bring a task service through `tests/TestTaskService.h`. CS's standalone tests are in `tests/` (for example
-  `tests/DrawcallLimitFixCPU/KeptStateTests.cpp`, `SceneExecutorTests.cpp`).
+  `tests/DrawcallLimitFixCPU/OwnerValuesTests.cpp`). The kept-state and executor tests moved to OMS `tests/Async`.
 - **Stage:** `python tools/cs-test/cs_test.py stage . --name nfg --preset Dev-Fast --base-aio "C:/Modding/MO2/mods/CS AB nfg"`
 - **Run one config:** `CS_TEST_BACKGROUND=1 DXVK_DEBUG=hang python tools/cs-test/cs_test.py run <mode>+<config> --stage nfg --wait 3600 --label <label>`.
   - Modes: `guest`, `native-vulkan`, `native-d3d12`. Quick runs: `guest-quick`, `native-quick`, `native-d3d12-quick`.
@@ -100,8 +103,9 @@ From the cleanup and the simplification:
   The configs set it through `saved_settings`; don't change the profile by hand.
 - **A run set stops after two failures.** When several configs run in one batch, the batch stops at the second failed
   config. Rerun the ones it skipped after fixing.
-- **Library errors:** ORG has no fatal hook. `org::RunReadback` throws `std::runtime_error` after a critical log, and CS's
-  commit paths don't catch it, so it still stops the game. CS's task adapter makes a throwing task fatal.
+- **Library errors:** `org::RunReadback` reports errors to the handler each `Create*` takes (p0-lib); CS passes
+  `RenderGraph::FatalHandler`. Other ORG throws are unchanged: CS's commit paths don't catch them, so they still stop the
+  game, and CS's task adapter makes a throwing task fatal.
 
 ### Known open items carried in
 
@@ -117,8 +121,8 @@ Not part of this plan unless a phase touches them:
 - Both dclf-parity findings are real DCLF defects. They showed up once the parity checks reported instead of repairing.
 - **The submodule branches are not pushed** (the table above, and `cleanup/integ`). Decision 89 wants them pushed and
   reviewed before anything new is pinned. Waiting for the user.
-- **6.11 done (decision 113):** guest runs with all five native-only host options on, so CS sets them in every mode.
-  ORG still has their off paths and `GraphHost::Desc` flags; deleting them is library work (phase 0 below).
+- **6.11 done (decision 113):** guest runs with all five native-only host options on. p0-lib deleted their off paths
+  and `GraphHost::Desc` flags; their behaviour is ORG's only one.
 - **effects11** fails on this machine: the game folder has no `enbseries\enbeffect.fx`, so Effects11 cannot own the
   tonemap and the mode falls back to Vanilla ("Post Processing Mode: Vanilla (chosen Effects11)"). effects11-programs
   passes. Not a code defect; the config needs the ENB effect files installed.
@@ -136,21 +140,33 @@ Not part of this plan unless a phase touches them:
 
 ### Progress (update as phases land)
 
-| Phase | State | Branches | Notes |
+Every part is code done and merged on `org-native/extract-integ`, with its submodule branches merged into
+`extract/integ`. Each part's CS branch is `org-native/extract-<part>`; its submodule branches are `extract/<part>` in the
+submodules named. The "<part> decisions" sections below say what each part decided.
+
+| Phase | State | Parts (submodules) | Summary |
 |---|---|---|---|
-| 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
-| 1 Small containers and async pieces | not started | | EventQueue already done. |
-| 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
-| 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
-| 4 Build and upload services | not started | | Needs phase 2's executor. |
+| 0 Review and push | code integrated; push waiting for the user | p0-lib (ORG, OMS) | Host-option off paths deleted, `RunReadback` error handler, OMS `Variables.h` wording, multisampled-SRV check read in code. Pushing the submodule branches for review (decision 89) waits for the user. |
+| 1 Small containers and async pieces | integrated, not run | p1-async (OMS), p1-frame (OMS) | LatestSlot, PublicationLog, SlotTable, KeptState in OMS `Async/`; RetirementChain and `Retired` in OMS `RetirementChain.h`; StarvationWatch and FrameClock in OMS `Async/`; the violation policy is OMS `ViolationPolicy`. CS keeps facades. |
+| 2 Services with clean cuts | integrated, not run; A/B perf runs pending | p2-executor (OMS), p2-recordings (ORG), p2-retire (OMS), p2-birth (OMS), p2-reflect (OMS), p2-cpu (OMS, BasicTelemetry) | Executor and lanes in OMS `Async/`; EpochRecordings in ORG; retirement join, pooled-backing defaults and recording pools in OMS; texel encoding in OMS `TexelEncoding.h`; shader reflection in OMS `ShaderReflection.h`; SIMD sphere cull in OMS `Cpu/`; zone tallies and the thread budget in BasicTelemetry. |
+| 3 Programs and GPU primitives | integrated, not run | p3-gates (ORG, OMS), p3-kernels (OMS), p3-pins (ORG, OMS), p3-latched (ORG), p3-programs (OMS) | `RunGate`, `FirstRun`, `RunSlots` and latched copies in ORG `Render/`; keyed recording tags and `IDescriptorService::Null` in ORG; UAV clear, prefix sum, sort scatter and HZB in OMS `Passes/` with their shaders; pipeline pins and the programs (`Programs/`) in OMS. |
+| 4 Build and upload services | integrated, not run; A/B perf run pending | p4-uploads (OMS), p4-build (OMS), p4-bufsets (OMS), p4-misc (ORG, OMS), p4-imgui (OMS) | Commit uploads, owned rows and content owners; the staged build service and build inputs; buffer sets and `BufferChains`; scene graph helpers, indirect runs, the read-order check and shader bindings (`OrgResources.hlsli` in OMS); the ImGui backend as `ORGModuleServices::ImGui`. |
+| Cleanup | written, not built | cleanup (ORG, OMS) | `FullscreenVS.hlsl` moved to OMS `shaders/`; this plan, docs, dead code and library comments tidied. See "cleanup decisions". |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
 ### Checks that need a run
 
 - **Phase 2 executor and retirement join, phase 4 build service:** one A/B perf sample each, before and after (Release,
   or Dev-Fast /Od stated).
-- **Multisampled SRVs** (in "Library work"): check whether ORG still lacks them. The old note in `pipelines.md` went
-  with the pipeline library, so there is no reference left.
+- **Multisampled SRVs** (checked by reading code, p0-lib): ORG still lacks them for its own textures. BasicRHI has them
+  (`SrvDim::Texture2DMS`/`Texture2DMSArray`, both backends; Vulkan maps them to 2D image views). But
+  `DescriptorHeapManager::UpdateDescriptorContentsUnlocked` picks the SRV dimension from `isArray`, `isCubemap` and
+  `is3D` only: `ViewRequirements::TextureViews` has no sample count, `SRVViewType` has no multisampled entry, and RTVs
+  and DSVs are likewise always `Texture2D`/`Texture2DArray`. So a texture made with `TextureDescription::sampleCount > 1`
+  gets a `Texture2D` SRV, which D3D12 rejects for a multisampled resource. The contributor C API validates
+  `ORG_RG_VIEW_DIMENSION_TEXTURE_2D_MS` views, but `ContributorHost` refuses multisampled resources. OMS
+  `ResolveMultisamplePass` reads its source through the default SRV (`Texture2DMS` in the shader), so it would hit this on
+  D3D12; it has no CS user. Adding them is ORG work: a sample count in `TextureViews`, an MS dimension at view creation.
 
 ## Goal
 
@@ -179,8 +195,8 @@ CS should end up with thin adapters (aliases, injected callbacks, host enums) wh
   `PayloadPart`, segment ids, `Placement`.
 - No CS names, switches (`CS_*`) or decision numbers in library code or comments. Library options are `Desc` fields; the
   libraries read no environment switches since phase 6.10.
-- Tests move with the code. Several are already standalone (`tests/DrawcallLimitFixCPU/KeptStateTests.cpp`,
-  `SceneExecutorTests.cpp`).
+- Tests move with the code. The kept-state and executor tests moved to OMS `tests/Async` (`KeptStateTests.cpp`,
+  `ExecutorTests.cpp`).
 - Wait for a second user before moving a large coordinator (frame-revision plan step 4c). Those items are in phase 5.
 - Each move is one branch per library plus one CS branch. CS pins the submodule commit. The submodule branches are local
   only. Push them and have them reviewed upstream before phase 1 pins anything (decision 89).
@@ -210,7 +226,7 @@ From the simplification (phase 6 and the parts it pulled in):
   - `FrameArena::AcquireOversize` (`include/Render/FrameArena.h:82`): a region with a chunk of its own, for staging data.
     CS's `FrameStaging` is now `RenderGraph::AcquireStaging` on it.
   - Hosts bring the task service (`Runtime::Desc::tasks`, required). `ThreadPoolTaskService` is gone; CS passes
-    `Frame::OrgTaskService()` (`src/RenderGraph/Async/Lanes.cpp:215`), an `ITaskService` over its `Executor`.
+    `Frame::OrgTaskService()` (`src/RenderGraph/Async/Lanes.cpp:108`), an `ITaskService` over OMS's `Executor`.
   - Deleted: the pipeline library (`PipelineLibrary`, `PipelinePermutations`, `pipelineCompiler`,
     `RequestPassPipelines`/`AwaitPassPipelines`), the built-in mips and resolve passes, recorded uploads, closed
     executions, the decision trace, the library's env switches, `PassId.h`, `DescriptorSnapshots.h`,
@@ -219,7 +235,7 @@ From the simplification (phase 6 and the parts it pulled in):
 - OMS:
   - `BuildPipeline` (`PipelineRegistry.h:80`), a one-shot async pipeline build. DCLF's draw pipelines use it.
     `PipelineService` is deleted, so OMS has the only pipeline stack.
-  - `Passes/ComputeKernel.h`, `Passes/GenerateMipsPass.h`, `Passes/ResolveMultisamplePass.h`. CS's `ComputeProgram`
+  - `Passes/ComputeKernel.h`, `Passes/GenerateMipsPass.h`, `Passes/ResolveMultisamplePass.h`. `ComputeProgram`
     implements `ComputeKernel`.
   - `ShaderCompiler::CompileHere`. One compiler instance: `DxcShaderStore` uses the runtime's.
   - Deleted: BasicRenderer's journal mode (`BufferJournal`, `VersionedBufferFamily`, `BufferImage`, `JournaledBufferSet`,
@@ -240,7 +256,7 @@ From the simplification (phase 6 and the parts it pulled in):
 | "Explicit `Table::Want` + `HoldForPrograms` API" (3.2) | `Programs::Table` and `HoldForPrograms` are gone. Frame-met keys use `Frame::ProgramSet` (p3-declare2). |
 | UploadRing core to OMS (2) | Changed to stays in CS. The engine constants' chunks are arena staging regions now (6.8). What is left serves only the dynamic ring, whose chunks are D3D11-wrapped buffers released behind D3D11 work (`ReleaseAfterD3D11`, `UploadRing.cpp:66`). |
 | Frame transients to ORG (4) | They already place on ORG's `FrameAliasArena` and frame positions (`Frame/Transients.cpp`). What is left maps CS's `SegmentId` stages to positions. |
-| DCLF revision participant (5) | Its recording-variant cache is `EpochRecordings::Cache` (`Core/Render/Impl/Producer.h:104`). `Core/Render/Revision/Participant.h` now holds DCLF's per-`ShapeKind` participants, which are DCLF's own. |
+| DCLF revision participant (5) | Its recording-variant cache is `EpochRecordings::Cache` (`Core/Render/Impl/Producer.h:115`). `Core/Render/Revision/Participant.h` now holds DCLF's per-`ShapeKind` participants, which are DCLF's own. |
 | Keyed pass schedule (5) | The recipe and DCLF's schedule do different jobs. `kAsyncOrder` went (4.8). |
 | Two `DeclareClient` overloads (5) | One public `DeclareClient<Key, State>` returns `DeclaredClientOf<State>` (`Frame/Declare.h:460`, 3.2). |
 | Pooled list pools per thread (2) | The Parallel record mode is gone (4.5). Only one pool for DXVK's CS thread is left (phase 2). |
@@ -250,6 +266,7 @@ From the simplification (phase 6 and the parts it pulled in):
 - Push the ORG, OMS, BasicRHI and DXVK branches above for review upstream (decision 89). Waiting for the user.
 - Delete ORG's off paths for the five host options CS now always sets (decision 113): `reuseLiveRecordings`,
   `coalesceSubmissions`, `mergeHandoffs`, `uploadsWithBatches`, `keepGatedInline`. The flags leave `GraphHost::Desc`.
+  Done in code (p0-lib), with the `RunReadback` error handler and the `Variables.h` wording.
 
 ## Phase 1: small containers and async pieces (OMS, effort S each)
 
@@ -383,16 +400,17 @@ regression.
 ## Library work CS needs but does not own
 
 - **ORG array-size versions.** LLF's slot count can't change in a session (decision 88).
-- **ORG keyed recording tags**, so more than one extension can tag a graph. Today one tag per graph
-  (`RenderGraph.h:762`). Pipeline pins (phase 3 item 1) need it.
+- **ORG keyed recording tags**, so more than one extension can tag a graph. Done in p3-pins: `RecordingTagKey`,
+  `RecordingTags` (`Render/RecordingTags.h`), `RenderGraph::SetRecordingTag(key, tag)`, `RecordingContext::Tag(key)`.
+  The single-tag API is gone; its one user was the pipeline pins.
 - **ORG `Builds{attached, staged}` snapshot readable from any thread.** DCLF prunes its cache on its builder thread only
   because `StagedGeneration` and `EpochRecordingCurrent` (`GraphHost.h:351,687`) are owner-thread calls.
-- **ORG multisampled SRVs.** To check (see "Checks that need a run").
-- **One error convention for library errors.** ORG has no fatal hook, so `org::RunReadback` throws after a critical log.
-  Either a host error callback in `Runtime::Desc`, or documented throws that CS catches at its commit paths.
+- **ORG multisampled SRVs.** Still missing (see "Checks that need a run").
+- **One error convention for library errors.** Decided (decision 115). `org::RunReadback` follows it (p0-lib): each
+  `Create*` takes an `ErrorHandler`, and CS passes `RenderGraph::FatalHandler`. Other ORG throws are not converted yet.
 - **Thread rules in signatures** (tag types or debug asserts) instead of prose and runtime checks.
-- **OMS cleanup:** `Variables.h:30` still cites "decision 6a". Reword it as a general statement.
-- **6.11 result:** guest runs with every one of these host options (decision 113). Their off paths go in phase 0.
+- **OMS cleanup:** done (p0-lib). `Variables.h` no longer cites a decision.
+- **6.11 result:** guest runs with every one of these host options (decision 113). Their off paths went in phase 0.
 
 ## Stays in CS
 
@@ -446,3 +464,443 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p1-frame decisions
+
+Decided by the agent, to confirm:
+
+- **Frame clock in OMS, not `GraphHost`.** `org::async::FrameClock` (`Async/FrameClock.h`) takes its slot count in the
+  constructor. `GraphHost` counts its own executions; CS's clock moves at `Renderer::Begin` and at the sealed present,
+  which ORG does not see, and it is read before the host exists. CS's `FrameClock.h` is a static facade over one
+  instance and keeps `kSlots = 4` as a `constexpr` (`SlotOf` still divides by the constant).
+- **Starvation callback gets the miss count too:** `onStarved(what, why, misses)`, so CS's tap error text stays the same.
+  CS's `Frame::StarvationWatch` derives from the OMS class and reports `TapError::Starved`. The unused `SegmentId`
+  argument of `NoteMiss` is gone (no caller passed one).
+- **Violation policy in the main OMS library** (`ViolationPolicy.h`, `src/ViolationPolicy.cpp`), not `Async/`: it logs
+  through spdlog as the rest of OMS does, and the header-only `AsyncPrimitives` target has no spdlog. Kinds are integers.
+  The log labels and notes are `Desc` strings, so CS's lines read as before; they lose CommonLib's `[file:line]` source
+  field. The policy is made at first use and reads `MismatchFatal` then, so that switch's info line can come earlier
+  (at the first violation warning, not the first tap error).
+- **CS still raises the menu warning** for the first tap error of a kind (`Outcome::First`); the library does not name
+  kinds.
+
+### p3-gates decisions
+
+Decided by the agent, to confirm:
+
+- **`org::RunGate::Create` returns null with a reason** (`std::string* error`), as a template `Create<Gate>` so CS makes its
+  own derived type. CS's `RenderGraph::RunGate` derives from it and keeps the fatal `Create`, the current-run overloads
+  (`Close()`, `OpenDispatch(entry, ...)`, `OpenDraw(entry, ...)`, `Current()`) and `Dispatch(ComputeProgram)`. Derived
+  rather than aliased because about 50 files use the no-run overloads and `RunGate::Current()`, and several forward-declare
+  `class RunGate`. ORG has no host-wide current run, and OMS's `ComputeKernel` is not visible from ORG.
+- **`org::FirstRun::Open` takes the run.** CS's `RenderGraph::FirstRun` derives and fills in the current run, reading it
+  only while the work is pending, as before.
+- **`UavClearPass` has no shader.** It records `ClearUavFloat`/`ClearUavUint`, not a kernel, so nothing moved to OMS's
+  shader folder and no program is built. It went to OMS `Passes/` as the plan says, taking a `UavClearTarget` (resolver or
+  plain resource; a `SelfDeclaringResource`) in place of `FrameAnchors::Texture`. Its one user, `AnchorPasses.cpp`, calls
+  OMS directly, and CS's `UavClearPass.{h,cpp}` are gone.
+- **`RunSlots` reads no frames-in-flight count.** The staging half that used one already moved, so there is nothing to
+  inject. `FrameStaging.h` keeps `AcquireStaging` and aliases `RunSlots`/`RunSlotsRegistry`.
+- **Tests:** ORG `OpenRenderGraphRunSlotsTests` (no device) and `TestRunGates` in `OpenRenderGraphExternalResourceTests`
+  (D3D12 runtime: latch words, open bits, staging copy, close, `FirstRun`).
+
+### p1-async decisions
+
+Decided by the agent, to confirm:
+
+- **Where they went.** LatestSlot, PublicationLog, SlotTable and KeptState are std-only, so they are in `Async/` (namespace
+  `org::async`, the header-only `AsyncPrimitives` target). RetirementChain and `Retired` include ORG's `EventQueue`, so they are
+  in `ORGModuleServices/RetirementChain.h` (namespace `org::services`), beside `RetirementClock` in the main target.
+- **`Retired` teardown.** It takes the queue's `QueueTeardown` (default `Free`) and capacity (default 64). DCLF's `Retired<T>`
+  alias in `Core/Scene/Channels.h` passes `Leak`, which is what it used before.
+- **The storage-reuse option is process-wide** (`org::async::keptStorageOptions.reuseStorage`), not per array. The journal's
+  run path is static and a snapshot carries no array, so a per-array option would mean new plumbing. It still also picks the
+  bitmap run path, as before. CS's two readers (`MainBuild.cpp`, `KeptStores.cpp`) read it directly.
+- **CS headers.** `RenderGraph/Async/LatestSlot.h` is an alias (11 users). DCLF `Core/Runtime/KeptState.h` is a list of using
+  declarations (22 users). PublicationLog, Retirement and SlotTable had two users each: those include OMS, and their uses
+  are qualified.
+- **Tests.** `KeptStateTests.cpp` moved to OMS without the AdvancedSkin `OwnerValues` test, which is DCLF's. That one stays in
+  CS as `tests/DrawcallLimitFixCPU/OwnerValuesTests.cpp` (`DclfOwnerValuesTests`). A short multi-thread `Retired` test was
+  added. `ORGRetirementChainTests` needs ORG's headers (`ORG_ASYNC_TEST_ORG_INCLUDE`, the sibling submodule by default).
+- **Style.** The moved headers are reformatted to OMS's layout (4 spaces, attached braces). Member names keep their old
+  spelling, without OMS's `m_` prefix, so the move stays a move.
+
+### p0-lib decisions
+
+Decided by the agent, to confirm:
+
+- **The kept-copy text stays on `reuseRecordings`.** With `reuseLiveRecordings` gone, a live epoch keeps copies whenever
+  `reuseRecordings` is on. `reuseRecordings` itself stays a flag: it was not one of the five, and ORG tests run with it
+  off.
+- **The RenderGraph setters went too** (`SetCoalescedSubmissions`, `SetMergedHandoffs`, `SetUploadsWithBatches`,
+  `SetKeptGatedInline`). They only carried the flags, so a graph built outside `GraphHost` now gets the on behaviour as
+  well.
+- **`RunReadback::ErrorHandler` is a required argument of `Create`, `CreateList` and `CreateRegions`,** not a `Runtime::Desc`
+  field. A readback is made by its reader, not by the runtime, and a required argument makes the compiler find every CS
+  site. An empty handler only logs. After the handler returns, `Create*` return null, `Commit` returns 0 (stamps are
+  never 0), and a copy or read is left out.
+- **CS's handler is `RenderGraph::FatalHandler(area)`** (`src/RenderGraph/Fatal.h`), so other libraries can reuse it. The
+  areas are each user's existing fatal area ("Drawcall Limit Fix", the clouds port's and Post Processing's `kName`).
+- **ORG tests that assumed the off paths were updated:** "reuse" and "external-reuse" now count runs that bind a kept
+  recording, and "leases-wide" accepts a kept copy's run ref. The bounds (`liveReused >= 6` in "reuse") are a guess
+  from reading the code; the director's test run confirms them.
+
+### p2-executor decisions
+
+Decided by the agent, to confirm:
+
+- **Names.** `org::async::Executor` (`Async/Executor.h`), `org::async::Lane`/`JobLane`/`MakeLane` (`Async/Lanes.h`) and
+  `org::async::CreateExecutorTaskService` (`Async/ExecutorTaskService.h`). The executor and lanes are a CPU-only target,
+  `ORGModuleServices::AsyncExecutor` (needs TBB); the task service is in `ORGModuleServices`, since it needs ORG.
+- **Layout as a default.** `Executor::Desc` takes worker counts per domain, the parallel domain (ParallelFor helpers and
+  frame-critical jobs) and the frame-critical thread count. The old constants (`Coordinator`, `Preparation`, `Scene`,
+  `Streaming`, `FrameCriticalThread`, `Layout`) stay as the default layout's, so CS's 30-odd users need no edit.
+  `SchedulingLayout()` gives an executor's own layout.
+- **`Statistics` per-domain arrays became vectors**, since the domain count is the host's. Only the DCLF capture reads them.
+- **Throw report.** With `onTaskError` set, a throwing ORG task is reported with "<name> threw: <what>" and counts as
+  finished. Without it, the exception goes to the executor, which counts a failed task. CS passes `RenderGraph::Fatal`
+  under "ORG task", as before.
+- **Lanes.** An empty `LaneDesc::refused` stops an OMS lane silently. CS's `Frame::Lane`, `Frame::JobLane` and
+  `Frame::MakeLane` fill it with the old fatal ("the <name> lane stopped ...") through `FatalOnRefusal`.
+- **Tests.** `tests/DrawcallLimitFixCPU/SceneExecutorTests.cpp` moved to OMS `tests/Async/ExecutorTests.cpp`, with layout
+  and lane tests added. `tests/Async/ExecutorTaskServiceTests.cpp` compiles the service against ORG's `ITaskService.h`
+  from the sibling checkout, so it stays standalone.
+
+### p3-kernels decisions
+
+Decided by the agent, to confirm:
+
+- **Shader layout.** The moved shaders sit flat in OMS `shaders/`: `PrefixSum.hlsl`, `SortScatter.hlsl`, `Hzb.hlsl`,
+  `HzbTest.hlsli`, `ffx_a.h`, `ffx_spd.h` and `FidelityFX-LICENSE.txt`. Flat, so CS's configure-time copy
+  (`cmake/RenderGraph.cmake`) only needed `*.h` and `*.txt` added to its glob. DCLF's cull shaders include
+  `ORGModuleServices/HzbTest.hlsli` through the shader-root include directory. All of them are DXC-only, so no FXC path
+  changes.
+- **`ffx_a.h` moved too.** `Hzb.hlsl` needs it, and nothing else used DCLF's copy.
+- **`Common/HiZ/SPD.hlsl` stays.** It is not a copy of `ffx_spd.h`. It is a separate, trimmed SPD rewrite with D3D11
+  register bindings and its own licence header, compiled with FXC for `HiZPyramid.cpp`. Pointing it at OMS's header
+  would change D3D11's FXC output and tie the D3D11 path to the OMS copy. So the build keeps two SPD implementations
+  but one copy of `ffx_spd.h`.
+- **Scatter parameters.** The stride stays a root constant. The rank bits and the "range" words are defines
+  (`SortScatterLayout`, `SortScatterDefines`), so DCLF's build folds the same constants as before. Ranges are optional:
+  without them an item goes to `offsets[key] + rank`. DCLF's range words are `offsetof(DrawSequence, instanceCount)` and
+  `firstInstance`, restored to 1 and 0. I read the plan's "key word" as the word holding the range's first key and
+  "rank word" as the packed key and rank word.
+- **The scatter pass stays in DCLF.** Its gating reads DCLF's frame shapes, so OMS ships only the shader, the constants
+  and the defines. The pass now records through `ComputeKernel::Dispatch`.
+- **HZB inputs.** `HzbDesc` takes the depth as a `PixelBuffer` or a `declareDepth` callback. DCLF uses the callback,
+  since its depth is a `FrameAnchors::Texture` slot. The reduction is a define (`ORG_HZB_REDUCE_MIN`) carried in
+  `HzbProgram`. The far value uses what was the constants' padding word, so the layout stays 24 words. The reduction's
+  identity (outside the domain) is 0 for max and 1 for min, which assumes depth in [0, 1].
+- **HZB with no kernel.** The pass is still made and records nothing, as DCLF's did. `MakeHzbPass` returns null only
+  without a depth, pyramid or counter; DCLF's pass is only made with phase two, which has them.
+- **Barriers.** PrefixSum and HZB keep their full memory barrier between dispatches. `ComputeKernel::Dispatch`
+  rebinds the layout and pipeline per dispatch, where the HZB bound them once. That is extra commands, not a change in
+  results.
+- **Defines.** The moved programs keep `commonDefines` on, as before. `HzbTest.hlsli`'s depth margin is
+  `ORG_HZB_DEPTH_MARGIN`, defaulting to the old 1e-4.
+
+### p2-recordings decisions
+
+Decided by the agent, to confirm:
+
+- **ORG, not OMS.** It wraps one GraphHost call and its types, and ORG's no-device tests can cover it. It lives beside
+  `GraphHost.h` as `include/OpenRenderGraph/EpochRecordings.h`, with `src/Host/EpochRecordings.cpp`.
+- **Failures go to an `OnFailure(what, error)` hook** given to the `Cache` constructor. A failed request reports when it
+  settles, then settles its entry with the error. A failed kept entry reports at `Find`, then goes and the lookup misses.
+  `Request` alone passes `Outcome::Failed` to its done. CS's `Cache` subclass passes `RenderGraph::Fatal`, so both stay
+  fatal at the same points with the same messages.
+- **`Posting { Posted, Refused }`** replaces the bool from `Request` and `Cache::Post`.
+- **The hash is a template parameter** (`Cache<Key, Keep, Rule, Hash, Payload>`). `Find` and `Add` hash the key. Frame
+  segments hash the fields only (`SegmentKeyHash`), as before, so its `AnyOf` checks by hash still work.
+- **Owner-thread fields stay on `Entry`; the locked part is a separate `Settle` block** that the host's thread holds alone.
+  Predicates read it through `Entry::LockedStatus()`. An erased entry's key and payload are now freed before its requests
+  settle. Nothing read them after the erase.
+- **The counters (`Read()`) stay process-wide in ORG.** A failed request is not counted, as before.
+- **`Cache::Post` has a requester overload** (`Post(entry, count, what, requester, settled)`) that the GraphHost overload
+  uses. The tests post through it.
+
+### p2-retire decisions
+
+Decided by the agent, to confirm:
+
+- **Two layers for the join.** `RetirementJoin` (std plus ORG's header-only `EventQueue`) does the counting behind a
+  `Source` interface (`SubmissionsMade`, `CpuFramesCompleted`), so its logic is tested standalone. `GraphHostRetirement`
+  adds the graph host source and the GPU points (`SubmittedGpuPoint`, `SealedGpuPoint`, `Sealed`), which need `GraphHost.h`.
+- **The host comes in as a callback** (`GraphHostAccess`, returning the host or null), since CS's host comes and goes.
+- **New headers, not `BackingPool.h`.** The join and the pool defaults are in `RetirementJoin.h`, `GraphHostRetirement.h` and
+  `GraphHostBackings.h`. `BackingPool.h` stays std-only for its standalone tests, and p1-async adds beside it at the same time.
+- **Shrink is an enum** (`BackingShrink::Settled/Never/Eager`) and copies are `PerFrameCopies(asked, framesInFlight)`. DCLF
+  still parses `CS_DCLF_SHRINK` and `CS_DCLF_SCENE_COPIES` (empty means 3), so the values are unchanged.
+- **Secondaries stay generic.** The list pool holds only BasicRHI types (`rhi::CommandAllocatorPtr`, `rhi::CommandListPtr`),
+  nothing of D3D11 or DXVK, so `SecondaryListPool` moved whole to OMS. `ResetPools` and `RecordingSlot` still take the pool
+  type as a template parameter, for tests and other pools. DCLF keeps the slot, the worker index and its fatal check.
+- **The reset queue is ORG's `EventQueue`**, not TBB's `concurrent_queue`: OMS's core has no TBB. Both are lock-free, any
+  thread pushes and one thread (the render thread) takes. "Retirement comes in as a callback" is `ResetPools`' `Defer`,
+  which DCLF points at its executor's preparation lane, with the same zone.
+- **Library error text** for a structured backing past `uint32` elements drops the `[DCLF]` prefix.
+
+### p2-birth decisions
+
+Decided by the agent, to confirm:
+
+- **The encoder lives in its own OMS header**, `TexelEncoding.h` (included by `VersionedTextureGrowth.h`), so a CPU-only test
+  can cover it without a device.
+- **OMS converts half floats and R11G11B10 itself**, a bit-for-bit port of DirectXMath's software paths
+  (`XMConvertFloatToHalf`, `XMStoreFloat3PK`), since the library is not Windows-only. CS built without F16C, so it ran the
+  same software path. `ORGTexelEncodingTests` compares every format against the old DXGI-keyed encoder on DirectXMath.
+  DirectXMath's blue channel shifts a value below about 1e-13 by 32 or more (undefined in C++); OMS masks the count to five
+  bits as x86 does, and the test skips that range.
+- **`TextureVersionRequest` names the value's format** (`valueFormat`), since an image version has no common format
+  accessor. Unknown reads it from a `PixelBuffer` or `ExternalTextureResource`. CS passes the declared format, which is what
+  `EncodeTexel` was keyed on before.
+- **CS still builds the Value writer in `Prepare`**: a guest export takes the birth as DXVK's wrap data, and a format with no
+  encoding still fails there with the same message. Graph-only and native exports now go as `TextureContents::Value`.
+- **Floating-point mode:** CS's code built with `/fp:fast`, OMS builds with the default. Only the sRGB `pow` could differ, in
+  the last bit before rounding to 8 bits. No CS birth uses an sRGB format (they use R16G16B16A16_FLOAT, R16_FLOAT, R8_UNORM,
+  R8_UINT, and R32_UINT for a Fill).
+
+### p3-pins decisions
+
+Decided by the agent, to confirm:
+
+- **Single-tag API removed, not kept as a default key.** It had one user (the pipeline pins), so the keyed form replaced
+  it. Keys are compared by address, so two extensions can't collide on a name.
+- **A tag set is immutable and shared.** Each `SetRecordingTag` makes a new set. A recording list holds one
+  `shared_ptr` to the set, as it held one to the single tag, so the per-batch cost is unchanged.
+- **OMS `PipelinePins` takes two callbacks** (`Desc::pin`, `Desc::defer`) instead of CS's `BuildManager`. CS's `defer`
+  calls `Builds::DeferStaged` then `Builds::Defer`, as before. The pin table is per `PipelinePins` object; CS keeps one
+  static object, as it kept one static table.
+- **CS `RenderGraph/PipelineVersions.h` stays as the facade.** Its users (Compute and Raster programs, `Revision.cpp`,
+  `RenderGraphRuntime.cpp`) don't change. Phase 3 item 2 can call `org::services::VersionFor` directly once programs move.
+
+### p2-reflect decisions
+
+Decided by the agent, to confirm:
+
+- DXIL's binding shifts and the skipped push register (DCLF's `kBindingShift*`, `kFramePushBinding`) became
+  `DxilBindingLayout`, a `Parse`/`ReflectDxil` parameter. DCLF's `SpirvReflection` is a subclass whose `Parse` passes
+  them, so its users are unchanged.
+- No new dependencies: the SPIR-V reader is hand-written (no SPIRV-Reflect or SPIR-V headers). DXIL uses `dxcapi.h`,
+  which OMS already finds for `ShaderCompiler`, and the Windows SDK's `d3d12shader.h`. `DxilReflection.cpp` builds only
+  on Windows with DXC; otherwise `ReflectDxil` returns false and `DxilFragment` the defaults.
+- DXIL reflection still finds `dxcompiler.dll` by name in the process (`GetModuleHandleW`), as before, instead of
+  asking a `ShaderCompiler` for its module. DCLF's `DxilStages.cpp` keeps its own per-thread DXC objects for the
+  frame-source preprocess.
+
+### p3-latched decisions
+
+Decided by the agent, to confirm:
+
+- The latched copy types and the copy pass go to ORG as two headers: `Render/LatchedCopies.h` (no pass machinery, so
+  DCLF's widely included `Latched.h` pulls in nothing new) and `RenderPasses/LatchedCopiesPass.h`. `LatchedTarget`,
+  `LatchRegionsHeld` and `SetLatchWords` moved too, since they serve only latched copies.
+- `LatchedSource` renamed its host words: `shape` is `owner`, `hosted` is `groups`, `zeros` is `copyFixed`. The
+  aggregate order is unchanged, so only one DCLF line (`source.groups`) changed. DCLF keeps `MakeLatchedCopiesPass` as a
+  wrapper that passes `!cpuPipeline` as `copyFixed`.
+- The copy joining is `org::LatchedCopyRuns`, split out so it can be tested without a device.
+- `IDescriptorService::Null` is virtual with a default over `CreateOwnedShaderResourceView` and makes a new descriptor
+  each call (no cache in the service), because a cached binding would hold the device owner past a device change. Callers
+  keep the binding, as DCLF does.
+- `NullViewKind` covers Texture2D, 2D array, 3D, cube, cube array, typed, structured and raw buffers. Every texture kind
+  gets R8G8B8A8_UNorm with one mip: D3D12 needs a format for a null texture view, and Vulkan's null descriptor depends only
+  on the descriptor type. DCLF's Texture2D, typed (R32_UInt) and structured (stride 4) descriptions are unchanged.
+- DCLF's `NullOf` keeps its D3D11 1x1 views for array, cube and 3D slots. Swapping them for per-dimension null
+  descriptors would change what the engine's draws read (a D3D11 view through the import, not a null descriptor), so it
+  is left for a separate change.
+
+### p2-cpu decisions
+
+Decided by the agent, to confirm:
+
+- **Zone tallies and the budget go to BasicTelemetry, not OMS.** The tally scope wraps `basic_telemetry::Scope` and
+  `Callsite`, and the budget is plain CPU timing with no graph types. In OMS both would add a BasicTelemetry dependency to a
+  module that has none outside `AsyncStateGraph`.
+- **The budget's epoch split is a parameter.** `ThreadBudget` takes `Splits` running totals through a function pointer, read
+  at an outermost hook's ends, plus the bucket each goes to. DCLF passes ORG's submit and overhead totals. The claiming site
+  (`SceneFrame`) and the rest bucket (`Other`) are `Desc` fields. The thread is a `std::thread::id`, not a Win32 id.
+- **The sphere cull gets the plugin's compile options.** CS adds `SC_DEBUG_OPTS`/`SC_RELEASE_OPTS` (`/fp:fast`, `/O2`...) to
+  `ORGSphereCull`, so the moved kernels build as they did in the plugin. The per-file `/arch` flags are set in
+  `SphereCull.cmake` for the OMS files and stay in `RenderGraph.cmake` for DCLF's `CullAvx2.cpp`/`CullAvx512.cpp`.
+- **The SSE pass is `org::cpu::FrustumSse`, taking a plane array and count** in place of DCLF's `PlaneSet`. It still leaves
+  dead lanes to the caller, as before. The level is `org::cpu::Supported()` (CPUID and XCR0, no logging); DCLF's
+  `Simd::Supported()` wraps it and keeps its log line.
+
+### p3-programs decisions
+
+Decided by the agent, to confirm:
+
+- **Layout.** OMS `include/ORGModuleServices/Programs/` (`ComputeProgram.h`, `RasterProgram.h`, `ProgramService.h`,
+  `ProgramBuild.h`, `ShaderTarget.h`), in `org::services`. The build helpers are `org::services::program_build`. CS keeps
+  `ComputeProgram`/`RasterProgram` as global aliases, and `Programs::Fixed<P>` and `Programs::Detail::Slot` as aliases of
+  `FixedProgram<P>` and `ProgramSlot`, so no feature file changed. The four forward declarations became alias declarations.
+- **A process-wide environment.** `ComputeProgram::Load(device, desc)` is static and called directly in about 15 CS files,
+  so the injected pieces live in one `ProgramEnvironment` the host sets once (`SetProgramEnvironment`), not in each call.
+  CS sets it at the top of `RenderGraphRuntime::Initialize`. Every callback resolves lazily, so the compiler and registry
+  are read when a program loads, as before.
+- **Injected pieces.** Shader root (`Data/Shaders`), backend (`Backend::Active`, mapped to the binary format by
+  `ShaderFormatFor`), compiler, registry, common defines (CS's `WithCommonDefines`, still resolved where programs are queued),
+  request defines (`CS_ORG_BINDLESS`, and `CS_GPU_AMD` on AMD, in the old order after the API define), the version a recording
+  binds (`PipelineVersions::VersionFor`; without it, the slot's newest), the pipeline-statistics label hook (BasicRHI's
+  Vulkan-only function, so OMS doesn't link it) and a log callback. CS's log adds the `[ORG] ` prefix, so log lines read as
+  before.
+- **Errors.** `ProgramService::Desc::onError` gets the refused build, a failed build at `Collect`, a fixed program read
+  before it was built and a stopped lane. CS passes `FatalHandler("Programs")`, so all stay fatal. A stopped programs lane
+  is now fatal under "Programs", not "lanes". A refused slot is marked done with its error, so a join doesn't hang when
+  the handler returns, and `Collect` doesn't report it twice. Load failures stay null and logged.
+- **The pool coupling.** An explicit dependency, not a new domain: `org::async::PlanWaitingPool(executor, runOn,
+  waitsOnDomain, fallback)` in `Async/Lanes.h`. `ProgramService::Desc::compileDomain` states where the builds' compiles run.
+  The arithmetic is unchanged (half the shared domain's workers, or one lane on the fallback class with one worker), so the
+  thread counts are the same. A new blocking domain would have added threads.
+- **The hash.** `HashBinary` is OMS's XXH3-128 (`HashShaderBytes`) folded to 64 bits; a raster pair hashes both through
+  `ShaderKeyBuilder`. The fingerprint is persisted nowhere: `PipelineRegistry` keeps it in memory and compares it only
+  within a session, at a reload. So no on-disk cache is invalidated; the shader store keys on its own variant keys.
+- **Log wording.** The pool's line says "on the compile domain's threads" or "on the fallback threads" instead of
+  "preparation"/"blocking", and the not-built error says "after the setup join" instead of "after CS's setup".
+- **ASCII names.** Entry points and define names are narrowed by casting, as CS's define code did. They are ASCII.
+
+### p4-uploads decisions
+
+Decided by the agent, to confirm:
+
+- **The binding type is the parameter, not the owner type.** `OwnedRow<Row, Binding>` takes the host's binding (an index, an
+  owner and an `explicit operator bool`, checked by the `DescriptorBinding` concept). Owners stay `shared_ptr<const void>`,
+  since `ContentOwners` and the uploads hold them type-erased. DCLF's `OwnedRow<Row>` is an alias over `GpuTextures::Binding`.
+  The old test was `index == GpuTextures::kInvalid`; `Binding`'s `operator bool` is the same test.
+- **The seal is a `Snapshot` argument**, not a constructor one, so `SceneBuffers` keeps a plain member. Its one caller
+  (`ExecutionOwners::Seal`) passes `GpuTextures::Seal`.
+- **Hooks are held by reference** (`CommitUploadHooks`, a static in DCLF's `Uploads.cpp`), so a commit builds no
+  `std::function`. The byte sink is an interface with `Enabled()` asked before each write, as `FrameData::Enabled()` was, so
+  names are still looked up only when counting. A missing `onError` drops the owners silently, as `ViolationPolicy` does.
+- **DCLF's `CommitUploads` and `LatchedUploads` are subclasses**, not aliases, because `Commits.h` and `VertexStreams.h`
+  forward-declare them as classes, and so the commits' constructors don't change. DCLF acquires the batch itself
+  (`AcquireCommitBatch`) to keep its `CS.DCLF.Stage.AcquireBatch` zone.
+- **Stayed in DCLF:** `FrameConstantsPart` and the route-and-name strings (they know the `cs.dclf.frame-constants` buffer), the
+  FrameData sink, the fatal area name, and the rest of `Uploads.cpp`, which is DCLF's main commit (scene streams, buckets,
+  shadow and class latches, frame textures). Only `CommitUploads::Stage(Versioned)` moved out of it.
+- **No OMS test for `CommitUploads`/`LatchedUploads`**: they need staged pages and latch blocks, so a device. The CPU test
+  covers `OwnedRow` (default and host bindings) and `ContentOwners` (overlaps, replaced owners, unchanged snapshots, counts).
+
+### p4-build decisions
+
+Decided by the agent, to confirm:
+
+- **Names.** `org::services::StagedBuilds` (`StagedBuilds.h`), `BuildObserver`, `BuildRefusalSite`, `BuildLogLevel`. The build
+  context is its own std-only header (`BuildContext.h`) so it is tested without a device. CS keeps `RenderGraph::BuildManager`
+  as an alias, so its users (`RenderGraphRuntime`, `Revision.cpp`, DCLF's `GraphBuilds.cpp`) are unchanged apart from
+  `MakeBuildManager`.
+- **Observer, not callbacks per event.** `BuildObserver::InPoll(point, body, context)` runs the poll's body, so CS opens its
+  `Frame::Boundary::Caller` around it as before, with no allocation per poll. `Attached(label)` and `Refused(site, reason)` map to
+  `NoteAttach` and `NoteRefusal`. CS maps the set site to "revision", so the census keys are unchanged. Ask's late change and the
+  adoption-point check stay in the CS facade, which never left CS.
+- **The recipe trace is a `Desc::afterBuild(epoch, graph)` hook**, run on the building thread inside the build, under the build lock
+  and the same try as before. CS's hook defers `NoteTrace` with `DeferToAttach`, which lands in the same `attached` list after the
+  extensions' entries, as the direct push did.
+- **Steady state.** `Desc::isSteadyState` is read at each frame end until true (empty: true at the first). CS passes the world
+  window check and `steadyStateName = "first world frame"`, so the log lines, which the shader-reload configs match, are byte-equal.
+- **Logging** goes to `Desc::log(level, line)`, formatted with `std::format` only when a log is set. CS sends each level to its
+  logger. The texts are unchanged.
+- **The executor and lane come from the host** (`Desc::executor`, `Desc::lane`). CS passes the shared executor and
+  `FatalOnRefusal({"CS graph builds", Preparation, Cpu})`, as `Frame::JobLane` did.
+- **`BuildInputs<State>`** holds the attached value, its serial, the built serial and the first-builds flag. `Next` keeps the
+  value when nothing moved, `Settle` takes `settled()` lazily (only once the serial is unbuilt, as before) and returns
+  `BuiltAndAttached` for the first builds, so DCLF still publishes the attached state itself (it also attaches the graph
+  conditions). DCLF's `buildState` member and its free functions stay; their storage is one namespace-scope `BuildInputs`.
+- **No device-free test of `StagedBuilds` itself**: it drives an `org::GraphHost`, which needs a device. `ORGBuildsTests` covers
+  the build context and the build inputs.
+
+### p4-bufsets decisions
+
+Decided by the agent, to confirm:
+
+- Payload versions did not merge into `ComposedVersions`/`NamedVersions`. The payload parts are late-bound buffers that the
+  frame publishes per version (`LateRefBuffer`), not `VersionedBuffer`s that a recording resolves through
+  `IResourceVersions`. Naming them in a set would change how the frame binds them. The chains became OMS `BufferChains`
+  over `VersionedBufferBuild` instead: change detection, the journal floor, the held versions, settle and finish, the
+  counters. DCLF keeps the part list, the journals' readers and the frame payload.
+- `BufferChains` makes no pools and posts no graph work itself. The host passes `makePool` (it gets the library's
+  suspension counter as the pool's telemetry), `post` (it gets a `built` hook to run before the version freezes), `wake`
+  and `failed`. DCLF's `post` wraps `built` in its `PayloadPartTag` and calls `SceneGraph::PostPayloadPart` as before, so
+  p4-misc's scene graph helpers are untouched.
+- A failed build calls `failed` every time. DCLF still logs only a part's first failure (its own `reported` flags).
+- `PayloadSource` derives from `BufferChainSource`: its fields are unchanged, and it gains the per-part overrides.
+  `PayloadPools::PartReport` is an alias of `BufferChains::Report` (same fields).
+- `LatchRegions` moved to OMS with the enumerators `PerRun` and `Shared` (OMS style, no `k`). Producer.cpp's two uses
+  changed. `Shared` registers one region (a dedicated block), `PerRun` two (a frame-arena block), as before.
+- DCLF keeps its own `GrowableSpec` (no shrink or address fields). `SceneBufferSet::Make` adds DCLF's shrink policy and
+  `address = true` when it builds the OMS `GrowableBufferSpec`.
+- No device-free test covers the `GrowableBufferSet` additions: a seal needs real `org::Buffer`s. They are thin
+  forwards of what DCLF did; the in-game runs cover them.
+
+### p4-misc decisions
+
+Decided by the agent, to confirm:
+
+- Scene graph helpers are two OMS headers in the style of `VersionGrowthArtifact.h`: `VersionedBufferPosts` +
+  `PostVersionedBuffer` (org::services, beside `RegisterVersionedBufferProducer`; it expects no `wrap` hook) and
+  `WindowGates` (org::async: `RegisterWindows`, `RegisterGates`, `PostWindow`, `RetireWindow`, `PostGate`). The gate
+  producer captures the `WindowGates` object, as DCLF's captured its gate list, so the graph must shut down first.
+  `SceneGraph` keeps its API and member order.
+- `IndirectRun` moved to OMS with `vertexLayout` renamed `tag` (a host word bound with the pipeline). `IndirectDraw`, the
+  push words and `PulledBucketPipeline` stay in DCLF. `RecordIndirectRuns` is templated on the list type so the test can
+  use a fake list; DCLF copies its counters into an `IndirectRunState` and back. After the runs DCLF sets
+  `boundVertexLayout` to the last run's tag, which is what the old loop left.
+- The read-order check returns structured findings (`ReadOrderFinding`) and counts; CS formats the same messages as
+  before, so the log text is unchanged. The owner tests became two predicates: `requiresLocalWriter` (CS stages) and
+  `allowsLaterWriter` (fragment sources' stages). Positions are the recipe's stage indices.
+- ORG's `Render/ShaderBindings.h` (`org::shader_bindings`) takes the push block helpers, `Latch`/`LatchOf`, and
+  `SamplerPreset`/`SamplerDescOf`. CS keeps `CreateSampler`, `SamplerFromD3D11`, the shared preset cache and
+  `CreateShaderResourceView`, since they go through CS's runtime and D3D11 types. `RenderGraph/ShaderBindings.h` is a
+  forwarding header (about 100 users).
+- OMS `shaders/OrgResources.hlsli` keys on `ORG_BINDLESS` and has no SHARED kind. CS's `Common/OrgResources.hlsli`
+  (included by about 160 shaders, many FXC ones shared with D3D11) defines `ORG_BINDLESS` under `CS_ORG_BINDLESS`,
+  includes `ORGModuleServices/OrgResources.hlsli`, and adds SHARED as a host kind. The FXC token stream is unchanged; this
+  needs the DXBC comparison below. A host kind is added by defining `ORG_HANDLE_<kind>` and `ORG_RESOURCE_<kind>`.
+- p4-misc check that needs a run: FXC output of the D3D11 shaders that include `Common/OrgResources.hlsli` is identical
+  (`tools/verify-shader-refactor.ps1` on Lighting.hlsl, ISHDR.hlsl, Effect.hlsl), and `tools/check-dual-target-shaders.py`
+  passes; both need `package/Shaders/ORGModuleServices` staged by a configure first.
+
+### p4-imgui decisions
+
+Decided by the agent, to confirm:
+
+- **Layout.** OMS `include/ORGModuleServices/ImGui/ImGuiBackend.h` and `src/ImGui/ImGuiBackend.cpp`, in
+  `org::services::imgui`. A separate static target, `ORGModuleServices::ImGui`, from `cmake/ImGuiBackend.cmake` (as
+  `SphereCull`), so OMS builds without ImGui. It links the host's target named by `ORG_MODULE_SERVICES_IMGUI_TARGET`
+  (`imgui::imgui`), or uses `ORG_MODULE_SERVICES_IMGUI_INCLUDE_DIR`. It never runs `find_package` for ImGui.
+- **The program.** OMS gives `ProgramDesc(format)` and `kShader`. CS keeps the `DeclareProgram` keyed on the UI target's
+  format, resolves its defines and passes the built program in `Target::program`, as before. The shader path is now
+  `ORGModuleServices/ImGui.hlsl`; the source is unchanged apart from its comment, and CS compiles it with the same defines.
+- **Host callbacks, not library code, for CS's pieces.** Textures come from `HostDesc::createTexture` (CS makes the same
+  persistent `GraphResources::Texture2D`), views and the sampler from `createShaderResourceView`/`createSampler` (CS passes
+  `ShaderBindings`, which p4-misc is moving), page versions from `publishPageVersion` (`Frame::Revision::PublishTexture`), and
+  the undeclared-access note from `noteImmutable`. The graph host comes from `graphHost`. Kept as callbacks so this part
+  does not depend on p4-misc's move; once `ShaderBindings` is in ORG, OMS can call it directly.
+- **Staging.** OMS acquires the staging region from `org::Runtime::Current()->Arena()` itself, as CS's `AcquireStaging` did.
+  A failure goes to `HostDesc::onError` and `Commit` returns false. CS passes `FatalHandler("ImGui")`, so it stays fatal with
+  the same message.
+- **The draw target.** `MakePass` takes `DrawTarget` (a resolver or a plain resource, like `UavClearTarget`). CS's adapter
+  builds it from `FrameAnchors::Texture::Slot()` and `Plain()`.
+- **Revision values.** Both passes were always made with `atExecution = true`, so `CommitReadTicket` always pushed 0. The
+  passes now push 0 directly, and the unused ahead-of-time branch is gone.
+- **Names.** The draw pass's debug label is `HostDesc::passName`; CS passes "CS ImGui". Log lines go through
+  `HostDesc::log`; CS adds the "[ORG] " prefix, so lines read as before.
+- **Host setup.** CS's adapter calls `SetHost` once (`std::call_once`) before any forwarded call that needs the host, since a
+  pass may be made before `Init`. `ImGuiRenderer.cpp` and `IconLoader` are unchanged.
+
+### cleanup decisions
+
+Decided by the agent, to confirm:
+
+- **`FullscreenVS.hlsl` is OMS's.** It is generic (no CS includes or defines), so it moved to OMS `shaders/` and
+  `RasterProgram::kFullscreenVertexShader` is `ORGModuleServices/FullscreenVS.hlsl`. The body is unchanged; only its
+  comment is. No CS program named the old path. CS's configure-time copy ships it with the other OMS shaders.
+- **Packaging needed no change.** `cmake/RenderGraph.cmake` copies OMS `shaders/` into `package/Shaders/ORGModuleServices`
+  at configure time, before the AIO globs and the `install(DIRECTORY package/ ...)` rule run, so the AIO folder, the
+  install tree, the zip and the CI shader validation all carry it. Tools that run FXC on the source tree
+  (`verify-shader-refactor.ps1`, `check-dual-target-shaders.py`) need one configure first, as p4-misc noted.
+- **OMS `StagedBuilds::Desc` gains `maxSupersededInARow`, `maxRejectedInARow` and `statsFrames`,** defaulting to the old
+  constants (3, 3, 3000). CS sets none of them.
+- **Removed as unused:** OMS `MarkedList::RemoveAt` and `SlotTable::FreeCount` (no caller in the libraries or CS).
+- **Throws left in new OMS code** (executor `Desc` checks, `BufferChains` hook checks, required-argument checks in
+  `RecordingPools.h`, `RetirementJoin.cpp`, `ProgramService.cpp`, the backing allocate hook) are setup or misuse checks.
+  Converting them needs factories that return null and CS callers that check; left for a separate change.

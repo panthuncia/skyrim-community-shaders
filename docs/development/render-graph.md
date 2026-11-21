@@ -667,7 +667,7 @@ bool ORGFoo::Setup()
 Three primitives replace the per-port workarounds (mismatch counters pushed into `Revision`, `prepared` atomics set in `Prepare`,
 fill and clear frame counts). A pass's revision stays a function of what it was made with, so its recording is kept.
 
--   **Run gates** (`src/RenderGraph/RunGate.h`). A dispatch or draw that runs on some runs of its anchor only records
+-   **Run gates** (`src/RenderGraph/RunGate.h`, over ORG's `org::RunGate` in `Render/RunGate.h`). A dispatch or draw that runs on some runs of its anchor only records
     `RunGate::Dispatch` (`ComputeProgram::DispatchIndirect`) or a `RasterProgram::DrawDesc` with `indirect` set to the gate's
     latch and offset. The group or vertex counts are in a latch block, so a zero there does no work. List the gate in
     `ClientDesc::gates`: each run of the client's anchors closes it before any commit, and the commit opens the entries this run
@@ -817,7 +817,7 @@ lanes; new code uses them from the start.
 -   **Per-run CPU data: `RenderGraph::AcquireStaging`** (`src/RenderGraph/FrameStaging.h`). An oversize region of ORG's frame
     arena (`FrameArena::AcquireOversize`): a chunk of its own, at offset 0, of at least the size asked for. It goes back to the
     arena when the recording that retained it is done, and a steady frame reuses the freed chunks. The engine constants' upload
-    ring takes its chunks the same way. `RenderGraph::RunSlots<T>` hands one immutable frame object per run from the commit
+    ring takes its chunks the same way. `RenderGraph::RunSlots<T>` (ORG's `org::RunSlots`, `Render/RunSlots.h`) hands one immutable frame object per run from the commit
     (`Store` at `GraphHost::CurrentRun`) to `Record` (`Take` at `RecordingContext::Run`), which retains it. A pass without a
     revision is prepared again after the commit, for the same run, so its Take finds the object.
 -   **Main-thread tick: `RenderGraph::Engine::MainTick::Add(name, callback)`** (`src/RenderGraph/Engine/MainTick.h`). Runs on the
@@ -849,12 +849,12 @@ lanes; new code uses them from the start.
 
 ## Raster programs
 
-`RasterProgram` (`src/RenderGraph/RasterProgram.h`) is `ComputeProgram`'s raster twin, for fullscreen vertex and pixel shader
+`RasterProgram` (OMS `Programs/RasterProgram.h`; CS's `src/RenderGraph/RasterProgram.h` forwards to it) is `ComputeProgram`'s raster twin, for fullscreen vertex and pixel shader
 passes on ORG render passes. It replaces `PostProcessing/RasterPass` and the pixel-shader passes in Upscaling and Effects11 as
 they are ported.
 
--   **Compile.** Both stages compile with DXC through the same path (`ProgramBuild.{h,cpp}`, shared with `ComputeProgram`):
-    ORGModuleServices' shader store, SPIR-V, BasicRHI's bindless ABI. The default vertex stage is `RenderGraph/FullscreenVS.hlsl`,
+-   **Compile.** Both stages compile with DXC through the same path (OMS `Programs/ProgramBuild.h`, shared with `ComputeProgram`; CS sets its environment in `Programs::InstallEnvironment`, `src/RenderGraph/ProgramService.cpp`):
+    ORGModuleServices' shader store, SPIR-V, BasicRHI's bindless ABI. The default vertex stage is `ORGModuleServices/FullscreenVS.hlsl`,
     a three-vertex triangle with `TEXCOORD0` as in PostProcessing's `fullscreen.hlsli`.
 -   **Defines.** Compute and raster programs get the defines `Util::CompileShader` gives the D3D11 build, after their own:
     CS's common shader defines (`Util::GetCommonShaderDefines`), the stage's (`COMPUTESHADER`, `VSHADER`, `PSHADER`), `WINPC`
@@ -876,7 +876,8 @@ they are ported.
 ## ImGui on the graph
 
 In graph mode, CS's ImGui frames are drawn by a render-graph pass instead of `imgui_impl_dx11`
-(`src/RenderGraph/ImGuiBasicRHI.{h,cpp}`, chosen in `src/Menu/ImGuiRenderer.{h,cpp}`).
+(OMS's `ORGModuleServices/ImGui/ImGuiBackend.h`, behind CS's adapter `src/RenderGraph/ImGuiBasicRHI.{h,cpp}`, chosen in
+`src/Menu/ImGuiRenderer.{h,cpp}`).
 
 -   **When.** `imgui_impl_dx11` draws the first frames: the graph starts after the menu. Once the runtime is active with the
     `Overlay` anchor's epoch (reserved in `Menu::Init`), the next `NewFrame` shuts the D3D11 backend down and installs the
@@ -893,7 +894,7 @@ In graph mode, CS's ImGui frames are drawn by a render-graph pass instead of `im
 -   **Per frame.** The client's commit copies the vertices, indices and texture rows into one host-visible staging buffer, a
     `LatchBlock` from a small pool. It stores the frame for the host's current run. The pass takes its run's frame at record time
     and keeps it, with its textures and descriptors, until the recording's GPU work retires (`RecordingContext::Retain`). The
-    staging buffer then goes back to the pool. The vertex stage reads the geometry by index (`RenderGraph/ImGui.hlsl`). Each
+    staging buffer then goes back to the pool. The vertex stage reads the geometry by index (`ORGModuleServices/ImGui.hlsl`). Each
     command gets its own scissor (`SetScissors`) and push block.
 -   **Not drawn.** Draw callbacks (`ImDrawList::AddCallback`), which are D3D11 code. `ImDrawCallback_ResetRenderState` needs
     nothing. The screenshot editor's opaque preview blend is the one callback CS has: its preview is alpha-blended on this
@@ -906,7 +907,7 @@ list into register declarations under FXC, and into push-block handles and descr
 (`CS_ORG_BINDLESS`, which `ProgramBuild` defines for every ORG compile). How to write one, the limits and the checks are in
 [shader-workflow.md](./shader-workflow.md), "Dual-target shaders".
 
-On the C++ side (`src/RenderGraph/ShaderBindings.h`):
+On the C++ side (`src/RenderGraph/ShaderBindings.h`, over ORG's `Render/ShaderBindings.h`):
 
 -   **The block.** A struct that mirrors the shader's push block: one `ShaderBindings::Handle` per resource entry in list order,
     then the `PUSH` structs as `alignas(16)` members. `ShaderBindings::Words<Block>()` is its size for `constantWords`, checked

@@ -21,7 +21,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadingFields.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/TableFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/SlotTable.h"
+#include <ORGModuleServices/Async/SlotTable.h>
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
@@ -333,7 +333,7 @@ namespace DCLF
 		 * Being in a used set certifies a slot's raw engine pointers for evaluation. CheckObjectSlots holds every bound record to it.
 		 */
 		static constexpr std::uint32_t kSlotFree = ~0u;  // a geometryLastUsed never written; ResolveGeometrySlot's "no slot"
-		SlotTable geometrySlots, pipelineSlots, materialSlots;
+		org::async::SlotTable geometrySlots, pipelineSlots, materialSlots;
 		std::vector<std::uint32_t> geometryLastUsed;  // parallel to geometries: the walk's last write (PassStamp)
 		std::vector<const RE::BSGraphics::TriShape*> geometrySlotKey;
 		// A layer's geometry key is the shape's second index list, never read as a TriShape.

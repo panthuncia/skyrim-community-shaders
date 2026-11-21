@@ -31,6 +31,7 @@ namespace org::services
 {
 	class ShaderCompiler;
 	class PipelineRegistry;
+	class StagedBuilds;
 }
 
 namespace rhi
@@ -46,7 +47,7 @@ namespace rhi
 
 namespace RenderGraph
 {
-	class BuildManager;
+	using BuildManager = org::services::StagedBuilds;
 }
 
 namespace org

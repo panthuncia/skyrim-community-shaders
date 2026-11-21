@@ -18,6 +18,8 @@
 #include "RenderGraph/Switches.h"
 #include "Utils/Setting.h"
 
+#include <ORGModuleServices/ViolationPolicy.h>
+
 #include "RenderGraph/Backend.h"
 
 #include <algorithm>
@@ -82,10 +84,8 @@ namespace RenderGraph::Frame::Driver
 			std::mutex mutex;
 			std::array<std::uint64_t, kKinds> frames{};
 			std::array<SegmentCounts, kSegments> segments{};
-			std::array<std::uint64_t, kErrors> errors{};
 			std::vector<std::pair<const char*, std::uint64_t>> hosted;  // by host name, since the last report
 			std::atomic<std::uint64_t> loadStart{ 0 };     // the frame a loading screen started in plus one, 0 for none
-			std::atomic<std::uint64_t> errorsTotal{ 0 };
 			std::uint64_t kindChanges = 0;
 			std::uint32_t errorLines = 0;
 			struct RecordingLog
@@ -98,7 +98,6 @@ namespace RenderGraph::Frame::Driver
 			std::array<RecordingLog, kSegments> switchLog{};
 			std::array<std::uint64_t, kLagBuckets.size()> lags{};
 			std::array<std::uint64_t, kLagBuckets.size()> lagsTotal{};
-			std::array<bool, kErrors> errorLogged{};  // one line per kind for the session
 			std::array<bool, kSegments> everPresent{};  // session
 			std::array<std::uint64_t, kSegments> absentAfterTotal{};  // session
 			std::unordered_map<std::string, std::uint64_t> untappable;  // per client, the frame its work last lagged with nothing on its way
@@ -574,34 +573,35 @@ namespace RenderGraph::Frame::Driver
 			return fmt::format("{}:{}", file, a_where.line());
 		}
 
-		struct Violations
+		/**
+		* @brief The violation policy: tap errors by TapError kind, fatal with MismatchFatal, and the session's violation warnings.
+		* Made at its first use, which reads MismatchFatal.
+		*/
+		org::services::ViolationPolicy& Violations()
 		{
-			std::mutex mutex;
-			std::vector<std::string> kinds;
-		};
-
-		Violations& GetViolations()
-		{
-			static Violations s_violations;
-			return s_violations;
+			static org::services::ViolationPolicy s_policy({
+				.kinds = kErrors,
+				.fatal = MismatchFatal(),
+				.onFatal = [](std::string_view a_message) {
+					RenderGraph::Fatal("frame tap error", fmt::format("{} Development builds stop here (CS_ORG_MISMATCH_FATAL=0 logs it instead).", a_message));
+				},
+				.errorLabel = "[ORG] frame tap error",
+				.firstNote = "Its work is not drawn. Later errors of this kind are counted, not logged.",
+				.warningLabel = "[ORG] rule violation warning raised",
+				.warningNote = "The menu shows it until the game exits",
+			});
+			return s_policy;
 		}
 	}
 
 	void RaiseViolationWarning(std::string_view a_kind)
 	{
-		auto& violations = GetViolations();
-		const std::lock_guard lock(violations.mutex);
-		if (std::ranges::find(violations.kinds, a_kind) != violations.kinds.end())
-			return;
-		violations.kinds.emplace_back(a_kind);
-		logger::warn("[ORG] rule violation warning raised: {}. The menu shows it until the game exits", a_kind);
+		Violations().RaiseWarning(a_kind);
 	}
 
 	std::vector<std::string> ViolationWarnings()
 	{
-		auto& violations = GetViolations();
-		const std::lock_guard lock(violations.mutex);
-		return violations.kinds;
+		return Violations().Warnings();
 	}
 
 	bool MismatchFatal()
@@ -624,25 +624,14 @@ namespace RenderGraph::Frame::Driver
 	void NoteTapError(TapError a_error, SegmentId a_segment, std::string_view a_what, const std::source_location& a_where)
 	{
 		auto& state = Get();
-		state.errorsTotal.fetch_add(1, std::memory_order_relaxed);
 		const auto where = a_segment < SegmentId::Count ? fmt::format("{} segment", SegmentName(a_segment)) : std::string("hosted work");
 		// The full error. A test greps "[ORG] frame tap error".
 		const auto message = fmt::format("{}: {} (tap error: {}). Frame {} ({}, slot {}), {}: {}. Raised at {}.", ModeName(),
 			TapErrorMeaning(a_error), TapErrorName(a_error), state.current.frame, KindName(state.current.kind), state.current.slot, where, a_what,
 			SiteOf(a_where));
-		if (MismatchFatal())
-			RenderGraph::Fatal("frame tap error", fmt::format("{} Development builds stop here (CS_ORG_MISMATCH_FATAL=0 logs it instead).", message));
-		bool first = false;
-		{
-			const std::lock_guard lock(state.mutex);
-			++state.errors[static_cast<std::size_t>(a_error)];
-			first = !std::exchange(state.errorLogged[static_cast<std::size_t>(a_error)], true);
-		}
-		// One line per kind for the session, and the menu warning.
-		if (first) {
-			logger::error("[ORG] frame tap error: {} Its work is not drawn. Later errors of this kind are counted, not logged.", message);
+		// Fatal with MismatchFatal. Otherwise counted: one line per kind for the session, and the menu warning.
+		if (Violations().Note(static_cast<std::uint32_t>(a_error), message) == org::services::ViolationPolicy::Outcome::First)
 			RaiseViolationWarning(fmt::format("tap error: {}", TapErrorName(a_error)));
-		}
 	}
 
 	void NoteUnbackedUse(std::string_view a_target, std::string_view a_what, const std::source_location& a_where)

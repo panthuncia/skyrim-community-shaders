@@ -36,8 +36,6 @@
 #include <TlHelp32.h>
 #include <intrin.h>
 
-#include <tbb/concurrent_queue.h>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -54,57 +52,19 @@ namespace DCLF::Direct::detail
 		// Lanes per cull job. Smaller batches are coalesced into a job.
 		constexpr std::size_t kJobLanes = 2048;
 
-		/** @brief List pools reset off the render thread. Any thread pushes, the render thread pops. Never destroyed. */
-		tbb::concurrent_queue<ListPool>& ResetPools()
-		{
-			static auto* pools = new tbb::concurrent_queue<ListPool>;
-			return *pools;
-		}
 	}
 
-	void ResetLater(ListPool&& a_pool)
+	org::services::ResetPools<ListPool>& ListPools()
 	{
-		if (!a_pool.used) {
-			ResetPools().push(std::move(a_pool));
-			return;
-		}
-		// Shared because a task must be copyable. If refused at shutdown, the pool is released here.
-		auto pool = std::make_shared<ListPool>(std::move(a_pool));
-		(void)::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu, "dclf cpu list pool reset",
-			[pool](const auto&) {
-				DCLF_ZONE("CS.DCLF.Cpu.ListPoolReset");
-				pool->Reset();
-				ResetPools().push(std::move(*pool));
-			});
-	}
-
-	ListPool TakeResetPool()
-	{
-		ListPool pool;
-		(void)ResetPools().try_pop(pool);  // none ready, so make a new one
-		return pool;
-	}
-
-	rhi::CommandList* ListPool::Next(rhi::Device& a_device)
-	{
-		if (!allocator && a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, allocator) != rhi::Result::Ok)
-			return nullptr;
-		if (used == lists.size()) {
-			rhi::CommandListPtr list;
-			if (a_device.CreateSecondaryCommandList(rhi::QueueKind::Graphics, allocator.Get(), list) != rhi::Result::Ok)
-				return nullptr;
-			lists.push_back(std::move(list));
-		}
-		auto& list = lists[used++].Get();
-		list.Recycle(allocator.Get());
-		return &list;
-	}
-
-	void ListPool::Reset()
-	{
-		if (allocator && used)
-			allocator->Recycle();
-		used = 0;
+		// Never destroyed. A reset the executor refuses at shutdown releases its pool there.
+		static auto* pools = new org::services::ResetPools<ListPool>([](std::function<void()> a_reset) {
+			(void)::RenderGraph::Frame::SharedExecutor().Dispatch(SceneScheduler::Scope(), ::RenderGraph::Frame::Executor::Preparation, org::async::TaskDispatch::Cpu,
+				"dclf cpu list pool reset", [reset = std::move(a_reset)](const auto&) {
+					DCLF_ZONE("CS.DCLF.Cpu.ListPoolReset");
+					reset();
+				});
+		});
+		return *pools;
 	}
 
 	State& S()
@@ -122,13 +82,13 @@ namespace DCLF::Direct::detail
 		return index;
 	}
 
-	Worker& WorkerOf(FrameSlot& a_slot)
+	CullArena& WorkerOf(FrameSlot& a_slot)
 	{
 		const std::uint32_t index = WorkerIndex();
-		if (index >= a_slot.workerCount)
+		if (index >= a_slot.recording.Workers())
 			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("a CPU-pipeline cull ran on thread {} of a pool of {} (not a preparation worker)", index,
-				a_slot.workerCount));
-		return a_slot.workers[index];
+				a_slot.recording.Workers()));
+		return a_slot.recording.Arena(index);
 	}
 
 	/** @brief Render thread. The main resources' RTVs and DSV, made once per resources. Older ones stay alive while frames in flight use them. */
@@ -308,15 +268,15 @@ namespace DCLF::Direct::detail
 	void ArriveColour(FrameSlot& a_slot);
 
 	/** @brief Marks a culled batch's list end and writes its indirect draws in Indirect mode. */
-	CulledBatch* FinishCulled(FrameSlot& a_slot, SiteRun& a_run, SiteView& a_view, Worker& a_worker, std::size_t a_index, const CulledBatch& a_culled,
+	CulledBatch* FinishCulled(FrameSlot& a_slot, SiteRun& a_run, SiteView& a_view, CullArena& a_arena, std::size_t a_index, const CulledBatch& a_culled,
 		const RecordBindings& a_bindings)
 	{
-		auto* out = a_worker.arena.Make<CulledBatch>(1);
+		auto* out = a_arena.Make<CulledBatch>(1);
 		*out = a_culled;
 		out->last = a_index + 1 == a_view.list->size();
 		out->hasRuns = false;
 		if (DrawsIndirect(a_run, a_view))
-			if (const auto indices = WriteIndirectDraws(*out, *a_slot.set, a_view.type, a_view.depthPass, a_bindings, a_slot.indirect, a_worker.arena)) {
+			if (const auto indices = WriteIndirectDraws(*out, *a_slot.set, a_view.type, a_view.depthPass, a_bindings, a_slot.indirect, a_arena)) {
 				std::atomic_ref<std::uint64_t>(a_slot.counters.indices[static_cast<std::size_t>(a_run.site)]).fetch_add(indices, std::memory_order_relaxed);
 				std::atomic_ref<std::uint64_t>(a_slot.counters.viewIndices[static_cast<std::size_t>(a_view.type)]).fetch_add(indices, std::memory_order_relaxed);
 			}
@@ -329,7 +289,7 @@ namespace DCLF::Direct::detail
 		const auto viewName = CpuViewName(static_cast<std::size_t>(a_view.type));
 		ZoneText(viewName.data(), viewName.size());
 		const auto start = Clock::now();
-		auto& worker = WorkerOf(a_slot);
+		auto& arena = WorkerOf(a_slot);
 		const auto& list = *a_view.list;
 		const std::uint32_t parity = static_cast<std::uint32_t>(LiveParity(a_frame.frameValuesSeq));
 		const bool depthMain = a_run.site == Site::Depth && a_view.type == ViewType::Main;
@@ -340,12 +300,12 @@ namespace DCLF::Direct::detail
 			if (a_view.colourWords) {
 				const CulledBatch* depth = i < a_slot.mainDepthCount ? a_slot.mainDepth[i].load(std::memory_order_acquire) : nullptr;
 				if (!depth)
-					depth = &CullBatch(batch, parity, a_view.mainView, a_frame, worker.arena);
-				culled = &ColourObjectWords(*depth, a_view.view, a_frame, worker.arena);
+					depth = &CullBatch(batch, parity, a_view.mainView, a_frame, arena);
+				culled = &ColourObjectWords(*depth, a_view.view, a_frame, arena);
 			} else {
-				culled = &CullBatch(batch, parity, a_view.view, a_frame, worker.arena);
+				culled = &CullBatch(batch, parity, a_view.view, a_frame, arena);
 			}
-			auto* out = FinishCulled(a_slot, a_run, a_view, worker, i, *culled, bindings);
+			auto* out = FinishCulled(a_slot, a_run, a_view, arena, i, *culled, bindings);
 			if (depthMain && i < a_slot.mainDepthCount)
 				a_slot.mainDepth[i].store(out, std::memory_order_release);
 			if (!a_view.view.stampOnly)
@@ -701,7 +661,7 @@ namespace DCLF::Direct::detail
 		const std::size_t siteIndex = static_cast<std::size_t>(run->site);
 		const std::uint32_t statsSlot = !callback && run->slot->ownsEpochs ? SiteStats::Begin(run->device, a_list, siteIndex, run->frameValue) : ~0u;
 		// Guest records into secondaries. Native records straight into the epoch's primary list.
-		SiteOut out{ a_list, run->slot->csLists, run->device, run->bindings.resourceHeap, run->bindings.samplerHeap };
+		SiteOut out{ a_list, run->slot->recording.Lists(), run->device, run->bindings.resourceHeap, run->bindings.samplerHeap };
 		out.direct = SitesInline();
 		switch (run->site) {
 		case Site::Shadow:
@@ -888,11 +848,9 @@ namespace DCLF::Direct::detail
 		window.sum.sameBinds += c.sameBinds;
 		window.sum.pushes += c.pushes;
 		window.sum.indirects += c.indirects;
-		for (std::uint32_t w = 0; w < a_slot.workerCount; ++w)
-			a_slot.workers[w].arena.Reset();
-		// Reset the CS thread's command pool on the pool, since each reset is a driver call. The slot takes an already-reset pool instead.
-		if (a_slot.csLists.used)
-			ResetLater(std::exchange(a_slot.csLists, TakeResetPool()));
+		// The arenas let go, and the CS thread's command pool is reset on the pool, since each reset is a driver call. The slot takes an
+		// already-reset pool instead.
+		a_slot.recording.Retire(ListPools());
 		a_slot.queuesUsed = 0;
 		// The frame's objects leave the slot whole and are destroyed on the pool.
 		auto released = std::make_unique<ReleasedFrame>();
@@ -940,8 +898,7 @@ namespace DCLF::Direct::detail
 		{
 			auto slot = std::make_unique<FrameSlot>();
 			slot->index = a_index;
-			slot->workerCount = ::RenderGraph::Frame::PreparationWorkers() + ::RenderGraph::Frame::FrameCriticalWorkers();  // threads a cull runs on
-			slot->workers = std::make_unique<Worker[]>(slot->workerCount);
+			slot->recording = SlotRecording(::RenderGraph::Frame::PreparationWorkers() + ::RenderGraph::Frame::FrameCriticalWorkers());  // threads a cull runs on
 			return slot;
 		}
 

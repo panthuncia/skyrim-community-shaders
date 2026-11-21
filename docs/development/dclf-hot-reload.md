@@ -25,8 +25,9 @@ once, generically, with how to build it again, and its consumers bind through th
     -   It starts what was asked: it moves `SourcesGeneration`, tells the listeners, and runs the rebuilds' starts on one task.
     -   It finishes a reload once every rebuild is in: it logs one line and publishes each new payload as a new version of its
         slot, all at the next `Generation`. No version a holder has changes.
--   **Pins.** Every graph build pins the generation it is made at (`RenderGraph/PipelineVersions.h`: the `cs.org.pipeline-versions`
-    extension, `RenderGraph::SetRecordingTag`). Every recording of that graph carries the pin (`RecordingContext::Tag`) and binds
+-   **Pins.** Every graph build pins the generation it is made at (OMS `PipelinePins`, attached in `RenderGraph/PipelineVersions.h` as
+    the `cs.org.pipeline-versions` extension, under its key in `RenderGraph::SetRecordingTag`). Every recording of that graph
+    carries the pin (`RecordingContext::Tag` with `org::services::PipelinePinTag()`) and binds
     each slot's version at it (`LivePipelineSlot::At`). A graph built before a reload keeps binding the old versions, and so does a
     kept recording made on it, for as long as it lives.
 -   **The revision.** A reload that published versions moves the `ShaderGeneration` frame variable to the new generation and asks

@@ -2,15 +2,14 @@
 
 #include "RenderGraph/Frame/FrameDriver.h"
 
+#include <string>
+
 namespace RenderGraph::Frame
 {
-	bool StarvationWatch::NoteMiss(std::string_view a_why, SegmentId a_segment)
-	{
-		if (++misses <= kStarvedAfter)
-			return false;
-		Driver::NoteTapError(Driver::TapError::Starved, a_segment,
-			fmt::format("{} has not landed: {} misses with no new input since (last: {})", what, misses, a_why));
-		misses = 0;
-		return true;
-	}
+	StarvationWatch::StarvationWatch(std::string_view a_what) :
+		org::async::StarvationWatch(std::string(a_what), kStarvedAfter, [](std::string_view a_watched, std::string_view a_why, std::uint64_t a_misses, std::uint64_t a_segment) {
+			Driver::NoteTapError(Driver::TapError::Starved, static_cast<SegmentId>(a_segment),
+				fmt::format("{} has not landed: {} misses with no new input since (last: {})", a_watched, a_misses, a_why));
+		})
+	{}
 }

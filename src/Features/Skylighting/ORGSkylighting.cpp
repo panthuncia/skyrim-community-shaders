@@ -537,8 +537,9 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature)
 	// full visibility, unknown coverage.
 	namespace RF = RenderGraph::Frame;
 	const float unitSH = std::sqrt(4.0f * std::numbers::pi_v<float>);
-	const RF::Birth allBitsLit = RF::Birth::Fill([](const RF::BirthTexels& a_texels) {
-		std::memset(a_texels.texels.data(), 0xFF, a_texels.texels.size());
+	const RF::Birth allBitsLit = RF::Birth::Fill([](std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t a_rows, std::uint32_t a_depth,
+													 std::uint32_t a_rowPitch, std::byte* a_texels) {
+		std::memset(a_texels, 0xFF, static_cast<std::size_t>(a_rowPitch) * a_rows * a_depth);
 		return true;
 	});
 	const std::pair<RF::Birth, std::string_view> volumeBirth[kVolumes] = {

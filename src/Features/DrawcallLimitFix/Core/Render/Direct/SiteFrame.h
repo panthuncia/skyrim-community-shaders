@@ -27,6 +27,8 @@ namespace org
 #include <utility>
 #include <vector>
 
+#include <ORGModuleServices/RecordingPools.h>
+#include <ORGModuleServices/SecondaryListPool.h>
 #include <Render/RunRef.h>
 
 namespace org
@@ -50,28 +52,17 @@ namespace DCLF::Direct::detail
 		std::atomic_ref<T>(a_counter).fetch_add(a_value, std::memory_order_relaxed);
 	}
 
-	/** @brief DXVK's CS thread's secondaries for one frame slot, from its own command pool. Reset when the slot retires. */
-	struct ListPool
-	{
-		rhi::CommandAllocatorPtr allocator;
-		std::deque<rhi::CommandListPtr> lists;  // never moved, because SiteOut holds the open one by address
-		std::size_t used = 0;
+	/** @brief DXVK's CS thread's secondaries for one frame slot, from their own command pool (OMS). Reset when the slot retires. */
+	using ListPool = org::services::SecondaryListPool;
 
-		/** @brief A recycled secondary for recording, or null when one could not be made. */
-		rhi::CommandList* Next(rhi::Device& a_device);
-		void Reset();
-	};
+	/**
+	 * @brief A frame slot's CPU recording memory: a cull arena per pool worker and DXVK's CS thread's secondaries. Retired when the
+	 * slot is released, through ListPools.
+	 */
+	using SlotRecording = org::services::RecordingSlot<ListPool>;
 
-	/** @brief Any thread. Resets a_pool on DCLF's pool, since each reset is a driver call. None of its lists may be in use. */
-	void ResetLater(ListPool&& a_pool);
-	/** @brief Render thread. A pool ResetLater made ready, or a new one. */
-	ListPool TakeResetPool();
-
-	/** @brief A pool worker's cull arena for one frame slot. */
-	struct Worker
-	{
-		CullArena arena;
-	};
+	/** @brief List pools reset on DCLF's pool, since each reset is a driver call. Any thread hands in, the render thread takes. */
+	org::services::ResetPools<ListPool>& ListPools();
 
 	/** @brief DCLF's own views of the main targets, made once per resources. */
 	struct TargetViews
@@ -151,9 +142,7 @@ namespace DCLF::Direct::detail
 		bool ownsEpochs = true;
 		std::uint64_t retirePoint = 0;
 		bool retireNoted = false;
-		std::unique_ptr<Worker[]> workers;
-		std::uint32_t workerCount = 0;
-		ListPool csLists;  // DXVK's CS thread's
+		SlotRecording recording;  // the pool workers' cull arenas and DXVK's CS thread's secondaries
 		std::vector<std::unique_ptr<CulledQueue>> queues;  // reused, because an EventQueue's ring is never freed
 		std::size_t queuesUsed = 0;
 		std::deque<SiteView> views;

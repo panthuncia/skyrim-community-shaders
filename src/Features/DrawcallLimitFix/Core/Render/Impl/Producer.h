@@ -98,11 +98,22 @@ namespace DCLF
 				std::vector<std::shared_ptr<const org::async::RevisionFragment>> fragments;
 				friend bool operator==(const RecordingInputs&, const RecordingInputs&) = default;
 			};
+			/** @brief Hashes an epoch's recording inputs by the identity of each fragment. */
+			struct RecordingInputsHash
+			{
+				std::uint64_t operator()(const RecordingInputs& a_inputs) const
+				{
+					std::uint64_t hash = 0xcbf29ce484222325ull;
+					for (const auto& fragment : a_inputs.fragments)
+						hash = (hash ^ static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(fragment.get()))) * 0x100000001b3ull;
+					return hash;
+				}
+			};
 			// The current inputs and the last ones. A drop is not asked for again until the inputs change.
 			static constexpr std::size_t kRecordingsKept = 2;
 			// Per epoch. An entry's payload is the fragment its recordings resolve. The builder looks up and adds.
 			using RecordingCache = ::RenderGraph::Frame::EpochRecordings::Cache<RecordingInputs, kRecordingsKept,
-				::RenderGraph::Frame::EpochRecordings::AfterDrop::KeepUntilNewKey, std::shared_ptr<org::async::RevisionFragment>>;
+				::RenderGraph::Frame::EpochRecordings::AfterDrop::KeepUntilNewKey, RecordingInputsHash, std::shared_ptr<org::async::RevisionFragment>>;
 			std::array<RecordingCache, kMaxEpochs> recordingCaches;
 		} revisions;
 		/** @brief Recording requests not yet completed. The build point releases unsubmitted tickets for them. */

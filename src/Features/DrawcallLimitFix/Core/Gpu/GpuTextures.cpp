@@ -1143,11 +1143,7 @@ namespace DCLF
 		auto* service = Impl::ServiceNow(retained);
 		if (!service)
 			return kInvalid;
-		rhi::SrvDesc srv{};
-		srv.dimension = rhi::SrvDim::Texture2D;
-		srv.formatOverride = rhi::Format::R8G8B8A8_UNorm;
-		srv.tex2D.mipLevels = 1;
-		impl->nullBinding = service->CreateOwnedShaderResourceView(RenderGraphRuntime::Get().DeviceOwner(), {}, {}, srv);
+		impl->nullBinding = service->Null(RenderGraphRuntime::Get().DeviceOwner(), org::runtime::NullViewKind::Texture2D);
 		if (!impl->nullBinding) {
 			logger::warn("[DCLF] Null texture descriptors are unsupported (VK_EXT_robustness2 nullDescriptor)");
 			return kInvalid;
@@ -1165,15 +1161,9 @@ namespace DCLF
 		auto* service = Impl::ServiceNow(retained);
 		if (!service)
 			return kInvalid;
-		rhi::SrvDesc srv{};
-		srv.dimension = rhi::SrvDim::Buffer;
-		srv.buffer.kind = a_typed ? rhi::BufferViewKind::Typed : rhi::BufferViewKind::Structured;
-		if (a_typed)
-			srv.formatOverride = rhi::Format::R32_UInt;
-		else
-			srv.buffer.structureByteStride = sizeof(std::uint32_t);
 		auto& binding = impl->nullBufferBindings[a_typed ? 1 : 0];
-		binding = service->CreateOwnedShaderResourceView(RenderGraphRuntime::Get().DeviceOwner(), {}, {}, srv);
+		binding = service->Null(RenderGraphRuntime::Get().DeviceOwner(),
+			a_typed ? org::runtime::NullViewKind::TypedBuffer : org::runtime::NullViewKind::StructuredBuffer);
 		if (!binding) {
 			logger::warn("[DCLF] Null buffer descriptors are unsupported (VK_EXT_robustness2 nullDescriptor)");
 			return kInvalid;

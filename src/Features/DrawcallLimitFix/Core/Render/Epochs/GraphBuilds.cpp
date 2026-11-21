@@ -46,9 +46,6 @@ namespace DCLF
 					return true;
 			return false;
 		}
-
-		// Render thread. Set while DCLF has had no graph since its builds began, so its first builds are made from the newest state.
-		bool firstBuildsPending = false;
 	}
 
 	std::shared_ptr<const Draws::BuildState> IndirectDraws::Impl::CurrentBuildState()
@@ -79,10 +76,7 @@ namespace DCLF
 		next.shadowSlots = shadowEngine->SlotBuffers();
 		if (const auto& sceneBuffers = main && main->scene ? main->scene : scene)
 			next.passStates = sceneBuffers->passStates;
-		if (buildState && SameBuild(*buildState, next))
-			return buildState;
-		next.serial = (buildState ? buildState->serial : 0) + 1;
-		buildState = std::make_shared<const Draws::BuildState>(std::move(next));
+		buildState = Draws::BuildStates::Next(buildState, std::move(next), SameBuild);
 		return buildState;
 	}
 
@@ -92,16 +86,13 @@ namespace DCLF
 		if (!host || !RenderGraphRuntime::Get().IsActive())
 			return;
 		const auto state = CurrentBuildState();
-		if (!AnyDclfGraph(*host))
-			firstBuildsPending = true;
-		if (state->serial == Draws::BuiltBuildSerial())
+		// While a build is pending, the first ones too, the staged or attached graphs are the old ones. Built is published once
+		// none is, and while DCLF has had no graph since its builds began, its first builds are made from the newest state.
+		const auto settled = Draws::BuildStateInputs().Settle(state->serial, AnyDclfGraph(*host), [] { return RenderGraphRuntime::Get().BuildsSettled(); });
+		if (settled == Draws::BuildStates::Settled::None)
 			return;
-		// While a build is pending, the first ones too, the staged or attached graphs are the old ones.
-		if (!RenderGraphRuntime::Get().BuildsSettled())
-			return;
-		Draws::PublishBuiltBuildState(state->serial);
 		// The first builds attach when they are staged, so their state is attached too.
-		if (std::exchange(firstBuildsPending, false))
+		if (settled == Draws::BuildStates::Settled::BuiltAndAttached)
 			Draws::PublishAttachedBuildState(state);
 		// Post the inputs again even when nothing else moved, since the builder holds its make until this serial is built.
 		PostRevisionInputs();

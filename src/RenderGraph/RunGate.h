@@ -1,132 +1,76 @@
 #pragma once
 
-#include <array>
-#include <atomic>
+#include <Render/RunGate.h>
+
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
-#include <utility>
 
 namespace org
 {
-	class LatchBlock;
 	class RecordingContext;
-	struct RunRef;
 }
 
-struct ComputeProgram;
+namespace org::services
+{
+	struct ComputeProgram;
+}
+using ComputeProgram = org::services::ComputeProgram;
 
 namespace RenderGraph
 {
 	/**
-	 * @brief A per-run on/off switch for a client's dispatches and draws that keeps their recording.
+	 * @brief CS's run gate: org::RunGate with the host's current run and ComputeProgram dispatches.
 	 *
-	 * The pass records an indirect dispatch or draw whose counts live in a latch block, so the recording stays current whatever
-	 * the gate says. The frame anchors close every gate of a client at the start of each run, so work only happens through
-	 * entries the client's commit opened. Open and Close run on the render thread, record helpers on the host's thread.
+	 * The frame anchors close every gate of a client at the start of each run, so work only happens through entries the
+	 * client's commit opened. Open and Close run on the render thread, record helpers on the host's thread.
 	 */
-	class RunGate
+	class RunGate : public org::RunGate
 	{
 	public:
-		/** @brief Three group counts and a pad, or four draw words. */
-		static constexpr std::uint32_t kEntryBytes = 16;
+		using org::RunGate::RunGate;
 
 		/** @brief A closed gate. Render thread, with the runtime active. Never null: no host or no entries is fatal. */
 		static std::shared_ptr<RunGate> Create(std::string_view a_name, std::uint32_t a_entries = 1);
 
-		std::uint32_t Entries() const { return entries; }
+		using org::RunGate::Close;
+		using org::RunGate::OpenDispatch;
+		using org::RunGate::OpenDraw;
 
-		/** @brief Closes every entry for this run. The frame anchors do this before the commits. */
-		void Close() const;
+		/** @brief Closes every entry for the current run. The frame anchors do this before the commits. */
+		void Close() const { Close(Current()); }
 
-		/** @brief a_entry dispatches a_x x a_y x a_z groups this run. */
-		void OpenDispatch(std::uint32_t a_entry, std::uint32_t a_x, std::uint32_t a_y = 1, std::uint32_t a_z = 1) const;
+		/** @brief a_entry dispatches a_x x a_y x a_z groups in the current run. */
+		void OpenDispatch(std::uint32_t a_entry, std::uint32_t a_x, std::uint32_t a_y = 1, std::uint32_t a_z = 1) const
+		{
+			OpenDispatch(Current(), a_entry, a_x, a_y, a_z);
+		}
 
-		/** @brief a_entry draws a_vertices vertices a_instances times this run. The default is the fullscreen triangle. */
-		void OpenDraw(std::uint32_t a_entry, std::uint32_t a_vertices = 3, std::uint32_t a_instances = 1) const;
-
-		// The same for a named run. A segment's end point writes what its taps gathered into the run that submits it.
-
-		void Close(const org::RunRef& a_run) const;
-
-		void OpenDispatch(const org::RunRef& a_run, std::uint32_t a_entry, std::uint32_t a_x, std::uint32_t a_y = 1, std::uint32_t a_z = 1) const;
-
-		void OpenDraw(const org::RunRef& a_run, std::uint32_t a_entry, std::uint32_t a_vertices = 3, std::uint32_t a_instances = 1) const;
-
-		/** @brief Copies the gate's record of which entries a_from has open onto a_to. The latch words travel with the run on their own. */
-		void CopyOpen(const org::RunRef& a_from, const org::RunRef& a_to) const;
-
-		/** @brief CopyOpen for every live gate, listed by its client or not. Render thread. */
-		static void CopyOpenAll(const org::RunRef& a_from, const org::RunRef& a_to);
-
-		/** @brief Clears every live gate's record of a_run, not its latch words. Render thread. */
-		static void ClearOpenAll(const org::RunRef& a_run);
+		/** @brief a_entry draws a_vertices vertices a_instances times in the current run. The default is the fullscreen triangle. */
+		void OpenDraw(std::uint32_t a_entry, std::uint32_t a_vertices = 3, std::uint32_t a_instances = 1) const
+		{
+			OpenDraw(Current(), a_entry, a_vertices, a_instances);
+		}
 
 		/** @brief The host's current run, which is a commit's own. */
 		static org::RunRef Current();
 
-		/**
-		 * @brief Whether the commit opened a_entry for a_run with work to do. Only for passes recorded at execution.
-		 * True when the gate cannot tell, so a caller that skips on false never drops work.
-		 */
-		bool IsOpen(const org::RunRef& a_run, std::uint32_t a_entry) const;
-
 		/** @brief Records a_program's dispatch through a_entry. */
 		void Dispatch(org::RecordingContext& a_recording, const ComputeProgram& a_program, std::span<const std::uint32_t> a_constants, std::uint32_t a_entry) const;
-
-		/** @brief The latch and offset a RasterProgram::DrawDesc takes for a_entry. */
-		const org::LatchBlock& Latch() const { return *latch; }
-		std::uint32_t Offset(std::uint32_t a_entry) const { return a_entry * kEntryBytes; }
-
-		RunGate(std::shared_ptr<org::LatchBlock> a_latch, std::uint32_t a_entries);
-		~RunGate();
-		RunGate(const RunGate&) = delete;
-		RunGate& operator=(const RunGate&) = delete;
-
-	private:
-		/** @brief a_work says whether the words make the dispatch or draw do something. */
-		void Write(const org::RunRef& a_run, std::uint32_t a_entry, const std::array<std::uint32_t, 4>& a_words, bool a_work) const;
-
-		std::shared_ptr<org::LatchBlock> latch;
-		std::uint32_t entries = 0;
-		// A bit per entry the current run opened with work, one row per lease index.
-		// Close clears a row at each run's start, and the run is over before the lease index is reused.
-		std::uint32_t words = 0;
-		std::unique_ptr<std::atomic<std::uint64_t>[]> open;
 	};
 
-	/**
-	 * @brief A first-run gate: work that runs until one run with it submits, such as a first fill or clear.
-	 * The client's commit opens its entry while the work is pending, and its executed callback ends it. Keep one per registration
-	 * (captured by the desc's callbacks), so a new registration runs the work again. The work must be safe to run twice.
-	 * The client must be active while Pending(), so its commit runs. Render thread.
-	 */
-	class FirstRun
+	/** @brief org::FirstRun, opened in the host's current run. Render thread. */
+	class FirstRun : public org::FirstRun
 	{
 	public:
-		bool Pending() const { return pending; }
+		using org::FirstRun::Open;
 
 		/** @brief In the commit: opens a_entry with a_x x a_y x a_z groups while the work is pending. A copy or clear takes one group. */
 		void Open(const RunGate& a_gate, std::uint32_t a_entry, std::uint32_t a_x = 1, std::uint32_t a_y = 1, std::uint32_t a_z = 1)
 		{
-			opened = pending;
-			if (pending)
-				a_gate.OpenDispatch(a_entry, a_x, a_y, a_z);
+			// The current run is read only while the work is pending. Open ignores the run otherwise.
+			Open(a_gate, Pending() ? RunGate::Current() : org::RunRef{}, a_entry, a_x, a_y, a_z);
 		}
-
-		/** @brief In the executed callback: the run submitted. True when its commit had opened the work, which is then done. */
-		bool Executed()
-		{
-			if (!std::exchange(opened, false))
-				return false;
-			pending = false;
-			return true;
-		}
-
-	private:
-		bool pending = true;  // no run whose commit opened the work has submitted yet
-		bool opened = false;  // the last commit opened the work
 	};
 }
-

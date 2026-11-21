@@ -27,7 +27,9 @@
 #include "RenderGraph/UndeclaredAccess.h"
 
 #include <array>
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace DCLF
 {
@@ -51,9 +53,43 @@ namespace DCLF
 	static_assert(Draws::FrameConstantRowOffset(Extensions::kFrameConstantRowFirst) == Draws::kExtrasPixelFrameOffset + sizeof(ExtrasFrame::projectedGlobals),
 		"Core's first frame constant row is not right after the extras' pixel row");
 
-	void Draws::CommitUploads::Stage(const Versioned& a_target, const void* a_data, std::size_t a_bytes, std::uint64_t a_offset)
+	namespace
 	{
-		Stage(TargetOf(a_target), a_data, a_bytes, a_offset);
+		std::string FrameDataWhere(std::string_view a_route, std::optional<std::string_view> a_target, std::uint64_t a_offset)
+		{
+			std::string where(a_route);
+			where += ": ";
+			if (!a_target)
+				return where + "other";
+			if (*a_target == "cs.dclf.frame-constants")
+				return where + Draws::FrameConstantsPart(a_offset);
+			where += a_target->empty() ? std::string("unnamed") : std::string(*a_target);
+			return where;
+		}
+
+		// The upload classes' bytes, counted by destination under the stats switch.
+		class FrameDataSink final : public org::services::IUploadBytesSink
+		{
+		public:
+			bool Enabled() const override { return FrameData::Enabled(); }
+			void Note(std::string_view a_route, std::optional<std::string_view> a_target, std::uint64_t a_offset, std::size_t a_bytes) override
+			{
+				FrameData::Note(FrameDataWhere(a_route, a_target, a_offset), a_bytes);
+			}
+		};
+	}
+
+	const org::services::CommitUploadHooks& Draws::CommitHooks()
+	{
+		static FrameDataSink sink;
+		static const org::services::CommitUploadHooks hooks{ .onError = ::RenderGraph::FatalHandler("Drawcall Limit Fix"), .bytes = &sink };
+		return hooks;
+	}
+
+	std::shared_ptr<org::runtime::StagedUploadBatch> Draws::AcquireCommitBatch(std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>& a_pool)
+	{
+		DCLF_ZONE("CS.DCLF.Stage.AcquireBatch");
+		return org::services::AcquireStagedBatch(a_pool, std::size_t{ 1 } << 20);
 	}
 
 	std::shared_ptr<const StreamViews> Draws::MakeStreamViews(ObjectRecordStore& a_objects, ExtrasStore& a_extras, GeometryStore& a_geometries, const TablesContentEpochs& a_oldest,

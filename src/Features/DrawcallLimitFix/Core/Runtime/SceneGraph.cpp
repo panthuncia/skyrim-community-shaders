@@ -7,12 +7,12 @@
 
 #include <ORGModuleServices/Async/StateGraph.h>
 #include <ORGModuleServices/Async/VersionGrowthArtifact.h>
+#include <ORGModuleServices/Async/VersionedBufferPosts.h>
 #include <ORGModuleServices/Async/VersionedBufferProducer.h>
+#include <ORGModuleServices/Async/WindowGates.h>
 
 #include <array>
-#include <atomic>
 #include <span>
-#include <vector>
 
 namespace DCLF::Runtime
 {
@@ -38,68 +38,21 @@ namespace DCLF::Runtime
 		constexpr auto kPayloadPart = static_cast<std::uint16_t>(SceneArtifact::PayloadPart);
 		constexpr auto kTextureWindow = static_cast<std::uint16_t>(SceneArtifact::TextureWindow);
 		constexpr auto kTextureGate = static_cast<std::uint16_t>(SceneArtifact::TextureGate);
-
-		struct TextureWindowInput
-		{
-			std::function<std::shared_ptr<const org::async::GpuSubmissionSet>()> build;
-		};
-		struct TextureWindowBuilt
-		{
-		};
-		struct TextureGateInput
-		{
-			std::function<void()> run;
-		};
-		struct TextureGateRan
-		{
-			std::uint64_t id = 0;
-		};
 	}
-
-	/** @brief The posting thread's payload part waits, dropped once finished at its next post. */
-	struct SceneGraph::PayloadPartPosts
-	{
-		struct Wait
-		{
-			Graph::ArtifactAwaiter awaiter;
-			std::atomic<bool> finished = false;
-		};
-		std::vector<std::shared_ptr<Wait>> waits;
-		std::uint64_t ids = 0;
-	};
-
-	/** @brief Gates that ran, whose addresses are released at the next post. */
-	struct SceneGraph::TextureGates
-	{
-		std::atomic<std::uint64_t> ids{ 0 };
-		std::mutex mutex;
-		std::vector<Graph::ArtifactKey> ran;
-	};
 
 	SceneGraph::SceneGraph(std::shared_ptr<org::async::GraphScheduler> a_scheduler) :
 		graph(std::make_unique<Graph>(std::move(a_scheduler), "DCLF scene", Hooks())),
 		growths(std::make_unique<org::async::VersionGrowthPosts<org::async::DefaultStateGraphTypes>>(kBufferVersion, ::RenderGraph::Frame::Executor::Coordinator.lane,
 			::RenderGraph::Frame::Executor::Coordinator.domain)),
-		payloadParts(std::make_unique<PayloadPartPosts>()),
-		textureGates(std::make_unique<TextureGates>())
+		payloadParts(std::make_unique<org::services::VersionedBufferPosts<org::async::DefaultStateGraphTypes>>(kPayloadPart, ::RenderGraph::Frame::Executor::Coordinator.lane,
+			::RenderGraph::Frame::Executor::Coordinator.domain)),
+		textureGates(std::make_unique<org::async::WindowGates<org::async::DefaultStateGraphTypes>>(kTextureWindow, kTextureGate))
 	{
 		// A window does blocking file reads and texture creation on the streaming domain. A failed read still completes, so its gate opens
 		// on a texture that reads zero instead of waiting forever. A window the render graph uploads is GPU ready once its copy pass was submitted.
-		graph->RegisterTypedProducer<TextureWindowInput, TextureWindowBuilt>(kTextureWindow, ::RenderGraph::Frame::Executor::Streaming.lane, ::RenderGraph::Frame::Executor::Streaming.domain, "DCLF texture window",
-			[](const Graph::ArtifactBuildContext&, std::shared_ptr<const TextureWindowInput> a_input) {
-				auto pending = a_input->build();
-				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureWindowBuilt>()), std::move(pending));
-			});
+		textureGates->RegisterWindows(*graph, ::RenderGraph::Frame::Executor::Streaming.lane, ::RenderGraph::Frame::Executor::Streaming.domain, "DCLF texture window");
 		// A gate runs its request once the base window is ready. The graph does the wake.
-		graph->RegisterTypedProducer<TextureGateInput, TextureGateRan>(kTextureGate, ::RenderGraph::Frame::Executor::Preparation.lane, ::RenderGraph::Frame::Executor::Preparation.domain, "DCLF texture gate",
-			[gates = textureGates.get()](const Graph::ArtifactBuildContext& a_context, std::shared_ptr<const TextureGateInput> a_input) {
-				a_input->run();
-				{
-					std::scoped_lock lock(gates->mutex);
-					gates->ran.push_back(a_context.key);
-				}
-				return Graph::ArtifactBuildResult::Ready(org::async::ArtifactPayload::Make(std::make_shared<const TextureGateRan>()));
-			});
+		textureGates->RegisterGates(*graph, ::RenderGraph::Frame::Executor::Preparation.lane, ::RenderGraph::Frame::Executor::Preparation.domain, "DCLF texture gate");
 		// Growth runs on the preparation pool and is ready once its uploads complete.
 		org::async::RegisterVersionGrowthProducer(*graph, kBufferVersion, ::RenderGraph::Frame::Executor::Preparation.lane, ::RenderGraph::Frame::Executor::Preparation.domain, "DCLF buffer version");
 		// A payload part version is built from its predecessor on the preparation pool, ready once its copy and upload complete.
@@ -116,35 +69,17 @@ namespace DCLF::Runtime
 
 	bool SceneGraph::PostTextureWindow(std::uint64_t a_texture, std::uint64_t a_revision, std::function<std::shared_ptr<const org::async::GpuSubmissionSet>()> a_build)
 	{
-		Graph::ArtifactIntent intent;
-		intent.key = Graph::ArtifactKey{ kTextureWindow, a_texture, 0 };
-		intent.desiredRevision = a_revision;
-		intent.input = org::async::ArtifactPayload::Make(std::make_shared<const TextureWindowInput>(TextureWindowInput{ std::move(a_build) }));
-		intent.requestFingerprint = a_revision;
-		return static_cast<bool>(graph->PostRequest(std::move(intent), true));
+		return textureGates->PostWindow(*graph, a_texture, a_revision, std::move(a_build));
 	}
 
 	void SceneGraph::RetireTextureWindow(std::uint64_t a_texture)
 	{
-		graph->Release(Graph::ArtifactKey{ kTextureWindow, a_texture, 0 });
+		textureGates->RetireWindow(*graph, a_texture);
 	}
 
 	bool SceneGraph::PostTextureGate(std::uint64_t a_texture, std::uint64_t a_revision, std::function<void()> a_run)
 	{
-		std::vector<Graph::ArtifactKey> ran;
-		{
-			std::scoped_lock lock(textureGates->mutex);
-			ran.swap(textureGates->ran);
-		}
-		if (!ran.empty())
-			graph->ReleaseBatch(ran);
-		Graph::ArtifactIntent intent;
-		intent.key = Graph::ArtifactKey{ kTextureGate, textureGates->ids.fetch_add(1, std::memory_order_relaxed) + 1, 0 };
-		intent.desiredRevision = 1;
-		intent.requirements.push_back(org::async::ReadyGateAtLeast(Graph::ArtifactKey{ kTextureWindow, a_texture, 0 }, a_revision, org::async::ArtifactReadiness::GpuReady));
-		intent.input = org::async::ArtifactPayload::Make(std::make_shared<const TextureGateInput>(TextureGateInput{ std::move(a_run) }));
-		intent.requestFingerprint = intent.key.primaryID;
-		return static_cast<bool>(graph->PostRequest(std::move(intent), false));
+		return textureGates->PostGate(*graph, a_texture, a_revision, std::move(a_run));
 	}
 
 	bool SceneGraph::PostGrowth(GrowthWork a_work)
@@ -154,42 +89,7 @@ namespace DCLF::Runtime
 
 	bool SceneGraph::PostPayloadPart(org::services::VersionedBufferBuildInput a_input, PayloadPartDone a_done)
 	{
-		auto& posts = *payloadParts;
-		std::erase_if(posts.waits, [](const auto& a_wait) { return a_wait->finished.load(std::memory_order_acquire); });
-		const Graph::ArtifactKey key{ kPayloadPart, ++posts.ids, 0 };
-		Graph::ArtifactIntent intent;
-		intent.key = key;
-		intent.desiredRevision = 1;
-		intent.input = org::async::ArtifactPayload::Make(std::make_shared<const org::services::VersionedBufferBuildInput>(std::move(a_input)));
-		intent.requestFingerprint = key.primaryID;  // an input needs one, and each version is its own
-		const auto request = graph->PostRequest(std::move(intent), false);
-		if (!request)
-			return false;
-		auto wait = std::make_shared<PayloadPartPosts::Wait>();
-		// The coordinator lane runs exactly one of these, once. Nothing else requests the address, so it is released after.
-		auto finish = [graph = graph.get(), key, done = std::move(a_done), weak = std::weak_ptr<PayloadPartPosts::Wait>(wait)](
-						  std::shared_ptr<const org::services::PublishedBufferVersion> a_version, std::string a_error) {
-			done(std::move(a_version), std::move(a_error));
-			graph->Release(key);
-			if (const auto held = weak.lock())
-				held->finished.store(true, std::memory_order_release);
-		};
-		wait->awaiter = graph->AwaitExact(request.Handle(), org::async::ArtifactReadiness::GpuReady, ::RenderGraph::Frame::Executor::Coordinator.lane,
-			::RenderGraph::Frame::Executor::Coordinator.domain,
-			[finish](const Graph::ArtifactSnapshot& a_snapshot) {
-				auto version = a_snapshot.payload.Get<org::services::PublishedBufferVersion>();
-				if (a_snapshot.gpuSubmissions && a_snapshot.gpuSubmissions->Failed())
-					finish(nullptr, a_snapshot.gpuSubmissions->Failure());
-				else if (!version)
-					finish(nullptr, "the build made no version");
-				else
-					finish(std::move(version), {});
-			},
-			[finish](const Graph::ArtifactTermination& a_termination) {
-				finish(nullptr, a_termination.error.empty() ? std::string("the build ended without a version") : a_termination.error);
-			});
-		posts.waits.push_back(std::move(wait));
-		return true;
+		return org::services::PostVersionedBuffer(*graph, *payloadParts, std::move(a_input), std::move(a_done));
 	}
 
 	SceneGraph::~SceneGraph()

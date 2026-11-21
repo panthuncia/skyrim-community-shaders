@@ -66,12 +66,18 @@ set(ORG_MODULE_SERVICES_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
 set(ORG_MODULE_SERVICES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CS_ORG_ROOT}/ORGModuleServices" "${CMAKE_BINARY_DIR}/extern/ORGModuleServices" EXCLUDE_FROM_ALL)
 target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ORGModuleServices)
-# OMS's passes' shaders (GenerateMips.hlsl, ResolveMultisample.hlsl and their include), which CS compiles at runtime
-# with ComputeProgram from Data/Shaders/ORGModuleServices (org::services::kGenerateMipsShader). Copied into
-# package/Shaders at configure time, so every path that ships package/Shaders ships them; the copies are generated
-# (.gitignore) and follow the OMS checkout.
+# OMS's Dear ImGui renderer backend (src/RenderGraph/ImGuiBasicRHI.h is CS's adapter), on CS's imgui::imgui.
+set(ORG_MODULE_SERVICES_IMGUI_TARGET "imgui::imgui" CACHE STRING "" FORCE)
+include("${CS_ORG_ROOT}/ORGModuleServices/cmake/ImGuiBackend.cmake")
+target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ImGui)
+# OMS's shaders (GenerateMips, ResolveMultisample, PrefixSum, SortScatter, Hzb, ImGui, the raster programs' FullscreenVS and
+# their includes, among them HzbTest.hlsli, OrgResources.hlsli and FidelityFX's ffx_a.h and ffx_spd.h), which CS compiles
+# at runtime with its programs from Data/Shaders/ORGModuleServices (org::services::kGenerateMipsShader). DCLF's cull shaders include HzbTest.hlsli by that
+# path. Copied into package/Shaders at configure time, with FidelityFX-LICENSE.txt, so every path that ships
+# package/Shaders ships them; the copies are generated (.gitignore) and follow the OMS checkout.
 if(ORG_MODULE_SERVICES_SHADER_DIR)
-    file(GLOB _oms_pass_shaders "${ORG_MODULE_SERVICES_SHADER_DIR}/*.hlsl" "${ORG_MODULE_SERVICES_SHADER_DIR}/*.hlsli")
+    file(GLOB _oms_pass_shaders "${ORG_MODULE_SERVICES_SHADER_DIR}/*.hlsl" "${ORG_MODULE_SERVICES_SHADER_DIR}/*.hlsli"
+        "${ORG_MODULE_SERVICES_SHADER_DIR}/*.h" "${ORG_MODULE_SERVICES_SHADER_DIR}/*.txt")
     file(COPY ${_oms_pass_shaders} DESTINATION "${CMAKE_SOURCE_DIR}/package/Shaders/ORGModuleServices")
     set_property(DIRECTORY "${CMAKE_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_oms_pass_shaders})
 endif()
@@ -85,15 +91,16 @@ if(NOT CS_DXC_RUNTIME_DLLS)
     message(WARNING "Render graph: VULKAN_SDK has no dxcompiler.dll; runtime SPIR-V compilation will be unavailable in game")
 endif()
 
-# The render-graph compute passes compile their HLSL at runtime through ORGModuleServices (src/RenderGraph/
-# ComputeProgram.cpp), like Drawcall Limit Fix's Lighting builds; the sources ship with the other shaders.
+# The render-graph compute passes compile their HLSL at runtime through ORGModuleServices' programs
+# (ORGModuleServices/Programs/ComputeProgram.h), like Drawcall Limit Fix's Lighting builds; the sources ship with the other shaders.
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenRenderGraph::OpenRenderGraph OpenRenderGraph::ScheduleUI OpenRenderGraph::MemoryUI BasicRHI::BasicRHI)
 # Unbounded lock-free queues (tbb::concurrent_queue): the render graph's compute submitter. Static, as DCLF's executor's.
 if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE TBB::tbb)
-# CS's executor (src/RenderGraph/Async): the frame's lanes, graph and program builds, and DCLF's jobs run on it.
+# CS's executor, OMS's org::async::Executor (src/RenderGraph/Async/Lanes.h): the frame's lanes, graph and program builds, and
+# DCLF's jobs run on it.
 include(${CMAKE_CURRENT_LIST_DIR}/FrameExecutor.cmake)
 target_link_libraries(${PROJECT_NAME} PRIVATE FrameExecutor)
 if(CS_ORG_D3D12)
@@ -114,8 +121,6 @@ message(STATUS "Render graph: OpenRenderGraph from ${CS_ORG_ROOT}")
 
 # Drawcall Limit Fix (src/Features/DrawcallLimitFix/), on ORGModuleServices.
 get_target_property(_cs_dclf_plugin_sources ${PROJECT_NAME} SOURCES)
-# The source glob also finds the executor; it is compiled only in its own library (FrameExecutor), without the game's PCH.
-list(FILTER _cs_dclf_plugin_sources EXCLUDE REGEX "/src/RenderGraph/Async/Executor\.cpp$")
 include("${CS_ORG_ROOT}/ORGModuleServices/cmake/AsyncPrimitives.cmake")
 target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::AsyncPrimitives)
 # DCLF's CPU publication graph shares ORGModuleServices' scheduler/runtime; it is linked explicitly and can be exercised
@@ -129,8 +134,15 @@ target_link_libraries(${PROJECT_NAME} PRIVATE swf::embedded)
 # The plugin's source glob also finds these two; they are compiled only in their independently testable libraries, without
 # the game's PCH.
 list(FILTER _cs_dclf_plugin_sources EXCLUDE REGEX "/SceneGraph\.cpp$")
-# The CPU cull's wide kernels (Core/Render/Direct/CullSimd.h): each file built for its instruction set alone, without the game's PCH
-# (built for the baseline), and chosen at run time by what the CPU supports.
+# The CPU cull's frustum kernels and CPU detection: ORGModuleServices' sphere cull. Its kernels get the plugin's floating-point and
+# optimisation options, so they build as they did inside the plugin.
+include("${CS_ORG_ROOT}/ORGModuleServices/cmake/SphereCull.cmake")
+if(MSVC)
+    target_compile_options(ORGSphereCull PRIVATE "$<$<CONFIG:DEBUG>:${SC_DEBUG_OPTS}>" "$<$<CONFIG:RELEASE>:${SC_RELEASE_OPTS}>")
+endif()
+target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::SphereCull)
+# The CPU cull's paraboloid and portal kernels (Core/Render/Direct/CullSimd.h): each file built for its instruction set alone, without
+# the game's PCH (built for the baseline), and chosen at run time by what the CPU supports.
 set(_cs_dclf_simd ${CMAKE_SOURCE_DIR}/src/Features/DrawcallLimitFix/Core/Render/Direct)
 if(MSVC)
     set(_cs_dclf_avx2 /arch:AVX2)
