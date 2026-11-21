@@ -128,12 +128,12 @@ namespace DCLF::Features
 			Integrations::PhysicalSky::kVolCubeTrRegister,
 			Integrations::PhysicalSky::kVolCubeLumRegister,
 			Integrations::PhysicalSky::kMediumCloudDepthRegister,
-			Water::Draw::kRefractionRegister,
-			Water::Draw::kDisplacementRegister,
-			Water::Draw::kDepthRegister,
-			Water::Draw::kFlowMapRegister,
-			Water::Draw::kSsrRegister,
-			Water::Draw::kSsrRawRegister,
+			Water::Indirect::kRefractionRegister,
+			Water::Indirect::kDisplacementRegister,
+			Water::Indirect::kDepthRegister,
+			Water::Indirect::kFlowMapRegister,
+			Water::Indirect::kSsrRegister,
+			Water::Indirect::kSsrRawRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()

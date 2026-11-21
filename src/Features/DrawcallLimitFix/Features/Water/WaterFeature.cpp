@@ -1,6 +1,7 @@
 // Water: the engine's BSWaterShader draws drawn by the render graph in graph mode.
 // The engine side is WaterCapture.cpp and the graph side WaterDraws.cpp.
 
+#include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterParity.h"
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
@@ -20,6 +21,9 @@ namespace DCLF::Features::Water
 			Port::RegisterSwitches(a_context);
 			// The scene side does not need graph mode. In phase 1 it claims nothing, so the latch path below still draws all water.
 			WaterScene::Install(a_context);
+			// The water program family and its deferred ranges need the port, so only with the scene side on.
+			if (WaterScene::On())
+				Indirect::Register(a_context);
 			if (!Enabled())
 				return;
 			InstallHooks();
