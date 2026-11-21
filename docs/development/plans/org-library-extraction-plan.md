@@ -167,6 +167,8 @@ submodules named. The "<part> decisions" sections below say what each part decid
   `ORG_RG_VIEW_DIMENSION_TEXTURE_2D_MS` views, but `ContributorHost` refuses multisampled resources. OMS
   `ResolveMultisamplePass` reads its source through the default SRV (`Texture2DMS` in the shader), so it would hit this on
   D3D12; it has no CS user. Adding them is ORG work: a sample count in `TextureViews`, an MS dimension at view creation.
+  Done in lib-msaa (see "lib-msaa decisions"). The run that checks it is OMS `ORGResolveMultisampleTests` (WARP, and
+  `--vulkan`).
 
 ## Goal
 
@@ -405,7 +407,8 @@ regression.
   The single-tag API is gone; its one user was the pipeline pins.
 - **ORG `Builds{attached, staged}` snapshot readable from any thread.** DCLF prunes its cache on its builder thread only
   because `StagedGeneration` and `EpochRecordingCurrent` (`GraphHost.h:351,687`) are owner-thread calls.
-- **ORG multisampled SRVs.** Still missing (see "Checks that need a run").
+- **ORG multisampled SRVs.** Done in lib-msaa: MS SRVs, RTVs and DSVs, and contributor MS textures. Its test needs a run
+  (see "Checks that need a run").
 - **One error convention for library errors.** Decided (decision 115). `org::RunReadback` follows it (p0-lib): each
   `Create*` takes an `ErrorHandler`, and CS passes `RenderGraph::FatalHandler`. Other ORG throws are not converted yet.
 - **Thread rules in signatures** (tag types or debug asserts) instead of prose and runtime checks.
@@ -904,3 +907,29 @@ Decided by the agent, to confirm:
 - **Throws left in new OMS code** (executor `Desc` checks, `BufferChains` hook checks, required-argument checks in
   `RecordingPools.h`, `RetirementJoin.cpp`, `ProgramService.cpp`, the backing allocate hook) are setup or misuse checks.
   Converting them needs factories that return null and CS callers that check; left for a separate change.
+
+### lib-msaa decisions
+
+Decided by the agent, to confirm:
+
+- **New SRV variants, appended.** `SRVViewType` gains `Texture2DMS`, `Texture2DMSArray` (one per slice) and
+  `Texture2DMSArrayFull`, after `Texture2DStencil`, so the numbers CS passes as `SrvView::variant` stay the same. A
+  multisampled texture's default variant is `Texture2DMS` (or `Texture2DMSArray`). It has no `Texture2D` views, so a
+  caller that asks for one by name finds none instead of a view D3D12 rejects.
+- **Misuse is fatal.** A multisampled texture with a UAV, more than one mip, `generateMipMaps`, a cube or 3D type throws
+  `std::invalid_argument` when the `PixelBuffer` is made, and the descriptor manager checks the same. D3D11 allows none of
+  these, so CS's shapes never ask for them.
+- **No stencil SRV for multisampled depth.** A D3D12 `Texture2DMS` view has no plane slice. A pass that needs one asks
+  for it.
+- **`PixelBuffer::TryGetRHIResourceDesc` describes multisampled colour textures**, with their sample count.
+  `ResolveMultisamplePass::Prepare` reads it through `Describe`, and it had read 1 before. Depth textures are still not
+  described, as before. External textures carry their sample count too, so a multisampled game texture CS imports now
+  gets MS views.
+- **Multi-device multisampled textures throw** at the shared-representation step, with their own message.
+- **Contributor sample counts**: the registry refuses a count above 16 or not a power of two
+  (`ORG_RG_E_UNSUPPORTED_CAPABILITY`), and `ContributorHost` makes the texture with its count.
+- **BasicRHI needed no change.** It already had `RtvDim`/`DsvDim::Texture2DMS` and `Texture2DMSArray` on D3D12 and
+  Vulkan (2D image views).
+- **The test is in OMS** (`ORGResolveMultisampleTests`), since it needs `ResolveMultisamplePass` and the module's shader
+  compiler. It compiles the shader at run time with DXC (`ORG_SERVICES_TEST_DXC_DIR` names the DLLs' folder). Exit code 77
+  is a skip: no DXC, or a device without shader model 6.6. No ORG-only test was added.
