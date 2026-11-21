@@ -6,7 +6,7 @@
 // Phase 2 retests each list entry against the rebuilt HZB and appends survivors after phase 1's draws.
 // The depth commit zeroes the header. GrassArgsCS's colour mode zeroes the counts after reading them.
 #include "DrawcallLimitFix/CullEye.hlsli"
-#include "DrawcallLimitFix/HzbTest.hlsli"
+#include "ORGModuleServices/HzbTest.hlsli"
 
 // Must match GrassCullConstants (Features/Grass/GrassTables.h).
 cbuffer GrassCullConstants : register(b0)

@@ -66,12 +66,14 @@ set(ORG_MODULE_SERVICES_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
 set(ORG_MODULE_SERVICES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CS_ORG_ROOT}/ORGModuleServices" "${CMAKE_BINARY_DIR}/extern/ORGModuleServices" EXCLUDE_FROM_ALL)
 target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ORGModuleServices)
-# OMS's passes' shaders (GenerateMips.hlsl, ResolveMultisample.hlsl and their include), which CS compiles at runtime
-# with ComputeProgram from Data/Shaders/ORGModuleServices (org::services::kGenerateMipsShader). Copied into
-# package/Shaders at configure time, so every path that ships package/Shaders ships them; the copies are generated
-# (.gitignore) and follow the OMS checkout.
+# OMS's passes' shaders (GenerateMips, ResolveMultisample, PrefixSum, SortScatter, Hzb and their includes, among them
+# HzbTest.hlsli and FidelityFX's ffx_a.h and ffx_spd.h), which CS compiles at runtime with ComputeProgram from
+# Data/Shaders/ORGModuleServices (org::services::kGenerateMipsShader). DCLF's cull shaders include HzbTest.hlsli by that
+# path. Copied into package/Shaders at configure time, with FidelityFX-LICENSE.txt, so every path that ships
+# package/Shaders ships them; the copies are generated (.gitignore) and follow the OMS checkout.
 if(ORG_MODULE_SERVICES_SHADER_DIR)
-    file(GLOB _oms_pass_shaders "${ORG_MODULE_SERVICES_SHADER_DIR}/*.hlsl" "${ORG_MODULE_SERVICES_SHADER_DIR}/*.hlsli")
+    file(GLOB _oms_pass_shaders "${ORG_MODULE_SERVICES_SHADER_DIR}/*.hlsl" "${ORG_MODULE_SERVICES_SHADER_DIR}/*.hlsli"
+        "${ORG_MODULE_SERVICES_SHADER_DIR}/*.h" "${ORG_MODULE_SERVICES_SHADER_DIR}/*.txt")
     file(COPY ${_oms_pass_shaders} DESTINATION "${CMAKE_SOURCE_DIR}/package/Shaders/ORGModuleServices")
     set_property(DIRECTORY "${CMAKE_SOURCE_DIR}" APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_oms_pass_shaders})
 endif()

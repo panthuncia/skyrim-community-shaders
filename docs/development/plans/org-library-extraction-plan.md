@@ -141,7 +141,7 @@ Not part of this plan unless a phase touches them:
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
 | 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
-| 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
+| 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
@@ -446,3 +446,36 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p3-kernels decisions
+
+Decided by the agent, to confirm:
+
+- **Shader layout.** The moved shaders sit flat in OMS `shaders/`: `PrefixSum.hlsl`, `SortScatter.hlsl`, `Hzb.hlsl`,
+  `HzbTest.hlsli`, `ffx_a.h`, `ffx_spd.h` and `FidelityFX-LICENSE.txt`. Flat, so CS's configure-time copy
+  (`cmake/RenderGraph.cmake`) only needed `*.h` and `*.txt` added to its glob. DCLF's cull shaders include
+  `ORGModuleServices/HzbTest.hlsli` through the shader-root include directory. All of them are DXC-only, so no FXC path
+  changes.
+- **`ffx_a.h` moved too.** `Hzb.hlsl` needs it, and nothing else used DCLF's copy.
+- **`Common/HiZ/SPD.hlsl` stays.** It is not a copy of `ffx_spd.h`. It is a separate, trimmed SPD rewrite with D3D11
+  register bindings and its own licence header, compiled with FXC for `HiZPyramid.cpp`. Pointing it at OMS's header
+  would change D3D11's FXC output and tie the D3D11 path to the OMS copy. So the build keeps two SPD implementations
+  but one copy of `ffx_spd.h`.
+- **Scatter parameters.** The stride stays a root constant. The rank bits and the "range" words are defines
+  (`SortScatterLayout`, `SortScatterDefines`), so DCLF's build folds the same constants as before. Ranges are optional:
+  without them an item goes to `offsets[key] + rank`. DCLF's range words are `offsetof(DrawSequence, instanceCount)` and
+  `firstInstance`, restored to 1 and 0. I read the plan's "key word" as the word holding the range's first key and
+  "rank word" as the packed key and rank word.
+- **The scatter pass stays in DCLF.** Its gating reads DCLF's frame shapes, so OMS ships only the shader, the constants
+  and the defines. The pass now records through `ComputeKernel::Dispatch`.
+- **HZB inputs.** `HzbDesc` takes the depth as a `PixelBuffer` or a `declareDepth` callback. DCLF uses the callback,
+  since its depth is a `FrameAnchors::Texture` slot. The reduction is a define (`ORG_HZB_REDUCE_MIN`) carried in
+  `HzbProgram`. The far value uses what was the constants' padding word, so the layout stays 24 words. The reduction's
+  identity (outside the domain) is 0 for max and 1 for min, which assumes depth in [0, 1].
+- **HZB with no kernel.** The pass is still made and records nothing, as DCLF's did. `MakeHzbPass` returns null only
+  without a depth, pyramid or counter; DCLF's pass is only made with phase two, which has them.
+- **Barriers.** PrefixSum and HZB keep their full memory barrier between dispatches. `ComputeKernel::Dispatch`
+  rebinds the layout and pipeline per dispatch, where the HZB bound them once. That is extra commands, not a change in
+  results.
+- **Defines.** The moved programs keep `commonDefines` on, as before. `HzbTest.hlsli`'s depth margin is
+  `ORG_HZB_DEPTH_MARGIN`, defaulting to the old 1e-4.
