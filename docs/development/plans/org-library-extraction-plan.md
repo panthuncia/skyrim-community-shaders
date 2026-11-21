@@ -141,7 +141,7 @@ Not part of this plan unless a phase touches them:
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. p1-frame (code only, not built): StarvationWatch and FrameClock to OMS `Async/`, the violation policy to OMS `ViolationPolicy`; CS keeps `Frame/Starvation.h` and `FrameClock.h` as facades. Branches `org-native/extract-p1-frame`, OMS `extract/p1-frame`. |
 | 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
-| 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
+| 3 Programs and GPU primitives | in progress | p3-gates: `org-native/extract-p3-gates`, ORG and OMS `extract/p3-gates` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 3–4 written (p3-gates), not built: `org::RunGate`, `org::FirstRun`, `org::RunSlots` in ORG `Render/`, `org::services::MakeUavClearPass` in OMS `Passes/`; CS keeps `RunGate.h` and `FrameStaging.h` as adapters. See "p3-gates decisions". |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
@@ -465,3 +465,23 @@ Decided by the agent, to confirm:
   (at the first violation warning, not the first tap error).
 - **CS still raises the menu warning** for the first tap error of a kind (`Outcome::First`); the library does not name
   kinds.
+
+### p3-gates decisions
+
+Decided by the agent, to confirm:
+
+- **`org::RunGate::Create` returns null with a reason** (`std::string* error`), as a template `Create<Gate>` so CS makes its
+  own derived type. CS's `RenderGraph::RunGate` derives from it and keeps the fatal `Create`, the current-run overloads
+  (`Close()`, `OpenDispatch(entry, ...)`, `OpenDraw(entry, ...)`, `Current()`) and `Dispatch(ComputeProgram)`. Derived
+  rather than aliased because about 50 files use the no-run overloads and `RunGate::Current()`, and several forward-declare
+  `class RunGate`. ORG has no host-wide current run, and OMS's `ComputeKernel` is not visible from ORG.
+- **`org::FirstRun::Open` takes the run.** CS's `RenderGraph::FirstRun` derives and fills in the current run, reading it
+  only while the work is pending, as before.
+- **`UavClearPass` has no shader.** It records `ClearUavFloat`/`ClearUavUint`, not a kernel, so nothing moved to OMS's
+  shader folder and no program is built. It went to OMS `Passes/` as the plan says, taking a `UavClearTarget` (resolver or
+  plain resource; a `SelfDeclaringResource`) in place of `FrameAnchors::Texture`. Its one user, `AnchorPasses.cpp`, calls
+  OMS directly, and CS's `UavClearPass.{h,cpp}` are gone.
+- **`RunSlots` reads no frames-in-flight count.** The staging half that used one already moved, so there is nothing to
+  inject. `FrameStaging.h` keeps `AcquireStaging` and aliases `RunSlots`/`RunSlotsRegistry`.
+- **Tests:** ORG `OpenRenderGraphRunSlotsTests` (no device) and `TestRunGates` in `OpenRenderGraphExternalResourceTests`
+  (D3D12 runtime: latch words, open bits, staging copy, close, `FirstRun`).
