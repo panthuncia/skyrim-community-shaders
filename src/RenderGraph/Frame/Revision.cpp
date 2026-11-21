@@ -38,6 +38,7 @@
 #include <Render/Runtime/IUploadService.h>
 #include <Resources/Buffers/VersionedBuffer.h>
 #include <Resources/VersionedTexture.h>
+#include <rhi_helpers.h>
 
 #include <algorithm>
 #include <array>
@@ -635,6 +636,11 @@ namespace RenderGraph::Frame::Revision
 					switch (prepared.contents) {
 					case GraphResources::Contents::Zero:
 						request.contents = org::services::TextureContents::Zero;
+						break;
+					case GraphResources::Contents::Value:
+						request.contents = org::services::TextureContents::Value;
+						request.value = prepared.value;
+						request.valueFormat = rhi::helpers::ToRHI(prepared.valueFormat);
 						break;
 					case GraphResources::Contents::Fill:
 						request.contents = org::services::TextureContents::Fill;
