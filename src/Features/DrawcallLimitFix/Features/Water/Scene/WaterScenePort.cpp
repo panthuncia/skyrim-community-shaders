@@ -5,7 +5,8 @@
 //   into its values. kUnderwater is left out, since GetRenderPasses writes it from the camera every frame.
 // - derive: Port::DeriveRenderPasses with a frame-free input, so a classification never depends on the camera. The key's
 //   descriptors are the surface pass's: raw, and as CS's ModifyShaderLookup leaves them. The stencil index rides in the key's
-//   spare bits (WaterScene.h). Phase 1 claims nothing: plain water returns WaterUnclaimed, the rest WaterVariant.
+//   spare bits (WaterScene.h). Plain water is claimed only with CS_DCLF_WATER=2 while the water epochs draw it (Indirect::DrawnInput);
+//   otherwise it returns WaterUnclaimed. The rest is WaterVariant.
 // - evaluate: Port::EvaluateMaterial with a neutral frame, and SetupMaterial's textures. The frame's values are in the water
 //   material pool (WaterSceneRows.cpp), which the shader reads instead.
 // - shading: water writes no per-object shading. The pool row comes from the WaterMaterial shading field.
@@ -18,6 +19,7 @@
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
+#include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 #include "RenderGraph/Fatal.h"
 
@@ -200,8 +202,9 @@ namespace DCLF::Features::Water::WaterScene
 			out.vertex = passes.lookupDescriptor;
 			out.pixel = passes.lookupDescriptor;
 			out.familyKeyBits = static_cast<std::uint8_t>(StencilIndexOf(c.stencilBit));
-			// Phase 1 claims no water. Phase 2 returns None here for plain water.
-			a_derivation.reason = Ineligible::WaterUnclaimed;
+			// Plain water is drawn by DCLF only with the claim switch and while its epochs draw it. The CPU-driven pipeline has no
+			// water range, so the input is off there and the latch path keeps the water.
+			a_derivation.reason = Claims() && Extensions::ClassifyInputOn(Indirect::DrawnInput()) ? Ineligible::None : Ineligible::WaterUnclaimed;
 		}
 
 		std::uint32_t WaterVariants(const Api::MaterialPortDerivation& a_derivation)
