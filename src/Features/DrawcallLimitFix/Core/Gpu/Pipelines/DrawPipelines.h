@@ -395,6 +395,8 @@ namespace DCLF
 			std::uint32_t shadowRequested = 0;
 			std::uint32_t shadowReady = 0;
 			std::uint32_t shadowFailed = 0;
+			// Pipeline builds requested and not finished, of every kind.
+			std::uint32_t buildsInFlight = 0;
 			// Set versions published, and admissions that waited because every version was still held.
 			std::uint32_t setPublishes = 0, setWaits = 0, shadowSetPublishes = 0, shadowSetWaits = 0;
 			// Frames that wanted a pipeline not yet in their catalog draw natively meanwhile.

@@ -452,7 +452,9 @@ namespace DCLF::LoadHold
 		// A cold shader cache builds for many seconds while the counts stand still, so every finished build counts as progress.
 		const auto pipelines = DrawPipelines::Get().GetStats();
 		const std::uint64_t builds = std::uint64_t(pipelines.ready) + pipelines.failed + pipelines.shadowReady + pipelines.shadowFailed;
-		if (builds != std::exchange(hold.builds, builds))
+		// A build still queued counts too: a cold driver cache can take seconds per pipeline, and the shadow epoch cannot record
+		// without its pipelines. The cap still ends a hold whose builds never finish.
+		if (builds != std::exchange(hold.builds, builds) || pipelines.buildsInFlight > 0)
 			hold.progress = std::chrono::steady_clock::now();
 		if (waits == ~0u || waits < hold.best) {
 			hold.best = waits == ~0u ? hold.best : waits;

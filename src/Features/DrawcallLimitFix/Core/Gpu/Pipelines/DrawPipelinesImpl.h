@@ -591,9 +591,14 @@ namespace DCLF
 		template <class Done>
 		static void RequestBuild(std::function<org::services::PipelinePayload()> a_build, Done a_done)
 		{
-			org::services::BuildPipeline(BuildSubmitter(), std::move(a_build),
-				[a_done = std::move(a_done)](org::services::LiveBuild a_built) { a_done(Artifact{ std::move(a_built.payload), std::move(a_built.error) }); });
+			buildsInFlight.fetch_add(1, std::memory_order_relaxed);
+			org::services::BuildPipeline(BuildSubmitter(), std::move(a_build), [a_done = std::move(a_done)](org::services::LiveBuild a_built) {
+				buildsInFlight.fetch_sub(1, std::memory_order_relaxed);
+				a_done(Artifact{ std::move(a_built.payload), std::move(a_built.error) });
+			});
 		}
+		/** @brief Builds RequestBuild started that have not finished, so the load hold waits for them. Any thread. */
+		static inline std::atomic<std::uint32_t> buildsInFlight{ 0 };
 		/** @brief A pipeline's hot reload registration: how to rebuild it and the program it is built from now. */
 		struct Live
 		{
