@@ -2127,7 +2127,7 @@ namespace FrameAnchors
 			// The cache drops recordings of an older build, which keep its graph and alias pools alive, tens of MB each.
 			// The staged build's stay. It needs every slot ready to switch in, and alternating descriptions would starve it.
 			const auto epoch = EpochOfDeclared(a_declared);
-			auto entry = recordings.cache.Add({ a_state.host->BuildGeneration(epoch), a_state.host->StagedGeneration(epoch) }, std::move(key), a_frame);
+			auto entry = recordings.cache.Add(*a_state.host, epoch, std::move(key), a_frame);
 			if (a_asked)
 				*a_asked = true;
 			Driver::NoteRecording(static_cast<SegmentId>(a_declared), a_frame, fmt::format("{}{}", reason, a_why));
