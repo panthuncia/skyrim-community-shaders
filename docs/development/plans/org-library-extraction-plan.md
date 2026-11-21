@@ -163,6 +163,8 @@ Not part of this plan unless a phase touches them:
 | 3 Programs and GPU primitives | items 5–6 written, not built | `org-native/extract-p3-kernels`, OMS `extract/p3-kernels` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 5–6: OMS `Passes/PrefixSumPass`, `Passes/SortScatter.h`, `Passes/HzbPass` and their shaders; CS `PrefixSum.*`, DCLF `HzbLayout.h` and the moved shaders are gone. See "p3-kernels decisions". |
 
 | 3 Programs and GPU primitives | in progress | p3-pins: CS `org-native/extract-p3-pins`, ORG and OMS `extract/p3-pins` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Item 1 (p3-pins): done in code, not built. OMS `PipelinePins` and `VersionFor`; CS `PipelineVersions` keeps `Install`, `Adopted` and forwards the rest. |
+
+| 3 Programs and GPU primitives | in progress | `org-native/extract-p3-latched` (ORG `extract/p3-latched`) | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 7 and 8 (p3-latched): ORG `Render/LatchedCopies.h` (types, copy joining, `RecordLatchedCopies`) and `RenderPasses/LatchedCopiesPass.h` (`MakeLatchedCopiesPass`); `IDescriptorService::Null(owner, NullViewKind)` over `NullSrvDesc` (`Render/Runtime/NullViews.h`). DCLF's `Latched.h` is aliases, its pass factory a wrapper, `GpuTextures` null indices use `Null`. ORG test `OpenRenderGraphLatchedCopiesTests`. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
@@ -698,3 +700,24 @@ Decided by the agent, to confirm:
 - DXIL reflection still finds `dxcompiler.dll` by name in the process (`GetModuleHandleW`), as before, instead of
   asking a `ShaderCompiler` for its module. DCLF's `DxilStages.cpp` keeps its own per-thread DXC objects for the
   frame-source preprocess.
+
+### p3-latched decisions
+
+Decided by the agent, to confirm:
+
+- The latched copy types and the copy pass go to ORG as two headers: `Render/LatchedCopies.h` (no pass machinery, so
+  DCLF's widely included `Latched.h` pulls in nothing new) and `RenderPasses/LatchedCopiesPass.h`. `LatchedTarget`,
+  `LatchRegionsHeld` and `SetLatchWords` moved too, since they serve only latched copies.
+- `LatchedSource` renamed its host words: `shape` is `owner`, `hosted` is `groups`, `zeros` is `copyFixed`. The
+  aggregate order is unchanged, so only one DCLF line (`source.groups`) changed. DCLF keeps `MakeLatchedCopiesPass` as a
+  wrapper that passes `!cpuPipeline` as `copyFixed`.
+- The copy joining is `org::LatchedCopyRuns`, split out so it can be tested without a device.
+- `IDescriptorService::Null` is virtual with a default over `CreateOwnedShaderResourceView` and makes a new descriptor
+  each call (no cache in the service), because a cached binding would hold the device owner past a device change. Callers
+  keep the binding, as DCLF does.
+- `NullViewKind` covers Texture2D, 2D array, 3D, cube, cube array, typed, structured and raw buffers. Every texture kind
+  gets R8G8B8A8_UNorm with one mip: D3D12 needs a format for a null texture view, and Vulkan's null descriptor depends only
+  on the descriptor type. DCLF's Texture2D, typed (R32_UInt) and structured (stride 4) descriptions are unchanged.
+- DCLF's `NullOf` keeps its D3D11 1x1 views for array, cube and 3D slots. Swapping them for per-dimension null
+  descriptors would change what the engine's draws read (a D3D11 view through the import, not a null descriptor), so it
+  is left for a separate change.
