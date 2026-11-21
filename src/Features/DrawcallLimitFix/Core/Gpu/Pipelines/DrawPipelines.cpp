@@ -730,8 +730,8 @@ namespace DCLF
 		// Each range's target formats, read until every target has one. They are the engine's targets, made once.
 		for (std::size_t r = 0; r < Extensions::kDeferredRanges; ++r) {
 			const auto& entry = Extensions::DeferredRanges()[r];
-			auto& targets = renderInput.deferredTargets[r];
-			if (!entry.taken || targets.read)
+			auto& rangeTargets = renderInput.deferredTargets[r];
+			if (!entry.taken || rangeTargets.read)
 				continue;
 			DeferredTargets read{};
 			bool formats = true;
@@ -746,7 +746,7 @@ namespace DCLF
 			if (!formats || !read.count)
 				continue;
 			read.read = true;
-			targets = read;
+			rangeTargets = read;
 			changed = true;
 		}
 		if (changed)

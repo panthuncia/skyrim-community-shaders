@@ -12,7 +12,7 @@
 #include <array>
 #include <cstdint>
 
-namespace DCLF::Features::Water::Draw
+namespace DCLF::Features::Water::Indirect
 {
 	/**
 	 * @brief The water object rows' register (Water.hlsl's kDCLFWaterObjectsRegister). The rows' table family has no GPU buffer yet,

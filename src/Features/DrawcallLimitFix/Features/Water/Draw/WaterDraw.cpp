@@ -14,7 +14,7 @@
 #include <atomic>
 #include <functional>
 
-namespace DCLF::Features::Water::Draw
+namespace DCLF::Features::Water::Indirect
 {
 	namespace
 	{
