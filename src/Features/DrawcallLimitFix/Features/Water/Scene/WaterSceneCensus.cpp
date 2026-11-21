@@ -95,7 +95,7 @@ namespace DCLF::Features::Water::WaterScene
 				kRefusalNames[static_cast<std::size_t>(c.refusal)]);
 		}
 
-		std::shared_ptr<void> MakeComponent() { return std::make_shared<int>(0); }
+		std::shared_ptr<void> MakeCensusComponent() { return std::make_shared<int>(0); }
 
 		void WalkEnded(const Api::CoordinatorComponentContext& a_context)
 		{
@@ -188,7 +188,7 @@ namespace DCLF::Features::Water::WaterScene
 
 	void RegisterCensus(Api::InstallContext& a_context)
 	{
-		a_context.RegisterCoordinatorComponent({ .name = "water-census", .make = &MakeComponent, .walk = { .ended = &WalkEnded }, .retirement = { .forgot = &Forgot } });
+		a_context.RegisterCoordinatorComponent({ .name = "water-census", .make = &MakeCensusComponent, .walk = { .ended = &WalkEnded }, .retirement = { .forgot = &Forgot } });
 		a_context.RegisterReportLines({ .name = "water scene", .point = Api::ReportPoint::RenderThread, .lines = &Lines });
 	}
 }
