@@ -25,6 +25,7 @@ void ORGVolumetricClouds::SetInputSource(InputSource a_source) { inputs = std::m
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/Observed.h"
+#include "RenderGraph/Fatal.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ProgramService.h"
@@ -1201,7 +1202,8 @@ void ORGVolumetricClouds::Setup(const PhysicalSky& a_feature)
 	next->boundary = RenderGraph::Programs::Queue("VolumetricClouds", std::move(boundary));
 	next->gate = RenderGraph::RunGate::Create("cs.physical-sky.clouds.gate", kEntryCount);
 	next->latch = std::make_shared<org::LatchBlock>("cs.physical-sky.clouds.latch", kLatchBytes);
-	next->readback = org::RunReadback::Create("PhysicalSky::LightningCandidates", { SkyLightning::kCandidates * static_cast<std::uint32_t>(sizeof(float4)) });
+	next->readback = org::RunReadback::Create("PhysicalSky::LightningCandidates", { SkyLightning::kCandidates * static_cast<std::uint32_t>(sizeof(float4)) },
+		RenderGraph::FatalHandler(kName));
 	D3D11_BUFFER_DESC candidates{};
 	candidates.ByteWidth = SkyLightning::kCandidates * sizeof(float4);
 	candidates.Usage = D3D11_USAGE_DEFAULT;

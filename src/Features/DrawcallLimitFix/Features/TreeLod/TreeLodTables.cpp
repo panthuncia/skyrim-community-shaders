@@ -96,7 +96,7 @@ namespace DCLF::Features::TreeLod
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				auto counts = std::make_shared<TreeLodCounts>();
 				counts->readback = org::RunReadback::CreateRegions("cs.dclf.tree-lod-counts-readback", sizeof(VisibleHeader) + kStageSlots * kStageWords * 4,
-					Draws::kReadbackRanges);
+					Draws::kReadbackRanges, RenderGraph::FatalHandler("Drawcall Limit Fix"));
 				counts->filled.assign(counts->readback->Regions(), 0u);
 				tables->counts = std::move(counts);
 			}

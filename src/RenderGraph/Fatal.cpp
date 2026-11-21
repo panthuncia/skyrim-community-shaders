@@ -11,6 +11,11 @@ namespace RenderGraph
 		stl::report_and_fail(fmt::format("Community Shaders: {}: {}", a_area, a_why));
 	}
 
+	std::function<void(std::string_view)> FatalHandler(std::string_view a_area)
+	{
+		return [area = std::string(a_area)](std::string_view a_why) { Fatal(area, a_why); };
+	}
+
 	org::GraphHost& RequireGraphHost(std::string_view a_area)
 	{
 		auto& runtime = RenderGraphRuntime::Get();
