@@ -93,6 +93,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
 
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Epochs.h"

@@ -147,13 +147,13 @@ namespace DCLF
 		}
 		bool drawn = true;
 		// In the GPU-driven graph, the CPU draws the forward family. Its run is handed to the epoch's late pass ahead of its execution.
-		const bool cpuForwardHandOff = !revision.direct;
+		const bool cpuForwardHandOff = a_submit.forwardSite && !revision.direct;
 		if (cpuForwardHandOff && !Direct::ForwardReached(result.optional)) {
 			++f.noSharedPayload;
 			return {};
 		}
 		const bool ok = Direct::ExecuteEpoch(traits.segment, [&] {
-			if (revision.direct)
+			if (revision.direct && a_submit.forwardSite)
 				drawn = Direct::ForwardReached(result.optional);
 			if (revision.recordings && !revision.recordings->recordings.empty())
 				impl->SubmitRevisionRecording(a_epoch, *revision.recordings, 0);

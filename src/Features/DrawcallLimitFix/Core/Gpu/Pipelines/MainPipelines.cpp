@@ -553,6 +553,11 @@ namespace DCLF
 		rhi::PipelineLayoutHandle a_layout, rhi::PipelineLayoutHandle a_zLayout, PipelineKey a_key, const ShaderPrograms::Program* a_program, TargetFormats a_targets,
 		EngineState a_state, bool a_frontCCW)
 	{
+		// The build point of ProgramBuild::DeferredRanges: one plain pipeline per deferred range the key draws in, into
+		// Built::pulledDeferred, in the Z-prepass layout. No family has that build yet, so its keys fail here and stay native,
+		// and no member is withheld with nothing to draw it.
+		if (Extensions::FamilyRules(a_key.rasterFlags).deferredRanges)
+			throw std::runtime_error(fmt::format("{} key: no deferred range pipeline build", a_keyName));
 		auto [vertex, pixel] = Parse<2>({ &a_program->vertex, &a_program->pixel });
 		const std::uint32_t decalGroup = RasterDecalGroup(a_key.rasterFlags);
 		if (!a_state.valid || (!RasterForward(a_key.rasterFlags) && decalGroup != 1 && decalGroup != 2))
@@ -768,6 +773,11 @@ namespace DCLF
 		}
 		state.plainColour.reserve(version->pipelines.size());
 		state.plainDepth.reserve(version->pipelines.size());
+		// Only a deferred family's keys have deferred pipelines, so without one these stay empty and cost nothing.
+		bool anyDeferred = false;
+		for (const auto& payload : version->pipelines)
+			for (const auto& pipeline : static_cast<const DrawPipelines::Impl::Built*>(payload.get())->pulledDeferred)
+				anyDeferred = anyDeferred || pipeline;
 		state.colour.reserve(version->pipelines.size());
 		state.depth.reserve(version->pipelines.size());
 		for (const auto& payload : version->pipelines) {
@@ -780,6 +790,11 @@ namespace DCLF
 			state.plainColour.push_back(pulledColour ? pulledColour->GetHandle() : decltype(pulledColour->GetHandle()){});
 			const auto& pulledDepth = built->pulledDecalDepth ? built->pulledDecalDepth : built->pulledDepth;
 			state.plainDepth.push_back(pulledDepth ? pulledDepth->GetHandle() : decltype(pulledDepth->GetHandle()){});
+			if (anyDeferred)
+				for (std::size_t r = 0; r < Api::kDeferredRanges; ++r) {
+					const auto& deferred = built->pulledDeferred[r];
+					state.deferred[r].push_back(deferred ? deferred->GetHandle() : decltype(deferred->GetHandle()){});
+				}
 		}
 		state.zLayout = impl.zLayout->GetHandle();
 		state.zDrawSignature = impl.zDrawSignature->GetHandle();

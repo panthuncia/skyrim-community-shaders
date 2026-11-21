@@ -48,6 +48,21 @@ namespace DCLF::Draws
 		bool operator==(const SetClassRanges&) const = default;
 	};
 	/**
+	 * @brief A deferred range's plain draw bucket: one set index's draws, with its plain pipeline and stencil reference. The draws
+	 * are at [first, first + capacity) of the main sequences, and the count at countWord of classCounts.
+	 */
+	struct DeferredCall
+	{
+		std::uint32_t set = 0, first = 0, capacity = 0, countWord = 0;
+		std::uint8_t stencilRef = 0;
+		rhi::PipelineHandle pipeline{};
+		bool operator==(const DeferredCall& o) const
+		{
+			return set == o.set && first == o.first && capacity == o.capacity && countWord == o.countWord && stencilRef == o.stencilRef && SameHandle(pipeline, o.pipeline);
+		}
+	};
+
+	/**
 	 * @brief What one segment's passes record against, and nothing that changes every frame. Per-frame values live in the
 	 * latch. Replaced only when it changes, so its identity is what a recording is prepared for.
 	 */
@@ -59,6 +74,8 @@ namespace DCLF::Draws
 		// Each half of the forward range. BuildDraws appends to the staging half, the forward epoch draws the sorted half.
 		std::uint32_t forwardCapacity = 0;
 		std::uint32_t refractionCapacity = 0;
+		// The colour segment's deferred ranges, bucket by bucket in draw order. A later epoch sharing this shape draws them.
+		std::array<std::vector<DeferredCall>, kDeferredRanges> deferred;
 		std::uint32_t sequenceDraws = 0, sequenceDecals = 0;
 		std::uint32_t cullMode = 0;
 		std::uint32_t width = 0, height = 0;  // the main pass viewport
@@ -95,7 +112,7 @@ namespace DCLF::Draws
 		{
 			return zCalls == o.zCalls && latched == o.latched && classes == o.classes &&
 			       terrainCapacity == o.terrainCapacity && forwardCapacity == o.forwardCapacity && refractionCapacity == o.refractionCapacity &&
-			       sequenceDraws == o.sequenceDraws &&
+			       deferred == o.deferred && sequenceDraws == o.sequenceDraws &&
 			       sequenceDecals == o.sequenceDecals && cullMode == o.cullMode &&
 			       width == o.width && height == o.height &&
 			       minDepth == o.minDepth && maxDepth == o.maxDepth && SameHandle(resourceHeap, o.resourceHeap) &&
@@ -169,6 +186,8 @@ namespace DCLF::Draws
 	{
 		return ForwardStagingSlot(a_frame) + 2ull * a_frame.forwardCapacity;
 	}
+	/** @brief Whether a colour shape's deferred range a_range has any bucket. */
+	inline bool DeferredRangeDrawn(const PassFrame& a_frame, std::uint32_t a_range) { return a_range < kDeferredRanges && !a_frame.deferred[a_range].empty(); }
 	constexpr std::uint32_t kSortSequencesGroup = 64;  // must match SortSequencesCS.hlsl
 	// The rank word holds the sort key in its top 12 bits and the rank below. A draw range past this is a hard failure
 	// until ranks get a word of their own.

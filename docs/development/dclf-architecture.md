@@ -1339,12 +1339,13 @@ frame inputs]` (`PayloadVersions::regionCount`, `mainInputsAt`, `shadowInputsAt`
     | 7 | `kViewReflection` | the water reflection's faces (Features/Reflection) |
     | 8, 9, 10 | `kViewDecal`, `kViewForward`, `kViewRefraction` | the colour segment's decal slots, forward range, refraction range |
     | 11 | `kViewFirstPerson` | the first-person view (Features/FirstPerson) |
+    | 12 | `kViewWater` | the colour segment's deferred ranges ([Deferred ranges](#deferred-ranges)) |
 
     A shadow entry carries the views of the modes that hold it (`ModeViewBits`). A feature's bit is checked against Core's
     (`Extensions::ResolveViewBits`, `Features/Manifest.cpp`).
 -   **A view is its bits.** Each view's latch names its view bits (`BuildDrawsLatch::viewBits`), and `BuildDrawsCS` drops an
     input whose mask has none of them before reading anything else. The Z-prepass reads `kDepthViewBits` (`kViewMainCull`), the
-    colour pass `kColourViewBits` (`kViewMain | kViewDecal | kViewForward | kViewRefraction`), a shadow view its mode's bit (the
+    colour pass `kColourViewBits` (`kViewMain | kViewDecal | kViewForward | kViewRefraction | kViewWater`), a shadow view its mode's bit (the
     sun's and the spot lights' cascades apart). A shadow view also names the key word it reads (`KeyWordOf`): the caster key or
     its occlusion map's key, with the shadow row for its material.
 -   **Main segments.** One build makes both segments' payloads. A pair is drawable only when both segments' shader variants are
@@ -2334,6 +2335,33 @@ Effect meshes under one billboard node are turned per draw on the GPU (Features/
 -   **A particle system under a billboard** needs no turn: the engine draws the world and particles of its last update, which the
     snapshot copies. A billboard DCLF draws whole is no longer turned by any cull, so such a system keeps the turn its last update
     left.
+
+### Deferred ranges
+
+Objects the colour segment culls once and a later epoch draws (`Api/DeferredRanges.h`, `Core/Extensions/DeferredRanges.cpp`,
+`Core/Render/Passes/DeferredRanges.cpp`). Water is the first user (docs/development/plans/dclf-water-indirect.md); nothing
+registers one yet.
+-   **Which objects.** A key of a program family built as `ProgramBuild::DeferredRanges` (`ProgramFamily::Water`: key bit 18,
+    `kRasterWater`). `MainMaskOf` gives its object `kViewWater` alone: never a depth segment input, so never in the HZB. The family
+    rule `deferredRanges` keeps its keys out of the Z-prepass buckets, the state classes and the main and terrain plain buckets.
+-   **The ranges.** Two Core slots (`DeferredRangeSlot::Range0`, `Range1`). A registration names the family, a pure `draws(key,
+    stencilRef)` and the pass's colour targets. Each range has one bucket per set index that draws in it, ordered by stencil
+    reference, then set index (`PlanDeferredRanges`, beside `PlanSetClasses`). Its map section follows the decals' in the class map
+    (header words 5 and 6), its count words follow the decal buckets' in `classCounts`, and its sequences follow the refraction
+    range (`MainLayout::deferredCapacity`). The shape holds the buckets (`PassFrame::deferred`) and compares them.
+-   **The cull.** BuildDrawsCS's colour dispatch: frustum, then the HZB, once per object, then one pooled plain sequence per range
+    in its set index's bucket (`AppendDeferred`). Depth phase 1 stamps the frustum only (`kStampOnlyViews`). Counters: words 44-47,
+    the `deferred ranges (sampled frame)` line.
+-   **The draws.** Pass keys `core.deferred-range0` and `core.deferred-range1`, made only in an epoch sharing `main.colour`'s shape.
+    One plain indexed indirect draw per bucket in the Z-prepass layout, `SetStencilRef` per run of equal references, into the
+    registration's targets and the main depth. Not device-generated commands: the stencil reference cannot change per sequence.
+    The pipelines are `Built::pulledDeferred` (`IndirectState::deferred`); the build point in `DrawPipelines::Impl::Build` refuses
+    such keys until a family provides it, so they stay native.
+-   **The epoch.** Its owner calls `Draws::SubmitDeferredEpoch(epoch)` at its trigger: `SubmitSharedEpoch` without the forward site's
+    hand-off (`SharedEpochSubmit::forwardSite`), skipped while no range has a bucket. No schedule row lists the passes yet.
+-   **With no members** nothing is planned, no sequence is written and no pass records, and the colour commit zeroes four more count
+    words.
+-   **Not in the CPU-driven pipeline.** Its lanes take no `kViewWater` input, so a member would draw nowhere there.
 
 ### Decals and pass layers
 
