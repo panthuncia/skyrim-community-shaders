@@ -1,52 +1,13 @@
 #ifndef __ORG_RESOURCES_DEPENDENCY_HLSL__
 #define __ORG_RESOURCES_DEPENDENCY_HLSL__
 
-// Resource declarations that build for both of CS's shader paths from one list:
+// Resource declarations that build for both of CS's shader paths from one list. The macros are ORGModuleServices'
+// (shaders/OrgResources.hlsli, staged at Data/Shaders/ORGModuleServices); its comment explains the list and its kinds.
 // - D3D11 (FXC, *_5_0): each entry is a register-bound declaration, as before.
-// - ORG (DXC, CS_ORG_BINDLESS): each entry is a handle in the push block, a cbuffer at b0. The
-//   resource is fetched from the descriptor heap by that handle (BasicRHI's bindless ABI). This
-//   expansion builds for SPIR-V (Vulkan) and for DXIL (D3D12, SM 6.6) alike.
+// - ORG (DXC, CS_ORG_BINDLESS): each entry is a handle in the push block, read from the descriptor heap.
+// The C++ side is src/RenderGraph/ShaderBindings.h.
 //
-// A shader lists its resources once, as an X-macro, then expands it twice: into the push block,
-// and into the declarations.
-//
-//   #define MY_RESOURCES(X)                           \
-//       X(SRV, Texture2D<float4>, InputTexture, 0)    \
-//       X(UAV, RWTexture2D<float4>, OutputTexture, 0) \
-//       X(SAMPLER, SamplerState, LinearSampler, 0)    \
-//       X(CBUFFER, MyConstants, Constants, 1)         \
-//       X(LATCH, MyFrame, Frame, 2)                   \
-//       X(PUSH, MyDispatch, Dispatch, 3)
-//   ORG_PUSH_BLOCK(MY_RESOURCES(ORG_HANDLE))
-//   MY_RESOURCES(ORG_RESOURCE)
-//
-// The shader invokes the list itself: FXC's preprocessor cannot take a list's name as a macro
-// argument.
-//
-// Each entry is X(kind, type, name, register number):
-// - SRV: t#. Texture2D/3D/Cube(+Array), StructuredBuffer, ByteAddressBuffer, Buffer.
-// - UAV: u#. RWTexture*, RWStructuredBuffer, RWByteAddressBuffer, RWBuffer.
-// - SAMPLER: s#. SamplerState or SamplerComparisonState.
-// - CBUFFER: b#. A struct. D3D11: a cbuffer holding one member of that struct. ORG: a constant
-//   buffer read from the heap (ConstantBuffer<T>). Code reads its fields as ORG_CB(name).field on
-//   every path, which also allows indexing an array in the struct with a dynamic index.
-// - LATCH: b#. A struct. D3D11: as CBUFFER. ORG: the struct loaded from a raw buffer at a byte
-//   offset, both given in the push block: the execution's region of an org::LatchBlock. For values
-//   that change every frame, which a recording reused across frames cannot hold: the host writes the
-//   region just before the submission. The struct must have the same layout packed tightly as in
-//   cbuffer packing: no member crosses a 16-byte row, and there are no gaps.
-// - PUSH: b#. A struct. D3D11: as CBUFFER. ORG: the struct itself, inside the push block. For
-//   small values fixed in the recording that change between its dispatches (a mip level, a pass
-//   index). PUSH entries go last.
-// - EXTERN: a resource an included header declares with ORG_RESOURCE. D3D11: nothing here (the
-//   header binds the register). ORG: its handle only; the header reads OrgHandle_<name>.
-// - EXTERN_LATCH: a LATCH an included header declares with ORG_RESOURCE. D3D11: nothing here. ORG:
-//   its handle and byte offset only, as a LATCH entry's; the header reads them.
-// - UNREAD: a resource an included header declares with ORG_HEADER_SRV that this shader never
-//   reads. D3D11: nothing here. ORG: nothing in the push block; OrgHandle_<name> is a constant 0,
-//   so the header's declaration builds, and DXC drops it as unused.
-// - UNREAD_LATCH: a LATCH an included header declares that this shader never reads. D3D11:
-//   nothing here. ORG: as UNREAD, with OrgHandle_<name> and OrgOffset_<name> constant 0.
+// CS adds one kind:
 // - SHARED: CS's shared constant buffers, first in the list: X(SHARED, ConstantBuffer, Shared, 0)
 //   (type, name and register are not used). D3D11: nothing here; FrameBuffer (b12), SharedData
 //   (b5), FeatureData (b6) and Permutation (b4) stay the cbuffers their headers declare. ORG: four
@@ -54,9 +15,7 @@
 //   the heap (Common/NamespacedCBuffer.hlsli, ORG_SHARED_*), and shader bodies are unchanged. The
 //   C++ side fills them from SharedConstants (src/RenderGraph/SharedConstants.h).
 //
-// Resources declared by headers: their handles must exist before the header is included, so a
-// shader with EXTERN or SHARED entries expands its push block before those includes and its own
-// declarations after them:
+// A shader with SHARED entries expands its push block before the shared headers and its own declarations after them:
 //
 //   #define ORG_SHARED_CONSTANTS
 //   #include "Common/OrgResources.hlsli"
@@ -65,150 +24,23 @@
 //   #include "Common/SharedData.hlsli"
 //   MY_RESOURCES(ORG_RESOURCE)
 //
-// The ORG push block, which the C++ side mirrors (src/RenderGraph/ShaderBindings.h):
-// 1. one uint handle per SRV, UAV, SAMPLER, CBUFFER and EXTERN entry, two uints per LATCH and
-//    EXTERN_LATCH entry (the handle, then the byte offset), and four for SHARED, in list order;
-// 2. then each PUSH struct, in list order, each starting on a 16-byte boundary (cbuffer packing).
-// The whole block is at most 32 words (128 bytes, Vulkan's guaranteed push constant size).
-//
-// Shared headers' own resources (SharedData's depth, Light Limit Fix's light lists, IBL, Terrain
-// and Cloud Shadows, Physical Sky) are declared with ORG_HEADER_SRV(type, name, register), and their
-// samplers with ORG_HEADER_SAMPLER(type, name, register). Everywhere they stay
-// register-bound as before. An ORG pass shader that defines ORG_HEADER_RESOURCES before including
-// this file reads them from the heap instead, and lists each one, of every such header it
-// includes, as an EXTERN entry (EXTERN_LATCH for a header's LATCH), or as an UNREAD
-// (UNREAD_LATCH) entry when it never reads it. A header resource missing from the list is an
-// undeclared OrgHandle_<name> in the DXC build.
-//
-// Large constant buffers read as globals: a shader whose D3D11 code reads a cbuffer's fields by
-// their bare names (not name.field) lists the fields once, as M(type, name) for a value and
-// A(type, name, count) for an array, and declares them with the ORG_GLOBAL_* macros:
-//
-//   #define MY_CB_FIELDS(M, A) M(float4, Tint) A(float4, Weights, 3)
-//   ORG_GLOBAL_LATCH_BEGIN(MyConstants, MyCB, 1)
-//   MY_CB_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
-//   ORG_GLOBAL_LATCH_END(MyConstants, MyFrame, 1)
-//   #define ORG_GLOBAL_LATCH MyFrame
-//   MY_CB_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
-//   #undef ORG_GLOBAL_LATCH
-//
-// D3D11: cbuffer MyCB : register(b1) holding the fields, as before; the statics expand to nothing.
-// ORG: struct MyConstants holding the fields, a LATCH entry MyFrame of it, and a static per field
-// copied from MyFrame, so the code reads the same names on both paths. The push block lists the
-// latch itself: ORG_HANDLE(LATCH, MyConstants, MyFrame, 1). ORG-only members may go between the
-// field list and ORG_GLOBAL_LATCH_END, under #if defined(CS_ORG_BINDLESS). The shader invokes the
-// field list itself, as it does its resource list.
-//
-// Handle tables: a shader that reads more resources than the push block holds keeps their handles in a table, one uint per
-// resource, which the pass writes into a buffer of its own (AnchorPasses' Dispatch::table and Bind::Table). The shader
-// declares the table as a struct of `uint OrgHandle_<name>;` fields read through one LATCH entry, then a static
-// `OrgHandle_<name>` per field copied from it, before the headers that declare the resources with ORG_HEADER_SRV,
-// ORG_HEADER_UAV and ORG_HEADER_SAMPLER. The C++ table lists the same names in the same order.
-//
-// Not covered: arrays of resources and append/consume counters. A list cannot hold another list
-// (FXC rejects a macro passed on as an argument), so the shared handles are one SHARED entry.
+// Shared headers' own resources (SharedData's depth, Light Limit Fix's light lists, IBL, Terrain and Cloud Shadows,
+// Physical Sky) are declared with ORG_HEADER_SRV and ORG_HEADER_SAMPLER. Handle tables are written by AnchorPasses'
+// Dispatch::table and Bind::Table.
+
+#if defined(CS_ORG_BINDLESS) && !defined(ORG_BINDLESS)
+#	define ORG_BINDLESS
+#endif
+
+#include "ORGModuleServices/OrgResources.hlsli"
 
 #if defined(CS_ORG_BINDLESS)
-
-#	define ORG_PUSH_BLOCK(FIELDS) \
-		cbuffer OrgBindings : register(b0) { FIELDS }
-
-#	define ORG_HANDLE_SRV(T, N, R) uint OrgHandle_##N;
-#	define ORG_HANDLE_UAV(T, N, R) uint OrgHandle_##N;
-#	define ORG_HANDLE_SAMPLER(T, N, R) uint OrgHandle_##N;
-#	define ORG_HANDLE_CBUFFER(T, N, R) uint OrgHandle_##N;
-#	define ORG_HANDLE_LATCH(T, N, R) uint OrgHandle_##N, OrgOffset_##N;
-#	define ORG_HANDLE_PUSH(T, N, R) T N;
-#	define ORG_HANDLE_EXTERN(T, N, R) uint OrgHandle_##N;
-#	define ORG_HANDLE_EXTERN_LATCH(T, N, R) uint OrgHandle_##N, OrgOffset_##N;
-#	define ORG_HANDLE_UNREAD(T, N, R)
-#	define ORG_HANDLE_UNREAD_LATCH(T, N, R)
 #	define ORG_HANDLE_SHARED(T, N, R) \
 		uint OrgHandle_FrameBuffer;    \
 		uint OrgHandle_SharedData;     \
 		uint OrgHandle_FeatureData;    \
 		uint OrgHandle_Permutation;
-#	define ORG_HANDLE(K, T, N, R) ORG_HANDLE_##K(T, N, R)
-
-#	define ORG_RESOURCE_SRV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
-#	define ORG_RESOURCE_UAV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
-#	define ORG_RESOURCE_SAMPLER(T, N, R) static T N = SamplerDescriptorHeap[OrgHandle_##N];
-// CBUFFER on ORG. DXC's SPIR-V copies a ConstantBuffer held in a variable (a static, or the value a heap read
-// returns) into function memory once an array in it is indexed dynamically, and that copy fails validation. So on
-// Vulkan the buffer is an element of an array declared at the resource heap's binding: the same variable DXC makes
-// for ResourceDescriptorHeap. Reads index it in place. DXIL accepts the static, and rejects that array.
-// The binding and set are BasicRHI's VULKAN_RESOURCE_DESCRIPTOR_HEAP_BINDING and VULKAN_DESCRIPTOR_HEAP_SET
-// (extern/BasicRHI/rhi_shader_abi.h). Keep them the same.
-#	if defined(BASICRHI_SHADER_API_VULKAN)
-#		define ORG_VULKAN_RESOURCE_HEAP_BINDING 1000000
-#		define ORG_VULKAN_DESCRIPTOR_HEAP_SET 0
-#		define ORG_RESOURCE_CBUFFER(T, N, R) 			[[vk::binding(ORG_VULKAN_RESOURCE_HEAP_BINDING, ORG_VULKAN_DESCRIPTOR_HEAP_SET)]] ConstantBuffer<T> OrgConstantBuffers_##N[];
-#		define ORG_CB(N) OrgConstantBuffers_##N[OrgHandle_##N]
-#	else
-#		define ORG_RESOURCE_CBUFFER(T, N, R) static ConstantBuffer<T> N = ResourceDescriptorHeap[OrgHandle_##N];
-#		define ORG_CB(N) N
-#	endif
-#	define ORG_RESOURCE_LATCH(T, N, R)                                                   \
-		static ByteAddressBuffer OrgLatch_##N = ResourceDescriptorHeap[OrgHandle_##N]; \
-		static T N = OrgLatch_##N.Load<T>(OrgOffset_##N);
-#	define ORG_RESOURCE_PUSH(T, N, R)
-#	define ORG_RESOURCE_EXTERN(T, N, R)
-#	define ORG_RESOURCE_EXTERN_LATCH(T, N, R)
-#	define ORG_RESOURCE_UNREAD(T, N, R) static const uint OrgHandle_##N = 0;
-#	define ORG_RESOURCE_UNREAD_LATCH(T, N, R) \
-		static const uint OrgHandle_##N = 0;   \
-		static const uint OrgOffset_##N = 0;
-#	define ORG_RESOURCE_SHARED(T, N, R)
-#	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
-
-#	define ORG_GLOBAL_LATCH_BEGIN(T, B, R) struct T {
-#	define ORG_GLOBAL_LATCH_END(T, N, R) \
-		};                               \
-		ORG_RESOURCE_LATCH(T, N, R)
-#	define ORG_GLOBAL_MEMBER(T, N) T N;
-#	define ORG_GLOBAL_ARRAY(T, N, C) T N[C];
-#	define ORG_GLOBAL_STATIC(T, N) static T N = ORG_GLOBAL_LATCH.N;
-#	define ORG_GLOBAL_STATIC_ARRAY(T, N, C) static T N[C] = ORG_GLOBAL_LATCH.N;
-
-#else
-
-// FXC rejects an empty macro argument, so the handles expand to their kinds, which
-// ORG_PUSH_BLOCK drops.
-#	define ORG_PUSH_BLOCK(FIELDS)
-#	define ORG_HANDLE(K, T, N, R) K
-
-#	define ORG_RESOURCE_SRV(T, N, R) T N : register(t##R);
-#	define ORG_RESOURCE_UAV(T, N, R) T N : register(u##R);
-#	define ORG_RESOURCE_SAMPLER(T, N, R) T N : register(s##R);
-#	define ORG_RESOURCE_CBUFFER(T, N, R) \
-		cbuffer N##Buffer : register(b##R) { T N; }
-#	define ORG_CB(N) N
-#	define ORG_RESOURCE_LATCH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
-#	define ORG_RESOURCE_PUSH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
-#	define ORG_RESOURCE_EXTERN(T, N, R)
-#	define ORG_RESOURCE_EXTERN_LATCH(T, N, R)
-#	define ORG_RESOURCE_UNREAD(T, N, R)
-#	define ORG_RESOURCE_UNREAD_LATCH(T, N, R)
-#	define ORG_RESOURCE_SHARED(T, N, R)
-#	define ORG_RESOURCE(K, T, N, R) ORG_RESOURCE_##K(T, N, R)
-
-#	define ORG_GLOBAL_LATCH_BEGIN(T, B, R) cbuffer B : register(b##R) {
-#	define ORG_GLOBAL_LATCH_END(T, N, R) };
-#	define ORG_GLOBAL_MEMBER(T, N) T N;
-#	define ORG_GLOBAL_ARRAY(T, N, C) T N[C];
-#	define ORG_GLOBAL_STATIC(T, N)
-#	define ORG_GLOBAL_STATIC_ARRAY(T, N, C)
-
 #endif
-
-#if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
-#	define ORG_HEADER_SRV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
-#	define ORG_HEADER_UAV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
-#	define ORG_HEADER_SAMPLER(T, N, R) static T N = SamplerDescriptorHeap[OrgHandle_##N];
-#else
-#	define ORG_HEADER_SRV(T, N, R) T N : register(t##R);
-#	define ORG_HEADER_UAV(T, N, R) T N : register(u##R);
-#	define ORG_HEADER_SAMPLER(T, N, R) T N : register(s##R);
-#endif
+#define ORG_RESOURCE_SHARED(T, N, R)
 
 #endif  // __ORG_RESOURCES_DEPENDENCY_HLSL__

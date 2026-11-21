@@ -120,41 +120,6 @@ namespace ShaderBindings
 		}
 	}
 
-	rhi::SamplerDesc SamplerDescOf(SamplerPreset a_preset)
-	{
-		rhi::SamplerDesc desc{};
-		const auto address = [&desc](rhi::AddressMode a_mode) { desc.addressU = desc.addressV = desc.addressW = a_mode; };
-		const auto point = [&desc] {
-			desc.minFilter = desc.magFilter = rhi::Filter::Nearest;
-			desc.mipFilter = rhi::MipFilter::Nearest;
-		};
-		switch (a_preset) {
-		case SamplerPreset::LinearClamp:
-			break;
-		case SamplerPreset::LinearWrap:
-			address(rhi::AddressMode::Wrap);
-			break;
-		case SamplerPreset::LinearMirror:
-			address(rhi::AddressMode::Mirror);
-			break;
-		case SamplerPreset::LinearBorder:
-			address(rhi::AddressMode::Border);
-			desc.borderPreset = rhi::BorderPreset::TransparentBlack;
-			break;
-		case SamplerPreset::PointClamp:
-			point();
-			break;
-		case SamplerPreset::PointBorderWhite:
-			point();
-			address(rhi::AddressMode::Border);
-			desc.borderPreset = rhi::BorderPreset::OpaqueWhite;
-			break;
-		default:
-			break;
-		}
-		return desc;
-	}
-
 	org::OwnedDescriptorBinding Sampler(SamplerPreset a_preset)
 	{
 		struct CachedSampler

@@ -12,12 +12,14 @@
 #include "RenderGraph/Switches.h"
 
 #include <OpenRenderGraph/GraphHost.h>
+#include <Render/RenderGraph/ReadOrderCheck.h>
 #include <Render/RenderGraph/RenderGraph.h>
 #include <Render/RenderGraph/ScheduleTrace.h>
 
 #include <algorithm>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -79,41 +81,7 @@ namespace RenderGraph::Frame::Recipes
 
 		std::uint32_t EpochOfSegment(Segment a_segment) { return RenderGraphRuntime::EpochOf(a_segment); }
 
-		struct Pass
-		{
-			std::uint32_t stage = 0;
-			std::string name;
-			std::vector<std::string> reads, writes;
-		};
-
-		std::string ResourceName(const org::ScheduleTrace& a_trace, std::uint32_t a_index)
-		{
-			if (a_index >= a_trace.resources.size())
-				return fmt::format("#{}", a_index);
-			const auto& resource = a_trace.resources[a_index];
-			return resource.name.empty() ? fmt::format("#{}", resource.id) : resource.name;
-		}
-
-		/** @brief The passes of a_trace in plan order, by batch then position. */
-		void AppendPasses(std::uint32_t a_stage, const org::ScheduleTrace& a_trace, std::vector<Pass>& a_out)
-		{
-			std::vector<const org::ScheduleTrace::Pass*> ordered;
-			for (const auto& pass : a_trace.passes)
-				ordered.push_back(&pass);
-			std::ranges::stable_sort(ordered, [](const auto* a_left, const auto* a_right) {
-				return std::tie(a_left->batch, a_left->position) < std::tie(a_right->batch, a_right->position);
-			});
-			for (const auto* pass : ordered) {
-				Pass out{ .stage = a_stage, .name = pass->name };
-				for (const auto& access : pass->accesses) {
-					auto name = ResourceName(a_trace, access.resource);
-					auto& list = access.write ? out.writes : out.reads;
-					if (std::ranges::find(list, name) == list.end())
-						list.push_back(std::move(name));
-				}
-				a_out.push_back(std::move(out));
-			}
-		}
+		using Pass = org::ReadOrderPass;
 
 		/** @brief The recipe's passes in order. Epoch a_epoch's come from a_trace when given. */
 		std::vector<Pass> RecipePasses(const State& a_state, std::uint32_t a_epoch, const org::ScheduleTrace* a_trace)
@@ -122,12 +90,12 @@ namespace RenderGraph::Frame::Recipes
 			ForCheckedEpochs([&](std::uint32_t a_stage, const Table::Epoch& a_entry) {
 				const auto epoch = EpochOfSegment(a_entry.segment);
 				if (a_trace && epoch == a_epoch) {
-					AppendPasses(a_stage, *a_trace, passes);
+					org::AppendReadOrderPasses(a_stage, *a_trace, passes);
 					return;
 				}
 				const auto found = a_state.traces.find(epoch);
 				if (found != a_state.traces.end() && found->second.trace)
-					AppendPasses(a_stage, *found->second.trace, passes);
+					org::AppendReadOrderPasses(a_stage, *found->second.trace, passes);
 			});
 			return passes;
 		}
@@ -154,85 +122,64 @@ namespace RenderGraph::Frame::Recipes
 			return text;
 		}
 
+		const char* PassStage(const Pass& a_pass) { return StageName(static_cast<StageId>(a_pass.position)); }
+
 		/**
-		 * @brief Checks read order between stages, since a stage's graph orders its own passes.
+		 * @brief Checks read order between stages with ORG's read-order check, since a stage's graph orders its own passes.
 		 * A read with no writer comes from outside the graphs. One whose writers are all later must be declared in kPreviousFrame.
 		 * A CS transient read with no writer in its own stage is a finding, since absent passes may drop the writer.
 		 */
 		void Validate(State& a_state, const std::vector<Pass>& a_passes, std::vector<std::string>& a_findings)
 		{
-			std::map<std::uint32_t, std::set<std::string>> stageWrites;  // what each stage's passes write
-			for (const auto& pass : a_passes)
-				for (const auto& name : pass.writes)
-					stageWrites[pass.stage].insert(name);
-			std::set<std::string> unwritten;
-			for (const auto& pass : a_passes) {
-				if (Table::kStageTable[pass.stage].owner != Owner::Cs)
-					continue;
-				for (const auto& name : pass.reads)
-					if (!stageWrites[pass.stage].contains(name) && GraphResources::IsTransientName(name) && unwritten.insert(name).second)
-						a_findings.push_back(fmt::format("{} ({}) reads the transient {}, which no present pass of its stage writes: a pass that writes it is absent "
-														 "from the build while its reader is present. Keep the writer present whenever a reader is, or give the "
-														 "resource a lifetime across frames",
-							pass.name, StageName(static_cast<StageId>(pass.stage)), name));
-			}
-			std::map<std::string, std::uint32_t> firstWriter;  // the first pass that writes each resource
-			for (std::uint32_t i = 0; i < a_passes.size(); ++i)
-				for (const auto& name : a_passes[i].writes)
-					firstWriter.try_emplace(name, i);
-			std::set<std::string> previous, outside, found, sourceLater;
-			for (std::uint32_t i = 0; i < a_passes.size(); ++i)
-				for (const auto& name : a_passes[i].reads) {
-					const auto writer = firstWriter.find(name);
-					if (writer == firstWriter.end()) {
-						outside.insert(name);
-						continue;
-					}
-					if (a_passes[writer->second].stage <= a_passes[i].stage)
-						continue;
-					if (PreviousFrame(name)) {
-						previous.insert(name);
-						continue;
-					}
-					if (Table::kStageTable[a_passes[i].stage].owner == Owner::Fragment) {
-						sourceLater.insert(name);
-						continue;
-					}
-					if (!found.insert(name).second)
-						continue;
+			org::ReadOrderInputs inputs;
+			inputs.requiresLocalWriter = [](std::uint32_t a_stage) { return Table::kStageTable[a_stage].owner == Owner::Cs; };
+			// The fragment sources' stages declare resources that later stages write.
+			inputs.allowsLaterWriter = [](std::uint32_t a_stage) { return Table::kStageTable[a_stage].owner == Owner::Fragment; };
+			inputs.previousFrame = [](std::string_view a_name) { return PreviousFrame(a_name); };
+			inputs.transient = [](std::string_view a_name) { return GraphResources::IsTransientName(a_name); };
+			// ORG's derived frame-transient spans, checked against the traces.
+			inputs.frameTransient = [](std::string_view a_name) -> std::optional<org::ReadOrderTransient> {
+				const auto transient = Transients::FrameTransientOf(a_name);
+				if (!transient)
+					return std::nullopt;
+				return org::ReadOrderTransient{ transient->first, { transient->second.first, transient->second.last } };
+			};
+			const auto report = org::CheckReadOrder(a_passes, inputs);
+			using Kind = org::ReadOrderFinding::Kind;
+			for (const auto& finding : report.findings) {
+				const auto& pass = a_passes[finding.pass];
+				const auto& name = finding.resource;
+				switch (finding.kind) {
+				case Kind::UnwrittenTransient:
+					a_findings.push_back(fmt::format("{} ({}) reads the transient {}, which no present pass of its stage writes: a pass that writes it is absent "
+													 "from the build while its reader is present. Keep the writer present whenever a reader is, or give the "
+													 "resource a lifetime across frames",
+						pass.name, PassStage(pass), name));
+					break;
+				case Kind::LaterWriter:
 					a_findings.push_back(fmt::format("{} ({}) reads {}, which no earlier stage writes; its first writer is {} ({}). Declare it as the previous "
 													 "frame's (RecipeTable.h, kPreviousFrame) once checked, or move the stage",
-						a_passes[i].name, StageName(static_cast<StageId>(a_passes[i].stage)), name, a_passes[writer->second].name,
-						StageName(static_cast<StageId>(a_passes[writer->second].stage))));
+						pass.name, PassStage(pass), name, a_passes[finding.writer].name, PassStage(a_passes[finding.writer])));
+					break;
+				case Kind::OutsideSpan:
+					// A pass outside the span uses bytes another resource holds.
+					a_findings.push_back(fmt::format("{} ({}) uses {} of {}, whose derived span in the frame arena is {}: other stages' transients may "
+													 "hold its memory there. ORG's derivation missed this graph's use (org::GraphHost::AddFrameTransients)",
+						pass.name, PassStage(pass), name, finding.transient.group,
+						Transients::Describe(Transients::Span{ finding.transient.span.first, finding.transient.span.last })));
+					break;
+				case Kind::FirstUseReads:
+					a_findings.push_back(fmt::format("{} ({}) reads {} of {} first in the frame: its memory comes in holding another resource's data. "
+													 "Its first pass must write it",
+						pass.name, PassStage(pass), name, finding.transient.group));
+					break;
 				}
-			// Check ORG's derived frame-transient spans against the traces, since a pass outside the span uses bytes another resource holds.
-			// The first pass that uses one must write it, since the bytes hold another resource's data.
-			std::set<std::string> groupFindings, groupSeen;
-			for (const auto& pass : a_passes) {
-				const auto check = [&](const std::string& a_name, bool a_write) {
-					const auto transient = Transients::FrameTransientOf(a_name);
-					if (!transient)
-						return;
-					const auto span = transient->second;
-					if ((span.Empty() || pass.stage < span.first || pass.stage > span.last) && groupFindings.insert(a_name + "@" + pass.name).second)
-						a_findings.push_back(fmt::format("{} ({}) uses {} of {}, whose derived span in the frame arena is {}: other stages' transients may "
-														 "hold its memory there. ORG's derivation missed this graph's use (org::GraphHost::AddFrameTransients)",
-							pass.name, StageName(static_cast<StageId>(pass.stage)), a_name, transient->first, Transients::Describe(span)));
-					if (groupSeen.insert(a_name).second && !a_write)
-						a_findings.push_back(fmt::format("{} ({}) reads {} of {} first in the frame: its memory comes in holding another resource's data. "
-														 "Its first pass must write it",
-							pass.name, StageName(static_cast<StageId>(pass.stage)), a_name, transient->first));
-				};
-				for (const auto& name : pass.writes)
-					check(name, true);
-				for (const auto& name : pass.reads)
-					check(name, std::ranges::find(pass.writes, name) != pass.writes.end());
 			}
 			a_state.passes = static_cast<std::uint32_t>(a_passes.size());
-			a_state.previousInputs = static_cast<std::uint32_t>(previous.size());
-			a_state.outsideInputs = static_cast<std::uint32_t>(outside.size());
+			a_state.previousInputs = report.previousInputs;
+			a_state.outsideInputs = report.outsideInputs;
 			a_state.findings = static_cast<std::uint32_t>(a_findings.size());
-			a_state.sourceLater = static_cast<std::uint32_t>(sourceLater.size());
+			a_state.sourceLater = report.laterDeclared;
 		}
 	}
 
@@ -419,7 +366,7 @@ namespace RenderGraph::Frame::Recipes
 			std::string text;
 			std::uint32_t count = 0;
 			for (const auto& pass : passes) {
-				if (pass.stage != s)
+				if (pass.position != s)
 					continue;
 				++count;
 				text += fmt::format("{}{} [reads {}; writes {}]", text.empty() ? "" : "; ", pass.name, Join(pass.reads), Join(pass.writes));
