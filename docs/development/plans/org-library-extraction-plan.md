@@ -140,7 +140,7 @@ Not part of this plan unless a phase touches them:
 |---|---|---|---|
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
-| 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
+| 2 Services with clean cuts | in progress | p2-reflect: CS `org-native/extract-p2-reflect`, OMS `extract/p2-reflect` | Executor and retirement join need A/B perf runs. Shader reflection (p2-reflect): OMS `ShaderReflection.h` (SPIR-V parse, `IsDxil`, `ReflectDxil` with a `DxilBindingLayout`, `DxilFragment`), tests in OMS `tests/Reflection`; DCLF keeps `SpirvReflection` (subclass passing its shifts and push register) and `DxilStages` (frame-source preprocessing, aliases for `IsDxil`/`Fragment`). |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
@@ -446,3 +446,17 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p2-reflect decisions
+
+Decided by the agent, to confirm:
+
+- DXIL's binding shifts and the skipped push register (DCLF's `kBindingShift*`, `kFramePushBinding`) became
+  `DxilBindingLayout`, a `Parse`/`ReflectDxil` parameter. DCLF's `SpirvReflection` is a subclass whose `Parse` passes
+  them, so its users are unchanged.
+- No new dependencies: the SPIR-V reader is hand-written (no SPIRV-Reflect or SPIR-V headers). DXIL uses `dxcapi.h`,
+  which OMS already finds for `ShaderCompiler`, and the Windows SDK's `d3d12shader.h`. `DxilReflection.cpp` builds only
+  on Windows with DXC; otherwise `ReflectDxil` returns false and `DxilFragment` the defaults.
+- DXIL reflection still finds `dxcompiler.dll` by name in the process (`GetModuleHandleW`), as before, instead of
+  asking a `ShaderCompiler` for its module. DCLF's `DxilStages.cpp` keeps its own per-thread DXC objects for the
+  frame-source preprocess.

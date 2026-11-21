@@ -1,7 +1,9 @@
 #pragma once
 
-// DCLF's stages on D3D12: reflection read from DXIL instead of SPIR-V, and the pulled builds' frame rewrite before they compile.
+// DCLF's stages on D3D12: the pulled builds' frame rewrite before they compile, and OMS's DXIL reflection under DCLF's names.
 // Uses the dxcompiler.dll the render graph's compiler loaded. Any thread.
+
+#include <ORGModuleServices/ShaderReflection.h>
 
 #include <cstddef>
 #include <span>
@@ -12,11 +14,6 @@ namespace org::services
 	struct ShaderCompileRequest;
 }
 
-namespace DCLF
-{
-	struct SpirvReflection;
-}
-
 namespace DCLF::DxilStages
 {
 	/** @brief Marks a D3D12 pulled build, whose source is preprocessed and rewritten before it compiles. */
@@ -25,22 +22,11 @@ namespace DCLF::DxilStages
 	inline constexpr const wchar_t* kShadowFrameDefine = L"DCLF_D3D12_SHADOW_FRAME";
 
 	/** @brief Whether a_binary is a DXIL container. */
-	bool IsDxil(std::span<const std::byte> a_binary);
-
-	/**
-	 * @brief A DXIL stage's reflection in SpirvReflection's terms, with bindings numbered as the SPIR-V builds shift them.
-	 * False when DXC cannot read it.
-	 */
-	bool Reflect(std::span<const std::byte> a_dxil, SpirvReflection& a_out);
+	using org::services::IsDxil;
 
 	/** @brief A DXIL pixel stage's depth-related facts. A stage DXC cannot read is treated as deferring depth. */
-	struct FragmentFacts
-	{
-		bool defersDepth = true;
-		bool exportsDepth = false;
-		bool exportsSampleMask = false;
-	};
-	FragmentFacts Fragment(std::span<const std::byte> a_dxil);
+	using FragmentFacts = org::services::DxilFragmentFacts;
+	inline FragmentFacts Fragment(std::span<const std::byte> a_dxil) { return org::services::DxilFragment(a_dxil); }
 
 	/** @brief Whether a_request is a D3D12 pulled build. */
 	bool NeedsFrameSource(const org::services::ShaderCompileRequest& a_request);
