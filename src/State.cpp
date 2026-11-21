@@ -186,6 +186,12 @@ void State::OnShadowMaskDraw(ID3D11ShaderResourceView* a_shadowMap)
 void State::Draw()
 {
 	ZoneScoped;
+	// The draw's shader and pixel descriptor, so a capture tells the engine's draws apart.
+	if (TracyIsConnected && currentShader) {
+		const auto type = magic_enum::enum_name(currentShader->shaderType.get());
+		ZoneText(type.data(), type.size());
+		ZoneValue(currentPixelDescriptor);
+	}
 	if (globals::features::sceneManager.loaded)
 		globals::features::sceneManager.Update();
 

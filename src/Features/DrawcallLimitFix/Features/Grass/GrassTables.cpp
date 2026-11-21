@@ -2,6 +2,7 @@
 // The draw row also carries the engine's per-frame grass values (wind, sun, fade), read where BSGrassShader reads them.
 
 // Helpers.h first. volk must precede every Vulkan header in the translation unit.
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassTables.h"
@@ -169,6 +170,7 @@ namespace DCLF::Features::Grass
 		{
 			if (a_bucket.bound && a_bucket.bindingGeneration == a_generation)
 				return true;
+			DCLF_ZONE("CS.DCLF.Grass.BindBucket");
 			a_bucket.bound = false;
 			OwnedRow<BucketRow> row(a_bucket.row.Plain());
 			auto& source = a_bucket.source;
@@ -198,6 +200,7 @@ namespace DCLF::Features::Grass
 		// Rebind buckets whose textures moved. A superseded import still holds its old storage until then.
 		void FollowRelocatedTextures(GrassTables& a_tables, Mirror& a_mirror)
 		{
+			DCLF_ZONE("CS.DCLF.Grass.FollowRelocatedTextures");
 			std::vector<ID3D11ShaderResourceView*> moved;
 			const bool complete = GpuTextures::Get().RelocatedViews(a_tables.relocationCursor, moved);
 			if (complete && moved.empty())

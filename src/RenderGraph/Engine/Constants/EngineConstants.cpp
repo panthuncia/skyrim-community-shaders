@@ -220,6 +220,7 @@ namespace RenderGraph::Engine::Constants
 
 			UseId Capture(std::uint32_t a_stageMask)
 			{
+				ZoneScopedN("CS.Engine.Constants.Capture");
 				if (!Active() || !FrameAnchors::IsRenderOwner())
 					return {};
 				if (uses.size() >= kMaxUsesPerFrame) {

@@ -1,6 +1,7 @@
 // Tree LOD's scene resources, what they post and latch in the depth commit, and the depth commit's uploads into them.
 
 // Helpers.h first, because volk must precede every Vulkan header.
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
@@ -238,6 +239,7 @@ namespace DCLF::Features::TreeLod
 
 	bool TreeLodTextureBinding(OwnedRow<TreeInstances::DrawRow>& a_row)
 	{
+		DCLF_ZONE("CS.DCLF.TreeLod.TextureBinding");
 		using TreeInstances::DrawRow;
 		const auto* texture = Engine::Global<RE::NiSourceTexture*>(Address::kTreeLodAtlas);
 		auto* view = texture && texture->rendererTexture ? texture->rendererTexture->resourceView : nullptr;

@@ -6,6 +6,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -50,6 +51,18 @@ namespace DCLF::Features::Water
 			return log;
 		}
 
+		/**
+		 * @brief A material slot as the run's last latched draw resolved it. A run holds every owner its draws named, so a later draw of
+		 * the same run with the same view and sampler modes reuses the indices without resolving or holding them again.
+		 */
+		struct SlotMemo
+		{
+			ID3D11ShaderResourceView* view = nullptr;
+			std::uint32_t address = 0, filter = 0;
+			std::uint32_t texture = GpuTextures::kInvalid, sampler = GpuTextures::kInvalid;
+			bool valid = false;
+		};
+
 		/** @brief The batch being latched, on the render thread. */
 		// The shadow record's alignment pads the struct, as intended.
 #pragma warning(push)
@@ -68,6 +81,8 @@ namespace DCLF::Features::Water
 			std::uint32_t lastTechnique = 0;  // the last pass's technique (State::currentPixelDescriptor >> 11 & 0xF)
 			// Frames with no sun shadow light keep the last record, as t98 keeps its buffer.
 			Deferred::DirectionalShadowLightData directionalShadow{};
+			// The current run's slots. Cleared whenever the run is handed off, so it never names owners another run holds.
+			std::array<SlotMemo, kMaterialSlots> slotMemo{};
 		};
 #pragma warning(pop)
 
@@ -100,6 +115,7 @@ namespace DCLF::Features::Water
 		/** @brief Runs the latched part of the batch now, before anything the engine draws after it. */
 		void FlushLatched(Capture& a_capture)
 		{
+			a_capture.slotMemo = {};
 			auto run = std::move(a_capture.run);
 			if (!run)
 				return;
@@ -206,6 +222,7 @@ namespace DCLF::Features::Water
 		/** @brief Latches the draw the engine is about to make. Returns null when latched, else the reason it was refused. */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
+			DCLF_ZONE("CS.DCLF.Water.TryLatchDraw");
 			if (a_capture.run->draws.size() >= kMaxLatched)
 				Interrupt(a_capture);
 			auto& run = *a_capture.run;
@@ -218,45 +235,49 @@ namespace DCLF::Features::Water
 
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
-			const auto& targets = a_capture.view == View::Mask ? kMaskTargets : kSurfaceTargets;
-			const auto& engineTargets = globals::game::renderer->GetRuntimeData().renderTargets;
-			for (std::uint32_t i = 0; i < TargetsOf(a_capture.view); ++i) {
-				const auto target = static_cast<std::int32_t>(rss.renderTargets[i]);
-				const auto found = std::ranges::find(targets, target);
-				if (target < 0 || found == targets.end())
-					return "a colour target its view's client does not import";
-				draw.colours[i] = static_cast<std::uint8_t>(found - targets.begin());
-				draw.key.colourFormats[i] = FormatOf(engineTargets[target].RTV);
-				if (!draw.key.colourFormats[i])
-					return "a colour target with no format";
-			}
-			draw.key.depthFormat = a_capture.depthFormat;
+			{
+				DCLF_ZONE("CS.DCLF.Water.Setup");
+				const auto& targets = a_capture.view == View::Mask ? kMaskTargets : kSurfaceTargets;
+				const auto& engineTargets = globals::game::renderer->GetRuntimeData().renderTargets;
+				for (std::uint32_t i = 0; i < TargetsOf(a_capture.view); ++i) {
+					const auto target = static_cast<std::int32_t>(rss.renderTargets[i]);
+					const auto found = std::ranges::find(targets, target);
+					if (target < 0 || found == targets.end())
+						return "a colour target its view's client does not import";
+					draw.colours[i] = static_cast<std::uint8_t>(found - targets.begin());
+					draw.key.colourFormats[i] = FormatOf(engineTargets[target].RTV);
+					if (!draw.key.colourFormats[i])
+						return "a colour target with no format";
+				}
+				draw.key.depthFormat = a_capture.depthFormat;
 
-			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra),
-					Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode), Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor)))
-				return "a depth-stencil, blend or rasterizer state with no description";
+				if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra),
+						Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode), Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor)))
+					return "a depth-stencil, blend or rasterizer state with no description";
+			}
 			draw.stencilRef = engine.stencilRef;
 			// The vertex stage reads Wading, which State strips from the pixel descriptor, so key on the vertex descriptor.
 			draw.key.descriptor = state->modifiedVertexDescriptor;
 			draw.key.defineStage = Family::DefineStage::Vertex;
 
 			auto& constants = draw.latch.constants;
-			const auto use = Family::CaptureConstants();
-			if (!use.Valid())
-				return "the engine constants capture is not active";
-			// A draw without the vertex matrices and PerGeometry is not one the engine made.
-			if (!Family::ConstantBytes(use, Stage::Vertex, 2))
-				return "no vertex PerGeometry";
-			Family::CopyRows(use, Stage::Vertex, 0, constants.vsTechnique, kGroupRows[0]);
-			Family::CopyRows(use, Stage::Vertex, 1, constants.vsMaterial, kGroupRows[1]);
-			Family::CopyRows(use, Stage::Vertex, 2, constants.vsGeometry, kGroupRows[2]);
-			Family::CopyRows(use, Stage::Pixel, 0, constants.psTechnique, kGroupRows[3]);
-			Family::CopyRows(use, Stage::Pixel, 1, constants.psMaterial, kGroupRows[4]);
-			Family::CopyRows(use, Stage::Pixel, 2, constants.psGeometry, kGroupRows[5]);
-			Family::CopyConstants(use, Stage::Pixel, kStrictLightSlot, draw.latch.strictLights);
-			if (globals::deferred)
-				globals::deferred->GetDirectionalShadowLightData(a_capture.directionalShadow);
-			std::memcpy(draw.latch.directionalShadow, &a_capture.directionalShadow, kDirectionalShadowBytes);
+			{
+				DCLF_ZONE("CS.DCLF.Water.LatchConstants");
+				const auto use = Family::CaptureConstants();
+				if (!use.Valid())
+					return "the engine constants capture is not active";
+				// A draw without the vertex matrices and PerGeometry is not one the engine made.
+				if (!Family::ConstantBytes(use, Stage::Vertex, 2))
+					return "no vertex PerGeometry";
+				Family::CopyRows(use, Stage::Vertex, 0, constants.vsTechnique, kGroupRows[0]);
+				Family::CopyRows(use, Stage::Vertex, 1, constants.vsMaterial, kGroupRows[1]);
+				Family::CopyRows(use, Stage::Vertex, 2, constants.vsGeometry, kGroupRows[2]);
+				Family::CopyRows(use, Stage::Pixel, 0, constants.psTechnique, kGroupRows[3]);
+				Family::CopyRows(use, Stage::Pixel, 1, constants.psMaterial, kGroupRows[4]);
+				Family::CopyRows(use, Stage::Pixel, 2, constants.psGeometry, kGroupRows[5]);
+				Family::CopyConstants(use, Stage::Pixel, kStrictLightSlot, draw.latch.strictLights);
+				std::memcpy(draw.latch.directionalShadow, &a_capture.directionalShadow, kDirectionalShadowBytes);
+			}
 			const auto& permutation = state->permutationData;
 			constants.descriptors[0] = permutation.VertexShaderDescriptor;
 			constants.descriptors[1] = permutation.PixelShaderDescriptor;
@@ -289,9 +310,20 @@ namespace DCLF::Features::Water
 			draw.indexCount = geometry.indexCount;
 
 			// An empty slot reads zero, as on D3D11. A slot the view never samples gets a null view and the first sampler.
+			// Committed to the capture only once the draw is appended, since a refused draw's owners never reach the run.
+			auto memo = a_capture.slotMemo;
 			for (std::uint32_t t = 0; t < kMaterialSlots; ++t) {
 				const bool read = SlotRead(a_capture.view, t);
 				auto* view = read ? Unwrap(rss.PSTexture[t]) : nullptr;
+				const std::uint32_t address = read ? rss.PSTextureAddressMode[t].underlying() : 0u;
+				const std::uint32_t filter = read ? rss.PSTextureFilterMode[t].underlying() : 0u;
+				auto& known = memo[t];
+				if (known.valid && known.view == view && known.address == address && known.filter == filter) {
+					constants.textures[t] = known.texture;
+					constants.samplers[t] = known.sampler;
+					continue;
+				}
+				DCLF_ZONE("CS.DCLF.Water.Slot");
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				const auto slot = Family::SlotTexture(view, MaterialKind(t), GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
 				if (slot == Family::SlotResult::Published) {
@@ -299,25 +331,31 @@ namespace DCLF::Features::Water
 					const auto id = PublishedResources::ExportedId(view);
 					const auto result = WaterDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
 					if (result != Family::InputResult::Graph) {
-						Refusals().Report(std::format("a {} draw's t{} holds '{}'", NameOf(a_capture.view), t, id), Family::ReasonOf(result));
+						Refusals().Report(std::format("a {} draw's t{} holds '{}'", NameOf(a_capture.view), t, id),
+							result == Family::InputResult::NoView ? std::format("{} ({})", Family::ReasonOf(result), PublishedResources::DescribeIndex(id)) :
+																	Family::ReasonOf(result));
 						return "a texture slot holds a published graph texture its client cannot read";
 					}
 				} else if (slot != Family::SlotResult::Ok) {
 					Refusals().Report(std::format("a {} draw's texture t{} could not be imported", NameOf(a_capture.view), t), GpuTextures::DescribeFailure(view, t, failure));
 					return "a texture it samples could not be imported";
 				}
-				constants.samplers[t] = read ? Family::SlotSampler(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying(), owners) :
-				                               Family::SlotSampler(0, 0, owners);
+				constants.samplers[t] = Family::SlotSampler(address, filter, owners);
 				if (constants.samplers[t] == GpuTextures::kInvalid)
 					return "its sampler modes have no graph sampler";
+				known = { view, address, filter, constants.textures[t], constants.samplers[t], true };
 			}
 
 			draw.viewport = Family::LatchViewport(engine.depthBias);
 
-			for (auto& owner : owners)
-				if (owner)
-					run.owners.push_back(std::move(owner));
-			run.draws.push_back(std::move(draw));
+			{
+				DCLF_ZONE("CS.DCLF.Water.Append");
+				for (auto& owner : owners)
+					if (owner)
+						run.owners.push_back(std::move(owner));
+				run.draws.push_back(std::move(draw));
+			}
+			a_capture.slotMemo = memo;
 			return nullptr;
 		}
 
@@ -345,6 +383,9 @@ namespace DCLF::Features::Water
 					return;
 				}
 				capture.view = kView;
+				// The sun's shadow record is the frame's, so it is read once per batch rather than per draw.
+				if (globals::deferred)
+					globals::deferred->GetDirectionalShadowLightData(capture.directionalShadow);
 				capture.headerIndices = run->headerIndices;
 				capture.physSky = run->physSky;
 				capture.run = std::move(run);

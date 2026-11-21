@@ -676,6 +676,7 @@ void Deferred::SetShadowCascadeParameters(T& lightData, DirectionalShadowLightDa
 
 bool Deferred::GetDirectionalShadowLightData(DirectionalShadowLightData& a_out)
 {
+	ZoneScoped;
 	auto* shadowSceneNode = globals::game::smState->shadowSceneNode[0];
 	if (!shadowSceneNode)
 		return false;
