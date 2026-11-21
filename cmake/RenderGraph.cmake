@@ -66,7 +66,11 @@ set(ORG_MODULE_SERVICES_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
 set(ORG_MODULE_SERVICES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CS_ORG_ROOT}/ORGModuleServices" "${CMAKE_BINARY_DIR}/extern/ORGModuleServices" EXCLUDE_FROM_ALL)
 target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ORGModuleServices)
-# OMS's passes' shaders (GenerateMips, ResolveMultisample, PrefixSum, SortScatter, Hzb and their includes, among them
+# OMS's Dear ImGui renderer backend (src/RenderGraph/ImGuiBasicRHI.h is CS's adapter), on CS's imgui::imgui.
+set(ORG_MODULE_SERVICES_IMGUI_TARGET "imgui::imgui" CACHE STRING "" FORCE)
+include("${CS_ORG_ROOT}/ORGModuleServices/cmake/ImGuiBackend.cmake")
+target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::ImGui)
+# OMS's passes' shaders (GenerateMips, ResolveMultisample, PrefixSum, SortScatter, Hzb, ImGui and their includes, among them
 # HzbTest.hlsli and FidelityFX's ffx_a.h and ffx_spd.h), which CS compiles at runtime with ComputeProgram from
 # Data/Shaders/ORGModuleServices (org::services::kGenerateMipsShader). DCLF's cull shaders include HzbTest.hlsli by that
 # path. Copied into package/Shaders at configure time, with FidelityFX-LICENSE.txt, so every path that ships

@@ -170,6 +170,8 @@ Not part of this plan unless a phase touches them:
 
 | 3 Programs and GPU primitives | item 2 written, not built | p3-programs: CS `org-native/extract-p3-programs`, OMS `extract/p3-programs` | Item 2: `ComputeProgram`, `RasterProgram`, `ProgramService` (slots, `FixedProgram`, the pool, `Collect`, `JoinSetup`, `Load`), the build helpers and `ShaderTarget` are OMS `Programs/`. CS sets their `ProgramEnvironment` (shader root, backend, compiler, registry, common defines, request defines, pipeline pins, log) in `Programs::InstallEnvironment`; `ComputeProgram.h`, `RasterProgram.h`, `ProgramService.h`, `ProgramBuild.h` and `ShaderTarget.h` stay as forwarding headers. The pool sizes itself with OMS `PlanWaitingPool` from its stated compile domain. Fingerprints are OMS's XXH3 content hash. Tests: OMS `ORGProgramServiceTests`, `ORGAsyncExecutorTests`. See "p3-programs decisions". |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
+
+| 4 Build and upload services | ImGui backend written, not built | p4-imgui: CS `org-native/extract-p4-imgui`, OMS `extract/p4-imgui` | Needs phase 2's executor. ImGui backend (p4-imgui): OMS `ImGui/ImGuiBackend.{h,cpp}` (`org::services::imgui`), the optional target `ORGModuleServices::ImGui` (`cmake/ImGuiBackend.cmake` or `ORG_MODULE_SERVICES_ENABLE_IMGUI`) on the host's ImGui target or include folder. Its shader is OMS `shaders/ImGui.hlsl`. The host passes a `HostDesc` (graph host, texture maker, view and sampler makers, page publishing, error and log callbacks) and the program in each `Target`; the draw pass takes a `DrawTarget`. CS's `ImGuiBasicRHI` is an adapter that keeps `DeclareProgram`/`ProgramFor`. Test: OMS `ORGImGuiBackendTests`. See "p4-imgui decisions". |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
 ### Checks that need a run
@@ -775,3 +777,31 @@ Decided by the agent, to confirm:
 - **Log wording.** The pool's line says "on the compile domain's threads" or "on the fallback threads" instead of
   "preparation"/"blocking", and the not-built error says "after the setup join" instead of "after CS's setup".
 - **ASCII names.** Entry points and define names are narrowed by casting, as CS's define code did. They are ASCII.
+
+### p4-imgui decisions
+
+Decided by the agent, to confirm:
+
+- **Layout.** OMS `include/ORGModuleServices/ImGui/ImGuiBackend.h` and `src/ImGui/ImGuiBackend.cpp`, in
+  `org::services::imgui`. A separate static target, `ORGModuleServices::ImGui`, from `cmake/ImGuiBackend.cmake` (as
+  `SphereCull`), so OMS builds without ImGui. It links the host's target named by `ORG_MODULE_SERVICES_IMGUI_TARGET`
+  (`imgui::imgui`), or uses `ORG_MODULE_SERVICES_IMGUI_INCLUDE_DIR`. It never runs `find_package` for ImGui.
+- **The program.** OMS gives `ProgramDesc(format)` and `kShader`. CS keeps the `DeclareProgram` keyed on the UI target's
+  format, resolves its defines and passes the built program in `Target::program`, as before. The shader path is now
+  `ORGModuleServices/ImGui.hlsl`; the source is unchanged apart from its comment, and CS compiles it with the same defines.
+- **Host callbacks, not library code, for CS's pieces.** Textures come from `HostDesc::createTexture` (CS makes the same
+  persistent `GraphResources::Texture2D`), views and the sampler from `createShaderResourceView`/`createSampler` (CS passes
+  `ShaderBindings`, which p4-misc is moving), page versions from `publishPageVersion` (`Frame::Revision::PublishTexture`), and
+  the undeclared-access note from `noteImmutable`. The graph host comes from `graphHost`. Kept as callbacks so this part
+  does not depend on p4-misc's move; once `ShaderBindings` is in ORG, OMS can call it directly.
+- **Staging.** OMS acquires the staging region from `org::Runtime::Current()->Arena()` itself, as CS's `AcquireStaging` did.
+  A failure goes to `HostDesc::onError` and `Commit` returns false. CS passes `FatalHandler("ImGui")`, so it stays fatal with
+  the same message.
+- **The draw target.** `MakePass` takes `DrawTarget` (a resolver or a plain resource, like `UavClearTarget`). CS's adapter
+  builds it from `FrameAnchors::Texture::Slot()` and `Plain()`.
+- **Revision values.** Both passes were always made with `atExecution = true`, so `CommitReadTicket` always pushed 0. The
+  passes now push 0 directly, and the unused ahead-of-time branch is gone.
+- **Names.** The draw pass's debug label is `HostDesc::passName`; CS passes "CS ImGui". Log lines go through
+  `HostDesc::log`; CS adds the "[ORG] " prefix, so lines read as before.
+- **Host setup.** CS's adapter calls `SetHost` once (`std::call_once`) before any forwarded call that needs the host, since a
+  pass may be made before `Init`. `ImGuiRenderer.cpp` and `IconLoader` are unchanged.

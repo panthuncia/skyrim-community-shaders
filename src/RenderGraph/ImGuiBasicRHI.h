@@ -1,15 +1,12 @@
 #pragma once
 
+#include <ORGModuleServices/ImGui/ImGuiBackend.h>
+
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <span>
 
 struct ImDrawData;
-namespace org::services
-{
-	struct RasterProgram;
-}
 using RasterProgram = org::services::RasterProgram;
 
 namespace org
@@ -28,42 +25,28 @@ namespace RenderGraph::Frame
 }
 
 /**
-* @brief A Dear ImGui renderer backend on BasicRHI, run as render-graph passes. imgui_impl_dx11's work without D3D11.
+* @brief CS's adapter for OMS's Dear ImGui renderer backend (ORGModuleServices/ImGui/ImGuiBackend.h).
 *
-* It implements ImGui 1.92's texture protocol, owning the font atlas pages and other ImTextureData. Other ImTextureIDs go to the
-* caller's resolver. Each frame Commit stages vertices, indices and texture uploads in one buffer for the run. The upload pass
-* copies, and the draw pass draws one ImDrawCmd at a time with ImGui's blending.
-* Both passes are static. ImGui's textures are versions of a fixed set of atlas pages, so new textures need no graph build.
-* A texture is restaged whole each frame until an upload of its bound version was recorded.
-* Commit runs on the render thread inside the epoch. Draw callbacks are D3D11 code and are skipped.
+* The backend runs ImGui as render-graph passes on BasicRHI. This adapter gives it CS's host on first use: the runtime's graph
+* host, graph textures (GraphResources), descriptors (ShaderBindings), frame-revision page versions, the undeclared-access
+* check, the "[ORG] " log and RenderGraph::Fatal for errors. CS keeps the pipeline's declaration, keyed on the interface's
+* target format, and passes the built program in each Target.
 */
 namespace ImGuiBasicRHI
 {
-	inline constexpr std::uint32_t kNoIndex = 0xFFFFFFFFu;
+	inline constexpr std::uint32_t kNoIndex = org::services::imgui::kNoIndex;
 
 	/** @brief A texture made by MakeTexture: a full mip chain, a view of all of it and one per level. */
-	class Texture;
+	using Texture = org::services::imgui::Texture;
 
-	/** @brief What a draw samples: a descriptor-heap index or one of this backend's textures, plus what keeps it alive until the frame retires. */
-	struct Binding
-	{
-		std::uint32_t index = kNoIndex;
-		std::shared_ptr<const void> owner;
-		std::shared_ptr<Texture> texture;  // set: one of this backend's textures, read through the passes' declarations
-		int mip = -1;                      // with texture: the level, or -1 for the whole chain
-	};
+	/** @brief What a draw samples: a descriptor-heap index or one of the backend's textures, plus what keeps it alive. */
+	using Binding = org::services::imgui::Binding;
 
 	/** @brief Turns an ImTextureID the backend does not own into a binding; kNoIndex skips the draws that use it. */
-	using Resolver = std::function<Binding(std::uint64_t a_texture)>;
+	using Resolver = org::services::imgui::Resolver;
 
-	/** @brief What a frame draws onto: the size of the pass's target, its colour format (rhi::Format, as its value) and its pipeline. */
-	struct Target
-	{
-		std::uint32_t width = 0;
-		std::uint32_t height = 0;
-		std::uint32_t format = 0;
-		std::shared_ptr<const RasterProgram> program;  // ProgramFor, for the revision the registration was made for
-	};
+	/** @brief What a frame draws onto: the target's size, its colour format (rhi::Format, as its value) and ProgramFor's pipeline. */
+	using Target = org::services::imgui::Target;
 
 	/** @brief Becomes the context's renderer backend. Call with no other renderer backend installed. */
 	void Init();
@@ -77,7 +60,7 @@ namespace ImGuiBasicRHI
 	/** @brief Destroys every ImGui texture, so ImGui recreates them next frame, such as after a font reload. */
 	void InvalidateTextures();
 
-	/** @brief Whether an ImTextureID is one of this backend's textures (ImGui's, or MakeTexture's). */
+	/** @brief Whether an ImTextureID is one of the backend's textures (ImGui's, or MakeTexture's). */
 	bool IsOwnTexture(std::uint64_t a_texture);
 
 	/** @brief An RGBA8 texture from CPU pixels, one span per level, uploaded with the next Commit. Render thread. Null, logged, on failure. */
