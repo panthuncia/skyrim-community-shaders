@@ -264,7 +264,8 @@ namespace DCLF::Features::Grass
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				auto counts = std::make_shared<GrassCounts>();
-				counts->readback = org::RunReadback::CreateRegions("cs.dclf.grass-counts-readback", sizeof(DrawsHeader), Draws::kReadbackRanges);
+				counts->readback = org::RunReadback::CreateRegions("cs.dclf.grass-counts-readback", sizeof(DrawsHeader), Draws::kReadbackRanges,
+					RenderGraph::FatalHandler("Drawcall Limit Fix"));
 				counts->filled.assign(counts->readback->Regions(), 0u);
 				tables->counts = std::move(counts);
 			}

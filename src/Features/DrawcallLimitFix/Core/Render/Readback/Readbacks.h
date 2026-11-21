@@ -49,7 +49,8 @@ namespace DCLF::Draws
 	 */
 	inline std::shared_ptr<org::RunReadback> MakeEventList(std::string_view a_name, std::uint32_t a_itemBytes, std::uint32_t a_events)
 	{
-		return org::RunReadback::CreateList(a_name, { .headerBytes = 16, .stampOffset = 4, .itemBytes = a_itemBytes, .regions = kReadbackRanges }, a_events);
+		return org::RunReadback::CreateList(a_name, { .headerBytes = 16, .stampOffset = 4, .itemBytes = a_itemBytes, .regions = kReadbackRanges }, a_events,
+			RenderGraph::FatalHandler("Drawcall Limit Fix"));
 	}
 
 	/** @brief Copies an event list, header and full capacity, into its readback's region for the run. */
@@ -237,7 +238,8 @@ namespace DCLF::Draws
 		explicit CounterReadback(std::uint32_t a_sources) :
 			sources(a_sources),
 			readback(org::RunReadback::CreateRegions("cs.dclf.cull-counter-readback",
-				std::max(a_sources, 1u) * kSourceWords * static_cast<std::uint32_t>(sizeof(std::uint32_t)), kReadbackRanges))
+				std::max(a_sources, 1u) * kSourceWords * static_cast<std::uint32_t>(sizeof(std::uint32_t)), kReadbackRanges,
+				RenderGraph::FatalHandler("Drawcall Limit Fix")))
 		{}
 		static constexpr std::uint32_t StampOf(std::uint32_t a_frame) { return a_frame & 0x0FFFFFFFu; }  // as the commits write it
 		std::uint32_t sources = 0;
