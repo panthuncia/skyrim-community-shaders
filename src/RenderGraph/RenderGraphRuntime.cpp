@@ -1582,6 +1582,8 @@ bool RenderGraphRuntime::Initialize()
 	if (attempted)
 		return false;
 	attempted = true;
+	// OMS's programs read CS's shader folder, backend, compiler and defines through it, before any program loads.
+	RenderGraph::Programs::InstallEnvironment();
 
 	auto disable = [&](std::string a_reason) {
 		disabledReason = std::move(a_reason);

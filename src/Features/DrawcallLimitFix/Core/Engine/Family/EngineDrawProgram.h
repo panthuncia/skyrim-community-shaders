@@ -16,7 +16,11 @@
 #include <utility>
 #include <vector>
 
-struct RasterProgram;
+namespace org::services
+{
+	struct RasterProgram;
+}
+using RasterProgram = org::services::RasterProgram;
 struct ID3D11BlendState;
 struct ID3D11DepthStencilState;
 struct ID3D11RasterizerState;

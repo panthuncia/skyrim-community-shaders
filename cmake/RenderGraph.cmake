@@ -87,8 +87,8 @@ if(NOT CS_DXC_RUNTIME_DLLS)
     message(WARNING "Render graph: VULKAN_SDK has no dxcompiler.dll; runtime SPIR-V compilation will be unavailable in game")
 endif()
 
-# The render-graph compute passes compile their HLSL at runtime through ORGModuleServices (src/RenderGraph/
-# ComputeProgram.cpp), like Drawcall Limit Fix's Lighting builds; the sources ship with the other shaders.
+# The render-graph compute passes compile their HLSL at runtime through ORGModuleServices' programs
+# (ORGModuleServices/Programs/ComputeProgram.h), like Drawcall Limit Fix's Lighting builds; the sources ship with the other shaders.
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenRenderGraph::OpenRenderGraph OpenRenderGraph::ScheduleUI OpenRenderGraph::MemoryUI BasicRHI::BasicRHI)
 # Unbounded lock-free queues (tbb::concurrent_queue): the render graph's compute submitter. Static, as DCLF's executor's.
 if(NOT TARGET TBB::tbb)

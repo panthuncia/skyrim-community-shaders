@@ -6,7 +6,11 @@
 #include <span>
 
 struct ImDrawData;
-struct RasterProgram;
+namespace org::services
+{
+	struct RasterProgram;
+}
+using RasterProgram = org::services::RasterProgram;
 
 namespace org
 {
