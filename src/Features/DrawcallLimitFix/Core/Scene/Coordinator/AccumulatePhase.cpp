@@ -995,6 +995,8 @@ namespace DCLF::Scene
 			rasterFlags |= Extensions::LightingKeyBitsOf(view) << kRasterLightingSpareShift;
 		const auto& family = Extensions::FamilyRulesOfKind(descriptors.port);
 		rasterFlags |= family.keyBit;
+		if (descriptors.port && family.keyBit && !family.turnedKeyBits)
+			rasterFlags |= (descriptors.familyKeyBits & kProgramFamilySpareBits) << family.spareShift;
 		if (family.turnedKeyBits && entry.parentReason == Ineligible::Billboard)
 			if (const std::int32_t mode = BillboardModeOf(entry); mode >= 0)
 				rasterFlags |= static_cast<std::uint32_t>(mode + 1) << family.spareShift;

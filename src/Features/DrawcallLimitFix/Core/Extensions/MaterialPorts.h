@@ -55,13 +55,17 @@ namespace DCLF
 
 namespace DCLF::Api
 {
-	/** @brief What a port's capture gets: the property, and the record fields its derive and shading read. */
+	/**
+	 * @brief What a port's capture gets: the property, and the record fields its derive and shading read.
+	 * values is the record's projected UV block, which only Lighting records use otherwise. A port may keep its own floats there.
+	 */
 	class MaterialPortCapture
 	{
 	public:
 		const RE::BSShaderProperty& property;
 		const void*& emissive;
 		std::uint32_t& feature;
+		std::array<float, 8>& values;
 	};
 
 	/** @brief What a port's derive gets. It writes out and reason, where None means drawn. For variants, out is null. */
@@ -124,7 +128,7 @@ namespace DCLF::Api
 namespace DCLF::Extensions
 {
 	/** @brief Number of material kinds: Lighting plus one per port. Grow it before registering more. */
-	inline constexpr std::uint8_t kMaterialKinds = 2;
+	inline constexpr std::uint8_t kMaterialKinds = 3;
 	/** @brief Most variables a stage's space may have. */
 	inline constexpr std::uint32_t kMaxStageVariables = 64;
 
@@ -242,7 +246,7 @@ namespace DCLF::Extensions
 	/** @brief Pure. Whether they differ inside the frame-owned spans. */
 	bool DifferInFrameSpans(std::uint8_t a_kind, const std::byte* a_left, const std::byte* a_right, std::size_t a_first, std::size_t a_end);
 
-	void CapturePort(std::uint8_t a_kind, const RE::BSShaderProperty& a_property, const void*& a_emissive, std::uint32_t& a_feature);
+	void CapturePort(std::uint8_t a_kind, const RE::BSShaderProperty& a_property, const void*& a_emissive, std::uint32_t& a_feature, std::array<float, 8>& a_values);
 	/** @brief Port a_kind's derive. Returns why the object stays native, or None. */
 	Ineligible DerivePort(std::uint8_t a_kind, const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf, LightingDescriptors& a_out);
 	/** @brief Port a_kind's variant bits, for the census. */

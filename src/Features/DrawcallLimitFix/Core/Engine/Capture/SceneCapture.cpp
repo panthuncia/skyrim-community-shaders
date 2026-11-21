@@ -664,7 +664,7 @@ namespace DCLF::SceneCapture
 		} else if (const std::uint8_t port = Extensions::PortOfRtti(r.rtti)) {
 			// Taken here, where the property holds the material.
 			r.port = port;
-			Extensions::CapturePort(port, a_property, r.emissive, r.feature);
+			Extensions::CapturePort(port, a_property, r.emissive, r.feature, r.projected);
 		}
 		return r;
 	}
