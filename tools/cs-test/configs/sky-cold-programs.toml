@@ -1,0 +1,38 @@
+# The sky family on a cold program manifest, as on a cold shader store's first run. CS_DCLF_PROGRAM_MANIFEST=0 queues
+# none of the manifest's programs, so the reflection faces' sky and cloud layer draws find theirs building in the load's
+# first world frames. Those draws are left out until built. Before, the first one handed its batch to the engine and the
+# face's cloud layer reached Cloud Shadows' D3D11 path, a fatal tap error at the load's first world frame. The save is
+# outside Whiterun with clouds in the water reflections. Compose it: native-vulkan+sky-cold-programs,
+# native-d3d12+sky-cold-programs.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[game]
+save = "Save91_00000000_0_507269736F6E6572_Tamriel_000027_20261113033158_1_1"
+
+[features]
+CloudShadows = true
+
+[env]
+CS_DCLF_PROGRAM_MANIFEST = "0"
+
+[[steps]]
+at = "world-ready"
+frames = 300
+do = "shot"
+arg = "sky"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["sky"]
+no_log = ["frame tap error"]
+
+[expect.graph_frames]
+min = { "cs.cloud-shadows" = 60 }

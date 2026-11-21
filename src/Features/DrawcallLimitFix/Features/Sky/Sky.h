@@ -164,8 +164,8 @@ namespace DCLF::Features::Sky
 		bool CanTake(const Shape& a_shape);
 		/** @brief How a_view's client reads the published id a bound header or t17 exports. */
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
-		/** @brief The program for a key, or null when it cannot be built. */
-		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		/** @brief The program for a key, or null. a_building is set true when null means it is still building on the program service. */
+		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
 		/** @brief Keeps a batch's imports and leases alive when it ran nothing, so the next batches find them. */
 		void Keep(Family::Owners&& a_owners);
 		/** @brief Runs a_run's anchor. False means its draws were not drawn, and that is logged. */

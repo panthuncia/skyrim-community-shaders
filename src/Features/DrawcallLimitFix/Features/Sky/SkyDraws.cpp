@@ -666,9 +666,9 @@ namespace DCLF::Features::Sky::SkyDraws
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
-	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
+	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building)
 	{
-		return GetState().programs.Get(a_key, a_shader);
+		return GetState().programs.Get(a_key, a_shader, a_building);
 	}
 
 	void Keep(Family::Owners&& a_owners)
