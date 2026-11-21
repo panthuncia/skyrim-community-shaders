@@ -2339,8 +2339,8 @@ Effect meshes under one billboard node are turned per draw on the GPU (Features/
 ### Deferred ranges
 
 Objects the colour segment culls once and a later epoch draws (`Api/DeferredRanges.h`, `Core/Extensions/DeferredRanges.cpp`,
-`Core/Render/Passes/DeferredRanges.cpp`). Water is the first user (docs/development/plans/dclf-water-indirect.md); nothing
-registers one yet.
+`Core/Render/Passes/DeferredRanges.cpp`). Water is the only user (docs/development/plans/dclf-water-indirect.md): range 0 is
+its mask, range 1 its surface, registered with `CS_DCLF_WATER` 1 or 2.
 -   **Which objects.** A key of a program family built as `ProgramBuild::DeferredRanges` (`ProgramFamily::Water`: key bit 18,
     `kRasterWater`). `MainMaskOf` gives its object `kViewWater` alone: never a depth segment input, so never in the HZB. The family
     rule `deferredRanges` keeps its keys out of the Z-prepass buckets, the state classes and the main and terrain plain buckets.
@@ -2355,10 +2355,28 @@ registers one yet.
 -   **The draws.** Pass keys `core.deferred-range0` and `core.deferred-range1`, made only in an epoch sharing `main.colour`'s shape.
     One plain indexed indirect draw per bucket in the Z-prepass layout, `SetStencilRef` per run of equal references, into the
     registration's targets and the main depth. Not device-generated commands: the stencil reference cannot change per sequence.
+-   **Targets by frame.** A registration may name up to `kDeferredRangeVariants` target sets with a `variant` read at the
+    submission (water: the normals mask or its swap, kMAIN or kRAW_WATER). Each set is a pass of its own, recorded at execution and
+    keyed by its skip answer (`kRecordKeyedBySkip`), so the late batch's list is kept per answer and nothing records per frame. The
+    epoch's commit (`SharedEpochSubmit::commit`) stores the frame's choice for its run; the other sets' passes skip. A run whose
+    choice is not found draws nothing (`<- DEFERRED TARGETS`). The pipelines are built for set 0, and a set with other formats
+    keeps the range's keys native.
     The pipelines are `Built::pulledDeferred` (`IndirectState::deferred`); the build point in `DrawPipelines::Impl::Build` refuses
     such keys until a family provides it, so they stay native.
--   **The epoch.** Its owner calls `Draws::SubmitDeferredEpoch(epoch)` at its trigger: `SubmitSharedEpoch` without the forward site's
-    hand-off (`SharedEpochSubmit::forwardSite`), skipped while no range has a bucket. No schedule row lists the passes yet.
+-   **The epochs.** `water.mask` (`Segment::WaterMask`, trigger `water.mask-batch`) and `water.surface` (`Segment::WaterSurface`,
+    trigger `water.surface-batch`), both sharing `main.colour`'s shape and both claims epochs. The triggers are the water batch
+    thunks (`Features/Water/WaterCapture.cpp`), before the engine runs the batch, so the latch path draws the unclaimed water right
+    after. `Draws::SubmitDeferredEpoch(epoch)` is `SubmitSharedEpoch` without the forward site's hand-off, skipped while no range has
+    a bucket and in the CPU-driven graph.
+-   **Dormant.** With nobody registering the ranges, their pass keys report themselves absent (`Api::PassDef::present`), so both
+    epochs are dormant (`EpochTraits::dormant`): no recording, no submission, coverage `EngineState::Dormant`, and no part in the
+    frame's claims. Their graphs are built empty.
+-   **The recipe around them.** CS's deferred+water stage keeps all its steps. DCLF's mask epoch ends it (`commitBefore`) and the
+    water stage opens with the steps after the mask; the surface epoch ends that and post-water opens. Group 10's water is the
+    latch path's in the water stage, before DCLF's surface. Under water the blended draw (which taps deferred+water, water and
+    post-water) comes before the surface batch, so the surface epoch ends the sun stage only if it holds work
+    (`commitBeforeIfStaged`), and sun water takes the rest. In frames with no water epoch nothing splits, so `CS_DCLF_WATER=0`
+    keeps today's tickets.
 -   **With no members** nothing is planned, no sequence is written and no pass records, and the colour commit zeroes four more count
     words.
 -   **Not in the CPU-driven pipeline.** Its lanes take no `kViewWater` input, so a member would draw nowhere there.

@@ -543,3 +543,22 @@ offsets 8 and 12, but they are PS b0 variables). So FresnelRI.x is 0 by the time
 store from +0x170 that Ghidra shows. ReflectionColor.w (latched 28800, global 46800) is the same kind of mismatch. Not
 explained yet: another plugin patching SetupMaterial is possible. The DCLF path uses the port's values (the engine's sources);
 compare the water's fresnel in phase 3's shots.
+
+## 10. The water epochs (phases 2 and 3, design (a))
+
+Written with the epochs' code (branch `dclf/water-epochs`, 2026-11-21). Nothing was built or run when this was written.
+
+- **Epochs.** `water.mask` and `water.surface` in `Schedule/Frame.cpp`, sharing `main.colour`'s shape, listing
+  `core.deferred-range0` and `core.deferred-range1`. Triggered at WaterCapture.cpp's mask and surface batch thunks
+  (`Indirect::ReachBatch`, `Features/Water/Draw/WaterEpochs.cpp`), main accumulator only, before the engine's batch. Group 10's
+  batch triggers nothing: its water draws before DCLF's surface, as the engine's order has it.
+- **The recipe.** New CS stages water, post-water and sun water (`RecipeTable.h`), with fragment stages water mask and water
+  surface between them. Above water: deferred+water, water mask, water, water surface, post-water, forward, sun. Under water:
+  deferred+water, water mask, water, forward, sun, water surface, sun water. The water surface epoch is then out of the host's
+  epoch order (its rank is before forward). The ledgers admit at submission, so this should hold (unverified).
+- **Targets.** Each range has two target sets and a per-frame choice: the mask's normals target by
+  GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP's rule (`PostChain::ReadWorld`), the surface's kRAW_WATER by 528167 / 415112.
+- **The claim.** `CS_DCLF_WATER=2` claims plain water while `Indirect::DrawnInput()` is on, which needs the batch hooks
+  installed (`Indirect::SetDrawer(true)`) and a GPU-driven frame.
+- **Object rows.** The water row family's GPU table is a scene resource at t42 (`WaterSceneRows.cpp`), uploaded by every commit
+  when the adopted rows changed, and fitted so an object past the table waits.
