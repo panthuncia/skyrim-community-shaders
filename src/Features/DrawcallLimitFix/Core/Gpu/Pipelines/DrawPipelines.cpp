@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/EngineStates.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
@@ -20,6 +21,8 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include "RenderGraph/Backend.h"
+#include "RenderGraph/Engine/Pipeline/Descriptions.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/SpirvReflection.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
@@ -666,9 +669,88 @@ namespace DCLF
 			for (const std::uint32_t bits : std::exchange(impl->pendingStateBits, {}))
 				read(bits, false);  // the opaque modes are read above
 		}
-		if (changed) {
+		if (changed)
 			input.states = std::make_shared<const decltype(impl->engineStates)>(impl->engineStates);
+		changed = impl->CaptureDeferredInputs() || changed;
+		if (changed)
 			impl->PostInput(*this);
+	}
+
+	DrawPipelines::Impl::DeferredEngineState DrawPipelines::Impl::ReadDeferredState(const Api::DeferredRangeState& a_state, std::string& a_error)
+	{
+		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
+		DeferredEngineState out;
+		auto* blendObject = ForwardBlendState(a_state.blendMode, a_state.alphaToCoverage, a_state.writeMode, a_state.blendExtra);
+		auto* depthObject = Pipeline::EngineDepthStencilState(a_state.depthMode, a_state.stencilMode);
+		const auto blend = blendObject ? Pipeline::FindBlend(blendObject) : nullptr;
+		const auto depth = depthObject ? Pipeline::FindDepthStencil(depthObject) : nullptr;
+		if (!blend || !depth) {
+			a_error = fmt::format("no engine {} state object", !blend ? "blend" : "depth-stencil");
+			return out;
 		}
+		if (!blend->error.empty() || blend->dualSource) {
+			a_error = blend->error.empty() ? std::string("its blend reads a second source") : blend->error;
+			return out;
+		}
+		// The mode index is the registration's arithmetic, so the engine's own mask confirms it.
+		if (a_state.stencilWriteMask && (!depth->d3d.StencilEnable || depth->d3d.StencilWriteMask != a_state.stencilWriteMask)) {
+			a_error = fmt::format("its stencil write mask is {:#x}, not {:#x}", depth->d3d.StencilEnable ? depth->d3d.StencilWriteMask : 0, a_state.stencilWriteMask);
+			return out;
+		}
+		out.blend = blend->rhi;
+		out.depthStencil = depth->rhi;
+		out.valid = true;
+		return out;
+	}
+
+	bool DrawPipelines::Impl::CaptureDeferredInputs()
+	{
+		bool changed = false;
+		completions->deferredStateRequests.Drain([&](std::uint64_t&& a_packed) { pendingDeferredStates.push_back(a_packed); });
+		// The engine's own blend table is kept once Community Shaders' deferred pass first ran. Until then the states wait.
+		if (!pendingDeferredStates.empty() && ForwardBlendState(0, 0, 1, 0)) {
+			for (const std::uint64_t packed : std::exchange(pendingDeferredStates, {})) {
+				if (deferredEngineStates.contains(packed))
+					continue;
+				const auto wanted = UnpackDeferredState(packed);
+				std::string error;
+				const auto state = ReadDeferredState(wanted, error);
+				if (!state.valid && loggedStateFailures++ < kMaxLoggedFailures)
+					logger::warn("[DCLF] deferred range state (blend [{}][{}][{}][{}], depth {}, stencil {}) cannot be built: {}; its keys stay native", wanted.blendMode,
+						wanted.alphaToCoverage, wanted.writeMode, wanted.blendExtra, wanted.depthMode, wanted.stencilMode, error);
+				else if (state.valid)
+					logger::info("[DCLF] deferred range state (blend [{}][{}][{}][{}], depth {}, stencil {}): rt0 mask {:X}, rt1 mask {:X}, depth test {} write {}, stencil {}",
+						wanted.blendMode, wanted.alphaToCoverage, wanted.writeMode, wanted.blendExtra, wanted.depthMode, wanted.stencilMode,
+						static_cast<unsigned>(state.blend.attachments[0].writeMask), static_cast<unsigned>(state.blend.attachments[1].writeMask), state.depthStencil.depthEnable,
+						state.depthStencil.depthWrite, state.depthStencil.stencilEnable ? "on" : "off");
+				deferredEngineStates.emplace(packed, state);
+				changed = true;
+			}
+		}
+		// Each range's target formats, read until every target has one. They are the engine's targets, made once.
+		for (std::size_t r = 0; r < Extensions::kDeferredRanges; ++r) {
+			const auto& entry = Extensions::DeferredRanges()[r];
+			auto& targets = renderInput.deferredTargets[r];
+			if (!entry.taken || targets.read)
+				continue;
+			DeferredTargets read{};
+			bool formats = true;
+			for (std::uint32_t i = 0; i < Api::kDeferredRangeTargets && formats; ++i) {
+				const auto target = entry.contribution.target(i);
+				if (!target)
+					break;
+				read.formats[i] = target.Format();
+				formats = read.formats[i] != rhi::Format::Unknown;
+				read.count = i + 1;
+			}
+			if (!formats || !read.count)
+				continue;
+			read.read = true;
+			targets = read;
+			changed = true;
+		}
+		if (changed)
+			renderInput.deferredStates = std::make_shared<const decltype(deferredEngineStates)>(deferredEngineStates);
+		return changed;
 	}
 }
