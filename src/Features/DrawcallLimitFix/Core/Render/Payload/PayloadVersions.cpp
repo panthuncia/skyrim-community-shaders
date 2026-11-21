@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 
 #include <ORGModuleServices/BackingPool.h>
+#include <ORGModuleServices/BufferChains.h>
 #include <ORGModuleServices/VersionedBufferBuild.h>
 #include <Render/Runtime/IUploadService.h>
 
@@ -17,7 +18,6 @@ namespace DCLF::Draws
 	namespace
 	{
 		using org::services::BufferByteRange;
-		using PartVersion = org::services::PublishedBufferVersion;
 
 		constexpr std::size_t Part(PayloadPart a_part) { return static_cast<std::size_t>(a_part); }
 
@@ -52,60 +52,74 @@ namespace DCLF::Draws
 		// A build that finds none free waits. The frames keep drawing the snapshot they have.
 		constexpr std::uint32_t kBackingsPerClass = RenderGraphRuntime::kGameFramesInFlight + 2;
 
-		constexpr std::uint64_t kNoTail = ~0ull;   // PartHeld::tailStart: the part has no tails
-		constexpr std::uint64_t kNoFloor = ~0ull;  // PartShared::floorEpoch: no backing holds anything
+		constexpr std::uint64_t kNoTail = org::services::BufferChainSource::kNoTail;  // the part has no tails
 
-		/** @brief A version's journal position and where its tails start. Together they say what a backing at this version lacks. */
-		struct PartHeld
-		{
-			std::uint64_t version = 0, journalEpoch = 0, tailStart = kNoTail;
-		};
+		/** @brief Whether a_part has tails, rows after the journalled ones that are written whole into each version. */
+		constexpr bool Tailed(PayloadPart a_part) { return a_part == PayloadPart::Geometries || a_part == PayloadPart::Inputs; }
 
-		/** @brief Any thread. A part's journal floor and report counters. */
-		struct PartShared
-		{
-			std::atomic<std::uint64_t> floorEpoch{ kNoFloor };  // the oldest journal position a backing of the pool holds
-			std::atomic<std::uint64_t> floorVersion{ 0 };       // the same as a version (the builder forgets the older ones)
-			std::atomic<std::uint64_t> built{ 0 }, uploadedBytes{ 0 }, copiedBytes{ 0 }, wholeCopies{ 0 }, suspensions{ 0 }, failures{ 0 };
-		};
+		struct PartsState;
+		PartsState& Parts();
+		void ReportFailure(std::size_t a_part, std::uint64_t a_version, std::string_view a_error);
 
-		/** @brief One posted version's outcome. The builder reads it once `done` is set. */
-		struct PartPending
+		/** @brief Producer thread, at a part's first post. Its pool, on DCLF's retirement clock. */
+		std::shared_ptr<org::services::BackingPool> MakePool(std::size_t a_part,
+			std::function<void(org::services::BackingPoolEvent, std::string_view, std::uint64_t)> a_telemetry)
 		{
-			std::atomic<bool> done{ false };
-			std::shared_ptr<const PartVersion> version;  // null: failed (error)
-			std::string error;
-			PartHeld held;
-			std::uint64_t units = 0, serial = 0;  // the source's
-		};
+			auto hooks = PooledBackings::Hooks();
+			hooks.telemetry = std::move(a_telemetry);
+			// One spare is enough. A fresh backing costs a GPU copy, not an upload, so more spares only hold VRAM.
+			// On HexRim five pipeline-row backings took 40 MB.
+			return org::services::BackingPool::Create(std::move(hooks), ::RenderGraph::Frame::Retirement::Clock(),
+				{ .name = fmt::format("cs.dclf.payload.{}", kPools[a_part].name), .maxPerClass = kBackingsPerClass,
+					.framesInFlight = RenderGraphRuntime::kGameFramesInFlight, .spareFree = 1 });
+		}
 
-		/** @brief Snapshot builder only. One part's chain. */
-		struct PartChain
+		org::services::BufferChainsDesc ChainsDesc()
 		{
-			std::shared_ptr<org::services::BackingPool> pool;  // made at the part's first post
-			std::shared_ptr<const PartVersion> last;           // the newest version built
-			PartHeld lastHeld;
-			std::uint64_t lastUnits = 0, lastSerial = 0;       // the source last was built for
-			std::uint64_t versions = 0;                        // the versions numbered (writeSequence)
-			std::vector<PartHeld> held;                        // by version, back to the pool's floor (last's included)
-			std::shared_ptr<PartPending> pending;              // the version in flight
-			bool failed = false;                               // the current source's build of it failed
-			bool reported = false;                             // a failure logged
-		};
+			org::services::BufferChainsDesc desc;
+			for (std::size_t k = 0; k < kPayloadParts; ++k)
+				desc.chains.push_back({ .name = fmt::format("cs.dclf.payload.{}", kPools[k].name), .stride = kPools[k].stride,
+					.deviceAddress = kPools[k].deviceAddress, .tailed = Tailed(static_cast<PayloadPart>(k)) });
+			desc.makePool = MakePool;
+			// Each version is built from its predecessor on the preparation pool. Its tag's built runs on the build's thread before it is frozen.
+			desc.post = [](org::services::VersionedBufferBuildInput a_input, org::services::BufferChainBuilt a_built, org::services::BufferChainDone a_done) {
+				auto tag = std::make_shared<Runtime::PayloadPartTag>();
+				tag->built = std::move(a_built);
+				a_input.tag = std::move(tag);
+				return SceneScheduler::Graph().PostPayloadPart(std::move(a_input), std::move(a_done));
+			};
+			// The builder picks up the result in its next Settle.
+			desc.wake = [] { WakeSnapshotBuilder(); };
+			desc.failed = ReportFailure;
+			// Grow with a quarter's headroom, not a power of two. A part that changes every frame keeps a backing per frame in flight.
+			// HexRim's pipeline rows used 4 backings of 16 MB for 9.5 MB of rows.
+			desc.growth = org::services::GrowthPolicy::Headroom(25, 64);
+			// Shrink once the part stays much smaller. The predecessor's copy is clipped to this version's rows.
+			desc.shrink = PooledBackings::Shrink();
+			return desc;
+		}
 
 		struct PartsState
 		{
-			std::array<PartShared, kPayloadParts> shared;
-			std::array<PartChain, kPayloadParts> chains;    // the snapshot builder's
-			std::uint64_t sources = 0;                      // the snapshot builder's: MakeSource's serials
-			bool uploaderReported = false;                  // the snapshot builder's
-			std::shared_ptr<const ScenePayload> installed;  // render thread: the frame's (Install)
+			org::services::BufferChains chains{ ChainsDesc() };  // the snapshot builder's, apart from the any-thread reads
+			std::array<bool, kPayloadParts> reported{};        // the snapshot builder's: a part's failure logged
+			std::uint64_t sources = 0;                          // the snapshot builder's: MakeSource's serials
+			bool uploaderReported = false;                      // the snapshot builder's
+			std::shared_ptr<const ScenePayload> installed;      // render thread: the frame's (Install)
 		};
 		/** @brief Never destroyed, because leases and build results can arrive while the process tears down. */
 		PartsState& Parts()
 		{
 			static auto* state = new PartsState();
 			return *state;
+		}
+
+		/** @brief Snapshot builder. A part's build failed. No fallback: the part keeps its last version and the next source builds it again. */
+		void ReportFailure(std::size_t a_part, std::uint64_t a_version, std::string_view a_error)
+		{
+			if (!std::exchange(Parts().reported[a_part], true))
+				logger::error("[DCLF] the scene payload's {} version {} failed: {}; its snapshot has no payload, the next publication builds it again",
+					PayloadPools::kPartNames[a_part], a_version, a_error);
 		}
 
 		/** @brief A part's rows in elements. Geometries and Inputs count words. */
@@ -134,9 +148,6 @@ namespace DCLF::Draws
 				return true;
 			}
 		}
-
-		/** @brief Whether a_part has tails, rows after the journalled ones that are written whole into each version. */
-		constexpr bool Tailed(PayloadPart a_part) { return a_part == PayloadPart::Geometries || a_part == PayloadPart::Inputs; }
 
 		/** @brief The first byte of a_part's tails, or kNoTail. */
 		std::uint64_t TailStartOf(const PayloadSource& a_source, PayloadPart a_part)
@@ -210,7 +221,7 @@ namespace DCLF::Draws
 			}
 		}
 
-		using DeltaWrite = std::function<void(const void* a_data, std::size_t a_bytes, std::uint64_t a_offset)>;
+		using DeltaWrite = org::services::ChainDeltaWrite;
 
 		/**
 		 * @brief Emits a part's delta on the producer's thread. The journal's runs since a_from, then its tails whole.
@@ -268,35 +279,22 @@ namespace DCLF::Draws
 			}
 		}
 
-		/**
-		 * @brief Publishes the oldest journal position any backing holds. Runs after a build, when the producer is the pool's only acquirer.
-		 * A backing at an unknown version, such as one a failed build wrote, keeps every change.
-		 */
-		void PublishFloor(org::services::BackingPool& a_pool, const std::vector<PartHeld>& a_held, PartShared& a_shared)
-		{
-			const auto oldest = a_pool.OldestContentEpoch();
-			if (!oldest) {
-				a_shared.floorEpoch.store(kNoFloor, std::memory_order_release);
-				return;
-			}
-			const auto it = std::ranges::find(a_held, *oldest, &PartHeld::version);
-			a_shared.floorVersion.store(*oldest, std::memory_order_release);
-			a_shared.floorEpoch.store(it != a_held.end() ? it->journalEpoch : 0, std::memory_order_release);
-		}
+	}
 
-		std::shared_ptr<org::services::BackingPool> MakePool(std::size_t a_part)
-		{
-			auto hooks = PooledBackings::Hooks();
-			hooks.telemetry = [shared = &Parts().shared[a_part]](org::services::BackingPoolEvent a_event, std::string_view, std::uint64_t) {
-				if (a_event == org::services::BackingPoolEvent::Suspended)
-					shared->suspensions.fetch_add(1, std::memory_order_relaxed);
-			};
-			// One spare is enough. A fresh backing costs a GPU copy, not an upload, so more spares only hold VRAM.
-			// On HexRim five pipeline-row backings took 40 MB.
-			return org::services::BackingPool::Create(std::move(hooks), ::RenderGraph::Frame::Retirement::Clock(),
-				{ .name = fmt::format("cs.dclf.payload.{}", kPools[a_part].name), .maxPerClass = kBackingsPerClass,
-					.framesInFlight = RenderGraphRuntime::kGameFramesInFlight, .spareFree = 1 });
-		}
+	bool PayloadSource::Present(std::size_t a_part) const { return Draws::Present(*this, static_cast<PayloadPart>(a_part)); }
+	std::uint64_t PayloadSource::Elements(std::size_t a_part) const { return RowsOf(*this, static_cast<PayloadPart>(a_part)); }
+	std::uint64_t PayloadSource::ContentEpoch(std::size_t a_part) const { return ContentEpochOf(*this, static_cast<PayloadPart>(a_part)); }
+	std::uint64_t PayloadSource::TailStart(std::size_t a_part) const { return TailStartOf(*this, static_cast<PayloadPart>(a_part)); }
+
+	std::optional<std::vector<org::services::BufferByteRange>> PayloadSource::ChangedSince(std::size_t a_part, std::uint64_t a_epoch) const
+	{
+		return JournalRanges(*this, static_cast<PayloadPart>(a_part), a_epoch);
+	}
+
+	void PayloadSource::EmitDelta(std::size_t a_part, std::optional<std::uint64_t> a_from, std::uint64_t a_version, std::uint64_t a_previous,
+		const org::services::ChainDeltaWrite& a_write) const
+	{
+		Draws::EmitDelta(static_cast<PayloadPart>(a_part), *this, a_from, a_version, a_previous, a_write);
 	}
 
 	namespace PayloadPools
@@ -339,53 +337,16 @@ namespace DCLF::Draws
 
 		bool Settle()
 		{
-			auto& s = Parts();
-			bool idle = true;
-			for (std::size_t k = 0; k < kPayloadParts; ++k) {
-				auto& chain = s.chains[k];
-				auto& shared = s.shared[k];
-				if (chain.pending) {
-					if (!chain.pending->done.load(std::memory_order_acquire)) {
-						idle = false;
-						continue;
-					}
-					const auto pending = std::move(chain.pending);
-					if (const auto& version = pending->version) {
-						chain.last = version;
-						chain.lastHeld = pending->held;
-						chain.lastUnits = pending->units;
-						chain.lastSerial = pending->serial;
-						chain.held.push_back(pending->held);
-						shared.built.fetch_add(1, std::memory_order_relaxed);
-						shared.uploadedBytes.fetch_add(version->uploadedBytes, std::memory_order_relaxed);
-						shared.copiedBytes.fetch_add(version->copiedBytes, std::memory_order_relaxed);
-						shared.wholeCopies.fetch_add(version->copiedWhole ? 1u : 0u, std::memory_order_relaxed);
-					} else {
-						// No fallback. The part keeps its last version and the next source builds it again.
-						chain.failed = true;
-						shared.failures.fetch_add(1, std::memory_order_relaxed);
-						if (!std::exchange(chain.reported, true))
-							logger::error("[DCLF] the scene payload's {} version {} failed: {}; its snapshot has no payload, the next publication builds it again",
-								kPartNames[k], pending->held.version, pending->error);
-					}
-				}
-				// Forget versions below the pool's floor. The newest is always kept.
-				const auto floor = s.shared[k].floorVersion.load(std::memory_order_acquire);
-				std::erase_if(chain.held, [&](const PartHeld& a_held) { return a_held.version < floor && a_held.version != chain.lastHeld.version; });
-			}
-			return idle;
+			return Parts().chains.Settle();
 		}
 
 		std::string PendingParts()
 		{
+			const auto& chains = Parts().chains;
 			std::string out;
-			for (std::size_t k = 0; k < kPayloadParts; ++k)
-				if (const auto pending = Parts().chains[k].pending)
-					out += fmt::format("{}{} v{}{}", out.empty() ? "" : ", ", kPartNames[k], pending->held.version, pending->done.load(std::memory_order_acquire) ? " (done)" : "");
-			std::uint64_t suspensions = 0;
-			for (const auto& shared : Parts().shared)
-				suspensions += shared.suspensions.load(std::memory_order_relaxed);
-			return fmt::format("{}; {} suspensions since the report", out.empty() ? std::string("none") : out, suspensions);
+			for (const auto& pending : chains.Pending())
+				out += fmt::format("{}{} v{}{}", out.empty() ? "" : ", ", kPartNames[pending.chain], pending.version, pending.done ? " (done)" : "");
+			return fmt::format("{}; {} suspensions since the report", out.empty() ? std::string("none") : out, chains.Suspensions());
 		}
 
 		bool Post(const std::shared_ptr<const PayloadSource>& a_source, const std::shared_ptr<org::runtime::IUploadService>& a_uploads)
@@ -397,100 +358,14 @@ namespace DCLF::Draws
 					logger::info("[DCLF] the scene payload's versions wait for the dedicated upload queue: snapshots have no payload until it is made");
 				return false;
 			}
-			const auto& source = *a_source;
-			bool posted = true;
-			for (std::size_t k = 0; k < kPayloadParts; ++k) {
-				const auto part = static_cast<PayloadPart>(k);
-				auto& chain = s.chains[k];
-				chain.failed = false;
-				if (!Present(source, part))
-					continue;  // the chain keeps its last version for a later source that has the part
-				const auto epoch = ContentEpochOf(source, part);
-				// A tailed or unjournalled part also changes whenever the source does.
-				const bool changed = !chain.last || source.units[k] != chain.lastUnits || epoch != chain.lastHeld.journalEpoch ||
-				                     ((Tailed(part) || !epoch) && source.serial != chain.lastSerial);
-				// Rebuild a quiet part when its shrink is due. A chain is otherwise asked only on change and would keep its large class.
-				if (!changed && !chain.last->shrinkWindow.Due(PooledBackings::Shrink(), org::services::ShrinkWindow::Clock::now()))
-					continue;
-				if (!chain.pool)
-					chain.pool = MakePool(k);
-				const PartHeld held{ ++chain.versions, epoch, TailStartOf(source, part) };
-				const PartHeld previous = chain.last ? chain.lastHeld : PartHeld{};
-				auto known = std::make_shared<std::vector<PartHeld>>(chain.held);
-				known->push_back(held);
-				const std::shared_ptr<const std::vector<PartHeld>> versions = std::move(known);
-				const PayloadSource* view = a_source.get();  // held by the input (keep)
-
-				org::services::VersionedBufferBuildInput input;
-				input.uploadOwner = a_uploads;
-				input.uploadService = a_uploads.get();
-				input.debugName = fmt::format("cs.dclf.payload.{}", kPools[k].name);
-				input.writeSequence = held.version;
-				input.elementStride = kPools[k].stride;
-				input.elementCount = RowsOf(source, part);
-				input.capacity = std::max<std::uint64_t>(input.elementCount, 1);
-				// Grow with a quarter's headroom, not a power of two. A part that changes every frame keeps a backing per frame in flight.
-				// HexRim's pipeline rows used 4 backings of 16 MB for 9.5 MB of rows.
-				input.growth = org::services::GrowthPolicy::Headroom(25, 64);
-				// Shrink once the part stays much smaller. The predecessor's copy is clipped to this version's rows.
-				input.shrink = PooledBackings::Shrink();
-				input.flags.deviceAddress = kPools[k].deviceAddress;
-				input.previous = chain.last;
-				input.backingPool = chain.pool;
-				input.keep = a_source;
-				// What a backing at a_from lacks. The journal's runs since then, plus everything from the earlier tail start on.
-				input.changedSince = [view, part, versions, previousTail = previous.tailStart](std::uint64_t a_from) -> std::optional<std::vector<BufferByteRange>> {
-					const auto it = std::ranges::find(*versions, a_from, &PartHeld::version);
-					if (it == versions->end())
-						return std::nullopt;
-					auto ranges = JournalRanges(*view, part, it->journalEpoch);
-					if (ranges && Tailed(part))
-						if (const auto tail = std::min(it->tailStart, previousTail); tail != kNoTail)
-							ranges->push_back({ tail, ~std::uint64_t{ 0 } - tail });
-					return ranges;
-				};
-				// Everything when there is no predecessor position.
-				const std::optional<std::uint64_t> from = chain.last && previous.journalEpoch ? std::optional<std::uint64_t>(previous.journalEpoch) : std::nullopt;
-				input.emitDelta = [view, part, from, version = held.version, previousVersion = previous.version](const DeltaWrite& a_write) {
-					EmitDelta(part, *view, from, version, previousVersion, a_write);
-				};
-				auto tag = std::make_shared<Runtime::PayloadPartTag>();
-				tag->built = [pool = chain.pool.get(), versions, shared = &s.shared[k]](const PartVersion&) { PublishFloor(*pool, *versions, *shared); };
-				input.tag = std::move(tag);
-
-				auto pending = std::make_shared<PartPending>();
-				pending->held = held;
-				pending->units = source.units[k];
-				pending->serial = source.serial;
-				// The builder picks up the result in its next Settle.
-				const bool accepted = SceneScheduler::Graph().PostPayloadPart(std::move(input), [pending](std::shared_ptr<const PartVersion> a_version, std::string a_error) {
-					pending->version = std::move(a_version);
-					pending->error = std::move(a_error);
-					pending->done.store(true, std::memory_order_release);
-					WakeSnapshotBuilder();
-				});
-				if (!accepted) {
-					chain.failed = true;
-					posted = false;
-					continue;
-				}
-				chain.pending = std::move(pending);
-			}
-			return posted;
+			return s.chains.Post(a_source, a_uploads);
 		}
 
 		std::shared_ptr<const ScenePayload> Finish(const PayloadSource& a_source)
 		{
-			auto& s = Parts();
 			auto out = std::make_shared<ScenePayload>();
-			for (std::size_t k = 0; k < kPayloadParts; ++k) {
-				if (!Present(a_source, static_cast<PayloadPart>(k)))
-					continue;
-				const auto& chain = s.chains[k];
-				if (chain.failed || !chain.last || chain.lastUnits != a_source.units[k])
-					return nullptr;
-				out->versions[k] = chain.last;
-			}
+			if (!Parts().chains.Finish(a_source, out->versions))
+				return nullptr;
 			out->units = a_source.units;
 			out->regionCount = a_source.regionCount;
 			out->mainInputsAt = a_source.mainInputsAt;
@@ -559,30 +434,15 @@ namespace DCLF::Draws
 
 		std::optional<std::uint64_t> OldestContentEpoch(PayloadPart a_part)
 		{
-			const auto floor = Parts().shared[Part(a_part)].floorEpoch.load(std::memory_order_acquire);
-			return floor == kNoFloor ? std::nullopt : std::optional<std::uint64_t>(floor);
+			return Parts().chains.OldestContentEpoch(Part(a_part));
 		}
 
 		std::array<PartReport, kPayloadParts> TakeReport()
 		{
-			auto& s = Parts();
+			const auto reports = Parts().chains.TakeReport();
 			std::array<PartReport, kPayloadParts> out{};
-			for (std::size_t k = 0; k < kPayloadParts; ++k) {
-				auto& shared = s.shared[k];
-				auto& r = out[k];
-				r.built = shared.built.exchange(0, std::memory_order_relaxed);
-				r.uploadedBytes = shared.uploadedBytes.exchange(0, std::memory_order_relaxed);
-				r.copiedBytes = shared.copiedBytes.exchange(0, std::memory_order_relaxed);
-				r.wholeCopies = shared.wholeCopies.exchange(0, std::memory_order_relaxed);
-				r.suspensions = shared.suspensions.exchange(0, std::memory_order_relaxed);
-				r.failures = shared.failures.exchange(0, std::memory_order_relaxed);
-				if (const auto& pool = s.chains[k].pool) {
-					const auto census = pool->Count();
-					r.liveBackings = census.live;
-					r.liveBytes = census.bytes;
-				}
-				r.floor = OldestContentEpoch(static_cast<PayloadPart>(k));
-			}
+			for (std::size_t k = 0; k < kPayloadParts && k < reports.size(); ++k)
+				out[k] = reports[k];
 			return out;
 		}
 	}

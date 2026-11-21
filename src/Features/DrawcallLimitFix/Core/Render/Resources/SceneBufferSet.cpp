@@ -48,22 +48,12 @@ namespace DCLF::Draws
 
 	Versioned SceneBufferSet::Make(std::shared_ptr<org::Buffer> a_first, GrowableSpec a_spec)
 	{
-		if (!a_first)
-			return nullptr;
-		org::services::GrowableRegistration registration;
-		registration.name = a_first->GetName();
-		auto versioned = org::VersionedBuffer::Create(std::move(a_first));
-		registration.buffer = versioned;
-		registration.extent = a_spec.extent;
-		registration.policy = a_spec.policy;
+		org::services::GrowableBufferSpec spec{ .extent = a_spec.extent, .policy = a_spec.policy, .contents = a_spec.contents, .capture = std::move(a_spec.capture) };
 		// Gives memory back once the scene asks for much less (CS_DCLF_SHRINK).
-		registration.shrink = PooledBackings::Shrink();
-		registration.contents = a_spec.contents;
-		registration.capture = std::move(a_spec.capture);
+		spec.shrink = PooledBackings::Shrink();
 		// Layouts and diagnostics read the device address. Shaders read the buffer view ref.
-		registration.address = true;
-		(void)set.Register(std::move(registration));
-		return versioned;
+		spec.address = true;
+		return set.Make(std::move(a_first), std::move(spec));
 	}
 
 	SealedSet SceneBufferSet::Seal(GrowthBuild&& a_build)
@@ -73,31 +63,6 @@ namespace DCLF::Draws
 		if (!sealed.error.empty() && failuresLogged++ < 8)
 			logger::error("[DCLF] a growth of the scene's buffers failed: {}", sealed.error);
 		return sealed;
-	}
-
-	void SceneBufferSet::Require(GrowthBuild& a_build, const Versioned& a_buffer, std::uint64_t a_units)
-	{
-		if (a_buffer && a_units)
-			a_build.Require(set.HandleOf(*a_buffer), a_units);
-	}
-
-	void SceneBufferSet::RequireNewer(GrowthBuild& a_build, const Versioned& a_buffer, std::uint64_t a_serial)
-	{
-		if (a_buffer && a_serial)
-			a_build.RequireNewer(set.HandleOf(*a_buffer), a_serial);
-	}
-
-	std::uint64_t SceneBufferSet::Units(const GrowthBuild& a_build, const Versioned& a_buffer)
-	{
-		return a_buffer ? a_build.Units(set.HandleOf(*a_buffer)) : 0;
-	}
-
-	std::uint64_t SceneBufferSet::Asked(const GrowthBuild& a_build, const Versioned& a_buffer)
-	{
-		if (!a_buffer)
-			return 0;
-		const auto handle = set.HandleOf(*a_buffer);
-		return std::max(a_build.Asked(handle), a_build.Units(handle));
 	}
 
 	std::string SceneBufferSet::Report()

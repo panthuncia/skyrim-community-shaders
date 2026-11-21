@@ -581,8 +581,8 @@ namespace DCLF
 		if (!handles) {
 			auto& buffers = SceneBufferSet::Get();
 			// One region per run, except the zeros, which every run shares.
-			const auto perRun = SceneBufferSet::LatchRegions::kPerRun;
-			const auto shared = SceneBufferSet::LatchRegions::kShared;
+			const auto perRun = SceneBufferSet::LatchRegions::PerRun;
+			const auto shared = SceneBufferSet::LatchRegions::Shared;
 			// Headroom, because a commit's frame blocks change size.
 			const auto latched = org::services::GrowthPolicy::Headroom(100, 4096);
 			handles.main = buffers.RegisterLatch("cs.dclf.latch", perRun);
