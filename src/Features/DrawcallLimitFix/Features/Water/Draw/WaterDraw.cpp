@@ -56,27 +56,27 @@ namespace DCLF::Features::Water::Indirect
 
 		bool MaskState(const Api::DeferredKey& a_key, Api::DeferredRangeState& a_state)
 		{
+			// SetupGeometry's Stencil technique: bit 1 << index takes mode 2 + index with the bit as reference. Water with no water-type
+			// bit (every Unified Water tile) takes mode 0, the stencil off, and writes only the normals mask and the motion vectors.
 			const std::uint32_t index = WaterScene::StencilIndexOfKey(a_key.rasterFlags);
-			if (!index)
-				return false;
 			a_state = { .writeMode = kMaskWriteMode,
 				.depthMode = kMaskDepthMode,
-				.stencilMode = static_cast<std::uint8_t>(kMaskStencilModeBase + index),
-				.stencilWriteMask = static_cast<std::uint8_t>(1u << index),
+				.stencilMode = index ? static_cast<std::uint8_t>(kMaskStencilModeBase + index) : std::uint8_t{ 0 },
+				.stencilWriteMask = index ? static_cast<std::uint8_t>(1u << index) : std::uint8_t{ 0 },
 				.twoSided = true };
 			return true;
 		}
 
 		/**
-		 * @brief The surface's state for the plain techniques: 0, LOD and simple, without Wading. A key with no stencil index has no
-		 * mask, so it fails here too: the engine would draw its mask and DCLF would not.
+		 * @brief The surface's state for the plain techniques: 0, LOD and simple, without Wading. It tests bit 0 (mode 30, ref 1)
+		 * whatever the water-type bit.
 		 */
 		bool SurfaceState(const Api::DeferredKey& a_key, Api::DeferredRangeState& a_state)
 		{
 			const std::uint32_t technique = Port::TechniqueOf(a_key.vertexDescriptor);
 			if (technique != 0 && technique != Port::kTechniqueLod && technique != Port::kTechniqueSimple)
 				return false;
-			if ((a_key.vertexDescriptor & Port::Flag::kWading) || !WaterScene::StencilIndexOfKey(a_key.rasterFlags))
+			if (a_key.vertexDescriptor & Port::Flag::kWading)
 				return false;
 			a_state = { .writeMode = kSurfaceWriteMode, .depthMode = kSurfaceDepthMode, .stencilMode = kSurfaceStencilMode, .twoSided = true };
 			return true;
