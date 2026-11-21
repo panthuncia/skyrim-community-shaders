@@ -43,8 +43,10 @@ namespace DCLF::Features::Water::Indirect
 
 		bool DrawsMask(const Api::DeferredKey& a_key, std::uint8_t& a_stencilRef)
 		{
-			a_stencilRef = WaterScene::MaskStencilRefOfKey(a_key.rasterFlags);
-			return a_stencilRef != 0;
+			// Every water key draws its mask. Without a water-type bit the stencil is off (MaskState) and the engine's reference is 0xFF.
+			const std::uint8_t bit = WaterScene::MaskStencilRefOfKey(a_key.rasterFlags);
+			a_stencilRef = bit ? bit : std::uint8_t{ 0xFF };
+			return true;
 		}
 
 		/** @brief Every water key draws in the surface range, so a key the surface cannot draw fails its build (SurfaceState) and stays native. */
