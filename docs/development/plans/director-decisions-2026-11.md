@@ -599,3 +599,20 @@ final until the user confirms it.
     the cleanup plan and the simplification plan. `integ/hard-ports` stays as the detailed history; the hashes in this
     file and the director log point into it. New work, starting with the library extraction plan, branches from
     `org_integration`. Nothing is pushed.
+
+## Library extraction plan
+
+115. **Extraction: one library error convention (to confirm).** Library code never calls a host fatal and reads no
+     host switches. A failure the caller can act on is returned. A failure deep inside a call that cannot be returned
+     goes to an error callback the host passes in the module's `Desc` (`std::function<void(std::string_view)>`); after
+     it returns, the library acts as if the call failed. CS passes `RenderGraph::Fatal`, so what was fatal stays
+     fatal. `org::RunReadback` moves from throwing to this callback; ORG's other throws stay as they are.
+116. **Extraction phase 0: nothing pushed (to confirm).** Pushing the submodule branches is outward-facing and the user
+     was away, so they stay local, as do the new `extract/*` branches. Phases 1-4 pin local commits anyway; decision
+     89's review is still open.
+117. **Extraction: integration in a worktree, staged as `extract` (to confirm).** A second session ported water to
+     DCLF at the same time and merges into `org_integration` in the main checkout, staging as `nfg`. The extraction
+     integrates on `org-native/extract-integ` in `../org-port-worktrees/extract-integ`, builds there
+     (`build-wt.cmd`), and stages as `CS AB extract`, deleted at the end. cs-test's own lock serialises the two
+     sessions' runs (`--wait`).
+118. **Extraction phase 5 not started.** It waits for a second user, as the plan says.
