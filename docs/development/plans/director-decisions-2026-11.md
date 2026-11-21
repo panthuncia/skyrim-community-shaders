@@ -616,3 +616,37 @@ final until the user confirms it.
      (`build-wt.cmd`), and stages as `CS AB extract`, deleted at the end. cs-test's own lock serialises the two
      sessions' runs (`--wait`).
 118. **Extraction phase 5 not started.** It waits for a second user, as the plan says.
+119. **Extraction: precondition violations throw (to confirm; refines 115).** A library constructor or call that gets a
+     missing required callback, an invalid `Desc`, or is used from a thread its contract forbids throws
+     `std::invalid_argument` or `std::logic_error`. These are programming errors, found the first time the code runs.
+     Runtime failures still follow 115. `org::RunReadback` takes its error handler as an argument of each `Create*`
+     rather than a `Runtime::Desc` field (p0-lib), so the compiler finds every reader.
+120. **Extraction: lead decisions are in the plan.** Each part's "decided by the agent, to confirm" list is under
+     "### <part> decisions" at the end of `org-library-extraction-plan.md`. Notable ones: the frame clock lives in OMS
+     `Async/`, not ORG (p1-frame); EpochRecordings went to ORG beside `GraphHost.h` (p2-recordings); the zone tallies
+     and the render-thread budget went to BasicTelemetry, not OMS (p2-cpu); payload versions became OMS
+     `BufferChains`, not a merge into `ComposedVersions` (p4-bufsets); programs read one process-wide
+     `ProgramEnvironment` (p3-programs); `UavClearPass` has no shader (p3-gates).
+121. **Extraction: test runs condensed.** One baseline set on `bb93e1016` (perf-quick per mode, uncapped), one
+     checkpoint batch after phases 0-4 (17 configs, `ck2`), one final batch after cleanup. Perf-quick uncapped, Dev-Fast
+     /Od, one sample each: guest 56.7 -> 56.7 fps, native Vulkan 57.0 -> 57.4, native D3D12 44.0 -> 44.2 (the
+     executor, retirement join and build service A/B the plan asks for: no change). The first checkpoint (`ck1`) ran
+     on the baseline DLL because staging hit the other session's cs-test lock and the chain went on; it counts as a
+     second baseline sample, nothing more.
+122. **Extraction: an intermittent uncovered epoch in native D3D12 (open).** `native-d3d12+shader-reload` failed once
+     in three runs (`ck2`): DCLF's "frame 40 is not covered by the scene it adopted at its Begin" with Z-prepass and
+     reflection uncovered, at a loading frame just after `cs.dclf.reflection` was added and its staged build attached.
+     Two reruns passed. Earlier `nfg` runs of the same config passed four times out of four, so it may be new; it has
+     not been reproduced or explained.
+123. **Extraction: library tests build through a wrapper project.** ORG's and OMS's tests are off in CS's build, so
+     `C:\w\lt` builds them from the integration worktree with CS's vcpkg packages (Streamline off). Three test files
+     no longer compiled before the extraction (Windows' `small` macro, a duplicate name, a stale override); fixed.
+     Four failures were test bugs, three of them older than the extraction (RunSlots' second move, a descriptor heap
+     of 2, a borrowed runtime cleaned up, a slot still retiring in KeptState); fixed in the tests, no library code
+     changed. 75 of 78 pass. `PersistentVulkanHostTests` Leases, LeasesOpen and LeasesWide fail at ORG `48c77dd` too:
+     `SynchronousAdmission` holds at most `numFramesInFlight * 3 + 3` admissions, the tests hold 24 and 260
+     executions, and the unwind then waits on GPU work that never ran. Lifting the cap is ORG work, left open.
+124. **Extraction: what was not done.** Phase 0's push (116) and phase 5 (118). Library work left: ORG multisampled
+     SRVs (ORG lacks them, p0-lib checked), a `Builds` snapshot readable from any thread, thread rules in signatures.
+     The cleanup pass listed host-choice constants still hardcoded (ImGui's 4 atlas pages, KeptState's spare views,
+     the shrink presets, the commit upload page sizes) and older CS mentions in ORG docs outside the diff.
