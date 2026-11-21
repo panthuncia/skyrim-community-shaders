@@ -822,9 +822,9 @@ frame time is unchanged by either, since the worst frames are outside the lane.
 ### Persistent draw state
 
 Every structure built from the tables follows what changed, by log, and sends GPU holders only the runs changed since what they
-hold (`Core/Runtime/KeptState.h`). One implementation each:
+hold (OMS `ORGModuleServices/Async/KeptState.h`, aliased into DCLF by `Core/Runtime/KeptState.h`). One implementation each:
 
--   **Slot tables** (`Core/Runtime/SlotTable.h`). The shared tables (geometries, pipelines, materials) keep slots with generations
+-   **Slot tables** (OMS `ORGModuleServices/Async/SlotTable.h`). The shared tables (geometries, pipelines, materials) keep slots with generations
     and reference counts. Liveness is by reference, never by idle time: `DrainUnreferenced` frees a slot after a complete batch of
     reference changes, in the batch where the last reference went. A freed slot is retired and returns to the free list only once
     no publication names it. References: an object's geometry slot while it has a record, its pipeline and material slots while it
@@ -871,7 +871,7 @@ change), the toggles, a `RevisionRequest`, the oldest event it is the first publ
 -   **A revision is its publication's alone** (tables, lookups, catalog); it never reads what the frame installed. Not a revision
     made from a publication's tables with the frame's installed lookups: it lags a publication and starts a self-sustaining loop of
     superseded revisions.
--   **The publication log** (`Core/Runtime/PublicationLog.h`, forward-linked, one producer, one consumer; nodes are
+-   **The publication log** (OMS `ORGModuleServices/Async/PublicationLog.h`, forward-linked, one producer, one consumer; nodes are
     `PublicationDeltas`): each publication's claims changes (joined, left) and the frame inputs its passes made: placement plans,
     shading names, seed requests, switches applied, retired imports, class membership changes, light-entry changes, component
     deltas (gate flips). The frame start walks the frame inputs up to the newest publication taken and the claims changes up to the
@@ -896,7 +896,7 @@ change), the toggles, a `RevisionRequest`, the oldest event it is the first publ
 
 ### The retirement chain
 
-Nothing is logically freed while a publication that names it lives (`Core/Runtime/Retirement.h`, `RetirementChain`). Each
+Nothing is logically freed while a publication that names it lives (OMS `ORGModuleServices/RetirementChain.h`, `RetirementChain`). Each
 publication holds the chain node opened with it. A node's batch (object, tree, fade-root, extras, bone and face-stream slots, the
 slot tables' slots, lookup retirements, geometry buffer owners, material references, engine references) returns to the
 coordinator's free lists (`RecycleRetired`, first in each pass) once no publication up to it lives. GPU memory has its own,
@@ -1106,14 +1106,14 @@ the GPU; a slot outlives GPU work only while something holds its owner (`GpuText
 > overwritten, and every execution submitted while the content is current holds it.
 
 ORG states the same contract for `OwnedDescriptorBinding::Index()`. DCLF makes it structural:
--   **Rows name descriptors only through `OwnedRow`** (`Core/Gpu/OwnedRows.h`). A row's descriptor fields are `DescriptorIndex`,
+-   **Rows name descriptors only through `OwnedRow`** (`Core/Gpu/OwnedRows.h`, an alias of OMS `ORGModuleServices/OwnedRows.h` over `GpuTextures::Binding`). A row's descriptor fields are `DescriptorIndex`,
     which only `OwnedRow::Bind` sets, and it keeps the binding's owner with the row. A field the reader takes as "none" is
     `DescriptorIndex::Sentinel`.
--   **The uploads record content owners.** `CommitUploads` and `LatchedUploads` (`Core/Render/Payload/Uploads.h`) take an `OwnedRow`
+-   **The uploads record content owners.** `CommitUploads` and `LatchedUploads` (`Core/Render/Payload/Uploads.h`, over OMS `ORGModuleServices/CommitUploads.h`) take an `OwnedRow`
     and make its owners the content owners of the range it writes (`ContentOwners`, `SceneBuffers::content`). A write of plain bytes
     replaces a range's owners with none, so a freed row (sent zero) releases its bindings.
     -   Ranges are keyed as the uploads match their targets: a versioned buffer by its `Key()`, so a catch-up or growth copy keeps them.
-    -   The registry snapshots its owners (one sealed owner, made again only after a change).
+    -   The registry (OMS `ContentOwners`) snapshots its owners with `GpuTextures::Seal` (one sealed owner, made again only after a change).
 -   **Every execution's owners are made one way** (`ExecutionOwners`, `Core/Render/Epochs/ExecutionOwners.h`): its payloads' bindings,
     the adopted snapshot, its frame textures, and what only it reads (`CommitContext::executionOwners`: retired leases, publications
     it binds). It is sealed at the end of the record step, after the commit wrote its content: `Seal` adds the content snapshot.
@@ -1398,8 +1398,8 @@ rebuilds the graph there, so a frame's passes always match its conditions.
     ranges, about 140 us of serialised NvPerf time, but only 0.03-0.04 ms of frame time (6.47 to 6.44 ms; DCLF off 5.74 ms). Phase 2
     rescued nothing there.
 
-**The HZB** (Features/GpuOcclusion: `HzbPass.cpp`, `Features/GpuOcclusion/HzbCS.hlsl`; the test is Core's `HzbTest.hlsli`, shared by
-BuildDrawsCS and TreeLodCullCS):
+**The HZB** (Features/GpuOcclusion: `HzbPass.cpp`, over OMS `Passes/HzbPass` and its `Hzb.hlsl`; the test is OMS's
+`ORGModuleServices/HzbTest.hlsli`, shared by BuildDrawsCS and TreeLodCullCS):
 -   Raw NDC depth, max reduction (the farthest surface). Mip 0 is half the next power of two of the depth. Texels past the rendered
     area read far (1.0); outside the domain or a level read 0 (the reduction's identity). UVs are scaled for the padding
     (`HzbView::UvScale`).
@@ -1419,7 +1419,7 @@ BuildDrawsCS and TreeLodCullCS):
     DrawIndexed). The main buffer's ranges (phase 1 and colour, phase 2, one per decal group) travel in `BuildDrawsConstants`
     (`phaseTwoBase`, `decalBase`, `decalStride`). Each indirect draw's max count is its epoch's own draws, grown as a power of two
     so the recording settles.
--   **The sort by pipeline** is a counting sort (`DrawSort`, `SortSequencesCS.hlsl`, `src/RenderGraph/PrefixSum.cpp`): BuildDraws
+-   **The sort by pipeline** is a counting sort (`DrawSort`, OMS `SortScatter.hlsl` and `Passes/PrefixSumPass`): BuildDraws
     stages each sequence and counts it per pipeline; the prefix sum turns the counts into each pipeline's first slot; the scatter
     writes each sequence at its pipeline's first slot plus its rank (the rank word: pipeline in the top 12 bits, rank in the low 20;
     `kSortRankLimit = 1 << 20`). It covers phase 1 and the colour segment, not phase 2's rescues. Not for the shadow views:
@@ -3130,7 +3130,7 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     pool at thresholds (delta above a quarter of the base, dead lanes above a quarter, dead sequences above a half). The
     asynchronous result is adopted at a later set and caught up from its snapshot's epochs. In the heavy exterior, turning, a set
     costs 1-2 ms on the builder against ~18 ms whole, and uploads ~440 KB against ~20 MB. A forward-only set is still built whole.
--   **Wide cull kernels** (`Core/Render/Direct/CullSimd.h`). The frustum pass and the portal programs' plane set test (16 bounds a group)
+-   **Wide cull kernels** (`Core/Render/Direct/CullSimd.h`, over OMS's sphere cull, `Cpu/SphereCull.h`). The frustum pass and the portal programs' plane set test (16 bounds a group)
     run in the widest kernels the CPU and OS support: AVX-512 (F and BW) or AVX2, else SSE. Each kernel lives in a file built for its
     instruction set alone (`CullAvx2.cpp`, `CullAvx512.cpp`; `cmake/RenderGraph.cmake` gives them their `/arch` and leaves the game's
     PCH out). The CPU's support is detected in `Cull.cpp`, which is built for the baseline. A group stops testing planes once every lane

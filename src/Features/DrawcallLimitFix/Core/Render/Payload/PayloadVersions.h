@@ -9,19 +9,17 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/PayloadProducts.h"
 
+#include <ORGModuleServices/BufferChains.h>
+
 #include <array>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace org::runtime
 {
 	class IUploadService;
-}
-
-namespace org::services
-{
-	struct Backing;
-	struct PublishedBufferVersion;
 }
 
 namespace org
@@ -54,8 +52,9 @@ namespace DCLF::Draws
 		std::uint64_t units = 0;     // the elements this payload holds (its rows: BindlessObject, extras row, GeometryDraw, DrawInput...)
 	};
 
-	/** @brief Where each part's rows come from for one publication. Immutable. Each version holds it until its upload completes. */
-	struct PayloadSource
+	/** @brief Where each part's rows come from for one publication. Immutable. Each version holds it until its upload completes.
+	 * The parts' chains read it by part index (OMS BufferChains). */
+	struct PayloadSource final : org::services::BufferChainSource
 	{
 		std::shared_ptr<const void> keep;  // the publication's draws (DrawPublication), which the pointers below are into
 		const StreamViews* views = nullptr;
@@ -70,6 +69,16 @@ namespace DCLF::Draws
 		std::uint64_t regionCount = 0, mainInputsAt = 0, shadowInputsAt = 0;
 		Extensions::PayloadProducts products;
 		std::uint64_t serial = 0;  // process-unique per source
+
+		std::uint64_t Serial() const override { return serial; }
+		bool Present(std::size_t a_part) const override;
+		std::uint64_t Units(std::size_t a_part) const override { return units[a_part]; }
+		std::uint64_t Elements(std::size_t a_part) const override;
+		std::uint64_t ContentEpoch(std::size_t a_part) const override;
+		std::uint64_t TailStart(std::size_t a_part) const override;
+		std::optional<std::vector<org::services::BufferByteRange>> ChangedSince(std::size_t a_part, std::uint64_t a_epoch) const override;
+		void EmitDelta(std::size_t a_part, std::optional<std::uint64_t> a_from, std::uint64_t a_version, std::uint64_t a_previous,
+			const org::services::ChainDeltaWrite& a_write) const override;
 	};
 
 	/** @brief A snapshot's payload. Every present part's GPU-ready version. Unchanged parts keep their last version. */
@@ -97,7 +106,7 @@ namespace DCLF::Draws
 	};
 
 	/**
-	 * @brief Version chains for the payload parts. Each part has its own backing pool, and a build waits while none is free.
+	 * @brief Version chains for the payload parts (OMS BufferChains). Each part has its own backing pool, and a build waits while none is free.
 	 * The journals keep changes back to the oldest position any backing of the part holds.
 	 */
 	namespace PayloadPools
@@ -130,12 +139,7 @@ namespace DCLF::Draws
 		std::optional<std::uint64_t> OldestContentEpoch(PayloadPart a_part);
 
 		/** @brief One part's report since the last take, then the pool's census. */
-		struct PartReport
-		{
-			std::uint64_t built = 0, uploadedBytes = 0, copiedBytes = 0, wholeCopies = 0, suspensions = 0, failures = 0;
-			std::uint64_t liveBackings = 0, liveBytes = 0;
-			std::optional<std::uint64_t> floor;
-		};
+		using PartReport = org::services::BufferChains::Report;
 		std::array<PartReport, kPayloadParts> TakeReport();
 		inline constexpr std::array<const char*, kPayloadParts> kPartNames{ "objects", "extras", "geometries", "material rows", "pipeline rows", "inputs",
 			"shadow rows" };

@@ -4,7 +4,7 @@
 #include "Common/DeviceRef.hlsli"
 
 #include "DrawcallLimitFix/CullEye.hlsli"
-#include "DrawcallLimitFix/HzbTest.hlsli"
+#include "ORGModuleServices/HzbTest.hlsli"
 #include "DrawcallLimitFix/ParabolicPrograms.hlsli"
 #include "DrawcallLimitFix/PortalPrograms.hlsli"
 #include "DrawcallLimitFix/PortalQueries.hlsli"
@@ -30,7 +30,7 @@ cbuffer BuildDrawsConstants : register(b0)
 	uint HzbIndex;
 	uint HzbSizePacked;  // mip 0: width in the low 16 bits, height in the high 16
 	uint HzbMips;
-	// With SortCountsIndex set, a sequence goes to staging with its rank among its sort key's sequences, and SortSequencesCS scatters
+	// With SortCountsIndex set, a sequence goes to staging with its rank among its sort key's sequences, and OMS's SortScatter.hlsl scatters
 	// it into its class's sub-range. 0 appends directly.
 	uint SortCountsIndex;   // RWByteAddressBuffer: uint[kSortKeys], zero before the dispatch
 	uint SortStagingIndex;  // RWByteAddressBuffer: DrawSequence[PhaseTwoBase]
@@ -701,7 +701,7 @@ static const uint kPartitionChainCount = kPartitionChain - 1;
 // The pad keeps pushed addresses 8-byte aligned for BasicRHI. Slot 1's vertex view is a face shape's positions, else slot 0 again.
 static const uint kSequenceStride = 136;
 static const uint kSequenceDrawOffset = 116;
-// The staged sort key words that ForwardSortCS and SortSequencesCS read.
+// The staged sort key words that ForwardSortCS and OMS's SortScatter.hlsl read.
 static const uint kSequenceInstanceCount = 120;
 static const uint kSequenceVertexOffset = 128;
 static const uint kSequenceFirstInstance = 132;

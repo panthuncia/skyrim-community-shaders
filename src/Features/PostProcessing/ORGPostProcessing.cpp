@@ -372,7 +372,7 @@ namespace ORGPostChain
 
 	std::shared_ptr<RunReadback> RunReadback::Create(std::string_view a_name, std::vector<std::uint32_t> a_parts)
 	{
-		return std::make_shared<RunReadback>(org::RunReadback::Create(a_name, std::move(a_parts)));
+		return std::make_shared<RunReadback>(org::RunReadback::Create(a_name, std::move(a_parts), RenderGraph::FatalHandler(ORGPostProcessing::kName)));
 	}
 
 	LatchRegion<org::RunReadback::Stamp> RunReadback::BuildStamp(Builder& a_builder)

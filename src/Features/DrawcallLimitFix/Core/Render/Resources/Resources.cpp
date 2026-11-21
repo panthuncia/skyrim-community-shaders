@@ -17,6 +17,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
 #include <cassert>
+#include <cstddef>
 
 namespace DCLF::Draws
 {
@@ -35,10 +36,26 @@ namespace DCLF::Draws
 		const SetupPrograms::Compute kShadowViews{ "DCLF shadow views", [] { return BuildDrawsDesc(L"ShadowViews"); } };
 		const SetupPrograms::Compute kForwardSort{ "DCLF forward sort",
 			[] { return ComputeProgram::Desc{ .source = kForwardSortShader, .constantWords = kForwardSortConstantWords }; } };
-		const SetupPrograms::Compute kSortScatter{ "DCLF draw sort",
-			[] { return ComputeProgram::Desc{ .source = kSortSequencesShader, .constantWords = kSortSequencesConstantWords }; } };
-		const SetupPrograms::Compute kBlockScan{ "DCLF draw sort", [] { return PrefixSum::BlockScanDesc(); } };
-		const SetupPrograms::Compute kBlockOffsets{ "DCLF draw sort", [] { return PrefixSum::BlockOffsetsDesc(); } };
+		// OMS's scatter, built for DrawSequence: each class's first slot is staged in instanceCount and its first sort key in
+		// firstInstance, and the sorted sequences get 1 and 0 back there.
+		const SetupPrograms::Compute kSortScatter{ "DCLF draw sort", [] {
+			const org::services::SortScatterLayout layout{ .rankBits = kSortRankBits,
+				.ranges = true,
+				.rangeSlotWord = static_cast<std::uint32_t>(offsetof(DrawSequence, instanceCount)),
+				.rangeKeyWord = static_cast<std::uint32_t>(offsetof(DrawSequence, firstInstance)),
+				.rangeSlotValue = 1,
+				.rangeKeyValue = 0 };
+			return ComputeProgram::Desc{ .source = org::services::kSortScatterShader, .constantWords = kSortSequencesConstantWords,
+				.defines = org::services::SortScatterDefines(layout) };
+		} };
+		const SetupPrograms::Compute kBlockScan{ "DCLF draw sort", [] {
+			return ComputeProgram::Desc{ .source = org::services::kPrefixSumShader, .entry = org::services::kPrefixSumBlockScanEntry,
+				.constantWords = org::services::kPrefixSumConstantWords };
+		} };
+		const SetupPrograms::Compute kBlockOffsets{ "DCLF draw sort", [] {
+			return ComputeProgram::Desc{ .source = org::services::kPrefixSumShader, .entry = org::services::kPrefixSumBlockOffsetsEntry,
+				.constantWords = org::services::kPrefixSumConstantWords };
+		} };
 		const SetupPrograms::Compute kVisibilityEvents{ "DCLF visibility events",
 			[] { return ComputeProgram::Desc{ .source = kVisibilityEventsShader, .constantWords = kVisibilityEventsConstantWords }; } };
 
@@ -588,7 +605,7 @@ namespace DCLF
 		if (!a_state.dispatchSignature)
 			return NotReady(7, "the BuildDraws dispatch signature could not be created");
 		// BuildDraws appends in thread order, so without a sort by pipeline nearly every sequence would switch pipeline.
-		a_state.sort = DrawSort::Create(std::make_shared<const PrefixSum::Programs>(PrefixSum::Programs{ kBlockScan.Get(), kBlockOffsets.Get() }), kSortScatter.Get(),
+		a_state.sort = DrawSort::Create(std::make_shared<const org::services::PrefixSumPrograms>(org::services::PrefixSumPrograms{ kBlockScan.Get(), kBlockOffsets.Get() }), kSortScatter.Get(),
 			firstLayout.sequenceDraws);
 		const GrowableSpec bucketWords{ .extent = { 0, 4, 4 }, .policy = org::services::GrowthPolicy::Doubling(64) };
 		a_state.zBucketCounts[0] = MakeVersioned(CreateWords(64, true, "cs.dclf.z.bucket-counts"), bucketWords);

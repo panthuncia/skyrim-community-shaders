@@ -107,3 +107,9 @@ Progress log for `org-cleanup-refactor-plan.md`. Decisions that need the user's 
     `org-library-extraction-plan.md` ("Handoff: start here").
 - Squash (2026-11-20): `integ/hard-ports` squash-merged into `org_integration` (decision 114). `mkwt.sh` now bases
   worktrees on `org_integration`.
+- Library extraction (2026-11-21, `org-native/extract-integ`, submodules on `extract/integ`): parts p0-lib, p1-async,
+  p1-frame, p2-executor, p2-retire, p2-recordings, p2-birth, p2-cpu, p2-reflect, p3-gates, p3-kernels, p3-latched,
+  p3-pins, p3-programs, p4-build, p4-uploads, p4-bufsets, p4-misc, p4-imgui, cleanup (decisions 115-124). Compile fixes:
+  the starvation segment tag, the cull level name. Checkpoint `ck2` 16 of 17 (native-d3d12+shader-reload's uncovered
+  epoch once, two reruns pass); perf-quick unchanged. Library tests 75 of 78 (Leases* older than the extraction).
+  Staged as `CS AB extract` because the water session used `nfg`.

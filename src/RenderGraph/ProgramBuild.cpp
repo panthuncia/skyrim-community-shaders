@@ -5,42 +5,15 @@
 
 #	include "RenderGraph/ProgramBuild.h"
 
-#	include "RenderGraph/RenderGraphRuntime.h"
-#	include "RenderGraph/ShaderTarget.h"
 #	include "Utils/D3D.h"
 
 #	include <algorithm>
-#	include <cstring>
-#	include <fstream>
-#	include <iterator>
+#	include <string>
+#	include <string_view>
+#	include <vector>
 
 namespace RenderGraph::ProgramBuild
 {
-	std::filesystem::path SourcePath(std::string_view a_source)
-	{
-		return std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / a_source;
-	}
-
-	std::vector<std::byte> ReadSource(const std::filesystem::path& a_path)
-	{
-		std::ifstream file(a_path, std::ios::binary);
-		const std::vector<char> chars((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-		std::vector<std::byte> bytes(chars.size());
-		if (!chars.empty())
-			std::memcpy(bytes.data(), chars.data(), chars.size());
-		return bytes;
-	}
-
-	std::uint64_t HashBinary(std::span<const std::byte> a_bytes)
-	{
-		std::uint64_t hash = 1469598103934665603ull;
-		for (const auto byte : a_bytes) {
-			hash ^= static_cast<std::uint8_t>(byte);
-			hash *= 1099511628211ull;
-		}
-		return hash;
-	}
-
 	Defines WithCommonDefines(const Defines& a_own, const wchar_t* a_target)
 	{
 		Defines defines = a_own;
@@ -72,34 +45,6 @@ namespace RenderGraph::ProgramBuild
 		add(L"WINPC", L"");
 		add(L"DX11", L"");
 		return defines;
-	}
-
-	org::services::ShaderCompileRequest MakeRequest(const std::filesystem::path& a_path, std::span<const std::byte> a_source, const std::wstring& a_entry,
-		const wchar_t* a_target, const Defines& a_defines)
-	{
-		org::services::ShaderCompileRequest request{};
-		request.sourceName = a_path.generic_string();
-		request.source = a_source;
-		request.entryPoint = a_entry;
-		request.target = a_target;
-		// SPIR-V on Vulkan, DXIL on D3D12, from the same HLSL.
-		ShaderTarget::Apply(request);
-		request.warningsAsErrors = false;  // as the build-time compilation these replaced
-		// Source-level debug info for Nsight and RenderDoc. Drivers ignore it and optimization is unchanged.
-		request.debugInfo = true;
-		request.includeDirectories = { RenderGraphRuntime::kShaderDirectory };
-		// Storage images take their view's format, as in D3D11. Without it DXC types every float4 RWTexture as Rgba32f,
-		// which must not be written through an RGBA16F view. D3D12 always works this way.
-		ShaderTarget::AddSpirvArgument(request, L"-fspv-use-unknown-image-format");
-		request.defines.push_back({ ShaderTarget::ApiDefine(), L"1" });
-		// Dual-target shaders take their bindless declarations.
-		request.defines.push_back({ L"CS_ORG_BINDLESS", L"1" });
-		// For AMD shader compiler workarounds, such as PortalPrograms.hlsli's interpreter.
-		if (RenderGraphRuntime::VendorId() == 0x1002)
-			request.defines.push_back({ L"CS_GPU_AMD", L"1" });
-		for (const auto& [name, value] : a_defines)
-			request.defines.push_back({ name, value });
-		return request;
 	}
 }
 

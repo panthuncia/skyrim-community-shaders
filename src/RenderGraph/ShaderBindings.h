@@ -1,16 +1,14 @@
 #pragma once
 
-#include <Render/LatchBlock.h>
 #include <Render/OwnedDescriptorBinding.h>
+#include <Render/ShaderBindings.h>
 #include <rhi.h>
 
-#include <cstdint>
 #include <memory>
-#include <span>
-#include <type_traits>
 
 /**
- * @brief The C++ side of dual-target shaders (package/Shaders/Common/OrgResources.hlsli).
+ * @brief The C++ side of dual-target shaders (package/Shaders/Common/OrgResources.hlsli). The push block helpers are ORG's
+ * (Render/ShaderBindings.h); CS adds the samplers and views it makes through its runtime.
  *
  * Under ORG a shader reads its resources through handles in its push block. A pass mirrors that block in a struct, in the
  * shader's list order, and pushes it at record time:
@@ -24,41 +22,14 @@
  */
 namespace ShaderBindings
 {
-	/** @brief The largest push block in 32-bit words. 128 bytes is Vulkan's guaranteed minimum, and D3D12 root constants hold 64. */
-	inline constexpr std::uint32_t kMaxPushWords = 32;
-
-	/** @brief A descriptor-heap index, read by a shader's OrgHandle_<name>. */
-	using Handle = std::uint32_t;
-
-	/** @brief A compile error when the block is not whole words or is above kMaxPushWords. */
-	template <class Block>
-	constexpr std::uint32_t Words()
-	{
-		static_assert(std::is_trivially_copyable_v<Block>, "a push block is plain data");
-		static_assert(sizeof(Block) % sizeof(std::uint32_t) == 0, "a push block is whole 32-bit words");
-		static_assert(sizeof(Block) <= kMaxPushWords * sizeof(std::uint32_t), "a push block is at most 128 bytes: move constants to a CBUFFER entry");
-		return sizeof(Block) / sizeof(std::uint32_t);
-	}
-
-	/** @brief The latch block's raw view, then the byte offset of the struct in it. */
-	struct Latch
-	{
-		Handle handle = 0;
-		std::uint32_t offset = 0;
-	};
-
-	/** @brief A LATCH entry for a latch block's region of a run, a_offset bytes in. The offset must be a multiple of 4. */
-	inline Latch LatchOf(const org::LatchBlock& a_block, const org::RunRef& a_run, std::uint32_t a_offset = 0)
-	{
-		const auto region = a_block.At(a_run);
-		return { region.srvIndex, static_cast<std::uint32_t>(region.offset) + a_offset };
-	}
-
-	template <class Block>
-	std::span<const std::uint32_t> Data(const Block& a_block)
-	{
-		return { reinterpret_cast<const std::uint32_t*>(&a_block), Words<Block>() };
-	}
+	using org::shader_bindings::kMaxPushWords;
+	using Handle = org::shader_bindings::Handle;
+	using org::shader_bindings::Words;
+	using Latch = org::shader_bindings::Latch;
+	using org::shader_bindings::LatchOf;
+	using org::shader_bindings::Data;
+	using SamplerPreset = org::shader_bindings::SamplerPreset;
+	using org::shader_bindings::SamplerDescOf;
 
 	/** @brief A sampler in the graph's sampler heap. Render thread, with the runtime active. Empty and logged on failure. */
 	org::OwnedDescriptorBinding CreateSampler(const rhi::SamplerDesc& a_desc);
@@ -67,21 +38,6 @@ namespace ShaderBindings
 	rhi::SamplerDesc SamplerFromD3D11(const D3D11_SAMPLER_DESC& a_desc);
 
 	inline org::OwnedDescriptorBinding CreateSamplerFromD3D11(const D3D11_SAMPLER_DESC& a_desc) { return CreateSampler(SamplerFromD3D11(a_desc)); }
-
-	/** @brief The samplers most ports use. Linear ones filter mips linearly too; point ones are point in every filter. */
-	enum class SamplerPreset : std::uint8_t
-	{
-		LinearClamp,       // rhi::SamplerDesc{}
-		LinearWrap,
-		LinearMirror,      // mirrored on all three axes
-		LinearBorder,      // transparent black border
-		PointClamp,
-		PointBorderWhite,  // opaque white border
-		kCount
-	};
-
-	/** @brief The description a_preset stands for. */
-	rhi::SamplerDesc SamplerDescOf(SamplerPreset a_preset);
 
 	/**
 	 * @brief The shared sampler for a_preset, made on first use and kept for the device it was made on. Every port that asks for

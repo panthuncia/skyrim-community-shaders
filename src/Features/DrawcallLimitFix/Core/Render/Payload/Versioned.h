@@ -36,10 +36,7 @@ namespace DCLF::Draws
 	Versioned MakeVersioned(std::shared_ptr<org::Buffer> a_buffer, GrowableSpec a_spec);
 
 	/** @brief Units in the version a_sealed names, or 0 when the set predates the buffer. */
-	inline std::uint64_t NamedUnits(const NamedVersions& a_sealed, const Versioned& a_buffer)
-	{
-		return a_buffer && a_sealed.Names(*a_buffer) ? a_sealed.Of(*a_buffer).units : 0;
-	}
+	inline std::uint64_t NamedUnits(const NamedVersions& a_sealed, const Versioned& a_buffer) { return a_sealed.UnitsOf(a_buffer); }
 
 	inline const std::shared_ptr<org::Buffer>& Target(const std::shared_ptr<org::Buffer>& a_buffer) { return a_buffer; }
 	inline std::shared_ptr<org::Buffer> Target(const Versioned& a_buffer) { return a_buffer ? a_buffer->Get() : nullptr; }

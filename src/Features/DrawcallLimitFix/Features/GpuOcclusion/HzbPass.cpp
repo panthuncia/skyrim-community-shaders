@@ -1,25 +1,24 @@
-// Creates the HZB with the main view's resources and rebuilds it from the main depth in the depth epoch.
+// Creates the HZB with the main view's resources and rebuilds it from the main depth in the depth epoch, with OMS's HZB pass.
 
 // Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Features/GpuOcclusion/GpuOcclusion.h"
-#include "Features/DrawcallLimitFix/Features/GpuOcclusion/HzbLayout.h"
 
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include <ORGModuleServices/Passes/HzbPass.h>
+#include <Render/PassBuilders.h>
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <Resources/PixelBuffer.h>
-#include <rhi.h>
-
-#include <algorithm>
-#include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace DCLF::Features::GpuOcclusion
@@ -29,164 +28,26 @@ namespace DCLF::Features::GpuOcclusion
 	{
 		std::shared_ptr<const ComputeProgram> program;
 	};
-}
 
-namespace DCLF::Draws
-{
-	struct HzbBindings
-	{
-		org::DeclaredViewToken depth;
-		org::DeclaredViewToken counter;
-		std::vector<org::DeclaredViewToken> hzbMips;
-	};
-
-	struct HzbFrame
-	{
-		std::shared_ptr<const ComputeProgram> program;
-		// One SPD dispatch per kHzbDispatchMips levels. Up to 4096 texels a side needs only one.
-		struct Dispatch
-		{
-			Features::GpuOcclusion::HzbConstants constants{};  // View indices are filled in at recording.
-			std::uint32_t level = 0;                            // First target level. At 0 the source is scene depth.
-			std::uint32_t groupsX = 0, groupsY = 0;
-		};
-		std::vector<Dispatch> dispatches;
-	};
-
-	// Runs after DCLF's depth draws, so it holds native and DCLF occluders. On AE it runs before the first-person depth and
-	// room stencil draws, which only means fewer occluders. SPD avoids a full barrier per level.
-	class HzbPass final : public org::TypedRenderGraphPass<HzbPass, HzbFrame, HzbBindings>
-	{
-	public:
-		HzbPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const Features::GpuOcclusion::HzbState> a_state, RenderGraphRuntime::Segment a_segment) :
-			resources(std::move(a_resources)), state(std::move(a_state)), segment(a_segment) {}
-
-		HzbBindings Declare(org::PassBuilder& a_builder)
-		{
-			a_builder.PreferQueue(org::QueueKind::Graphics);
-			HzbBindings bindings{};
-			bindings.depth = a_builder.ShaderResource(resources->nativeDepth).View();
-			bindings.counter = a_builder.UnorderedAccess(resources->hzbScratch).View();
-			bindings.hzbMips.reserve(resources->hzbMips);
-			for (std::uint32_t mip = 0; mip < resources->hzbMips; ++mip)
-				bindings.hzbMips.push_back(a_builder.UnorderedAccess(resources->hzb, org::UavView{ UINT32_MAX, mip }).View());
-			return bindings;
-		}
-
-		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(static_cast<std::uint64_t>(segment)); }
-
-		HzbFrame Prepare(const HzbBindings&, const org::PassPrepareContext& a_preparation) const
-		{
-			using namespace Features::GpuOcclusion;
-			HzbFrame prepared{};
-			const auto now = segment;
-			if (!resources->hzb || !state->program || !resources->hzbScratch)
-				return prepared;
-			const auto frame = CurrentFrame(a_preparation, now);
-			if (!frame)
-				return prepared;
-			const std::uint32_t renderWidth = frame->width ? frame->width : resources->width;
-			const std::uint32_t renderHeight = frame->height ? frame->height : resources->height;
-			prepared.program = state->program;
-			const auto levelSize = [&](std::uint32_t a_mip, std::uint32_t a_axis) {
-				return std::max(1u, (a_axis == 0 ? resources->hzbWidth : resources->hzbHeight) >> a_mip);
-			};
-			for (std::uint32_t level = 0; level < resources->hzbMips;) {
-				HzbFrame::Dispatch dispatch{};
-				dispatch.level = level;
-				auto& constants = dispatch.constants;
-				if (level == 0) {
-					// Mip 0 is half the padded domain. The image can be larger than the viewport.
-					constants.fromDepth = 1;
-					constants.domainSize[0] = resources->hzbWidth * 2;
-					constants.domainSize[1] = resources->hzbHeight * 2;
-					constants.validSize[0] = std::min(renderWidth, constants.domainSize[0]);
-					constants.validSize[1] = std::min(renderHeight, constants.domainSize[1]);
-				} else {
-					constants.fromDepth = 0;
-					constants.domainSize[0] = constants.validSize[0] = levelSize(level - 1, 0);
-					constants.domainSize[1] = constants.validSize[1] = levelSize(level - 1, 1);
-				}
-				constants.targetSize[0] = levelSize(level, 0);
-				constants.targetSize[1] = levelSize(level, 1);
-				// A group reduces its tile through six levels. The last group goes further only when level six fits in one tile.
-				const std::uint32_t domain = std::max(constants.domainSize[0], constants.domainSize[1]);
-				const std::uint32_t reach = domain / kHzbTile <= kHzbTile ? kHzbDispatchMips : 6u;
-				constants.mips = std::min(resources->hzbMips - level, reach);
-				dispatch.groupsX = (constants.domainSize[0] + kHzbTile - 1) / kHzbTile;
-				dispatch.groupsY = (constants.domainSize[1] + kHzbTile - 1) / kHzbTile;
-				constants.workGroups = dispatch.groupsX * dispatch.groupsY;
-				level += constants.mips;
-				prepared.dispatches.push_back(dispatch);
-			}
-			return prepared;
-		}
-
-		static void Record(const HzbBindings& a_bindings, const HzbFrame& a_frame, org::PassRecordContext& a_recording)
-		{
-			if (!a_frame.program || a_frame.dispatches.empty())
-				return;
-			const std::uint32_t counterIndex = a_recording.Index(a_bindings.counter);
-			auto& commands = a_recording.Commands();
-			commands.BindLayout(a_frame.program->layout->GetHandle());
-			commands.BindPipeline(a_frame.program->Pipeline(a_recording));
-			for (std::size_t i = 0; i < a_frame.dispatches.size(); ++i) {
-				const auto& dispatch = a_frame.dispatches[i];
-				if (i != 0) {
-					// The previous dispatch's last level must be complete before this one reads it.
-					const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
-					const rhi::BarrierBatch batch{ {}, {}, { &global, 1 } };
-					commands.Barriers(batch);
-				}
-				auto constants = dispatch.constants;
-				constants.counterIndex = counterIndex;
-				constants.sourceIndex = dispatch.level == 0 ? a_recording.Index(a_bindings.depth) : a_recording.Index(a_bindings.hzbMips[dispatch.level - 1]);
-				for (std::uint32_t m = 0; m < constants.mips; ++m)
-					constants.targetIndices[m] = a_recording.Index(a_bindings.hzbMips[dispatch.level + m]);
-				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, Features::GpuOcclusion::kHzbConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
-				commands.Dispatch(dispatch.groupsX, dispatch.groupsY, 1);
-			}
-		}
-
-	private:
-		std::shared_ptr<Resources> resources;
-		std::shared_ptr<const Features::GpuOcclusion::HzbState> state;
-		RenderGraphRuntime::Segment segment;
-	};
-}
-
-namespace DCLF::Features::GpuOcclusion
-{
 	namespace
 	{
-		const SetupPrograms::Compute kHzbProgram{ "DCLF HZB", [] { return ComputeProgram::Desc{ .source = kHzbShader, .constantWords = kHzbConstantWords }; } };
+		// The HZB holds raw NDC depth. Skyrim's z_ndc = A - B/w grows with distance and the test only compares order, so
+		// linearising would add a step that can go wrong for no gain. Each level keeps the maximum, the farthest surface under it,
+		// and padding loads as the far plane. That keeps the test conservative, since a footprint with some sky never culls.
+		constexpr float kHzbFarPlane = 1.0f;
+
+		const SetupPrograms::Compute kHzbProgram{ "DCLF HZB",
+			[] { return ComputeProgram::Desc{ .source = org::services::kHzbShader, .constantWords = org::services::kHzbConstantWords }; } };
 
 		// Mip 0 is half the depth's next power of two, so log2 of a screen extent picks the mip.
 		// Padding holds the far plane, which can only prevent culling, never cause it.
 		std::shared_ptr<const void> Setup(const Api::DepthPyramidSetup& a_setup, Api::DepthPyramid& a_out)
 		{
-			auto nextPowerOfTwo = [](std::uint32_t a_value) {
-				std::uint32_t result = 1;
-				while (result < a_value)
-					result <<= 1;
-				return result;
-			};
-			a_out.width = std::max(1u, nextPowerOfTwo(a_setup.width) / 2);
-			a_out.height = std::max(1u, nextPowerOfTwo(a_setup.height) / 2);
-			a_out.mips = 1;
-			for (std::uint32_t size = std::max(a_out.width, a_out.height); size > 1; size >>= 1)
-				++a_out.mips;
-
-			org::TextureDescription hzbDesc{};
-			for (std::uint32_t mip = 0; mip < a_out.mips; ++mip)
-				hzbDesc.imageDimensions.push_back({ std::max(1u, a_out.width >> mip), std::max(1u, a_out.height >> mip), 0, 0 });
-			hzbDesc.format = rhi::Format::R32_Float;
-			hzbDesc.channels = 1;
-			hzbDesc.hasUAV = true;
-			hzbDesc.uavFormat = hzbDesc.format;
-			hzbDesc.hasSRV = true;
-			hzbDesc.srvFormat = hzbDesc.format;
-			a_out.texture = org::PixelBuffer::CreateSharedUnmaterialized(hzbDesc);
+			const auto layout = org::services::PlanHzbLayout(a_setup.width, a_setup.height);
+			a_out.width = layout.width;
+			a_out.height = layout.height;
+			a_out.mips = layout.mips;
+			a_out.texture = org::PixelBuffer::CreateSharedUnmaterialized(org::services::HzbTextureDescription(layout));
 			a_out.texture->SetName("cs.dclf.hzb");
 			auto state = std::make_shared<HzbState>();
 			a_out.scratch = Draws::CreateWords(1, true, "cs.dclf.hzb-counter");
@@ -195,11 +56,32 @@ namespace DCLF::Features::GpuOcclusion
 			return state;
 		}
 
+		// Runs after DCLF's depth draws, so it holds native and DCLF occluders. On AE it runs before the first-person depth and
+		// room stencil draws, which only means fewer occluders. SPD avoids a full barrier per level.
 		std::shared_ptr<org::RenderPass> MakePass(const Api::PassContext& a_context)
 		{
 			if (!a_context.PhaseTwo())
 				return nullptr;
-			return std::make_shared<Draws::HzbPass>(a_context.Main(), Extensions::DepthPyramidState<HzbState>(a_context), a_context.segment);
+			const std::shared_ptr<Draws::Resources> resources = a_context.Main();
+			const auto state = Extensions::DepthPyramidState<HzbState>(a_context);
+			const auto segment = a_context.segment;
+			org::services::HzbDesc desc{};
+			desc.program.kernel = state ? state->program : nullptr;
+			desc.program.reduction = org::services::HzbReduction::Max;
+			desc.declareDepth = [resources](org::RenderPassBuilder& a_builder) { return a_builder.ShaderResource(resources->nativeDepth).View(); };
+			desc.hzb = resources->hzb;
+			desc.counter = resources->hzbScratch;
+			desc.layout = { resources->hzbWidth, resources->hzbHeight, resources->hzbMips };
+			desc.farValue = kHzbFarPlane;
+			// The frame's render size. The depth image can be larger than the viewport.
+			desc.source = [resources, segment](const org::PassPrepareContext& a_preparation) -> org::services::HzbSource {
+				const auto frame = Draws::CurrentFrame(a_preparation, segment);
+				if (!frame)
+					return {};
+				return { frame->width ? frame->width : resources->width, frame->height ? frame->height : resources->height };
+			};
+			desc.revision = [segment](std::vector<std::uint64_t>& a_out) { a_out.push_back(static_cast<std::uint64_t>(segment)); };
+			return org::services::MakeHzbPass(std::move(desc));
 		}
 	}
 

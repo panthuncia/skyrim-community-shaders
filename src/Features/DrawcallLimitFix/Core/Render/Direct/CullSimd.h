@@ -1,8 +1,11 @@
 #pragma once
 
-// The CPU cull's wide kernels, in CullAvx2.cpp and CullAvx512.cpp. Each file is compiled for its own instruction set
-// without the game's PCH, and the kernel is chosen at run time by what the CPU and OS support. So this header uses plain types only.
-// Each kernel must match the SSE pass bit for bit, so keep its operation order and use no FMA.
+// The CPU cull's paraboloid and portal kernels, in CullAvx2.cpp and CullAvx512.cpp. Each file is compiled for its own instruction
+// set without the game's PCH, and the kernel is chosen at run time by what the CPU and OS support. So this header uses plain types
+// only. Each kernel must match the SSE pass bit for bit, so keep its operation order and use no FMA.
+// The frustum kernels and the CPU detection are ORGModuleServices' sphere cull.
+
+#include <ORGModuleServices/Cpu/SphereCull.h>
 
 #include <cmath>
 #include <cstdint>
@@ -10,22 +13,7 @@
 namespace DCLF::Direct::Simd
 {
 	/** @brief A batch's sphere columns. */
-	struct Spheres
-	{
-		const float *x, *y, *z, *r;
-	};
-
-	/**
-	 * @brief The frustum over a_count lanes. a_pass[i] is 1 inside every plane or with a negative radius, else 0, and 0 for a
-	 * lane set in a_dead. A lane group stops testing once every lane in it is outside a plane.
-	 */
-	using FrustumFn = void (*)(const Spheres& a_spheres, std::uint32_t a_count, const float (*a_planes)[4], std::uint32_t a_planeCount, const std::uint64_t* a_dead,
-		std::uint8_t* a_pass);
-
-	void FrustumAvx2(const Spheres& a_spheres, std::uint32_t a_count, const float (*a_planes)[4], std::uint32_t a_planeCount, const std::uint64_t* a_dead,
-		std::uint8_t* a_pass);
-	void FrustumAvx512(const Spheres& a_spheres, std::uint32_t a_count, const float (*a_planes)[4], std::uint32_t a_planeCount, const std::uint64_t* a_dead,
-		std::uint8_t* a_pass);
+	using Spheres = org::cpu::Spheres;
 
 	/** @brief ParabolicFn's view flags: draws both hemispheres, and is the back hemisphere's view. */
 	inline constexpr std::uint32_t kParabolicBothSides = 1u, kParabolicBack = 2u;
@@ -71,12 +59,8 @@ namespace DCLF::Direct::Simd
 		const std::uint16_t* a_lanes, std::uint16_t* a_pass, std::uint32_t a_chunks);
 
 	/** @brief The widest kernels the CPU and OS support. AVX2 needs the YMM state, AVX-512 needs F, BW and the ZMM state. */
-	enum class Level : std::uint8_t
-	{
-		Sse,
-		Avx2,
-		Avx512,
-	};
+	using Level = org::cpu::Level;
+	/** @brief org::cpu::Supported, logged the first time. */
 	Level Supported();
-	const char* NameOf(Level a_level);
+	using org::cpu::NameOf;
 }

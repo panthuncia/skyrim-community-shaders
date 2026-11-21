@@ -19,6 +19,7 @@
 #include "RenderGraph/RunGate.h"
 #include "Utils/D3D.h"
 
+#include <ORGModuleServices/TexelEncoding.h>
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/PassBuilders.h>
 #include <Render/RenderGraph/RenderGraph.h>
@@ -35,7 +36,6 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
-#include <cstring>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
@@ -890,49 +890,31 @@ namespace GraphResources
 			return !IsDepth(a_shape) && a_shape.samples <= 1;
 		}
 
-		/** @brief The texel bytes of a_shape's format, or 0 when it has no encoding (Frame::EncodeTexel). */
+		/** @brief The texel bytes of a_shape's format, or 0 when it has no encoding (org::services::EncodeTexel). */
 		std::uint32_t TexelBytesOf(const Shape& a_shape)
 		{
-			std::array<std::byte, 16> texel{};
-			return RenderGraph::Frame::EncodeTexel(static_cast<std::uint32_t>(a_shape.format), {}, texel);
+			return org::services::EncodedTexelBytes(rhi::helpers::ToRHI(a_shape.format));
 		}
 
 		/**
-		* @brief The writer of a Value or Fill birth for a_shape's format. Value repeats one encoded texel; Fill calls the birth's
-		* function. Null for another birth or a format with no encoding. Any thread.
+		* @brief The writer of a Value or Fill birth for a_shape's format. Value repeats one encoded texel (org::services::ValueFillWriter);
+		* Fill calls the birth's writer. Null for another birth or a format with no encoding. Any thread.
 		*/
 		TexelWriter BirthWriterOf(const RenderGraph::Frame::Birth& a_birth, const Shape& a_shape)
 		{
 			using Kind = RenderGraph::Frame::Birth::Kind;
-			std::array<std::byte, 16> texel{};
-			const std::uint32_t bytes = RenderGraph::Frame::EncodeTexel(static_cast<std::uint32_t>(a_shape.format), a_birth.GetValue(), texel);
+			const rhi::Format format = rhi::helpers::ToRHI(a_shape.format);
+			const std::uint32_t bytes = org::services::EncodedTexelBytes(format);
 			if (!bytes)
 				return {};
 			if (a_birth.GetKind() == Kind::Value)
-				return [texel, bytes](std::uint32_t, std::uint32_t, std::uint32_t a_width, std::uint32_t a_rows, std::uint32_t a_depth, std::uint32_t a_rowPitch,
-						   std::byte* a_destination) {
-					if (a_rowPitch < a_width * bytes)
-						return false;
-					for (std::uint32_t row = 0; row < a_rows * a_depth; ++row) {
-						auto* line = a_destination + static_cast<std::size_t>(row) * a_rowPitch;
-						for (std::uint32_t x = 0; x < a_width; ++x)
-							std::memcpy(line + static_cast<std::size_t>(x) * bytes, texel.data(), bytes);
-					}
-					return true;
-				};
+				return org::services::ValueFillWriter(format, a_birth.GetValue());
 			if (a_birth.GetKind() == Kind::Fill && a_birth.GetFill())
 				return [fill = a_birth.GetFill(), bytes](std::uint32_t a_mip, std::uint32_t a_slice, std::uint32_t a_width, std::uint32_t a_rows, std::uint32_t a_depth,
 						   std::uint32_t a_rowPitch, std::byte* a_destination) {
 					if (a_rowPitch < a_width * bytes)
 						return false;
-					const RenderGraph::Frame::BirthTexels texels{ .mip = a_mip,
-						.slice = a_slice,
-						.width = a_width,
-						.height = a_rows,
-						.depth = a_depth,
-						.rowPitch = a_rowPitch,
-						.texels = { a_destination, static_cast<std::size_t>(a_rowPitch) * a_rows * a_depth } };
-					return (*fill)(texels);
+					return (*fill)(a_mip, a_slice, a_width, a_rows, a_depth, a_rowPitch, a_destination);
 				};
 			return {};
 		}
@@ -1062,7 +1044,13 @@ namespace GraphResources
 		}
 		const bool nativeWrites = native && a_plan.exported && writable;
 		if (!a_plan.exported || nativeWrites)
-			prepared.contents = filled ? Contents::Fill : (birth.Writes() || nativeWrites ? Contents::Zero : Contents::Undefined);
+			prepared.contents = filled ? (birth.GetKind() == BirthKind::Value ? Contents::Value : Contents::Fill) :
+										 (birth.Writes() || nativeWrites ? Contents::Zero : Contents::Undefined);
+		// The uploader writes a Value through OMS's value fill (MakeTextureVersions), the same writer the guest export's data takes.
+		if (prepared.contents == Contents::Value) {
+			prepared.value = birth.GetValue();
+			prepared.valueFormat = next.format;
+		}
 		if (prepared.contents == Contents::Fill)
 			prepared.fill = writer;
 		const bool nativeZero = nativeWrites;

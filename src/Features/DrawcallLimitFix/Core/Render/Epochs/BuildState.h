@@ -17,6 +17,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowFrame.h"
 
+#include <ORGModuleServices/BuildInputs.h>
+
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -87,6 +89,11 @@ namespace DCLF::Draws
 	 */
 	std::shared_ptr<const BuildState> BuildingState(const char* a_who);
 
+	/** @brief The build states' serials, the built one and the attached one (OMS BuildInputs). */
+	using BuildStates = org::services::BuildInputs<BuildState>;
+	/** @brief DCLF's one BuildStates. */
+	BuildStates& BuildStateInputs();
+
 	/**
 	 * @brief Render thread: a_state is what the attached graphs are built from. Its conditions become the attached conditions.
 	 * Called when a snapshot made for it is adopted, with the staged builds it was recorded on.
@@ -96,8 +103,6 @@ namespace DCLF::Draws
 	std::shared_ptr<const BuildState> AttachedBuildState();
 	/** @brief Any thread: the attached build state's serial, 0 before the first. */
 	std::uint64_t AttachedBuildSerial();
-	/** @brief Render thread: every build a_state asked for is staged or attached, so snapshots may be made for it. */
-	void PublishBuiltBuildState(std::uint64_t a_serial);
 	/** @brief Any thread: the built build state's serial, 0 before the first. */
 	std::uint64_t BuiltBuildSerial();
 }

@@ -8,11 +8,9 @@
 #include <ORGModuleServices/GrowableBufferSet.h>
 #include <Render/Runtime/IUploadService.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace DCLF::Draws
 {
@@ -34,17 +32,12 @@ namespace DCLF::Draws
 		Versioned Make(std::shared_ptr<org::Buffer> a_first, GrowableSpec a_spec);
 
 		/** @brief What a latch block holds: a region per run, or one region every run reads, such as a block of zeros. */
-		enum class LatchRegions : std::uint8_t
-		{
-			kPerRun,
-			kShared,
-		};
-		/** @brief Any thread. Registers a latch block that the seals requiring it make or grow. A count of 1 makes a dedicated block,
-		 * any other count a block of the runtime's frame arena. */
+		using LatchRegions = org::services::LatchRegions;
+		/** @brief Any thread. Registers a latch block that the seals requiring it make or grow. Shared makes a dedicated block,
+		 * PerRun a block of the runtime's frame arena. */
 		LatchHandle RegisterLatch(std::string a_name, LatchRegions a_regions, org::services::GrowthPolicy a_policy = org::services::GrowthPolicy::Headroom(0))
 		{
-			const std::uint32_t count = a_regions == LatchRegions::kShared ? 1u : 2u;
-			return set.Register(org::services::LatchRegistration{ std::move(a_name), count, a_policy });
+			return set.Register(std::move(a_name), a_regions, a_policy);
 		}
 
 		/** @brief Producer. The uploader a growth's fills go through. */
@@ -54,15 +47,17 @@ namespace DCLF::Draws
 		/** @brief Producer. The set naming every requirement, or pending while a batch grows what it lacks. */
 		SealedSet Seal(GrowthBuild&& a_build);
 		/** @brief Producer. Requires at least a_units of a_buffer. */
-		void Require(GrowthBuild& a_build, const Versioned& a_buffer, std::uint64_t a_units);
+		void Require(GrowthBuild& a_build, const Versioned& a_buffer, std::uint64_t a_units) { set.Require(a_build, a_buffer, a_units); }
 		/** @brief Producer. Requires a version newer than a_serial, which relays it out at the same size. */
-		void RequireNewer(GrowthBuild& a_build, const Versioned& a_buffer, std::uint64_t a_serial);
+		void RequireNewer(GrowthBuild& a_build, const Versioned& a_buffer, std::uint64_t a_serial) { set.RequireNewer(a_build, a_buffer, a_serial); }
 		/** @brief Producer. Requires a_latch's block of at least a_bytes a slot, laid out as a_layoutKey (0 for plain bytes). */
 		static void Require(GrowthBuild& a_build, LatchHandle a_latch, std::uint32_t a_bytes, std::uint64_t a_layoutKey) { a_build.Require(a_latch, a_bytes, a_layoutKey); }
 		/** @brief Producer. The units a_buffer's newest ready version holds. */
-		std::uint64_t Units(const GrowthBuild& a_build, const Versioned& a_buffer);
+		std::uint64_t Units(const GrowthBuild& a_build, const Versioned& a_buffer) { return set.Units(a_build, a_buffer); }
 		/** @brief Producer. The most asked of a_buffer, at least what it holds. */
-		std::uint64_t Asked(const GrowthBuild& a_build, const Versioned& a_buffer);
+		std::uint64_t Asked(const GrowthBuild& a_build, const Versioned& a_buffer) { return set.MostAsked(a_build, a_buffer); }
+		/** @brief Producer. The OMS set, for helpers that take it. */
+		org::services::GrowableBufferSet& Set() { return set; }
 		/** @brief The producer's report line, which resets its counters. Empty when nothing happened. */
 		std::string Report();
 		/** @brief Producer. Whether a shrink waits to be observed or named. */
@@ -75,39 +70,17 @@ namespace DCLF::Draws
 		std::uint32_t failuresLogged = 0;
 	};
 
-	/** @brief Buffers indexed alike, each with its own extent. One requirement fans out to every member, and the group holds the least any member holds. */
-	struct UnitGroup
+	/** @brief Buffers of the scene's set indexed alike. One requirement fans out to every member, and the group holds the least any member holds. */
+	struct UnitGroup : org::services::GrowableUnitGroup
 	{
-		std::vector<Versioned> members;
-
 		UnitGroup& Add(const Versioned& a_buffer)
 		{
-			if (a_buffer)
-				members.push_back(a_buffer);
+			org::services::GrowableUnitGroup::Add(a_buffer);
 			return *this;
 		}
 		/** @brief Producer. Requires at least a_units of every member. */
-		void Require(GrowthBuild& a_build, std::uint64_t a_units) const
-		{
-			auto& buffers = SceneBufferSet::Get();
-			for (const auto& member : members)
-				buffers.Require(a_build, member, a_units);
-		}
-		/** @brief The units every member's named version holds, or 0 without members. Throws for a member a_sealed does not name. */
-		std::uint64_t Units(const NamedVersions& a_sealed) const
-		{
-			std::uint64_t units = members.empty() ? 0 : ~0ull;
-			for (const auto& member : members)
-				units = std::min(units, a_sealed.Of(member).units);
-			return units;
-		}
+		void Require(GrowthBuild& a_build, std::uint64_t a_units) const { org::services::GrowableUnitGroup::Require(SceneBufferSet::Get().Set(), a_build, a_units); }
 		/** @brief Producer. The most asked of any member. */
-		std::uint64_t Asked(const GrowthBuild& a_build) const
-		{
-			std::uint64_t asked = 0;
-			for (const auto& member : members)
-				asked = std::max(asked, SceneBufferSet::Get().Asked(a_build, member));
-			return asked;
-		}
+		std::uint64_t Asked(const GrowthBuild& a_build) const { return org::services::GrowableUnitGroup::Asked(SceneBufferSet::Get().Set(), a_build); }
 	};
 }
