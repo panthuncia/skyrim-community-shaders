@@ -559,8 +559,8 @@ namespace DCLF
 		/** @brief a_family's draw signature, or null if it could not be made. Valid after InstallFeatures. */
 		const rhi::CommandSignaturePtr& FamilySignature(Api::DrawFamily a_family) const
 		{
-			const bool instanceWord = Extensions::DrawFamilyOf(a_family).contribution.program.signature == Api::DrawFamilySignature::InstanceWordDrawInstanced;
-			return instanceWord ? familyInstanceWordSignature : familySignatures[static_cast<std::size_t>(a_family)];
+			const bool wordSignature = Extensions::DrawFamilyOf(a_family).contribution.program.signature == Api::DrawFamilySignature::InstanceWordDrawInstanced;
+			return wordSignature ? familyInstanceWordSignature : familySignatures[static_cast<std::size_t>(a_family)];
 		}
 		struct FamilyBuilt
 		{
