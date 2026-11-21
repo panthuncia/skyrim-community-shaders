@@ -172,6 +172,8 @@ Not part of this plan unless a phase touches them:
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
 
 | 4 Build and upload services | in progress | p4-uploads: CS `org-native/extract-p4-uploads`, OMS `extract/p4-uploads` | Needs phase 2's executor. Commit uploads (p4-uploads, code only, not built): OMS `CommitUploads.h` (`CommitUploads`, `LatchedUploads`, `AcquireStagedBatch`, `CommitUploadHooks` with `onError` and an `IUploadBytesSink`), `OwnedRows.h` (`OwnedRow<Row, Binding>`, `DescriptorIndex`), `ContentOwners.h` (`Snapshot(seal)`); tests in OMS `tests/Uploads` (`ORGUploadsTests`, CPU only). DCLF keeps thin subclasses and aliases with its hooks (`RenderGraph::FatalHandler`, FrameData) and the frame-constants names. See "p4-uploads decisions". |
+
+| 4 Build and upload services | in progress | p4-build: CS `org-native/extract-p4-build`, OMS `extract/p4-build` | Needs its A/B perf run. p4-build (code only, not built): the staged build service is OMS `StagedBuilds.h` (`org::services::StagedBuilds`, on an OMS `JobLane`), with `BuildObserver` (poll scope, attach, refusal), `isSteadyState`, `afterBuild` and a log callback in its `Desc`. The build context is OMS `BuildContext.h` (`DeferToAttach`, `DeferToStaging`, `CurrentBuild`); DCLF's serials, built and attached, are OMS `BuildInputs.h`. CS `BuildManager.h` keeps the `Builds::` facade, `MakeBuildManager` and an alias. Tests: OMS `ORGBuildsTests`. See "p4-build decisions". |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
 ### Checks that need a run
@@ -799,3 +801,31 @@ Decided by the agent, to confirm:
   shadow and class latches, frame textures). Only `CommitUploads::Stage(Versioned)` moved out of it.
 - **No OMS test for `CommitUploads`/`LatchedUploads`**: they need staged pages and latch blocks, so a device. The CPU test
   covers `OwnedRow` (default and host bindings) and `ContentOwners` (overlaps, replaced owners, unchanged snapshots, counts).
+
+### p4-build decisions
+
+Decided by the agent, to confirm:
+
+- **Names.** `org::services::StagedBuilds` (`StagedBuilds.h`), `BuildObserver`, `BuildRefusalSite`, `BuildLogLevel`. The build
+  context is its own std-only header (`BuildContext.h`) so it is tested without a device. CS keeps `RenderGraph::BuildManager`
+  as an alias, so its users (`RenderGraphRuntime`, `Revision.cpp`, DCLF's `GraphBuilds.cpp`) are unchanged apart from
+  `MakeBuildManager`.
+- **Observer, not callbacks per event.** `BuildObserver::InPoll(point, body, context)` runs the poll's body, so CS opens its
+  `Frame::Boundary::Caller` around it as before, with no allocation per poll. `Attached(label)` and `Refused(site, reason)` map to
+  `NoteAttach` and `NoteRefusal`. CS maps the set site to "revision", so the census keys are unchanged. Ask's late change and the
+  adoption-point check stay in the CS facade, which never left CS.
+- **The recipe trace is a `Desc::afterBuild(epoch, graph)` hook**, run on the building thread inside the build, under the build lock
+  and the same try as before. CS's hook defers `NoteTrace` with `DeferToAttach`, which lands in the same `attached` list after the
+  extensions' entries, as the direct push did.
+- **Steady state.** `Desc::isSteadyState` is read at each frame end until true (empty: true at the first). CS passes the world
+  window check and `steadyStateName = "first world frame"`, so the log lines, which the shader-reload configs match, are byte-equal.
+- **Logging** goes to `Desc::log(level, line)`, formatted with `std::format` only when a log is set. CS sends each level to its
+  logger. The texts are unchanged.
+- **The executor and lane come from the host** (`Desc::executor`, `Desc::lane`). CS passes the shared executor and
+  `FatalOnRefusal({"CS graph builds", Preparation, Cpu})`, as `Frame::JobLane` did.
+- **`BuildInputs<State>`** holds the attached value, its serial, the built serial and the first-builds flag. `Next` keeps the
+  value when nothing moved, `Settle` takes `settled()` lazily (only once the serial is unbuilt, as before) and returns
+  `BuiltAndAttached` for the first builds, so DCLF still publishes the attached state itself (it also attaches the graph
+  conditions). DCLF's `buildState` member and its free functions stay; their storage is one namespace-scope `BuildInputs`.
+- **No device-free test of `StagedBuilds` itself**: it drives an `org::GraphHost`, which needs a device. `ORGBuildsTests` covers
+  the build context and the build inputs.
