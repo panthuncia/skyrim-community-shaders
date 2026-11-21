@@ -6,7 +6,8 @@
 // Every program builds on the program service (RenderGraph/ProgramService.h). Stages compile when CS loads one of the family's
 // descriptors. Every program key a session draws with is written to a manifest, and the next session queues those keys in CS's
 // setup batch, so they are built before the first frame. A key first seen in a draw is posted to the service and logged once as
-// "not prebuilt"; its draws stay the engine's until it is built. The render thread never builds or waits for a program.
+// "not prebuilt"; its draws stay the engine's until it is built, or the family leaves them out (the sky's, in graph mode). The render
+// thread never builds or waits for a program.
 
 #include <array>
 #include <compare>
@@ -102,8 +103,9 @@ namespace DCLF::Family
 		 * @brief Render thread. The key's program once built. Null while it builds, and for a key whose states have no ORG form
 		 * (logged once). Never builds and never waits: an unseen key is posted to the program service and listed in the manifest.
 		 * A failed build is fatal. The defines follow from the family's shader type, so a_shader is not read.
+		 * a_building, when given, is set true when null means the program is still building, and false otherwise.
 		 */
-		std::shared_ptr<const RasterProgram> Get(const ProgramKey& a_key, const RE::BSShader& a_shader);
+		std::shared_ptr<const RasterProgram> Get(const ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
 
 		/**
 		 * @brief Render thread, once at CS's setup, before the setup batch is joined. Queues the manifest's keys on the program
