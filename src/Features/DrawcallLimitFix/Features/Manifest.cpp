@@ -27,6 +27,7 @@
 #include "Features/DrawcallLimitFix/Features/Reflection/Reflection.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWind.h"
+#include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/AdvancedSkin.h"
 #include "Features/DrawcallLimitFix/Integrations/CloudShadows/CloudShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/DynamicCubemaps/DynamicCubemaps.h"
@@ -124,6 +125,12 @@ namespace DCLF::Features
 			Integrations::PhysicalSky::kVolCubeTrRegister,
 			Integrations::PhysicalSky::kVolCubeLumRegister,
 			Integrations::PhysicalSky::kMediumCloudDepthRegister,
+			Water::Draw::kRefractionRegister,
+			Water::Draw::kDisplacementRegister,
+			Water::Draw::kDepthRegister,
+			Water::Draw::kFlowMapRegister,
+			Water::Draw::kSsrRegister,
+			Water::Draw::kSsrRawRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()
