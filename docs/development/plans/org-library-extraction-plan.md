@@ -100,8 +100,9 @@ From the cleanup and the simplification:
   The configs set it through `saved_settings`; don't change the profile by hand.
 - **A run set stops after two failures.** When several configs run in one batch, the batch stops at the second failed
   config. Rerun the ones it skipped after fixing.
-- **Library errors:** ORG has no fatal hook. `org::RunReadback` throws `std::runtime_error` after a critical log, and CS's
-  commit paths don't catch it, so it still stops the game. CS's task adapter makes a throwing task fatal.
+- **Library errors:** `org::RunReadback` reports errors to the handler each `Create*` takes (p0-lib); CS passes
+  `RenderGraph::FatalHandler`. Other ORG throws are unchanged: CS's commit paths don't catch them, so they still stop the
+  game, and CS's task adapter makes a throwing task fatal.
 
 ### Known open items carried in
 
@@ -117,8 +118,8 @@ Not part of this plan unless a phase touches them:
 - Both dclf-parity findings are real DCLF defects. They showed up once the parity checks reported instead of repairing.
 - **The submodule branches are not pushed** (the table above, and `cleanup/integ`). Decision 89 wants them pushed and
   reviewed before anything new is pinned. Waiting for the user.
-- **6.11 done (decision 113):** guest runs with all five native-only host options on, so CS sets them in every mode.
-  ORG still has their off paths and `GraphHost::Desc` flags; deleting them is library work (phase 0 below).
+- **6.11 done (decision 113):** guest runs with all five native-only host options on. p0-lib deleted their off paths
+  and `GraphHost::Desc` flags; their behaviour is ORG's only one.
 - **effects11** fails on this machine: the game folder has no `enbseries\enbeffect.fx`, so Effects11 cannot own the
   tonemap and the mode falls back to Vanilla ("Post Processing Mode: Vanilla (chosen Effects11)"). effects11-programs
   passes. Not a code defect; the config needs the ENB effect files installed.
@@ -138,7 +139,7 @@ Not part of this plan unless a phase touches them:
 
 | Phase | State | Branches | Notes |
 |---|---|---|---|
-| 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
+| 0 Review and push | code done (p0-lib), push waiting for the user | CS `org-native/extract-p0-lib`, ORG and OMS `extract/p0-lib` | Host-option off paths deleted, `RunReadback` error handler, OMS `Variables.h` wording, multisampled-SRV check (below). Not built or run yet. Push the submodule branches for review (decision 89): waiting for the user. Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. |
 | 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
 | 3 Programs and GPU primitives | not started | | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. |
@@ -149,8 +150,15 @@ Not part of this plan unless a phase touches them:
 
 - **Phase 2 executor and retirement join, phase 4 build service:** one A/B perf sample each, before and after (Release,
   or Dev-Fast /Od stated).
-- **Multisampled SRVs** (in "Library work"): check whether ORG still lacks them. The old note in `pipelines.md` went
-  with the pipeline library, so there is no reference left.
+- **Multisampled SRVs** (checked by reading code, p0-lib): ORG still lacks them for its own textures. BasicRHI has them
+  (`SrvDim::Texture2DMS`/`Texture2DMSArray`, both backends; Vulkan maps them to 2D image views). But
+  `DescriptorHeapManager::UpdateDescriptorContentsUnlocked` picks the SRV dimension from `isArray`, `isCubemap` and
+  `is3D` only: `ViewRequirements::TextureViews` has no sample count, `SRVViewType` has no multisampled entry, and RTVs
+  and DSVs are likewise always `Texture2D`/`Texture2DArray`. So a texture made with `TextureDescription::sampleCount > 1`
+  gets a `Texture2D` SRV, which D3D12 rejects for a multisampled resource. The contributor C API validates
+  `ORG_RG_VIEW_DIMENSION_TEXTURE_2D_MS` views, but `ContributorHost` refuses multisampled resources. OMS
+  `ResolveMultisamplePass` reads its source through the default SRV (`Texture2DMS` in the shader), so it would hit this on
+  D3D12; it has no CS user. Adding them is ORG work: a sample count in `TextureViews`, an MS dimension at view creation.
 
 ## Goal
 
@@ -250,6 +258,7 @@ From the simplification (phase 6 and the parts it pulled in):
 - Push the ORG, OMS, BasicRHI and DXVK branches above for review upstream (decision 89). Waiting for the user.
 - Delete ORG's off paths for the five host options CS now always sets (decision 113): `reuseLiveRecordings`,
   `coalesceSubmissions`, `mergeHandoffs`, `uploadsWithBatches`, `keepGatedInline`. The flags leave `GraphHost::Desc`.
+  Done in code (p0-lib), with the `RunReadback` error handler and the `Variables.h` wording.
 
 ## Phase 1: small containers and async pieces (OMS, effort S each)
 
@@ -387,12 +396,12 @@ regression.
   (`RenderGraph.h:762`). Pipeline pins (phase 3 item 1) need it.
 - **ORG `Builds{attached, staged}` snapshot readable from any thread.** DCLF prunes its cache on its builder thread only
   because `StagedGeneration` and `EpochRecordingCurrent` (`GraphHost.h:351,687`) are owner-thread calls.
-- **ORG multisampled SRVs.** To check (see "Checks that need a run").
-- **One error convention for library errors.** ORG has no fatal hook, so `org::RunReadback` throws after a critical log.
-  Either a host error callback in `Runtime::Desc`, or documented throws that CS catches at its commit paths.
+- **ORG multisampled SRVs.** Still missing (see "Checks that need a run").
+- **One error convention for library errors.** Decided (decision 115). `org::RunReadback` follows it (p0-lib): each
+  `Create*` takes an `ErrorHandler`, and CS passes `RenderGraph::FatalHandler`. Other ORG throws are not converted yet.
 - **Thread rules in signatures** (tag types or debug asserts) instead of prose and runtime checks.
-- **OMS cleanup:** `Variables.h:30` still cites "decision 6a". Reword it as a general statement.
-- **6.11 result:** guest runs with every one of these host options (decision 113). Their off paths go in phase 0.
+- **OMS cleanup:** done (p0-lib). `Variables.h` no longer cites a decision.
+- **6.11 result:** guest runs with every one of these host options (decision 113). Their off paths went in phase 0.
 
 ## Stays in CS
 
@@ -446,3 +455,23 @@ Estimates, about ±25%:
   the 50 users of run gates and the users of programs.
 - **The ITaskService adapter now carries ORG's work too.** Moving the executor moves the thread pool every graph build
   and readback uses. Keep `Frame::OrgTaskService()` as the one seam.
+
+### p0-lib decisions
+
+Decided by the agent, to confirm:
+
+- **The kept-copy text stays on `reuseRecordings`.** With `reuseLiveRecordings` gone, a live epoch keeps copies whenever
+  `reuseRecordings` is on. `reuseRecordings` itself stays a flag: it was not one of the five, and ORG tests run with it
+  off.
+- **The RenderGraph setters went too** (`SetCoalescedSubmissions`, `SetMergedHandoffs`, `SetUploadsWithBatches`,
+  `SetKeptGatedInline`). They only carried the flags, so a graph built outside `GraphHost` now gets the on behaviour as
+  well.
+- **`RunReadback::ErrorHandler` is a required argument of `Create`, `CreateList` and `CreateRegions`,** not a `Runtime::Desc`
+  field. A readback is made by its reader, not by the runtime, and a required argument makes the compiler find every CS
+  site. An empty handler only logs. After the handler returns, `Create*` return null, `Commit` returns 0 (stamps are
+  never 0), and a copy or read is left out.
+- **CS's handler is `RenderGraph::FatalHandler(area)`** (`src/RenderGraph/Fatal.h`), so other libraries can reuse it. The
+  areas are each user's existing fatal area ("Drawcall Limit Fix", the clouds port's and Post Processing's `kName`).
+- **ORG tests that assumed the off paths were updated:** "reuse" and "external-reuse" now count runs that bind a kept
+  recording, and "leases-wide" accepts a kept copy's run ref. The bounds (`liveReused >= 6` in "reuse") are a guess
+  from reading the code; the director's test run confirms them.

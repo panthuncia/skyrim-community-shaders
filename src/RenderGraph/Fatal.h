@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string_view>
 
 namespace org
@@ -19,6 +20,12 @@ namespace RenderGraph
 	 * @param a_why What went wrong.
 	 */
 	[[noreturn]] void Fatal(std::string_view a_area, std::string_view a_why);
+
+	/**
+	 * @brief An error handler for a library that reports errors through a callback (org::RunReadback::ErrorHandler).
+	 * It calls Fatal, naming a_area, with the library's message.
+	 */
+	std::function<void(std::string_view)> FatalHandler(std::string_view a_area);
 
 	/** @brief The render graph's host, at a port's setup. Fatal, naming a_area, when the graph does not run. */
 	org::GraphHost& RequireGraphHost(std::string_view a_area);
