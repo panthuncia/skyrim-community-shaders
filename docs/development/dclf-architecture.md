@@ -1106,14 +1106,14 @@ the GPU; a slot outlives GPU work only while something holds its owner (`GpuText
 > overwritten, and every execution submitted while the content is current holds it.
 
 ORG states the same contract for `OwnedDescriptorBinding::Index()`. DCLF makes it structural:
--   **Rows name descriptors only through `OwnedRow`** (`Core/Gpu/OwnedRows.h`). A row's descriptor fields are `DescriptorIndex`,
+-   **Rows name descriptors only through `OwnedRow`** (`Core/Gpu/OwnedRows.h`, an alias of OMS `ORGModuleServices/OwnedRows.h` over `GpuTextures::Binding`). A row's descriptor fields are `DescriptorIndex`,
     which only `OwnedRow::Bind` sets, and it keeps the binding's owner with the row. A field the reader takes as "none" is
     `DescriptorIndex::Sentinel`.
--   **The uploads record content owners.** `CommitUploads` and `LatchedUploads` (`Core/Render/Payload/Uploads.h`) take an `OwnedRow`
+-   **The uploads record content owners.** `CommitUploads` and `LatchedUploads` (`Core/Render/Payload/Uploads.h`, over OMS `ORGModuleServices/CommitUploads.h`) take an `OwnedRow`
     and make its owners the content owners of the range it writes (`ContentOwners`, `SceneBuffers::content`). A write of plain bytes
     replaces a range's owners with none, so a freed row (sent zero) releases its bindings.
     -   Ranges are keyed as the uploads match their targets: a versioned buffer by its `Key()`, so a catch-up or growth copy keeps them.
-    -   The registry snapshots its owners (one sealed owner, made again only after a change).
+    -   The registry (OMS `ContentOwners`) snapshots its owners with `GpuTextures::Seal` (one sealed owner, made again only after a change).
 -   **Every execution's owners are made one way** (`ExecutionOwners`, `Core/Render/Epochs/ExecutionOwners.h`): its payloads' bindings,
     the adopted snapshot, its frame textures, and what only it reads (`CommitContext::executionOwners`: retired leases, publications
     it binds). It is sealed at the end of the record step, after the commit wrote its content: `Seal` adds the content snapshot.
