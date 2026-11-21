@@ -562,3 +562,24 @@ Written with the epochs' code (branch `dclf/water-epochs`, 2026-11-21). Nothing 
   installed (`Indirect::SetDrawer(true)`) and a GPU-driven frame.
 - **Object rows.** The water row family's GPU table is a scene resource at t42 (`WaterSceneRows.cpp`), uploaded by every commit
   when the adopted rows changed, and fitted so an object past the table waits.
+
+## 11. Why claimed water was see-through, and what is left (2026-11-21)
+
+- **Cause.** FinishAccumulating (SE 99938, AE 106583) runs the whole water mask block only when the batch renderer
+  (accumulator +0x130) holds passes 0x5C00006D..70 (`FUN_1414f43c0`, AE +0x3B4, SE +0x3C5). The block clears the stencil,
+  binds the normals mask and the motion vectors, runs the mask batch (whose thunk triggers `water.mask`) and sets
+  ImageSpaceManager +0x1F0's +0x2C. When DCLF claims every water shape the engine holds no mask pass, so the block and DCLF's
+  mask epoch were skipped (`water.mask epoch: reached 0 frames`). ISWaterBlend then saw no coverage and discarded every
+  water pixel, leaving the riverbed. The surface itself drew correctly into kRAW_WATER.
+- **Fix.** `MaskPassesCheck` (WaterCapture.cpp) thunks that check: it also answers yes for the main camera's batch renderer
+  while the mask epoch is live (`Indirect::MaskBatchWanted`). The engine then runs its own block with an empty batch.
+- **How it was found.** The surface pass was fine: forcing it opaque changed nothing on screen, while ISWaterBlend showing
+  kRAW_WATER directly showed DCLF's shaded water and its mask term read exactly 0 (not NaN, not negative) with a constant mask
+  output. The epoch report then gave the mask's 0 reached frames. `graph-trace` (a cs-test command, configs/river-trace.toml)
+  writes every epoch's schedule; it confirmed the targets and order were right.
+- **Left (river, river-east, native Vulkan, also with `CS_DCLF_CULL=frustum`):**
+  - Tile-shaped regions differ from the latch path: some water tiles show no water, others show dark patches with smeared,
+    stretched reflections (ISWaterBlend reading kRAW_WATER or history where mask and surface disagree). Not culling.
+  - DCLF's surface draws over the dock posts' bottoms, where the latch path's is hidden. Check the depth-stencil state the
+    water epochs run with (the mask writes depth, mode 3; the surface tests stencil mode 30).
+  - The ripples are finer and flatter than the latch path's (normals or flow map inputs; compare with the parity observer).

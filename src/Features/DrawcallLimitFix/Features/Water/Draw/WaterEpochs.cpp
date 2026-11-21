@@ -40,6 +40,9 @@ namespace DCLF::Features::Water::Indirect
 		// The mask's and the surface's, by View.
 		std::array<WaterEpochSite, 2> waterEpochSites{ { { "water.mask", "water.mask-batch" }, { "water.surface", "water.surface-batch" } } };
 
+		// BSShaderAccumulator's batch renderer, which FinishAccumulating asks for passes (SE and AE alike).
+		constexpr std::size_t kBatchRendererOffset = 0x130;
+
 		WaterEpochSite& WaterSiteOf(View a_view) { return waterEpochSites[a_view == View::Mask ? 0 : 1]; }
 
 		std::uint32_t WaterEpochOfSite(WaterEpochSite& a_site)
@@ -72,6 +75,20 @@ namespace DCLF::Features::Water::Indirect
 		for (auto& site : waterEpochSites)
 			site.trigger = a_context.FindTrigger(site.triggerId);
 		a_context.RegisterReportLines({ .name = "water epochs", .point = Api::ReportPoint::AsyncWorkForward, .text = &WaterEpochReportLines });
+	}
+
+	bool MaskBatchWanted(const void* a_batchRenderer)
+	{
+		static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
+		const auto* accumulator = static_cast<const std::byte*>(*mainAccumulator);
+		if (!accumulator || !a_batchRenderer || *reinterpret_cast<void* const*>(accumulator + kBatchRendererOffset) != a_batchRenderer ||
+			!FrameAnchors::IsRenderOwner())
+			return false;
+		if (RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+			return false;
+		auto& site = WaterSiteOf(View::Mask);
+		const std::uint32_t epoch = WaterEpochOfSite(site);
+		return site.trigger && epoch != Draws::kNoEpoch && !Draws::EpochTraitsOf(epoch).dormant;
 	}
 
 	bool ReachBatch(View a_view, const void* a_accumulator)
