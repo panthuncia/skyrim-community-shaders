@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#include "Features/DrawcallLimitFix/Features/Water/Port/WaterParity.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
 #include "Deferred.h"
@@ -79,6 +80,7 @@ namespace DCLF::Features::Water
 			std::uint32_t depthFormat = 0;
 			Family::Passes passes;
 			std::uint32_t lastTechnique = 0;  // the last pass's technique (State::currentPixelDescriptor >> 11 & 0xF)
+			const RE::BSRenderPass* lastPass = nullptr;  // the pass whose SetupGeometry ran last, for the water port's parity observer
 			// Frames with no sun shadow light keep the last record, as t98 keeps its buffer.
 			Deferred::DirectionalShadowLightData directionalShadow{};
 			// The current run's slots. Cleared whenever the run is handed off, so it never names owners another run holds.
@@ -356,6 +358,8 @@ namespace DCLF::Features::Water
 				run.draws.push_back(std::move(draw));
 			}
 			a_capture.slotMemo = memo;
+			if (Port::ParityEnabled())
+				Port::ObserveDraw(run.draws.back().latch.constants, a_capture.lastPass, a_shape, a_capture.view);
 			return nullptr;
 		}
 
@@ -390,6 +394,7 @@ namespace DCLF::Features::Water
 				capture.physSky = run->physSky;
 				capture.run = std::move(run);
 				capture.failed = false;
+				capture.lastPass = nullptr;
 				capture.passes.Begin();
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
@@ -438,6 +443,7 @@ namespace DCLF::Features::Water
 				return;
 			if (const auto* state = globals::state)
 				capture.lastTechnique = TechniqueOf(state->currentPixelDescriptor);
+			capture.lastPass = a_pass;
 			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
 				Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape", capture.lastTechnique);
 		}
