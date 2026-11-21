@@ -12,9 +12,7 @@
 #include <ORGModuleServices/Async/WindowGates.h>
 
 #include <array>
-#include <atomic>
 #include <span>
-#include <vector>
 
 namespace DCLF::Runtime
 {

@@ -103,8 +103,6 @@ namespace DCLF::Draws
 	std::shared_ptr<const BuildState> AttachedBuildState();
 	/** @brief Any thread: the attached build state's serial, 0 before the first. */
 	std::uint64_t AttachedBuildSerial();
-	/** @brief Render thread: every build a_state asked for is staged or attached, so snapshots may be made for it. */
-	void PublishBuiltBuildState(std::uint64_t a_serial);
 	/** @brief Any thread: the built build state's serial, 0 before the first. */
 	std::uint64_t BuiltBuildSerial();
 }

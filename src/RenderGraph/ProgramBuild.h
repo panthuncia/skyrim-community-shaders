@@ -11,10 +11,7 @@ namespace RenderGraph::ProgramBuild
 {
 	using Defines = org::services::ProgramDefines;
 
-	using org::services::program_build::HashBinary;
-	using org::services::program_build::MakeRequest;
 	using org::services::program_build::ReadSource;
-	using org::services::program_build::SourcePath;
 
 	/**
 	 * @brief a_own plus the defines every D3D11 build of the stage gets, so both paths build one permutation.

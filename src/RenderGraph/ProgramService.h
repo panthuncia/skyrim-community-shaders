@@ -5,7 +5,6 @@
 
 #include <ORGModuleServices/Programs/ProgramService.h>
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
