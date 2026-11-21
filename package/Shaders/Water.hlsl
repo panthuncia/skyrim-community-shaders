@@ -211,6 +211,141 @@ void WaterOrgPermutation()
 	Permutation::ExtraFeatureDescriptor = WaterDraw.Descriptors.w;
 	Permutation::EffectRadius = WaterDraw.EffectRadius;
 }
+#	elif defined(DCLF_BINDLESS)
+// Drawcall Limit Fix's water draws (Features/DrawcallLimitFix/Features/Water/Draw; docs/development/plans/dclf-water-indirect.md).
+// The colour segment culls water into its deferred ranges: the mask (the Stencil technique) in range 0, the surface (techniques
+// 0, 9 and 11) in range 1. Each range draws plain indexed indirect draws (DCLF_PULLED), so a stage finds its draw's sequence by its
+// instance, as Effect.hlsl's and Lighting.hlsl's pulled stages do.
+// - World and PreviousWorld come from the placement row, made relative to the eye here.
+// - The material values come from the water material pool's row, which the shading row names. They move every frame (fog, scroll,
+//   colours times the water lighting), so a material row's block cannot hold them.
+// - The per-object values (ObjectUV, CellTexCoordOffset, the plane) come from the water object row, which the object record names.
+// - The frame values (SetupTechnique's rows) come from the water frame row.
+// - The headers, t98 and Physical Sky's resources are the frame record's, as Lighting's are. Light Limit Fix's room index is the
+//   object record's (LightLimitFix.hlsli, RoomIndexOf).
+// The three row buffers are frame bindings. The vertex stage's layout maps no register there, so both stages read them through the
+// frame record's descriptor indices. Features/Water/Draw/WaterDrawLayout.h must match every constant below.
+#		include "Common/DCLFObjects.hlsli"
+
+// The water material pool's row (Port::MaterialRow): VS b1 c0-c5, then PS b1 c0-c13.
+struct DCLFWaterMaterial
+{
+	float4 VS[6];
+	float4 PS[14];
+};
+
+// The water object row: ObjectUV (VS b2 c12), CellTexCoordOffset (VS b2 c13) and the property's plane (world space, normal and constant).
+struct DCLFWaterObject
+{
+	float4 ObjectUV;
+	float4 CellTexCoordOffset;
+	float4 Plane;
+};
+
+// The frame bindings' registers (WaterDrawLayout.h: kMaterialPoolRegister, kObjectRowsRegister, kFrameRowRegister).
+static const uint kDCLFWaterMaterialsRegister = 42;
+static const uint kDCLFWaterObjectsRegister = 43;
+static const uint kDCLFWaterFrameRegister = 44;
+// The water frame row's float4s (Port::TechniqueRows): QPosAdjust, then PS b0 c0-c4.
+static const uint kDCLFWaterFrameQPosAdjust = 0;
+static const uint kDCLFWaterFramePS = 1;
+// Where the object record holds the water object row (WaterDrawLayout.h: kObjectRecordWord, kObjectRecordShift, kObjectRecordBias),
+// and the shading row word that names the material pool row (kMaterialShadingWord).
+static const uint kDCLFWaterObjectRecordWord = 4;
+static const uint kDCLFWaterObjectRecordShift = 0;
+static const uint kDCLFWaterObjectRecordBias = 0;
+static const uint kDCLFWaterMaterialShadingWord = 14;
+
+// The descriptor index the frame record holds for register a_register (DrawBindings::textures).
+uint DCLFWaterFrameIndex(uint a_register) { return DCLFFrameRecordWord(kDCLFRecordTextures + 4 * a_register); }
+
+// Word a_word of a record, by DCLFObjectRecord's fields. The word is a constant, so this folds to one field.
+uint DCLFWaterRecordWord(DCLFObjectRecord a_record, uint a_word)
+{
+	switch (a_word) {
+	case 4:
+		return asuint(a_record.DCLFTreeParams.x);
+	case 5:
+		return asuint(a_record.DCLFTreeParams.y);
+	case 6:
+		return asuint(a_record.DCLFTreeParams.z);
+	case 7:
+		return asuint(a_record.DCLFTreeParams.w);
+	case 8:
+		return asuint(a_record.DCLFWindTimers.x);
+	case 9:
+		return asuint(a_record.DCLFWindTimers.y);
+	default:
+		return 0;
+	}
+}
+
+// Word a_word of a shading row, by DCLFShadingRow's fields. A constant word, as above.
+uint DCLFWaterShadingWord(DCLFShadingRow a_row, uint a_word)
+{
+	switch (a_word) {
+	case 13:
+		return a_row.SkinMaterial;
+	case 14:
+		return a_row.DCLFShadingPadding.x;
+	case 15:
+		return a_row.DCLFShadingPadding.y;
+	default:
+		return 0;
+	}
+}
+
+DCLFWaterMaterial DCLFWaterMaterialOf(uint a_object)
+{
+	StructuredBuffer<DCLFWaterMaterial> materials = ResourceDescriptorHeap[DCLFWaterFrameIndex(kDCLFWaterMaterialsRegister)];
+	return materials[DCLFWaterShadingWord(DCLFShading[a_object], kDCLFWaterMaterialShadingWord)];
+}
+
+DCLFWaterObject DCLFWaterObjectOf(uint a_object)
+{
+	StructuredBuffer<DCLFWaterObject> objects = ResourceDescriptorHeap[DCLFWaterFrameIndex(kDCLFWaterObjectsRegister)];
+	const uint word = DCLFWaterRecordWord(DCLFObjects[a_object], kDCLFWaterObjectRecordWord);
+	return objects[(word >> kDCLFWaterObjectRecordShift) - kDCLFWaterObjectRecordBias];
+}
+
+float4 DCLFWaterFrameRow(uint a_row)
+{
+	StructuredBuffer<float4> frame = ResourceDescriptorHeap[DCLFWaterFrameIndex(kDCLFWaterFrameRegister)];
+	return frame[a_row];
+}
+
+// The placement's World as SetupGeometry writes it: the absolute row made relative to a_eye, with the fourth row of a 4x4.
+// PreviousWorld is the same world against the previous eye, not the object's previous transform (the engine's).
+float4x4 DCLFWaterWorld(uint a_object, float3 a_eye)
+{
+	const DCLFPlacement placement = DCLFPlacements[a_object];
+	return float4x4(placement.World[0] - float4(0, 0, 0, a_eye.x), placement.World[1] - float4(0, 0, 0, a_eye.y), placement.World[2] - float4(0, 0, 0, a_eye.z),
+		float4(0, 0, 0, 1));
+}
+
+#		if defined(DCLF_PULLED)
+// The permutation block (b4) as the draw's pipeline row holds it (Permutation.hlsli, DCLF_PULLED_ROWS; Effect.hlsl's).
+void DCLFWaterPermutation()
+{
+	Permutation::VertexShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
+	Permutation::PixelShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+	Permutation::ExtraShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 8);
+	Permutation::ExtraFeatureDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 12);
+	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);
+}
+
+// A plain draw's object word and rows, from its sequence (BuildDrawsCS: DrawSequence), before anything reads them.
+DeviceRef DCLFWaterSequence(uint a_instance)
+{
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's ref, the material row's
+	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
+	DCLFPipelineRowAddress = rows.xy;
+	DCLFMaterialRowAddress = rows.zw;
+	DCLFWaterPermutation();
+	return sequence;
+}
+#		endif
 #	endif
 
 #	if defined(VSHADER)
@@ -279,6 +414,10 @@ struct VS_OUTPUT
 #	endif
 
 	float4 NormalsScale: TEXCOORD8;
+#	if defined(DCLF_PULLED)
+	// The draw's instance, by which the pixel stage reads its sequence (Effect.hlsl's).
+	nointerpolation uint DCLFDrawInstance: TEXCOORD15;
+#	endif
 };
 
 #	ifdef VSHADER
@@ -296,6 +435,40 @@ static float4x4 PreviousWorld = float4x4(WaterDraw.VSGeometry[4], WaterDraw.VSGe
 static float4x4 WorldViewProj = float4x4(WaterDraw.VSGeometry[8], WaterDraw.VSGeometry[9], WaterDraw.VSGeometry[10], WaterDraw.VSGeometry[11]);
 static float3 ObjectUV = WaterDraw.VSGeometry[12].xyz;
 static float4 CellTexCoordOffset = WaterDraw.VSGeometry[13];
+#		elif defined(DCLF_BINDLESS)
+// Assigned by DCLFWaterVertexStatics, which main calls once the draw's object word is known.
+static float4 QPosAdjust;
+static float4 VSFogParam;
+static float4 VSFogNearColor;
+static float4 VSFogFarColor;
+static float4 NormalsScroll0;
+static float4 NormalsScroll1;
+static float4 NormalsScale;
+static float4x4 World;
+static float4x4 PreviousWorld;
+static float4x4 WorldViewProj;
+static float3 ObjectUV;
+static float4 CellTexCoordOffset;
+
+/** @brief The vertex stage's constants for the draw's object (DCLFObjectIndex), as SetupTechnique, SetupMaterial and SetupGeometry write them. */
+void DCLFWaterVertexStatics()
+{
+	const DCLFWaterMaterial material = DCLFWaterMaterialOf(DCLFObjectIndex);
+	const DCLFWaterObject object = DCLFWaterObjectOf(DCLFObjectIndex);
+	QPosAdjust = DCLFWaterFrameRow(kDCLFWaterFrameQPosAdjust);
+	VSFogParam = material.VS[0];
+	VSFogNearColor = material.VS[1];
+	VSFogFarColor = material.VS[2];
+	NormalsScroll0 = material.VS[3];
+	NormalsScroll1 = material.VS[4];
+	NormalsScale = material.VS[5];
+	World = DCLFWaterWorld(DCLFObjectIndex, FrameBuffer::CameraPosAdjust.xyz);
+	PreviousWorld = DCLFWaterWorld(DCLFObjectIndex, FrameBuffer::CameraPreviousPosAdjust.xyz);
+	// The engine's WorldViewProj takes the jittered view-projection while TAA jitters (SE 513713), as the main pass's CameraViewProj.
+	WorldViewProj = mul(FrameBuffer::CameraViewProj, World);
+	ObjectUV = object.ObjectUV.xyz;
+	CellTexCoordOffset = object.CellTexCoordOffset;
+}
 #		else
 cbuffer PerTechnique : register(b0)
 {
@@ -322,7 +495,7 @@ cbuffer PerGeometry : register(b2)
 };
 #		endif
 
-#		if defined(CS_ORG_BINDLESS)
+#		if defined(CS_ORG_BINDLESS) || defined(DCLF_BINDLESS)
 VS_OUTPUT WaterVertex(VS_INPUT input)
 #		else
 VS_OUTPUT main(VS_INPUT input)
@@ -463,10 +636,32 @@ VS_OUTPUT main(VS_INPUT input)
 	return vsout;
 }
 
-#		if defined(CS_ORG_BINDLESS)
-#			define DCLF_PULLED_VERTICES
+#		if defined(CS_ORG_BINDLESS) || defined(DCLF_BINDLESS)
+#			if defined(CS_ORG_BINDLESS)
+#				define DCLF_PULLED_VERTICES
+#			endif
 #			include "Common/DCLFVertexPull.hlsli"
 
+/**
+ * @brief Vertex a_index's attributes, as the engine's input layout for the draw's vertex layout reads them (DCLFDrawVertexLayout).
+ * They must match the mask the DCLF pipelines check the geometry's layout against (ShaderPrograms.cpp, VertexAttributesOf: Water's).
+ */
+VS_INPUT WaterPulledInput(uint a_index, DCLFStream a_first, DCLFStream a_second)
+{
+	DCLFStreamsAt(a_index, a_first, a_second);
+	VS_INPUT input = (VS_INPUT)0;
+	input.Position = DCLFPullPosition(a_first, a_second);
+#			if (defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)) && defined(NORMAL_TEXCOORD)
+	input.TexCoord0 = DCLFPullHalf2(1, a_first, a_second);
+#			endif
+#			if defined(VC)
+	input.Color = DCLFPullUnorm4(5, 0, a_first, a_second);
+#			endif
+	return input;
+}
+#		endif
+
+#		if defined(CS_ORG_BINDLESS)
 /** @brief The draw's vertex a_vertexID, pulled as the input assembler reads it: its 16-bit index, then its attributes. */
 VS_INPUT WaterPullVertex(uint a_vertexID)
 {
@@ -476,23 +671,60 @@ VS_INPUT WaterPullVertex(uint a_vertexID)
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { WaterDraw.VertexAddress, WaterDraw.VertexStride };
 	DCLFStream second = { DeviceRef(0, 0), 0u };
-	DCLFStreamsAt(index, first, second);
-
-	VS_INPUT input = (VS_INPUT)0;
-	input.Position = DCLFPullPosition(first, second);
-#			if (defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)) && defined(NORMAL_TEXCOORD)
-	input.TexCoord0 = DCLFPullHalf2(1, first, second);
-#			endif
-#			if defined(VC)
-	input.Color = DCLFPullUnorm4(5, 0, first, second);
-#			endif
-	return input;
+	return WaterPulledInput(index, first, second);
 }
 
 VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {
 	WaterOrgPermutation();
 	return WaterVertex(WaterPullVertex(a_vertexID));
+}
+#		elif defined(DCLF_BINDLESS) && defined(DCLF_PULLED)
+// The deferred ranges' plain draws: SV_VertexID is the geometry's vertex index (the index pool's indices, vertex offset 0), and the
+// draw's sequence holds its geometry's two vertex buffer views (ref, size, stride) at bytes 24 and 40.
+VS_OUTPUT DCLFWaterPulledVertex(uint a_index, uint a_instance)
+{
+	const DeviceRef sequence = DCLFWaterSequence(a_instance);
+	DCLFWaterVertexStatics();
+	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
+	DCLFStream first, second;
+	first.address = vertexBuffer.xy;
+	first.stride = vertexBuffer.w;
+	second.address = streamBuffer.xy;
+	second.stride = streamBuffer.w;
+	VS_OUTPUT vsout = WaterVertex(WaterPulledInput(a_index, first, second));
+	vsout.DCLFDrawInstance = a_instance;
+	return vsout;
+}
+
+// The draw's lookups keyed on a wave-uniform instance (Effect.hlsl's pulled main): its rows and statics are the draw's, not each lane's.
+VS_OUTPUT main(uint a_index: SV_VertexID, uint a_instance: SV_InstanceID)
+{
+	VS_OUTPUT vsout;
+	[loop] for (;;) {
+		const uint drawInstance = WaveReadLaneFirst(a_instance);
+		[branch] if (drawInstance == a_instance) {
+			vsout = DCLFWaterPulledVertex(a_index, drawInstance);
+			break;
+		}
+	}
+	return vsout;
+}
+#		elif defined(DCLF_BINDLESS)
+// A device-generated draw's form: the geometry's buffers come in the draw's push data. The deferred ranges never draw it, since their
+// stencil reference cannot change per sequence, but a family program's stages are built in both forms.
+VS_OUTPUT main(uint a_index: SV_VertexID)
+{
+	DCLFWaterVertexStatics();
+	DCLFDrawVertexLayout = DCLFPushedVertexLayout();
+	DCLFStream first, second;
+	first.address = DCLFVertexBuffer.xy;
+	first.stride = DCLFVertexStride;
+	second.address = DCLFStreamBuffer.xy;
+	second.stride = DCLFStreamStride;
+	return WaterVertex(WaterPulledInput(a_index, first, second));
 }
 #		endif
 
@@ -591,6 +823,23 @@ SamplerState RawSSRReflectionSampler : register(s11);
 SamplerState ApSampler : register(s13);
 #		endif
 
+#			if defined(DCLF_BINDLESS)
+// The samplers and the material's textures (t0, t3-t6) are the material row's. The frame's textures are frame textures, the same for
+// every water draw of a frame (WaterDrawLayout.h, kFrameTextureRegisters: kMAIN's copy, the displacement, the depth copy, the flow map
+// and its normals, the SSR targets).
+Texture2D<float4> ReflectionTex : register(t0);
+Texture2D<float4> RefractionTex : register(t46);
+Texture2D<float4> DisplacementTex : register(t47);
+TextureCube<float4> CubeMapTex : register(t3);
+Texture2D<float4> Normals01Tex : register(t4);
+Texture2D<float4> Normals02Tex : register(t5);
+Texture2D<float4> Normals03Tex : register(t6);
+Texture2D<float4> DepthTex : register(t48);
+Texture2D<float4> FlowMapTex : register(t49);
+Texture2D<float4> FlowMapNormalsTex : register(t54);
+Texture2D<float4> SSRReflectionTex : register(t56);
+Texture2D<float4> RawSSRReflectionTex : register(t58);
+#			else
 Texture2D<float4> ReflectionTex : register(t0);
 Texture2D<float4> RefractionTex : register(t1);
 Texture2D<float4> DisplacementTex : register(t2);
@@ -603,7 +852,75 @@ Texture2D<float4> FlowMapTex : register(t8);
 Texture2D<float4> FlowMapNormalsTex : register(t9);
 Texture2D<float4> SSRReflectionTex : register(t10);
 Texture2D<float4> RawSSRReflectionTex : register(t11);
+#			endif
 
+#			if defined(DCLF_BINDLESS)
+// Assigned by DCLFWaterPixelStatics, which main calls once the draw's object word is known.
+static float4 VPOSOffset;
+static float4 PosAdjust;
+static float4 CameraDataWater;
+static float4 SunDir;
+static float4 SunColor;
+
+static float4 ShallowColor;
+static float4 DeepColor;
+static float4 ReflectionColor;
+static float4 FresnelRI;
+static float4 BlendRadius;
+static float4 VarAmounts;
+static float4 NormalsAmplitude;
+static float4 WaterParams;
+static float4 FogNearColor;
+static float4 FogFarColor;
+static float4 FogParam;
+static float4 DepthControl;
+static float4 SSRParams;
+static float4 SSRParams2;
+
+static float4x4 TextureProj;
+static float4 ReflectPlane[1];
+static float4 ProjData;
+// DCLF draws no light technique: under Light Limit Fix they add nothing. The surface's stages read none of these.
+static float4 LightPos[8];
+static float4 LightColor[8];
+
+/** @brief The pixel stage's constants for the draw's object (DCLFObjectIndex), as SetupTechnique, SetupMaterial and SetupGeometry write them. */
+void DCLFWaterPixelStatics()
+{
+	const uint object = DCLFObjectIndex;
+	VPOSOffset = DCLFWaterFrameRow(kDCLFWaterFramePS + 0);
+	PosAdjust = DCLFWaterFrameRow(kDCLFWaterFramePS + 1);
+	CameraDataWater = DCLFWaterFrameRow(kDCLFWaterFramePS + 2);
+	SunDir = DCLFWaterFrameRow(kDCLFWaterFramePS + 3);
+	SunColor = DCLFWaterFrameRow(kDCLFWaterFramePS + 4);
+
+	const DCLFWaterMaterial material = DCLFWaterMaterialOf(object);
+	ShallowColor = material.PS[0];
+	DeepColor = material.PS[1];
+	ReflectionColor = material.PS[2];
+	FresnelRI = material.PS[3];
+	BlendRadius = material.PS[4];
+	VarAmounts = material.PS[5];
+	NormalsAmplitude = material.PS[6];
+	WaterParams = material.PS[7];
+	FogNearColor = material.PS[8];
+	FogFarColor = material.PS[9];
+	FogParam = material.PS[10];
+	DepthControl = material.PS[11];
+	SSRParams = material.PS[12];
+	SSRParams2 = material.PS[13];
+
+	// SetupGeometry's TextureProj: the texture space times the world-view-projection, the world relative to the eye (FUN_1412f83b0).
+	// The D3D11 block holds its columns, so the matrix here is the transpose of that product.
+	const float4x4 textureSpace = float4x4(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
+	const float3 eye = FrameBuffer::CameraPosAdjust.xyz;
+	TextureProj = transpose(mul(textureSpace, mul(FrameBuffer::CameraViewProj, DCLFWaterWorld(object, eye))));
+	// The property's plane as stored, with w its distance to the eye.
+	const float4 plane = DCLFWaterObjectOf(object).Plane;
+	ReflectPlane[0] = float4(plane.xyz, dot(plane.xyz, eye) - plane.w);
+	ProjData = float4(FrameBuffer::CameraProj[0][0], FrameBuffer::CameraProj[1][1], 0, 0);
+}
+#			else
 cbuffer PerTechnique : register(b0)
 {
 	float4 VPOSOffset : packoffset(c0);  // inverse main render target width and height in xy, 0 in zw
@@ -639,6 +956,7 @@ cbuffer PerGeometry : register(b2)
 	float4 LightPos[8] : packoffset(c6);
 	float4 LightColor[8] : packoffset(c14);
 }
+#			endif
 #		endif
 
 #		define SampColorSampler Normals01Sampler
@@ -1352,7 +1670,7 @@ float3 GetSunColor(float3 normal, float3 viewDirection, float3 worldPosition)
 #			include "IBL/IBL.hlsli"
 #		endif
 
-#		if defined(CS_ORG_BINDLESS)
+#		if defined(CS_ORG_BINDLESS) || defined(DCLF_BINDLESS)
 PS_OUTPUT WaterPixel(PS_INPUT input)
 #		else
 PS_OUTPUT main(PS_INPUT input)
@@ -1760,6 +2078,43 @@ PS_OUTPUT main(PS_INPUT input)
 	WaterOrgPermutation();
 	return WaterPixel(input);
 }
+#		elif defined(DCLF_BINDLESS)
+/** @brief The draw's constants. The mask's stage reads none of them. */
+void DCLFWaterPixelInputs()
+{
+#			if !defined(STENCIL)
+	DCLFWaterPixelStatics();
+#			endif
+}
+
+#			if defined(DCLF_PULLED)
+// A plain draw's rows and object word are its vertex stage's sequence's (Effect.hlsl's pulled pixel stage).
+PS_OUTPUT DCLFWaterPulledPixel(PS_INPUT input, uint a_instance)
+{
+	DCLFWaterSequence(a_instance);
+	DCLFWaterPixelInputs();
+	return WaterPixel(input);
+}
+
+PS_OUTPUT main(PS_INPUT input)
+{
+	PS_OUTPUT psout;
+	[loop] for (;;) {
+		const uint drawInstance = WaveReadLaneFirst(input.DCLFDrawInstance);
+		[branch] if (drawInstance == input.DCLFDrawInstance) {
+			psout = DCLFWaterPulledPixel(input, drawInstance);
+			break;
+		}
+	}
+	return psout;
+}
+#			else
+PS_OUTPUT main(PS_INPUT input)
+{
+	DCLFWaterPixelInputs();
+	return WaterPixel(input);
+}
+#			endif
 #		endif
 
 #	endif
