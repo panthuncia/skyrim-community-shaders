@@ -55,10 +55,10 @@ namespace DCLF::Features::Water::WaterScene
 	void Install(Api::InstallContext& a_context)
 	{
 		const auto id = a_context.RegisterSwitch({ .name = "CS_DCLF_WATER", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never,
-			.description = "0 (default): nothing of it is registered; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2: as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the latch path's (phases 2 and 3)",
+			.description = "0: nothing of it is registered, and the latch path draws all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the latch path's (phases 2 and 3)",
 			.after = "CS_DCLF_EFFECT_RIGID_SKINS" });
 		const auto& value = SwitchValue(id);
-		claims = value == "2";
+		claims = value.empty() || value == "2";
 		on = claims || value == "1";
 		if (!on)
 			return;
@@ -67,7 +67,7 @@ namespace DCLF::Features::Water::WaterScene
 		RegisterPort(a_context);
 		RegisterCensus(a_context);
 		RegisterRows(a_context);
-		logger::info("[DCLF] water scene: on (CS_DCLF_WATER={}): water is tracked and classified{}", value,
+		logger::info("[DCLF] water scene: on (CS_DCLF_WATER={}): water is tracked and classified{}", value.empty() ? std::string_view("2, the default") : std::string_view(value),
 			claims ? ", and plain water is claimed while DCLF's water epochs draw it" : ", not claimed");
 	}
 }

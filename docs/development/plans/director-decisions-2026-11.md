@@ -660,3 +660,6 @@ final until the user confirms it.
      when the engine holds no mask pass, which is the case once DCLF claims every water shape. A thunk on that check
      runs the block for the main camera while DCLF's mask epoch is live. `CS_DCLF_WATER` stays 0 by default; claimed
      water still differs from the engine's (section 11's list).
+127. **DCLF water on by default (user, 2026-11-21).** `CS_DCLF_WATER` unset means 2: plain water is claimed and drawn by
+     DCLF's water epochs. 0 turns the port off. Decision 126's "stays 0" is superseded; the waves and tile bands were
+     fixed first (water plan section 11).
