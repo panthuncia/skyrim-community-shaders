@@ -459,7 +459,7 @@ SE 1.5.97 and AE 1.6.1170; ids are Address Library ids, SE / AE.
   material port), `WaterSceneCensus.cpp` (the census), `WaterSceneRows.cpp` (the water row family, the material pool, the frame
   row). `WaterScene.h` holds the constants and the GPU row layouts. `WaterFeature.cpp` calls `WaterScene::Install` before its
   graph-mode test, so the scene side does not need graph mode.
-- The switch: `CS_DCLF_WATER`. 0 (default) registers nothing. 1 registers the class, the port, the census, the family and the
+- The switch: `CS_DCLF_WATER`. 0 registers nothing (2 is the default since 2026-11-21, section 11). 1 registers the class, the port, the census, the family and the
   pools, and claims nothing: the derive returns `Ineligible::WaterUnclaimed` for plain water and `WaterVariant` for the rest.
 - Log lines: `[DCLF] water scene: '<shape>' under '<parent>' (reference '<ref>', geometry <ptr>): <placement>, flags ..., stencil
   bit ..., surface ... hint ..., stencil pass ..., <refusal>` once per shape (at most 1,024 a session), and at the report
