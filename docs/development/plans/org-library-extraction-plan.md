@@ -414,6 +414,14 @@ regression.
   converted what fit: OMS returns its allocation and growth failures, and ORG's runtime services report through
   `Runtime::Desc::onError`. ORG's graph engine keeps its throws (see "lib-errors decisions").
 - **Thread rules in signatures** (tag types or debug asserts) instead of prose and runtime checks.
+
+  because `StagedGeneration` and `EpochRecordingCurrent` (`GraphHost.h:351,687`) are owner-thread calls. Done in lib-builds:
+  `GraphHost::BuildsOf(epoch)`, and `epoch_recordings::Cache::Add(host, epoch, ...)` (see "lib-builds decisions").
+- **ORG multisampled SRVs.** Still missing (see "Checks that need a run").
+- **One error convention for library errors.** Decided (decision 115). `org::RunReadback` follows it (p0-lib): each
+  `Create*` takes an `ErrorHandler`, and CS passes `RenderGraph::FatalHandler`. Other ORG throws are not converted yet.
+- **Thread rules in signatures** (tag types or debug asserts) instead of prose and runtime checks. Done for GraphHost's
+  owner-thread calls in lib-builds, as debug asserts (see "lib-builds decisions").
 - **OMS cleanup:** done (p0-lib). `Variables.h` no longer cites a decision.
 - **6.11 result:** guest runs with every one of these host options (decision 113). Their off paths went in phase 0.
 
@@ -1015,3 +1023,40 @@ Decided by the agent, to confirm:
   - `ContributorHost` only logs a contributor's recording throw. Contributors are host callbacks, CS has none, and the file
     is lib-msaa's.
   - `TrackedAllocation`'s `std::terminate` on an impossible variant is an invariant, not an error.
+
+### lib-builds decisions
+
+Decided by the agent, to confirm:
+
+- **`GraphHost::BuildsOf(epoch)` returns `GraphHost::Builds{attached, staged}`, on any thread.** `attached` is 0 while the
+  epoch has no graph, as `EpochRecordingCurrent` always treated it. `epoch_recordings::Builds` is now an alias of it.
+- **A sequence count per epoch, not a mutex.** The owner is the only writer and never waits. A reader retries only while the
+  owner is inside a publish (a few stores). A mutex would let a builder thread holding it stall the render thread.
+- **Published where `EpochsDeclaring`'s view already is (`PublishDeclared`).** Every change of an attached or staged graph
+  calls it: a build, an attach, a staging, a staged set, a staged graph's retirement, `StopAsync` and `DestroyGraph`. Those
+  all run on the owner at its build points, so the pair changes only at frame boundaries.
+- **`StagedGeneration` and `EpochRecordingCurrent` read the snapshot, so they are any-thread calls now.** On the owner they
+  return what they did before. `BuildGeneration(epoch)` stays an owner-thread call: it keeps its value after
+  `DestroyGraph`, which the snapshot does not.
+- **The prune moves into ORG's cache, read from the host.** `Cache::Add(host, epoch, key, ...)` takes `BuildsOf(epoch)`
+  itself. DCLF's `Assemble.cpp` used `Builds{epochBuilds[segment], 0}` from the posted inputs. It now keeps the attached
+  build's recordings while a build is staged, as FrameAnchors does. It still records on the build its inputs name
+  (`epochBuilds`), because that is part of the revision, not a workaround. FrameAnchors' `Add` uses the same overload.
+- **Nothing else in CS works around these calls.** The other callers (`Coverage.cpp`, `Snapshot.cpp`, `Frame/Revision.cpp`,
+  `PipelineVersions`, OMS `PipelinePins` and `StagedBuilds`, `BuildManager`'s attach callbacks) all run on the render
+  thread or at an attach. They are left as they are.
+- **Thread rules: debug asserts, not tag types.** CS's render ownership moves between threads during a session
+  (`FrameAnchors` claims, loading screens, `RenderGraphRuntime::MoveOwnerThread`). The owner is a run-time fact. A token
+  would live in `RenderGraphRuntime`, which every thread reaches, so it would prove nothing, and it would change about 70
+  call sites in CS and OMS. The assert checks the real thread, follows `SetOwnerThread`, and touches no caller.
+- **The check.** Every call the header marks "Owner thread" starts with `CheckOwner`. A call from another thread is logged
+  (the call, both threads) and aborts. The first checked call claims an unowned host. CS's `MoveOwnerThread` calls
+  `SetOwnerThread`. Scope: those calls only. "Submitting thread" and "Render thread" calls are not checked: the submission
+  thread and DXVK's stream run some of them by design.
+- **On without `NDEBUG` (`ORG_THREAD_CHECKS` in `GraphHost.cpp`, overridable).** The header does not depend on it, so mixed
+  builds have one layout. CS's Dev-Fast and Release define `NDEBUG`, so the checks run only in ORG's Debug tests and CS's
+  ALL-DEBUG preset. A checked CS run needs `ORG_THREAD_CHECKS=1` on the ORG target.
+- **Test.** `OpenRenderGraphPersistentVulkanHostTests built`, step 6: four reader threads read `BuildsOf` while the owner
+  stages and attaches both epochs eight times, with frames between. A torn pair shows up as a lost staged build, a staged
+  build no newer than the attached one, or an attached build that goes back. It also checks `SetOwnerThread` and
+  `IsOwnerThread`.
