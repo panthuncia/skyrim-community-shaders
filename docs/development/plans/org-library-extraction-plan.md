@@ -140,6 +140,8 @@ Not part of this plan unless a phase touches them:
 |---|---|---|---|
 | 0 Review and push | not started | | Push the submodule branches for review (decision 89). Merge p8 first. |
 | 1 Small containers and async pieces | not started | | EventQueue already done. p1-frame (code only, not built): StarvationWatch and FrameClock to OMS `Async/`, the violation policy to OMS `ViolationPolicy`; CS keeps `Frame/Starvation.h` and `FrameClock.h` as facades. Branches `org-native/extract-p1-frame`, OMS `extract/p1-frame`. |
+
+| 1 Small containers and async pieces | in progress | `org-native/extract-p1-async`, OMS `extract/p1-async` | EventQueue already done. p1-async (code only, not built): LatestSlot, PublicationLog, SlotTable, KeptState in OMS `Async/`, RetirementChain and `Retired` in OMS `RetirementChain.h`; tests in OMS `tests/Async` (ORGKeptStateTests, ORGRetirementChainTests). |
 | 2 Services with clean cuts | not started | | Executor and retirement join need A/B perf runs. |
 | 3 Programs and GPU primitives | in progress | p3-gates: `org-native/extract-p3-gates`, ORG and OMS `extract/p3-gates` | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 3–4 written (p3-gates), not built: `org::RunGate`, `org::FirstRun`, `org::RunSlots` in ORG `Render/`, `org::services::MakeUavClearPass` in OMS `Passes/`; CS keeps `RunGate.h` and `FrameStaging.h` as adapters. See "p3-gates decisions". |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
@@ -485,3 +487,24 @@ Decided by the agent, to confirm:
   inject. `FrameStaging.h` keeps `AcquireStaging` and aliases `RunSlots`/`RunSlotsRegistry`.
 - **Tests:** ORG `OpenRenderGraphRunSlotsTests` (no device) and `TestRunGates` in `OpenRenderGraphExternalResourceTests`
   (D3D12 runtime: latch words, open bits, staging copy, close, `FirstRun`).
+
+### p1-async decisions
+
+Decided by the agent, to confirm:
+
+- **Where they went.** LatestSlot, PublicationLog, SlotTable and KeptState are std-only, so they are in `Async/` (namespace
+  `org::async`, the header-only `AsyncPrimitives` target). RetirementChain and `Retired` include ORG's `EventQueue`, so they are
+  in `ORGModuleServices/RetirementChain.h` (namespace `org::services`), beside `RetirementClock` in the main target.
+- **`Retired` teardown.** It takes the queue's `QueueTeardown` (default `Free`) and capacity (default 64). DCLF's `Retired<T>`
+  alias in `Core/Scene/Channels.h` passes `Leak`, which is what it used before.
+- **The storage-reuse option is process-wide** (`org::async::keptStorageOptions.reuseStorage`), not per array. The journal's
+  run path is static and a snapshot carries no array, so a per-array option would mean new plumbing. It still also picks the
+  bitmap run path, as before. CS's two readers (`MainBuild.cpp`, `KeptStores.cpp`) read it directly.
+- **CS headers.** `RenderGraph/Async/LatestSlot.h` is an alias (11 users). DCLF `Core/Runtime/KeptState.h` is a list of using
+  declarations (22 users). PublicationLog, Retirement and SlotTable had two users each: those include OMS, and their uses
+  are qualified.
+- **Tests.** `KeptStateTests.cpp` moved to OMS without the AdvancedSkin `OwnerValues` test, which is DCLF's. That one stays in
+  CS as `tests/DrawcallLimitFixCPU/OwnerValuesTests.cpp` (`DclfOwnerValuesTests`). A short multi-thread `Retired` test was
+  added. `ORGRetirementChainTests` needs ORG's headers (`ORG_ASYNC_TEST_ORG_INCLUDE`, the sibling submodule by default).
+- **Style.** The moved headers are reformatted to OMS's layout (4 spaces, attached braces). Member names keep their old
+  spelling, without OMS's `m_` prefix, so the move stays a move.

@@ -1081,7 +1081,7 @@ namespace DCLF::Draws
 	void MainBuild::RegionWrite(std::uint32_t i, const DrawInput& a_entry)
 	{
 		auto& r = *region;
-		if (reuseKeptStorage)
+		if (org::async::keptStorageOptions.reuseStorage)
 			r.inputs.Set(i, a_entry);
 		else {
 			r.inputs.Mutable()[i] = a_entry;
