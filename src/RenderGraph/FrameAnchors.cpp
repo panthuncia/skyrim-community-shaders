@@ -264,12 +264,18 @@ namespace FrameAnchors
 			friend bool operator==(const SegmentKey&, const SegmentKey&) = default;
 		};
 
+		/** @brief A segment key's cache hash: its fields only, so the same description for another slot or versions shares it. */
+		struct SegmentKeyHash
+		{
+			std::uint64_t operator()(const SegmentKey& a_key) const { return RenderGraph::Frame::FieldsHash(a_key.fields); }
+		};
+
 		/** @brief A segment's recordings for its last kKeep descriptions per slot, so a toggling field records nothing new.
 		*  A dropped one is asked for again at the next request. */
 		struct SegmentRecordings
 		{
 			static constexpr std::size_t kKeep = 6 * RenderGraphRuntime::kGameFramesInFlight;
-			using Cache = RenderGraph::Frame::EpochRecordings::Cache<SegmentKey, kKeep, RenderGraph::Frame::EpochRecordings::AfterDrop::AskAgain>;
+			using Cache = RenderGraph::Frame::EpochRecordings::Cache<SegmentKey, kKeep, RenderGraph::Frame::EpochRecordings::AfterDrop::AskAgain, SegmentKeyHash>;
 			Cache cache;
 			RenderGraph::Frame::SegmentFields last{};  // the last description's fields, to log why a new one differs
 			bool any = false;
@@ -2087,8 +2093,8 @@ namespace FrameAnchors
 				RenderGraph::Fatal("frame segments", fmt::format("{} was asked for named versions without a serial, or a serial without versions",
 					declaredInfo[a_declared].names.label));
 			auto& recordings = a_state.declaredRecordings[a_declared];
-			const auto hash = RenderGraph::Frame::FieldsHash(a_fields);
 			SegmentKey key{ a_slot, a_versions.serial, a_fields };
+			const auto hash = SegmentRecordings::Cache::HashOf(key);
 			// A recording of the versions current when it was made, which a frame revision replaced since, never runs again.
 			const auto replaced = [&](const SegmentRecordings::Cache::Status& a_status) {
 				return a_versions.serial == 0 && !a_state.host->EpochRecordingVersionsCurrent(*a_status.recordings.front(), a_slot);
@@ -2097,7 +2103,7 @@ namespace FrameAnchors
 				return fmt::format("the {} (graph build {}, clients on {:#x} of {}, pass revisions {:#x}, frame slot {})",
 					declaredInfo[a_declared].names.label, a_fields.graph, a_fields.clientsOn, a_fields.clients, a_fields.passes, a_slot);
 			};
-			if (auto kept = recordings.cache.Find(hash, key, a_frame, replaced, describe))
+			if (auto kept = recordings.cache.Find(key, a_frame, replaced, describe))
 				return kept;
 			std::string reason = recordings.any ? RenderGraph::Frame::DiffFields(recordings.last, a_fields) : std::string("the first description");
 			if (reason.empty()) {
@@ -2115,7 +2121,7 @@ namespace FrameAnchors
 			// The cache drops recordings of an older build, which keep its graph and alias pools alive, tens of MB each.
 			// The staged build's stay. It needs every slot ready to switch in, and alternating descriptions would starve it.
 			const auto epoch = EpochOfDeclared(a_declared);
-			auto entry = recordings.cache.Add({ a_state.host->BuildGeneration(epoch), a_state.host->StagedGeneration(epoch) }, hash, std::move(key), a_frame);
+			auto entry = recordings.cache.Add({ a_state.host->BuildGeneration(epoch), a_state.host->StagedGeneration(epoch) }, std::move(key), a_frame);
 			if (a_asked)
 				*a_asked = true;
 			Driver::NoteRecording(static_cast<SegmentId>(a_declared), a_frame, fmt::format("{}{}", reason, a_why));
@@ -2722,7 +2728,7 @@ namespace FrameAnchors
 				continue;
 			// A frame slot's schedule holds its own reference, so the recordings a frame runs on stay until it switches.
 			auto& recordings = state.declaredRecordings[d];
-			dropped += recordings.cache.EraseIf([&](const SegmentRecording& a_kept) { return a_kept.status.settled; });
+			dropped += recordings.cache.EraseIf([&](const SegmentRecording& a_kept) { return a_kept.LockedStatus().settled; });
 		}
 		if (dropped)
 			logger::info("[ORG] frame segments: dropped {} kept recordings of the stages that hold the {} anchor ({})", dropped, kInfo[index].name, a_why);
@@ -3225,7 +3231,8 @@ namespace FrameAnchors
 				state.schedule[declared] = next;
 				// The replaced build's recordings are never used again. Each keeps that build's graph and alias pools alive.
 				recordings.cache.EraseIf([&](const SegmentRecording& a_kept) {
-					return a_kept.status.Ready() && a_kept.status.recordings.front()->buildGeneration != member.staged;
+					const auto& status = a_kept.LockedStatus();
+					return status.Ready() && status.recordings.front()->buildGeneration != member.staged;
 				});
 				Driver::NoteSwitch(segment, a_frame, 0, a_frame - member.stagedSince, what);
 				Driver::NoteBuildSwitch(segment);
