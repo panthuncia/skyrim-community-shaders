@@ -42,6 +42,7 @@ namespace DCLF::Features::Water::Port
 		inline constexpr Engine::Offset kWaterEnabled{ { 391120 }, { 513342 } };        // bool 0x141e0e350: TESWaterSystem::Enable writes it
 		inline constexpr Engine::Offset kLocalMapPasses{ { 414746 }, { 527793 } };      // bool 0x1431d1d30: GetRenderPasses takes the local map's path
 		inline constexpr Engine::Offset kWaterLOD{ { 402322 }, { 516171 } };            // NiNode* 0x142f23e98: BGSTerrainManager's "WaterLOD" node
+		inline constexpr Engine::Offset kReflectionTimer{ { 390953 }, { 513213 } };     // float 0x142033080: SetupMaterial's ReflectionColor.w
 	}
 
 	// The engine's variable indices, as BSWaterShader writes them through the bound shader's constant table (VS at +0x50 + i,
@@ -165,7 +166,7 @@ namespace DCLF::Features::Water::Port
 		float proj00 = 0.0f, proj11 = 0.0f;
 		// BSShaderManager::State
 		float invFrameBufferRange = 0.0f;  // +0x9C: PosAdjust.w, and 1 / it is WaterParams.w
-		float timer = 0.0f;                // timerValues[0] (+0x20): ReflectionColor.w
+		float timer = 0.0f;                // Address::kReflectionTimer: ReflectionColor.w
 		bool interior = false;             // +0x44: the Interior descriptor bit
 		// The camera's planes (NiCamera +0x160 / +0x164)
 		float cameraNear = 0.0f, cameraFar = 0.0f;

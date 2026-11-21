@@ -67,7 +67,8 @@ namespace DCLF::Features::Water::Port
 		}
 		if (const auto* sm = globals::game::smState) {
 			f.invFrameBufferRange = sm->invFrameBufferRange;
-			f.timer = sm->timerValues[0];
+			// Its own global, not BSShaderManager::State's timerValues[0], which runs on a different clock.
+			f.timer = Read<float>(Address::kReflectionTimer);
 			f.interior = sm->interior;
 			const auto* sceneNode = sm->sceneGraph < 4 ? sm->shadowSceneNode[sm->sceneGraph] : nullptr;
 			if (const auto* fog = sceneNode ? sceneNode->GetRuntimeData().fogProperty.get() : nullptr) {
