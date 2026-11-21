@@ -1,0 +1,93 @@
+# river with every epoch's schedule written just before the first shot (graph-trace-<frame>/ in the run's log folder).
+# Riverwood's river at noon in clear weather: a shot down at the water (its reflection: the water reflection's cube faces) and one
+# along it, then exit. Compose it: guest+river, native-vulkan+river, native-d3d12+river.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 200
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "console"
+arg = "player.setpos x 19300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -45300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -80"
+
+[[steps]]
+at = "previous"
+frames = 8
+do = "console"
+arg = "player.setangle x 12"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 0"
+
+[[steps]]
+at = "previous"
+frames = 380
+do = "graph-trace"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "shot"
+arg = "river"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle z 90"
+
+[[steps]]
+at = "previous"
+frames = 290
+do = "shot"
+arg = "river-east"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["river", "river-east"]

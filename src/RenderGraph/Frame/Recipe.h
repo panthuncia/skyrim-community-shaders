@@ -94,4 +94,7 @@ namespace RenderGraph::Frame::Recipes
 	/** @brief At Renderer::Begin, rechecks and prints the recipe when an epoch runs a build not seen yet.
 	*  A read whose only producers come later in the frame is a mismatch. */
 	void Check(org::GraphHost& a_host);
+
+	/** @brief Asks the next Check to write every epoch's schedule (graph-trace-<frame>/epoch-<n>.txt in the log folder). Any thread. */
+	void RequestGraphTrace();
 }

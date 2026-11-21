@@ -485,6 +485,10 @@ withheld and drawn by nobody. Before reading parity or timing, check in each run
         `signal=<name>`) and `shaders` (Community Shaders' compile queue is empty: a run that compiles on demand, as
         `CS_DISABLE_FEATURES` makes one, has every shader in view built).
     -   `capture[=<seconds>]` takes a [diagnostic capture](#the-diagnostic-capture) at the next Present (no Explorer window, nothing on the clipboard).
+    -   `graph-trace` writes every attached epoch's schedule at the next frame (passes in order, their barriers with each
+        resource's state before and after, and cross-queue waits) to `<log directory>/graph-trace-<frame>/epoch-<n>.txt`, to see
+        which pass writes what another epoch reads. `CS_ORG_GRAPH_RESOURCES_FRAME=<n>` does the same at frame n.
+        `configs/river-trace.toml` takes one just before its first shot.
     -   `telemetry=<label>` starts a BasicTelemetry session for a phase, and `telemetry=off` ends the last. Each writes per-Present frame times, scope totals, off-CPU stalls and DCLF's zones by thread to `<log directory>/dclf-telemetry`, and a frame time summary and each thread's DCLF zone time to the log. DCLF's zones are `DCLF_ZONE` / `DCLF_ZONE_NAMED` (`Diagnostics/Zones.h`), which open a Tracy zone and, during a phase only, a BasicTelemetry scope and a per-thread tally, so they record in builds without Tracy too. Use them in place of `ZoneScopedN` / `ZoneNamedN` under the tree.
     -   `mark=<label>` marks a phase's boundary in the log; `org:gpu-window=<label>` makes the GPU event timers
         (`CS_GPU_EVENT_TIMERS`, with an interval too large to reach) log the frames from there to the next window as one block,

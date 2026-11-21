@@ -13,6 +13,7 @@
 #include "Globals.h"
 #include "Menu.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
+#include "RenderGraph/Frame/Recipe.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Vram/MemProbe.h"
@@ -918,6 +919,11 @@ namespace Testing
 			// "capture": [<seconds>], the menu's diagnostic capture. "telemetry": <label>|off, a BasicTelemetry session for this phase.
 			RegisterCommand("capture", [](const std::string& a_arg, std::string&) {
 				DCLF::Capture::Request(a_arg.empty() ? 10.0f : std::strtof(a_arg.c_str(), nullptr), true);
+				return true;
+			});
+			// "graph-trace": every epoch's schedule at the next frame, into graph-trace-<frame>/ in the log folder.
+			RegisterCommand("graph-trace", [](const std::string&, std::string&) {
+				RenderGraph::Frame::Recipes::RequestGraphTrace();
 				return true;
 			});
 			RegisterCommand("telemetry", [](const std::string& a_arg, std::string&) {

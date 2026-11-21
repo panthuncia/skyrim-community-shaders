@@ -16,6 +16,9 @@
 #include <Render/RenderGraph/ScheduleTrace.h>
 
 #include <algorithm>
+#include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <set>
@@ -335,12 +338,30 @@ namespace RenderGraph::Frame::Recipes
 		state.traces[a_epoch] = { a_generation, std::move(a_trace) };
 	}
 
-	/** @brief CS_ORG_GRAPH_RESOURCES_FRAME=<n> logs every attached epoch graph's resources at frame n, to match with a memory dump. */
+	/**
+	 * @brief CS_ORG_GRAPH_RESOURCES_FRAME=<n> logs every attached epoch graph's resources at frame n, to match with a memory dump.
+	 * It also writes each epoch's whole schedule (passes in order, their accesses, barriers and waits) to
+	 * graph-trace-<n>/epoch-<epoch>.txt in the log folder, to see which pass writes what another epoch reads.
+	 */
+	static std::atomic_bool graphTraceRequested{ false };
+
+	void RequestGraphTrace() { graphTraceRequested.store(true, std::memory_order_relaxed); }
+
 	static void LogGraphResources(org::GraphHost& a_host)
 	{
 		static const auto at = Switches::Number("CS_ORG_GRAPH_RESOURCES_FRAME", 0);
-		if (!at || RenderGraph::FrameClock::BeginFrame() != at)
+		const auto frame = RenderGraph::FrameClock::BeginFrame();
+		const bool requested = graphTraceRequested.exchange(false, std::memory_order_relaxed);
+		if (!requested && (!at || frame != at))
 			return;
+		std::filesystem::path traceDir;
+		if (const auto logDir = logger::log_directory()) {
+			traceDir = *logDir / fmt::format("graph-trace-{}", frame);
+			std::error_code error;
+			std::filesystem::create_directories(traceDir, error);
+			if (error)
+				traceDir.clear();
+		}
 		for (std::size_t i = 0; i < a_host.GraphCount(); ++i) {
 			auto* graph = a_host.GraphAt(i);
 			const auto epoch = a_host.EpochAt(i);
@@ -357,6 +378,10 @@ namespace RenderGraph::Frame::Recipes
 				text += fmt::format("{}{}", text.empty() ? "" : ", ", name);
 			logger::info("[ORG] graph resources: epoch {} build {} ({} passes, {} resources): {}", epoch, a_host.BuildGeneration(epoch), trace->passes.size(), names.size(),
 				text);
+			if (!traceDir.empty()) {
+				std::ofstream file(traceDir / fmt::format("epoch-{}.txt", epoch), std::ios::binary);
+				file << org::ScheduleTraceToText(*trace);
+			}
 		}
 	}
 
