@@ -88,6 +88,17 @@ namespace RenderGraph::Engine::Native
 			return rhi::QueryNativeResource(a_resource, rhi::RHI_IID_D3D12_RESOURCE, &info, sizeof(info)) ? info.resource : nullptr;
 		}
 
+		/** @brief A D3D12 buffer's resource and where the buffer starts in it: a small buffer may be a range of a shared resource. */
+		void* D3D12BufferRangeOf(const rhi::Resource& a_buffer, uint64_t& a_offset)
+		{
+			rhi::D3D12BufferRangeInfo info{};
+			a_offset = 0;
+			if (!rhi::QueryNativeResource(a_buffer, rhi::RHI_IID_D3D12_BUFFER_RANGE, &info, sizeof(info)))
+				return nullptr;
+			a_offset = info.offset;
+			return info.resource;
+		}
+
 		/** @brief A D3D12 buffer's GPU virtual address. 0 for a texture or off D3D12. */
 		uint64_t D3D12AddressOf(void* a_resource)
 		{
@@ -388,6 +399,7 @@ namespace RenderGraph::Engine::Native
 			rhi::ResourcePtr resource;
 			std::string name;
 			VkBuffer vkBuffer = VK_NULL_HANDLE;
+			VkDeviceSize offset = 0;  // where the buffer starts in vkBuffer (a packed D3D12 buffer shares its resource)
 			VkDeviceAddress address = 0;  // 0 when the buffer has none
 			VkBufferUsageFlags usage = 0;
 			uint64_t size = 0;
@@ -1400,11 +1412,14 @@ namespace RenderGraph::Engine::Native
 			static bool DescribeBuffer(NativeResource& a_record, const rhi::Resource& a_buffer)
 			{
 				if (OnD3D12()) {
-					void* resource = D3D12ResourceOf(a_buffer);
+					uint64_t offset = 0;
+					void* resource = D3D12BufferRangeOf(a_buffer, offset);
 					if (!resource)
 						return false;
 					a_record.vkBuffer = reinterpret_cast<VkBuffer>(resource);
-					a_record.address = static_cast<VkDeviceAddress>(g_device ? g_device->Rhi().GetBufferDeviceAddress({ a_buffer.GetHandle(), 0 }) : D3D12AddressOf(resource));
+					a_record.offset = offset;
+					a_record.address =
+						static_cast<VkDeviceAddress>(g_device ? g_device->Rhi().GetBufferDeviceAddress({ a_buffer.GetHandle(), 0 }) : D3D12AddressOf(resource) + offset);
 					a_record.usage = 0;
 					return true;
 				}
@@ -1412,6 +1427,7 @@ namespace RenderGraph::Engine::Native
 				if (!rhi::vulkan::get_resource_info(a_buffer, info) || !info.resource)
 					return false;
 				a_record.vkBuffer = rhi::vulkan::from_native_void<VkBuffer>(info.resource);
+				a_record.offset = 0;
 				a_record.address = static_cast<VkDeviceAddress>(info.deviceAddress);
 				a_record.usage = static_cast<VkBufferUsageFlags>(info.usage);
 				return true;
@@ -4360,7 +4376,7 @@ namespace RenderGraph::Engine::Native
 			// From now on a CPU access waits for the graph's work.
 			record->graphShared.store(true, std::memory_order_release);
 			a_info.kind = DXVK_ORG_INTEROP_RESOURCE_BUFFER;
-			a_info.buffer = { record->vkBuffer, 0, record->size, record->address, record->usage };
+			a_info.buffer = { record->vkBuffer, record->offset, record->size, record->address, record->usage };
 			return true;
 		}
 		if (record->kind != NativeResource::Kind::Image)
