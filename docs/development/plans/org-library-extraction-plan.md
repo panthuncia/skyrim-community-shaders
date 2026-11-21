@@ -166,6 +166,8 @@ Not part of this plan unless a phase touches them:
 
 | 3 Programs and GPU primitives | in progress | `org-native/extract-p3-latched` (ORG `extract/p3-latched`) | Pipeline-stack decision, frame staging and readback already done. Items 3–6 can start beside phases 1–2. Items 7 and 8 (p3-latched): ORG `Render/LatchedCopies.h` (types, copy joining, `RecordLatchedCopies`) and `RenderPasses/LatchedCopiesPass.h` (`MakeLatchedCopiesPass`); `IDescriptorService::Null(owner, NullViewKind)` over `NullSrvDesc` (`Render/Runtime/NullViews.h`). DCLF's `Latched.h` is aliases, its pass factory a wrapper, `GpuTextures` null indices use `Null`. ORG test `OpenRenderGraphLatchedCopiesTests`. |
 | 4 Build and upload services | not started | | Needs phase 2's executor. |
+
+| 4 Build and upload services | in progress | p4-misc: CS `org-native/extract-p4-misc`, ORG and OMS `extract/p4-misc` | Needs phase 2's executor. p4-misc (code only, not built): scene graph helpers are OMS `Async/VersionedBufferPosts.h` (`PostVersionedBuffer`) and `Async/WindowGates.h` (texture windows and gates), `SceneArtifact` stays; indirect run coalescing is OMS `Passes/IndirectRuns.h` (`IndirectRunCounts`, `IndirectRunWriter` on the bucket binder, `RecordIndirectRuns`, `OrderBySlabs`), DCLF keeps `IndirectDraw` and the push words; the recipe read-order check is ORG `Render/RenderGraph/ReadOrderCheck.h` (`CheckReadOrder`), CS formats the findings; shader bindings are ORG `Render/ShaderBindings.h` and OMS `shaders/OrgResources.hlsli`, CS keeps forwarding files at the old paths. Tests: ORG `OpenRenderGraphReadOrderCheckTests`, OMS `ORGIndirectRunsTests`. |
 | 5 Coordinators | waiting | | Only once a second user exists. |
 
 ### Checks that need a run
@@ -721,3 +723,31 @@ Decided by the agent, to confirm:
 - DCLF's `NullOf` keeps its D3D11 1x1 views for array, cube and 3D slots. Swapping them for per-dimension null
   descriptors would change what the engine's draws read (a D3D11 view through the import, not a null descriptor), so it
   is left for a separate change.
+
+### p4-misc decisions
+
+Decided by the agent, to confirm:
+
+- Scene graph helpers are two OMS headers in the style of `VersionGrowthArtifact.h`: `VersionedBufferPosts` +
+  `PostVersionedBuffer` (org::services, beside `RegisterVersionedBufferProducer`; it expects no `wrap` hook) and
+  `WindowGates` (org::async: `RegisterWindows`, `RegisterGates`, `PostWindow`, `RetireWindow`, `PostGate`). The gate
+  producer captures the `WindowGates` object, as DCLF's captured its gate list, so the graph must shut down first.
+  `SceneGraph` keeps its API and member order.
+- `IndirectRun` moved to OMS with `vertexLayout` renamed `tag` (a host word bound with the pipeline). `IndirectDraw`, the
+  push words and `PulledBucketPipeline` stay in DCLF. `RecordIndirectRuns` is templated on the list type so the test can
+  use a fake list; DCLF copies its counters into an `IndirectRunState` and back. After the runs DCLF sets
+  `boundVertexLayout` to the last run's tag, which is what the old loop left.
+- The read-order check returns structured findings (`ReadOrderFinding`) and counts; CS formats the same messages as
+  before, so the log text is unchanged. The owner tests became two predicates: `requiresLocalWriter` (CS stages) and
+  `allowsLaterWriter` (fragment sources' stages). Positions are the recipe's stage indices.
+- ORG's `Render/ShaderBindings.h` (`org::shader_bindings`) takes the push block helpers, `Latch`/`LatchOf`, and
+  `SamplerPreset`/`SamplerDescOf`. CS keeps `CreateSampler`, `SamplerFromD3D11`, the shared preset cache and
+  `CreateShaderResourceView`, since they go through CS's runtime and D3D11 types. `RenderGraph/ShaderBindings.h` is a
+  forwarding header (about 100 users).
+- OMS `shaders/OrgResources.hlsli` keys on `ORG_BINDLESS` and has no SHARED kind. CS's `Common/OrgResources.hlsli`
+  (included by about 160 shaders, many FXC ones shared with D3D11) defines `ORG_BINDLESS` under `CS_ORG_BINDLESS`,
+  includes `ORGModuleServices/OrgResources.hlsli`, and adds SHARED as a host kind. The FXC token stream is unchanged; this
+  needs the DXBC comparison below. A host kind is added by defining `ORG_HANDLE_<kind>` and `ORG_RESOURCE_<kind>`.
+- p4-misc check that needs a run: FXC output of the D3D11 shaders that include `Common/OrgResources.hlsli` is identical
+  (`tools/verify-shader-refactor.ps1` on Lighting.hlsl, ISHDR.hlsl, Effect.hlsl), and `tools/check-dual-target-shaders.py`
+  passes; both need `package/Shaders/ORGModuleServices` staged by a configure first.

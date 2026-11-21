@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 
+#include <ORGModuleServices/Passes/IndirectRuns.h>
 #include <rhi.h>
 
 #include <array>
@@ -49,15 +50,6 @@ namespace DCLF::Direct
 		std::uint32_t objectWord;  // with its per-frame bits
 	};
 	static_assert(sizeof(IndirectDraw) == 32 && offsetof(IndirectDraw, indexCount) == 4 && offsetof(IndirectDraw, sequence) == 24);  // must match DCLFDrawSequence
-
-	/** @brief Consecutive draws with one pipeline, recorded as one indirect draw. */
-	struct IndirectRun
-	{
-		rhi::PipelineHandle pipeline{};
-		std::uint64_t vertexLayout = 0;  // a shadow pipeline's, pushed with it
-		std::uint32_t first = 0;
-		std::uint32_t count = 0;
-	};
 
 	/** @brief A frame slot's draw buffer as its recordings read it. */
 	struct IndirectBuffer
