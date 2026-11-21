@@ -233,9 +233,11 @@ namespace DCLF::Features::LocalLights
 			org::VersionedBuffer& a_buffer, std::uint32_t& a_descriptor)
 		{
 			const auto capacity = std::bit_ceil(std::max<std::uint64_t>(64, a_words.size()));
-			auto lease = std::make_shared<org::services::BackingLease>(a_scene.pool->Acquire({ .capacityClass = capacity, .stride = 4, .name = a_name }));
+			org::services::BackingPool::AcquireInfo acquired;
+			auto lease = std::make_shared<org::services::BackingLease>(
+				a_scene.pool->Acquire({ .capacityClass = capacity, .stride = 4, .name = a_name }, org::services::BackingPool::kAnyEpoch, &acquired));
 			if (!*lease)
-				throw std::runtime_error("allocation failed");
+				throw std::runtime_error("allocation failed: " + acquired.error);
 			if (!(*lease)->srvIndex)
 				throw std::runtime_error("missing GPU descriptor");
 			a_descriptor = (*lease)->srvIndex;

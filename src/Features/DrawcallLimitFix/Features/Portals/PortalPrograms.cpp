@@ -150,10 +150,12 @@ namespace DCLF::Features::Portals
 				return a_scene.current;
 			auto publication = std::make_shared<Publication>();
 			publication->words = encoded;
+			org::services::BackingPool::AcquireInfo acquired;
 			auto lease = std::make_shared<org::services::BackingLease>(a_scene.pool->Acquire(
-				{ .capacityClass = std::bit_ceil(std::max<std::uint64_t>(64, encoded.size())), .stride = 4, .name = "cs.dclf.portal-programs.encoding" }));
+				{ .capacityClass = std::bit_ceil(std::max<std::uint64_t>(64, encoded.size())), .stride = 4, .name = "cs.dclf.portal-programs.encoding" },
+				org::services::BackingPool::kAnyEpoch, &acquired));
 			if (!*lease)
-				throw std::runtime_error("allocation failed");
+				throw std::runtime_error("allocation failed: " + acquired.error);
 			publication->descriptor = (*lease)->srvIndex;
 			if (!publication->descriptor)
 				throw std::runtime_error("missing GPU descriptor");
