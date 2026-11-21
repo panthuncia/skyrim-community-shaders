@@ -15,7 +15,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 
 #include "RenderGraph/ComputeProgram.h"
-#include "RenderGraph/PrefixSum.h"
+#include <ORGModuleServices/Passes/PrefixSumPass.h>
+#include <ORGModuleServices/Passes/SortScatter.h>
 #include <Render/LatchBlock.h>
 #include <Render/RenderGraph/RenderGraph.h>
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
@@ -126,18 +127,9 @@ namespace DCLF::Draws
 		bool operator==(const TablesContentEpochs&) const = default;
 	};
 
-	struct SortSequencesConstants
-	{
-		std::uint32_t stagingIndex;
-		std::uint32_t ranksIndex;
-		std::uint32_t offsetsIndex;
-		std::uint32_t countIndex;
-		std::uint32_t sequencesIndex;
-		std::uint32_t sequenceStride;  // bytes
-		std::uint32_t drawLimit;
-		std::uint32_t padding;
-	};
-	constexpr std::uint32_t kSortSequencesConstantWords = sizeof(SortSequencesConstants) / 4;
+	// OMS's counting-sort scatter (SortScatter.hlsl) over the colour sequences.
+	using SortSequencesConstants = org::services::SortScatterConstants;
+	constexpr std::uint32_t kSortSequencesConstantWords = org::services::kSortScatterConstantWords;
 	/**
 	 * @brief ForwardSortCS.hlsl's push constants. BuildDraws appends visible forward draws to the staging half with their view
 	 * depth in firstInstance, and the sort writes the sorted half the forward epoch draws.
@@ -169,35 +161,36 @@ namespace DCLF::Draws
 	{
 		return ForwardStagingSlot(a_frame) + 2ull * a_frame.forwardCapacity;
 	}
-	constexpr std::uint32_t kSortSequencesGroup = 64;  // must match SortSequencesCS.hlsl
+	constexpr std::uint32_t kSortSequencesGroup = org::services::kSortScatterGroupSize;
 	// The rank word holds the sort key in its top 12 bits and the rank below. A draw range past this is a hard failure
-	// until ranks get a word of their own.
-	constexpr std::uint32_t kSortRankLimit = 1u << 20;
+	// until ranks get a word of their own. BuildDrawsCS's kSortRankBits.
+	constexpr std::uint32_t kSortRankBits = 20;
+	constexpr std::uint32_t kSortRankLimit = 1u << kSortRankBits;
 	static_assert(DrawPipelines::kMaxPipelines <= (1u << 12));
 
 	/**
-	 * @brief Sorts the colour segment's sequences by pipeline. BuildDraws counts per sort key, PrefixSum turns counts into first
+	 * @brief Sorts the colour segment's sequences by pipeline. BuildDraws counts per sort key, OMS's prefix sum turns counts into first
 	 * slots, and SortSequencesPass writes each class's sequences grouped by pipeline. Shadow views are not sorted because it gained nothing.
 	 */
 	struct DrawSort
 	{
 		std::shared_ptr<org::Buffer> counts, offsets, blockSums;
 		Versioned staging, ranks;
-		std::shared_ptr<const PrefixSum::Programs> prefixSum;
+		std::shared_ptr<const org::services::PrefixSumPrograms> prefixSum;
 		std::shared_ptr<const ComputeProgram> scatter;
 		bool countsZeroed = false;  // render thread
 
 		static constexpr std::uint32_t kKeys = DrawPipelines::kMaxPipelines;
 
 		/** @brief With the programs queued at setup (SetupPrograms). Staging and ranks are sized for a_draws. */
-		static std::shared_ptr<DrawSort> Create(std::shared_ptr<const PrefixSum::Programs> a_prefixSum, std::shared_ptr<const ComputeProgram> a_scatter, std::uint32_t a_draws)
+		static std::shared_ptr<DrawSort> Create(std::shared_ptr<const org::services::PrefixSumPrograms> a_prefixSum, std::shared_ptr<const ComputeProgram> a_scatter, std::uint32_t a_draws)
 		{
 			auto sort = std::make_shared<DrawSort>();
 			sort->prefixSum = std::move(a_prefixSum);
 			sort->scatter = std::move(a_scatter);
 			sort->counts = CreateWords(kKeys, true, "cs.dclf.sort-counts");
 			sort->offsets = CreateWords(kKeys, true, "cs.dclf.sort-offsets");
-			sort->blockSums = CreateWords(PrefixSum::Blocks(kKeys), true, "cs.dclf.sort-block-sums");
+			sort->blockSums = CreateWords(org::services::PrefixSumBlocks(kKeys), true, "cs.dclf.sort-block-sums");
 			// Sized exactly, since the main layout already grows by doubling.
 			sort->staging = MakeVersioned(CreateWords(std::uint64_t(a_draws) * sizeof(DrawSequence) / 4, true, "cs.dclf.sort-staging"),
 				{ .extent = { 0, sizeof(DrawSequence), 4 }, .policy = org::services::GrowthPolicy::Headroom(0) });
@@ -218,7 +211,7 @@ namespace DCLF::Draws
 		 */
 		std::shared_ptr<org::RenderPass> ScanPass(std::function<bool(const org::PassPrepareContext&)> a_active = {}) const
 		{
-			PrefixSum::Desc scan{};
+			org::services::PrefixSumDesc scan{};
 			scan.programs = prefixSum;
 			scan.counts = counts;
 			scan.offsets = offsets;
@@ -226,7 +219,7 @@ namespace DCLF::Draws
 			scan.elements = kKeys;
 			scan.clearCounts = true;
 			scan.active = std::move(a_active);
-			return PrefixSum::CreatePass(std::move(scan));
+			return org::services::MakePrefixSumPass(std::move(scan));
 		}
 
 		template <class Uploads>

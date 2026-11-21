@@ -6,7 +6,7 @@
 // Phase 2 retests each entry against the rebuilt HZB and appends survivors after phase 1's. The colour pass draws both phases'.
 // The depth commit zeroes the counts.
 #include "DrawcallLimitFix/CullEye.hlsli"
-#include "DrawcallLimitFix/HzbTest.hlsli"
+#include "ORGModuleServices/HzbTest.hlsli"
 
 // Must match TreeLodCullConstants in TreeLodTables.h.
 cbuffer TreeLodCullConstants : register(b0)
