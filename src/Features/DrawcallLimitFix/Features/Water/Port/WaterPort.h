@@ -35,6 +35,7 @@ namespace DCLF::Features::Water::Port
 		inline constexpr Engine::Offset kSsrBlur{ { 391669 }, { 513717 } };             // float 0x141e103c8: SSRParams.y
 		inline constexpr Engine::Offset kSsrPerturbation{ { 391672 }, { 513719 } };     // float 0x141e103e0: SSRParams2.x
 		inline constexpr Engine::Offset kDefaultLightColor{ { 388604 }, { 512012 } };   // float[4] 0x141e06460: LightColor of a light that does not affect water
+		inline constexpr Engine::Offset kFlowmapSource{ { 414616 }, { 527694 } };     // NiPointer<NiSourceTexture>: SetupGeometry binds its view at t8
 		inline constexpr Engine::Offset kFlowmapSize{ { 414596 }, { 527644 } };         // std::int32_t 0x1431d0e10 (Unified Water's gFlowMapSize)
 		inline constexpr Engine::Offset kMeshFlowCellOffset{ { 415109 }, { 528164 } };  // float[2] 0x143233630 (Unified Water's gDisplacementMeshFlowCellOffset)
 		inline constexpr Engine::Offset kDisplacementOffset{ { 415129 }, { 528184 } };  // float[4] 0x143233680 (Unified Water's gDisplacementCellTexCoordOffset)

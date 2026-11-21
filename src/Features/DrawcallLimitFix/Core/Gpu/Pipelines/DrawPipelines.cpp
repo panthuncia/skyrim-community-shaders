@@ -719,10 +719,10 @@ namespace DCLF
 					logger::warn("[DCLF] deferred range state (blend [{}][{}][{}][{}], depth {}, stencil {}) cannot be built: {}; its keys stay native", wanted.blendMode,
 						wanted.alphaToCoverage, wanted.writeMode, wanted.blendExtra, wanted.depthMode, wanted.stencilMode, error);
 				else if (state.valid)
-					logger::info("[DCLF] deferred range state (blend [{}][{}][{}][{}], depth {}, stencil {}): rt0 mask {:X}, rt1 mask {:X}, depth test {} write {}, stencil {}",
+					logger::info("[DCLF] deferred range state (blend [{}][{}][{}][{}], depth {}, stencil {}): rt0 mask {:X}, rt1 mask {:X}, depth test {} write {} func {}, stencil {}",
 						wanted.blendMode, wanted.alphaToCoverage, wanted.writeMode, wanted.blendExtra, wanted.depthMode, wanted.stencilMode,
 						static_cast<unsigned>(state.blend.attachments[0].writeMask), static_cast<unsigned>(state.blend.attachments[1].writeMask), state.depthStencil.depthEnable,
-						state.depthStencil.depthWrite, state.depthStencil.stencilEnable ? "on" : "off");
+						state.depthStencil.depthWrite, magic_enum::enum_name(state.depthStencil.depthFunc), state.depthStencil.stencilEnable ? "on" : "off");
 				deferredEngineStates.emplace(packed, state);
 				changed = true;
 			}

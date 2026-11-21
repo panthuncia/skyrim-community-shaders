@@ -577,9 +577,16 @@ Written with the epochs' code (branch `dclf/water-epochs`, 2026-11-21). Nothing 
   kRAW_WATER directly showed DCLF's shaded water and its mask term read exactly 0 (not NaN, not negative) with a constant mask
   output. The epoch report then gave the mask's 0 reached frames. `graph-trace` (a cs-test command, configs/river-trace.toml)
   writes every epoch's schedule; it confirmed the targets and order were right.
-- **Left (river, river-east, native Vulkan, also with `CS_DCLF_CULL=frustum`):**
-  - Tile-shaped regions differ from the latch path: some water tiles show no water, others show dark patches with smeared,
-    stretched reflections (ISWaterBlend reading kRAW_WATER or history where mask and surface disagree). Not culling.
-  - DCLF's surface draws over the dock posts' bottoms, where the latch path's is hidden. Check the depth-stencil state the
-    water epochs run with (the mask writes depth, mode 3; the surface tests stencil mode 30).
-  - The ripples are finer and flatter than the latch path's (normals or flow map inputs; compare with the parity observer).
+- **Fixed later the same day:**
+  - **Bands and smears.** Per-object probe colours showed the mask covering whole tiles and the surface only parts of them.
+    With the surface's depth test off it covered them. The engine's mask writes depth (mode 3) and its surface tests it
+    LESS_EQUAL (mode 1), which needs both passes at the same depth. DCLF's two pipelines land one or two depth steps apart
+    (a 1e-7 SV_Depth pull fixed it). `precise` arithmetic, an invariant SV_Position and no TAA jitter did not; the
+    source of the gap is not known. So the mask now only tests (1) and the surface tests and writes (3): kMAIN's depth
+    after the surface holds the nearest water as before, and no pass between the two epochs reads it (graph trace).
+  - **The waves.** SetupGeometry binds the flow map source texture's view at t8 for a Flowmap draw (AE 0x1414e2957,
+    `gFlowMapSourceTex` 527694 / 414616), which Unified Water makes its world flow map. DCLF read the ImageSpace port's
+    map (`kFlowMapId`) there, so the waves came out small. t8 now resolves the source's view.
+  - The dock posts' bottoms were covered while the mask block was skipped; they are right since.
+- **Left:** a parity run of claimed water against the latch path on more scenes (rain, interiors, underwater stays the
+  latch path's), and phases 4 and 5.
