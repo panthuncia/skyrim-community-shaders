@@ -395,16 +395,6 @@
 			"description": "1: effect meshes with a skin instance whose pass has no Skinned bit (the property without kSkinned: dog eyes) drawn by DCLF, each partition with the unskinned vertex stage and the geometry's world, as the engine draws them; 0 (default) they stay native (effect-variant (skinned))"
 		},
 		{
-			"name": "CS_DCLF_WATER",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "0 (default): nothing of it is registered; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2: as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the latch path's (phases 2 and 3)"
-		},
-		{
 			"name": "CS_DCLF_EMPTY_FADE_NODE",
 			"key": "",
 			"type": "bool",
@@ -495,16 +485,6 @@
 			"description": "1: nothing is withheld from the engine, which draws everything while DCLF draws its set as well (capture parity compares the two; it double-draws)"
 		},
 		{
-			"name": "CS_DCLF_WATER_PARITY",
-			"key": "",
-			"type": "bool",
-			"default": "0",
-			"choices": [],
-			"kind": "parity",
-			"family": "dclf",
-			"description": "1: every water draw the latch path takes is checked against the water port (VS and PS b0-b2 bit for bit, its pass id), and a census logs where drawn water hangs in the scene graph (dclf-water-indirect.md, Phase 0)"
-		},
-		{
 			"name": "CS_DCLF_PASS_STATS",
 			"key": "dclf.pass_stats",
 			"type": "bool",
@@ -583,6 +563,16 @@
 			"kind": "diagnostic",
 			"family": "dclf",
 			"description": "1: scene-phase timings in the report"
+		},
+		{
+			"name": "CS_DCLF_PROGRAM_MANIFEST",
+			"key": "",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "0: the engine draw families queue none of the program manifest's keys at setup, so each program builds at its first draw, as on a cold shader store's first run (the manifest is still read and saved)"
 		},
 		{
 			"name": "CS_DCLF_RELEASE_GUARD",
@@ -803,6 +793,26 @@
 			"kind": "diagnostic",
 			"family": "dclf",
 			"description": "1: DCLF's tree LOD colour draws write solid magenta, so screen captures find its pixels"
+		},
+		{
+			"name": "CS_DCLF_WATER",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: nothing of it is registered, and the latch path draws all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the latch path's (phases 2 and 3)"
+		},
+		{
+			"name": "CS_DCLF_WATER_PARITY",
+			"key": "",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "parity",
+			"family": "dclf",
+			"description": "1: every water draw the latch path takes is checked against the water port (VS and PS b0-b2 bit for bit, its pass id), and a census logs where drawn water hangs in the scene graph (dclf-water-indirect.md, Phase 0)"
 		},
 		{
 			"name": "CS_DISABLE_FEATURES",
@@ -1163,6 +1173,16 @@
 			"kind": "other",
 			"family": "org",
 			"description": ""
+		},
+		{
+			"name": "CS_ORG_D3D12_INSTANCE_WORD",
+			"key": "org.d3d12_instance_word",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "1: D3D12 DCLF draws pass the first instance in a root constant per draw, as before Shader Model 6.8's SV_StartInstanceLocation"
 		},
 		{
 			"name": "CS_ORG_D3D12_SDK",
