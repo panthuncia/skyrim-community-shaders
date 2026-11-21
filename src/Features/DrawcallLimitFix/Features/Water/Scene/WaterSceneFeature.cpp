@@ -21,7 +21,8 @@ namespace DCLF::Features::Water::WaterScene
 {
 	namespace
 	{
-		bool on = false;  // written once at install
+		bool on = false;      // written once at install
+		bool claims = false;  // the same
 
 		// The render thread's last listing. Keys only: the census compares them, never dereferences them.
 		std::atomic<const void*> listedWaterLod{ nullptr };
@@ -49,13 +50,16 @@ namespace DCLF::Features::Water::WaterScene
 	}
 
 	bool On() { return on; }
+	bool Claims() { return claims; }
 
 	void Install(Api::InstallContext& a_context)
 	{
 		const auto id = a_context.RegisterSwitch({ .name = "CS_DCLF_WATER", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never,
-			.description = "1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 0 (default) nothing of it is registered",
+			.description = "0 (default): nothing of it is registered; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2: as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the latch path's (phases 2 and 3)",
 			.after = "CS_DCLF_EFFECT_RIGID_SKINS" });
-		on = SwitchEnabled(id);
+		const auto& value = SwitchValue(id);
+		claims = value == "2";
+		on = claims || value == "1";
 		if (!on)
 			return;
 		a_context.RegisterObjectClass({ .objectClass = Api::ObjectClass::Water, .categoryRoots = &GatherRoots });
@@ -63,6 +67,7 @@ namespace DCLF::Features::Water::WaterScene
 		RegisterPort(a_context);
 		RegisterCensus(a_context);
 		RegisterRows(a_context);
-		logger::info("[DCLF] water scene: on (CS_DCLF_WATER=1): water is tracked and classified, not claimed");
+		logger::info("[DCLF] water scene: on (CS_DCLF_WATER={}): water is tracked and classified{}", value,
+			claims ? ", and plain water is claimed while DCLF's water epochs draw it" : ", not claimed");
 	}
 }
