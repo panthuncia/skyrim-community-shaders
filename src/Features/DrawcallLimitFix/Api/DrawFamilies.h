@@ -47,7 +47,8 @@ namespace DCLF::Api
 		// SV_InstanceID counts from the first instance only on Vulkan, so stages that read it must not use a first instance.
 		DrawInstanced,
 		// The same arguments after a word holding the first instance, 20 bytes per draw.
-		// D3D12's SV_InstanceID ignores the first instance, so there the word goes to kDrawPushInstance for the stage to add.
+		// D3D12's SV_InstanceID ignores the first instance. Below Shader Model 6.8 the word goes to kDrawPushInstance for the stage to
+		// add. With 6.8 the stage adds SV_StartInstanceLocation (DCLF_START_INSTANCE_INPUT), and the draw starts past the word, as on Vulkan.
 		InstanceWordDrawInstanced,
 	};
 

@@ -259,7 +259,7 @@ namespace DCLF
 			const auto* built = static_cast<const DrawPipelines::Impl::FamilyBuilt*>(a_catalog->families[f].pipelines.get());
 			const bool instanceWord = Extensions::DrawFamilyOf(a_family).contribution.program.signature == Api::DrawFamilySignature::InstanceWordDrawInstanced;
 			a_out = FamilyPipelines{ built->depth->GetHandle(), built->colours[0]->GetHandle(), built->colours[1] ? built->colours[1]->GetHandle() : rhi::PipelineHandle{},
-				signature->GetHandle(), instanceWord && !impl.d3d12 ? 4u : 0u };
+				signature->GetHandle(), instanceWord && !impl.instanceWord ? 4u : 0u };
 			return true;
 		}
 	};

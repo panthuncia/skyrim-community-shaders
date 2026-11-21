@@ -36,7 +36,8 @@ namespace DCLF::Direct
 
 	/**
 	 * @brief One draw in a frame slot's draw buffer, also the stride of an indirect run. D3D12's SV_InstanceID does not count
-	 * the first instance, so D3D12's signature writes the instance word into kDrawPushInstance first. Vulkan reads the arguments alone.
+	 * the first instance, so below Shader Model 6.8 D3D12's signature writes the instance word into kDrawPushInstance first.
+	 * Vulkan, and D3D12 with 6.8 (SV_StartInstanceLocation), read the arguments alone.
 	 */
 	struct IndirectDraw
 	{
@@ -54,10 +55,10 @@ namespace DCLF::Direct
 	/** @brief A frame slot's draw buffer as its recordings read it. */
 	struct IndirectBuffer
 	{
-		rhi::CommandSignatureHandle signature{};  // Vulkan's, one for every layout
-		// D3D12's, made per bound layout because it names a root signature. Null on Vulkan.
+		rhi::CommandSignatureHandle signature{};  // the plain one, for every layout
+		// The instance word signature (D3D12 below Shader Model 6.8), made per bound layout because it names a root signature. Else null.
 		rhi::CommandSignatureHandle (*signatureFor)(rhi::PipelineLayoutHandle a_layout) = nullptr;
-		std::uint64_t argumentsOffset = 0;  // Vulkan starts past the instance word
+		std::uint64_t argumentsOffset = 0;  // the plain signature starts past the instance word
 		rhi::ResourceHandle buffer{};
 		RenderGraph::BufferRef ref;  // the draws' buffer view ref, which the pulled stages read their records through
 		// Draws past capacity are not written. Those batches draw directly, and the slot's next frame gets a larger buffer.

@@ -596,8 +596,9 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 
 // The draw's lookups (its sequence, rows, object, geometry) keyed on a wave-uniform instance: each pass of the loop takes the first
 // active lane's draw and the lanes of that draw, so the loads are the draw's, not each lane's (one pass unless a wave mixes draws).
-VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
+VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID DCLF_START_INSTANCE_INPUT)
 {
+	DCLF_ADD_START_INSTANCE(a_instance);
 	VS_OUTPUT vsout;
 	[loop] for (;;) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);
@@ -737,8 +738,9 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 }
 
 // Keyed on a wave-uniform instance, as the shadow views' main is.
-VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
+VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID DCLF_START_INSTANCE_INPUT)
 {
+	DCLF_ADD_START_INSTANCE(a_instance);
 	VS_OUTPUT vsout;
 	[loop] for (;;) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);
