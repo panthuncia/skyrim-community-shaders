@@ -110,7 +110,7 @@ namespace DCLF::Draws
 			}
 			for (const auto& change : s.cursor.Unread(a_tables.changeLog)) {
 				// Each event reads the final table row, not an intermediate value.
-				if (!(change.causes & kObjectRecordCauses) || change.slot >= count || (reuseKeptStorage && !s.changedObjects.Add(change.slot)))
+				if (!(change.causes & kObjectRecordCauses) || change.slot >= count || (org::async::keptStorageOptions.reuseStorage && !s.changedObjects.Add(change.slot)))
 					continue;
 				BuildObjectRecord(a_tables, change.slot, GeometryPort::kMainPassRenderFlags, fresh);
 				s.rewritten += s.records.Set(change.slot, fresh) ? 1u : 0u;

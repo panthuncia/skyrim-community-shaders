@@ -14,8 +14,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "RenderGraph/Async/EventQueue.h"
 #include "RenderGraph/Async/LatestSlot.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/PublicationLog.h"
-#include "Features/DrawcallLimitFix/Core/Runtime/Retirement.h"
+#include <ORGModuleServices/Async/PublicationLog.h>
+#include <ORGModuleServices/RetirementChain.h>
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneEvents.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
@@ -26,6 +26,9 @@
 namespace DCLF
 {
 	struct FrameGlobals;
+	/** @brief OMS's Retired over a queue that lives as long as the process, like the engine event queues (RenderGraph/Async/EventQueue.h). */
+	template <class T>
+	using Retired = org::services::Retired<T, org::runtime::QueueTeardown::Leak>;
 }
 
 namespace DCLF::Scene
@@ -168,7 +171,7 @@ namespace DCLF::Scene
 		Retired<ScenePublication> retiredPublications;
 
 		// Coordinator -> render thread.
-		PublicationLog<PublicationDeltas> publicationLog;  // every publication's deltas, walked by the frame's start
+		org::async::PublicationLog<PublicationDeltas> publicationLog;  // every publication's deltas, walked by the frame's start
 		RenderGraph::Frame::EventQueue<PrimaryNote> primaryNotes;
 		RenderGraph::Frame::EventQueue<MaterialRequest> materialRequests;
 		RenderGraph::Frame::EventQueue<FadeNodeRequest, 256> fadeNodeRequests;
