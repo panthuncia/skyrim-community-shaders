@@ -75,7 +75,7 @@ namespace DCLF::Features::Water::WaterScene
 			static_cast<WaterRows*>(a_columns)->free.push_back(a_row);
 		}
 
-		std::shared_ptr<void> MakeComponent() { return std::make_shared<int>(0); }
+		std::shared_ptr<void> MakeRowsComponent() { return std::make_shared<int>(0); }
 
 		std::uint32_t RowCount(const void* a_columns)
 		{
@@ -431,7 +431,7 @@ namespace DCLF::Features::Water::WaterScene
 	{
 		rowFamily = a_context.RegisterTableFamily({ .name = "water rows", .make = &MakeRows, .assign = &AssignRows, .same = &SameRows, .clear = &ClearRows,
 			.recycle = &RecycleRow, .recordWord = kWaterRecordWord, .rows = &RowCount });
-		component = a_context.RegisterCoordinatorComponent({ .name = "water-rows", .make = &MakeComponent, .residency = { .resident = &ListWater, .left = &UnlistWater } });
+		component = a_context.RegisterCoordinatorComponent({ .name = "water-rows", .make = &MakeRowsComponent, .residency = { .resident = &ListWater, .left = &UnlistWater } });
 		framePool = a_context.RegisterFrameValuePool({ .name = "water-frame", .stride = sizeof(WaterFrameRow), .kick = &KickFrame, .sample = &SampleFrame, .send = &SendFrame });
 		materialPool = a_context.RegisterFrameValuePool(
 			{ .name = "water-materials", .stride = sizeof(WaterMaterialRow), .kick = &KickMaterials, .sample = &SampleMaterials, .send = &SendMaterials });
