@@ -307,8 +307,8 @@ namespace RenderGraph::Frame::Revision
 			if (!a_resource.TryGetRHIResourceDesc(desc))
 				return 0;
 			const std::uint64_t texel = org::services::EncodedTexelBytes(desc.texture.format);
-			bytes = texel * desc.texture.width * desc.texture.height * (std::max)<std::uint64_t>(desc.texture.depthOrLayers, 1) *
-			        (std::max)<std::uint64_t>(desc.texture.sampleCount, 1);
+			bytes = texel * desc.texture.width * desc.texture.height * (std::max)(std::uint64_t(desc.texture.depthOrLayers), std::uint64_t(1)) *
+			        (std::max)(std::uint64_t(desc.texture.sampleCount), std::uint64_t(1));
 			return desc.texture.mipLevels > 1 ? bytes + bytes / 3 : bytes;
 		}
 
