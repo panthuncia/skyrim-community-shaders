@@ -274,6 +274,8 @@ struct RenderGraphRuntime::Impl
 		std::shared_ptr<const void> owner;
 	};
 	std::deque<NativeRelease> nativeReleases;
+	// Services the queue's head has waited for, to log a head that never goes.
+	std::uint64_t nativeHeadWaits = 0;
 	std::atomic<std::uint64_t> retiredSubmissions{ 0 };
 	PFN_dxvkSetDeviceTeardownCallback setTeardownCallback = nullptr;
 	PFN_dxvkEnqueueInteropSubmission enqueueSubmission = nullptr;
@@ -3149,11 +3151,20 @@ void RenderGraphRuntime::ServiceD3D11Releases()
 		return;
 	if (impl->native) {
 		const std::uint64_t retired = impl->retiredSubmissions.load(std::memory_order_acquire);
+		const std::size_t before = impl->nativeReleases.size();
 		while (!impl->nativeReleases.empty() && impl->nativeReleases.front().submissions <= retired) {
 			auto& queue = impl->nativeReleases.front().queue;
 			if (queue.timeline && queue.submitted && queue.timeline.GetCompletedValue() < queue.submitted)
 				break;
 			impl->nativeReleases.pop_front();
+		}
+		if (impl->nativeReleases.empty() || impl->nativeReleases.size() != before)
+			impl->nativeHeadWaits = 0;
+		else if (++impl->nativeHeadWaits % 2000 == 0) {
+			auto& head = impl->nativeReleases.front();
+			logger::warn("[ORG] native releases: the head has waited {} services; {} queued; it needs submission {} (retired {}) and queue value {} (completed {})",
+				impl->nativeHeadWaits, impl->nativeReleases.size(), head.submissions, retired, head.queue.submitted,
+				head.queue.timeline ? head.queue.timeline.GetCompletedValue() : 0);
 		}
 		return;
 	}
