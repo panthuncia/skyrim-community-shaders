@@ -1,0 +1,51 @@
+# VRAM attribution in Riverwood: from the save, a coc to Riverwood, 900 frames to settle, a shot, then two VRAM dumps.
+# dclf:vram-json writes the previous snapshot, so the second dump is the one to read. ORG's allocator is the source in the
+# graph modes. Compose it with a mode: native-vulkan+vram-riverwood, native-d3d12+vram-riverwood, guest+vram-riverwood.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[cs]
+vram_debug = true
+
+[org]
+vram_source = "org"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Riverwood"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "riverwood"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "vram-json"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "vram-json"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["riverwood"]
