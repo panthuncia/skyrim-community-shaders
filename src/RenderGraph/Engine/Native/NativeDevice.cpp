@@ -19,6 +19,7 @@
 #include "Features/Upscaling/Streamline.h"
 #include "Globals.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Backend.h"
@@ -4765,6 +4766,10 @@ namespace RenderGraph::Engine::Native
 	{
 		if (!g_device || !a_texture)
 			return nullptr;
+		// A defrag move leaves the new image in CopyDest, and a later render target draw found it there (D3D12 validation, 2026-11-22):
+		// some user of the handle still takes it as resting in Common. Until that is found, defrag leaves these textures alone. Frame
+		// placement still places them: a placement change is followed every frame.
+		::RenderGraph::Relocation::Pin(*a_texture);
 		const bool deferred = a_flags == WrapFlags::DeferInitialize;
 		const auto dimension = static_cast<D3D11_RESOURCE_DIMENSION>(a_wrap.dimension);
 		const TextureRequest request = WrapRequestOf(a_wrap, nullptr, a_name);
