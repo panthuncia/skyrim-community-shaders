@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -89,4 +90,12 @@ namespace FrameAnchors
 	* on a staged build takes that build's description for every slot. Fatal on a mismatch.
 	*/
 	void InstallRevisionSchedules(const RevisionRecordings& a_revision, std::uint64_t a_frame);
+
+	/**
+	* @brief Render owner, inside the adoption point, after a revision's versions were adopted and no revision is in preparation.
+	* Drops the kept segment recordings that bind versions no frame selects again: those named for a revision, and those of the
+	* versions current before this adoption. Each held its versions' memory for good. Schedules and retiring revisions keep their
+	* own references, so frames in flight are unaffected. Returns how many went.
+	*/
+	std::size_t DropStaleVersionRecordings();
 }

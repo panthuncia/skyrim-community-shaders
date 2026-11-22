@@ -3262,6 +3262,32 @@ namespace FrameAnchors
 		}
 	}
 
+	std::size_t DropStaleVersionRecordings()
+	{
+		auto& state = Anchors();
+		if (!state.host)
+			return 0;
+		auto lock = Guard();
+		auto& host = *state.host;
+		std::size_t dropped = 0;
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d])
+				continue;
+			// A frame slot's schedule holds its own reference, and a retiring revision holds its entries until the GPU is past it.
+			// So only the cache's reference goes here.
+			dropped += state.declaredRecordings[d].cache.EraseIf([&](const SegmentRecording& a_kept) {
+				// Named versions belong to one revision. Once it is adopted or superseded, no lookup asks for its serial again.
+				if (a_kept.key.versionsSerial != 0)
+					return true;
+				// A recording of the versions current when it was made, which an adoption replaced since, never runs again.
+				const auto& status = a_kept.LockedStatus();
+				return status.Ready() && !status.recordings.empty() && status.recordings.front() &&
+				       !host.EpochRecordingVersionsCurrent(*status.recordings.front(), a_kept.key.slot);
+			});
+		}
+		return dropped;
+	}
+
 	RunResult Run(const Point& a_point)
 	{
 		const RunDepthScope depth;

@@ -32,6 +32,7 @@
 #include <ORGModuleServices/ComposedVersions.h>
 #include <ORGModuleServices/GrowableBufferSet.h>
 #include <ORGModuleServices/VersionedBufferBuild.h>
+#include <ORGModuleServices/TexelEncoding.h>
 #include <ORGModuleServices/Variables.h>
 #include <ORGModuleServices/VersionedTextureGrowth.h>
 #include <OpenRenderGraph/GraphHost.h>
@@ -286,6 +287,31 @@ namespace RenderGraph::Frame::Revision
 			StarvationWatch watch;
 		};
 
+		/** @brief A version an adoption replaced, watched until nothing holds its resource. */
+		struct ReplacedVersion
+		{
+			std::weak_ptr<org::Resource> resource;
+			std::string name;
+			std::uint64_t bytes = 0;     // about: mip 0 times the mips' share, 0 when the format has no texel size
+			std::uint64_t replaced = 0;  // the frame its adoption ran
+			bool reported = false;       // logged as still held
+		};
+
+		/** @brief A resource's device bytes, about. A texture counts its mips as a third more; 0 when its size is unknown. */
+		std::uint64_t ApproxBytes(const org::Resource& a_resource)
+		{
+			std::uint64_t bytes = 0;
+			if (a_resource.TryGetBufferByteSize(bytes))
+				return bytes;
+			rhi::ResourceDesc desc{};
+			if (!a_resource.TryGetRHIResourceDesc(desc))
+				return 0;
+			const std::uint64_t texel = org::services::EncodedTexelBytes(desc.texture.format);
+			bytes = texel * desc.texture.width * desc.texture.height * (std::max)<std::uint64_t>(desc.texture.depthOrLayers, 1) *
+			        (std::max)<std::uint64_t>(desc.texture.sampleCount, 1);
+			return desc.texture.mipLevels > 1 ? bytes + bytes / 3 : bytes;
+		}
+
 		std::array<std::uint8_t, kMaxSegments> MakeSegmentSources()
 		{
 			std::array<std::uint8_t, kMaxSegments> sources{};
@@ -329,6 +355,9 @@ namespace RenderGraph::Frame::Revision
 			// The needs of a superseded revision, carried to the next one.
 			std::vector<FrameAnchors::StageBuildNeed> carriedNeeds;
 			std::deque<std::pair<std::uint64_t, std::shared_ptr<PreparedRevision>>> retiring;
+			// Render thread. The versions adoptions replaced, watched until their memory goes (ReleaseRetired logs it).
+			std::vector<ReplacedVersion> replaced;
+			std::uint64_t replacedReleased = 0, replacedReleasedBytes = 0;  // for the session
 			std::unique_ptr<org::async::RevisionAssembler> assembler = std::make_unique<org::async::RevisionAssembler>(kRevisionSlots);
 			std::uint64_t adoptedLines = 0;
 			// Mark's values, any thread.
@@ -1003,11 +1032,49 @@ namespace RenderGraph::Frame::Revision
 			++a_coordinator.session.superseded;
 		}
 
-		void ReleaseRetired(Coordinator& a_coordinator)
+		/** @brief Notes a version an adoption replaces, so ReleaseRetired can tell when its memory goes. Render thread. */
+		void WatchReplaced(Coordinator& a_coordinator, const std::shared_ptr<org::Resource>& a_old, std::string_view a_name, std::uint64_t a_frame)
+		{
+			if (!a_old)
+				return;
+			a_coordinator.replaced.push_back({ a_old, std::string(a_name), ApproxBytes(*a_old), a_frame });
+		}
+
+		void ReleaseRetired(Coordinator& a_coordinator, std::uint64_t a_frame)
 		{
 			const auto completed = Retirement::Clock()->Completed();
 			while (!a_coordinator.retiring.empty() && a_coordinator.retiring.front().first <= completed)
 				a_coordinator.retiring.pop_front();
+			// A replaced version goes once its retiring revision, the recordings that bound it and the frames that ran it are gone.
+			// One still held long after is a holder this rule missed.
+			constexpr std::uint64_t kHeldFrames = 600;
+			std::uint32_t released = 0;
+			std::uint64_t bytes = 0;
+			std::erase_if(a_coordinator.replaced, [&](const ReplacedVersion& a_version) {
+				if (!a_version.resource.expired())
+					return false;
+				++released;
+				bytes += a_version.bytes;
+				return true;
+			});
+			std::uint32_t held = 0;
+			std::uint64_t heldBytes = 0;
+			for (auto& version : a_coordinator.replaced) {
+				++held;
+				heldBytes += version.bytes;
+				if (version.reported || a_frame < version.replaced + kHeldFrames)
+					continue;
+				version.reported = true;
+				logger::warn("[ORG] versions: {} ({:.1f} MB) is still held {} frames after an adoption replaced it", version.name,
+					static_cast<double>(version.bytes) / (1024.0 * 1024.0), a_frame - version.replaced);
+			}
+			if (!released)
+				return;
+			a_coordinator.replacedReleased += released;
+			a_coordinator.replacedReleasedBytes += bytes;
+			logger::info("[ORG] versions released: {} ({:.1f} MB) at frame {}; {} replaced versions still held ({:.1f} MB); {} released this session ({:.1f} MB)",
+				released, static_cast<double>(bytes) / (1024.0 * 1024.0), a_frame, held, static_cast<double>(heldBytes) / (1024.0 * 1024.0),
+				a_coordinator.replacedReleased, static_cast<double>(a_coordinator.replacedReleasedBytes) / (1024.0 * 1024.0));
 		}
 
 		/**
@@ -1085,8 +1152,11 @@ namespace RenderGraph::Frame::Revision
 						adopt();
 				if (named)
 					named->AdoptAll();
-				for (std::size_t i = 0; i < revision->twins.size(); ++i)
+				for (std::size_t i = 0; i < revision->twins.size(); ++i) {
+					// The twin's graph resource is still the old version's until AdoptPrepared. A prepared version is always new.
+					WatchReplaced(a_coordinator, revision->twins[i]->Graph(), revision->names[i], a_frame);
 					revision->twins[i]->AdoptPrepared(revision->versions[i]);
+				}
 				// The features' D3D11 wrappers follow the versions the twins just took.
 				GraphResources::RetargetWrappers();
 				if (buffers) {
@@ -1094,6 +1164,8 @@ namespace RenderGraph::Frame::Revision
 						const std::lock_guard lock(a_coordinator.bufferMutex);
 						for (const auto& entry : buffers->buffers)
 							if (const auto buffer = entry.buffer.lock()) {
+								if (const auto old = buffer->Current(); old && old != entry.version)
+									WatchReplaced(a_coordinator, old->resource, entry.name, a_frame);
 								buffer->Adopt(entry.version);
 								a_coordinator.adoptedPayloads[entry.key] = entry.payload;
 							}
@@ -1129,6 +1201,10 @@ namespace RenderGraph::Frame::Revision
 			}
 			if (recorded->recordings)
 				FrameAnchors::InstallRevisionSchedules(*recorded->recordings, a_frame);
+			// The stages' recording caches let go of every recording that binds a replaced version. The retiring revision below
+			// keeps the old versions until the GPU is past the frames that ran them.
+			if (const auto dropped = FrameAnchors::DropStaleVersionRecordings())
+				logger::info("[ORG] frame revision {}: dropped {} kept stage recordings of replaced versions", revision->serial, dropped);
 			// The sources' epochs take their recordings of the same versions in the same frame.
 			for (std::uint32_t s = 0; s < a_fragments.size(); ++s)
 				if (a_fragments[s])
@@ -1523,7 +1599,7 @@ namespace RenderGraph::Frame::Revision
 		ZoneScopedN("CS.Frame.Revision.Adopt");
 		// The frame clock moved before this Begin, so this is the frame it starts.
 		const std::uint64_t frame = FrameClock::BeginFrame();
-		ReleaseRetired(coordinator);
+		ReleaseRetired(coordinator, frame);
 		// The same snapshot, with no allocation, while no variable changed.
 		auto previous = std::exchange(coordinator.variables, Vars::Lane::Take());
 		if (coordinator.variables)
