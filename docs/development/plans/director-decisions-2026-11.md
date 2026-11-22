@@ -721,3 +721,20 @@ final until the user confirms it.
      `OpenRenderGraphCopyQueueUploadTests` failed twice (a ticket never reached Submitted in 5 s) and then passed four
      times on builds with and without the new code, so it is intermittent; the D3D12 llf-slots-live run averaged
      22.3 fps against Vulkan's 63.8 in Dragonsreach, with no older D3D12 sample there to compare.
+138. **Every feature on for test runs (user, 2026-11-21).** The saved settings had been reset (MO2 overwrite
+     `SettingsUser.json`, 2.3 KB); the user wants every feature enabled so no error is missed. Post Processing, Skin and
+     Unified Water are no longer disabled at boot, so frame rates from before this differ. Runs pin
+     `game.save=Save91_...`; the user's newest save was moved to `C:\Modding\CS-AB\saves-aside` because Start On Save's
+     pinning is broken.
+139. **Cold sky programs left the graph (fixed).** On a cold program manifest a reflection face's sky program was not
+     built, the capture was refused, and the rest of the batch with its cloud layer went to the engine: Cloud Shadows'
+     D3D11 path, fatal in native mode. A sky draw whose program is still building is now left out until it is built
+     (`a8f0db611`); `CS_DCLF_PROGRAM_MANIFEST=0` and `sky-cold-programs` reproduce the cold start.
+140. **D3D12 frame rate (2026-11-21).** Dragonsreach (`perf-dragonsreach`): D3D12 18.2 ms (55 fps) against Vulkan 13.4;
+     now 13.39 against 13.34 ms of GPU time (75.4 and 76.6 fps). Two causes, both in DCLF's draws
+     (`docs/development/plans/dclf-d3d12-perf.md`): ExecuteIndirect with a root constant per command is slow on AMD, so
+     on Shader Model 6.8 the first instance comes from `SV_StartInstanceLocation` and the signatures are plain draws
+     (`CS_ORG_D3D12_INSTANCE_WORD=1` keeps the old path); and D3D12's frame rewrite copied two pass-block arrays to
+     scratch in every colour wave, now view macros. Exterior (`perf-quick`, Save91): D3D12 24.3 against Vulkan 22.2 ms
+     (41.0 and 44.9 fps); left: main opaque +1.2 (AMD's D3D12 compiles pixel stages as Wave64, Vulkan Wave32; heap
+     CBVs are vector loads), screen-space shadows' raymarch +0.5, forward +0.3. Dev-Fast /Od, one sample each.
