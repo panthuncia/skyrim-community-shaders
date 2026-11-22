@@ -738,3 +738,24 @@ final until the user confirms it.
      scratch in every colour wave, now view macros. Exterior (`perf-quick`, Save91): D3D12 24.3 against Vulkan 22.2 ms
      (41.0 and 44.9 fps); left: main opaque +1.2 (AMD's D3D12 compiles pixel stages as Wave64, Vulkan Wave32; heap
      CBVs are vector loads), screen-space shadows' raymarch +0.5, forward +0.3. Dev-Fast /Od, one sample each.
+141. **Upstream sync batch 17 by rebase (user, 2026-11-21).** `upstream/dev` through #3230 merged into `sync/vulkan-base`
+     (`531781833`; the frame-generation border clear moved upstream onto the D3D12 swap chain proxy resolves to the base),
+     then `org_integration`'s 148 commits rebased onto it with merges kept (not squashed); 5 fix commits. Backup:
+     `backup/org_integration-pre-upstream-sync-20261121`. Not yet followed on the graph: Physical Sky's quality toggles
+     (#3200, Low's half-resolution trace), Effects11's adapted-luminance publish (#3181), the fused Composite + Grading
+     and shared targets (D3D11 only).
+142. **Shader store V3: zstd records in pack files (to confirm).** Level 9, 64 MB packs, compaction at startup, no
+     migration from v2. On this machine 495 MB on disk (2,048 MB raw) against 6.7 GB for v2; index 5 ms, packs 1.4 ms;
+     a warm start compiles nothing. v2 was moved to `C:\Modding\CS-AB\ShaderCache-v2-aside`.
+143. **Program builds compile on their own lane.** DCLF configures the shared compiler's submitter, so program builds
+     queued behind its pipeline compiles and held the frame revision the screenshot copy rides on (guest shots lost).
+     OMS programs now use `CompileHere` (`fix/program-compiles-here`).
+144. **Replaced versions are released (VRAM).** History resets made new versions that recording caches, graph
+     registration, published entries, the last preparation and kept recordings held for good. Native Vulkan in
+     Riverwood: 4,654 to 4,042 MB. One holder is left: a graph that declares a slot keeps its build's version (one extra
+     copy of each SSGI history). Across loads usage still rises about 140 MB a load with no versions held; open.
+145. **Haze is the Post Processing configuration, not the graph.** `d3d11` mode (graph off) is as hazy as native;
+     with Post Processing off it is gone; Exponential Height Fog and Physical Sky are not the cause. The settings reset
+     enabled Post Processing at its defaults. Upstream's own DLL was not compared (cs-test cannot drive it).
+146. **Vanilla volumetric lighting follows the engine's volume size** through a frame variable; setup had read the
+     descriptor before the engine's INI preset applied (fatal with the feature off).
