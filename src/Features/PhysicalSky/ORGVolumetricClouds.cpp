@@ -118,7 +118,7 @@ namespace
 	constexpr std::uint32_t kVoxelsOffset = kWeightsOffset + kMaxLatchWeights * sizeof(float4);
 	constexpr std::uint32_t kSegmentsOffset = kVoxelsOffset + kMaxLatchVoxels * sizeof(VoxelCloudData);
 	constexpr std::uint32_t kLatchBytes = kSegmentsOffset + SkyLightning::kMaxSegments * sizeof(SkyLightning::Segment);
-	static_assert(sizeof(PhysicalSky::VolumetricCloudCB) == 1328 && sizeof(CloudStormData) == 1824 && sizeof(VoxelCloudData) == 96 &&
+	static_assert(sizeof(PhysicalSky::VolumetricCloudCB) == 1344 && sizeof(CloudStormData) == 1824 && sizeof(VoxelCloudData) == 96 &&
 					  sizeof(SkyLightning::Segment) == 32 && sizeof(float4) == 16,
 		"Volumetrics.cs.hlsl's latch strides");
 	static_assert(kStormRectOffset % 16 == 0 && kAmbientOffset % 16 == 0 && kShadowLightOffset % 16 == 0 && kBoundaryOffset % 16 == 0 &&

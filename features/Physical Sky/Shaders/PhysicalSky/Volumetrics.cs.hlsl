@@ -30,7 +30,7 @@
 
 // The push block (26 words). Each latch is a handle and a byte offset.
 // - CloudTable: the handle table, one uint per PHYSSKY_CLOUD_TABLE entry, at offset 0 of the pass's own buffer.
-// - VolumetricCloudConstants: the D3D11 b1 bytes (VolumetricCloudCB, 1328 bytes).
+// - VolumetricCloudConstants: the D3D11 b1 bytes (VolumetricCloudCB, 1344 bytes).
 // - CloudDispatch: the D3D11 b3 bytes (one uint4: StormScreenRect, or VoxelScreenRect in the voxel view).
 // - CloudAmbientVolumeConstants: the D3D11 b2 bytes (CloudAmbientVolumeCB, 32 bytes).
 // - StormInstanceConstants: the D3D11 b0 bytes of SINGLE_CLOUD_STORM (one CloudStormData, 1824 bytes).
@@ -243,6 +243,9 @@ static OrgCloudMsCalibration CloudMsCalibration;
 static float4 MiddleCloudCells = asfloat(OrgLatch_VolumetricCloudConstants.Load4(OrgOffset_VolumetricCloudConstants + 1280u));
 static float4 MiddleCloudBands = asfloat(OrgLatch_VolumetricCloudConstants.Load4(OrgOffset_VolumetricCloudConstants + 1296u));
 static float4 MiddleCloudBandShape = asfloat(OrgLatch_VolumetricCloudConstants.Load4(OrgOffset_VolumetricCloudConstants + 1312u));
+static uint CloudTraceScale = OrgLatch_VolumetricCloudConstants.Load(OrgOffset_VolumetricCloudConstants + 1328u);
+static uint CloudAmbientSHOnly = OrgLatch_VolumetricCloudConstants.Load(OrgOffset_VolumetricCloudConstants + 1332u);
+static uint CloudCascadeShadows = OrgLatch_VolumetricCloudConstants.Load(OrgOffset_VolumetricCloudConstants + 1336u);
 #else
 cbuffer VolumetricCloudConstants : register(b1)
 {
