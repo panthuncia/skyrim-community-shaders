@@ -30,6 +30,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/ProgramService.h"
+#include "RenderGraph/Relocation/DxvkSource.h"
 #include "RenderGraph/UndeclaredAccess.h"
 #include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
@@ -286,8 +287,6 @@ struct RenderGraphRuntime::Impl
 	// Pinless imports.
 	PFN_dxvkTrackInteropResources trackResources = nullptr;
 	PFN_dxvkUntrackInteropResources untrackResources = nullptr;
-	PFN_dxvkPollInteropRelocations pollRelocations = nullptr;
-	PFN_dxvkReleaseInteropStorage releaseStorage = nullptr;
 #if defined(ORG_MODULE_SERVICES_HAS_DXC)
 	std::unique_ptr<org::services::ShaderCompiler> shaderCompiler;
 #endif
@@ -1664,8 +1663,6 @@ bool RenderGraphRuntime::Initialize()
 		state->getResourceInfos = dxvk.getInteropResourceInfos;
 		state->trackResources = dxvk.trackInteropResources;
 		state->untrackResources = dxvk.untrackInteropResources;
-		state->pollRelocations = dxvk.pollInteropRelocations;
-		state->releaseStorage = dxvk.releaseInteropStorage;
 		// Recordings into DXVK's own command buffer (EmitCommands, the in-stream epochs).
 		state->emitExternalCommands = dxvk.emitExternalCommands;
 		// Graph submissions in DXVK's command stream.
@@ -1985,6 +1982,9 @@ bool RenderGraphRuntime::Initialize()
 	}
 	impl = std::move(state);
 	disabledReason.clear();
+	// Guest mode: DXVK's moves of the pinless imports reach ORG's relocation service through this source.
+	if (!impl->native && impl->trackResources)
+		RenderGraph::Relocation::DxvkSource::Install();
 	if (impl->native) {
 		logger::info("[ORG] Render graph runs natively on BasicRHI's {} device; submissions go to its queues directly",
 			RenderGraph::Backend::Name(RenderGraph::Backend::Active()));
@@ -2040,6 +2040,8 @@ void RenderGraphRuntime::Shutdown()
 	RenderGraph::Programs::Stop();
 	if (!impl)
 		return;
+	// No more polls of DXVK's moves. Registrations still alive keep the source until they go.
+	RenderGraph::Relocation::DxvkSource::Uninstall();
 	// Let the build thread finish and drop unattached graphs before anything of the host goes.
 	if (impl->builds)
 		impl->builds->Shutdown();
@@ -2902,19 +2904,9 @@ void RenderGraphRuntime::UntrackResources(std::span<IUnknown* const> a_objects)
 		impl->untrackResources(globals::d3d::device, static_cast<UINT>(a_objects.size()), a_objects.data());
 }
 
-std::uint32_t RenderGraphRuntime::PollRelocations(std::span<DxvkOrgInteropRelocation> a_relocations)
+bool RenderGraphRuntime::OffStreamQueuesIdle() const
 {
-	std::uint32_t count = 0;
-	if (PinlessImports() && !a_relocations.empty() &&
-		FAILED(impl->pollRelocations(globals::d3d::device, a_relocations.data(), static_cast<std::uint32_t>(a_relocations.size()), &count)))
-		count = 0;
-	return count;
-}
-
-void RenderGraphRuntime::ReleaseStorage(std::span<void* const> a_storages)
-{
-	if (PinlessImports() && !a_storages.empty())
-		impl->releaseStorage(globals::d3d::device, static_cast<UINT>(a_storages.size()), a_storages.data());
+	return !impl || (!impl->computeEntered && !impl->copyEntered && !impl->externalOpen);
 }
 
 bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkCommandBuffer a_commandBuffer), void* a_user,

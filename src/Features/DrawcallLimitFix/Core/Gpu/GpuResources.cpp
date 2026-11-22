@@ -12,6 +12,7 @@
 #include "RenderGraph/DxvkImageImport.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
+#include "RenderGraph/Relocation/DxvkSource.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/UndeclaredAccess.h"
 
@@ -41,6 +42,8 @@ namespace DCLF
 		std::vector<DxvkOrgInteropTrackedResource> tracked;
 		std::vector<HRESULT> results;
 		bool pinless = false;
+		// Begun before the description. Moves taken until the batch goes wait for its registrations.
+		RenderGraph::Relocation::DxvkSource::Ticket ticket;
 		bool described = false;  // otherwise Acquire describes each one alone
 		double ms = 0.0;
 		std::atomic<bool> claimed{ false };  // the job or the owner, whichever describes first
@@ -77,7 +80,7 @@ namespace DCLF
 			IUnknown* object = reference.get();
 			RenderGraphRuntime::Get().UntrackResources({ &object, 1 });
 		}
-		storages.clear();
+		registration.reset();
 	}
 
 	GpuResources& GpuResources::Scene()
@@ -108,8 +111,6 @@ namespace DCLF
 			if (auto owner = it->second.owner.lock())
 				return LeasedBuffer{ it->second.buffer, it->second.generation, std::shared_ptr<const void>(std::move(owner)) };
 			// Its last lease went, so a buffer at this address now is a new one.
-			if (const auto c = byCookie.find(it->second.cookie); c != byCookie.end() && c->second == a_buffer)
-				byCookie.erase(c);
 			entries.erase(it);
 			Bump(counters.cached, -1);
 		}
@@ -144,11 +145,7 @@ namespace DCLF
 			}
 			const auto& info = batch->Info(i);
 			if (SUCCEEDED(batch->results[i]) && info.kind == DXVK_ORG_INTEROP_RESOURCE_BUFFER && info.buffer.address != 0) {
-				// A description older than a relocation names storage nothing holds for it, so describe it again.
-				if (batch->pinless && Superseded(batch->tracked[i].cookie, batch->tracked[i].storageSerial)) {
-					Bump(counters.prefetchSuperseded, 1);
-					break;
-				}
+				// The batch's ticket covers a move since the description: the registration takes its old storage.
 				return Insert(a_buffer, std::move(reference),
 					Buffer{ reinterpret_cast<std::uint64_t>(info.buffer.buffer), info.buffer.offset, info.buffer.size, info.buffer.address },
 					batch->pinless ? &batch->tracked[i] : nullptr);
@@ -167,6 +164,8 @@ namespace DCLF
 				Buffer{ reinterpret_cast<std::uint64_t>(a_info.buffer.buffer), a_info.buffer.offset, a_info.buffer.size, a_info.buffer.address }, a_tracked);
 		};
 		if (runtime.PinlessImports()) {
+			// Covers a move between the description and the registration in Insert.
+			const auto ticket = RenderGraph::Relocation::DxvkSource::Begin();
 			IUnknown* object = a_buffer;
 			DxvkOrgInteropTrackedResource tracked{};
 			HRESULT result = E_FAIL;
@@ -201,67 +200,41 @@ namespace DCLF
 		if (!entry.buffer.ref)
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				entry.buffer.ref = RenderGraph::ImportBufferRef(host->Device(), entry.buffer.vkBuffer, entry.buffer.offset, entry.buffer.size, entry.buffer.address, held->refKeep);
+		if (a_tracked) {
+			// The registration holds the old storage of each later move, and the entry goes at the next BeginFrame.
+			const auto moveOf = [moved = moved, key = a_buffer, generation = entry.generation] { moved->Push({ key, generation }); };
+			auto registration = RenderGraph::Relocation::DxvkSource::Hold(a_tracked->cookie, a_tracked->storageSerial, moveOf);
+			// A move since the description: this lease reads the old storage, which the registration holds.
+			if (registration && registration->Superseded()) {
+				Bump(counters.supersededAtImport, 1);
+				moveOf();
+			}
+			held->registration = std::move(registration);
+		}
 		std::shared_ptr<Held> owner(held, [released = released, key = a_buffer](Held* a_held) {
 			delete a_held;
 			released->Push(key);
 		});
 		entry.owner = owner;
-		if (a_tracked) {
-			entry.cookie = a_tracked->cookie;
-			entry.serial = a_tracked->storageSerial;
-			byCookie[entry.cookie] = a_buffer;
-		}
 		LeasedBuffer lease{ entry.buffer, entry.generation, std::shared_ptr<const void>(std::move(owner)) };
 		entries.insert_or_assign(a_buffer, std::move(entry));
 		Bump(counters.cached, 1);
 		return lease;
 	}
 
-	void GpuResources::PostRelocations(std::span<const ImportRelocations::Relocation> a_relocations)
+	void GpuResources::TakeMoved()
 	{
-		std::scoped_lock lock(inboxMutex);
-		inbox.insert(inbox.end(), a_relocations.begin(), a_relocations.end());
-	}
-
-	bool GpuResources::Superseded(std::uint64_t a_cookie, std::uint64_t a_serial) const
-	{
-		const auto it = moved.find(a_cookie);
-		return it != moved.end() && it->second.serial > a_serial;
-	}
-
-	void GpuResources::TakeRelocations()
-	{
-		++passes;
 		relocatedBuffers.clear();  // Frame()'s holders never re-acquire
-		std::vector<ImportRelocations::Relocation> taken;
-		{
-			std::scoped_lock lock(inboxMutex);
-			taken.swap(inbox);
-		}
-		for (auto& relocation : taken) {
-			auto& seen = moved[relocation.cookie];
-			seen.serial = std::max(seen.serial, relocation.serial);
-			seen.pass = passes;
-			const auto c = byCookie.find(relocation.cookie);
-			const auto e = c != byCookie.end() ? entries.find(c->second) : entries.end();
-			// Not ours, its last lease gone, or imported after the move. Nothing here reads the old storage.
-			if (e == entries.end() || e->second.cookie != relocation.cookie || e->second.serial >= relocation.serial) {
-				Bump(counters.relocationsIgnored, 1);
-				continue;
-			}
-			if (auto owner = e->second.owner.lock()) {
-				std::scoped_lock lock(owner->mutex);
-				owner->storages.push_back(std::move(relocation.storage));
-			}
-			relocatedBuffers.push_back(c->second);
+		moved->Drain([this](MovedImport&& a_moved) {
+			// An entry made since at the same key is another import.
+			const auto e = entries.find(a_moved.buffer);
+			if (e == entries.end() || e->second.generation != a_moved.generation)
+				return;
+			relocatedBuffers.push_back(a_moved.buffer);
 			entries.erase(e);
-			byCookie.erase(c);
 			Bump(counters.cached, -1);
 			Bump(counters.relocated, 1);
-		}
-		// A prefetched description is taken within two passes, so older moves can be dropped.
-		if (!moved.empty() && passes % 8 == 0)
-			std::erase_if(moved, [&](const auto& a_moved) { return a_moved.second.pass + 3 < passes; });
+		});
 	}
 
 	void GpuResources::NoteResolve(double a_ms, std::uint64_t a_buffers)
@@ -293,8 +266,10 @@ namespace DCLF
 		if (!batch)
 			return;
 		batch->pinless = RenderGraphRuntime::Get().PinlessImports();
-		if (batch->pinless)
+		if (batch->pinless) {
+			batch->ticket = RenderGraph::Relocation::DxvkSource::Begin();
 			batch->tracked.resize(batch->objects.size());
+		}
 		else
 			batch->infos.resize(batch->objects.size());
 		batch->results.assign(batch->objects.size(), E_FAIL);
@@ -341,13 +316,11 @@ namespace DCLF
 		released->Drain([this](ID3D11Buffer*&& a_key) {
 			// A key resolved again since has a live lease, so that entry stays.
 			if (const auto it = entries.find(a_key); it != entries.end() && it->second.owner.expired()) {
-				if (const auto c = byCookie.find(it->second.cookie); c != byCookie.end() && c->second == a_key)
-					byCookie.erase(c);
 				entries.erase(it);
 				Bump(counters.cached, -1);
 			}
 		});
-		TakeRelocations();
+		TakeMoved();
 	}
 
 	GpuResources::Stats GpuResources::GetStats() const
@@ -366,8 +339,7 @@ namespace DCLF
 		stats.prefetchWaited = counters.prefetchWaited.load(std::memory_order_relaxed);
 		stats.prefetchWaitMs = counters.prefetchWaitMs.load(std::memory_order_relaxed);
 		stats.relocated = counters.relocated.load(std::memory_order_relaxed);
-		stats.relocationsIgnored = counters.relocationsIgnored.load(std::memory_order_relaxed);
-		stats.prefetchSuperseded = counters.prefetchSuperseded.load(std::memory_order_relaxed);
+		stats.supersededAtImport = counters.supersededAtImport.load(std::memory_order_relaxed);
 		return stats;
 	}
 
@@ -377,17 +349,12 @@ namespace DCLF
 		prefetched.clear();
 		prefetchedBefore.clear();
 		released->Discard();
-		byCookie.clear();
-		moved.clear();
+		moved->Discard();
 		relocatedBuffers.clear();
-		{
-			std::scoped_lock lock(inboxMutex);
-			inbox.clear();
-		}
 		for (auto* counter : { &counters.cached, &counters.rejected })
 			counter->store(0, std::memory_order_relaxed);
 		for (auto* counter : { &counters.resolvedTotal, &counters.prefetchBatches, &counters.prefetched, &counters.prefetchTaken, &counters.prefetchReleased,
-				 &counters.prefetchRunByOwner, &counters.prefetchWaited, &counters.relocated, &counters.relocationsIgnored, &counters.prefetchSuperseded })
+				 &counters.prefetchRunByOwner, &counters.prefetchWaited, &counters.relocated, &counters.supersededAtImport })
 			counter->store(0, std::memory_order_relaxed);
 		counters.resolveMsTotal.store(0.0, std::memory_order_relaxed);
 		counters.prefetchWaitMs.store(0.0, std::memory_order_relaxed);

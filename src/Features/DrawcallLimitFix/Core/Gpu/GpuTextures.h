@@ -9,7 +9,6 @@
 #include <string>
 #include <vector>
 
-#include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
 #include "RenderGraph/Async/EventQueue.h"
 
 struct ID3D11ShaderResourceView;
@@ -26,8 +25,8 @@ namespace DCLF
 	 * So Request never imports on the calling thread. The import thread answers it, and a draw still waiting stays the engine's.
 	 * ResolveBinding imports inline for the frame's own textures, whose draws cannot be deferred.
 	 *
-	 * With pinless imports DXVK may move an image. A move supersedes the old import, which keeps its storage alive until its last
-	 * owner goes, and the next lookup imports the new storage.
+	 * With pinless imports DXVK may move an image. Each import is registered with Relocation::DxvkSource. A move supersedes the old
+	 * import, whose registration keeps the old storage alive until its last owner goes, and the next lookup imports the new storage.
 	 */
 	class GpuTextures
 	{
@@ -192,13 +191,8 @@ namespace DCLF
 		std::uint32_t Generation() const { return generation.load(std::memory_order_acquire); }  // any thread
 
 		/**
-		 * @brief Render thread, at frame start. Applies DXVK's image relocations by superseding the old imports.
-		 * A relocation taken before its import registered applies when it does.
-		 */
-		void NoteRelocations(std::span<const ImportRelocations::Relocation> a_relocations);
-
-		/**
-		 * @brief Any thread. Views superseded since a_cursor, which it advances.
+		 * @brief Any thread. Views superseded since a_cursor, which it advances: those DXVK moved (ORG's commit, at Present) and those
+		 * whose streamed window changed.
 		 * False when the log no longer reaches a_cursor, so every binding should be resolved again.
 		 */
 		bool RelocatedViews(std::uint64_t& a_cursor, std::vector<ID3D11ShaderResourceView*>& a_out) const;

@@ -40,7 +40,7 @@ struct DxvkDestroyedView
 	X(PFN_dxvkGetInteropResourceInfos, getInteropResourceInfos, dxvkGetInteropResourceInfos)                            \
 	X(PFN_dxvkTrackInteropResources, trackInteropResources, dxvkTrackInteropResources)                                  \
 	X(PFN_dxvkUntrackInteropResources, untrackInteropResources, dxvkUntrackInteropResources)                            \
-	X(PFN_dxvkPollInteropRelocations, pollInteropRelocations, dxvkPollInteropRelocations)                               \
+	X(PFN_dxvkPollInteropRelocations2, pollInteropRelocations2, dxvkPollInteropRelocations2)                            \
 	X(PFN_dxvkReleaseInteropStorage, releaseInteropStorage, dxvkReleaseInteropStorage)                                  \
 	X(PFN_dxvkEnqueueQueueCallback, enqueueQueueCallback, dxvkEnqueueQueueCallback)                                     \
 	X(PFN_dxvkEmitCommandBufferCallback, emitCommandBufferCallback, dxvkEmitCommandBufferCallback)                      \

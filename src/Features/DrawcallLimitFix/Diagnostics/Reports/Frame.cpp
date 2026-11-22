@@ -13,7 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
-#include "Features/DrawcallLimitFix/Core/Gpu/ImportRelocations.h"
+#include "RenderGraph/Relocation/DxvkSource.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
@@ -283,13 +283,14 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 					 "{} rejected, {} resolved in {:.1f} ms (slowest {:.3f} ms)",
 			gpu.cached, gpu.rejected, gpu.resolvedTotal, gpu.resolveMsTotal, gpu.resolveMsMax, gpu.prefetchTaken, gpu.prefetchReleased, treeGpu.cached,
 			treeGpu.rejected, treeGpu.resolvedTotal, treeGpu.resolveMsTotal, treeGpu.resolveMsMax);
-		// Pinless imports and DXVK's moves of them. Old storages are held until their users let them go.
+		// Pinless imports and DXVK's moves of them (RenderGraph::Relocation::DxvkSource). Old storages are held until their users let them go.
 		if (RenderGraphRuntime::Get().PinlessImports()) {
-			const auto moves = DCLF::ImportRelocations::GetStats();
-			logger::info("[DCLF] pinless imports: {} image and {} buffer moves taken, {} old storages held; textures: {} imports superseded, {} pinned "
-						 "(written by the GPU); buffers: {} entries moved, {} moves of no entry, {} prefetched descriptions superseded (tree LOD's: {} moved, {} of none)",
-				moves.images, moves.buffers, moves.storagesHeld, textures.superseded, textures.pinned, gpu.relocated, gpu.relocationsIgnored, gpu.prefetchSuperseded,
-				treeGpu.relocated, treeGpu.relocationsIgnored);
+			const auto moves = RenderGraph::Relocation::DxvkSource::GetStats();
+			logger::info("[DCLF] pinless imports: {} image and {} buffer moves taken, {} old storages held, {} kept for imports in flight; {} imports told; "
+						 "textures: {} imports superseded, {} pinned (written by the GPU); buffers: {} entries moved, {} superseded before they registered "
+						 "(tree LOD's: {} moved, {} before registering)",
+				moves.images, moves.buffers, moves.storagesHeld, moves.unclaimed, moves.held, textures.superseded, textures.pinned, gpu.relocated,
+				gpu.supersededAtImport, treeGpu.relocated, treeGpu.supersededAtImport);
 			logger::info("[DCLF] superseded imports: {}", GpuTextures::Get().DescribeSuperseded());
 		}
 		const auto& capture = DCLF::PassCapture::Get().GetStats();
