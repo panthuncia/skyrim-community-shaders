@@ -1,6 +1,7 @@
 # A short frame-rate sample at the autoloaded save: god mode (a wolf attacks there), 600 frames to settle, then 900 frames
 # between the "start" and "end" marks. Compose it with a mode: guest+perf-quick, native-vulkan+perf-quick,
-# native-d3d12+perf-quick. Read the [Perf] lines between the marks.
+# native-d3d12+perf-quick. Read the [Perf] lines between the marks. With
+# --set env.CS_GPU_EVENT_TIMERS=1000000 the frames between them are one GPU timer window ("[GpuEvents] graph window 'pq'").
 extends = ["base"]
 
 [run]
@@ -20,7 +21,19 @@ arg = "start"
 
 [[steps]]
 at = "previous"
+frames = 0
+do = "org:gpu-window"
+arg = "pq"
+
+[[steps]]
+at = "previous"
 frames = 900
+do = "org:gpu-window"
+arg = "-"
+
+[[steps]]
+at = "previous"
+frames = 0
 do = "mark"
 arg = "end"
 
