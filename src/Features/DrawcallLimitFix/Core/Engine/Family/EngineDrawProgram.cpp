@@ -13,6 +13,7 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "ShaderCache.h"
 #include "Utils/Logging.h"
+#include "Utils/SharedShaderStore.h"
 #include "Utils/SwitchFile.h"
 
 #include <algorithm>
@@ -38,8 +39,11 @@ namespace DCLF::Family
 
 	namespace
 	{
-		// The manifest of keys sessions drew with. The shader store and the old-cache cleanup leave this file alone.
-		constexpr const wchar_t* kManifestPath = L"Data/ShaderCache/v2/engine-draw-programs.txt";
+		/** @brief The manifest of keys sessions drew with, in the store's folder. The store and the old-cache cleanup leave it alone. */
+		std::filesystem::path ManifestPath()
+		{
+			return std::filesystem::path(L"Data/ShaderCache") / ::Util::kShaderStoreDirName / L"engine-draw-programs.txt";
+		}
 		// A line is the family's tag, a tab, then the key's words.
 		constexpr std::size_t kKeyWords = 6 + 4 + kBlendWords + kDepthStencilWords + kRasterWords;
 		// Cap the keys per family, so a broken file or a mod changing states every frame cannot make startup build without bound.
@@ -235,7 +239,7 @@ namespace DCLF::Family
 						}
 				}
 				std::error_code ec;
-				const std::filesystem::path path(kManifestPath);
+				const std::filesystem::path path = ManifestPath();
 				std::filesystem::create_directories(path.parent_path(), ec);
 				auto temporary = path;
 				temporary += L".tmp";
@@ -259,7 +263,7 @@ namespace DCLF::Family
 				if (loaded)
 					return;
 				loaded = true;
-				std::ifstream in{ std::filesystem::path(kManifestPath) };
+				std::ifstream in{ ManifestPath() };
 				if (!in)
 					return;
 				std::string line;

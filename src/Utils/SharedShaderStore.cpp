@@ -20,17 +20,26 @@ namespace Util
 		{
 			std::thread([] {
 				std::error_code ec;
-				uint64_t removed = 0;
+				uint64_t removed = 0, bytes = 0;
 				for (const auto& entry : std::filesystem::directory_iterator(L"Data/ShaderCache", ec)) {
 					if (entry.path().filename().wstring() == kShaderStoreDirName)
 						continue;
+					// The size first, so the log says what the old layout took.
+					std::error_code sizeError;
+					if (entry.is_regular_file(sizeError))
+						bytes += entry.file_size(sizeError);
+					for (std::filesystem::recursive_directory_iterator it(entry.path(), sizeError), end; !sizeError && it != end; it.increment(sizeError)) {
+						std::error_code fileError;
+						if (it->is_regular_file(fileError))
+							bytes += it->file_size(fileError);
+					}
 					std::error_code removeError;
 					removed += std::filesystem::remove_all(entry.path(), removeError);
 					if (removeError)
 						logger::warn("Could not delete old shader cache entry {}: {}", WStringToString(entry.path().wstring()), removeError.message());
 				}
 				if (removed)
-					logger::info("Deleted {} files of the old shader cache", removed);
+					logger::info("Deleted {} files ({} MB) of the old shader cache", removed, bytes >> 20);
 			}).detach();
 		}
 	}
@@ -51,7 +60,11 @@ namespace Util
 				logger::warn("Another game instance owns the shader cache: this one uses it but will not save its index");
 			if (persistent) {
 				const auto info = created->IndexInfo();
-				logger::info("Shader store opened: {} variants, {} artifacts, {} MB, {} evicted", info.variants, info.artifactsAtStart, info.artifactBytesAtStart >> 20, info.artifactsEvicted);
+				logger::info("Shader store opened: {} variants, {} artifacts, {} MB stored ({} MB before compression), {} packs, {} MB on disk, {} recovered, {} evicted, "
+							 "{} packs compacted ({} MB copied, {} MB freed). Index {:.1f} ms, packs {:.1f} ms, compaction {:.1f} ms.",
+					info.variants, info.artifactsAtStart, info.storedBytes >> 20, info.rawBytes >> 20, info.packsAtStart, info.packBytesAtStart >> 20,
+					info.recoveredAtStart, info.artifactsEvicted, info.packsCompacted, info.compactedBytes >> 20, info.reclaimedBytes >> 20,
+					info.indexLoadMicroseconds / 1000.0, info.packScanMicroseconds / 1000.0, info.compactMicroseconds / 1000.0);
 				if (info.overCapBytes)
 					logger::warn("Shader store is {} MB over its size limit, because recent starts used all of it. Raise the limit in Advanced settings if you switch between builds or feature sets.", info.overCapBytes >> 20);
 				RemoveOldCacheFiles();

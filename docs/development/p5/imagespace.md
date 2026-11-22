@@ -131,7 +131,7 @@ both graph modes. This section is the history of the guest client.
   by `RE::RENDER_TARGET` (with the mip, the depth or cube bit), samplers by their address and filter modes, the blend state by its
   four engine table fields (mode, alpha to coverage, write mode, extra), the viewport in pixels. Two sessions name the same shape the
   same way.
-- **The manifest.** Every shape the port sees is written to `Data/ShaderCache/v2/ImageSpaceShapes.json` (beside the shader store), with
+- **The manifest.** Every shape the port sees is written to `Data/ShaderCache/v3/ImageSpaceShapes.json` (beside the shader store), with
   its place in the frame (scope and draw index), and each seen effect's program defines. The file is rewritten whenever the session
   has seen shapes since the last write (new ones, or known ones whose last session it updates), at most every 300 frames, so the
   world's shapes are written after the main menu's. A shape not seen for 16 sessions is dropped; at most 256 are kept.

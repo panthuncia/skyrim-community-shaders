@@ -128,7 +128,7 @@ each family doc has a "Primary path" section with its own "What stays the engine
 - **Program keys are values (rule 2).** `Family::ProgramKey` holds the descriptor CS looks the shader up by (`State::modified*`), the
   variant, the target formats and the D3D11 descriptions of the blend, depth-stencil and rasterizer states field by field
   (`Family::DescribeStates` over `Pipeline::FindBlend/FindDepthStencil/FindRaster`). A program is built from its key alone. The
-  manifest is `Data/ShaderCache/v2/engine-draw-programs.txt` (one line a key, family tag then the key's words; at most 512 keys a
+  manifest is `Data/ShaderCache/v3/engine-draw-programs.txt` (one line a key, family tag then the key's words; at most 512 keys a
   family; written on ProgramCache's thread when a key is first drawn). At setup each family asks for the manifest's keys
   (`EngineDrawPrograms::Prebuild`), which are queued on ProgramCache's build thread as soon as the family's shader object is known
   (setup, the LoadShaders enumeration, or at the latest the first draw). The `not prebuilt` line carries the key's hash: one descriptor

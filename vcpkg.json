@@ -47,7 +47,8 @@
         },
         "unordered-dense",
         "xbyak",
-        "xxhash"
+        "xxhash",
+        "zstd"
     ],
     "overrides": [
         {

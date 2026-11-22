@@ -11,8 +11,9 @@ namespace org::services
 /// The plugin's one shader store. FXC and DXC builds share it, and a cache folder can only have one owner.
 namespace Util
 {
-	/// Subdirectory of Data/ShaderCache holding the store.
-	inline constexpr std::wstring_view kShaderStoreDirName = L"v2";
+	/// Subdirectory of Data/ShaderCache holding the store. v3 is the pack-file layout. A start deletes every other
+	/// entry of Data/ShaderCache, so the v2 folder of loose artifact files goes once, and v3 is rebuilt.
+	inline constexpr std::wstring_view kShaderStoreDirName = L"v3";
 
 	/// The store, opened on first use. Settings must be loaded by then: the disk cache setting decides whether it saves anything.
 	std::shared_ptr<org::services::ShaderStore> SharedShaderStore();
