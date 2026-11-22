@@ -1045,6 +1045,9 @@ namespace RenderGraph::Frame::Revision
 			const auto completed = Retirement::Clock()->Completed();
 			while (!a_coordinator.retiring.empty() && a_coordinator.retiring.front().first <= completed)
 				a_coordinator.retiring.pop_front();
+			// The assembler keeps the publication the last adoption replaced until it is reclaimed. It names that revision's versions.
+			if (a_coordinator.assembler)
+				a_coordinator.assembler->ReclaimRetired();
 			// A replaced version goes once its retiring revision, the recordings that bound it and the frames that ran it are gone.
 			// One still held long after is a holder this rule missed.
 			constexpr std::uint64_t kHeldFrames = 600;
