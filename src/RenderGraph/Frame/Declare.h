@@ -178,9 +178,14 @@ namespace RenderGraph::Frame
 
 	/**
 	* @brief Render owner (fatal elsewhere), at setup. Makes a versioned twin from a_desc of the newest values and follows a_dependencies from then
-	* on. a_options.versioned is forced on. A Transient lifetime is fatal: declare Persistent or History. A description that changes
-	* more than the extent is fatal. a_renew, when given, reads
+	* on. a_options.versioned is forced on. A description that changes more than the extent is fatal. a_renew, when given, reads
 	* only a_dependencies too. Never null: a twin that cannot be made is fatal.
+	*
+	* A Transient lifetime means each version holds its contents within one frame: its first use each frame writes it, and no later
+	* frame reads it. Its versions are then alias candidates of ORG's frame placement (ORG_FRAME_PLACEMENT), which may share their
+	* bytes with other transients of the frame. Without it each version keeps memory of its own. A Transient texture is graph-only
+	* and born undefined: a D3D11 export or a birth that writes it is fatal. Like any CS transient, its readers need a writer in
+	* their own stage (the recipe's read-order check).
 	*
 	* a_options.birth is applied by the revision lane to every version. A birth that writes (Zero, Value, Fill) makes the first
 	* version on the lane too: the first revision after this call carries it, so no frame binds a version that was not born. A
@@ -271,6 +276,10 @@ namespace RenderGraph::Frame
 	* then registers the client again, and the revision waits for the builds of its stages, so the new size switches in with
 	* them at one Begin. Its passes write it before they read it, in one run of one stage. No later run, epoch or frame reads it,
 	* and it is never published. Render thread.
+	*
+	* A Transient DeclareTexture2D/3D is the same contract with versions in place of registrations. It is placed only by ORG's
+	* frame placement, while each registration's transient is also aliased in its stage's own pools. So this stays until the frame
+	* placement is on by default, and new transients may use either.
 	*/
 	template <class Twin>
 	class DeclaredTransient
