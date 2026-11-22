@@ -1,6 +1,7 @@
 #include "Border.h"
 
-#include "Deferred.h"
+#include "Features/PostProcessing.h"
+#include "Features/Upscaling.h"
 #include "I18n/I18n.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -44,39 +45,9 @@ void Border::SaveSettings(json& o_json)
 
 void Border::SetupResources()
 {
-	auto renderer = globals::game::renderer;
-
 	logger::debug("Creating buffers...");
 	{
 		borderCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<BorderCB>(), "PostProcessing::Border::Constants");
-	}
-
-	logger::debug("Creating 2D textures...");
-	{
-		auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
-
-		D3D11_TEXTURE2D_DESC texDesc;
-		gameTexMainCopy.texture->GetDesc(&texDesc);
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
-			.Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 }
-		};
-
-		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
-			.Texture2D = { .MipSlice = 0 }
-		};
-
-		texDesc.MipLevels = srvDesc.Texture2D.MipLevels = 1;
-		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		texDesc.MiscFlags = 0;
-
-		texOutput = eastl::make_unique<Texture2D>(texDesc, "PostProcessing::Border::Output");
-		texOutput->CreateSRV(srvDesc);
-		texOutput->CreateUAV(uavDesc);
 	}
 
 	CompileComputeShaders();
@@ -161,7 +132,11 @@ void Border::ClearMotionVectorsForFrameGen()
 
 void Border::Draw(TextureInfo& inout_tex)
 {
-	if (!AllShadersReady({ &borderCS }))
+	if (!owner || !AllShadersReady({ &borderCS }))
+		return;
+
+	auto* texOutput = owner->GetColorTarget(inout_tex.tex);
+	if (!texOutput)
 		return;
 
 	globals::profiler->BeginPass("PostProcessing::Border");
@@ -183,11 +158,10 @@ void Border::Draw(TextureInfo& inout_tex)
 		globals::profiler->EndPass();
 		return;
 	}
-	auto motion = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
 	ID3D11ShaderResourceView* srvs[2] = { inout_tex.srv, depthSRV };
 	context->CSSetShaderResources(0, 2, srvs);
-	ID3D11UnorderedAccessView* uavs[2] = { texOutput->uav.get(), motion.UAV };
-	context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+	ID3D11UnorderedAccessView* uav = texOutput->uav.get();
+	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 	ID3D11Buffer* cb = borderCB->CB();
 	context->CSSetConstantBuffers(1, 1, &cb);
 	context->CSSetShader(borderCS.get(), nullptr, 0);
@@ -196,10 +170,9 @@ void Border::Draw(TextureInfo& inout_tex)
 
 	srvs[0] = nullptr;
 	srvs[1] = nullptr;
-	uavs[0] = nullptr;
-	uavs[1] = nullptr;
+	uav = nullptr;
 	cb = nullptr;
-	context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 	context->CSSetShaderResources(0, 2, srvs);
 	context->CSSetConstantBuffers(1, 1, &cb);
 	context->CSSetShader(nullptr, nullptr, 0);
