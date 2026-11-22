@@ -4187,12 +4187,60 @@ namespace RenderGraph::Engine::Native
 				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(old)));
 			return true;
 		}
+
+		/**
+		 * @brief The records WrapGraphTexture made. A frame placement gives their textures new images with no journal entry, so they
+		 * are checked every frame. Expired entries are dropped as they are found.
+		 */
+		struct GraphTextureRecords
+		{
+			std::mutex lock;
+			std::vector<std::weak_ptr<NativeResource>> records;
+		};
+
+		GraphTextureRecords& GraphTextures()
+		{
+			// Never destroyed, since records can go during static destruction.
+			static auto* records = new GraphTextureRecords;
+			return *records;
+		}
+
+		/** @brief Points every live WrapGraphTexture record at its texture's current image. Render thread. */
+		void FollowGraphTextures()
+		{
+			std::vector<std::shared_ptr<NativeResource>> live;
+			{
+				auto& textures = GraphTextures();
+				std::lock_guard guard(textures.lock);
+				live.reserve(textures.records.size());
+				std::erase_if(textures.records, [&](const std::weak_ptr<NativeResource>& a_weak) {
+					auto record = a_weak.lock();
+					if (!record)
+						return true;
+					live.push_back(std::move(record));
+					return false;
+				});
+			}
+			std::size_t followed = 0;
+			for (const auto& record : live)
+				if (FollowMovedImage(*record))
+					++followed;
+			if (followed) {
+				static std::uint32_t logged = 0;
+				if (logged < 32) {
+					++logged;
+					logger::info("[ORG native] graph textures: {} engine target versions have new images (a frame placement or a move)", followed);
+				}
+			}
+		}
 	}
 
 	void FollowRelocations()
 	{
 		if (!g_device)
 			return;
+		// Before the journal, since a frame placement changes images without an entry.
+		FollowGraphTextures();
 		const auto& journal = org::relocation::Service::Get().Journal();
 		// From 0, so the first read covers every move before it.
 		static std::uint64_t cursor = 0;
@@ -4570,6 +4618,79 @@ namespace RenderGraph::Engine::Native
 		return g_device->immediate.Run(label, work, record, {}) != 0;
 	}
 
+	namespace
+	{
+		/** @brief Zeroes a wrapped image that can be cleared, as DXVK's wrap does. Block-compressed images stay as made: their owners write them before reading. */
+		void ZeroWrapped(const std::shared_ptr<NativeResource>& a_record, UINT a_bindFlags)
+		{
+			if (a_record->shape.blocks)
+				return;
+			const bool renderTarget = (a_bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
+			const bool depthStencil = (a_bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
+			const bool unordered = (a_bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
+			if (!renderTarget && !depthStencil && !unordered)
+				return;
+			const auto& record = a_record;
+			const auto range = AllOf(*record);
+			const std::array uses{ renderTarget || depthStencil ? ClearUse(*record, range, depthStencil) : UnorderedUse(*record, range) };
+			RunOp(
+				"zero " + record->name, uses,
+				[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
+					static constexpr float kZero[4]{};
+					static constexpr uint32_t kZeroWords[4]{};
+					const auto handle = a_handles[0].GetHandle();
+					if (depthStencil)
+						ClearImageRhi(a_list, a_descriptors, *record, handle, range, nullptr, true, true, (record->shape.aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0, 0.0f, 0);
+					else if (renderTarget)
+						ClearImageRhi(a_list, a_descriptors, *record, handle, range, kZero, false, false, false, 0.0f, 0);
+					else
+						ClearUnorderedRhi(a_list, a_descriptors, *record, a_handles[0], range, 0, 0, kZeroWords, nullptr);
+				},
+				{ record });
+		}
+
+		/** @brief The texture handle over a wrap record, in the request's dimension. The handle keeps the record. */
+		winrt::com_ptr<ID3D11Resource> WrapHandle(const std::shared_ptr<NativeResource>& a_record, const TextureRequest& a_request, uint32_t a_depth, uint32_t a_layers)
+		{
+			Tripwire::Options options;
+			options.name = a_request.name;
+			options.owner = a_record;
+			winrt::com_ptr<ID3D11Resource> result;
+			switch (a_request.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				{
+					const D3D11_TEXTURE3D_DESC desc{ a_request.width, a_request.height, a_depth, a_request.mipLevels, a_request.format, D3D11_USAGE_DEFAULT,
+						a_request.bindFlags, 0, a_request.miscFlags };
+					result.copy_from(Tripwire::CreateTexture3D(desc, std::move(options)).get());
+					break;
+				}
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				{
+					const D3D11_TEXTURE1D_DESC desc{ a_request.width, a_request.mipLevels, a_layers, a_request.format, D3D11_USAGE_DEFAULT, a_request.bindFlags, 0,
+						a_request.miscFlags };
+					result.copy_from(Tripwire::CreateTexture1D(desc, std::move(options)).get());
+					break;
+				}
+			default:
+				{
+					const D3D11_TEXTURE2D_DESC desc{ a_request.width, a_request.height, a_request.mipLevels, a_layers, a_request.format, { a_request.sampleCount, 0 },
+						D3D11_USAGE_DEFAULT, a_request.bindFlags, 0, a_request.miscFlags };
+					result.copy_from(Tripwire::CreateTexture2D(desc, std::move(options)).get());
+					break;
+				}
+			}
+			return result;
+		}
+
+		/** @brief A wrap's request: the texture as D3D11 describes it, with no CPU access. */
+		TextureRequest WrapRequestOf(const DxvkOrgInteropTextureWrap& a_wrap, const D3D11_SUBRESOURCE_DATA* a_data, const char* a_name)
+		{
+			return { static_cast<D3D11_RESOURCE_DIMENSION>(a_wrap.dimension), a_wrap.width, a_wrap.height, (std::max)(a_wrap.depthOrArraySize, 1u),
+				(std::max)(a_wrap.mipLevels, 1u), (std::max)(a_wrap.sampleCount, 1u), static_cast<DXGI_FORMAT>(a_wrap.format), D3D11_USAGE_DEFAULT, a_wrap.bindFlags, 0,
+				a_wrap.miscFlags, a_data, a_name ? a_name : "Native::Wrapped" };
+		}
+	}
+
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
 		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data, WrapFlags a_flags)
 	{
@@ -4583,9 +4704,7 @@ namespace RenderGraph::Engine::Native
 			return nullptr;
 		}
 		const auto dimension = static_cast<D3D11_RESOURCE_DIMENSION>(a_wrap.dimension);
-		TextureRequest request{ dimension, a_wrap.width, a_wrap.height, (std::max)(a_wrap.depthOrArraySize, 1u), (std::max)(a_wrap.mipLevels, 1u),
-			(std::max)(a_wrap.sampleCount, 1u), static_cast<DXGI_FORMAT>(a_wrap.format), D3D11_USAGE_DEFAULT, a_wrap.bindFlags, 0, a_wrap.miscFlags, a_data,
-			a_name ? a_name : "Native::Wrapped" };
+		const TextureRequest request = WrapRequestOf(a_wrap, a_data, a_name);
 		const DXGI_FORMAT dxgiFormat = ResolveTypeless(request.format, request.bindFlags);
 		const rhi::Format format = rhi::helpers::ToRHI(dxgiFormat);
 		const uint32_t depth = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? request.depthOrArraySize : 1;
@@ -4604,62 +4723,96 @@ namespace RenderGraph::Engine::Native
 			LogOnce(loggedInitialize, request.name, "the image to wrap could not be moved into GENERAL or given its contents");
 			return nullptr;
 		}
-		// Block-compressed images cannot be cleared, so they stay as made. Their owners write them before reading.
-		if (!deferred && !a_data && !record->shape.blocks) {
-			const bool renderTarget = (request.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
-			const bool depthStencil = (request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
-			const bool unordered = (request.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
-			if (renderTarget || depthStencil || unordered) {
-				const auto range = AllOf(*record);
-				const std::array uses{ renderTarget || depthStencil ? ClearUse(*record, range, depthStencil) : UnorderedUse(*record, range) };
-				RunOp(
-					"zero " + record->name, uses,
-					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
-						static constexpr float kZero[4]{};
-						static constexpr uint32_t kZeroWords[4]{};
-						const auto handle = a_handles[0].GetHandle();
-						if (depthStencil)
-							ClearImageRhi(a_list, a_descriptors, *record, handle, range, nullptr, true, true, (record->shape.aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0, 0.0f, 0);
-						else if (renderTarget)
-							ClearImageRhi(a_list, a_descriptors, *record, handle, range, kZero, false, false, false, 0.0f, 0);
-						else
-							ClearUnorderedRhi(a_list, a_descriptors, *record, a_handles[0], range, 0, 0, kZeroWords, nullptr);
-					},
-					{ record });
+		if (!deferred && !a_data)
+			ZeroWrapped(record, request.bindFlags);
+		a_info = {};
+		a_info.version = DXVK_ORG_INTEROP_VERSION;
+		a_info.kind = DXVK_ORG_INTEROP_RESOURCE_IMAGE;
+		a_info.image = record->image;
+		return WrapHandle(record, request, depth, layers);
+	}
+
+	bool CanWrapGraphTexture(DXGI_FORMAT a_format, UINT a_bindFlags, std::string& a_why)
+	{
+		if (!g_device) {
+			a_why = "native mode is not active";
+			return false;
+		}
+		const rhi::Format format = rhi::helpers::ToRHI(ResolveTypeless(a_format, a_bindFlags));
+		rhi::FormatSupport support{};
+		if (format == rhi::Format::Unknown || g_device->Rhi().QueryFormatSupport(format, support) != rhi::Result::Ok) {
+			a_why = fmt::format("DXGI format {} has no BasicRHI format", static_cast<int>(a_format));
+			return false;
+		}
+		// The record's views would need a swizzle the ORG texture's views do not have (as MakeGraphOwned keeps such textures host-made).
+		if (support.srvSwizzle) {
+			a_why = fmt::format("BasicRHI stores DXGI format {} as another, read through a swizzle", static_cast<int>(a_format));
+			return false;
+		}
+		return true;
+	}
+
+	winrt::com_ptr<ID3D11Resource> WrapGraphTexture(const std::shared_ptr<org::PixelBuffer>& a_texture, const DxvkOrgInteropTextureWrap& a_wrap,
+		DxvkOrgInteropResourceInfo& a_info, const char* a_name, WrapFlags a_flags)
+	{
+		if (!g_device || !a_texture)
+			return nullptr;
+		const bool deferred = a_flags == WrapFlags::DeferInitialize;
+		const auto dimension = static_cast<D3D11_RESOURCE_DIMENSION>(a_wrap.dimension);
+		const TextureRequest request = WrapRequestOf(a_wrap, nullptr, a_name);
+		const DXGI_FORMAT dxgiFormat = ResolveTypeless(request.format, request.bindFlags);
+		const rhi::Format format = rhi::helpers::ToRHI(dxgiFormat);
+		const uint32_t depth = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? request.depthOrArraySize : 1;
+		const uint32_t layers = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? 1 : request.depthOrArraySize;
+		static std::atomic<bool> loggedDescribe = false, loggedImport = false, loggedInitialize = false;
+		auto record = MakeWrapRecord(a_name);
+		NoteRequest(*record, request);
+		rhi::FormatSupport support{};
+		(void)g_device->Rhi().QueryFormatSupport(format, support);
+		// The record describes the texture's image as a tracked texture's does: GENERAL, the layout ORG's ledger names Common.
+		if (!NativeState::FillImage(*record, a_texture->GetAPIResource(), request, dxgiFormat, format, support, request.mipLevels, layers, depth,
+				VK_IMAGE_LAYOUT_GENERAL)) {
+			LogOnce(loggedDescribe, request.name, "BasicRHI did not describe the ORG texture to wrap");
+			return nullptr;
+		}
+		// The context's import of the image. Operations name the ledger's own handle; this one is for work outside the ledgers.
+		record->resource = ::RenderGraph::ImportDxvkImage(g_device->Rhi(), record->image, request.name.c_str());
+		if (!record->resource) {
+			LogOnce(loggedImport, request.name, "the ORG texture's image could not be imported for the context");
+			return nullptr;
+		}
+		// Tracked only once graphOwned holds its final value, as FollowRelocations reads them in that order.
+		record->graphOwned = a_texture;
+		record->ownership = NativeResource::Ownership::Tracked;
+		if (!deferred) {
+			// Registered as owned so the first contents go through the ledger. The caller registers it again with its slot.
+			NoteOwnedImage(*record);
+			if (!g_device->InitializeTracked(*record, request, format, request.mipLevels, layers, depth)) {
+				LogOnce(loggedInitialize, request.name, "the ORG texture's first layout could not be written");
+				return nullptr;
 			}
+			ZeroWrapped(record, request.bindFlags);
+		}
+		{
+			auto& textures = GraphTextures();
+			std::lock_guard guard(textures.lock);
+			textures.records.push_back(record);
 		}
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
 		a_info.kind = DXVK_ORG_INTEROP_RESOURCE_IMAGE;
 		a_info.image = record->image;
+		return WrapHandle(record, request, depth, layers);
+	}
 
-		Tripwire::Options options;
-		options.name = request.name;
-		options.owner = record;
-		const auto format11 = static_cast<DXGI_FORMAT>(a_wrap.format);
-		winrt::com_ptr<ID3D11Resource> result;
-		switch (dimension) {
-		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-			{
-				const D3D11_TEXTURE3D_DESC desc{ request.width, request.height, depth, request.mipLevels, format11, D3D11_USAGE_DEFAULT, request.bindFlags, 0, request.miscFlags };
-				result.copy_from(Tripwire::CreateTexture3D(desc, std::move(options)).get());
-				break;
-			}
-		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
-			{
-				const D3D11_TEXTURE1D_DESC desc{ request.width, request.mipLevels, layers, format11, D3D11_USAGE_DEFAULT, request.bindFlags, 0, request.miscFlags };
-				result.copy_from(Tripwire::CreateTexture1D(desc, std::move(options)).get());
-				break;
-			}
-		default:
-			{
-				const D3D11_TEXTURE2D_DESC desc{ request.width, request.height, request.mipLevels, layers, format11, { request.sampleCount, 0 }, D3D11_USAGE_DEFAULT,
-					request.bindFlags, 0, request.miscFlags };
-				result.copy_from(Tripwire::CreateTexture2D(desc, std::move(options)).get());
-				break;
-			}
-		}
-		return result;
+	std::uint64_t FollowGraphTexture(const IUnknown* a_texture)
+	{
+		const auto record = g_device && a_texture ? Resolve(a_texture) : nullptr;
+		if (!record || record->kind != NativeResource::Kind::Image || record->ownership != NativeResource::Ownership::Tracked || !record->graphOwned)
+			return 0;
+		(void)FollowMovedImage(*record);
+		std::lock_guard guard(record->graphLock);
+		return reinterpret_cast<std::uint64_t>(record->image.image);
 	}
 
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc, const char* a_name)

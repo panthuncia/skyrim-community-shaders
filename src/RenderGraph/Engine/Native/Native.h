@@ -33,6 +33,7 @@ namespace rhi
 namespace org
 {
 	class ExternalTextureResource;
+	class PixelBuffer;
 	class Runtime;
 	class VersionedTexture;
 }
@@ -133,7 +134,8 @@ namespace RenderGraph::Engine::Native
 
 	/**
 	* @brief Reads ORG's relocation journal and points each graph-owned texture's record at its new image (NativeResource::Rebind,
-	* ImageRegistry::Rekey). Render thread, at the frame's end after the host's commit (RenderGraphRuntime::SealPresented).
+	* ImageRegistry::Rekey). WrapGraphTexture's records are checked against their texture's image every call, since a frame placement
+	* changes it with no journal entry. Render thread, at the frame's end after the host's commit (RenderGraphRuntime::SealPresented).
 	*/
 	void FollowRelocations();
 
@@ -214,6 +216,29 @@ namespace RenderGraph::Engine::Native
 	 */
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
 		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data, WrapFlags a_flags = WrapFlags::None);
+
+	/**
+	 * @brief Whether WrapGraphTexture can make a handle over an ORG texture of a_format with a_bindFlags (D3D11_BIND_*). False, with
+	 * a_why, off native mode or for a format BasicRHI reads through a swizzle. Any thread.
+	 */
+	bool CanWrapGraphTexture(DXGI_FORMAT a_format, UINT a_bindFlags, std::string& a_why);
+
+	/**
+	 * @brief A native texture handle over an ORG texture: a tracked record whose graph resource is a_texture, so ORG's placement and
+	 * moves reach the memory D3D11 users see. The record and every view made over the handle follow a_texture's image: journal moves
+	 * at FollowRelocations, and image changes with no journal entry (a frame placement) every frame there too. Without
+	 * DeferInitialize it gives the texture its first layout through the ledger and zeroes it when it can be cleared; the caller then
+	 * registers it in ImageRegistry, replacing the owned entry made here. With DeferInitialize it is CPU-only (any thread), registers
+	 * nothing, and the texture stays Undefined for its graph birth. Null on failure.
+	 */
+	winrt::com_ptr<ID3D11Resource> WrapGraphTexture(const std::shared_ptr<org::PixelBuffer>& a_texture, const DxvkOrgInteropTextureWrap& a_wrap,
+		DxvkOrgInteropResourceInfo& a_info, const char* a_name, WrapFlags a_flags = WrapFlags::None);
+
+	/**
+	 * @brief Points a WrapGraphTexture handle's record at its texture's current image, and returns that image as ImageRegistry keys it.
+	 * 0 when a_texture is not such a handle. Render thread.
+	 */
+	std::uint64_t FollowGraphTexture(const IUnknown* a_texture);
 
 	/** @brief A native buffer handle over a port's BasicRHI buffer. Null on failure. */
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc, const char* a_name);
