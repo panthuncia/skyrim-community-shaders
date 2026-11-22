@@ -1025,12 +1025,13 @@ void EffectManager::PublishAdaptedLuminance(ID3D11ShaderResourceView* a_adaptati
 	static REL::Relocation<RE::ImageSpaceTexture*> luminanceHistory{ RELOCATION_ID(513464, 391302) };
 
 	const auto target = GetEngineAdaptedLuminanceTarget();
-	const auto& luminance = globals::game::renderer->GetRuntimeData().renderTargets[target];
-	if (!luminance.RTV)
+	// Engine target fields can be tripwire handles: DXVK's context takes the object they wrap.
+	auto* luminanceRTV = RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[target].RTV);
+	if (!luminanceRTV)
 		return;
 
-	if (!a_adaptation || !broadcastPixelShader || !CopyTexture(a_adaptation, luminance.RTV, false, broadcastPixelShader.get()))
-		globals::d3d::context->ClearRenderTargetView(luminance.RTV, kNeutralLuminance);
+	if (!a_adaptation || !broadcastPixelShader || !CopyTexture(a_adaptation, luminanceRTV, false, broadcastPixelShader.get()))
+		globals::d3d::context->ClearRenderTargetView(luminanceRTV, kNeutralLuminance);
 
 	// Same fields the engine sets when it acquires a render target into an ImageSpaceTexture
 	if (luminanceHistory->renderTarget != target) {
