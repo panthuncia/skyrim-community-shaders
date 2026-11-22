@@ -726,8 +726,9 @@ namespace DCLF
 		// If nothing the requirement pass reads has moved, this make would seal the same revision, so keep the last one.
 		ImplSnapshotBuilder::RevisionReuse::Key key;
 		std::uint32_t moved = RequirementsMoved(*this, reuse, a_publication, lookups, key);
-		// A due shrink changes what the pass seals without moving the key, so run the pass.
-		if (!moved && (SceneBufferSet::Get().ShrinkPending() ||
+		// A due shrink changes what the pass seals without moving the key, so run the pass. So does a buffer move: the seal names
+		// the new addresses, and frames wait for it (SceneBufferSet::AddressesCurrent).
+		if (!moved && (SceneBufferSet::Get().ShrinkPending() || SceneBufferSet::Get().AddressesMoved() ||
 						  producer.mainWindows.Due(PooledBackings::Shrink(), org::services::ShrinkWindow::Clock::now())))
 			moved = 1u << ImplSnapshotBuilder::RevisionReuse::kMovedShrink;
 		if (moved == 0) {

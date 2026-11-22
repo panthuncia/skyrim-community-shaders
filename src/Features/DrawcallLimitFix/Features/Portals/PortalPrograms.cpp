@@ -73,7 +73,7 @@ namespace DCLF::Features::Portals
 			scene->members = CreateBatch(a_setup, "cs.dclf.member-portal");
 			if (!scene->members)
 				return nullptr;
-			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), ::RenderGraph::Frame::Retirement::Clock(),
+			scene->pool = org::services::BackingPool::Create(PooledBackings::PerFrameHooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = kProgramsName, .maxPerClass = 0, .spareFree = PooledBackings::PerFrameSpares() });
 			auto standIn = a_setup.StructuredBuffer(1, 4, kStandInName);
 			if (!standIn)

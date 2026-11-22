@@ -208,7 +208,7 @@ namespace DCLF::Draws
 		/** @brief The sequences' backing pool. Never destroyed, because a lease may return late. */
 		const std::shared_ptr<org::services::BackingPool>& SequencesPool()
 		{
-			static const auto* pool = new std::shared_ptr<org::services::BackingPool>(org::services::BackingPool::Create(PooledBackings::Hooks(), ::RenderGraph::Frame::Retirement::Clock(),
+			static const auto* pool = new std::shared_ptr<org::services::BackingPool>(org::services::BackingPool::Create(PooledBackings::PerFrameHooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = "cs.dclf.cpu.sequences",
 					// A frame in flight's set, the installed one's, the one being built, and a set a site still holds per frame slot.
 					.maxPerClass = RenderGraphRuntime::kGameFramesInFlight + 3,

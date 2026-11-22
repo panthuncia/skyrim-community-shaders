@@ -155,6 +155,8 @@ namespace DCLF
 		std::uint64_t restageInputSerial = 0;
 		// Adopted scenes with a recording of a version the frame does not read, in the session (CheckSceneVersions).
 		std::uint64_t staleSceneVersions = 0;
+		// Frames whose adopted scene was sealed before an idle buffer move, in the session (SceneBufferSet::AddressesCurrent).
+		std::uint64_t addressWaitFrames = 0;
 		// Render thread. Whether the adopted scene binds a version the frame does not read, checked at each adoption that could change it.
 		// Such a scene covers nothing.
 		bool sceneVersionsStale = false;

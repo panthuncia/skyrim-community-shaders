@@ -62,6 +62,13 @@ namespace DCLF::Draws
 		std::string Report();
 		/** @brief Producer. Whether a shrink waits to be observed or named. */
 		bool ShrinkPending() const { return set.ShrinkPending(); }
+		/** @brief Producer. Whether buffers moved since the last seal, so the next one names their new addresses. */
+		bool AddressesMoved() const { return set.AddressesMoved(); }
+		/**
+		 * @brief Any thread. Whether a_sealed names the addresses every buffer of the set has now: false for a set sealed before an
+		 * idle move, whose shapes and recordings may still hold the old ones.
+		 */
+		bool AddressesCurrent(const org::services::NamedVersions& a_sealed) const { return a_sealed.AddressEpoch() >= set.MovedEpoch(); }
 
 	private:
 		SceneBufferSet();

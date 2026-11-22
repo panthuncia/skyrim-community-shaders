@@ -65,7 +65,9 @@ namespace DCLF::Draws
 		std::shared_ptr<org::services::BackingPool> MakePool(std::size_t a_part,
 			std::function<void(org::services::BackingPoolEvent, std::string_view, std::uint64_t)> a_telemetry)
 		{
-			auto hooks = PooledBackings::Hooks();
+			// A payload version lives for a scene revision or two, so its churn goes to ORG's per-frame blocks. The row bases hand
+			// out its address (Backing::address), which stays valid there: per-frame backings never move.
+			auto hooks = PooledBackings::PerFrameHooks();
 			hooks.telemetry = std::move(a_telemetry);
 			// One spare is enough. A fresh backing costs a GPU copy, not an upload, so more spares only hold VRAM.
 			// On HexRim five pipeline-row backings took 40 MB.

@@ -199,9 +199,10 @@ namespace DCLF
 				s.revisions.engine[e] != EngineState::None ? fmt::format("the engine's ({})", EngineStateName(s.revisions.engine[e])) :
 				                                             std::string("UNCOVERED"),
 				EpochTraitsOf(e).claims ? " (claims)" : "");
-		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, current {}, versions stale {}, frame versions {}, build generation {} against {} "
-						   "attached, main generation {} against {}), newest taken dropped {}, payload {}, adopted set {}; epochs: {}",
+		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, current {}, versions stale {}, addresses current {}, frame versions {}, build "
+						   "generation {} against {} attached, main generation {} against {}), newest taken dropped {}, payload {}, adopted set {}; epochs: {}",
 			adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete, s.AdoptedCurrent(), s.sceneVersionsStale,
+			!s.adoptedSet || SceneBufferSet::Get().AddressesCurrent(*s.adoptedSet),
 			adopted ? adopted->frameVersions : 0,
 			adopted ? adopted->buildGeneration : 0, host ? Impl::GraphBuildGeneration(*host) : 0,
 			adopted ? adopted->mainGeneration : 0, s.postedInputs.mainGeneration, s.snapshotStale, !payload ? "none" : FrameValues::Get().Available() ? "installed" : "installed, NO FRAME VALUES",
@@ -224,6 +225,12 @@ namespace DCLF
 		// A scene that binds a version the frame does not read covers nothing (CheckSceneVersions).
 		bool snapshot = adoptedSnapshot && adoptedSnapshot->drawsComplete && AdoptedCurrent() && !sceneVersionsStale && payload && PayloadPools::Available() &&
 		                FrameValues::Get().Available();
+		// After an idle buffer move, a scene sealed before it may name the old device addresses in its shapes and recordings. It
+		// covers nothing, and the move wakes the producer to seal one with the new addresses.
+		if (snapshot && adoptedSet && !SceneBufferSet::Get().AddressesCurrent(*adoptedSet)) {
+			snapshot = false;
+			++addressWaitFrames;
+		}
 		const bool current = host && snapshot && versions && versions.get() == adoptedSet;
 		// Records how many frames passed between a growth's adoption and the first draws that use its versions.
 		if (current && snapshot && growthAdoptedFrame != ~0u) {

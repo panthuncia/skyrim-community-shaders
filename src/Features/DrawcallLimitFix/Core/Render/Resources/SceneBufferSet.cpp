@@ -1,6 +1,7 @@
 // The scene's growable buffers: registration, ties to DCLF's state graph, and the producer's requirements and seals.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
+#include "RenderGraph/Relocation/Holders.h"
 
 #include <ORGModuleServices/ElasticCapacity.h>
 
@@ -39,7 +40,17 @@ namespace DCLF::Draws
 			};
 			return hooks;
 		}())
-	{}
+	{
+		// The set names its versions' device addresses (DeviceAddressOf marks them FollowAtIdle). After an idle move its next
+		// seal reads them again, and frames wait for a set sealed after the move (AddressesCurrent).
+		::RenderGraph::Relocation::AddBufferMovesListener([this] {
+			const auto epoch = set.NoteBuffersMoved();
+			logger::info("[DCLF] buffers moved: the scene's buffer set reads its device addresses again at its next seal (move {}); "
+						 "frames wait for that set",
+				epoch);
+			WakeSnapshotBuilder();
+		});
+	}
 
 	Versioned MakeVersioned(std::shared_ptr<org::Buffer> a_buffer, GrowableSpec a_spec)
 	{

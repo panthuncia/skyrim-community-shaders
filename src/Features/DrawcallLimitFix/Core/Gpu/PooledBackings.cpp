@@ -25,18 +25,37 @@ namespace DCLF::PooledBackings
 
 	std::uint64_t DeviceAddressOf(const org::Buffer& a_buffer)
 	{
-		// Shaders read the address from GPU data, so the buffer never moves once it went out.
-		::RenderGraph::Relocation::Pin(a_buffer);
+		// The scene's set reads the address again after an idle move (SceneBufferSet follows the journal).
+		::RenderGraph::Relocation::FollowAtIdle(a_buffer);
 		return org::services::GraphHostDeviceAddress(Host(), a_buffer);
 	}
 
 	org::services::BackingPoolHooks Hooks()
 	{
 		auto hooks = org::services::GraphHostBackingHooks(Host());
-		// A backing made with its device address hands it out at once (Backing::address).
 		hooks.allocate = [allocate = std::move(hooks.allocate)](const org::services::BackingRequest& a_request) {
 			auto allocation = allocate(a_request);
-			if (a_request.flags.deviceAddress && allocation.buffer)
+			if (a_request.flags.deviceAddress && allocation.buffer) {
+				// A long-lived backing may move while the GPU is idle, so the pool keeps no address that would go stale.
+				// Readers ask the buffer (DeviceAddressOf), and follow its moves.
+				::RenderGraph::Relocation::FollowAtIdle(*allocation.buffer);
+				allocation.address = 0;
+			}
+			return allocation;
+		};
+		return hooks;
+	}
+
+	org::services::BackingPoolHooks PerFrameHooks()
+	{
+		auto hooks = org::services::GraphHostBackingHooks(Host());
+		hooks.allocate = [allocate = std::move(hooks.allocate)](const org::services::BackingRequest& a_request) {
+			// Every backing of the pool is made this way, so the pool's reuse by equal flags is unchanged.
+			auto request = a_request;
+			request.flags.perFrame = true;
+			auto allocation = allocate(request);
+			// ORG never moves a per-frame backing. The pin says the same for the address it hands out (Backing::address).
+			if (request.flags.deviceAddress && allocation.buffer)
 				::RenderGraph::Relocation::Pin(*allocation.buffer);
 			return allocation;
 		};
