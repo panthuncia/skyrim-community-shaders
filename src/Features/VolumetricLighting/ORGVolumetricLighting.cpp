@@ -22,6 +22,7 @@
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RasterProgram.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
@@ -804,6 +805,8 @@ struct ORGVolumetricLighting::Impl
 			return;
 		if (run->noise && !noiseDone) {
 			noiseDone = true;
+			// The fill is its only write. From now on ORG may move the volume (ReadOnly).
+			::RenderGraph::Relocation::Seal(fixed->noiseVolume->Graph());
 			logger::info("{}: the noise volume ({}x{}x{}) is made on the graph", kLogPrefix, fixed->noiseSize.width, fixed->noiseSize.height, fixed->noiseSize.depth);
 		}
 		if (!std::exchange(announced, true))

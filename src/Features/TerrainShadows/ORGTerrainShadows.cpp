@@ -11,6 +11,7 @@
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
@@ -265,7 +266,11 @@ namespace
 		};
 		a_client.commit = [heightmap, latch, gate, upload](const FrameAnchors::Point&) { Commit(*heightmap, *latch, *gate, *upload); };
 		a_client.active = [heightmap, upload] { return !heightmap->pending.empty() || upload->Pending(); };
-		a_client.executed = [upload](const FrameAnchors::Point&) { upload->Executed(); };
+		a_client.executed = [heightmap, upload](const FrameAnchors::Point&) {
+			// The upload is its only write. Once a run with it submitted, ORG may move the heightmap (ReadOnly).
+			if (upload->Executed())
+				::RenderGraph::Relocation::Seal(heightmap->texture->Graph());
+		};
 		a_client.gates = { gate };
 		logger::info("[ORG] Terrain Shadows: {}x{} heightmap #{} (format {}) made its client, up to {} stripes a refresh", heightmap->width, heightmap->height,
 			heightmap->id, heightmap->format, maxDispatches);
