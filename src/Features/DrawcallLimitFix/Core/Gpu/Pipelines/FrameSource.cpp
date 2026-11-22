@@ -281,8 +281,12 @@ namespace DCLF::FrameSource
 					out += "};\n";
 					out += std::format("static ConstantBuffer<DCLFBlock_{0}> DCLFBlockView_{0} = ResourceDescriptorHeap[{1}];\n", name, view);
 					for (const auto& [member, offset] : members) {
-						out += std::format("static const {} {}{} = DCLFBlockView_{}.{};\n", member.type, member.name,
-							member.array ? std::format("[{}]", member.count) : std::string{}, name, member.name);
+						// An array is a macro for the view's member, not a static copy. DXC keeps a static array copy that is
+						// indexed at run time, and AMD's D3D12 compiler then copies the whole block to scratch in every wave.
+						if (member.array)
+							out += std::format("#define {} DCLFBlockView_{}.{}\n", member.name, name, member.name);
+						else
+							out += std::format("static const {} {} = DCLFBlockView_{}.{};\n", member.type, member.name, name, member.name);
 						++result.members;
 					}
 					return true;
