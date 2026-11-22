@@ -206,7 +206,29 @@ namespace GraphResources
 			return { std::move(exported.graph), std::move(exported.d3d11), exported.layout };
 		}
 
-		Created CreateTexture(const Shape& a_shape, const std::string& a_name, const Options& a_options)
+		/**
+		* @brief A native-owned twin's first version: an ORG texture with a native handle over it, zeroed when it can be cleared, and
+		* registered in ImageRegistry as made. a_framePlaced marks it aliasable, a frame placement candidate. Render thread. Throws on failure.
+		*/
+		Created CreateNativeOwnedTexture(const Shape& a_shape, const std::string& a_name, bool a_framePlaced);
+
+		/**
+		* @brief Whether a twin's versions are native-owned (Options::nativeOwned): native mode, a versioned export, and a format the
+		* native device can wrap. A format it cannot is logged and keeps the standalone images.
+		*/
+		bool DecideNativeOwned(const Options& a_options, const Shape& a_shape, const std::string& a_name)
+		{
+			if (!a_options.nativeOwned || !a_options.versioned || a_options.d3d11 == Export::None || !RenderGraph::Engine::Native::Active())
+				return false;
+			std::string why;
+			if (!RenderGraph::Engine::Native::CanWrapGraphTexture(a_shape.format, a_shape.bindFlags, why)) {
+				logger::warn("[ORG] {}: its versions stay standalone images, not ORG textures: {}", a_name, why);
+				return false;
+			}
+			return true;
+		}
+
+		Created CreateTexture(const Shape& a_shape, const std::string& a_name, const Options& a_options, bool a_nativeOwned = false)
 		{
 			if (!RenderGraphRuntime::Get().IsActive()) {
 				logger::warn("[ORG] {}: not created, the render graph is not active", a_name);
@@ -226,6 +248,8 @@ namespace GraphResources
 			try {
 				if (a_options.d3d11 == Export::None)
 					return { CreateGraphTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient, a_options.aliasPool, false, a_options.versioned), nullptr };
+				if (a_nativeOwned)
+					return CreateNativeOwnedTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient);
 				return CreateExportedTexture(a_shape, a_name);
 			} catch (const std::exception& e) {
 				logger::error("[ORG] {}: not created: {}", a_name, e.what());
@@ -476,6 +500,25 @@ namespace GraphResources
 			org::TextureDescription graphDesc;
 		};
 
+		/** @brief What D3D11's wrap of an exported texture's image describes: its shape as D3D11 sees it. */
+		DxvkOrgInteropTextureWrap WrapOf(const ExportDesc& a_desc)
+		{
+			const UINT layers = (std::max)(a_desc.depthOrArraySize, 1u);
+			const Shape shape{ a_desc.dimension, a_desc.width, a_desc.height, layers, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
+				a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0, a_desc.array };
+			DxvkOrgInteropTextureWrap wrap{};
+			wrap.dimension = static_cast<std::uint32_t>(a_desc.dimension);
+			wrap.width = a_desc.width;
+			wrap.height = a_desc.height;
+			wrap.depthOrArraySize = layers;
+			wrap.mipLevels = MipCount(shape);
+			wrap.format = static_cast<std::uint32_t>(a_desc.format);
+			wrap.sampleCount = (std::max)(a_desc.samples, 1u);
+			wrap.bindFlags = a_desc.bindFlags;
+			wrap.miscFlags = a_desc.miscFlags;
+			return wrap;
+		}
+
 		/**
 		 * @brief Makes the image of an exported texture. Any thread. Throws when the format has no image format or the image is refused.
 		 * a_concurrent makes it usable from every queue, so the uploader's copy queue can zero it (Contents::Zero).
@@ -517,16 +560,7 @@ namespace GraphResources
 			TwinExportImage made;
 			if (RenderGraphRuntime::Get().Host()->Device().CreateCommittedResource(desc, made.image) != rhi::Result::Ok || !made.image)
 				throw std::runtime_error("the image could not be created");
-			auto& wrap = made.wrap;
-			wrap.dimension = static_cast<std::uint32_t>(a_desc.dimension);
-			wrap.width = a_desc.width;
-			wrap.height = a_desc.height;
-			wrap.depthOrArraySize = layers;
-			wrap.mipLevels = mips;
-			wrap.format = static_cast<std::uint32_t>(a_desc.format);
-			wrap.sampleCount = (std::max)(a_desc.samples, 1u);
-			wrap.bindFlags = a_desc.bindFlags;
-			wrap.miscFlags = a_desc.miscFlags;
+			made.wrap = WrapOf(a_desc);
 			auto& graphDesc = made.graphDesc;
 			graphDesc = Describe(shape, true);
 			graphDesc.format = imageFormat;
@@ -637,6 +671,26 @@ namespace GraphResources
 																	   std::string(a_owner), a_name, RenderGraph::ImageRegistry::Kind::Made });
 			exported.graph = std::move(texture);
 			return exported;
+		}
+
+		Created CreateNativeOwnedTexture(const Shape& a_shape, const std::string& a_name, bool a_framePlaced)
+		{
+			// Memory of its own. A frame placement candidate is marked aliasable, and only the frame placement moves it.
+			auto texture = std::dynamic_pointer_cast<org::PixelBuffer>(CreateGraphTexture(a_shape, a_name, a_framePlaced, std::nullopt, false, true));
+			if (!texture)
+				throw std::runtime_error("its ORG texture could not be made");
+			DxvkOrgInteropResourceInfo info{};
+			auto d3d11 = RenderGraph::Engine::Native::WrapGraphTexture(texture, WrapOf(TwinExportDescOf(a_shape)), info, a_name.c_str(),
+				RenderGraph::Engine::Native::WrapFlags::None);
+			if (!d3d11)
+				throw std::runtime_error("the native device did not wrap its ORG texture");
+			// An import of the D3D11 texture finds this resource instead of importing it again. AdoptSlot adds the slot.
+			RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(info.image.image),
+				{ texture, nullptr, std::make_shared<const org::TextureDescription>(texture->GetDescription()), "GraphResources", a_name,
+					RenderGraph::ImageRegistry::Kind::Made });
+			logger::info("[ORG] {}: its versions are ORG textures with native handles over them{}", a_name,
+				a_framePlaced ? ", candidates of the frame placement" : "");
+			return { std::move(texture), std::move(d3d11), static_cast<std::uint32_t>(info.image.layout) };
 		}
 
 		/** @brief Keeps an image whose export failed for the session, since DXVK's stream may name it and nothing says when it is done. */
@@ -890,6 +944,8 @@ namespace GraphResources
 		RenderGraph::Frame::Birth birth;  // Options::birth
 		Extent extent{};
 		const void* twin = nullptr;
+		bool nativeOwned = false;  // Resource::NativeOwned
+		bool framePlaced = false;  // Resource::FramePlacedExport
 	};
 
 	namespace
@@ -1011,6 +1067,8 @@ namespace GraphResources
 		plan->birth = options.birth;
 		plan->extent = a_next;
 		plan->twin = this;
+		plan->nativeOwned = nativeOwned;
+		plan->framePlaced = FramePlacedExport();
 		return plan;
 	}
 
@@ -1018,6 +1076,61 @@ namespace GraphResources
 	{
 		const auto plan = PlanPrepare(a_next);
 		return plan ? Prepare(*plan) : PreparedVersion{};
+	}
+
+	namespace
+	{
+		/**
+		* @brief Prepare's work for a native-owned twin: the version is an ORG texture with memory of its own, and its D3D11 handle a
+		* deferred native wrap over it (no GPU work), with its views. a_prepared holds what Prepare decided, its contents among it. Any thread.
+		*/
+		PreparedVersion PrepareNativeOwned(const PreparePlan& a_plan, PreparedVersion a_prepared)
+		{
+			const auto& name = a_plan.name;
+			const auto& next = a_plan.extent;
+			const auto failure = [&](std::string_view a_why) {
+				return std::runtime_error(fmt::format("{}: no version at {}x{}x{}: {}", name, next[0], next[1], next[2], a_why));
+			};
+			const Shape shape = TwinShapeOf(a_plan.shape);
+			const auto wrapStart = std::chrono::steady_clock::now();
+			std::shared_ptr<org::PixelBuffer> texture;
+			try {
+				// The uploader writes a born version on its copy queue, which only a concurrent texture allows.
+				texture = std::dynamic_pointer_cast<org::PixelBuffer>(
+					CreateGraphTexture(shape, name, a_plan.framePlaced, std::nullopt, a_prepared.contents != Contents::Undefined, true));
+			} catch (const std::exception& e) {
+				throw failure(e.what());
+			}
+			if (!texture)
+				throw failure("its ORG texture could not be made");
+			auto exported = std::make_shared<PreparedExport>();
+			exported->image = texture->GetAPIResource();
+			exported->wrap = WrapOf(TwinExportDescOf(shape));
+			// The handle and views here on the lane, so adoption only moves pointers. A born version is written by the uploader; any
+			// other stays Undefined, so its first use discards.
+			DxvkOrgInteropResourceInfo wrapped{};
+			exported->d3d11 = RenderGraph::Engine::Native::WrapGraphTexture(texture, exported->wrap, wrapped, name.c_str(),
+				RenderGraph::Engine::Native::WrapFlags::DeferInitialize);
+			if (!exported->d3d11)
+				throw failure("the native device did not wrap its ORG texture");
+			exported->vkImage = reinterpret_cast<std::uint64_t>(wrapped.image.image);
+			exported->layout = static_cast<std::uint32_t>(wrapped.image.layout);
+			if (exported->layout != a_plan.layout)
+				throw failure(fmt::format("the native device wrapped it in layout {}, but the twin rests in layout {}", exported->layout, a_plan.layout));
+			const auto formats = FormatsOf(shape);
+			const bool typed = Is3D(shape) ? static_cast<bool>(exported->d3d11.try_as<ID3D11Texture3D>()) : static_cast<bool>(exported->d3d11.try_as<ID3D11Texture2D>());
+			if (!typed || !CreateTextureViews(exported->d3d11.get(), a_plan.d3d11, exported->srv, exported->uav, exported->rtv, exported->dsv,
+							  IsDepth(shape) ? &formats : nullptr))
+				throw failure("D3D11 refused a view of the native handle");
+			exported->views = texture->GetDescription();
+			const double wrapMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wrapStart).count();
+			logger::info("[ORG] {}: prepared its version at {}x{}x{} as an ORG texture with a native handle on the revision lane ({:.3f} ms, {}{})", name,
+				next[0], next[1], next[2], wrapMs, a_prepared.contents == Contents::Undefined ? "born undefined" : "born on the uploader",
+				a_plan.framePlaced ? ", a frame placement candidate" : "");
+			a_prepared.resource = std::move(texture);
+			a_prepared.exported = std::move(exported);
+			return a_prepared;
+		}
 	}
 
 	PreparedVersion Resource::Prepare(const PreparePlan& a_plan)
@@ -1076,6 +1189,8 @@ namespace GraphResources
 			return prepared;
 		}
 		const std::uint32_t layout = a_plan.layout;
+		if (a_plan.nativeOwned)
+			return PrepareNativeOwned(a_plan, std::move(prepared));
 		TwinExportImage made;
 		try {
 			made = MakeExportImage(TwinExportDescOf(next), name, nativeZero);
@@ -1187,9 +1302,14 @@ namespace GraphResources
 		SetExtent(extent);
 		if (a_prepared.exported) {
 			const auto& exported = *a_prepared.exported;
+			// A native-owned version may have moved since the lane made it (a loading-screen defrag), so its handle follows first and
+			// the entry goes under the image it has now.
+			const std::uint64_t image = nativeOwned ? RenderGraph::Engine::Native::FollowGraphTexture(d3d11.get()) : exported.vkImage;
+			if (!image)
+				fail("its native handle is not over its ORG texture");
 			// An import of the D3D11 texture finds this resource, and through it the slot.
-			RenderGraph::ImageRegistry::Register(exported.vkImage, { graph, slot, std::make_shared<const org::TextureDescription>(exported.views),
-																	   "GraphResources", name, RenderGraph::ImageRegistry::Kind::Made });
+			RenderGraph::ImageRegistry::Register(image, { graph, slot, std::make_shared<const org::TextureDescription>(exported.views),
+															"GraphResources", name, RenderGraph::ImageRegistry::Kind::Made });
 		}
 		NameViews();
 		logger::info("[ORG] {}: adopted its prepared version at {}x{}x{}", name, extent[0], extent[1], extent[2]);
@@ -1289,6 +1409,9 @@ namespace GraphResources
 		Resource(std::move(a_name), a_options), desc(a_desc)
 	{
 		auto join = std::exchange(options.joinSlot, nullptr);
+		// A joined slot's image belongs to native's swap chain, which presents it.
+		if (join)
+			options.nativeOwned = false;
 		Create();
 		RequireMade(*this, name);
 		if (!join) {
@@ -1305,7 +1428,8 @@ namespace GraphResources
 	{
 		const Shape shape{ D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.Width, desc.Height, desc.ArraySize, desc.MipLevels, desc.Format,
 			desc.SampleDesc.Count, desc.BindFlags, desc.MiscFlags, desc.Usage, desc.CPUAccessFlags, options.array };
-		auto created = CreateTexture(shape, name, options);
+		nativeOwned = DecideNativeOwned(options, shape, name);
+		auto created = CreateTexture(shape, name, options, nativeOwned);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
 		exportLayout = created.layout;
@@ -1358,7 +1482,8 @@ namespace GraphResources
 			logger::error("[ORG] {}: not created: graph 3D textures take no render targets", name);
 			return;
 		}
-		auto created = CreateTexture(shape, name, options);
+		nativeOwned = DecideNativeOwned(options, shape, name);
+		auto created = CreateTexture(shape, name, options, nativeOwned);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
 		exportLayout = created.layout;

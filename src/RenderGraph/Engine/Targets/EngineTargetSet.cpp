@@ -1274,23 +1274,58 @@ namespace RenderGraph::Engine::Targets
 		}
 
 		/**
-		* @brief Every engine target is exported, so none is a candidate of ORG's frame placement. The export is the marker for a user
-		* outside the graphs: in guest mode the image is DXVK's, and in native mode the native device wraps the image itself. A
-		* placement moves a version to a new image, and the wrap would keep the old one. Once the native device follows such a move,
-		* the targets whose contents live within one frame can be graph-placed: the G-buffer (kINDIRECT, kINDIRECT_DOWNSCALED,
-		* kRAWINDIRECT, kRAWINDIRECT_DOWNSCALED, kRAWINDIRECT_PREVIOUS and its DOWNSCALED), kSHADOW_MASK, kSNOW_SWAP, the kMAIN,
-		* kREFRACTION_NORMALS and kUNDERWATER_MASK copies, and depth kPOST_ZPREPASS_COPY. These must keep memory of their own:
+		* @brief Every engine target is exported: the export is the marker for a user outside the graphs. In guest mode the image is
+		* DXVK's, so no target is a candidate of ORG's frame placement. In native mode each version is an ORG texture and its D3D11
+		* texture a native handle over it (Options::nativeOwned), which follows ORG's moves and placements. kFRAMEBUFFER joins
+		* native's swap chain slot and keeps native's own images.
+		*
+		* In native mode the targets whose contents live within one frame are Transient, so the frame placement may place their
+		* versions (FramePlacedColour, FramePlacedDepth): the G-buffer (kINDIRECT, kINDIRECT_DOWNSCALED, kRAWINDIRECT,
+		* kRAWINDIRECT_DOWNSCALED, kRAWINDIRECT_PREVIOUS and its DOWNSCALED), kSHADOW_MASK, kSNOW_SWAP, the kMAIN,
+		* kREFRACTION_NORMALS and kUNDERWATER_MASK copies, and depth kPOST_ZPREPASS_COPY. The rest are Persistent and keep memory
+		* of their own, which only a loading-screen defrag moves:
 		* - read by the next frame (kPreviousFrame): kMAIN_COPY, kREFRACTION_NORMALS, kUNDERWATER_MASK, kWATER_DISPLACEMENT and its
 		*   SWAP, depth kMAIN_COPY; kMAIN_ONLY_ALPHA (SSR reads it before its clear); kNORMAL_TAAMASK_SSRMASK and its SWAP (parity);
 		* - histories and kept frames: kWATER_1/2, kMENUBG, kSHADOWMAPS_ESRAM, kBOOK_TEXT depth;
 		* - users outside the graphs: kSAVE_GAME_SCREENSHOT (a D3D11 readback), kRAW_WATER (its clear on the native context),
 		*   kMOTION_VECTOR and depth kMAIN (frame generation's SDK reads them).
 		* The engine's own clears, copies and ImageSpace draws that write these are marked MayNotWrite, since each runs only when
-		* the engine makes it.
+		* the engine makes it. The frame placement leaves out a target whose first use in the frame is such a write.
 		*/
-		GraphResources::Options TwinOptions(std::uint32_t a_bindFlags)
+		GraphResources::Options TwinOptions(std::uint32_t a_bindFlags, bool a_framePlaced = false)
 		{
-			return { .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = ExportsOf(a_bindFlags), .versioned = true };
+			// Guest mode keeps every target Persistent, as before: DXVK owns the images, so nothing could place them.
+			const bool placed = a_framePlaced && Native::Active();
+			return { .lifetime = placed ? GraphResources::Lifetime::Transient : GraphResources::Lifetime::Persistent,
+				.d3d11 = ExportsOf(a_bindFlags),
+				.versioned = true,
+				.nativeOwned = true };
+		}
+
+		/** @brief Whether a colour target's twin is a frame placement candidate in native mode (TwinOptions). a_copy: its textureCopy twin. */
+		bool FramePlacedColour(std::uint32_t a_index, bool a_copy)
+		{
+			if (a_copy)
+				return a_index == RT::kMAIN || a_index == RT::kREFRACTION_NORMALS || a_index == RT::kUNDERWATER_MASK;
+			switch (a_index) {
+			case RT::kINDIRECT:
+			case RT::kINDIRECT_DOWNSCALED:
+			case RT::kRAWINDIRECT:
+			case RT::kRAWINDIRECT_DOWNSCALED:
+			case RT::kRAWINDIRECT_PREVIOUS:
+			case RT::kRAWINDIRECT_PREVIOUS_DOWNSCALED:
+			case RT::kSHADOW_MASK:
+			case RT::kSNOW_SWAP:
+				return true;
+			default:
+				return false;
+			}
+		}
+
+		/** @brief Whether a depth target's twin is a frame placement candidate in native mode (TwinOptions). */
+		bool FramePlacedDepth(std::uint32_t a_index)
+		{
+			return a_index == static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
 		}
 
 		template <class Twin>
@@ -1303,13 +1338,18 @@ namespace RenderGraph::Engine::Targets
 				RenderGraph::Fatal("engine targets", fmt::format("{} could not be published", a_name));
 		}
 
-		/** @brief A colour target's twin. a_join is a slot its versions join (native's kFRAMEBUFFER), or null for its own. */
+		/**
+		* @brief A colour target's twin. a_join is a slot its versions join (native's kFRAMEBUFFER), or null for its own. A joined twin
+		* keeps native's images, so it is neither native-owned nor placed.
+		*/
 		Frame::DeclaredTexture2D DeclareColour(std::uint32_t a_index, bool a_copy, DXGI_FORMAT a_copyFormat, std::uint32_t a_bindFlags,
 			std::shared_ptr<org::VersionedTexture> a_join = nullptr)
 		{
 			using namespace Frame;
 			auto name = ColourName(a_index) + (a_copy ? " Copy" : "");
-			auto options = TwinOptions(a_bindFlags);
+			auto options = TwinOptions(a_bindFlags, !a_join && FramePlacedColour(a_index, a_copy));
+			if (a_join)
+				options.nativeOwned = false;
 			options.joinSlot = std::move(a_join);
 			auto twin = DeclareTexture2D(
 				name, DependsOn(Vars::EngineTargetShapes()),
@@ -1562,7 +1602,8 @@ namespace RenderGraph::Engine::Targets
 			const auto name = DepthName(i);
 			record.main = Frame::DeclareTexture2D(
 				name, Frame::DependsOn(Frame::Vars::EngineTargetShapes()),
-				[i](const Frame::Inputs& a_in) { return Desc2D(a_in.Get(Frame::Vars::EngineTargetShapes()).depths[i]); }, TwinOptions(table.depths[i].bindFlags));
+				[i](const Frame::Inputs& a_in) { return Desc2D(a_in.Get(Frame::Vars::EngineTargetShapes()).depths[i]); },
+				TwinOptions(table.depths[i].bindFlags, FramePlacedDepth(i)));
 			Publish(record.main, name);
 			++declared;
 		}

@@ -59,7 +59,7 @@ namespace GraphResources
 	enum class Lifetime : std::uint8_t
 	{
 		Transient,   // written before any read, every frame, and read only within that frame: aliasable unless exported (a declared,
-		             // versioned one only by ORG's frame placement)
+		             // versioned one only by ORG's frame placement, which also places a native-owned export's versions)
 		History,     // read in a later frame (ping-pong, temporal accumulation): never aliased
 		Persistent,  // written once or on a settings change: never aliased
 	};
@@ -96,6 +96,10 @@ namespace GraphResources
 		// A versioned 2D texture's first version joins this slot instead of a new one, as kFRAMEBUFFER joins the slot native made
 		// with the swap chain. Its shape class must be the slot's, or it is fatal. The constructor takes it, so the twin keeps none.
 		std::shared_ptr<org::VersionedTexture> joinSlot;
+		// Native mode, a versioned texture with a D3D11 export: each version is an ORG texture, and its D3D11 texture a native handle
+		// over it (Native::WrapGraphTexture) that follows ORG's moves. A Transient one is then a candidate of ORG's frame placement.
+		// Guest mode ignores it (DXVK owns the image), and so does a 2D texture that joins a slot (native's swap chain owns that one).
+		bool nativeOwned = false;
 	};
 
 	/** @brief Whether a live aliasable twin has this graph resource name. Any thread. */
@@ -258,6 +262,17 @@ namespace GraphResources
 		*/
 		bool FramePlaceable() const { return options.lifetime == Lifetime::Transient && !Exported() && options.versioned; }
 
+		/** @brief Whether its versions are ORG textures with native D3D11 handles over them (Options::nativeOwned, native mode). */
+		bool NativeOwned() const { return nativeOwned; }
+
+		/**
+		* @brief Whether its versions are candidates of ORG's frame placement as native-owned exports: NativeOwned and Transient. Each
+		* version has memory of its own and is marked aliasable; with ORG_FRAME_PLACEMENT off nothing moves it. Its D3D11 handle follows
+		* the new image (Native::FollowRelocations). Unlike FramePlaceable, it is not a transient name for the read-order check, since
+		* D3D11 users outside the graphs read it.
+		*/
+		bool FramePlacedExport() const { return nativeOwned && options.lifetime == Lifetime::Transient; }
+
 		/** @brief The exported D3D11 views of the whole resource; null when not exported. */
 		ID3D11ShaderResourceView* SRV() const { return srv.get(); }
 		ID3D11UnorderedAccessView* UAV() const { return uav.get(); }
@@ -355,6 +370,7 @@ namespace GraphResources
 		std::shared_ptr<org::VersionedTexture> slot;  // a versioned texture's (Options::versioned)
 		std::shared_ptr<org::VersionedBuffer> bufferSlot;  // a versioned structured buffer's (Options::versioned)
 		std::uint32_t exportLayout = 0;               // an exported texture's resting VkImageLayout, the same for every version
+		bool nativeOwned = false;                     // Options::nativeOwned held in native mode, decided once at Create
 		// The exported texture or buffer, as DXVK returned it: one COM object, so the derived twins' D3D11() casts it down.
 		winrt::com_ptr<ID3D11Resource> d3d11;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;

@@ -316,10 +316,13 @@ namespace RenderGraph::Frame
 			a_options.versioned = true;
 			// A Transient declared texture holds its contents within one frame, so the frame placement may share its bytes
 			// (ORG_FRAME_PLACEMENT). Otherwise each version has memory of its own. Its first writer in each frame writes it, so
-			// no birth writes a version. An export has a user outside the graphs, so it is never placed.
-			if (a_options.lifetime == GraphResources::Lifetime::Transient && (a_options.d3d11 != GraphResources::Export::None || a_options.birth.Writes()))
+			// no birth writes a version. An export has a user outside the graphs, so it is placed only when native mode owns its
+			// versions (Options::nativeOwned): the native handle follows the placed image. In guest mode it keeps its own memory.
+			if (a_options.lifetime == GraphResources::Lifetime::Transient &&
+				((a_options.d3d11 != GraphResources::Export::None && !a_options.nativeOwned) || a_options.birth.Writes()))
 				RenderGraph::Fatal("frame declaration", fmt::format("{} is declared Transient with a D3D11 export or a birth that writes it; a Transient "
-																	"declared texture is graph-only and born undefined, so declare it Persistent or History",
+																	"declared texture is graph-only (or a native-owned export) and born undefined, so declare it "
+																	"Persistent or History",
 															a_name));
 			const auto desc = a_desc(Inputs(nullptr));
 			auto twin = std::make_shared<Twin>(desc, a_name, a_options);
