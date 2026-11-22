@@ -126,6 +126,10 @@ namespace RenderGraph::AnchorPasses
 		rhi::LoadOp load = rhi::LoadOp::Load;
 		std::array<float, 4> clear{};  // with LoadOp::Clear
 		std::optional<std::uint32_t> gate;  // the builder's run gate entry: the draw happens only on runs whose commit opened it
+		// Gated apart from the passes that read what it writes, such as an engine draw the graph makes only when the engine makes
+		// it. Its writes are then not guaranteed in a run (org MayNotWrite), so the alias planners keep a resource it writes first
+		// out of shared memory. Leave it off when the draw's readers are gated with it, as a client's own chain is.
+		bool mayNotWrite = false;
 		// The depth-stencil attachment, for a program with a depth format. Loaded and stored.
 		// Read-only unless the program's depth state writes depth or stencil.
 		FrameAnchors::Texture depth;
@@ -150,6 +154,7 @@ namespace RenderGraph::AnchorPasses
 		std::array<std::uint32_t, 3> groups{ 1, 1, 1 };
 		std::optional<std::uint32_t> gate;       // the builder's run gate entry (its counts replace groups)
 		std::optional<std::uint32_t> latchArgs;  // three uints at this offset of the builder's latch (replace groups)
+		bool mayNotWrite = false;                // as Draw::mayNotWrite
 		// The handle table, for a shader that reads more resources than the push block holds: one uint per entry, in the order
 		// of the shader's table struct. Srv, Uav and Published entries are declared as bindings are and hold their views'
 		// indices; Handle entries hold their value. The pass writes the indices into a buffer of its own when it is recorded,
@@ -165,6 +170,7 @@ namespace RenderGraph::AnchorPasses
 		FrameAnchors::Texture source, target;
 		std::uint32_t width = 0, height = 0;  // both 0: the smaller of the two versions each preparation binds
 		std::optional<std::uint32_t> gate;  // the builder's run gate entry
+		bool mayNotWrite = false;           // as Draw::mayNotWrite
 		std::uint32_t depth = 1;            // a 3D texture's depth slices
 		std::uint32_t slices = 1;           // an array's or cube's slices (six for a cube), each copied in turn
 	};

@@ -1273,6 +1273,21 @@ namespace RenderGraph::Engine::Targets
 			return exports;
 		}
 
+		/**
+		* @brief Every engine target is exported, so none is a candidate of ORG's frame placement. The export is the marker for a user
+		* outside the graphs: in guest mode the image is DXVK's, and in native mode the native device wraps the image itself. A
+		* placement moves a version to a new image, and the wrap would keep the old one. Once the native device follows such a move,
+		* the targets whose contents live within one frame can be graph-placed: the G-buffer (kINDIRECT, kINDIRECT_DOWNSCALED,
+		* kRAWINDIRECT, kRAWINDIRECT_DOWNSCALED, kRAWINDIRECT_PREVIOUS and its DOWNSCALED), kSHADOW_MASK, kSNOW_SWAP, the kMAIN,
+		* kREFRACTION_NORMALS and kUNDERWATER_MASK copies, and depth kPOST_ZPREPASS_COPY. These must keep memory of their own:
+		* - read by the next frame (kPreviousFrame): kMAIN_COPY, kREFRACTION_NORMALS, kUNDERWATER_MASK, kWATER_DISPLACEMENT and its
+		*   SWAP, depth kMAIN_COPY; kMAIN_ONLY_ALPHA (SSR reads it before its clear); kNORMAL_TAAMASK_SSRMASK and its SWAP (parity);
+		* - histories and kept frames: kWATER_1/2, kMENUBG, kSHADOWMAPS_ESRAM, kBOOK_TEXT depth;
+		* - users outside the graphs: kSAVE_GAME_SCREENSHOT (a D3D11 readback), kRAW_WATER (its clear on the native context),
+		*   kMOTION_VECTOR and depth kMAIN (frame generation's SDK reads them).
+		* The engine's own clears, copies and ImageSpace draws that write these are marked MayNotWrite, since each runs only when
+		* the engine makes it.
+		*/
 		GraphResources::Options TwinOptions(std::uint32_t a_bindFlags)
 		{
 			return { .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = ExportsOf(a_bindFlags), .versioned = true };
