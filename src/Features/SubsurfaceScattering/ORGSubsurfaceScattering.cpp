@@ -154,29 +154,30 @@ namespace
 			FrameAnchors::EngineTexture(FrameAnchors::Colour(NORMALROUGHNESS)), FrameAnchors::EngineTexture(FrameAnchors::Depth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY)) };
 	}
 
-	/** @brief Made at setup and kept. The working textures follow the display size through the frame revisions. */
+	/** @brief Made at setup and kept. The working textures are declared transients: each registration makes its own at its size. */
 	struct Fixed
 	{
-		RenderGraph::Frame::DeclaredTexture2D diffuseNoAlbedo, blurTemp;
+		RenderGraph::Frame::DeclaredTransient2D diffuseNoAlbedo, blurTemp;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
 		org::OwnedDescriptorBinding pointSampler;
 	};
 
-	/** @brief What a registration is made for: the mode's programs and the imported targets. */
+	/** @brief What a registration is made for: the mode's programs, the imported targets and the working textures' extent. */
 	struct Shape
 	{
 		std::shared_ptr<const ModePrograms> programs;
 		Targets targets;
+		RenderGraph::Frame::DeclaredTransient2D::Extent extent{};
 
 		bool operator==(const Shape&) const = default;
 	};
 
-	/** @brief A declared twin as passes declare it: its slot. */
-	FrameAnchors::Texture SlotOf(const RenderGraph::Frame::DeclaredTexture2D& a_texture)
+	/** @brief One registration's working textures, transients aliased in its builds' pool. blurTemp is null for Burley. */
+	struct Working
 	{
-		return FrameAnchors::Texture(a_texture->Name(), a_texture->Versioned());
-	}
+		std::shared_ptr<GraphResources::Texture2D> diffuseNoAlbedo, blurTemp;
+	};
 
 	/** @brief Kept for the build, so the recording can be submitted again. */
 	struct PassFrame
@@ -198,12 +199,12 @@ namespace
 	class ExtractionPass final : public org::TypedRenderGraphPass<ExtractionPass, PassFrame, ExtractionBindings>
 	{
 	public:
-		ExtractionPass(const Fixed& a_fixed, const Shape& a_shape) :
+		ExtractionPass(const Fixed& a_fixed, const Shape& a_shape, FrameAnchors::Texture a_output) :
 			programs(a_shape.programs),
 			program(a_shape.programs->extraction.get()),
 			latch(a_fixed.latch),
 			gate(a_fixed.gate),
-			output(SlotOf(a_fixed.diffuseNoAlbedo)),
+			output(std::move(a_output)),
 			targets(a_shape.targets) {}
 
 		ExtractionBindings Declare(org::PassBuilder& a_builder)
@@ -319,6 +320,13 @@ namespace
 		a_client.sharedConstants = true;
 		a_client.gates = { a_fixed->gate };
 		const int mode = a_shape.programs->mode;
+		// Written and read in this run only, so the builds alias them. The extraction writes the first before any read.
+		auto working = std::make_shared<Working>();
+		working->diffuseNoAlbedo = a_fixed->diffuseNoAlbedo.Make(a_shape.extent);
+		if (mode != kBurley)
+			working->blurTemp = a_fixed->blurTemp.Make(a_shape.extent);
+		const auto diffuse = RenderGraph::AnchorPasses::TextureOf(*working->diffuseNoAlbedo);
+		const auto temp = working->blurTemp ? RenderGraph::AnchorPasses::TextureOf(*working->blurTemp) : FrameAnchors::Texture();
 		// After SSGI's passes, below 200, and before the composite, as the D3D11 path runs. Every pass waits on the gate entry, so
 		// the anchor can run in a frame phase.
 		const auto pass = [&a_client](const char* a_name, std::int32_t a_order, std::function<std::shared_ptr<org::RenderPass>()> a_make,
@@ -330,31 +338,31 @@ namespace
 				.make = std::move(a_make),
 				.atExecution = a_atExecution });
 		};
-		pass("cs.subsurface.extract", 200, [a_fixed, a_shape]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ExtractionPass>(*a_fixed, a_shape); });
+		pass("cs.subsurface.extract", 200,
+			[a_fixed, a_shape, diffuse]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ExtractionPass>(*a_fixed, a_shape, diffuse); });
 		if (mode == kBurley) {
 			// Burley's extraction writes only masked pixels. D3D11 reads stale values elsewhere, but the graph clears to zero, which
 			// also keeps it aliasable.
 			pass(
 				"cs.subsurface.clear", 199,
-				[a_fixed]() {
-					return RenderGraph::AnchorPasses::MakeClear(RenderGraph::AnchorPasses::ClearOf("cs.subsurface.clear", *a_fixed->diffuseNoAlbedo, {}, kGateEntry),
+				[a_fixed, working]() {
+					return RenderGraph::AnchorPasses::MakeClear(RenderGraph::AnchorPasses::ClearOf("cs.subsurface.clear", *working->diffuseNoAlbedo, {}, kGateEntry),
 						a_fixed->gate);
 				},
 				true);
-			pass("cs.subsurface.burley", 201, [a_fixed, a_shape]() -> std::shared_ptr<org::RenderPass> {
-				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->blur, SlotOf(a_fixed->diffuseNoAlbedo), a_shape.targets.main);
+			pass("cs.subsurface.burley", 201, [a_fixed, a_shape, diffuse]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->blur, diffuse, a_shape.targets.main);
 			});
 		} else {
-			pass("cs.subsurface.horizontal", 201, [a_fixed, a_shape]() -> std::shared_ptr<org::RenderPass> {
-				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->blur, SlotOf(a_fixed->diffuseNoAlbedo), SlotOf(a_fixed->blurTemp));
+			pass("cs.subsurface.horizontal", 201, [a_fixed, a_shape, diffuse, temp]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->blur, diffuse, temp);
 			});
-			pass("cs.subsurface.vertical", 202, [a_fixed, a_shape]() -> std::shared_ptr<org::RenderPass> {
-				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->secondBlur, SlotOf(a_fixed->blurTemp), a_shape.targets.main);
+			pass("cs.subsurface.vertical", 202, [a_fixed, a_shape, temp]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<BlurPass>(*a_fixed, a_shape, a_shape.programs->secondBlur, temp, a_shape.targets.main);
 			});
 		}
-		a_client.registerResources = [a_fixed](org::RenderGraph& a_graph) {
-			a_fixed->diffuseNoAlbedo->Register(a_graph);
-			a_fixed->blurTemp->Register(a_graph);
+		a_client.registerResources = [working](org::RenderGraph& a_graph) {
+			RenderGraph::Frame::RegisterTransients(a_graph, { working->diffuseNoAlbedo.get(), working->blurTemp.get() });
 		};
 		a_client.commit = [a_fixed, mode](const FrameAnchors::Point&) {
 			auto& feature = globals::features::subsurfaceScattering;
@@ -366,7 +374,8 @@ namespace
 			}
 			ORGSubsurfaceScattering::Get().NoteRan();
 		};
-		logger::info("[ORG] Subsurface Scattering: a client for the next revision ({} blur)", ModeName(mode));
+		logger::info("[ORG] Subsurface Scattering: a client for the next revision ({} blur, working textures {}x{}{})", ModeName(mode), a_shape.extent[0],
+			a_shape.extent[1], working->diffuseNoAlbedo->Aliasable() ? "" : ", kept apart");
 		return true;
 	}
 }
@@ -400,8 +409,8 @@ bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 		auto fixed = std::make_shared<Fixed>();
 		// Deferred::pointSampler's description.
 		fixed->pointSampler = ShaderBindings::Sampler(ShaderBindings::SamplerPreset::PointClamp);
-		// kMAIN's description on the display size (decision 6a): a new size is a new version, adopted with a frame revision.
-		// The engine target set writes the display size before the first declaration.
+		// kMAIN's description on the display size (decision 6a). A new size registers the client again with transients of
+		// that size, and the revision switches in with its builds. The engine target set writes the display size first.
 		const auto onDisplay = [a_desc](const Inputs& a_in) {
 			const auto display = a_in.Get(Vars::DisplaySize());
 			D3D11_TEXTURE2D_DESC desc = a_desc;
@@ -409,16 +418,16 @@ bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 			desc.Height = display.height;
 			return desc;
 		};
-		// Declared textures keep their own memory. CS_ORG_SSS_KEEP_APART=1 makes it History, which births each version cleared.
+		// Transients, aliased in the deferred stage's pool. CS_ORG_SSS_KEEP_APART=1 keeps the albedo-free copy out of it.
 		const bool keepApart = Switches::On("CS_ORG_SSS_KEEP_APART");
-		fixed->diffuseNoAlbedo = DeclareTexture2D("SSS::DiffuseNoAlbedo", DependsOn(Vars::DisplaySize()), onDisplay,
-			GraphResources::Options{ .lifetime = keepApart ? GraphResources::Lifetime::History : GraphResources::Lifetime::Persistent });
-		fixed->blurTemp = DeclareTexture2D("SSS::BlurHorizontalTemp", DependsOn(Vars::DisplaySize()), onDisplay,
-			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+		fixed->diffuseNoAlbedo = DeclareTransient2D("SSS::DiffuseNoAlbedo", SizedDesc2D{ DependsOn(Vars::DisplaySize()), onDisplay },
+			GraphResources::Options{ .lifetime = keepApart ? GraphResources::Lifetime::History : GraphResources::Lifetime::Transient });
+		fixed->blurTemp = DeclareTransient2D("SSS::BlurHorizontalTemp", SizedDesc2D{ DependsOn(Vars::DisplaySize()), onDisplay },
+			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient });
 		fixed->latch = std::make_shared<org::LatchBlock>("cs.subsurface.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
 		fixed->gate = RenderGraph::RunGate::Create("cs.subsurface.dispatch");
-		if (!fixed->pointSampler || !fixed->diffuseNoAlbedo->Versioned() || !fixed->blurTemp->Versioned())
-			Fatal("its sampler or its textures' versions could not be made");
+		if (!fixed->pointSampler)
+			Fatal("its sampler could not be made");
 		auto made = std::make_unique<Impl>();
 		// The engine's targets are declared before any feature's setup, so a missing slot is an error.
 		made->targets = ImportTargets();
@@ -436,13 +445,20 @@ bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 		const std::shared_ptr<const Fixed> shared = fixed;
 		auto* self = made.get();
 		// Registered at setup's build, so the first frame has it. A frame whose stage lags draws nothing; D3D11 never draws.
+		// The working textures' size is part of the key, so a new display size registers the client again.
+		auto dependencies = DependsOn(settings.SSMode);
+		for (const auto& dependency : fixed->diffuseNoAlbedo.Depends())
+			dependencies.push_back(dependency);
 		made->client = DeclareClient<Shape>(
-			kClientId, DependsOn(settings.SSMode),
-			[self](const Inputs& a_in) -> std::optional<Shape> { return Shape{ self->program.For(a_in), self->targets }; },
+			kClientId, std::move(dependencies),
+			[self, shared](const Inputs& a_in) -> std::optional<Shape> {
+				return Shape{ self->program.For(a_in), self->targets, shared->diffuseNoAlbedo.ExtentAt(a_in) };
+			},
 			[shared](const Shape& a_shape, FrameAnchors::ClientDesc& a_client) { return MakeClient(shared, a_shape, a_client); });
 		made->fixed = shared;
 		impl = std::move(made);
-		logger::info("[ORG] Subsurface Scattering runs on the render graph ({}x{}, {} blur); its textures, programs and client follow the frame revisions",
+		logger::info("[ORG] Subsurface Scattering runs on the render graph ({}x{}, {} blur); its programs and client follow the frame revisions, and each "
+					 "registration makes its working textures as transients",
 			a_desc.Width, a_desc.Height, ModeName(ModeOf(Inputs(nullptr).Get(settings.SSMode))));
 		return true;
 	} catch (const std::exception& e) {

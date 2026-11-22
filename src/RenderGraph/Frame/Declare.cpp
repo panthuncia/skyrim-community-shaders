@@ -537,6 +537,159 @@ namespace RenderGraph::Frame
 				} };
 	}
 
+	namespace Detail
+	{
+		struct TransientDeclaration
+		{
+			std::string name;
+			Dependencies dependencies;
+			Texture2DDescFn desc2D;
+			Texture3DDescFn desc3D;
+			// The description at declaration. Make changes only its extent.
+			D3D11_TEXTURE2D_DESC base2D{};
+			D3D11_TEXTURE3D_DESC base3D{};
+			GraphResources::Options options;
+		};
+	}
+
+	namespace
+	{
+		/** @brief Fatal unless a_options make an aliasable transient, or a History one kept apart. */
+		void RequireTransientOptions(std::string_view a_name, const GraphResources::Options& a_options)
+		{
+			if (a_options.lifetime == GraphResources::Lifetime::Persistent || a_options.versioned || a_options.d3d11 != GraphResources::Export::None ||
+				a_options.joinSlot)
+				RenderGraph::Fatal("frame declaration", fmt::format("{} is a declared transient with a lifetime, versions or an export it cannot have; it is "
+															"Transient (or History to keep it apart), graph-only and unversioned",
+															a_name));
+		}
+
+		std::shared_ptr<Detail::TransientDeclaration> MakeTransientDeclaration(std::string a_name, Dependencies a_dependencies,
+			const GraphResources::Options& a_options)
+		{
+			RequireRenderOwner(fmt::format("the declaration of {}", a_name));
+			RequireTransientOptions(a_name, a_options);
+			// Resolved once, so a dependency that is no variable is fatal here.
+			DependencyState state;
+			state.Resolve(a_dependencies, a_name);
+			RequireSizes(a_dependencies, state, a_name);
+			auto declaration = std::make_shared<Detail::TransientDeclaration>();
+			declaration->name = std::move(a_name);
+			declaration->dependencies = std::move(a_dependencies);
+			declaration->options = a_options;
+			return declaration;
+		}
+
+		/** @brief a_desc with a_extent's size. */
+		template <class Desc>
+		Desc WithExtent(Desc a_desc, const DeclaredExtent& a_extent)
+		{
+			a_desc.Width = a_extent[0];
+			a_desc.Height = a_extent[1];
+			if constexpr (std::is_same_v<Desc, D3D11_TEXTURE3D_DESC>)
+				a_desc.Depth = a_extent[2];
+			else
+				a_desc.ArraySize = a_extent[2];
+			return a_desc;
+		}
+
+		/** @brief The declared transients this thread registered for the graph being built, with their extents. */
+		thread_local std::vector<std::string> t_buildTransients;
+	}
+
+	DeclaredTransient2D DeclareTransient2D(std::string a_name, SizedDesc2D a_desc, const GraphResources::Options& a_options)
+	{
+		if (!a_desc.desc)
+			RenderGraph::Fatal("frame declaration", fmt::format("{} has no description", a_name));
+		auto declaration = MakeTransientDeclaration(std::move(a_name), std::move(a_desc.dependencies), a_options);
+		declaration->base2D = a_desc.desc(Inputs(nullptr));
+		declaration->desc2D = std::move(a_desc.desc);
+		return DeclaredTransient2D(std::move(declaration));
+	}
+
+	DeclaredTransient3D DeclareTransient3D(std::string a_name, Dependencies a_dependencies, Texture3DDescFn a_desc, const GraphResources::Options& a_options)
+	{
+		if (!a_desc)
+			RenderGraph::Fatal("frame declaration", fmt::format("{} has no description", a_name));
+		auto declaration = MakeTransientDeclaration(std::move(a_name), std::move(a_dependencies), a_options);
+		declaration->base3D = a_desc(Inputs(nullptr));
+		declaration->desc3D = std::move(a_desc);
+		return DeclaredTransient3D(std::move(declaration));
+	}
+
+	template <class Twin>
+	const std::string& DeclaredTransient<Twin>::Name() const
+	{
+		return declaration->name;
+	}
+
+	template <class Twin>
+	const Dependencies& DeclaredTransient<Twin>::Depends() const
+	{
+		return declaration->dependencies;
+	}
+
+	template <class Twin>
+	typename DeclaredTransient<Twin>::Extent DeclaredTransient<Twin>::ExtentAt(const Inputs& a_values) const
+	{
+		if constexpr (std::is_same_v<Twin, GraphResources::Texture3D>) {
+			const auto desc = declaration->desc3D(a_values);
+			if (ShapeDiffers(desc, declaration->base3D))
+				RenderGraph::Fatal("frame declaration", fmt::format("{}'s description changed more than its extent", declaration->name));
+			return ExtentOfDesc(desc);
+		} else {
+			const auto desc = declaration->desc2D(a_values);
+			if (ShapeDiffers(desc, declaration->base2D))
+				RenderGraph::Fatal("frame declaration", fmt::format("{}'s description changed more than its extent", declaration->name));
+			return ExtentOfDesc(desc);
+		}
+	}
+
+	template <class Twin>
+	typename DeclaredTransient<Twin>::Extent DeclaredTransient<Twin>::AdoptedExtent() const
+	{
+		return ExtentAt(Inputs(Vars::Lane::Adopted().get()));
+	}
+
+	template <class Twin>
+	std::shared_ptr<Twin> DeclaredTransient<Twin>::Make(const Extent& a_extent) const
+	{
+		std::shared_ptr<Twin> twin;
+		if constexpr (std::is_same_v<Twin, GraphResources::Texture3D>)
+			twin = std::make_shared<Twin>(WithExtent(declaration->base3D, a_extent), declaration->name, declaration->options);
+		else
+			twin = std::make_shared<Twin>(WithExtent(declaration->base2D, a_extent), declaration->name, declaration->options);
+		if (!*twin)
+			RenderGraph::Fatal("frame declaration",
+				fmt::format("the declared transient {} could not be made at {}x{}x{}", declaration->name, a_extent[0], a_extent[1], a_extent[2]));
+		return twin;
+	}
+
+	template class DeclaredTransient<GraphResources::Texture2D>;
+	template class DeclaredTransient<GraphResources::Texture3D>;
+
+	void RegisterTransients(org::RenderGraph& a_graph, const std::vector<const GraphResources::Resource*>& a_transients)
+	{
+		for (const auto* twin : a_transients) {
+			if (!twin)
+				continue;
+			twin->Register(a_graph);
+			const auto extent = twin->CurrentExtent();
+			t_buildTransients.push_back(fmt::format("{} {}x{}x{}{}", twin->Name(), extent[0], extent[1], extent[2], twin->Aliasable() ? "" : " (kept apart)"));
+		}
+	}
+
+	void Detail::LogBuildTransients(std::string_view a_build)
+	{
+		if (t_buildTransients.empty())
+			return;
+		std::string list;
+		for (const auto& entry : t_buildTransients)
+			list += fmt::format("{}{}", list.empty() ? "" : ", ", entry);
+		t_buildTransients.clear();
+		logger::info("[ORG] frame declaration: the {} build places declared transients in its alias pool: {}", a_build, list);
+	}
+
 	DeclaredBuffer DeclareBuffer(std::string a_name, Dependencies a_dependencies, BufferDescFn a_desc, const GraphResources::Options& a_options)
 	{
 		RequireRenderOwner(fmt::format("the declaration of {}", a_name));

@@ -200,45 +200,59 @@ namespace
 
 	/**
 	* @brief The graph textures, declared on first use and kept for the session (frame revision plan, 6.11).
-	* A screen-size one is declared on DisplaySize: a new display size is a new version of it, adopted with a frame revision.
+	* A kept row is declared on DisplaySize: a new display size is a new version of it, adopted with a frame revision.
+	* A Transient row is a declared transient: each plan makes its own at the plan's display size, aliased in its builds' pool.
 	*/
 	struct Textures
 	{
 		std::array<RF::DeclaredTexture2D, kTextureRows> declared{};
+		std::array<RF::DeclaredTransient2D, kTextureRows> transients{};
 
-		/** @brief Render thread. Null when the texture cannot be made. */
-		GraphResources::Texture2D* Get(const TextureSpec& a_spec)
+		/** @brief A row's description at a_display. */
+		static D3D11_TEXTURE2D_DESC DescOf(const TextureSpec& a_spec, RF::Vars::Extent2D a_display)
 		{
-			auto& texture = declared[RowOf(a_spec)];
-			if (texture)
-				return texture.Get();
 			const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | (a_spec.uav ? D3D11_BIND_UNORDERED_ACCESS : 0u);
-			const D3D11_TEXTURE2D_DESC base{ .Width = 1,
-				.Height = 1,
+			return { .Width = a_spec.size ? a_spec.size : a_display.width,
+				.Height = a_spec.size ? a_spec.size : a_display.height,
 				.MipLevels = 1,
 				.ArraySize = 1,
 				.Format = a_spec.format,
 				.SampleDesc = { .Count = 1 },
 				.Usage = D3D11_USAGE_DEFAULT,
 				.BindFlags = bind };
+		}
+
+		/** @brief Render thread. A kept row. Null when the texture cannot be made. */
+		GraphResources::Texture2D* Get(const TextureSpec& a_spec)
+		{
+			auto& texture = declared[RowOf(a_spec)];
+			if (texture)
+				return texture.Get();
 			texture = RF::DeclareTexture2D(
 				fmt::format("Effects11::{}", a_spec.name), RF::DependsOn(RF::Vars::DisplaySize()),
-				[base, size = a_spec.size](const RF::Inputs& a_in) {
-					const auto display = DisplayOf(a_in);
-					auto desc = base;
-					desc.Width = size ? size : display.width;
-					desc.Height = size ? size : display.height;
-					return desc;
-				},
-				// A Transient row is written before it is read each frame, so it is born Undefined. Declared, it still keeps its own
-				// memory. A kept row is born zero, as DXVK's D3D11 textures start at zero.
-				GraphResources::Options{ .lifetime = a_spec.lifetime == Lifetime::Transient ? Lifetime::Persistent : a_spec.lifetime,
-					.birth = a_spec.lifetime == Lifetime::Transient ? RF::Birth::Undefined() : RF::Birth::Zero() });
+				[&a_spec](const RF::Inputs& a_in) { return DescOf(a_spec, DisplayOf(a_in)); },
+				// A kept row is born zero, as DXVK's D3D11 textures start at zero.
+				GraphResources::Options{ .lifetime = a_spec.lifetime, .birth = RF::Birth::Zero() });
 			if (!texture || !*texture) {
 				texture = {};
 				return nullptr;
 			}
 			return texture.Get();
+		}
+
+		/**
+		* @brief Render thread. A Transient row's new transient for one plan at a_display. It is written before it is read in the
+		* tonemap's run, so it starts Undefined.
+		*/
+		std::shared_ptr<GraphResources::Texture2D> Make(const TextureSpec& a_spec, RF::Vars::Extent2D a_display)
+		{
+			auto& transient = transients[RowOf(a_spec)];
+			if (!transient)
+				transient = RF::DeclareTransient2D(fmt::format("Effects11::{}", a_spec.name),
+					RF::SizedDesc2D{ RF::DependsOn(RF::Vars::DisplaySize()), [&a_spec](const RF::Inputs& a_in) { return DescOf(a_spec, DisplayOf(a_in)); } },
+					GraphResources::Options{ .lifetime = Lifetime::Transient });
+			const auto desc = DescOf(a_spec, a_display);
+			return transient.Make({ desc.Width, desc.Height, 1 });
 		}
 	};
 
@@ -436,8 +450,10 @@ namespace
 		Res output;
 		std::uint32_t width = 0;   // the display size planned for
 		std::uint32_t height = 0;
-		// Every texture the steps use, by kTextures row. The kept ones are born zero on the revision lane.
+		// Every kept texture the steps use, by kTextures row. They are born zero on the revision lane.
 		std::vector<std::pair<std::uint32_t, GraphResources::Texture2D*>> textures;
+		// The Transient rows the steps use, by kTextures row: this plan's own, aliased in its builds' pool.
+		std::vector<std::pair<std::uint32_t, std::shared_ptr<GraphResources::Texture2D>>> transients;
 		std::uint32_t fxPasses = 0;
 	};
 
@@ -1024,6 +1040,15 @@ struct ORGFxRuntime::Impl
 		Res Tex(std::string_view a_name)
 		{
 			const auto* spec = FindSpec(a_name);
+			if (spec && spec->lifetime == Lifetime::Transient) {
+				const auto row = RowOf(*spec);
+				for (const auto& [used, texture] : frame->transients)
+					if (used == row)
+						return AP::TextureOf(*texture);
+				auto texture = impl.textures.Make(*spec, { frame->width, frame->height });
+				frame->transients.emplace_back(row, texture);
+				return AP::TextureOf(*texture);
+			}
 			auto* texture = spec ? impl.textures.Get(*spec) : nullptr;
 			if (!texture) {
 				Fail(fmt::format("the texture Effects11::{} could not be created", a_name));
@@ -1553,6 +1578,10 @@ struct ORGFxRuntime::Impl
 		desc.registerResources = [a_frame](org::RenderGraph& a_graph) {
 			for (const auto& [row, texture] : a_frame->textures)
 				texture->Register(a_graph);
+			std::vector<const GraphResources::Resource*> transients;
+			for (const auto& [row, texture] : a_frame->transients)
+				transients.push_back(texture.get());
+			RF::RegisterTransients(a_graph, transients);
 		};
 		// Read at each Begin: while Post Processing or the game owns the tonemap, the passes record only their barriers.
 		desc.declared = [] {

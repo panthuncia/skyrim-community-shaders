@@ -30,6 +30,11 @@ namespace GraphResources
 	struct Options;
 }
 
+namespace org
+{
+	class RenderGraph;
+}
+
 namespace FrameAnchors
 {
 	struct ClientDesc;
@@ -252,6 +257,75 @@ namespace RenderGraph::Frame
 		Existence a_exists);
 	DeclaredTexture3D DeclareTexture3D(std::string a_name, Dependencies a_dependencies, Texture3DDescFn a_desc, const GraphResources::Options& a_options,
 		Existence a_exists);
+
+	namespace Detail
+	{
+		struct TransientDeclaration;
+	}
+
+	/**
+	* @brief A declared transient: a texture whose description follows variables but which takes no versions. Each registration of
+	* the client that uses it makes its own transient (Make), so the builds of that registration alias it in their pool.
+	*
+	* The client depends on Depends() and keys on ExtentAt(), and its make function calls Make with the key's extent. A change
+	* then registers the client again, and the revision waits for the builds of its stages, so the new size switches in with
+	* them at one Begin. Its passes write it before they read it, in one run of one stage. No later run, epoch or frame reads it,
+	* and it is never published. Render thread.
+	*/
+	template <class Twin>
+	class DeclaredTransient
+	{
+	public:
+		/** @brief Width, height, and depth (3D) or slice count (2D). */
+		using Extent = std::array<std::uint32_t, 3>;
+
+		DeclaredTransient() = default;
+		explicit DeclaredTransient(std::shared_ptr<Detail::TransientDeclaration> a_declaration) :
+			declaration(std::move(a_declaration)) {}
+
+		explicit operator bool() const { return declaration != nullptr; }
+
+		/** @brief The name every transient it makes takes. */
+		const std::string& Name() const;
+
+		/** @brief The variables its description reads. The client that uses it depends on them too. */
+		const Dependencies& Depends() const;
+
+		/** @brief The extent for a revision's values, for the client's key. Fatal on a change other than the extent. */
+		Extent ExtentAt(const Inputs& a_values) const;
+
+		/** @brief The extent for the adopted revision's values: the one the frame's builds were made with. */
+		Extent AdoptedExtent() const;
+
+		/** @brief A new transient at a_extent, for one registration. Never null: a transient that cannot be made is fatal. */
+		std::shared_ptr<Twin> Make(const Extent& a_extent) const;
+
+	private:
+		std::shared_ptr<Detail::TransientDeclaration> declaration;
+	};
+
+	using DeclaredTransient2D = DeclaredTransient<GraphResources::Texture2D>;
+	using DeclaredTransient3D = DeclaredTransient<GraphResources::Texture3D>;
+
+	/**
+	* @brief Render owner (fatal elsewhere), at setup. A transient described by a_desc of a_dependencies. a_options.lifetime is
+	* Transient, or History to keep it out of the pool (a diagnostic); other lifetimes, versions and exports are fatal. Only the
+	* extent may change between revisions, as for DeclareTexture2D.
+	*/
+	DeclaredTransient2D DeclareTransient2D(std::string a_name, SizedDesc2D a_desc, const GraphResources::Options& a_options);
+	DeclaredTransient3D DeclareTransient3D(std::string a_name, Dependencies a_dependencies, Texture3DDescFn a_desc, const GraphResources::Options& a_options);
+
+	/**
+	* @brief Registers one registration's declared transients with a graph being built, from the client's registerResources.
+	* The stage logs them once per build. Null entries are skipped.
+	*/
+	void RegisterTransients(org::RenderGraph& a_graph, const std::vector<const GraphResources::Resource*>& a_transients);
+
+	namespace Detail
+	{
+		/** @brief Logs the declared transients RegisterTransients registered on this thread since the last call, for a_build. */
+		void LogBuildTransients(std::string_view a_build);
+	}
 
 	/** @brief A declared structured buffer. Keep it for as long as the feature uses the buffer. Render thread. */
 	class DeclaredBuffer

@@ -6,6 +6,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/Frame/BoundaryCheck.h"
+#include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/DeclareRegistration.h"
 #include "RenderGraph/Frame/EpochRecordings.h"
 #include "RenderGraph/Frame/FrameDescription.h"
@@ -907,6 +908,8 @@ namespace FrameAnchors
 				for (const auto& client : snapshot->clients)
 					if (client->registerResources)
 						client->registerResources(a_graph);
+				// One line per build: the declared transients its clients registered.
+				::RenderGraph::Frame::Detail::LogBuildTransients(declaredInfo[declared].names.label);
 				if (SegmentUsesSharedConstants(*snapshot, declared))
 					SharedConstants::Register(a_graph);
 			}
