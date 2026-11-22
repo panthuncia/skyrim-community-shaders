@@ -5,6 +5,7 @@
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/Frame/Variables.h"
+#include "RenderGraph/Relocation/Holders.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
@@ -67,13 +68,12 @@ namespace DCLF::Draws
 			return created;
 		}
 
-		/** @brief A structured buffer the shaders read through its SRV. a_index receives the SRV's descriptor slot. */
-		std::shared_ptr<org::Buffer> StructuredBuffer(std::uint32_t a_elements, std::uint32_t a_stride, const char* a_name, std::uint32_t& a_index, bool a_unorderedAccess = false)
+		/** @brief A structured buffer the shaders read through its SRV. Readers take its index when they bind it, never from here. */
+		std::shared_ptr<org::Buffer> StructuredBuffer(std::uint32_t a_elements, std::uint32_t a_stride, const char* a_name, bool a_unorderedAccess = false)
 		{
 			auto created = org::Buffer::CreateUnmaterializedStructuredBuffer(a_elements, a_stride, a_unorderedAccess);
 			created->SetName(a_name);
 			created->Materialize();
-			a_index = created->GetSRVInfo(0).slot.index;
 			return created;
 		}
 
@@ -87,11 +87,9 @@ namespace DCLF::Draws
 				std::equal(a_main.begin(), a_main.end(), held->begin(), [](const auto& a, const auto& b) { return a.SameShape(b); }))
 				return;
 			auto copies = std::make_shared<std::vector<FrameBuffer>>(a_main);
-			for (auto& frameBuffer : *copies) {
-				std::uint32_t index = 0;
+			for (auto& frameBuffer : *copies)
 				frameBuffer.copy = StructuredBuffer(frameBuffer.elements, frameBuffer.stride,
-					fmt::format("{}.frame-buffer.t{}", a_view.traits->prefix, frameBuffer.textureRegister).c_str(), index);
-			}
+					fmt::format("{}.frame-buffer.t{}", a_view.traits->prefix, frameBuffer.textureRegister).c_str());
 			a_view.frameBuffers.store(std::move(copies), std::memory_order_release);
 		}
 
@@ -109,6 +107,8 @@ namespace DCLF::Draws
 
 		std::uint64_t AddressOf(rhi::Device a_device, org::Buffer& a_buffer)
 		{
+			// Shaders read the address from GPU data, so the buffer never moves once it went out.
+			::RenderGraph::Relocation::Pin(a_buffer);
 			// BasicRHI places whole buffers at 256 or more. The descriptor-buffer model's pointer loads assume at least 16.
 			const auto address = a_device.GetBufferDeviceAddress({ a_buffer.GetAPIResource().GetHandle(), 0 });
 			assert(address % 16 == 0);
@@ -771,7 +771,6 @@ namespace DCLF
 		using org::services::GrowableContents;
 		const std::uint32_t objects = InitialObjectUnits();
 		// Every table grows by doubling. The object records, extras and geometry table belong to the payload.
-		std::uint32_t unused = 0;
 		// The features' scene resources. The vertex stream comes first, since the sealed set owns its address and capacity.
 		// Without a vertex stream the tables are not made.
 		buffers->sceneResources = Extensions::SetUpSceneResources(a_device, smallStart);
@@ -786,9 +785,9 @@ namespace DCLF
 				const std::uint32_t events = smallStart ? 4u : kInitialVisibilityEvents;
 				buffers->visibilityEvents = MakeVersioned(CreateWords(VisibilityEventBytes(events) / 4, true, "cs.dclf.visibility-events"),
 					{ .extent = { kVisibilityEventHeaderWords * 4, 16, 4 } });
-				buffers->visibilityRootReported = MakeVersioned(StructuredBuffer(roots, 2 * sizeof(std::uint32_t), "cs.dclf.visibility-root-reported", unused, true),
+				buffers->visibilityRootReported = MakeVersioned(StructuredBuffer(roots, 2 * sizeof(std::uint32_t), "cs.dclf.visibility-root-reported", true),
 					{ .extent = { 0, 8, 8 }, .contents = GrowableContents::Zero });
-				buffers->visibilityObjectReported = MakeVersioned(StructuredBuffer(objects, sizeof(std::uint32_t), "cs.dclf.visibility-object-reported", unused, true),
+				buffers->visibilityObjectReported = MakeVersioned(StructuredBuffer(objects, sizeof(std::uint32_t), "cs.dclf.visibility-object-reported", true),
 					{ .extent = { 0, 4, 4 }, .contents = GrowableContents::Zero });
 				auto readback = std::make_shared<VisibilityReadback>();
 				readback->list = MakeEventList("cs.dclf.visibility-events-readback", sizeof(VisibilityEvent), events);

@@ -4,6 +4,7 @@
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
+#include "RenderGraph/Relocation/Holders.h"
 
 namespace DCLF::Draws
 {
@@ -30,6 +31,8 @@ namespace DCLF::Draws
 		auto views = std::make_shared<FrameBlockViews>();
 		views->service = std::move(service);
 		views->buffer = a_buffer;
+		// The views name the buffer's native resource, so the buffer never moves.
+		::RenderGraph::Relocation::Pin(*a_buffer);
 		const auto resource = a_buffer->GetAPIResource().GetHandle();
 		for (std::uint32_t b = 0; b < a_blocks.size(); ++b) {
 			const rhi::DescriptorSlot slot = views->service->AllocateDescriptorSlot(rhi::DescriptorHeapType::CbvSrvUav, true);

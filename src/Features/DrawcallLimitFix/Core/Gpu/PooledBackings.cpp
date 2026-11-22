@@ -2,11 +2,13 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include <ORGModuleServices/BackingPool.h>
 #include <ORGModuleServices/ElasticCapacity.h>
 #include <ORGModuleServices/GraphHostBackings.h>
+#include <Resources/Buffers/Buffer.h>
 
 #include <cstdlib>
 
@@ -23,12 +25,22 @@ namespace DCLF::PooledBackings
 
 	std::uint64_t DeviceAddressOf(const org::Buffer& a_buffer)
 	{
+		// Shaders read the address from GPU data, so the buffer never moves once it went out.
+		::RenderGraph::Relocation::Pin(a_buffer);
 		return org::services::GraphHostDeviceAddress(Host(), a_buffer);
 	}
 
 	org::services::BackingPoolHooks Hooks()
 	{
-		return org::services::GraphHostBackingHooks(Host());
+		auto hooks = org::services::GraphHostBackingHooks(Host());
+		// A backing made with its device address hands it out at once (Backing::address).
+		hooks.allocate = [allocate = std::move(hooks.allocate)](const org::services::BackingRequest& a_request) {
+			auto allocation = allocate(a_request);
+			if (a_request.flags.deviceAddress && allocation.buffer)
+				::RenderGraph::Relocation::Pin(*allocation.buffer);
+			return allocation;
+		};
+		return hooks;
 	}
 
 	std::uint32_t PerFrameSpares()

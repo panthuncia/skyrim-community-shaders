@@ -4,6 +4,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "RenderGraph/BufferRefs.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include <OpenRenderGraph/GraphHost.h>
@@ -36,17 +37,25 @@ namespace RenderGraph
 		if (UndeclaredAccess::On())
 			UndeclaredAccess::NoteResource(a_buffer, "BufferRefOf", a_where);
 		auto* host = RenderGraphRuntime::Get().Host();
-		return host ? MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where) : BufferRef{};
+		if (!host)
+			return {};
+		// A ref is the native buffer's own view, so the buffer never moves once a ref went out.
+		Relocation::Pin(a_buffer);
+		return MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where);
 	}
 
 	BufferRef DeclaredRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset, std::source_location a_where)
 	{
 		auto* host = RenderGraphRuntime::Get().Host();
-		return host ? MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where) : BufferRef{};
+		if (!host)
+			return {};
+		Relocation::Pin(a_buffer);
+		return MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where);
 	}
 
 	BufferRef DeclaredRefOf(rhi::Device a_device, const org::Buffer& a_buffer, std::uint64_t a_offset, std::source_location a_where)
 	{
+		Relocation::Pin(a_buffer);
 		return MakeBufferRef(a_device, const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where);
 	}
 
@@ -172,6 +181,7 @@ namespace RenderGraph
 		// The same backing again keeps its version.
 		if (buffer->Get() != a_backing)
 			buffer->PublishLate(a_backing, std::move(a_owner));
+		Relocation::Pin(*a_backing);
 		const BufferRef ref = MakeBufferRef(host->Device(), a_backing->GetAPIResource().GetHandle(), 0, std::source_location::current());
 		latch->Set(a_used ? a_used : ref);
 		return ref;

@@ -11,6 +11,7 @@
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/RasterProgram.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/UndeclaredAccess.h"
@@ -58,6 +59,9 @@ namespace ImGuiBasicRHI
 			desc.Usage = D3D11_USAGE_DEFAULT;
 			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 			auto twin = std::make_shared<GraphResources::Texture2D>(desc, a_name, GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+			// The backend makes raw views of its textures (createShaderResourceView). They would not follow a move.
+			if (twin->Graph())
+				::RenderGraph::Relocation::Pin(*twin->Graph());
 			auto pixels = std::dynamic_pointer_cast<org::PixelBuffer>(twin->Graph());
 			return { std::move(pixels), std::move(twin) };
 		}
