@@ -246,6 +246,8 @@ namespace FrameAnchors
 			RenderGraph::Frame::SegmentFields fields;
 			// The versions it binds, which may be pending. Null binds the current ones.
 			std::shared_ptr<const org::IResourceVersions> versions;
+			// The revision that named versions, 0 for none.
+			std::uint64_t versionsSerial = 0;
 			const void* TryGet(std::type_index a_type) const noexcept override
 			{
 				if (a_type == std::type_index(typeid(SegmentHostData)))
@@ -2140,11 +2142,24 @@ namespace FrameAnchors
 			data->segment = a_declared;
 			data->fields = a_fields;
 			data->versions = a_versions.versions;
+			data->versionsSerial = a_versions.serial;
 			// A failed recording stops the game inside the service. A drop is kept so the next request asks again.
 			// A refused post (async epochs off) settles the entry with an error, which stops the game when it is asked for again.
 			(void)recordings.cache.Post(*a_state.host, entry, epoch, { std::move(data) }, a_fields.graph, a_slot,
 				fmt::format("the {} (slot {})", declaredInfo[a_declared].names.label, a_slot));
 			return entry;
+		}
+
+		/**
+		* @brief The serial of the older revision whose named versions a_recording holds, or 0. Such a recording holds that
+		* revision's whole version set through its host data, also the versions later revisions replaced. Render owner.
+		*/
+		std::uint64_t HeldOlderRevision(const std::shared_ptr<const org::GraphHost::EpochRecording>& a_recording)
+		{
+			const auto* data = a_recording && a_recording->revision ? a_recording->revision->Get<SegmentHostData>() : nullptr;
+			if (!data || !data->versions)
+				return 0;
+			return data->versionsSerial != RenderGraph::Frame::Revision::Mark().revision ? data->versionsSerial : 0;
 		}
 
 		/**
@@ -2183,7 +2198,7 @@ namespace FrameAnchors
 				const SegmentFields ahead = DescribeDeclared(a_state, a_declared, true);
 				for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && ahead.graph; ++s) {
 					auto& kept = a_state.schedule[a_declared][s];
-					if (kept.recording && host.EpochRecordingCurrent(*kept.recording))
+					if (kept.recording && host.EpochRecordingCurrent(*kept.recording) && !HeldOlderRevision(kept.recording))
 						continue;
 					// Parity fields fit only the slots of this frame's parity.
 					if (s % 2 != a_frame.parity)
@@ -2200,8 +2215,12 @@ namespace FrameAnchors
 				Driver::NoteScheduled(segment, Reason::Absent);
 				return wanted;
 			}
+			// A recording for an older revision's versions holds that revision's whole set, also versions replaced since. A stage
+			// that was a member of that revision and not of the newer one keeps it. So it records again against the current
+			// versions, and switches once that is ready.
+			const std::uint64_t heldRevision = HeldOlderRevision(active.recording);
 			// While a build is staged the attached graph's bindings are frozen, so slots keep what they have.
-			if (!(active.recording && active.fields == wanted) && !stillStaged) {
+			if (!(active.recording && active.fields == wanted && !heldRevision) && !stillStaged) {
 				std::shared_ptr<SegmentRecording> entry;
 				for (std::uint32_t ahead = 0; ahead < RenderGraphRuntime::kGameFramesInFlight; ++ahead) {
 					auto requested = RequestDeclared(a_state, a_declared, wanted, (slot + ahead) % RenderGraphRuntime::kGameFramesInFlight, a_frame.frame, "");
@@ -2215,7 +2234,9 @@ namespace FrameAnchors
 				}
 				auto ready = recordings.cache.RecordingOf(*entry);
 				if (ready && host.EpochRecordingCurrent(*ready) && host.EpochRecordingVersionsCurrent(*ready, slot)) {
-					const auto what = active.recording ? RenderGraph::Frame::DiffFields(active.fields, wanted) :
+					const auto what = heldRevision && active.recording && active.fields == wanted ?
+					                      fmt::format("recorded again off revision {}'s named versions", heldRevision) :
+					                  active.recording ? RenderGraph::Frame::DiffFields(active.fields, wanted) :
 					                                     fmt::format("the slot's first schedule on build {}", wanted.graph);
 					active = { wanted, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
 					Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.waitFrame[a_declared], what);
