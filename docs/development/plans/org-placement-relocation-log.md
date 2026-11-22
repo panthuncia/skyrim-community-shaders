@@ -16,6 +16,33 @@ entry says what was decided and why, so it can be reviewed and reversed.
 | basicrhi-retain | BasicRHI | `relocation/copy-retain` | relocation 1 |
 | dxvk-reloc | dxvk | `relocation/next-location` | relocation 4 (DXVK side) |
 | cs-dclf-reads | CS | `placement/dclf-reads` | placement 1 |
+| org-defrag + cs-defrag | ORG, CS | `relocation/defragmenter`, `relocation/defrag-cs` | relocation 5 |
+| cs-dxvk-source | CS | `relocation/dxvk-source` | relocation 4 (CS side) |
+| cs-holders | CS | `relocation/holders` | relocation 2-3 (CS side), journal readers for 6 |
+| org-versioned + cs-versioned | ORG, CS | `placement/versioned-candidates`, `placement/versioned-cs` | placement 5, 6 |
+
+All lanes are merged into `org_integration` (CS) and `vram/frame-arena` (ORG submodule). The main session fixed runtime
+failures itself; those fixes are separate commits.
+
+## Status by plan step
+
+| Plan | Step | State |
+|---|---|---|
+| Placement | 1 DCLF reads | done, on |
+| Placement | 2 usage summaries | done, on (diagnostic only) |
+| Placement | 3 host packing | done, `ORG_FRAME_PLACEMENT`, off by default (costs memory today) |
+| Placement | 4 versioned placements | done as re-placement on a new version (entry 5) |
+| Placement | 5 versioned candidates | done for frame placement; only SSGI's scratch qualifies (entry 20) |
+| Placement | 6 MayNotWrite | done, engine-gated passes only (entry 21) |
+| Placement | 7 switch on + delete | not done (entry 22) |
+| Relocation | 1 CopyRetain | done, tested |
+| Relocation | 2 owner records | done, on |
+| Relocation | 3 follow path + stress | done, on; `ORG_RELOCATION_STRESS` |
+| Relocation | 4 DXVK source | done, on in guest; DCLF keeps re-importing (entry 15) |
+| Relocation | 5 loading-screen defrag | done, `CS_ORG_DEFRAG`, off by default (frees nothing yet, entry 19) |
+| Relocation | 6 steady-state trickle | not done: no texture slack to win (entry 19) |
+| Relocation | 7 streaming-window hook | not done: window blocks are full |
+| Relocation | 8 written resources | not done (optional) |
 
 ## Decisions
 
@@ -54,5 +81,69 @@ entry says what was decided and why, so it can be reviewed and reversed.
 11. **DXVK keeps the old relocation struct and adds `dxvkPollInteropRelocations2`** (interop version 8, 7 still accepted), because
    the client allocates the array and the poll has no version input. The ready point is DXVK's tracking timeline value, not a
    CS chunk sequence, since a chunk sequence only says the CS thread processed the work.
+    Measured at the second dump after loads 1/3/4 (driver MB, off → on): Vulkan 3728/3732/3796 → 3868/3870/3870; D3D12
+    3727/3630/3696 → 3860/3829/3895; guest 4154/4096/4154 → 4233/4180/4238. Correctness with it on: river (all three
+    modes) and ssgi (Vulkan) pass and match the baseline by eye.
 12. **BasicRHI `CopyRetain` hands the old allocation back through a caller-owned `pRetained` array**; retained allocations are
    never chosen as move sources. Tests pass on D3D12 and Vulkan (Vulkan needs `VK_LOADER_LAYERS_DISABLE=*nsight*`).
+13. **A recording whose bound backing moved keeps running while it records again.** The follow path first made
+    `EpochRecordingCurrent` false on a move, so FrameAnchors dropped the stage for a frame and Cloud Shadows stopped the
+    game under `ORG_RELOCATION_STRESS`. Now ORG has `EpochRecordingBackingsCurrent`; the recording cache records again on a
+    move and the schedule switches when the new recording is ready. Safe because the old copy holds the old backing's lease.
+    Measured under `ORG_RELOCATION_STRESS=4`: 6,810 moves in a `vram-loads` run, 2 awaiting retirement at any time, no
+    failures, shots match.
+14. **CS ReadOnly marks are conservative** (cs-holders agent): only Terrain Shadows' heightmap and Volumetric Lighting's noise
+    volume. Buffers whose GPU address went out, buffer view refs, DCLF raw CBV buffers and ImGui textures are Pinned.
+15. **DCLF stays on its own re-import path for DXVK moves ("Hold"), not ORG's follow path** (cs-dxvk-source agent). DCLF's
+    tables and async scene work can record with the old descriptor index after a commit, and `RefreshShared` retires the old
+    resource behind the commit's frontier, which would leave them reading destroyed views. Only plain imported textures
+    ("Follow") go through ORG's switch. The plan's "DCLF import counts fall" does not happen yet.
+16. **DXVK moves carry no ORG `ready` point.** `rhi::Timeline` cannot wrap DXVK's semaphore, and ORG's empty submits would
+    mark the compute and copy queues started for the epoch. Ordering comes from DXVK's stream: graphics work is enqueued
+    after the poll, and the other queues already wait on a stream point at their first submission of each epoch. Follow
+    moves commit only while those queues are idle.
+17. **A DXVK move's old storage is held only by the newest import before it.** The first version gave it to every older
+    import of the cookie; under `DXVK_ORG_RELOCATE_STRESS=4` held storages grew ~150/s. After the fix they still grow
+    (~115/s) under that stress, held by superseded DCLF imports that stay alive. Without stress, `guest+vram-loads` shows
+    "Storages retired to ORG" at 0 MB and the driver total equal or lower than before. **Open:** find what keeps superseded
+    DCLF imports alive under heavy move rates.
+18. **Every guest run before 05:45 used a Nov 6 DXVK DLL.** cs-test's stage copies only the CS DLL and shaders, and the
+    Dev-Fast `aio/bin` DLLs are not refreshed by the CS build. I copied the new DXVK DLLs into the aio folder
+    (`tools/stage-dxvk-dlls.ps1 -Src extern/dxvk/build/src`) and into the `CS AB nfg` MO2 mod by hand.
+19. **The native defragmenter moves textures only, and only at loading screens** (`CS_ORG_DEFRAG=1`, off by default). Buffers
+    are off (`moveBuffers=false`) because CS hands out buffer device addresses ORG cannot see. All ORG frees go through a
+    release gate while a pass is open. Old ranges are kept until the GPU is past the copy and the old generation's
+    published snapshot expires, so no kept recording can read freed memory.
+    Measured (native Vulkan `vram-loads`): one campaign at the first loading screen, 99 moves, 59 MB in 4.3 ms, blocks 9 → 9,
+    slack unchanged. Native D3D12: 48 moves, 51 MB in 6.5 ms, blocks 7 → 7. A memory dump (Vulkan) shows why: texture blocks are almost full. The free space is in blocks shared with DCLF
+    buffers (written every frame, most with handed-out addresses, so pinned), in the frame arena's alias heaps, and in
+    mapped ReBAR/system heaps (128 + 73 MB, pinned by the plan). Relocation step 6 (steady-state trickle) is not worth doing
+    for textures. The win needs buffer moves, which needs CS to stop caching device addresses (or to follow the journal for
+    them), and packing DCLF's per-frame buffers apart from long-lived ones.
+20. **Versioned resources are frame-placement candidates only** (placement-versioned agent). With `ORG_FRAME_PLACEMENT` off
+    nothing changes for them. Engine targets did not become candidates: they are all exported, and in native mode the native
+    device wraps the raw image, so a moved version would leave that wrap behind. The list of frame-scoped targets that could
+    be placed once the native device follows moves is in `EngineTargetSet.cpp` above `TwinOptions`. The one new candidate
+    is SSGI's full-resolution scratch (`Lifetime::Transient`, no longer fatal). `DeclareTransient*` is not folded in yet:
+    with the switch off that would cost VRAM.
+21. **MayNotWrite marks only engine-gated passes** (skeleton clear, gated kMAIN/depth copies, ImageSpace draws/dispatches).
+    The plan's gated regions no longer exist (`34aee5701`). The per-graph planner first also refused pools for those
+    resources, which cost ~30 MB with the switch off (frame arena 136 → 125 MB, 6 resources standalone). I limited the rule
+    to frame placement: the readers in the graph share the gate.
+22. **Placement step 7 (switch on by default, delete the frame arena, frame positions, private pools, `DeclareTransient*`) is
+    not done.** With the switch on, native Vulkan `vram-loads` still uses ~214 MB of alias heaps against 136 MB off. The
+    big candidates the plan counted on (G-buffer ~91 MB, Scaleform scratch 33 MB) are blocked: engine targets by the native
+    wrap (entry 20), Scaleform by the repeated UI epoch (graphs can't mark a resource as crossing runs).
+23. **Known risk, not fixed:** `ExecutionState.cpp` (~298, ~505) enters every aliased backing from Undefined at each execution,
+    including later epochs. A frame-placed resource used by several epochs could lose its content at the later epoch's
+    entry. Today's frame-placed resources are single-epoch except two; it must be fixed before engine targets are placed.
+
+## Final checks (merged build, switches at their defaults)
+
+Passed: `river` in all three modes; `ssgi` native D3D12 and guest; `dynres` in all three modes; `resize` native Vulkan;
+`terrain-shadows` native Vulkan with `ORG_RELOCATION_STRESS=4`; `vram-loads` native Vulkan and D3D12 with `CS_ORG_DEFRAG=1`;
+guest `river` with `DXVK_ORG_RELOCATE_STRESS=4`; native Vulkan `ssgi` and `vram-loads` with `ORG_FRAME_PLACEMENT=1`.
+Shots compared by eye with the morning's baselines: the differences seen were weather/fog and camera position, which also
+vary between two runs of the same build.
+
+Nothing is pushed. Branches of every lane are kept locally.

@@ -3,7 +3,7 @@
 Goal (user, 2026-11-22): ORG works out resource lifetimes and placement by itself. CS only declares what each pass uses and
 what must persist. No explicit frame transients, and no manual grouping of aliased resources.
 
-Status: plan only. The frame transient work this replaces was reverted (`chore(org): revert frame transients`). The reasons
+Status (2026-11-22, evening): steps 1-6 implemented, step 7 not done; see `org-placement-relocation-log.md` for what is on, what is off and why. Earlier status: plan only. The frame transient work this replaces was reverted (`chore(org): revert frame transients`). The reasons
 are below. Companion plan: `org-relocation.md`. A placement change is a relocation of transients, so the two share the
 commit point and the follow path.
 

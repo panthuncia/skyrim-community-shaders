@@ -5,7 +5,7 @@ system covers both modes. The re-import path DXVK triggers stops being an intero
 (guest) mode DXVK keeps its own allocations and defragmentation and hands ORG the new locations. In native mode ORG drives
 everything through BasicRHI's allocator.
 
-Status: plan only, from a read of `org_integration` with ORG `e20aa19`. Nothing here is implemented.
+Status (2026-11-22, evening): steps 1-5 implemented, 6-8 not done; see `org-placement-relocation-log.md`. Written from a read of `org_integration` with ORG `e20aa19`.
 
 For the working state, pins, build and test commands, baselines and traps, see "Handoff" in `org-whole-frame-placement.md`
 (section 5). It applies to this plan too. The two plans share the commit point and follow path. A transient that moves is a
