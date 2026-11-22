@@ -169,6 +169,8 @@ namespace Testing::SwitchRegistry
 			{ .name = "DXVK_PIPELINE_STATS", .type = Bool },
 			{ .name = "DXVK_SHADER_DUMP_PATH" },
 			{ .name = "DXVK_VIEW_TRACE" },
+			{ .name = "ORG_FRAME_PLACEMENT", .key = "org.frame_placement", .type = Bool, .defaultValue = "0", .description = "true: ORG places graph transients across the whole frame (org-whole-frame-placement.md)" },
+			{ .name = "ORG_FRAME_PLACEMENT_LOG", .key = "org.frame_placement_log", .type = Bool, .defaultValue = "0", .description = "true: log every frame-placement resource and slot" },
 			{ .name = "ORG_GRAPH_REPLAY_OUTPUT" },
 			{ .name = "SARP_D3D12_DRED" },
 			{ .name = "SARP_D3D12_GPU_VALIDATION", .type = Bool },

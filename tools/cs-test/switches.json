@@ -1808,6 +1808,26 @@
 			"description": ""
 		},
 		{
+			"name": "ORG_FRAME_PLACEMENT",
+			"key": "org.frame_placement",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "true: ORG places graph transients across the whole frame (org-whole-frame-placement.md)"
+		},
+		{
+			"name": "ORG_FRAME_PLACEMENT_LOG",
+			"key": "org.frame_placement_log",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "true: log every frame-placement resource and slot"
+		},
+		{
 			"name": "ORG_GRAPH_REPLAY_OUTPUT",
 			"key": "",
 			"type": "string",

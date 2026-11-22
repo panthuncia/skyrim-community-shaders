@@ -1860,6 +1860,19 @@ bool RenderGraphRuntime::Initialize()
 		// The build manager makes every rebuild off the render thread and attaches it at a frame boundary.
 		// An epoch with no graph is still built at its first submission.
 		state->host->SetExplicitBuilds(true);
+		// Whole-frame placement of graph transients (ORG_FRAME_PLACEMENT). Off by default.
+		// The host packs every epoch's transients over the frame instead of each graph packing its own.
+		{
+			org::GraphHost::FramePlacementSettings placement{};
+			placement.enabled = Switches::On("ORG_FRAME_PLACEMENT");
+			placement.logLifetimes = Switches::On("ORG_FRAME_PLACEMENT_LOG");
+			// Fragment epochs (DCLF's) can run more than once a frame.
+			// A resource that crosses their runs must span the whole epoch.
+			for (const auto& entry : RenderGraph::Frame::Recipes::PositionedEpochs())
+				if (entry.owner != RenderGraph::Frame::Recipes::Owner::Cs)
+					placement.repeatedEpochs.push_back(entry.epoch);
+			state->host->SetFramePlacement(std::move(placement));
+		}
 		// The frame-wait timeline, made before any build because packets bind it. It needs an uploader queue to signal from.
 		// DCLF's frame values need it.
 		if (state->uploadQueue || state->native) {
