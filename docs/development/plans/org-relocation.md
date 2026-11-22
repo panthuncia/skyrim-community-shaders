@@ -7,6 +7,10 @@ everything through BasicRHI's allocator.
 
 Status: plan only, from a read of `org_integration` with ORG `e20aa19`. Nothing here is implemented.
 
+For the working state, pins, build and test commands, baselines and traps, see "Handoff" in `org-whole-frame-placement.md`
+(section 5). It applies to this plan too. The two plans share the commit point and follow path. A transient that moves is a
+relocation with no copy.
+
 ## 0. What exists today
 
 ### DXVK (guest) relocations
