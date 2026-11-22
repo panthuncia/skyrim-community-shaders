@@ -34,6 +34,8 @@ namespace PublishedResources
 		struct Entry
 		{
 			std::string id;
+			// A plain resource. Null for a slot, whose versions the entry never holds: a version held here would outlive its
+			// replacement for the session.
 			std::shared_ptr<org::Resource> resource;
 			// A versioned twin's slot. Every graph registers it as the id's resolver, so a resize is a new version, not a new resource.
 			std::shared_ptr<org::VersionedTexture> slot;
@@ -51,7 +53,7 @@ namespace PublishedResources
 			struct Registered
 			{
 				std::string id;
-				std::shared_ptr<org::Resource> resource;
+				std::shared_ptr<org::Resource> resource;      // null for a slot, as Entry's
 				std::shared_ptr<org::VersionedTexture> slot;  // registered as the id's resolver in place of resource
 				std::shared_ptr<org::VersionedBuffer> bufferSlot;  // the same for a buffer
 				// Read by a build's ShaderResourceVariant and ShaderResourceIndex, which may run off the render thread.
@@ -233,10 +235,12 @@ namespace PublishedResources
 			auto& state = Published();
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto* entry = Find(state, a_id);
+			// A slot's entry holds no version. Its readers follow the slot (CurrentOf).
+			auto resource = a_source.slot || a_source.bufferSlot ? nullptr : a_source.resource;
 			// The same resource or a new version of the same slot needs no build.
-			if (entry && (entry->resource == a_source.resource || (entry->slot && entry->slot == a_source.slot) ||
+			if (entry && ((entry->resource && entry->resource == resource) || (entry->slot && entry->slot == a_source.slot) ||
 							 (entry->bufferSlot && entry->bufferSlot == a_source.bufferSlot))) {
-				entry->resource = a_source.resource;
+				entry->resource = std::move(resource);
 				entry->srv = a_source.srv;
 				entry->twin = a_source.twin;
 				entry->alive = a_source.alive;
@@ -248,11 +252,13 @@ namespace PublishedResources
 			}
 			// Another resource under a published id would rebuild every graph that holds it, and its readers would bind two
 			// resources across one build. Declare the id once and let its versions follow the settings.
-			if (entry)
+			if (entry) {
+				const auto held = CurrentOf(*entry);
 				RenderGraph::Fatal("published resources", fmt::format("'{}' is already published as {}; {} cannot replace it (declare the id once, at setup)", a_id,
-					entry->resource ? entry->resource->GetName() : std::string("another resource"), a_source.name));
+					held ? held->GetName() : std::string("another resource"), a_source.name));
+			}
 			entry = &state.entries.emplace_back(Entry{ .id = std::string(a_id) });
-			entry->resource = a_source.resource;
+			entry->resource = std::move(resource);
 			entry->slot = a_source.slot;
 			entry->bufferSlot = a_source.bufferSlot;
 			entry->view = a_view;
@@ -369,7 +375,12 @@ namespace PublishedResources
 				const auto found = std::ranges::find(snapshot->resources, a_id, &Snapshot::Registered::id);
 				if (found == snapshot->resources.end())
 					return {};
-				return { found->slot ? found->slot->CurrentResource() : found->resource, found->view, true, found->published };
+				std::shared_ptr<org::Resource> current = found->resource;
+				if (found->slot)
+					current = found->slot->CurrentResource();
+				else if (found->bufferSlot)
+					current = found->bufferSlot->Get();
+				return { std::move(current), found->view, true, found->published };
 			}
 			const auto* entry = Find(Published(), a_id);
 			if (!entry)
