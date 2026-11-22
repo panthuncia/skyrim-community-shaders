@@ -125,9 +125,12 @@ namespace DCLF::Features::Grass
 			for (const auto& table : { tables->instances, tables->owners, tables->frame, tables->visible, tables->shapes, tables->buckets, tables->meshes })
 				builder.ShaderResource(*table, noViews);
 			builder.ShaderResource(tables->draw, noViews);
+			// Both programs' vertex stages read the collision texture. Only the colour programs sample the shadow mask. RenderDepth
+			// reads just its diffuse alpha (RunGrass.hlsl).
 			static constexpr std::string_view kCollisionIds[] = { GrassShared::kCollisionGraphId };
 			Extensions::DeclareGraphTextures(builder, kCollisionIds);
-			Extensions::DeclareGraphTextures(builder, Extensions::ShadowMaskGraphTextureIds());
+			if (!a_declare.depth)
+				Extensions::DeclareGraphTextures(builder, Extensions::ShadowMaskGraphTextureIds());
 		}
 
 		bool MainDirect(Api::DrawFamilyDirect& a_draw)

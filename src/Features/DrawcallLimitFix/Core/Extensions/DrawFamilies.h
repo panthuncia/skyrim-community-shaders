@@ -68,6 +68,8 @@ namespace DCLF::Api
 		const Draws::ViewResources* view;
 		std::span<org::ResourceBindingToken> arguments;
 		RenderGraph::BufferRef row;  // out, main pass only. Fixed with the family's tables.
+		// The main pass's depth shape, which draws only the depth programs. Without it, also declare what only the colour programs read.
+		bool depth = false;
 	};
 
 	/**

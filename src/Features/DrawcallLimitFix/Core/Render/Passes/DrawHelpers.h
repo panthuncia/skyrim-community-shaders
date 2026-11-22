@@ -67,11 +67,20 @@ namespace DCLF::Draws
 	/** @brief The shadow epoch's index pool copies, dispatched from the revision's shadow shape's latch. */
 	std::shared_ptr<org::RenderPass> MakeShadowIndexPoolPass(const std::shared_ptr<ShadowResources>& a_resources);
 
+	/** @brief Which main commit wrote the frame record a pass draws with. It decides what the record binds from t16 up. */
+	enum class FrameRecordKind : std::uint8_t
+	{
+		Depth,   // the depth commit: the Z-prepass phases
+		Colour,  // the colour commit: colour, water, forward and first person
+	};
+
 	/**
-	 * @brief Declares a pass's frame buffers (t16 and up), Light Limit Fix's lights (t35-t37) and the frame textures' ids.
+	 * @brief Declares what a pass's draws read through a frame record of a_kind: the record's own buffers and the payload.
+	 * A colour record adds its frame buffers (t16 and up), Light Limit Fix's lights (t35-t37) and the frame textures' ids.
 	 * @return The published reads, for Extensions::CheckDeclaredReads in the pass's Prepare.
 	 */
-	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
+	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, FrameRecordKind a_kind = FrameRecordKind::Colour,
+		bool a_lights = true);
 
 	/** @brief Declares the late-bound buffers of the installed payload's parts that the pass reads. DeclareFrameBuffers does this too. */
 	void DeclarePayloadReads(org::PassBuilder& a_builder);

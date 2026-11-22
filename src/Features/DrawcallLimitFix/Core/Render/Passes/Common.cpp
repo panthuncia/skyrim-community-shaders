@@ -65,25 +65,48 @@ namespace DCLF::Draws
 		return org::MakeLatchedCopiesPass(!a_conditions.cpuPipeline, std::move(a_targets), std::move(a_source), a_declared);
 	}
 
-	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights)
+	namespace
 	{
+		/** @brief The groups of frame record registers from t16 up that a commit fills. Those it leaves out hold the null texture. */
+		struct FrameRecordReads
+		{
+			bool frameBuffers = false;   // the latched frame buffer copies
+			bool graphBuffers = false;   // the frame graph buffers, such as Light Limit Fix's lights
+			bool frameTextures = false;  // the frame textures, the character light's noise (t125) and the precipitation occlusion (t70)
+		};
+
+		// By FrameRecordKind. A depth commit fills none of these groups (Uploads.cpp, ResolveFrameTextures), so a Z-prepass draw
+		// reads only the record's own buffers. Its shaders agree. Lighting's DCLF_DEPTH_ONLY build keeps only the alpha test.
+		// Grass's RenderDepth reads its diffuse alpha and, from its draw row, the collision texture.
+		constexpr std::array<FrameRecordReads, 2> kFrameRecordReads{ {
+			{},
+			{ .frameBuffers = true, .graphBuffers = true, .frameTextures = true },
+		} };
+	}
+
+	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, FrameRecordKind a_kind, bool a_lights)
+	{
+		const auto& filled = kFrameRecordReads[static_cast<std::size_t>(a_kind)];
 		const std::span<const org::SrvView> noViews{};
 		for (const auto& frameBuffer : a_resources.frameBuffers)
-			a_builder.ShaderResource(frameBuffer.copy, noViews);
+			if (filled.frameBuffers)
+				a_builder.ShaderResource(frameBuffer.copy, noViews);
 		// The frame graph buffers on the graph, such as Light Limit Fix's lights, light list and grid, each with the view
 		// whose index the commit latches.
 		const auto graphBuffers = Extensions::RegisteredFrameGraphBuffers();
 		Extensions::DeclaredReads reads;
-		for (std::size_t b = 0; a_lights && b < graphBuffers.size(); ++b)
+		for (std::size_t b = 0; filled.graphBuffers && a_lights && b < graphBuffers.size(); ++b)
 			if ((a_resources.graphBuffers >> b) & 1)
 				for (std::uint32_t r = 0; r < graphBuffers[b].count; ++r)
 					Extensions::DeclarePublishedRead(a_builder, graphBuffers[b].resources[r], reads);
-		// Declare the frame textures' published ids so the graph orders these reads after the producers' writes.
-		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds(), reads);
-		// The character light's noise, whichever HDR downsample level the engine names this frame.
-		Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds(), reads);
-		// Wetness Effects' precipitation occlusion (t70), the engine's depth target once published.
-		Extensions::DeclareGraphTextures(a_builder, Extensions::PrecipitationOcclusionGraphTextureIds(), reads);
+		if (filled.frameTextures) {
+			// Declare the frame textures' published ids so the graph orders these reads after the producers' writes.
+			Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds(), reads);
+			// The character light's noise, whichever HDR downsample level the engine names this frame.
+			Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds(), reads);
+			// Wetness Effects' precipitation occlusion (t70), the engine's depth target once published.
+			Extensions::DeclareGraphTextures(a_builder, Extensions::PrecipitationOcclusionGraphTextureIds(), reads);
+		}
 		// Every caller draws with the frame record bound, whose shaders read t117 and t121-t123 and the payload's rows.
 		FrameValues::Get().DeclareReads(a_builder);
 		DeclarePayloadReads(a_builder);

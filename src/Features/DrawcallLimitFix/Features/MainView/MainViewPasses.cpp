@@ -436,11 +436,13 @@ namespace DCLF::Draws
 				if (resources->scene->vertexStream)
 					a_builder.ShaderResource(*resources->scene->vertexStream, noViews);
 			}
-			DeclareFrameBuffers(a_builder, *resources);
+			// The depth shape draws with the depth commit's record, which binds nothing the colour commit adds.
+			DeclareFrameBuffers(a_builder, *resources, depth ? FrameRecordKind::Depth : FrameRecordKind::Colour);
 			a_builder.ShaderResource(resources->frameConstants, noViews);  // the frame record's slots, by address
 			for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f)
 				if (const auto& family = Extensions::DrawFamilies()[f]; family.taken) {
-					Api::DrawFamilyDeclare declare{ a_builder, *resources->scene, nullptr, std::span(&bindings.familyArguments[f], 1) };
+					Api::DrawFamilyDeclare declare{ .builder = a_builder, .scene = *resources->scene, .view = nullptr,
+						.arguments = std::span(&bindings.familyArguments[f], 1), .depth = depth };
 					family.contribution.main.declare(declare);
 					bindings.familyRows[f] = declare.row;
 				}

@@ -417,7 +417,7 @@ namespace RenderGraph::Frame::Recipes::Table
 
 	/**
 	* @brief Resources a stage reads before the stage that writes them, so it reads the previous frame's contents. Checked by hand.
-	* DCLF's stages are exempt, since their graphs declare the whole binding table their shaders may read.
+	* DCLF's stages are exempt, since their colour draws declare every frame texture a colour draw may read. Their Z-prepass draws declare none.
 	*/
 	// Physical Sky's LUTs, AP shadow, sky tail and cloud outputs: the sky's reflection faces draw in the start stage, before the pre-depth
 	// and pre-main stages make this frame's. D3D11 does the same (the faces render before EarlyPrepass and Prepass), and they keep their
