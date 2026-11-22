@@ -1866,6 +1866,9 @@ bool RenderGraphRuntime::Initialize()
 			org::GraphHost::FramePlacementSettings placement{};
 			placement.enabled = Switches::On("ORG_FRAME_PLACEMENT");
 			placement.logLifetimes = Switches::On("ORG_FRAME_PLACEMENT_LOG");
+			// Heaps exactly their need: a version that needs more grows one rarely (twice in a vram-loads run), and headroom cost
+			// ~34 MB.
+			placement.heapHeadroom = 1.0;
 			// Fragment epochs (DCLF's) can run more than once a frame.
 			// A resource that crosses their runs must span the whole epoch.
 			for (const auto& entry : RenderGraph::Frame::Recipes::PositionedEpochs())
@@ -2374,6 +2377,9 @@ namespace
 		// keeps its slot, and the holders of device addresses follow the journal (Relocation::FollowBufferMoves).
 		org::relocation::DefragmentBudget budget{};
 		budget.moveBuffers = true;
+		// Per-frame buffers have their own blocks, so the shared blocks' slack is lower than it was: measured 11-13 %, 120-140 MB.
+		// Start above 10 % (and ORG's 64 MB).
+		budget.minSlackFraction = 0.10;
 		(void)a_host.DefragmentAtIdle(budget);
 	}
 }
