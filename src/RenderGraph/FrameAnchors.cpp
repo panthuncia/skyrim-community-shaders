@@ -2108,7 +2108,10 @@ namespace FrameAnchors
 			const auto hash = SegmentRecordings::Cache::HashOf(key);
 			// A recording of the versions current when it was made, which a frame revision replaced since, never runs again.
 			const auto replaced = [&](const SegmentRecordings::Cache::Status& a_status) {
-				return a_versions.serial == 0 && !a_state.host->EpochRecordingVersionsCurrent(*a_status.recordings.front(), a_slot);
+				// One that bound a backing that moved since (a relocation) is recorded again too. The schedule keeps it until the
+				// new recording is ready.
+				return (a_versions.serial == 0 && !a_state.host->EpochRecordingVersionsCurrent(*a_status.recordings.front(), a_slot)) ||
+				       !a_state.host->EpochRecordingBackingsCurrent(*a_status.recordings.front(), a_slot);
 			};
 			const auto describe = [&] {
 				return fmt::format("the {} (graph build {}, clients on {:#x} of {}, pass revisions {:#x}, frame slot {})",
@@ -2198,14 +2201,15 @@ namespace FrameAnchors
 				const SegmentFields ahead = DescribeDeclared(a_state, a_declared, true);
 				for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && ahead.graph; ++s) {
 					auto& kept = a_state.schedule[a_declared][s];
-					if (kept.recording && host.EpochRecordingCurrent(*kept.recording) && !HeldOlderRevision(kept.recording))
+					if (kept.recording && host.EpochRecordingCurrent(*kept.recording) && host.EpochRecordingBackingsCurrent(*kept.recording, s) &&
+						!HeldOlderRevision(kept.recording))
 						continue;
 					// Parity fields fit only the slots of this frame's parity.
 					if (s % 2 != a_frame.parity)
 						continue;
 					const auto entry = RequestDeclared(a_state, a_declared, ahead, s, a_frame.frame, " (ahead, for the next frame of its kinds)");
 					auto ready = recordings.cache.RecordingOf(*entry);
-					if (ready && host.EpochRecordingCurrent(*ready) && host.EpochRecordingVersionsCurrent(*ready, s))
+					if (ready && host.EpochRecordingCurrent(*ready) && host.EpochRecordingVersionsCurrent(*ready, s) && host.EpochRecordingBackingsCurrent(*ready, s))
 						kept = { ahead, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
 				}
 			}
@@ -2219,8 +2223,11 @@ namespace FrameAnchors
 			// that was a member of that revision and not of the newer one keeps it. So it records again against the current
 			// versions, and switches once that is ready.
 			const std::uint64_t heldRevision = HeldOlderRevision(active.recording);
+			// A recording that bound a backing that moved since (a relocation) keeps running: it holds the old backing. It records
+			// again, and the slot switches once that is ready.
+			const bool backingsMoved = active.recording && !host.EpochRecordingBackingsCurrent(*active.recording, slot);
 			// While a build is staged the attached graph's bindings are frozen, so slots keep what they have.
-			if (!(active.recording && active.fields == wanted && !heldRevision) && !stillStaged) {
+			if (!(active.recording && active.fields == wanted && !heldRevision && !backingsMoved) && !stillStaged) {
 				std::shared_ptr<SegmentRecording> entry;
 				for (std::uint32_t ahead = 0; ahead < RenderGraphRuntime::kGameFramesInFlight; ++ahead) {
 					auto requested = RequestDeclared(a_state, a_declared, wanted, (slot + ahead) % RenderGraphRuntime::kGameFramesInFlight, a_frame.frame, "");
@@ -2233,8 +2240,10 @@ namespace FrameAnchors
 					a_state.waitFrame[a_declared] = a_frame.frame;
 				}
 				auto ready = recordings.cache.RecordingOf(*entry);
-				if (ready && host.EpochRecordingCurrent(*ready) && host.EpochRecordingVersionsCurrent(*ready, slot)) {
-					const auto what = heldRevision && active.recording && active.fields == wanted ?
+				if (ready && host.EpochRecordingCurrent(*ready) && host.EpochRecordingVersionsCurrent(*ready, slot) &&
+					host.EpochRecordingBackingsCurrent(*ready, slot)) {
+					const auto what = backingsMoved && active.fields == wanted ? std::string("recorded again after a relocation") :
+					                  heldRevision && active.recording && active.fields == wanted ?
 					                      fmt::format("recorded again off revision {}'s named versions", heldRevision) :
 					                  active.recording ? RenderGraph::Frame::DiffFields(active.fields, wanted) :
 					                                     fmt::format("the slot's first schedule on build {}", wanted.graph);
