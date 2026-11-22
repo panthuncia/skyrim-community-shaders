@@ -663,7 +663,7 @@ static float3 PBRParams1;  // roughness scale, specular level, emissive scale
 static float4 PBRParams2;  // subsurface color, subsurface opacity
 static float4 PBRParams3;  // fuzz color, fuzz weight
 static float4 PBRParams4;  // subsurface balance, front/back specular weights, back roughness scale
-static float4 PBRParams5;  // fuzz roughness in x (negative uses base roughness)
+static float4 PBRParams5;  // fuzz roughness in x (negative uses base roughness); y, the displacement scale, stays 0
 static uint DCLFGrassNormal, DCLFGrassRmaos, DCLFGrassFeatures, DCLFGrassFuzz, DCLFGrassEmissive, DCLFGrassPbrSampler;
 #			define SampNormalSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
 #			define SampRMAOSSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
@@ -675,6 +675,8 @@ static uint DCLFGrassNormal, DCLFGrassRmaos, DCLFGrassFeatures, DCLFGrassFuzz, D
 #			define TexSubsurfaceSampler DCLFGrassTextureAt(DCLFGrassFeatures)
 #			define TexFuzzSampler DCLFGrassTextureAt(DCLFGrassFuzz)
 #			define TexEmissiveSampler DCLFGrassTextureAt(DCLFGrassEmissive)
+// The bucket row carries no displacement texture or scale, so PBRParams5.y is 0 and the parallax branch never samples this.
+#			define TexDisplacementSampler DCLFGrassTextureAt(DCLFGrassNormal)
 #		endif
 
 // The pixel stage's statics (DCLFGrassStatics, then the bucket's textures, samplers and alpha reference), first in its main.
