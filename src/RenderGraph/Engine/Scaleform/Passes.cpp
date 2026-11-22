@@ -1292,7 +1292,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 */
 		void MakeScratch(PathState& a_state)
 		{
-			// A draw into one clears it, and nothing reads one before that.
+			// A draw into one clears it, and nothing reads one before that. GFx reads what it drew only within the frame, often in a
+			// later run of the UI stage, which keeps one frame position. So each version is a frame transient, placed in the frame arena.
 			const D3D11_TEXTURE2D_DESC desc{ .Width = 1,
 				.Height = 1,
 				.MipLevels = 1,
@@ -1304,7 +1305,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			for (std::uint32_t i = 0; i < kScratchTargets; ++i) {
 				auto& texture = a_state.scratch[i];
 				texture = RenderGraph::Frame::DeclareTexture2D(fmt::format("Scaleform::Scratch{}", i), RenderGraph::Frame::DisplaySized(desc),
-					GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+					GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .frameTransient = true });
 				if (!texture || !texture->Versioned())
 					RenderGraph::Fatal("Scaleform", fmt::format("scratch image {} could not be declared", i));
 				auto surface = std::make_shared<Surface>();
@@ -1318,7 +1319,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					QueuePrograms(a_state, *surface);
 				a_state.surfaces.push_back(std::move(surface));
 			}
-			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets, declared on the display size", kScratchTargets,
+			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets, declared on the display size as frame transients", kScratchTargets,
 				a_state.scratch[0]->Desc().Width, a_state.scratch[0]->Desc().Height);
 		}
 	}

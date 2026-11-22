@@ -737,8 +737,13 @@ namespace RenderGraph::Frame::Revision
 						request.contents = org::services::TextureContents::Undefined;
 						break;
 					}
-					// An exported version's image lives as long as the version.
-					request.owner = prepared.exported;
+					// An exported version's image lives as long as the version, and so does a frame transient's place in the arena.
+					if (prepared.exported && prepared.placement)
+						request.owner = std::make_shared<const std::pair<std::shared_ptr<const void>, std::shared_ptr<const void>>>(prepared.exported, prepared.placement);
+					else if (prepared.exported)
+						request.owner = prepared.exported;
+					else
+						request.owner = prepared.placement;
 					requests.push_back(std::move(request));
 					job->versions.push_back(std::move(prepared));
 				}

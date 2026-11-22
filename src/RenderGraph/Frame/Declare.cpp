@@ -317,6 +317,11 @@ namespace RenderGraph::Frame
 			// A transient aliases memory and cannot take a version, so a declared texture is Persistent or History.
 			if (a_options.lifetime == GraphResources::Lifetime::Transient)
 				RenderGraph::Fatal("frame declaration", fmt::format("{} is declared Transient; a declared texture keeps its own memory, so declare it Persistent or History", a_name));
+			// A frame transient's bytes are shared within the frame, so its first writer in each frame writes it, never its birth.
+			if (a_options.frameTransient && (a_options.lifetime == GraphResources::Lifetime::History || a_options.birth.Writes()))
+				RenderGraph::Fatal("frame declaration", fmt::format("{} is a frame transient with a History lifetime or a birth that writes it; its "
+																	"contents live within one frame",
+															a_name));
 			const auto desc = a_desc(Inputs(nullptr));
 			auto twin = std::make_shared<Twin>(desc, a_name, a_options);
 			if (!*twin)
