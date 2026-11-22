@@ -10,11 +10,12 @@
 // (gpu-crash-<stamp>-shader-<identifier>.nvdbg) is looked up by its identifier in the dump's folder, or
 // in --debug-info. The JSON (by default <dump>.json) holds everything the SDK can decode.
 //
-// --spirv names ORGModuleServices' shader cache (Data/ShaderCache/v2/cas, in MO2's overwrite folder): the
-// SPIR-V of every shader DCLF compiled, each file a CacheHeader and the binary. The decoder hands the
-// SDK the binary whose Aftermath hash an active shader carries, so the JSON maps the faulting warps to
-// SPIR-V, and to HLSL lines when the shader was built with CS_DCLF_SHADER_DEBUG=1. Hashing the cache
-// is slow, so the hashes are kept in <dir>/aftermath-hashes.txt, keyed by file name, size and write time.
+// --spirv names ORGModuleServices' shader cache (Data/ShaderCache/v3, in MO2's overwrite folder): the
+// SPIR-V of every shader DCLF compiled. It is opened read-only through the store, so a running game keeps
+// it. The decoder hands the SDK the binary whose Aftermath hash an active shader carries, so the JSON maps
+// the faulting warps to SPIR-V, and to HLSL lines when the shader was built with CS_DCLF_SHADER_DEBUG=1.
+// Hashing the cache is slow, so the hashes are kept in <dir>/aftermath-hashes.txt, keyed by compile key:
+// an artifact's key names its contents, so a key's hash never changes.
 //
 // The dump carries the fault address, resources and warp PCs only when DXVK created the device with
 // the NVIDIA diagnostics config: DXVK_DEBUG=hang plus DXVK_AFTERMATH_RESOURCE_TRACKING=1,
@@ -28,6 +29,8 @@
 #include <GFSDK_Aftermath_GpuCrashDump.h>
 #include <GFSDK_Aftermath_GpuCrashDumpDecoding.h>
 
+#include <ORGModuleServices/ShaderStore.h>
+
 #include <cctype>
 #include <cstring>
 #include <cstdint>
@@ -35,6 +38,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -55,85 +59,61 @@ namespace
 		std::vector<fs::path> directories;
 		std::vector<char> held;  // the SDK copies what it is given before the callback returns; kept alive regardless
 		unsigned found = 0, missing = 0;
-		std::unordered_map<std::uint64_t, fs::path> spirv;  // Aftermath shader hash -> ORG cache file
-		std::vector<char> heldSpirv;
+		std::unique_ptr<org::services::ShaderStore> store;
+		struct Held
+		{
+			org::services::ShaderStoreHash key;
+			std::size_t size = 0;
+		};
+		std::unordered_map<std::uint64_t, Held> spirv;  // Aftermath shader hash -> the artifact in the ORG cache
+		std::vector<std::byte> heldSpirv;
 		unsigned spirvFound = 0, spirvMissing = 0;
 	};
 
-	// ORGModuleServices' artifact file: this header, then the binary (extern/ORGModuleServices/src/ShaderStore.cpp).
-#pragma pack(push, 1)
-	struct CacheHeader
-	{
-		std::uint32_t magic;
-		std::uint16_t schema;
-		std::uint8_t format;
-		std::uint8_t reserved;
-		std::uint64_t key[2];
-		std::uint64_t size;
-		std::uint64_t payloadHash[2];
-	};
-#pragma pack(pop)
-	constexpr std::uint32_t kCacheMagic = 0x41435353;
+	// The store's format number for SPIR-V (extern/ORGModuleServices, docs/development/shader-cache.md).
 	constexpr std::uint8_t kFormatSpirv = 1;
 
-	// The SPIR-V a cache file holds, or nothing if it holds DXIL or is not one.
-	std::vector<char> CachedSpirv(const fs::path& a_path)
-	{
-		auto bytes = ReadFile(a_path);
-		CacheHeader header{};
-		if (bytes.size() < sizeof(header))
-			return {};
-		std::memcpy(&header, bytes.data(), sizeof(header));
-		if (header.magic != kCacheMagic || header.format != kFormatSpirv || header.size != bytes.size() - sizeof(header))
-			return {};
-		return std::vector<char>(bytes.begin() + sizeof(header), bytes.end());
-	}
-
-	// Indexes a cache directory by Aftermath shader hash, reusing the hashes of files unchanged since the last run.
+	// Indexes a cache directory by Aftermath shader hash, reusing the hashes of artifacts seen in an earlier run.
 	void IndexSpirv(Lookup& a_lookup, const fs::path& a_directory)
 	{
 		const auto indexPath = a_directory / "aftermath-hashes.txt";
-		struct Known
-		{
-			std::uint64_t size, stamp, hash;
-		};
-		std::unordered_map<std::string, Known> known;
+		std::unordered_map<std::string, std::uint64_t> known;
 		{
 			std::ifstream in(indexPath);
-			std::string name;
-			Known entry{};
-			while (in >> name >> entry.size >> entry.stamp >> std::hex >> entry.hash >> std::dec)
-				known[name] = entry;
+			std::string key;
+			std::uint64_t hash = 0;
+			while (in >> key >> std::hex >> hash >> std::dec)
+				known[key] = hash;
 		}
+		org::services::ShaderStoreOptions options;
+		options.sourceRoot = a_directory;
+		options.cacheDirectory = a_directory;
+		options.readOnly = true;
+		options.saveInterval = std::chrono::milliseconds(0);
+		a_lookup.store = std::make_unique<org::services::ShaderStore>(std::move(options));
 		std::ostringstream index;
 		unsigned hashed = 0, reused = 0;
-		std::error_code ec;
-		for (const auto& file : fs::recursive_directory_iterator(a_directory, ec)) {
-			if (file.path().extension() != ".bin")
-				continue;
-			const auto name = file.path().filename().string();
-			const std::uint64_t size = file.file_size(ec);
-			const std::uint64_t stamp = static_cast<std::uint64_t>(file.last_write_time(ec).time_since_epoch().count());
+		a_lookup.store->ForEachArtifact([&](const org::services::ShaderStoreHash& a_key, std::uint8_t a_format, std::span<const std::byte> a_binary) {
+			if (a_format != kFormatSpirv)
+				return;
+			const auto name = a_key.ToHex();
 			std::uint64_t hash = 0;
-			if (const auto it = known.find(name); it != known.end() && it->second.size == size && it->second.stamp == stamp) {
-				hash = it->second.hash;
+			if (const auto it = known.find(name); it != known.end()) {
+				hash = it->second;
 				++reused;
 			} else {
-				const auto spirv = CachedSpirv(file.path());
-				if (spirv.empty())
-					continue;
-				const GFSDK_Aftermath_SpirvCode code{ spirv.data(), static_cast<std::uint32_t>(spirv.size()) };
+				const GFSDK_Aftermath_SpirvCode code{ a_binary.data(), static_cast<std::uint32_t>(a_binary.size()) };
 				GFSDK_Aftermath_ShaderBinaryHash shaderHash{};
 				if (!GFSDK_Aftermath_SUCCEED(GFSDK_Aftermath_GetShaderHashSpirv(GFSDK_Aftermath_Version_API, &code, &shaderHash)))
-					continue;
+					return;
 				hash = shaderHash.hash;
 				++hashed;
 			}
 			// The hash ignores debug info, so a shader's debug and release builds share one: keep the larger, the debug build.
-			if (auto& held = a_lookup.spirv[hash]; held.empty() || fs::file_size(held, ec) < size)
-				held = file.path();
-			index << name << ' ' << size << ' ' << stamp << ' ' << std::hex << hash << std::dec << '\n';
-		}
+			if (auto& held = a_lookup.spirv[hash]; held.size < a_binary.size())
+				held = { a_key, a_binary.size() };
+			index << name << ' ' << std::hex << hash << std::dec << '\n';
+		});
 		std::ofstream(indexPath) << index.str();
 		std::printf("spirv: %zu shaders indexed in %s (%u hashed, %u reused)\n", a_lookup.spirv.size(), a_directory.string().c_str(), hashed, reused);
 	}
@@ -143,11 +123,10 @@ namespace
 	{
 		auto& lookup = *static_cast<Lookup*>(a_user);
 		if (const auto it = lookup.spirv.find(a_hash->hash); it != lookup.spirv.end()) {
-			lookup.heldSpirv = CachedSpirv(it->second);
-			if (!lookup.heldSpirv.empty()) {
+			if (lookup.store->ReadArtifact(it->second.key, kFormatSpirv, lookup.heldSpirv)) {
 				a_set(lookup.heldSpirv.data(), static_cast<uint32_t>(lookup.heldSpirv.size()));
 				++lookup.spirvFound;
-				std::printf("spirv: shader 0x%016llx is %s\n", static_cast<unsigned long long>(a_hash->hash), it->second.filename().string().c_str());
+				std::printf("spirv: shader 0x%016llx is artifact %s\n", static_cast<unsigned long long>(a_hash->hash), it->second.key.ToHex().c_str());
 				return;
 			}
 		}

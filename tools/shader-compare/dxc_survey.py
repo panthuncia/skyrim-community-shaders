@@ -22,8 +22,11 @@ import time
 
 SDK = os.environ.get('VULKAN_SDK', r'C:\VulkanSDK\1.4.357.0')
 MOD = r'C:\Modding\MO2\mods\CS AB dclf'
-STORE = 'C:/Modding/MO2/overwrite/ShaderCache/v2'  # with the run's variant live
-ARTIFACT_HEADER = 48  # ShaderStore.cpp, ArtifactHeader
+STORE = 'C:/Modding/MO2/overwrite/ShaderCache/v3'  # with the run's variant live
+# ShaderStore.cpp's RecordHeader: magic, format, codec, reserved, key (high, low), stored size, raw size, hash.
+RECORD = struct.Struct('<IBBHQQIIQQ')
+RECORD_MAGIC = 0x52435353
+PACK_HEADER = 16
 # The game's arguments (src/Utils/DxcShaderStore.cpp).
 # Each register class gets its own range of bindings here, so the comparison can tell them apart.
 SHIFTS = {'b': 0, 't': 1000, 's': 2000, 'u': 3000}
@@ -298,14 +301,44 @@ def packed_registers(entries):
     return any(n > 1 for n in per_register.values())
 
 
+def read_store(store):
+    """The store's artifacts by compile key, read from its pack files (docs/development/shader-cache.md).
+
+    Each value is a function that returns the artifact's bytes. Records are not hash-checked here: xxHash is not in the
+    standard library. A later record for a key replaces an earlier one, as in the store. Compressed records need
+    `python -m pip install zstandard`.
+    """
+    artifacts = {}
+    folder = os.path.join(store, 'packs')
+    for name in sorted(os.listdir(folder)):
+        if not name.endswith('.pack'):
+            continue
+        with open(os.path.join(folder, name), 'rb') as f:
+            data = f.read()
+        at = PACK_HEADER
+        while len(data) - at >= RECORD.size:
+            magic, _, codec, _, high, low, stored, raw, _, _ = RECORD.unpack_from(data, at)
+            if magic != RECORD_MAGIC or stored == 0 or stored > len(data) - at - RECORD.size:
+                break
+            payload = data[at + RECORD.size:at + RECORD.size + stored]
+            artifacts['%016x%016x' % (high, low)] = (lambda payload=payload, codec=codec, raw=raw: decode(payload, codec, raw))
+            at += RECORD.size + stored
+    return artifacts
+
+
+def decode(payload, codec, raw):
+    if codec == 0:
+        return payload
+    import zstandard
+    return zstandard.ZstdDecompressor().decompress(payload, max_output_size=raw)
+
+
 def compare(done, store):
     """Reflection differences of one successful build against its DXBC."""
     request = done['request']
     key = request['key']
-    path = os.path.join(store, 'cas', key[:2], key + '.bin')
     result = {'offsets': [], 'sizes': [], 'globals': False, 'fxcOnly': [], 'dxcOnly': [], 'packed': False, 'layout': [], 'compared': 0}
-    with open(path, 'rb') as f:
-        dxbc = f.read()[ARTIFACT_HEADER:]
+    dxbc = store[key]()
     chunks = dxbc_chunks(dxbc)
     buffers, bound, sizes = rdef(chunks['RDEF'])
     blocks, resources, _, _, block_sizes = spirv_reflect(done['spv'])
@@ -367,7 +400,8 @@ def main():
         print(f'compiled in {time.perf_counter() - start:.0f} s, {sum(r["seconds"] for r in results):.0f} s of compiler time, and {sum(r["interfaceSeconds"] for r in results):.0f} s for the interfaces')
         passed = [r for r in results if r['ok']]
         invalid = dict(zip((r['request']['key'] for r in passed), pool.map(lambda r: validate(r, spirv_val), passed)))
-        compared = dict(zip((r['request']['key'] for r in passed), pool.map(lambda r: compare(r, args.store), passed)))
+        artifacts = read_store(args.store)
+        compared = dict(zip((r['request']['key'] for r in passed), pool.map(lambda r: compare(r, artifacts), passed)))
 
     per_root = collections.defaultdict(lambda: collections.Counter())
     errors = collections.defaultdict(lambda: {'count': 0, 'files': collections.Counter(), 'where': collections.Counter(), 'example': ''})

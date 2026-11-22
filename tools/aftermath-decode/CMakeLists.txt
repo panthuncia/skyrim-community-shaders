@@ -6,6 +6,9 @@
 #
 # The SDK is found as the plugin's build finds it: -DAFTERMATH_SDK_DIR, the NSIGHT_AFTERMATH_SDK environment
 # variable, or a vendored extern/aftermath. Its runtime DLL is copied next to the executable.
+#
+# --spirv reads the shader cache through ORGModuleServices' store, which needs zstd: configure with vcpkg's
+# toolchain (-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake) or point CMAKE_PREFIX_PATH at a zstd install.
 cmake_minimum_required(VERSION 3.24)
 project(aftermath-decode LANGUAGES CXX)
 
@@ -22,9 +25,10 @@ if(NOT _root)
     message(FATAL_ERROR "Nsight Aftermath SDK not found. Searched: ${_candidates}. Pass -DAFTERMATH_SDK_DIR.")
 endif()
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../extern/ORGModuleServices/cmake/ShaderStore.cmake")
 add_executable(aftermath-decode main.cpp)
 target_compile_features(aftermath-decode PRIVATE cxx_std_20)
 target_include_directories(aftermath-decode PRIVATE "${_root}/include")
-target_link_libraries(aftermath-decode PRIVATE "${_root}/lib/x64/GFSDK_Aftermath_Lib.x64.lib")
+target_link_libraries(aftermath-decode PRIVATE "${_root}/lib/x64/GFSDK_Aftermath_Lib.x64.lib" ORGModuleServices::ShaderStore)
 add_custom_command(TARGET aftermath-decode POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_root}/lib/x64/GFSDK_Aftermath_Lib.x64.dll" "$<TARGET_FILE_DIR:aftermath-decode>")
