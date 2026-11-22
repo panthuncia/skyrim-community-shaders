@@ -306,6 +306,65 @@ Effects11's Transient rows. Not moved:
   history clamp reads one texel past the dynamic area, which no pass writes in that run. Aliased, that texel holds another
   epoch's data. They stay declared until the clamp stays inside the area.
 
+## A1, third pass: per-load growth and the last holders (2026-11-22, tested)
+
+Runs: `vram-loads` (Riverwood, Dragonsreach, Riverwood, Riverwood) in native Vulkan, native D3D12 and guest. BasicRHI's
+`BASICRHI_MEMORY_DUMP` now takes `{n}` in its path, so each 300-present report keeps its own allocation and resource
+lists; comparing them across loads is how the growth was found.
+
+Per-load growth (about 140-150 MB a load). The committed images that grew were the exported twins: `SSGI::IlY`,
+`GiSpecular`, `IlCoCg`, `AO` and every Skylighting volume, one more copy per load (ProbeArray 1, 2, 3, 4). Holder: the
+native immediate context (`NativeDevice.cpp`, `Immediate`) kept each operation's keep list until its slot came round again,
+64 operations later. Native mode runs few once a scene settles, so a load's clears of the new versions kept the old ones for
+good. A slot now lets go once the GPU passes its work, checked before each operation and once a frame at the present.
+
+The extra SSGI copy. Four holders, in order of discovery:
+- ORG declarations (ORG `ReleaseReplacedVersionDeclarations`): a pass that declares a versioned slot kept the version its
+  declaration captured (resolver snapshot, keep-alives, the graph's transient pin). Each preparation now moves such a
+  declaration to the version it binds, as a redeclaration would. It follows the preparation's own selection, so a revision's
+  recordings move it to the pending versions (they are replayed after the adoption without another preparation). A pass
+  that cannot move yet makes the next preparation try again. Log: `Persistent declarations moved off N replaced versions in
+  P passes (<first passes>)`.
+- The revision assembler (OMS `RevisionAssembler::ReclaimRetired`): the publication an adoption replaced stayed until the
+  next revision completed. A load raises two resets, so the first one's versions stayed until the next load. The
+  coordinator reclaims once a frame.
+- Frame-slot schedules (`FrameAnchors.cpp`, `Schedule`): a slot keeps its recording until its description changes, and a
+  revision's recording holds that revision's whole version set. A stage that was a member of the revision that made the old
+  versions, and not of the reset, kept them. Such a schedule now records again against the current versions and switches
+  once that is ready. Log: `... switches in frame F (...): recorded again off revision N's named versions`, a burst of about
+  25-30 after each load.
+- Not a holder after all: the native release queue (`ReleaseAfterD3D11`; it stalls only during a load, then drains; a
+  warning names a head that waits 2000 services) and the stage recording caches (a periodic re-run of
+  `DropStaleVersionRecordings` dropped nothing).
+
+Results, driver device-local usage at the second dump after each Riverwood load (MB):
+
+| Run | Load 1 | Load 3 | Load 4 |
+|---|---|---|---|
+| Native Vulkan, before (`hh1`) | 4,049 | 4,185 | 4,334 |
+| Native Vulkan, after (`hs1`) | 3,808 | 3,636 | 3,693 |
+| Native D3D12, after (`hs1`) | 3,753 | 3,689 | 3,747 |
+| Guest, after (`gc2`) | 4,132 | 4,161 | 4,155 |
+
+The `still held` warnings went from about 30 a run to one. What is left: after a reload of the same cell (Riverwood to
+Riverwood), the replaced `Skylighting::ProbeArray` (256x256x128 RGBA16F, 64 MB; the watch logs 0.5 MB because its estimate
+ignores depth) stays until the next load or exit, with 2 references: a live `TextureVersion` (its resource and its
+declaration), so something still holds a version set naming it. Making every fragment source a member of revisions that
+make texture versions did not release it, so it is not DCLF's fragments. It does not accumulate.
+
+Other candidates, decided this pass:
+- S1 allocator slack: the allocator keeps at most one empty block per pool already. The slack is partly filled 64 MB
+  blocks; only defragmentation (moving live resources and every view of them) would reclaim it. Not done.
+- S2 frame arena: flat across loads (95 MB in the dumps). The oversize chunks are cycled by staging; the pinned chunks are
+  latch blocks' stable regions sized to each client's maximum. Shrinking them is per-feature work. Not done.
+- S3 DCLF frame values: three copies are two frames in flight and the one being written; two would make uploads wait on
+  the GPU. Kept.
+- S7 the clean-scene copy: taken every frame so a screenshot without the UI is ready at once. On demand would delay
+  screenshots. Kept.
+- A3: SSS, Volumetric Lighting and Effects11's working textures alias again (section above). The new log line lists every
+  stage a declared transient is registered with; memory is placed only in the builds whose passes use it (the alias pools
+  grew 12 MB while about 20 MB of counted textures left).
+
 ## Open questions
 
 - Decided by the agent, to confirm: erasing every named-serial entry at adoption. At that point no revision is in
