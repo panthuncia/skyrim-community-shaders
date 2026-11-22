@@ -1838,6 +1838,16 @@
 			"description": ""
 		},
 		{
+			"name": "ORG_RELOCATION_STRESS",
+			"key": "org.relocation_stress",
+			"type": "int",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "<n>: ORG moves n ReadOnly graph backings at each relocation commit, to test the follow path (org-relocation.md, step 3)"
+		},
+		{
 			"name": "SARP_D3D12_DRED",
 			"key": "",
 			"type": "string",

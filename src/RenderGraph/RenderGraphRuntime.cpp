@@ -50,6 +50,7 @@
 #include <ORGModuleServices/ShaderCompiler.h>
 #endif
 #include <Render/RenderGraph/RhiExecution.h>
+#include <Resources/Relocation.h>
 #include <Resources/Resource.h>
 
 #include <algorithm>
@@ -1873,6 +1874,10 @@ bool RenderGraphRuntime::Initialize()
 					placement.repeatedEpochs.push_back(entry.epoch);
 			state->host->SetFramePlacement(std::move(placement));
 		}
+		// The relocation stress switch (ORG_RELOCATION_STRESS). ORG reads it from the environment when its relocation service
+		// is first used, which may be before CommunityShaders.env or the test configuration was applied. Set it from the switch.
+		if (Switches::IsSet("ORG_RELOCATION_STRESS"))
+			org::relocation::Service::Get().SetStress(static_cast<std::uint32_t>((std::min<std::uint64_t>)(Switches::Number("ORG_RELOCATION_STRESS"), 4096)));
 		// The frame-wait timeline, made before any build because packets bind it. It needs an uploader queue to signal from.
 		// DCLF's frame values need it.
 		if (state->uploadQueue || state->native) {

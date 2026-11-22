@@ -172,6 +172,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "ORG_FRAME_PLACEMENT", .key = "org.frame_placement", .type = Bool, .defaultValue = "0", .description = "true: ORG places graph transients across the whole frame (org-whole-frame-placement.md)" },
 			{ .name = "ORG_FRAME_PLACEMENT_LOG", .key = "org.frame_placement_log", .type = Bool, .defaultValue = "0", .description = "true: log every frame-placement resource and slot" },
 			{ .name = "ORG_GRAPH_REPLAY_OUTPUT" },
+			{ .name = "ORG_RELOCATION_STRESS", .key = "org.relocation_stress", .type = Int, .defaultValue = "0", .description = "<n>: ORG moves n ReadOnly graph backings at each relocation commit, to test the follow path (org-relocation.md, step 3)" },
 			{ .name = "SARP_D3D12_DRED" },
 			{ .name = "SARP_D3D12_GPU_VALIDATION", .type = Bool },
 			{ .name = "VK_INSTANCE_LAYERS" },
