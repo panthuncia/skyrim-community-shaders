@@ -1205,6 +1205,16 @@
 			"description": ""
 		},
 		{
+			"name": "CS_ORG_DEFRAG",
+			"key": "org.defrag",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "native: compact ORG's device-local memory at loading screens (GraphHost::DefragmentAtIdle)"
+		},
+		{
 			"name": "CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES",
 			"key": "",
 			"type": "int",

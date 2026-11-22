@@ -339,6 +339,12 @@ namespace RenderGraph::Relocation
 			for (std::size_t i = 0; i < taken.size(); ++i) {
 				const auto& move = taken[i];
 				if (const auto found = byCookie.find(move.cookie); found != byCookie.end()) {
+					// The storage this move leaves is the one the newest import before it describes. An older import reads an
+					// older storage, which an earlier move already handed to it, so it does not hold this one.
+					std::uint64_t reader = 0;
+					for (const auto* raw : found->second)
+						if (raw->serial < move.storageSerial)
+							reader = (std::max)(reader, raw->serial);
 					for (auto* raw : found->second) {
 						// Imported after this move: it reads the new storage already.
 						if (raw->serial >= move.storageSerial)
@@ -351,7 +357,8 @@ namespace RenderGraph::Relocation
 							AddMove(*registration, move.storageSerial, move.next, storages[i]);
 							continue;
 						}
-						registration->storages.push_back(storages[i]);
+						if (registration->serial == reader)
+							registration->storages.push_back(storages[i]);
 						if (!registration->superseded.exchange(true, std::memory_order_acq_rel)) {
 							Count().held.fetch_add(1, std::memory_order_relaxed);
 							notify.push_back(registration);
