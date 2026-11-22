@@ -603,6 +603,16 @@ namespace RenderGraph::Engine::Native
 
 			bool Done(uint64_t a_value) { return !a_value || timeline->GetCompletedValue() >= a_value; }
 
+			/**
+			 * @brief Releases what finished work kept. A slot is reused only after kSlots more operations, and native mode runs few
+			 * once a scene settles, so without this a slot would keep a replaced version alive until the next load or longer.
+			 */
+			void ReleaseDone()
+			{
+				std::lock_guard guard(lock);
+				ReleaseDoneLocked();
+			}
+
 			bool Wait(uint64_t a_value) { return Done(a_value) || timeline->HostWait(a_value) == rhi::Result::Ok; }
 
 		private:
@@ -615,9 +625,21 @@ namespace RenderGraph::Engine::Native
 				std::vector<std::shared_ptr<const void>> keep;
 			};
 
+			/** @brief Clears the keep list of every slot whose work the GPU finished. Call with the lock. */
+			void ReleaseDoneLocked()
+			{
+				if (!timeline)
+					return;
+				const uint64_t completed = timeline->GetCompletedValue();
+				for (auto& slot : slots)
+					if (slot.value && slot.value <= completed && !slot.keep.empty())
+						slot.keep.clear();
+			}
+
 			/** @brief The next slot once the GPU is done with it. Releases what its last work kept. Call with the lock. */
 			uint32_t AcquireSlotLocked()
 			{
+				ReleaseDoneLocked();
 				const uint32_t index = static_cast<uint32_t>(next++ % kSlots);
 				auto& slot = slots[index];
 				if (slot.value && timeline->GetCompletedValue() < slot.value)
@@ -2054,6 +2076,9 @@ namespace RenderGraph::Engine::Native
 			{
 				if (a_flags & DXGI_PRESENT_TEST)
 					return S_OK;
+				// Once a frame, what finished context work kept goes.
+				if (g_device)
+					g_device->immediate.ReleaseDone();
 				if (RenderGraphRuntime::Get().QueuesPresent())
 					return QueuePresent(a_syncInterval);
 				// The render owner's epochs must reach the queue before this present, and so must what they wait for. Nothing is queued
