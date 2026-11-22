@@ -17,6 +17,8 @@
 #include <Render/MemoryIntrospectionAPI.h>
 #include <Render/RenderGraph/RenderGraph.h>
 #include <Render/Runtime/IStatisticsService.h>
+#include <Resources/Relocation.h>
+#include <Resources/RelocationRecord.h>
 
 #include <nlohmann/json.hpp>
 
@@ -475,6 +477,10 @@ namespace Vram
 					a_org.allocatorValid ? "its allocator's blocks, plus tracked resources outside them" :
 										   "tracked resources (no allocator statistics)" });
 				lines.push_back({ "ORG resources", orgCounted - orgAliasPools, Kind::Attributed, 2, {} });
+				// Old backings of moved resources stay allocated until the GPU is done with them (org-relocation.md).
+				if (const auto relocation = org::relocation::GetStats(); relocation.awaitingRetirement)
+					lines.push_back({ "Relocations awaiting retirement", relocation.awaitingRetirementBytes, Kind::Residual, 3,
+						fmt::format("{} old backings of moved resources the GPU may still read; part of the line above", relocation.awaitingRetirement) });
 				lines.push_back({ "ORG alias pools", orgAliasPools, Kind::Attributed, 2, "memory placed resources alias; they are listed but not counted" });
 				if (a_org.allocatorValid || a_org.hasLedger) {
 					if (a_org.allocatorValid)
@@ -606,6 +612,32 @@ namespace Vram
 		}
 	}
 
+	namespace
+	{
+		// ORG's relocation counters (org-relocation.md): moves, ignored moves by reason, retirements, owner records by class.
+		nlohmann::json RelocationJson()
+		{
+			using namespace org::relocation;
+			const auto stats = GetStats();
+			nlohmann::json json;
+			json["moved"] = stats.moved;
+			json["movedBytes"] = stats.movedBytes;
+			json["retired"] = stats.retired;
+			json["retiredBytes"] = stats.retiredBytes;
+			json["awaitingRetirement"] = stats.awaitingRetirement;
+			json["awaitingRetirementBytes"] = stats.awaitingRetirementBytes;
+			json["journalHead"] = stats.journalHead;
+			json["stress"] = Service::Get().Stress();
+			json["ignored"] = nlohmann::json::object();
+			for (std::size_t i = 0; i < stats.ignored.size(); ++i)
+				json["ignored"][IgnoreReasonName(static_cast<IgnoreReason>(i))] = stats.ignored[i];
+			json["records"] = nlohmann::json::object();
+			for (std::size_t i = 0; i < stats.records.size(); ++i)
+				json["records"][ClassName(static_cast<Class>(i))] = { { "count", stats.records[i] }, { "bytes", stats.recordBytes[i] } };
+			return json;
+		}
+	}
+
 	std::filesystem::path WriteJson(const std::filesystem::path& a_directory, std::string_view a_fileName)
 	{
 		const auto snapshot = Current(0.0);
@@ -619,6 +651,7 @@ namespace Vram
 		for (const auto& line : snapshot.reconciliation)
 			json["reconciliation"].push_back({ { "label", line.label }, { "bytes", line.bytes }, { "depth", line.depth },
 				{ "kind", static_cast<int>(line.kind) }, { "note", line.note } });
+		json["relocation"] = RelocationJson();
 		for (const auto& row : snapshot.rows)
 			json["rows"].push_back({ { "name", row.name }, { "owner", row.owner }, { "type", row.type }, { "source", row.source },
 				{ "detail", row.detail }, { "callsite", row.callsite }, { "bytes", row.bytes }, { "uid", row.uid }, { "flags", row.flags }, { "deviceLocal", row.deviceLocal },
