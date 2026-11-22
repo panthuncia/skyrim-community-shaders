@@ -290,6 +290,22 @@ Not a holder but now visible: with versions actually freed, a recording that rea
 did not declare (`PublishedResources::ShaderResourceIndex`) would read a freed descriptor after a reset. The river and
 shader-reload runs check this.
 
+## A3 fix: declared transients (2026-11-22, code only, not yet run)
+
+`Frame::DeclareTransient2D/3D` (Declare.h) is a texture described by variables that takes no versions. The client that uses
+it depends on its variables and keys on its extent, and its make function calls `Make`: each registration has its own
+transient, aliased in its builds' pool. A new size registers the client again, and the revision switches in with those
+builds. `RegisterTransients` registers them, and each stage build logs one line, "the <stage> build places declared
+transients in its alias pool: ...".
+
+Moved: `SSS::DiffuseNoAlbedo`, `SSS::BlurHorizontalTemp` (Burley makes no temporary), `VolumetricLighting::Volume`, and
+Effects11's Transient rows. Not moved:
+- `Scaleform::Scratch0..3`: a pushed GFx target is drawn in one Interface run and read in a later one (each run is a tap,
+  a new instance). A transient holds nothing from one run to the next, so the scratch images stay Persistent.
+- SSGI's full-resolution partners (A2): written by the disocclusion and read by the GI pass in one run, but the GI pass's
+  history clamp reads one texel past the dynamic area, which no pass writes in that run. Aliased, that texel holds another
+  epoch's data. They stay declared until the clamp stays inside the area.
+
 ## Open questions
 
 - Decided by the agent, to confirm: erasing every named-serial entry at adoption. At that point no revision is in
