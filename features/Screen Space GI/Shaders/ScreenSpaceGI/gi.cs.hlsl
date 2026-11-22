@@ -383,18 +383,26 @@ void CalculateGI(
 		// so the marginal bounding effect doesn't justify the bandwidth.
 		[branch] if (lerpFactor >= 0.15)
 		{
-			float4 yL = srcPrevY[pxCoord + int2(-1, 0)];
-			float4 yR = srcPrevY[pxCoord + int2(1, 0)];
-			float4 yU = srcPrevY[pxCoord + int2(0, -1)];
-			float4 yD = srcPrevY[pxCoord + int2(0, 1)];
-			float2 cL = srcPrevCoCg[pxCoord + int2(-1, 0)];
-			float2 cR = srcPrevCoCg[pxCoord + int2(1, 0)];
-			float2 cU = srcPrevCoCg[pxCoord + int2(0, -1)];
-			float2 cD = srcPrevCoCg[pxCoord + int2(0, 1)];
-			float aL = srcPrevAo[pxCoord + int2(-1, 0)];
-			float aR = srcPrevAo[pxCoord + int2(1, 0)];
-			float aU = srcPrevAo[pxCoord + int2(0, -1)];
-			float aD = srcPrevAo[pxCoord + int2(0, 1)];
+			// The neighbours stay inside the area the disocclusion pass wrote this frame. A texel past it holds whatever
+			// was there before (an earlier frame's history, or another pass's data if the memory is shared), and past the
+			// texture's edge a load is undefined on Vulkan.
+			const int2 areaMax = int2(OUT_FRAME_DIM) - 1;
+			const int2 pxL = int2(max(int(pxCoord.x) - 1, 0), pxCoord.y);
+			const int2 pxR = int2(min(int(pxCoord.x) + 1, areaMax.x), pxCoord.y);
+			const int2 pxU = int2(pxCoord.x, max(int(pxCoord.y) - 1, 0));
+			const int2 pxD = int2(pxCoord.x, min(int(pxCoord.y) + 1, areaMax.y));
+			float4 yL = srcPrevY[pxL];
+			float4 yR = srcPrevY[pxR];
+			float4 yU = srcPrevY[pxU];
+			float4 yD = srcPrevY[pxD];
+			float2 cL = srcPrevCoCg[pxL];
+			float2 cR = srcPrevCoCg[pxR];
+			float2 cU = srcPrevCoCg[pxU];
+			float2 cD = srcPrevCoCg[pxD];
+			float aL = srcPrevAo[pxL];
+			float aR = srcPrevAo[pxR];
+			float aU = srcPrevAo[pxU];
+			float aD = srcPrevAo[pxD];
 
 			float nMinAo = min(min(min(aL, aR), min(aU, aD)), currAo);
 			float nMaxAo = max(max(max(aL, aR), max(aU, aD)), currAo);
