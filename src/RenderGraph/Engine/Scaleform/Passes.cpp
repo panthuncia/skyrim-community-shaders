@@ -1304,7 +1304,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			for (std::uint32_t i = 0; i < kScratchTargets; ++i) {
 				auto& texture = a_state.scratch[i];
 				texture = RenderGraph::Frame::DeclareTexture2D(fmt::format("Scaleform::Scratch{}", i), RenderGraph::Frame::DisplaySized(desc),
-					GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+					GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient, .versioned = true, .contentAcrossRuns = true });
 				if (!texture || !texture->Versioned())
 					RenderGraph::Fatal("Scaleform", fmt::format("scratch image {} could not be declared", i));
 				auto surface = std::make_shared<Surface>();

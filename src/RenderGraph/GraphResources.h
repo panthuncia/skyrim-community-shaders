@@ -100,6 +100,9 @@ namespace GraphResources
 		// over it (Native::WrapGraphTexture) that follows ORG's moves. A Transient one is then a candidate of ORG's frame placement.
 		// Guest mode ignores it (DXVK owns the image), and so does a 2D texture that joins a slot (native's swap chain owns that one).
 		bool nativeOwned = false;
+		// A versioned Transient texture whose contents must last between runs of a repeated epoch (Scaleform's scratch). Each
+		// version is marked (org::Resource::SetContentAcrossRuns), so frame placement gives it one lifetime over every run.
+		bool contentAcrossRuns = false;
 	};
 
 	/** @brief Whether a live aliasable twin has this graph resource name. Any thread. */
@@ -272,6 +275,8 @@ namespace GraphResources
 		* D3D11 users outside the graphs read it.
 		*/
 		bool FramePlacedExport() const { return nativeOwned && options.lifetime == Lifetime::Transient; }
+		/** @brief Whether each version keeps its contents between runs of a repeated epoch (Options::contentAcrossRuns). */
+		bool ContentAcrossRuns() const { return options.contentAcrossRuns; }
 
 		/** @brief The exported D3D11 views of the whole resource; null when not exported. */
 		ID3D11ShaderResourceView* SRV() const { return srv.get(); }

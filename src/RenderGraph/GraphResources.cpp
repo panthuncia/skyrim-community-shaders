@@ -156,7 +156,7 @@ namespace GraphResources
 		* texture now too: a version of a declared Transient texture, which only ORG's frame placement moves into shared memory.
 		*/
 		std::shared_ptr<org::Resource> CreateGraphTexture(const Shape& a_shape, const std::string& a_name, bool a_aliasable,
-			std::optional<std::uint64_t> a_pool = std::nullopt, bool a_concurrent = false, bool a_ownMemory = false)
+			std::optional<std::uint64_t> a_pool = std::nullopt, bool a_concurrent = false, bool a_ownMemory = false, bool a_acrossRuns = false)
 		{
 			auto desc = Describe(a_shape, false);
 			desc.allowAlias = a_aliasable;
@@ -167,6 +167,9 @@ namespace GraphResources
 				desc.aliasingPoolID = a_pool;
 			auto texture = a_aliasable && !a_ownMemory ? org::PixelBuffer::CreateSharedUnmaterialized(desc) : org::PixelBuffer::CreateShared(desc);
 			texture->SetName(a_name);
+			// Set before any graph plans with it, since frame placement reads it when it places the version.
+			if (a_acrossRuns)
+				texture->SetContentAcrossRuns(true);
 			return texture;
 		}
 
@@ -247,7 +250,8 @@ namespace GraphResources
 			}
 			try {
 				if (a_options.d3d11 == Export::None)
-					return { CreateGraphTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient, a_options.aliasPool, false, a_options.versioned), nullptr };
+					return { CreateGraphTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient, a_options.aliasPool, false, a_options.versioned,
+						a_options.contentAcrossRuns), nullptr };
 				if (a_nativeOwned)
 					return CreateNativeOwnedTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient);
 				return CreateExportedTexture(a_shape, a_name);
@@ -946,6 +950,7 @@ namespace GraphResources
 		const void* twin = nullptr;
 		bool nativeOwned = false;  // Resource::NativeOwned
 		bool framePlaced = false;  // Resource::FramePlacedExport
+		bool acrossRuns = false;   // Resource::ContentAcrossRuns
 	};
 
 	namespace
@@ -1069,6 +1074,7 @@ namespace GraphResources
 		plan->twin = this;
 		plan->nativeOwned = nativeOwned;
 		plan->framePlaced = FramePlacedExport();
+		plan->acrossRuns = ContentAcrossRuns();
 		return plan;
 	}
 
@@ -1180,7 +1186,8 @@ namespace GraphResources
 		if (!a_plan.exported) {
 			try {
 				prepared.resource = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
-					CreateGraphTexture(next, name, a_plan.lifetime == Lifetime::Transient, std::nullopt, prepared.contents != Contents::Undefined, true));
+					CreateGraphTexture(next, name, a_plan.lifetime == Lifetime::Transient, std::nullopt, prepared.contents != Contents::Undefined, true,
+						a_plan.acrossRuns));
 			} catch (const std::exception& e) {
 				throw failure(e.what());
 			}
