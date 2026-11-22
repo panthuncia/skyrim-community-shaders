@@ -14,7 +14,6 @@
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/BoundaryCheck.h"
 #include "RenderGraph/Frame/FrameDriver.h"
-#include "RenderGraph/Frame/Transients.h"
 #include "RenderGraph/ImageRegistry.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -34,7 +33,6 @@
 #include <rhi_helpers.h>
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -75,7 +73,6 @@ namespace GraphResources
 			std::shared_ptr<org::Resource> graph;
 			winrt::com_ptr<ID3D11Resource> d3d11;
 			std::uint32_t layout = 0;  // an exported texture's resting VkImageLayout
-			std::shared_ptr<const void> placement;  // a frame transient's place in the frame arena
 		};
 
 		bool Is3D(const Shape& a_shape) { return a_shape.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D; }
@@ -170,43 +167,6 @@ namespace GraphResources
 			return texture;
 		}
 
-		/** @brief A frame transient's texture and its place in the frame arena. The placement is null when it has memory of its own. */
-		struct PlacedTexture
-		{
-			std::shared_ptr<org::PixelBuffer> texture;
-			std::shared_ptr<const void> placement;
-		};
-
-		/**
-		 * @brief A frame transient (Options::frameTransient): a PixelBuffer placed in the frame arena under its name, so the next
-		 * version starts with the span this one reached. Without a frame arena it gets memory of its own. Any thread. Throws when
-		 * the memory cannot be allocated.
-		 */
-		PlacedTexture PlaceFrameTransient(org::TextureDescription a_desc, const std::string& a_name)
-		{
-			a_desc.allowAlias = false;
-			PlacedTexture placed;
-			placed.texture = org::PixelBuffer::CreateSharedUnmaterialized(a_desc);
-			placed.texture->SetName(a_name);
-			const std::array textures{ placed.texture };
-			// The host logs the placement and each span it grows to, under the name. Guest mode keeps memory of its own.
-			if (RenderGraph::Engine::Native::Active())
-				placed.placement = RenderGraph::Frame::Transients::Place(a_name, textures);
-			if (!placed.placement) {
-				placed.texture->Materialize();
-				logger::info("[ORG] {}: a frame transient with memory of its own ({})", a_name,
-					RenderGraph::Engine::Native::Active() ? "the host has no frame arena" : "guest mode");
-			}
-			return placed;
-		}
-
-		/** @brief A graph-only frame transient. */
-		Created CreateFrameTransientTexture(const Shape& a_shape, const std::string& a_name)
-		{
-			auto placed = PlaceFrameTransient(Describe(a_shape, false), a_name);
-			return { std::move(placed.texture), nullptr, 0, std::move(placed.placement) };
-		}
-
 		/** @brief A twin's shape, from the description ShapeAt gives. */
 		Shape TwinShapeOf(const ExportDesc& a_desc)
 		{
@@ -236,9 +196,6 @@ namespace GraphResources
 			return desc;
 		}
 
-		/** @brief A native export placed in the frame arena (Options::frameTransient). Defined with the export images below. */
-		Created CreatePlacedExport(const Shape& a_shape, const std::string& a_name);
-
 		/** @brief An exported twin texture. */
 		Created CreateExportedTexture(const Shape& a_shape, const std::string& a_name)
 		{
@@ -264,17 +221,8 @@ namespace GraphResources
 				return {};
 			}
 			try {
-				if (a_options.frameTransient && !a_options.versioned) {
-					logger::error("[ORG] {}: not created: a frame transient is a declared, versioned texture", a_name);
-					return {};
-				}
-				if (a_options.frameTransient && a_options.d3d11 == Export::None)
-					return CreateFrameTransientTexture(a_shape, a_name);
 				if (a_options.d3d11 == Export::None)
 					return { CreateGraphTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient, a_options.aliasPool), nullptr };
-				// A guest export is DXVK's image, so only native mode places one.
-				if (a_options.frameTransient && RenderGraph::Engine::Native::Active() && RenderGraph::Frame::Transients::On())
-					return CreatePlacedExport(a_shape, a_name);
 				return CreateExportedTexture(a_shape, a_name);
 			} catch (const std::exception& e) {
 				logger::error("[ORG] {}: not created: {}", a_name, e.what());
@@ -523,34 +471,13 @@ namespace GraphResources
 			rhi::ResourcePtr image;
 			DxvkOrgInteropTextureWrap wrap{};
 			org::TextureDescription graphDesc;
-			// A frame transient's image is a PixelBuffer placed in the frame arena, the version's graph resource itself.
-			std::shared_ptr<org::PixelBuffer> placed;
-			std::shared_ptr<const void> placement;
-
-			rhi::Resource Image() const { return placed ? placed->GetAPIResource() : image.Get(); }
 		};
-
-		/** @brief The views an exported texture's graph description names, each in its own format. */
-		void SetExportViews(org::TextureDescription& a_graphDesc, const ExportDesc& a_desc, rhi::Format a_imageFormat)
-		{
-			a_graphDesc.format = a_imageFormat;
-			a_graphDesc.hasSRV = a_desc.srv != DXGI_FORMAT_UNKNOWN;
-			a_graphDesc.srvFormat = rhi::helpers::ToRHI(a_desc.srv);
-			a_graphDesc.hasUAV = a_desc.uav != DXGI_FORMAT_UNKNOWN;
-			a_graphDesc.uavFormat = rhi::helpers::ToRHI(a_desc.uav);
-			a_graphDesc.hasNonShaderVisibleUAV = a_graphDesc.hasUAV;
-			a_graphDesc.hasRTV = a_desc.rtv != DXGI_FORMAT_UNKNOWN;
-			a_graphDesc.rtvFormat = rhi::helpers::ToRHI(a_desc.rtv);
-			a_graphDesc.hasDSV = a_desc.dsv != DXGI_FORMAT_UNKNOWN;
-			a_graphDesc.dsvFormat = a_imageFormat;
-		}
 
 		/**
 		 * @brief Makes the image of an exported texture. Any thread. Throws when the format has no image format or the image is refused.
 		 * a_concurrent makes it usable from every queue, so the uploader's copy queue can zero it (Contents::Zero).
-		 * a_place makes it a PixelBuffer placed in the frame arena (Options::frameTransient, native mode only).
 		 */
-		TwinExportImage MakeExportImage(const ExportDesc& a_desc, const std::string& a_name, bool a_concurrent = false, bool a_place = false)
+		TwinExportImage MakeExportImage(const ExportDesc& a_desc, const std::string& a_name, bool a_concurrent = false)
 		{
 			const bool is3D = a_desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
 			const bool cube = (a_desc.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
@@ -585,16 +512,8 @@ namespace GraphResources
 			if (a_concurrent)
 				desc.queueSharing = rhi::QueueSharing::Concurrent;
 			TwinExportImage made;
-			if (a_place) {
-				// A PixelBuffer reads every slice's mips from its description, as a graph-only texture does.
-				auto full = Describe(shape, false);
-				SetExportViews(full, a_desc, imageFormat);
-				auto placed = PlaceFrameTransient(std::move(full), a_name);
-				made.placed = std::move(placed.texture);
-				made.placement = std::move(placed.placement);
-			} else if (RenderGraphRuntime::Get().Host()->Device().CreateCommittedResource(desc, made.image) != rhi::Result::Ok || !made.image) {
+			if (RenderGraphRuntime::Get().Host()->Device().CreateCommittedResource(desc, made.image) != rhi::Result::Ok || !made.image)
 				throw std::runtime_error("the image could not be created");
-			}
 			auto& wrap = made.wrap;
 			wrap.dimension = static_cast<std::uint32_t>(a_desc.dimension);
 			wrap.width = a_desc.width;
@@ -606,8 +525,17 @@ namespace GraphResources
 			wrap.bindFlags = a_desc.bindFlags;
 			wrap.miscFlags = a_desc.miscFlags;
 			auto& graphDesc = made.graphDesc;
-			graphDesc = made.placed ? made.placed->GetDescription() : Describe(shape, true);
-			SetExportViews(graphDesc, a_desc, imageFormat);
+			graphDesc = Describe(shape, true);
+			graphDesc.format = imageFormat;
+			graphDesc.hasSRV = a_desc.srv != DXGI_FORMAT_UNKNOWN;
+			graphDesc.srvFormat = rhi::helpers::ToRHI(a_desc.srv);
+			graphDesc.hasUAV = a_desc.uav != DXGI_FORMAT_UNKNOWN;
+			graphDesc.uavFormat = rhi::helpers::ToRHI(a_desc.uav);
+			graphDesc.hasNonShaderVisibleUAV = graphDesc.hasUAV;
+			graphDesc.hasRTV = a_desc.rtv != DXGI_FORMAT_UNKNOWN;
+			graphDesc.rtvFormat = rhi::helpers::ToRHI(a_desc.rtv);
+			graphDesc.hasDSV = a_desc.dsv != DXGI_FORMAT_UNKNOWN;
+			graphDesc.dsvFormat = imageFormat;
 			if (a_concurrent)
 				graphDesc.queueSharing = rhi::QueueSharing::Concurrent;
 			return made;
@@ -715,22 +643,6 @@ namespace GraphResources
 			static auto* kept = new std::vector<rhi::ResourcePtr>;
 			const std::lock_guard lock(mutex);
 			kept->push_back(std::move(a_image));
-		}
-
-		Created CreatePlacedExport(const Shape& a_shape, const std::string& a_name)
-		{
-			auto made = MakeExportImage(TwinExportDescOf(a_shape), a_name, false, true);
-			const auto image = made.Image();
-			DxvkOrgInteropResourceInfo info{};
-			// Deferred: nothing writes the image now, since its bytes are shared. Its first writer in each frame enters from Undefined.
-			auto d3d11 = RenderGraphRuntime::Get().WrapTexture(image, made.wrap, info, a_name.c_str(), nullptr, RenderGraph::Engine::Native::WrapFlags::DeferInitialize);
-			if (!d3d11)
-				throw std::runtime_error("the native device did not wrap its image");
-			// An import of the D3D11 texture finds the placed texture, and through it the slot (AdoptSlot).
-			RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(info.image.image),
-				{ made.placed, nullptr, std::make_shared<const org::TextureDescription>(made.graphDesc), "GraphResources", a_name,
-					RenderGraph::ImageRegistry::Kind::Made });
-			return { std::move(made.placed), std::move(d3d11), static_cast<std::uint32_t>(info.image.layout), std::move(made.placement) };
 		}
 	}
 
@@ -851,8 +763,6 @@ namespace GraphResources
 	{
 		slot.reset();
 		auto image = std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph);
-		// A frame transient's place in the arena lives as long as its version.
-		const auto placement = std::exchange(firstPlacement, nullptr);
 		if (!options.versioned || Aliasable() || !image)
 			return false;
 		try {
@@ -864,18 +774,18 @@ namespace GraphResources
 				throw std::invalid_argument(fmt::format("{} slices, not the slot's {}", image->GetArraySize(), previous ? previous->GetArraySize() : 0u));
 			if (a_previous && a_sameShape) {
 				const RenderGraph::Frame::Boundary::Caller caller("twin");
-				a_previous->PublishImage(std::move(image), placement);
+				a_previous->PublishImage(std::move(image));
 				slot = std::move(a_previous);
 				// Tickets prepared before resolved the old version, so they are prepared again.
 				if (auto* host = RenderGraphRuntime::Get().Host())
 					host->NoteNewVersions();
 				return true;
 			}
-			slot = org::VersionedTexture::CreateImage(std::move(image), placement);
+			slot = org::VersionedTexture::CreateImage(std::move(image));
 		} catch (const std::exception& e) {
 			// A different shape class needs a new slot, which passes declare again after a build.
 			logger::warn("[ORG] {}: not a new version ({}); a new slot instead", name, e.what());
-			slot = org::VersionedTexture::CreateImage(std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph), placement);
+			slot = org::VersionedTexture::CreateImage(std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph));
 		}
 		if (a_previous)
 			logger::info("[ORG] {}: another shape class; a new slot, built again", name);
@@ -975,7 +885,6 @@ namespace GraphResources
 		Export d3d11 = Export::None;  // the views the export makes
 		Lifetime lifetime = Lifetime::Transient;
 		RenderGraph::Frame::Birth birth;  // Options::birth
-		bool frameTransient = false;      // Options::frameTransient
 		Extent extent{};
 		const void* twin = nullptr;
 	};
@@ -1097,7 +1006,6 @@ namespace GraphResources
 		plan->d3d11 = options.d3d11;
 		plan->lifetime = options.lifetime;
 		plan->birth = options.birth;
-		plan->frameTransient = options.frameTransient;
 		plan->extent = a_next;
 		plan->twin = this;
 		return plan;
@@ -1141,11 +1049,8 @@ namespace GraphResources
 			if (!writer)
 				throw failure("its birth has no texel encoding in its format");
 		}
-		// A frame transient's bytes are shared, so nothing writes a version but its first writer in each frame. A guest export
-		// cannot be placed, so it is born as any export is.
-		const bool placed = a_plan.frameTransient && (!a_plan.exported || (native && RenderGraph::Frame::Transients::On()));
-		const bool nativeWrites = native && a_plan.exported && writable && !placed;
-		if ((!a_plan.exported && !placed) || nativeWrites)
+		const bool nativeWrites = native && a_plan.exported && writable;
+		if (!a_plan.exported || nativeWrites)
 			prepared.contents = filled ? (birth.GetKind() == BirthKind::Value ? Contents::Value : Contents::Fill) :
 										 (birth.Writes() || nativeWrites ? Contents::Zero : Contents::Undefined);
 		// The uploader writes a Value through OMS's value fill (MakeTextureVersions), the same writer the guest export's data takes.
@@ -1158,14 +1063,8 @@ namespace GraphResources
 		const bool nativeZero = nativeWrites;
 		if (!a_plan.exported) {
 			try {
-				if (placed) {
-					auto texture = PlaceFrameTransient(Describe(next, false), name);
-					prepared.resource = std::move(texture.texture);
-					prepared.placement = std::move(texture.placement);
-				} else {
-					prepared.resource = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
-						CreateGraphTexture(next, name, false, std::nullopt, prepared.contents != Contents::Undefined));
-				}
+				prepared.resource = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
+					CreateGraphTexture(next, name, false, std::nullopt, prepared.contents != Contents::Undefined));
 			} catch (const std::exception& e) {
 				throw failure(e.what());
 			}
@@ -1176,31 +1075,22 @@ namespace GraphResources
 		const std::uint32_t layout = a_plan.layout;
 		TwinExportImage made;
 		try {
-			made = MakeExportImage(TwinExportDescOf(next), name, nativeZero, placed);
+			made = MakeExportImage(TwinExportDescOf(next), name, nativeZero);
 		} catch (const std::exception& e) {
 			throw failure(e.what());
 		}
 		DxvkOrgInteropImageInfo info{};
-		if (!DescribeExportImage(made.Image(), made.wrap, static_cast<VkImageLayout>(layout), info))
+		if (!DescribeExportImage(made.image.Get(), made.wrap, static_cast<VkImageLayout>(layout), info))
 			throw failure("BasicRHI did not describe its image");
 		auto exported = std::make_shared<PreparedExport>();
-		exported->image = made.Image();
+		exported->image = made.image.Get();
 		exported->wrap = made.wrap;
 		exported->vkImage = reinterpret_cast<std::uint64_t>(info.image);
 		exported->layout = layout;
 		// The graph texture first: once DXVK wraps the image, the wrap keeps it (below), so a failure after it frees nothing early.
-		// A placed image is its own graph texture, so the alias ledger orders every use of its shared bytes.
-		std::shared_ptr<org::ExternalTextureResource> imported;
-		std::shared_ptr<org::GloballyIndexedResource> texture;
-		if (made.placed) {
-			texture = made.placed;
-			prepared.placement = std::move(made.placement);
-		} else {
-			imported = MakeExportGraph(made.image, info, made.graphDesc, name);
-			if (!imported)
-				throw failure(fmt::format("the graph could not take it in layout {}", layout));
-			texture = imported;
-		}
+		auto texture = MakeExportGraph(made.image, info, made.graphDesc, name);
+		if (!texture)
+			throw failure(fmt::format("the graph could not take it in layout {}", layout));
 		// The D3D11 wrap and views, here on the lane, so adoption only moves pointers. A guest export born with a value or
 		// contents takes them as the wrap's data, which DXVK writes in place of its zeros.
 		const auto wrapStart = std::chrono::steady_clock::now();
@@ -1215,7 +1105,7 @@ namespace GraphResources
 			throw failure("D3D11 did not wrap its image");
 		// DXVK may still run the wrap's zero fill after a dropped revision lets the version go, so the wrap keeps the image.
 		if (!native)
-			(void)RenderGraph::Engine::Tripwire::AttachGraphResource(exported->d3d11.get(), imported);
+			(void)RenderGraph::Engine::Tripwire::AttachGraphResource(exported->d3d11.get(), texture);
 		// The previous version's resting layout, since D3D11 rests every image of a shape class alike.
 		if (reinterpret_cast<std::uint64_t>(wrapped.image.image) != exported->vkImage || static_cast<std::uint32_t>(wrapped.image.layout) != layout)
 			throw failure(fmt::format("D3D11 wrapped image 0x{:X} in layout {}, but it was made as image 0x{:X} for layout {}",
@@ -1227,14 +1117,13 @@ namespace GraphResources
 			throw failure("D3D11 refused a view of the exported texture");
 		// Nothing moved a deferred native image out of Undefined. A zeroed one leaves the uploader in Common, which the uploader
 		// sets; any other starts from Undefined, so its first use, graph or context, discards rather than reads a layout it never had.
-		if (native && !nativeZero && imported)
-			imported->SeedInitialLayout(rhi::ResourceLayout::Undefined);
+		if (native && !nativeZero)
+			texture->SeedInitialLayout(rhi::ResourceLayout::Undefined);
 		const double wrapMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wrapStart).count();
 		logger::info("[ORG] {}: prepared its version at {}x{}x{} with its D3D11 wrap and views on the revision lane ({:.3f} ms, {})", name, a_next[0],
 			a_next[1], a_next[2], wrapMs,
-			placed ? "born undefined in the frame arena" :
-					 nativeZero ? (filled ? "filled by the uploader" : "zeroed by the uploader") :
-								  (native ? "born undefined" : (filled ? "filled by DXVK" : "zeroed by DXVK")));
+			nativeZero ? (filled ? "filled by the uploader" : "zeroed by the uploader") :
+						 (native ? "born undefined" : (filled ? "filled by DXVK" : "zeroed by DXVK")));
 		exported->views = made.graphDesc;
 		prepared.resource = std::move(texture);
 		prepared.exported = std::move(exported);
@@ -1417,7 +1306,6 @@ namespace GraphResources
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
 		exportLayout = created.layout;
-		firstPlacement = std::move(created.placement);
 		const auto formats = FormatsOf(shape);
 		const Formats* depth = IsDepth(shape) ? &formats : nullptr;
 		if (d3d11 && (!d3d11.try_as<ID3D11Texture2D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv, dsv, depth))) {
@@ -1471,7 +1359,6 @@ namespace GraphResources
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
 		exportLayout = created.layout;
-		firstPlacement = std::move(created.placement);
 		if (d3d11 && (!d3d11.try_as<ID3D11Texture3D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv, dsv))) {
 			logger::error("[ORG] {}: D3D11 refused a view of the exported texture", name);
 			Reset();

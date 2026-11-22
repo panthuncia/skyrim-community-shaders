@@ -1225,16 +1225,6 @@
 			"description": ""
 		},
 		{
-			"name": "CS_ORG_ENGINE_FRAME_TRANSIENTS",
-			"key": "org.engine_frame_transients",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "other",
-			"family": "org",
-			"description": "false: native mode gives the frame-scoped engine targets memory of their own instead of the frame arena"
-		},
-		{
 			"name": "CS_ORG_FOG_DEBUG",
 			"key": "",
 			"type": "string",

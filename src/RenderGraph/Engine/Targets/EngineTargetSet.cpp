@@ -17,13 +17,11 @@
 #include "RenderGraph/ImageRegistry.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
-#include "RenderGraph/Switches.h"
 #include "Utils/D3D.h"
 
 #include <array>
 #include <atomic>
 #include <optional>
-#include <span>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -71,58 +69,6 @@ namespace RenderGraph::Engine::Targets
 			UnbackedColour{ RT::kLDR_DOWNSAMPLE0, "none: depth of field draws into ImageSpace::DofDownsample" },
 			UnbackedColour{ RT::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED, "the engine's frame clear only (dropped); SSR reads ImageSpace::SSRMaskDownsampled" },
 		};
-
-		// --- Frame transients (native mode). Each version shares the frame arena's bytes with other stages' transients. ---
-
-		/** @brief A target whose contents live within one frame: its first use in a frame writes it, and no later frame reads it. */
-		struct FrameScoped
-		{
-			std::uint32_t target;
-			bool copy;          // the target's copy texture ("Engine::kMAIN Copy"), not the target
-			const char* users;  // its first writer and its readers, for the log
-		};
-
-		// Only targets every user of reaches inside the graphs. Not listed, with the reason:
-		// - kMAIN_COPY, kREFRACTION_NORMALS, kUNDERWATER_MASK, kWATER_DISPLACEMENT(_SWAP), Depth kMAIN_COPY: read by the next frame
-		//   (RecipeTable.h, kPreviousFrame).
-		// - kMAIN_ONLY_ALPHA: SSR reads it before its clear after the water blend, so it holds the last frame's alpha.
-		// - kNORMAL_TAAMASK_SSRMASK and its SWAP: they alternate by frame parity, and with SSR off the water blend reads the one
-		//   nothing wrote that frame.
-		// - kWATER_1/2: the water's TAA history. kMENUBG: kept for the frozen menu frames. kSAVE_GAME_SCREENSHOT: read back on D3D11.
-		// - kRAW_WATER: its clear stays on the native context, outside the graph.
-		// - kMOTION_VECTOR, Depth kMAIN: frame generation takes them as legacy interop inputs, which its SDK reads outside the graph.
-		// - kSHADOWMAPS_ESRAM: the sun cascades; a cascade the engine does not redraw keeps its last contents.
-		// - kBOOK_TEXT depth: GFx's stencil masks may rely on stencil left by an earlier frame.
-		constexpr std::array kFrameScoped{
-			FrameScoped{ RT::kINDIRECT, false, "Deferred's albedo: cleared at Prepass, the main pass, read in deferred+water" },
-			FrameScoped{ RT::kINDIRECT_DOWNSCALED, false, "Deferred's specular: cleared at Prepass, the main pass, read in deferred+water" },
-			FrameScoped{ RT::kRAWINDIRECT, false, "Deferred's reflectance: cleared at Prepass, the main pass, read in deferred+water" },
-			FrameScoped{ RT::kRAWINDIRECT_DOWNSCALED, false, "Deferred's normal-roughness: cleared at Prepass, the main pass, read in deferred+water" },
-			FrameScoped{ RT::kRAWINDIRECT_PREVIOUS, false, "Deferred's masks (not a history): cleared at Prepass, the main pass, read in deferred+water" },
-			FrameScoped{ RT::kRAWINDIRECT_PREVIOUS_DOWNSCALED, false, "Deferred's masks2: cleared at Prepass, the main pass, read in deferred+water" },
-			FrameScoped{ RT::kSNOW_SWAP, false, "the snow pass or the kMAIN copy, read by the SAO composite" },
-			FrameScoped{ RT::kMAIN, true, "the engine's kMAIN copy, read by the water that follows it" },
-			FrameScoped{ RT::kREFRACTION_NORMALS, true, "the upscaler's copy, read in the same client" },
-			FrameScoped{ RT::kUNDERWATER_MASK, true, "the upscaler's copy, read in the same client" },
-		};
-
-		// Not kSHADOW_MASK: DCLF's depth epoch declares a read of it before the shadow-mask passes write it, which the world
-		// recipe's read-order check stops native mode on. It stays out until that declaration is narrowed.
-		// Depth targets, by the same rule. None qualifies now: DCLF's depth epoch reads kPOST_ZPREPASS_COPY before the frame's copy
-		// writes it (the world recipe's read-order check stops native mode on it), so it keeps last frame's depth.
-		constexpr std::array<FrameScoped, 0> kFrameScopedDepths{};
-
-		/** @brief Whether native mode places the target in the frame arena. CS_ORG_ENGINE_FRAME_TRANSIENTS=0 keeps memory of their own. */
-		const FrameScoped* FindFrameScoped(std::span<const FrameScoped> a_table, std::uint32_t a_target, bool a_copy)
-		{
-			static const bool on = !Switches::Off("CS_ORG_ENGINE_FRAME_TRANSIENTS");
-			if (!Native::Active() || !on)
-				return nullptr;
-			for (const auto& entry : a_table)
-				if (entry.target == a_target && entry.copy == a_copy)
-					return &entry;
-			return nullptr;
-		}
 
 		// The volumetric lighting accumulation volumes (RENDER_TARGETS_3D 0 and 1).
 		constexpr const char* kUnbackedVolume = "none: the volumetric lighting port draws VolumetricLighting::Volume";
@@ -1350,10 +1296,6 @@ namespace RenderGraph::Engine::Targets
 			auto name = ColourName(a_index) + (a_copy ? " Copy" : "");
 			auto options = TwinOptions(a_bindFlags);
 			options.joinSlot = std::move(a_join);
-			if (const auto* scoped = FindFrameScoped(kFrameScoped, a_index, a_copy)) {
-				options.frameTransient = true;
-				logger::info("[ORG] {}: a frame transient in the frame arena ({})", name, scoped->users);
-			}
 			auto twin = DeclareTexture2D(
 				name, DependsOn(Vars::EngineTargetShapes()),
 				[a_index, a_copy, a_copyFormat](const Inputs& a_in) {
@@ -1603,14 +1545,9 @@ namespace RenderGraph::Engine::Targets
 			if (record.props.arraySize == 0 || record.props.arraySize > kMaxDepthSlices)
 				RenderGraph::Fatal("engine targets", fmt::format("{} has {} slices; the set takes 1 to {}", DepthName(i), record.props.arraySize, kMaxDepthSlices));
 			const auto name = DepthName(i);
-			auto options = TwinOptions(table.depths[i].bindFlags);
-			if (const auto* scoped = FindFrameScoped(kFrameScopedDepths, i, false)) {
-				options.frameTransient = true;
-				logger::info("[ORG] {}: a frame transient in the frame arena ({})", name, scoped->users);
-			}
 			record.main = Frame::DeclareTexture2D(
 				name, Frame::DependsOn(Frame::Vars::EngineTargetShapes()),
-				[i](const Frame::Inputs& a_in) { return Desc2D(a_in.Get(Frame::Vars::EngineTargetShapes()).depths[i]); }, options);
+				[i](const Frame::Inputs& a_in) { return Desc2D(a_in.Get(Frame::Vars::EngineTargetShapes()).depths[i]); }, TwinOptions(table.depths[i].bindFlags));
 			Publish(record.main, name);
 			++declared;
 		}

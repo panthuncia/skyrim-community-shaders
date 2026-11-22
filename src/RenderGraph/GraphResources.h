@@ -91,11 +91,6 @@ namespace GraphResources
 		// What each of a declared texture's versions holds before its first writer (Frame::DeclareTexture2D). Unset: a History
 		// texture is born zero, others undefined. Only versioned textures are born on the lane.
 		RenderGraph::Frame::Birth birth;
-		// A declared texture whose contents live within one frame: written before any read, and never read in a later frame.
-		// Each version is placed in the frame arena under the twin's name (Frame/Transients.h), so a new version keeps the span
-		// the last one reached. Its versions are born Undefined. Graph-only twins, and native mode's exports; a guest export or a
-		// host without a frame arena gets memory of its own.
-		bool frameTransient = false;
 		// A versioned 2D texture's first version joins this slot instead of a new one, as kFRAMEBUFFER joins the slot native made
 		// with the swap chain. Its shape class must be the slot's, or it is fatal. The constructor takes it, so the twin keeps none.
 		std::shared_ptr<org::VersionedTexture> joinSlot;
@@ -221,7 +216,6 @@ namespace GraphResources
 		Extent extent{};
 		const void* twin = nullptr;                      // the Resource it was prepared for
 		std::shared_ptr<const PreparedExport> exported;  // null for a graph-only twin
-		std::shared_ptr<const void> placement;           // a frame transient's place in the frame arena; null otherwise
 		explicit operator bool() const { return resource != nullptr; }
 	};
 
@@ -352,8 +346,6 @@ namespace GraphResources
 		std::shared_ptr<org::VersionedTexture> slot;  // a versioned texture's (Options::versioned)
 		std::shared_ptr<org::VersionedBuffer> bufferSlot;  // a versioned structured buffer's (Options::versioned)
 		std::uint32_t exportLayout = 0;               // an exported texture's resting VkImageLayout, the same for every version
-		// A frame transient's first version's place in the frame arena, until its slot takes it as the version's owner.
-		std::shared_ptr<const void> firstPlacement;
 		// The exported texture or buffer, as DXVK returned it: one COM object, so the derived twins' D3D11() casts it down.
 		winrt::com_ptr<ID3D11Resource> d3d11;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;
