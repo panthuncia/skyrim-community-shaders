@@ -8,6 +8,9 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include <OpenRenderGraph/Runtime.h>
+#include <Render/RenderGraph/PersistentGraph.h>
+#include <Render/Runtime/IUploadService.h>
+#include <Render/Runtime/StagedUploadBatch.h>
 
 #include <atomic>
 #include <mutex>
@@ -21,6 +24,7 @@ namespace RenderGraph::ExternalWork
 		{
 			std::mutex lock;
 			std::unique_ptr<org::ExternalClient> client;
+			std::shared_ptr<org::Runtime> runtime;
 			bool shutDown = false;  // nothing is submitted any more
 			std::atomic<std::uint64_t> submissions{ 0 };
 		};
@@ -29,6 +33,32 @@ namespace RenderGraph::ExternalWork
 		{
 			static State state;
 			return state;
+		}
+
+		/**
+		* @brief The graphs' uploads queued before this work, submitted ahead of it: a buffer or texture made with contents (engine
+		* geometry, a texture's first contents) is otherwise copied only at the graphs' next submission, after work outside them that
+		* may use it. Render thread (the upload service's owner), with the state's lock; elsewhere nothing is taken.
+		*/
+		void SubmitQueuedUploads(State& a_state)
+		{
+			const auto& uploads = a_state.runtime ? a_state.runtime->Uploads() : nullptr;
+			std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>> batches;
+			if (!uploads || !uploads->TakeStagedUploadsForSubmission(batches) || batches.empty())
+				return;
+			// Held until the copies are submitted, so no graph's admission comes between the textures' states and their copies.
+			std::unique_lock hold(a_state.runtime->Sequencer()->mutex);
+			a_state.runtime->SeedFreshTextureUploads(batches, 0);
+			auto keep = std::make_shared<const std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>>(std::move(batches));
+			a_state.client->Submit(
+				0, {},
+				[keep](rhi::CommandList& a_list) {
+					org::runtime::StagedUploadBatch::RecordCopies(a_list, *keep, "CS external work uploads");
+					// The work after them on the queue reads what they wrote.
+					const auto full = rhi::FullMemoryBarrier();
+					a_list.Barriers({ .globals = { &full, 1u } });
+				},
+				{}, keep, {});
 		}
 
 		Access WholeIn(org::Resource& a_resource, rhi::ResourceAccessType a_access, rhi::ResourceLayout a_layout)
@@ -55,6 +85,7 @@ namespace RenderGraph::ExternalWork
 			RenderGraph::Fatal("external work", "ORG's external client was made twice, or after its shutdown");
 		try {
 			org::ExternalClient::Desc desc{};
+			state.runtime = a_runtime;
 			desc.runtime = std::move(a_runtime);
 			// The graphs' queue slots in their order, since a handoff matches queues by slot.
 			desc.queues = { { a_device.GetQueue(rhi::QueueKind::Graphics), rhi::QueueKind::Graphics },
@@ -87,6 +118,7 @@ namespace RenderGraph::ExternalWork
 		if (!state.client)
 			RenderGraph::Fatal("external work", fmt::format("'{}' has no ORG external client to submit through (it is made with the native device)", a_label));
 		try {
+			SubmitQueuedUploads(state);
 			state.client->Submit(0, a_accesses, a_record, a_signals, std::move(a_keepAlive), a_waits);
 		} catch (const std::exception& e) {
 			RenderGraph::Fatal("external work", fmt::format("ORG's external client could not submit '{}': {}", a_label, e.what()));
@@ -110,6 +142,7 @@ namespace RenderGraph::ExternalWork
 			logger::error("[ORG] external work: shutdown failed: {}", e.what());
 			(void)state.client.release();
 		}
+		state.runtime.reset();
 		logger::info("[ORG] external work: {} submissions in the session", state.submissions.load(std::memory_order_relaxed));
 	}
 }

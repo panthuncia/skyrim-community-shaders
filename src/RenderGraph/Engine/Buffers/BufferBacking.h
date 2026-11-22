@@ -18,7 +18,7 @@ namespace org
 
 namespace RenderGraph::Engine::Buffers::detail
 {
-	/** @brief A persistently mapped ORG buffer in GPUUpload memory, and the DXVK buffer made from it. */
+	/** @brief An ORG buffer and the D3D11 buffer made from it. data is a ring chunk's mapping, null for a static buffer. */
 	struct Backing
 	{
 		// Declared first, so it is released after the guest buffer that reads it.
@@ -27,8 +27,14 @@ namespace RenderGraph::Engine::Buffers::detail
 		std::uint8_t* data = nullptr;
 	};
 
-	/** @brief Nullopt when the graph is inactive. Any other failure is fatal. Any thread. */
+	/** @brief A ring chunk, persistently mapped. Nullopt when the graph is inactive. Any other failure is fatal. Any thread. */
 	std::optional<Backing> MakeBacking(const D3D11_BUFFER_DESC& a_desc, const char* a_name);
+
+	/**
+	* @brief A static buffer in device-local memory, filled with a_contents through the graph's upload service. Nullopt when the
+	* graph is inactive. Any other failure is fatal. Any thread.
+	*/
+	std::optional<Backing> MakeStaticBacking(const D3D11_BUFFER_DESC& a_desc, const void* a_contents, const char* a_name);
 
 	/**
 	* @brief A tripwire handle while the guest context is installed, else the guest buffer with the ORG buffer attached.

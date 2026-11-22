@@ -71,7 +71,6 @@ struct ORGTerrainShadows::Heightmap
 	int format = 0;  // for the log
 	std::uint32_t maxDispatches = 0;
 	std::unique_ptr<GraphResources::Texture2D> texture;
-	std::shared_ptr<const GraphResources::StagedUpload> staged;
 
 	// Render thread. Held until the commit latches them.
 	std::vector<Constants> pending;
@@ -186,14 +185,10 @@ namespace
 		return true;
 	}
 
-	/**
-	* @brief Runs only in a graph holding this heightmap's client, so a committed refresh covers the heightmap it uploads.
-	* The upload's entry opens until a run with it submits, so the first refresh's run uploads first.
-	*/
-	void Commit(Heightmap& a_heightmap, org::LatchBlock& a_latch, RenderGraph::RunGate& a_gate, RenderGraph::FirstRun& a_upload)
+	/** @brief Runs only in a graph holding this heightmap's client. Its contents were uploaded when it was staged. */
+	void Commit(Heightmap& a_heightmap, org::LatchBlock& a_latch, RenderGraph::RunGate& a_gate)
 	{
 		const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
-		a_upload.Open(a_gate, a_heightmap.maxDispatches);
 		if (a_heightmap.pending.empty())
 			return;
 		a_latch.Write(run, 0, std::as_bytes(std::span(a_heightmap.pending)));
@@ -226,8 +221,8 @@ namespace
 			logger::error("[ORG] Terrain Shadows: its latch block could not be created ({})", e.what());
 			return false;
 		}
-		// One entry per stripe, then the heightmap upload's.
-		auto gate = RenderGraph::RunGate::Create("TerrainShadows::UpdateGate", maxDispatches + 1);
+		// One entry per stripe.
+		auto gate = RenderGraph::RunGate::Create("TerrainShadows::UpdateGate", maxDispatches);
 		if (!gate) {
 			logger::error("[ORG] Terrain Shadows: its run gate could not be created");
 			return false;
@@ -235,15 +230,7 @@ namespace
 		const auto spec = std::make_shared<const UpdateSpec>(
 			UpdateSpec{ a_impl.program.Get(), latch, gate, heightmap->texture->Graph(), a_impl.shadowHeights->Versioned(), maxDispatches });
 
-		// Key 99 is the gated heightmap copy, 100 the update that reads it. The copy skips at execution once a run with it submitted.
-		const auto upload = std::make_shared<RenderGraph::FirstRun>();
-		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 99);
-		builder.Add(
-			"heightmap-upload", FrameAnchors::PassKind::Copy,
-			[staged = heightmap->staged, gateRef = std::shared_ptr<const RenderGraph::RunGate>(gate), maxDispatches]() -> std::shared_ptr<org::RenderPass> {
-				return GraphResources::MakeUploadPass({ staged }, { gateRef, maxDispatches });
-			},
-			true);
+		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 100);
 		builder.Add(
 			"update", FrameAnchors::PassKind::Compute,
 			[spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<false>>(spec); });
@@ -264,11 +251,12 @@ namespace
 			heightmap->texture->Register(a_graph);
 			shadowHeights->Register(a_graph);
 		};
-		a_client.commit = [heightmap, latch, gate, upload](const FrameAnchors::Point&) { Commit(*heightmap, *latch, *gate, *upload); };
-		a_client.active = [heightmap, upload] { return !heightmap->pending.empty() || upload->Pending(); };
-		a_client.executed = [heightmap, upload](const FrameAnchors::Point&) {
-			// The upload is its only write. Once a run with it submitted, ORG may move the heightmap (ReadOnly).
-			if (upload->Executed())
+		a_client.commit = [heightmap, latch, gate](const FrameAnchors::Point&) { Commit(*heightmap, *latch, *gate); };
+		a_client.active = [heightmap] { return !heightmap->pending.empty(); };
+		a_client.executed = [heightmap, sealed = std::make_shared<bool>(false)](const FrameAnchors::Point&) {
+			// The upload, its only write, went with the first submission after it was staged, so it is in by this run's. ORG may
+			// move the heightmap from here on (ReadOnly).
+			if (!std::exchange(*sealed, true))
 				::RenderGraph::Relocation::Seal(heightmap->texture->Graph());
 		};
 		a_client.gates = { gate };
@@ -352,9 +340,8 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 	next->texture = std::make_unique<GraphResources::Texture2D>(desc, "TerrainShadows::HeightMap",
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
 	const GraphResources::SubresourceData bytes{ image->pixels, static_cast<UINT>(image->rowPitch), static_cast<UINT>(image->slicePitch) };
-	next->staged = next->texture->Stage(std::span<const GraphResources::SubresourceData>(&bytes, 1));
-	if (!next->staged)
-		Fatal(fmt::format("its {}x{} heightmap could not be staged", next->width, next->height));
+	if (!next->texture->Upload(std::span<const GraphResources::SubresourceData>(&bytes, 1)))
+		Fatal(fmt::format("its {}x{} heightmap could not be uploaded", next->width, next->height));
 	next->pending.reserve(next->maxDispatches);
 	// The revision that carries this value makes the shadow height map's version and the client. No stripes run until then.
 	impl->staged[next->id] = next;

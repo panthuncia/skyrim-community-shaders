@@ -103,11 +103,9 @@ namespace ORGPostChain
 				auto image = a_builder.CreateImage("PostProcessing::LUT::Output", format, D3D11_BIND_RENDER_TARGET);
 				const auto constants = a_builder.Latch<LUT::LUTCB>();
 				const bool is3D = lutType == kLut3D;
-				if (is3D) {
+				// Its contents were uploaded when it was made.
+				if (is3D)
 					a_builder.Register(*copy);
-					// The chain has no first-run gate, so the copy of a few hundred KB runs every run.
-					a_builder.Add("upload", FrameAnchors::PassKind::Copy, [staged = staged]() { return GraphResources::MakeUploadPass({ staged }); });
-				}
 				// The shader reads only the LUT LutType names.
 				a_builder.Draw({ .name = "draw",
 					.program = LoadProgram(a_builder),
@@ -136,7 +134,6 @@ namespace ORGPostChain
 				if (copy && copiedFrom == loaded)
 					return nullptr;
 				copy.reset();
-				staged.reset();
 				copiedFrom = nullptr;
 				// The same path LUT::ReadTexture resolves.
 				const auto path = UnifiedPresetCatalog::GetSingleton().ResolveActivePackPath(a_lut.attemptedPath);
@@ -166,16 +163,14 @@ namespace ORGPostChain
 						return "the 3D LUT file has a missing slice";
 					slices.push_back({ slice->pixels, static_cast<UINT>(slice->rowPitch), static_cast<UINT>(slice->slicePitch) });
 				}
-				staged = next->Stage(slices);
-				if (!staged)
-					return "the 3D LUT cannot be staged for its graph texture";
+				if (!next->Upload(slices))
+					return "the 3D LUT cannot be uploaded into its graph texture";
 				copy = std::move(next);
 				copiedFrom = loaded;
 				return nullptr;
 			}
 
 			std::unique_ptr<GraphResources::Texture3D> copy;
-			std::shared_ptr<const GraphResources::StagedUpload> staged;  // for the upload pass
 			winrt::com_ptr<ID3D11Texture3D> copiedFrom;  // held so a new LUT never takes the old one's address
 			FrameAnchors::Texture source;
 			int lutType = kNoLut;  // this frame's, from Update

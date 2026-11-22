@@ -92,13 +92,25 @@ namespace
 
 namespace
 {
-	// Features BasicRHI needs beyond DXVK's own. The graph uses descriptor buffers only, since VK_EXT_descriptor_heap rendered DLSS black on NVIDIA.
+	// Features BasicRHI needs beyond DXVK's own. The graph uses descriptor buffers, since VK_EXT_descriptor_heap rendered DLSS black on NVIDIA,
+	// or update-after-bind descriptor sets on devices without mutable descriptors (Pascal). A device grants what it supports, and BasicRHI
+	// adopts the model whose features it finds enabled.
 	// vulkanMemoryModelDeviceScope is needed because DXVK enables vulkanMemoryModel, which makes DXC's device-scope atomics invalid without it.
 	constexpr DxvkOrgInteropFeature kRequestedFeatures[] = {
 		{ VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME, "descriptorBuffer" },
 		{ VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME, "mutableDescriptorType" },
 		// The descriptor-buffer model's heap sets are variable-count bindings (a bound heap need only cover its own capacity).
 		{ nullptr, "descriptorBindingVariableDescriptorCount" },
+		// The descriptor-sets model: one update-after-bind binding per descriptor kind, indexed non-uniformly.
+		{ nullptr, "descriptorBindingStorageImageUpdateAfterBind" },
+		{ nullptr, "descriptorBindingStorageBufferUpdateAfterBind" },
+		{ nullptr, "descriptorBindingUniformTexelBufferUpdateAfterBind" },
+		{ nullptr, "descriptorBindingStorageTexelBufferUpdateAfterBind" },
+		{ nullptr, "shaderSampledImageArrayNonUniformIndexing" },
+		{ nullptr, "shaderStorageImageArrayNonUniformIndexing" },
+		{ nullptr, "shaderStorageBufferArrayNonUniformIndexing" },
+		{ nullptr, "shaderUniformTexelBufferArrayNonUniformIndexing" },
+		{ nullptr, "shaderStorageTexelBufferArrayNonUniformIndexing" },
 		{ nullptr, "vulkanMemoryModelDeviceScope" },
 		// FidelityFX's Vulkan backend barriers a depth-stencil image with the depth aspect alone. That is valid only with
 		// separateDepthStencilLayouts, and AMD backs the game's D24S8 depth with D32_SFLOAT_S8_UINT (VUID-VkImageMemoryBarrier-image-03320).
@@ -170,16 +182,20 @@ namespace
 					names += "descriptor heap";
 				if (a_mask & rhi::vulkan::BindingModel_DescriptorBuffer)
 					names += names.empty() ? "descriptor buffer" : ", descriptor buffer";
+				if (a_mask & rhi::vulkan::BindingModel_DescriptorSets)
+					names += names.empty() ? "descriptor sets" : ", descriptor sets";
 				return names.empty() ? std::string("none") : names;
 			};
 			logger::info("[ORG] Binding model negotiation: DXVK prefers {}, BasicRHI supports {}",
 				a_dxvkPreferredModel ? modelNames(a_dxvkPreferredModel) : std::string("legacy descriptor sets"), modelNames(report.supportedModels));
 			for (const auto& check : report.checks)
 				logger::info("[ORG]   {}", check);
-			logger::info("[ORG] Shader-visible heap capacities: descriptor heap {} / {}, descriptor buffer {} / {} (CBV/SRV/UAV / sampler; 0: unsupported)",
-				report.heapModelResources, report.heapModelSamplers, report.bufferModelResources, report.bufferModelSamplers);
-			// Descriptor buffers alone (kRequestedFeatures).
-			return report.supportedModels & rhi::vulkan::BindingModel_DescriptorBuffer;
+			logger::info("[ORG] Shader-visible heap capacities: descriptor heap {} / {}, descriptor buffer {} / {}, descriptor sets {} / {} (CBV/SRV/UAV / "
+						 "sampler; 0: unsupported)",
+				report.heapModelResources, report.heapModelSamplers, report.bufferModelResources, report.bufferModelSamplers, report.setsModelResources,
+				report.setsModelSamplers);
+			// Descriptor buffers, or sets of the graph's own beside DXVK's legacy sets (kRequestedFeatures).
+			return report.supportedModels & (rhi::vulkan::BindingModel_DescriptorBuffer | rhi::vulkan::BindingModel_DescriptorSets);
 		} catch (...) {
 			return 0;
 		}
@@ -1699,20 +1715,27 @@ bool RenderGraphRuntime::Initialize()
 				properties.vendorID, properties.deviceID, driverText, VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion),
 				VK_API_VERSION_PATCH(properties.apiVersion), info.enabledExtensionCount);
 		}
-		// BasicRHI runs on DXVK's negotiated model, descriptor buffers with mutable descriptors. DXVK grants nothing on legacy sets.
+		// BasicRHI runs on DXVK's negotiated model, descriptor buffers with mutable descriptors, or, while DXVK runs on legacy sets, on
+		// update-after-bind sets of its own (the features below, which BasicRHI's adoption checks in full).
 		const auto* bufferFeatures = FindFeatures<VkPhysicalDeviceDescriptorBufferFeaturesEXT>(info.enabledFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT);
 		const auto* mutableFeatures = FindFeatures<VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT>(info.enabledFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT);
 		const bool onBuffers = HasExtension(info, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME) && HasExtension(info, VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME) &&
 		                       bufferFeatures && bufferFeatures->descriptorBuffer && mutableFeatures && mutableFeatures->mutableDescriptorType;
-		if (!onBuffers) {
+		const auto* vk12 = FindFeatures<VkPhysicalDeviceVulkan12Features>(info.enabledFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
+		const bool onSets = !onBuffers && vk12 && vk12->descriptorBindingStorageImageUpdateAfterBind && vk12->descriptorBindingStorageBufferUpdateAfterBind &&
+		                    vk12->descriptorBindingUniformTexelBufferUpdateAfterBind && vk12->descriptorBindingStorageTexelBufferUpdateAfterBind &&
+		                    vk12->shaderStorageBufferArrayNonUniformIndexing && vk12->shaderStorageTexelBufferArrayNonUniformIndexing;
+		if (!onBuffers && !onSets) {
 			// The one cause seen in practice, named so the menu does not leave it to be guessed.
 			if (::GetModuleHandleW(L"renderdoc.dll"))
 				return disable("DXVK runs on legacy descriptor sets: RenderDoc is loaded, and its DXVK capture config turns off descriptor buffers, which the "
 							   "render graph needs. Turn off RenderDoc capture to use the render graph.");
-			return disable("DXVK did not grant descriptor buffers with mutable descriptors: it runs on legacy descriptor sets, or on a model BasicRHI cannot "
-						   "use on this device (see the binding model negotiation above and DXVK's 'Binding model' and 'Interop feature denied' log lines)");
+			return disable("DXVK granted neither descriptor buffers with mutable descriptors nor update-after-bind descriptor sets: it runs on a model "
+						   "BasicRHI cannot use on this device (see the binding model negotiation above and DXVK's 'Binding model' and 'Interop feature "
+						   "denied' log lines)");
 		}
-		logger::info("[ORG] Binding model: descriptor buffer (VK_EXT_descriptor_buffer + VK_EXT_mutable_descriptor_type)");
+		logger::info("[ORG] Binding model: {}", onBuffers ? "descriptor buffer (VK_EXT_descriptor_buffer + VK_EXT_mutable_descriptor_type)" :
+		                                                    "update-after-bind descriptor sets beside DXVK's legacy sets");
 
 		rhi::vulkan::AdoptedVulkanDeviceInfo adopt{};
 		adopt.getInstanceProcAddr = info.getInstanceProcAddr;

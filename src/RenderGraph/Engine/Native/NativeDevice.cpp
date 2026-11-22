@@ -42,6 +42,8 @@
 #include "RenderGraph/Switches.h"
 
 #include <OpenRenderGraph/GraphHost.h>
+#include <OpenRenderGraph/Runtime.h>
+#include <Render/Runtime/IUploadService.h>
 
 #if defined(CS_ORG_HAS_D3D12)
 #	include <d3d12.h>
@@ -315,8 +317,9 @@ namespace RenderGraph::Engine::Native
 				ci.vulkanRegisterCheckpoint = &Aftermath::RegisterOrgCheckpoint;
 				ci.vulkanDetailedCheckpoints = ci.enableCrashMarkers;
 			}
-			// The graph binds through descriptor buffers alone, as on DXVK's device.
-			ci.vulkanBindingModels = rhi::vulkan::BindingModel_DescriptorBuffer;
+			// The graph binds through descriptor buffers, as on DXVK's device, or update-after-bind descriptor sets on devices without
+			// mutable descriptors (Pascal).
+			ci.vulkanBindingModels = rhi::vulkan::BindingModel_DescriptorBuffer | rhi::vulkan::BindingModel_DescriptorSets;
 			ci.vulkanCreateHooks = &hooks;
 			// Use the adapter the game's INI picked, at RendererData +0x00.
 			DXGI_ADAPTER_DESC adapter{};
@@ -1671,34 +1674,53 @@ namespace RenderGraph::Engine::Native
 				return value && immediate.Wait(value);
 			}
 
-			/** @brief A tracked texture's first contents through ORG's external client. No wait, since the ledger orders every later use. */
+			/**
+			 * @brief A tracked texture's first contents. With data they go through the graphs' upload service, which copies them ahead
+			 * of the next work that can use the texture (the graphs' next submission, or the context's next operation on the render
+			 * thread). Without data the external client moves it out of Undefined. No wait, since the ledger orders every later use.
+			 */
 			bool InitializeTracked(NativeResource& a_record, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
 			{
 				auto& texture = *a_record.graphOwned;
-				const auto handle = texture.GetAPIResource().GetHandle();
-				auto upload = std::make_shared<rhi::ResourcePtr>();
-				std::vector<InitialCopy> copies;
-				rhi::TextureSubresourceRange all{};
-				if (!StageInitialData(handle, a_request, a_format, a_mips, a_layers, a_depth, *upload, copies, all))
-					return false;
+				if (a_request.data)
+					return UploadTracked(a_record, a_request, a_format, a_mips, a_layers, a_depth);
 				const ::RenderGraph::ExternalWork::Access access{ &texture, {},
-					{ rhi::ResourceAccessType::CopyDest, copies.empty() ? rhi::ResourceLayout::Common : rhi::ResourceLayout::CopyDest, rhi::ResourceSyncState::Copy } };
+					{ rhi::ResourceAccessType::CopyDest, rhi::ResourceLayout::Common, rhi::ResourceSyncState::Copy } };
 				NativeResource* const used[] = { &a_record };
 				Immediate::Work work;
 				work.accesses = { &access, 1 };
 				work.used = used;
-				const auto record = [&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
-					for (const auto& copy : copies) {
-						rhi::BufferTextureCopyFootprint region{};
-						region.texture = handle;
-						region.buffer = (*upload)->GetHandle();
-						region.mip = copy.mip;
-						region.arraySlice = copy.slice;
-						region.footprint = copy.footprint;
-						a_list.CopyBufferToTexture(region);
-					}
-				};
-				return immediate.Run((copies.empty() ? "initial layout " : "initial contents ") + a_request.name, work, record, { upload }) != 0;
+				return immediate.Run("initial layout " + a_request.name, work, [](rhi::CommandList&, const Immediate::Descriptors&) {}, {}) != 0;
+			}
+
+			/** @brief InitializeTracked's contents, through the graphs' upload service. False, logged once, when it cannot take them. */
+			bool UploadTracked(NativeResource& a_record, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
+			{
+				static std::atomic<bool> loggedService = false, loggedDepth = false;
+				// A depth texture's stencil is a plane of its own, which the service's layout does not cover. D3D11 hardly makes one with contents.
+				if (a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) {
+					LogOnce(loggedDepth, a_request.name, "a depth texture with contents is not graph-owned");
+					return false;
+				}
+				auto* host = RenderGraphRuntime::Get().Host();
+				auto* uploads = host ? host->GetRuntime().Uploads().get() : nullptr;
+				if (!uploads) {
+					LogOnce(loggedService, a_request.name, "the graphs have no upload service");
+					return false;
+				}
+				// D3D11's subresource order, mip-major within each slice, as the service takes it.
+				std::vector<rhi::helpers::SubresourceData> sources;
+				sources.reserve(size_t(a_mips) * a_layers);
+				for (uint32_t i = 0; i < a_mips * a_layers; ++i) {
+					const auto& source = a_request.data[i];
+					if (!source.pSysMem)
+						return false;
+					sources.push_back({ source.pSysMem, source.SysMemPitch, source.SysMemSlicePitch });
+				}
+				uploads->UploadTextureSubresources(org::runtime::UploadTarget::FromShared(a_record.graphOwned), a_format,
+					a_request.width, a_request.height, a_depth > 1 ? a_depth : 1, a_mips, a_layers, sources.data(), static_cast<uint32_t>(sources.size()),
+					__FILE__, __LINE__);
+				return true;
 			}
 
 			/**
@@ -4841,7 +4863,7 @@ namespace RenderGraph::Engine::Native
 		}
 		record->size = a_desc.ByteWidth;
 		record->bufferDesc = a_desc;
-		// Its owner fills it through a mapping no census sees, so it counts as made without data.
+		// Its owner fills it through ORG (an upload, or a ring chunk's mapping) where no census sees it, so it counts as made without data.
 		record->bindFlags = a_desc.BindFlags;
 		record->d3dUsage = a_desc.Usage;
 		record->dimension = D3D11_RESOURCE_DIMENSION_BUFFER;

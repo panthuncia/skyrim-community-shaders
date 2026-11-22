@@ -310,6 +310,35 @@ void Streamline::PreloadInterposer()
 	Initialize();
 }
 
+// XeSS's Vulkan library builds its descriptor set layouts with VK_DESCRIPTOR_TYPE_MUTABLE_EXT, and Streamline reports it supported
+// on devices without mutable descriptors (Pascal), where those layouts are invalid. False when the device lacks them.
+static bool VulkanMutableDescriptorsSupported(PFN_vkGetInstanceProcAddr a_gipa, VkInstance a_instance, VkPhysicalDevice a_physicalDevice)
+{
+	if (!a_gipa || !a_instance || !a_physicalDevice)
+		return false;
+	const auto enumExts = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(a_gipa(a_instance, "vkEnumerateDeviceExtensionProperties"));
+	const auto getFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(a_gipa(a_instance, "vkGetPhysicalDeviceFeatures2"));
+	if (!enumExts || !getFeatures2)
+		return false;
+	uint32_t count = 0;
+	if (enumExts(a_physicalDevice, nullptr, &count, nullptr) != VK_SUCCESS)
+		return false;
+	std::vector<VkExtensionProperties> extensions(count);
+	if (enumExts(a_physicalDevice, nullptr, &count, extensions.data()) != VK_SUCCESS)
+		return false;
+	// A structure of an extension the device lacks must not be chained into the query.
+	const bool listed = std::any_of(extensions.begin(), extensions.begin() + count, [](const VkExtensionProperties& a_ext) {
+		return std::strcmp(a_ext.extensionName, VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME) == 0;
+	});
+	if (!listed)
+		return false;
+	VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT mutableFeatures{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT };
+	VkPhysicalDeviceFeatures2 features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+	features.pNext = &mutableFeatures;
+	getFeatures2(a_physicalDevice, &features);
+	return mutableFeatures.mutableDescriptorType == VK_TRUE;
+}
+
 // Probe with the system loader before slInit decides which FG plugin to load. A nonzero a_luid (native mode) checks only the
 // adapter the device is made on, so a second GPU's optical flow does not load DLSS-G for a device that lacks it.
 static bool ProbeDLSSGHardware(uint64_t a_luid)
@@ -528,7 +557,7 @@ void* Streamline::InterposerModule() const
 	return initialized ? g_sl.interposer : nullptr;
 }
 
-void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
+void Streamline::SetNativeDevice(void* a_vkInstance, void* a_vkGetInstanceProcAddr, void* a_vkPhysicalDevice, uint64_t a_luid)
 {
 	if (!initialized || !native || vulkanDeviceSet)
 		return;
@@ -551,6 +580,12 @@ void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
 	featureDLSS = supported(sl::kFeatureDLSS);
 	featureReflex = supported(sl::kFeatureReflex);
 	featureXeSS = supported(sl::kFeatureXeSS);
+	if (featureXeSS && a_vkPhysicalDevice &&
+		!VulkanMutableDescriptorsSupported(reinterpret_cast<PFN_vkGetInstanceProcAddr>(a_vkGetInstanceProcAddr), static_cast<VkInstance>(a_vkInstance),
+			static_cast<VkPhysicalDevice>(a_vkPhysicalDevice))) {
+		logger::info("[Streamline] XeSS off: the native Vulkan device has no mutable descriptors, which XeSS's Vulkan library needs");
+		featureXeSS = false;
+	}
 	featureFSR = supported(sl::kFeatureFSR);
 	featureDLSSG = dlssgHardware && supported(sl::kFeatureDLSS_G);
 	featureFSRFG = supported(sl::kFeatureFSR_G);
@@ -643,6 +678,10 @@ void Streamline::SetVulkanDevice()
 	featureReflex = supported(sl::kFeatureReflex);
 	featureDLSSG = supported(sl::kFeatureDLSS_G);
 	featureXeSS = supported(sl::kFeatureXeSS);
+	if (featureXeSS && !VulkanMutableDescriptorsSupported(dxvk->GetInstanceProcAddr(), dxvk->GetInstance(), dxvk->GetPhysicalDevice())) {
+		logger::info("[Streamline] XeSS off: DXVK's Vulkan device has no mutable descriptors, which XeSS's Vulkan library needs");
+		featureXeSS = false;
+	}
 	featureFSR = supported(sl::kFeatureFSR);
 	featureFSRFG = supported(sl::kFeatureFSR_G);
 

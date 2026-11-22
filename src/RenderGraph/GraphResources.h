@@ -26,11 +26,6 @@ namespace org
 	struct BufferVersion;
 }
 
-namespace RenderGraph
-{
-	class RunGate;
-}
-
 namespace RenderGraph::Engine::Native
 {
 	enum class WrapFlags : std::uint32_t;
@@ -164,29 +159,13 @@ namespace GraphResources
 	/** @brief The one way to retire an EngineExport: forgets it in ImageRegistry, releases the D3D11 side, then the image after D3D11's last use. Render thread. */
 	void Retire(EngineExport&& a_export);
 
-	/** @brief One subresource's bytes for an upload (Texture2D::Stage, Texture3D::Stage): rows of texels, or of 4x4 blocks. */
+	/** @brief One subresource's bytes for an upload (Texture2D::Upload, Texture3D::Upload): rows of texels, or of 4x4 blocks. */
 	struct SubresourceData
 	{
 		const void* data = nullptr;
 		UINT rowPitch = 0;    // bytes from one row to the next in data
 		UINT slicePitch = 0;  // rowPitch times the rows
 	};
-
-	/** @brief A twin texture's contents in a host-visible buffer, written once by the CPU. Immutable. */
-	struct StagedUpload;
-
-	/** @brief A gate entry an upload waits for. */
-	struct UploadGate
-	{
-		std::shared_ptr<const ::RenderGraph::RunGate> gate;
-		std::uint32_t entry = 0;
-	};
-
-	/**
-	* @brief A copy pass for staged uploads. Null entries are skipped. Ungated it copies on every run it is in.
-	* With a_gate it copies only on runs whose commit opened the entry (a first-run gate, RunGate.h), so give it as atExecution.
-	*/
-	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads, UploadGate a_gate = {});
 
 	/** @brief A texture's width, height, and depth (3D) or slice count (2D). A version may change any of them (ORG array-size versions for the slices). */
 	using Extent = std::array<UINT, 3>;
@@ -400,12 +379,12 @@ namespace GraphResources
 		ID3D11Texture2D* D3D11() const { return static_cast<ID3D11Texture2D*>(d3d11.get()); }
 		ID3D11RenderTargetView* RTV() const { return rtv.get(); }
 
-		/** @brief Stages contents for MakeUploadPass, one entry per subresource in D3D11CalcSubresource order. Empty entries are skipped.
-		*  a_width and a_height default to the texture's mip 0 size. Bytes are copied before return. Any thread. Null on failure. */
-		std::shared_ptr<const StagedUpload> Stage(std::span<const SubresourceData> a_subresources, UINT a_width = 0, UINT a_height = 0) const;
-
-		/** @brief Stage of zeros into every subresource: texels or blocks of zero bytes, as DXVK's new images hold. */
-		std::shared_ptr<const StagedUpload> StageZeros() const;
+		/**
+		* @brief The texture's first contents, one entry per subresource in D3D11CalcSubresource order, through the graph's upload
+		* service: the next graph submission copies them before its own work. Only for a texture no graph has used yet. a_width and
+		* a_height default to the texture's mip 0 size. Bytes are copied before return. Any thread. False, logged, on failure.
+		*/
+		bool Upload(std::span<const SubresourceData> a_subresources, UINT a_width = 0, UINT a_height = 0) const;
 
 		Extent CurrentExtent() const override;
 
@@ -427,8 +406,8 @@ namespace GraphResources
 
 		const D3D11_TEXTURE3D_DESC& Desc() const { return desc; }
 		ID3D11Texture3D* D3D11() const { return static_cast<ID3D11Texture3D*>(d3d11.get()); }
-		/** @brief Texture2D::Stage for mip 0 only: one entry per depth slice, in order. Mips past the first are left as they are. */
-		std::shared_ptr<const StagedUpload> Stage(std::span<const SubresourceData> a_depthSlices) const;
+		/** @brief Texture2D::Upload for mip 0 only: one entry per depth slice, in order. Mips past the first are left as they are. */
+		bool Upload(std::span<const SubresourceData> a_depthSlices) const;
 
 		Extent CurrentExtent() const override;
 

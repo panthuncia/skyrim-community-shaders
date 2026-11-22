@@ -44,10 +44,10 @@ public:
 	[[nodiscard]] const std::wstring& PluginDirectory() const { return pluginDirectory; }
 
 	/**
-	 * @brief Native mode, once the native device exists: resolves feature support on its adapter (a_vkPhysicalDevice on Vulkan, else
-	 * the adapter a_luid names).
+	 * @brief Native mode, once the native device exists: resolves feature support on its adapter (a_vkPhysicalDevice on Vulkan, with
+	 * its VkInstance and vkGetInstanceProcAddr, else the adapter a_luid names).
 	 */
-	void SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid);
+	void SetNativeDevice(void* a_vkInstance, void* a_vkGetInstanceProcAddr, void* a_vkPhysicalDevice, uint64_t a_luid);
 
 	/** @brief Returns whether feature support is final for this session. */
 	[[nodiscard]] bool IsFeatureSupportResolved() const { return vulkanDeviceSet || unavailable; }

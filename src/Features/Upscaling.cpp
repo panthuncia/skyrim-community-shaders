@@ -1552,7 +1552,9 @@ void Upscaling::SetupResources()
 		// Native mode: Streamline came up with the native device (NativeDevice's NativeStreamline); its support is the device's adapter's.
 		DxvkOrgInteropDeviceInfo vulkan{};
 		const bool onVulkan = RenderGraph::Engine::Native::DescribeVulkanDevice(vulkan);
-		Streamline::GetSingleton()->SetNativeDevice(onVulkan ? static_cast<void*>(vulkan.physicalDevice) : nullptr, RenderGraph::Engine::Native::AdapterLuid());
+		Streamline::GetSingleton()->SetNativeDevice(onVulkan ? static_cast<void*>(vulkan.instance) : nullptr,
+			onVulkan ? reinterpret_cast<void*>(vulkan.getInstanceProcAddr) : nullptr, onVulkan ? static_cast<void*>(vulkan.physicalDevice) : nullptr,
+			RenderGraph::Engine::Native::AdapterLuid());
 		// Frame generation's plugins load and unload between a replacement's destroy and create.
 		FrameGen::ActivePresenter().SetTornDown(&Streamline::CompleteSwapchainTeardown);
 		ApplyHardwareDefaults();

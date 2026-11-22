@@ -22,6 +22,9 @@
 #include <Resources/Buffers/Buffer.h>
 #include <Resources/Buffers/VersionedBuffer.h>
 #include <rhi.h>
+#include <rhi_feature_info.h>
+#include <OpenRenderGraph/Runtime.h>
+#include <Render/Runtime/IUploadService.h>
 
 #include <cstring>
 #include <exception>
@@ -33,37 +36,89 @@ namespace RenderGraph::Engine::Buffers
 	{
 		namespace
 		{
+			/** @brief Raw views load whole words, so a buffer is a whole number of them. */
+			UINT WholeWords(UINT a_bytes) { return (a_bytes + 3) & ~3u; }
+
+			/** @brief The D3D11 buffer over a graph buffer. A failure is fatal. */
+			winrt::com_ptr<ID3D11Buffer> Wrap(RenderGraphRuntime& a_runtime, org::Buffer& a_buffer, const D3D11_BUFFER_DESC& a_desc)
+			{
+				D3D11_BUFFER_DESC wrap{};
+				wrap.ByteWidth = a_desc.ByteWidth;
+				wrap.Usage = D3D11_USAGE_DEFAULT;
+				wrap.BindFlags = a_desc.BindFlags;
+				auto guest = a_runtime.WrapBuffer(a_buffer, wrap);
+				if (!guest)
+					RenderGraph::Fatal("engine buffers", fmt::format("'{}' could not be wrapped for D3D11", a_buffer.GetName()));
+				return guest;
+			}
+
+			/**
+			* @brief The ring's memory: device-local memory the CPU writes (D3D12's GPU upload heap, or resizable BAR) where the device
+			* has it, else upload memory, where D3D11 drivers keep dynamic buffers too.
+			*/
+			rhi::HeapType RingHeap(org::GraphHost& a_host)
+			{
+				static const rhi::HeapType heap = [&] {
+					ResourceAllocationFeatureInfo allocation{};
+					const bool deviceLocal = a_host.Device().QueryFeatureInfo(&allocation.header) == rhi::Result::Ok && allocation.gpuUploadHeapSupported;
+					logger::info("[ORG] engine buffers: the dynamic ring is in {} memory", deviceLocal ? "device-local host-visible" : "upload");
+					return deviceLocal ? rhi::HeapType::GPUUpload : rhi::HeapType::Upload;
+				}();
+				return heap;
+			}
 		}
 
 		std::optional<Backing> MakeBacking(const D3D11_BUFFER_DESC& a_desc, const char* a_name)
 		{
 			auto& runtime = RenderGraphRuntime::Get();
-			if (!runtime.IsActive() || !a_desc.ByteWidth)
+			auto* host = runtime.Host();
+			if (!runtime.IsActive() || !host || !a_desc.ByteWidth)
 				return std::nullopt;
 			try {
-				// Also made on loader threads, but the host's world belongs to the render thread.
 				org::Resource::ScopedECSRegistrationSuppression suppressECS;
-				// Host-visible memory, so the CPU fills it with no GPU copy.
-				// Round up to whole words because raw views load whole words.
-				const UINT bytes = (a_desc.ByteWidth + 3) & ~3u;
-				auto buffer = org::Buffer::CreateShared(rhi::HeapType::GPUUpload, bytes);
+				const UINT bytes = WholeWords(a_desc.ByteWidth);
+				auto buffer = org::Buffer::CreateShared(RingHeap(*host), bytes);
 				buffer->SetName(a_name);
 				void* data = nullptr;
 				auto api = buffer->GetAPIResource();
 				api.Map(&data);  // kept mapped for the buffer's life
 				if (!data)
-					RenderGraph::Fatal("engine buffers", "an upload buffer has no mapping");
+					RenderGraph::Fatal("engine buffers", "a ring chunk has no mapping");
 				std::memset(static_cast<std::uint8_t*>(data) + a_desc.ByteWidth, 0, bytes - a_desc.ByteWidth);
-				D3D11_BUFFER_DESC wrap{};
-				wrap.ByteWidth = a_desc.ByteWidth;
-				wrap.Usage = D3D11_USAGE_DEFAULT;
-				wrap.BindFlags = a_desc.BindFlags;
-				auto guest = runtime.WrapBuffer(*buffer, wrap);
-				if (!guest)
-					RenderGraph::Fatal("engine buffers", "DXVK refused to wrap an upload buffer");
+				auto guest = Wrap(runtime, *buffer, a_desc);
 				return Backing{ std::move(buffer), std::move(guest), static_cast<std::uint8_t*>(data) };
 			} catch (const std::exception& e) {
-				RenderGraph::Fatal("engine buffers", fmt::format("an upload buffer could not be made ({})", e.what()));
+				RenderGraph::Fatal("engine buffers", fmt::format("a ring chunk could not be made ({})", e.what()));
+			}
+		}
+
+		std::optional<Backing> MakeStaticBacking(const D3D11_BUFFER_DESC& a_desc, const void* a_contents, const char* a_name)
+		{
+			auto& runtime = RenderGraphRuntime::Get();
+			auto* host = runtime.Host();
+			if (!runtime.IsActive() || !host || !a_desc.ByteWidth)
+				return std::nullopt;
+			try {
+				// Also made on loader threads, but the host's world belongs to the render thread.
+				org::Resource::ScopedECSRegistrationSuppression suppressECS;
+				const UINT bytes = WholeWords(a_desc.ByteWidth);
+				auto buffer = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, bytes);
+				buffer->SetName(a_name);
+				// Staged on this thread. The next graph submission copies it behind a full barrier before its own work, so the
+				// submission that first draws the buffer finds it filled.
+				auto& uploads = host->GetRuntime().Uploads();
+				if (!uploads)
+					RenderGraph::Fatal("engine buffers", "the graph has no upload service");
+				const auto target = org::runtime::UploadTarget::FromShared(buffer);
+				uploads->UploadData(a_contents, a_desc.ByteWidth, target, 0, __FILE__, __LINE__);
+				if (bytes > a_desc.ByteWidth) {
+					static constexpr std::uint32_t kZero = 0;
+					uploads->UploadData(&kZero, bytes - a_desc.ByteWidth, target, a_desc.ByteWidth, __FILE__, __LINE__);
+				}
+				auto guest = Wrap(runtime, *buffer, a_desc);
+				return Backing{ std::move(buffer), std::move(guest), nullptr };
+			} catch (const std::exception& e) {
+				RenderGraph::Fatal("engine buffers", fmt::format("a static buffer could not be made ({})", e.what()));
 			}
 		}
 
@@ -118,11 +173,9 @@ namespace RenderGraph::Engine::Buffers
 		winrt::com_ptr<ID3D11Buffer> MakeStatic(const D3D11_BUFFER_DESC& a_desc, const void* a_contents)
 		{
 			const char* name = a_desc.BindFlags == D3D11_BIND_VERTEX_BUFFER ? "Engine::TriShape VB" : "Engine::TriShape IB";
-			auto backing = detail::MakeBacking(a_desc, name);
+			auto backing = detail::MakeStaticBacking(a_desc, a_contents, name);
 			if (!backing)
 				return nullptr;
-			// Write before the handle exists so no lease can come first. The memory is host-visible, so the next submission makes the writes visible.
-			std::memcpy(backing->data, a_contents, a_desc.ByteWidth);
 			auto view = detail::EngineView(a_desc, *backing, name);
 			if (view) {
 				// Filled once and bound VB or IB only, so immutable from here.

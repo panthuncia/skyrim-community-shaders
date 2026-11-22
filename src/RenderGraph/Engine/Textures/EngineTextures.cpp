@@ -1,5 +1,6 @@
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -17,7 +18,10 @@
 #include "Utils/D3D.h"
 
 #include <OpenRenderGraph/GraphHost.h>
+#include <OpenRenderGraph/Runtime.h>
+#include <Render/Runtime/IUploadService.h>
 #include <Resources/ExternalTextureResource.h>
+#include <Resources/PixelBuffer.h>
 #include <Resources/TextureDescription.h>
 #include <rhi_helpers.h>
 
@@ -133,6 +137,113 @@ namespace RenderGraph::Engine::Textures
 		return Engine::GraphMode() && RenderGraphRuntime::Get().IsActive();
 	}
 
+	namespace
+	{
+		/**
+		* @brief Guest mode: a BasicRHI image, which DXVK wraps and fills with the contents in its own stream, imported into the graph
+		* in the layout DXVK rests it in. Null on success, else why not.
+		*/
+		const char* MakeGuest(const CreateInfo& a_info, rhi::Format a_format, const DxvkOrgInteropTextureWrap& a_wrap, const org::TextureDescription& a_graphDesc,
+			DxvkOrgInteropResourceInfo& a_out, std::shared_ptr<Record>& a_record, winrt::com_ptr<ID3D11Resource>& a_texture)
+		{
+			auto& runtime = RenderGraphRuntime::Get();
+			auto* host = runtime.Host();
+			rhi::ResourceDesc desc{};
+			desc.type = Is3D(a_info) ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
+			desc.heapType = rhi::HeapType::DeviceLocal;
+			std::uint32_t flags = rhi::RF_None;
+			if (a_info.bindFlags & D3D11_BIND_UNORDERED_ACCESS)
+				flags |= rhi::RF_AllowUnorderedAccess;
+			if (a_info.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE)
+				flags |= rhi::RF_TextureCubeCompatible;
+			desc.resourceFlags = static_cast<rhi::ResourceFlags>(flags);
+			desc.debugName = a_info.name.c_str();
+			desc.texture.format = a_format;
+			desc.texture.width = a_info.width;
+			desc.texture.height = a_info.height;
+			desc.texture.depthOrLayers = static_cast<std::uint16_t>(a_info.depthOrArraySize);
+			desc.texture.mipLevels = static_cast<std::uint16_t>(a_info.mipLevels);
+			desc.texture.sampleCount = 1;
+			if (host->Device().CreateCommittedResource(desc, a_record->image) != rhi::Result::Ok || !a_record->image)
+				return "BasicRHI could not create the image";
+			a_texture = runtime.WrapTexture(a_record->image.Get(), a_wrap, a_out, a_info.name.c_str(), a_info.initialData);
+			if (!a_texture) {
+				// DXVK's stream may name the image already, and no texture is left to tie it to.
+				Abandon(std::move(a_record));
+				return "DXVK could not wrap the image";
+			}
+			a_record->graph = RenderGraph::ImportDxvkTexture(host->Device(), a_out.image, a_graphDesc, a_info.name.c_str());
+			if (!a_record->graph) {
+				DropWithTexture(a_texture, std::move(a_record));
+				return "the graph cannot import the layout DXVK rests it in";
+			}
+			return nullptr;
+		}
+
+		/**
+		* @brief Native mode: an ORG texture (persistent, never aliased) under a native handle. Its contents go through the graphs' upload
+		* service, which copies them ahead of the next work that can use it, so nothing waits here. Without contents the handle's wrap
+		* zeroes it. Null on success, else why not.
+		*/
+		const char* MakeNative(const CreateInfo& a_info, rhi::Format a_format, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_out,
+			Record& a_record, winrt::com_ptr<ID3D11Resource>& a_texture)
+		{
+			std::string why;
+			if (!Native::CanWrapGraphTexture(a_info.format, a_info.bindFlags, why))
+				return "native mode cannot wrap an ORG texture of its format";
+			const bool cube = (a_info.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+			const UINT layers = Is3D(a_info) ? 1u : (std::max)(a_info.depthOrArraySize, 1u);
+			org::TextureDescription desc{};
+			desc.type = Is3D(a_info) ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
+			desc.format = a_format;
+			desc.isCubemap = cube;
+			desc.arraySize = cube ? (std::max)(layers / 6, 1u) : layers;
+			desc.isArray = layers > (cube ? 6u : 1u);
+			desc.depth = Is3D(a_info) ? a_info.depthOrArraySize : 1u;
+			desc.hasSRV = true;
+			desc.srvFormat = a_format;
+			desc.hasUAV = (a_info.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
+			desc.uavFormat = a_format;
+			desc.hasNonShaderVisibleUAV = desc.hasUAV;
+			desc.channels = 4;
+			desc.allowAlias = false;
+			// Slice-major, as a PixelBuffer reads them.
+			for (UINT slice = 0; slice < layers; ++slice)
+				for (UINT mip = 0; mip < a_info.mipLevels; ++mip)
+					desc.imageDimensions.push_back({ (std::max)(a_info.width >> mip, 1u), (std::max)(a_info.height >> mip, 1u), 0, 0 });
+			std::shared_ptr<org::PixelBuffer> graph;
+			try {
+				graph = org::PixelBuffer::CreateShared(desc);
+				graph->SetName(a_info.name);
+			} catch (const std::exception&) {
+				return "ORG could not make the texture";
+			}
+			const bool contents = a_info.initialData != nullptr;
+			a_texture = Native::WrapGraphTexture(graph, a_wrap, a_out, a_info.name.c_str(), contents ? Native::WrapFlags::DeferInitialize : Native::WrapFlags::None);
+			if (!a_texture)
+				return "native mode could not wrap the ORG texture";
+			if (contents) {
+				auto* host = RenderGraphRuntime::Get().Host();
+				const auto& uploads = host ? host->GetRuntime().Uploads() : nullptr;
+				if (!uploads)
+					return "the graphs have no upload service";
+				const UINT subresources = a_info.mipLevels * layers;
+				std::vector<rhi::helpers::SubresourceData> sources;
+				sources.reserve(subresources);
+				for (UINT i = 0; i < subresources; ++i) {
+					const auto& source = a_info.initialData[i];
+					if (!source.pSysMem)
+						return "a subresource has no contents";
+					sources.push_back({ source.pSysMem, source.SysMemPitch, source.SysMemSlicePitch });
+				}
+				uploads->UploadTextureSubresources(org::runtime::UploadTarget::FromShared(graph), a_format, a_info.width, a_info.height,
+					Is3D(a_info) ? a_info.depthOrArraySize : 1u, a_info.mipLevels, layers, sources.data(), subresources, __FILE__, __LINE__);
+			}
+			a_record.graph = std::move(graph);
+			return nullptr;
+		}
+	}
+
 	bool Create(const CreateInfo& a_info, Created& a_out)
 	{
 		a_out = {};
@@ -168,28 +279,6 @@ namespace RenderGraph::Engine::Textures
 			LogOnce(g_loggedFormat, a_info.name, "the device cannot sample (or store to) its format");
 			return false;
 		}
-		rhi::ResourceDesc desc{};
-		desc.type = Is3D(a_info) ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
-		desc.heapType = rhi::HeapType::DeviceLocal;
-		std::uint32_t flags = rhi::RF_None;
-		if (a_info.bindFlags & D3D11_BIND_UNORDERED_ACCESS)
-			flags |= rhi::RF_AllowUnorderedAccess;
-		if (a_info.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE)
-			flags |= rhi::RF_TextureCubeCompatible;
-		desc.resourceFlags = static_cast<rhi::ResourceFlags>(flags);
-		desc.debugName = a_info.name.c_str();
-		desc.texture.format = format;
-		desc.texture.width = a_info.width;
-		desc.texture.height = a_info.height;
-		desc.texture.depthOrLayers = static_cast<std::uint16_t>(a_info.depthOrArraySize);
-		desc.texture.mipLevels = static_cast<std::uint16_t>(a_info.mipLevels);
-		desc.texture.sampleCount = 1;
-		auto record = std::make_shared<Record>();
-		g_live.fetch_add(1, std::memory_order_relaxed);
-		if (host->Device().CreateCommittedResource(desc, record->image) != rhi::Result::Ok || !record->image)
-			return fail(g_loggedImage, "BasicRHI could not create the image");
-
-		// DXVK uploads the contents in its own stream.
 		DxvkOrgInteropTextureWrap wrap{};
 		wrap.dimension = static_cast<std::uint32_t>(a_info.dimension);
 		wrap.width = a_info.width;
@@ -201,18 +290,15 @@ namespace RenderGraph::Engine::Textures
 		wrap.bindFlags = a_info.bindFlags;
 		wrap.miscFlags = a_info.miscFlags;
 		DxvkOrgInteropResourceInfo info{};
-		auto texture = runtime.WrapTexture(record->image.Get(), wrap, info, a_info.name.c_str(), a_info.initialData);
-		if (!texture) {
-			// DXVK's stream may name the image already, and no texture is left to tie it to.
-			Abandon(std::move(record));
-			return fail(g_loggedWrap, "DXVK could not wrap the image");
-		}
-
+		winrt::com_ptr<ID3D11Resource> texture;
+		auto record = std::make_shared<Record>();
+		g_live.fetch_add(1, std::memory_order_relaxed);
 		const auto graphDesc = Describe(a_info, format);
-		record->graph = RenderGraph::ImportDxvkTexture(host->Device(), info.image, graphDesc, a_info.name.c_str());
-		if (!record->graph) {
-			DropWithTexture(texture, std::move(record));
-			return fail(g_loggedLayout, "the graph cannot import the layout DXVK rests it in");
+		if (Native::Active()) {
+			if (const char* why = MakeNative(a_info, format, wrap, info, *record, texture))
+				return fail(g_loggedImage, why);
+		} else if (const char* why = MakeGuest(a_info, format, wrap, graphDesc, info, record, texture)) {
+			return fail(g_loggedImage, why);
 		}
 		// An import of this texture returns this resource instead of importing it again.
 		RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(info.image.image), { record->graph, nullptr,
