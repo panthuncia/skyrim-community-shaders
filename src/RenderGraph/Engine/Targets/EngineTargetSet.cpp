@@ -100,17 +100,17 @@ namespace RenderGraph::Engine::Targets
 			FrameScoped{ RT::kRAWINDIRECT_DOWNSCALED, false, "Deferred's normal-roughness: cleared at Prepass, the main pass, read in deferred+water" },
 			FrameScoped{ RT::kRAWINDIRECT_PREVIOUS, false, "Deferred's masks (not a history): cleared at Prepass, the main pass, read in deferred+water" },
 			FrameScoped{ RT::kRAWINDIRECT_PREVIOUS_DOWNSCALED, false, "Deferred's masks2: cleared at Prepass, the main pass, read in deferred+water" },
-			FrameScoped{ RT::kSHADOW_MASK, false, "cleared before the shadow-mask passes, read by the main pass and the SAO composite" },
 			FrameScoped{ RT::kSNOW_SWAP, false, "the snow pass or the kMAIN copy, read by the SAO composite" },
 			FrameScoped{ RT::kMAIN, true, "the engine's kMAIN copy, read by the water that follows it" },
 			FrameScoped{ RT::kREFRACTION_NORMALS, true, "the upscaler's copy, read in the same client" },
 			FrameScoped{ RT::kUNDERWATER_MASK, true, "the upscaler's copy, read in the same client" },
 		};
 
-		// Depth targets, by the same rule.
-		constexpr std::array kFrameScopedDepths{
-			FrameScoped{ RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY, false, "the depth copy after the Z-prepass (or the UI stage's), read later in the frame" },
-		};
+		// Not kSHADOW_MASK: DCLF's depth epoch declares a read of it before the shadow-mask passes write it, which the world
+		// recipe's read-order check stops native mode on. It stays out until that declaration is narrowed.
+		// Depth targets, by the same rule. None qualifies now: DCLF's depth epoch reads kPOST_ZPREPASS_COPY before the frame's copy
+		// writes it (the world recipe's read-order check stops native mode on it), so it keeps last frame's depth.
+		constexpr std::array<FrameScoped, 0> kFrameScopedDepths{};
 
 		/** @brief Whether native mode places the target in the frame arena. CS_ORG_ENGINE_FRAME_TRANSIENTS=0 keeps memory of their own. */
 		const FrameScoped* FindFrameScoped(std::span<const FrameScoped> a_table, std::uint32_t a_target, bool a_copy)
