@@ -363,25 +363,26 @@ namespace
 	struct OutputInfo
 	{
 		const char* name;         // the published, exported texture
-		const char* partnerName;  // its partner, not exported
+		const char* partnerName;  // its partner, not exported: the history below full resolution
+		const char* scratchName;  // the scratch at full resolution, a transient of the registration
 		DXGI_FORMAT format;
 		std::string_view id;
 	};
 
 	constexpr std::array<OutputInfo, kOutputs> kOutputInfo{ {
 		// 8-bit history stalls the temporal AO blend.
-		{ "SSGI::AO", "SSGI::AOPartner", DXGI_FORMAT_R16_UNORM, ORGScreenSpaceGI::kAoId },
-		{ "SSGI::IlY", "SSGI::IlYPartner", DXGI_FORMAT_R16G16B16A16_FLOAT, ORGScreenSpaceGI::kYId },
-		{ "SSGI::IlCoCg", "SSGI::IlCoCgPartner", DXGI_FORMAT_R16G16_FLOAT, ORGScreenSpaceGI::kCoCgId },
-		{ "SSGI::GiSpecular", "SSGI::GiSpecularPartner", DXGI_FORMAT_R16G16B16A16_FLOAT, ORGScreenSpaceGI::kSpecularId },
+		{ "SSGI::AO", "SSGI::AOPartner", "SSGI::AOScratch", DXGI_FORMAT_R16_UNORM, ORGScreenSpaceGI::kAoId },
+		{ "SSGI::IlY", "SSGI::IlYPartner", "SSGI::IlYScratch", DXGI_FORMAT_R16G16B16A16_FLOAT, ORGScreenSpaceGI::kYId },
+		{ "SSGI::IlCoCg", "SSGI::IlCoCgPartner", "SSGI::IlCoCgScratch", DXGI_FORMAT_R16G16_FLOAT, ORGScreenSpaceGI::kCoCgId },
+		{ "SSGI::GiSpecular", "SSGI::GiSpecularPartner", "SSGI::GiSpecularScratch", DXGI_FORMAT_R16G16B16A16_FLOAT, ORGScreenSpaceGI::kSpecularId },
 	} };
 
 	/**
 	* @brief Declared at setup and kept. The textures the next frame reads are declared on the display size and the settings
 	* that make them exist; each is one texel while that is off (the existence rule), so no slot ever goes away.
-	* Each composite input has one published slot. At full resolution it is also the history and its partner the scratch the
-	* chain reprojects into; below full resolution the partner is the history and the upsample writes the output. So the
-	* resolution mode switches roles in the client, never textures.
+	* Each composite input has one published slot. At full resolution it is also the history, and the scratch the chain
+	* reprojects into is a transient of the client (GiState), so the partner is one texel. Below full resolution the partner is
+	* the history and the upsample writes the output. A mode change is a new version of each partner at its new size.
 	*/
 	struct Fixed
 	{
@@ -421,8 +422,10 @@ namespace
 		Shape shape;
 		std::shared_ptr<const Fixed> fixed;
 
-		// Aliasable, made for this registration.
+		// Aliasable, made for this registration. The output scratch only at full resolution, where the disocclusion pass writes
+		// it and GI reads it in the same run.
 		Texture workingDepth, normal, radiance, radianceTemp, accumScratch, yBlurInput, coCgBlurInput;
+		std::array<Texture, kOutputs> outputScratch;
 		// Read by the next frame's disocclusion pass.
 		const GraphResources::Texture2D *accum = nullptr, *prevGeo = nullptr, *ao = nullptr, *y = nullptr, *coCg = nullptr, *spec = nullptr;
 		// Written by the disocclusion pass and, below full resolution, by the upsample.
@@ -430,7 +433,8 @@ namespace
 
 		std::vector<const Texture*> Transients() const
 		{
-			return { &workingDepth, &normal, &radiance, &radianceTemp, &accumScratch, &yBlurInput, &coCgBlurInput };
+			return { &workingDepth, &normal, &radiance, &radianceTemp, &accumScratch, &yBlurInput, &coCgBlurInput, &outputScratch[kAo], &outputScratch[kY],
+				&outputScratch[kCoCg], &outputScratch[kSpecular] };
 		}
 
 		/** @brief The published outputs the composite reads. */
@@ -567,22 +571,29 @@ struct ORGScreenSpaceGI::Impl
 		const bool on = config.enabled;
 
 		if (on) {
-			// At full resolution the published outputs are the history; below it the upsample writes them.
+			// At full resolution the published outputs are the history and the scratch is this registration's transients. Below
+			// it the partners are the history and the upsample writes the outputs.
+			const auto& size = a_shape.size;
 			const auto& history = config.FullRes() ? fixed->outputs : fixed->partners;
-			const auto& scratch = config.FullRes() ? fixed->partners : fixed->outputs;
+			const auto scratchOf = [&](Output a_output) -> const GraphResources::Texture2D* {
+				if (!config.FullRes())
+					return fixed->outputs[a_output].Get();
+				const auto& info = kOutputInfo[a_output];
+				state->outputScratch[a_output] = MakeTransient(info.format, 1, info.scratchName, size);
+				return state->outputScratch[a_output].get();
+			};
 			state->accum = fixed->accum.Get();
 			state->prevGeo = fixed->prevGeo.Get();
 			state->ao = history[kAo].Get();
 			state->y = history[kY].Get();
 			state->coCg = history[kCoCg].Get();
-			state->aoScratch = scratch[kAo].Get();
-			state->yScratch = scratch[kY].Get();
-			state->coCgScratch = scratch[kCoCg].Get();
+			state->aoScratch = scratchOf(kAo);
+			state->yScratch = scratchOf(kY);
+			state->coCgScratch = scratchOf(kCoCg);
 			if (config.SpecularTextures()) {
 				state->spec = history[kSpecular].Get();
-				state->specScratch = scratch[kSpecular].Get();
+				state->specScratch = scratchOf(kSpecular);
 			}
-			const auto& size = a_shape.size;
 			state->workingDepth = MakeTransient(DXGI_FORMAT_R16_FLOAT, kMips, "SSGI::WorkingDepth", size);
 			state->normal = MakeTransient(DXGI_FORMAT_R8G8_UNORM, kMips, "SSGI::Normal", size);
 			state->radiance = MakeTransient(DXGI_FORMAT_R11G11B10_FLOAT, kMips, "SSGI::Radiance", size);
@@ -721,7 +732,8 @@ bool ORGScreenSpaceGI::Setup(const D3D11_TEXTURE2D_DESC& a_main)
 		// version is born zero on the lane. A new configuration or a reset (historyResets) is a new version at the same size,
 		// so the history never carries over a change, and no pass clears it.
 		const auto& feature = globals::features::screenSpaceGI;
-		const auto declare = [&](const char* a_name, DXGI_FORMAT a_format, bool a_exported, bool a_specular) {
+		// A partner exists only below full resolution, where it is the history.
+		const auto declare = [&](const char* a_name, DXGI_FORMAT a_format, bool a_exported, bool a_specular, bool a_partner) {
 			auto dependencies = DependsOn(Vars::DisplaySize(), s.Enabled, s.EnableGI, s.EnableExperimentalSpecularGI, s.ResolutionMode,
 				s.EnableTemporalDenoiser, s.EnableBlur, feature.historyResets);
 			GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History,
@@ -729,9 +741,9 @@ bool ORGScreenSpaceGI::Setup(const D3D11_TEXTURE2D_DESC& a_main)
 			options.birth = Frame::Birth::Zero();
 			return Frame::DeclareTexture2D(
 				a_name, std::move(dependencies),
-				[a_format, a_specular](const Frame::Inputs& a_in) {
+				[a_format, a_specular, a_partner](const Frame::Inputs& a_in) {
 					const auto config = Config::For(a_in);
-					const bool exists = config.enabled && (!a_specular || config.SpecularTextures());
+					const bool exists = config.enabled && (!a_specular || config.SpecularTextures()) && (!a_partner || !config.FullRes());
 					return TextureDesc(a_format, 1, exists ? SizeFor(a_in) : Vars::Extent2D{ 1, 1 });
 				},
 				options,
@@ -748,13 +760,13 @@ bool ORGScreenSpaceGI::Setup(const D3D11_TEXTURE2D_DESC& a_main)
 					return key;
 				});
 		};
-		fixed->accum = declare("SSGI::AccumFrames", DXGI_FORMAT_R8_UNORM, false, false);
-		fixed->prevGeo = declare("SSGI::PrevGeo", DXGI_FORMAT_R11G11B10_FLOAT, false, false);
+		fixed->accum = declare("SSGI::AccumFrames", DXGI_FORMAT_R8_UNORM, false, false, false);
+		fixed->prevGeo = declare("SSGI::PrevGeo", DXGI_FORMAT_R11G11B10_FLOAT, false, false, false);
 		for (std::uint32_t i = 0; i < kOutputs; ++i) {
 			const auto& info = kOutputInfo[i];
 			// The composite's inputs are exported to D3D11, so they are never aliased while D3D11 reads them.
-			fixed->outputs[i] = declare(info.name, info.format, true, i == kSpecular);
-			fixed->partners[i] = declare(info.partnerName, info.format, false, i == kSpecular);
+			fixed->outputs[i] = declare(info.name, info.format, true, i == kSpecular, false);
+			fixed->partners[i] = declare(info.partnerName, info.format, false, i == kSpecular, true);
 		}
 		bool made = fixed->pointSampler && fixed->linearSampler && fixed->latch && fixed->gate;
 		for (const auto* texture : fixed->All())
