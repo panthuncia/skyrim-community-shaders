@@ -242,6 +242,54 @@ A reset stays a new version. Clearing in place would need a clear pass that runs
 frame, in every stage that reads the history, and a gate on the reset. A new version is born zero on the lane at no frame
 cost, and the configuration changes that share the key need a new version anyway. The bug was the release, not the reset.
 
+## A1, second pass: the holders the first fix missed (2026-11-21, code only, not yet run)
+
+Run `1121-223609-nfg-native-vulkan-vram-riverwood-m2` after the first fix. The SSGI rows come from four eras: revision 1
+(uids 617-624), revision 7 (8497-8506), revision 26 (9764-9773) and the reset at 22:37:00 (15476-15483, current). So every
+replaced version was held. Two facts point at the holders:
+- revision 1 released the SSGI partners' first versions, but not the first versions of the published twins (`SSGI::AO`,
+  `IlY`, `IlCoCg`, `GiSpecular`, `Skylighting::ProbeArray`, every `PhysicalSky::*` LUT, `ImageSpace::AdaptedLuminance0/1`);
+- the versions held later match the graphs still alive that were built while those versions were current. The start stage
+  (epoch 10) and pre-depth (epoch 11) were last built before revision 7, DCLF's epochs 0-9 between revisions 7 and 26, and
+  post (epoch 18) between revision 26 and the last reset.
+
+Holders found:
+- **Graph registration** (`OpenRenderGraph/src/Render/RenderGraph/RenderGraph.cpp`, `RegisterResolver`). It resolved every
+  resolver and kept the resources in `resourcesByID` and the registry for the graph's life. For a slot that is its current
+  version. FrameAnchors registers every client's resources with every stage graph (`FrameAnchors.cpp`, the extension's
+  `PrepareForBuild`), and `PublishedResources` registers every published slot with every epoch's graph, DCLF's too. So each
+  graph pinned the version current at its build. DCLF's own `Register` (`PassContext.h`) already skipped versioned buffers
+  for this reason. Fixed in ORG: a versioned resolver's versions are not registered (late-bound and per-frame ones are).
+- **Published entries** (`src/RenderGraph/PublishedResources.cpp`). `Entry::resource` and the snapshot's `resource` kept the
+  version current at publish, for the session. Fixed: a slot's entry holds no version, and every reader follows the slot.
+  The build snapshot's index lookup now follows a buffer slot too (it read the first version).
+- **The graph's last preparation** (`RenderGraphPersistentTickets.cpp`, `PreparePersistentTicket`). The graph kept the
+  preparation's host data and capture context until its next preparation. A revision's host data names every version the
+  revision made. Fixed in ORG: dropped when the preparation returns; the caller keeps the host data with the recording.
+- **Live epochs' kept recordings** (`GraphHost.cpp`, `PrepareTicket`). A copy's kept recording went only when that copy was
+  taken again. Fixed in ORG: each preparation drops every copy's recording of another build or backing version.
+
+Holders checked and left as they are:
+- the frame slots' schedules, the segment caches, DCLF's caches, the retiring revisions (first pass);
+- ImageRegistry (weak), the anchors' imports (weak backings), the native release queue (`ReleaseAfterD3D11`, released once
+  the graph submissions before it retire);
+- ORG's `VersionedResource` keeps only its current version and a weak reshaped one. OMS `NamedVersions` names only the
+  versions its revision made. `RecordingPools` hold CPU memory only. `PipelinePins` hold pipelines;
+- GraphHost's revision tickets: each holds its candidates until it is submitted; `liveRecordings` are weak.
+
+Holder left, with its bound:
+- **A declaring graph's declaration.** A graph whose passes declare a slot keeps the version its declaration captured: the
+  pass's resolver snapshot (`ResolverSnapshot::state`, which owns the version's resource list), the pass's
+  `retainedAnonymousKeepAlive`, and the graph's transient pin (`RequestResourceHandle`). Its stored declarations need the
+  resource to lower again. A redeclaration or the next build moves it to the version current then. So it is at most one
+  extra version per declaring graph, until that graph is built again. DCLF's epochs are built rarely, which may explain the
+  oldest `cs.dclf.sequences` size. A root fix is an ORG change: a versioned declaration names the slot, and its stored
+  requirements and keep-alives hold no version. See the open questions.
+
+Not a holder but now visible: with versions actually freed, a recording that reads a version through a bindless index it
+did not declare (`PublishedResources::ShaderResourceIndex`) would read a freed descriptor after a reset. The river and
+shader-reload runs check this.
+
 ## Open questions
 
 - Decided by the agent, to confirm: erasing every named-serial entry at adoption. At that point no revision is in
@@ -253,3 +301,11 @@ cost, and the configuration changes that share the key need a new version anyway
   second dump.
 - To confirm by a run: the size the watch logs is mip 0 plus a third for mips, and 0 for formats with no texel encoding
   (depth). It is for comparison, not for the ledger.
+- Decided by the agent, to confirm: a declaring graph keeps the version its declaration captured until it is built or
+  redeclared again (bounded at one per declaring graph). Fixing it needs ORG declarations of a versioned resource that hold
+  no version, which touches lowering, stored requirements and keep-alives; too wide to change without a build. If the runs
+  show a held version from it, the next step is that ORG change.
+- Decided by the agent, to confirm: `RegisterResolver` still registers a per-frame resolver's versions (the swapchain's), so
+  that path is unchanged. Its versions are host images.
+- To confirm by a run: the "still held" warning now prints the reference count. One reference left after these fixes
+  points at a declaring graph (above).
