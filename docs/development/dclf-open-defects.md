@@ -677,6 +677,17 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
 -   **Physical Sky's `PHYSICAL_SKY` define in graph builds.** Removing the strip had broken DCLF Lighting and Effect pipelines
     (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and the ORG
     `ISSAOComposite` build in guest. Phase 3 of `physical-sky-port.md` maps them and removes the strip; not yet run in the game.
+-   **`ORG_FRAME_PLACEMENT=1`: the image goes wrong after a frame placement change.** In `native-vulkan+resize` (2026-11-22,
+    build `23b46168e`), the `grid` shot after the ViewAtmosphere grid change (`nearPixelSize`, `middleSlices`) came out dark in
+    one run (mean 45 against 94), green with coloured lens-flare sparkles in another, and correct in a third. Placement off is
+    correct every time; the `fog`, `fsr` and `taa` shots match. Every running graph had placed from the same frame placement
+    version by the shot, so it is not graphs on mixed versions. The likely mechanism is a one-frame glitch when the graphs
+    switch to the new version, poisoning eye adaptation and lens flare, which then take seconds to recover. Suspects: the
+    descriptor rewrite of a re-placed resource while frames are still in flight, or a reader of an engine target outside the
+    graphs that follows its new image only at the frame's end (`Native::FollowGraphTextures`). The switch stays off by default.
+    **Next:** register test switches (engine targets as placement candidates; forced new heaps at a version change), since
+    cs-test refuses unregistered `--set env.X`, and repeat the run several times with each. Details:
+    `plans/org-placement-relocation-log.md`, entry 35.
 
 ## Accepted differences
 
