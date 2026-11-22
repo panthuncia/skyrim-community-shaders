@@ -111,6 +111,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_ORG_D3D12_SDK_PATH" },
 			{ .name = "CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES", .type = Int },
 			{ .name = "CS_ORG_ENGINE_DRAW_TAP" },
+			{ .name = "CS_ORG_ENGINE_FRAME_TRANSIENTS", .key = "org.engine_frame_transients", .type = Bool, .defaultValue = "1", .description = "false: native mode gives the frame-scoped engine targets memory of their own instead of the frame arena" },
 			{ .name = "CS_ORG_FOG_DEBUG" },
 			{ .name = "CS_ORG_GRAPH_RESOURCES_FRAME" },
 			{ .name = "CS_ORG_LLF_PARITY", .key = "org.llf_parity", .description = "1: the parity frame's D3D11 light culling against the render graph's, cluster by cluster" },
