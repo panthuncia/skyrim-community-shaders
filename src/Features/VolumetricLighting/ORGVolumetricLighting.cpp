@@ -295,12 +295,24 @@ namespace
 		friend bool operator==(const VLInputs&, const VLInputs&) = default;
 	};
 
+	/** @brief The client's key: the inputs the VL render found and the density volume's extent. */
+	struct VLKey
+	{
+		VLInputs inputs;
+		RenderGraph::Frame::DeclaredTransient3D::Extent extent{};
+		friend bool operator==(const VLKey&, const VLKey&) = default;
+	};
+
 	/** @brief One registration of the client. Immutable once made, but for the passes its builds made. */
 	struct VLRegistration
 	{
 		FrameAnchors::Texture targets[3];
 		FrameAnchors::Texture motionVectors, depth, previousDepth, shadowmap, shadowmapVL, noiseGradient;
 		std::string shadowHeights, cloudShadows;
+		// The density volume, a transient of this registration: the generate writes it and the raymarch and the apply read it
+		// in the same run, so its builds alias it.
+		std::shared_ptr<GraphResources::Texture3D> volume;
+		VolumeSize size;
 		// Written at its builds. A published input not declarable yet leaves the generate out.
 		mutable std::array<std::atomic<bool>, kGateEntries> passMade{};
 	};
@@ -332,7 +344,8 @@ struct ORGVolumetricLighting::Impl
 {
 	std::shared_ptr<VLFixed> fixed;
 	// The density volume, declared on the size settings and the Interior variable, or with the feature off on the engine's size.
-	RenderGraph::Frame::DeclaredTexture3D volume;
+	// A declared transient: each registration makes its own at the key's extent.
+	RenderGraph::Frame::DeclaredTransient3D volume;
 	// The client, declared on the inputs the last VL render found (B2's interim). The engine targets it reads are stable slots.
 	RenderGraph::Frame::DeclaredClient client;
 	RenderGraph::Frame::Observed<VLInputs> observed{ "VolumetricLighting.Inputs" };
@@ -415,7 +428,7 @@ struct ORGVolumetricLighting::Impl
 	{
 		using namespace RenderGraph::Frame;
 		const auto& s = globals::features::volumetricLighting.settings;
-		volume = DeclareTexture3D(
+		volume = DeclareTransient3D(
 			"VolumetricLighting::Volume",
 			DependsOn(Vars::Interior(), s.ExteriorEnabled, s.ExteriorQuality, s.ExteriorCustomSize, s.InteriorEnabled, s.InteriorQuality,
 				s.InteriorCustomSize),
@@ -429,40 +442,44 @@ struct ORGVolumetricLighting::Impl
 				                             feature.VolumeSizeFor(a_in.Get(f.ExteriorQuality), a_in.Get(f.ExteriorCustomSize));
 				return VolumeDesc(SizeOf(size));
 			},
-			// Written by the generate and read by the apply in the same run. Not transient, so a new size is a new version.
-			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+			// Written by the generate and read by the apply in the same run, so a transient. A new size registers the client again.
+			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient });
 	}
 
 	/**
 	* @brief With the feature off: the engine's own size, the VolumetricLightingSize variable. The engine sets it from the INI's
 	* quality when it makes its ImageSpace, after this setup, and again at a quality change (the console's command). A new size
-	* is a new version at a revision. One texel until the engine has a size.
+	* registers the client again at a revision. One texel until the engine has a size.
 	*/
 	void DeclareVanillaVolume()
 	{
 		using namespace RenderGraph::Frame;
-		volume = DeclareTexture3D(
+		volume = DeclareTransient3D(
 			"VolumetricLighting::Volume", DependsOn(Vars::VolumetricLightingSize()),
 			[](const Inputs& a_in) {
 				const auto engine = a_in.Get(Vars::VolumetricLightingSize());
 				const VolumeSize size{ engine.width, engine.height, engine.depth };
 				return VolumeDesc(size ? size : VolumeSize{ 1, 1, 1 });
 			},
-			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
+			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient });
 	}
 
 	void DeclareClient()
 	{
-		client = RenderGraph::Frame::DeclareClient<VLInputs>(
-			kClientId, RenderGraph::Frame::DependsOn(observed.Var()),
-			[this](const RenderGraph::Frame::Inputs& a_in) -> std::optional<VLInputs> {
+		// The volume's extent is part of the key, so a new size registers the client again.
+		auto dependencies = RenderGraph::Frame::DependsOn(observed.Var());
+		for (const auto& dependency : volume.Depends())
+			dependencies.push_back(dependency);
+		client = RenderGraph::Frame::DeclareClient<VLKey>(
+			kClientId, std::move(dependencies),
+			[this](const RenderGraph::Frame::Inputs& a_in) -> std::optional<VLKey> {
 				// Until a VL render found the sky's noise gradient, there is no client. The volume is declared before the client.
 				const auto* seen = observed.Get(a_in);
 				if (!seen || !seen->noiseGradient)
 					return std::nullopt;
-				return *seen;
+				return VLKey{ *seen, volume.ExtentAt(a_in) };
 			},
-			[this](const VLInputs& a_inputs, FrameAnchors::ClientDesc& a_client) { return MakeClient(a_inputs, a_client); });
+			[this](const VLKey& a_key, FrameAnchors::ClientDesc& a_client) { return MakeClient(a_key, a_client); });
 	}
 
 	/** @brief In each VL render. A change is an event: the next revision registers a new client. */
@@ -477,10 +494,13 @@ struct ORGVolumetricLighting::Impl
 		observed.Observe(seen);
 	}
 
-	/** @brief The registration for a new key, at the start of the revision that adopts it. A new volume size is a version, never this. */
-	bool MakeClient(const VLInputs& a_inputs, FrameAnchors::ClientDesc& a_client)
+	/** @brief The registration for a new key, at the start of the revision that adopts it. A new volume size is a new key. */
+	bool MakeClient(const VLKey& a_key, FrameAnchors::ClientDesc& a_client)
 	{
+		const auto& inputs = a_key.inputs;
 		auto made = std::make_shared<VLRegistration>();
+		made->volume = volume.Make(a_key.extent);
+		made->size = { a_key.extent[0], a_key.extent[1], a_key.extent[2] };
 		constexpr std::array kTargets{ kVolumetricTarget, kPreviousTarget, kSwapTarget };
 		for (std::size_t i = 0; i < kTargets.size(); ++i)
 			made->targets[i] = FrameAnchors::EngineTexture(FrameAnchors::Colour(kTargets[i]));
@@ -495,18 +515,18 @@ struct ORGVolumetricLighting::Impl
 			return false;
 		}
 		winrt::com_ptr<ID3D11Resource> resource;
-		a_inputs.noiseGradient->GetResource(resource.put());
+		inputs.noiseGradient->GetResource(resource.put());
 		const auto texture = resource.try_as<ID3D11Texture2D>();
-		made->noiseGradient = texture ? FrameAnchors::ImportTexture("cs.d3d11.volumetric-lighting.noise-gradient", { .texture = texture.get(), .srv = a_inputs.noiseGradient, .immutable = true }) : nullptr;
+		made->noiseGradient = texture ? FrameAnchors::ImportTexture("cs.d3d11.volumetric-lighting.noise-gradient", { .texture = texture.get(), .srv = inputs.noiseGradient, .immutable = true }) : nullptr;
 		if (!made->noiseGradient) {
 			logger::error("{}: the sky's noise gradient texture could not be imported", kLogPrefix);
 			return false;
 		}
-		made->shadowHeights = a_inputs.shadowHeights;
-		made->cloudShadows = a_inputs.cloudShadows;
+		made->shadowHeights = inputs.shadowHeights;
+		made->cloudShadows = inputs.cloudShadows;
 
-		// Passes bind the volume's slot, so each frame binds the version its revision adopted.
-		auto* twin = volume.Get();
+		// Passes bind this registration's volume. The registration holds it for as long as its passes live.
+		auto* twin = made->volume.get();
 		const std::shared_ptr<const VLRegistration> shared = made;
 		a_client.id = kClientId;
 		std::int32_t order = 0;
@@ -618,9 +638,9 @@ struct ORGVolumetricLighting::Impl
 					.gate = kDepthCopyEntry });
 			});
 		});
-		a_client.registerResources = [fixedState = fixed, twin](org::RenderGraph& a_graph) {
+		a_client.registerResources = [fixedState = fixed, shared](org::RenderGraph& a_graph) {
 			fixedState->noiseVolume->Register(a_graph);
-			twin->Register(a_graph);
+			RenderGraph::Frame::RegisterTransients(a_graph, { shared->volume.get() });
 		};
 		// The commit and the gates are this registration's, so a run of an older build commits for the passes it holds.
 		a_client.commit = [this, shared](const FrameAnchors::Point&) { Commit(*shared); };
@@ -628,8 +648,9 @@ struct ORGVolumetricLighting::Impl
 		a_client.executed = [this](const FrameAnchors::Point&) { Executed(); };
 		a_client.sharedConstants = true;
 		a_client.gates = { fixed->gate };
-		logger::info("{}: a client for the next revision (Terrain Shadows {}, Cloud Shadows {})", kLogPrefix,
-			made->shadowHeights.empty() ? "off" : "by its published id", made->cloudShadows.empty() ? "off" : "by its published id");
+		logger::info("{}: a client for the next revision (Terrain Shadows {}, Cloud Shadows {}, volume {}x{}x{})", kLogPrefix,
+			made->shadowHeights.empty() ? "off" : "by its published id", made->cloudShadows.empty() ? "off" : "by its published id", made->size.width,
+			made->size.height, made->size.depth);
 		return true;
 	}
 
@@ -672,7 +693,7 @@ struct ORGVolumetricLighting::Impl
 		return a_output;
 	}
 
-	/** @brief The frame's work runs on the graph now, with the client and the volume version of the adopted revision. */
+	/** @brief The frame's work runs on the graph now, with the client and the volume size of the adopted revision. */
 	void Blur(std::uint32_t a_source, std::uint32_t a_destination, std::uint32_t a_swap)
 	{
 		const auto clear = [&] { pending = {}; };
@@ -705,7 +726,8 @@ struct ORGVolumetricLighting::Impl
 			skip("the client is not registered yet (the first revision after a VL render found the sky's noise gradient registers it)");
 			return clear();
 		}
-		const auto extent = RenderGraph::Frame::Revision::Adopted().Extent(volume);
+		// The adopted revision's values give the size its builds' registration made the volume at.
+		const auto extent = volume.AdoptedExtent();
 		const VolumeSize size{ extent[0], extent[1], extent[2] };
 		// With the feature off, the engine's new size reaches the next Begin's variable, and its version switches in with a later
 		// revision. The frames before that have no volumetric lighting. Not a late skip: no warning.
@@ -754,6 +776,9 @@ struct ORGVolumetricLighting::Impl
 			if (!a_registration.passMade[entry])
 				return;
 		if (run->noise && !a_registration.passMade[kNoiseEntry])
+			return;
+		// An older registration's volume has another size. Its build draws nothing for this frame.
+		if (run->size != a_registration.size)
 			return;
 		run->opened = true;
 		const auto& gate = *fixed->gate;
