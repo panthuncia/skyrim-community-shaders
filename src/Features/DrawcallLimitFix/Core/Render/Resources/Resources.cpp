@@ -15,6 +15,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
 #include <cassert>
@@ -68,6 +69,19 @@ namespace DCLF::Draws
 			return created;
 		}
 
+		/**
+		 * @brief DeviceBuffer for constants written every frame, read through raw constant buffer views and a cached address
+		 * (AddressOf). It lives in ORG's per-frame blocks, apart from long-lived buffers, since it can never move.
+		 */
+		std::shared_ptr<org::Buffer> FrameDeviceBuffer(std::uint64_t a_bytes, const char* a_name)
+		{
+			auto created = org::Buffer::CreateSharedUnmaterialized(rhi::HeapType::DeviceLocal, a_bytes, false);
+			created->SetName(a_name);
+			created->SetMemoryGroup(org::MemoryGroup::PerFrame);
+			created->Materialize();
+			return created;
+		}
+
 		/** @brief A structured buffer the shaders read through its SRV. Readers take its index when they bind it, never from here. */
 		std::shared_ptr<org::Buffer> StructuredBuffer(std::uint32_t a_elements, std::uint32_t a_stride, const char* a_name, bool a_unorderedAccess = false)
 		{
@@ -107,7 +121,7 @@ namespace DCLF::Draws
 
 		std::uint64_t AddressOf(rhi::Device a_device, org::Buffer& a_buffer)
 		{
-			// Shaders read the address from GPU data, so the buffer never moves once it went out.
+			// Shaders read the address from GPU data, and nothing follows it, so the buffer never moves once it went out.
 			::RenderGraph::Relocation::Pin(a_buffer);
 			// BasicRHI places whole buffers at 256 or more. The descriptor-buffer model's pointer loads assume at least 16.
 			const auto address = a_device.GetBufferDeviceAddress({ a_buffer.GetAPIResource().GetHandle(), 0 });
@@ -151,7 +165,8 @@ namespace DCLF::Draws
 		name = a_name;
 		buffer = MakeVersioned(DeviceBuffer(std::uint64_t(std::max(a_rows, 1u)) * stride, a_name),
 			{ .extent = { 0, a_stride, 0 }, .policy = a_policy, .contents = a_contents, .capture = std::move(a_capture) });
-		return AddressOf(host->Device(), *buffer->Get()) != 0;
+		// Readers take the address from the sealed set, which follows idle moves.
+		return PooledBackings::DeviceAddressOf(*buffer->Get()) != 0;
 	}
 
 	namespace
@@ -615,7 +630,7 @@ namespace DCLF
 			return NotReady(7, "the index pool's dispatch signature could not be created");
 		// The view covers every count word. A short view would read zeros that look clean.
 		a_state.countD3D11 = WrapWords(*a_state.count, kCountWords * sizeof(std::uint32_t));
-		a_state.frameConstants = DeviceBuffer(kFrameConstantBytes, "cs.dclf.frame-constants");
+		a_state.frameConstants = FrameDeviceBuffer(kFrameConstantBytes, "cs.dclf.frame-constants");
 		a_state.frameConstantsAddress = AddressOf(a_device, *a_state.frameConstants);
 		a_state.frameConstantsRef = RenderGraph::DeclaredRefOf(a_device, *a_state.frameConstants);
 
@@ -872,7 +887,7 @@ namespace DCLF
 		auto assignCasterRows = kShadowCasterRows.Get();
 		auto buildDraws = kShadowViews.Get();
 		auto state = std::make_shared<ShadowResources>();
-		state->constants = DeviceBuffer(kShadowConstantBytes, "cs.dclf.shadow.constants");
+		state->constants = FrameDeviceBuffer(kShadowConstantBytes, "cs.dclf.shadow.constants");
 		// The shadow commit latches into the constants alone, so this is known before any graph declares the pass.
 		state->latchedTargets.store(std::make_shared<const std::vector<const void*>>(1, state->constants.get()), std::memory_order_release);
 		auto scene = shadowHost.ShadowSceneBuffers(device);
@@ -1012,13 +1027,13 @@ namespace DCLF
 				}
 			}
 		}
-		state->blocks = DeviceBuffer(std::uint64_t(traits.faces) * kViewBlockBytes, name(traits.blocks).c_str());
+		state->blocks = FrameDeviceBuffer(std::uint64_t(traits.faces) * kViewBlockBytes, name(traits.blocks).c_str());
 		state->blocksAddress = AddressOf(device, *state->blocks);
 		if (!state->blocksAddress)
 			return fail("blocks have no device address");
 		// A view with its own frame constants, laid out like the main ones and written by its commit.
 		if (OwnsFrameConstants(traits)) {
-			state->frameConstants = DeviceBuffer(kFrameConstantBytes, name("frame-constants").c_str());
+			state->frameConstants = FrameDeviceBuffer(kFrameConstantBytes, name("frame-constants").c_str());
 			state->frameConstantsAddress = AddressOf(device, *state->frameConstants);
 			state->frameConstantsRef = RenderGraph::DeclaredRefOf(device, *state->frameConstants);
 			if (!state->frameConstantsAddress || !state->frameConstantsRef)

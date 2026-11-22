@@ -103,7 +103,7 @@ namespace DCLF::Features::LocalLights
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
 		{
 			auto scene = std::make_shared<Scene>();
-			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), ::RenderGraph::Frame::Retirement::Clock(),
+			scene->pool = org::services::BackingPool::Create(PooledBackings::PerFrameHooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = "cs.dclf.light-contexts", .maxPerClass = 0, .spareFree = PooledBackings::PerFrameSpares() });
 			auto atlasStandIn = a_setup.StructuredBuffer(1, 4, kAtlasStandInName);
 			auto gatesStandIn = a_setup.StructuredBuffer(1, 4, kGatesStandInName);

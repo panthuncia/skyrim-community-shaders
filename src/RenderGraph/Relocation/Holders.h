@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -27,11 +28,34 @@ namespace RenderGraph::Relocation
 	void Pin(const org::Resource& a_resource);
 
 	/**
+	 * @brief Marks a_resource Written: ORG moves it only while the GPU is idle (a defragmentation at a loading screen), and CS
+	 * follows the move through the relocation journal (FollowBufferMoves). For a buffer whose device address or buffer view ref
+	 * went out to code that follows: a view ref keeps its slot through an idle move, and an address holder registers with
+	 * AddBufferMovesListener. A pinned resource stays pinned, also when ORG pinned it by its memory (mapped or shared heaps).
+	 * Skipped for a resource with no backing yet or none of its own. Seal leaves it Written. Any thread.
+	 */
+	void FollowAtIdle(const org::Resource& a_resource);
+
+	/**
 	 * @brief Marks a_resource ReadOnly: nothing writes it any more, so ORG may move it at any time (and the
 	 * ORG_RELOCATION_STRESS switch picks it). Call it once the last write was submitted, from the thread that owns the
-	 * resource. Skipped for a pinned resource and for one with no backing of its own (imports, exports).
+	 * resource. Skipped for a pinned resource, for one marked FollowAtIdle (a move while the GPU runs would leave its
+	 * followers behind) and for one with no backing of its own (imports, exports).
 	 */
 	void Seal(const std::shared_ptr<org::Resource>& a_resource);
+
+	/**
+	 * @brief Adds a_listener, called by FollowBufferMoves after a commit that moved buffers with device addresses (or when
+	 * journal entries were lost, so buffers may have moved). A listener refreshes the addresses it caches and keeps work made
+	 * with the old ones from the GPU. It runs on FollowBufferMoves' thread and must not throw. Any thread.
+	 */
+	void AddBufferMovesListener(std::function<void()> a_listener);
+
+	/**
+	 * @brief Reads the relocation journal and tells the listeners when buffers moved. Call it once a frame on the thread that
+	 * seals the frame, right after the host's relocation commit (GraphHost::SealSubmitted). Not for concurrent use.
+	 */
+	void FollowBufferMoves();
 
 	/** @brief The journal's head: the sequence its next entry gets. Keep it beside a cached index to ask MovedSince later. Any thread. */
 	std::uint64_t JournalHead();

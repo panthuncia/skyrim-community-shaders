@@ -320,7 +320,8 @@ namespace DCLF
 
 		static std::shared_ptr<org::services::BackingPool> MakePool(std::string_view a_name)
 		{
-			return org::services::BackingPool::Create(PooledBackings::Hooks(), ::RenderGraph::Frame::Retirement::Clock(),
+			// Each frame writes its own copy, so the copies live in ORG's per-frame blocks.
+			return org::services::BackingPool::Create(PooledBackings::PerFrameHooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = fmt::format("cs.dclf.frame-values.{}", a_name), .maxPerClass = PooledBackings::SceneCopies(), .spareFree = PooledBackings::SceneCopies(),
 					.reuseBound = true });
 		}

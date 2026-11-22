@@ -31,6 +31,7 @@
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/Relocation/DxvkSource.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/UndeclaredAccess.h"
 #include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
@@ -2369,8 +2370,10 @@ namespace
 			return;
 		}
 		wasLoading = true;
-		// ORG's defaults: Full passes of up to 512 MB, at most 4 passes and 40 ms a frame, buffers stay where they are.
-		const org::relocation::DefragmentBudget budget{};
+		// ORG's defaults: Full passes of up to 512 MB, at most 4 passes and 40 ms a frame. Buffers move too: a buffer view ref
+		// keeps its slot, and the holders of device addresses follow the journal (Relocation::FollowBufferMoves).
+		org::relocation::DefragmentBudget budget{};
+		budget.moveBuffers = true;
 		(void)a_host.DefragmentAtIdle(budget);
 	}
 }
@@ -2381,8 +2384,11 @@ void RenderGraphRuntime::SealPresented()
 	FrameAnchors::BeforeGpuWork("the frame's end");
 	// What a site latches from here on goes to the next present.
 	RenderGraph::FrameClock::clock.SealPresent();
-	if (impl && impl->host)
+	if (impl && impl->host) {
 		impl->host->SealSubmitted();
+		// The holders of moved buffers' device addresses follow the commit before anything is made for the next frame.
+		RenderGraph::Relocation::FollowBufferMoves();
+	}
 	// Native mode, after the seal's relocation commit: compaction at loading screens, then the native records follow what moved.
 	if (impl && impl->host && impl->native && FrameAnchors::IsRenderOwner()) {
 		DefragmentAtLoadingScreens(*impl->host);
@@ -3097,6 +3103,8 @@ winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource& a_buf
 	winrt::com_ptr<ID3D11Buffer> result;
 	if (!IsActive())
 		return result;
+	// The wrap names the native buffer, so the buffer never moves.
+	RenderGraph::Relocation::Pin(a_buffer);
 	// Native mode: a native buffer handle over the graph's buffer.
 	if (impl->native)
 		return RenderGraph::Engine::Native::WrapBuffer(a_buffer.GetAPIResource(), a_desc, a_buffer.GetName().c_str());

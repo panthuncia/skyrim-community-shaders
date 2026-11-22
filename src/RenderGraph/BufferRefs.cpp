@@ -39,8 +39,8 @@ namespace RenderGraph
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return {};
-		// A ref is the native buffer's own view, so the buffer never moves once a ref went out.
-		Relocation::Pin(a_buffer);
+		// A ref keeps its slot through a move while the GPU is idle (BasicRHI retargets it), and only then.
+		Relocation::FollowAtIdle(a_buffer);
 		return MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where);
 	}
 
@@ -49,13 +49,13 @@ namespace RenderGraph
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return {};
-		Relocation::Pin(a_buffer);
+		Relocation::FollowAtIdle(a_buffer);
 		return MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where);
 	}
 
 	BufferRef DeclaredRefOf(rhi::Device a_device, const org::Buffer& a_buffer, std::uint64_t a_offset, std::source_location a_where)
 	{
-		Relocation::Pin(a_buffer);
+		Relocation::FollowAtIdle(a_buffer);
 		return MakeBufferRef(a_device, const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where);
 	}
 
@@ -181,7 +181,7 @@ namespace RenderGraph
 		// The same backing again keeps its version.
 		if (buffer->Get() != a_backing)
 			buffer->PublishLate(a_backing, std::move(a_owner));
-		Relocation::Pin(*a_backing);
+		Relocation::FollowAtIdle(*a_backing);
 		const BufferRef ref = MakeBufferRef(host->Device(), a_backing->GetAPIResource().GetHandle(), 0, std::source_location::current());
 		latch->Set(a_used ? a_used : ref);
 		return ref;
