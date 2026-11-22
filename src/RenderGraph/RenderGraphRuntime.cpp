@@ -51,6 +51,7 @@
 #include <ORGModuleServices/ShaderCompiler.h>
 #endif
 #include <Render/RenderGraph/RhiExecution.h>
+#include <Resources/Defragmenter.h>
 #include <Resources/Relocation.h>
 #include <Resources/Resource.h>
 
@@ -2349,6 +2350,31 @@ void RenderGraphRuntime::NoteFrameBegin(std::uint64_t a_frame)
 	state.aheadFrames = 0;
 }
 
+namespace
+{
+	/**
+	* @brief CS_ORG_DEFRAG=1 in native mode: at loading screens, ORG compacts its device-local memory (GraphHost::DefragmentAtIdle).
+	* Each loading frame runs a few passes after the frame's seal. The campaign ends with the loading screen. Render owner.
+	*/
+	void DefragmentAtLoadingScreens(org::GraphHost& a_host)
+	{
+		static const bool enabled = Switches::On("CS_ORG_DEFRAG");
+		if (!enabled)
+			return;
+		static bool wasLoading = false;
+		const bool loading = RenderGraph::Frame::Driver::Current().kind == RenderGraph::Frame::Kind::Loading;
+		if (!loading) {
+			if (std::exchange(wasLoading, false))
+				a_host.EndDefragmentation();
+			return;
+		}
+		wasLoading = true;
+		// ORG's defaults: Full passes of up to 512 MB, at most 4 passes and 40 ms a frame, buffers stay where they are.
+		const org::relocation::DefragmentBudget budget{};
+		(void)a_host.DefragmentAtIdle(budget);
+	}
+}
+
 void RenderGraphRuntime::SealPresented()
 {
 	// Before the seal.
@@ -2357,6 +2383,11 @@ void RenderGraphRuntime::SealPresented()
 	RenderGraph::FrameClock::clock.SealPresent();
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
+	// Native mode, after the seal's relocation commit: compaction at loading screens, then the native records follow what moved.
+	if (impl && impl->host && impl->native && FrameAnchors::IsRenderOwner()) {
+		DefragmentAtLoadingScreens(*impl->host);
+		RenderGraph::Engine::Native::FollowRelocations();
+	}
 	// Every stage committed and the present sent the frame's work on, so this release is outside every stage window.
 	if (impl) {
 		auto released = std::make_shared<std::vector<std::shared_ptr<const void>>>();

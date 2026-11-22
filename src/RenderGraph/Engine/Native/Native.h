@@ -131,6 +131,12 @@ namespace RenderGraph::Engine::Native
 	/** @brief Whether native mode is active and sorts its textures as above. Any thread. */
 	bool OwnedResources();
 
+	/**
+	* @brief Reads ORG's relocation journal and points each graph-owned texture's record at its new image (NativeResource::Rebind,
+	* ImageRegistry::Rekey). Render thread, at the frame's end after the host's commit (RenderGraphRuntime::SealPresented).
+	*/
+	void FollowRelocations();
+
 	/** @brief An exempt texture as a read-only graph resource, made on first call. Null when the texture is not exempt. Any thread. */
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown* a_texture, DXGI_FORMAT a_srvFormat);
 

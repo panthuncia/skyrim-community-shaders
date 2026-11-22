@@ -48,6 +48,7 @@
 
 #include <Resources/ExternalTextureResource.h>
 #include <Resources/PixelBuffer.h>
+#include <Resources/Relocation.h>
 #include <Resources/TextureDescription.h>
 #include <Resources/VersionedTexture.h>
 
@@ -441,7 +442,21 @@ namespace RenderGraph::Engine::Native
 			~NativeResource();
 			NativeResource(const NativeResource&) = delete;
 			NativeResource& operator=(const NativeResource&) = delete;
+
+			/**
+			 * @brief A graph-owned texture's backing moved (an ORG relocation). Under graphLock, points the record at the new image:
+			 * a_next is the context's import of it and a_image its description. Returns the old import, which the caller releases once
+			 * no work can use it.
+			 */
+			rhi::ResourcePtr Rebind(rhi::ResourcePtr a_next, const DxvkOrgInteropImageInfo& a_image);
 		};
+
+		rhi::ResourcePtr NativeResource::Rebind(rhi::ResourcePtr a_next, const DxvkOrgInteropImageInfo& a_image)
+		{
+			std::lock_guard guard(graphLock);
+			image = a_image;
+			return std::exchange(resource, std::move(a_next));
+		}
 
 		uint64_t NextSerial()
 		{
@@ -490,6 +505,17 @@ namespace RenderGraph::Engine::Native
 				return;
 			::RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(a_record.image.image),
 				{ a_record.graphOwned, nullptr, nullptr, "native", fmt::format("cs.native.texture.{}", a_record.serial), ::RenderGraph::ImageRegistry::Kind::Owned });
+		}
+
+		/** @brief The native image of a BasicRHI texture as the record keeps it: the VkImage, or on D3D12 the ID3D12Resource. Null on failure. */
+		VkImage NativeImageOf(const rhi::Resource& a_resource)
+		{
+			if (OnD3D12())
+				return reinterpret_cast<VkImage>(D3D12ResourceOf(a_resource));
+			rhi::VulkanResourceInfo info{};
+			if (!rhi::vulkan::get_resource_info(a_resource, info) || !info.resource)
+				return VK_NULL_HANDLE;
+			return rhi::vulkan::from_native_void<VkImage>(info.resource);
 		}
 
 		/** @brief Starts a debug label so crash markers name the work. A no-op where unsupported. */
@@ -4129,6 +4155,84 @@ namespace RenderGraph::Engine::Native
 	bool OwnedResources()
 	{
 		return g_device != nullptr;
+	}
+
+	namespace
+	{
+		/**
+		 * @brief Points a tracked record at its texture's current image, when the texture's backing moved. The ORG texture keeps
+		 * its identity and its bindless indices. Only the native image and the context's import of it change. False when nothing
+		 * changed.
+		 */
+		bool FollowMovedImage(NativeResource& a_record)
+		{
+			const auto texture = a_record.graphOwned;
+			if (!texture)
+				return false;
+			const VkImage current = NativeImageOf(texture->GetAPIResource());
+			const VkImage previous = a_record.image.image;
+			if (!current || current == previous)
+				return false;
+			DxvkOrgInteropImageInfo image = a_record.image;
+			image.image = current;
+			auto import = ::RenderGraph::ImportDxvkImage(g_device->Rhi(), image, a_record.name.c_str());
+			if (!import) {
+				logger::error("[ORG native] {}: its texture moved, and the new image could not be imported for the context", a_record.name);
+				return false;
+			}
+			auto old = a_record.Rebind(std::move(import), image);
+			::RenderGraph::ImageRegistry::Rekey(reinterpret_cast<std::uint64_t>(previous), reinterpret_cast<std::uint64_t>(current));
+			// Work recorded before the switch may still name the old import.
+			if (old)
+				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(old)));
+			return true;
+		}
+	}
+
+	void FollowRelocations()
+	{
+		if (!g_device)
+			return;
+		const auto& journal = org::relocation::Service::Get().Journal();
+		// From 0, so the first read covers every move before it.
+		static std::uint64_t cursor = 0;
+		if (journal.Head() == cursor)
+			return;
+		std::vector<org::relocation::JournalEntry> entries;
+		const bool complete = journal.Read(cursor, entries);
+		std::unordered_set<std::uint64_t> moved;
+		for (const auto& entry : entries)
+			moved.insert(entry.resourceID);
+		// The tracked records whose texture moved. Without a complete journal, every tracked record is checked.
+		std::vector<std::shared_ptr<NativeResource>> records;
+		{
+			auto& registry = GetRegistry();
+			std::lock_guard guard(registry.lock);
+			for (const void* live : registry.live) {
+				auto* record = static_cast<NativeResource*>(const_cast<void*>(live));
+				// ownership is set to Tracked only after graphOwned holds its final value (FinishGraphOwned).
+				if (record->ownership != NativeResource::Ownership::Tracked)
+					continue;
+				const auto* texture = record->graphOwned.get();
+				if (!texture || (complete && !moved.contains(texture->GetGlobalResourceID())))
+					continue;
+				// A record whose last reference is going is skipped. Its destructor waits for this lock.
+				if (auto owned = record->weak_from_this().lock())
+					records.push_back(std::move(owned));
+			}
+		}
+		std::size_t followed = 0;
+		for (const auto& record : records)
+			if (FollowMovedImage(*record))
+				++followed;
+		if (followed) {
+			static std::uint32_t logged = 0;
+			if (logged < 32 || !complete) {
+				++logged;
+				logger::info("[ORG native] relocations: {} graph-owned textures moved to new images ({} journal entries{})", followed, entries.size(),
+					complete ? "" : ", entries were lost so every tracked texture was checked");
+			}
+		}
 	}
 
 	std::shared_ptr<org::Runtime> TakeOrgRuntime()
