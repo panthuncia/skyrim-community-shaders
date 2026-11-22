@@ -227,7 +227,9 @@ namespace ORGPostChain
 			{
 				const std::vector<std::pair<std::string, std::string>> defines{ { "TONEMAP_FUNC", std::string(a_grading.TonemapFunctionName()) } };
 				return { .bake = a_programs.Compute(kShader, ShaderBindings::Words<ColorBlock>(), defines, L"CSLUTGen"),
-					.grade = a_programs.Raster(kShader, ShaderBindings::Words<ColorBlock>(), { kFormat }, defines, L"PSColorGrading") };
+					// The grading vertex stage computes the white balance once per draw (colorgrading.hlsl, VSColorGrading).
+					.grade = a_programs.RasterTargets(kShader, ShaderBindings::Words<ColorBlock>(), { RasterProgram::Target{ .format = rhi::helpers::ToRHI(kFormat) } }, defines,
+						L"PSColorGrading", kShader, L"VSColorGrading") };
 			}
 
 			RenderGraph::Frame::DeclaredTexture3D lut;
