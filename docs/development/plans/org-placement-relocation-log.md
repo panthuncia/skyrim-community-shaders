@@ -147,3 +147,80 @@ Shots compared by eye with the morning's baselines: the differences seen were we
 vary between two runs of the same build.
 
 Nothing is pushed. Branches of every lane are kept locally.
+
+## Round 2 (2026-11-22 afternoon): engine targets, buffer moves, per-frame pools
+
+Plan: `org-placement-defrag-2.md`. Four code-only lanes (buffer-moves: BasicRHI + ORG; placement-org: ORG; dclf-follow: CS +
+OMS; engine-targets: CS), merged into `org_integration` / `vram/frame-arena`. The main session built, tested and fixed the
+runtime failures listed below. Switches stay off by default.
+
+### What landed
+
+24. **Native engine targets are ORG textures** (`GraphResources::Options::nativeOwned`, `Native::WrapGraphTexture`). Each
+    version is an ORG `PixelBuffer`; its D3D11 handle is a Tracked native record that follows a new image every frame
+    (`FollowGraphTextures`, before the journal). The frame-scoped targets (G-buffer, kSHADOW_MASK, kSNOW_SWAP, the copies,
+    depth kPOST_ZPREPASS_COPY) are Transient in native mode, so frame placement places them. Guest is unchanged.
+25. **Buffers move at idle points.** BasicRHI `RetargetBufferViewRef` keeps a buffer's view ref slot across a move (abi 18).
+    ORG's defragmenter moves buffers in idle campaigns, rewrites descriptors in place, retargets the ref pair and journals old
+    and new device addresses. CS: refs and growable tables are `FollowAtIdle` (Written) instead of Pinned; DCLF's scene set
+    re-reads addresses after a move and frames wait for a set sealed after it. Fixed constant buffers stay pinned in the
+    PerFrame group (dclf-follow report). Engine geometry is GPUUpload, pinned by its memory.
+26. **PerFrame memory group** (`org::MemoryGroup::PerFrame`, 32 MB blocks, own `rhi::ma` pool per heap type): DCLF's per-frame
+    pools (frame values, payload parts, CPU sequences, light contexts, portal programs, fixed constants) live apart from
+    long-lived allocations. The shared device-local blocks' slack fell from 26-29 % (round 1) to 11-13 %.
+27. **Frame placement correctness**: multi-epoch entry continues from the ledger state after the first epoch (entry 23 fixed);
+    `Resource::SetContentAcrossRuns` gives Scaleform's scratch one lifetime over every UI run (now Transient versions);
+    versions no longer keep replaced heaps alive.
+
+### Runtime fixes by the main session
+
+28. **DCLF CPU-pipeline sites cached RTVs per resource object** (D3D12 crash, "stale or released resource" at
+    OMSetRenderTargets with placement on). The views are now remade when an image changes, and the site pass resolves its
+    declared targets in its recording (`SiteImages`), so frames still running older graphs draw into their own images.
+29. **Image registry collisions in a defrag pass**: one target moved into an image handle another left in the same pass.
+    `ImageRegistry::RekeyAll` takes every old entry out first; the native follow rekeys graph textures and journal moves as
+    one batch.
+30. **A resource the placement version does not know is no longer pooled per graph.** Epoch 13 pooled
+    `ImageSpace::SSRMaskDownsampled` while another epoch gave it memory of its own; a defrag move made epoch 13 record again
+    and the binding check refused it. Defrag also waits while a graph awaits a rebuild of its shared pools.
+31. **Frame arena blocks**: frame transients get blocks of their own with placement on, and a range does not refill a block
+    it would leave under half used. The 59 MB block a 17 MB region kept is now 17 MB.
+32. **Placement heaps at their need** (`heapHeadroom = 1.0`): 169 → 146 MB; heaps grow about twice a run.
+33. **Defrag start at 10 % slack** (was 25 %, which no longer triggered), and no new campaign after one that freed no block
+    until the slack grows by 32 MB (long loading screens started one every 2 s).
+34. **Native-owned engine targets are pinned against defrag.** On D3D12 a moved kHDR_DOWNSAMPLE was drawn as a render target
+    while still in CopyDest: some user of the native handle takes it as resting in Common. Frame placement still places them.
+
+### Measurements (native Vulkan `vram-loads`, driver MB at the 2nd/3rd load; one sample each unless noted)
+
+| Config | Driver | Alias pools | ORG resources | Slack |
+|---|---|---|---|---|
+| Off (3 samples) | 3688-3876 / 3746-3940 | 136 | 1975-2010 | 372-549 |
+| `ORG_FRAME_PLACEMENT=1` (final) | 3652 / 3775 | 161 / 210 | 1892 | 397-407 |
+| `CS_ORG_DEFRAG=1` (final) | 3815 / 3879 | 136 | 2019 | 453 |
+| Both (final) | 3745 / 3868 | 161 / 210 | 1930 | 396-407 |
+
+Driver totals vary ±130 MB between identical runs, mostly slack; ORG's own numbers are steadier. Placement: resources
+−95 to −120 MB, alias memory +25 MB (+74 MB at the 3rd load, when a 49 MB frame-transient group joins the arena), so a net
+win of ~50-90 MB. Defrag: one campaign of 50-110 MB at the first loading screen; it freed one block in one run, none in
+others; slack at later loads ends where it was. Native D3D12 with both: 3586 / 3703.
+
+### Open
+
+35. **Intermittent corruption with placement on after a version change**: in `resize` (native Vulkan), the `grid` shot after
+    the ViewAtmosphere grid change was dark in one run, green with lens-flare sparkles in another, and correct in a third;
+    placement off is correct. It looks like a one-frame glitch at the switch poisoning eye adaptation, which then takes
+    seconds to recover. Suspects: the in-place descriptor rewrite of a re-placed resource while frames are in flight, or a
+    reader of an engine target outside the graph that follows its image only at the frame's end. Needs registered toggle
+    switches (engine targets as candidates; forced new heaps) and repeated runs. **Keep `ORG_FRAME_PLACEMENT` off until fixed.**
+36. The CopyDest/Common mismatch behind entry 34.
+37. D3D12 debug layer: defrag copies a few render targets nothing wrote yet (`Native::Texture2D`, id 1422); packed-buffer
+    cross-queue warnings (id 1047) predate this round and grow with loads.
+38. Buffer moves are only exercised by refs and growable tables so far (19 address-holding buffers moved in a campaign, all
+    before DCLF's scene set existed). DCLF's scene-set follow path has not seen a move in a test.
+
+### Final checks (this round)
+
+Passed with switches off: `river` in all three modes. With placement on: `river` guest and native D3D12 (debug layer: same
+messages as off), `ssgi` and `dynres` native Vulkan, `resize` native Vulkan and D3D12 (but see entry 35), `vram-loads` guest.
+With defrag on: `vram-loads` native Vulkan and D3D12 (debug layer). Both on: `vram-loads` native Vulkan and D3D12.
