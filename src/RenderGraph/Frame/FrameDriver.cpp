@@ -26,6 +26,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstring>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -312,13 +314,24 @@ namespace RenderGraph::Frame::Driver
 	namespace
 	{
 		/**
-		* @brief The one writer of the engine values the frame observes (plan A7): whether the player is in an interior cell. Main
-		* thread, at each Begin. Writing the same value is no event.
+		* @brief The one writer of the engine values the frame observes (plan A7): whether the player is in an interior cell, and
+		* the volumetric lighting volume size. Main thread, at each Begin. Writing the same value is no event.
 		*/
 		void SampleEngine()
 		{
 			if (const auto* tes = RE::TES::GetSingleton())
 				(void)Vars::Set(Vars::Interior(), tes->interiorCell != nullptr, "engine sampler");
+			// The VL descriptor (SE 100297, AE 107014) is made on its first read, with the Low preset's static default. The engine's
+			// ImageSpace setup (SE 1412dbd00) then sets the INI's quality, after CS's setup. A quality change (SE 100299: the
+			// console's command, or CS's feature) sets it again. Inside a frame, so it is read here, at the next Begin.
+			static REL::Relocation<const std::byte* (*)()> descriptor{ REL::RelocationID(100297, 107014) };
+			if (const auto* vl = descriptor()) {
+				Vars::Extent3D size{};
+				std::memcpy(&size.width, vl + 0x30, sizeof(std::uint32_t));
+				std::memcpy(&size.height, vl + 0x34, sizeof(std::uint32_t));
+				std::memcpy(&size.depth, vl + 0x38, sizeof(std::uint32_t));
+				(void)Vars::Set(Vars::VolumetricLightingSize(), size, "engine sampler");
+			}
 		}
 	}
 

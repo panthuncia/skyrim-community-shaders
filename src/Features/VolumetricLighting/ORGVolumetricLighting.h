@@ -14,7 +14,8 @@
 * client on the inputs the VL render finds. A change switches in with its revision; until then the old one draws. The feature
 * gives the engine the adopted revision's quality, so the engine's volume size is always the bound version's (a mismatch is fatal).
 * The engine subsystems install it, not the feature. Native mode installs it with the feature off too, since it has no D3D11 path,
-* and then draws the engine's own volumetric lighting. Render thread throughout. Free of ORG/Vulkan includes.
+* and then draws the engine's own volumetric lighting. Its volume follows the engine's size (Vars::VolumetricLightingSize), and
+* frames whose size the adopted revision does not have yet skip the work. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGVolumetricLighting : public RenderGraph::Port<ORGVolumetricLighting>
 {

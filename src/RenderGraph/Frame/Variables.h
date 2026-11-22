@@ -42,6 +42,15 @@ namespace RenderGraph::Frame::Vars
 		friend bool operator==(const Extent2D&, const Extent2D&) = default;
 	};
 
+	/** @brief A 3D texture's width, height and depth in texels. */
+	struct Extent3D
+	{
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+		std::uint32_t depth = 0;
+		friend bool operator==(const Extent3D&, const Extent3D&) = default;
+	};
+
 	/** @brief The dynamic resolution ratios, render size over display size per axis. */
 	struct Ratios
 	{
@@ -181,6 +190,7 @@ namespace RenderGraph::Frame::Vars
 		Detail::Row<std::uint64_t>{ "ShaderGeneration", false },
 		// Every engine target's recorded shape. The engine target set writes it at each set; the targets' declarations depend on it.
 		Detail::Row<::RenderGraph::Engine::Targets::ShapeTable>{ "EngineTargetShapes" },
+		Detail::Row<Extent3D>{ "VolumetricLightingSize" },
 	};
 
 	inline constexpr std::size_t kTableSize = std::tuple_size_v<std::remove_cvref_t<decltype(kTable)>>;
@@ -260,6 +270,12 @@ namespace RenderGraph::Frame::Vars
 	* set. A change makes the changed targets' next versions, and the set points the engine's field handles at them at adoption.
 	*/
 	constexpr Var<::RenderGraph::Engine::Targets::ShapeTable> EngineTargetShapes() { return Detail::TableVar<::RenderGraph::Engine::Targets::ShapeTable>("EngineTargetShapes"); }
+	/**
+	* @brief The engine's volumetric lighting volume size, from the VL descriptor's +0x30 to +0x38. The frame driver's engine
+	* sampler writes it at each Begin. The engine sets it from the INI's quality when its ImageSpace is made, after CS's setup.
+	* Later only a quality change sets it: the console's volumetric lighting command, or CS's feature while it is on.
+	*/
+	constexpr Var<Extent3D> VolumetricLightingSize() { return Detail::TableVar<Extent3D>("VolumetricLightingSize"); }
 
 	/** @brief Any thread. Writes a_value to a row of kTable. Returns whether it changed, which is an event. */
 	template <class T>
@@ -330,6 +346,15 @@ struct std::formatter<RenderGraph::Frame::Vars::Extent2D> : std::formatter<std::
 	auto format(const RenderGraph::Frame::Vars::Extent2D& a_value, std::format_context& a_context) const
 	{
 		return std::format_to(a_context.out(), "{}x{}", a_value.width, a_value.height);
+	}
+};
+
+template <>
+struct std::formatter<RenderGraph::Frame::Vars::Extent3D> : std::formatter<std::string_view>
+{
+	auto format(const RenderGraph::Frame::Vars::Extent3D& a_value, std::format_context& a_context) const
+	{
+		return std::format_to(a_context.out(), "{}x{}x{}", a_value.width, a_value.height, a_value.depth);
 	}
 };
 

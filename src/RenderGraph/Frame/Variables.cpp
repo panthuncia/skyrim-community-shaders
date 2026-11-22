@@ -6,6 +6,7 @@
 // The value types of kTable's rows. The generic functions are instantiated for each.
 #define CS_FRAME_VARIABLE_TYPES(X)  \
 	X(Extent2D)                     \
+	X(Extent3D)                     \
 	X(Ratios)                       \
 	X(Upscaler)                     \
 	X(bool)                         \
