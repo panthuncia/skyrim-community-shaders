@@ -222,6 +222,13 @@ namespace DCLF
 			rv.graphBuilds = builds;
 			rv.frameVersions = frameVersions;
 			++rv.versionSets;
+			// A recording keyed on an older versions fragment is never looked up again: a fragment is never reused. Each held its
+			// set's buffer versions at their old sizes, in every epoch's cache, including epochs that no longer record. The revisions
+			// the frame still runs keep their own references.
+			for (auto& cache : rv.recordingCaches)
+				(void)cache.EraseIf([&](const RecordingCache::Entry& a_kept) {
+					return a_kept.key.fragments.empty() || a_kept.key.fragments.front() != rv.versionsFragment;
+				});
 		}
 		if (draft.Get(R::kVersionsSlot) != rv.versionsFragment)
 			draft.Set(R::kVersionsSlot, rv.versionsFragment);
