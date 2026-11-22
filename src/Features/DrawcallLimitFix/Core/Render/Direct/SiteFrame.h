@@ -77,11 +77,36 @@ namespace DCLF::Direct::detail
 		std::array<rhi::ResourceHandle, Draws::kColorTargets> colourResources{};
 		std::array<rhi::Format, Draws::kColorTargets> formats{};
 		rhi::DescriptorSlot depth{};
+		rhi::ResourceHandle depthResource{};  // the image the DSV names, to notice a new image of the same resource
 		rhi::Format depthFormat = rhi::Format::Unknown;
 		rhi::DescriptorSlot refraction{};
 		rhi::ResourceHandle refractionResource{};
 		rhi::Format refractionFormat = rhi::Format::Unknown;
 		bool valid = false;
+		// Views a recording resolved instead (SiteImages) name ORG's slots and keep the views made at commit, with their heaps.
+		std::shared_ptr<const void> keep;
+
+		/** @brief These views without their heaps, keeping these alive. For a run that rebinds some of them. */
+		static std::shared_ptr<TargetViews> RebindOf(const std::shared_ptr<const TargetViews>& a_views)
+		{
+			auto views = std::make_shared<TargetViews>();
+			views->native = a_views->native;
+			views->nativeDepth = a_views->nativeDepth;
+			views->refractionNormals = a_views->refractionNormals;
+			views->count = a_views->count;
+			views->colours = a_views->colours;
+			views->colourResources = a_views->colourResources;
+			views->formats = a_views->formats;
+			views->depth = a_views->depth;
+			views->depthResource = a_views->depthResource;
+			views->depthFormat = a_views->depthFormat;
+			views->refraction = a_views->refraction;
+			views->refractionResource = a_views->refractionResource;
+			views->refractionFormat = a_views->refractionFormat;
+			views->valid = a_views->valid;
+			views->keep = a_views;
+			return views;
+		}
 	};
 
 	/** @brief One view of a site in a frame, with its cull inputs and culled batches. */
@@ -316,7 +341,25 @@ namespace DCLF::Direct::detail
 	 * @brief From a site epoch's late pass, after a full barrier, records the site's draws into a_list. The barrier is needed because
 	 * the CPU pipeline passes write memory the graph does not track. False when there is no run or its inputs are incomplete.
 	 */
-	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list, const org::RunRef* a_run = nullptr);
+	/**
+	 * @brief The images a site pass's recording binds: its declared colours in order, then its depths, each with the view the
+	 * recording resolves. A frame still running older graphs binds older images than the resources' current ones (frame placement
+	 * places them again, a defrag moves them), so the site draws into these rather than into the views made at commit.
+	 */
+	struct SiteImages
+	{
+		struct Image
+		{
+			rhi::DescriptorSlot view{};
+			rhi::ResourceHandle resource{};
+		};
+		std::vector<Image> colours, depths;
+	};
+
+	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list, const org::RunRef* a_run = nullptr, const SiteImages* a_images = nullptr);
+
+	/** @brief Points a first-person run's views at a_images (SiteImages): the main colours, then its depth target. */
+	void UseFirstPersonImages(SiteRun& a_run, const SiteImages& a_images);
 
 
 	void RecordShadowSite(SiteOut& a_out, SiteRun& a_run);

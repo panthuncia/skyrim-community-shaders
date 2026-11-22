@@ -101,8 +101,18 @@ namespace DCLF::Direct::detail
 			native[i] = a_resources.native[i].Current();
 		const auto nativeDepth = a_resources.nativeDepth.Current();
 		const auto refractionNormals = a_resources.refractionNormals.Current();
+		// The same resources can have new images: frame placement places them again, and a defrag moves them.
+		const auto same = [](rhi::ResourceHandle a_left, rhi::ResourceHandle a_right) { return a_left.index == a_right.index && a_left.generation == a_right.generation; };
+		const auto sameImages = [&](const TargetViews& a_views) {
+			for (std::uint32_t i = 0; i < a_views.count; ++i)
+				if (native[i] && !same(native[i]->GetAPIResource().GetHandle(), a_views.colourResources[i]))
+					return false;
+			if (nativeDepth && !same(nativeDepth->GetAPIResource().GetHandle(), a_views.depthResource))
+				return false;
+			return !refractionNormals || !a_views.refractionResource.valid() || same(refractionNormals->GetAPIResource().GetHandle(), a_views.refractionResource);
+		};
 		if (s.targets && s.targets->count == a_resources.targetCount && s.targets->native == native && s.targets->nativeDepth == nativeDepth &&
-			s.targets->refractionNormals == refractionNormals)
+			s.targets->refractionNormals == refractionNormals && sameImages(*s.targets))
 			return s.targets;
 		if (s.targets)
 			a_holds.push_back(std::move(s.targets));
@@ -127,7 +137,8 @@ namespace DCLF::Direct::detail
 		if (ok && nativeDepth) {
 			views->depthFormat = a_resources.nativeDepth.Format();
 			views->depth = rhi::DescriptorSlot(views->dsvHeap->GetHandle(), 0);
-			ok = s.device.CreateDepthStencilView(views->depth, nativeDepth->GetAPIResource().GetHandle(), rhi::DsvDesc{}) == rhi::Result::Ok;
+			views->depthResource = nativeDepth->GetAPIResource().GetHandle();
+			ok = s.device.CreateDepthStencilView(views->depth, views->depthResource, rhi::DsvDesc{}) == rhi::Result::Ok;
 		} else {
 			ok = false;
 		}
@@ -624,7 +635,52 @@ namespace DCLF::Direct::detail
 		}
 	}
 
-	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list, const org::RunRef* a_run)
+	namespace
+	{
+		bool SameImage(rhi::ResourceHandle a_left, rhi::ResourceHandle a_right)
+		{
+			return a_left.index == a_right.index && a_left.generation == a_right.generation;
+		}
+
+		/** @brief Points a run's views at the images its pass's recording binds, when they differ from the ones made at commit. */
+		void UseSiteImages(SiteRun& a_run, const SiteImages& a_images)
+		{
+			if (a_run.site == Site::FirstPerson) {
+				UseFirstPersonImages(a_run, a_images);
+				return;
+			}
+			if (!a_run.targets)
+				return;
+			const auto& made = *a_run.targets;
+			const std::uint32_t colours = std::min<std::uint32_t>(made.count, static_cast<std::uint32_t>(a_images.colours.size()));
+			// Forward declares refraction normals after the main colours.
+			const bool refraction = a_run.site == Site::Forward && a_images.colours.size() > made.count && made.refractionResource.valid();
+			bool differs = refraction && !SameImage(made.refractionResource, a_images.colours[made.count].resource);
+			for (std::uint32_t i = 0; i < colours; ++i)
+				differs = differs || !SameImage(made.colourResources[i], a_images.colours[i].resource);
+			if (!a_images.depths.empty())
+				differs = differs || !SameImage(made.depthResource, a_images.depths.front().resource);
+			if (!differs)
+				return;
+			auto views = TargetViews::RebindOf(a_run.targets);
+			for (std::uint32_t i = 0; i < colours; ++i) {
+				views->colours[i] = a_images.colours[i].view;
+				views->colourResources[i] = a_images.colours[i].resource;
+			}
+			if (refraction) {
+				views->refraction = a_images.colours[made.count].view;
+				views->refractionResource = a_images.colours[made.count].resource;
+			}
+			if (!a_images.depths.empty()) {
+				views->depth = a_images.depths.front().view;
+				views->depthResource = a_images.depths.front().resource;
+			}
+			// The run lives until its frame retires, and the copy keeps the commit's views.
+			a_run.targets = std::move(views);
+		}
+	}
+
+	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list, const org::RunRef* a_run, const SiteImages* a_images)
 	{
 		auto& s = S();
 		auto* run = executing;
@@ -645,6 +701,8 @@ namespace DCLF::Direct::detail
 		}
 		if (!run || run->site != a_site || !run->valid)
 			return false;
+		if (a_images)
+			UseSiteImages(*run, *a_images);
 		const auto start = Clock::now();
 		const auto drawnNow = [&] {
 			std::uint32_t drawn = 0;

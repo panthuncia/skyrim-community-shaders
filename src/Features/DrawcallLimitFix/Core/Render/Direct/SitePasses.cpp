@@ -32,6 +32,8 @@ namespace DCLF::Direct
 		{
 			Site site = Site::Depth;
 			RenderGraph::DeclaredRefs sequences;  // the recorder pushes refs into these
+			// The declared colours, then depths, which the recording resolves to the images this frame's graph binds.
+			std::vector<org::DeclaredResourceUse> colours, depths;
 		};
 
 		/** @brief A draw site's late pass, recording the executing run's draws. */
@@ -48,16 +50,16 @@ namespace DCLF::Direct
 			SiteBindings Declare(org::PassBuilder& a_builder)
 			{
 				a_builder.PreferQueue(org::QueueKind::Graphics);
+				SiteBindings bindings{ site };
 				for (const auto& colour : colours)
-					(void)a_builder.RenderTarget(colour);
+					bindings.colours.push_back(a_builder.RenderTarget(colour));
 				for (const auto& depth : depths)
-					(void)a_builder.DepthReadWrite(depth);
+					bindings.depths.push_back(a_builder.DepthReadWrite(depth));
 				if (reads)
 					reads(a_builder);
 				// The draws read t117 and t121-t123 through the frame record.
 				FrameValues::Get().DeclareReads(a_builder);
 				// And the batch set's sequences, through the ref every draw's push words carry.
-				SiteBindings bindings{ site };
 				Draws::DeclareViewBatchReads(a_builder, bindings.sequences);
 				// The sequences' rows are offsets from the payload's row parts.
 				Draws::DeclarePayloadReads(a_builder);
@@ -80,7 +82,15 @@ namespace DCLF::Direct
 			{
 				// Find the run through the epoch's run, since the render thread may have opened the next site by now.
 				const org::RunRef run = a_recording.Run();
-				(void)detail::RecordExecutingSite(a_bindings.site, a_recording.Commands(), &run);
+				detail::SiteImages images;
+				const auto resolve = [&](const std::vector<org::DeclaredResourceUse>& a_uses, std::vector<detail::SiteImages::Image>& a_out) {
+					a_out.reserve(a_uses.size());
+					for (const auto& use : a_uses)
+						a_out.push_back({ a_recording.View(use.View()), a_recording.Resolve(use.Resource()).GetHandle() });
+				};
+				resolve(a_bindings.colours, images.colours);
+				resolve(a_bindings.depths, images.depths);
+				(void)detail::RecordExecutingSite(a_bindings.site, a_recording.Commands(), &run, &images);
 			}
 
 		private:

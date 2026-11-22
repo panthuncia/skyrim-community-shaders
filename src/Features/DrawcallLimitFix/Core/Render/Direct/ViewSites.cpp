@@ -75,6 +75,7 @@ namespace DCLF::Direct::detail
 			rhi::Format colourFormat = rhi::Format::Unknown, depthFormat = rhi::Format::Unknown;
 			std::uint32_t faces = 0, width = 0, height = 0;
 			bool valid = false;
+			std::shared_ptr<const void> keep;  // the targets a rebound copy replaced, with their heaps
 		};
 
 		/** @brief One face of a hosted view: its cull's view, its push words and its view of the depth run. */
@@ -172,8 +173,10 @@ namespace DCLF::Direct::detail
 		{
 			static std::shared_ptr<const ViewTargets> current;
 			const rhi::Format depthFormat = a_view.depth ? a_view.depth->GetFormat() : rhi::Format::Unknown;
+			// A new image of the same resource (a placement or a defrag move) needs new views too.
 			if (current && current->target == a_view.target.Current() && current->width == a_view.width && current->height == a_view.height &&
-				current->depthFormat == depthFormat)
+				current->depthFormat == depthFormat && current->target->GetAPIResource().GetHandle().index == current->targetResource.index &&
+				current->target->GetAPIResource().GetHandle().generation == current->targetResource.generation)
 				return current;
 			if (current)
 				a_slot.holds.push_back(std::move(current));
@@ -403,6 +406,47 @@ namespace DCLF::Direct::detail
 				RecordReflection(a_out, a_run, *view);
 			else
 				RecordFirstPersonDepth(a_out, a_run, *view);
+		}
+	}
+
+	void UseFirstPersonImages(SiteRun& a_run, const SiteImages& a_images)
+	{
+		const auto* run = static_cast<const FirstPersonRun*>(a_run.viewState.get());
+		if (!run || !run->view || !run->view->main || !run->view->targets)
+			return;
+		const auto same = [](rhi::ResourceHandle a_left, rhi::ResourceHandle a_right) {
+			return a_left.index == a_right.index && a_left.generation == a_right.generation;
+		};
+		auto& view = *run->view;
+		const auto& main = *view.main;
+		const std::uint32_t colours = std::min<std::uint32_t>(main.count, static_cast<std::uint32_t>(a_images.colours.size()));
+		bool coloursDiffer = false;
+		for (std::uint32_t i = 0; i < colours; ++i)
+			coloursDiffer = coloursDiffer || !same(main.colourResources[i], a_images.colours[i].resource);
+		if (coloursDiffer) {
+			auto views = TargetViews::RebindOf(view.main);
+			for (std::uint32_t i = 0; i < colours; ++i) {
+				views->colours[i] = a_images.colours[i].view;
+				views->colourResources[i] = a_images.colours[i].resource;
+			}
+			view.main = std::move(views);
+		}
+		if (!a_images.depths.empty() && !same(view.targets->depthResource, a_images.depths.front().resource)) {
+			// Only first person's depth target: no colours of its own and no faces' depth.
+			auto targets = std::make_shared<ViewTargets>();
+			const auto& made = *view.targets;
+			targets->target = made.target;
+			targets->targetResource = made.targetResource;
+			targets->colourFormat = made.colourFormat;
+			targets->depthFormat = made.depthFormat;
+			targets->faces = made.faces;
+			targets->width = made.width;
+			targets->height = made.height;
+			targets->valid = made.valid;
+			targets->keep = view.targets;
+			targets->dsv = a_images.depths.front().view;
+			targets->depthResource = a_images.depths.front().resource;
+			view.targets = std::move(targets);
 		}
 	}
 
