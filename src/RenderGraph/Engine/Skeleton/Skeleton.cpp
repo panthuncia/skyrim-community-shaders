@@ -296,6 +296,8 @@ namespace RenderGraph::Engine::Skeleton
 
 			ClearBindings Declare(org::PassBuilder& a_builder)
 			{
+				// The engine's clear runs only on the runs whose tap opened one of its entries, whatever later passes read the target.
+				a_builder.MayNotWrite();
 				const auto declare = [&](const auto& a_range) -> ClearBindings {
 					if (spec->depth)
 						return { a_builder.DepthReadWrite(a_range, org::DsvView{ .slice = spec->slice }).View() };
@@ -1560,7 +1562,9 @@ namespace RenderGraph::Engine::Skeleton
 				break;
 			}
 			AnchorPasses::Builder builder(anchor, id, order, {}, gate);
-			builder.Add(AnchorPasses::Copy{ .name = std::move(step), .source = std::move(source), .target = std::move(target), .width = 0, .height = 0, .gate = entry });
+			// A gated copy runs only when the engine copies, whatever later passes read the target.
+			builder.Add(AnchorPasses::Copy{
+				.name = std::move(step), .source = std::move(source), .target = std::move(target), .width = 0, .height = 0, .gate = entry, .mayNotWrite = entry.has_value() });
 			FrameAnchors::ClientDesc client{};
 			client.id = id;
 			client.passes = builder.Take();

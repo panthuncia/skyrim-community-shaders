@@ -1285,6 +1285,8 @@ namespace RenderGraph::Engine::ImageSpace
 				dispatch.program = compute;
 				dispatch.bindings = std::move(bindings);
 				dispatch.gate = spec.entry;
+				// The engine's draw: it runs only when the engine makes it, whatever later draws read.
+				dispatch.mayNotWrite = true;
 				builder.Add(std::move(dispatch));
 			} else {
 				AnchorPasses::Draw draw{};
@@ -1319,6 +1321,8 @@ namespace RenderGraph::Engine::ImageSpace
 				}
 				draw.load = rhi::LoadOp::Load;
 				draw.gate = spec.entry;
+				// The engine's draw: it runs only when the engine makes it, whatever later draws read.
+				draw.mayNotWrite = true;
 				builder.Add(std::move(draw));
 			}
 			auto passes = builder.Take();

@@ -151,18 +151,21 @@ namespace GraphResources
 			return desc;
 		}
 
-		/** @brief A graph-only texture. Transient ones are placed by the graph, others are made now. */
+		/**
+		* @brief A graph-only texture. Transient ones are placed by the graph, others are made now. a_ownMemory makes an aliasable
+		* texture now too: a version of a declared Transient texture, which only ORG's frame placement moves into shared memory.
+		*/
 		std::shared_ptr<org::Resource> CreateGraphTexture(const Shape& a_shape, const std::string& a_name, bool a_aliasable,
-			std::optional<std::uint64_t> a_pool = std::nullopt, bool a_concurrent = false)
+			std::optional<std::uint64_t> a_pool = std::nullopt, bool a_concurrent = false, bool a_ownMemory = false)
 		{
 			auto desc = Describe(a_shape, false);
 			desc.allowAlias = a_aliasable;
 			// The uploader zero-fills a version on its copy queue, which only a concurrent texture allows.
 			if (a_concurrent)
 				desc.queueSharing = rhi::QueueSharing::Concurrent;
-			if (a_aliasable)
+			if (a_aliasable && !a_ownMemory)
 				desc.aliasingPoolID = a_pool;
-			auto texture = a_aliasable ? org::PixelBuffer::CreateSharedUnmaterialized(desc) : org::PixelBuffer::CreateShared(desc);
+			auto texture = a_aliasable && !a_ownMemory ? org::PixelBuffer::CreateSharedUnmaterialized(desc) : org::PixelBuffer::CreateShared(desc);
 			texture->SetName(a_name);
 			return texture;
 		}
@@ -222,7 +225,7 @@ namespace GraphResources
 			}
 			try {
 				if (a_options.d3d11 == Export::None)
-					return { CreateGraphTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient, a_options.aliasPool), nullptr };
+					return { CreateGraphTexture(a_shape, a_name, a_options.lifetime == Lifetime::Transient, a_options.aliasPool, false, a_options.versioned), nullptr };
 				return CreateExportedTexture(a_shape, a_name);
 			} catch (const std::exception& e) {
 				logger::error("[ORG] {}: not created: {}", a_name, e.what());
@@ -1064,7 +1067,7 @@ namespace GraphResources
 		if (!a_plan.exported) {
 			try {
 				prepared.resource = std::dynamic_pointer_cast<org::GloballyIndexedResource>(
-					CreateGraphTexture(next, name, false, std::nullopt, prepared.contents != Contents::Undefined));
+					CreateGraphTexture(next, name, a_plan.lifetime == Lifetime::Transient, std::nullopt, prepared.contents != Contents::Undefined, true));
 			} catch (const std::exception& e) {
 				throw failure(e.what());
 			}

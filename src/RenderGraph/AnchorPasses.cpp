@@ -250,6 +250,9 @@ namespace RenderGraph::AnchorPasses
 			DrawBindings Declare(org::PassBuilder& a_builder)
 			{
 				const auto& draw = spec->step;
+				// A draw that clears its target writes it on every run, even when its gate leaves the draw closed.
+				if (draw.mayNotWrite && draw.load != rhi::LoadOp::Clear)
+					a_builder.MayNotWrite();
 				// An import's slot is declared as the slot, a plain resource as itself.
 				auto view = draw.mip == kAllMips ? a_builder.RenderTarget(draw.target).View() :
 				            draw.target.Slot()   ? a_builder.RenderTarget(SlotOf(*draw.target.Slot(), draw.mip), org::RtvView{ .mip = draw.mip }).View() :
@@ -326,6 +329,8 @@ namespace RenderGraph::AnchorPasses
 			DispatchBindings Declare(org::PassBuilder& a_builder)
 			{
 				a_builder.PreferQueue(org::QueueKind::Graphics);
+				if (spec->step.mayNotWrite)
+					a_builder.MayNotWrite();
 				return { DeclareBindings(a_builder, spec->step.bindings, spec->step.table) };
 			}
 
@@ -393,6 +398,8 @@ namespace RenderGraph::AnchorPasses
 			{
 				a_builder.PreferQueue(org::QueueKind::Graphics);
 				const auto& copy = spec->step;
+				if (copy.mayNotWrite)
+					a_builder.MayNotWrite();
 				return { a_builder.CopySource(copy.source), a_builder.CopyDestination(copy.target) };
 			}
 
@@ -542,6 +549,8 @@ namespace RenderGraph::AnchorPasses
 			DepthCopyBindings Declare(org::PassBuilder& a_builder)
 			{
 				const auto& copy = frame.spec->step;
+				if (copy.mayNotWrite)
+					a_builder.MayNotWrite();
 				DepthCopyBindings bindings{};
 				if (frame.stencil) {
 					const std::array<org::SrvView, 2> views{ org::SrvView{}, org::SrvView{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DStencil) } };

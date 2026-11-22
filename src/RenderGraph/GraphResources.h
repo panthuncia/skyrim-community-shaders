@@ -58,7 +58,8 @@ namespace GraphResources
 	/** @brief How long a resource's contents live (docs/development/org-aliasing-port-priorities.md, "Lifetime classes"). */
 	enum class Lifetime : std::uint8_t
 	{
-		Transient,   // written before any read, every frame, and read only within that frame: aliasable unless exported
+		Transient,   // written before any read, every frame, and read only within that frame: aliasable unless exported (a declared,
+		             // versioned one only by ORG's frame placement)
 		History,     // read in a later frame (ping-pong, temporal accumulation): never aliased
 		Persistent,  // written once or on a settings change: never aliased
 	};
@@ -84,7 +85,8 @@ namespace GraphResources
 		Export d3d11 = Export::None;
 		// A transient's own alias pool, aliased only with resources naming the same pool. Unset means the shared pool. A diagnostic.
 		std::optional<std::uint64_t> aliasPool;
-		// Passes declare only the slot or published id, so a new extent is a new version, not a graph build. Not for transients.
+		// Passes declare only the slot or published id, so a new extent is a new version, not a graph build. A versioned Transient
+		// texture (Frame::DeclareTexture2D) is graph-only: only ORG's frame placement places its versions.
 		bool versioned = false;
 		// A 2D texture that shaders read and write as an array, so it has array views even with one slice.
 		bool array = false;
@@ -246,8 +248,15 @@ namespace GraphResources
 		/** @brief Whether D3D11 views were asked for; an exported resource is never aliasable. */
 		bool Exported() const { return options.d3d11 != Export::None; }
 
-		/** @brief Whether the graph may alias the resource: transient and not exported. */
-		bool Aliasable() const { return options.lifetime == Lifetime::Transient && !Exported(); }
+		/** @brief Whether each graph may alias the resource in its own pools: transient, unversioned and not exported. */
+		bool Aliasable() const { return options.lifetime == Lifetime::Transient && !Exported() && !options.versioned; }
+
+		/**
+		* @brief Whether its versions are alias candidates of ORG's frame placement: a declared Transient texture, graph-only. Each
+		* version is made with memory of its own and marked aliasable. Only the frame placement (ORG_FRAME_PLACEMENT) moves it into
+		* shared memory, since other graphs may bind the same version.
+		*/
+		bool FramePlaceable() const { return options.lifetime == Lifetime::Transient && !Exported() && options.versioned; }
 
 		/** @brief The exported D3D11 views of the whole resource; null when not exported. */
 		ID3D11ShaderResourceView* SRV() const { return srv.get(); }
@@ -309,13 +318,13 @@ namespace GraphResources
 		Resource(std::string a_name, Options a_options) :
 			name(std::move(a_name)), options(a_options)
 		{
-			if (Aliasable())
+			if (Aliasable() || FramePlaceable())
 				NoteTransientName(name, true);
 		}
 		virtual ~Resource()
 		{
 			Reset();
-			if (Aliasable())
+			if (Aliasable() || FramePlaceable())
 				NoteTransientName(name, false);
 		}
 
