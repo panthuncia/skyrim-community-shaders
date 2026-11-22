@@ -1065,8 +1065,9 @@ namespace RenderGraph::Frame::Revision
 				if (version.reported || a_frame < version.replaced + kHeldFrames)
 					continue;
 				version.reported = true;
-				logger::warn("[ORG] versions: {} ({:.1f} MB) is still held {} frames after an adoption replaced it", version.name,
-					static_cast<double>(version.bytes) / (1024.0 * 1024.0), a_frame - version.replaced);
+				// The count of references tells one missed holder from several.
+				logger::warn("[ORG] versions: {} ({:.1f} MB) is still held {} frames after an adoption replaced it ({} references)", version.name,
+					static_cast<double>(version.bytes) / (1024.0 * 1024.0), a_frame - version.replaced, version.resource.use_count());
 			}
 			if (!released)
 				return;
