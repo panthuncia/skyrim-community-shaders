@@ -76,6 +76,10 @@ namespace PublishedResources
 	*/
 	bool IsVersioned(std::string_view a_id);
 
+	/** @brief The global resource ID of the resource ShaderResourceIndex reads for a_id, or 0. A relocation journal entry names it.
+	*  Any thread during a build (its snapshot), otherwise the render thread. */
+	std::uint64_t ResourceIdOf(std::string_view a_id);
+
 	/** @brief The view variant ShaderResourceIndex hands out for a_id, so a declaration covers the descriptor it reads.
 	*  UINT32_MAX for a primary view or an unknown id. Render thread, or a build on any thread (its snapshot). */
 	std::uint32_t ShaderResourceVariant(std::string_view a_id);

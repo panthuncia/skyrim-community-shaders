@@ -491,6 +491,12 @@ namespace PublishedResources
 		return source.found && source.view ? static_cast<std::uint32_t>(*source.view) : UINT32_MAX;
 	}
 
+	std::uint64_t ResourceIdOf(std::string_view a_id)
+	{
+		const auto source = IndexSourceOf(a_id);
+		return source.published && source.current ? source.current->GetGlobalResourceID() : 0;
+	}
+
 	std::string ExportedId(const ID3D11ShaderResourceView* a_view)
 	{
 		if (!a_view)

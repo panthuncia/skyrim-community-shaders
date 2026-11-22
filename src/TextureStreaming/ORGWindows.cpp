@@ -11,6 +11,7 @@
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Utils/D3D.h"
 #include "Vram/Debug.h"
@@ -105,6 +106,8 @@ namespace TextureStreaming::ORG
 			std::atomic<bool> failed{ false };
 			std::atomic<std::uint64_t> serial{ 0 };
 			std::atomic<std::uint64_t> made{ 0 }, installFrames{ 0 }, retried{ 0 };
+			// The windows' bindless indices, which a relocation of their texture changes (org-relocation.md).
+			RenderGraph::Relocation::IndexCache indices;
 		};
 
 		// Never destroyed, since a window let go during process exit still finds it.
@@ -122,7 +125,8 @@ namespace TextureStreaming::ORG
 		winrt::com_ptr<ID3D11Resource> d3d11;
 		winrt::com_ptr<ID3D11ShaderResourceView> view;
 		std::shared_ptr<org::ExternalTextureResource> texture;
-		std::uint32_t index = 0;
+		// The texture's bindless index. State::indices keeps it current when the texture moves.
+		std::atomic<std::uint32_t> index{ 0 };
 
 		// Any thread. The render thread releases it in FrameTick.
 		~Window()
@@ -216,7 +220,7 @@ namespace TextureStreaming::ORG
 			// An import of the window's texture returns this one.
 			RenderGraph::ImageRegistry::Register(reinterpret_cast<std::uint64_t>(info.image.image), { window->texture, nullptr,
 				std::make_shared<const org::TextureDescription>(desc), "ORGWindows", name, RenderGraph::ImageRegistry::Kind::Made });
-			window->index = window->texture->GetSRVInfo(0).slot.index;
+			S().indices.Track(window->texture, std::shared_ptr<RenderGraph::Relocation::IndexCache::Cell>(window, &window->index));
 			a_item.window = std::move(window);
 			return true;
 		}
@@ -246,6 +250,8 @@ namespace TextureStreaming::ORG
 			return;
 		auto& state = S();
 		ServiceRetired();
+		// After the frame boundary's relocation commit, so shells that bind a window this frame read its new index.
+		state.indices.Refresh();
 		if (state.failed.load(std::memory_order_acquire))
 			return;
 		auto& runtime = RenderGraphRuntime::Get();
@@ -292,7 +298,7 @@ namespace TextureStreaming::ORG
 
 	std::uint32_t IndexOf(const Window& a_window)
 	{
-		return a_window.index;
+		return a_window.index.load(std::memory_order_acquire);
 	}
 
 	std::shared_ptr<PendingWindow> Queue(Upload a_upload)

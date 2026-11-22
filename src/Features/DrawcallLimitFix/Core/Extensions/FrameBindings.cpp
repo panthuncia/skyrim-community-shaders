@@ -12,6 +12,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/UndeclaredAccess.h"
 
@@ -137,9 +138,17 @@ namespace DCLF::Extensions
 
 	struct DeclaredReads::Entry
 	{
+		/** @brief The index the check compares with, and the journal's head when it was taken. A relocation gives the resource a new index. */
+		struct Latch
+		{
+			std::atomic<std::uint32_t> index{ UINT32_MAX };  // UINT32_MAX means withdrawn at build, so nothing to compare
+			std::atomic<std::uint64_t> journalAt{ 0 };
+		};
+
 		std::string id;
 		org::DeclaredViewToken view;
-		std::uint32_t latched = UINT32_MAX;  // UINT32_MAX means withdrawn at build, so nothing to compare
+		std::uint64_t resourceID = 0;  // the published resource the index is of, which journal entries name
+		std::unique_ptr<Latch> latched = std::make_unique<Latch>();
 		std::unique_ptr<std::atomic<bool>> reported = std::make_unique<std::atomic<bool>>(false);
 	};
 
@@ -151,8 +160,13 @@ namespace DCLF::Extensions
 		// only with a frame revision that records its readers against the new one (plan step 10b), so the build's index is no
 		// reference for it. ORG checks those readers' version currency instead.
 		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
-		if (PublishedResources::IsVersioned(a_id) || !PublishedResources::ShaderResourceIndex(a_id, entry.latched))
-			entry.latched = UINT32_MAX;
+		// The head before the index, so a move between the two counts as after the latch.
+		entry.latched->journalAt.store(RenderGraph::Relocation::JournalHead(), std::memory_order_relaxed);
+		std::uint32_t latched = UINT32_MAX;
+		if (PublishedResources::IsVersioned(a_id) || !PublishedResources::ShaderResourceIndex(a_id, latched))
+			latched = UINT32_MAX;
+		entry.latched->index.store(latched, std::memory_order_relaxed);
+		entry.resourceID = PublishedResources::ResourceIdOf(a_id);
 		if (!a_out.entries)
 			a_out.entries = std::make_shared<std::vector<DeclaredReads::Entry>>();
 		a_out.entries->push_back(std::move(entry));
@@ -163,7 +177,8 @@ namespace DCLF::Extensions
 		if (!a_reads.entries)
 			return;
 		for (const auto& entry : *a_reads.entries) {
-			if (entry.latched == UINT32_MAX || entry.reported->load(std::memory_order_relaxed))
+			const std::uint32_t latched = entry.latched->index.load(std::memory_order_acquire);
+			if (latched == UINT32_MAX || entry.reported->load(std::memory_order_relaxed))
 				continue;
 			std::uint32_t declared = UINT32_MAX;
 			try {
@@ -171,12 +186,23 @@ namespace DCLF::Extensions
 			} catch (const std::exception& e) {
 				if (!entry.reported->exchange(true, std::memory_order_relaxed))
 					logger::warn("[ORG] declared view mismatch: {} reads '{}' (latched descriptor {}), and its declared view does not resolve: {}", a_site,
-						entry.id, entry.latched, e.what());
+						entry.id, latched, e.what());
 				continue;
 			}
-			if (declared != entry.latched && !entry.reported->exchange(true, std::memory_order_relaxed))
+			if (declared == latched)
+				continue;
+			// A relocation since the latch gave the resource a new index. The commit reads the live index, so only the latch is old:
+			// the declared view's index becomes the latch. The head is read first, so a move after it is checked next time.
+			const auto head = RenderGraph::Relocation::JournalHead();
+			const auto journalAt = entry.latched->journalAt.load(std::memory_order_acquire);
+			if (entry.resourceID && RenderGraph::Relocation::MovedSince(journalAt, entry.resourceID)) {
+				entry.latched->index.store(declared, std::memory_order_release);
+				entry.latched->journalAt.store(head, std::memory_order_release);
+				continue;
+			}
+			if (!entry.reported->exchange(true, std::memory_order_relaxed))
 				logger::warn("[ORG] declared view mismatch: {} reads '{}' through descriptor {}, its declared view is descriptor {}", a_site, entry.id,
-					entry.latched, declared);
+					latched, declared);
 		}
 	}
 
