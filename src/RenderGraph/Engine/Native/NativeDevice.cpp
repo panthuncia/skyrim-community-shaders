@@ -4164,7 +4164,7 @@ namespace RenderGraph::Engine::Native
 		 * its identity and its bindless indices. Only the native image and the context's import of it change. False when nothing
 		 * changed.
 		 */
-		bool FollowMovedImage(NativeResource& a_record)
+		bool FollowMovedImage(NativeResource& a_record, std::vector<std::pair<std::uint64_t, std::uint64_t>>* a_rekeys = nullptr)
 		{
 			const auto texture = a_record.graphOwned;
 			if (!texture)
@@ -4181,7 +4181,11 @@ namespace RenderGraph::Engine::Native
 				return false;
 			}
 			auto old = a_record.Rebind(std::move(import), image);
-			::RenderGraph::ImageRegistry::Rekey(reinterpret_cast<std::uint64_t>(previous), reinterpret_cast<std::uint64_t>(current));
+			// A batch rekeys together, since one record may move into an image another record of the batch left.
+			if (a_rekeys)
+				a_rekeys->emplace_back(reinterpret_cast<std::uint64_t>(previous), reinterpret_cast<std::uint64_t>(current));
+			else
+				::RenderGraph::ImageRegistry::Rekey(reinterpret_cast<std::uint64_t>(previous), reinterpret_cast<std::uint64_t>(current));
 			// Work recorded before the switch may still name the old import.
 			if (old)
 				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(old)));
@@ -4206,7 +4210,7 @@ namespace RenderGraph::Engine::Native
 		}
 
 		/** @brief Points every live WrapGraphTexture record at its texture's current image. Render thread. */
-		void FollowGraphTextures()
+		void FollowGraphTextures(std::vector<std::pair<std::uint64_t, std::uint64_t>>& a_rekeys)
 		{
 			std::vector<std::shared_ptr<NativeResource>> live;
 			{
@@ -4223,7 +4227,7 @@ namespace RenderGraph::Engine::Native
 			}
 			std::size_t followed = 0;
 			for (const auto& record : live)
-				if (FollowMovedImage(*record))
+				if (FollowMovedImage(*record, &a_rekeys))
 					++followed;
 			if (followed) {
 				static std::uint32_t logged = 0;
@@ -4239,13 +4243,16 @@ namespace RenderGraph::Engine::Native
 	{
 		if (!g_device)
 			return;
-		// Before the journal, since a frame placement changes images without an entry.
-		FollowGraphTextures();
+		// Before the journal, since a frame placement changes images without an entry. Both rekey as one batch.
+		std::vector<std::pair<std::uint64_t, std::uint64_t>> rekeys;
+		FollowGraphTextures(rekeys);
 		const auto& journal = org::relocation::Service::Get().Journal();
 		// From 0, so the first read covers every move before it.
 		static std::uint64_t cursor = 0;
-		if (journal.Head() == cursor)
+		if (journal.Head() == cursor) {
+			::RenderGraph::ImageRegistry::RekeyAll(rekeys);
 			return;
+		}
 		std::vector<org::relocation::JournalEntry> entries;
 		const bool complete = journal.Read(cursor, entries);
 		std::unordered_set<std::uint64_t> moved;
@@ -4271,8 +4278,9 @@ namespace RenderGraph::Engine::Native
 		}
 		std::size_t followed = 0;
 		for (const auto& record : records)
-			if (FollowMovedImage(*record))
+			if (FollowMovedImage(*record, &rekeys))
 				++followed;
+		::RenderGraph::ImageRegistry::RekeyAll(rekeys);
 		if (followed) {
 			static std::uint32_t logged = 0;
 			if (logged < 32 || !complete) {

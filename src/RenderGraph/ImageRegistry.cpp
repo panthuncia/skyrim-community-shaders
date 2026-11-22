@@ -220,6 +220,47 @@ namespace RenderGraph::ImageRegistry
 		return true;
 	}
 
+	std::size_t RekeyAll(const std::vector<std::pair<std::uint64_t, std::uint64_t>>& a_moves)
+	{
+		auto& state = ImageRegistryRecords();
+		std::string duplicate;
+		std::size_t moved = 0;
+		{
+			const std::lock_guard lock(state.mutex);
+			// Out first, so a move into an image another entry of the batch leaves finds it free.
+			std::vector<std::pair<std::uint64_t, ImageRegistryRecord>> taken;
+			taken.reserve(a_moves.size());
+			for (const auto& [from, to] : a_moves) {
+				if (!from || !to || from == to)
+					continue;
+				const auto found = state.byImage.find(from);
+				if (found == state.byImage.end())
+					continue;
+				taken.emplace_back(to, std::move(found->second));
+				state.byImage.erase(found);
+			}
+			for (auto& [to, record] : taken) {
+				if (const auto existing = state.byImage.find(to); existing != state.byImage.end()) {
+					if (!existing->second.resource.expired() && existing->second.key != record.key) {
+						if (duplicate.empty())
+							duplicate = fmt::format("image 0x{:X} has two live graph resources after a relocation: '{}' ({}, from {}) moved into it, and "
+													"'{}' ({}, from {}) is registered for it.",
+								to, record.name, KindText(record.kind), record.owner, existing->second.name, KindText(existing->second.kind),
+								existing->second.owner);
+						continue;
+					}
+					EraseImageRecord(state, existing);
+				}
+				state.imageOf[record.key] = to;
+				state.byImage.emplace(to, std::move(record));
+				++moved;
+			}
+		}
+		if (!duplicate.empty())
+			RenderGraph::Fatal("image registry", duplicate);
+		return moved;
+	}
+
 	void Retire(const org::Resource* a_resource)
 	{
 		if (!a_resource)

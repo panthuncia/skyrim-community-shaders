@@ -9,6 +9,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 struct IUnknown;
 
@@ -68,4 +70,11 @@ namespace RenderGraph::ImageRegistry
 	* An entry of another live resource under a_new is fatal, as in Register. False when a_old has no entry. Any thread.
 	*/
 	bool Rekey(std::uint64_t a_old, std::uint64_t a_new);
+
+	/**
+	* @brief Rekey for a batch of moves at once: every old entry is taken out first, then each goes in under its new image. One
+	* resource of the batch may move into an image another left in the same batch (a defrag pass reuses image handles). An entry
+	* of a live resource outside the batch under a new image is fatal, as in Register. Returns the entries moved. Any thread.
+	*/
+	std::size_t RekeyAll(const std::vector<std::pair<std::uint64_t, std::uint64_t>>& a_moves);
 }
