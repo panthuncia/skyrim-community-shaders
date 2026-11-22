@@ -920,3 +920,16 @@ Open after this part:
   extension); the OMS headers serve `ShaderCompiler` and `BuildPipeline`.
 - **The tripwire generator forwards interface arrays as they are.** They occur only on the context, whose forward args are never
   expanded.
+
+## Open questions: Volumetric Lighting's vanilla volume size (`org-native/simplify-vl-vanilla-size`, decided by the agent, to confirm)
+
+- **A new frame variable, `VolumetricLightingSize`, written by the frame driver's engine sampler.** It reads the VL descriptor at
+  each main-thread Begin, next to `Interior`. It is sampled in every mode and with the feature on too. With the feature on,
+  nothing depends on it, so its events are variable-only revisions. `EngineTargetShapes().volumes[0]` was not used: the target
+  set does not update an unbacked volume's recorded shape when the engine makes it again.
+- **Frames whose engine size the adopted revision lacks skip the work**, with a skip reason and no late-skip warning. Keeping the
+  old volume was rejected: the engine's constants that frame are for the new size.
+- **What sets the size (from SE Ghidra):** the descriptor's first read copies the Low preset's static default; the engine's
+  ImageSpace setup (SE 1412dbd00, from SE 141294060) sets the INI's quality, after CS's setup; then only SetVLQuality (SE 100299:
+  the console's volumetric lighting command, or CS's feature while it is on). The interior/exterior switch does not change it
+  with the feature off. AE not checked.

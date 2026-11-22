@@ -331,7 +331,7 @@ namespace
 struct ORGVolumetricLighting::Impl
 {
 	std::shared_ptr<VLFixed> fixed;
-	// The density volume, declared on the size settings and the Interior variable (the engine's size with the feature off).
+	// The density volume, declared on the size settings and the Interior variable, or with the feature off on the engine's size.
 	RenderGraph::Frame::DeclaredTexture3D volume;
 	// The client, declared on the inputs the last VL render found (B2's interim). The engine targets it reads are stable slots.
 	RenderGraph::Frame::DeclaredClient client;
@@ -339,8 +339,6 @@ struct ORGVolumetricLighting::Impl
 	VLPending pending;
 	std::optional<VLRun> run;
 	bool inRender = false;
-	// The engine's volume size with the feature off, declared at setup.
-	VolumeSize vanillaSize{};
 	bool noiseDone = false;
 	bool announced = false;
 	static constexpr std::uint32_t kLateSkipsLogged = 16;
@@ -435,14 +433,22 @@ struct ORGVolumetricLighting::Impl
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
 	}
 
-	/** @brief With the feature off: the engine's own size, which nothing changes in a session. Declared once it is known. */
-	void DeclareVanillaVolume(const VolumeSize& a_size)
+	/**
+	* @brief With the feature off: the engine's own size, the VolumetricLightingSize variable. The engine sets it from the INI's
+	* quality when it makes its ImageSpace, after this setup, and again at a quality change (the console's command). A new size
+	* is a new version at a revision. One texel until the engine has a size.
+	*/
+	void DeclareVanillaVolume()
 	{
 		using namespace RenderGraph::Frame;
 		volume = DeclareTexture3D(
-			"VolumetricLighting::Volume", Dependencies{}, [a_size](const Inputs&) { return VolumeDesc(a_size); },
+			"VolumetricLighting::Volume", DependsOn(Vars::VolumetricLightingSize()),
+			[](const Inputs& a_in) {
+				const auto engine = a_in.Get(Vars::VolumetricLightingSize());
+				const VolumeSize size{ engine.width, engine.height, engine.depth };
+				return VolumeDesc(size ? size : VolumeSize{ 1, 1, 1 });
+			},
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
-		logger::info("{}: the engine's volume is {}x{}x{}", kLogPrefix, a_size.width, a_size.height, a_size.depth);
 	}
 
 	void DeclareClient()
@@ -645,10 +651,6 @@ struct ORGVolumetricLighting::Impl
 		pending.rangeFactor = DescriptorField<float>(0x2C);
 		std::memcpy(pending.generateConstants.data(), GenerateConstants(), kGenerateBytes);
 		pending.generateConstants[kGenerateRows] = { pending.rangeFactor != 0.0f ? 1.0f / pending.rangeFactor : 0.0f, 0.0f, 0.0f, 0.0f };
-		// The volume was declared at setup, so a render never declares anything (phase 3, design 3.5).
-		if (fixed->vanilla && pending.size && !(pending.size == vanillaSize))
-			Fatal(fmt::format("the engine renders its volume at {}x{}x{}, but setup declared {}x{}x{}", pending.size.width, pending.size.height,
-				pending.size.depth, vanillaSize.width, vanillaSize.height, vanillaSize.depth));
 	}
 
 	std::uint32_t Apply(std::uint8_t* a_helper, std::uint32_t a_previous, std::uint32_t a_output)
@@ -703,9 +705,16 @@ struct ORGVolumetricLighting::Impl
 			skip("the client is not registered yet (the first revision after a VL render found the sky's noise gradient registers it)");
 			return clear();
 		}
-		// The engine was given the adopted revision's quality at EarlyPrepass, so its size is the bound version's.
 		const auto extent = RenderGraph::Frame::Revision::Adopted().Extent(volume);
 		const VolumeSize size{ extent[0], extent[1], extent[2] };
+		// With the feature off, the engine's new size reaches the next Begin's variable, and its version switches in with a later
+		// revision. The frames before that have no volumetric lighting. Not a late skip: no warning.
+		if (fixed->vanilla && size != pending.size) {
+			skipped.Report(fmt::format("the engine renders a {}x{}x{} volume, and the adopted revision's is {}x{}x{} until its new size switches in",
+				pending.size.width, pending.size.height, pending.size.depth, size.width, size.height, size.depth));
+			return clear();
+		}
+		// With the feature on, the engine was given the adopted revision's quality at EarlyPrepass, so its size is the bound version's.
 		if (size != pending.size)
 			Fatal(fmt::format("the engine renders a {}x{}x{} volume, but the adopted revision's is {}x{}x{}", pending.size.width, pending.size.height,
 				pending.size.depth, size.width, size.height, size.depth));
@@ -906,15 +915,10 @@ void ORGVolumetricLighting::Setup()
 		auto made = std::make_unique<Impl>();
 		made->fixed = std::move(fixed);
 		// The volume first, so the client's key never sees it missing. The volume follows the revisions.
-		if (!made->fixed->vanilla) {
+		if (made->fixed->vanilla)
+			made->DeclareVanillaVolume();
+		else
 			made->DeclareFeatureVolume();
-		} else if (const auto size = DescriptorSize()) {
-			made->vanillaSize = size;
-			made->DeclareVanillaVolume(size);
-		} else {
-			// Declared at setup only, never inside a frame. The descriptor is filled from the INI before the first frame.
-			Fatal("the engine's volume size (the volumetric lighting descriptor) is not known at setup");
-		}
 		// The client exists from the first revision after a VL render found its inputs.
 		made->DeclareClient();
 		impl = std::move(made);

@@ -460,6 +460,7 @@ namespace RenderGraph::Frame
 	}
 
 	template Vars::Extent2D Inputs::Get(Vars::Var<Vars::Extent2D>) const;
+	template Vars::Extent3D Inputs::Get(Vars::Var<Vars::Extent3D>) const;
 	template Vars::Ratios Inputs::Get(Vars::Var<Vars::Ratios>) const;
 	template Vars::Upscaler Inputs::Get(Vars::Var<Vars::Upscaler>) const;
 	template bool Inputs::Get(Vars::Var<bool>) const;
