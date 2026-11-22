@@ -188,6 +188,38 @@ namespace RenderGraph::ImageRegistry
 		return Find(reinterpret_cast<std::uint64_t>(info.image.image));
 	}
 
+	bool Rekey(std::uint64_t a_old, std::uint64_t a_new)
+	{
+		if (!a_old || !a_new || a_old == a_new)
+			return false;
+		auto& state = ImageRegistryRecords();
+		std::string duplicate;
+		{
+			const std::lock_guard lock(state.mutex);
+			const auto found = state.byImage.find(a_old);
+			if (found == state.byImage.end())
+				return false;
+			if (const auto existing = state.byImage.find(a_new); existing != state.byImage.end()) {
+				if (!existing->second.resource.expired() && existing->second.key != found->second.key)
+					duplicate = fmt::format("image 0x{:X} has two live graph resources after a relocation: '{}' ({}, from {}) moved into it, and '{}' "
+											"({}, from {}) is registered for it.",
+						a_new, found->second.name, KindText(found->second.kind), found->second.owner, existing->second.name,
+						KindText(existing->second.kind), existing->second.owner);
+				else
+					EraseImageRecord(state, existing);
+			}
+			if (duplicate.empty()) {
+				ImageRegistryRecord record = std::move(found->second);
+				state.byImage.erase(found);
+				state.imageOf[record.key] = a_new;
+				state.byImage.emplace(a_new, std::move(record));
+			}
+		}
+		if (!duplicate.empty())
+			RenderGraph::Fatal("image registry", duplicate);
+		return true;
+	}
+
 	void Retire(const org::Resource* a_resource)
 	{
 		if (!a_resource)

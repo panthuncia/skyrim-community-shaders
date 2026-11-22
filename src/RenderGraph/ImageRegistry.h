@@ -62,4 +62,10 @@ namespace RenderGraph::ImageRegistry
 
 	/** @brief Forgets a_resource. Frames may still finish with it, but no lookup finds it. Call it before its image can go. Any thread. */
 	void Retire(const org::Resource* a_resource);
+
+	/**
+	* @brief Moves a_old's entry to a_new: the resource now lives in another image (a relocation). Call it before a_old can go.
+	* An entry of another live resource under a_new is fatal, as in Register. False when a_old has no entry. Any thread.
+	*/
+	bool Rekey(std::uint64_t a_old, std::uint64_t a_new);
 }

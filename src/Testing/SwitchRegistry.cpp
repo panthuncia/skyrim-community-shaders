@@ -109,6 +109,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_ORG_D3D12_INSTANCE_WORD", .key = "org.d3d12_instance_word", .type = Bool, .defaultValue = "0", .description = "1: D3D12 DCLF draws pass the first instance in a root constant per draw, as before Shader Model 6.8's SV_StartInstanceLocation" },
 			{ .name = "CS_ORG_D3D12_SDK" },
 			{ .name = "CS_ORG_D3D12_SDK_PATH" },
+			{ .name = "CS_ORG_DEFRAG", .key = "org.defrag", .type = Bool, .defaultValue = "0", .description = "native: compact ORG's device-local memory at loading screens (GraphHost::DefragmentAtIdle)" },
 			{ .name = "CS_ORG_ENGINE_CONSTANTS_LOG_FRAMES", .type = Int },
 			{ .name = "CS_ORG_ENGINE_DRAW_TAP" },
 			{ .name = "CS_ORG_FOG_DEBUG" },
