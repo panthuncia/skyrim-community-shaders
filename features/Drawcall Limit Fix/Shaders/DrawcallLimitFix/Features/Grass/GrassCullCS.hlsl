@@ -242,7 +242,7 @@ void OcclusionSphere(uint4 a_raw0, uint4 a_raw1, float3 a_world, uint a_bucketBa
 	const float3 up = float3(f16tof32(a_raw0.w & 0xFFFF), f16tof32(a_raw1.y & 0xFFFF), f16tof32(a_raw1.y >> 16));
 	const float canopyMid = 0.5 * asfloat(buckets.Load(a_bucketBase + 200 + a_tier * 4));
 	a_centre = a_world + canopyMid * (1.0 + sizeVariance) * up;
-	a_radius = asfloat(buckets.Load(a_bucketBase + 212)) * max(1.0, abs(1.0 + sizeVariance)) * a_tightness;
+	a_radius = asfloat(buckets.Load(a_bucketBase + 216)) * max(1.0, abs(1.0 + sizeVariance)) * a_tightness;
 }
 
 // Counts the draw and writes the visible entry. Tiers 0 and 1 grow up from their base, tier 2 down from the end it shares with tier 1.
