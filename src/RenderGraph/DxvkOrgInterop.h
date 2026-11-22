@@ -15,7 +15,10 @@
 #endif
 
 // Version 6 added the guest-device exports, which were removed later. Version 7: dxvkCreateTextureFromVkImage (DxvkOrgInteropTextureWrap).
-#define DXVK_ORG_INTEROP_VERSION 7u
+// Version 8: dxvkPollInteropRelocations2 (DxvkOrgInteropRelocation2: the new storage and when its copy is done). No struct of
+// version 7 changed, so DXVK accepts both.
+#define DXVK_ORG_INTEROP_VERSION 8u
+#define DXVK_ORG_INTEROP_MIN_VERSION 7u
 
 extern "C" {
 
@@ -297,6 +300,29 @@ typedef HRESULT(__stdcall* PFN_dxvkUntrackInteropResources)(ID3D11Device* pDevic
 // Takes up to capacity relocations, oldest first (any thread). Each taken must be released, including those of resources no
 // longer imported.
 typedef HRESULT(__stdcall* PFN_dxvkPollInteropRelocations)(ID3D11Device* pDevice, DxvkOrgInteropRelocation* pRelocations, uint32_t capacity, uint32_t* pCount);
+// Version 8: one move of a tracked resource with its new storage. The first fields match DxvkOrgInteropRelocation.
+// - next describes the new storage as dxvkTrackInteropResources describes the whole resource (next.version is 8). A buffer: the new
+//   range's buffer, offset, address and usage; size is DXVK's size, at least the imported one. An image: the new VkImage, its
+//   properties, usage and the layout it rests in now; a client that imported a view keeps its own view fields. The handles stay valid
+//   until the resource moves again or the client ends its last import.
+// - DXVK's timeline readySemaphore reaches readyValue once the command list holding the copy completed. The client must not read the
+//   new storage before that. Work enqueued into DXVK's stream after the poll returned runs after the copy and needs nothing. Another
+//   queue waits for a signal of such work, or for readySemaphore directly: never a wait DXVK's stream waits for before its next
+//   flush, and never a host wait that holds DXVK's submission lock. The client must not signal the semaphore.
+struct DxvkOrgInteropRelocation2
+{
+	uint64_t cookie;
+	uint64_t storageSerial;  // the new storage's
+	void* storage;           // the old storage, alive until dxvkReleaseInteropStorage
+	uint32_t kind;           // DxvkOrgInteropResourceKind
+	uint32_t reserved;
+	DxvkOrgInteropResourceInfo next;
+	VkSemaphore readySemaphore;
+	uint64_t readyValue;
+};
+// dxvkPollInteropRelocations with the new storage and its ready point. Takes up to capacity, oldest first (any thread). Both exports
+// take from the same queue. Each one taken must be released, including those of resources no longer imported.
+typedef HRESULT(__stdcall* PFN_dxvkPollInteropRelocations2)(ID3D11Device* pDevice, DxvkOrgInteropRelocation2* pRelocations, uint32_t capacity, uint32_t* pCount);
 typedef HRESULT(__stdcall* PFN_dxvkReleaseInteropStorage)(ID3D11Device* pDevice, UINT count, void* const* pStorages);
 // Address of the immediate context's submission counter: +1 each time DXVK closes a command list (implicit
 // flushes, Flush(), the flush ahead of an enqueued submission). Read on the immediate context's thread.

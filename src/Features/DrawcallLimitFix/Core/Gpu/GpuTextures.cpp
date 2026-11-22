@@ -19,6 +19,7 @@
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Relocation/DxvkSource.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/UndeclaredAccess.h"
@@ -190,21 +191,9 @@ namespace DCLF
 			ankerl::unordered_dense::map<ID3D11ShaderResourceView*, Slot> entries;
 			std::atomic<std::uint32_t> liveCount{ 0 };
 			std::uint64_t nextSerial = 0;
-			// Pinless imports by resource, plus recent relocations for imports described before a move and registered after it.
+			// Pinless imports by resource. DXVK's moves reach each entry through its registration with Relocation::DxvkSource.
 			ankerl::unordered_dense::map<std::uint64_t, std::vector<std::weak_ptr<Entry>>> byCookie;
-			struct Unclaimed
-			{
-				std::uint64_t serial = 0;
-				std::shared_ptr<const void> storage;
-				std::chrono::steady_clock::time_point taken;
-				std::uint64_t ticket = 0;  // imports with a ticket up to this began before it
-			};
-			ankerl::unordered_dense::map<std::uint64_t, std::vector<Unclaimed>> unclaimed;
-			// An unclaimed move is kept while an import that began before it is still in flight. That import may have described the old
-			// storage, and DXVK's CS thread can be slow during a load.
-			std::uint64_t nextTicket = 0;
-			std::set<std::uint64_t> importsInFlight;
-			// Oldest first, covering [logEnd - log.size(), logEnd).
+			// Superseded views, oldest first, covering [logEnd - log.size(), logEnd).
 			std::deque<ID3D11ShaderResourceView*> log;
 			std::uint64_t logEnd = 0;
 			std::atomic<std::uint64_t> superseded{ 0 };
@@ -221,8 +210,9 @@ namespace DCLF
 			winrt::com_ptr<ID3D11ShaderResourceView> view;
 			rhi::ResourcePtr image;
 			IUnknown* tracked = nullptr;  // untrack the same object
-			// Old storages from relocations that superseded this import. Its image still reads them.
-			std::vector<std::shared_ptr<const void>> storages;
+			// The import's registration with Relocation::DxvkSource. It holds the old storage of each move that superseded the import,
+			// which its image still reads.
+			std::shared_ptr<const void> registration;
 			std::shared_ptr<const RenderGraph::Engine::Textures::Texture> engineTexture;
 			// Set when the graph moves the image between layouts, so the descriptor must read the graph's own image.
 			std::shared_ptr<org::Resource> graphResource;
@@ -233,7 +223,7 @@ namespace DCLF
 				if (tracked) {
 					RenderGraphRuntime::Get().UntrackResources({ &tracked, 1 });
 				}
-				storages.clear();
+				registration.reset();
 			}
 		};
 		struct Entry
@@ -248,6 +238,8 @@ namespace DCLF
 			std::uint64_t serial = 0;
 			std::uint64_t cookie = 0, storageSerial = 0;
 			bool pinned = false;
+			// Begun before a pinless import's description, ended once the import registered or failed.
+			RenderGraph::Relocation::DxvkSource::Ticket ticket;
 			const void* window = nullptr;  // an identity
 			std::shared_ptr<const void> graphWindow;
 			std::uint32_t sourceTag = ~0u;  // diagnostics
@@ -391,15 +383,13 @@ namespace DCLF
 		static constexpr std::size_t kRelocationLogEntries = std::size_t(1) << 14;
 
 		/**
-		 * @brief Apply the first relocation past the entry's storage. Its backing holds the old storage from then on, and the view leaves
-		 * the registry. Call under the registry lock.
+		 * @brief The entry's storage moved, or its window changed. The view leaves the registry, so the next lookup imports it again.
+		 * The entry stays valid for its owners: its registration holds the old storage. Call under the registry lock.
 		 */
-		static void Supersede(Registry& a_registry, Entry& a_entry, const std::shared_ptr<const void>& a_storage)
+		static void Supersede(Registry& a_registry, Entry& a_entry)
 		{
 			if (a_entry.superseded.exchange(true, std::memory_order_acq_rel))
 				return;
-			if (auto backing = a_entry.backing.lock())
-				backing->storages.push_back(a_storage);
 			a_registry.superseded.fetch_add(1, std::memory_order_relaxed);
 			if (const auto found = a_registry.entries.find(a_entry.key); found != a_registry.entries.end() && found->second.serial == a_entry.serial)
 				a_registry.entries.erase(found);
@@ -409,29 +399,10 @@ namespace DCLF
 				a_registry.log.pop_front();
 		}
 
-		/** @brief Marks an import in flight from before its description until after its registration. */
-		struct InFlight
-		{
-			explicit InFlight(std::shared_ptr<Registry> a_registry) :
-				registry(std::move(a_registry))
-			{
-				std::scoped_lock lock(registry->mutex);
-				ticket = ++registry->nextTicket;
-				registry->importsInFlight.insert(ticket);
-			}
-			~InFlight()
-			{
-				std::scoped_lock lock(registry->mutex);
-				registry->importsInFlight.erase(ticket);
-			}
-			InFlight(const InFlight&) = delete;
-			InFlight& operator=(const InFlight&) = delete;
-
-			std::shared_ptr<Registry> registry;
-			std::uint64_t ticket = 0;
-		};
-
-		/** @brief Register a settled import. A relocation that came after it was described supersedes it now. Call under the registry lock. */
+		/**
+		 * @brief Register a settled import with Relocation::DxvkSource. A move after its description supersedes it, now if the move
+		 * came before this. Call under the registry lock, before the entry's ticket ends.
+		 */
 		static void Register(Registry& a_registry, const std::shared_ptr<Entry>& a_entry)
 		{
 			if (!a_entry->cookie)
@@ -441,10 +412,22 @@ namespace DCLF
 				return;
 			}
 			a_registry.byCookie[a_entry->cookie].push_back(a_entry);
-			if (const auto unclaimed = a_registry.unclaimed.find(a_entry->cookie); unclaimed != a_registry.unclaimed.end())
-				for (const auto& relocation : unclaimed->second)
-					if (relocation.serial > a_entry->storageSerial)
-						Supersede(a_registry, *a_entry, relocation.storage);
+			const auto backing = a_entry->backing.lock();
+			if (!backing)
+				return;
+			// Runs on the committing thread, which holds no lock of ours.
+			auto superseded = [registry = a_entry->registry, weak = std::weak_ptr<Entry>(a_entry)] {
+				const auto owner = registry.lock();
+				const auto entry = weak.lock();
+				if (!owner || !entry)
+					return;
+				std::scoped_lock lock(owner->mutex);
+				Supersede(*owner, *entry);
+			};
+			auto registration = RenderGraph::Relocation::DxvkSource::Hold(a_entry->cookie, a_entry->storageSerial, std::move(superseded));
+			if (registration && registration->Superseded())
+				Supersede(a_registry, *a_entry);
+			backing->registration = std::move(registration);
 		}
 
 		static Found Find(Registry& a_registry, ID3D11ShaderResourceView* a_view, Binding& a_binding)
@@ -595,6 +578,8 @@ namespace DCLF
 				// DXVK accepts image views, but buffer imports must name the underlying resource.
 				IUnknown* object = structured ? static_cast<IUnknown*>(bufferResource.get()) : view;
 				if (runtime.PinlessImports()) {
+					// Held until the import registers, so a move in between reaches it.
+					a_entry.ticket = RenderGraph::Relocation::DxvkSource::Begin();
 					DxvkOrgInteropTrackedResource tracked{};
 					HRESULT result = E_FAIL;
 					if (!runtime.TrackResources({ &object, 1 }, { &tracked, 1 }, { &result, 1 }) || FAILED(result))
@@ -747,7 +732,6 @@ namespace DCLF
 				}
 			}
 			if (entry) {
-				const InFlight inFlight(a_published.registry);
 				Reject reject = Reject::Import;
 				try {
 					reject = Import(*entry, a_published.context, *a_published.counters, a_work.sourceTag);
@@ -769,10 +753,11 @@ namespace DCLF
 							winrt::com_ptr<ID3D11ShaderResourceView> window;
 							window.attach(TextureStreaming::CurrentWindow(entry->view.get()));
 							if (window.get() != entry->window)
-								Supersede(table, *entry, {});
+								Supersede(table, *entry);
 						}
 					}
 				}
+				entry->ticket = {};
 				binding = AnswerOf(entry, reject);
 			}
 			Answered(a_importer, *a_work.replies, key, a_work.cookie, std::move(binding));
@@ -928,7 +913,6 @@ namespace DCLF
 			entry->view.copy_from(a_view);
 			entry->registry = registry;
 			entry->key = a_view;
-			const Impl::InFlight inFlight(registry);
 			const auto reject = Impl::Import(*entry, context, *impl->counters, a_sourceTag);
 			Impl::Settle(*entry, reject, *impl->counters);
 			{
@@ -945,6 +929,7 @@ namespace DCLF
 				else
 					Impl::Register(*registry, entry);
 			}
+			entry->ticket = {};
 			if (reject != Reject::None) {
 				failure = ResolveFailure::Rejected;
 				return { kInvalid, {} };
@@ -1229,32 +1214,6 @@ namespace DCLF
 		return { index, index == kInvalid ? std::shared_ptr<const void>{} : impl->samplerBindings[a_addressMode * kFilterModes + a_filterMode].Owner() };
 	}
 
-	void GpuTextures::NoteRelocations(std::span<const ImportRelocations::Relocation> a_relocations)
-	{
-		const auto registry = impl->registry;
-		if (!registry)
-			return;
-		DCLF_ZONE("CS.DCLF.Texture.NoteRelocations");
-		// Kept a while for imports described before the move and registered after it, and longer while such an import is in flight.
-		constexpr auto kUnclaimedFor = std::chrono::seconds(2);
-		const auto now = std::chrono::steady_clock::now();
-		std::scoped_lock lock(registry->mutex);
-		for (const auto& relocation : a_relocations) {
-			registry->unclaimed[relocation.cookie].push_back({ relocation.serial, relocation.storage, now, registry->nextTicket });
-			if (const auto found = registry->byCookie.find(relocation.cookie); found != registry->byCookie.end())
-				for (const auto& weak : found->second)
-					if (const auto entry = weak.lock(); entry && entry->storageSerial < relocation.serial)
-						Impl::Supersede(*registry, *entry, relocation.storage);
-		}
-		std::erase_if(registry->unclaimed, [&](auto& a_unclaimed) {
-			std::erase_if(a_unclaimed.second, [&](const auto& a_relocation) {
-				const bool olderImport = !registry->importsInFlight.empty() && *registry->importsInFlight.begin() <= a_relocation.ticket;
-				return now - a_relocation.taken > kUnclaimedFor && !olderImport;
-			});
-			return a_unclaimed.second.empty();
-		});
-	}
-
 	bool GpuTextures::RelocatedViews(std::uint64_t& a_cursor, std::vector<ID3D11ShaderResourceView*>& a_out) const
 	{
 		const auto published = impl->importer->published.load(std::memory_order_acquire);
@@ -1279,7 +1238,7 @@ namespace DCLF
 		std::scoped_lock lock(registry.mutex);
 		if (const auto found = registry.entries.find(const_cast<ID3D11ShaderResourceView*>(a_shell)); found != registry.entries.end())
 			if (const auto entry = found->second.live.lock())
-				Impl::Supersede(registry, *entry, {});
+				Impl::Supersede(registry, *entry);
 	}
 
 	bool GpuTextures::Superseded(const void* a_owner)

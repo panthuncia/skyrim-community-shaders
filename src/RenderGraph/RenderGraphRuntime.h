@@ -277,15 +277,17 @@ public:
 
 	/** @brief Whether imports can be tracked instead of pinned. Fixed once the runtime is up. False when DXVK lacks the exports. */
 	bool PinlessImports() const;
-	/** @brief DescribeResources without pinning. DXVK may move the resource, reported by PollRelocations.
-	*  End each success with UntrackResources while the D3D11 object is still referenced. */
+	/** @brief DescribeResources without pinning. DXVK may move the resource. Its moves reach Relocation::DxvkSource, where the
+	*  importer registers each success (begin a ticket there before this call). End each success with UntrackResources while the
+	*  D3D11 object is still referenced. */
 	bool TrackResources(std::span<IUnknown* const> a_objects, std::span<DxvkOrgInteropTrackedResource> a_resources, std::span<HRESULT> a_results);
 	/** @brief Ends one import of each object's resource (any thread). */
 	void UntrackResources(std::span<IUnknown* const> a_objects);
-	/** @brief Takes reported relocations, oldest first (any thread); each one's storage must be released. */
-	std::uint32_t PollRelocations(std::span<DxvkOrgInteropRelocation> a_relocations);
-	/** @brief Releases relocations' old storage once the GPU no longer uses it (any thread). */
-	void ReleaseStorage(std::span<void* const> a_storages);
+	/**
+	* @brief Guest mode: no compute or copy queue is inside an epoch. The next submission on either then waits for a new point in
+	* DXVK's stream, so it comes after every D3D11 command so far. Read on the render thread.
+	*/
+	bool OffStreamQueuesIdle() const;
 
 	/** @brief A timeline semaphore point an external recording waits for or signals (stages 0: all commands). */
 	struct ExternalCommandsWait
