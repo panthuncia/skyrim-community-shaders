@@ -581,7 +581,7 @@ namespace DCLF
 				failed.diagnostics = std::move(error);
 				done(failed);
 			};
-			if (!BuildSubmitter()(std::function<void()>(std::move(task))))
+			if (!BuildSubmitter(BuildKind::Stage)(std::function<void()>(std::move(task))))
 				logger::error("[DCLF] the build executor refused a D3D12 stage's preparation");
 		}
 
@@ -756,7 +756,7 @@ namespace DCLF
 				return {};
 			if (configured != compiler) {
 				// Every DCLF request takes requestMutex, so none is submitted before this.
-				compiler->Configure(BuildSubmitter());
+				compiler->Configure(BuildSubmitter(BuildKind::Stage));
 				configured = compiler;
 			}
 			auto stage = std::make_shared<Stage>();

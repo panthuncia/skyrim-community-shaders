@@ -4,6 +4,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Diagnostics/ReplayCapture/ReplayCapture.h"
@@ -647,13 +648,19 @@ namespace DCLF
 		if (const auto family = KeyFamily(a_key.rasterFlags); family != Api::ProgramFamily::Count)
 			return BuildForwardOrDecal(ProgramFamilySlotOf(family), Extensions::ProgramFamilyOf(family).keyName, a_device, a_layout, a_zLayout, a_key, a_program, a_targets, a_state,
 				a_frontCCW);
-		auto [vertex, pixel, depthPixel, pulledVertex, pulledDepthPixel] =
-			Parse<5>({ &a_program->vertex, &a_program->pixel, &a_program->depthPixel, &a_program->pulledVertex, &a_program->pulledDepthPixel });
-		CheckBindings(vertex, false);
-		CheckBindings(pixel, true);
-		CheckBindings(depthPixel, true);
-		CheckPulledBindings(pulledVertex, false);
-		CheckPulledBindings(pulledDepthPixel, true);
+		DCLF_ZONE("CS.DCLF.Pipelines.BuildMain");
+		auto [vertex, pixel, depthPixel, pulledVertex, pulledDepthPixel] = [&] {
+			DCLF_ZONE("CS.DCLF.Pipelines.BuildMain.Parse");
+			return Parse<5>({ &a_program->vertex, &a_program->pixel, &a_program->depthPixel, &a_program->pulledVertex, &a_program->pulledDepthPixel });
+		}();
+		{
+			DCLF_ZONE("CS.DCLF.Pipelines.BuildMain.Check");
+			CheckBindings(vertex, false);
+			CheckBindings(pixel, true);
+			CheckBindings(depthPixel, true);
+			CheckPulledBindings(pulledVertex, false);
+			CheckPulledBindings(pulledDepthPixel, true);
+		}
 		// Both vertex stages read the same attributes.
 		CheckVertexAttributes(a_program->vertexAttributes, a_key.vertexLayout);
 		auto built = std::make_shared<Built>();

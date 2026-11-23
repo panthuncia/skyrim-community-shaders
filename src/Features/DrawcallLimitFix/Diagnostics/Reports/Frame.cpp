@@ -12,6 +12,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 
 #include "Deferred.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
+#include "Features/DrawcallLimitFix/Features/TextureStreaming/TextureStreaming.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -159,6 +161,15 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 					 "Lighting lookup pairs {}, {} with several runtime pairs (at most {})",
 			shaders.requested, shaders.ready, shaders.fromCache, shaders.failed, shaders.shadowRequested, shaders.shadowReady, shaders.shadowFailed, shaders.lookupPairs,
 			shaders.severalRuntime, shaders.mostRuntime);
+		// Queue waits are what hold a disk cache hit for seconds after a load.
+		const auto pump = DCLF::TakeBuildPumpStats();
+		const auto kind = [](const DCLF::BuildPumpStats::Kind& a_kind) {
+			return fmt::format("{} tasks, queued p50 {:.0f} ms p95 {:.0f} max {:.0f}, ran p50 {:.1f} ms p95 {:.1f} max {:.0f} ({:.0f} ms in all)", a_kind.tasks, a_kind.wait.p50,
+				a_kind.wait.p95, a_kind.wait.max, a_kind.run.p50, a_kind.run.p95, a_kind.run.max, a_kind.run.total);
+		};
+		if (pump.kinds[0].tasks || pump.kinds[1].tasks)
+			logger::info("[DCLF] build pump ({} at once, at most {} queued): shader stages {}; pipeline builds {}", pump.width, pump.deepest, kind(pump.kinds[0]),
+				kind(pump.kinds[1]));
 		const auto& indirect = DCLF::DrawPipelines::Get().GetStats();
 		std::string familyLanes;
 		for (const auto& family : indirect.drawFamilies)
@@ -192,6 +203,15 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 			draws.cpuMs, draws.epochs, draws.notReady, textures.cached, textures.registrySlots, textures.cleanupPending,
 			textures.rejected[1], textures.rejected[2], textures.rejected[3], textures.samplers, textures.importedAsync,
 			textures.requestsAnswered, textures.requestsPending);
+		// Imports run one at a time, so one slow answer holds every request behind it.
+		if (auto times = DCLF::GpuTextures::Get().TakeImportTimes(); times.queuedMax > 0 || times.answerMax > 0) {
+			std::string slow;
+			for (const auto& text : times.slowest)
+				slow += (slow.empty() ? "; the slowest: " : "; ") + text;
+			logger::info("[DCLF] texture imports: a request queued at most {:.0f} ms, an answer took at most {:.0f} ms{}", times.queuedMax, times.answerMax, slow);
+		}
+		if (const auto windows = DCLF::Features::Streaming::TakeWindowTimes(); !windows.empty())
+			logger::info("{}", windows);
 		// A register a pipeline reads that the commit does not supply rejects every pair of that pipeline. Its members are then drawn by nobody.
 		if (const auto constants = draws.skipped[static_cast<std::size_t>(DCLF::DrawSkip::Constants)])
 			logger::warn("[DCLF] {} pairs read constant registers no frame slot supplies (VS b{:04X} PS b{:04X}): their members are not drawn",

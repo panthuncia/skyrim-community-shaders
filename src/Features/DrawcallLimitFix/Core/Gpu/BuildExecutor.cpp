@@ -3,11 +3,16 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
 
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "RenderGraph/Async/Lanes.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <mutex>
+#include <utility>
+#include <vector>
 
 #include <ORGModuleServices/Async/SerializedTaskPump.h>
 #include <tbb/concurrent_queue.h>
@@ -16,24 +21,43 @@ namespace DCLF
 {
 	namespace
 	{
+		using Clock = std::chrono::steady_clock;
+
 		/**
 		 * @brief A lock-free, width-limited pump onto the preparation pool. A runner gives its slot back only once the count reads zero,
 		 * then looks once more, so a push that found every slot taken is never left without a runner.
+		 *
+		 * Shader stages run before queued pipeline builds. A stage is mostly a disk cache hit of a few milliseconds, and a pipeline
+		 * build can take a hundred. A stage behind a load's builds held its pipeline, and the objects drawn with it, for seconds.
 		 */
 		struct BuildPump
 		{
 			using Task = std::function<void()>;
+			struct Item
+			{
+				Task task;
+				Clock::time_point queued;
+			};
 
-			tbb::concurrent_queue<Task> tasks;
+			std::array<tbb::concurrent_queue<Item>, 2> tasks;  // BuildKind order: stages first
 			// A pop may precede its push's count, so this can read below zero for a moment.
 			std::atomic<std::int64_t> queued{ 0 };
 			std::atomic<unsigned> runners{ 0 };
 			const unsigned width = BuildWidth();
 
-			bool Submit(Task a_task)
+			// CS_DCLF_STATS: each kind's queue waits and run times in ms, and the deepest queue, under statsLock.
+			std::mutex statsLock;
+			std::array<std::vector<float>, 2> waits, runs;
+			std::int64_t deepest = 0;
+
+			bool Submit(BuildKind a_kind, Task a_task)
 			{
-				tasks.push(std::move(a_task));
-				queued.fetch_add(1);
+				tasks[static_cast<std::size_t>(a_kind)].push({ std::move(a_task), Clock::now() });
+				const std::int64_t depth = queued.fetch_add(1) + 1;
+				if (Diagnostics::Observe().stats) {
+					std::scoped_lock lock(statsLock);
+					deepest = (std::max)(deepest, depth);
+				}
 				if (TakeRunner())
 					Dispatch();
 				return true;
@@ -56,12 +80,24 @@ namespace DCLF
 
 			void Run()
 			{
-				if (Task task; tasks.try_pop(task)) {
+				Item item;
+				std::size_t kind = 0;
+				while (kind < tasks.size() && !tasks[kind].try_pop(item))
+					++kind;
+				if (kind < tasks.size()) {
 					queued.fetch_sub(1);
+					const auto start = Clock::now();
 					// ORG's tasks report failures through their artifacts. Nothing may stop the pump.
 					try {
-						task();
+						item.task();
 					} catch (...) {
+					}
+					if (Diagnostics::Observe().stats) {
+						const auto ms = [](Clock::duration a_span) { return std::chrono::duration<float, std::milli>(a_span).count(); };
+						const auto end = Clock::now();
+						std::scoped_lock lock(statsLock);
+						waits[kind].push_back(ms(start - item.queued));
+						runs[kind].push_back(ms(end - start));
 					}
 				}
 				if (queued.load() > 0) {
@@ -88,9 +124,35 @@ namespace DCLF
 		return (std::max)(1u, ::RenderGraph::Frame::PreparationWorkers() / 2);
 	}
 
-	std::function<bool(std::function<void()>)> BuildSubmitter()
+	std::function<bool(std::function<void()>)> BuildSubmitter(BuildKind a_kind)
 	{
-		return [](std::function<void()> a_task) { return Pump().Submit(std::move(a_task)); };
+		return [a_kind](std::function<void()> a_task) { return Pump().Submit(a_kind, std::move(a_task)); };
+	}
+
+	BuildPumpStats TakeBuildPumpStats()
+	{
+		auto& pump = Pump();
+		BuildPumpStats out;
+		std::scoped_lock lock(pump.statsLock);
+		const auto summarize = [](std::vector<float>& a_ms, BuildPumpStats::Spread& a_out) {
+			if (a_ms.empty())
+				return;
+			std::sort(a_ms.begin(), a_ms.end());
+			a_out.p50 = a_ms[a_ms.size() / 2];
+			a_out.p95 = a_ms[(std::min)(a_ms.size() - 1, a_ms.size() * 95 / 100)];
+			a_out.max = a_ms.back();
+			for (const float ms : a_ms)
+				a_out.total += ms;
+			a_ms.clear();
+		};
+		for (std::size_t k = 0; k < out.kinds.size(); ++k) {
+			out.kinds[k].tasks = static_cast<std::uint32_t>(pump.runs[k].size());
+			summarize(pump.waits[k], out.kinds[k].wait);
+			summarize(pump.runs[k], out.kinds[k].run);
+		}
+		out.deepest = static_cast<std::uint32_t>((std::max<std::int64_t>)(std::exchange(pump.deepest, 0), 0));
+		out.width = pump.width;
+		return out;
 	}
 
 	namespace
