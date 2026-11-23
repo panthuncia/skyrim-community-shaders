@@ -202,10 +202,22 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
         one batch at 10 steps). NPC face parts used to take 40 to 130 steps: a face shape gets no record without its head's
         positions snapshot, and the morph stage that took them does not run while the hold pauses the game, then only for some
         heads a frame. The walk now takes a head's first snapshot itself (fixed 2026-11-23, `FaceSnapshots`, `by the walk N`).
-    -   **New bindings (open):** an object whose keys are compiled on demand waits for them. Sigrid in native Vulkan (river route)
-        waited 225 to 232 steps, behind an on-demand Utility stage that took 6.7 s though both stages came from the disk cache,
-        and 181 on-demand pipeline builds. **Next:** the waiting reason per object for the slowest admissions, and the on-demand
-        lane's wait (shader-precompile-proposal.md, goal 3).
+    -   **Textures (fixed 2026-11-23):** the slowest report now names each object's waits ("frames on: material 232"). Sigrid
+        (native Vulkan, river route) waited about 230 frames on her material: her textures' base windows queued 10 s on the two
+        streaming workers behind 223 upgrade windows. The controller now keeps at most 8 upgrades in flight, so a base window
+        waits at most about 0.6 s. Sigrid now joins in 10 to 18 frames.
+    -   **Shader stages behind builds (fixed 2026-11-23):** a disk cache hit (the refraction stage, 6.7 s) queued behind every
+        pipeline build on DCLF's build pump. Stages now run before queued builds: 55 to 89 ms.
+    -   **Pipeline builds (open):** a load starts about 400 pipeline builds and the last wait up to 9 s (`[DCLF] build pump`
+        lines). About 95% of a build is BasicRHI lowering SPIR-V for the descriptor-buffer and descriptor-sets models (Tracy:
+        `RHI.Vulkan.LowerShaderModule`, about 10 ms a module in Dev-Fast's /Od). The driver call is 0.2 ms with the new on-disk
+        pipeline cache (`Data/ShaderCache/v3/pipelines-*.bin`). Lowered modules are now reused within a run (about 80% reused),
+        but about 1000 distinct modules a load are still lowered every launch. **Next:** persist lowered modules keyed by the
+        pre-lowering hash, likely in the shader store (compressed, capped). The Vulkan pipeline cache file grows to about 290 MB.
+        The Merchant still waits 14 frames on pipelines in the river route.
+    -   **D3D12 shadow stages (open):** on native D3D12 the first shadow techniques' Utility stages still come back after about
+        3 s from the disk cache, on the first world frame.
+    -   **Land (open):** one 'Land' object, untracked (not pending), stays undrawn about 267 frames in the river route.
 
 ## Memory retention
 
