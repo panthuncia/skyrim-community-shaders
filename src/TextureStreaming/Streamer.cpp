@@ -48,6 +48,11 @@ namespace TextureStreaming
 		constexpr std::uint32_t kHeaderBytes = 0x80, kDx10HeaderBytes = 0x94;
 		constexpr std::uint32_t kMaxDimension = 0x4000;
 		constexpr std::chrono::milliseconds kTick{ 250 };
+		// Upgrades asked for and not there yet, at most. The streaming workers take window builds in order, and a base window, which an
+		// object waits for before it is drawn, queued behind every upgrade posted before it: hundreds after a load, for ten seconds.
+		// Two ticks of builds keep the workers busy. One still pending after kInFlightTicks stops counting, so a lost build cannot stall the rest.
+		constexpr std::uint32_t kMaxUpgradesInFlight = 8;
+		constexpr std::uint32_t kInFlightTicks = 8;
 		// The driver's use at this share of its budget may be clamped to it.
 		constexpr double kClampedShare = 0.995;
 		constexpr std::size_t kMaxReleasesPerTick = 16;
@@ -994,6 +999,7 @@ namespace TextureStreaming
 			std::uint64_t committed = g_residentBytes.load(std::memory_order_relaxed);  // with what is on its way
 			std::vector<Candidate> upgrades;
 			std::vector<Candidate> downgrades;
+			std::uint32_t inFlight = 0;  // upgrades asked for and not there yet (kMaxUpgradesInFlight)
 			for (auto& texture : textures) {
 				auto& t = *texture;
 				if (!hasWindow(t)) {
@@ -1015,8 +1021,10 @@ namespace TextureStreaming
 				// What was asked for and not there yet stays asked for, unless it takes too long (the job failed or was replaced).
 				if (t.pendingTop != Policy::kNoWindow) {
 					if (t.pendingTop != resident && ++t.pendingTicks < 40) {
-						if (t.pendingTop < resident)
+						if (t.pendingTop < resident) {
 							committed += t.bytesFrom[t.pendingTop] - t.bytesFrom[resident];
+							inFlight += t.pendingTicks < kInFlightTicks ? 1u : 0u;
+						}
 						continue;
 					}
 					t.pendingTop = Policy::kNoWindow;
@@ -1075,10 +1083,13 @@ namespace TextureStreaming
 			for (auto& candidate : upgrades) {
 				if (candidate.bytes > uploadLeft && uploadLeft != rate / 4)
 					break;
+				if (inFlight >= kMaxUpgradesInFlight)
+					break;
 				if ((!candidate.visible || force >= 0) && (candidate.bytes > allowance || committed > allowance - candidate.bytes))
 					continue;
 				uploadLeft -= std::min(uploadLeft, candidate.bytes);
 				committed += candidate.bytes;
+				++inFlight;
 				g_upgrades.fetch_add(1, std::memory_order_relaxed);
 				post(candidate);
 			}
