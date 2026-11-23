@@ -47,6 +47,11 @@ The fixes below are in the code. No recorded run has yet shown the check that co
 
 ## Open crashes
 
+-   **A display resolution change in play is fatal (graph modes).** Seen 2026-11-23 on a GTX 980 Ti, guest mode: the user changed
+    the Windows display resolution during a run. The engine made a new target set with one more SAO depth mip
+    (`Engine::kSAO_CAMERAZ_MIP_LEVEL_11`), and `EngineTargetSet.cpp` (`LaterSetTarget`) stops the game, because the first set never
+    made that target. **Next:** declare a target a later set adds (mip views of a declared mip chain at least), instead of a
+    fatal error.
 -   **A freed child detached during cell streaming.** It happens intermittently, 70-100 s into motion runs (`CS_DCLF_TEST_MOVE`,
     cells streaming). It is an access violation on an engine job thread with this stack: `DCLF::DetachChild2At<0>::thunk+0x65`,
     then the engine's detach (`SkyrimSE+0xd1d32e`), whose `call qword ptr [rax+1B8h]` goes through the child's vtable. The vtable
