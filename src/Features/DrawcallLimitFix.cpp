@@ -52,6 +52,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
 #include "DrawcallLimitFix/Core/Handoff/PassCapture.h"
+#include "DrawcallLimitFix/Diagnostics/ReplayCapture/ReplayCapture.h"
 #include "DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
@@ -265,6 +266,8 @@ void DrawcallLimitFix::Reset()
 	// Every Present, menus included. The coordinator's queues hold references to attached subtrees and must not grow while the world is not rendered.
 	if (!installed)
 		return;
+	// A pass capture's dump, before the frame's end retires what it drew with (CS_DCLF_CAPTURE).
+	DCLF::ReplayCapture::OnFrameEnd();
 	{
 		DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Present);
 		DCLF::FrameDriver::Get().EndFrame();

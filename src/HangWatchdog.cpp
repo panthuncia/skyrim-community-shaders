@@ -5,6 +5,7 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 #include <OpenRenderGraph/GraphHost.h>
 #include <rhi_interop_vulkan.h>
+#include <rhi_interop.h>
 // After volk (rhi_interop_vulkan.h): DXVK's interop header includes vulkan.h only when no Vulkan header is in.
 #include "DxvkExports.h"
 
@@ -170,6 +171,9 @@ namespace HangWatchdog
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				const auto lines = rhi::vulkan::DumpCrashDiagnostics(host->Device(), false);
 				logger::critical("[HANG] render graph crash markers: {} lines logged above", lines);
+				// D3D12: each timeline's recent signals and waits. A queue stuck on a GPU wait shows a wait past its timeline's completed value.
+				if (const auto timelines = rhi::dx12::DumpTimelineHistories(host->Device()))
+					logger::critical("[HANG] D3D12 timelines: {} logged above (a wait whose value is past its timeline's completed one blocks its queue)", timelines);
 			}
 			spdlog::default_logger()->flush();
 			PruneReports(*dir);

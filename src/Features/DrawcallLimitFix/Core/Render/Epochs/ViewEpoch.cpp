@@ -43,7 +43,8 @@ namespace DCLF
 				return false;
 			if (keys.forwardRasterToForwardPart && RasterForward(pipelineKey.rasterFlags))
 				return false;
-			a_key = ForwardPipelineKey{ pipelineKey.vertexDescriptor, pipelineKey.pixelDescriptor & ~kLightingPixelDeferred, keys.keyFlags | twoSided };
+			a_key = ForwardPipelineKey{ pipelineKey.vertexDescriptor, pipelineKey.pixelDescriptor & ~kLightingPixelDeferred, keys.keyFlags | twoSided,
+				pipelineKey.runtimeVertex, pipelineKey.runtimePixel };
 			return true;
 		}
 
@@ -188,11 +189,11 @@ namespace DCLF
 				frame->faces[d].signature = in.signature;
 				frame->faces[d].groups = static_cast<std::uint32_t>((std::uint64_t(in.units) * faces.unitWords + faces.cullGroup - 1) / faces.cullGroup);
 			}
-			// Per face, the view's frame constants, with VS and PS b12 as the face's block.
-			const auto base = FramePushWords(a_in.frameConstantsAddress, a_in.frameConstantsRef);
+			// Per face, the view's frame record (its blocks, VS and PS b12 the face's camera, come through the record).
+			const auto base = FramePushWords(a_in.frameConstantsAddress, a_in.frameConstantsRef, a_in.frameBlocks ? a_in.frameBlocks->TableBase(0) : 0u);
 			frame->push.assign(traits.faces, base);
-			// A view with its own frame constants holds a record per face, so each face's words name its own.
-			const bool faceRecords = a_resources.frameConstants && a_resources.faceBlocks;
+			// A view with its own frame constants holds a record and a block table per face, so each face's words name its own.
+			const bool faceRecords = a_resources.frameConstants && a_resources.frameBlocks && a_resources.frameBlocks->faces > 1;
 			for (std::uint32_t f = 0; f < traits.faces; ++f) {
 				if (faceRecords && f) {
 					auto& words = frame->push[f];
@@ -200,13 +201,8 @@ namespace DCLF
 					words[kFramePushRecord] = static_cast<std::uint32_t>(record);
 					words[kFramePushRecord + 1] = static_cast<std::uint32_t>(record >> 32);
 					words[kFramePushRecordRef + 1] += f * static_cast<std::uint32_t>(sizeof(DrawBindings));
+					words[kFramePushBlocks] = a_resources.frameBlocks->TableBase(f);
 				}
-				const std::uint64_t block = a_resources.blocksAddress + std::uint64_t(f) * kViewBlockBytes;
-				for (const bool pixel : { false, true })
-					if (const std::uint32_t word = FramePushWord(pixel, kPerFrameVertexRegister); word != ~0u) {
-						frame->push[f][word] = static_cast<std::uint32_t>(block);
-						frame->push[f][word + 1] = static_cast<std::uint32_t>(block >> 32);
-					}
 			}
 			// The latched copies: each face's block and family rows from the latch, with the counters zeroed.
 			auto& fromLatch = frame->latched[0];
@@ -439,14 +435,11 @@ namespace DCLF
 				{ FrameValues::Get().PlacementsIndex(), FrameValues::Get().PalettesIndex(), FrameValues::Get().ShadingIndex() }, adopted, *scene, frameNumber);
 			// A record per face, each naming its face's camera block at VS and PS b12.
 			std::array<DrawBindings, kMaxViewFaces> records;
-			const std::uint32_t faces = own->faceBlocks ? std::min(own->traits ? own->traits->faces : 1u, kMaxViewFaces) : 1u;
+			const std::uint32_t faces = std::min(own->frameBlocks->faces, kMaxViewFaces);
 			for (std::uint32_t f = 0; f < faces; ++f) {
 				records[f] = record;
-				if (own->faceBlocks)
-					ForEachFrameBlock([&](bool, std::uint32_t a_register, std::uint32_t a_block) {
-						if (a_register == kPerFrameVertexRegister)
-							records[f].frameBlocks[a_block] = own->faceBlocks->indices[f];
-					});
+				const auto indices = own->frameBlocks->FaceIndices(f);
+				std::ranges::copy(indices, records[f].frameBlocks);
 			}
 			frame(own->frameConstants, records.data(), sizeof(DrawBindings) * faces, std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes);
 			frame(own->frameConstants, shared.data(), shared.size(), FrameSlotOffset(true, kSharedDataRegister));

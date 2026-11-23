@@ -141,6 +141,16 @@
 			"description": ""
 		},
 		{
+			"name": "BASICRHI_DX12_SUBMIT_LOG",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": "1: each D3D12 queue's last 64 submissions in the stall report"
+		},
+		{
 			"name": "BASICRHI_DX12_TEST_NO_DEPTH",
 			"key": "",
 			"type": "string",
@@ -202,6 +212,16 @@
 		},
 		{
 			"name": "BASICRHI_VK_BINDING",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": ""
+		},
+		{
+			"name": "BASICRHI_VK_BOUND_UBO",
 			"key": "",
 			"type": "string",
 			"default": "",
@@ -321,6 +341,16 @@
 			"description": "default on (T7f item 7): particle systems under NiBillboardNodes (the magic hands' fire cores and embers) drawn by DCLF's particle path like any other (their world and particles are their last update's); 0 they stay the engine's (billboard)"
 		},
 		{
+			"name": "CS_DCLF_CAPTURE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "<dir>: D3D12 native only. Records every view, sampler and pipeline; the cs-test command dclf:capture then dumps one frame of DCLF's Z-prepass and main opaque passes into <dir>/capture-<frame>/ for pascal-fetch-bench replay (docs/development/plans/dclf-replay.md)"
+		},
+		{
 			"name": "CS_DCLF_CAPTURE_PARITY",
 			"key": "dclf.capture_parity",
 			"type": "bool",
@@ -413,6 +443,16 @@
 			"kind": "feature",
 			"family": "dclf",
 			"description": "default on (T7f item 7): a decal on a first-person entry (an effect's skinned blood decal on the arms, a weapon's BloodLighting) drawn by the first-person forward part as a forward object with its decal group's depth bias, test and blend; 0 it stays the engine's"
+		},
+		{
+			"name": "CS_DCLF_HEAP_FRAME_BLOCKS",
+			"key": "dclf.heap_frame_blocks",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "1: D3D12 pulled stages read the pass-wide frame blocks by heap index instead of a bound descriptor table (A/B for dclf-bound-constants.md)"
 		},
 		{
 			"name": "CS_DCLF_LATE_POSE",
@@ -1816,6 +1856,16 @@
 			"kind": "other",
 			"family": "dxvk",
 			"description": ""
+		},
+		{
+			"name": "ORG_BOUND_PUSH_TABLES",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "0: D3D12 graph compute programs read every constant buffer from the heap (A/B for their bound push tables)"
 		},
 		{
 			"name": "ORG_FRAME_PLACEMENT",

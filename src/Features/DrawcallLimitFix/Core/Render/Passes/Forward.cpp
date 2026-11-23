@@ -88,9 +88,9 @@ namespace DCLF::Draws
 		return std::make_shared<ForwardSortPass>(std::move(a_sequences), std::move(a_counts), std::move(a_source));
 	}
 
-	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef)
+	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews* a_blocks)
 	{
-		return FramePushWords(a_frameConstants, a_frameConstantsRef);
+		return FramePushWords(a_frameConstants, a_frameConstantsRef, a_blocks ? a_blocks->TableBase(0) : 0u);
 	}
 
 	void MainShadowLayoutPush(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, std::uint32_t (&a_out)[kShadowPushWords])
@@ -120,9 +120,8 @@ namespace DCLF::Draws
 		ref(kShadowPushViewBlock, a_frameConstantsRef + FrameSlotOffset(false, 0));
 		ref(kShadowPushPerFrame, a_frameConstantsRef + FrameSlotOffset(false, kPerFrameVertexRegister));
 		ref(kShadowPushZeros, a_frameConstantsRef + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);
-		// A block's view is its ordinal in the frame push words' order.
 		auto view = [&](std::uint32_t a_word, std::uint32_t a_register) {
-			a_out[a_word] = a_blocks.indices[(FramePushWord(false, a_register) - kFramePushRegisters) / 2];
+			a_out[a_word] = a_blocks.indices[FrameBlockOrdinal(false, a_register)];
 			a_out[a_word + 1] = 0;
 		};
 		view(kShadowPushSharedData, kSharedDataRegister);

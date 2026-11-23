@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/EngineStates.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/FrameSource.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
@@ -49,6 +50,12 @@
 
 namespace DCLF
 {
+	bool BoundFrameBlocks()
+	{
+		static const bool bound = !SwitchEnabled(Switch::HeapFrameBlocks);
+		return bound;
+	}
+
 	bool DrawPipelines::Impl::ToRHI(D3D11_BLEND a_factor, rhi::BlendFactor& a_out)
 	{
 		switch (a_factor) {
@@ -181,9 +188,14 @@ namespace DCLF
 		pushConstants[1].set = 0;
 		pushConstants[1].binding = kFramePushBinding;
 
-		// On D3D12 the main layout has no ranges. Nothing draws with the unpulled builds there.
-		const auto mainRanges = d3d12 ? std::vector<rhi::LayoutBindingRange>{} : MainLayoutRanges(false);
-		const auto zRanges = d3d12 ? std::vector<rhi::LayoutBindingRange>{} : MainLayoutRanges(true);
+		// On D3D12 nothing draws with the unpulled builds, and the pulled builds read everything but the pass-wide blocks themselves
+		// (FrameSource). Those are one table, register(b<ordinal>, space9), unless CS_DCLF_HEAP_FRAME_BLOCKS reads them by heap index.
+		const std::vector<rhi::LayoutBindingRange> d3d12Ranges = BoundFrameBlocks() ?
+			std::vector<rhi::LayoutBindingRange>{ FrameBlockRange(FrameSource::kBoundBlockSpace, 0, kFrameBlocks, rhi::ShaderStage::AllGraphics, 0),
+				FrameBlockRange(FrameSource::kBoundBlockSpace + 1, 0, kFrameBlocks, rhi::ShaderStage::AllGraphics, 0) } :
+			std::vector<rhi::LayoutBindingRange>{};
+		const auto mainRanges = d3d12 ? d3d12Ranges : MainLayoutRanges(false);
+		const auto zRanges = d3d12 ? d3d12Ranges : MainLayoutRanges(true);
 		// No input assembler, since every vertex stage pulls its attributes.
 		const rhi::PipelineLayoutDesc desc{ .ranges = rhi::Span<rhi::LayoutBindingRange>{ mainRanges.data(), static_cast<std::uint32_t>(mainRanges.size()) },
 			.pushConstants = { pushConstants, 2u }, .staticSamplers = {}, .flags = rhi::PF_None };

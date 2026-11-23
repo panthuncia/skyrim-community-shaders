@@ -99,8 +99,9 @@ bool PortalProgramRun(ByteAddressBuffer a_programs, uint4 a_entry, uint4 a_entry
 	uint op = a_entry.w;
 	// The loops never run past the records the encoding holds, so a torn buffer gives one wrong frame, never a GPU hang.
 	// Written with min rather than a guard and early return, because of AMD's equality-guard miscompile.
-	const uint available = (a_setsBase - a_recordsBase) / kPortalOpBytes;
-	const uint operators = min(a_entry.y, available - min(a_entry2.x, available));
+	// A sets base below the records base (stale words) gives none rather than an unsigned wrap. 4096 is the CPU encoder's own guard.
+	const uint available = (max(a_setsBase, a_recordsBase) - a_recordsBase) / kPortalOpBytes;
+	const uint operators = min(min(a_entry.y, available - min(a_entry2.x, available)), 4096u);
 #ifdef DCLF_PORTAL_UNIFORM_SCAN
 	bool accepted = false;
 	[loop] for (uint i = 0; i < operators; ++i)

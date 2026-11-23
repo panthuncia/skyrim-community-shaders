@@ -8,15 +8,64 @@
 
 namespace DCLF::Draws
 {
-	std::shared_ptr<const FrameBlockViews> FrameBlockViews::Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants)
+	std::shared_ptr<const FrameBlockViews> FrameBlockViews::Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants,
+		const std::shared_ptr<org::Buffer>& a_faceBlocks, std::uint32_t a_faceStride, std::uint32_t a_faces)
 	{
-		std::array<Block, kFrameBlocks> blocks{};
-		ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
-			// The shared light block is half a slot.
-			const std::uint64_t bytes = a_pixel && a_register == 3 ? kSharedLightBlockBytes : kFrameSlotBytes;
-			blocks[a_block] = { FrameBlockOffset(a_pixel, a_register), static_cast<std::uint32_t>(bytes) };
-		});
-		return CreateFor(a_device, a_frameConstants, blocks, "frame block");
+		auto* host = RenderGraphRuntime::Get().Host();
+		auto service = host && host->Graph() ? host->Graph()->RetainDescriptorService() : nullptr;
+		const std::uint32_t faces = a_faceBlocks ? std::max(a_faces, 1u) : 1u;
+		if (!service || !a_frameConstants) {
+			logger::error("[DCLF] frame block views: no descriptor service");
+			return nullptr;
+		}
+		// One range, so a face's table is kFrameBlocks consecutive slots a PushIndex range binds from its first.
+		auto range = service->AllocateDescriptorSlotRange(rhi::DescriptorHeapType::CbvSrvUav, true, faces * kFrameBlocks);
+		if (range.size() != faces * kFrameBlocks) {
+			for (const auto& slot : range)
+				service->RetireDescriptorSlot(slot);
+			logger::error("[DCLF] frame block views: the descriptor service gave no range of {} slots", faces * kFrameBlocks);
+			return nullptr;
+		}
+		auto views = std::make_shared<FrameBlockViews>();
+		views->service = std::move(service);
+		views->slots = std::move(range);
+		views->owner = std::make_shared<std::pair<std::shared_ptr<org::Buffer>, std::shared_ptr<org::Buffer>>>(a_frameConstants, a_faceBlocks);
+		views->contiguous = true;
+		views->faces = faces;
+		// The views name the buffers' native resources, so the buffers never move.
+		::RenderGraph::Relocation::Pin(*a_frameConstants);
+		if (a_faceBlocks)
+			::RenderGraph::Relocation::Pin(*a_faceBlocks);
+		const auto constants = a_frameConstants->GetAPIResource().GetHandle();
+		bool made = true;
+		for (std::uint32_t f = 0; f < faces && made; ++f)
+			ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
+				if (!made)
+					return;
+				const rhi::DescriptorSlot& slot = views->slots[f * kFrameBlocks + a_block];
+				const bool face = a_faceBlocks && a_register == kPerFrameVertexRegister;
+				// The shared light block is half a slot.
+				const std::uint64_t bytes = face ? a_faceStride : a_pixel && a_register == 3 ? kSharedLightBlockBytes : kFrameSlotBytes;
+				const std::uint64_t offset = face ? std::uint64_t(f) * a_faceStride : FrameBlockOffset(a_pixel, a_register);
+				const rhi::CbvDesc desc{ .byteOffset = offset, .byteSize = static_cast<std::uint32_t>(bytes) };
+				if (a_device.CreateConstantBufferView(slot, face ? a_faceBlocks->GetAPIResource().GetHandle() : constants, desc) != rhi::Result::Ok) {
+					logger::error("[DCLF] frame block views: face {} block {} ({} bytes at {}) could not be made", f, a_block, bytes, offset);
+					made = false;
+				}
+			});
+		if (!made)
+			return nullptr;
+		views->indices = views->FaceIndices(0);
+		return views;
+	}
+
+	std::array<std::uint32_t, kFrameBlocks> FrameBlockViews::FaceIndices(std::uint32_t a_face) const
+	{
+		std::array<std::uint32_t, kFrameBlocks> out{};
+		const std::uint32_t first = std::min(a_face, faces - 1) * kFrameBlocks;
+		for (std::uint32_t b = 0; b < kFrameBlocks && first + b < slots.size(); ++b)
+			out[b] = slots[first + b].index;
+		return out;
 	}
 
 	std::shared_ptr<const FrameBlockViews> FrameBlockViews::CreateFor(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_buffer, std::span<const Block> a_blocks,
@@ -30,14 +79,13 @@ namespace DCLF::Draws
 		}
 		auto views = std::make_shared<FrameBlockViews>();
 		views->service = std::move(service);
-		views->buffer = a_buffer;
+		views->owner = a_buffer;
 		// The views name the buffer's native resource, so the buffer never moves.
 		::RenderGraph::Relocation::Pin(*a_buffer);
 		const auto resource = a_buffer->GetAPIResource().GetHandle();
 		for (std::uint32_t b = 0; b < a_blocks.size(); ++b) {
 			const rhi::DescriptorSlot slot = views->service->AllocateDescriptorSlot(rhi::DescriptorHeapType::CbvSrvUav, true);
-			views->slots[b] = slot;
-			views->made = b + 1;
+			views->slots.push_back(slot);
 			const rhi::CbvDesc desc{ .byteOffset = a_blocks[b].offset, .byteSize = a_blocks[b].bytes };
 			if (!slot.heap.valid() || a_device.CreateConstantBufferView(slot, resource, desc) != rhi::Result::Ok) {
 				logger::error("[DCLF] {} views: the view of block {} ({} bytes at {}) could not be made", a_what, b, a_blocks[b].bytes, a_blocks[b].offset);
@@ -50,9 +98,9 @@ namespace DCLF::Draws
 
 	FrameBlockViews::~FrameBlockViews()
 	{
-		for (std::uint32_t b = 0; b < made; ++b)
-			if (slots[b].heap.valid())
-				service->RetireDescriptorSlotWithOwner(slots[b], buffer);
+		for (const auto& slot : slots)
+			if (slot.heap.valid())
+				service->RetireDescriptorSlotWithOwner(slot, owner);
 	}
 
 	std::string FrameConstantsPart(std::uint64_t a_offset)

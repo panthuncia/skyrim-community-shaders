@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
+#include "Features/DrawcallLimitFix/Diagnostics/ReplayCapture/ReplayCapture.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/EngineStates.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
@@ -47,6 +48,13 @@ namespace DCLF
 {
 	namespace
 	{
+		/** @brief A pulled Lighting stage's key in the replay capture, as ShaderPrograms names its stage line. */
+		std::string ReplayStageKey(const ShaderStageSpec& a_stage)
+		{
+			return ReplayCapture::StageKey(a_stage.pixel, a_stage.depth, true, false, a_stage.descriptor, a_stage.literals, a_stage.runtimeVertex, a_stage.runtimePixel,
+				a_stage.depthTex);
+		}
+
 		/** @brief A key's variable names: its family's material space, else Lighting's. */
 		std::span<const std::string_view> VariableNames(const PipelineKey& a_key, bool a_pixel)
 		{
@@ -95,7 +103,7 @@ namespace DCLF
 
 	inline namespace DrawPipelinesDetail
 	{
-		// Pass-wide blocks come from uniform buffer views, b0/b1/b2/b4 from the draw's pushed addresses, the rest from the frame record.
+		// Pass-wide blocks come from the pass's block table, b0/b1/b2/b4 from the draw's pushed addresses, the rest from the frame record.
 		std::vector<rhi::LayoutBindingRange> MainLayoutRanges(bool a_pulled)
 		{
 			// A pulled draw reads its rows itself, so it gets no row ranges.
@@ -122,9 +130,8 @@ namespace DCLF
 					const std::uint32_t b = kBindingShiftB + r;
 					const auto address = rhi::LayoutRangeSource::IndirectAddress;
 					if ((mask >> r) & 1) {
-						// A heap descriptor, not the pushed address, since address-sourced blocks lower to raw pointer loads (see kFrameBlocks).
-						mainRanges.push_back(FromFrameRecord(LayoutRange(b, 1, stage, rhi::LayoutRangeSource::IndirectIndex,
-							offsetof(DrawBindings, frameBlocks) + 4 * std::size_t{ block++ })));
+						// A descriptor of the pass's block table, not a pushed address, since address-sourced blocks lower to raw pointer loads.
+						mainRanges.push_back(FrameBlockRange(0, b, 1, stage, block++));
 					} else if (r <= 2 || r == 4) {
 						if (!a_pulled)
 							mainRanges.push_back(PushedRange(b, stage, 0, rowBlockWord(r, pixel)));
@@ -184,6 +191,8 @@ namespace DCLF
 			difference.Field("pass", key.passDescriptor, a_key.passDescriptor);
 			difference.Field("raster", key.rasterFlags, a_key.rasterFlags);
 			difference.Field("vertex layout", key.vertexLayout, a_key.vertexLayout);
+			difference.Field("runtime vertex", key.runtimeVertex, a_key.runtimeVertex);
+			difference.Field("runtime pixel", key.runtimePixel, a_key.runtimePixel);
 			if (!nearest || difference.bits < best.bits) {
 				nearest = &key;
 				best = std::move(difference);
@@ -231,7 +240,7 @@ namespace DCLF
 			return;
 		}
 		if (!program) {
-			l.programWaiters[member ? ShaderPrograms::FamilyProgramId(family, a_key) : ShaderPrograms::LightingProgramId(a_key)].push_back(a_key);
+			l.programWaiters[member ? ShaderPrograms::Get().FamilyProgramId(family, a_key) : ShaderPrograms::Get().LightingProgramId(a_key)].push_back(a_key);
 			return;
 		}
 		if (l.Full()) {
@@ -702,17 +711,23 @@ namespace DCLF
 					}
 			}
 			built->stateClass.variants[variant] = desc.State(depthOnly ? depthPixel : pixel);
-			const std::string keyName = fmt::format("vs {:08X} ps {:08X} flags {:08X}", a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.rasterFlags);
+			const std::string keyName = fmt::format("vs {:08X} ps {:08X} flags {:08X} runtime {:08X} {:08X}", a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.rasterFlags,
+				a_key.runtimeVertex, a_key.runtimePixel);
 			// On D3D12 no layout maps the unpulled stages' registers, so only the pulled pipelines are made.
 			if (!DrawPipelines::Get().impl->d3d12)
 				desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", keyName, depthOnly ? "depth" : "color"));
 			if (!depthOnly) {
 				BuildPulledColour(a_device, a_zLayout, a_program->pulledVertex, a_program->pulledPixel, desc,
 					fmt::format("{} {}", forward ? "Lighting forward" : terrainGroup ? "Lighting terrain" : RasterDecalGroup(a_key.rasterFlags) ? "Lighting decal" : "Lighting main", keyName), *built);
+				if (built->pulledColour && ReplayCapture::Enabled())
+					ReplayCapture::NotePipeline(built->pulledColour->GetHandle(), { keyName, ReplayStageKey(ShaderPrograms::LightingStages(a_key)[3]),
+						ReplayStageKey(ShaderPrograms::LightingStages(a_key)[5]) });
 				continue;
 			}
-			// The Z-prepass plain-draw pipeline. Without a pixel stage it uses the depth-only vertex build. An alpha-tested one keeps the full stage.
-			const auto& zVertex = !pulledPixel && !a_program->pulledDepthVertex.empty() ? a_program->pulledDepthVertex : a_program->pulledVertex;
+			// The Z-prepass plain-draw pipeline. Without a pixel stage it uses the depth-only vertex build. An alpha-tested one uses the
+			// full stage's build that passes its pixel stage the texture indices (ShaderStageSpec::depthTex).
+			const auto& zVertex = pulledPixel ? a_program->pulledDepthTexVertex : (!a_program->pulledDepthVertex.empty() ? a_program->pulledDepthVertex : a_program->pulledVertex);
+			const std::size_t zVertexStage = pulledPixel ? 7 : (&zVertex != &a_program->pulledVertex ? 6 : 3);
 			if (&zVertex != &a_program->pulledVertex)
 				CheckPulledBindings(Parse<1>({ &zVertex })[0], false);
 			auto& zKey = built->zKey;
@@ -733,6 +748,10 @@ namespace DCLF
 			pulled.blend = desc.blend;
 			pulled.targets = desc.targets;
 			pulled.Create(a_device, built->pulledDepth, "pulled depth");
+			if (built->pulledDepth && ReplayCapture::Enabled())
+				ReplayCapture::NotePipeline(built->pulledDepth->GetHandle(), { keyName + " depth",
+					ReplayStageKey(ShaderPrograms::LightingStages(a_key)[zVertexStage]),
+					pulledPixel ? ReplayStageKey(ShaderPrograms::LightingStages(a_key)[4]) : std::string{} });
 		}
 		return built;
 	}
@@ -772,7 +791,7 @@ namespace DCLF
 		if (programFailed)
 			return fail("its program failed");
 		if (!own) {
-			l.programWaiters[ShaderPrograms::FamilyProgramId(family, a_key)].push_back(a_key);
+			l.programWaiters[ShaderPrograms::Get().FamilyProgramId(family, a_key)].push_back(a_key);
 			return;
 		}
 		const auto draws = Extensions::DeferredDrawsOf(a_key);
@@ -797,7 +816,7 @@ namespace DCLF
 					if (programFailed)
 						return fail(fmt::format("range {}'s program (VS {:08X} PS {:08X}) failed", entry.name, other.vertexDescriptor, other.pixelDescriptor));
 					if (!range.program) {
-						l.programWaiters[ShaderPrograms::FamilyProgramId(family, other)].push_back(a_key);
+						l.programWaiters[ShaderPrograms::Get().FamilyProgramId(family, other)].push_back(a_key);
 						return;
 					}
 				}

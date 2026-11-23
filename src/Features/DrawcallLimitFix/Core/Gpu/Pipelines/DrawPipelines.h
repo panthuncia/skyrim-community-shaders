@@ -28,22 +28,31 @@ namespace DCLF
 	/** @brief Constant buffer registers b0-b13, separate per stage as in D3D11. */
 	inline constexpr std::uint32_t kConstantBufferRegisters = 14;
 	/**
-	 * @brief Registers whose block is the same for every draw of a pass. Their addresses are pushed once per pass, saving an indirection.
-	 * Push data order: the record address range (4 words, for alignment), then these addresses, VS registers ascending, then PS.
+	 * @brief Registers whose block is the same for every draw of a pass (the pass-wide blocks), VS registers ascending, then PS.
+	 * Shaders read them through uniform buffer views (FrameBlockViews), in this order.
 	 */
 	inline constexpr std::uint32_t kFramePushVS = (1u << 3) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 11) | (1u << 12) | (1u << 13);
-	inline constexpr std::uint32_t kFramePushPS = (1u << 3) | (1u << 5) | (1u << 6) | (1u << 9) | (1u << 10) | (1u << 12) | (1u << 13);
+	// Every frame block that is not per draw (Extensions kCorePerDrawVS/PS and the features' per-draw registers): PS b7 is Advanced
+	// Skin's per-geometry block and PS b11 the alpha test reference.
+	inline constexpr std::uint32_t kFramePushPS = (1u << 3) | (1u << 5) | (1u << 6) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 12) | (1u << 13);
 	inline constexpr std::uint32_t kFramePushBinding = 191;
 	// The draw's push range. Per draw under device-generated commands, once per call for plain draws.
 	inline constexpr std::uint32_t kDrawPushBinding = 190;
-	// The frame record's address, its buffer view ref (Common/DCLFFrameRecord.hlsli), then the registers' addresses.
+	// The frame push words: the frame record's address and its buffer view ref (Common/DCLFFrameRecord.hlsli), then the first
+	// heap slot of the pass-wide blocks' table (FrameBlockViews::TableBase), which the layout's PushIndex ranges bind. Everything
+	// else a pass reads comes through the record, so the root signature (D3D12) and push range (Vulkan) stay small.
 	inline constexpr std::uint32_t kFramePushRecord = 0;
 	inline constexpr std::uint32_t kFramePushRecordRef = 2;
-	inline constexpr std::uint32_t kFramePushRegisters = 4;
-	inline constexpr std::uint32_t kFramePushWords = kFramePushRegisters + 2 * (std::popcount(kFramePushVS) + std::popcount(kFramePushPS));
+	inline constexpr std::uint32_t kFramePushBlocks = 4;
+	inline constexpr std::uint32_t kFramePushWords = 5;
 	// Pass-wide blocks, in the frame push words' order. Read through uniform buffer descriptors rather than pushed addresses,
 	// because address-sourced blocks cost the colour pixel stage about 40 registers on NVIDIA (tools/shader-compare).
 	inline constexpr std::uint32_t kFrameBlocks = std::popcount(kFramePushVS) + std::popcount(kFramePushPS);
+	/**
+	 * @brief Whether D3D12 pulled stages read the pass-wide blocks as bound constant buffers (a descriptor table the layout's
+	 * PushIndex range binds) rather than by heap index. On unless CS_DCLF_HEAP_FRAME_BLOCKS=1. See dclf-bound-constants.md.
+	 */
+	bool BoundFrameBlocks();
 	// A draw's push words (DrawSequence bytes 4-99). These must match DCLFPushData's packoffsets in DCLFObjects.hlsli.
 	// BasicRHI needs pushed addresses 8-byte aligned, hence the pad at word 13 and the even word count.
 	inline constexpr std::uint32_t kDrawPushPipelineRow = 0, kDrawPushMaterialRow = 2, kDrawPushObject = 4, kDrawPushVertexBuffer = 5, kDrawPushStreamBuffer = 9,
@@ -206,8 +215,7 @@ namespace DCLF
 		std::uint64_t pixelConstants[kConstantBufferRegisters];
 		std::uint32_t textures[kTextureRegisters];  // descriptor heap indices
 		std::uint32_t samplers[kSamplerRegisters];  // descriptor heap indices
-		std::uint32_t frameBlocks[kFrameBlocks];  // uniform buffer descriptor heap indices
-		std::uint32_t pad = 0;
+		std::uint32_t frameBlocks[kFrameBlocks];  // uniform buffer descriptor heap indices (face 0's table, FrameBlockViews)
 		// The buffers device addresses point into. No layout reads them.
 		RecordBacking backings[kRecordBackings];
 	};
@@ -275,6 +283,8 @@ namespace DCLF
 		static constexpr std::uint32_t kForwardTwoSided = 1, kForwardTreeLod = 2;
 		std::uint32_t vertexDescriptor = 0, pixelDescriptor = 0;
 		std::uint32_t flags = 0;
+		// A Lighting key's runtime descriptors, as its main PipelineKey's. The pulled pixel stage is compiled for them.
+		std::uint32_t runtimeVertex = 0, runtimePixel = 0;
 
 		bool operator==(const ForwardPipelineKey&) const = default;
 	};

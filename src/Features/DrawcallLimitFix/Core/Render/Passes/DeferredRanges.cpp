@@ -113,7 +113,7 @@ namespace DCLF::Draws
 				// Without buckets the pass records nothing, so a range with no members costs only its declarations.
 				if (!frame || !frame->indirect.valid || !DeferredRangeDrawn(*frame, range))
 					return prepared;
-				prepared.framePushWords = MainFramePushWords(resources->frameConstantsAddress, resources->frameConstantsRef);
+				prepared.framePushWords = MainFramePushWords(resources->frameConstantsAddress, resources->frameConstantsRef, resources->frameBlocks.get());
 				prepared.range = range;
 				prepared.variant = variant;
 				prepared.chosen = chosen;

@@ -183,8 +183,8 @@ uint DCLFShadowLightMask()
 // The permutation block (b4) as the draw's pipeline row holds it (Permutation.hlsli, DCLF_PULLED_ROWS).
 void DCLFPermutationStatics()
 {
-	Permutation::VertexShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
-	Permutation::PixelShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+	Permutation::VertexShaderDescriptor = DCLFPermutationVertexDescriptor();
+	Permutation::PixelShaderDescriptor = DCLFPermutationPixelDescriptor();
 	Permutation::ExtraShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 8);
 	Permutation::ExtraFeatureDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 12);
 	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);
@@ -273,6 +273,10 @@ struct VS_OUTPUT
 	// stage does (DCLFDrawSequence). One flat word: the five the stage reads (its rows and object word) cost a pixel shader 60 bytes of
 	// attribute storage a warp, which cost the terrain shader a warp of occupancy.
 	nointerpolation uint DCLFDrawInstance: TEXCOORD15;
+#	if defined(DCLF_DEPTH_TEX)
+	// The Z-prepass's alpha-tested pipelines (DCLF_DEPTH_TEX): the diffuse texture's and sampler's heap indices (DCLFDepthTexIndices).
+	nointerpolation uint2 DCLFDepthTex: TEXCOORD14;
+#	endif
 #endif
 };
 #ifdef VSHADER
@@ -727,6 +731,9 @@ VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
 	if (DCLFVertexLayout.x != 0)
 		vsout.Position.z += 10.0;
 	vsout.DCLFDrawInstance = a_instance;
+#		if defined(DCLF_DEPTH_TEX)
+	vsout.DCLFDepthTex = uint2(DCLFMaterialTextureIndex(0), DCLFMaterialSamplerIndex(0));
+#		endif
 	return vsout;
 }
 
@@ -4430,6 +4437,9 @@ void DCLFPixelObjectStatics()
 #		endif
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 {
+#		if defined(DCLF_DEPTH_TEX)
+	DCLFDepthTexIndices = input.DCLFDepthTex;
+#		endif
 	const DeviceRef sequence = DCLFDrawSequence(input.DCLFDrawInstance);
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
 	DCLFRowStatics(DCLFSequenceRows(sequence));

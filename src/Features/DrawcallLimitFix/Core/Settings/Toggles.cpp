@@ -1,10 +1,18 @@
 // Toggles: the flag table with seeds and menu entries, the packed active set, and its writes through a setting.
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
+// volk must precede every Vulkan header in this translation unit.
+#include <rhi_interop_vulkan.h>
+
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/Variables.h"
+#include "RenderGraph/Backend.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+
+#include <OpenRenderGraph/GraphHost.h>
+#include <atomic>
 
 #include <functional>
 
@@ -71,6 +79,30 @@ namespace DCLF
 	std::uint8_t DefaultCullMode()
 	{
 		return 2;
+	}
+
+	bool CpuExteriorsByDefault()
+	{
+		// -1 until the device answers, then 0 or 1 for the session.
+		static std::atomic<int> cached{ -1 };
+		if (const int value = cached.load(std::memory_order_acquire); value >= 0)
+			return value != 0;
+		const auto* host = RenderGraphRuntime::Get().Host();
+		if (!host)
+			return false;
+		::ShaderFeatureInfo features{};
+		if (!rhi::IsOk(host->Device().QueryFeatureInfo(&features.header)))
+			return false;
+		// Vulkan: Pascal reports unbounded tables, but without mutable descriptors BasicRHI runs it on the descriptor-sets model.
+		const bool legacy = ::RenderGraph::Backend::IsD3D12() ?
+		                        !features.unifiedResourceHeaps :
+		                        (!features.unboundedDescriptorTables ||
+									rhi::vulkan::GetBindingModel(host->Device()) == rhi::vulkan::BindingModel_DescriptorSets);
+		int expected = -1;
+		if (cached.compare_exchange_strong(expected, legacy ? 1 : 0, std::memory_order_acq_rel) && legacy)
+			logger::info("[DCLF] the GPU has the legacy binding model: the pipeline's auto mode draws exteriors CPU-driven too (CS_DCLF_PIPELINE=gpu "
+						 "for the GPU pipeline)");
+		return legacy;
 	}
 
 	Direct::Mode ModeOf(const ToggleSet& a_set)

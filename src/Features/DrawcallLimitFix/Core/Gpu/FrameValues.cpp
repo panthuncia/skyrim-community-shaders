@@ -226,6 +226,27 @@ namespace DCLF
 		using BoundPoints = std::deque<std::pair<std::uint64_t, org::GraphHost::GpuPoint>>;
 
 		// Bind a frame's backings to its last submission so none is reused before that frame completes on the GPU.
+		/**
+		 * @brief Whether a producer the frame's work waits for may wait on a_point on the GPU: each value is reached or within the last
+		 * present's sealed point. Unlike Retirement::Sealed, a seal or point still queued on the submission thread is not safe.
+		 */
+		bool SafeProducerWait(const org::GraphHost::GpuPoint& a_point)
+		{
+			if (a_point.points.empty())
+				return true;
+			const auto sealed = ::RenderGraph::Frame::Retirement::SealedGpuPoint();
+			if (!sealed.Passed() || !a_point.Passed())
+				return false;
+			for (const auto& [timeline, value] : a_point.Resolve()) {
+				if (!timeline || !*timeline || (*timeline)->GetCompletedValue() >= value)
+					continue;
+				const auto known = std::ranges::find_if(sealed.points, [&](const auto& a_entry) { return a_entry.first.get() == timeline.get(); });
+				if (known == sealed.points.end() || known->second < value)
+					return false;
+			}
+			return true;
+		}
+
 		void BindFrameLeases(FrameLeases& a_leases, std::vector<org::services::BackingLease>& a_registered, BoundPoints& a_points)
 		{
 			const auto point = ::RenderGraph::Frame::Retirement::SubmittedPoint();
@@ -313,6 +334,10 @@ namespace DCLF
 			std::atomic<std::uint64_t> floor{ 0 };  // diagnostics
 			std::atomic<std::uint64_t> acquires{ 0 }, made{ 0 }, runs{ 0 }, bytes{ 0 };  // since the last take
 			std::string backingName;
+			// Fresh backings for a job that may not wait for the capped pool's bound one (LeaseBackings): uncapped, reusing only
+			// retired backings. Made at the first such job.
+			std::shared_ptr<org::services::BackingPool> overflow;
+			std::atomic<std::uint64_t> overflowAcquires{ 0 };  // since the start
 		};
 
 		// Grow a quarter past the rows asked, not to a power of two. Every class is held once per frame in flight, and palettes reach tens of MB.
@@ -321,9 +346,11 @@ namespace DCLF
 		static std::shared_ptr<org::services::BackingPool> MakePool(std::string_view a_name)
 		{
 			// Each frame writes its own copy, so the copies live in ORG's per-frame blocks.
+			// Uncapped, and a backing is reused only once the GPU is done with it: a job that reused a bound copy waited for the bound
+			// work on the copy queue, and that work could be waiting for the job's own signal, which deadlocked both queues
+			// (docs/development/plans/pascal-d3d12-stability.md). A job never waits on the GPU now.
 			return org::services::BackingPool::Create(PooledBackings::PerFrameHooks(), ::RenderGraph::Frame::Retirement::Clock(),
-				{ .name = fmt::format("cs.dclf.frame-values.{}", a_name), .maxPerClass = PooledBackings::SceneCopies(), .spareFree = PooledBackings::SceneCopies(),
-					.reuseBound = true });
+				{ .name = fmt::format("cs.dclf.frame-values.{}", a_name), .maxPerClass = 0, .spareFree = PooledBackings::SceneCopies(), .reuseBound = false });
 		}
 
 		Impl()
@@ -682,6 +709,8 @@ namespace DCLF
 		void QueuePlans(std::vector<std::shared_ptr<const Plan>>& a_plans);
 		void LeaseBackings(Job& a_job);
 		void ReusedCopyPoint(std::uint64_t a_writeAfter, Job& a_job);
+		/** @brief The GPU point a reused backing bound at clock point a_writeAfter waits for (empty when it is reusable now). */
+		org::GraphHost::GpuPoint BoundGpuPoint(std::uint64_t a_writeAfter) const;
 		void ReleaseLatePoses()
 		{
 			late.jobLeases = {};
@@ -689,7 +718,7 @@ namespace DCLF
 		}
 		// Returns the GPU point the lease's copy is still bound to, or 0 if reusable now.
 		std::uint64_t LeasePool(Pool& a_pool, std::string_view a_name, std::uint32_t a_stride, org::services::BackingFlags a_flags, std::uint64_t a_needed, org::services::BackingLease& a_frameLease,
-			org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_oldestContentEpoch);
+			org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_oldestContentEpoch, bool a_fresh = false);
 		void MakeRegistered();
 		void KickRegistered(Job& a_job, const FrameGlobals* a_globals);
 		void SampleRootViews(Job& a_job, const SetSnapshot& a_claims);
@@ -2170,25 +2199,60 @@ namespace DCLF
 	void FrameValues::Impl::LeaseBackings(Job& a_job)
 	{
 		const std::array<std::uint64_t, kBuiltInPools> needed{ plan ? plan->slots : 0u, plan ? 2ull * plan->boneCapacity : 0u, a_job.shadingSlots };
-		std::uint64_t writeAfter = 0;
-		// Lease the late poses' backings first, so the frame's floors cover their content.
-		if (const auto& latePlan = late.plan) {
-			const bool parts[kBuiltInPools]{ !latePlan->rigid.empty(), !latePlan->skins.empty(), false };
-			for (const std::size_t part : { kPlacements, kPalettes })
-				if (parts[part]) {
-					std::optional<std::uint64_t> floor;
-					writeAfter = std::max(writeAfter, LeasePool(pools[part], kPartNames[part], kStrides[part], {}, needed[part], late.frameLeases[part], late.jobLeases[part], floor));
-				}
-		}
-		for (std::size_t part = 0; part < kBuiltInPools; ++part)
-			writeAfter = std::max(writeAfter, LeasePool(pools[part], kPartNames[part], kStrides[part], {}, needed[part], frameLeases[part], a_job.leases[part], a_job.oldestContentEpochs[part]));
-		for (std::size_t i = 0; i < a_job.registered.size(); ++i) {
-			auto& entry = registered[i];
-			auto& part = a_job.registered[i];
-			writeAfter = std::max(writeAfter, LeasePool(entry.pool, entry.entry->name, entry.entry->stride, { .unorderedAccess = entry.entry->unorderedAccess, .deviceAddress = entry.entry->deviceAddress }, entry.needed, registeredFrameLeases[i], part.lease,
-													 part.oldestContentEpoch));
+		// Each lease, so the ones bound to work the job may not wait for can be leased again fresh.
+		const auto leaseAll = [&](bool a_freshIfBound, std::uint64_t a_completed) {
+			std::uint64_t writeAfter = 0;
+			const auto lease = [&](Pool& a_pool, std::string_view a_name, std::uint32_t a_stride, org::services::BackingFlags a_flags, std::uint64_t a_needed,
+								   org::services::BackingLease& a_frameLease, org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_floor) {
+				// A second pass leases again only what the first left bound to unfinished work.
+				if (a_freshIfBound && !(a_jobLease && a_jobLease->safeAt.load(std::memory_order_acquire) > a_completed))
+					return;
+				writeAfter = std::max(writeAfter, LeasePool(a_pool, a_name, a_stride, a_flags, a_needed, a_frameLease, a_jobLease, a_floor, a_freshIfBound));
+			};
+			// Lease the late poses' backings first, so the frame's floors cover their content.
+			if (const auto& latePlan = late.plan) {
+				const bool parts[kBuiltInPools]{ !latePlan->rigid.empty(), !latePlan->skins.empty(), false };
+				for (const std::size_t part : { kPlacements, kPalettes })
+					if (parts[part]) {
+						std::optional<std::uint64_t> floor;
+						lease(pools[part], kPartNames[part], kStrides[part], {}, needed[part], late.frameLeases[part], late.jobLeases[part], floor);
+					}
+			}
+			for (std::size_t part = 0; part < kBuiltInPools; ++part)
+				lease(pools[part], kPartNames[part], kStrides[part], {}, needed[part], frameLeases[part], a_job.leases[part], a_job.oldestContentEpochs[part]);
+			for (std::size_t i = 0; i < a_job.registered.size(); ++i) {
+				auto& entry = registered[i];
+				auto& part = a_job.registered[i];
+				lease(entry.pool, entry.entry->name, entry.entry->stride, { .unorderedAccess = entry.entry->unorderedAccess, .deviceAddress = entry.entry->deviceAddress }, entry.needed,
+					registeredFrameLeases[i], part.lease, part.oldestContentEpoch);
+			}
+			return writeAfter;
+		};
+		const auto completed = ::RenderGraph::Frame::Retirement::Clock()->Completed();
+		std::uint64_t writeAfter = leaseAll(false, completed);
+		// The frame's own work waits for this job's signal, so the copy may wait only for work the last present sealed. A capped pool's
+		// bound backing can be bound to a point past that: a bind at the frame's start takes everything submitted so far, the frame's
+		// early epochs with it. Waiting for those deadlocks the graphics and copy queues, so such backings are leased again fresh.
+		if (writeAfter > completed && !SafeProducerWait(BoundGpuPoint(writeAfter))) {
+			if (std::uint64_t replaced = leaseAll(true, completed); replaced > completed)
+				logger::error("[DCLF] frame values {}: a fresh backing is still bound to unfinished work (clock {})", a_job.seq, replaced);
+			// Logged at the 1st, 10th, 100th... job: how often it happens is the overflow pools' memory cost.
+			static std::uint64_t freshJobs = 0;
+			if (const auto count = ++freshJobs; count == 1 || count == 10 || count == 100 || count == 1000 || count % 10000 == 0)
+				logger::info("[DCLF] frame values {}: a reused copy was bound to work the last present did not seal; it took fresh backings instead "
+							 "({} jobs so far)",
+					a_job.seq, count);
+			writeAfter = 0;
 		}
 		ReusedCopyPoint(writeAfter, a_job);
+	}
+
+	org::GraphHost::GpuPoint FrameValues::Impl::BoundGpuPoint(std::uint64_t a_writeAfter) const
+	{
+		if (a_writeAfter <= ::RenderGraph::Frame::Retirement::Clock()->Completed())
+			return {};
+		const auto at = std::ranges::find_if(boundPoints, [&](const auto& a_point) { return a_point.first >= a_writeAfter; });
+		return at != boundPoints.end() ? at->second : ::RenderGraph::Frame::Retirement::SubmittedGpuPoint();
 	}
 
 	void FrameValues::Impl::ReusedCopyPoint(std::uint64_t a_writeAfter, Job& a_job)
@@ -2196,11 +2260,7 @@ namespace DCLF
 		const auto writeAfter = a_writeAfter;
 		// Points rise per queue, so the latest one covers the others.
 		if (writeAfter > ::RenderGraph::Frame::Retirement::Clock()->Completed()) {
-			const auto at = std::ranges::find_if(boundPoints, [&](const auto& a_point) { return a_point.first >= writeAfter; });
-			if (at != boundPoints.end())
-				a_job.writeAfter = at->second;
-			else if (const auto* host = RenderGraphRuntime::Get().Host())
-				a_job.writeAfter = ::RenderGraph::Frame::Retirement::SubmittedGpuPoint();  // every bind notes its point, but waiting for everything is still safe
+			a_job.writeAfter = BoundGpuPoint(writeAfter);
 			reusedInFlight.fetch_add(1, std::memory_order_relaxed);
 			// Waiting for this frame's own work could hold the uploader, and the signal behind it, until the present.
 			if (static bool logged = false; !logged && !::RenderGraph::Frame::Retirement::Sealed(a_job.writeAfter)) {
@@ -2213,21 +2273,31 @@ namespace DCLF
 	}
 
 	std::uint64_t FrameValues::Impl::LeasePool(Pool& a_pool, std::string_view a_name, std::uint32_t a_stride, org::services::BackingFlags a_flags, std::uint64_t a_needed, org::services::BackingLease& a_frameLease,
-		org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_oldestContentEpoch)
+		org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_oldestContentEpoch, bool a_fresh)
 	{
 		// Shrink only after the asks stay much smaller for a while. A fresh backing is written whole.
 		org::services::FitCapacity(a_pool.capacity, a_pool.window, std::max<std::uint64_t>(a_needed, 1), kPoolGrowth, PooledBackings::Shrink());
 		if (a_pool.backingName.empty())
 			a_pool.backingName = fmt::format("cs.dclf.frame-values.{}", a_name);
+		if (a_fresh && !a_pool.overflow)
+			a_pool.overflow = org::services::BackingPool::Create(PooledBackings::PerFrameHooks(), ::RenderGraph::Frame::Retirement::Clock(),
+				{ .name = a_pool.backingName + ".fresh", .maxPerClass = 0, .spareFree = 1, .reuseBound = false });
+		auto& from = a_fresh ? *a_pool.overflow : *a_pool.pool;
 		org::services::BackingPool::AcquireInfo info;
-		auto lease = a_pool.pool->Acquire({ .capacityClass = a_pool.capacity, .stride = a_stride, .flags = a_flags, .name = a_pool.backingName },
+		auto lease = from.Acquire({ .capacityClass = a_pool.capacity, .stride = a_stride, .flags = a_flags, .name = a_pool.backingName },
 			a_pool.newestContentEpoch.load(std::memory_order_acquire), &info);
 		if (!lease)
 			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the frame values' {} pool returned no backing{}", a_name, info.error.empty() ? std::string() : ": " + info.error));
 		++a_pool.acquires;
+		if (a_fresh)
+			a_pool.overflowAcquires.fetch_add(1, std::memory_order_relaxed);
 		if (info.allocated)
 			++a_pool.made;
+		// The journal keeps changes back to the oldest content either pool holds.
 		a_oldestContentEpoch = a_pool.pool->OldestContentEpoch();
+		if (a_pool.overflow)
+			if (const auto overflow = a_pool.overflow->OldestContentEpoch())
+				a_oldestContentEpoch = a_oldestContentEpoch ? std::min(*a_oldestContentEpoch, *overflow) : *overflow;
 		a_pool.floor.store(a_oldestContentEpoch.value_or(0), std::memory_order_relaxed);
 		a_frameLease = lease;
 		a_jobLease = std::move(lease);

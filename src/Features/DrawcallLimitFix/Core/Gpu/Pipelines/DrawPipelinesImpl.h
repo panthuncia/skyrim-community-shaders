@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/EngineStates.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/FrameSource.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
@@ -162,6 +163,13 @@ namespace DCLF
 			for (const auto& binding : a_module.bindings) {
 				if (binding.binding >= kDescriptorHeapBindings)
 					continue;
+				// D3D12's bound pass-wide blocks (FrameSource boundBlocks): register(b<ordinal>, space9 or space10).
+				if (binding.kind == Kind::ConstantBuffer && binding.set >= FrameSource::kBoundBlockSpace &&
+					binding.set < FrameSource::kBoundBlockSpace + FrameSource::kBoundBlockSpaces && binding.binding < kFrameBlocks && BoundFrameBlocks())
+					continue;
+				// DXIL builds declare VS_PerFrame at register(b12, space1) beside FrameBuffer's b12 (DCLFObjects.hlsli): the same block.
+				if (binding.kind == Kind::ConstantBuffer && !a_pixel && binding.set == 1 && binding.binding == kPerFrameVertexRegister)
+					continue;
 				bool mapped = binding.set == 0;
 				switch (binding.kind) {
 				case Kind::ConstantBuffer:
@@ -193,7 +201,7 @@ namespace DCLF
 			CheckBindings(a_module, a_pixel);
 			using Kind = SpirvReflection::BindingKind;
 			for (const auto& binding : a_module.bindings) {
-				if (binding.binding >= kDescriptorHeapBindings)
+				if (binding.binding >= kDescriptorHeapBindings || binding.set != 0)
 					continue;
 				const std::uint32_t b = binding.binding - kBindingShiftB, t = binding.binding - kBindingShiftT;
 				const bool row = (binding.kind == Kind::ConstantBuffer && (b <= 2 || b == 4)) ||
@@ -235,6 +243,8 @@ namespace DCLF
 					continue;
 				if (binding.binding == kRecordAddressBinding || binding.binding == kFramePushBinding)
 					continue;  // push data, not a DrawBindings entry
+				if (binding.set != 0)
+					continue;  // D3D12's bound pass-wide blocks: the layout's table, not a DrawBindings entry
 				switch (binding.kind) {
 				case Kind::ConstantBuffer:
 					(a_pixel ? a_usage.pixelConstants : a_usage.vertexConstants) |= 1u << (binding.binding - kBindingShiftB);
@@ -311,6 +321,14 @@ namespace DCLF
 		}
 		inline rhi::LayoutBindingRange FromMaterialRow(rhi::LayoutBindingRange a_range) { return RangeFrom(a_range, 0, kDrawPushMaterialRow); }
 		inline rhi::LayoutBindingRange FromFrameRecord(rhi::LayoutBindingRange a_range) { return RangeFrom(a_range, 1, kFramePushRecord); }
+		// Pass-wide block a_ordinal's constant buffer at a_binding: the slot a_ordinal past the table's first, the frame push word
+		// kFramePushBlocks (FrameBlockViews::TableBase). A bound constant buffer where the backend has one (D3D12: a descriptor table).
+		inline rhi::LayoutBindingRange FrameBlockRange(std::uint32_t a_set, std::uint32_t a_binding, std::uint32_t a_count, rhi::ShaderStage a_stage, std::uint32_t a_ordinal)
+		{
+			auto range = RangeFrom(LayoutRange(a_binding, a_count, a_stage, rhi::LayoutRangeSource::PushIndex, a_ordinal), 1, kFramePushBlocks);
+			range.set = a_set;
+			return range;
+		}
 
 		std::vector<rhi::LayoutBindingRange> MainLayoutRanges(bool a_pulled);
 		std::vector<rhi::LayoutBindingRange> ShadowLayoutRanges();
@@ -1076,10 +1094,10 @@ namespace DCLF
 		static std::string DescribeKey(const PipelineKey& a_key)
 		{
 			const auto family = KeyFamily(a_key.rasterFlags);
-			return fmt::format("VS {:08X} PS {:08X} pass {:08X} ({}), raster {:X}, vertex layout {:016X}", a_key.vertexDescriptor, a_key.pixelDescriptor,
-				a_key.passDescriptor,
+			return fmt::format("VS {:08X} PS {:08X} pass {:08X} ({}), raster {:X}, vertex layout {:016X}, runtime VS {:08X} PS {:08X}", a_key.vertexDescriptor,
+				a_key.pixelDescriptor, a_key.passDescriptor,
 				family != Api::ProgramFamily::Count ? std::string_view(Extensions::ProgramFamilyOf(family).keyName) : LightingTechniqueName((a_key.passDescriptor >> 24) & 0x3f),
-				a_key.rasterFlags, a_key.vertexLayout);
+				a_key.rasterFlags, a_key.vertexLayout, a_key.runtimeVertex, a_key.runtimePixel);
 		}
 
 		bool Initialize();

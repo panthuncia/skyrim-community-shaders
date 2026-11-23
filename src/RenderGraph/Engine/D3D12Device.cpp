@@ -4,6 +4,7 @@
 #include "RenderGraph/Switches.h"
 
 #include <rhi.h>
+#include <rhi_interop.h>
 #include <rhi_shader_abi.h>
 
 #if defined(CS_ORG_HAS_D3D12)
@@ -179,6 +180,9 @@ namespace RenderGraph::Engine
 			                      "rhi::CreateD3D12Device failed on the system's D3D12 runtime (see BasicRHI's log lines above; CS_ORG_D3D12_SDK loads an Agility SDK)");
 		if (auto missing = MissingFeatures(a_device->Get()); !missing.empty())
 			return fail(std::move(missing));
+		// CS_DCLF_CAPTURE dumps DCLF passes, which needs every view, sampler and pipeline recorded from the start.
+		if (Switches::IsSet("CS_DCLF_CAPTURE"))
+			rhi::dx12::EnableCaptureTables(a_device->Get());
 		logger::info("[ORG] D3D12 device created: debug layer {}, DRED {}, {} frames in flight, {} runtime", a_options.debug ? "on" : "off",
 			a_options.debug || a_options.crashMarkers ? "on" : "off", a_options.framesInFlight, factory ? "Agility SDK" : "system");
 		a_reason.clear();

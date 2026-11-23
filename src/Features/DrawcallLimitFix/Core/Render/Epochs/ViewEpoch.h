@@ -173,9 +173,8 @@ namespace DCLF::Draws
 		std::shared_ptr<org::Buffer> frameConstants;
 		std::uint64_t frameConstantsAddress = 0;
 		RenderGraph::BufferRef frameConstantsRef;
+		// A table of the pass-wide blocks per face, each face's VS and PS b12 its own camera block (FrameBlockViews::Create).
 		std::shared_ptr<const FrameBlockViews> frameBlocks;
-		// One view per face of its block, so each face's record names its own b12 and draws with its own camera.
-		std::shared_ptr<const FrameBlockViews> faceBlocks;
 		bool sharedLightZeroed = false;
 		// Copies of the main pass's frame buffers, filled by the commit from CPU mirrors. Replaced whole because the revision producer reads them.
 		std::atomic<std::shared_ptr<const std::vector<FrameBuffer>>> frameBuffers;
@@ -239,6 +238,7 @@ namespace DCLF::Draws
 		const ViewLatches* latches = nullptr;
 		std::uint64_t frameConstantsAddress = 0;
 		RenderGraph::BufferRef frameConstantsRef;
+		std::shared_ptr<const FrameBlockViews> frameBlocks;  // the frame constants' block tables
 		std::vector<LatchedCopy> frameCopies;
 		std::uint32_t width = 0, height = 0;
 		float depthRange = 1.0f;

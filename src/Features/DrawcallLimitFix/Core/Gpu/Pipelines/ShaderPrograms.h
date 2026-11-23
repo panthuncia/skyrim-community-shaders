@@ -27,6 +27,9 @@ namespace DCLF
 	inline constexpr std::uint32_t kBindingShiftS = 400;
 	inline constexpr std::uint32_t kBindingShiftU = 500;
 
+	/** @brief ShaderStageSpec::literals bits: which runtime descriptors a pulled stage takes as literals. */
+	inline constexpr std::uint8_t kLiteralVertex = 1, kLiteralPixel = 2, kLiteralBoth = kLiteralVertex | kLiteralPixel;
+
 	/** @brief One stage of a program and its depth-only and pulled builds. */
 	struct ShaderStageSpec
 	{
@@ -34,6 +37,31 @@ namespace DCLF
 		std::uint32_t descriptor = 0;
 		bool depth = false;
 		bool pulled = false;
+		// A pulled stage compiled for its key's runtime descriptors (DCLF_RUNTIME_VS_DESCRIPTOR, DCLF_RUNTIME_PS_DESCRIPTOR), so the
+		// compiler folds the permutation branches. The words count only for the literals bits set.
+		std::uint8_t literals = 0;
+		std::uint32_t runtimeVertex = 0, runtimePixel = 0;
+		// A pulled Lighting build for the Z-prepass's alpha test (DCLF_DEPTH_TEX): the vertex stage passes the diffuse texture's and
+		// sampler's heap indices to the pixel stage as a flat attribute, so its sample does not wait on the material row's loads.
+		bool depthTex = false;
+	};
+
+	/**
+	 * @brief A Lighting or program family program's descriptors: the key's lookup pair, and the runtime pair its pulled stages
+	 * are compiled for. Draws whose runtime descriptors differ draw with different programs.
+	 */
+	struct ProgramDescriptors
+	{
+		std::uint32_t vertex = 0, pixel = 0;
+		std::uint32_t runtimeVertex = 0, runtimePixel = 0;
+
+		bool operator==(const ProgramDescriptors&) const = default;
+	};
+	static_assert(std::has_unique_object_representations_v<ProgramDescriptors>);
+	struct ProgramDescriptorsHash
+	{
+		using is_avalanching = void;
+		std::uint64_t operator()(const ProgramDescriptors& a_key) const noexcept { return ankerl::unordered_dense::detail::wyhash::hash(&a_key, sizeof(a_key)); }
 	};
 
 	// DCLF_BINDLESS builds read the per-object values from the record table at t127 instead of the draw's constant buffers.
@@ -64,6 +92,9 @@ namespace DCLF
 			std::vector<std::byte> pulledPixel;
 			// For a depth pipeline without a pixel stage. Empty for a program family's.
 			std::vector<std::byte> pulledDepthVertex;
+			// For an alpha-tested depth pipeline: pulledVertex's build that also passes pulledDepthPixel its texture indices
+			// (DCLF_DEPTH_TEX). Empty for a program family's.
+			std::vector<std::byte> pulledDepthTexVertex;
 			// The vertex attributes the stages read. A key whose vertex layout lacks one fails, as the input assembler's layout did.
 			std::uint32_t vertexAttributes = 0;
 			// The sources generation is the oldest the stages were compiled for.
@@ -79,6 +110,8 @@ namespace DCLF
 			std::uint32_t shadowRequested = 0;
 			std::uint32_t shadowReady = 0;
 			std::uint32_t shadowFailed = 0;
+			// Lighting programs by lookup pair: pairs seen, how many draw with several runtime pairs, and the most for one pair.
+			std::uint32_t lookupPairs = 0, severalRuntime = 0, mostRuntime = 0;
 		};
 
 		static ShaderPrograms& Get();
@@ -88,7 +121,8 @@ namespace DCLF
 
 		/** @brief Stages a runtime request needed that no precompile had asked for, so they compiled on demand. */
 		static constexpr std::uint8_t kOnDemandVertex = 1, kOnDemandPixel = 2, kOnDemandDepthPixel = 4, kOnDemandPulledVertex = 8,
-									  kOnDemandPulledDepthPixel = 16, kOnDemandPulledPixel = 32, kOnDemandPulledDepthVertex = 64;
+									  kOnDemandPulledDepthPixel = 16, kOnDemandPulledPixel = 32, kOnDemandPulledDepthVertex = 64,
+									  kOnDemandPulledDepthTexVertex = 128;
 		static std::string OnDemandStages(std::uint8_t a_stages);
 
 		/**
@@ -96,11 +130,18 @@ namespace DCLF
 		 * a_failed is set when the program can never be made.
 		 */
 		std::shared_ptr<const Program> Find(const PipelineKey& a_key, RE::BSShader& a_lighting, std::uint8_t* a_onDemand = nullptr, bool* a_failed = nullptr);
-		/** @brief Which Lighting program a key draws with. */
-		static std::uint64_t LightingProgramId(const PipelineKey& a_key)
+		/** @brief A key's program descriptors. */
+		static ProgramDescriptors ProgramDescriptorsOf(const PipelineKey& a_key)
 		{
-			return (static_cast<std::uint64_t>(a_key.vertexDescriptor) << 32) | a_key.pixelDescriptor;
+			return { a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.runtimeVertex, a_key.runtimePixel };
 		}
+		/** @brief The pipeline lane. Which Lighting program a key draws with. Below every family's program id bit. */
+		std::uint64_t LightingProgramId(const PipelineKey& a_key) { return ProgramId(ProgramDescriptorsOf(a_key)); }
+		/**
+		 * @brief A Lighting key's stages: vertex, pixel, depth pixel, pulled vertex, pulled depth pixel, pulled pixel, pulled depth vertex,
+		 * pulled depth texture vertex.
+		 */
+		static std::array<ShaderStageSpec, 8> LightingStages(const PipelineKey& a_key);
 
 		/**
 		 * @brief SPIR-V builds of one Utility technique, for shadow views. Per-object values come from the record table, because one
@@ -136,19 +177,16 @@ namespace DCLF
 			std::uint64_t fingerprint = 0, sourcesGeneration = 0;
 		};
 		/** @brief The Lighting forward program of these descriptors, requesting it. Null until both stages are compiled. */
-		std::shared_ptr<const ForwardProgram> FindForward(std::uint32_t a_vertexDescriptor, std::uint32_t a_pixelDescriptor, RE::BSShader& a_lighting, bool* a_failed = nullptr);
-		/** @brief Which forward program a pair of descriptors draws with. */
-		static std::uint64_t ForwardProgramId(std::uint32_t a_vertexDescriptor, std::uint32_t a_pixelDescriptor)
-		{
-			return (static_cast<std::uint64_t>(a_vertexDescriptor) << 32) | a_pixelDescriptor;
-		}
+		std::shared_ptr<const ForwardProgram> FindForward(const ProgramDescriptors& a_descriptors, RE::BSShader& a_lighting, bool* a_failed = nullptr);
+		/** @brief The pipeline lane. Which forward program these descriptors draw with. Below every draw family's forward program id. */
+		std::uint64_t ForwardProgramId(const ProgramDescriptors& a_descriptors) { return ProgramId(a_descriptors); }
 		/**
 		 * @brief A program family key's program, vertex and pixel stages only. A forward object is no depth segment input, so it has no
 		 * Z-prepass pipeline. Null until both are compiled.
 		 */
 		std::shared_ptr<const Program> FindFamily(Api::ProgramFamily a_family, const PipelineKey& a_key, const RE::BSShader& a_shader, bool* a_failed = nullptr);
-		/** @brief Which family program a key draws with. Distinct from every LightingProgramId. */
-		static std::uint64_t FamilyProgramId(Api::ProgramFamily a_family, const PipelineKey& a_key) { return LightingProgramId(a_key) | ProgramFamilySlotOf(a_family).programIdBit; }
+		/** @brief The pipeline lane. Which family program a key draws with. Distinct from every LightingProgramId. */
+		std::uint64_t FamilyProgramId(Api::ProgramFamily a_family, const PipelineKey& a_key) { return LightingProgramId(a_key) | ProgramFamilySlotOf(a_family).programIdBit; }
 		/** @brief A draw family's forward program. */
 		std::shared_ptr<const ForwardProgram> FindDrawFamilyForward(Api::DrawFamily a_family, RE::BSShader& a_shader, bool* a_failed = nullptr);
 
@@ -206,7 +244,7 @@ namespace DCLF
 		void RebuildFamily(Api::ProgramFamily a_family, const PipelineKey& a_key, const RE::BSShader& a_shader, Rebuilt<Program> a_done);
 		void RebuildShadow(std::uint32_t a_technique, const RE::BSShader& a_utility, Rebuilt<ShadowProgram> a_done);
 		void RebuildDrawFamily(Api::DrawFamily a_family, const RE::BSShader& a_shader, Rebuilt<DrawProgram> a_done);
-		void RebuildForward(std::uint32_t a_vertexDescriptor, std::uint32_t a_pixelDescriptor, const RE::BSShader& a_lighting, Rebuilt<ForwardProgram> a_done);
+		void RebuildForward(const ProgramDescriptors& a_descriptors, const RE::BSShader& a_lighting, Rebuilt<ForwardProgram> a_done);
 		void RebuildDrawFamilyForward(Api::DrawFamily a_family, const RE::BSShader& a_shader, Rebuilt<ForwardProgram> a_done);
 
 		// CS compilation workers request the same stages the runtime uses. Requests before ORG initialization wait for StartPrecompile.
@@ -229,6 +267,9 @@ namespace DCLF
 			result.shadowRequested = laneStats.shadowRequested.load(std::memory_order_relaxed);
 			result.shadowReady = laneStats.shadowReady.load(std::memory_order_relaxed);
 			result.shadowFailed = laneStats.shadowFailed.load(std::memory_order_relaxed);
+			result.lookupPairs = laneStats.lookupPairs.load(std::memory_order_relaxed);
+			result.severalRuntime = laneStats.severalRuntime.load(std::memory_order_relaxed);
+			result.mostRuntime = laneStats.mostRuntime.load(std::memory_order_relaxed);
 			return result;
 		}
 
@@ -239,7 +280,7 @@ namespace DCLF
 		template <class P, std::size_t N>
 		struct ProgramEntry;
 		// vertex, pixel, depth pixel, pulled vertex, pulled depth pixel, pulled pixel, pulled depth vertex
-		using Entry = ProgramEntry<Program, 7>;
+		using Entry = ProgramEntry<Program, 8>;
 		using ShadowEntry = ProgramEntry<ShadowProgram, 2>;
 		// Vertex, pixel, depth vertex, depth pixel, then the second colour pair. With one colour program that pair repeats the first.
 		using DrawFamilyEntry = ProgramEntry<DrawProgram, 6>;
@@ -267,6 +308,16 @@ namespace DCLF
 		void FinishEntry(E& a_entry, std::atomic<std::uint32_t>* a_ready, std::atomic<std::uint32_t>& a_failed, LogFailure&& a_logFailure);
 		void FinishDrawFamily(std::uint8_t a_user, Finished& a_finished);
 
+		/** @brief The pipeline lane. A small id per descriptors, made on first use and kept for the process. */
+		std::uint64_t ProgramId(const ProgramDescriptors& a_descriptors);
+		/** @brief The pipeline lane. The descriptors an id was made for. */
+		const ProgramDescriptors& DescriptorsOfId(std::uint64_t a_id) const { return programDescriptors[static_cast<std::uint32_t>(a_id)]; }
+		/** @brief The pipeline lane. Counts a new Lighting program's runtime pair against its lookup pair. */
+		void NoteRuntimePair(const ProgramDescriptors& a_descriptors);
+		ankerl::unordered_dense::map<ProgramDescriptors, std::uint32_t, ProgramDescriptorsHash> programIds;
+		std::vector<ProgramDescriptors> programDescriptors;  // by id
+		ankerl::unordered_dense::map<std::uint64_t, std::uint32_t> runtimePairs;  // Lighting programs per lookup pair, this sources generation
+
 		ankerl::unordered_dense::map<std::uint64_t, std::unique_ptr<Entry>> entries;
 		ankerl::unordered_dense::map<std::uint32_t, std::unique_ptr<ShadowEntry>> shadowEntries;
 		ankerl::unordered_dense::map<std::uint64_t, std::unique_ptr<ForwardEntry>> forwardEntries;
@@ -281,6 +332,7 @@ namespace DCLF
 		{
 			std::atomic<std::uint32_t> requested{ 0 }, ready{ 0 }, failed{ 0 }, fromCache{ 0 };
 			std::atomic<std::uint32_t> shadowRequested{ 0 }, shadowReady{ 0 }, shadowFailed{ 0 };
+			std::atomic<std::uint32_t> lookupPairs{ 0 }, severalRuntime{ 0 }, mostRuntime{ 0 };
 		};
 		LaneStats laneStats;
 	};

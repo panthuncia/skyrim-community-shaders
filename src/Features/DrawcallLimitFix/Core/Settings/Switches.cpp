@@ -64,6 +64,7 @@ namespace DCLF
 			// Diagnostics. See dclf-validation.md, "Probes and diagnostics".
 			{ Stats, "CS_DCLF_STATS", N },
 			{ PassStats, "CS_DCLF_PASS_STATS", N },
+			{ HeapFrameBlocks, "CS_DCLF_HEAP_FRAME_BLOCKS", N },
 			{ Profile, "CS_DCLF_PROFILE", N },
 			{ ShaderDebug, "CS_DCLF_SHADER_DEBUG", N },
 			{ ShaderSourceDir, "CS_DCLF_SHADER_SOURCE_DIR", N },

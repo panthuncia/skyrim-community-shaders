@@ -14,6 +14,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -234,16 +235,27 @@ int main(int a_argc, char** a_argv)
 	VkPhysicalDeviceVulkan12Features v12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &v13 };
 	VkPhysicalDeviceVulkan11Features v11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12 };
 	VkPhysicalDeviceFeatures2 features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v11 };
+	// Mutable descriptors only when a binding has several types. SPV_STATS_DEVICE=<substring> picks the device by name.
+	bool needMutable = false;
+	for (const auto* r : { &vs, &fs })
+		for (const auto& [key, b] : r->bindings)
+			needMutable = needMutable || b.types.size() > 1;
+	const char* wanted = std::getenv("SPV_STATS_DEVICE");
 	VkPhysicalDevice physical = VK_NULL_HANDLE;
 	for (auto p : physicals) {
+		VkPhysicalDeviceProperties props;
+		vkGetPhysicalDeviceProperties(p, &props);
+		if (wanted && !std::strstr(props.deviceName, wanted))
+			continue;
 		vkGetPhysicalDeviceFeatures2(p, &features);
-		if (executableFeatures.pipelineExecutableInfo && mutableFeatures.mutableDescriptorType) {
+		if (executableFeatures.pipelineExecutableInfo && (!needMutable || mutableFeatures.mutableDescriptorType)) {
 			physical = p;
 			break;
 		}
 	}
 	if (!physical) {
-		std::cerr << "no device with pipeline executable properties and mutable descriptors\n";
+		std::cerr << "no device with pipeline executable properties" << (needMutable ? " and mutable descriptors" : "") << (wanted ? " matching SPV_STATS_DEVICE" : "")
+				  << "\n";
 		return 1;
 	}
 	if (!heap.empty() && !heapFeatures.descriptorHeap) {
@@ -269,7 +281,7 @@ int main(int a_argc, char** a_argv)
 			name == "VK_NV_low_latency" || name == "VK_NV_low_latency2" || name == "VK_EXT_present_timing" || name == "VK_KHR_present_id" ||
 			name == "VK_KHR_present_id2" || name == "VK_EXT_swapchain_maintenance1" || name == "VK_KHR_swapchain_maintenance1")
 			continue;
-		if (name == "VK_KHR_pipeline_executable_properties" || name == "VK_EXT_mutable_descriptor_type" || name == "VK_KHR_shader_float_controls2" ||
+		if (name == "VK_KHR_pipeline_executable_properties" || (name == "VK_EXT_mutable_descriptor_type" && needMutable) || name == "VK_KHR_shader_float_controls2" ||
 			name == "VK_EXT_shader_demote_to_helper_invocation" || name == "VK_KHR_shader_maximal_reconvergence" || name == "VK_KHR_shader_quad_control" ||
 			name == "VK_KHR_shader_subgroup_uniform_control_flow" || name == "VK_KHR_compute_shader_derivatives" || name == "VK_NV_compute_shader_derivatives" ||
 			name == "VK_EXT_fragment_shader_interlock" || name == "VK_KHR_shader_relaxed_extended_instruction" || name == "VK_KHR_shader_untyped_pointers" ||
@@ -331,7 +343,10 @@ int main(int a_argc, char** a_argv)
 				lb.descriptorType = *b.types.begin();
 			layoutBindings.push_back(lb);
 			VkDescriptorBindingFlags f = 0;
-			if (b.runtime) {
+			// Uniform buffer arrays stay without update-after-bind: devices without it for uniform buffers (Pascal) still compile them.
+			if (b.runtime && lb.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+				f = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+			else if (b.runtime) {
 				f = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
 				updateAfterBind = true;
 			}

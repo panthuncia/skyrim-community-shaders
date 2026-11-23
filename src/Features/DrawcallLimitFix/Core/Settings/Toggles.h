@@ -21,7 +21,7 @@ namespace DCLF
 	/** @brief How the pipeline is chosen: by the cell (Auto), or per kind of cell (Manual). */
 	enum class PipelineMode : std::uint8_t
 	{
-		Auto,    // exteriors GPU-driven, interiors CPU-driven
+		Auto,    // exteriors GPU-driven, interiors CPU-driven; both CPU-driven on a legacy-binding GPU (CpuExteriorsByDefault)
 		Manual,  // ToggleSet::interiorCpu, exteriorCpu
 	};
 
@@ -58,11 +58,19 @@ namespace DCLF
 	/** @brief The CPU pipeline's state in a_set. Main is always per frame. */
 	Direct::Mode ModeOf(const ToggleSet& a_set);
 
+	/**
+	 * @brief Whether Auto draws exteriors CPU-driven too: on a GPU with the legacy binding model (D3D12 resource heap tier 1, or
+	 * Vulkan without bindless descriptors: NVIDIA Pascal and older). There the GPU pipeline's culling and pulled bindless draws cost
+	 * more than the CPU pipeline (GTX 1070 Ti, native D3D12: about 2.3 ms of the frame), and its build pass lost the device in about a
+	 * third of the perf runs (docs/development/plans/pascal-d3d12-stability.md). False until the render graph's device exists.
+	 */
+	bool CpuExteriorsByDefault();
+
 	/** @brief Whether a_set draws a cell of a_interior CPU-driven. Auto does interiors on the CPU and exteriors on the GPU. */
 	inline bool CpuPipelineFor(const ToggleSet& a_set, bool a_interior)
 	{
 		if (a_set.pipelineMode == PipelineMode::Auto)
-			return a_interior;
+			return a_interior || CpuExteriorsByDefault();
 		return a_interior ? a_set.interiorCpu : a_set.exteriorCpu;
 	}
 

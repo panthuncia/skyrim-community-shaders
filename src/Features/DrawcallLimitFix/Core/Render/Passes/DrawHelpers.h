@@ -114,7 +114,7 @@ namespace DCLF::Draws
 		rhi::ResourceHandle a_arguments, std::uint64_t a_argumentsOffset, rhi::ResourceHandle a_counts, std::uint64_t a_countOffset, std::uint32_t a_capacity);
 
 	/** @brief The frame push words of the main frame constants, for draw passes outside IndirectDraws. */
-	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef);
+	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews* a_blocks);
 	/** @brief The frame push block in the shadow views' layout for the main camera, with the zeroed shared light block as the zero block. */
 	void MainShadowLayoutPush(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, std::uint32_t (&a_out)[kShadowPushWords]);
 	/**

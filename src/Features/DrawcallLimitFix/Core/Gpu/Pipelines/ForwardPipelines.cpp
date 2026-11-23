@@ -165,8 +165,9 @@ namespace DCLF
 			return;
 		}
 		bool programFailed = false;
+		const ProgramDescriptors descriptors{ a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.runtimeVertex, a_key.runtimePixel };
 		const auto program = familyKey ? ShaderPrograms::Get().FindDrawFamilyForward(family, *input->drawFamilySource[d], &programFailed) :
-		                                 ShaderPrograms::Get().FindForward(a_key.vertexDescriptor, a_key.pixelDescriptor, *input->lighting, &programFailed);
+		                                 ShaderPrograms::Get().FindForward(descriptors, *input->lighting, &programFailed);
 		if (programFailed) {
 			// The engine draws its objects in the reflection phase instead.
 			f.FailForGood(a_key);
@@ -175,23 +176,24 @@ namespace DCLF
 			return;
 		}
 		if (!program) {
-			f.programWaiters[familyKey ? kDrawFamilyLaneSlots[d].forwardProgramId : ShaderPrograms::ForwardProgramId(a_key.vertexDescriptor, a_key.pixelDescriptor)].push_back(a_key);
+			f.programWaiters[familyKey ? kDrawFamilyLaneSlots[d].forwardProgramId : ShaderPrograms::Get().ForwardProgramId(descriptors)].push_back(a_key);
 			return;
 		}
 		const ForwardTargets forwardTargets = *keyTargets;
 		const auto cull = (a_key.flags & ForwardPipelineKey::kForwardTwoSided) ? rhi::CullMode::None : cullBack ? rhi::CullMode::Back : rhi::CullMode::Front;
 		const std::string id = familyKey ? fmt::format("dclf.forward.{}", Extensions::DrawFamilyOf(family).keyName) :
-		                        fmt::format("dclf.forward.{:08X}.{:08X}.{:X}", a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.flags);
+		                        fmt::format("dclf.forward.{:08X}.{:08X}.{:X}.{:08X}.{:08X}", a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.flags, a_key.runtimeVertex,
+									a_key.runtimePixel);
 		const auto build = [device = device, zLayout = zLayout->GetHandle(), forwardTargets, cull, frontCCW = *input->frontCCW](const ShaderPrograms::ForwardProgram& a_program) {
 			return BuildForward(device, zLayout, &a_program, forwardTargets, cull, frontCCW);
 		};
 		const RE::BSShader* shader = familyKey ? input->drawFamilySource[d] : input->lighting;
 		auto live = MakeLive(id, ShaderPrograms::SourcePathOf(*shader), *program,
-			[family, familyKey, shader, key = a_key](ShaderPrograms::Rebuilt<ShaderPrograms::ForwardProgram> a_done) {
+			[family, familyKey, shader, descriptors](ShaderPrograms::Rebuilt<ShaderPrograms::ForwardProgram> a_done) {
 				if (familyKey)
 					ShaderPrograms::Get().RebuildDrawFamilyForward(family, *shader, std::move(a_done));
 				else
-					ShaderPrograms::Get().RebuildForward(key.vertexDescriptor, key.pixelDescriptor, *shader, std::move(a_done));
+					ShaderPrograms::Get().RebuildForward(descriptors, *shader, std::move(a_done));
 			},
 			build);
 		f.entries.try_emplace(a_key).first->second.requested = true;

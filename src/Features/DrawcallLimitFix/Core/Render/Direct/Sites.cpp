@@ -224,7 +224,7 @@ namespace DCLF::Direct::detail
 				a_holds.push_back(std::move(version));
 			}
 		b.poolFirsts = a_poolFirsts;
-		b.framePush = Draws::MainFramePushWords(a_inputs.resources->frameConstantsAddress, a_inputs.resources->frameConstantsRef);
+		b.framePush = Draws::MainFramePushWords(a_inputs.resources->frameConstantsAddress, a_inputs.resources->frameConstantsRef, a_inputs.resources->frameBlocks.get());
 		// The animated rows as the commit latched them, which BuildDrawsCS's MaterialRowAddress also reads.
 		if (const auto* latch = a_inputs.latch) {
 			b.animatedRows = std::uint64_t(latch->animatedRowsLo) | (std::uint64_t(latch->animatedRowsHi) << 32);

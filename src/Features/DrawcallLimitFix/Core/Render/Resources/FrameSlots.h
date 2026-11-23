@@ -101,18 +101,18 @@ namespace DCLF::Draws
 	constexpr std::uint64_t FrameConstantRowOffset(std::uint32_t a_row) { return std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + std::uint64_t(a_row) * 16; }
 	static_assert(sizeof(FrameFog) == 3 * 16);
 
-	/** @brief The frame push word of a stage's constant buffer register, or ~0u when it is not pushed. */
-	inline std::uint32_t FramePushWord(bool a_pixel, std::uint32_t a_register)
+	/** @brief The pass-wide block ordinal of a stage's constant buffer register (FrameBlockViews::indices), or ~0u when it is not pass-wide. */
+	inline std::uint32_t FrameBlockOrdinal(bool a_pixel, std::uint32_t a_register)
 	{
-		std::uint32_t word = kFramePushRegisters;
+		std::uint32_t block = 0;
 		for (const bool pixel : { false, true }) {
 			const std::uint32_t mask = pixel ? kFramePushPS : kFramePushVS;
 			for (std::uint32_t r = 0; r < kConstantBufferRegisters; ++r) {
 				if (!((mask >> r) & 1))
 					continue;
 				if (pixel == a_pixel && r == a_register)
-					return word;
-				word += 2;
+					return block;
+				++block;
 			}
 		}
 		return ~0u;
@@ -128,7 +128,7 @@ namespace DCLF::Draws
 		return FrameSlotOffset(a_pixel, a_register);
 	}
 
-	/** @brief Calls a_visit(pixel, register, block) for each pass-wide block, in push word order. */
+	/** @brief Calls a_visit(pixel, register, block) for each pass-wide block, in ordinal order. */
 	template <class F>
 	void ForEachFrameBlock(F&& a_visit)
 	{
@@ -141,14 +141,11 @@ namespace DCLF::Draws
 		}
 	}
 
-	inline std::array<std::uint32_t, kFramePushWords> FramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef)
+	/** @brief A pass's frame push words: the record's address and ref, and the first slot of its pass-wide blocks' table (a_blockTable). */
+	inline std::array<std::uint32_t, kFramePushWords> FramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, std::uint32_t a_blockTable)
 	{
 		std::array<std::uint32_t, kFramePushWords> words{};
-		ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
-			const std::uint64_t address = a_frameConstants + FrameBlockOffset(a_pixel, a_register);
-			words[kFramePushRegisters + 2 * a_block] = static_cast<std::uint32_t>(address);
-			words[kFramePushRegisters + 2 * a_block + 1] = static_cast<std::uint32_t>(address >> 32);
-		});
+		words[kFramePushBlocks] = a_blockTable;
 		const std::uint64_t record = a_frameConstants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
 		words[kFramePushRecord] = static_cast<std::uint32_t>(record);
 		words[kFramePushRecord + 1] = static_cast<std::uint32_t>(record >> 32);
@@ -158,12 +155,22 @@ namespace DCLF::Draws
 		return words;
 	}
 
-	/** @brief The uniform buffer views of one frame constants buffer's pass-wide blocks. The views retire with the buffer. */
+	/**
+	 * @brief The uniform buffer views of one frame constants buffer's pass-wide blocks, a table of kFrameBlocks views per face in one
+	 * contiguous descriptor range, so a layout's PushIndex range binds a face's table from its first slot (TableBase). The views
+	 * retire with the buffers.
+	 */
 	class FrameBlockViews
 	{
 	public:
-		/** @brief Render thread. Returns null, and logs, when a slot or view cannot be made. */
-		static std::shared_ptr<const FrameBlockViews> Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants);
+		/**
+		 * @brief Render thread. One table, or one per face when a_faceBlocks is given: face f's VS and PS b12 view a_faceStride bytes
+		 * of a_faceBlocks at f * a_faceStride (the face's camera block), its other views the frame constants' blocks.
+		 * Returns null, and logs, when a slot or view cannot be made, or when bound frame blocks need a contiguous range the
+		 * descriptor service cannot give.
+		 */
+		static std::shared_ptr<const FrameBlockViews> Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants,
+			const std::shared_ptr<org::Buffer>& a_faceBlocks = nullptr, std::uint32_t a_faceStride = 0, std::uint32_t a_faces = 1);
 		/** @brief A block a view covers. The offset is 256-aligned and the size a multiple of 256. */
 		struct Block
 		{
@@ -178,13 +185,19 @@ namespace DCLF::Draws
 		FrameBlockViews& operator=(const FrameBlockViews&) = delete;
 		~FrameBlockViews();
 
-		std::array<std::uint32_t, kFrameBlocks> indices{};
+		/** @brief Face a_face's view indices, in ordinal order (a frame record's frameBlocks). */
+		std::array<std::uint32_t, kFrameBlocks> FaceIndices(std::uint32_t a_face) const;
+		/** @brief The first slot of face a_face's table (the frame push word kFramePushBlocks). Meaningful when contiguous. */
+		std::uint32_t TableBase(std::uint32_t a_face) const { return indices[0] + a_face * kFrameBlocks; }
+
+		std::array<std::uint32_t, kFrameBlocks> indices{};  // face 0's, or CreateFor's blocks'
+		bool contiguous = false;                             // the faces' tables are one range from indices[0]
+		std::uint32_t faces = 1;
 
 	private:
-		std::array<rhi::DescriptorSlot, kFrameBlocks> slots{};
-		std::uint32_t made = 0;
+		std::vector<rhi::DescriptorSlot> slots;
 		std::shared_ptr<org::runtime::IDescriptorService> service;
-		std::shared_ptr<org::Buffer> buffer;
+		std::shared_ptr<const void> owner;  // the viewed buffers
 	};
 
 	// The blocks the render thread packs into the frame slots for one epoch.

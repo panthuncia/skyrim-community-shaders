@@ -161,6 +161,9 @@ namespace DCLF::FrameSource
 			std::string out;
 			Result result;
 			std::uint32_t blockNumber = 0;
+			// Bound blocks declared per ordinal: a second block at one register (FrameBuffer's PerFrame beside VS_PerFrame at VS
+			// b12) takes the next space, since DXIL allows one block per register.
+			std::uint8_t boundUses[32]{};
 
 			bool Fail(std::string a_error)
 			{
@@ -265,6 +268,12 @@ namespace DCLF::FrameSource
 				const std::uint32_t ordinal = (options.pixel ? static_cast<std::uint32_t>(std::popcount(options.vertexBlocks)) : 0u) +
 				                              static_cast<std::uint32_t>(std::popcount(mask & ((1u << a_register) - 1)));
 				const std::string stage = options.pixel ? "PS" : "VS";
+				// Bound: a register of its own per block (DXIL allows one block per register), which a PushIndex range binds.
+				const bool bound = passWide && options.boundBlocks && !options.shadow;
+				const std::uint32_t space = kBoundBlockSpace + (bound && ordinal < 32 ? boundUses[ordinal]++ : 0u);
+				if (bound && space >= kBoundBlockSpace + kBoundBlockSpaces)
+					return Fail(std::format("constant buffer {} is the {}th block at {} b{}; bound blocks allow {} per register", name, space - kBoundBlockSpace + 1, stage,
+						a_register, kBoundBlockSpaces));
 				const std::string view = options.shadow ? std::format("DCLFShadowBlockView({})", a_register) : std::format("DCLFFrameBlockIndex({})", ordinal);
 				const std::string byRef = options.shadow ? std::format("DCLFShadowBlockRef({})", a_register) :
 				                                           std::format("DCLFFrameBlockSpan({}, {})", options.pixel ? "true" : "false", a_register);
@@ -279,7 +288,8 @@ namespace DCLF::FrameSource
 						out += std::format("\t{}{}{} {}{};\n", member.qualifiers, member.qualifiers.empty() ? "" : " ", member.type, member.name,
 							member.array ? std::format("[{}]", member.count) : std::string{});
 					out += "};\n";
-					out += std::format("static ConstantBuffer<DCLFBlock_{0}> DCLFBlockView_{0} = ResourceDescriptorHeap[{1}];\n", name, view);
+					out += bound ? std::format("ConstantBuffer<DCLFBlock_{0}> DCLFBlockView_{0} : register(b{1}, space{2});\n", name, ordinal, space) :
+					               std::format("static ConstantBuffer<DCLFBlock_{0}> DCLFBlockView_{0} = ResourceDescriptorHeap[{1}];\n", name, view);
 					for (const auto& [member, offset] : members) {
 						// An array is a macro for the view's member, not a static copy. DXC keeps a static array copy that is
 						// indexed at run time, and AMD's D3D12 compiler then copies the whole block to scratch in every wave.
@@ -293,7 +303,8 @@ namespace DCLF::FrameSource
 				}
 				std::string registerOf;
 				if (passWide) {
-					out += std::format("static ConstantBuffer<DCLFRawBlock> DCLFBlockView_{} = ResourceDescriptorHeap[{}];\n", name, view);
+					out += bound ? std::format("ConstantBuffer<DCLFRawBlock> DCLFBlockView_{} : register(b{}, space{});\n", name, ordinal, space) :
+					               std::format("static ConstantBuffer<DCLFRawBlock> DCLFBlockView_{} = ResourceDescriptorHeap[{}];\n", name, view);
 					registerOf = std::format("DCLFBlockView_{}.r[{{}}]", name);
 				} else {
 					out += std::format("static const uint2 DCLFBlockSpan_{} = {};\n", name, byRef);

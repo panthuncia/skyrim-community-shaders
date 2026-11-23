@@ -599,14 +599,20 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID DCLF_START_INSTANCE_INPUT)
 {
 	DCLF_ADD_START_INSTANCE(a_instance);
-	VS_OUTPUT vsout;
-	[loop] for (;;) {
+	VS_OUTPUT vsout = (VS_OUTPUT)0;
+	// At most a wave's lanes of passes: a lane the loop never reached (a miscompiled exit) takes its own draw, unkeyed, rather than
+	// loop until the device is lost.
+	bool done = false;
+	[loop] for (uint pass = 0; pass < 64; ++pass) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);
 		[branch] if (drawInstance == a_instance) {
 			vsout = DCLFShadowVertex(index, drawInstance);
+			done = true;
 			break;
 		}
 	}
+	[branch] if (!done)
+		vsout = DCLFShadowVertex(index, a_instance);
 	return vsout;
 }
 #	elif defined(DCLF_REFRACTION)
@@ -741,14 +747,20 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID DCLF_START_INSTANCE_INPUT)
 {
 	DCLF_ADD_START_INSTANCE(a_instance);
-	VS_OUTPUT vsout;
-	[loop] for (;;) {
+	VS_OUTPUT vsout = (VS_OUTPUT)0;
+	// At most a wave's lanes of passes: a lane the loop never reached (a miscompiled exit) takes its own draw, unkeyed, rather than
+	// loop until the device is lost.
+	bool done = false;
+	[loop] for (uint pass = 0; pass < 64; ++pass) {
 		const uint drawInstance = WaveReadLaneFirst(a_instance);
 		[branch] if (drawInstance == a_instance) {
 			vsout = DCLFRefractionVertex(index, drawInstance);
+			done = true;
 			break;
 		}
 	}
+	[branch] if (!done)
+		vsout = DCLFRefractionVertex(index, a_instance);
 	return vsout;
 }
 #	endif

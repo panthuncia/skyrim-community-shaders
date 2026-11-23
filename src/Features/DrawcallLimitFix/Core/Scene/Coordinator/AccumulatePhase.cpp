@@ -502,9 +502,10 @@ namespace DCLF::Scene
 		tables.pipelineTechnique[slot] = TechniqueRowFor(rules.techniqueRows ? descriptors.pass : 0u);
 		stats.shadowMaskPipelines += tables.TechniqueShadowMask(slot) ? 1 : 0;
 
+		// The key's runtime descriptors, which its pulled stages are compiled for.
 		PipelinePermutation permutation;
-		permutation.vertexShaderDescriptor = descriptors.rawVertex;
-		permutation.pixelShaderDescriptor = descriptors.rawPixel & ~descriptors.pixel;
+		permutation.vertexShaderDescriptor = key.runtimeVertex;
+		permutation.pixelShaderDescriptor = key.runtimePixel;
 		permutation.extraShaderDescriptor = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::InWorld);
 		// AdditiveLighting sets destination blend ONE. Only blended decals and forward objects (FUN_1414b39d0's flag 4) apply their alpha property.
 		if ((descriptors.decalGroup == 2 || descriptors.forward) && alphaBlending &&
@@ -513,8 +514,8 @@ namespace DCLF::Scene
 		permutation.extraFeatureDescriptor = RasterRefraction(key.rasterFlags) ? 0u : Extensions::LightingKeyPermutation(RasterLightingSpare(key.rasterFlags));
 		// A raw-permutation port's pass, as BSShader_BeginTechnique sets it.
 		if (rules.rawPermutation) {
-			permutation.vertexShaderDescriptor = descriptors.rawVertex;
-			permutation.pixelShaderDescriptor = descriptors.rawPixel & ~descriptors.pixel;
+			permutation.vertexShaderDescriptor = key.runtimeVertex;
+			permutation.pixelShaderDescriptor = key.runtimePixel;
 			permutation.extraShaderDescriptor = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::InWorld);
 			permutation.extraFeatureDescriptor = 0u;
 		}
@@ -1000,8 +1001,9 @@ namespace DCLF::Scene
 		if (family.turnedKeyBits && entry.parentReason == Ineligible::Billboard)
 			if (const std::int32_t mode = BillboardModeOf(entry); mode >= 0)
 				rasterFlags |= static_cast<std::uint32_t>(mode + 1) << family.spareShift;
+		// The runtime descriptors are the permutation block's, as MakeJoinPipeline writes it.
 		r.key = PipelineKey{ descriptors.vertex, descriptors.pixel, rasterFlags, descriptors.pass,
-			VertexLayoutOf(tables.geometries[r.geometrySlot].vertexDesc) };
+			VertexLayoutOf(tables.geometries[r.geometrySlot].vertexDesc), descriptors.rawVertex, descriptors.rawPixel & ~descriptors.pixel };
 		// As ExternalEmittance::ShouldSuppress decides.
 		const bool suppress = a_interior && (a_property.flags & static_cast<std::uint64_t>(PropertyFlag::kExternalEmittance)) && !r.leaf.node->emittance;
 		r.staticFlags = (alphaTest ? kObjectAlphaTest : 0u) | (twoSided ? kObjectTwoSided : 0u) |

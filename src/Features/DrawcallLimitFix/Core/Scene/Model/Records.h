@@ -173,6 +173,10 @@ namespace DCLF
 		std::uint32_t rasterFlags = 0;     // PipelineRasterFlags
 		std::uint32_t passDescriptor = 0;  // raw technique the Setup* functions read (selects the per-frame constants)
 		std::uint64_t vertexLayout = 0;    // geometry's BSGraphics::VertexDesc without the stride (VertexInput.h)
+		// The permutation block's runtime descriptors (PipelinePermutation's first two words). They follow from the pass and pixel
+		// descriptors, and the pulled stages are compiled for them (ShaderPrograms::ProgramDescriptorsOf).
+		std::uint32_t runtimeVertex = 0;
+		std::uint32_t runtimePixel = 0;
 
 		bool operator==(const PipelineKey&) const = default;
 	};

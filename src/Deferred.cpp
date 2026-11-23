@@ -446,7 +446,7 @@ void Deferred::DeferredPasses()
 			dynamicCubemaps.loaded ? Unwrap(reflectance.SRV) : nullptr,                           // t5  ReflectanceTexture
 			dynamicCubemaps.loaded ? dynamicCubemaps.envTexture->srv.get() : nullptr,             // t6  EnvTexture
 			dynamicCubemaps.loaded ? dynamicCubemaps.envReflectionsTexture->srv.get() : nullptr,  // t7  EnvReflectionsTexture
-			dynamicCubemaps.loaded ? skylightingProbes : nullptr,                                 // t8  SkylightingProbeArray
+			skylightingProbes,                                                                    // t8  SkylightingProbeArray (read under SKYLIGHTING alone)
 			Unwrap(masks2.SRV),                                                                   // t9  Masks2Texture (vertexAO in .x)
 			ssgi_ao,                                                                              // t10 SsgiAoTexture
 			ssgi_hq_spec ? nullptr : ssgi_y,                                                      // t11 SsgiYTexture

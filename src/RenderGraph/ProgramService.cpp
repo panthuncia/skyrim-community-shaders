@@ -47,6 +47,12 @@ namespace RenderGraph::Programs
 				defines.emplace_back(L"CS_GPU_AMD", L"1");
 			return defines;
 		};
+		// SPIR-V builds take bound push tables where BasicRHI binds them as uniform buffers (Pascal: descriptor-sets model with
+		// push descriptors). Elsewhere on Vulkan the shared blocks stay heap-indexed, as before.
+		environment.spirvBoundPushTables = [] {
+			const auto* host = RenderGraphRuntime::Get().Host();
+			return host && rhi::vulkan::BoundUniformBuffers(host->Device());
+		};
 		environment.labelPipelines = [](const char* a_label) { rhi::vulkan::set_pipeline_statistics_label(a_label); };
 		environment.log = [](org::services::ProgramLogLevel a_level, std::string_view a_message) {
 			switch (a_level) {

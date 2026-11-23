@@ -10,10 +10,12 @@
 #include "Features/DrawcallLimitFix/Core/Render/DrawFamilies/FamilySlots.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
+#include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/IndexPool.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Epochs.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
+#include "Features/DrawcallLimitFix/Diagnostics/ReplayCapture/ReplayCapture.h"
 
 #include "Features/RemoteControl/GpuCounters.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -118,6 +120,61 @@ namespace DCLF::Draws
 			}
 			if (stats)
 				stats->Resolve(commands, statsSlot, depthKind);
+		}
+
+		/**
+		 * @brief Hands a pass to the pass capture (CS_DCLF_CAPTURE): its plain bucket draws, as RecordDepthDraws and the colour
+		 * pass's plain main draws record them. Draw families and the terrain twins' second depth pass are left out.
+		 */
+		void CapturePass(const PassBindings& a_bindings, const PreparedDraws& a_prepared, org::PassRecordContext& a_recording, const char* a_name)
+		{
+			const auto& frame = *a_prepared.frame;
+			ReplayCapture::Pass pass;
+			pass.name = a_name;
+			pass.resourceHeap = frame.resourceHeap;
+			pass.samplerHeap = frame.samplerHeap;
+			static_assert(kFramePushWords == std::tuple_size_v<decltype(pass.frameWords)>);
+			std::copy(a_prepared.framePushWords.begin(), a_prepared.framePushWords.end(), pass.frameWords.begin());
+			pass.recordOffset = std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
+			pass.frameConstantsBytes = kFrameConstantBytes;
+			pass.sequences = a_recording.Resolve(a_bindings.sequences);
+			pass.depth = a_recording.Resolve(a_bindings.depth.Resource());
+			pass.width = frame.width;
+			pass.height = frame.height;
+			pass.minDepth = frame.minDepth;
+			pass.maxDepth = frame.maxDepth;
+			pass.argumentsOffset = PlainDrawArgumentsOffset();
+			pass.instanceWord = ::RenderGraph::Backend::D3D12InstanceWord();
+			const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.sequences);
+			auto add = [&](std::uint32_t a_set, std::uint64_t a_first, rhi::PipelineHandle a_pipeline, std::uint32_t a_countWord, std::uint32_t a_capacity, bool a_offsetDepth) {
+				ReplayCapture::Bucket bucket{ .set = a_set, .first = a_first, .capacity = a_capacity, .countWord = a_countWord, .pipeline = a_pipeline };
+				const RenderGraph::BufferRef sequence = sequencesRef + a_first * sizeof(DrawSequence);
+				bucket.drawWords[kZDrawPushSequences] = sequence.viewSlot;
+				bucket.drawWords[kZDrawPushSequences + 1] = sequence.byteOffset;
+				bucket.drawWords[kZDrawPushOffsetDepth] = a_offsetDepth ? 1u : 0u;
+				pass.buckets.push_back(bucket);
+			};
+			if (a_prepared.zPrepass) {
+				pass.indexPool = a_recording.Resolve(a_bindings.pool);
+				pass.counts = a_recording.Resolve(a_bindings.bucketCounts);
+				const std::uint64_t phaseBase = a_prepared.phaseTwo ? std::uint64_t(frame.sequenceDraws) : 0;
+				for (const auto& call : frame.zCalls)
+					add(~0u, phaseBase + call.first, call.pipeline, call.bucket, call.capacity, call.terrainNear);
+			} else {
+				// The colour pass captures only its plain main draws (RecordColourDraws' plainMain).
+				if (!frame.classPlan || frame.classPlan->main.empty() || a_bindings.pool.globalResourceID == 0)
+					return;
+				pass.indexPool = a_recording.Resolve(a_bindings.pool);
+				pass.counts = a_recording.Resolve(a_bindings.classCounts);
+				pass.colourCount = std::min<std::uint32_t>(a_prepared.targetCount, static_cast<std::uint32_t>(pass.colours.size()));
+				for (std::uint32_t i = 0; i < pass.colourCount; ++i)
+					pass.colours[i] = a_recording.Resolve(a_bindings.targets[i].Resource());
+				for (std::size_t b = 0; b < frame.classPlan->main.size(); ++b) {
+					const auto& bucket = frame.classPlan->main[b];
+					add(bucket.set, bucket.first, frame.indirect.plainColour[bucket.set], frame.classPlan->MainCountWord(b), bucket.capacity, false);
+				}
+			}
+			ReplayCapture::RecordPass(a_recording.Commands(), std::move(pass));
 		}
 
 		/** @brief Begins a draw pass identically on the command list and on a preprocess state list. */
@@ -474,7 +531,7 @@ namespace DCLF::Draws
 			prepared.stats = resources->passStats.get();
 			if (!prepared.zPrepass)
 				prepared.preprocess = resources->preprocessMain.get();
-			prepared.framePushWords = MainFramePushWords(resources->frameConstantsAddress, resources->frameConstantsRef);
+			prepared.framePushWords = MainFramePushWords(resources->frameConstantsAddress, resources->frameConstantsRef, resources->frameBlocks.get());
 			for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f)
 				if (const auto family = static_cast<Api::DrawFamily>(f); FamilySetUp(*resources->scene, family))
 					prepared.families[f] = { frame->families[f], a_bindings.familyRows[f] };
@@ -512,6 +569,8 @@ namespace DCLF::Draws
 			const auto run = a_recording.Run();
 			const MainRecording pass{ frame, commands, sequences, count, classCounts, begin, depth, a_prepared.stats,
 				a_prepared.stats ? a_prepared.stats->RangeOf(run) : UINT32_MAX, run };
+			if (const char* captured = zPrepass ? (a_prepared.phaseTwo ? "Z-prepass phase two" : "Z-prepass") : "main opaque"; ReplayCapture::Wanted(captured))
+				CapturePass(a_bindings, a_prepared, a_recording, captured);
 			if (zPrepass) {
 				RecordDepthDraws(a_bindings, a_prepared, a_recording, pass);
 				return;

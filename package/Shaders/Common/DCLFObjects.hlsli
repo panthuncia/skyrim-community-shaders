@@ -252,8 +252,17 @@ static const uint kDCLFMaterialBlock = 256;
 static const uint kDCLFTechniqueBlock = 256;
 static const uint kDCLFGeometryBlock = 768;
 #		endif
+#		if defined(DCLF_DEPTH_TEX) && defined(PSHADER)
+// The Z-prepass's alpha-tested pixel stage (DCLF_DEPTH_TEX): the diffuse texture's and sampler's heap indices, which its vertex stage
+// read from the material row and passes as a flat attribute. Its sample then does not wait on the row's loads.
+static uint2 DCLFDepthTexIndices;
+#		endif
 uint DCLFMaterialTextureIndex(uint a_register)
 {
+#		if defined(DCLF_DEPTH_TEX) && defined(PSHADER)
+	if (a_register == 0)
+		return DCLFDepthTexIndices.x;
+#		endif
 	// MaterialRowHeader: four words (the animated row, reserved), textures[16], samplers[16], features (TruePBR's t80-t91: Manifest.cpp).
 	const uint slot = a_register >= 80 ? 32 + (a_register - 80) : a_register;
 	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFMaterialRowAddress, kDCLFMaterialRowHeader + 16 + 4 * slot), 4);
@@ -261,6 +270,10 @@ uint DCLFMaterialTextureIndex(uint a_register)
 }
 uint DCLFMaterialSamplerIndex(uint a_register)
 {
+#		if defined(DCLF_DEPTH_TEX) && defined(PSHADER)
+	if (a_register == 0)
+		return DCLFDepthTexIndices.y;
+#		endif
 	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFMaterialRowAddress, kDCLFMaterialRowHeader + 80 + 4 * a_register), 4);
 	return index;
 }
@@ -273,6 +286,25 @@ float3 DCLFRowFloat3(DeviceRef a_row, uint a_offset) { return asfloat(DeviceLoad
 float2 DCLFRowFloat2(DeviceRef a_row, uint a_offset) { return asfloat(DeviceLoad(uint2, DeviceRefAdd(a_row, a_offset), 4)); }
 float DCLFRowFloat(DeviceRef a_row, uint a_offset) { return asfloat(DeviceLoad(uint, DeviceRefAdd(a_row, a_offset), 4)); }
 uint DCLFRowUint(DeviceRef a_row, uint a_offset) { return DeviceLoad(uint, DeviceRefAdd(a_row, a_offset), 4); }
+// The permutation block's runtime descriptors (Permutation::VertexShaderDescriptor, PixelShaderDescriptor). DCLF compiles a pulled
+// stage for its pipeline key's values (ShaderPrograms.cpp, DCLF_RUNTIME_VS_DESCRIPTOR and DCLF_RUNTIME_PS_DESCRIPTOR), so the
+// compiler folds the permutation branches away. Without the define, the stage reads the pipeline row's word.
+uint DCLFPermutationVertexDescriptor()
+{
+#		if defined(DCLF_RUNTIME_VS_DESCRIPTOR)
+	return DCLF_RUNTIME_VS_DESCRIPTOR;
+#		else
+	return DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
+#		endif
+}
+uint DCLFPermutationPixelDescriptor()
+{
+#		if defined(DCLF_RUNTIME_PS_DESCRIPTOR)
+	return DCLF_RUNTIME_PS_DESCRIPTOR;
+#		else
+	return DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+#		endif
+}
 // A row_major matrix: a register per row.
 float3x4 DCLFRowFloat3x4(DeviceRef a_row, uint a_offset)
 {

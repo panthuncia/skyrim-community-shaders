@@ -5,9 +5,9 @@
 //   spv-lower <in.spv> <plan.txt> <out.spv> [--source <from>=<to> ...]
 //
 // --source rewrites every mapping of one BindingSource to another before lowering, keeping its push and record offsets (sources by
-// name: Heap, HeapIndirect, BufferIndirectAddress, BufferPushAddress, PushData, StaticSampler); e.g. BufferIndirectAddress=HeapIndirect
-// reads each uniform block as a heap descriptor whose index is in the record, as a layout with IndirectIndex constant buffer ranges
-// would.
+// name: Heap, HeapIndirect, BufferIndirectAddress, BufferPushAddress, PushData, StaticSampler, HeapPush, BoundUniform); e.g.
+// BufferIndirectAddress=HeapIndirect reads each uniform block as a heap descriptor whose index is in the record, as a layout with
+// IndirectIndex constant buffer ranges would. A plan line's 11th mapping field is BoundUniform's set (older dumps have 10).
 #include "rhi_vulkan_spirv_lowering.h"
 
 #include <cstdio>
@@ -26,7 +26,8 @@ namespace
 
 	const std::map<std::string, BindingSource> kSources = { { "Heap", BindingSource::Heap }, { "HeapIndirect", BindingSource::HeapIndirect },
 		{ "BufferIndirectAddress", BindingSource::BufferIndirectAddress }, { "BufferPushAddress", BindingSource::BufferPushAddress },
-		{ "PushData", BindingSource::PushData }, { "StaticSampler", BindingSource::StaticSampler } };
+		{ "PushData", BindingSource::PushData }, { "StaticSampler", BindingSource::StaticSampler },
+		{ "HeapPush", BindingSource::HeapPush }, { "BoundUniform", BindingSource::BoundUniform } };
 
 	std::vector<std::uint32_t> ReadWords(const char* a_path)
 	{
@@ -41,11 +42,21 @@ namespace
 int main(int a_argc, char** a_argv)
 {
 	if (a_argc < 4) {
-		std::cerr << "usage: spv-lower <in.spv> <plan.txt> <out.spv> [--source <from>=<to> ...]\n";
+		std::cerr << "usage: spv-lower <in.spv> <plan.txt> <out.spv> [--sets [--ub]] [--source <from>=<to> ...]\n";
 		return 2;
 	}
 	std::map<BindingSource, BindingSource> rewrites;
-	for (int i = 4; i + 1 < a_argc; i += 2) {
+	bool sets = false, uniformBuffers = false;
+	for (int i = 4; i < a_argc; i += 2) {
+		if (std::string(a_argv[i]) == "--sets" || std::string(a_argv[i]) == "--ub") {
+			(std::string(a_argv[i]) == "--sets" ? sets : uniformBuffers) = true;
+			--i;
+			continue;
+		}
+		if (i + 1 >= a_argc) {
+			std::cerr << "bad option: " << a_argv[i] << "\n";
+			return 2;
+		}
 		const std::string rule = a_argv[i + 1];
 		const auto equals = rule.find('=');
 		if (std::string(a_argv[i]) != "--source" || equals == std::string::npos || !kSources.contains(rule.substr(0, equals)) ||
@@ -79,6 +90,8 @@ int main(int a_argc, char** a_argv)
 			rhi::vulkan_binding::BindingMapping m;
 			std::uint32_t mask = 0, source = 0;
 			in >> m.set >> m.firstBinding >> m.bindingCount >> mask >> source >> m.heapElement >> m.pushOffset >> m.recordOffset >> m.pushDataBytes >> m.staticSampler;
+			if (std::uint32_t boundSet = 0; in >> boundSet)
+				m.boundSet = boundSet;
 			m.resourceMask = mask;
 			m.source = static_cast<BindingSource>(source);
 			if (const auto found = rewrites.find(m.source); found != rewrites.end())
@@ -89,6 +102,25 @@ int main(int a_argc, char** a_argv)
 				staticSamplers.push_back(e);
 	}
 	target.staticSamplerElements = staticSamplers;
+	// --ub keeps heap CBVs as uniform buffers (binding 6), as D3D12 reads them, for statistics only: Pascal cannot bind that layout.
+	// --sets: BasicRHI's descriptor-sets model (VkCreateBufferModelShaderModule): one binding per kind in set 0, uniform buffers past
+	// them, heap CBVs as storage buffers.
+	if (sets) {
+		using Kind = rhi::vulkan_binding::LoweringTarget::Kind;
+		target.resourceSet = 0;
+		target.resourceBinding = 0;
+		target.samplerSet = 1;
+		target.samplerBinding = 0;
+		target.perType = true;
+		target.kindBindings[static_cast<std::uint32_t>(Kind::SampledImage)] = 0;
+		target.kindBindings[static_cast<std::uint32_t>(Kind::StorageImage)] = 1;
+		target.kindBindings[static_cast<std::uint32_t>(Kind::UniformTexelBuffer)] = 2;
+		target.kindBindings[static_cast<std::uint32_t>(Kind::StorageTexelBuffer)] = 3;
+		target.kindBindings[static_cast<std::uint32_t>(Kind::StorageBuffer)] = 4;
+		target.kindBindings[static_cast<std::uint32_t>(Kind::UniformBuffer)] = 6;
+		target.kindBindings[static_cast<std::uint32_t>(Kind::AccelerationStructure)] = 5;
+		target.cbvAsStorageBuffer = !uniformBuffers;
+	}
 	std::vector<std::uint32_t> lowered;
 	std::string error;
 	if (!rhi::vulkan_binding::LowerForDescriptorBuffer(input, plan, static_cast<VkShaderStageFlagBits>(stage), target, lowered, error, entry)) {

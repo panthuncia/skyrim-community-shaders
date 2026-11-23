@@ -30,6 +30,18 @@
 // - ORG_SHARED_BOOL: a bool member, a uint in the struct. DXC 1.9 emits invalid SPIR-V for a bool read from a
 //   ConstantBuffer<T>; the aliases still give it as a bool.
 #if defined(__hlsl_dx_compiler) && defined(CS_ORG_BINDLESS) && defined(ORG_SHARED_CONSTANTS)
+// A D3D12 program build (ORG_BOUND_PUSH_TABLES, ORGModuleServices' ComputeProgram) reads each block as a bound constant buffer in space
+// 11, at the register of the push word holding its handle (the SHARED entry is first, so words 0-3). A bound constant buffer's values
+// are free operands on NVIDIA, where a heap-indexed one's cost a register each.
+#	if defined(ORG_BOUND_PUSH_TABLES)
+#		define ORG_SHARED_HEAP_VIEW(view) ConstantBuffer<OrgSharedValues_##view> OrgSharedView_##view : register(ORG_SHARED_REGISTER_##view, space11);
+#		define ORG_SHARED_REGISTER_FrameBuffer b0
+#		define ORG_SHARED_REGISTER_SharedData b1
+#		define ORG_SHARED_REGISTER_FeatureData b2
+#		define ORG_SHARED_REGISTER_Permutation b3
+#	else
+#		define ORG_SHARED_HEAP_VIEW(view) static ConstantBuffer<OrgSharedValues_##view> OrgSharedView_##view = ResourceDescriptorHeap[OrgHandle_##view];
+#	endif
 #	define ORG_SHARED_CBUFFER(cb, view, reg) struct OrgSharedValues_##view
 #	define ORG_SHARED_PACKOFFSET(c)
 #	define ORG_SHARED_BOOL uint
@@ -42,11 +54,11 @@
 #		define ORG_SHARED_VIEW_FrameBuffer                                                                                  \
 			static ByteAddressBuffer OrgSharedRing_FrameBuffer = ResourceDescriptorHeap[ORG_SHARED_FRAMEBUFFER_AT.FrameSrv]; \
 			static OrgSharedValues_FrameBuffer OrgSharedView_FrameBuffer = OrgSharedRing_FrameBuffer.Load<OrgSharedValues_FrameBuffer>(ORG_SHARED_FRAMEBUFFER_AT.FrameOffset);
-#		define ORG_SHARED_VIEW_SharedData static ConstantBuffer<OrgSharedValues_SharedData> OrgSharedView_SharedData = ResourceDescriptorHeap[OrgHandle_SharedData];
-#		define ORG_SHARED_VIEW_FeatureData static ConstantBuffer<OrgSharedValues_FeatureData> OrgSharedView_FeatureData = ResourceDescriptorHeap[OrgHandle_FeatureData];
-#		define ORG_SHARED_VIEW_Permutation static ConstantBuffer<OrgSharedValues_Permutation> OrgSharedView_Permutation = ResourceDescriptorHeap[OrgHandle_Permutation];
+#		define ORG_SHARED_VIEW_SharedData ORG_SHARED_HEAP_VIEW(SharedData)
+#		define ORG_SHARED_VIEW_FeatureData ORG_SHARED_HEAP_VIEW(FeatureData)
+#		define ORG_SHARED_VIEW_Permutation ORG_SHARED_HEAP_VIEW(Permutation)
 #	else
-#		define ORG_SHARED_VIEW(view) static ConstantBuffer<OrgSharedValues_##view> OrgSharedView_##view = ResourceDescriptorHeap[OrgHandle_##view];
+#		define ORG_SHARED_VIEW(view) ORG_SHARED_HEAP_VIEW(view)
 #	endif
 #	define ORG_SHARED_ALIAS(view, ns, type, name) static const type name = OrgSharedView_##view.ns##_##name;
 #	define ORG_SHARED_ARRAY_ALIAS(view, ns, type, name, count) static const type name[count] = OrgSharedView_##view.ns##_##name;

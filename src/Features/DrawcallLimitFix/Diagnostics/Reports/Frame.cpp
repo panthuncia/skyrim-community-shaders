@@ -133,8 +133,11 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 		// Scene statistics are logged by the coordinator from its pass. The lines here read only the frame's own state.
 		const double frames = std::max(1u, timing.frames);
 		const auto& shaders = DCLF::ShaderPrograms::Get().GetStats();
-		logger::info("[DCLF] SPIR-V programs: {} requested, {} ready ({} stages from cache), {} failed; shadow (Utility): {} requested, {} ready, {} failed",
-			shaders.requested, shaders.ready, shaders.fromCache, shaders.failed, shaders.shadowRequested, shaders.shadowReady, shaders.shadowFailed);
+		// Lighting programs are compiled per runtime descriptor pair (the pulled stages' literals), so a lookup pair can have several.
+		logger::info("[DCLF] SPIR-V programs: {} requested, {} ready ({} stages from cache), {} failed; shadow (Utility): {} requested, {} ready, {} failed; "
+					 "Lighting lookup pairs {}, {} with several runtime pairs (at most {})",
+			shaders.requested, shaders.ready, shaders.fromCache, shaders.failed, shaders.shadowRequested, shaders.shadowReady, shaders.shadowFailed, shaders.lookupPairs,
+			shaders.severalRuntime, shaders.mostRuntime);
 		const auto& indirect = DCLF::DrawPipelines::Get().GetStats();
 		std::string familyLanes;
 		for (const auto& family : indirect.drawFamilies)

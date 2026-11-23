@@ -17,6 +17,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Capture/Capture.h"
 #include "Features/DrawcallLimitFix/Diagnostics/PlayerParity.h"
+#include "Features/DrawcallLimitFix/Diagnostics/ReplayCapture/ReplayCapture.h"
 #include "Features/DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
 #include "CSEditor/EditorWindow.h"
 #include "Features/HDRDisplay.h"
@@ -189,6 +190,9 @@ namespace DCLF
 			}
 			if (RunTextureStreamingCommand(command))
 				return true;
+			// "dclf:capture" dumps the next frame's Z-prepass and main opaque passes for replay (needs CS_DCLF_CAPTURE=<dir>).
+			if (command == "dclf:capture")
+				return ReplayCapture::Arm(a_error);
 			// "dclf:<toggle name>=<0|1>" sets a live toggle as the menu does.
 			if (command.rfind("dclf:", 0) == 0) {
 				const auto equals = command.find('=');

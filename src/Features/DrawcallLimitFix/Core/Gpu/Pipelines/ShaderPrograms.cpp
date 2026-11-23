@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.h"
+#include "Features/DrawcallLimitFix/Diagnostics/ReplayCapture/ReplayCapture.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
 
 #include <algorithm>
@@ -129,10 +130,24 @@ namespace DCLF
 
 	namespace
 	{
+		/** @brief A stage's key in the stage cache: its kind and descriptor, then the runtime descriptors it takes as literals. */
+		struct StageKey
+		{
+			std::uint64_t base = 0;
+			std::uint64_t runtime = 0;  // the vertex literal's word high, the pixel literal's low
+
+			bool operator==(const StageKey&) const = default;
+		};
+		struct StageKeyHash
+		{
+			using is_avalanching = void;
+			std::uint64_t operator()(const StageKey& a_key) const noexcept { return ankerl::unordered_dense::detail::wyhash::hash(&a_key, sizeof(a_key)); }
+		};
+
 		/** @brief One stage's compile. Kept for the process, as the programs are. */
 		struct Stage
 		{
-			std::uint64_t key = 0;
+			StageKey key;
 			std::shared_ptr<const org::services::ShaderArtifact> artifact;  // written once, before done
 			std::atomic<bool> done{ false };
 			// A pulled vertex stage's attributes, written before the stage is shared. 0 otherwise.
@@ -142,10 +157,10 @@ namespace DCLF
 		using StagePtr = std::shared_ptr<Stage>;
 
 		/** @brief Completed stage keys, pushed from any thread and drained by the pipeline lane. */
-		RenderGraph::Frame::EventQueue<std::uint64_t>& StageCompletions()
+		RenderGraph::Frame::EventQueue<StageKey>& StageCompletions()
 		{
 			// Never destroyed, because a compile may complete while the process tears down.
-			static auto* queue = new RenderGraph::Frame::EventQueue<std::uint64_t>;
+			static auto* queue = new RenderGraph::Frame::EventQueue<StageKey>;
 			return *queue;
 		}
 
@@ -172,7 +187,7 @@ namespace DCLF
 		std::string text;
 		for (const auto& [bit, name] : { std::pair{ kOnDemandVertex, "VS" }, std::pair{ kOnDemandPixel, "PS" }, std::pair{ kOnDemandDepthPixel, "depth PS" },
 				 std::pair{ kOnDemandPulledVertex, "pulled VS" }, std::pair{ kOnDemandPulledDepthPixel, "pulled depth PS" }, std::pair{ kOnDemandPulledPixel, "pulled PS" },
-				 std::pair{ kOnDemandPulledDepthVertex, "pulled depth VS" } })
+				 std::pair{ kOnDemandPulledDepthVertex, "pulled depth VS" }, std::pair{ kOnDemandPulledDepthTexVertex, "pulled depth texture VS" } })
 			if (a_stages & bit)
 				text += fmt::format("{}{}", text.empty() ? "" : ", ", name);
 		return text;
@@ -321,13 +336,15 @@ namespace DCLF
 		const auto& dependencies = RenderGraphRuntime::ShaderSourceFiles();
 		const auto eager = PulledSource::EagerRowNames(dependencies);
 		const auto pulledOptions = PulledOptions(&eager);
-		if (!SwitchValue(Switch::StageDump).empty()) {
+		if (!SwitchValue(Switch::StageDump).empty() || ReplayCapture::Enabled()) {
 			std::string textures;
 			for (std::size_t r = 0; r < pulledOptions.materialTexture.size(); ++r)
 				if (pulledOptions.materialTexture[r])
 					textures += fmt::format("{}{}", textures.empty() ? "" : ",", r);
-			DumpStageLine(fmt::format(R"({{"kind":"options","generation":{},"materialTextures":[{}],"shadowMaskSlot":{},"samplerSlots":{},"lazyRows":true}})", a_generation,
-				textures, pulledOptions.shadowMaskSlot, pulledOptions.samplerSlots));
+			auto line = fmt::format(R"({{"kind":"options","generation":{},"materialTextures":[{}],"shadowMaskSlot":{},"samplerSlots":{},"lazyRows":true}})", a_generation,
+				textures, pulledOptions.shadowMaskSlot, pulledOptions.samplerSlots);
+			DumpStageLine(line);
+			ReplayCapture::NoteStageLine({}, std::move(line));
 		}
 		pulledSource = PulledLightingSource(source, pulledOptions);
 		utilitySource = ReadShaderFile(kUtilitySourcePath);
@@ -432,9 +449,11 @@ namespace DCLF
 		}
 
 		/** @brief A stage's compile request. The lane and the registry's rebuilds share it, so one request means one compiler key. */
-		org::services::ShaderCompileRequest MakeStageRequest(std::span<const std::byte> a_source, const RE::BSShader& a_lighting, bool a_pixel, std::uint32_t a_descriptor, bool a_depthOnly, bool a_pulled, bool a_family,
-			const char* a_sourceName, std::uint32_t& a_vertexAttributes)
+		org::services::ShaderCompileRequest MakeStageRequest(std::span<const std::byte> a_source, const RE::BSShader& a_lighting, const ShaderStageSpec& a_stage, bool a_pulled,
+			bool a_family, const char* a_sourceName, std::uint32_t& a_vertexAttributes)
 		{
+			const bool a_pixel = a_stage.pixel, a_depthOnly = a_stage.depth;
+			const std::uint32_t a_descriptor = a_stage.descriptor;
 			a_vertexAttributes = 0;
 			org::services::ShaderCompileRequest request{};
 			DCLF_ZONE("CS.DCLF.Shaders.RequestStage");
@@ -470,6 +489,15 @@ namespace DCLF
 				request.defines.push_back({ L"DCLF_PULLED", L"1" });
 			if (a_pulled && (a_sourceName == kSourcePath || a_family))
 				request.defines.push_back({ L"DCLF_PULLED_ROWS", L"1" });
+			// The pipeline key's runtime descriptors as literals, in place of the pipeline row's words (DCLFObjects.hlsli,
+			// DCLFPermutationVertexDescriptor), so the compiler folds the permutation branches.
+			if (a_pulled && (a_stage.literals & kLiteralVertex))
+				request.defines.push_back({ L"DCLF_RUNTIME_VS_DESCRIPTOR", Widen(fmt::format("0x{:08X}u", a_stage.runtimeVertex)) });
+			if (a_pulled && (a_stage.literals & kLiteralPixel))
+				request.defines.push_back({ L"DCLF_RUNTIME_PS_DESCRIPTOR", Widen(fmt::format("0x{:08X}u", a_stage.runtimePixel)) });
+			// The Z-prepass's alpha test reads its texture indices from the vertex stage (ShaderStageSpec::depthTex).
+			if (a_pulled && a_stage.depthTex)
+				request.defines.push_back({ L"DCLF_DEPTH_TEX", L"1" });
 			// On D3D12, a pulled build also reads the pass's bindings itself, rewritten by DxilStages before it compiles.
 			// Other builds keep their registers.
 			const bool utility = a_sourceName == kUtilitySourcePath;
@@ -511,14 +539,18 @@ namespace DCLF
 				shift(L"-fvk-s-shift", kBindingShiftS);
 				shift(L"-fvk-u-shift", kBindingShiftU);
 			}
-			if (!SwitchValue(Switch::StageDump).empty()) {
+			if (!SwitchValue(Switch::StageDump).empty() || ReplayCapture::Enabled()) {
 				std::string arguments = "[";
 				for (std::size_t i = 0; i < request.arguments.size(); ++i)
 					arguments += (i ? "," : "") + JsonString(Util::WStringToString(request.arguments[i]));
 				const std::span<const org::services::ShaderDefine> defines(request.defines);
-				DumpStageLine(fmt::format(R"({{"kind":"stage","source":{},"pixel":{},"depth":{},"pulled":{},"family":{},"descriptor":"{:08X}","target":{},"cs":{},"dclf":{},"arguments":{}]}})",
+				auto line = fmt::format(R"({{"kind":"stage","source":{},"pixel":{},"depth":{},"pulled":{},"family":{},"descriptor":"{:08X}","target":{},"cs":{},"dclf":{},"arguments":{}]}})",
 					JsonString(a_sourceName), a_pixel, a_depthOnly, a_pulled, a_family, a_descriptor, JsonString(Util::WStringToString(request.target)),
-					JsonDefines(defines.first(communityShadersDefines)), JsonDefines(defines.subspan(communityShadersDefines)), arguments));
+					JsonDefines(defines.first(communityShadersDefines)), JsonDefines(defines.subspan(communityShadersDefines)), arguments);
+				DumpStageLine(line);
+				ReplayCapture::NoteStageLine(ReplayCapture::StageKey(a_pixel, a_depthOnly, a_pulled, a_family, a_descriptor, a_pulled ? a_stage.literals : std::uint8_t(0),
+												 a_stage.runtimeVertex, a_stage.runtimePixel, a_pulled && a_stage.depthTex),
+					std::move(line));
 			}
 			return request;
 		}
@@ -566,16 +598,21 @@ namespace DCLF
 			});
 		}
 
-		/** @brief A stage's key in the stage cache, and whether it is a pulled build. */
-		std::uint64_t StageKeyOf(const RE::BSShader& a_shader, const ShaderStageSpec& a_stage, bool& a_pulled)
+		/** @brief A stage's key in the stage cache, and whether it is a pulled build. Only a pulled build takes literals. */
+		StageKey StageKeyOf(const RE::BSShader& a_shader, const ShaderStageSpec& a_stage, bool& a_pulled)
 		{
 			const bool utility = a_shader.shaderType.get() == RE::BSShader::Type::Utility;
 			const auto drawFamily = Extensions::DrawFamilyOfShader(static_cast<std::uint8_t>(a_shader.shaderType.get()));
 			const auto family = Extensions::FamilyOfShader(static_cast<std::uint8_t>(a_shader.shaderType.get()));
 			a_pulled = family != Api::ProgramFamily::Count ? a_stage.pulled :
 			                                                 (a_stage.pulled || utility || (drawFamily != Api::DrawFamily::Count && DrawFamilyLaneSlotOf(drawFamily).pulled));
-			return a_stage.descriptor | (std::uint64_t(a_stage.pixel) << 32) | (std::uint64_t(a_stage.depth) << 33) | (std::uint64_t(utility) << 34) |
-			       (std::uint64_t(a_pulled) << 35) | DrawStageKeyBitOf(drawFamily) | StageKeyBitOf(family);
+			const std::uint8_t literals = a_pulled ? a_stage.literals : std::uint8_t(0);
+			const std::uint64_t runtime = ((literals & kLiteralVertex) ? std::uint64_t(a_stage.runtimeVertex) << 32 : 0ull) |
+			                              ((literals & kLiteralPixel) ? a_stage.runtimePixel : 0u);
+			return { a_stage.descriptor | (std::uint64_t(a_stage.pixel) << 32) | (std::uint64_t(a_stage.depth) << 33) | (std::uint64_t(utility) << 34) |
+						 (std::uint64_t(a_pulled) << 35) | DrawStageKeyBitOf(drawFamily) | StageKeyBitOf(family) | (std::uint64_t(literals) << 40) |
+						 (std::uint64_t(a_pulled && a_stage.depthTex) << 48),
+				runtime };
 		}
 
 		/** @brief Mixes a stage binary into a program's fingerprint. */
@@ -586,19 +623,15 @@ namespace DCLF
 		}
 
 		// Each kind's stage list, shared by the lane's Find* and the registry's Rebuild*, so both make the same requests and fingerprints.
-		std::array<ShaderStageSpec, 7> LightingStages(const PipelineKey& a_key)
-		{
-			const std::uint32_t v = a_key.vertexDescriptor, p = a_key.pixelDescriptor;
-			// vertex, pixel, depth pixel, pulled vertex, pulled depth pixel, pulled pixel, pulled depth vertex
-			return { ShaderStageSpec{ false, v }, ShaderStageSpec{ true, p }, ShaderStageSpec{ true, p, true }, ShaderStageSpec{ false, v, false, true },
-				ShaderStageSpec{ true, p, true, true }, ShaderStageSpec{ true, p, false, true }, ShaderStageSpec{ false, v, true, true } };
-		}
+		// Pulled pixel stages take both runtime descriptors as literals (ShaderPrograms::LightingStages). A family's pulled vertex
+		// stage takes the vertex one, which Water's reads.
 		std::array<ShaderStageSpec, 6> FamilyStages(const PipelineKey& a_key)
 		{
 			// Program's order with the depth slots repeating the pixel stages. A stage listed twice is waited for twice, harmlessly.
-			const std::uint32_t v = a_key.vertexDescriptor, p = a_key.pixelDescriptor;
-			return { ShaderStageSpec{ false, v }, ShaderStageSpec{ true, p }, ShaderStageSpec{ true, p }, ShaderStageSpec{ false, v, false, true },
-				ShaderStageSpec{ true, p, false, true }, ShaderStageSpec{ true, p, false, true } };
+			const std::uint32_t v = a_key.vertexDescriptor, p = a_key.pixelDescriptor, rv = a_key.runtimeVertex, rp = a_key.runtimePixel;
+			const ShaderStageSpec pulledPixel{ true, p, false, true, kLiteralBoth, rv, rp };
+			return { ShaderStageSpec{ false, v }, ShaderStageSpec{ true, p }, ShaderStageSpec{ true, p }, ShaderStageSpec{ false, v, false, true, kLiteralVertex, rv, rp },
+				pulledPixel, pulledPixel };
 		}
 		std::array<ShaderStageSpec, 2> ShadowStages(std::uint32_t a_technique)
 		{
@@ -622,16 +655,29 @@ namespace DCLF
 			a_program.vertex2 = {};
 			a_program.pixel2 = {};
 		}
-		std::array<ShaderStageSpec, 2> ForwardStages(std::uint32_t a_vertexDescriptor, std::uint32_t a_pixelDescriptor)
+		std::array<ShaderStageSpec, 2> ForwardStages(const ProgramDescriptors& a_descriptors)
 		{
-			// The pulled vertex stage is the Z-prepass's. The pixel stage is the colour one.
-			return { ShaderStageSpec{ false, a_vertexDescriptor, false, true }, ShaderStageSpec{ true, a_pixelDescriptor, false, true } };
+			// The pulled vertex stage is the Z-prepass's. The pixel stage is the colour one, with the runtime literals.
+			return { ShaderStageSpec{ false, a_descriptors.vertex, false, true },
+				ShaderStageSpec{ true, a_descriptors.pixel, false, true, kLiteralBoth, a_descriptors.runtimeVertex, a_descriptors.runtimePixel } };
 		}
 		std::array<ShaderStageSpec, 2> DrawFamilyForwardStages(Api::DrawFamily a_family)
 		{
 			const std::uint32_t forward = Extensions::DrawFamilyOf(a_family).contribution.program.descriptors.forward;
 			return { ShaderStageSpec{ false, forward }, ShaderStageSpec{ true, forward } };
 		}
+	}
+
+	std::array<ShaderStageSpec, 8> ShaderPrograms::LightingStages(const PipelineKey& a_key)
+	{
+		// Lighting.hlsl's vertex stage reads neither runtime descriptor, so its pulled builds take no literals and stay shared
+		// between keys and Z-prepass groups. The pulled pixel builds take both. The pulled depth pixel stage reads its texture indices
+		// from the pulled depth texture vertex stage, which an alpha-tested Z-prepass pipeline pairs it with.
+		const std::uint32_t v = a_key.vertexDescriptor, p = a_key.pixelDescriptor, rv = a_key.runtimeVertex, rp = a_key.runtimePixel;
+		// vertex, pixel, depth pixel, pulled vertex, pulled depth pixel, pulled pixel, pulled depth vertex, pulled depth texture vertex
+		return { ShaderStageSpec{ false, v }, ShaderStageSpec{ true, p }, ShaderStageSpec{ true, p, true }, ShaderStageSpec{ false, v, false, true },
+			ShaderStageSpec{ true, p, true, true, kLiteralBoth, rv, rp, true }, ShaderStageSpec{ true, p, false, true, kLiteralBoth, rv, rp }, ShaderStageSpec{ false, v, true, true },
+			ShaderStageSpec{ false, v, false, true, 0, 0, 0, true } };
 	}
 
 	std::string ShaderPrograms::SourcePathOf(const RE::BSShader& a_shader)
@@ -677,21 +723,19 @@ namespace DCLF
 		bool started = false;
 		struct Pending { const RE::BSShader* shader; bool pixel; std::uint32_t descriptor; };
 		std::vector<Pending> pending;
-		ankerl::unordered_dense::map<std::uint64_t, StagePtr> stages;
+		ankerl::unordered_dense::map<StageKey, StagePtr, StageKeyHash> stages;
 		// The compiler we pointed at DCLF's build executor. A runtime restart replaces it.
 		org::services::ShaderCompiler* configured = nullptr;
 		// The lane's waiters by stage key.
-		ankerl::unordered_dense::map<std::uint64_t, std::vector<StageWaiter>> waiting;
+		ankerl::unordered_dense::map<StageKey, std::vector<StageWaiter>, StageKeyHash> waiting;
 		std::vector<StageWaiter> ready;
 
 		// a_created is set when this call made the request. Null when the stage's source is missing.
 		// A stage belongs to one sources generation, so an earlier one is not found.
-		StagePtr Request(ShaderPrograms& owner, const RE::BSShader& shader, bool pixel, std::uint32_t descriptor, bool depth = false, bool* a_created = nullptr,
-			bool pulled = false)
+		StagePtr Request(ShaderPrograms& owner, const RE::BSShader& shader, const ShaderStageSpec& spec, bool* a_created = nullptr)
 		{
-			const ShaderStageSpec spec{ pixel, descriptor, depth, pulled };
 			bool effectivePulled = false;
-			const std::uint64_t key = StageKeyOf(shader, spec, effectivePulled);
+			const StageKey key = StageKeyOf(shader, spec, effectivePulled);
 			const std::uint64_t generation = CurrentSourcesGeneration();
 			{
 				std::lock_guard lock(mutex);
@@ -718,9 +762,7 @@ namespace DCLF
 			auto stage = std::make_shared<Stage>();
 			stage->key = key;
 			stage->sourcesGeneration = current->generation;
-			RequestStage(*compiler, stage,
-				MakeStageRequest(resolved.source, shader, pixel, descriptor, depth, resolved.pulled, resolved.family, resolved.name,
-					stage->vertexAttributes));
+			RequestStage(*compiler, stage, MakeStageRequest(resolved.source, shader, spec, resolved.pulled, resolved.family, resolved.name, stage->vertexAttributes));
 			{
 				std::lock_guard lock(mutex);
 				stages.insert_or_assign(key, stage);
@@ -735,7 +777,7 @@ namespace DCLF
 		{
 			std::array<StagePtr, N> out;
 			for (std::size_t i = 0; i < N; ++i)
-				out[i] = Request(owner, shader, a_stages[i].pixel, a_stages[i].descriptor, a_stages[i].depth, a_created ? &a_created[i] : nullptr, a_stages[i].pulled);
+				out[i] = Request(owner, shader, a_stages[i], a_created ? &a_created[i] : nullptr);
 			return out;
 		}
 
@@ -812,8 +854,8 @@ namespace DCLF
 				}
 			}
 			DCLF_ZONE("CS.DCLF.Shaders.PrecompileFamily");
-			(void)stages->Request(*this, a_shader, a_pixel, a_descriptor);
-			(void)stages->Request(*this, a_shader, a_pixel, a_descriptor, false, nullptr, true);
+			// Not the pulled builds: they take their key's runtime descriptors as literals, which no precompile knows.
+			(void)stages->Request(*this, a_shader, ShaderStageSpec{ a_pixel, a_descriptor });
 			return;
 		}
 		if (type != RE::BSShader::Type::Lighting && type != RE::BSShader::Type::Utility)
@@ -827,17 +869,17 @@ namespace DCLF
 		}
 		DCLF_ZONE("CS.DCLF.Shaders.Precompile");
 
-		auto stage = stages->Request(*this, a_shader, a_pixel, a_descriptor);
+		auto stage = stages->Request(*this, a_shader, ShaderStageSpec{ a_pixel, a_descriptor });
 		const bool lighting = type == RE::BSShader::Type::Lighting;
-		auto depth = a_pixel && lighting ? stages->Request(*this, a_shader, true, a_descriptor, true) : StagePtr{};
-		auto pulled = lighting ? stages->Request(*this, a_shader, a_pixel, a_descriptor, a_pixel, nullptr, true) : StagePtr{};
-		auto pulledColour = lighting && a_pixel ? stages->Request(*this, a_shader, true, a_descriptor, false, nullptr, true) : StagePtr{};
-		auto pulledDepthVertex = lighting && !a_pixel ? stages->Request(*this, a_shader, false, a_descriptor, true, nullptr, true) : StagePtr{};
+		auto depth = a_pixel && lighting ? stages->Request(*this, a_shader, ShaderStageSpec{ true, a_descriptor, true }) : StagePtr{};
+		// The pulled pixel builds take their key's runtime descriptors as literals, which no precompile knows, so they compile on demand.
+		auto pulled = lighting && !a_pixel ? stages->Request(*this, a_shader, ShaderStageSpec{ false, a_descriptor, false, true }) : StagePtr{};
+		auto pulledDepthVertex = lighting && !a_pixel ? stages->Request(*this, a_shader, ShaderStageSpec{ false, a_descriptor, true, true }) : StagePtr{};
 		// The shadow views' merged pipelines draw with a technique's canonical form.
 		const std::uint32_t canonical = !lighting ? CanonicalShadowTechnique(a_descriptor) : a_descriptor;
-		auto merged = canonical != a_descriptor ? stages->Request(*this, a_shader, a_pixel, canonical) : StagePtr{};
+		auto merged = canonical != a_descriptor ? stages->Request(*this, a_shader, ShaderStageSpec{ a_pixel, canonical }) : StagePtr{};
 		// Hold CS's bounded compilation worker until this is done. The compiles run on DCLF's pool, which never waits on these.
-		for (const auto* requested : { &stage, &depth, &pulled, &pulledColour, &pulledDepthVertex, &merged }) {
+		for (const auto* requested : { &stage, &depth, &pulled, &pulledDepthVertex, &merged }) {
 			if (!*requested) continue;
 			(*requested)->done.wait(false, std::memory_order_acquire);
 			const auto& artifact = *(*requested)->artifact;
@@ -890,9 +932,32 @@ namespace DCLF
 			entry.reset();
 		for (auto& entry : drawFamilyForwardEntries)
 			entry.reset();
+		runtimePairs.clear();
+		laneStats.lookupPairs.store(0, std::memory_order_relaxed);
+		laneStats.severalRuntime.store(0, std::memory_order_relaxed);
+		laneStats.mostRuntime.store(0, std::memory_order_relaxed);
 		loggedFailures = 0;
 		logger::info("[DCLF] shader programs: sources generation {}; {} program entries of the files before dropped, made again as they are asked for", generation, dropped);
 		return true;
+	}
+
+	std::uint64_t ShaderPrograms::ProgramId(const ProgramDescriptors& a_descriptors)
+	{
+		const auto [found, added] = programIds.try_emplace(a_descriptors, static_cast<std::uint32_t>(programDescriptors.size()));
+		if (added)
+			programDescriptors.push_back(a_descriptors);
+		return found->second;
+	}
+
+	void ShaderPrograms::NoteRuntimePair(const ProgramDescriptors& a_descriptors)
+	{
+		const std::uint32_t count = ++runtimePairs[(std::uint64_t(a_descriptors.vertex) << 32) | a_descriptors.pixel];
+		if (count == 1)
+			laneStats.lookupPairs.fetch_add(1, std::memory_order_relaxed);
+		if (count == 2)
+			laneStats.severalRuntime.fetch_add(1, std::memory_order_relaxed);
+		if (count > laneStats.mostRuntime.load(std::memory_order_relaxed))
+			laneStats.mostRuntime.store(count, std::memory_order_relaxed);
 	}
 
 	template <class E, class MakeStages>
@@ -936,9 +1001,13 @@ namespace DCLF
 		const std::uint64_t id = LightingProgramId(a_key);
 		auto& slot = entries[id];
 		if (!slot) {
-			DumpStageLine(fmt::format(R"({{"kind":"lighting","vertex":"{:08X}","pixel":"{:08X}"}})", a_key.vertexDescriptor, a_key.pixelDescriptor));
+			DumpStageLine(fmt::format(R"({{"kind":"lighting","vertex":"{:08X}","pixel":"{:08X}","runtimeVertex":"{:08X}","runtimePixel":"{:08X}"}})", a_key.vertexDescriptor,
+				a_key.pixelDescriptor, a_key.runtimeVertex, a_key.runtimePixel));
+			NoteRuntimePair(ProgramDescriptorsOf(a_key));
 			MakeEntry(slot, static_cast<std::uint8_t>(StageUser::Lighting), id, &laneStats.requested, laneStats.failed,
 				[&](bool* a_created) { return stages->RequestAll(*this, a_lighting, LightingStages(a_key), a_created); });
+			// The literal stages follow from the key, so no precompile asks for them and their compile here is expected.
+			slot->onDemand &= static_cast<std::uint8_t>(~(kOnDemandPulledDepthPixel | kOnDemandPulledPixel | kOnDemandPulledDepthTexVertex));
 			if (a_onDemand)
 				*a_onDemand = slot->onDemand;
 		}
@@ -989,16 +1058,15 @@ namespace DCLF
 		return Found(slot.get(), a_failed);
 	}
 
-	std::shared_ptr<const ShaderPrograms::ForwardProgram> ShaderPrograms::FindForward(std::uint32_t a_vertexDescriptor, std::uint32_t a_pixelDescriptor, RE::BSShader& a_lighting,
-		bool* a_failed)
+	std::shared_ptr<const ShaderPrograms::ForwardProgram> ShaderPrograms::FindForward(const ProgramDescriptors& a_descriptors, RE::BSShader& a_lighting, bool* a_failed)
 	{
 		if (!Enabled())
 			return Found<ForwardEntry>(nullptr, a_failed);
-		const std::uint64_t id = ForwardProgramId(a_vertexDescriptor, a_pixelDescriptor);
+		const std::uint64_t id = ForwardProgramId(a_descriptors);
 		auto& slot = forwardEntries[id];
 		if (!slot)
 			MakeEntry(slot, static_cast<std::uint8_t>(StageUser::Forward), id, nullptr, laneStats.failed,
-				[&](bool*) { return stages->RequestAll(*this, a_lighting, ForwardStages(a_vertexDescriptor, a_pixelDescriptor), nullptr); });
+				[&](bool*) { return stages->RequestAll(*this, a_lighting, ForwardStages(a_descriptors), nullptr); });
 		return Found(slot.get(), a_failed);
 	}
 
@@ -1039,9 +1107,9 @@ namespace DCLF
 		 * A stage from an earlier sources generation may complete after the cache moved on.
 		 */
 		template <class Arrive>
-		void FanOut(ankerl::unordered_dense::map<std::uint64_t, std::vector<StageWaiter>>& a_waiting, std::vector<StageWaiter>& a_ready, Arrive&& a_arrive)
+		void FanOut(ankerl::unordered_dense::map<StageKey, std::vector<StageWaiter>, StageKeyHash>& a_waiting, std::vector<StageWaiter>& a_ready, Arrive&& a_arrive)
 		{
-			StageCompletions().Drain([&](std::uint64_t&& a_key) {
+			StageCompletions().Drain([&](StageKey&& a_key) {
 				const auto found = a_waiting.find(a_key);
 				if (found == a_waiting.end())
 					return;  // no entry waits
@@ -1133,7 +1201,7 @@ namespace DCLF
 				                                            a_visit(*drawFamilyEntries[DrawFamilyIndexOf(a_waiter.user)]);
 			return a_visit(*familyEntries[FamilyIndexOf(a_waiter.user)].find(a_waiter.id)->second);
 		};
-		FanOut(stages->waiting, stages->ready, [&](const StageWaiter& a_waiter, std::uint64_t a_key) {
+		FanOut(stages->waiting, stages->ready, [&](const StageWaiter& a_waiter, const StageKey& a_key) {
 			return visit(a_waiter, [&](auto& a_entry) -> int {
 				const bool done = std::ranges::any_of(a_entry.stages, [&](const StagePtr& a_stage) {
 					return a_stage->key == a_key && a_stage->done.load(std::memory_order_acquire);
@@ -1145,7 +1213,10 @@ namespace DCLF
 		});
 		for (const auto& waiter : std::exchange(stages->ready, {})) {
 			const std::uint64_t id = waiter.id;
-			const auto vertex = static_cast<std::uint32_t>(id >> 32), pixel = static_cast<std::uint32_t>(id);
+			// Lighting, forward and family ids name their descriptors. The others' are unread.
+			const bool described = waiter.user == StageUser::Lighting || waiter.user == StageUser::Forward || waiter.user >= StageUser::Family;
+			const ProgramDescriptors descriptors = described ? DescriptorsOfId(id) : ProgramDescriptors{};
+			const auto vertex = descriptors.vertex, pixel = descriptors.pixel;
 			switch (waiter.user) {
 			case StageUser::Shadow:
 				{
@@ -1176,15 +1247,13 @@ namespace DCLF
 					continue;
 				}
 				{
-					// The id's vertex part, without the family's program-id bit.
 					const auto f = FamilyIndexOf(waiter.user);
 					const auto& family = Extensions::ProgramFamilies()[f];
-					const auto familyVertex = static_cast<std::uint32_t>((id & ~kProgramFamilySlots[f].programIdBit) >> 32);
 					auto& entry = *familyEntries[f].find(id)->second;
 					FinishEntry(entry, &laneStats.ready, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
 						// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
 						RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of {} {}{} {:08X} failed; its {}:\n{}", family.name, a_stage == 0 || a_stage == 3 ? "VS" : "PS",
-								a_stage >= 3 ? " (pulled)" : "", a_stage == 0 || a_stage == 3 ? familyVertex : pixel,
+								a_stage >= 3 ? " (pulled)" : "", a_stage == 0 || a_stage == 3 ? vertex : pixel,
 								family.nativeNote, a_artifact.diagnostics.substr(0, 1500)));
 					});
 					if (entry.program)
@@ -1198,11 +1267,13 @@ namespace DCLF
 			OnDemandOutcome(fmt::format("Lighting VS {:08X} PS {:08X}", vertex, pixel).c_str(), entry.onDemand, entry.requested,
 				{ { kOnDemandVertex, &ArtifactOf(entry.stages[0]) }, { kOnDemandPixel, &ArtifactOf(entry.stages[1]) }, { kOnDemandDepthPixel, &ArtifactOf(entry.stages[2]) },
 					{ kOnDemandPulledVertex, &ArtifactOf(entry.stages[3]) }, { kOnDemandPulledDepthPixel, &ArtifactOf(entry.stages[4]) },
-					{ kOnDemandPulledPixel, &ArtifactOf(entry.stages[5]) }, { kOnDemandPulledDepthVertex, &ArtifactOf(entry.stages[6]) } });
+					{ kOnDemandPulledPixel, &ArtifactOf(entry.stages[5]) }, { kOnDemandPulledDepthVertex, &ArtifactOf(entry.stages[6]) },
+					{ kOnDemandPulledDepthTexVertex, &ArtifactOf(entry.stages[7]) } });
 			FinishEntry(entry, &laneStats.ready, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-				static constexpr const char* kStages[] = { "VS", "PS", "PS (depth)", "VS (pulled)", "PS (pulled depth)", "PS (pulled)", "VS (pulled depth)" };
+				static constexpr const char* kStages[] = { "VS", "PS", "PS (depth)", "VS (pulled)", "PS (pulled depth)", "PS (pulled)", "VS (pulled depth)",
+					"VS (pulled depth texture)" };
 				// A failed build is a shader bug: DCLF would quietly leave the draws to the engine.
-				RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of Lighting {} {:08X} failed:\n{}", kStages[a_stage], a_stage == 0 || a_stage == 3 || a_stage == 6 ? vertex : pixel,
+				RenderGraph::Fatal("DCLF shaders", fmt::format("SPIR-V build of Lighting {} {:08X} failed:\n{}", kStages[a_stage], a_stage == 0 || a_stage == 3 || a_stage == 6 || a_stage == 7 ? vertex : pixel,
 						a_artifact.diagnostics.substr(0, 1500)));
 			});
 			// DrawPipelines checks the key's vertex layout has these attributes.
@@ -1238,8 +1309,7 @@ namespace DCLF
 		std::array<org::services::ShaderCompileRequest, N> requests;
 		for (std::size_t i = 0; i < N; ++i) {
 			const auto& stage = a_stages[i];
-			requests[i] = MakeStageRequest(resolved[i].source, a_shader, stage.pixel, stage.descriptor, stage.depth,
-				resolved[i].pulled, resolved[i].family, resolved[i].name, compiles->attributes[i]);
+			requests[i] = MakeStageRequest(resolved[i].source, a_shader, stage, resolved[i].pulled, resolved[i].family, resolved[i].name, compiles->attributes[i]);
 		}
 		for (std::size_t i = 0; i < N; ++i) {
 			// A memory-cache hit completes on this thread.
@@ -1290,9 +1360,9 @@ namespace DCLF
 		});
 	}
 
-	void ShaderPrograms::RebuildForward(std::uint32_t a_vertexDescriptor, std::uint32_t a_pixelDescriptor, const RE::BSShader& a_lighting, Rebuilt<ForwardProgram> a_done)
+	void ShaderPrograms::RebuildForward(const ProgramDescriptors& a_descriptors, const RE::BSShader& a_lighting, Rebuilt<ForwardProgram> a_done)
 	{
-		CompileProgram<ForwardProgram>(a_lighting, ForwardStages(a_vertexDescriptor, a_pixelDescriptor), std::move(a_done));
+		CompileProgram<ForwardProgram>(a_lighting, ForwardStages(a_descriptors), std::move(a_done));
 	}
 
 	void ShaderPrograms::RebuildDrawFamilyForward(Api::DrawFamily a_family, const RE::BSShader& a_shader, Rebuilt<ForwardProgram> a_done)

@@ -709,8 +709,8 @@ VS_INPUT DCLFPulledInput(uint a_index, DCLFStream a_first, DCLFStream a_second)
 // The permutation block (b4) as the draw's pipeline row holds it (Permutation.hlsli, DCLF_PULLED_ROWS; Lighting.hlsl's).
 void DCLFPermutationStatics()
 {
-	Permutation::VertexShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
-	Permutation::PixelShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+	Permutation::VertexShaderDescriptor = DCLFPermutationVertexDescriptor();
+	Permutation::PixelShaderDescriptor = DCLFPermutationPixelDescriptor();
 	Permutation::ExtraShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 8);
 	Permutation::ExtraFeatureDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 12);
 	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);
@@ -1667,8 +1667,8 @@ PS_OUTPUT main(PS_INPUT input)
 // The permutation block (b4) as the draw's pipeline row holds it (the vertex stage's DCLFPermutationStatics).
 void DCLFPermutationStatics()
 {
-	Permutation::VertexShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
-	Permutation::PixelShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+	Permutation::VertexShaderDescriptor = DCLFPermutationVertexDescriptor();
+	Permutation::PixelShaderDescriptor = DCLFPermutationPixelDescriptor();
 	Permutation::ExtraShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 8);
 	Permutation::ExtraFeatureDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 12);
 	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);

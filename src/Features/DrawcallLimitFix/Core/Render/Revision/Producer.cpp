@@ -970,6 +970,7 @@ namespace DCLF
 			const auto& own = view.resources->frameConstants;
 			in.frameConstantsAddress = own ? view.resources->frameConstantsAddress : r.frameConstantsAddress;
 			in.frameConstantsRef = own ? view.resources->frameConstantsRef : r.frameConstantsRef;
+			in.frameBlocks = own ? view.resources->frameBlocks : r.frameBlocks;
 			if (own && viewLatches.latch && viewLatches.layout.frameBytes) {
 				const auto frameBuffers = view.resources->frameBuffers.load(std::memory_order_acquire);
 				in.frameCopies = ViewFrameLatched(own.get(), frameBuffers.get(), inputs.blockSizes[kDepthShape], viewLatches.layout.FrameOffset(), traits.faces);

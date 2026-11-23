@@ -1038,15 +1038,10 @@ namespace DCLF
 			state->frameConstantsRef = RenderGraph::DeclaredRefOf(device, *state->frameConstants);
 			if (!state->frameConstantsAddress || !state->frameConstantsRef)
 				return fail("frame constants have no device address or buffer view ref");
-			state->frameBlocks = FrameBlockViews::Create(device, state->frameConstants);
+			// A table per face, each with the face's camera block at VS and PS b12.
+			state->frameBlocks = FrameBlockViews::Create(device, state->frameConstants, state->blocks, kViewBlockBytes, traits.faces);
 			if (!state->frameBlocks)
 				return fail("the frame blocks' views could not be made");
-			std::vector<FrameBlockViews::Block> faceBlocks;
-			for (std::uint32_t f = 0; f < traits.faces; ++f)
-				faceBlocks.push_back({ std::uint64_t(f) * kViewBlockBytes, kViewBlockBytes });
-			state->faceBlocks = FrameBlockViews::CreateFor(device, state->blocks, faceBlocks, "the faces' camera blocks");
-			if (!state->faceBlocks)
-				return fail("the faces' camera blocks' views could not be made");
 			MatchViewFrameBuffers(*state, resources->frameBuffers);
 		}
 		resources->views[ViewIndex(a_kind)] = state;

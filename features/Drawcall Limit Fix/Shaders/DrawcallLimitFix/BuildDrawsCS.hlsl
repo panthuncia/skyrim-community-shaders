@@ -213,6 +213,9 @@ static const uint kSunEntryProcessBytes = 112;
 // Colour pass. Local shadow lights' latch offset. 0 for none.
 static uint LocalShadowOffset;
 static const uint kShadowVolumeBytes = 240;
+// Caps on the latch's region counts, far above what the CPU writes: a count read from a stale or unwritten region would otherwise
+// loop until the device is lost.
+static const uint kMaxLatchRegionEntries = 1024;
 // Depth segment: the main camera's position and LOD factor (kObjectFadeTest).
 static float4 FadeEye;
 // Depth segment: the tree height test's base and limit (kObjectHeightTest); limit +infinity when off.
@@ -335,7 +338,7 @@ void LoadLatch()
 uint LocalShadowMask(float3 a_centre, float a_radius, bool a_landscape, uint a_object)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
-	const uint volumes = latch.Load(LocalShadowOffset);
+	const uint volumes = min(latch.Load(LocalShadowOffset), kMaxLatchRegionEntries);
 	uint mask = 0;
 	[loop] for (uint v = 0; v < volumes; ++v)
 	{
@@ -371,7 +374,7 @@ uint LocalShadowMask(float3 a_centre, float a_radius, bool a_landscape, uint a_o
 bool InSunCascades(float3 a_centre, float a_radius)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
-	const uint cascades = latch.Load(SunCascadeOffset);
+	const uint cascades = min(latch.Load(SunCascadeOffset), kMaxLatchRegionEntries);
 	[loop] for (uint c = 0; c < cascades; ++c)
 	{
 		const uint record = SunCascadeOffset + kSunRegionHeader + c * kSunCascadeBytes;
@@ -397,7 +400,7 @@ bool OutsideSunEntry(float4 a_entry)
 	if (SunEntryOffset == 0)
 		return false;
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
-	const uint processes = latch.Load(SunEntryOffset);
+	const uint processes = min(latch.Load(SunEntryOffset), kMaxLatchRegionEntries);
 	if (processes == 0)
 		return false;
 	[loop] for (uint process = 0; process < processes; ++process)
@@ -616,7 +619,7 @@ uint ClassCount()
 	if (ClassTableOffset == 0)
 		return 0;
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
-	return latch.Load(ClassTableOffset);
+	return min(latch.Load(ClassTableOffset), kMaxLatchRegionEntries);
 }
 
 // A class's first slot and capacity in a range, 0 when it has none there.
@@ -1485,7 +1488,9 @@ void BuildInput(uint draw, DrawInputWords a_words)
 	const uint4 stream = streamIndex != kNoStream ? geometries.Load4(streamIndex * kGeometryStride) : uint4(0, 0, 0, 0);
 	uint geometryIndex = input.z;
 	const bool chain = (partitions & kPartitionChain) != 0;
-	const uint links = chain ? (partitions & kPartitionChainCount) : kMaxPartitions;
+	// A chain walks the geometries' nextPartition links. 1024 is far past any object's LOD chain: a stale or cyclic chain then
+	// draws wrong for a frame instead of walking 32767 links per input, long enough to lose the device.
+	const uint links = chain ? min(partitions & kPartitionChainCount, 1024u) : kMaxPartitions;
 	// This input's rows in its shadow family. Dropped before any bucket slot is taken, so a bucket has no hole.
 	uint casterFirst = 0, casterMask = 0, casterSpan = 0;
 	if (CasterRowsIndex != 0) {

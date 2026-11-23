@@ -342,8 +342,8 @@ void DCLFWaterObjectValues(uint a_object, uint a_descriptor, out float3 a_object
 // The permutation block (b4) as the draw's pipeline row holds it (Permutation.hlsli, DCLF_PULLED_ROWS; Effect.hlsl's).
 void DCLFWaterPermutation()
 {
-	Permutation::VertexShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
-	Permutation::PixelShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+	Permutation::VertexShaderDescriptor = DCLFPermutationVertexDescriptor();
+	Permutation::PixelShaderDescriptor = DCLFPermutationPixelDescriptor();
 	Permutation::ExtraShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 8);
 	Permutation::ExtraFeatureDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 12);
 	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);
