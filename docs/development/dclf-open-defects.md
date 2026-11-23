@@ -620,10 +620,14 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     ImageSpace programs one by one through `GetNow` at the graph's build ("Setup did not queue it"). That took 40 s in batch 16,
     and frame 167 of the loading screen had a kMAIN clear with no place in the schedule. Warm stores do not show it.
     **Next:** address with the shader precompile overhaul (queue the programs at Setup and compile them in parallel).
--   **A cold cache makes a frame wait for DCLF's on-demand pipelines.** A new variant (for example HDR's Lighting variants in
+-   **(Closed) A cold cache makes a frame wait for DCLF's on-demand pipelines.** A new variant (for example HDR's Lighting variants in
     native Vulkan with frame generation) is compiled on demand while the frame waits; one took 13 s on 2026-11-19 and the hang
-    watchdog fired at 15 s (`native-vulkan+fg-hdr`, passed once warm). The render thread must never wait. **Next:** with the
-    shader precompile overhaul; until then warm each mode and config once before judging a failure.
+    watchdog fired at 15 s (`native-vulkan+fg-hdr`, passed once warm). The render thread must never wait.
+    **Closed (2026-11-23):** that hang's stack (run `1119-174909-rv5`) was not a pipeline: Grass's `Setup` compiled its compute
+    programs with `ComputeProgram::Load` inside `BeginFrame`. Those programs are `SetupPrograms` now, queued at CS's setup. A
+    native Vulkan quick run on an empty store (`build.shader_cache=cold`, run `1123-134155-pascal-native-quick-cold-vk`) passed:
+    the on-demand Utility compiles and shadow pipeline builds after the load all ran on the pipeline lane, and the render thread
+    did not stall.
 -   **Physical Sky's aerial perspective is its own full-screen pass.** The ORG deferred composite's push block holds 32
     words and uses 26; Physical Sky needs about 7 more and ViewAtmosphere 3. So the aerial perspective runs as
     `cs.physical-sky.composite` right after `cs.deferred` (phase 2, not yet run in the game). Minor cost: one more full-screen
@@ -643,8 +647,11 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     Lighting on.
 -   **Physical Sky's lightning, storms, voxel clouds, local NDF, middle and cirrus layers and clouds in water reflections are
     untested on the graph.** Only clear weather at one spot ran (`clouds.toml`, `clouds-long.toml`).
--   **A wrong JSON type in a Physical Sky setting crashes the game.** `PhysicalSky.enableVolumetricClouds=1` (a number for a
+-   **(Closed) A wrong JSON type in a Physical Sky setting crashes the game.** `PhysicalSky.enableVolumetricClouds=1` (a number for a
     bool) ends in a JSON type error. Settings must be validated (`.claude/CLAUDE.md`).
+    **Closed (2026-11-23):** the throw came from the test harness's `setting` command, which called `LoadSettings` unguarded. It
+    now refuses a value whose JSON type differs from the setting's (any number for a number) and puts the old settings back if
+    `LoadSettings` throws. Every user path (the settings file, Baselines, scene settings, DevBench, undo) already caught it.
 -   **A cold shader store makes boot slow with the clouds:** the 50 cloud programs compile before data-loaded, beyond the 120 s
     load limit on a first run. Warm per mode first.
 -   **(Closed) Guest: Physical Sky's volumetric clouds kept the AP shadow, the fog's scattering and the sky tail on D3D11.**
@@ -669,11 +676,13 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     **Update (2026-11-19, build `0d994ca13`):** native Vulkan now shows the same haze as plain D3D11 at the same spot
     (`native-vulkan+fog` vs `d3d11+fog`), most likely since the post-water composite flag follows the frame (`b2b46322d`).
     Native D3D12 matches too. **Closed.**
--   **A graph build reads PublishedResources off the render thread.** Once per run near loading:
+-   **(Closed) A graph build reads PublishedResources off the render thread.** Once per run near loading:
     `[C] [ORG] PublishedResources used on thread N, not the render owner: its entries are not locked`. N is an async graph-build
     thread building the UI stage. The likely caller is DCLF's `DeclarePublishedRead` (`FrameBindings.cpp:136`), which calls
     `ShaderResourceVariant` and `ShaderResourceIndex` during a pass's declare; they read live, unlocked entries. **Next:** carry
     each entry's published state and view in the build snapshot and serve these two calls from it during a build.
+    **Closed (2026-11-23):** last logged 2026-11-19 (`post-effects-integ-6b3pp`); none in the 1,204 guest and native runs since,
+    after the frame revisions moved declarations to revision starts on the render thread.
 -   **Physical Sky's `PHYSICAL_SKY` define in graph builds.** Removing the strip had broken DCLF Lighting and Effect pipelines
     (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and the ORG
     `ISSAOComposite` build in guest. Phase 3 of `physical-sky-port.md` maps them and removes the strip; not yet run in the game.
