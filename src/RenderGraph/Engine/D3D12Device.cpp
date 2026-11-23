@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/D3D12Device.h"
 
 #include "RenderGraph/Backend.h"
+#include "RenderGraph/PipelineCache.h"
 #include "RenderGraph/Switches.h"
 
 #include <rhi.h>
@@ -168,6 +169,8 @@ namespace RenderGraph::Engine
 		ci.enableCrashMarkers = a_options.crashMarkers;
 		ci.d3d12DeviceFactory = factory.get();
 		ci.streamlineHost = static_cast<const rhi::DeviceCreateInfo::StreamlineHost*>(a_options.streamlineHost);
+		const auto pipelineCache = PipelineCache::PathFor(rhi::Backend::D3D12);
+		ci.pipelineCachePath = pipelineCache.empty() ? nullptr : pipelineCache.c_str();
 		if (a_options.adapterLuid) {
 			ci.adapterLuid = a_options.adapterLuid;
 			ci.requireAdapterLuid = true;

@@ -4,6 +4,7 @@
 #include "RenderGraphRuntime.h"
 
 #include "Aftermath.h"
+#include "RenderGraph/PipelineCache.h"
 #include "DxvkExports.h"
 #include "DxvkLoader.h"
 #include "Features/Upscaling/DXVKInteropInterfaces.h"
@@ -1833,6 +1834,9 @@ bool RenderGraphRuntime::Initialize()
 			!state->copyQueue ? std::string("shared with graphics") : state->copyQueue == state->uploadQueue ? std::string("shared with upload") : fmt::format("{}:{}", info.copyQueueFamily, info.copyQueueIndex));
 		if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
 			return disable("BasicRHI could not adopt DXVK's Vulkan device");
+		// Before any of the graph's pipelines. The native devices open theirs at creation.
+		if (const auto path = RenderGraph::PipelineCache::PathFor(rhi::Backend::Vulkan); !path.empty())
+			(void)(*state->device)->OpenPipelineCache(path.c_str());
 	}
 	// CS_SUBMIT_TRACE=<file> turns on BasicRHI's submission trace before any list is recorded, so every kept list is named.
 	if (char path[8]{}; GetEnvironmentVariableA("CS_SUBMIT_TRACE", path, sizeof(path)))
@@ -2153,6 +2157,7 @@ void RenderGraphRuntime::Shutdown()
 		logger::error("[ORG] Runtime shutdown failed: {}", e.what());
 	}
 	state->nativeTimelines.Reset();
+	RenderGraph::PipelineCache::WaitForSave();
 	// Non-owning: BasicRHI never destroys the adopted VkDevice.
 	state->device.reset();
 	disabledReason = "shut down";
@@ -2356,6 +2361,7 @@ void RenderGraphRuntime::NoteFrameBegin(std::uint64_t a_frame)
 	if (!impl)
 		return;
 	auto& state = *impl;
+	RenderGraph::PipelineCache::Tick(state.device);
 	const auto completed = RenderGraph::FrameClock::GpuCompleted();
 	if (!completed)
 		return;

@@ -14,6 +14,7 @@
 #include <functional>
 
 #include "Aftermath.h"
+#include "RenderGraph/PipelineCache.h"
 #include "Features/Upscaling.h"
 #include "Features/Upscaling/NativePresenter.h"
 #include "Features/Upscaling/Streamline.h"
@@ -321,6 +322,8 @@ namespace RenderGraph::Engine::Native
 			// mutable descriptors (Pascal).
 			ci.vulkanBindingModels = rhi::vulkan::BindingModel_DescriptorBuffer | rhi::vulkan::BindingModel_DescriptorSets;
 			ci.vulkanCreateHooks = &hooks;
+			const auto pipelineCache = PipelineCache::PathFor(rhi::Backend::Vulkan);
+			ci.pipelineCachePath = pipelineCache.empty() ? nullptr : pipelineCache.c_str();
 			// Use the adapter the game's INI picked, at RendererData +0x00.
 			DXGI_ADAPTER_DESC adapter{};
 			if (a_adapter && SUCCEEDED(a_adapter->GetDesc(&adapter))) {
