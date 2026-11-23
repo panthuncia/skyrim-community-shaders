@@ -121,15 +121,40 @@ namespace DCLF
 		const auto* lighting = SceneCapture::LeafView::Lighting(a_leaf.property);
 		if (!lighting || !a_leaf.geometry)
 			return 0;
-		const std::uint64_t flags = lighting->flags;
-		std::uint32_t technique = UtilityShaderDecl(flags);
-		if (a_leaf.AlphaTesting())
+		return ShadowUtilityTechnique(lighting->flags, a_leaf.AlphaTesting());
+	}
+
+	std::uint32_t ShadowUtilityTechnique(std::uint64_t a_flags, bool a_alphaTesting)
+	{
+		std::uint32_t technique = UtilityShaderDecl(a_flags);
+		if (a_alphaTesting)
 			technique |= 0x80;
-		if (flags & (Bit(34) | Bit(63)))
+		if (a_flags & (Bit(34) | Bit(63)))
 			technique |= 0x8000000;
-		if (flags & (Bit(26) | Bit(27)))
+		if (a_flags & (Bit(26) | Bit(27)))
 			technique |= 0x20080;
 		return technique;
+	}
+
+	std::vector<std::uint32_t> AllShadowUtilityTechniques()
+	{
+		// One flag for each test in UtilityShaderDecl and ShadowUtilityTechnique. Where a test reads either of two flags, one stands
+		// for both. Keep this list in step with those two functions.
+		constexpr std::uint64_t kTested[] = { 0x1000, 0x2, Bit(37), 0x4000'0000'0000ull, Bit(33), Bit(17), Bit(61), Bit(34), Bit(26) };
+		constexpr std::uint32_t kCombinations = 1u << std::size(kTested);
+		std::vector<std::uint32_t> techniques;
+		for (std::uint32_t combination = 0; combination < kCombinations; ++combination) {
+			std::uint64_t flags = 0;
+			for (std::size_t i = 0; i < std::size(kTested); ++i)
+				if (combination & (1u << i))
+					flags |= kTested[i];
+			for (const bool alphaTesting : { false, true })
+				techniques.push_back(ShadowUtilityTechnique(flags, alphaTesting));
+		}
+		std::ranges::sort(techniques);
+		const auto [first, last] = std::ranges::unique(techniques);
+		techniques.erase(first, last);
+		return techniques;
 	}
 
 	std::uint32_t ShadowModeBits(std::uint32_t a_renderMode)

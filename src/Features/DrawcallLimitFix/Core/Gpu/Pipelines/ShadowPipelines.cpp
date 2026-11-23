@@ -162,7 +162,7 @@ namespace DCLF
 		bool programFailed = false;
 		const auto program = ShaderPrograms::Get().FindShadow(a_key.technique, *input->utility, true, nullptr, &onDemand, &programFailed);
 		if (onDemand)
-			logger::warn("[DCLF] on-demand SPIR-V compile: Utility {} of technique {:08X} that no precompile requested ({}), {}", ShaderPrograms::OnDemandStages(onDemand),
+			logger::warn("[DCLF] on-demand SPIR-V compile: Utility {} of technique {:08X} outside the derived stage batch, unexpected ({}), {}", ShaderPrograms::OnDemandStages(onDemand),
 				a_key.technique, SIE::ShaderCache::Instance().IsCompiling() ? "Community Shaders' compile workers still busy" : "Community Shaders' compile workers idle",
 				casters);
 		if (programFailed) {

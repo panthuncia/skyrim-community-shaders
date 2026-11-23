@@ -927,6 +927,18 @@ void DrawcallLimitFix::PrecompileFamilyStages(const RE::BSShader& a_shader, bool
 	DCLF::Family::PrecompileStages(a_shader, a_pixel, a_descriptor);
 }
 
+void DrawcallLimitFix::QueueProgramStages(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor)
+{
+	const auto type = a_shader.shaderType.get();
+	if (type == RE::BSShader::Type::Lighting || type == RE::BSShader::Type::Utility)
+		DCLF::ShaderPrograms::Get().QueuePrecompile(a_shader, a_pixel, a_descriptor);
+}
+
+void DrawcallLimitFix::PrecompileDerivedStages(const RE::BSShader& a_utility)
+{
+	DCLF::ShaderPrograms::Get().PrecompileDerivedStages(a_utility);
+}
+
 void DrawcallLimitFix::PostSetupResources()
 {
 	if (!installed)

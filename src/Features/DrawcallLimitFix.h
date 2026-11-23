@@ -123,6 +123,13 @@ struct DrawcallLimitFix : Feature
 	static void PrecompileShader(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor);
 	/** @brief A descriptor the engine loaded for a_shader. Builds the engine draw families' ORG stages and keeps the shader object for their defines. */
 	static void PrecompileFamilyStages(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor);
+	/**
+	 * @brief DCLF's Lighting and Utility stages for a descriptor, queued on Community Shaders' compile pool. For descriptors no
+	 * Community Shaders compile task hands to PrecompileShader (background compilation on, or no disk cache).
+	 */
+	static void QueueProgramStages(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor);
+	/** @brief DCLF's own Utility stage batch: the shadow, occlusion and refraction techniques it composes. a_utility is the engine's Utility shader. */
+	static void PrecompileDerivedStages(const RE::BSShader& a_utility);
 	/** @brief The D3D11 context's Map, Unmap and UpdateSubresource, for DCLF's constant buffer mirror and capture parity. */
 	static void OnMap(ID3D11Resource* a_resource, void* a_data);
 	static void OnUnmap(ID3D11Resource* a_resource);
