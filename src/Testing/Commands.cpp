@@ -520,6 +520,33 @@ namespace Testing
 		}
 
 		/** @brief "<ShortName>={...}": a_object merged into the feature's settings JSON, applied once, as a preset button writes. */
+		/** @brief Whether a_value can replace a_current: the same JSON type, any number for a number. A null setting takes anything. */
+		bool SameSettingType(const json& a_current, const json& a_value)
+		{
+			if (a_current.is_null())
+				return true;
+			if (a_current.is_number() && a_value.is_number())
+				return true;
+			return a_current.type() == a_value.type();
+		}
+
+		/** @brief Loads a_settings into a_feature. A throw puts a_previous back and reports it as a_error. */
+		bool ApplySettings(Feature& a_feature, json& a_settings, json& a_previous, std::string& a_error)
+		{
+			try {
+				a_feature.LoadSettings(a_settings);
+				return true;
+			} catch (const std::exception& e) {
+				a_error = fmt::format("{} refused the settings: {}", a_feature.GetShortName(), e.what());
+			}
+			try {
+				a_feature.LoadSettings(a_previous);
+			} catch (...) {
+				a_error += " (its previous settings could not be put back)";
+			}
+			return false;
+		}
+
 		bool SetSettings(const std::string& a_name, const std::string& a_object, std::string& a_error)
 		{
 			const auto& list = Feature::GetFeatureList();
@@ -539,14 +566,20 @@ namespace Testing
 				a_error = fmt::format("{} has no settings object", a_name);
 				return false;
 			}
+			json previous = settings;
 			for (const auto& [key, value] : patch.items()) {
 				if (!settings.contains(key)) {
 					a_error = fmt::format("{} has no setting '{}'", a_name, key);
 					return false;
 				}
+				if (!SameSettingType(settings[key], value)) {
+					a_error = fmt::format("{}.{} holds a {}, not a {}", a_name, key, settings[key].type_name(), value.type_name());
+					return false;
+				}
 				settings[key] = value;
 			}
-			(*found)->LoadSettings(settings);
+			if (!ApplySettings(**found, settings, previous, a_error))
+				return false;
 			logger::info("[TEST] settings {} = {}", a_name, patch.dump());
 			return true;
 		}
@@ -591,8 +624,14 @@ namespace Testing
 				a_error = fmt::format("'{}' is not a JSON value", a_arg.substr(equals + 1));
 				return false;
 			}
+			if (!SameSettingType(*target, value)) {
+				a_error = fmt::format("{}.{} holds a {}, not a {}", name, path, target->type_name(), value.type_name());
+				return false;
+			}
+			json previous = settings;
 			*target = value;
-			(*found)->LoadSettings(settings);
+			if (!ApplySettings(**found, settings, previous, a_error))
+				return false;
 			logger::info("[TEST] setting {}.{} = {}", name, path, value.dump());
 			return true;
 		}
