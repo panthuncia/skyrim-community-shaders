@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 namespace DCLF::Features::Faces
@@ -61,6 +62,9 @@ namespace DCLF::Features::Faces
 			std::uint32_t readSlot = 2;
 			// Asks the stage join for a first snapshot. Cleared once any capture publishes.
 			std::atomic<bool> wantsCapture{ true };
+			// One writer of the triple buffer at a time: a morph job, the stage join or the walk's first capture. A writer that finds it
+			// taken skips; the next capture catches up.
+			std::atomic<bool> writing{ false };
 			// Set when a capture sees a changed shape. The walk then rebuilds the record.
 			std::atomic<bool> stale{ false };
 			std::uint32_t seenWalk = 0;
@@ -137,14 +141,30 @@ namespace DCLF::Features::Faces
 			}
 		}
 
-		// Only called by the thread that just morphed the head, or after the stage join.
-		bool Capture(Record& a_record)
+		/**
+		 * @brief Copies the head's shapes into the next slot. Called by the thread that just morphed the head, after the stage join, or
+		 * by the walk for a head's first snapshot. The walk's copy (a_locked) runs outside the morph stage's order, so it reads each
+		 * shape's dynamic data under the shape's own lock, as the engine's renderer does.
+		 */
+		bool Capture(Record& a_record, bool a_locked = false)
+		{
+			if (a_record.writing.exchange(true, std::memory_order_acquire))
+				return false;
+			const bool captured = CaptureOwned(a_record, a_locked);
+			a_record.writing.store(false, std::memory_order_release);
+			return captured;
+		}
+
+		bool CaptureOwned(Record& a_record, bool a_locked)
 		{
 			float* out = a_record.storage.PrepareWrite(a_record.writeSlot, a_record.floats).data();
 			for (const auto& shape : a_record.shapes) {
 				auto* geometry = shape.shape.get();
-				const auto& dynamic = geometry->GetDynamicTrishapeRuntimeData();
+				auto& dynamic = geometry->GetDynamicTrishapeRuntimeData();
 				const std::uint32_t count = geometry->GetTrishapeRuntimeData().vertexCount;
+				std::optional<RE::BSSpinLockGuard> guard;
+				if (a_locked)
+					guard.emplace(dynamic.lock);
 				if (!dynamic.dynamicData || count != shape.vertexCount || dynamic.dataSize < count * 16u) {
 					mismatches.fetch_add(1, std::memory_order_relaxed);
 					a_record.stale.store(true, std::memory_order_relaxed);
@@ -395,6 +415,16 @@ namespace DCLF::Features::Faces
 			}
 			d.scratch.clear();  // the record now holds these references
 			record->seenWalk = d.walk;
+			// A head with no snapshot yet takes its first one here, rather than waiting for the morph stage to reach it: the stage
+			// does not run while a load's hold pauses the game, and afterwards only for some heads a frame.
+			if (record->slotGeneration[record->readSlot] == 0 && record->wantsCapture.load(std::memory_order_relaxed) && d.Capture(*record, true)) {
+				++d.stats.walkCaptured;
+				if (record->latest.load(std::memory_order_relaxed) & kFresh) {
+					const auto previous = record->latest.exchange(record->readSlot, std::memory_order_acq_rel);
+					record->readSlot = previous & kSlotMask;
+					++d.stats.acquired;
+				}
+			}
 			if (record->slotGeneration[record->readSlot] == 0)
 				++d.stats.withoutSnapshot;
 		}
@@ -454,9 +484,9 @@ namespace DCLF::Features::Faces
 			const auto stats = TakeStats();
 			const auto writer = TakeWriterStats();
 			logger::info("[DCLF] face snapshots: {} heads, {} taken fresh, {} seen without one, {} rebuilt, {} retired, {} freed; "
-			             "captured by jobs {}, at the join {}, {} mismatches, over {} stages",
+			             "captured by jobs {}, at the join {}, by the walk {}, {} mismatches, over {} stages",
 				stats.heads, stats.acquired, stats.withoutSnapshot, stats.rebuilt, stats.retired, stats.freed, writer.jobCaptures, writer.stageCaptures,
-				writer.mismatches, writer.stages);
+				stats.walkCaptured, writer.mismatches, writer.stages);
 		}
 	}
 

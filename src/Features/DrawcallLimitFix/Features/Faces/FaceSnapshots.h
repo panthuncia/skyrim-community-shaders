@@ -90,6 +90,7 @@ namespace DCLF::Features::Faces
 			std::uint32_t heads = 0;           // live records
 			std::uint32_t acquired = 0;        // heads with a fresh snapshot this walk
 			std::uint32_t withoutSnapshot = 0; // heads the walk saw with none yet
+			std::uint32_t walkCaptured = 0;    // first snapshots the walk took itself
 			std::uint32_t rebuilt = 0;         // records rebuilt this walk
 			std::uint32_t retired = 0, freed = 0;
 		};

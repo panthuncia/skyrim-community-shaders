@@ -4,6 +4,8 @@
 #include "Engine.h"
 #include "Draws.h"
 
+#include <algorithm>
+
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Reports.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
@@ -123,6 +125,25 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 			nobody.first ? fmt::format(" <- NOBODY (first geometry {})", nobody.first) : std::string());
 		nobody = {};
 		leaks = {};
+		// How long lit objects the engine wanted drawn waited for DCLF, by what they were at their first undrawn frame.
+		auto admission = DCLF::PassCapture::Get().TakeAdmissionStats();
+		const auto spread = [](std::vector<std::uint32_t>& a_steps) {
+			if (a_steps.empty())
+				return std::string("none");
+			std::sort(a_steps.begin(), a_steps.end());
+			const auto at = [&](std::size_t a_percent) { return a_steps[(std::min)(a_steps.size() - 1, a_steps.size() * a_percent / 100)]; };
+			return fmt::format("{} objects, steps p50 {}, p95 {}, max {}", a_steps.size(), at(50), at(95), a_steps.back());
+		};
+		if (!admission.untracked.empty() || !admission.waiting.empty() || admission.open || admission.abandoned)
+			logger::info("[DCLF] admission latency (lit objects the engine registered into the main views and nobody drew, until DCLF drew them): "
+						 "not tracked yet {}; waiting to join {}; {} still undrawn, {} dropped after {} steps",
+				spread(admission.untracked), spread(admission.waiting), admission.open, admission.abandoned, 900);
+		if (!admission.slowest.empty()) {
+			std::string slow;
+			for (const auto& [steps, what] : admission.slowest)
+				slow += fmt::format("{}{} steps: {}", slow.empty() ? "" : "; ", steps, what);
+			logger::info("[DCLF] admission latency, the slowest: {}", slow);
+		}
 	}
 	// GPU time per segment, measured by the graph. The menu shows the latest window.
 	if (due)

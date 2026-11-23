@@ -8,6 +8,8 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 #include <algorithm>
 #include <span>
@@ -326,6 +328,8 @@ namespace DCLF
 			auto& view = viewRenderers[v];
 			if (ViewCovered(views.mainRendererViews[i]) && (set->drawn & phase)) {
 				view.withheld.fetch_add(1, std::memory_order_relaxed);
+				if (set->PhasesOf(a_pass->geometry) & phase)
+					NoteDrawn(a_pass->geometry);
 				NotePending(*set, a_pass->geometry, phase);
 				return true;
 			}
@@ -337,6 +341,10 @@ namespace DCLF
 		// Every pass of a member, fade and LOD cross-fade copies included. DCLF draws them all.
 		mainWithheld.fetch_add(1, std::memory_order_relaxed);
 		NotePending(*set, a_pass->geometry, kSetMain);
+		if (set->PhasesOf(a_pass->geometry) & kSetMain)
+			NoteDrawn(a_pass->geometry);
+		else if (LitPass(a_pass))
+			NoteUndrawn(a_pass->geometry, true);
 		if (!(set->PhasesOf(a_pass->geometry) & kSetMain) && LitPass(a_pass)) {
 			mainNobodyWaiting.fetch_add(1, std::memory_order_relaxed);
 			const RE::BSGeometry* none = nullptr;
@@ -652,6 +660,94 @@ namespace DCLF
 		return classes;
 	}
 
+	namespace
+	{
+		// An object undrawn this long is dropped from the admission count: it went away or never joins.
+		constexpr std::uint32_t kAdmissionAbandonSteps = 900;
+	}
+
+	void PassCapture::PublishSet(std::shared_ptr<const SetSnapshot> a_set)
+	{
+		// The engine stops registering a member's passes once DCLF stands in for it, so an undrawn object is admitted when the
+		// claims DCLF draws from first hold it.
+		if (a_set && admissionAny.load(std::memory_order_acquire)) {
+			std::uint8_t drawnPhases = kSetMain;
+			const auto& views = Extensions::Views();
+			for (std::uint32_t i = 0; i < views.mainRendererCount; ++i)
+				drawnPhases |= views.views[static_cast<std::size_t>(views.mainRendererViews[i])].phase;
+			std::scoped_lock lock(admissionLock);
+			const std::uint32_t now = SceneClock::Step();
+			for (auto it = admissionOpen.begin(); it != admissionOpen.end();) {
+				if (a_set->PhasesOf(it->first) & drawnPhases) {
+					const std::uint32_t steps = now > it->second.first ? now - it->second.first : 0u;
+					(it->second.waiting ? admittedWaiting : admittedUntracked).push_back(steps);
+					if (steps > 4)
+						admittedSlow.emplace_back(steps, std::string(it->second.waiting ? "waiting " : "untracked ") + it->second.what);
+					it = admissionOpen.erase(it);
+				} else {
+					++it;
+				}
+			}
+			if (admissionOpen.empty())
+				admissionAny.store(false, std::memory_order_release);
+		}
+		std::atomic_store(&frameSet, std::move(a_set));
+	}
+
+	void PassCapture::NoteUndrawn(const RE::BSGeometry* a_geometry, bool a_waiting) const
+	{
+		if (!Diagnostics::Observe().stats)
+			return;
+		std::scoped_lock lock(admissionLock);
+		if (admissionOpen.contains(a_geometry))
+			return;
+		admissionOpen.emplace(a_geometry, Admission{ SceneClock::Step(), a_waiting,
+			fmt::format("'{}' under {}{}", a_geometry->name.c_str() ? a_geometry->name.c_str() : "", OwnerOf(a_geometry),
+				a_geometry->GetGeometryRuntimeData().skinInstance ? ", skinned" : "") });
+		admissionAny.store(true, std::memory_order_release);
+	}
+
+	void PassCapture::NoteDrawn(const RE::BSGeometry* a_geometry) const
+	{
+		if (!admissionAny.load(std::memory_order_acquire))
+			return;
+		std::scoped_lock lock(admissionLock);
+		const auto it = admissionOpen.find(a_geometry);
+		if (it == admissionOpen.end())
+			return;
+		const std::uint32_t now = SceneClock::Step();
+		(it->second.waiting ? admittedWaiting : admittedUntracked).push_back(now > it->second.first ? now - it->second.first : 0u);
+		admissionOpen.erase(it);
+		if (admissionOpen.empty())
+			admissionAny.store(false, std::memory_order_release);
+	}
+
+	PassCapture::AdmissionStats PassCapture::TakeAdmissionStats()
+	{
+		std::scoped_lock lock(admissionLock);
+		const std::uint32_t now = SceneClock::Step();
+		for (auto it = admissionOpen.begin(); it != admissionOpen.end();) {
+			if (now - it->second.first >= kAdmissionAbandonSteps) {
+				++admissionAbandoned;
+				it = admissionOpen.erase(it);
+			} else {
+				++it;
+			}
+		}
+		if (admissionOpen.empty())
+			admissionAny.store(false, std::memory_order_release);
+		AdmissionStats out;
+		out.untracked = std::exchange(admittedUntracked, {});
+		out.waiting = std::exchange(admittedWaiting, {});
+		out.open = static_cast<std::uint32_t>(admissionOpen.size());
+		out.abandoned = std::exchange(admissionAbandoned, 0u);
+		std::sort(admittedSlow.begin(), admittedSlow.end(), [](const auto& a_left, const auto& a_right) { return a_left.first > a_right.first; });
+		if (admittedSlow.size() > 8)
+			admittedSlow.resize(8);
+		out.slowest = std::exchange(admittedSlow, {});
+		return out;
+	}
+
 	std::vector<std::string> PassCapture::TakeHoldNobodySamples()
 	{
 		std::scoped_lock lock(keptLock);
@@ -674,6 +770,7 @@ namespace DCLF
 			dclfKept.fetch_add(1, std::memory_order_relaxed);
 			if (LitPass(a_pass) && (IsMainRenderer(a_batch) || (!t_shadowRegistration && MainRendererNow(a_batch))) && EngineLitDrawsVoid()) {
 				mainNobodyKept.fetch_add(1, std::memory_order_relaxed);
+				NoteUndrawn(a_pass->geometry, false);
 				const RE::BSGeometry* none = nullptr;
 				mainNobodyFirst.compare_exchange_strong(none, a_pass->geometry, std::memory_order_relaxed);
 			}

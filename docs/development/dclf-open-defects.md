@@ -190,17 +190,22 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     missing for those frames. Waiting on the catalog at the frame's start could exceed the 5 s bound while the pipelines compile.
     This needs its own design: for example, the old catalog keeps drawing into compatible formats until the new one is installed.
 -   **Objects reach the drawn scene late (open; admission latency).** In graph modes the engine draws none of DCLF's classes, so
-    an object is invisible until DCLF admits it.
-    -   **Attached in play.** An attached object (a tankard, Alvor's hammer) shows 3 to 7 frames after its attach. It joins the set
-        in the scene pass that tracks it, but a publication is installed about every 2 to 3 frames and is 2 to 5 frames old by then
-        (`[publication of frame N]` in the cell trace).
-    -   **After a load.** The hold waits until nothing it withholds would be drawn by nobody (2026-11-23), so the load's own
-        objects are in. Objects attached after the hold still wait their turn: the first report windows after a load read up to
-        about 2,300 lit passes by nobody.
-    -   **New bindings.** A first binding whose pipeline is compiled on demand waits longer: about 100 frames in guest and up to
-        260 in native on a cold driver cache (runs fxg, fxn, fig).
-    **Fix direction:** a shorter path from the scene pass to the installed snapshot, and pipeline keys asked for from the attach
-    records.
+    an object is invisible until DCLF admits it. `CS_DCLF_STATS` reports it per object: `[DCLF] admission latency` counts, for
+    every lit object the engine registered into the main views that nobody drew, the scene steps until the claims DCLF draws from
+    held it, split by what it was at its first undrawn frame (not tracked yet, or waiting to join); `the slowest` names them.
+    Measured 2026-11-23 (GTX 1070 Ti, guest and native, tours, Dragonsreach and the river routes):
+    -   **Steady play:** 1 to 3 steps. That is the structure: an event pushed during a frame's update is walked by the pass that
+        frame's inputs wake, published during its render, and adopted at the next `Renderer::Begin` (event to adoption p50 2
+        frames, about 48 ms at 28 fps; commit to adoption p50 1 frame; snapshot builds about 0.5 ms plus 5 ms of recordings).
+        Adopting mid-frame would break the frame revision, so this stays.
+    -   **After a load:** 3 to 10 steps, for objects the engine's cull first reaches after the hold (29 Dragonsreach statics in
+        one batch at 10 steps). NPC face parts used to take 40 to 130 steps: a face shape gets no record without its head's
+        positions snapshot, and the morph stage that took them does not run while the hold pauses the game, then only for some
+        heads a frame. The walk now takes a head's first snapshot itself (fixed 2026-11-23, `FaceSnapshots`, `by the walk N`).
+    -   **New bindings (open):** an object whose keys are compiled on demand waits for them. Sigrid in native Vulkan (river route)
+        waited 225 to 232 steps, behind an on-demand Utility stage that took 6.7 s though both stages came from the disk cache,
+        and 181 on-demand pipeline builds. **Next:** the waiting reason per object for the slowest admissions, and the on-demand
+        lane's wait (shader-precompile-proposal.md, goal 3).
 
 ## Memory retention
 

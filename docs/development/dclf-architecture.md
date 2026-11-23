@@ -2498,7 +2498,10 @@ NPC face shapes (a `BSDynamicTriShape` under a `BSFaceGenNiNode`: head, mouth, h
 reads their positions from the shape (Features/Faces).
 -   **Snapshots.** A thunk on each head's morph call (`0x1404334f3`) copies the head's face shapes on the job's thread; a thunk after
     the stage's `JobList::Finish` (`0x1406d36fd`) captures heads that want a first snapshot. Each head has a lock-free triple buffer,
-    so every shape of a head is read from one job run. DCLF never reads `dynamicData` or takes its lock.
+    so every shape of a head is read from one job run. A head the walk finds with no snapshot yet takes its first one on the walk,
+    reading each shape's `dynamicData` under the shape's own lock as the engine's renderer does: the morph stage does not run while
+    a load's hold pauses the game, and afterwards only for some heads a frame. One writer fills a head's buffer at a time (a
+    morph job, the stage join or the walk); the others skip.
 -   **An entry class, not a verdict** (`Api::EntryClass::FaceShape`): classified like any shape, every frame, its record given the
     positions stream row (`SceneTables::streamRows`). Face shapes follow their heads' publications (`ApplyFacePublications`).
 -   **One buffer.** One face positions buffer (`SceneBuffers::facePositions`, `cs.dclf.face-positions`) serves every epoch, through

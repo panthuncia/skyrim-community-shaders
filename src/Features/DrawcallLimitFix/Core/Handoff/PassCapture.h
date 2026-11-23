@@ -155,7 +155,7 @@ namespace DCLF
 		 * @brief Render thread. The frame's DCLF set, immutable and swapped whole, so every registration of the frame reads the same one.
 		 * Null withholds nothing.
 		 */
-		void PublishSet(std::shared_ptr<const SetSnapshot> a_set) { std::atomic_store(&frameSet, std::move(a_set)); }
+		void PublishSet(std::shared_ptr<const SetSnapshot> a_set);
 		std::shared_ptr<const SetSnapshot> CurrentSet() const { return std::atomic_load(&frameSet); }
 
 		/** @brief A geometry of DCLF's classes whose passes went to the engine, as first seen in the window. */
@@ -196,6 +196,20 @@ namespace DCLF
 		std::vector<const void*> TakeUncoveredAccumulators();
 		/** @brief Render thread. The samples of the load hold's undrawn passes since the last call, and clears them. */
 		std::vector<std::string> TakeHoldNobodySamples();
+
+		/**
+		 * @brief Admission latency (CS_DCLF_STATS): for each lit object the engine registered into the main views that nobody drew,
+		 * the scene steps until DCLF first drew it. Split by what it was at its first undrawn frame: not tracked yet, or waiting to join.
+		 */
+		struct AdmissionStats
+		{
+			std::vector<std::uint32_t> untracked, waiting;  // steps, one per object admitted in the window
+			std::uint32_t open = 0;                         // still undrawn at the report
+			std::uint32_t abandoned = 0;                    // undrawn for kAdmissionAbandonSteps, then dropped (gone or never admitted)
+			std::vector<std::pair<std::uint32_t, std::string>> slowest;  // the slowest admissions: steps, and what the object was
+		};
+		/** @brief Render thread, on report frames. The window's admissions, and clears them. */
+		AdmissionStats TakeAdmissionStats();
 		/**
 		 * @brief Render thread, before registrations. The main views' batch renderers: the Z-prepass accumulator (*0x14338c828) and the
 		 * main one (*0x14338c830) with their groups. Rebuilt only when an accumulator changes.
@@ -275,6 +289,21 @@ namespace DCLF
 		mutable std::atomic<const RE::BSGeometry*> mainNobodyFirst{ nullptr };
 		static constexpr std::size_t kKeptSamples = 256;
 		mutable std::mutex keptLock;
+		// Admission latency (CS_DCLF_STATS): the geometries undrawn since a step, and the admitted ones' steps, under admissionLock.
+		struct Admission
+		{
+			std::uint32_t first = 0;
+			bool waiting = false;
+			std::string what;  // name, owner and shader at the first undrawn frame
+		};
+		mutable std::vector<std::pair<std::uint32_t, std::string>> admittedSlow;
+		mutable std::mutex admissionLock;
+		mutable ankerl::unordered_dense::map<const RE::BSGeometry*, Admission> admissionOpen;
+		mutable std::vector<std::uint32_t> admittedUntracked, admittedWaiting;
+		mutable std::atomic<bool> admissionAny{ false };
+		mutable std::uint32_t admissionAbandoned = 0;
+		void NoteUndrawn(const RE::BSGeometry* a_geometry, bool a_waiting) const;
+		void NoteDrawn(const RE::BSGeometry* a_geometry) const;
 		// The load hold's undrawn passes: a line per geometry, the first few (under keptLock). Taken at the hold's release.
 		std::vector<std::string> holdNobodySamples;
 		ankerl::unordered_dense::set<const RE::BSGeometry*> holdNobodySeen;
