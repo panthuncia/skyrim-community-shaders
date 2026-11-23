@@ -96,6 +96,24 @@ void DrawcallLimitFix::DataLoaded()
 	DCLF::DeclaredTargets::InitShadows();
 }
 
+void DrawcallLimitFix::StartPipelinePrecompile()
+{
+	if (!installed || !RenderGraphRuntime::Get().IsActive())
+		return;
+	// The shadow keys need the shadow map format and the Utility shader, which exist once the data has loaded. DataLoaded's
+	// later call then does nothing.
+	DCLF::DeclaredTargets::InitShadows();
+	DCLF::DrawPipelines::Get().StartPrecompile();
+}
+
+DrawcallLimitFix::PipelinePrecompileProgress DrawcallLimitFix::GetPipelinePrecompileProgress() const
+{
+	if (!installed)
+		return {};
+	const auto progress = DCLF::DrawPipelines::Get().GetPrecompileProgress();
+	return { progress.pending, progress.total, progress.finished, progress.failed };
+}
+
 namespace
 {
 	// The scene writer framework's provider, its families and the integrity check's findings (the menu).

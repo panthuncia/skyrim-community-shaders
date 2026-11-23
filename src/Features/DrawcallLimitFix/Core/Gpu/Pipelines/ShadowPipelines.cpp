@@ -158,17 +158,25 @@ namespace DCLF
 		}
 		const auto asked = s.asked.find(a_key);
 		const std::string casters = asked != s.asked.end() ? DescribeShadowCasters(asked->second.casterKey, asked->second.occlusion) : std::string("for no recorded caster");
+		// The startup pipeline step's keys build before play, so they are not logged as on demand.
+		const bool startup = precompile.shadow.contains(a_key);
 		std::uint8_t onDemand = 0;
 		bool programFailed = false;
 		const auto program = ShaderPrograms::Get().FindShadow(a_key.technique, *input->utility, true, nullptr, &onDemand, &programFailed);
-		if (onDemand)
+		if (onDemand && startup)
+			++precompile.stageCompiles;
+		else if (onDemand)
 			logger::warn("[DCLF] on-demand SPIR-V compile: Utility {} of technique {:08X} that no precompile requested ({}), {}", ShaderPrograms::OnDemandStages(onDemand),
 				a_key.technique, SIE::ShaderCache::Instance().IsCompiling() ? "Community Shaders' compile workers still busy" : "Community Shaders' compile workers idle",
 				casters);
+		const ShadowRasterState rasterState = (*input->shadowStates)[a_key.viewState - 1];
+		const DXGI_FORMAT depthFormat = input->shadowFormat;
+		auto manifestIdentity = ShadowManifestIdentity(a_key, depthFormat, rasterState);
 		if (programFailed) {
 			// Its casters stay native in this key's views until a shader reload makes its program again.
 			s.FailForGood(a_key);
 			lane.dirty = true;
+			PipelineManifest::Get().Forget(std::string(kShadowPipelineTag), manifestIdentity);
 			return;
 		}
 		if (!program) {
@@ -179,8 +187,6 @@ namespace DCLF
 			s.blocked.push_back(a_key);
 			return;
 		}
-		const ShadowRasterState rasterState = (*input->shadowStates)[a_key.viewState - 1];
-		const DXGI_FORMAT depthFormat = input->shadowFormat;
 		const std::string id = fmt::format("dclf.shadow.{:08X}.{:X}.{:016X}.{}", a_key.technique, a_key.rasterFlags, a_key.vertexLayout, a_key.viewState);
 		const auto build = [device = device, layout = ShadowLayout(), key = a_key, depthFormat, rasterState](const ShaderPrograms::ShadowProgram& a_program) {
 			return BuildShadow(device, layout, key, &a_program, depthFormat, rasterState);
@@ -191,14 +197,20 @@ namespace DCLF
 			},
 			build);
 		s.entries.try_emplace(a_key);
+		// A built key is listed in the pipeline manifest for the next startup, and a failed one is dropped from it.
 		RequestBuild([build, program] { return build(*program); },
-			[completions = completions, key = a_key, generation = s.generation, live = std::move(live)](Artifact a_artifact) {
+			[completions = completions, key = a_key, generation = s.generation, live = std::move(live), manifestIdentity = std::move(manifestIdentity)](Artifact a_artifact) {
+				if (a_artifact)
+					PipelineManifest::Get().Record(std::string(kShadowPipelineTag), manifestIdentity, {});
+				else
+					PipelineManifest::Get().Forget(std::string(kShadowPipelineTag), manifestIdentity);
 				completions->shadow.Push({ key, generation, a_artifact, live });
 				WakePipelineLane();
 			});
 		s.counters.requested.fetch_add(1, std::memory_order_relaxed);
-		logger::warn("[DCLF] on-demand pipeline build: shadow technique {:08X}, raster {:X}, vertex layout {:016X}, view state {}, format {}, {}; {}", a_key.technique,
-			a_key.rasterFlags, a_key.vertexLayout, a_key.viewState, static_cast<int>(depthFormat), casters, NearestShadowKey(a_key));
+		if (!startup)
+			logger::warn("[DCLF] on-demand pipeline build: shadow technique {:08X}, raster {:X}, vertex layout {:016X}, view state {}, format {}, {}; {}", a_key.technique,
+				a_key.rasterFlags, a_key.vertexLayout, a_key.viewState, static_cast<int>(depthFormat), casters, NearestShadowKey(a_key));
 	}
 
 	void DrawPipelines::Impl::AdmitShadow()
@@ -285,19 +297,29 @@ namespace DCLF
 		state.slopeScaledDepthBias = a_desc.SlopeScaledDepthBias;
 		state.cull = a_desc.CullMode == D3D11_CULL_NONE ? rhi::CullMode::None : a_desc.CullMode == D3D11_CULL_FRONT ? rhi::CullMode::Front : rhi::CullMode::Back;
 		state.frontCCW = a_desc.FrontCounterClockwise != FALSE;
-		auto& states = impl->shadowRasterStates;
-		for (std::size_t i = 0; i < states.size(); ++i)
-			if (states[i] == state)
-				return static_cast<std::uint32_t>(i + 1);
-		states.push_back(state);
-		logger::info("[DCLF] shadow view rasterizer state {} (mode {:#x}): depth bias {} (clamp {}, slope {}), cull {}, front {}, depth {}", states.size(), a_renderMode,
+		bool added = false;
+		const std::uint32_t id = impl->ShadowRasterStateIdOf(state, added);
+		if (!added)
+			return id;
+		logger::info("[DCLF] shadow view rasterizer state {} (mode {:#x}): depth bias {} (clamp {}, slope {}), cull {}, front {}, depth {}", id, a_renderMode,
 			state.depthBias, state.depthBiasClamp, state.slopeScaledDepthBias, static_cast<int>(a_desc.CullMode), a_desc.FrontCounterClockwise ? "CCW" : "CW",
 			state.depthClip ? "clipped" : "clamped");
 		// Keys of this id wait in the lane until it arrives with the frame's inputs.
-		impl->renderInput.shadowStates = std::make_shared<const std::vector<Impl::ShadowRasterState>>(states);
 		if (Enabled())
 			impl->PostInput(*this);
-		return static_cast<std::uint32_t>(states.size());
+		return id;
+	}
+
+	std::uint32_t DrawPipelines::Impl::ShadowRasterStateIdOf(const ShadowRasterState& a_state, bool& a_added)
+	{
+		a_added = false;
+		for (std::size_t i = 0; i < shadowRasterStates.size(); ++i)
+			if (shadowRasterStates[i] == a_state)
+				return static_cast<std::uint32_t>(i + 1);
+		shadowRasterStates.push_back(a_state);
+		renderInput.shadowStates = std::make_shared<const std::vector<ShadowRasterState>>(shadowRasterStates);
+		a_added = true;
+		return static_cast<std::uint32_t>(shadowRasterStates.size());
 	}
 
 	std::uint32_t DrawPipelines::ShadowRasterStateCount() const

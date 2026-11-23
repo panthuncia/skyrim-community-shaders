@@ -223,21 +223,28 @@ namespace DCLF
 		if (member && Extensions::FamilyRules(a_key.rasterFlags).deferredRanges)
 			return TryRequestDeferred(a_key, slot);
 		// A build here is one the precompile missed. Each is logged with its key, slot and nearest relative to find the gap.
+		// The startup pipeline step's keys are not: they build before play.
+		const bool startup = precompile.main.contains(a_key);
 		std::uint8_t onDemand = 0;
 		bool programFailed = false;
 		const auto* shader = member ? static_cast<const RE::BSShader*>(input->familySource[f]) : input->lighting;
 		const auto program = member ? ShaderPrograms::Get().FindFamily(family, a_key, *shader, &programFailed) :
 		                              ShaderPrograms::Get().Find(a_key, *input->lighting, &onDemand, &programFailed);
-		if (onDemand)
+		if (onDemand && startup)
+			++precompile.stageCompiles;
+		else if (onDemand)
 			logger::warn("[DCLF] on-demand SPIR-V compile: Lighting {} that no precompile requested ({}), for pipeline slot {}: {}", ShaderPrograms::OnDemandStages(onDemand),
 				SIE::ShaderCache::Instance().IsCompiling() ? "Community Shaders' compile workers still busy" : "Community Shaders' compile workers idle", slot,
 				DescribeKey(a_key));
+		const auto manifestTag = MainManifestTag(a_key);
+		auto manifestIdentity = MainManifestIdentity(a_key, input->targets, *input->frontCCW);
 		if (programFailed) {
 			// Its objects stay native until a shader reload makes its program again.
 			l.FailForGood(a_key);
 			l.dirty = true;
 			if (member)
 				l.programFamilyCounters[f].failed.fetch_add(1, std::memory_order_relaxed);
+			PipelineManifest::Get().Forget(manifestTag, manifestIdentity);
 			return;
 		}
 		if (!program) {
@@ -253,29 +260,30 @@ namespace DCLF
 		auto stateOf = [&](std::uint32_t a_bits) -> const EngineState* {
 			if (const auto it = states.find(a_bits); it != states.end())
 				return &it->second;
+			// The pipeline manifest's state, until the render thread reads the live one to check it against.
+			if (const auto it = precompile.recordedStates.find(a_bits); it != precompile.recordedStates.end()) {
+				precompile.recordedUse[a_key] = a_bits;
+				return &it->second;
+			}
 			if (l.statesAsked.insert(a_bits).second)
 				completions->stateRequests.Push(a_bits);
 			l.blocked.push_back(a_key);
 			return nullptr;
 		};
+		bool blendOnly = false;
+		const std::uint32_t stateBits = EngineStateBitsOf(a_key, blendOnly);
+		const auto* found = stateOf(stateBits);
+		if (!found || !found->valid)
+			return;
 		EngineState state{};
-		if (const auto bits = RasterStateBits(a_key.rasterFlags)) {
-			const auto* found = stateOf(bits);
-			if (!found || !found->valid)
-				return;
-			state = *found;
-		} else {
-			constexpr std::uint32_t kDoAlphaTest = 1u << 20;
-			// LOD techniques (9, 13, 15, 18) draw in write mode 1 even when alpha-tested, as the engine's main pass does, so G-buffer alpha keeps what lies beneath.
-			const std::uint32_t technique = (a_key.passDescriptor >> 24) & 0x3f;
-			const bool lod = technique == 9 || technique == 13 || technique == 15 || technique == 18;
-			const std::uint32_t writeMode = (a_key.pixelDescriptor & kDoAlphaTest) && !lod ? kAlphaTestedWriteMode : kOpaqueWriteMode;
-			const auto* found = stateOf(writeMode << kRasterWriteModeShift);
-			if (!found || !found->valid)
-				return;
+		if (blendOnly) {
 			state.blend = found->blend;
 			state.blendOnly = true;
+		} else {
+			state = *found;
 		}
+		// The engine state as read, for the manifest line.
+		auto manifestInputs = EngineStateWords(stateBits, *found);
 		const auto& inputTargets = input->targets;
 		const std::string id = fmt::format("dclf.{}.{:08X}.{:08X}.{:08X}.{:X}.{:016X}", member ? std::string_view(Extensions::ProgramFamilyOf(family).keyName) : std::string_view("lighting"),
 			a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.passDescriptor, a_key.rasterFlags, a_key.vertexLayout);
@@ -291,15 +299,22 @@ namespace DCLF
 				ShaderPrograms::Get().RebuildLighting(key, *shader, std::move(a_done));
 		}, build);
 		l.entries.try_emplace(a_key);
+		// A built key is listed in the pipeline manifest for the next startup, and a failed one is dropped from it.
 		RequestBuild([build, program] { return build(*program); },
-			[completions = completions, key = a_key, generation = l.generation, live = std::move(live)](Artifact a_artifact) {
+			[completions = completions, key = a_key, generation = l.generation, live = std::move(live), manifestTag, manifestIdentity = std::move(manifestIdentity),
+				manifestInputs = std::move(manifestInputs)](Artifact a_artifact) {
+				if (a_artifact)
+					PipelineManifest::Get().Record(manifestTag, manifestIdentity, manifestInputs);
+				else
+					PipelineManifest::Get().Forget(manifestTag, manifestIdentity);
 				completions->main.Push({ key, generation, a_artifact, live });
 				WakePipelineLane();
 			});
 		l.counters.requested.fetch_add(1, std::memory_order_relaxed);
 		if (member)
 			l.programFamilyCounters[f].requested.fetch_add(1, std::memory_order_relaxed);
-		LogOnDemandBuild(a_key, family, slot);
+		if (!startup)
+			LogOnDemandBuild(a_key, family, slot);
 	}
 
 	void DrawPipelines::Impl::LogOnDemandBuild(const PipelineKey& a_key, Api::ProgramFamily a_family, std::uint32_t a_slot) const

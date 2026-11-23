@@ -18,6 +18,7 @@ namespace RenderGraph::PipelineCache
 		constexpr auto kQuiet = std::chrono::seconds(5);
 
 		std::atomic<bool> saving{ false };
+		std::atomic<bool> saveAsked{ false };  // RequestSave: the next tick saves without the quiet wait
 		std::uint64_t savedMisses = 0;  // misses at the last save
 		std::uint64_t lastMisses = 0;   // misses at the last tick
 		Clock::time_point lastAdded{};
@@ -60,13 +61,20 @@ namespace RenderGraph::PipelineCache
 			reported = true;
 			logger::info("[ORG] pipeline cache: {} ({} KB read)", LoadName(stats.load), stats.loadedBytes >> 10);
 		}
+		const bool asked = saveAsked.load();
 		if (stats.misses != lastMisses) {
 			lastMisses = stats.misses;
 			lastAdded = now;
+			if (!asked)
+				return;
+		}
+		if (stats.misses == savedMisses) {
+			saveAsked.store(false);  // nothing new to save
 			return;
 		}
-		if (stats.misses == savedMisses || now - lastAdded < kQuiet || saving.exchange(true))
+		if ((!asked && now - lastAdded < kQuiet) || saving.exchange(true))
 			return;
+		saveAsked.store(false);
 		savedMisses = stats.misses;
 		std::thread([device = a_device, hits = stats.hits, misses = stats.misses] {
 			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
@@ -78,6 +86,11 @@ namespace RenderGraph::PipelineCache
 			saving.store(false);
 			saving.notify_all();
 		}).detach();
+	}
+
+	void RequestSave()
+	{
+		saveAsked.store(true);
 	}
 
 	void WaitForSave()

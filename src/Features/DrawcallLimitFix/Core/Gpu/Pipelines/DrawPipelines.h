@@ -509,6 +509,24 @@ namespace DCLF
 		/** @brief Any thread. Counters for the report, read relaxed. */
 		Stats GetStats() const;
 
+		/** @brief The startup pipeline step's progress. */
+		struct PrecompileProgress
+		{
+			bool pending = false;  // keys queued and not all finished
+			std::uint32_t total = 0;
+			std::uint32_t finished = 0;  // built, failed or left for play
+			std::uint32_t failed = 0;
+		};
+		/**
+		 * @brief Main thread at kDataLoaded, after Community Shaders' startup compile and before any world frame. The startup pipeline
+		 * step: reads the key sources (PipelineKeySource.h), primes the inputs a frame would post, and queues every key on the pipeline
+		 * lane through the normal request paths. Builds run on the build pump at full width until the step ends. Once per session.
+		 * Off with CS_DCLF_PIPELINE_PRECOMPILE=0.
+		 */
+		void StartPrecompile();
+		/** @brief Any thread. */
+		PrecompileProgress GetPrecompileProgress() const;
+
 		/** @brief Lighting constant variable names by index, per stage. */
 		static std::span<const std::string_view> LightingVariableNames(bool a_pixel);
 

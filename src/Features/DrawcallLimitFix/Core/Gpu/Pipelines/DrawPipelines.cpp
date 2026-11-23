@@ -451,10 +451,14 @@ namespace DCLF
 			inputsChanged = true;
 		}
 		if (inputsChanged) {
+			ValidateRecordedStates();
 			l.RetryBlocked([&](const auto& a_key) { TryRequest(a_key); });
 			s.RetryBlocked([&](const auto& a_key) { TryRequestShadow(a_key); });
 			f.RetryBlocked([&](const auto& a_key) { TryRequestForward(a_key); });
 		}
+		// The startup pipeline step's keys, once posted. Before the program loop, so a cached program builds in this pass.
+		TakePrecompileJob();
+		RebuildContradicted();
 		// Tried every pass. Cheap once requested, built or failed.
 		TryRequestFamilies();
 		TryRequestRefraction();
@@ -483,6 +487,7 @@ namespace DCLF
 		AdmitLane();
 		AdmitShadow();
 		AdmitFamiliesAndForward();
+		UpdatePrecompile();
 		if (l.dirty)
 			PublishCatalog();
 	}

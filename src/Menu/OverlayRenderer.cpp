@@ -332,6 +332,7 @@ bool OverlayRenderer::ShouldSkipRendering()
 	const uint32_t effectFailed = GetFailedEffectCount();
 
 	return !(shaderCache->IsCompiling() ||
+			 globals::features::drawcallLimitFix.GetPipelinePrecompileProgress().pending ||
 			 Menu::GetSingleton()->IsOpen() ||
 			 Menu::GetSingleton()->openFade > 0.0f ||
 			 HomePageRenderer::ShouldShowFirstTimeSetup() ||
@@ -416,7 +417,9 @@ void OverlayRenderer::RenderShaderCompilationStatus(const std::function<const ch
 	const uint32_t effectFailed = GetFailedEffectCount();
 	const bool showFailures = (failed && !hide) || effectFailed;
 	const bool compiling = shaderCache->IsCompiling();
-	if (!compiling && !showFailures && !renderDocAvailable)
+	// DCLF's startup pipeline step, after the shader compile.
+	const auto pipelines = globals::features::drawcallLimitFix.GetPipelinePrecompileProgress();
+	if (!compiling && !pipelines.pending && !showFailures && !renderDocAvailable)
 		return;
 
 	// Card accent: errors win, then the RenderDoc warning, else plain progress
@@ -462,6 +465,22 @@ void OverlayRenderer::RenderShaderCompilationStatus(const std::function<const ch
 				"Press {key} to proceed without completing shader compilation.");
 			ImGui::TextUnformatted(skipShadersText.c_str());
 			ImGui::TextUnformatted(T("overlay.uncompiled_warning", "WARNING: Uncompiled shaders will have visual errors or cause stuttering when loading."));
+		}
+	}
+
+	if (pipelines.pending) {
+		const auto pipelinesTitle = I18n::GetSingleton()->Format("overlay.dclf_pipelines",
+			{ { "done", std::to_string(pipelines.finished) }, { "total", std::to_string(pipelines.total) } }, "Building DCLF pipelines: {done} / {total}");
+		const float pipelinesPercent = pipelines.total ? static_cast<float>(pipelines.finished) / static_cast<float>(pipelines.total) : 0.0f;
+		const auto pipelinesOverlay = fmt::format("{}/{} ({:2.1f}%)", pipelines.finished, pipelines.total, 100 * pipelinesPercent);
+		ImGui::TextUnformatted(pipelinesTitle.c_str());
+		ImGui::ProgressBar(pipelinesPercent, ImVec2(0.0f, 0.0f), pipelinesOverlay.c_str());
+		// The shader compile's card above already names the skip key while it runs.
+		if (!compiling && !shaderCache->backgroundCompilation && shaderCache->menuLoaded) {
+			const auto skipPipelinesText = I18n::GetSingleton()->Format("overlay.dclf_pipelines_skip",
+				{ { "key", keyIdToString(Menu::GetSingleton()->GetSettings().SkipCompilationKey) } },
+				"Press {key} to continue while the rest build in the background. Objects they draw appear when their pipeline is ready.");
+			ImGui::TextUnformatted(skipPipelinesText.c_str());
 		}
 	}
 

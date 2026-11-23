@@ -23,6 +23,9 @@ namespace DCLF
 	{
 		using Clock = std::chrono::steady_clock;
 
+		// Set while the startup pipeline step runs, when nothing else needs the preparation workers.
+		std::atomic<bool> buildFullWidth{ false };
+
 		/**
 		 * @brief A lock-free, width-limited pump onto the preparation pool. A runner gives its slot back only once the count reads zero,
 		 * then looks once more, so a push that found every slot taken is never left without a runner.
@@ -43,7 +46,12 @@ namespace DCLF
 			// A pop may precede its push's count, so this can read below zero for a moment.
 			std::atomic<std::int64_t> queued{ 0 };
 			std::atomic<unsigned> runners{ 0 };
-			const unsigned width = BuildWidth();
+
+			/** @brief Runners allowed at once: BuildWidth(), or every preparation worker during the startup pipeline step. */
+			static unsigned Width()
+			{
+				return buildFullWidth.load(std::memory_order_relaxed) ? (std::max)(1u, ::RenderGraph::Frame::PreparationWorkers()) : BuildWidth();
+			}
 
 			// CS_DCLF_STATS: each kind's queue waits and run times in ms, and the deepest queue, under statsLock.
 			std::mutex statsLock;
@@ -65,7 +73,7 @@ namespace DCLF
 
 			bool TakeRunner()
 			{
-				for (unsigned running = runners.load(); running < width;)
+				for (unsigned running = runners.load(); running < Width();)
 					if (runners.compare_exchange_weak(running, running + 1))
 						return true;
 				return false;
@@ -100,7 +108,8 @@ namespace DCLF
 						runs[kind].push_back(ms(end - start));
 					}
 				}
-				if (queued.load() > 0) {
+				// A runner past the width, after the startup step narrowed it, gives its slot back. The others keep running.
+				if (queued.load() > 0 && runners.load() <= Width()) {
 					Dispatch();  // keeps the slot, behind whatever the pool queued meanwhile
 					return;
 				}
@@ -122,6 +131,11 @@ namespace DCLF
 	unsigned BuildWidth()
 	{
 		return (std::max)(1u, ::RenderGraph::Frame::PreparationWorkers() / 2);
+	}
+
+	void SetBuildFullWidth(bool a_full)
+	{
+		buildFullWidth.store(a_full, std::memory_order_relaxed);
 	}
 
 	std::function<bool(std::function<void()>)> BuildSubmitter(BuildKind a_kind)
@@ -151,7 +165,7 @@ namespace DCLF
 			summarize(pump.runs[k], out.kinds[k].run);
 		}
 		out.deepest = static_cast<std::uint32_t>((std::max<std::int64_t>)(std::exchange(pump.deepest, 0), 0));
-		out.width = pump.width;
+		out.width = BuildPump::Width();
 		return out;
 	}
 

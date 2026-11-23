@@ -30,6 +30,22 @@ struct DrawcallLimitFix : Feature
 	virtual void PostPostLoad() override;
 	/** @brief SKSE kDataLoaded. SceneWriterFramework's integrity check, once every plugin has installed its hooks. */
 	virtual void DataLoaded() override;
+
+	/** @brief The startup pipeline step's progress, for the startup gate and the overlay. */
+	struct PipelinePrecompileProgress
+	{
+		bool pending = false;  // the startup gate holds while set, unless shader compilation went to the background
+		std::uint32_t total = 0;
+		std::uint32_t finished = 0;
+		std::uint32_t failed = 0;
+	};
+	/**
+	 * @brief SKSE kDataLoaded, main thread, once Community Shaders' startup compile is done or skipped. Queues every pipeline the
+	 * pipeline manifests list, so no DCLF pipeline builds in play. Does nothing when DCLF is not installed.
+	 */
+	void StartPipelinePrecompile();
+	/** @brief Any thread. */
+	PipelinePrecompileProgress GetPipelinePrecompileProgress() const;
 	virtual void SetupResources() override;
 	/** @brief After every feature's SetupResources. Sets up the engine draw families. */
 	virtual void PostSetupResources() override;
