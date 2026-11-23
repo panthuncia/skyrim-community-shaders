@@ -182,6 +182,16 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 					std::this_thread::sleep_for(100ms);
 				}
 
+				// DCLF's startup pipeline step, once the shader compile has put the stages in the store. The skip key lets its
+				// remaining builds finish in the background, as it does the shader compile.
+				if (!globals::game::quitGame) {
+					auto& dclf = globals::features::drawcallLimitFix;
+					dclf.StartPipelinePrecompile();
+					while (dclf.GetPipelinePrecompileProgress().pending && !shaderCache->backgroundCompilation && !globals::game::quitGame) {
+						std::this_thread::sleep_for(100ms);
+					}
+				}
+
 				if (globals::game::quitGame) {
 					logger::info("Game was closed, skipping feature DataLoaded methods");
 					break;

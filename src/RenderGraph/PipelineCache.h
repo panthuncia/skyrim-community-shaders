@@ -22,6 +22,12 @@ namespace RenderGraph::PipelineCache
 	 */
 	void Tick(const std::shared_ptr<rhi::DevicePtr>& a_device);
 
+	/**
+	 * @brief Any thread. The next Tick saves the cache without waiting for pipelines to stop coming, if any were added since the
+	 * last save. A save in progress delays it to the Tick after.
+	 */
+	void RequestSave();
+
 	/** @brief Before the device goes: waits up to two seconds for a save in progress, which holds the device. */
 	void WaitForSave();
 }

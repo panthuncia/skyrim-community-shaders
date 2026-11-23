@@ -25,6 +25,7 @@
 #include "Feature.h"
 #include "FeatureIssues.h"
 #include "FeatureVersions.h"
+#include "Features/DrawcallLimitFix.h"
 #include "Features/RenderDoc.h"
 #include "Features/Upscaling.h"
 #include "I18n/I18n.h"
@@ -1218,7 +1219,8 @@ void Menu::ProcessInputEventQueue()
 							 HomePageRenderer::MarkFirstTimeSetupComplete();
 						 }
 					 } },
-					{ settings.SkipCompilationKey, [this, shaderCache]() { if (!ShouldSwallowInput() && shaderCache->IsCompiling()) shaderCache->SetBackgroundCompilation(true); } },
+					// Also skips DCLF's startup pipeline step, whose builds go on in the background.
+					{ settings.SkipCompilationKey, [this, shaderCache]() { if (!ShouldSwallowInput() && (shaderCache->IsCompiling() || globals::features::drawcallLimitFix.GetPipelinePrecompileProgress().pending)) shaderCache->SetBackgroundCompilation(true); } },
 					{ settings.EffectToggleKey, [shaderCache]() { shaderCache->SetEnabled(!shaderCache->IsEnabled()); } },
 					{ settings.ShaderBlockPrevKey, [this, shaderCache]() { if (settings.EnableShaderBlocking) shaderCache->IterateShaderBlock(); } },
 					{ settings.ShaderBlockNextKey, [this, shaderCache]() { if (settings.EnableShaderBlocking) shaderCache->IterateShaderBlock(false); } },

@@ -14,6 +14,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/EngineStates.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/FrameSource.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PipelineKeySource.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
@@ -42,6 +43,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <limits>
 #include <stdexcept>
@@ -792,6 +794,24 @@ namespace DCLF
 		// As the engine draws them, alpha-tested writes every channel (mode 10). Plain opaque leaves RT0's alpha alone (mode 1),
 		// so a shader alpha below 1 never reaches the G-buffer.
 		static constexpr std::uint32_t kOpaqueWriteMode = 1, kAlphaTestedWriteMode = 10;
+		/**
+		 * @brief The engine state bits a key's build reads. An opaque key (no state bits) reads its write mode's state and takes
+		 * only the blend, which a_blendOnly reports.
+		 */
+		static std::uint32_t EngineStateBitsOf(const PipelineKey& a_key, bool& a_blendOnly)
+		{
+			if (const auto bits = RasterStateBits(a_key.rasterFlags)) {
+				a_blendOnly = false;
+				return bits;
+			}
+			constexpr std::uint32_t kDoAlphaTest = 1u << 20;
+			// LOD techniques (9, 13, 15, 18) draw in write mode 1 even when alpha-tested, as the engine's main pass does, so G-buffer alpha keeps what lies beneath.
+			const std::uint32_t technique = (a_key.passDescriptor >> 24) & 0x3f;
+			const bool lod = technique == 9 || technique == 13 || technique == 15 || technique == 18;
+			const std::uint32_t writeMode = (a_key.pixelDescriptor & kDoAlphaTest) && !lod ? kAlphaTestedWriteMode : kOpaqueWriteMode;
+			a_blendOnly = true;
+			return writeMode << kRasterWriteModeShift;
+		}
 		ankerl::unordered_dense::map<std::uint32_t, EngineState> engineStates;
 		std::uint32_t loggedStateFailures = 0;
 
@@ -1022,6 +1042,75 @@ namespace DCLF
 			Forward forward;
 		};
 		Lane lane;
+
+		/** @brief The startup pipeline step's keys, decoded on the main thread from the key sources. Posted once to the lane. */
+		struct PrecompileJob
+		{
+			std::vector<PipelineKey> main;
+			// The engine states the main keys' manifest lines recorded, by state bits.
+			ankerl::unordered_dense::map<std::uint32_t, EngineState> states;
+			// Shadow keys, with view state ids registered from the lines' rasterizer states.
+			std::vector<ShadowPipelineKey> shadow;
+			std::string sources;  // each source's line count, for the summary
+			std::uint32_t otherTargets = 0;  // lines for another session's targets, skipped
+			std::chrono::steady_clock::time_point started;
+			// Whether the inputs posted just before the job can build each kind. When they can, the lane holds the job until it has them.
+			bool mainInputs = false, shadowInputs = false;
+		};
+		::RenderGraph::Frame::LatestSlot<PrecompileJob> precompileSlot;
+		std::unique_ptr<PrecompileJob> heldPrecompileJob;  // lane: taken, waiting for its inputs
+		/** @brief The startup pipeline step (PipelinePrecompile.cpp). */
+		struct Precompile
+		{
+			// Any thread: the startup gate and the overlay read these.
+			std::atomic<bool> pending{ false };
+			std::atomic<std::uint32_t> total{ 0 }, built{ 0 }, failed{ 0 }, deferred{ 0 };
+			// Main thread.
+			bool started = false;
+			// The lane's from here on.
+			bool active = false;
+			// Keys the step requested whose build has not finished. Their builds are not logged as on demand.
+			ankerl::unordered_dense::set<PipelineKey, PipelineKeyHash> main;
+			ankerl::unordered_dense::set<ShadowPipelineKey, ShadowPipelineKeyHash> shadow;
+			// Manifest states used until the render thread reads the live ones, then checked against them.
+			ankerl::unordered_dense::map<std::uint32_t, EngineState> recordedStates;
+			// Keys built from a recorded state not checked yet, with its bits.
+			ankerl::unordered_dense::map<PipelineKey, std::uint32_t, PipelineKeyHash> recordedUse;
+			// Keys built from a recorded state the live one contradicted, built again once their first build finished.
+			std::vector<PipelineKey> rebuild;
+			std::uint32_t stageCompiles = 0;
+			std::uint32_t otherTargets = 0;
+			std::string sources;
+			std::chrono::steady_clock::time_point startedAt;
+		};
+		Precompile precompile;
+
+		/** @brief The manifest tag of a main key: "lighting", or its program family's key name. */
+		static std::string MainManifestTag(const PipelineKey& a_key);
+		/** @brief A main key's manifest identity: the key's words, the main targets' formats and the winding. */
+		static PipelineWords MainManifestIdentity(const PipelineKey& a_key, const TargetFormats& a_targets, bool a_frontCCW);
+		/** @brief A main key's manifest inputs: its state bits and the engine state read for them. */
+		static PipelineWords EngineStateWords(std::uint32_t a_bits, const EngineState& a_state);
+		/** @brief Decodes a main line. False when malformed. */
+		static bool MainFromManifest(const PipelineWords& a_identity, const PipelineWords& a_inputs, PipelineKey& a_key, TargetFormats& a_targets, bool& a_frontCCW,
+			std::uint32_t& a_bits, EngineState& a_state);
+		/** @brief A shadow key's manifest identity: the key's words without the session's view state id, the format and the view's rasterizer state. */
+		static PipelineWords ShadowManifestIdentity(const ShadowPipelineKey& a_key, DXGI_FORMAT a_format, const ShadowRasterState& a_state);
+		/** @brief Decodes a shadow line. The key's view state is left 0. False when malformed. */
+		static bool ShadowFromManifest(const PipelineWords& a_identity, ShadowPipelineKey& a_key, DXGI_FORMAT& a_format, ShadowRasterState& a_state);
+		/**
+		 * @brief Render thread (or the main thread before any world frame). A shadow rasterizer state's id, registering it when new.
+		 * a_added is set when it was new, and the caller logs and posts the inputs.
+		 */
+		std::uint32_t ShadowRasterStateIdOf(const ShadowRasterState& a_state, bool& a_added);
+		/** @brief Lane. Requests the posted job's keys, once its inputs are in. */
+		void TakePrecompileJob();
+		/** @brief Lane, the end of a pass. Counts the step's finished keys, and ends the step when none is left. */
+		void UpdatePrecompile();
+		/** @brief Lane, when the inputs changed. Checks recorded states against the live ones the render thread read. */
+		void ValidateRecordedStates();
+		/** @brief Lane. Builds again the keys whose recorded state was contradicted, once their first build has finished. */
+		void RebuildContradicted();
 
 		/** @brief Publishes a family's admitted pipelines and hands out the published indices. */
 		template <class Family, class Version, class Publish, class OnReady>

@@ -46,6 +46,12 @@ namespace DCLF
 	unsigned BuildWidth();
 
 	/**
+	 * @brief Any thread. While set, the pump runs on every preparation worker instead of BuildWidth(). The startup pipeline step
+	 * sets it, since nothing else runs then, and clears it at its end.
+	 */
+	void SetBuildFullWidth(bool a_full);
+
+	/**
 	 * @brief Sets the pipeline lane's drain, run one pass at a time on the coordinator. Wakes coalesce, and a wake during a pass
 	 * makes another pass. A wake before this is set runs an empty pass and its work waits for the next one.
 	 */

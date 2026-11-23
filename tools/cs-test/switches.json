@@ -545,6 +545,16 @@
 			"description": "auto (default: exteriors GPU-driven, interiors CPU-driven)|manual|gpu|cpu: the draws culled and recorded on the GPU, or culled on the CPU and recorded as direct draws into DXVK's command buffer; gpu and cpu are manual with both kinds of cell (live toggle's seed)"
 		},
 		{
+			"name": "CS_DCLF_PIPELINE_PRECOMPILE",
+			"key": "dclf.pipeline_precompile",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "dclf",
+			"description": "0: no startup pipeline step; each DCLF pipeline builds when first drawn (the pipeline manifest is still read and saved)"
+		},
+		{
 			"name": "CS_DCLF_PLAIN_SNOW_SPARKLE",
 			"key": "dclf.plain_snow_sparkle",
 			"type": "bool",

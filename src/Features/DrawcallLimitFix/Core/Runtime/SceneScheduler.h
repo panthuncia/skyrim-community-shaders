@@ -14,6 +14,6 @@ namespace DCLF
 	public:
 		/** @brief The scope every feature job runs under. It is never cancelled. A job's own stop source cancels it. */
 		static const org::async::Scope& Scope();
-		static Runtime::SceneGraph& Graph();
+		static ::DCLF::Runtime::SceneGraph& Graph();
 	};
 }
