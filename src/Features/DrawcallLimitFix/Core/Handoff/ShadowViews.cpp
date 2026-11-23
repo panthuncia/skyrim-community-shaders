@@ -69,29 +69,32 @@ namespace DCLF
 		const auto* lighting = SceneCapture::LeafView::Lighting(a_leaf.property);
 		if (!lighting || !a_leaf.geometry)
 			return ShadowReject::NotLighting;
-		const std::uint64_t flags = lighting->flags;
-		if (IsLodObject(flags, a_leaf.Type()) || IsLodLand(flags, a_leaf.Type()))
+		return ShadowCasterReject(lighting->flags, a_leaf.Type(), a_leaf.AlphaBlending(), lighting->materialAlpha, ShadowGlobal());
+	}
+
+	ShadowReject ShadowCasterReject(std::uint64_t a_flags, std::uint8_t a_type, bool a_blended, float a_materialAlpha, std::uint8_t a_shadowGlobal)
+	{
+		if (IsLodObject(a_flags, a_type) || IsLodLand(a_flags, a_type))
 			return ShadowReject::Lod;
-		const bool blended = a_leaf.AlphaBlending();
-		const bool decal = (flags & (Bit(26) | Bit(27))) != 0;
-		const bool decalLike = decal && (flags & Bit(18));
-		if (decal && !(decalLike && (flags & Bit(32)) && blended))
+		const bool decal = (a_flags & (Bit(26) | Bit(27))) != 0;
+		const bool decalLike = decal && (a_flags & Bit(18));
+		if (decal && !(decalLike && (a_flags & Bit(32)) && a_blended))
 			return decalLike ? ShadowReject::DecalNoZWrite : ShadowReject::DecalPointLight;
 		// The fade node's share is the GPU's, since a shadow view drops a caster while its root fades.
-		if (lighting->materialAlpha < 1.0f)
+		if (a_materialAlpha < 1.0f)
 			return ShadowReject::Faded;
-		if (flags & 0x8004ull)
+		if (a_flags & 0x8004ull)
 			return ShadowReject::Refraction;
-		if (blended && !decalLike)
+		if (a_blended && !decalLike)
 			return ShadowReject::AlphaBlended;
 		// With kCastShadows clear, global 1 registers no pass, global 2 only the volumetric copy's, and global 0 casts as usual.
-		if (!(flags & Bit(9))) {
-			if (ShadowGlobal() == 1)
+		if (!(a_flags & Bit(9))) {
+			if (a_shadowGlobal == 1)
 				return ShadowReject::NoCastShadows;
-			if (ShadowGlobal() == 2)
+			if (a_shadowGlobal == 2)
 				return ShadowReject::VolumetricOnly;
 		}
-		if (UtilityShaderDecl(flags) == 0)
+		if (UtilityShaderDecl(a_flags) == 0)
 			return ShadowReject::DeclZero;
 		return ShadowReject::None;
 	}
@@ -138,18 +141,35 @@ namespace DCLF
 
 	std::vector<std::uint32_t> AllShadowUtilityTechniques()
 	{
-		// One flag for each test in UtilityShaderDecl and ShadowUtilityTechnique. Where a test reads either of two flags, one stands
-		// for both. Keep this list in step with those two functions.
-		constexpr std::uint64_t kTested[] = { 0x1000, 0x2, Bit(37), 0x4000'0000'0000ull, Bit(33), Bit(17), Bit(61), Bit(34), Bit(26) };
+		// One flag for each test in UtilityShaderDecl, ShadowUtilityTechnique and ShadowCasterReject. Where a test reads either of two
+		// flags, one stands for both. Keep this list in step with those functions. kCastShadows is left out: with shadow global 0 it
+		// changes nothing, and the other globals only reject.
+		constexpr std::uint64_t kLodLandscape = Bit(33);
+		constexpr std::uint64_t kTested[] = { 0x1000, 0x2, Bit(37), 0x4000'0000'0000ull, kLodLandscape, Bit(17), Bit(61), Bit(34), Bit(26), Bit(18), Bit(32),
+			0x4, 0x8000 };
 		constexpr std::uint32_t kCombinations = 1u << std::size(kTested);
+		// The geometry types the LOD rules tell apart.
+		constexpr std::uint8_t kTriShape = static_cast<std::uint8_t>(RE::BSGeometry::Type::kTriShape);
+		constexpr std::uint8_t kSubIndexTriShape = static_cast<std::uint8_t>(RE::BSGeometry::Type::kSubIndexTriShape);
 		std::vector<std::uint32_t> techniques;
 		for (std::uint32_t combination = 0; combination < kCombinations; ++combination) {
 			std::uint64_t flags = 0;
 			for (std::size_t i = 0; i < std::size(kTested); ++i)
 				if (combination & (1u << i))
 					flags |= kTested[i];
-			for (const bool alphaTesting : { false, true })
-				techniques.push_back(ShadowUtilityTechnique(flags, alphaTesting));
+			for (const std::uint8_t type : { kTriShape, kSubIndexTriShape }) {
+				// Only terrain LOD chunks carry the LOD landscape flag, and they are BSTriShapes. So no caster has it.
+				if ((flags & kLodLandscape) && type != kTriShape)
+					continue;
+				for (const bool blended : { false, true }) {
+					// A faded caster is rejected, so only full alpha casts. Shadow global 0 rejects nothing by itself.
+					const auto reject = ShadowCasterReject(flags, type, blended, 1.0f, 0);
+					if (reject != ShadowReject::None && reject != ShadowReject::VolumetricOnly)
+						continue;
+					for (const bool alphaTesting : { false, true })
+						techniques.push_back(ShadowUtilityTechnique(flags, alphaTesting));
+				}
+			}
 		}
 		std::ranges::sort(techniques);
 		const auto [first, last] = std::ranges::unique(techniques);
