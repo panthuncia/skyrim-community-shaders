@@ -94,6 +94,11 @@ namespace DCLF
 	 */
 	ShadowReject ShadowCasterReject(const SceneCapture::LeafView& a_leaf);
 	/**
+	 * @brief ShadowCasterReject from the inputs it reads: the Lighting property's flags, the geometry type, whether it alpha blends,
+	 * the material's alpha and the frame's shadow global. Never NotLighting.
+	 */
+	ShadowReject ShadowCasterReject(std::uint64_t a_flags, std::uint8_t a_type, bool a_blended, float a_materialAlpha, std::uint8_t a_shadowGlobal);
+	/**
 	 * @brief Whether a Lighting property's own flags give it no shadow pass in any view, whatever the frame.
 	 * Its entry can leave every shadow cull, since DCLF writes the activeLightMask bits it still needs.
 	 */
@@ -103,7 +108,7 @@ namespace DCLF
 	std::uint32_t ShadowUtilityTechnique(const SceneCapture::LeafView& a_leaf);
 	/** @brief ShadowUtilityTechnique from a Lighting property's flags and whether its geometry alpha tests. */
 	std::uint32_t ShadowUtilityTechnique(std::uint64_t a_flags, bool a_alphaTesting);
-	/** @brief Every value ShadowUtilityTechnique can return, each once, for any flags. */
+	/** @brief Every value ShadowUtilityTechnique can return for a caster ShadowCasterReject lets through, each once. */
 	std::vector<std::uint32_t> AllShadowUtilityTechniques();
 
 	/** @brief The technique bits one accumulator render mode contributes, 0xC RenderDepth to 0xF Pb. */
