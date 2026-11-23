@@ -63,6 +63,7 @@ namespace DCLF::Scene
 		bool setSnapshotDirty = true;  // setBuilding changed since the last published claims
 		using PendingMap = ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint8_t>;
 		PendingMap setPending;
+		PendingMap setPendingWhy;  // CS_DCLF_STATS only: each pending object's reason (SetSnapshot::pendingWhy)
 		bool setPendingDirty = true;
 		// A face shape waits pending for its head's snapshot, so the engine does not draw the head between two snapshots.
 		// After kStreamWaitFrames it is the engine's again.

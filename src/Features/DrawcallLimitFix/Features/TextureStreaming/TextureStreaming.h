@@ -6,10 +6,15 @@
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
+#include <string>
+
 namespace DCLF::Features::Streaming
 {
 	Api::Feature Feature();
 
 	/** @brief A test's: logs how many material views draw their shell's current window, and samples of those that do not. */
 	void ReportBindings();
+
+	/** @brief CS_DCLF_STATS: the window builds since the last call, base windows and the others apart, as a log line. Empty with none. */
+	std::string TakeWindowTimes();
 }

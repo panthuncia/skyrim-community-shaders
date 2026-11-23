@@ -11,13 +11,18 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "State.h"
 #include "TextureStreaming/Policy.h"
 #include "TextureStreaming/Streamer.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace DCLF::Features::Streaming
@@ -26,6 +31,13 @@ namespace DCLF::Features::Streaming
 	{
 		std::atomic<float> cameraX{ 0.0f }, cameraY{ 0.0f }, cameraZ{ 0.0f }, pixelsPerRadian{ 0.0f };
 		std::atomic<float> forwardX{ 1.0f }, forwardY{ 0.0f }, forwardZ{ 0.0f }, viewCos{ -1.0f };  // the view's axis, and the cosine of its corner's angle from it
+
+		// CS_DCLF_STATS: each window build's wait for the streaming workers and its own time in ms, base windows ([0]) and the others apart.
+		struct WindowTimes
+		{
+			std::mutex lock;
+			std::array<std::vector<float>, 2> waits, runs;
+		} windowTimes;
 
 		// The render thread's only part in the demand: a position, a direction and two ratios a frame, read by the worker.
 		void Commit(const Api::CommitContext&)
@@ -193,7 +205,20 @@ namespace DCLF::Features::Streaming
 			a_context.RegisterCommitHook({ .name = "texture-streaming", .commit = &Commit });
 
 			TextureStreaming::SetScheduler({ [](TextureStreaming::TextureId a_id, std::uint64_t a_revision, std::uint32_t a_top) {
-												SceneScheduler::Graph().PostTextureWindow(a_id, a_revision, [a_id, a_top] { return Readiness(TextureStreaming::BuildWindowAsync(a_id, a_top)); });
+												const auto posted = std::chrono::steady_clock::now();
+												SceneScheduler::Graph().PostTextureWindow(a_id, a_revision, [a_id, a_top, posted] {
+													const auto started = std::chrono::steady_clock::now();
+													auto readiness = Readiness(TextureStreaming::BuildWindowAsync(a_id, a_top));
+													if (Diagnostics::Observe().stats) {
+														const auto ms = [](std::chrono::steady_clock::duration a_span) { return std::chrono::duration<float, std::milli>(a_span).count(); };
+														const std::size_t kind = a_top == TextureStreaming::kBaseTop ? 0 : 1;
+														const auto ran = ms(std::chrono::steady_clock::now() - started);
+														std::scoped_lock lock(windowTimes.lock);
+														windowTimes.waits[kind].push_back(ms(started - posted));
+														windowTimes.runs[kind].push_back(ran);
+													}
+													return readiness;
+												});
 											},
 				[](TextureStreaming::TextureId a_id) { SceneScheduler::Graph().RetireTextureWindow(a_id); } });
 			TextureStreaming::SetWindowListener([](const ID3D11ShaderResourceView* a_shell) { GpuTextures::Get().NoteWindowChanged(a_shell); });
@@ -204,6 +229,30 @@ namespace DCLF::Features::Streaming
 	Api::Feature Feature()
 	{
 		return { "texture-streaming", &Install };
+	}
+
+	std::string TakeWindowTimes()
+	{
+		std::array<std::vector<float>, 2> waits, runs;
+		{
+			std::scoped_lock lock(windowTimes.lock);
+			waits = std::exchange(windowTimes.waits, {});
+			runs = std::exchange(windowTimes.runs, {});
+		}
+		if (runs[0].empty() && runs[1].empty())
+			return {};
+		const auto spread = [](std::vector<float>& a_ms) {
+			if (a_ms.empty())
+				return std::string("none");
+			std::sort(a_ms.begin(), a_ms.end());
+			float total = 0;
+			for (const float ms : a_ms)
+				total += ms;
+			return fmt::format("p50 {:.0f} ms, p95 {:.0f}, max {:.0f} ({:.0f} ms in all)", a_ms[a_ms.size() / 2], a_ms[(std::min)(a_ms.size() - 1, a_ms.size() * 95 / 100)],
+				a_ms.back(), total);
+		};
+		const auto kind = [&](std::size_t a_kind) { return fmt::format("{} built, queued {}, built in {}", runs[a_kind].size(), spread(waits[a_kind]), spread(runs[a_kind])); };
+		return fmt::format("[DCLF] texture windows (the streaming workers): base windows {}; the others {}", kind(0), kind(1));
 	}
 
 	void ReportBindings()

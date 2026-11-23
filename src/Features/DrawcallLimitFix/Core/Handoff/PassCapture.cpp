@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
+#include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 #include <algorithm>
@@ -664,6 +665,26 @@ namespace DCLF
 	{
 		// An object undrawn this long is dropped from the admission count: it went away or never joins.
 		constexpr std::uint32_t kAdmissionAbandonSteps = 900;
+		constexpr std::size_t kAdmissionNotPending = 15;
+
+		/** @brief The reasons an admission waited on, most frames first, such as "pipeline 120 frames, not pending 3". */
+		std::string AdmissionWaits(const std::array<std::uint16_t, 16>& a_frames)
+		{
+			std::array<std::size_t, 16> order{};
+			for (std::size_t i = 0; i < order.size(); ++i)
+				order[i] = i;
+			std::stable_sort(order.begin(), order.end(), [&](std::size_t a_left, std::size_t a_right) { return a_frames[a_left] > a_frames[a_right]; });
+			std::string out;
+			for (const std::size_t why : order) {
+				if (!a_frames[why])
+					break;
+				const char* name = why < kSetWaitReasons ? kSetWaitReasonNames[why] :
+				                   why == kPendingComponentWhy ? "the head's positions" :
+				                   why == kAdmissionNotPending ? "not pending" : "?";
+				out += fmt::format("{}{} {}", out.empty() ? "" : ", ", name, a_frames[why]);
+			}
+			return out;
+		}
 	}
 
 	void PassCapture::PublishSet(std::shared_ptr<const SetSnapshot> a_set)
@@ -681,10 +702,18 @@ namespace DCLF
 				if (a_set->PhasesOf(it->first) & drawnPhases) {
 					const std::uint32_t steps = now > it->second.first ? now - it->second.first : 0u;
 					(it->second.waiting ? admittedWaiting : admittedUntracked).push_back(steps);
-					if (steps > 4)
-						admittedSlow.emplace_back(steps, std::string(it->second.waiting ? "waiting " : "untracked ") + it->second.what);
+					if (steps > 4) {
+						const std::string waits = AdmissionWaits(it->second.frames);
+						admittedSlow.emplace_back(steps, fmt::format("{}{}{}{}", it->second.waiting ? "waiting " : "untracked ", it->second.what,
+															 waits.empty() ? "" : "; frames on: ", waits));
+					}
 					it = admissionOpen.erase(it);
 				} else {
+					// Not drawn yet: one more frame on what it waits for.
+					const auto why = a_set->pendingWhy.find(it->first);
+					const std::size_t reason = why != a_set->pendingWhy.end() ? (std::min<std::size_t>)(why->second, kAdmissionNotPending - 1) : kAdmissionNotPending;
+					auto& frames = it->second.frames[reason];
+					frames = static_cast<std::uint16_t>((std::min)(frames + 1, 0xFFFF));
 					++it;
 				}
 			}

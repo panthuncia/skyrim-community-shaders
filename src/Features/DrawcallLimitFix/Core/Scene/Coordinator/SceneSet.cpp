@@ -14,6 +14,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 #include <algorithm>
 #include <atomic>
@@ -198,7 +199,8 @@ namespace DCLF::Scene
 			setPendingDirty = true;
 		if (!std::exchange(setPendingDirty, false))
 			return;
-		PendingMap next;
+		PendingMap next, nextWhy;
+		const bool observe = Diagnostics::Observe().stats;
 		for (auto it = streamWaitingSince.begin(); it != streamWaitingSince.end();) {
 			const auto found = tracked.find(const_cast<RE::BSGeometry*>(it->first));
 			if (found == tracked.end() || !found->second.streamWaiting) {
@@ -206,8 +208,11 @@ namespace DCLF::Scene
 				continue;
 			}
 			if (sceneBuilt && sceneFrame - it->second <= kStreamWaitFrames)
-				if (const std::uint8_t phases = static_cast<std::uint8_t>(kCoreSetPhases & setPhaseMask))
+				if (const std::uint8_t phases = static_cast<std::uint8_t>(kCoreSetPhases & setPhaseMask)) {
 					next.try_emplace(it->first, phases);
+					if (observe)
+						nextWhy.try_emplace(it->first, kPendingComponentWhy);
+				}
 			++it;
 		}
 		if (sceneBuilt) {
@@ -216,17 +221,23 @@ namespace DCLF::Scene
 				if (slot >= setWaitingMark.size() || !setWaitingMark[slot] || slot >= tables.objects.size() || tables.IsLayer(slot))
 					continue;
 				const auto* geometry = tables.objectGeometry[slot];
-				if (const std::uint8_t phases = geometry ? SetParticipation(slot, drawn) : std::uint8_t{ 0 })
+				if (const std::uint8_t phases = geometry ? SetParticipation(slot, drawn) : std::uint8_t{ 0 }) {
 					next.insert_or_assign(geometry, phases);
+					if (observe)
+						nextWhy.insert_or_assign(geometry, slot < setWaitWhy.size() ? setWaitWhy[slot] : std::uint8_t{ 0 });
+				}
 			}
 		}
-		const bool same = next.size() == setPending.size() && std::ranges::all_of(next, [&](const auto& a_entry) {
-			const auto it = setPending.find(a_entry.first);
-			return it != setPending.end() && it->second == a_entry.second;
-		});
-		if (same)
+		const auto same = [](const PendingMap& a_next, const PendingMap& a_last) {
+			return a_next.size() == a_last.size() && std::ranges::all_of(a_next, [&](const auto& a_entry) {
+				const auto it = a_last.find(a_entry.first);
+				return it != a_last.end() && it->second == a_entry.second;
+			});
+		};
+		if (same(next, setPending) && same(nextWhy, setPendingWhy))
 			return;
 		setPending = std::move(next);
+		setPendingWhy = std::move(nextWhy);
 		setPendingChanged = true;
 	}
 
@@ -274,6 +285,7 @@ namespace DCLF::Scene
 		entry.snapshot->frame = sceneFrame;
 		entry.snapshot->drawn = drawn;
 		entry.snapshot->pending = setPending;
+		entry.snapshot->pendingWhy = setPendingWhy;
 		setPendingChanged = false;
 		publicationClaims = entry.snapshot;
 		claimsPublished = index;

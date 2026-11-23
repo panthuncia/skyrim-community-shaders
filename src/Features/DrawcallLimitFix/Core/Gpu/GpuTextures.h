@@ -56,6 +56,15 @@ namespace DCLF
 			std::uint64_t superseded = 0;        // pinless: imports a relocation superseded
 			std::uint32_t pinned = 0;            // pinless: imports DXVK pinned all the same (images the GPU writes)
 		};
+		/** @brief CS_DCLF_STATS: the import thread's times since the last take, in ms. */
+		struct ImportTimes
+		{
+			float queuedMax = 0;  // a request's wait for the import thread
+			float answerMax = 0;  // one answer's work
+			std::vector<std::string> slowest;  // answers of 20 ms or more, with their steps
+		};
+		/** @brief Render thread, on report frames. */
+		ImportTimes TakeImportTimes();
 		struct Binding
 		{
 			std::uint32_t index = kInvalid;

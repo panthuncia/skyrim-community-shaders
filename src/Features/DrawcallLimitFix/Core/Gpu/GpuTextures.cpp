@@ -26,6 +26,7 @@
 #include "TextureStreaming/Census.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/TextureFeedback.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "TextureStreaming/Streamer.h"
 
 #include <OpenRenderGraph/GraphHost.h>
@@ -269,6 +270,23 @@ namespace DCLF
 			std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Reject::Count)> rejected{};
 			std::atomic<std::uint32_t> unsupportedLayouts{ 0 };
 			std::atomic<std::uint64_t> importedAsync{ 0 };
+			// CS_DCLF_STATS: the longest queue wait and answer since the last take, and the slowest answers' steps, under timesLock.
+			std::mutex timesLock;
+			float queuedMax = 0, answerMax = 0;
+			std::vector<std::pair<float, std::string>> slowest;
+		};
+		// The import thread's step times in ms for the answer in progress. Only that thread touches it.
+		struct ImportSteps
+		{
+			float window = 0, track = 0, wrap = 0, view = 0;
+		};
+		static inline thread_local ImportSteps t_importSteps;
+		/** @brief Adds the scope's time to a step of t_importSteps. */
+		struct StepTimer
+		{
+			float& step;
+			std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+			~StepTimer() { step += std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count(); }
 		};
 		// The descriptor service here is retained from the graph, not the epoch's, so imports can run outside any epoch.
 		struct ImportContext
@@ -284,6 +302,7 @@ namespace DCLF
 			winrt::com_ptr<ID3D11ShaderResourceView> view;
 			Replies* replies = nullptr;
 			std::uint64_t cookie = 0;
+			std::chrono::steady_clock::time_point queued = std::chrono::steady_clock::now();
 		};
 		// Published by the render thread, immutable.
 		struct Published
@@ -524,8 +543,11 @@ namespace DCLF
 			if (auto engine = RenderGraph::Engine::Textures::Find(a_entry.view.get()))
 				return ImportEngineTexture(a_entry, std::move(engine), a_context, a_sourceTag);
 			winrt::com_ptr<ID3D11ShaderResourceView> window;
-			if (!StreamedWindow(a_entry, window))
-				return Reject::NotImage;
+			{
+				StepTimer timer{ t_importSteps.window };
+				if (!StreamedWindow(a_entry, window))
+					return Reject::NotImage;
+			}
 			if (TextureStreaming::GraphWindow graph; window && TextureStreaming::GraphWindowOf(a_entry.view.get(), window.get(), graph)) {
 				a_entry.graphWindow = std::move(graph.owner);
 				a_entry.index = graph.index;
@@ -574,6 +596,7 @@ namespace DCLF
 			} tracking;
 			{
 				DCLF_ZONE("CS.DCLF.Texture.Import.DescribeResource");
+				StepTimer timer{ t_importSteps.track };
 				auto& runtime = RenderGraphRuntime::Get();
 				// DXVK accepts image views, but buffer imports must name the underlying resource.
 				IUnknown* object = structured ? static_cast<IUnknown*>(bufferResource.get()) : view;
@@ -650,6 +673,7 @@ namespace DCLF
 						graphResource.reset();
 					}
 					DCLF_ZONE("CS.DCLF.Texture.Import.WrapImage");
+					StepTimer timer{ t_importSteps.wrap };
 					a_entry.image = RenderGraph::ImportDxvkImage(a_context.device, image, importName.c_str());
 					if (!a_entry.image)
 						return Reject::Import;
@@ -666,6 +690,7 @@ namespace DCLF
 			a_entry.backing = backing;
 			{
 				DCLF_ZONE("CS.DCLF.Texture.Import.CreateView");
+				StepTimer timer{ t_importSteps.view };
 				const rhi::Resource viewed = backing->graphResource ? backing->graphResource->GetAPIResource() : backing->image.Get();
 				a_entry.binding = a_context.service->CreateOwnedShaderResourceView(a_context.deviceOwner, viewed, backing, srv);
 			}
@@ -709,6 +734,35 @@ namespace DCLF
 		static void Answer(Importer& a_importer, Work& a_work, const Published& a_published)
 		{
 			DCLF_ZONE("CS.DCLF.Texture.Answer");
+			const auto started = std::chrono::steady_clock::now();
+			t_importSteps = {};
+			// Records the answer's times when it took long, after the reply is pushed.
+			struct Timing
+			{
+				const Work& work;
+				const Published& published;
+				std::chrono::steady_clock::time_point started;
+				std::uint32_t sourceTag;
+				~Timing()
+				{
+					if (!Diagnostics::Observe().stats)
+						return;
+					const auto ms = [](std::chrono::steady_clock::duration a_span) { return std::chrono::duration<float, std::milli>(a_span).count(); };
+					const float queued = ms(started - work.queued), answer = ms(std::chrono::steady_clock::now() - started);
+					auto& counters = *published.counters;
+					std::scoped_lock lock(counters.timesLock);
+					counters.queuedMax = (std::max)(counters.queuedMax, queued);
+					counters.answerMax = (std::max)(counters.answerMax, answer);
+					if (answer < 20.0f)
+						return;
+					const auto& s = t_importSteps;
+					counters.slowest.emplace_back(answer, std::format("{:.0f} ms (queued {:.0f} ms; window {:.0f}, track {:.0f}, wrap {:.0f}, view {:.0f}; tag {})", answer, queued,
+															  s.window, s.track, s.wrap, s.view, sourceTag));
+					std::ranges::sort(counters.slowest, std::greater{}, &std::pair<float, std::string>::first);
+					if (counters.slowest.size() > 6)
+						counters.slowest.resize(6);
+				}
+			} timing{ a_work, a_published, started, a_work.sourceTag };
 			auto* key = a_work.view.get();
 			if (!key) {
 				Answered(a_importer, *a_work.replies, nullptr, a_work.cookie, a_published.fixed->null);
@@ -1271,6 +1325,18 @@ namespace DCLF
 		for (const auto& [tag, count] : counts)
 			text += std::format(" {}={}", tag, count);
 		return text;
+	}
+
+	GpuTextures::ImportTimes GpuTextures::TakeImportTimes()
+	{
+		auto& counters = *impl->counters;
+		std::scoped_lock lock(counters.timesLock);
+		ImportTimes out;
+		out.queuedMax = std::exchange(counters.queuedMax, 0.0f);
+		out.answerMax = std::exchange(counters.answerMax, 0.0f);
+		for (auto& [ms, text] : std::exchange(counters.slowest, {}))
+			out.slowest.push_back(std::move(text));
+		return out;
 	}
 
 	GpuTextures::Stats GpuTextures::GetStats() const

@@ -35,6 +35,9 @@ namespace DCLF
 		return a_mode < 2 ? kSetCaster : kSetCasterPoint;
 	}
 
+	/** @brief pendingWhy's reason for a face shape waiting for its head's positions. The others are kSetWaitReasons' indices. */
+	inline constexpr std::uint8_t kPendingComponentWhy = 14;
+
 	/**
 	 * @brief The set for one frame, by geometry. Immutable once published.
 	 *
@@ -45,6 +48,8 @@ namespace DCLF
 	{
 		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint8_t> phases;
 		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint8_t> pending;
+		// CS_DCLF_STATS only: why each pending object waits, for the admission latency report.
+		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint8_t> pendingWhy;
 		std::uint32_t frame = 0;
 		std::uint8_t drawn = 0;  // the phases DCLF draws this frame (a member's phases are within them)
 

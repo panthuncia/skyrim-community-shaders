@@ -295,6 +295,8 @@ namespace DCLF
 			std::uint32_t first = 0;
 			bool waiting = false;
 			std::string what;  // name, owner and shader at the first undrawn frame
+			// Frames spent on each reason: SetSnapshot::pendingWhy's (kSetWaitReasons, then kPendingComponentWhy), then not pending at all.
+			std::array<std::uint16_t, 16> frames{};
 		};
 		mutable std::vector<std::pair<std::uint32_t, std::string>> admittedSlow;
 		mutable std::mutex admissionLock;
