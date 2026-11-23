@@ -139,6 +139,7 @@ namespace DCLF
 		}
 		stats.occlusionWithheld = occlusionWithheld.exchange(0, std::memory_order_relaxed);
 		stats.holdWithheld = holdWithheld.exchange(0, std::memory_order_relaxed);
+		stats.holdNobody = holdNobody.exchange(0, std::memory_order_relaxed);
 		stats.pendingWithheld = pendingWithheld.exchange(0, std::memory_order_relaxed);
 		stats.baseMipsWithheld = baseMipsWithheld.exchange(0, std::memory_order_relaxed);
 		stats.dclfKept = dclfKept.exchange(0, std::memory_order_relaxed);
@@ -222,6 +223,26 @@ namespace DCLF
 	PassCapture::MenuSceneScope::MenuSceneScope() { ++t_menuScenes; }
 	PassCapture::MenuSceneScope::~MenuSceneScope() { --t_menuScenes; }
 
+	namespace
+	{
+		/** @brief Whether a_geometry is under the player's first or third person 3D. Main thread, during a registration. */
+		bool PlayerGeometry(const RE::NiAVObject* a_geometry)
+		{
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			if (!player)
+				return false;
+			const RE::NiAVObject* roots[] = { player->Get3D(false), player->Get3D(true) };
+			for (const auto* node = a_geometry; node; node = node->parent)
+				if (node == roots[0] || node == roots[1])
+					return true;
+			return false;
+		}
+
+		// Defined with the kept samples' helpers below.
+		std::string OwnerOf(const RE::NiAVObject* a_object);
+		bool HiddenChain(const RE::NiAVObject* a_object);
+	}
+
 	bool PassCapture::HeldByLoad(const RE::BSRenderPass* a_pass)
 	{
 		// During a load's hold every pass of DCLF's classes into a view DCLF draws is withheld, member or not, so the engine draws none
@@ -253,8 +274,35 @@ namespace DCLF
 		// Include group renderers the engine made during this frame's registrations. A shadow-map registration is never the main views'.
 		if (!IsMainRenderer(a_batch) && (t_shadowRegistration || !MainRendererNow(a_batch)))
 			return false;
-		if (HeldByLoad(a_pass))
+		if (HeldByLoad(a_pass)) {
+			// A lit pass the frame's claims do not draw would be drawn by nobody once the hold ends: a load object not tracked yet,
+			// or one waiting to join. The hold does not settle while there are any.
+			// A member of a view that draws into the main renderers (the first person's) is drawn by that view.
+			const auto set = std::atomic_load(&frameSet);
+			std::uint8_t drawnPhases = kSetMain;
+			const auto& mainViews = Extensions::Views();
+			for (std::uint32_t i = 0; i < mainViews.mainRendererCount; ++i)
+				drawnPhases |= mainViews.views[static_cast<std::size_t>(mainViews.mainRendererViews[i])].phase;
+			// As the report after the hold counts them: an object waiting to join is drawn by nobody, and one outside the set only
+			// where the engine's lit draws draw nothing (native); in guest mode the engine draws it.
+			const bool drawn = set && (set->PhasesOf(a_pass->geometry) & drawnPhases);
+			const bool waiting = set && (set->WithheldPhasesOf(a_pass->geometry) & drawnPhases);
+			// The player's own parts are no load content: some stay the engine's (head parts other plugins draw), so they never join.
+			if (LitPass(a_pass) && !drawn && (waiting || EngineLitDrawsVoid()) && !PlayerGeometry(a_pass->geometry)) {
+				holdNobody.fetch_add(1, std::memory_order_relaxed);
+				std::scoped_lock lock(keptLock);
+				const auto* geometry = a_pass->geometry;
+				if (holdNobodySamples.size() < 8 && holdNobodySeen.insert(geometry).second) {
+					const auto p = set ? set->pending.find(geometry) : decltype(set->pending.end()){};
+					const bool pending = set && p != set->pending.end();
+					holdNobodySamples.push_back(fmt::format("'{}' under {} (shader {} technique {:08X}, {}, {}{})", geometry->name.c_str() ? geometry->name.c_str() : "",
+						OwnerOf(geometry), a_pass->shader ? static_cast<std::uint32_t>(a_pass->shader->shaderType.get()) : 99u, a_pass->passEnum,
+						!set ? "no claims installed" : pending ? "waiting to join" : "not in the set", geometry->GetGeometryRuntimeData().skinInstance ? "skinned" : "static",
+						HiddenChain(geometry) ? ", hidden" : ""));
+				}
+			}
 			return true;
+		}
 		// For every draw family DCLF draws this frame, or waits to draw, the engine's passes of its shapes are withheld.
 		for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f)
 			if (familyHeld[f].load(std::memory_order_acquire) && Engine::VtableIs(ShaderPropertyOf(a_pass->geometry), Extensions::DrawFamilies()[f].engineShapeVtable)) {
@@ -602,6 +650,13 @@ namespace DCLF
 		const auto total = [](const MapClass& a_class) { return a_class.withheld + a_class.kept + a_class.otherWithheld + a_class.otherKept; };
 		std::ranges::sort(classes, [&](const MapClass& a_left, const MapClass& a_right) { return total(a_left) > total(a_right); });
 		return classes;
+	}
+
+	std::vector<std::string> PassCapture::TakeHoldNobodySamples()
+	{
+		std::scoped_lock lock(keptLock);
+		holdNobodySeen.clear();
+		return std::exchange(holdNobodySamples, {});
 	}
 
 	std::vector<const void*> PassCapture::TakeUncoveredAccumulators()

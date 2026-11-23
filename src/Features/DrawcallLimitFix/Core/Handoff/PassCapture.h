@@ -58,6 +58,8 @@ namespace DCLF
 			std::uint32_t mainWithheld = 0;
 			std::uint32_t occlusionWithheld = 0;
 			std::uint32_t holdWithheld = 0;
+			// Of those, lit passes into the main views the frame's claims do not draw: the load hold waits for them.
+			std::uint32_t holdNobody = 0;
 			// Passes of objects waiting to join that the hooks withheld.
 			std::uint32_t pendingWithheld = 0;
 			// Passes of lit objects withheld until their base mips are in.
@@ -192,6 +194,8 @@ namespace DCLF
 		std::size_t MapKeptMembersNow(std::size_t& a_kept, std::size_t& a_waiting) const;
 		/** @brief Render thread. Accumulators of uncovered shadow views that kept passes went to, since the last call. */
 		std::vector<const void*> TakeUncoveredAccumulators();
+		/** @brief Render thread. The samples of the load hold's undrawn passes since the last call, and clears them. */
+		std::vector<std::string> TakeHoldNobodySamples();
 		/**
 		 * @brief Render thread, before registrations. The main views' batch renderers: the Z-prepass accumulator (*0x14338c828) and the
 		 * main one (*0x14338c830) with their groups. Rebuilt only when an accumulator changes.
@@ -264,13 +268,16 @@ namespace DCLF
 		std::array<std::atomic<std::uint32_t>, kShadowModes> shadowWithheld{};
 		std::atomic<std::uint32_t> volumetricWithheld{ 0 };
 		std::atomic<std::uint32_t> directWithheld{ 0 };
-		std::atomic<std::uint32_t> mainWithheld{ 0 }, occlusionWithheld{ 0 }, holdWithheld{ 0 };
+		std::atomic<std::uint32_t> mainWithheld{ 0 }, occlusionWithheld{ 0 }, holdWithheld{ 0 }, holdNobody{ 0 };
 		std::atomic<std::uint32_t> pendingWithheld{ 0 }, baseMipsWithheld{ 0 };
 		mutable std::atomic<std::uint32_t> dclfKept{ 0 };
 		mutable std::atomic<std::uint32_t> mainNobodyWaiting{ 0 }, mainNobodyKept{ 0 };
 		mutable std::atomic<const RE::BSGeometry*> mainNobodyFirst{ nullptr };
 		static constexpr std::size_t kKeptSamples = 256;
 		mutable std::mutex keptLock;
+		// The load hold's undrawn passes: a line per geometry, the first few (under keptLock). Taken at the hold's release.
+		std::vector<std::string> holdNobodySamples;
+		ankerl::unordered_dense::set<const RE::BSGeometry*> holdNobodySeen;
 		mutable ankerl::unordered_dense::map<const RE::BSGeometry*, KeptSample> keptSamples;
 		mutable ankerl::unordered_dense::set<const void*> uncoveredAccumulators;  // under keptLock
 		// Under mapLock.

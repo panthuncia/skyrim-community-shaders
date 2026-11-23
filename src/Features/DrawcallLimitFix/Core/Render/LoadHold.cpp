@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace DCLF::LoadHold
 {
@@ -94,9 +95,13 @@ namespace DCLF::LoadHold
 			std::uint64_t withheld = 0;
 			bool heldThisFrame = false;
 			// Frames each condition was unmet, and the most objects that waited by reason.
-			std::uint32_t waitedPublication = 0, waitedObjects = 0, waitedClaims = 0, waitedFamilies = 0, waitedViews = 0;
+			std::uint32_t waitedPublication = 0, waitedObjects = 0, waitedClaims = 0, waitedFamilies = 0, waitedViews = 0, waitedUndrawn = 0;
+			std::uint32_t peakUndrawn = 0, undrawn = 0;
+			std::vector<std::string> undrawnSamples;  // the last frame's, logged at the release  // lit main-view passes the claims did not draw: the most, and this frame's
 			std::array<std::uint32_t, kSetWaitReasons> peakWaiting{};
 			std::uint64_t builds = 0;  // any finished build counts as progress
+			// Nearby actors the engine has not given 3D yet, at the hold's first world frame and at its release (~0u: not counted).
+			std::uint32_t actorsWithout3DFirst = ~0u, actorsWithout3DLast = ~0u;
 		};
 		Hold hold;
 
@@ -109,8 +114,28 @@ namespace DCLF::LoadHold
 			std::uint32_t frames = 0, familyFrames = 0;
 			std::array<std::uint32_t, kSetWaitReasons> peakWaiting{};
 			bool logged = false;  // log the next window even when quiet, to say so
+			// Actors without 3D at the release, until the frame the count first reaches 0 (logged once).
+			std::uint32_t actorsWithout3D = 0, actorFrames = 0;
 		};
 		After after;
+
+		/**
+		 * @brief Main thread. The high-process actors that are enabled and have no 3D yet: the engine's queued loads of the actors
+		 * near the player. A measurement for the hold (dclf-open-defects.md, actors drawn by nobody after a load).
+		 */
+		std::uint32_t ActorsWithout3D()
+		{
+			auto* lists = RE::ProcessLists::GetSingleton();
+			if (!lists)
+				return 0;
+			std::uint32_t count = 0;
+			for (const auto& handle : lists->highActorHandles) {
+				const auto actor = handle.get();
+				if (actor && !actor->IsDisabled() && !actor->IsDeleted() && !actor->Get3D())
+					++count;
+			}
+			return count;
+		}
 
 		double MillisecondsSince(std::chrono::steady_clock::time_point a_start)
 		{
@@ -163,8 +188,9 @@ namespace DCLF::LoadHold
 					peaks += fmt::format("{}{} {}", peaks.empty() ? "" : ", ", kSetWaitReasonNames[why], hold.peakWaiting[why]);
 			return fmt::format(
 				"the load's publication {} frames, waiting objects {} frames (at most: {}), claims changing {} frames, draw families {} frames, a view not "
-				"covered {} frames",
-				hold.waitedPublication, hold.waitedObjects, peaks.empty() ? "none" : peaks, hold.waitedClaims, hold.waitedFamilies, hold.waitedViews);
+				"covered {} frames, passes the claims did not draw {} frames (at most {} a frame)",
+				hold.waitedPublication, hold.waitedObjects, peaks.empty() ? "none" : peaks, hold.waitedClaims, hold.waitedFamilies, hold.waitedViews,
+				hold.waitedUndrawn, hold.peakUndrawn);
 		}
 
 		/** @brief Render thread. Ends the hold. a_warn logs what still waits. */
@@ -185,14 +211,23 @@ namespace DCLF::LoadHold
 				StoreState(HoldState::Idle);
 				PostMistEnd();
 			}
+			hold.actorsWithout3DLast = ActorsWithout3D();
+			if (const auto& samples = hold.undrawnSamples; !samples.empty()) {
+				std::string text;
+				for (const auto& sample : samples)
+					text += (text.empty() ? "" : "; ") + sample;
+				logger::info("[DCLF] load hold: passes the claims did not draw in its last frame, first geometries: {}", text);
+			}
 			after = {};
 			after.since = std::chrono::steady_clock::now();
+			after.actorsWithout3D = hold.actorsWithout3DLast;
 			if (!a_warn) {
 				logger::info(
 					"[DCLF] load hold: {} frames, {:.0f} ms ({}), {}; {} passes of DCLF's classes withheld; {} frames with a view DCLF did not cover yet "
-					"(its engine cull skipped: {} sun, {} occlusion maps; {} frames with no shadow view DCLF's{}{}); waited for: {}",
+					"(its engine cull skipped: {} sun, {} occlusion maps; {} frames with no shadow view DCLF's{}{}); waited for: {}; actors without 3D: {} at "
+					"the first world frame, {} now",
 					hold.frames, ms, mode, a_why, hold.withheld, hold.held, hold.heldSun, hold.heldOcclusion, hold.heldShadow, hold.reentry ? ": " : "",
-					hold.reentry ? hold.reentry : "", WaitedText());
+					hold.reentry ? hold.reentry : "", WaitedText(), hold.actorsWithout3DFirst, hold.actorsWithout3DLast);
 				return;
 			}
 			const auto& view = Scene::FrameView::Get();
@@ -201,10 +236,11 @@ namespace DCLF::LoadHold
 			logger::warn(
 				"[DCLF] load hold: released after {} frames, {:.0f} ms ({}), {}; {} passes of DCLF's classes withheld. Still waiting: objects by reason: {}; "
 				"draw families {}; claims {}; the installed publication {} (built {}, committed at frame {}, the world's first frame {}); a view held this frame: "
-				"{}; waited for: {}. What is not ready stays withheld until it is",
+				"{}; waited for: {}; actors without 3D: {} at the first world frame, {} now. What is not ready stays withheld until it is",
 				hold.frames, ms, mode, a_why, hold.withheld, WaitingText(publication), IndirectDraws::Get().DrawFamiliesWaiting(),
 				claims ? (hold.settled ? "installed, unchanged" : "installed, changing") : "not installed", publication ? publication->sequence : 0ull,
-				publication && publication->built, publication ? publication->commitFrame : 0u, hold.firstFrame, hold.heldThisFrame ? "yes" : "no", WaitedText());
+				publication && publication->built, publication ? publication->commitFrame : 0u, hold.firstFrame, hold.heldThisFrame ? "yes" : "no", WaitedText(),
+				hold.actorsWithout3DFirst, hold.actorsWithout3DLast);
 		}
 
 		/** @brief Render thread. Whether one world frame of a hold is settled. */
@@ -220,12 +256,14 @@ namespace DCLF::LoadHold
 			hold.claims = claims.get();
 			hold.claimsFrame = claims ? claims->frame : 0u;
 			const std::uint32_t families = IndirectDraws::Get().DrawFamiliesWaiting();
-			a_waits = transient + families + (hold.heldThisFrame ? 1u : 0u);
+			a_waits = transient + families + (hold.heldThisFrame ? 1u : 0u) + hold.undrawn;
 			hold.waitedPublication += fresh ? 0u : 1u;
 			hold.waitedObjects += fresh && !objectsSettled ? 1u : 0u;
 			hold.waitedClaims += stable ? 0u : 1u;
 			hold.waitedFamilies += families ? 1u : 0u;
 			hold.waitedViews += hold.heldThisFrame ? 1u : 0u;
+			hold.waitedUndrawn += hold.undrawn ? 1u : 0u;
+			hold.peakUndrawn = (std::max)(hold.peakUndrawn, hold.undrawn);
 			if (fresh)
 				for (std::size_t why = 0; why < kSetWaitReasons; ++why)
 					if ((kSetTransientWaits >> why) & 1u)
@@ -233,7 +271,7 @@ namespace DCLF::LoadHold
 			// The load's objects are not in the tables yet, so nothing counts as progress or stall.
 			if (!fresh)
 				a_waits = ~0u;
-			return fresh && objectsSettled && stable && !families && !hold.heldThisFrame;
+			return fresh && objectsSettled && stable && !families && !hold.heldThisFrame && !hold.undrawn;
 		}
 	}
 
@@ -429,8 +467,17 @@ namespace DCLF::LoadHold
 			reentryBlocked = false;
 		if (now != HoldState::Holding) {
 			// Outside a load, what is not ready is withheld, never handed to the engine.
-			if (now == HoldState::Idle && !Scene::FrameView::LoadShown())
+			if (now == HoldState::Idle && !Scene::FrameView::LoadShown()) {
 				WatchAfterHold();
+				if (after.actorsWithout3D) {
+					++after.actorFrames;
+					if (ActorsWithout3D() == 0) {
+						logger::info("[DCLF] load hold: the last of the {} actors without 3D at the release got it {} frames later", after.actorsWithout3D,
+							after.actorFrames);
+						after.actorsWithout3D = 0;
+					}
+				}
+			}
 			return;
 		}
 		if (withMenu.load(std::memory_order_relaxed) && !MenuOpen()) {
@@ -443,10 +490,15 @@ namespace DCLF::LoadHold
 			hold.heldThisFrame = false;
 			return;
 		}
-		if (!hold.firstFrame)
+		if (!hold.firstFrame) {
 			hold.firstFrame = scene;
+			hold.actorsWithout3DFirst = ActorsWithout3D();
+		}
 		++hold.frames;
-		hold.withheld += PassCapture::Get().GetStats().holdWithheld;
+		const auto& passes = PassCapture::Get().GetStats();
+		hold.withheld += passes.holdWithheld;
+		hold.undrawn = passes.holdNobody;
+		hold.undrawnSamples = PassCapture::Get().TakeHoldNobodySamples();
 		std::uint32_t waits = 0;
 		hold.settled = Settled(waits) ? hold.settled + 1 : 0;
 		// A cold shader cache builds for many seconds while the counts stand still, so every finished build counts as progress.

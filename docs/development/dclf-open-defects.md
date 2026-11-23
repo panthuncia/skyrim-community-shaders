@@ -229,6 +229,17 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     on demand, about 100 frames in guest and up to 260 in native (runs fxg, fxn, fig). The `drawn by nobody` count's first window
     after a coc reads about 30,000 passes in guest. **Fix direction:** the hold also waits for the nearby actors' parts, and their
     keys are asked for from the attach records during the load (Phase 5.5.1's sixth step).
+    **Update (2026-11-23):** the engine had given every nearby actor its 3D by the hold's first world frame in every load measured
+    (`actors without 3D: 0 at the first world frame` in the hold's line). The hole was the hold settling on a publication that did
+    not hold the load's objects yet: `Settled` took a commit two frames after the world's first frame as the load's, and the scene
+    pass can lag more. One native tour's `coc WhiterunDragonsreach` settled after 9 frames and then drew 365,515 lit passes by
+    nobody over 187 frames. The hold now also waits while a lit main-view pass it withholds would be drawn by nobody under the
+    frame's claims (`PassCapture` `holdNobody`: an object waiting to join, or one outside the set where the engine's lit draws
+    draw nothing; the player's own parts are left out, since some stay the engine's). Its line adds `passes the claims did not
+    draw N frames (at most N a frame)` and, at the release, the last frame's first undrawn geometries. Guest interior and river,
+    native Vulkan and D3D12 tours: every hold settled (first load about 10 s, Dragonsreach 3.2-3.7 s, others under 2.2 s), and
+    the windows after it read at most about 2,300 passes by nobody, from objects attached after the load. **Left:** those late
+    arrivals (the next entry's latency).
 -   **A re-equip split across scene passes erased and re-added the item (fixed 2026-11-18).** NPCs re-equip by a `DetachChild`
     and an `AttachChild` of the same node on the engine's actor threads (scabbard and dagger, bow, arrow and quiver after a load and
     when an NPC's 3D finishes loading). The detach woke the scene pass, which erased the geometry before the attach tracked it
