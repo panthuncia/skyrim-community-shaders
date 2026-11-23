@@ -49,7 +49,7 @@ namespace RenderGraph::Backend
 		s_d3d12StartInstance.store(used, std::memory_order_release);
 		logger::info("[ORG] D3D12 first instance: {}", used ? "SV_StartInstanceLocation (Shader Model 6.8)" :
 		                                                      a_supported ? "root constant per draw (CS_ORG_D3D12_INSTANCE_WORD=1)" :
-		                                                                    "root constant per draw (the device is below Shader Model 6.8)");
+		                                                                    "root constant per draw (the device lacks Shader Model 6.8 or extended command info)");
 	}
 
 	bool D3D12InstanceWord()

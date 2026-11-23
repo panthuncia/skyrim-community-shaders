@@ -131,8 +131,18 @@ namespace RenderGraph::Engine
 			if (shader.maxShaderVisibleResourceDescriptors && shader.maxShaderVisibleResourceDescriptors < kResourceDescriptors)
 				return fmt::format("the device's shader-visible heap holds {} descriptors, and the render graph needs {}",
 					shader.maxShaderVisibleResourceDescriptors, kResourceDescriptors);
-			// Shader Model 6.8's vertex stages read the draw's first instance, so DCLF's indirect draws need no root constant for it.
-			::RenderGraph::Backend::SetD3D12StartInstance(shader.maxShaderModel >= ::ShaderModel::SM_6_8);
+			// Vertex stages read the draw's first instance (SV_StartInstanceLocation), so DCLF's indirect draws need no root constant for it.
+			// That needs the extended command info cap, not only Shader Model 6.8: a GTX 980 Ti has 6.8 without it, and every
+			// pipeline whose vertex stage reads it fails to create there.
+			bool startInstance = false;
+			if (shader.maxShaderModel >= ::ShaderModel::SM_6_8) {
+				rhi::D3D12DeviceInfo native{};
+				D3D12_FEATURE_DATA_D3D12_OPTIONS21 options21{};
+				startInstance = rhi::QueryNativeDevice(a_device, rhi::RHI_IID_D3D12_DEVICE, &native, sizeof(native)) && native.device &&
+				                SUCCEEDED(static_cast<ID3D12Device*>(native.device)->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &options21, sizeof(options21))) &&
+				                options21.ExtendedCommandInfoSupported;
+			}
+			::RenderGraph::Backend::SetD3D12StartInstance(startInstance);
 			return {};
 		}
 	}
