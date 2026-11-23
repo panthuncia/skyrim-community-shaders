@@ -20,6 +20,15 @@ namespace DCLF::Draws
 		return IsOcclusionMode(a_mode) ? 0u : ShadowModeBits(PassCapture::kFirstShadowMode + a_mode);
 	}
 
+	/**
+	 * @brief The technique a mode's merged view pipeline draws a key with: the key's technique plus the mode's bits, canonical.
+	 * The startup stage batch enumerates the same set (EnumerateDerivedUtilityTechniques).
+	 */
+	inline std::uint32_t ViewPipelineTechnique(std::uint32_t a_keyTechnique, std::uint32_t a_mode)
+	{
+		return CanonicalShadowTechnique(a_keyTechnique | ModeBitsOf(a_mode));
+	}
+
 	/** @brief The technique the object draws with in this mode, or 0 if it does not draw. */
 	inline std::uint32_t ModeTechnique(const SceneTables& a_tables, std::uint32_t a_mode, std::size_t a_object)
 	{

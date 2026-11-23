@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.h"
 #include "Features/DrawcallLimitFix/Diagnostics/ReplayCapture/ReplayCapture.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowTechniques.h"
 
 #include <algorithm>
 #include <array>
@@ -723,6 +724,8 @@ namespace DCLF
 		bool started = false;
 		struct Pending { const RE::BSShader* shader; bool pixel; std::uint32_t descriptor; };
 		std::vector<Pending> pending;
+		// The Utility shader the derived stage batch compiles with, once the engine loaded it. Null before.
+		const RE::BSShader* derivedUtility = nullptr;
 		ankerl::unordered_dense::map<StageKey, StagePtr, StageKeyHash> stages;
 		// The compiler we pointed at DCLF's build executor. A runtime restart replaces it.
 		org::services::ShaderCompiler* configured = nullptr;
@@ -894,12 +897,17 @@ namespace DCLF
 	void ShaderPrograms::StartPrecompile()
 	{
 		std::vector<StageCache::Pending> pending;
+		const RE::BSShader* derivedUtility = nullptr;
 		{
 			std::lock_guard lock(stages->mutex);
 			if (stages->started) return;
 			stages->started = true;
 			pending.swap(stages->pending);
+			derivedUtility = stages->derivedUtility;
 		}
+		// First, so its compiles start before the per-descriptor tasks queue behind each other.
+		if (derivedUtility)
+			DetachDerivedStages(*derivedUtility);
 		auto remaining = std::make_shared<std::atomic<std::size_t>>(pending.size());
 		for (const auto request : pending)
 			SIE::ShaderCache::Instance().compilationPool.detach_task([this, request, remaining] {
@@ -911,6 +919,97 @@ namespace DCLF
 					Util::FinishShaderStoreBatch("DCLF precompile");
 				SIE::ShaderCache::Instance().NotifyPoolProgress();
 			});
+	}
+
+	void ShaderPrograms::QueuePrecompile(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor)
+	{
+		{
+			std::lock_guard lock(stages->mutex);
+			if (!stages->started) {
+				stages->pending.push_back({ &a_shader, a_pixel, a_descriptor });
+				return;
+			}
+		}
+		SIE::ShaderCache::Instance().compilationPool.detach_task([this, shader = &a_shader, pixel = a_pixel, descriptor = a_descriptor] {
+			try { Precompile(*shader, pixel, descriptor); }
+			catch (const std::exception& e) { logger::warn("[DCLF] ORG shader precompile failed: {}", e.what()); }
+			SIE::ShaderCache::Instance().NotifyPoolProgress();
+		});
+	}
+
+	void ShaderPrograms::PrecompileDerivedStages(const RE::BSShader& a_utility)
+	{
+		{
+			std::lock_guard lock(stages->mutex);
+			stages->derivedUtility = &a_utility;
+			if (!stages->started)
+				return;
+		}
+		DetachDerivedStages(a_utility);
+	}
+
+	void ShaderPrograms::DetachDerivedStages(const RE::BSShader& a_utility)
+	{
+		SIE::ShaderCache::Instance().compilationPool.detach_task([this, utility = &a_utility] {
+			try { RunDerivedStages(*utility); }
+			catch (const std::exception& e) { logger::warn("[DCLF] derived Utility stage batch failed: {}", e.what()); }
+			SIE::ShaderCache::Instance().NotifyPoolProgress();
+		});
+	}
+
+	void ShaderPrograms::RunDerivedStages(const RE::BSShader& a_utility)
+	{
+		DCLF_ZONE("CS.DCLF.Shaders.PrecompileDerived");
+		const auto started = std::chrono::steady_clock::now();
+		const auto derived = Draws::EnumerateDerivedUtilityTechniques();
+		struct Requested
+		{
+			StagePtr stage;
+			bool created = false;
+			std::uint32_t technique = 0;
+			bool pixel = false;
+		};
+		std::vector<Requested> requested;
+		requested.reserve(derived.techniques.size() * 2);
+		std::uint32_t unavailable = 0;
+		// Every request first, so DCLF's pool compiles them side by side. Then wait, which holds this compile pool worker.
+		for (const std::uint32_t technique : derived.techniques) {
+			for (const auto& spec : ShadowStages(technique)) {
+				bool created = false;
+				auto stage = stages->Request(*this, a_utility, spec, &created);
+				if (!stage) {
+					++unavailable;
+					continue;
+				}
+				requested.push_back({ std::move(stage), created, technique, spec.pixel });
+			}
+		}
+		std::uint32_t earlier = 0, fromStore = 0, compiled = 0, failed = 0;
+		for (const auto& entry : requested) {
+			entry.stage->done.wait(false, std::memory_order_acquire);
+			// Another precompile asked first, so its outcome is that request's.
+			if (!entry.created) {
+				++earlier;
+				continue;
+			}
+			const auto& artifact = *entry.stage->artifact;
+			if (!artifact) {
+				// Not fatal: the set is closed form, so it may hold a technique no caster draws with. A used one stays native.
+				if (++failed <= 8)
+					logger::warn("[DCLF] derived Utility stage {} {:08X} failed: {}", entry.pixel ? "PS" : "VS", entry.technique, artifact.diagnostics.substr(0, 1500));
+			} else if (artifact.fromCache) {
+				++fromStore;
+			} else {
+				++compiled;
+			}
+		}
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+		logger::info(
+			"[DCLF] derived Utility stages: {} techniques ({} shadow from {} caster techniques in {} modes, {} occlusion, refraction); {} stages requested: "
+			"{} already in the store, {} compiled, {} failed, {} asked for earlier by another precompile, {} without a source; {:.0f} ms",
+			derived.techniques.size(), derived.shadow, derived.casterBases, Draws::kFirstOcclusionMode, derived.occlusion, requested.size() + unavailable, fromStore,
+			compiled, failed, earlier, unavailable, ms);
+		Util::FinishShaderStoreBatch("DCLF derived stages");
 	}
 
 	bool ShaderPrograms::FollowSources()

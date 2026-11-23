@@ -255,6 +255,17 @@ namespace DCLF
 		 */
 		static const RE::BSShader* FamilyShader(Api::ProgramFamily a_family);
 		void StartPrecompile();
+		/**
+		 * @brief Any thread. Precompile on Community Shaders' compile pool, for a descriptor no Community Shaders compile task will hand
+		 * to Precompile (background compilation on, or no disk cache). Waits for StartPrecompile like Precompile.
+		 */
+		void QueuePrecompile(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor);
+		/**
+		 * @brief Any thread. DCLF's own Utility stage batch: every technique the shadow, occlusion and refraction pipelines can compose
+		 * (Draws::EnumerateDerivedUtilityTechniques). Runs on Community Shaders' compile pool, so it holds the startup gate until done.
+		 * Waits for StartPrecompile. a_utility is the engine's Utility shader.
+		 */
+		void PrecompileDerivedStages(const RE::BSShader& a_utility);
 
 		/** @brief Any thread. The pipeline lane's counters, read relaxed. */
 		Stats GetStats() const
@@ -296,6 +307,10 @@ namespace DCLF
 		std::shared_ptr<const Sources> SourcesLocked();
 		/** @brief Any thread. SourcesLocked under the lock. */
 		std::shared_ptr<const Sources> CurrentSources();
+		/** @brief A compile pool worker. Requests the derived Utility stages, waits for them and logs the batch's summary. */
+		void RunDerivedStages(const RE::BSShader& a_utility);
+		/** @brief Any thread. Runs the derived stage batch on Community Shaders' compile pool. */
+		void DetachDerivedStages(const RE::BSShader& a_utility);
 		/** @brief Any thread. Compiles a_stages from the current sources into a program. */
 		template <class P, std::size_t N>
 		void CompileProgram(const RE::BSShader& a_shader, const std::array<ShaderStageSpec, N>& a_stages, Rebuilt<P> a_done);

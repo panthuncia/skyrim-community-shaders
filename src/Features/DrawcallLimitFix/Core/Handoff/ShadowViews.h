@@ -101,6 +101,10 @@ namespace DCLF
 
 	/** @brief The Utility technique the engine derives for a caster, without the view's mode bits. The registered pass is this plus 0x2B. */
 	std::uint32_t ShadowUtilityTechnique(const SceneCapture::LeafView& a_leaf);
+	/** @brief ShadowUtilityTechnique from a Lighting property's flags and whether its geometry alpha tests. */
+	std::uint32_t ShadowUtilityTechnique(std::uint64_t a_flags, bool a_alphaTesting);
+	/** @brief Every value ShadowUtilityTechnique can return, each once, for any flags. */
+	std::vector<std::uint32_t> AllShadowUtilityTechniques();
 
 	/** @brief The technique bits one accumulator render mode contributes, 0xC RenderDepth to 0xF Pb. */
 	std::uint32_t ShadowModeBits(std::uint32_t a_renderMode);

@@ -185,7 +185,7 @@ namespace DCLF::Draws
 			const DXGI_FORMAT format = IsOcclusionMode(m) ? a_inputs.occlusionFormats[OcclusionOfMode(m)] : a_inputs.dsvFormat;
 			const bool inSet = format != DXGI_FORMAT_UNKNOWN && format == a_catalog->shadowFormat;
 			for (const auto& key : keys) {
-				const std::uint32_t technique = key.technique | ModeBitsOf(m);
+				const std::uint32_t technique = ViewPipelineTechnique(key.technique, m);
 				const ShadowPipelineKey slotKey{ key.technique, key.rasterFlags, key.vertexLayout };
 				auto slotIt = a_lookups.shadowSlots.find(slotKey);
 				if (slotIt == a_lookups.shadowSlots.end()) {
@@ -197,7 +197,7 @@ namespace DCLF::Draws
 				const std::uint32_t slot = slotIt->second;
 				const std::uint32_t occlusion = IsOcclusionMode(m) ? OcclusionOfMode(m) : ~0u;
 				for (const std::uint32_t state : modeStates[m]) {
-					const ShadowPipelineKey viewKey{ CanonicalShadowTechnique(technique), slotKey.rasterFlags, 0, state };
+					const ShadowPipelineKey viewKey{ technique, slotKey.rasterFlags, 0, state };
 					// Ask the lane once per key. It keeps every key and rebuilds them all after a format change.
 					if (a_state.shadowRequested.insert(viewKey).second)
 						pipelines.RequestShadow(viewKey, key, occlusion);

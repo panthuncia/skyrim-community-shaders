@@ -156,12 +156,16 @@ struct BSShader_LoadShaders
 		// The engine draw families' ORG stages for every descriptor the engine loaded, in CS's lookup form, whatever CS's own precompile
 		// below does (with background compilation it compiles nothing here): the sky, water, screen blood and shadow mask programs exist
 		// before their first draw (DrawcallLimitFix::PrecompileFamilyStages).
+		// DCLF's Lighting and Utility stages too, when CS's own precompile below makes no compile task to hand them over.
+		const bool csPrecompiles = shaderCache->IsDiskCache() && !shaderCache->backgroundCompilation;
 		for (const auto& entry : shader->vertexShaders) {
 			auto vertexDescriptor = entry->id;
 			auto pixelDescriptor = entry->id;
 			NormalizeLegacyUtilityDescriptors(*shader, vertexDescriptor, pixelDescriptor);
 			state->ModifyShaderLookup(*shader, vertexDescriptor, pixelDescriptor);
 			DrawcallLimitFix::PrecompileFamilyStages(*shader, false, vertexDescriptor);
+			if (!csPrecompiles)
+				DrawcallLimitFix::QueueProgramStages(*shader, false, vertexDescriptor);
 		}
 		for (const auto& entry : shader->pixelShaders) {
 			for (const bool deferred : { false, true }) {
@@ -170,8 +174,13 @@ struct BSShader_LoadShaders
 				NormalizeLegacyUtilityDescriptors(*shader, vertexDescriptor, pixelDescriptor);
 				state->ModifyShaderLookup(*shader, vertexDescriptor, pixelDescriptor, deferred);
 				DrawcallLimitFix::PrecompileFamilyStages(*shader, true, pixelDescriptor);
+				if (!csPrecompiles)
+					DrawcallLimitFix::QueueProgramStages(*shader, true, pixelDescriptor);
 			}
 		}
+		// The shadow, occlusion and refraction techniques DCLF composes, which the engine never loads (ShaderPrograms::PrecompileDerivedStages).
+		if (shader->shaderType.get() == RE::BSShader::Type::Utility)
+			DrawcallLimitFix::PrecompileDerivedStages(*shader);
 		if ((shaderCache->IsDiskCache() && !shaderCache->backgroundCompilation) || shaderCache->IsDump()) {
 			if (shaderCache->IsDiskCache() && !shaderCache->backgroundCompilation) {
 				Feature::ForEachLoadedFeature("GenerateShaderPermutations", [shader](Feature* feature) {
