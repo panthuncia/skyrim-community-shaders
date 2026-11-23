@@ -129,7 +129,7 @@ namespace RenderGraph::Frame::Recipes::Table
 			.steps = { {
 				{ .anchor = Anchor::DecalQueries, .clients = { "cs.decals.occlusion" }, .whole = true },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.facetint" } },
-				{ .anchor = Anchor::ReflectionsPrepass, .clients = { "cs.cloud-shadows", "cs.cloud-shadows.layers" }, .whole = true },
+				{ .anchor = Anchor::ReflectionsPrepass, .clients = { "cs.cloud-shadows", "cs.cloud-shadows.layers", "cs.view-atmosphere.reflection" }, .whole = true },
 				{ .anchor = Anchor::SkyReflections, .clients = { "cs.sky.faces", "cs.cloud-shadows.layers" }, .whole = true },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.start" } },
 				{ .anchor = Anchor::EngineShadowClear, .clients = { "cs.engine.skeleton.shadow@start" } },
@@ -424,13 +424,15 @@ namespace RenderGraph::Frame::Recipes::Table
 	// contents across frames (History/Persistent).
 	// IBL's two SH textures: the sky faces (start) read last frame's, since the projection runs at Prepass (pre-main). Both are History.
 	// Dynamic Cubemaps' env: IBL's projection (pre-main) reads last frame's, as on D3D11; it is published (deferred+water) and Persistent.
-	inline constexpr std::array<std::string_view, 29> kPreviousFrame{ "DynamicCubemaps::Env", "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
+	// Atmosphere and Fog's reflection medium (start) reads the previous frame's multiscatter LUT, Skylighting's probes and Terrain
+	// Shadows' heights too, as D3D11's RenderReflection does before EarlyPrepass and Prepass. They are History or Persistent.
+	inline constexpr std::array<std::string_view, 32> kPreviousFrame{ "DynamicCubemaps::Env", "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H",
 		"Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT", "Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320",
 		"Engine::kMAIN_COPY", "IBL::EnvIBL", "IBL::SkyIBL", "TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY", "PhysicalSky::TransmittanceLut",
 		"PhysicalSky::SkyViewLut", "PhysicalSky::ApLut", "PhysicalSky::DiskPhaseLut", "PhysicalSky::ApShadow",
 		"PhysicalSky::SkyTail", "PhysicalSky::ShadowVolume", "PhysicalSky::CloudShadowMean", "PhysicalSky::VolTr", "PhysicalSky::VolLum",
 		"PhysicalSky::VolAux", "PhysicalSky::VolCubeTr", "PhysicalSky::VolCubeLum", "PhysicalSky::VolCubeDepth", "PhysicalSky::LightningChannels",
-		"PhysicalSky::LightningReflection" };
+		"PhysicalSky::LightningReflection", "PhysicalSky::MultiscatterLut", "Skylighting::ProbeArray", "TerrainShadows::ShadowHeight" };
 
 	// What is derived from the table.
 

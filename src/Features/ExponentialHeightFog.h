@@ -192,6 +192,12 @@ public:
 	/** @brief The engine's local shadow lights, one per shadow mask channel (EngineLocalShadowCB, b1). */
 	using EngineLocalShadows = std::array<LightLimitFix::LocalShadowData, LightLimitFix::SHADOW_MASK_CHANNEL_COUNT>;
 
+	/**
+	 * @brief Fills a_shadows with the engine's local shadow lights. Atmosphere and Fog's volume reads the same data.
+	 * @return The engine's shadow map array view they index, or null when there is none (a_shadows untouched).
+	 */
+	ID3D11ShaderResourceView* BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const;
+
 private:
 	friend class ORGExponentialHeightFog;
 
@@ -206,12 +212,6 @@ private:
 
 	/** @brief The frame's volumetric fog constants; a_farGridEnabled says whether the far volume covers any depth. */
 	VolumetricFogCB BuildConstants(const ConstantInputs& a_inputs, bool& a_farGridEnabled) const;
-
-	/**
-	 * @brief Fills a_shadows with the engine's local shadow lights.
-	 * @return The engine's shadow map array view they index, or null when there is none (a_shadows untouched).
-	 */
-	ID3D11ShaderResourceView* BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const;
 
 	/** @brief The D3D11 path's samplers (s0 linear clamp, s1 the shadow comparison), which the render-graph path converts. */
 	static D3D11_SAMPLER_DESC SamplerDesc(bool a_comparison);

@@ -1,20 +1,76 @@
-#define COMPUTESHADER
+#ifndef COMPUTESHADER
+#	define COMPUTESHADER
+#endif
 #define PS_LINEAR_SHADOW_SAMPLER
+
+// Dual-target (Common/OrgResources.hlsli). On the render graph every handle this program reads, its own and its headers',
+// comes from one table (ViewAtmosphere/MediumTableList.hlsli), written by ORGViewAtmosphereVolume. The push block holds
+// the shared constants, the table and the engine local shadows' latch. Under D3D11 every declaration is the register it
+// was, so FXC output is unchanged.
+#define ORG_SHARED_CONSTANTS
+#define ORG_HEADER_RESOURCES
+#define VIEW_ATMOSPHERE_ORG_HANDLES
+#define PS_CLOUD_TRANSPORT_EXTERN
+#include "Common/OrgResources.hlsli"
+#include "ViewAtmosphere/MediumTableList.hlsli"
+
+#if defined(CS_ORG_BINDLESS)
+#	define VIEW_ATMOSPHERE_TABLE_FIELD(N) uint OrgHandle_##N;
+struct ViewAtmosphereInjectTable
+{
+	VIEW_ATMOSPHERE_INJECT_TABLE(VIEW_ATMOSPHERE_TABLE_FIELD)
+};
+#	undef VIEW_ATMOSPHERE_TABLE_FIELD
+// The engine local shadows are 4 LightLimitFix::LocalShadowData (448 bytes), read by offset.
+struct ViewAtmosphereEngineShadows
+{
+	float4 Rows[28];
+};
+#endif
+#define VIEW_ATMOSPHERE_INJECT_PUSH(X)                     	X(SHARED, ConstantBuffer, Shared, 0)                   	X(LATCH, ViewAtmosphereInjectTable, MediumTable, 0)    	X(EXTERN_LATCH, ViewAtmosphereEngineShadows, EngineLocalShadow, 1)
+ORG_PUSH_BLOCK(VIEW_ATMOSPHERE_INJECT_PUSH(ORG_HANDLE))
+#if defined(CS_ORG_BINDLESS)
+ORG_RESOURCE(LATCH, ViewAtmosphereInjectTable, MediumTable, 0)
+#	define VIEW_ATMOSPHERE_TABLE_STATIC(N) static uint OrgHandle_##N = MediumTable.OrgHandle_##N;
+VIEW_ATMOSPHERE_INJECT_TABLE(VIEW_ATMOSPHERE_TABLE_STATIC)
+#	undef VIEW_ATMOSPHERE_TABLE_STATIC
+// Declared by the headers, never read here.
+ORG_RESOURCE(UNREAD, Texture3D<float4>, ViewAtmosphereLuminance, 125)
+ORG_RESOURCE(UNREAD, Texture3D<float4>, ViewAtmosphereTransmittance, 126)
+ORG_RESOURCE(UNREAD, Texture2D<float4>, DepthTexture, 17)
+ORG_RESOURCE(UNREAD, Texture2D<float4>, TexSvLut, 62)
+ORG_RESOURCE(UNREAD, Texture3D<float4>, TexApLut, 63)
+ORG_RESOURCE(UNREAD, Texture2D<unorm float>, TexApShadow, 64)
+ORG_RESOURCE(UNREAD, Texture2D<float4>, TexSkyTail, 66)
+ORG_RESOURCE(UNREAD, TextureCube<float4>, TexVolCubeDepth, 67)
+ORG_RESOURCE(UNREAD, TextureCube<float4>, TexLightningReflection, 109)
+ORG_RESOURCE(UNREAD, Texture2D<float>, TexVolTr, 110)
+ORG_RESOURCE(UNREAD, Texture2D<float4>, TexVolLum, 111)
+ORG_RESOURCE(UNREAD, Texture2D<float4>, TexLightningChannels, 113)
+ORG_RESOURCE(UNREAD, TextureCube<float>, TexVolCubeTr, 114)
+ORG_RESOURCE(UNREAD, TextureCube<float4>, TexVolCubeLum, 115)
+ORG_RESOURCE(UNREAD, TextureCube<float>, CloudSelfShadowTexture, 26)
+ORG_RESOURCE(UNREAD_LATCH, StrictLightDataValues, StrictLightData, 3)
+static uint MediumLevel = OrgHandle_MediumLevel;
+#endif
+
 #include "Common/Random.hlsli"
 #include "Common/ViewAtmosphere.hlsli"
 #include "PhysicalSky/Common.hlsli"
 
-SamplerState LinearSampler : register(s0);
-SamplerComparisonState ShadowSampler : register(s1);
-Texture3D<float4> MediumHistory : register(t0);
-Texture2DArray<float4> DirectionalShadowMap : register(t1);
-Texture2D<float4> MediumMsLut : register(t2);
-RWTexture3D<float4> MediumSource : register(u0);
+ORG_HEADER_SAMPLER(SamplerState, LinearSampler, 0)
+ORG_HEADER_SAMPLER(SamplerComparisonState, ShadowSampler, 1)
+ORG_HEADER_SRV(Texture3D<float4>, MediumHistory, 0)
+ORG_HEADER_SRV(Texture2DArray<float4>, DirectionalShadowMap, 1)
+ORG_HEADER_SRV(Texture2D<float4>, MediumMsLut, 2)
+ORG_HEADER_UAV(RWTexture3D<float4>, MediumSource, 0)
+#if !defined(CS_ORG_BINDLESS)
 cbuffer MediumDispatch : register(b0)
 {
 	uint MediumLevel;
 	uint3 MediumPadding;
 };
+#endif
 struct DirectionalShadowLightData
 {
 	column_major float4x4 ShadowProj[2];
@@ -22,7 +78,7 @@ struct DirectionalShadowLightData
 	float2 EndSplitDistances;
 	float2 StartSplitDistances;
 };
-StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(t98);
+ORG_HEADER_SRV(StructuredBuffer<DirectionalShadowLightData>, DirectionalShadowLights, 98)
 
 #if defined(TERRAIN_SHADOWS)
 #	include "TerrainShadows/TerrainShadows.hlsli"
@@ -67,16 +123,27 @@ float MediumVisibility(float3 position, out float atmosphereVisibility, out floa
 #	define VIEW_ATMOSPHERE_INJECTION
 #	include "ExponentialHeightFog/VolumetricFogCommon.hlsli"
 #	include "IBL/IBL.hlsli"
-TextureCube<float3> MediumEnvironment : register(t31);
+ORG_HEADER_SRV(TextureCube<float3>, MediumEnvironment, 31)
 #	define SKYLIGHTING_PROBE_REGISTER t50
 #	include "Skylighting/Skylighting.hlsli"
 #	ifdef LIGHT_LIMIT_FIX
 #		include "LightLimitFix/LightLimitFix.hlsli"
-Texture2DArray<float> EngineLocalShadowMaps : register(t5);
+ORG_HEADER_SRV(Texture2DArray<float>, EngineLocalShadowMaps, 5)
+#		if defined(CS_ORG_BINDLESS)
+static ByteAddressBuffer OrgLatch_EngineLocalShadow = ResourceDescriptorHeap[OrgHandle_EngineLocalShadow];
+// One engine local shadow by index, read from the latch by offset, as the fog's scattering reads it. LocalShadowData is
+// 112 bytes: a float4x4 and three float4.
+LightLimitFix::LocalShadowData EngineLocalShadowAt(uint a_index)
+{
+	return OrgLatch_EngineLocalShadow.Load<LightLimitFix::LocalShadowData>(OrgOffset_EngineLocalShadow + 112 * a_index);
+}
+#			define VOLUMETRIC_FOG_ENGINE_LOCAL_SHADOW(i) EngineLocalShadowAt(i)
+#		else
 cbuffer EngineLocalShadowCB : register(b1)
 {
 	LightLimitFix::LocalShadowData EngineLocalShadows[4];
 };
+#		endif
 #	endif
 #	define VolumetricFogGridSize ViewAtmosphere::Data[0].grids[MediumLevel].size.xyz
 #	define VolumetricFogInvGridSize (1.0 / VolumetricFogGridSize)

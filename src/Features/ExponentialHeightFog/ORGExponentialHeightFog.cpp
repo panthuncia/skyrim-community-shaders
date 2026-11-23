@@ -42,6 +42,7 @@ std::uint32_t ORGExponentialHeightFog::Debug()
 #include "Features/TerrainShadows.h"
 #include "Features/TerrainShadows/ORGTerrainShadows.h"
 #include "Features/ViewAtmosphere.h"
+#include "Features/ViewAtmosphere/ORGViewAtmosphere.h"
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
 #include "RenderGraph/ComputeProgram.h"
@@ -804,15 +805,22 @@ struct ORGExponentialHeightFog::Impl
 		const auto& fog = globals::features::exponentialHeightFog.settings;
 		const auto& quality = globals::features::viewAtmosphere.settings;
 		// The grid follows the display size (decision 6a) and the grid settings. The existence rule makes it one texel while the
-		// volumes are off.
+		// volumes are off, and while Atmosphere and Fog's shared volume replaces them (view-atmosphere-port.md 3.3), so both switch
+		// with one revision. The ids stay published.
 		const auto dependencies = DependsOn(Vars::DisplaySize(), quality.nearPixelSize, quality.nearSlices, quality.middlePixelSize, quality.middleSlices);
+		// Atmosphere and Fog sets up first (the feature list's order), so its switch can be read here.
+		if (ORGViewAtmosphere::Get().SharedVolumeDependencies().empty())
+			RenderGraph::Fatal(ORGExponentialHeightFog::kName, "Atmosphere and Fog's render graph path is not set up before the fog's");
+		auto existenceDependencies = DependsOn(fog.enabled, fog.volumetricFogEnabled, fog.volumetricFogExtinctionScale, fog.fogDensity, fog.fogDensity2);
+		for (const auto& dependency : ORGViewAtmosphere::Get().SharedVolumeDependencies())
+			existenceDependencies.push_back(dependency);
 		const auto exists = [&] {
-			return ExistsWhen(DependsOn(fog.enabled, fog.volumetricFogEnabled, fog.volumetricFogExtinctionScale, fog.fogDensity, fog.fogDensity2),
-				[](const Inputs& a_in) {
-					const auto& f = globals::features::exponentialHeightFog.settings;
-					return ExponentialHeightFog::VolumesOn(a_in.Get(f.enabled), a_in.Get(f.volumetricFogEnabled), a_in.Get(f.volumetricFogExtinctionScale),
-						a_in.Get(f.fogDensity), a_in.Get(f.fogDensity2));
-				});
+			return ExistsWhen(existenceDependencies, [](const Inputs& a_in) {
+				const auto& f = globals::features::exponentialHeightFog.settings;
+				return ExponentialHeightFog::VolumesOn(a_in.Get(f.enabled), a_in.Get(f.volumetricFogEnabled), a_in.Get(f.volumetricFogExtinctionScale),
+						   a_in.Get(f.fogDensity), a_in.Get(f.fogDensity2)) &&
+				       !ORGViewAtmosphere::Get().SharedVolumeAt(a_in);
+			});
 		};
 		const auto sizeOf = [](const Inputs& a_in, bool a_far) {
 			const auto& q = globals::features::viewAtmosphere.settings;
@@ -869,15 +877,19 @@ struct ORGExponentialHeightFog::Impl
 		using namespace RenderGraph::Frame;
 		const auto& fog = globals::features::exponentialHeightFog.settings;
 		const auto& quality = globals::features::viewAtmosphere.settings;
+		auto dependencies = DependsOn(quality.nearPixelSize, quality.middlePixelSize, fog.enabled, fog.volumetricFogEnabled, fog.volumetricFogExtinctionScale,
+			fog.fogDensity, fog.fogDensity2, globals::features::ibl.settings.EnableIBL, observed.Var());
+		// No client while the shared volume replaces the volumes: ViewAtmosphere::IsPrepared keeps the fog's Prepass from staging.
+		for (const auto& dependency : ORGViewAtmosphere::Get().SharedVolumeDependencies())
+			dependencies.push_back(dependency);
 		declaredClient = RenderGraph::Frame::DeclareClient<Shape>(
-			kClientId,
-			DependsOn(quality.nearPixelSize, quality.middlePixelSize, fog.enabled, fog.volumetricFogEnabled, fog.volumetricFogExtinctionScale, fog.fogDensity,
-				fog.fogDensity2, globals::features::ibl.settings.EnableIBL, observed.Var()),
+			kClientId, std::move(dependencies),
 			[this](const Inputs& a_in) -> std::optional<Shape> {
 				const auto& f = globals::features::exponentialHeightFog.settings;
 				const auto& q = globals::features::viewAtmosphere.settings;
 				if (!ExponentialHeightFog::VolumesOn(a_in.Get(f.enabled), a_in.Get(f.volumetricFogEnabled), a_in.Get(f.volumetricFogExtinctionScale),
-						a_in.Get(f.fogDensity), a_in.Get(f.fogDensity2)))
+						a_in.Get(f.fogDensity), a_in.Get(f.fogDensity2)) ||
+					ORGViewAtmosphere::Get().SharedVolumeAt(a_in))
 					return std::nullopt;
 				// The inputs come from the last Prepass. Before the first, the engine's depth alone.
 				const auto* seen = observed.Get(a_in);
@@ -1095,8 +1107,10 @@ bool ORGExponentialHeightFog::VolumesOn() const
 {
 	const auto& adopted = RenderGraph::Frame::Revision::Adopted();
 	const auto& f = globals::features::exponentialHeightFog.settings;
+	// The shared volume's revision has no fog client (DeclareClient).
 	return ExponentialHeightFog::VolumesOn(adopted.Get(f.enabled), adopted.Get(f.volumetricFogEnabled), adopted.Get(f.volumetricFogExtinctionScale),
-		adopted.Get(f.fogDensity), adopted.Get(f.fogDensity2));
+			   adopted.Get(f.fogDensity), adopted.Get(f.fogDensity2)) &&
+	       !ORGViewAtmosphere::Get().SharedVolumeActive();
 }
 
 bool ORGExponentialHeightFog::Prepass()

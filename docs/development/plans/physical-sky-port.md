@@ -250,7 +250,8 @@ scheduled the outputs hold their neutral clears.
    needs the view. Not changed here.
 8. **ViewAtmosphere in the AP pass.** t125-t127 stay out of the AP pass for now ("no medium"), as agreed with port-viewatmos.
    The pass is skipped while `ViewAtmosphere::IsPrepared()` (D3D11's medium, where the shader's `Enabled()` would return early).
-   In the graph modes ViewAtmosphere prepares nothing, so the pass always runs. Revisit when port-viewatmos ports the medium.
+   In the graph modes `IsPrepared()` answers the shared volume the adopted revision runs (view-atmosphere-port.md 3.6), so this
+   pass and the AP shadow step aside then, as on D3D11.
 9. **AP depth without Dynamic Cubemaps (decided by the agent, to confirm).** The pass binds the null descriptor for depth, as
    the D3D11 composite's unbound t4 reads 0. Then every pixel passes `depth < 1`: the AP is near zero (near-plane distance), but
    the cloud composite (`CompositeVolumetricClouds`, by pixel) runs on every pixel, sky included. That matches upstream D3D11.
@@ -271,14 +272,14 @@ scheduled the outputs hold their neutral clears.
     the clouds off, so these are null there. Terrain Shadows' heights and Cloud Shadows' last layer are read by their published
     ids; a frame where either is not the graph's runs the AP shadow on D3D11.
 14. **Sky tail before ViewAtmosphere's medium (decided by the agent, to confirm).** The tail runs on the graph under the same
-    condition as on D3D11 (`ViewAtmosphere` enabled and its composite on). In the graph modes `ORGViewAtmosphere::CompositeActive()`
-    is off while Physical Sky is on (its plan, 3.4), so the tail does not run there yet, and nothing reads it: the medium says
-    "no medium", so `SampleViewSky` uses the sky-view LUT. The pass is ready for port-viewatmos's shared volume. The multiscatter
-    LUT it reads is published (`PhysicalSky::MultiscatterLut`, since phase 1), which view-atmosphere-port.md 3.6 lists as missing.
+    condition as on D3D11 (`ViewAtmosphere` enabled and its composite on). Since 2026-11-23 the graph composite is on with Physical
+    Sky (view-atmosphere-port.md 3.4), so the tail runs in the graph modes too. Nothing reads it yet: the medium says "no medium",
+    so `SampleViewSky` uses the sky-view LUT. The pass is ready for port-viewatmos's shared volume. The multiscatter
+    LUT it reads is published (`PhysicalSky::MultiscatterLut`, since phase 1), the shared volume reads it too.
 15. **The cloud diffuse transport (decided by the agent).** `Common.hlsli` declares `TexCloudDiffuseTransport` (t70) as a plain
     register. A graph pass that reads it defines `PS_CLOUD_TRANSPORT_EXTERN` and lists it as an EXTERN entry (the sky tail does);
-    every other build keeps the plain declaration, so FXC output is unchanged. ViewAtmosphere does not publish the transport yet
-    (its plan, 3.7), so the sky tail binds null, which it reads only with the clouds on.
+    every other build keeps the plain declaration, so FXC output is unchanged. Since 2026-11-23 the transport is the second row of
+    `ViewAtmosphere::ReflectionSkySH` (view-atmosphere-port.md 3.7), which the sky tail binds by id with the clouds on.
 
 16. **Middle and cirrus maps (decided by the agent, to confirm).** On the graph the last weather state always writes map 0, so
     the renderer reads one texture whatever the state count. With no states a zero-weight dispatch replaces D3D11's clear.
@@ -297,7 +298,9 @@ scheduled the outputs hold their neutral clears.
     D3D11's viewport clipped; nothing reads them.
 22. **ViewAtmosphere's call (decided by the agent, to confirm).** In the graph modes the main view always runs from Physical Sky's
     Prepass with the depth copy, and ViewAtmosphere's D3D11 composite call to `RenderVolumetricClouds` returns at once. Its medium is
-    off for the clouds' programs ("no medium").
+    off for the clouds' programs ("no medium"). The graph's post-water composite (view-atmosphere-port.md 3.4) reads that frame's
+    filtered targets by id. D3D11 traces the main view against kMAIN's depth when its composite is on, after the water; the graph
+    traces against the depth copy, before the water.
 23. **The AP composite's cloud inputs.** As the D3D11 composite binds them (t18, t19), the AP pass reads the reprojected targets
     before the filter (`PhysicalSky::CloudTr`, `CloudLum`), not the filtered ones engine draws read.
 24. **Readers wait for the cloud client (decided by the agent).** Until `cs.physical-sky.clouds` first runs (its first run clears

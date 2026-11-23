@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Port.h"
 
 #include <d3d11.h>
@@ -12,12 +13,15 @@
 * Two clients, both declared at Setup and following the frame revisions (RenderGraph/Frame/Declare.h):
 * - "cs.view-atmosphere" at the Prepass anchor owns the medium the shaders read through Common/ViewAtmosphere.hlsli: the
 *   luminance and transmittance atlases and the parameters buffer. They are published once, and exported for DCLF's frame
-*   textures at t104, t107 and t108. The atlas is declared on the size settings and the display size. The shared volume's inject
-*   and integrate are not on the graph yet, so the atlas is one texel, the parameters say "no medium", and Exponential Height
-*   Fog's own graph volumes stay the fog.
+*   textures at t104, t107 and t108. The atlas is declared on the size settings and the display size. While the shared volume
+*   is on (SharedVolumeAt), the client also runs its inject and integrate passes (ORGViewAtmosphereVolume) and the atlas has its
+*   full size. Otherwise the atlas is one texel, the parameters say "no medium", and Exponential Height Fog's own graph volumes
+*   are the fog.
 * - "cs.view-atmosphere.composite" at EngineDraws, after the water: the post-water composite of the medium into kMAIN.
-*   Its steps are in the deferred+water and sun stages, beside the water's. It switches in with the revision that holds it, and
-*   PostWaterComposite with it.
+* - "cs.view-atmosphere.composite" at EngineDraws, after the water: the post-water composite of the medium, Physical Sky's
+*   clouds and lightning into kMAIN. On while the fog is on or Physical Sky renders, as on D3D11. Its steps are in the
+*   deferred+water and sun stages, beside the water's. It switches in with the revision that holds it, and PostWaterComposite
+*   with it.
 * Setup failures are fatal. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGViewAtmosphere : public RenderGraph::Port<ORGViewAtmosphere>
@@ -34,7 +38,8 @@ public:
 
 	/**
 	* @brief At Deferred::PrepassPasses, before the features' Prepass: stages the frame's parameters, and notes what the composite
-	* can read (Physical Sky off, its program built, its inputs published). A change is taken when the next revision starts.
+	* can read (whether Physical Sky would render, its program built, its inputs published, the clouds' targets written). A change is
+	* taken when the next revision starts.
 	*/
 	void Prepass();
 
@@ -48,10 +53,20 @@ public:
 	void CompositeAfterWater();
 
 	/**
-	* @brief Whether the shared volume replaces Exponential Height Fog's volumes this frame. Not ported: always false.
-	* Once it is, the fog's volumes go to one texel through their declaration (the existence rule), and their ids stay published.
+	* @brief Whether the adopted revision runs the shared volume, so it replaces Exponential Height Fog's volumes and Physical Sky's
+	* AP shadow this frame. ViewAtmosphere::IsPrepared answers it in the graph modes. Stable within a frame.
 	*/
-	bool SharedVolumeActive() const { return false; }
+	bool SharedVolumeActive() const;
+
+	/** @brief What SharedVolumeAt reads, for a declaration that follows the shared volume. Empty before Setup. */
+	RenderGraph::Frame::Dependencies SharedVolumeDependencies() const;
+
+	/**
+	* @brief Whether the shared volume runs for a revision's values: the toggle, Physical Sky rendering, and the post-water
+	* composite on, as ViewAtmosphere::Prepare asks on D3D11. The fog's volumes are one texel while it does (their existence rule),
+	* and their ids stay published. False before Setup.
+	*/
+	bool SharedVolumeAt(const RenderGraph::Frame::Inputs& a_in) const;
 
 	/** @brief Whether the medium is made and published, so DCLF's frame textures read its ids. False before the first Prepass. */
 	bool MediumPublished() const;

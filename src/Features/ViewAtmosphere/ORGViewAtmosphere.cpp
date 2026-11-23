@@ -3,6 +3,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 #include "Features/ExponentialHeightFog.h"
@@ -10,7 +11,10 @@
 #include "Features/IBL.h"
 #include "Features/IBL/ORGIBL.h"
 #include "Features/PhysicalSky.h"
+#include "Features/PhysicalSky/ORGPhysicalSky.h"
+#include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #include "Features/ViewAtmosphere.h"
+#include "Features/ViewAtmosphere/ORGViewAtmosphereVolume.h"
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
 #include "RenderGraph/ComputeProgram.h"
@@ -49,15 +53,16 @@ namespace
 	constexpr const char* kMediumClientId = "cs.view-atmosphere";
 	constexpr const char* kCompositeClientId = "cs.view-atmosphere.composite";
 	constexpr const char* kCompositeShader = "ViewAtmosphere/Composite.cs.hlsl";
-	// After Exponential Height Fog's passes at the Prepass anchor.
+	// After Exponential Height Fog's passes at the Prepass anchor. The shared volume's passes follow the parameters copy.
 	constexpr std::int32_t kPrepassOrder = 400;
+	constexpr std::int32_t kVolumeOrder = 410;
 
 	// ViewAtmosphere::Parameters' size. All zero means no medium: Enabled() and ReflectionEnabled() read flags.x as 0.
 	constexpr std::uint32_t kParametersBytes = 256;
-	using Parameters = std::array<std::uint32_t, kParametersBytes / 4>;
+	static_assert(sizeof(ViewAtmosphere::Parameters) == kParametersBytes);
 
-	// Composite.cs.hlsl's push block: the shared constants, then one handle per entry.
-	constexpr std::uint32_t kCompositeWords = 4 + 11;
+	// Composite.cs.hlsl's push block: the shared constants, then one handle per entry (eleven of its own, five of Physical Sky's).
+	constexpr std::uint32_t kCompositeWords = 4 + 11 + 5;
 
 	D3D11_TEXTURE3D_DESC VolumeDesc(UINT a_bind)
 	{
@@ -70,43 +75,58 @@ namespace
 		return desc;
 	}
 
-	// Copies the run's parameters from the latch into the published buffer. A run without them copies the zeros of no medium.
-	struct ParametersBindings
+	// Copies a_bytes of the run's latch region, from a_offset, into a buffer: the parameters into the published buffer (a run
+	// without them copies the zeros of no medium), and the shared volume's shadow light into the buffer it reads at t98.
+	struct LatchCopyBindings
 	{
 		org::ResourceBindingToken buffer;
 	};
 
-	struct ParametersFrame
+	struct LatchCopyFrame
 	{
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::uint32_t offset = 0, bytes = 0;
 	};
 
-	class ParametersPass final : public org::TypedRenderGraphPass<ParametersPass, ParametersFrame, ParametersBindings>
+	class LatchCopyPass final : public org::TypedRenderGraphPass<LatchCopyPass, LatchCopyFrame, LatchCopyBindings>
 	{
 	public:
-		ParametersPass(std::shared_ptr<org::Resource> a_buffer, std::shared_ptr<const org::LatchBlock> a_latch) :
-			buffer(std::move(a_buffer)), latch(std::move(a_latch)) {}
+		LatchCopyPass(std::shared_ptr<org::Resource> a_buffer, std::shared_ptr<const org::LatchBlock> a_latch, std::uint32_t a_offset, std::uint32_t a_bytes) :
+			buffer(std::move(a_buffer)), latch(std::move(a_latch)), offset(a_offset), bytes(a_bytes) {}
 
-		ParametersBindings Declare(org::PassBuilder& a_builder)
+		LatchCopyBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			return { a_builder.CopyDestination(buffer) };
 		}
 
-		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get())); }
+		void Revision(std::vector<std::uint64_t>& a_out) const
+		{
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
+			a_out.push_back((static_cast<std::uint64_t>(offset) << 32) | bytes);
+		}
 
-		ParametersFrame Prepare(const ParametersBindings&, const org::PassPrepareContext&) const { return { latch }; }
+		LatchCopyFrame Prepare(const LatchCopyBindings&, const org::PassPrepareContext&) const { return { latch, offset, bytes }; }
 
-		static void Record(const ParametersBindings& a_bindings, const ParametersFrame& a_frame, org::PassRecordContext& a_recording)
+		static void Record(const LatchCopyBindings& a_bindings, const LatchCopyFrame& a_frame, org::PassRecordContext& a_recording)
 		{
 			const auto region = a_frame.latch->At(a_recording.Run());
 			a_recording.Commands().CopyBufferRegion(a_recording.Resolve(a_bindings.buffer).GetHandle(), 0, region.buffer->GetAPIResource().GetHandle(),
-				region.offset, kParametersBytes);
+				region.offset + a_frame.offset, a_frame.bytes);
 		}
 
 	private:
 		std::shared_ptr<org::Resource> buffer;
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::uint32_t offset = 0, bytes = 0;
+	};
+
+	/** @brief The medium client's key: the shared volume's inputs while it is on. */
+	struct MediumKey
+	{
+		std::optional<ORGViewAtmosphereVolume::Inputs> volume;
+
+		bool operator==(const MediumKey&) const = default;
 	};
 
 	/** @brief What the composite reads besides its own resources. */
@@ -115,6 +135,8 @@ namespace
 		bool fogNear = false, fogFar = false;  // the fog's published volumes, else the no-fog volume
 		bool ibl = false;
 		bool cubemap = false;
+		bool skyLut = false;  // Physical Sky's transmittance LUT, read with Physical Sky loaded
+		bool clouds = false;  // the clouds' filtered targets, cloud depth and lightning channels, once a cloud run wrote them
 
 		bool operator==(const CompositeInputs&) const = default;
 	};
@@ -185,20 +207,26 @@ struct ORGViewAtmosphere::Impl
 	// version is born as no medium: nothing scattered, everything transmitted. The no-fog volume is born as a fog that is off.
 	RenderGraph::Frame::DeclaredTexture3D luminance, transmittance, noFog;
 	std::unique_ptr<GraphResources::StructuredBuffer> parameters;
-	RenderGraph::Frame::DeclaredClient medium;
+	// Each registration keeps its key, so the commit finds the volume inputs of the one the run executes.
+	RenderGraph::Frame::DeclaredClientOf<const MediumKey> medium;
+	// The shared volume's passes, part of the medium client while the shared volume is on.
+	ORGViewAtmosphereVolume volume;
 	// Each registration keeps its key. The frame composes while the adopted revision holds one (Adopted()).
 	RenderGraph::Frame::DeclaredClientOf<const CompositeKey> composite;
-	// Whether the shared volume's inject and integrate passes are on the graph. They wait on Physical Sky's media
-	// (view-atmosphere-port.md 3.6). Until then the atlas is one texel, as for a feature that is off.
-	bool sharedVolumePasses = false;
+	// The composite's stand-in for the clouds' transmittance while it reads no clouds: no cloud, as their neutral clear.
+	RenderGraph::Frame::DeclaredTexture2D noCloud;
+	// The null descriptor, for the clouds' other inputs while they are not read. It reads zero, as an unbound D3D11 register.
+	std::uint32_t nullIndex = DCLF::GpuTextures::kInvalid;
+	std::shared_ptr<const void> nullOwner;
 
-	// What the last Prepass found the composite can read, and whether Physical Sky would render if it were on (B2's interim).
+	// What the last Prepass found the composite can read, and whether Physical Sky would render if it were on.
 	// The composite's key reads it, the sky flag with Physical Sky's toggle.
 	RenderGraph::Frame::Observed<CompositeSeen> observed{ "ViewAtmosphere.Composite" };
 	std::optional<CompositeRun> pendingRun;
 	std::uint32_t compositeFrame = UINT32_MAX;
 	bool reportedRun = false;  // the first run's inputs are logged once
-	Parameters frameParameters{};
+	// The parameters Prepass staged. The commit clears what the registration the run executes does not bind.
+	ViewAtmosphere::Parameters frameParameters{};
 
 	/** @brief One line with what the first run reads, to tell its inputs apart between the modes. */
 	void ReportFirstRun(const D3D11_TEXTURE2D_DESC& a_main, std::uint32_t a_width, std::uint32_t a_height) const
@@ -214,15 +242,18 @@ struct ORGViewAtmosphere::Impl
 		const auto& orgFog = ORGExponentialHeightFog::Get();
 		const auto slices = orgFog.Slices();
 		const auto& shared = globals::state->lastSharedData;
+		const auto& sky = globals::features::physicalSky.cbData;
 		const auto& camera = globals::game::frameBufferCached.GetCameraPosAdjust();
 		logger::info(
 			"[ORG] Atmosphere and Fog: the first post-water composite: kMAIN {}x{} format {}, groups for {}x{}, depth format {}; "
 			"fog on {}, volumetric {}, density {:.4f}/{:.4f}, start {:.0f}, volumetric start {:.0f}, local range {:.0f}, near range {:.0f}; "
-			"the fog's graph volumes {} (slices {}/{}); PostWaterComposite {}, near plane {:.2f}, camera ({:.0f}, {:.0f}, {:.0f}), debug view {}",
+			"the fog's graph volumes {} (slices {}/{}); Physical Sky renders {}, clouds {}, lightning {:.2f}; PostWaterComposite {}, near plane {:.2f}, "
+			"camera ({:.0f}, {:.0f}, {:.0f}), debug view {}",
 			a_main.Width, a_main.Height, static_cast<int>(a_main.Format), a_width, a_height, static_cast<int>(depthFormat), fog.enabled.Get(), fog.volumetricFogEnabled.Get(),
 			fog.fogDensity.Get(), fog.fogDensity2.Get(), fog.startDistance, fog.volumetricFogStartDistance, atmosphere.localRange, atmosphere.nearRange,
 			orgFog.NearSRV() ? "ran this frame" : "did not run this frame", slices ? slices->first : 0u, slices ? slices->second : 0u,
-			shared.PostWaterComposite, shared.CameraData.y, camera.x, camera.y, camera.z, DebugView());
+			sky.enabled, sky.enableVolumetricClouds, sky.lightningColorIntensity.w, shared.PostWaterComposite,
+			shared.CameraData.y, camera.x, camera.y, camera.z, DebugView());
 		ReportAnalyticInputs();
 	}
 
@@ -276,11 +307,8 @@ struct ORGViewAtmosphere::Impl
 		const auto& s = globals::features::viewAtmosphere.settings;
 		const auto dependencies = DependsOn(Vars::DisplaySize(), s.nearPixelSize, s.nearSlices, s.middlePixelSize, s.middleSlices, s.distantPixelSize,
 			s.distantSlices);
-		// One texel while the shared volume is off (the existence rule). Its passes are not on the graph yet, so it is off.
-		const auto exists = [&] {
-			return ExistsWhen(DependsOn(s.enabled),
-				[shared = sharedVolumePasses](const Inputs& a_in) { return shared && a_in.Get(globals::features::viewAtmosphere.settings.enabled); });
-		};
+		// One texel while the shared volume is off (the existence rule), so it switches with the revision that switches the volume.
+		const auto exists = [&] { return ExistsWhen(SharedVolumeDependencies(), [this](const Inputs& a_in) { return SharedVolumeAt(a_in); }); };
 		// Only graph readers: DCLF reads the published ids, so nothing is exported to D3D11.
 		const auto published = [](std::array<float, 4> a_birth) {
 			return GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .versioned = true, .birth = Birth::Value(a_birth) };
@@ -301,37 +329,89 @@ struct ORGViewAtmosphere::Impl
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
 		if (!*parameters || !luminance || !*luminance || !transmittance || !*transmittance)
 			Fatal("the medium's textures could not be made");
+		// The shared volume's source pair has the atlas's shape and existence.
+		volume.Setup({ dependencies, AtlasDesc, exists() });
 		// Published once, for the session. Readers follow the versions.
 		if (!PublishedResources::Publish(*luminance) || !PublishedResources::Publish(*transmittance) || !PublishedResources::Publish(*parameters))
 			Fatal("the medium could not be published");
 	}
 
-	/** @brief The medium's registration. Its client has no dependencies, so it is registered once, at the first revision. */
-	bool MakeMediumClient(FrameAnchors::ClientDesc& a_client)
+	/** @brief The medium's registration for a key: the parameters copy, and the shared volume's passes while it is on. */
+	bool MakeMediumClient(const MediumKey& a_key, FrameAnchors::ClientDesc& a_client)
 	{
 		RenderGraph::AnchorPasses::Builder builder(Anchor::Prepass, kMediumClientId, kPrepassOrder);
 		builder.Add("parameters", FrameAnchors::PassKind::Copy, [buffer = parameters->Graph(), latch = std::shared_ptr<const org::LatchBlock>(latch)] {
-			return std::make_shared<ParametersPass>(buffer, latch);
+			return std::make_shared<LatchCopyPass>(buffer, latch, 0, kParametersBytes);
 		});
-		if (builder.Failed()) {
-			logger::error("[ORG] Atmosphere and Fog: the medium's passes: {}", builder.Failure());
+		RenderGraph::AnchorPasses::Builder volumeBuilder(Anchor::Prepass, kMediumClientId, kVolumeOrder, volume.Latch(), volume.Gate());
+		if (a_key.volume) {
+			volumeBuilder.Add("shadow-light", FrameAnchors::PassKind::Copy, [buffer = volume.LightBuffer().Graph(), latch = volume.Latch()] {
+				return std::make_shared<LatchCopyPass>(buffer, latch, ORGViewAtmosphereVolume::kLightOffset, ORGViewAtmosphereVolume::kLightBytes);
+			});
+			volume.AddPasses(*a_key.volume, volumeBuilder, *luminance, *transmittance, *parameters);
+		}
+		if (builder.Failed() || volumeBuilder.Failed()) {
+			logger::error("[ORG] Atmosphere and Fog: the medium's passes: {}", builder.Failed() ? builder.Failure() : volumeBuilder.Failure());
 			return false;
 		}
 		a_client.id = kMediumClientId;
 		a_client.passes = builder.Take();
+		for (auto& pass : volumeBuilder.Take())
+			a_client.passes.push_back(std::move(pass));
+		a_client.sharedConstants = volumeBuilder.ReadsSharedConstants();
+		a_client.gates = { volume.Gate() };
 		a_client.registerResources = [this](org::RenderGraph& a_graph) {
 			luminance->Register(a_graph);
 			transmittance->Register(a_graph);
 			noFog->Register(a_graph);
 			parameters->Register(a_graph);
+			volume.RegisterResources(a_graph);
 		};
-		// No active callback, so the commit runs every run.
+		// No active callback, so the commit runs every run. The newest registration's commit also runs for an older one the
+		// schedule still holds, so it reads the held registration's key.
 		a_client.commit = [this](const FrameAnchors::Point&) {
-			if (auto* host = RenderGraphRuntime::Get().Host())
-				latch->WriteValue(host->CurrentRun(), 0, frameParameters);
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (!host)
+				return;
+			const auto held = medium.Held(Anchor::Prepass);
+			const auto* inputs = held && held->volume ? &*held->volume : nullptr;
+			auto values = frameParameters;
+			volume.Commit(inputs, values);
+			latch->WriteValue(host->CurrentRun(), 0, values);
 		};
-		logger::info("[ORG] Atmosphere and Fog: the medium is on the render graph (no shared volume: Exponential Height Fog's volumes stay the fog)");
+		a_client.executed = [this](const FrameAnchors::Point&) { volume.Executed(); };
+		if (const auto& v = a_key.volume)
+			logger::info("[ORG] Atmosphere and Fog: the medium with the shared volume for the next revision (shadow map {}, engine shadows {}, terrain {}, "
+						 "cloud layer {}, clouds {}, local shadows {}, IBL {}, probes {}, environment {})",
+				v->shadowMap ? "imported" : "none", v->engineShadows ? "imported" : "none", v->terrain.empty() ? "none" : v->terrain,
+				v->cloudLayer.empty() ? "none" : v->cloudLayer, v->clouds, v->localShadows, v->ibl, v->probes, v->environment);
+		else
+			logger::info("[ORG] Atmosphere and Fog: the medium without the shared volume for the next revision (Exponential Height Fog's volumes are the fog)");
 		return true;
+	}
+
+	/** @brief What the shared volume's switch reads: the toggles and what the composite's key reads. */
+	RenderGraph::Frame::Dependencies SharedVolumeDependencies() const
+	{
+		auto dependencies = RenderGraph::Frame::DependsOn(globals::features::viewAtmosphere.settings.enabled, globals::features::physicalSky.settings.enabled);
+		for (const auto& dependency : CompositeDependencies())
+			dependencies.push_back(dependency);
+		return dependencies;
+	}
+
+	/**
+	* @brief Whether the shared volume runs for a revision's values. As ViewAtmosphere::Prepare: the toggle, Physical Sky rendering,
+	* and the post-water composite on, since only the composite applies the medium to what was drawn before it.
+	*/
+	bool SharedVolumeAt(const RenderGraph::Frame::Inputs& a_in)
+	{
+		const auto& sky = globals::features::physicalSky;
+		if (!sky.loaded || !a_in.Get(globals::features::viewAtmosphere.settings.enabled) || !a_in.Get(sky.settings.enabled))
+			return false;
+		const auto* seen = observed.Get(a_in);
+		if (!seen || !seen->sky)
+			return false;
+		return CompositeKeyAt(a_in).has_value();
 	}
 
 	/** @brief What the composite reads now. Empty while an input it needs is not on the graph yet. */
@@ -353,13 +433,26 @@ struct ORGViewAtmosphere::Impl
 				return std::nullopt;
 			inputs.cubemap = true;
 		}
+		const auto& sky = globals::features::physicalSky;
+		if (sky.loaded) {
+			if (!PublishedResources::IsDeclarable(ORGPhysicalSky::kTransmittanceLutId))
+				return std::nullopt;
+			inputs.skyLut = true;
+			// The clouds ran at Physical Sky's Prepass this frame. Until a run wrote their targets, nothing may read them (its plan,
+			// open question 24). The key also needs the clouds on in its revision.
+			inputs.clouds = sky.VolumetricCloudsEnabled() && ORGVolumetricClouds::OutputsWritten() && PublishedResources::IsDeclarable(ORGVolumetricClouds::kVolTrId) &&
+			                PublishedResources::IsDeclarable(ORGVolumetricClouds::kVolLumId) && PublishedResources::IsDeclarable(ORGVolumetricClouds::kVolAuxId) &&
+			                PublishedResources::IsDeclarable(ORGVolumetricClouds::kLightningChannelsId);
+		}
 		return inputs;
 	}
 
 	ComputeProgram::Desc CompositeDesc() const
 	{
 		std::vector<std::pair<std::string, std::string>> defines;
-		// Physical Sky's media are not on the graph, so this build composes the fog alone.
+		// As ViewAtmosphere::CompositeEnabled builds it on D3D11.
+		if (globals::features::physicalSky.loaded)
+			defines.emplace_back("PHYSICAL_SKY", "");
 		if (globals::features::exponentialHeightFog.loaded)
 			defines.emplace_back("EXP_HEIGHT_FOG", "");
 		if (globals::features::ibl.loaded)
@@ -375,7 +468,7 @@ struct ORGViewAtmosphere::Impl
 	CompositeSeen Observe()
 	{
 		CompositeSeen seen;
-		if (!globals::features::exponentialHeightFog.loaded)
+		if (!globals::features::exponentialHeightFog.loaded && !globals::features::physicalSky.loaded)
 			return seen;
 		seen.inputs = InputsNow();
 		return seen;
@@ -416,13 +509,20 @@ struct ORGViewAtmosphere::Impl
 	{
 		const auto fogVolume = [&](bool a_published, std::string_view a_id) { return a_published ? Bind::Published(a_id) : Bind::Srv(*noFog); };
 		const auto& inputs = a_key.inputs;
+		MakeNull();
+		const auto null = Bind::Handle(nullIndex);
+		const auto cloud = [&](std::string_view a_id) { return inputs.clouds ? Bind::Published(a_id) : null; };
 		RenderGraph::AnchorPasses::Builder builder(Anchor::EngineDraws, kCompositeClientId, 0, nullptr, gate);
 		builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "dispatch",
 			.program = a_key.program,
 			.bindings = { Bind::Shared(), Bind::Handle(sampler.Index()), Bind::Srv(a_key.depth), Bind::Uav(a_key.main), Bind::Published(kLuminanceId),
 				Bind::Published(kTransmittanceId), Bind::Published(kParametersId), fogVolume(inputs.fogNear, ORGExponentialHeightFog::kNearIntegratedId),
 				fogVolume(inputs.fogFar, ORGExponentialHeightFog::kFarIntegratedId), inputs.ibl ? Bind::Published(ORGIBL::kEnvId) : Bind::Unused(),
-				inputs.ibl ? Bind::Published(ORGIBL::kSkyId) : Bind::Unused(), inputs.cubemap ? Bind::Published(ORGDynamicCubemaps::kEnvBC6HId) : Bind::Unused() },
+				inputs.ibl ? Bind::Published(ORGIBL::kSkyId) : Bind::Unused(), inputs.cubemap ? Bind::Published(ORGDynamicCubemaps::kEnvBC6HId) : Bind::Unused(),
+				// Physical Sky's, as CompositeAfterWater binds them on D3D11: the filtered cloud targets, not the reprojected ones.
+				cloud(ORGVolumetricClouds::kVolAuxId), inputs.skyLut ? Bind::Published(ORGPhysicalSky::kTransmittanceLutId) : null,
+				inputs.clouds ? Bind::Published(ORGVolumetricClouds::kVolTrId) : Bind::Srv(*noCloud), cloud(ORGVolumetricClouds::kVolLumId),
+				cloud(ORGVolumetricClouds::kLightningChannelsId) },
 			.gate = 0u });
 		if (builder.Failed()) {
 			logger::error("[ORG] Atmosphere and Fog: the post-water composite's pass: {}", builder.Failure());
@@ -438,11 +538,76 @@ struct ORGViewAtmosphere::Impl
 		a_client.active = [this] { return pendingRun.has_value(); };
 		a_client.sharedConstants = shared;
 		a_client.gates = { gate };
+		a_client.registerResources = [this](org::RenderGraph& a_graph) { noCloud->Register(a_graph); };
 		// Every registration keeps the gate and commits the same run, so a registration for new inputs lets the older one
 		// compose until the revision that holds the new one is adopted (it taps by id). No frame goes without it.
-		logger::info("[ORG] Atmosphere and Fog: a post-water composite for the next revision (fog {}/{}, IBL {}, cubemap {})", inputs.fogNear ? "near" : "-",
-			inputs.fogFar ? "far" : "-", inputs.ibl, inputs.cubemap);
+		logger::info("[ORG] Atmosphere and Fog: a post-water composite for the next revision (fog {}/{}, IBL {}, cubemap {}, Physical Sky {}, clouds {})",
+			inputs.fogNear ? "near" : "-", inputs.fogFar ? "far" : "-", inputs.ibl, inputs.cubemap, inputs.skyLut, inputs.clouds);
 		return true;
+	}
+
+	/** @brief The null descriptor, made once. */
+	void MakeNull()
+	{
+		if (nullIndex != DCLF::GpuTextures::kInvalid)
+			return;
+		auto binding = DCLF::GpuTextures::Get().NullBinding();
+		if (!binding)
+			Fatal("the null descriptor could not be made");
+		nullIndex = binding.index;
+		nullOwner = std::move(binding.owner);
+	}
+
+	/** @brief Setup. The composite's no-cloud texture: one texel, transmittance one, as the clouds' neutral clear. */
+	void MakeCompositeResources()
+	{
+		using namespace RenderGraph::Frame;
+		noCloud = DeclareTexture2D(
+			"ViewAtmosphere::NoCloud", Dependencies{},
+			[](const Inputs&) {
+				D3D11_TEXTURE2D_DESC desc{};
+				desc.Width = desc.Height = 1;
+				desc.MipLevels = desc.ArraySize = 1;
+				desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+				desc.SampleDesc.Count = 1;
+				desc.Usage = D3D11_USAGE_DEFAULT;
+				desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+				return desc;
+			},
+			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .birth = Birth::Value({ 1.0f, 1.0f, 1.0f, 1.0f }) });
+		if (!noCloud || !*noCloud)
+			Fatal("the composite's no-cloud texture could not be made");
+	}
+
+	/** @brief What the composite's key reads. Physical Sky's toggles are there, so the composite switches with the sky's clients. */
+	RenderGraph::Frame::Dependencies CompositeDependencies() const
+	{
+		using namespace RenderGraph::Frame;
+		const auto& fog = globals::features::exponentialHeightFog.settings;
+		const auto& sky = globals::features::physicalSky.settings;
+		return DependsOn(fog.enabled, sky.enabled, sky.enableVolumetricClouds, observed.Var(), programReloads.Var());
+	}
+
+	/**
+	* @brief The composite's key for a revision. On while the fog is on or Physical Sky renders, as ViewAtmosphere::CompositeEnabled
+	* is on D3D11, and the last Prepass found what the composite reads.
+	*/
+	std::optional<CompositeKey> CompositeKeyAt(const RenderGraph::Frame::Inputs& a_in)
+	{
+		const auto& fog = globals::features::exponentialHeightFog;
+		const auto& physicalSky = globals::features::physicalSky;
+		const auto* seen = observed.Get(a_in);
+		if (!seen)
+			return std::nullopt;
+		const bool fogOn = fog.loaded && a_in.Get(fog.settings.enabled);
+		const bool skyOn = physicalSky.loaded && seen->sky && a_in.Get(physicalSky.settings.enabled);
+		if (!fogOn && !skyOn)
+			return std::nullopt;
+		auto key = KeyOf(a_in, *seen);
+		// The clouds' targets are one texel in a revision with the clouds off, and nothing wrote that version.
+		if (key && !(skyOn && a_in.Get(physicalSky.settings.enableVolumetricClouds)))
+			key->inputs.clouds = false;
+		return key;
 	}
 
 	/** @brief Inside the adoption point of the first Begin whose revision holds the registration. */
@@ -456,27 +621,26 @@ struct ORGViewAtmosphere::Impl
 	void DeclareClients()
 	{
 		using namespace RenderGraph::Frame;
-		medium = RenderGraph::Frame::DeclareClient<bool>(
-			kMediumClientId, Dependencies{}, [](const Inputs&) -> std::optional<bool> { return true; },
-			[this](const bool&, FrameAnchors::ClientDesc& a_client) { return MakeMediumClient(a_client); });
-		// On while the adopted revision has the fog on and the last Prepass found what the composite reads. Off while Physical Sky
-		// renders: its media are not on the graph, so its shaders keep their own aerial perspective and clouds. Its toggle is a
-		// dependency, so a toggle switches the composite in the same revision as the sky's clients.
-		const auto& fog = globals::features::exponentialHeightFog.settings;
-		const auto& sky = globals::features::physicalSky.settings;
-		composite = RenderGraph::Frame::DeclareClient<CompositeKey, const CompositeKey>(
-			kCompositeClientId, DependsOn(fog.enabled, sky.enabled, observed.Var(), programReloads.Var()),
-			[this](const Inputs& a_in) -> std::optional<CompositeKey> {
-				if (!a_in.Get(globals::features::exponentialHeightFog.settings.enabled))
-					return std::nullopt;
-				const auto* seen = observed.Get(a_in);
-				if (!seen)
-					return std::nullopt;
-				const auto& physicalSky = globals::features::physicalSky;
-				if (physicalSky.loaded && seen->sky && a_in.Get(physicalSky.settings.enabled))
-					return std::nullopt;
-				return KeyOf(a_in, *seen);
+		// The medium follows the shared volume's switch and inputs. Every registration has the parameters copy.
+		auto mediumDependencies = SharedVolumeDependencies();
+		for (const auto& dependency : volume.Dependencies())
+			mediumDependencies.push_back(dependency);
+		medium = RenderGraph::Frame::DeclareClient<MediumKey, const MediumKey>(
+			kMediumClientId, std::move(mediumDependencies),
+			[this](const Inputs& a_in) -> std::optional<MediumKey> {
+				MediumKey key;
+				if (SharedVolumeAt(a_in))
+					key.volume = volume.KeyAt(a_in);
+				return key;
 			},
+			[this](const MediumKey& a_key, FrameAnchors::ClientDesc& a_client) -> std::shared_ptr<const MediumKey> {
+				if (!MakeMediumClient(a_key, a_client))
+					return nullptr;
+				return std::make_shared<const MediumKey>(a_key);
+			});
+		// On while the adopted revision has the fog on or Physical Sky rendering (CompositeKeyAt).
+		composite = RenderGraph::Frame::DeclareClient<CompositeKey, const CompositeKey>(
+			kCompositeClientId, CompositeDependencies(), [this](const Inputs& a_in) { return CompositeKeyAt(a_in); },
 			[this](const CompositeKey& a_key, FrameAnchors::ClientDesc& a_client) -> std::shared_ptr<const CompositeKey> {
 				if (!MakeComposite(a_key, a_client))
 					return nullptr;
@@ -502,9 +666,11 @@ void ORGViewAtmosphere::Setup()
 		Fatal("the sampler could not be made");
 	// Before the first frame, since DCLF's draws read the exports from their first frame on.
 	state->MakeMedium();
-	// The program and both clients follow the frame revisions from the first one on. The composite needs the fog.
-	if (globals::features::exponentialHeightFog.loaded)
+	// The program and both clients follow the frame revisions from the first one on. The composite needs the fog or Physical Sky.
+	if (globals::features::exponentialHeightFog.loaded || globals::features::physicalSky.loaded) {
+		state->MakeCompositeResources();
 		state->DeclareCompositeProgram();
+	}
 	state->DeclareClients();
 	impl = std::move(state);
 }
@@ -513,8 +679,10 @@ void ORGViewAtmosphere::Prepass()
 {
 	if (!impl)
 		return;
-	// No shared volume yet, so every frame stages the parameters of no medium.
-	impl->frameParameters = {};
+	// The shared volume's inputs are noted every frame, so the registration that switches it on binds them. Its parameters are
+	// staged while the adopted revision runs it; otherwise the frame has no medium.
+	impl->volume.Observe();
+	impl->frameParameters = SharedVolumeActive() ? impl->volume.Stage() : ViewAtmosphere::Parameters{};
 	// What the composite reads is not a variable yet. A change is an event, so the next revision makes its key again.
 	// Physical Sky's checks but its toggle (worldspace, interior, shaders), which the toggle joins in the key.
 	const auto& sky = globals::features::physicalSky;
@@ -560,6 +728,24 @@ void ORGViewAtmosphere::CompositeAfterWater()
 		                result.status == FrameAnchors::RunStatus::Refused ? "refused" :
 		                                                                     "its epoch failed");
 	}
+}
+
+bool ORGViewAtmosphere::SharedVolumeActive() const
+{
+	if (!impl)
+		return false;
+	const auto adopted = impl->medium.Adopted();
+	return adopted && adopted->volume.has_value();
+}
+
+RenderGraph::Frame::Dependencies ORGViewAtmosphere::SharedVolumeDependencies() const
+{
+	return impl ? impl->SharedVolumeDependencies() : RenderGraph::Frame::Dependencies{};
+}
+
+bool ORGViewAtmosphere::SharedVolumeAt(const RenderGraph::Frame::Inputs& a_in) const
+{
+	return impl && impl->SharedVolumeAt(a_in);
 }
 
 bool ORGViewAtmosphere::MediumPublished() const

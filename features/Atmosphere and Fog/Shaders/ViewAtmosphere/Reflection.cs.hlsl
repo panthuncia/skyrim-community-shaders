@@ -1,5 +1,62 @@
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below (ViewAtmosphere::RenderReflection). The ORG passes
+// (src/Features/ViewAtmosphere/ORGViewAtmosphereReflection.cpp) pass heap handles in the push block: the shared constants,
+// this file's own resources, then the included headers' resources. The list is the same in every permutation of an entry.
+// The two entries differ only in their outputs, which come last.
 #define COMPUTESHADER
 #define PS_LINEAR_SHADOW_SAMPLER
+#if defined(CS_ORG_BINDLESS)
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+#	define VIEW_ATMOSPHERE_ORG_HANDLES
+#	define PS_CLOUD_TRANSPORT_EXTERN
+#endif
+#include "Common/OrgResources.hlsli"
+
+// The medium reads the sky SH (t77) as IBL's sky SH and the cloud diffuse transport (t70). The sky SH pass reads neither.
+// ViewAtmosphereData is the reflection parameters. The medium's own atlases are this file's outputs, never read.
+#define VIEW_ATMOSPHERE_REFLECTION_RESOURCES(X) \
+	X(SHARED, ConstantBuffer, Shared, 0)        \
+	X(SAMPLER, SamplerState, LinearSampler, 0)  \
+	X(SRV, Texture2D<float4>, ReflectionMsLut, 2)
+// The included headers' resources. Their handles must exist before the headers, so this list expands first.
+#define VIEW_ATMOSPHERE_REFLECTION_HEADER_RESOURCES(X)             \
+	X(EXTERN, StructuredBuffer<uint>, ViewAtmosphereData, 127)     \
+	X(UNREAD, Texture3D<float4>, ViewAtmosphereLuminance, 125)     \
+	X(UNREAD, Texture3D<float4>, ViewAtmosphereTransmittance, 126) \
+	X(EXTERN, Texture2D<float4>, TexTrLut, 61)                     \
+	X(EXTERN, Texture2D<float4>, TexSvLut, 62)                     \
+	X(EXTERN, Texture3D<float4>, TexApLut, 63)                     \
+	X(EXTERN, Texture2D<float4>, TexDiskPhaseLut, 106)             \
+	X(EXTERN, Texture3D<float>, TexShadowVolume, 112)              \
+	X(EXTERN, Texture2D<float4>, MeanProfile, 69)                  \
+	X(EXTERN, TextureCube<float>, TexVolCubeTr, 114)               \
+	X(EXTERN, TextureCube<float4>, TexVolCubeLum, 115)             \
+	X(EXTERN, TextureCube<float4>, TexVolCubeDepth, 67)            \
+	X(EXTERN, Texture2D<float4>, TexCloudDiffuseTransport, 70)     \
+	X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                   \
+	X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                   \
+	X(EXTERN, Texture3D<sh2>, SkylightingProbeArray, 50)           \
+	X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 60)          \
+	X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)         \
+	X(UNREAD, Texture2D<float4>, DepthTexture, 17)                 \
+	X(UNREAD, Texture2D<unorm float>, TexApShadow, 64)             \
+	X(UNREAD, Texture2D<float4>, TexSkyTail, 66)                   \
+	X(UNREAD, Texture2D<float4>, TexLightningChannels, 113)        \
+	X(UNREAD, TextureCube<float4>, TexLightningReflection, 109)    \
+	X(UNREAD, Texture2D<float>, TexVolTr, 110)                     \
+	X(UNREAD, Texture2D<float4>, TexVolLum, 111)                   \
+	X(UNREAD, TextureCube<float>, CloudSelfShadowTexture, 26)
+#ifdef REFLECTION_SKY_SH
+#	define VIEW_ATMOSPHERE_REFLECTION_OUTPUTS(X) X(UAV, RWTexture2D<sh2>, ReflectionSkySH, 0)
+#else
+#	define VIEW_ATMOSPHERE_REFLECTION_OUTPUTS(X)            \
+		X(UAV, RWTexture3D<float4>, ReflectionLuminance, 0) \
+		X(UAV, RWTexture3D<float4>, ReflectionTransmittance, 1)
+#endif
+ORG_PUSH_BLOCK(VIEW_ATMOSPHERE_REFLECTION_RESOURCES(ORG_HANDLE) VIEW_ATMOSPHERE_REFLECTION_HEADER_RESOURCES(ORG_HANDLE)
+		VIEW_ATMOSPHERE_REFLECTION_OUTPUTS(ORG_HANDLE))
+VIEW_ATMOSPHERE_REFLECTION_HEADER_RESOURCES(ORG_RESOURCE)
+
 #include "IBL/IBL.hlsli"
 #include "PhysicalSky/Common.hlsli"
 #define SKYLIGHTING_PROBE_REGISTER t50
@@ -11,11 +68,11 @@
 #	include "TerrainShadows/TerrainShadows.hlsli"
 #endif
 
-SamplerState LinearSampler : register(s0);
-Texture2D<float4> ReflectionMsLut : register(t2);
+// Where D3D11 declared them, so its bytecode is unchanged.
+VIEW_ATMOSPHERE_REFLECTION_RESOURCES(ORG_RESOURCE)
+VIEW_ATMOSPHERE_REFLECTION_OUTPUTS(ORG_RESOURCE)
 
 #ifdef REFLECTION_SKY_SH
-RWTexture2D<sh2> ReflectionSkySH : register(u0);
 groupshared float4 SkyR[256], SkyG[256], SkyB[256];
 groupshared float3 ClearSky[256];
 
@@ -82,8 +139,6 @@ static const uint SkySubsampleCount = SkySubsamplesPerAxis * SkySubsamplesPerAxi
 	}
 }
 #else
-RWTexture3D<float4> ReflectionLuminance : register(u0);
-RWTexture3D<float4> ReflectionTransmittance : register(u1);
 groupshared float3 SegmentL[128], SegmentT[128];
 groupshared float3 AngularRayleigh[2], AngularMie[2];
 groupshared float AngularFog[2];

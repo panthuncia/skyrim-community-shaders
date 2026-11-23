@@ -1,6 +1,8 @@
 // Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below. The ORG pass
 // (src/Features/ViewAtmosphere/ORGViewAtmosphere.cpp) passes heap handles in the push block, with the
 // shared constants and the included feature headers' resources. The list is the same in every permutation.
+// With PHYSICAL_SKY the shader reads Physical Sky's transmittance LUT (the fog's sun light), the clouds' filtered targets
+// and their depth (Common/ViewMedium.hlsli) and the lightning channels. It reads nothing else of Physical Sky's header.
 #define COMPUTESHADER
 #define PS_SKY_SAMPLERS
 #define MEDIUM_COMPOSITE
@@ -24,8 +26,26 @@
 	X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                       \
 	X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                       \
 	X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                     \
+	X(EXTERN, Texture2D<float4>, TexMediumCloudDepth, 41)                              \
+	X(EXTERN, Texture2D<float4>, TexTrLut, 61)                                         \
+	X(EXTERN, Texture2D<float>, TexVolTr, 110)                                         \
+	X(EXTERN, Texture2D<float4>, TexVolLum, 111)                                       \
+	X(EXTERN, Texture2D<float4>, TexLightningChannels, 113)                            \
 	X(UNREAD, TextureCube<float3>, EnvReflectionsTexture, 30)                          \
-	X(UNREAD, Texture2D<float4>, DepthTexture, 17)
+	X(UNREAD, Texture2D<float4>, DepthTexture, 17)                                     \
+	X(UNREAD, SamplerState, SampTr, 3)                                                 \
+	X(UNREAD, SamplerState, SampSv, 4)                                                 \
+	X(UNREAD, Texture2D<float4>, TexSvLut, 62)                                         \
+	X(UNREAD, Texture3D<float4>, TexApLut, 63)                                         \
+	X(UNREAD, Texture2D<unorm float>, TexApShadow, 64)                                 \
+	X(UNREAD, Texture2D<float4>, TexSkyTail, 66)                                       \
+	X(UNREAD, TextureCube<float4>, TexVolCubeDepth, 67)                                \
+	X(UNREAD, Texture2D<float4>, MeanProfile, 69)                                      \
+	X(UNREAD, Texture2D<float4>, TexDiskPhaseLut, 106)                                 \
+	X(UNREAD, TextureCube<float4>, TexLightningReflection, 109)                        \
+	X(UNREAD, Texture3D<float>, TexShadowVolume, 112)                                  \
+	X(UNREAD, TextureCube<float>, TexVolCubeTr, 114)                                   \
+	X(UNREAD, TextureCube<float4>, TexVolCubeLum, 115)
 ORG_PUSH_BLOCK(VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_HANDLE))
 VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_RESOURCE)
 

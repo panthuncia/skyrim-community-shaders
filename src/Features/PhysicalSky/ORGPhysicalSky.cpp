@@ -14,14 +14,15 @@
 #include "Features/TerrainShadows.h"
 #include "Features/TerrainShadows/ORGTerrainShadows.h"
 #include "Features/ViewAtmosphere.h"
+#include "Features/ViewAtmosphere/ORGViewAtmosphereReflection.h"
 #include "Globals.h"
 #include "ORGDeferredComposite.h"
 #include "RenderGraph/AnchorPasses.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/D3D11Wrapper.h"
+#include "RenderGraph/DepthViewSource.h"
 #include "RenderGraph/Engine/Targets/TargetRef.h"
-#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/Observed.h"
 #include "RenderGraph/Frame/FrameDriver.h"
@@ -112,69 +113,21 @@ namespace
 	};
 
 	/**
-	* @brief Which engine depth target a view is, or UINT32_MAX. A field handle is identified by the target set. The view Deferred
-	* captured may be DXVK's own object, which the set cannot identify, so it is compared by what the fields wrap.
-	*/
-	std::uint32_t PhysSkyEngineDepthOf(ID3D11ShaderResourceView* a_view)
-	{
-		namespace Tripwire = RenderGraph::Engine::Tripwire;
-		namespace Targets = RenderGraph::Engine::Targets;
-		if (!a_view || !globals::game::renderer)
-			return UINT32_MAX;
-		if (Tripwire::IsHandle(a_view)) {
-			const auto target = Targets::Identify(static_cast<const ID3D11View*>(a_view));
-			return target && target->kind == Targets::Kind::Depth ? target->index : UINT32_MAX;
-		}
-		winrt::com_ptr<ID3D11Resource> resource;
-		a_view->GetResource(resource.put());
-		if (!resource)
-			return UINT32_MAX;
-		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
-		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
-			if (depthStencils[i].texture && Tripwire::Unwrap(depthStencils[i].texture) == Tripwire::Unwrap(static_cast<ID3D11Texture2D*>(resource.get())))
-				return i;
-		return UINT32_MAX;
-	}
-
-	/** @brief A shadow map view that is no engine target, imported as its own. */
-	FrameAnchors::Texture PhysSkyImportShadowMap(ID3D11ShaderResourceView* a_view, const char* a_id)
-	{
-		if (!a_view)
-			return nullptr;
-		winrt::com_ptr<ID3D11Resource> resource;
-		a_view->GetResource(resource.put());
-		auto texture = resource.try_as<ID3D11Texture2D>();
-		if (!texture)
-			return nullptr;
-		RE::BSGraphics::DepthStencilData target{};
-		target.texture = texture.get();
-		target.depthSRV = a_view;
-		return FrameAnchors::ImportTexture(a_id, { .depth = &target });
-	}
-
-	/**
 	* @brief What the last Prepass found for the AP shadow that is no variable yet (B2's interim): its inputs without the shadow
 	* map, and the shadow map as an engine depth target or another view. The Prepass client's key imports it.
 	*/
 	struct ShadowSeen
 	{
-		ShadowInputs inputs;                                    // shadowMap left empty
-		std::uint32_t shadowDepth = UINT32_MAX;                 // the engine depth target, UINT32_MAX for none
-		winrt::com_ptr<ID3D11ShaderResourceView> shadowOther;  // a view that is no engine target
+		ShadowInputs inputs;                     // shadowMap left empty
+		RenderGraph::DepthViewSource shadowMap;  // empty when the frame drew no shadow mask
 
-		bool operator==(const ShadowSeen& a_other) const
-		{
-			return inputs == a_other.inputs && shadowDepth == a_other.shadowDepth && shadowOther.get() == a_other.shadowOther.get();
-		}
+		bool operator==(const ShadowSeen&) const = default;
 
 		/** @brief The inputs, with the shadow map imported. The engine depth's slot never changes. */
 		ShadowInputs Resolved() const
 		{
 			auto resolved = inputs;
-			if (shadowDepth != UINT32_MAX)
-				resolved.shadowMap = FrameAnchors::EngineTexture(FrameAnchors::Depth(shadowDepth));
-			else if (shadowOther)
-				resolved.shadowMap = PhysSkyImportShadowMap(shadowOther.get(), "cs.physical-sky.directional-shadow-map");
+			resolved.shadowMap = shadowMap.Resolve("cs.physical-sky.directional-shadow-map");
 			return resolved;
 		}
 	};
@@ -460,15 +413,18 @@ struct ORGPhysicalSky::Impl
 		// Every version is born zero (no shadow), for readers on frames no AP shadow ran.
 		builder.Add(AnchorPasses::Dispatch{ .name = "ap-shadow", .program = shadowFull.Get(), .bindings = bindings, .gate = kShadowFullEntry });
 		builder.Add(AnchorPasses::Dispatch{ .name = "ap-shadow.half", .program = shadowHalf.Get(), .bindings = bindings, .gate = kShadowHalfEntry });
-		// The sky tail, in LutGen's list order. The LUTs are read by id, after the pre-depth stage wrote them. ViewAtmosphere's cloud
-		// diffuse transport is not published, so it is null, which the shader reads only with the clouds on.
+		// The sky tail, in LutGen's list order. The LUTs are read by id, after the pre-depth stage wrote them. The cloud diffuse
+		// transport is the second row of ViewAtmosphere's reflection sky SH, by id. The shader reads it only with the clouds on. It
+		// is born zero and cleared when the reflection medium stops, which reads as no transport, as D3D11's null view.
+		const bool transport = a_inputs.clouds && ORGViewAtmosphereReflection::Get().TransportPublished();
 		const auto& tailOutput = *SkyTailTwin();
 		builder.Add(AnchorPasses::Dispatch{ .name = "sky-tail",
 			.program = skyTail.Get(),
 			.bindings = { Bind::Shared(), Bind::Published(ORGPhysicalSky::kTransmittanceLutId), Bind::Published(ORGPhysicalSky::kMultiscatterLutId),
 				Bind::Published(ORGPhysicalSky::kDiskPhaseLutId), Bind::Uav(tailOutput), Bind::Handle(samplers[0].Index()), Bind::Handle(samplers[1].Index()),
 				Bind::Handle(samplers[2].Index()), a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kShadowVolumeId) : null,
-				a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kCloudShadowMeanId) : null, null },
+				a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kCloudShadowMeanId) : null,
+				transport ? Bind::Published(ORGViewAtmosphereReflection::kSkySHId) : null },
 			.gate = kSkyTailEntry });
 		if (builder.Failed()) {
 			logger::error("[ORG] Physical Sky: the AP shadow's passes: {}", builder.Failure());
@@ -811,9 +767,7 @@ bool ORGPhysicalSky::AccumShadow(const PhysicalSky& a_feature)
 		latch.lightCount = hasLight ? 1u : 0u;
 		if (auto* shadowMap = globals::deferred ? globals::deferred->GetDirectionalShadowMap() : nullptr; shadowMap && hasLight) {
 			// The key imports it: an engine depth target's slot, or the view as its own.
-			seen.shadowDepth = PhysSkyEngineDepthOf(shadowMap);
-			if (seen.shadowDepth == UINT32_MAX)
-				seen.shadowOther.copy_from(shadowMap);
+			seen.shadowMap = RenderGraph::DepthViewSource::Of(shadowMap);
 		}
 		std::string missing;
 		auto& terrainShadows = globals::features::terrainShadows;

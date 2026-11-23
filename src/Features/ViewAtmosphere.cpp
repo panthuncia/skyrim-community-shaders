@@ -14,6 +14,7 @@
 #include "Features/Skylighting.h"
 #include "Features/TerrainShadows.h"
 #include "Features/ViewAtmosphere/ORGViewAtmosphere.h"
+#include "Features/ViewAtmosphere/ORGViewAtmosphereReflection.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -187,6 +188,7 @@ void ViewAtmosphere::DrawDebugSection()
 void ViewAtmosphere::SetupResources()
 {
 	ORGViewAtmosphere::Get().Setup();
+	ORGViewAtmosphereReflection::Get().Setup();
 }
 
 ViewAtmosphere::AtlasLayout ViewAtmosphere::LayoutFor(float2 a_screen, std::uint32_t a_nearPixels, std::uint32_t a_middlePixels, std::uint32_t a_distantPixels,
@@ -224,14 +226,59 @@ ViewAtmosphere::AtlasLayout ViewAtmosphere::LayoutFor(float2 a_screen, std::uint
 	}
 }
 
+D3D11_SAMPLER_DESC ViewAtmosphere::SamplerDesc(bool a_comparison)
+{
+	D3D11_SAMPLER_DESC desc{};
+	desc.Filter = a_comparison ? D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+	desc.MaxLOD = D3D11_FLOAT32_MAX;
+	if (a_comparison)
+		desc.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+	return desc;
+}
+
+std::uint32_t ViewAtmosphere::InputFlags::Bits() const
+{
+	return (directionalShadow ? 1u : 0u) | (ibl ? 4u : 0u) | (probes ? 8u : 0u) | (localLights ? 32u : 0u) | (localShadows ? 64u : 0u) |
+	       (engineShadows ? 128u : 0u) | (terrain ? 256u : 0u) | (cloudLayer ? 512u : 0u) | (environment ? 1024u : 0u);
+}
+
+ViewAtmosphere::Parameters ViewAtmosphere::ParametersFor(const AtlasLayout& a_layout, bool a_useFog, bool a_continuous) const
+{
+	const float maxDistance = 40000.0f / Util::Units::GAME_UNIT_TO_M;
+	const float nearEnd = std::clamp(settings.nearRange, 1000.0f, maxDistance * 0.1f);
+	const float middleEnd = std::clamp(settings.localRange, nearEnd + 1000.0f, maxDistance * 0.5f);
+	const float ends[4] = { 0.0f, nearEnd, middleEnd, maxDistance };
+	Parameters next{};
+	for (uint32_t i = 0; i < 3; ++i) {
+		auto& grid = next.grids[i];
+		grid.size = a_layout.size[i];
+		grid.offset = a_layout.offset[i];
+		const float scale = i == 0 ? 10.0f / Util::Units::GAME_UNIT_TO_M : ends[i];
+		grid.depth = { ends[i], ends[i + 1], scale, std::log2(1.0f + (ends[i + 1] - ends[i]) / scale) };
+	}
+	next.atlas = a_layout.atlas;
+	next.flags = { 1u, uint32_t(a_useFog), 0u, 0u };
+	const bool temporal = Util::GetTemporal();
+	const float historyWeight = std::clamp(settings.historyWeight, 0.0f, 0.99f);
+	next.history = { a_continuous && temporal ? historyWeight : 0.0f,
+		temporal && historyWeight > 0.0f ? 1.0f : 0.0f,
+		temporal && historyWeight > 0.0f ? std::clamp(settings.sampleJitter, 0.0f, 1.0f) : 0.0f, 0 };
+	next.clipToWorld = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Invert();
+	return next;
+}
+
 bool ViewAtmosphere::Prepare()
 {
 	prepared = ready = false;
-	// The graph modes' medium is ORGViewAtmosphere's. Nothing here runs D3D11 work there.
+	// The graph modes' medium is ORGViewAtmosphere's. Nothing here runs D3D11 work there. The shared volume replaces the fog's
+	// volumes and the AP shadow while the adopted revision runs it, as a prepared volume does here.
 	if (ORGViewAtmosphere::On()) {
-		ORGViewAtmosphere::Get().Prepass();
+		auto& graph = ORGViewAtmosphere::Get();
+		graph.Prepass();
 		lastFrame = UINT32_MAX;
-		return false;
+		prepared = ready = graph.SharedVolumeActive();
+		return prepared;
 	}
 	Unbind();
 	auto& sky = globals::features::physicalSky;
@@ -261,37 +308,20 @@ bool ViewAtmosphere::Prepare()
 		parameters = std::make_unique<StructuredBuffer>(StructuredBufferDesc<Parameters>(uint64_t(1), false, true), 1u, "ViewAtmosphere::Parameters");
 		parameters->CreateSRV();
 		dispatchCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<DirectX::XMUINT4>(), "ViewAtmosphere::Dispatch");
-		D3D11_SAMPLER_DESC desc{};
-		desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-		desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-		desc.MaxLOD = D3D11_FLOAT32_MAX;
+		auto desc = SamplerDesc(false);
 		if (!linearSampler)
 			DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&desc, linearSampler.put()));
 		Util::SetResourceName(linearSampler.get(), "ViewAtmosphere::LinearSampler");
-		desc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
-		desc.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+		desc = SamplerDesc(true);
 		DX::ThrowIfFailed(globals::d3d::device->CreateSamplerState(&desc, shadowSampler.put()));
 		Util::SetResourceName(shadowSampler.get(), "ViewAtmosphere::ShadowSampler");
 	}
 	auto& fog = globals::features::exponentialHeightFog;
 	const bool useFog = fog.IsActive();
 	const float2 screen = Util::ConvertToDynamic(float2{ float(globals::game::graphicsState->screenWidth), float(globals::game::graphicsState->screenHeight) });
-	const float maxDistance = 40000.0f / Util::Units::GAME_UNIT_TO_M;
-	const float nearEnd = std::clamp(settings.nearRange, 1000.0f, maxDistance * 0.1f);
-	const float middleEnd = std::clamp(settings.localRange, nearEnd + 1000.0f, maxDistance * 0.5f);
-	const float ends[4] = { 0.0f, nearEnd, middleEnd, maxDistance };
 	const auto layout = LayoutFor(screen, settings.nearPixelSize, settings.middlePixelSize, settings.distantPixelSize, settings.nearSlices, settings.middleSlices,
 		settings.distantSlices);
-	Parameters next{};
-	for (uint32_t i = 0; i < 3; ++i) {
-		auto& grid = next.grids[i];
-		grid.size = layout.size[i];
-		grid.offset = layout.offset[i];
-		const float scale = i == 0 ? 10.0f / Util::Units::GAME_UNIT_TO_M : ends[i];
-		grid.depth = { ends[i], ends[i + 1], scale, std::log2(1.0f + (ends[i + 1] - ends[i]) / scale) };
-	}
-	next.atlas = layout.atlas;
-
+	Parameters next = ParametersFor(layout, useFog, false);
 	const bool resized = !source || std::memcmp(&data.atlas, &next.atlas, sizeof(next.atlas)) != 0;
 	const bool changed = resized || std::memcmp(data.grids, next.grids, sizeof(next.grids)) != 0 || data.flags.y != uint32_t(useFog);
 	if (resized) {
@@ -328,13 +358,8 @@ bool ViewAtmosphere::Prepare()
 		globals::d3d::context->ClearUnorderedAccessViewFloat(integratedLum->uav.get(), zero);
 		globals::d3d::context->ClearUnorderedAccessViewFloat(integratedTr->uav.get(), one);
 	}
-	next.flags = { 1u, uint32_t(useFog), data.flags.z, 0u };
-	const bool temporal = Util::GetTemporal();
-	const float historyWeight = std::clamp(settings.historyWeight, 0.0f, 0.99f);
-	next.history = { !changed && lastFrame != UINT32_MAX && lastFrame + 1u == globals::state->frameCount && temporal ? historyWeight : 0.0f,
-		temporal && historyWeight > 0.0f ? 1.0f : 0.0f,
-		temporal && historyWeight > 0.0f ? std::clamp(settings.sampleJitter, 0.0f, 1.0f) : 0.0f, 0 };
-	next.clipToWorld = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Invert();
+	next.flags.z = data.flags.z;
+	next.history = ParametersFor(layout, useFog, !changed && lastFrame != UINT32_MAX && lastFrame + 1u == globals::state->frameCount).history;
 	data = next;
 	prepared = true;
 	return true;
@@ -342,7 +367,8 @@ bool ViewAtmosphere::Prepare()
 
 void ViewAtmosphere::Render()
 {
-	if (!prepared)
+	// The graph modes run the volume at the Prepass anchor (ORGViewAtmosphere).
+	if (!prepared || ORGViewAtmosphere::On())
 		return;
 	auto* context = globals::d3d::context;
 	auto& sky = globals::features::physicalSky;
@@ -362,13 +388,20 @@ void ViewAtmosphere::Render()
 	auto* shadowData = globals::deferred->directionalShadowLights ? globals::deferred->directionalShadowLights->srv.get() : nullptr;
 	const bool terrainReady = terrain.IsShadowMapReady();
 	auto* cloudLayer = clouds.loaded ? clouds.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1] : nullptr;
-	const auto previousShadowFlags = data.flags.z & (1u | 256u | 512u);
+	const auto previousShadowFlags = data.flags.z & kShadowInputBits;
 	// The graph's volumes while its probe update runs.
 	auto* probes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
-	data.flags.z = (shadowView && shadowData ? 1u : 0u) | (useIBL ? 4u : 0u) |
-	               (probes ? 8u : 0u) | (localLights ? 32u : 0u) |
-	               (localShadows ? 64u : 0u) | (engineShadows ? 128u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u) | (environment ? 1024u : 0u);
-	if ((data.flags.z & (1u | 256u | 512u)) != previousShadowFlags)
+	data.flags.z = InputFlags{ .directionalShadow = shadowView && shadowData,
+		.ibl = useIBL,
+		.probes = probes != nullptr,
+		.localLights = localLights,
+		.localShadows = localShadows,
+		.engineShadows = engineShadows != nullptr,
+		.terrain = terrainReady,
+		.cloudLayer = cloudLayer != nullptr,
+		.environment = environment != nullptr }
+	                   .Bits();
+	if ((data.flags.z & kShadowInputBits) != previousShadowFlags)
 		data.history.x = 0.0f;
 	parameters->Update(&data, sizeof(data));
 	auto* paramSrv = parameters->SRV();
@@ -443,7 +476,8 @@ void ViewAtmosphere::Render()
 
 void ViewAtmosphere::Bind(bool compute)
 {
-	if (!ready)
+	// The graph's readers take the medium by its published ids.
+	if (!ready || ORGViewAtmosphere::On())
 		return;
 	ID3D11ShaderResourceView* srvs[] = { integratedLum->srv.get(), integratedTr->srv.get(), parameters->SRV() };
 	if (compute)
@@ -452,10 +486,29 @@ void ViewAtmosphere::Bind(bool compute)
 		globals::d3d::context->PSSetShaderResources(125, 3, srvs);
 }
 
+std::array<std::uint32_t, 64> ViewAtmosphere::ReflectionParameters(const ReflectionFlags& a_flags)
+{
+	Parameters reflection{};
+	reflection.grids[0].size = { 32, 32, 32, 0 };
+	const float offset = 10.0f / Util::Units::GAME_UNIT_TO_M;
+	const float distance = 40000.0f / Util::Units::GAME_UNIT_TO_M;
+	reflection.grids[0].depth = { 0, distance, offset, std::log2(1.0f + distance / offset) };
+	reflection.atlas = { 32, 32, 32, 0 };
+	reflection.flags = { 1u, uint32_t(a_flags.fog),
+		(a_flags.ibl ? 4u : 0u) | (a_flags.probes ? 8u : 0u) | (a_flags.terrain ? 256u : 0u) | (a_flags.cloudLayer ? 512u : 0u), 1u };
+	std::array<std::uint32_t, 64> words{};
+	static_assert(sizeof(words) == sizeof(reflection));
+	std::memcpy(words.data(), &reflection, sizeof(reflection));
+	return words;
+}
+
 void ViewAtmosphere::RenderReflection()
 {
-	if (ORGViewAtmosphere::On())
+	// The graph's passes run at the ReflectionsPrepass anchor, which comes before this. Here they note what they read.
+	if (ORGViewAtmosphere::On()) {
+		ORGViewAtmosphereReflection::Get().Observe();
 		return;
+	}
 	Unbind();
 	auto& sky = globals::features::physicalSky;
 	auto& fog = globals::features::exponentialHeightFog;
@@ -538,15 +591,9 @@ void ViewAtmosphere::RenderReflection()
 	const bool useIBL = useFog && ibl.loaded && ibl.settings.EnableIBL && !ibl.IsDisabledForCurrentScene() && ibl.envIBLTexture;
 	const bool terrainReady = terrain.IsShadowMapReady();
 	auto* cloudLayer = clouds.loaded ? clouds.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1] : nullptr;
-	Parameters reflection{};
-	reflection.grids[0].size = { 32, 32, 32, 0 };
-	const float offset = 10.0f / Util::Units::GAME_UNIT_TO_M;
-	const float distance = 40000.0f / Util::Units::GAME_UNIT_TO_M;
-	reflection.grids[0].depth = { 0, distance, offset, std::log2(1.0f + distance / offset) };
-	reflection.atlas = { 32, 32, 32, 0 };
 	auto* probes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
-	reflection.flags = { 1u, uint32_t(useFog), (useIBL ? 4u : 0u) | (probes ? 8u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u), 1u };
-	reflectionParameters->Update(&reflection, sizeof(reflection));
+	const auto reflection = ReflectionParameters({ .fog = useFog, .ibl = useIBL, .probes = probes != nullptr, .terrain = terrainReady, .cloudLayer = cloudLayer != nullptr });
+	reflectionParameters->Update(reflection.data(), sizeof(reflection));
 	auto bind = [&](UINT slot, ID3D11ShaderResourceView* srv) { context->CSSetShaderResources(slot, 1, &srv); };
 	ID3D11Buffer* shared[] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
 	context->CSSetConstantBuffers(5, 2, shared);
@@ -747,78 +794,14 @@ std::pair<ID3D11ShaderResourceView*, ID3D11Buffer*> ViewAtmosphere::PrepareLocal
 {
 	if (!enabled)
 		return {};
-	auto* renderer = globals::game::renderer;
-	auto* smState = globals::game::smState;
-	if (!renderer || !smState || !smState->shadowSceneNode[0])
+	// The same data the fog's graph path latches.
+	ExponentialHeightFog::EngineLocalShadows shadows{};
+	auto* view = globals::features::exponentialHeightFog.BuildEngineLocalShadowData(shadows);
+	if (!view)
 		return {};
-	auto* shadowSceneNode = smState->shadowSceneNode[0];
-	auto& depthStencil = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS];
-	if (!depthStencil.texture || !depthStencil.depthSRV)
-		return {};
-
-	D3D11_TEXTURE2D_DESC textureDesc{};
-	depthStencil.texture->GetDesc(&textureDesc);
-	D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
-	depthStencil.depthSRV->GetDesc(&viewDesc);
-	if (viewDesc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2DARRAY || textureDesc.Width != textureDesc.Height)
-		return {};
-	const uint32_t firstSlice = viewDesc.Texture2DArray.FirstArraySlice;
-	const uint32_t sliceCount = std::min(textureDesc.ArraySize, LightLimitFix::ENGINE_SHADOW_MAP_SLICES);
-	const float texel = 1.0f / static_cast<float>(std::max(textureDesc.Width >> viewDesc.Texture2DArray.MostDetailedMip, 1u));
-	std::array<RE::BSShadowLight*, LightLimitFix::SHADOW_MASK_CHANNEL_COUNT> shadowLights{};
-	std::array<uint32_t, LightLimitFix::SHADOW_MASK_CHANNEL_COUNT> maskClaims{};
-	std::array<uint32_t, LightLimitFix::ENGINE_SHADOW_MAP_SLICES> sliceClaims{};
-	const auto& runtimeData = shadowSceneNode->GetRuntimeData();
-	for (const auto& entry : runtimeData.activeShadowLights) {
-		auto* light = entry.get();
-		if (!light || light == runtimeData.sunShadowDirLight || !light->light || !LightLimitFix::IsShadowMapRendered(shadowSceneNode, light))
-			continue;
-		const auto& lightData = light->GetRuntimeData();
-		if (lightData.shadowmapDescriptors.empty())
-			continue;
-		const auto& descriptor = lightData.shadowmapDescriptors[0];
-		const uint32_t slice = descriptor.shadowmapIndex;
-		if (descriptor.renderTarget != RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS || slice >= sliceCount ||
-			slice < firstSlice || slice - firstSlice >= viewDesc.Texture2DArray.ArraySize)
-			continue;
-		shadowLights[lightData.maskIndex] = light;
-		maskClaims[lightData.maskIndex]++;
-		sliceClaims[slice]++;
-	}
-
-	std::array<LightLimitFix::LocalShadowData, LightLimitFix::SHADOW_MASK_CHANNEL_COUNT> shadows{};
-	const auto& eye = globals::game::frameBufferCached.GetCameraPosAdjust();
-	for (uint32_t i = 0; i < shadows.size(); i++) {
-		auto* light = shadowLights[i];
-		if (!light || maskClaims[i] != 1)
-			continue;
-		const auto& lightData = light->GetRuntimeData();
-		const auto& descriptor = lightData.shadowmapDescriptors[0];
-		if (sliceClaims[descriptor.shadowmapIndex] != 1)
-			continue;
-		uint32_t type = LightLimitFix::LOCAL_SHADOW_TYPE_SPOT;
-		float falloff = LightLimitFix::LOCAL_SHADOW_DEFAULT_SPOT_FALLOFF;
-		if (light->GetIsParabolicLight()) {
-			type = light->shadowMapCount == 2 ? LightLimitFix::LOCAL_SHADOW_TYPE_OMNI : LightLimitFix::LOCAL_SHADOW_TYPE_HEMISPHERE;
-		} else if (light->GetIsFrustumLight()) {
-			const float spotFalloff = static_cast<RE::BSShadowFrustumLight*>(light)->GetShadowFrustumLightRuntimeData().falloff;
-			if (std::isfinite(spotFalloff) && spotFalloff > 0.0f)
-				falloff = spotFalloff;
-		} else {
-			continue;
-		}
-		auto& shadow = shadows[i];
-		static_assert(sizeof(shadow.ShadowProj) == sizeof(descriptor.lightTransform));
-		std::memcpy(&shadow.ShadowProj, &descriptor.lightTransform, sizeof(shadow.ShadowProj));
-		for (int column = 0; column < 4; column++)
-			shadow.ShadowProj.m[3][column] = static_cast<float>(static_cast<double>(eye.x) * shadow.ShadowProj.m[0][column] + static_cast<double>(eye.y) * shadow.ShadowProj.m[1][column] + static_cast<double>(eye.z) * shadow.ShadowProj.m[2][column] + static_cast<double>(shadow.ShadowProj.m[3][column]));
-		shadow.Params = { static_cast<float>(type), light->light->GetLightRuntimeData().radius.x, lightData.shadowBiasScale * LightLimitFix::LOCAL_SHADOW_DEPTH_BIAS, 1.0f };
-		shadow.Params2 = { falloff, 0.0f, static_cast<float>(descriptor.shadowmapIndex - firstSlice), texel };
-		shadow.Origin = { eye.x, eye.y, eye.z, 0.0f };
-	}
 	if (!engineLocalShadowCB)
 		engineLocalShadowCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<decltype(shadows)>(), "ViewAtmosphere::EngineLocalShadows");
 	engineLocalShadowCB->Update(shadows);
 	// The engine's field can be a tripwire handle: DXVK takes the wrapped object.
-	return { RenderGraph::Engine::Tripwire::Unwrap(depthStencil.depthSRV), engineLocalShadowCB->CB() };
+	return { RenderGraph::Engine::Tripwire::Unwrap(view), engineLocalShadowCB->CB() };
 }

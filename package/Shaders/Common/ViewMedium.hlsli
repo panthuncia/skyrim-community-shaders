@@ -8,7 +8,8 @@
 #endif
 
 #ifdef MEDIUM_COMPOSITE
-Texture2D<float4> TexMediumCloudDepth : register(t41);
+// The composite's ORG build reads it by its handle (ViewAtmosphere/Composite.cs.hlsl).
+ORG_HEADER_SRV(Texture2D<float4>, TexMediumCloudDepth, 41)
 #elif defined(DCLF_BINDLESS)
 // DCLF's pixel object rows hold t116, so its draws read the cloud depth at t105.
 Texture2D<float4> TexMediumCloudDepth : register(t105);

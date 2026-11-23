@@ -5,6 +5,9 @@
 #include "Utils/Setting.h"
 #include "Utils/TexturePreview.h"
 
+#include <array>
+#include <cstdint>
+
 class ViewAtmosphere : public Feature
 {
 public:
@@ -93,39 +96,14 @@ public:
 	static AtlasLayout LayoutFor(float2 a_screen, std::uint32_t a_nearPixels, std::uint32_t a_middlePixels, std::uint32_t a_distantPixels,
 		std::uint32_t a_nearSlices, std::uint32_t a_middleSlices, std::uint32_t a_distantSlices);
 
-	/** @brief Prepares the shared volume before standalone fog selects its path. */
-	bool Prepare();
-	/** @brief Reports whether post-water composition is available for the active media. */
-	bool CompositeEnabled();
-	/** @brief Composes the finished medium once after water and before transparency. */
-	void CompositeAfterWater();
-	/** @brief Prepares engine local-light shadow bindings for either volume renderer. */
-	std::pair<ID3D11ShaderResourceView*, ID3D11Buffer*> PrepareLocalShadows(bool enabled);
-	/** @brief Injects and integrates the prepared volume after feature prepasses. */
-	void Render();
-	/** @brief Builds and binds a small omnidirectional medium before the six reflection faces. */
-	void RenderReflection();
-	/** @brief Binds the integrated medium to a shader stage. */
-	void Bind(bool compute = false);
-	/** @brief Removes shared medium bindings from both shader stages. */
-	void Unbind();
-	/** @brief Invalidates shared medium shaders and history. */
-	void ClearShaderCache() override;
-	bool IsPrepared() const { return prepared; }
-	bool IsReady() const { return ready; }
-	ID3D11ShaderResourceView* Luminance() const { return integratedLum ? integratedLum->srv.get() : nullptr; }
-	ID3D11ShaderResourceView* Transmittance() const { return integratedTr ? integratedTr->srv.get() : nullptr; }
-	ID3D11ShaderResourceView* Source() const { return ready && history ? history->srv.get() : nullptr; }
-	/** @brief Cloud/clear diffuse transport from the last completed reflection sky update. */
-	ID3D11ShaderResourceView* CloudDiffuseTransport() const { return ready && settings.enabled && reflectionSkySH ? reflectionSkySH->srv.get() : nullptr; }
-
-private:
+	/** @brief One grid of the parameters block (Common/ViewAtmosphere.hlsli). */
 	struct Grid
 	{
 		DirectX::XMUINT4 size;
 		DirectX::XMUINT4 offset;
 		float4 depth;
 	};
+	/** @brief The parameters block the shaders read (ViewAtmosphere::Data). All zero means no medium. */
 	struct Parameters
 	{
 		Grid grids[3];
@@ -136,6 +114,78 @@ private:
 	};
 	STATIC_ASSERT_ALIGNAS_16(Parameters);
 	static_assert(sizeof(Grid) == 48 && sizeof(Parameters) == 256);
+
+	/** @brief The inputs the inject pass reads this frame: the bits of flags.z. */
+	struct InputFlags
+	{
+		bool directionalShadow = false;  // 1: the shadow map and its light data
+		bool ibl = false;                // 4
+		bool probes = false;             // 8: Skylighting's probes
+		bool localLights = false;        // 32: Light Limit Fix's lists
+		bool localShadows = false;       // 64: its local shadow cache
+		bool engineShadows = false;      // 128: the engine's local shadow maps
+		bool terrain = false;            // 256: Terrain Shadows' heights
+		bool cloudLayer = false;         // 512: Cloud Shadows' last layer
+		bool environment = false;        // 1024: Dynamic Cubemaps' environment
+
+		std::uint32_t Bits() const;
+	};
+	/** @brief The flags.z bits whose change resets the history: the directional shadow, terrain and cloud layer. */
+	static constexpr std::uint32_t kShadowInputBits = 1u | 256u | 512u;
+
+	/**
+	* @brief The parameters both paths compute, as Prepare does: the grids and the atlas of a_layout, flags.x and flags.y (the fog),
+	* the history weights and the unjittered clip-to-world. flags.z is left zero. a_continuous says the history holds the previous
+	* frame of the same grids; without it the history weight is zero.
+	*/
+	Parameters ParametersFor(const AtlasLayout& a_layout, bool a_useFog, bool a_continuous) const;
+
+	/** @brief The inject pass's samplers: linear clamp (s0), or the shadow map's comparison sampler (s1). */
+	static D3D11_SAMPLER_DESC SamplerDesc(bool a_comparison);
+
+	/** @brief Prepares the shared volume before standalone fog selects its path. */
+	bool Prepare();
+	/** @brief Reports whether post-water composition is available for the active media. */
+	bool CompositeEnabled();
+	/** @brief Composes the finished medium once after water and before transparency. */
+	void CompositeAfterWater();
+	/** @brief Prepares engine local-light shadow bindings for either volume renderer. */
+	std::pair<ID3D11ShaderResourceView*, ID3D11Buffer*> PrepareLocalShadows(bool enabled);
+	/** @brief Injects and integrates the prepared volume after feature prepasses. */
+	void Render();
+	/**
+	* @brief Builds and binds a small omnidirectional medium before the six reflection faces. In the graph modes it only notes what
+	* ORGViewAtmosphereReflection's passes read, for the next revision.
+	*/
+	void RenderReflection();
+	/** @brief What the reflection medium reads this frame, for its parameters' flags. */
+	struct ReflectionFlags
+	{
+		bool fog = false;         // Exponential Height Fog is active (flags.y)
+		bool ibl = false;         // IBL's environment SH is bound (flags.z 4)
+		bool probes = false;      // Skylighting's probes are bound (flags.z 8)
+		bool terrain = false;     // Terrain Shadows' heights are ready (flags.z 256)
+		bool cloudLayer = false;  // Cloud Shadows' last layer is bound (flags.z 512)
+	};
+	/** @brief The reflection medium's parameters (the 256 bytes Reflection.cs.hlsl reads), with flags.w = 1. D3D11 and the graph share it. */
+	static std::array<std::uint32_t, 64> ReflectionParameters(const ReflectionFlags& a_flags);
+	/** @brief Binds the integrated medium to a shader stage. */
+	void Bind(bool compute = false);
+	/** @brief Removes shared medium bindings from both shader stages. */
+	void Unbind();
+	/** @brief Invalidates shared medium shaders and history. */
+	void ClearShaderCache() override;
+	/** @brief Whether the shared volume replaces the fog's volumes and the AP shadow this frame. In the graph modes: the adopted revision runs it. */
+	bool IsPrepared() const { return prepared; }
+	/** @brief Whether the medium is rendered this frame. In the graph modes it is IsPrepared. */
+	bool IsReady() const { return ready; }
+	ID3D11ShaderResourceView* Luminance() const { return integratedLum ? integratedLum->srv.get() : nullptr; }
+	ID3D11ShaderResourceView* Transmittance() const { return integratedTr ? integratedTr->srv.get() : nullptr; }
+	ID3D11ShaderResourceView* Source() const { return ready && history ? history->srv.get() : nullptr; }
+	/** @brief Cloud/clear diffuse transport from the last completed reflection sky update. */
+	ID3D11ShaderResourceView* CloudDiffuseTransport() const { return ready && settings.enabled && reflectionSkySH ? reflectionSkySH->srv.get() : nullptr; }
+
+private:
 	TexturePreview preview;
 	Parameters data{};
 	std::unique_ptr<StructuredBuffer> parameters;
