@@ -45,15 +45,6 @@ The fixes below are in the code. No recorded run has yet shown the check that co
     remaining frames needs the room resolved on the GPU in the frame: each object's record holds a stable room slot, and a table
     from slot to Light Limit Fix's number is written after its Prepass.
 
-## AMD: the HZB reads back empty (fixed 2026-11-17)
-
--   **Cause.** `HzbTest` (`HzbTest.hlsli`) returned early on `a_view.Index == 0 || a_view.Mips == 0`. AMD's RDNA2 compiler folds a
-    value to the constant past such a guard (AGENTS.md, "Known Driver Bug"), so the four taps read heap slot 0 and every footprint came
-    back all-near: occlusion culled nearly everything in view on the RX 6600.
--   **Fix.** The guard is one unsigned relational compare (`min(Index, Mips) < 1u`). With occlusion on, perf-taa reads 0 of 2,693
-    footprints all-near, about 460 draws a window are occluded, and the view is whole. `CS_DCLF_CULL` defaults to occlusion on every
-    GPU again (`DefaultCullMode`). Details: `org-native-frame-graph.md`, "RX 6600, third pass".
-
 ## Open crashes
 
 -   **A freed child detached during cell streaming.** It happens intermittently, 70-100 s into motion runs (`CS_DCLF_TEST_MOVE`,
@@ -198,141 +189,27 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     before `Setup` (`indirect state invalid`) while the claims stand and the snapshots look current, so DCLF's objects can be
     missing for those frames. Waiting on the catalog at the frame's start could exceed the 5 s bound while the pipelines compile.
     This needs its own design: for example, the old catalog keeps drawing into compatible formats until the new one is installed.
-
--   **Objects changing cells flickered or vanished (fixed 2026-11-18).** A reference crossing into another cell is moved by one
-    `NiNode::AttachChild` on the new cell's node, which first detaches the child from the old one. The detach and the attach were
-    pushed as separate events, and the detach woke the scene pass, which often drained it alone: every part of the actor was
-    erased and tracked again as new one pass later. The new entries had no slot or binding, so they were withheld while they
-    waited for pipelines and materials, for 10 to 70 frames at Riverwood (`CS_DCLF_CELL_TRACE`, runs x2g and x3n: 8 of 9
-    crossings split). SceneWriterFramework now flags that detach `SWF_CHILD_REPARENT` (ABI minor 4), and `SceneTracker` holds the
-    move's events on the moving thread until its attach pushes them together. The move then applies in one batch, the entries keep
-    their slots and are re-filed under the new category node.
--   **A drawn object rebound to a binding not built yet was hidden (fixed 2026-11-18).** Any change that picked a pipeline or
-    material not ready yet took the member out of the set while it was still withheld from the engine, so nobody drew it until the
-    pipeline compiled. At an actor's first cell change 3 to 8 parts vanished for 4 to 10 frames: its fade sat at 0.983 (one
-    fade step, "Actors resting at a fractional fade" below) on the blended fading pipeline, and the crossing reset it to 1 and picked the opaque one. A drawn member
-    now keeps its record, claim and current binding while the next one is staged (`Coordinator::StageBinding`, which references its
-    pipeline and material so they get built), and the joins switch in the publication that can draw the new one. The rebind of
-    every resident after a membership witness change goes the same way instead of ending all residency. In the fading case the
-    old binding draws a few frames of the blended pass at alpha 1: no G-buffer write, so no SSAO, screen-space shadows or GI and
-    no decals on it, and no shadow-casting lights, as in the engine's fading pass. A fading join also asks the pipeline lane for
-    its settled key (`RequestSettledPipeline`), so the switch usually finds it built. Runs fxg and fxn: 19 crossings, none losing a
-    part (Alvor's in fxn came while his parts still waited after the load, below).
--   **A newly attached object shows 3 to 7 frames late (open).** In guest and native mode the engine's draw of a lit object draws
-    nothing (the flush latch skips it, native's D3D11 calls do nothing), so whether DCLF withholds it changes no pixel. An attached
-    object (a tankard, Alvor's hammer) joins the set in the scene pass that tracks it, but a publication is installed about every 2
-    to 3 frames and is 2 to 5 frames old by then (`[publication of frame N]` in the cell trace). The one frame of run x5g with no
-    engine pass for the hammer was its attach frame, before the stand-in walked the admitted entry again. **Fix direction:** a
-    shorter path from the scene pass to the installed snapshot.
--   **Actors after a load are drawn by nobody for 1.5 to 4 seconds (open).** The load hold settles before the actors' 3D is
-    tracked (records 0 on its last frames), and their first bindings (the fade-in's blended keys) then wait for pipelines compiled
-    on demand, about 100 frames in guest and up to 260 in native (runs fxg, fxn, fig). The `drawn by nobody` count's first window
-    after a coc reads about 30,000 passes in guest. **Fix direction:** the hold also waits for the nearby actors' parts, and their
-    keys are asked for from the attach records during the load (Phase 5.5.1's sixth step).
-    **Update (2026-11-23):** the engine had given every nearby actor its 3D by the hold's first world frame in every load measured
-    (`actors without 3D: 0 at the first world frame` in the hold's line). The hole was the hold settling on a publication that did
-    not hold the load's objects yet: `Settled` took a commit two frames after the world's first frame as the load's, and the scene
-    pass can lag more. One native tour's `coc WhiterunDragonsreach` settled after 9 frames and then drew 365,515 lit passes by
-    nobody over 187 frames. The hold now also waits while a lit main-view pass it withholds would be drawn by nobody under the
-    frame's claims (`PassCapture` `holdNobody`: an object waiting to join, or one outside the set where the engine's lit draws
-    draw nothing; the player's own parts are left out, since some stay the engine's). Its line adds `passes the claims did not
-    draw N frames (at most N a frame)` and, at the release, the last frame's first undrawn geometries. Guest interior and river,
-    native Vulkan and D3D12 tours: every hold settled (first load about 10 s, Dragonsreach 3.2-3.7 s, others under 2.2 s), and
-    the windows after it read at most about 2,300 passes by nobody, from objects attached after the load. **Left:** those late
-    arrivals (the next entry's latency).
--   **A re-equip split across scene passes erased and re-added the item (fixed 2026-11-18).** NPCs re-equip by a `DetachChild`
-    and an `AttachChild` of the same node on the engine's actor threads (scabbard and dagger, bow, arrow and quiver after a load and
-    when an NPC's 3D finishes loading). The detach woke the scene pass, which erased the geometry before the attach tracked it
-    again: 5 to 10 in every Riverwood run (`[DCLF] split move`). `SceneTracker` now holds a plain detach outside loads, pinned, until
-    an attach of the same child pushes both (applied as a move) or the next frame's start pushes it as a removal. Runs fxg and fig
-    had none. Run fxn had two static ones at startup and fqn two 'Land' blocks detached at frame 59 and attached at frame 61, which
-    stay a removal and an add.
--   **"Sometimes parts do not come back" (not reproduced).** No part stayed drawn by nobody and every actor's tracked count matched
-    its held geometry at the end, over runs l1g, fxg, fxn and fig: 31 crossings and about 36,000 actor-frames at Riverwood and in the
-    Bannered Mare, plus 47 crossings before.
--   **Actors resting at a fractional fade (fixed 2026-11-18).** After a load, some actors' fade nodes hold 0.983 (guest, 60 fps),
-    0.964 (native, about 28 fps) or 0.950 (20 fps) for good, one frame's fade step below 1. The mirror reads that value, so their
-    parts bind the blended fading pipelines (hint 9) while DCLF's own fade state is 1 and draws them at alpha 1. A placement snap
-    or reseed (a cell change) clears it. Runs b5r1 to b5diag7g and the tour config in the bug5 scratch folder.
-    -   **Vanilla rests at exactly 1.** `FUN_14147a160` (AE 1.6.1170) steps `+0x130`/`+0x140` toward `fadeAmount` by
-        `min(dt / time, 0.1)` and stops at it. The snap applies only above 1.5 (`0x141ad2874`) and gives `fadeAmount - 2.0`
-        (`0x141ad288c`), so 0.983 is no snap offset. Ghosts use the snap. Their `fadeAmount` ramps to 2.25 and they rest at 0.25
-        (actor probe: node 2.250, mirror 2.250, root row 2.250).
-    -   **The handover.** The seed copies the node at the start of the frame that first draws the root's generation. The engine's
-        own `OnVisible` for that frame's cull still runs on the node, because the writer tables that stop it are published at the
-        next `Main::Update` entry. Run b5diag3 caught it for Hod. The seed read `cur 1.0`, `+0x140 1.0` and `fadeAmount 0` (alpha 0
-        for one frame at the load), then the engine stepped the node to 0.9639. DCLF's state runs on from the seed, and only a reported
-        milestone brings the node in line. `ReportMilestone` took the seed's milestone as already on the node, so a state that
-        stays at 1 is never written. **Fixed:** a new generation's
-        first update always reports (`FadeStateCS.hlsl` and the CPU stage's `Report`).
-    -   **The fade write-back delivered nothing (fixed).** Runs b5diag4 to b5diag7g (guest and native) counted about 1,400
-        harvests with 0 events and 0 stores, so every DCLF-owned fade node kept what the engine left at the handover. The graph's
-        order was right: a probe word FadeStateCS wrote reached the copied list in the same frame, after the header upload and before
-        the copy (run b6d1g). No event was ever appended. `ReportMilestone` guarded the append with two early returns on an `||` of
-        equalities (`EventsIndex == 0 || ReportedIndex == 0`, then the written bit or an unchanged milestone), the pattern the
-        RX 6600 compiler miscompiles (TextureTransformsCS, the portal programs). Adding counters ahead of the guards, with the logic
-        unchanged, made the events flow (run b6d2g: 13,435 events). The guards are now one relational compare and a plain `if` around
-        the append. Guest run b6fixg: 10,288 events and 10,280 stores in the first window after the load (the first-update rule makes
-        every root report once, 3.3 ms of stores in all), then 2 to 32 a window. Native run b6fixn: 10,531 events, 10,278 stores.
-    -   **Result.** The actor probe at rest finds 0 fading actors in guest (b6fixg, b6fin, b6fin2) and native (b6fixn). Before, native
-        held up to 9 actors at 0.964 and the actor walking in (1A010003) stayed at 0.90 to 0.93 in both modes. An NPC placed in front
-        (`player.placeatme 000A2C8E 1 150 0`, run b6fin2) still fades in on the fading pipelines (lowest fade 0.915, 0.829, 0.764 at
-        5 to 40 frames) and rests opaque. The ghost (`000725F6`) rests with its node's fade at 0.250 in both modes, DCLF's state and
-        the engine's own snap value, and draws translucent (run b6fin, shot ghost240). Its `+0x140` keeps the engine's last step (0.07
-        to 0.13): the store writes only `+0x130`. Console `enable` has no fade, so the bug5 config's disable and enable cycles never
-        tested a fade-in.
-    -   Also changed: the fade amount and fade snap writers push the mirror update before the key, and the scene pass drains those
-        keys before the tracker. A key could be applied against a mirror without its value, leaving the root row at an older alpha.
-        Not seen in a run.
+-   **Objects reach the drawn scene late (open; admission latency).** In graph modes the engine draws none of DCLF's classes, so
+    an object is invisible until DCLF admits it.
+    -   **Attached in play.** An attached object (a tankard, Alvor's hammer) shows 3 to 7 frames after its attach. It joins the set
+        in the scene pass that tracks it, but a publication is installed about every 2 to 3 frames and is 2 to 5 frames old by then
+        (`[publication of frame N]` in the cell trace).
+    -   **After a load.** The hold waits until nothing it withholds would be drawn by nobody (2026-11-23), so the load's own
+        objects are in. Objects attached after the hold still wait their turn: the first report windows after a load read up to
+        about 2,300 lit passes by nobody.
+    -   **New bindings.** A first binding whose pipeline is compiled on demand waits longer: about 100 frames in guest and up to
+        260 in native on a cold driver cache (runs fxg, fxn, fig).
+    **Fix direction:** a shorter path from the scene pass to the installed snapshot, and pipeline keys asked for from the attach
+    records.
 
 ## Memory retention
 
--   **VRAM retention after leaving an exterior: mostly fixed, about 0.9 GB outside DXVK left.** The 2.5 GB that DCLF held after
-    leaving an exterior was DXVK chunks that defragmentation could not move (every import locked). Pinless imports fixed it on
-    2026-10-29: dedicated VRAM at the end is now 10,997 MiB with DCLF against 11,308 MiB without (the table below). What is left
-    is listed under "Still open". The history: on the short retention tour (save, `coc Whiterun`,
-    `coc RiverwoodSleepingGiantInn`, `pcb`, 45 s in the inn; `tour.sh` in the session scratch folder, runs p1onT3 and p1offT3 on
-    2026-10-28), Task Manager's dedicated usage ends at 13,854 MiB with DCLF and 11,308 MiB without. With DCLF it does not drop
-    after `pcb`. The DXVK allocation trace (`DXVK_ALLOC_TRACE=10`) finds no D3D11 difference:
-
-    | After `pcb` | DCLF on | DCLF off |
-    |---|---|---|
-    | Live device-local, total | 8,464 MiB | 9,129 MiB |
-    | SkyrimSE.exe | 4,513 MiB | 5,178 MiB |
-    | CommunityShaders.dll | 2,608 MiB | 2,608 MiB |
-
-    So the difference is Vulkan memory the trace does not see. The candidates are DXVK keeping freed chunks resident after DCLF's
-    higher peak, and ORG/BasicRHI's own allocations. The engine-reference retention that held about 5 GB of game textures is fixed
-    (`dclf-scene-lifetime-survey.md`, section 12).
-
-    **Cause (runs dxon2/dxoff2):** DXVK's chunk statistics (`describeDevicePoolChunks` in the alloc trace) show that defragmentation
-    cannot run with DCLF on.
-    -   DCLF on, after `pcb`: all 33 device-local chunks hold locked allocations (3,150 of them), and 4,564 of 7,636 MiB is used.
-    -   DCLF off: no locks. Defragmentation shrinks the pool from 38 to 24 chunks.
-
-    Every ORG import (`GetResourceInfo` → `ensureBufferAddress`/`LockImage`) locks its resource's address for the resource's whole
-    life. About 2,300 of the 3,150 locks are live imports (1,795 buffers, 523 textures); the rest are resources DCLF no longer
-    imports. The peak was 11,702 locks.
-
-    **Fixed (2026-10-29): pinless imports.** DCLF's game imports no longer pin anything. The DXVK fork tracks them
-    (`dxvkTrackInteropResources`) and reports each move with the old storage (`dxvkPollInteropRelocations`). DCLF takes the moves
-    at frame start (`Core/Gpu/ImportRelocations`) and imports again:
-    -   textures: the import is superseded and its slot detached; material bindings resolve again;
-    -   buffers: the entry goes and the geometry slots go stale.
-
-    The old storage is attached to the old import's owner and released behind the GPU.
-
-    A few things stay pinned:
-    -   images and buffers the GPU writes (render targets, depth, storage);
-    -   the Resources.cpp imports, which still use `GetResourceInfo`.
-
-    `CS_ORG_PINNED_IMPORTS=1` restores the old pinned path.
-
-    | After `pcb` | DCLF on, pinned (dxon2) | DCLF on, pinless (pinon4) | DCLF off (pinoff2) |
-    |---|---|---|---|
-    | Device-local chunks | 33, all locked | 25 | 24 |
-    | DXVK allocated / used | 11,574 / 8,439 MiB | 9,398 / 7,479 MiB | 10,082 / 9,105 MiB |
-    | Dedicated VRAM at the end | 13,742 MiB | 10,997 MiB | 11,308 MiB |
+-   **VRAM retention after leaving an exterior: about 0.9 GB outside DXVK left.** The 2.5 GB DCLF held after leaving an exterior
+    (DXVK chunks defragmentation could not move, every import locked) was fixed on 2026-10-29 by pinless imports: on the short
+    retention tour (save, `coc Whiterun`, `coc RiverwoodSleepingGiantInn`, `pcb`, 45 s in the inn) dedicated VRAM ends at
+    10,997 MiB with DCLF against 11,308 MiB without. DXVK reports each move of a tracked import (`dxvkPollInteropRelocations`) and
+    DCLF imports it again at frame start (`Core/Gpu/ImportRelocations`); `CS_ORG_PINNED_IMPORTS=1` restores the pinned path.
+    Render targets, depth, storage and the Resources.cpp imports stay pinned.
 
     Still open:
     -   **Outside DXVK.** 2,167 MiB with DCLF on against 1,285 off (BasicRHI's allocator); process usage is 11,565 against
@@ -346,12 +223,6 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
 
 ## Payload and table defects
 
--   **An entry write the incremental visibility pass skips.** Under motion, `CS_DCLF_PERSISTENT_PARITY` reports
-    `<- WRITES DIFFER; first: root N set wide (reference's alone)` in some windows. It reproduces every time with
-    `CS_DCLF_TEST_MOVE` and `CS_DCLF_PERSISTENT_PARITY` set. The suspect is `JudgeEntry`'s skip (`Core/Render/Readback/Visibility.cpp`).
-    It skips when `entryWritten` already holds the wanted value and `entryWrittenVersion` is unchanged, so a write made while the
-    entry was in another state can hide a later one.
-    **No longer verifiable:** 0 in ten moving full parity runs on the tree-forest route (vp1-vp10, 2026-10-21), with the check active.
 -   **A material row is keyed per material but packed per pair (latent).** `MainRows::materials[m]` is one row per material slot,
     packed against the pair's pipeline. Two shader permutations of one pass, or a `ModifyShaderLookup` that changed between them,
     could differ in their `PerMaterial` offsets. The row would then keep the last pair's packing, and `ResolvePair`'s
@@ -446,15 +317,9 @@ both ways (no overlap, no hole). **Check:** a turn-only run's first `grass draws
     80-180 by the engine alone, all `Land`, `obj`, `obj-LargeRef`, `objsnow` and `objsnowHD-LargeRef` (terrain blocks and object
     LOD), in runs of consecutive frames. Stood-in roots and the animation gate agree (`anim rate`: 0 differ). These geometries are
     not animated, so the bit only matters to whatever else reads `kAccumulated` on them. Not investigated.
--   **Capture parity mismatches under `CS_DCLF_CAPTURE_PARITY` with `CS_DCLF_PARITY_BOTH`**, in every window. Since the observer fix
-    (run cp1, tree-forest route) 7-10k of about 340k draws a window (0 material, 3-4k per-geometry, 0 technique); before it about 44k
-    of 153k (29k material, about 300 per-geometry, 7k technique), and every LODObjects, LODObjectHD and LODLandNoise draw. The cause, by field:
-    -   **Observer fixed (run cp1: 0 material and 0 technique mismatches in every window, of about 340k draws checked):** `CompareMaterial` no longer compares PS PerMaterial 29 (IBLParams, kept from
-        the first evaluation by `KeepUnreadFloats` and read by no Lighting stage) or VS 11 (`TexcoordOffset`, which the GPU patches
-        into the rows), and the technique compare leaves out the fog (VS 13-15 and PS 19 FogColor, kept by `KeepTechniqueFog`).
-        A port's declared frame variables (`MaterialSpace::declaredVSFloats`, `declaredPSFloats`) are not compared by
-        `CompareMaterial` (Lighting's layout only), so nothing was changed for them. What remains is 7-10k mismatched draws a
-        window: about 3.5k per-geometry and the rest below.
+-   **Capture parity mismatches under `CS_DCLF_CAPTURE_PARITY` with `CS_DCLF_PARITY_BOTH`**, in every window: 7-10k of about 340k draws a window
+    (run cp1, tree-forest route: 0 material, 3-4k per-geometry, 0 technique). The observer leaves out what DCLF patches or keeps
+    on purpose (IBLParams, `TexcoordOffset`, the technique's fog). What remains, by field:
     -   **Loaded terrain blocks drawn with another technique.** `Block (x, 0)` draws with DCLF's MTLandLODBlend (19) pipeline where
         the engine's pass is MTLand (8). This is permutation parity's `vertex 1B000000`, about 900 a window. It is a real
         normal-path difference, not yet chased.
@@ -480,11 +345,6 @@ both ways (no overlap, no hole). **Check:** a turn-only run's first `grass draws
     the bound armed at the difference (`CS_DCLF_MIRROR_WATCH=moved`) saw no write in the next 600 frames. **Next:** a bound watch armed
     at the body part's capture (`Bloody*`, the arms and legs) to name the writer.
 
--   **Stand-in walk parity: three snow geometries missed at frame 868.** About one full parity run in three reports, in one
-    window only, `3 geometries handed to the registration from entries the stand-in would not walk <- STAND-IN WALK`, always at
-    `[frame 868]` of the fixed `CS_DCLF_TEST_MOVE` path, and always 'objHD-LargeRef', 'objsnow' and 'objsnowHD-LargeRef'. It is
-    likely a cell crossing where the walk decided before the snow members joined. Normal play would drop these for that frame.
-    **No longer verifiable:** 0 in ten moving full parity runs on the tree-forest route (vp1-vp10, 2026-10-21), with the check active.
 -   **Walk parity: the cooking spit's sun entry moves without an event.** `CS_DCLF_WALK_PARITY` reports 5 of about 113,900
     objects differing per interval, all of them the sun entry on `FireSptiCookingBase:17`, whose bounds drift by about 0.06
     units. A writer DCLF does not watch animates the node, so the delta walk keeps the old bound. The same gap on a larger animated
@@ -631,19 +491,6 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     ImageSpace programs one by one through `GetNow` at the graph's build ("Setup did not queue it"). That took 40 s in batch 16,
     and frame 167 of the loading screen had a kMAIN clear with no place in the schedule. Warm stores do not show it.
     **Next:** address with the shader precompile overhaul (queue the programs at Setup and compile them in parallel).
--   **(Closed) A cold cache makes a frame wait for DCLF's on-demand pipelines.** A new variant (for example HDR's Lighting variants in
-    native Vulkan with frame generation) is compiled on demand while the frame waits; one took 13 s on 2026-11-19 and the hang
-    watchdog fired at 15 s (`native-vulkan+fg-hdr`, passed once warm). The render thread must never wait.
-    **Closed (2026-11-23):** that hang's stack (run `1119-174909-rv5`) was not a pipeline: Grass's `Setup` compiled its compute
-    programs with `ComputeProgram::Load` inside `BeginFrame`. Those programs are `SetupPrograms` now, queued at CS's setup. A
-    native Vulkan quick run on an empty store (`build.shader_cache=cold`, run `1123-134155-pascal-native-quick-cold-vk`) passed:
-    the on-demand Utility compiles and shadow pipeline builds after the load all ran on the pipeline lane, and the render thread
-    did not stall.
--   **Physical Sky's aerial perspective is its own full-screen pass.** The ORG deferred composite's push block holds 32
-    words and uses 26; Physical Sky needs about 7 more and ViewAtmosphere 3. So the aerial perspective runs as
-    `cs.physical-sky.composite` right after `cs.deferred` (phase 2, not yet run in the game). Minor cost: one more full-screen
-    read and write of kMAIN and a second fp16 rounding. **Next:** fold it back into the composite when the composite takes a
-    handle table.
 -   **Intermittent crash in DCLF's material capture during a load (guest).** `guest+resize` on build `2fcb06441` crashed at the
     loading screen (2026-11-19 12:12, `crash-2026-11-19-12-12-42.log`): the render thread executed `0x1ffff`, with
     `MaterialPort.cpp:68` (`Capture(*a_material, ...)`) under `SceneCapture.cpp:707` on the scanned stack. Two reruns passed. A
@@ -658,45 +505,8 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     Lighting on.
 -   **Physical Sky's lightning, storms, voxel clouds, local NDF, middle and cirrus layers and clouds in water reflections are
     untested on the graph.** Only clear weather at one spot ran (`clouds.toml`, `clouds-long.toml`).
--   **(Closed) A wrong JSON type in a Physical Sky setting crashes the game.** `PhysicalSky.enableVolumetricClouds=1` (a number for a
-    bool) ends in a JSON type error. Settings must be validated (`.claude/CLAUDE.md`).
-    **Closed (2026-11-23):** the throw came from the test harness's `setting` command, which called `LoadSettings` unguarded. It
-    now refuses a value whose JSON type differs from the setting's (any number for a number) and puts the old settings back if
-    `LoadSettings` throws. Every user path (the settings file, Baselines, scene settings, DevBench, undo) already caught it.
 -   **A cold shader store makes boot slow with the clouds:** the 50 cloud programs compile before data-loaded, beyond the 120 s
     load limit on a first run. Warm per mode first.
--   **(Closed) Guest: Physical Sky's volumetric clouds kept the AP shadow, the fog's scattering and the sky tail on D3D11.**
-    Phase 4 of `physical-sky-port.md` put the clouds on the graph (`cs.physical-sky.cloud-maps`, `cs.physical-sky.clouds`).
-    The three read the shadow volume and mean by their published ids, and the D3D11 fallbacks are gone.
--   **(Closed) Native: no volumetric clouds and no lightning.** The native gate in `PhysicalSky::VolumetricCloudsEnabled`
-    is removed. The lightning query reads its candidates through `RenderGraph::RunReadback`.
--   **(Closed) Guest: kMAIN goes non-finite with Exponential Height Fog on.** With the fog and its volumetric fog on, guest's image goes
-    black with bright green-haloed foliage and stays so (NaN or inf through bloom). Fog off, native and plain D3D11 are clean.
-    Pre-existing: build `87fcac5d6` (before ViewAtmosphere's port) shows it too. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=1` shows kMAIN
-    already non-finite before the post-water composite, and `=6` (pass-through) keeps the blobs, so the composite is not the cause.
-    **Fixed (2026-11-19, build `1a0b9dde1`):** the fog's temporal history (`CS_ORG_FOG_DEBUG=8` turned it off and the image
-    was clean). Guest memory is DXVK's recycled VRAM, so history texels never written held garbage, and the 0.96 blend kept
-    it. The scattering shader now rejects history that is not finite or above 65504 (`3bd376e65`, also in D3D11), and
-    readers get the volumes only after a run wrote them (`d451564b3`). Guest fog now matches native and plain D3D11. Where
-    the unwritten texels come from is not proven. `CS_ORG_FOG_DEBUG=9` (clear the histories every run) is clean too.
-    `CS_ORG_FOG_DEBUG=10` (clear every 600 frames by a one-shot client) hung 31 frames after world-ready; it is a
-    diagnostic only, not looked into.
--   **(Closed) Native: the fog volumes hold almost no fog.** With the same settings plain D3D11 shows haze on distant hills; native shows
-    none. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=3` reads transmittance near 1 across the screen, so the integrated volumes the post-water
-    composite reads are near identity. Before ViewAtmosphere's port native had no fog composite at all, so this was hidden.
-    **Update (2026-11-19, build `0d994ca13`):** native Vulkan now shows the same haze as plain D3D11 at the same spot
-    (`native-vulkan+fog` vs `d3d11+fog`), most likely since the post-water composite flag follows the frame (`b2b46322d`).
-    Native D3D12 matches too. **Closed.**
--   **(Closed) A graph build reads PublishedResources off the render thread.** Once per run near loading:
-    `[C] [ORG] PublishedResources used on thread N, not the render owner: its entries are not locked`. N is an async graph-build
-    thread building the UI stage. The likely caller is DCLF's `DeclarePublishedRead` (`FrameBindings.cpp:136`), which calls
-    `ShaderResourceVariant` and `ShaderResourceIndex` during a pass's declare; they read live, unlocked entries. **Next:** carry
-    each entry's published state and view in the build snapshot and serve these two calls from it during a build.
-    **Closed (2026-11-23):** last logged 2026-11-19 (`post-effects-integ-6b3pp`); none in the 1,204 guest and native runs since,
-    after the frame revisions moved declarations to revision starts on the render thread.
--   **Physical Sky's `PHYSICAL_SKY` define in graph builds.** Removing the strip had broken DCLF Lighting and Effect pipelines
-    (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and the ORG
-    `ISSAOComposite` build in guest. Phase 3 of `physical-sky-port.md` maps them and removes the strip; not yet run in the game.
 -   **`ORG_FRAME_PLACEMENT=1`: the image goes wrong after a frame placement change.** In `native-vulkan+resize` (2026-11-22,
     build `23b46168e`), the `grid` shot after the ViewAtmosphere grid change (`nearPixelSize`, `middleSlices`) came out dark in
     one run (mean 45 against 94), green with coloured lens-flare sparkles in another, and correct in a third. Placement off is
