@@ -1585,6 +1585,14 @@ void RenderGraphRuntime::RequestDeviceFeatures(HMODULE a_dxvkD3D11)
 	const DxvkOrgInteropFeatureRequest desc{ DXVK_ORG_INTEROP_VERSION, static_cast<uint32_t>(std::size(kRequestedFeatures)), kRequestedFeatures };
 	if (FAILED(dxvk.requestDeviceFeatures(&desc)))
 		logger::warn("[ORG] DXVK rejected the render graph device feature request");
+	// Push descriptors: on the descriptor-sets model BasicRHI binds constant buffers as uniform buffers in a push descriptor set
+	// (bound uniform buffers). Without them those are heap storage buffers, which nearly doubled DCLF's main pass on Maxwell.
+	// DXVK has no table entry for the extension, so it is asked for by name.
+	if (dxvk.requestDeviceExtensions) {
+		const char* const extensions[] = { VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME };
+		if (FAILED(dxvk.requestDeviceExtensions(static_cast<uint32_t>(std::size(extensions)), extensions)))
+			logger::warn("[ORG] DXVK rejected the request for {}", VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+	}
 	const DxvkOrgInteropBindingModelNegotiation negotiation{ DXVK_ORG_BINDING_MODEL_NEGOTIATION_VERSION, &NegotiateBindingModel, nullptr };
 	if (FAILED(dxvk.setBindingModelCallback(&negotiation)))
 		logger::warn("[ORG] DXVK rejected the render graph's binding model callback");

@@ -147,7 +147,7 @@ struct DxvkOrgInteropSubmission
 
 typedef HRESULT(__stdcall* PFN_dxvkRequestDeviceFeatures)(const DxvkOrgInteropFeatureRequest* pRequest);
 // Device extensions for the next device beyond the features (a profiler's driver interface, VK_AMD_gpa_interface): each
-// enabled where the device supports it; DXVK never uses them. Replaces an earlier request.
+// enabled where the device supports it; DXVK never uses them. Adds to earlier requests.
 typedef HRESULT(__stdcall* PFN_dxvkRequestDeviceExtensions)(uint32_t extensionCount, const char* const* ppExtensions);
 
 // Descriptor binding models; the values equal BasicRHI's rhi::vulkan::BindingModelBits.
