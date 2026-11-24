@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "RenderGraph/BufferRef.h"
 
 // Water, in graph mode: the render graph draws the main camera's BSWaterShader passes in the engine's place.
@@ -178,6 +180,9 @@ namespace DCLF::Features::Water
 		// cpuVariant. Null for none. Only the first run of a batch carries them.
 		void* cpuWater = nullptr;
 		std::uint32_t cpuVariant = 0;
+		// Set by the first commit that hands cpuWater on. The site run belongs to that frame, so a later commit of the same run
+		// (no new batch) must not hand it on again.
+		mutable std::atomic<bool> cpuHanded{ false };
 
 		/** @brief What the recording depends on: everything but the latched values and counts (WaterDraws.cpp). */
 		std::uint64_t Hash() const;

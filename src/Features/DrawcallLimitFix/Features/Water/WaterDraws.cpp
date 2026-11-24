@@ -167,7 +167,8 @@ namespace DCLF::Features::Water::WaterDraws
 				if (!a_frame.client)
 					return;
 				// DCLF's claimed water first, as the GPU-driven frame's epoch draws it before the engine's batch.
-				if (const auto cpu = a_frame.client->cpuRuns.Find(a_recording.Run()))
+				// Taken: its site run is drawn once, and its frame slot may retire after this run's submission.
+				if (const auto cpu = a_frame.client->cpuRuns.Take(a_recording.Run()))
 					RecordCpuWater(a_bindings, *a_frame.client, *cpu, a_recording);
 				const auto runRef = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
 				if (!runRef)
@@ -369,7 +370,7 @@ namespace DCLF::Features::Water::WaterDraws
 				}
 				client->committedFrame = frame;
 				client->runs.Store(latchRun, client->committed);
-				if (run && run->cpuWater)
+				if (run && run->cpuWater && !run->cpuHanded.exchange(true, std::memory_order_acq_rel))
 					client->cpuRuns.Store(latchRun, std::make_shared<const CpuWater>(CpuWater{ run->cpuWater, client->shape.view == View::Mask ? 0u : 1u, run->cpuVariant }));
 				if (!run)
 					return;
