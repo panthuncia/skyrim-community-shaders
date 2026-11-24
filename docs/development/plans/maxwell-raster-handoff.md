@@ -63,7 +63,8 @@ Frozen scene (`tgm`, `set timescale to 0`, `fw 81a`, TAA, a 600-frame `org:gpu-w
 | deferred+water | 7.7 | 9.8 | 7.5 | 6.7 |
 
 raster-perf (unfrozen save scene) frame time: native Vulkan 36-37 ms, guest 35-36, native D3D12 33-35. The 58 ms D3D12 frame
-above came from a run with the NvPerf timing trace (it serialises passes); without it D3D12 is the fastest of the three.
+above does not reproduce: with the same dclf-timing trace settings D3D12 runs 33-35 ms too (cause of the old reading unknown,
+likely an older build). D3D12 is the fastest of the three, so no D3D12 work was done.
 
 ## Guest vs native: fixed
 
