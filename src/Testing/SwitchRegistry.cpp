@@ -46,6 +46,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "BASICRHI_VK_FORCE_GENERAL", .description = "1: every image in GENERAL but presents (an experiment: the layout images shared with DXVK rest in)" },
 			{ .name = "BASICRHI_VK_LIMITS" },
 			{ .name = "BASICRHI_VK_MAX_DESCRIPTORS" },
+			{ .name = "BASICRHI_VK_MODULE_IDENTIFIERS", .description = "0: no module identifier store; where the pipeline binary store is off, every run lowers its pipelines' modules again" },
 			{ .name = "BASICRHI_VK_PIPELINE_BINARY", .description = "0: no pipeline binary store; the lowered binding models lower and compile every pipeline each run, through the pipeline cache. 1: the store on NVIDIA, where it is off by default (2 MiB of process memory per pipeline)" },
 			{ .name = "BASICRHI_VK_PIPELINE_ROBUSTNESS", .description = "core (default): the render graph's pipelines get core robustBufferAccess for buffers and none for images, as native Vulkan; off: none; device: the device's robustness (DXVK's robustness2 in guest)" },
 			{ .name = "BASICRHI_VK_VALIDATE_LOWERING" },

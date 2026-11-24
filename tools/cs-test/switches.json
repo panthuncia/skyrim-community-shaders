@@ -291,6 +291,16 @@
 			"description": ""
 		},
 		{
+			"name": "BASICRHI_VK_MODULE_IDENTIFIERS",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": "0: no module identifier store; where the pipeline binary store is off, every run lowers its pipelines' modules again"
+		},
+		{
 			"name": "BASICRHI_VK_PIPELINE_BINARY",
 			"key": "",
 			"type": "string",
