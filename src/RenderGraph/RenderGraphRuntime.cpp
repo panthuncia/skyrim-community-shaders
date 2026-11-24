@@ -854,6 +854,12 @@ struct RenderGraphRuntime::Impl
 	bool framePaceSignalled = false;  // this frame enqueued one
 	std::vector<std::function<void()>> presentWaits;  // WaitBeforePresent: the next present's, render owner only
 	std::shared_ptr<rhi::DevicePtr> device = std::make_shared<rhi::DevicePtr>();
+	// The kept recordings' timestamp mode chosen at startup, and whether the profiler's consumers have it per pass now
+	// (FollowProfilerTimestamps). profilerIdleFrames counts frames since the profiler was last active.
+	org::RenderGraph::RecordingTimestampMode startupTimestampMode = org::RenderGraph::RecordingTimestampMode::Off;
+	bool timestampModeForced = false;  // CS_ORG_RECORDING_TIMESTAMPS was set: the profiler leaves the mode alone
+	bool profilerTimestamps = false;
+	std::uint32_t profilerIdleFrames = 0;
 	// ORG's runtime on the adopted device: outlives the host, goes before the device.
 	std::shared_ptr<org::Runtime> orgRuntime;
 	std::unique_ptr<org::GraphHost> host;
@@ -1927,10 +1933,12 @@ bool RenderGraphRuntime::Initialize()
 	// CS_ORG_RECORDING_TIMESTAMPS also times the recordings kept across frames. Native stages are all kept recordings,
 	// so without it they report nothing while GPU timings are collected.
 	if (Switches::Equals("CS_ORG_RECORDING_TIMESTAMPS", "1") || Switches::EqualsNoCase("CS_ORG_RECORDING_TIMESTAMPS", "passes"))
-		state->host->SetRecordingTimestamps(true);
+		state->startupTimestampMode = org::RenderGraph::RecordingTimestampMode::Passes;
 	else if (Switches::EqualsNoCase("CS_ORG_RECORDING_TIMESTAMPS", "lists") ||
 			 (!Switches::Equals("CS_ORG_RECORDING_TIMESTAMPS", "0") && GpuTimingSource::Collecting()))
-		state->host->SetRecordingTimestampMode(org::RenderGraph::RecordingTimestampMode::Lists);
+		state->startupTimestampMode = org::RenderGraph::RecordingTimestampMode::Lists;
+	state->timestampModeForced = Switches::IsSet("CS_ORG_RECORDING_TIMESTAMPS");
+	state->host->SetRecordingTimestampMode(state->startupTimestampMode);
 	state->host->SetCompletedFrameCallback([self = state.get()](std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats) {
 		self->OnCompletedFrame(a_frameNumber, a_stats);
 	});
@@ -2356,12 +2364,44 @@ void RenderGraphRuntime::NoteGpuCompleted(std::uint64_t a_frame)
 	RenderGraph::FrameClock::clock.NoteGpuCompleted(a_frame);
 }
 
+namespace
+{
+	/**
+	 * @brief Times the kept recordings per pass while the profiler has a consumer (the performance overlay, DevBench, a test).
+	 * Every native stage and most guest epochs are kept recordings, and those record timestamps only in that mode, so
+	 * without it the overlay listed no render graph pass. Back to the startup mode once the profiler has been idle a while.
+	 * Each switch rebuilds the graphs.
+	 */
+	template <class State>
+	void FollowProfilerTimestamps(State& a_state)
+	{
+		if (!a_state.host || a_state.timestampModeForced || !globals::profiler)
+			return;
+		constexpr std::uint32_t kIdleFrames = 300;
+		if (globals::profiler->IsActive()) {
+			a_state.profilerIdleFrames = 0;
+			if (!a_state.profilerTimestamps) {
+				a_state.profilerTimestamps = true;
+				a_state.host->SetRecordingTimestampMode(org::RenderGraph::RecordingTimestampMode::Passes);
+				logger::info("[ORG] the profiler is in use: the kept recordings record a timestamp per pass");
+			}
+			return;
+		}
+		if (a_state.profilerTimestamps && ++a_state.profilerIdleFrames > kIdleFrames) {
+			a_state.profilerTimestamps = false;
+			a_state.host->SetRecordingTimestampMode(a_state.startupTimestampMode);
+			logger::info("[ORG] the profiler is idle: the kept recordings' timestamps go back to the startup mode");
+		}
+	}
+}
+
 void RenderGraphRuntime::NoteFrameBegin(std::uint64_t a_frame)
 {
 	if (!impl)
 		return;
 	auto& state = *impl;
 	RenderGraph::PipelineCache::Tick(state.device);
+	FollowProfilerTimestamps(state);
 	const auto completed = RenderGraph::FrameClock::GpuCompleted();
 	if (!completed)
 		return;
