@@ -117,6 +117,9 @@ namespace
 		// separateDepthStencilLayouts, and AMD backs the game's D24S8 depth with D32_SFLOAT_S8_UINT (VUID-VkImageMemoryBarrier-image-03320).
 		{ nullptr, "separateDepthStencilLayouts" },
 		{ VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME, "deviceGeneratedCommands" },
+		// Per-pipeline robustness. BasicRHI drops DXVK's robustness2 bounds checks on the graph's pipelines
+		// (BASICRHI_VK_PIPELINE_ROBUSTNESS). Optional: without it the graph keeps the device's robustness.
+		{ VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME, "pipelineRobustness" },
 	};
 
 	// What DXVK takes from the device's descriptor budgets, for BasicRHI's limit checks.
