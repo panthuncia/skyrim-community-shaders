@@ -205,6 +205,8 @@ SkyrimPrefs.ini).
 
 ### Left
 
+- **ISTemporalAA_UI: untested, a known gap.** Its steps exist, but no test reaches the draw. CS turns the game's TAA off in menus
+  (native TAA does not work with HDR), and with Upscaling off and bUseTAA on the inventory's scene still skips it.
 - **Perlin noise (128, 129):** the 3D form is Volumetric Lighting's port; its output is not an engine render target.
 - **The dynamic-resolution quad:** its vertices are not known, so draws with it stay refused.
 - **Dead in the engine (Ghidra):** ISBasicCopy, ISDebugSnow, ISExp, ISPerlinNoise2DCS, ISReflectionsDebugSpecMask, ISDisplayDepth and ISWaterFlow have no callers; not ported. The compute downsamples (121, 122) and the compute SAO (134, 135, 137, 145) are done (above).
