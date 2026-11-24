@@ -673,7 +673,8 @@ void BuildChainSteps(ChainBuild& a_build)
 	// Lens flares (SE 100274), which RenderWorldPostProcess draws before the composites. The visibility pass writes a texel per
 	// light. One sprite pass draws all the frame's sprites additively into kMAIN, each from its own latch record (StageLensFlareSprite).
 	{
-		StepDesc v{ .name = "lensflare.visibility", .output = engine(T::kLENSFLAREVIS) };
+		// The engine draws it with write mode 5 (seen at the draw).
+		StepDesc v{ .name = "lensflare.visibility", .output = engine(T::kLENSFLAREVIS), .blend = PackBlend(0, 0, 5, 0) };
 		v.inputs[0] = mainDepth;
 		v.samplers[0] = kPoint;
 		add(0, ChainGroup::kLensFlare, WorldScope::LensFlare, E::ISLensFlareVisibility, 0, std::move(v));
@@ -1276,7 +1277,7 @@ void CheckLensFlareState(Effects::ImageSpaceEffectEnum a_effect)
 	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 	const auto target = static_cast<std::int32_t>(shadow.renderTargets[0]);
 	const std::int32_t plannedTarget = sprite ? RE::RENDER_TARGET::kMAIN : RE::RENDER_TARGET::kLENSFLAREVIS;
-	const std::uint32_t plannedMode = sprite ? 5 : 0, plannedWrite = sprite ? 1 : 2;
+	const std::uint32_t plannedMode = sprite ? 5 : 0, plannedWrite = sprite ? 1 : 5;
 	if (target != plannedTarget || shadow.alphaBlendMode != plannedMode || shadow.alphaBlendWriteMode != plannedWrite)
 		logger::error("[ORG] ImageSpace: the engine's {} writes rt{} with blend mode {} and write mode {}; CS's step writes rt{} with {} and {}",
 			kEffects[static_cast<std::size_t>(EffectIndexOf(a_effect))].effectName, target, shadow.alphaBlendMode, shadow.alphaBlendWriteMode, plannedTarget,
