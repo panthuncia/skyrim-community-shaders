@@ -19,15 +19,15 @@ namespace DCLF
 {
 	namespace PipelineManifestDetail
 	{
-		std::wstring FileName()
+		std::wstring FileName(std::wstring_view a_suffix = {})
 		{
-			return ::RenderGraph::Backend::IsD3D12() ? L"dclf-pipelines-d3d12.txt" : L"dclf-pipelines-vulkan.txt";
+			return std::wstring(::RenderGraph::Backend::IsD3D12() ? L"dclf-pipelines-d3d12" : L"dclf-pipelines-vulkan") + std::wstring(a_suffix) + L".txt";
 		}
 
 		/** @brief In the store's folder. The store and the old-cache cleanup leave it alone. */
-		std::filesystem::path LocalPath()
+		std::filesystem::path LocalPath(std::wstring_view a_suffix)
 		{
-			return std::filesystem::path(L"Data/ShaderCache") / ::Util::kShaderStoreDirName / FileName();
+			return std::filesystem::path(L"Data/ShaderCache") / ::Util::kShaderStoreDirName / FileName(a_suffix);
 		}
 
 		/** @brief The read-only copy a build ships beside the shader pack. */
@@ -105,6 +105,20 @@ namespace DCLF
 		return true;
 	}
 
+	bool PipelineKeySet::AddExpanded(const std::string& a_tag, const PipelineWords& a_identity, const PipelineWords& a_inputs)
+	{
+		if (!Add(a_tag, a_identity, a_inputs))
+			return false;
+		expanded.emplace(a_tag, a_identity);
+		return true;
+	}
+
+	bool PipelineKeySet::Contains(const std::string& a_tag, const PipelineWords& a_identity) const
+	{
+		const auto tagLines = lines.find(a_tag);
+		return tagLines != lines.end() && tagLines->second.contains(a_identity);
+	}
+
 	void CollectPipelineKeys(PipelineKeySource& a_source, PipelineKeySet& a_set)
 	{
 		const std::size_t before = a_set.Size();
@@ -115,8 +129,14 @@ namespace DCLF
 	PipelineManifest& PipelineManifest::Get()
 	{
 		// Never destroyed, because a build may record a key while the process tears down.
-		static auto* manifest = new PipelineManifest;
+		static auto* manifest = new PipelineManifest(L"", "pipeline manifest");
 		return *manifest;
+	}
+
+	PipelineManifest& PipelineManifest::Unbuildable()
+	{
+		static auto* unbuildable = new PipelineManifest(L"-unbuildable", "unbuildable pipeline list");
+		return *unbuildable;
 	}
 
 	void PipelineManifest::LoadOnce()
@@ -124,8 +144,8 @@ namespace DCLF
 		if (loaded)
 			return;
 		loaded = true;
-		const auto [read, skipped] = PipelineManifestDetail::Parse(PipelineManifestDetail::LocalPath(), lines);
-		logger::info("[DCLF] pipeline manifest: {} keys listed{}", read, skipped ? std::format(" ({} malformed lines skipped)", skipped) : std::string());
+		const auto [read, skipped] = PipelineManifestDetail::Parse(PipelineManifestDetail::LocalPath(suffix), lines);
+		logger::info("[DCLF] {}: {} keys listed{}", label, read, skipped ? std::format(" ({} malformed lines skipped)", skipped) : std::string());
 	}
 
 	void PipelineManifest::Record(const std::string& a_tag, const PipelineWords& a_identity, const PipelineWords& a_inputs)
@@ -190,21 +210,21 @@ namespace DCLF
 			text = PipelineManifestDetail::Format(lines);
 		}
 		std::error_code ec;
-		const auto path = PipelineManifestDetail::LocalPath();
+		const auto path = PipelineManifestDetail::LocalPath(suffix);
 		std::filesystem::create_directories(path.parent_path(), ec);
 		auto temporary = path;
 		temporary += L".tmp";
 		{
 			std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
 			if (!out) {
-				logger::warn("[DCLF] pipeline manifest: {} could not be written", temporary.string());
+				logger::warn("[DCLF] {}: {} could not be written", label, temporary.string());
 				return;
 			}
 			out << text;
 		}
 		std::filesystem::rename(temporary, path, ec);
 		if (ec)
-			logger::warn("[DCLF] pipeline manifest: {} could not be replaced: {}", path.string(), ec.message());
+			logger::warn("[DCLF] {}: {} could not be replaced: {}", label, path.string(), ec.message());
 	}
 
 	void LocalPipelineManifestSource::Collect(PipelineKeySet& a_set)

@@ -52,10 +52,13 @@ struct PipelineKeySource { virtual void Collect(PipelineKeySet&) = 0; };
 | Local manifest | Every key a session built, with its resolved inputs | Now |
 | Shipped manifest | Keys gathered by cs-test tours per backend (`shader-gather.toml`) | Now |
 | Combination expander | Likely neighbours of the keys above (see below) | Now |
-| Engine technique lists | Lighting pairs from the engine's loaded techniques (the CS precompile's walk) crossed with the vertex layouts seen for each technique | Now |
+| Engine technique lists | Not built: the engine loads vertex and pixel descriptors as separate lists, not pairs, and a key also needs the pass and runtime descriptors and raster flags, which only a drawn key has | - |
 | Game forms | Pipelines the user's load order needs, from parsing its forms at startup (SARP's parser) | Later |
 
 The set is deduplicated by key and capped per family, like the family manifest (`kMaxManifestKeys`).
+
+Water keys (the deferred range family) are not listed: each range's engine depth-stencil state and target formats are read
+on the render thread from the deferred pass and the range's registration, and no line records them yet.
 
 ### The manifest
 
@@ -76,6 +79,11 @@ Keys that commonly appear together, so a tour that missed one does not leave it 
 - for each observed vertex layout of a technique, the technique's other observed pairs.
 
 Every rule is a small function over a key, listed in one file, and each logs how many keys it added.
+
+As built: rules read only listed keys and take every input of a new key from listed keys (state words by state bits,
+targets, shadow rasterizer states by mode). They add at most 1.5 times the listed keys, each rule under its own share.
+An expanded key joins the local manifest only when play asks for it. One that fails to build goes to
+`dclf-pipelines-<backend>-unbuildable.txt` and is not offered again. `CS_DCLF_PIPELINE_EXPAND=0` turns the expander off.
 
 ### The startup step
 
@@ -106,7 +114,7 @@ A key whose build fails is logged and dropped from the local manifest.
 | 1 | Pipeline manifest: record keys with resolved inputs, read at startup. Key source interface with the local source | Manifest lists the run's keys; a second run reads them |
 | 2 | Startup pipeline step in the gate: build every manifest key before the main menu, with progress and skip | Warm second run: 0 `on-demand pipeline build` lines after the first loading screen |
 | 3 | DCLF stage closure: derived shadow techniques, stages for every manifest key | 0 `on-demand SPIR-V compile` lines |
-| 4 | Combination expander and the engine technique source | A tour after a gather of a different route still builds nothing in play |
+| 4 | Combination expander (`PipelineExpander.cpp`); forward, refraction and draw family lines in the manifest | A tour after a gather of a different route still builds nothing in play |
 | 5 | Shipped pack and manifests: store pack lookup, `build-shader-pack`, `shader-gather.toml`, no debug info in Release, packaging | Cold store with the pack: startup precompile under 30 s, nothing compiled |
 | Later | Game-form key source from SARP | |
 

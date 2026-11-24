@@ -1043,14 +1043,26 @@ namespace DCLF
 		};
 		Lane lane;
 
+		/** @brief A manifest line, kept for an expanded key until play asks for it. */
+		struct ManifestLine
+		{
+			std::string tag;
+			PipelineWords identity, inputs;
+		};
 		/** @brief The startup pipeline step's keys, decoded on the main thread from the key sources. Posted once to the lane. */
 		struct PrecompileJob
 		{
 			std::vector<PipelineKey> main;
-			// The engine states the main keys' manifest lines recorded, by state bits.
+			// The engine states the main keys' and draw families' manifest lines recorded, by state bits.
 			ankerl::unordered_dense::map<std::uint32_t, EngineState> states;
 			// Shadow keys, with view state ids registered from the lines' rasterizer states.
 			std::vector<ShadowPipelineKey> shadow;
+			std::vector<ForwardPipelineKey> forward;
+			std::array<bool, kDrawFamilyLanes> families{};
+			bool refraction = false;
+			// The expander's keys among them, with their lines (PipelineExpander.h).
+			ankerl::unordered_dense::map<PipelineKey, ManifestLine, PipelineKeyHash> expandedMain;
+			ankerl::unordered_dense::map<ShadowPipelineKey, ManifestLine, ShadowPipelineKeyHash> expandedShadow;
 			std::string sources;  // each source's line count, for the summary
 			std::uint32_t otherTargets = 0;  // lines for another session's targets, skipped
 			std::chrono::steady_clock::time_point started;
@@ -1072,6 +1084,18 @@ namespace DCLF
 			// Keys the step requested whose build has not finished. Their builds are not logged as on demand.
 			ankerl::unordered_dense::set<PipelineKey, PipelineKeyHash> main;
 			ankerl::unordered_dense::set<ShadowPipelineKey, ShadowPipelineKeyHash> shadow;
+			ankerl::unordered_dense::set<ForwardPipelineKey, ForwardPipelineKeyHash> forward;
+			std::array<bool, kDrawFamilyLanes> families{};
+			bool refraction = false;
+			// Expanded keys play has not asked for, with their manifest lines. A build of one is not recorded in the manifest until
+			// play asks for it, and a failed one is listed as unbuildable. Kept for the session.
+			ankerl::unordered_dense::map<PipelineKey, ManifestLine, PipelineKeyHash> expandedMain;
+			ankerl::unordered_dense::map<ShadowPipelineKey, ManifestLine, ShadowPipelineKeyHash> expandedShadow;
+			std::uint32_t expandedFailed = 0;
+			// A draw family's state bits when its build took a recorded state not yet checked, else ~0.
+			std::array<std::uint32_t, kDrawFamilyLanes> familyRecordedBits = MakeFamilyRecordedBits();
+			// Draw families built from a recorded state the live one contradicted, built again once their build finished.
+			std::array<bool, kDrawFamilyLanes> familyRebuild{};
 			// Manifest states used until the render thread reads the live ones, then checked against them.
 			ankerl::unordered_dense::map<std::uint32_t, EngineState> recordedStates;
 			// Keys built from a recorded state not checked yet, with its bits.
@@ -1082,6 +1106,13 @@ namespace DCLF
 			std::uint32_t otherTargets = 0;
 			std::string sources;
 			std::chrono::steady_clock::time_point startedAt;
+
+			static std::array<std::uint32_t, kDrawFamilyLanes> MakeFamilyRecordedBits()
+			{
+				std::array<std::uint32_t, kDrawFamilyLanes> bits;
+				bits.fill(~0u);
+				return bits;
+			}
 		};
 		Precompile precompile;
 
@@ -1098,6 +1129,24 @@ namespace DCLF
 		static PipelineWords ShadowManifestIdentity(const ShadowPipelineKey& a_key, DXGI_FORMAT a_format, const ShadowRasterState& a_state);
 		/** @brief Decodes a shadow line. The key's view state is left 0. False when malformed. */
 		static bool ShadowFromManifest(const PipelineWords& a_identity, ShadowPipelineKey& a_key, DXGI_FORMAT& a_format, ShadowRasterState& a_state);
+		/** @brief Decodes state words (EngineStateWords). False when malformed or not for a_bits. */
+		static bool EngineStateFromWords(const PipelineWords& a_inputs, std::uint32_t a_bits, EngineState& a_state);
+		/** @brief A forward key's manifest identity: the key's words, its view's targets and the winding. */
+		static PipelineWords ForwardManifestIdentity(const ForwardPipelineKey& a_key, const ForwardTargets& a_targets, bool a_frontCCW);
+		/** @brief Decodes a forward line. False when malformed. */
+		static bool ForwardFromManifest(const PipelineWords& a_identity, ForwardPipelineKey& a_key, ForwardTargets& a_targets, bool& a_frontCCW);
+		/** @brief A draw family's manifest tag: kDrawFamilyPipelineTagPrefix and its key name. */
+		static std::string DrawFamilyManifestTag(Api::DrawFamily a_family);
+		/** @brief A draw family's manifest identity: the main targets and the winding. Its inputs are its write mode's state words. */
+		static PipelineWords DrawFamilyManifestIdentity(const TargetFormats& a_targets, bool a_frontCCW);
+		/** @brief Decodes a draw family's identity. False when malformed. */
+		static bool DrawFamilyFromManifest(const PipelineWords& a_identity, TargetFormats& a_targets, bool& a_frontCCW);
+		/** @brief The refraction pipeline's manifest identity: the normals format, the depth format, the write mask and the winding. */
+		static PipelineWords RefractionManifestIdentity(DXGI_FORMAT a_format, DXGI_FORMAT a_depthFormat, std::uint8_t a_writeMask, bool a_frontCCW);
+		/** @brief Lane. Play asked for a main key. If the expander made it, it joins the local manifest now, unless its build failed. */
+		void PromoteExpanded(const PipelineKey& a_key);
+		/** @brief Lane. PromoteExpanded for a shadow key. */
+		void PromoteExpandedShadow(const ShadowPipelineKey& a_key);
 		/**
 		 * @brief Render thread (or the main thread before any world frame). A shadow rasterizer state's id, registering it when new.
 		 * a_added is set when it was new, and the caller logs and posts the inputs.

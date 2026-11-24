@@ -101,13 +101,21 @@ namespace DCLF
 		// the family stays native.
 		const auto& program = family.contribution.program;
 		const std::uint32_t stateBits = std::uint32_t(program.writeMode) << kRasterWriteModeShift;
-		const auto state = input->states->find(stateBits);
-		if (state == input->states->end()) {
+		const EngineState* state = nullptr;
+		if (const auto liveState = input->states->find(stateBits); liveState != input->states->end()) {
+			state = &liveState->second;
+			precompile.familyRecordedBits[f] = ~0u;
+		} else if (const auto recorded = precompile.recordedStates.find(stateBits); recorded != precompile.recordedStates.end()) {
+			// The pipeline manifest's state, until the render thread reads the live one to check it against.
+			state = &recorded->second;
+			precompile.familyRecordedBits[f] = stateBits;
+		}
+		if (!state) {
 			if (lane.statesAsked.insert(stateBits).second)
 				completions->stateRequests.Push(stateBits);
 			return;
 		}
-		if (!state->second.valid) {
+		if (!state->valid) {
 			t.failed = true;
 			t.counters.failed.fetch_add(1, std::memory_order_relaxed);
 			lane.dirty = true;
@@ -125,7 +133,9 @@ namespace DCLF
 		if (!drawProgram)
 			return;
 		const auto& inputTargets = input->targets;
-		const auto blend = state->second.blend;
+		const auto blend = state->blend;
+		auto manifestIdentity = DrawFamilyManifestIdentity(inputTargets, *input->frontCCW);
+		auto manifestInputs = EngineStateWords(stateBits, *state);
 		const std::string id = fmt::format("dclf.{}", family.keyName);
 		const auto build = [device = device, zLayout = zLayout->GetHandle(), formats = inputTargets, blend, frontCCW = *input->frontCCW, colours = program.colours,
 							   label = std::string_view(family.label)](const ShaderPrograms::DrawProgram& a_program) {
@@ -137,12 +147,20 @@ namespace DCLF
 			},
 			build);
 		t.requested = true;
+		// Built pipelines are listed in the pipeline manifest for the next startup, and failed ones are dropped from it.
 		RequestBuild([build, drawProgram] { return build(*drawProgram); },
-			[completions = completions, f, generation = lane.generation, live = std::move(live)](Artifact a_artifact) {
+			[completions = completions, f, generation = lane.generation, live = std::move(live), manifestTag = DrawFamilyManifestTag(a_family),
+				manifestIdentity = std::move(manifestIdentity), manifestInputs = std::move(manifestInputs)](Artifact a_artifact) {
+				if (a_artifact)
+					PipelineManifest::Get().Record(manifestTag, manifestIdentity, manifestInputs);
+				else
+					PipelineManifest::Get().Forget(manifestTag, manifestIdentity);
 				completions->family[f].Push({ generation, a_artifact, live });
 				WakePipelineLane();
 			});
 		t.counters.requested.fetch_add(1, std::memory_order_relaxed);
+		if (!precompile.families[f])
+			logger::warn("[DCLF] on-demand pipeline build: {} (draw family), write mode {}", family.label, program.writeMode);
 	}
 
 	void DrawPipelines::Impl::AdmitFamiliesAndForward()
