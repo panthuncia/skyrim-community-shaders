@@ -1,6 +1,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/ShaderDebugInfo.h"
 #include "RenderGraph/ProgramService.h"
 
 #include "RenderGraph/Async/Lanes.h"
@@ -49,6 +50,7 @@ namespace RenderGraph::Programs
 		};
 		// SPIR-V builds take bound push tables where BasicRHI binds them as uniform buffers (Pascal: descriptor-sets model with
 		// push descriptors). Elsewhere on Vulkan the shared blocks stay heap-indexed, as before.
+		environment.debugInfo = [] { return ::RenderGraph::ShaderDebugInfo(); };
 		environment.spirvBoundPushTables = [] {
 			const auto* host = RenderGraphRuntime::Get().Host();
 			return host && rhi::vulkan::BoundUniformBuffers(host->Device());

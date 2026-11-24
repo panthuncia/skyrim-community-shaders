@@ -1,5 +1,6 @@
 // The stage cache, the compile requests and the pipeline lane's program entries.
 
+#include "RenderGraph/ShaderDebugInfo.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "RenderGraph/Fatal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
@@ -83,15 +84,11 @@ namespace DCLF
 			return std::wstring(a_value.begin(), a_value.end());
 		}
 
-		// Built with debug info by default (CS_DCLF_SHADER_DEBUG=0 turns it off) so crash dumps name the shader, still optimized.
+		// Debug info only in developer mode on a dev build, or with CS_DCLF_SHADER_DEBUG=1 (RenderGraph::ShaderDebugInfo), still optimized.
 		// There is deliberately no -Od form. Unoptimized code reads per-frame constant buffers the epochs do not supply, so DCLF would draw nothing.
 		bool ShaderDebug()
 		{
-#if defined(CS_RELEASE_PROFILE)
-			return SwitchValue(Switch::ShaderDebug) == "1";
-#else
-			return SwitchValue(Switch::ShaderDebug) != "0";
-#endif
+			return ::RenderGraph::ShaderDebugInfo();
 		}
 
 		// Copy the shader tree out of MO2's virtual file system so a debugger outside it can find the sources.

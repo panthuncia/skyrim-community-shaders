@@ -269,6 +269,8 @@ target_compile_definitions(
     ${PROJECT_NAME}
     PRIVATE "$<$<BOOL:${TRACY_SUPPORT}>:TRACY_SUPPORT>"
     PRIVATE "$<$<BOOL:${CS_RELEASE_PROFILE}>:CS_RELEASE_PROFILE>"
+    # Dev-Fast and Debug builds may compile shader stages with debug info (RenderGraph::ShaderDebugInfo). Release builds never do.
+    PRIVATE "$<$<OR:$<BOOL:${SC_DEVFAST_OPTS}>,$<CONFIG:Debug>>:CS_SHADER_DEBUG_BUILD>"
     PRIVATE "$<$<BOOL:${ENABLE_ENB_EXTENDER}>:ENABLE_ENB_EXTENDER>"
 )
 
