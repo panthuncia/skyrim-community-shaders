@@ -20,7 +20,7 @@ from .stage import load_manifest
 
 # SSE Display Tweaks reads this file after its own ini; game.uncapped writes it for one run.
 DISPLAY_TWEAKS_FILE = "SSEDisplayTweaks_custom.ini"
-# [prefs_ini] edits this file in the MO2 profile for one run.
+# [prefs_ini] edits this file (the one the game reads, prefs_ini_path) for one run.
 PREFS_INI = "SkyrimPrefs.ini"
 DISPLAY_TWEAKS_UNCAPPED = "[Render]\nEnableVSync=false\nEnableTearing=true\nFramerateLimit=0\n"
 
@@ -252,12 +252,44 @@ def set_ini_values(text, values):
     return "\n".join(lines) + "\n"
 
 
+def documents_dir():
+    """The user's Documents folder, where the game keeps its INI files when the MO2 profile has none of its own."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("a", wintypes.DWORD), ("b", wintypes.WORD), ("c", wintypes.WORD), ("d", ctypes.c_ubyte * 8)]
+
+        # FOLDERID_Documents. It follows a moved or OneDrive Documents folder.
+        folder = GUID(0xFDD39AD0, 0x238F, 0x46AF, (ctypes.c_ubyte * 8)(0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7))
+        out = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(out)) == 0:
+            path = Path(out.value)
+            ctypes.windll.ole32.CoTaskMemFree(out)
+            return path
+    except (AttributeError, OSError):
+        pass
+    return Path.home() / "Documents"
+
+
+def prefs_ini_path(paths):
+    """The SkyrimPrefs.ini the game reads: the profile's own with LocalSettings=true in its settings.ini, else the one in Documents."""
+    profile = paths.mo2 / "profiles" / paths.profile
+    settings = profile / "settings.ini"
+    text = settings.read_text(encoding="latin-1") if settings.exists() else ""
+    local = any(line.strip().lower().replace(" ", "") == "localsettings=true" for line in text.splitlines())
+    if local:
+        return profile / PREFS_INI
+    return documents_dir() / "My Games" / "Skyrim Special Edition" / PREFS_INI
+
+
 def write_prefs_ini(paths, run_id, prefs, journal, log=print):
-    """[prefs_ini]: written into the MO2 profile's own SkyrimPrefs.ini for this run. The journal puts the file from before back.
-    The profile must use its own game INI files; the game reads the ones in Documents otherwise, and the run stops."""
-    target = paths.mo2 / "profiles" / paths.profile / PREFS_INI
+    """[prefs_ini]: written into the SkyrimPrefs.ini the game reads (prefs_ini_path) for this run. The journal puts the file from
+    before back."""
+    target = prefs_ini_path(paths)
     if not target.exists():
-        raise RunError(f"{target} is missing: prefs_ini needs the MO2 profile to use its own game INI files")
+        raise RunError(f"{target} is missing: prefs_ini edits the game's SkyrimPrefs.ini, which the game makes at its first launch")
     backup = paths.root / "aside" / f"{run_id}-{PREFS_INI}"
     backup.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(target, backup)
