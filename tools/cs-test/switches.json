@@ -281,6 +281,16 @@
 			"description": ""
 		},
 		{
+			"name": "BASICRHI_VK_PIPELINE_BINARY",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": "0: no pipeline binary store; the lowered binding models lower and compile every pipeline each run, through the pipeline cache"
+		},
+		{
 			"name": "BASICRHI_VK_VALIDATE_LOWERING",
 			"key": "",
 			"type": "string",

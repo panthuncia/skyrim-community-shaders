@@ -19,8 +19,10 @@ namespace RenderGraph::PipelineCache
 
 		std::atomic<bool> saving{ false };
 		std::atomic<bool> saveAsked{ false };  // RequestSave: the next tick saves without the quiet wait
-		std::uint64_t savedMisses = 0;  // misses at the last save
-		std::uint64_t lastMisses = 0;   // misses at the last tick
+		// Changes: pipelines the cache missed plus the pipeline binary store's changes (entries added or first used), the two
+		// things a save writes.
+		std::uint64_t savedChanges = 0;  // changes at the last save
+		std::uint64_t lastChanges = 0;   // changes at the last tick
 		Clock::time_point lastAdded{};
 		bool reported = false;
 
@@ -35,6 +37,11 @@ namespace RenderGraph::PipelineCache
 			case rhi::PipelineCacheLoadResult::Unsupported: return "not supported";
 			}
 			return "?";
+		}
+
+		std::uint64_t Changes(const rhi::PipelineCacheStats& a_stats)
+		{
+			return a_stats.misses + a_stats.binaryChanges;
 		}
 	}
 
@@ -59,23 +66,25 @@ namespace RenderGraph::PipelineCache
 		const auto now = Clock::now();
 		if (!reported) {
 			reported = true;
-			logger::info("[ORG] pipeline cache: {} ({} KB read)", LoadName(stats.load), stats.loadedBytes >> 10);
+			logger::info("[ORG] pipeline cache: {} ({} KB read); pipeline binaries: {} ({} entries, {} KB read)", LoadName(stats.load), stats.loadedBytes >> 10,
+				LoadName(stats.binaryLoad), stats.binaryEntries, stats.binaryLoadedBytes >> 10);
 		}
 		const bool asked = saveAsked.load();
-		if (stats.misses != lastMisses) {
-			lastMisses = stats.misses;
+		const std::uint64_t changes = Changes(stats);
+		if (changes != lastChanges) {
+			lastChanges = changes;
 			lastAdded = now;
 			if (!asked)
 				return;
 		}
-		if (stats.misses == savedMisses) {
+		if (changes == savedChanges) {
 			saveAsked.store(false);  // nothing new to save
 			return;
 		}
 		if ((!asked && now - lastAdded < kQuiet) || saving.exchange(true))
 			return;
 		saveAsked.store(false);
-		savedMisses = stats.misses;
+		savedChanges = changes;
 		std::thread([device = a_device, hits = stats.hits, misses = stats.misses] {
 			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
 			const auto result = (*device)->SavePipelineCache();
@@ -83,6 +92,9 @@ namespace RenderGraph::PipelineCache
 			(void)(*device)->GetPipelineCacheStats(after);
 			logger::info("[ORG] pipeline cache saved ({}): {} KB, {} pipelines served from it and {} built so far", result == rhi::Result::Ok ? "ok" : "failed",
 				after.savedBytes >> 10, hits, misses);
+			if (after.binaryLoad != rhi::PipelineCacheLoadResult::Off && after.binaryLoad != rhi::PipelineCacheLoadResult::Unsupported)
+				logger::info("[ORG] pipeline binaries: {} KB, {} entries ({} added this session, {} left out as unused), {} pipelines made from them and {} built",
+					after.binarySavedBytes >> 10, after.binaryEntries, after.binaryStored, after.binaryPruned, after.binaryHits, after.binaryMisses);
 			saving.store(false);
 			saving.notify_all();
 		}).detach();
