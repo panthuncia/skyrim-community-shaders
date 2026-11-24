@@ -583,19 +583,37 @@ namespace DCLF::Family
 		for (const auto id : added)
 			next->emplace(id);
 		declared.store(std::move(next), std::memory_order_release);
+		declaredSerial.fetch_add(1, std::memory_order_release);
 		return reads;
 	}
 
 	InputResult PublishedInputs::Resolve(std::string_view a_id, std::uint32_t& a_index) const
 	{
-		if (a_id.empty() || std::ranges::find(ids, a_id) == ids.end())
+		const auto listed = a_id.empty() ? ids.end() : std::ranges::find(ids, a_id);
+		if (listed == ids.end())
 			return InputResult::NotListed;
-		// An undeclared id must never be read, since nothing orders the read after its writes.
-		const auto known = declared.load(std::memory_order_acquire);
-		if (!known || !known->contains(a_id))
-			return InputResult::PublishedLate;
-		RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
-		return PublishedResources::ShaderResourceIndex(a_id, a_index) ? InputResult::Graph : InputResult::NoView;
+		const std::uint64_t frame = ::RenderGraph::Frame::Driver::Current().frame;
+		const std::uint64_t serial = declaredSerial.load(std::memory_order_acquire);
+		if (answersFrame != frame || answersSerial != serial || answers.size() != ids.size()) {
+			answers.assign(ids.size(), {});
+			answersFrame = frame;
+			answersSerial = serial;
+		}
+		auto& answer = answers[static_cast<std::size_t>(listed - ids.begin())];
+		if (!answer.asked) {
+			answer.asked = true;
+			// An undeclared id must never be read, since nothing orders the read after its writes.
+			const auto known = declared.load(std::memory_order_acquire);
+			if (!known || !known->contains(a_id)) {
+				answer.result = InputResult::PublishedLate;
+			} else {
+				RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
+				answer.result = PublishedResources::ShaderResourceIndex(a_id, answer.index) ? InputResult::Graph : InputResult::NoView;
+			}
+		}
+		if (answer.result == InputResult::Graph)
+			a_index = answer.index;
+		return answer.result;
 	}
 
 	std::string PublishedInputs::Describe() const

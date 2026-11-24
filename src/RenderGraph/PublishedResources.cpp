@@ -7,6 +7,7 @@
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -93,6 +94,19 @@ namespace PublishedResources
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 			// Bumped after each snapshot store, so a thread can keep its last load while it holds.
 			std::atomic<std::uint64_t> snapshotGeneration{ 0 };
+			// Bumped by every change to an entry (PublishEntry). Render owner.
+			std::uint64_t entriesSerial = 0;
+			// Which entry exports a view, for ExportedId and IsExport: they are asked per draw and per texture slot. A versioned
+			// twin's export changes only when a version is adopted, at a frame's Begin, so the answers hold for one frame and one
+			// entriesSerial. Render owner.
+			struct ExportAnswer
+			{
+				std::uint32_t first = UINT32_MAX;  // the first entry whose export it is
+				std::uint32_t named = UINT32_MAX;  // the first such entry with an id
+			};
+			ankerl::unordered_dense::map<const ID3D11ShaderResourceView*, ExportAnswer> exportAnswers;
+			std::uint64_t exportAnswersFrame = ~0ull;
+			std::uint64_t exportAnswersSerial = ~0ull;
 		};
 
 		// The snapshot the graph being built on this thread registers. Weak, so a thread's last build pins nothing.
@@ -270,6 +284,7 @@ namespace PublishedResources
 		bool PublishEntry(std::string_view a_id, const Source& a_source, std::optional<org::SRVViewType> a_view)
 		{
 			auto& state = Published();
+			++state.entriesSerial;
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto* entry = Find(state, a_id);
 			// A slot's entry holds no version. Its readers follow the slot (CurrentOf).
@@ -450,7 +465,7 @@ namespace PublishedResources
 		auto snapshot = t_building.lock();
 		if (!snapshot)
 			snapshot = state.snapshot.load(std::memory_order_acquire);
-		if (snapshot && std::ranges::any_of(snapshot->resources, [&](const Snapshot::Registered& a_entry) { return a_entry.id == a_id; }))
+		if (snapshot && snapshot->Find(a_id))
 			return RenderGraphRuntime::Get().IsActive();
 		std::scoped_lock lock(state.skippedMutex);
 		if (std::ranges::find(state.skipped, a_id) == state.skipped.end())
@@ -535,26 +550,54 @@ namespace PublishedResources
 		return source.published && source.current ? source.current->GetGlobalResourceID() : 0;
 	}
 
+	namespace
+	{
+		/** @brief Which entries export a view (State::exportAnswers). A cached entry is checked again before it is used. */
+		State::ExportAnswer ExportAnswerOf(const ID3D11ShaderResourceView* a_view)
+		{
+			CheckThread();
+			auto& state = Published();
+			const std::uint64_t frame = RenderGraph::Frame::Driver::Current().frame;
+			if (state.exportAnswersFrame != frame || state.exportAnswersSerial != state.entriesSerial) {
+				state.exportAnswers.clear();
+				state.exportAnswersFrame = frame;
+				state.exportAnswersSerial = state.entriesSerial;
+			}
+			if (const auto found = state.exportAnswers.find(a_view); found != state.exportAnswers.end()) {
+				const auto answer = found->second;
+				const bool current = answer.first == UINT32_MAX || ExportOf(state.entries[answer.first]) == a_view;
+				if (current)
+					return answer;
+			}
+			State::ExportAnswer answer;
+			for (std::uint32_t i = 0; i < state.entries.size(); ++i) {
+				if (ExportOf(state.entries[i]) != a_view)
+					continue;
+				if (answer.first == UINT32_MAX)
+					answer.first = i;
+				if (!state.entries[i].id.empty()) {
+					answer.named = i;
+					break;
+				}
+			}
+			state.exportAnswers[a_view] = answer;
+			return answer;
+		}
+	}
+
 	std::string ExportedId(const ID3D11ShaderResourceView* a_view)
 	{
 		if (!a_view)
 			return {};
-		CheckThread();
-		for (const auto& entry : Published().entries)
-			if (ExportOf(entry) == a_view)
-				return entry.id;
-		return {};
+		const auto answer = ExportAnswerOf(a_view);
+		return answer.first != UINT32_MAX ? Published().entries[answer.first].id : std::string{};
 	}
 
 	bool IsExport(const ID3D11ShaderResourceView* a_view)
 	{
 		if (!a_view)
 			return false;
-		CheckThread();
-		for (const auto& entry : Published().entries)
-			if (ExportOf(entry) == a_view && !entry.id.empty())
-				return true;
-		return false;
+		return ExportAnswerOf(a_view).named != UINT32_MAX;
 	}
 }
 

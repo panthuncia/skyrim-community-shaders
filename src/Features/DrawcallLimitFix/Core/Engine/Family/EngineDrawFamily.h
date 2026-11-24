@@ -351,6 +351,18 @@ namespace DCLF::Family
 		std::vector<std::string> ids;
 		// Replaced whole and only grows. Atomic because a graph may be built on the host's owner thread.
 		std::atomic<std::shared_ptr<const PublishedIds>> declared;
+		std::atomic<std::uint64_t> declaredSerial{ 0 };  // bumped with each replacement of declared
+		// Resolve's answers, per listed id, for one frame and one declared set: draws of a frame ask the same ids again and again,
+		// and an id's index changes only when a version is adopted, at a frame's Begin. Render thread.
+		struct Answer
+		{
+			bool asked = false;
+			InputResult result = InputResult::NotListed;
+			std::uint32_t index = 0;
+		};
+		mutable std::vector<Answer> answers;
+		mutable std::uint64_t answersFrame = ~0ull;
+		mutable std::uint64_t answersSerial = ~0ull;
 	};
 
 	/** @brief The engine sampler for a slot's address and filter modes, or kInvalid. */

@@ -212,6 +212,16 @@ namespace FrameAnchors
 			return Table::Has(a_step.clients, a_client.id);
 		}
 
+		/** @brief The steps of a declared segment that hold a client, a bit per step. */
+		std::uint32_t StepMaskOf(std::uint32_t a_declared, const ClientDesc& a_client)
+		{
+			std::uint32_t mask = 0;
+			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k)
+				if (StepHolds(declaredInfo[a_declared].steps[k], a_client))
+					mask |= 1u << k;
+			return mask;
+		}
+
 		/** @brief The range of a_client's instances this step makes. */
 		std::pair<std::uint32_t, std::uint32_t> StepInstances(const Step& a_step, const ClientDesc& a_client)
 		{
@@ -505,6 +515,28 @@ namespace FrameAnchors
 			std::vector<std::pair<std::string, std::shared_ptr<org::VersionedTexture>>> imports;  // each id's slot
 			// Each declared segment's clients in registration order, made once at Publish.
 			std::array<std::vector<std::shared_ptr<const ClientDesc>>, kDeclared> segmentClients;
+			// For each segmentClients entry, the segment's steps that hold it (a bit per step). Made at Publish.
+			std::array<std::vector<std::uint32_t>, kDeclared> segmentClientSteps;
+			// Each declared segment's steps whose clients read CS's shared constants (a bit per step). Made at Publish.
+			std::array<std::uint32_t, kDeclared> sharedConstantSteps{};
+			// Positions by id (ids are unique among the clients): in clients, and in each segmentClients. Made at Publish; the keys
+			// are the descs' ids, which the snapshot holds.
+			std::unordered_map<std::string_view, std::uint32_t> clientById;
+			std::array<std::unordered_map<std::string_view, std::uint32_t>, kDeclared> segmentById;
+
+			/** @brief The client with a_desc's id, or null. */
+			const std::shared_ptr<const ClientDesc>* ClientOf(const ClientDesc& a_desc) const
+			{
+				const auto found = clientById.find(a_desc.id);
+				return found != clientById.end() ? &clients[found->second] : nullptr;
+			}
+
+			/** @brief Whether it holds exactly a_desc. */
+			bool HoldsDesc(const std::shared_ptr<const ClientDesc>& a_desc) const
+			{
+				const auto* held = a_desc ? ClientOf(*a_desc) : nullptr;
+				return held && *held == a_desc;
+			}
 		};
 
 		/** @brief A registered client and what the anchors keep about it. Render thread. */
@@ -516,6 +548,9 @@ namespace FrameAnchors
 			// The declared segments that hold it, a bit each. Taps check this instead of comparing client ids.
 			const ClientDesc* heldOf = nullptr;
 			std::uint64_t held = 0;
+			// Made at Publish from desc: the anchors it has passes at (AnchorMask), and each declared segment's steps that hold it.
+			std::uint32_t anchors = 0;
+			std::array<std::uint32_t, kDeclared> steps{};
 		};
 
 		/**
@@ -535,6 +570,8 @@ namespace FrameAnchors
 			bool frozen = false;  // AddToFrame ran: the stages are the frame's epochs
 			org::GraphHost* host = nullptr;
 			std::vector<Client> clients;
+			// Each client's index in clients by id, the ids in the clients' descs. Made at Publish, which follows every change.
+			std::unordered_map<std::string_view, std::size_t> clientIndex;
 			std::map<std::string, std::shared_ptr<EngineImport>, std::less<>> imports; // by graph id. Ids of one image share an entry
 			std::vector<std::weak_ptr<EngineImport>> loose;                             // the owners of ShareImage's slots no id names
 			std::uint64_t serial = 0;                                  // bumped by every Publish
@@ -620,8 +657,11 @@ namespace FrameAnchors
 
 		Client* FindClient(State& a_state, std::string_view a_id)
 		{
-			const auto found = std::ranges::find_if(a_state.clients, [&](const Client& a_client) { return a_client.desc->id == a_id; });
-			return found != a_state.clients.end() ? &*found : nullptr;
+			const auto found = a_state.clientIndex.find(a_id);
+			if (found == a_state.clientIndex.end() || found->second >= a_state.clients.size())
+				return nullptr;
+			auto& client = a_state.clients[found->second];
+			return client.desc->id == a_id ? &client : nullptr;
 		}
 
 		/** @brief The declared segment of a segment epoch's graph, or kDeclared. */
@@ -665,6 +705,15 @@ namespace FrameAnchors
 
 		bool SegmentHolds(std::uint32_t a_declared, const ClientDesc& a_client);
 
+		std::uint32_t AnchorMask(const ClientDesc& a_client)
+		{
+			std::uint32_t mask = 0;
+			for (const auto& pass : a_client.passes)
+				if (IndexOf(pass.anchor) < kAnchors)
+					mask |= 1u << IndexOf(pass.anchor);
+			return mask;
+		}
+
 		/** @brief Publishes the clients and imports as they are now, for the next builds. */
 		void Publish(State& a_state)
 		{
@@ -685,8 +734,26 @@ namespace FrameAnchors
 				snapshot->imports.emplace_back(id, import->slot);
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
 				for (const auto& client : snapshot->clients)
-					if (SegmentHolds(d, *client))
+					if (const auto steps = StepMaskOf(d, *client)) {
 						snapshot->segmentClients[d].push_back(client);
+						snapshot->segmentClientSteps[d].push_back(steps);
+						if (client->sharedConstants)
+							snapshot->sharedConstantSteps[d] |= steps;
+					}
+			for (std::uint32_t i = 0; i < snapshot->clients.size(); ++i)
+				snapshot->clientById.emplace(snapshot->clients[i]->id, i);
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				for (std::uint32_t i = 0; i < snapshot->segmentClients[d].size(); ++i)
+					snapshot->segmentById[d].emplace(snapshot->segmentClients[d][i]->id, i);
+			// What lookups by id and taps read of each client, made once here instead of at every lookup and tap.
+			a_state.clientIndex.clear();
+			for (std::size_t i = 0; i < a_state.clients.size(); ++i) {
+				auto& client = a_state.clients[i];
+				client.anchors = AnchorMask(*client.desc);
+				for (std::uint32_t d = 0; d < kDeclared; ++d)
+					client.steps[d] = StepMaskOf(d, *client.desc);
+				a_state.clientIndex.emplace(client.desc->id, i);
+			}
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 		}
 
@@ -703,14 +770,6 @@ namespace FrameAnchors
 				RenderGraph::Builds::Ask({ .epochs = std::move(epochs), .structural = a_structural }, fmt::format("frame anchors: {}", a_reason));
 		}
 
-		std::uint32_t AnchorMask(const ClientDesc& a_client)
-		{
-			std::uint32_t mask = 0;
-			for (const auto& pass : a_client.passes)
-				if (IndexOf(pass.anchor) < kAnchors)
-					mask |= 1u << IndexOf(pass.anchor);
-			return mask;
-		}
 
 		/** @brief Closes a departed registration's gates at every run until its anchors are rebuilt without it. a_kept belongs to the replacement. */
 		void RetireGates(State& a_state, const ClientDesc& a_client, const std::vector<std::shared_ptr<RenderGraph::RunGate>>& a_kept = {})
@@ -838,17 +897,13 @@ namespace FrameAnchors
 		/** @brief Whether a step's clients read CS's shared constants, so the segment uploads them for that step. */
 		bool StepUsesSharedConstants(const Snapshot& a_snapshot, std::uint32_t a_declared, std::uint32_t a_step)
 		{
-			const auto& step = declaredInfo[a_declared].steps[a_step];
-			return std::ranges::any_of(a_snapshot.clients, [&](const auto& a_client) { return a_client->sharedConstants && StepHolds(step, *a_client); });
+			return (a_snapshot.sharedConstantSteps[a_declared] >> a_step & 1u) != 0;
 		}
 
 		/** @brief Whether any step of a declared segment reads CS's shared constants. */
 		bool SegmentUsesSharedConstants(const Snapshot& a_snapshot, std::uint32_t a_declared)
 		{
-			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k)
-				if (StepUsesSharedConstants(a_snapshot, a_declared, k))
-					return true;
-			return false;
+			return a_snapshot.sharedConstantSteps[a_declared] != 0;
 		}
 
 		class AnchorExtension final : public org::RenderGraph::IRenderGraphExtension
@@ -1822,6 +1877,7 @@ namespace FrameAnchors
 			std::shared_ptr<const ClientDesc> desc;
 			std::uint64_t serial = 0;
 			bool active = false;
+			std::array<std::uint32_t, kDeclared> steps{};  // Client::steps
 		};
 	}
 
@@ -2627,8 +2683,9 @@ namespace FrameAnchors
 			const std::uint32_t local = a_state.stepTaps[a_declared][a_step]++;
 			const std::uint32_t instance = step.firstInstance + local;
 			const auto& clients = SegmentClients(*built, a_declared);
+			const auto& clientSteps = built->segmentClientSteps[a_declared];
 			for (std::size_t i = 0; i < clients.size(); ++i) {
-				if (!StepHolds(step, *clients[i]))
+				if (!(clientSteps[i] >> a_step & 1u))
 					continue;
 				const auto found = std::ranges::find_if(a_clients, [&](const RunClient& a_client) { return SameClient(clients[i], a_client.desc); });
 				const bool active = found != a_clients.end() && found->active;
@@ -2849,7 +2906,7 @@ namespace FrameAnchors
 				if (!(frame.Segment(static_cast<SegmentId>(d)) == a_state.frameWanted[d]))
 					return true;
 				const auto& built = a_state.frameBuilt[d];
-				if (built && std::ranges::find(built->clients, a_client.desc) != built->clients.end())
+				if (built && built->HoldsDesc(a_client.desc))
 					return true;
 			}
 			return !held;
@@ -2870,7 +2927,7 @@ namespace FrameAnchors
 			if (!state.declaredEpochs[d] || !ClientHolds(*client, d) || !WindowOpen(state, d))
 				continue;
 			const auto& built = state.frameBuilt[d];
-			if (!built || std::ranges::find(built->clients, client->desc) == built->clients.end())
+			if (!built || !built->HoldsDesc(client->desc))
 				continue;
 			// The client must be on in the frame's schedule: its passes do work only then.
 			const auto& clients = SegmentClients(*built, d);
@@ -3366,11 +3423,11 @@ namespace FrameAnchors
 		std::vector<RunClient> clients;
 		bool work = false;
 		for (const auto& client : state.clients) {
-			if (!HasPassesAt(*client.desc, a_point.anchor))
+			if (!(client.anchors >> index & 1u))
 				continue;
 			const bool active = !client.desc->active || client.desc->active();
 			work = work || active;
-			clients.push_back({ client.desc, client.serial, active });
+			clients.push_back({ client.desc, client.serial, active, client.steps });
 		}
 		// Declared segments: an anchor a segment holds wholly is one of its taps whenever it fires.
 		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared) {
@@ -3408,8 +3465,11 @@ namespace FrameAnchors
 							continue;
 						std::vector<RunClient> stepMembers;
 						for (auto it = others.begin(); it != others.end();) {
-							const bool member = built && StepHolds(stepInfo, *it->desc) &&
-							                    std::ranges::any_of(built->clients, [&](const auto& a_built) { return SameClient(a_built, it->desc); });
+							const bool member = built && (it->steps[declared] >> k & 1u) &&
+							                    [&] {
+								                    const auto* held = built->ClientOf(*it->desc);
+								                    return held && SameClient(*held, it->desc);
+							                    }();
 							if (member) {
 								stepMembers.push_back(*it);
 								it = others.erase(it);
@@ -3484,6 +3544,16 @@ namespace FrameAnchors
 
 	namespace
 	{
+		/** @brief The steps of a_declared at a_anchor, a bit per step. Every step for Count. */
+		std::uint32_t StepsAtAnchor(std::uint32_t a_declared, Anchor a_anchor)
+		{
+			std::uint32_t mask = 0;
+			for (std::uint32_t k = 0; k < declaredInfo[a_declared].stepCount; ++k)
+				if (a_anchor == Anchor::Count || declaredInfo[a_declared].steps[k].anchor == a_anchor)
+					mask |= 1u << k;
+			return mask;
+		}
+
 		/** @brief Whether a step of a_declared at a_anchor holds the client. Any anchor for Count. */
 		bool StepAtHolds(std::uint32_t a_declared, Anchor a_anchor, const ClientDesc& a_client)
 		{
@@ -3508,17 +3578,21 @@ namespace FrameAnchors
 			}
 			const auto& last = a_state.frameBuilt[a_declared];
 			const auto built = last ? last : a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
-			a_place.built = built && std::ranges::any_of(built->clients, [&](const auto& a_held) { return SameClient(a_held, a_client.desc); });
+			const auto* held = built ? built->ClientOf(*a_client.desc) : nullptr;
+			a_place.built = held && SameClient(*held, a_client.desc);
 			bool inSchedule = false;
 			if (fields.declared && last) {
+				// Ids are unique in a snapshot, so the client's position in the segment is found by its id.
 				const auto& clients = SegmentClients(*last, a_declared);
-				for (std::size_t i = 0; i < clients.size() && i < RenderGraph::Frame::kSegmentClients; ++i) {
-					if (!SameClient(clients[i], a_client.desc) || !StepAtHolds(a_declared, a_anchor, *clients[i]))
-						continue;
-					inSchedule = true;
-					a_place.draws = (fields.clientsOn >> i & 1u) != 0;
-					a_place.generation = clients[i]->generation;
-					break;
+				const auto& byId = last->segmentById[a_declared];
+				if (const auto found = byId.find(a_client.desc->id); found != byId.end()) {
+					const std::size_t i = found->second;
+					if (i < RenderGraph::Frame::kSegmentClients && SameClient(clients[i], a_client.desc) &&
+						(last->segmentClientSteps[a_declared][i] & StepsAtAnchor(a_declared, a_anchor)) != 0) {
+						inSchedule = true;
+						a_place.draws = (fields.clientsOn >> i & 1u) != 0;
+						a_place.generation = clients[i]->generation;
+					}
 				}
 			}
 			a_place.reason = a_place.draws ? Reason::None : inSchedule ? Reason::Off : MayLag(a_state, a_client) ? Reason::Behind : Reason::Missing;
@@ -3548,7 +3622,7 @@ namespace FrameAnchors
 				if (!state.declaredEpochs[d] || !ClientHolds(*client, d) || !WindowOpen(state, d))
 					continue;
 				const auto& built = state.frameBuilt[d];
-				const bool holds = built && std::ranges::find(built->clients, client->desc) != built->clients.end();
+				const bool holds = built && built->HoldsDesc(client->desc);
 				if (found == kDeclared || holds)
 					found = d;
 				if (holds)
@@ -3574,7 +3648,8 @@ namespace FrameAnchors
 				// Work queued before the next Begin, such as a Bink tick, asks whether the stage's last build holds the client.
 				const auto& last = state.frameBuilt[declared];
 				const auto built = last ? last : state.declaredSnapshots[declared].load(std::memory_order_acquire);
-				place.built = built && std::ranges::any_of(built->clients, [&](const auto& a_held) { return SameClient(a_held, client->desc); });
+				const auto* held = built ? built->ClientOf(*client->desc) : nullptr;
+				place.built = held && SameClient(*held, client->desc);
 				return place;
 			}
 			PlaceInStage(state, *client, declared, a_anchor, place);
@@ -3585,7 +3660,7 @@ namespace FrameAnchors
 			if (!WindowOpen(state, d))
 				continue;
 			for (std::uint32_t k = 0; k < declaredInfo[d].stepCount; ++k)
-				if (declaredInfo[d].steps[k].anchor == a_anchor && StepTakesTaps(state, d, k) && StepHolds(declaredInfo[d].steps[k], *client->desc)) {
+				if (declaredInfo[d].steps[k].anchor == a_anchor && StepTakesTaps(state, d, k) && (client->steps[d] >> k & 1u)) {
 					PlaceInStage(state, *client, d, a_anchor, place);
 					return place;
 				}

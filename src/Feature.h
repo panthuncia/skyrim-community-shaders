@@ -319,6 +319,8 @@ public:
 	virtual void ClearShaderCache() {}
 
 	static const std::vector<Feature*>& GetFeatureList();
+	/** @brief Each listed feature's VRAM owner (GetVramOwner), in GetFeatureList's order. Made once. */
+	static const std::vector<const char*>& GetVramOwners();
 
 	/**
 	 * @brief Finds a loaded feature by its short name.
@@ -402,10 +404,13 @@ public:
 	template <typename Func>
 	static inline void ForEachLoadedFeature(std::string_view methodName, Func&& callback, bool emitGpuZone = false)
 	{
-		for (auto* feature : GetFeatureList()) {
+		const auto& features = GetFeatureList();
+		const auto& owners = GetVramOwners();
+		for (std::size_t i = 0; i < features.size(); ++i) {
+			auto* feature = features[i];
 			if (feature->loaded) {
 				// What DXVK creates during the callback is the feature's memory (VRAM attribution).
-				Vram::OwnerScope vramScope(feature->GetVramOwner());
+				Vram::OwnerScope vramScope(owners[i]);
 				const bool gpuEvent = emitGpuZone && s_beginGpuEvent && s_endGpuEvent;
 				if (gpuEvent)
 					s_beginGpuEvent(std::format("{}::{}", feature->GetShortName(), methodName));

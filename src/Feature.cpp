@@ -300,9 +300,24 @@ bool Feature::ToggleAtBootSetting()
 	return state->IsFeatureDisabled(featureName);  // Return the new state
 }
 
+const std::vector<const char*>& Feature::GetVramOwners()
+{
+	static const std::vector<const char*> owners = [] {
+		std::vector<const char*> list;
+		for (auto* feature : GetFeatureList())
+			list.push_back(Vram::FeatureOwner(feature->GetShortName()));
+		return list;
+	}();
+	return owners;
+}
+
 const char* Feature::GetVramOwner()
 {
-	// Cached outside the class: a member would change every feature's layout (and padding). Read on every feature callback.
+	// A listed feature's owner from the table made once; others are cached outside the class (a member would change every
+	// feature's layout and padding).
+	const auto& features = GetFeatureList();
+	if (const auto it = std::ranges::find(features, this); it != features.end())
+		return GetVramOwners()[static_cast<std::size_t>(it - features.begin())];
 	static std::shared_mutex mutex;
 	static std::unordered_map<const Feature*, const char*> owners;
 	{
