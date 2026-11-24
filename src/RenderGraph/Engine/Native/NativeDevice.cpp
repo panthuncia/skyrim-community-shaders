@@ -1049,6 +1049,10 @@ namespace RenderGraph::Engine::Native
 			std::atomic<bool> hdr10Supported = false;
 			// The render thread queues a present only once the one before has finished.
 			std::atomic<uint64_t> queuedPresents = 0, donePresents = 0;
+			// Each queued present's copy value on the present timeline (0: it copied nothing), by its number in queuedPresents. The
+			// render thread paces on them (QueuePresent), so the submission thread's present never waits for frame latency.
+			static constexpr uint32_t kPacedPresents = 16;
+			std::array<std::atomic<uint64_t>, kPacedPresents> pacedCopies{};
 
 			// Each present drains BasicRHI's queued validation messages into the log.
 			bool validation = false;
@@ -2105,8 +2109,8 @@ namespace RenderGraph::Engine::Native
 				desc.colorSpace = hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
 				if (const auto created = Rhi().CreateSwapchain(desc, swapchain); created != rhi::Result::Ok || !swapchain)
 					RenderGraph::Fatal("native device", fmt::format("the swap chain could not be made for {} (BasicRHI result {})", describe(), static_cast<int>(created)));
-				if (swapchain->SetMaximumFrameLatency(frameLatency) != rhi::Result::Ok)
-					RenderGraph::Fatal("native device", fmt::format("the new swap chain refused a frame latency of {}", frameLatency));
+				if (!SetSwapchainLatency())
+					RenderGraph::Fatal("native device", fmt::format("the new swap chain refused a frame latency of {}", frameLatency + 1));
 				// A fresh swap chain has no mode change pending.
 				resizeRequested = false;
 				layerVsync = desc.presentationLayer ? std::optional<bool>(a_config.vsync) : std::nullopt;
@@ -2143,6 +2147,16 @@ namespace RenderGraph::Engine::Native
 			}
 
 			/**
+			 * @brief Gives the swap chain frameLatency + 1. The render thread paces queued presents at frameLatency itself (QueuePresent),
+			 * so the swap chain's own wait never blocks them. A present on the calling thread paces one frame looser. Under presentLock or
+			 * while making the swap chain.
+			 */
+			bool SetSwapchainLatency()
+			{
+				return swapchain && swapchain->SetMaximumFrameLatency(frameLatency + 1) == rhi::Result::Ok;
+			}
+
+			/**
 			 * @brief Queues the present on the submission thread after the frame's epochs. Render owner only.
 			 * It queues only once the previous present finished, so the render thread runs at most one frame ahead.
 			 */
@@ -2156,6 +2170,7 @@ namespace RenderGraph::Engine::Native
 						donePresents.wait(done, std::memory_order_acquire);
 				}
 				PresentSource source;
+				uint32_t latency = 0;
 				{
 					std::lock_guard guard(presentLock);
 					if (lost.load(std::memory_order_relaxed) || !backBuffer)
@@ -2164,15 +2179,28 @@ namespace RenderGraph::Engine::Native
 					source = CurrentSource();
 					if (!source.graph)
 						return S_OK;
+					latency = (std::min)(frameLatency, kPacedPresents - 2);
+				}
+				// Frame latency: this present waits until the frame latency + 1 presents back has finished on the GPU. Its copy is
+				// that frame's last work. The swap chain allows one frame more (SetSwapchainLatency), so its own wait on the submission
+				// thread never blocks the epochs queued behind a present.
+				if (queued > latency) {
+					const uint64_t paced = queued - 1 - latency;
+					if (const uint64_t copy = pacedCopies[paced % kPacedPresents].load(std::memory_order_acquire); copy && presentTimeline->GetCompletedValue() < copy) {
+						ZoneScopedN("CS.Native.FrameLatencyWait");
+						(void)presentTimeline->HostWait(copy);
+					}
 				}
 				queuedPresents.store(queued + 1, std::memory_order_relaxed);
-				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), a_syncInterval, waits = RenderGraphRuntime::Get().TakePresentWaits()] {
+				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), a_syncInterval, queued, waits = RenderGraphRuntime::Get().TakePresentWaits()] {
 					ZoneScopedN("CS.Native.QueuedPresent");
 					for (const auto& wait : waits)
 						wait();
 					{
 						std::lock_guard guard(presentLock);
+						const uint64_t before = presentValue;
 						(void)PresentLocked(a_syncInterval, source);
+						pacedCopies[queued % kPacedPresents].store(presentValue != before ? presentValue : 0, std::memory_order_release);
 					}
 					donePresents.fetch_add(1, std::memory_order_release);
 					donePresents.notify_all();
@@ -2425,7 +2453,7 @@ namespace RenderGraph::Engine::Native
 				// A presentation replacement on the submission thread swaps the swap chain under presentLock.
 				std::lock_guard guard(g_device->presentLock);
 				g_device->frameLatency = a_frames ? a_frames : 3;
-				(void)g_device->swapchain->SetMaximumFrameLatency(g_device->frameLatency);
+				(void)g_device->SetSwapchainLatency();
 				logger::info("[ORG native] the engine set the frame latency to {}", g_device->frameLatency);
 				return S_OK;
 			}
@@ -4648,6 +4676,14 @@ namespace RenderGraph::Engine::Native
 				a_record(a_user, a_list);
 			a_list.Barriers(barriers);
 		};
+		// The render owner's commands go onto the submission thread's queue, after its epochs, so it does not wait for them. They use
+		// no context slot: no descriptors, and no value on the context's timeline.
+		if (RenderGraphRuntime::Get().QueuesSubmissions())
+			return ::RenderGraph::ExternalWork::SubmitInOrder(label, {}, [&](rhi::CommandList& a_list) {
+				BeginLabel(a_list, label);
+				record(a_list, {});
+				EndLabel(a_list);
+			}, {}, work.signals, work.waits);
 		// a_record runs exactly once on true and never on false.
 		return g_device->immediate.Run(label, work, record, {}) != 0;
 	}

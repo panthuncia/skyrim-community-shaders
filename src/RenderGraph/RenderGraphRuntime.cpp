@@ -2524,6 +2524,11 @@ void RenderGraphRuntime::DrainSubmissions(const char* a_why, bool a_anyThread)
 
 bool RenderGraphRuntime::QueuesPresent() const
 {
+	return QueuesSubmissions();
+}
+
+bool RenderGraphRuntime::QueuesSubmissions() const
+{
 	return impl && impl->host && impl->host->SubmissionThreadOn() && FrameAnchors::IsRenderOwner();
 }
 
@@ -3137,8 +3142,7 @@ bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::Comman
 	if (impl->native) {
 		// Stages whose commit point this is commit first.
 		FrameAnchors::BeforeGpuWork("commands");
-		// And after the epochs still on the submission thread.
-		DrainSubmissions("commands");
+		// The commands follow the epochs still on the submission thread: queued after them, or after a drain (Native::EmitCommands).
 		return RenderGraph::Engine::Native::EmitCommands(a_record, a_user, a_waits, a_waitCount, a_signals, a_signalCount, a_label);
 	}
 	// DXVK takes Vulkan semaphores: each point through the host's timelines.

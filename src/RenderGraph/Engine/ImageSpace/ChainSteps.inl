@@ -909,12 +909,19 @@ void BuildChainSteps(ChainBuild& a_build)
 			add(a_part, group, scope, E::ISDepthOfFieldBlurVCS, 0, std::move(v));
 		}
 		constexpr std::array<E::ImageSpaceEffectEnum, 4> kComposites{ E::ISDepthOfField, E::ISDepthOfFieldFogged, E::ISDistantBlur, E::ISDistantBlurFogged };
+		// The engine binds the view of kSAO_CAMERAZ_MIP_LEVEL_10, whatever mip that is. Below 1024 pixels wide the camera depth has no
+		// mip 10. If that target then has no view, the slot is empty and reads zero, and the engine's black texture stands in for it.
+		const auto farDepth = [] {
+			const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+			const auto name = InputOfView(targets[RE::RENDER_TARGET::kSAO_CAMERAZ_MIP_LEVEL_10].SRV);
+			return StepTexture::Engine(name >= 0 ? name : (kDefaultTextureInput | 0));
+		}();
 		for (const auto effect : kComposites) {
 			StepDesc d{ .name = fmt::format("dof.composite{}", static_cast<std::uint32_t>(effect)), .output = scratch(a_ldr) };
 			d.inputs[0] = image(a_ldr);
 			d.inputs[1] = owned(chain.dofDown);
 			d.inputs[2] = mainDepth;
-			d.inputs[3] = engine(T::kSAO_CAMERAZ, 10);  // the camera depth's mip 10, as the engine binds it
+			d.inputs[3] = farDepth;
 			d.samplers[1] = kLinear;
 			add(a_part, group, scope, effect, 0, std::move(d), true);
 		}

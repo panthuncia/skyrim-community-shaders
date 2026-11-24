@@ -257,6 +257,10 @@ public:
 	/** @brief Whether the present goes onto the submission thread's queue. Render owner only. */
 	bool QueuesPresent() const;
 
+	/** @brief Whether the calling thread's queue work can go onto the submission thread's queue, after its epochs: a submission
+	*  thread runs and the caller owns rendering (so never on the submission thread itself). */
+	bool QueuesSubmissions() const;
+
 	/** @brief Render owner. Runs a_closure on the submission thread after the epochs queued so far, or at once without one. */
 	void QueueOnSubmitThread(std::function<void()> a_closure);
 

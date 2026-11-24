@@ -40,12 +40,24 @@ namespace RenderGraph::ExternalWork
 		* geometry, a texture's first contents) is otherwise copied only at the graphs' next submission, after work outside them that
 		* may use it. Render thread (the upload service's owner), with the state's lock; elsewhere nothing is taken.
 		*/
-		void SubmitQueuedUploads(State& a_state)
+		using UploadBatches = std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>>;
+
+		/** @brief The staged uploads queued so far, for SubmitUploads. Render thread, with the state's lock. */
+		UploadBatches TakeQueuedUploads(State& a_state)
 		{
 			const auto& uploads = a_state.runtime ? a_state.runtime->Uploads() : nullptr;
-			std::vector<std::shared_ptr<org::runtime::StagedUploadBatch>> batches;
-			if (!uploads || !uploads->TakeStagedUploadsForSubmission(batches) || batches.empty())
+			UploadBatches batches;
+			if (!uploads || !uploads->TakeStagedUploadsForSubmission(batches))
+				batches.clear();
+			return batches;
+		}
+
+		/** @brief Submits uploads that TakeQueuedUploads took. With the state's lock. */
+		void SubmitUploads(State& a_state, UploadBatches a_batches)
+		{
+			if (a_batches.empty())
 				return;
+			auto& batches = a_batches;
 			// Held until the copies are submitted, so no graph's admission comes between the textures' states and their copies.
 			std::unique_lock hold(a_state.runtime->Sequencer()->mutex);
 			a_state.runtime->SeedFreshTextureUploads(batches, 0);
@@ -59,6 +71,11 @@ namespace RenderGraph::ExternalWork
 					a_list.Barriers({ .globals = { &full, 1u } });
 				},
 				{}, keep, {});
+		}
+
+		void SubmitQueuedUploads(State& a_state)
+		{
+			SubmitUploads(a_state, TakeQueuedUploads(a_state));
 		}
 
 		Access WholeIn(org::Resource& a_resource, rhi::ResourceAccessType a_access, rhi::ResourceLayout a_layout)
@@ -124,6 +141,47 @@ namespace RenderGraph::ExternalWork
 			RenderGraph::Fatal("external work", fmt::format("ORG's external client could not submit '{}': {}", a_label, e.what()));
 		}
 		state.submissions.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
+	bool SubmitInOrder(std::string_view a_label, std::span<const Access> a_accesses, const std::function<void(rhi::CommandList&)>& a_record,
+		std::shared_ptr<const void> a_keepAlive, std::span<const rhi::TimelinePoint> a_signals, std::span<const rhi::TimelinePoint> a_waits)
+	{
+		if (!RenderGraphRuntime::Get().QueuesSubmissions())
+			return Submit(a_label, a_accesses, a_record, std::move(a_keepAlive), a_signals, a_waits);
+		// Stages whose commit point this is commit first. Their epochs are queued ahead of this work.
+		::FrameAnchors::BeforeGpuWork("external work");
+		auto& state = Get();
+		std::shared_ptr<org::ExternalClient::Recorded> recorded;
+		UploadBatches uploads;
+		{
+			std::lock_guard guard(state.lock);
+			if (state.shutDown)
+				return false;
+			if (!state.client)
+				RenderGraph::Fatal("external work", fmt::format("'{}' has no ORG external client to submit through (it is made with the native device)", a_label));
+			// The uploads queued before this work go ahead of it, as with Submit.
+			uploads = TakeQueuedUploads(state);
+			try {
+				recorded = state.client->Record(0, a_accesses, a_record, a_signals, std::move(a_keepAlive), a_waits);
+			} catch (const std::exception& e) {
+				RenderGraph::Fatal("external work", fmt::format("ORG's external client could not record '{}': {}", a_label, e.what()));
+			}
+		}
+		// Queued after the lock goes: a pass recorded on the submission thread may submit through this client meanwhile.
+		RenderGraphRuntime::Get().QueueOnSubmitThread([recorded = std::move(recorded), uploads = std::move(uploads), label = std::string(a_label)]() mutable {
+			auto& state = Get();
+			std::lock_guard guard(state.lock);
+			if (state.shutDown)
+				return;
+			try {
+				SubmitUploads(state, std::move(uploads));
+				state.client->SubmitRecorded(std::move(recorded));
+			} catch (const std::exception& e) {
+				RenderGraph::Fatal("external work", fmt::format("ORG's external client could not submit '{}': {}", label, e.what()));
+			}
+			state.submissions.fetch_add(1, std::memory_order_relaxed);
+		});
 		return true;
 	}
 

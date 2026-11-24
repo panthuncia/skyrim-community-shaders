@@ -41,6 +41,15 @@ namespace RenderGraph::ExternalWork
 	bool Submit(std::string_view a_label, std::span<const Access> a_accesses, const std::function<void(rhi::CommandList&)>& a_record,
 		std::shared_ptr<const void> a_keepAlive = {}, std::span<const rhi::TimelinePoint> a_signals = {}, std::span<const rhi::TimelinePoint> a_waits = {});
 
+	/**
+	 * @brief As Submit, but the render owner does not wait for its epochs on the submission thread. a_record runs before this returns,
+	 * on the calling thread. With a submission thread (RenderGraphRuntime::QueuesSubmissions), the admission and the queue submission
+	 * are an entry on that thread, after the epochs queued before it. Otherwise it is Submit. A failure there is fatal.
+	 * @return False only after Shutdown.
+	 */
+	bool SubmitInOrder(std::string_view a_label, std::span<const Access> a_accesses, const std::function<void(rhi::CommandList&)>& a_record,
+		std::shared_ptr<const void> a_keepAlive = {}, std::span<const rhi::TimelinePoint> a_signals = {}, std::span<const rhi::TimelinePoint> a_waits = {});
+
 	/** @brief Waits for the client's submissions and drops it, before the host goes. */
 	void Shutdown();
 }
