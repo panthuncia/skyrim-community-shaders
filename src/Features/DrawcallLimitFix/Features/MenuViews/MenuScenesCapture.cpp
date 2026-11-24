@@ -134,8 +134,12 @@ namespace DCLF::Features::MenuViews::Scenes
 				if (target < 0)
 					break;
 				const auto found = std::ranges::find(imports, target);
-				if (found == imports.end())
-					return "a colour target its view's client does not import";
+				if (found == imports.end()) {
+					// Names the target, so the log says which import is missing. Render thread only.
+					static std::string why;
+					why = std::format("a colour target its view's client does not import (rt{} at slot {})", target, i);
+					return why.c_str();
+				}
 				const auto index = static_cast<std::uint32_t>(found - imports.begin());
 				a_draw.colours[i] = static_cast<std::uint8_t>(index);
 				a_draw.key.colourFormats[i] = SceneDraws::ColourFormat(a_view, index);
