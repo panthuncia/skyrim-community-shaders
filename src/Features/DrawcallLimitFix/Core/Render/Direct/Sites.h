@@ -14,6 +14,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
+#include <rhi.h>
+
 #include <Render/RunRef.h>
 
 #include <array>
@@ -112,14 +114,40 @@ namespace DCLF::Direct
 	bool ForwardReached(bool a_refraction);
 
 	/**
-	 * @brief Render thread, inside a water epoch's execution body. Makes the colour commit's water site of deferred range a_range (0
-	 * the mask, 1 the surface) the epoch's pending run, drawing target set a_variant. False without one: no colour commit this frame, no
-	 * water member, or a GPU-driven frame.
+	 * @brief Whether CPU-driven frames draw claimed water in the water family's anchor pass, inside its CS stage (native mode, where
+	 * stage passes record inline at every execution), rather than in the water epochs' site passes (guest, whose stages are kept
+	 * recordings). Fixed for the session, so the graph builds and the frames agree.
+	 */
+	bool WaterInStageAnchor();
+
+	/**
+	 * @brief Render thread, inside a water epoch's execution body, where the sites do not record inline (guest). Makes the colour
+	 * commit's water site of deferred range a_range the epoch's pending run, drawing target set a_variant. False without one.
 	 */
 	bool WaterReached(std::uint32_t a_range, std::uint32_t a_variant);
 
 	/** @brief Render thread. Whether this CPU frame's colour commit opened a water site that is not drawn yet. */
 	bool WaterSitesOpen();
+
+	/** @brief A water draw target: a view and its image, as the recording binds them. */
+	struct WaterTarget
+	{
+		rhi::DescriptorSlot view{};
+		rhi::ResourceHandle resource{};
+	};
+
+	/**
+	 * @brief Render thread, at deferred range a_range's engine batch (0 the water mask, 1 the surface). Takes the colour commit's water
+	 * site for it, drawing target set a_variant, for the water family's anchor pass. Null without one: no colour commit this frame, no
+	 * water member, or a GPU-driven frame. It stays valid until the frame's slot retires.
+	 */
+	void* TakeWaterRun(std::uint32_t a_range, std::uint32_t a_variant);
+
+	/**
+	 * @brief The thread recording the anchor pass. Records a_run's water draws into a_list, in a rendering of a_colours (the run's target
+	 * set) and the main depth. False when the run has nothing to draw.
+	 */
+	bool RecordWaterDraws(void* a_run, rhi::CommandList& a_list, std::span<const WaterTarget> a_colours, const WaterTarget& a_depth);
 
 	/** @brief Whether a view's site draws in CPU mode. An epoch whose site is not live is not covered, and the engine draws it. */
 	bool ViewSiteLive(std::uint32_t a_view);

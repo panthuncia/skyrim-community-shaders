@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
+#include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Variables.h"
@@ -123,8 +124,8 @@ namespace DCLF::Features::Water::Indirect
 		{
 			if (!waterDrawer.load(std::memory_order_acquire))
 				return false;
-			// CPU-driven frames draw claimed water with the CPU pipeline's water sites (Direct::WaterReached).
-			if (WaterScene::ClaimsInCpuFrames())
+			// CPU-driven frames draw claimed water in the water family's anchor pass (Draws::TakeCpuRange), once its client is up.
+			if (WaterScene::ClaimsInCpuFrames() && WaterDraws::Available())
 				return true;
 			return !Draws::CpuPipelineForced() && !Draws::GraphBuiltForCpu() && !CpuPipelineFor(Toggles::Get().Active(), waterInterior.load(std::memory_order_relaxed));
 		}

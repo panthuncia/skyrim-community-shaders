@@ -174,6 +174,10 @@ namespace DCLF::Features::Water
 		Integrations::PhysicalSky::OrgHandles physSky{};                     // Physical Sky's resources and samplers, latched with every draw
 		std::uint64_t revision = 0;                                          // what the recording depends on (WaterDraws.cpp, Run::Hash)
 		Family::Owners owners;                                               // the textures' imports and the buffers' leases
+		// A CPU-driven frame's DCLF water draws of the batch (Draws::TakeCpuRange), drawn before the latched ones into target set
+		// cpuVariant. Null for none. Only the first run of a batch carries them.
+		void* cpuWater = nullptr;
+		std::uint32_t cpuVariant = 0;
 
 		/** @brief What the recording depends on: everything but the latched values and counts (WaterDraws.cpp). */
 		std::uint64_t Hash() const;

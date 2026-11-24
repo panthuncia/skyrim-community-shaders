@@ -20,6 +20,13 @@ namespace DCLF::Draws
 	 */
 	bool SubmitDeferredEpoch(std::uint32_t a_epoch, std::uint32_t a_range);
 
+	/**
+	 * @brief Render thread, at a deferred range's engine batch in a CPU-driven frame. The colour commit's CPU-culled draws of range
+	 * a_range, drawn into the target set a_variant picks now (Direct::RecordWaterDraws), or null: not a CPU-driven graph, the range is not
+	 * registered, or the commit opened none.
+	 */
+	void* TakeCpuRange(std::uint32_t a_range, std::uint32_t& a_variant);
+
 	/** @brief Any thread. The runs since the last call whose passes found no target set chosen, so drew nothing of their range. */
 	std::uint64_t TakeDeferredRunsWithoutChoice();
 }

@@ -91,14 +91,25 @@ namespace DCLF::Features::Water::Indirect
 		return site.trigger && epoch != Draws::kNoEpoch && !Draws::EpochTraitsOf(epoch).dormant;
 	}
 
-	bool ReachBatch(View a_view, const void* a_accumulator)
+	bool ReachBatch(View a_view, const void* a_accumulator, void** a_cpuRun, std::uint32_t* a_cpuVariant)
 	{
+		if (a_cpuRun)
+			*a_cpuRun = nullptr;
 		// The main camera's batch only. Cube map faces and other accumulators run the same batches.
 		static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 		if (!a_accumulator || a_accumulator != *mainAccumulator || !FrameAnchors::IsRenderOwner())
 			return false;
 		if (RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 			return false;
+		// A CPU-driven frame draws claimed water in the water family's anchor pass, so the stage needs no epoch of its own.
+		if (a_cpuRun && a_cpuVariant) {
+			std::uint32_t variant = 0;
+			if (void* run = Draws::TakeCpuRange(a_view == View::Mask ? 0u : 1u, variant)) {
+				*a_cpuRun = run;
+				*a_cpuVariant = variant;
+				return true;
+			}
+		}
 		auto& site = WaterSiteOf(a_view);
 		const std::uint32_t epoch = WaterEpochOfSite(site);
 		if (!site.trigger || epoch == Draws::kNoEpoch)

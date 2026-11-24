@@ -274,9 +274,10 @@ namespace DCLF::Draws
 	{
 		if (a_epoch == kNoEpoch || EpochTraitsOf(a_epoch).dormant || a_range >= kDeferredRanges)
 			return false;
-		// The CPU-driven graph draws the range with the CPU pipeline's water site, which the colour commit culled, in the set chosen now.
+		// The CPU-driven graph has no deferred range pass. Inline (native), the water family's anchor pass draws the range
+		// (TakeCpuRange). Otherwise the epoch holds the CPU pipeline's water site, which draws what the colour commit culled.
 		if (AttachedGraphConditions().cpuPipeline) {
-			if (!Direct::WaterSitesOpen())
+			if (Direct::WaterInStageAnchor() || !Direct::WaterSitesOpen())
 				return false;
 			const auto& entry = Extensions::DeferredRanges()[a_range];
 			const std::uint32_t variant = entry.taken && entry.contribution.variant ? std::min(entry.contribution.variant(), entry.contribution.variants - 1) : 0u;
@@ -294,6 +295,19 @@ namespace DCLF::Draws
 				DeferredChoices().Store(host->CurrentRun(), std::make_shared<const DeferredChoice>(*static_cast<const DeferredChoice*>(a_choice)));
 		};
 		return IndirectDraws::Get().SubmitSharedEpoch(a_epoch, { .context = &choice, .empty = &NoDeferredBuckets, .commit = store }).submitted;
+	}
+
+	void* TakeCpuRange(std::uint32_t a_range, std::uint32_t& a_variant)
+	{
+		a_variant = 0;
+		// Only where the anchor pass records at every execution (inline). A kept stage recording would keep one frame's draws.
+		if (a_range >= kDeferredRanges || !AttachedGraphConditions().cpuPipeline || !Direct::WaterInStageAnchor())
+			return nullptr;
+		const auto& entry = Extensions::DeferredRanges()[a_range];
+		if (!entry.taken)
+			return nullptr;
+		a_variant = entry.contribution.variant ? std::min(entry.contribution.variant(), entry.contribution.variants - 1) : 0u;
+		return Direct::TakeWaterRun(a_range, a_variant);
 	}
 
 	std::uint64_t TakeDeferredRunsWithoutChoice()

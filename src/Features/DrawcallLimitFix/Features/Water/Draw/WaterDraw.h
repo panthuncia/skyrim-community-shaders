@@ -70,9 +70,11 @@ namespace DCLF::Features::Water::Indirect
 
 	/**
 	 * @brief Render thread, at the engine's mask or water batch, before the engine runs it. Submits the view's epoch inside its trigger
-	 * for the main camera's batch. Returns whether it was submitted. The latch path draws the rest of the batch after it.
+	 * for the main camera's batch. Returns whether it was submitted. The latch path draws the rest of the batch after it. In a
+	 * CPU-driven frame it submits nothing and hands the colour commit's water draws to a_cpuRun (set set a_cpuVariant), for the water
+	 * family's run to carry into its anchor pass.
 	 */
-	bool ReachBatch(View a_view, const void* a_accumulator);
+	bool ReachBatch(View a_view, const void* a_accumulator, void** a_cpuRun = nullptr, std::uint32_t* a_cpuVariant = nullptr);
 
 	/**
 	 * @brief Render thread, at FinishAccumulating's check for water mask passes. Whether the mask batch must run for DCLF even though the

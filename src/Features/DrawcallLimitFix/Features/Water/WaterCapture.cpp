@@ -73,6 +73,9 @@ namespace DCLF::Features::Water
 		{
 			bool active = false;
 			bool failed = false;  // a draw was refused: the latched part ran, the rest of the batch is the engine's
+			// The batch's DCLF water draws in a CPU-driven frame (Indirect::ReachBatch), for its first run to carry.
+			void* cpuWater = nullptr;
+			std::uint32_t cpuVariant = 0;
 			View view = View::Surface;
 			std::shared_ptr<Run> run;
 			// Kept so a run restarted after another shader's draw (Interrupt) has the same headers.
@@ -122,7 +125,11 @@ namespace DCLF::Features::Water
 			auto run = std::move(a_capture.run);
 			if (!run)
 				return;
-			if (run->draws.empty()) {
+			if (a_capture.cpuWater) {
+				run->cpuWater = std::exchange(a_capture.cpuWater, nullptr);
+				run->cpuVariant = a_capture.cpuVariant;
+			}
+			if (run->draws.empty() && !run->cpuWater) {
 				WaterDraws::Keep(std::move(run->owners));
 				return;
 			}
@@ -382,9 +389,17 @@ namespace DCLF::Features::Water
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& capture = GetCapture();
+				void* cpuWater = nullptr;
+				std::uint32_t cpuVariant = 0;
 				if constexpr (kSite != kGroup10Site)
 					if (!capture.active)
-						(void)Indirect::ReachBatch(kView, a_accumulator);
+						(void)Indirect::ReachBatch(kView, a_accumulator, &cpuWater, &cpuVariant);
+				if (cpuWater && (capture.active || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available())) {
+					static std::atomic<bool> logged{ false };
+					if (!logged.exchange(true))
+						logger::error("[DCLF] water: a CPU-driven frame's {} batch could not be taken by the water family; its DCLF water is not drawn", NameOf(kView));
+					cpuWater = nullptr;
+				}
 				// A batch nested in a latched one feeds the outer batch. Otherwise the engine draws batches the family cannot run.
 				if (capture.active || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
@@ -394,6 +409,11 @@ namespace DCLF::Features::Water
 				auto run = std::make_shared<Run>();
 				run->view = kView;
 				if (!CurrentShape(a_accumulator, kView, *run, capture) || !WaterDraws::CanTake(kView)) {
+					if (cpuWater) {
+						static std::atomic<bool> logged{ false };
+						if (!logged.exchange(true))
+							logger::warn("[DCLF] water: a CPU-driven frame's {} batch is not the water family's yet; its DCLF water is not drawn that frame", NameOf(kView));
+					}
 					WaterDraws::Keep(std::move(run->owners));
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
@@ -405,6 +425,8 @@ namespace DCLF::Features::Water
 				capture.headerIndices = run->headerIndices;
 				capture.physSky = run->physSky;
 				capture.run = std::move(run);
+				capture.cpuWater = cpuWater;
+				capture.cpuVariant = cpuVariant;
 				capture.failed = false;
 				capture.lastPass = nullptr;
 				capture.passes.Begin();

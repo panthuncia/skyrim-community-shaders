@@ -486,7 +486,8 @@ namespace DCLF::Draws
 				if (epoch.id == state.ids[a_epoch])
 					return std::any_of(epoch.passes.begin(), epoch.passes.end(), [&](const ResolvedPass& a_pass) {
 						const auto& entry = state.passes[a_pass.pass];
-						return entry.cpuPipeline && entry.make;
+						// A pass absent in this install (present) makes nothing, so it does not make the epoch a site's.
+						return entry.cpuPipeline && entry.make && (!entry.present || entry.present());
 					});
 		return false;
 	}
@@ -589,6 +590,8 @@ namespace DCLF::Draws
 					context.view = &view;
 				}
 				if (cpu ? !cpuPass(entry) : entry.recordAtExecution && !entry.gpuLate)
+					continue;
+				if (entry.present && !entry.present())
 					continue;
 				if (entry.emit) {
 					if (!cpu)

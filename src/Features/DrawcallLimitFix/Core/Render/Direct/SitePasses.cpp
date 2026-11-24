@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteFrame.h"
+#include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
@@ -243,12 +244,14 @@ namespace DCLF::Direct
 		/**
 		 * @brief water.mask and water.surface: deferred range a_range's members, which the colour commit culled, in the target set the
 		 * trigger chose. Every set's targets are declared once each, then the main depth. The draws read what the GPU path's range pass
-		 * reads: the frame record's buffers and textures.
+		 * reads: the frame record's buffers and textures. Only where the sites do not record inline (guest): there the CS stages are
+		 * kept recordings, so per-frame draws need an epoch of their own. Inline (native) the water family's anchor pass draws them
+		 * inside the stage (Draws::TakeCpuRange), and the water epochs stay empty in the CPU graph.
 		 */
 		std::shared_ptr<org::RenderPass> WaterSite(const Api::PassContext& a_context, std::uint32_t a_range)
 		{
 			const auto& entry = Extensions::DeferredRanges()[a_range];
-			if (!entry.taken || !entry.contribution.target || !a_context.main)
+			if (!entry.taken || !entry.contribution.target || !a_context.main || WaterInStageAnchor())
 				return nullptr;
 			const auto& main = *a_context.Main();
 			SitePass::Textures unique;
@@ -286,8 +289,10 @@ namespace DCLF::Direct
 		std::shared_ptr<org::RenderPass> WaterMaskSite(const Api::PassContext& a_context) { return WaterSite(a_context, 0); }
 		std::shared_ptr<org::RenderPass> WaterSurfaceSite(const Api::PassContext& a_context) { return WaterSite(a_context, 1); }
 		// Absent while nobody registered the range, so the water epochs stay dormant then, as with the GPU path's range passes.
-		bool WaterMaskPresent() { return Extensions::DeferredRanges()[0].taken; }
-		bool WaterSurfacePresent() { return Extensions::DeferredRanges()[1].taken; }
+		// Native mode draws CPU water in the water family's anchor pass, so there the passes do not exist at all: an epoch listing a CPU
+		// pipeline pass counts as a site epoch even when it makes none.
+		bool WaterMaskPresent() { return Extensions::DeferredRanges()[0].taken && !WaterInStageAnchor(); }
+		bool WaterSurfacePresent() { return Extensions::DeferredRanges()[1].taken && !WaterInStageAnchor(); }
 
 		constexpr Api::PassDef kSitePasses[] = {
 			{ .key = "core.z.direct", .passName = "cs.dclf.z.direct", .kind = Api::PassKind::Render, .make = &DepthSite, .cpuPipeline = true, .recordAtExecution = true },

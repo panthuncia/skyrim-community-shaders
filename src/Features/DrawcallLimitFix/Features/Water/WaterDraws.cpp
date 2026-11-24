@@ -8,6 +8,8 @@
 #include "RenderGraph/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/FamilyClient.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
+#include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 
@@ -62,6 +64,13 @@ namespace DCLF::Features::Water::WaterDraws
 		};
 		static_assert(sizeof(WaterBlock) == 112, "Water.hlsl's push block is 112 bytes");
 
+		/** @brief A commit's DCLF water draws (Draws::TakeCpuRange) and their target set. */
+		struct CpuWater
+		{
+			void* run = nullptr;
+			std::uint32_t range = 0, variant = 0;
+		};
+
 		const std::array<std::int32_t, 3>& TargetListOf(const Shape& a_shape) { return a_shape.view == View::Mask ? kMaskTargets : kSurfaceTargets; }
 
 		struct Client : Family::ClientState<Run>
@@ -76,6 +85,8 @@ namespace DCLF::Features::Water::WaterDraws
 			Family::PublishedInputs inputs;
 			// The run each commit drew. The pass may record on the submission thread after the render thread published the next run.
 			::RenderGraph::RunSlots<Run> runs;
+			// The DCLF water draws each commit took (Run::cpuWater), by the same runs.
+			::RenderGraph::RunSlots<CpuWater> cpuRuns;
 			// The draws committed into the declared segment's run so far this frame.
 			std::shared_ptr<const Run> committed;
 			std::uint64_t committedFrame = UINT64_MAX;
@@ -140,6 +151,8 @@ namespace DCLF::Features::Water::WaterDraws
 			{
 				if (!a_frame.client)
 					return true;
+				if (a_frame.client->cpuRuns.Find(a_recording.Run()))
+					return false;
 				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
 				if (!run)
 					return true;
@@ -153,6 +166,9 @@ namespace DCLF::Features::Water::WaterDraws
 			{
 				if (!a_frame.client)
 					return;
+				// DCLF's claimed water first, as the GPU-driven frame's epoch draws it before the engine's batch.
+				if (const auto cpu = a_frame.client->cpuRuns.Find(a_recording.Run()))
+					RecordCpuWater(a_bindings, *a_frame.client, *cpu, a_recording);
 				const auto runRef = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
 				if (!runRef)
 					return;
@@ -200,6 +216,34 @@ namespace DCLF::Features::Water::WaterDraws
 			}
 
 		private:
+			/** @brief The CPU-culled draws of a_cpu's range, into its target set: each target found among the pass's declared ones. */
+			static void RecordCpuWater(const Bindings& a_bindings, const Client& a_client, const CpuWater& a_cpu, org::PassRecordContext& a_recording)
+			{
+				const auto& entry = Extensions::DeferredRanges()[a_cpu.range];
+				if (!entry.taken || !entry.contribution.target)
+					return;
+				std::array<Direct::WaterTarget, Api::kDeferredRangeTargets> colours{};
+				std::uint32_t count = 0;
+				for (std::uint32_t i = 0; i < Api::kDeferredRangeTargets; ++i) {
+					const auto target = entry.contribution.target(a_cpu.variant, i);
+					if (!target)
+						break;
+					std::size_t k = 0;
+					while (k < a_client.colours.size() && !(a_bindings.hasColours[k] && a_client.colours[k] == target))
+						++k;
+					if (k == a_client.colours.size()) {
+						static std::atomic<bool> logged{ false };
+						if (!logged.exchange(true))
+							logger::error("[DCLF] water: the {} pass does not declare target {} of deferred range {}'s set {}; its DCLF water draws nothing <- WATER TARGETS",
+								a_client.id, i, entry.name, a_cpu.variant);
+						return;
+					}
+					colours[count++] = { a_recording.View(a_bindings.colours[k]), a_recording.Resolve(a_bindings.colours[k].Resource()).GetHandle() };
+				}
+				const Direct::WaterTarget depth{ a_recording.View(a_bindings.depth), a_recording.Resolve(a_bindings.depth.Resource()).GetHandle() };
+				(void)Direct::RecordWaterDraws(a_cpu.run, a_recording.Commands(), std::span(colours.data(), count), depth);
+			}
+
 			std::shared_ptr<Client> client;
 			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
@@ -325,6 +369,8 @@ namespace DCLF::Features::Water::WaterDraws
 				}
 				client->committedFrame = frame;
 				client->runs.Store(latchRun, client->committed);
+				if (run && run->cpuWater)
+					client->cpuRuns.Store(latchRun, std::make_shared<const CpuWater>(CpuWater{ run->cpuWater, client->shape.view == View::Mask ? 0u : 1u, run->cpuVariant }));
 				if (!run)
 					return;
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
@@ -437,6 +483,7 @@ namespace DCLF::Features::Water
 			std::memcpy(range, draw.viewport.depthRange.data(), sizeof(range));
 			hash.Mix((std::uint64_t(range[0]) << 32) | range[1]);
 		}
+		hash.Mix(cpuWater ? 1u + cpuVariant : 0u);
 		return hash.Value();
 	}
 }

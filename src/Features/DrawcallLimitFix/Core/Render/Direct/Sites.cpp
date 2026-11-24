@@ -611,53 +611,44 @@ namespace DCLF::Direct::detail
 	}
 
 	/**
-	 * @brief A water site's draws: the colour commit's culled water list in the chosen target set's rendering, testing the main depth
-	 * and stencil, with each key's range pipeline and stencil reference. a_images holds every target set's colours in set order (each
-	 * set the same count), then the main depth.
+	 * @brief A water site's draws: the colour commit's culled water list in the given rendering, testing the main depth and stencil,
+	 * with each key's range pipeline and stencil reference.
 	 */
-	void RecordWaterSite(SiteOut& a_out, SiteRun& a_run, const SiteImages* a_images)
+	void RecordWaterSite(SiteOut& a_out, SiteRun& a_run, std::span<const WaterTarget> a_colours, const WaterTarget& a_depth)
 	{
 		auto& slot = *a_run.slot;
-		if (!a_run.water)
+		if (!a_run.water || a_colours.empty() || a_colours.size() > Api::kDeferredRangeTargets)
 			return;
 		const auto batches = AwaitAll(a_run, *a_run.water);
-		const std::uint32_t range = a_run.site == Site::WaterMask ? 0u : 1u;
-		const auto& entry = Extensions::DeferredRanges()[range];
-		if (!a_images || a_images->depths.empty() || !entry.taken || !entry.contribution.variants)
-			return;
-		const std::uint32_t variants = entry.contribution.variants;
-		const auto perSet = static_cast<std::uint32_t>(a_images->colours.size() / variants);
-		if (!perSet || perSet > Api::kDeferredRangeTargets || a_run.waterVariant >= variants)
-			return;
 		if (std::ranges::none_of(batches, [](const CulledBatch* a_batch) { return a_batch->count != 0; }))
 			return;
+		const bool mask = a_run.site == Site::WaterMask;
 		std::array<rhi::ColorAttachment, Api::kDeferredRangeTargets> colours{};
-		for (std::uint32_t i = 0; i < perSet; ++i) {
-			const auto& image = a_images->colours[a_run.waterVariant * perSet + i];
-			colours[i].rtv = image.view;
-			colours[i].resource = image.resource;
+		for (std::size_t i = 0; i < a_colours.size(); ++i) {
+			colours[i].rtv = a_colours[i].view;
+			colours[i].resource = a_colours[i].resource;
 			colours[i].loadOp = rhi::LoadOp::Load;
 			colours[i].storeOp = rhi::StoreOp::Store;
 		}
 		rhi::DepthAttachment depth{};
-		depth.dsv = a_images->depths.front().view;
-		depth.resource = a_images->depths.front().resource;
+		depth.dsv = a_depth.view;
+		depth.resource = a_depth.resource;
 		depth.depthLoad = rhi::LoadOp::Load;
 		depth.depthStore = rhi::StoreOp::Store;
 		depth.stencilLoad = rhi::LoadOp::Load;
 		depth.stencilStore = rhi::StoreOp::Store;
 		const auto& shape = *a_run.shape;
 		rhi::PassBeginInfo begin{};
-		begin.colors = { colours.data(), perSet };
+		begin.colors = { colours.data(), static_cast<std::uint32_t>(a_colours.size()) };
 		begin.depth = &depth;
 		begin.width = shape.width;
 		begin.height = shape.height;
 		begin.minDepth = shape.minDepth;
 		begin.maxDepth = shape.maxDepth;
-		begin.debugName = range == 0 ? "DCLF direct water mask" : "DCLF direct water surface";
+		begin.debugName = mask ? "DCLF direct water mask" : "DCLF direct water surface";
 		auto& list = a_out.Inline();
 		list.BeginPass(begin);
-		RecordContext context{ list, *slot.set, ViewType::Water, 0, a_run.site, range == 0, a_run.bindings, &slot.counters };
+		RecordContext context{ list, *slot.set, ViewType::Water, 0, a_run.site, mask, a_run.bindings, &slot.counters };
 		if (BeginList(context))
 			for (const auto* batch : batches)
 				if (batch->count)
@@ -665,6 +656,24 @@ namespace DCLF::Direct::detail
 		list.EndPass();
 		// A list's reference starts at 0, and later passes on this list expect that.
 		list.SetStencilRef(0);
+	}
+
+	/** @brief A water site pass's draws: a_images holds every target set's colours in set order (each set the same count), then the depth. */
+	void RecordWaterSiteImages(SiteOut& a_out, SiteRun& a_run, const SiteImages* a_images)
+	{
+		const auto& entry = Extensions::DeferredRanges()[a_run.site == Site::WaterMask ? 0 : 1];
+		if (!a_images || a_images->depths.empty() || !entry.taken || !entry.contribution.variants)
+			return;
+		const auto perSet = static_cast<std::uint32_t>(a_images->colours.size() / entry.contribution.variants);
+		if (!perSet || perSet > Api::kDeferredRangeTargets || a_run.waterVariant >= entry.contribution.variants)
+			return;
+		std::array<WaterTarget, Api::kDeferredRangeTargets> colours{};
+		for (std::uint32_t i = 0; i < perSet; ++i) {
+			const auto& image = a_images->colours[a_run.waterVariant * perSet + i];
+			colours[i] = { image.view, image.resource };
+		}
+		const auto& depth = a_images->depths.front();
+		RecordWaterSite(a_out, a_run, std::span(colours.data(), perSet), { depth.view, depth.resource });
 	}
 
 	namespace
@@ -798,7 +807,7 @@ namespace DCLF::Direct::detail
 			break;
 		case Site::WaterMask:
 		case Site::WaterSurface:
-			RecordWaterSite(out, *run, a_images);
+			RecordWaterSiteImages(out, *run, a_images);
 			break;
 		default:
 			break;
@@ -1725,6 +1734,11 @@ namespace DCLF::Direct
 		return HandOffRun(*run, rows != nullptr);
 	}
 
+	bool WaterInStageAnchor()
+	{
+		return ::RenderGraph::Engine::Native::Requested();
+	}
+
 	bool WaterReached(std::uint32_t a_range, std::uint32_t a_variant)
 	{
 		auto& s = S();
@@ -1743,6 +1757,37 @@ namespace DCLF::Direct
 	{
 		const auto* slot = S().current;
 		return slot && slot->ownsEpochs && (slot->waterRuns[0] || slot->waterRuns[1]);
+	}
+
+	void* TakeWaterRun(std::uint32_t a_range, std::uint32_t a_variant)
+	{
+		auto* slot = S().current;
+		if (!slot || !slot->ownsEpochs || a_range >= slot->waterRuns.size())
+			return nullptr;
+		auto* run = std::exchange(slot->waterRuns[a_range], nullptr);
+		if (!run || !run->valid)
+			return nullptr;
+		run->waterVariant = a_variant;
+		return run;
+	}
+
+	bool RecordWaterDraws(void* a_run, rhi::CommandList& a_list, std::span<const WaterTarget> a_colours, const WaterTarget& a_depth)
+	{
+		auto* run = static_cast<SiteRun*>(a_run);
+		if (!run || !run->valid || !run->water)
+			return false;
+		// The draws read the colour commit's uploads (sequences, rows, frame record), which another epoch wrote.
+		auto full = rhi::FullMemoryBarrier();
+		rhi::BarrierBatch barrier{};
+		barrier.globals = { &full, 1u };
+		a_list.Barriers(barrier);
+		const auto start = Clock::now();
+		SiteOut out{ a_list, run->slot->recording.Lists(), run->device, run->bindings.resourceHeap, run->bindings.samplerHeap };
+		out.direct = true;
+		RecordWaterSite(out, *run, a_colours, a_depth);
+		run->recordedDraws = true;
+		Add(run->slot->counters.recordUs[static_cast<std::size_t>(run->site)], MicrosecondsSince(start));
+		return true;
 	}
 
 	WindowCounters TakeWindowCounters()
