@@ -527,6 +527,33 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     Lighting on.
 -   **Physical Sky's lightning, storms, voxel clouds, local NDF, middle and cirrus layers and clouds in water reflections are
     untested on the graph.** Only clear weather at one spot ran (`clouds.toml`, `clouds-long.toml`).
+-   **Graph-mode water is still brighter and sharper than D3D11, and so are the areas under structures.** On the `river`
+    config's river-east shot (Riverwood), the water area's mean is 75 native and 69 guest against D3D11's 55. Before CS
+    `7c9d1f98f` it was 93 and 94. That commit fixed four causes:
+    -   the refraction read the wrong target name;
+    -   the global cube was unbound (now frame texture t54);
+    -   DCLF's reflection-face draws were not marked InReflection, so pre-exposure scaled the cube faces about 10x;
+    -   the sky's faces lacked the reflection flag.
+
+    In the same shots, the ground and walls under structures (overhangs, the bridge, the mill) also look brighter in the graph
+    modes than in D3D11. That suggests occlusion is missing there, and the first suspect is Skylighting, which may not reach
+    the graph modes' draws or may read a stale or unbound occlusion volume. If Skylighting's occlusion is missing, it would
+    brighten the reflection-face draws too, so it may account for part of the water gap.
+
+    Not yet explained:
+    -   In the D3D11 capture the engine did not write `kREFLECTIONS` in the captured frame, while graph mode redraws two faces
+        a frame. So a texel-by-texel cube comparison is not expected to match.
+    -   The water's cube reads (blur, mip choice) were not compared.
+    -   Non-pulled `DCLF_BINDLESS_DRAW` builds read the permutation from a constant buffer and do not get the view-bits
+        InReflection flag, if any of them draw into the faces.
+
+    **Next:**
+    -   Run the same shot with Skylighting off in both modes. If the brightness under structures matches, compare Skylighting's
+        inputs on the graph.
+    -   Then compare the water's cube sampling.
+
+    Capture and replay recipe: native RenderDoc captures deadlock (a batch waits on a value submitted later), so capture guest
+    and D3D11 with the `renderdoc.capture` test command.
 -   **A cold shader store makes boot slow with the clouds:** the 50 cloud programs compile before data-loaded, beyond the 120 s
     load limit on a first run. Warm per mode first.
 -   **`ORG_FRAME_PLACEMENT=1`: the image goes wrong after a frame placement change.** In `native-vulkan+resize` (2026-11-22,
