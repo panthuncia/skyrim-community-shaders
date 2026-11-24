@@ -107,6 +107,8 @@ namespace DCLF::Direct
 		bool visibilityReset = false;
 		// False on an observer's frame, where the GPU's events report visibility instead.
 		bool reportsVisibility = true;
+		// The CPU frame's colour commit opens water sites when the set has water lanes (not on an observer's frame).
+		bool waterSites = false;
 		std::shared_ptr<const void> storage;  // owns every span above
 		// Main camera batches still to cull, plus one for the publication. The last to finish diffs the verdicts.
 		mutable std::atomic<std::uint32_t> pendingStamps{ 0 };

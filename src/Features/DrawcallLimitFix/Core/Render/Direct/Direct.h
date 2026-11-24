@@ -64,6 +64,8 @@ namespace DCLF::Direct
 		PrecipOccluder,
 		Reflection,
 		FirstPerson,
+		// The deferred ranges' members (water): the colour commit culls them once, and the water mask and surface sites draw them.
+		Water,
 		kCount
 	};
 	inline constexpr std::size_t kViewTypes = static_cast<std::size_t>(ViewType::kCount);
@@ -263,6 +265,8 @@ namespace DCLF::Direct
 		bool sunTest = false;  // the colour pass's sun test (kSunTestOn)
 		// Main camera lists culled only for their kAccumulated verdicts. Nothing is kept.
 		bool stampOnly = false;
+		// A main-camera view that stamps nothing: the water surface's, since the mask's culls the same lanes and stamps them.
+		bool noStamp = false;
 		// Latch-block spans the caller holds for the cull's duration.
 		const Draws::GpuCascade* cascades = nullptr;
 		std::uint32_t cascadeCount = 0;
@@ -306,6 +310,8 @@ namespace DCLF::Direct
 		Colour,       // opaque.after: main colour and decals
 		Forward,      // blended.draw: forward and refraction
 		FirstPerson,  // fp.colour-render
+		WaterMask,    // water.mask-batch: deferred range 0
+		WaterSurface, // water.surface-batch: deferred range 1
 		kCount
 	};
 

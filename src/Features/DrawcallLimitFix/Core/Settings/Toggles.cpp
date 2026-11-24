@@ -36,7 +36,7 @@ namespace DCLF
 		constexpr std::uint32_t kPipelineModeBit = 32, kInteriorCpuBit = 33, kExteriorCpuBit = 34, kCpuRecordBit = 35;  // cpuRecord takes two bits
 
 		constexpr std::string_view kCpuViewNames[] = { "main", "decal", "forward", "refraction", "sun", "spot", "point", "sky", "precipitation", "reflection",
-			"first-person" };
+			"first-person", "water" };
 		static_assert(std::size(kCpuViewNames) == Direct::kViewTypes);
 
 		/**

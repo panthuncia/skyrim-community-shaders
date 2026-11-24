@@ -111,6 +111,16 @@ namespace DCLF::Direct
 	 */
 	bool ForwardReached(bool a_refraction);
 
+	/**
+	 * @brief Render thread, inside a water epoch's execution body. Makes the colour commit's water site of deferred range a_range (0
+	 * the mask, 1 the surface) the epoch's pending run, drawing target set a_variant. False without one: no colour commit this frame, no
+	 * water member, or a GPU-driven frame.
+	 */
+	bool WaterReached(std::uint32_t a_range, std::uint32_t a_variant);
+
+	/** @brief Render thread. Whether this CPU frame's colour commit opened a water site that is not drawn yet. */
+	bool WaterSitesOpen();
+
 	/** @brief Whether a view's site draws in CPU mode. An epoch whose site is not live is not covered, and the engine draws it. */
 	bool ViewSiteLive(std::uint32_t a_view);
 

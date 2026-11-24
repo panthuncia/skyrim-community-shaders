@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
@@ -269,11 +270,18 @@ namespace DCLF::Draws
 
 	std::span<const Api::PassDef> DeferredRangePassDefs() { return kDeferredRangePasses; }
 
-	bool SubmitDeferredEpoch(std::uint32_t a_epoch)
+	bool SubmitDeferredEpoch(std::uint32_t a_epoch, std::uint32_t a_range)
 	{
-		// The CPU-driven graph makes no deferred range pass, so its epochs have nothing to run.
-		if (a_epoch == kNoEpoch || EpochTraitsOf(a_epoch).dormant || AttachedGraphConditions().cpuPipeline)
+		if (a_epoch == kNoEpoch || EpochTraitsOf(a_epoch).dormant || a_range >= kDeferredRanges)
 			return false;
+		// The CPU-driven graph draws the range with the CPU pipeline's water site, which the colour commit culled, in the set chosen now.
+		if (AttachedGraphConditions().cpuPipeline) {
+			if (!Direct::WaterSitesOpen())
+				return false;
+			const auto& entry = Extensions::DeferredRanges()[a_range];
+			const std::uint32_t variant = entry.taken && entry.contribution.variant ? std::min(entry.contribution.variant(), entry.contribution.variants - 1) : 0u;
+			return IndirectDraws::Get().SubmitSharedEpoch(a_epoch, { .waterSite = a_range + 1, .waterVariant = variant }).submitted;
+		}
 		// This frame's target set per range, read now inside the trigger. The commit stores it for the execution's run.
 		DeferredChoice choice;
 		for (std::uint32_t r = 0; r < kDeferredRanges; ++r) {

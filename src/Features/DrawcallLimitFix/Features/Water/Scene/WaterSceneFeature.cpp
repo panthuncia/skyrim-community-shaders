@@ -23,6 +23,7 @@ namespace DCLF::Features::Water::WaterScene
 	{
 		bool on = false;      // written once at install
 		bool claims = false;  // the same
+		bool cpuClaims = false;  // the same
 
 		// The render thread's last listing. Keys only: the census compares them, never dereferences them.
 		std::atomic<const void*> listedWaterLod{ nullptr };
@@ -51,14 +52,16 @@ namespace DCLF::Features::Water::WaterScene
 
 	bool On() { return on; }
 	bool Claims() { return claims; }
+	bool ClaimsInCpuFrames() { return cpuClaims; }
 
 	void Install(Api::InstallContext& a_context)
 	{
 		const auto id = a_context.RegisterSwitch({ .name = "CS_DCLF_WATER", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never,
-			.description = "0: nothing of it is registered, and the latch path draws all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the latch path's (phases 2 and 3)",
+			.description = "0: nothing of it is registered, and the latch path draws all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs, the rest staying the latch path's (phases 2 and 3): in GPU-driven frames by the deferred range passes, in CPU-driven frames by the CPU pipeline's water sites; 3: as 2, but CPU-driven frames leave all water to the latch path",
 			.after = "CS_DCLF_EFFECT_RIGID_SKINS" });
 		const auto& value = SwitchValue(id);
-		claims = value.empty() || value == "2";
+		claims = value.empty() || value == "2" || value == "3";
+		cpuClaims = claims && value != "3";
 		on = claims || value == "1";
 		if (!on)
 			return;

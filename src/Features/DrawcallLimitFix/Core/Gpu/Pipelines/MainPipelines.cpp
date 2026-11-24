@@ -915,6 +915,7 @@ namespace DCLF
 		built->zKey.vertexBytes = static_cast<std::uint32_t>(a_program.vertex.size());
 		built->zKey.pixel = ModuleHash(a_program.pixel);
 		built->zKey.pixelBytes = static_cast<std::uint32_t>(a_program.pixel.size());
+		built->deferredStencil = Extensions::DeferredDrawsOf(a_key).stencilRef;
 		for (std::uint32_t r = 0; r < Api::kDeferredRanges; ++r) {
 			const auto& range = a_ranges[r];
 			if (!range.drawn)
@@ -1023,6 +1024,7 @@ namespace DCLF
 				for (std::size_t r = 0; r < Api::kDeferredRanges; ++r) {
 					const auto& deferred = built->pulledDeferred[r];
 					state.deferred[r].push_back(deferred ? deferred->GetHandle() : decltype(deferred->GetHandle()){});
+					state.deferredStencil[r].push_back(built->deferredStencil[r]);
 				}
 		}
 		state.zLayout = impl.zLayout->GetHandle();

@@ -75,6 +75,8 @@ namespace DCLF::Direct
 		DecalDepth,  // the opaque decals' depth pass (plainDepth)
 		Shadow,      // a shadow view or occlusion map (ShadowIndirectState::pipelines)
 		Refraction,  // the refraction normals (IndirectState::refraction)
+		WaterMask,     // deferred range 0's pipelines (IndirectState::deferred), each with its stencil reference
+		WaterSurface,  // deferred range 1's
 	};
 
 	/** @brief A draw family's main draw this frame. Null pipelines mean it is not drawn. */
@@ -134,6 +136,7 @@ namespace DCLF::Direct
 		std::uint32_t boundBucket = ~0u;
 		rhi::PipelineHandle boundPipeline{};
 		std::uint64_t boundVertexLayout = 0;
+		std::uint32_t stencilRef = ~0u;  // the water passes' last reference set
 		// Whether colour or depth draws use the keys' own pipelines under the main layout, and whether that layout is bound.
 		bool pushedColour = false;
 		bool mainLayoutBound = false;

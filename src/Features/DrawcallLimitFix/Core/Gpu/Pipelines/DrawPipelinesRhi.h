@@ -41,6 +41,8 @@ namespace DCLF
 		std::vector<rhi::PipelineHandle> plainDepth;
 		// Per deferred range and by set index, a deferred family key's plain pipeline there. Null for every other key.
 		std::array<std::vector<rhi::PipelineHandle>, Api::kDeferredRanges> deferred;
+		// The same keys' stencil references there (DeferredDrawsOf), for the CPU pipeline's water sites.
+		std::array<std::vector<std::uint8_t>, Api::kDeferredRanges> deferredStencil;
 		rhi::PipelineLayoutHandle zLayout{};
 		rhi::CommandSignatureHandle zDrawSignature{};
 		// Null while it waits or once it failed.

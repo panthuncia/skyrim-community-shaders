@@ -105,6 +105,6 @@ namespace DCLF::Features::Water::Indirect
 			return false;
 		DCLF_ZONE("CS.DCLF.Water.Epoch");
 		Extensions::TriggerScope trigger(site.trigger);
-		return Draws::SubmitDeferredEpoch(epoch);
+		return Draws::SubmitDeferredEpoch(epoch, a_view == View::Mask ? 0u : 1u);
 	}
 }

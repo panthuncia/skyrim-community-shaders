@@ -145,6 +145,9 @@ namespace DCLF::Direct::detail
 		std::vector<SiteView*> views;
 		SiteView *main = nullptr, *decal = nullptr, *forward = nullptr, *refractionView = nullptr;
 		bool refraction = false;
+		// A water site's list (the water mask's or surface's), and the target set its trigger chose (DeferredRangeContribution::variant).
+		SiteView* water = nullptr;
+		std::uint32_t waterVariant = 0;
 		// False when the run's inputs were incomplete. Its queues are still drained.
 		bool valid = true;
 		bool recordedDraws = false;
@@ -188,6 +191,8 @@ namespace DCLF::Direct::detail
 		std::function<void()> colourDispatch;
 		bool depthRan = false;
 		SiteRun* forwardRun = nullptr;
+		// The water mask's and surface's runs, opened by the colour commit and taken at their triggers.
+		std::array<SiteRun*, 2> waterRuns{};
 		std::shared_ptr<void> shadowState, viewState, familyState;
 		// Pool work still running for this slot's frame. A continuation that starts after the slot moves on does nothing.
 		// Release waits until none is left.

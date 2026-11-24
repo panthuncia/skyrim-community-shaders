@@ -772,6 +772,8 @@ namespace DCLF
 			rhi::PipelinePtr pulledDecalDepth;
 			// A deferred family key's plain pipeline per deferred range, null where it does not draw. Its family's build makes them.
 			std::array<rhi::PipelinePtr, Api::kDeferredRanges> pulledDeferred;
+			// Its stencil reference in each range (DeferredDrawsOf).
+			std::array<std::uint8_t, Api::kDeferredRanges> deferredStencil{};
 			// A DeferredRanges key's: only pulledDeferred is drawn, so it has no state class and no set pipelines.
 			bool deferredOnly = false;
 			ZPipelineKey zKey;

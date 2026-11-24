@@ -72,6 +72,9 @@ namespace DCLF
 		bool (*empty)(const Draws::PassFrame& a_shape) = nullptr;
 		// The epoch holds the CPU pipeline's forward site, so the frame's forward run is handed to it (Direct::ForwardReached).
 		bool forwardSite = false;
+		// The CPU pipeline's water site of deferred range waterSite - 1 (0: none), drawing target set waterVariant (Direct::WaterReached).
+		std::uint32_t waterSite = 0;
+		std::uint32_t waterVariant = 0;
 		// Runs first inside the epoch's commit, where the host's current run is the run its passes recorded at execution see.
 		void (*commit)(void* a_context) = nullptr;
 	};

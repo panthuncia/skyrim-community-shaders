@@ -5,6 +5,8 @@
 
 // Main/Resources.h goes first because volk must come before every Vulkan header.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteFrame.h"
@@ -19,6 +21,7 @@
 
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -34,6 +37,7 @@ namespace DCLF::Direct
 			RenderGraph::DeclaredRefs sequences;  // the recorder pushes refs into these
 			// The declared colours, then depths, which the recording resolves to the images this frame's graph binds.
 			std::vector<org::DeclaredResourceUse> colours, depths;
+			std::vector<std::uint32_t> order;  // SitePass's a_order
 		};
 
 		/** @brief A draw site's late pass, recording the executing run's draws. */
@@ -44,13 +48,16 @@ namespace DCLF::Direct
 
 			// Only in a GPU-driven graph, where ORG alone places the barriers. An external epoch's barriers are full anyway.
 			using Reads = std::function<void(org::PassBuilder&)>;
-			SitePass(Site a_site, Textures a_colours, Textures a_depths, Reads a_reads) :
-				site(a_site), colours(std::move(a_colours)), depths(std::move(a_depths)), reads(std::move(a_reads)) {}
+			// a_order: the recording's colours as indices into a_colours, for a site that draws one of several target sets sharing
+			// targets (the water sites). Empty: a_colours in order.
+			SitePass(Site a_site, Textures a_colours, Textures a_depths, Reads a_reads, std::vector<std::uint32_t> a_order = {}) :
+				site(a_site), colours(std::move(a_colours)), depths(std::move(a_depths)), reads(std::move(a_reads)), order(std::move(a_order)) {}
 
 			SiteBindings Declare(org::PassBuilder& a_builder)
 			{
 				a_builder.PreferQueue(org::QueueKind::Graphics);
 				SiteBindings bindings{ site };
+				bindings.order = order;
 				for (const auto& colour : colours)
 					bindings.colours.push_back(a_builder.RenderTarget(colour));
 				for (const auto& depth : depths)
@@ -90,6 +97,13 @@ namespace DCLF::Direct
 				};
 				resolve(a_bindings.colours, images.colours);
 				resolve(a_bindings.depths, images.depths);
+				if (!a_bindings.order.empty()) {
+					std::vector<detail::SiteImages::Image> ordered;
+					ordered.reserve(a_bindings.order.size());
+					for (const std::uint32_t index : a_bindings.order)
+						ordered.push_back(images.colours[index]);
+					images.colours = std::move(ordered);
+				}
 				(void)detail::RecordExecutingSite(a_bindings.site, a_recording.Commands(), &run, &images);
 			}
 
@@ -97,6 +111,7 @@ namespace DCLF::Direct
 			Site site;
 			Textures colours, depths;
 			Reads reads;
+			std::vector<std::uint32_t> order;
 		};
 
 		/** @brief A site's pass, or null when it would declare no target, since a pass that writes nothing would be culled. */
@@ -225,12 +240,63 @@ namespace DCLF::Direct
 			return MakeSitePass(Site::FirstPerson, MainColours(*view->main), { view->target }, std::move(reads));
 		}
 
+		/**
+		 * @brief water.mask and water.surface: deferred range a_range's members, which the colour commit culled, in the target set the
+		 * trigger chose. Every set's targets are declared once each, then the main depth. The draws read what the GPU path's range pass
+		 * reads: the frame record's buffers and textures.
+		 */
+		std::shared_ptr<org::RenderPass> WaterSite(const Api::PassContext& a_context, std::uint32_t a_range)
+		{
+			const auto& entry = Extensions::DeferredRanges()[a_range];
+			if (!entry.taken || !entry.contribution.target || !a_context.main)
+				return nullptr;
+			const auto& main = *a_context.Main();
+			SitePass::Textures unique;
+			std::vector<std::uint32_t> order;
+			std::uint32_t perSet = 0;
+			for (std::uint32_t v = 0; v < entry.contribution.variants; ++v) {
+				std::uint32_t count = 0;
+				for (std::uint32_t i = 0; i < Api::kDeferredRangeTargets; ++i, ++count) {
+					auto target = entry.contribution.target(v, i);
+					if (!target)
+						break;
+					auto found = std::ranges::find(unique, target);
+					if (found == unique.end())
+						found = unique.insert(unique.end(), std::move(target));
+					order.push_back(static_cast<std::uint32_t>(found - unique.begin()));
+				}
+				if (v == 0)
+					perSet = count;
+				if (!count || count != perSet) {
+					logger::error("[DCLF] CPU pipeline: deferred range {}'s target sets are empty or differ in their counts; its water site draws nothing", entry.name);
+					return nullptr;
+				}
+			}
+			return std::make_shared<SitePass>(a_range == 0 ? Site::WaterMask : Site::WaterSurface, std::move(unique), SitePass::Textures{ main.nativeDepth },
+				[resources = a_context.Main()](org::PassBuilder& a_builder) {
+					const std::span<const org::SrvView> noViews{};
+					a_builder.ShaderResource(resources->frameConstants, noViews);
+					for (const auto& frameBuffer : resources->frameBuffers)
+						a_builder.ShaderResource(frameBuffer.copy, noViews);
+					(void)Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds());
+				},
+				std::move(order));
+		}
+
+		std::shared_ptr<org::RenderPass> WaterMaskSite(const Api::PassContext& a_context) { return WaterSite(a_context, 0); }
+		std::shared_ptr<org::RenderPass> WaterSurfaceSite(const Api::PassContext& a_context) { return WaterSite(a_context, 1); }
+		// Absent while nobody registered the range, so the water epochs stay dormant then, as with the GPU path's range passes.
+		bool WaterMaskPresent() { return Extensions::DeferredRanges()[0].taken; }
+		bool WaterSurfacePresent() { return Extensions::DeferredRanges()[1].taken; }
+
 		constexpr Api::PassDef kSitePasses[] = {
 			{ .key = "core.z.direct", .passName = "cs.dclf.z.direct", .kind = Api::PassKind::Render, .make = &DepthSite, .cpuPipeline = true, .recordAtExecution = true },
 			{ .key = "core.direct", .passName = "cs.dclf.direct", .kind = Api::PassKind::Render, .make = &ColourSite, .cpuPipeline = true, .recordAtExecution = true },
 			{ .key = "core.forward-direct", .passName = "cs.dclf.forward.direct", .kind = Api::PassKind::Render, .make = &ForwardSite, .cpuPipeline = true, .recordAtExecution = true, .gpuLate = true },
 			{ .key = "core.shadow-direct", .passName = "cs.dclf.shadow.direct", .kind = Api::PassKind::Render, .make = &ShadowSite, .cpuPipeline = true, .recordAtExecution = true },
 			{ .key = "view.direct", .passName = "{view}.direct", .kind = Api::PassKind::Render, .make = &FirstPersonSite, .cpuPipeline = true, .recordAtExecution = true, .gpuLate = true },
+			{ .key = "core.water-mask-direct", .passName = "cs.dclf.water-mask.direct", .kind = Api::PassKind::Render, .make = &WaterMaskSite, .cpuPipeline = true, .recordAtExecution = true, .present = &WaterMaskPresent },
+			{ .key = "core.water-surface-direct", .passName = "cs.dclf.water-surface.direct", .kind = Api::PassKind::Render, .make = &WaterSurfaceSite, .cpuPipeline = true, .recordAtExecution = true, .present = &WaterSurfacePresent },
 		};
 	}
 

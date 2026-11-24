@@ -384,6 +384,9 @@ namespace DCLF::Draws::detail
 				AddMain(ViewType::Reflection, a_input, mainRuns(), 0, a_input.pipelineIndex);
 			if (drawable && firstPersonBit && (mask & firstPersonBit))
 				AddMain(ViewType::FirstPerson, a_input, mainRuns(), 0, a_input.pipelineIndex);
+			// A deferred range's member (water): its key's main set, whose range pipelines the water sites bind.
+			if (drawable && (mask & kViewWater))
+				AddMain(ViewType::Water, a_input, mainRuns(), 0, a_input.pipelineIndex);
 			const std::uint32_t caster = a_input.view.shadowKey;
 			const auto casters = [&]() -> const Run& {
 				if (casterRun.first == kNoKey)

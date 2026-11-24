@@ -40,7 +40,8 @@ namespace DCLF::Direct
 
 		bool MainCamera(ViewType a_type)
 		{
-			return a_type == ViewType::Main || a_type == ViewType::Decal || a_type == ViewType::Forward || a_type == ViewType::Refraction;
+			return a_type == ViewType::Main || a_type == ViewType::Decal || a_type == ViewType::Forward || a_type == ViewType::Refraction ||
+			       a_type == ViewType::Water;
 		}
 		// Shadow epoch views drop casters under a fading root.
 		bool ShadowFamily(ViewType a_type)
@@ -433,7 +434,7 @@ namespace DCLF::Direct
 		{
 			const bool portalPassed = a_inFrustum && !(a_portalRejected ? *a_portalRejected != 0 : PortalRejected(a_frame, a_lane.root, a_lane.bound, a_view.planeMargin));
 			bool fadeHidden = false;
-			if (portalPassed && a_frame.reportsVisibility)
+			if (portalPassed && a_frame.reportsVisibility && !a_view.noStamp)
 				fadeHidden = StampFrustum(a_frame, a_lane.object, a_lane.root, a_lane.flags, a_lane.fadeDistance);
 			if (a_view.stampOnly || (a_lane.flags & kLaneCullOnly))
 				return false;
@@ -614,6 +615,9 @@ namespace DCLF::Direct
 		if (a_frame->set)
 			for (const ViewType type : { ViewType::Main, ViewType::Decal, ViewType::Forward, ViewType::Refraction })
 				batches += static_cast<std::uint32_t>(a_frame->set->List(type).size());
+		// The water list is culled by the mask's site and the surface's. Only the mask's stamps.
+		if (a_frame->set && a_frame->waterSites)
+			batches += static_cast<std::uint32_t>(a_frame->set->List(ViewType::Water).size());
 		a_frame->pendingStamps.store(batches, std::memory_order_relaxed);
 		auto* held = new Held{ a_frame };
 		const Held* replaced = latest.exchange(held, std::memory_order_seq_cst);
@@ -770,7 +774,7 @@ namespace DCLF::Direct
 		out.objectWords = words;
 		out.drawMasks = masks;
 		// The frame's last main-camera list diffs the verdicts for kAccumulated.
-		if (mainCamera && a_frame.reportsVisibility && a_frame.pendingStamps.fetch_sub(1, std::memory_order_acq_rel) == 1)
+		if (mainCamera && !a_view.noStamp && a_frame.reportsVisibility && a_frame.pendingStamps.fetch_sub(1, std::memory_order_acq_rel) == 1)
 			DiffVisibility(a_frame);
 		return out;
 	}

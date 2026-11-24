@@ -133,6 +133,8 @@ namespace DCLF::Features::Water::WaterScene
 	bool On();
 	/** @brief Whether CS_DCLF_WATER is 2: the port claims plain water while Indirect::DrawnInput is on. Read once at install. */
 	bool Claims();
+	/** @brief Whether claimed water is claimed in CPU-driven frames too, which the CPU pipeline's water sites draw (CS_DCLF_WATER not 3). */
+	bool ClaimsInCpuFrames();
 
 	// Within this folder.
 

@@ -123,6 +123,9 @@ namespace DCLF::Features::Water::Indirect
 		{
 			if (!waterDrawer.load(std::memory_order_acquire))
 				return false;
+			// CPU-driven frames draw claimed water with the CPU pipeline's water sites (Direct::WaterReached).
+			if (WaterScene::ClaimsInCpuFrames())
+				return true;
 			return !Draws::CpuPipelineForced() && !Draws::GraphBuiltForCpu() && !CpuPipelineFor(Toggles::Get().Active(), waterInterior.load(std::memory_order_relaxed));
 		}
 

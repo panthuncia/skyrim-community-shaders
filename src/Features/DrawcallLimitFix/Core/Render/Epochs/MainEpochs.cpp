@@ -157,6 +157,8 @@ namespace DCLF
 				a_submit.commit(a_submit.context);
 			if (revision.direct && a_submit.forwardSite)
 				drawn = Direct::ForwardReached(result.optional);
+			if (revision.direct && a_submit.waterSite)
+				drawn = Direct::WaterReached(a_submit.waterSite - 1, a_submit.waterVariant);
 			if (revision.recordings && !revision.recordings->recordings.empty())
 				impl->SubmitRevisionRecording(a_epoch, *revision.recordings, 0);
 			owners.Seal(impl->scene.get());

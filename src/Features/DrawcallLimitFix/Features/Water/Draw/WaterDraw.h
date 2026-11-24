@@ -56,9 +56,9 @@ namespace DCLF::Features::Water::Indirect
 	void Register(Api::InstallContext& a_context);
 
 	/**
-	 * @brief The classify input "water drawn by dclf": on while a draw client is set (SetDrawer) and the frame is GPU-driven. The
-	 * CPU-driven pipeline has no kViewWater input, so water claimed there would be drawn by nobody. The port's derive must refuse to
-	 * claim water while it is off.
+	 * @brief The classify input "water drawn by dclf": on while a draw client is set (SetDrawer), in GPU-driven frames (the deferred range
+	 * passes) and, unless CS_DCLF_WATER is 3, CPU-driven ones (the CPU pipeline's water sites). The port's derive must refuse to claim water
+	 * while it is off.
 	 */
 	Api::ClassifyInputId DrawnInput();
 

@@ -506,6 +506,7 @@ namespace DCLF::Features::Fades
 			frame->programs = s.programs;
 			// Portal tests only decide visibility stamps, and an observer's culls stamp nothing.
 			frame->reportsVisibility = !a_input.observer;
+			frame->waterSites = !a_input.observer;
 			if (!a_input.observer) {
 				frame->portalTest = &::DCLF::Portals::PortalTestCpu;
 				frame->portalTestBatch = &::DCLF::Portals::PortalTestCpuBatch;

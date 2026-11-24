@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteFrame.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteStats.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/ViewSites.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DeferredRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
@@ -609,6 +610,63 @@ namespace DCLF::Direct::detail
 		}
 	}
 
+	/**
+	 * @brief A water site's draws: the colour commit's culled water list in the chosen target set's rendering, testing the main depth
+	 * and stencil, with each key's range pipeline and stencil reference. a_images holds every target set's colours in set order (each
+	 * set the same count), then the main depth.
+	 */
+	void RecordWaterSite(SiteOut& a_out, SiteRun& a_run, const SiteImages* a_images)
+	{
+		auto& slot = *a_run.slot;
+		if (!a_run.water)
+			return;
+		const auto batches = AwaitAll(a_run, *a_run.water);
+		const std::uint32_t range = a_run.site == Site::WaterMask ? 0u : 1u;
+		const auto& entry = Extensions::DeferredRanges()[range];
+		if (!a_images || a_images->depths.empty() || !entry.taken || !entry.contribution.variants)
+			return;
+		const std::uint32_t variants = entry.contribution.variants;
+		const auto perSet = static_cast<std::uint32_t>(a_images->colours.size() / variants);
+		if (!perSet || perSet > Api::kDeferredRangeTargets || a_run.waterVariant >= variants)
+			return;
+		if (std::ranges::none_of(batches, [](const CulledBatch* a_batch) { return a_batch->count != 0; }))
+			return;
+		std::array<rhi::ColorAttachment, Api::kDeferredRangeTargets> colours{};
+		for (std::uint32_t i = 0; i < perSet; ++i) {
+			const auto& image = a_images->colours[a_run.waterVariant * perSet + i];
+			colours[i].rtv = image.view;
+			colours[i].resource = image.resource;
+			colours[i].loadOp = rhi::LoadOp::Load;
+			colours[i].storeOp = rhi::StoreOp::Store;
+		}
+		rhi::DepthAttachment depth{};
+		depth.dsv = a_images->depths.front().view;
+		depth.resource = a_images->depths.front().resource;
+		depth.depthLoad = rhi::LoadOp::Load;
+		depth.depthStore = rhi::StoreOp::Store;
+		depth.stencilLoad = rhi::LoadOp::Load;
+		depth.stencilStore = rhi::StoreOp::Store;
+		const auto& shape = *a_run.shape;
+		rhi::PassBeginInfo begin{};
+		begin.colors = { colours.data(), perSet };
+		begin.depth = &depth;
+		begin.width = shape.width;
+		begin.height = shape.height;
+		begin.minDepth = shape.minDepth;
+		begin.maxDepth = shape.maxDepth;
+		begin.debugName = range == 0 ? "DCLF direct water mask" : "DCLF direct water surface";
+		auto& list = a_out.Inline();
+		list.BeginPass(begin);
+		RecordContext context{ list, *slot.set, ViewType::Water, 0, a_run.site, range == 0, a_run.bindings, &slot.counters };
+		if (BeginList(context))
+			for (const auto* batch : batches)
+				if (batch->count)
+					RecordBatch(context, *batch);
+		list.EndPass();
+		// A list's reference starts at 0, and later passes on this list expect that.
+		list.SetStencilRef(0);
+	}
+
 	namespace
 	{
 		// CS thread. The run being recorded, for its epoch's late pass.
@@ -701,7 +759,8 @@ namespace DCLF::Direct::detail
 		}
 		if (!run || run->site != a_site || !run->valid)
 			return false;
-		if (a_images)
+		const bool water = run->site == Site::WaterMask || run->site == Site::WaterSurface;
+		if (a_images && !water)
 			UseSiteImages(*run, *a_images);
 		const auto start = Clock::now();
 		const auto drawnNow = [&] {
@@ -737,6 +796,10 @@ namespace DCLF::Direct::detail
 		case Site::FirstPerson:
 			RecordFirstPersonSite(out, *run);
 			break;
+		case Site::WaterMask:
+		case Site::WaterSurface:
+			RecordWaterSite(out, *run, a_images);
+			break;
 		default:
 			break;
 		}
@@ -760,7 +823,7 @@ namespace DCLF::Direct::detail
 		auto& slot = *run.slot;
 		const auto start = Clock::now();
 		const std::size_t site = static_cast<std::size_t>(run.site);
-		static constexpr std::string_view kSiteNames[kSites] = { "shadow", "depth", "colour", "forward", "first person" };
+		static constexpr std::string_view kSiteNames[kSites] = { "shadow", "depth", "colour", "forward", "first person", "water mask", "water surface" };
 		DCLF_ZONE("CS.DCLF.Cpu.Site");
 		const auto siteName = kSiteNames[site];
 		ZoneText(siteName.data(), siteName.size());
@@ -814,7 +877,7 @@ namespace DCLF::Direct::detail
 		auto& waits = s.emitWaits;
 		auto& signals = s.emitSignals;
 		static constexpr const char* kLabels[kSites] = { "DCLF direct shadow", "DCLF direct depth", "DCLF direct colour", "DCLF direct forward",
-			"DCLF direct first person" };
+			"DCLF direct first person", "DCLF direct water mask", "DCLF direct water surface" };
 		// One callback per segment, each with its waits and its signals on the graphics timeline.
 		// DXVK's list is ended first for a segment marked split.
 		const auto& execution = a_run.execution;
@@ -926,6 +989,7 @@ namespace DCLF::Direct::detail
 		a_slot.mainDepthCount = 0;
 		a_slot.depthRan = false;
 		a_slot.forwardRun = nullptr;
+		a_slot.waterRuns = {};
 		a_slot.counters = {};
 		a_slot.siteRuns = {};
 		a_slot.siteEmpty = {};
@@ -1584,18 +1648,36 @@ namespace DCLF::Direct
 		forward.forward = &NewView(*slot, forward, ViewType::Forward, colourView(ViewType::Forward), false);
 		forward.refractionView = &NewView(*slot, forward, ViewType::Refraction, colourView(ViewType::Refraction), false);
 		slot->forwardRun = &forward;
+		// The water mask's and surface's sites, while the frame has water members. Each culls the water list on its own, since its
+		// epoch may record on the submission thread while the other's is still queued.
+		std::array<SiteRun*, 2> water{};
+		if (slot->ownsEpochs && !slot->set->List(ViewType::Water).empty())
+			for (std::uint32_t r = 0; r < water.size(); ++r) {
+				auto& waterRun = NewRun(*slot, r == 0 ? Site::WaterMask : Site::WaterSurface, a_inputs);
+				auto view = colourView(ViewType::Water);
+				view.noStamp = r != 0;
+				waterRun.water = &NewView(*slot, waterRun, ViewType::Water, view, r == 0);
+				water[r] = &waterRun;
+			}
+		slot->waterRuns = water;
 		// Main colour culls wait for the depth site's batches and this frame's cull frame.
 		if (run)
 			slot->colourDispatch = [slot, run] { DispatchCulls(*slot, *run, *run->main, run->cullFrame); };
-		OnCullFrame(*slot, [slot, run, forward = &forward](const std::shared_ptr<const CullFrame>& a_frame) {
+		OnCullFrame(*slot, [slot, run, forward = &forward, water](const std::shared_ptr<const CullFrame>& a_frame) {
 			forward->cullFrame = a_frame;
 			if (run)
 				run->cullFrame = a_frame;
-			DispatchSiteCulls(*slot, [slot, run, forward, a_frame] {
+			for (auto* waterRun : water)
+				if (waterRun)
+					waterRun->cullFrame = a_frame;
+			DispatchSiteCulls(*slot, [slot, run, forward, water, a_frame] {
 				if (run && run->decal)
 					DispatchCulls(*slot, *run, *run->decal, a_frame);
 				DispatchCulls(*slot, *forward, *forward->forward, a_frame);
 				DispatchCulls(*slot, *forward, *forward->refractionView, a_frame);
+				for (auto* waterRun : water)
+					if (waterRun)
+						DispatchCulls(*slot, *waterRun, *waterRun->water, a_frame);
 				if (run)
 					ArriveColour(*slot);
 			});
@@ -1641,6 +1723,26 @@ namespace DCLF::Direct
 			return true;
 		}
 		return HandOffRun(*run, rows != nullptr);
+	}
+
+	bool WaterReached(std::uint32_t a_range, std::uint32_t a_variant)
+	{
+		auto& s = S();
+		auto* slot = s.current;
+		if (!slot || !slot->ownsEpochs || a_range >= slot->waterRuns.size())
+			return false;
+		auto* run = std::exchange(slot->waterRuns[a_range], nullptr);
+		if (!run)
+			return false;
+		run->waterVariant = a_variant;
+		s.pending = run;
+		return true;
+	}
+
+	bool WaterSitesOpen()
+	{
+		const auto* slot = S().current;
+		return slot && slot->ownsEpochs && (slot->waterRuns[0] || slot->waterRuns[1]);
 	}
 
 	WindowCounters TakeWindowCounters()

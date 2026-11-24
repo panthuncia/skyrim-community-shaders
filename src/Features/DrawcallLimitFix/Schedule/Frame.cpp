@@ -94,9 +94,11 @@ namespace DCLF::Schedule
 		// The water epochs: the deferred ranges the colour segment culled. Range 0 is the water mask, range 1 the water surface.
 		constexpr std::string_view kWaterMask[] = {
 			"core.deferred-range0",
+			"core.water-mask-direct",
 		};
 		constexpr std::string_view kWaterSurface[] = {
 			"core.deferred-range1",
+			"core.water-surface-direct",
 		};
 		// The forward epoch: the CPU pipeline's forward site sorts and draws the blended draws and the refraction normals, in either pipeline.
 		constexpr std::string_view kForward[] = {

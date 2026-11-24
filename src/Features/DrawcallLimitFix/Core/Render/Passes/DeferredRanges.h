@@ -18,7 +18,7 @@ namespace DCLF::Draws
 	 * range has a bucket, and always for a dormant epoch. Each range draws the target set its variant picks now. Returns whether it
 	 * was submitted.
 	 */
-	bool SubmitDeferredEpoch(std::uint32_t a_epoch);
+	bool SubmitDeferredEpoch(std::uint32_t a_epoch, std::uint32_t a_range);
 
 	/** @brief Any thread. The runs since the last call whose passes found no target set chosen, so drew nothing of their range. */
 	std::uint64_t TakeDeferredRunsWithoutChoice();

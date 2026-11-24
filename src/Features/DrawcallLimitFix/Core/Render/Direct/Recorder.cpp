@@ -118,6 +118,12 @@ namespace DCLF::Direct
 				}
 			case RecordPass::DecalDepth:
 				return index < bindings.main->plainDepth.size() ? bindings.main->plainDepth[index] : rhi::PipelineHandle{};
+			case RecordPass::WaterMask:
+			case RecordPass::WaterSurface:
+				{
+					const auto& deferred = bindings.main->deferred[a_pass == RecordPass::WaterMask ? 0 : 1];
+					return index < deferred.size() ? deferred[index] : rhi::PipelineHandle{};
+				}
 			case RecordPass::Shadow:
 				{
 					// The bucket is a key slot, so its pipeline comes from the view's map row.
@@ -168,6 +174,17 @@ namespace DCLF::Direct
 				++a_context.binds;
 				if (previous.index == a_context.boundPipeline.index && previous.generation == a_context.boundPipeline.generation)
 					++a_context.sameBinds;
+				// A water key's stencil reference in its range: the water type's bit for the mask, the surface's test value.
+				if (a_context.pass == RecordPass::WaterMask || a_context.pass == RecordPass::WaterSurface) {
+					const auto& buckets = a_context.set.buckets[static_cast<std::size_t>(a_context.view)].pipeline;
+					const auto& stencil = a_context.bindings.main->deferredStencil[a_context.pass == RecordPass::WaterMask ? 0 : 1];
+					const std::uint32_t index = a_bucket < buckets.size() ? buckets[a_bucket] : ~0u;
+					const std::uint32_t reference = index < stencil.size() ? stencil[index] : 0u;
+					if (reference != a_context.stencilRef) {
+						a_context.stencilRef = reference;
+						a_context.list.SetStencilRef(reference);
+					}
+				}
 			}
 			return a_context.boundPipeline.valid();
 		}
@@ -382,6 +399,8 @@ namespace DCLF::Direct
 			return RecordPass::Colour;
 		case ViewType::Refraction:
 			return RecordPass::Refraction;
+		case ViewType::Water:
+			return a_depthPass ? RecordPass::WaterMask : RecordPass::WaterSurface;
 		default:
 			return RecordPass::Shadow;
 		}
@@ -393,6 +412,7 @@ namespace DCLF::Direct
 		a_context.boundBucket = ~0u;
 		a_context.boundPipeline = {};
 		a_context.boundVertexLayout = 0;
+		a_context.stencilRef = ~0u;
 		const auto& bindings = a_context.bindings;
 		if (a_context.pass == RecordPass::Shadow ? !bindings.shadow || !bindings.shadow->valid : !bindings.main || !bindings.main->valid)
 			return false;
