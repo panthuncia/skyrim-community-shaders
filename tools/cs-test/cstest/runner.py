@@ -20,6 +20,8 @@ from .stage import load_manifest
 
 # SSE Display Tweaks reads this file after its own ini; game.uncapped writes it for one run.
 DISPLAY_TWEAKS_FILE = "SSEDisplayTweaks_custom.ini"
+# [prefs_ini] edits this file in the MO2 profile for one run.
+PREFS_INI = "SkyrimPrefs.ini"
 DISPLAY_TWEAKS_UNCAPPED = "[Render]\nEnableVSync=false\nEnableTearing=true\nFramerateLimit=0\n"
 
 POLL_S = 1.0
@@ -216,6 +218,56 @@ def write_saved_settings(paths, stage, run_id, saved, journal, log=print):
     log(f"Saved settings: {', '.join(saved)} written into {target} for this run")
 
 
+def ini_text(value):
+    """A prefs_ini value as the game's INI writes it: bools as 1 and 0."""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
+
+def set_ini_values(text, values):
+    """Sets key=value lines in an INI's text, by section. Names match without case, as the game reads them. A missing key goes at the
+    end of its section, a missing section at the end of the file. Every other line stays as it is."""
+    lines = text.splitlines()
+    for section, keys in values.items():
+        header = f"[{section.lower()}]"
+        start = next((i for i, line in enumerate(lines) if line.strip().lower() == header), None)
+        if start is None:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(f"[{section}]")
+            start = len(lines) - 1
+        for key, value in keys.items():
+            end = next((i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("[")), len(lines))
+            line = f"{key}={ini_text(value)}"
+            found = next((i for i in range(start + 1, end) if "=" in lines[i] and lines[i].split("=", 1)[0].strip().lower() == key.lower()), None)
+            if found is not None:
+                lines[found] = line
+                continue
+            # After the section's last line that is not blank.
+            at = end
+            while at > start + 1 and not lines[at - 1].strip():
+                at -= 1
+            lines.insert(at, line)
+    return "\n".join(lines) + "\n"
+
+
+def write_prefs_ini(paths, run_id, prefs, journal, log=print):
+    """[prefs_ini]: written into the MO2 profile's own SkyrimPrefs.ini for this run. The journal puts the file from before back.
+    The profile must use its own game INI files; the game reads the ones in Documents otherwise, and the run stops."""
+    target = paths.mo2 / "profiles" / paths.profile / PREFS_INI
+    if not target.exists():
+        raise RunError(f"{target} is missing: prefs_ini needs the MO2 profile to use its own game INI files")
+    backup = paths.root / "aside" / f"{run_id}-{PREFS_INI}"
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target, backup)
+    journal.add({"do": "restore", "path": str(target), "backup": str(backup)})
+    # Latin-1 keeps every byte of an ANSI file as it was.
+    text = target.read_text(encoding="latin-1")
+    target.write_text(set_ini_values(text, prefs), encoding="latin-1", newline="\r\n")
+    log(f"Prefs INI: {', '.join(f'{s}.{k}' for s, keys in prefs.items() for k in keys)} written into {target} for this run")
+
+
 def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, wait_lock=0, log=print, config_dir=CONFIG_DIR):
     """One run. Returns its result dict (or the resolved config on a dry run)."""
     schema = load_schema()
@@ -305,6 +357,9 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
 
         if harness["saved_settings"]:
             write_saved_settings(paths, stage, run_id, harness["saved_settings"], journal, log)
+
+        if harness["prefs_ini"]:
+            write_prefs_ini(paths, run_id, harness["prefs_ini"], journal, log)
 
         legacy_env = paths.skse / LEGACY_ENV_FILE
         if legacy_env.exists():

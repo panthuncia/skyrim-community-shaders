@@ -210,6 +210,12 @@ def test_graph_frames_unit():
     assert collect.graph_frames({"env": {}, "expect": {"graph_frames": {}}}, status)["failures"] == []
 
 
+def test_set_ini_values():
+    text = "[Display]\nbFoo=0\n\n[Imagespace]\nbDoDepthOfField=1\n"
+    got = runner.set_ini_values(text, {"display": {"BFOO": True, "bSAO_CS_Enable": 1}, "Extra": {"x": "y"}})
+    assert got == "[Display]\nBFOO=1\nbSAO_CS_Enable=1\n\n[Imagespace]\nbDoDepthOfField=1\n\n[Extra]\nx=y\n"
+
+
 SSGI = {"Screen Space GI": {"Enabled": True, "Settings": {"Quality": 3}}}
 
 

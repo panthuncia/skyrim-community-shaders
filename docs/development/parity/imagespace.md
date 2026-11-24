@@ -135,10 +135,42 @@ PerGeometry, its texture's heap index, its quad's buffer refs) in a latch entry 
 the quad's index count per record. Lens flare scopes leave their batch open, so the composites' scope that follows runs it once.
 `ImageSpace: the engine's ... writes rt...` in the log means the target or blend read above is wrong.
 
+### Compute SAO
+
+`Main::Draw` (SE 35560 / AE 36559) calls the compute SAO's render function (SE 100526 / AE 107252) after the world render and
+first person, just before RenderWorldPostProcess, when its helper's flag at +0x20 is set. The helper is at
+ImageSpaceManager+0x1d0; its constructor copies `bSAO_CS_Enable:Display` (default 0) into the flag and `bSAO_CS_Downscaled:Display`
+into a global (SE 528131 / AE 415076), and the console's `ToggleSAOCS` flips the flag. Each call flips the helper's parity at +0x24.
+The four dispatches go through `DispatchComputeShader` (vtable +0x60), so the usual compute tap takes them. DS below is the downscale
+flag, P the parity.
+
+| Effect | t | u | Groups |
+| --- | --- | --- | --- |
+| ISSAOCameraZAndMipsCS | depth target 0 | `kSAO_CAMERAZ` mips 0 to 2 (rt50 to rt52) | ((W/2+7)>>3, (H/2+7)>>3) |
+| ISSAORawAOCS | rt49 (s0 clamp trilinear), rt62 + DS + 2(1-P), rt7 | rt62 + DS + 2P | ((W'+15)>>4, (H'+15)>>4) |
+| ISSAOBlurHCS | rt62 + DS + 2P | rt66 + DS | (ceil(W'/960), H') |
+| ISSAOBlurVCS | rt66 + DS | rt46 + DS (`kSAO`) | (W', ceil(H'/540)) |
+
+W' and H' are halved with DS. The steps write the engine's targets, as the engine does. Nothing reads them in the frame: the pixel
+SAO in RenderWorld writes its own `kSAO` (CS's kept texture here) before the composite reads it, in vanilla too.
+
+The steps are post chain steps (ChainSteps.inl, group `kSaoCs`, the composites client), always on and gated, with every DS and
+parity variant. A dispatch picks its variant from the global and the helper. The compute SAO's scope leaves its batch open, like the
+lens flares', so the composites' scope runs it inside the post stage; in third person the sun stage is still open at the dispatches.
+The compute effects take several UAVs now: `EffectInfo::targets` counts a dispatch's UAVs, and a step names them in `output`,
+`output1` and `output2`.
+
+The engine sets no CS sampler for the raw AO's t1 and t2, so the steps use clamp linear there. At the first dispatch of each effect
+the log says `the engine's ISSAO... binds what its step reads and writes`, or `differs from its step` with the slots that differ.
+The ORG forms of the three shaders read 0 and drop stores outside a texture, as D3D does (Common/OrgTexelBounds.hlsli).
+
+Check: cs-test `guest+sao-cs` and `guest+sao-cs-downscaled` (the `[prefs_ini]` table sets the two prefs in the profile's
+SkyrimPrefs.ini).
+
 ### Left
 
 - **ISTemporalAA_UI and _Water:** CS's ISTemporalAA.hlsl has neither path. Writing them needs vanilla's DXBC for both (the UI build
   reads the mask from t4, the water build blends a water history) to transcribe and check; not available in this lane.
 - **Perlin noise (128, 129):** the 3D form is Volumetric Lighting's port; its output is not an engine render target.
 - **The dynamic-resolution quad:** its vertices are not known, so draws with it stay refused.
-- **ISExp (123), the compute downsamples (121, 122), debug (118, 149):** not converted.
+- **ISExp (123), the compute downsamples (121, 122), debug (118, 149):** not converted. The compute SAO (134, 135, 137, 145) is done (above).

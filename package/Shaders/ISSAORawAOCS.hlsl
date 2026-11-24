@@ -4,6 +4,18 @@
 // constant layout are vanilla's. Temporaries hold raw bits (uint4), as DXBC registers do; integer work goes
 // through asint/asuint and float work through asfloat. Checked against the vanilla shader on random inputs.
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0 to t2, s0 to s2 and u0 from the heap, and the constants
+// the engine uploaded for this dispatch (CS b0) from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISSAORAWAOCS_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, CS_Z_BufferTex, 0) X(SRV, Texture2D<float4>, AccumAOTex, 1) X(SRV, Texture2D<float4>, MotionVectorsTex, 2) X(SAMPLER, SamplerState, CS_Z_BufferSampler, 0) X(SAMPLER, SamplerState, AccumAOSampler, 1) X(SAMPLER, SamplerState, MotionVectorsSampler, 2) X(UAV, RWTexture2D<float4>, g_OutputBuffer, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 0)
+ORG_PUSH_BLOCK(ISSAORAWAOCS_ORG_RESOURCES(ORG_HANDLE))
+ISSAORAWAOCS_ORG_RESOURCES(ORG_RESOURCE)
+// g_ProjInfos, g_SSAOInfos, g_ScreenInfos, gDynamicResolutionInfo, as the engine uploaded them.
+static float4 cb0[4] = { OrgEngineRow(PerGeometryAt, 0), OrgEngineRow(PerGeometryAt, 1), OrgEngineRow(PerGeometryAt, 2), OrgEngineRow(PerGeometryAt, 3) };
+#else
 SamplerState CS_Z_BufferSampler : register(s0);
 SamplerState AccumAOSampler : register(s1);
 SamplerState MotionVectorsSampler : register(s2);
@@ -18,6 +30,10 @@ cbuffer PerTechnique : register(b0)
 {
 	float4 cb0[4];
 };
+#endif
+
+// The taps read camera Z texels and mips near the edges, and the group's thread count rounds the dispatch up.
+#include "Common/OrgTexelBounds.hlsli"
 
 [numthreads(16, 16, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0;
@@ -50,43 +66,43 @@ cbuffer PerTechnique : register(b0)
 	r5.xy = r4.xy;
 	r5.z = 0x00000000u;
 	{
-		const float4 fetched = CS_Z_BufferTex.Load(int3(asint(r5.x), asint(r5.y), asint(r5.z)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(CS_Z_BufferTex, int3(asint(r5.x), asint(r5.y), asint(r5.z)));
 		r2.w = asuint(fetched.x);
 	}
 	r5.w = dispatchID.y;
 	{
-		const float4 fetched = CS_Z_BufferTex.Load(int3(asint(r5.x), asint(r5.w), asint(r5.z)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(CS_Z_BufferTex, int3(asint(r5.x), asint(r5.w), asint(r5.z)));
 		r4.x = asuint(fetched.x);
 	}
 	r6.xy = (uint2)(cb0[2].yx);
 	r6.xy = min(r4.zw, r6.xy);
 	r6.zw = r5.xz;
 	{
-		const float4 fetched = CS_Z_BufferTex.Load(int3(asint(r6.z), asint(r6.x), asint(r6.w)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(CS_Z_BufferTex, int3(asint(r6.z), asint(r6.x), asint(r6.w)));
 		r4.y = asuint(fetched.x);
 	}
 	r5.x = dispatchID.x;
 	{
-		const float4 fetched = CS_Z_BufferTex.Load(int3(asint(r5.x), asint(r5.y), asint(r5.z)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(CS_Z_BufferTex, int3(asint(r5.x), asint(r5.y), asint(r5.z)));
 		r4.z = asuint(fetched.x);
 	}
 	r5.w = r6.x;
 	{
-		const float4 fetched = CS_Z_BufferTex.Load(int3(asint(r5.x), asint(r5.w), asint(r5.z)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(CS_Z_BufferTex, int3(asint(r5.x), asint(r5.w), asint(r5.z)));
 		r4.w = asuint(fetched.x);
 	}
 	r5.xz = r6.yw;
 	{
-		const float4 fetched = CS_Z_BufferTex.Load(int3(asint(r5.x), asint(r5.y), asint(r5.z)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(CS_Z_BufferTex, int3(asint(r5.x), asint(r5.y), asint(r5.z)));
 		r5.y = asuint(fetched.x);
 	}
 	r5.w = dispatchID.y;
 	{
-		const float4 fetched = CS_Z_BufferTex.Load(int3(asint(r5.x), asint(r5.w), asint(r5.z)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(CS_Z_BufferTex, int3(asint(r5.x), asint(r5.w), asint(r5.z)));
 		r5.x = asuint(fetched.x);
 	}
 	{
-		const float4 fetched = CS_Z_BufferTex.Load(int3(asint(r6.y), asint(r6.x), asint(r6.w)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(CS_Z_BufferTex, int3(asint(r6.y), asint(r6.x), asint(r6.w)));
 		r5.z = asuint(fetched.x);
 	}
 	r4.x = asuint(-asfloat(r4.x) * 2.0 + -asfloat(r2.w));
@@ -204,5 +220,5 @@ cbuffer PerTechnique : register(b0)
 	r0.y = r0.z & r0.y;
 	r3.x = (r0.y != 0u ? r1.x : r0.x);
 	r3.w = 0x3f800000u;
-	g_OutputBuffer[uint2(dispatchID.x, dispatchID.y)] = float4(asfloat(r3.x), asfloat(r3.y), asfloat(r3.z), asfloat(r3.w));
+	ORG_STORE_INSIDE(g_OutputBuffer, uint2(dispatchID.x, dispatchID.y), float4(asfloat(r3.x), asfloat(r3.y), asfloat(r3.z), asfloat(r3.w)));
 }

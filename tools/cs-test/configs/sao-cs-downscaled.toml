@@ -1,0 +1,6 @@
+# sao-cs with bSAO_CS_Downscaled:Display=1: the raw AO and both blurs run at half size into the downscaled targets.
+# Compose it: guest+sao-cs-downscaled, native-vulkan+sao-cs-downscaled.
+extends = ["sao-cs"]
+
+[prefs_ini.Display]
+bSAO_CS_Downscaled = true
