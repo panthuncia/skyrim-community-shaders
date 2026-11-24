@@ -1,0 +1,23 @@
+# A held scene for GPU timing of DCLF's raster passes: the save's scene for 4000 frames after world-ready, a shot, then exit.
+# Add a trace with --set env.CS_NVPERF_TEMPLATE=<template> (dclf-timing reads pass timestamps on any GPU; dclf-passes needs Nsight
+# Perf) and env.CS_NVPERF_START_FRAME=1500 so it starts before the exit.
+# Compose it: guest+raster-perf, native-d3d12+raster-perf.
+extends = ["base"]
+
+[run]
+timeout_s = 600
+
+[[steps]]
+at = "world-ready"
+frames = 600
+do = "shot"
+arg = "scene"
+
+[[steps]]
+at = "previous"
+frames = 4000
+do = "exit"
+
+[expect]
+reach = "world-ready"
+no_log = ["frame tap error"]
