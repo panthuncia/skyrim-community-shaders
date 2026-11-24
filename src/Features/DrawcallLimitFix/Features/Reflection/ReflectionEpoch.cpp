@@ -60,6 +60,7 @@ namespace DCLF::Features::Reflection
 			return skip(2);
 		// The faces draw from the frame's whole publication and their own frame constants. The cube is imported later, at the faces' capture.
 		IndirectDraws::ViewListed listed;
+		DCLF_ZONE_NAMED(reflectionSetup, "CS.DCLF.Reflection.Setup", true);
 		if (draws.TakeViewInputs(kView, IndirectDraws::ViewInputsFrom::DepthThisFrameTargetAfter, listed) != IndirectDraws::ViewInputsTaken::Taken)
 			return skip(3);
 		if (!FrameIndirectStateValid() || !draws.SetUpView(kView) || !draws.ImportViewTarget(kView, reflection.cube.get()))
@@ -73,6 +74,7 @@ namespace DCLF::Features::Reflection
 				views[f] = { true, std::span(faces[f].perFrame.data(), faces[f].perFrameBytes), faces[f].viewProj, faces[f].eye };
 		std::uint32_t drawn = 0;
 		std::array<std::uint64_t, 2> nullTextures{};
+		DCLF_ZONE_NAMED(reflectionSubmit, "CS.DCLF.Reflection.Submit", true);
 		switch (draws.SubmitViewEpoch(kView, 0, listed, views, &drawn, &nullTextures)) {
 		case ViewSubmit::NoRevision:
 			return skip(1);

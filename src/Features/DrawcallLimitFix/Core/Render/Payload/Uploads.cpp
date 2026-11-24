@@ -439,6 +439,7 @@ namespace DCLF
 		for (const auto& frameBuffer : depthOnly ? decltype(epochResources->frameBuffers){} : epochResources->frameBuffers)
 			if (frameBuffer.textureRegister < kTextureRegisters)
 				copied[frameBuffer.textureRegister] = true;
+		DCLF_ZONE_NAMED(registersZone, "CS.DCLF.CMP.FT.Registers", true);
 		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters && !depthOnly; ++t) {
 			auto& held = frameTextureBindings[t];
 			const auto at = frameTextureAt[t];
@@ -478,6 +479,7 @@ namespace DCLF
 				NoteExportRead(t, view);
 			a_frameTextures[t] = HoldFrameTexture(held.view, held.binding, view, t, view ? 0u : textures.NullIndex(), a_commit.bindingOwners);
 		}
+		ZoneNamedN(graphBuffersZone, "CS.DCLF.CMP.FT.GraphBuffers", true);
 		// The colour passes declared these graph buffers, so the reads are ordered. Only the indices come from this commit.
 		for (std::size_t b = 0; b < graphBuffers.size() && !depthOnly; ++b) {
 			if (!((epochResources->graphBuffers >> b) & 1))
@@ -497,6 +499,7 @@ namespace DCLF
 				a_frameTextures[t] = HoldFrameTexture(held.view, held.binding, view, t, view ? 0u : textures.NullIndex(), a_commit.bindingOwners);
 			}
 		}
+		ZoneNamedN(frameBuffersZone, "CS.DCLF.CMP.FT.FrameBuffers", true);
 		for (const auto& frameBuffer : depthOnly ? decltype(epochResources->frameBuffers){} : epochResources->frameBuffers) {
 			auto* buffer = BufferOf(capture.psViews[frameBuffer.textureRegister]);
 			// The mirror sees only writes after it starts watching, so a buffer's first watched frame reads zero and is no defect.
@@ -679,14 +682,23 @@ namespace DCLF
 
 		std::array<std::uint32_t, kTextureRegisters> frameTextures;
 		TracyCZoneN(cTex, "CS.DCLF.CMP.FrameTextures", true);
-		ResolveFrameTextures(commit, frameTextures);
-		CountMissingFrameTextures(commit, frameTextures);
+		{
+			DCLF_ZONE("CS.DCLF.CMP.ResolveFrameTextures");
+			ResolveFrameTextures(commit, frameTextures);
+		}
+		{
+			DCLF_ZONE("CS.DCLF.CMP.CountMissingFrameTextures");
+			CountMissingFrameTextures(commit, frameTextures);
+		}
 		// Unresolved registers read zero through a null descriptor of their view's kind.
 		if (!depthOnly)
 			for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t)
 				if (frameTextures[t] == kInvalidIndex)
 					frameTextures[t] = textures.NullIndexFor(frameTextureBindings[t].view);
-		WriteFrameRecord(commit, frameTextures);
+		{
+			DCLF_ZONE("CS.DCLF.CMP.WriteFrameRecord");
+			WriteFrameRecord(commit, frameTextures);
+		}
 		lap(2);
 		TracyCZoneEnd(cTex);
 

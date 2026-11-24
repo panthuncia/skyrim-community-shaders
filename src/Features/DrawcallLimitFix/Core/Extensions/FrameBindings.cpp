@@ -19,6 +19,8 @@
 #include <Render/PassBuilders.h>
 #include <Render/PreparedPass.h>
 
+#include <ankerl/unordered_dense.h>
+
 #include <algorithm>
 #include <atomic>
 #include <format>
@@ -109,7 +111,27 @@ namespace DCLF::Extensions
 		}
 
 		/** @brief The ids a graph build declared. Replaced whole, and it only ever grows. */
-		std::atomic<std::shared_ptr<const std::vector<std::string_view>>> s_declared;
+		struct DeclaredIds
+		{
+			std::vector<std::string_view> ids;
+			ankerl::unordered_dense::set<std::string_view> set;
+			bool Has(std::string_view a_id) const { return set.contains(a_id); }
+		};
+		std::atomic<std::shared_ptr<const DeclaredIds>> s_declared;
+		std::atomic<std::uint64_t> s_declaredGeneration{ 0 };
+
+		/** @brief The declared ids, kept per thread while no build adds one: the atomic load locks, and commits ask per register. */
+		const std::shared_ptr<const DeclaredIds>& DeclaredNow()
+		{
+			thread_local std::uint64_t t_generation = ~0ull;
+			thread_local std::shared_ptr<const DeclaredIds> t_declared;
+			const std::uint64_t generation = s_declaredGeneration.load(std::memory_order_acquire);
+			if (generation != t_generation) {
+				t_declared = s_declared.load(std::memory_order_acquire);
+				t_generation = generation;
+			}
+			return t_declared;
+		}
 
 		std::string GraphTextureWho(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name)
 		{
@@ -215,35 +237,36 @@ namespace DCLF::Extensions
 
 	void DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids, DeclaredReads& a_out)
 	{
-		const auto declared = s_declared.load(std::memory_order_acquire);
+		const auto& declared = DeclaredNow();
 		std::vector<std::string_view> added;
 		for (const auto id : a_ids) {
 			// Only ids every graph registers, since declaring another fails the build. A skipped id is built in once published.
 			if (!PublishedResources::IsDeclarable(id))
 				continue;
 			DeclarePublishedRead(a_builder, id, a_out);
-			if (!declared || std::ranges::find(*declared, id) == declared->end())
+			if (!declared || !declared->Has(id))
 				added.push_back(id);
 		}
 		if (added.empty())
 			return;
-		auto next = std::make_shared<std::vector<std::string_view>>();
+		auto next = std::make_shared<DeclaredIds>();
 		if (declared)
 			*next = *declared;
 		for (const auto id : added)
-			if (std::ranges::find(*next, id) == next->end())
-				next->push_back(id);
+			if (next->set.insert(id).second)
+				next->ids.push_back(id);
 		s_declared.store(std::move(next), std::memory_order_release);
+		s_declaredGeneration.fetch_add(1, std::memory_order_acq_rel);
 	}
 
 	bool DeclaredTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, std::span<const std::string_view> a_ids,
 		std::uint32_t& a_index)
 	{
 		// Only an id a graph build declared, so the graph orders the read after its writes.
-		const auto declared = s_declared.load(std::memory_order_acquire);
+		const auto& declared = DeclaredNow();
 		std::string_view read;
 		for (const auto id : a_ids) {
-			if (id.empty() || !declared || std::ranges::find(*declared, id) == declared->end() || !PublishedResources::IsPublished(id))
+			if (id.empty() || !declared || !declared->Has(id) || !PublishedResources::IsPublished(id))
 				continue;
 			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 			if (PublishedResources::ShaderResourceIndex(id, a_index)) {
@@ -298,10 +321,10 @@ namespace DCLF::Extensions
 		if (!a_view)
 			return false;
 		// Check declared first. It is cheap, and an undeclared id must never be read.
-		const auto declared = s_declared.load(std::memory_order_acquire);
+		const auto& declared = DeclaredNow();
 		std::string_view read;
 		for (const auto id : a_ids) {
-			if (id.empty() || !declared || std::ranges::find(*declared, id) == declared->end())
+			if (id.empty() || !declared || !declared->Has(id))
 				continue;
 			// The graph orders the declared read. Only its index comes from the build.
 			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
@@ -324,8 +347,8 @@ namespace DCLF::Extensions
 		std::string_view read;
 		if (listed != a_texture.graphResources.end()) {
 			const auto id = *listed;
-			const auto declared = s_declared.load(std::memory_order_acquire);
-			if (declared && std::ranges::find(*declared, id) != declared->end()) {
+			const auto& declared = DeclaredNow();
+			if (declared && declared->Has(id)) {
 				RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 				if (PublishedResources::ShaderResourceIndex(id, a_index))
 					read = id;
@@ -371,8 +394,8 @@ namespace DCLF::Extensions
 		if (id.empty())
 			return false;
 		// Only a read a graph build declared, so the graph orders it against the post stage's write.
-		const auto declared = s_declared.load(std::memory_order_acquire);
-		if (!declared || std::ranges::find(*declared, id) == declared->end() || !PublishedResources::IsPublished(id))
+		const auto& declared = DeclaredNow();
+		if (!declared || !declared->Has(id) || !PublishedResources::IsPublished(id))
 			return false;
 		RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 		if (!PublishedResources::ShaderResourceIndex(id, a_index))

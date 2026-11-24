@@ -18,6 +18,8 @@
 #include <Resources/GloballyIndexedResource.h>
 #include <Resources/VersionedTexture.h>
 
+#include <ankerl/unordered_dense.h>
+
 #include <algorithm>
 #include <atomic>
 #include <mutex>
@@ -61,16 +63,36 @@ namespace PublishedResources
 				bool published = false;
 			};
 			std::vector<Registered> resources;
+			// Each id's position in resources. Its keys point into resources, which never changes once stored.
+			ankerl::unordered_dense::map<std::string_view, std::uint32_t> index;
+
+			const Registered* Find(std::string_view a_id) const
+			{
+				const auto found = index.find(a_id);
+				return found != index.end() ? &resources[found->second] : nullptr;
+			}
+		};
+
+		/** @brief A string map key that finds by string_view without a copy. */
+		struct IdHash
+		{
+			using is_transparent = void;
+			using is_avalanching = void;
+			std::uint64_t operator()(std::string_view a_id) const noexcept { return ankerl::unordered_dense::hash<std::string_view>{}(a_id); }
 		};
 
 		struct State
 		{
 			std::vector<Entry> entries;
+			// Each entry's position. Entries are only appended, so a position stays valid.
+			ankerl::unordered_dense::map<std::string, std::uint32_t, IdHash, std::equal_to<>> entryIndex;
 			// Ids a build skipped before they were published. Their publish rebuilds every graph. Locked, since builds run on another thread.
 			std::vector<std::string> skipped;
 			std::mutex skippedMutex;
 			// Atomic so an extension made off the render thread still reads a whole snapshot.
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
+			// Bumped after each snapshot store, so a thread can keep its last load while it holds.
+			std::atomic<std::uint64_t> snapshotGeneration{ 0 };
 		};
 
 		// The snapshot the graph being built on this thread registers. Weak, so a thread's last build pins nothing.
@@ -90,7 +112,18 @@ namespace PublishedResources
 		{
 			if (auto building = t_building.lock())
 				return building;
-			return t_buildThread ? Published().snapshot.load(std::memory_order_acquire) : nullptr;
+			if (!t_buildThread)
+				return nullptr;
+			// The atomic load locks, and the frame textures ask hundreds of times a frame. Keep the last one while it is current.
+			thread_local std::uint64_t t_generation = ~0ull;
+			thread_local std::shared_ptr<const Snapshot> t_latest;
+			auto& state = Published();
+			const std::uint64_t generation = state.snapshotGeneration.load(std::memory_order_acquire);
+			if (generation != t_generation) {
+				t_latest = state.snapshot.load(std::memory_order_acquire);
+				t_generation = generation;
+			}
+			return t_latest;
 		}
 
 		/** @brief Logs once when called off the owning thread, since the entries are not locked. A loading screen's thread may own them. */
@@ -115,8 +148,8 @@ namespace PublishedResources
 		Entry* Find(State& a_state, std::string_view a_id)
 		{
 			CheckThread();
-			const auto found = std::ranges::find(a_state.entries, a_id, &Entry::id);
-			return found != a_state.entries.end() ? &*found : nullptr;
+			const auto found = a_state.entryIndex.find(a_id);
+			return found != a_state.entryIndex.end() ? &a_state.entries[found->second] : nullptr;
 		}
 
 		/** @brief Registers every entry with each graph built. */
@@ -163,7 +196,11 @@ namespace PublishedResources
 			auto snapshot = std::make_shared<Snapshot>();
 			for (const auto& entry : a_state.entries)
 				snapshot->resources.push_back({ entry.id, entry.resource, entry.slot, entry.bufferSlot, entry.view, entry.published });
+			snapshot->index.reserve(snapshot->resources.size());
+			for (std::uint32_t i = 0; i < snapshot->resources.size(); ++i)
+				snapshot->index.try_emplace(snapshot->resources[i].id, i);
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
+			a_state.snapshotGeneration.fetch_add(1, std::memory_order_acq_rel);
 		}
 
 		/** @brief Stores the entries for the next builds. A new id rebuilds only the graphs that looked it up, never a running one's shape. */
@@ -258,6 +295,7 @@ namespace PublishedResources
 					held ? held->GetName() : std::string("another resource"), a_source.name));
 			}
 			entry = &state.entries.emplace_back(Entry{ .id = std::string(a_id) });
+			state.entryIndex.try_emplace(entry->id, static_cast<std::uint32_t>(state.entries.size() - 1));
 			entry->resource = std::move(resource);
 			entry->slot = a_source.slot;
 			entry->bufferSlot = a_source.bufferSlot;
@@ -356,7 +394,7 @@ namespace PublishedResources
 			const auto snapshot = ThreadSnapshot();
 			if (!snapshot)
 				return std::nullopt;
-			return std::ranges::any_of(snapshot->resources, [&](const Snapshot::Registered& a_entry) { return a_entry.id == a_id; });
+			return snapshot->Find(a_id) != nullptr;
 		}
 
 		/** @brief What ShaderResourceIndex and ShaderResourceVariant read for one id. */
@@ -372,8 +410,8 @@ namespace PublishedResources
 		IndexSource IndexSourceOf(std::string_view a_id)
 		{
 			if (const auto snapshot = ThreadSnapshot()) {
-				const auto found = std::ranges::find(snapshot->resources, a_id, &Snapshot::Registered::id);
-				if (found == snapshot->resources.end())
+				const auto* found = snapshot->Find(a_id);
+				if (!found)
 					return {};
 				std::shared_ptr<org::Resource> current = found->resource;
 				if (found->slot)
@@ -478,8 +516,8 @@ namespace PublishedResources
 	bool IsVersioned(std::string_view a_id)
 	{
 		if (const auto snapshot = ThreadSnapshot()) {
-			const auto found = std::ranges::find(snapshot->resources, a_id, &Snapshot::Registered::id);
-			return found != snapshot->resources.end() && (found->slot || found->bufferSlot);
+			const auto* found = snapshot->Find(a_id);
+			return found && (found->slot || found->bufferSlot);
 		}
 		const auto* entry = Find(Published(), a_id);
 		return entry && (entry->slot || entry->bufferSlot);

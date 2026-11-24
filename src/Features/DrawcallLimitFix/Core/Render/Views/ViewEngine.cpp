@@ -222,17 +222,25 @@ namespace DCLF
 		const auto shape = fragment->Value<ViewFrame>();
 		// Everything the view reads is held with the host's owners until the host's execution retires.
 		auto& owners = *commit.owners;
-		for (std::uint32_t i = 0; i < a_listed.ownerCount; ++i)
-			if (const auto* payload = a_listed.owners[i]; payload && payload != commit.payload)
-				owners.insert(owners.end(), payload->body->bindingOwners.begin(), payload->body->bindingOwners.end());
+		{
+			DCLF_ZONE("CS.DCLF.HostedView.Owners");
+			for (std::uint32_t i = 0; i < a_listed.ownerCount; ++i)
+				if (const auto* payload = a_listed.owners[i]; payload && payload != commit.payload)
+					owners.insert(owners.end(), payload->body->bindingOwners.begin(), payload->body->bindingOwners.end());
+		}
 		auto& state = View(a_view);
 		const bool ownFrame = state.resources && state.resources->frameConstants;
-		if (ownFrame)
+		if (ownFrame) {
+			DCLF_ZONE("CS.DCLF.HostedView.FrameTextures");
 			ResolveViewFrameTextures(state, owners);
+		}
 		ViewFamilyRows rows{};
 		const bool trees = TraitsOf(a_view).trees;
-		if (trees)
+		if (trees) {
+			DCLF_ZONE("CS.DCLF.HostedView.FaceRows");
 			rows = ViewFaceRows(a_view, *shape, owners);
+		}
+		DCLF_ZONE("CS.DCLF.HostedView.CommitView");
 		const std::uint32_t drawn = CommitView(*shape, a_faces, a_listed.inputs, trees ? &rows : nullptr);
 		commit.drawn |= 1u << a_epoch;
 		if (a_drawn)
