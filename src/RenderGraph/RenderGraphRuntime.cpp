@@ -2721,6 +2721,11 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		return EpochResult::Stopped;
 	if (const auto starting = epochStartingHook.load(std::memory_order_acquire))
 		starting(a_segment);
+	// The stages that commit first and this epoch reach the submission thread together, as one group: their queue submissions
+	// can share a vkQueueSubmit. A drain or a submitted point inside hands them over first.
+	std::optional<org::GraphHost::SubmissionGroup> submissionGroup;
+	if (QueuesSubmissions())
+		submissionGroup.emplace(*impl->host);
 	// Stages whose commit point this epoch is commit first.
 	FrameAnchors::BeforeGpuWork("another epoch", static_cast<std::uint32_t>(a_segment));
 	impl->CloseLeftOpenExternal();
