@@ -361,6 +361,9 @@ namespace DCLF::Family
 			std::uint32_t index = 0;
 		};
 		mutable std::vector<Answer> answers;
+		// Each asked id's position in ids by the address of its characters: callers ask with the same strings each draw, so one
+		// compare confirms the position instead of a search. Render thread.
+		mutable std::vector<std::pair<const char*, std::uint32_t>> positions;
 		mutable std::uint64_t answersFrame = ~0ull;
 		mutable std::uint64_t answersSerial = ~0ull;
 	};
