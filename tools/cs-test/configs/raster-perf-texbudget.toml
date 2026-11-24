@@ -1,0 +1,27 @@
+# raster-perf with DCLF's texture streaming budget cut to 800 MB at world-ready (dclf:tex-budget), to see whether VRAM
+# pressure slows the raster passes. Compose it: guest+raster-perf-texbudget.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 10
+do = "dclf:tex-budget"
+arg = "800"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "scene"
+
+[[steps]]
+at = "previous"
+frames = 1200
+do = "exit"
+
+[expect]
+reach = "world-ready"
+no_log = ["frame tap error"]
