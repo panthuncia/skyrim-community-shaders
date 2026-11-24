@@ -41,6 +41,7 @@ namespace DCLF::Features::MenuViews::Scenes
 	const char* NameOf(View a_view);
 
 	/** @brief RE::RENDER_TARGET values the batches draw into. */
+	inline constexpr std::int32_t kFramebufferTarget = 0;        // kFRAMEBUFFER
 	inline constexpr std::int32_t kMainTarget = 1;               // kMAIN
 	inline constexpr std::int32_t kNormalTaaMaskTarget = 4;      // kNORMAL_TAAMASK_SSRMASK
 	inline constexpr std::int32_t kNormalTaaMaskSwapTarget = 5;  // kNORMAL_TAAMASK_SSRMASK_SWAP

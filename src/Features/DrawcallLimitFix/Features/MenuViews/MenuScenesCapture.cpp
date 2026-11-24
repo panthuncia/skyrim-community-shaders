@@ -38,6 +38,10 @@ namespace DCLF::Features::MenuViews::Scenes
 
 		constexpr std::array<std::int32_t, 1> kLocalMapTargets{ kLocalMapSwapTarget };
 		constexpr std::array<std::int32_t, 4> kMenuTargets{ kMainTarget, kMotionVectorTarget, kNormalTaaMaskTarget, kNormalTaaMaskSwapTarget };
+		// An item menu's model (scene types 0-2 and 7) draws straight into the back buffer its menu's movie drew into.
+		// UI3DSceneManager::Render (AE 0x140972590) binds no colour target for it. TAA's UI form then reads the back buffer.
+		constexpr std::array<std::int32_t, 5> kMenuColourTargets{ kMainTarget, kMotionVectorTarget, kNormalTaaMaskTarget, kNormalTaaMaskSwapTarget,
+			kFramebufferTarget };
 
 		/** @brief The inherent refusals, each logged once per reason. */
 		Family::RefusalLog& Refusals()
@@ -672,6 +676,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			return kLocalMapTargets;
 		if (a_view == View::MenuShadow)
 			return {};
+		if (a_view == View::MenuColour)
+			return kMenuColourTargets;
 		return kMenuTargets;
 	}
 

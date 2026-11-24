@@ -50,7 +50,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
-		constexpr std::size_t kMaxImports = 4;
+		constexpr std::size_t kMaxImports = 5;
 
 		/** @brief The push block of both builds, in list order. Lighting's UNREAD entries take no words. */
 		struct UtilityBlock
@@ -79,7 +79,21 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			Family::PublishedInputs inputs;
 			::RenderGraph::RunSlots<Run> runs;
 			bool targetLogged = false;
+			// A committed run drew into the back buffer. Its first execution is logged once.
+			std::atomic<bool> backBufferCommitted{ false };
+			std::atomic<bool> backBufferLogged{ false };
 		};
+
+		/** @brief Whether a run has a draw into the back buffer, such as an item menu's model. */
+		bool DrawsIntoBackBuffer(const Run& a_run)
+		{
+			const auto targets = TargetsOf(a_run.view);
+			for (const auto& draw : a_run.draws)
+				for (std::uint32_t k = 0; k < draw.colourCount; ++k)
+					if (draw.program && draw.colours[k] < targets.size() && targets[draw.colours[k]] == kFramebufferTarget)
+						return true;
+			return false;
+		}
 
 		struct Bindings
 		{
@@ -346,10 +360,15 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
 					if (run->draws[i].program)
 						client->gate->OpenDraw(i, run->draws[i].indexCount, 1);
+				if (!client->backBufferLogged.load(std::memory_order_relaxed) && DrawsIntoBackBuffer(*run))
+					client->backBufferCommitted.store(true, std::memory_order_relaxed);
 			};
 			a_desc.executed = [client = a_client](const FrameAnchors::Point&) {
 				if (client->CountExecuted())
 					logger::info("[DCLF] menu scenes: the first {} run drawn by the graph", client->id);
+				// The model lands in the back buffer after its menu's movie and before TAA's UI form reads it.
+				if (client->backBufferCommitted.exchange(false, std::memory_order_relaxed) && !client->backBufferLogged.exchange(true, std::memory_order_relaxed))
+					logger::info("[DCLF] menu scenes: the first {} run into the back buffer (rt0) drawn by the graph, such as an item menu's model", client->id);
 			};
 			a_desc.active = [client = a_client] { return client->pending; };
 			// UI stage passes only. A batch while no open stage holds the client is a mismatch.
