@@ -1,0 +1,44 @@
+# The engine's compute SAO (bSAO_CS_Enable:Display=1), whose four dispatches Main::Draw runs after the world render
+# (docs/development/parity/imagespace.md, "Compute SAO"). The helper's constructor reads the pref at boot, so [prefs_ini] sets it
+# in the profile's SkyrimPrefs.ini for the run. In third person and then first person, so the dispatches come both while the sun
+# stage is open and after it ended.
+# The log must show "the engine's ISSAO... binds what its step reads and writes" once per effect, and no tap error.
+# Compose it: guest+sao-cs, native-vulkan+sao-cs. sao-cs-downscaled adds the half-size form.
+extends = ["base"]
+
+[prefs_ini.Display]
+bSAO_CS_Enable = true
+
+[[steps]]
+at = "world-ready"
+frames = 10
+do = "pov"
+arg = "third"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "third"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "pov"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["third", "first"]
+no_log = ["frame tap error", "differs from its step"]

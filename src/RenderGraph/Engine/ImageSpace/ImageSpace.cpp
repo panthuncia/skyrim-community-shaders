@@ -133,8 +133,8 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t reads;               // bit per texture slot the shader reads with these defines
 			std::uint32_t samplers;            // read slots below this count have a sampler
 			std::uint32_t cubes = 0;           // bit per slot CS binds the reflection cubemap to itself
-			bool compute = false;              // one UAV at u0, constants at CS b0
-			std::uint32_t targets = 1;
+			bool compute = false;              // UAVs from u0, constants at CS b0
+			std::uint32_t targets = 1;         // render targets, or a dispatch's UAVs
 			// SAO composite only. Adds s9 and the six feature resources CS headers read.
 			bool features = false;
 			// The effect keeps the viewport the previous effect left, so each shape implies the full-target one.
@@ -239,6 +239,12 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISSAOCompositeSAO, "ISSAOCompositeSAO", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, 1, true },
 			{ Effects::ISSAOCompositeFog, "ISSAOCompositeFog", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, 1, true },
 			{ Effects::ISSAOCompositeSAOFog, "ISSAOCompositeSAOFog", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, 1, true },
+			// The compute SAO (Main::Draw, SE 100526 / AE 107252). Depth to the first three camera Z mips (u0 to u2), the raw AO from
+			// t0 camera Z, t1 the other history and t2 motion vectors, then the two blur passes.
+			{ Effects::ISSAOCameraZAndMipsCS, "ISSAOCameraZAndMipsCS", "ISSAOCameraZAndMipsCS.hlsl", 1, 0b1, 0, 0, true, 3 },
+			{ Effects::ISSAORawAOCS, "ISSAORawAOCS", "ISSAORawAOCS.hlsl", 3, 0b111, 3, 0, true },
+			{ Effects::ISSAOBlurHCS, "ISSAOBlurHCS", "ISSAOBlurCS.hlsl", 1, 0b1, 0, 0, true },
+			{ Effects::ISSAOBlurVCS, "ISSAOBlurVCS", "ISSAOBlurCS.hlsl", 1, 0b1, 0, 0, true },
 			// SSR: mask downsample, ray march (t4 is the cubemap CS binds), then the compute blur.
 			{ Effects::ISDownsampleIgnoreBrightest, "ISDownsampleIgnoreBrightest", "ISDownsample.hlsl", 3, 0b001, 3 },
 			{ Effects::ISReflectionsRayTracing, "ISReflectionsRayTracing", "ISReflectionsRayTracing.hlsl", 5, 0b11111, 4, 0b10000 },
@@ -333,12 +339,13 @@ namespace RenderGraph::Engine::ImageSpace
 
 		constexpr std::uint32_t kStencilModes = 40;
 
-		/** @brief What one pass is made for, by value. A compute shape's output is the target behind its UAV. */
+		/** @brief What one pass is made for, by value. A compute shape's outputs are the targets behind its UAVs. */
 		struct ShapeKey
 		{
 			std::uint32_t effect = 0;
 			std::int32_t output = -1;
 			std::int32_t output1 = -1;
+			std::int32_t output2 = -1;  // a dispatch's third UAV
 			std::array<std::int32_t, kMaxSlots> inputs = NoInputs();
 			std::array<std::uint32_t, kMaxSlots> address{};
 			std::array<std::uint32_t, kMaxSlots> filter{};
@@ -353,7 +360,7 @@ namespace RenderGraph::Engine::ImageSpace
 
 			auto Tie() const
 			{
-				return std::tie(effect, output, output1, inputs, address, filter, blend, compute, viewport, depth, depthMode, stencilMode, stencilRef, scissored, scissor);
+				return std::tie(effect, output, output1, output2, inputs, address, filter, blend, compute, viewport, depth, depthMode, stencilMode, stencilRef, scissored, scissor);
 			}
 			bool operator<(const ShapeKey& a_other) const { return Tie() < a_other.Tie(); }
 			bool operator==(const ShapeKey& a_other) const { return Tie() == a_other.Tie(); }
@@ -366,6 +373,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::string name;
 			FrameAnchors::Texture output;
 			FrameAnchors::Texture output1;
+			FrameAnchors::Texture output2;
 			std::array<FrameAnchors::Texture, kMaxSlots> inputs;
 			rhi::Format format = rhi::Format::Unknown;
 			rhi::Format format1 = rhi::Format::Unknown;
@@ -453,6 +461,8 @@ namespace RenderGraph::Engine::ImageSpace
 			Effect,
 			FlowMap,
 			Water,        // 31385 / 32176
+			// The compute SAO (100526 / 107252), from Main::Draw after the world render.
+			SaoCs,
 			// A lens flare draw (SE 100274). Its batch stays open: the sprites share one pass, which opens once a run.
 			LensFlare,
 			Count
@@ -1115,8 +1125,8 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto& effect = kEffects[a_effect];
 			ComputeProgram::Desc desc{};
 			desc.source = effect.source;
-			// Shared (4), SRVs, samplers, UAV, latch (2).
-			desc.constantWords = 4 + effect.slots + effect.samplers + 1 + 2;
+			// Shared (4), SRVs, samplers, UAVs, latch (2).
+			desc.constantWords = 4 + effect.slots + effect.samplers + effect.targets + 2;
 			desc.defines = DefinesOf(a_effect);
 			return desc;
 		}
@@ -1274,7 +1284,7 @@ namespace RenderGraph::Engine::ImageSpace
 					spec.name);
 				return nullptr;
 			}
-			// Resource list order: shared constants, t0.., s0.., u0, constants location.
+			// Resource list order: shared constants, t0.., s0.., u0.., constants location.
 			std::vector<AnchorPasses::Bind> bindings;
 			bindings.push_back(AnchorPasses::Bind::Shared());
 			// A latched slot is read by heap index and has no SRV entry.
@@ -1290,8 +1300,15 @@ namespace RenderGraph::Engine::ImageSpace
 					return nullptr;
 				}
 			}
-			if (effect.compute)
-				bindings.push_back(AnchorPasses::Bind::Uav(spec.output));
+			if (effect.compute) {
+				const std::array<std::pair<FrameAnchors::Texture, std::int32_t>, 3> uavs{ { { spec.output, spec.key.output }, { spec.output1, spec.key.output1 },
+					{ spec.output2, spec.key.output2 } } };
+				for (std::uint32_t u = 0; u < effect.targets && u < uavs.size(); ++u) {
+					if (!uavs[u].first)
+						RenderGraph::Fatal("ImageSpace", fmt::format("{}: its effect writes {} UAVs and its step names no u{}", spec.name, effect.targets, u));
+					bindings.push_back(AnchorPasses::Bind::Uav(uavs[u].first, MipOfName(uavs[u].second)));
+				}
+			}
 			bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride));
 			if (effect.latched)
 				bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt))));
@@ -1625,6 +1642,8 @@ namespace RenderGraph::Engine::ImageSpace
 			++state.drawIndex;
 			if (a_x == 0 || a_y == 0 || a_z == 0)
 				return true;  // the engine's call would do nothing either
+			if (SaoCsStepNow())
+				return TakeSaoCsStep(scope.effect, { a_x, a_y, a_z });
 			if (StartStepScope() != WorldScope::None)
 				return TakeStartStep(scope.effect, true, { a_x, a_y, a_z });
 			if (const auto world = WorldStepScope(); world != WorldScope::None)
@@ -1700,7 +1719,10 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			// A lens flare scope leaves its batch for the next flush, so the frame's sprites run in one pass. The composites' scope,
 			// next in RenderWorldPostProcess, runs it. So does any engine draw or dispatch CS does not take.
-			if (--state.scopeDepth == 0 && FrameAnchors::IsRenderOwner() && state.scope != static_cast<std::uint32_t>(ScopeKind::LensFlare))
+			// The compute SAO's scope leaves its batch the same way. It runs before RenderWorldPostProcess, where the sun stage may
+			// still be open, and its steps belong to the post stage.
+			const auto open = state.scope == static_cast<std::uint32_t>(ScopeKind::LensFlare) || state.scope == static_cast<std::uint32_t>(ScopeKind::SaoCs);
+			if (--state.scopeDepth == 0 && FrameAnchors::IsRenderOwner() && !open)
 				Flush();
 		}
 
@@ -1902,6 +1924,24 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		* @brief The compute SAO (100526 / 107252). Main::Draw calls it after the world render, before RenderWorldPostProcess, when
+		* its helper's flag is set (bSAO_CS_Enable:Display or ToggleSAOCS). Its this is the helper at ImageSpaceManager+0x1d0.
+		*/
+		struct RenderSaoCs
+		{
+			static void thunk(void* a_helper, void* a_camera)
+			{
+				EnterScope(ScopeKind::SaoCs);
+				{
+					const SaoCsGuard guard(a_helper);
+					func(a_helper, a_camera);
+					LeaveScope();
+				}
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief The screen-space reflections pass (100428 / 107146). */
 		struct RenderReflections
 		{
@@ -2028,19 +2068,20 @@ namespace RenderGraph::Engine::ImageSpace
 		stl::detour_thunk<DispatchComputeShader>(REL::RelocationID(100952, 107734));
 		stl::detour_thunk<RenderSSAO>(REL::RelocationID(100520, 107245));
 		stl::detour_thunk<RenderReflections>(REL::RelocationID(100428, 107146));
+		stl::detour_thunk<RenderSaoCs>(REL::RelocationID(100526, 107252));
 		stl::detour_thunk<WaterDisplacement>(REL::RelocationID(31385, 32176));
 		stl::detour_thunk<DrawTriShape>(REL::RelocationID(75477, 77263));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
 		stl::detour_thunk<RenderEffect>(REL::RelocationID(99025, 105676));
 		auto& state = IS();
 		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && ExplicitRender::func.address() &&
-		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && WaterDisplacement::func.address() &&
+		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && RenderSaoCs::func.address() && WaterDisplacement::func.address() &&
 		                  DrawTriShape::func.address() && DispatchCSShader::func.address() && RenderEffect::func.address();
 		if (!state.installed)
 			RenderGraph::Fatal("ImageSpace", "a hook could not be installed");
 		logger::info(
 			"[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render and its explicit-target form, DispatchComputeShader, the HDR effect, the pre-tonemap "
-			"composites, RenderSSAO, the reflections pass, the water's displacement update, DrawTriShape, DispatchCSShader)");
+			"composites, RenderSSAO, the reflections pass, the compute SAO, the water's displacement update, DrawTriShape, DispatchCSShader)");
 	}
 
 	void Setup()

@@ -4,11 +4,23 @@
 // constant layout are vanilla's. Temporaries hold raw bits (uint4), as DXBC registers do; integer work goes
 // through asint/asuint and float work through asfloat. Checked against the vanilla shader on random inputs.
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0 and u0 to u2 from the heap, and the constants the engine
+// uploaded for this dispatch (CS b0) from the engine-constants capture through the pass's latch. The UAVs are the first three mips
+// of one texture.
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISSAOCAMERAZANDMIPSCS_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, DepthTex, 0) X(UAV, RWTexture2D<float4>, g_DepthMip0, 0) X(UAV, RWTexture2D<float4>, g_DepthMip1, 1) X(UAV, RWTexture2D<float4>, g_DepthMip2, 2) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 0)
+ORG_PUSH_BLOCK(ISSAOCAMERAZANDMIPSCS_ORG_RESOURCES(ORG_HANDLE))
+ISSAOCAMERAZANDMIPSCS_ORG_RESOURCES(ORG_RESOURCE)
+// g_ClipInfos, as the engine uploaded it.
+static float4 cb0[1] = { OrgEngineRow(PerGeometryAt, 0) };
+#else
 Texture2D<float4> DepthTex : register(t0);
 RWTexture2D<float4> g_DepthMip0 : register(u0);
 RWTexture2D<float4> g_DepthMip1 : register(u1);
 RWTexture2D<float4> g_DepthMip2 : register(u2);
-groupshared uint g0[64][1];
 
 // The engine uploads this block whole (SetComputeShaderConstants); its constant list is
 // g_ClipInfos.
@@ -16,6 +28,12 @@ cbuffer PerTechnique : register(b0)
 {
 	float4 cb0[1];
 };
+#endif
+
+// The group's thread count rounds the dispatch up, so the edge groups read and write past the textures.
+#include "Common/OrgTexelBounds.hlsli"
+
+groupshared uint g0[64][1];
 
 [numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0;
@@ -26,7 +44,7 @@ cbuffer PerTechnique : register(b0)
 	r3.xy = asuint(asint(r1.xy) + int2(asint(0x00000001u), asint(0x00000001u)));
 	r1.zw = uint2(0x00000000u, 0x00000000u);
 	{
-		const float4 fetched = DepthTex.Load(int3(asint(r1.x), asint(r1.y), asint(r1.w)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(DepthTex, int3(asint(r1.x), asint(r1.y), asint(r1.w)));
 		r1.z = asuint(fetched.x);
 	}
 	r1.z = asuint(cb0[0].y * asfloat(r1.z) + cb0[0].z);
@@ -34,21 +52,21 @@ cbuffer PerTechnique : register(b0)
 	r4.xy = r2.zw;
 	r4.zw = uint2(0x00000000u, 0x00000000u);
 	{
-		const float4 fetched = DepthTex.Load(int3(asint(r4.x), asint(r4.y), asint(r4.w)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(DepthTex, int3(asint(r4.x), asint(r4.y), asint(r4.w)));
 		r1.w = asuint(fetched.x);
 	}
 	r1.w = asuint(cb0[0].y * asfloat(r1.w) + cb0[0].z);
 	r1.w = asuint(cb0[0].x / asfloat(r1.w));
 	r2.zw = uint2(0x00000000u, 0x00000000u);
 	{
-		const float4 fetched = DepthTex.Load(int3(asint(r2.x), asint(r2.y), asint(r2.w)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(DepthTex, int3(asint(r2.x), asint(r2.y), asint(r2.w)));
 		r2.z = asuint(fetched.x);
 	}
 	r2.z = asuint(cb0[0].y * asfloat(r2.z) + cb0[0].z);
 	r2.z = asuint(cb0[0].x / asfloat(r2.z));
 	r3.zw = uint2(0x00000000u, 0x00000000u);
 	{
-		const float4 fetched = DepthTex.Load(int3(asint(r3.x), asint(r3.y), asint(r3.w)));
+		const float4 fetched = ORG_LOAD_OR_ZERO(DepthTex, int3(asint(r3.x), asint(r3.y), asint(r3.w)));
 		r2.w = asuint(fetched.x);
 	}
 	r2.w = asuint(cb0[0].y * asfloat(r2.w) + cb0[0].z);
@@ -56,14 +74,14 @@ cbuffer PerTechnique : register(b0)
 	r3.z = asuint(min(asfloat(r1.w), asfloat(r1.z)));
 	r3.w = asuint(min(asfloat(r2.w), asfloat(r2.z)));
 	r3.z = asuint(min(asfloat(r3.w), asfloat(r3.z)));
-	g_DepthMip0[uint2(r1.x, r1.y)] = float4(asfloat(r1.z), asfloat(r1.z), asfloat(r1.z), asfloat(r1.z));
-	g_DepthMip0[uint2(r4.x, r4.y)] = float4(asfloat(r1.w), asfloat(r1.w), asfloat(r1.w), asfloat(r1.w));
-	g_DepthMip0[uint2(r2.x, r2.y)] = float4(asfloat(r2.z), asfloat(r2.z), asfloat(r2.z), asfloat(r2.z));
-	g_DepthMip0[uint2(r3.x, r3.y)] = float4(asfloat(r2.w), asfloat(r2.w), asfloat(r2.w), asfloat(r2.w));
+	ORG_STORE_INSIDE(g_DepthMip0, uint2(r1.x, r1.y), float4(asfloat(r1.z), asfloat(r1.z), asfloat(r1.z), asfloat(r1.z)));
+	ORG_STORE_INSIDE(g_DepthMip0, uint2(r4.x, r4.y), float4(asfloat(r1.w), asfloat(r1.w), asfloat(r1.w), asfloat(r1.w)));
+	ORG_STORE_INSIDE(g_DepthMip0, uint2(r2.x, r2.y), float4(asfloat(r2.z), asfloat(r2.z), asfloat(r2.z), asfloat(r2.z)));
+	ORG_STORE_INSIDE(g_DepthMip0, uint2(r3.x, r3.y), float4(asfloat(r2.w), asfloat(r2.w), asfloat(r2.w), asfloat(r2.w)));
 	r1.x = asuint(asint(groupThreadID.y) * asint(0x00000008u) + asint(groupThreadID.x));
 	g0[r1.x][0] = r3.z;
 	GroupMemoryBarrierWithGroupSync();
-	g_DepthMip1[uint2(dispatchID.x, dispatchID.y)] = float4(asfloat(r3.z), asfloat(r3.z), asfloat(r3.z), asfloat(r3.z));
+	ORG_STORE_INSIDE(g_DepthMip1, uint2(dispatchID.x, dispatchID.y), float4(asfloat(r3.z), asfloat(r3.z), asfloat(r3.z), asfloat(r3.z)));
 	r1.yz = dispatchID.xy & uint2(0x00000001u, 0x00000001u);
 	r1.yz = asuint(-(int2)((asint(r1.yz)) == (int2(asint(0x00000000u), asint(0x00000000u)))));
 	r1.y = r1.z & r1.y;
@@ -77,6 +95,6 @@ cbuffer PerTechnique : register(b0)
 		r1.x = asuint(min(asfloat(r1.y), asfloat(r1.x)));
 		r0.xyzw = asuint(asfloat(r0.xyzw) * float4(0.5, 0.5, 0.5, 0.5));
 		r0.xyzw = (uint4)(asfloat(r0.xyzw));
-		g_DepthMip2[uint2(r0.x, r0.y)] = float4(asfloat(r1.x), asfloat(r1.x), asfloat(r1.x), asfloat(r1.x));
+		ORG_STORE_INSIDE(g_DepthMip2, uint2(r0.x, r0.y), float4(asfloat(r1.x), asfloat(r1.x), asfloat(r1.x), asfloat(r1.x)));
 	}
 }

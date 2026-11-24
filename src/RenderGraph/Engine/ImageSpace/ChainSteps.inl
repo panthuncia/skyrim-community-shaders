@@ -26,7 +26,8 @@ namespace ChainGroup
 	constexpr std::uint8_t kCapture = 30;  // a frozen world's capture frame copies the final target into kMENUBG
 	constexpr std::uint8_t kLensFlare = 31;  // the lens flares' visibility and sprite passes
 	constexpr std::uint8_t kIblf = 32;       // the image-based lens flares' downsamples, flares, blurs and sums
-	constexpr std::uint8_t kCount = 33;
+	constexpr std::uint8_t kSaoCs = 33;      // the compute SAO, which Main::Draw runs before the chain
+	constexpr std::uint8_t kCount = 34;
 }
 
 constexpr std::array<PostPart, 3> kChainParts{ PostPart::Composites, PostPart::Hdr, PostPart::Final };
@@ -83,6 +84,10 @@ struct ChainSteps
 	bool lensVisibilityChecked = false, lensSpriteChecked = false;
 	// The image-based flares' draws this frame so far, by effect, t0 and output target (IblfVariantNow). Cleared as the composites start.
 	std::map<std::tuple<std::int32_t, std::int32_t, std::int32_t>, std::uint32_t> iblfDraws;
+	// The compute SAO's helper (ImageSpaceManager+0x1d0) while its render function runs, else null (SaoCsGuard). Render owner.
+	const std::byte* saoCsHelper = nullptr;
+	// Whether the engine's bindings at each compute SAO dispatch were checked against its step's. Once a session per effect.
+	std::array<bool, 4> saoCsChecked{};
 };
 
 /**
@@ -235,6 +240,8 @@ std::string ChainGroupName(std::uint8_t a_group)
 		return "the lens flares";
 	case kIblf:
 		return "the image-based lens flares";
+	case kSaoCs:
+		return "the compute SAO";
 	default:
 		return fmt::format("group {}", a_group);
 	}
@@ -390,6 +397,8 @@ std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_po
 	on[ChainGroup::kLensFlare] = true;
 	// CS turns the image-based flares off at init, and only the console turns them on, at any frame. Gated, so frames without them skip.
 	on[ChainGroup::kIblf] = true;
+	// The compute SAO runs while its helper's flag is set, which the console's ToggleSAOCS flips at any time. Gated, so frames without it skip.
+	on[ChainGroup::kSaoCs] = true;
 	for (std::uint32_t slot = 0; slot < 8; ++slot) {
 		if (!(post.slots >> slot & 1u))
 			continue;
@@ -691,6 +700,37 @@ void BuildChainSteps(ChainBuild& a_build)
 		pending.desc.name = std::move(a_name);
 		steps.push_back(std::move(pending));
 	};
+
+	// The compute SAO (100526 / 107252), which Main::Draw runs after the world render and before RenderWorldPostProcess. The
+	// camera Z pass is half the render size in groups and writes the first three mips of kSAO_CAMERAZ. With bSAO_CS_Downscaled
+	// the later passes use the half-size targets (DS, + 1). The raw AO writes kSAO_RAWAO + DS + 2 x parity and reads the other
+	// history; the parity is the helper's (+0x24), flipped at each call. The engine sets no CS sampler for t1 and t2.
+	{
+		using RT = std::int32_t;
+		StepDesc z{ .name = "saocs.cameraz", .output = engine(T::kSAO_CAMERAZ, 0), .output1 = engine(T::kSAO_CAMERAZ, 1), .output2 = engine(T::kSAO_CAMERAZ, 2) };
+		z.inputs[0] = mainDepth;
+		add(0, ChainGroup::kSaoCs, WorldScope::SaoCs, E::ISSAOCameraZAndMipsCS, 0, std::move(z));
+		for (std::uint16_t ds = 0; ds < 2; ++ds)
+			for (std::uint16_t p = 0; p < 2; ++p) {
+				const auto variant = static_cast<std::uint16_t>(ds | (p << 1));
+				StepDesc a{ .name = fmt::format("saocs.rawao.d{}.h{}", ds, p), .output = engine(static_cast<RT>(T::kSAO_RAWAO) + ds + 2 * p) };
+				a.inputs[0] = engine(T::kSAO_CAMERAZ);
+				a.inputs[1] = engine(static_cast<RT>(T::kSAO_RAWAO) + ds + 2 * (1 - p));
+				a.inputs[2] = engine(T::kMOTION_VECTOR);
+				a.samplers[0] = { 0, 2 };
+				a.samplers[1] = kLinear;
+				a.samplers[2] = kLinear;
+				add(0, ChainGroup::kSaoCs, WorldScope::SaoCs, E::ISSAORawAOCS, variant, std::move(a));
+				StepDesc h{ .name = fmt::format("saocs.blur.h.d{}.h{}", ds, p), .output = engine(static_cast<RT>(T::kSAO_TEMP_BLUR) + ds) };
+				h.inputs[0] = engine(static_cast<RT>(T::kSAO_RAWAO) + ds + 2 * p);
+				add(0, ChainGroup::kSaoCs, WorldScope::SaoCs, E::ISSAOBlurHCS, variant, std::move(h));
+			}
+		for (std::uint16_t ds = 0; ds < 2; ++ds) {
+			StepDesc v{ .name = fmt::format("saocs.blur.v.d{}", ds), .output = engine(static_cast<RT>(T::kSAO) + ds) };
+			v.inputs[0] = engine(static_cast<RT>(T::kSAO_TEMP_BLUR) + ds);
+			add(0, ChainGroup::kSaoCs, WorldScope::SaoCs, E::ISSAOBlurVCS, ds, std::move(v));
+		}
+	}
 
 	// Lens flares (SE 100274), which RenderWorldPostProcess draws before the composites. The visibility pass writes a texel per
 	// light. One sprite pass draws all the frame's sprites additively into kMAIN, each from its own latch record (StageLensFlareSprite).
@@ -1560,6 +1600,122 @@ bool TakeLensFlareStep(std::size_t a_effect)
 	StageLensFlareSprite(client, entry, *part.SpecOf(entry), part.count);
 	return true;
 }
+
+/** @brief Whether a dispatch is a compute SAO step: the compute SAO's render function is running (SaoCsGuard). Render owner. */
+bool SaoCsStepNow()
+{
+	return Chain().saoCsHelper && IS().on && Chain().group.Registered();
+}
+
+/** @brief bSAO_CS_Downscaled as the helper's constructor copied it (528131 / 415076). The steps after camera Z then use the half-size targets. */
+bool SaoCsDownscaled()
+{
+	static REL::Relocation<const bool*> downscaled{ REL::RelocationID(528131, 415076) };
+	return *downscaled.get();
+}
+
+/**
+* @brief Logs once a session per effect when the engine's UAVs, textures or CS samplers at a compute SAO dispatch differ from its
+* step's. The step's are read from the engine's code (SE 100526 / AE 107252), so a difference means that reading is wrong.
+* The samplers at t1 and t2 of the raw AO are a guess: the engine sets none there.
+*/
+void CheckSaoCsState(std::size_t a_effect, const Spec& a_spec)
+{
+	using E = Effects;
+	auto& chain = Chain();
+	const auto id = kEffects[a_effect].id;
+	const std::size_t index = id == E::ISSAOCameraZAndMipsCS ? 0 : id == E::ISSAORawAOCS ? 1 : id == E::ISSAOBlurHCS ? 2 : 3;
+	if (chain.saoCsChecked[index])
+		return;
+	chain.saoCsChecked[index] = true;
+	const auto& info = kEffects[a_effect];
+	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+	// A UAV of a mip view target names its source and mip. Mip 0 and the whole target are one UAV.
+	const auto mipOf = [](std::int32_t a_name) {
+		const auto mip = MipOfName(a_name);
+		return mip == AnchorPasses::kAllMips ? 0u : mip;
+	};
+	const auto sameUav = [&](std::int32_t a_engine, std::int32_t a_step) {
+		if (a_engine < 0 || a_step < 0)
+			return a_engine == a_step;
+		return ImportOfName(a_engine) == ImportOfName(a_step) && mipOf(a_engine) == mipOf(a_step);
+	};
+	std::string differences;
+	const auto note = [&](std::string a_text) { differences += (differences.empty() ? "" : "; ") + std::move(a_text); };
+	const std::array<std::int32_t, 3> outputs{ a_spec.key.output, a_spec.key.output1, a_spec.key.output2 };
+	for (std::uint32_t u = 0; u < info.targets && u < outputs.size(); ++u)
+		if (const auto engine = TargetOfUav(shadow.CSUAV[u]); !sameUav(engine, outputs[u]))
+			note(fmt::format("u{} is {}, the step's {}", u, NameForLog(engine), NameForLog(outputs[u])));
+	for (std::uint32_t slot = 0; slot < info.slots; ++slot) {
+		if (!(info.reads >> slot & 1u))
+			continue;
+		const auto engine = InputOfView(shadow.CSTexture[slot]);
+		if (engine != a_spec.key.inputs[slot])
+			note(fmt::format("t{} is {}, the step's {}", slot, NameForLog(engine), NameForLog(a_spec.key.inputs[slot])));
+		if (slot >= info.samplers)
+			continue;
+		const auto address = static_cast<std::uint32_t>(shadow.CSTextureAddressMode[slot].underlying());
+		const auto filter = static_cast<std::uint32_t>(shadow.CSTextureFilterMode[slot].underlying());
+		if (address != a_spec.key.address[slot] || filter != a_spec.key.filter[slot])
+			note(fmt::format("s{} is address {} filter {}, the step's {} and {}", slot, address, filter, a_spec.key.address[slot], a_spec.key.filter[slot]));
+	}
+	if (differences.empty())
+		logger::info("[ORG] ImageSpace: the engine's {} binds what its step reads and writes ({})", info.effectName, a_spec.name);
+	else
+		logger::error("[ORG] ImageSpace: the engine's {} differs from its step {}: {}", info.effectName, a_spec.name, differences);
+}
+
+/**
+* @brief Matches a compute SAO dispatch to its pass in the build the frame runs, by the downscale flag and the helper's parity, and
+* stages its constants and group counts. Withholds the engine's dispatch. Its batch runs with the composites' (LeaveScope).
+*/
+bool TakeSaoCsStep(std::size_t a_effect, std::array<std::uint32_t, 3> a_groups)
+{
+	using E = Effects;
+	auto& state = IS();
+	auto& chain = Chain();
+	const auto id = kEffects[a_effect].id;
+	constexpr auto segment = Frame::SegmentId::Post;
+	const auto downscaled = static_cast<std::uint16_t>(SaoCsDownscaled() ? 1u : 0u);
+	const auto parity = static_cast<std::uint16_t>(*reinterpret_cast<const std::uint32_t*>(chain.saoCsHelper + 0x24) & 1u);
+	std::uint16_t variant = 0;
+	if (id == E::ISSAORawAOCS || id == E::ISSAOBlurHCS)
+		variant = static_cast<std::uint16_t>(downscaled | (parity << 1));
+	else if (id == E::ISSAOBlurVCS)
+		variant = downscaled;
+	const StepKey key{ WorldScope::SaoCs, id, variant };
+	const auto what = fmt::format("compute SAO step {} (variant {:#x})", kEffects[a_effect].effectName, variant);
+	const auto find = chain.group.Find(key);
+	// Behind: the engine dispatches for variables the build the frame runs was not made for, such as a new size.
+	if (!chain.group.Draws(find, segment, what, "in Main::Draw's compute SAO"))
+		return true;
+	const auto entry = find.at.entry;
+	const auto& part = find.Part();
+	auto& client = state.post[static_cast<std::size_t>(chain.group.PartOf(find.at.part))];
+	// The group is always on, so a row off is a build made without it, and a pass not made was left out by its graph build (MakePass).
+	if (!RowOn(segment, part.RowOf(entry)) || !part.Made(entry) || !part.SpecOf(entry)) {
+		Frame::Driver::NoteStepLag(segment, client.id, what);
+		return true;
+	}
+	CheckSaoCsState(a_effect, *part.SpecOf(entry));
+	return StageStep(client, entry, part.SpecOf(entry), a_effect, true, a_groups);
+}
+
+/** @brief Marks the dispatches inside the compute SAO's render function as its steps. Render owner. */
+struct SaoCsGuard
+{
+	explicit SaoCsGuard(void* a_helper) : active(a_helper && IS().on && FrameAnchors::IsRenderOwner())
+	{
+		if (active)
+			Chain().saoCsHelper = static_cast<const std::byte*>(a_helper);
+	}
+	~SaoCsGuard()
+	{
+		if (active)
+			Chain().saoCsHelper = nullptr;
+	}
+	bool active = false;
+};
 
 /** @brief In a routed frame with no TAA, copies the scratch into the final target. Render owner. */
 void OpenThrough()

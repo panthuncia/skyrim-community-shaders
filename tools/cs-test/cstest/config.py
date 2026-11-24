@@ -31,8 +31,9 @@ AWAITS = ("adopted",)
 # A call step's arg: <owner>.<name> or <owner>.<name>=<arg>.
 CALL_ARG = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(=.*)?", re.DOTALL)
 GRAPH_FRAMES_FIELDS = ("min",)
-# Tables taken as they are. saved_settings goes into the saved settings file for one run (harness part, not the contract).
-RAW_TABLES = ("env", "dclf_ini", "saved_settings")
+# Tables taken as they are. saved_settings goes into the saved settings file for one run, prefs_ini into the profile's
+# SkyrimPrefs.ini (harness part, not the contract).
+RAW_TABLES = ("env", "dclf_ini", "saved_settings", "prefs_ini")
 
 
 def parse_value(text):
@@ -148,6 +149,15 @@ def check_fixed(merged):
     for section, value in saved.items():
         if not isinstance(value, dict):
             raise ConfigError(f"saved_settings.{section} must be a table (a section of the settings file), not {value!r}")
+    prefs = merged.get("prefs_ini", {})
+    if not isinstance(prefs, dict):
+        raise ConfigError("[prefs_ini] must be a table")
+    for section, value in prefs.items():
+        if not isinstance(value, dict):
+            raise ConfigError(f"prefs_ini.{section} must be a table (a section of SkyrimPrefs.ini), not {value!r}")
+        for key, setting in value.items():
+            if not isinstance(setting, (bool, int, float, str)):
+                raise ConfigError(f"prefs_ini.{section}.{key} takes a bool, number or string, not {setting!r}")
 
 
 def check_graph_frames(graph):
@@ -304,6 +314,7 @@ def flatten(merged, schema, name):
         "presentmon": bool(merged.get("fg", {}).get("presentmon", False)),
         "autoload_off": autoload_mod if autoload_off else "",
         "saved_settings": copy.deepcopy(merged.get("saved_settings", {})),
+        "prefs_ini": copy.deepcopy(merged.get("prefs_ini", {})),
         "timeout_s": run.get("timeout_s", 600),
         "stall_s": run.get("stall_s", 90),
         "label": run.get("label", ""),

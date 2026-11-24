@@ -261,3 +261,15 @@ def test_saved_settings(configs, tmp_path):
     assert harness["saved_settings"]["Light Limit Fix"] == {"Enable Light Limit Visualization": False}
     with pytest.raises(ConfigError, match="saved_settings.Light Limit Fix must be a table"):
         r("s", configs, ["saved_settings.Light Limit Fix=3"])
+
+
+def test_prefs_ini(configs, tmp_path):
+    contract, harness = r("base", configs)
+    assert harness["prefs_ini"] == {} and "prefs_ini" not in contract
+    (tmp_path / "p.toml").write_text('extends = ["base"]\n[prefs_ini.Display]\nbSAO_CS_Enable = true\n', encoding="utf-8")
+    _, harness = r("p", configs, ["prefs_ini.Display={bSAO_CS_Downscaled=1}"])
+    assert harness["prefs_ini"] == {"Display": {"bSAO_CS_Downscaled": 1}}
+    with pytest.raises(ConfigError, match="prefs_ini.Display must be a table"):
+        r("p", configs, ["prefs_ini.Display=3"])
+    with pytest.raises(ConfigError, match="prefs_ini.Display.x takes a bool, number or string"):
+        r("p", configs, ["prefs_ini.Display={x=[1]}"])

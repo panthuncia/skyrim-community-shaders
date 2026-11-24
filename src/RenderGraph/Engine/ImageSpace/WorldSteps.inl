@@ -25,6 +25,7 @@ enum class WorldScope : std::uint8_t
 	Upsample,
 	LensFlare,   // BSLensFlare's frame function (SE 100274), before the composites
 	Iblf,        // the image-based lens flares (AE 0x1414d21b0), inside the composites
+	SaoCs,       // the compute SAO (100526 / 107252), from Main::Draw before the post chain
 	// The start stage's water effects (StartSteps.inl).
 	WaterDisplacement,  // 31385 / 32176
 	FlowCopy,           // 35561 / 36560
@@ -79,6 +80,7 @@ struct StepDesc
 	Effects::ImageSpaceEffectEnum effect = Effects::ISCopy;
 	StepTexture output;
 	StepTexture output1;
+	StepTexture output2;  // a dispatch's third UAV
 	std::array<StepTexture, kMaxSlots> inputs{};
 	std::array<StepSampler, kMaxSlots> samplers{};
 	std::uint32_t blend = PackBlend(0, 0, 2, 0);  // no blending, all channels written
@@ -126,6 +128,7 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 	key.compute = info.compute;
 	key.output = name(a_desc.output);
 	key.output1 = a_desc.output1 ? name(a_desc.output1) : -1;
+	key.output2 = a_desc.output2 ? name(a_desc.output2) : -1;
 	spec->output = texture(a_desc.output);
 	if (!spec->output) {
 		a_error = "its output could not be resolved";
@@ -138,6 +141,13 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 		spec->output1 = texture(a_desc.output1);
 		if (!spec->output1) {
 			a_error = "its second output could not be resolved";
+			return nullptr;
+		}
+	}
+	if (a_desc.output2) {
+		spec->output2 = texture(a_desc.output2);
+		if (!spec->output2) {
+			a_error = "its third output could not be resolved";
 			return nullptr;
 		}
 	}

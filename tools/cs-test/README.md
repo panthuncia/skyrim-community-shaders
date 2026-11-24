@@ -104,6 +104,7 @@ The shipped configs:
 | `shader-reload` | a forced reload of every live pipeline (`org:reload-shaders=all`), then an unchanged one-file reload, a shot before and after each (`wait = "reload"`): the new versions are a `ShaderGeneration` event; every graph is built again off the render thread, and the revision that carries it adopts them with DCLF's scene recorded on them; compose it, `native-vulkan+shader-reload` |
 | `shader-reload-resize` | a forced reload of every live pipeline with a fog grid resize every 15 frames while it compiles and its graphs are built again, so the reload's revision and resize revisions with DCLF epochs follow each other, each adopted whole (cleanup plan A4); compose it, `native-vulkan+shader-reload-resize` |
 | `dclf-toggles` | DCLF's cull mode (frustum, off, occlusion) and then its pipeline (CPU, GPU) changed during play, a shot after each (`wait = "settled"`): each change rebuilds DCLF's epochs, staged and attached with the snapshot recorded on them at a Begin, with no frame-start wait (plan step 10a); compose it, `native-vulkan+dclf-toggles` |
+| `sao-cs`, `sao-cs-downscaled` | the engine's compute SAO (`bSAO_CS_Enable`, then also `bSAO_CS_Downscaled`, set through `[prefs_ini]`), a shot in third and first person: its four dispatches are post chain steps; compose it, `guest+sao-cs`, `native-vulkan+sao-cs` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |
@@ -135,6 +136,20 @@ min = { "cs.ssgi" = 300 }   # at least this many frames on the graph
 - A run without the report fails (a Release build or an older build). A run with `CS_ORG=0` (plain D3D11) skips the check.
 - Each failure is one clause: `cs.ssgi ran on the graph in 12 frames, at least 300 expected`.
 - `result.json`'s `graph_frames` has the expectation, the report, the failures and why it was skipped.
+
+### Prefs INI
+
+`[prefs_ini]` sets values in the MO2 profile's own `SkyrimPrefs.ini` for one run, then undoes it. Its tables are the file's sections.
+Use it for a pref the engine reads only at boot, such as `bSAO_CS_Enable:Display`.
+
+```toml
+[prefs_ini.Display]
+bSAO_CS_Enable = true
+```
+
+- The profile must use its own game INI files (MO2's profile setting). Without `profiles\<profile>\SkyrimPrefs.ini` the run stops.
+- The file is copied aside and put back after the run. Names match without case; a missing key or section is added.
+- Bools are written as 1 and 0, other values as they are.
 
 ### Saved settings
 
