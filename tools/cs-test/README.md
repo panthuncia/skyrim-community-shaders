@@ -87,6 +87,7 @@ The shipped configs:
 | `bink` | BGS_Logo.bik played through the `bink` step in SDR, then again with HDR on: Bink's client declared on its targets' variables; compose it, `native-vulkan+bink` |
 
 | `imagespace-transitions` | Whiterun, Dragonsreach and Whiterun again by coc, each with a loading screen, a shot after each settles: ImageSpace's step groups must lag across the shape changes, never raise a tap error; compose it, `guest+imagespace-transitions`, `native-vulkan+imagespace-transitions` |
+| `taa-ui`, `taa-water` | TAA's UI form (Upscaling on TAA, the inventory opened over the world, shots in it) and its water form (Riverwood's river with `ttaaw`, the console's water-blending toggle): their CS steps, and `CheckStepState`'s once-a-session comparison with the engine's state; compose them, `guest+taa-ui`, `native-vulkan+taa-water` |
 | `river-sgtm` | Riverwood's river with the global time multiplier at 4, then 1: the water client's heightmap bound changes with a frame revision; compose it, `native-vulkan+river-sgtm` |
 
 | `sss` | Subsurface Scattering's mode switched (Burley, separable, back) and character lighting toggled in Dragonsreach (`setting` steps): the mode's programs and client switch with frame revisions; compose it, `native-vulkan+sss` |

@@ -1,4 +1,11 @@
-#if defined(CS_ORG_BINDLESS)
+// TAA_UI and TAA_BLEND_WATER are vanilla's UI and water forms (ISTemporalAAForms.hlsli). The rest of this file is CS's own TAA,
+// and those forms use only its vertex stage.
+#if defined(TAA_UI) || defined(TAA_BLEND_WATER)
+#	define ISTEMPORALAA_VANILLA_FORM
+#	include "ISTemporalAAForms.hlsli"
+#endif
+
+#if defined(CS_ORG_BINDLESS) && !defined(ISTEMPORALAA_VANILLA_FORM)
 // The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t5 and s0-s5 from the heap, the shared
 // constants, and PerGeometry from the engine-constants capture through the pass's latch. The vertex stage is the graph's fullscreen
 // triangle.
@@ -25,7 +32,7 @@ struct PS_OUTPUT
 	float4 Feedback: SV_Target1;
 };
 
-#if defined(PSHADER)
+#if defined(PSHADER) && !defined(ISTEMPORALAA_VANILLA_FORM)
 
 #	if defined(CS_ORG_BINDLESS)
 // PerGeometry by row, in the order the D3D11 cbuffer below places it.

@@ -851,24 +851,33 @@ void BuildChainSteps(ChainBuild& a_build)
 				steps.back().route = routed ? ChainRoute::kRouted : ChainRoute::kDirect;
 			}
 	// CS's history pair replaces kTEMPORAL_AA_ACCUMULATION_1/2. t2 motion vectors, t3 depth, t4 TAA mask, t5 the frame's normals target.
+	// The water form (bTAAWater) draws in the world form's place. Its water history is the engine's pair: it writes
+	// kTEMPORAL_AA_WATER_2 - parity and reads kTEMPORAL_AA_WATER_1 + parity at t6 (AE FUN_1414d88b0), with the frame's parity.
 	for (const bool routed : { false, true }) {
-		for (std::uint16_t h = 0; h < 2; ++h)
-			for (std::uint16_t n = 0; n < 2; ++n) {
-				StepDesc d{ .name = fmt::format("taa.h{}.n{}{}", h, n, routed ? ".routed" : ""), .output = routed ? engine(kFinal) : scratch(true),
-					.output1 = owned(chain.taaHistory[h]) };
-				d.inputs[0] = routed ? scratch(true) : engine(kFinal);
-				d.inputs[1] = owned(chain.taaHistory[1 - h]);
-				d.inputs[2] = engine(T::kMOTION_VECTOR);
-				d.inputs[3] = mainDepth;
-				d.inputs[4] = engine(T::kTEMPORAL_AA_MASK);
-				d.inputs[5] = engine(n ? T::kNORMAL_TAAMASK_SSRMASK_SWAP : T::kNORMAL_TAAMASK_SSRMASK);
-				d.samplers[1] = kLinear;
-				d.samplers[4] = kWrapPoint;
-				d.samplers[5] = kWrapPoint;
-				add(2, ChainGroup::kTaa, WorldScope::Taa, E::ISTemporalAA, static_cast<std::uint16_t>((h << 15) | (n << 14) | (routed ? ChainRoute::kTaaBit : 0)),
-					std::move(d), !routed);
-				steps.back().route = routed ? ChainRoute::kRouted : ChainRoute::kDirect;
-			}
+		for (const bool water : { false, true })
+			for (std::uint16_t h = 0; h < 2; ++h)
+				for (std::uint16_t n = 0; n < 2; ++n) {
+					StepDesc d{ .name = fmt::format("taa{}.h{}.n{}{}", water ? ".water" : "", h, n, routed ? ".routed" : ""),
+						.output = routed ? engine(kFinal) : scratch(true),
+						.output1 = owned(chain.taaHistory[h]) };
+					d.inputs[0] = routed ? scratch(true) : engine(kFinal);
+					d.inputs[1] = owned(chain.taaHistory[1 - h]);
+					d.inputs[2] = engine(T::kMOTION_VECTOR);
+					d.inputs[3] = mainDepth;
+					d.inputs[4] = engine(T::kTEMPORAL_AA_MASK);
+					d.inputs[5] = engine(n ? T::kNORMAL_TAAMASK_SSRMASK_SWAP : T::kNORMAL_TAAMASK_SSRMASK);
+					d.samplers[1] = kLinear;
+					d.samplers[4] = kWrapPoint;
+					d.samplers[5] = kWrapPoint;
+					if (water) {
+						d.output2 = engine(h ? T::kTEMPORAL_AA_WATER_1 : T::kTEMPORAL_AA_WATER_2);
+						d.inputs[6] = engine(h ? T::kTEMPORAL_AA_WATER_2 : T::kTEMPORAL_AA_WATER_1);
+						d.samplers[6] = kLinear;
+					}
+					add(2, ChainGroup::kTaa, WorldScope::Taa, water ? E::ISTemporalAA_Water : E::ISTemporalAA,
+						static_cast<std::uint16_t>((h << 15) | (n << 14) | (routed ? ChainRoute::kTaaBit : 0)), std::move(d), !routed);
+					steps.back().route = routed ? ChainRoute::kRouted : ChainRoute::kDirect;
+				}
 		if (!routed) {
 			copyBack(2, ChainGroup::kTaa, true, "taa.copyback");
 			steps.back().route = ChainRoute::kDirect;
@@ -1111,6 +1120,7 @@ ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std
 	}
 	switch (a_effect) {
 	case E::ISTemporalAA:
+	case E::ISTemporalAA_Water:
 		{
 			a_group = ChainGroup::kTaa;
 			const auto history = static_cast<std::uint16_t>(Frame::Driver::Current().parity & 1u);
@@ -1212,6 +1222,10 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		Frame::Driver::NoteStepLag(segment, client.id, what);
 		return true;
 	}
+	// The water form's first two targets are CS's, so only its water history is compared.
+	if (id == Effects::ISTemporalAA_Water)
+		if (const auto* spec = part.SpecOf(entry))
+			CheckStepState(a_effect, *spec, { -1, -1, spec->key.output2 });
 	const auto staged = client.batch.size();
 	const bool taken = StageStep(client, entry, part.SpecOf(entry), a_effect, a_compute, a_groups);
 	// A step whose constants could not be staged opens nothing.

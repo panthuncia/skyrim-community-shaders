@@ -28,6 +28,9 @@ Each batch is one agent in its own worktree. Agents write code only; the main se
 
 ### A: TAA UI and water forms
 
+Done on `port/taa-forms`, waiting for its in-game check: [parity/imagespace.md](../parity/imagespace.md), "TAA forms". Vanilla's UI
+shader declares only t0 to t4, so the texture at t5 is never read. The UI path also needed ISSimpleColor's mask as a step.
+
 CS's `ISTemporalAA.hlsl` is its own rewrite with neither form, so both need new HLSL with an ORG form. Write them from the
 vanilla shaders (extracted and disassembled as in `org-full-port.md`, "Also from RE").
 

@@ -1,0 +1,61 @@
+# TAA's UI form (ISTemporalAA_UI) and its ISSimpleColor mask: a menu's 3D scene with TAA on. Upscaling on TAA turns the game's
+# TAA on, then the inventory opens over the world and its 3D item draws through UI3DSceneManager::Render. Two shots in the menu,
+# one after it closes. The harness has no input step to drag the item, so the item is not rotated; the shots cover the item
+# vanilla shows at open. Compose it: guest+taa-ui, native-vulkan+taa-ui, d3d11+taa-ui (the D3D11 reference).
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "upscale"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "world"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "menu"
+arg = "InventoryMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "inventory"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "inventory-later"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "menu"
+arg = "InventoryMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "closed"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["world", "inventory", "inventory-later", "closed"]
+# A step whose planned state differs from the engine's (CheckStepState) logs this once per effect.
+no_log = ["frame tap error", "differs from the engine's state at its first draw"]
