@@ -207,6 +207,22 @@ namespace DCLF::Features::Sky::SkyDraws
 				return { atExecution ? nullptr : client->Current(), client, part, instance };
 			}
 
+			// The commands depend on the run through its draw list's structure (Run::Hash, the run's revision), the gates' answer and
+			// latch regions a kept recording's stable run pins. So a kept late batch keeps its list while the revision holds. The sun
+			// parts reset and resolve the run's queries, so they record every run (a key never repeated).
+			static constexpr bool kRecordKeyedBySkip = true;
+			static std::uint64_t RecordKeyAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.client)
+					return 0;
+				if (IsSun(a_frame.part)) {
+					static std::atomic<std::uint64_t> unique{ 0 };
+					return ~0ull - unique.fetch_add(1, std::memory_order_relaxed);
+				}
+				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs[a_frame.instance].Find(a_recording.Run());
+				return run ? run->revision ^ (std::uint64_t(a_frame.instance) << 56) : 0;
+			}
+
 			/** @brief A run whose commit opened none of the gate entries records only the pass's barriers. */
 			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
 			{
