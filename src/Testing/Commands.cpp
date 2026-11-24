@@ -11,6 +11,7 @@
 #include "Features/ScreenshotFeature.h"
 #include "Features/Upscaling.h"
 #include "Globals.h"
+#include "Profiler.h"
 #include "Menu.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Frame/Recipe.h"
@@ -649,6 +650,22 @@ namespace Testing
 			RegisterCommand("weather", Weather);
 			RegisterCommand("feature", SetFeature);
 			RegisterCommand("setting", SetSetting);
+			// "profiler": "on" keeps GPU and CPU pass timing running as the performance overlay does; "dump" logs every pass it holds.
+			RegisterCommand("profiler", [](const std::string& a_arg, std::string& a_error) {
+				if (a_arg == "on") {
+					globals::profiler->KeepActive(1u << 30);
+					return true;
+				}
+				if (a_arg != "dump") {
+					a_error = "profiler takes on or dump";
+					return false;
+				}
+				const auto stats = globals::profiler->GetStatistics();
+				logger::info("[TEST] profiler: {} passes, {:.3f} ms GPU in the last frame", stats.size(), globals::profiler->GetTotalTimeMs());
+				for (const auto& pass : stats)
+					logger::info("[TEST] profiler pass '{}': GPU {:.3f} ms (avg {:.3f}), CPU {:.3f} ms, valid {}", pass.name, pass.gpuTimeMs, pass.avgMs, pass.cpuTimeMs, pass.valid);
+				return true;
+			});
 			// "call": <owner>.<name>[=<arg>], a feature's registered test command (RegisterFeatureCommand).
 			RegisterCommand("call", [](const std::string& a_arg, std::string& a_error) {
 				const auto equals = a_arg.find('=');

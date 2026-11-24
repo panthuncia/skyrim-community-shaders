@@ -1,0 +1,32 @@
+# The profiler's passes, as the performance overlay (F10) lists them: timing on, then a dump of every pass after 600 frames.
+# Compose it with a mode: guest+profiler-dump, native-vulkan+profiler-dump.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "profiler"
+arg = "on"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "call"
+arg = "org.ts-dump=3"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "profiler"
+arg = "dump"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
