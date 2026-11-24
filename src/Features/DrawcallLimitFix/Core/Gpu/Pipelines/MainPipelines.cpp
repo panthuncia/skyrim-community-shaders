@@ -242,7 +242,7 @@ namespace DCLF
 			// Its objects stay native until a shader reload makes its program again.
 			l.FailForGood(a_key);
 			l.dirty = true;
-			if (member)
+			if (member && !precompile.expandedMain.contains(a_key))
 				l.programFamilyCounters[f].failed.fetch_add(1, std::memory_order_relaxed);
 			PipelineManifest::Get().Forget(manifestTag, manifestIdentity);
 			return;
@@ -299,11 +299,12 @@ namespace DCLF
 				ShaderPrograms::Get().RebuildLighting(key, *shader, std::move(a_done));
 		}, build);
 		l.entries.try_emplace(a_key);
-		// A built key is listed in the pipeline manifest for the next startup, and a failed one is dropped from it.
+		// A built key is listed in the pipeline manifest for the next startup, and a failed one is dropped from it. An expanded key
+		// is listed only once play asks for it (PromoteExpanded).
 		RequestBuild([build, program] { return build(*program); },
 			[completions = completions, key = a_key, generation = l.generation, live = std::move(live), manifestTag, manifestIdentity = std::move(manifestIdentity),
-				manifestInputs = std::move(manifestInputs)](Artifact a_artifact) {
-				if (a_artifact)
+				manifestInputs = std::move(manifestInputs), expanded = precompile.expandedMain.contains(a_key)](Artifact a_artifact) {
+				if (a_artifact && !expanded)
 					PipelineManifest::Get().Record(manifestTag, manifestIdentity, manifestInputs);
 				else
 					PipelineManifest::Get().Forget(manifestTag, manifestIdentity);
@@ -341,6 +342,9 @@ namespace DCLF
 			if (!artifact) {
 				entry.failed = true;
 				++l.failedEntries;
+				// An expanded key may well not build. The startup step lists it as unbuildable and counts it in its summary.
+				if (precompile.expandedMain.contains(key))
+					return;
 				l.counters.failed.fetch_add(1, std::memory_order_relaxed);
 				if (const auto family = KeyFamily(key.rasterFlags); family != Api::ProgramFamily::Count)
 					l.programFamilyCounters[static_cast<std::size_t>(family)].failed.fetch_add(1, std::memory_order_relaxed);

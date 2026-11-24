@@ -6,9 +6,14 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawFamilyLaneSlots.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PipelineExpander.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PipelineKeySource.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ProgramFamilies.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
+#include "Globals.h"
 #include "RenderGraph/PipelineCache.h"
 #include "Utils/SwitchFile.h"
 
@@ -16,6 +21,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -25,14 +31,12 @@ namespace DCLF
 {
 	namespace PipelinePrecompileDetail
 	{
-		// A main line's identity: the key (8 words), the main targets (count, 8 formats, depth) and the winding.
-		constexpr std::size_t kMainKeyWords = 8;
-		constexpr std::size_t kMainIdentityWords = kMainKeyWords + 10 + 1;
-		// A main line's inputs: the state bits, depth bias (3), alpha to coverage, independent blend, attachments, then 8 per attachment.
-		constexpr std::size_t kAttachmentWords = 8;
-		constexpr std::size_t kStateWords = 1 + 6 + 8 * kAttachmentWords;
-		// A shadow line's identity: the key without its view state (4), the shadow map format and the view's rasterizer state (6).
-		constexpr std::size_t kShadowIdentityWords = 4 + 1 + 6;
+		// A forward line's identity: the key (5 words), its view's targets (colour, depth, colour 2) and the winding.
+		constexpr std::size_t kForwardIdentityWords = 5 + 3 + 1;
+		// A draw family line's identity: the main targets (count, 8 formats, depth) and the winding.
+		constexpr std::size_t kDrawFamilyIdentityWords = 10 + 1;
+		// The refraction line's identity: the normals format, the depth format, the write mask and the winding.
+		constexpr std::size_t kRefractionIdentityWords = 4;
 		// Enum ranges a line must stay inside.
 		constexpr std::uint32_t kLastBlendFactor = static_cast<std::uint32_t>(rhi::BlendFactor::InvSrc1Alpha);
 		constexpr std::uint32_t kLastBlendOp = static_cast<std::uint32_t>(rhi::BlendOp::Max);
@@ -40,6 +44,36 @@ namespace DCLF
 
 		std::uint32_t FloatWord(float a_value) { return std::bit_cast<std::uint32_t>(a_value); }
 		float WordFloat(std::uint32_t a_word) { return std::bit_cast<float>(a_word); }
+
+		/** @brief Main targets as manifest words: the count, 8 formats and the depth format. */
+		void AppendTargetWords(PipelineWords& a_words, const TargetFormats& a_targets)
+		{
+			a_words.push_back(a_targets.colorCount);
+			for (const auto format : a_targets.colors)
+				a_words.push_back(static_cast<std::uint32_t>(format));
+			a_words.push_back(static_cast<std::uint32_t>(a_targets.depth));
+		}
+
+		/** @brief Reads AppendTargetWords' words at a_words. False when malformed. */
+		bool ReadTargetWords(const std::uint32_t* a_words, TargetFormats& a_targets)
+		{
+			a_targets.colorCount = a_words[0];
+			if (a_targets.colorCount > a_targets.colors.size())
+				return false;
+			for (std::size_t i = 0; i < a_targets.colors.size(); ++i)
+				a_targets.colors[i] = static_cast<DXGI_FORMAT>(a_words[1 + i]);
+			a_targets.depth = static_cast<DXGI_FORMAT>(a_words[1 + a_targets.colors.size()]);
+			return true;
+		}
+
+		/** @brief The draw family whose forward flags a forward key carries, or Count for a Lighting key (as ForwardPipelines.cpp). */
+		Api::DrawFamily PrecompileForwardFamilyOf(std::uint32_t a_flags)
+		{
+			for (const auto& slot : kDrawFamilyLaneSlots)
+				if (a_flags & slot.forwardFlags)
+					return slot.family;
+			return Api::DrawFamily::Count;
+		}
 
 		using Clock = std::chrono::steady_clock;
 	}
@@ -52,8 +86,8 @@ namespace DCLF
 		std::string tag(std::string_view(Extensions::ProgramFamilyOf(family).keyName));
 		std::ranges::replace(tag, ' ', '-');
 		std::ranges::replace(tag, '\t', '-');
-		// Never the shadow keys' tag or Lighting's.
-		if (tag.empty() || tag == kShadowPipelineTag || tag == "lighting")
+		// Never another kind's tag or Lighting's.
+		if (tag.empty() || !IsMainPipelineTag(tag) || tag == "lighting")
 			tag.insert(0, "family-");
 		return tag;
 	}
@@ -61,10 +95,8 @@ namespace DCLF
 	PipelineWords DrawPipelines::Impl::MainManifestIdentity(const PipelineKey& a_key, const TargetFormats& a_targets, bool a_frontCCW)
 	{
 		PipelineWords words{ a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.rasterFlags, a_key.passDescriptor, static_cast<std::uint32_t>(a_key.vertexLayout),
-			static_cast<std::uint32_t>(a_key.vertexLayout >> 32), a_key.runtimeVertex, a_key.runtimePixel, a_targets.colorCount };
-		for (const auto format : a_targets.colors)
-			words.push_back(static_cast<std::uint32_t>(format));
-		words.push_back(static_cast<std::uint32_t>(a_targets.depth));
+			static_cast<std::uint32_t>(a_key.vertexLayout >> 32), a_key.runtimeVertex, a_key.runtimePixel };
+		PipelinePrecompileDetail::AppendTargetWords(words, a_targets);
 		words.push_back(a_frontCCW ? 1u : 0u);
 		return words;
 	}
@@ -88,39 +120,13 @@ namespace DCLF
 		return words;
 	}
 
-	bool DrawPipelines::Impl::MainFromManifest(const PipelineWords& a_identity, const PipelineWords& a_inputs, PipelineKey& a_key, TargetFormats& a_targets, bool& a_frontCCW,
-		std::uint32_t& a_bits, EngineState& a_state)
+	bool DrawPipelines::Impl::EngineStateFromWords(const PipelineWords& a_inputs, std::uint32_t a_bits, EngineState& a_state)
 	{
 		using namespace PipelinePrecompileDetail;
-		if (a_identity.size() != kMainIdentityWords || a_inputs.size() != kStateWords)
+		if (a_inputs.size() != kManifestStateWords)
 			return false;
-		const auto* w = a_identity.data();
-		a_key.vertexDescriptor = w[0];
-		a_key.pixelDescriptor = w[1];
-		a_key.rasterFlags = w[2];
-		a_key.passDescriptor = w[3];
-		a_key.vertexLayout = std::uint64_t{ w[4] } | (std::uint64_t{ w[5] } << 32);
-		a_key.runtimeVertex = w[6];
-		a_key.runtimePixel = w[7];
-		w += kMainKeyWords;
-		a_targets.colorCount = w[0];
-		if (a_targets.colorCount > a_targets.colors.size())
-			return false;
-		for (std::size_t i = 0; i < a_targets.colors.size(); ++i)
-			a_targets.colors[i] = static_cast<DXGI_FORMAT>(w[1 + i]);
-		a_targets.depth = static_cast<DXGI_FORMAT>(w[1 + a_targets.colors.size()]);
-		const std::uint32_t frontCCW = w[2 + a_targets.colors.size()];
-		if (frontCCW > 1)
-			return false;
-		a_frontCCW = frontCCW != 0;
-		// A deferred range key's build reads other states, which no line records.
-		const auto family = KeyFamily(a_key.rasterFlags);
-		if (family != Api::ProgramFamily::Count && Extensions::FamilyRules(a_key.rasterFlags).deferredRanges)
-			return false;
-		bool blendOnly = false;
 		const auto* s = a_inputs.data();
-		a_bits = s[0];
-		if (a_bits != EngineStateBitsOf(a_key, blendOnly))
+		if (s[0] != a_bits)
 			return false;
 		a_state = EngineState{};
 		a_state.depthBias = WordFloat(s[1]);
@@ -144,10 +150,40 @@ namespace DCLF
 			attachment.dstAlpha = static_cast<rhi::BlendFactor>(s[5]);
 			attachment.alphaOp = static_cast<rhi::BlendOp>(s[6]);
 			attachment.writeMask = static_cast<rhi::ColorWriteEnable>(s[7]);
-			s += kAttachmentWords;
+			s += kManifestAttachmentWords;
 		}
 		a_state.valid = true;
 		return true;
+	}
+
+	bool DrawPipelines::Impl::MainFromManifest(const PipelineWords& a_identity, const PipelineWords& a_inputs, PipelineKey& a_key, TargetFormats& a_targets, bool& a_frontCCW,
+		std::uint32_t& a_bits, EngineState& a_state)
+	{
+		using namespace PipelinePrecompileDetail;
+		if (a_identity.size() != kMainManifestIdentityWords || a_inputs.size() != kManifestStateWords)
+			return false;
+		const auto* w = a_identity.data();
+		a_key.vertexDescriptor = w[0];
+		a_key.pixelDescriptor = w[1];
+		a_key.rasterFlags = w[2];
+		a_key.passDescriptor = w[3];
+		a_key.vertexLayout = std::uint64_t{ w[4] } | (std::uint64_t{ w[5] } << 32);
+		a_key.runtimeVertex = w[6];
+		a_key.runtimePixel = w[7];
+		w += kMainManifestKeyWords;
+		if (!ReadTargetWords(w, a_targets))
+			return false;
+		const std::uint32_t frontCCW = w[2 + a_targets.colors.size()];
+		if (frontCCW > 1)
+			return false;
+		a_frontCCW = frontCCW != 0;
+		// A deferred range key's build reads other states, which no line records.
+		const auto family = KeyFamily(a_key.rasterFlags);
+		if (family != Api::ProgramFamily::Count && Extensions::FamilyRules(a_key.rasterFlags).deferredRanges)
+			return false;
+		bool blendOnly = false;
+		a_bits = EngineStateBitsOf(a_key, blendOnly);
+		return EngineStateFromWords(a_inputs, a_bits, a_state);
 	}
 
 	PipelineWords DrawPipelines::Impl::ShadowManifestIdentity(const ShadowPipelineKey& a_key, DXGI_FORMAT a_format, const ShadowRasterState& a_state)
@@ -161,7 +197,7 @@ namespace DCLF
 	bool DrawPipelines::Impl::ShadowFromManifest(const PipelineWords& a_identity, ShadowPipelineKey& a_key, DXGI_FORMAT& a_format, ShadowRasterState& a_state)
 	{
 		using namespace PipelinePrecompileDetail;
-		if (a_identity.size() != kShadowIdentityWords)
+		if (a_identity.size() != kShadowManifestIdentityWords)
 			return false;
 		const auto* w = a_identity.data();
 		if (w[8] > kLastCullMode || w[9] > 1 || w[10] > 1)
@@ -180,8 +216,59 @@ namespace DCLF
 		return true;
 	}
 
+	PipelineWords DrawPipelines::Impl::ForwardManifestIdentity(const ForwardPipelineKey& a_key, const ForwardTargets& a_targets, bool a_frontCCW)
+	{
+		return { a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.flags, a_key.runtimeVertex, a_key.runtimePixel, static_cast<std::uint32_t>(a_targets.colour),
+			static_cast<std::uint32_t>(a_targets.depth), static_cast<std::uint32_t>(a_targets.colour2), a_frontCCW ? 1u : 0u };
+	}
+
+	bool DrawPipelines::Impl::ForwardFromManifest(const PipelineWords& a_identity, ForwardPipelineKey& a_key, ForwardTargets& a_targets, bool& a_frontCCW)
+	{
+		using namespace PipelinePrecompileDetail;
+		if (a_identity.size() != kForwardIdentityWords || a_identity[8] > 1)
+			return false;
+		a_key = ForwardPipelineKey{ a_identity[0], a_identity[1], a_identity[2], a_identity[3], a_identity[4] };
+		a_targets.colour = static_cast<DXGI_FORMAT>(a_identity[5]);
+		a_targets.depth = static_cast<DXGI_FORMAT>(a_identity[6]);
+		a_targets.colour2 = static_cast<DXGI_FORMAT>(a_identity[7]);
+		a_frontCCW = a_identity[8] != 0;
+		return a_targets.colour != DXGI_FORMAT_UNKNOWN && a_targets.depth != DXGI_FORMAT_UNKNOWN;
+	}
+
+	std::string DrawPipelines::Impl::DrawFamilyManifestTag(Api::DrawFamily a_family)
+	{
+		std::string tag(kDrawFamilyPipelineTagPrefix);
+		tag += Extensions::DrawFamilyOf(a_family).keyName;
+		std::ranges::replace(tag, ' ', '-');
+		std::ranges::replace(tag, '\t', '-');
+		return tag;
+	}
+
+	PipelineWords DrawPipelines::Impl::DrawFamilyManifestIdentity(const TargetFormats& a_targets, bool a_frontCCW)
+	{
+		PipelineWords words;
+		PipelinePrecompileDetail::AppendTargetWords(words, a_targets);
+		words.push_back(a_frontCCW ? 1u : 0u);
+		return words;
+	}
+
+	bool DrawPipelines::Impl::DrawFamilyFromManifest(const PipelineWords& a_identity, TargetFormats& a_targets, bool& a_frontCCW)
+	{
+		using namespace PipelinePrecompileDetail;
+		if (a_identity.size() != kDrawFamilyIdentityWords || !ReadTargetWords(a_identity.data(), a_targets) || a_identity.back() > 1)
+			return false;
+		a_frontCCW = a_identity.back() != 0;
+		return true;
+	}
+
+	PipelineWords DrawPipelines::Impl::RefractionManifestIdentity(DXGI_FORMAT a_format, DXGI_FORMAT a_depthFormat, std::uint8_t a_writeMask, bool a_frontCCW)
+	{
+		return { static_cast<std::uint32_t>(a_format), static_cast<std::uint32_t>(a_depthFormat), a_writeMask, a_frontCCW ? 1u : 0u };
+	}
+
 	void DrawPipelines::StartPrecompile()
 	{
+		using namespace PipelinePrecompileDetail;
 		auto& p = impl->precompile;
 		if (p.started || !Enabled() || !HasTargetFormats())
 			return;
@@ -190,7 +277,7 @@ namespace DCLF
 			logger::info("[DCLF] pipeline precompile: off (CS_DCLF_PIPELINE_PRECOMPILE=0); each pipeline builds when first drawn");
 			return;
 		}
-		const auto startedAt = PipelinePrecompileDetail::Clock::now();
+		const auto startedAt = Clock::now();
 		// What a world frame's capture posts. No world frame has run yet, so nothing else writes these now. The engine states
 		// come from the manifest lines instead, and are checked once the render thread reads them.
 		auto& input = impl->renderInput;
@@ -206,13 +293,31 @@ namespace DCLF
 			if (!input.familySource[f] && family.taken)
 				input.familySource[f] = family.contribution.programSource();
 		}
+		// The draw families' engine shaders, as their frame decisions post them (SetFamilyInputs).
+		for (std::size_t f = 0; f < kDrawFamilyLanes; ++f) {
+			const auto& family = Extensions::DrawFamilies()[f];
+			if (!input.drawFamilySource[f] && family.taken && family.contribution.frame.programSource)
+				input.drawFamilySource[f] = static_cast<RE::BSShader*>(const_cast<void*>(family.contribution.frame.programSource()));
+		}
 		if (!input.states)
 			input.states = std::make_shared<const decltype(impl->engineStates)>(impl->engineStates);
 
 		PipelineKeySet keys;
 		LocalPipelineManifestSource local;
 		ShippedPipelineManifestSource shipped;
-		for (auto* source : std::array<PipelineKeySource*, 2>{ &local, &shipped })
+		// The expander reads the state bits a main line's build reads, as the lane does.
+		PipelineCombinationExpander expander([](const PipelineWords& a_identity) -> std::optional<std::uint32_t> {
+			if (a_identity.size() != kMainManifestIdentityWords)
+				return std::nullopt;
+			PipelineKey key{};
+			key.vertexDescriptor = a_identity[0];
+			key.pixelDescriptor = a_identity[1];
+			key.rasterFlags = a_identity[2];
+			key.passDescriptor = a_identity[3];
+			bool blendOnly = false;
+			return Impl::EngineStateBitsOf(key, blendOnly);
+		});
+		for (auto* source : std::array<PipelineKeySource*, 3>{ &local, &shipped, &expander })
 			CollectPipelineKeys(*source, keys);
 
 		auto job = std::make_unique<Impl::PrecompileJob>();
@@ -220,6 +325,7 @@ namespace DCLF
 		for (const auto& [tag, tagLines] : keys.Lines()) {
 			const bool shadowTag = tag == kShadowPipelineTag;
 			for (const auto& [identity, inputs] : tagLines) {
+				const bool expanded = keys.IsExpanded(tag, identity);
 				if (shadowTag) {
 					ShadowPipelineKey key{};
 					DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
@@ -237,6 +343,71 @@ namespace DCLF
 					key.viewState = impl->ShadowRasterStateIdOf(raster, added);
 					newRasterStates += added ? 1u : 0u;
 					job->shadow.push_back(key);
+					if (expanded)
+						job->expandedShadow.try_emplace(key, Impl::ManifestLine{ tag, identity, inputs });
+				} else if (tag == kForwardPipelineTag) {
+					ForwardPipelineKey key{};
+					ForwardTargets lineTargets{};
+					bool frontCCW = false;
+					if (!Impl::ForwardFromManifest(identity, key, lineTargets, frontCCW)) {
+						++malformed;
+						continue;
+					}
+					const auto view = Extensions::ForwardKeyView(key.flags);
+					const auto family = PrecompileForwardFamilyOf(key.flags);
+					const bool sourced = family == Api::DrawFamily::Count ? input.lighting != nullptr : input.drawFamilySource[static_cast<std::size_t>(family)] != nullptr;
+					if (view == Api::EngineView::Count || !sourced || !input.frontCCW || frontCCW != *input.frontCCW) {
+						++job->otherTargets;
+						continue;
+					}
+					// The view's targets, as its frame would post them. The first line primes them. A line for others is skipped and kept.
+					auto& viewTargets = input.viewTargets[static_cast<std::size_t>(view)];
+					if (viewTargets.colour == DXGI_FORMAT_UNKNOWN)
+						viewTargets = lineTargets;
+					else if (!(viewTargets == lineTargets)) {
+						++job->otherTargets;
+						continue;
+					}
+					job->forward.push_back(key);
+				} else if (tag == kRefractionPipelineTag) {
+					if (identity.size() != kRefractionIdentityWords || identity[2] > 0xF || identity[3] > 1) {
+						++malformed;
+						continue;
+					}
+					const auto format = static_cast<DXGI_FORMAT>(identity[0]);
+					auto* utility = globals::game::utilityShader;
+					if (format == DXGI_FORMAT_UNKNOWN || !utility || static_cast<DXGI_FORMAT>(identity[1]) != Targets().depth || !input.frontCCW ||
+						(identity[3] != 0) != *input.frontCCW || (input.refractionUtility && (input.refractionFormat != format || input.refractionWriteMask != identity[2]))) {
+						++job->otherTargets;
+						continue;
+					}
+					// As the forward epoch posts them (SetRefractionInputs). Other values there later build it again.
+					input.refractionUtility = utility;
+					input.refractionFormat = format;
+					input.refractionWriteMask = static_cast<std::uint8_t>(identity[2]);
+					job->refraction = true;
+				} else if (tag.starts_with(kDrawFamilyPipelineTagPrefix)) {
+					std::size_t f = 0;
+					while (f < kDrawFamilyLanes && !(Extensions::DrawFamilies()[f].taken && Impl::DrawFamilyManifestTag(static_cast<Api::DrawFamily>(f)) == tag))
+						++f;
+					TargetFormats lineTargets{};
+					bool frontCCW = false;
+					if (f == kDrawFamilyLanes || !input.drawFamilySource[f]) {
+						++job->otherTargets;  // a family this session does not draw
+						continue;
+					}
+					Impl::EngineState state{};
+					const std::uint32_t bits = std::uint32_t(Extensions::DrawFamilies()[f].contribution.program.writeMode) << kRasterWriteModeShift;
+					if (!Impl::DrawFamilyFromManifest(identity, lineTargets, frontCCW) || !Impl::EngineStateFromWords(inputs, bits, state)) {
+						++malformed;
+						continue;
+					}
+					if (!(lineTargets == Targets()) || !input.frontCCW || frontCCW != *input.frontCCW) {
+						++job->otherTargets;
+						continue;
+					}
+					job->families[f] = true;
+					job->states.try_emplace(bits, state);
 				} else {
 					PipelineKey key{};
 					TargetFormats lineTargets{};
@@ -254,24 +425,37 @@ namespace DCLF
 					}
 					job->main.push_back(key);
 					job->states.try_emplace(bits, state);
+					if (expanded)
+						job->expandedMain.try_emplace(key, Impl::ManifestLine{ tag, identity, inputs });
 				}
 			}
 		}
 		if (newRasterStates)
 			logger::info("[DCLF] pipeline precompile: {} shadow view rasterizer states registered from the manifest", newRasterStates);
 		impl->PostInput(*this);
-		for (const auto& [name, count] : keys.Sources())
+		for (const auto& [name, count] : keys.Sources()) {
 			job->sources += fmt::format("{}{} {}", job->sources.empty() ? "" : ", ", count, name);
-		const auto queued = static_cast<std::uint32_t>(job->main.size() + job->shadow.size());
-		logger::info("[DCLF] pipeline precompile: {} main and {} shadow keys queued ({}){}{}", job->main.size(), job->shadow.size(), job->sources,
-			job->otherTargets ? fmt::format(", {} for other targets skipped", job->otherTargets) : std::string(),
+			if (name != expander.Name() || expander.RuleCounts().empty())
+				continue;
+			std::string rules;
+			for (const auto& [rule, added] : expander.RuleCounts())
+				rules += fmt::format("{}{} {}", rules.empty() ? "" : ", ", added, rule);
+			job->sources += fmt::format(" ({})", rules);
+		}
+		std::uint32_t families = 0;
+		for (const bool queued : job->families)
+			families += queued ? 1u : 0u;
+		const auto queuedKeys = static_cast<std::uint32_t>(job->main.size() + job->shadow.size() + job->forward.size()) + families + (job->refraction ? 1u : 0u);
+		logger::info("[DCLF] pipeline precompile: {} main ({} expanded), {} shadow ({} expanded), {} forward, {} draw family and {} refraction keys queued ({}){}{}",
+			job->main.size(), job->expandedMain.size(), job->shadow.size(), job->expandedShadow.size(), job->forward.size(), families, job->refraction ? 1 : 0,
+			job->sources, job->otherTargets ? fmt::format(", {} for other targets or features skipped", job->otherTargets) : std::string(),
 			malformed ? fmt::format(", {} malformed lines skipped", malformed) : std::string());
-		if (!queued)
+		if (!queuedKeys)
 			return;
 		job->started = startedAt;
 		job->mainInputs = input.lighting && input.frontCCW && input.states;
 		job->shadowInputs = input.utility && input.shadowFormat != DXGI_FORMAT_UNKNOWN && input.shadowStates;
-		p.total.store(queued, std::memory_order_relaxed);
+		p.total.store(queuedKeys, std::memory_order_relaxed);
 		p.pending.store(true, std::memory_order_release);
 		// Nothing else runs yet, so the builds take every preparation worker until the step ends.
 		SetBuildFullWidth(true);
@@ -319,9 +503,13 @@ namespace DCLF
 			if (a_count)
 				logger::warn("[DCLF] pipeline precompile: the {} pipelines' inputs are not in; their {} keys are left for play", a_what, a_count);
 		};
-		// A key already asked for is the lane's already, and not the step's.
+		// A key already asked for is the lane's already, and not the step's. An expanded key is marked before its request, so its build
+		// is not recorded in the manifest until play asks for it.
 		if (!mainReady) {
-			leave(job->main.size(), "main");
+			std::uint32_t families = 0;
+			for (const bool queued : job->families)
+				families += queued ? 1u : 0u;
+			leave(job->main.size() + job->forward.size() + families, "main, forward and draw family");
 		} else {
 			for (const auto& key : job->main) {
 				if (!l.asked.try_emplace(key, ~0u).second) {
@@ -329,7 +517,39 @@ namespace DCLF
 					continue;
 				}
 				p.main.insert(key);
+				if (const auto expanded = job->expandedMain.find(key); expanded != job->expandedMain.end())
+					p.expandedMain.insert_or_assign(key, std::move(expanded->second));
 				TryRequest(key);
+			}
+			// Forward keys check their view's targets and program source themselves, and wait or are left for play as main keys are.
+			auto& f = l.forward;
+			for (const auto& key : job->forward) {
+				if (!f.asked.insert(key).second) {
+					p.deferred.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+				p.forward.insert(key);
+				TryRequestForward(key);
+			}
+			// The draw families are requested by TryRequestFamilies, later in this pass.
+			for (std::size_t d = 0; d < kDrawFamilyLanes; ++d) {
+				if (!job->families[d])
+					continue;
+				if (l.families[d].asked) {
+					p.deferred.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+				l.families[d].asked = true;
+				p.families[d] = true;
+			}
+		}
+		// The refraction pipeline is requested by TryRequestRefraction, later in this pass, once its inputs are in.
+		if (job->refraction) {
+			if (l.refraction.asked) {
+				p.deferred.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				l.refraction.asked = true;
+				p.refraction = true;
 			}
 		}
 		if (!shadowReady) {
@@ -341,6 +561,8 @@ namespace DCLF
 					continue;
 				}
 				p.shadow.insert(key);
+				if (const auto expanded = job->expandedShadow.find(key); expanded != job->expandedShadow.end())
+					p.expandedShadow.insert_or_assign(key, std::move(expanded->second));
 				TryRequestShadow(key);
 			}
 		}
@@ -352,7 +574,17 @@ namespace DCLF
 		if (!p.active)
 			return;
 		auto& l = lane;
-		const auto settle = [&](auto& a_family, auto& a_keys, auto&& a_describe) {
+		// An expanded key that failed is listed as unbuildable, so the expander does not offer it again. Any other failure is logged.
+		const auto listUnbuildable = [&](auto& a_expanded, const auto& a_key) {
+			const auto found = a_expanded.find(a_key);
+			if (found == a_expanded.end())
+				return false;
+			PipelineManifest::Unbuildable().Record(found->second.tag, found->second.identity, {});
+			a_expanded.erase(found);
+			++p.expandedFailed;
+			return true;
+		};
+		const auto settle = [&](auto& a_family, auto& a_keys, auto&& a_built, auto&& a_failed) {
 			using Keys = std::remove_cvref_t<decltype(a_keys)>;
 			using Key = typename Keys::key_type;
 			if (a_keys.empty())
@@ -371,8 +603,8 @@ namespace DCLF
 				} else if (found->second.failed) {
 					// The failed build or program already dropped its manifest line.
 					p.failed.fetch_add(1, std::memory_order_relaxed);
-					logger::warn("[DCLF] pipeline precompile: {} failed; dropped from the pipeline manifest", a_describe(key));
-				} else if (found->second.index != kNotReady) {
+					a_failed(key);
+				} else if (a_built(found->second)) {
 					p.built.fetch_add(1, std::memory_order_relaxed);
 				} else {
 					continue;  // building, or admitted and not yet published
@@ -382,21 +614,69 @@ namespace DCLF
 			for (const auto& key : settled)
 				a_keys.erase(key);
 		};
-		settle(l, p.main, [](const PipelineKey& a_key) { return DescribeKey(a_key); });
-		settle(l.shadow, p.shadow, [](const ShadowPipelineKey& a_key) {
-			return fmt::format("shadow technique {:08X}, raster {:X}, vertex layout {:016X}, view state {}", a_key.technique, a_key.rasterFlags, a_key.vertexLayout,
-				a_key.viewState);
+		settle(l, p.main, [](const Entry& a_entry) { return a_entry.index != kNotReady; }, [&](const PipelineKey& a_key) {
+			if (!listUnbuildable(p.expandedMain, a_key))
+				logger::warn("[DCLF] pipeline precompile: {} failed; dropped from the pipeline manifest", DescribeKey(a_key));
 		});
-		if (!p.main.empty() || !p.shadow.empty())
+		settle(l.shadow, p.shadow, [](const Entry& a_entry) { return a_entry.index != kNotReady; }, [&](const ShadowPipelineKey& a_key) {
+			if (!listUnbuildable(p.expandedShadow, a_key))
+				logger::warn("[DCLF] pipeline precompile: shadow technique {:08X}, raster {:X}, vertex layout {:016X}, view state {} failed; dropped from the pipeline manifest",
+					a_key.technique, a_key.rasterFlags, a_key.vertexLayout, a_key.viewState);
+		});
+		settle(l.forward, p.forward, [](const ForwardEntry& a_entry) { return a_entry.built != nullptr; }, [](const ForwardPipelineKey& a_key) {
+			logger::warn("[DCLF] pipeline precompile: forward VS {:08X} PS {:08X} flags {:X} failed; dropped from the pipeline manifest", a_key.vertexDescriptor,
+				a_key.pixelDescriptor, a_key.flags);
+		});
+		const auto* input = l.input.get();
+		for (std::size_t d = 0; d < kDrawFamilyLanes; ++d) {
+			if (!p.families[d])
+				continue;
+			const auto& t = l.families[d];
+			if (t.built) {
+				p.built.fetch_add(1, std::memory_order_relaxed);
+			} else if (t.failed) {
+				p.failed.fetch_add(1, std::memory_order_relaxed);
+				logger::warn("[DCLF] pipeline precompile: {} pipelines failed; dropped from the pipeline manifest", Extensions::DrawFamilies()[d].label);
+			} else if (t.requested) {
+				continue;
+			} else {
+				// Not requested yet: its program is on its way when every input is in, else it waits for an input only play gives.
+				const std::uint32_t bits = std::uint32_t(Extensions::DrawFamilies()[d].contribution.program.writeMode) << kRasterWriteModeShift;
+				const bool stateKnown = input && input->states && (input->states->contains(bits) || p.recordedStates.contains(bits));
+				if (input && input->drawFamilySource[d] && input->frontCCW && stateKnown && zLayout && FamilySignature(static_cast<Api::DrawFamily>(d)))
+					continue;
+				p.deferred.fetch_add(1, std::memory_order_relaxed);
+			}
+			p.families[d] = false;
+		}
+		if (p.refraction) {
+			const auto& r = l.refraction;
+			const bool inputs = input && input->refractionUtility && input->refractionFormat != DXGI_FORMAT_UNKNOWN && input->targets.depth != DXGI_FORMAT_UNKNOWN &&
+			                    input->frontCCW && shadowLayout;
+			if (r.built) {
+				p.built.fetch_add(1, std::memory_order_relaxed);
+				p.refraction = false;
+			} else if (r.failed) {
+				p.failed.fetch_add(1, std::memory_order_relaxed);
+				logger::warn("[DCLF] pipeline precompile: the refraction pipeline failed; dropped from the pipeline manifest");
+				p.refraction = false;
+			} else if (!r.requested && !inputs) {
+				p.deferred.fetch_add(1, std::memory_order_relaxed);
+				p.refraction = false;
+			}
+		}
+		if (!p.main.empty() || !p.shadow.empty() || !p.forward.empty() || p.refraction || std::ranges::find(p.families, true) != p.families.end())
 			return;
 		p.active = false;
 		SetBuildFullWidth(false);
 		// The driver cache holds every pipeline built, so the next start reads them instead of compiling.
 		::RenderGraph::PipelineCache::RequestSave();
 		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(PipelinePrecompileDetail::Clock::now() - p.startedAt).count();
-		logger::info("[DCLF] pipeline precompile: done in {} ms: {} keys ({}{}), {} built, {} failed, {} left for play, {} shader stages compiled for them",
-			ms, p.total.load(std::memory_order_relaxed), p.sources, p.otherTargets ? fmt::format("; {} for other targets skipped", p.otherTargets) : std::string(),
-			p.built.load(std::memory_order_relaxed), p.failed.load(std::memory_order_relaxed), p.deferred.load(std::memory_order_relaxed), p.stageCompiles);
+		logger::info("[DCLF] pipeline precompile: done in {} ms: {} keys ({}{}), {} built, {} failed{}, {} left for play, {} shader stages compiled for them", ms,
+			p.total.load(std::memory_order_relaxed), p.sources, p.otherTargets ? fmt::format("; {} for other targets or features skipped", p.otherTargets) : std::string(),
+			p.built.load(std::memory_order_relaxed), p.failed.load(std::memory_order_relaxed),
+			p.expandedFailed ? fmt::format(" ({} of them expanded keys, now listed as unbuildable)", p.expandedFailed) : std::string(),
+			p.deferred.load(std::memory_order_relaxed), p.stageCompiles);
 		p.pending.store(false, std::memory_order_release);
 	}
 
@@ -422,6 +702,13 @@ namespace DCLF
 		for (const std::uint32_t bits : checked)
 			p.recordedStates.erase(bits);
 		const auto in = [](const std::vector<std::uint32_t>& a_list, std::uint32_t a_bits) { return std::ranges::find(a_list, a_bits) != a_list.end(); };
+		// A draw family built from a contradicted state is built again (RebuildContradicted).
+		for (std::size_t d = 0; d < kDrawFamilyLanes; ++d) {
+			if (p.familyRecordedBits[d] == ~0u || !in(checked, p.familyRecordedBits[d]))
+				continue;
+			p.familyRebuild[d] = p.familyRebuild[d] || in(contradicted, p.familyRecordedBits[d]);
+			p.familyRecordedBits[d] = ~0u;
+		}
 		std::vector<PipelineKey> settled;
 		std::uint32_t rebuilt = 0;
 		for (const auto& [key, bits] : p.recordedUse) {
@@ -445,6 +732,26 @@ namespace DCLF
 	{
 		auto& p = precompile;
 		auto& l = lane;
+		for (std::size_t d = 0; d < kDrawFamilyLanes; ++d) {
+			if (!p.familyRebuild[d])
+				continue;
+			auto& t = l.families[d];
+			// A build in flight finishes first, so its completion is never taken for the new build's.
+			if (t.requested && !t.built && !t.failed)
+				continue;
+			p.familyRebuild[d] = false;
+			// Kept for the process, because a recording may still draw with it.
+			if (t.built)
+				t.retired.push_back(std::move(t.built));
+			t.built = {};
+			t.slot = {};
+			t.requested = false;
+			t.failed = t.programFailed;
+			if (l.input && l.input->frontCCW)
+				PipelineManifest::Get().Forget(DrawFamilyManifestTag(static_cast<Api::DrawFamily>(d)), DrawFamilyManifestIdentity(l.input->targets, *l.input->frontCCW));
+			l.dirty = true;
+			logger::warn("[DCLF] pipeline precompile: {} pipelines are built again with the engine's live state", Extensions::DrawFamilies()[d].label);
+		}
 		if (p.rebuild.empty())
 			return;
 		std::vector<PipelineKey> waiting;
@@ -469,5 +776,32 @@ namespace DCLF
 			TryRequest(key);
 		}
 		p.rebuild = std::move(waiting);
+	}
+
+	void DrawPipelines::Impl::PromoteExpanded(const PipelineKey& a_key)
+	{
+		auto& expanded = precompile.expandedMain;
+		const auto found = expanded.find(a_key);
+		if (found == expanded.end())
+			return;
+		const auto line = std::move(found->second);
+		expanded.erase(found);
+		// A failed build stays out. One still building is listed now, and dropped again if it fails.
+		if (const auto entry = lane.entries.find(a_key); entry != lane.entries.end() && entry->second.failed)
+			return;
+		PipelineManifest::Get().Record(line.tag, line.identity, line.inputs);
+	}
+
+	void DrawPipelines::Impl::PromoteExpandedShadow(const ShadowPipelineKey& a_key)
+	{
+		auto& expanded = precompile.expandedShadow;
+		const auto found = expanded.find(a_key);
+		if (found == expanded.end())
+			return;
+		const auto line = std::move(found->second);
+		expanded.erase(found);
+		if (const auto entry = lane.shadow.entries.find(a_key); entry != lane.shadow.entries.end() && entry->second.failed)
+			return;
+		PipelineManifest::Get().Record(line.tag, line.identity, {});
 	}
 }

@@ -197,10 +197,12 @@ namespace DCLF
 			},
 			build);
 		s.entries.try_emplace(a_key);
-		// A built key is listed in the pipeline manifest for the next startup, and a failed one is dropped from it.
+		// A built key is listed in the pipeline manifest for the next startup, and a failed one is dropped from it. An expanded key
+		// is listed only once play asks for it (PromoteExpandedShadow).
 		RequestBuild([build, program] { return build(*program); },
-			[completions = completions, key = a_key, generation = s.generation, live = std::move(live), manifestIdentity = std::move(manifestIdentity)](Artifact a_artifact) {
-				if (a_artifact)
+			[completions = completions, key = a_key, generation = s.generation, live = std::move(live), manifestIdentity = std::move(manifestIdentity),
+				expanded = precompile.expandedShadow.contains(a_key)](Artifact a_artifact) {
+				if (a_artifact && !expanded)
 					PipelineManifest::Get().Record(std::string(kShadowPipelineTag), manifestIdentity, {});
 				else
 					PipelineManifest::Get().Forget(std::string(kShadowPipelineTag), manifestIdentity);
@@ -229,6 +231,9 @@ namespace DCLF
 			if (!artifact) {
 				entry.failed = true;
 				++s.failedEntries;
+				// An expanded key may well not build. The startup step lists it as unbuildable and counts it in its summary.
+				if (precompile.expandedShadow.contains(key))
+					return;
 				s.counters.failed.fetch_add(1, std::memory_order_relaxed);
 				if (s.loggedFailures++ < kMaxLoggedFailures)
 					logger::warn("[DCLF] shadow pipeline technique {:08X} layout {:016X} failed: {}", key.technique, key.vertexLayout, artifact.error);

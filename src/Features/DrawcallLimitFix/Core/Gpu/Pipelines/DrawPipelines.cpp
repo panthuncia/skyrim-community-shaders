@@ -430,13 +430,18 @@ namespace DCLF
 			l.dirty = true;  // the catalog names the shadow format and the forward targets
 		}
 		// Each key once. The lane keeps them.
+		// A key the startup step asked for is in already. If the expander made it, play asking for it lists it in the manifest.
 		completions->requests.Drain([&](LightingRequest&& a_request) {
 			if (l.asked.try_emplace(a_request.key, a_request.slot).second)
 				TryRequest(a_request.key);
+			else
+				PromoteExpanded(a_request.key);
 		});
 		completions->shadowRequests.Drain([&](ShadowRequest&& a_request) {
 			if (s.asked.try_emplace(a_request.viewKey, a_request).second)
 				TryRequestShadow(a_request.viewKey);
+			else
+				PromoteExpandedShadow(a_request.viewKey);
 		});
 		completions->forwardRequests.Drain([&](ForwardPipelineKey&& a_key) {
 			if (f.asked.insert(a_key).second)

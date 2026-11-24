@@ -128,6 +128,7 @@ namespace DCLF
 		const DXGI_FORMAT format = input->refractionFormat, depthFormat = input->targets.depth;
 		const std::uint8_t writeMask = input->refractionWriteMask;
 		const bool frontCCW = *input->frontCCW;
+		auto manifestIdentity = RefractionManifestIdentity(format, depthFormat, writeMask, frontCCW);
 		const std::string id = "dclf.refraction";
 		const auto build = [device = device, layout = ShadowLayout(), format, depthFormat, writeMask, frontCCW](const ShaderPrograms::ShadowProgram& a_program) {
 			return BuildRefraction(device, layout, &a_program, format, depthFormat, writeMask, frontCCW);
@@ -139,12 +140,20 @@ namespace DCLF
 			build);
 		r.requested = true;
 		r.format = format;
+		// A built pipeline is listed in the pipeline manifest for the next startup, and a failed one is dropped from it.
 		RequestBuild([build, program] { return build(*program); },
-			[completions = completions, generation = lane.generation, format, live = std::move(live)](Artifact a_artifact) {
+			[completions = completions, generation = lane.generation, format, live = std::move(live), manifestIdentity = std::move(manifestIdentity)](Artifact a_artifact) {
+				if (a_artifact)
+					PipelineManifest::Get().Record(std::string(kRefractionPipelineTag), manifestIdentity, {});
+				else
+					PipelineManifest::Get().Forget(std::string(kRefractionPipelineTag), manifestIdentity);
 				completions->refraction.Push({ generation, format, a_artifact, live });
 				WakePipelineLane();
 			});
 		r.counters.requested.fetch_add(1, std::memory_order_relaxed);
+		if (!precompile.refraction)
+			logger::warn("[DCLF] on-demand pipeline build: refraction, normals format {}, depth format {}, write mask {:X}", static_cast<int>(format),
+				static_cast<int>(depthFormat), writeMask);
 	}
 
 	void DrawPipelines::Impl::TryRequestForward(const ForwardPipelineKey& a_key)
@@ -168,8 +177,10 @@ namespace DCLF
 		const ProgramDescriptors descriptors{ a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.runtimeVertex, a_key.runtimePixel };
 		const auto program = familyKey ? ShaderPrograms::Get().FindDrawFamilyForward(family, *input->drawFamilySource[d], &programFailed) :
 		                                 ShaderPrograms::Get().FindForward(descriptors, *input->lighting, &programFailed);
+		auto manifestIdentity = ForwardManifestIdentity(a_key, *keyTargets, *input->frontCCW);
 		if (programFailed) {
 			// The engine draws its objects in the reflection phase instead.
+			PipelineManifest::Get().Forget(std::string(kForwardPipelineTag), manifestIdentity);
 			f.FailForGood(a_key);
 			f.counters.failed.fetch_add(1, std::memory_order_relaxed);
 			lane.dirty = true;
@@ -197,13 +208,22 @@ namespace DCLF
 			},
 			build);
 		f.entries.try_emplace(a_key).first->second.requested = true;
+		// A built key is listed in the pipeline manifest for the next startup, and a failed one is dropped from it.
 		RequestBuild([build, program] { return build(*program); },
-			[completions = completions, key = a_key, generation = f.generation, live = std::move(live)](Artifact a_artifact) {
+			[completions = completions, key = a_key, generation = f.generation, live = std::move(live), manifestIdentity = std::move(manifestIdentity)](Artifact a_artifact) {
+				if (a_artifact)
+					PipelineManifest::Get().Record(std::string(kForwardPipelineTag), manifestIdentity, {});
+				else
+					PipelineManifest::Get().Forget(std::string(kForwardPipelineTag), manifestIdentity);
 				completions->forward.Push({ key, generation, a_artifact, live });
 				WakePipelineLane();
 			});
 		f.counters.requested.fetch_add(1, std::memory_order_relaxed);
 		lane.dirty = true;
+		if (!precompile.forward.contains(a_key))
+			logger::warn("[DCLF] on-demand pipeline build: forward VS {:08X} PS {:08X} flags {:X} runtime VS {:08X} PS {:08X}, colour {} colour 2 {} depth {}",
+				a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.flags, a_key.runtimeVertex, a_key.runtimePixel, static_cast<int>(forwardTargets.colour),
+				static_cast<int>(forwardTargets.colour2), static_cast<int>(forwardTargets.depth));
 	}
 
 	void DrawPipelines::Impl::RecreateForward(const ForwardTargets& a_from, const ForwardTargets& a_to)
