@@ -1,21 +1,23 @@
-# TAA's UI form (ISTemporalAA_UI) and its ISSimpleColor mask: a menu's 3D scene with TAA on. Upscaling on TAA turns the game's
-# TAA on, then the inventory opens over the world and its 3D item draws through UI3DSceneManager::Render. Two shots in the menu,
-# one after it closes. The harness has no input step to drag the item, so the item is not rotated; the shots cover the item
-# vanilla shows at open. Compose it: guest+taa-ui, native-vulkan+taa-ui, d3d11+taa-ui (the D3D11 reference).
+# TAA's UI form (ISTemporalAA_UI) and its ISSimpleColor mask: a menu's 3D scene with the game's TAA on. CS's Upscaling turns the
+# game's TAA flag off after the post chain (Util::SetTemporal(false)), before menus draw, so with Upscaling loaded the UI form never
+# runs. This config turns Upscaling off and the game's own TAA on (bUseTAA in SkyrimPrefs.ini), then opens the inventory over the
+# world and selects its first item (the key step), whose 3D model draws through UI3DSceneManager::Render. Two shots in the menu,
+# one after it closes. The item is not rotated. The log must show "first ISTemporalAA_UI taken by its step".
+# Compose it: guest+taa-ui, native-vulkan+taa-ui, d3d11+taa-ui (the D3D11 reference).
 extends = ["base"]
+
+[features]
+Upscaling = false
+
+[prefs_ini.Display]
+bUseTAA = true
 
 [run]
 timeout_s = 300
 
 [[steps]]
 at = "world-ready"
-frames = 60
-do = "upscale"
-arg = "taa"
-
-[[steps]]
-at = "previous"
-frames = 120
+frames = 180
 do = "shot"
 arg = "world"
 
@@ -24,6 +26,13 @@ at = "previous"
 frames = 10
 do = "menu"
 arg = "InventoryMenu=show"
+
+# The menu opens on its category list. Right moves into the item list and selects its first item, whose 3D model then draws.
+[[steps]]
+at = "previous"
+frames = 120
+do = "key"
+arg = "Right"
 
 [[steps]]
 at = "previous"

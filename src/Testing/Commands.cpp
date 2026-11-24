@@ -844,6 +844,29 @@ namespace Testing
 				queue->AddMessage(RE::BSFixedString(a_arg.substr(0, equals)), a_arg.substr(equals + 1) == "show" ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
 				return true;
 			});
+			// "key": <menu user event>, a key press queued as the keyboard's: Right, Left, Up, Down or Accept. Menus act on the user event,
+			// so this moves an open menu's selection (the inventory's item list, for its 3D item). Only the press is sent.
+			RegisterCommand("key", [](const std::string& a_arg, std::string& a_error) {
+				static constexpr std::array<std::pair<std::string_view, std::uint32_t>, 5> kKeys{ { { "Right", 0xCD }, { "Left", 0xCB }, { "Up", 0xC8 },
+					{ "Down", 0xD0 }, { "Accept", 0x1C } } };
+				const auto key = std::ranges::find(kKeys, std::string_view(a_arg), &std::pair<std::string_view, std::uint32_t>::first);
+				if (key == kKeys.end()) {
+					a_error = fmt::format("'{}' is not Right, Left, Up, Down or Accept", a_arg);
+					return false;
+				}
+				// Sent as "cast" sends its buttons, on the main thread. The input queue's own events are not used: its cached event
+				// layout does not match this runtime (AddButtonEvent crashed in 69192).
+				AddTask([userEvent = std::string(a_arg), code = key->second] {
+					auto* devices = RE::BSInputDeviceManager::GetSingleton();
+					if (!devices)
+						return;
+					// Left to the heap, as "cast" leaves its events.
+					RE::InputEvent* event = RE::ButtonEvent::Create(RE::INPUT_DEVICE::kKeyboard, RE::BSFixedString(userEvent.c_str()), code, 1.0f, 0.0f);
+					if (event)
+						devices->SendEvent(&event);
+				});
+				return true;
+			});
 			// "save": <name>; "load": <name>|recent. Through the save manager: the console's save and load do nothing as a compiled script.
 			RegisterCommand("save", [](const std::string& a_arg, std::string& a_error) {
 				auto* manager = RE::BGSSaveLoadManager::GetSingleton();
