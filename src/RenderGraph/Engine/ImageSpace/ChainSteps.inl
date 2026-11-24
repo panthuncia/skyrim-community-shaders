@@ -68,6 +68,13 @@ struct ChainSteps
 	OwnedTarget hdrScratch, ldrScratch;
 	// The adapted luminance pair, published for DCLF's character light, which reads it in place of the engine's target.
 	std::array<OwnedTarget, 2> adapt;
+	// The compute SAO's own textures. The engine's SAO targets have no memory (the pixel SAO port has its own), and nothing
+	// later reads the compute SAO's results. History by downscale + 2 x parity, the others by downscale.
+	std::array<OwnedTarget, 4> saoCsHistory;
+	std::array<OwnedTarget, 2> saoCsTemp, saoCsOut;
+	// The TAA water form's history, standing in for kTEMPORAL_AA_WATER_1 and _2 ([0] and [1]). The engine makes those only when
+	// bTAAWater is on at boot, and the console (ttaaw) turns the form on at any time.
+	std::array<OwnedTarget, 2> taaWaterHistory;
 	// From ImageSpaceEffectBlur's HDR flag at +0x95. True for ISBlurN, false for ISNonHDRBlurN.
 	std::array<bool, 7> blurHdr{};
 	bool inComposites = false, inEndOfFrame = false, inHdr = false, hdrCopy = false, copyDrawn = false;
@@ -356,6 +363,14 @@ std::optional<ChainKey> ChainKeyOf(const Values& a_values)
 void BuildChainSteps(ChainBuild& a_build);
 
 /** @brief Setup. The kept chain textures, the adapted pair published once, and the three clients declared on their variables. */
+/** @brief The engine target an owned texture is made like: a_target when the engine made it, else a_full. The compute SAO's downscaled
+* targets exist only with bSAO_CS_Downscaled, and TAA's water targets only with bTAAWater at boot. */
+std::int32_t OwnedLike(std::int32_t a_target, std::int32_t a_full)
+{
+	D3D11_TEXTURE2D_DESC desc{};
+	return OwnedDescLike(a_target, desc) ? a_target : a_full;
+}
+
 void DeclareChainSteps()
 {
 	using T = RE::RENDER_TARGET;
@@ -364,6 +379,17 @@ void DeclareChainSteps()
 	DeclareKept(chain.bloom, T::kHDR_BLOOM, "ImageSpace::Bloom");
 	DeclareKept(chain.taaHistory[0], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory0");
 	DeclareKept(chain.taaHistory[1], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory1");
+	for (std::uint32_t i = 0; i < chain.taaWaterHistory.size(); ++i) {
+		const auto like = static_cast<std::int32_t>(T::kTEMPORAL_AA_WATER_1) + static_cast<std::int32_t>(i);
+		DeclareKept(chain.taaWaterHistory[i], fmt::format("ImageSpace::TAAWaterHistory{}", i), Frame::DependsOn(Frame::Vars::DisplaySize()),
+			[like](const Frame::Inputs&, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(OwnedLike(like, T::kTEMPORAL_AA_ACCUMULATION_1), a_desc); });
+	}
+	for (std::uint32_t i = 0; i < chain.saoCsHistory.size(); ++i) {
+		const auto like = static_cast<std::int32_t>(T::kSAO_RAWAO) + static_cast<std::int32_t>(i);
+		const auto full = static_cast<std::int32_t>(T::kSAO_RAWAO) + static_cast<std::int32_t>(i & 2);
+		DeclareKept(chain.saoCsHistory[i], fmt::format("ImageSpace::SAOCSRawAO{}", i), Frame::DependsOn(Frame::Vars::DisplaySize()),
+			[like, full](const Frame::Inputs&, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(OwnedLike(like, full), a_desc); });
+	}
 	// The pair follows the luminance chain's last level. One texel like the first level while the levels have no pair.
 	for (std::uint32_t parity = 0; parity < 2; ++parity)
 		DeclareKept(chain.adapt[parity], kAdaptedIds[parity], Frame::DependsOn(Frame::Vars::DisplaySize(), Frame::Vars::EngineImageSpace()),
@@ -645,6 +671,17 @@ void BuildChainSteps(ChainBuild& a_build)
 	KeptExtentLike(chain.bloom, T::kHDR_BLOOM);
 	for (auto& history : chain.taaHistory)
 		KeptExtentLike(history, T::kTEMPORAL_AA_ACCUMULATION_1);
+	for (std::uint32_t i = 0; i < chain.taaWaterHistory.size(); ++i)
+		KeptExtentLike(chain.taaWaterHistory[i], OwnedLike(static_cast<std::int32_t>(T::kTEMPORAL_AA_WATER_1) + static_cast<std::int32_t>(i), T::kTEMPORAL_AA_ACCUMULATION_1));
+	for (std::uint32_t i = 0; i < chain.saoCsHistory.size(); ++i)
+		KeptExtentLike(chain.saoCsHistory[i], OwnedLike(static_cast<std::int32_t>(T::kSAO_RAWAO) + static_cast<std::int32_t>(i), static_cast<std::int32_t>(T::kSAO_RAWAO) + static_cast<std::int32_t>(i & 2)));
+	for (std::int32_t ds = 0; ds < 2; ++ds) {
+		D3D11_TEXTURE2D_DESC desc{};
+		if (OwnedDescLike(OwnedLike(static_cast<std::int32_t>(T::kSAO_TEMP_BLUR) + ds, T::kSAO_TEMP_BLUR), desc))
+			MakeTransient(chain.saoCsTemp[ds], desc, fmt::format("ImageSpace::SAOCSBlurTemp{}", ds));
+		if (OwnedDescLike(OwnedLike(static_cast<std::int32_t>(T::kSAO) + ds, T::kSAO), desc))
+			MakeTransient(chain.saoCsOut[ds], desc, fmt::format("ImageSpace::SAOCS{}", ds));
+	}
 	MakeTransient(chain.bloomSwap, T::kHDR_BLURSWAP, "ImageSpace::BloomSwap");
 	MakeTransient(chain.dofDown, T::kLDR_DOWNSAMPLE0, "ImageSpace::DofDownsample");
 	MakeTransient(chain.dofSwap, T::kLDR_BLURSWAP, "ImageSpace::DofBlurSwap");
@@ -704,7 +741,7 @@ void BuildChainSteps(ChainBuild& a_build)
 	// The compute SAO (100526 / 107252), which Main::Draw runs after the world render and before RenderWorldPostProcess. The
 	// camera Z pass is half the render size in groups and writes the first three mips of kSAO_CAMERAZ. With bSAO_CS_Downscaled
 	// the later passes use the half-size targets (DS, + 1). The raw AO writes kSAO_RAWAO + DS + 2 x parity and reads the other
-	// history; the parity is the helper's (+0x24), flipped at each call. The engine sets no CS sampler for t1 and t2.
+	// history; the parity is the helper's (+0x24), flipped at each call. The engine's t1 sampler is point clamp (seen at the dispatch); t2's is a guess.
 	{
 		using RT = std::int32_t;
 		StepDesc z{ .name = "saocs.cameraz", .output = engine(T::kSAO_CAMERAZ, 0), .output1 = engine(T::kSAO_CAMERAZ, 1), .output2 = engine(T::kSAO_CAMERAZ, 2) };
@@ -713,21 +750,21 @@ void BuildChainSteps(ChainBuild& a_build)
 		for (std::uint16_t ds = 0; ds < 2; ++ds)
 			for (std::uint16_t p = 0; p < 2; ++p) {
 				const auto variant = static_cast<std::uint16_t>(ds | (p << 1));
-				StepDesc a{ .name = fmt::format("saocs.rawao.d{}.h{}", ds, p), .output = engine(static_cast<RT>(T::kSAO_RAWAO) + ds + 2 * p) };
+				StepDesc a{ .name = fmt::format("saocs.rawao.d{}.h{}", ds, p), .output = owned(chain.saoCsHistory[ds + 2 * p]) };
 				a.inputs[0] = engine(T::kSAO_CAMERAZ);
-				a.inputs[1] = engine(static_cast<RT>(T::kSAO_RAWAO) + ds + 2 * (1 - p));
+				a.inputs[1] = owned(chain.saoCsHistory[ds + 2 * (1 - p)]);
 				a.inputs[2] = engine(T::kMOTION_VECTOR);
 				a.samplers[0] = { 0, 2 };
-				a.samplers[1] = kLinear;
+				a.samplers[1] = kPoint;  // the engine's, seen at the dispatch
 				a.samplers[2] = kLinear;
 				add(0, ChainGroup::kSaoCs, WorldScope::SaoCs, E::ISSAORawAOCS, variant, std::move(a));
-				StepDesc h{ .name = fmt::format("saocs.blur.h.d{}.h{}", ds, p), .output = engine(static_cast<RT>(T::kSAO_TEMP_BLUR) + ds) };
-				h.inputs[0] = engine(static_cast<RT>(T::kSAO_RAWAO) + ds + 2 * p);
+				StepDesc h{ .name = fmt::format("saocs.blur.h.d{}.h{}", ds, p), .output = owned(chain.saoCsTemp[ds]) };
+				h.inputs[0] = owned(chain.saoCsHistory[ds + 2 * p]);
 				add(0, ChainGroup::kSaoCs, WorldScope::SaoCs, E::ISSAOBlurHCS, variant, std::move(h));
 			}
 		for (std::uint16_t ds = 0; ds < 2; ++ds) {
-			StepDesc v{ .name = fmt::format("saocs.blur.v.d{}", ds), .output = engine(static_cast<RT>(T::kSAO) + ds) };
-			v.inputs[0] = engine(static_cast<RT>(T::kSAO_TEMP_BLUR) + ds);
+			StepDesc v{ .name = fmt::format("saocs.blur.v.d{}", ds), .output = owned(chain.saoCsOut[ds]) };
+			v.inputs[0] = owned(chain.saoCsTemp[ds]);
 			add(0, ChainGroup::kSaoCs, WorldScope::SaoCs, E::ISSAOBlurVCS, ds, std::move(v));
 		}
 	}
@@ -995,8 +1032,8 @@ void BuildChainSteps(ChainBuild& a_build)
 				steps.back().route = routed ? ChainRoute::kRouted : ChainRoute::kDirect;
 			}
 	// CS's history pair replaces kTEMPORAL_AA_ACCUMULATION_1/2. t2 motion vectors, t3 depth, t4 TAA mask, t5 the frame's normals target.
-	// The water form (bTAAWater) draws in the world form's place. Its water history is the engine's pair: it writes
-	// kTEMPORAL_AA_WATER_2 - parity and reads kTEMPORAL_AA_WATER_1 + parity at t6 (AE FUN_1414d88b0), with the frame's parity.
+	// The water form (bTAAWater) draws in the world form's place. Its water history stands in for the engine's pair
+	// (taaWaterHistory): at the frame's history parity h it writes kTEMPORAL_AA_WATER_1 + h and reads the other at t6.
 	for (const bool routed : { false, true }) {
 		for (const bool water : { false, true })
 			for (std::uint16_t h = 0; h < 2; ++h)
@@ -1014,9 +1051,10 @@ void BuildChainSteps(ChainBuild& a_build)
 					d.samplers[4] = kWrapPoint;
 					d.samplers[5] = kWrapPoint;
 					if (water) {
-						d.output2 = engine(h ? T::kTEMPORAL_AA_WATER_1 : T::kTEMPORAL_AA_WATER_2);
-						d.inputs[6] = engine(h ? T::kTEMPORAL_AA_WATER_2 : T::kTEMPORAL_AA_WATER_1);
-						d.samplers[6] = kLinear;
+						// At history parity h the engine writes kTEMPORAL_AA_WATER_1 + h and reads the other, wrapped and linear (seen at the draw).
+						d.output2 = owned(chain.taaWaterHistory[h]);
+						d.inputs[6] = owned(chain.taaWaterHistory[1 - h]);
+						d.samplers[6] = { 3, 1 };
 					}
 					add(2, ChainGroup::kTaa, WorldScope::Taa, water ? E::ISTemporalAA_Water : E::ISTemporalAA,
 						static_cast<std::uint16_t>((h << 15) | (n << 14) | (routed ? ChainRoute::kTaaBit : 0)), std::move(d), !routed);
@@ -1402,7 +1440,8 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	// The water form's first two targets are CS's, so only its water history is compared.
 	if (id == Effects::ISTemporalAA_Water)
 		if (const auto* spec = part.SpecOf(entry))
-			CheckStepState(a_effect, *spec, { -1, -1, spec->key.output2 });
+			CheckStepState(a_effect, *spec,
+				{ -1, -1, static_cast<std::int32_t>((part.keys[entry].variant >> 15) & 1u ? RE::RENDER_TARGET::kTEMPORAL_AA_WATER_2 : RE::RENDER_TARGET::kTEMPORAL_AA_WATER_1) });
 	const auto staged = client.batch.size();
 	const bool taken = StageStep(client, entry, part.SpecOf(entry), a_effect, a_compute, a_groups);
 	// A step whose constants could not be staged opens nothing.
@@ -1656,16 +1695,60 @@ void CheckSaoCsState(std::size_t a_effect, const Spec& a_spec)
 	};
 	std::string differences;
 	const auto note = [&](std::string a_text) { differences += (differences.empty() ? "" : "; ") + std::move(a_text); };
+	// The step's own textures (the history, blur and result) have name 0 in the key. No compute SAO step uses rt0, so those are skipped.
+	const auto owned = [](std::int32_t a_name) { return a_name >= 0 && (a_name & ~kMipBits) == 0; };
+	// A view the target set does not know: the engine target whose own UAV or SRV it is, by the unwrapped pointer, or -1.
+	const auto rawTarget = [](const auto* a_view, bool a_uav) {
+		if (!a_view)
+			return -1;
+		const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+		for (std::int32_t i = 0; i < static_cast<std::int32_t>(RE::RENDER_TARGET::kTOTAL); ++i) {
+			const void* own = a_uav ? static_cast<const void*>(Tripwire::Unwrap(static_cast<const ID3D11UnorderedAccessView*>(targets[i].UAV))) :
+			                          static_cast<const void*>(Tripwire::Unwrap(static_cast<const ID3D11ShaderResourceView*>(targets[i].SRV)));
+			if (own && own == static_cast<const void*>(Tripwire::Unwrap(a_view)))
+				return i;
+		}
+		return -1;
+	};
+	const auto viewName = [&](std::int32_t a_name, const auto* a_view, bool a_uav) {
+		if (a_name >= 0 || !a_view)
+			return NameForLog(a_name);
+		const auto raw = rawTarget(a_view, a_uav);
+		return raw >= 0 ? fmt::format("rt{}'s own {} (not a target set handle)", raw, a_uav ? "UAV" : "SRV") : std::string("a view no target owns");
+	};
+	// A raw UAV is the step's output when it views the same texture as the step's target, at the step's mip (its view desc's slice).
+	const auto rawUavIs = [&](ID3D11UnorderedAccessView* a_view, std::int32_t a_step) {
+		if (!a_view || a_step < 0)
+			return false;
+		const auto source = a_step & ~kMipBits;
+		const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+		if (source < 0 || source >= static_cast<std::int32_t>(RE::RENDER_TARGET::kTOTAL) || !targets[source].texture)
+			return false;
+		auto* raw = Tripwire::Unwrap(a_view);
+		winrt::com_ptr<ID3D11Resource> resource;
+		raw->GetResource(resource.put());
+		D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
+		raw->GetDesc(&desc);
+		const auto* texture = Tripwire::Unwrap(static_cast<ID3D11Resource*>(targets[source].texture));
+		return resource.get() == texture && desc.ViewDimension == D3D11_UAV_DIMENSION_TEXTURE2D && desc.Texture2D.MipSlice == mipOf(a_step);
+	};
+	// Slots the shadow state holds nothing for: the engine binds those past it (camera Z's UAVs, the raw AO's t0), so they go unchecked.
+	std::string unseen;
 	const std::array<std::int32_t, 3> outputs{ a_spec.key.output, a_spec.key.output1, a_spec.key.output2 };
 	for (std::uint32_t u = 0; u < info.targets && u < outputs.size(); ++u)
-		if (const auto engine = TargetOfUav(shadow.CSUAV[u]); !sameUav(engine, outputs[u]))
-			note(fmt::format("u{} is {}, the step's {}", u, NameForLog(engine), NameForLog(outputs[u])));
+		if (const auto engine = TargetOfUav(shadow.CSUAV[u]); engine < 0 && shadow.CSUAV[u] == nullptr)
+			unseen += fmt::format(" u{}", u);
+		else if (!owned(outputs[u]) && !sameUav(engine, outputs[u]) && !(engine < 0 && rawUavIs(shadow.CSUAV[u], outputs[u])))
+			note(fmt::format("u{} is {}, the step's {}", u, viewName(engine, shadow.CSUAV[u], true), NameForLog(outputs[u])));
 	for (std::uint32_t slot = 0; slot < info.slots; ++slot) {
 		if (!(info.reads >> slot & 1u))
 			continue;
 		const auto engine = InputOfView(shadow.CSTexture[slot]);
-		if (engine != a_spec.key.inputs[slot])
-			note(fmt::format("t{} is {}, the step's {}", slot, NameForLog(engine), NameForLog(a_spec.key.inputs[slot])));
+		if (engine < 0 && shadow.CSTexture[slot] == nullptr)
+			unseen += fmt::format(" t{}", slot);
+		else if (!owned(a_spec.key.inputs[slot]) && engine != a_spec.key.inputs[slot] &&
+				 !(engine < 0 && rawTarget(shadow.CSTexture[slot], false) == a_spec.key.inputs[slot]))
+			note(fmt::format("t{} is {}, the step's {}", slot, viewName(engine, shadow.CSTexture[slot], false), NameForLog(a_spec.key.inputs[slot])));
 		if (slot >= info.samplers)
 			continue;
 		const auto address = static_cast<std::uint32_t>(shadow.CSTextureAddressMode[slot].underlying());
@@ -1674,7 +1757,8 @@ void CheckSaoCsState(std::size_t a_effect, const Spec& a_spec)
 			note(fmt::format("s{} is address {} filter {}, the step's {} and {}", slot, address, filter, a_spec.key.address[slot], a_spec.key.filter[slot]));
 	}
 	if (differences.empty())
-		logger::info("[ORG] ImageSpace: the engine's {} binds what its step reads and writes ({})", info.effectName, a_spec.name);
+		logger::info("[ORG] ImageSpace: the engine's {} binds what its step reads and writes ({}){}", info.effectName, a_spec.name,
+			unseen.empty() ? std::string() : fmt::format("; not in the shadow state, unchecked:{}", unseen));
 	else
 		logger::error("[ORG] ImageSpace: the engine's {} differs from its step {}: {}", info.effectName, a_spec.name, differences);
 }
