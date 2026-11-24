@@ -610,59 +610,86 @@ namespace DCLF::Direct
 		CountDrawn(a_context, a_context.drawn - before);
 	}
 
-	void RecordForward(RecordContext& a_context, std::span<const CulledBatch* const> a_batches)
+	namespace
 	{
-		const auto& bindings = a_context.bindings;
-		const auto& set = a_context.set;
-		const auto& m = bindings.viewProj;
-		auto& draws = forwardDraws;
-		draws.clear();
-		for (const CulledBatch* culled : a_batches) {
-			if (!culled || !culled->batch)
-				continue;
-			const ViewBatch& batch = *culled->batch;
-			for (std::uint32_t k = 0; k < culled->count; ++k) {
-				const std::uint32_t lane = culled->lanes[k];
-				const std::uint32_t object = batch.object[lane];
-				// A BSOrderedNode group's leaf sorts at its node's centre, otherwise at its bound's centre.
-				ForwardDraw draw{};
-				draw.object = object;
-				draw.bucket = batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u;
-				const std::uint32_t laneWord = culled->objectWords[k];
-				const std::uint32_t mask = MaskOf(*culled, k);
-				if (object < bindings.placements.size()) {
-					const BindlessPlacement& placement = bindings.placements[object];
-					draw.ordinal = std::bit_cast<std::uint32_t>(placement.forwardSort[3]);
-					const float* centre = draw.ordinal != 0 ? placement.forwardSort : placement.bound;
-					const float clipW = m[12] * centre[0] + m[13] * centre[1] + m[14] * centre[2] + m[15];
-					draw.depth = std::isnan(clipW) ? 0.0f : clipW;  // a NaN would break the order
-					if (draw.ordinal != 0)
-						draw.group = (std::bit_cast<std::uint32_t>(centre[0]) * 0x9E3779B1u) ^ (std::bit_cast<std::uint32_t>(centre[1]) * 0x85EBCA77u) ^
-						             (std::bit_cast<std::uint32_t>(centre[2]) * 0xC2B2AE3Du);
-				}
-				// Each sequence is staged as its own draw, as on the GPU path.
-				const std::uint32_t count = batch.sequenceCount ? batch.sequenceCount[lane] : 1u;
-				for (std::uint32_t s = 0; s < count; ++s) {
-					if (!SequenceDrawn(mask, s, laneWord, draw.objectWord))
-						continue;
-					draw.sequence = batch.sequence[lane] + s;
-					const DrawArgs* args = set.Args(draw.sequence);
-					draw.first = args ? args->firstIndex : 0u;
-					const std::uint32_t slot = args ? args->geometrySlot : ~0u;
-					if (slot < bindings.poolFirsts.size() && bindings.poolFirsts[slot] != Draws::IndexPool::kNoRange)
-						draw.first += bindings.poolFirsts[slot];
-					draws.push_back(draw);
+		/** @brief The forward list's draws with their sort keys, sorted. Reads a_bindings' placements, view-projection and pool firsts. */
+		void SortForward(const ViewBatchSet& a_set, const RecordBindings& a_bindings, std::span<const CulledBatch* const> a_batches, std::vector<ForwardDraw>& a_draws)
+		{
+			const auto& m = a_bindings.viewProj;
+			a_draws.clear();
+			for (const CulledBatch* culled : a_batches) {
+				if (!culled || !culled->batch)
+					continue;
+				const ViewBatch& batch = *culled->batch;
+				for (std::uint32_t k = 0; k < culled->count; ++k) {
+					const std::uint32_t lane = culled->lanes[k];
+					const std::uint32_t object = batch.object[lane];
+					// A BSOrderedNode group's leaf sorts at its node's centre, otherwise at its bound's centre.
+					ForwardDraw draw{};
+					draw.object = object;
+					draw.bucket = batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u;
+					const std::uint32_t laneWord = culled->objectWords[k];
+					const std::uint32_t mask = MaskOf(*culled, k);
+					if (object < a_bindings.placements.size()) {
+						const BindlessPlacement& placement = a_bindings.placements[object];
+						draw.ordinal = std::bit_cast<std::uint32_t>(placement.forwardSort[3]);
+						const float* centre = draw.ordinal != 0 ? placement.forwardSort : placement.bound;
+						const float clipW = m[12] * centre[0] + m[13] * centre[1] + m[14] * centre[2] + m[15];
+						draw.depth = std::isnan(clipW) ? 0.0f : clipW;  // a NaN would break the order
+						if (draw.ordinal != 0)
+							draw.group = (std::bit_cast<std::uint32_t>(centre[0]) * 0x9E3779B1u) ^ (std::bit_cast<std::uint32_t>(centre[1]) * 0x85EBCA77u) ^
+							             (std::bit_cast<std::uint32_t>(centre[2]) * 0xC2B2AE3Du);
+					}
+					// Each sequence is staged as its own draw, as on the GPU path.
+					const std::uint32_t count = batch.sequenceCount ? batch.sequenceCount[lane] : 1u;
+					for (std::uint32_t s = 0; s < count; ++s) {
+						if (!SequenceDrawn(mask, s, laneWord, draw.objectWord))
+							continue;
+						draw.sequence = batch.sequence[lane] + s;
+						const DrawArgs* args = a_set.Args(draw.sequence);
+						draw.first = args ? args->firstIndex : 0u;
+						const std::uint32_t slot = args ? args->geometrySlot : ~0u;
+						if (slot < a_bindings.poolFirsts.size() && a_bindings.poolFirsts[slot] != Draws::IndexPool::kNoRange)
+							draw.first += a_bindings.poolFirsts[slot];
+						a_draws.push_back(draw);
+					}
 				}
 			}
+			std::sort(a_draws.begin(), a_draws.end(), Before);
 		}
-		std::sort(draws.begin(), draws.end(), Before);
-		std::uint32_t drawn = 0;
-		for (const ForwardDraw& draw : draws) {
-			if (BindBucket(a_context, draw.bucket))
-				drawn += DrawSequenceDirect(a_context, draw.sequence, draw.objectWord) ? 1u : 0u;
+
+		template <class Draw>
+		void RecordForwardDraws(RecordContext& a_context, std::span<const Draw> a_draws)
+		{
+			std::uint32_t drawn = 0;
+			for (const Draw& draw : a_draws) {
+				if (BindBucket(a_context, draw.bucket))
+					drawn += DrawSequenceDirect(a_context, draw.sequence, draw.objectWord) ? 1u : 0u;
+			}
+			a_context.drawn += drawn;
+			CountDrawn(a_context, drawn);
 		}
-		a_context.drawn += drawn;
-		CountDrawn(a_context, drawn);
+	}
+
+	void RecordForward(RecordContext& a_context, std::span<const CulledBatch* const> a_batches)
+	{
+		auto& draws = forwardDraws;
+		SortForward(a_context.set, a_context.bindings, a_batches, draws);
+		RecordForwardDraws(a_context, std::span<const ForwardDraw>(draws));
+	}
+
+	void StageForward(const ViewBatchSet& a_set, const RecordBindings& a_bindings, std::span<const CulledBatch* const> a_batches, std::vector<StagedForwardDraw>& a_out)
+	{
+		auto& draws = forwardDraws;
+		SortForward(a_set, a_bindings, a_batches, draws);
+		a_out.resize(draws.size());
+		for (std::size_t i = 0; i < draws.size(); ++i)
+			a_out[i] = { draws[i].bucket, draws[i].sequence, draws[i].objectWord };
+	}
+
+	void RecordStagedForward(RecordContext& a_context, std::span<const StagedForwardDraw> a_draws)
+	{
+		RecordForwardDraws(a_context, a_draws);
 	}
 
 	void RecordDecalGroup(RecordContext& a_context, std::uint32_t a_group, std::span<const CulledBatch* const> a_batches)

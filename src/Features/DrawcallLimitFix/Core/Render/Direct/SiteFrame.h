@@ -124,6 +124,15 @@ namespace DCLF::Direct::detail
 		std::uint32_t received = 0;
 		// Null uses the run's bindings.
 		const RecordBindings* bindings = nullptr;
+		// A CPU frame's forward and refraction views: their draws are sorted on the pool (StageForward) once the culls and the
+		// render thread's rows are both in (each arrives at stageGate once), so the recording thread only records them. A recording
+		// that comes first takes the gate and sorts them itself.
+		bool stageArmed = false;
+		const RecordBindings* stageBindings = nullptr;
+		std::atomic<std::uint32_t> cullJobs{ 0 };
+		std::atomic<int> stageGate{ 0 };
+		std::atomic<bool> staged{ false };
+		std::vector<StagedForwardDraw> stagedDraws;
 	};
 
 	struct FrameSlot;

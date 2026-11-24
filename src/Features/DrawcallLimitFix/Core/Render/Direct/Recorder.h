@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace DCLF
 {
@@ -181,6 +182,21 @@ namespace DCLF::Direct
 	 * a group's at equal depth, then by group, ordinal, object and first index, as ForwardSortCS ranks them.
 	 */
 	void RecordForward(RecordContext& a_context, std::span<const CulledBatch* const> a_batches);
+
+	/** @brief A forward draw in RecordForward's order (StageForward). */
+	struct StagedForwardDraw
+	{
+		std::uint32_t bucket = 0, sequence = 0, objectWord = 0;
+	};
+
+	/**
+	 * @brief Any thread. RecordForward's draws in its order, into a_out, for RecordStagedForward. Reads a_bindings' placements,
+	 * view-projection and pool firsts, so those must be final.
+	 */
+	void StageForward(const ViewBatchSet& a_set, const RecordBindings& a_bindings, std::span<const CulledBatch* const> a_batches, std::vector<StagedForwardDraw>& a_out);
+
+	/** @brief Records the draws StageForward ordered. */
+	void RecordStagedForward(RecordContext& a_context, std::span<const StagedForwardDraw> a_draws);
 
 	/** @brief One decal group's draws in the decal list's order, called per group at the colour pass's positions. */
 	void RecordDecalGroup(RecordContext& a_context, std::uint32_t a_group, std::span<const CulledBatch* const> a_batches);

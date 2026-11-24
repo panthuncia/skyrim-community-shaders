@@ -329,6 +329,65 @@ namespace DCLF::Direct::detail
 	}
 
 
+	/** @brief Pool. Sorts a staged view's draws (StageForward) once its culls are done. */
+	void StageView(FrameSlot& a_slot, SiteRun& a_run, SiteView& a_view)
+	{
+		DCLF_ZONE("CS.DCLF.Cpu.ForwardSort");
+		const auto batches = AwaitAll(a_run, a_view);
+		StageForward(*a_slot.set, *a_view.stageBindings, batches, a_view.stagedDraws);
+		a_view.staged.store(true, std::memory_order_release);
+	}
+
+	void ArriveStage(FrameSlot& a_slot, SiteRun& a_run, SiteView& a_view, bool a_inline)
+	{
+		if (!a_view.stageArmed || a_view.stageGate.fetch_sub(1, std::memory_order_acq_rel) != 1)
+			return;
+		if (a_inline) {
+			StageView(a_slot, a_run, a_view);
+			return;
+		}
+		a_slot.outstanding.fetch_add(1, std::memory_order_acq_rel);
+		if (!::RenderGraph::Frame::SharedExecutor().DispatchFrameCritical(SceneScheduler::Scope(), "dclf cpu forward sort",
+				[slot = &a_slot, run = &a_run, view = &a_view](const auto&) {
+					StageView(*slot, *run, *view);
+					slot->outstanding.fetch_sub(1, std::memory_order_acq_rel);
+				}))
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the preparation pool refused a CPU-pipeline forward sort");
+	}
+
+	namespace
+	{
+		/** @brief Render thread, before the view's culls are dispatched. Its draws are sorted once the culls and the rows are in. */
+		void ArmStage(SiteView& a_view, const RecordBindings& a_bindings)
+		{
+			a_view.stageArmed = true;
+			a_view.stageBindings = &a_bindings;
+			a_view.stageGate.store(2, std::memory_order_release);
+		}
+
+		/**
+		 * @brief Recording thread. True when the view's draws were sorted on the pool (waits for that sort). False when the recording
+		 * came first, having taken the gate, or the view is not staged: it then sorts them itself.
+		 */
+		bool TakeStaged(SiteView& a_view)
+		{
+			if (!a_view.stageArmed)
+				return false;
+			int gate = a_view.stageGate.load(std::memory_order_acquire);
+			while (gate > 0)
+				if (a_view.stageGate.compare_exchange_weak(gate, -0x10000, std::memory_order_acq_rel))
+					return false;
+			if (gate < 0)
+				return false;
+			if (!a_view.staged.load(std::memory_order_acquire)) {
+				DCLF_ZONE("CS.DCLF.Cpu.AwaitForwardSort");
+				while (!a_view.staged.load(std::memory_order_acquire))
+					std::this_thread::yield();
+			}
+			return true;
+		}
+	}
+
 	/**
 	 * @brief Any thread. Dispatches a view's culls on DCLF's pool as frame-critical work. Never runs them inline, since the caller
 	 * may be the render thread.
@@ -338,12 +397,18 @@ namespace DCLF::Direct::detail
 		DCLF_ZONE("CS.DCLF.Cpu.DispatchCulls");
 		const std::size_t count = a_view.list->size();
 		const std::size_t jobBatches = std::max<std::size_t>(1, kJobLanes / a_slot.set->lanes);
+		a_view.cullJobs.store(static_cast<std::uint32_t>((count + jobBatches - 1) / jobBatches), std::memory_order_release);
+		if (!count)
+			ArriveStage(a_slot, a_run, a_view, false);
 		for (std::size_t first = 0; first < count; first += jobBatches) {
 			const std::size_t end = std::min(count, first + jobBatches);
 			a_slot.outstanding.fetch_add(1, std::memory_order_acq_rel);
 			if (!::RenderGraph::Frame::SharedExecutor().DispatchFrameCritical(SceneScheduler::Scope(), "dclf cpu cull",
 					[slot = &a_slot, run = &a_run, view = &a_view, frame = a_frame, first, end](const auto&) {
 						CullJob(*slot, *run, *view, *frame, first, end);
+						// The last cull job of a staged view sorts it here, on this worker, once the rows are in too.
+						if (view->cullJobs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+							ArriveStage(*slot, *run, *view, true);
 						slot->outstanding.fetch_sub(1, std::memory_order_acq_rel);
 					}))
 				::RenderGraph::Fatal("Drawcall Limit Fix", "the preparation pool refused a CPU-pipeline cull");
@@ -564,16 +629,22 @@ namespace DCLF::Direct::detail
 	{
 		auto& slot = *a_run.slot;
 		if (a_run.forward) {
-			const auto batches = AwaitAll(a_run, *a_run.forward);
+			const bool staged = TakeStaged(*a_run.forward);
+			const auto batches = staged ? std::vector<const CulledBatch*>{} : AwaitAll(a_run, *a_run.forward);
 			auto& list = a_out.Inline();
 			BeginMain(list, a_run, true, "DCLF direct forward");
 			RecordContext context{ list, *slot.set, ViewType::Forward, 0, Site::Forward, false, a_run.bindings, &slot.counters };
-			if (BeginList(context))
-				RecordForward(context, batches);
+			if (BeginList(context)) {
+				if (staged)
+					RecordStagedForward(context, a_run.forward->stagedDraws);
+				else
+					RecordForward(context, batches);
+			}
 			list.EndPass();
 		}
 		if (a_run.refractionView) {
-			const auto batches = AwaitAll(a_run, *a_run.refractionView);
+			const bool staged = TakeStaged(*a_run.refractionView);
+			const auto batches = staged ? std::vector<const CulledBatch*>{} : AwaitAll(a_run, *a_run.refractionView);
 			const auto& targets = *a_run.targets;
 			if (!a_run.refraction || !targets.refractionResource.valid())
 				return;
@@ -604,8 +675,12 @@ namespace DCLF::Direct::detail
 			auto& list = a_out.Inline();
 			list.BeginPass(begin);
 			RecordContext context{ list, *slot.set, ViewType::Refraction, 0, Site::Forward, false, a_run.refractionBindings, &slot.counters };
-			if (BeginList(context))
-				RecordForward(context, batches);
+			if (BeginList(context)) {
+				if (staged)
+					RecordStagedForward(context, a_run.refractionView->stagedDraws);
+				else
+					RecordForward(context, batches);
+			}
 			list.EndPass();
 		}
 	}
@@ -1656,6 +1731,10 @@ namespace DCLF::Direct
 		auto& forward = NewRun(*slot, Site::Forward, a_inputs);
 		forward.forward = &NewView(*slot, forward, ViewType::Forward, colourView(ViewType::Forward), false);
 		forward.refractionView = &NewView(*slot, forward, ViewType::Refraction, colourView(ViewType::Refraction), false);
+		if (slot->ownsEpochs) {
+			ArmStage(*forward.forward, forward.bindings);
+			ArmStage(*forward.refractionView, forward.refractionBindings);
+		}
 		slot->forwardRun = &forward;
 		// The water mask's and surface's sites, while the frame has water members. Each culls the water list on its own, since its
 		// epoch may record on the submission thread while the other's is still queued.
@@ -1728,6 +1807,9 @@ namespace DCLF::Direct
 		run->refractionBindings.viewProj = run->refractionView->view.viewProj;
 		run->refraction = a_refraction;
 		if (slot->ownsEpochs) {
+			// The rows are in: the forward sorts may start once their culls are done.
+			ArriveStage(*slot, *run, *run->forward, false);
+			ArriveStage(*slot, *run, *run->refractionView, false);
 			s.pending = run;
 			return true;
 		}
