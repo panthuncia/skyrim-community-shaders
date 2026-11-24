@@ -277,8 +277,13 @@ namespace RenderGraph::Engine::ImageSpace
 			// Water.hlsl's UNDERWATERMASK form over the engine's own geometry.
 			{ Effects::ISUnderwaterMask, "ISUnderwaterMask", "Water.hlsl", 0, 0, 0, 0, false, 1, false, false, true },
 			// t0 image, t1 history, t2 motion vectors, t3 depth, t4 TAA mask, t5 alpha. Writes the image and the next history.
-			// The UI and water forms have no CS source and stay the engine's.
 			{ Effects::ISTemporalAA, "ISTemporalAA", "ISTemporalAA.hlsl", 6, 0b111111, 6, 0, false, 2 },
+			// Vanilla's UI form (ISTemporalAAForms.hlsli), in a menu's 3D scene: t0 the scene, t1 the UI history, t2 motion vectors,
+			// t3 depth, t4 the mask ISSimpleColor wrote. Writes the image and the next UI history.
+			{ Effects::ISTemporalAA_UI, "ISTemporalAA_UI", "ISTemporalAA.hlsl", 5, 0b11111, 5, 0, false, 2 },
+			// Vanilla's water form, in the world TAA's place with bTAAWater: the world form's slots, then t5 the normals (water in z)
+			// and t6 the water history. Writes the image, the next history and the next water history.
+			{ Effects::ISTemporalAA_Water, "ISTemporalAA_Water", "ISTemporalAA.hlsl", 7, 0x7F, 7, 0, false, 3 },
 			{ Effects::ISLocalMap, "ISLocalMap", "ISLocalMap.hlsl", 1, 0b1, 1, 0, false },
 			// t0 depth, t1 snow diffuse, t2 snow alpha and specular.
 			// t1 the snow's diffuse, t2 its alpha and specular.
@@ -377,6 +382,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::array<FrameAnchors::Texture, kMaxSlots> inputs;
 			rhi::Format format = rhi::Format::Unknown;
 			rhi::Format format1 = rhi::Format::Unknown;
+			rhi::Format format2 = rhi::Format::Unknown;
 			FrameAnchors::Texture depth;
 			rhi::Format depthFormat = rhi::Format::Unknown;
 			// The output's extent in this registration. A kept output's twin may hold the last version's until the revision adopts.
@@ -803,10 +809,11 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr std::uint32_t kSamplerFilterModes = 5;
 
 		/**
-		* @brief Effect, output formats, packed blend, depth-stencil format (Unknown for none), depth-stencil table index, the
-		* feature define permutation (Spec::permutation) and whether the vertex stage takes its viewport from the latch.
+		* @brief Effect, the first two output formats, packed blend, depth-stencil format (Unknown for none), depth-stencil table index,
+		* the feature define permutation (Spec::permutation), whether the vertex stage takes its viewport from the latch, and the
+		* third output's format (Unknown for none).
 		*/
-		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t, rhi::Format, std::uint32_t, std::uint32_t, bool>;
+		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t, rhi::Format, std::uint32_t, std::uint32_t, bool, rhi::Format>;
 
 		/** @brief The fullscreen vertex stage that draws a quad in the viewport its latch holds (ConstantsAt::viewport). */
 		constexpr const char* kLatchViewportVertexShader = "RenderGraph/FullscreenLatchViewportVS.hlsl";
@@ -927,7 +934,10 @@ namespace RenderGraph::Engine::ImageSpace
 			return true;
 		}
 
-		bool BlendFor(std::uint32_t a_blend, std::uint32_t a_targets, std::array<rhi::BlendAttachment, 2>& a_out, std::string& a_error)
+		/** @brief The most targets an effect writes: ISTemporalAA_Water's three. */
+		constexpr std::uint32_t kMaxTargets = 3;
+
+		bool BlendFor(std::uint32_t a_blend, std::uint32_t a_targets, std::array<rhi::BlendAttachment, kMaxTargets>& a_out, std::string& a_error)
 		{
 			D3D11_BLEND_DESC desc{};
 			if (!BlendDescOf(a_blend, desc)) {
@@ -942,7 +952,8 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			a_out[0] = blend.attachments[0];
 			// D3D11 blends every target as the first unless IndependentBlendEnable.
-			a_out[1] = a_targets > 1 && desc.IndependentBlendEnable ? blend.attachments[1] : blend.attachments[0];
+			for (std::uint32_t target = 1; target < kMaxTargets; ++target)
+				a_out[target] = target < a_targets && desc.IndependentBlendEnable ? blend.attachments[target] : blend.attachments[0];
 			return true;
 		}
 
@@ -1078,9 +1089,9 @@ namespace RenderGraph::Engine::ImageSpace
 		/** @brief Needs the engine's effect object. Blend and depth-stencil must already be checked. */
 		RasterProgram::Desc DescribeRaster(const ProgramKey& a_key)
 		{
-			const auto& [effectIndex, format, format1, blendBits, depthFormat, depthIndex, permutation, latchViewport] = a_key;
+			const auto& [effectIndex, format, format1, blendBits, depthFormat, depthIndex, permutation, latchViewport, format2] = a_key;
 			const auto& effect = kEffects[effectIndex];
-			std::array<rhi::BlendAttachment, 2> blend{};
+			std::array<rhi::BlendAttachment, kMaxTargets> blend{};
 			std::string error;
 			BlendFor(blendBits, effect.targets, blend, error);
 			RasterProgram::Desc desc{};
@@ -1102,6 +1113,8 @@ namespace RenderGraph::Engine::ImageSpace
 			desc.targets = { { .format = format, .blend = blend[0] } };
 			if (format1 != rhi::Format::Unknown)
 				desc.targets.push_back({ .format = format1, .blend = blend[1] });
+			if (format2 != rhi::Format::Unknown)
+				desc.targets.push_back({ .format = format2, .blend = blend[2] });
 			if (depthFormat != rhi::Format::Unknown) {
 				desc.depthFormat = depthFormat;
 				DepthStateFor(depthIndex, desc.depth);
@@ -1135,13 +1148,13 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			const auto depthIndex = a_spec.depth ? a_spec.key.depthMode * kStencilModes + a_spec.key.stencilMode : 0u;
 			return { a_spec.key.effect, a_spec.format, a_spec.format1, a_spec.key.blend, a_spec.depth ? a_spec.depthFormat : rhi::Format::Unknown, depthIndex,
-				a_spec.permutation, a_spec.latchViewport };
+				a_spec.permutation, a_spec.latchViewport, a_spec.format2 };
 		}
 
 		/** @brief Whether the blend and depth-stencil states are known yet. a_error says which is not. */
 		bool StatesKnown(const Spec& a_spec, std::string& a_error)
 		{
-			std::array<rhi::BlendAttachment, 2> blend{};
+			std::array<rhi::BlendAttachment, kMaxTargets> blend{};
 			if (!BlendFor(a_spec.key.blend, kEffects[a_spec.key.effect].targets, blend, a_error))
 				return false;
 			rhi::DepthStencilState depth{};
@@ -1331,6 +1344,8 @@ namespace RenderGraph::Engine::ImageSpace
 				draw.mip = MipOfName(spec.key.output);
 				if (spec.output1)
 					draw.extraTargets.push_back(spec.output1);
+				if (spec.output2)
+					draw.extraTargets.push_back(spec.output2);
 				const auto mip = MipOfName(spec.key.output);
 				const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
 				bool exact = false;

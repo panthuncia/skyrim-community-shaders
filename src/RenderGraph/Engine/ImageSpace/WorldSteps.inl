@@ -87,7 +87,21 @@ struct StepDesc
 	StepArea area = StepArea::Full;
 	std::uint32_t latched = 0;
 	std::uint32_t permutation = 0;  // Spec::permutation
+	// An engine depth-stencil target (kDepthInput | index) the draw tests against, with the engine's depth and stencil modes.
+	StepTexture depth;
+	std::uint32_t depthMode = 0, stencilMode = 0, stencilRef = 0;
 };
+
+/** @brief The format of an engine depth-stencil target's view, or Unknown before the engine made it. */
+rhi::Format DepthViewFormatOf(std::uint32_t a_index)
+{
+	auto* view = globals::game::renderer->GetDepthStencilData().depthStencils[a_index].views[0];
+	if (!view)
+		return rhi::Format::Unknown;
+	D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
+	view->GetDesc(&desc);
+	return rhi::helpers::ToRHI(desc.Format);
+}
 
 std::int32_t EffectIndexOf(Effects::ImageSpaceEffectEnum a_effect)
 {
@@ -151,6 +165,18 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 			return nullptr;
 		}
 	}
+	if (a_desc.depth) {
+		key.depth = a_desc.depth.engine;
+		key.depthMode = a_desc.depthMode;
+		key.stencilMode = a_desc.stencilMode;
+		key.stencilRef = a_desc.stencilRef;
+		spec->depth = texture(a_desc.depth);
+		spec->depthFormat = DepthViewFormatOf(IndexOfName(a_desc.depth.engine));
+		if (!spec->depth || spec->depthFormat == rhi::Format::Unknown) {
+			a_error = "its depth-stencil target could not be resolved";
+			return nullptr;
+		}
+	}
 	for (std::uint32_t slot = 0; slot < kMaxSlots; ++slot) {
 		if (a_desc.latched & (1u << slot)) {
 			key.inputs[slot] = kLatchSourceInput;
@@ -174,6 +200,8 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 		spec->format = format(a_desc.output, spec->output);
 		if (spec->output1)
 			spec->format1 = format(a_desc.output1, spec->output1);
+		if (spec->output2)
+			spec->format2 = format(a_desc.output2, spec->output2);
 		const auto shift = a_desc.output.mip == AnchorPasses::kAllMips ? 0u : a_desc.output.mip;
 		const float width = static_cast<float>((std::max)(spec->width >> shift, 1u));
 		const float height = static_cast<float>((std::max)(spec->height >> shift, 1u));
@@ -1119,6 +1147,53 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 	return true;
 }
 
+
+/**
+* @brief Logs once a session per effect where the engine's state at a draw differs from its step's: the engine targets the step
+* writes (a_targets, -1 to skip one), the blend, the depth-stencil state and the samplers of the slots it reads. The steps' states
+* are read from the engine's code, so a difference means that reading is wrong. Render owner.
+*/
+void CheckStepState(std::size_t a_effect, const Spec& a_spec, const std::array<std::int32_t, kMaxTargets>& a_targets)
+{
+	static std::set<std::size_t> checked;
+	if (!checked.insert(a_effect).second)
+		return;
+	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+	std::string differences;
+	const auto note = [&](std::string a_what) {
+		if (!differences.empty())
+			differences += "; ";
+		differences += a_what;
+	};
+	for (std::uint32_t target = 0; target < kMaxTargets; ++target) {
+		const auto bound = static_cast<std::int32_t>(shadow.renderTargets[target]);
+		if (a_targets[target] >= 0 && bound != a_targets[target])
+			note(fmt::format("target {} is rt{}, the step's rt{}", target, bound, a_targets[target]));
+	}
+	const auto blend = a_spec.key.blend;
+	if (shadow.alphaBlendMode != (blend & 0xFF) || shadow.alphaBlendAlphaToCoverage != ((blend >> 8) & 0xFF) || shadow.alphaBlendWriteMode != ((blend >> 16) & 0xFF))
+		note(fmt::format("blend mode {}, coverage {} and write mode {}, the step's {}, {} and {}", shadow.alphaBlendMode, shadow.alphaBlendAlphaToCoverage,
+			shadow.alphaBlendWriteMode, blend & 0xFF, (blend >> 8) & 0xFF, (blend >> 16) & 0xFF));
+	if (a_spec.depth) {
+		const auto depthMode = static_cast<std::uint32_t>(shadow.depthStencilDepthMode);
+		if (shadow.depthStencil != IndexOfName(a_spec.key.depth) || depthMode != a_spec.key.depthMode || shadow.depthStencilStencilMode != a_spec.key.stencilMode ||
+			shadow.stencilRef != a_spec.key.stencilRef)
+			note(fmt::format("depth target {} with depth mode {}, stencil mode {} and reference {}, the step's {}, {}, {} and {}", shadow.depthStencil, depthMode,
+				shadow.depthStencilStencilMode, shadow.stencilRef, IndexOfName(a_spec.key.depth), a_spec.key.depthMode, a_spec.key.stencilMode, a_spec.key.stencilRef));
+	}
+	for (std::uint32_t slot = 0; slot < kEffects[a_effect].samplers; ++slot) {
+		if (!SlotRead(a_spec, slot))
+			continue;
+		const auto address = static_cast<std::uint32_t>(shadow.PSTextureAddressMode[slot].underlying());
+		const auto filter = static_cast<std::uint32_t>(shadow.PSTextureFilterMode[slot].underlying());
+		if (address != a_spec.key.address[slot] || filter != a_spec.key.filter[slot])
+			note(fmt::format("s{} has address {} and filter {}, the step's {} and {}", slot, address, filter, a_spec.key.address[slot], a_spec.key.filter[slot]));
+	}
+	if (differences.empty())
+		logger::info("[ORG] ImageSpace: {}'s step ({}) matches the engine's state at its first draw", kEffects[a_effect].effectName, a_spec.name);
+	else
+		logger::error("[ORG] ImageSpace: {}'s step ({}) differs from the engine's state at its first draw: {}", kEffects[a_effect].effectName, a_spec.name, differences);
+}
 
 /**
 * @brief Matches the draw to its pass by scope, effect and the variant the engine picked, in the build the frame runs, then stages

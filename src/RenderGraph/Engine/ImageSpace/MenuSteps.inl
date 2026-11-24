@@ -3,7 +3,8 @@
 // Outside the world chain the engine draws a few ImageSpace effects of its own:
 // - a menu's 3D scene runs the HDR effect and its tonemap into the framebuffer when its light scheme has an ImageSpace override,
 // - otherwise, and after a menu drawn into kMAIN, kMAIN is copied into the framebuffer,
-// - under a menu that freezes the world, the frozen frame (kMENUBG) is composited into the framebuffer.
+// - under a menu that freezes the world, the frozen frame (kMENUBG) is composited into the framebuffer,
+// - a menu's 3D scene with TAA marks its pixels in the TAA mask, runs TAA's UI form and copies the result into the framebuffer.
 // Each is a step of the UI stage in every frame kind. The player's face tint at a load is a step of the start stage in a
 // world frame and of the UI stage in a loading screen. Hooks only stage the engine's constants, and the stage records at execution.
 
@@ -85,6 +86,9 @@ constexpr StepKey TintKey()
 	return { WorldScope::MenuCopy, Effects::ISAlphaBlend, 0 };
 }
 
+/** @brief ISSimpleColor's stencil mode in a menu's 3D scene: it fills only where the scene's draws wrote stencil (AE 0x140972590). */
+constexpr std::uint32_t kUiMaskStencilMode = 0x1c;
+
 /** @brief One composite step, before its spec is made. */
 struct MenuStep
 {
@@ -142,6 +146,36 @@ std::vector<MenuStep> MenuStepList(std::uint32_t a_levels)
 		StepDesc f{ .name = "copy.frozen", .output = engine(kFinal), .blend = PackBlend(0, 0, 1, 0) };
 		f.inputs[0] = engine(T::kMENUBG);
 		add(WorldScope::MenuCopy, E::ISCopy, InOut(T::kMENUBG, kFinal), std::move(f));
+	}
+
+	// A menu's 3D scene with TAA (UI3DSceneManager::Render, AE 0x140972590). ISSimpleColor clears the TAA mask at its bind and fills
+	// it where the scene wrote stencil. TAA's UI form reads the scene from the framebuffer (kMAIN for scene type 5) and writes
+	// kIMAGESPACE_TEMP_COPY and the UI history. ISCopy then puts the result into the framebuffer. The UI form never flips the TAA
+	// helper's parity: it reads kTEMPORAL_AA_UI_ACCUMULATION_1 + parity and writes kTEMPORAL_AA_UI_ACCUMULATION_2 - parity with the
+	// parity the world TAA left (AE FUN_1414d88b0).
+	{
+		StepDesc m{ .name = "taa.ui.mask",
+			.output = engine(T::kTEMPORAL_AA_MASK),
+			.depth = engine(kDepthInput | 0),
+			.stencilMode = kUiMaskStencilMode,
+			.stencilRef = 0xff };
+		add(WorldScope::MenuCopy, E::ISSimpleColor, InOut(0, T::kTEMPORAL_AA_MASK), std::move(m));
+		for (const std::int32_t source : { kFinal, kSource })
+			for (std::int32_t p = 0; p < 2; ++p) {
+				StepDesc d{ .name = fmt::format("taa.ui.rt{}.p{}", source, p),
+					.output = engine(T::kIMAGESPACE_TEMP_COPY),
+					.output1 = engine(T::kTEMPORAL_AA_UI_ACCUMULATION_2 - p) };
+				d.inputs[0] = engine(source);
+				d.inputs[1] = engine(T::kTEMPORAL_AA_UI_ACCUMULATION_1 + p);
+				d.inputs[2] = engine(T::kMOTION_VECTOR);
+				d.inputs[3] = engine(kDepthInput | 0);
+				d.inputs[4] = engine(T::kTEMPORAL_AA_MASK);
+				d.samplers[1] = kLinear;
+				add(WorldScope::MenuCopy, E::ISTemporalAA_UI, static_cast<std::uint16_t>((p << 15) | InOut(source, T::kIMAGESPACE_TEMP_COPY)), std::move(d));
+			}
+		StepDesc c{ .name = "copy.taa.ui", .output = engine(kFinal) };
+		c.inputs[0] = engine(T::kIMAGESPACE_TEMP_COPY);
+		add(WorldScope::MenuCopy, E::ISCopy, InOut(T::kIMAGESPACE_TEMP_COPY, kFinal), std::move(c));
 	}
 
 	// Sixteen loaded tint masks blended over grey, each read by heap index.
@@ -231,11 +265,43 @@ void BuildMenuSteps(MenuBuild& a_build)
 		table->parts[0].count, a_build.levels, a_build.width, a_build.height, a_build.finalWidth, a_build.finalHeight);
 }
 
+/** @brief A menu 3D scene's TAA draws. Only UI3DSceneManager::Render draws them, through the explicit-target Render. */
+bool IsUiSceneEffect(Effects::ImageSpaceEffectEnum a_effect)
+{
+	return a_effect == Effects::ISSimpleColor || a_effect == Effects::ISTemporalAA_UI;
+}
+
 bool MenuStepNow(std::size_t a_effect)
 {
 	const auto& menu = Menu();
+	const auto id = kEffects[a_effect].id;
 	// Before the group registers, a menu scene's draw is still a menu step: TakeMenuStep counts it as lag.
-	return IS().on && (menu.inHdr || !menu.calls.empty() || kEffects[a_effect].id == Effects::ISAlphaBlend);
+	return IS().on && (menu.inHdr || !menu.calls.empty() || id == Effects::ISAlphaBlend || IsUiSceneEffect(id));
+}
+
+/**
+* @brief The key of a menu 3D scene's TAA draw (MenuStepList), from the engine's state at the draw: its target, the source at t0,
+* and the parity of the TAA helper at ImageSpaceManager +0x1f0 (+0x34). False when the target or the source is no plain engine target.
+*/
+bool UiSceneKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::int32_t& a_source)
+{
+	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+	const auto destination = static_cast<std::int32_t>(shadow.renderTargets[0]);
+	a_source = -1;
+	if (destination < 0 || destination > 0xff)
+		return false;
+	if (a_effect == Effects::ISSimpleColor) {
+		a_key = { WorldScope::MenuCopy, a_effect, InOut(0, destination) };
+		return true;
+	}
+	a_source = shadow.PSTexture[0] ? InputOfView(shadow.PSTexture[0]) : -1;
+	auto* manager = RE::ImageSpaceManager::GetSingleton();
+	const auto helper = manager ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(manager) + 0x1f0) : 0;
+	if (a_source < 0 || (a_source & (kKindBits | kMipBits)) || a_source > 0x7f || !helper)
+		return false;
+	const auto parity = static_cast<std::uint16_t>(*reinterpret_cast<const std::int32_t*>(helper + 0x34) & 1);
+	a_key = { WorldScope::MenuCopy, a_effect, static_cast<std::uint16_t>((parity << 15) | InOut(a_source, destination)) };
+	return true;
 }
 
 /**
@@ -292,6 +358,7 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 	const auto id = kEffects[a_effect].id;
 	StepKey key{};
 	bool known = false;
+	std::int32_t uiSource = -1;
 	if (menu.inHdr) {
 		const auto parity = static_cast<std::uint16_t>(Frame::PostChain::LuminanceParity());
 		switch (id) {
@@ -333,6 +400,8 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 	} else if (id == E::ISAlphaBlend) {
 		key = { WorldScope::MenuCopy, id, 0 };
 		known = true;
+	} else if (IsUiSceneEffect(id)) {
+		known = UiSceneKeyOf(id, key, uiSource);
 	} else if (!menu.calls.empty() && menu.calls.back().effect == static_cast<std::uint32_t>(RE::ImageSpaceManager::GetCurrentIndex(id))) {
 		const auto& call = menu.calls.back();
 		key = { WorldScope::MenuCopy, id, InOut(call.source, call.destination) };
@@ -349,9 +418,13 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 	}
 	if (find.found == StepFound::NoPass) {
 		const auto& call = menu.calls.empty() ? MenuSteps::EffectCall{} : menu.calls.back();
+		const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+		const auto where = menu.inHdr          ? std::string(" in a menu scene's HDR effect") :
+		                   IsUiSceneEffect(id) ? fmt::format(" in a menu's 3D scene (t0 {}, into rt{})", NameForLog(uiSource),
+													 static_cast<std::int32_t>(shadow.renderTargets[0])) :
+		                                         fmt::format(" (RenderEffect {} from rt{} into rt{})", call.effect, call.source, call.destination);
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, Frame::SegmentId::Count,
-			fmt::format("{} (variant {:#x}){} outside the world chain has no CS pass; it draws nothing", kEffects[a_effect].effectName, key.variant,
-				menu.inHdr ? " in a menu scene's HDR effect" : fmt::format(" (RenderEffect {} from rt{} into rt{})", call.effect, call.source, call.destination)));
+			fmt::format("{} (variant {:#x}){} outside the world chain has no CS pass; it draws nothing", kEffects[a_effect].effectName, key.variant, where));
 		return true;
 	}
 	const bool isTint = find.at.part == 2;
@@ -368,6 +441,9 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 			logger::info("[ORG] ImageSpace: {} waits for the build with the menu composites; it draws nothing until then (counted)", kEffects[a_effect].effectName);
 		return true;
 	}
+	if (IsUiSceneEffect(id))
+		if (const auto* spec = find.Part().SpecOf(entry))
+			CheckStepState(a_effect, *spec, { spec->key.output, spec->key.output1, -1 });
 	const auto before = client.batch.size();
 	StageStep(client, entry, find.Part().SpecOf(entry), a_effect, a_compute, a_groups);
 	if (isTint && client.batch.size() > before)

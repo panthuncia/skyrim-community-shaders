@@ -25,12 +25,12 @@ them (below). The dynamic-resolution quad itself is still refused, and a blend s
 | Effect | State | How to trigger it in game | What to look for |
 | --- | --- | --- | --- |
 | ISTemporalAA | Done. A two-target pass (the image and the next history), from ISTemporalAA.hlsl's new ORG build. Each call is a scope of its own. | Native mode (Upscaling off), or guest with Upscaling off and the game's TAA on (`bUseTAA=1`). | No `ISTemporalAA` in the 300-frame line. A refusal names t5 (alpha) if it is not an engine target. History ping-pong: both directions are registered at Setup since round 2. |
-| ISTemporalAA_UI, ISTemporalAA_Water | Not done. CS's ISTemporalAA.hlsl has no `TAA_UI` or `TAA_BLEND_WATER` path, so both stay on vanilla DXBC (imagespace-shaders.md). | A menu over the world with TAA on; `coc` to a cell with water, then look at it. | `... into rt.. (not covered)` in the 300-frame line. |
+| ISTemporalAA_UI, ISTemporalAA_Water | Done (TAA forms below): menu steps for the UI form, post chain steps for the water form. | Upscaling on TAA, open the inventory (UI); `bTAAWater=1` at a river (water). | No NoPass tap error naming either; the `step matches the engine's state` lines. |
 | ISCopyScaleBias, ISCopyTextureMask | Done, through ISCopy.hlsl's ORG vertex stage (the fullscreen triangle with the same affine change). | Menus and the loading screen (scaled copies); the race menu (texture mask). | No `ISCopyScaleBias` / `ISCopyTextureMask` in the summary. |
 | Copies from `kFRAMEBUFFER` | Done when the engine has an SRV of the back buffer. | Take a screenshot (PrintScreen); the journal over the world. | `ISCopy into rt..` gone from the summary. A refusal `an input that is not an engine target` means the back buffer has no SRV. |
 | ISLocalMap | Done (ISLocalMap.hlsl dual-target, its own scope). | Open the map, then the local map. | No `ISLocalMap` in the summary. |
 | ISMap, ISNoiseScrollAndBlend, ISNoiseNormalmap | Taken with no pass. Their vertex shaders write POSITION, not SV_Position, so the engine's draw rasterizes nothing (inferred; imagespace-shaders.md). The engine's state is still applied. | The map menu (ISMap). | They leave the census. If the map looks different from D3D11, the inference is wrong. |
-| ISSimpleColor | Done, with menu 3D's stencil test and scissor since round 2. | Inventory or race menu (menu 3D). | No `ISSimpleColor` in the summary in menu 3D. |
+| ISSimpleColor | Done: the UI TAA's mask, a menu step with menu 3D's stencil test (TAA forms below). Drawn only with TAA on. | Inventory with Upscaling on TAA. | As ISTemporalAA_UI. |
 | ISSILComposite | Done (composites' scope). | Needs SIL on (game setting). | |
 | ISSnowSSS | Done (its own scope). | Snowy exterior, e.g. `coc Winterhold` or `coc HighHrothgar`. | |
 | ISAlphaBlend | Done (round 2): the 16 tint masks by heap index from the latch. | Race menu (face tints). | No `ISAlphaBlend` in the summary. |
@@ -205,8 +205,54 @@ SkyrimPrefs.ini).
 
 ### Left
 
-- **ISTemporalAA_UI and _Water:** CS's ISTemporalAA.hlsl has neither path. Writing them needs vanilla's DXBC for both (the UI build
-  reads the mask from t4, the water build blends a water history) to transcribe and check; not available in this lane.
 - **Perlin noise (128, 129):** the 3D form is Volumetric Lighting's port; its output is not an engine render target.
 - **The dynamic-resolution quad:** its vertices are not known, so draws with it stay refused.
 - **Dead in the engine (Ghidra):** ISBasicCopy, ISDebugSnow, ISExp, ISPerlinNoise2DCS, ISReflectionsDebugSpecMask, ISDisplayDepth and ISWaterFlow have no callers; not ported. The compute downsamples (121, 122) and the compute SAO (134, 135, 137, 145) are done (above).
+- **ISExp (123), the compute downsamples (121, 122), debug (118, 149):** not converted.
+
+## TAA forms (batch A of plans/imagespace-remaining-ports.md)
+
+### Shaders
+
+`ISTemporalAAForms.hlsli` holds both forms. `ISTemporalAA.hlsl` includes it for `TAA_UI` and `TAA_BLEND_WATER` and keeps only its
+vertex stage for them. Both were transcribed from vanilla's DXBC (`shadersfx/shaders011.fxp`, the groups after ISSnowSSS), one line
+per instruction, with uint4 temporaries and hex literals. The engine uploads PerGeometry as one 0x60-byte block, not by name, so the
+cbuffer keeps vanilla's six rows (c0 to c5).
+
+Checks, off line: the FXC build of each form matched vanilla's outputs bit for bit over 400 (UI) and 600 (water) random inputs in a
+DXBC interpreter (textures, constants and dynamic-resolution ratios random; a UI against world TAA run shows the harness catches
+differences). The vertex stage is vanilla's instruction for instruction. Both ORG forms build under DXC (SM 6.6, HLSL 2018). So
+ShaderCache now builds both D3D11 forms from source (`CheckedImagespaceShaders`, `true`). They ignore `HDR_OUTPUT`, as vanilla does.
+
+### Steps
+
+- **Water** (ChainSteps.inl, group `kTaa`): the world TAA's eight steps again with `ISTemporalAA_Water`, as the world form's slots
+  plus t6 and a third target. The image history is CS's pair, as for the world form. The water history is the engine's pair: a frame
+  of parity h writes `kTEMPORAL_AA_WATER_2 - h` and reads `kTEMPORAL_AA_WATER_1 + h`. The engine binds t6 only in TAA helper mode
+  1; the steps always bind it, as the world steps always bind the normals at t5.
+- **UI** (MenuSteps.inl, UI3DSceneManager::Render, AE 0x140972590): `taa.ui.mask` (ISSimpleColor into `kTEMPORAL_AA_MASK`, depth
+  target 0 with stencil mode 0x1c, reference 0xff, depth mode 0), `taa.ui.rt<source>.p<parity>` (source the framebuffer, or kMAIN
+  for scene type 5; into `kIMAGESPACE_TEMP_COPY` and `kTEMPORAL_AA_UI_ACCUMULATION_2 - p`, history `..._1 + p`), and `copy.taa.ui`
+  (ISCopy from `kIMAGESPACE_TEMP_COPY` into the framebuffer). The draws come through the explicit-target Render with no RenderEffect
+  around them, so the key is read from the state at the draw: the target, t0's engine target and the TAA helper's parity
+  (ImageSpaceManager +0x1f0, +0x34). The UI form never flips that parity, so it reads the same history each frame until a world
+  frame flips it; vanilla does the same.
+- Steps now take a third target (`StepDesc::output2`, `ShapeKey::output2`, the program key's last field) and a depth-stencil
+  target (`StepDesc::depth` with its modes).
+- `kIMAGESPACE_TEMP_COPY` and the UI history pair are backed now (EngineTargetSet).
+
+### What the log says
+
+- `<effect>'s step (<name>) matches the engine's state at its first draw`, or `differs ...` with the targets, blend, depth-stencil
+  modes and samplers that differ. Once per effect per session. The planned states are read from the code; the samplers' address
+  modes and ISSimpleColor's depth mode are inherited state the code does not set, so a difference there is the first thing to fix.
+- `... in a menu's 3D scene (t0 <name>, into rt<n>) ... has no CS pass`: a source or target the steps do not have.
+- `post step ISTemporalAA_Water ... has no pass (its output could not be resolved)` at a build: the engine has not made the water
+  history pair.
+
+### Not verified without a build
+
+- The C++ is not compiled.
+- That a step's depth-stencil attachment works: no step used `Spec::depth` before this, though MakePass has always handled it.
+- That the framebuffer's SRV identifies as rt0 at the UI form's t0 in guest mode.
+- The TAA helper offsets (+0x2c mode, +0x34 parity) are from AE; SE is assumed the same, as CheckEndOfFrame assumes for +0x18.

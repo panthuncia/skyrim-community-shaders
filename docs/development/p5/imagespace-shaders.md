@@ -204,8 +204,8 @@ described. The ISBlurCS and ISLensFlare/CopySubRegion sources were written by ha
 | 149 | ISDisplayDepth | BSImagespaceShaderISDisplayDepth | ISSimpleColor | 99099 / 105743 | DISPLAY_DEPTH | src-unmapped | matches (x*(1/y) vs x/y); GPU equal |
 | 150 | ISSnowSSS | BSImagespaceShaderISSnowSSS | ISSnowSSS | 99130 / 105768 | - | src-unmapped | matches (operand order); GPU equal |
 | 151 | ISTemporalAA | BSImagespaceShaderISTemporalAA | ISTemporalAA | 99131 / 105769 | - | active | differs on random inputs (CS changes, not reviewed) |
-| 152 | ISTemporalAA_UI | BSImagespaceShaderISTemporalAA_UI | ISTemporalAA | 99132 / 105770 | TAA_UI | src-unmapped | differs: CS ISTemporalAA.hlsl is its own rewrite with no TAA_UI path and other constant names. Not in `all` |
-| 153 | ISTemporalAA_Water | BSImagespaceShaderISTemporalAA_Water | ISTemporalAA | 99133 / 105771 | TAA_BLEND_WATER | src-unmapped | differs: no TAA_BLEND_WATER path in CS ISTemporalAA.hlsl. Not in `all` |
+| 152 | ISTemporalAA_UI | BSImagespaceShaderISTemporalAA_UI | ISTemporalAA | 99132 / 105770 | TAA_UI | src-unmapped | transcribed (ISTemporalAAForms.hlsli); equal to vanilla in a DXBC interpreter (parity/imagespace.md) |
+| 153 | ISTemporalAA_Water | BSImagespaceShaderISTemporalAA_Water | ISTemporalAA | 99133 / 105771 | TAA_BLEND_WATER | src-unmapped | transcribed (ISTemporalAAForms.hlsli); equal to vanilla in a DXBC interpreter (parity/imagespace.md) |
 | 154 | ISUpsampleDynamicResolution | BSImagespaceShaderISUpsampleDynamicResolution | ISUpsampleDynamicResolution | 99135 / inlined | - | src-unmapped | matches: exact |
 | 155 | ISWaterBlend | BSImagespaceShaderISWaterBlend | ISWaterBlend | 99138 / 105774 | - | active | differs on random inputs (CS changes, not reviewed) |
 | 156 | ISUnderwaterMask | BSImagespaceShaderISUnderwaterMask | Water | 99134 / inlined | UNDERWATERMASK | src-unmapped | matches: exact |

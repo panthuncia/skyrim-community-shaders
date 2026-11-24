@@ -1775,9 +1775,9 @@ namespace SIE
 				{ "BSImagespaceShaderISSimpleColor", ISSimpleColor, true },
 				{ "BSImagespaceShaderISDisplayDepth", ISDisplayDepth, true },
 				{ "BSImagespaceShaderISSnowSSS", ISSnowSSS, true },
-				// CS's ISTemporalAA.hlsl is its own rewrite, with neither the UI nor the water path.
-				{ "BSImagespaceShaderISTemporalAA_UI", ISTemporalAA_UI, false },
-				{ "BSImagespaceShaderISTemporalAA_Water", ISTemporalAA_Water, false },
+				// Vanilla's UI and water forms, transcribed in ISTemporalAAForms.hlsli (ISTemporalAA.hlsl includes it for TAA_UI and TAA_BLEND_WATER).
+				{ "BSImagespaceShaderISTemporalAA_UI", ISTemporalAA_UI, true },
+				{ "BSImagespaceShaderISTemporalAA_Water", ISTemporalAA_Water, true },
 				{ "BSImagespaceShaderISUpsampleDynamicResolution", ISUpsampleDynamicResolution, true },
 				{ "BSImagespaceShaderISUnderwaterMask", ISUnderwaterMask, true },
 				{ "BSImagespaceShaderWaterFlow", ISWaterFlow, true },
