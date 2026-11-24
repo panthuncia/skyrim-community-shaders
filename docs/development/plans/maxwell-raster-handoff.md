@@ -1,6 +1,6 @@
 # GTX 980 Ti: raster pass cost, guest slowdown, pipeline binaries (handoff)
 
-Status: 2026-11-24, investigation in progress. Hardware: GTX 980 Ti (Maxwell, driver 582.78), 6 GB, no ReBAR (214 MB host-visible
+Status: 2026-11-24, done: guest and native D3D12 are at native Vulkan's frame time (see "Results" below). Hardware: GTX 980 Ti (Maxwell, driver 582.78), 6 GB, no ReBAR (214 MB host-visible
 VRAM window). All numbers are Dev-Fast (/Od) builds, 1920x1080 targets with a 1280x720 render area, the base save's exterior scene.
 
 ## Tools and how to measure
@@ -49,56 +49,59 @@ Replay attribution (D3D12, GPU path, main opaque 8.0 ms, Z 2.2 ms; offline-rebui
 Fix candidates, by saving: split the light loop out when a draw has no lights (~0.5 ms+ per pass); cheaper Skylighting for foliage
 (up to 0.74); distance-gate raindrops (0.59 in rain); cheaper Z-prepass tree alpha test (0.43). None implemented.
 
-## Guest vs native: open
+## Results (2026-11-24, after the fixes)
 
-The gap is real (frame 49.4 vs 35.5 ms) and specific to DXVK's device: native Vulkan runs the same shaders, lowering and descriptor
-model as fast as D3D12.
+Frozen scene (`tgm`, `set timescale to 0`, `fw 81a`, TAA, a 600-frame `org:gpu-window`), Dev-Fast:
 
-Ruled out:
-- **Robustness, per pipeline.** `VK_EXT_pipeline_robustness` (DXVK enables it, CS requests it, BasicRHI chains `core` behaviour, matching
-  native) was confirmed active (`pipelineRobustness : 1`, BasicRHI's "per-pipeline robustness core" line) and main colour stayed 17 ms.
-  The device-wide test (DXVK with robustBufferAccess2/robustImageAccess2 off) crashes at boot every time, also with ImprovedCameraSE off
-  (crash in engine 77396 on a pathing job; DXVK writes no log), so device-level robustness is not fully excluded.
-- **Memory placement.** Per-resource dumps: every BasicRHI resource has the same memory kind in guest and native (frame arena in the BAR
-  window, nothing per-pixel in system memory).
-- **VRAM pressure.** Guest sits at ~3.8 of 4.4 GB budget; cutting DCLF's texture budget (`raster-perf-texbudget`, -300 MiB) changed nothing.
-- **Image layouts.** Guest render targets rest in GENERAL (storage usage; DXVK keeps them there even with
-  `dxvk.enableUnifiedImageLayouts = False`), but native with every image forced to GENERAL (`BASICRHI_VK_FORCE_GENERAL=1`) stays 8.8 ms.
+| | Native Vulkan | Guest before | Guest after | Native D3D12 |
+|---|---|---|---|---|
+| GPU frame (graphics queue) | 45.7 ms | 67.9 | 44.9 | 43.0 |
+| Frame time | 45.3 | 68.6 | 45.2 | 43.3 |
+| DCLF main opaque | 14.2 | 27.5 | 14.2 | 15.0 |
+| DCLF Z-prepass | 4.5 | 5.5 | 4.2 | 4.0 |
+| pre-main | 4.0 | 7.3 | 4.1 | 3.3 |
+| deferred+water | 7.7 | 9.8 | 7.5 | 6.7 |
 
-Next candidates:
-1. **How DXVK creates the textures DCLF samples** (D3D11 textures: MUTABLE_FORMAT, view-format lists, extended usage), which may switch
-   off texture compression on NVIDIA. DCLF's pixel stages take ~20 samples and 25-28 texel loads; fits "pixel-heavy passes slow, shadows
-   not". Extend the import log line in `src/RenderGraph/DxvkImageImport.cpp` (uncommitted) to print `a_image.flags`, compare with
-   native's texture create info.
-2. **Samplers:** guest uses the engine's D3D11 samplers through DXVK; compare anisotropy and filter against native's.
-3. Anything else DXVK's device enables that BasicRHI's own does not (diff the two devices' enabled features from the DXVK log and the
-   BasicRHI create log).
+raster-perf (unfrozen save scene) frame time: native Vulkan 36-37 ms, guest 35-36, native D3D12 33-35. The 58 ms D3D12 frame
+above came from a run with the NvPerf timing trace (it serialises passes); without it D3D12 is the fastest of the three.
 
-## Pipeline binary store: decided for now
+## Guest vs native: fixed
 
-- The store held one 2 MiB binary per entry with the same key in all 5,101 entries (10.9 GB file, read whole at boot). Fixed: binaries are
-  kept once by driver key, store keys made stable (static sampler placements persisted). File now 231 MB; warm runs build 0-9 pipelines.
-- NVIDIA still keeps ~2 MiB of process memory per pipeline made from binaries (guest 25 GB vs 12.9 GB without), also with one
-  `VkPipelineBinaryKHR` kept for all pipelines. The blob is exactly 524,288 x 4 bytes, the resource set's slots per binding: most likely a
-  layout-sized table NVIDIA serialises into every self-contained binary, shared through the layout for normally built pipelines. Not
-  documented anywhere found; shrinking the set to test it fails the descriptor-sets minimum capacity at boot.
-- The store is now off by default on NVIDIA (`BASICRHI_VK_PIPELINE_BINARY=1` turns it on; BasicRHI 20d31ec, CS 918ce0f23). Cost: the
-  startup precompile re-lowers SPIR-V every boot (~16 s for 1,008 pipelines). Options for the user: a slot mapping that needs fewer
-  slots per binding, or persisting lowered SPIR-V keyed by the pre-lowering hash.
+Cause: in guest mode BasicRHI read PushIndex constant buffers (DCLF's frame blocks, OMS shared constants) from the heap as
+storage buffers. Native binds them as uniform buffers in a push descriptor set. That is the register-pressure problem that
+cost Pascal's D3D12 path 10 ms (`dclf-bound-constants.md`). Two things kept it off in guest:
+- BasicRHI's `VkInitBoundUniforms` refused bound uniform buffers on any adopted device. DXVK binds its own descriptors again
+  after interop commands (`DxvkContext::invalidateExternalCommandState`), so the push set is safe: guard removed (BasicRHI c695c56).
+- DXVK never enabled `VK_KHR_push_descriptor`. CS now asks for it with `dxvkRequestDeviceExtensions`, whose requests now add up
+  instead of replacing each other (DXVK e8f692d6, CS 9787908d9).
+Check in a guest log: `AdoptVulkanDevice: descriptor-sets model: bound uniform buffers on`.
 
-## Repository state (local, nothing pushed)
+What the earlier candidates showed: DXVK's render targets have no create flags (`flags 0x0`, usage 0x1f, exclusive sharing);
+material textures are plain BC images in SHADER_READ_ONLY_OPTIMAL; the main depth target is graph-made in both modes.
+None of it mattered.
 
-Committed on `org_integration`: the image-space ports, lens flares, inventory model fix, binary store fixes, cs-test fixes and configs.
-BasicRHI commits (e459a49, 20d31ec, ...) must be pushed to BasicRHI's remote before the CS commits that point at them.
+Left: native D3D12 main opaque is 0.8 ms over native Vulkan (DXIL vs SPIR-V on NVIDIA's compiler), but the whole frame is faster.
 
-Uncommitted / experimental, decide before committing:
-- Per-pipeline robustness: merged (`feat/pipeline-robustness` in CS, DXVK 4f752b3d + an uncommitted `HANDLE_EXT(extPipelineRobustness)`
-  line that makes it work, BasicRHI 8fb8258); submodule pointers not committed. No measured benefit.
-- DXVK `DXVK_CS_NO_ROBUSTNESS2` experiment (dxvk_device_info.cpp): crashes at boot; revert.
-- BasicRHI `BASICRHI_VK_FORCE_GENERAL` (rhi_vulkan.cpp) and its switch registry entries: experiment; revert or keep as a debug switch.
-- BasicRHI guest memory report from `q_submit` (adopted devices, every 6000 submits): useful; keep or gate.
-- `src/RenderGraph/DxvkImageImport.cpp` per-image layout log line: diagnostic; keep while investigating.
-- `BASICRHI_VK_PIPELINE_ROBUSTNESS` switch registry entries.
-- `tools/cs-test/configs/raster-perf.toml` shortened, `raster-perf-texbudget.toml` new.
-- Worktrees that can go: `org-port-worktrees/{inventory-item,basicrhi-binaries,dxvk-robustness,basicrhi-robustness,cs-robustness}`
-  once their branches are merged; keep `lighting-probes` for the probe work.
+## Pipeline binary store and module identifiers: done
+
+- The binary store held one 2 MiB binary per entry with the same key in all 5,101 entries (10.9 GB file). Fixed: binaries kept
+  once by driver key, stable store keys. NVIDIA still keeps ~2 MiB of process memory per pipeline made from binaries (guest 25 GB
+  vs 12.9 GB without), so the store is off by default on NVIDIA (`BASICRHI_VK_PIPELINE_BINARY=1` turns it on). The blob is
+  524,288 x 4 bytes, the resource set's slots per binding; avoiding it would need a different slot mapping.
+- Replacement where the binary store is off: the module identifier store (BasicRHI b244ced, `VK_EXT_shader_module_identifier`).
+  Each lowered module's identifier is kept by its lowering key in `<pipeline cache>.identifiers` (about 120 KB), with the static
+  sampler placements. A pipeline whose stages all have identifiers is made from them through the pipeline cache, with
+  `FAIL_ON_PIPELINE_COMPILE_REQUIRED`: no lowering, no modules. A miss lowers as before. DXVK passes the feature to the adopter
+  (d3d985d1). Warm precompile of 1,008 DCLF pipelines: guest 15.8 s to 0.6 s, native Vulkan 8.0 s to 0.4 s; 0 misses. Pipelines
+  made from identifiers keep normal memory, and the 256 MiB in-memory lowered module cache no longer fills on warm runs.
+  `BASICRHI_VK_MODULE_IDENTIFIERS=0` turns it off. Log: `Vulkan module identifiers '...': saved N identifiers ...; M pipelines made
+  from them so far, K missed the cache`.
+- A persisted lowered-SPIR-V cache was tried first and dropped: ~3,300 modules of ~80 KB each (a 300 MB file).
+
+## Repository state
+
+Everything above is committed and pushed (CS `org_integration`, BasicRHI `dev`, DXVK `org_integration`; OpenRenderGraph,
+ORGModuleServices, BasicTelemetry and Streamline fast-forwarded to their tracked branches). `BASICRHI_VK_FORCE_GENERAL` is kept as
+a debug switch. The DXVK `DXVK_CS_NO_ROBUSTNESS2` experiment and the per-image import log line were removed.
+Worktrees that can go: `org-port-worktrees/{inventory-item,basicrhi-binaries,dxvk-robustness,basicrhi-robustness,cs-robustness}`;
+keep `lighting-probes` for the probe work (Lighting fix candidates under "Raster pass cost" are still open).
