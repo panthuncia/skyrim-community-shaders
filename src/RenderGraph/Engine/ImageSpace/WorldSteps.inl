@@ -23,6 +23,7 @@ enum class WorldScope : std::uint8_t
 	Screenshot,
 	LdrSlot,     // after the tonemap (usesLDR)
 	Upsample,
+	LensFlare,   // BSLensFlare's frame function (SE 100274), before the composites
 	// The start stage's water effects (StartSteps.inl).
 	WaterDisplacement,  // 31385 / 32176
 	FlowCopy,           // 35561 / 36560

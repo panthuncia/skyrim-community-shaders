@@ -215,6 +215,10 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISDownsample, "ISDownsample", "ISDownsample.hlsl", 3, 0b111, 3, 0, false },
 			{ Effects::ISBlur, "ISBlur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
 			{ Effects::ISIBLensFlares, "ISIBLensFlares", "ISIBLensFlare.hlsl", 1, 0b1, 1, 0, false },
+			// Lens flares (SE 100274, in RenderWorldPostProcess). The visibility pass reads depth and writes a texel per light into
+			// kLENSFLAREVIS. Each sprite draws the engine's sprite quad: t0 is its loaded texture, read by heap index, t1 the visibility.
+			{ Effects::ISLensFlareVisibility, "ISLensFlareVisibility", "LensFlare.hlsl", 1, 0b1, 1, 0, false },
+			{ Effects::ISLensFlare, "ISLensFlare", "ISLensFlare.hlsl", 2, 0b11, 1, 0, false, 1, false, false, true, true, false, 0b01 },
 			// t0 source, t1 indirect lighting.
 			{ Effects::ISSILComposite, "ISSILComposite", "ISSILComposite.hlsl", 2, 0b11, 2 },
 			// t0 depth, t1 normals, t2 motion vectors, t3 emissive, t4 accumulated indirect lighting.
@@ -398,6 +402,9 @@ namespace RenderGraph::Engine::ImageSpace
 
 		constexpr std::uint32_t kLatchStride = static_cast<std::uint32_t>(sizeof(ConstantsAt) + sizeof(SourcesAt));
 
+		/** @brief One entry's whole latch region, as words. */
+		using LatchWords = std::array<std::uint32_t, kLatchStride / 4>;
+
 		struct Pending
 		{
 			std::uint32_t entry = 0;
@@ -407,6 +414,10 @@ namespace RenderGraph::Engine::ImageSpace
 			std::shared_ptr<const void> source;  // held until the run's GPU work retires
 			std::uint32_t vertices = 3;
 			std::optional<SourcesAt> sources;
+			// Written into the entry's latch region in place of at and sources. The lens flare sprites use it (ChainSteps.inl).
+			std::optional<LatchWords> record;
+			// False for an entry that only holds latch words another entry's pass reads. Its gate entry stays closed.
+			bool open = true;
 		};
 
 		struct EffectScope
@@ -438,6 +449,8 @@ namespace RenderGraph::Engine::ImageSpace
 			Effect,
 			FlowMap,
 			Water,        // 31385 / 32176
+			// A lens flare draw (SE 100274). Its batch stays open: the sprites share one pass, which opens once a run.
+			LensFlare,
 			Count
 		};
 
@@ -1349,9 +1362,15 @@ namespace RenderGraph::Engine::ImageSpace
 			if (held)
 				state.heldSources.Store(run, std::move(held));
 			for (const auto& pending : a_batch) {
-				a_latch.WriteValue(run, pending.entry * kLatchStride, pending.at);
-				if (pending.sources)
-					a_latch.WriteValue(run, pending.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt)), *pending.sources);
+				if (pending.record) {
+					a_latch.WriteValue(run, pending.entry * kLatchStride, *pending.record);
+				} else {
+					a_latch.WriteValue(run, pending.entry * kLatchStride, pending.at);
+					if (pending.sources)
+						a_latch.WriteValue(run, pending.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt)), *pending.sources);
+				}
+				if (!pending.open)
+					continue;
 				if (pending.compute)
 					a_gate.OpenDispatch(pending.entry, pending.groups[0], pending.groups[1], pending.groups[2]);
 				else
@@ -1471,7 +1490,8 @@ namespace RenderGraph::Engine::ImageSpace
 #include "RenderGraph/Engine/ImageSpace/MenuSteps.inl"
 
 		/** @brief The engine blend states the steps use. The engine fills its blend table after Setup. */
-		constexpr std::array<std::uint32_t, 4> kShapeBlends{ PackBlend(0, 0, 2, 0), PackBlend(5, 0, 2, 0), PackBlend(1, 0, 2, 0), PackBlend(0, 0, 1, 0) };
+		constexpr std::array<std::uint32_t, 5> kShapeBlends{ PackBlend(0, 0, 2, 0), PackBlend(5, 0, 2, 0), PackBlend(1, 0, 2, 0), PackBlend(0, 0, 1, 0),
+			PackBlend(5, 0, 1, 0) };
 
 		/** @brief The water's part of the shape, which the water update sees: the displacement pair, the flow map and the heightmap bound. */
 		void WaterShapeNow(Frame::Vars::ImageSpaceShape& a_shape)
@@ -1578,6 +1598,8 @@ namespace RenderGraph::Engine::ImageSpace
 				++state.taken;
 				return true;
 			}
+			if (LensFlareStepNow(scope.effect))
+				return TakeLensFlareStep(scope.effect);
 			if (StartStepScope() != WorldScope::None)
 				return TakeStartStep(scope.effect, false, {});
 			if (const auto world = WorldStepScope(); world != WorldScope::None)
@@ -1672,7 +1694,9 @@ namespace RenderGraph::Engine::ImageSpace
 			auto& state = IS();
 			if (state.scopeDepth == 0)
 				return;
-			if (--state.scopeDepth == 0 && FrameAnchors::IsRenderOwner())
+			// A lens flare scope leaves its batch for the next flush, so the frame's sprites run in one pass. The composites' scope,
+			// next in RenderWorldPostProcess, runs it. So does any engine draw or dispatch CS does not take.
+			if (--state.scopeDepth == 0 && FrameAnchors::IsRenderOwner() && state.scope != static_cast<std::uint32_t>(ScopeKind::LensFlare))
 				Flush();
 		}
 
@@ -1713,7 +1737,8 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto index = EffectOf(a_shader);
 			const auto id = index >= 0 ? kEffects[static_cast<std::size_t>(index)].id : Effects::ISCopy;
 			const bool flowCopy = index >= 0 && id == Effects::ISCopySubRegionCS && FlowCopyBound();
-			EnterScope(flowCopy ? ScopeKind::FlowMap : ScopeKind::Effect);
+			const bool lensFlare = index >= 0 && (id == Effects::ISLensFlare || id == Effects::ISLensFlareVisibility);
+			EnterScope(flowCopy ? ScopeKind::FlowMap : lensFlare ? ScopeKind::LensFlare : ScopeKind::Effect);
 			if (state.scopeDepth == 0)
 				return false;
 			const FlowCopyGuard flow(flowCopy);

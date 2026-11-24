@@ -24,7 +24,8 @@ namespace ChainGroup
 	constexpr std::uint8_t kScreenshot = 28;
 	constexpr std::uint8_t kUpsample = 29;
 	constexpr std::uint8_t kCapture = 30;  // a frozen world's capture frame copies the final target into kMENUBG
-	constexpr std::uint8_t kCount = 31;
+	constexpr std::uint8_t kLensFlare = 31;  // the lens flares' visibility and sprite passes
+	constexpr std::uint8_t kCount = 32;
 }
 
 constexpr std::array<PostPart, 3> kChainParts{ PostPart::Composites, PostPart::Hdr, PostPart::Final };
@@ -74,6 +75,11 @@ struct ChainSteps
 	std::map<Effects::ImageSpaceEffectEnum, std::uint8_t> slotDraws;
 	bool captureFrame = false;
 	bool scratchWritten = false, taaRouted = false;
+	// The frame's lens flare sprites so far and the vertices each draws (StageLensFlareSprite). Render owner.
+	std::uint64_t lensFrame = UINT64_MAX;
+	std::uint32_t lensSprites = 0, lensVerticesPerSprite = 0;
+	// Whether the engine's target and blend at each lens flare pass were checked against the step's. Once a session.
+	bool lensVisibilityChecked = false, lensSpriteChecked = false;
 };
 
 /**
@@ -207,6 +213,8 @@ std::string ChainGroupName(std::uint8_t a_group)
 		return "the dynamic-resolution upsample";
 	case kCapture:
 		return "the frozen background's copy";
+	case kLensFlare:
+		return "the lens flares";
 	default:
 		return fmt::format("group {}", a_group);
 	}
@@ -358,6 +366,8 @@ std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_po
 	std::array<bool, ChainGroup::kCount> on{};
 	// The engine may start the VL composite after Begin read its fields. Gated, so frames without it skip it.
 	on[ChainGroup::kComposite] = true;
+	// The engine draws lens flares only for the lights it sees this frame, which Begin cannot know. Gated, so frames without them skip.
+	on[ChainGroup::kLensFlare] = true;
 	for (std::uint32_t slot = 0; slot < 8; ++slot) {
 		if (!(post.slots >> slot & 1u))
 			continue;
@@ -660,7 +670,21 @@ void BuildChainSteps(ChainBuild& a_build)
 		steps.push_back(std::move(pending));
 	};
 
-	// The VL composite at the render size. The lens flare forms read an output with no CS pass.
+	// Lens flares (SE 100274), which RenderWorldPostProcess draws before the composites. The visibility pass writes a texel per
+	// light. One sprite pass draws all the frame's sprites additively into kMAIN, each from its own latch record (StageLensFlareSprite).
+	{
+		StepDesc v{ .name = "lensflare.visibility", .output = engine(T::kLENSFLAREVIS) };
+		v.inputs[0] = mainDepth;
+		v.samplers[0] = kPoint;
+		add(0, ChainGroup::kLensFlare, WorldScope::LensFlare, E::ISLensFlareVisibility, 0, std::move(v));
+		// The sprite texture is clamped and trilinear (BSLensFlare's constructor). t1 is read by Load, with no sampler.
+		StepDesc s{ .name = "lensflare.sprites", .output = engine(T::kMAIN), .blend = PackBlend(5, 0, 1, 0), .latched = 0b01 };
+		s.inputs[1] = engine(T::kLENSFLAREVIS);
+		s.samplers[0] = { 0, 2 };
+		add(0, ChainGroup::kLensFlare, WorldScope::LensFlare, E::ISLensFlare, 0, std::move(s));
+	}
+
+	// The VL composite at the render size. The lens flare forms (the image-based flares) read an output with no CS pass.
 	for (std::uint16_t p = 0; p < 2; ++p) {
 		StepDesc d{ .name = fmt::format("composite.vl.p{}", p), .output = engine(T::kMAIN), .blend = PackBlend(5, 0, 2, 0), .area = StepArea::Render };
 		d.inputs[0] = engine(T::kIMAGESPACE_VOLUMETRIC_LIGHTING + p);
@@ -1198,6 +1222,205 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		chain.taaRouted |= routedTaa;
 	}
 	return taken;
+}
+
+/**
+* @brief The lens flare sprites' records: latch entries of the composites client past its passes, one per sprite. The sprite pass reads
+* them. Their gate entries stay closed.
+*/
+constexpr std::uint32_t kLensFlareSprites = 128;
+constexpr std::uint32_t kLensFlareRecordFirst = kGateEntries - kLensFlareSprites;
+
+/** @brief Mirrors LensFlareSpritesAt in ISLensFlare.hlsl: the sprite pass's own latch region. */
+struct LensFlareSpritesAt
+{
+	std::uint32_t recordOffset = 0;  // bytes from this region to the first sprite's record
+	std::uint32_t recordStride = kLatchStride;
+	std::uint32_t sprites = 0;
+	std::uint32_t verticesPerSprite = 0;
+	std::array<float, 4> viewport{ 1.0f, 1.0f, 0.0f, 0.0f };  // the draw's viewport in kMAIN as fractions: scale xy, offset xy
+	std::array<std::uint32_t, 20> unused{};
+};
+static_assert(sizeof(LensFlareSpritesAt) == kLatchStride);
+
+/** @brief Mirrors LensFlareSpriteRecord in ISLensFlare.hlsl: one sprite's captured constants, texture and geometry. */
+struct LensFlareSpriteRecord
+{
+	std::uint32_t pixelSrv = 0, pixelOffset = 0, pixelSize = 0, texture = 0;  // PS b2, then t0's heap index
+	std::uint32_t vertexSrv = 0, vertexOffset = 0, vertexSize = 0, firstIndex = 0;  // VS b2, then the first index
+	std::uint32_t vertexBuffer = 0, vertexBufferOffset = 0, indexBuffer = 0, indexBufferOffset = 0;  // buffer view refs
+	std::uint32_t layoutLow = 0, layoutHigh = 0, stride = 0, unusedWord = 0;
+	std::array<std::uint32_t, 12> unused{};
+};
+static_assert(sizeof(LensFlareSpriteRecord) == kLatchStride);
+
+/** @brief Whether a draw is a lens flare step: BSLensFlare's frame function runs inside RenderWorldPostProcess. Render owner. */
+bool LensFlareStepNow(std::size_t a_effect)
+{
+	const auto id = kEffects[a_effect].id;
+	return (id == Effects::ISLensFlareVisibility || id == Effects::ISLensFlare) && IS().on && Chain().group.Registered() && Frame::PostChain::InChain();
+}
+
+/**
+* @brief Logs once a session when the engine's target or blend at a lens flare pass differs from its step's. The step's are from the
+* engine's code (SE 100274 and its callees), so a difference means that reading is wrong.
+*/
+void CheckLensFlareState(Effects::ImageSpaceEffectEnum a_effect)
+{
+	auto& chain = Chain();
+	const bool sprite = a_effect == Effects::ISLensFlare;
+	auto& checked = sprite ? chain.lensSpriteChecked : chain.lensVisibilityChecked;
+	if (checked)
+		return;
+	checked = true;
+	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+	const auto target = static_cast<std::int32_t>(shadow.renderTargets[0]);
+	const std::int32_t plannedTarget = sprite ? RE::RENDER_TARGET::kMAIN : RE::RENDER_TARGET::kLENSFLAREVIS;
+	const std::uint32_t plannedMode = sprite ? 5 : 0, plannedWrite = sprite ? 1 : 2;
+	if (target != plannedTarget || shadow.alphaBlendMode != plannedMode || shadow.alphaBlendWriteMode != plannedWrite)
+		logger::error("[ORG] ImageSpace: the engine's {} writes rt{} with blend mode {} and write mode {}; CS's step writes rt{} with {} and {}",
+			kEffects[static_cast<std::size_t>(EffectIndexOf(a_effect))].effectName, target, shadow.alphaBlendMode, shadow.alphaBlendWriteMode, plannedTarget,
+			plannedMode, plannedWrite);
+}
+
+/**
+* @brief Stages one lens flare sprite: its record in the next record entry, and the sprite pass opened for every sprite so far.
+* The batch stays open across the sprites' scopes (LeaveScope), so the pass opens once a run with all of them.
+*/
+void StageLensFlareSprite(PostClient& a_client, std::uint32_t a_entry, const Spec& a_spec, std::uint32_t a_passes)
+{
+	auto& state = IS();
+	auto& chain = Chain();
+	constexpr auto segment = Frame::SegmentId::Post;
+	const auto frame = Frame::Driver::Current().frame;
+	if (chain.lensFrame != frame) {
+		chain.lensFrame = frame;
+		chain.lensSprites = 0;
+		chain.lensVerticesPerSprite = 0;
+	}
+	const auto isPass = [a_entry](const Pending& a_pending) { return a_pending.entry == a_entry && a_pending.open; };
+	// A sprite after the batch with this frame's sprite pass ran has no pass left to draw in.
+	if (chain.lensSprites > 0 && std::ranges::none_of(a_client.batch, isPass)) {
+		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
+			fmt::format("lens flare sprite {} of the frame came after the batch with its sprite pass ran; it draws nothing", chain.lensSprites));
+		return;
+	}
+	const auto sprite = chain.lensSprites;
+	if (sprite >= kLensFlareSprites || a_passes > kLensFlareRecordFirst) {
+		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
+			fmt::format("lens flare sprite {} of the frame is past the sprite pass's {} records; it draws nothing", sprite, kLensFlareSprites));
+		return;
+	}
+	static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
+	setDirtyStates(false);
+	// Both stages read their own PerGeometry: the vertex stage places the sprite, the pixel stage tints it.
+	const auto use = Constants::Capture(Constants::kDrawStages);
+	const auto* pixel = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
+	const auto* vertex = use.Valid() ? Constants::Find(use, Constants::Stage::Vertex, 2) : nullptr;
+	if (!pixel || !vertex) {
+		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
+			fmt::format("a lens flare sprite's capture holds no PerGeometry for its {} stage; it draws nothing", pixel ? "vertex" : "pixel"));
+		return;
+	}
+	const auto pixelAt = Constants::Where(*pixel);
+	const auto vertexAt = Constants::Where(*vertex);
+	if (!pixelAt.owner || !vertexAt.owner)
+		RenderGraph::Fatal("ISLensFlare", "its captured constants have no ring chunk");
+	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+	DCLF::Family::Geometry geometry;
+	auto owners = std::make_shared<DCLF::Family::Owners>();
+	std::string detail;
+	const auto result = DCLF::Family::LatchGeometry(static_cast<const DCLF::Family::TriShape*>(state.drawShape), state.drawStart, state.drawTriangles,
+		~std::uint64_t(0), static_cast<std::uint32_t>(shadow.topology), geometry, *owners, &detail);
+	if (result != DCLF::Family::GeometryResult::Ok) {
+		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
+			fmt::format("a lens flare sprite's quad could not be staged: {} ({}); it draws nothing", DCLF::Family::ReasonOf(result), detail));
+		return;
+	}
+	// The vertex stage finds a vertex's sprite by dividing by one count, so every sprite must draw as many vertices.
+	if (chain.lensVerticesPerSprite && geometry.indexCount != chain.lensVerticesPerSprite) {
+		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
+			fmt::format("lens flare sprite {} draws {} vertices, and the frame's first sprite drew {}; it draws nothing", sprite, geometry.indexCount,
+				chain.lensVerticesPerSprite));
+		return;
+	}
+	// The sprite's loaded texture by heap index. The engine binds none for a flare without one, and D3D11 then reads zero.
+	auto& textures = ::DCLF::GpuTextures::Get();
+	auto* view = shadow.PSTexture[0];
+	const auto input = view ? InputOfView(view) : -1;
+	const bool target = input >= 0 && !(input & kDefaultTextureInput);
+	auto binding = view && !target ? textures.ResolveBinding(view, kImageSpaceTag) : ::DCLF::GpuTextures::Binding{};
+	if (!binding)
+		binding = textures.NullOf(::DCLF::GpuTextures::ViewKind::Texture2D);
+	if (!binding)
+		RenderGraph::Fatal("ISLensFlare", "the zero Texture2D view could not be made");
+	if (binding.owner)
+		owners->push_back(std::move(binding.owner));
+	const LensFlareSpriteRecord record{ .pixelSrv = pixelAt.srvIndex,
+		.pixelOffset = pixelAt.offset,
+		.pixelSize = pixelAt.size,
+		.texture = binding.index,
+		.vertexSrv = vertexAt.srvIndex,
+		.vertexOffset = vertexAt.offset,
+		.vertexSize = vertexAt.size,
+		.firstIndex = geometry.firstIndex,
+		.vertexBuffer = geometry.vertexRef.viewSlot,
+		.vertexBufferOffset = geometry.vertexRef.byteOffset,
+		.indexBuffer = geometry.indexRef.viewSlot,
+		.indexBufferOffset = geometry.indexRef.byteOffset,
+		.layoutLow = static_cast<std::uint32_t>(geometry.layout),
+		.layoutHigh = static_cast<std::uint32_t>(geometry.layout >> 32),
+		.stride = geometry.stride };
+	a_client.batch.push_back(
+		Pending{ .entry = kLensFlareRecordFirst + sprite, .source = std::move(owners), .record = std::bit_cast<LatchWords>(record), .open = false });
+	chain.lensSprites = sprite + 1;
+	chain.lensVerticesPerSprite = geometry.indexCount;
+	// The engine's draw keeps the dynamic-resolution viewport while the effect's flag is set (ImageSpaceEffect +0x88).
+	const auto* shader = state.current ? state.current->shader : nullptr;
+	const bool dynamic = shader && static_cast<const RE::ImageSpaceEffect*>(shader)->unk88;
+	const LensFlareSpritesAt at{ .recordOffset = (kLensFlareRecordFirst - a_entry) * kLatchStride,
+		.sprites = chain.lensSprites,
+		.verticesPerSprite = chain.lensVerticesPerSprite,
+		.viewport = dynamic ? RenderViewportOf(a_spec) : std::array<float, 4>{ 1.0f, 1.0f, 0.0f, 0.0f } };
+	Pending pass{ .entry = a_entry, .vertices = chain.lensSprites * chain.lensVerticesPerSprite, .record = std::bit_cast<LatchWords>(at) };
+	if (const auto staged = std::ranges::find_if(a_client.batch, isPass); staged != a_client.batch.end())
+		*staged = std::move(pass);
+	else
+		a_client.batch.push_back(std::move(pass));
+	state.postKeep.push_back(pixelAt.owner);
+	state.postKeep.push_back(vertexAt.owner);
+	++state.taken;
+}
+
+/**
+* @brief Matches a lens flare draw to its pass in the build the frame runs. The visibility pass stages like any step. Each sprite
+* stages a record for the one sprite pass. Withholds the engine's draw.
+*/
+bool TakeLensFlareStep(std::size_t a_effect)
+{
+	auto& state = IS();
+	auto& chain = Chain();
+	const auto id = kEffects[a_effect].id;
+	constexpr auto segment = Frame::SegmentId::Post;
+	const StepKey key{ WorldScope::LensFlare, id, 0 };
+	const auto what = fmt::format("lens flare step {}", kEffects[a_effect].effectName);
+	const auto find = chain.group.Find(key);
+	// Behind: the engine draws for variables the build the frame runs was not made for, such as a new size.
+	if (!chain.group.Draws(find, segment, what, "in the world post chain"))
+		return true;
+	const auto entry = find.at.entry;
+	const auto& part = find.Part();
+	auto& client = state.post[static_cast<std::size_t>(chain.group.PartOf(find.at.part))];
+	// The group is always on, so a row off is a build made without it, and a pass not made was left out by its graph build (MakePass).
+	if (!RowOn(segment, part.RowOf(entry)) || !part.Made(entry) || !part.SpecOf(entry)) {
+		Frame::Driver::NoteStepLag(segment, client.id, what);
+		return true;
+	}
+	CheckLensFlareState(id);
+	if (id == Effects::ISLensFlareVisibility)
+		return StageStep(client, entry, part.SpecOf(entry), a_effect, false, {});
+	StageLensFlareSprite(client, entry, *part.SpecOf(entry), part.count);
+	return true;
 }
 
 /** @brief In a routed frame with no TAA, copies the scratch into the final target. Render owner. */

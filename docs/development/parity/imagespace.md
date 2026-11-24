@@ -35,7 +35,7 @@ them (below). The dynamic-resolution quad itself is still refused, and a blend s
 | ISSnowSSS | Done (its own scope). | Snowy exterior, e.g. `coc Winterhold` or `coc HighHrothgar`. | |
 | ISAlphaBlend | Done (round 2): the 16 tint masks by heap index from the latch. | Race menu (face tints). | No `ISAlphaBlend` in the summary. |
 | ISUnderwaterMask | Done (round 2): Water.hlsl's UNDERWATERMASK ORG form, a geometry effect. | `coc` into a cell with water, then swim under it. | |
-| FXAA, raster and IB lens flares, the dynamic-resolution upsample, ISSILRawInd | Round 2: all done except the raster lens flares (BSLensFlare). | FXAA with the game's FXAA setting; lens flares with a lens-flare weather by day. | |
+| FXAA, raster and IB lens flares, the dynamic-resolution upsample, ISSILRawInd | Round 2: all done. The raster lens flares (BSLensFlare and its visibility pass) followed as post chain steps (Raster lens flares below). | FXAA with the game's FXAA setting; lens flares with a lens-flare weather by day. | |
 | The p5 "Next" rows: ISApplyReflections, the parallax-mask blur CS, ISLightingComposite x3, Perlin noise CS, the DOF downsample (58) and raster blur (11) | Round 2: the apply, the parallax blur and the lighting composite done; 58 and 11 were rows already; Perlin noise left. | | |
 | Sun glare 0x5C006072 | Sky family's, not this lane. | | |
 
@@ -121,13 +121,24 @@ the DOF chain are built on first sight if the manifest lacks them.
 - That menu 3D's depth target imports with `EngineDepth`, and that DepthRead with a stencil test and a loaded and stored stencil is
   accepted by both backends.
 
+### Raster lens flares
+
+BSLensFlare's frame function (SE 100274, from RenderWorldPostProcess before the composites, read from the unpacked SE binary) skips
+everything when no light is visible. Otherwise it draws the visibility pass (101) once, through `BSImagespaceShader::Render` with the
+manager's quad: depth target 0 at t0, point clamp, into `kLENSFLAREVIS`. Then each flare sprite is one more `Render` call with a
+shared sprite quad, into `kMAIN` (the effect's texture 0 is `kMAIN`, 1 the sprite, 2 `kLENSFLAREVIS`), additive blend (mode 5,
+write mode 1), no culling, the sprite clamped and trilinear.
+
+Both are steps of the post chain's composites client (ChainSteps.inl, group `kLensFlare`). The visibility pass is a plain step.
+The sprite count changes every frame, so one sprite pass draws them all: each sprite's draw stages a record (both stages'
+PerGeometry, its texture's heap index, its quad's buffer refs) in a latch entry past the client's passes, and the pass opens with
+the quad's index count per record. Lens flare scopes leave their batch open, so the composites' scope that follows runs it once.
+`ImageSpace: the engine's ... writes rt...` in the log means the target or blend read above is wrong.
+
 ### Left
 
 - **ISTemporalAA_UI and _Water:** CS's ISTemporalAA.hlsl has neither path. Writing them needs vanilla's DXBC for both (the UI build
   reads the mask from t4, the water build blends a water history) to transcribe and check; not available in this lane.
-- **Raster lens flares (BSLensFlare, 100):** sprites drawn with their own geometry, a vertex stage that reads its own PerGeometry
-  (VS b2, which the latch does not capture), a loaded sprite texture and the visibility target. Needs VS b2 in the latch and a pulled
-  vertex stage; it is also not known that they draw through `BSImagespaceShader::Render`.
 - **Perlin noise (128, 129):** the 3D form is Volumetric Lighting's port; its output is not an engine render target.
 - **The dynamic-resolution quad:** its vertices are not known, so draws with it stay refused.
 - **ISExp (123), the compute downsamples (121, 122), debug (118, 149):** not converted.
