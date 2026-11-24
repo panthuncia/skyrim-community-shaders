@@ -113,8 +113,9 @@ namespace RenderGraph::Engine::Native
 			Fail("DXVK", "dxvk_d3d11.dll was loaded");
 		if (::GetModuleHandleW(L"dxvk_d3d11.dll") || ::GetModuleHandleW(L"dxvk_dxgi.dll"))
 			Fail("another plugin", "a DXVK DLL is in the process (another mod loads DXVK)");
+		// RenderDoc captures the native device (its Vulkan or D3D12 layer), not the engine's D3D11.
 		if (RenderDoc::IsLoaded())
-			Fail("the RenderDoc feature", "it captures the game's D3D11, which runs on DXVK");
+			logger::info("[ORG native] RenderDoc is loaded: its captures hold the native device's frames");
 		// Streamline stands down until it runs on the native device, so upscaling falls back to TAA.
 		Stage("checks", "DXVK is not loaded, and no feature that needs it is on");
 	}

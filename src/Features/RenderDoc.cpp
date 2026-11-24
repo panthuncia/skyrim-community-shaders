@@ -13,6 +13,9 @@
 #include "Menu/MenuIcons.h"
 #include "Plugin.h"
 #include "State.h"
+#if !defined(CS_RELEASE_PROFILE)
+#	include "Testing/Testing.h"
+#endif
 #include "Utils/UI.h"
 
 #define I18N_KEY_PREFIX "feature.renderdoc."
@@ -189,6 +192,16 @@ void RenderDoc::Load()
 			SetEnvironmentVariableA("DXVK_DEBUG", "markers");
 		}
 	}
+
+#if !defined(CS_RELEASE_PROFILE)
+	// For test runs: a "call renderdoc.capture" step captures the next frame (or the configured count), as the panel's button does.
+	::Testing::RegisterFeatureCommand("renderdoc", "capture", [](const std::string&, std::string& a_error) {
+		if (GetSingleton()->CaptureNow())
+			return true;
+		a_error = "RenderDoc could not start a capture (see the log)";
+		return false;
+	});
+#endif
 
 	logger::info("[RenderDoc] Successfully initialized");
 }
