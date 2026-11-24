@@ -345,17 +345,28 @@ namespace RenderGraph::Frame::Driver
 		// The thread that owns rendering adopts: the main thread, or a loading screen's or the startup movie's thread while it owns
 		// rendering. The startup sequence runs on the movie's thread, and targets made again there register there (decision 70).
 		// Epochs that failed since the last Begin go to their owners here, never mid-frame. What they drop asks for builds below.
-		RenderGraphRuntime::Get().PollEpochFailures();
+		{
+			ZoneScopedN("CS.Frame.Begin.PollEpochFailures");
+			RenderGraphRuntime::Get().PollEpochFailures();
+		}
 		// The engine values the frame observes, before the adoption, so a change is adopted in this Begin when nothing else waits.
 		// Only the main thread reads them: a load changes them on the main thread while another thread renders.
-		if (FrameAnchors::IsMainThread())
+		if (FrameAnchors::IsMainThread()) {
+			ZoneScopedN("CS.Frame.Begin.SampleEngine");
 			SampleEngine();
+		}
 		// Every build asked for since the last adoption point is made here (Builds::Ask).
-		Builds::IssueAdoptionRequests();
+		{
+			ZoneScopedN("CS.Frame.Begin.IssueAdoptionRequests");
+			Builds::IssueAdoptionRequests();
+		}
 		// The newest prepared frame revision switches in whole, before anything reads what it changes.
 		Revision::AdoptLatest();
 		// After the adoption, so the values it adopted are the ones compared.
-		CheckSettingsWriters();
+		{
+			ZoneScopedN("CS.Frame.Begin.CheckSettingsWriters");
+			CheckSettingsWriters();
+		}
 		// A declared segment of the last frame whose tap never fired is a tap error.
 		if (state.began)
 			for (std::uint32_t s = 0; s < kSegments; ++s) {
@@ -375,16 +386,23 @@ namespace RenderGraph::Frame::Driver
 		next.frame = clock.beginFrame;
 		next.slot = clock.slot;
 		next.parity = static_cast<std::uint32_t>(next.frame & 1);
-		next.kind = DecideKind(state, next.capture);
+		{
+			ZoneScopedN("CS.Frame.Begin.DecideKind");
+			next.kind = DecideKind(state, next.capture);
+		}
 		// In native mode the fragment sources' build points run here for a world frame, before the schedule is chosen. Guest mode
 		// keeps them in the frame. Either way they only stage builds. No anchor runs an epoch of its own. CS stage builds attach in
 		// AdoptLatest, and a source's with the fragment it adopts there, in both modes.
 		if (Engine::Native::Requested() && FrameAnchors::IsRenderOwner() &&
 			(next.kind == Kind::World || (next.kind == Kind::FrozenWorld && next.capture)))
 			Revision::FragmentFrameStart(next.frame);
+		ZoneNamedN(drawsWorldZone, "CS.Frame.Begin.FragmentsDrawWorld", true);
 		next.sceneDraws = (next.kind == Kind::World || next.kind == Kind::FrozenWorld) && Revision::FragmentsDrawWorld();
 		// Clears and copies the last frame left waiting are its tap errors, so this runs before the new frame is current.
-		RenderGraph::Engine::Skeleton::BeginFrame();
+		{
+			ZoneScopedN("CS.Frame.Begin.Skeleton");
+			RenderGraph::Engine::Skeleton::BeginFrame();
+		}
 		{
 			const std::lock_guard lock(state.mutex);
 			++state.frames[static_cast<std::size_t>(next.kind)];
@@ -405,13 +423,22 @@ namespace RenderGraph::Frame::Driver
 		// A movie tick's work from here is the Bink frame's, which is now current.
 		t_movieFrameNext = false;
 		state.tapped.fill(false);
-		PostChain::OnBegin(state.current);
+		{
+			ZoneScopedN("CS.Frame.Begin.PostChain");
+			PostChain::OnBegin(state.current);
+		}
 		// Recheck the recipe when a build of one of its epochs attached.
 		if (Engine::GraphMode() && FrameAnchors::IsRenderOwner())
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				Recipes::Check(*host);
-		FrameAnchors::BeginFrame(state.current);
-		Engine::ImageSpace::OnFrameBegin();
+		{
+			ZoneScopedN("CS.Frame.Begin.Anchors");
+			FrameAnchors::BeginFrame(state.current);
+		}
+		{
+			ZoneScopedN("CS.Frame.Begin.ImageSpace");
+			Engine::ImageSpace::OnFrameBegin();
+		}
 		{
 			const std::lock_guard lock(state.mutex);
 			for (std::uint32_t s = 0; s < kSegments; ++s)

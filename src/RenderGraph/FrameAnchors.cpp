@@ -2004,6 +2004,24 @@ namespace FrameAnchors
 		SegmentFields DescribeDeclaredFrom(State& a_state, std::uint32_t a_declared, bool a_declaredByKind, const std::shared_ptr<const Snapshot>& a_built,
 			const std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>& a_passes, std::uint64_t a_graph, const BuildKey* a_key, bool a_keyed);
 
+		/** @brief Turns off in a_fields what a_key leaves out of a_clients' passes. Nothing without a key, or with a key that has all. */
+		template <class Clients>
+		void CutToKey(SegmentFields& a_fields, const BuildKey* a_key, const Clients& a_clients)
+		{
+			if (!a_key || a_key->all)
+				return;
+			for (std::size_t i = 0; i < a_clients.size(); ++i) {
+				const auto [present, rows] = KeyPart(a_key, *a_clients[i]);
+				const auto own = RowsOf(*a_clients[i]);
+				for (std::size_t w = 0; w < 4; ++w)
+					a_fields.rows[w] &= ~(own[w] & ~rows[w]);
+				if (!present && i < RenderGraph::Frame::kSegmentClients) {
+					a_fields.clientsOn &= ~(1u << i);
+					a_fields.instances[i] = 0;
+				}
+			}
+		}
+
 		/** @brief A declared segment's fields against its attached build. a_keyed cuts it to what the build's key has present. */
 		SegmentFields DescribeDeclared(State& a_state, std::uint32_t a_declared, bool a_declaredByKind, bool a_keyed = true)
 		{
@@ -2053,18 +2071,8 @@ namespace FrameAnchors
 						{ clients[i]->instances ? clients[i]->instances() : 1u, clients[i]->maxInstances, 255u }));
 			}
 			// What the build's key left out is off in the description.
-			if (a_keyed && a_key && !a_key->all) {
-				for (std::size_t i = 0; i < clients.size(); ++i) {
-					const auto [present, rows] = KeyPart(a_key, *clients[i]);
-					const auto own = RowsOf(*clients[i]);
-					for (std::size_t w = 0; w < 4; ++w)
-						fields.rows[w] &= ~(own[w] & ~rows[w]);
-					if (!present && i < RenderGraph::Frame::kSegmentClients) {
-						fields.clientsOn &= ~(1u << i);
-						fields.instances[i] = 0;
-					}
-				}
-			}
+			if (a_keyed)
+				CutToKey(fields, a_key, clients);
 			// A kept recording binds the revisions its passes depend on beyond their bindings, so they go in the description.
 			// A pass that cannot tell is logged once per build.
 			if (const auto& passes = a_passes) {
@@ -2192,8 +2200,14 @@ namespace FrameAnchors
 			const auto epoch = EpochOfDeclared(a_declared);
 			const bool stillStaged = a_world && host.StagedGeneration(epoch) != 0;
 			// The frame's description cut to the attached build's key, and the full one. Taps treat the difference as lagged work.
-			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
+			// Described once: the cut to the key comes after the clients' rows, which see the key either way.
 			a_state.frameWanted[a_declared] = DescribeDeclared(a_state, a_declared, a_world, false);
+			SegmentFields wanted = a_state.frameWanted[a_declared];
+			if (a_world && wanted.graph)
+				if (const auto built = a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire)) {
+					const auto key = a_state.declaredKeys[a_declared].load(std::memory_order_acquire);
+					CutToKey(wanted, key.get(), SegmentClients(*built, a_declared));
+				}
 			const bool keyLags = !(a_state.frameWanted[a_declared] == wanted);
 			// A stage outside its frame kinds still gets a first schedule recorded ahead for every slot.
 			// After a kind switch its first frames may lag, but are never blank.
@@ -2312,9 +2326,9 @@ namespace FrameAnchors
 							continue;
 						found->used = use.clock;
 						const auto own = RowsOf(*clients[i]);
-						for (std::uint32_t r = 0; r < 256; ++r)
-							if ((own[r / 64] & (wanted.rows[r / 64] | other.rows[r / 64])) >> (r % 64) & 1u)
-								found->rows[r] = use.clock;
+						for (std::uint32_t w = 0; w < 4; ++w)
+							for (std::uint64_t bits = own[w] & (wanted.rows[w] | other.rows[w]); bits; bits &= bits - 1)
+								found->rows[w * 64 + std::countr_zero(bits)] = use.clock;
 					}
 				}
 			} else {
@@ -2324,8 +2338,12 @@ namespace FrameAnchors
 					return;
 			}
 			// The key keeps what was wanted within the hold. A client never described is unlisted, so it is present whole.
-			auto keep = std::make_shared<BuildKey>();
+			// Built in a reused key: most frames compare it and keep nothing. A copy is stored when it is.
+			thread_local BuildKey t_keep;
+			BuildKey* const keep = &t_keep;
+			keep->clients.clear();
 			keep->all = false;
+			keep->serial = 0;
 			keep->frame = a_frame.frame;
 			bool any = false;
 			for (const auto& client : clients) {
@@ -2337,9 +2355,12 @@ namespace FrameAnchors
 				BuildKey::Client part{ .desc = client, .present = use.clock - found->used <= kKeyHold };
 				if (part.present) {
 					const auto own = RowsOf(*client);
-					for (std::uint32_t r = 0; r < 256; ++r)
-						if ((own[r / 64] >> (r % 64) & 1u) && use.clock - found->rows[r] <= kKeyHold)
-							part.rows[r / 64] |= 1ull << (r % 64);
+					for (std::uint32_t w = 0; w < 4; ++w)
+						for (std::uint64_t bits = own[w]; bits; bits &= bits - 1) {
+							const std::uint32_t r = w * 64 + static_cast<std::uint32_t>(std::countr_zero(bits));
+							if (use.clock - found->rows[r] <= kKeyHold)
+								part.rows[w] |= 1ull << (r % 64);
+						}
 					any = true;
 				}
 				keep->clients.push_back(part);
@@ -2356,35 +2377,35 @@ namespace FrameAnchors
 			const auto equal = [&](const BuildKey* a_left, const BuildKey* a_right) {
 				return a_left && a_right && KeyCovers(a_left, a_right, clients) && KeyCovers(a_right, a_left, clients);
 			};
-			const bool covered = KeyCovers(built.get(), keep.get(), clients);
-			const bool stale = !KeyCovers(keep.get(), built.get(), clients);
+			const bool covered = KeyCovers(built.get(), keep, clients);
+			const bool stale = !KeyCovers(keep, built.get(), clients);
 			// A requested build that has not arrived is in flight. One that never came, after a failure, is asked for again.
 			constexpr std::uint64_t kRequestFrames = 600;
 			const bool inFlight = use.requestedSerial && (!built || built->serial < use.requestedSerial) && a_frame.frame - use.requestedFrame < kRequestFrames;
 			const char* why = nullptr;
 			if (!covered) {
-				if (!(inFlight && next && KeyCovers(next.get(), keep.get(), clients)))
+				if (!(inFlight && next && KeyCovers(next.get(), keep, clients)))
 					why = "a frame wants passes the build left out";
 			} else if (stale) {
 				const bool provisional = KeyProvisional(built.get(), clients);
-				if ((provisional || load || a_kindSwitch) && !(inFlight && equal(next.get(), keep.get())))
+				if ((provisional || load || a_kindSwitch) && !(inFlight && equal(next.get(), keep)))
 					why = provisional ? (!built || built->all ? "the stage's first key" : "a client registered since the build") :
 					      load        ? "unused passes leave at a load" :
 					                    "unused passes leave at a frame-kind switch";
 			}
 			if (why) {
 				keep->serial = ++a_state.keySerial;
-				const auto text = DiffKeys(built.get(), keep.get(), clients);
+				const auto text = DiffKeys(built.get(), keep, clients);
 				use.requestedSerial = keep->serial;
 				use.requestedFrame = a_frame.frame;
-				a_state.nextKeys[a_declared].store(keep, std::memory_order_release);
+				a_state.nextKeys[a_declared].store(std::make_shared<BuildKey>(*keep), std::memory_order_release);
 				logger::info("[ORG] absent passes: the {} asks for a build at frame {} ({}): {}", info.names.label, a_frame.frame, why, text);
 				RenderGraph::Builds::Ask({ .epochs = { epoch } }, fmt::format("frame anchors: the {}'s key: {}", info.names.label, why));
 				Driver::NoteKeyBuild(static_cast<SegmentId>(a_declared));
-			} else if (!equal(next.get(), keep.get())) {
+			} else if (!equal(next.get(), keep)) {
 				// Passes unused for the hold leave with the stage's next build, whatever asks for it.
 				keep->serial = ++a_state.keySerial;
-				a_state.nextKeys[a_declared].store(keep, std::memory_order_release);
+				a_state.nextKeys[a_declared].store(std::make_shared<BuildKey>(*keep), std::memory_order_release);
 			}
 		}
 
@@ -2988,6 +3009,7 @@ namespace FrameAnchors
 			state.frameWanted[d] = {};
 			if (state.declaredEpochs[d]) {
 				const bool inRecipe = RenderGraph::Frame::Recipes::KindHas(a_frame.kind, a_frame.capture, static_cast<SegmentId>(d));
+				ZoneScopedN("CS.Anchors.Schedule");
 				a_frame.segments[d] = Schedule(state, d, inRecipe, a_frame);
 				// A present stage's frame inputs start empty for this frame.
 				if (state.frameRecording[d])
@@ -2998,8 +3020,10 @@ namespace FrameAnchors
 		const bool kindSwitch = state.keyKind != Kind::Count && state.keyKind != a_frame.kind;
 		state.keyKind = a_frame.kind;
 		for (std::uint32_t d = 0; d < kDeclared; ++d)
-			if (state.declaredEpochs[d])
+			if (state.declaredEpochs[d]) {
+				ZoneScopedN("CS.Anchors.UpdateKey");
 				UpdateKey(state, d, RenderGraph::Frame::Recipes::KindHas(a_frame.kind, a_frame.capture, static_cast<SegmentId>(d)), a_frame, kindSwitch);
+			}
 		state.inBegin = false;
 	}
 
