@@ -45,7 +45,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "BASICRHI_VK_DUMP_LOWERED" },
 			{ .name = "BASICRHI_VK_LIMITS" },
 			{ .name = "BASICRHI_VK_MAX_DESCRIPTORS" },
-			{ .name = "BASICRHI_VK_PIPELINE_BINARY", .description = "0: no pipeline binary store; the lowered binding models lower and compile every pipeline each run, through the pipeline cache" },
+			{ .name = "BASICRHI_VK_PIPELINE_BINARY", .description = "0: no pipeline binary store; the lowered binding models lower and compile every pipeline each run, through the pipeline cache. 1: the store on NVIDIA, where it is off by default (2 MiB of process memory per pipeline)" },
 			{ .name = "BASICRHI_VK_VALIDATE_LOWERING" },
 			{ .name = "CS_AB_PROBE" },
 			{ .name = "CS_D3D12_SOURCE_DUMP" },

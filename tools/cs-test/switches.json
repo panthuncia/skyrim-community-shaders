@@ -288,7 +288,7 @@
 			"choices": [],
 			"kind": "other",
 			"family": "basicrhi",
-			"description": "0: no pipeline binary store; the lowered binding models lower and compile every pipeline each run, through the pipeline cache"
+			"description": "0: no pipeline binary store; the lowered binding models lower and compile every pipeline each run, through the pipeline cache. 1: the store on NVIDIA, where it is off by default (2 MiB of process memory per pipeline)"
 		},
 		{
 			"name": "BASICRHI_VK_VALIDATE_LOWERING",
