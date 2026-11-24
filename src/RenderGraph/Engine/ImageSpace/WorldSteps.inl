@@ -1110,6 +1110,12 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 	for (auto& block : blocks)
 		state.postKeep.push_back(std::move(block));
 	++state.taken;
+	// Says once per effect that a step took it, so a test can tell a path ran. Render thread only.
+	static std::array<bool, kEffects.size()> firstTaken{};
+	if (!firstTaken[a_effect]) {
+		firstTaken[a_effect] = true;
+		logger::info("[ORG] ImageSpace: first {} taken by its step", kEffects[a_effect].effectName);
+	}
 	return true;
 }
 
