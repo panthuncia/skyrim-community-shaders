@@ -272,6 +272,10 @@ namespace RenderGraph::AnchorPasses
 			// A draw with no viewport size follows its target's bound version, which a kept recording checks itself.
 			DrawFrame Prepare(const DrawBindings&, const org::PassPrepareContext& a_context) const { return { spec, DrawViewport(spec->step, a_context) }; }
 
+			// Its commands depend on the run only through SkipsAtExecution and its latch regions, which a kept recording's stable run
+			// pins (LatchBlock). Its pipeline is the recording's pinned version. So a kept late batch keeps its list.
+			static constexpr bool kRecordKeyedBySkip = true;
+
 			// A gated draw left closed this run is not recorded. A draw that clears its target is always recorded.
 			static bool SkipsAtExecution(const DrawBindings&, const DrawFrame& a_frame, const org::PassRecordContext& a_recording)
 			{
@@ -337,6 +341,9 @@ namespace RenderGraph::AnchorPasses
 			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(spec.get())); }
 
 			SpecFrame<Dispatch> Prepare(const DispatchBindings&, const org::PassPrepareContext&) const { return { spec }; }
+
+			// As FullscreenPass: the run only through SkipsAtExecution and pinned latch regions.
+			static constexpr bool kRecordKeyedBySkip = true;
 
 			// A gated dispatch left closed this run is not recorded.
 			static bool SkipsAtExecution(const DispatchBindings&, const SpecFrame<Dispatch>& a_frame, const org::PassRecordContext& a_recording)
