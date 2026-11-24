@@ -215,6 +215,10 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISDownsample, "ISDownsample", "ISDownsample.hlsl", 3, 0b111, 3, 0, false },
 			{ Effects::ISBlur, "ISBlur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
 			{ Effects::ISIBLensFlares, "ISIBLensFlares", "ISIBLensFlare.hlsl", 1, 0b1, 1, 0, false },
+			// The compute downsamples. ISDownsampleCS is the image-based flares' first downsample, with jitter compensation (t1 last
+			// frame's result, t2 motion vectors). ISDownsampleIgnoreBrightestCS is the SSR mask's at reflection divider 4, without it.
+			{ Effects::ISDownsampleCS, "ISDownsampleCS", "ISDownsampleCS.hlsl", 3, 0b111, 3, 0, true },
+			{ Effects::ISDownsampleIgnoreBrightestCS, "ISDownsampleIgnoreBrightestCS", "ISDownsampleCS.hlsl", 3, 0b001, 3, 0, true },
 			// Lens flares (SE 100274, in RenderWorldPostProcess). The visibility pass reads depth and writes a texel per light into
 			// kLENSFLAREVIS. Each sprite draws the engine's sprite quad: t0 is its loaded texture, read by heap index, t1 the visibility.
 			{ Effects::ISLensFlareVisibility, "ISLensFlareVisibility", "LensFlare.hlsl", 1, 0b1, 1, 0, false },

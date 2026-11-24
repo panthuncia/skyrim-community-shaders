@@ -25,7 +25,8 @@ namespace ChainGroup
 	constexpr std::uint8_t kUpsample = 29;
 	constexpr std::uint8_t kCapture = 30;  // a frozen world's capture frame copies the final target into kMENUBG
 	constexpr std::uint8_t kLensFlare = 31;  // the lens flares' visibility and sprite passes
-	constexpr std::uint8_t kCount = 32;
+	constexpr std::uint8_t kIblf = 32;       // the image-based lens flares' downsamples, flares, blurs and sums
+	constexpr std::uint8_t kCount = 33;
 }
 
 constexpr std::array<PostPart, 3> kChainParts{ PostPart::Composites, PostPart::Hdr, PostPart::Final };
@@ -80,6 +81,8 @@ struct ChainSteps
 	std::uint32_t lensSprites = 0, lensVerticesPerSprite = 0;
 	// Whether the engine's target and blend at each lens flare pass were checked against the step's. Once a session.
 	bool lensVisibilityChecked = false, lensSpriteChecked = false;
+	// The image-based flares' draws this frame so far, by effect, t0 and output target (IblfVariantNow). Cleared as the composites start.
+	std::map<std::tuple<std::int32_t, std::int32_t, std::int32_t>, std::uint32_t> iblfDraws;
 };
 
 /**
@@ -179,6 +182,21 @@ constexpr std::uint16_t InOut(std::int32_t a_in, std::int32_t a_out)
 	return static_cast<std::uint16_t>(((a_in & 0x7f) << 8) | (a_out & 0xff));
 }
 
+/** @brief How often the image-based flares' blur loops may repeat a draw (the engine's count is 3 by default). A later repeat has no pass. */
+constexpr std::uint32_t kIblfRepeats = 4;
+
+/** @brief No image-based flare step has this variant: it names target 127, which does not exist. */
+constexpr std::uint16_t kIblfNoStep = 0xffff;
+
+/**
+* @brief An image-based flare step's variant: its t0 and output targets (RE::RENDER_TARGET below 127), and which repeat of that pair in
+* the frame it is. The blur loops draw the same pair several times, and each repeat is its own pass.
+*/
+constexpr std::uint16_t IblfVariant(std::int32_t a_in, std::int32_t a_out, std::uint32_t a_repeat)
+{
+	return static_cast<std::uint16_t>((a_out & 0x7f) | ((a_in & 0x7f) << 7) | ((a_repeat & 3u) << 14));
+}
+
 std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_post);
 
 std::string ChainGroupName(std::uint8_t a_group)
@@ -215,6 +233,8 @@ std::string ChainGroupName(std::uint8_t a_group)
 		return "the frozen background's copy";
 	case kLensFlare:
 		return "the lens flares";
+	case kIblf:
+		return "the image-based lens flares";
 	default:
 		return fmt::format("group {}", a_group);
 	}
@@ -368,6 +388,8 @@ std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_po
 	on[ChainGroup::kComposite] = true;
 	// The engine draws lens flares only for the lights it sees this frame, which Begin cannot know. Gated, so frames without them skip.
 	on[ChainGroup::kLensFlare] = true;
+	// CS turns the image-based flares off at init, and only the console turns them on, at any frame. Gated, so frames without them skip.
+	on[ChainGroup::kIblf] = true;
 	for (std::uint32_t slot = 0; slot < 8; ++slot) {
 		if (!(post.slots >> slot & 1u))
 			continue;
@@ -685,12 +707,94 @@ void BuildChainSteps(ChainBuild& a_build)
 		add(0, ChainGroup::kLensFlare, WorldScope::LensFlare, E::ISLensFlare, 0, std::move(s));
 	}
 
-	// The VL composite at the render size. The lens flare forms (the image-based flares) read an output with no CS pass.
+	// The image-based lens flares (AE 0x1414d21b0), first in RenderPreTonemapComposites. CS turns them off at init (Hooks.cpp), so only
+	// the console's ToggleIBLF reaches them. Every step reads and writes the engine's targets, as the engine does. Each downsample
+	// blends in last frame's result from the other target of its ping-pong pair (by frame counter), moved by the motion vectors.
+	// The sum ends in kHDR_BLURSWAP, which the lens flare forms of the composite read. All viewports are the whole target.
+	{
+		constexpr std::uint32_t kAdd = PackBlend(5, 0, 2, 0);
+		const auto ping = [](std::int32_t a_first, std::uint32_t a_parity) { return a_first + static_cast<std::int32_t>(a_parity); };
+		// a_history is the downsample's other ping-pong target, or -1 for a step without it. The engine samples t0 linear with a border.
+		const auto iblf = [&](E::ImageSpaceEffectEnum a_effect, std::string a_name, std::int32_t a_in, std::int32_t a_out, std::uint32_t a_repeat,
+							  std::int32_t a_history = -1, StepSampler a_sampler = StepSampler{ 4, 1 }, std::uint32_t a_blend = PackBlend(0, 0, 2, 0)) {
+			StepDesc d{ .name = std::move(a_name), .output = engine(a_out), .blend = a_blend };
+			d.inputs[0] = engine(a_in);
+			d.samplers[0] = a_sampler;
+			if (a_history >= 0) {
+				d.inputs[1] = engine(a_history);
+				d.inputs[2] = engine(T::kMOTION_VECTOR);
+				d.samplers[1] = kLinear;
+				d.samplers[2] = kLinear;
+			}
+			add(0, ChainGroup::kIblf, WorldScope::Iblf, a_effect, IblfVariant(a_in, a_out, a_repeat), std::move(d));
+		};
+		constexpr std::int32_t kLights = T::kIBLENSFLARES_LIGHTS_FILTER, k4x4 = T::kIBLENSFLARES_DOWNSAMPLE_4X_4X_PING,
+							   k16x4 = T::kIBLENSFLARES_DOWNSAMPLE_16X_4Y_PING, k16x4Blur = T::kIBLENSFLARES_DOWNSAMPLE_16X_4Y_BLUR,
+							   k16x4Swap = T::kIBLENSFLARES_DOWNSAMPLE_16X_4Y_BLUR_SWAP, k32x4 = T::kIBLENSFLARES_DOWNSAMPLE_32X_4Y_PING,
+							   k32x4Blur = T::kIBLENSFLARES_DOWNSAMPLE_32X_4Y_BLUR, k32x4Swap = T::kIBLENSFLARES_DOWNSAMPLE_32X_4Y_BLUR_SWAP,
+							   k16x16 = T::kIBLENSFLARES_DOWNSAMPLE_16X_16X_PING, k16x16Swap = T::kIBLENSFLARES_DOWNSAMPLE_16X_16X_SWAP;
+		// The first downsample, of kMAIN. The compute form runs while bEnableDownsampleComputeShader is on (the default), with a linear
+		// clamp sampler at s0. The raster form samples with a border.
+		for (std::uint32_t p = 0; p < 2; ++p) {
+			iblf(E::ISDownsample, fmt::format("iblf.downsample0.p{}", p), T::kMAIN, ping(k4x4, p), 0, ping(k4x4, 1 - p));
+			iblf(E::ISDownsampleCS, fmt::format("iblf.downsample0.cs.p{}", p), T::kMAIN, ping(k4x4, p), 0, ping(k4x4, 1 - p), kLinear);
+		}
+		for (std::uint32_t p = 0; p < 2; ++p)
+			iblf(E::ISIBLensFlares, fmt::format("iblf.flares0.p{}", p), ping(k4x4, p), kLights, 0);
+		for (std::uint32_t p = 0; p < 2; ++p)
+			iblf(E::ISDownsample, fmt::format("iblf.downsample1.p{}", p), kLights, ping(k16x4, p), 0, ping(k16x4, 1 - p));
+		for (std::uint32_t p = 0; p < 2; ++p)
+			iblf(E::ISIBLensFlares, fmt::format("iblf.flares1.p{}", p), ping(k16x4, p), k16x4Blur, 0);
+		for (std::uint32_t p = 0; p < 2; ++p)
+			iblf(E::ISDownsample, fmt::format("iblf.downsample2.p{}", p), k16x4Blur, ping(k32x4, p), 0, ping(k32x4, 1 - p));
+		// The lights' blur goes through two of the HDR effect's targets, which the HDR effect writes again later in the frame.
+		iblf(E::ISBlur, "iblf.blur.lights.h", kLights, T::kHDR_DOWNSAMPLE0, 0);
+		iblf(E::ISBlur, "iblf.blur.lights.v", T::kHDR_DOWNSAMPLE0, T::kHDR_BLURSWAP, 0);
+		for (std::uint32_t p = 0; p < 2; ++p)
+			iblf(E::ISDownsample, fmt::format("iblf.downsample3.p{}", p), T::kHDR_BLURSWAP, ping(k16x16, p), 0, ping(k16x16, 1 - p));
+		for (std::uint32_t p = 0; p < 2; ++p)
+			iblf(E::ISBlur, fmt::format("iblf.blur.16x16.h.p{}", p), ping(k16x16, p), k16x16Swap, 0);
+		iblf(E::ISBlur, "iblf.blur.16x16.v", k16x16Swap, T::kHDR_DOWNSAMPLE1, 0);
+		// Two blur loops of the engine's count. The second loop's first blur reads the 32x4 downsample, its later ones the swap.
+		for (std::uint32_t i = 0; i < kIblfRepeats; ++i) {
+			iblf(E::ISBlur, fmt::format("iblf.blur.16x4.h{}", i), k16x4Blur, k16x4Swap, i);
+			iblf(E::ISBlur, fmt::format("iblf.blur.16x4.v{}", i), k16x4Swap, k16x4Blur, i);
+		}
+		for (std::uint32_t i = 0; i < kIblfRepeats; ++i) {
+			if (i == 0)
+				for (std::uint32_t p = 0; p < 2; ++p)
+					iblf(E::ISBlur, fmt::format("iblf.blur.32x4.v0.p{}", p), ping(k32x4, p), k32x4Blur, 0);
+			else
+				iblf(E::ISBlur, fmt::format("iblf.blur.32x4.v{}", i), k32x4Swap, k32x4Blur, i - 1);
+			iblf(E::ISBlur, fmt::format("iblf.blur.32x4.h{}", i), k32x4Blur, k32x4Swap, i);
+		}
+		// The sum: three additive copies (ImageSpaceManager::RenderEffect with effect 35), linear at s0.
+		iblf(E::ISCopyDynamicFetchDisabled, "iblf.sum.16x16", T::kHDR_DOWNSAMPLE1, T::kHDR_BLURSWAP, 0, -1, kLinear, kAdd);
+		iblf(E::ISCopyDynamicFetchDisabled, "iblf.sum.32x4", k32x4Swap, k16x4Blur, 0, -1, kLinear, kAdd);
+		iblf(E::ISCopyDynamicFetchDisabled, "iblf.sum.16x4", k16x4Blur, T::kHDR_BLURSWAP, 0, -1, kLinear, kAdd);
+	}
+
+	// The composite at the render size (AE 0x1414d45f0), additive into kMAIN: t0 the VL of the frame's parity, t1 the image-based
+	// flares' sum. The engine picks the form from what is on: VL alone, the flares alone, or both.
 	for (std::uint16_t p = 0; p < 2; ++p) {
 		StepDesc d{ .name = fmt::format("composite.vl.p{}", p), .output = engine(T::kMAIN), .blend = PackBlend(5, 0, 2, 0), .area = StepArea::Render };
 		d.inputs[0] = engine(T::kIMAGESPACE_VOLUMETRIC_LIGHTING + p);
 		d.samplers[0] = kLinear;
 		add(0, ChainGroup::kComposite, WorldScope::Composite, E::ISCompositeVolumetricLighting, p, std::move(d));
+	}
+	{
+		StepDesc d{ .name = "composite.lf", .output = engine(T::kMAIN), .blend = PackBlend(5, 0, 2, 0), .area = StepArea::Render };
+		d.inputs[1] = engine(T::kHDR_BLURSWAP);
+		d.samplers[1] = kLinear;
+		add(0, ChainGroup::kComposite, WorldScope::Composite, E::ISCompositeLensFlare, 0, std::move(d));
+	}
+	for (std::uint16_t p = 0; p < 2; ++p) {
+		StepDesc d{ .name = fmt::format("composite.lfvl.p{}", p), .output = engine(T::kMAIN), .blend = PackBlend(5, 0, 2, 0), .area = StepArea::Render };
+		d.inputs[0] = engine(T::kIMAGESPACE_VOLUMETRIC_LIGHTING + p);
+		d.inputs[1] = engine(T::kHDR_BLURSWAP);
+		d.samplers[0] = kLinear;
+		d.samplers[1] = kLinear;
+		add(0, ChainGroup::kComposite, WorldScope::Composite, E::ISCompositeLensFlareVolumetricLighting, p, std::move(d));
 	}
 
 	const auto single = [&](std::uint8_t a_part, std::uint32_t a_slot, bool a_ldr, E::ImageSpaceEffectEnum a_effect, const char* a_name, StepSampler a_sampler,
@@ -1044,17 +1148,50 @@ enum class ChainDraw : std::uint8_t
 	Nothing,
 };
 
-/** @brief A chain draw's key from the engine's parity globals and the frame state. No variant depends on a target. */
+/**
+* @brief An image-based flare draw's variant (IblfVariant) from the targets the engine bound for it: t0 and the render target, or
+* u0 for the compute downsample. Counts the frame's repeats of the pair. kIblfNoStep for a target no step names.
+*/
+std::uint16_t IblfVariantNow(Effects::ImageSpaceEffectEnum a_effect)
+{
+	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+	const bool compute = kEffects[static_cast<std::size_t>(EffectIndexOf(a_effect))].compute;
+	const auto input = InputOfView(compute ? shadow.CSTexture[0] : shadow.PSTexture[0]);
+	const auto output = compute ? TargetOfUav(shadow.CSUAV[0]) : static_cast<std::int32_t>(shadow.renderTargets[0]);
+	const auto plain = [](std::int32_t a_name) { return a_name >= 0 && a_name < 0x7f; };
+	if (!plain(input) || !plain(output))
+		return kIblfNoStep;
+	const auto repeat = Chain().iblfDraws[{ static_cast<std::int32_t>(a_effect), input, output }]++;
+	return repeat < kIblfRepeats ? IblfVariant(input, output, repeat) : kIblfNoStep;
+}
+
+/** @brief A chain draw's key from the engine's parity globals and the frame state. Only the image-based flares' variants name targets. */
 ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::uint8_t& a_group)
 {
 	using E = Effects;
 	auto& chain = Chain();
 	if (chain.inComposites && !chain.inEndOfFrame) {
-		if (a_effect != E::ISCompositeVolumetricLighting)
+		switch (a_effect) {
+		case E::ISCompositeVolumetricLighting:
+		case E::ISCompositeLensFlareVolumetricLighting:
+			a_group = ChainGroup::kComposite;
+			a_key = { WorldScope::Composite, a_effect, static_cast<std::uint16_t>(Frame::PostChain::VolumetricParity()) };
+			return ChainDraw::Step;
+		case E::ISCompositeLensFlare:
+			a_group = ChainGroup::kComposite;
+			a_key = { WorldScope::Composite, a_effect, 0 };
+			return ChainDraw::Step;
+		case E::ISDownsample:
+		case E::ISDownsampleCS:
+		case E::ISIBLensFlares:
+		case E::ISBlur:
+		case E::ISCopyDynamicFetchDisabled:
+			a_group = ChainGroup::kIblf;
+			a_key = { WorldScope::Iblf, a_effect, IblfVariantNow(a_effect) };
+			return ChainDraw::Step;
+		default:
 			return ChainDraw::Unknown;
-		a_group = ChainGroup::kComposite;
-		a_key = { WorldScope::Composite, a_effect, static_cast<std::uint16_t>(Frame::PostChain::VolumetricParity()) };
-		return ChainDraw::Step;
+		}
 	}
 	if (!chain.inEndOfFrame)
 		return ChainDraw::Unknown;
@@ -1478,8 +1615,10 @@ struct ChainCompositesGuard
 {
 	ChainCompositesGuard() : active(IS().on && Frame::PostChain::InChain() && FrameAnchors::IsRenderOwner())
 	{
-		if (active)
+		if (active) {
 			Chain().inComposites = true;
+			Chain().iblfDraws.clear();
+		}
 	}
 	~ChainCompositesGuard()
 	{
