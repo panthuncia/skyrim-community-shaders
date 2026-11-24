@@ -84,7 +84,8 @@ namespace DCLF::Features::Fades
 			std::vector<std::uint32_t> programs;
 			// Set on GPU-driven frames. The stage then only reads and steps routedRoots. FadeStateCS stays in charge of fades.
 			bool observer = false;
-			std::shared_ptr<const std::vector<std::uint32_t>> routedRoots;
+			// Made by the producer from set (RoutedRoots), off the render thread.
+			mutable std::shared_ptr<const std::vector<std::uint32_t>> routedRoots;
 		};
 
 		// Render thread. Kept apart from FadeCommit.cpp's mirror of the same programs. Frames share the vector, so it is replaced, never edited.
@@ -260,8 +261,6 @@ namespace DCLF::Features::Fades
 				return { idleInput, stateRows };
 			auto input = std::make_shared<CpuStageInput>();
 			input->observer = arm.observer;
-			if (arm.observer)
-				input->routedRoots = RoutedRoots(arm.set);
 			input->set = std::move(arm.set);
 			input->sceneFrame = arm.sceneFrame;
 			input->visibilityReset = arm.visibilityReset;
@@ -575,7 +574,11 @@ namespace DCLF::Features::Fades
 						storage->rootPrograms[r] = (*input->rootPrograms)[r];
 				storage->programs = input->programs;
 			}
-			// Every root, or for an observer the routed roots still listed.
+			// Every root, or for an observer the routed roots still listed. Producer only (RoutedRoots' cache).
+			if (observer && !input->routedRoots) {
+				DCLF_ZONE("CS.DCLF.FadeCpuStage.RoutedRoots");
+				input->routedRoots = RoutedRoots(input->set);
+			}
 			const std::uint32_t* routed = observer ? input->routedRoots->data() : nullptr;
 			const std::size_t steps = observer ? static_cast<std::size_t>(std::lower_bound(input->routedRoots->begin(), input->routedRoots->end(), roots) - input->routedRoots->begin()) : roots;
 			const auto slotAt = [&](std::size_t a_step) { return routed ? routed[a_step] : static_cast<std::uint32_t>(a_step); };

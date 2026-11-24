@@ -591,19 +591,17 @@ namespace DCLF::Family
 	{
 		if (a_id.empty())
 			return InputResult::NotListed;
-		auto listed = ids.end();
-		for (const auto& [chars, at] : positions)
-			if (chars == a_id.data() && at < ids.size() && ids[at] == a_id) {
-				listed = ids.begin() + at;
-				break;
-			}
-		if (listed == ids.end()) {
-			listed = std::ranges::find(ids, a_id);
-			if (listed == ids.end())
-				return InputResult::NotListed;
-			if (positions.size() < 64)
-				positions.emplace_back(a_id.data(), static_cast<std::uint32_t>(listed - ids.begin()));
+		// ids only grow, at setup. Growing may move its strings, so the map is made again whenever it grew.
+		if (positionsOf != ids.size()) {
+			positions.clear();
+			for (std::uint32_t i = 0; i < ids.size(); ++i)
+				positions.emplace(ids[i], i);
+			positionsOf = ids.size();
 		}
+		const auto found = positions.find(a_id);
+		if (found == positions.end())
+			return InputResult::NotListed;
+		const auto listed = ids.begin() + found->second;
 		const std::uint64_t frame = ::RenderGraph::Frame::Driver::Current().frame;
 		const std::uint64_t serial = declaredSerial.load(std::memory_order_acquire);
 		if (answersFrame != frame || answersSerial != serial || answers.size() != ids.size()) {

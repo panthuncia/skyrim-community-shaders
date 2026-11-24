@@ -918,9 +918,17 @@ namespace RenderGraph::Engine::Skeleton
 			return info.dclf || info.anchor != Anchor::Count;
 		}
 
-		std::string HostedClientId(std::size_t a_group, Host a_host)
+		const std::string& HostedClientId(std::size_t a_group, Host a_host)
 		{
-			return fmt::format("{}@{}", kGroupIds[a_group], kHostInfo[HostIndex(a_host)].name);
+			// Asked at every staged clear: the ids are made once.
+			static const auto ids = [] {
+				std::array<std::array<std::string, kHosts>, kGroups> table;
+				for (std::size_t group = 0; group < kGroups; ++group)
+					for (std::size_t host = 0; host < kHosts; ++host)
+						table[group][host] = fmt::format("{}@{}", kGroupIds[group], kHostInfo[host].name);
+				return table;
+			}();
+			return ids[a_group][HostIndex(a_host)];
 		}
 
 		struct HostedSet
@@ -1101,7 +1109,18 @@ namespace RenderGraph::Engine::Skeleton
 			a_client.gates = { a_build.gate };
 		}
 
-		std::string PlaceClientId(std::size_t a_group, std::size_t a_place) { return fmt::format("{}@{}", kGroupIds[a_group], kPlaceNames[a_place]); }
+		const std::string& PlaceClientId(std::size_t a_group, std::size_t a_place)
+		{
+			// Asked at every clear: the ids are made once.
+			static const auto ids = [] {
+				std::array<std::array<std::string, kPlaces>, std::size(kGroupIds)> table;
+				for (std::size_t group = 0; group < table.size(); ++group)
+					for (std::size_t place = 0; place < kPlaces; ++place)
+						table[group][place] = fmt::format("{}@{}", kGroupIds[group], kPlaceNames[place]);
+				return table;
+			}();
+			return ids[a_group][a_place];
+		}
 
 		/** @brief The clears seen in loading screen and main menu frames. Any other clear there keeps its group anchor's ticket. */
 		bool PlaceClears(Place, const Target& a_target)
@@ -1257,12 +1276,9 @@ namespace RenderGraph::Engine::Skeleton
 			auto& group = GroupOf(a_group);
 			const auto index = IndexOf(a_group);
 			static Util::ReasonLog s_kept("[ORG] engine skeleton: a clear at no place of the UI stage keeps its group anchor's ticket");
-			std::array<std::string, kPlaces> ids;
 			std::array<std::string_view, kPlaces> views;
-			for (std::size_t place = 0; place < kPlaces; ++place) {
-				ids[place] = PlaceClientId(index, place);
-				views[place] = ids[place];
-			}
+			for (std::size_t place = 0; place < kPlaces; ++place)
+				views[place] = PlaceClientId(index, place);
 			const auto place = FrameAnchors::StagePlace(views);
 			if (place < 0)
 				return !WorldFrame() && s_kept.Report(fmt::format("{}: no open stage has a place for the {} clears", RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind), kGroupNames[index])), false;
@@ -1277,7 +1293,7 @@ namespace RenderGraph::Engine::Skeleton
 			if (!entry)
 				return s_kept.Report(fmt::format("the {} place has no clear of {} for flags {}", kPlaceNames[p], TargetName(a_target), a_flags)), false;
 			const auto& build = *held;
-			const bool staged = FrameAnchors::StageInputs(ids[p], [&] {
+			const bool staged = FrameAnchors::StageInputs(views[p], [&] {
 				const org::RunRef run = RunGate::Current();
 				if (!a_pending.depth)
 					build.placeColours->WriteValue(run, *entry * RunGate::kEntryBytes, a_pending.colour);
@@ -1505,16 +1521,26 @@ namespace RenderGraph::Engine::Skeleton
 			return { FrameAnchors::EngineTexture(FrameAnchors::Colour(ColourTarget::kMAIN)), std::move(copy) };
 		}
 
-		std::string CopyClientId(CopyKind a_kind, CopyAt a_at)
+		const std::string& CopyClientId(CopyKind a_kind, CopyAt a_at)
 		{
+			// Asked at every copy: the ids are made once.
+			static const auto ids = [] {
+				std::array<std::array<std::string, 2>, std::size(kCopyIds)> table;
+				for (std::size_t kind = 0; kind < table.size(); ++kind) {
+					table[kind][0] = kCopyIds[kind];
+					table[kind][1] = fmt::format("{}@{}", kCopyIds[kind], kHostInfo[HostIndex(Host::DeferredPasses)].name);
+				}
+				return table;
+			}();
+			static const std::string ui = kUiDepthCopyId;
 			const auto index = static_cast<std::size_t>(a_kind);
 			switch (a_at) {
 			case CopyAt::Hosted:
-				return fmt::format("{}@{}", kCopyIds[index], kHostInfo[HostIndex(Host::DeferredPasses)].name);
+				return ids[index][1];
 			case CopyAt::Ui:
-				return kUiDepthCopyId;
+				return ui;
 			default:
-				return kCopyIds[index];
+				return ids[index][0];
 			}
 		}
 
@@ -1537,7 +1563,7 @@ namespace RenderGraph::Engine::Skeleton
 			if (source.Width() != target.Width() || source.Height() != target.Height() || source.Format() != target.Format())
 				RenderGraph::Fatal("engine skeleton", fmt::format("{}: the textures differ in size or format", kCopyNames[index]));
 			const auto& hostInfo = kHostInfo[HostIndex(Host::DeferredPasses)];
-			const auto id = CopyClientId(a_kind, a_at);
+			const auto& id = CopyClientId(a_kind, a_at);
 			auto anchor = kCopyAnchors[index];
 			std::int32_t order = 0;
 			std::string step = kCopySteps[index];

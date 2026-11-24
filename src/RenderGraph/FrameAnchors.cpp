@@ -170,6 +170,24 @@ namespace FrameAnchors
 		}
 		constexpr std::array<DeclaredInfo, kDeclared> declaredInfo = DeclaredFromTable();
 
+		/** @brief The steps of each declared segment whose table entry names a client id, a bit per step. Zeros for an id no step names. */
+		const std::array<std::uint32_t, kDeclared>& NamedSteps(std::string_view a_id)
+		{
+			// The table is constant, so the map is made once.
+			static const auto byId = [] {
+				std::unordered_map<std::string_view, std::array<std::uint32_t, kDeclared>> map;
+				for (std::uint32_t d = 0; d < kDeclared; ++d)
+					for (std::uint32_t k = 0; k < declaredInfo[d].stepCount; ++k)
+						for (const auto name : declaredInfo[d].steps[k].clients)
+							if (!name.empty())
+								map[name][d] |= 1u << k;
+				return map;
+			}();
+			static constexpr std::array<std::uint32_t, kDeclared> kNone{};
+			const auto found = byId.find(a_id);
+			return found != byId.end() ? found->second : kNone;
+		}
+
 		/** @brief The anchors a declared segment has a step at, a bit each. */
 		std::uint32_t StepAnchorsOf(std::uint32_t a_declared)
 		{
@@ -2868,13 +2886,10 @@ namespace FrameAnchors
 		const auto& state = Anchors();
 		if (!state.frozen)
 			return false;
-		for (std::uint32_t d = 0; d < kDeclared; ++d) {
-			if (!state.declaredEpochs[d])
-				continue;
-			for (std::uint32_t k = 0; k < declaredInfo[d].stepCount; ++k)
-				if (Table::Has(declaredInfo[d].steps[k].clients, a_id))
-					return true;
-		}
+		const auto& steps = NamedSteps(a_id);
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (state.declaredEpochs[d] && steps[d])
+				return true;
 		return false;
 	}
 
@@ -2954,9 +2969,14 @@ namespace FrameAnchors
 		if (!state.host || !IsRenderOwner())
 			return -1;
 		auto lock = Guard();
-		const auto named = [&](const Step& a_step) -> std::int32_t {
-			for (std::size_t i = 0; i < a_ids.size(); ++i)
-				if (Table::Has(a_step.clients, a_ids[i]))
+		// Each id's named steps, from the table's map.
+		std::array<const std::array<std::uint32_t, kDeclared>*, 8> namedSteps{};
+		const std::size_t idCount = (std::min)(a_ids.size(), namedSteps.size());
+		for (std::size_t i = 0; i < idCount; ++i)
+			namedSteps[i] = &NamedSteps(a_ids[i]);
+		const auto named = [&](std::uint32_t a_declared, std::uint32_t a_step) -> std::int32_t {
+			for (std::size_t i = 0; i < idCount; ++i)
+				if ((*namedSteps[i])[a_declared] >> a_step & 1u)
 					return static_cast<std::int32_t>(i);
 			return -1;
 		};
@@ -2972,7 +2992,7 @@ namespace FrameAnchors
 						last = static_cast<std::int32_t>(k);
 			std::int32_t first = -1, chosen = -1;
 			for (std::uint32_t k = 0; k < info.stepCount; ++k) {
-				const auto id = named(info.steps[k]);
+				const auto id = named(d, k);
 				if (id < 0)
 					continue;
 				if (first < 0)
