@@ -1490,8 +1490,8 @@ namespace RenderGraph::Engine::ImageSpace
 #include "RenderGraph/Engine/ImageSpace/MenuSteps.inl"
 
 		/** @brief The engine blend states the steps use. The engine fills its blend table after Setup. */
-		constexpr std::array<std::uint32_t, 6> kShapeBlends{ PackBlend(0, 0, 2, 0), PackBlend(5, 0, 2, 0), PackBlend(1, 0, 2, 0), PackBlend(0, 0, 1, 0),
-			PackBlend(5, 0, 1, 0), PackBlend(0, 0, 5, 0) };
+		constexpr std::array<std::uint32_t, 5> kShapeBlends{ PackBlend(0, 0, 2, 0), PackBlend(5, 0, 2, 0), PackBlend(1, 0, 2, 0), PackBlend(0, 0, 1, 0),
+			PackBlend(0, 0, 5, 0) };
 
 		/** @brief The water's part of the shape, which the water update sees: the displacement pair, the flow map and the heightmap bound. */
 		void WaterShapeNow(Frame::Vars::ImageSpaceShape& a_shape)
