@@ -24,6 +24,7 @@ enum class WorldScope : std::uint8_t
 	LdrSlot,     // after the tonemap (usesLDR)
 	Upsample,
 	LensFlare,   // BSLensFlare's frame function (SE 100274), before the composites
+	Iblf,        // the image-based lens flares (AE 0x1414d21b0), inside the composites
 	// The start stage's water effects (StartSteps.inl).
 	WaterDisplacement,  // 31385 / 32176
 	FlowCopy,           // 35561 / 36560
@@ -752,10 +753,13 @@ bool WorldStepOn(const StepKey& a_key, const Frame::WorldFields& a_fields, std::
 			return false;
 		switch (a_key.effect) {
 		case Effects::ISDownsampleIgnoreBrightest:
-			return a_fields.ssrDownsample != 0;
+			return a_fields.ssrDownsample == 1;
+		case Effects::ISDownsampleIgnoreBrightestCS:
+			return a_fields.ssrDownsample == 2;
 		case Effects::ISReflectionsRayTracing:
-			// Variant 2 reads the downsampled mask. 0 and 1 read the normals of that parity.
-			return (a_key.variant == 2) == (a_fields.ssrDownsample != 0);
+			// Variant 2 reads the downsampled mask. 0 and 1 read the normals of that parity. After the compute downsample (divider 4)
+			// the engine leaves the ray march's input at the normals (AE 107146), so it reads them too.
+			return (a_key.variant == 2) == (a_fields.ssrDownsample == 1);
 		case Effects::ISReflectionBlurHCS:
 		case Effects::ISReflectionBlurVCS:
 			return a_fields.ssrBlur;
@@ -850,12 +854,19 @@ void BuildWorldSteps(WorldBuild& a_build)
 		steps.push_back({ a_scope == WorldScope::WaterBlend, { a_scope, a_effect, a_variant }, std::move(a_desc) });
 	};
 
-	// The compute form of the mask downsample has no CS pass.
 	for (std::uint16_t p = 0; p < 2; ++p) {
 		StepDesc d{ .name = fmt::format("ssr.downsample.n{}", p), .output = owned(world.ssrMask), .area = StepArea::Render };
 		d.inputs[0] = normals(p);
 		d.samplers[0] = { 4, 1 };
 		add(WorldScope::Reflections, E::ISDownsampleIgnoreBrightest, p, std::move(d));
+	}
+	// At divider 4 the compute form replaces it (AE 107146): u0 the mask target, t0 the normals, 4 samples, no jitter compensation.
+	// The engine's ray march then still reads the normals, so nothing reads what it writes.
+	for (std::uint16_t p = 0; p < 2; ++p) {
+		StepDesc d{ .name = fmt::format("ssr.downsample.cs.n{}", p), .output = owned(world.ssrMask) };
+		d.inputs[0] = normals(p);
+		d.samplers[0] = { 4, 1 };
+		add(WorldScope::Reflections, E::ISDownsampleIgnoreBrightestCS, p, std::move(d));
 	}
 	for (std::uint16_t v = 0; v < 3; ++v) {
 		StepDesc d{ .name = v == 2 ? std::string("ssr.raymarch.mask") : fmt::format("ssr.raymarch.n{}", v), .output = engine(T::kSSR_RAW), .area = StepArea::Render };
@@ -1107,13 +1118,15 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 	const auto parity = static_cast<std::uint16_t>(Frame::Driver::Current().parity);
 	switch (id) {
 	case E::ISDownsampleIgnoreBrightest:
+	case E::ISDownsampleIgnoreBrightestCS:
 		variant = EngineNormalsParity();
 		break;
 	case E::ISReflectionsRayTracing:
 		{
 			static REL::Relocation<const bool*> downsample{ REL::RelocationID(513568, 391448) };
 			static REL::Relocation<const std::int32_t*> mode{ REL::RelocationID(513454, 391287) };
-			variant = (*downsample.get() && *mode.get() > 1) ? 2 : EngineNormalsParity();
+			// Only the raster downsample (divider 2 or 3) moves the ray march's input to the mask.
+			variant = (*downsample.get() && *mode.get() > 1 && *mode.get() != 4) ? 2 : EngineNormalsParity();
 			break;
 		}
 	case E::ISMinify:

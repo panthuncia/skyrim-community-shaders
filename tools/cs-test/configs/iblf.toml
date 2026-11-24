@@ -1,0 +1,83 @@
+# The image-based lens flares (the IBLF chain in RenderPreTonemapComposites, with ISDownsampleCS first). CS turns them off at
+# init, so the console's ToggleIBLF turns them on. Whiterun at noon in clear weather, looking up toward the sun: a shot without
+# them, ToggleIBLF, a shot with them, ToggleIBLF again and a last shot. Compose it: guest+iblf, native-vulkan+iblf, d3d11+iblf.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 200
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "console"
+arg = "player.setangle x -40"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 180"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "iblf-off"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "console"
+arg = "ToggleIBLF"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "iblf-on"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "console"
+arg = "ToggleIBLF"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "iblf-off-again"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["iblf-off", "iblf-on", "iblf-off-again"]
+no_log = ["frame tap error"]

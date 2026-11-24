@@ -135,10 +135,47 @@ PerGeometry, its texture's heap index, its quad's buffer refs) in a latch entry 
 the quad's index count per record. Lens flare scopes leave their batch open, so the composites' scope that follows runs it once.
 `ImageSpace: the engine's ... writes rt...` in the log means the target or blend read above is wrong.
 
+### Image-based lens flares and the compute downsamples
+
+Read from AE Ghidra (2026-11-23). Neither path runs with default settings under CS.
+
+- **Image-based lens flares (IBLF).** `RenderPreTonemapComposites` calls the IBLF helper (manager +0x180, AE 0x1414d21b0) before
+  the composite. CS turns `bIBLFEnable` off at init (Hooks.cpp, `BSImageSpace_Init_IBLF`), so only the console's `ToggleIBLF`
+  reaches it. The chain, in order: the first downsample of kMAIN into the 4x4 ping-pong target of the frame's parity
+  (ISDownsampleCS while `bEnableDownsampleComputeShader` is on, the default, else ISDownsample), the flares into the lights filter
+  (rt91), a downsample into the 16x4 pair, the flares into the 16x4 blur (rt96), a downsample into the 32x4 pair, the lights'
+  blur through kHDR_DOWNSAMPLE0 into kHDR_BLURSWAP, a downsample into the 16x16 pair, its blur through the 16x16 swap into
+  kHDR_DOWNSAMPLE1, then two blur loops (the engine's count, 3 by default), and three additive ISCopyDynamicFetchDisabled sums
+  (`RenderEffect` 35) into kHDR_BLURSWAP. Each downsample reads the other target of its pair (last frame's result) at t1 and the
+  motion vectors at t2. The composite (AE 0x1414d45f0) then adds t1 = kHDR_BLURSWAP through ISCompositeLensFlare, or with VL
+  through ISCompositeLensFlareVolumetricLighting.
+- **The SSR mask's compute downsample.** In `RenderReflections` (AE 107146), with `bDownSampleNormalSSR` and
+  `iReflectionResolutionDivider:Display == 4`, ISDownsampleIgnoreBrightestCS replaces the raster downsample: u0 rt6, t0 the
+  normals, 4 samples, no jitter compensation, s0 border linear, dispatch ((W x 4 + 0x3ff) >> 10, H). The engine does not then
+  move the ray march's input to rt6 as the raster path does, so the ray march reads the normals and nothing reads the mask.
+
+Both are steps now. ISDownsampleCS.hlsl has an ORG form (t0-t2, s0-s2 and u0 from the heap, the CS b0 rows from the capture, and
+a bounds test before the store). The SSR form is a world scope step into CS's own mask target (`ssr.downsample.cs.n<parity>`),
+on when `ssrDownsample` is 2. The IBLF steps are the composites client's (ChainSteps.inl, group `kIblf`, always on and gated).
+They read and write the engine's targets. Their variant is the draw's t0 and output targets and its repeat of that pair in the
+frame (`IblfVariant`), which the hook reads from the engine's bound state, so the blur loops' repeats are passes of their own,
+up to `kIblfRepeats` (4). The composite's two lens flare forms are steps beside `composite.vl`.
+
+Check: `cs-test ...+ssr-divider4` (Riverwood's river) and `...+iblf` (an exterior at noon, `ToggleIBLF`). A draw with no pass
+logs a `frame tap error` naming the effect, its variant and `the image-based lens flares`; decode the variant as output (bits
+0-6), t0 (7-13), repeat (14-15).
+
+Not verified without a build or a run: the C++ and the shader are not compiled. That the engine makes the IBLF targets while
+`bIBLFEnable` is off at init (a missing one logs `post step iblf... has no pass (its output could not be resolved)`). That the
+reset clears of the ping-pong targets on the first IBLF frame have skeleton clear passes. The raster downsamples' s1 and s2
+(the engine leaves them as earlier draws set them; the steps use linear clamp). That `ToggleIBLF` draws with the full quad,
+not the dynamic-resolution one (refused as before). That the composites' source is kMAIN (the first downsample's variant names
+t0, so another source is a tap error naming it).
+
 ### Left
 
 - **ISTemporalAA_UI and _Water:** CS's ISTemporalAA.hlsl has neither path. Writing them needs vanilla's DXBC for both (the UI build
   reads the mask from t4, the water build blends a water history) to transcribe and check; not available in this lane.
 - **Perlin noise (128, 129):** the 3D form is Volumetric Lighting's port; its output is not an engine render target.
 - **The dynamic-resolution quad:** its vertices are not known, so draws with it stay refused.
-- **ISExp (123), the compute downsamples (121, 122), debug (118, 149):** not converted.
+- **ISExp (123), debug (118, 149):** not converted. The compute downsamples (121, 122) are steps now (above).
