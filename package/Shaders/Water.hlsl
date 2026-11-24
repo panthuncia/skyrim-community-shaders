@@ -265,6 +265,8 @@ static const uint kDCLFWaterFrameDisplacementOffset = 11;
 // The water flags and descriptor bits ObjectUV and CellTexCoordOffset depend on (Port::EvaluateObject).
 static const uint kDCLFWaterFlagVertexColors = 0x100;
 static const uint kDCLFWaterFlagFlowmap = 0x8000;
+// CS's bit (WaterScene::kRowGlobalCube): the material reads the global reflection cube, the frame's kREFLECTIONS at GlobalCubeMapTex.
+static const uint kDCLFWaterFlagGlobalCube = 0x80000000;
 static const uint kDCLFWaterDescriptorWading = 1u << 6;
 static const uint kDCLFWaterDescriptorFlowmap = 1u << 9;
 
@@ -853,6 +855,8 @@ Texture2D<float4> FlowMapTex : register(t49);
 Texture2D<float4> FlowMapNormalsTex : register(t9);
 Texture2D<float4> SSRReflectionTex : register(t56);
 Texture2D<float4> RawSSRReflectionTex : register(t75);
+// t3 for a material that reads the global cube: the frame's kREFLECTIONS (WaterDraw.h's kGlobalCubeRegister).
+TextureCube<float4> GlobalCubeMapTex : register(t54);
 #			else
 Texture2D<float4> ReflectionTex : register(t0);
 Texture2D<float4> RefractionTex : register(t1);
@@ -894,6 +898,8 @@ static float4 SSRParams2;
 static float4x4 TextureProj;
 static float4 ReflectPlane[1];
 static float4 ProjData;
+// Whether the material reads the global cube (kDCLFWaterFlagGlobalCube) rather than its own at t3.
+static bool UsesGlobalCube;
 // DCLF draws no light technique: under Light Limit Fix they add nothing. The surface's stages read none of these.
 static float4 LightPos[8];
 static float4 LightColor[8];
@@ -932,6 +938,7 @@ void DCLFWaterPixelStatics()
 	// The property's plane as stored, with w its distance to the eye (this frame's, as the camera above).
 	const float4 plane = DCLFWaterObjectOf(object).Plane;
 	ReflectPlane[0] = float4(plane.xyz, dot(plane.xyz, eye) - plane.w);
+	UsesGlobalCube = (DCLFWaterObjectOf(object).WaterFlags & kDCLFWaterFlagGlobalCube) != 0;
 	ProjData = float4(FrameBuffer::CameraProj[0][0], FrameBuffer::CameraProj[1][1], 0, 0);
 }
 #			else
@@ -1457,6 +1464,16 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	return result;
 }
 
+/** @brief The reflection cube at t3: the material's, or under DCLF the frame's global cube when the material reads that one. */
+float3 SampleReflectionCube(float3 a_direction)
+{
+#			if defined(DCLF_BINDLESS)
+	if (UsesGlobalCube)
+		return GlobalCubeMapTex.SampleLevel(CubeMapSampler, a_direction, 0).xyz;
+#			endif
+	return CubeMapTex.SampleLevel(CubeMapSampler, a_direction, 0).xyz;
+}
+
 float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular)
 {
 #			if !defined(DYNAMIC_CUBEMAPS)
@@ -1482,13 +1499,13 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 			float minVisibility = SharedData::skylightingSettings.MinSpecularVisibility;
 			float skyVisibility = minVisibility < 1.0 ? saturate((skylightingSpecular - minVisibility) / (1.0 - minVisibility)) : 1.0;
 			float reflectionAmount = saturate(length(input.WPosition.xyz) / 1024.0) * skyVisibility;
-			workingSpecularIrradianceReflections = lerp(workingSpecularIrradianceReflections, CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz, reflectionAmount);
+			workingSpecularIrradianceReflections = lerp(workingSpecularIrradianceReflections, SampleReflectionCube(R), reflectionAmount);
 		}
 	}
 
 	float3 reflectionColor = ColorManagement::SceneColor::LerpInLinear(workingSpecularIrradiance, workingSpecularIrradianceReflections, skylightingSpecular);
 #			else
-	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, 0).xyz;
+	float3 reflectionColor = SampleReflectionCube(R);
 #			endif
 
 #			if !defined(LOD) && NUM_SPECULAR_LIGHTS == 0

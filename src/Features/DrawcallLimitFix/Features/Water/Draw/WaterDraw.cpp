@@ -12,6 +12,7 @@
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "State.h"
 
 #include <atomic>
 #include <functional>
@@ -134,7 +135,14 @@ namespace DCLF::Features::Water::Indirect
 		{
 			return globals::game::renderer ? static_cast<void*>(globals::game::renderer->GetRuntimeData().renderTargets[a_target].SRV) : nullptr;
 		}
-		void* RefractionView() { return ColourView(RE::RENDER_TARGET::kMAIN_COPY); }
+		/**
+		 * @brief The refraction at t1: kMAIN's copy texture, which the engine fills from kMAIN just before the water draws. Not the
+		 * kMAIN_COPY target, which the post chain writes at the frame's end.
+		 */
+		void* RefractionView()
+		{
+			return globals::game::renderer ? static_cast<void*>(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].SRVCopy) : nullptr;
+		}
 		void* DisplacementView() { return ColourView(RE::RENDER_TARGET::kWATER_DISPLACEMENT); }
 		/**
 		 * @brief The flow map SetupGeometry binds at t8 for a Flowmap draw: the flow map source texture's view (AE 0x1414e2957).
@@ -150,15 +158,36 @@ namespace DCLF::Features::Water::Indirect
 		}
 		void* SsrView() { return ColourView(RE::RENDER_TARGET::kSSR); }
 		void* SsrRawView() { return ColourView(RE::RENDER_TARGET::kSSR_RAW); }
+		/**
+		 * @brief Whether CS's cubemap fix leaves t3 empty where the engine binds kREFLECTIONS: in an interior, outside the map menu
+		 * (Port's nullReflectionCube).
+		 */
+		bool GlobalCubeUnbound()
+		{
+			auto* tes = RE::TES::GetSingleton();
+			if (!tes || (globals::state && globals::state->isMapMenuOpen))
+				return false;
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* cell = player ? player->GetParentCell() : nullptr;
+			return tes->interiorCell || (cell && cell->IsInteriorCell());
+		}
+		void* GlobalCubeView()
+		{
+			if (!globals::game::renderer || GlobalCubeUnbound())
+				return nullptr;
+			return static_cast<void*>(globals::game::renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS].SRV);
+		}
 		// The published ids of the engine's targets the surface reads. The renderer's SRVs are not their exports, so each frame texture
 		// names its id through graphId rather than matching the view. Only wading water reads the displacement swap, and it is not claimed.
-		constexpr std::string_view kRefractionId = "Engine::kMAIN_COPY", kDisplacementId = "Engine::kWATER_DISPLACEMENT",
-								   kDepthId = "Engine::Depth::kPOST_ZPREPASS_COPY", kSsrId = "Engine::kSSR", kSsrRawId = "Engine::kSSR_RAW";
+		constexpr std::string_view kRefractionId = "Engine::kMAIN Copy", kDisplacementId = "Engine::kWATER_DISPLACEMENT",
+								   kDepthId = "Engine::Depth::kPOST_ZPREPASS_COPY", kSsrId = "Engine::kSSR", kSsrRawId = "Engine::kSSR_RAW",
+								   kGlobalCubeId = "Engine::Cubemap::kREFLECTIONS";
 		std::string_view RefractionId() { return kRefractionId; }
 		std::string_view DisplacementId() { return kDisplacementId; }
 		std::string_view DepthId() { return kDepthId; }
 		std::string_view SsrId() { return kSsrId; }
 		std::string_view SsrRawId() { return kSsrRawId; }
+		std::string_view GlobalCubeId() { return GlobalCubeUnbound() ? std::string_view{} : kGlobalCubeId; }
 
 		void* DepthView()
 		{
@@ -223,6 +252,11 @@ namespace DCLF::Features::Water::Indirect
 		a_context.RegisterFrameTexture({ .name = "water SSR", .textureRegister = kSsrRegister, .view = &SsrView, .graphResources = { kSsrId }, .graphId = &SsrId });
 		a_context.RegisterFrameTexture(
 			{ .name = "water SSR raw", .textureRegister = kSsrRawRegister, .view = &SsrRawView, .graphResources = { kSsrRawId }, .graphId = &SsrRawId });
+		a_context.RegisterFrameTexture({ .name = "water global cube",
+			.textureRegister = kGlobalCubeRegister,
+			.view = &GlobalCubeView,
+			.graphResources = { kGlobalCubeId },
+			.graphId = &GlobalCubeId });
 		drawnInput = a_context.RegisterClassifyInput({ .name = "water drawn by dclf", .sample = &SampleDrawn });
 		::RenderGraph::Frame::Vars::OnAdopted(::RenderGraph::Frame::Vars::Interior(),
 			std::function<void(const bool&, const bool&)>([](const bool&, const bool& a_now) { waterInterior.store(a_now, std::memory_order_relaxed); }));

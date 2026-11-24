@@ -135,6 +135,7 @@ namespace DCLF::Features
 			Water::Indirect::kFlowMapRegister,
 			Water::Indirect::kSsrRegister,
 			Water::Indirect::kSsrRawRegister,
+			Water::Indirect::kGlobalCubeRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()

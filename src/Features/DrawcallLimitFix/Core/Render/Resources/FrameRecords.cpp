@@ -123,7 +123,7 @@ namespace DCLF::Draws
 		a_zeroed = true;
 	}
 
-	void LatchFrameRows(LatchedUploads& a_latched, const std::shared_ptr<org::Buffer>& a_target)
+	void LatchFrameRows(LatchedUploads& a_latched, const std::shared_ptr<org::Buffer>& a_target, std::uint32_t a_viewBits)
 	{
 		// Latched every commit, since latching only on change would change the frame's shape.
 		const auto& frameCapture = Scene::FrameView::Get().GetFrameCapture();
@@ -131,6 +131,9 @@ namespace DCLF::Draws
 		// The draws fade specular and envmap by distance.
 		const LodFadeFrame lodFadeFrame = SampleLodFadeFrame();
 		a_latched(a_target, &lodFadeFrame, sizeof(lodFadeFrame), std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting));
+		// The view's bits: a reflection face's draws are reflection draws (the shaders' InReflection), as CS's RenderCubemap hook marks them on D3D11.
+		const std::uint32_t viewBits[4]{ a_viewBits, 0, 0, 0 };
+		a_latched(a_target, viewBits, sizeof(viewBits), kViewBitsPixelFrameOffset);
 		// The frame's fog goes to VS b13. The technique rows keep theirs.
 		a_latched(a_target, frameCapture.fog.data(), sizeof(FrameFog), FrameSlotOffset(false, kFrameFogRegister));
 		const ExtrasFrame extrasFrame = SampleExtrasFrame();
@@ -153,6 +156,7 @@ namespace DCLF::Draws
 	{
 		a_add(a_context, sizeof(Scene::FrameView::FrameCapture::lighting), std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes);
 		a_add(a_context, sizeof(LodFadeFrame), std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting));
+		a_add(a_context, sizeof(std::uint32_t[4]), kViewBitsPixelFrameOffset);
 		a_add(a_context, sizeof(FrameFog), FrameSlotOffset(false, kFrameFogRegister));
 		a_add(a_context, kExtrasFrameVertexBytes, FrameSlotOffset(false, kFrameFogRegister) + sizeof(FrameFog));
 		a_add(a_context, sizeof(ExtrasFrame::projectedGlobals), kExtrasPixelFrameOffset);

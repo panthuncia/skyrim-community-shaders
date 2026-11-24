@@ -456,7 +456,10 @@ namespace DCLF::Features::Sky
 
 			// The alpha test reference SetDirtyStates would write to PS b11.
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
-			constants.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor;
+			// A reflection face's draw is a reflection draw, as CS's RenderCubemap hook marks it on D3D11 (IsReflections, Sky.hlsl's
+			// InReflection). The capture can run outside that hook, so the face's view sets the bit here.
+			constants.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor |
+			                                  (a_capture.view == View::Face ? static_cast<std::uint32_t>(State::ExtraShaderDescriptors::IsReflections) : 0u);
 			constants.physSky = run.physSky;
 			// No depth bias offset. An offset left the sky short of depth 1, so the deferred pass lit and fogged it as geometry.
 			// The engine's sky also leaves the range whole.

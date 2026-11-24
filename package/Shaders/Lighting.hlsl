@@ -1400,6 +1400,7 @@ cbuffer DCLFFrameLighting : register(b13)
 	float4 DCLFLodFadeMetric : packoffset(c8);       // metric scale, default scale, the override metric, 1 when overridden
 	float4 DCLFLodFadeDivisors[4] : packoffset(c9);  // per LOD type
 	float4 DCLFLodFadeState : packoffset(c13);       // x: 1 when the engine updates the metric at all (else the property's fades stand)
+	uint4 DCLFViewBits : packoffset(c14);            // x: the view's bits (FrameSlots.h, kViewBitsPixelFrameOffset); 0 for the main view
 	// The extras' pixel input (LightingConstants.h, ExtrasFrame): ProjectedUVParams3, the frame's (the two tilings, 0, the
 	// projected-normals switch).
 	float4 DCLFExtrasProjectedGlobals : packoffset(c16);
@@ -4409,6 +4410,11 @@ void DCLFRowStatics(uint4 a_rows)
 	DCLFPerMaterialStatics();
 	DCLFPerGeometryStatics();
 	DCLFPermutationStatics();
+#		if defined(DCLF_BINDLESS)
+	// A reflection face's draws are reflection draws, as on D3D11: the pipeline row is shared with the main view's.
+	if (DCLFViewBits.x & kDCLFViewReflection)
+		Permutation::ExtraShaderDescriptor |= Permutation::ExtraFlags::InReflection;
+#		endif
 }
 
 // The object's values the DCLF_BINDLESS build's statics hold, assigned once this draw's object word is known.

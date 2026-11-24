@@ -445,7 +445,7 @@ namespace DCLF
 			frame(own->frameConstants, shared.data(), shared.size(), FrameSlotOffset(true, kSharedDataRegister));
 			frame(own->frameConstants, feature.data(), feature.size(), FrameSlotOffset(true, kFeatureDataRegister));
 			ZeroSharedLightOnce(uploads, own->frameConstants, own->sharedLightZeroed);
-			LatchFrameRows(frame, own->frameConstants);
+			LatchFrameRows(frame, own->frameConstants, traits.viewBits);
 			(void)frame.Finish();
 			revisions.latchedMisses += frame.Misses();
 			// Frame texture registers left null, for the view's report.

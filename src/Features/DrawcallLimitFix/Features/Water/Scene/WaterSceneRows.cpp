@@ -108,7 +108,7 @@ namespace DCLF::Features::Water::WaterScene
 			row.flowY = std::bit_cast<std::int32_t>(values[kValueOffsets + 3]);
 			row.plane = { values[kValuePlane + 0], values[kValuePlane + 1], values[kValuePlane + 2], values[kValuePlane + 3] };
 			const auto classification = ClassifyLeaf(a_property, a_leaf);
-			row.waterFlags = classification.waterFlags;
+			row.waterFlags = classification.waterFlags | ((a_property.feature & kFeatureGlobalCube) ? kRowGlobalCube : 0u);
 			row.stencilBit = classification.stencilBit;
 			row.surfaceDescriptor = classification.surfaceDescriptor;
 			return row;

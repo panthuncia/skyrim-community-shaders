@@ -92,9 +92,12 @@ namespace DCLF::Draws
 	{
 		return (std::uint64_t(a_pixelStage ? kConstantBufferRegisters : 0u) + a_register) * kFrameSlotBytes;
 	}
-	// The lighting slot's rows (PS b13): frame lighting c0-c5, LOD fades c6-c13, c14-c15 unused, extras c16.
+	// The lighting slot's rows (PS b13): frame lighting c0-c5, LOD fades c6-c13, the view's bits c14 (kViewBitsPixelFrameOffset),
+	// c15 unused, extras c16.
 	constexpr std::uint64_t kExtrasPixelFrameOffset = std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame) + 32;
 	static_assert(sizeof(FrameLighting) + sizeof(LodFadeFrame) + 32 == 16 * 16);
+	// c14.x: the bits of the view the constants are for (its ViewShape::viewBits), 0 for the main view. Shaders read the reflection's bit.
+	constexpr std::uint64_t kViewBitsPixelFrameOffset = std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame);
 	// The record and every slot's block are read through 16-byte-aligned pointers on Vulkan's descriptor-buffer model.
 	static_assert(kFrameSlotBytes % 256 == 0 && sizeof(FrameLighting) % 16 == 0);
 	// Core's frame constant rows follow from c17, 16 bytes each. Uploads.cpp checks the first comes right after the extras' row.

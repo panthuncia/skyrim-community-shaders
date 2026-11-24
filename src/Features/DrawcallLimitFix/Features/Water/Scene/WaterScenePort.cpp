@@ -135,6 +135,10 @@ namespace DCLF::Features::Water::WaterScene
 			// No water-type bit (0, every Unified Water tile) is index 0. Any other value that is not one bit from 2 to 0x80 is not captured.
 			const bool stencilValid = water.unk8C == 0 || StencilIndexOf(water.unk8C) != 0;
 			a_capture.feature = (stencilValid ? kFeatureCaptured : 0u) | (flags & kFeatureFlagsMask) | (StencilIndexOf(water.unk8C) << kFeatureStencilShift);
+			// As EvaluateWater binds t3: the material's static cube, or else the global one, which the draw reads as a frame texture.
+			if (const auto* material = reinterpret_cast<const std::byte*>(water.material);
+				!material || *reinterpret_cast<const std::uint8_t*>(material + kGlobalCubeByte) || !*reinterpret_cast<void* const*>(material + kStaticReflection))
+				a_capture.feature |= kFeatureGlobalCube;
 			a_capture.emissive = nullptr;
 			auto& values = a_capture.values;
 			values[kValuePlane + 0] = water.plane.normal.x;

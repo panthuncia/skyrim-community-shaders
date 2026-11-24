@@ -301,6 +301,13 @@ Texture2D<float4> DCLFTreeTexture()
 #		define SampShadowMaskSampler DCLFTreeSampler()
 #		define TexDiffuse DCLFTreeTexture()
 #		define AlphaTestRefRS asfloat(DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeAlphaRef), 4))
+
+// The view's bits in the frame lighting block every DCLF pixel stage is given (Lighting.hlsl's DCLFFrameLighting c14.x; FrameSlots.h,
+// kViewBitsPixelFrameOffset). Bit 7 is the reflection's (Features/Reflection/Reflection.h, kViewReflection).
+cbuffer DCLFTreeFrameView : register(b13)
+{
+	uint4 DCLFTreeViewBits : packoffset(c14);
+}
 // CS_DCLF_TREE_LOD_STAGES: the stage's entry stamp and what its texture resolves to (TreeInstancesLayout.h, kStageProbeWords).
 void DCLFTreeProbe(uint a_entry, uint a_probe, float2 a_texCoord)
 {
@@ -422,6 +429,9 @@ PS_OUTPUT main(PS_INPUT input)
 	PS_OUTPUT psout;
 #		if defined(DCLF_PULLED)
 	DCLFTreeProbe(kDCLFStageColourEntry, kDCLFStageColourProbe, input.TexCoord.xy);
+	// A reflection face's trees are reflection draws, as on D3D11 (the pulled permutation statics are zero otherwise).
+	if (DCLFTreeViewBits.x & (1u << 7))
+		Permutation::ExtraShaderDescriptor |= Permutation::ExtraFlags::InReflection;
 #		endif
 
 #	if defined(EXP_HEIGHT_FOG)

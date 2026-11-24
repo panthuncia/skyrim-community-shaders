@@ -66,6 +66,10 @@ namespace DCLF::Features::Water::WaterScene
 	inline constexpr std::uint32_t kFeatureFlagsMask = 0x00FFFFFFu;  // BSWaterShaderProperty +0x88, kUnderwater (bit 5) cleared
 	inline constexpr std::uint32_t kFeatureStencilShift = 24;         // 3 bits: StencilIndexOf(+0x8C)
 	inline constexpr std::uint32_t kFeatureCaptured = 1u << 31;       // set by every water capture
+	// The material reads the global reflection cube at t3: it has no static cube, or its +0x17D byte picks the global one (SetupMaterial).
+	inline constexpr std::uint32_t kFeatureGlobalCube = 1u << 27;
+	/** @brief WaterObjectRow::waterFlags: the draw reads the frame's reflection cube at t3 (Water.hlsl's kDCLFWaterFlagGlobalCube). */
+	inline constexpr std::uint32_t kRowGlobalCube = 1u << 31;
 	/** @brief kUnderwater: GetRenderPasses copies the camera's state into it, so the record never keeps it. */
 	inline constexpr std::uint32_t kWaterFlagUnderwater = 0x20;
 	inline constexpr std::size_t kValuePlane = 0;    // 4 floats: the property's plane (+0xA0), normal and constant

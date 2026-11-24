@@ -873,6 +873,7 @@ cbuffer AlphaTestRefCB : register(b11)
 // writes CameraDataEffect.yz from the current camera (+0x160, +0x164). VPOSOffset and FilteringParam are not read.
 cbuffer DCLFFrameLighting : register(b13)
 {
+	uint4 DCLFViewBits : packoffset(c14);  // x: the view's bits (Lighting.hlsl's DCLFFrameLighting); 0 for the main view
 	float4 DCLFEffectCamera : packoffset(c17);
 	// The Lighting variant's DLightColor (SetupGeometry: the pass's light 0, the scene's sun light, its NiDirectionalLight +0x14c colour times
 	// its fade and the HDR multiplier): the frame's (LightingConstants.h, SampleEffectLight).
@@ -1686,6 +1687,11 @@ PS_OUTPUT DCLFPulledPixel(PS_INPUT input, uint a_instance)
 	DCLFPerMaterialStatics();
 	DCLFPerGeometryStatics();
 	DCLFPermutationStatics();
+#		if defined(DCLF_BINDLESS)
+	// A reflection face's draws are reflection draws, as on D3D11 (Lighting.hlsl's pulled pixel statics).
+	if (DCLFViewBits.x & kDCLFViewReflection)
+		Permutation::ExtraShaderDescriptor |= Permutation::ExtraFlags::InReflection;
+#		endif
 #		if defined(DCLF_BINDLESS_DRAW)
 	AlphaTestRefRS = DCLFObjects[DCLFObjectIndex].AlphaTestRef;
 #		endif

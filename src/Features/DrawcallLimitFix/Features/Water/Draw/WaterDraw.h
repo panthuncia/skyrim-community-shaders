@@ -30,8 +30,9 @@ namespace DCLF::Features::Water::Indirect
 	inline constexpr std::uint32_t kFlowMapRegister = 49;       // t8: the flow map source (Unified Water's world flow map, or the ImageSpace port's map)
 	inline constexpr std::uint32_t kSsrRegister = 56;           // t10: kSSR
 	inline constexpr std::uint32_t kSsrRawRegister = 75;        // t11: kSSR_RAW
-	inline constexpr std::array<std::uint32_t, 6> kFrameTextureRegisters{ kRefractionRegister, kDisplacementRegister, kDepthRegister, kFlowMapRegister, kSsrRegister,
-		kSsrRawRegister };
+	inline constexpr std::uint32_t kGlobalCubeRegister = 54;    // t3 for a material that reads the global cube: kREFLECTIONS
+	inline constexpr std::array<std::uint32_t, 7> kFrameTextureRegisters{ kRefractionRegister, kDisplacementRegister, kDepthRegister, kFlowMapRegister, kSsrRegister,
+		kSsrRawRegister, kGlobalCubeRegister };
 
 	/**
 	 * @brief The mask's stencil mode for water-type bit 1 << index is kMaskStencilModeBase + index (SetupGeometry's modes 2-9 write the

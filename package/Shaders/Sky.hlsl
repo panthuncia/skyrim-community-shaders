@@ -967,7 +967,10 @@ PS_OUTPUT main(PS_INPUT input)
 #	endif
 	psout.Color.w *= alphaTransmittance;
 #	if !defined(OCCLUSION)
-	psout.Color.rgb = PreExposure::EncodeScene(psout.Color.rgb);
+	// As PreExposure::EncodeScene, with the draw's own descriptor: on ORG the Permutation buffer is not the draw's, so a reflection
+	// face's sky would be scaled like the main view's.
+	if (!Permutation::RenderToUI && !inReflection)
+		psout.Color.rgb = PreExposure::Encode(psout.Color.rgb);
 #	endif
 	return psout;
 }

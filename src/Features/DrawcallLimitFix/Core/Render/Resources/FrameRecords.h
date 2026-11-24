@@ -53,8 +53,8 @@ namespace DCLF::Draws
 	/** @brief Stages the zero block and the zeroed Light Limit Fix light block into a_target once. */
 	void ZeroSharedLightOnce(CommitUploads& a_uploads, const std::shared_ptr<org::Buffer>& a_target, bool& a_zeroed);
 
-	/** @brief Latches this frame's frame-wide rows into a_target, in ascending row order. */
-	void LatchFrameRows(LatchedUploads& a_latched, const std::shared_ptr<org::Buffer>& a_target);
+	/** @brief Latches this frame's frame-wide rows into a_target, in ascending row order. a_viewBits: the view's bits (0 for the main view). */
+	void LatchFrameRows(LatchedUploads& a_latched, const std::shared_ptr<org::Buffer>& a_target, std::uint32_t a_viewBits = 0);
 	/** @brief Calls a_add for each write LatchFrameRows makes, in its order. */
 	void FrameRowWrites(void (*a_add)(void* a_context, std::size_t a_bytes, std::uint64_t a_offset), void* a_context);
 

@@ -243,6 +243,8 @@ static DeviceRef DCLFPipelineRowAddress;
 static const uint kDCLFMaterialRowHeader = 768;
 static const uint kDCLFPipelineRowHeader = 1536;
 static const uint kDCLFPermutationBlock = 1280;  // one block, both stages
+// The reflection view's bit in a view's bits (Features/Reflection/Reflection.h, kViewReflection; the frame lighting block's c14.x).
+static const uint kDCLFViewReflection = 1u << 7;
 #		if defined(VSHADER)
 static const uint kDCLFMaterialBlock = 0;
 static const uint kDCLFTechniqueBlock = 0;
