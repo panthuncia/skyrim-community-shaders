@@ -1,7 +1,8 @@
 # Native post chain
 
-Status: 2026-11-25, families 0-4 built and the only path in graph modes, on SE and AE (see "Milestone 1, as built" and "Round 2,
-as built"); every end-of-frame slot CS draws is native ("Slot effects, as built"). Families 5-8 are design only. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`) and the
+Status: 2026-11-25, families 0-6 built and the only path in graph modes, on SE and AE (see "Milestone 1, as built", "Round 2,
+as built" and "Families 5 and 6, as built"); every end-of-frame slot CS draws is native ("Slot effects, as built"). The snow window
+and families 7-8 are design only. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`) and the
 post chain hooks (`src/RenderGraph/Frame/PostChain.cpp`). Follows [dclf-native-imagespace.md](./dclf-native-imagespace.md) (steps
 2a-2c, the formulas in "Where the values come from"). Background: [p5/imagespace.md](../p5/imagespace.md),
 [imagespace-remaining-ports.md](./imagespace-remaining-ports.md).
@@ -476,3 +477,40 @@ id paired (perf-post-slots.md) but runs on the engine unless `CS_ORG_POST_NATIVE
   0x1414e5610) matches `DofSteps`, except that the engine leaves the masked composite's rows 4-7 as the last override frame wrote
   them when mode 2 draws it, where CS writes zeros. The LDR slot routing matches RenderEndOfFrameEffects (AE 105674) step for step.
 
+
+## Families 5 and 6, as built (2026-11-25, perf2/native)
+
+Code: `src/RenderGraph/Engine/ImageSpace/NativeWorld.inl`, the hooks in `ImageSpace.cpp` (`RenderReflections`, `RenderSSAO`, the new
+`WaterBlend` detour on SE 100550 / AE 107285) and `StageWorldKey` in `WorldSteps.inl`, which `TakeWorldStep` and the native forms
+share. Lead notes: [perf2-native.md](./perf2-native.md).
+
+- **Not called.** The reflections pass (AE 107146), both RenderSSAO calls (107245) and the water blend (107285) are no longer called
+  in graph modes. Each hook reads what its container reads, at the hook, computes the step rows and stages the world steps' passes.
+  The steps, gates and HLSL are unchanged. A container still runs where CS does not draw the frame: a foreign hook on it (decision
+  4, checked with the post chain's), or no world steps build yet.
+- **Reflections** (`ReflectionSteps`): the mask downsample at divider 2 or 3 (raster, 17 rows: texel size, the int sample count and
+  jitter flag, four taps) or 4 (compute, 19 rows, groups `(width * 4 + 1023) / 1024` by height of the mask), the ray march (row 0
+  the thickness, radius, alpha weight and 1 / radius settings; row 1 the point (0, 0, 1) through the world camera's view matrix from
+  the State's camera data, AE 77507), and the compute blur (the depth of field's helper, `SetBlurCs`, grid sizes from the blur
+  shaders' first macro, as the engine reads them). Write-back: the State's camera data for the world camera (`SetCameraData`, flag
+  1), the camera at 415058, the normals target at +0x34, the drawn flag +0x11, RT0/RT1 and depth unbound.
+- **RenderSSAO's first call** (`SsaoSteps`): camera Z, the minify levels (the first level at most 16 high in the contrast form when
+  415069 is set), the raw AO (temporal or not) and the H/V blur, rows from the current camera's near, far and frustum and the SAO
+  settings 415060 to 415067. The raw AO's random angle is CS's own generator (the engine's is a static in RenderSSAO; only its
+  distribution, `rand * pi / 2^32`, matters). Write-back: the SAO counter (+0x54), kSAO bound, depth unbound. The snow window between
+  the calls stays the engine's.
+- **RenderSSAO's composite** (`ReadComposite`, `CompositeStep`): the form from the SAO flag (+0x50), the portal graph's fog and
+  ToggleFog; eleven rows (fog range and colours, near and far, the sun's direction, the eye with the improved snow flag, the four
+  sparkle rows with their colour mode, the reflection row with 415072); form 3 is the copy. Write-back: the destination bound, the
+  main depth target.
+- **Water blend** (`WaterBlendStep`, `RunWaterBlend`): the clear request (+0x0C bit 0: kWATER_1, kWATER_2 and kRAW_WATER through
+  the skeleton's clear pass), then the blend row (near, far, the menu flag, `max(0, 1 - |eye moved| * 0.025)`). Write-back: no
+  targets, depth test off, blend mode 0, write mode 1.
+- **Parity.** Before the switch to native, a development build ran the containers and compared every step CS predicted with the
+  step the engine drew (key, rows, thread groups): 18k steps, 0 differed, 0 key mismatches, over the raster, compute and no mask
+  downsample, the fog composite and the copy (ToggleFog). Fields the engine leaves as stack garbage were excluded and CS writes
+  zero there: ISMinify's rows 1 and 2 (but its dynamic sampling flag), ISMinifyContrast's unused parts of rows 1 and 2, the SAO-only
+  composite's rows 0 to 3, and the composite's row 4 w and row 10 w. The SAO composite forms (SAO on) were not reached in the
+  test profile; their rows are the fog form's, read in the decompile.
+- **SE.** Every global and function has its SE pair, matched by reference order in each SE/AE function pair (perf2-native.md). SE
+  runs the native forms by default; untested at runtime.
