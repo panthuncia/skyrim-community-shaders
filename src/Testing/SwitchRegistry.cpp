@@ -122,7 +122,6 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_ORG_FOG_DEBUG" },
 			{ .name = "CS_ORG_GRAPH_RESOURCES_FRAME" },
 			{ .name = "CS_ORG_IMAGESPACE_NATIVE", .defaultValue = "2", .description = "0: ImageSpace steps captured; 1: param steps also computed and compared with the capture; 2: param steps staged from the engine's params without its draw; 3: diagnostic, computed rows staged at the engine's draw (dclf-native-imagespace.md)" },
-			{ .name = "CS_ORG_LLF_PARITY", .key = "org.llf_parity", .description = "1: the parity frame's D3D11 light culling against the render graph's, cluster by cluster" },
 			{ .name = "CS_ORG_MISMATCH_FATAL", .key = "org.mismatch_fatal", .description = "0: a frame anchor mismatch is not fatal (it is in every build but the Release profile)" },
 			{ .name = "CS_ORG_NATIVE", .key = "org.native", .type = Bool, .defaultValue = "0", .description = "true: native mode, no DXVK; BasicRHI's device and ORG present (render-graph.md, \"Native mode\")" },
 			{ .name = "CS_ORG_NATIVE_BACKEND", .key = "org.backend", .type = Enum, .defaultValue = "vulkan", .choices = "vulkan|d3d12", .description = "native mode's backend; d3d12 needs org.native" },

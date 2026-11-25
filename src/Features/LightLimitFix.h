@@ -580,18 +580,6 @@ public:
 	 */
 	bool CullOnRenderGraph(const eastl::vector<LightData>& a_lightsData);
 
-	/**
-	 * @brief Debug (CS_ORG_LLF_PARITY=1): compares the D3D11 culling of the parity frame with the render graph's, cluster by
-	 * cluster, and logs the result. The graph culls at the Prepass anchor, after this hook, so the compare runs one frame later.
-	 */
-	void CompareRenderGraphCulling(uint32_t a_clusterTotal, uint32_t a_lightCount);
-
-	uint32_t orgParityFrame = 0;
-	// The parity frame's D3D11 culling waits for the compare in the next frame, with its cluster and light counts.
-	bool orgParityPending = false;
-	uint32_t orgParityClusters = 0;
-	uint32_t orgParityLights = 0;
-
 	Settings settings;
 
 	/** @brief Pre-geometry setup: initializes strict light data and determines the room index for the pass. */

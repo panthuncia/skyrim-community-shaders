@@ -179,8 +179,6 @@ switches file too (`Util::SwitchFile`).
 
 The render graph's own switches, and BasicRHI's `BASICRHI_VK_CRASH_MARKERS`, are in [render-graph.md](./render-graph.md#switches).
 
-`CS_ORG_LLF_PARITY` (`LightLimitFix.cpp`) is Light Limit Fix's own parity and is not DCLF's.
-
 ## Parity checks
 
 ### How the checks work

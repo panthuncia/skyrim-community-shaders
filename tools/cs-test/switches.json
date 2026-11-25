@@ -1345,16 +1345,6 @@
 			"description": "0: ImageSpace steps captured; 1: param steps also computed and compared with the capture; 2: param steps staged from the engine's params without its draw; 3: diagnostic, computed rows staged at the engine's draw (dclf-native-imagespace.md)"
 		},
 		{
-			"name": "CS_ORG_LLF_PARITY",
-			"key": "org.llf_parity",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "org",
-			"description": "1: the parity frame's D3D11 light culling against the render graph's, cluster by cluster"
-		},
-		{
 			"name": "CS_ORG_MISMATCH_FATAL",
 			"key": "org.mismatch_fatal",
 			"type": "string",
