@@ -49,7 +49,7 @@ namespace DCLF::Features::FirstPerson
 		{
 			const auto decalsSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_FIRST_PERSON_DECALS", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero,
 				.description = "default on (T7f item 7): a decal on a first-person entry (an effect's skinned blood decal on the arms, a weapon's BloodLighting) drawn by the first-person forward part as a forward object with its decal group's depth bias, test and blend; 0 it stays the engine's",
-				.before = "CS_DCLF_OPAQUE_EFFECTS" });
+				.after = "CS_DCLF_PLAIN_SNOW_SPARKLE" });
 			// The decals switch is read once, here.
 			a_context.RegisterView(Contribution(SwitchValue(decalsSwitch) != "0"));
 			// Must run before the coverage, which decides whether the members are withheld.

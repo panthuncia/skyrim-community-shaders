@@ -435,26 +435,6 @@
 			"description": "off|frustum|occlusion (default): GPU culling, the live toggle's seed"
 		},
 		{
-			"name": "CS_DCLF_EFFECT_CLOUD_LIGHT",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on: effect meshes with kEffectLighting and kCloudLOD (lit by the cloud light, not the sun) drawn by DCLF with the cloud light's colour as a frame row; 0 they stay native (cloud-lighting)"
-		},
-		{
-			"name": "CS_DCLF_EFFECT_FALLOFF",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on: effect meshes with Falloff and no blending alpha property (the engine's hint 1, unblended while their alpha is one) drawn by DCLF's forward epoch unblended, sorted with the blended objects; 0 they stay native (effect-opaque)"
-		},
-		{
 			"name": "CS_DCLF_EFFECT_RIGID_SKINS",
 			"key": "",
 			"type": "bool",
@@ -513,16 +493,6 @@
 			"kind": "feature",
 			"family": "dclf",
 			"description": "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4); 0 they stay the engine's"
-		},
-		{
-			"name": "CS_DCLF_OPAQUE_EFFECTS",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on (T7f item 7): opaque BSEffectShaderProperty meshes (hint 0: no blending alpha property, no Falloff, depth tested and written; forge coals, slag) drawn by DCLF in the G-buffer with the DEFERRED effect variant, through the opaque decal group's fixed slots and its decal depth pass without the bias; 0 they stay the engine's (effect-opaque)"
 		},
 		{
 			"name": "CS_DCLF_PARITY",

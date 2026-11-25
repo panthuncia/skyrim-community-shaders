@@ -2237,8 +2237,8 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
     stage); skinned effects through the palettes; opaque effects (below); the Lighting variant (`kEffectLighting`); weapon blood.
 -   **Still variants** (`EffectVariantBit`, `Ineligible::EffectVariant`), the engine's: a shape that is not a `BSTriShape` or
     particle system, a skin mismatch (the Skinned bit without a skin instance; a skin instance without the bit, a rigid skin,
-    without `CS_DCLF_EFFECT_RIGID_SKINS`), a decal that registers no pass, sky objects (bit 45), wireframe (bit 48), cloud lighting
-    with `CS_DCLF_EFFECT_CLOUD_LIGHT=0`, Lighting without Light Limit Fix, projected UV, an unrecognised blend pair, and the
+    without `CS_DCLF_EFFECT_RIGID_SKINS`), a decal that registers no pass, sky objects (bit 45), wireframe (bit 48), Lighting
+    without Light Limit Fix, projected UV, an unrecognised blend pair, and the
     particle causes.
 -   **Membership.** The synthetic pass is derived from the property every time (`PrimaryCull::MembershipPass`); `PassCapture` keeps no
     effect registration.
@@ -2260,7 +2260,7 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
     Light Limit Fix's clusters; a register the capture lacks leaves the pair not drawable (the engine draws it), never drawn wrong.
     Light 0 is the sun (`ShadowSceneNode` `+0x200`, frame row c18), or for a `kCloudLOD` property the cloud light (`+0x208`,
     `FUN_1414fcf80`; frame row c20, `SampleEffectCloudLight`). The shading row's `MaterialData.w` is 1 for a `kCloudLOD` property
-    and `Effect.hlsl` picks the row by it (`CS_DCLF_EFFECT_CLOUD_LIGHT`, default on; 0 leaves them the engine's).
+    and `Effect.hlsl` picks the row by it.
 -   **Effect decals**: decal group 1 (hint 2) or 2 (hint 3), blend mode from the pair, write mode 11 (10 for group 1 with
     MotionVectorsNormals), `kObjectDecal`. The member decal's chain key (`decalKey`) is ordered by the pass enum, so a group's
     effect decals precede its Lighting ones, as the engine draws them.
@@ -2278,15 +2278,14 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
 
 A hint 0 effect (no blending alpha property, no Falloff, depth tested and written, not a particle system) draws through decal group
 1 with `opaqueEffect`: Deferred, blend mode 0, write mode 1, no depth bias, membership hint 0 (`DeriveEffectDescriptors`;
-`CS_DCLF_OPAQUE_EFFECTS`, needs decals). It is an occludee culled once in the colour segment, and the decal depth pass writes its
+needs decals). It is an occludee culled once in the colour segment, and the decal depth pass writes its
 depth before the colour pass. A property alpha below one would make the engine's pass blended; DCLF keeps it opaque.
 
 #### Falloff without blending
 
 An effect mesh with `kFalloff` and no blending alpha property is hint 1 in `GetRenderPasses` (the descriptor's Falloff alone), and
 the alpha setup (`FUN_14150bc80`, no blending alpha property) leaves blending off while the property alpha is one; below one it
-blends alpha over. DCLF draws it in the forward sort with blend mode 0 and the property's depth flags (`EffectDrawOf`;
-`CS_DCLF_EFFECT_FALLOFF`, default on; 0 leaves it the engine's as `effect-opaque`). While it fades (property alpha below one) the
+blends alpha over. DCLF draws it in the forward sort with blend mode 0 and the property's depth flags (`EffectDrawOf`). While it fades (property alpha below one) the
 engine blends it and DCLF does not, as with the opaque effects.
 
 ### Particles
