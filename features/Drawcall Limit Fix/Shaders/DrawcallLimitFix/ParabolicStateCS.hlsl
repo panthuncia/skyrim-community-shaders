@@ -28,7 +28,7 @@ cbuffer Constants : register(b0)
 	values[i] = uint2(active && decision.z != 0u ? i + 1u : 0u, active && decision.w != 0u ? 1u : 0u);
 }
 
-// Same 256-wide scratch layout as PortalBatchLayout::ScanFor. Scan upward, then AddOffsets downward, with UAV barriers.
+// A 256-wide hierarchical scan: each level's sums follow it in the scratch. Scan upward, then AddOffsets downward, with UAV barriers.
 groupshared uint2 ScanValues[256];
 [numthreads(256, 1, 1)] void Scan(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
 	const uint block = group.x + group.y * 65535u;

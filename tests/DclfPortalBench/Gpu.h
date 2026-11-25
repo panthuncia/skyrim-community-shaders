@@ -34,13 +34,12 @@ namespace Bench
 	{
 		rhi::PipelineLayoutPtr layout;
 		rhi::PipelinePtr pipeline;
-		rhi::CommandSignaturePtr dispatchSignature;
 	};
 
 	class Gpu
 	{
 	public:
-		static constexpr std::uint32_t kConstantWords = 20;
+		static constexpr std::uint32_t kConstantWords = 12;
 		static constexpr std::uint32_t kHeapCapacity = 256;
 		static constexpr std::uint32_t kMaxTimestamps = 4096;
 
@@ -102,10 +101,6 @@ namespace Bench
 			const rhi::SubobjShader shader{ rhi::ShaderStage::Compute, { code.data(), static_cast<std::uint32_t>(code.size()) }, a_entry };
 			const rhi::PipelineStreamItem items[] = { rhi::Make(layout), rhi::Make(shader) };
 			Check(device->CreatePipeline(items, 2, program.pipeline), ("CreatePipeline " + a_spirv).c_str());
-			rhi::IndirectArg args[] = { { .kind = rhi::IndirectArgKind::Dispatch } };
-			Check(device->CreateCommandSignature(rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args, 1), sizeof(std::uint32_t) * 3 }, program.layout->GetHandle(),
-					  program.dispatchSignature),
-				"CreateCommandSignature");
 			return program;
 		}
 

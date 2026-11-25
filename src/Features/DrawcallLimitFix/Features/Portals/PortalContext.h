@@ -49,11 +49,4 @@ namespace DCLF::Portals
 		std::int32_t visible = -1;
 	};
 	static_assert(sizeof(Result) == 8);
-
-	/** @brief One program-homogeneous GPU workgroup. A short tail never borrows queries from a different program. */
-	struct Task
-	{
-		std::uint32_t program = 0, first = 0, count = 0, padding = 0;
-	};
-	static_assert(sizeof(Task) == 16);
 }

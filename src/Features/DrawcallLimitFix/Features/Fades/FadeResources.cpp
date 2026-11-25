@@ -11,7 +11,6 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalPrograms.h"
-#include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
 #include "RenderGraph/ComputeProgram.h"
@@ -29,7 +28,7 @@ namespace DCLF::Features::Fades
 	{
 		Api::SceneResourcesId sceneId;
 		// Revision input words. Posting the wanted event count here makes a growth trigger new requirements.
-		constexpr std::uint32_t kEventsWantedInput = 0, kBucketsInput = 1, kInputWords = 2;
+		constexpr std::uint32_t kEventsWantedInput = 0, kInputWords = 1;
 		// Render thread. The scene owns the write-back.
 		std::weak_ptr<FadeWriteBack> postedWriteBack;
 
@@ -102,10 +101,8 @@ namespace DCLF::Features::Fades
 			roots.Add(s.fadeRoots).Add(s.fadeRootPrograms).Add(s.fadeAnimated).Add(s.fadeStates).Add(s.fadeReported);
 			roots.Add(s.fadeStatesOut[0]).Add(s.fadeStatesOut[1]);
 			const auto& batch = *s.portalBatch;
-			roots.Add(batch.queries).Add(batch.results).Add(batch.ranks).Add(batch.indices).Add(batch.tasks);
+			roots.Add(batch.queries).Add(batch.results).Add(batch.claims).Add(batch.traces);
 			roots.Require(a_requirements.build, Extensions::TableFamilyRows(a_requirements.tables.families, Extensions::RootStatesFamily()));
-			Draws::SceneBufferSet::Get().Require(a_requirements.build, batch.counts, 2ull * std::max(1u, a_requirements.inputs[kBucketsInput]));
-			Draws::SceneBufferSet::Get().Require(a_requirements.build, batch.offsets, 2ull * std::max(1u, a_requirements.inputs[kBucketsInput]));
 			// Grow the event list to the most a frame wanted. Roots dropped by overflow append again next frame.
 			if (s.fadeEvents && s.fadeWriteBack)
 				Draws::SceneBufferSet::Get().Require(a_requirements.build, s.fadeEvents, a_requirements.inputs[kEventsWantedInput]);
@@ -113,8 +110,6 @@ namespace DCLF::Features::Fades
 
 		void PostInputs(std::span<std::uint32_t> a_words)
 		{
-			const auto& encoded = PortalViews::Get().Encoded();
-			a_words[kBucketsInput] = encoded.size() > kPortalSetBytes / 4 ? encoded[kPortalSetBytes / 4] : 0u;
 			if (const auto writeBack = postedWriteBack.lock())
 				a_words[kEventsWantedInput] = writeBack->list->Wanted();
 		}

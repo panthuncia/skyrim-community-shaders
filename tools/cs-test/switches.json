@@ -515,16 +515,6 @@
 			"description": "1: the compatibility monitor starts on (the menu switches it live): engine state other plugins change with no hook DCLF sees, by reference and plugin"
 		},
 		{
-			"name": "CS_DCLF_PORTAL_EVALUATOR",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "test",
-			"family": "dclf",
-			"description": "Portal batches' evaluation: inline (one dispatch, the default) or batched (by program: count, scan, scatter, evaluate)"
-		},
-		{
 			"name": "CS_DCLF_PORTAL_TRACE",
 			"key": "",
 			"type": "string",
@@ -532,7 +522,7 @@
 			"choices": [],
 			"kind": "diagnostic",
 			"family": "dclf",
-			"description": "Inline portal batches write each query's decision trace"
+			"description": "Portal batches write each query's decision trace"
 		},
 		{
 			"name": "CS_DCLF_PORTAL_UNIFORM_SCAN",

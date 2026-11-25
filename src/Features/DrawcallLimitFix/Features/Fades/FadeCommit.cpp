@@ -242,10 +242,6 @@ namespace DCLF::Features::Fades
 				ZoneScopedN("CS.DCLF.Fade.UploadRoots");
 				UploadFadeRoots(adopted, a_commit.tables, a_commit.frame, inputs, buffers, uploads);
 			}
-			// Programs past the bucket scratch still get the same verdict, unbatched. This only reports the shortfall.
-			if (buffers.portalBatch)
-				Portals::CheckMainBatchCapacity(*buffers.portalBatch, a_commit.frame,
-					std::min(Draws::NamedUnits(adopted, buffers.portalBatch->counts), Draws::NamedUnits(adopted, buffers.portalBatch->offsets)) / 2);
 
 			Extensions::TableFamilySent(Extensions::RootStatesFamily(), buffers.FadeRootsContentEpoch(adopted));
 			{

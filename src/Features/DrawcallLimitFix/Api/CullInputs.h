@@ -44,7 +44,7 @@ namespace DCLF::Api
 	 *
 	 * - RootStates: the published states a frame's cull reads. May alternate by frame.
 	 * - RootStepStates: the root state step's own rows for this frame, read by the visibility events.
-	 * - MemberClaims: per-object atomic claims during query generation, reused as query ranks after that pass.
+	 * - MemberClaims: per-object atomic claims during query generation.
 	 * - LightContexts: the frame's portal context atlas for the camera and the strict lights.
 	 * - StrictGates: each strict-light gate's verdict per atlas context.
 	 * - ObjectGates: each object's strict-light gate.

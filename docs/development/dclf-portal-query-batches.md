@@ -17,23 +17,20 @@ carries it (`BuildDrawsLatch::portalProgramsIndex`, byte 320, `kLatchPortalProgr
 read it there; no pass declares it. There is no capacity substitution: the only descriptor-0 frame is an allocation failure, logged,
 where every reader takes the frustum alone (the "no programs" meaning).
 
-Fade roots use three passes before `fades.state`:
+Fade roots use two passes before `fades.state`:
 
 1. `fades.portal-queries` merges each root's seed into a local copy and captures its placement bound. Preprocessed roots and the legitimate
    no-program case retain the existing frustum semantics. Every capacity slot receives a current-frame query, including dead slots.
-2. `fades.portal-batch` counts queries per program, computes hierarchical exclusive scans of query and task counts, scatters query indices,
-   and builds 64-query tasks. Scratch grows with published root and room requirements. No task mixes programs. Scan levels are recorded
-   from publication capacity without CPU readback; explicit barriers order stages within this pass.
-3. `fades.portal-evaluate` indirectly dispatches one workgroup per task and scatters `{frame, verdict}` to stable root slots. The state pass
-   checks the frame before consuming a verdict, retaining the previous frame-ahead fade publication timing.
+2. `fades.portal-evaluate` evaluates each query against its own program in one `Inline` dispatch and writes `{frame, verdict}` to stable
+   root slots. The state pass checks the frame before consuming a verdict, retaining the previous frame-ahead fade publication timing.
 
 Main-camera members now use a separate batch before `core.z.build-draws`. `core.z.portal-queries` clears every published object slot,
 then walks the existing GPU draw inputs with the latched dispatch. An atomic claim emits one bound query per object, shared by skin
 partitions and other inputs for that object. `SetFadeRow` assigns the same root from the object-root column to those inputs. The producer
 also covers decal, forward, and refraction stamp-only inputs, and preserves the zero-view-mask meaning. Unclaimed slots receive current
-rejected verdicts. Cheap frustum rejection and legitimate no-program outcomes are resolved before bucketing.
+rejected verdicts. Cheap frustum rejection and legitimate no-program outcomes are resolved before evaluation.
 
-`portals.member-batch` and `portals.member-evaluate` use the shared executor in `PortalBatchPass.cpp`; fade passes use the same executor
+`portals.member-evaluate` uses the shared executor in `PortalBatchPass.cpp`; fade passes use the same executor
 with their own storage. The resource prefix identifies each batch independently. Member scratch grows by the already witnessed object-slot
 count, and participates in `SceneFit::objects`, so a newer payload cannot address a member slot absent from its adopted buffer set.
 `BuildDrawsCS` checks the result's visibility stamp for both normal phase-one culling and stamp-only feedback. Its main entry no longer
@@ -41,7 +38,7 @@ interprets portal bytecode. Phase two still retests only occlusion, and the colo
 
 The default evaluator follows each lane's branches independently. Both predicates share one fixed six-plane calculation, preserving
 empty-set and boundary semantics. `CS_DCLF_PORTAL_UNIFORM_SCAN=1` selects a diagnostic uniform instruction scan. Its extra plane work
-must be included in comparisons. Neither backend uses subgroup operations or assumes a subgroup width. Task dispatch supports two dimensions.
+must be included in comparisons. Neither backend uses subgroup operations or assumes a subgroup width. The dispatch supports two dimensions.
 
 `PortalContext.h` defines owned contexts, room identity, queries, tasks, and results. Main-camera and strict-light walk contexts own their
 encoded words. Strict lights are captured before restoring main-camera scratch; selected-light records retain their snapshots.
@@ -234,8 +231,8 @@ cmake --build build/dclf-cpu-tests --config Release
 ctest --test-dir build/dclf-cpu-tests -C Release --output-on-failure
 ```
 
-Compile all nine `PortalBatchCS.hlsl` entry points (with `Inline`), `FadeStateCS.hlsl`'s `PreparePortalQueries` and `main`, and `BuildDrawsCS.hlsl`'s `ClearPortalQueries`, `PreparePortalQueries`, and `main`
-with the runtime DXC SPIR-V configuration. Also compile `ParabolicQueriesCS.hlsl` with independent and uniform traversal, and all four `ParabolicStateCS` entry points. Compile `Evaluate` with all four combinations of standalone/atlas addressing and independent/uniform traversal. Compile `Count` with both standalone and atlas addressing.
+Compile `PortalBatchCS.hlsl`'s `Inline`, `FadeStateCS.hlsl`'s `PreparePortalQueries` and `main`, and `BuildDrawsCS.hlsl`'s `ClearPortalQueries`, `PreparePortalQueries`, and `main`
+with the runtime DXC SPIR-V configuration. Also compile `ParabolicQueriesCS.hlsl` with independent and uniform traversal, and all four `ParabolicStateCS` entry points. Compile `Inline` with all four combinations of standalone/atlas addressing and independent/uniform traversal.
 
 `python tools/validate-dclf-portal-shaders.py --dxc <path-to-runtime-dxc.exe>` performs these checks, reading descriptor bindings from
 BasicRHI's ABI header. Its default shader directory is the prepared `build/ALL/aio/Shaders` tree; run `prepare_shaders` first.
@@ -283,10 +280,9 @@ build/dclf-portal-bench/Release/DclfPortalBench.exe --synthetic --corpus <captur
     approximated by the quad's sphere). Families: corridor, hub, grid, occluders, deep (the 26-operator cap), exterior, open (wall-wide
     openings: up to 35 programs, 459 sets, 44-step paths) and large (10x10 rooms, 60,000 queries). `--programs-only` keeps only the
     queries that reach a program's records, repeated to 64k: the evaluators' own cost.
--   **Variants:** V0 floor (queries read, verdicts written, nothing evaluated); V1 the batch (count, scan, scatter, tasks, indirect
-    evaluate); V2 the batch with the uniform scan; V3 inline (one thread per query, the short-circuit interpreter: `PortalBatchCS`'s
+-   **Variants:** V0 floor (queries read, verdicts written, nothing evaluated); V3 inline (one thread per query, the short-circuit interpreter: `PortalBatchCS`'s
     `Inline`); V3u inline uniform scan; V4 the hand-written baseline, each program's accepting paths flattened on the CPU into terms of
-    literals (exact: in a decision program exactly one path is taken); B1/B1b plane bits, inline and batched (each program's distinct
+    literals (exact: in a decision program exactly one path is taken); B1 plane bits (each program's distinct
     active planes once into two bit masks, then the records on bits). V4 and B1 are `PortalEvaluators.hlsli`, under
     `DCLF_PORTAL_EXPERIMENTAL` only, with auxiliary tables the bench builds (`AuxTables.h`).
 
@@ -313,8 +309,8 @@ median microseconds; every variant exact on every corpus):
 -   **Real programs are small**: at most 3 programs with records, 5 sets and a 4-step path on the route, and most queries are immediate
     (frustum-rejected by `PreparePortalQueries`: members 37-99.7%, median 97%; fade roots 46-93%, median 70%). Evaluation is 1-3 us above the 3.6-4 us dispatch floor.
 
-**Decisions.** The batches evaluate inline: one `Inline` dispatch over the queries in the evaluate pass, no count/scan/scatter pass
-(`CS_DCLF_PORTAL_EVALUATOR`, default `inline`; `batched` restores the batch). In game, inline with `CS_DCLF_SET_PARITY=1` and
+**Decisions.** The batches evaluate inline: one `Inline` dispatch over the queries in the evaluate pass. The batched evaluator (V1, V2,
+B1b above) and its switch were deleted on 2026-11-25; the table keeps their measurements. In game, inline with `CS_DCLF_SET_PARITY=1` and
 `CS_DCLF_FADE_PARITY=1` over the route: 12 of 12 set parity windows OK (0 records disagreeing with the set) and 12 of 12 fade parity
 windows OK (0 differ). The flattened and plane-bit evaluators stay bench-only. Not pursued: a strict-light gate prepass, a CPU collapse
 of strict verdicts and three-state cluster culling: each adds at least a dispatch and a barrier (3-4 us alone) to save evaluation that
