@@ -14,6 +14,7 @@
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
+#include "Features/PhysicalSky.h"
 #include "RenderGraph/Switches.h"
 #include "State.h"
 #include "Utils/Clipboard.h"
@@ -357,6 +358,17 @@ namespace
 				src.importName = "screenshot.target";
 				return src;
 			}
+		}
+		// CS_ORG_SHOT_PHYSSKY=apshadow (a diagnostic): the shot copies Physical Sky's aerial perspective shadow, as it is at the capture point.
+		static const auto physSkyShot = Switches::Value("CS_ORG_SHOT_PHYSSKY");
+		if (physSkyShot == "apshadow" && globals::features::physicalSky.loaded && globals::features::physicalSky.texApShadow) {
+			auto* texture = globals::features::physicalSky.texApShadow.get();
+			src.texture = texture->resource.get();
+			src.srv = texture->srv.get();
+			src.needsPreviewCache = true;
+			src.description = "Physical Sky's AP shadow (CS_ORG_SHOT_PHYSSKY)";
+			src.importName = "screenshot.physsky";
+			return src;
 		}
 		auto& slot = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 		src.texture = ResolveSlotTexture(slot, holder);

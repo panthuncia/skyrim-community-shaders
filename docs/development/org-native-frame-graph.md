@@ -4672,6 +4672,8 @@ it through the shadow mask. A client for that draw (a menu scene batch with the 
 **`CS_ORG_SHOT_TARGET=<n>`** (new, diagnostic): a harness shot copies engine render target n instead of the framebuffer. It found the
 fault above (kMAIN empty in native, the emblem's geometry present in the TAA mask, target 4).
 
+**`CS_ORG_SHOT_PHYSSKY=apshadow`** (diagnostic): a harness shot copies Physical Sky's AP shadow instead of the framebuffer. It found the sky's ghost of earlier views (2026-11-25): the sky family's ORG shaders had no Atmosphere and Fog medium, so `ViewAtmosphere::Enabled()` read false there and the sky sampled the AP shadow, which Physical Sky stops writing while the medium runs.
+
 Shots (main menu, Start On Save off; guest is the reference): native before showed only the menus; now the mist and the emblem (darker).
 
 ### 3. A menu's scene over the live world, blood and precipitation: not done

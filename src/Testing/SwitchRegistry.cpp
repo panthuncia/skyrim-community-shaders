@@ -136,6 +136,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_ORG_RAW_ACCESS_CHECK", .key = "org.raw_access_check", .type = Bool, .defaultValue = "0", .description = "native: log and count work on graph-tracked images that skips the graph's state tracking ([ORG raw access] lines)" },
 			{ .name = "CS_ORG_RECORDING_TIMESTAMPS", .type = Bool, .defaultValue = "0" },
 			{ .name = "CS_ORG_SHARED_CONSTANTS_CHECK", .type = Bool, .defaultValue = "0" },
+			{ .name = "CS_ORG_SHOT_PHYSSKY" },
 			{ .name = "CS_ORG_SHOT_TARGET" },
 			{ .name = "CS_ORG_SSGI_DEBUG" },
 			{ .name = "CS_ORG_SSS_KEEP_APART" },

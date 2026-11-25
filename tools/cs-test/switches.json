@@ -1488,6 +1488,16 @@
 			"description": ""
 		},
 		{
+			"name": "CS_ORG_SHOT_PHYSSKY",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": ""
+		},
+		{
 			"name": "CS_ORG_SSGI_DEBUG",
 			"key": "",
 			"type": "string",
