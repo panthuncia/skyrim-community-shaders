@@ -1110,8 +1110,6 @@ namespace Hooks
 				if (setting->DataLength >= sizeof(DWORD))
 					Upscaling::NotifyDisplayState(*reinterpret_cast<const DWORD*>(setting->Data) != 0);
 			}
-			if (a_msg == WM_DISPLAYCHANGE)
-				Upscaling::NotifyDesktopChanged();
 			if ((a_msg == WM_KILLFOCUS || a_msg == WM_SETFOCUS) && menu->initialized) {
 				menu->focusChanged = true;
 			}
