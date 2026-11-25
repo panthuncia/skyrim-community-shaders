@@ -36,7 +36,6 @@ namespace DCLF
 		// Diagnostics: stats, shader debugging, and probes. See dclf-validation.md, "Probes and diagnostics".
 		Stats,
 		PassStats,
-		HeapFrameBlocks,
 		Profile,
 		ShaderDebug,
 		ShaderSourceDir,

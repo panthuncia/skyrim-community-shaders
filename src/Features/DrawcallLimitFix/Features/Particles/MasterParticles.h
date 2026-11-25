@@ -1,6 +1,6 @@
 #pragma once
 
-// Master particle systems (CS_DCLF_MASTER_PARTICLES, default on): torches, candles and street mist drawn by DCLF's particle path.
+// Master particle systems: torches, candles and street mist drawn by DCLF's particle path.
 // The particle manager holds each BSMasterParticleSystem in its child array without being its parent. The masters are unheld roots,
 // held by key alone, because the engine removes a master once its reference count drops below 3 and a DCLF reference would leak it.
 // Lifetime comes from events: attach through AttachChild, removal by the manager's update (FUN_140e2a520, hooked here to push the

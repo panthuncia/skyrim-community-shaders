@@ -282,7 +282,7 @@ objects, so the engine draws none of them and nothing pops in. No frame is black
     not with frame generation. A loading screen that starts during a hold ends it
     (`SetLoadingScreenActive(true)`, +0x11A): the new load posts its own close.
 -   **A re-entry** holds the presents the same way (`LoadHold::BeginReentry`), only for the map menu's camera cut: opening or
-    closing the map, whose set was culled for the other camera (`CS_DCLF_MAP_HOLD=0` turns it off). It ends as a load's hold does;
+    closing the map, whose set was culled for the other camera. It ends as a load's hold does;
     one that ended at a stall or the cap is not started again until a frame without its condition. Frame generation is not held.
 -   **Undrawable shadow views and occlusion maps** (`LoadHold::NoteUndrawable`: an unstaged graph rebuild or no host in
     `IndirectDraws::ShadowViewCapacity`, the shadow epoch not recorded in `DecideShadowCoverage`, an occlusion map DCLF cannot
@@ -688,7 +688,7 @@ missing events before.
     the main pass does not take), `UnsupportedParent` (a blended leaf under a `BSOrderedNode` the forward epoch
     does not take) and `MultiIndex`. Billboards are never shadow-only: `NiBillboardNode` turns to the culling camera, which for a
     shadow view is the light.
--   **The engine's empty fade node is no root** (`Engine::EmptyFadeNode`; `CS_DCLF_EMPTY_FADE_NODE`). `BSShaderProperty`'s
+-   **The engine's empty fade node is no root** (`Engine::EmptyFadeNode`). `BSShaderProperty`'s
     constructor points `fadeNode` at a static `BSFadeNode` (the pointer at `0x14332a2a0`) that the engine reads as null; terrain,
     object LOD and some references keep it. Such geometry takes its plain entry root instead, and every reader compares the value,
     not the global's address.
@@ -2237,8 +2237,8 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
     stage); skinned effects through the palettes; opaque effects (below); the Lighting variant (`kEffectLighting`); weapon blood.
 -   **Still variants** (`EffectVariantBit`, `Ineligible::EffectVariant`), the engine's: a shape that is not a `BSTriShape` or
     particle system, a skin mismatch (the Skinned bit without a skin instance; a skin instance without the bit, a rigid skin,
-    without `CS_DCLF_EFFECT_RIGID_SKINS`), a decal that registers no pass, sky objects (bit 45), wireframe (bit 48), cloud lighting
-    with `CS_DCLF_EFFECT_CLOUD_LIGHT=0`, Lighting without Light Limit Fix, projected UV, an unrecognised blend pair, and the
+    without `CS_DCLF_EFFECT_RIGID_SKINS`), a decal that registers no pass, sky objects (bit 45), wireframe (bit 48), Lighting
+    without Light Limit Fix, projected UV, an unrecognised blend pair, and the
     particle causes.
 -   **Membership.** The synthetic pass is derived from the property every time (`PrimaryCull::MembershipPass`); `PassCapture` keeps no
     effect registration.
@@ -2260,7 +2260,7 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
     Light Limit Fix's clusters; a register the capture lacks leaves the pair not drawable (the engine draws it), never drawn wrong.
     Light 0 is the sun (`ShadowSceneNode` `+0x200`, frame row c18), or for a `kCloudLOD` property the cloud light (`+0x208`,
     `FUN_1414fcf80`; frame row c20, `SampleEffectCloudLight`). The shading row's `MaterialData.w` is 1 for a `kCloudLOD` property
-    and `Effect.hlsl` picks the row by it (`CS_DCLF_EFFECT_CLOUD_LIGHT`, default on; 0 leaves them the engine's).
+    and `Effect.hlsl` picks the row by it.
 -   **Effect decals**: decal group 1 (hint 2) or 2 (hint 3), blend mode from the pair, write mode 11 (10 for group 1 with
     MotionVectorsNormals), `kObjectDecal`. The member decal's chain key (`decalKey`) is ordered by the pass enum, so a group's
     effect decals precede its Lighting ones, as the engine draws them.
@@ -2278,15 +2278,14 @@ the frame rows (`EffectFrame.cpp`) and the controllers' write hooks (`EffectWrit
 
 A hint 0 effect (no blending alpha property, no Falloff, depth tested and written, not a particle system) draws through decal group
 1 with `opaqueEffect`: Deferred, blend mode 0, write mode 1, no depth bias, membership hint 0 (`DeriveEffectDescriptors`;
-`CS_DCLF_OPAQUE_EFFECTS`, needs decals). It is an occludee culled once in the colour segment, and the decal depth pass writes its
+needs decals). It is an occludee culled once in the colour segment, and the decal depth pass writes its
 depth before the colour pass. A property alpha below one would make the engine's pass blended; DCLF keeps it opaque.
 
 #### Falloff without blending
 
 An effect mesh with `kFalloff` and no blending alpha property is hint 1 in `GetRenderPasses` (the descriptor's Falloff alone), and
 the alpha setup (`FUN_14150bc80`, no blending alpha property) leaves blending off while the property alpha is one; below one it
-blends alpha over. DCLF draws it in the forward sort with blend mode 0 and the property's depth flags (`EffectDrawOf`;
-`CS_DCLF_EFFECT_FALLOFF`, default on; 0 leaves it the engine's as `effect-opaque`). While it fades (property alpha below one) the
+blends alpha over. DCLF draws it in the forward sort with blend mode 0 and the property's depth flags (`EffectDrawOf`). While it fades (property alpha below one) the
 engine blends it and DCLF does not, as with the opaque effects.
 
 ### Particles
@@ -2309,7 +2308,7 @@ Effect-shaded `NiParticleSystem`s are drawn in the forward sort (Features/Partic
 -   **Draw**: `Effect.hlsl` `PARTICLES` under `DCLF_PARTICLE_PULL`: no vertex input but `SV_VertexID`, corners pulled
     (`DCLFParticleInput`). A forward object culled with the snapshot's bound and sorted by its centre.
 -   First-person particle members are expanded faced to the first-person eye.
--   **Master particle systems** (`CS_DCLF_MASTER_PARTICLES`, default on; `Features/Particles/MasterParticles.cpp`; roadmap 1.4):
+-   **Master particle systems** (`Features/Particles/MasterParticles.cpp`; roadmap 1.4):
     the particle manager's `BSMasterParticleSystem`s are parentless children of its array. They are unheld roots
     (`Api::UnheldRootsContribution`): category nodes filed under themselves, held by key alone, because the engine removes an
     idle master once its count is below 3. Their exits are events: the manager's child edits and remove-all through
@@ -2320,7 +2319,7 @@ Effect-shaded `NiParticleSystem`s are drawn in the forward sort (Features/Partic
 ### Billboards and aligned particles
 
 Effect meshes under one billboard node are turned per draw on the GPU (Features/Billboards; `Core/Gpu/PlacementRows/BillboardRow.h`;
-`CS_DCLF_BILLBOARD_PARTICLES` for particle systems under billboard nodes).
+particle systems under billboard nodes take the particle path).
 -   **Classification**: an effect `BSTriShape` without a skin with exactly one billboard node between it and its category node,
     first-person entries included. The face mode is read at AE's `+0x128` (`PlacementRows::BillboardFaceMode`), not CommonLib's
     `NiBillboardNode::userFlags` (the wrong offset in this build). The key holds `mode + 1` in raster bits 21-23
@@ -2340,7 +2339,7 @@ Effect meshes under one billboard node are turned per draw on the GPU (Features/
 
 Objects the colour segment culls once and a later epoch draws (`Api/DeferredRanges.h`, `Core/Extensions/DeferredRanges.cpp`,
 `Core/Render/Passes/DeferredRanges.cpp`). Water is the only user (docs/development/plans/dclf-water-indirect.md): range 0 is
-its mask, range 1 its surface, registered with `CS_DCLF_WATER` 1 or 2.
+its mask, range 1 its surface.
 -   **Which objects.** A key of a program family built as `ProgramBuild::DeferredRanges` (`ProgramFamily::Water`: key bit 18,
     `kRasterWater`). `MainMaskOf` gives its object `kViewWater` alone: never a depth segment input, so never in the HZB. The family
     rule `deferredRanges` keeps its keys out of the Z-prepass buckets, the state classes and the main and terrain plain buckets.
@@ -2375,8 +2374,7 @@ its mask, range 1 its surface, registered with `CS_DCLF_WATER` 1 or 2.
     water stage opens with the steps after the mask; the surface epoch ends that and post-water opens. Group 10's water is the
     latch path's in the water stage, before DCLF's surface. Under water the blended draw (which taps deferred+water, water and
     post-water) comes before the surface batch, so the surface epoch ends the sun stage only if it holds work
-    (`commitBeforeIfStaged`), and sun water takes the rest. In frames with no water epoch nothing splits, so `CS_DCLF_WATER=0`
-    keeps today's tickets.
+    (`commitBeforeIfStaged`), and sun water takes the rest. In frames with no water epoch nothing splits.
 -   **With no members** nothing is planned, no sequence is written and no pass records, and the colour commit zeroes four more count
     words.
 -   **Not in the CPU-driven pipeline.** Its lanes take no `kViewWater` input, so a member would draw nowhere there.
@@ -2644,7 +2642,7 @@ keeps on the node. One hidden without a visible full tree leaves a hole.
 #### LOD gates: the scene side
 
 The engine's object and terrain LOD swaps (Upgrade, Downgrade, InitialLoad `Func2`s) are held until DCLF's claims cover the incoming
-level (`Features/Lod/LodGates.h`, `LodGateComponent.{h,cpp}`, `LodGateAdoption.cpp`; `CS_DCLF_LOD_GATES`). Otherwise a swap shows
+level (`Features/Lod/LodGates.h`, `LodGateComponent.{h,cpp}`, `LodGateAdoption.cpp`). Otherwise a swap shows
 the incoming blocks for the frames before DCLF claims them, and the engine draws them meanwhile.
 -   **The engine side** hides a swap's incoming blocks (app-cull) before their attach and keeps them hidden by vetoing the engine's
     show stores (the hidden-store stubs' `Api::ShowVeto`); outgoing blocks are stolen from their quadtree nodes inside
@@ -3024,7 +3022,7 @@ alpha test on; the sky tests without writing.
 The player's first-person skeleton is a category root of the one scene, drawn by two view epochs, the depth one hosted by the depth
 epoch (Features/FirstPerson; Core's view
 engine, `Core/Render/Epochs/ViewEpoch*.cpp`, `Core/Render/Views/ViewSlots.h`, shared with the reflection faces;
-`CS_DCLF_FIRST_PERSON_DECALS`).
+decals on its entries draw in its forward part).
 -   **Coverage** (`Covered`): the latch, both epochs covered, the depth copy imported, no rebuild pending, and a way to draw its
     forward part. That part has no plain buckets, so a GPU-driven graph without device-generated commands (AMD, Intel) draws it only
     through the direct forward family (`GraphConditions::firstPersonForwardDirect`). Without either, the engine keeps the whole view.
@@ -3245,8 +3243,7 @@ keeps a subset of the GPU's draws. No HZB: more overdraw in colour, which draws 
 ## What the engine still draws
 
 DCLF claims whole objects in the phases it draws; the engine keeps:
--   **By class**: water, sky, grass, precipitation, the particle manager's master particle systems (torches, candles, street mist,
-    blood impact sprays; the engine's only with `CS_DCLF_MASTER_PARTICLES=0`), and the effect variants not ported (sky objects,
+-   **By class**: water, sky, grass, precipitation, and the effect variants not ported (sky objects,
     wireframe, the effect Lighting variant without Light Limit Fix, projected UV, unrecognised blend pairs, membrane, strip and mesh
     particle systems, skins or nested billboards under billboards, Lighting leaves under billboards).
 -   **By state**: an object not yet a member (the engine draws it until the publication that claims it is installed), a pair a

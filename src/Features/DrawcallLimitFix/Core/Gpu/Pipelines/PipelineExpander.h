@@ -21,7 +21,7 @@
 
 namespace DCLF
 {
-	/** @brief Adds likely neighbours of the keys already in the set. Run it after the manifest sources. Off with CS_DCLF_PIPELINE_EXPAND=0. */
+	/** @brief Adds likely neighbours of the keys already in the set. Run it after the manifest sources. */
 	class PipelineCombinationExpander final : public PipelineKeySource
 	{
 	public:

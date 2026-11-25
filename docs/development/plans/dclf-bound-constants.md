@@ -206,7 +206,7 @@ Per-draw root CBVs are not viable on Pascal:
    - CS:
      - FrameSource declares the pass-wide blocks as `register(b<ordinal>, space9)`;
      - the main and Z-prepass layouts take the table over `FrameBlockViews`' range, set once per pass;
-     - a diagnostic switch (`CS_DCLF_HEAP_FRAME_BLOCKS=1`) restores heap-indexed blocks for A/B.
+     - a diagnostic switch (`CS_DCLF_HEAP_FRAME_BLOCKS=1`) restored heap-indexed blocks for A/B (removed 2026-11-25).
    - Default on, every vendor.
 3. **Non-pass-wide frame blocks as descriptors.**
    - Give b7, b8 and b11 (both stages) uniform-buffer views like the pass-wide ones, and read them through the same table (or

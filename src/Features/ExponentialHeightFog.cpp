@@ -151,7 +151,7 @@ ExponentialHeightFog::GpuSettings ExponentialHeightFog::GetCommonBufferData() co
 		data.enabled = 0;
 	// On the graph the shaders read the volumes only once a run wrote the bound versions, as the D3D11 readers get them.
 	const auto& orgFog = ORGExponentialHeightFog::Get();
-	if (orgFog.IsActive() && ORGExponentialHeightFog::Debug() != 3 && !orgFog.NearSRV())
+	if (orgFog.IsActive() && !orgFog.NearSRV())
 		data.volumetricFogEnabled = 0;
 	return data;
 }
@@ -844,10 +844,9 @@ void ExponentialHeightFog::Prepass()
 		return;
 	}
 	// The render-graph path: its volumes and passes follow the adopted revision, and run in the Prepass anchor's epoch.
-	// In graph mode the fog never runs on D3D11: a false Prepass means no volumetric fog this frame. Debug mode 3 runs the
-	// D3D11 path instead, in guest mode only, and the test census counts those frames.
+	// In graph mode the fog never runs on D3D11: a false Prepass means no volumetric fog this frame.
 	auto& orgFog = ORGExponentialHeightFog::Get();
-	if (orgFog.IsActive() && ORGExponentialHeightFog::Debug() != 3) {
+	if (orgFog.IsActive()) {
 		if (vBufferA || vBufferAFar)
 			ReleaseVolumetricResources();
 		if (!IsSuppressed() && orgFog.Prepass())

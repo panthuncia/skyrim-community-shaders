@@ -29,6 +29,7 @@ def build_parser():
     p.add_argument("--base-aio", help="an AIO folder for the files a DLL build lacks, the first time a name is staged")
     p.add_argument("--pad", type=int, default=0, help="empty files that make usvfs grow its table before the game starts")
     p.add_argument("--pdb", action="store_true", help="AIO mode: copy PDBs too")
+    p.add_argument("--wait", type=int, default=0, metavar="S", help="wait up to S seconds while a run copies this stage (default: refuse)")
 
     p = sub.add_parser("run", help="one game run of a config ('a+b' composes)")
     p.add_argument("config")
@@ -70,7 +71,7 @@ def main(argv=None):
 
             # A run copies a stage into its slot under the same lock, so it never copies half a stage.
             lock = locks.Lock(paths.locks / f"stage-{args.name}.lock", f"stage {args.name}")
-            lock.acquire(900)
+            lock.acquire(args.wait)
             try:
                 manifest = stage(paths, args.source, args.name, args.preset, args.base_aio, args.pad, args.pdb)
             finally:

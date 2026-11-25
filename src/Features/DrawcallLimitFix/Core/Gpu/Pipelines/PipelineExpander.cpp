@@ -6,7 +6,6 @@
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
-#include "Utils/SwitchFile.h"
 
 #include <algorithm>
 #include <array>
@@ -287,10 +286,6 @@ namespace DCLF
 		using namespace PipelineExpanderDetail;
 		ruleCounts.clear();
 		skippedUnbuildable = 0;
-		if (::Util::SwitchFile::Value("CS_DCLF_PIPELINE_EXPAND") == "0") {
-			logger::info("[DCLF] pipeline expander: off (CS_DCLF_PIPELINE_EXPAND=0)");
-			return;
-		}
 		// A copy, since the rules add to the set while reading what was listed.
 		const PipelineManifestLines listed = a_set.Lines();
 		const PipelineManifestLines unbuildable = PipelineManifest::Unbuildable().Lines();

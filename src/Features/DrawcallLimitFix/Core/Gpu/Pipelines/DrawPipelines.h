@@ -48,11 +48,8 @@ namespace DCLF
 	// Pass-wide blocks, in the frame push words' order. Read through uniform buffer descriptors rather than pushed addresses,
 	// because address-sourced blocks cost the colour pixel stage about 40 registers on NVIDIA (tools/shader-compare).
 	inline constexpr std::uint32_t kFrameBlocks = std::popcount(kFramePushVS) + std::popcount(kFramePushPS);
-	/**
-	 * @brief Whether D3D12 pulled stages read the pass-wide blocks as bound constant buffers (a descriptor table the layout's
-	 * PushIndex range binds) rather than by heap index. On unless CS_DCLF_HEAP_FRAME_BLOCKS=1. See dclf-bound-constants.md.
-	 */
-	bool BoundFrameBlocks();
+	// D3D12 pulled stages read the pass-wide blocks as bound constant buffers: a descriptor table the layout's PushIndex
+	// range binds. See dclf-bound-constants.md.
 	// A draw's push words (DrawSequence bytes 4-99). These must match DCLFPushData's packoffsets in DCLFObjects.hlsli.
 	// BasicRHI needs pushed addresses 8-byte aligned, hence the pad at word 13 and the even word count.
 	inline constexpr std::uint32_t kDrawPushPipelineRow = 0, kDrawPushMaterialRow = 2, kDrawPushObject = 4, kDrawPushVertexBuffer = 5, kDrawPushStreamBuffer = 9,

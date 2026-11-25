@@ -106,10 +106,6 @@ public:
 	static void RequestUpscaleTest(int a_method);
 	static void NotifyWindowModifying(bool a_modifying);  // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE
 	static void NotifyDisplayState(bool a_on);            // GUID_CONSOLE_DISPLAY_STATE
-	static void NotifyDesktopChanged();                   // WM_DISPLAYCHANGE
-
-	/** @brief With CS_FG_DISPLAY_SUSPEND=1, whether the display is off or the desktop changed moments ago: frame generation stays down until it settles. */
-	static bool IsDisplayUnsettled();
 
 	/**
 	* @brief Returns whether presenting must be suspended. Once frames begin, this is the answer LatchWindowState took at the
@@ -130,7 +126,6 @@ public:
 	static inline std::atomic<bool> s_windowUnusableLatched{ false };
 	static inline std::atomic<bool> s_windowLatched{ false };  // LatchWindowState has run
 	static inline std::atomic<bool> s_displayOff{ false };
-	static inline std::atomic<std::uint64_t> s_displayChangedTick{ 0 };
 
 	// Timing and scaling
 	double refreshRate = 0.0;

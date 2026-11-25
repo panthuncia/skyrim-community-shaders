@@ -1,10 +1,10 @@
 #pragma once
 
-// Water as DCLF scene objects (docs/development/plans/dclf-water-indirect.md, phase 1), behind CS_DCLF_WATER.
-// With 0 nothing here is registered. With 1 water shapes are tracked under the water roots, classified by the water port and
-// counted by a census, but never claimed: every water shape stays the batch hooks'.
+// Water as DCLF scene objects (docs/development/plans/dclf-water-indirect.md). Water shapes are tracked under the water roots,
+// classified by the water port and counted by a census. Plain water is claimed while the water epochs draw it; the rest stays
+// the batch hooks'.
 // The port's pure functions are Features/Water/Port. This folder registers them with Core:
-// - WaterSceneFeature.cpp: the switch, ObjectClass::Water and its category roots.
+// - WaterSceneFeature.cpp: ObjectClass::Water and its category roots.
 // - WaterScenePort.cpp: the material port for BSWaterShaderProperty and BSWaterShaderMaterial.
 // - WaterSceneCensus.cpp: what was tracked and classified, and the report line.
 // - WaterSceneRows.cpp: the per-object water row (a table family), the water material pool and the frame row.
@@ -139,14 +139,8 @@ namespace DCLF::Features::Water::WaterScene
 	};
 	static_assert(sizeof(WaterFrameRow) == kFrameRows * 16);
 
-	/** @brief Install time, main thread. Registers CS_DCLF_WATER and, when it is 1 or 2, everything else in this folder. */
+	/** @brief Install time, main thread. Registers the water object class and everything else in this folder. */
 	void Install(Api::InstallContext& a_context);
-	/** @brief Whether CS_DCLF_WATER is 1 or 2. Read once at install. A water program family must register only when this is true. */
-	bool On();
-	/** @brief Whether CS_DCLF_WATER is 2: the port claims plain water while Indirect::DrawnInput is on. Read once at install. */
-	bool Claims();
-	/** @brief Whether claimed water is claimed in CPU-driven frames too, which the CPU pipeline's water sites draw (CS_DCLF_WATER not 3). */
-	bool ClaimsInCpuFrames();
 
 	// Within this folder.
 

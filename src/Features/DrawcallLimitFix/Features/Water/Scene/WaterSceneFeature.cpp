@@ -1,4 +1,4 @@
-// Water as scene objects: the CS_DCLF_WATER switch, ObjectClass::Water and the roots water hangs under.
+// Water as scene objects: ObjectClass::Water and the roots water hangs under.
 //
 // Where drawn water hangs (phase 0's census, read in Ghidra on SE 1.5.97 and AE 1.6.1170):
 // - Unified Water's tiles and vanilla LOD water: TES::objLODWaterRoot (TES +0x90), the NiNode "WaterLOD" under "LODRoot".
@@ -13,7 +13,6 @@
 // AddWater itself attaches no shape. It writes the property's plane and flags, then SetMaterial, which is a property event.
 
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
-#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include <atomic>
 
@@ -21,10 +20,6 @@ namespace DCLF::Features::Water::WaterScene
 {
 	namespace
 	{
-		bool on = false;      // written once at install
-		bool claims = false;  // the same
-		bool cpuClaims = false;  // the same
-
 		// The render thread's last listing. Keys only: the census compares them, never dereferences them.
 		std::atomic<const void*> listedWaterLod{ nullptr };
 		std::atomic<const void*> listedWaterSystem{ nullptr };
@@ -50,27 +45,13 @@ namespace DCLF::Features::Water::WaterScene
 		return { listedWaterLod.load(std::memory_order_relaxed), listedWaterSystem.load(std::memory_order_relaxed) };
 	}
 
-	bool On() { return on; }
-	bool Claims() { return claims; }
-	bool ClaimsInCpuFrames() { return cpuClaims; }
-
 	void Install(Api::InstallContext& a_context)
 	{
-		const auto id = a_context.RegisterSwitch({ .name = "CS_DCLF_WATER", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never,
-			.description = "0: nothing of it is registered, and the batch hooks draw all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the batch hooks still draw them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs, the rest staying the batch hooks' (phases 2 and 3): in GPU-driven frames by the deferred range passes, in CPU-driven frames by the CPU pipeline's water sites; 3: as 2, but CPU-driven frames leave all water to the batch hooks",
-			.after = "CS_DCLF_EFFECT_RIGID_SKINS" });
-		const auto& value = SwitchValue(id);
-		claims = value.empty() || value == "2" || value == "3";
-		cpuClaims = claims && value != "3";
-		on = claims || value == "1";
-		if (!on)
-			return;
 		a_context.RegisterObjectClass({ .objectClass = Api::ObjectClass::Water, .categoryRoots = &GatherRoots });
 		// Must register after the object class.
 		RegisterPort(a_context);
 		RegisterCensus(a_context);
 		RegisterRows(a_context);
-		logger::info("[DCLF] water scene: on (CS_DCLF_WATER={}): water is tracked and classified{}", value.empty() ? std::string_view("2, the default") : std::string_view(value),
-			claims ? ", and plain water is claimed while DCLF's water epochs draw it" : ", not claimed");
+
 	}
 }

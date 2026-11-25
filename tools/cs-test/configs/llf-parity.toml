@@ -1,4 +1,0 @@
-# Light Limit Fix's culling parity: every 300 frames the graph's light lists are read back and compared with D3D11's
-# ("[ORG] LLF parity OK" or "MISMATCH"). Guest only, since native culls on the graph alone. Compose it: guest+upscalers+llf-parity.
-[org]
-llf_parity = "1"

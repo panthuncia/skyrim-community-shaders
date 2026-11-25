@@ -37,7 +37,7 @@ namespace DCLF::Features::Effects
 		kEffectVariantDecal = 1u << 2,          // kDecal / kDynamicDecal that registers no pass
 		kEffectVariantSkyObject = 1u << 3,      // bit 45: hint 0x12, geometry group 13
 		kEffectVariantWireframe = 1u << 4,      // bit 48
-		kEffectVariantCloudLighting = 1u << 5,  // kEffectLighting with kCloudLOD while CS_DCLF_EFFECT_CLOUD_LIGHT is 0
+		kEffectVariantCloudLighting = 1u << 5,  // retired: cloud-lit effects are drawn (the bit is kept for report names)
 		kEffectVariantLightingNoLlf = 1u << 6,  // kEffectLighting without Light Limit Fix (PerGeometry PLight*)
 		kEffectVariantBlood = 1u << 7,          // kWeaponBlood
 		kEffectVariantProjectedUv = 1u << 8,    // kProjectedUV
@@ -57,17 +57,14 @@ namespace DCLF::Features::Effects
 	inline constexpr std::uint32_t kEffectVariantParticles = kEffectVariantParticle | kEffectVariantParticleClass | kEffectVariantParticleData |
 	                                                         kEffectVariantParticleAligned | kEffectVariantParticleUnblended | kEffectVariantParticleDecal;
 	/**
-	 * @brief Variants the port can draw, each behind its own switch. Read once at install, before any classification.
+	 * @brief Variants the port can draw behind a switch. Read once at install, before any classification.
 	 * rigidSkins covers a skin instance without the Skinned bit, which the engine draws per partition with the unskinned shader.
 	 */
 	struct PortedVariants
 	{
-		bool cloudLighting = false;
-		bool falloff = false;
 		bool rigidSkins = false;
 	};
 	void SetPortedVariants(const PortedVariants& a_variants);
-	const PortedVariants& Ported();
 	std::uint32_t EffectVariantsOf(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf);
 	/** @brief Needs both the property's kSkinned and a skinned vertex description, as FUN_1414bde90 does. */
 	bool EffectSkinned(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf);

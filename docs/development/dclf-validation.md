@@ -60,19 +60,11 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_CPU_RECORD` | `indirect` on every vendor | `serial`: the CS thread records each draw. `indirect`: the cull jobs write draws (needs pulled colour, 0.21 ms of GPU time on an RTX 5080). Live: `dclf:cpu-record=indirect\|serial`. |
 | `CS_DCLF_CPU_BATCH` | 4096 | The CPU pipeline's batch lanes, rounded up to a multiple of 8. Live: `dclf:cpu-batch=`. |
 | `CS_DCLF_PLAIN_SNOW_SPARKLE` | on (unless 1) | `0`: a snow layer with a plain material (vanilla glaciers and ice) draws without sparkle instead of the Snow class's default. See [the engine bugs](#in-the-engine). |
-| `CS_DCLF_LOD_GATES` | on (unless 0) | `0`: the engine's LOD swaps are ungated. By default a swap keeps the outgoing level shown, and the incoming hidden, until DCLF's claims cover the incoming. |
 | `CS_DCLF_TREE_LIST_ALL` | **off** | `1`: the tree manager's list loop gets DCLF's verdict for every `BSTreeNode` DCLF lists; off: for the stood-in trees alone. |
-| `CS_DCLF_FIRST_PERSON_DECALS` | on (unless 0) | `0`: decals on first-person entries (an effect's blood on the arms, a weapon's `BloodLighting`) stay the engine's. |
-| `CS_DCLF_OPAQUE_EFFECTS` | on (unless 0) | `0`: opaque effect meshes (hint 0: forge coals, slag) stay the engine's. |
-| `CS_DCLF_EFFECT_CLOUD_LIGHT` | on (unless 0) | `0`: Lighting-variant effects with `kCloudLOD` (lit by the cloud light) stay the engine's (`cloud-lighting`). |
-| `CS_DCLF_EFFECT_FALLOFF` | on (unless 0) | `0`: effect meshes with Falloff and no blending alpha property stay the engine's (`effect-opaque`). |
 | `CS_DCLF_EFFECT_RIGID_SKINS` | **off** | `1`: effect meshes with a skin instance whose pass has no Skinned bit (the property without `kSkinned`) are DCLF's, each partition drawn with the unskinned vertex stage and the geometry's world, as the engine draws them; `0` they stay the engine's (`effect-variant (skinned)`). |
-| `CS_DCLF_BILLBOARD_PARTICLES` | on (unless 0) | `0`: particle systems under billboard nodes (the magic hands' fire cores) stay the engine's. |
-| `CS_DCLF_MASTER_PARTICLES` | on (unless 0) | the particle manager's master particle systems (torches, candles, street mist, blood impacts) are DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4). Its observers (`<- MASTER SET`, `<- MASTER REFS` in the particles report) run with `CS_DCLF_STATS` only. `0`: they stay the engine's. |
 | `CS_DCLF_TEX_STREAM` | on (unless 0) | `0`: the game's textures stay whole, not shells with streamed mip windows. Read at the first texture load ([texture-streaming.md](./texture-streaming.md)). |
 | `CS_DCLF_TEX_DISTANCE` | the menu's | `0`: texture streaming has no distance floor, over the menu's setting. |
 | `CS_DCLF_TEX_FEEDBACK` | the menu's | `0`: texture streaming has no shader feedback, over the menu's setting. |
-| `CS_DCLF_EMPTY_FADE_NODE` | on (unless 0) | `0`: the engine's empty fade node (the `BSFadeNode` at `0x14332a2a0` every `BSShaderProperty` starts with) is listed as one fade root of all its geometry, instead of no root. |
 
 ### Parity checks and observers
 
@@ -143,9 +135,7 @@ DCLF's registry, so DCLF's startup summary does not list them.
 | --- | --- | --- |
 | `CS_ORG_RECORDING_TIMESTAMPS` | `RenderGraphRuntime.cpp` | `1`: the recordings kept across frames carry pass and barrier timestamps (`GraphHost::SetRecordingTimestamps`), as a timestamp trace turns on; the others are always timed. |
 | `CS_ORG` | `RenderGraphRuntime.cpp` | `0`: no render graph; `features`: the interop device features are requested but no graph is made. |
-| `CS_UPSCALE_SUBMIT` | registry | `direct`: upscaling's ring submissions wait for DXVK's command stream. |
 | `CS_STREAMLINE_REFLEX` | registry | `0`: Streamline does not load Reflex, PCL or DLSS-G, for Nsight Graphics captures. FSR-FG then holds 32 frames of input copies in VRAM. |
-| `CS_FG_DISPLAY_SUSPEND` | `Upscaling.cpp` | `1`: frame generation unloads while the display is off and for 5 s after a desktop change, then reloads. |
 | `CS_VK_DRIVER_TRACE` | `VkDriverTrace.cpp` | `1`: logs the real present rate and each module's device memory, as the driver sees them, every 5 s. The overlay's DLSS-G "true" rate is an estimate, so this is how to confirm frames are generated. |
 | `CS_GPU_EVENT_TIMERS` | `GpuEventTimers.cpp` | `<frames>`: GPU time per engine event, logged every that many frames. Works with DCLF off. |
 | `CS_GPU_TIMERS` | `RenderGraph/GpuTimingSource.cpp` | `graph`: the profiler, `CS_PROFILER_LOG` and `CS_GPU_EVENT_TIMERS` read GPU time from the render graph only, with no D3D11 query. See [render-graph.md](./render-graph.md#gpu-timers-from-the-graph). |
@@ -163,8 +153,6 @@ switches file too (`Util::SwitchFile`).
 | `CS_HANG_WATCHDOG`, `CS_TEST_HANG` | `HangWatchdog.cpp`, env | See [Hangs](#hangs). |
 | `CS_AB_PROBE` | `Vram/MemProbe.h`, env | `1`: a row of memory figures a second in `CS-AB-memory.csv`, which `tools/cs-test/compare.py` reads. |
 | `CS_NATIVE_D3D11` | `DxvkLoader.cpp`, env | `1`: the native D3D11 runtime instead of DXVK (no render graph). |
-| `CS_NO_D3DX_UPGRADE` | `D3DX9MathUpgrade.cpp`, env | `1`: the D3DX9 math upgrade is not patched in. |
-| `CS_NO_PASS_PREFETCH` | `Hooks.cpp`, env | `1`: no next-pass prefetch detour on `BSBatchRenderer::RenderPassImmediately` (an A/B escape hatch). |
 | `CS_PASS_SKIP`, `CS_PASS_ROUNDS` | `GpuEventTimers.cpp`, env | Cost attribution by dropping events' draws ([Cost attribution](#cost-attribution-cutting-pieces-out)); `CS_PASS_ROUNDS` is how many times the list is cycled (default 2). |
 | `CS_PASS_SAMPLE` | `GpuEventTimers.cpp`, env | Set: a sampler thread profiles the main thread during `CS_PASS_SKIP` runs and logs each thread's share of wall time (`[PassSkip] thread ...`). |
 | `CS_GPU_EVENT_STATS` | `GpuEventTimers.cpp`, env | `<event>\|<event>...`: D3D11 pipeline statistics for those engine events, logged every `CS_GPU_EVENT_TIMERS` frames (`[GpuStats]`). |
@@ -182,8 +170,6 @@ switches file too (`Util::SwitchFile`).
 | `DXVK_SHADER_DUMP_PATH` | DCLF's `DrawPipelinesImpl.h`, env | DXVK's own variable; DCLF also writes each pipeline's pixel SPIR-V there, named by its label. |
 
 The render graph's own switches, and BasicRHI's `BASICRHI_VK_CRASH_MARKERS`, are in [render-graph.md](./render-graph.md#switches).
-
-`CS_ORG_LLF_PARITY` (`LightLimitFix.cpp`) is Light Limit Fix's own parity and is not DCLF's.
 
 ## Parity checks
 
