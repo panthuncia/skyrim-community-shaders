@@ -71,5 +71,11 @@ always is in graph modes); wip7 keys entries by call site instead.
 
 | Config | Label | Result |
 |---|---|---|
-| guest+quick | p-dclf-inputs-fguest | passed, shot looks right |
-| native-vulkan+quick | p-dclf-inputs-fnvk | passed, shot looks right |
+| guest+quick | p-dclf-inputs-fguest | passed, shot looks right (before the fade loop change) |
+| native-vulkan+quick | p-dclf-inputs-fnvk | passed, shot looks right (before the fade loop change) |
+| native-vulkan+quick | p-dclf-inputs-fnvk2 | passed (final build) |
+| guest+quick, trun capture | p-dclf-inputs-wip9 | world loaded, ran to its exit step (final build); the capture is not comparable, the machine was loaded (window 10.7 ms) |
+| list-switches | p-dclf-inputs-switches | passed; `switches.json` regenerated, one switch added |
+
+Captures: `base3`, `base4` (baseline), `wip1`-`wip9` with the trun.sh labels `p-dclf-inputs-*`. Buckets in
+`org-port-worktrees/perf-tools/out-dclf-inputs/*.buckets.txt`.
