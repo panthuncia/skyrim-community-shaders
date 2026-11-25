@@ -1,6 +1,6 @@
 # Native post chain
 
-Status: 2026-11-25, families 0-4 built and native by default on AE (see "Milestone 1, as built"). Families 5-8 are design only. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`) and the
+Status: 2026-11-25, families 0-4 built and native by default on AE (see "Milestone 1, as built"); slots 1, 3 and 5 native ("Slot effects, as built"). Families 5-8 are design only. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`) and the
 post chain hooks (`src/RenderGraph/Frame/PostChain.cpp`). Follows [dclf-native-imagespace.md](./dclf-native-imagespace.md) (steps
 2a-2c, the formulas in "Where the values come from"). Background: [p5/imagespace.md](../p5/imagespace.md),
 [imagespace-remaining-ports.md](./imagespace-remaining-ports.md).
@@ -441,3 +441,13 @@ Answers:
   +0x40 or +0x60 other than `RenderEndOfFrameEffects`, and no reader of the SAO counter +0x54 other than `RenderSSAO`. CS writes
   +0x3C and +0x40 anyway (two ints).
 
+
+## Slot effects, as built (2026-11-25, perf/post-slots)
+
+Refraction (1), the depth of field with its compute blur (3) and the radial blur (5) are staged natively by the end-of-frame family
+from rows CS computes (`RefractionSteps`, `DofSteps`, `DofBlurStep`, `RadialSteps` in `NativePost.inl`); the engine's RenderEffect
+runs only for the full-screen blur (6), get hit (7), the raster DoF blur and a DoF composite whose param UpdateParams leaves stale.
+Write-back: refraction's drawn flags, the underwater mask flag and its rt12 clear (the skeleton's pass). Legacy Graphics
+Compatibility's selector is written into the rows as its hooks write it. A foreign hook on a slot's Render or UpdateParams keeps that
+slot on RenderEffect. Observe compares the slots' rows and the compute steps' CS b0 and thread groups: 0 differences. SE has every
+id paired (perf-post-slots.md) but runs on the engine unless `CS_ORG_POST_NATIVE` is set. Details: [perf-post-slots.md](./perf-post-slots.md).

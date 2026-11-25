@@ -235,17 +235,20 @@ namespace RenderGraph::Frame::PostChain
 
 	bool OwnsJitter()
 	{
-		return Engine::GraphMode() && REL::Module::IsAE();
+		// SE only with the native post chain asked for: its State layout was matched statically, never run.
+		static const bool s_se = !Switches::Value("CS_ORG_POST_NATIVE").empty() && Switches::Value("CS_ORG_POST_NATIVE") != "0";
+		return Engine::GraphMode() && (REL::Module::IsAE() || s_se);
 	}
 
 	void UpdateJitter(RE::BSGraphics::State* a_state)
 	{
-		// AE layout (BSGraphics::State, 411479): the table index at +0xC0, x and y tables of eight at +0xC4 and +0xE4, the screen
-		// size at +0x24 / +0x28. The engine's UpdateJitter (AE 0x140e58a10) reads the same.
+		// BSGraphics::State (AE 411479): the table index at +0xC0, x and y tables of eight at +0xC4 and +0xE4 (SE 8 bytes lower), the
+		// screen size at +0x24 / +0x28. The engine's UpdateJitter (AE 77518, SE 75709) reads the same.
 		auto& state = Get();
 		auto* base = reinterpret_cast<std::byte*>(a_state);
 		const auto at = [&](std::uintptr_t a_offset) { return reinterpret_cast<float*>(base + a_offset); };
-		auto* index = reinterpret_cast<std::uint32_t*>(base + 0xC0);
+		const std::uintptr_t table = REL::Relocate(0xB8, 0xC0);
+		auto* index = reinterpret_cast<std::uint32_t*>(base + table);
 		// CS's own index from the first call on. The engine's starts it, so the sequence continues where the engine left it.
 		if (!std::exchange(state.jitterIndexRead, true))
 			state.jitterIndex = *index;
@@ -260,8 +263,8 @@ namespace RenderGraph::Frame::PostChain
 		*index = state.jitterIndex;
 		const auto width = static_cast<float>(*reinterpret_cast<const std::uint32_t*>(base + 0x24));
 		const auto height = static_cast<float>(*reinterpret_cast<const std::uint32_t*>(base + 0x28));
-		const float x = *at(0xC4 + state.jitterIndex * 4);
-		const float y = *at(0xE4 + state.jitterIndex * 4);
+		const float x = *at(table + 4 + state.jitterIndex * 4);
+		const float y = *at(table + 0x24 + state.jitterIndex * 4);
 		a_state->projectionPosScaleX = (x + x - 1.0f) / width;
 		a_state->projectionPosScaleY = (y + y - 1.0f) / height;
 	}
