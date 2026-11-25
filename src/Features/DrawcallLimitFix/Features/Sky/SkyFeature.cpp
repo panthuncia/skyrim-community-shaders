@@ -2,6 +2,7 @@
 // The engine side is SkyCapture.cpp and the graph side SkyDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
+#include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
@@ -12,17 +13,21 @@ namespace DCLF::Features::Sky
 {
 	namespace
 	{
-		void Install(Api::InstallContext&)
+		void Install(Api::InstallContext& a_context)
 		{
 			if (!Enabled())
 				return;
+			Native::RegisterSwitch(a_context);
 			InstallHooks();
 			logger::info("[DCLF] sky: on (graph mode): the engine's sky batches and cloud layers are drawn at the Sky and SkyReflections anchors");
 		}
 
 		std::string Status()
 		{
-			return SkyDraws::Status();
+			auto status = SkyDraws::Status();
+			if (const auto native = Native::Status(); !native.empty())
+				status += "; " + native;
+			return status;
 		}
 	}
 

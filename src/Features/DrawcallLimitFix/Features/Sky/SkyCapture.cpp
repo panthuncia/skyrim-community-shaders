@@ -6,6 +6,7 @@
 
 #include "RenderGraph/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
+#include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -88,6 +89,10 @@ namespace DCLF::Features::Sky
 			bool deferred = false;  // the sky batch ran; the capture is finished after the cloud group
 			// Set when the cloud group's call did not follow a spanning sky batch, for example another hook at that site.
 			bool deferralBroken = false;
+			bool inCloudGroup = false;  // the capture spans the cloud group's call now
+			void* accumulator = nullptr;  // the sky batch's, for the cloud group's native draws
+			std::uint32_t renderFlags = 0;  // the sky batch's RenderBatches flags
+			bool cloudLatched = false;  // a cloud layer of it was latched (sky-object effects before it are the engine's)
 		};
 
 		Capture& GetCapture()
@@ -493,12 +498,19 @@ namespace DCLF::Features::Sky
 			const char* reason = nullptr;
 			if (!(group->flags & 1))
 				reason = "it is not a pass list";
+			// Sky-object effects (accumulation hint 0x12, BSEffectShader) are registered at the group's head, before the cloud layers:
+			// the engine draws them first, and the cloud layers are latched after them. One after a cloud layer would break that order.
+			bool sky = false;
 			for (const auto* pass = group->passList.head; pass && !reason; pass = pass->passGroupNext) {
 				if (!pass->geometry)
 					continue;
-				if (!pass->shader || pass->shader->shaderType.get() != RE::BSShader::Type::Sky)
-					reason = "it holds a pass of another shader (a sky-object effect)";
-				else if (pass->geometry->GetType().get() != RE::BSGeometry::Type::kTriShape)
+				if (!pass->shader || pass->shader->shaderType.get() != RE::BSShader::Type::Sky) {
+					if (sky)
+						reason = "it holds a pass of another shader after a cloud layer";
+					continue;
+				}
+				sky = true;
+				if (pass->geometry->GetType().get() != RE::BSGeometry::Type::kTriShape)
 					reason = "it holds a sky pass that is not a TriShape";
 			}
 			if (!reason)
@@ -557,9 +569,43 @@ namespace DCLF::Features::Sky
 				capture.lastCloudLayer = -1;
 				capture.passes.Begin();
 				capture.cloudGroup = capture.shape.clouds && !capture.deferralBroken ? CloudGroupOf(a_accumulator, capture) : nullptr;
+				capture.accumulator = a_accumulator;
+				capture.renderFlags = a_flags;
+				// The draws computed from the registered passes (SkyNative.cpp), when CS_DCLF_SKY_NATIVE asks for them.
+				const auto nativeMode = Native::GetMode();
+				std::vector<Draw> native;
+				bool nativeBuilt = false;
+				if (nativeMode != Native::Mode::Off) {
+					auto* accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator);
+					const Native::BatchInputs inputs{ capture.view, capture.colourFormats, capture.depthFormat, a_flags, capture.run->physSky };
+					Family::Owners owners;
+					std::string why;
+					nativeBuilt = Native::BuildBatch(accumulator, inputs, native, owners, why) && native.size() <= kMaxLatched;
+					if (!nativeBuilt) {
+						static Family::RefusalLog log("[DCLF] sky native: the batch stays the capture's");
+						log.Report(std::format("a {} batch", NameOf(capture.view)), why.empty() ? std::string("more draws than one run latches") : why);
+					}
+					for (auto& owner : owners)
+						capture.run->owners.push_back(std::move(owner));
+					// Drawn natively: the engine's call finds no sky pass to draw, and nothing is latched.
+					if (nativeBuilt && nativeMode == Native::Mode::Draw) {
+						capture.run->draws = std::move(native);
+						auto detached = Native::DetachBatch(accumulator);
+						func(a_accumulator, a_first, a_last, a_flags, a_group);
+						Native::Reattach(detached);
+						if (capture.cloudGroup) {
+							capture.deferred = true;
+							return;
+						}
+						Finish(capture);
+						return;
+					}
+				}
 				capture.active = true;
 				func(a_accumulator, a_first, a_last, a_flags, a_group);
 				capture.active = false;
+				if (nativeBuilt && !capture.failed && capture.run)
+					Native::Compare(capture.view, native, capture.run->draws);
 				if (capture.cloudGroup && !capture.failed) {
 					capture.deferred = true;
 					return;
@@ -582,8 +628,46 @@ namespace DCLF::Features::Sky
 					func(a_group, a_flags);
 					return;
 				}
+				// The cloud layers computed from the group's passes (SkyNative.cpp), when CS_DCLF_SKY_NATIVE asks for them.
+				const auto nativeMode = Native::GetMode();
+				std::vector<Draw> native;
+				bool nativeBuilt = false;
+				if (nativeMode != Native::Mode::Off && capture.run && capture.accumulator) {
+					const Native::BatchInputs inputs{ capture.view, capture.colourFormats, capture.depthFormat, a_flags, capture.run->physSky };
+					Family::Owners owners;
+					std::string why;
+					std::int32_t lastLayer = capture.lastCloudLayer;
+					nativeBuilt = Native::BuildClouds(static_cast<RE::BSShaderAccumulator*>(capture.accumulator), a_group, inputs, lastLayer, native, owners, why) &&
+					              capture.run->draws.size() + native.size() <= kMaxLatched;
+					if (!nativeBuilt) {
+						static Family::RefusalLog log("[DCLF] sky native: the cloud layers stay the capture's");
+						log.Report(std::format("a {} cloud group", NameOf(capture.view)), why.empty() ? std::string("more draws than one run latches") : why);
+					}
+					for (auto& owner : owners)
+						capture.run->owners.push_back(std::move(owner));
+					// Drawn natively: the engine's call draws only the sky-object effects at the group's head, and nothing is latched.
+					if (nativeBuilt && nativeMode == Native::Mode::Draw) {
+						auto& cloudShadows = globals::features::cloudShadows;
+						for (auto& draw : native) {
+							if (draw.occlusion)
+								cloudShadows.NoteGraphCloudLayer(static_cast<int>(capture.run->face), draw.layer);
+							capture.run->draws.push_back(std::move(draw));
+						}
+						capture.lastCloudLayer = lastLayer;
+						Native::DetachClouds(a_group);
+						func(a_group, a_flags);
+						Finish(capture);
+						return;
+					}
+				}
+				const std::size_t before = capture.run ? capture.run->draws.size() : 0;
 				capture.active = true;
+				capture.inCloudGroup = true;
+				capture.cloudLatched = false;
 				func(a_group, a_flags);
+				capture.inCloudGroup = false;
+				if (nativeBuilt && !capture.failed && capture.run && capture.run->draws.size() >= before)
+					Native::Compare(capture.view, native, std::span<const Draw>(capture.run->draws).subspan(before));
 				Finish(capture);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -695,6 +779,12 @@ namespace DCLF::Features::Sky
 			}
 			if (capture.failed || !capture.run)
 				return false;
+			// A sky-object effect at the cloud group's head (CloudGroupOf): the engine's draw, before the cloud layers it latches.
+			if (capture.inCloudGroup && !capture.cloudLatched) {
+				const auto* state = globals::state;
+				if (!state || !state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::Sky)
+					return false;
+			}
 			if (const char* reason = TryLatchDraw(capture, a_shape, a_start, a_triangles)) {
 				const auto* state = globals::state;
 				const std::uint32_t technique = state ? state->currentPixelDescriptor & 0xFF : 0xFF;
@@ -712,6 +802,8 @@ namespace DCLF::Features::Sky
 				Refuse(capture, reason, technique);
 				return false;
 			}
+			if (capture.inCloudGroup)
+				capture.cloudLatched = true;
 			return true;
 		}
 
