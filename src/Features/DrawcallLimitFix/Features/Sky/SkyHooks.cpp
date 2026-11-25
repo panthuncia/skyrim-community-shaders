@@ -10,6 +10,8 @@
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
 #include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
@@ -121,16 +123,29 @@ namespace DCLF::Features::Sky
 			std::string sceneDepth;
 		};
 
-		/** @brief The header textures bound now (kHeaderRegisters), as imports or published ids. False when one cannot be read. */
+		/**
+		 * @brief The view the feature that owns a_register binds there now (its DCLF frame texture: IBL's t76 and t77, Dynamic
+		 * Cubemaps' t30 and t31), or null when it binds nothing.
+		 */
+		ID3D11ShaderResourceView* FeatureView(std::uint32_t a_register)
+		{
+			const auto at = Extensions::FrameTextureIndices()[a_register];
+			if (at == Extensions::kNoFrameTexture)
+				return nullptr;
+			const auto& texture = Extensions::RegisteredFrameTextures()[at];
+			return texture.view ? static_cast<ID3D11ShaderResourceView*>(texture.view()) : nullptr;
+		}
+
+		/** @brief The header textures (kHeaderRegisters), as imports or published ids. False when one cannot be read. */
 		bool ResolveHeaders(std::array<std::uint32_t, 4>& a_indices, Family::Owners& a_owners, PublishedInputIds& a_published)
 		{
 			DCLF_ZONE("CS.DCLF.Sky.ResolveHeaders");
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
 				Family::Header header;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
-				ID3D11ShaderResourceView* view = nullptr;
-				const auto result = Family::ResolveHeader(kHeaderRegisters[h], kHeaderKinds[h], GpuTextures::Tag(GpuTextures::Source::FamilyHeader, static_cast<std::uint32_t>(h)),
-					header, a_owners, &failure, &view);
+				auto* view = FeatureView(kHeaderRegisters[h]);
+				const auto result = Family::ResolveHeaderView(view, kHeaderKinds[h], GpuTextures::Tag(GpuTextures::Source::FamilyHeader, static_cast<std::uint32_t>(h)), header,
+					a_owners, &failure);
 				if (result != Family::HeaderResult::Ok) {
 					Refusals().Report(std::format("a batch whose t{} cannot be read", kHeaderRegisters[h]),
 						result == Family::HeaderResult::Buffer ? "a D3D11 buffer" : GpuTextures::DescribeFailure(view, kHeaderRegisters[h], failure));

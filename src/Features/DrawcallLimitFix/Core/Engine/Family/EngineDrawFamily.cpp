@@ -631,18 +631,26 @@ namespace DCLF::Family
 		globals::d3d::context->PSGetShaderResources(a_register, 1, &view);
 		if (a_view)
 			*a_view = view;
-		if (!view) {
+		// The binding keeps the view alive for the batch, and the import keeps what the run reads.
+		if (view)
+			view->Release();
+		return ResolveHeaderView(view, a_kind, a_tag, a_out, a_owners, a_failure);
+	}
+
+	HeaderResult ResolveHeaderView(ID3D11ShaderResourceView* a_view, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, Header& a_out, Owners& a_owners,
+		GpuTextures::ResolveFailure* a_failure)
+	{
+		a_out = {};
+		if (!a_view) {
 			a_out.index = GpuTextures::Get().NullOf(a_kind).index;
 			return a_out.index != GpuTextures::kInvalid ? HeaderResult::Ok : HeaderResult::Texture;
 		}
-		// The binding keeps the view alive for the batch, and the import keeps what the run reads.
-		view->Release();
-		a_out.publishedId = PublishedResources::ExportedId(view);
+		a_out.publishedId = PublishedResources::ExportedId(a_view);
 		if (!a_out.publishedId.empty())
 			return HeaderResult::Ok;
-		if (IsBufferView(view))
+		if (IsBufferView(a_view))
 			return HeaderResult::Buffer;
-		auto binding = GpuTextures::Get().ResolveBinding(view, a_tag, a_failure);
+		auto binding = GpuTextures::Get().ResolveBinding(a_view, a_tag, a_failure);
 		if (binding.index == GpuTextures::kInvalid)
 			return HeaderResult::Texture;
 		a_out.index = binding.index;

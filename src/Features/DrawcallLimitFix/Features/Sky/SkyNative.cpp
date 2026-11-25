@@ -308,9 +308,12 @@ namespace DCLF::Features::Sky::Native
 			return log;
 		}
 
+		std::uint64_t s_builds = 0;  // render thread: one per batch, cloud group, sun or face build
+
 		/** @brief What every pass of a batch or cloud group reads alike: the camera and the engine globals, at the call. */
 		struct Frame
 		{
+			std::uint64_t build = ++s_builds;  // which build this is, so a slot entry's owners join its run once
 			BatchInputs inputs;
 			State* state = nullptr;
 			RE::NiPoint3 posAdjust, previousPosAdjust, eye;
@@ -429,6 +432,7 @@ namespace DCLF::Features::Sky::Native
 			std::array<bool, 3> used{};
 			std::array<std::uint32_t, 3> textures{}, samplers{};
 			Family::Owners owners;
+			std::uint64_t build = 0;  // the last build whose run holds the owners
 		};
 
 		struct SlotCache
@@ -439,13 +443,13 @@ namespace DCLF::Features::Sky::Native
 		SlotCache s_slots;  // render thread
 
 		/** @brief The slots for a_views, resolved on the frame's first use. Null, with a_why, when one cannot be read. */
-		const Slots* SlotsOf(const std::array<ID3D11ShaderResourceView*, 3>& a_views, const std::array<bool, 3>& a_used, std::string& a_why)
+		Slots* SlotsOf(const std::array<ID3D11ShaderResourceView*, 3>& a_views, const std::array<bool, 3>& a_used, std::string& a_why)
 		{
 			if (const auto frame = Family::GameFrame(); s_slots.frame != frame) {
 				s_slots.frame = frame;
 				s_slots.entries.clear();
 			}
-			for (const auto& entry : s_slots.entries)
+			for (auto& entry : s_slots.entries)
 				if (entry.views == a_views && entry.used == a_used)
 					return &entry;
 			Slots slots{ .views = a_views, .used = a_used };
@@ -653,12 +657,13 @@ namespace DCLF::Features::Sky::Native
 			std::array<ID3D11ShaderResourceView*, 3> views{};
 			for (std::uint32_t t = 0; t < 3; ++t)
 				views[t] = used[t] ? ViewOf(textures[t]) : nullptr;
-			const auto* slots = SlotsOf(views, used, a_why);
+			auto* slots = SlotsOf(views, used, a_why);
 			if (!slots)
 				return PassResult::Failed;
 			std::copy(slots->textures.begin(), slots->textures.end(), c.textures);
 			std::copy(slots->samplers.begin(), slots->samplers.end(), c.samplers);
-			a_owners.insert(a_owners.end(), slots->owners.begin(), slots->owners.end());
+			if (std::exchange(slots->build, a_frame.build) != a_frame.build)
+				a_owners.insert(a_owners.end(), slots->owners.begin(), slots->owners.end());
 			// Cloud self shadowing (t26): a main pass cloud layer reads its own layer's occlusion, anything else the occlusion cubemap.
 			c.textures[3] = kSelfShadowFromOcclusion;
 			if (selfShadow) {
@@ -961,6 +966,7 @@ namespace DCLF::Features::Sky::Native
 		 */
 		bool FacePasses(const FaceView& a_view, std::vector<FacePass>& a_batch, std::vector<FacePass>& a_clouds, std::string& a_why)
 		{
+			DCLF_ZONE("CS.DCLF.Sky.Native.FacePasses");
 			auto* sky = globals::game::sky;
 			if (!sky || !sky->root) {
 				a_why = "no sky root";
@@ -968,12 +974,15 @@ namespace DCLF::Features::Sky::Native
 			}
 			ShadowCameras::Planes planes;
 			ShadowCameras::FrustumPlanes(a_view.frustum, a_view.world, planes);
-			FaceCull cull;
+			// Render thread: the registration list is kept between faces.
+			static FaceCull cull;
 			cull.planes = &planes;
+			cull.passes.clear();
+			cull.why.clear();
 			// TESWaterReflections::Update holds the sky root always drawn while it renders the faces (AE 0x140520570).
 			cull.Visit(sky->root.get(), true);
 			if (!cull.why.empty()) {
-				a_why = std::move(cull.why);
+				a_why = cull.why;
 				return false;
 			}
 			Order(cull.passes, a_batch, a_clouds);
