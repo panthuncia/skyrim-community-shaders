@@ -421,41 +421,11 @@ namespace DCLF::Family
 	{
 		DCLF_ZONE("CS.DCLF.Family.SlotTexture");
 		auto& textures = GpuTextures::Get();
-		// A frame's draws mostly share their textures (water's distant tiles, the sky's layers), so a view resolves once a frame.
-		// The cache holds a reference to each view, so a freed view's address cannot name another texture within the frame.
-		struct Cached
-		{
-			winrt::com_ptr<ID3D11ShaderResourceView> view;
-			GpuTextures::Binding binding;
-		};
-		thread_local std::vector<Cached> cache;
-		thread_local std::uint64_t cacheFrame = ~0ull;
-		thread_local std::uint32_t cacheGeneration = ~0u;
-		if (a_view) {
-			const std::uint64_t frame = ::RenderGraph::Frame::Driver::Current().frame;
-			if (cacheFrame != frame || cacheGeneration != textures.Generation()) {
-				cache.clear();
-				cacheFrame = frame;
-				cacheGeneration = textures.Generation();
-			}
-			for (const auto& entry : cache)
-				if (entry.view.get() == a_view && !GpuTextures::Superseded(entry.binding.owner.get())) {
-					a_index = entry.binding.index;
-					if (entry.binding.owner)
-						a_owners.push_back(entry.binding.owner);
-					return SlotResult::Ok;
-				}
-			// Only views that were no export are cached, so the export lookup runs once a view a frame.
-			if (PublishedResources::IsExport(a_view))
-				return SlotResult::Published;
-		}
+		// An export is read by its graph id, never imported. The answers are kept for the frame (PublishedResources).
+		if (a_view && PublishedResources::IsExport(a_view))
+			return SlotResult::Published;
+		// A ready binding is kept for the rest of the frame (GpuTextures::ResolveBinding), so a shared texture resolves once.
 		auto binding = a_view ? textures.ResolveBinding(a_view, a_tag, a_failure) : textures.NullOf(a_kind);
-		if (a_view && binding.index != GpuTextures::kInvalid && !binding.pending && cache.size() < 256) {
-			Cached entry;
-			entry.view.copy_from(a_view);
-			entry.binding = binding;
-			cache.push_back(std::move(entry));
-		}
 		if (binding.index == GpuTextures::kInvalid)
 			return SlotResult::Failed;
 		a_index = binding.index;
