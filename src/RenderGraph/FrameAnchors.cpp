@@ -590,6 +590,8 @@ namespace FrameAnchors
 			std::vector<Client> clients;
 			// Each client's index in clients by id, the ids in the clients' descs. Made at Publish, which follows every change.
 			std::unordered_map<std::string_view, std::size_t> clientIndex;
+			// Each anchor's clients by their index in clients, in order. Made at Publish, so a run walks only its own.
+			std::array<std::vector<std::uint32_t>, kAnchors> anchorClients;
 			std::map<std::string, std::shared_ptr<EngineImport>, std::less<>> imports; // by graph id. Ids of one image share an entry
 			std::vector<std::weak_ptr<EngineImport>> loose;                             // the owners of ShareImage's slots no id names
 			std::uint64_t serial = 0;                                  // bumped by every Publish
@@ -765,12 +767,16 @@ namespace FrameAnchors
 					snapshot->segmentById[d].emplace(snapshot->segmentClients[d][i]->id, i);
 			// What lookups by id and taps read of each client, made once here instead of at every lookup and tap.
 			a_state.clientIndex.clear();
+			for (auto& list : a_state.anchorClients)
+				list.clear();
 			for (std::size_t i = 0; i < a_state.clients.size(); ++i) {
 				auto& client = a_state.clients[i];
 				client.anchors = AnchorMask(*client.desc);
 				for (std::uint32_t d = 0; d < kDeclared; ++d)
 					client.steps[d] = StepMaskOf(d, *client.desc);
 				a_state.clientIndex.emplace(client.desc->id, i);
+				for (std::uint32_t mask = client.anchors; mask; mask &= mask - 1)
+					a_state.anchorClients[std::countr_zero(mask)].push_back(static_cast<std::uint32_t>(i));
 			}
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 		}
@@ -2538,6 +2544,7 @@ namespace FrameAnchors
 		/** @brief A stage's one commit. Copies the staged values into the slot's copy and submits its ticket. Render owner, under the mutex. */
 		RunResult SubmitSegment(State& a_state, std::uint32_t a_declared)
 		{
+			ZoneScopedN("CS.Anchors.Submit");
 			const auto segment = static_cast<SegmentId>(a_declared);
 			const auto& frame = Driver::Current();
 			auto& host = *a_state.host;
@@ -2634,6 +2641,7 @@ namespace FrameAnchors
 		*/
 		RunResult TapDeclared(State& a_state, const Point& a_point, std::uint32_t a_declared, std::uint32_t a_step, const std::vector<RunClient>& a_clients)
 		{
+			ZoneScopedN("CS.Anchors.Tap");
 			const auto segment = static_cast<SegmentId>(a_declared);
 			const auto& info = declaredInfo[a_declared];
 			const auto& step = info.steps[a_step];
@@ -2743,10 +2751,14 @@ namespace FrameAnchors
 					~StagingScope() { host.EndHeldRun(); }
 				} scope{ host };
 				host.UseRun(a_state.stagingRun[a_declared]);
-				if (StepUsesSharedConstants(*built, a_declared, a_step))
+				if (StepUsesSharedConstants(*built, a_declared, a_step)) {
+					ZoneScopedN("CS.Anchors.SharedConstants");
 					SharedConstants::Commit(a_step);
+				}
 				a_state.tapInstance = instance;
 				for (const auto& client : committed) {
+					ZoneScopedN("CS.Anchors.ClientCommit");
+					ZoneText(client->id.data(), client->id.size());
 					if (client->commit)
 						client->commit(a_point);
 					RenderGraph::TestSupport::GraphFrames::NoteGraph(client->id, frame.frame);
@@ -3424,6 +3436,7 @@ namespace FrameAnchors
 
 	RunResult Run(const Point& a_point)
 	{
+		ZoneScopedN("CS.FrameAnchors.Run");
 		const RunDepthScope depth;
 		auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_point.anchor);
@@ -3442,9 +3455,10 @@ namespace FrameAnchors
 		// A client registered after the build waits for the next build.
 		std::vector<RunClient> clients;
 		bool work = false;
-		for (const auto& client : state.clients) {
-			if (!(client.anchors >> index & 1u))
-				continue;
+		const auto& at = state.anchorClients[index];
+		clients.reserve(at.size());
+		for (const auto i : at) {
+			const auto& client = state.clients[i];
 			const bool active = !client.desc->active || client.desc->active();
 			work = work || active;
 			clients.push_back({ client.desc, client.serial, active, client.steps });
