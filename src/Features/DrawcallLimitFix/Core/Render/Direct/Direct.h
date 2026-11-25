@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -211,6 +212,7 @@ namespace DCLF::Direct
 		std::vector<std::uint32_t> decalGroupFirst;
 		// Per geometry slot, the index buffer its sequences were resolved against. Held by `keep`, so no other buffer can take its address.
 		std::vector<std::uint64_t> geometryIndexAddress;
+		std::uint64_t geometrySerial = 0;  // the same for sets with the same geometryIndexAddress (GeometryAddressSerials)
 		// object -> [moverLaneFirst[object], moverLaneFirst[object + 1]) in moverLanes. Only movers have lanes there.
 		std::vector<std::uint32_t> moverLaneFirst;
 		std::vector<LaneRef> moverLanes;
@@ -223,6 +225,21 @@ namespace DCLF::Direct
 		std::vector<std::uint64_t> deadBits;
 
 		const std::vector<ViewBatch>& List(ViewType a_view) const { return lists[static_cast<std::size_t>(a_view)]; }
+	};
+
+	/**
+	 * @brief Gives sets with the same geometryIndexAddress the same serial, so the render thread can keep what it derived from the
+	 * addresses. A builder calls it off the render thread, with an instance of its own.
+	 */
+	class GeometryAddressSerials
+	{
+	public:
+		std::uint64_t Of(const std::vector<std::uint64_t>& a_addresses);
+
+	private:
+		std::mutex lock;
+		std::vector<std::uint64_t> last;
+		std::uint64_t serial = 0;
 	};
 
 	/** @brief The live sphere column for a frame, chosen by its producer sequence's parity. */

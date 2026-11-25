@@ -25,6 +25,7 @@
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 
 #include <ORGModuleServices/BackingPool.h>
 #include <Render/RenderGraph/ExternalEpochExecution.h>
@@ -45,6 +46,21 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+namespace DCLF::Direct
+{
+	std::uint64_t GeometryAddressSerials::Of(const std::vector<std::uint64_t>& a_addresses)
+	{
+		// Unique across instances, so two builders never share a serial for different addresses.
+		static std::atomic<std::uint64_t> s_serials{ 0 };
+		std::scoped_lock held(lock);
+		if (!serial || a_addresses != last) {
+			last = a_addresses;
+			serial = s_serials.fetch_add(1, std::memory_order_relaxed) + 1;
+		}
+		return serial;
+	}
+}
 
 namespace DCLF::Direct::detail
 {
@@ -96,6 +112,11 @@ namespace DCLF::Direct::detail
 	std::shared_ptr<const TargetViews> TargetsOf(std::vector<std::shared_ptr<const void>>& a_holds, const Draws::Resources& a_resources)
 	{
 		auto& s = S();
+		const std::uint64_t frame = ::RenderGraph::Frame::Driver::Current().frame;
+		if (s.targets && s.targetsFor == &a_resources && s.targetsFrame == frame)
+			return s.targets;
+		s.targetsFor = &a_resources;
+		s.targetsFrame = frame;
 		// A new version of an engine target's slot is a new image, so it needs new views.
 		std::array<std::shared_ptr<org::GloballyIndexedResource>, Draws::kColorTargets> native{};
 		for (std::size_t i = 0; i < native.size(); ++i)
@@ -205,10 +226,19 @@ namespace DCLF::Direct::detail
 	{
 		if (a_slot.poolFirstsTaken || !a_pool || !a_slot.set)
 			return;
-		DCLF_ZONE("CS.DCLF.Cpu.TakePoolFirsts");
-		ZoneValue(a_pool->slotFirst.size());
-		PoolFirstsOf(*a_slot.set, *a_pool, a_slot.poolFirsts, a_slot.counters.staleGeometry);
 		a_slot.poolFirstsTaken = true;
+		const bool sameGeometry = a_slot.set->geometrySerial && a_slot.set->geometrySerial == a_slot.poolFirstsGeometry;
+		if (sameGeometry && a_slot.poolFirstsSerial == a_pool->firstsSerial && a_pool->firstsSerial) {
+			a_slot.counters.staleGeometry += a_slot.poolFirstsStale;
+			return;
+		}
+		DCLF_ZONE("CS.DCLF.Cpu.TakePoolFirsts");
+		std::uint32_t stale = 0;
+		PoolFirstsOf(*a_slot.set, *a_pool, a_slot.poolFirsts, stale);
+		a_slot.counters.staleGeometry += stale;
+		a_slot.poolFirstsStale = stale;
+		a_slot.poolFirstsGeometry = a_slot.set->geometrySerial;
+		a_slot.poolFirstsSerial = a_pool->firstsSerial;
 	}
 
 	/** @brief Render thread. What a main site's recordings bind. Immutable while they read it. */

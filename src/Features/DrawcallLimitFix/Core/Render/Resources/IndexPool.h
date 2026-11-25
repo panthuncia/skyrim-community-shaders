@@ -55,6 +55,7 @@ namespace DCLF::Draws
 		LogCursor cursor;
 		std::vector<Range> slots;
 		std::vector<std::uint32_t> slotFirst;                       // what firsts holds
+		std::uint64_t firstsSerial = 0;                             // a new value whenever slotFirst or a range's address may have changed
 		std::map<std::uint32_t, std::uint32_t> free;                // first -> count
 		std::uint32_t end = 0;                                      // past the last range ever given out
 		std::uint64_t indicesHeld = 0;                              // live indices, for the report

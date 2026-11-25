@@ -190,6 +190,10 @@ namespace DCLF::Direct::detail
 		// The pool's first indices after the frame's first drawing commit. The recorder adds them per draw.
 		std::vector<std::uint32_t> poolFirsts;
 		bool poolFirstsTaken = false;
+		// What poolFirsts was taken from. The same geometry addresses and pool serial give the same firsts, so a steady scene keeps them.
+		std::uint64_t poolFirstsGeometry = 0;
+		std::uint64_t poolFirstsSerial = 0;
+		std::uint32_t poolFirstsStale = 0;
 		// Sort rows for the forward and refraction sort on the CS thread, by object. Only those objects are written.
 		std::vector<ForwardSortRow> forwardRows;
 		// The main list's depth batches, which colour's object words come from, and the gate that dispatches colour culls.
@@ -238,6 +242,9 @@ namespace DCLF::Direct::detail
 		std::vector<std::pair<org::RunRef, SiteRun*>> siteRuns;
 		bool wasCpu = false;
 		std::shared_ptr<const TargetViews> targets;
+		// The resources and frame targets were last checked for. Images change only at a frame boundary, so later runs reuse them.
+		const Draws::Resources* targetsFor = nullptr;
+		std::uint64_t targetsFrame = ~0ull;
 		std::atomic<std::uint32_t> nextWorker{ 0 };
 		WindowCounters window;
 		bool loggedNotAdopted = false, loggedNoLatePass = false, loggedExternal = false;
