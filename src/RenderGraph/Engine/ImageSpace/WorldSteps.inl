@@ -1098,7 +1098,17 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 	static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
 	Pending pending{ .entry = a_entry, .compute = a_compute, .groups = a_groups };
 	std::vector<std::shared_ptr<const void>> blocks;
-	if (a_compute) {
+	if (a_compute && NativeSteps::Get().armed && NativeSteps::Get().computeRows) {
+		// The native post chain's dispatch: its CS b0 rows are computed, nothing of the engine's is bound or captured.
+		auto& native = NativeSteps::Get();
+		const auto rowsAt = Constants::Upload({ native.rows.bytes.data(), native.rows.size });
+		if (!rowsAt.owner) {
+			RenderGraph::Fatal(kEffects[a_effect].effectName, "its computed constants have no ring chunk");
+		}
+		pending.at = { .srv = rowsAt.srvIndex, .offset = rowsAt.offset, .size = native.rows.size };
+		blocks.push_back(rowsAt.owner);
+		++native.taken;
+	} else if (a_compute) {
 		// A native dispatch applies no engine state: only the CS b0 buffer is bound for the capture.
 		if (!NativeSteps::Get().armed)
 			setDirtyStates(true);

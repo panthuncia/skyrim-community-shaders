@@ -1403,7 +1403,7 @@ ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std
 }
 
 /** @brief Observe mode of the native post chain (NativePost.inl): checks an engine step against the predicted one. Render owner. */
-void ObservePostStep(const StepKey& a_key, std::size_t a_effect);
+void ObservePostStep(const StepKey& a_key, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups);
 
 bool StageChainKey(StepKey a_key, std::uint8_t a_group, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups);
 
@@ -1426,7 +1426,7 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			fmt::format("{} in the world post chain{} has no CS pass; it draws nothing", kEffects[a_effect].effectName, chain.inHdr ? " (the HDR effect)" : ""));
 		return true;
 	}
-	ObservePostStep(key, a_effect);
+	ObservePostStep(key, a_effect, a_compute, a_groups);
 	return StageChainKey(key, group, a_effect, a_compute, a_groups);
 }
 

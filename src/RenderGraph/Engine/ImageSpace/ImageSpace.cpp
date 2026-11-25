@@ -26,6 +26,8 @@
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Pipeline/StateConversion.h"
+#include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
+#include "ShaderTools/LegacyGraphicsCompatibility.h"
 #include "RenderGraph/Engine/Targets/TargetRef.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Frame/Declare.h"
@@ -1415,6 +1417,7 @@ namespace RenderGraph::Engine::ImageSpace
 			struct State
 			{
 				bool armed = false;  // StageStep stages rows from here, not from a capture
+				bool computeRows = false;  // with armed, a compute step's CS b0 rows are these (the native post chain), not the engine's buffer
 				bool observing = false;  // StageStep compares the capture with rows
 				bool observingTextures = false;  // the whole observed draw: the texture-list checks compare the bound views
 				Rows rows;
@@ -2581,19 +2584,36 @@ namespace RenderGraph::Engine::ImageSpace
 				config.foreign |= a_family;
 				logger::warn("[ORG] native post chain: {}; that family stays on the engine path", a_why);
 			};
-			check(Family::kHdr, ForeignAt("ImageSpaceEffectHDR::Render (AE 107183)", REL::ID(107183).address(), HDRRender::func.address()));
-			check(Family::kHdr, ForeignSlot("the HDR effect", effect(0x1e), 7, REL::ID(107185).address()));
+			check(Family::kHdr, ForeignAt("ImageSpaceEffectHDR::Render (AE 107183)", REL::RelocationID(100465, 107183).address(), HDRRender::func.address()));
+			check(Family::kHdr, ForeignSlot("the HDR effect", effect(0x1e), 7, REL::RelocationID(100467, 107185).address()));
 			for (std::uint32_t r = 0; r < 7; ++r)
-				check(Family::kHdr, ForeignSlot(fmt::format("the bloom blur effect {}", r), effect(0x17 + r), 7, REL::ID(108558).address()));
-			check(Family::kComposites, ForeignAt("RenderPreTonemapComposites (AE 105675)", REL::ID(105675).address(), PreTonemapComposites::func.address()));
-			check(Family::kEof, ForeignAt("RenderEndOfFrameEffects (AE 105674)", REL::ID(105674).address(), 0));
-			check(Family::kPost, ForeignAt("RenderWorldPostProcess (AE 107148)", REL::ID(107148).address(), 0));
+				check(Family::kHdr, ForeignSlot(fmt::format("the bloom blur effect {}", r), effect(0x17 + r), 7, REL::RelocationID(101560, 108558).address()));
+			check(Family::kComposites, ForeignAt("RenderPreTonemapComposites (AE 105675)", REL::RelocationID(99024, 105675).address(), PreTonemapComposites::func.address()));
+			check(Family::kEof, ForeignAt("RenderEndOfFrameEffects (AE 105674)", REL::RelocationID(99023, 105674).address(), 0));
+			check(Family::kPost, ForeignAt("RenderWorldPostProcess (AE 107148)", REL::RelocationID(100430, 107148).address(), 0));
 			// The tonemap call site inside RenderEndOfFrameEffects is CS's: the native end-of-frame effects run its work themselves.
-			{
-				const auto site = REL::ID(105674).address() + 0x178;
+			// SE has two: the HDR form (+0x1EA) and the copy (+0x230).
+			for (const auto offset : REL::Module::IsAE() ? std::vector<std::uintptr_t>{ 0x178 } : std::vector<std::uintptr_t>{ 0x1EA, 0x230 }) {
+				const auto site = REL::RelocationID(99023, 105674).address() + offset;
 				const auto target = FollowJumps(site + 5 + *reinterpret_cast<const std::int32_t*>(site + 1));
 				if (!InModule(target, OwnModule()))
 					check(Family::kEof, fmt::format("the HDR effect's call site in RenderEndOfFrameEffects leads to {:#x}, outside Community Shaders", target));
+			}
+			// The slot effects CS stages natively: Render (slot 1) and UpdateParams (slot 7) must be the game's or CS's (Legacy Graphics
+			// Compatibility wraps the depth of field's Render).
+			for (const std::uint32_t slot : { 1u, 3u, 5u }) {
+				const auto* object = effect(slot);
+				if (!object)
+					continue;
+				const auto* vtable = *reinterpret_cast<const std::uintptr_t* const*>(object);
+				for (const std::uint32_t entry : { 1u, 7u }) {
+					const auto target = FollowJumps(vtable[entry]);
+					if (InModule(target, GetModuleHandleW(nullptr)) || InModule(target, OwnModule()))
+						continue;
+					config.foreignSlots |= static_cast<std::uint8_t>(1u << slot);
+					logger::warn("[ORG] native post chain: end-of-frame slot {}'s vtable entry {} leads to {:#x}, another module; the engine's RenderEffect draws it", slot,
+						entry, target);
+				}
 			}
 			// A family inside a foreign one cannot be native while the outer one stages it.
 			if (config.foreign & Family::kHdr)
@@ -2652,7 +2672,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 			{
 			// The native post chain (native-post-chain.md): 0 the engine's containers, 1 observe, 2 native; optionally ":" and a family
-			// list (hdr, eof, composites, post), all four when none. AE only.
+			// list (hdr, eof, composites, post), all four when none. On SE only when the switch is set (its ids were never run).
 			const auto value = Switches::Value("CS_ORG_POST_NATIVE");
 			const auto text = value.empty() ? std::string("2") : std::string(value);
 			auto& config = NativePost::Settings();
@@ -2672,8 +2692,8 @@ namespace RenderGraph::Engine::ImageSpace
 				config.families |= NativePost::Family::kComposites | NativePost::Family::kEof;
 			if (config.mode == NativePost::Mode::Native && (config.families & NativePost::Family::kEof))
 				config.families |= NativePost::Family::kHdr;
-			if (!REL::Module::IsAE() && config.mode != NativePost::Mode::Engine) {
-				logger::info("[ORG] native post chain: SE has no ids for its inputs yet; every family runs on the engine");
+			if (!REL::Module::IsAE() && value.empty()) {
+				logger::info("[ORG] native post chain: SE runs every family on the engine unless CS_ORG_POST_NATIVE is set");
 				config.mode = NativePost::Mode::Engine;
 			}
 			NativePost::ResolveGlobals();
