@@ -1778,16 +1778,6 @@
 			"description": ""
 		},
 		{
-			"name": "CS_UPSCALE_SUBMIT",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "cs",
-			"description": "direct: upscaling's ring submissions wait for DXVK's command stream"
-		},
-		{
 			"name": "CS_UPSCALE_UNFOCUSED",
 			"key": "",
 			"type": "bool",

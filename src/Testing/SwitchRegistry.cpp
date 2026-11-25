@@ -165,7 +165,6 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_TEST_HANG" },
 			{ .name = "CS_TEST_LIST_SWITCHES", .description = "1: the game writes CommunityShaders-Switches.json (every switch) at kPostPostLoad and exits" },
 			{ .name = "CS_TEX_CENSUS", .type = Bool },
-			{ .name = "CS_UPSCALE_SUBMIT", .description = "direct: upscaling's ring submissions wait for DXVK's command stream" },
 			{ .name = "CS_UPSCALE_UNFOCUSED", .type = Bool },
 			{ .name = "CS_VK_CLIENT_PRIORITY" },
 			{ .name = "CS_VK_DRIVER_TRACE" },

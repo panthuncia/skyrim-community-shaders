@@ -143,7 +143,6 @@ DCLF's registry, so DCLF's startup summary does not list them.
 | --- | --- | --- |
 | `CS_ORG_RECORDING_TIMESTAMPS` | `RenderGraphRuntime.cpp` | `1`: the recordings kept across frames carry pass and barrier timestamps (`GraphHost::SetRecordingTimestamps`), as a timestamp trace turns on; the others are always timed. |
 | `CS_ORG` | `RenderGraphRuntime.cpp` | `0`: no render graph; `features`: the interop device features are requested but no graph is made. |
-| `CS_UPSCALE_SUBMIT` | registry | `direct`: upscaling's ring submissions wait for DXVK's command stream. |
 | `CS_STREAMLINE_REFLEX` | registry | `0`: Streamline does not load Reflex, PCL or DLSS-G, for Nsight Graphics captures. FSR-FG then holds 32 frames of input copies in VRAM. |
 | `CS_FG_DISPLAY_SUSPEND` | `Upscaling.cpp` | `1`: frame generation unloads while the display is off and for 5 s after a desktop change, then reloads. |
 | `CS_VK_DRIVER_TRACE` | `VkDriverTrace.cpp` | `1`: logs the real present rate and each module's device memory, as the driver sees them, every 5 s. The overlay's DLSS-G "true" rate is an estimate, so this is how to confirm frames are generated. |
