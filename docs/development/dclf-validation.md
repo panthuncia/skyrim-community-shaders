@@ -66,7 +66,6 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_TEX_STREAM` | on (unless 0) | `0`: the game's textures stay whole, not shells with streamed mip windows. Read at the first texture load ([texture-streaming.md](./texture-streaming.md)). |
 | `CS_DCLF_TEX_DISTANCE` | the menu's | `0`: texture streaming has no distance floor, over the menu's setting. |
 | `CS_DCLF_TEX_FEEDBACK` | the menu's | `0`: texture streaming has no shader feedback, over the menu's setting. |
-| `CS_DCLF_EMPTY_FADE_NODE` | on (unless 0) | `0`: the engine's empty fade node (the `BSFadeNode` at `0x14332a2a0` every `BSShaderProperty` starts with) is listed as one fade root of all its geometry, instead of no root. |
 
 ### Parity checks and observers
 

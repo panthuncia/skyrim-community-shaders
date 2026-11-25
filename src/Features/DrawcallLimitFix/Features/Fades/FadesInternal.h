@@ -24,8 +24,4 @@ namespace DCLF::Features::Fades
 	/** @brief Scene lane. True once per recheck of a_node. Only the census uses the answer. */
 	bool TakeRecheck(const void* a_node);
 	void RegisterDiagnostics(Api::InstallContext& a_context);
-
-	// Settings. Readable from any thread after install.
-	/** @brief CS_DCLF_EMPTY_FADE_NODE, on by default. The engine's shared empty fade node is not treated as a fade root. */
-	bool EmptyFadeNodeIsNone();
 }

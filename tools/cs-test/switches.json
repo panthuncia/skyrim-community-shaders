@@ -435,16 +435,6 @@
 			"description": "1: effect meshes with a skin instance whose pass has no Skinned bit (the property without kSkinned: dog eyes) drawn by DCLF, each partition with the unskinned vertex stage and the geometry's world, as the engine draws them; 0 (default) they stay native (effect-variant (skinned))"
 		},
 		{
-			"name": "CS_DCLF_EMPTY_FADE_NODE",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on (T7f item 7): the engine's empty fade node (the BSFadeNode 0x14332a2a0 holds, which every BSShaderProperty starts with and the engine reads as none) is no fade root: such geometry (terrain, object LOD, some clutter) takes its entry's root; 0: it is listed as one fade root of all of them, outside the scene graph"
-		},
-		{
 			"name": "CS_DCLF_LATE_POSE",
 			"key": "",
 			"type": "string",

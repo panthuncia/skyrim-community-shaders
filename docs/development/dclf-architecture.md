@@ -688,7 +688,7 @@ missing events before.
     the main pass does not take), `UnsupportedParent` (a blended leaf under a `BSOrderedNode` the forward epoch
     does not take) and `MultiIndex`. Billboards are never shadow-only: `NiBillboardNode` turns to the culling camera, which for a
     shadow view is the light.
--   **The engine's empty fade node is no root** (`Engine::EmptyFadeNode`; `CS_DCLF_EMPTY_FADE_NODE`). `BSShaderProperty`'s
+-   **The engine's empty fade node is no root** (`Engine::EmptyFadeNode`). `BSShaderProperty`'s
     constructor points `fadeNode` at a static `BSFadeNode` (the pointer at `0x14332a2a0`) that the engine reads as null; terrain,
     object LOD and some references keep it. Such geometry takes its plain entry root instead, and every reader compares the value,
     not the global's address.
