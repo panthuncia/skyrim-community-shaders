@@ -725,6 +725,16 @@
 			"description": ""
 		},
 		{
+			"name": "CS_DCLF_SKY_NATIVE",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "feature",
+			"family": "dclf",
+			"description": "0: the sky batch and cloud layers are drawn from their latched engine draws; 1: as 0, and their draws are also computed from the engine's registered passes and compared with the latched ones (differences logged once each); 2 (default): they are drawn from the computed draws, and the engine's calls draw nothing of them (dclf-native-sky.md)"
+		},
+		{
 			"name": "CS_DCLF_STAGE_DUMP",
 			"key": "",
 			"type": "string",
@@ -885,16 +895,6 @@
 			"description": "1: DCLF's tree LOD colour draws write solid magenta, so screen captures find its pixels"
 		},
 		{
-			"name": "CS_DCLF_SKY_NATIVE",
-			"key": "",
-			"type": "string",
-			"default": "2",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "0: the sky batch and cloud layers are drawn from their latched engine draws; 1: as 0, and their draws are also computed from the engine's registered passes and compared with the latched ones (differences logged once each); 2 (default): they are drawn from the computed draws, and the engine's calls draw nothing of them (dclf-native-sky.md)"
-		},
-		{
 			"name": "CS_DCLF_WATER",
 			"key": "",
 			"type": "string",
@@ -902,7 +902,7 @@
 			"choices": [],
 			"kind": "feature",
 			"family": "dclf",
-			"description": "0: nothing of it is registered, and the batch hooks draw all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the batch hooks still draw them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the batch hooks' (phases 2 and 3)"
+			"description": "0: nothing of it is registered, and the batch hooks draw all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the batch hooks still draw them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs, the rest staying the batch hooks' (phases 2 and 3): in GPU-driven frames by the deferred range passes, in CPU-driven frames by the CPU pipeline's water sites; 3: as 2, but CPU-driven frames leave all water to the batch hooks"
 		},
 		{
 			"name": "CS_DISABLE_FEATURES",
@@ -933,6 +933,16 @@
 			"kind": "other",
 			"family": "cs",
 			"description": ""
+		},
+		{
+			"name": "CS_ENGINE_ZONES",
+			"key": "",
+			"type": "bool",
+			"default": "",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "cs",
+			"description": "1: Tracy zones around the engine's render function calls (AE 1.6.1170 only, Tracy builds)"
 		},
 		{
 			"name": "CS_FG_DISPLAY_SUSPEND",
@@ -1325,16 +1335,6 @@
 			"description": ""
 		},
 		{
-			"name": "CS_ORG_IMAGESPACE_NATIVE",
-			"key": "",
-			"type": "string",
-			"default": "2",
-			"choices": ["0", "1", "2", "3"],
-			"kind": "other",
-			"family": "org",
-			"description": "0: ImageSpace steps captured; 1: param steps also computed and compared; 2: param steps staged without the engine's draw; 3: diagnostic, computed rows staged at the engine's draw"
-		},
-		{
 			"name": "CS_ORG_FOG_DEBUG",
 			"key": "",
 			"type": "string",
@@ -1353,6 +1353,16 @@
 			"kind": "other",
 			"family": "org",
 			"description": ""
+		},
+		{
+			"name": "CS_ORG_IMAGESPACE_NATIVE",
+			"key": "",
+			"type": "string",
+			"default": "2",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "0: ImageSpace steps captured; 1: param steps also computed and compared with the capture; 2: param steps staged from the engine's params without its draw; 3: diagnostic, computed rows staged at the engine's draw (dclf-native-imagespace.md)"
 		},
 		{
 			"name": "CS_ORG_LLF_PARITY",
@@ -1418,16 +1428,6 @@
 			"description": "true: BasicRHI's API validation in native mode (Vulkan layers or the D3D12 debug layer)"
 		},
 		{
-			"name": "CS_ORG_PIPELINE_CACHE",
-			"key": "org.pipeline_cache",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "other",
-			"family": "org",
-			"description": "false: no on-disk pipeline cache (Data/ShaderCache/v3/pipelines-*.bin); every pipeline is built again each run"
-		},
-		{
 			"name": "CS_ORG_OCCLUSION_QUERY_LOG",
 			"key": "",
 			"type": "bool",
@@ -1436,6 +1436,16 @@
 			"kind": "other",
 			"family": "org",
 			"description": ""
+		},
+		{
+			"name": "CS_ORG_PIPELINE_CACHE",
+			"key": "org.pipeline_cache",
+			"type": "bool",
+			"default": "1",
+			"choices": [],
+			"kind": "other",
+			"family": "org",
+			"description": "false: no on-disk pipeline cache (Data/ShaderCache/v3/pipelines-*.bin); every pipeline is built again each run"
 		},
 		{
 			"name": "CS_ORG_PRESENT_COPY_SKIP",
@@ -1478,7 +1488,7 @@
 			"description": ""
 		},
 		{
-			"name": "CS_ORG_SHOT_TARGET",
+			"name": "CS_ORG_SHOT_PHYSSKY",
 			"key": "",
 			"type": "string",
 			"default": "",
@@ -1488,7 +1498,7 @@
 			"description": ""
 		},
 		{
-			"name": "CS_ORG_SHOT_PHYSSKY",
+			"name": "CS_ORG_SHOT_TARGET",
 			"key": "",
 			"type": "string",
 			"default": "",

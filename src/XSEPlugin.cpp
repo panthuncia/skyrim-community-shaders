@@ -4,6 +4,7 @@
 #include "Features/RenderDoc.h"
 #include "Features/Upscaling.h"
 #include "Features/RemoteControl/GpuCountersTrace.h"
+#include "EngineZones.h"
 #include "FrameAnnotations.h"
 #include "Globals.h"
 #include "D3DX9MathUpgrade.h"
@@ -198,6 +199,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 				}
 
 				Feature::ForEachLoadedFeature("DataLoaded", [](Feature* feature) { feature->DataLoaded(); });
+				// Last, so its call-site zones chain onto every hook already written at those sites.
+				EngineZones::Install();
 
 				NativeMenu::Register();
 			}
