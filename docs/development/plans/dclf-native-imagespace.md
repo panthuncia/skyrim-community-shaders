@@ -1,7 +1,7 @@
 # ImageSpace without draw capture
 
 Status: 2026-11-24, cheap cuts 1-2 done; steps 2a-2b (param, explicit and compute steps native,
-`CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2d done. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
+`CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2e done. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
 [p5/imagespace.md](../p5/imagespace.md) (the RE and the chain), [imagespace-remaining-ports.md](./imagespace-remaining-ports.md)
 (the last effects), [dclf-native-sky.md](./dclf-native-sky.md) (the pattern this follows).
 
@@ -415,6 +415,12 @@ vanilla shader does not declare read as zero in the capture.
    ORG pass multiplies the tint by it: captured sprites drew black. The native rows use vanilla's table, so the sprites get the
    engine's intensity (1 by default). `RE::BSGraphics::RenderTargetManager::GetSingleton()` reads the manager's address as a
    pointer; the manager is the object at 524970 / 411451.
+   2e. Done 2026-11-24: wading ripples (their quad from the geometry passed to Render) and the menu steps: a UI scene step's target
+   and t0, and the face tint's sixteen masks (ISAlphaBlend), come from the effect's texture list (texture 0 the output, texture
+   i + 1 slot i: an engine target, a depth index, or a loaded texture's view at +0x48 -> +0x10), cross-checked in observe mode
+   (the inventory, the map, a menu 3D scene with TAA, loading screens: no difference). Every ImageSpace step now draws natively
+   except ISDownsampleCS (the image-based flares' dispatch) and the no-raster steps. The capture path stays for modes 0 and 1:
+   observe mode is how each later change is checked.
 3. HDR native (the most draws in every frame, formulas read): downsample, luminance, adaptation, bloom, tonemap.
 4. SAO native (the next most draws), then SSR.
 5. Composites (VL, SIL), the SAO composite, the water blend, TAA and the upsample: one decompile each.

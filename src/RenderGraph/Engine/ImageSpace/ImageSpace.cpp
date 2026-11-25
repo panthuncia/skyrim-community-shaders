@@ -1414,6 +1414,7 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				bool armed = false;  // StageStep stages rows from here, not from a capture
 				bool observing = false;  // StageStep compares the capture with rows
+				bool observingTextures = false;  // the whole observed draw: the texture-list checks compare the bound views
 				Rows rows;
 				const RE::BSImagespaceShader* shader = nullptr;  // the step's shader, while armed or observing
 				// A lens flare sprite's draw: its vertex rows, its quad and the texture at slot 0.
@@ -1461,6 +1462,33 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				static const auto vtable = RE::VTABLE_ImageSpaceShaderParam[0].address();
 				return a_param && *static_cast<const std::uintptr_t*>(a_param) == vtable;
+			}
+
+			/**
+			* @brief What input slot a_slot of a draw reads, from its effect's texture list as the generic SetupGeometry binds it (texture
+			* a_slot + 1, 0x1414e8bc0): an engine target in a_target, else a loaded texture's view (unwrapped) in a_view. False for a depth
+			* texture, which the list names by its own index.
+			*/
+			bool SlotTexture(const RE::BSImagespaceShader& a_shader, std::uint32_t a_slot, std::int32_t& a_target, ID3D11ShaderResourceView*& a_view)
+			{
+				a_target = -1;
+				a_view = nullptr;
+				const auto& textures = static_cast<const RE::ImageSpaceEffect&>(a_shader).effectTextures;
+				const auto index = static_cast<std::uint16_t>(a_slot + 1);
+				const auto* texture = index < textures.capacity() ? textures[index] : nullptr;
+				if (!texture)
+					return true;
+				if (texture->renderTarget >= 0) {
+					a_target = texture->renderTarget;
+					return true;
+				}
+				if (*reinterpret_cast<const std::int32_t*>(reinterpret_cast<const std::byte*>(texture) + 0xC) >= 0)
+					return false;
+				if (texture->texture) {
+					const auto* renderer = *reinterpret_cast<const std::byte* const*>(reinterpret_cast<const std::byte*>(texture->texture.get()) + 0x48);
+					a_view = renderer ? Tripwire::Unwrap(*reinterpret_cast<ID3D11ShaderResourceView* const*>(renderer + 0x10)) : nullptr;
+				}
+				return true;
 			}
 
 			/** @brief The one pixel shader of an ImageSpace shader, or null. Its table places the param's rows. */
@@ -2130,7 +2158,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// The lens flare sprites and the wading ripples are geometry steps the native path makes whole (BuildSprite, BuildShape).
 			const bool sprite = info.id == Effects::ISLensFlare;
 			const bool ripple = info.id == Effects::ISWaterDisplacementWadingRipple;
-			if (!sprite && !ripple && (info.geometry || info.rastersNothing || info.latched || info.vertexStage))
+			// The tint masks (ISAlphaBlend) are loaded textures the native path reads from the effect's texture list.
+			const bool masks = info.id == Effects::ISAlphaBlend;
+			if (!sprite && !ripple && !masks && (info.geometry || info.rastersNothing || info.latched || info.vertexStage))
 				return "a geometry, loaded-texture or no-raster step";
 			using E = Effects;
 			switch (info.id) {
@@ -2148,9 +2178,9 @@ namespace RenderGraph::Engine::ImageSpace
 				return nullptr;
 			if (sprite)
 				return "a lens flare outside the post chain";
-			if (StartStepScope() != WorldScope::None || WorldStepScope() != WorldScope::None || ChainStepNow())
+			if (StartStepScope() != WorldScope::None || WorldStepScope() != WorldScope::None || ChainStepNow() || MenuStepNow(state.current->effect))
 				return nullptr;
-			return "a menu step or outside every step";
+			return "outside every step";
 		}
 
 		/**
@@ -2218,8 +2248,10 @@ namespace RenderGraph::Engine::ImageSpace
 			native.shader = a_shader;
 			if (NativeSteps::s_mode == NativeSteps::Mode::Observe) {
 				native.observing = true;
+				native.observingTextures = true;
 				a_render();
 				native.observing = false;
+				native.observingTextures = false;
 				return;
 			}
 			if (NativeSteps::s_mode == NativeSteps::Mode::Hybrid) {

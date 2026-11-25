@@ -286,7 +286,22 @@ bool MenuStepNow(std::size_t a_effect)
 bool UiSceneKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::int32_t& a_source)
 {
 	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-	const auto destination = static_cast<std::int32_t>(shadow.renderTargets[0]);
+	auto& native = NativeSteps::Get();
+	std::int32_t destination = static_cast<std::int32_t>(shadow.renderTargets[0]);
+	std::int32_t bound = shadow.PSTexture[0] ? InputOfView(shadow.PSTexture[0]) : -1;
+	if (native.shader && (native.armed || native.observingTextures)) {
+		// A native draw applied no engine state: its target and t0 come from the effect's texture list. Observe mode checks the two agree.
+		std::int32_t listedInput = -1, listedOutput = -1;
+		NativeSteps::TextureTargets(*native.shader, listedInput, listedOutput);
+		if (native.armed) {
+			destination = listedOutput;
+			bound = listedInput;
+		} else if (listedOutput != destination || (a_effect != Effects::ISSimpleColor && listedInput != bound)) {
+			++native.differed;
+			NativeSteps::Differences().Report(fmt::format("{}'s targets", kEffects[static_cast<std::size_t>(EffectIndexOf(a_effect))].effectName),
+				fmt::format("texture list t0 {} into {}, bound t0 {} into {}", listedInput, listedOutput, bound, destination));
+		}
+	}
 	a_source = -1;
 	if (destination < 0 || destination > 0xff)
 		return false;
@@ -294,7 +309,7 @@ bool UiSceneKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::i
 		a_key = { WorldScope::MenuCopy, a_effect, InOut(0, destination) };
 		return true;
 	}
-	a_source = shadow.PSTexture[0] ? InputOfView(shadow.PSTexture[0]) : -1;
+	a_source = bound;
 	auto* manager = RE::ImageSpaceManager::GetSingleton();
 	const auto helper = manager ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(manager) + 0x1f0) : 0;
 	if (a_source < 0 || (a_source & (kKindBits | kMipBits)) || a_source > 0x7f || !helper)
@@ -311,14 +326,29 @@ bool UiSceneKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::i
 void StageTintMasks(Pending& a_pending)
 {
 	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+	auto& native = NativeSteps::Get();
 	auto owners = std::make_shared<std::vector<std::shared_ptr<const void>>>();
 	SourcesAt sources{};
 	std::string targets;
 	for (std::uint32_t slot = 0; slot < kMaxSlots; ++slot) {
 		auto* view = shadow.PSTexture[slot];
 		// Default textures are loaded textures like the masks, so read them by heap index.
-		const auto input = view ? InputOfView(view) : -1;
-		const auto target = input >= 0 && !(input & kDefaultTextureInput) ? input : -1;
+		auto input = view ? InputOfView(view) : -1;
+		auto target = input >= 0 && !(input & kDefaultTextureInput) ? input : -1;
+		if (native.shader && (native.armed || native.observingTextures)) {
+			// Native: the slot from the effect's texture list. Observe mode checks it names what the engine bound.
+			std::int32_t listedTarget = -1;
+			ID3D11ShaderResourceView* listedView = nullptr;
+			const bool known = NativeSteps::SlotTexture(*native.shader, slot, listedTarget, listedView);
+			if (native.armed) {
+				view = known ? listedView : nullptr;
+				target = listedTarget;
+			} else if (!known || listedTarget != target || (target < 0 && listedView != Tripwire::Unwrap(view))) {
+				++native.differed;
+				NativeSteps::Differences().Report(fmt::format("ISAlphaBlend t{}", slot), fmt::format("texture list target {} view {}, bound target {} view {}", listedTarget,
+					static_cast<const void*>(listedView), target, static_cast<const void*>(Tripwire::Unwrap(view))));
+			}
+		}
 		if (target >= 0)
 			targets += fmt::format("{}t{} {}", targets.empty() ? "" : ", ", slot, NameForLog(target));
 		auto& textures = ::DCLF::GpuTextures::Get();

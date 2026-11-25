@@ -1258,7 +1258,7 @@ std::uint16_t IblfVariantNow(Effects::ImageSpaceEffectEnum a_effect)
 		const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 		input = InputOfView(compute ? shadow.CSTexture[0] : shadow.PSTexture[0]);
 		output = compute ? TargetOfUav(shadow.CSUAV[0]) : static_cast<std::int32_t>(shadow.renderTargets[0]);
-		if (native.observing && native.shader && !compute) {
+		if (native.observingTextures && native.shader && !compute) {
 			std::int32_t listedInput = -1, listedOutput = -1;
 			NativeSteps::TextureTargets(*native.shader, listedInput, listedOutput);
 			if (listedInput != input || listedOutput != output) {
