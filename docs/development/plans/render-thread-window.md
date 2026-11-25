@@ -186,10 +186,18 @@ Other fixes this round: BasicRHI's lowering identity hashes its sources instead 
 discarded the shared pipeline identifier store, about 19 s of rebuild per run); cs-test runs games in parallel lab slots
 (README, "Lab"); `stage --wait`.
 
+- `finish`: guest mode finishes external tickets on the submission thread; DXVK gained deferred external commands
+  (`dxvkEmitDeferredExternalCommands`, DXVK org_integration 94063a21) so DXVK's CS thread records an epoch once its tickets
+  finish. FinishTicket was 0.77 ms a frame on the render thread. Window 3.60 -> 2.67 ms, ORG epochs 1.50 -> 0.73. Guest
+  mode now runs DCLF's async passes on the graphics queue (as native does): with them on DXVK's compute queue, FSR frame
+  generation deadlocked 8 of 8 runs (its present holds DXVK's submission lock while waiting on that queue). The user chose
+  the graphics queue for now; ORG getting its own compute queue would bring async compute back.
+
 Open:
 
-- Lead `finish` is testing `FinishTicket` on the submit thread (guest mode), and one render-thread hang seen once in
-  `StopFrameProduction` during a graph install at a frame revision (perf2-finish.md when it lands).
+- ORG's own compute queue in guest mode, then async compute back on; a GPU A/B of async on and off is still unmeasured.
+- Graph installs at a frame revision block the render thread in `StopFrameProduction` (median 0.26 ms, p99 70 ms, twice
+  35-41 s in 31k attaches); root cause unsettled (perf2-finish.md).
 - The engine's shadow maps and caster lights (about 0.13 ms): `perf2-shadow.md` has the next step.
 - The Scaleform HUD (0.06), the remaining anchor clients (0.13), ORG's thin per-epoch remainder.
 - SE: every default now matches AE, and every new address is an SE/AE pair, but nothing has run on SE.
