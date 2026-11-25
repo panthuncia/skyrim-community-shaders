@@ -1098,7 +1098,11 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 	Pending pending{ .entry = a_entry, .compute = a_compute, .groups = a_groups };
 	std::vector<std::shared_ptr<const void>> blocks;
 	if (a_compute) {
-		setDirtyStates(true);
+		// A native dispatch applies no engine state: only the CS b0 buffer is bound for the capture.
+		if (!NativeSteps::Get().armed)
+			setDirtyStates(true);
+		else
+			++NativeSteps::Get().taken;
 		ID3D11Buffer* constants = Tripwire::Unwrap(Constants::EngineComputeBuffer());
 		if (!constants) {
 			RenderGraph::Fatal(kEffects[a_effect].effectName, "no engine compute constant buffer");
@@ -1115,7 +1119,7 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 	} else if (auto& native = NativeSteps::Get(); native.armed) {
 		// Native: the rows the engine's SetupGeometry would write and CS's FrameBuffer, with no engine state applied.
 		const auto frameAt = NativeSteps::FrameLocation();
-		const auto rowsAt = native.rows.size ? Constants::Upload({ native.rows.bytes.data(), native.rows.size }) : frameAt;
+		const auto rowsAt = native.rowsAt.owner ? native.rowsAt : native.rows.size ? Constants::Upload({ native.rows.bytes.data(), native.rows.size }) : frameAt;
 		if (!frameAt.owner || !rowsAt.owner) {
 			RenderGraph::Fatal(kEffects[a_effect].effectName, "its computed constants have no ring chunk");
 		}

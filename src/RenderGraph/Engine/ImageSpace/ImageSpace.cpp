@@ -1415,6 +1415,8 @@ namespace RenderGraph::Engine::ImageSpace
 				bool armed = false;  // StageStep stages rows from here, not from a capture
 				bool observing = false;  // StageStep compares the capture with rows
 				Rows rows;
+				// The rows already in the ring: an explicit step's PS b2 as its setter bound it. Null to upload rows.
+				Constants::Location rowsAt;
 				std::size_t effect = 0;
 				// The PerFrame bytes uploaded last, reused while they do not change.
 				std::array<std::byte, kFrameBytes> frame{};
@@ -1448,6 +1450,7 @@ namespace RenderGraph::Engine::ImageSpace
 			const char* BuildRows(const RE::BSImagespaceShader& a_shader, const void* a_param, Rows& a_out)
 			{
 				a_out = {};
+				Get().rowsAt = {};
 				const auto* base = reinterpret_cast<const std::byte*>(&a_shader);
 				if (*reinterpret_cast<const bool*>(base + 0x1A0))
 					return nullptr;
@@ -1472,6 +1475,36 @@ namespace RenderGraph::Engine::ImageSpace
 					a_out.size = (std::max)(a_out.size, (end + 15u) & ~15u);
 				}
 				a_out.count = count;
+				return nullptr;
+			}
+
+			/**
+			* @brief An explicit step's rows (the SAO family, SSR): its per-shader setter (ISMinify's at AE 0x14151f710 and the rest) maps an
+			* engine pool buffer, copies its struct and binds it at PS b2 on the context before the explicit Render. The capture tracks that
+			* bind and answers the map from CS memory, so the rows are read here without applying the engine's state.
+			*/
+			const char* BoundRows(Rows& a_out)
+			{
+				a_out = {};
+				auto& native = Get();
+				native.rowsAt = {};
+				const auto use = Constants::Capture(Constants::StageBit(Constants::Stage::Pixel));
+				if (!use.Valid())
+					return "the capture is not active";
+				const auto* slot = Constants::Find(use, Constants::Stage::Pixel, 2);
+				if (!slot)
+					return nullptr;
+				const auto bytes = Constants::Bytes(*slot);
+				const auto at = Constants::Where(*slot);
+				if (!at.owner)
+					return "bound rows the ring does not hold";
+				// The ring holds them all; the copy is only what observe mode compares.
+				std::memcpy(a_out.bytes.data(), bytes.data(), (std::min)(bytes.size(), a_out.bytes.size()));
+				a_out.size = static_cast<std::uint32_t>(bytes.size());
+				a_out.count = (std::min)(a_out.size / 16u, static_cast<std::uint32_t>(a_out.offsets.size()));
+				for (std::uint32_t row = 0; row < a_out.count; ++row)
+					a_out.offsets[row] = static_cast<std::uint8_t>(row * 4);
+				native.rowsAt = at;
 				return nullptr;
 			}
 
@@ -1971,7 +2004,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return "off";
 			if (!state.current || !state.current->covered)
 				return "an effect CS does not cover";
-			if (!state.current->eligible || state.current->compute)
+			if (!state.current->eligible)
 				return "a draw the capture refuses";
 			const auto& info = kEffects[state.current->effect];
 			if (info.geometry || info.rastersNothing || info.latched || info.vertexStage)
@@ -1986,11 +2019,16 @@ namespace RenderGraph::Engine::ImageSpace
 			case E::ISBlur:
 			case E::ISCopyDynamicFetchDisabled:
 				return "a lens flare or image-based flare step";
+			case E::ISCopySubRegionCS:
+				return "a flow copy (its source is the bound view)";
 			default:
 				break;
 			}
 			// TakeDraw's order: a lens flare first, then the start, world and post chain steps. A menu step is what is left.
-			if (LensFlareStepNow(state.current->effect))
+			// TakeDispatch's: the compute SAO first (its first dispatch checks the bound views).
+			if (state.current->compute && SaoCsStepNow())
+				return "a compute SAO step";
+			if (!state.current->compute && LensFlareStepNow(state.current->effect))
 				return "a lens flare step";
 			if (StartStepScope() != WorldScope::None || WorldStepScope() != WorldScope::None || ChainStepNow())
 				return nullptr;
@@ -2032,7 +2070,7 @@ namespace RenderGraph::Engine::ImageSpace
 		* @brief The engine's Render for the current effect, or its native step. Draw mode stages the step from the param's rows and skips
 		* the engine's call; observe mode computes the rows, lets the capture take the draw and compares them.
 		*/
-		void RenderOrNative(const RE::BSImagespaceShader* a_shader, const void* a_param, const std::function<void()>& a_render)
+		void RenderOrNative(const RE::BSImagespaceShader* a_shader, const void* a_param, const std::function<void()>& a_render, bool a_explicit = false)
 		{
 			auto& native = NativeSteps::Get();
 			if (const char* why = NativeStepNow()) {
@@ -2043,7 +2081,7 @@ namespace RenderGraph::Engine::ImageSpace
 				a_render();
 				return;
 			}
-			if (const char* why = NativeSteps::BuildRows(*a_shader, a_param, native.rows)) {
+			if (const char* why = a_explicit ? NativeSteps::BoundRows(native.rows) : NativeSteps::BuildRows(*a_shader, a_param, native.rows)) {
 				++native.declined;
 				static Util::ReasonLog s_declined("[ORG] ImageSpace native: a step stays the capture's");
 				s_declined.Report(why, kEffects[IS().current->effect].effectName);
@@ -2066,7 +2104,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// Base Render (AE 0x1414f88b0) runs the shader's PreRender before its draw and PostRender after; an effect's own work can
 			// live there (nested steps take their own draws in the engine's order).
 			auto* shader = const_cast<RE::BSImagespaceShader*>(a_shader);
-			KeepRenderTargets(a_shader);
+			// The explicit Render (AE 0x1414f8b00) sets no target: its caller did.
+			if (!a_explicit)
+				KeepRenderTargets(a_shader);
 			shader->PreRender();
 			native.effect = IS().current->effect;
 			native.armed = true;
@@ -2082,6 +2122,26 @@ namespace RenderGraph::Engine::ImageSpace
 					clear ? fmt::format(" to {} {} {} {}", colour[0], colour[1], colour[2], colour[3]) : std::string(),
 					*(reinterpret_cast<const bool*>(a_shader) + 0x90 + 0x88), a_param != nullptr);
 			}
+		}
+
+		/**
+		* @brief The engine's DispatchComputeShader (AE 0x1414f8be0: PreRender, the compute shader's Dispatch, PostRender), or its native
+		* step: the effect wrote its CS b0 rows before the call, and Renderer::DispatchCSShader (AE 0x140e49cb0) only applies state, binds
+		* that buffer and dispatches, so the step is staged from the buffer with neither.
+		*/
+		void DispatchOrNative(RE::BSImagespaceShader* a_shader, std::array<std::uint32_t, 3> a_groups, const std::function<void()>& a_dispatch)
+		{
+			auto& native = NativeSteps::Get();
+			if (NativeSteps::s_mode != NativeSteps::Mode::Draw || NativeStepNow()) {
+				a_dispatch();
+				return;
+			}
+			native.effect = IS().current->effect;
+			a_shader->PreRender();
+			native.armed = true;
+			TakeDispatch(a_groups[0], a_groups[1], a_groups[2]);
+			native.armed = false;
+			a_shader->PostRender();
 		}
 
 		/** @brief BSImagespaceShader::Render (100950 / 107732). */
@@ -2121,7 +2181,8 @@ namespace RenderGraph::Engine::ImageSpace
 				const bool covered = EffectOf(a_shader) >= 0;
 				EngineCall(a_shader, [&] {
 					const bool scoped = InScope(a_shader, [&] {
-						WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{}, [&] { func(a_shader, a_geometry); });
+						WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{},
+							[&] { RenderOrNative(a_shader, nullptr, [&] { func(a_shader, a_geometry); }, true); });
 					});
 					if (!scoped)
 						func(a_shader, a_geometry);
@@ -2140,7 +2201,9 @@ namespace RenderGraph::Engine::ImageSpace
 					return;
 				}
 				EngineCall(a_shader, [&] {
-					const bool scoped = InScope(a_shader, [&] { WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); }); });
+					const bool scoped = InScope(a_shader, [&] {
+						WithEffect(a_shader, true, IneligibleDispatch(), [&] { DispatchOrNative(a_shader, { a_x, a_y, a_z }, [&] { func(a_shader, a_x, a_y, a_z); }); });
+					});
 					if (!scoped)
 						func(a_shader, a_x, a_y, a_z);
 				});

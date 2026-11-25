@@ -1,7 +1,7 @@
 # ImageSpace without draw capture
 
-Status: 2026-11-24, cheap cuts 1-2 done; step 2a (param steps native, `CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2b (explicit
-and compute steps) next. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
+Status: 2026-11-24, cheap cuts 1-2 done; steps 2a-2b (param, explicit and compute steps native,
+`CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2c next. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
 [p5/imagespace.md](../p5/imagespace.md) (the RE and the chain), [imagespace-remaining-ports.md](./imagespace-remaining-ports.md)
 (the last effects), [dclf-native-sky.md](./dclf-native-sky.md) (the pattern this follows).
 
@@ -392,8 +392,16 @@ vanilla shader does not declare read as zero in the capture.
    explicit (SAO, SSR) and compute steps. Measured at 960x540 (Dev-Fast): ImageSpace 7.0% -> 6.5% of the render thread;
    `ShaderRender` 1.0% -> 0.6%, the shim's `DrawTriShape` 2.6% -> 1.6%. `CS_ORG_IMAGESPACE_NATIVE=3` (a diagnostic) stages the
    computed rows at the engine's own draw.
-   2b. Next: the explicit steps (the SAO family and SSR: hook the per-shader setters, or compute their rows from the decompiled
-   formulas above) and the compute steps (CS b0), then image-based flares from the effect texture list.
+   2b. Done 2026-11-24: explicit and compute steps. An explicit step's setter (ISMinify's at AE `0x14151f710` and the rest) maps an
+   engine pool buffer, copies its struct and binds it at PS b2 on the context before the explicit Render (AE `0x1414f8b00`:
+   PreRender, the draw, PostRender, no target), so `NativeSteps::BoundRows` captures PS b2 at the hook with no state applied; observe
+   mode compared 118,162 draws (param and explicit) without a difference. A dispatch's CS b0 rows are written by the effect before
+   `DispatchComputeShader` (AE `0x1414f8be0`), and `Renderer::DispatchCSShader` (AE `0x140e49cb0`) only applies state, binds that
+   buffer and dispatches, so a native dispatch binds it, captures it and skips both. Still captured: the compute SAO (its first
+   dispatch checks the bound views) and the flow copies (their source is the bound view), with the steps listed in 2a. Measured at
+   960x540 (Dev-Fast): ImageSpace 7.0% (before 2a) -> 5.5% of the render thread; the shim's `DrawTriShape` no longer shows.
+   2c. Next: image-based flares and the flow copies from the effect texture list instead of the bound views, then the explicit
+   setters' structs (or the formulas above) instead of the bound PS b2.
 3. HDR native (the most draws in every frame, formulas read): downsample, luminance, adaptation, bloom, tonemap.
 4. SAO native (the next most draws), then SSR.
 5. Composites (VL, SIL), the SAO composite, the water blend, TAA and the upsample: one decompile each.
