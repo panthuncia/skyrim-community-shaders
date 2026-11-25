@@ -590,3 +590,16 @@ Written with the epochs' code (branch `dclf/water-epochs`, 2026-11-21). Nothing 
   - The dock posts' bottoms were covered while the mask block was skipped; they are right since.
 - **Left:** a parity run of claimed water against the latch path on more scenes (rain, interiors, underwater stays the
   latch path's), and phases 4 and 5.
+
+## 12. Where phase 4 stands (2026-11-24)
+
+- **Empty batches.** A water batch hook first checks whether the batch renderer it draws (the accumulator's, or a geometry
+  group's) holds passes in the batch's technique range (`BatchHasPasses`, WaterCapture.cpp: the technique hash at +0x48, a wide
+  range walks every bucket). Claimed water leaves the engine's batches empty, so most batches no longer resolve inputs or set up a
+  latch. The hooks fell from 1.7% to 0.6% of the render thread (960x540, Dev-Fast).
+- **What the latch path still draws** at Riverwood's river (`CS_DCLF_STATS=1` census): 1,283 of 1,284 shapes are plain and
+  claimed; the one left is the wading displacement mesh (water flag bit 0 and accumulation hint 13, refused as `Wading`), which
+  follows the player every frame. It needs the Wading program variant, its hint-13 batch placement and a per-frame position
+  (Unified Water's `TESWaterSystem_UpdateDisplacementMeshPosition` hook is the mover event). Underwater (technique 8) and
+  interiors are not yet checked.
+
