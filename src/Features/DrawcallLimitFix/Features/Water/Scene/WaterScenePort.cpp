@@ -12,7 +12,9 @@
 // - shading: water writes no per-object shading. The pool row comes from the WaterMaterial shading field.
 
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
+#include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ClassifyInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ProgramFamilySlots.h"
@@ -272,6 +274,40 @@ namespace DCLF::Features::Water::WaterScene
 			return true;
 		}
 
+		// TESWaterNormals: the water object whose per-frame update (SWF_HOOK_WATER_NORMALS_UPDATE) writes its material.
+		constexpr std::size_t kWaterNormalsMaterial = 0x28;  // BSWaterShaderMaterial*
+
+		const RE::BSShaderMaterial* WaterNormalsMaterial(const void* a_object)
+		{
+			return a_object ? *reinterpret_cast<const RE::BSShaderMaterial* const*>(static_cast<const std::byte*>(a_object) + kWaterNormalsMaterial) : nullptr;
+		}
+
+		void TexturesInto(const RE::BSShaderMaterial* a_material, std::uintptr_t* a_out)
+		{
+			for (std::size_t i = 0; i < std::size(kMaterialTextureFields); ++i)
+				a_out[i] = a_material ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<const std::byte*>(a_material) + kMaterialTextureFields[i]) : 0;
+		}
+
+		/**
+		 * @brief The engine's water material update stores the normal textures into the material in place once they load, seconds
+		 * after the material was captured. A change of the material or of any texture field is reported as a write, so Core
+		 * recaptures it. The normal scroll it writes every call is the frame's, which the water material pool evaluates live.
+		 */
+		void OnWaterNormalsUpdate(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
+		{
+			static_assert(1 + std::size(kMaterialTextureFields) <= SWF_SCRATCH_WORDS);
+			const auto* material = WaterNormalsMaterial(SceneWriter::Arg<const void*>(a_event, 0));
+			if (SceneWriter::IsPre(a_event)) {
+				a_scratch[0] = reinterpret_cast<std::uintptr_t>(material);
+				TexturesInto(material, a_scratch + 1);
+				return;
+			}
+			std::array<std::uintptr_t, std::size(kMaterialTextureFields)> after{};
+			TexturesInto(material, after.data());
+			if (material && (reinterpret_cast<std::uintptr_t>(material) != a_scratch[0] || !std::equal(after.begin(), after.end(), a_scratch + 1)))
+				Api::NoteMaterialWritten(material);
+		}
+
 		void SampleWaterShading(Api::MaterialPortShading& a_shading)
 		{
 			// BSWaterShader writes no MaterialData or EmitColor. The material pool row is a shading field, which samples leave alone.
@@ -316,5 +352,8 @@ namespace DCLF::Features::Water::WaterScene
 		};
 		if (a_context.RegisterMaterialPort(port) != kMaterialKindWater)
 			::RenderGraph::Fatal("Drawcall Limit Fix", "the water port did not take material kind 2 (Effects' port must register first, and no other before it)");
+		// SceneWriterFramework's material calls were required at PostPostLoad.
+		if (!SceneWriter::SubscribeCall(SWF_HOOK_WATER_NORMALS_UPDATE, &OnWaterNormalsUpdate))
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the water material update hook after reporting the material calls installed");
 	}
 }
