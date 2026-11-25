@@ -568,10 +568,4 @@ ID3D11ShaderResourceView* ORGLightCulling::GetLightGridSRV() const
 	return impl ? impl->resources->lightGrid->SRV() : nullptr;
 }
 
-bool ORGLightCulling::GetShaderResourceIndices(uint32_t& a_lights, uint32_t& a_lightIndexList, uint32_t& a_lightGrid) const
-{
-	// Each reader declares the same view by published id, so the graph orders its reads after the culling.
-	return IsActive() && PublishedResources::ShaderResourceIndex(kLightsId, a_lights) &&
-	       PublishedResources::ShaderResourceIndex(kLightIndexListId, a_lightIndexList) && PublishedResources::ShaderResourceIndex(kLightGridId, a_lightGrid);
-}
 

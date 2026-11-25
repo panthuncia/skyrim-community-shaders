@@ -157,6 +157,14 @@ namespace DCLF::Extensions
 	bool DeclaredTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, std::span<const std::string_view> a_ids,
 		std::uint32_t& a_index);
 
+	/**
+	 * @brief Render thread. Writes a_id's descriptor from an answer kept while it holds (no publish, relocation or new version since).
+	 * For a reader that declares the id itself. False when it is not published.
+	 */
+	bool PublishedIndex(std::string_view a_id, std::uint32_t& a_index);
+	/** @brief PublishedIndex for each of a_ids. False when one is not published. */
+	bool PublishedIndices(std::span<const std::string_view> a_ids, std::span<std::uint32_t> a_out);
+
 	/** @brief Published ids the character light's noise can read: the HDR downsample chain, whose last level the luminance chain alternates. */
 	std::span<const std::string_view> CharacterLightGraphTextureIds();
 

@@ -11,6 +11,7 @@
 #include "RenderGraph/Engine/Targets/EngineTargetSet.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -167,6 +168,23 @@ namespace DCLF::Extensions
 				return kept.answer.read.empty() ? std::nullopt : std::optional(kept.answer.index);
 			}
 
+			/** @brief a_id's descriptor if it is published, for a reader that declares it itself. The answer keeps its own copy of a_id. */
+			std::optional<std::uint32_t> PublishedIndex(std::string_view a_id)
+			{
+				Refresh();
+				if (const auto found = published.find(a_id); found != published.end() && Holds(found->second))
+					return found->second.answer.read.empty() ? std::nullopt : std::optional(found->second.answer.index);
+				Kept kept;
+				kept.Follow(PublishedResources::VersionedSlotOf(a_id));
+				{
+					RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
+					if (PublishedResources::ShaderResourceIndex(a_id, kept.answer.index))
+						kept.answer.read = a_id;
+				}
+				published.insert_or_assign(std::string(a_id), kept);
+				return kept.answer.read.empty() ? std::nullopt : std::optional(kept.answer.index);
+			}
+
 			/** @brief The first declared id in a_ids whose export a_view is, and its descriptor. a_ids must be static. */
 			Answer ExportIndex(const ID3D11ShaderResourceView* a_view, std::span<const std::string_view> a_ids, const DeclaredIds* a_declared)
 			{
@@ -248,11 +266,19 @@ namespace DCLF::Extensions
 					return;
 				holdsFor = now;
 				indices.clear();
+				published.clear();
 				exports.clear();
 			}
 
 			std::array<std::uint64_t, 4> holdsFor{ ~0ull, ~0ull, ~0ull, ~0ull };
 			ankerl::unordered_dense::map<std::string_view, Kept> indices;
+			struct IdHash
+			{
+				using is_transparent = void;
+				using is_avalanching = void;
+				std::uint64_t operator()(std::string_view a_id) const noexcept { return ankerl::unordered_dense::hash<std::string_view>{}(a_id); }
+			};
+			ankerl::unordered_dense::map<std::string, Kept, IdHash, std::equal_to<>> published;
 			ankerl::unordered_dense::map<ExportKey, Kept, ExportKeyHash> exports;
 		};
 
@@ -456,6 +482,24 @@ namespace DCLF::Extensions
 		return NoteGraphTextureRead(a_reader, a_register, a_name, answer.read, a_index);
 	}
 
+	bool PublishedIndex(std::string_view a_id, std::uint32_t& a_index)
+	{
+		const auto index = Answers().PublishedIndex(a_id);
+		if (index)
+			a_index = *index;
+		return index.has_value();
+	}
+
+	bool PublishedIndices(std::span<const std::string_view> a_ids, std::span<std::uint32_t> a_out)
+	{
+		if (a_ids.size() > a_out.size())
+			return false;
+		for (std::size_t i = 0; i < a_ids.size(); ++i)
+			if (!PublishedIndex(a_ids[i], a_out[i]))
+				return false;
+		return true;
+	}
+
 	bool FrameTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, const FrameTextureEntry& a_texture, const ID3D11ShaderResourceView* a_view,
 		std::uint32_t& a_index)
 	{
@@ -507,7 +551,18 @@ namespace DCLF::Extensions
 
 	bool AdaptedLuminanceTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view, std::uint32_t& a_index)
 	{
-		const auto id = RenderGraph::Engine::ImageSpace::AdaptedLuminanceOf(a_view);
+		// The faces and colour commits ask about the same view each frame. The chain's pair and the engine's targets change only
+		// at a frame boundary, so the first answer of the frame holds for the rest of it. Render thread.
+		static struct
+		{
+			std::uint64_t frame = ~0ull;
+			const ID3D11ShaderResourceView* view = nullptr;
+			std::string_view id;
+		} s_adapted;
+		const auto frame = RenderGraph::Frame::Driver::Current().frame;
+		if (s_adapted.frame != frame || s_adapted.view != a_view)
+			s_adapted = { frame, a_view, RenderGraph::Engine::ImageSpace::AdaptedLuminanceOf(a_view) };
+		const auto id = s_adapted.id;
 		if (id.empty())
 			return false;
 		// Only a read a graph build declared, so the graph orders it against the post stage's write.

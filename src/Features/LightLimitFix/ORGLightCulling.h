@@ -64,8 +64,6 @@ public:
 	ID3D11ShaderResourceView* GetLightIndexListSRV() const;
 	ID3D11ShaderResourceView* GetLightGridSRV() const;
 
-	/** @brief Heap indices of t35, t36 and t37 for graph passes. False when inactive. */
-	bool GetShaderResourceIndices(uint32_t& a_lights, uint32_t& a_lightIndexList, uint32_t& a_lightGrid) const;
 	~ORGLightCulling();
 
 private:

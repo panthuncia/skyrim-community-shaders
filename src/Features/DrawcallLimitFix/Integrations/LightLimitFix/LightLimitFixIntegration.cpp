@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LightLimitFix.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LocalShadowViews.h"
@@ -13,6 +14,7 @@
 #include "Features/LightLimitFix/ORGLocalShadows.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <span>
 
@@ -63,7 +65,9 @@ namespace DCLF::Integrations::LightLimitFix
 		// Its lights, light index list and light grid, while its ORG culling is active.
 		bool GraphBufferIndices(std::span<std::uint32_t> a_out)
 		{
-			return ORGLightCulling::Get().GetShaderResourceIndices(a_out[0], a_out[1], a_out[2]);
+			// Each reader declares the same ids, so the graph orders its reads after the culling.
+			static constexpr std::array<std::string_view, 3> kIds{ ORGLightCulling::kLightsId, ORGLightCulling::kLightIndexListId, ORGLightCulling::kLightGridId };
+			return ORGLightCulling::Get().IsActive() && Extensions::PublishedIndices(kIds, a_out);
 		}
 
 		void Install(Api::InstallContext& a_context)

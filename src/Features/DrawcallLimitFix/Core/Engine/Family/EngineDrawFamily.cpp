@@ -20,7 +20,6 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Frame/FrameDriver.h"
-#include "RenderGraph/UndeclaredAccess.h"
 #include "Utils/Logging.h"
 
 #include <Render/PassBuilders.h>
@@ -588,8 +587,7 @@ namespace DCLF::Family
 			if (!known || !known->contains(a_id)) {
 				answer.result = InputResult::PublishedLate;
 			} else {
-				RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
-				answer.result = PublishedResources::ShaderResourceIndex(a_id, answer.index) ? InputResult::Graph : InputResult::NoView;
+				answer.result = Extensions::PublishedIndex(a_id, answer.index) ? InputResult::Graph : InputResult::NoView;
 			}
 		}
 		if (answer.result == InputResult::Graph)
