@@ -111,13 +111,24 @@ public:
 	/** @brief With CS_FG_DISPLAY_SUSPEND=1, whether the display is off or the desktop changed moments ago: frame generation stays down until it settles. */
 	static bool IsDisplayUnsettled();
 
-	/** @brief Returns whether presenting must be suspended. */
+	/**
+	* @brief Returns whether presenting must be suspended. Once frames begin, this is the answer LatchWindowState took at the
+	* current frame's Begin, so every reader in one frame agrees. Before that it reads the window now.
+	*/
 	static bool IsWindowUnusable();
+
+	/**
+	* @brief Reads the window state for the frame that begins now (Renderer::Begin). The frame's description and its upscaler
+	* read the same answer, so a focus change mid-frame takes effect at the next Begin.
+	*/
+	static void LatchWindowState();
 
 	static inline std::atomic<bool> s_windowUnfocused{ false };
 	static inline std::atomic<int> s_frameGenTestRequest{ -1 };  // RequestFrameGenTest's, -1: none
 	static inline std::atomic<int> s_upscaleTestRequest{ -1 };   // RequestUpscaleTest's, -1: none
 	static inline std::atomic<bool> s_windowModifying{ false };
+	static inline std::atomic<bool> s_windowUnusableLatched{ false };
+	static inline std::atomic<bool> s_windowLatched{ false };  // LatchWindowState has run
 	static inline std::atomic<bool> s_displayOff{ false };
 	static inline std::atomic<std::uint64_t> s_displayChangedTick{ 0 };
 

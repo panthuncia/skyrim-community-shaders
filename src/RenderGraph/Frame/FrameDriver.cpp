@@ -1,5 +1,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 
+#include "Features/Upscaling.h"
+
 #include "RenderGraph/BuildManager.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
@@ -226,6 +228,8 @@ namespace RenderGraph::Frame::Driver
 					if (Engine::GraphMode())
 						FrameAnchors::ClaimRenderOwnership();
 					RenderGraphRuntime::OnRendererBegin();
+					// The description (PostChain) and the upscaler read the window state the frame starts with.
+					Upscaling::LatchWindowState();
 					OnBegin();
 				}
 				func(a_renderer, a_flags);

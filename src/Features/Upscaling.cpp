@@ -1720,24 +1720,41 @@ bool Upscaling::IsDisplayUnsettled()
 	return changed != 0 && GetTickCount64() - changed < kSettleMilliseconds;
 }
 
-bool Upscaling::IsWindowUnusable()
+namespace
 {
-	if (const auto foregroundWindow = GetForegroundWindow()) {
-		DWORD foregroundProcess = 0;
-		GetWindowThreadProcessId(foregroundWindow, &foregroundProcess);
-		if (foregroundProcess != 0)
-			s_windowUnfocused.store(foregroundProcess != GetCurrentProcessId(), std::memory_order_relaxed);
+	/** @brief The window state now: minimized, unfocused (unless CS_UPSCALE_UNFOCUSED=1), or being sized or moved. */
+	bool ReadWindowUnusable()
+	{
+		if (const auto foregroundWindow = GetForegroundWindow()) {
+			DWORD foregroundProcess = 0;
+			GetWindowThreadProcessId(foregroundWindow, &foregroundProcess);
+			if (foregroundProcess != 0)
+				Upscaling::s_windowUnfocused.store(foregroundProcess != GetCurrentProcessId(), std::memory_order_relaxed);
+		}
+
+		// CS_UPSCALE_UNFOCUSED=1: unattended test runs on another monitor keep upscaling (and HDR, frame generation) while another
+		// process has the foreground; minimized and size/move still suspend.
+		static const bool s_ignoreFocus = Switches::On("CS_UPSCALE_UNFOCUSED");
+
+		return Upscaling::IsWindowMinimized() ||
+		       (!s_ignoreFocus && Upscaling::s_windowUnfocused.load(std::memory_order_relaxed)) ||
+		       Upscaling::s_windowModifying.load(std::memory_order_relaxed);
 	}
-
-	// CS_UPSCALE_UNFOCUSED=1: unattended test runs on another monitor keep upscaling (and HDR, frame generation) while another
-	// process has the foreground; minimized and size/move still suspend.
-	static const bool s_ignoreFocus = Switches::On("CS_UPSCALE_UNFOCUSED");
-
-	return IsWindowMinimized() ||
-	       (!s_ignoreFocus && s_windowUnfocused.load(std::memory_order_relaxed)) ||
-	       s_windowModifying.load(std::memory_order_relaxed);
 }
 
+void Upscaling::LatchWindowState()
+{
+	s_windowUnusableLatched.store(ReadWindowUnusable(), std::memory_order_relaxed);
+	s_windowLatched.store(true, std::memory_order_release);
+}
+
+bool Upscaling::IsWindowUnusable()
+{
+	// Once frames begin, a frame reads one answer from its Begin to the next. Before the first Begin, the window is read now.
+	if (s_windowLatched.load(std::memory_order_acquire))
+		return s_windowUnusableLatched.load(std::memory_order_relaxed);
+	return ReadWindowUnusable();
+}
 
 void Upscaling::SeparateFromGraphEpochs()
 {
