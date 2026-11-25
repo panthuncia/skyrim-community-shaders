@@ -16,6 +16,8 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "Utils/Logging.h"
 
+#include <ankerl/unordered_dense.h>
+
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -352,19 +354,20 @@ namespace DCLF::Family
 		// Replaced whole and only grows. Atomic because a graph may be built on the host's owner thread.
 		std::atomic<std::shared_ptr<const PublishedIds>> declared;
 		std::atomic<std::uint64_t> declaredSerial{ 0 };  // bumped with each replacement of declared
-		// Resolve's answers, per listed id, for one frame and one declared set: draws of a frame ask the same ids again and again,
-		// and an id's index changes only when a version is adopted, at a frame's Begin. Render thread.
+		// Resolve's answers, per listed id. Draws of a frame ask the same ids again and again, and an id's index changes only when a
+		// version is adopted, at a frame's Begin, so the index is asked once a frame. Whether the id is declared holds for one declared
+		// set. Render thread.
 		struct Answer
 		{
-			bool asked = false;
+			std::uint64_t frame = ~0ull;
+			bool declared = false;
 			InputResult result = InputResult::NotListed;
 			std::uint32_t index = 0;
 		};
 		mutable std::vector<Answer> answers;
 		// Each id's position in ids, made again when ids grew. Render thread.
-		mutable std::unordered_map<std::string_view, std::uint32_t> positions;
+		mutable ankerl::unordered_dense::map<std::string_view, std::uint32_t> positions;
 		mutable std::size_t positionsOf = 0;
-		mutable std::uint64_t answersFrame = ~0ull;
 		mutable std::uint64_t answersSerial = ~0ull;
 	};
 
