@@ -1155,16 +1155,6 @@
 			"description": ""
 		},
 		{
-			"name": "CS_NO_PASS_PREFETCH",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "cs",
-			"description": ""
-		},
-		{
 			"name": "CS_NVPERF_BASELINE",
 			"key": "",
 			"type": "string",

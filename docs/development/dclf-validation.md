@@ -163,7 +163,6 @@ switches file too (`Util::SwitchFile`).
 | `CS_AB_PROBE` | `Vram/MemProbe.h`, env | `1`: a row of memory figures a second in `CS-AB-memory.csv`, which `tools/cs-test/compare.py` reads. |
 | `CS_NATIVE_D3D11` | `DxvkLoader.cpp`, env | `1`: the native D3D11 runtime instead of DXVK (no render graph). |
 | `CS_NO_D3DX_UPGRADE` | `D3DX9MathUpgrade.cpp`, env | `1`: the D3DX9 math upgrade is not patched in. |
-| `CS_NO_PASS_PREFETCH` | `Hooks.cpp`, env | `1`: no next-pass prefetch detour on `BSBatchRenderer::RenderPassImmediately` (an A/B escape hatch). |
 | `CS_PASS_SKIP`, `CS_PASS_ROUNDS` | `GpuEventTimers.cpp`, env | Cost attribution by dropping events' draws ([Cost attribution](#cost-attribution-cutting-pieces-out)); `CS_PASS_ROUNDS` is how many times the list is cycled (default 2). |
 | `CS_PASS_SAMPLE` | `GpuEventTimers.cpp`, env | Set: a sampler thread profiles the main thread during `CS_PASS_SKIP` runs and logs each thread's share of wall time (`[PassSkip] thread ...`). |
 | `CS_GPU_EVENT_STATS` | `GpuEventTimers.cpp`, env | `<event>\|<event>...`: D3D11 pipeline statistics for those engine events, logged every `CS_GPU_EVENT_TIMERS` frames (`[GpuStats]`). |

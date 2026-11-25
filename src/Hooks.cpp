@@ -1573,19 +1573,13 @@ namespace Hooks
 		logger::info("Hooking BSGraphics::SetDirtyStates");
 		stl::detour_thunk<BSGraphics_SetDirtyStates>(REL::RelocationID(75580, 77386));
 
-		// CS_NO_PASS_PREFETCH=1: A/B escape hatch to run without the next-pass prefetch detour.
-		char noPassPrefetch[2] = {};
-		if (!(GetEnvironmentVariableA("CS_NO_PASS_PREFETCH", noPassPrefetch, sizeof(noPassPrefetch)) && noPassPrefetch[0] == '1')) {
-			logger::info("Hooking BSBatchRenderer::RenderPassImmediately (next-pass prefetch)");
-			stl::detour_thunk<BSBatchRenderer_RenderPassImmediately1>(REL::RelocationID(100854, 107644));
-		} else {
-			logger::info("BSBatchRenderer::RenderPassImmediately prefetch disabled via CS_NO_PASS_PREFETCH");
-		}
+		logger::info("Hooking BSBatchRenderer::RenderPassImmediately (next-pass prefetch)");
+		stl::detour_thunk<BSBatchRenderer_RenderPassImmediately1>(REL::RelocationID(100854, 107644));
 
 		Vram::Debug::InstallGameHooks();
 		TextureStreaming::Census::InstallGameHooks();
 		TextureStreaming::InstallGameHooks();
-		// The engine-on-graph subsystems' game hooks (each behind its own switch).
+		// The engine-on-graph subsystems' game hooks.
 		RenderGraph::Engine::InstallGameHooks();
 
 		logger::info("Hooking BSGraphics::Renderer::InitD3D");
