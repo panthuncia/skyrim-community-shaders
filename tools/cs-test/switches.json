@@ -505,16 +505,6 @@
 			"description": "0: the engine's LOD swaps ungated (T6b5: by default an object or terrain LOD swap keeps the outgoing level shown, and the incoming hidden, until DCLF's claims cover the incoming)"
 		},
 		{
-			"name": "CS_DCLF_MAP_HOLD",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "dclf",
-			"description": ""
-		},
-		{
 			"name": "CS_DCLF_MASTER_PARTICLES",
 			"key": "",
 			"type": "bool",

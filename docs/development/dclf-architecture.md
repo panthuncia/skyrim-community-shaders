@@ -282,7 +282,7 @@ objects, so the engine draws none of them and nothing pops in. No frame is black
     not with frame generation. A loading screen that starts during a hold ends it
     (`SetLoadingScreenActive(true)`, +0x11A): the new load posts its own close.
 -   **A re-entry** holds the presents the same way (`LoadHold::BeginReentry`), only for the map menu's camera cut: opening or
-    closing the map, whose set was culled for the other camera (`CS_DCLF_MAP_HOLD=0` turns it off). It ends as a load's hold does;
+    closing the map, whose set was culled for the other camera. It ends as a load's hold does;
     one that ended at a stall or the cap is not started again until a frame without its condition. Frame generation is not held.
 -   **Undrawable shadow views and occlusion maps** (`LoadHold::NoteUndrawable`: an unstaged graph rebuild or no host in
     `IndirectDraws::ShadowViewCapacity`, the shadow epoch not recorded in `DecideShadowCoverage`, an occlusion map DCLF cannot
