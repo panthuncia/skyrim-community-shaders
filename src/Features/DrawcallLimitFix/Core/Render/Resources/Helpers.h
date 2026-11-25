@@ -27,14 +27,15 @@ namespace DCLF::Draws
 	inline std::atomic<int> asyncComputeOverride{ -1 };
 	// The least a sun caster's bound may project to, in texels, or 0 for off. It is data only, so it can change live for A/B tests.
 	inline std::atomic<float> shadowMinTexels{ 0.0f };
-	// Native mode defaults these passes to the graphics queue. They take about 0.03 ms, but cross-queue waits cost
-	// the graphics queue about 0.13 ms a frame. CS_DCLF_ASYNC_COMPUTE overrides the choice.
+	// These passes default to the graphics queue. They take about 0.03 ms, but cross-queue waits cost the graphics queue about
+	// 0.13 ms a frame (native mode). In guest mode FSR frame generation's interpolation shares DXVK's compute queue, and a graph
+	// batch waiting there deadlocks its present (render-graph.md, "Not with FSR frame generation"). CS_DCLF_ASYNC_COMPUTE=1
+	// forces the compute queue.
 	inline org::QueueKind AsyncComputeQueue()
 	{
 		const int forced = asyncComputeOverride.load(std::memory_order_relaxed);
 		const auto& value = SwitchValue(Switch::AsyncCompute);
-		static const bool native = ::Switches::On("CS_ORG_NATIVE");
-		const bool compute = forced >= 0 ? forced != 0 : value.empty() ? !native : value != "0";
+		const bool compute = forced >= 0 ? forced != 0 : !value.empty() && value != "0";
 		return compute ? org::QueueKind::Compute : org::QueueKind::Graphics;
 	}
 
