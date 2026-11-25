@@ -314,6 +314,53 @@ namespace EngineZones
 		}
 	}
 
+	namespace
+	{
+		/** @brief Writes a_size bytes at a_at with one 16-byte compare-exchange. They must lie in one 16-byte line. */
+		void WriteInLine(std::uintptr_t a_at, const void* a_bytes, std::size_t a_size)
+		{
+			const auto line = a_at & ~std::uintptr_t(15);
+			auto* words = reinterpret_cast<volatile long long*>(line);
+			alignas(16) long long expected[2]{ words[0], words[1] };
+			for (;;) {
+				alignas(16) long long desired[2]{ expected[0], expected[1] };
+				std::memcpy(reinterpret_cast<std::byte*>(desired) + (a_at - line), a_bytes, a_size);
+				if (::_InterlockedCompareExchange128(words, desired[1], desired[0], expected))
+					return;
+			}
+		}
+
+		/**
+		* @brief Points the CALL at a_src at a_dst. The install runs on another thread while the render thread may run the site, and a
+		* torn write sends it into the trampoline's int3 padding. So the displacement goes in with one atomic store. When it crosses a
+		* 16-byte line, the site first spins on itself (jmp $) while its tail is written, then gets its new head.
+		*/
+		bool RetargetCall(std::uintptr_t a_src, std::uintptr_t a_dst)
+		{
+			const auto disp = static_cast<std::int32_t>(static_cast<std::intptr_t>(a_dst) - static_cast<std::intptr_t>(a_src + 5));
+			std::uint8_t bytes[4];
+			std::memcpy(bytes, &disp, sizeof(disp));
+			DWORD old = 0;
+			if (!::VirtualProtect(reinterpret_cast<void*>(a_src), 5, PAGE_EXECUTE_READWRITE, &old))
+				return false;
+			const auto at = a_src + 1;
+			if ((at & 15) <= 12) {
+				WriteInLine(at, bytes, 4);
+			} else {
+				// The CALL's first two bytes share a line, since the displacement starts at offset 13 to 15.
+				constexpr std::uint8_t kSpin[2]{ 0xEB, 0xFE };
+				WriteInLine(a_src, kSpin, 2);
+				::FlushInstructionCache(::GetCurrentProcess(), reinterpret_cast<void*>(a_src), 5);
+				std::memcpy(reinterpret_cast<void*>(a_src + 2), bytes + 1, 3);
+				const std::uint8_t head[2]{ 0xE8, bytes[0] };
+				WriteInLine(a_src, head, 2);
+			}
+			::VirtualProtect(reinterpret_cast<void*>(a_src), 5, old, &old);
+			::FlushInstructionCache(::GetCurrentProcess(), reinterpret_cast<void*>(a_src), 5);
+			return true;
+		}
+	}
+
 	void Install()
 	{
 		if (!Switches::On("CS_ENGINE_ZONES"))
@@ -345,7 +392,17 @@ namespace EngineZones
 				logger::warn("[EngineZones] {}: AE {}+{:#x} calls {:#x}, not AE {}; skipped", site.name, site.parent, site.offset, target - moduleBase, site.callee);
 				continue;
 			}
-			*entries[i].func = reinterpret_cast<Fn>(trampoline.write_call<5>(src, entries[i].thunk));
+			// The render thread may already run this site (the install runs on another thread): the thunk's target and its jump are
+			// in place before the call's one atomic retarget.
+			*entries[i].func = reinterpret_cast<Fn>(target);
+			auto* jump = static_cast<std::uint8_t*>(trampoline.allocate(14));
+			constexpr std::uint8_t kJmpAbs[6]{ 0xFF, 0x25, 0, 0, 0, 0 };  // jmp [rip+0]
+			std::memcpy(jump, kJmpAbs, sizeof(kJmpAbs));
+			std::memcpy(jump + sizeof(kJmpAbs), &entries[i].thunk, sizeof(entries[i].thunk));
+			if (!RetargetCall(src, reinterpret_cast<std::uintptr_t>(jump))) {
+				logger::warn("[EngineZones] {}: AE {}+{:#x} could not be made writable; skipped", site.name, site.parent, site.offset);
+				continue;
+			}
 			++written;
 		}
 		logger::info("[EngineZones] CS_ENGINE_ZONES: {} of {} engine call sites wrapped in Tracy zones", written, std::size(kSites));

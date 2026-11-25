@@ -195,7 +195,7 @@ ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches(float2 a_scre
 void ScreenSpaceShadows::DrawShadows()
 {
 	ZoneScopedS(8);
-	TracyD3D11Zone(globals::state->tracyCtx, "Screen Space Shadows");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Screen Space Shadows");
 
 	auto context = globals::d3d::context;
 
@@ -227,12 +227,12 @@ void ScreenSpaceShadows::DrawShadows()
 	const auto dispatches = BuildDispatches(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
 	for (uint32_t i = 0; i < dispatches.count; i++) {
 		{
-			TracyD3D11Zone(globals::state->tracyCtx, "SSS - Dispatch CB");
+			CS_GPU_ZONE(globals::state->tracyCtx, "SSS - Dispatch CB");
 			raymarchCB->Update(dispatches.constants[i]);
 		}
 
 		{
-			TracyD3D11Zone(globals::state->tracyCtx, "SSS - Dispatch Sweep");
+			CS_GPU_ZONE(globals::state->tracyCtx, "SSS - Dispatch Sweep");
 			context->Dispatch(dispatches.groups[i][0], dispatches.groups[i][1], dispatches.groups[i][2]);
 		}
 	}

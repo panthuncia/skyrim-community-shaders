@@ -830,7 +830,7 @@ void ScreenSpaceGI::DrawSSGI()
 	}
 
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "SSGI");
+	CS_GPU_ZONE(globals::state->tracyCtx, "SSGI");
 
 	static uint lastFrameAoTexIdx = 0;
 	static uint lastFrameGITexIdx = 0;
@@ -886,7 +886,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 	// prefilter depths
 	{
-		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Prefilter Depths");
+		CS_GPU_ZONE(globals::state->tracyCtx, "SSGI - Prefilter Depths");
 
 		srvs.at(0) = Util::GetCurrentSceneDepthSRV();
 		for (int i = 0; i < 5; ++i)
@@ -902,7 +902,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 	// fetch radiance and disocclusion
 	{
-		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Radiance Disocc");
+		CS_GPU_ZONE(globals::state->tracyCtx, "SSGI - Radiance Disocc");
 
 		resetViews();
 		srvs.at(0) = Unwrap(rts[deferred->forwardRenderTargets[0]].SRV);
@@ -935,7 +935,7 @@ void ScreenSpaceGI::DrawSSGI()
 		// radianceDisocc wrote mip 0 directly to texRadianceTemp above, so we can bind it
 		// as SRV input here without an intermediate CopySubresourceRegion.
 		{
-			TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Prefilter Radiance");
+			CS_GPU_ZONE(globals::state->tracyCtx, "SSGI - Prefilter Radiance");
 
 			resetViews();
 			srvs.at(0) = texRadianceTemp->srv.get();
@@ -960,7 +960,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 	// Prefilter normals
 	{
-		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Prefilter Normals");
+		CS_GPU_ZONE(globals::state->tracyCtx, "SSGI - Prefilter Normals");
 
 		resetViews();
 		srvs.at(0) = Unwrap(rts[NORMALROUGHNESS].SRV);
@@ -980,7 +980,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 	// GI
 	{
-		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - GI");
+		CS_GPU_ZONE(globals::state->tracyCtx, "SSGI - GI");
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();
@@ -1015,7 +1015,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 	// blur
 	if (settings.EnableBlur) {
-		TracyD3D11Zone(globals::state->tracyCtx, "SSGI - Diffuse Blur");
+		CS_GPU_ZONE(globals::state->tracyCtx, "SSGI - Diffuse Blur");
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();

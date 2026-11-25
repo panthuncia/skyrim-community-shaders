@@ -30,7 +30,7 @@
 #include "TruePBR.h"
 
 template <class... Ts>
-std::pair<unsigned char*, size_t> _GetFeatureBufferData(Ts... feat_datas)
+std::pair<unsigned char*, size_t> _GetFeatureBufferData(const Ts&... feat_datas)
 {
 	// The packed size is a compile-time constant, so reuse one aligned, thread-local buffer
 	// instead of allocating/freeing every UpdateSharedData call. The returned pointer is
@@ -40,8 +40,8 @@ std::pair<unsigned char*, size_t> _GetFeatureBufferData(Ts... feat_datas)
 	size_t offset = 0;
 
 	([&] {
-		*reinterpret_cast<decltype(feat_datas)*>(storage.data() + offset) = feat_datas;
-		offset += sizeof(decltype(feat_datas));
+		std::memcpy(storage.data() + offset, &feat_datas, sizeof(feat_datas));
+		offset += sizeof(feat_datas);
 	}(),
 		...);
 

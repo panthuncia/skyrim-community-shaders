@@ -579,6 +579,8 @@ public:
 	D3D_FEATURE_LEVEL featureLevel;
 
 	TracyD3D11Ctx tracyCtx = nullptr;  // Tracy context
+	// CS_FEATURE_GPU_ZONES=1: Tracy GPU zones (a D3D11 query pair each) on CS's own D3D11 work, see CS_GPU_ZONE.
+	bool gpuZones = false;
 
 	void ClearDisabledFeatures();
 	bool SetFeatureDisabled(const std::string& featureName, bool isDisabled);
@@ -716,3 +718,7 @@ public:
 private:
 	bool active = false;
 };
+
+// A Tracy GPU zone on CS's D3D11 work. A D3D11 query pair each, so opt-in (CS_FEATURE_GPU_ZONES=1). In the graph modes the
+// work these time runs on the render graph, so the queries time nothing there.
+#define CS_GPU_ZONE(ctx, name) TracyD3D11NamedZone(ctx, ___cs_gpu_zone, name, globals::state->gpuZones)

@@ -79,7 +79,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_EDITOR" },
 			{ .name = "CS_ENABLE_FEATURES" },
 			{ .name = "CS_ENGINE_ZONES", .type = Bool, .kind = Diagnostic, .description = "1: Tracy zones around the engine's render function calls (AE 1.6.1170 only, Tracy builds)" },
-			{ .name = "CS_FEATURE_GPU_ZONES", .type = Bool, .kind = Diagnostic, .description = "1: a Tracy GPU zone on each feature's frame callbacks (a D3D11 query pair each, Tracy builds)" },
+			{ .name = "CS_FEATURE_GPU_ZONES", .type = Bool, .kind = Diagnostic, .description = "1: Tracy GPU zones on CS's D3D11 work and each feature's frame callbacks (a D3D11 query pair each, Tracy builds)" },
 			{ .name = "CS_FORCE_FSR_FG" },
 			{ .name = "CS_FRAME_LATENCY" },
 			{ .name = "CS_FSRFG_QDEPTH" },

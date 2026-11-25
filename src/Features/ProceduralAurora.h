@@ -84,8 +84,10 @@ public:
 	/** @brief Whether the procedural aurora replaces the vanilla one; off while Effects 11 owns the aurora. */
 	bool IsActive() const;
 
-	/** @brief Packs the settings for the shared feature constant buffer (SharedData::proceduralAuroraSettings). */
+	/** @brief Packs the settings for the shared feature constant buffer (SharedData::proceduralAuroraSettings). Once per frame. */
 	CommonBufferData GetCommonBufferData();
+	/** @brief Builds the block and advances the animation clock: GetCommonBufferData's first call of a frame. */
+	CommonBufferData PackCommonBufferData();
 
 	/** @brief Draws the settings, with an Advanced section for fine tuning. */
 	virtual void DrawSettings() override;

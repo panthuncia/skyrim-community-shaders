@@ -258,14 +258,17 @@ namespace SharedConstants
 		// This run's own region, which nothing else reads.
 		const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
 		const auto sources = Sources();
+		// Only the check reads back what was committed.
+		const bool keep = CheckRequested();
 		for (std::uint32_t i = 0; i < kBlocks; ++i) {
 			// A block CS has not uploaded yet stays as it was. One that grew is cut to the buffer.
 			const auto bytes = sources[i].first((std::min)(sources[i].size(), std::size_t{ buffers.bytes[i] }));
 			if (!bytes.empty())
 				buffers.latches[a_point]->Write(run, buffers.offsets[i], bytes);
-			state.committed[i].assign(bytes.begin(), bytes.end());
+			if (keep)
+				state.committed[i].assign(bytes.begin(), bytes.end());
 		}
-		state.committedThisRun = true;
+		state.committedThisRun = keep;
 	}
 
 

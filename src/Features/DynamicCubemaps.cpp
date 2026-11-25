@@ -668,7 +668,7 @@ void DynamicCubemaps::UpdateCubemap()
 		return;
 
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Cubemap Update");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Cubemap Update");
 
 	BeginUpdate();
 

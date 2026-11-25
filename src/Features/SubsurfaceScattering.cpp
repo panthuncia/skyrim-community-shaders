@@ -247,7 +247,7 @@ void SubsurfaceScattering::DrawSSS()
 		return;
 
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Subsurface Scattering");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Subsurface Scattering");
 
 	validMaterials = false;
 
@@ -282,7 +282,7 @@ void SubsurfaceScattering::DrawSSS()
 
 		// Pre-pass: remove albedo from diffuse, write to diffuseNoAlbedoTex
 		{
-			TracyD3D11Zone(globals::state->tracyCtx, "Subsurface Scattering - Prepass");
+			CS_GPU_ZONE(globals::state->tracyCtx, "Subsurface Scattering - Prepass");
 
 			ID3D11UnorderedAccessView* uav = diffuseNoAlbedoTex->uav.get();
 			context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
@@ -303,7 +303,7 @@ void SubsurfaceScattering::DrawSSS()
 		if (settings.SSMode.Get() == 0) {
 			// Horizontal pass: diffuseNoAlbedoTex -> blurHorizontalTemp
 			{
-				TracyD3D11Zone(globals::state->tracyCtx, "Subsurface Scattering - Horizontal");
+				CS_GPU_ZONE(globals::state->tracyCtx, "Subsurface Scattering - Horizontal");
 
 				ID3D11UnorderedAccessView* uav = blurHorizontalTemp->uav.get();
 				context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
@@ -321,7 +321,7 @@ void SubsurfaceScattering::DrawSSS()
 
 			// Vertical pass: blurHorizontalTemp -> main
 			{
-				TracyD3D11Zone(globals::state->tracyCtx, "Subsurface Scattering - Vertical");
+				CS_GPU_ZONE(globals::state->tracyCtx, "Subsurface Scattering - Vertical");
 
 				views[0] = blurHorizontalTemp->srv.get();
 				context->CSSetShaderResources(0, 1, views);
@@ -339,7 +339,7 @@ void SubsurfaceScattering::DrawSSS()
 		} else if (settings.SSMode.Get() == 1) {
 			// Burley pass: diffuseNoAlbedoTex -> main (SSS pixels only)
 			{
-				TracyD3D11Zone(globals::state->tracyCtx, "Subsurface Scattering - Burley");
+				CS_GPU_ZONE(globals::state->tracyCtx, "Subsurface Scattering - Burley");
 
 				ID3D11UnorderedAccessView* uavs[1] = { Unwrap(main.UAV) };
 				context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
