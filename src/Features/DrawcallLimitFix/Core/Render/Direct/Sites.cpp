@@ -982,37 +982,27 @@ namespace DCLF::Direct::detail
 		Add(slot.counters.recordUs[site], MicrosecondsSince(start));
 	}
 
-	/** @brief Render thread. Queues the site's callback with the frame values' wait and the execution's waits and signals. */
+	/** @brief Render thread. Emits the site's epoch: its callback per segment, after the frame values' wait. */
 	void Emit(SiteRun& a_run)
 	{
 		DCLF_ZONE("CS.DCLF.Cpu.Emit");
-		auto& s = S();
-		const rhi::TimelinePoint wait = FrameValues::Get().FrameWaitPoint();
-		auto& waits = s.emitWaits;
-		auto& signals = s.emitSignals;
 		static constexpr const char* kLabels[kSites] = { "DCLF direct shadow", "DCLF direct depth", "DCLF direct colour", "DCLF direct forward",
 			"DCLF direct first person", "DCLF direct water mask", "DCLF direct water surface" };
-		// One callback per segment, each with its waits and its signals on the graphics timeline.
-		// DXVK's list is ended first for a segment marked split.
-		const auto& execution = a_run.execution;
-		const std::size_t count = execution ? (std::max<std::size_t>)(execution->segments.size(), 1) : 1;
-		for (std::size_t index = 0; index < count; ++index) {
-			waits.clear();
-			signals.clear();
-			if (index == 0 && wait.value)
-				waits.push_back(wait);
-			if (execution && index < execution->segments.size()) {
-				const auto& segment = execution->segments[index];
-				if (segment.split && index)
-					RenderGraphRuntime::Get().SplitStream();
-				waits.insert(waits.end(), segment.waits.begin(), segment.waits.end());
-				signals.insert(signals.end(), segment.signals.begin(), segment.signals.end());
-			}
-			// DXVK rejected the commands, or a wait or signal is not on the host's timelines.
-			if (!RenderGraphRuntime::Get().EmitCommands(&SiteCallback, &a_run, waits.data(), static_cast<std::uint32_t>(waits.size()), signals.data(),
-					static_cast<std::uint32_t>(signals.size()), true, kLabels[static_cast<std::size_t>(a_run.site)], true))
-				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the CPU pipeline's {} site could not emit its commands", kLabels[static_cast<std::size_t>(a_run.site)]));
+		const char* label = kLabels[static_cast<std::size_t>(a_run.site)];
+		// DXVK's CS thread runs the callback once per segment, once the submission thread finished the epoch, each with the segment's
+		// waits and signals on the graphics timeline. The first also waits for the frame values.
+		RenderGraphRuntime::SegmentRecorder recorder;
+		recorder.record = &SiteCallback;
+		recorder.user = &a_run;
+		recorder.label = label;
+		if (const rhi::TimelinePoint wait = FrameValues::Get().FrameWaitPoint(); wait.value) {
+			recorder.firstWait = RenderGraphRuntime::NativeTimelinePoint(wait);
+			if (!recorder.firstWait.semaphore)
+				::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the CPU pipeline's {} site waits for frame values that are not on the host's timelines", label));
 		}
+		// DXVK rejected the commands.
+		if (!RenderGraphRuntime::Get().EmitExternalEpoch(recorder))
+			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the CPU pipeline's {} site could not emit its commands", label));
 	}
 
 	namespace
@@ -1663,19 +1653,16 @@ namespace DCLF::Direct
 		}
 		s.current->holds.push_back(std::move(a_owner));
 		if (auto* run = std::exchange(s.pending, nullptr)) {
-			const bool hasExecution = execution != nullptr;
 			run->execution = std::move(execution);
 			// The epoch's passes failed, so its draws would read stale data. Drain the queues and draw nothing.
 			run->valid = run->valid && executed;
-			// Emit the stream's wait for the epoch's compute work now. Left to the next epoch, it landed in the list holding those segments,
-			// and the GPU waited for itself.
+			// Emitted now, with the stream's wait for the epoch's compute work. Left to the next epoch, that wait landed in the list
+			// holding the segments it waits for, and the GPU waited for itself.
 			Emit(*run);
-			RenderGraphRuntime::Get().CloseExternalEpoch(hasExecution);
 			return true;
 		}
-		if (execution)
-			RenderGraphRuntime::Get().SignalExecutionUnexecuted(*execution, execution->ExecutedSegments(), "DCLF site epoch without a run");
-		RenderGraphRuntime::Get().CloseExternalEpoch(false);
+		// No run: the epoch's segments are signalled unexecuted.
+		RenderGraphRuntime::Get().CloseExternalEpoch();
 		return executed;
 	}
 

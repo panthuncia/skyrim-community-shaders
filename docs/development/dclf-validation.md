@@ -123,7 +123,7 @@ The other switches a test run sets:
 | `CS_DCLF_TEX_STREAM_RATE_MB` | 256 | Texture upgrades started per second, in MiB. |
 | `CS_DCLF_TEX_STREAM_VISIBLE_OFFSET` | 0 | Over the budget, how many mips what is on screen may step down (0: it loads what it asks for). |
 | `CS_DCLF_TEX_STREAM_DISTANCE_SCALE` | 1 | The distance floor's sharpness: above 1, finer mips. |
-| `CS_DCLF_ASYNC_COMPUTE` | on in guest, off in native | `0`: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue, for timing them in the graphics queue's order. `1` puts them on the compute queue in native mode too. |
+| `CS_DCLF_ASYNC_COMPUTE` | off | `1`: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on it. Off by default: cross-queue waits cost more than the passes, and in guest mode FSR frame generation shares DXVK's compute queue and deadlocks with them (render-graph.md). |
 
 ### Other switches DCLF runs depend on
 

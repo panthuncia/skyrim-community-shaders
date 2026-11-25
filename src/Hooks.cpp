@@ -617,11 +617,11 @@ struct IDXGISwapChain_Present
 			// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
 			// presenting without owning rendering drains too: it copies what the owner's epochs draw.
 			// Native mode: the render owner's present is an entry on the submission thread's queue,
-			// after the frame's epochs, so it does not drain (Native's QueuePresent).
+			// after the frame's epochs, so it does not drain (Native's QueuePresent). Guest mode: the epochs are in DXVK's stream
+			// already, and DXVK's CS thread waits there for the submission thread, so the render owner does not drain either.
 			const bool holdsPresent = globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
 			                          !globals::features::upscaling.IsFrameGenerationActive();
 			// Native keeps the queued present with frame generation on: the swap chain's layer presents on the submission thread.
-			// Only native mode has a submission thread.
 			const bool queuedPresent = !holdsPresent && RenderGraphRuntime::Get().QueuesPresent();
 			if (!queuedPresent)
 				RenderGraphRuntime::Get().DrainSubmissions("the present", true);

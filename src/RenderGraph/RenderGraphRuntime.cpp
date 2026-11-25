@@ -270,6 +270,34 @@ std::uint32_t RenderGraphRuntime::VendorId()
 	return adoptedVendorId.load(std::memory_order_relaxed);
 }
 
+namespace
+{
+	/** @brief A client's recording in DXVK's stream: its callback, and the wrapper its commands record through. */
+	struct AdoptedCommands
+	{
+		void (*record)(void*, rhi::CommandList&) = nullptr;
+		void* user = nullptr;
+		rhi::Device device;
+		// Kept until D3D11 work issued after the call completes, since the wrapper owns GPU scratch its recording may allocate.
+		std::shared_ptr<rhi::CommandListPtr> wrapper;
+	};
+
+	/** @brief DXVK's CS thread, once: DXVK's command buffer adopted as a BasicRHI list for the client's callback. */
+	void RecordAdoptedCommands(void* a_user, VkCommandBuffer a_commandBuffer)
+	{
+		const std::unique_ptr<AdoptedCommands> commands(static_cast<AdoptedCommands*>(a_user));
+		*commands->wrapper = rhi::vulkan::AdoptCommandBuffer(commands->device, a_commandBuffer, rhi::QueueKind::Graphics);
+		if (!*commands->wrapper) {
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::error("[ORG] DXVK's command buffer could not be adopted; a client's commands are left out (logged once)");
+			return;
+		}
+		auto list = commands->wrapper->Get();
+		commands->record(commands->user, list);
+	}
+}
+
 struct RenderGraphRuntime::Impl
 {
 	winrt::com_ptr<IDXGIVkInteropDevice> interop;
@@ -315,6 +343,7 @@ struct RenderGraphRuntime::Impl
 #endif
 	PFN_vkQueueSubmit2 queueSubmit2 = nullptr;
 	PFN_dxvkEmitExternalCommands emitExternalCommands = nullptr;
+	PFN_dxvkEmitDeferredExternalCommands emitDeferredExternalCommands = nullptr;
 	PFN_vkGetDeviceProcAddr deviceProcAddr = nullptr;
 	VkDevice adoptedDevice = VK_NULL_HANDLE;
 	// DXVK's compute-only queue, used by the graph directly. Submissions still take DXVK's submission lock.
@@ -326,29 +355,35 @@ struct RenderGraphRuntime::Impl
 	// DXVK's upload queue, offered to BasicRHI for ORG's upload service. It needs no order against DXVK's stream,
 	// because it only writes resources that become current after its copies complete. Still under DXVK's submission lock.
 	VkQueue uploadQueue = VK_NULL_HANDLE;
-	// DXVK's stream signals streamPoint before an epoch's first compute or copy submission, and waits for those queues at its end.
-	// That wait uses computeExit or copyExit, never graph timelines, because a rebuild destroys those while DXVK may still hold the wait.
+	// DXVK's stream signals streamPoint at each epoch's place in it. Each of the compute and copy queues' first submission of the
+	// epoch waits for it, and the stream waits for both queues after the epoch. That wait uses computeExit or copyExit, never graph
+	// timelines, because a rebuild destroys those while DXVK may still hold the wait.
 	VkDevice vkDevice = VK_NULL_HANDLE;
 	VkSemaphore streamPoint = VK_NULL_HANDLE;
-	uint64_t streamPointValue = 0;
+	uint64_t streamPointValue = 0;  // render thread: the last value an epoch took
+	uint64_t emittedEntry = 0;      // render thread: the last emitted epoch's
+	uint64_t flushedEntry = 0;      // render thread: emittedEntry at the last FlushPendingStreamWork
+	uint64_t signalledEntry = 0;    // DXVK's CS thread: the last value it signalled
 	VkSemaphore computeExit = VK_NULL_HANDLE;
-	uint64_t computeExitValue = 0;
+	uint64_t computeExitValue = 0;  // the submission thread's
 	VkSemaphore copyExit = VK_NULL_HANDLE;
 	uint64_t copyExitValue = 0;
-	bool streamPointEnqueued = false;  // this epoch's
-	bool computeEntered = false;
-	bool copyEntered = false;
-	std::vector<VkSemaphoreSubmitInfo> computeTail;
-	std::vector<VkSemaphoreSubmitInfo> computeWaits;  // scratch for the entry submission's waits
 
-	// Open from ExecuteExternalEpoch until CloseExternalEpoch adds the stream's wait. Render thread.
+	struct EpochStream;  // below ComputeSubmitter
+	// Render thread: the open epoch's, from its start until it is emitted.
+	std::shared_ptr<EpochStream> epochStream;
+	// The host, for the queue hook while the host's submission thread finishes tickets, its last ones at the host's destruction too.
+	std::atomic<org::GraphHost*> finishingHost = nullptr;
+
+	// Open from ExecuteExternalEpoch until EmitExternalEpoch or CloseExternalEpoch emits it. Render thread.
 	bool externalOpen = false;
+	std::shared_ptr<org::ExternalEpochExecution> externalExecution;
+	std::shared_ptr<EpochStream> externalOuter;  // the stream it replaced (OpenEpochStream)
 	// Open while an epoch's BeforeGpuWork commits the stages due before it (TryExecuteEpoch). Their tickets are submitted as
 	// before, and their execution is emitted with the epoch's.
 	bool joinOpen = false;
 	// AfterEmission's work for the joined epochs, run once the outer epoch is emitted (or failed).
 	std::vector<std::function<void()>> afterEmission;
-	bool externalExitSplit = false;
 	const char* externalLabel = "";
 
 	// The stream-order guard. DXVK waits at the start of a submission and signals at its end, so waiting on off-stream work that
@@ -751,7 +786,7 @@ struct RenderGraphRuntime::Impl
 		static std::atomic<std::uint32_t> warned = 0;
 		const bool named = warned.fetch_add(1, std::memory_order_relaxed) < 4;
 		if (named) {
-			logger::error("[ORG] A shared copy queue submission has waited 0.5 s for {}", DescribeUnsealed(semaphores, values));
+			logger::error("[ORG] A shared queue's submission has waited 0.5 s for {}", DescribeUnsealed(semaphores, values));
 			// What the host submitted and what each run waits for, the other side of the stall.
 			logger::error("[ORG] DXVK stream at the copy queue's wait: {} graph submissions enqueued, {} submitted", streamEnqueued.load(std::memory_order_acquire),
 				streamSubmitted.load(std::memory_order_acquire));
@@ -760,7 +795,7 @@ struct RenderGraphRuntime::Impl
 			logger::error("[ORG] stream order at the copy queue's wait: {}", DescribeStreamOrder(64));
 		}
 		if (waitSemaphores(vkDevice, &wait, 9'500'000'000ull) != VK_SUCCESS) {
-			logger::warn("[ORG] A shared copy queue submission went ahead after 10 s without its waits: {}", DescribeUnsealed(semaphores, values));
+			logger::warn("[ORG] A shared queue's submission went ahead after 10 s without its waits: {}", DescribeUnsealed(semaphores, values));
 			if (named && host)
 				logger::warn("[ORG] host state after 10 s: {}", host->DescribeAsyncState(!a_rhiLocked));
 		}
@@ -852,6 +887,18 @@ struct RenderGraphRuntime::Impl
 	};
 	ComputeSubmitter computeSubmitter;
 	ComputeSubmitter copySubmitter;
+
+	// One epoch's way through DXVK's stream (guest mode). The render thread makes it when the epoch starts, and the epoch's tickets
+	// carry it (GraphHost::SetSubmissionContext). The queue hook fills it in on the submission thread while that thread finishes
+	// them. DXVK's CS thread reads it once the epoch's execution is finished (EmitEpoch).
+	struct EpochStream
+	{
+		uint64_t entry = 0;  // the streamPoint value signalled at the epoch's place
+		bool computeEntered = false;
+		bool copyEntered = false;
+		std::vector<VkSemaphoreSubmitInfo> tail;   // the compute and copy queues' last exit values
+		std::vector<VkSemaphoreSubmitInfo> waits;  // scratch for an entry submission's waits
+	};
 	PFN_vkDestroySemaphore destroySemaphore = nullptr;
 	PFN_vkWaitSemaphores waitSemaphores = nullptr;
 	// A timeline DXVK's stream signals with each paced frame's number. Lives as long as the device, since its last signal may still be queued.
@@ -1248,29 +1295,6 @@ struct RenderGraphRuntime::Impl
 		GpuTimingSource::OnEpochSubmitted(a_hostFrame, SegmentLabel(a_segment));
 	}
 
-	// DXVK's stream signals streamPoint here, after every D3D11 command so far and ahead of the epoch's graph work.
-	bool EnqueueStreamPoint()
-	{
-		ZoneScopedN("CS.ORG.StreamPoint");
-		const VkSemaphoreSubmitInfo signal{ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, streamPoint, streamPointValue + 1,
-			VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0 };
-		DxvkOrgInteropSubmission submission{};
-		submission.version = DXVK_ORG_INTEROP_VERSION;
-		submission.signalCount = 1;
-		submission.signals = &signal;
-		submission.onSubmitted = &Impl::OnStreamSubmitted;
-		submission.user = this;
-		submission.label = "CS ORG: compute entry";
-		streamEnqueued.fetch_add(1, std::memory_order_acq_rel);
-		if (FAILED(enqueueSubmission(globals::d3d::device, &submission))) {
-			streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
-			return false;
-		}
-		++streamPointValue;
-		NoteEnqueued("stream point", submission.label, {}, { &signal, 1 });
-		return true;
-	}
-
 	static void NoCommands(void*, VkCommandBuffer) {}
 
 	// One segment of an in-stream epoch's execution, for its callback on DXVK's CS thread (which frees it).
@@ -1306,101 +1330,191 @@ struct RenderGraphRuntime::Impl
 				logger::error("[ORG] an in-stream epoch's segment failed: {}", e.what());
 		}
 	}
-	// Render thread. Emits an in-stream execution into DXVK's stream, one external command per segment.
-	// DXVK's list is flushed before a split segment. If not taken, the rest is signalled unexecuted.
-	bool EmitExecution(const std::shared_ptr<org::ExternalEpochExecution>& a_execution, const char* a_label)
+	// Render thread: opens an epoch's stream state, which the epoch's tickets carry. Returns the one it replaces.
+	std::shared_ptr<EpochStream> OpenEpochStream()
 	{
-		ZoneScopedN("CS.ORG.EmitExecution");
-		thread_local std::vector<RenderGraphRuntime::ExternalCommandsWait> waits, signals;
-		const auto streamDevice = host->Device();
-		for (std::size_t index = 0; index < a_execution->segments.size(); ++index) {
-			const auto& streamSegment = a_execution->segments[index];
-			if (streamSegment.split && index) {
-				globals::d3d::context->Flush();
-				NoteStreamClosed("segment split", a_label);
-			}
+		auto outer = std::move(epochStream);
+		epochStream = std::make_shared<EpochStream>();
+		epochStream->entry = ++streamPointValue;
+		host->SetSubmissionContext(epochStream);
+		return outer;
+	}
+
+	// Render thread: closes the open epoch's stream state and puts a_outer back. Returns the epoch's.
+	std::shared_ptr<EpochStream> CloseEpochStream(std::shared_ptr<EpochStream> a_outer)
+	{
+		auto stream = std::exchange(epochStream, std::move(a_outer));
+		host->SetSubmissionContext(epochStream);
+		return stream;
+	}
+
+	// What DXVK's CS thread records in an epoch's place in the stream (EmitEpoch).
+	struct DeferredEpoch
+	{
+		Impl* impl = nullptr;
+		std::shared_ptr<org::ExternalEpochExecution> execution;  // null: none
+		std::shared_ptr<EpochStream> stream;                       // null: no entry and no exit
+		const char* label = "";
+		bool execute = true;  // false: the segments are signalled unexecuted
+		bool recorded = false;  // the caller records each segment itself (recorder)
+		RenderGraphRuntime::SegmentRecorder recorder{};
+		rhi::Device device;
+	};
+
+	// DXVK's CS thread, in the epoch's place. Waits until the submission thread finished the epoch's tickets, then records:
+	// - the entry: everything before it signals streamPoint. When the compute or copy queue waits for that point, DXVK's list ends
+	//   here, so that work waits only for what came before the epoch.
+	// - each segment, as one external command with its waits and signals; a split segment starts a new list.
+	// - the exit: the stream waits for the epoch's compute and copy work, in a new list when the execution's exitSplit says so.
+	static void RecordDeferredEpoch(void* a_user, const DxvkOrgInteropStreamRecorder* a_recorder)
+	{
+		std::unique_ptr<DeferredEpoch> epoch(static_cast<DeferredEpoch*>(a_user));
+		ZoneScopedN("CS.ORG.DeferredEpoch");
+		auto& self = *epoch->impl;
+		const auto* execution = epoch->execution.get();
+		bool finished = true;
+		if (execution) {
+			ZoneScopedN("CS.ORG.DeferredEpoch.WaitFinished");
+			finished = execution->WaitFinished();
+		}
+		if (!finished) {
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::error("[ORG] {}: the submission thread failed this epoch's tickets; its segments are signalled unexecuted", epoch->label);
+		}
+		const bool execute = epoch->execute && finished;
+		// DXVK's CS thread is one thread: the scratch is reused across epochs.
+		thread_local std::vector<VkSemaphoreSubmitInfo> waits, signals;
+		const auto point = [](VkSemaphore a_semaphore, std::uint64_t a_value) {
+			return VkSemaphoreSubmitInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, a_semaphore, a_value, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0 };
+		};
+		const auto record = [&](PFN_dxvkOrgInteropCommandBufferCallback a_callback, void* a_callbackUser, bool a_commands, bool a_split, const char* a_kind) {
+			DxvkOrgInteropExternalCommands commands{};
+			commands.version = DXVK_ORG_EXTERNAL_COMMANDS_VERSION;
+			commands.flags = a_commands ? (DXVK_ORG_EXTERNAL_COMMANDS_BINDS_STATE | DXVK_ORG_EXTERNAL_COMMANDS_FULL_BARRIER) : 0u;
+			commands.callback = a_callback;
+			commands.user = a_callbackUser;
+			commands.waitCount = static_cast<std::uint32_t>(waits.size());
+			commands.waits = waits.data();
+			commands.signalCount = static_cast<std::uint32_t>(signals.size());
+			commands.signals = signals.data();
+			commands.label = epoch->label;
+			const bool recorded = SUCCEEDED(a_recorder->record(a_recorder->context, &commands, a_split ? VK_TRUE : VK_FALSE));
+			std::scoped_lock lock(self.streamOrderMutex);
+			if (a_split)
+				self.RecordStreamEventLocked<StreamPoint, StreamPoint>("segment split", epoch->label, 0, {}, {});
+			self.RecordStreamEventLocked<VkSemaphoreSubmitInfo, VkSemaphoreSubmitInfo>(recorded ? a_kind : "rejected by DXVK", epoch->label, 0, waits, signals);
+			return recorded;
+		};
+		bool split = false;
+		if (const auto* stream = epoch->stream.get()) {
 			waits.clear();
 			signals.clear();
-			for (const auto& point : streamSegment.waits)
-				if (const auto converted = RenderGraphRuntime::NativeTimelinePoint(point); converted.semaphore)
-					waits.push_back(converted);
-			bool resolved = true;
-			for (const auto& point : streamSegment.signals) {
-				const auto converted = RenderGraphRuntime::NativeTimelinePoint(point);
-				resolved = resolved && converted.semaphore;
-				signals.push_back(converted);
+			// Values only grow. An epoch emitted after a later-started one (nested) is entered by that one's point already.
+			if (stream->entry > self.signalledEntry) {
+				signals.push_back(point(self.streamPoint, stream->entry));
+				self.signalledEntry = stream->entry;
+				(void)record(&NoCommands, nullptr, false, false, "entry");
 			}
-			auto user = std::make_unique<StreamSegment>(StreamSegment{ a_execution, index, streamDevice });
-			if (!resolved || !RenderGraphRuntime::Get().EmitExternalCommands(&StreamSegmentCallback, user.get(), waits, signals, true, a_label, true)) {
-				RenderGraphRuntime::Get().SignalExecutionUnexecuted(*a_execution, index, a_label);
-				return false;
-			}
-			(void)user.release();  // the callback's
+			split = stream->computeEntered || stream->copyEntered;
 		}
+		const std::size_t segments = execution ? execution->segments.size() : 0;
+		// A caller's own recording runs once even without segments (it draws, and drains its queues).
+		const std::size_t parts = epoch->recorded ? (std::max<std::size_t>)(segments, 1) : segments;
+		for (std::size_t index = 0; index < parts; ++index) {
+			waits.clear();
+			signals.clear();
+			if (index == 0 && epoch->recorded && epoch->recorder.firstWait.semaphore)
+				waits.push_back(point(epoch->recorder.firstWait.semaphore, epoch->recorder.firstWait.value));
+			bool resolved = true;
+			if (index < segments) {
+				const auto& segment = execution->segments[index];
+				split = split || (segment.split && index);
+				for (const auto& wait : segment.waits)
+					if (const auto converted = NativeTimelinePoint(wait); converted.semaphore)
+						waits.push_back(point(converted.semaphore, converted.value));
+				for (const auto& signal : segment.signals) {
+					const auto converted = NativeTimelinePoint(signal);
+					resolved = resolved && converted.semaphore;
+					if (converted.semaphore)
+						signals.push_back(point(converted.semaphore, converted.value));
+				}
+			}
+			if (!resolved) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::error("[ORG] {}: a segment's signal is not on one of the host's timelines; it is left out", epoch->label);
+			}
+			if (!execute || !resolved) {
+				(void)record(&NoCommands, nullptr, false, split, "segment signalled unexecuted");
+			} else if (epoch->recorded) {
+				auto wrapper = std::make_shared<rhi::CommandListPtr>();
+				auto* commands = new AdoptedCommands{ epoch->recorder.record, epoch->recorder.user, epoch->device, wrapper };
+				if (record(&RecordAdoptedCommands, commands, true, split, "commands")) {
+					// Released at a frame's end behind that frame's work, which covers these commands.
+					const std::lock_guard lock(self.frameEndLock);
+					self.frameEndReleases.push_back(std::move(wrapper));
+				} else {
+					delete commands;
+				}
+			} else {
+				auto* user = new StreamSegment{ epoch->execution, index, epoch->device };
+				if (!record(&StreamSegmentCallback, user, true, split, "commands"))
+					delete user;
+			}
+			split = false;
+		}
+		if (const auto* stream = epoch->stream.get(); stream && !stream->tail.empty()) {
+			waits.assign(stream->tail.begin(), stream->tail.end());
+			signals.clear();
+			for (auto& wait : waits)
+				wait.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+			(void)record(&NoCommands, nullptr, false, split || (execution && execution->exitSplit), "exit wait");
+		}
+	}
+
+	// Render thread, guest mode. Puts an epoch in its place in DXVK's stream. DXVK's CS thread records it there once the
+	// submission thread finished the epoch's tickets (RecordDeferredEpoch). a_execute false signals the segments unexecuted.
+	// a_recorder records each segment in place of its execution. False when DXVK took nothing.
+	bool EmitEpoch(std::shared_ptr<org::ExternalEpochExecution> a_execution, std::shared_ptr<EpochStream> a_stream, bool a_execute,
+		const char* a_label, const RenderGraphRuntime::SegmentRecorder* a_recorder = nullptr)
+	{
+		if (native || (!a_execution && !a_stream && !a_recorder))
+			return true;
+		ZoneScopedN("CS.ORG.EmitEpoch");
+		// Stages whose commit point this is commit first.
+		FrameAnchors::BeforeGpuWork("external commands");
+		const std::uint64_t entry = a_stream ? a_stream->entry : 0;
+		auto epoch = std::make_unique<DeferredEpoch>(DeferredEpoch{ this, std::move(a_execution), std::move(a_stream), a_label, a_execute,
+			a_recorder != nullptr, a_recorder ? *a_recorder : RenderGraphRuntime::SegmentRecorder{}, host->Device() });
+		if (FAILED(emitDeferredExternalCommands(globals::d3d::device, &RecordDeferredEpoch, epoch.get())))
+			return false;
+		(void)epoch.release();  // the callback's
+		if (entry)
+			emittedEntry = entry;
 		return true;
 	}
 
-	// The epoch's end. The stream waits for the compute queue's last signals. With a_split, the list holding
-	// the segments the compute work waits for is flushed first.
-	bool CloseComputeEpoch(const char* a_label, bool a_inStream = false, bool a_split = false)
+	// Render thread: emits the open external epoch and closes it (EmitExternalEpoch, CloseExternalEpoch).
+	bool CloseExternal(bool a_execute, const RenderGraphRuntime::SegmentRecorder* a_recorder)
 	{
-		streamPointEnqueued = false;
-		computeEntered = false;
-		copyEntered = false;
-		if (computeTail.empty())
-			return true;
-		for (auto& wait : computeTail)
-			wait.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-		bool result = true;
-		if (a_inStream) {
-			if (a_split) {
-				globals::d3d::context->Flush();
-				NoteStreamClosed("exit split", a_label);
-			}
-			std::vector<RenderGraphRuntime::ExternalCommandsWait> waits;
-			waits.reserve(computeTail.size());
-			for (const auto& wait : computeTail)
-				waits.push_back({ wait.semaphore, wait.value, wait.stageMask });
-			result = RenderGraphRuntime::Get().EmitExternalCommands(&NoCommands, nullptr, waits, {}, false, a_label);
-		} else if (batching) {
-			if (pendingCount == pendingSubmits.size())
-				pendingSubmits.emplace_back();
-			auto& pending = pendingSubmits[pendingCount++];
-			pending.waits = computeTail;
-			pending.commandBuffers.clear();
-			pending.signals.clear();
-		} else {
-			DxvkOrgInteropSubmission submission{};
-			submission.version = DXVK_ORG_INTEROP_VERSION;
-			submission.waitCount = static_cast<uint32_t>(computeTail.size());
-			submission.waits = computeTail.data();
-			submission.onSubmitted = &Impl::OnStreamSubmitted;
-			submission.user = this;
-			submission.label = a_label;
-			streamEnqueued.fetch_add(1, std::memory_order_acq_rel);
-			if (FAILED(enqueueSubmission(globals::d3d::device, &submission))) {
-				streamEnqueued.fetch_sub(1, std::memory_order_acq_rel);
-				result = false;
-			} else {
-				NoteEnqueued("exit wait", a_label, computeTail, {});
-			}
-		}
-		computeTail.clear();
-		return result;
+		externalOpen = false;
+		RecordStreamEvent(a_execute ? "external epoch emitted" : "external epoch closed, not emitted", externalLabel);
+		auto stream = CloseEpochStream(std::move(externalOuter));
+		return EmitEpoch(std::move(externalExecution), std::move(stream), a_execute, externalLabel, a_recorder);
 	}
 
-	// Render thread. Closes an external epoch nobody closed, after a flush, since the list may hold segments its compute work waits for.
+	// Render thread. Emits an external epoch nobody emitted, its segments unexecuted, before the next epoch.
 	void CloseLeftOpenExternal()
 	{
 		if (!externalOpen)
 			return;
-		externalOpen = false;
 		static std::atomic_flag logged;
 		if (!logged.test_and_set())
-			logger::error("[ORG] {}: an external epoch was not closed; its compute exit goes in at the next epoch, after a flush", externalLabel);
+			logger::error("[ORG] {}: an external epoch was not emitted; its segments are signalled unexecuted at the next epoch", externalLabel);
 		RecordStreamEvent("external left open", externalLabel);
-		if (!CloseComputeEpoch(externalLabel, true, true))
-			logger::error("[ORG] {}: DXVK rejected the compute queue's exit wait", externalLabel);
+		if (!CloseExternal(false, nullptr))
+			logger::error("[ORG] {}: DXVK rejected the epoch's commands", externalLabel);
 	}
 
 	// Every queue of DXVK's device, compute and copy included, is used under DXVK's submission lock. See computeQueue.
@@ -1462,29 +1576,28 @@ struct RenderGraphRuntime::Impl
 	{
 		auto* self = static_cast<Impl*>(a_user);
 		// The compute and copy queues are the graph's alone. Timeline waits on values still in DXVK's stream are legal.
-		// On a copy queue shared with the uploader, only the render thread's submissions are the graph's.
-		const bool copy = a_queue == self->copyQueue && (a_queue != self->uploadQueue || ::GetCurrentThreadId() == self->streamThread.load(std::memory_order_relaxed));
+		// The host's submission thread finishes the epochs' tickets, so on a copy queue shared with the uploader only its
+		// submissions are the graph's.
+		auto* host = self->finishingHost.load(std::memory_order_acquire);
+		const bool finishing = host && host->OnSubmissionThread();
+		const bool copy = a_queue == self->copyQueue && (a_queue != self->uploadQueue || finishing);
 		if (copy || a_queue == self->computeQueue) {
 			ZoneScopedN("CS.ORG.OffStreamSubmit");
-			if (::GetCurrentThreadId() != self->streamThread.load(std::memory_order_relaxed)) {
-				// Its entry point is a position in DXVK's stream, which only the D3D11 thread can take.
-				logger::error("[ORG] A {}-queue submission came from a thread other than the render thread", copy ? "copy" : "compute");
+			// The ticket's epoch: its place in DXVK's stream is the entry point this queue's first submission of it waits for.
+			auto* stream = finishing ? static_cast<EpochStream*>(host->SubmissionContext()) : nullptr;
+			if (!stream) {
+				logger::error("[ORG] A {}-queue submission came from outside an epoch's ticket on the submission thread", copy ? "copy" : "compute");
 				return VK_ERROR_UNKNOWN;
 			}
 			VkSubmitInfo2 submit = a_submit;
-			bool& entered = copy ? self->copyEntered : self->computeEntered;
+			bool& entered = copy ? stream->copyEntered : stream->computeEntered;
 			if (!entered) {
-				if (!self->streamPointEnqueued) {
-					if (!self->EnqueueStreamPoint())
-						return VK_ERROR_UNKNOWN;
-					self->streamPointEnqueued = true;
-				}
 				entered = true;
-				self->computeWaits.assign(a_submit.pWaitSemaphoreInfos, a_submit.pWaitSemaphoreInfos + a_submit.waitSemaphoreInfoCount);
-				self->computeWaits.push_back({ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, self->streamPoint, self->streamPointValue,
+				stream->waits.assign(a_submit.pWaitSemaphoreInfos, a_submit.pWaitSemaphoreInfos + a_submit.waitSemaphoreInfoCount);
+				stream->waits.push_back({ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, self->streamPoint, stream->entry,
 					VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0 });
-				submit.waitSemaphoreInfoCount = static_cast<uint32_t>(self->computeWaits.size());
-				submit.pWaitSemaphoreInfos = self->computeWaits.data();
+				submit.waitSemaphoreInfoCount = static_cast<uint32_t>(stream->waits.size());
+				submit.pWaitSemaphoreInfos = stream->waits.data();
 			}
 			// Also signal the queue's exit timeline, which the stream's exit wait uses.
 			auto& submitter = copy ? self->copySubmitter : self->computeSubmitter;
@@ -1500,12 +1613,18 @@ struct RenderGraphRuntime::Impl
 			batch.signals.push_back(exit);
 			self->NoteOffStream(copy, batch.waits, batch.signals);
 			submitter.Push(std::move(batch));
-			const auto tail = std::ranges::find(self->computeTail, exit.semaphore, &VkSemaphoreSubmitInfo::semaphore);
-			if (tail != self->computeTail.end())
+			const auto tail = std::ranges::find(stream->tail, exit.semaphore, &VkSemaphoreSubmitInfo::semaphore);
+			if (tail != stream->tail.end())
 				*tail = exit;
 			else
-				self->computeTail.push_back(exit);
+				stream->tail.push_back(exit);
 			return VK_SUCCESS;
+		}
+		if (finishing) {
+			// The in-stream epochs' graphics work is DXVK's stream, which waits for this thread: a graphics submission from it would
+			// wait for that stream in turn.
+			logger::error("[ORG] A graphics-queue submission came from the submission thread");
+			return VK_ERROR_UNKNOWN;
 		}
 		if (a_queue == self->uploadQueue) {
 			if (a_queue == self->copyQueue)
@@ -1709,6 +1828,8 @@ bool RenderGraphRuntime::Initialize()
 		state->untrackResources = dxvk.untrackInteropResources;
 		// Recordings into DXVK's own command buffer (EmitCommands, the in-stream epochs).
 		state->emitExternalCommands = dxvk.emitExternalCommands;
+		// In-stream epochs, recorded on DXVK's CS thread once the submission thread finished them.
+		state->emitDeferredExternalCommands = dxvk.emitDeferredExternalCommands;
 		// Graph submissions in DXVK's command stream.
 		state->enqueueSubmission = dxvk.enqueueInteropSubmission;
 		state->enqueueSubmissions = dxvk.enqueueInteropSubmissions;
@@ -1814,7 +1935,7 @@ bool RenderGraphRuntime::Initialize()
 					state->vkDevice = info.device;
 				logger::info("[ORG] frame pacing: {}", state->framePace ? std::format("the GPU at most {} frames behind the render thread (CS_FRAME_LATENCY)", state->frameLatency - 1) : std::string("off"));
 			}
-			// DXVK's compute-only queue, ordered against the stream by the host (EnqueueStreamPoint, CloseComputeEpoch), which
+			// DXVK's compute-only queue, ordered against the stream at each epoch's place in it (RecordDeferredEpoch), which
 			// needs the stream.
 			if (info.computeQueue && getDeviceProcAddr) {
 				const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
@@ -1882,15 +2003,15 @@ bool RenderGraphRuntime::Initialize()
 		// Tickets record replayable recordings, which the revision-driven epochs need (their published copies are submitted again).
 		// A live run also reuses its copy's kept recording while every pass revision holds.
 		desc.reuseRecordings = true;
-		// The commit runs on the render thread and the rest of the submission on a host thread.
-		desc.submissionThread = state->native;
-		if (desc.submissionThread)
-			logger::info("[ORG] native: epochs submit on a submission thread");
+		// The commit runs on the render thread and the rest of the submission on a host thread. Guest mode puts each epoch in DXVK's
+		// stream at once, and DXVK's CS thread records it there once that thread finished it.
+		desc.submissionThread = true;
+		logger::info("[ORG] epochs are finished on a submission thread");
 		// Tickets queued together share queue submissions where they can.
 		desc.mergeTicketSubmissions = state->native;
-		// The seal and present queue on the submission thread after the frame's epochs.
-		// The render thread waits only when the previous present is still queued.
-		desc.queuedSeals = state->native;
+		// The seal queues on the submission thread after the frame's epochs. Native mode queues the present there too, and the
+		// render thread waits only when the previous present is still queued.
+		desc.queuedSeals = true;
 		// Uploads are recorded on the compute queue when that queue uses them first. A pass must declare every upload it reads.
 		// DCLF's per-frame publications are read through late-bound buffers for this. An undeclared read once hung the RX 6600.
 		desc.queueScopedUploads = true;
@@ -1908,6 +2029,7 @@ bool RenderGraphRuntime::Initialize()
 			return disable("native mode made no ORG runtime with its device");
 		desc.runtime = state->orgRuntime;
 		state->host = std::make_unique<org::GraphHost>(std::move(desc));
+		state->finishingHost.store(state->host.get(), std::memory_order_release);
 		// The build manager makes every rebuild off the render thread and attaches it at a frame boundary.
 		// An epoch with no graph is still built at its first submission.
 		state->host->SetExplicitBuilds(true);
@@ -2136,17 +2258,18 @@ void RenderGraphRuntime::Shutdown()
 	try {
 		// Waits only for the graph's own timelines, then releases every graph object.
 		state->host.reset();
+		state->finishingHost.store(nullptr, std::memory_order_release);
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Render graph shutdown failed: {}", e.what());
 	}
 	// The pipeline versions no graph pins any more, while the device is still there (its work is done).
 	PipelineRegistry()->DrainRetired();
 	if (state->streamPoint) {
-		// Every point was waited for by a compute submission the graph's timelines have seen complete.
+		// Every emitted epoch signals its point in DXVK's stream.
 		VkSemaphoreWaitInfo wait{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
 		wait.semaphoreCount = 1;
 		wait.pSemaphores = &state->streamPoint;
-		wait.pValues = &state->streamPointValue;
+		wait.pValues = &state->emittedEntry;
 		(void)state->waitSemaphores(state->vkDevice, &wait, UINT64_MAX);
 		state->destroySemaphore(state->vkDevice, state->streamPoint, nullptr);
 	}
@@ -2231,16 +2354,19 @@ std::uint64_t RenderGraphRuntime::FlushPendingStreamWork()
 	DrainSubmissions("a wait for the GPU");
 	const uint64_t enqueued = impl->streamEnqueued.load(std::memory_order_acquire);
 	const uint64_t submitted = impl->streamSubmitted.load(std::memory_order_acquire);
-	if (enqueued <= submitted)
+	// The epochs emitted since the last flush are in DXVK's current command list, their entries and signals with them.
+	const bool epochs = std::exchange(impl->flushedEntry, impl->emittedEntry) != impl->emittedEntry;
+	if (enqueued <= submitted && !epochs)
 		return 0;
 	if (auto* context = globals::d3d::context)
 		context->Flush();
 	impl->NoteStreamClosed("flush before a wait", "");
 	static std::atomic<uint32_t> logged = 0;
 	if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
-		logger::info("[ORG] flushed DXVK's stream before a render-thread wait: {} graph submissions were still in it (enqueued {}, submitted {})",
-			enqueued - submitted, enqueued, submitted);
-	return enqueued - submitted;
+		logger::info("[ORG] flushed DXVK's stream before a render-thread wait: {} graph submissions were still in it (enqueued {}, submitted {}), epochs "
+					 "emitted since the last flush: {}",
+			enqueued - submitted, enqueued, submitted, epochs);
+	return enqueued - submitted + (epochs ? 1 : 0);
 }
 
 std::shared_ptr<rhi::TimelinePtr> RenderGraphRuntime::FrameWaitTimeline() const
@@ -2642,65 +2768,43 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	}
 	const char* label = Impl::SegmentLabel(a_segment);
 	RenderGraph::UndeclaredAccess::EpochScope undeclaredScope(label);
+	auto outer = impl->OpenEpochStream();
 	try {
 		impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, std::move(a_resourceOwner));
 	} catch (...) {
 		// The ticket may have submitted its compute work before the throw. Its execution, if the host made one, is signalled
-		// unexecuted, and the stream's exit wait goes in as a submission of its own.
-		if (auto lost = impl->host->TakeExternalExecution()) {
-			try {
-				SignalExecutionUnexecuted(*lost, 0, label);
-			} catch (const std::exception& e) {
-				logger::error("[ORG] {}: an execution nobody took could not be signalled: {}", label, e.what());
-			}
-		}
-		(void)impl->CloseComputeEpoch(label);
+		// unexecuted in the epoch's place, with the stream's exit wait.
+		if (!impl->EmitEpoch(impl->host->TakeExternalExecution(), impl->CloseEpochStream(std::move(outer)), false, label))
+			logger::error("[ORG] {}: DXVK rejected a failed epoch's commands", label);
 		throw;
 	}
 	impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
 	auto execution = impl->host->TakeExternalExecution();
-	// Open until the caller emits the execution and calls CloseExternalEpoch.
+	// Open until the caller emits it (EmitExternalEpoch) or closes it (CloseExternalEpoch).
 	impl->externalOpen = true;
-	impl->externalExitSplit = execution && execution->exitSplit;
+	impl->externalExecution = execution;
+	impl->externalOuter = std::move(outer);
 	impl->externalLabel = label;
-	impl->RecordStreamEvent(execution ? "external epoch" : "external epoch without an execution", label, execution ? execution->segments.size() : 0);
+	impl->RecordStreamEvent(execution ? "external epoch" : "external epoch without an execution", label);
 	return execution;
 }
 
-void RenderGraphRuntime::CloseExternalEpoch(bool a_emitted)
+bool RenderGraphRuntime::EmitExternalEpoch(const SegmentRecorder& a_recorder)
+{
+	if (!IsActive())
+		return false;
+	// No epoch is open (its submission failed, or it had nothing to submit): the caller's recording alone.
+	if (!impl->externalOpen)
+		return impl->EmitEpoch(nullptr, nullptr, true, a_recorder.label, &a_recorder);
+	return impl->CloseExternal(true, &a_recorder);
+}
+
+void RenderGraphRuntime::CloseExternalEpoch()
 {
 	if (!IsActive() || !impl->externalOpen)
 		return;
-	impl->externalOpen = false;
-	impl->RecordStreamEvent(a_emitted ? "external epoch closed" : "external epoch closed, not emitted", impl->externalLabel);
-	if (!impl->CloseComputeEpoch(impl->externalLabel, a_emitted, a_emitted && impl->externalExitSplit))
-		logger::error("[ORG] {}: DXVK rejected the compute queue's exit wait", impl->externalLabel);
-}
-
-void RenderGraphRuntime::SignalExecutionUnexecuted(const org::ExternalEpochExecution& a_execution, std::size_t a_first, const char* a_label)
-{
-	if (!IsActive())
-		return;
-	for (std::size_t index = a_first; index < a_execution.segments.size(); ++index) {
-		thread_local std::vector<ExternalCommandsWait> waits, signals;
-		waits.clear();
-		signals.clear();
-		for (const auto& point : a_execution.segments[index].waits)
-			waits.push_back(NativeTimelinePoint(point));
-		for (const auto& point : a_execution.segments[index].signals)
-			signals.push_back(NativeTimelinePoint(point));
-		std::scoped_lock lock(impl->streamOrderMutex);
-		impl->RecordStreamEventLocked<ExternalCommandsWait, ExternalCommandsWait>("segment signalled unexecuted", a_label, index, waits, signals);
-	}
-	impl->host->SignalExternalExecutionUnexecuted(a_execution, a_first);
-}
-
-void RenderGraphRuntime::SplitStream()
-{
-	if (!IsActive())
-		return;
-	globals::d3d::context->Flush();
-	impl->NoteStreamClosed("segment split", "");
+	if (!impl->CloseExternal(false, nullptr))
+		logger::error("[ORG] {}: DXVK rejected the epoch's commands", impl->externalLabel);
 }
 
 std::string RenderGraphRuntime::DescribeStreamOrder(std::size_t a_events) const
@@ -2737,20 +2841,36 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		return EpochResult::Stopped;
 	if (const auto starting = epochStartingHook.load(std::memory_order_acquire))
 		starting(a_segment);
-	// The stages that commit first and this epoch reach the submission thread together, as one group: their queue submissions
-	// can share a vkQueueSubmit. A drain or a submitted point inside hands them over first.
+	// Native mode: the stages that commit first and this epoch reach the submission thread together, as one group: their queue
+	// submissions can share a vkQueueSubmit. A drain or a submitted point inside hands them over first. Guest mode hands each
+	// ticket over at once: DXVK's CS thread may already wait for it.
 	std::optional<org::GraphHost::SubmissionGroup> submissionGroup;
-	if (QueuesSubmissions())
+	if (impl->native && QueuesSubmissions())
 		submissionGroup.emplace(*impl->host);
 	// An epoch submitted while another epoch's stages commit (below) is joined to that epoch. Its ticket is submitted here as
 	// before, but its execution is left in the host, and the outer epoch's ticket appends its own (GraphHost::TakeExternalExecution).
 	// The outer epoch emits both as one execution, with one compute exit and one flush of the pending submits.
 	const bool joined = impl->joinOpen;
+	// Guest mode: the epoch's place in DXVK's stream, which its tickets and those of the stages joined to it carry.
+	std::shared_ptr<Impl::EpochStream> outerStream;
+	bool streamOpen = false;
 	if (!joined) {
 		impl->batching = impl->enqueueSubmission && impl->enqueueSubmissions;
 		impl->pendingCount = 0;
 		impl->joinOpen = true;
+		if (!impl->native) {
+			outerStream = impl->OpenEpochStream();
+			streamOpen = true;
+		}
 	}
+	// The outer epoch's emission: its execution (the joined epochs' too) in its place in DXVK's stream, with its compute entry
+	// and exit. a_execute false signals the segments unexecuted.
+	const auto emit = [&](bool a_execute) {
+		auto execution = impl->host->TakeExternalExecution();
+		auto stream = streamOpen ? impl->CloseEpochStream(std::move(outerStream)) : nullptr;
+		streamOpen = false;
+		return impl->EmitEpoch(std::move(execution), std::move(stream), a_execute, Impl::SegmentLabel(a_segment));
+	};
 	{
 		struct CloseJoin
 		{
@@ -2780,13 +2900,11 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 	}
 	impl->TakeCompletedEpochs();
 	const auto completed = std::chrono::steady_clock::now();
-	// The outer epoch's end after a failure: the joined epochs' execution still goes into the stream before the compute exit.
+	// The outer epoch's end after a failure: the joined epochs' execution still goes into the stream.
 	const auto closeAfterFailure = [&] {
 		if (joined)
 			return;
-		const auto held = impl->host->TakeExternalExecution();
-		const bool emitted = held && impl->EmitExecution(held, Impl::SegmentLabel(a_segment));
-		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment), emitted, emitted && held->exitSplit);
+		(void)emit(true);
 		if (impl->batching)
 			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
 	};
@@ -2826,11 +2944,8 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 			return EpochResult::Submitted;
 		}
 		// An in-stream epoch: its graphics work into DXVK's own command stream, here.
-		const auto execution = impl->host->TakeExternalExecution();
-		if (execution && !impl->EmitExecution(execution, Impl::SegmentLabel(a_segment)))
+		if (!emit(true))
 			throw std::runtime_error("DXVK took no external commands for an in-stream epoch");
-		if (!impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment), execution != nullptr, execution && execution->exitSplit))
-			throw std::runtime_error("DXVK rejected the compute queue's exit wait");
 		if (impl->batching && !impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment)))
 			throw std::runtime_error("DXVK rejected the epoch's submissions");
 		const auto elapsed = std::chrono::steady_clock::now() - start;
@@ -2872,17 +2987,11 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		}
 		return EpochResult::EpochFailed;
 	} catch (const std::exception& e) {
-		// What the graph committed still goes to DXVK in order, then the graph stops. An untaken execution is signalled
-		// unexecuted first, since compute work may wait for its segments.
-		if (auto lost = impl->host->TakeExternalExecution()) {
-			try {
-				SignalExecutionUnexecuted(*lost, 0, Impl::SegmentLabel(a_segment));
-			} catch (const std::exception& signalError) {
-				logger::error("[ORG] {}: an execution nobody took could not be signalled: {}", Impl::SegmentLabel(a_segment), signalError.what());
-			}
-		}
+		// What the graph committed still goes to DXVK in order, then the graph stops. The outer epoch's execution is signalled
+		// unexecuted in its place, since compute work may wait for its segments. A joined epoch's goes with the outer's.
 		if (!joined) {
-			(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
+			if (!emit(false))
+				logger::error("[ORG] {}: DXVK rejected a failed epoch's commands", Impl::SegmentLabel(a_segment));
 			if (impl->batching)
 				(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
 		}
@@ -3106,7 +3215,7 @@ void RenderGraphRuntime::UntrackResources(std::span<IUnknown* const> a_objects)
 
 bool RenderGraphRuntime::OffStreamQueuesIdle() const
 {
-	return !impl || (!impl->computeEntered && !impl->copyEntered && !impl->externalOpen);
+	return !impl || (!impl->epochStream && !impl->externalOpen);
 }
 
 bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkCommandBuffer a_commandBuffer), void* a_user,
@@ -3171,36 +3280,6 @@ RenderGraphRuntime::ExternalCommandsWait RenderGraphRuntime::NativeTimelinePoint
 	return { static_cast<VkSemaphore_T*>(info.timeline), a_point.value, 0 };
 }
 
-namespace
-{
-	/** @brief EmitCommands' recording in DXVK's stream: the client's callback, and the wrapper its commands record through. */
-	struct AdoptedCommands
-	{
-		void (*record)(void*, rhi::CommandList&) = nullptr;
-		void* user = nullptr;
-		rhi::Device device;
-		// Kept until D3D11 work issued after the call completes, since the wrapper owns GPU scratch its recording may allocate.
-		std::shared_ptr<rhi::CommandListPtr> wrapper;
-	};
-
-	/** @brief DXVK's CS thread, once: DXVK's command buffer adopted as a BasicRHI list for the client's callback. */
-	void RecordAdoptedCommands(void* a_user, VkCommandBuffer a_commandBuffer)
-	{
-		const std::unique_ptr<AdoptedCommands> commands(static_cast<AdoptedCommands*>(a_user));
-		*commands->wrapper = rhi::vulkan::AdoptCommandBuffer(commands->device, a_commandBuffer, rhi::QueueKind::Graphics);
-		if (!*commands->wrapper) {
-			static std::atomic_flag logged;
-			if (!logged.test_and_set())
-				logger::error("[ORG] EmitCommands: DXVK's command buffer could not be adopted; the caller's commands are left out (logged once)");
-			return;
-		}
-		auto list = commands->wrapper->Get();
-		commands->record(commands->user, list);
-	}
-
-	void RecordNoCommands(void*, VkCommandBuffer) {}
-}
-
 bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::CommandList& a_commands), void* a_user, const rhi::TimelinePoint* a_waits,
 	std::uint32_t a_waitCount, const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, bool a_bindsState, const char* a_label, bool a_fullBarrier)
 {
@@ -3227,7 +3306,7 @@ bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::Comman
 	}
 	const std::span<const ExternalCommandsWait> waits(points.data(), a_waitCount), signals(points.data() + a_waitCount, a_signalCount);
 	if (!a_record)
-		return EmitExternalCommands(&RecordNoCommands, nullptr, waits, signals, false, a_label, a_fullBarrier);
+		return EmitExternalCommands(&Impl::NoCommands, nullptr, waits, signals, false, a_label, a_fullBarrier);
 	auto wrapper = std::make_shared<rhi::CommandListPtr>();
 	// DXVK's CS thread frees it in the callback, which may run before the call returns; when the call fails, it never runs.
 	auto* commands = new AdoptedCommands{ a_record, a_user, impl->host->Device(), wrapper };

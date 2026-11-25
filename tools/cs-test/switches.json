@@ -344,11 +344,11 @@
 			"name": "CS_DCLF_ASYNC_COMPUTE",
 			"key": "",
 			"type": "bool",
-			"default": "1",
+			"default": "0",
 			"choices": [],
 			"kind": "feature",
 			"family": "dclf",
-			"description": "0: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue; unset: on in guest mode, off in native mode (1 turns it on there)"
+			"description": "1: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on it; unset or 0: on the graphics queue (in guest mode FSR frame generation shares DXVK's compute queue and deadlocks with them)"
 		},
 		{
 			"name": "CS_DCLF_CAPTURE",

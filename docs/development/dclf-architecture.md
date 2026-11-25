@@ -1249,8 +1249,8 @@ latch's `drawCount` of 0 skips its view.
 
 -   **Async compute.** DXVK creates a compute-only queue and never submits to it; the interop exports it
     (`DxvkOrgInteropDeviceInfo::computeQueue`), and the host adopts it as BasicRHI's compute queue (`src/RenderGraph/RenderGraphRuntime.cpp`).
-    Before an epoch's first compute submission, DXVK's stream signals a host timeline that submission waits for
-    (`EnqueueStreamPoint`); at the epoch's end the stream waits for the compute queue (`CloseComputeEpoch`).
+    DXVK's stream signals a host timeline at the epoch's place, which the epoch's first compute submission waits for, and waits
+    for the compute queue after the epoch (`RecordDeferredEpoch`, render-graph.md "In-stream epochs").
 -   ORG lets a pass leave the graphics queue only when every resource it touches is `QueueSharing::Concurrent`; every graph buffer
     is. Uses of a buffer are ordered after its last write, and a write after every use since (`OrderUse`). A texture's uses stay
     serialized.

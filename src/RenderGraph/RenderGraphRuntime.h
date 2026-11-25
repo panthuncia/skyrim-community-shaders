@@ -210,16 +210,12 @@ public:
 	bool BuildSetupGraphs(std::string_view a_caller);
 
 	/** @brief Render thread. Submits an external epoch whose recording the caller executes in DXVK's command buffer.
-	*  Null when inactive. Throws as the host's SubmitEpoch does. */
+	*  Null when inactive. Throws as the host's SubmitEpoch does. The epoch stays open until EmitExternalEpoch or CloseExternalEpoch.
+	*  The execution is finished on the submission thread: read it only on DXVK's CS thread, in a SegmentRecorder's callback. */
 	std::shared_ptr<org::ExternalEpochExecution> ExecuteExternalEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare,
 		std::shared_ptr<const void> a_resourceOwner = {});
-	/** @brief Render thread. Ends an external epoch after the caller emitted it, adding the stream's wait for its compute and copy work.
-	*  a_emitted means every segment went into DXVK's stream. The wait must not share a list with the segments it waits for. */
-	void CloseExternalEpoch(bool a_emitted);
-	/** @brief Render thread. Signals a_execution's segments from a_first on without running them, and notes them in the telemetry. */
-	void SignalExecutionUnexecuted(const org::ExternalEpochExecution& a_execution, std::size_t a_first, const char* a_label);
-	/** @brief Render thread: ends DXVK's command list (a D3D11 Flush), for a segment that must start a submission of its own. */
-	void SplitStream();
+	/** @brief Render thread. Closes the open external epoch without executing it: its segments are signalled unexecuted. */
+	void CloseExternalEpoch();
 	/** @brief Any thread, for a stall report. Recent off-stream submissions, stream points and flushes with semaphore values. Read racily. */
 	std::string DescribeStreamOrder(std::size_t a_events = 96) const;
 
@@ -259,7 +255,8 @@ public:
 	*  Call before the render owner's own queue work that must follow them, such as a present or a GPU wait. */
 	void DrainSubmissions(const char* a_why, bool a_anyThread = false);
 
-	/** @brief Whether the present goes onto the submission thread's queue. Render owner only. */
+	/** @brief Whether the render owner's present follows the frame's epochs without a drain. Native mode queues it on the submission
+	*  thread; guest mode's epochs are in DXVK's stream already. */
 	bool QueuesPresent() const;
 
 	/** @brief Whether the calling thread's queue work can go onto the submission thread's queue, after its epochs: a submission
@@ -293,8 +290,8 @@ public:
 	/** @brief Ends one import of each object's resource (any thread). */
 	void UntrackResources(std::span<IUnknown* const> a_objects);
 	/**
-	* @brief Guest mode: no compute or copy queue is inside an epoch. The next submission on either then waits for a new point in
-	* DXVK's stream, so it comes after every D3D11 command so far. Read on the render thread.
+	* @brief Guest mode: no epoch is open. The next epoch's compute and copy work then waits for its own place in DXVK's stream,
+	* so it comes after every D3D11 command so far. Read on the render thread.
 	*/
 	bool OffStreamQueuesIdle() const;
 
@@ -314,6 +311,18 @@ public:
 		const char* a_label, bool a_fullBarrier = false);
 	/** @brief An ORG timeline point as the semaphore EmitExternalCommands takes (the frame-wait timeline's too); none when it has none. */
 	static ExternalCommandsWait NativeTimelinePoint(const rhi::TimelinePoint& a_point);
+	/** @brief A caller's recording of an external epoch's segments (EmitExternalEpoch), in place of executing them. */
+	struct SegmentRecorder
+	{
+		// DXVK's CS thread, once per segment in order (once when there is none), into DXVK's command buffer. It may bind state.
+		void (*record)(void* a_user, rhi::CommandList& a_commands) = nullptr;
+		void* user = nullptr;
+		ExternalCommandsWait firstWait{};  // the first segment's submission also waits for it (no semaphore: nothing)
+		const char* label = "";
+	};
+	/** @brief Render thread. Emits the open external epoch (ExecuteExternalEpoch) in its place in DXVK's stream and closes it: its
+	*  segments through a_recorder, between the epoch's compute entry and exit. Without an open epoch, a_recorder's recording alone. */
+	bool EmitExternalEpoch(const SegmentRecorder& a_recorder);
 	/**
 	* @brief Render thread. EmitExternalCommands with BasicRHI types, in every mode. a_record starts with nothing bound and runs once on success.
 	* Guest mode adopts DXVK's command buffer. Native mode submits its own list between full barriers. Epoch work belongs in a pass instead.
