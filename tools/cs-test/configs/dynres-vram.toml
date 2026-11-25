@@ -5,6 +5,7 @@
 extends = ["base"]
 
 [run]
+exclusive = true             # every lab slot: VRAM numbers, so no other game shares the GPU's memory
 timeout_s = 420
 
 [cs]

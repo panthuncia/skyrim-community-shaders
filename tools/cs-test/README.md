@@ -226,16 +226,17 @@ goes into every slot's `SKSE\Plugins`. It loads first, since SKSE loads plugins 
   files, and the other plugins' logs stay in the slot. SKSE's own `skse64.log` and `skse64_loader.log` are opened before any plugin
   loads, so they still go to the user's Documents.
 - Without `CS_TEST_LAB_HOME` it stops the game and writes `CSTestLab-error.txt` beside itself; the run's reason quotes it.
-- It writes `home\cs-test-lab.json` when it loads and at kDataLoaded.
+- It writes `home\cs-test-lab.json` when it loads, at kPostLoad and at kDataLoaded.
 
 It is not part of Community Shaders: a run may stage another branch or an old revision, and those would lack it.
 
-**Slots.** `--slots N` (else `CS_TEST_SLOTS`, else `C:\Modding\CS-AB\lab\settings.json`'s `"slots"`, else 2) is how many runs
+**Slots.** `--slots N` (else `CS_TEST_SLOTS`, else `C:\Modding\CS-AB\lab\settings.json`'s `"slots"`, else 3) is how many runs
 go at once. A run takes the first free slot (`lab\slot-<n>.lock`); `--wait S` waits for one. An exclusive run takes every slot,
-so no other game runs beside it: `run.exclusive = true` (the perf configs, `fg-dlss`), and every run with `game.uncapped` or
+so no other game runs beside it: `run.exclusive = true` (the perf and VRAM configs, `fg-dlss`), and every run with `game.uncapped` or
 `fg.presentmon`. Only an exclusive run focuses its game, and not with `CS_TEST_BACKGROUND=1`.
 
-**Starting.** One game starts at a time (`lab\launch.lock`), until its helper reports kDataLoaded or it ends. CommonLib keeps
+**Starting.** One game starts at a time (`lab\launch.lock`), until its helper reports kPostLoad (every plugin's `SKSEPlugin_Load` has
+returned) or it ends. CommonLib keeps
 the Address Library table in shared memory that the first game fills, and a second game that opens it while it is being filled
 reads it empty. Every plugin has its own CommonLib build, so the gate is what makes starting safe.
 
@@ -254,7 +255,7 @@ reads it empty. Every plugin has its own CommonLib build, so the gate is what ma
    run: Upscaling stops while another process has the foreground, so an unfocused run would never run DLSS, FSR or XeSS.
 5. Watches the slot's `CommunityShaders-Test.status.json` and the slot's game, found by its image path, until an outcome: the
    game's own, or `never-launched`, `crashed`, `never-loaded`, `hang` (a stalled status file) or `timeout`. The launch lock goes
-   at the helper's kDataLoaded.
+   at the helper's kPostLoad.
 6. Kills its game by PID, never by name. A game still running is dumped first: `CommunityShadersCrashDump.exe --pid` from the
    slot writes every thread's stack and a minidump into the run folder (`CommunityShaders-Kill-*.txt`, `.dmp`). A run whose game
    ended by itself puts its shader cache back (see Lab).

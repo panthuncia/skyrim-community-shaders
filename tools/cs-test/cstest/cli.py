@@ -15,7 +15,7 @@ def _common(parser):
     parser.add_argument("--stage", help="the staged build to run (same as --set build.stage=NAME)")
     parser.add_argument("--dry-run", action="store_true", help="resolve and print the config and its difference from base; touch nothing")
     parser.add_argument("--wait", type=int, default=0, metavar="S", help="wait up to S seconds for a free lab slot (default: refuse)")
-    parser.add_argument("--slots", type=int, metavar="N", help="how many lab slots runs share (default: CS_TEST_SLOTS, else <root>/lab/settings.json, else 2)")
+    parser.add_argument("--slots", type=int, metavar="N", help="how many lab slots runs share (default: CS_TEST_SLOTS, else <root>/lab/settings.json, else 3)")
 
 
 def build_parser():

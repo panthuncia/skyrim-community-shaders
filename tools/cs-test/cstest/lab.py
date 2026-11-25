@@ -32,7 +32,7 @@ HELPER_NAME = "!CSTestLab.dll"
 HELPER_ERROR = "CSTestLab-error.txt"
 HELPER_MARKER = "cs-test-lab.json"
 OVERWRITE = "_overwrite"
-DEFAULT_SLOTS = 2
+DEFAULT_SLOTS = 3
 
 # Copied into a slot, never linked: files a game or plugin writes. Configs anywhere, every SKSE file but code, and everything in
 # overwrite, which holds what the games wrote (Community Shaders rewrites its water flowmap textures there at each start). Its
@@ -477,7 +477,7 @@ def merge_cache(lab, slot, clean, log=print):
 # Slots.
 
 def slot_count(paths, override=None):
-    """--slots, else CS_TEST_SLOTS, else <root>\\lab\\settings.json's "slots", else 2."""
+    """--slots, else CS_TEST_SLOTS, else <root>\\lab\\settings.json's "slots", else 3."""
     if override:
         return override
     if os.environ.get("CS_TEST_SLOTS"):
@@ -585,7 +585,8 @@ def helper_error(slot):
 
 class LaunchGate:
     """One game starts at a time: CommonLib's shared Address Library table fails when two games fill it at once. The lock is
-    held from the launch until the helper reports kDataLoaded (every plugin has loaded) or the game is gone."""
+    held from the launch until the helper reports kPostLoad (every plugin's SKSEPlugin_Load has returned, so each CommonLib
+    has filled its table) or the game is gone."""
 
     def __init__(self, lab, slot, command, wait_s=900, log=print):
         self.slot = slot
@@ -597,7 +598,7 @@ class LaunchGate:
         if not self.lock.held:
             return
         marker = helper_marker(self.slot)
-        if marker and marker.get("phase") == "data-loaded" and (not games or marker.get("pid") in games):
+        if marker and marker.get("phase") in ("plugins-loaded", "data-loaded") and (not games or marker.get("pid") in games):
             self.release()
         elif game_seen and not games:
             self.release()

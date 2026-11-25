@@ -324,7 +324,7 @@ def test_prefs_ini_goes_into_the_slot(fake, game):
 def test_uncapped_is_exclusive_and_takes_every_slot(fake, game):
     result = runner.run(fake, "guest+quick", ["game.uncapped=true"], stage="p35", log=lambda *_: None)
     assert result["outcome"] == "passed", result["reason"]
-    assert result["lab"]["exclusive"] and result["lab"]["slots"] == [0, 1]
+    assert result["lab"]["exclusive"] and result["lab"]["slots"] == [0, 1, 2]
     assert "SKSE/Plugins/SSEDisplayTweaks_custom.ini" in game.seen_data
 
 

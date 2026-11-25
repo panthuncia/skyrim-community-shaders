@@ -6,7 +6,7 @@
 //   SHGetFolderPathA, CommonLib (Community Shaders' log, status and test files) through SHGetKnownFolderPath. Those
 //   functions are detoured, so they answer with the slot's home (CS_TEST_LAB_HOME) for every module and thread.
 //   INIs, plugins.txt, saves and the plugins' logs then stay in the slot.
-// - It writes <home>\cs-test-lab.json when it has loaded and again at kDataLoaded. cs-test starts the next game only
+// - It writes <home>\cs-test-lab.json when it has loaded, at kPostLoad and at kDataLoaded. cs-test starts the next game only
 //   after that, because CommonLib's shared Address Library table fails when two games fill it at once.
 //
 // Plain Win32 and Detours, no CommonLib: it must not use the shared table itself, and it must load before every other
@@ -61,6 +61,7 @@ namespace
 	};
 
 	constexpr std::uint32_t kInterfaceMessaging = 5;
+	constexpr std::uint32_t kMessagePostLoad = 0;
 	constexpr std::uint32_t kMessageDataLoaded = 8;
 
 	constexpr const char* kGameWindowClass = "Skyrim Special Edition";
@@ -341,6 +342,11 @@ namespace
 
 	void OnMessage(SKSEMessage* a_message)
 	{
+		// kPostLoad: every plugin's SKSEPlugin_Load has returned, so each CommonLib has filled its Address Library table.
+		if (a_message && a_message->type == kMessagePostLoad) {
+			WriteMarker("plugins-loaded");
+			Log("plugins loaded");
+		}
 		if (a_message && a_message->type == kMessageDataLoaded) {
 			WriteMarker("data-loaded");
 			Log("data loaded; " + std::to_string(g_answered.load()) + " folder requests answered with the home so far");
