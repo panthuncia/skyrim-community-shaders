@@ -102,7 +102,7 @@ Left: native D3D12 main opaque is 0.8 ms over native Vulkan (DXIL vs SPIR-V on N
 ## Repository state
 
 Everything above is committed and pushed (CS `org_integration`, BasicRHI `dev`, DXVK `org_integration`; OpenRenderGraph,
-ORGModuleServices, BasicTelemetry and Streamline fast-forwarded to their tracked branches). `BASICRHI_VK_FORCE_GENERAL` is kept as
-a debug switch. The DXVK `DXVK_CS_NO_ROBUSTNESS2` experiment and the per-image import log line were removed.
+ORGModuleServices, BasicTelemetry and Streamline fast-forwarded to their tracked branches). `BASICRHI_VK_FORCE_GENERAL` was kept as
+a debug switch (deleted 2026-11-25, perf2-native.md). The DXVK `DXVK_CS_NO_ROBUSTNESS2` experiment and the per-image import log line were removed.
 Worktrees that can go: `org-port-worktrees/{inventory-item,basicrhi-binaries,dxvk-robustness,basicrhi-robustness,cs-robustness}`;
 keep `lighting-probes` for the probe work (Lighting fix candidates under "Raster pass cost" are still open).

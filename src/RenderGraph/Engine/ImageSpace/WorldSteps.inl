@@ -1231,12 +1231,49 @@ void CheckStepState(std::size_t a_effect, const Spec& a_spec, const std::array<s
 }
 
 /**
+* @brief Stages a world step by its key in the build the frame runs: the engine's draw (TakeWorldStep) or a native step
+* (NativeWorld.inl). A step the frame's description at Begin has off, or that has no pass, is a mismatch.
+*/
+bool StageWorldKey(const StepKey& a_key, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
+{
+	auto& state = IS();
+	auto& world = World();
+	const auto parity = static_cast<std::uint16_t>(Frame::Driver::Current().parity);
+	const auto what = [&] { return fmt::format("world step {} (variant {:#x})", kEffects[a_effect].effectName, a_key.variant); };
+	const auto find = world.group.Find(a_key);
+	// Behind: the engine draws for variables the build the frame runs was not made for, such as a new size.
+	if (!world.group.Draws(find, Frame::SegmentId::Deferred, what, "in a RenderWorld scope"))
+		return true;
+	const auto entry = find.at.entry;
+	const auto& part = find.Part();
+	const bool water = a_key.scope == WorldScope::WaterBlend;
+	auto& client = state.post[static_cast<std::size_t>(world.group.PartOf(find.at.part))];
+	// Under water the water blend is a step of the sun stage.
+	const auto segment = StageOf(client.id, Frame::SegmentId::Deferred);
+	if (!RowOn(segment, part.RowOf(entry))) {
+		// The description at Begin has it on, so the build the frame runs was made for a key without it: lag. So is a step the
+		// engine turned on after Begin (the first world frame sets the composite's state late); the next Begin reads it. Else a mismatch.
+		if (water || WorldStepOn(a_key, world.described, parity, false) || WorldStepOn(a_key, WorldFieldsNow(), parity, false))
+			Frame::Driver::NoteStepLag(segment, client.id, what());
+		else
+			Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
+				fmt::format("{} is drawn, and the scopes' state the frame's description read at Begin has it off", what()));
+		return true;
+	}
+	if (!part.Made(entry)) {
+		// Its graph build left the pass out (MakePass says why).
+		Frame::Driver::NoteStepLag(segment, client.id, what());
+		return true;
+	}
+	return StageStep(client, entry, part.SpecOf(entry), a_effect, a_compute, a_groups);
+}
+
+/**
 * @brief Matches the draw to its pass by scope, effect and the variant the engine picked, in the build the frame runs, then stages
 * its constants. A draw the frame's description at Begin has off, or that has no pass, is a mismatch.
 */
 bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
 {
-	auto& state = IS();
 	auto& world = World();
 	const auto id = kEffects[a_effect].id;
 	using E = Effects;
@@ -1285,34 +1322,7 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 	default:
 		break;
 	}
-	const StepKey key{ a_scope, id, variant };
-	const auto what = [&] { return fmt::format("world step {} (variant {:#x})", kEffects[a_effect].effectName, variant); };
-	const auto find = world.group.Find(key);
-	// Behind: the engine draws for variables the build the frame runs was not made for, such as a new size.
-	if (!world.group.Draws(find, Frame::SegmentId::Deferred, what, "in a RenderWorld scope"))
-		return true;
-	const auto entry = find.at.entry;
-	const auto& part = find.Part();
-	const bool water = a_scope == WorldScope::WaterBlend;
-	auto& client = state.post[static_cast<std::size_t>(world.group.PartOf(find.at.part))];
-	// Under water the water blend is a step of the sun stage.
-	const auto segment = StageOf(client.id, Frame::SegmentId::Deferred);
-	if (!RowOn(segment, part.RowOf(entry))) {
-		// The description at Begin has it on, so the build the frame runs was made for a key without it: lag. So is a step the
-		// engine turned on after Begin (the first world frame sets the composite's state late); the next Begin reads it. Else a mismatch.
-		if (water || WorldStepOn(key, world.described, parity, false) || WorldStepOn(key, WorldFieldsNow(), parity, false))
-			Frame::Driver::NoteStepLag(segment, client.id, what());
-		else
-			Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
-				fmt::format("{} is drawn, and the scopes' state the frame's description read at Begin has it off", what()));
-		return true;
-	}
-	if (!part.Made(entry)) {
-		// Its graph build left the pass out (MakePass says why).
-		Frame::Driver::NoteStepLag(segment, client.id, what());
-		return true;
-	}
-	return StageStep(client, entry, part.SpecOf(entry), a_effect, a_compute, a_groups);
+	return StageWorldKey({ a_scope, id, variant }, a_effect, a_compute, a_groups);
 }
 
 /** @brief Entering sets the scope. Leaving stages its draws. */

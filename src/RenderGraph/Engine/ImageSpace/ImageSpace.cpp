@@ -2247,6 +2247,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 #include "RenderGraph/Engine/ImageSpace/NativePost.inl"
+#include "RenderGraph/Engine/ImageSpace/NativeWorld.inl"
 
 		/** @brief BSImagespaceShader::Render (100950 / 107732). */
 		struct ShaderRender
@@ -2365,7 +2366,7 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief RenderSSAO (100520 / 107245). Its this is the SAO helper at ImageSpaceManager+0x1c8. */
+		/** @brief RenderSSAO (100520 / 107245): native (NativeWorld.inl), or the engine's. Its this is the SAO helper at ImageSpaceManager+0x1c8. */
 		struct RenderSSAO
 		{
 			static std::uint64_t thunk(void* a_helper, std::int32_t a_source, std::uint64_t a_destination)
@@ -2375,10 +2376,14 @@ namespace RenderGraph::Engine::ImageSpace
 				const bool second = *composite.get();
 				if (Usable() && EngineSaoLevels() != RaisedShape().saoLevels)
 					RaiseShape("ImageSpace: RenderSSAO's level count changed");
-				EnterScope(ScopeKind::SSAO);
 				IS().snowWindow = false;
 				std::uint64_t result = 0;
-				{
+				if (NativePost::WorldNative(NativePost::Family::kSsao))
+					result = NativePost::RunSsao(a_helper, second, a_destination);
+				else {
+					if (IS().on)
+						++NativePost::R().engine[5];
+					EnterScope(ScopeKind::SSAO);
 					const WorldScopeGuard guard(second ? WorldScope::SsaoComposite : WorldScope::Ssao);
 					result = func(a_helper, a_source, a_destination);
 					LeaveScope();
@@ -2407,15 +2412,38 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The screen-space reflections pass (100428 / 107146). */
+		/** @brief The screen-space reflections pass (100428 / 107146): native (NativeWorld.inl), or the engine's. */
 		struct RenderReflections
 		{
 			static void thunk()
 			{
+				if (NativePost::WorldNative(NativePost::Family::kReflections)) {
+					NativePost::RunReflections();
+					return;
+				}
+				if (IS().on)
+					++NativePost::R().engine[4];
 				EnterScope(ScopeKind::Reflections);
 				const WorldScopeGuard guard(WorldScope::Reflections);
 				func();
 				LeaveScope();
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		* @brief The water blend (100550 / 107285), from the accumulator's RenderPostResolve: native (NativeWorld.inl), or the engine's,
+		* whose ISWaterBlend draw is a world step (InScope). Its this is the blend object at ImageSpaceManager+0x200.
+		*/
+		struct WaterBlend
+		{
+			static std::int32_t thunk(void* a_blend, std::int32_t a_source, std::int32_t a_destination)
+			{
+				if (NativePost::WorldNative(NativePost::Family::kWaterBlend))
+					return NativePost::RunWaterBlend(a_blend, a_source, a_destination);
+				if (IS().on)
+					++NativePost::R().engine[6];
+				return func(a_blend, a_source, a_destination);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -2524,6 +2552,9 @@ namespace RenderGraph::Engine::ImageSpace
 			check(Family::kComposites, ForeignAt("RenderPreTonemapComposites (AE 105675)", REL::RelocationID(99024, 105675).address(), PreTonemapComposites::func.address()));
 			check(Family::kEof, ForeignAt("RenderEndOfFrameEffects (AE 105674)", REL::RelocationID(99023, 105674).address(), 0));
 			check(Family::kPost, ForeignAt("RenderWorldPostProcess (AE 107148)", REL::RelocationID(100430, 107148).address(), 0));
+			check(Family::kReflections, ForeignAt("the reflections pass (AE 107146)", REL::RelocationID(100428, 107146).address(), RenderReflections::func.address()));
+			check(Family::kSsao, ForeignAt("RenderSSAO (AE 107245)", REL::RelocationID(100520, 107245).address(), RenderSSAO::func.address()));
+			check(Family::kWaterBlend, ForeignAt("the water blend (AE 107285)", REL::RelocationID(100550, 107285).address(), WaterBlend::func.address()));
 			// The tonemap call site inside RenderEndOfFrameEffects is CS's: the native end-of-frame effects run its work themselves.
 			// SE has two: the HDR form (+0x1EA) and the copy (+0x230).
 			for (const auto offset : REL::Module::IsAE() ? std::vector<std::uintptr_t>{ 0x178 } : std::vector<std::uintptr_t>{ 0x1EA, 0x230 }) {
@@ -2607,6 +2638,7 @@ namespace RenderGraph::Engine::ImageSpace
 		if (!Engine::GraphMode())
 			return;
 		NativePost::ResolveGlobals();
+		NativePost::ResolveWorldGlobals();
 		stl::detour_thunk<ShaderRender>(REL::RelocationID(100950, 107732));
 		stl::detour_thunk<HDRRender>(REL::RelocationID(100465, 107183));
 		stl::detour_thunk<PreTonemapComposites>(REL::RelocationID(99024, 105675));
@@ -2615,19 +2647,20 @@ namespace RenderGraph::Engine::ImageSpace
 		stl::detour_thunk<RenderSSAO>(REL::RelocationID(100520, 107245));
 		stl::detour_thunk<RenderReflections>(REL::RelocationID(100428, 107146));
 		stl::detour_thunk<RenderSaoCs>(REL::RelocationID(100526, 107252));
+		stl::detour_thunk<WaterBlend>(REL::RelocationID(100550, 107285));
 		stl::detour_thunk<WaterDisplacement>(REL::RelocationID(31385, 32176));
 		stl::detour_thunk<DrawTriShape>(REL::RelocationID(75477, 77263));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
 		stl::detour_thunk<RenderEffect>(REL::RelocationID(99025, 105676));
 		auto& state = IS();
 		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && ExplicitRender::func.address() &&
-		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && RenderSaoCs::func.address() && WaterDisplacement::func.address() &&
+		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && RenderSaoCs::func.address() && WaterBlend::func.address() && WaterDisplacement::func.address() &&
 		                  DrawTriShape::func.address() && DispatchCSShader::func.address() && RenderEffect::func.address();
 		if (!state.installed)
 			RenderGraph::Fatal("ImageSpace", "a hook could not be installed");
 		logger::info(
 			"[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render and its explicit-target form, DispatchComputeShader, the HDR effect, the pre-tonemap "
-			"composites, RenderSSAO, the reflections pass, the compute SAO, the water's displacement update, DrawTriShape, DispatchCSShader)");
+			"composites, RenderSSAO, the reflections pass, the compute SAO, the water blend, the water's displacement update, DrawTriShape, DispatchCSShader)");
 	}
 
 	void Setup()

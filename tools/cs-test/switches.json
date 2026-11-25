@@ -221,16 +221,6 @@
 			"description": ""
 		},
 		{
-			"name": "BASICRHI_VK_BOUND_UBO",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "basicrhi",
-			"description": ""
-		},
-		{
 			"name": "BASICRHI_VK_CRASH_MARKERS",
 			"key": "",
 			"type": "string",
@@ -259,16 +249,6 @@
 			"kind": "other",
 			"family": "basicrhi",
 			"description": ""
-		},
-		{
-			"name": "BASICRHI_VK_FORCE_GENERAL",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "basicrhi",
-			"description": "1: every image in GENERAL but presents (an experiment: the layout images shared with DXVK rest in)"
 		},
 		{
 			"name": "BASICRHI_VK_LIMITS",
@@ -1756,16 +1736,6 @@
 			"kind": "other",
 			"family": "dxvk",
 			"description": ""
-		},
-		{
-			"name": "ORG_BOUND_PUSH_TABLES",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "org",
-			"description": "0: D3D12 graph compute programs read every constant buffer from the heap (A/B for their bound push tables)"
 		},
 		{
 			"name": "ORG_FRAME_PLACEMENT",
