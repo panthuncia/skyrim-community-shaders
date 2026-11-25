@@ -267,10 +267,12 @@ int CloudShadows::FindCloudLayer(RE::BSRenderPass* Pass)
 
 void CloudShadows::ModifySky(RE::BSRenderPass* Pass)
 {
-	auto shadowState = globals::game::shadowState;
+	const auto cubeMapRenderTarget = globals::game::shadowState->GetRuntimeData().cubeMapRenderTarget;
+	ModifySky(Pass, cubeMapRenderTarget == RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS);
+}
 
-	auto& cubeMapRenderTarget = shadowState->GetRuntimeData().cubeMapRenderTarget;
-
+void CloudShadows::ModifySky(RE::BSRenderPass* Pass, bool a_reflectionFace)
+{
 	auto skyProperty = static_cast<const RE::BSSkyShaderProperty*>(Pass->shaderProperty);
 
 	if (skyProperty->uiSkyObjectType != RE::BSSkyShaderProperty::SkyObject::SO_CLOUDS)
@@ -282,7 +284,7 @@ void CloudShadows::ModifySky(RE::BSRenderPass* Pass)
 
 	currentLayerForDraw = layer;
 	occlusionClearedWithoutClouds = false;
-	if (cubeMapRenderTarget == RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS)
+	if (a_reflectionFace)
 		overrideSky = true;
 	else
 		bindLayerSelfShadow = true;

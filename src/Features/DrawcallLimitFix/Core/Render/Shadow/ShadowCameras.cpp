@@ -91,11 +91,21 @@ namespace DCLF::ShadowCameras
 
 	void CameraMatrices(const RE::NiCamera& a_camera, Camera& a_out)
 	{
+		// NiRect<float> members are protected. The order is left, right, top, bottom.
+		auto& data = const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2();
+		static_assert(sizeof(data.port) == sizeof(float) * 4);
+		std::array<float, 4> port;
+		std::memcpy(port.data(), &data.port, sizeof(float) * 4);
+		CameraMatrices(a_camera.world, data.viewFrustum, port, a_out);
+	}
+
+	void CameraMatrices(const RE::NiTransform& a_world, const RE::NiFrustum& a_frustum, const std::array<float, 4>& a_port, Camera& a_out)
+	{
 		// Port of FUN_140e57ae0 (AE), with the arguments FUN_140e58b80 passes.
-		const auto& r = a_camera.world.rotate.entry;
+		const auto& r = a_world.rotate.entry;
 		auto& v = a_out.view;
 		v = { r[0][2], r[0][1], r[0][0], 0.0f, r[1][2], r[1][1], r[1][0], 0.0f, r[2][2], r[2][1], r[2][0], 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
-		const auto& f = const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2().viewFrustum;
+		const auto& f = a_frustum;
 		const float one = 1.0f;
 		const float rl = one / (f.fRight - f.fLeft);
 		const float fn = one / (f.fFar - f.fNear);
@@ -130,11 +140,8 @@ namespace DCLF::ShadowCameras
 				a_out.viewProj[row * 4 + c] = zx + wy;
 			}
 		}
-		a_out.eye = { a_camera.world.translate.x, a_camera.world.translate.y, a_camera.world.translate.z };
-		// NiRect<float> members are protected. The order is left, right, top, bottom.
-		const auto& port = const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2().port;
-		static_assert(sizeof(port) == sizeof(float) * 4);
-		std::memcpy(a_out.port.data(), &port, sizeof(float) * 4);
+		a_out.eye = { a_world.translate.x, a_world.translate.y, a_world.translate.z };
+		a_out.port = a_port;
 	}
 
 	void Block(const Camera& a_camera, std::byte* a_out)

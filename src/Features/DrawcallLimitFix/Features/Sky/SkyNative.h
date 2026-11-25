@@ -60,6 +60,33 @@ namespace DCLF::Features::Sky::Native
 	bool BuildSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
 		std::string& a_why);
 
+	/** @brief A face's sky pass: what the engine's face cull would register for a sky object. */
+	struct FacePass
+	{
+		RE::BSGeometry* geometry = nullptr;
+		RE::BSShaderProperty* property = nullptr;
+		std::uint32_t passId = 0;
+		std::uint32_t sub = 0;  // the batch sub-group (FindTechniqueGroup), or the cloud list
+	};
+
+	/**
+	 * @brief The passes the engine's face cull of the sky root would register, in the engine's draw order: the sky batch by
+	 * technique, sub-group and newest first, then the cloud layers (geometry group 13) in registration order. False, with a_why,
+	 * when the face shows something the native face cannot draw (a sky-object effect).
+	 */
+	bool FacePasses(const FaceView& a_view, std::vector<FacePass>& a_batch, std::vector<FacePass>& a_clouds, std::string& a_why);
+
+	/** @brief A face's draws from FacePasses, with the face's camera. a_lastLayer is advanced over the cloud layers. */
+	bool BuildFace(const FaceView& a_view, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why);
+
+	/**
+	 * @brief Observe mode, at the engine's face sky batch: compares the native face's passes, camera and starting state with the
+	 * engine's registrations and shadow state. Logs each kind of difference once.
+	 */
+	void CompareFaceBatch(const FaceView& a_view, RE::BSShaderAccumulator* a_accumulator, std::uint32_t a_flags);
+	/** @brief Observe mode, at the engine's face cloud group: the cloud list and the cloud layers' starting state. */
+	void CompareFaceClouds(const FaceView& a_view, RE::BSBatchRenderer::GeometryGroup* a_group);
+
 	/** @brief Leaves only the group's sky-object effects linked, so the engine's call draws them and nothing of the clouds. */
 	void DetachClouds(RE::BSBatchRenderer::GeometryGroup* a_group);
 

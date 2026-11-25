@@ -55,6 +55,8 @@ namespace DCLF::ShadowCameras
 	void CullPlanes(const RE::NiCullingProcess* a_process, const RE::NiCamera& a_camera, Planes& a_out);
 	/** @brief SetCameraData's matrices and eye (FUN_140e57ae0), and the port. */
 	void CameraMatrices(const RE::NiCamera& a_camera, Camera& a_out);
+	/** @brief The same for a camera given by its world transform, frustum and port (left, right, top, bottom). */
+	void CameraMatrices(const RE::NiTransform& a_world, const RE::NiFrustum& a_frustum, const std::array<float, 4>& a_port, Camera& a_out);
 	/**
 	 * @brief Writes VS_PerFrame (b12) with the camera matrices and CameraPosAdjust. Everything else is zero,
 	 * since Utility.hlsl's shadow modes read only the view-projection and the eye.

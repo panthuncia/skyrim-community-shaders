@@ -115,6 +115,7 @@ namespace DCLF::Features::Reflection
 			reflection.updates, reflection.epochs, reflection.facesDrawn, reflection.lateFaces, reflection.lateFaces ? " <- LATE FACES" : "", s[0], s[2], s[1], s[3], s[4], s[5],
 			s[5] ? " <- EPOCH FAILED" : "", capture.viewWithheld[v], capture.viewFamilyWithheld[v][static_cast<std::size_t>(Api::DrawFamily::TreeInstances)], facesOwned ? "DCLF's" : "the engine's",
 			reflection.epochs ? NullFaceTextures(reflection.nullTextures) : std::string("no epochs"));
+		text += ReflectionFaces::TakeReport();
 		const auto roots = ReflectionFaces::TakeRootStats();
 		text += fmt::format("[DCLF] reflection faces (T4: DCLF's cameras, the engine's tree LOD root skipped; T6b6: its LOD land and objects roots while gated): {} updates, {} without the "
 							"tree root, {} without the LOD roots\n",

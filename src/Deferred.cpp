@@ -932,16 +932,24 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 	// After this point, water starts rendering
 };
 
+void Deferred::BeginReflectionFace()
+{
+	ReflectionsPrepasses();
+	globals::state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections);
+}
+
+void Deferred::EndReflectionFace()
+{
+	globals::features::viewAtmosphere.Unbind();
+	globals::state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections);
+}
+
 void Deferred::Hooks::BSCubeMapCamera_RenderCubemap::thunk(RE::NiAVObject* camera, int a2, bool a3, bool a4, bool a5)
 {
 	auto deferred = globals::deferred;
-	auto state = globals::state;
-
-	deferred->ReflectionsPrepasses();
-	state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections);
+	deferred->BeginReflectionFace();
 	func(camera, a2, a3, a4, a5);
-	globals::features::viewAtmosphere.Unbind();
-	state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections);
+	deferred->EndReflectionFace();
 }
 
 void Deferred::Hooks::Main_RenderFirstPersonView::thunk(bool a1, bool a2)

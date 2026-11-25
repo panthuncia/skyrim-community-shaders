@@ -45,7 +45,7 @@ namespace DCLF::Features::Reflection
 		}
 	}
 
-	void FaceOriented(const RE::NiCamera& a_camera, std::uint32_t a_face)
+	void FaceOriented(const ShadowCameras::Camera& a_camera, std::uint32_t a_face)
 	{
 		auto& draws = IndirectDraws::Get();
 		const auto* state = draws.ViewState(kView);
@@ -71,9 +71,7 @@ namespace DCLF::Features::Reflection
 		auto& face = reflection.faces[a_face];
 		face = {};
 		// VS_PerFrame for the face's camera, with no jitter and no previous camera, as the engine uploads it for a face.
-		ShadowCameras::Camera view;
-		ShadowCameras::CameraMatrices(a_camera, view);
-		Draws::PerFrameBlock(view, Draws::FrameBlockNow(), false, nullptr, face.perFrame.data());
+		Draws::PerFrameBlock(a_camera, Draws::FrameBlockNow(), false, nullptr, face.perFrame.data());
 		face.perFrameBytes = ShadowCameras::kBlockBytes;
 		const auto* floats = reinterpret_cast<const float*>(face.perFrame.data());
 		std::memcpy(face.viewProj.data(), floats + 32, sizeof(float) * 16);

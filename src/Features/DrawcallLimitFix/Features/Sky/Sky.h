@@ -151,6 +151,34 @@ namespace DCLF::Features::Sky
 	/** @brief Whether the family is on, which is graph mode (read at install). */
 	bool Enabled();
 
+	/**
+	 * @brief A water reflection face's camera, computed from engine data without the engine's face render
+	 * (perf-reflections.md): the cube camera's position, the face's orientation, its frustum and port.
+	 */
+	struct FaceView
+	{
+		std::uint32_t face = 0;
+		RE::NiTransform world;               // the face camera's world transform
+		RE::NiFrustum frustum;               // the cube camera's frustum
+		std::array<float, 16> viewProj{};    // SetCameraData's view-projection, row-major (the shadow state's camera data)
+		RE::NiPoint3 eye;                    // the camera position, also the face's posAdjust
+		std::array<std::uint32_t, 4> rect{};  // the face's viewport
+	};
+
+	/**
+	 * @brief Render thread. A face's sky run, drawn without the engine's face render. PrepareFace computes its draws from the Sky
+	 * object list, before CS's reflection prepasses; SubmitFace reads what the prepasses bound and submits it at the SkyReflections
+	 * anchor. Null from PrepareFace, with a_why, means the engine renders the face.
+	 */
+	std::shared_ptr<Run> PrepareFace(const FaceView& a_view, std::string& a_why);
+	/** @brief Submits a prepared face. False when it could not be drawn (logged). */
+	bool SubmitFace(std::shared_ptr<Run> a_run);
+	/**
+	 * @brief Observe mode (CS_DCLF_REFLECTION_NATIVE=1): the face the engine renders now, or null after it. Its sky batch compares
+	 * the native face's passes and inputs with the engine's.
+	 */
+	void ObserveFace(const FaceView* a_view);
+
 	void InstallHooks();
 	void PreflightHooks();
 

@@ -44,6 +44,14 @@ public:
 	/** @brief Runs feature reflection prepasses with render targets unbound. */
 	void ReflectionsPrepasses();
 
+	/**
+	 * @brief What CS does around one reflection face render: the reflection prepasses and the IsReflections bit before it.
+	 * The cube camera's face render hook calls it, and so does Drawcall Limit Fix when it draws a face without the engine.
+	 */
+	void BeginReflectionFace();
+	/** @brief Ends what BeginReflectionFace began. */
+	void EndReflectionFace();
+
 	/** @brief Runs early feature prepasses and uploads shadow light data after shadow map rendering. */
 	void EarlyPrepasses();
 

@@ -12,9 +12,9 @@
 #include <cstdint>
 #include <string>
 
-namespace RE
+namespace DCLF::ShadowCameras
 {
-	class NiCamera;
+	struct Camera;
 }
 
 namespace DCLF::Features::Reflection
@@ -31,7 +31,7 @@ namespace DCLF::Features::Reflection
 	bool Covered(const Api::ViewCoverage& a_coverage);
 	// TESWaterReflections::Update hides the player's third-person 3D and the water shapes around the cube faces.
 	void CullHiddenByUpdate(Api::CullHiddenNodes& a_nodes);
-	void FaceOriented(const RE::NiCamera& a_camera, std::uint32_t a_face);
+	void FaceOriented(const ShadowCameras::Camera& a_camera, std::uint32_t a_face);
 
 	// The faces' commit, inside the depth commit, and the report lines.
 	void Execute(const Api::ViewPointContext& a_context);

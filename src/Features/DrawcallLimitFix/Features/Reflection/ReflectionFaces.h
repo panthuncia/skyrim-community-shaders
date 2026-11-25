@@ -3,8 +3,10 @@
 // The water reflection's engine hooks. Render thread. Included by the feature's sources only.
 
 #include "Features/DrawcallLimitFix/Api/Views.h"
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 
 #include <cstdint>
+#include <string>
 
 namespace RE
 {
@@ -34,9 +36,24 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 	/** @brief Whether the face render's mode is plain (0). PassCapture withholds only then. */
 	bool Plain();
 
-	/** @brief Called once the engine has oriented the camera to a face, before its cull and draws. Render thread. */
-	using FaceOriented = void (*)(const RE::NiCamera& a_camera, std::uint32_t a_face);
+	/**
+	 * @brief Called with a face's camera before anything is drawn into it: the engine's once it oriented the camera to the face, or
+	 * the one computed for a face drawn without the engine. Render thread.
+	 */
+	using FaceOriented = void (*)(const ShadowCameras::Camera& a_camera, std::uint32_t a_face);
 	void SetFaceOriented(FaceOriented a_callback);
+
+	/** @brief CS_DCLF_REFLECTION_NATIVE (perf-reflections.md). */
+	enum class Mode : std::uint8_t
+	{
+		Engine,   // 0: the engine renders every face
+		Observe,  // 1: the engine renders; the native cameras and sky passes are computed and compared with its
+		Native,   // 2 (default): DCLF draws a plain face whose LOD roots it owns without the engine's face render
+	};
+	void SetMode(Mode a_mode);
+
+	/** @brief The faces' report line since the last call: native and engine faces, and the observe mode's camera parity. */
+	std::string TakeReport();
 
 	/**
 	 * @brief The cube camera's LOD roots DCLF draws in this update's faces. Their add-root calls are skipped, the sky's stays.

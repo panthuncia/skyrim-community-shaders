@@ -121,6 +121,8 @@ public:
 	 */
 	int FindCloudLayer(RE::BSRenderPass* Pass);
 	void ModifySky(RE::BSRenderPass* Pass);
+	/** @brief The same, for a pass of a reflection face (a_reflectionFace) or of another view, whatever the shadow state's target. */
+	void ModifySky(RE::BSRenderPass* Pass, bool a_reflectionFace);
 
 	/** @brief Copies the cloud occlusion cubemap and binds it as a shader resource for the reflections prepass. */
 	virtual void ReflectionsPrepass() override;

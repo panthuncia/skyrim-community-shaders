@@ -102,6 +102,16 @@ namespace DCLF::Features::Sky
 			return capture;
 		}
 
+		// Observe mode: the face the engine renders now (ReflectionFaces), or null. Render thread.
+		const FaceView* s_observedFace = nullptr;
+
+		/** @brief The face draws that could not be submitted, each reason logged once. */
+		Family::RefusalLog& FaceFailures()
+		{
+			static Family::RefusalLog log("[DCLF] sky: a native reflection face's sky is not drawn");
+			return log;
+		}
+
 		std::uint32_t FormatOf(ID3D11RenderTargetView* a_rtv)
 		{
 			if (!a_rtv)
@@ -140,6 +150,26 @@ namespace DCLF::Features::Sky
 			std::string sceneDepth;
 		};
 
+		/** @brief The header textures bound now (kHeaderRegisters), as imports or published ids. False when one cannot be read. */
+		bool ResolveHeaders(Run& a_run, PublishedInputIds& a_published)
+		{
+			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
+				Family::Header header;
+				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
+				ID3D11ShaderResourceView* view = nullptr;
+				const auto result = Family::ResolveHeader(kHeaderRegisters[h], kHeaderKinds[h], GpuTextures::Tag(GpuTextures::Source::FamilyHeader, static_cast<std::uint32_t>(h)),
+					header, a_run.owners, &failure, &view);
+				if (result != Family::HeaderResult::Ok) {
+					Refusals().Report(std::format("a batch whose t{} cannot be read", kHeaderRegisters[h]),
+						result == Family::HeaderResult::Buffer ? "a D3D11 buffer" : GpuTextures::DescribeFailure(view, kHeaderRegisters[h], failure));
+					return false;
+				}
+				a_published.headers[h] = std::move(header.publishedId);
+				a_run.headerIndices[h] = header.index;
+			}
+			return true;
+		}
+
 		/**
 		 * @brief Reads the batch's view, targets and inputs, for a water reflection face or the main GBuffer pass.
 		 * Returns false for anything else, which stays the engine's.
@@ -157,20 +187,8 @@ namespace DCLF::Features::Sky
 			}
 			a_shape.cloudShadows = cloudShadows.loaded;
 			a_shape.clouds = Address::kCloudGroup.Known();
-			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
-				Family::Header header;
-				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
-				ID3D11ShaderResourceView* view = nullptr;
-				const auto result = Family::ResolveHeader(kHeaderRegisters[h], kHeaderKinds[h], GpuTextures::Tag(GpuTextures::Source::FamilyHeader, static_cast<std::uint32_t>(h)),
-					header, a_run.owners, &failure, &view);
-				if (result != Family::HeaderResult::Ok) {
-					Refusals().Report(std::format("a batch whose t{} cannot be read", kHeaderRegisters[h]),
-						result == Family::HeaderResult::Buffer ? "a D3D11 buffer" : GpuTextures::DescribeFailure(view, kHeaderRegisters[h], failure));
-					return false;
-				}
-				a_published.headers[h] = std::move(header.publishedId);
-				a_run.headerIndices[h] = header.index;
-			}
+			if (!ResolveHeaders(a_run, a_published))
+				return false;
 			a_shape.depth = static_cast<std::int32_t>(rss.depthStencil);
 			if (!IsDepth(a_shape.depth))
 				return false;
@@ -572,6 +590,8 @@ namespace DCLF::Features::Sky
 				capture.cloudGroup = capture.shape.clouds && !capture.deferralBroken ? CloudGroupOf(a_accumulator, capture) : nullptr;
 				capture.accumulator = a_accumulator;
 				capture.renderFlags = a_flags;
+				if (capture.view == View::Face && s_observedFace && s_observedFace->face == capture.run->face)
+					Native::CompareFaceBatch(*s_observedFace, static_cast<RE::BSShaderAccumulator*>(a_accumulator), a_flags);
 				// The draws computed from the registered passes (SkyNative.cpp), when CS_DCLF_SKY_NATIVE asks for them.
 				const auto nativeMode = Native::GetMode();
 				std::vector<Draw> native;
@@ -627,6 +647,8 @@ namespace DCLF::Features::Sky
 					func(a_group, a_flags);
 					return;
 				}
+				if (capture.view == View::Face && s_observedFace && capture.run && s_observedFace->face == capture.run->face)
+					Native::CompareFaceClouds(*s_observedFace, a_group);
 				// The cloud layers computed from the group's passes (SkyNative.cpp), when CS_DCLF_SKY_NATIVE asks for them.
 				const auto nativeMode = Native::GetMode();
 				std::vector<Draw> native;
@@ -909,6 +931,78 @@ namespace DCLF::Features::Sky
 			Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape", capture.lastTechnique);
 		}
 	}
+
+	std::shared_ptr<Run> PrepareFace(const FaceView& a_view, std::string& a_why)
+	{
+		if (!FrameAnchors::IsRenderOwner() || !SkyDraws::Available()) {
+			a_why = "the sky family does not draw now";
+			return nullptr;
+		}
+		if (Native::GetMode() != Native::Mode::Draw) {
+			a_why = "the sky is not native (CS_DCLF_SKY_NATIVE)";
+			return nullptr;
+		}
+		auto& cloudShadows = globals::features::cloudShadows;
+		if (cloudShadows.loaded && !ORGCloudShadows::Get().IsActive()) {
+			a_why = "Cloud Shadows runs on D3D11";
+			return nullptr;
+		}
+		Family::BeginBatch();
+		// The face's shape, as CurrentShape reads it from the shadow state inside the engine's face render.
+		Shape shape;
+		shape.view = View::Face;
+		shape.depth = static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS);
+		shape.cloudShadows = cloudShadows.loaded;
+		shape.clouds = Address::kCloudGroup.Known();
+		if (!SkyDraws::CanTake(shape)) {
+			a_why = "the faces' client does not take a face now";
+			return nullptr;
+		}
+		auto* renderer = globals::game::renderer;
+		const auto& cube = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS];
+		const auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS];
+		const Native::BatchInputs inputs{ View::Face, { FormatOf(cube.cubeSideRTV[0]), 0u, 0u }, FormatOf(depth.views[0]) };
+		if (!inputs.colourFormats[0] || !inputs.depthFormat) {
+			a_why = "the reflection cube or its depth has no view";
+			return nullptr;
+		}
+		auto run = std::make_shared<Run>();
+		run->view = View::Face;
+		run->face = a_view.face;
+		if (!Native::BuildFace(a_view, inputs, run->draws, run->owners, a_why) || run->draws.size() > kMaxLatched) {
+			if (a_why.empty())
+				a_why = "more draws than one run latches";
+			SkyDraws::Keep(std::move(run->owners));
+			return nullptr;
+		}
+		// The sky pass's first draw clears the face and its depth, so a face needs one.
+		if (run->draws.empty()) {
+			a_why = "a face without sky draws";
+			SkyDraws::Keep(std::move(run->owners));
+			return nullptr;
+		}
+		return run;
+	}
+
+	bool SubmitFace(std::shared_ptr<Run> a_run)
+	{
+		// What CS's reflection prepasses bound: the header textures, the published inputs and Physical Sky's resources.
+		PublishedInputIds published;
+		if (!ResolveHeaders(*a_run, published) || !ReadInputs(View::Face, published, *a_run)) {
+			FaceFailures().Report("its inputs cannot be read", "see the sky's refusals");
+			SkyDraws::Keep(std::move(a_run->owners));
+			return false;
+		}
+		auto& cloudShadows = globals::features::cloudShadows;
+		for (auto& draw : a_run->draws) {
+			draw.constants.physSky = a_run->physSky;
+			if (draw.occlusion)
+				cloudShadows.NoteGraphCloudLayer(static_cast<int>(a_run->face), draw.layer);
+		}
+		return SkyDraws::Submit(std::move(a_run));
+	}
+
+	void ObserveFace(const FaceView* a_view) { s_observedFace = a_view; }
 
 	void PreflightHooks()
 	{
