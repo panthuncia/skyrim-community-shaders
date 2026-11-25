@@ -485,16 +485,6 @@
 			"description": "default on (T7f item 7): a decal on a first-person entry (an effect's skinned blood decal on the arms, a weapon's BloodLighting) drawn by the first-person forward part as a forward object with its decal group's depth bias, test and blend; 0 it stays the engine's"
 		},
 		{
-			"name": "CS_DCLF_HEAP_FRAME_BLOCKS",
-			"key": "dclf.heap_frame_blocks",
-			"type": "bool",
-			"default": "0",
-			"choices": [],
-			"kind": "diagnostic",
-			"family": "dclf",
-			"description": "1: D3D12 pulled stages read the pass-wide frame blocks by heap index instead of a bound descriptor table (A/B for dclf-bound-constants.md)"
-		},
-		{
 			"name": "CS_DCLF_LATE_POSE",
 			"key": "",
 			"type": "string",
