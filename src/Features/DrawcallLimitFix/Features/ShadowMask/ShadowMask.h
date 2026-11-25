@@ -2,12 +2,13 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Shadow mask, in graph mode: the render graph draws the engine's shadow mask passes in the engine's place.
+// Shadow mask, in graph mode: the render graph draws the shadow mask passes in the engine's place.
 // Each shadow-casting light is one BSUtilityShader screen-quad pass into kSHADOW_MASK. The world's run at Main::Draw (AE 107141,
-// SE 100423) and a menu scene's at UI3DSceneManager::Render (AE 52728, SE 51856). Details are in docs/development/p5/shadow-mask.md.
-// The engine's CPU code runs unchanged. Its function runs with DrawTriShape latched (ShadowMaskCapture.cpp), and an ORG pass at
-// the EngineDraws anchor draws the latched draws in engine order with CS's Utility.hlsl (ShadowMaskDraws.cpp).
-// A draw the family cannot take flushes the latched part, and the engine draws the rest.
+// SE 100423) and a menu scene's at UI3DSceneManager::Render (AE 52728, SE 51856). Details are in docs/development/p5/shadow-mask.md
+// and docs/development/plans/perf2-shadow.md.
+// At each call the draws are computed from the shadow lights (ShadowMaskNative.cpp), the call's own bookkeeping is done
+// (ShadowMaskHooks.cpp), and an ORG pass at the EngineDraws anchor draws them in engine order with CS's Utility.hlsl
+// (ShadowMaskDraws.cpp). The engine's call does not run. A batch the native build cannot compute is the engine's, logged once.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -44,6 +45,9 @@ namespace DCLF::Features::ShadowMask
 
 	inline constexpr std::uint32_t kSlots = 8;
 
+	/** @brief The most draws a run holds: one per shadow light, which the engine caps far below this. */
+	inline constexpr std::uint32_t kMaxDraws = 32;
+
 	using Kind = GpuTextures::ViewKind;
 
 	/** @brief Each slot's declared dimension. The shadow maps (t3, t4, t6) are arrays. */
@@ -52,17 +56,7 @@ namespace DCLF::Features::ShadowMask
 		return a_slot == 3 || a_slot == 4 || a_slot == 6 ? Kind::Texture2DArray : Kind::Texture2D;
 	}
 
-	/**
-	 * @brief Whether the ORG build reads slot a_slot: only the scene depth (t2) and the light's shadow map (t4).
-	 * Other slots latch as null views. Latching the map from t3 left the sun's masks fully in shadow. The engine reads the focus
-	 * stencil (t5) from red, where DXVK's view has zero, so it never samples t6, and the ORG build reads 0 the same way.
-	 */
-	constexpr bool SlotRead(std::uint32_t a_slot) { return a_slot == 2 || a_slot == 4; }
-
-	/** @brief Whether the ORG build reads slot a_slot's sampler. s3 is the filter-0 path's plain sampler. */
-	constexpr bool SamplerRead(std::uint32_t a_slot) { return SlotRead(a_slot) || a_slot == 3; }
-
-	/** @brief The rows of PS b0 (PerTechnique) and PS b2 (PerGeometry) the latch takes (Utility.hlsl's packoffsets). */
+	/** @brief The rows of PS b0 (PerTechnique) and PS b2 (PerGeometry) a draw holds (Utility.hlsl's packoffsets). */
 	inline constexpr std::uint32_t kTechniqueRows = 5;
 	inline constexpr std::uint32_t kGeometryRows = 28;
 
@@ -112,6 +106,30 @@ namespace DCLF::Features::ShadowMask
 		std::uint64_t Hash() const;
 	};
 
+	/** @brief One light's draw: built, left out while its program builds (logged once), or not computable. */
+	enum class PassResult : std::uint8_t
+	{
+		Drawn,
+		LeftOut,
+		Failed,
+	};
+
+	namespace Native
+	{
+		/**
+		 * @brief Render thread, at a view's shadow mask call, after the engine's open technique ended. The draws of every light in the
+		 * view's caster array, in the engine's order, computed from the light, its maps and the camera. a_lights gets the lights.
+		 * False, with a_why, when a light cannot be computed (the engine then draws the batch).
+		 */
+		bool Build(View a_view, Run& a_run, std::vector<RE::BSShadowLight*>& a_lights, std::string& a_why);
+
+		/** @brief FUN_1414f4350: ends the technique the engine left open, as the masks' call does first. */
+		void EndTechnique();
+
+		/** @brief The world's sun cascade map (the map its mask draw binds at t4), or null. */
+		ID3D11ShaderResourceView* SunMap(View a_view, const std::vector<RE::BSShadowLight*>& a_lights);
+	}
+
 	/** @brief The view's name for logs and client ids. */
 	const char* NameOf(View a_view);
 
@@ -134,8 +152,8 @@ namespace DCLF::Features::ShadowMask
 		/** @brief How a_view's client reads the published id a bound slot exports. */
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
 		/** @brief The program for a key, or null when it cannot be built. */
-		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
-		/** @brief Keeps a batch's imports and leases alive when it ran nothing, so the next batches find them. */
+		std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
+		/** @brief Keeps a batch's imports and leases alive when it runs nothing, so the next batches find them. */
 		void Keep(Family::Owners&& a_owners);
 		/** @brief Runs a_run's view at the anchor. False means its draws were not drawn, and that is logged. */
 		bool Submit(std::shared_ptr<Run> a_run);

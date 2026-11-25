@@ -1,5 +1,9 @@
 # P5.13 residue: the shadow mask passes on the render graph
 
+> 2026-11-25: the capture described below (the latch at DrawTriShape, the SetupGeometry watcher, `ShadowMaskCapture.cpp`) is gone.
+> The draws are computed from the shadow lights and the engine's call does not run: [perf2-shadow.md](../plans/perf2-shadow.md).
+> The client, the pass, the published inputs and the shader's ORG build below are unchanged.
+
 The engine's shadow mask passes, the residue census's `RT kSHADOW_MASK DS none` classes (1-2.5 draws a frame in the world, about 1.7 in
 the inventory; [flush.md](flush.md), "DCLF's share"), drawn by ORG through Drawcall Limit Fix's engine draw family helpers
 (`Core/Engine/Family`, render-graph.md "Shared helpers for engine families"). The code is

@@ -1,5 +1,5 @@
 // Shadow mask: the engine's shadow mask passes drawn by the render graph in graph mode.
-// The engine side is ShadowMaskCapture.cpp and the graph side ShadowMaskDraws.cpp.
+// The engine side is ShadowMaskHooks.cpp and ShadowMaskNative.cpp, the graph side ShadowMaskDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 #include "RenderGraph/Engine/Native/Native.h"
