@@ -12,7 +12,6 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
-#include "Utils/SwitchFile.h"
 
 #include <atomic>
 #include <mutex>
@@ -58,7 +57,6 @@ namespace DCLF::Features::Particles::MasterParticles
 		// (UpdateParticleSystemManagerJob 0x1402c7470), so nothing holds the manager's lock while waiting for the gate.
 		std::shared_mutex gate;
 		bool installed = false;
-		Api::SwitchId masterSwitch;  // install
 		bool observing = false;      // install: CS_DCLF_STATS, the observers' report (Lines) is read
 
 		struct Counts
@@ -230,9 +228,6 @@ namespace DCLF::Features::Particles::MasterParticles
 
 	void Preflight()
 	{
-		// Runs before the switch is registered, so read it from the same source the registry uses.
-		if (Util::SwitchFile::Value("CS_DCLF_MASTER_PARTICLES") == "0")
-			return;
 		HookSites::RequireKnown("the particle manager's master removal", SitesKnown());
 		if (SitesKnown())
 			HookSites::RequireCall("the particle manager's master removal (FUN_140e2a520's SetAt of an idle master's slot)", REL::Offset(kRemovalCall).address());
@@ -240,8 +235,7 @@ namespace DCLF::Features::Particles::MasterParticles
 
 	void Install(Api::InstallContext& a_context)
 	{
-		masterSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_MASTER_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero, .description = "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4); 0 they stay the engine's", .after = "CS_DCLF_BILLBOARD_PARTICLES" });
-		if (SwitchValue(masterSwitch) == "0" || installed)
+		if (installed)
 			return;
 		observing = Diagnostics::Observe().stats;
 		if (!SitesKnown()) {
@@ -269,7 +263,7 @@ namespace DCLF::Features::Particles::MasterParticles
 		installed = true;
 		const auto reset = REL::Offset(kResetRemoveAll).address();
 		logger::info(
-			"[DCLF] master particles: on (CS_DCLF_MASTER_PARTICLES, default on): the particle manager's masters are unheld category roots; removal hooked at {:#x}; "
+			"[DCLF] master particles: on: the particle manager's masters are unheld category roots; removal hooked at {:#x}; "
 			"the world reset's remove-all at {:#x} {}",
 			removal, reset, Engine::CallsTo(reset, REL::Offset(kRemoveAll).address()) ? "is the engine's (SceneWriterFramework's detour fires its detaches)" : "is not a call to the remove-all <- FLAG");
 	}
@@ -285,7 +279,7 @@ namespace DCLF::Features::Particles::MasterParticles
 		const std::scoped_lock lock(observedLock);
 		const auto& o = observed;
 		a_text += fmt::format(
-			"[DCLF] master particles (CS_DCLF_MASTER_PARTICLES): {} listed at the last gather ({} at most); {} attaches, {} detaches (the manager's child "
+			"[DCLF] master particles: {} listed at the last gather ({} at most); {} attaches, {} detaches (the manager's child "
 			"edits), {} idle removals hooked, {} gathers; {} left with no event{}{}\n",
 			o.lastListed, o.maxListed, attaches, detaches, removals, gathers, o.unseenLeft, o.unseenLeft ? " <- MASTER SET" : " <- OK",
 			o.firstUnseen.empty() ? std::string() : fmt::format(" (first {})", o.firstUnseen));

@@ -371,16 +371,6 @@
 			"description": "0: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue; unset: on in guest mode, off in native mode (1 turns it on there)"
 		},
 		{
-			"name": "CS_DCLF_BILLBOARD_PARTICLES",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on (T7f item 7): particle systems under NiBillboardNodes (the magic hands' fire cores and embers) drawn by DCLF's particle path like any other (their world and particles are their last update's); 0 they stay the engine's (billboard)"
-		},
-		{
 			"name": "CS_DCLF_CAPTURE",
 			"key": "",
 			"type": "string",
@@ -483,16 +473,6 @@
 			"kind": "feature",
 			"family": "dclf",
 			"description": "0: the engine's LOD swaps ungated (T6b5: by default an object or terrain LOD swap keeps the outgoing level shown, and the incoming hidden, until DCLF's claims cover the incoming)"
-		},
-		{
-			"name": "CS_DCLF_MASTER_PARTICLES",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4); 0 they stay the engine's"
 		},
 		{
 			"name": "CS_DCLF_PARITY",

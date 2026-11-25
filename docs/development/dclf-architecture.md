@@ -2308,7 +2308,7 @@ Effect-shaded `NiParticleSystem`s are drawn in the forward sort (Features/Partic
 -   **Draw**: `Effect.hlsl` `PARTICLES` under `DCLF_PARTICLE_PULL`: no vertex input but `SV_VertexID`, corners pulled
     (`DCLFParticleInput`). A forward object culled with the snapshot's bound and sorted by its centre.
 -   First-person particle members are expanded faced to the first-person eye.
--   **Master particle systems** (`CS_DCLF_MASTER_PARTICLES`, default on; `Features/Particles/MasterParticles.cpp`; roadmap 1.4):
+-   **Master particle systems** (`Features/Particles/MasterParticles.cpp`; roadmap 1.4):
     the particle manager's `BSMasterParticleSystem`s are parentless children of its array. They are unheld roots
     (`Api::UnheldRootsContribution`): category nodes filed under themselves, held by key alone, because the engine removes an
     idle master once its count is below 3. Their exits are events: the manager's child edits and remove-all through
@@ -2319,7 +2319,7 @@ Effect-shaded `NiParticleSystem`s are drawn in the forward sort (Features/Partic
 ### Billboards and aligned particles
 
 Effect meshes under one billboard node are turned per draw on the GPU (Features/Billboards; `Core/Gpu/PlacementRows/BillboardRow.h`;
-`CS_DCLF_BILLBOARD_PARTICLES` for particle systems under billboard nodes).
+particle systems under billboard nodes take the particle path).
 -   **Classification**: an effect `BSTriShape` without a skin with exactly one billboard node between it and its category node,
     first-person entries included. The face mode is read at AE's `+0x128` (`PlacementRows::BillboardFaceMode`), not CommonLib's
     `NiBillboardNode::userFlags` (the wrong offset in this build). The key holds `mode + 1` in raster bits 21-23
@@ -3243,8 +3243,7 @@ keeps a subset of the GPU's draws. No HZB: more overdraw in colour, which draws 
 ## What the engine still draws
 
 DCLF claims whole objects in the phases it draws; the engine keeps:
--   **By class**: water, sky, grass, precipitation, the particle manager's master particle systems (torches, candles, street mist,
-    blood impact sprays; the engine's only with `CS_DCLF_MASTER_PARTICLES=0`), and the effect variants not ported (sky objects,
+-   **By class**: water, sky, grass, precipitation, and the effect variants not ported (sky objects,
     wireframe, the effect Lighting variant without Light Limit Fix, projected UV, unrecognised blend pairs, membrane, strip and mesh
     particle systems, skins or nested billboards under billboards, Lighting leaves under billboards).
 -   **By state**: an object not yet a member (the engine draws it until the publication that claims it is installed), a pair a
