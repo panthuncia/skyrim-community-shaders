@@ -50,7 +50,8 @@ namespace NativePost
 		std::uintptr_t (*portalFog)(std::int32_t) = nullptr;  // 105637: the portal graph's fog property, or null
 		// BSGraphics::State's camera data for a camera and jitter flag (77507), and the State object.
 		std::uintptr_t (*cameraData)(void*, const RE::NiCamera*, bool) = nullptr;
-		// BSShaderManager::State (390951): a pointer to it. Its sun light (+0x210) and the light the sparkles may take (+0x200).
+		// BSShaderManager::State (390951). Its first word is shadowSceneNode[0], whose sunShadowDirLight (+0x210) and sunLight (+0x200)
+		// the rows read. CommonLib's State::GetSingleton() returns the same object.
 		const std::uintptr_t* shaderState = nullptr;
 	};
 
@@ -385,8 +386,8 @@ namespace NativePost
 		}
 		SetId(rows, 3, Field<float>(camera, 0x160), Field<float>(camera, 0x164));
 		// The sun's direction: its light's world rotation, first column, normalised (zero when shorter than kSunLength).
-		const auto shaderState = *w.shaderState;
-		if (const auto sun = Field<std::uintptr_t>(shaderState, 0x210)) {
+		const auto shadowSceneNode = *w.shaderState;  // State::shadowSceneNode[0]
+		if (const auto sun = Field<std::uintptr_t>(shadowSceneNode, 0x210)) {
 			const auto light = Field<std::uintptr_t>(sun, 0x48);
 			const float x = Field<float>(light, 0x7c), y = Field<float>(light, 0x88), z = Field<float>(light, 0x94);
 			const float length = std::sqrt(y * y + x * x + z * z);
@@ -410,7 +411,7 @@ namespace NativePost
 			break;
 		case 2:
 			{
-				const auto light = Field<std::uintptr_t>(Field<std::uintptr_t>(shaderState, 0x200), 0x48);
+				const auto light = Field<std::uintptr_t>(Field<std::uintptr_t>(shadowSceneNode, 0x200), 0x48);
 				colour = { Field<float>(light, 0x11c), Field<float>(light, 0x120), Field<float>(light, 0x124) };
 				break;
 			}
