@@ -1,10 +1,10 @@
 // The water's two DCLF epochs (docs/development/plans/dclf-water-indirect.md, section 3.5): water.mask at the engine's mask batch
 // and water.surface at its water batch. Each shares main.colour's shape and draws one deferred range of what this frame's colour
 // commit culled (Core/Render/Passes/DeferredRanges.cpp).
-// - The triggers are WaterCapture.cpp's batch thunks. Each submits its epoch before the engine runs the batch, so the latch path
-//   still draws the water DCLF does not claim right after it, at the engine's point.
+// - The triggers are WaterBatches.cpp's batch thunks. Each submits its epoch before the engine runs the batch, so the batch hook
+//   draws the water DCLF does not claim right after it, at the engine's point.
 // - The recipe ends CS's open stage just before each epoch and opens the next (RecipeTable.h: water, post-water, sun water).
-// - Geometry group 10's batch, just before the water batch, triggers nothing. Its water stays the latch path's, before DCLF's surface.
+// - Geometry group 10's batch, just before the water batch, triggers no epoch. Its water (the wading surface) is the batch hook's, before DCLF's surface.
 
 // Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"

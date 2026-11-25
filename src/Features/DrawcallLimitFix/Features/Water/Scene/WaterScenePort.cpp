@@ -207,7 +207,7 @@ namespace DCLF::Features::Water::WaterScene
 			out.pixel = passes.lookupDescriptor;
 			out.familyKeyBits = static_cast<std::uint8_t>(StencilIndexOf(c.stencilBit));
 			// Plain water is drawn by DCLF only with the claim switch and while its epochs draw it. The CPU-driven pipeline has no
-			// water range, so the input is off there and the latch path keeps the water.
+			// water range, so the input is off there and the batch hooks keep the water.
 			a_derivation.reason = Claims() && Extensions::ClassifyInputOn(Indirect::DrawnInput()) ? Ineligible::None : Ineligible::WaterUnclaimed;
 		}
 

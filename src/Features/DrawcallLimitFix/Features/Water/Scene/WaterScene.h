@@ -2,7 +2,7 @@
 
 // Water as DCLF scene objects (docs/development/plans/dclf-water-indirect.md, phase 1), behind CS_DCLF_WATER.
 // With 0 nothing here is registered. With 1 water shapes are tracked under the water roots, classified by the water port and
-// counted by a census, but never claimed: every water shape stays the latch path's.
+// counted by a census, but never claimed: every water shape stays the batch hooks'.
 // The port's pure functions are Features/Water/Port. This folder registers them with Core:
 // - WaterSceneFeature.cpp: the switch, ObjectClass::Water and its category roots.
 // - WaterScenePort.cpp: the material port for BSWaterShaderProperty and BSWaterShaderMaterial.

@@ -1,8 +1,7 @@
 // The water census: every water shape DCLF tracks, how the port classified it, and Core's verdict now.
 // The port's derive queues each classification. The census component takes the queue at the end of each walk, files each tracked
 // shape by where it hangs (WaterLOD, the water system's root, or a cell's category nodes) and reads Core's verdict back. A report
-// line, at the report schedule, counts them. Each shape is also logged once, so a run can be matched with the latch path's census
-// (CS_DCLF_WATER_PARITY) by name. Phase 1's gate is that both list the same shapes.
+// line, at the report schedule, counts them. Each shape is also logged once.
 
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"

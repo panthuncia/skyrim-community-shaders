@@ -902,17 +902,7 @@
 			"choices": [],
 			"kind": "feature",
 			"family": "dclf",
-			"description": "0: nothing of it is registered, and the latch path draws all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the latch path still draws them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the latch path's (phases 2 and 3)"
-		},
-		{
-			"name": "CS_DCLF_WATER_PARITY",
-			"key": "",
-			"type": "bool",
-			"default": "0",
-			"choices": [],
-			"kind": "parity",
-			"family": "dclf",
-			"description": "1: every water draw the latch path takes is checked against the water port (VS and PS b0-b2 bit for bit, its pass id), and a census logs where drawn water hangs in the scene graph (dclf-water-indirect.md, Phase 0)"
+			"description": "0: nothing of it is registered, and the batch hooks draw all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the batch hooks still draw them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs in GPU-driven frames, the rest staying the batch hooks' (phases 2 and 3)"
 		},
 		{
 			"name": "CS_DISABLE_FEATURES",

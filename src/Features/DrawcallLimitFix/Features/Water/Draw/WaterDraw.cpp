@@ -207,7 +207,7 @@ namespace DCLF::Features::Water::Indirect
 			.name = "Water",
 			.keyName = "water",
 			.sourcePath = "Data/Shaders/Water.hlsl",
-			.nativeNote = "water stays the latch path's",
+			.nativeNote = "water stays the batch hooks'",
 			.stages = Api::ProgramStages::VertexPixel,
 			.build = Api::ProgramBuild::DeferredRanges,
 			// The material values are the water material pool's, so the rows' blocks are not read.
@@ -232,7 +232,7 @@ namespace DCLF::Features::Water::Indirect
 			.variant = &SurfaceVariant,
 			.state = &SurfaceState });
 		// The engine's targets are graph textures written by CS passes, published under their declared names. Their D3D11 views hold
-		// nothing, so each frame texture reads its graph resource, as the latch path reads them by published id.
+		// nothing, so each frame texture reads its graph resource, as the batch hooks read them by published id.
 		a_context.RegisterFrameTexture({ .name = "water refraction",
 			.textureRegister = kRefractionRegister,
 			.view = &RefractionView,

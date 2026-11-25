@@ -4,7 +4,7 @@
 // ranges, the mask (the Stencil technique) and the surface (techniques 0, 9 and 11). Water.hlsl's DCLF_BINDLESS path draws both.
 // - The family's keys come from the water port (Features/Water/Scene). Each key gets one plain pipeline per range, with the engine's
 //   blend, depth and stencil state (DrawPipelines' TryRequestDeferred and BuildDeferred).
-// - A key DCLF cannot draw in both ranges fails its build, so its objects stay the latch path's.
+// - A key DCLF cannot draw in both ranges fails its build, so its objects stay the batch hooks'.
 // - The ranges are culled in the colour segment and drawn by the water.mask and water.surface epochs (WaterEpochs.cpp), triggered
 //   at the engine's two water batches. Each range picks its targets by frame: the normals mask or its swap, kMAIN or kRAW_WATER.
 

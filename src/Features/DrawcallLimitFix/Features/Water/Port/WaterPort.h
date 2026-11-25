@@ -5,7 +5,7 @@
 // BSWaterShaderProperty::GetRenderPasses (SE 100238, AE 106945) as pure functions, with the rewrites CS's own hooks apply.
 // The outputs are split by scope as docs/development/plans/dclf-water-indirect.md section 2.1 lists them: a material row,
 // an object row, a frame row, and the object-by-frame geometry rows. Assemble puts them in the latch's layout (Water.h DrawConstants).
-// Phase 0 checks them against the latch path (WaterParity.cpp). Later phases feed DCLF's rows from them.
+// DCLF's water rows and the batch hooks' computed draws (WaterNative.cpp) both come from them.
 // The captures read the engine on the render thread. Everything else is pure.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"

@@ -6,11 +6,10 @@
 
 // Water, in graph mode: the render graph draws the main camera's BSWaterShader passes in the engine's place.
 // That covers the water mask (Stencil technique) and the water itself. Details are in docs/development/p5/water.md.
-// The engine's CPU code runs unchanged. Each water batch runs with DrawTriShape latched, so every pass still goes through the
-// engine's setup and other mods' hooks, and the draw is recorded instead of issued (WaterCapture.cpp). An ORG pass at the
-// EngineDraws anchor then draws the batch in the engine's order with CS's Water.hlsl (WaterDraws.cpp).
-// The water displacement simulation stays the engine's. A draw the family cannot take flushes the latched part, and the engine
-// draws the rest of the batch.
+// DCLF's scene path draws the water it claims in its water epochs. The rest (the wading displacement mesh, and water the scene path
+// refuses) is computed at each water batch from the passes the engine registered and the water port's constants (WaterNative.cpp),
+// and an ORG pass at the EngineDraws anchor draws it with CS's Water.hlsl (WaterDraws.cpp). Its passes are taken out of the batch,
+// so the engine draws none of them. The water displacement simulation stays the engine's.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"

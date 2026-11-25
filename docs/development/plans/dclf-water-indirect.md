@@ -603,3 +603,32 @@ Written with the epochs' code (branch `dclf/water-epochs`, 2026-11-21). Nothing 
   (Unified Water's `TESWaterSystem_UpdateDisplacementMeshPosition` hook is the mover event). Underwater (technique 8) and
   interiors are not yet checked.
 
+## 13. The latch path replaced by computed draws (2026-11-24)
+
+The capture path (DrawTriShape latched inside each water batch, the engine's constants and bindings copied per draw) is deleted.
+What DCLF's scene path does not claim is now computed at each water batch from the passes the engine registered, following the
+sky's pattern (dclf-native-sky.md):
+
+- **Where hint 13 goes.** The main registration (`FUN_1414b2330`) puts accumulation hint 13 into geometry group 10, so the wading
+  surface draws in group 10's batch (`kGroup10Batch`), just before the water batch. Its mask pass (0x5C00006F/70, hint 0) is in the
+  mask batch, after the plain masks. Both batches were already hooked.
+- **The code.** `WaterBatches.cpp` holds the three batch hooks. Each submits DCLF's epoch for claimed water, then
+  `WaterNative.cpp` walks the batch renderer's sorted technique list (+0x58), computes a draw per water pass and takes the water's
+  pass groups out of the batch, so the engine's call draws only what is not water (group 10's Lighting cross-fades). The draws go to
+  the same ORG pass as before (`WaterDraws.cpp`).
+- **What a draw is made of.** The constants are the water port's (`Port::Assemble`), written through the CS shaders' constant tables
+  as the engine writes them. The state follows SetupTechnique (0x1414e0df0: no culling, additive light techniques, write mode 9 for
+  0x5C00006B..70) and SetupGeometry (0x1414e1890): the wading mask tests and increments on the water-type bit (modes 0x20-0x26, ref
+  0xFF, depth 1, bias 1); a wading surface draws where that happened (modes 0xE-0x14, ref bit | 1, depth 1, bias 1); a plain mask
+  writes the bit (modes 2-9, depth 3); a plain surface tests bit 0 (mode 30, ref 1, depth 1). The textures are SetupGeometry's
+  bindings, with the cubemap fix's interior rule. t2 for a wading pass is the render target the global at AE 415235 names
+  (kWATER_DISPLACEMENT or its swap). No SE id is known for it, so on SE a batch with a wading pass reaches the engine. Light Limit
+  Fix's strict lights are its water values: no lights, the room index, the first-person flag.
+- **Checked before the deletion.** An observe mode compared every computed draw with the latched one at the river: 13,343 draws
+  matched in programs, states, stencil references, targets, geometry, viewports, textures, samplers, descriptors and constants.
+  Two constants differed on every draw, and the deleted parity observer reported the same two: ReflectionColor.w (the flow
+  animation's timer) and FresnelRI.x. The latch held a timer from another clock (28800 + t against timer[0]'s 46800 + t) and 0 for
+  FresnelRI.x, values SetupMaterial does not write for that draw. The computed draws use SetupMaterial's values, as DCLF's claimed
+  water already does, so all water now animates on one timer.
+- **Not checked.** Under water (technique 8) and interiors: the shot configs for them still need positions that work.
+- **Removed with it:** `CS_DCLF_WATER_PARITY`, the parity observer and its census (`Port/WaterParity.cpp`, `Port/WaterCensus.cpp`).
