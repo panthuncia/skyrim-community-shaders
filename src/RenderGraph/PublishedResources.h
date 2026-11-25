@@ -10,6 +10,7 @@ struct ID3D11ShaderResourceView;
 
 namespace org
 {
+	class IVersionedResource;
 	class Resource;
 }
 
@@ -92,4 +93,12 @@ namespace PublishedResources
 	std::string DescribeIndex(std::string_view a_id);
 	/** @brief Whether a_view is a published resource's export. */
 	bool IsExport(const ID3D11ShaderResourceView* a_view);
+
+	/** @brief Changes with every publish that changes an entry, and every stored snapshot. A lookup's answer holds while this and the
+	*  relocation journal's head stay the same, and for a versioned id while its slot's CurrentNumber does. Render thread. */
+	std::uint64_t Serial();
+
+	/** @brief a_id's versioned slot, or null for a plain resource or an unknown id. An entry keeps its slot for the process, so the
+	*  pointer stays valid. Render thread. */
+	const org::IVersionedResource* VersionedSlotOf(std::string_view a_id);
 }
