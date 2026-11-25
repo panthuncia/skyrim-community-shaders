@@ -60,7 +60,6 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_CPU_RECORD` | `indirect` on every vendor | `serial`: the CS thread records each draw. `indirect`: the cull jobs write draws (needs pulled colour, 0.21 ms of GPU time on an RTX 5080). Live: `dclf:cpu-record=indirect\|serial`. |
 | `CS_DCLF_CPU_BATCH` | 4096 | The CPU pipeline's batch lanes, rounded up to a multiple of 8. Live: `dclf:cpu-batch=`. |
 | `CS_DCLF_PLAIN_SNOW_SPARKLE` | on (unless 1) | `0`: a snow layer with a plain material (vanilla glaciers and ice) draws without sparkle instead of the Snow class's default. See [the engine bugs](#in-the-engine). |
-| `CS_DCLF_LOD_GATES` | on (unless 0) | `0`: the engine's LOD swaps are ungated. By default a swap keeps the outgoing level shown, and the incoming hidden, until DCLF's claims cover the incoming. |
 | `CS_DCLF_TREE_LIST_ALL` | **off** | `1`: the tree manager's list loop gets DCLF's verdict for every `BSTreeNode` DCLF lists; off: for the stood-in trees alone. |
 | `CS_DCLF_EFFECT_RIGID_SKINS` | **off** | `1`: effect meshes with a skin instance whose pass has no Skinned bit (the property without `kSkinned`) are DCLF's, each partition drawn with the unskinned vertex stage and the geometry's world, as the engine draws them; `0` they stay the engine's (`effect-variant (skinned)`). |
 | `CS_DCLF_TEX_STREAM` | on (unless 0) | `0`: the game's textures stay whole, not shells with streamed mip windows. Read at the first texture load ([texture-streaming.md](./texture-streaming.md)). |

@@ -2642,7 +2642,7 @@ keeps on the node. One hidden without a visible full tree leaves a hole.
 #### LOD gates: the scene side
 
 The engine's object and terrain LOD swaps (Upgrade, Downgrade, InitialLoad `Func2`s) are held until DCLF's claims cover the incoming
-level (`Features/Lod/LodGates.h`, `LodGateComponent.{h,cpp}`, `LodGateAdoption.cpp`; `CS_DCLF_LOD_GATES`). Otherwise a swap shows
+level (`Features/Lod/LodGates.h`, `LodGateComponent.{h,cpp}`, `LodGateAdoption.cpp`). Otherwise a swap shows
 the incoming blocks for the frames before DCLF claims them, and the engine draws them meanwhile.
 -   **The engine side** hides a swap's incoming blocks (app-cull) before their attach and keeps them hidden by vetoing the engine's
     show stores (the hidden-store stubs' `Api::ShowVeto`); outgoing blocks are stolen from their quadtree nodes inside

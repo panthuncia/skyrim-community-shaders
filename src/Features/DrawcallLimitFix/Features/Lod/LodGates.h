@@ -33,8 +33,8 @@ namespace DCLF::Features::Lod::LodGates
 	void NoteRegistered(Api::EngineChannelId a_channel, std::uint32_t a_hiddenSite);
 
 	/** @brief Installs the thunks and detours once. */
-	void Install(Api::SwitchId a_switch);
-	/** @brief The switch is on and Install patched every site. */
+	void Install();
+	/** @brief Install patched every site. */
 	bool Enabled();
 	/** @brief Idempotent. */
 	void InstallDetours();

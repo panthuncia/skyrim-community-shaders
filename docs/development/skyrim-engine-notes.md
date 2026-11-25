@@ -2396,7 +2396,7 @@ never the main thread, in motion).
 ## LOD swaps and their gates
 
 Ghidra, AE 1.6.1170 (2026-10-11); the bytes of every site DCLF patches read from the binary. DCLF's side is
-`Engine/LodGates.{h,cpp}` (T6b5, `CS_DCLF_LOD_GATES`).
+`Engine/LodGates.{h,cpp}` (T6b5).
 
 **The quadtree node** (`0x50` bytes): `+0x00` the manager, `+0x08` the terrain block handle, `+0x10` the object block handle,
 `+0x18` the tree handle, `+0x20`/`+0x28` the map's fixed-level terrain/object handles, `+0x30` the children (four contiguous

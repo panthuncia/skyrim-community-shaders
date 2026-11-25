@@ -445,16 +445,6 @@
 			"description": "0: the player's parts Improved Camera hides after the shadow maps are not looked for; 1: they are looked for in first person without the plugin too"
 		},
 		{
-			"name": "CS_DCLF_LOD_GATES",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "0: the engine's LOD swaps ungated (T6b5: by default an object or terrain LOD swap keeps the outgoing level shown, and the incoming hidden, until DCLF's claims cover the incoming)"
-		},
-		{
 			"name": "CS_DCLF_PARITY",
 			"key": "dclf.parity",
 			"type": "bool",
