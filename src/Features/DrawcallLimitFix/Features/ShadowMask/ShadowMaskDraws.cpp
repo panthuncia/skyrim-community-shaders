@@ -44,8 +44,6 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 	namespace
 	{
 		constexpr const char* kShader = "Utility.hlsl";
-		// The most draws a run latches (ShadowMaskCapture's kMaxLatched).
-		constexpr std::uint32_t kMaxDraws = 32;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
@@ -323,9 +321,9 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
-	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
+	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building)
 	{
-		return GetState().programs.Get(a_key, a_shader);
+		return GetState().programs.Get(a_key, a_shader, a_building);
 	}
 
 	void Keep(Family::Owners&& a_owners)
