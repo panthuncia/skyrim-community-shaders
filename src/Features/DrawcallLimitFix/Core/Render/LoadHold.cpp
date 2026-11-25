@@ -4,6 +4,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
@@ -40,9 +41,11 @@ namespace DCLF::LoadHold
 		constexpr std::uint32_t kSettledFrames = 2;
 		constexpr std::uint32_t kJoinFrames = 2;
 		constexpr std::uint32_t kQuietFrames = 8;
-		// No progress for this long, or a hold this long, ends it and logs what still waits.
+		// No progress for this long ends the hold and logs what still waits. A hold has no time cap: a cold shader cache can build for
+		// minutes after a feature change, and releasing the hold before the shadow epoch can record leaves it to the engine.
 		constexpr double kStallMs = 5000.0;
-		constexpr double kCapMs = 60000.0;
+		// While builds are in flight, the time without a finished build that counts as a stall. A cold build can take seconds.
+		constexpr double kBuildStallMs = 30000.0;
 
 		std::atomic<HoldState> state{ HoldState::Idle };
 		std::atomic<bool> withMenu{ false };
@@ -77,7 +80,7 @@ namespace DCLF::LoadHold
 			ReportHold(a_state);
 			return previous;
 		}
-		// A re-entry that ended at a stall or the cap does not start again until a frame without its condition.
+		// A re-entry that ended at a stall does not start again until a frame without its condition.
 		bool reentryBlocked = false;
 		bool reentryThisFrame = false;
 
@@ -502,22 +505,26 @@ namespace DCLF::LoadHold
 		std::uint32_t waits = 0;
 		hold.settled = Settled(waits) ? hold.settled + 1 : 0;
 		// A cold shader cache builds for many seconds while the counts stand still, so every finished build counts as progress.
+		// A pipeline waits for its SPIR-V stages first, so a finished shader program counts too.
 		const auto pipelines = DrawPipelines::Get().GetStats();
-		const std::uint64_t builds = std::uint64_t(pipelines.ready) + pipelines.failed + pipelines.shadowReady + pipelines.shadowFailed;
-		// A build still queued counts too: a cold driver cache can take seconds per pipeline, and the shadow epoch cannot record
-		// without its pipelines. The cap still ends a hold whose builds never finish.
-		if (builds != std::exchange(hold.builds, builds) || pipelines.buildsInFlight > 0)
+		const auto programs = ShaderPrograms::Get().GetStats();
+		const std::uint64_t programsDone = std::uint64_t(programs.ready) + programs.failed + programs.shadowReady + programs.shadowFailed;
+		const std::uint64_t builds =
+			std::uint64_t(pipelines.ready) + pipelines.failed + pipelines.shadowReady + pipelines.shadowFailed + programsDone;
+		const bool compiling = pipelines.buildsInFlight > 0 || std::uint64_t(programs.requested) + programs.shadowRequested > programsDone;
+		if (builds != std::exchange(hold.builds, builds))
 			hold.progress = std::chrono::steady_clock::now();
 		if (waits == ~0u || waits < hold.best) {
 			hold.best = waits == ~0u ? hold.best : waits;
 			hold.progress = std::chrono::steady_clock::now();
 		}
+		// The shadow epoch cannot record without its pipelines, so builds in flight get longer before they count as a stall.
+		// A build that never finishes still ends the hold.
+		const double stallMs = compiling ? kBuildStallMs : kStallMs;
 		if (hold.settled >= kSettledFrames)
 			Release("settled", false);
-		else if (MillisecondsSince(hold.start) >= kCapMs)
-			Release("at the cap", true);
-		else if (MillisecondsSince(hold.progress) >= kStallMs)
-			Release("no progress", true);
+		else if (MillisecondsSince(hold.progress) >= stallMs)
+			Release(compiling ? "no build finished" : "no progress", true);
 		hold.heldThisFrame = false;
 	}
 
