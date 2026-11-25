@@ -1,0 +1,14 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+    "name": "cs-test-lab",
+    "version-string": "1.0.0",
+    "dependencies": ["detours"],
+    "overrides": [
+        {
+            "name": "detours",
+            "version": "4.0.1",
+            "port-version": 8
+        }
+    ],
+    "builtin-baseline": "dddca6fa87f177e0678e2545c4b4636a44aa05bd"
+}

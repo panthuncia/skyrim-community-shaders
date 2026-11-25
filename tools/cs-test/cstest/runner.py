@@ -1,31 +1,34 @@
-"""cs-test run: one game session from a resolved config, with every change journaled and undone."""
+"""cs-test run: one game session from a resolved config, in a lab slot (lab.py). Nothing outside the slot changes."""
 
-import atexit
 import copy
 import datetime
 import json
+import os
 import shutil
 import signal
-import os
-import subprocess
 import time
 from pathlib import Path
 
-from . import collect, journal as journal_mod, mo2, presentmon, procs
+from . import collect, lab as lab_mod, locks, mo2, presentmon, procs
 from .config import diff, resolve
 from .outcome import Final, Watcher, frames_after, read_status, summary_line
-from .paths import CONFIG_DIR, GAME_EXE, LEGACY_ENV_FILE, LOG_FILE, MO2_EXE, STATUS_FILE, TEST_FILE
+from .paths import CONFIG_DIR, LOG_FILE, STATUS_FILE
 from .schema import ConfigError, load_schema
 from .stage import load_manifest
 
-# SSE Display Tweaks reads this file after its own ini; game.uncapped writes it for one run.
+# SSE Display Tweaks reads this file after its own ini; game.uncapped writes it into the slot for one run.
 DISPLAY_TWEAKS_FILE = "SSEDisplayTweaks_custom.ini"
-# [prefs_ini] edits this file (the one the game reads, prefs_ini_path) for one run.
-PREFS_INI = "SkyrimPrefs.ini"
 DISPLAY_TWEAKS_UNCAPPED = "[Render]\nEnableVSync=false\nEnableTearing=true\nFramerateLimit=0\n"
+SETTINGS_USER = Path("SKSE/Plugins/CommunityShaders/SettingsUser.json")
+STEAM_EXE = "steam.exe"
+CRASH_DUMP_EXE = "CommunityShadersCrashDump.exe"
 
 POLL_S = 1.0
 EXIT_WAIT_S = 15  # how long a game that reported its outcome gets to exit by itself
+
+# CS_TEST_BACKGROUND=1: an exclusive run, the only kind that may take the focus, never focuses the game or moves the mouse
+# either. Other runs never do: several games run at once, each kept running unfocused (bAlwaysActive=1 in the slot's Skyrim.ini).
+BACKGROUND = os.environ.get("CS_TEST_BACKGROUND") == "1"
 
 
 class RunError(Exception):
@@ -80,23 +83,15 @@ def _install_signals():
     signal.signal(signal.SIGINT, handler)
 
 
-def launch(paths):
-    return subprocess.Popen([str(paths.mo2 / MO2_EXE), "-p", paths.profile, "moshortcut://:SKSE"], cwd=str(paths.mo2),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-
-
-# CS_TEST_BACKGROUND=1: never focus the game or move the mouse, so someone can use the computer during a run. The game must be
-# set to keep running unfocused (bAlwaysActive=1 in Skyrim.ini).
-BACKGROUND = os.environ.get("CS_TEST_BACKGROUND") == "1"
-
-
-def watch(paths, contract, harness, log=print, clock=time.monotonic, sleep=time.sleep):
-    """Watches the status file and the game until the run is over. Returns (Final, last status)."""
+def watch(slot, contract, harness, gate=None, background=True, log=print, clock=time.monotonic, sleep=time.sleep):
+    """Watches the slot's status file and game until the run is over. Returns (Final, last status, the game PIDs seen)."""
     watcher = Watcher(contract, harness)
-    status_path = paths.skse / STATUS_FILE
+    status_path = slot.skse / STATUS_FILE
     start = clock()
+    seen = set()
     try:
-        return _watch_loop(paths, contract, harness, log, clock, sleep, watcher, status_path, start)
+        final, status = _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path, start, gate, background, seen)
+        return final, status, sorted(seen)
     finally:
         # Stopped before the game is killed. The samples stay for the result.
         if watch.sampler:
@@ -122,19 +117,22 @@ def _start_presentmon(contract, harness, games, log):
         harness["presentmon"] = False
 
 
-def _watch_loop(paths, contract, harness, log, clock, sleep, watcher, status_path, start):
+def _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path, start, gate, background, seen):
     status = None
     focused = False
     last_phase = None
     while True:
         sleep(POLL_S)
         t = clock() - start
-        games = procs.find(GAME_EXE)
+        games = procs.pids_of(slot.exe)
+        seen.update(games)
+        if gate:
+            gate.check(games, watcher.game_seen)
         _start_presentmon(contract, harness, games, log)
         fresh = read_status(status_path, contract["run_id"])
         if fresh is not None:
             status = fresh
-        if games and not focused and not BACKGROUND and procs.focus(games[0]):
+        if games and not focused and not background and procs.focus(games[0]):
             focused = True
         if status is not None and status.get("phase") != last_phase:
             last_phase = status.get("phase")
@@ -175,9 +173,6 @@ def check_expectations(contract, run_dir, status, final):
     return final
 
 
-SETTINGS_USER = Path("SKSE/Plugins/CommunityShaders/SettingsUser.json")
-
-
 def deep_merge(into, layer):
     """Tables merge key by key, recursively; everything else is replaced."""
     for key, value in layer.items():
@@ -188,34 +183,23 @@ def deep_merge(into, layer):
     return into
 
 
-def write_saved_settings(paths, stage, run_id, saved, journal, log=print):
-    """[saved_settings]: merged into the saved settings for this run. The copy in MO2's overwrite folder wins over every mod, so it
-    goes there. An existing file is set aside and put back by the journal; a new one is deleted."""
-    target = paths.overwrite / SETTINGS_USER
+def write_saved_settings(slot, saved, log=print):
+    """[saved_settings]: merged into the slot's copy of the saved settings for this run. That copy is the one MO2 would serve
+    (overwrite's, else the staged build's). The next run's slot build puts it back."""
+    target = slot.data / SETTINGS_USER
+    settings = {}
     if target.exists():
         try:
             settings = json.loads(target.read_text(encoding="utf-8-sig"))
         except ValueError as error:
-            raise RunError(f"{target} does not parse ({error}): fix it, saved_settings will not overwrite it") from error
+            raise RunError(f"{target} does not parse ({error}): fix the file it comes from; saved_settings will not overwrite it") from error
         if not isinstance(settings, dict):
-            raise RunError(f"{target} is not a JSON object: fix it, saved_settings will not overwrite it")
-        backup = paths.root / "aside" / f"{run_id}-SettingsUser.json"
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(target, backup)
-        journal.add({"do": "restore", "path": str(target), "backup": str(backup)})
-    else:
-        settings = {}
-        staged = paths.mods / mo2.mod_for(paths, stage) / SETTINGS_USER
-        if staged.exists():
-            try:
-                settings = json.loads(staged.read_text(encoding="utf-8-sig"))
-            except ValueError as error:
-                raise RunError(f"{staged} does not parse ({error})") from error
-        journal.add({"do": "file", "path": str(target)})
-        target.parent.mkdir(parents=True, exist_ok=True)
+            raise RunError(f"{target} is not a JSON object: fix the file it comes from; saved_settings will not overwrite it")
+        target.unlink()
+    target.parent.mkdir(parents=True, exist_ok=True)
     deep_merge(settings, copy.deepcopy(saved))
     target.write_text(json.dumps(settings, indent=4), encoding="utf-8")
-    log(f"Saved settings: {', '.join(saved)} written into {target} for this run")
+    log(f"Saved settings: {', '.join(saved)} written into slot {slot.number}'s {SETTINGS_USER.name} for this run")
 
 
 def ini_text(value):
@@ -252,55 +236,50 @@ def set_ini_values(text, values):
     return "\n".join(lines) + "\n"
 
 
-def documents_dir():
-    """The user's Documents folder, where the game keeps its INI files when the MO2 profile has none of its own."""
+def mods_for_run(lab, harness, log=print):
+    """The enabled mods, those without the run's mods_off, and the plugin files of the mods it turns off."""
+    mods = lab.enabled_mods()
+    off = []
+    for mod in harness["mods_off"]:
+        if mod in mods:
+            off.append(mod)
+        else:
+            log(f"warning: no enabled mod '{mod}' in the mod list")
+    plugins_off = [p for mod in off for p in lab_mod.plugins_of(lab.paths.mods / mod)]
+    return mods, [m for m in mods if m not in off], plugins_off
+
+
+def prepare_slot(paths, lab, slot, stage, stage_mod, contract, harness, command, log=print):
+    """The slot's game folder, its run-only files, its shader cache and its home. Returns the save it loads."""
+    all_mods, mods, plugins_off = mods_for_run(lab, harness, log)
+    base = lab.lock("base", command)
+    base.acquire(900, log=log, poll_s=0.5)
     try:
-        import ctypes
-        from ctypes import wintypes
-
-        class GUID(ctypes.Structure):
-            _fields_ = [("a", wintypes.DWORD), ("b", wintypes.WORD), ("c", wintypes.WORD), ("d", ctypes.c_ubyte * 8)]
-
-        # FOLDERID_Documents. It follows a moved or OneDrive Documents folder.
-        folder = GUID(0xFDD39AD0, 0x238F, 0x46AF, (ctypes.c_ubyte * 8)(0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7))
-        out = ctypes.c_wchar_p()
-        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(out)) == 0:
-            path = Path(out.value)
-            ctypes.windll.ole32.CoTaskMemFree(out)
-            return path
-    except (AttributeError, OSError):
-        pass
-    return Path.home() / "Documents"
-
-
-def prefs_ini_path(paths):
-    """The SkyrimPrefs.ini the game reads: the profile's own with LocalSettings=true in its settings.ini, else the one in Documents."""
-    profile = paths.mo2 / "profiles" / paths.profile
-    settings = profile / "settings.ini"
-    text = settings.read_text(encoding="latin-1") if settings.exists() else ""
-    local = any(line.strip().lower().replace(" ", "") == "localsettings=true" for line in text.splitlines())
-    if local:
-        return profile / PREFS_INI
-    return documents_dir() / "My Games" / "Skyrim Special Edition" / PREFS_INI
+        lab.refresh_mirrors(all_mods, log=log)
+        stage_lock = lab.lock(f"stage-{stage}", command)
+        stage_lock.acquire(900, log=log, poll_s=0.5)
+        try:
+            lab_mod.build_slot(lab, slot, mods, stage_mod, log=log)
+        finally:
+            stage_lock.release()
+    finally:
+        base.release()
+    # game.uncapped: SSE Display Tweaks' override file in the slot, for this run only. It turns off its vsync and its frame-rate
+    # limiter, so a timing run is not held at the display's rate or at the limiter's.
+    if harness["uncapped"]:
+        tweaks = slot.data / "SKSE" / "Plugins" / DISPLAY_TWEAKS_FILE
+        tweaks.unlink(missing_ok=True)
+        tweaks.write_text(DISPLAY_TWEAKS_UNCAPPED, encoding="utf-8")
+        log("Uncapped: SSE Display Tweaks' vsync and limiter off for this run")
+    if harness["saved_settings"]:
+        write_saved_settings(slot, harness["saved_settings"], log)
+    lab_mod.prepare_cache(lab, slot, harness["shader_cache"] == "cold", log=log)
+    save = lab_mod.write_home(paths, slot, contract, harness["prefs_ini"], plugins_off, set_ini_values, log=log)
+    log(f"Slot {slot.number}: home ready, save {save}" + (f"; plugins off: {', '.join(plugins_off)}" if plugins_off else ""))
+    return save
 
 
-def write_prefs_ini(paths, run_id, prefs, journal, log=print):
-    """[prefs_ini]: written into the SkyrimPrefs.ini the game reads (prefs_ini_path) for this run. The journal puts the file from
-    before back."""
-    target = prefs_ini_path(paths)
-    if not target.exists():
-        raise RunError(f"{target} is missing: prefs_ini edits the game's SkyrimPrefs.ini, which the game makes at its first launch")
-    backup = paths.root / "aside" / f"{run_id}-{PREFS_INI}"
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(target, backup)
-    journal.add({"do": "restore", "path": str(target), "backup": str(backup)})
-    # Latin-1 keeps every byte of an ANSI file as it was.
-    text = target.read_text(encoding="latin-1")
-    target.write_text(set_ini_values(text, prefs), encoding="latin-1", newline="\r\n")
-    log(f"Prefs INI: {', '.join(f'{s}.{k}' for s, keys in prefs.items() for k in keys)} written into {target} for this run")
-
-
-def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, wait_lock=0, log=print, config_dir=CONFIG_DIR):
+def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0, slots=None, log=print, config_dir=CONFIG_DIR):
     """One run. Returns its result dict (or the resolved config on a dry run)."""
     schema = load_schema()
     try:
@@ -318,130 +297,89 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
     if not stage:
         log("config-error: no build.stage: pass --stage <name> or set it in the config")
         return {"outcome": "config-error", "reason": "no build.stage"}
+    try:
+        stage_mod = mo2.mod_for(paths, stage)
+    except mo2.Mo2Error as error:
+        log(f"config-error: {error}")
+        return {"outcome": "config-error", "reason": str(error)}
 
-    own_lock = lock is None
-    if own_lock:
-        lock = journal_mod.Lock(paths.lock, f"run {spec} {label or ''}".strip())
-        lock.acquire(wait_lock, log=log)
-    journal = journal_mod.Journal(paths)
-
-    def undo_at_exit():
-        if journal.owned():
-            journal_mod.undo(paths, journal.load(), log=log)
-
-    atexit.register(undo_at_exit)
+    lab = lab_mod.Lab(paths)
+    exclusive = harness["exclusive"]
+    command = f"run {spec} {label or ''}".strip()
+    claim = lab_mod.take_slots(lab, lab_mod.slot_count(paths, slots), exclusive, wait_lock, command, log=log)
+    slot = claim.slot
+    # However cs-test ends, the game it started ends with it.
+    procs.kill_children_with_this_process()
     _install_signals()
+    background = not exclusive or BACKGROUND
     final = None
     status = None
     started = None
     run_dir = None
+    active = None
+    gate = None
+    launched = False
+    killed = False
+    pids = []
+    lab_info = {"slot": slot.number, "slots": claim.numbers, "exclusive": exclusive, "home": str(slot.home), "game": str(slot.game)}
     try:
-        if not journal_mod.recover(paths, log=log):
-            raise RunError("leftover state could not be undone (cs-test status shows it)")
-        if procs.find(GAME_EXE) or procs.find(MO2_EXE):
-            raise RunError("the game or MO2 is running: close them first (MO2 rewrites the mod list)")
-        mo2.mod_for(paths, stage)
+        if not procs.find(STEAM_EXE):
+            raise RunError("Steam is not running: start it first (steam.exe -silent)")
+        lab_mod.kill_orphans(slot, log=log)
         run_id = run_id_for(stage, contract["name"], harness["label"])
         run_dir = paths.runs / run_id
         (run_dir / "shots").mkdir(parents=True, exist_ok=True)
         contract["run_id"], contract["run_dir"] = run_id, str(run_dir)
         # Upscaling stops while another process has the foreground (Upscaling::IsWindowUnusable). A background run never
         # takes the foreground, so without this switch DLSS, FSR and XeSS never run and their Upscale client never registers.
-        if BACKGROUND:
+        if background:
             contract["env"].setdefault("CS_UPSCALE_UNFOCUSED", "1")
         manifest = load_manifest(paths, stage)
-        (run_dir / "resolved.json").write_text(json.dumps({**contract, "harness": harness, "stage": manifest}, indent=2), encoding="utf-8")
+        (run_dir / "resolved.json").write_text(json.dumps({**contract, "harness": harness, "stage": manifest, "lab": lab_info}, indent=2), encoding="utf-8")
+        active = lab_mod.write_active(paths, run_id, harness["label"], slot, claim.numbers)
+        log(f"{run_id}: lab slot {slot.number}{' (exclusive: every slot)' if exclusive else ''}")
+        prepare_slot(paths, lab, slot, stage, stage_mod, contract, harness, command, log)
 
-        journal.begin(run_id)
-        state = mo2.get_state(paths)
-        previous = state["live"] if state["originalMod"] else "_original"
-        journal.add({"do": "variant", "from": previous, "to": stage})
-        mo2.use_variant(paths, stage)
-        if harness["shader_cache"] == "cold":
-            # The cache is shared by every stage, so a cold run sets it aside and the journal puts it back.
-            cache = paths.overwrite / "ShaderCache"
-            held = paths.root / "ShaderCache.cold-hold"
-            if held.exists():
-                raise RuntimeError(f"{held} already exists: a cold run left the shared shader cache there. Move it back to {cache} first")
-            journal.add({"do": "cold_cache", "live": str(cache), "held": str(held)})
-            if cache.exists():
-                log(f"Setting the shared shader cache aside for this run (build.shader_cache = cold): {held}")
-                shutil.move(str(cache), str(held))
-
-        wanted = harness["mods_off"]
-        current = mo2.mods_state(paths.modlist, wanted)
-        for mod in wanted:
-            if current[mod] != "+":
-                log(f"warning: no enabled mod '{mod}' in the mod list")
-        to_change = [m for m in wanted if current[m] == "+"]
-        if to_change:
-            journal.add({"do": "mods_off", "mods": to_change})
-            mo2.disable_mods(paths.modlist, to_change)
-
-        # game.uncapped: SSE Display Tweaks' override file in the staged mod, for this run only. It turns off its vsync and its
-        # frame-rate limiter, so a timing run is not held at the display's rate or at the limiter's.
-        if harness["uncapped"]:
-            tweaks = paths.mods / mo2.mod_for(paths, stage) / "SKSE" / "Plugins" / DISPLAY_TWEAKS_FILE
-            tweaks.parent.mkdir(parents=True, exist_ok=True)
-            journal.add({"do": "file", "path": str(tweaks)})
-            tweaks.write_text(DISPLAY_TWEAKS_UNCAPPED, encoding="utf-8")
-            log(f"Uncapped: wrote {tweaks} for this run")
-
-        if harness["saved_settings"]:
-            write_saved_settings(paths, stage, run_id, harness["saved_settings"], journal, log)
-
-        if harness["prefs_ini"]:
-            write_prefs_ini(paths, run_id, harness["prefs_ini"], journal, log)
-
-        legacy_env = paths.skse / LEGACY_ENV_FILE
-        if legacy_env.exists():
-            aside = paths.root / "aside" / f"{run_id}-{LEGACY_ENV_FILE}"
-            aside.parent.mkdir(parents=True, exist_ok=True)
-            journal.add({"do": "move", "from": str(legacy_env), "to": str(aside)})
-            shutil.move(str(legacy_env), str(aside))
-            log(f"Moved {legacy_env} aside for this run")
-
-        test_file = paths.skse / TEST_FILE
-        journal.add({"do": "file", "path": str(test_file)})
-        test_file.write_text(json.dumps(contract, indent=2), encoding="utf-8")
-        (paths.skse / STATUS_FILE).unlink(missing_ok=True)
-        log_path = paths.skse / LOG_FILE
-        if log_path.exists():
-            log_path.replace(paths.skse / "CommunityShaders.previous.log")
-
+        gate = lab_mod.LaunchGate(lab, slot, command, log=log)
         started = time.time()
-        journal.add({"do": "launch", "at": datetime.datetime.now().isoformat(timespec="seconds")})
-        log(f"{run_id}: launching through MO2")
-        launch(paths)
+        launched = True
+        log(f"{run_id}: launching slot {slot.number}")
+        lab_mod.launch(slot, log=log)
         procs.keep_display_awake(True)
-        if not BACKGROUND:
+        if not background:
             procs.nudge_mouse()
-        final, status = watch(paths, contract, harness, log=log)
+        final, status, pids = watch(slot, contract, harness, gate=gate, background=background, log=log)
+        helper_error = lab_mod.helper_error(slot)
+        if final.outcome in ("crashed", "never-launched") and helper_error:
+            final = Final(final.outcome, f"the lab helper stopped the game: {helper_error}", "harness")
     except KeyboardInterrupt:
         final = Final("interrupted", "cs-test was interrupted", "harness")
-        log("Interrupted: stopping the game and undoing the run's changes")
-    except (RunError, mo2.Mo2Error) as error:
-        final = Final("config-error" if isinstance(error, mo2.Mo2Error) else "not-run", str(error), "harness")
-        log(f"{final.outcome}: {error}")
+        log("Interrupted: stopping the game")
+    except (RunError, lab_mod.LabError, locks.LockError, mo2.Mo2Error) as error:
+        final = Final("not-run", str(error), "harness")
+        log(f"not-run: {error}")
     finally:
         procs.keep_display_awake(False)
-        if journal.owned():
-            data = journal.load()
-            if any(e.get("do") == "launch" for e in data.get("entries", [])):
-                # A game still running here is one the harness ends: its stacks first, beside the run's other files.
-                if run_dir is not None:
-                    helper = paths.mods / mo2.mod_for(paths, stage) / "SKSE" / "Plugins" / "CommunityShadersCrashDump.exe"
-                    procs.dump_before_kill(GAME_EXE, helper, run_dir, log=log)
-                procs.stop_game_and_mo2(GAME_EXE, MO2_EXE, log=log)
-            journal_mod.undo(paths, data, log=log)
-        if own_lock:
-            lock.release()
+        if gate:
+            gate.release()
+        games = procs.pids_of(slot.exe)
+        if games:
+            # A game still running here is one the harness ends: its stacks first, beside the run's other files.
+            killed = True
+            if run_dir is not None:
+                procs.dump_before_kill(games, slot.data / "SKSE" / "Plugins" / CRASH_DUMP_EXE, run_dir, log=log)
+            procs.stop(games, log=log)
+        if launched:
+            lab_mod.merge_cache(lab, slot, clean=not killed and final is not None and final.outcome != "interrupted", log=log)
+        if active:
+            active.unlink(missing_ok=True)
+        claim.release()
 
     if run_dir is None or started is None:
         return {"outcome": final.outcome, "reason": final.reason}
 
-    collected = collect.collect(paths.skse, run_dir, started, log=log)
-    status_copy = paths.skse / STATUS_FILE
+    collected = collect.collect(slot.skse, run_dir, started, game_dir=slot.game, log=log)
+    status_copy = slot.skse / STATUS_FILE
     if status_copy.exists() and collect.new_since(status_copy, started):
         shutil.copy2(status_copy, run_dir / "status.json")
     final = check_expectations(contract, run_dir, status, final)
@@ -469,6 +407,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         "stage": load_manifest(paths, stage),
         "resolved": contract,
         "harness": harness,
+        "lab": {**lab_info, "game_pids": pids, "killed": killed, "helper": lab_mod.helper_marker(slot)},
         "shots": shots,
         "live_image": collect.live_image(run_dir, contract["expect"]),
         "graph_frames": collect.graph_frames(contract, collect.final_status(run_dir, status)),

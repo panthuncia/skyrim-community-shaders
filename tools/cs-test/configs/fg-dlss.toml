@@ -5,6 +5,7 @@
 extends = ["base"]
 
 [run]
+exclusive = true             # every lab slot: DLSS-G presents only while the window has the foreground, so no other game runs beside it
 timeout_s = 400
 
 [env]

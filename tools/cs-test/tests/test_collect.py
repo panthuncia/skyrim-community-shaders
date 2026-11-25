@@ -105,6 +105,6 @@ def test_stage_refuses_without_terrain_helper(fake, tmp_path):
     (wt / "build" / "Dev-Fast").mkdir(parents=True)
     (wt / "build" / "Dev-Fast" / "CommunityShaders.dll").write_bytes(b"MZdll")
     (wt / "package" / "Shaders").mkdir(parents=True)
-    (fake.mods / "CS AB p35").mkdir(parents=True, exist_ok=True)
+    (fake.mods / "CS AB p35" / "TerrainHelper.esp").unlink()
     with pytest.raises(StageError, match="TerrainHelper.esp"):
         stage(fake, wt, "p35", log=lambda *_: None)

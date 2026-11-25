@@ -4,6 +4,7 @@
 extends = ["base"]
 
 [run]
+exclusive = true             # every lab slot: a frame-rate sample, so no other game runs beside it
 timeout_s = 300
 
 [[steps]]

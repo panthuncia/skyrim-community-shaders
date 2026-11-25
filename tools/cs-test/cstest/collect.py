@@ -161,6 +161,9 @@ SKSE_FILES = [
     (re.compile(r"^CommunityShaders-GpuCounters\.csv$"), "copy"),
     (re.compile(r"^CommunityShaders-DCLF-Compat-.*\.txt$"), "copy"),
     (re.compile(r"^CommunityShaders-Switches\.json$"), "copy"),
+    # Crash Logger's report, and the lab helper's log.
+    (re.compile(r"^crash-[\d-]+\.log$"), "copy"),
+    (re.compile(r"^CSTestLab\.log$"), "copy"),
 ]
 BOUNDED_LOGS = [re.compile(r"^CommunityShaders\.log$"), re.compile(r"^SkyrimSE_[a-z0-9]+\.log$")]
 
@@ -180,7 +183,8 @@ def game_dir_from_log(log):
 
 
 def collect(skse, run_dir, start_ts, game_dir=None, log=print):
-    """Copies or moves this run's files from the SKSE folder (and the game folder's crash dump) into run_dir."""
+    """Copies or moves this run's files from the slot's SKSE folder (and the slot's game folder: DXVK logs, the crash dump) into
+    run_dir."""
     skse, run_dir = Path(skse), Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     collected = {"logs": {}, "files": [], "cut": []}
