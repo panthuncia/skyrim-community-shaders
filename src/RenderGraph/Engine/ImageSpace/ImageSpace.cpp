@@ -1416,6 +1416,15 @@ namespace RenderGraph::Engine::ImageSpace
 				bool observing = false;  // StageStep compares the capture with rows
 				Rows rows;
 				const RE::BSImagespaceShader* shader = nullptr;  // the step's shader, while armed or observing
+				// A lens flare sprite's draw: its vertex rows, its quad and the texture at slot 0.
+				struct Sprite
+				{
+					Rows vertex;
+					const void* shape = nullptr;  // BSGraphics::TriShape (the geometry's renderer data)
+					std::uint32_t triangles = 0;
+					ID3D11ShaderResourceView* view = nullptr;  // a loaded texture, unwrapped
+					std::int32_t target = -1;  // or an engine target
+				} sprite;
 				// The rows already in the ring: an explicit step's PS b2 as its setter bound it. Null to upload rows.
 				Constants::Location rowsAt;
 				std::size_t effect = 0;
@@ -1447,6 +1456,13 @@ namespace RenderGraph::Engine::ImageSpace
 				a_input = targetOf(1);
 			}
 
+			/** @brief Whether a_param is an ImageSpaceShaderParam (its vtable), whose constant groups the generic SetupGeometry reads. */
+			bool IsShaderParam(const void* a_param)
+			{
+				static const auto vtable = RE::VTABLE_ImageSpaceShaderParam[0].address();
+				return a_param && *static_cast<const std::uintptr_t*>(a_param) == vtable;
+			}
+
 			/** @brief The one pixel shader of an ImageSpace shader, or null. Its table places the param's rows. */
 			const RE::BSGraphics::PixelShader* PixelShaderOf(const RE::BSImagespaceShader& a_shader)
 			{
@@ -1475,9 +1491,12 @@ namespace RenderGraph::Engine::ImageSpace
 					return nullptr;
 				if (count > a_out.offsets.size())
 					return "more pixel constants than a table holds";
+				if (!IsShaderParam(a_param))
+					return "a param that is not an ImageSpaceShaderParam";
 				const auto* param = static_cast<const RE::ImageSpaceShaderParam*>(a_param);
-				if (!param || !param->pixelConstantGroup)
-					return "a param with no pixel constants";
+				// Both groups count float4 rows.
+				if (!param->pixelConstantGroup || param->pixelConstantGroupSize < count)
+					return "a param with too few pixel constants";
 				const auto* pixel = PixelShaderOf(a_shader);
 				if (!pixel)
 					return "not exactly one pixel shader";
@@ -1521,6 +1540,79 @@ namespace RenderGraph::Engine::ImageSpace
 				for (std::uint32_t row = 0; row < a_out.count; ++row)
 					a_out.offsets[row] = static_cast<std::uint8_t>(row * 4);
 				native.rowsAt = at;
+				return nullptr;
+			}
+
+			/**
+			* @brief A lens flare sprite's draw as the generic SetupGeometry (AE 0x1414f8500) and RenderPassImmediately would make it: VS b2 row
+			* table[0] = (0, 0, 0.5 / width, 0.5 / height) of the output at the dynamic-resolution ratio, rows 1 to n - 1 (n at +0x148) from the
+			* param's vertex constants (+0x30); the quad's whole index range; slot 0 from texture 1 of the effect's list (0x1414e8bc0: an
+			* engine target, else the loaded texture's view at +0x48 -> +0x10).
+			*/
+			const char* BuildSprite(const RE::BSImagespaceShader& a_shader, const void* a_param, const void* a_geometry, State::Sprite& a_out)
+			{
+				a_out = {};
+				const auto* base = reinterpret_cast<const std::byte*>(&a_shader);
+				const auto* param = static_cast<const RE::ImageSpaceShaderParam*>(a_param);
+				const RE::BSGraphics::VertexShader* vertex = nullptr;
+				for (const auto& entry : a_shader.vertexShaders) {
+					if (vertex)
+						return "not exactly one vertex shader";
+					vertex = entry;
+				}
+				if (!vertex)
+					return "no vertex shader";
+				const auto& textures = static_cast<const RE::ImageSpaceEffect&>(a_shader).effectTextures;
+				const auto* output = textures.capacity() > 0 ? textures[0] : nullptr;
+				// The manager is the object at this address (CommonLib's GetSingleton reads it as a pointer).
+				static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> managerAt{ REL::RelocationID(524970, 411451) };
+				const auto* manager = managerAt.get();
+				const auto* graphics = globals::game::graphicsState;
+				if (!output || output->renderTarget < 0 || output->renderTarget >= RE::RENDER_TARGET::kTOTAL || !manager || !graphics)
+					return "no output target";
+				if (!*reinterpret_cast<const bool*>(base + 0x1A0)) {
+					const auto count = *reinterpret_cast<const std::uint32_t*>(base + 0x148);
+					if (count > vertex->constantTable.size())
+						return "more vertex constants than a table holds";
+					if (count > 1 && (!IsShaderParam(a_param) || !param->vertexConstantGroup || param->vertexConstantGroupSize < count - 1))
+						return "a param with too few vertex constants";
+					const auto& data = graphics->GetRuntimeData();
+					const bool locked = data.dynamicResolutionLock != 0;
+					const auto& target = manager->renderTargetData[output->renderTarget];
+					const auto scaled = [](std::uint32_t a_size, float a_ratio) {
+						return static_cast<float>(static_cast<std::uint32_t>(static_cast<std::int64_t>(static_cast<float>(a_size) * a_ratio)));
+					};
+					for (std::uint32_t row = 0; row < count; ++row) {
+						const auto offset = static_cast<std::uint8_t>(vertex->constantTable[row]);
+						if ((offset + 4u) * 4u > a_out.vertex.bytes.size())
+							return "a vertex constant past the rows a step holds";
+						float values[4]{};
+						if (row == 0) {
+							values[2] = 0.5f / scaled(target.width, locked ? 1.0f : data.dynamicResolutionWidthRatio);
+							values[3] = 0.5f / scaled(target.height, locked ? 1.0f : data.dynamicResolutionHeightRatio);
+						} else {
+							std::memcpy(values, param->vertexConstantGroup + (row - 1) * 4u, 16);
+						}
+						std::memcpy(a_out.vertex.bytes.data() + offset * 4u, values, 16);
+						a_out.vertex.offsets[row] = offset;
+						a_out.vertex.size = (std::max)(a_out.vertex.size, ((offset + 4u) * 4u + 15u) & ~15u);
+					}
+					a_out.vertex.count = count;
+				}
+				const auto* geometry = static_cast<const RE::BSGeometry*>(a_geometry);
+				if (!geometry || geometry->GetType().get() != RE::BSGeometry::Type::kTriShape)
+					return "a sprite that is not a TriShape";
+				a_out.shape = geometry->GetGeometryRuntimeData().rendererData;
+				a_out.triangles = static_cast<const RE::BSTriShape*>(geometry)->GetTrishapeRuntimeData().triangleCount;
+				const auto* input = textures.capacity() > 1 ? textures[1] : nullptr;
+				if (input && input->renderTarget >= 0) {
+					a_out.target = input->renderTarget;
+				} else if (input && *reinterpret_cast<const std::int32_t*>(reinterpret_cast<const std::byte*>(input) + 0xC) >= 0) {
+					return "a depth texture at slot 0";
+				} else if (input && input->texture) {
+					const auto* renderer = *reinterpret_cast<const std::byte* const*>(reinterpret_cast<const std::byte*>(input->texture.get()) + 0x48);
+					a_out.view = renderer ? Tripwire::Unwrap(*reinterpret_cast<ID3D11ShaderResourceView* const*>(renderer + 0x10)) : nullptr;
+				}
 				return nullptr;
 			}
 
@@ -2023,13 +2115,12 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!state.current->eligible)
 				return "a draw the capture refuses";
 			const auto& info = kEffects[state.current->effect];
-			if (info.geometry || info.rastersNothing || info.latched || info.vertexStage)
+			// The lens flare sprites are geometry steps the native path makes whole (BuildSprite).
+			const bool sprite = info.id == Effects::ISLensFlare;
+			if (!sprite && (info.geometry || info.rastersNothing || info.latched || info.vertexStage))
 				return "a geometry, loaded-texture or no-raster step";
 			using E = Effects;
 			switch (info.id) {
-			case E::ISLensFlare:
-			case E::ISLensFlareVisibility:
-				return "a lens flare step";
 			case E::ISDownsampleCS:
 				return "an image-based flare dispatch";
 			default:
@@ -2041,7 +2132,9 @@ namespace RenderGraph::Engine::ImageSpace
 			if (state.current->compute && SaoCsStepNow())
 				return nullptr;
 			if (!state.current->compute && LensFlareStepNow(state.current->effect))
-				return "a lens flare step";
+				return nullptr;
+			if (sprite)
+				return "a lens flare outside the post chain";
 			if (StartStepScope() != WorldScope::None || WorldStepScope() != WorldScope::None || ChainStepNow())
 				return nullptr;
 			return "a menu step or outside every step";
@@ -2082,7 +2175,8 @@ namespace RenderGraph::Engine::ImageSpace
 		* @brief The engine's Render for the current effect, or its native step. Draw mode stages the step from the param's rows and skips
 		* the engine's call; observe mode computes the rows, lets the capture take the draw and compares them.
 		*/
-		void RenderOrNative(const RE::BSImagespaceShader* a_shader, const void* a_param, const std::function<void()>& a_render, bool a_explicit = false)
+		void RenderOrNative(const RE::BSImagespaceShader* a_shader, const void* a_param, const void* a_geometry, const std::function<void()>& a_render,
+			bool a_explicit = false)
 		{
 			auto& native = NativeSteps::Get();
 			if (const char* why = NativeStepNow()) {
@@ -2093,7 +2187,11 @@ namespace RenderGraph::Engine::ImageSpace
 				a_render();
 				return;
 			}
-			if (const char* why = a_explicit ? NativeSteps::BoundRows(native.rows) : NativeSteps::BuildRows(*a_shader, a_param, native.rows)) {
+			const bool sprite = kEffects[IS().current->effect].id == Effects::ISLensFlare;
+			const char* why = a_explicit ? NativeSteps::BoundRows(native.rows) : NativeSteps::BuildRows(*a_shader, a_param, native.rows);
+			if (!why && sprite)
+				why = NativeSteps::BuildSprite(*a_shader, a_param, a_geometry, native.sprite);
+			if (why) {
 				++native.declined;
 				static Util::ReasonLog s_declined("[ORG] ImageSpace native: a step stays the capture's");
 				s_declined.Report(why, kEffects[IS().current->effect].effectName);
@@ -2173,7 +2271,7 @@ namespace RenderGraph::Engine::ImageSpace
 				EngineCall(shader, [&] {
 					const bool scoped = InScope(shader, [&] {
 						WithEffect(shader, false, covered ? Ineligible(a_quad, kEffects[static_cast<std::size_t>(EffectOf(shader))].geometry) : std::string_view{},
-							[&] { RenderOrNative(shader, a_param, [&] { func(a_effect, a_quad, a_param); }); });
+							[&] { RenderOrNative(shader, a_param, a_quad, [&] { func(a_effect, a_quad, a_param); }); });
 					});
 					if (!scoped)
 						func(a_effect, a_quad, a_param);
@@ -2195,7 +2293,7 @@ namespace RenderGraph::Engine::ImageSpace
 				EngineCall(a_shader, [&] {
 					const bool scoped = InScope(a_shader, [&] {
 						WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{},
-							[&] { RenderOrNative(a_shader, nullptr, [&] { func(a_shader, a_geometry); }, true); });
+							[&] { RenderOrNative(a_shader, nullptr, a_geometry, [&] { func(a_shader, a_geometry); }, true); });
 					});
 					if (!scoped)
 						func(a_shader, a_geometry);

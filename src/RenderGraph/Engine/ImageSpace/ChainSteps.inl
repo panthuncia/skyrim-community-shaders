@@ -1565,27 +1565,95 @@ void StageLensFlareSprite(PostClient& a_client, std::uint32_t a_entry, const Spe
 			fmt::format("lens flare sprite {} of the frame is past the sprite pass's {} records; it draws nothing", sprite, kLensFlareSprites));
 		return;
 	}
-	static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
-	setDirtyStates(false);
-	// Both stages read their own PerGeometry: the vertex stage places the sprite, the pixel stage tints it.
-	const auto use = Constants::Capture(Constants::kDrawStages);
-	const auto* pixel = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
-	const auto* vertex = use.Valid() ? Constants::Find(use, Constants::Stage::Vertex, 2) : nullptr;
-	if (!pixel || !vertex) {
-		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
-			fmt::format("a lens flare sprite's capture holds no PerGeometry for its {} stage; it draws nothing", pixel ? "vertex" : "pixel"));
-		return;
+	auto& native = NativeSteps::Get();
+	Constants::Location pixelAt, vertexAt;
+	const DCLF::Family::TriShape* shape = nullptr;
+	std::uint32_t start = 0, triangles = 0, topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	ID3D11ShaderResourceView* view = nullptr;
+	std::int32_t input = -1;
+	if (native.armed) {
+		// Native: the rows, the quad and the texture BuildSprite made, with no engine state applied.
+		pixelAt = native.rows.size ? Constants::Upload({ native.rows.bytes.data(), native.rows.size }) : Constants::Location{};
+		vertexAt = native.sprite.vertex.size ? Constants::Upload({ native.sprite.vertex.bytes.data(), native.sprite.vertex.size }) : Constants::Location{};
+		if (!pixelAt.owner || !vertexAt.owner) {
+			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment, "a native lens flare sprite has no PerGeometry for a stage; it draws nothing");
+			return;
+		}
+		shape = static_cast<const DCLF::Family::TriShape*>(native.sprite.shape);
+		triangles = native.sprite.triangles;
+		view = native.sprite.view;
+		input = native.sprite.target;
+		++native.taken;
+	} else {
+		static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
+		setDirtyStates(false);
+		// Both stages read their own PerGeometry: the vertex stage places the sprite, the pixel stage tints it.
+		const auto use = Constants::Capture(Constants::kDrawStages);
+		const auto* pixel = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
+		const auto* vertex = use.Valid() ? Constants::Find(use, Constants::Stage::Vertex, 2) : nullptr;
+		if (!pixel || !vertex) {
+			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
+				fmt::format("a lens flare sprite's capture holds no PerGeometry for its {} stage; it draws nothing", pixel ? "vertex" : "pixel"));
+			return;
+		}
+		pixelAt = Constants::Where(*pixel);
+		vertexAt = Constants::Where(*vertex);
+		if (!pixelAt.owner || !vertexAt.owner)
+			RenderGraph::Fatal("ISLensFlare", "its captured constants have no ring chunk");
+		const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+		shape = static_cast<const DCLF::Family::TriShape*>(state.drawShape);
+		start = state.drawStart;
+		triangles = state.drawTriangles;
+		topology = static_cast<std::uint32_t>(shadow.topology);
+		view = shadow.PSTexture[0];
+		const auto bound = view ? InputOfView(view) : -1;
+		input = bound >= 0 && !(bound & kDefaultTextureInput) ? bound : -1;
+		if (native.observing && native.effect == IS().current->effect) {
+			native.observing = false;
+			++native.compared;
+			std::string differences;
+			const auto bytes = Constants::Bytes(*vertex);
+			const auto& rows = native.sprite.vertex;
+			for (std::uint32_t row = 0; row < rows.count; ++row) {
+				const auto at = rows.offsets[row] * 4u;
+				if (at + 16 > bytes.size() || std::memcmp(rows.bytes.data() + at, bytes.data() + at, 16) != 0) {
+					float computed[4]{}, captured[4]{};
+					std::memcpy(computed, rows.bytes.data() + at, 16);
+					if (at + 16 <= bytes.size())
+						std::memcpy(captured, bytes.data() + at, 16);
+					differences += fmt::format(" vs c{} ({} {} {} {}) vs ({} {} {} {})", at / 16, computed[0], computed[1], computed[2], computed[3], captured[0], captured[1],
+						captured[2], captured[3]);
+				}
+			}
+			if (native.sprite.shape != state.drawShape || state.drawStart != 0 || native.sprite.triangles != state.drawTriangles ||
+				topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
+				differences += fmt::format(" quad {} 0 {} vs {} {} {} topology {}", native.sprite.shape, native.sprite.triangles, state.drawShape, state.drawStart,
+					state.drawTriangles, topology);
+			if (native.sprite.target != input || (input < 0 && native.sprite.view != Tripwire::Unwrap(view)))
+				differences += fmt::format(" texture target {} view {} vs target {} view {}", native.sprite.target, static_cast<const void*>(native.sprite.view), input,
+					static_cast<const void*>(Tripwire::Unwrap(view)));
+			const auto pixelBytes = Constants::Bytes(*pixel);
+			for (std::uint32_t row = 0; row < native.rows.count; ++row) {
+				const auto at = native.rows.offsets[row] * 4u;
+				if (at + 16 > pixelBytes.size() || std::memcmp(native.rows.bytes.data() + at, pixelBytes.data() + at, 16) != 0) {
+					float computed[4]{}, captured[4]{};
+					std::memcpy(computed, native.rows.bytes.data() + at, 16);
+					if (at + 16 <= pixelBytes.size())
+						std::memcpy(captured, pixelBytes.data() + at, 16);
+					differences += fmt::format(" pixel c{} (row {}) ({} {} {} {}) vs ({} {} {} {})", at / 16, row, computed[0], computed[1], computed[2], computed[3], captured[0],
+						captured[1], captured[2], captured[3]);
+				}
+			}
+			if (!differences.empty()) {
+				++native.differed;
+				NativeSteps::Differences().Report("ISLensFlare sprite", fmt::format("computed vs captured:{}", differences));
+			}
+		}
 	}
-	const auto pixelAt = Constants::Where(*pixel);
-	const auto vertexAt = Constants::Where(*vertex);
-	if (!pixelAt.owner || !vertexAt.owner)
-		RenderGraph::Fatal("ISLensFlare", "its captured constants have no ring chunk");
-	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 	DCLF::Family::Geometry geometry;
 	auto owners = std::make_shared<DCLF::Family::Owners>();
 	std::string detail;
-	const auto result = DCLF::Family::LatchGeometry(static_cast<const DCLF::Family::TriShape*>(state.drawShape), state.drawStart, state.drawTriangles,
-		~std::uint64_t(0), static_cast<std::uint32_t>(shadow.topology), geometry, *owners, &detail);
+	const auto result = DCLF::Family::LatchGeometry(shape, start, triangles, ~std::uint64_t(0), topology, geometry, *owners, &detail);
 	if (result != DCLF::Family::GeometryResult::Ok) {
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
 			fmt::format("a lens flare sprite's quad could not be staged: {} ({}); it draws nothing", DCLF::Family::ReasonOf(result), detail));
@@ -1600,9 +1668,7 @@ void StageLensFlareSprite(PostClient& a_client, std::uint32_t a_entry, const Spe
 	}
 	// The sprite's loaded texture by heap index. The engine binds none for a flare without one, and D3D11 then reads zero.
 	auto& textures = ::DCLF::GpuTextures::Get();
-	auto* view = shadow.PSTexture[0];
-	const auto input = view ? InputOfView(view) : -1;
-	const bool target = input >= 0 && !(input & kDefaultTextureInput);
+	const bool target = input >= 0;
 	auto binding = view && !target ? textures.ResolveBinding(view, kImageSpaceTag) : ::DCLF::GpuTextures::Binding{};
 	if (!binding)
 		binding = textures.NullOf(::DCLF::GpuTextures::ViewKind::Texture2D);
@@ -1670,7 +1736,9 @@ bool TakeLensFlareStep(std::size_t a_effect)
 		Frame::Driver::NoteStepLag(segment, client.id, what());
 		return true;
 	}
-	CheckLensFlareState(id);
+	// A native step applies no engine state, so there is nothing bound to check.
+	if (!NativeSteps::Get().armed)
+		CheckLensFlareState(id);
 	if (id == Effects::ISLensFlareVisibility)
 		return StageStep(client, entry, part.SpecOf(entry), a_effect, false, {});
 	StageLensFlareSprite(client, entry, *part.SpecOf(entry), part.count);

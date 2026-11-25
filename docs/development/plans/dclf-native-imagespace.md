@@ -1,7 +1,7 @@
 # ImageSpace without draw capture
 
 Status: 2026-11-24, cheap cuts 1-2 done; steps 2a-2b (param, explicit and compute steps native,
-`CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2c done. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
+`CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2d done. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
 [p5/imagespace.md](../p5/imagespace.md) (the RE and the chain), [imagespace-remaining-ports.md](./imagespace-remaining-ports.md)
 (the last effects), [dclf-native-sky.md](./dclf-native-sky.md) (the pattern this follows).
 
@@ -405,6 +405,16 @@ vanilla shader does not declare read as zero in the capture.
    the bound targets. Not yet exercised: `iblf.toml` did not run the flares in capture mode either. The flow copies and the
    compute SAO go native as they are: their callers set their views in the shadow state before the call. Left captured: lens
    flares, ripples, ISAlphaBlend, menu steps and ISDownsampleCS. The explicit steps still read the PS b2 their setter bound.
+   2d. Done 2026-11-24: lens flares. The visibility pass is a param step. A sprite's draw is made whole (`NativeSteps::BuildSprite`):
+   VS b2 row table[0] = (0, 0, 0.5 / width, 0.5 / height) of the output at the dynamic-resolution ratio (`DAT_141ad285c` is 0.5;
+   the ratio is 1 while `dynamicResolutionLock` is set), rows 1 to n - 1 (n at shader +0x148) from the param's vertex constants;
+   the quad's whole index range; slot 0 from the effect's texture 1. Both constant groups count float4 rows
+   (`pixelConstantGroupSize`, `vertexConstantGroupSize`), and the param must be an `ImageSpaceShaderParam` (vtable checked; some
+   Render calls pass another param). Observe mode matched every sprite field but one: the capture's `GlobalIntensity` (PS c2.y,
+   constant 3) is 0, because CS's compiled D3D11 shader leaves it out of its constant table so the engine never writes it, and the
+   ORG pass multiplies the tint by it: captured sprites drew black. The native rows use vanilla's table, so the sprites get the
+   engine's intensity (1 by default). `RE::BSGraphics::RenderTargetManager::GetSingleton()` reads the manager's address as a
+   pointer; the manager is the object at 524970 / 411451.
 3. HDR native (the most draws in every frame, formulas read): downsample, luminance, adaptation, bloom, tonemap.
 4. SAO native (the next most draws), then SSR.
 5. Composites (VL, SIL), the SAO composite, the water blend, TAA and the upsample: one decompile each.
