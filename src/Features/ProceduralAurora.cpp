@@ -263,6 +263,20 @@ void ProceduralAurora::DrawSettings()
 
 ProceduralAurora::CommonBufferData ProceduralAurora::GetCommonBufferData()
 {
+	// The feature buffer is packed several times a frame. Every pack of a frame gets the block its first one made, so the
+	// animation clock advances once a frame.
+	static uint32_t packedFrame = UINT32_MAX;
+	static CommonBufferData packed{};
+	const uint32_t frame = globals::state->frameCount;
+	if (packedFrame != frame) {
+		packedFrame = frame;
+		packed = PackCommonBufferData();
+	}
+	return packed;
+}
+
+ProceduralAurora::CommonBufferData ProceduralAurora::PackCommonBufferData()
+{
 	if (!IsActive()) {
 		auroraVisibility = 0.0f;
 		lastClockUpdate = {};
