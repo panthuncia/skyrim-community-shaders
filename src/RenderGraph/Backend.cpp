@@ -44,12 +44,9 @@ namespace RenderGraph::Backend
 
 	void SetD3D12StartInstance(bool a_supported)
 	{
-		// CS_ORG_D3D12_INSTANCE_WORD=1 keeps the root constant, to compare the two.
-		const bool used = a_supported && !Switches::On("CS_ORG_D3D12_INSTANCE_WORD");
-		s_d3d12StartInstance.store(used, std::memory_order_release);
-		logger::info("[ORG] D3D12 first instance: {}", used ? "SV_StartInstanceLocation (Shader Model 6.8)" :
-		                                                      a_supported ? "root constant per draw (CS_ORG_D3D12_INSTANCE_WORD=1)" :
-		                                                                    "root constant per draw (the device lacks Shader Model 6.8 or extended command info)");
+		s_d3d12StartInstance.store(a_supported, std::memory_order_release);
+		logger::info("[ORG] D3D12 first instance: {}", a_supported ? "SV_StartInstanceLocation (Shader Model 6.8)" :
+		                                                             "root constant per draw (the device lacks Shader Model 6.8 or extended command info)");
 	}
 
 	bool D3D12InstanceWord()

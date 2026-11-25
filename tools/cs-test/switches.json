@@ -1295,16 +1295,6 @@
 			"description": ""
 		},
 		{
-			"name": "CS_ORG_D3D12_INSTANCE_WORD",
-			"key": "org.d3d12_instance_word",
-			"type": "bool",
-			"default": "0",
-			"choices": [],
-			"kind": "other",
-			"family": "org",
-			"description": "1: D3D12 DCLF draws pass the first instance in a root constant per draw, as before Shader Model 6.8's SV_StartInstanceLocation"
-		},
-		{
 			"name": "CS_ORG_D3D12_SDK",
 			"key": "",
 			"type": "string",

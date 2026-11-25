@@ -41,7 +41,7 @@ Shader Model 6.8 gives the vertex stage `SV_StartInstanceLocation`.
   The records keep their instance word; the draws start past it.
 - Direct draws pass first instance 0, so they need nothing more.
 - Below 6.8 the root constant path stays.
-  `CS_ORG_D3D12_INSTANCE_WORD=1` forces it on a 6.8 device, to compare the two.
+  (The A/B switch that forced it on a 6.8 device was removed on 2026-11-25.)
 - FXC and Vulkan builds are unchanged: everything is behind `DCLF_START_INSTANCE`, which only D3D12 builds get.
 
 The game's DXC is the Vulkan SDK's `dxcompiler.dll` (1.4.357.0 ships DXC 1.9.0.5399), which compiles Shader Model 6.8.
