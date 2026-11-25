@@ -3,6 +3,7 @@
 #include "RenderGraph/FrameAnchors.h"
 
 #include <cstdint>
+#include <functional>
 
 namespace RenderGraph::Engine
 {
@@ -22,4 +23,11 @@ namespace RenderGraph::Engine
 	* @return Whether the Tonemap anchor submitted an epoch.
 	*/
 	bool RunTonemapAnchor(std::uint32_t a_input, std::uint32_t a_output);
+
+	/**
+	* @brief CS's work at the HDR effect's call site in RenderEndOfFrameEffects, in order: the Tonemap anchor, Effects11 (which may
+	* replace the effect), then Post Processing's PreProcess. a_render draws the HDR effect from the source it is given into
+	* a_output. Hooks.cpp's call-site hook and the native end-of-frame effects both run it. Render thread.
+	*/
+	void TonemapCallSite(std::uint32_t a_input, std::uint32_t a_output, const std::function<void(std::uint32_t)>& a_render);
 }

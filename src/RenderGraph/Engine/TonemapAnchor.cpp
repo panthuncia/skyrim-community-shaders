@@ -5,6 +5,7 @@
 #include "Globals.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Targets/EngineTargetSet.h"
+#include "State.h"
 
 #include <rhi_helpers.h>
 
@@ -56,5 +57,27 @@ namespace RenderGraph::Engine
 		if (globals::features::postProcessing.loaded)
 			globals::features::postProcessing.BeforeTonemapAnchor(targets);
 		return FrameAnchors::Run({ .anchor = FrameAnchors::Anchor::Tonemap, .input = static_cast<std::int32_t>(a_input), .output = static_cast<std::int32_t>(a_output) });
+	}
+
+	void TonemapCallSite(std::uint32_t a_input, std::uint32_t a_output, const std::function<void(std::uint32_t)>& a_render)
+	{
+		auto* state = globals::state;
+		const auto input = static_cast<RE::RENDER_TARGET>(a_input);
+		const auto output = static_cast<RE::RENDER_TARGET>(a_output);
+		// The ORG FX runtime, Post Processing's graph chain and the Tonemap anchor's epoch.
+		RunTonemapAnchor(a_input, a_output);
+		// Effects11 replaces the pass outright. HandlePostProcessing then fixes up the render-target state the pass would have set.
+		if (state->HandlePostProcessing(input, output))
+			return;
+		auto& postProcessing = globals::features::postProcessing;
+		const bool renderToUI = state->permutationData.RenderToUI;
+		const bool previousFallback = state->IsPostProcessingFallback();
+		const auto fallback = postProcessing.loaded ? postProcessing.PreProcess(input) : std::nullopt;
+		state->SetPostProcessingFallback(fallback.has_value());
+		// On failure the scene is still in its original target. Refraction may have routed it through kMAIN_COPY independently of
+		// the hook input.
+		a_render(fallback && *fallback != output ? static_cast<std::uint32_t>(*fallback) : a_input);
+		if (renderToUI)
+			state->SetPostProcessingFallback(previousFallback);
 	}
 }

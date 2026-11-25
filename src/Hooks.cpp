@@ -507,29 +507,7 @@ namespace PostProcessingExtensions
 	{
 		static void thunk(RE::ImageSpaceManager* a1, RE::ImageSpaceEffect* a2, uint32_t a3, uint32_t a4, RE::ImageSpaceShaderParam* a5)
 		{
-			auto* state = globals::state;
-			const auto input = static_cast<RE::RENDER_TARGET>(a3);
-			const auto output = static_cast<RE::RENDER_TARGET>(a4);
-
-			// The ORG FX runtime, Post Processing's graph chain and the Tonemap anchor's epoch.
-			RenderGraph::Engine::RunTonemapAnchor(a3, a4);
-
-			// Effects11 replaces the pass outright; when it does, the vanilla call is skipped
-			// and HandlePostProcessing fixes up the render-target state the pass would have set.
-			if (state->HandlePostProcessing(input, output))
-				return;
-
-			auto& postProcessing = globals::features::postProcessing;
-			const bool renderToUI = state->permutationData.RenderToUI;
-			const bool previousFallback = state->IsPostProcessingFallback();
-			const auto fallback = postProcessing.loaded ? postProcessing.PreProcess(input) : std::nullopt;
-			state->SetPostProcessingFallback(fallback.has_value());
-			// On failure the scene is still in its original target. Refraction may
-			// have routed it through kMAIN_COPY independently of the hook input.
-			const auto source = fallback && *fallback != output ? static_cast<uint32_t>(*fallback) : a3;
-			func(a1, a2, source, a4, a5);
-			if (renderToUI)
-				state->SetPostProcessingFallback(previousFallback);
+			RenderGraph::Engine::TonemapCallSite(a3, a4, [&](uint32_t a_source) { func(a1, a2, a_source, a4, a5); });
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};

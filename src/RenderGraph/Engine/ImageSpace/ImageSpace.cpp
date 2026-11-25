@@ -17,6 +17,7 @@
 #include "Features/HDRDisplay/ORGHDRDisplay.h"
 #include "Features/IBL/ORGIBL.h"
 #include "Features/PhysicalSky/ORGPhysicalSky.h"
+#include "Features/PostProcessing.h"
 #include "Features/UnifiedWater.h"
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
@@ -62,6 +63,7 @@
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -2308,6 +2310,8 @@ namespace RenderGraph::Engine::ImageSpace
 			a_shader->PostRender();
 		}
 
+#include "RenderGraph/Engine/ImageSpace/NativePost.inl"
+
 		/** @brief BSImagespaceShader::Render (100950 / 107732). */
 		struct ShaderRender
 		{
@@ -2381,15 +2385,17 @@ namespace RenderGraph::Engine::ImageSpace
 			static void thunk(void* a_effect, void* a_quad, void* a_param)
 			{
 				// The HDR effect runs the luminance chain the shape counts. Its change is an event.
-				if (Usable() && Frame::PostChain::LuminanceLevels() != RaisedShape().luminanceLevels)
-					RaiseShape("ImageSpace: the HDR effect's luminance chain changed");
-				EnterScope(ScopeKind::HDR);
-				{
-					const ChainHdrGuard chain;
-					const MenuHdrGuard menu;
-					func(a_effect, a_quad, a_param);
-					LeaveScope();
-				}
+				HdrFamily(a_effect, [&] {
+					if (Usable() && Frame::PostChain::LuminanceLevels() != RaisedShape().luminanceLevels)
+						RaiseShape("ImageSpace: the HDR effect's luminance chain changed");
+					EnterScope(ScopeKind::HDR);
+					{
+						const ChainHdrGuard chain;
+						const MenuHdrGuard menu;
+						func(a_effect, a_quad, a_param);
+						LeaveScope();
+					}
+				});
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -2411,12 +2417,14 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_manager, std::uintptr_t a_source, std::uintptr_t a_destination)
 			{
-				EnterScope(ScopeKind::Composites);
-				{
-					const ChainCompositesGuard chain;
-					func(a_manager, a_source, a_destination);
-					LeaveScope();
-				}
+				CompositesFamily([&] {
+					EnterScope(ScopeKind::Composites);
+					{
+						const ChainCompositesGuard chain;
+						func(a_manager, a_source, a_destination);
+						LeaveScope();
+					}
+				});
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -2555,6 +2563,55 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		* @brief Decision 4 of native-post-chain.md: a family whose container or effect vtable slot holds another mod's hook stays on the
+		* engine path, with one log line naming it. Checked once, at the first frame with the ImageSpace manager. Render owner.
+		*/
+		void CheckForeignHooks()
+		{
+			using namespace NativePost;
+			auto& config = Settings();
+			auto* manager = RE::ImageSpaceManager::GetSingleton();
+			const auto effect = [&](std::uint32_t a_index) -> const void* {
+				return manager && a_index < manager->effects.free_idx() ? manager->effects[static_cast<std::uint16_t>(a_index)] : nullptr;
+			};
+			const auto check = [&](std::uint8_t a_family, std::string a_why) {
+				if (a_why.empty())
+					return;
+				config.foreign |= a_family;
+				logger::warn("[ORG] native post chain: {}; that family stays on the engine path", a_why);
+			};
+			check(Family::kHdr, ForeignAt("ImageSpaceEffectHDR::Render (AE 107183)", REL::ID(107183).address(), HDRRender::func.address()));
+			check(Family::kHdr, ForeignSlot("the HDR effect", effect(0x1e), 7, REL::ID(107185).address()));
+			for (std::uint32_t r = 0; r < 7; ++r)
+				check(Family::kHdr, ForeignSlot(fmt::format("the bloom blur effect {}", r), effect(0x17 + r), 7, REL::ID(108558).address()));
+			check(Family::kComposites, ForeignAt("RenderPreTonemapComposites (AE 105675)", REL::ID(105675).address(), PreTonemapComposites::func.address()));
+			check(Family::kEof, ForeignAt("RenderEndOfFrameEffects (AE 105674)", REL::ID(105674).address(), 0));
+			check(Family::kPost, ForeignAt("RenderWorldPostProcess (AE 107148)", REL::ID(107148).address(), 0));
+			// The tonemap call site inside RenderEndOfFrameEffects is CS's: the native end-of-frame effects run its work themselves.
+			{
+				const auto site = REL::ID(105674).address() + 0x178;
+				const auto target = FollowJumps(site + 5 + *reinterpret_cast<const std::int32_t*>(site + 1));
+				if (!InModule(target, OwnModule()))
+					check(Family::kEof, fmt::format("the HDR effect's call site in RenderEndOfFrameEffects leads to {:#x}, outside Community Shaders", target));
+			}
+			// A family inside a foreign one cannot be native while the outer one stages it.
+			if (config.foreign & Family::kHdr)
+				config.foreign |= Family::kEof | Family::kPost;
+			if (config.foreign & (Family::kEof | Family::kComposites))
+				config.foreign |= Family::kPost;
+			logger::info("[ORG] native post chain: foreign hook check done (families on the engine path for a foreign hook: {:#x})", config.foreign);
+		}
+
+		void NativePost::CheckForeignHooksOnce()
+		{
+			static const bool s_checked = [] {
+				CheckForeignHooks();
+				return true;
+			}();
+			(void)s_checked;
+		}
+
 		/** @brief DispatchCSShader (75532 / 77329). Any other engine dispatch runs the batch first. */
 		struct DispatchCSShader
 		{
@@ -2592,6 +2649,35 @@ namespace RenderGraph::Engine::ImageSpace
 				NativeSteps::s_mode == NativeSteps::Mode::Off     ? "every step captured" :
 				NativeSteps::s_mode == NativeSteps::Mode::Observe ? "param steps computed and compared with the capture" :
 				                                                    "param steps staged from the engine's params, without its draw");
+		}
+			{
+			// The native post chain (native-post-chain.md): 0 the engine's containers, 1 observe, 2 native; optionally ":" and a family
+			// list (hdr, eof, composites, post), all four when none. AE only.
+			const auto value = Switches::Value("CS_ORG_POST_NATIVE");
+			const auto text = value.empty() ? std::string("2") : std::string(value);
+			auto& config = NativePost::Settings();
+			const auto mode = text.substr(0, text.find(':'));
+			config.mode = mode == "1" ? NativePost::Mode::Observe : mode == "2" ? NativePost::Mode::Native : NativePost::Mode::Engine;
+			config.families = NativePost::Family::kAll;
+			if (const auto colon = text.find(':'); colon != std::string::npos) {
+				config.families = 0;
+				const auto list = text.substr(colon + 1);
+				config.families |= list.find("hdr") != std::string::npos ? NativePost::Family::kHdr : 0;
+				config.families |= list.find("eof") != std::string::npos ? NativePost::Family::kEof : 0;
+				config.families |= list.find("composites") != std::string::npos ? NativePost::Family::kComposites : 0;
+				config.families |= list.find("post") != std::string::npos ? NativePost::Family::kPost : 0;
+			}
+			// The end-of-frame and body families stage the families inside them natively.
+			if (config.mode == NativePost::Mode::Native && (config.families & NativePost::Family::kPost))
+				config.families |= NativePost::Family::kComposites | NativePost::Family::kEof;
+			if (config.mode == NativePost::Mode::Native && (config.families & NativePost::Family::kEof))
+				config.families |= NativePost::Family::kHdr;
+			if (!REL::Module::IsAE() && config.mode != NativePost::Mode::Engine) {
+				logger::info("[ORG] native post chain: SE has no ids for its inputs yet; every family runs on the engine");
+				config.mode = NativePost::Mode::Engine;
+			}
+			NativePost::ResolveGlobals();
+			logger::info("[ORG] native post chain: CS_ORG_POST_NATIVE={} (mode {}, families {:#x})", text, static_cast<int>(config.mode), config.families);
 		}
 		stl::detour_thunk<ShaderRender>(REL::RelocationID(100950, 107732));
 		stl::detour_thunk<HDRRender>(REL::RelocationID(100465, 107183));
@@ -2669,7 +2755,7 @@ namespace RenderGraph::Engine::ImageSpace
 			PublishFlowMap();
 			RaiseShape("ImageSpace::Setup, the flow map");
 		}
-		// The first revision registers the clients the engine is ready for, so the build is ready for the main menu.
+			// The first revision registers the clients the engine is ready for, so the build is ready for the main menu.
 		DeclareSteps();
 	}
 
@@ -2702,7 +2788,8 @@ namespace RenderGraph::Engine::ImageSpace
 		// After the revision's adoption, so a change is a later revision's.
 		if (!Usable())
 			return;
-		NoteWorldBegin();
+			NoteWorldBegin();
+		NativePost::ReadA();
 		// The engine makes its ImageSpace manager, effects and blend states after CS's setup, with no hook of ours. Until it has,
 		// each Begin raises the shape. Then the hooks raise what changes.
 		auto& state = IS();
@@ -2747,6 +2834,26 @@ namespace RenderGraph::Engine::ImageSpace
 		a_out.outputFormat = RtvFormatOf(chain.final, a_out.output);
 		a_out.chain = true;
 		return a_out.input && a_out.output;
+	}
+
+		void WorldPostProcess(std::uint32_t a_target, const std::function<void()>& a_engine)
+	{
+		NativePost::ReadB();
+		const auto& f = NativePost::R().frame;
+		if (IS().on && f.readB && Chain().group.Registered() && NativePost::In(NativePost::Mode::Native, NativePost::Family::kPost)) {
+			NativePost::RunBody(a_target);
+			return;
+		}
+		a_engine();
+	}
+
+	void WorldEndOfFrame(std::int32_t a_source, std::int32_t a_final, const std::function<void()>& a_engine)
+	{
+		if (!IS().on) {
+			a_engine();
+			return;
+		}
+		EofFamily(a_source, a_final, a_engine);
 	}
 
 	bool SceneInMain()
