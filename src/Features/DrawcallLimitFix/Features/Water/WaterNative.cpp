@@ -39,9 +39,9 @@ namespace DCLF::Features::Water::Native
 		{
 			// The engine globals SetupGeometry reads that the water port does not (AE, SE).
 			inline constexpr Engine::Offset kWhiteTexture{ { 411503 }, { 525021 } };  // NiSourceTexture*: a normal map slot without a texture
-			// std::int32_t: the render target the wading displacement reads at t2, kWATER_DISPLACEMENT or its swap. No SE id is known, so
-			// on SE a wading pass is not computed and its batch stays the engine's.
-			inline constexpr Engine::Offset kDisplacementTarget{ { 415235 }, {} };
+			// std::int32_t: the render target the wading displacement reads at t2, kWATER_DISPLACEMENT or its swap. ImageSpaceEffectWaterDisplacement
+			// (vtable slot 1) writes it after each simulation step; BSWaterShader::SetupGeometry reads it (AE 0x1433dcf0c, SE 0x143283adc).
+			inline constexpr Engine::Offset kDisplacementTarget{ { 415235 }, { 528285 } };
 		}
 
 		template <class T>
