@@ -211,12 +211,28 @@ WorldScope StartStepScope()
 std::string StageGeometry(Pending& a_pending)
 {
 	auto& state = IS();
-	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+	auto& native = NativeSteps::Get();
+	const auto* shape = static_cast<const DCLF::Family::TriShape*>(state.drawShape);
+	std::uint32_t start = state.drawStart, triangles = state.drawTriangles;
+	std::uint32_t topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	if (native.armed) {
+		// Native: the quad BuildShape read from the geometry the engine passed to Render.
+		shape = static_cast<const DCLF::Family::TriShape*>(native.sprite.shape);
+		start = 0;
+		triangles = native.sprite.triangles;
+	} else {
+		topology = static_cast<std::uint32_t>(RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().topology);
+		if (native.sprite.shape && (native.sprite.shape != state.drawShape || state.drawStart != 0 || native.sprite.triangles != state.drawTriangles ||
+										topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)) {
+			++native.differed;
+			NativeSteps::Differences().Report("ISWaterDisplacementWadingRipple quad", fmt::format("computed {} 0 {} vs captured {} {} {} topology {}", native.sprite.shape,
+				native.sprite.triangles, state.drawShape, state.drawStart, state.drawTriangles, topology));
+		}
+	}
 	DCLF::Family::Geometry geometry;
 	auto owners = std::make_shared<DCLF::Family::Owners>();
 	std::string detail;
-	const auto result = DCLF::Family::LatchGeometry(static_cast<const DCLF::Family::TriShape*>(state.drawShape), state.drawStart, state.drawTriangles, ~std::uint64_t(0),
-		static_cast<std::uint32_t>(shadow.topology), geometry, *owners, &detail);
+	const auto result = DCLF::Family::LatchGeometry(shape, start, triangles, ~std::uint64_t(0), topology, geometry, *owners, &detail);
 	if (result != DCLF::Family::GeometryResult::Ok)
 		return fmt::format("{} ({})", DCLF::Family::ReasonOf(result), detail);
 	if (geometry.firstIndex > 0xFFFF || geometry.stride > 0xFFFF)

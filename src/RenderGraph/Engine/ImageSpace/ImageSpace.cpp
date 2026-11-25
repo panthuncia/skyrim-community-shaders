@@ -1616,6 +1616,18 @@ namespace RenderGraph::Engine::ImageSpace
 				return nullptr;
 			}
 
+			/** @brief A geometry step's quad (a wading ripple): the TriShape's renderer data and its whole index range, as the dispatcher draws it. */
+			const char* BuildShape(const void* a_geometry, State::Sprite& a_out)
+			{
+				a_out = {};
+				const auto* geometry = static_cast<const RE::BSGeometry*>(a_geometry);
+				if (!geometry || geometry->GetType().get() != RE::BSGeometry::Type::kTriShape)
+					return "a geometry that is not a TriShape";
+				a_out.shape = geometry->GetGeometryRuntimeData().rendererData;
+				a_out.triangles = static_cast<const RE::BSTriShape*>(geometry)->GetTrishapeRuntimeData().triangleCount;
+				return nullptr;
+			}
+
 			/** @brief The PerFrame bytes for a step: CS's FrameBuffer, uploaded again only when it changed. */
 			Constants::Location FrameLocation()
 			{
@@ -2115,9 +2127,10 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!state.current->eligible)
 				return "a draw the capture refuses";
 			const auto& info = kEffects[state.current->effect];
-			// The lens flare sprites are geometry steps the native path makes whole (BuildSprite).
+			// The lens flare sprites and the wading ripples are geometry steps the native path makes whole (BuildSprite, BuildShape).
 			const bool sprite = info.id == Effects::ISLensFlare;
-			if (!sprite && (info.geometry || info.rastersNothing || info.latched || info.vertexStage))
+			const bool ripple = info.id == Effects::ISWaterDisplacementWadingRipple;
+			if (!sprite && !ripple && (info.geometry || info.rastersNothing || info.latched || info.vertexStage))
 				return "a geometry, loaded-texture or no-raster step";
 			using E = Effects;
 			switch (info.id) {
@@ -2179,6 +2192,7 @@ namespace RenderGraph::Engine::ImageSpace
 			bool a_explicit = false)
 		{
 			auto& native = NativeSteps::Get();
+			native.sprite = {};
 			if (const char* why = NativeStepNow()) {
 				if (NativeSteps::s_mode != NativeSteps::Mode::Off && IS().current) {
 					static Util::ReasonLog s_capture("[ORG] ImageSpace native: a draw is captured");
@@ -2187,10 +2201,12 @@ namespace RenderGraph::Engine::ImageSpace
 				a_render();
 				return;
 			}
-			const bool sprite = kEffects[IS().current->effect].id == Effects::ISLensFlare;
+			const auto id = kEffects[IS().current->effect].id;
 			const char* why = a_explicit ? NativeSteps::BoundRows(native.rows) : NativeSteps::BuildRows(*a_shader, a_param, native.rows);
-			if (!why && sprite)
+			if (!why && id == Effects::ISLensFlare)
 				why = NativeSteps::BuildSprite(*a_shader, a_param, a_geometry, native.sprite);
+			else if (!why && id == Effects::ISWaterDisplacementWadingRipple)
+				why = NativeSteps::BuildShape(a_geometry, native.sprite);
 			if (why) {
 				++native.declined;
 				static Util::ReasonLog s_declined("[ORG] ImageSpace native: a step stays the capture's");
