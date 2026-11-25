@@ -1314,7 +1314,7 @@ void HDRDisplay::ClearUIBuffer()
 void HDRDisplay::ApplyHDR()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "HDR Processing");
+	CS_GPU_ZONE(globals::state->tracyCtx, "HDR Processing");
 
 	std::lock_guard<std::mutex> lock(settingsMutex);
 

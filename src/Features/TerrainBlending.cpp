@@ -261,7 +261,7 @@ void TerrainBlending::ResetDepth()
 	// The EarlyPrepass anchor's pass cleared it this frame (ORGTerrainBlending).
 	if (ORGTerrainBlending::Get().TerrainDepthCleared())
 		return;
-	TracyD3D11Zone(globals::state->tracyCtx, "Terrain Blending - Reset Depth");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Terrain Blending - Reset Depth");
 	auto context = globals::d3d::context;
 
 	auto dsv = terrainDepth.views[0];
@@ -272,7 +272,7 @@ void TerrainBlending::ResetDepth()
 
 void TerrainBlending::ResetTerrainDepth()
 {
-	TracyD3D11Zone(globals::state->tracyCtx, "Terrain Blending - Reset Terrain Depth");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Terrain Blending - Reset Terrain Depth");
 	if (globals::state->frameAnnotations)
 		globals::state->BeginPerfEvent("Terrain Blending - Reset Terrain Depth");
 
@@ -291,7 +291,7 @@ void TerrainBlending::ResetTerrainDepth()
 void TerrainBlending::BlendPrepassDepths()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Terrain Blending - Blend Prepass Depths");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Terrain Blending - Blend Prepass Depths");
 	if (globals::state->frameAnnotations)
 		globals::state->BeginPerfEvent("Terrain Blending - Blend Prepass Depths");
 
@@ -316,7 +316,7 @@ void TerrainBlending::BlendPrepassDepths()
 	auto dispatchCount = Util::GetScreenDispatchCount();
 
 	{
-		TracyD3D11Zone(globals::state->tracyCtx, "Terrain Blending - Depth Blend CS");
+		CS_GPU_ZONE(globals::state->tracyCtx, "Terrain Blending - Depth Blend CS");
 
 		ID3D11ShaderResourceView* views[2] = { RenderGraph::Engine::Tripwire::Unwrap(depthSRVBackup), terrainDepth.depthSRV };
 		context->CSSetShaderResources(0, ARRAYSIZE(views), views);
@@ -503,7 +503,7 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 	const uint64_t noBlendPassCount = static_cast<uint64_t>(renderPasses.size());
 
 	if (terrainPassCount != 0 || noBlendPassCount != 0) {
-		TracyD3D11Zone(globals::state->tracyCtx, "Terrain Blending - Render Passes");
+		CS_GPU_ZONE(globals::state->tracyCtx, "Terrain Blending - Render Passes");
 		if (globals::state->frameAnnotations)
 			globals::state->BeginPerfEvent("Terrain Blending - Render Passes");
 

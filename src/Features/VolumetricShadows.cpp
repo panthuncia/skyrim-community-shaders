@@ -84,7 +84,7 @@ void VolumetricShadows::ClearShaderCache()
 void VolumetricShadows::CopyShadowLightData(ID3D11ShaderResourceView* a_shadowMap)
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "VolumetricShadows::CopyShadowLightData");
+	CS_GPU_ZONE(globals::state->tracyCtx, "VolumetricShadows::CopyShadowLightData");
 
 	auto context = globals::d3d::context;
 

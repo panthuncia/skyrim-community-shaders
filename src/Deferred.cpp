@@ -258,18 +258,24 @@ void Deferred::ReflectionsPrepasses()
 
 	Feature::ForEachLoadedFeature("ReflectionsPrepass", [](Feature* feature) { feature->ReflectionsPrepass(); }, true);
 	FrameAnchors::Run(FrameAnchors::Anchor::ReflectionsPrepass);
-	globals::features::viewAtmosphere.RenderReflection();
+	{
+		ZoneScopedN("CS.ViewAtmosphere.RenderReflection");
+		globals::features::viewAtmosphere.RenderReflection();
+	}
 }
 
 void Deferred::EarlyPrepasses()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Early Prepass");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Early Prepass");
 
 	// Main::RenderShadowMaps returned: every step of the start stage has tapped (its last, the shadow maps' clears, are inside it). The
 	// stage ends here at the latest. In a frame without Drawcall Limit Fix's shadow view epoch (a load hold) it would otherwise stay open
 	// until the pre-depth stage's first tap, after the D3D11 work below.
-	(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Start);
+	{
+		ZoneScopedN("CS.Deferred.TapStart");
+		(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Start);
+	}
 
 	sceneDepthFinal = false;
 
@@ -295,7 +301,7 @@ void Deferred::EarlyPrepasses()
 void Deferred::PrepassPasses()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Prepass");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Prepass");
 
 	auto shaderCache = globals::shaderCache;
 
@@ -305,12 +311,18 @@ void Deferred::PrepassPasses()
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
 
-	globals::features::viewAtmosphere.Prepare();
+	{
+		ZoneScopedN("CS.ViewAtmosphere.Prepare");
+		globals::features::viewAtmosphere.Prepare();
+	}
 	Feature::ForEachLoadedFeature("Prepass", [](Feature* feature) { feature->Prepass(); }, true);
 	Feature::ForEachLoadedFeature("PostPrepass", [](Feature* feature) { feature->PostPrepass(); }, true);
 	// After PostPrepass: Screen Space Shadows hands its graph passes to this anchor there.
 	FrameAnchors::Run(FrameAnchors::Anchor::Prepass);
-	globals::features::viewAtmosphere.Render();
+	{
+		ZoneScopedN("CS.ViewAtmosphere.Render");
+		globals::features::viewAtmosphere.Render();
+	}
 }
 
 void Deferred::StartDeferred()
@@ -368,7 +380,7 @@ void Deferred::StartDeferred()
 void Deferred::DeferredPasses()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Deferred");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Deferred");
 
 	auto renderer = globals::game::renderer;
 	auto context = globals::d3d::context;
@@ -409,20 +421,26 @@ void Deferred::DeferredPasses()
 	auto& skylighting = globals::features::skylighting;
 
 	auto& ssgi = globals::features::screenSpaceGI;
-	if (ssgi.loaded)
+	if (ssgi.loaded) {
+		ZoneScopedN("CS.Deferred.SSGI");
 		ssgi.DrawSSGI();
+	}
 	auto [ssgi_ao, ssgi_y, ssgi_cocg, ssgi_gi_spec] = ssgi.GetOutputTextures();
 	bool ssgi_hq_spec = ssgi.FrameSpecularGI();
 
 	auto dispatchCount = Util::GetScreenDispatchCount(true);
 
 	auto& sss = globals::features::subsurfaceScattering;
-	if (sss.loaded)
+	if (sss.loaded) {
+		ZoneScopedN("CS.Deferred.SSS");
 		sss.DrawSSS();
+	}
 
 	auto& dynamicCubemaps = globals::features::dynamicCubemaps;
-	if (dynamicCubemaps.loaded)
+	if (dynamicCubemaps.loaded) {
+		ZoneScopedN("CS.Deferred.UpdateCubemap");
 		dynamicCubemaps.UpdateCubemap();
+	}
 
 	auto& ibl = globals::features::ibl;
 
@@ -433,8 +451,9 @@ void Deferred::DeferredPasses()
 
 	// Deferred Composite
 	{
-		TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite");
+		CS_GPU_ZONE(globals::state->tracyCtx, "Deferred Composite");
 
+		ZoneScopedN("CS.Deferred.CompositeInputs");
 		ID3D11ShaderResourceView* skylightingProbes = skylighting.loaded ? skylighting.ProbeArraySRV() : nullptr;
 		const std::array<ID3D11ShaderResourceView*, 16> srvs{
 			Unwrap(specular.SRV),                                                                 // t0  SpecularTexture
@@ -506,7 +525,7 @@ void Deferred::DeferredPasses()
 			context->CSSetShader(shader, nullptr, 0);
 
 			{
-				TracyD3D11Zone(globals::state->tracyCtx, "Deferred Composite - Dispatch");
+				CS_GPU_ZONE(globals::state->tracyCtx, "Deferred Composite - Dispatch");
 				globals::profiler->BeginPass("DeferredComposite");
 				context->Dispatch(dispatchCount.x, dispatchCount.y, 1);
 				globals::profiler->EndPass();
@@ -532,10 +551,13 @@ void Deferred::DeferredPasses()
 		context->CSSetShader(nullptr, nullptr, 0);
 	}
 
-	if (dynamicCubemaps.loaded)
+	if (dynamicCubemaps.loaded) {
+		ZoneScopedN("CS.Deferred.CubemapPostDeferred");
 		dynamicCubemaps.PostDeferred();
+	}
 
 	if (globals::features::effects11.loaded) {
+		ZoneScopedN("CS.Deferred.Effects11");
 		globals::features::effects11.DrawVolumetricRays();
 		globals::features::effects11.DrawSunRays();
 	}
@@ -703,7 +725,7 @@ namespace
 void Deferred::CopyShadowLightData()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "CopyShadowLightData");
+	CS_GPU_ZONE(globals::state->tracyCtx, "CopyShadowLightData");
 	if (DirectionalShadowLightData dd{}; GetDirectionalShadowLightData(dd)) {
 		g_lastDirectionalShadow = dd;
 		directionalShadowDataFrame = globals::state->frameCount;

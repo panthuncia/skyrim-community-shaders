@@ -1404,6 +1404,7 @@ void State::SetupResources()
 	(void)data;
 	featureDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc((uint32_t)size), "State::FeatureDataCB");
 	featureDataBytes = static_cast<std::uint32_t>(size);
+	lastFeatureData.clear();  // the new buffer holds nothing yet
 
 	// Grab main texture to get resolution
 	D3D11_TEXTURE2D_DESC texDesc{};
@@ -1415,8 +1416,9 @@ void State::SetupResources()
 	featureLevel = globals::d3d::device->GetFeatureLevel();
 
 	tracyCtx = TracyD3D11Context(globals::d3d::device, globals::d3d::context);
+	gpuZones = tracyCtx && Switches::On("CS_FEATURE_GPU_ZONES");
 #ifdef TRACY_ENABLE
-	Feature::SetTracyCtx(tracyCtx, Switches::On("CS_FEATURE_GPU_ZONES"));
+	Feature::SetTracyCtx(tracyCtx, gpuZones);
 #endif
 
 	globals::profiler->Initialize(globals::d3d::device, globals::d3d::context);
@@ -1665,6 +1667,7 @@ void State::SetAdapterDescription(const std::wstring& description)
 
 void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] bool a_prepass)
 {
+	ZoneScopedN("CS.State.UpdateSharedData");
 	if (preExposureFrame != frameCount) {
 		preExposureFrame = frameCount;
 		previousPreExposure = preExposure;
@@ -1818,14 +1821,17 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 	}
 
 	{
+		ZoneScopedN("CS.State.SharedData.FeatureData");
 		auto [data, size] = GetFeatureBufferData(a_inWorld);
 
 		// Kept for Drawcall Limit Fix, for the same reason as lastSharedData: it packs these bytes into its
-		// own per-draw constants and cannot read them back from the GPU buffer.
-		lastFeatureData.assign(static_cast<const std::byte*>(static_cast<const void*>(data)),
-			static_cast<const std::byte*>(static_cast<const void*>(data)) + size);
-
-		featureDataCB->Update(data, size);
+		// own per-draw constants and cannot read them back from the GPU buffer. It is also what featureDataCB holds,
+		// so an unchanged block (most calls after a frame's first) is not uploaded again.
+		if (lastFeatureData.size() != size || std::memcmp(lastFeatureData.data(), data, size) != 0) {
+			lastFeatureData.resize(size);
+			std::memcpy(lastFeatureData.data(), data, size);
+			featureDataCB->Update(data, size);
+		}
 	}
 
 	VanillaBinding::BindSceneDepth();

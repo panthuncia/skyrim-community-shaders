@@ -2422,7 +2422,7 @@ void PhysicalSky::GenerateLuts()
 	constexpr auto debugStr = "Physical Sky: LUT Generation";
 	state->BeginPerfEvent(debugStr);
 	{
-		TracyD3D11Zone(state->tracyCtx, debugStr);
+		CS_GPU_ZONE(state->tracyCtx, debugStr);
 
 		auto samplers = std::array{ sampTr.get(), sampSv.get(), sampNoise.get() };
 		std::array<ID3D11ShaderResourceView*, 2> srvs = {};
@@ -2544,7 +2544,7 @@ void PhysicalSky::AccumShadow()
 	constexpr auto debugStr = "Physical Sky: Shadow Accumulation";
 	state->BeginPerfEvent(debugStr);
 	{
-		TracyD3D11Zone(state->tracyCtx, debugStr);
+		CS_GPU_ZONE(state->tracyCtx, debugStr);
 
 		auto sampler = sampTr.get();
 		ID3D11ShaderResourceView* directionalShadowLights = nullptr;

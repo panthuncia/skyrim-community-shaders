@@ -647,7 +647,7 @@ bool TerrainShadows::DispatchShadowUpdate(std::span<const ShadowUpdateCB> a_disp
 	// The map is bound as a UAV below.
 	UnbindShadowHeight();
 
-	TracyD3D11Zone(globals::state->tracyCtx, "Terrain Occlusion - Update Shadows");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Terrain Occlusion - Update Shadows");
 
 	/* ---- BACKUP ---- */
 	struct ShaderState

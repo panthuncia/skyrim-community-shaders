@@ -356,7 +356,7 @@ void Skylighting::Prepass()
 	if (interior)
 		return;
 
-	TracyD3D11Zone(globals::state->tracyCtx, "Skylighting - Update Probes");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Skylighting - Update Probes");
 
 	auto context = globals::d3d::context;
 
@@ -757,7 +757,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 
 	BSParticleShaderRainEmitter* rain = new BSParticleShaderRainEmitter;
 	{
-		TracyD3D11Zone(state->tracyCtx, "Skylighting - Render Height Map");
+		CS_GPU_ZONE(state->tracyCtx, "Skylighting - Render Height Map");
 		globals::profiler->BeginPass("Skylighting::OcclusionMask");
 		a_precip->RenderMask((RE::BSParticleShaderRainEmitter*)rain);
 		// RenderMask defers its clear until the first engine draw. The DCLF
@@ -823,7 +823,7 @@ void Skylighting::RenderOcclusionAtShadowMaps()
 		return;
 
 	auto state = globals::state;
-	TracyD3D11Zone(state->tracyCtx, "Occlusion Maps (Drawcall Limit Fix)");
+	CS_GPU_ZONE(state->tracyCtx, "Occlusion Maps (Drawcall Limit Fix)");
 	state->BeginPerfEvent("Occlusion Maps (Drawcall Limit Fix)");
 	// Before the engine's shadow maps, so whatever RenderMask leaves of the renderer's state (its targets, viewport, camera) the shadow maps
 	// set again as they did; the camera the shadow maps begin with is put back besides (EarlyPrepasses reads its eye after them). As
@@ -854,7 +854,7 @@ void Skylighting::RenderOcclusion()
 	auto sky = globals::game::sky;
 
 	if (!shaderCache->IsEnabled()) {
-		TracyD3D11Zone(globals::state->tracyCtx, "Precipitation Mask");
+		CS_GPU_ZONE(globals::state->tracyCtx, "Precipitation Mask");
 		state->BeginPerfEvent("Precipitation Mask");
 		Main_Precipitation_RenderOcclusion::func();
 		state->EndPerfEvent();
@@ -871,7 +871,7 @@ void Skylighting::RenderOcclusion()
 			auto precip = sky->precip;
 
 			{
-				TracyD3D11Zone(globals::state->tracyCtx, "Precipitation Mask");
+				CS_GPU_ZONE(globals::state->tracyCtx, "Precipitation Mask");
 				state->BeginPerfEvent("Precipitation Mask");
 
 				auto precipObject = precip->currentPrecip;
@@ -885,7 +885,7 @@ void Skylighting::RenderOcclusion()
 			}
 
 			{
-				TracyD3D11Zone(globals::state->tracyCtx, "Skylighting Mask");
+				CS_GPU_ZONE(globals::state->tracyCtx, "Skylighting Mask");
 				state->BeginPerfEvent("Skylighting Mask");
 
 				if (dclf.OcclusionNeedsEngine(DrawcallLimitFix::kSkyOcclusion))

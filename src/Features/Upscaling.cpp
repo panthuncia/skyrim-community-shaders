@@ -1792,7 +1792,7 @@ void Upscaling::Upscale()
 		// GPU time comes from the interop buffer's own timestamps (PublishCommandTimings above); a D3D11 timer
 		// around the evaluation would straddle that buffer's submission and count the queue's idle time.
 		state->BeginPerfEvent("Upscaling");
-		TracyD3D11Zone(globals::state->tracyCtx, "Upscaling Dispatch");
+		CS_GPU_ZONE(globals::state->tracyCtx, "Upscaling Dispatch");
 
 		// Engine target fields can be tripwire handles: Streamline and DXVK take the wrapped objects.
 		using RenderGraph::Engine::Tripwire::Unwrap;
@@ -1850,7 +1850,7 @@ void Upscaling::Upscale()
 void Upscaling::PerformUpscaling()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Upscaling");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Upscaling");
 	Upscale();
 	UpscaleDepth();
 	// CS_ORG_UPSCALING: the copy into kMAIN and the depth upscale queued above.
@@ -1890,7 +1890,7 @@ Upscaling::JitterCB Upscaling::DepthUpscaleConstants()
 void Upscaling::UpscaleDepth()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Upscaling - Depth");
+	CS_GPU_ZONE(globals::state->tracyCtx, "Upscaling - Depth");
 
 	if (!IsUpscalingActive()) {
 		return;
@@ -1971,7 +1971,7 @@ void Upscaling::UpscaleDepth()
 	};
 
 	{
-		TracyD3D11Zone(globals::state->tracyCtx, "Upscaling - Depth Upscale");
+		CS_GPU_ZONE(globals::state->tracyCtx, "Upscaling - Depth Upscale");
 
 		copyIfNonAliased(depthCopy.texture, depth.texture);
 
@@ -1992,7 +1992,7 @@ void Upscaling::UpscaleDepth()
 	}
 
 	{
-		TracyD3D11Zone(globals::state->tracyCtx, "Upscaling - Underwater Mask");
+		CS_GPU_ZONE(globals::state->tracyCtx, "Upscaling - Underwater Mask");
 
 		viewport.Width = screenSize.x * 0.5f;
 		viewport.Height = screenSize.y * 0.5f;
