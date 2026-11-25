@@ -43,16 +43,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 	using FaceOriented = void (*)(const ShadowCameras::Camera& a_camera, std::uint32_t a_face);
 	void SetFaceOriented(FaceOriented a_callback);
 
-	/** @brief CS_DCLF_REFLECTION_NATIVE (perf-reflections.md). */
-	enum class Mode : std::uint8_t
-	{
-		Engine,   // 0: the engine renders every face
-		Observe,  // 1: the engine renders; the native cameras and sky passes are computed and compared with its
-		Native,   // 2 (default): DCLF draws a plain face whose LOD roots it owns without the engine's face render
-	};
-	void SetMode(Mode a_mode);
-
-	/** @brief The faces' report line since the last call: native and engine faces, and the observe mode's camera parity. */
+	/** @brief The faces' report line since the last call: native faces and the faces left to the engine. */
 	std::string TakeReport();
 
 	/**

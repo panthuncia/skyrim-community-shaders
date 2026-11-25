@@ -16,7 +16,6 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include <array>
-#include <bit>
 #include <cstring>
 #include <set>
 #include <utility>
@@ -49,13 +48,11 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 		RootsOwned rootsOwned = nullptr;
 		std::uint32_t skipRoots = 0;
 		RootStats rootStats;
-		Mode mode = Mode::Native;
 
 		/** @brief Since the last report. */
 		struct FaceStats
 		{
 			std::uint32_t native = 0, engine = 0, submitFailed = 0;
-			std::uint32_t camerasCompared = 0, camerasDiffer = 0;
 			std::string engineWhy;  // the last reason a face was the engine's
 		};
 		FaceStats faceStats;
@@ -81,11 +78,30 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			return port;
 		}
 
+		/** @brief The reflection cube's face size, read again only when the engine's cube texture changes. */
+		std::array<std::uint32_t, 2> CubeSize()
+		{
+			static ID3D11Texture2D* texture = nullptr;
+			static std::array<std::uint32_t, 2> size{};
+			auto* renderer = globals::game::renderer;
+			auto* next = renderer ? ::RenderGraph::Engine::Tripwire::Unwrap(renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].texture) : nullptr;
+			if (next != texture) {
+				texture = next;
+				size = {};
+				if (texture) {
+					D3D11_TEXTURE2D_DESC desc{};
+					texture->GetDesc(&desc);
+					size = { desc.Width, desc.Height };
+				}
+			}
+			return size;
+		}
+
 		/**
 		 * @brief A face's camera without SetFace: the position TESWaterReflections::Update gave the cube camera (its local translate;
 		 * the world transform follows only at SetFace's update), the face's rotation, and the frustum and port the update set.
 		 */
-		Sky::FaceView NativeFace(const RE::NiCamera& a_cube, std::uint32_t a_face, ShadowCameras::Camera& a_camera)
+		Sky::FaceView NativeFace(const RE::NiCamera& a_cube, std::uint32_t a_face, const std::array<std::uint32_t, 2>& a_size, ShadowCameras::Camera& a_camera)
 		{
 			Sky::FaceView view;
 			view.face = a_face;
@@ -100,41 +116,8 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			ShadowCameras::CameraMatrices(view.world, view.frustum, port, a_camera);
 			view.viewProj = a_camera.viewProj;
 			view.eye = view.world.translate;
-			std::uint32_t width = 0, height = 0;
-			if (auto* renderer = globals::game::renderer)
-				if (auto* texture = ::RenderGraph::Engine::Tripwire::Unwrap(renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].texture)) {
-					D3D11_TEXTURE2D_DESC desc{};
-					texture->GetDesc(&desc);
-					width = desc.Width;
-					height = desc.Height;
-				}
-			view.rect = ShadowCameras::Viewport(port, width, height);
+			view.rect = ShadowCameras::Viewport(port, a_size[0], a_size[1]);
 			return view;
-		}
-
-		/** @brief Observe mode: the engine's face camera against the native one. The first difference is logged once. */
-		void CompareCamera(const RE::NiCamera& a_engine, std::uint32_t a_face, const ShadowCameras::Camera& a_mine)
-		{
-			ShadowCameras::Camera engine;
-			ShadowCameras::CameraMatrices(a_engine, engine);
-			++faceStats.camerasCompared;
-			std::string what;
-			const auto check = [&](std::string_view a_name, const float* a_n, const float* a_e, std::size_t a_count) {
-				for (std::size_t i = 0; i < a_count && what.empty(); ++i)
-					if (!ShadowCameras::Close(a_n[i], a_e[i]))
-						what = fmt::format("{}[{}] native {}, engine {}", a_name, i, a_n[i], a_e[i]);
-			};
-			check("view", a_mine.view.data(), engine.view.data(), 16);
-			check("proj", a_mine.proj.data(), engine.proj.data(), 16);
-			check("viewProj", a_mine.viewProj.data(), engine.viewProj.data(), 16);
-			check("eye", a_mine.eye.data(), engine.eye.data(), 3);
-			check("port", a_mine.port.data(), engine.port.data(), 4);
-			if (what.empty())
-				return;
-			++faceStats.camerasDiffer;
-			static bool logged = false;
-			if (!std::exchange(logged, true))
-				logger::warn("[DCLF] reflection native: face {}'s camera differs from the engine's: {} (logged once)", a_face, what);
 		}
 
 		/** @brief TESWaterReflections::Update (0x140520570). Decides which roots DCLF draws before its add-roots. */
@@ -180,11 +163,6 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 					return;
 				ShadowCameras::Camera engine;
 				ShadowCameras::CameraMatrices(*a_camera, engine);
-				if (mode == Mode::Observe && a_face < 6) {
-					ShadowCameras::Camera mine;
-					NativeFace(*a_camera, a_face, mine);
-					CompareCamera(*a_camera, a_face, mine);
-				}
 				if (faceOriented)
 					faceOriented(engine, a_face);
 			}
@@ -199,22 +177,32 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 		}
 
 		/**
-		 * @brief Draws a_faces without the engine's face render: per face, its sky computed from the Sky object list, CS's reflection
-		 * prepasses (Deferred, as its face render hook runs them), and DCLF's LOD camera. Returns the faces left to the engine.
+		 * @brief Draws a_faces without the engine's face render: per face, its sky computed from the Sky object list and DCLF's LOD camera,
+		 * after CS's reflection prepasses (Deferred, as its face render hook runs them). The prepasses and the inputs they bind are the
+		 * same for every face, so they run once a frame. Returns the faces left to the engine.
 		 */
 		std::uint32_t DrawNative(RE::NiCamera* a_camera, std::uint32_t a_faces)
 		{
 			DCLF_ZONE("CS.DCLF.Reflection.NativeFaces");
+			struct Prepared
+			{
+				std::uint32_t face = 0;
+				ShadowCameras::Camera camera;
+				std::shared_ptr<Sky::Run> run;
+			};
+			std::array<Prepared, 6> prepared;
+			std::uint32_t count = 0;
 			std::uint32_t left = 0;
+			const auto size = CubeSize();
+			// Each face's run first. A face the sky family cannot take is the engine's, whose face render runs the prepasses itself.
 			for (std::uint32_t f = 0; f < 6; ++f) {
 				const std::uint32_t bit = 1u << f;
 				if (!(a_faces & bit))
 					continue;
-				ShadowCameras::Camera view;
-				const auto face = NativeFace(*a_camera, f, view);
+				auto& face = prepared[count];
 				std::string why;
-				auto run = Sky::PrepareFace(face, why);
-				if (!run) {
+				face.run = Sky::PrepareFace(NativeFace(*a_camera, f, size, face.camera), why);
+				if (!face.run) {
 					left |= bit;
 					++faceStats.engine;
 					static std::set<std::string> logged;
@@ -223,23 +211,40 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 					faceStats.engineWhy = std::move(why);
 					continue;
 				}
-				camera = a_camera;
-				faceMask = bit;
-				plain = true;
-				globals::deferred->BeginReflectionFace();
-				if (!Sky::SubmitFace(std::move(run)))
+				face.face = f;
+				++count;
+			}
+			if (!count)
+				return left;
+			camera = a_camera;
+			faceMask = 1u << prepared[0].face;
+			plain = true;
+			// The update renders one face a call, and a frame may hold several updates. The prepasses bind the same views every time and
+			// their graph clients run only at the frame's first, so they run and are read once a frame.
+			static std::uint32_t preparedFrame = UINT32_MAX;
+			static Sky::FaceInputs inputs;
+			const auto frame = Family::GameFrame();
+			const bool first = std::exchange(preparedFrame, frame) != frame;
+			globals::deferred->BeginReflectionFace(first);
+			if (first)
+				inputs = Sky::ReadFaceInputs();
+			for (std::uint32_t i = 0; i < count; ++i) {
+				auto& face = prepared[i];
+				faceMask = 1u << face.face;
+				if (!Sky::SubmitFace(std::move(face.run), inputs))
 					++faceStats.submitFailed;
 				if (faceOriented)
-					faceOriented(view, f);
-				globals::deferred->EndReflectionFace();
-				camera = nullptr;
-				faceMask = 0;
-				if (faceStats.native++ == 0) {
-					static bool first = true;
-					if (std::exchange(first, false))
-						logger::info("[DCLF] reflection native: the first face drawn without the engine's face render (face {})", f);
-				}
+					faceOriented(face.camera, face.face);
 			}
+			globals::deferred->EndReflectionFace();
+			camera = nullptr;
+			faceMask = 0;
+			if (faceStats.native == 0) {
+				static bool logFirst = true;
+				if (std::exchange(logFirst, false))
+					logger::info("[DCLF] reflection native: the first face drawn without the engine's face render (face {})", prepared[0].face);
+			}
+			faceStats.native += count;
 			return left;
 		}
 
@@ -252,7 +257,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 				const bool plainMode = !a_silhouettes && !a_noSky;
 				// A plain face whose LOD roots are all DCLF's holds only the sky, which the sky family computes, so the engine's render
 				// is skipped. An update that adds roots DCLF does not draw stays the engine's.
-				if (mode == Mode::Native && a_camera && plainMode && skipRoots == (kLodRoots | kTreeRoot) && Sky::Enabled()) {
+				if (a_camera && plainMode && skipRoots == (kLodRoots | kTreeRoot) && Sky::Enabled()) {
 					a_faces = DrawNative(a_camera, a_faces);
 					if (!a_faces) {
 						if (a_clearRoots)
@@ -273,21 +278,11 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 					accumulators.count = 2;
 					capture.SetViewRenderers(kView, accumulators);
 				}
-				// Observe mode: the sky batch of a single face compares the native face's passes with the engine's.
-				Sky::FaceView observed;
-				const bool observe = mode == Mode::Observe && a_camera && plainMode && std::has_single_bit(a_faces) && a_faces < 64;
-				if (observe) {
-					ShadowCameras::Camera unused;
-					observed = NativeFace(*a_camera, static_cast<std::uint32_t>(std::countr_zero(a_faces)), unused);
-					Sky::ObserveFace(&observed);
-				}
 				capture.SetViewWithholdActive(kView, plain);
 				capture.SetViewRendering(kView, true);
 				func(a_camera, a_faces, a_silhouettes, a_clearRoots, a_noSky);
 				capture.SetViewRendering(kView, false);
 				capture.SetViewWithholdActive(kView, false);
-				if (observe)
-					Sky::ObserveFace(nullptr);
 				camera = nullptr;
 				faceMask = 0;
 			}
@@ -344,17 +339,12 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 	bool Plain() { return plain; }
 	void SetFaceOriented(FaceOriented a_callback) { faceOriented = a_callback; }
 	void SetRootsOwned(RootsOwned a_callback) { rootsOwned = a_callback; }
-	void SetMode(Mode a_mode) { mode = a_mode; }
 
 	std::string TakeReport()
 	{
 		const auto s = std::exchange(faceStats, {});
-		std::string text = fmt::format("[DCLF] reflection faces without the engine (CS_DCLF_REFLECTION_NATIVE={}): {} drawn natively, {} sky submits failed{}, {} the engine's{}",
-			static_cast<int>(mode), s.native, s.submitFailed, s.submitFailed ? " <- FAILED" : "", s.engine,
-			s.engineWhy.empty() ? std::string() : fmt::format(" (last: {})", s.engineWhy));
-		if (mode == Mode::Observe)
-			text += fmt::format("; cameras compared {}, differ {}{}", s.camerasCompared, s.camerasDiffer, s.camerasDiffer ? " <- DIFFER" : "");
-		return text + "\n";
+		return fmt::format("[DCLF] reflection faces without the engine: {} drawn natively, {} sky submits failed{}, {} the engine's{}\n", s.native, s.submitFailed,
+			s.submitFailed ? " <- FAILED" : "", s.engine, s.engineWhy.empty() ? std::string() : fmt::format(" (last: {})", s.engineWhy));
 	}
 
 	RootStats TakeRootStats()

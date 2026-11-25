@@ -119,7 +119,7 @@ same in guest mode.
 ## Decisions (by the agent, to confirm)
 
 - **The switch stays** (`CS_DCLF_REFLECTION_NATIVE`, default 2): observe mode is the parity tool, as for the sky. Delete it with
-  the sky's latch path.
+  the sky's latch path. Deleted in round 2 with the sky's latch path ([perf2-faces.md](perf2-faces.md)).
 - **The faces' starting state follows the engine's steady state.** The engine's state at a face's sky batch carries over from what
   ran before: after a load the first face had write mode 11 (later 1) and the cloud group stencil mode 0 (later 2). The native face
   always uses write 1 and stencil mode 2.

@@ -565,16 +565,6 @@
 			"description": "0: the engine draw families queue none of the program manifest's keys at setup, so each program builds at its first draw, as on a cold shader store's first run (the manifest is still read and saved)"
 		},
 		{
-			"name": "CS_DCLF_REFLECTION_NATIVE",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "0: the engine renders the water reflection's cube faces; 1: as 0, and each face's camera and sky passes are also computed without it and compared with the engine's (differences logged once each); 2 (default): a plain face whose LOD roots DCLF draws is drawn without the engine's face render, its sky computed from the Sky object list (perf-reflections.md)"
-		},
-		{
 			"name": "CS_DCLF_RELEASE_GUARD",
 			"key": "",
 			"type": "bool",
@@ -633,16 +623,6 @@
 			"kind": "other",
 			"family": "dclf",
 			"description": ""
-		},
-		{
-			"name": "CS_DCLF_SKY_NATIVE",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "0: the sky batch, cloud layers and the sun's occlusion query draw are drawn from their latched engine draws; 1: as 0, and their draws are also computed from the engine's registered passes and the sun geometry and compared with the latched ones (differences logged once each); 2 (default): they are drawn from the computed draws, the engine's calls draw nothing of them, and the engine's sun query call is not made (dclf-native-sky.md)"
 		},
 		{
 			"name": "CS_DCLF_STAGE_DUMP",
