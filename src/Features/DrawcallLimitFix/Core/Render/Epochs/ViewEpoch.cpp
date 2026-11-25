@@ -75,22 +75,27 @@ namespace DCLF
 
 		namespace
 		{
-			/**
-			 * @brief Writes the view's forward class map into its latch slot, which BuildDrawsCS uses to class each forward draw.
-			 * False without a forward range, and then every forward draw is dropped and counted.
-			 */
-			bool WriteViewClassMap(const ViewFrame& a_shape, std::string_view a_what, const org::RunRef& a_latchRun)
+			/** @brief Whether the view has a forward class map. Without one every forward draw is dropped and counted. */
+			bool HasViewClassMap(const ViewFrame& a_shape)
+			{
+				return !a_shape.forwardRanges.empty() && a_shape.indirect.classOf.size() <= a_shape.latchLayout.classMapWords;
+			}
+
+			/** @brief Writes the view's forward class map into its latch slot, which BuildDrawsCS uses to class each forward draw. */
+			void WriteViewClassMap(const ViewFrame& a_shape, std::string_view a_what, const org::RunRef& a_latchRun)
 			{
 				const auto& classOf = a_shape.indirect.classOf;
 				const auto& layout = a_shape.latchLayout;
-				if (a_shape.forwardRanges.empty() || classOf.size() > layout.classMapWords)
-					return false;
+				if (!HasViewClassMap(a_shape))
+					return;
 				const std::uint32_t header[kClassHeaderWords] = { static_cast<std::uint32_t>(classOf.size()), 0, 0, 0 };
 				LatchWrite(*a_shape.latch, a_what, a_latchRun, layout.ClassMapOffset(), std::as_bytes(std::span(header)));
 				if (!classOf.empty())
 					LatchWrite(*a_shape.latch, a_what, a_latchRun, layout.ClassMapOffset() + kClassHeaderWords * 4, std::as_bytes(std::span(classOf)));
-				return true;
 			}
+
+			// Per view, the latch regions already holding the shape's maps and face tables. Render thread.
+			std::array<Draws::LatchRegionsHeld, static_cast<std::size_t>(Api::EngineView::Count)> viewShapeRegions;
 		}
 
 		std::uint32_t SetClassOf(const Lookups* a_lookups, const IndirectState& a_indirect, std::uint32_t a_slot)
@@ -348,8 +353,17 @@ namespace DCLF
 		const auto region = static_cast<std::uint32_t>(latchBlock.Offset(latchRun));
 		// Slots the tables gained since the map was made get no bucket, since none of their draws is the frame's.
 		const std::uint32_t slots = std::min(std::max(static_cast<std::uint32_t>(map.size()), InstalledPipelineSlots()), layout.slots);
-		WriteBucketMap(latchBlock, labels.map, latchRun, layout.MapOffset(), map, slots);
-		const bool classMap = WriteViewClassMap(a_shape, labels.map, latchRun);
+		// The maps and face tables belong to the shape, whose map is made with it. Written only when this run's region holds another's.
+		auto& held = viewShapeRegions[static_cast<std::size_t>(a_shape.kind)].Of(latchRun, a_shape.latch, a_shape.map, slots);
+		TracyCZoneN(mapsZone, "CS.DCLF.View.Maps", true);
+		TracyCZoneValue(mapsZone, slots);
+		if (!Draws::LatchRegionsHeld::Hold(held, 0)) {
+			WriteBucketMap(latchBlock, labels.map, latchRun, layout.MapOffset(), map, slots);
+			WriteViewClassMap(a_shape, labels.map, latchRun);
+		}
+		const bool classMap = HasViewClassMap(a_shape);
+		TracyCZoneEnd(mapsZone);
+		TracyCZoneN(facesZone, "CS.DCLF.View.Faces", true);
 		const std::uint32_t frameNumber = Scene::FrameView::Get().SceneStep();
 		auto& state = View(a_shape.kind);
 		const auto* view = state.resources.get();
@@ -358,17 +372,19 @@ namespace DCLF
 		for (std::uint32_t f = 0; f < a_faces.size() && f < traits.faces; ++f) {
 			const auto& face = a_faces[f];
 			// The face's bucket table, then one forward entry per state class.
-			table.clear();
-			for (const auto& bucket : a_shape.buckets) {
-				table.push_back(f * a_shape.sequenceDraws + bucket.first);
-				table.push_back(bucket.capacity);
+			if (!Draws::LatchRegionsHeld::Hold(held, 1 + f)) {
+				table.clear();
+				for (const auto& bucket : a_shape.buckets) {
+					table.push_back(f * a_shape.sequenceDraws + bucket.first);
+					table.push_back(bucket.capacity);
+				}
+				for (const auto& range : a_shape.forwardRanges) {
+					table.push_back(f * a_shape.sequenceDraws + range.first);
+					table.push_back(range.capacity);
+				}
+				if (!table.empty())
+					LatchWrite(latchBlock, labels.tables, latchRun, layout.TableOffset(f), std::as_bytes(std::span(table)));
 			}
-			for (const auto& range : a_shape.forwardRanges) {
-				table.push_back(f * a_shape.sequenceDraws + range.first);
-				table.push_back(range.capacity);
-			}
-			if (!table.empty())
-				LatchWrite(latchBlock, labels.tables, latchRun, layout.TableOffset(f), std::as_bytes(std::span(table)));
 			const std::uint32_t inputs = face.drawn ? a_inputs : 0u;
 			BuildDrawsLatch latch{};
 			latch.dispatch[0] = (inputs + 63) / 64;
@@ -404,6 +420,8 @@ namespace DCLF
 			}
 			drawn += face.drawn ? 1u : 0u;
 		}
+		TracyCZoneEnd(facesZone);
+		ZoneNamedN(recordZone, "CS.DCLF.View.FrameRecord", true);
 		if (auto* own = state.resources.get(); own && own->frameConstants) {
 			// The view's own frame constants, filled from this frame's sources. The faces' programs read no other frame slot.
 			const auto& adopted = Adopted();

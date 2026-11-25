@@ -284,7 +284,6 @@ namespace PublishedResources
 		bool PublishEntry(std::string_view a_id, const Source& a_source, std::optional<org::SRVViewType> a_view)
 		{
 			auto& state = Published();
-			++state.entriesSerial;
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto* entry = Find(state, a_id);
 			// A slot's entry holds no version. Its readers follow the slot (CurrentOf).
@@ -292,6 +291,10 @@ namespace PublishedResources
 			// The same resource or a new version of the same slot needs no build.
 			if (entry && ((entry->resource && entry->resource == resource) || (entry->slot && entry->slot == a_source.slot) ||
 							 (entry->bufferSlot && entry->bufferSlot == a_source.bufferSlot))) {
+				// A publish of what the entry already holds changes no answer, so lookups keep theirs.
+				const bool sameAlive = !entry->alive.owner_before(a_source.alive) && !a_source.alive.owner_before(entry->alive);
+				if (entry->resource != resource || entry->srv != a_source.srv || entry->twin != a_source.twin || !sameAlive || !entry->published)
+					++state.entriesSerial;
 				entry->resource = std::move(resource);
 				entry->srv = a_source.srv;
 				entry->twin = a_source.twin;
@@ -309,6 +312,7 @@ namespace PublishedResources
 				RenderGraph::Fatal("published resources", fmt::format("'{}' is already published as {}; {} cannot replace it (declare the id once, at setup)", a_id,
 					held ? held->GetName() : std::string("another resource"), a_source.name));
 			}
+			++state.entriesSerial;
 			entry = &state.entries.emplace_back(Entry{ .id = std::string(a_id) });
 			state.entryIndex.try_emplace(entry->id, static_cast<std::uint32_t>(state.entries.size() - 1));
 			entry->resource = std::move(resource);
@@ -598,6 +602,23 @@ namespace PublishedResources
 		if (!a_view)
 			return false;
 		return ExportAnswerOf(a_view).named != UINT32_MAX;
+	}
+
+	const org::IVersionedResource* VersionedSlotOf(std::string_view a_id)
+	{
+		const auto* entry = Find(Published(), a_id);
+		if (!entry)
+			return nullptr;
+		if (entry->slot)
+			return entry->slot.get();
+		return entry->bufferSlot.get();
+	}
+
+	std::uint64_t Serial()
+	{
+		// Both only grow, so their sum changes whenever either does.
+		auto& state = Published();
+		return state.entriesSerial + state.snapshotGeneration.load(std::memory_order_acquire);
 	}
 }
 

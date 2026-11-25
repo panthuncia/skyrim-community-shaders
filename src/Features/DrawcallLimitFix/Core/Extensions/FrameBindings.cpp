@@ -18,6 +18,7 @@
 
 #include <Render/PassBuilders.h>
 #include <Render/PreparedPass.h>
+#include <Resources/VersionedResource.h>
 
 #include <ankerl/unordered_dense.h>
 
@@ -131,6 +132,134 @@ namespace DCLF::Extensions
 				t_generation = generation;
 			}
 			return t_declared;
+		}
+
+		/**
+		 * @brief The frame textures' published lookups, kept while their answers hold. The faces, colour and grass commits ask the
+		 * same ones every frame. A publish, a relocation, a newly declared id or the runtime stopping drops them all. A versioned
+		 * id's index and export follow its adopted version, so its answers also hold only while that version is current. Render
+		 * thread: the commits ask.
+		 */
+		class GraphAnswers
+		{
+		public:
+			/** @brief The id read and its descriptor. An empty read means none of the ids is read. */
+			struct Answer
+			{
+				std::string_view read;
+				std::uint32_t index = 0;
+			};
+
+			/** @brief a_id's descriptor if a build declared it and it is published. a_id must be a static string. */
+			std::optional<std::uint32_t> DeclaredIndex(std::string_view a_id, const DeclaredIds* a_declared)
+			{
+				Refresh();
+				if (const auto found = indices.find(a_id); found != indices.end() && Holds(found->second))
+					return found->second.answer.read.empty() ? std::nullopt : std::optional(found->second.answer.index);
+				Kept kept;
+				if (a_declared && a_declared->Has(a_id)) {
+					kept.Follow(PublishedResources::VersionedSlotOf(a_id));
+					RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
+					if (PublishedResources::ShaderResourceIndex(a_id, kept.answer.index))
+						kept.answer.read = a_id;
+				}
+				indices.insert_or_assign(a_id, kept);
+				return kept.answer.read.empty() ? std::nullopt : std::optional(kept.answer.index);
+			}
+
+			/** @brief The first declared id in a_ids whose export a_view is, and its descriptor. a_ids must be static. */
+			Answer ExportIndex(const ID3D11ShaderResourceView* a_view, std::span<const std::string_view> a_ids, const DeclaredIds* a_declared)
+			{
+				Refresh();
+				const ExportKey key{ a_view, a_ids.data(), a_ids.size() };
+				if (const auto found = exports.find(key); found != exports.end() && Holds(found->second))
+					return found->second.answer;
+				Kept kept;
+				for (const auto id : a_ids) {
+					if (id.empty() || !a_declared || !a_declared->Has(id))
+						continue;
+					kept.Follow(PublishedResources::VersionedSlotOf(id));
+					// The graph orders the declared read. Only its index comes from the build.
+					RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
+					if (PublishedResources::IsExportOf(a_view, id) && PublishedResources::ShaderResourceIndex(id, kept.answer.index)) {
+						kept.answer.read = id;
+						break;
+					}
+				}
+				exports.insert_or_assign(key, kept);
+				return kept.answer;
+			}
+
+		private:
+			/** @brief An answer and the versioned slots it read, with the version each had. */
+			struct Kept
+			{
+				static constexpr std::size_t kSlots = 16;
+				Answer answer;
+				std::array<const org::IVersionedResource*, kSlots> slots{};
+				std::array<std::uint64_t, kSlots> numbers{};
+				std::uint32_t followed = 0;
+				bool unkept = false;  // read more slots than it can follow, so it is asked again every time
+
+				void Follow(const org::IVersionedResource* a_slot)
+				{
+					if (!a_slot)
+						return;
+					if (followed == kSlots) {
+						unkept = true;
+						return;
+					}
+					slots[followed] = a_slot;
+					numbers[followed++] = a_slot->CurrentNumber();
+				}
+			};
+			struct ExportKey
+			{
+				const ID3D11ShaderResourceView* view;
+				const std::string_view* ids;
+				std::size_t count;
+				bool operator==(const ExportKey&) const = default;
+			};
+			struct ExportKeyHash
+			{
+				using is_avalanching = void;
+				std::uint64_t operator()(const ExportKey& a_key) const noexcept
+				{
+					const auto mix = [](std::uint64_t a_hash, std::uint64_t a_value) { return ankerl::unordered_dense::detail::wyhash::mix(a_hash ^ a_value, 0x9E3779B97F4A7C15ull); };
+					return mix(mix(reinterpret_cast<std::uintptr_t>(a_key.view), reinterpret_cast<std::uintptr_t>(a_key.ids)), a_key.count);
+				}
+			};
+
+			static bool Holds(const Kept& a_kept)
+			{
+				if (a_kept.unkept)
+					return false;
+				for (std::uint32_t i = 0; i < a_kept.followed; ++i)
+					if (a_kept.slots[i]->CurrentNumber() != a_kept.numbers[i])
+						return false;
+				return true;
+			}
+
+			void Refresh()
+			{
+				const std::array<std::uint64_t, 4> now{ PublishedResources::Serial(), RenderGraph::Relocation::JournalHead(),
+					s_declaredGeneration.load(std::memory_order_acquire), RenderGraphRuntime::Get().IsActive() ? 1ull : 0ull };
+				if (now == holdsFor)
+					return;
+				holdsFor = now;
+				indices.clear();
+				exports.clear();
+			}
+
+			std::array<std::uint64_t, 4> holdsFor{ ~0ull, ~0ull, ~0ull, ~0ull };
+			ankerl::unordered_dense::map<std::string_view, Kept> indices;
+			ankerl::unordered_dense::map<ExportKey, Kept, ExportKeyHash> exports;
+		};
+
+		GraphAnswers& Answers()
+		{
+			static GraphAnswers s_answers;
+			return s_answers;
 		}
 
 		std::string GraphTextureWho(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name)
@@ -266,10 +395,10 @@ namespace DCLF::Extensions
 		const auto& declared = DeclaredNow();
 		std::string_view read;
 		for (const auto id : a_ids) {
-			if (id.empty() || !declared || !declared->Has(id) || !PublishedResources::IsPublished(id))
+			if (id.empty())
 				continue;
-			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
-			if (PublishedResources::ShaderResourceIndex(id, a_index)) {
+			if (const auto index = Answers().DeclaredIndex(id, declared.get())) {
+				a_index = *index;
 				read = id;
 				break;
 			}
@@ -320,20 +449,11 @@ namespace DCLF::Extensions
 	{
 		if (!a_view)
 			return false;
-		// Check declared first. It is cheap, and an undeclared id must never be read.
-		const auto& declared = DeclaredNow();
-		std::string_view read;
-		for (const auto id : a_ids) {
-			if (id.empty() || !declared || !declared->Has(id))
-				continue;
-			// The graph orders the declared read. Only its index comes from the build.
-			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
-			if (PublishedResources::IsExportOf(a_view, id) && PublishedResources::ShaderResourceIndex(id, a_index)) {
-				read = id;
-				break;
-			}
-		}
-		return NoteGraphTextureRead(a_reader, a_register, a_name, read, a_index);
+		// Only declared ids, since an undeclared id must never be read.
+		const auto answer = Answers().ExportIndex(a_view, a_ids, DeclaredNow().get());
+		if (!answer.read.empty())
+			a_index = answer.index;
+		return NoteGraphTextureRead(a_reader, a_register, a_name, answer.read, a_index);
 	}
 
 	bool FrameTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, const FrameTextureEntry& a_texture, const ID3D11ShaderResourceView* a_view,
@@ -346,12 +466,9 @@ namespace DCLF::Extensions
 		const auto listed = asked.empty() ? a_texture.graphResources.end() : std::ranges::find(a_texture.graphResources, asked);
 		std::string_view read;
 		if (listed != a_texture.graphResources.end()) {
-			const auto id = *listed;
-			const auto& declared = DeclaredNow();
-			if (declared && declared->Has(id)) {
-				RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
-				if (PublishedResources::ShaderResourceIndex(id, a_index))
-					read = id;
+			if (const auto index = Answers().DeclaredIndex(*listed, DeclaredNow().get())) {
+				a_index = *index;
+				read = *listed;
 			}
 		}
 		return NoteGraphTextureRead(a_reader, a_register, a_texture.name, read, a_index);
@@ -394,12 +511,10 @@ namespace DCLF::Extensions
 		if (id.empty())
 			return false;
 		// Only a read a graph build declared, so the graph orders it against the post stage's write.
-		const auto& declared = DeclaredNow();
-		if (!declared || !declared->Has(id) || !PublishedResources::IsPublished(id))
+		const auto index = Answers().DeclaredIndex(id, DeclaredNow().get());
+		if (!index)
 			return false;
-		RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
-		if (!PublishedResources::ShaderResourceIndex(id, a_index))
-			return false;
+		a_index = *index;
 		static std::array<bool, static_cast<std::size_t>(GraphTextureReader::Count)> s_logged{};
 		if (!std::exchange(s_logged[static_cast<std::size_t>(a_reader)], true))
 			logger::info("[DCLF] {} reads CS's adapted luminance '{}' in place of the engine's target", GraphTextureWho(a_reader, a_register, "character light"), id);

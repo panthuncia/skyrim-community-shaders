@@ -319,8 +319,7 @@ namespace DCLF::Features::Fades
 	void TakeAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs)
 	{
 		WaitAnimatedDrain();
-		// Copied so the batch keeps its storage for the next drain.
-		a_roots.assign(animatedBatch.begin(), animatedBatch.end());
+		a_roots.swap(animatedBatch);
 		animatedBatch.clear();
 		a_inputs = std::exchange(batchInputs, {});
 	}
@@ -331,9 +330,9 @@ namespace DCLF::Features::Fades
 		AnimatedFadeInputs observerInputs{};
 	}
 
-	void KeepAnimatedBatchForObserver(const std::vector<AnimatedFadeRoot>& a_roots, const AnimatedFadeInputs& a_inputs)
+	void KeepAnimatedBatchForObserver(std::vector<AnimatedFadeRoot>& a_roots, const AnimatedFadeInputs& a_inputs)
 	{
-		observerBatch.assign(a_roots.begin(), a_roots.end());
+		observerBatch.swap(a_roots);
 		observerInputs = a_inputs;
 	}
 

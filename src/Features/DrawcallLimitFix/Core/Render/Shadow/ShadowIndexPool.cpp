@@ -65,10 +65,12 @@ namespace DCLF
 				std::vector<std::array<std::uint32_t, 4>> copies{};
 				std::vector<std::uint32_t> changed{};
 				bool allFirsts = false;
+				bool firstsMoved = false;  // a slot's first index or range changed, or the slot count did
 
 				void Release(std::uint32_t a_slot)
 				{
 					auto& range = p.slots[a_slot];
+					firstsMoved |= p.slotFirst[a_slot] != IndexPool::kNoRange;
 					p.slotFirst[a_slot] = IndexPool::kNoRange;
 					if (range.first == IndexPool::kNoRange) {
 						range = {};
@@ -131,6 +133,7 @@ namespace DCLF
 					for (std::size_t g = 0; g < p.slots.size(); ++g)
 						p.slotFirst[g] = p.slots[g].first;
 					allFirsts = true;
+					firstsMoved = true;
 				}
 
 				// Ranges are never shared by buffer address. The device reuses a freed buffer's address during a cell load,
@@ -156,6 +159,7 @@ namespace DCLF
 					auto& range = p.slots[a_slot];
 					range = { first, slotIndices, geometry.indexAddress, geometry.indexBytes, geometry.indexRef };
 					p.slotFirst[a_slot] = first;
+					firstsMoved = true;
 					p.indicesHeld += slotIndices;
 					CopyOf(range);
 				}
@@ -175,8 +179,10 @@ namespace DCLF
 							Acquire(g);
 						p.cursor.Restart(a_generation);
 						allFirsts = true;
+						firstsMoved = true;
 					} else {
 						const auto first = static_cast<std::uint32_t>(p.slots.size());
+						firstsMoved |= first != count;
 						p.slots.resize(count);
 						p.slotFirst.resize(count, IndexPool::kNoRange);
 						for (std::uint32_t g = 0; g < count; ++g)
@@ -254,6 +260,10 @@ namespace DCLF
 			const auto& firsts = a_sealed.Of(p.firsts);
 			PoolUpdate update{ p, a_tables, indices, indices.units, firsts.units, a_sealed.Of(p.copies).units };
 			update.UpdateRanges(count, a_generation);
+			// Unique across pools, so a reader that kept one pool's firsts never matches another's.
+			static std::uint64_t s_firstsSerials = 0;  // render thread
+			if (update.firstsMoved || !p.firstsSerial)
+				p.firstsSerial = ++s_firstsSerials;
 			p.cursor.Advance(a_tables.geometryLog);
 			p.indicesFilled.Filled(indices);
 

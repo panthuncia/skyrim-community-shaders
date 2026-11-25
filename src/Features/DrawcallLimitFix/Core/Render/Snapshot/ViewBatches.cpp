@@ -74,6 +74,8 @@ namespace DCLF::Draws
 		for (std::size_t g = 0; g < set->geometryIndexAddress.size(); ++g)
 			if (const GeometryDraw* geometry = geometries.slots.At(static_cast<std::uint32_t>(g)))
 				set->geometryIndexAddress[g] = geometry->indexBufferAddress;
+		static Direct::GeometryAddressSerials s_geometrySerials;
+		set->geometrySerial = s_geometrySerials.Of(set->geometryIndexAddress);
 		RowBases rows;
 		rows.pipelineRows = RowBases::AddressOf(*a_in.payload, PayloadPart::PipelineRows);
 		rows.materialRows = RowBases::AddressOf(*a_in.payload, PayloadPart::MaterialRows);
