@@ -343,6 +343,11 @@ struct RenderGraphRuntime::Impl
 
 	// Open from ExecuteExternalEpoch until CloseExternalEpoch adds the stream's wait. Render thread.
 	bool externalOpen = false;
+	// Open while an epoch's BeforeGpuWork commits the stages due before it (TryExecuteEpoch). Their tickets are submitted as
+	// before, and their execution is emitted with the epoch's.
+	bool joinOpen = false;
+	// AfterEmission's work for the joined epochs, run once the outer epoch is emitted (or failed).
+	std::vector<std::function<void()>> afterEmission;
 	bool externalExitSplit = false;
 	const char* externalLabel = "";
 
@@ -2707,6 +2712,15 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 	return TryExecuteEpoch(a_segment, a_beforePrepare, std::move(a_resourceOwner)) == EpochResult::Submitted;
 }
 
+void RenderGraphRuntime::AfterEmission(std::function<void()> a_work)
+{
+	if (impl && impl->joinOpen) {
+		impl->afterEmission.push_back(std::move(a_work));
+		return;
+	}
+	a_work();
+}
+
 void RenderGraphRuntime::SetEpochHooks(EpochHooks a_hooks)
 {
 	epochStartingHook.store(a_hooks.starting, std::memory_order_release);
@@ -2726,8 +2740,29 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 	std::optional<org::GraphHost::SubmissionGroup> submissionGroup;
 	if (QueuesSubmissions())
 		submissionGroup.emplace(*impl->host);
-	// Stages whose commit point this epoch is commit first.
-	FrameAnchors::BeforeGpuWork("another epoch", static_cast<std::uint32_t>(a_segment));
+	// An epoch submitted while another epoch's stages commit (below) is joined to that epoch. Its ticket is submitted here as
+	// before, but its execution is left in the host, and the outer epoch's ticket appends its own (GraphHost::TakeExternalExecution).
+	// The outer epoch emits both as one execution, with one compute exit and one flush of the pending submits.
+	const bool joined = impl->joinOpen;
+	if (!joined) {
+		impl->batching = impl->enqueueSubmission && impl->enqueueSubmissions;
+		impl->pendingCount = 0;
+		impl->joinOpen = true;
+	}
+	{
+		struct CloseJoin
+		{
+			bool& open;
+			bool outer;
+			~CloseJoin()
+			{
+				if (outer)
+					open = false;
+			}
+		} closeJoin{ impl->joinOpen, !joined };
+		// Stages whose commit point this epoch is commit first, joined to this epoch.
+		FrameAnchors::BeforeGpuWork("another epoch", static_cast<std::uint32_t>(a_segment));
+	}
 	impl->CloseLeftOpenExternal();
 	// Read by passes while the frame prepares and records, all before ExecuteFrame returns.
 	segment = a_segment;
@@ -2743,8 +2778,29 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 	}
 	impl->TakeCompletedEpochs();
 	const auto completed = std::chrono::steady_clock::now();
-	impl->batching = impl->enqueueSubmission && impl->enqueueSubmissions;
-	impl->pendingCount = 0;
+	// The outer epoch's end after a failure: the joined epochs' execution still goes into the stream before the compute exit.
+	const auto closeAfterFailure = [&] {
+		if (joined)
+			return;
+		const auto held = impl->host->TakeExternalExecution();
+		const bool emitted = held && impl->EmitExecution(held, Impl::SegmentLabel(a_segment));
+		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment), emitted, emitted && held->exitSplit);
+		if (impl->batching)
+			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
+	};
+	// AfterEmission's work for the epochs that joined this one, once this epoch is emitted or failed.
+	struct RunAfterEmission
+	{
+		Impl& impl;
+		bool outer;
+		~RunAfterEmission()
+		{
+			if (!outer)
+				return;
+			for (auto& work : std::exchange(impl.afterEmission, {}))
+				work();
+		}
+	} runAfterEmission{ *impl, !joined };
 	try {
 		// An epoch with no graph builds at its submission on this thread. That is logged after the first world frame.
 		if (!impl->host->Graph(EpochOf(a_segment)) && !impl->host->EpochFailed(EpochOf(a_segment)))
@@ -2761,6 +2817,12 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		}
 		impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, a_resourceOwner);
 		impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
+		if (joined) {
+			// Emitted with the outer epoch's execution.
+			impl->submittedSegments |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
+			impl->failedEpochsLogged &= ~(std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment));
+			return EpochResult::Submitted;
+		}
 		// An in-stream epoch: its graphics work into DXVK's own command stream, here.
 		const auto execution = impl->host->TakeExternalExecution();
 		if (execution && !impl->EmitExecution(execution, Impl::SegmentLabel(a_segment)))
@@ -2790,9 +2852,7 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 	} catch (const org::GraphHost::EpochCopiesBusyError& e) {
 		// A revision-driven epoch ran more often since Present than it has published copies.
 		// Nothing was submitted or failed, so the caller falls back for this run.
-		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
-		if (impl->batching)
-			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
+		closeAfterFailure();
 		if (const std::uint64_t bit = std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment); !(impl->copiesBusyLogged & bit)) {
 			impl->copiesBusyLogged |= bit;
 			logger::info("[ORG] {} ran more than its {} published copies in one frame; runs past them fall back until the next Present", Impl::SegmentLabel(a_segment),
@@ -2803,9 +2863,7 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		// Only this epoch's graph failed and nothing was submitted. Fatal in graph mode. Otherwise its owner hears at the next
 		// PollEpochFailures, and the caller falls back until then.
 		FaultIsFatal(fmt::format("{} did not run, its graph failed ({})", Impl::SegmentLabel(a_segment), e.what()));
-		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
-		if (impl->batching)
-			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
+		closeAfterFailure();
 		if (const std::uint64_t bit = std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment); !(impl->failedEpochsLogged & bit)) {
 			impl->failedEpochsLogged |= bit;
 			logger::error("[ORG] {} did not run, its graph failed (the other epochs run on): {}", Impl::SegmentLabel(a_segment), e.what());
@@ -2821,9 +2879,11 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 				logger::error("[ORG] {}: an execution nobody took could not be signalled: {}", Impl::SegmentLabel(a_segment), signalError.what());
 			}
 		}
-		(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
-		if (impl->batching)
-			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
+		if (!joined) {
+			(void)impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment));
+			if (impl->batching)
+				(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
+		}
 		// Fatal in graph mode. Outside it the graph stops and callers fall back to D3D11.
 		logger::error("[ORG] Render graph epoch failed, disabling the graph: {}", e.what());
 		// What the host held when it failed: its runs in flight, what each waits for, and the timelines (read racily, for the report).
