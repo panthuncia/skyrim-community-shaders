@@ -147,3 +147,50 @@ Open:
   device loss after a teleport with frame generation on (guest+fg).
 - `player.setpos` does not move the player in cs-test runs, so the underwater rt12 clear has no readback yet.
 - Confirm the ranking in an optimized build: CS and ORG code shrinks about 3x there, the engine does not.
+
+## Round 2 (2026-11-25, evening)
+
+The same capture (guest, river, frozen, Dev-Fast, `CS_ENGINE_ZONES=1`), now on cs-test's lab slots. The window from DCLF's
+scene tables to Present:
+
+| Point | Window (ms) |
+|---|---|
+| Round 1 start | 6.53 |
+| Round 1 end | 4.86 |
+| org_integration d49225e30 (ledger, ticket, post, faces merged) | 3.84 |
+| org_integration 4f2d97b79 (plus dclf, native, frame, ticket3, clients) | 3.43 |
+
+At 4f2d97b79: ORG epochs 1.44, other CS 0.75 (it now holds time that used to show as the Deferred loops, 0.22 -> 0.04,
+because lead frame zoned the anchors), engine code 0.59, DCLF CPU 0.50. The shadow mask port (747f16806) came after it.
+
+What each lead did (notes in `perf2-<name>.md` beside this file):
+
+- `strip`: 22 switches and two debug modes deleted with their old paths; the inventory table is in `perf2-strip.md`.
+- `ledger`: cross-frame access cells only grow (a read waits on every writer, a write on every writer and reader), a
+  ledger-wide change stamp skips the walks, state commits skip unchanged grids, one alias scan per admission. Ledger zones
+  0.66 -> 0.24 ms; cross-queue waits unchanged at 2 a frame.
+- `ticket`, `ticket3`: the pinned copy step (no WaitTicket), kept handoff lists, early outs for empty uploads, no per-ticket
+  allocation, copies recorded without a map. About 0.37 + 0.05 ms.
+- `post`, `native`: the whole post chain is native, slots 6-7 and families 5-6 (SSR, SAO, water blend) included;
+  `CS_ORG_POST_NATIVE` and the old `CS_ORG_IMAGESPACE_NATIVE` modes deleted; SE gets AE's defaults (not run on SE).
+- `faces`: native-only reflection faces and sky (both switches and the sky latch path deleted); prepasses once a frame; sky
+  headers from the features. Native faces 0.335 -> 0.267 ms.
+- `dclf`: fades counted before the list wait, the batched portal evaluator deleted, skin materials kept until they change
+  (0.238 -> 0.099), water members indexed densely, forward sort rows filled by the producer. Scene tables 0.99 -> 0.79.
+- `frame`: anchors walk only their clients, shared data packed once, the engine zone install race fixed (it could crash
+  captures).
+- `clients`: colour space matrices once, Scaleform and overlay commit work kept. Client commits 0.20 -> 0.16.
+- `shadow`: native shadow masks (1800/1800 batches matched in a compare build); engine mask self 0.033 -> 0.004.
+
+Other fixes this round: BasicRHI's lowering identity hashes its sources instead of `__TIMESTAMP__` (every worktree's build
+discarded the shared pipeline identifier store, about 19 s of rebuild per run); cs-test runs games in parallel lab slots
+(README, "Lab"); `stage --wait`.
+
+Open:
+
+- Lead `finish` is testing `FinishTicket` on the submit thread (guest mode), and one render-thread hang seen once in
+  `StopFrameProduction` during a graph install at a frame revision (perf2-finish.md when it lands).
+- The engine's shadow maps and caster lights (about 0.13 ms): `perf2-shadow.md` has the next step.
+- The Scaleform HUD (0.06), the remaining anchor clients (0.13), ORG's thin per-epoch remainder.
+- SE: every default now matches AE, and every new address is an SE/AE pair, but nothing has run on SE.
+- All numbers are Dev-Fast. An optimised build is still to confirm the ranking.
