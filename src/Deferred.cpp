@@ -239,7 +239,6 @@ void Deferred::PlanTargets()
 void Deferred::ReflectionsPrepasses()
 {
 	ZoneScoped;
-	TracyD3D11Zone(globals::state->tracyCtx, "Reflections Prepass");
 
 	auto shaderCache = globals::shaderCache;
 
@@ -932,9 +931,10 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 	// After this point, water starts rendering
 };
 
-void Deferred::BeginReflectionFace()
+void Deferred::BeginReflectionFace(bool a_prepasses)
 {
-	ReflectionsPrepasses();
+	if (a_prepasses)
+		ReflectionsPrepasses();
 	globals::state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections);
 }
 

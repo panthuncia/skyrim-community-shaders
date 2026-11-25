@@ -46,9 +46,10 @@ public:
 
 	/**
 	 * @brief What CS does around one reflection face render: the reflection prepasses and the IsReflections bit before it.
-	 * The cube camera's face render hook calls it, and so does Drawcall Limit Fix when it draws a face without the engine.
+	 * The cube camera's face render hook calls it, and so does Drawcall Limit Fix for the faces it draws without the engine. Those
+	 * read what the prepasses bind once a frame, so it passes a_prepasses false after the frame's first.
 	 */
-	void BeginReflectionFace();
+	void BeginReflectionFace(bool a_prepasses = true);
 	/** @brief Ends what BeginReflectionFace began. */
 	void EndReflectionFace();
 

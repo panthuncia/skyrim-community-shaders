@@ -3,13 +3,12 @@
 #include "RenderGraph/BufferRef.h"
 
 // Sky, in graph mode: the render graph draws the engine's BSSkyShader passes in the main pass and the water reflection faces.
-// Details are in docs/development/p5/sky.md.
-// The engine's CPU code runs unchanged. The sky batch runs with DrawTriShape latched, so every pass still goes through the
-// engine's setup, and the draw is recorded instead of issued (SkyCapture.cpp). An ORG pass at the Sky or SkyReflections anchor
-// then draws the batch in engine order (SkyDraws.cpp). The cloud layers come right after in geometry group 13, and the capture
-// spans them when that group holds only sky shapes.
-// Cloud Shadows keeps per-layer occlusion in its D3D11 cubemaps, and layer L holds the occlusion of layers up to L. Graph cloud
-// draws write the same layers, so both paths stay in step.
+// Details are in docs/development/plans/dclf-native-sky.md and docs/development/p5/sky.md.
+// At the engine's sky batch the draws are computed from the passes the engine registered (SkyNative.cpp), and the engine's call
+// finds nothing of the sky to draw (SkyHooks.cpp). An ORG pass at the Sky or SkyReflections anchor then draws the batch in engine
+// order (SkyDraws.cpp). The cloud layers come right after in geometry group 13 and join the batch's run.
+// Cloud Shadows keeps per-layer occlusion in its layer cubemaps, and layer L holds the occlusion of layers up to L. Graph cloud
+// draws write the same layers.
 // In graph mode the sun's occlusion query draw is the graph's too (docs/development/p5/occlusion-queries.md).
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
@@ -80,9 +79,6 @@ namespace DCLF::Features::Sky
 	};
 	static_assert(sizeof(DrawConstants) == 448, "SkyOrgDraw's layout");
 	static_assert(offsetof(DrawConstants, vertexRef) == 288 && offsetof(DrawConstants, textures) == 320, "SkyOrgDraw's rows");
-
-	/** @brief The bytes of the vertex stage's PerGeometry the latch takes (c0 to c16.xy). */
-	inline constexpr std::size_t kVertexConstantBytes = 264;
 
 	/** @brief DrawConstants::textures[3] when self shadowing reads the occlusion cubemap. */
 	inline constexpr std::uint32_t kSelfShadowFromOcclusion = ~0u;
@@ -167,17 +163,22 @@ namespace DCLF::Features::Sky
 
 	/**
 	 * @brief Render thread. A face's sky run, drawn without the engine's face render. PrepareFace computes its draws from the Sky
-	 * object list, before CS's reflection prepasses; SubmitFace reads what the prepasses bound and submits it at the SkyReflections
-	 * anchor. Null from PrepareFace, with a_why, means the engine renders the face.
+	 * object list, before CS's reflection prepasses. Null, with a_why, means the engine renders the face.
 	 */
 	std::shared_ptr<Run> PrepareFace(const FaceView& a_view, std::string& a_why);
-	/** @brief Submits a prepared face. False when it could not be drawn (logged). */
-	bool SubmitFace(std::shared_ptr<Run> a_run);
-	/**
-	 * @brief Observe mode (CS_DCLF_REFLECTION_NATIVE=1): the face the engine renders now, or null after it. Its sky batch compares
-	 * the native face's passes and inputs with the engine's.
-	 */
-	void ObserveFace(const FaceView* a_view);
+
+	/** @brief What CS's reflection prepasses bound for the faces: read once a frame, shared by its faces. */
+	struct FaceInputs
+	{
+		bool readable = false;                         // false when one could not be read (logged)
+		std::array<std::uint32_t, 4> headerIndices{};  // kHeaderRegisters
+		Integrations::PhysicalSky::OrgHandles physSky{};
+		Family::Owners owners;
+	};
+	/** @brief Reads the faces' inputs, after the reflection prepasses. */
+	FaceInputs ReadFaceInputs();
+	/** @brief Submits a prepared face at the SkyReflections anchor. False when it could not be drawn (logged). */
+	bool SubmitFace(std::shared_ptr<Run> a_run, const FaceInputs& a_inputs);
 
 	void InstallHooks();
 	void PreflightHooks();

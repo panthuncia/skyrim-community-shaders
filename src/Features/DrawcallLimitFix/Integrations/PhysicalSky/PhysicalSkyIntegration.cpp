@@ -207,35 +207,20 @@ namespace DCLF::Integrations::PhysicalSky
 		for (std::size_t i = 0; i < kOrgTextureRegisters.size(); ++i) {
 			const std::uint32_t r = kOrgTextureRegisters[i];
 			const auto tag = GpuTextures::Tag(GpuTextures::Source::FamilyHeader, 4 + static_cast<std::uint32_t>(i));
-			std::string published;
-			if (auto* view = OrgView(i)) {
-				// A LUT's export is read by its id. A zero view is imported.
-				published = PublishedResources::ExportedId(view);
-				if (published.empty()) {
-					GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
-					auto binding = GpuTextures::Get().ResolveBinding(view, tag, &failure);
-					if (binding.index == GpuTextures::kInvalid) {
-						a_why = std::format("Physical Sky's t{} cannot be imported: {}", r, GpuTextures::DescribeFailure(view, r, failure));
-						return false;
-					}
-					a_out.textures[i] = binding.index;
-					if (binding.owner)
-						a_owners.push_back(std::move(binding.owner));
-				}
-			} else {
-				// What the feature binds on D3D11: an import, a published id, or the zero view for nothing bound.
-				Family::Header header;
-				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
-				ID3D11ShaderResourceView* bound = nullptr;
-				const auto result = Family::ResolveHeader(r, kOrgTextureKinds[i], tag, header, a_owners, &failure, &bound);
-				if (result != Family::HeaderResult::Ok) {
-					a_why = std::format("Physical Sky's t{} cannot be read: {}", r,
-						result == Family::HeaderResult::Buffer ? std::string("a D3D11 buffer") : GpuTextures::DescribeFailure(bound, r, failure));
-					return false;
-				}
-				published = std::move(header.publishedId);
-				a_out.textures[i] = header.index;
+			// The graph's view, else the feature's own texture, which D3D11 binds there in guest mode.
+			auto* view = OrgView(i);
+			if (!view)
+				view = kPhysSkySlots[i].srv(globals::features::physicalSky);
+			Family::Header header;
+			GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
+			const auto result = Family::ResolveHeaderView(view, kOrgTextureKinds[i], tag, header, a_owners, &failure);
+			if (result != Family::HeaderResult::Ok) {
+				a_why = std::format("Physical Sky's t{} cannot be read: {}", r,
+					result == Family::HeaderResult::Buffer ? std::string("a D3D11 buffer") : GpuTextures::DescribeFailure(view, r, failure));
+				return false;
 			}
+			const auto& published = header.publishedId;
+			a_out.textures[i] = header.index;
 			if (published.empty())
 				continue;
 			std::string why;

@@ -1,6 +1,7 @@
 # DCLF: the sky without draw capture
 
-Status: steps 1-3a done 2026-11-24 (batch and cloud layers native, the default); step 4 done 2026-11-25 (the sun query); step 5 open. Owner: the DCLF sky family (`src/Features/DrawcallLimitFix/Features/Sky/`). Background: [p5/sky.md](../p5/sky.md)
+Status: done. Steps 1-3a 2026-11-24 (batch and cloud layers native), step 4 2026-11-25 (the sun query), step 5 2026-11-25 (the latch
+path and `CS_DCLF_SKY_NATIVE` deleted; native is the only path). Owner: the DCLF sky family (`src/Features/DrawcallLimitFix/Features/Sky/`). Background: [p5/sky.md](../p5/sky.md)
 (the reverse engineering and the capture path this replaces).
 
 ## Goal
@@ -86,28 +87,20 @@ Per pass, natively (`SkyNative.cpp`):
 
 The run then goes to the existing `SkyDraws::Submit`.
 
-### Switch and parity
+### Parity (historical)
 
-`CS_DCLF_SKY_NATIVE`:
-
-- 0: the capture path (today).
-- 1 (observe): the capture path draws; the native path builds its run from the same passes before the batch runs, and after the
-  batch the two runs are compared draw by draw (count, order, technique, program key, every constant within 1e-5, textures,
-  samplers, geometry, viewport, stencil reference). Mismatches are logged once per kind with the draw's numbers.
-- 2 (native): the native path draws; the capture hooks for the sky stay installed only to answer the thunks.
-
-2 is the default since observe runs (`tools/cs-test/configs/sky-native.toml`: Riverwood at noon in cloudy weather with the river's
-faces, a clear night, Dragonsreach) reported every draw equal: count, order, descriptor, states, every constant, textures, samplers,
-geometry, viewport. Two capture artifacts are not differences: MoonAndStarsMask's PParams.y (its vanilla pixel shader declares no
-PParams, so the capture reads zero; the native draw writes zero too), and IsAurora (bit 10 of the extra descriptor) leaking into the
-captured face clouds from the sky-object effect drawn before them (Sky.hlsl does not read it). Measured at 960x540 (Dev-Fast): the
-engine draws through the family detour fell from 66 to 31 a frame and the family's zone from 0.63 to 0.29 ms, for 0.25 ms of native
-building (3 batches and 3 cloud groups); frame 6.41 -> 6.16 ms.
+Until step 5, `CS_DCLF_SKY_NATIVE` kept the capture path (0) and an observe mode (1) that built the native run beside the capture
+and compared the two draw by draw. Observe runs (`tools/cs-test/configs/sky-native.toml`: Riverwood at noon in cloudy weather with
+the river's faces, a clear night, Dragonsreach) reported every draw equal: count, order, descriptor, states, every constant, textures,
+samplers, geometry, viewport. Two capture artifacts were not differences: MoonAndStarsMask's PParams.y (its vanilla pixel shader
+declares no PParams, so the capture reads zero; the native draw writes zero too), and IsAurora (bit 10 of the extra descriptor)
+leaking into the captured face clouds from the sky-object effect drawn before them (Sky.hlsl does not read it). Measured at 960x540
+(Dev-Fast): the engine draws through the family detour fell from 66 to 31 a frame and the family's zone from 0.63 to 0.29 ms, for
+0.25 ms of native building (3 batches and 3 cloud groups); frame 6.41 -> 6.16 ms.
 
 Found on the way and fixed: a cloud group whose head holds a sky-object effect (hint 0x12, BSEffectShader; at night) was left whole
 to the engine, and Cloud Shadows' face layer draws on D3D11 are fatal in graph mode: native mode stopped with a message box every
-night with reflection faces in view. The capture now spans such a group (the effects at the head stay the engine's draws, the cloud
-layers after them are latched), and the native path draws the clouds and leaves the effects linked for the engine's call.
+night with reflection faces in view. The native path draws the clouds and leaves the effects at the group's head linked for the engine's call.
 
 ## Steps
 
@@ -125,7 +118,10 @@ layers after them are latched), and the native path draws the clouds and leaves 
    (SunOcclude), no alpha test, the sun's additive blend, and the eye from the shader manager's current accumulator (the screen
    splatter's after the world render, not the query's). Mode 1 compares it with the latched draw; observe runs (river noon and
    night, Dragonsreach) matched every field once SunOcclude's undeclared PParams.y was written as zero, as for MoonAndStarsMask.
-5. Delete the sky's latch path once observe runs also cover rain, storms, the aurora and night faces.
+5. Done 2026-11-25 (perf2-faces.md): the latch path, its switch and the parity helpers are deleted. What the latch path did that
+   native did not: it left a draw out while its program built; native now does the same (`PassResult::LeftOut`). A batch or cloud
+   group the native build cannot take (a pass that is not a BSSkyShader TriShape, a texture that cannot be imported) is drawn by the
+   engine, logged once per reason. Rain, storms and the aurora were not covered by an observe run before the deletion.
 
 ## Risks
 

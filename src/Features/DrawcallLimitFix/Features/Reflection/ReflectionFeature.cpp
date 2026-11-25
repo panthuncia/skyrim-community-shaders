@@ -7,7 +7,6 @@
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
-#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include <string>
 
@@ -61,23 +60,8 @@ namespace DCLF::Features::Reflection
 			});
 		}
 
-		void RegisterSwitch(Api::InstallContext& a_context)
-		{
-			const auto id = a_context.RegisterSwitch({ .name = "CS_DCLF_REFLECTION_NATIVE", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never,
-				.description = "0: the engine renders the water reflection's cube faces; 1: as 0, and each face's camera and sky passes are also computed "
-							   "without it and compared with the engine's (differences logged once each); 2 (default): a plain face whose LOD roots DCLF "
-							   "draws is drawn without the engine's face render, its sky computed from the Sky object list "
-							   "(perf-reflections.md)" });
-			const auto& value = SwitchValue(id);
-			const auto mode = value == "0" ? ReflectionFaces::Mode::Engine : value == "1" ? ReflectionFaces::Mode::Observe : ReflectionFaces::Mode::Native;
-			ReflectionFaces::SetMode(mode);
-			if (mode != ReflectionFaces::Mode::Native)
-				logger::info("[DCLF] reflection native: CS_DCLF_REFLECTION_NATIVE={}", value);
-		}
-
 		void Install(Api::InstallContext& a_context)
 		{
-			RegisterSwitch(a_context);
 			// DCLF draws the LOD the water's cube map reflects from its own tables on the GPU; the engine draws the sky.
 			a_context.RegisterView(Contribution());
 			a_context.RegisterViewWork({ .view = kView, .point = Api::ViewPoint::FrameStartAfterTreeLod, .run = &Prepare });

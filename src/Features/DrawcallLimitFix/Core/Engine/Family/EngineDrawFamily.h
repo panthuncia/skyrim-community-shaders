@@ -392,6 +392,10 @@ namespace DCLF::Family
 	HeaderResult ResolveHeader(std::uint32_t a_register, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, Header& a_out, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure = nullptr, ID3D11ShaderResourceView** a_view = nullptr);
 
+	/** @brief Resolves a_view as a header would read it: a published id, an import, or the null view of a_kind when a_view is null. */
+	HeaderResult ResolveHeaderView(ID3D11ShaderResourceView* a_view, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, Header& a_out, Owners& a_owners,
+		GpuTextures::ResolveFailure* a_failure = nullptr);
+
 	/** @brief Keeps leases and imports for a few frames, since the GPU may be that far behind. */
 	class KeptOwners
 	{

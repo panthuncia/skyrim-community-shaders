@@ -7,7 +7,6 @@
 
 #include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
-#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
@@ -22,7 +21,6 @@
 #include <rhi_helpers.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <format>
 
@@ -32,8 +30,6 @@ namespace DCLF::Features::Sky::Native
 	{
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
-
-		Mode s_mode = Mode::Off;
 
 		namespace Address
 		{
@@ -205,9 +201,9 @@ namespace DCLF::Features::Sky::Native
 			}
 
 			/**
-			 * @brief The shadow state at a face's sky batch, as observe mode read it from the engine's (CompareFaceBatch): stencil
-			 * mode 2 and cull mode 2 from the face render, the alpha test from FinishAccumulating. The face's render flags (8) keep
-			 * the cull mode for every pass.
+			 * @brief The shadow state at a face's sky batch, as the engine's face render leaves it in its steady state (perf-reflections.md):
+			 * stencil mode 2 and cull mode 2 from the face render, the alpha test from FinishAccumulating. The face's render flags (8)
+			 * keep the cull mode for every pass.
 			 */
 			static Modes FaceBatch()
 			{
@@ -229,12 +225,6 @@ namespace DCLF::Features::Sky::Native
 				return m;
 			}
 		};
-
-		std::string Describe(const Modes& a_m)
-		{
-			return std::format("depth {} stencil {} fill {} cull {} bias {} scissor {} blend {} a2c {} write {} extra {} alpha test {}", a_m.depth, a_m.stencil,
-				a_m.fill, a_m.cull, a_m.depthBias, a_m.scissor, a_m.blend, a_m.alphaToCoverage, a_m.write, a_m.blendExtra, a_m.alphaTest);
-		}
 
 		/** @brief The batch renderer's pass group for a technique (its hash map at +0x48, the groups at +8), or null. */
 		std::byte* PassGroupOf(std::byte* a_batch, std::uint32_t a_technique)
@@ -311,40 +301,19 @@ namespace DCLF::Features::Sky::Native
 			return 0;
 		}
 
-		struct Parity
+		/** @brief Draws left out while their program builds, each logged once by view and technique. */
+		Family::RefusalLog& LeftOut()
 		{
-			std::uint64_t batches = 0, matched = 0, mismatched = 0, skipped = 0;
-		};
-		Parity s_parity;
-
-		Family::RefusalLog& Differences()
-		{
-			static Family::RefusalLog log("[DCLF] sky native: differs from the capture");
+			static Family::RefusalLog log("[DCLF] sky: a draw is left out until its program is built");
 			return log;
 		}
-	}
 
-	void RegisterSwitch(Api::InstallContext& a_context)
-	{
-		const auto id = a_context.RegisterSwitch({ .name = "CS_DCLF_SKY_NATIVE", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never,
-			.description = "0: the sky batch, cloud layers and the sun's occlusion query draw are drawn from their latched engine draws; 1: as 0, and their "
-						   "draws are also computed from the engine's registered passes and the sun geometry and compared with the latched ones (differences "
-						   "logged once each); 2 (default): they are drawn from the computed draws, the engine's calls draw nothing of them, and the engine's "
-						   "sun query call is not made (dclf-native-sky.md)" });
-		const auto& value = SwitchValue(id);
-		s_mode = value == "0" ? Mode::Off : value == "1" ? Mode::Observe : Mode::Draw;
-		if (s_mode != Mode::Off)
-			logger::info("[DCLF] sky native: CS_DCLF_SKY_NATIVE={} ({})", value.empty() ? std::string_view("2, the default") : std::string_view(value),
-				s_mode == Mode::Observe ? "computed and compared with the capture" : "drawn from the computed draws");
-	}
+		std::uint64_t s_builds = 0;  // render thread: one per batch, cloud group, sun or face build
 
-	Mode GetMode() { return s_mode; }
-
-	namespace
-	{
 		/** @brief What every pass of a batch or cloud group reads alike: the camera and the engine globals, at the call. */
 		struct Frame
 		{
+			std::uint64_t build = ++s_builds;  // which build this is, so a slot entry's owners join its run once
 			BatchInputs inputs;
 			State* state = nullptr;
 			RE::NiPoint3 posAdjust, previousPosAdjust, eye;
@@ -454,21 +423,70 @@ namespace DCLF::Features::Sky::Native
 		};
 
 		/**
+		 * @brief A draw's t0-t2 and s0-s2, kept for the frame by the views it samples: the faces and the main batch draw the same sky
+		 * objects, so most draws find theirs.
+		 */
+		struct Slots
+		{
+			std::array<ID3D11ShaderResourceView*, 3> views{};
+			std::array<bool, 3> used{};
+			std::array<std::uint32_t, 3> textures{}, samplers{};
+			Family::Owners owners;
+			std::uint64_t build = 0;  // the last build whose run holds the owners
+		};
+
+		struct SlotCache
+		{
+			std::uint32_t frame = UINT32_MAX;
+			std::vector<Slots> entries;
+		};
+		SlotCache s_slots;  // render thread
+
+		/** @brief The slots for a_views, resolved on the frame's first use. Null, with a_why, when one cannot be read. */
+		Slots* SlotsOf(const std::array<ID3D11ShaderResourceView*, 3>& a_views, const std::array<bool, 3>& a_used, std::string& a_why)
+		{
+			if (const auto frame = Family::GameFrame(); s_slots.frame != frame) {
+				s_slots.frame = frame;
+				s_slots.entries.clear();
+			}
+			for (auto& entry : s_slots.entries)
+				if (entry.views == a_views && entry.used == a_used)
+					return &entry;
+			Slots slots{ .views = a_views, .used = a_used };
+			for (std::uint32_t t = 0; t < 3; ++t) {
+				auto* view = a_views[t];
+				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
+				if (Family::SlotTexture(view, GpuTextures::ViewKind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), slots.textures[t], slots.owners, &failure) !=
+					Family::SlotResult::Ok) {
+					a_why = std::format("t{}: {}", t, GpuTextures::DescribeFailure(view, t, failure));
+					return nullptr;
+				}
+				// t0 and t1: WRAP, LINEAR (SetupGeometry); t2: WRAP, POINT (SetupTechnique).
+				slots.samplers[t] = !a_used[t] ? Family::SlotSampler(0, 0, slots.owners) : Family::SlotSampler(3, t == 2 ? 0u : 1u, slots.owners);
+				if (slots.samplers[t] == GpuTextures::kInvalid) {
+					a_why = "a sampler with no graph sampler";
+					return nullptr;
+				}
+			}
+			return &s_slots.entries.emplace_back(std::move(slots));
+		}
+
+		/**
 		 * @brief One pass's draw, as SetupTechnique, SetupGeometry and the engine's state for it would make it. a_cloudLayers is the
 		 * cloud group's last face layer when the pass is a cloud layer of the group, else null.
 		 */
-		bool BuildPass(const Frame& a_frame, RE::BSRenderPass* a_pass, std::uint32_t a_technique, const Modes& a_modes, std::int32_t* a_cloudLayers, Draw& a_draw,
+		PassResult BuildPass(const Frame& a_frame, RE::BSRenderPass* a_pass, std::uint32_t a_technique, const Modes& a_modes, std::int32_t* a_cloudLayers, Draw& a_draw,
 			Family::Owners& a_owners, std::string& a_why)
 		{
 			auto* geometry = a_pass->geometry;
 			auto* property = a_pass->shaderProperty;
 			if (!geometry || !property || !a_pass->shader || a_pass->shader->shaderType.get() != RE::BSShader::Type::Sky) {
 				a_why = "a pass that is not a BSSkyShader draw";
-				return false;
+				return PassResult::Failed;
 			}
 			if (geometry->GetType().get() != RE::BSGeometry::Type::kTriShape) {
 				a_why = "a sky pass that is not a TriShape";
-				return false;
+				return PassResult::Failed;
 			}
 			auto* state = a_frame.state;
 			const auto& inputs = a_frame.inputs;
@@ -500,7 +518,7 @@ namespace DCLF::Features::Sky::Native
 			auto* raster = Pipeline::EngineRasterState(a_modes.fill, a_modes.cull, a_modes.depthBias, a_modes.scissor);
 			if (!depthStencil) {
 				a_why = "a state with no description";
-				return false;
+				return PassResult::Failed;
 			}
 			ProgramInputs programInputs{ .blend = blend, .depthStencil = depthStencil, .raster = raster, .shader = a_pass->shader, .descriptor = pixelDescriptor,
 				.variant = inputs.view != View::Main ? kVariantFaces : 0u, .occlusion = cloud.occlusion ? 1u : 0u };
@@ -524,23 +542,23 @@ namespace DCLF::Features::Sky::Native
 				// Cloud Shadows binds no depth target for its occlusion draws (SkyShaderHacks).
 				if (!Family::DescribeStates(a_draw.key, blend, cloud.occlusion ? nullptr : depthStencil, raster)) {
 					a_why = "a state with no description";
-					return false;
+					return PassResult::Failed;
 				}
 				a_draw.key.colourFormats = programInputs.colourFormats;
 				a_draw.key.depthFormat = programInputs.depthFormat;
 				bool building = false;
 				a_draw.program = SkyDraws::Program(a_draw.key, *a_pass->shader, &building);
 				if (!a_draw.program) {
-					a_why = building ? "a program still building" : "a program that cannot be built";
-					return false;
+					a_why = "a program that cannot be built";
+					return building ? PassResult::LeftOut : PassResult::Failed;
 				}
 				if (cloud.occlusion) {
 					auto occlusionKey = a_draw.key;
 					occlusionKey.maskedTargets = 1;
 					a_draw.occlusionProgram = SkyDraws::Program(occlusionKey, *a_pass->shader, &building);
 					if (!a_draw.occlusionProgram) {
-						a_why = building ? "an occlusion program still building" : "an occlusion program that cannot be built";
-						return false;
+						a_why = "an occlusion program that cannot be built";
+						return building ? PassResult::LeftOut : PassResult::Failed;
 					}
 				}
 				// Bounded: the states come from fixed engine tables, so only a changed target format makes new entries.
@@ -552,7 +570,7 @@ namespace DCLF::Features::Sky::Native
 				// Each face layer once, in engine order, so a later layer holds every earlier layer's occlusion.
 				if (cloud.layer < 0 || cloud.layer >= static_cast<std::int32_t>(kCloudLayers) || cloud.layer <= *a_cloudLayers) {
 					a_why = "a cloud layer out of order";
-					return false;
+					return PassResult::Failed;
 				}
 				a_draw.occlusion = true;
 				a_draw.layer = cloud.layer;
@@ -568,7 +586,7 @@ namespace DCLF::Features::Sky::Native
 					latched, a_owners, &detail);
 				result != Family::GeometryResult::Ok) {
 				a_why = std::format("geometry: {} {}", Family::ReasonOf(result), detail);
-				return false;
+				return PassResult::Failed;
 			}
 
 			// SetupGeometry's constants.
@@ -636,21 +654,16 @@ namespace DCLF::Features::Sky::Native
 			}
 			textures[2] = Global<const void*>(Address::kNoiseTexture);
 			const auto used = TexturesOf(a_technique);
-			for (std::uint32_t t = 0; t < 3; ++t) {
-				auto* view = used[t] ? ViewOf(textures[t]) : nullptr;
-				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
-				if (Family::SlotTexture(view, GpuTextures::ViewKind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), c.textures[t], a_owners, &failure) !=
-					Family::SlotResult::Ok) {
-					a_why = std::format("t{}: {}", t, GpuTextures::DescribeFailure(view, t, failure));
-					return false;
-				}
-				// t0 and t1: WRAP, LINEAR (SetupGeometry); t2: WRAP, POINT (SetupTechnique).
-				c.samplers[t] = !used[t] ? Family::SlotSampler(0, 0, a_owners) : Family::SlotSampler(3, t == 2 ? 0u : 1u, a_owners);
-				if (c.samplers[t] == GpuTextures::kInvalid) {
-					a_why = "a sampler with no graph sampler";
-					return false;
-				}
-			}
+			std::array<ID3D11ShaderResourceView*, 3> views{};
+			for (std::uint32_t t = 0; t < 3; ++t)
+				views[t] = used[t] ? ViewOf(textures[t]) : nullptr;
+			auto* slots = SlotsOf(views, used, a_why);
+			if (!slots)
+				return PassResult::Failed;
+			std::copy(slots->textures.begin(), slots->textures.end(), c.textures);
+			std::copy(slots->samplers.begin(), slots->samplers.end(), c.samplers);
+			if (std::exchange(slots->build, a_frame.build) != a_frame.build)
+				a_owners.insert(a_owners.end(), slots->owners.begin(), slots->owners.end());
 			// Cloud self shadowing (t26): a main pass cloud layer reads its own layer's occlusion, anything else the occlusion cubemap.
 			c.textures[3] = kSelfShadowFromOcclusion;
 			if (selfShadow) {
@@ -658,24 +671,39 @@ namespace DCLF::Features::Sky::Native
 				auto* layerTexture = layer >= 0 && layer < CloudShadows::kMaxCloudLayers ? cloudShadows.texCloudShadowLayers[layer] : nullptr;
 				if (!layerTexture || !layerTexture->srv) {
 					a_why = "a cloud layer with no occlusion texture";
-					return false;
+					return PassResult::Failed;
 				}
 				if (const auto id = ORGCloudShadows::PublishedLayerId(layer); !id.empty()) {
 					if (SkyDraws::ReadPublished(View::Main, id, c.textures[3]) != Family::InputResult::Graph) {
 						a_why = std::format("a cloud layer whose occlusion '{}' its client cannot read", id);
-						return false;
+						return PassResult::Failed;
 					}
 				} else if (Family::SlotTexture(layerTexture->srv.get(), GpuTextures::ViewKind::Cube, GpuTextures::Tag(GpuTextures::Source::FrameSlot, 26), c.textures[3],
 							   a_owners) != Family::SlotResult::Ok) {
 					a_why = "a cloud layer whose occlusion cannot be imported";
-					return false;
+					return PassResult::Failed;
 				}
 			}
 			c.alphaTestRef = a_modes.alphaTest ? a_frame.alphaRef : 0.0f;
 			c.extraShaderDescriptor = state->permutationData.ExtraShaderDescriptor | a_frame.reflection;
 			c.physSky = inputs.physSky;
 			a_draw.viewport = a_frame.viewport;
-			return true;
+			return PassResult::Drawn;
+		}
+
+		/**
+		 * @brief Takes a pass's result for the draw it built last: a draw whose program still builds is dropped, so the batch stays the
+		 * graph's (handed to the engine, a face's cloud layer would reach Cloud Shadows' D3D11 path). False when it failed.
+		 */
+		bool Take(PassResult a_result, std::vector<Draw>& a_draws, View a_view, std::uint32_t a_technique)
+		{
+			if (a_result == PassResult::LeftOut) {
+				a_draws.pop_back();
+				const char* view = a_view == View::Main ? "main" : a_view == View::Face ? "face" :
+				                                                                          "sun";
+				LeftOut().Report(std::format("a {} draw of technique {}", view, a_technique));
+			}
+			return a_result != PassResult::Failed;
 		}
 	}
 
@@ -724,7 +752,7 @@ namespace DCLF::Features::Sky::Native
 						if (type == 0 || type == 6)
 							modes.blend = 2;
 					}
-					if (!BuildPass(frame, pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why))
+					if (!Take(BuildPass(frame, pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why), a_draws, a_inputs.view, technique))
 						return false;
 				}
 			}
@@ -761,20 +789,20 @@ namespace DCLF::Features::Sky::Native
 				modes.Setup(technique);
 				current = technique;
 			}
-			if (!BuildPass(frame, pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why))
+			if (!Take(BuildPass(frame, pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why), a_draws, a_inputs.view, technique))
 				return false;
 		}
 		a_lastLayer = lastLayer;
 		return true;
 	}
 
-	bool BuildSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
+	PassResult BuildSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
 		std::string& a_why)
 	{
 		DCLF_ZONE("CS.DCLF.Sky.Native.BuildSun");
 		Frame frame;
 		if (!frame.Read(a_accumulator, a_inputs, a_why))
-			return false;
+			return PassResult::Failed;
 		// SetupGeometry reads the eye from the shader manager's current accumulator, which after the world's render is the last one
 		// submitted (the screen splatter's), not the query's.
 		const auto* current = reinterpret_cast<RE::BSShaderAccumulator*>(*globals::game::currentAccumulator.get());
@@ -797,6 +825,15 @@ namespace DCLF::Features::Sky::Native
 
 	namespace
 	{
+		/** @brief A face's sky pass: what the engine's face cull would register for a sky object. */
+		struct FacePass
+		{
+			RE::BSGeometry* geometry = nullptr;
+			RE::BSShaderProperty* property = nullptr;
+			std::uint32_t passId = 0;
+			std::uint32_t sub = 0;  // the batch sub-group (FindTechniqueGroup), or the cloud list
+		};
+
 		/** @brief GetRenderPasses' pass id for a sky object type (AE 0x1414e6fd0), or 0 for the sun glare, which no face draws. */
 		std::uint32_t PassIdOf(const RE::BSShaderProperty* a_property, std::uint32_t a_type)
 		{
@@ -861,7 +898,7 @@ namespace DCLF::Features::Sky::Native
 			std::vector<FacePass> passes;
 			std::string why;
 
-			/** @brief An always-drawn object skips its own bound test; its children test theirs (observe mode found this). */
+			/** @brief An always-drawn object skips its own bound test; its children test theirs (as the engine's cull does). */
 			void Visit(RE::NiAVObject* a_object, bool a_always)
 			{
 				if (!a_object || !why.empty())
@@ -921,34 +958,44 @@ namespace DCLF::Features::Sky::Native
 			pass.passEnum = a_pass.passId;
 			return pass;
 		}
-	}
 
-	bool FacePasses(const FaceView& a_view, std::vector<FacePass>& a_batch, std::vector<FacePass>& a_clouds, std::string& a_why)
-	{
-		auto* sky = globals::game::sky;
-		if (!sky || !sky->root) {
-			a_why = "no sky root";
-			return false;
+		/**
+		 * @brief The passes the engine's face cull of the sky root would register, in the engine's draw order: the sky batch by
+		 * technique, sub-group and newest first, then the cloud layers (geometry group 13) in registration order. False, with a_why,
+		 * when the face shows something the native face cannot draw (a sky-object effect).
+		 */
+		bool FacePasses(const FaceView& a_view, std::vector<FacePass>& a_batch, std::vector<FacePass>& a_clouds, std::string& a_why)
+		{
+			DCLF_ZONE("CS.DCLF.Sky.Native.FacePasses");
+			auto* sky = globals::game::sky;
+			if (!sky || !sky->root) {
+				a_why = "no sky root";
+				return false;
+			}
+			ShadowCameras::Planes planes;
+			ShadowCameras::FrustumPlanes(a_view.frustum, a_view.world, planes);
+			// Render thread: the registration list is kept between faces.
+			static FaceCull cull;
+			cull.planes = &planes;
+			cull.passes.clear();
+			cull.why.clear();
+			// TESWaterReflections::Update holds the sky root always drawn while it renders the faces (AE 0x140520570).
+			cull.Visit(sky->root.get(), true);
+			if (!cull.why.empty()) {
+				a_why = cull.why;
+				return false;
+			}
+			Order(cull.passes, a_batch, a_clouds);
+			return true;
 		}
-		ShadowCameras::Planes planes;
-		ShadowCameras::FrustumPlanes(a_view.frustum, a_view.world, planes);
-		FaceCull cull;
-		cull.planes = &planes;
-		// TESWaterReflections::Update holds the sky root always drawn while it renders the faces (AE 0x140520570).
-		cull.Visit(sky->root.get(), true);
-		if (!cull.why.empty()) {
-			a_why = std::move(cull.why);
-			return false;
-		}
-		Order(cull.passes, a_batch, a_clouds);
-		return true;
 	}
 
 	bool BuildFace(const FaceView& a_view, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
 	{
 		DCLF_ZONE("CS.DCLF.Sky.Native.BuildFace");
 		a_draws.clear();
-		std::vector<FacePass> batch, clouds;
+		// Render thread: the lists are kept between faces.
+		static std::vector<FacePass> batch, clouds;
 		if (!FacePasses(a_view, batch, clouds, a_why))
 			return false;
 		a_draws.reserve(batch.size() + clouds.size());
@@ -976,7 +1023,7 @@ namespace DCLF::Features::Sky::Native
 			if (type == 0 || type == 6)
 				modes.blend = 2;
 			auto pass = PassOf(facePass);
-			if (!BuildPass(frame, &pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why))
+			if (!Take(BuildPass(frame, &pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why), a_draws, View::Face, technique))
 				return false;
 		}
 		// The cloud layers, as BuildClouds walks geometry group 13.
@@ -996,113 +1043,10 @@ namespace DCLF::Features::Sky::Native
 				current = technique;
 			}
 			auto pass = PassOf(facePass);
-			if (!BuildPass(frame, &pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why))
+			if (!Take(BuildPass(frame, &pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why), a_draws, View::Face, technique))
 				return false;
 		}
 		return true;
-	}
-
-	namespace
-	{
-		/** @brief The fields of a face's starting state that its draws read before a technique or group sets them. */
-		bool SameStart(const Modes& a_native, const Modes& a_engine, bool a_cull)
-		{
-			return a_native.write == a_engine.write && a_native.depthBias == a_engine.depthBias && a_native.fill == a_engine.fill &&
-			       a_native.stencil == a_engine.stencil && a_native.scissor == a_engine.scissor && a_native.blendExtra == a_engine.blendExtra &&
-			       (!a_cull || a_native.cull == a_engine.cull);
-		}
-
-		std::string DescribePasses(const std::vector<FacePass>& a_passes)
-		{
-			std::string text;
-			for (const auto& pass : a_passes)
-				text += std::format("{}{} {:#x}/{}", text.empty() ? "" : ", ", pass.geometry ? pass.geometry->name.c_str() : "?", pass.passId, pass.sub);
-			return text.empty() ? std::string("none") : text;
-		}
-
-		void ComparePasses(std::string_view a_what, const std::vector<FacePass>& a_native, const std::vector<FacePass>& a_engine)
-		{
-			const bool same = std::ranges::equal(a_native, a_engine, [](const FacePass& a, const FacePass& b) {
-				return a.geometry == b.geometry && a.passId == b.passId && a.sub == b.sub;
-			});
-			if (same) {
-				++s_parity.matched;
-				return;
-			}
-			++s_parity.mismatched;
-			Differences().Report(std::format("face {}", a_what), std::format("native [{}], engine [{}]", DescribePasses(a_native), DescribePasses(a_engine)));
-		}
-
-		bool Close(float a_native, float a_engine) { return std::abs(a_native - a_engine) <= 1e-4f * (std::max)(1.0f, std::abs(a_engine)); }
-	}
-
-	void CompareFaceBatch(const FaceView& a_view, RE::BSShaderAccumulator* a_accumulator, std::uint32_t a_flags)
-	{
-		++s_parity.batches;
-		std::vector<FacePass> batch, clouds;
-		std::string why;
-		if (!FacePasses(a_view, batch, clouds, why)) {
-			++s_parity.skipped;
-			Differences().Report("face passes not computed", why);
-			return;
-		}
-		// The engine's registrations, in its draw order (BuildBatch's walk).
-		std::vector<FacePass> engine;
-		if (auto* batchRenderer = BatchOf(a_accumulator)) {
-			for (std::uint32_t passId = kFirstPass; passId <= kLastPass; ++passId) {
-				auto* group = PassGroupOf(batchRenderer, passId);
-				if (!group)
-					continue;
-				for (std::uint32_t sub = 0; sub < 5; ++sub)
-					for (auto* pass = Field<RE::BSRenderPass*>(group, sub * 8); pass; pass = pass->passGroupNext)
-						engine.push_back({ pass->geometry, pass->shaderProperty, pass->passEnum, sub });
-			}
-		}
-		ComparePasses("batch passes", batch, engine);
-		// The camera and the state the draws read.
-		auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-		const auto camera = rss.cameraData.getEye();
-		const auto* engineViewProj = reinterpret_cast<const float*>(&camera.viewProjMat);
-		for (std::uint32_t i = 0; i < 16; ++i)
-			if (!Close(a_view.viewProj[i], engineViewProj[i])) {
-				Differences().Report("face view-projection", std::format("[{}] native {}, engine {}", i, a_view.viewProj[i], engineViewProj[i]));
-				break;
-			}
-		const auto point = [&](std::string_view a_name, const RE::NiPoint3& a_engine) {
-			if (!Close(a_view.eye.x, a_engine.x) || !Close(a_view.eye.y, a_engine.y) || !Close(a_view.eye.z, a_engine.z))
-				Differences().Report(std::format("face {}", a_name),
-					std::format("native ({}, {}, {}), engine ({}, {}, {})", a_view.eye.x, a_view.eye.y, a_view.eye.z, a_engine.x, a_engine.y, a_engine.z));
-		};
-		point("posAdjust", rss.posAdjust.getEye());
-		if (const auto previous = rss.previousPosAdjust.getEye(); previous.x != 0.0f || previous.y != 0.0f || previous.z != 0.0f)
-			Differences().Report("face previous posAdjust", std::format("engine ({}, {}, {})", previous.x, previous.y, previous.z));
-		point("eye", a_accumulator->GetRuntimeData()->eyePosition);
-		if (!Close(kFaceAlphaRef, rss.alphaTestRef))
-			Differences().Report("face alpha reference", std::format("engine {}", rss.alphaTestRef));
-		if (rss.stencilRef != kFaceStencilRef)
-			Differences().Report("face stencil reference", std::format("engine {}", rss.stencilRef));
-		if (const auto viewport = Family::LatchViewport(0); viewport.rect != a_view.rect)
-			Differences().Report("face viewport", std::format("native {} {} {} {}, engine {} {} {} {}", a_view.rect[0], a_view.rect[1], a_view.rect[2], a_view.rect[3],
-													  viewport.rect[0], viewport.rect[1], viewport.rect[2], viewport.rect[3]));
-		if (a_flags != kFaceRenderFlags)
-			Differences().Report("face render flags", std::format("native {:#x}, engine {:#x}", kFaceRenderFlags, a_flags));
-		if (const auto current = Modes::Current(); !SameStart(Modes::FaceBatch(), current, (a_flags & 0x108) != 0))
-			Differences().Report("face batch starting state", std::format("native {}; engine {}", Describe(Modes::FaceBatch()), Describe(current)));
-	}
-
-	void CompareFaceClouds(const FaceView& a_view, RE::BSBatchRenderer::GeometryGroup* a_group)
-	{
-		std::vector<FacePass> batch, clouds;
-		std::string why;
-		if (!FacePasses(a_view, batch, clouds, why))
-			return;
-		std::vector<FacePass> engine;
-		for (auto* pass = a_group->passList.head; pass; pass = pass->passGroupNext)
-			if (pass->geometry && pass->shader && pass->shader->shaderType.get() == RE::BSShader::Type::Sky)
-				engine.push_back({ pass->geometry, pass->shaderProperty, pass->passEnum, 0 });
-		ComparePasses("cloud layers", clouds, engine);
-		if (const auto current = Modes::Current(); !SameStart(Modes::FaceClouds(), current, false))
-			Differences().Report("face cloud starting state", std::format("native {}; engine {}", Describe(Modes::FaceClouds()), Describe(current)));
 	}
 
 	void DetachClouds(RE::BSBatchRenderer::GeometryGroup* a_group)
@@ -1161,86 +1105,5 @@ namespace DCLF::Features::Sky::Native
 			*reinterpret_cast<std::uint32_t*>(group + 0x28) = entry.bits;
 		}
 		a_detached.entries.clear();
-	}
-
-	void Compare(View a_view, std::span<const Draw> a_native, std::span<const Draw> a_captured)
-	{
-		++s_parity.batches;
-		const char* view = a_view == View::Main ? "main" : a_view == View::Face ? "face" : "sun";
-		if (a_native.size() != a_captured.size()) {
-			++s_parity.mismatched;
-			Differences().Report(std::format("{} batch draw count", view), std::format("native {}, captured {}", a_native.size(), a_captured.size()));
-			return;
-		}
-		for (std::size_t i = 0; i < a_native.size(); ++i) {
-			const auto& n = a_native[i];
-			const auto& c = a_captured[i];
-			const std::uint32_t technique = c.key.descriptor & 0xFF;
-			std::string what;
-			const auto note = [&](std::string_view a_field, std::string a_detail) {
-				if (what.empty())
-					Differences().Report(std::format("{} technique {}: {}", view, technique, a_field), std::move(a_detail));
-				what = a_field;
-			};
-			if (n.key.descriptor != c.key.descriptor)
-				note("descriptor", std::format("native {:#x}, captured {:#x}", n.key.descriptor, c.key.descriptor));
-			if (n.key.blend != c.key.blend)
-				note("blend state", "");
-			if (n.key.depthStencil != c.key.depthStencil || n.key.hasDepth != c.key.hasDepth)
-				note("depth-stencil state", "");
-			if (n.key.raster != c.key.raster)
-				note("raster state", std::format("cull words native {} captured {}", n.key.raster[1], c.key.raster[1]));
-			if (n.key.colourFormats != c.key.colourFormats || n.key.depthFormat != c.key.depthFormat || n.key.variant != c.key.variant)
-				note("targets or variant", "");
-			if (n.indexCount != c.indexCount || std::memcmp(&n.constants.vertexRef, &c.constants.vertexRef, 32) != 0)
-				note("geometry", std::format("indices native {}, captured {}", n.indexCount, c.indexCount));
-			if (n.stencilRef != c.stencilRef)
-				note("stencil reference", "");
-			if (n.viewport.rect != c.viewport.rect || n.viewport.depthRange != c.viewport.depthRange)
-				note("viewport", "");
-			// The floats: matrices, eye, VParams, BlendColor; TexCoordOff and PParams.x only for clouds (others leave them unwritten).
-			const auto floats = [&](const float* a_n, const float* a_c, std::size_t a_count, std::string_view a_name) {
-				for (std::size_t f = 0; f < a_count; ++f)
-					if (std::abs(a_n[f] - a_c[f]) > 1e-4f * (std::max)(1.0f, std::abs(a_c[f]))) {
-						note(a_name, std::format("[{}] native {}, captured {}", f, a_n[f], a_c[f]));
-						return;
-					}
-			};
-			floats(n.constants.worldViewProj, c.constants.worldViewProj, 16, "WorldViewProj");
-			floats(n.constants.world, c.constants.world, 16, "World");
-			floats(n.constants.previousWorld, c.constants.previousWorld, 16, "PreviousWorld");
-			floats(n.constants.eyePosition, c.constants.eyePosition, 3, "EyePosition");
-			floats(&n.constants.vParams, &c.constants.vParams, 1, "VParams");
-			floats(n.constants.blendColor, c.constants.blendColor, 12, "BlendColor");
-			const bool cloud = technique >= 4 && technique <= 6;
-			if (cloud) {
-				floats(n.constants.texCoordOff, c.constants.texCoordOff, 2, "TexCoordOff");
-				floats(n.constants.pParams, c.constants.pParams, 1, "PParams.x");
-			}
-			floats(&n.constants.pParams[1], &c.constants.pParams[1], 1, "PParams.y");
-			floats(&n.constants.alphaTestRef, &c.constants.alphaTestRef, 1, "alpha test reference");
-			// IsAurora leaks into the capture's sky draws from a sky-object effect drawn before them (UpdateEffectShaderPermutation sets it,
-			// UpdateSkyShaderPermutation never clears it); Sky.hlsl does not read it.
-			constexpr auto aurora = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::IsAurora);
-			if ((n.constants.extraShaderDescriptor & ~aurora) != (c.constants.extraShaderDescriptor & ~aurora))
-				note("ExtraShaderDescriptor", std::format("native {:#x}, captured {:#x}", n.constants.extraShaderDescriptor, c.constants.extraShaderDescriptor));
-			for (std::uint32_t t = 0; t < 4; ++t)
-				if (n.constants.textures[t] != c.constants.textures[t])
-					note(std::format("t{}", t == 3 ? 26u : t), std::format("native {}, captured {}", n.constants.textures[t], c.constants.textures[t]));
-			for (std::uint32_t s = 0; s < 3; ++s)
-				if (n.constants.samplers[s] != c.constants.samplers[s])
-					note(std::format("s{}", s), std::format("native {}, captured {}", n.constants.samplers[s], c.constants.samplers[s]));
-			if (what.empty())
-				++s_parity.matched;
-			else
-				++s_parity.mismatched;
-		}
-	}
-
-	std::string Status()
-	{
-		if (s_mode != Mode::Observe)
-			return {};
-		return std::format("native parity: {} batches, {} draws match, {} differ, {} not compared", s_parity.batches, s_parity.matched, s_parity.mismatched, s_parity.skipped);
 	}
 }
