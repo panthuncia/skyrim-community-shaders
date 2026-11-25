@@ -10,12 +10,14 @@
 #include "Features/DrawcallLimitFix/Features/Fades/FadesAddresses.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
 #include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
@@ -343,12 +345,79 @@ namespace DCLF::Features::Fades
 		a_inputs = std::exchange(observerInputs, {});
 	}
 
-	void DrainAnimatedFades()
+	namespace
 	{
-		// The producer owns the queue during a hand-off. Nothing is pushed before the list jobs end, so skipping loses nothing.
+		// Render thread. The batch's counts, made before the list jobs' wait.
+		AnimatedStamps preparedStamps;
+		bool stampsPrepared = false;
+		std::vector<std::uint32_t> stampScratch;  // per slot, zero between counts
+	}
+
+	void CountAnimatedRoots(std::span<const AnimatedFadeRoot> a_roots, AnimatedStamps& a_stamps)
+	{
+		DCLF_ZONE("CS.DCLF.Fade.CountRoots");
+		a_stamps.slots.clear();
+		a_stamps.counts.clear();
+		const auto tables = Extensions::RootListOf(Scene::FrameView::Get().GetTables());
+		const std::size_t slots = std::min(tables.rows.size(), tables.nodes.size());
+		if (stampScratch.size() < slots)
+			stampScratch.resize(slots, 0u);
+		// A batch can hold many roots, so the loop reads through plain pointers.
+		const auto* nodes = tables.nodes.data();
+		const auto* rows = tables.rows.data();
+		auto* counts = stampScratch.data();
+		for (const auto& root : a_roots) {
+			if (root.slot >= slots || nodes[root.slot] != root.node || rows[root.slot].generation != root.generation)
+				continue;
+			if (counts[root.slot]++ == 0)
+				a_stamps.slots.push_back(root.slot);
+		}
+		std::sort(a_stamps.slots.begin(), a_stamps.slots.end());
+		a_stamps.counts.reserve(a_stamps.slots.size());
+		for (const std::uint32_t slot : a_stamps.slots) {
+			a_stamps.counts.push_back(counts[slot]);
+			counts[slot] = 0;
+		}
+	}
+
+	bool TakeAnimatedStamps(AnimatedStamps& a_stamps)
+	{
+		if (!std::exchange(stampsPrepared, false))
+			return false;
+		std::swap(a_stamps, preparedStamps);
+		return true;
+	}
+
+	void PrepareAnimatedFades()
+	{
+		// The producer owns the queue during a hand-off.
 		if (animatedDrainHanded.load(std::memory_order_acquire))
 			return;
 		DrainAnimatedFadesNow();
+		CountAnimatedRoots(animatedBatch, preparedStamps);
+		stampsPrepared = true;
+	}
+
+	void DrainAnimatedFades()
+	{
+		if (animatedDrainHanded.load(std::memory_order_acquire))
+			return;
+		// Nothing is expected here: the batch was taken before the wait. Late updates join it, and the commit counts it again.
+		const std::size_t late = animatedNodes.Drain([&](AnimatedFadeRoot&& a_root) { animatedBatch.push_back(a_root); });
+		const auto state = animatedState.load(std::memory_order_acquire);
+		if (!late && state == kAnimatedEmpty)
+			return;
+		stampsPrepared = false;
+		if (state == kAnimatedPublished) {
+			if (!batchInputs.valid) {
+				batchInputs = animatedInputs;
+				batchInputs.varied = animatedVaried.load(std::memory_order_relaxed);
+			} else if (std::memcmp(&animatedInputs, &batchInputs, offsetof(AnimatedFadeInputs, valid)) != 0) {
+				batchInputs.varied = 1;
+			}
+			animatedVaried.store(0, std::memory_order_relaxed);
+			animatedState.store(kAnimatedEmpty, std::memory_order_release);
+		}
 	}
 
 	std::size_t DrainAnimatedFadesNow()
@@ -398,7 +467,7 @@ namespace DCLF::Features::Fades
 	{
 		// Must be the last observer, so the writer tables publish after the other observers' updateEntry.
 		// Without the primary cull no hooks go in.
-		if (!a_context.RegisterStandInObserver({ .updateEntry = &WriteFadeWriters, .listJobsDone = &DrainAnimatedFades }))
+		if (!a_context.RegisterStandInObserver({ .updateEntry = &WriteFadeWriters, .beforeListJobsWait = &PrepareAnimatedFades, .listJobsDone = &DrainAnimatedFades }))
 			return;
 		InstallWriterHooks();
 	}

@@ -1160,6 +1160,8 @@ namespace DCLF
 		{
 			static std::uint64_t thunk(std::uint64_t a_1, std::uint64_t a_2, std::uint64_t a_3, std::uint64_t a_4)
 			{
+				// The job threads cull meanwhile, so the render thread does what does not depend on them first.
+				Extensions::StandInBeforeListJobsWait();
 				std::uint64_t result;
 				{
 					DCLF_ZONE("CS.DCLF.ListJobsWait");

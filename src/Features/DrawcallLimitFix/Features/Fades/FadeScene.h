@@ -118,7 +118,6 @@ namespace DCLF::Features::Fades
 		org::services::FilledVersion fadeAnimatedFilled;
 		// CPU mirrors. Only runs that differ are uploaded.
 		std::vector<std::uint32_t> fadeAnimatedMirror;
-		std::vector<std::uint32_t> fadeAnimatedCounts;
 		std::vector<std::uint32_t> fadeRootProgramsMirror;
 		org::services::FilledContents<> fadeRootProgramsFilled;
 		// Inputs the programs mirror was last judged against.
