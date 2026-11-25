@@ -732,7 +732,7 @@
 			"choices": [],
 			"kind": "feature",
 			"family": "dclf",
-			"description": "0: the sky batch and cloud layers are drawn from their latched engine draws; 1: as 0, and their draws are also computed from the engine's registered passes and compared with the latched ones (differences logged once each); 2 (default): they are drawn from the computed draws, and the engine's calls draw nothing of them (dclf-native-sky.md)"
+			"description": "0: the sky batch, cloud layers and the sun's occlusion query draw are drawn from their latched engine draws; 1: as 0, and their draws are also computed from the engine's registered passes and the sun geometry and compared with the latched ones (differences logged once each); 2 (default): they are drawn from the computed draws, the engine's calls draw nothing of them, and the engine's sun query call is not made (dclf-native-sky.md)"
 		},
 		{
 			"name": "CS_DCLF_STAGE_DUMP",

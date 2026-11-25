@@ -87,6 +87,7 @@ query entry functions are SE 75565/75567/75568, AE 77366/77368/77369.
 | native-vulkan + scenes, `CS_DCLF_SKY_NATIVE=1` | p-engine-skip-sc-obs-nv | passed |
 | native-vulkan + scenes | p-engine-skip-sc-sun-nv | passed; shots match the observe run's (night 1% of pixels > 1, mean 0.12) |
 | native-d3d12 + scenes | p-engine-skip-sc-sun-nd | passed; the dropped engine draw errors are pre-existing (other leads' D3D12 runs show them) |
+| guest+quick, native-vulkan+quick, native-d3d12-quick | p-engine-skip-final-* | all passed |
 | guest+quick (Tracy) | p-engine-skip-base3, p-engine-skip-sun1 | captures; 'start' shot not written is trun.sh's step override |
 
 Shot comparison: two runs of the same build differ as much as base vs after (river: 57% vs 60% of pixels by > 1 from the
