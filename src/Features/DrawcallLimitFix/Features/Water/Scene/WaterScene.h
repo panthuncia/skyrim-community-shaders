@@ -75,6 +75,14 @@ namespace DCLF::Features::Water::WaterScene
 	inline constexpr std::size_t kValuePlane = 0;    // 4 floats: the property's plane (+0xA0), normal and constant
 	inline constexpr std::size_t kValueOffsets = 4;  // 4 ints as float bits: cellX, cellY, flowX, flowY (+0x90..+0x9C)
 
+	// BSWaterShaderMaterial's texture fields (NiSourceTexture pointers): the static cube, the three normal maps and the flow normals.
+	inline constexpr std::uint16_t kMaterialStaticReflection = 0x38;
+	inline constexpr std::uint16_t kMaterialNormal1 = 0x40;
+	inline constexpr std::uint16_t kMaterialNormal2 = 0x48;
+	inline constexpr std::uint16_t kMaterialNormal3 = 0x50;
+	inline constexpr std::uint16_t kMaterialFlowNormals = 0x58;
+	inline constexpr std::uint16_t kMaterialTextureFields[] = { kMaterialStaticReflection, kMaterialNormal1, kMaterialNormal2, kMaterialNormal3, kMaterialFlowNormals };
+
 	/**
 	 * @brief A water object's row in the table family: what SetupGeometry reads of the property, fixed until an engine write.
 	 * Port::ObjectRow is this row with the frame's flowmap values and Unified Water's rewrite applied, which needs the frame row

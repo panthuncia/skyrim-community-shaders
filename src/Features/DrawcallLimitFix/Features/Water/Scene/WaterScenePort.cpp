@@ -41,13 +41,13 @@ namespace DCLF::Features::Water::WaterScene
 		constexpr std::uint32_t kPsVariables = static_cast<std::uint32_t>(Port::PsVariable::Count);
 
 		// BSWaterShaderMaterial's texture fields, and the slots SetupMaterial (SE 100604, 0x1412f6a70) binds them to.
-		constexpr std::uint16_t kStaticReflection = 0x38;  // t3, unless the material's +0x17D byte picks the global cube
-		constexpr std::uint16_t kNormal1 = 0x40;           // t4
-		constexpr std::uint16_t kNormal2 = 0x48;           // t5
-		constexpr std::uint16_t kNormal3 = 0x50;           // t6
-		constexpr std::uint16_t kFlowNormals = 0x58;       // t9, with the Flowmap bit
+		constexpr std::uint16_t kStaticReflection = kMaterialStaticReflection;  // t3, unless the material's +0x17D byte picks the global cube
+		constexpr std::uint16_t kNormal1 = kMaterialNormal1;                    // t4
+		constexpr std::uint16_t kNormal2 = kMaterialNormal2;                    // t5
+		constexpr std::uint16_t kNormal3 = kMaterialNormal3;                    // t6
+		constexpr std::uint16_t kFlowNormals = kMaterialFlowNormals;            // t9, with the Flowmap bit
 		constexpr std::uint16_t kGlobalCubeByte = 0x17D;
-		constexpr std::uint16_t kTextureFields[] = { kStaticReflection, kNormal1, kNormal2, kNormal3, kFlowNormals };
+		constexpr std::span<const std::uint16_t> kTextureFields = kMaterialTextureFields;
 		constexpr std::uint32_t kWrap = 3;         // SetupMaterial's address mode for the normal maps
 		constexpr std::uint32_t kAnisotropic = 3;  // and filter mode
 		constexpr std::uint32_t kBilinear = 1;     // the cube's filter mode, with address mode 0

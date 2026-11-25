@@ -29,6 +29,8 @@
 #include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneMirror.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
+#include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
+#include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
 #include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 
@@ -244,11 +246,31 @@ namespace DCLF::Features::Water::WaterScene
 
 		// ---- The frame inputs, the material pool and the frame row. Render thread, apart from the producers.
 
-		/** @brief A pool row: the material it evaluates and how many member slots name it. */
+		/** @brief Each texture field's texture and its view, as the material holds them now. */
+		using MaterialTextures = std::array<const void*, 2 * std::size(kMaterialTextureFields)>;
+
+		MaterialTextures TexturesOf(const void* a_material)
+		{
+			MaterialTextures out{};
+			const auto* bytes = static_cast<const std::byte*>(a_material);
+			for (std::size_t i = 0; i < std::size(kMaterialTextureFields); ++i) {
+				const void* texture = *reinterpret_cast<const void* const*>(bytes + kMaterialTextureFields[i]);
+				out[2 * i] = texture;
+				out[2 * i + 1] = MaterialPort::ViewOf(texture);
+			}
+			return out;
+		}
+
+		/**
+		 * @brief A pool row: the material it evaluates, how many member slots name it, and the textures it held when last reported.
+		 * A new row starts with no textures, so its first frame reports a write. The material's record may have been captured before
+		 * the engine swapped its textures, during the load.
+		 */
 		struct MaterialEntry
 		{
 			const void* material = nullptr;
 			std::uint32_t users = 0;
+			MaterialTextures textures{};
 		};
 
 		struct MemberSlot
@@ -359,6 +381,17 @@ namespace DCLF::Features::Water::WaterScene
 				slots.push_back(slot);
 			for (const auto slot : slots)
 				ResolveSlot(state, a_capture, slot);
+			// TESWaterSystem::Update (AE 32174) gives a water material its textures in place once they load (AE 32170, found with a
+			// write watch). That can be seconds after the material was captured, and no hook hears it. Report each change as a write.
+			for (auto& entry : state.rows) {
+				if (!entry.material)
+					continue;
+				const auto textures = TexturesOf(entry.material);
+				if (textures == entry.textures)
+					continue;
+				entry.textures = textures;
+				Api::NoteMaterialWritten(static_cast<const RE::BSShaderMaterial*>(entry.material));
+			}
 		}
 
 		Api::FrameValuePoolId materialPool, framePool;  // install
