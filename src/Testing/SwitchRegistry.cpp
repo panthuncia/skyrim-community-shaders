@@ -102,7 +102,6 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_GRASS_COLLISION_STATS", .type = Bool },
 			{ .name = "CS_HANG_WATCHDOG", .key = "cs.hang_watchdog", .type = Int, .description = "seconds without progress before the hang watchdog writes its report (default 15)" },
 			{ .name = "CS_NATIVE_D3D11" },
-			{ .name = "CS_NO_D3DX_UPGRADE" },
 			{ .name = "CS_NVPERF_BASELINE" },
 			{ .name = "CS_NVPERF_HALF_WIDTH" },
 			{ .name = "CS_NVPERF_LABEL" },
