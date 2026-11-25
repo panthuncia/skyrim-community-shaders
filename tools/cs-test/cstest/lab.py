@@ -355,13 +355,26 @@ def pick_save(paths, save):
     return path
 
 
+def empty_folder(folder, wait_s=30):
+    """Deletes a folder's contents and makes it again. A game's last handles can outlive it briefly, so it retries for a while."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            if folder.exists():
+                shutil.rmtree(folder)
+            folder.mkdir(parents=True)
+            return
+        except PermissionError as error:
+            if time.monotonic() >= deadline:
+                raise LabError(f"cannot empty {folder} ({error}): something still has a file in it open") from error
+            time.sleep(1)
+
+
 def write_home(paths, slot, contract, prefs, plugins_off, set_ini_values, log=print):
     """The slot's Documents and local AppData for one run: INIs (kept running unfocused), the one save it loads, plugins.txt and
     the test file. The SKSE folder starts empty, so the run's logs are its own."""
     for folder in (slot.skse, slot.saves):
-        if folder.exists():
-            shutil.rmtree(folder)
-        folder.mkdir(parents=True)
+        empty_folder(folder)
     source = ini_folder(paths)
     for name in ("Skyrim.ini", "SkyrimPrefs.ini", "SkyrimCustom.ini"):
         src = source / name

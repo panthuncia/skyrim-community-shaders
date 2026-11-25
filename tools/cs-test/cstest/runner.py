@@ -355,7 +355,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
     except KeyboardInterrupt:
         final = Final("interrupted", "cs-test was interrupted", "harness")
         log("Interrupted: stopping the game")
-    except (RunError, lab_mod.LabError, locks.LockError, mo2.Mo2Error) as error:
+    except (RunError, lab_mod.LabError, locks.LockError, mo2.Mo2Error, OSError) as error:
         final = Final("not-run", str(error), "harness")
         log(f"not-run: {error}")
     finally:
@@ -369,6 +369,10 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
             if run_dir is not None:
                 procs.dump_before_kill(games, slot.data / "SKSE" / "Plugins" / CRASH_DUMP_EXE, run_dir, log=log)
             procs.stop(games, log=log)
+        # A game that has exited can hold its files a moment longer while it is torn down. The next run in this slot
+        # deletes them, so the slot is free only once every game it saw is gone.
+        if pids and not procs.wait_gone(pids, 60):
+            log(f"Slot {slot.number}: game {pids} still shutting down after 60 s")
         if launched:
             lab_mod.merge_cache(lab, slot, clean=not killed and final is not None and final.outcome != "interrupted", log=log)
         if active:
