@@ -46,10 +46,13 @@ namespace DCLF::Features::Fades
 		std::uint32_t slot = 0;
 		std::uint32_t generation = 0;
 	};
-	/** @brief Render thread. The animation job's fade updates since the last list jobs, which FadeStateCS repeats before its cull test. */
+	/**
+	 * @brief Render thread. The animation job's fade updates since the last list jobs, which FadeStateCS repeats before its cull test.
+	 * Swapped into a_roots, whose old storage the next drain fills.
+	 */
 	void TakeAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
-	/** @brief Render thread. Keeps a copy of the batch so the CPU stage's observer frame can step it a frame later. */
-	void KeepAnimatedBatchForObserver(const std::vector<AnimatedFadeRoot>& a_roots, const AnimatedFadeInputs& a_inputs);
+	/** @brief Render thread. Keeps the batch so the CPU stage's observer frame can step it a frame later. Swapped: a_roots gets old storage. */
+	void KeepAnimatedBatchForObserver(std::vector<AnimatedFadeRoot>& a_roots, const AnimatedFadeInputs& a_inputs);
 	void TakeObserverAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
 	/** @brief Render thread, when the list jobs finish. Turns the queued updates into the batch. */
 	void DrainAnimatedFades();

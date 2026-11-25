@@ -34,10 +34,12 @@ namespace DCLF::Features::Fades
 			const auto eye = FadeState::FadeEye();
 			std::copy_n(eye.data(), 3, a_inputs.eye);
 			a_inputs.lodAdjust = eye[3];
-			std::vector<AnimatedFadeRoot> roots;
+			// Kept for its storage, which the batches rotate through. Render thread.
+			static std::vector<AnimatedFadeRoot> roots;
 			AnimatedFadeInputs anim{};
 			TakeAnimatedBatch(roots, anim);
-			KeepAnimatedBatchForObserver(roots, anim);
+			TracyCZoneN(stampZone, "CS.DCLF.Fade.Stamp", true);
+			TracyCZoneValue(stampZone, roots.size());
 			std::copy_n(anim.eye, 3, a_inputs.animEye);
 			a_inputs.animLodAdjust = anim.lodAdjust;
 			a_inputs.animCounter = anim.counter;
@@ -48,7 +50,8 @@ namespace DCLF::Features::Fades
 			auto& counts = a_buffers.fadeAnimatedCounts;
 			if (counts.size() < a_rootSlots)
 				counts.resize(a_rootSlots, 0u);
-			std::vector<std::uint32_t> stamped;
+			static std::vector<std::uint32_t> stamped;  // render thread, kept for its storage
+			stamped.clear();
 			if (a_buffers.fadeAnimated && anim.valid) {
 				// A batch can hold many roots, so the loop reads through plain pointers.
 				const std::size_t slots = std::min({ std::size_t(a_rootSlots), batchRoots.rows.size(), batchRoots.nodes.size() });
@@ -65,11 +68,14 @@ namespace DCLF::Features::Fades
 			auto& animatedWords = a_buffers.fadeAnimatedMirror;
 			if (animatedWords.size() < a_rootSlots)
 				animatedWords.resize(a_rootSlots, 0u);
+			const std::uint32_t sceneStep = Scene::FrameView::Get().SceneStep();
 			for (const std::uint32_t root : stamped) {
-				animatedWords[root] = FadeAnimatedWord(Scene::FrameView::Get().SceneStep(), counts[root]);
+				animatedWords[root] = FadeAnimatedWord(sceneStep, counts[root]);
 				counts[root] = 0;
 			}
 			std::sort(stamped.begin(), stamped.end());
+			TracyCZoneEnd(stampZone);
+			KeepAnimatedBatchForObserver(roots, anim);
 			// A version not filled yet gets the whole mirror.
 			if (const auto& animated = a_adopted.Of(a_buffers.fadeAnimated); !a_buffers.fadeAnimatedFilled.Holds(animated)) {
 				stamped.resize(std::min<std::size_t>(animatedWords.size(), animated.units));

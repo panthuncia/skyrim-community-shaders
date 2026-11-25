@@ -657,12 +657,18 @@ namespace DCLF
 			const org::RunRef latchRun = RenderGraphRuntime::Get().Host()->CurrentRun();
 			// On the CPU pipeline, the shadow site culls from the latched views collected here.
 			std::vector<Direct::ShadowSiteView> directViews;
+			TracyCZoneN(latchViewsZone, "CS.DCLF.ShadowInputs.LatchViews", true);
 			std::uint64_t active = Draws::LatchShadowViews(commit, latchRun, revisionShape, layouts, revision.direct ? &directViews : nullptr);
+			TracyCZoneEnd(latchViewsZone);
 			const auto occlusionStart = std::chrono::steady_clock::now();
+			TracyCZoneN(occlusionZone, "CS.DCLF.ShadowInputs.Occlusion", true);
 			mapsDrawn = Draws::LatchOcclusionViews(commit, latchRun, revisionShape, engine.occlusion, maps, active, revision.direct ? &directViews : nullptr);
 			occlusionMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - occlusionStart).count();
+			TracyCZoneEnd(occlusionZone);
+			TracyCZoneN(arenaZone, "CS.DCLF.ShadowInputs.Arena", true);
 			const auto record = Draws::UploadShadowArena(commit);
 			impl->revisions.latchedMisses += Draws::LatchShadowCsBlocks(commit, latchRun, record);
+			TracyCZoneEnd(arenaZone);
 			engine.lastActiveViews = active;
 			// Views that share draw arguments must not draw in the same frame, or they overwrite each other's draws.
 			if (revisionShape) {
@@ -688,7 +694,10 @@ namespace DCLF
 				impl->SubmitRevisionRecording(epoch, *revision.recordings, Draws::ShadowVariantToSubmit(commit, latchRun, revision.shape->Value<ShadowVariants>()->shapes, active));
 			owners.Seal(impl->scene.get());
 			blocksMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - blocksStart).count();
-			Draws::LogShadowEpoch(commit);
+			{
+				DCLF_ZONE("CS.DCLF.ShadowInputs.Log");
+				Draws::LogShadowEpoch(commit);
+			}
 			TracyCZoneEnd(shadowViewsZone);
 			bodyMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - bodyStart).count();
 		}, owners.Handle());
