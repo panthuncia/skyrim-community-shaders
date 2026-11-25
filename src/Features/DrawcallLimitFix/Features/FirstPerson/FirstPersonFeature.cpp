@@ -1,7 +1,6 @@
-// FirstPerson feature registration: its switch, the view's contribution, hooks and report lines.
+// FirstPerson feature registration: the view's contribution, hooks and report lines.
 
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
-#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include <string>
 
@@ -14,10 +13,10 @@ namespace DCLF::Features::FirstPerson
 			a_text += Report();
 		}
 
-		Api::ViewContribution Contribution(bool a_forwardDecals)
+		Api::ViewContribution Contribution()
 		{
 			return { .view = Api::EngineView::FirstPerson,
-				.forwardDecals = a_forwardDecals,
+				.forwardDecals = true,
 				.phase = kSetFirstPerson,
 				.membership = Api::ViewMembership::CategoryRoot,
 				.keys = { .forwardRasterToForwardPart = true, .keyFlags = kForwardKeyFirstPerson, .cullBackFaces = true },
@@ -47,11 +46,7 @@ namespace DCLF::Features::FirstPerson
 
 		void Install(Api::InstallContext& a_context)
 		{
-			const auto decalsSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_FIRST_PERSON_DECALS", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero,
-				.description = "default on (T7f item 7): a decal on a first-person entry (an effect's skinned blood decal on the arms, a weapon's BloodLighting) drawn by the first-person forward part as a forward object with its decal group's depth bias, test and blend; 0 it stays the engine's",
-				.after = "CS_DCLF_PLAIN_SNOW_SPARKLE" });
-			// The decals switch is read once, here.
-			a_context.RegisterView(Contribution(SwitchValue(decalsSwitch) != "0"));
+			a_context.RegisterView(Contribution());
 			// Must run before the coverage, which decides whether the members are withheld.
 			a_context.RegisterViewWork({ .view = Api::EngineView::FirstPerson, .point = Api::ViewPoint::FrameStartBeforeCoverage, .run = &BeginFrame });
 			a_context.RegisterViewWork({ .view = Api::EngineView::FirstPerson, .point = Api::ViewPoint::DepthCommitted, .run = &ExecuteDepth });

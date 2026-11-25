@@ -445,16 +445,6 @@
 			"description": "default on (T7f item 7): the engine's empty fade node (the BSFadeNode 0x14332a2a0 holds, which every BSShaderProperty starts with and the engine reads as none) is no fade root: such geometry (terrain, object LOD, some clutter) takes its entry's root; 0: it is listed as one fade root of all of them, outside the scene graph"
 		},
 		{
-			"name": "CS_DCLF_FIRST_PERSON_DECALS",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on (T7f item 7): a decal on a first-person entry (an effect's skinned blood decal on the arms, a weapon's BloodLighting) drawn by the first-person forward part as a forward object with its decal group's depth bias, test and blend; 0 it stays the engine's"
-		},
-		{
 			"name": "CS_DCLF_LATE_POSE",
 			"key": "",
 			"type": "string",

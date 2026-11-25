@@ -3022,7 +3022,7 @@ alpha test on; the sky tests without writing.
 The player's first-person skeleton is a category root of the one scene, drawn by two view epochs, the depth one hosted by the depth
 epoch (Features/FirstPerson; Core's view
 engine, `Core/Render/Epochs/ViewEpoch*.cpp`, `Core/Render/Views/ViewSlots.h`, shared with the reflection faces;
-`CS_DCLF_FIRST_PERSON_DECALS`).
+decals on its entries draw in its forward part).
 -   **Coverage** (`Covered`): the latch, both epochs covered, the depth copy imported, no rebuild pending, and a way to draw its
     forward part. That part has no plain buckets, so a GPU-driven graph without device-generated commands (AMD, Intel) draws it only
     through the direct forward family (`GraphConditions::firstPersonForwardDirect`). Without either, the engine keeps the whole view.
