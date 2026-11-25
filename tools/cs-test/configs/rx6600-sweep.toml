@@ -6,6 +6,9 @@
 # The exit comes 7200 frames after tgm (about 90 s): the sweep driver (tools/cs-test/sweep.ps1) moves the mouse for 60 s of it.
 extends = ["guest"]
 
+[run]
+exclusive = true             # every lab slot: sweep.ps1 moves the mouse in the focused game
+
 [dxvk]
 filter_device_name = "AMD Radeon RX 6600"
 

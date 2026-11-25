@@ -4,6 +4,9 @@
 # Two dumps: dclf:vram-json writes the previous snapshot, so the second is the one at 1500. Against vram-notex.env and vram-d3d11.env.
 extends = ["guest"]
 
+[run]
+exclusive = true             # every lab slot: VRAM numbers, so no other game shares the GPU's memory
+
 [cs]
 vram_debug = true
 

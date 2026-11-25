@@ -18,7 +18,8 @@ DEFAULT_TIMEOUTS = {"launch": 60, "compile": 600, "load": 120, "step_wait": 60}
 
 # Tables with fixed fields, and each field's type.
 FIXED = {
-    "run": {"timeout_s": int, "label": str, "stall_s": int},
+    # run.exclusive: the run takes every lab slot, so no other game runs beside it (timing, frame generation, focus).
+    "run": {"timeout_s": int, "label": str, "stall_s": int, "exclusive": bool},
     "build": {"stage": str, "shader_cache": str},
     "game": {"save": str, "cell": str, "mods_off": list, "autoload_mod": str, "uncapped": bool},
     "timeouts": {"launch": int, "compile": int, "load": int, "step_wait": int},
@@ -306,12 +307,16 @@ def flatten(merged, schema, name):
     autoload_off = game.get("save", "autoload") != "autoload" and bool(autoload_mod)
     if autoload_off and autoload_mod not in mods_off:
         mods_off.append(autoload_mod)
+    uncapped = bool(game.get("uncapped", False))
+    presentmon = bool(merged.get("fg", {}).get("presentmon", False))
     harness = {
         "stage": build.get("stage", ""),
         "shader_cache": build.get("shader_cache", "warm"),
         "mods_off": mods_off,
-        "uncapped": bool(game.get("uncapped", False)),
-        "presentmon": bool(merged.get("fg", {}).get("presentmon", False)),
+        "uncapped": uncapped,
+        "presentmon": presentmon,
+        # A timing run (uncapped, PresentMon) is exclusive too: other games would take GPU time from it.
+        "exclusive": bool(run.get("exclusive", False)) or uncapped or presentmon,
         "autoload_off": autoload_mod if autoload_off else "",
         "saved_settings": copy.deepcopy(merged.get("saved_settings", {})),
         "prefs_ini": copy.deepcopy(merged.get("prefs_ini", {})),

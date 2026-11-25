@@ -4,7 +4,9 @@ param([string]$Configs = 'rx6600-sweep', [string]$Stage = 'p35', [string]$Label 
 # -Set takes --set values separated by ";".
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$status = "$env:USERPROFILE\Documents\My Games\Skyrim Special Edition\SKSE\CommunityShaders-Test.status.json"
+# The run's status file is in its lab slot: lab\active\<run id>.json names it once the run has its slots.
+$active = "C:\Modding\CS-AB\lab\active"
+$status = $null
 $sets = @(); foreach ($s in ($Set -split ";" | Where-Object { $_ })) { $sets += @('--set', $s) }
 $job = Start-Job -ScriptBlock {
     param($root, $configs, $stage, $label, $sets)
@@ -16,6 +18,10 @@ $start = Get-Date
 $ready = $false
 while ($job.State -eq 'Running' -and -not $ready) {
     Start-Sleep -Seconds 2
+    if (-not $status) {
+        $found = Get-ChildItem "$active\*.json" -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_ -Raw | ConvertFrom-Json } | Where-Object { $_.label -eq $Label } | Select-Object -First 1
+        if ($found) { $status = $found.status } else { continue }
+    }
     try {
         if ((Get-Item $status -ErrorAction Stop).LastWriteTime -gt $start) {
             $json = Get-Content $status -Raw | ConvertFrom-Json
@@ -26,7 +32,7 @@ while ($job.State -eq 'Running' -and -not $ready) {
 if ($ready) {
     Start-Sleep -Seconds 3
     $sweepStart = Get-Date; $dir = 1; $steps = 0
-    while (((Get-Date) - $sweepStart).TotalSeconds -lt $Seconds -and $job.State -eq 'Running' -and (Get-Process SkyrimSE -ErrorAction SilentlyContinue)) {
+    while (((Get-Date) - $sweepStart).TotalSeconds -lt $Seconds -and $job.State -eq 'Running' -and (Get-Process SkyrimSE -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$($found.game)\*" })) {
         [Sweep.Native]::mouse_event(1, 120 * $dir, 0, 0, [UIntPtr]::Zero)
         Start-Sleep -Milliseconds 16
         if (++$steps % 60 -eq 0) { $dir = -$dir }

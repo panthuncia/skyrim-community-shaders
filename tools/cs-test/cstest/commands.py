@@ -6,10 +6,10 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from . import collect, journal as journal_mod, mo2, procs
+from . import collect, lab as lab_mod, locks, mo2, procs
 from .config import diff
 from . import schema as schema_mod
-from .paths import GAME_EXE, LOG_FILE, MO2_EXE, REPO_DIR, SCHEMA_PATH, SWITCHES_FILE, TEST_FILE
+from .paths import LOG_FILE, REPO_DIR, SCHEMA_PATH, SWITCHES_FILE
 from .runner import run
 from .schema import ConfigError, load_schema
 
@@ -39,26 +39,19 @@ def sweep_plan(schema, base, vary, mode):
     return plan
 
 
-def sweep(paths, spec, base, vary, mode="on-one", sets=(), label=None, stage=None, dry_run=False, wait_lock=0, log=print):
+def sweep(paths, spec, base, vary, mode="on-one", sets=(), label=None, stage=None, dry_run=False, wait_lock=0, slots=None, log=print):
     schema = load_schema()
     plan = sweep_plan(schema, base, vary, mode)
     log(f"Sweep of {spec}: {len(plan)} runs ({mode})")
-    lock = None
-    if not dry_run:
-        lock = journal_mod.Lock(paths.lock, f"sweep {spec}")
-        lock.acquire(wait_lock, log=log)
     rows = []
-    try:
-        for suffix, sweep_sets in plan:
-            run_label = f"{label}-{suffix}" if label else suffix
-            result = run(paths, spec, list(sets) + sweep_sets, label=run_label, stage=stage, dry_run=dry_run, lock=lock, log=log)
-            rows.append((suffix, result))
-            if result.get("outcome") == "not-run":
-                log("Stopping the sweep: a run could not start")
-                break
-    finally:
-        if lock:
-            lock.release()
+    for suffix, sweep_sets in plan:
+        run_label = f"{label}-{suffix}" if label else suffix
+        # Each run takes a lab slot of its own, and waits for one.
+        result = run(paths, spec, list(sets) + sweep_sets, label=run_label, stage=stage, dry_run=dry_run, wait_lock=wait_lock, slots=slots, log=log)
+        rows.append((suffix, result))
+        if result.get("outcome") == "not-run":
+            log("Stopping the sweep: a run could not start")
+            break
     log("")
     width = max(len(s) for s, _ in rows)
     log(f"{'run'.ljust(width)}  outcome          detail")
@@ -159,68 +152,54 @@ def compare(paths, a, b, log=print, shots=True, memory=True):
 # status and restore
 
 def status(paths, log=print):
-    lock = journal_mod.Lock(paths.lock)
-    owner = lock.owner()
-    if owner:
-        live = journal_mod.Lock.is_live(owner)
-        log(f"Lock: PID {owner.get('pid')} {owner.get('command', '')} since {owner.get('started')} ({'running' if live else 'stale'})")
-    else:
-        log("Lock: free")
-    data = journal_mod.Journal(paths).load()
-    if data:
-        log(f"Journal: run {data.get('run_id')} (PID {data.get('pid')}, {data.get('started')}) left these changes; the next command undoes them:")
-        for entry in data.get("entries", []):
-            log(f"  {json.dumps(entry)}")
-    else:
-        log("Journal: none")
+    lab = lab_mod.Lab(paths)
+    count = lab_mod.slot_count(paths)
+    log(f"Lab: {lab.root}, {count} slots (game {paths.game})")
+    for name in ["exclusive", "launch", "base", "cache"] + [f"slot-{n}" for n in range(max(count, lab_mod.existing_slots(lab)))]:
+        lock = lab.lock(name)
+        owner = lock.owner()
+        if owner:
+            live = locks.Lock.is_live(owner)
+            log(f"  {name}: PID {owner.get('pid')} {owner.get('command', '')} since {owner.get('started')} ({'running' if live else 'stale'})")
+        else:
+            log(f"  {name}: free")
+    for active in lab_mod.active_runs(paths):
+        games = procs.pids_of(lab.slot(active["slot"]).exe)
+        log(f"Run {active['run_id']} in slot {active['slot']} (PID {active['pid']}); game {', '.join(map(str, games)) or 'not running'}; log {active['log']}")
+    log(f"Shader cache: generation {lab_mod.cache_generation(lab)} at {lab.cache}")
     if paths.modlist.exists():
         state = mo2.get_state(paths)
-        log(f"Variant: live {state['live']}; enabled CS mod {mo2.enabled_cs_mod(paths.modlist)}; original {state['originalMod']}")
-    for name, stash in mo2.list_stashes(paths).items():
-        log(f"  {name}: stash {', '.join(stash) or '(empty)'}")
-    if paths.mods_off_legacy.exists():
-        log(f"cs-ab left mods off ({paths.mods_off_legacy}): {', '.join(l for l in paths.mods_off_legacy.read_text(encoding='utf-8-sig').splitlines() if l)}")
-    legacy = journal_mod.legacy_env_left(paths)
-    if legacy:
-        log(f"cs-ab left {legacy} (a manual launch would run its test commands)")
-    if (paths.skse / TEST_FILE).exists():
-        log(f"Leftover {paths.skse / TEST_FILE}")
-    running = [f"{image} {pid}" for image in (GAME_EXE, MO2_EXE) for pid in procs.find(image)]
-    log(f"Running: {', '.join(running) if running else 'neither the game nor MO2'}")
+        if state["originalMod"]:
+            log(f"The old MO2 harness left {mo2.enabled_cs_mod(paths.modlist)} enabled in the mod list; restore puts {state['originalMod']} back")
 
 
-def restore(paths, original=True, log=print):
-    lock = journal_mod.Lock(paths.lock, "restore")
-    lock.acquire(0, log=log)
-    try:
-        if not journal_mod.recover(paths, log=log):
-            return False
-        if procs.find(GAME_EXE) or procs.find(MO2_EXE):
-            log("The game or MO2 is running: close them first")
-            return False
-        legacy = journal_mod.legacy_env_left(paths)
-        if legacy:
-            legacy.unlink()
-            log(f"Deleted cs-ab's leftover {legacy}")
-        leftover = paths.skse / TEST_FILE
-        if leftover.exists():
-            leftover.unlink()
-            log(f"Deleted leftover {leftover}")
-        if original:
-            restored = mo2.restore_original(paths)
-            log(f"Restored {restored}" if restored else "Variant: nothing to restore")
-        return True
-    finally:
-        lock.release()
+def restore(paths, log=print):
+    """Lab runs change nothing outside the lab. This undoes what the old MO2 harness left: its variant swap in the mod list."""
+    if (paths.root / "journal.json").exists():
+        log(f"{paths.root / 'journal.json'} is the old MO2 harness's record of a killed run: undo it with that harness, or by hand, then delete it")
+        return False
+    if procs.find("ModOrganizer.exe"):
+        log("MO2 is running: close it first (it rewrites the mod list as it exits)")
+        return False
+    restored = mo2.restore_original(paths)
+    log(f"Restored {restored} in the mod list" if restored else "Nothing to restore")
+    return True
 
 
 # schema and check-schema
 
+def newest_dump(paths):
+    """The newest run folder's switch dump (a run collects it from its slot)."""
+    dumps = sorted(paths.runs.glob(f"*/{SWITCHES_FILE}"), key=lambda p: p.stat().st_mtime) if paths.runs.exists() else []
+    return dumps[-1] if dumps else None
+
+
 def _read_dump(paths, dump, log):
-    path = Path(dump) if dump else paths.skse / SWITCHES_FILE
-    if not path.exists():
-        log(f"No {path}: make one with 'cs_test.py run list-switches --stage <name>' (DCLF on, for its features' switches)")
+    path = Path(dump) if dump else newest_dump(paths)
+    if path is None or not path.exists():
+        log(f"No {path or SWITCHES_FILE + ' in any run folder'}: make one with 'cs_test.py run list-switches --stage <name>' (DCLF on, for its features' switches)")
         return None
+    log(f"Switch dump: {path}")
     return json.loads(path.read_text(encoding="utf-8"))
 
 

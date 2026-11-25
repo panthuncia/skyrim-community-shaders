@@ -57,7 +57,9 @@ def test_bad_rows_are_named():
 
 def test_schema_copies_a_dump_and_check_schema_compares(fake, tmp_path):
     out = tmp_path / "switches.json"
-    (fake.skse / "CommunityShaders-Switches.json").write_text(json.dumps(DUMP), encoding="utf-8")
+    dump = fake.runs / "1125-120000-p35-list-switches" / "CommunityShaders-Switches.json"
+    dump.parent.mkdir(parents=True)
+    dump.write_text(json.dumps(DUMP), encoding="utf-8")
     lines = []
     assert commands.write_schema(fake, out=out, log=lines.append)
     assert out.read_text(encoding="utf-8") == render(DUMP)
@@ -66,7 +68,7 @@ def test_schema_copies_a_dump_and_check_schema_compares(fake, tmp_path):
     changed["switches"].append({"name": "CS_NEW", "key": "", "type": "string", "kind": "other", "family": "cs"})
     lines.clear()
     assert commands.schema_differences(DUMP, changed) == ["added: CS_NEW (cs, other)", "default differs for CS_ORG_NATIVE: '0' -> '1'"]
-    (fake.skse / "CommunityShaders-Switches.json").write_text(json.dumps({**DUMP, "dclf_complete": False}), encoding="utf-8")
+    dump.write_text(json.dumps({**DUMP, "dclf_complete": False}), encoding="utf-8")
     assert not commands.write_schema(fake, out=out, log=lines.append)
     assert any("DCLF" in line for line in lines)
 

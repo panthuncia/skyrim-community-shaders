@@ -3,36 +3,24 @@
 //
 // Family 0 is the snapshot (ImageSpaceFrame), read once at Renderer::Begin (read point A) and at RenderWorldPostProcess's entry
 // (read point B), and CS's post state (the parities and the adapted luminance). Families 1 to 4 are the HDR effect, the end-of-frame
-// effects, the pre-tonemap composites and RenderWorldPostProcess's body. Each has three modes (CS_ORG_POST_NATIVE): the engine's
-// container runs; observe, where the container runs and CS predicts each step's key and rows and the state after it, and logs a
-// difference once; and native, where the container is not called and CS stages the steps from the snapshot and writes back what
-// engine code after the chain reads.
+// effects, the pre-tonemap composites and RenderWorldPostProcess's body. Their containers are not called: CS stages the steps from the
+// snapshot and writes back what engine code after the chain reads. A family stays on the engine's container only for a case CS does
+// not draw: another mod's hook (decision 4), the world map or FXAA (decision 7), SIL or the image-based flares.
 //
-// The globals are SE/AE pairs. AE runs natively by default. SE's ids were matched statically (perf-post-slots.md) but never run, so
-// SE runs every family on the engine unless CS_ORG_POST_NATIVE is set.
+// The globals are SE/AE pairs. SE's were matched statically (perf-post-slots.md) and are untested at runtime.
 
 namespace NativePost
 {
-	enum class Mode : std::uint8_t
-	{
-		Engine,
-		Observe,
-		Native,
-	};
-
 	namespace Family
 	{
 		constexpr std::uint8_t kHdr = 1;
 		constexpr std::uint8_t kEof = 2;
 		constexpr std::uint8_t kComposites = 4;
 		constexpr std::uint8_t kPost = 8;
-		constexpr std::uint8_t kAll = kHdr | kEof | kComposites | kPost;
 	}
 
 	struct Config
 	{
-		Mode mode = Mode::Engine;
-		std::uint8_t families = 0;
 		// Families whose container or effect holds another mod's hook. They stay on the engine path (decision 4).
 		std::uint8_t foreign = 0;
 		// Slot effects whose Render or UpdateParams holds another mod's hook: the engine's RenderEffect draws them.
@@ -45,10 +33,10 @@ namespace NativePost
 		return config;
 	}
 
-	bool In(Mode a_mode, std::uint8_t a_family)
+	/** @brief Whether a family runs natively: unless another mod hooks it. */
+	bool Native(std::uint8_t a_family)
 	{
-		const auto& config = Settings();
-		return config.mode == a_mode && (config.families & a_family) && !(config.foreign & a_family);
+		return !(Settings().foreign & a_family);
 	}
 
 	/** @brief The engine globals the families read and write back, resolved once at Install. The comments give the AE ids. */
@@ -110,6 +98,13 @@ namespace NativePost
 		std::array<const float*, 7> dofCustom{};   // 415136 to 415142, the depth of field's custom range (mode bit 0x80)
 		const bool* dofCompute = nullptr;          // 391684: the depth of field blurs with its compute shaders
 		bool* underwaterMaskWritten = nullptr;     // 391616: the underwater mask was drawn; the depth of field's Render clears it
+		// The full-screen blur and get hit.
+		const float* blurCamera = nullptr;         // 415441: the world camera's values Main::RenderWorld keeps (three floats), (1, 1, 1) when reset
+		const bool* blurCameraMoved = nullptr;     // 415422: the camera moved this frame; the full-screen blur then blurs at radius 2 or more
+		const bool* blurCameraGate = nullptr;      // 414598: Main::RenderWorld tracks the camera for the blur
+		const float* getHitScale = nullptr;        // 415419
+		const float* getHitAmount = nullptr;       // 415420
+		const float* timer = nullptr;              // 390953: the timer get hit's double vision turns with
 		bool ready = false;
 	};
 
@@ -179,6 +174,12 @@ namespace NativePost
 		}
 		g.dofCompute = At<bool>(513727, 391684);
 		g.underwaterMaskWritten = At<bool>(513680, 391616);
+		g.blurCamera = At<float>(528495, 415441);
+		g.blurCameraMoved = At<bool>(528476, 415422);
+		g.blurCameraGate = At<bool>(527646, 414598);
+		g.getHitScale = At<float>(528473, 415419);
+		g.getHitAmount = At<float>(528474, 415420);
+		g.timer = At<float>(513213, 390953);
 		g.ready = true;
 	}
 
@@ -196,6 +197,8 @@ namespace NativePost
 	constexpr float kDofNoRange = -1.0e8f;   // 0x141abf108
 	// The depth of field's compute blur shaders' thread groups (ISBlurCS.hlsl's GRIDSIZE_X and GRIDSIZE_Y for 112 and 113).
 	constexpr std::uint32_t kDofGridX = 480, kDofGridY = 270;
+	constexpr float kGetHitTurn = 0.0017453278f;  // 0x141ac58d0: the timer to the double vision's angle (SE: / 3600 * 2 pi)
+	constexpr float kGetHitRadius = 2.0f;          // 0x141ad288c: get hit's blurs take radius 2's weights
 
 	/** @brief ImageSpaceManager +0xC8 to +0x15C: the blended ImageSpace data (HDR, cinematic, tint, fade, blurs, DoF). */
 	constexpr std::uintptr_t kDataFirst = 0xC8, kDataEnd = 0x15C;
@@ -239,6 +242,12 @@ namespace NativePost
 		std::array<float, 7> dofIni{}, dofCustom{};
 		std::int32_t radialEffect = -1;         // the radial blur's shader (by quality), a kEffects index
 		bool dofDynamic = false, radialDynamic = false;  // the depth of field's and radial blur's ImageSpaceEffect +0x88
+		// B: the full-screen blur (slot 6) and get hit (slot 7). Their blurs are effects 9 to 15: radius (+0x90) and flag (+0x88).
+		std::array<std::int32_t, 7> slotBlurRadius{};
+		std::array<bool, 7> slotBlurDynamic{};
+		bool fullBlurDynamic = false, fullBlurLegacy = false, fullBlurAtLeast2 = false;
+		bool getHitDynamic = false;
+		float getHitScale = 0, getHitAmount = 0, timer = 0;
 		// The end-of-frame entry: Upscaling's call-site hook turns TAA on just before it, and sets the dynamic resolution.
 		bool taa = false;
 		std::int32_t taaMode = 0;
@@ -283,11 +292,7 @@ namespace NativePost
 		ImageSpaceFrame frame;
 		PostState state;
 		std::uint64_t frameNumber = UINT64_MAX;
-		// Observe mode: the steps CS predicts, in order, and the post state it predicts after them.
-		std::deque<NativeStep> expected;
-		std::optional<PostState> predicted;
-		bool predicting = false;
-		std::uint64_t compared = 0, differed = 0, staged = 0;
+		std::uint64_t staged = 0;
 		// Per-family counts of frames run natively and on the engine path, for the log.
 		std::array<std::uint64_t, 4> native{}, engine{};
 		std::uint64_t slotNative = 0, slotEngine = 0;  // slot effects staged natively, and run through the engine's RenderEffect
@@ -298,12 +303,6 @@ namespace NativePost
 	{
 		static Runtime runtime;
 		return runtime;
-	}
-
-	Util::ReasonLog& Mismatches()
-	{
-		static Util::ReasonLog log("[ORG] native post chain: observe found a difference", spdlog::level::warn);
-		return log;
 	}
 
 	std::uintptr_t ManagerBase()
@@ -343,7 +342,7 @@ namespace NativePost
 		f = {};
 		const auto& g = G();
 		const auto base = ManagerBase();
-		if (!g.ready || !base || Settings().mode == Mode::Engine)
+		if (!g.ready || !base)
 			return;
 		CheckForeignHooksOnce();
 		std::memcpy(f.data.data(), reinterpret_cast<const void*>(base + kDataFirst), sizeof(f.data));
@@ -386,9 +385,9 @@ namespace NativePost
 		f.read = true;
 		r.state = EngineState();
 		if (Frame::Driver::Current().frame % 300 == 0)
-			logger::info("[ORG] native post chain: {} steps compared ({} differed), {} staged natively; native frames hdr {} eof {} composites {} post {}, "
+			logger::info("[ORG] native post chain: {} steps staged natively; native frames hdr {} eof {} composites {} post {}, "
 						 "end-of-frame frames on the engine {} (last slots {:#x}); slot effects native {}, through RenderEffect {}",
-				r.compared, r.differed, r.staged, r.native[0], r.native[1], r.native[2], r.native[3], r.engine[1], r.lastSlots, r.slotNative, r.slotEngine);
+				r.staged, r.native[0], r.native[1], r.native[2], r.native[3], r.engine[1], r.lastSlots, r.slotNative, r.slotEngine);
 		r.frameNumber = Frame::Driver::Current().frame;
 	}
 
@@ -425,6 +424,24 @@ namespace NativePost
 		if (const auto radial = effect(5))
 			if (const auto* list = Field<RE::ImageSpaceEffect* const*>(radial, 0x18); list && list[0])
 				a_f.radialEffect = EffectOf(static_cast<const RE::BSImagespaceShader*>(list[0]));
+		for (std::uint32_t r = 0; r < 7; ++r)
+			if (const auto blur = effect(9 + r)) {
+				a_f.slotBlurRadius[r] = Field<std::int32_t>(blur, 0x90);
+				a_f.slotBlurDynamic[r] = Field<bool>(blur, 0x88);
+			}
+		if (const auto full = effect(6)) {
+			a_f.fullBlurDynamic = Field<bool>(full, 0x88);
+			// Legacy Graphics Compatibility's full-screen blur adapter adds an eleventh entry (its HasElevenSlots and the copy there).
+			const auto& object = *reinterpret_cast<const RE::ImageSpaceEffect*>(full);
+			a_f.fullBlurLegacy = object.effects.size() >= 11 && object.effectParams.size() >= 11 && object.effectTextures.size() >= 11 && object.effects[10];
+		}
+		// The full-screen blur's Render (AE 108563) blurs at radius 2 or more while Main::RenderWorld saw the camera move.
+		const bool reset = g.blurCamera[0] == 1.0f && g.blurCamera[1] == 1.0f && g.blurCamera[2] == 1.0f;
+		a_f.fullBlurAtLeast2 = !reset && *g.blurCameraMoved && *g.blurCameraGate;
+		a_f.getHitDynamic = effect(7) && Field<bool>(effect(7), 0x88);
+		a_f.getHitScale = *g.getHitScale;
+		a_f.getHitAmount = *g.getHitAmount;
+		a_f.timer = *g.timer;
 	}
 
 	/** @brief Read point B, RenderWorldPostProcess's entry. Render owner. */
@@ -1026,10 +1043,115 @@ namespace NativePost
 		return steps;
 	}
 
-	/** @brief The slots CS stages natively: refraction (1), the depth of field (3) and the radial blur (5). */
+	/**
+	* @brief One draw of effects 9 to 15, the blurs the full-screen blur and get hit draw (ImageSpaceEffectBlur::UpdateParams, AE 108558):
+	* radius index a_r, its weights interpolated by the radius its parent handed over (AE 415421), the texel size of the blur's swap
+	* target a_swap. Its first draw takes the vertical taps, its second the horizontal ones. Row 0's x is 0 with the blur's flag (+0x88).
+	*/
+	NativeStep SlotBlurStep(const ImageSpaceFrame& a_f, std::uint32_t a_slot, bool a_ldr, std::uint32_t a_r, float a_handoff, std::int32_t a_swap, bool a_dynamic,
+		bool a_vertical, std::uint32_t a_occurrence)
+	{
+		using E = Effects;
+		constexpr std::array<E::ImageSpaceEffectEnum, 7> kHdr{ E::ISBlur3, E::ISBlur5, E::ISBlur7, E::ISBlur9, E::ISBlur11, E::ISBlur13, E::ISBlur15 };
+		constexpr std::array<E::ImageSpaceEffectEnum, 7> kLdr{ E::ISNonHDRBlur3, E::ISNonHDRBlur5, E::ISNonHDRBlur7, E::ISNonHDRBlur9, E::ISNonHDRBlur11,
+			E::ISNonHDRBlur13, E::ISNonHDRBlur15 };
+		const auto effect = Chain().blurHdr[a_r] ? kHdr[a_r] : kLdr[a_r];
+		auto step = Step(a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, effect, InnerVariant(static_cast<std::int32_t>(a_slot), effect, a_occurrence, false),
+			SlotGroup(a_slot, a_ldr));
+		const auto radius = a_f.slotBlurRadius[a_r];
+		const float fraction = [&] {
+			const float value = 1.0f - (static_cast<float>(radius) - a_handoff);
+			return value == 0.0f ? 1.0f : value;
+		}();
+		const auto [w, h] = a_f.Size(a_swap);
+		const auto taps = BlurTaps(radius, fraction, a_vertical, a_vertical ? 1.0f / h : 1.0f / w);
+		const auto n = static_cast<std::uint32_t>(std::clamp(radius, 0, 7));
+		SetId(step.rows, 0, a_dynamic ? 0.0f : 1.0f, 0.0f, a_f.range, 1.0f / a_f.range);
+		for (std::uint32_t tap = 0; tap < 2 * n + 1; ++tap) {
+			const auto& t = taps[7 - n + tap];
+			SetId(step.rows, 1 + tap, t[0], t[1], t[2], t[3]);
+		}
+		return step;
+	}
+
+	/** @brief The full-screen blur's radius from manager +0x128: rounded up (down below zero), at least 2 while the camera moved. */
+	std::int32_t FullBlurDrawnRadius(const ImageSpaceFrame& a_f)
+	{
+		const float amount = a_f.D(0x128);
+		auto radius = static_cast<std::int32_t>(amount);
+		if (radius != INT32_MIN && static_cast<float>(radius) != amount && !std::signbit(amount))
+			++radius;
+		if (a_f.fullBlurAtLeast2 && radius < 2)
+			radius = 2;
+		return radius;
+	}
+
+	/**
+	* @brief The full-screen blur (ImageSpaceEffectFullScreenBlur::Render and UpdateParams, AE 108563 and 108564): the downsample into
+	* rt22, the blur of its radius between rt22 and rt26, and the upsample back, which blends over the image below an amount of 1.
+	* CS draws it in place, so the engine's copy of the input before the blend has no step. Legacy Graphics Compatibility's adapter gives
+	* the blurs the effect's flag and sets the upsample's row 0 x to 1.
+	*/
+	std::vector<NativeStep> FullBlurSteps(const ImageSpaceFrame& a_f, const SlotCall& a_call, bool a_ldr)
+	{
+		using E = Effects;
+		std::vector<NativeStep> steps;
+		const auto scope = a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot;
+		const auto group = SlotGroup(6, a_ldr);
+		const float amount = a_f.D(0x128);
+		{
+			auto down = Step(scope, E::ISHDRDownSample4, InnerVariant(6, E::ISHDRDownSample4, 0, false), group);
+			const auto [w, h] = a_f.Size(a_call.source);
+			SetId(down.rows, 0, 0.0f);
+			SetId(down.rows, 1, 1.0f / w, 1.0f / h);
+			SetTaps(down.rows, 2, false);
+			steps.push_back(std::move(down));
+		}
+		if (const auto radius = FullBlurDrawnRadius(a_f); radius >= 1 && radius <= 7) {
+			const auto r = static_cast<std::uint32_t>(radius - 1);
+			const bool dynamic = a_f.fullBlurLegacy ? a_f.fullBlurDynamic : a_f.slotBlurDynamic[r];
+			steps.push_back(SlotBlurStep(a_f, 6, a_ldr, r, amount, RE::RENDER_TARGET::kHDR_DOWNSAMPLE0, dynamic, true, 0));
+			steps.push_back(SlotBlurStep(a_f, 6, a_ldr, r, amount, RE::RENDER_TARGET::kHDR_DOWNSAMPLE0, dynamic, false, 1));
+		}
+		{
+			const bool blended = amount < 1.0f;
+			auto up = Step(scope, E::ISHDRDownSample4, InnerVariant(6, E::ISHDRDownSample4, 1, blended), group);
+			const auto [w, h] = a_f.Size(a_call.destination);
+			SetId(up.rows, 0, a_f.fullBlurLegacy ? 1.0f : 0.0f);
+			SetId(up.rows, 1, 1.0f / w, 1.0f / h, (std::min)(amount, 1.0f), 0.0f);
+			SetTaps(up.rows, 2, false);
+			steps.push_back(std::move(up));
+		}
+		return steps;
+	}
+
+	/**
+	* @brief Get hit (ImageSpaceEffectGetHit::UpdateParams, AE 108553, drawn by the base Render): the copy into the get-hit buffer, the
+	* radius-index-1 blur twice (radius 2's weights), and the double vision over the image. Its rows turn with the timer.
+	*/
+	std::vector<NativeStep> GetHitSteps(const ImageSpaceFrame& a_f, bool a_ldr)
+	{
+		using E = Effects;
+		std::vector<NativeStep> steps;
+		const auto scope = a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot;
+		const auto group = SlotGroup(7, a_ldr);
+		steps.push_back(Step(scope, E::ISCopy, InnerVariant(7, E::ISCopy, 0, false), group));
+		for (std::uint32_t k = 0; k < 4; ++k)
+			steps.push_back(SlotBlurStep(a_f, 7, a_ldr, 1, kGetHitRadius, RE::RENDER_TARGET::kGETHIT_BUFFER, a_f.getHitDynamic, k % 2 == 0, k));
+		auto vision = Step(scope, E::ISDoubleVision, InnerVariant(7, E::ISDoubleVision, 0, false), group);
+		const float strength = a_f.D(0x12c);
+		const float angle = a_f.timer * kGetHitTurn;
+		SetId(vision.rows, 0, 0.0f, 0.0f, a_f.getHitScale * a_f.getHitAmount, a_f.getHitAmount);
+		SetId(vision.rows, 1, std::sin(angle) * strength, std::cos(angle) * strength, 1.0f, 1.0f);
+		SetLegacySelector(vision, a_f.getHitDynamic);
+		steps.push_back(std::move(vision));
+		return steps;
+	}
+
+	/** @brief The slots CS stages natively: refraction (1), the depth of field (3), the radial blur (5), the full-screen blur (6), get hit (7). */
 	bool SlotIsNative(std::uint32_t a_slot)
 	{
-		return (a_slot == 1 || a_slot == 3 || a_slot == 5) && !(Settings().foreignSlots >> a_slot & 1u);
+		return (a_slot == 1 || a_slot == 3 || a_slot == 5 || a_slot == 6 || a_slot == 7) && !(Settings().foreignSlots >> a_slot & 1u);
 	}
 
 	/** @brief A native slot's steps. a_supported is false when the frame's slot needs the engine's RenderEffect. */
@@ -1043,6 +1165,10 @@ namespace NativePost
 			return RefractionSteps(a_f);
 		case 3:
 			return DofSteps(a_f, a_call, a_ldr, a_supported);
+		case 6:
+			return FullBlurSteps(a_f, a_call, a_ldr);
+		case 7:
+			return GetHitSteps(a_f, a_ldr);
 		default:
 			return RadialSteps(a_f, a_ldr, a_supported);
 		}
@@ -1060,164 +1186,6 @@ namespace NativePost
 		SetId(vl.rows, 0, a_f.vlColour[0], a_f.vlColour[1], a_f.vlColour[2], 1.0f);
 		steps.push_back(std::move(vl));
 		return steps;
-	}
-
-	// Observe mode.
-
-	void Expect(std::vector<NativeStep> a_steps)
-	{
-		auto& r = R();
-		for (auto& step : a_steps)
-			r.expected.push_back(std::move(step));
-	}
-
-	std::string KeyName(const StepKey& a_key)
-	{
-		return fmt::format("{} {:#x}", kEffects[EffectIndex(a_key.effect)].effectName, a_key.variant);
-	}
-
-	/** @brief Each float within 1e-5 relative (1e-6 absolute near zero), as the plan's parity rule. */
-	bool Near(float a_a, float a_b)
-	{
-		if (std::memcmp(&a_a, &a_b, 4) == 0)
-			return true;
-		const float scale = (std::max)(std::abs(a_a), std::abs(a_b));
-		return std::abs(a_a - a_b) <= (std::max)(1e-5f * scale, 1e-6f);
-	}
-
-	/** @brief The effects whose ORG shader reads no PerGeometry rows: their engine rows are not compared. */
-	bool ReadsNoRows(Effects::ImageSpaceEffectEnum a_effect)
-	{
-		using E = Effects;
-		return a_effect == E::ISCopy || a_effect == E::ISCopyDynamicFetchDisabled;
-	}
-
-	void Compare(const StepKey& a_key, const NativeSteps::Rows& a_predicted, const NativeSteps::Rows& a_engine, bool a_compute = false)
-	{
-		auto& r = R();
-		++r.compared;
-		if (ReadsNoRows(a_key.effect))
-			return;
-		std::string differences;
-		// An explicit step's engine rows are the whole pool buffer its setter bound. Only the setter's struct is the step's.
-		const bool param = !a_compute && TableOf(EffectIndex(a_key.effect)).count > 0;
-		const auto count = param ? (std::max)(a_predicted.count, a_engine.count) : a_predicted.count;
-		for (std::uint32_t id = 0; id < count && differences.size() < 500; ++id) {
-			const auto* source = id < a_engine.count ? &a_engine : &a_predicted;
-			const auto at = source->offsets[id] * 4u;
-			for (std::uint32_t c = 0; c < 4; ++c) {
-				float predicted = 0.0f, engine = 0.0f;
-				if (id < a_predicted.count)
-					std::memcpy(&predicted, a_predicted.bytes.data() + at + c * 4, 4);
-				if (id < a_engine.count)
-					std::memcpy(&engine, a_engine.bytes.data() + at + c * 4, 4);
-				if (!Near(predicted, engine))
-					differences += fmt::format(" id{}.{} {} vs {}", id, "xyzw"[c], predicted, engine);
-			}
-		}
-		if (differences.empty())
-			return;
-		++r.differed;
-		Mismatches().Report(fmt::format("rows of {}", KeyName(a_key)), fmt::format("CS vs engine:{}", differences));
-	}
-}
-
-namespace NativePost
-{
-	/** @brief The engine's CS b0 rows for the dispatch it makes now, captured as StageStep captures them. Observe mode only. */
-	NativeSteps::Rows EngineComputeRows(std::uint32_t a_rows)
-	{
-		auto rows = ExplicitRows(a_rows);
-		ID3D11Buffer* constants = Tripwire::Unwrap(Constants::EngineComputeBuffer());
-		if (!constants)
-			return rows;
-		globals::d3d::context->CSSetConstantBuffers(0, 1, &constants);
-		const auto use = Constants::Capture(Constants::StageBit(Constants::Stage::Compute));
-		if (const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Compute, 0) : nullptr) {
-			const auto bytes = Constants::Bytes(*slot);
-			std::memcpy(rows.bytes.data(), bytes.data(), (std::min)(bytes.size(), static_cast<std::size_t>(rows.size)));
-		}
-		return rows;
-	}
-
-	/** @brief The slot a slot step belongs to: an inner draw of the full-screen blur (6) or get hit (7) by its variant, else by its effect. */
-	std::int32_t SlotOfStep(const StepKey& a_key)
-	{
-		if (a_key.scope != WorldScope::PreSlot && a_key.scope != WorldScope::LdrSlot)
-			return -1;
-		if (a_key.variant & 0x400u)
-			return (a_key.variant & 0x800u) ? 7 : 6;
-		return SlotOfEffect(a_key.effect);
-	}
-}
-
-void ObservePostStep(const StepKey& a_key, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
-{
-	using namespace NativePost;
-	auto& r = R();
-	if (!r.predicting)
-		return;
-	// The slots CS does not stage natively run through the engine's RenderEffect in every mode, so their steps are not predicted.
-	const bool slotStep = a_key.scope == WorldScope::PreSlot || a_key.scope == WorldScope::LdrSlot;
-	if (const auto slot = SlotOfStep(a_key); slotStep && (slot < 0 || !SlotIsNative(static_cast<std::uint32_t>(slot))))
-		return;
-	auto& native = NativeSteps::Get();
-	if (r.expected.empty()) {
-		++r.differed;
-		Mismatches().Report("an engine step CS did not predict", KeyName(a_key));
-		return;
-	}
-	auto step = std::move(r.expected.front());
-	r.expected.pop_front();
-	if (!(step.key == a_key)) {
-		++r.differed;
-		Mismatches().Report(fmt::format("the step CS predicted, {}", KeyName(step.key)), fmt::format("the engine drew {}", KeyName(a_key)));
-		return;
-	}
-	if (a_compute) {
-		if (step.groups != a_groups) {
-			++r.differed;
-			Mismatches().Report(fmt::format("thread groups of {}", KeyName(a_key)),
-				fmt::format("CS {}x{}x{} vs engine {}x{}x{}", step.groups[0], step.groups[1], step.groups[2], a_groups[0], a_groups[1], a_groups[2]));
-		}
-		Compare(a_key, step.rows, EngineComputeRows(step.rows.count), true);
-		return;
-	}
-	// The engine's rows are known when the step is native per effect (CS_ORG_IMAGESPACE_NATIVE=2): BuildRows or BoundRows filled them.
-	if (native.armed && native.effect == a_effect)
-		Compare(a_key, step.rows, native.rows);
-}
-
-namespace NativePost
-{
-	/** @brief Starts a prediction for a container run on the engine. a_state is advanced by the builders. */
-	void BeginPredict()
-	{
-		auto& r = R();
-		r.expected.clear();
-		r.predicting = true;
-	}
-
-	/** @brief Ends a prediction: steps CS predicted that the engine did not draw, and the state after the container. */
-	void EndPredict(std::string_view a_where, const std::optional<PostState>& a_predicted)
-	{
-		auto& r = R();
-		r.predicting = false;
-		for (const auto& step : r.expected) {
-			++r.differed;
-			Mismatches().Report(fmt::format("a step CS predicted in {} that the engine did not draw", a_where), KeyName(step.key));
-		}
-		r.expected.clear();
-		if (!a_predicted)
-			return;
-		const auto engine = EngineState();
-		if (engine.lumParity != a_predicted->lumParity || engine.adaptTarget != a_predicted->adaptTarget || engine.resetPending != a_predicted->resetPending ||
-			engine.taaParity != a_predicted->taaParity) {
-			++r.differed;
-			Mismatches().Report(fmt::format("the post state after {}", a_where),
-				fmt::format("CS: luminance parity {}, adapted rt{}, reset {}, TAA parity {}; engine: {}, rt{}, {}, {}", a_predicted->lumParity, a_predicted->adaptTarget,
-					a_predicted->resetPending, a_predicted->taaParity, engine.lumParity, engine.adaptTarget, engine.resetPending, engine.taaParity));
-		}
 	}
 
 	// Native mode.
@@ -1308,7 +1276,7 @@ namespace NativePost
 	}
 }
 
-/** @brief The HDR effect's hook: native in the world chain when the family is, observed when it is observed, else the engine's. */
+/** @brief The HDR effect's hook: native in the world chain, else the engine's. */
 template <class Engine>
 void HdrFamily(void* a_effect, Engine&& a_engine)
 {
@@ -1316,24 +1284,11 @@ void HdrFamily(void* a_effect, Engine&& a_engine)
 	auto& chain = Chain();
 	auto& r = R();
 	const bool world = chain.inEndOfFrame && r.frame.read && r.frame.readB && Chain().group.Registered();
-	if (world && In(Mode::Native, Family::kHdr)) {
+	if (world && Native(Family::kHdr)) {
 		// The effect's texture list names the source and the output (RenderEffect set them): texture 1 and texture 0.
 		std::int32_t input = -1, output = -1;
 		NativeSteps::TextureTargets(*static_cast<const RE::BSImagespaceShader*>(static_cast<const RE::ImageSpaceEffect*>(a_effect)), input, output);
 		RunHdr(input >= 0 ? input : RE::RENDER_TARGET::kMAIN, output);
-		return;
-	}
-	const bool observe = world && In(Mode::Observe, Family::kHdr) && !r.predicting;
-	if (observe) {
-		std::int32_t input = -1, output = -1;
-		NativeSteps::TextureTargets(*static_cast<const RE::BSImagespaceShader*>(static_cast<const RE::ImageSpaceEffect*>(a_effect)), input, output);
-		auto predicted = r.state;
-		BeginPredict();
-		Expect(HdrSteps(r.frame, predicted, input >= 0 ? input : RE::RENDER_TARGET::kMAIN, HeldLevels()));
-		a_engine();
-		predicted.taaParity = EngineState().taaParity;
-		EndPredict("the HDR effect", predicted);
-		r.state = EngineState();
 		return;
 	}
 	a_engine();
@@ -1381,6 +1336,18 @@ namespace NativePost
 			Stage(step);
 			composite |= step.key.effect != Effects::ISHDRDownSample4 && !step.compute;
 		}
+		// The full-screen blur sets alpha blend mode 1 around its blended upsample and leaves mode 0.
+		if (a_call.slot == 6 && r.frame.D(0x128) < 1.0f) {
+			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			if (shadow.alphaBlendMode != 0) {
+				shadow.alphaBlendMode = 0;
+				shadow.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
+			}
+		}
+		// Get hit's base Render gives its blur (effect 10) its own flag, which stays for the full-screen blur's next draw of it.
+		if (a_call.slot == 7)
+			if (auto* manager = RE::ImageSpaceManager::GetSingleton(); manager && 10 < manager->effects.free_idx() && manager->effects[10])
+				Field<bool>(reinterpret_cast<std::uintptr_t>(manager->effects[10]), 0x88) = r.frame.getHitDynamic;
 		// Refraction's Render (AE 107744) clears the flags refraction geometry sets, which its IsActive reads.
 		if (a_call.slot == 1) {
 			g.refractionDrawn[0] = false;
@@ -1400,8 +1367,8 @@ namespace NativePost
 
 	/**
 	* @brief The native end-of-frame effects (AE 105674) from a_source into a_final. CS routes the frame and stages the HDR effect, TAA,
-	* the screenshot copy and the upsample from the snapshot. The slot effects (refraction, depth of field, the blurs) go through the
-	* engine's RenderEffect, whose steps stage natively per effect (CS_ORG_IMAGESPACE_NATIVE=2).
+	* the screenshot copy, the upsample and the slot effects from the snapshot. A slot another mod hooks goes through the engine's
+	* RenderEffect.
 	*/
 	void RunEndOfFrame(std::int32_t a_source, std::int32_t a_final)
 	{
@@ -1513,7 +1480,7 @@ namespace NativePost
 	}
 }
 
-/** @brief The world chain's end-of-frame effects: native, observed or the engine's. Between OnEndOfFrame's begin and end. */
+/** @brief The world chain's end-of-frame effects: native, or the engine's for a frame CS does not draw. Between OnEndOfFrame's begin and end. */
 template <class Engine>
 void EofFamily(std::int32_t a_source, std::int32_t a_final, Engine&& a_engine)
 {
@@ -1521,44 +1488,8 @@ void EofFamily(std::int32_t a_source, std::int32_t a_final, Engine&& a_engine)
 	auto& r = R();
 	ReadEndOfFrame();
 	const bool frame = EofNativeFrame(r.frame);
-	if (frame && In(Mode::Native, Family::kEof)) {
+	if (frame && Native(Family::kEof)) {
 		RunEndOfFrame(a_source, a_final);
-		return;
-	}
-	if (frame && In(Mode::Observe, Family::kEof)) {
-		auto predicted = r.state;
-		BeginPredict();
-		const auto route = RouteOf(r.frame, a_source, a_final, SpareTarget());
-		const auto expectSlots = [&](const std::vector<SlotCall>& a_calls, bool a_ldr) {
-			for (const auto& call : a_calls) {
-				bool supported = false;
-				auto steps = SlotSteps(r.frame, call, a_ldr, supported);
-				if (supported)
-					Expect(std::move(steps));
-				else if (SlotIsNative(call.slot))
-					Mismatches().Report("a slot CS stages through the engine's RenderEffect", fmt::format("slot {} (depth of field steps {}{}{}{}{}, compute {})", call.slot,
-						r.frame.dofSteps[0], r.frame.dofSteps[1], r.frame.dofSteps[2], r.frame.dofSteps[3], r.frame.dofSteps[4], r.frame.dofCompute));
-			}
-		};
-		expectSlots(route.pre, false);
-		if (r.frame.hdr && !(globals::state && globals::state->PeekTonemapOwner() == ::State::TonemapOwner::kEffects11))
-			Expect(HdrSteps(r.frame, predicted, route.hdrSource, HeldLevels()));
-		else if (!r.frame.hdr)
-			Expect({ Step(WorldScope::HdrCopy, Effects::ISCopy, 0, ChainGroup::kHdrCopy) });
-		auto tail = EofTailSteps(r.frame, predicted, route);
-		std::vector<NativeStep> upsample;
-		for (auto it = tail.begin(); it != tail.end();)
-			if (it->key.scope == WorldScope::Upsample) {
-				upsample.push_back(std::move(*it));
-				it = tail.erase(it);
-			} else
-				++it;
-		Expect(std::move(tail));
-		expectSlots(route.ldr, true);
-		Expect(std::move(upsample));
-		a_engine();
-		EndPredict("the end-of-frame effects", predicted);
-		r.state = EngineState();
 		return;
 	}
 	if (r.frame.read)
@@ -1568,14 +1499,14 @@ void EofFamily(std::int32_t a_source, std::int32_t a_final, Engine&& a_engine)
 		r.state = EngineState();
 }
 
-/** @brief The pre-tonemap composites: native when the frame has neither SIL nor the image-based flares, observed, or the engine's. */
+/** @brief The pre-tonemap composites: native when the frame has neither SIL nor the image-based flares, else the engine's. */
 template <class Engine>
 void CompositesFamily(Engine&& a_engine)
 {
 	using namespace NativePost;
 	auto& r = R();
 	const bool frame = r.frame.read && r.frame.readB && !r.frame.sil && !r.frame.iblf && Frame::PostChain::InChain() && Chain().group.Registered();
-	if (frame && In(Mode::Native, Family::kComposites)) {
+	if (frame && Native(Family::kComposites)) {
 		EnterScope(ScopeKind::Composites);
 		{
 			const ChainCompositesGuard chain;
@@ -1591,13 +1522,6 @@ void CompositesFamily(Engine&& a_engine)
 			shadow.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 		}
 		++r.native[2];
-		return;
-	}
-	if (frame && In(Mode::Observe, Family::kComposites)) {
-		BeginPredict();
-		Expect(CompositeSteps(r.frame));
-		a_engine();
-		EndPredict("the pre-tonemap composites", std::nullopt);
 		return;
 	}
 	a_engine();

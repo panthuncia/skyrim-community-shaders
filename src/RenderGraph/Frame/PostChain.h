@@ -57,7 +57,7 @@ namespace RenderGraph::Frame::PostChain
 	std::uint32_t VolumetricParity();
 
 	/**
-	 * @brief Whether CS computes the TAA jitter (native-post-chain.md, decision 3): graph modes on AE, and on SE with CS_ORG_POST_NATIVE set. Main_UpdateJitter then calls
+	 * @brief Whether CS computes the TAA jitter (native-post-chain.md, decision 3): every graph mode (SE untested at runtime). Main_UpdateJitter then calls
 	 * UpdateJitter in place of the engine's (AE 77245 +0xE2).
 	 */
 	bool OwnsJitter();

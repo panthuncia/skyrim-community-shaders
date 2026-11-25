@@ -3,8 +3,8 @@
 import argparse
 import sys
 
-from . import commands, journal as journal_mod, procs
-from .paths import GAME_EXE, MO2_EXE, default_paths
+from . import commands, locks
+from .paths import default_paths
 from .schema import ConfigError
 
 
@@ -14,11 +14,12 @@ def _common(parser):
     parser.add_argument("--label", help="a label for the run folder and summary")
     parser.add_argument("--stage", help="the staged build to run (same as --set build.stage=NAME)")
     parser.add_argument("--dry-run", action="store_true", help="resolve and print the config and its difference from base; touch nothing")
-    parser.add_argument("--wait", type=int, default=0, metavar="S", help="wait up to S seconds for another run's lock (default: refuse)")
+    parser.add_argument("--wait", type=int, default=0, metavar="S", help="wait up to S seconds for a free lab slot (default: refuse)")
+    parser.add_argument("--slots", type=int, metavar="N", help="how many lab slots runs share (default: CS_TEST_SLOTS, else <root>/lab/settings.json, else 3)")
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="cs-test", description="Automated Community Shaders game runs through MO2.")
+    parser = argparse.ArgumentParser(prog="cs-test", description="Automated Community Shaders game runs, several at once, in lab copies of the game.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("stage", help="stage a worktree's build (or an AIO folder) as MO2 mod 'CS AB <name>'")
@@ -28,6 +29,7 @@ def build_parser():
     p.add_argument("--base-aio", help="an AIO folder for the files a DLL build lacks, the first time a name is staged")
     p.add_argument("--pad", type=int, default=0, help="empty files that make usvfs grow its table before the game starts")
     p.add_argument("--pdb", action="store_true", help="AIO mode: copy PDBs too")
+    p.add_argument("--wait", type=int, default=0, metavar="S", help="wait up to S seconds while a run copies this stage (default: refuse)")
 
     p = sub.add_parser("run", help="one game run of a config ('a+b' composes)")
     p.add_argument("config")
@@ -46,17 +48,17 @@ def build_parser():
     p.add_argument("--no-shots", action="store_true")
     p.add_argument("--no-memory", action="store_true")
 
-    sub.add_parser("status", help="the lock, the journal, the live variant, leftovers")
+    sub.add_parser("status", help="the lab's slots, locks and runs")
 
-    p = sub.add_parser("restore", help="undo leftovers, then put back the CS mod from before the first swap")
-    p.add_argument("--journal-only", action="store_true", help="undo leftovers only; keep the live variant")
+    p = sub.add_parser("restore", help="put back the MO2 CS mod the old MO2 harness swapped out (lab runs change nothing)")
+    p.add_argument("--journal-only", action="store_true", help="kept for old callers: does the same")
 
     p = sub.add_parser("schema", help="copy the game's switch dump to switches.json, the schema (after 'run list-switches')")
-    p.add_argument("dump", nargs="?", help="the dump (default: <SKSE>\\CommunityShaders-Switches.json)")
+    p.add_argument("dump", nargs="?", help="the dump (default: the newest run folder's CommunityShaders-Switches.json)")
     p.add_argument("--out", help="where to write it (default: tools/cs-test/switches.json)")
 
     p = sub.add_parser("check-schema", help="compare switches.json with the game's switch dump")
-    p.add_argument("dump", nargs="?", help="the dump (default: <SKSE>\\CommunityShaders-Switches.json)")
+    p.add_argument("dump", nargs="?", help="the dump (default: the newest run folder's CommunityShaders-Switches.json)")
     return parser
 
 
@@ -67,14 +69,10 @@ def main(argv=None):
         if args.command == "stage":
             from .stage import stage
 
-            lock = journal_mod.Lock(paths.lock, f"stage {args.name}")
-            lock.acquire(0)
+            # A run copies a stage into its slot under the same lock, so it never copies half a stage.
+            lock = locks.Lock(paths.locks / f"stage-{args.name}.lock", f"stage {args.name}")
+            lock.acquire(args.wait)
             try:
-                if not journal_mod.recover(paths):
-                    return 1
-                if procs.find(GAME_EXE) or procs.find(MO2_EXE):
-                    print("The game or MO2 is running: close them first")
-                    return 1
                 manifest = stage(paths, args.source, args.name, args.preset, args.base_aio, args.pad, args.pdb)
             finally:
                 lock.release()
@@ -86,10 +84,10 @@ def main(argv=None):
         if args.command == "run":
             from .runner import run
 
-            result = run(paths, args.config, args.sets, args.label, args.stage, args.dry_run, wait_lock=args.wait)
+            result = run(paths, args.config, args.sets, args.label, args.stage, args.dry_run, wait_lock=args.wait, slots=args.slots)
             return 0 if result.get("outcome") in ("passed", "dry-run") else 1
         if args.command == "sweep":
-            rows = commands.sweep(paths, args.config, args.base, args.vary, args.mode, args.sets, args.label, args.stage, args.dry_run, args.wait)
+            rows = commands.sweep(paths, args.config, args.base, args.vary, args.mode, args.sets, args.label, args.stage, args.dry_run, args.wait, args.slots)
             return 0 if all(r.get("outcome") in ("passed", "dry-run") for _, r in rows) else 1
         if args.command == "compare":
             commands.compare(paths, args.a, args.b, shots=not args.no_shots, memory=not args.no_memory)
@@ -98,19 +96,20 @@ def main(argv=None):
             commands.status(paths)
             return 0
         if args.command == "restore":
-            return 0 if commands.restore(paths, original=not args.journal_only) else 1
+            return 0 if commands.restore(paths) else 1
         if args.command == "schema":
             return 0 if commands.write_schema(paths, args.dump, args.out) else 1
         if args.command == "check-schema":
             return 0 if commands.check_schema(paths, args.dump) == 0 else 1
-    except (ConfigError, journal_mod.LockError) as error:
+    except (ConfigError, locks.LockError) as error:
         print(f"error: {error}")
         return 2
     except Exception as error:  # noqa: BLE001 - one readable line for the expected failures below
-        from .stage import StageError
+        from .lab import LabError
         from .mo2 import Mo2Error
+        from .stage import StageError
 
-        if isinstance(error, (StageError, Mo2Error)):
+        if isinstance(error, (StageError, Mo2Error, LabError)):
             print(f"error: {error}")
             return 2
         raise

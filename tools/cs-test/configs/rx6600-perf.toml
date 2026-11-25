@@ -7,6 +7,9 @@
 # tgm first: a wolf attacks the player at the newest save, and god mode keeps every run's scene alike.
 extends = ["guest"]
 
+[run]
+exclusive = true             # every lab slot: a frame-rate sample, so no other game runs beside it
+
 [cs]
 gpu_event_timers = 250
 

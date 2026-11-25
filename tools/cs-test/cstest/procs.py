@@ -30,6 +30,14 @@ if IS_WINDOWS:
     _user32.PostMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
     _user32.SwitchToThisWindow.argtypes = (wintypes.HWND, wintypes.BOOL)
     _user32.mouse_event.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_size_t)
+    _psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    _psapi.EnumProcesses.argtypes = (ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
+    _kernel32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+    _kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 STILL_ACTIVE = 259
@@ -153,15 +161,15 @@ def wait_gone(pids, seconds):
     return not any(alive(p) for p in pids)
 
 
-def dump_before_kill(game_image, helper, out_dir, log=print, timeout_s=180):
-    """Writes every thread's stack and a minidump of each running game (CommunityShadersCrashDump.exe --pid) before it is killed,
+def dump_before_kill(pids, helper, out_dir, log=print, timeout_s=180):
+    """Writes every thread's stack and a minidump of each game process (CommunityShadersCrashDump.exe --pid) before it is killed,
     so a run the harness ends still leaves a hang report. Returns the files written."""
     written = []
-    games = find(game_image)
-    if not games or not helper or not Path(helper).exists() or not out_dir:
+    pids = [p for p in pids if alive(p)]
+    if not pids or not helper or not Path(helper).exists() or not out_dir:
         return written
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    for pid in games:
+    for pid in pids:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         text = Path(out_dir) / f"CommunityShaders-Kill-{stamp}-{pid}.txt"
         dump = Path(out_dir) / f"CommunityShaders-Kill-{stamp}-{pid}.dmp"
@@ -174,22 +182,86 @@ def dump_before_kill(game_image, helper, out_dir, log=print, timeout_s=180):
     return written
 
 
-def stop_game_and_mo2(game_image, mo2_image, log=print, close_s=10):
-    """Kills the game, then closes MO2 politely and kills it if it stays. Returns once neither runs."""
-    games = find(game_image)
-    for pid in games:
+def stop(pids, log=print, wait_s=15):
+    """Kills these processes (and their children) by PID only, never by name: other lab slots run games too. Returns whether all
+    are gone."""
+    pids = [p for p in pids if alive(p)]
+    for pid in pids:
         kill(pid)
-    if games:
-        wait_gone(games, 15)
-    mo2 = find(mo2_image)
-    if mo2:
-        for pid in mo2:
-            close_windows(pid)
-        if not wait_gone(mo2, close_s):
-            log(f"MO2 did not close in {close_s} s; killing it")
-            for pid in find(mo2_image):
-                kill(pid)
-            wait_gone(mo2, 15)
-    # MO2 writes the mod list as it exits: give the file system a moment before anyone edits it.
-    time.sleep(1)
-    return not find(game_image) and not find(mo2_image)
+    if pids and not wait_gone(pids, wait_s):
+        log(f"Still running after the kill: {', '.join(str(p) for p in pids if alive(p))}")
+        return False
+    return True
+
+
+def image_path(pid):
+    """The full path of a running process's image, or None."""
+    if not IS_WINDOWS:
+        return None
+    handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not _kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        return buffer.value
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def all_pids():
+    if not IS_WINDOWS:
+        return []
+    count = 4096
+    while True:
+        array = (wintypes.DWORD * count)()
+        needed = wintypes.DWORD()
+        if not _psapi.EnumProcesses(array, ctypes.sizeof(array), ctypes.byref(needed)):
+            return []
+        if needed.value < ctypes.sizeof(array):
+            return [array[i] for i in range(needed.value // ctypes.sizeof(wintypes.DWORD)) if array[i]]
+        count *= 2
+
+
+def pids_of(exe):
+    """PIDs of running processes started from this exact file (a lab slot's SkyrimSE.exe)."""
+    want = str(Path(exe)).lower()
+    return [pid for pid in all_pids() if (image_path(pid) or "").lower() == want]
+
+
+_job = None
+
+
+def kill_children_with_this_process():
+    """Puts this process in a job that kills every process in it when the last handle closes: when cs-test ends, however it
+    ends, the game it started (through skse64_loader.exe, a child) ends too."""
+    global _job
+    if not IS_WINDOWS or _job is not None:
+        return
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64), ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t), ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in ("ReadOps", "WriteOps", "OtherOps", "ReadBytes", "WriteBytes", "OtherBytes")]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BasicLimits), ("IoInfo", IoCounters), ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    JobObjectExtendedLimitInformation = 9
+    job = _kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+    limits = ExtendedLimits()
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not _kernel32.SetInformationJobObject(job, JobObjectExtendedLimitInformation, ctypes.byref(limits), ctypes.sizeof(limits)):
+        raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+    if not _kernel32.AssignProcessToJobObject(job, _kernel32.GetCurrentProcess()):
+        raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+    _job = job
