@@ -220,8 +220,6 @@ namespace DCLF::Features::MenuViews::Scenes
 	/** @brief FrameBuffer (b12) c0-c44 as the draw had it bound, latched with the draw. */
 	inline constexpr std::uint32_t kFrameRows = 45;
 	inline constexpr std::uint32_t kFrameBytes = kFrameRows * 16;
-	/** @brief Its matrices, stored transposed because the builds load rows raw and so read a matrix column by column. */
-	inline constexpr std::uint32_t kFrameMatrices = 10;
 
 	/** @brief A skinned draw's palettes for ORG_LATCHED_BONES: previous frame's (VS b9), then this one's (b10). */
 	inline constexpr std::uint32_t kPaletteRows = 240;

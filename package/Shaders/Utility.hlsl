@@ -42,7 +42,7 @@ struct UtilityOrgSceneDraw
 	uint2 Padding2;
 };
 
-// The draw's FrameBuffer rows (b12, c0-c44), its matrices transposed (OrgSceneFrame, below).
+// The draw's FrameBuffer rows (b12, c0-c44), as bound (OrgSceneFrame, below).
 struct OrgSceneFrameRows
 {
 	float4 Rows[45];
@@ -79,7 +79,7 @@ struct UtilityOrgShadowMaskDraw
 ORG_PUSH_BLOCK(UTILITY_ORG_RESOURCES(ORG_HANDLE))
 UTILITY_ORG_RESOURCES(ORG_RESOURCE)
 #	if defined(UTILITY_ORG_SCENE)
-// FrameBuffer (the engine's VS_PerFrame, b12) as the draw had it bound, latched with it, its matrices stored transposed: the shared
+// FrameBuffer (the engine's VS_PerFrame, b12) as the draw had it bound, latched with it: the shared
 // FrameBuffer's ConstantBuffer view, read in this build's vertex stage, made DXC emit invalid SPIR-V (a Function-storage
 // ConstantBuffer). Common/NamespacedCBuffer.hlsli loads it raw from here instead (ORG_SHARED_FRAMEBUFFER_AT).
 struct OrgSceneFrameAt

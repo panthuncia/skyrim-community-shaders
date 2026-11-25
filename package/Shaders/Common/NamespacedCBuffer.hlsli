@@ -48,8 +48,19 @@
 #	if defined(ORG_SHARED_FRAMEBUFFER_AT)
 // An ORG pass that draws an engine draw in its place (RenderGraph/Engine/ImageSpace) reads FrameBuffer from the bytes that
 // draw had bound at b12, which the engine-constants capture copied: ORG_SHARED_FRAMEBUFFER_AT names the shader's latched
-// location (OrgEngineConstantsAt: FrameSrv, FrameOffset). The struct is loaded raw, so its row_major matrices come back
-// transposed: such a shader reads only the float4 members (the dynamic-resolution parameters, FrameParams).
+// location (OrgEngineConstantsAt: FrameSrv, FrameOffset). The struct is loaded raw. DXIL keeps its members' row_major in a
+// templated raw load, but DXC's SPIR-V ignores it and reads each matrix column by column, so on SPIR-V the aliases transpose
+// the matrices back: every backend then reads the matrices the cbuffer would hold.
+float4 OrgSharedRawValue(float4 a_value) { return a_value; }
+float4x4 OrgSharedRawValue(float4x4 a_value)
+{
+#		if defined(__spirv__)
+	return transpose(a_value);
+#		else
+	return a_value;
+#		endif
+}
+#		define ORG_SHARED_FIX_FrameBuffer(value) OrgSharedRawValue(value)
 #		define ORG_SHARED_VIEW(view) ORG_SHARED_VIEW_##view
 #		define ORG_SHARED_VIEW_FrameBuffer                                                                                  \
 			static ByteAddressBuffer OrgSharedRing_FrameBuffer = ResourceDescriptorHeap[ORG_SHARED_FRAMEBUFFER_AT.FrameSrv]; \
@@ -59,8 +70,12 @@
 #		define ORG_SHARED_VIEW_Permutation ORG_SHARED_HEAP_VIEW(Permutation)
 #	else
 #		define ORG_SHARED_VIEW(view) ORG_SHARED_HEAP_VIEW(view)
+#		define ORG_SHARED_FIX_FrameBuffer(value) value
 #	endif
-#	define ORG_SHARED_ALIAS(view, ns, type, name) static const type name = OrgSharedView_##view.ns##_##name;
+#	define ORG_SHARED_FIX_SharedData(value) value
+#	define ORG_SHARED_FIX_FeatureData(value) value
+#	define ORG_SHARED_FIX_Permutation(value) value
+#	define ORG_SHARED_ALIAS(view, ns, type, name) static const type name = ORG_SHARED_FIX_##view(OrgSharedView_##view.ns##_##name);
 #	define ORG_SHARED_ARRAY_ALIAS(view, ns, type, name, count) static const type name[count] = OrgSharedView_##view.ns##_##name;
 #else
 #	define ORG_SHARED_CBUFFER(cb, view, reg) cbuffer cb : register(b##reg)

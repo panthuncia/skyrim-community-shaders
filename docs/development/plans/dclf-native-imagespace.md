@@ -234,8 +234,11 @@ vanilla shader does not declare read as zero in the capture.
   viewport call). With mode 2 their changes to the param no longer reach the draw unless the native path reads the same inputs.
 - **Timing of the inputs.** Values like the frame time, the adapted luminance and the fade must be read where the engine reads
   them, or a frame's HDR differs by one frame. Observe mode catches this.
-- **The SAO composite's FrameBuffer matrices.** It looks like the IBL and height fog paths of `ISSAOComposite.hlsl` read
-  `CameraViewProjInverse` from the raw-loaded engine PerFrame, which the header says holds only valid float4 members. Native mode
-  writes the PerFrame values from CS's snapshot; observe mode will show whether the captured matrices were right.
+- **The SAO composite's FrameBuffer matrices** (checked 2026-11-24, fixed). Steps load the captured PerFrame raw
+  (`ORG_SHARED_FRAMEBUFFER_AT`). DXIL keeps `row_major` in a templated raw load, DXC's SPIR-V does not, so on native Vulkan
+  `CameraViewProjInverse` came back transposed. It reached the screen in the composite's fog (only before View Atmosphere's
+  post-water composite switches in, after which `PostWaterComposite` skips it) and in snow sparkles. The raw path now transposes
+  the matrices back on SPIR-V, and menu scenes, which pre-transposed their latched copy for SPIR-V (and so were wrong on D3D12),
+  latch it as bound. Native constants must write PerFrame as the cbuffer holds it.
 - **Late-built shapes.** A draw the build has no pass for is a tap error today. In native mode the step list comes from the build,
   so an engine draw with no step is invisible unless the inner thunk still checks coverage and logs it.

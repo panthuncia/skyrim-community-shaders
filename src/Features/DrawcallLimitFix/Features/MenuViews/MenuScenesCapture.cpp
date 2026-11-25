@@ -166,7 +166,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return a_offset != ~0u;
 		}
 
-		/** @brief Appends the draw's FrameBuffer (b12) to the latch with its matrices transposed. False when unbound or full. */
+		/** @brief Appends the draw's FrameBuffer (b12) to the latch as it was bound. False when unbound or full. */
 		bool LatchFrame(Family::Constants::UseId a_use, Run& a_run, std::uint32_t& a_offset)
 		{
 			const auto stage = Family::ConstantBytes(a_use, Stage::Vertex, 12) ? Stage::Vertex : Stage::Pixel;
@@ -174,12 +174,6 @@ namespace DCLF::Features::MenuViews::Scenes
 				return false;
 			float rows[kFrameRows][4]{};
 			Family::CopyRows(a_use, stage, 12, rows, kFrameRows);
-			for (std::uint32_t m = 0; m < kFrameMatrices; ++m) {
-				float(*matrix)[4] = rows + m * 4;
-				for (std::uint32_t r = 0; r < 4; ++r)
-					for (std::uint32_t c = r + 1; c < 4; ++c)
-						std::swap(matrix[r][c], matrix[c][r]);
-			}
 			a_offset = a_run.Append(std::as_bytes(std::span<const float[4]>(rows, kFrameRows)));
 			return a_offset != ~0u;
 		}
