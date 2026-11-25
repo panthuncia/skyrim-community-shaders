@@ -289,18 +289,9 @@ bool UiSceneKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::i
 	auto& native = NativeSteps::Get();
 	std::int32_t destination = static_cast<std::int32_t>(shadow.renderTargets[0]);
 	std::int32_t bound = shadow.PSTexture[0] ? InputOfView(shadow.PSTexture[0]) : -1;
-	if (native.shader && (native.armed || native.observingTextures)) {
-		// A native draw applied no engine state: its target and t0 come from the effect's texture list. Observe mode checks the two agree.
-		std::int32_t listedInput = -1, listedOutput = -1;
-		NativeSteps::TextureTargets(*native.shader, listedInput, listedOutput);
-		if (native.armed) {
-			destination = listedOutput;
-			bound = listedInput;
-		} else if (listedOutput != destination || (a_effect != Effects::ISSimpleColor && listedInput != bound)) {
-			++native.differed;
-			NativeSteps::Differences().Report(fmt::format("{}'s targets", kEffects[static_cast<std::size_t>(EffectIndexOf(a_effect))].effectName),
-				fmt::format("texture list t0 {} into {}, bound t0 {} into {}", listedInput, listedOutput, bound, destination));
-		}
+	if (native.shader && native.armed) {
+		// A native draw applied no engine state: its target and t0 come from the effect's texture list.
+		NativeSteps::TextureTargets(*native.shader, bound, destination);
 	}
 	a_source = -1;
 	if (destination < 0 || destination > 0xff)
@@ -335,19 +326,13 @@ void StageTintMasks(Pending& a_pending)
 		// Default textures are loaded textures like the masks, so read them by heap index.
 		auto input = view ? InputOfView(view) : -1;
 		auto target = input >= 0 && !(input & kDefaultTextureInput) ? input : -1;
-		if (native.shader && (native.armed || native.observingTextures)) {
-			// Native: the slot from the effect's texture list. Observe mode checks it names what the engine bound.
+		if (native.shader && native.armed) {
+			// Native: the slot from the effect's texture list.
 			std::int32_t listedTarget = -1;
 			ID3D11ShaderResourceView* listedView = nullptr;
 			const bool known = NativeSteps::SlotTexture(*native.shader, slot, listedTarget, listedView);
-			if (native.armed) {
-				view = known ? listedView : nullptr;
-				target = listedTarget;
-			} else if (!known || listedTarget != target || (target < 0 && listedView != Tripwire::Unwrap(view))) {
-				++native.differed;
-				NativeSteps::Differences().Report(fmt::format("ISAlphaBlend t{}", slot), fmt::format("texture list target {} view {}, bound target {} view {}", listedTarget,
-					static_cast<const void*>(listedView), target, static_cast<const void*>(Tripwire::Unwrap(view))));
-			}
+			view = known ? listedView : nullptr;
+			target = listedTarget;
 		}
 		if (target >= 0)
 			targets += fmt::format("{}t{} {}", targets.empty() ? "" : ", ", slot, NameForLog(target));

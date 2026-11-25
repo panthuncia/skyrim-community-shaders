@@ -8,7 +8,6 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
-#include "RenderGraph/Switches.h"
 #include "State.h"
 
 #include <algorithm>
@@ -235,9 +234,8 @@ namespace RenderGraph::Frame::PostChain
 
 	bool OwnsJitter()
 	{
-		// SE only with the native post chain asked for: its State layout was matched statically, never run.
-		static const bool s_se = !Switches::Value("CS_ORG_POST_NATIVE").empty() && Switches::Value("CS_ORG_POST_NATIVE") != "0";
-		return Engine::GraphMode() && (REL::Module::IsAE() || s_se);
+		// SE's State layout was matched statically (perf-post-slots.md); untested at runtime.
+		return Engine::GraphMode();
 	}
 
 	void UpdateJitter(RE::BSGraphics::State* a_state)

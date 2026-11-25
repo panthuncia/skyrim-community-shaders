@@ -3,36 +3,24 @@
 //
 // Family 0 is the snapshot (ImageSpaceFrame), read once at Renderer::Begin (read point A) and at RenderWorldPostProcess's entry
 // (read point B), and CS's post state (the parities and the adapted luminance). Families 1 to 4 are the HDR effect, the end-of-frame
-// effects, the pre-tonemap composites and RenderWorldPostProcess's body. Each has three modes (CS_ORG_POST_NATIVE): the engine's
-// container runs; observe, where the container runs and CS predicts each step's key and rows and the state after it, and logs a
-// difference once; and native, where the container is not called and CS stages the steps from the snapshot and writes back what
-// engine code after the chain reads.
+// effects, the pre-tonemap composites and RenderWorldPostProcess's body. Their containers are not called: CS stages the steps from the
+// snapshot and writes back what engine code after the chain reads. A family stays on the engine's container only for a case CS does
+// not draw: another mod's hook (decision 4), the world map or FXAA (decision 7), SIL or the image-based flares.
 //
-// The globals are SE/AE pairs. AE runs natively by default. SE's ids were matched statically (perf-post-slots.md) but never run, so
-// SE runs every family on the engine unless CS_ORG_POST_NATIVE is set.
+// The globals are SE/AE pairs. SE's were matched statically (perf-post-slots.md) and are untested at runtime.
 
 namespace NativePost
 {
-	enum class Mode : std::uint8_t
-	{
-		Engine,
-		Observe,
-		Native,
-	};
-
 	namespace Family
 	{
 		constexpr std::uint8_t kHdr = 1;
 		constexpr std::uint8_t kEof = 2;
 		constexpr std::uint8_t kComposites = 4;
 		constexpr std::uint8_t kPost = 8;
-		constexpr std::uint8_t kAll = kHdr | kEof | kComposites | kPost;
 	}
 
 	struct Config
 	{
-		Mode mode = Mode::Engine;
-		std::uint8_t families = 0;
 		// Families whose container or effect holds another mod's hook. They stay on the engine path (decision 4).
 		std::uint8_t foreign = 0;
 		// Slot effects whose Render or UpdateParams holds another mod's hook: the engine's RenderEffect draws them.
@@ -45,10 +33,10 @@ namespace NativePost
 		return config;
 	}
 
-	bool In(Mode a_mode, std::uint8_t a_family)
+	/** @brief Whether a family runs natively: unless another mod hooks it. */
+	bool Native(std::uint8_t a_family)
 	{
-		const auto& config = Settings();
-		return config.mode == a_mode && (config.families & a_family) && !(config.foreign & a_family);
+		return !(Settings().foreign & a_family);
 	}
 
 	/** @brief The engine globals the families read and write back, resolved once at Install. The comments give the AE ids. */
@@ -304,11 +292,7 @@ namespace NativePost
 		ImageSpaceFrame frame;
 		PostState state;
 		std::uint64_t frameNumber = UINT64_MAX;
-		// Observe mode: the steps CS predicts, in order, and the post state it predicts after them.
-		std::deque<NativeStep> expected;
-		std::optional<PostState> predicted;
-		bool predicting = false;
-		std::uint64_t compared = 0, differed = 0, staged = 0;
+		std::uint64_t staged = 0;
 		// Per-family counts of frames run natively and on the engine path, for the log.
 		std::array<std::uint64_t, 4> native{}, engine{};
 		std::uint64_t slotNative = 0, slotEngine = 0;  // slot effects staged natively, and run through the engine's RenderEffect
@@ -319,12 +303,6 @@ namespace NativePost
 	{
 		static Runtime runtime;
 		return runtime;
-	}
-
-	Util::ReasonLog& Mismatches()
-	{
-		static Util::ReasonLog log("[ORG] native post chain: observe found a difference", spdlog::level::warn);
-		return log;
 	}
 
 	std::uintptr_t ManagerBase()
@@ -364,7 +342,7 @@ namespace NativePost
 		f = {};
 		const auto& g = G();
 		const auto base = ManagerBase();
-		if (!g.ready || !base || Settings().mode == Mode::Engine)
+		if (!g.ready || !base)
 			return;
 		CheckForeignHooksOnce();
 		std::memcpy(f.data.data(), reinterpret_cast<const void*>(base + kDataFirst), sizeof(f.data));
@@ -407,9 +385,9 @@ namespace NativePost
 		f.read = true;
 		r.state = EngineState();
 		if (Frame::Driver::Current().frame % 300 == 0)
-			logger::info("[ORG] native post chain: {} steps compared ({} differed), {} staged natively; native frames hdr {} eof {} composites {} post {}, "
+			logger::info("[ORG] native post chain: {} steps staged natively; native frames hdr {} eof {} composites {} post {}, "
 						 "end-of-frame frames on the engine {} (last slots {:#x}); slot effects native {}, through RenderEffect {}",
-				r.compared, r.differed, r.staged, r.native[0], r.native[1], r.native[2], r.native[3], r.engine[1], r.lastSlots, r.slotNative, r.slotEngine);
+				r.staged, r.native[0], r.native[1], r.native[2], r.native[3], r.engine[1], r.lastSlots, r.slotNative, r.slotEngine);
 		r.frameNumber = Frame::Driver::Current().frame;
 	}
 
@@ -1210,164 +1188,6 @@ namespace NativePost
 		return steps;
 	}
 
-	// Observe mode.
-
-	void Expect(std::vector<NativeStep> a_steps)
-	{
-		auto& r = R();
-		for (auto& step : a_steps)
-			r.expected.push_back(std::move(step));
-	}
-
-	std::string KeyName(const StepKey& a_key)
-	{
-		return fmt::format("{} {:#x}", kEffects[EffectIndex(a_key.effect)].effectName, a_key.variant);
-	}
-
-	/** @brief Each float within 1e-5 relative (1e-6 absolute near zero), as the plan's parity rule. */
-	bool Near(float a_a, float a_b)
-	{
-		if (std::memcmp(&a_a, &a_b, 4) == 0)
-			return true;
-		const float scale = (std::max)(std::abs(a_a), std::abs(a_b));
-		return std::abs(a_a - a_b) <= (std::max)(1e-5f * scale, 1e-6f);
-	}
-
-	/** @brief The effects whose ORG shader reads no PerGeometry rows: their engine rows are not compared. */
-	bool ReadsNoRows(Effects::ImageSpaceEffectEnum a_effect)
-	{
-		using E = Effects;
-		return a_effect == E::ISCopy || a_effect == E::ISCopyDynamicFetchDisabled;
-	}
-
-	void Compare(const StepKey& a_key, const NativeSteps::Rows& a_predicted, const NativeSteps::Rows& a_engine, bool a_compute = false)
-	{
-		auto& r = R();
-		++r.compared;
-		if (ReadsNoRows(a_key.effect))
-			return;
-		std::string differences;
-		// An explicit step's engine rows are the whole pool buffer its setter bound. Only the setter's struct is the step's.
-		const bool param = !a_compute && TableOf(EffectIndex(a_key.effect)).count > 0;
-		const auto count = param ? (std::max)(a_predicted.count, a_engine.count) : a_predicted.count;
-		for (std::uint32_t id = 0; id < count && differences.size() < 500; ++id) {
-			const auto* source = id < a_engine.count ? &a_engine : &a_predicted;
-			const auto at = source->offsets[id] * 4u;
-			for (std::uint32_t c = 0; c < 4; ++c) {
-				float predicted = 0.0f, engine = 0.0f;
-				if (id < a_predicted.count)
-					std::memcpy(&predicted, a_predicted.bytes.data() + at + c * 4, 4);
-				if (id < a_engine.count)
-					std::memcpy(&engine, a_engine.bytes.data() + at + c * 4, 4);
-				if (!Near(predicted, engine))
-					differences += fmt::format(" id{}.{} {} vs {}", id, "xyzw"[c], predicted, engine);
-			}
-		}
-		if (differences.empty())
-			return;
-		++r.differed;
-		Mismatches().Report(fmt::format("rows of {}", KeyName(a_key)), fmt::format("CS vs engine:{}", differences));
-	}
-}
-
-namespace NativePost
-{
-	/** @brief The engine's CS b0 rows for the dispatch it makes now, captured as StageStep captures them. Observe mode only. */
-	NativeSteps::Rows EngineComputeRows(std::uint32_t a_rows)
-	{
-		auto rows = ExplicitRows(a_rows);
-		ID3D11Buffer* constants = Tripwire::Unwrap(Constants::EngineComputeBuffer());
-		if (!constants)
-			return rows;
-		globals::d3d::context->CSSetConstantBuffers(0, 1, &constants);
-		const auto use = Constants::Capture(Constants::StageBit(Constants::Stage::Compute));
-		if (const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Compute, 0) : nullptr) {
-			const auto bytes = Constants::Bytes(*slot);
-			std::memcpy(rows.bytes.data(), bytes.data(), (std::min)(bytes.size(), static_cast<std::size_t>(rows.size)));
-		}
-		return rows;
-	}
-
-	/** @brief The slot a slot step belongs to: an inner draw of the full-screen blur (6) or get hit (7) by its variant, else by its effect. */
-	std::int32_t SlotOfStep(const StepKey& a_key)
-	{
-		if (a_key.scope != WorldScope::PreSlot && a_key.scope != WorldScope::LdrSlot)
-			return -1;
-		if (a_key.variant & 0x400u)
-			return (a_key.variant & 0x800u) ? 7 : 6;
-		return SlotOfEffect(a_key.effect);
-	}
-}
-
-void ObservePostStep(const StepKey& a_key, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
-{
-	using namespace NativePost;
-	auto& r = R();
-	if (!r.predicting)
-		return;
-	// The slots CS does not stage natively run through the engine's RenderEffect in every mode, so their steps are not predicted.
-	const bool slotStep = a_key.scope == WorldScope::PreSlot || a_key.scope == WorldScope::LdrSlot;
-	if (const auto slot = SlotOfStep(a_key); slotStep && (slot < 0 || !SlotIsNative(static_cast<std::uint32_t>(slot))))
-		return;
-	auto& native = NativeSteps::Get();
-	if (r.expected.empty()) {
-		++r.differed;
-		Mismatches().Report("an engine step CS did not predict", KeyName(a_key));
-		return;
-	}
-	auto step = std::move(r.expected.front());
-	r.expected.pop_front();
-	if (!(step.key == a_key)) {
-		++r.differed;
-		Mismatches().Report(fmt::format("the step CS predicted, {}", KeyName(step.key)), fmt::format("the engine drew {}", KeyName(a_key)));
-		return;
-	}
-	if (a_compute) {
-		if (step.groups != a_groups) {
-			++r.differed;
-			Mismatches().Report(fmt::format("thread groups of {}", KeyName(a_key)),
-				fmt::format("CS {}x{}x{} vs engine {}x{}x{}", step.groups[0], step.groups[1], step.groups[2], a_groups[0], a_groups[1], a_groups[2]));
-		}
-		Compare(a_key, step.rows, EngineComputeRows(step.rows.count), true);
-		return;
-	}
-	// The engine's rows are known when the step is native per effect (CS_ORG_IMAGESPACE_NATIVE=2): BuildRows or BoundRows filled them.
-	if (native.armed && native.effect == a_effect)
-		Compare(a_key, step.rows, native.rows);
-}
-
-namespace NativePost
-{
-	/** @brief Starts a prediction for a container run on the engine. a_state is advanced by the builders. */
-	void BeginPredict()
-	{
-		auto& r = R();
-		r.expected.clear();
-		r.predicting = true;
-	}
-
-	/** @brief Ends a prediction: steps CS predicted that the engine did not draw, and the state after the container. */
-	void EndPredict(std::string_view a_where, const std::optional<PostState>& a_predicted)
-	{
-		auto& r = R();
-		r.predicting = false;
-		for (const auto& step : r.expected) {
-			++r.differed;
-			Mismatches().Report(fmt::format("a step CS predicted in {} that the engine did not draw", a_where), KeyName(step.key));
-		}
-		r.expected.clear();
-		if (!a_predicted)
-			return;
-		const auto engine = EngineState();
-		if (engine.lumParity != a_predicted->lumParity || engine.adaptTarget != a_predicted->adaptTarget || engine.resetPending != a_predicted->resetPending ||
-			engine.taaParity != a_predicted->taaParity) {
-			++r.differed;
-			Mismatches().Report(fmt::format("the post state after {}", a_where),
-				fmt::format("CS: luminance parity {}, adapted rt{}, reset {}, TAA parity {}; engine: {}, rt{}, {}, {}", a_predicted->lumParity, a_predicted->adaptTarget,
-					a_predicted->resetPending, a_predicted->taaParity, engine.lumParity, engine.adaptTarget, engine.resetPending, engine.taaParity));
-		}
-	}
-
 	// Native mode.
 
 	/** @brief Stages a predicted step as the frame's own, from its rows. False when the build the frame runs has no pass for it. */
@@ -1456,7 +1276,7 @@ namespace NativePost
 	}
 }
 
-/** @brief The HDR effect's hook: native in the world chain when the family is, observed when it is observed, else the engine's. */
+/** @brief The HDR effect's hook: native in the world chain, else the engine's. */
 template <class Engine>
 void HdrFamily(void* a_effect, Engine&& a_engine)
 {
@@ -1464,24 +1284,11 @@ void HdrFamily(void* a_effect, Engine&& a_engine)
 	auto& chain = Chain();
 	auto& r = R();
 	const bool world = chain.inEndOfFrame && r.frame.read && r.frame.readB && Chain().group.Registered();
-	if (world && In(Mode::Native, Family::kHdr)) {
+	if (world && Native(Family::kHdr)) {
 		// The effect's texture list names the source and the output (RenderEffect set them): texture 1 and texture 0.
 		std::int32_t input = -1, output = -1;
 		NativeSteps::TextureTargets(*static_cast<const RE::BSImagespaceShader*>(static_cast<const RE::ImageSpaceEffect*>(a_effect)), input, output);
 		RunHdr(input >= 0 ? input : RE::RENDER_TARGET::kMAIN, output);
-		return;
-	}
-	const bool observe = world && In(Mode::Observe, Family::kHdr) && !r.predicting;
-	if (observe) {
-		std::int32_t input = -1, output = -1;
-		NativeSteps::TextureTargets(*static_cast<const RE::BSImagespaceShader*>(static_cast<const RE::ImageSpaceEffect*>(a_effect)), input, output);
-		auto predicted = r.state;
-		BeginPredict();
-		Expect(HdrSteps(r.frame, predicted, input >= 0 ? input : RE::RENDER_TARGET::kMAIN, HeldLevels()));
-		a_engine();
-		predicted.taaParity = EngineState().taaParity;
-		EndPredict("the HDR effect", predicted);
-		r.state = EngineState();
 		return;
 	}
 	a_engine();
@@ -1560,8 +1367,8 @@ namespace NativePost
 
 	/**
 	* @brief The native end-of-frame effects (AE 105674) from a_source into a_final. CS routes the frame and stages the HDR effect, TAA,
-	* the screenshot copy and the upsample from the snapshot. The slot effects (refraction, depth of field, the blurs) go through the
-	* engine's RenderEffect, whose steps stage natively per effect (CS_ORG_IMAGESPACE_NATIVE=2).
+	* the screenshot copy, the upsample and the slot effects from the snapshot. A slot another mod hooks goes through the engine's
+	* RenderEffect.
 	*/
 	void RunEndOfFrame(std::int32_t a_source, std::int32_t a_final)
 	{
@@ -1673,7 +1480,7 @@ namespace NativePost
 	}
 }
 
-/** @brief The world chain's end-of-frame effects: native, observed or the engine's. Between OnEndOfFrame's begin and end. */
+/** @brief The world chain's end-of-frame effects: native, or the engine's for a frame CS does not draw. Between OnEndOfFrame's begin and end. */
 template <class Engine>
 void EofFamily(std::int32_t a_source, std::int32_t a_final, Engine&& a_engine)
 {
@@ -1681,44 +1488,8 @@ void EofFamily(std::int32_t a_source, std::int32_t a_final, Engine&& a_engine)
 	auto& r = R();
 	ReadEndOfFrame();
 	const bool frame = EofNativeFrame(r.frame);
-	if (frame && In(Mode::Native, Family::kEof)) {
+	if (frame && Native(Family::kEof)) {
 		RunEndOfFrame(a_source, a_final);
-		return;
-	}
-	if (frame && In(Mode::Observe, Family::kEof)) {
-		auto predicted = r.state;
-		BeginPredict();
-		const auto route = RouteOf(r.frame, a_source, a_final, SpareTarget());
-		const auto expectSlots = [&](const std::vector<SlotCall>& a_calls, bool a_ldr) {
-			for (const auto& call : a_calls) {
-				bool supported = false;
-				auto steps = SlotSteps(r.frame, call, a_ldr, supported);
-				if (supported)
-					Expect(std::move(steps));
-				else if (SlotIsNative(call.slot))
-					Mismatches().Report("a slot CS stages through the engine's RenderEffect", fmt::format("slot {} (depth of field steps {}{}{}{}{}, compute {})", call.slot,
-						r.frame.dofSteps[0], r.frame.dofSteps[1], r.frame.dofSteps[2], r.frame.dofSteps[3], r.frame.dofSteps[4], r.frame.dofCompute));
-			}
-		};
-		expectSlots(route.pre, false);
-		if (r.frame.hdr && !(globals::state && globals::state->PeekTonemapOwner() == ::State::TonemapOwner::kEffects11))
-			Expect(HdrSteps(r.frame, predicted, route.hdrSource, HeldLevels()));
-		else if (!r.frame.hdr)
-			Expect({ Step(WorldScope::HdrCopy, Effects::ISCopy, 0, ChainGroup::kHdrCopy) });
-		auto tail = EofTailSteps(r.frame, predicted, route);
-		std::vector<NativeStep> upsample;
-		for (auto it = tail.begin(); it != tail.end();)
-			if (it->key.scope == WorldScope::Upsample) {
-				upsample.push_back(std::move(*it));
-				it = tail.erase(it);
-			} else
-				++it;
-		Expect(std::move(tail));
-		expectSlots(route.ldr, true);
-		Expect(std::move(upsample));
-		a_engine();
-		EndPredict("the end-of-frame effects", predicted);
-		r.state = EngineState();
 		return;
 	}
 	if (r.frame.read)
@@ -1728,14 +1499,14 @@ void EofFamily(std::int32_t a_source, std::int32_t a_final, Engine&& a_engine)
 		r.state = EngineState();
 }
 
-/** @brief The pre-tonemap composites: native when the frame has neither SIL nor the image-based flares, observed, or the engine's. */
+/** @brief The pre-tonemap composites: native when the frame has neither SIL nor the image-based flares, else the engine's. */
 template <class Engine>
 void CompositesFamily(Engine&& a_engine)
 {
 	using namespace NativePost;
 	auto& r = R();
 	const bool frame = r.frame.read && r.frame.readB && !r.frame.sil && !r.frame.iblf && Frame::PostChain::InChain() && Chain().group.Registered();
-	if (frame && In(Mode::Native, Family::kComposites)) {
+	if (frame && Native(Family::kComposites)) {
 		EnterScope(ScopeKind::Composites);
 		{
 			const ChainCompositesGuard chain;
@@ -1751,13 +1522,6 @@ void CompositesFamily(Engine&& a_engine)
 			shadow.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 		}
 		++r.native[2];
-		return;
-	}
-	if (frame && In(Mode::Observe, Family::kComposites)) {
-		BeginPredict();
-		Expect(CompositeSteps(r.frame));
-		a_engine();
-		EndPredict("the pre-tonemap composites", std::nullopt);
 		return;
 	}
 	a_engine();
