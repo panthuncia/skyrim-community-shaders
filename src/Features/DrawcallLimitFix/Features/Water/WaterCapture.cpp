@@ -371,6 +371,67 @@ namespace DCLF::Features::Water
 			return nullptr;
 		}
 
+		/**
+		 * @brief Whether RenderBatches (AE 0x1414b4fe0) would draw anything: a technique in [a_first, a_last] with passes in the batch
+		 * renderer it draws, the accumulator's (+0x130) or, for a geometry group, the group's (*(*(renderer + 0x70 + group * 8))). Its
+		 * techniques are a hash map at +0x48 (capacity +0x2C, sentinel +0x38; entries of key, group index, next), its pass groups 0x30
+		 * apart at +0x8 with a head per sub-group. A narrow range looks its techniques up; a wide one walks every bucket.
+		 */
+		bool BatchHasPasses(const void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::int32_t a_group)
+		{
+			if (a_last < a_first)
+				return false;
+			const auto field = [](const void* a_object, std::size_t a_offset) {
+				return *reinterpret_cast<const std::byte* const*>(static_cast<const std::byte*>(a_object) + a_offset);
+			};
+			const std::byte* batch = field(a_accumulator, 0x130);
+			if (batch && a_group >= 0) {
+				const std::byte* group = field(batch, 0x70 + static_cast<std::size_t>(a_group) * 8);
+				batch = group ? field(group, 0) : nullptr;
+			}
+			if (!batch)
+				return false;
+			const std::byte* buckets = field(batch, 0x48);
+			const std::byte* groups = field(batch, 0x8);
+			if (!buckets || !groups)
+				return false;
+			const auto capacity = *reinterpret_cast<const std::uint32_t*>(batch + 0x2C);
+			const std::byte* sentinel = field(batch, 0x38);
+			const auto hasHeads = [&](const std::byte* a_entry) {
+				const std::byte* passGroup = groups + std::size_t(*reinterpret_cast<const std::uint32_t*>(a_entry + 4)) * 0x30;
+				for (std::size_t sub = 0; sub < 5; ++sub)
+					if (field(passGroup, sub * 8))
+						return true;
+				return false;
+			};
+			if (a_last - a_first > 64) {
+				for (std::uint32_t bucket = 0; bucket < capacity; ++bucket) {
+					const std::byte* entry = buckets + std::size_t(bucket) * 0x10;
+					if (!field(entry, 8))
+						continue;
+					for (; entry && entry != sentinel; entry = field(entry, 8)) {
+						const auto technique = *reinterpret_cast<const std::uint32_t*>(entry);
+						if (technique >= a_first && technique <= a_last && hasHeads(entry))
+							return true;
+					}
+				}
+				return false;
+			}
+			for (std::uint32_t technique = a_first; technique <= a_last; ++technique) {
+				const std::byte* entry = buckets + std::size_t((capacity - 1u) & technique) * 0x10;
+				if (!field(entry, 8))
+					continue;
+				for (; entry && entry != sentinel; entry = field(entry, 8)) {
+					if (*reinterpret_cast<const std::uint32_t*>(entry) != technique)
+						continue;
+					if (hasHeads(entry))
+						return true;
+					break;
+				}
+			}
+			return false;
+		}
+
 		enum Site : std::uint32_t
 		{
 			kMaskSite,
@@ -402,6 +463,12 @@ namespace DCLF::Features::Water
 				}
 				// A batch nested in a latched one feeds the outer batch. Otherwise the engine draws batches the family cannot run.
 				if (capture.active || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
+					func(a_accumulator, a_first, a_last, a_flags, a_group);
+					return;
+				}
+				// Claimed water leaves the engine's batch empty: then there is nothing to latch, and the engine's call draws nothing.
+				const bool hasPasses = cpuWater || BatchHasPasses(a_accumulator, a_first, a_last, a_group);
+				if (!hasPasses) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
