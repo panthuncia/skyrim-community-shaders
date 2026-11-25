@@ -3,11 +3,9 @@
 #include "Features/DrawcallLimitFix/Features/Lod/LodGates.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
-#include "Utils/SwitchFile.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
-#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include <Tracy/Tracy.hpp>
 #include <ankerl/unordered_dense.h>
@@ -1145,8 +1143,6 @@ namespace DCLF::Features::Lod::LodGates
 
 	void Preflight()
 	{
-		if (Util::SwitchFile::Value("CS_DCLF_LOD_GATES") == "0")
-			return;
 		for (const auto& function : kFunctions)
 			if (!function.Known())
 				return;
@@ -1162,14 +1158,10 @@ namespace DCLF::Features::Lod::LodGates
 		}
 	}
 
-	void Install(Api::SwitchId a_switch)
+	void Install()
 	{
 		if (installed)
 			return;
-		if (SwitchValue(a_switch) == "0") {
-			logger::info("[DCLF] LOD gates (T6b5) off (CS_DCLF_LOD_GATES=0): the engine's LOD swaps ungated");
-			return;
-		}
 		for (const auto& function : kFunctions)
 			if (!function.Known()) {
 				logger::warn("[DCLF] LOD gates (T6b5) not installed: an engine address is unknown on this runtime");

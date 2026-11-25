@@ -8,8 +8,8 @@ std::uint32_t ORGExponentialHeightFog::Debug()
 {
 	static const std::uint32_t s_mode = [] {
 		const auto mode = Switches::Number("CS_ORG_FOG_DEBUG", 0);
-		if (mode > 9) {
-			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1 to 9); it is off", mode);
+		if (mode > 9 || mode == 3 || mode == 4) {
+			logger::warn("[ORG] Exponential Height Fog: CS_ORG_FOG_DEBUG={} is not a mode (1, 2 or 5 to 9); it is off", mode);
 			return 0u;
 		}
 		if (mode)
@@ -1115,7 +1115,7 @@ bool ORGExponentialHeightFog::VolumesOn() const
 
 bool ORGExponentialHeightFog::Prepass()
 {
-	if (!IsActive() || Debug() == 3)
+	if (!IsActive())
 		return false;
 	auto& fog = globals::features::exponentialHeightFog;
 	impl->pending.reset();
@@ -1266,8 +1266,7 @@ bool ORGExponentialHeightFog::Prepass()
 
 bool ORGExponentialHeightFog::Readable() const
 {
-	// Mode 4 hands out versions no run wrote yet, as before the fix, to show what that does.
-	return IsActive() && impl->state && impl->ranLastFrame && (impl->IntegratedWritten() || Debug() == 4);
+	return IsActive() && impl->state && impl->ranLastFrame && impl->IntegratedWritten();
 }
 
 ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const

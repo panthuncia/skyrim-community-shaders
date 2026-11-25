@@ -44,7 +44,7 @@ namespace DCLF
 		MultiIndex,          // BSMultiIndexTriShape: its main pass is the engine's (the snow layer), its shadow a tri-shape's
 		EffectOpaque,        // an effect without a blending alpha property
 		EffectVariant,       // an effect permutation not ported
-		WaterUnclaimed,      // water the port classifies but its claim is off (CS_DCLF_WATER=1, phase 1)
+		WaterUnclaimed,      // water the port classifies while the water epochs do not draw it (Indirect::DrawnInput off)
 		WaterVariant,        // water the port does not draw: wading, a bad stencil bit, lights without Light Limit Fix
 		Count
 	};

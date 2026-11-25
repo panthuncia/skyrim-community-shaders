@@ -169,7 +169,7 @@ def main():
     ap.add_argument('--debug-info', action='store_true', help='-Zi -Qembed_debug, as the game with shader debug on')
     ap.add_argument('--bound-blocks', action='store_true', help='pass-wide blocks bound (the game default) even for a manifest without boundFrameBlocks')
     ap.add_argument('--heap-blocks', action='store_true',
-                    help='pass-wide blocks by heap index, as the game with CS_DCLF_HEAP_FRAME_BLOCKS=1 (default: bound, or the manifest boundFrameBlocks)')
+                    help='pass-wide blocks by heap index, as the game read them before the bound tables (default: bound, or the manifest boundFrameBlocks)')
     ap.add_argument('-o', '--out', help='output .dxil')
     ap.add_argument('--work', help='folder for intermediate files (default: <out>.work)')
     ap.add_argument('--keep', action='store_true', help='keep the intermediate files')

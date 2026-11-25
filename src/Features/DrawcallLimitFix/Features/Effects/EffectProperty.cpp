@@ -37,7 +37,7 @@ namespace DCLF::Features::Effects
 		shading.materialData[0] = shading.materialData[1] = 0.0f;
 		shading.materialData[2] = a_shading.member && material ? material->baseColor.alpha : effect.alpha;
 		// 1 picks the cloud light, as FUN_1414fcf80 does for a kCloudLOD property. 0 picks the sun.
-		const bool cloudLight = Ported().cloudLighting && effect.flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kCloudLOD);
+		const bool cloudLight = effect.flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kCloudLOD);
 		shading.materialData[3] = cloudLight ? 1.0f : 0.0f;
 		const auto* emittance = effect.emittanceColor;
 		shading.emitColor[0] = emittance ? emittance->red : 1.0f;

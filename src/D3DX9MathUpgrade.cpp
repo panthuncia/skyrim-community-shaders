@@ -208,12 +208,6 @@ namespace D3DX9MathUpgrade
 
 	void Sweep(const char* reason)
 	{
-		char disable[2] = {};
-		if (GetEnvironmentVariableA("CS_NO_D3DX_UPGRADE", disable, sizeof(disable)) && disable[0] == '1') {
-			logger::info("[D3DX9MathUpgrade] disabled via CS_NO_D3DX_UPGRADE");
-			return;
-		}
-
 		const HMODULE self = reinterpret_cast<HMODULE>(&__ImageBase);
 
 		HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());

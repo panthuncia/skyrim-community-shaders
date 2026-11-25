@@ -83,7 +83,7 @@ Every rule is a small function over a key, listed in one file, and each logs how
 As built: rules read only listed keys and take every input of a new key from listed keys (state words by state bits,
 targets, shadow rasterizer states by mode). They add at most 1.5 times the listed keys, each rule under its own share.
 An expanded key joins the local manifest only when play asks for it. One that fails to build goes to
-`dclf-pipelines-<backend>-unbuildable.txt` and is not offered again. `CS_DCLF_PIPELINE_EXPAND=0` turns the expander off.
+`dclf-pipelines-<backend>-unbuildable.txt` and is not offered again.
 
 ### The startup step
 

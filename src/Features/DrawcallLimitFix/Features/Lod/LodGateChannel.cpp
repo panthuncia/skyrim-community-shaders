@@ -6,9 +6,9 @@
 
 namespace DCLF::Features::Lod::Gates
 {
-	void RegisterGates(Api::InstallContext& a_context, Api::SwitchId a_switch)
+	void RegisterGates(Api::InstallContext& a_context)
 	{
-		LodGates::Install(a_switch);
+		LodGates::Install();
 		if (!LodGates::Enabled())
 			return;
 		// A stack channel keeps gate events in order with the incoming blocks' attaches.

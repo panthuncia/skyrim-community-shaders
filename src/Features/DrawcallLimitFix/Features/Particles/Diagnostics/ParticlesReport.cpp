@@ -36,7 +36,7 @@ namespace DCLF::Features::Particles
 									"published, {} records pruned\n",
 					members, c.followed, c.captures, c.unchanged, c.contended, c.expansions, c.expandedParticles, c.withoutSnapshot, c.frozen,
 					ParticleSnapshots::kFrozenRuns, c.aligned, c.published, c.pruned);
-			// The master particle systems' lifetime and references (CS_DCLF_MASTER_PARTICLES).
+			// The master particle systems' lifetime and references (MasterParticles.cpp).
 			MasterParticles::Lines(text);
 			a_text += text;
 		}

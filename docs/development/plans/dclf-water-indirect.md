@@ -432,8 +432,8 @@ Ids are Address Library ids, SE / AE.
   `TESWaterSystem::waterRoot`; `defaultDisplacementWaterObject` (+0x128) is a candidate.
 - **Who writes `unk8C`** (the stencil bit) and `plane` after attach, and who writes SunDir and SunColor (528168, 528172).
 - **Light Limit Fix's PS b3** (the room index) is not ported here; DCLF's object record already has it (plan section 4).
-- **Bit-exact matrices.** The port uses DirectXMath, which CS's D3DX9MathUpgrade puts behind the engine's D3DX imports. With
-  `CS_NO_D3DX_UPGRADE=1` the engine runs the real D3DX and the matrices may differ in the last bit.
+- **Bit-exact matrices.** The port uses DirectXMath, which CS's D3DX9MathUpgrade puts behind the engine's D3DX imports, so
+  the engine's matrices and the port's match.
 - **Linear Lighting's light colour** is computed in its own file, which is built with /fp:fast. The port computes the same
   expression with precise floats, so a reassociated product would show as a LightColor mismatch.
 - **Frame scope.** The observer captures the frame values at the frame's first latched draw. A value that changes between the

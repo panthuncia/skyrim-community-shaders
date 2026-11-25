@@ -50,12 +50,6 @@
 
 namespace DCLF
 {
-	bool BoundFrameBlocks()
-	{
-		static const bool bound = !SwitchEnabled(Switch::HeapFrameBlocks);
-		return bound;
-	}
-
 	bool DrawPipelines::Impl::ToRHI(D3D11_BLEND a_factor, rhi::BlendFactor& a_out)
 	{
 		switch (a_factor) {
@@ -189,11 +183,9 @@ namespace DCLF
 		pushConstants[1].binding = kFramePushBinding;
 
 		// On D3D12 nothing draws with the unpulled builds, and the pulled builds read everything but the pass-wide blocks themselves
-		// (FrameSource). Those are one table, register(b<ordinal>, space9), unless CS_DCLF_HEAP_FRAME_BLOCKS reads them by heap index.
-		const std::vector<rhi::LayoutBindingRange> d3d12Ranges = BoundFrameBlocks() ?
-			std::vector<rhi::LayoutBindingRange>{ FrameBlockRange(FrameSource::kBoundBlockSpace, 0, kFrameBlocks, rhi::ShaderStage::AllGraphics, 0),
-				FrameBlockRange(FrameSource::kBoundBlockSpace + 1, 0, kFrameBlocks, rhi::ShaderStage::AllGraphics, 0) } :
-			std::vector<rhi::LayoutBindingRange>{};
+		// (FrameSource). Those are one table, register(b<ordinal>, space9).
+		const std::vector<rhi::LayoutBindingRange> d3d12Ranges{ FrameBlockRange(FrameSource::kBoundBlockSpace, 0, kFrameBlocks, rhi::ShaderStage::AllGraphics, 0),
+			FrameBlockRange(FrameSource::kBoundBlockSpace + 1, 0, kFrameBlocks, rhi::ShaderStage::AllGraphics, 0) };
 		const auto mainRanges = d3d12 ? d3d12Ranges : MainLayoutRanges(false);
 		const auto zRanges = d3d12 ? d3d12Ranges : MainLayoutRanges(true);
 		// No input assembler, since every vertex stage pulls its attributes.
