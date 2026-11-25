@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from . import commands, journal as journal_mod, procs
-from .paths import GAME_EXE, MO2_EXE, default_paths
+from .paths import MO2_EXE, default_paths
 from .schema import ConfigError
 
 
@@ -28,6 +28,7 @@ def build_parser():
     p.add_argument("--base-aio", help="an AIO folder for the files a DLL build lacks, the first time a name is staged")
     p.add_argument("--pad", type=int, default=0, help="empty files that make usvfs grow its table before the game starts")
     p.add_argument("--pdb", action="store_true", help="AIO mode: copy PDBs too")
+    p.add_argument("--wait", type=int, default=0, metavar="S", help="wait up to S seconds for another run's lock (default: refuse)")
 
     p = sub.add_parser("run", help="one game run of a config ('a+b' composes)")
     p.add_argument("config")
@@ -68,12 +69,13 @@ def main(argv=None):
             from .stage import stage
 
             lock = journal_mod.Lock(paths.lock, f"stage {args.name}")
-            lock.acquire(0)
+            lock.acquire(args.wait)
             try:
                 if not journal_mod.recover(paths):
                     return 1
-                if procs.find(GAME_EXE) or procs.find(MO2_EXE):
-                    print("The game or MO2 is running: close them first")
+                # Only MO2's virtual file system can hold a staged mod's files. Games started without MO2 (lab slots) don't.
+                if procs.find(MO2_EXE):
+                    print("MO2 is running: close it first")
                     return 1
                 manifest = stage(paths, args.source, args.name, args.preset, args.base_aio, args.pad, args.pdb)
             finally:

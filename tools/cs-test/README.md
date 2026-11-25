@@ -12,7 +12,7 @@ python tools/cs-test/cs_test.py <command> ...
 ## Commands
 
 ```
-stage <worktree|aio folder> --name p35 [--preset Dev-Fast] [--base-aio DIR] [--pad N] [--pdb]
+stage <worktree|aio folder> --name p35 [--preset Dev-Fast] [--base-aio DIR] [--pad N] [--pdb] [--wait S]
 run <config>[+<config>...] [--stage p35] [--set key=value]... [--label x] [--dry-run] [--wait S]
 sweep <config> --base "features.*=false" --vary features.Skylighting,features.ScreenSpaceGI [--mode on-one|off-one] [run options]
 compare <run A> <run B> [--no-shots] [--no-memory]
