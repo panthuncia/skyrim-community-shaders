@@ -2617,7 +2617,7 @@ namespace FrameAnchors
 			for (std::uint32_t i = 0; i < kAnchors; ++i)
 				late = late || ((anchors >> i & 1u) && kInfo[i].late);
 			if (late && a_state.lateHook)
-				a_state.lateHook();
+				runtime.AfterEmission(a_state.lateHook);
 			if (SegmentUsesSharedConstants(*built, a_declared))
 				SharedConstants::CheckAfterRun();
 			PruneRetired(a_state);

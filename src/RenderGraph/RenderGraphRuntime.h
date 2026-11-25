@@ -184,6 +184,11 @@ public:
 	EpochResult TryExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare = {},
 		std::shared_ptr<const void> a_resourceOwner = {});
 
+	/** @brief Render thread, after TryExecuteEpoch submitted an epoch: runs a_work once that epoch's work is in the stream. An epoch
+	*  that joined another epoch's ticket (a stage committed inside that epoch's BeforeGpuWork) is emitted with it, so a_work waits
+	*  for that epoch's emission; otherwise it runs now. */
+	void AfterEmission(std::function<void()> a_work);
+
 	/** @brief The render owner, inside the frame's adoption point (Frame::Driver::OnBegin) only. Hands each epoch whose graph failed
 	*  since the last call to its owner. */
 	void PollEpochFailures();
