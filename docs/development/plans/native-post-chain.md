@@ -1,6 +1,6 @@
 # Native post chain
 
-Status: 2026-11-24, design only. Nothing here is built. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`) and the
+Status: 2026-11-25, families 0-4 built and native by default on AE (see "Milestone 1, as built"). Families 5-8 are design only. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`) and the
 post chain hooks (`src/RenderGraph/Frame/PostChain.cpp`). Follows [dclf-native-imagespace.md](./dclf-native-imagespace.md) (steps
 2a-2c, the formulas in "Where the values come from"). Background: [p5/imagespace.md](../p5/imagespace.md),
 [imagespace-remaining-ports.md](./imagespace-remaining-ports.md).
@@ -398,3 +398,46 @@ Lighting on.
 6. The lead answers it from Ghidra (xrefs to manager +0x3C/+0x40/+0x60/+0x54) and records the readers here.
 7. The world map and FXAA stay on the engine path. A frame that needs either runs the end-of-frame family on the engine.
 8. Keep the write-back of the adapted texture.
+
+## Milestone 1, as built (2026-11-25)
+
+Code: `src/RenderGraph/Engine/ImageSpace/NativePost.inl` (snapshot, post state, row writers, the four native forms, observe), the
+hooks in `ImageSpace.cpp` (`HdrFamily`, `CompositesFamily`, `WorldPostProcess`, `WorldEndOfFrame`) and `PostChain.cpp`, and
+`RenderGraph::Engine::TonemapCallSite` (`TonemapAnchor.cpp`), which Hooks.cpp's tonemap call-site hook and the native end-of-frame
+effects share. Switch `CS_ORG_POST_NATIVE` (`org.post_native`): 0 engine, 1 observe, 2 native (default); `:hdr,eof,composites,post`
+picks families. Native `eof` implies `hdr`, native `post` implies `composites` and `eof`.
+
+What differs from the design above:
+
+- **AE only.** The inputs are AE ids. SE runs every family on the engine (one log line).
+- **Slot effects stay the engine's.** Refraction (slot 1) and the depth of field / distant blur (slot 3) are active in almost every
+  river frame. The native end-of-frame effects route the frame themselves and call the engine's `RenderEffect` for each active
+  slot, whose steps stage natively per effect as before (`CS_ORG_IMAGESPACE_NATIVE=2`). The world map (slot 0) and FXAA (slot 2)
+  keep the whole frame's end-of-frame effects on the engine (decision 7). Porting the slot effects' rows is the next step here.
+- **Read point B also holds** the VL composite's colour and VL's activity (VL Render fills the settings block during the frame, and
+  an interior turns VL off after A: observe caught both), the slot activity (refraction turns on mid-frame), the screenshot
+  request and the world camera's near and far. TAA's state (on, form, water) is read at the end-of-frame entry, after Upscaling's
+  call-site hook sets it.
+- **Post state** starts each frame from the engine's copy at A. CS writes back the luminance parity, the adapted luminance
+  ImageSpaceTexture (target, no texture), the adaptation reset, TAA's parity, row 0, form and reset, the manager's slot count and
+  last slot, the screenshot flags, the current camera, the depth of field's near and far, and the shadow state's targets. So a
+  frame whose family runs on the engine continues the same state.
+- **Jitter** (decision 3): in graph modes on AE, `Main_UpdateJitter` calls `PostChain::UpdateJitter`, CS's copy of the engine's
+  sequence (AE 0x140e58a10: eight State table entries, its own index), in place of the engine's. Upscaling then overrides it for
+  an upscaler, and `NoteJitter` records the final value the TAA rows read.
+- **Post Processing's bloom skip** (its hook on the blur effect's Render) moved into the native HDR family
+  (`PostProcessing::SkipsVanillaBloom`).
+- **Foreign hooks** (decision 4) are checked at the first frame with the ImageSpace manager: each container's entry must lead into
+  CS, CS's detour's original code must not jump to another module, the HDR effect's and bloom blurs' UpdateParams slots must be
+  the engine's, and the tonemap call site must lead into CS. A foreign hook keeps its family (and the families around it) on the
+  engine.
+- **Not replicated:** the shader PreRender/PostRender around each step, the engine's TAA history clear on a reset (AE 107273: CS's
+  history pair is its own), and `Renderer::ApplyState` in the body and after the HDR effect (D3D11 work CS's passes do not read).
+
+Answers:
+
+- **The HDR effect's flag at +9** calls vfunc 0x38, which is UpdateParams itself; it returns 1, so UpdateParams runs every frame.
+- **Question 6.** A decompile scan of the 118 functions that reference the ImageSpaceManager singleton found no reader of +0x3C,
+  +0x40 or +0x60 other than `RenderEndOfFrameEffects`, and no reader of the SAO counter +0x54 other than `RenderSSAO`. CS writes
+  +0x3C and +0x40 anyway (two ints).
+

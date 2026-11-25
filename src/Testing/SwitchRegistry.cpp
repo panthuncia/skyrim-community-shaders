@@ -134,6 +134,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_ORG_NATIVE_VALIDATION", .key = "org.validation", .type = Bool, .defaultValue = "0", .description = "true: BasicRHI's API validation in native mode (Vulkan layers or the D3D12 debug layer)" },
 			{ .name = "CS_ORG_OCCLUSION_QUERY_LOG", .type = Bool, .defaultValue = "0" },
 			{ .name = "CS_ORG_PIPELINE_CACHE", .key = "org.pipeline_cache", .type = Bool, .defaultValue = "1", .description = "false: no on-disk pipeline cache (Data/ShaderCache/v3/pipelines-*.bin); every pipeline is built again each run" },
+			{ .name = "CS_ORG_POST_NATIVE", .key = "org.post_native", .defaultValue = "2", .description = "the native post chain (native-post-chain.md), AE only: 0 the engine's ImageSpace containers; 1 observe, the containers run and CS's predicted steps, rows and state are compared; 2 native, the containers are not called. Optionally :hdr,eof,composites,post to pick families" },
 			{ .name = "CS_ORG_PRESENT_COPY_SKIP" },
 			{ .name = "CS_ORG_RAW_ACCESS_CHECK", .key = "org.raw_access_check", .type = Bool, .defaultValue = "0", .description = "native: log and count work on graph-tracked images that skips the graph's state tracking ([ORG raw access] lines)" },
 			{ .name = "CS_ORG_RECORDING_TIMESTAMPS", .type = Bool, .defaultValue = "0" },

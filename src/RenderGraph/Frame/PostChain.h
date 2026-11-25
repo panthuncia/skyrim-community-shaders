@@ -2,6 +2,7 @@
 
 #include "RenderGraph/Frame/FrameDescription.h"
 
+#include <array>
 #include <cstdint>
 
 /**
@@ -54,6 +55,24 @@ namespace RenderGraph::Frame::PostChain
 
 	/** @brief The VL target this frame is kIMAGESPACE_VOLUMETRIC_LIGHTING + (~counter & 1). 0 when the VL state does not exist. */
 	std::uint32_t VolumetricParity();
+
+	/**
+	 * @brief Whether CS computes the TAA jitter (native-post-chain.md, decision 3): graph modes on AE. Main_UpdateJitter then calls
+	 * UpdateJitter in place of the engine's (AE 77245 +0xE2).
+	 */
+	bool OwnsJitter();
+
+	/**
+	 * @brief The engine's jitter sequence, computed by CS: with TAA on, the next of the eight State table entries (State +0xC0 the
+	 * index, +0xC4 and +0xE4 the tables) scaled to the screen; else zero. Writes State +0x44 / +0x48 and the index. Render thread.
+	 */
+	void UpdateJitter(RE::BSGraphics::State* a_state);
+
+	/** @brief Records the frame's final jitter (State +0x44 / +0x48 after Upscaling's override). The post chain's rows read it. */
+	void NoteJitter(float a_x, float a_y);
+
+	/** @brief The jitter NoteJitter recorded last. */
+	std::array<float, 2> Jitter();
 
 	/** @brief Fills a_frame.post at Renderer::Begin and counts structure changes. Render owner. */
 	void OnBegin(Description& a_frame);

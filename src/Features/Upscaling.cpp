@@ -1,4 +1,5 @@
 #include "Upscaling.h"
+#include "RenderGraph/Frame/PostChain.h"
 #include "DrawcallLimitFix.h"
 
 #include "../I18n/I18n.h"
@@ -2114,8 +2115,12 @@ void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 	upscaling.BeginRenderFrame();
 	Streamline::GetSingleton()->BeginRenderFrame();
 	upscaling.ConfigureTAA();
-	func(a_state);
+	if (RenderGraph::Frame::PostChain::OwnsJitter())
+		RenderGraph::Frame::PostChain::UpdateJitter(a_state);
+	else
+		func(a_state);
 	upscaling.ConfigureUpscaling(a_state);
+	RenderGraph::Frame::PostChain::NoteJitter(a_state->projectionPosScaleX, a_state->projectionPosScaleY);
 }
 
 void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)

@@ -88,6 +88,11 @@ namespace
 	int pipelineFeatIdx = 0;
 }
 
+bool PostProcessing::SkipsVanillaBloom()
+{
+	return skipVanillaBloom && !globals::state->permutationData.RenderToUI;
+}
+
 PostProcessFeature* PostProcessing::GetOpenEffectWithDebug() const
 {
 	if (pipelinePageNum != 1 || pipelineFeatIdx < 0 || pipelineFeatIdx >= static_cast<int>(pipeline.size()))

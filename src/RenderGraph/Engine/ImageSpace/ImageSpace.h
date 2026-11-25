@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -35,6 +37,18 @@ namespace RenderGraph::Engine::ImageSpace
 
 	/** @brief RenderEndOfFrameEffects for a menu scene. True at entry with its arguments, false at return. Render owner. */
 	void OnMenuEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final);
+
+	/**
+	* @brief RenderWorldPostProcess's hook (native-post-chain.md, family 4): reads the snapshot's B fields, then runs CS's native body
+	* or a_engine, the engine's. Render owner.
+	*/
+	void WorldPostProcess(std::uint32_t a_target, const std::function<void()>& a_engine);
+
+	/**
+	* @brief The world chain's RenderEndOfFrameEffects, between OnEndOfFrame's begin and end (family 2): CS's native end-of-frame effects,
+	* or a_engine observed or not. Render owner.
+	*/
+	void WorldEndOfFrame(std::int32_t a_source, std::int32_t a_final, const std::function<void()>& a_engine);
 
 	/** @brief Renderer::Begin, after the frame's schedule was chosen. Render owner. */
 	void OnFrameBegin();

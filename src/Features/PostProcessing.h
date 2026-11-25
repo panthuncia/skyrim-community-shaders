@@ -185,6 +185,12 @@ struct PostProcessing : Feature
 
 	/// Returns the untouched scene target when ISHDR must tonemap it directly.
 	std::optional<RE::RENDER_TARGET> PreProcess(RE::RENDER_TARGET a_input);
+
+	/**
+	 * @brief Whether a Post Processing bloom replaces the vanilla bloom this frame, so the HDR effect's bloom blur draws nothing (its
+	 * Render hook, and the native post chain, skip it outside the UI's 3D scenes).
+	 */
+	static bool SkipsVanillaBloom();
 	void DrawBeforeUpscaling();
 	void DrawFeature(PostProcessFeature& feature, PostProcessFeature::TextureInfo& lastTexColor);
 

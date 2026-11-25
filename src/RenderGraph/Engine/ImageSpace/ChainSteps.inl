@@ -1402,13 +1402,17 @@ ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std
 	return ChainDraw::Step;
 }
 
+/** @brief Observe mode of the native post chain (NativePost.inl): checks an engine step against the predicted one. Render owner. */
+void ObservePostStep(const StepKey& a_key, std::size_t a_effect);
+
+bool StageChainKey(StepKey a_key, std::uint8_t a_group, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups);
+
 /**
 * @brief Captures the constants the engine bound and stages them for the step's pass in the build the frame runs, then withholds
 * the engine's draw. A draw with no pass, or of a group the frame's description at Begin has off, is a mismatch.
 */
 bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
 {
-	auto& state = IS();
 	auto& chain = Chain();
 	const auto id = kEffects[a_effect].id;
 	const auto segment = Frame::SegmentId::Post;
@@ -1422,6 +1426,22 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			fmt::format("{} in the world post chain{} has no CS pass; it draws nothing", kEffects[a_effect].effectName, chain.inHdr ? " (the HDR effect)" : ""));
 		return true;
 	}
+	ObservePostStep(key, a_effect);
+	return StageChainKey(key, group, a_effect, a_compute, a_groups);
+}
+
+/**
+* @brief Stages a chain step by its key in the build the frame runs: the engine's draw (TakeChainStep) or a native step
+* (NativePost.inl). The tonemap and TAA take their routed form when the held build has it.
+*/
+bool StageChainKey(StepKey a_key, std::uint8_t a_group, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
+{
+	auto& state = IS();
+	auto& chain = Chain();
+	const auto id = kEffects[a_effect].id;
+	const auto segment = Frame::SegmentId::Post;
+	auto key = a_key;
+	const auto group = a_group;
 	// The tonemap and TAA have a routed form. The held build's schedule says which one runs.
 	const auto heldOn = [&](const StepKey& a_key) {
 		const auto found = chain.group.Find(a_key);

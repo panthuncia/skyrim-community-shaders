@@ -12,6 +12,7 @@
 #include "State.h"
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <map>
 #include <mutex>
@@ -102,6 +103,10 @@ namespace RenderGraph::Frame::PostChain
 			std::mutex mutex;
 			std::uint64_t frames = 0, changedFrames = 0;
 			std::map<std::string, std::uint64_t> changes;  // fields that changed against the same slot, by name
+			// UpdateJitter's index into the State tables, and the frame's final jitter (NoteJitter).
+			std::uint32_t jitterIndex = 0;
+			bool jitterIndexRead = false;
+			std::array<float, 2> jitter{};
 		};
 
 		State& Get()
@@ -172,7 +177,11 @@ namespace RenderGraph::Frame::PostChain
 				const bool menu = !world && !state.endOfFrame && FrameAnchors::IsRenderOwner();
 				if (menu)
 					Engine::ImageSpace::OnMenuEndOfFrame(true, static_cast<std::int32_t>(a_source), static_cast<std::int32_t>(a_final));
-				func(a_manager, a_source, a_final, a_arg4, a_arg5);
+				if (world)
+					Engine::ImageSpace::WorldEndOfFrame(static_cast<std::int32_t>(a_source), static_cast<std::int32_t>(a_final),
+						[&] { func(a_manager, a_source, a_final, a_arg4, a_arg5); });
+				else
+					func(a_manager, a_source, a_final, a_arg4, a_arg5);
 				if (menu)
 					Engine::ImageSpace::OnMenuEndOfFrame(false, 0, 0);
 				if (world) {
@@ -197,7 +206,10 @@ namespace RenderGraph::Frame::PostChain
 					(void)FrameAnchors::TapPoint(SegmentId::Sun);
 					(void)FrameAnchors::TapPoint(SegmentId::SunWater);
 				}
-				func(a_target);
+				if (owner)
+					Engine::ImageSpace::WorldPostProcess(a_target, [&] { func(a_target); });
+				else
+					func(a_target);
 				if (owner)
 					state.inChain = false;
 			}
@@ -219,6 +231,49 @@ namespace RenderGraph::Frame::PostChain
 	bool On()
 	{
 		return Get().installed;
+	}
+
+	bool OwnsJitter()
+	{
+		return Engine::GraphMode() && REL::Module::IsAE();
+	}
+
+	void UpdateJitter(RE::BSGraphics::State* a_state)
+	{
+		// AE layout (BSGraphics::State, 411479): the table index at +0xC0, x and y tables of eight at +0xC4 and +0xE4, the screen
+		// size at +0x24 / +0x28. The engine's UpdateJitter (AE 0x140e58a10) reads the same.
+		auto& state = Get();
+		auto* base = reinterpret_cast<std::byte*>(a_state);
+		const auto at = [&](std::uintptr_t a_offset) { return reinterpret_cast<float*>(base + a_offset); };
+		auto* index = reinterpret_cast<std::uint32_t*>(base + 0xC0);
+		// CS's own index from the first call on. The engine's starts it, so the sequence continues where the engine left it.
+		if (!std::exchange(state.jitterIndexRead, true))
+			state.jitterIndex = *index;
+		auto* manager = RE::ImageSpaceManager::GetSingleton();
+		const auto taa = manager ? Member<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(manager), kTemporal) : 0;
+		if (!taa || !Member<bool>(taa, 0x18)) {
+			a_state->projectionPosScaleX = 0.0f;
+			a_state->projectionPosScaleY = 0.0f;
+			return;
+		}
+		state.jitterIndex = (state.jitterIndex + 1) & 7;
+		*index = state.jitterIndex;
+		const auto width = static_cast<float>(*reinterpret_cast<const std::uint32_t*>(base + 0x24));
+		const auto height = static_cast<float>(*reinterpret_cast<const std::uint32_t*>(base + 0x28));
+		const float x = *at(0xC4 + state.jitterIndex * 4);
+		const float y = *at(0xE4 + state.jitterIndex * 4);
+		a_state->projectionPosScaleX = (x + x - 1.0f) / width;
+		a_state->projectionPosScaleY = (y + y - 1.0f) / height;
+	}
+
+	void NoteJitter(float a_x, float a_y)
+	{
+		Get().jitter = { a_x, a_y };
+	}
+
+	std::array<float, 2> Jitter()
+	{
+		return Get().jitter;
 	}
 
 	PostFields Read()
