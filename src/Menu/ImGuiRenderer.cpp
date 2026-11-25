@@ -17,6 +17,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "RenderGraph/Engine/UiTargets.h"
 #include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/KeptBindings.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include <OpenRenderGraph/GraphHost.h>
@@ -45,6 +46,8 @@ namespace ImGuiRenderer
 			std::uint32_t heldFormat = 0;   // rhi::Format, as its value
 			std::shared_ptr<const RasterProgram> heldProgram;
 			ImDrawData* pending = nullptr;  // the frame RenderDrawData is drawing, for the commit
+			// The draws' D3D11 views' bindings, kept while the same views are drawn.
+			RenderGraph::KeptBindings bindings;
 		};
 
 		/** @brief What the client's registration is made for: the interface's target, a stable slot, its format and its pipeline. */
@@ -73,10 +76,22 @@ namespace ImGuiRenderer
 			// An icon's ORG copy is one of the backend's exempt textures, read through its own views.
 			if (auto icon = Util::IconLoader::OrgBinding(view); icon.texture)
 				return icon;
-			auto binding = DCLF::GpuTextures::Get().ResolveBinding(view, DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::ImGui));
-			if (!binding)
+			const auto* kept = Renderer().bindings.Resolve(view, DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::ImGui));
+			if (!kept)
 				return {};
-			return { binding.index, std::move(binding.owner) };
+			return { kept->index, kept->owner };
+		}
+
+		/** @brief Whether a frame draws anything or asks for a texture change. */
+		bool HasWork(const ImDrawData& a_drawData)
+		{
+			if (a_drawData.TotalVtxCount > 0)
+				return true;
+			if (a_drawData.Textures)
+				for (const ImTextureData* texture : *a_drawData.Textures)
+					if (texture->Status != ImTextureStatus_OK)
+						return true;
+			return false;
 		}
 
 		/**
@@ -130,7 +145,8 @@ namespace ImGuiRenderer
 				if (!ImGuiBasicRHI::Commit(state.pending, target, Resolve))
 					RenderGraph::Fatal("ImGui", "the overlay's frame could not be committed");
 			};
-			client.active = [] { return Renderer().pending != nullptr; };
+			// An empty overlay frame with no texture requests has nothing to commit, which is most game frames.
+			client.active = [] { return Renderer().pending && HasWork(*Renderer().pending); };
 			return client;
 		}
 
@@ -207,6 +223,7 @@ namespace ImGuiRenderer
 		if (state.org) {
 			state.declared = {};
 			FrameAnchors::Unregister(kClientId);
+			state.bindings.Clear();
 			ImGuiBasicRHI::Shutdown();
 			state.org = false;
 		}

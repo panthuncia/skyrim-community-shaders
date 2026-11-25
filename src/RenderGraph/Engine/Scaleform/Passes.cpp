@@ -16,11 +16,13 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/Declare.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/Observed.h"
 #include "RenderGraph/Frame/ProgramSet.h"
 #include "RenderGraph/Frame/Transients.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/KeptBindings.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/RasterProgram.h"
@@ -66,6 +68,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr std::uint32_t kInstances = 16;
 		// Scratch images for GFx render targets. A blur needs its source and two intermediates, plus one for a nested target.
 		constexpr std::uint32_t kScratchTargets = 4;
+		// A kept staging region unused for this many frames is let go.
+		constexpr std::uint64_t kStagingIdleFrames = 60;
 		constexpr rhi::Format kScratchFormat = rhi::Format::R8G8B8A8_UNorm;
 
 		using FrameAnchors::Anchor;
@@ -236,6 +240,18 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::array<RenderGraph::Frame::DeclaredTexture2D, kScratchTargets> scratch;
 			// Tracked textures the displays read. A new one makes the client register again after the run.
 			std::vector<Read> reads;
+			// The displays' textures' bindings. The HUD's textures repeat frame after frame.
+			KeptBindings bindings;
+			// Per instance, the last staging region and the bytes it holds.
+			struct KeptStaging
+			{
+				Staging staging;
+				std::vector<std::byte> bytes;
+				std::uint64_t lastFrame = 0;
+			};
+			std::array<KeptStaging, kInstances> stagings;
+			// Per instance, the slots a commit stored a frame in. The next commit of the instance empties them.
+			std::array<std::vector<std::shared_ptr<const Slots>>, kInstances> filled;
 			bool readsChanged = false;
 			// Raised for new reads. With surfacesGeneration it is the declared client's key.
 			std::uint64_t readsGeneration = 0;
@@ -658,12 +674,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				state.commitReason = "an Interface run past the UI stage's instances";
 				return;
 			}
-			for (const auto& surface : state.surfaces) {
-				if (surface->Drawable())
-					surface->colourSlots[instance]->Store(run, nullptr);
-				if (surface->Masks())
-					surface->depthSlots[instance]->Store(run, nullptr);
-			}
+			// Only slots this client filled can hold a frame for this run, so only those are emptied.
+			for (const auto& filled : state.filled[instance])
+				filled->Store(run, nullptr);
+			state.filled[instance].clear();
 			if (!state.pending || !state.pendingSurface)
 				return;
 			const Display& display = *state.pending;
@@ -685,23 +699,32 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				std::optional<RenderGraph::UndeclaredAccess::DeclaredViewScope> declared;
 				if (reads[i] && !added)
 					declared.emplace();
-				auto binding = ::DCLF::GpuTextures::Get().ResolveBinding(view, ::DCLF::GpuTextures::Tag(::DCLF::GpuTextures::Source::Scaleform));
+				const auto* kept = state.bindings.Resolve(view, ::DCLF::GpuTextures::Tag(::DCLF::GpuTextures::Source::Scaleform));
 				declared.reset();
-				if (!binding) {
+				if (!kept) {
 					state.commitReason = "a texture's view cannot be resolved";
 					return;
 				}
-				textures[i] = binding.index;
-				frame->owners.push_back(std::move(binding.owner));
+				textures[i] = kept->index;
+				frame->owners.push_back(kept->owner);
 				// Keep the view too until the GPU work retires, since EndDisplay's queued releases may drop GFx's.
-				view->AddRef();
-				frame->owners.push_back(std::shared_ptr<const void>(view, [](const void* a_view) {
-					static_cast<ID3D11ShaderResourceView*>(const_cast<void*>(a_view))->Release();
-				}));
+				frame->owners.push_back(kept->view);
 			}
 
-			frame->staging = AcquireStaging("Scaleform", display.staging.size());
-			std::memcpy(frame->staging->mapped, display.staging.data(), display.staging.size());
+			// The GPU only reads a staging region, so frames whose bytes did not change share the last one. An instance unused for a
+			// while lets its region go.
+			const std::uint64_t frameNumber = RenderGraph::Frame::Driver::Current().frame;
+			for (auto& idle : state.stagings)
+				if (idle.staging && idle.lastFrame + kStagingIdleFrames < frameNumber)
+					idle = {};
+			auto& kept = state.stagings[instance];
+			kept.lastFrame = frameNumber;
+			if (!kept.staging || kept.bytes != display.staging) {
+				kept.staging = AcquireStaging("Scaleform", display.staging.size());
+				std::memcpy(kept.staging->mapped, display.staging.data(), display.staging.size());
+				kept.bytes = display.staging;
+			}
+			frame->staging = kept.staging;
 
 			const std::size_t first = state.pendingFirst;
 			const std::size_t last = std::min<std::size_t>(first + state.pendingCount, display.commands.size());
@@ -768,6 +791,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				static_cast<std::uint32_t>(std::ceil(right) - std::floor(left)), static_cast<std::uint32_t>(std::ceil(bottom) - std::floor(top)) };
 
 			slots->Store(run, std::move(frame));
+			state.filled[instance].push_back(slots);
 			for (std::size_t i = first; i < last; ++i)
 				if (display.commands[i].kind == Command::Kind::Draw && state.pendingPrograms[i])
 					state.gate->OpenDraw(instance * kGateEntries + static_cast<std::uint32_t>(i - first), display.commands[i].vertexCount);

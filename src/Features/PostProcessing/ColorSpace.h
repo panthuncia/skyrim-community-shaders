@@ -108,3 +108,23 @@ inline DirectX::SimpleMath::Matrix getWhiteAdaptedRGBMatrix(std::string_view in_
 	const Matrix adaptation = cone.Invert() * scale * cone;
 	return getRGBMatrix("XYZ", out_space) * adaptation * getRGBMatrix(in_space, "XYZ");
 }
+
+// The index of XYZ in getAvailableColorSpaces.
+inline constexpr int kXYZColorSpace = 4;
+
+// getWhiteAdaptedRGBMatrix between the spaces getAvailableColorSpaces lists, by index. Made once, so a per-frame caller formats
+// and looks up nothing.
+inline const DirectX::SimpleMath::Matrix& getWhiteAdaptedRGBMatrix(int in_index, int out_index)
+{
+	constexpr std::size_t count = 6;
+	static_assert(std::tuple_size_v<std::remove_cvref_t<decltype(getAvailableColorSpaces())>> == count);
+	static const auto table = [] {
+		const auto& spaces = getAvailableColorSpaces();
+		std::array<std::array<DirectX::SimpleMath::Matrix, count>, count> made{};
+		for (std::size_t i = 0; i < count; ++i)
+			for (std::size_t j = 0; j < count; ++j)
+				made[i][j] = getWhiteAdaptedRGBMatrix(spaces[i], spaces[j]);
+		return made;
+	}();
+	return table[in_index][out_index];
+}
