@@ -79,7 +79,8 @@ namespace RenderGraph::Engine::Skeleton
 			ColourTarget::kNORMAL_TAAMASK_SSRMASK, ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP, ColourTarget::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED,
 			ColourTarget::kMOTION_VECTOR, ColourTarget::kSHADOW_MASK };
 		// Cleared views missing from the RE list. Native mode hands their clears over through Sites::TakeContextColourClear.
-		constexpr std::array<std::uint32_t, 3> kMoreColourTargets{ ColourTarget::kTEMPORAL_AA_MASK, ColourTarget::kWATER_1, ColourTarget::kWATER_2 };
+		constexpr std::array<std::uint32_t, 5> kMoreColourTargets{ ColourTarget::kTEMPORAL_AA_MASK, ColourTarget::kWATER_1, ColourTarget::kWATER_2,
+			ColourTarget::kRAW_WATER, ColourTarget::kUNDERWATER_MASK };
 		constexpr std::array<std::uint32_t, 6> kDepthTargets{ DepthTarget::kMAIN, DepthTarget::kSHADOWMAPS_ESRAM, DepthTarget::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM,
 			DepthTarget::kSHADOWMAPS, DepthTarget::kPRECIPITATION_OCCLUSION_MAP, DepthTarget::kCUBEMAP_REFLECTIONS };
 		constexpr std::uint32_t kDepthSlices = 8;
@@ -888,9 +889,15 @@ namespace RenderGraph::Engine::Skeleton
 			case ColourTarget::kNORMAL_TAAMASK_SSRMASK:
 			case ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP:
 				return Host::Prepass;
+			// The water blend (SE 100304, AE 107285) clears the three water targets together.
 			case ColourTarget::kWATER_1:
 			case ColourTarget::kWATER_2:
+			case ColourTarget::kRAW_WATER:
 				return Host::ImageSpace;
+			// The underwater depth of field (ImageSpaceEffectDepthOfField::Render, inside the post chain) clears the mask once its
+			// masked composites read it, so the start stage's mask draws begin the next frame on an empty mask.
+			case ColourTarget::kUNDERWATER_MASK:
+				return Host::PostChain;
 			// Cleared after the water blend every frame, at the deferred+water stage's last ImageSpace step.
 			// The post chain clears them again when TAA is turned on, before TAA reads them.
 			case ColourTarget::kTEMPORAL_AA_MASK:
@@ -1353,8 +1360,8 @@ namespace RenderGraph::Engine::Skeleton
 			bool& a_engineKeeps)
 		{
 			a_engineKeeps = false;
-			// Some engine clears have no pass yet (the water targets kUNDERWATER_MASK and kRAW_WATER). They stay on D3D11, logged once
-			// per view, unless CS_ORG_ENGINE_DRAW_TAP=1 makes them tap errors.
+			// Some engine clears have no pass yet. They stay on D3D11, logged once per view, unless CS_ORG_ENGINE_DRAW_TAP=1 makes them
+			// tap errors.
 			const auto refuse = [&](std::string_view a_why) -> const ClearDraw* {
 				static const bool strict = Switches::On("CS_ORG_ENGINE_DRAW_TAP");
 				if (a_engineSite && strict) {
