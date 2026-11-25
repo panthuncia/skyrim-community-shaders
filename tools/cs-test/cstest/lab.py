@@ -144,11 +144,19 @@ def copied(rel_lower, kind):
 def replace(src, dst, mode):
     """Puts src at dst as a hard link or a copy. An existing dst is deleted first, so nothing is written through a hard link."""
     dst = Path(dst)
-    try:
-        if dst.exists() or dst.is_symlink():
-            dst.unlink()
-    except OSError as error:
-        raise LabError(f"cannot replace {dst} ({error}): a running game has it open") from error
+    # A game that just exited can hold its files (a mapped DLL, open plugins) for a few seconds more.
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+            break
+        except PermissionError as error:
+            if time.monotonic() >= deadline:
+                raise LabError(f"cannot replace {dst} ({error}): a running game has it open") from error
+            time.sleep(1)
+        except OSError as error:
+            raise LabError(f"cannot replace {dst} ({error})") from error
     dst.parent.mkdir(parents=True, exist_ok=True)
     if mode == "link":
         os.link(src, dst)
@@ -568,6 +576,12 @@ def kill_orphans(slot, log=print):
         log(f"Slot {slot.number}: stopping a game left by a killed run: {', '.join(map(str, orphans))}")
         if not procs.stop(orphans, log=log):
             raise LabError(f"slot {slot.number}'s old game {orphans} does not stop")
+        # A killed game reads as exited before Windows has released its process and files: wait until it is gone from the list.
+        deadline = time.monotonic() + 60
+        while procs.pids_of(slot.exe):
+            if time.monotonic() >= deadline:
+                raise LabError(f"slot {slot.number}'s old game {orphans} still listed 60 s after it stopped")
+            time.sleep(1)
 
 
 def launch(slot, log=print):
