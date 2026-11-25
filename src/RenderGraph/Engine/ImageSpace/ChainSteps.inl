@@ -1248,10 +1248,26 @@ enum class ChainDraw : std::uint8_t
 */
 std::uint16_t IblfVariantNow(Effects::ImageSpaceEffectEnum a_effect)
 {
-	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 	const bool compute = kEffects[static_cast<std::size_t>(EffectIndexOf(a_effect))].compute;
-	const auto input = InputOfView(compute ? shadow.CSTexture[0] : shadow.PSTexture[0]);
-	const auto output = compute ? TargetOfUav(shadow.CSUAV[0]) : static_cast<std::int32_t>(shadow.renderTargets[0]);
+	auto& native = NativeSteps::Get();
+	std::int32_t input = -1, output = -1;
+	if (native.armed && native.shader && !compute) {
+		// A native draw applied no engine state: its targets come from the effect's texture list.
+		NativeSteps::TextureTargets(*native.shader, input, output);
+	} else {
+		const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+		input = InputOfView(compute ? shadow.CSTexture[0] : shadow.PSTexture[0]);
+		output = compute ? TargetOfUav(shadow.CSUAV[0]) : static_cast<std::int32_t>(shadow.renderTargets[0]);
+		if (native.observing && native.shader && !compute) {
+			std::int32_t listedInput = -1, listedOutput = -1;
+			NativeSteps::TextureTargets(*native.shader, listedInput, listedOutput);
+			if (listedInput != input || listedOutput != output) {
+				++native.differed;
+				NativeSteps::Differences().Report(fmt::format("{}'s targets", kEffects[static_cast<std::size_t>(EffectIndexOf(a_effect))].effectName),
+					fmt::format("texture list t0 {} into {}, bound t0 {} into {}", listedInput, listedOutput, input, output));
+			}
+		}
+	}
 	const auto plain = [](std::int32_t a_name) { return a_name >= 0 && a_name < 0x7f; };
 	if (!plain(input) || !plain(output))
 		return kIblfNoStep;

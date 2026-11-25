@@ -1,7 +1,7 @@
 # ImageSpace without draw capture
 
 Status: 2026-11-24, cheap cuts 1-2 done; steps 2a-2b (param, explicit and compute steps native,
-`CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2c next. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
+`CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2c done. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
 [p5/imagespace.md](../p5/imagespace.md) (the RE and the chain), [imagespace-remaining-ports.md](./imagespace-remaining-ports.md)
 (the last effects), [dclf-native-sky.md](./dclf-native-sky.md) (the pattern this follows).
 
@@ -400,8 +400,11 @@ vanilla shader does not declare read as zero in the capture.
    buffer and dispatches, so a native dispatch binds it, captures it and skips both. Still captured: the compute SAO (its first
    dispatch checks the bound views) and the flow copies (their source is the bound view), with the steps listed in 2a. Measured at
    960x540 (Dev-Fast): ImageSpace 7.0% (before 2a) -> 5.5% of the render thread; the shim's `DrawTriShape` no longer shows.
-   2c. Next: image-based flares and the flow copies from the effect texture list instead of the bound views, then the explicit
-   setters' structs (or the formulas above) instead of the bound PS b2.
+   2c. Done 2026-11-24: the image-based flare draws take their variant's targets from the effect's texture list (output texture 0,
+   input slot i texture i + 1, as base Render and the generic SetupGeometry bind them); observe mode cross-checks the list with
+   the bound targets. Not yet exercised: `iblf.toml` did not run the flares in capture mode either. The flow copies and the
+   compute SAO go native as they are: their callers set their views in the shadow state before the call. Left captured: lens
+   flares, ripples, ISAlphaBlend, menu steps and ISDownsampleCS. The explicit steps still read the PS b2 their setter bound.
 3. HDR native (the most draws in every frame, formulas read): downsample, luminance, adaptation, bloom, tonemap.
 4. SAO native (the next most draws), then SSR.
 5. Composites (VL, SIL), the SAO composite, the water blend, TAA and the upsample: one decompile each.

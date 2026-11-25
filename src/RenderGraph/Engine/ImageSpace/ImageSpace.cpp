@@ -1415,6 +1415,7 @@ namespace RenderGraph::Engine::ImageSpace
 				bool armed = false;  // StageStep stages rows from here, not from a capture
 				bool observing = false;  // StageStep compares the capture with rows
 				Rows rows;
+				const RE::BSImagespaceShader* shader = nullptr;  // the step's shader, while armed or observing
 				// The rows already in the ring: an explicit step's PS b2 as its setter bound it. Null to upload rows.
 				Constants::Location rowsAt;
 				std::size_t effect = 0;
@@ -1429,6 +1430,21 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				static State state;
 				return state;
+			}
+
+			/**
+			* @brief A draw's engine targets from its effect's texture list, as base Render and the generic SetupGeometry bind them: the
+			* output is texture 0 (render target 0), input slot i is texture i + 1. -1 for a loaded texture or none.
+			*/
+			void TextureTargets(const RE::BSImagespaceShader& a_shader, std::int32_t& a_input, std::int32_t& a_output)
+			{
+				const auto& textures = static_cast<const RE::ImageSpaceEffect&>(a_shader).effectTextures;
+				const auto targetOf = [&](std::uint16_t a_index) {
+					const auto* texture = a_index < textures.capacity() ? textures[a_index] : nullptr;
+					return texture ? static_cast<std::int32_t>(texture->renderTarget) : -1;
+				};
+				a_output = targetOf(0);
+				a_input = targetOf(1);
 			}
 
 			/** @brief The one pixel shader of an ImageSpace shader, or null. Its table places the param's rows. */
@@ -2013,21 +2029,17 @@ namespace RenderGraph::Engine::ImageSpace
 			switch (info.id) {
 			case E::ISLensFlare:
 			case E::ISLensFlareVisibility:
-			case E::ISDownsample:
+				return "a lens flare step";
 			case E::ISDownsampleCS:
-			case E::ISIBLensFlares:
-			case E::ISBlur:
-			case E::ISCopyDynamicFetchDisabled:
-				return "a lens flare or image-based flare step";
-			case E::ISCopySubRegionCS:
-				return "a flow copy (its source is the bound view)";
+				return "an image-based flare dispatch";
 			default:
 				break;
 			}
 			// TakeDraw's order: a lens flare first, then the start, world and post chain steps. A menu step is what is left.
-			// TakeDispatch's: the compute SAO first (its first dispatch checks the bound views).
+			// TakeDispatch's order: the compute SAO first. Its views and the flow copies' are set in the shadow state by their callers,
+			// before the call, so a native dispatch still finds them there.
 			if (state.current->compute && SaoCsStepNow())
-				return "a compute SAO step";
+				return nullptr;
 			if (!state.current->compute && LensFlareStepNow(state.current->effect))
 				return "a lens flare step";
 			if (StartStepScope() != WorldScope::None || WorldStepScope() != WorldScope::None || ChainStepNow())
@@ -2089,6 +2101,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			}
 			native.effect = IS().current->effect;
+			native.shader = a_shader;
 			if (NativeSteps::s_mode == NativeSteps::Mode::Observe) {
 				native.observing = true;
 				a_render();
