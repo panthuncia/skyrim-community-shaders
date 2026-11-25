@@ -293,14 +293,14 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			logger::error("[ORG] ImageSpace: the water update's {} writes rt{}, and CS planned rt{}", kEffects[a_effect].effectName, bound, planned);
 	}
 	auto& client = state.post[static_cast<std::size_t>(PostPart::Start)];
-	const auto what = fmt::format("water step {} (variant {:#x})", kEffects[a_effect].effectName, variant);
+	const auto what = [&] { return fmt::format("water step {} (variant {:#x})", kEffects[a_effect].effectName, variant); };
 	// The heightmap steps' count is the held build's, from the engine's timer settings it was made for.
 	const auto held = start.group.Held(0);
 	if (start.scope == WorldScope::WaterDisplacement && id == E::ISWaterWadingHeightmap)
 		limit = held ? held->heightmapInstances : std::uint16_t{ 0 };
 	if (instance >= limit) {
 		if (!held) {
-			Frame::Driver::NoteStepLag(segment, client.id, what);
+			Frame::Driver::NoteStepLag(segment, client.id, what());
 			return true;
 		}
 		// The engine may run more heightmap steps for new timer settings before the revision with them is adopted.
@@ -320,7 +320,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	const auto& part = find.Part();
 	// Every row is on, so a row off is a build the key left it out of. A pass not made was left out by its graph build (MakePass).
 	if (!RowOn(segment, part.RowOf(entry)) || !part.Made(entry)) {
-		Frame::Driver::NoteStepLag(segment, client.id, what);
+		Frame::Driver::NoteStepLag(segment, client.id, what());
 		return true;
 	}
 	const auto before = client.batch.size();

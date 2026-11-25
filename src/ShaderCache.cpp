@@ -1888,7 +1888,30 @@ namespace SIE
 		{
 			if (shader.shaderType == RE::BSShader::Type::ImageSpace) {
 				const auto& isShader = static_cast<const RE::BSImagespaceShader&>(shader);
-				return GetImagespaceShaderDescriptor(isShader, descriptor);
+				// The answer is fixed per shader name (both tables are static), and the draw paths ask it twice a draw, so each
+				// shader object's answer is kept, with its name pointer in case the object is freed and its address reused.
+				struct Answer
+				{
+					const RE::BSImagespaceShader* shader;
+					const char* name;
+					uint32_t descriptor;
+					bool found;
+				};
+				thread_local std::vector<Answer> answers;
+				for (const auto& answer : answers)
+					if (answer.shader == &isShader && answer.name == isShader.name) {
+						if (answer.found)
+							descriptor = answer.descriptor;
+						return answer.found;
+					}
+				uint32_t resolved = descriptor;
+				const bool found = GetImagespaceShaderDescriptor(isShader, resolved);
+				if (answers.size() >= 512)
+					answers.clear();
+				answers.push_back({ &isShader, isShader.name, resolved, found });
+				if (found)
+					descriptor = resolved;
+				return found;
 			}
 			return true;
 		}

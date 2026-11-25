@@ -438,17 +438,18 @@ public:
 	* @brief Whether a_find has a pass to draw. Otherwise notes why not in a_segment: lag while the engine draws for newer variables
 	* or the frame holds no build of the client, a tap error when the held build has no pass. a_what names the draw, a_where its place.
 	*/
-	bool Draws(const StepFind<Build>& a_find, Frame::SegmentId a_segment, std::string_view a_what, std::string_view a_where) const
+	template <class What>
+	bool Draws(const StepFind<Build>& a_find, Frame::SegmentId a_segment, const What& a_what, std::string_view a_where) const
 	{
 		switch (a_find.found) {
 		case StepFound::Behind:
 			Frame::Driver::NoteLaggedWork(a_segment);
 			return false;
 		case StepFound::NoPass:
-			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, a_segment, fmt::format("{} {} has no CS pass; it draws nothing", a_what, a_where));
+			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, a_segment, fmt::format("{} {} has no CS pass; it draws nothing", a_what(), a_where));
 			return false;
 		case StepFound::NotHeld:
-			Frame::Driver::NoteStepLag(a_segment, Id(a_find.at.part), a_what);
+			Frame::Driver::NoteStepLag(a_segment, Id(a_find.at.part), a_what());
 			return false;
 		case StepFound::Draw:
 			break;
@@ -1251,7 +1252,7 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 		break;
 	}
 	const StepKey key{ a_scope, id, variant };
-	const auto what = fmt::format("world step {} (variant {:#x})", kEffects[a_effect].effectName, variant);
+	const auto what = [&] { return fmt::format("world step {} (variant {:#x})", kEffects[a_effect].effectName, variant); };
 	const auto find = world.group.Find(key);
 	// Behind: the engine draws for variables the build the frame runs was not made for, such as a new size.
 	if (!world.group.Draws(find, Frame::SegmentId::Deferred, what, "in a RenderWorld scope"))
@@ -1266,15 +1267,15 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 		// The description at Begin has it on, so the build the frame runs was made for a key without it: lag. So is a step the
 		// engine turned on after Begin (the first world frame sets the composite's state late); the next Begin reads it. Else a mismatch.
 		if (water || WorldStepOn(key, world.described, parity, false) || WorldStepOn(key, WorldFieldsNow(), parity, false))
-			Frame::Driver::NoteStepLag(segment, client.id, what);
+			Frame::Driver::NoteStepLag(segment, client.id, what());
 		else
 			Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
-				fmt::format("{} is drawn, and the scopes' state the frame's description read at Begin has it off", what));
+				fmt::format("{} is drawn, and the scopes' state the frame's description read at Begin has it off", what()));
 		return true;
 	}
 	if (!part.Made(entry)) {
 		// Its graph build left the pass out (MakePass says why).
-		Frame::Driver::NoteStepLag(segment, client.id, what);
+		Frame::Driver::NoteStepLag(segment, client.id, what());
 		return true;
 	}
 	return StageStep(client, entry, part.SpecOf(entry), a_effect, a_compute, a_groups);

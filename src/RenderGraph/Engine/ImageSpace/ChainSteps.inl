@@ -1422,7 +1422,7 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			routedTaa = true;
 		}
 	}
-	const auto what = fmt::format("post step {} (variant {:#x}, {})", kEffects[a_effect].effectName, key.variant, ChainGroupName(group));
+	const auto what = [&] { return fmt::format("post step {} (variant {:#x}, {})", kEffects[a_effect].effectName, key.variant, ChainGroupName(group)); };
 	const auto find = chain.group.Find(key);
 	// Behind: the engine draws for variables the build the frame runs was not made for, such as new luminance levels.
 	if (!chain.group.Draws(find, segment, what, "in the world post chain"))
@@ -1433,15 +1433,15 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	if (!RowOn(segment, part.RowOf(entry))) {
 		// The description at Begin has the group on, so the build the frame runs was made for a key without it: lag. Else a mismatch.
 		if (ChainGroupsOn(Frame::Driver::Current().post)[group])
-			Frame::Driver::NoteStepLag(segment, client.id, what);
+			Frame::Driver::NoteStepLag(segment, client.id, what());
 		else
 			Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
-				fmt::format("{} is drawn, and the frame's description at Begin has its group off", what));
+				fmt::format("{} is drawn, and the frame's description at Begin has its group off", what()));
 		return true;
 	}
 	if (!part.Made(entry)) {
 		// Its graph build left the pass out (MakePass says why).
-		Frame::Driver::NoteStepLag(segment, client.id, what);
+		Frame::Driver::NoteStepLag(segment, client.id, what());
 		return true;
 	}
 	// The water form's first two targets are CS's, so only its water history is compared.
@@ -1641,7 +1641,7 @@ bool TakeLensFlareStep(std::size_t a_effect)
 	const auto id = kEffects[a_effect].id;
 	constexpr auto segment = Frame::SegmentId::Post;
 	const StepKey key{ WorldScope::LensFlare, id, 0 };
-	const auto what = fmt::format("lens flare step {}", kEffects[a_effect].effectName);
+	const auto what = [&] { return fmt::format("lens flare step {}", kEffects[a_effect].effectName); };
 	const auto find = chain.group.Find(key);
 	// Behind: the engine draws for variables the build the frame runs was not made for, such as a new size.
 	if (!chain.group.Draws(find, segment, what, "in the world post chain"))
@@ -1651,7 +1651,7 @@ bool TakeLensFlareStep(std::size_t a_effect)
 	auto& client = state.post[static_cast<std::size_t>(chain.group.PartOf(find.at.part))];
 	// The group is always on, so a row off is a build made without it, and a pass not made was left out by its graph build (MakePass).
 	if (!RowOn(segment, part.RowOf(entry)) || !part.Made(entry) || !part.SpecOf(entry)) {
-		Frame::Driver::NoteStepLag(segment, client.id, what);
+		Frame::Driver::NoteStepLag(segment, client.id, what());
 		return true;
 	}
 	CheckLensFlareState(id);
@@ -1789,7 +1789,7 @@ bool TakeSaoCsStep(std::size_t a_effect, std::array<std::uint32_t, 3> a_groups)
 	else if (id == E::ISSAOBlurVCS)
 		variant = downscaled;
 	const StepKey key{ WorldScope::SaoCs, id, variant };
-	const auto what = fmt::format("compute SAO step {} (variant {:#x})", kEffects[a_effect].effectName, variant);
+	const auto what = [&] { return fmt::format("compute SAO step {} (variant {:#x})", kEffects[a_effect].effectName, variant); };
 	const auto find = chain.group.Find(key);
 	// Behind: the engine dispatches for variables the build the frame runs was not made for, such as a new size.
 	if (!chain.group.Draws(find, segment, what, "in Main::Draw's compute SAO"))
@@ -1799,7 +1799,7 @@ bool TakeSaoCsStep(std::size_t a_effect, std::array<std::uint32_t, 3> a_groups)
 	auto& client = state.post[static_cast<std::size_t>(chain.group.PartOf(find.at.part))];
 	// The group is always on, so a row off is a build made without it, and a pass not made was left out by its graph build (MakePass).
 	if (!RowOn(segment, part.RowOf(entry)) || !part.Made(entry) || !part.SpecOf(entry)) {
-		Frame::Driver::NoteStepLag(segment, client.id, what);
+		Frame::Driver::NoteStepLag(segment, client.id, what());
 		return true;
 	}
 	CheckSaoCsState(a_effect, *part.SpecOf(entry));
