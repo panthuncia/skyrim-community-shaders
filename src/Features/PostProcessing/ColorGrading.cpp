@@ -806,9 +806,9 @@ void ColorGrading::UpdateColorSpaceTransforms(bool hdrEnabled)
 		};
 	};
 
-	storeMatrix(getWhiteAdaptedRGBMatrix(spaces[kInputColorSpace], spaces[settings.processColorSpace]), inputToWorkingMatrix);
-	storeMatrix(getWhiteAdaptedRGBMatrix(spaces[settings.processColorSpace], spaces[tonemapInputSpace]), workingToTonemapMatrix);
-	storeMatrix(getWhiteAdaptedRGBMatrix(spaces[tonemapOutputSpace], spaces[outputColorSpace]), tonemapToOutputMatrix);
+	storeMatrix(getWhiteAdaptedRGBMatrix(kInputColorSpace, settings.processColorSpace), inputToWorkingMatrix);
+	storeMatrix(getWhiteAdaptedRGBMatrix(settings.processColorSpace, tonemapInputSpace), workingToTonemapMatrix);
+	storeMatrix(getWhiteAdaptedRGBMatrix(tonemapOutputSpace, outputColorSpace), tonemapToOutputMatrix);
 }
 
 void ColorGrading::SetupResources()
@@ -1029,8 +1029,8 @@ ColorGrading::ColorCB ColorGrading::BuildConstants()
 				float3{ mat(2, 0), mat(2, 1), mat(2, 2) }
 			};
 		};
-		storeMatrix(getWhiteAdaptedRGBMatrix(spaces[wsIdx], "XYZ"), workingToXYZMatrix);
-		storeMatrix(getWhiteAdaptedRGBMatrix("XYZ", spaces[wsIdx]), xyzToWorkingMatrix);
+		storeMatrix(getWhiteAdaptedRGBMatrix(wsIdx, kXYZColorSpace), workingToXYZMatrix);
+		storeMatrix(getWhiteAdaptedRGBMatrix(kXYZColorSpace, wsIdx), xyzToWorkingMatrix);
 	}
 
 	return {

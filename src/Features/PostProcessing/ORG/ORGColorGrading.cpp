@@ -67,11 +67,10 @@ namespace ORGPostChain
 				a_commit.Write(constants, data);
 				// The curve preview: every run draws the ramp and copies it back, and the menu takes it while the preview is open.
 				curve->Commit(a_commit, curveStamp);
-				const auto ramp = curve->Take(0);
 				const bool previewOpen = grading.curveReadbackRequested &&
 				                         grading.curveReadbackRequestFrame >= static_cast<std::int64_t>(globals::state->frameCount) - 1;
 				if (previewOpen)
-					TakeCurve(grading, ramp);
+					TakeCurve(grading, curve->Take(0));
 				else
 					grading.curveReadbackRequested = false;
 				pending = false;
