@@ -17,6 +17,10 @@ namespace NativePost
 		constexpr std::uint8_t kEof = 2;
 		constexpr std::uint8_t kComposites = 4;
 		constexpr std::uint8_t kPost = 8;
+		// The deferred containers (NativeWorld.inl).
+		constexpr std::uint8_t kReflections = 16;
+		constexpr std::uint8_t kSsao = 32;
+		constexpr std::uint8_t kWaterBlend = 64;
 	}
 
 	struct Config
@@ -293,8 +297,9 @@ namespace NativePost
 		PostState state;
 		std::uint64_t frameNumber = UINT64_MAX;
 		std::uint64_t staged = 0;
-		// Per-family counts of frames run natively and on the engine path, for the log.
-		std::array<std::uint64_t, 4> native{}, engine{};
+		// Per-family counts of frames run natively and on the engine path, for the log: hdr, eof, composites, post, then the
+		// reflections, RenderSSAO's calls and the water blend.
+		std::array<std::uint64_t, 7> native{}, engine{};
 		std::uint64_t slotNative = 0, slotEngine = 0;  // slot effects staged natively, and run through the engine's RenderEffect
 		std::uint8_t lastSlots = 0;  // the last B read's, for the log
 	};
@@ -386,8 +391,10 @@ namespace NativePost
 		r.state = EngineState();
 		if (Frame::Driver::Current().frame % 300 == 0)
 			logger::info("[ORG] native post chain: {} steps staged natively; native frames hdr {} eof {} composites {} post {}, "
-						 "end-of-frame frames on the engine {} (last slots {:#x}); slot effects native {}, through RenderEffect {}",
-				r.staged, r.native[0], r.native[1], r.native[2], r.native[3], r.engine[1], r.lastSlots, r.slotNative, r.slotEngine);
+						 "end-of-frame frames on the engine {} (last slots {:#x}); slot effects native {}, through RenderEffect {}; "
+						 "native reflections {} SSAO calls {} water blends {}, on the engine {} {} {}",
+				r.staged, r.native[0], r.native[1], r.native[2], r.native[3], r.engine[1], r.lastSlots, r.slotNative, r.slotEngine, r.native[4],
+				r.native[5], r.native[6], r.engine[4], r.engine[5], r.engine[6]);
 		r.frameNumber = Frame::Driver::Current().frame;
 	}
 
@@ -930,24 +937,33 @@ namespace NativePost
 		return steps;
 	}
 
-	/** @brief A compute blur pass of the depth of field (AE 0x1414d40b0 and 0x1414d42d0, rows from 0x1414d44d0). */
+	/**
+	* @brief The rows and thread groups of a pass of the engine's separable compute blur (AE 0x1414d40b0 and 0x1414d42d0, rows from
+	* 0x1414d44d0), from a_input into a_output at the dynamic-resolution ratios a_rx and a_ry (1 when locked). a_grid is the shader's
+	* GRIDSIZE_X or GRIDSIZE_Y.
+	*/
+	void SetBlurCs(NativeStep& a_step, std::pair<float, float> a_input, std::pair<float, float> a_output, float a_rx, float a_ry, bool a_vertical, std::uint32_t a_grid)
+	{
+		const auto [w, h] = a_input;
+		const auto [ow, oh] = a_output;
+		a_step.compute = true;
+		a_step.rows = ExplicitRows(2);
+		const auto trunc = [](float a_v) { return static_cast<float>(static_cast<std::int32_t>(static_cast<std::int64_t>(a_v))); };
+		SetId(a_step.rows, 0, 1.0f / ow, 1.0f / oh);
+		SetId(a_step.rows, 1, (trunc(w * a_rx) - 1.0f) / w, (trunc(h * a_ry) - 1.0f) / h);
+		// The dispatch covers the input's render-size area: one group per line along the blur, GRIDSIZE texels per group across it.
+		const auto up = [](float a_v) { return static_cast<std::uint32_t>(std::ceil(a_v)); };
+		const auto x = up(w * a_rx), y = up(h * a_ry);
+		a_step.groups = a_vertical ? std::array<std::uint32_t, 3>{ x, (y + a_grid - 1) / a_grid, 1 } : std::array<std::uint32_t, 3>{ (x + a_grid - 1) / a_grid, y, 1 };
+	}
+
+	/** @brief A compute blur pass of the depth of field. */
 	NativeStep DofBlurStep(const ImageSpaceFrame& a_f, bool a_ldr, bool a_vertical, std::int32_t a_input, std::int32_t a_output)
 	{
 		using E = Effects;
 		const auto effect = a_vertical ? E::ISDepthOfFieldBlurVCS : E::ISDepthOfFieldBlurHCS;
 		NativeStep step{ .key = { a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, effect, 0 }, .group = SlotGroup(3, a_ldr), .effect = EffectIndex(effect) };
-		step.compute = true;
-		step.rows = ExplicitRows(2);
-		const auto [w, h] = a_f.Size(a_input);
-		const auto [ow, oh] = a_f.Size(a_output);
-		const float rx = a_f.locked ? 1.0f : a_f.ratioX, ry = a_f.locked ? 1.0f : a_f.ratioY;
-		const auto trunc = [](float a_v) { return static_cast<float>(static_cast<std::int32_t>(static_cast<std::int64_t>(a_v))); };
-		SetId(step.rows, 0, 1.0f / ow, 1.0f / oh);
-		SetId(step.rows, 1, (trunc(w * rx) - 1.0f) / w, (trunc(h * ry) - 1.0f) / h);
-		// The dispatch covers the input's render-size area: one group per line along the blur, GRIDSIZE texels per group across it.
-		const auto up = [](float a_v) { return static_cast<std::uint32_t>(std::ceil(a_v)); };
-		const auto x = up(w * rx), y = up(h * ry);
-		step.groups = a_vertical ? std::array<std::uint32_t, 3>{ x, (y + kDofGridY - 1) / kDofGridY, 1 } : std::array<std::uint32_t, 3>{ (x + kDofGridX - 1) / kDofGridX, y, 1 };
+		SetBlurCs(step, a_f.Size(a_input), a_f.Size(a_output), a_f.locked ? 1.0f : a_f.ratioX, a_f.locked ? 1.0f : a_f.ratioY, a_vertical, a_vertical ? kDofGridY : kDofGridX);
 		return step;
 	}
 
@@ -1190,6 +1206,20 @@ namespace NativePost
 
 	// Native mode.
 
+	/** @brief Whether a step is one of the RenderWorld scopes' (WorldSteps.inl), not the post chain's. */
+	bool WorldStepKey(const StepKey& a_key)
+	{
+		switch (a_key.scope) {
+		case WorldScope::Reflections:
+		case WorldScope::Ssao:
+		case WorldScope::SsaoComposite:
+		case WorldScope::WaterBlend:
+			return true;
+		default:
+			return false;
+		}
+	}
+
 	/** @brief Stages a predicted step as the frame's own, from its rows. False when the build the frame runs has no pass for it. */
 	bool Stage(const NativeStep& a_step)
 	{
@@ -1202,7 +1232,8 @@ namespace NativePost
 		native.shader = ShaderOf(a_step.effect);
 		native.armed = true;
 		native.computeRows = a_step.compute;
-		const bool taken = StageChainKey(a_step.key, a_step.group, a_step.effect, a_step.compute, a_step.groups);
+		const bool taken = WorldStepKey(a_step.key) ? StageWorldKey(a_step.key, a_step.effect, a_step.compute, a_step.groups) :
+		                                              StageChainKey(a_step.key, a_step.group, a_step.effect, a_step.compute, a_step.groups);
 		native.armed = false;
 		native.computeRows = false;
 		++R().staged;
