@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
@@ -153,6 +154,7 @@ namespace DCLF::Features::Sky
 		/** @brief The header textures bound now (kHeaderRegisters), as imports or published ids. False when one cannot be read. */
 		bool ResolveHeaders(Run& a_run, PublishedInputIds& a_published)
 		{
+			DCLF_ZONE("CS.DCLF.Sky.ResolveHeaders");
 			for (std::size_t h = 0; h < kHeaderRegisters.size(); ++h) {
 				Family::Header header;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
@@ -253,6 +255,7 @@ namespace DCLF::Features::Sky
 		/** @brief Reads a batch's published inputs by id. False when the client cannot read one, and the batch stays the engine's. */
 		bool ReadInputs(View a_view, const PublishedInputIds& a_published, Run& a_run)
 		{
+			DCLF_ZONE("CS.DCLF.Sky.ReadInputs");
 			const auto read = [&](std::uint32_t a_register, const std::string& a_id, std::uint32_t& a_index) {
 				if (a_id.empty())
 					return true;
@@ -934,6 +937,7 @@ namespace DCLF::Features::Sky
 
 	std::shared_ptr<Run> PrepareFace(const FaceView& a_view, std::string& a_why)
 	{
+		DCLF_ZONE("CS.DCLF.Sky.PrepareFace");
 		if (!FrameAnchors::IsRenderOwner() || !SkyDraws::Available()) {
 			a_why = "the sky family does not draw now";
 			return nullptr;
@@ -988,6 +992,7 @@ namespace DCLF::Features::Sky
 	{
 		// What CS's reflection prepasses bound: the header textures, the published inputs and Physical Sky's resources.
 		PublishedInputIds published;
+		DCLF_ZONE("CS.DCLF.Sky.SubmitFace");
 		if (!ResolveHeaders(*a_run, published) || !ReadInputs(View::Face, published, *a_run)) {
 			FaceFailures().Report("its inputs cannot be read", "see the sky's refusals");
 			SkyDraws::Keep(std::move(a_run->owners));
