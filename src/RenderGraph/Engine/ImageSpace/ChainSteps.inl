@@ -888,7 +888,8 @@ void BuildChainSteps(ChainBuild& a_build)
 	const auto slotCopy = [&](std::uint8_t a_part, std::uint32_t a_slot, bool a_ldr, const char* a_name) {
 		copyBack(a_part, SlotGroup(a_slot, a_ldr), a_ldr, fmt::format("{}.copyback", a_name));
 	};
-	// Depth of field with its compute blur. The masked composites need a mask CS lacks, and the raster blur has no CS pass.
+	// Depth of field with its compute blur. The masked composites (under water) read the underwater mask at t4, which the start stage's
+	// underwater mask step writes. The raster blur has no CS pass.
 	const auto dof = [&](std::uint8_t a_part, bool a_ldr) {
 		const auto scope = a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot;
 		const auto group = SlotGroup(3, a_ldr);
@@ -916,15 +917,24 @@ void BuildChainSteps(ChainBuild& a_build)
 			const auto name = InputOfView(targets[RE::RENDER_TARGET::kSAO_CAMERAZ_MIP_LEVEL_10].SRV);
 			return StepTexture::Engine(name >= 0 ? name : (kDefaultTextureInput | 0));
 		}();
-		for (const auto effect : kComposites) {
-			StepDesc d{ .name = fmt::format("dof.composite{}", static_cast<std::uint32_t>(effect)), .output = scratch(a_ldr) };
+		constexpr std::array<E::ImageSpaceEffectEnum, 2> kMaskedComposites{ E::ISDepthOfFieldMaskedFogged, E::ISDistantBlurMaskedFogged };
+		const auto composite = [&](E::ImageSpaceEffectEnum a_effect, bool a_masked) {
+			StepDesc d{ .name = fmt::format("dof.composite{}", static_cast<std::uint32_t>(a_effect)), .output = scratch(a_ldr) };
 			d.inputs[0] = image(a_ldr);
 			d.inputs[1] = owned(chain.dofDown);
 			d.inputs[2] = mainDepth;
 			d.inputs[3] = farDepth;
 			d.samplers[1] = kLinear;
-			add(a_part, group, scope, effect, 0, std::move(d), true);
-		}
+			if (a_masked) {
+				d.inputs[4] = engine(T::kUNDERWATER_MASK);
+				d.samplers[4] = kLinear;
+			}
+			add(a_part, group, scope, a_effect, 0, std::move(d), true);
+		};
+		for (const auto effect : kComposites)
+			composite(effect, false);
+		for (const auto effect : kMaskedComposites)
+			composite(effect, true);
 		copyBack(a_part, group, a_ldr, "dof.copyback");
 	};
 	const auto radial = [&](std::uint8_t a_part, bool a_ldr) {

@@ -2027,14 +2027,19 @@ namespace RenderGraph::Engine::ImageSpace
 			return "a geometry other than the full-screen quad";
 		}
 
-		/** @brief This Render sets neither target nor viewport and applies no manager rectangle. Null geometry means the +0x48 quad. */
-		std::string_view IneligibleExplicit(const void* a_geometry)
+		/**
+		 * @brief This Render sets neither target nor viewport and applies no manager rectangle. Null geometry means the +0x48 quad. An
+		 * effect that draws its own geometry (the underwater mask over each water shape) takes any.
+		 */
+		std::string_view IneligibleExplicit(const void* a_geometry, bool a_geometryEffect)
 		{
 			if (!Constants::Active())
 				return "the engine-constants capture is not active";
 			auto* manager = RE::ImageSpaceManager::GetSingleton();
 			if (!manager)
 				return "no ImageSpaceManager";
+			if (a_geometryEffect)
+				return {};
 			const auto* quad = *reinterpret_cast<void* const*>(reinterpret_cast<const std::byte*>(manager) + 0x48);
 			if (a_geometry && a_geometry != quad)
 				return "a geometry other than the full-screen quad";
@@ -2340,7 +2345,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const bool covered = EffectOf(a_shader) >= 0;
 				EngineCall(a_shader, [&] {
 					const bool scoped = InScope(a_shader, [&] {
-						WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{},
+						WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry, kEffects[static_cast<std::size_t>(EffectOf(a_shader))].geometry) : std::string_view{},
 							[&] { RenderOrNative(a_shader, nullptr, a_geometry, [&] { func(a_shader, a_geometry); }, true); });
 					});
 					if (!scoped)

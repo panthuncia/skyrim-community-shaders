@@ -29,6 +29,7 @@ enum class WorldScope : std::uint8_t
 	// The start stage's water effects (StartSteps.inl).
 	WaterDisplacement,  // 31385 / 32176
 	FlowCopy,           // 35561 / 36560
+	UnderwaterMask,     // ISUnderwaterMask over each water shape near the camera (AE 32225, from Main::RenderWaterEffects)
 	// The menu and loading screen composites (MenuSteps.inl).
 	MenuHdr,   // inside UI3DSceneManager::Render
 	MenuCopy,  // ImageSpaceManager::RenderEffect with ISCopy

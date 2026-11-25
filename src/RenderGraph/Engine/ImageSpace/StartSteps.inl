@@ -1,6 +1,6 @@
 // The start stage's water effects as CS passes, in graph mode. Included by ImageSpace.cpp after WorldSteps.inl and ChainSteps.inl.
 //
-// Main::RenderWaterEffects runs the displacement simulation and the flow copies inside the start stage's window.
+// Main::RenderWaterEffects runs the displacement simulation, the flow copies and the underwater mask inside the start stage's window.
 // How many ripples, heightmap steps and flow copies a frame makes is the engine's late decision. So each is a set of
 // instances, all on, and the k-th draw of its kind is instance k. Unused instances stay closed in the run gate.
 // The heightmap steps' count is the engine's bound from its timer settings (HeightmapStepBound), part of the shape.
@@ -8,6 +8,7 @@
 /** @brief Instances of each repeated water step a frame. More in one frame is a mismatch. */
 constexpr std::uint16_t kRippleInstances = 8;  // per target of the pair
 constexpr std::uint16_t kFlowInstances = 32;
+constexpr std::uint16_t kUnderwaterMaskInstances = 16;  // the water shapes the mask draws in a frame
 
 /** @brief The water update's heightmap step in seconds (0x3ccccccd, set by ImageSpaceEffectWaterDisplacement's Render). */
 constexpr double kHeightmapStep = 0.025;
@@ -63,7 +64,7 @@ struct StartSteps
 	WorldScope scope = WorldScope::None;
 	std::int32_t target = -1;
 	bool swapped = false;
-	std::uint16_t ripples = 0, heightmaps = 0, flows = 0;
+	std::uint16_t ripples = 0, heightmaps = 0, flows = 0, masks = 0;
 	std::uint64_t frame = UINT64_MAX;
 };
 
@@ -165,6 +166,10 @@ void BuildStartSteps(StartBuild& a_build)
 	if (a_build.flowSize)
 		for (std::uint16_t k = 0; k < kFlowInstances; ++k)
 			add(WorldScope::FlowCopy, E::ISCopySubRegionCS, k, StepDesc{ .name = fmt::format("flow.copy.{}", k), .output = engine(kFlowMapOutput) });
+	// The underwater mask: one draw per water shape, of the engine's geometry (StageGeometry), reading nothing.
+	for (std::uint16_t k = 0; k < kUnderwaterMaskInstances; ++k)
+		add(WorldScope::UnderwaterMask, E::ISUnderwaterMask, k,
+			StepDesc{ .name = fmt::format("water.underwater-mask.{}", k), .output = engine(static_cast<std::int32_t>(T::kUNDERWATER_MASK)) });
 
 	auto& client = state.post[static_cast<std::size_t>(PostPart::Start)];
 	client.batch.clear();
@@ -193,10 +198,10 @@ void BuildStartSteps(StartBuild& a_build)
 	// An empty client is no client. Its declaration then registers none.
 	if (!desc.passes.empty())
 		a_build.descs[0] = std::move(desc);
-	logger::info("[ORG] ImageSpace: the water effects are start stage passes: {} passes ({} ripples and {} heightmap steps per target, {} flow copies), "
-				 "displacement {}x{}, flow map {}x{}, built for the revision starting now",
-		part.count, kRippleInstances, a_build.heightmapInstances, a_build.flowSize ? kFlowInstances : 0, a_build.displacementSize, a_build.displacementSize,
-		a_build.flowSize, a_build.flowSize);
+	logger::info("[ORG] ImageSpace: the water effects are start stage passes: {} passes ({} ripples and {} heightmap steps per target, {} flow copies, "
+				 "{} underwater mask draws), displacement {}x{}, flow map {}x{}, built for the revision starting now",
+		part.count, kRippleInstances, a_build.heightmapInstances, a_build.flowSize ? kFlowInstances : 0, kUnderwaterMaskInstances, a_build.displacementSize,
+		a_build.displacementSize, a_build.flowSize, a_build.flowSize);
 }
 
 WorldScope StartStepScope()
@@ -204,10 +209,13 @@ WorldScope StartStepScope()
 	const auto& start = Start();
 	if (!IS().on || !start.group.Registered())
 		return WorldScope::None;
+	// The underwater mask has no scope of its own: its effect is the step, wherever Main::RenderWaterEffects draws it.
+	if (start.scope == WorldScope::None && IS().current && kEffects[IS().current->effect].id == Effects::ISUnderwaterMask)
+		return WorldScope::UnderwaterMask;
 	return start.scope;
 }
 
-/** @brief Writes the ripple quad's buffer refs into the PerFrame words for its vertex stage. Returns why not, or empty. */
+/** @brief Writes a geometry step's buffer refs (a ripple's quad, a water shape the underwater mask draws) into the PerFrame words for its vertex stage. Returns why not, or empty. */
 std::string StageGeometry(Pending& a_pending)
 {
 	auto& state = IS();
@@ -262,7 +270,9 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	if (start.frame != frame) {
 		start.frame = frame;
 		start.flows = 0;
+		start.masks = 0;
 	}
+	const auto scope = StartStepScope();
 	std::uint16_t variant = 0;
 	std::uint16_t limit = 1;
 	std::uint16_t instance = 0;
@@ -295,9 +305,13 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		default:
 			break;
 		}
-	} else if (start.scope == WorldScope::FlowCopy) {
+	} else if (scope == WorldScope::FlowCopy) {
 		instance = start.flows++;
 		limit = kFlowInstances;
+		variant = instance;
+	} else if (scope == WorldScope::UnderwaterMask) {
+		instance = start.masks++;
+		limit = kUnderwaterMaskInstances;
 		variant = instance;
 	}
 	// Checked once a session. A difference means our RE of the update is wrong.
@@ -328,7 +342,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			fmt::format("{} instance {} of the frame is past the start stage's {} instances; it draws nothing", kEffects[a_effect].effectName, instance, limit));
 		return true;
 	}
-	const StepKey key{ start.scope, id, variant };
+	const StepKey key{ scope, id, variant };
 	const auto find = start.group.Find(key);
 	if (!start.group.Draws(find, segment, what, "in the water effects"))
 		return true;
@@ -344,10 +358,10 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	if (client.batch.size() == before)
 		return true;
 	auto& pending = client.batch.back();
-	if (id == E::ISWaterDisplacementWadingRipple) {
+	if (id == E::ISWaterDisplacementWadingRipple || id == E::ISUnderwaterMask) {
 		if (const auto why = StageGeometry(pending); !why.empty()) {
 			client.batch.pop_back();
-			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment, fmt::format("a wading ripple's quad could not be staged: {}", why));
+			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment, fmt::format("{}'s geometry could not be staged: {}", kEffects[a_effect].effectName, why));
 		}
 	} else if (id == E::ISCopySubRegionCS) {
 		// BGSAutoWater loads these and never writes them, so the graph exempts them from declarations. Held until the run retires.
