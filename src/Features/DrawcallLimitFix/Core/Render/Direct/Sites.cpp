@@ -1476,7 +1476,7 @@ namespace DCLF::Direct
 			}
 			{
 				DCLF_ZONE("CS.DCLF.Cpu.FrameStart.SetViewBatches");
-				FrameValues::Get().SetViewBatches(forward);
+				FrameValues::Get().SetViewBatches(forward, forward ? &s.current->forwardRows : nullptr);
 			}
 			{
 				DCLF_ZONE("CS.DCLF.Cpu.FrameStart.PublishViewBatches");
@@ -1507,7 +1507,7 @@ namespace DCLF::Direct
 		// Latch regions go in an external run of the host's, retired after this frame's signal.
 		(void)host->BeginExternalRun(s.timeline, s.signalled + 1);
 		// These must run in this order, before FrameValues::Kick.
-		FrameValues::Get().SetViewBatches(a_set);
+		FrameValues::Get().SetViewBatches(a_set, &slot.forwardRows);
 		Draws::PublishViewBatches(a_set.get());
 		KickCpuFrameState(std::move(a_set));
 	}
@@ -1815,27 +1815,15 @@ namespace DCLF::Direct
 		auto* run = slot ? std::exchange(slot->forwardRun, nullptr) : nullptr;
 		if (!run)
 			return false;
-		// Rows for the forward sort on the CS thread. The producer changes them at the next Kick. A frame whose producer is not done waits here.
+		// Rows for the forward sort on the CS thread. A frame whose producer is not done waits here.
 		const auto* rows = FrameValues::Get().RowsIfDone();
 		if (!rows) {
 			DCLF_ZONE("CS.DCLF.Cpu.RowsWait");
 			++s.window.rowWaits;
 			rows = FrameValues::Get().RowsIfDone(true);
 		}
-		if (rows) {
-			DCLF_ZONE("CS.DCLF.Cpu.ForwardRows");
-			if (slot->forwardRows.size() < rows->size())
-				slot->forwardRows.resize(rows->size());
-			const BindlessPlacement* source = rows->data();
-			const std::size_t sourceRows = rows->size();
-			ForwardSortRow* target = slot->forwardRows.data();
-			for (const ViewType type : { ViewType::Forward, ViewType::Refraction })
-				for (const auto& batch : slot->set->List(type)) {
-					const auto* objects = batch.object;
-					for (std::uint32_t lane = 0; lane < batch.count; ++lane)
-						if (const std::uint32_t object = objects[lane]; object < sourceRows)
-							target[object] = ForwardSortRowOf(source[object]);
-				}
+		// The producer filled the slot's sort rows. A frame it did not fill them for sorts without them.
+		if (rows && FrameValues::Get().ForwardRowsFilled(&slot->forwardRows)) {
 			run->bindings.sortRows = slot->forwardRows;
 			run->refractionBindings.sortRows = slot->forwardRows;
 		}
