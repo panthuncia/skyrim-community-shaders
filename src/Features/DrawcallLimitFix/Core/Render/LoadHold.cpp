@@ -13,7 +13,6 @@
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "Testing/Testing.h"
-#include "Utils/SwitchFile.h"
 
 #include <algorithm>
 #include <array>
@@ -356,7 +355,7 @@ namespace DCLF::LoadHold
 		/**
 		 * @brief The map menu opening is a camera cut. The engine registers the map's LOD under TES::lodLandRoot only in its first frames,
 		 * and DCLF's set does not hold it yet, so the frame is held as a re-entry until the map camera's set settles.
-		 * Closing the map is held the same way. CS_DCLF_MAP_HOLD=0 turns both holds off.
+		 * Closing the map is held the same way.
 		 */
 		void WatchMapStart()
 		{
@@ -365,20 +364,17 @@ namespace DCLF::LoadHold
 			if (now == mapOpen)
 				return;
 			mapOpen = now;
-			static const bool mapHold = Util::SwitchFile::Value("CS_DCLF_MAP_HOLD") != "0";
 			if (!now) {
 				PassCapture::Get().SetMapCensus(false);
 				LogMapCensus(mapFrames, "the map closed");
 				mapFrames = 0;
 				// The world's objects are not in the set culled with the map camera.
-				if (mapHold)
-					BeginReentry("the map menu closed (a camera cut back: the world is not in the set culled with the map camera)");
+				BeginReentry("the map menu closed (a camera cut back: the world is not in the set culled with the map camera)");
 				return;
 			}
 			mapFrames = 0;
 			PassCapture::Get().SetMapCensus(true);
-			if (mapHold)
-				BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)");
+			BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)");
 		}
 
 		void WatchMap()

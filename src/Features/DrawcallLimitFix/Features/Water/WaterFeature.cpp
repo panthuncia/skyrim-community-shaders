@@ -19,19 +19,17 @@ namespace DCLF::Features::Water
 		{
 			// The scene side does not need graph mode. What it does not claim, the batch hooks below compute and draw.
 			WaterScene::Install(a_context);
-			// The water program family, its deferred ranges and their epochs need the port, so only with the scene side on.
-			if (WaterScene::On()) {
-				Indirect::Register(a_context);
-				Indirect::RegisterEpochs(a_context);
-			}
+			// The water program family, its deferred ranges and their epochs.
+			Indirect::Register(a_context);
+			Indirect::RegisterEpochs(a_context);
 			if (!Enabled())
 				return;
 			const bool hooked = InstallHooks();
 			logger::info("[DCLF] water: on (graph mode): the engine's water batches are drawn at the EngineDraws anchor (mask and surface)");
-			// The batch hooks trigger the water epochs, so only then may the port claim water (CS_DCLF_WATER=2).
-			if (hooked && WaterScene::Claims()) {
+			// The batch hooks trigger the water epochs, so only then may the port claim water.
+			if (hooked) {
 				Indirect::SetDrawer(true);
-				logger::info("[DCLF] water: CS_DCLF_WATER=2: plain water is claimed and drawn by the water.mask and water.surface epochs");
+				logger::info("[DCLF] water: plain water is claimed and drawn by the water.mask and water.surface epochs");
 			}
 		}
 

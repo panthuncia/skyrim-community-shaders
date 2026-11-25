@@ -207,7 +207,7 @@ private:
 	VkSemaphore completionTimeline = VK_NULL_HANDLE;
 	uint64_t lastTimelineValue = 0;
 	std::vector<uint64_t> slotTimelineValues;
-	/// dxvkEnqueueInteropSubmission, when this DXVK build has it (and CS_UPSCALE_SUBMIT is not "direct").
+	/// dxvkEnqueueInteropSubmission, when this DXVK build has it.
 	PFN_dxvkEnqueueInteropSubmission enqueueSubmission = nullptr;
 	std::atomic<DWORD> streamThread{ 0 };
 	/// Set on DXVK's submission thread when an enqueued submission failed; the next BeginFrameCommandBuffer quarantines

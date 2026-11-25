@@ -371,16 +371,6 @@
 			"description": "0: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue; unset: on in guest mode, off in native mode (1 turns it on there)"
 		},
 		{
-			"name": "CS_DCLF_BILLBOARD_PARTICLES",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on (T7f item 7): particle systems under NiBillboardNodes (the magic hands' fire cores and embers) drawn by DCLF's particle path like any other (their world and particles are their last update's); 0 they stay the engine's (billboard)"
-		},
-		{
 			"name": "CS_DCLF_CAPTURE",
 			"key": "",
 			"type": "string",
@@ -435,26 +425,6 @@
 			"description": "off|frustum|occlusion (default): GPU culling, the live toggle's seed"
 		},
 		{
-			"name": "CS_DCLF_EFFECT_CLOUD_LIGHT",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on: effect meshes with kEffectLighting and kCloudLOD (lit by the cloud light, not the sun) drawn by DCLF with the cloud light's colour as a frame row; 0 they stay native (cloud-lighting)"
-		},
-		{
-			"name": "CS_DCLF_EFFECT_FALLOFF",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on: effect meshes with Falloff and no blending alpha property (the engine's hint 1, unblended while their alpha is one) drawn by DCLF's forward epoch unblended, sorted with the blended objects; 0 they stay native (effect-opaque)"
-		},
-		{
 			"name": "CS_DCLF_EFFECT_RIGID_SKINS",
 			"key": "",
 			"type": "bool",
@@ -465,36 +435,6 @@
 			"description": "1: effect meshes with a skin instance whose pass has no Skinned bit (the property without kSkinned: dog eyes) drawn by DCLF, each partition with the unskinned vertex stage and the geometry's world, as the engine draws them; 0 (default) they stay native (effect-variant (skinned))"
 		},
 		{
-			"name": "CS_DCLF_EMPTY_FADE_NODE",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on (T7f item 7): the engine's empty fade node (the BSFadeNode 0x14332a2a0 holds, which every BSShaderProperty starts with and the engine reads as none) is no fade root: such geometry (terrain, object LOD, some clutter) takes its entry's root; 0: it is listed as one fade root of all of them, outside the scene graph"
-		},
-		{
-			"name": "CS_DCLF_FIRST_PERSON_DECALS",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on (T7f item 7): a decal on a first-person entry (an effect's skinned blood decal on the arms, a weapon's BloodLighting) drawn by the first-person forward part as a forward object with its decal group's depth bias, test and blend; 0 it stays the engine's"
-		},
-		{
-			"name": "CS_DCLF_HEAP_FRAME_BLOCKS",
-			"key": "dclf.heap_frame_blocks",
-			"type": "bool",
-			"default": "0",
-			"choices": [],
-			"kind": "diagnostic",
-			"family": "dclf",
-			"description": "1: D3D12 pulled stages read the pass-wide frame blocks by heap index instead of a bound descriptor table (A/B for dclf-bound-constants.md)"
-		},
-		{
 			"name": "CS_DCLF_LATE_POSE",
 			"key": "",
 			"type": "string",
@@ -503,46 +443,6 @@
 			"kind": "test",
 			"family": "dclf",
 			"description": "0: the player's parts Improved Camera hides after the shadow maps are not looked for; 1: they are looked for in first person without the plugin too"
-		},
-		{
-			"name": "CS_DCLF_LOD_GATES",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "0: the engine's LOD swaps ungated (T6b5: by default an object or terrain LOD swap keeps the outgoing level shown, and the incoming hidden, until DCLF's claims cover the incoming)"
-		},
-		{
-			"name": "CS_DCLF_MAP_HOLD",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "dclf",
-			"description": ""
-		},
-		{
-			"name": "CS_DCLF_MASTER_PARTICLES",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4); 0 they stay the engine's"
-		},
-		{
-			"name": "CS_DCLF_OPAQUE_EFFECTS",
-			"key": "",
-			"type": "bool",
-			"default": "1",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "default on (T7f item 7): opaque BSEffectShaderProperty meshes (hint 0: no blending alpha property, no Falloff, depth tested and written; forge coals, slag) drawn by DCLF in the G-buffer with the DEFERRED effect variant, through the opaque decal group's fixed slots and its decal depth pass without the bias; 0 they stay the engine's (effect-opaque)"
 		},
 		{
 			"name": "CS_DCLF_PARITY",
@@ -905,16 +805,6 @@
 			"description": "1: DCLF's tree LOD colour draws write solid magenta, so screen captures find its pixels"
 		},
 		{
-			"name": "CS_DCLF_WATER",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "0: nothing of it is registered, and the batch hooks draw all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the batch hooks still draw them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs, the rest staying the batch hooks' (phases 2 and 3): in GPU-driven frames by the deferred range passes, in CPU-driven frames by the CPU pipeline's water sites; 3: as 2, but CPU-driven frames leave all water to the batch hooks"
-		},
-		{
 			"name": "CS_DISABLE_FEATURES",
 			"key": "cs.disable_features",
 			"type": "string",
@@ -963,16 +853,6 @@
 			"kind": "diagnostic",
 			"family": "cs",
 			"description": "1: a Tracy GPU zone on each feature's frame callbacks (a D3D11 query pair each, Tracy builds)"
-		},
-		{
-			"name": "CS_FG_DISPLAY_SUSPEND",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "cs",
-			"description": ""
 		},
 		{
 			"name": "CS_FORCE_FSR_FG",
@@ -1145,26 +1025,6 @@
 			"description": ""
 		},
 		{
-			"name": "CS_NO_D3DX_UPGRADE",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "cs",
-			"description": ""
-		},
-		{
-			"name": "CS_NO_PASS_PREFETCH",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "cs",
-			"description": ""
-		},
-		{
 			"name": "CS_NVPERF_BASELINE",
 			"key": "",
 			"type": "string",
@@ -1295,16 +1155,6 @@
 			"description": ""
 		},
 		{
-			"name": "CS_ORG_D3D12_INSTANCE_WORD",
-			"key": "org.d3d12_instance_word",
-			"type": "bool",
-			"default": "0",
-			"choices": [],
-			"kind": "other",
-			"family": "org",
-			"description": "1: D3D12 DCLF draws pass the first instance in a root constant per draw, as before Shader Model 6.8's SV_StartInstanceLocation"
-		},
-		{
 			"name": "CS_ORG_D3D12_SDK",
 			"key": "",
 			"type": "string",
@@ -1383,16 +1233,6 @@
 			"kind": "other",
 			"family": "org",
 			"description": "0: ImageSpace steps captured; 1: param steps also computed and compared with the capture; 2: param steps staged from the engine's params without its draw; 3: diagnostic, computed rows staged at the engine's draw (dclf-native-imagespace.md)"
-		},
-		{
-			"name": "CS_ORG_LLF_PARITY",
-			"key": "org.llf_parity",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "org",
-			"description": "1: the parity frame's D3D11 light culling against the render graph's, cluster by cluster"
 		},
 		{
 			"name": "CS_ORG_MISMATCH_FATAL",
@@ -1786,16 +1626,6 @@
 			"kind": "other",
 			"family": "cs",
 			"description": ""
-		},
-		{
-			"name": "CS_UPSCALE_SUBMIT",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "other",
-			"family": "cs",
-			"description": "direct: upscaling's ring submissions wait for DXVK's command stream"
 		},
 		{
 			"name": "CS_UPSCALE_UNFOCUSED",

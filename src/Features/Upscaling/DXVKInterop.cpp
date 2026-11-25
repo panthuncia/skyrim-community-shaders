@@ -3,7 +3,6 @@
 #include "DxvkExports.h"
 #include "Globals.h"
 #include "Profiler.h"
-#include "Utils/SwitchFile.h"
 #include "VkDriverTrace.h"
 
 #include <algorithm>
@@ -448,9 +447,7 @@ bool DXVKInterop::Initialize()
 	if (const auto& dxvk = DxvkExports::Get(); dxvk.Loaded()) {
 		synchronousPresentControlAvailable = dxvk.setSyncPresent != nullptr;
 		getPresenterSurfaceState = dxvk.getPresenterSurfaceState;
-		// CS_UPSCALE_SUBMIT=direct: every ring submission waits for DXVK's command stream (the previous behaviour).
-		if (Util::SwitchFile::Value("CS_UPSCALE_SUBMIT") != "direct")
-			enqueueSubmission = dxvk.enqueueInteropSubmission;
+		enqueueSubmission = dxvk.enqueueInteropSubmission;
 	}
 	logger::info("[DXVKInterop] Ring submissions from the render thread {}", enqueueSubmission ?
 		"go through DXVK's command stream (no wait)" : "flush and wait for DXVK's command stream");

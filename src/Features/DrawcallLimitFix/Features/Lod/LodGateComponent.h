@@ -120,7 +120,7 @@ namespace DCLF::Features::Lod::Gates
 	}
 
 	/** @brief Installs the engine hooks, then registers the rest only if they installed. */
-	void RegisterGates(Api::InstallContext& a_context, Api::SwitchId a_switch);
+	void RegisterGates(Api::InstallContext& a_context);
 
 	/** @brief Creates the GateState. */
 	std::shared_ptr<void> MakeState();

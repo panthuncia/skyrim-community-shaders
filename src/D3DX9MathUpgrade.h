@@ -18,8 +18,6 @@ namespace D3DX9MathUpgrade
 	 * D3DX edge-case semantics are preserved: D3DXMatrixInverse returns nullptr on a
 	 * singular matrix without touching the output, and the normalize functions return a
 	 * zero vector/plane for zero-length input.
-	 *
-	 * Disable with CS_NO_D3DX_UPGRADE=1 for A/B testing.
 	 */
 	void Install();
 

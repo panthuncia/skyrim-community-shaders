@@ -235,8 +235,7 @@ namespace DCLF::Scene
 			const auto* node = property ? static_cast<const RE::NiAVObject*>(property->fadeNode) : nullptr;
 			// The engine's shared empty fade node sits outside the scene graph and serves thousands of geometries.
 			// Treating it as a root would make FadeStateCS and the write-back write a static engine node.
-			static const bool emptyIsNone = Features::Fades::EmptyFadeNodeIsNone();
-			if (emptyIsNone && node == Engine::EmptyFadeNode())
+			if (node == Engine::EmptyFadeNode())
 				node = nullptr;
 			const auto live = LiveRootsOf(a_context);
 			auto& [family, roots] = live;

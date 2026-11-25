@@ -375,9 +375,8 @@ namespace DCLF::Scene
 		// An attach's capture pins every ancestor.
 		const auto* property = record->property ? mirror.Property(record->property) : nullptr;
 		keys.fadeNode = property ? property->fadeNode : nullptr;
-		// The engine's empty fade node sentinel is no root, unless the switch says otherwise.
-		static const bool emptyIsNone = RegisteredSwitchValue("CS_DCLF_EMPTY_FADE_NODE") != "0";
-		if (emptyIsNone && keys.fadeNode == Engine::EmptyFadeNode())
+		// The engine's empty fade node sentinel is no root.
+		if (keys.fadeNode == Engine::EmptyFadeNode())
 			keys.fadeNode = nullptr;
 		keys.propertyPin = PinOf(keys.property);
 		keys.layerPin = PinOf(keys.layer);

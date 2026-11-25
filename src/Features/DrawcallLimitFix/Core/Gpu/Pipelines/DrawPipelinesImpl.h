@@ -167,7 +167,7 @@ namespace DCLF
 					continue;
 				// D3D12's bound pass-wide blocks (FrameSource boundBlocks): register(b<ordinal>, space9 or space10).
 				if (binding.kind == Kind::ConstantBuffer && binding.set >= FrameSource::kBoundBlockSpace &&
-					binding.set < FrameSource::kBoundBlockSpace + FrameSource::kBoundBlockSpaces && binding.binding < kFrameBlocks && BoundFrameBlocks())
+					binding.set < FrameSource::kBoundBlockSpace + FrameSource::kBoundBlockSpaces && binding.binding < kFrameBlocks)
 					continue;
 				// DXIL builds declare VS_PerFrame at register(b12, space1) beside FrameBuffer's b12 (DCLFObjects.hlsli): the same block.
 				if (binding.kind == Kind::ConstantBuffer && !a_pixel && binding.set == 1 && binding.binding == kPerFrameVertexRegister)

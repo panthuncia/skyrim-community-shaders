@@ -47,7 +47,7 @@ namespace DCLF::Features::Effects
 			const bool opaqueEffects = Extensions::ObjectClassOn(Api::ObjectClass::OpaqueEffect);
 			a_draw.opaque = !a_draw.blending && !a_draw.decal;
 			// GetRenderPasses (0x1414bd890) makes an unblended Falloff pass hint 1, so it goes to the forward epoch drawn unblended.
-			if (a_draw.opaque && ported.falloff && (f & Bit(Flag::kFalloff)) && !ParticleGeometryType(a_leaf.Type()))
+			if (a_draw.opaque && (f & Bit(Flag::kFalloff)) && !ParticleGeometryType(a_leaf.Type()))
 				a_draw.opaque = false;
 			if (a_draw.opaque && (!opaqueEffects || !Extensions::ObjectClassOn(Api::ObjectClass::Decal) || (f & Bit(Flag::kFalloff)) || !(f & Bit(Flag::kZBufferTest)) ||
 									 !(f & Bit(Flag::kZBufferWrite)) || ParticleGeometryType(a_leaf.Type())))
@@ -203,8 +203,6 @@ namespace DCLF::Features::Effects
 			variants |= kEffectVariantWireframe;
 		// kCloudLOD swaps the sun for the cloud light (ShadowSceneNode +0x208). Point lights come from Light Limit Fix's clusters only.
 		if (f & Bit(Flag::kEffectLighting)) {
-			if ((f & Bit(Flag::kCloudLOD)) && !ported.cloudLighting)
-				variants |= kEffectVariantCloudLighting;
 			if (!Extensions::ClassifyInputOn(lightLimitFix))
 				variants |= kEffectVariantLightingNoLlf;
 		}
@@ -228,11 +226,6 @@ namespace DCLF::Features::Effects
 	void SetPortedVariants(const PortedVariants& a_variants)
 	{
 		ported = a_variants;
-	}
-
-	const PortedVariants& Ported()
-	{
-		return ported;
 	}
 
 	void NeedLightLimitFix(Api::InstallContext& a_context)

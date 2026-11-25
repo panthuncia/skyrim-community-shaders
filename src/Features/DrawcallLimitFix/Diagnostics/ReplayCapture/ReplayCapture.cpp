@@ -979,18 +979,16 @@ namespace DCLF::ReplayCapture
 				out += ++index == samplers.size() ? "\n" : ",\n";
 			}
 			out += "],\n\"pointers\":[],\n";
-			// With bound frame blocks, a CBV descriptor table after the constants: register(b0.., space9) from the heap slot in frame word kFramePushBlocks.
-			// One per bound space (FrameSource kBoundBlockSpaces), all over the same slots.
+			// The bound frame blocks: a CBV descriptor table after the constants, register(b0.., space9) from the heap slot in frame word
+			// kFramePushBlocks. One per bound space (FrameSource kBoundBlockSpaces), all over the same slots.
 			std::string tables;
-			if (BoundFrameBlocks()) {
-				for (std::uint32_t s = 0; s < FrameSource::kBoundBlockSpaces; ++s)
-					tables += fmt::format("{}{{\"space\":{},\"register\":0,\"count\":{},\"frameWord\":{}}}", s ? "," : "", FrameSource::kBoundBlockSpace + s, kFrameBlocks,
-						kFramePushBlocks);
-				tables = ",\"cbvTables\":[" + tables + "]";
-			}
+			for (std::uint32_t s = 0; s < FrameSource::kBoundBlockSpaces; ++s)
+				tables += fmt::format("{}{{\"space\":{},\"register\":0,\"count\":{},\"frameWord\":{}}}", s ? "," : "", FrameSource::kBoundBlockSpace + s, kFrameBlocks,
+					kFramePushBlocks);
+			tables = ",\"cbvTables\":[" + tables + "]";
 			out += fmt::format("\"rootSignature\":{{\"drawWords\":{},\"drawRegister\":{},\"frameWords\":{},\"frameRegister\":{}{}}},\n", kDrawPushWords, kDrawPushBinding,
 				kFramePushWords, kFramePushBinding, tables);
-			out += fmt::format("\"boundFrameBlocks\":{},\n", BoundFrameBlocks() ? "true" : "false");
+			out += "\"boundFrameBlocks\":true,\n";
 			out += fmt::format("\"commandSignature\":{{\"stride\":{},\"instanceConstantWord\":{}}},\n", sizeof(DrawSequence),
 				first.pass.instanceWord ? std::to_string(kDrawPushInstance) : std::string("null"));
 			if (first.indexPool.resource)
