@@ -131,7 +131,8 @@ read-only storage buffers there. So nothing was bound, and the colour stage paid
   pass-wide register a PushIndex range at set 0 with the FrameSource ordinals. That is 8 VS and 8 PS blocks, 16 push descriptors.
   Shadow layouts have no PushIndex range.
 
-**Switch.** `BASICRHI_VK_BOUND_UBO=0` keeps the heap storage buffers (read once at device creation). ORG's shared blocks follow it.
+**Switch.** `BASICRHI_VK_BOUND_UBO=0` kept the heap storage buffers (read once at device creation); ORG's shared blocks followed
+it. Deleted 2026-11-25 (perf2-native.md), with `ORG_BOUND_PUSH_TABLES`: only devices without push descriptors read them from the heap.
 
 **Log lines.**
 - Device: `descriptor-sets model: bound uniform buffers on: ... up to N per stage and M per layout`, or the reason it is off.
