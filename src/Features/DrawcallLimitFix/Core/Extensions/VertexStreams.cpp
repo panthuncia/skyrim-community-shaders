@@ -71,6 +71,7 @@ namespace DCLF::Extensions
 	std::uint32_t UploadVertexStream(const org::services::NamedVersions& a_adopted, std::span<const Api::VertexStreamRow> a_rows, const Draws::SceneBuffers& a_scene,
 		Draws::CommitUploads& a_uploads)
 	{
+		ZoneScopedN("CS.DCLF.UploadVertexStream");
 		const auto& entry = State().entry;
 		const auto& state = SceneResourcesStateOf(a_scene, entry.contribution.resources);
 		if (!entry.registered || !state || !a_scene.vertexStream)

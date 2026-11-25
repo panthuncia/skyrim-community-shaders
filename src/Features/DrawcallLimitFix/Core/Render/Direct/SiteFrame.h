@@ -190,8 +190,8 @@ namespace DCLF::Direct::detail
 		// The pool's first indices after the frame's first drawing commit. The recorder adds them per draw.
 		std::vector<std::uint32_t> poolFirsts;
 		bool poolFirstsTaken = false;
-		// Placement rows for the forward and refraction sort on the CS thread. Only those objects are written.
-		std::vector<BindlessPlacement> forwardRows;
+		// Sort rows for the forward and refraction sort on the CS thread, by object. Only those objects are written.
+		std::vector<ForwardSortRow> forwardRows;
 		// The main list's depth batches, which colour's object words come from, and the gate that dispatches colour culls.
 		std::unique_ptr<std::atomic<const CulledBatch*>[]> mainDepth;
 		std::size_t mainDepthCount = 0;

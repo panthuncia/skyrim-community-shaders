@@ -197,17 +197,20 @@ public:
 	/** @brief Draws the UI shown when this feature failed to load. */
 	virtual void DrawUnloadedUI();
 
+	// The default frame callbacks below note that they ran, so ForEachLoadedFeature skips a feature's empty callback from then on.
+	// An override must not call them.
+
 	/** @brief Per-frame work executed before the reflections pass. */
-	virtual void ReflectionsPrepass() {};
+	virtual void ReflectionsPrepass() { t_defaultCallbackRan = true; }
 
 	/** @brief Per-frame work executed before the main rendering pass. */
-	virtual void Prepass() {}
+	virtual void Prepass() { t_defaultCallbackRan = true; }
 
 	/** @brief Per-frame work after every feature's Prepass, so it sees the depth they wrote. */
-	virtual void PostPrepass() {}
+	virtual void PostPrepass() { t_defaultCallbackRan = true; }
 
 	/** @brief Per-frame work executed before Prepass, earliest per-frame hook. */
-	virtual void EarlyPrepass() {}
+	virtual void EarlyPrepass() { t_defaultCallbackRan = true; }
 
 	/**
 	 * @brief Called during disk-cache shader loading to generate additional shader permutations.
@@ -357,12 +360,17 @@ public:
 	// can emit GPU timer zones without pulling in State headers here.
 #ifdef TRACY_ENABLE
 	inline static TracyD3D11Ctx s_tracyCtx = nullptr;
+	// Per-feature GPU zones are a D3D11 query pair each, so they are opt-in (CS_FEATURE_GPU_ZONES=1).
+	inline static bool s_tracyGpuZones = false;
 
-	/** @brief Sets the Tracy GPU context used by ForEachLoadedFeature for GPU profiling zones. */
-	static void SetTracyCtx(TracyD3D11Ctx ctx) noexcept { s_tracyCtx = ctx; }
+	/** @brief Sets the Tracy GPU context and whether ForEachLoadedFeature puts a GPU zone on each feature. */
+	static void SetTracyCtx(TracyD3D11Ctx ctx, bool a_gpuZones) noexcept
+	{
+		s_tracyCtx = ctx;
+		s_tracyGpuZones = a_gpuZones;
+	}
 #endif
 
-#ifdef TRACY_ENABLE
 	/** @brief Writes "<a_shortName>::<a_method>" into a_buffer without allocating, truncating to fit; returns a_buffer. */
 	static const char* FormatZoneName(std::span<char> a_buffer, std::string_view a_shortName, std::string_view a_method) noexcept
 	{
@@ -378,14 +386,17 @@ public:
 		a_buffer[length] = '\0';
 		return a_buffer.data();
 	}
-#endif
+
 	// Debugger events (D3D11 BeginEvent/EndEvent) around the GPU-emitting callbacks below. Injected by
-	// State, like the Tracy context, and only while events are wanted (a capture tool is attached, or
-	// Frame Annotations is on), so the names are not built otherwise.
-	using GpuEventBegin = void (*)(std::string_view);
+	// State, like the Tracy context. Begin returns whether it began an event, which it does only while
+	// events are wanted (a capture tool is attached, or Frame Annotations is on). A begun event also
+	// opens a Tracy zone of the same name while Tracy records.
+	using GpuEventBegin = bool (*)(std::string_view);
 	using GpuEventEnd = void (*)();
 	inline static GpuEventBegin s_beginGpuEvent = nullptr;
 	inline static GpuEventEnd s_endGpuEvent = nullptr;
+
+	inline static thread_local bool t_defaultCallbackRan = false;
 
 	/** @brief Sets (or with nulls, clears) the debugger event callbacks used by ForEachLoadedFeature. */
 	static void SetGpuEventCallbacks(GpuEventBegin a_begin, GpuEventEnd a_end) noexcept
@@ -398,43 +409,46 @@ public:
 	 * @brief Invokes a callback on every loaded feature with optional Tracy profiling.
 	 * @param methodName Label for the Tracy zone (e.g. "Reset", "Prepass").
 	 * @param callback Callable receiving a Feature* for each loaded feature.
-	 * @param emitGpuZone When true, also emits a GPU timer zone (Tracy) and a debugger event (Nsight,
-	 * RenderDoc, PIX) named "<feature>::<method>".
+	 * @param emitGpuZone When true, also emits a debugger event (Nsight, RenderDoc, PIX) named
+	 * "<feature>::<method>", and a Tracy GPU zone when CS_FEATURE_GPU_ZONES=1. Only for the frame callbacks, on the render thread:
+	 * a feature whose callback is the empty default is skipped after its first call, with no event or zone.
 	 */
 	template <typename Func>
 	static inline void ForEachLoadedFeature(std::string_view methodName, Func&& callback, bool emitGpuZone = false)
 	{
 		const auto& features = GetFeatureList();
 		const auto& owners = GetVramOwners();
+		// One per call site, since each passes its own lambda type.
+		static std::vector<std::uint8_t> s_defaultOnly;
+		if (emitGpuZone && s_defaultOnly.size() != features.size())
+			s_defaultOnly.assign(features.size(), 0);
 		for (std::size_t i = 0; i < features.size(); ++i) {
 			auto* feature = features[i];
-			if (feature->loaded) {
-				// What DXVK creates during the callback is the feature's memory (VRAM attribution).
-				Vram::OwnerScope vramScope(owners[i]);
-				const bool gpuEvent = emitGpuZone && s_beginGpuEvent && s_endGpuEvent;
-				if (gpuEvent)
-					s_beginGpuEvent(std::format("{}::{}", feature->GetShortName(), methodName));
+			if (!feature->loaded || (emitGpuZone && s_defaultOnly[i]))
+				continue;
+			// What DXVK creates during the callback is the feature's memory (VRAM attribution).
+			Vram::OwnerScope vramScope(owners[i]);
 #ifdef TRACY_ENABLE
-				// Zones are only worth their name lookup while a Tracy client is recording.
-				if (!TracyIsConnected) {
-					callback(feature);
-				} else {
-					char zoneNameBuffer[128];
-					const auto* zoneName = FormatZoneName(zoneNameBuffer, feature->GetShortName(), methodName);
-					ZoneTransientN(___tracy_feature_zone, zoneName, true);
-					if (emitGpuZone) {
-						TracyD3D11ZoneTransientS(s_tracyCtx, ___tracy_d3d11_feature_zone, zoneName, 0, s_tracyCtx != nullptr);
-						callback(feature);
-					} else {
-						callback(feature);
-					}
-				}
+			const bool tracy = TracyIsConnected;
 #else
-				callback(feature);
+			constexpr bool tracy = false;
 #endif
-				if (gpuEvent)
-					s_endGpuEvent();
-			}
+			const bool wantEvent = emitGpuZone && s_beginGpuEvent && s_endGpuEvent;
+			char name[128];
+			if (wantEvent || tracy)
+				FormatZoneName(name, feature->GetShortName(), methodName);
+			const bool gpuEvent = wantEvent && s_beginGpuEvent(name);
+#ifdef TRACY_ENABLE
+			// The debugger event already opened a zone of this name.
+			ZoneTransientN(___tracy_feature_zone, name, tracy && !gpuEvent);
+			TracyD3D11ZoneTransientS(s_tracyCtx, ___tracy_d3d11_feature_zone, name, 0, tracy && emitGpuZone && s_tracyGpuZones && s_tracyCtx != nullptr);
+#endif
+			t_defaultCallbackRan = false;
+			callback(feature);
+			if (emitGpuZone && t_defaultCallbackRan)
+				s_defaultOnly[i] = 1;
+			if (gpuEvent)
+				s_endGpuEvent();
 		}
 	}
 };

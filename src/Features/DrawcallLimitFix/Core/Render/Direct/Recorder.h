@@ -35,6 +35,16 @@ namespace DCLF::Direct
 {
 	using CullArena = org::services::BumpArena;
 
+	/** @brief The two fields of an object's placement row the forward sort reads, copied per frame for the sort on the CS thread. */
+	struct ForwardSortRow
+	{
+		float forwardSort[4];  // BindlessPlacement::forwardSort
+		float bound[4];        // BindlessPlacement::bound
+	};
+
+	/** @brief a_row's sort fields. */
+	ForwardSortRow ForwardSortRowOf(const BindlessPlacement& a_row);
+
 	/**
 	 * @brief One draw in a frame slot's draw buffer, also the stride of an indirect run. D3D12's SV_InstanceID does not count
 	 * the first instance, so below Shader Model 6.8 D3D12's signature writes the instance word into kDrawPushInstance first.
@@ -110,8 +120,8 @@ namespace DCLF::Direct
 		RenderGraph::BufferRef animatedRowsRef;
 		// Terrain Blending's depth offset on every draw, for a terrain group 1 twin's recording.
 		bool offsetDepth = false;
-		// For each forward draw's sort key, as BuildDrawsCS's StageForwardKey makes it.
-		std::span<const BindlessPlacement> placements;
+		// For each forward draw's sort key, as BuildDrawsCS's StageForwardKey makes it. Indexed by object.
+		std::span<const ForwardSortRow> sortRows;
 		std::array<float, 16> viewProj{};
 		std::span<const FamilyDraw> families;
 	};
@@ -190,7 +200,7 @@ namespace DCLF::Direct
 	};
 
 	/**
-	 * @brief Any thread. RecordForward's draws in its order, into a_out, for RecordStagedForward. Reads a_bindings' placements,
+	 * @brief Any thread. RecordForward's draws in its order, into a_out, for RecordStagedForward. Reads a_bindings' sort rows,
 	 * view-projection and pool firsts, so those must be final.
 	 */
 	void StageForward(const ViewBatchSet& a_set, const RecordBindings& a_bindings, std::span<const CulledBatch* const> a_batches, std::vector<StagedForwardDraw>& a_out);

@@ -1416,7 +1416,7 @@ void State::SetupResources()
 
 	tracyCtx = TracyD3D11Context(globals::d3d::device, globals::d3d::context);
 #ifdef TRACY_ENABLE
-	Feature::SetTracyCtx(tracyCtx);
+	Feature::SetTracyCtx(tracyCtx, Switches::On("CS_FEATURE_GPU_ZONES"));
 #endif
 
 	globals::profiler->Initialize(globals::d3d::device, globals::d3d::context);
@@ -1441,13 +1441,12 @@ void State::SetupResources()
 		});
 	Feature::SetGpuEventCallbacks(
 		[](std::string_view name) {
-			if (globals::state->debuggerEvents || globals::state->frameAnnotations)
-				globals::state->BeginPerfEvent(name);
+			if (!globals::state->debuggerEvents && !globals::state->frameAnnotations)
+				return false;
+			globals::state->BeginPerfEvent(name);
+			return true;
 		},
-		[] {
-			if (globals::state->debuggerEvents || globals::state->frameAnnotations)
-				globals::state->EndPerfEvent();
-		});
+		[] { globals::state->EndPerfEvent(); });
 }
 
 void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred)
@@ -1603,7 +1602,12 @@ void State::BeginPerfEvent(std::string_view title)
 	const TracyCZoneCtx ctx = ___tracy_emit_zone_begin_alloc(srcloc, true);
 	s_tracyPerfZones.push_back(ctx);
 #endif
-	pPerf->BeginEvent(std::wstring(title.begin(), title.end()).c_str());
+	// Widened on the stack: this runs per feature callback while debugger events are on.
+	std::array<wchar_t, 256> wide;
+	const auto length = std::min(title.size(), wide.size() - 1);
+	std::copy_n(title.begin(), length, wide.begin());
+	wide[length] = L'\0';
+	pPerf->BeginEvent(wide.data());
 	if (GpuCounters::RangesActive())
 		GpuCounters::PushRange(title);
 	GpuEventTimers::BeginEvent(title);

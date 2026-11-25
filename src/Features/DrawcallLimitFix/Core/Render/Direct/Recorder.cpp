@@ -610,9 +610,17 @@ namespace DCLF::Direct
 		CountDrawn(a_context, a_context.drawn - before);
 	}
 
+	ForwardSortRow ForwardSortRowOf(const BindlessPlacement& a_row)
+	{
+		ForwardSortRow row;
+		std::memcpy(row.forwardSort, a_row.forwardSort, sizeof(row.forwardSort));
+		std::memcpy(row.bound, a_row.bound, sizeof(row.bound));
+		return row;
+	}
+
 	namespace
 	{
-		/** @brief The forward list's draws with their sort keys, sorted. Reads a_bindings' placements, view-projection and pool firsts. */
+		/** @brief The forward list's draws with their sort keys, sorted. Reads a_bindings' sort rows, view-projection and pool firsts. */
 		void SortForward(const ViewBatchSet& a_set, const RecordBindings& a_bindings, std::span<const CulledBatch* const> a_batches, std::vector<ForwardDraw>& a_draws)
 		{
 			const auto& m = a_bindings.viewProj;
@@ -630,8 +638,8 @@ namespace DCLF::Direct
 					draw.bucket = batch.pipelineBucket ? batch.pipelineBucket[lane] : 0u;
 					const std::uint32_t laneWord = culled->objectWords[k];
 					const std::uint32_t mask = MaskOf(*culled, k);
-					if (object < a_bindings.placements.size()) {
-						const BindlessPlacement& placement = a_bindings.placements[object];
+					if (object < a_bindings.sortRows.size()) {
+						const ForwardSortRow& placement = a_bindings.sortRows[object];
 						draw.ordinal = std::bit_cast<std::uint32_t>(placement.forwardSort[3]);
 						const float* centre = draw.ordinal != 0 ? placement.forwardSort : placement.bound;
 						const float clipW = m[12] * centre[0] + m[13] * centre[1] + m[14] * centre[2] + m[15];

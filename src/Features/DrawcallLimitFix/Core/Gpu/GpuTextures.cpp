@@ -17,6 +17,7 @@
 #include "Utils/D3D.h"
 
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Relocation/DxvkSource.h"
@@ -907,8 +908,39 @@ namespace DCLF
 	GpuTextures::Binding GpuTextures::Resolve(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, ResolveFailure* a_failure,
 		std::source_location a_where, bool a_pinFull)
 	{
+		ResolveFailure ignored = ResolveFailure::None;
+		auto& failure = a_failure ? *a_failure : ignored;
+		failure = ResolveFailure::None;
+		if (!a_view)
+			return NullBinding();
+		// A frame's resolves mostly repeat (the reflection faces, the sky's layers, a family's shared textures), so a ready binding is
+		// kept for the rest of the frame. An entry holds a reference to its view, so a freed view's address cannot name another texture
+		// within the frame. Entries are per call site, so the undeclared access check still sees each site's first resolve.
+		struct FrameCached
+		{
+			winrt::com_ptr<ID3D11ShaderResourceView> view;
+			const char* file = nullptr;
+			std::uint_least32_t line = 0;
+			bool pinFull = false;
+			Binding binding;
+		};
+		thread_local std::vector<FrameCached> t_frameCache;
+		thread_local std::uint64_t t_cacheFrame = ~0ull;
+		thread_local std::uint32_t t_cacheGeneration = ~0u;
+		const std::uint64_t frame = ::RenderGraph::Frame::Driver::Current().frame;
+		if (t_cacheFrame != frame || t_cacheGeneration != Generation()) {
+			t_frameCache.clear();
+			t_cacheFrame = frame;
+			t_cacheGeneration = Generation();
+		}
+		for (const auto& entry : t_frameCache)
+			if (entry.view.get() == a_view && entry.line == a_where.line() && entry.file == a_where.file_name() && entry.pinFull == a_pinFull &&
+				!Superseded(entry.binding.owner.get()))
+				return entry.binding;
+		// A cached answer has no zone, so a capture counts only the resolves that do work.
 		DCLF_ZONE("CS.DCLF.Texture.ResolveBinding");
-		// The caller, so a capture shows who resolves: "Grass/GrassTables.cpp:158".
+		// The caller, so a capture shows who resolves: "Grass/GrassTables.cpp" and its line as the zone's value. Not formatted, since
+		// this runs a few dozen times a frame.
 		if (TracyIsConnected) {
 			std::string_view file = a_where.file_name();
 			const auto slash = file.find_last_of("/\\");
@@ -916,15 +948,20 @@ namespace DCLF
 				const auto parent = file.find_last_of("/\\", slash - 1);
 				file.remove_prefix(parent == std::string_view::npos ? 0 : parent + 1);
 			}
-			char text[160];
-			const auto written = fmt::format_to_n(text, sizeof(text), "{}:{}", file, a_where.line());
-			ZoneText(text, written.size < sizeof(text) ? written.size : sizeof(text));
+			ZoneText(file.data(), file.size());
+			ZoneValue(a_where.line());
 		}
-		ResolveFailure ignored = ResolveFailure::None;
-		auto& failure = a_failure ? *a_failure : ignored;
-		failure = ResolveFailure::None;
-		if (!a_view)
-			return NullBinding();
+		const auto keep = [&](const Binding& a_binding) {
+			if (a_binding.index != kInvalid && !a_binding.pending && t_frameCache.size() < 256) {
+				auto& entry = t_frameCache.emplace_back();
+				entry.view.copy_from(a_view);
+				entry.file = a_where.file_name();
+				entry.line = a_where.line();
+				entry.pinFull = a_pinFull;
+				entry.binding = a_binding;
+			}
+			return a_binding;
+		};
 		// A second import means no pass declared what the index reads.
 		if (RenderGraph::UndeclaredAccess::On())
 			RenderGraph::UndeclaredAccess::NoteView(a_view, SourceName(a_sourceTag), a_where);
@@ -949,7 +986,7 @@ namespace DCLF
 				failure = ResolveFailure::Rejected;
 				return binding;
 			case Impl::Found::Ready:
-				return binding;
+				return keep(binding);
 			}
 		}
 		// Imports are legal only inside an epoch. Do not cache that as a rejection, since the view may import fine at the next epoch.
@@ -988,7 +1025,7 @@ namespace DCLF
 				failure = ResolveFailure::Rejected;
 				return { kInvalid, {} };
 			}
-			return { entry->index, entry };
+			return keep({ entry->index, entry });
 		}
 	}
 

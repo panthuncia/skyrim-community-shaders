@@ -130,12 +130,12 @@ namespace DCLF::Direct::detail
 		}
 
 		/**
-		 * @brief First person's forward placement rows per frame slot, for its sort on the CS thread. Grown, never shrunk,
+		 * @brief First person's forward sort rows per frame slot, for its sort on the CS thread. Grown, never shrunk,
 		 * and rewritten only once the slot's last frame retired.
 		 */
-		std::vector<BindlessPlacement>& FirstPersonRowsOf(const FrameSlot& a_slot)
+		std::vector<ForwardSortRow>& FirstPersonRowsOf(const FrameSlot& a_slot)
 		{
-			static std::vector<std::vector<BindlessPlacement>> rows;
+			static std::vector<std::vector<ForwardSortRow>> rows;
 			if (rows.size() <= a_slot.index)
 				rows.resize(a_slot.index + 1);
 			return rows[a_slot.index];
@@ -272,7 +272,7 @@ namespace DCLF::Direct::detail
 				b.samplerHeap = shape.samplerHeap;
 				b.main = a_view.pipelines.get();
 				b.families = {};
-				b.placements = {};
+				b.sortRows = {};
 				b.offsetDepth = false;
 				if (face.face < shape.push.size())
 					b.framePush = shape.push[face.face];
@@ -572,8 +572,8 @@ namespace DCLF::Direct
 				for (const auto& batch : slot->set->List(ViewType::FirstPerson))
 					for (std::uint32_t lane = 0; lane < batch.count; ++lane)
 						if (const std::uint32_t object = batch.object[lane]; (!batch.flags || (batch.flags[lane] & kLaneForward)) && object < rows->size())
-							kept[object] = (*rows)[object];
-				state->forward.placements = kept;
+							kept[object] = ForwardSortRowOf((*rows)[object]);
+				state->forward.sortRows = kept;
 			}
 		}
 		// Its view is the depth site's, for the drawn counts and the callback's drain.

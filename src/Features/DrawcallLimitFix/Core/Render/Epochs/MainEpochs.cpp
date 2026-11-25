@@ -136,19 +136,26 @@ namespace DCLF
 		}
 		// Held until this execution retires, since its draws read what the shared commit bound.
 		const std::array<const MainPayload*, 1> payloads{ shared };
-		auto owners = impl->EpochOwners(payloads);
+		auto owners = [&] {
+			DCLF_ZONE("CS.DCLF.Shared.Owners");
+			return impl->EpochOwners(payloads);
+		}();
 		if (!owners) {
 			++f.failed;
 			return {};
 		}
 		SharedEpochResult result{};
 		if (a_submit.prepare) {
+			DCLF_ZONE("CS.DCLF.Shared.Prepare");
 			result.optional = a_submit.prepare(a_submit.context, impl->resources.get(), shape.get());
 		}
 		bool drawn = true;
 		// In the GPU-driven graph, the CPU draws the forward family. Its run is handed to the epoch's late pass ahead of its execution.
 		const bool cpuForwardHandOff = a_submit.forwardSite && !revision.direct;
-		if (cpuForwardHandOff && !Direct::ForwardReached(result.optional)) {
+		if (cpuForwardHandOff && ![&] {
+				DCLF_ZONE("CS.DCLF.Shared.ForwardReached");
+				return Direct::ForwardReached(result.optional);
+			}()) {
 			++f.noSharedPayload;
 			return {};
 		}
