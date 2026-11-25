@@ -1,6 +1,7 @@
 # Native post chain
 
-Status: 2026-11-25, families 0-4 built and native by default on AE (see "Milestone 1, as built"); slots 1, 3 and 5 native ("Slot effects, as built"). Families 5-8 are design only. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`) and the
+Status: 2026-11-25, families 0-4 built and the only path in graph modes, on SE and AE (see "Milestone 1, as built" and "Round 2,
+as built"); every end-of-frame slot CS draws is native ("Slot effects, as built"). Families 5-8 are design only. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`) and the
 post chain hooks (`src/RenderGraph/Frame/PostChain.cpp`). Follows [dclf-native-imagespace.md](./dclf-native-imagespace.md) (steps
 2a-2c, the formulas in "Where the values come from"). Background: [p5/imagespace.md](../p5/imagespace.md),
 [imagespace-remaining-ports.md](./imagespace-remaining-ports.md).
@@ -304,7 +305,7 @@ Each family goes observe first, then native, behind the switch below. Earlier fa
 7. **Start water**: displacement and flow copies. Ties into the water family's port.
 8. **Lens flares**, when ported, empty most of read point B.
 
-## Switch and parity
+## Switch and parity (historical: the switch and observe mode were deleted on 2026-11-25, see "Round 2, as built")
 
 `CS_ORG_POST_NATIVE`, a family list (`hdr,eof,composites,post,sao,ssr,snow,waterblend,water`), with a mode:
 
@@ -451,3 +452,27 @@ Write-back: refraction's drawn flags, the underwater mask flag and its rt12 clea
 Compatibility's selector is written into the rows as its hooks write it. A foreign hook on a slot's Render or UpdateParams keeps that
 slot on RenderEffect. Observe compares the slots' rows and the compute steps' CS b0 and thread groups: 0 differences. SE has every
 id paired (perf-post-slots.md) but runs on the engine unless `CS_ORG_POST_NATIVE` is set. Details: [perf-post-slots.md](./perf-post-slots.md).
+
+
+## Round 2, as built (2026-11-25, perf2/post)
+
+- **No switch.** `CS_ORG_POST_NATIVE`, its engine (0) and observe (1) modes and the family list are deleted, with the observe
+  helpers (predictions, row and state comparisons). `CS_ORG_IMAGESPACE_NATIVE` and its capture, observe and diagnostic modes are
+  deleted too. A family still runs the engine's container where CS does not draw the frame: a foreign hook (decision 4), the world
+  map or FXAA (decision 7), SIL or the image-based flares, or no ImageSpace manager yet. A slot another mod hooks still goes
+  through the engine's RenderEffect.
+- **SE as AE.** SE runs the native chain and CS's jitter by default. Every SE pair was re-checked in Ghidra (perf2-post.md);
+  untested at runtime.
+- **Slots 6 and 7 native** (`FullBlurSteps`, `GetHitSteps`, `SlotBlurStep` in `NativePost.inl`). The full-screen blur (AE 108563 /
+  108564): the downsample into rt22, the blur of radius ceil(manager +0x128) (at least 2 while Main::RenderWorld saw the camera
+  move: AE 415441, 415422, 414598) between rt22 and rt26, and the upsample back, which alpha blends below an amount of 1. Get hit
+  (AE 108553 through the base Render): the copy into the get-hit buffer, effect 10's blur twice (radius hand-off 2.0), and the
+  double vision, whose row 1 is (sin, cos) of the timer (AE 390953) times 0.0017453 times manager +0x12C. The blurs' rows are
+  ImageSpaceEffectBlur::UpdateParams (AE 108558) with the parent's radius hand-off. Legacy Graphics Compatibility's full-screen blur
+  adapter (eleven entries) is replicated: the blurs take the effect's flag and the upsample's row 0 x is 1. Write-back: the alpha
+  blend mode after a blended upsample, and effect 10's flag after get hit (the base Render leaves it there).
+  Before the observe mode was deleted it compared these steps against the engine's: 8.7k steps, 0 differed (p2-post-obs1).
+- **Reviewed against Ghidra, not observed:** the underwater depth of field (DoF UpdateParams AE 107388 and its override
+  0x1414e5610) matches `DofSteps`, except that the engine leaves the masked composite's rows 4-7 as the last override frame wrote
+  them when mode 2 draws it, where CS writes zeros. The LDR slot routing matches RenderEndOfFrameEffects (AE 105674) step for step.
+

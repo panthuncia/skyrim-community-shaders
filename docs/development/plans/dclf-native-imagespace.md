@@ -1,7 +1,8 @@
 # ImageSpace without draw capture
 
-Status: 2026-11-24, cheap cuts 1-2 done; steps 2a-2b (param, explicit and compute steps native,
-`CS_ORG_IMAGESPACE_NATIVE=2` default) done; 2e done. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
+Status: 2026-11-24, cheap cuts 1-2 done; steps 2a-2b (param, explicit and compute steps native) done; 2e done. 2026-11-25
+(perf2-post): the switch `CS_ORG_IMAGESPACE_NATIVE` and its capture, observe and diagnostic modes are deleted; native staging is
+the only path, and a step `NativeStepNow` declines (menus, image-based flares, geometry steps outside the chain) stays the capture's. Owner: the ImageSpace shim (`src/RenderGraph/Engine/ImageSpace/`). Background:
 [p5/imagespace.md](../p5/imagespace.md) (the RE and the chain), [imagespace-remaining-ports.md](./imagespace-remaining-ports.md)
 (the last effects), [dclf-native-sky.md](./dclf-native-sky.md) (the pattern this follows).
 
@@ -356,7 +357,7 @@ This is still the engine's per-effect CPU code, so it is a stepping stone, not t
 the full port (`RenderPassImmediately`, the capture, the state apply), so it is worth landing first, and it is the reference the
 observe mode compares the native rows against.
 
-## Switch and parity
+## Switch and parity (historical: the switch was deleted on 2026-11-25)
 
 `CS_ORG_IMAGESPACE_NATIVE`, per family where it helps (HDR, SAO, SSR, composites, chain, water):
 

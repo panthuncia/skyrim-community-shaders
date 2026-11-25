@@ -1268,15 +1268,6 @@ std::uint16_t IblfVariantNow(Effects::ImageSpaceEffectEnum a_effect)
 		const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 		input = InputOfView(compute ? shadow.CSTexture[0] : shadow.PSTexture[0]);
 		output = compute ? TargetOfUav(shadow.CSUAV[0]) : static_cast<std::int32_t>(shadow.renderTargets[0]);
-		if (native.observingTextures && native.shader && !compute) {
-			std::int32_t listedInput = -1, listedOutput = -1;
-			NativeSteps::TextureTargets(*native.shader, listedInput, listedOutput);
-			if (listedInput != input || listedOutput != output) {
-				++native.differed;
-				NativeSteps::Differences().Report(fmt::format("{}'s targets", kEffects[static_cast<std::size_t>(EffectIndexOf(a_effect))].effectName),
-					fmt::format("texture list t0 {} into {}, bound t0 {} into {}", listedInput, listedOutput, input, output));
-			}
-		}
 	}
 	const auto plain = [](std::int32_t a_name) { return a_name >= 0 && a_name < 0x7f; };
 	if (!plain(input) || !plain(output))
@@ -1402,9 +1393,6 @@ ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std
 	return ChainDraw::Step;
 }
 
-/** @brief Observe mode of the native post chain (NativePost.inl): checks an engine step against the predicted one. Render owner. */
-void ObservePostStep(const StepKey& a_key, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups);
-
 bool StageChainKey(StepKey a_key, std::uint8_t a_group, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups);
 
 /**
@@ -1426,7 +1414,6 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			fmt::format("{} in the world post chain{} has no CS pass; it draws nothing", kEffects[a_effect].effectName, chain.inHdr ? " (the HDR effect)" : ""));
 		return true;
 	}
-	ObservePostStep(key, a_effect, a_compute, a_groups);
 	return StageChainKey(key, group, a_effect, a_compute, a_groups);
 }
 
@@ -1638,47 +1625,6 @@ void StageLensFlareSprite(PostClient& a_client, std::uint32_t a_entry, const Spe
 		view = shadow.PSTexture[0];
 		const auto bound = view ? InputOfView(view) : -1;
 		input = bound >= 0 && !(bound & kDefaultTextureInput) ? bound : -1;
-		if (native.observing && native.effect == IS().current->effect) {
-			native.observing = false;
-			++native.compared;
-			std::string differences;
-			const auto bytes = Constants::Bytes(*vertex);
-			const auto& rows = native.sprite.vertex;
-			for (std::uint32_t row = 0; row < rows.count; ++row) {
-				const auto at = rows.offsets[row] * 4u;
-				if (at + 16 > bytes.size() || std::memcmp(rows.bytes.data() + at, bytes.data() + at, 16) != 0) {
-					float computed[4]{}, captured[4]{};
-					std::memcpy(computed, rows.bytes.data() + at, 16);
-					if (at + 16 <= bytes.size())
-						std::memcpy(captured, bytes.data() + at, 16);
-					differences += fmt::format(" vs c{} ({} {} {} {}) vs ({} {} {} {})", at / 16, computed[0], computed[1], computed[2], computed[3], captured[0], captured[1],
-						captured[2], captured[3]);
-				}
-			}
-			if (native.sprite.shape != state.drawShape || state.drawStart != 0 || native.sprite.triangles != state.drawTriangles ||
-				topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
-				differences += fmt::format(" quad {} 0 {} vs {} {} {} topology {}", native.sprite.shape, native.sprite.triangles, state.drawShape, state.drawStart,
-					state.drawTriangles, topology);
-			if (native.sprite.target != input || (input < 0 && native.sprite.view != Tripwire::Unwrap(view)))
-				differences += fmt::format(" texture target {} view {} vs target {} view {}", native.sprite.target, static_cast<const void*>(native.sprite.view), input,
-					static_cast<const void*>(Tripwire::Unwrap(view)));
-			const auto pixelBytes = Constants::Bytes(*pixel);
-			for (std::uint32_t row = 0; row < native.rows.count; ++row) {
-				const auto at = native.rows.offsets[row] * 4u;
-				if (at + 16 > pixelBytes.size() || std::memcmp(native.rows.bytes.data() + at, pixelBytes.data() + at, 16) != 0) {
-					float computed[4]{}, captured[4]{};
-					std::memcpy(computed, native.rows.bytes.data() + at, 16);
-					if (at + 16 <= pixelBytes.size())
-						std::memcpy(captured, pixelBytes.data() + at, 16);
-					differences += fmt::format(" pixel c{} (row {}) ({} {} {} {}) vs ({} {} {} {})", at / 16, row, computed[0], computed[1], computed[2], computed[3], captured[0],
-						captured[1], captured[2], captured[3]);
-				}
-			}
-			if (!differences.empty()) {
-				++native.differed;
-				NativeSteps::Differences().Report("ISLensFlare sprite", fmt::format("computed vs captured:{}", differences));
-			}
-		}
 	}
 	DCLF::Family::Geometry geometry;
 	auto owners = std::make_shared<DCLF::Family::Owners>();

@@ -129,7 +129,7 @@ What each lead did (notes in `perf-<name>.md` beside this file):
   texture answers, pool firsts skipped in a steady scene. The commit is not a pointer swap: what is left settles there.
 - **Item 5, engine work** (`perf-engine-skip.md`, `perf-reflections.md`, `perf-post-native.md`, `perf-post-slots.md`):
   sun occlusion query native; water reflection faces native (`CS_DCLF_REFLECTION_NATIVE`); native post chain families
-  0-4 plus slot effects 1, 3 and 5 (`CS_ORG_POST_NATIVE`, AE native by default, SE opt-in); native clears for rt12 and
+  0-4 plus slot effects 1, 3 and 5 (round 2, perf2-post.md: slots 6 and 7 native too, native on SE as on AE, `CS_ORG_POST_NATIVE` deleted); native clears for rt12 and
   rt88.
 - **Leftovers** (`perf-smalls.md`): rebinding checks kept, latch copies only over live blocks, repeated texture index
   lookups kept.

@@ -1156,11 +1156,6 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 		if (!at.owner || !frameAt.owner) {
 			RenderGraph::Fatal(kEffects[a_effect].effectName, "its captured constants have no ring chunk");
 		}
-		if (native.observing && native.effect == a_effect) {
-			NativeSteps::FrameLocation();
-			NativeSteps::Compare(a_effect, slot ? Constants::Bytes(*slot) : std::span<const std::byte>{}, Constants::Bytes(*frameSlot));
-			native.observing = false;
-		}
 		pending.at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = slot ? at.size : 0u,
 			.frameSize = frameAt.size };
 		blocks.push_back(at.owner);

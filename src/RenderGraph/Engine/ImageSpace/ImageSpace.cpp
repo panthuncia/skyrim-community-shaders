@@ -1385,23 +1385,12 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		* @brief ImageSpace steps without the engine's draw (docs/development/plans/dclf-native-imagespace.md). CS_ORG_IMAGESPACE_NATIVE:
-		* 0, the capture (the engine draws, its state is applied and its constants captured); 1, observe: as 0, and each covered draw's
-		* rows are also computed from the engine's param and compared with the capture; 2 (default), draw: those draws are staged
-		* from the computed rows, and the engine's Render returns at once.
+		* @brief ImageSpace steps without the engine's draw (docs/development/plans/dclf-native-imagespace.md): a covered draw is staged
+		* from rows computed from the engine's param, and the engine's Render returns at once. Steps NativeStepNow declines stay the
+		* capture's.
 		*/
 		namespace NativeSteps
 		{
-			enum class Mode : std::uint8_t
-			{
-				Off,
-				Observe,
-				Draw,
-				Hybrid,  // 3, a diagnostic: the computed rows are staged at the engine's draw, and the engine's Render still runs
-			};
-
-			Mode s_mode = Mode::Off;
-
 			/** @brief The PerFrame bytes a step reads (FrameBuffer, c0-c44). */
 			constexpr std::uint32_t kFrameBytes = static_cast<std::uint32_t>(sizeof(globals::game::frameBufferCached.data));
 
@@ -1418,10 +1407,8 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				bool armed = false;  // StageStep stages rows from here, not from a capture
 				bool computeRows = false;  // with armed, a compute step's CS b0 rows are these (the native post chain), not the engine's buffer
-				bool observing = false;  // StageStep compares the capture with rows
-				bool observingTextures = false;  // the whole observed draw: the texture-list checks compare the bound views
 				Rows rows;
-				const RE::BSImagespaceShader* shader = nullptr;  // the step's shader, while armed or observing
+				const RE::BSImagespaceShader* shader = nullptr;  // the step's shader, while armed
 				// A lens flare sprite's draw: its vertex rows, its quad and the texture at slot 0.
 				struct Sprite
 				{
@@ -1438,7 +1425,7 @@ namespace RenderGraph::Engine::ImageSpace
 				std::array<std::byte, kFrameBytes> frame{};
 				Constants::Location frameAt;
 				std::uint64_t frameAtFrame = ~0ull;
-				std::uint64_t taken = 0, compared = 0, differed = 0, declined = 0;
+				std::uint64_t taken = 0, declined = 0;
 			};
 
 			State& Get()
@@ -1566,7 +1553,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto at = Constants::Where(*slot);
 				if (!at.owner)
 					return "bound rows the ring does not hold";
-				// The ring holds them all; the copy is only what observe mode compares.
+				// The ring holds them all; the copy keeps the row count.
 				std::memcpy(a_out.bytes.data(), bytes.data(), (std::min)(bytes.size(), a_out.bytes.size()));
 				a_out.size = static_cast<std::uint32_t>(bytes.size());
 				a_out.count = (std::min)(a_out.size / 16u, static_cast<std::uint32_t>(a_out.offsets.size()));
@@ -1675,43 +1662,6 @@ namespace RenderGraph::Engine::ImageSpace
 				return native.frameAt;
 			}
 
-			Util::ReasonLog& Differences()
-			{
-				static Util::ReasonLog log("[ORG] ImageSpace native: a step's rows differ from the capture", spdlog::level::warn);
-				return log;
-			}
-
-			/** @brief Observe mode: the captured PerGeometry and PerFrame against the computed ones. Only the rows the engine writes are compared. */
-			void Compare(std::size_t a_effect, std::span<const std::byte> a_pixel, std::span<const std::byte> a_frame)
-			{
-				auto& native = Get();
-				const auto& rows = native.rows;
-				++native.compared;
-				std::string differences;
-				for (std::uint32_t row = 0; row < rows.count; ++row) {
-					const auto at = rows.offsets[row] * 4u;
-					for (std::uint32_t c = 0; c < 4; ++c) {
-						float computed = 0.0f, captured = 0.0f;
-						std::memcpy(&computed, rows.bytes.data() + at + c * 4, 4);
-						if (at + c * 4 + 4 <= a_pixel.size())
-							std::memcpy(&captured, a_pixel.data() + at + c * 4, 4);
-						if (std::memcmp(&computed, &captured, 4) != 0 && differences.size() < 400)
-							differences += fmt::format(" c{}.{} {} vs {}", at / 16, "xyzw"[c], computed, captured);
-					}
-				}
-				for (std::uint32_t word = 0; word < kFrameBytes / 4; ++word) {
-					float computed = 0.0f, captured = 0.0f;
-					std::memcpy(&computed, native.frame.data() + word * 4, 4);
-					if (word * 4 + 4 <= a_frame.size())
-						std::memcpy(&captured, a_frame.data() + word * 4, 4);
-					if (std::memcmp(&computed, &captured, 4) != 0 && differences.size() < 600)
-						differences += fmt::format(" frame c{}.{} {} vs {}", word / 4, "xyzw"[word % 4], computed, captured);
-				}
-				if (!differences.empty()) {
-					++native.differed;
-					Differences().Report(kEffects[a_effect].effectName, fmt::format("computed vs captured:{}", differences));
-				}
-			}
 		}
 
 		/** @brief Writes each pending draw's constants location into the latch and opens its gate entry. */
@@ -1798,10 +1748,9 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			Flush();
 			state.frame = frame;
-			if (NativeSteps::s_mode != NativeSteps::Mode::Off && frame % 1000 == 0) {
+			if (frame % 1000 == 0) {
 				const auto& native = NativeSteps::Get();
-				logger::info("[ORG] ImageSpace native: {} steps staged natively, {} compared ({} differed), {} declined", native.taken, native.compared, native.differed,
-					native.declined);
+				logger::info("[ORG] ImageSpace native: {} steps staged natively, {} declined", native.taken, native.declined);
 			}
 			// Last frame's post segments were submitted at their end taps, so their constant chunks are no longer read.
 			state.postKeep.clear();
@@ -2158,8 +2107,6 @@ namespace RenderGraph::Engine::ImageSpace
 		const char* NativeStepNow()
 		{
 			const auto& state = IS();
-			if (NativeSteps::s_mode == NativeSteps::Mode::Off)
-				return "off";
 			if (!state.current || !state.current->covered)
 				return "an effect CS does not cover";
 			if (!state.current->eligible)
@@ -2225,8 +2172,8 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		* @brief The engine's Render for the current effect, or its native step. Draw mode stages the step from the param's rows and skips
-		* the engine's call; observe mode computes the rows, lets the capture take the draw and compares them.
+		* @brief The engine's Render for the current effect, or its native step: the step staged from the param's rows, without the
+		* engine's call.
 		*/
 		void RenderOrNative(const RE::BSImagespaceShader* a_shader, const void* a_param, const void* a_geometry, const std::function<void()>& a_render,
 			bool a_explicit = false)
@@ -2234,7 +2181,7 @@ namespace RenderGraph::Engine::ImageSpace
 			auto& native = NativeSteps::Get();
 			native.sprite = {};
 			if (const char* why = NativeStepNow()) {
-				if (NativeSteps::s_mode != NativeSteps::Mode::Off && IS().current) {
+				if (IS().current) {
 					static Util::ReasonLog s_capture("[ORG] ImageSpace native: a draw is captured");
 					s_capture.Report(fmt::format("{}: {}", kEffects[IS().current->effect].effectName, why));
 				}
@@ -2256,20 +2203,6 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			native.effect = IS().current->effect;
 			native.shader = a_shader;
-			if (NativeSteps::s_mode == NativeSteps::Mode::Observe) {
-				native.observing = true;
-				native.observingTextures = true;
-				a_render();
-				native.observing = false;
-				native.observingTextures = false;
-				return;
-			}
-			if (NativeSteps::s_mode == NativeSteps::Mode::Hybrid) {
-				native.armed = true;
-				a_render();
-				native.armed = false;
-				return;
-			}
 			// Base Render (AE 0x1414f88b0) runs the shader's PreRender before its draw and PostRender after; an effect's own work can
 			// live there (nested steps take their own draws in the engine's order).
 			auto* shader = const_cast<RE::BSImagespaceShader*>(a_shader);
@@ -2301,7 +2234,7 @@ namespace RenderGraph::Engine::ImageSpace
 		void DispatchOrNative(RE::BSImagespaceShader* a_shader, std::array<std::uint32_t, 3> a_groups, const std::function<void()>& a_dispatch)
 		{
 			auto& native = NativeSteps::Get();
-			if (NativeSteps::s_mode != NativeSteps::Mode::Draw || NativeStepNow()) {
+			if (NativeStepNow()) {
 				a_dispatch();
 				return;
 			}
@@ -2601,7 +2534,21 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			// The slot effects CS stages natively: Render (slot 1) and UpdateParams (slot 7) must be the game's or CS's (Legacy Graphics
 			// Compatibility wraps the depth of field's Render).
-			for (const std::uint32_t slot : { 1u, 3u, 5u }) {
+			const auto foreignSlot = [&](std::uint32_t a_slot, std::string a_why) {
+				config.foreignSlots |= static_cast<std::uint8_t>(1u << a_slot);
+				logger::warn("[ORG] native post chain: {}; the engine's RenderEffect draws end-of-frame slot {}", a_why, a_slot);
+			};
+			// The full-screen blur's and get hit's Render hold CS's slot guard, which calls the code it replaced.
+			for (const auto& [slot, replaced] : { std::pair{ 6u, SlotEffectRender<6>::func.address() }, std::pair{ 7u, SlotEffectRender<7>::func.address() } })
+				if (const auto target = FollowJumps(replaced); replaced && !InModule(target, GetModuleHandleW(nullptr)) && !InModule(target, OwnModule()))
+					foreignSlot(slot, fmt::format("its Render under CS's guard leads to {:#x}, another module", target));
+			// Their blurs (effects 9 to 15) must keep the engine's UpdateParams.
+			for (std::uint32_t r = 0; r < 7; ++r)
+				if (const auto why = ForeignSlot(fmt::format("the slot blur effect {}", r), effect(9 + r), 7, REL::RelocationID(101560, 108558).address()); !why.empty()) {
+					foreignSlot(6, why);
+					foreignSlot(7, why);
+				}
+			for (const std::uint32_t slot : { 1u, 3u, 5u, 6u, 7u }) {
 				const auto* object = effect(slot);
 				if (!object)
 					continue;
@@ -2659,46 +2606,7 @@ namespace RenderGraph::Engine::ImageSpace
 	{
 		if (!Engine::GraphMode())
 			return;
-		{
-			const auto value = Switches::Value("CS_ORG_IMAGESPACE_NATIVE");
-			NativeSteps::s_mode = value == "0" ? NativeSteps::Mode::Off :
-			                      value == "1" ? NativeSteps::Mode::Observe :
-			                      value == "3" ? NativeSteps::Mode::Hybrid :
-			                                     NativeSteps::Mode::Draw;
-			logger::info("[ORG] ImageSpace native: CS_ORG_IMAGESPACE_NATIVE={} ({})", value.empty() ? std::string("2, the default") : value,
-				NativeSteps::s_mode == NativeSteps::Mode::Off     ? "every step captured" :
-				NativeSteps::s_mode == NativeSteps::Mode::Observe ? "param steps computed and compared with the capture" :
-				                                                    "param steps staged from the engine's params, without its draw");
-		}
-			{
-			// The native post chain (native-post-chain.md): 0 the engine's containers, 1 observe, 2 native; optionally ":" and a family
-			// list (hdr, eof, composites, post), all four when none. On SE only when the switch is set (its ids were never run).
-			const auto value = Switches::Value("CS_ORG_POST_NATIVE");
-			const auto text = value.empty() ? std::string("2") : std::string(value);
-			auto& config = NativePost::Settings();
-			const auto mode = text.substr(0, text.find(':'));
-			config.mode = mode == "1" ? NativePost::Mode::Observe : mode == "2" ? NativePost::Mode::Native : NativePost::Mode::Engine;
-			config.families = NativePost::Family::kAll;
-			if (const auto colon = text.find(':'); colon != std::string::npos) {
-				config.families = 0;
-				const auto list = text.substr(colon + 1);
-				config.families |= list.find("hdr") != std::string::npos ? NativePost::Family::kHdr : 0;
-				config.families |= list.find("eof") != std::string::npos ? NativePost::Family::kEof : 0;
-				config.families |= list.find("composites") != std::string::npos ? NativePost::Family::kComposites : 0;
-				config.families |= list.find("post") != std::string::npos ? NativePost::Family::kPost : 0;
-			}
-			// The end-of-frame and body families stage the families inside them natively.
-			if (config.mode == NativePost::Mode::Native && (config.families & NativePost::Family::kPost))
-				config.families |= NativePost::Family::kComposites | NativePost::Family::kEof;
-			if (config.mode == NativePost::Mode::Native && (config.families & NativePost::Family::kEof))
-				config.families |= NativePost::Family::kHdr;
-			if (!REL::Module::IsAE() && value.empty()) {
-				logger::info("[ORG] native post chain: SE runs every family on the engine unless CS_ORG_POST_NATIVE is set");
-				config.mode = NativePost::Mode::Engine;
-			}
-			NativePost::ResolveGlobals();
-			logger::info("[ORG] native post chain: CS_ORG_POST_NATIVE={} (mode {}, families {:#x})", text, static_cast<int>(config.mode), config.families);
-		}
+		NativePost::ResolveGlobals();
 		stl::detour_thunk<ShaderRender>(REL::RelocationID(100950, 107732));
 		stl::detour_thunk<HDRRender>(REL::RelocationID(100465, 107183));
 		stl::detour_thunk<PreTonemapComposites>(REL::RelocationID(99024, 105675));
@@ -2860,7 +2768,7 @@ namespace RenderGraph::Engine::ImageSpace
 	{
 		NativePost::ReadB();
 		const auto& f = NativePost::R().frame;
-		if (IS().on && f.readB && Chain().group.Registered() && NativePost::In(NativePost::Mode::Native, NativePost::Family::kPost)) {
+		if (IS().on && f.readB && Chain().group.Registered() && NativePost::Native(NativePost::Family::kPost)) {
 			NativePost::RunBody(a_target);
 			return;
 		}

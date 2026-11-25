@@ -230,12 +230,6 @@ std::string StageGeometry(Pending& a_pending)
 		triangles = native.sprite.triangles;
 	} else {
 		topology = static_cast<std::uint32_t>(RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().topology);
-		if (native.sprite.shape && (native.sprite.shape != state.drawShape || state.drawStart != 0 || native.sprite.triangles != state.drawTriangles ||
-										topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)) {
-			++native.differed;
-			NativeSteps::Differences().Report("ISWaterDisplacementWadingRipple quad", fmt::format("computed {} 0 {} vs captured {} {} {} topology {}", native.sprite.shape,
-				native.sprite.triangles, state.drawShape, state.drawStart, state.drawTriangles, topology));
-		}
 	}
 	DCLF::Family::Geometry geometry;
 	auto owners = std::make_shared<DCLF::Family::Owners>();
