@@ -13,23 +13,6 @@
 
 namespace DCLF::Features::Portals
 {
-	void CheckMainBatchCapacity(Batch& a_batch, std::uint32_t a_frame, std::uint64_t a_capacity)
-	{
-		if (a_batch.inlineEvaluation)
-			return;  // no buckets: every query is evaluated against its own program
-		const auto& programs = PortalViews::Get().Encoded();
-		const auto count = programs.size() > kPortalSetBytes / 4 ? programs[kPortalSetBytes / 4] : 0u;
-		if (count > a_capacity) {
-			if (a_batch.reportedPrograms != count || a_batch.reportedBuckets != a_capacity)
-				logger::warn("[DCLF] {} programs exceed publication buckets until growth is adopted; the excess is evaluated unbatched: programs={}, capacity={}, frame={}", a_batch.name, count, a_capacity, a_frame);
-			a_batch.reportedPrograms = count;
-			a_batch.reportedBuckets = a_capacity;
-		} else if (a_batch.reportedPrograms) {
-			logger::info("[DCLF] {} publication bucket gap resolved at frame {}", a_batch.name, a_frame);
-			a_batch.reportedPrograms = a_batch.reportedBuckets = 0;
-		}
-	}
-
 	void RegisterBatch(org::RenderGraph& a_graph, const Batch& a_batch)
 	{
 		const auto add = [&](const char* suffix, const Draws::Versioned& buffer) {
@@ -37,79 +20,45 @@ namespace DCLF::Features::Portals
 		};
 		add("-queries", a_batch.queries);
 		add("-results", a_batch.results);
-		add("-ranks", a_batch.ranks);
-		add("-indices", a_batch.indices);
-		add("-tasks", a_batch.tasks);
-		add("-counts", a_batch.counts);
-		add("-offsets", a_batch.offsets);
-		Draws::Register(a_graph, org::ResourceIdentifier(a_batch.name + "-dispatch"), a_batch.dispatch);
+		add("-claims", a_batch.claims);
+		add("-traces", a_batch.traces);
 	}
 
 	namespace
 	{
-		constexpr std::size_t kBatchPrograms = 9;
-
-		/** @brief Inline by default. The portal bench measured count, scan and scatter at about 25 us a batch over the evaluation itself
-		* (dclf-portal-query-batches.md, "Portal culling bench"). */
-		bool InlineEvaluation() { return RegisteredSwitchValue("CS_DCLF_PORTAL_EVALUATOR") != "batched"; }
 		bool Traced() { return RegisteredSwitchValue("CS_DCLF_PORTAL_TRACE") == "1"; }
 
-		ComputeProgram::Desc BatchDesc(std::size_t a_program, bool a_contextAtlas)
+		ComputeProgram::Desc BatchDesc(bool a_contextAtlas)
 		{
-			const wchar_t* entries[]{ L"Clear", L"Count", L"TaskCounts", L"Scan", L"AddOffsets", L"Scatter", L"MakeTasks", L"Evaluate", L"Inline" };
-			ComputeProgram::Desc desc{ .source = "DrawcallLimitFix/PortalBatchCS.hlsl", .entry = entries[a_program], .constantWords = 20 };
-			// Count evaluates past-capacity queries itself, so it addresses programs as Evaluate does.
-			if ((a_program == 1 || a_program == 7 || a_program == 8) && a_contextAtlas)
+			ComputeProgram::Desc desc{ .source = "DrawcallLimitFix/PortalBatchCS.hlsl", .entry = L"Inline", .constantWords = 12 };
+			if (a_contextAtlas)
 				desc.defines.emplace_back(L"DCLF_PORTAL_CONTEXT_ATLAS", L"1");
-			if ((a_program == 7 || a_program == 8) && RegisteredSwitchValue("CS_DCLF_PORTAL_UNIFORM_SCAN") == "1")
+			if (RegisteredSwitchValue("CS_DCLF_PORTAL_UNIFORM_SCAN") == "1")
 				desc.defines.emplace_back(L"DCLF_PORTAL_UNIFORM_SCAN", L"1");
-			if (a_program == 8 && InlineEvaluation() && Traced())
+			if (Traced())
 				desc.defines.emplace_back(L"DCLF_PORTAL_TRACE", L"1");
 			return desc;
 		}
 
-		/** @brief Each batch program with and without the context atlas, queued at CS's setup (SetupPrograms). */
-		using BatchPrograms = std::array<std::array<SetupPrograms::Compute, kBatchPrograms>, 2>;
-		BatchPrograms MakeBatchPrograms()
-		{
-			BatchPrograms programs;
-			for (std::size_t atlas = 0; atlas < 2; ++atlas)
-				for (std::size_t i = 0; i < kBatchPrograms; ++i)
-					programs[atlas][i] = SetupPrograms::Compute("DCLF portal batch", [i, atlas] { return BatchDesc(i, atlas != 0); });
-			return programs;
-		}
-		const BatchPrograms kBatchProgramSets = MakeBatchPrograms();
+		/** @brief The program with and without the context atlas, queued at CS's setup (SetupPrograms). */
+		const std::array<SetupPrograms::Compute, 2> kBatchPrograms{ SetupPrograms::Compute("DCLF portal batch", [] { return BatchDesc(false); }),
+			SetupPrograms::Compute("DCLF portal batch", [] { return BatchDesc(true); }) };
 	}
 
 	std::shared_ptr<Batch> CreateBatch(const Api::SceneResourcesSetup& a_setup, std::string a_name, bool a_contextAtlas)
 	{
 		auto batch = std::make_shared<Batch>();
 		batch->name = std::move(a_name);
-		const auto& evaluator = RegisteredSwitchValue("CS_DCLF_PORTAL_EVALUATOR");
-		batch->inlineEvaluation = InlineEvaluation();
 		batch->trace = Traced();
-		if (batch->trace && !batch->inlineEvaluation)
-			logger::warn("[DCLF] CS_DCLF_PORTAL_TRACE traces inline batches only; {} is batched", batch->name);
-		if (!evaluator.empty() && evaluator != "inline" && evaluator != "batched")
-			logger::warn("[DCLF] CS_DCLF_PORTAL_EVALUATOR '{}' is neither batched nor inline; {} is inline", evaluator, batch->name);
-		static_assert(std::tuple_size_v<decltype(batch->programs)> == kBatchPrograms);
-		for (std::size_t i = 0; i < kBatchPrograms; ++i)
-			batch->programs[i] = kBatchProgramSets[a_contextAtlas ? 1 : 0][i].Get();
-		batch->signature = Draws::CreateDispatchSignature(a_setup.device, batch->programs[7]->layout->GetHandle());
-		if (!batch->signature)
-			return nullptr;
+		batch->program = kBatchPrograms[a_contextAtlas ? 1 : 0].Get();
 		const auto buffer = [&](std::uint32_t stride, const char* suffix, std::uint32_t count) {
 			return Draws::MakeVersioned(a_setup.StructuredBuffer(count, stride, (batch->name + suffix).c_str(), true), { .extent = { 0, stride, stride } });
 		};
 		const auto roots = a_setup.smallStart ? 4u : 4096u;
 		batch->queries = buffer(sizeof(DCLF::Portals::Query), "-queries", roots);
 		batch->results = buffer(sizeof(DCLF::Portals::Result), "-results", roots);
-		batch->ranks = buffer(4, "-ranks", roots);
-		batch->indices = buffer(4, "-indices", roots);
-		batch->tasks = buffer(sizeof(DCLF::Portals::Task), "-tasks", roots);
-		batch->counts = buffer(8, "-counts", 8);
-		batch->offsets = buffer(8, "-offsets", 8);
-		batch->dispatch = a_setup.StructuredBuffer(4, 4, (batch->name + "-dispatch").c_str(), true);
+		batch->claims = buffer(4, "-claims", roots);
+		batch->traces = buffer(16, "-traces", roots);
 		return batch;
 	}
 }

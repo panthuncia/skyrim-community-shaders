@@ -22,6 +22,7 @@
 #include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Cull.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
+#include "Features/DrawcallLimitFix/Core/Render/Direct/Recorder.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PlacementRows/BillboardRow.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
@@ -607,6 +608,7 @@ namespace DCLF
 			// By class index - 1.
 			std::array<Api::PaletteRowsInput, Api::kPaletteRowsClasses> paletteInputs{};
 			std::shared_ptr<const Direct::ViewBatchSet> viewBatches;
+			std::vector<Direct::ForwardSortRow>* forwardRows = nullptr;  // the frame slot's, which no one else touches until done
 			std::shared_ptr<const LatePoses::FramePlan> latePlan;
 			FrameLeases lateLeases;
 		};
@@ -728,6 +730,10 @@ namespace DCLF
 		void TrackSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
 		void PostSnapshotSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
 		static void StoreLiveSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
+		void StoreForwardRows(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
+		// The forward rows the last producer filled, read by the render thread once done reaches forwardRowsSeq.
+		const std::vector<Direct::ForwardSortRow>* forwardRowsTarget = nullptr;
+		std::uint64_t forwardRowsSeq = 0;
 		void MarkMover(std::uint32_t a_mover);
 		void MarkRoot(std::uint32_t a_root);
 		void MarkDue(const Job& a_job);
@@ -1307,6 +1313,7 @@ namespace DCLF
 		SampleShadingRows(a_job, a_job.shadingSlots);
 		// The rows are final from here, since registered pools write none.
 		StoreLiveSpheres(a_job, out);
+		StoreForwardRows(a_job, out);
 		PostSnapshotSpheres(a_job, out);
 		{
 			DCLF_ZONE("CS.DCLF.FV.S.OnSampled");
@@ -1375,6 +1382,29 @@ namespace DCLF
 		for (const auto& item : settling)
 			mark(item.slot);
 		spheresSlot.Post(std::move(table));
+	}
+
+	void FrameValues::Impl::StoreForwardRows(const Job& a_job, const std::vector<BindlessPlacement>& a_out)
+	{
+		const auto* set = a_job.viewBatches.get();
+		auto* target = a_job.forwardRows;
+		if (!set || !target)
+			return;
+		DCLF_ZONE("CS.DCLF.FrameValues.ForwardRows");
+		if (target->size() < a_out.size())
+			target->resize(a_out.size());
+		const BindlessPlacement* source = a_out.data();
+		const std::size_t sourceRows = a_out.size();
+		Direct::ForwardSortRow* sortRows = target->data();
+		for (const Direct::ViewType type : { Direct::ViewType::Forward, Direct::ViewType::Refraction })
+			for (const auto& batch : set->List(type)) {
+				const auto* objects = batch.object;
+				for (std::uint32_t lane = 0; lane < batch.count; ++lane)
+					if (const std::uint32_t object = objects[lane]; object < sourceRows)
+						sortRows[object] = Direct::ForwardSortRowOf(source[object]);
+			}
+		forwardRowsTarget = target;
+		forwardRowsSeq = a_job.seq;
 	}
 
 	void FrameValues::Impl::StoreLiveSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out)
@@ -2441,6 +2471,7 @@ namespace DCLF
 				job.shadingSlots = std::max<std::size_t>(job.shadingSlots, std::size_t(value.slot) + 1);
 		job.globals = a_globals;
 		job.viewBatches = viewBatches;
+		job.forwardRows = std::exchange(forwardRows, nullptr);
 		TracyCZoneEnd(kJob);
 		TracyCZoneN(kReg, "CS.DCLF.FV.K.KickRegistered", true);
 		s.KickRegistered(job, a_globals.get());
@@ -2666,6 +2697,13 @@ namespace DCLF
 		if (s.done.load(std::memory_order_acquire) < s.seq)
 			return nullptr;
 		return &s.rows.Get();
+	}
+
+	bool FrameValues::ForwardRowsFilled(const std::vector<Direct::ForwardSortRow>* a_target) const
+	{
+		const auto& s = *impl;
+		// The producer wrote them before it stored done.
+		return a_target && s.seq && s.done.load(std::memory_order_acquire) >= s.seq && s.forwardRowsSeq == s.seq && s.forwardRowsTarget == a_target;
 	}
 
 	const std::vector<FrameValues::PaletteRow>* FrameValues::PalettesIfDone(bool a_wait) const

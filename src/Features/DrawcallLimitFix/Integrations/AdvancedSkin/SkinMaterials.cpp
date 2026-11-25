@@ -37,6 +37,9 @@ namespace DCLF::Integrations::AdvancedSkin
 		constexpr std::size_t kSkinSamplerDescriptor = 3;       // s15's
 		constexpr std::size_t kSkinDetailEnabled = 2 * 4 + 3;   // SkinData::skinDetailParams.w
 		constexpr std::uint32_t kSkinViewEvictAfter = 300;      // captures a view may go unused before its binding is dropped
+		// A kept slot is still resolved this often, so Skin keeps observing its geometry (it prunes after 600 frames) and its views
+		// stay in use. It also bounds how long a change no key covers, such as a new owner on the same node, takes to show.
+		constexpr std::uint32_t kSkinRefreshCaptures = 120;
 
 		struct MaterialRowHash
 		{
@@ -67,14 +70,60 @@ namespace DCLF::Integrations::AdvancedSkin
 			std::shared_ptr<const void> owners;  // the row's descriptors, handed out with every put of it
 		};
 
+		/** @brief What Skin's resolve reads from a geometry, besides its owner. The same key and Skin revision give the same material. */
+		struct SurfaceKey
+		{
+			const void* geometry = nullptr;
+			const void* property = nullptr;
+			const void* material = nullptr;
+			const void* textureSet = nullptr;
+			const void* diffuse = nullptr;
+			const void* normal = nullptr;
+			const void* parent = nullptr;
+			const void* alpha = nullptr;
+			std::uint64_t flags = 0;
+			bool blending = false;
+			bool active = false;
+			bool operator==(const SurfaceKey&) const = default;
+		};
+
+		SurfaceKey KeyOf(RE::BSGeometry* a_geometry, bool a_active)
+		{
+			SurfaceKey key{ .geometry = a_geometry, .active = a_active };
+			if (!a_active || !a_geometry)
+				return key;
+			const auto& data = a_geometry->GetGeometryRuntimeData();
+			auto* property = data.shaderProperty.get();
+			key.parent = a_geometry->parent;
+			key.property = property;
+			if (const auto* alpha = data.alphaProperty.get()) {
+				key.alpha = alpha;
+				key.blending = alpha->GetAlphaBlending();
+			}
+			if (!property)
+				return key;
+			key.flags = property->flags.underlying();
+			key.material = property->material;
+			if (SkinMaterials::IsCompatible(property)) {
+				const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
+				key.textureSet = material->textureSet.get();
+				key.diffuse = material->diffuseTexture.get();
+				key.normal = material->normalTexture.get();
+			}
+			return key;
+		}
+
 		struct MaterialSlotState
 		{
 			bool member = false;
-			bool force = false;  // put the row again even if its index did not change
-			bool complete = false;
+			bool force = false;     // put the row again even if its index did not change
+			bool complete = false;  // every view the material names is bound, or failed for good
+			bool kept = false;      // key and revision hold what the last resolve saw
 			std::uint32_t row = 0;
 			std::uint32_t at = 0;  // position in MaterialState::members
 			std::array<ID3D11ShaderResourceView*, 3> views{};
+			SurfaceKey key;
+			std::uint64_t revision = 0;  // Skin::MaterialRevision at the last resolve
 		};
 
 		// Render thread only, apart from the replies the import thread pushes.
@@ -84,6 +133,9 @@ namespace DCLF::Integrations::AdvancedSkin
 			std::uint64_t cookie = 1;
 			std::uint32_t generation = ~0u;
 			std::uint32_t captures = 0;
+			std::uint64_t relocationCursor = 0;
+			std::vector<ID3D11ShaderResourceView*> relocated;
+			std::uint64_t rowZeroRevision = ~0ull;
 			std::unordered_map<ID3D11ShaderResourceView*, MaterialViewBinding> views;
 			org::OwnedDescriptorBinding sampler;
 			// Row 0 is the disabled profile, which a slot with no skin surface names. It is never freed.
@@ -318,15 +370,31 @@ namespace DCLF::Integrations::AdvancedSkin
 				ResetMaterialDevice(state, generation);
 			DrainMaterialReplies(state);
 			const bool active = skin.loaded;
+			const std::uint64_t revision = skin.MaterialRevision();
 			// Row 0 follows the common settings.
-			if (const auto disabled = RowOfMaterial(skin.ResolveGeometryMaterial(nullptr, nullptr)); !MaterialRowEqual{}(disabled, state.table[0].row)) {
-				state.table[0].row = disabled;
-				state.unsent.emplace_back(0, disabled);
+			if (std::exchange(state.rowZeroRevision, revision) != revision) {
+				if (const auto disabled = RowOfMaterial(skin.ResolveGeometryMaterial(nullptr, nullptr)); !MaterialRowEqual{}(disabled, state.table[0].row)) {
+					state.table[0].row = disabled;
+					state.unsent.emplace_back(0, disabled);
+				}
 			}
+			// A moved texture's binding is superseded, so every slot resolves again and asks for the new one.
+			state.relocated.clear();
+			bool resolveAll = !GpuTextures::Get().RelocatedViews(state.relocationCursor, state.relocated);
+			for (auto* view : state.relocated)
+				resolveAll |= state.views.contains(view);
 			const auto geometry = a_capture.objectGeometry;
 			for (const auto o : state.members) {
 				auto& slot = state.slots[o];
 				auto* mesh = o < geometry.size() ? geometry[o] : nullptr;
+				// Skin's resolve is the capture's cost. A slot keeps its row while its key and Skin's revision hold.
+				const auto key = KeyOf(mesh, active);
+				const bool refresh = (state.captures + o) % kSkinRefreshCaptures == 0;
+				if (slot.kept && slot.complete && !slot.force && !resolveAll && !refresh && slot.revision == revision && slot.key == key)
+					continue;
+				slot.key = key;
+				slot.revision = revision;
+				slot.kept = true;
 				slot.views = {};
 				slot.complete = true;
 				const std::uint32_t row = active && mesh ? ResolveMaterialSlot(state, skin, mesh, slot) : 0u;

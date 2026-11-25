@@ -23,6 +23,8 @@ namespace DCLF::Api
 	 * - updateEntry: main thread at Main::Update's entry, in registration order.
 	 * - afterWrites: main thread, after every updateEntry.
 	 * - structure: any thread, per attach or detach. Must be lock-free and cheap. a_parent may be null.
+	 * - beforeListJobsWait: render thread, once per frame right before it waits for the list jobs. The job threads cull meanwhile, so it
+	 *   must not touch what the cull hooks read or write.
 	 * - listJobsDone: render thread, once per frame when the list jobs finish. Data the hooks gathered on job threads is complete here.
 	 */
 	struct StandInObserver
@@ -32,6 +34,7 @@ namespace DCLF::Api
 		void (*updateEntry)() = nullptr;
 		void (*afterWrites)() = nullptr;
 		void (*structure)(const void* a_parent) = nullptr;
+		void (*beforeListJobsWait)() = nullptr;
 		void (*listJobsDone)() = nullptr;
 	};
 

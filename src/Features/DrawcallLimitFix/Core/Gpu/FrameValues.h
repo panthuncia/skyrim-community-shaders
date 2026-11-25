@@ -44,6 +44,7 @@ namespace DCLF
 	{
 		struct ViewBatchSet;
 		struct SnapshotSpheres;
+		struct ForwardSortRow;
 	}
 
 	/**
@@ -89,8 +90,17 @@ namespace DCLF
 		 * root's space (FUN_1414cb020). The producer never samples them.
 		 */
 		void SetRootViewClaims(std::shared_ptr<const SetSnapshot> a_claims) { rootViewClaims = std::move(a_claims); }
-		/** @brief Render thread, before Kick. The CPU pipeline's view batches, kept until replaced. Producers fill their live sphere column. */
-		void SetViewBatches(std::shared_ptr<const Direct::ViewBatchSet> a_set) { viewBatches = std::move(a_set); }
+		/**
+		 * @brief Render thread, before Kick. The CPU pipeline's view batches, kept until replaced. Producers fill their live sphere column.
+		 * The next producer also fills a_forwardRows, the frame slot's forward sort rows, from the Forward and Refraction lists.
+		 */
+		void SetViewBatches(std::shared_ptr<const Direct::ViewBatchSet> a_set, std::vector<Direct::ForwardSortRow>* a_forwardRows = nullptr)
+		{
+			viewBatches = std::move(a_set);
+			forwardRows = a_forwardRows;
+		}
+		/** @brief Render thread, once RowsIfDone gave rows. Whether the newest kick's producer filled a_target's forward sort rows. */
+		bool ForwardRowsFilled(const std::vector<Direct::ForwardSortRow>* a_target) const;
 		/** @brief Any thread. Asks the next producer for every slot's bound. Costly, so made only when asked. Latest wins. */
 		void RequestSnapshotSpheres();
 		/** @brief The newest bounds posted since the last take, or null. */
@@ -204,5 +214,6 @@ namespace DCLF
 		std::uint32_t frameIndex = 0, paletteIndex = 0, shadingIndex = 0;
 		std::shared_ptr<const SetSnapshot> rootViewClaims;
 		std::shared_ptr<const Direct::ViewBatchSet> viewBatches;
+		std::vector<Direct::ForwardSortRow>* forwardRows = nullptr;
 	};
 }

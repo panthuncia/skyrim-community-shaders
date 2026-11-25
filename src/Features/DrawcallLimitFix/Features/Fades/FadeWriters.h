@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace DCLF::SceneCapture
@@ -54,7 +55,25 @@ namespace DCLF::Features::Fades
 	/** @brief Render thread. Keeps the batch so the CPU stage's observer frame can step it a frame later. Swapped: a_roots gets old storage. */
 	void KeepAnimatedBatchForObserver(std::vector<AnimatedFadeRoot>& a_roots, const AnimatedFadeInputs& a_inputs);
 	void TakeObserverAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
-	/** @brief Render thread, when the list jobs finish. Turns the queued updates into the batch. */
+	/** @brief The batch's updates counted per root slot of the frame's tables. Slots are sorted and unique. */
+	struct AnimatedStamps
+	{
+		std::vector<std::uint32_t> slots;
+		std::vector<std::uint32_t> counts;  // per entry of slots
+	};
+	/**
+	 * @brief Counts a_roots per slot of the frame's tables, into a_stamps. A slot counts only if the tables still list the same node at
+	 * the same generation, since the slots were resolved against the writer tables. Render thread.
+	 */
+	void CountAnimatedRoots(std::span<const AnimatedFadeRoot> a_roots, AnimatedStamps& a_stamps);
+	/** @brief Render thread. Swaps in the batch's counts if they were made before the list jobs' wait. */
+	bool TakeAnimatedStamps(AnimatedStamps& a_stamps);
+	/**
+	 * @brief Render thread, right before it waits for the list jobs. Turns the queued updates into the batch and counts it while the
+	 * job threads cull. Nothing pushes between the frame start and the list jobs' end.
+	 */
+	void PrepareAnimatedFades();
+	/** @brief Render thread, when the list jobs finish. Adds updates queued during the wait, which are then counted at the commit. */
 	void DrainAnimatedFades();
 	/**
 	 * @brief Render thread. Lets the CPU fade stage's producer do the drain instead. This is safe because nothing pushes

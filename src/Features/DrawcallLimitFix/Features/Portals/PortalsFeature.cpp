@@ -79,9 +79,7 @@ namespace DCLF::Features::Portals
 		{
 			a_context.RegisterSwitch({ .name = "CS_DCLF_PORTAL_UNIFORM_SCAN", .kind = Api::SwitchKind::Diagnostic, .description = "Evaluate portal batches with the diagnostic uniform instruction scan" });
 			a_context.RegisterSwitch({ .name = "CS_DCLF_PORTAL_TRACE", .kind = Api::SwitchKind::Diagnostic,
-				.description = "Inline portal batches write each query's decision trace" });
-			a_context.RegisterSwitch({ .name = "CS_DCLF_PORTAL_EVALUATOR", .kind = Api::SwitchKind::Test,
-				.description = "Portal batches' evaluation: inline (one dispatch, the default) or batched (by program: count, scan, scatter, evaluate)" });
+				.description = "Portal batches write each query's decision trace" });
 			a_context.RegisterMainCullInput({ .name = "portals",
 				.noProgram = kPortalNoProgram,
 				.unboundVisible = &UnboundVisible,

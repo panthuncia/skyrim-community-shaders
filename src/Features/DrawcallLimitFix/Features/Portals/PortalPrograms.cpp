@@ -37,7 +37,6 @@ namespace DCLF::Features::Portals
 	{
 		constexpr const char* kProgramsName = "cs.dclf.portal-programs";
 		constexpr const char* kStandInName = "cs.dclf.portal-programs.stand-in";
-		constexpr std::uint32_t kBucketsInput = 0, kInputWords = 1;
 
 		/** @brief An immutable published encoding, its buffer version and the descriptor the latch names. */
 		struct Publication
@@ -92,10 +91,7 @@ namespace DCLF::Features::Portals
 		{
 			const auto& scene = a_requirements.State<ProgramsScene>();
 			const auto& batch = *scene.members;
-			Draws::UnitGroup{}.Add(batch.queries).Add(batch.results).Add(batch.ranks).Add(batch.indices).Add(batch.tasks).Require(a_requirements.build, a_requirements.objectRows);
-			const auto buckets = std::max(1u, a_requirements.inputs[kBucketsInput]);
-			Draws::SceneBufferSet::Get().Require(a_requirements.build, batch.counts, 2ull * buckets);
-			Draws::SceneBufferSet::Get().Require(a_requirements.build, batch.offsets, 2ull * buckets);
+			Draws::UnitGroup{}.Add(batch.queries).Add(batch.results).Add(batch.claims).Add(batch.traces).Require(a_requirements.build, a_requirements.objectRows);
 		}
 
 		void Fit(Api::SceneResourcesFit& a_fit)
@@ -103,7 +99,7 @@ namespace DCLF::Features::Portals
 			// A set sealed before the revision required the batch names none of it. No object fits it, and that must not throw.
 			const auto& b = *a_fit.State<ProgramsScene>().members;
 			std::uint64_t units = ~0ull;
-			for (const auto* buffer : { &b.queries, &b.results, &b.ranks, &b.indices, &b.tasks })
+			for (const auto* buffer : { &b.queries, &b.results, &b.claims, &b.traces })
 				units = std::min(units, Draws::NamedUnits(a_fit.sealed, *buffer));
 			a_fit.fit.objects = std::min(a_fit.fit.objects, static_cast<std::uint32_t>(std::min<std::uint64_t>(units, UINT32_MAX)));
 		}
@@ -118,7 +114,7 @@ namespace DCLF::Features::Portals
 				else if constexpr (Slot == Api::CullBindingSlot::MemberResults)
 					a_select.Versioned(b.results);
 				else
-					a_select.Versioned(b.ranks);
+					a_select.Versioned(b.claims);
 			}
 		}
 
@@ -126,18 +122,11 @@ namespace DCLF::Features::Portals
 		{
 			return Extensions::SceneResourcesStateOf(a_setup.scene, sceneId);
 		}
-		template <bool Evaluate>
 		std::shared_ptr<org::RenderPass> MemberBatch(const Api::PassContext& a_context)
 		{
 			const auto resources = a_context.Main();
 			const auto* scene = SceneOf(*resources->scene);
-			return scene ? MakeBatchPass(resources, scene->members, a_context.segment, Evaluate) : nullptr;
-		}
-
-		void PostInputs(std::span<std::uint32_t> a_words)
-		{
-			const auto& encoded = PortalViews::Get().Encoded();
-			a_words[kBucketsInput] = encoded.size() >= kPortalHeaderBytes / 4 ? encoded[kPortalSetBytes / 4] : 0u;
+			return scene ? MakeBatchPass(resources, scene->members, a_context.segment) : nullptr;
 		}
 
 		/** @brief Publishes the frame's encoding into a backing sized to it. An unchanged encoding keeps the last one. Render thread. */
@@ -174,7 +163,6 @@ namespace DCLF::Features::Portals
 			if (!scene)
 				return;
 			if (scene->frame != a_commit.frame) {
-				CheckMainBatchCapacity(*scene->members, a_commit.frame, std::min(Draws::NamedUnits(a_commit.adopted, scene->members->counts), Draws::NamedUnits(a_commit.adopted, scene->members->offsets)) / 2);
 				scene->frame = a_commit.frame;
 				// Commit hooks run unguarded on the render thread. Without a publication every reader takes the frustum alone.
 				try {
@@ -209,12 +197,11 @@ namespace DCLF::Features::Portals
 
 	void RegisterPrograms(Api::InstallContext& a_context)
 	{
-		sceneId = a_context.RegisterSceneResources({ .name = "portal-programs", .setup = &Setup, .registerGraph = &RegisterGraph, .require = &Require, .fit = &Fit, .postInputs = &PostInputs, .inputWords = kInputWords });
+		sceneId = a_context.RegisterSceneResources({ .name = "portal-programs", .setup = &Setup, .registerGraph = &RegisterGraph, .require = &Require, .fit = &Fit });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::MemberQueries, .name = "member-portal-queries", .select = &SelectMembers<Api::CullBindingSlot::MemberQueries> });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::MemberResults, .name = "member-portal-results", .select = &SelectMembers<Api::CullBindingSlot::MemberResults> });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::MemberClaims, .name = "member-portal-claims", .select = &SelectMembers<Api::CullBindingSlot::MemberClaims> });
-		a_context.RegisterPass({ .key = "portals.member-batch", .passName = "cs.dclf.z.member-portal-batch", .make = &MemberBatch<false>, .setup = &BatchSetup });
-		a_context.RegisterPass({ .key = "portals.member-evaluate", .passName = "cs.dclf.z.member-portal-evaluate", .make = &MemberBatch<true>, .setup = &BatchSetup });
+		a_context.RegisterPass({ .key = "portals.member-evaluate", .passName = "cs.dclf.z.member-portal-evaluate", .make = &MemberBatch, .setup = &BatchSetup });
 
 		a_context.RegisterCommitHook({ .name = "portal-programs", .commit = &Commit });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::Programs, .name = kProgramsName, .select = &SelectPrograms });

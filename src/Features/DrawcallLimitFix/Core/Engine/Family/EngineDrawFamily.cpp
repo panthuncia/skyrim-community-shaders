@@ -571,24 +571,22 @@ namespace DCLF::Family
 		const auto found = positions.find(a_id);
 		if (found == positions.end())
 			return InputResult::NotListed;
-		const auto listed = ids.begin() + found->second;
-		const std::uint64_t frame = ::RenderGraph::Frame::Driver::Current().frame;
 		const std::uint64_t serial = declaredSerial.load(std::memory_order_acquire);
-		if (answersFrame != frame || answersSerial != serial || answers.size() != ids.size()) {
-			answers.assign(ids.size(), {});
-			answersFrame = frame;
-			answersSerial = serial;
-		}
-		auto& answer = answers[static_cast<std::size_t>(listed - ids.begin())];
-		if (!answer.asked) {
-			answer.asked = true;
+		if (answersSerial != serial || answers.size() != ids.size()) {
 			// An undeclared id must never be read, since nothing orders the read after its writes.
 			const auto known = declared.load(std::memory_order_acquire);
-			if (!known || !known->contains(a_id)) {
+			answers.assign(ids.size(), {});
+			for (std::size_t i = 0; i < ids.size(); ++i)
+				answers[i].declared = known && known->contains(ids[i]);
+			answersSerial = serial;
+		}
+		auto& answer = answers[found->second];
+		if (const std::uint64_t frame = ::RenderGraph::Frame::Driver::Current().frame; answer.frame != frame) {
+			answer.frame = frame;
+			if (!answer.declared)
 				answer.result = InputResult::PublishedLate;
-			} else {
+			else
 				answer.result = Extensions::PublishedIndex(a_id, answer.index) ? InputResult::Graph : InputResult::NoView;
-			}
 		}
 		if (answer.result == InputResult::Graph)
 			a_index = answer.index;

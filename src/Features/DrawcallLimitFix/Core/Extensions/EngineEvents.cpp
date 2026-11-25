@@ -84,6 +84,13 @@ namespace DCLF::Extensions
 				observer.structure(a_parent);
 	}
 
+	void StandInBeforeListJobsWait()
+	{
+		for (const auto& observer : RegisteredStandInObservers())
+			if (observer.beforeListJobsWait)
+				observer.beforeListJobsWait();
+	}
+
 	void StandInListJobsDone()
 	{
 		for (const auto& observer : RegisteredStandInObservers())

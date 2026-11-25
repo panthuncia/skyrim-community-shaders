@@ -34,46 +34,33 @@ namespace DCLF::Features::Fades
 			const auto eye = FadeState::FadeEye();
 			std::copy_n(eye.data(), 3, a_inputs.eye);
 			a_inputs.lodAdjust = eye[3];
-			// Kept for its storage, which the batches rotate through. Render thread.
+			// Kept for their storage, which the batches rotate through. Render thread.
 			static std::vector<AnimatedFadeRoot> roots;
+			static AnimatedStamps stamps;
 			AnimatedFadeInputs anim{};
 			TakeAnimatedBatch(roots, anim);
-			TracyCZoneN(stampZone, "CS.DCLF.Fade.Stamp", true);
-			TracyCZoneValue(stampZone, roots.size());
 			std::copy_n(anim.eye, 3, a_inputs.animEye);
 			a_inputs.animLodAdjust = anim.lodAdjust;
 			a_inputs.animCounter = anim.counter;
 			a_inputs.animDeltaTime = anim.deltaTime;
-			// Slots were resolved against the writer tables, and the frame's tables may be newer.
-			// A slot counts only if these tables still list the same node at the same generation.
-			const auto batchRoots = Extensions::RootListOf(Scene::FrameView::Get().GetTables());
-			auto& counts = a_buffers.fadeAnimatedCounts;
-			if (counts.size() < a_rootSlots)
-				counts.resize(a_rootSlots, 0u);
+			// Normally counted before the list jobs' wait.
+			if (!TakeAnimatedStamps(stamps))
+				CountAnimatedRoots(roots, stamps);
+			TracyCZoneN(stampZone, "CS.DCLF.Fade.Stamp", true);
+			TracyCZoneValue(stampZone, stamps.slots.size());
 			static std::vector<std::uint32_t> stamped;  // render thread, kept for its storage
 			stamped.clear();
-			if (a_buffers.fadeAnimated && anim.valid) {
-				// A batch can hold many roots, so the loop reads through plain pointers.
-				const std::size_t slots = std::min({ std::size_t(a_rootSlots), batchRoots.rows.size(), batchRoots.nodes.size() });
-				const auto* nodes = batchRoots.nodes.data();
-				const auto* rows = batchRoots.rows.data();
-				auto* rootCounts = counts.data();
-				for (const auto& root : roots) {
-					if (root.slot >= slots || nodes[root.slot] != root.node || rows[root.slot].generation != root.generation)
-						continue;
-					if (rootCounts[root.slot]++ == 0)
-						stamped.push_back(root.slot);
-				}
-			}
 			auto& animatedWords = a_buffers.fadeAnimatedMirror;
 			if (animatedWords.size() < a_rootSlots)
 				animatedWords.resize(a_rootSlots, 0u);
-			const std::uint32_t sceneStep = Scene::FrameView::Get().SceneStep();
-			for (const std::uint32_t root : stamped) {
-				animatedWords[root] = FadeAnimatedWord(sceneStep, counts[root]);
-				counts[root] = 0;
+			if (a_buffers.fadeAnimated && anim.valid) {
+				const std::uint32_t sceneStep = Scene::FrameView::Get().SceneStep();
+				for (std::size_t i = 0; i < stamps.slots.size(); ++i)
+					if (const std::uint32_t root = stamps.slots[i]; root < a_rootSlots) {
+						animatedWords[root] = FadeAnimatedWord(sceneStep, stamps.counts[i]);
+						stamped.push_back(root);
+					}
 			}
-			std::sort(stamped.begin(), stamped.end());
 			TracyCZoneEnd(stampZone);
 			KeepAnimatedBatchForObserver(roots, anim);
 			// A version not filled yet gets the whole mirror.
@@ -255,10 +242,6 @@ namespace DCLF::Features::Fades
 				ZoneScopedN("CS.DCLF.Fade.UploadRoots");
 				UploadFadeRoots(adopted, a_commit.tables, a_commit.frame, inputs, buffers, uploads);
 			}
-			// Programs past the bucket scratch still get the same verdict, unbatched. This only reports the shortfall.
-			if (buffers.portalBatch)
-				Portals::CheckMainBatchCapacity(*buffers.portalBatch, a_commit.frame,
-					std::min(Draws::NamedUnits(adopted, buffers.portalBatch->counts), Draws::NamedUnits(adopted, buffers.portalBatch->offsets)) / 2);
 
 			Extensions::TableFamilySent(Extensions::RootStatesFamily(), buffers.FadeRootsContentEpoch(adopted));
 			{

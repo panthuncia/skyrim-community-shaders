@@ -1,4 +1,4 @@
-// DclfPortalBench: the portal culling variants (the production batch, inline evaluation, the hand-written flattened baseline and the
+// DclfPortalBench: the portal culling variants (the production inline evaluation, the hand-written flattened baseline and the
 // experimental evaluators) timed on the GPU over real and synthetic corpora, each variant's verdicts checked bit for bit against the
 // CPU oracle (PortalModel::Visible). See CMakeLists.txt for the build and docs/development/dclf-portal-query-batches.md for the results.
 //
@@ -20,11 +20,6 @@ namespace
 {
 	using namespace Bench;
 
-	enum class Kind
-	{
-		Inline,
-		Batch
-	};
 	enum class AuxKind
 	{
 		None,
@@ -35,33 +30,27 @@ namespace
 	{
 		const char* id;
 		const char* description;
-		Kind kind;
-		const char* evaluate;  // the inline or batch-evaluate SPIR-V
+		const char* evaluate;  // the SPIR-V
 		AuxKind aux;
 	};
 	constexpr Variant kVariants[]{
-		{ "V0", "floor: queries read, verdicts written, nothing evaluated", Kind::Inline, "inline-floor", AuxKind::None },
-		{ "V1", "production: batched by program, short-circuit interpreter", Kind::Batch, "batch-Evaluate", AuxKind::None },
-		{ "V2", "batched, uniform instruction scan", Kind::Batch, "batch-Evaluate-uniform", AuxKind::None },
-		{ "V3", "inline (one thread per query), short-circuit interpreter", Kind::Inline, "inline", AuxKind::None },
-		{ "V3u", "inline, uniform instruction scan", Kind::Inline, "inline-uniform", AuxKind::None },
-		{ "V4", "hand-written: flattened accepting paths, inline", Kind::Inline, "inline-flat", AuxKind::Flat },
-		{ "B1", "plane bits: distinct planes once, the program on bits, inline", Kind::Inline, "inline-planebits", AuxKind::PlaneBits },
-		{ "B1b", "plane bits, batched", Kind::Batch, "batch-Evaluate-planebits", AuxKind::PlaneBits },
+		{ "V0", "floor: queries read, verdicts written, nothing evaluated", "inline-floor", AuxKind::None },
+		{ "V3", "production: inline (one thread per query), short-circuit interpreter", "inline", AuxKind::None },
+		{ "V3u", "inline, uniform instruction scan", "inline-uniform", AuxKind::None },
+		{ "V4", "hand-written: flattened accepting paths, inline", "inline-flat", AuxKind::Flat },
+		{ "B1", "plane bits: distinct planes once, the program on bits, inline", "inline-planebits", AuxKind::PlaneBits },
 	};
 
 	/** @brief PortalBatchPass's constants (PortalBatchCS's cbuffer), with the bench's aux index. */
 	struct Constants
 	{
-		std::uint32_t queries, results, programs, counts, offsets, ranks, indices, tasks, dispatch;
-		std::uint32_t queryCount, bucketCount, base, elements, sumsBase, parentBase;
-		std::uint32_t latchIndex, latchOffset, auxIndex, padding[2];
+		std::uint32_t queries, results, programs, traces, queryCount;
+		std::uint32_t latchIndex, latchOffset, auxIndex, traceFrame, padding[3];
 	};
 	static_assert(sizeof(Constants) == Gpu::kConstantWords * 4);
 
 	struct Programs
 	{
-		GpuProgram stages[7];  // Clear .. MakeTasks
 		std::map<std::string, GpuProgram> evaluate;
 	};
 
@@ -141,12 +130,9 @@ namespace
 		Runner(Gpu& a_gpu, const Options& a_options) :
 			gpu(a_gpu), options(a_options)
 		{
-			const char* stages[]{ "Clear", "Count", "TaskCounts", "Scan", "AddOffsets", "Scatter", "MakeTasks" };
-			for (int s = 0; s < 7; ++s)
-				programs.stages[s] = gpu.Load(Spirv(std::string("batch-") + stages[s]), stages[s]);
 			for (const auto& v : kVariants)
 				if (!programs.evaluate.contains(v.evaluate))
-					programs.evaluate[v.evaluate] = gpu.Load(Spirv(v.evaluate), v.kind == Kind::Batch ? "Evaluate" : "Inline");
+					programs.evaluate[v.evaluate] = gpu.Load(Spirv(v.evaluate), "Inline");
 		}
 
 		void Run(const Corpus& a_corpus, std::FILE* a_csv)
@@ -170,17 +156,9 @@ namespace
 
 			gpu.ResetHeap();
 			const std::uint32_t queryCount = static_cast<std::uint32_t>(a_corpus.queries.size());
-			const std::uint32_t buckets = std::max(1u, s.programs);
-			const auto scan = DCLF::Portals::ScanFor(buckets);
 			const auto words = gpu.Create(a_corpus.words.size() * 4, 0, false, "programs");
 			const auto queries = gpu.Create(std::uint64_t(queryCount) * sizeof(Query), sizeof(Query), false, "queries");
 			const auto results = gpu.Create(std::uint64_t(queryCount) * 8, 8, true, "results");
-			const auto counts = gpu.Create(std::uint64_t(scan.units + 16) * 8, 8, true, "counts");
-			const auto offsets = gpu.Create(std::uint64_t(scan.units + 16) * 8, 8, true, "offsets");
-			const auto ranks = gpu.Create(std::uint64_t(queryCount) * 4, 4, true, "ranks");
-			const auto indices = gpu.Create(std::uint64_t(queryCount) * 4, 4, true, "indices");
-			const auto tasks = gpu.Create(std::uint64_t(queryCount + buckets + 1) * 16, 16, true, "tasks");
-			const auto dispatch = gpu.Create(16, 4, true, "dispatch");
 			const auto flatBuffer = gpu.Create(flat.size() * 4, 0, false, "flat");
 			const auto bitsBuffer = gpu.Create(bits.size() * 4, 0, false, "plane bits");
 			gpu.Upload(words, a_corpus.words.data(), a_corpus.words.size() * 4);
@@ -196,26 +174,15 @@ namespace
 				c.queries = queries.srv;
 				c.results = results.uav;
 				c.programs = words.srv;
-				c.counts = counts.uav;
-				c.offsets = offsets.uav;
-				c.ranks = ranks.uav;
-				c.indices = indices.uav;
-				c.tasks = tasks.uav;
-				c.dispatch = dispatch.uav;
 				c.queryCount = queryCount;
-				c.bucketCount = buckets;
 				c.auxIndex = v.aux == AuxKind::Flat ? flatBuffer.srv : v.aux == AuxKind::PlaneBits ? bitsBuffer.srv : 0u;
 				const auto& evaluate = programs.evaluate.at(v.evaluate);
 				const auto body = [&](rhi::CommandList& a_list) {
-					if (v.kind == Kind::Inline) {
-						const auto shape = DCLF::Portals::DispatchFor(queryCount, 64);
-						if (shape.x) {
-							gpu.Bind(a_list, evaluate, reinterpret_cast<const std::uint32_t*>(&c));
-							a_list.Dispatch(shape.x, shape.y, 1);
-						}
-						return;
+					const auto shape = DCLF::Portals::DispatchFor(queryCount, 64);
+					if (shape.x) {
+						gpu.Bind(a_list, evaluate, reinterpret_cast<const std::uint32_t*>(&c));
+						a_list.Dispatch(shape.x, shape.y, 1);
 					}
-					RecordBatch(a_list, c, scan, evaluate, Constants{ c }, indices, tasks, dispatch);
 				};
 				gpu.Upload(results, poison.data(), poison.size() * 4);
 				if (options.warmup)
@@ -255,44 +222,6 @@ namespace
 		std::uint32_t Failures() const { return failures; }
 
 	private:
-		/** @brief PortalBatchPass::Record: count, scan, scatter, tasks, then the evaluation through the indirect dispatch. */
-		void RecordBatch(rhi::CommandList& a_list, Constants a_c, const DCLF::Portals::BatchScan& a_scan, const GpuProgram& a_evaluate, Constants a_evaluateConstants,
-			const GpuBuffer& a_indices, const GpuBuffer& a_tasks, const GpuBuffer& a_dispatch) const
-		{
-			const auto dispatch = [&](std::size_t a_stage, std::uint32_t a_elements, std::uint32_t a_width = 64u) {
-				const auto shape = DCLF::Portals::DispatchFor(a_elements, a_width);
-				if (!shape.x)
-					return;
-				gpu.Bind(a_list, programs.stages[a_stage], reinterpret_cast<const std::uint32_t*>(&a_c));
-				a_list.Dispatch(shape.x, shape.y, 1);
-				Gpu::Barrier(a_list);
-			};
-			dispatch(0, a_c.bucketCount);
-			dispatch(1, a_c.queryCount);
-			dispatch(2, a_c.bucketCount);
-			const auto& levels = a_scan.levels;
-			for (std::size_t i = 0; i < levels.size(); ++i) {
-				a_c.base = levels[i].base;
-				a_c.elements = levels[i].elements;
-				a_c.sumsBase = i + 1 < levels.size() ? levels[i + 1].base : 0;
-				dispatch(3, a_c.elements, 256);
-			}
-			for (std::size_t i = levels.size() - 1; i > 0; --i) {
-				a_c.base = levels[i - 1].base;
-				a_c.elements = levels[i - 1].elements;
-				a_c.parentBase = levels[i].base;
-				dispatch(4, a_c.elements);
-			}
-			dispatch(5, a_c.queryCount);
-			dispatch(6, a_c.bucketCount);
-			// The evaluation pass reads the indices, tasks and dispatch words through their SRVs (PortalBatchPass's evaluate bindings).
-			a_evaluateConstants.indices = a_indices.srv;
-			a_evaluateConstants.tasks = a_tasks.srv;
-			a_evaluateConstants.dispatch = a_dispatch.srv;
-			gpu.Bind(a_list, a_evaluate, reinterpret_cast<const std::uint32_t*>(&a_evaluateConstants));
-			a_list.ExecuteIndirect(a_evaluate.dispatchSignature->GetHandle(), a_dispatch.resource->GetHandle(), 0, {}, 0, 1);
-		}
-
 		Gpu& gpu;
 		const Options& options;
 		Programs programs;

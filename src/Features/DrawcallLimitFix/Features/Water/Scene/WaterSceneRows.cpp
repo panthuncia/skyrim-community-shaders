@@ -251,11 +251,14 @@ namespace DCLF::Features::Water::WaterScene
 			std::uint32_t users = 0;
 		};
 
+		/** @brief A slot's water material as last resolved. Row 0 means the slot is not a member. */
 		struct MemberSlot
 		{
 			const RE::BSGeometry* geometry = nullptr;
+			const RE::BSShaderProperty* property = nullptr;
 			const void* material = nullptr;
 			std::uint32_t row = 0;
+			std::uint32_t at = 0;  // position in PoolState::members
 		};
 
 		struct PoolState
@@ -264,7 +267,8 @@ namespace DCLF::Features::Water::WaterScene
 			std::vector<MaterialEntry> rows = std::vector<MaterialEntry>(1);
 			std::vector<std::uint32_t> freeRows;
 			std::unordered_map<const void*, std::uint32_t> rowOf;
-			std::unordered_map<std::uint32_t, MemberSlot> members;
+			std::vector<MemberSlot> slots;      // by slot
+			std::vector<std::uint32_t> members;  // the slots with a row
 			Port::FrameInputs frame;
 			bool haveFrame = false;
 		};
@@ -304,13 +308,12 @@ namespace DCLF::Features::Water::WaterScene
 			a_state.freeRows.push_back(a_row);
 		}
 
-		/** @brief a_slot's water material now, or null when its geometry is not water. */
-		const void* WaterMaterialOf(const RE::BSGeometry* a_geometry)
+		/** @brief A property's water material now, or null when it is not a water property. */
+		const void* WaterMaterialOf(const RE::BSShaderProperty* a_property)
 		{
-			const auto* property = a_geometry ? a_geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
-			if (!property || property->GetRTTI() != Extensions::MaterialPorts()[kMaterialKindWater].rtti)
+			if (!a_property || a_property->GetRTTI() != Extensions::MaterialPorts()[kMaterialKindWater].rtti)
 				return nullptr;
-			return property->material;
+			return a_property->material;
 		}
 
 		void PutRow(const Api::ShadingFieldCapture& a_capture, std::uint32_t a_slot, std::uint32_t a_row)
@@ -324,22 +327,41 @@ namespace DCLF::Features::Water::WaterScene
 		bool ResolveSlot(PoolState& a_state, const Api::ShadingFieldCapture& a_capture, std::uint32_t a_slot)
 		{
 			auto* geometry = a_slot < a_capture.objectGeometry.size() ? a_capture.objectGeometry[a_slot] : nullptr;
-			const void* material = WaterMaterialOf(geometry);
-			const auto it = a_state.members.find(a_slot);
+			const auto* property = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+			if (a_state.slots.size() <= a_slot)
+				a_state.slots.resize(std::size_t(a_slot) + 1);
+			auto& member = a_state.slots[a_slot];
+			// The same water property keeps its type, so only its material can have changed.
+			if (member.row && member.geometry == geometry && member.property == property && property && property->material == member.material)
+				return true;
+			const void* material = WaterMaterialOf(property);
 			if (!material) {
-				if (it != a_state.members.end()) {
-					ReleaseRow(a_state, it->second.row);
-					a_state.members.erase(it);
+				if (member.row) {
+					ReleaseRow(a_state, member.row);
+					const std::uint32_t moved = a_state.members.back();
+					a_state.members[member.at] = moved;
+					a_state.slots[moved].at = member.at;
+					a_state.members.pop_back();
+					member = {};
 					PutRow(a_capture, a_slot, 0);
 				}
 				return false;
 			}
-			if (it != a_state.members.end() && it->second.geometry == geometry && it->second.material == material)
+			if (member.row && member.geometry == geometry && member.material == material) {
+				member.property = property;
 				return true;
+			}
 			const std::uint32_t row = AcquireRow(a_state, material);
-			if (it != a_state.members.end())
-				ReleaseRow(a_state, it->second.row);
-			a_state.members.insert_or_assign(a_slot, MemberSlot{ geometry, material, row });
+			if (member.row)
+				ReleaseRow(a_state, member.row);
+			else {
+				member.at = static_cast<std::uint32_t>(a_state.members.size());
+				a_state.members.push_back(a_slot);
+			}
+			member.geometry = geometry;
+			member.property = property;
+			member.material = material;
+			member.row = row;
 			PutRow(a_capture, a_slot, row);
 			return true;
 		}
@@ -352,13 +374,10 @@ namespace DCLF::Features::Water::WaterScene
 			state.haveFrame = true;
 			for (const auto slot : a_capture.changedObjects)
 				ResolveSlot(state, a_capture, slot);
-			// A material swap or a reused slot shows here even when its shading was not published again.
-			std::vector<std::uint32_t> slots;
-			slots.reserve(state.members.size());
-			for (const auto& [slot, member] : state.members)
-				slots.push_back(slot);
-			for (const auto slot : slots)
-				ResolveSlot(state, a_capture, slot);
+			// A material swap or a reused slot shows here even when its shading was not published again. A slot that leaves takes
+			// the last member's place, which this backward walk has already seen.
+			for (std::size_t i = state.members.size(); i-- > 0;)
+				ResolveSlot(state, a_capture, state.members[i]);
 		}
 
 		Api::FrameValuePoolId materialPool, framePool;  // install

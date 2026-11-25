@@ -14,31 +14,29 @@ namespace DCLF::Features::Portals
 	{
 		struct Constants
 		{
-			std::uint32_t queries, results, programs, counts, offsets, ranks, indices, tasks, dispatch;
-			std::uint32_t queryCount, bucketCount, base, elements, sumsBase, parentBase;
+			std::uint32_t queries, results, programs, traces, queryCount;
 			std::uint32_t latchIndex, latchOffset, aux;  // the depth latch, whose portalProgramsIndex names the programs
-			std::uint32_t traceFrame, padding;            // CS_DCLF_PORTAL_TRACE: the scene frame the pass prepared for
+			std::uint32_t traceFrame;                    // CS_DCLF_PORTAL_TRACE: the scene frame the pass prepared for
+			std::uint32_t padding[3];
 		};
-		static_assert(sizeof(Constants) == 80);
+		static_assert(sizeof(Constants) == 48);
 		constexpr std::uint32_t kConstantWords = sizeof(Constants) / 4;
 		struct Bindings
 		{
-			org::DeclaredViewToken queries, results, counts, offsets, ranks, indices, tasks, dispatch;
-			org::ResourceBindingToken indirect;
+			org::DeclaredViewToken queries, results, traces;
 		};
 		struct Prepared
 		{
 			std::shared_ptr<const Portals::Batch> batch;
 			std::shared_ptr<const org::LatchBlock> latch;
 			Constants constants{};
-			bool evaluate = false;
 		};
 
 		class BatchPass final : public org::TypedRenderGraphPass<BatchPass, Prepared, Bindings>
 		{
 		public:
-			BatchPass(std::shared_ptr<Draws::Resources> a_resources, std::shared_ptr<const Batch> a_batch, RenderGraphRuntime::Segment a_segment, bool a_evaluate) :
-				resources(std::move(a_resources)), batch(std::move(a_batch)), segment(a_segment), evaluate(a_evaluate) {}
+			BatchPass(std::shared_ptr<Draws::Resources> a_resources, std::shared_ptr<const Batch> a_batch, RenderGraphRuntime::Segment a_segment) :
+				resources(std::move(a_resources)), batch(std::move(a_batch)), segment(a_segment) {}
 
 			Bindings Declare(org::PassBuilder& a_builder)
 			{
@@ -50,27 +48,13 @@ namespace DCLF::Features::Portals
 				// The programs are declared through their late-bound buffer, because the pass may run on the compute queue and the depth commit's
 				// upload fills the backing in this execution.
 				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::Programs });
-				if (evaluate && b.inlineEvaluation) {
-					// One Inline dispatch: the queries and the results alone, and the trace (into the task buffer) when asked.
-					if (b.trace)
-						bindings.tasks = a_builder.UnorderedAccess(*b.tasks).View();
-				} else if (evaluate) {
-					bindings.dispatch = a_builder.ShaderResource(b.dispatch).View();
-					bindings.indices = a_builder.ShaderResource(*b.indices).View();
-					bindings.tasks = a_builder.ShaderResource(*b.tasks).View();
-					bindings.indirect = a_builder.IndirectArguments(b.dispatch);
-				} else {
-					bindings.counts = a_builder.UnorderedAccess(*b.counts).View();
-					bindings.offsets = a_builder.UnorderedAccess(*b.offsets).View();
-					bindings.ranks = a_builder.UnorderedAccess(*b.ranks).View();
-					bindings.indices = a_builder.UnorderedAccess(*b.indices).View();
-					bindings.tasks = a_builder.UnorderedAccess(*b.tasks).View();
-					bindings.dispatch = a_builder.UnorderedAccess(b.dispatch).View();
-				}
+				if (b.trace)
+					bindings.traces = a_builder.UnorderedAccess(*b.traces).View();
 				return bindings;
 			}
 
-			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(evaluate); }
+			// Opts into kept-recording reuse. Record depends on nothing beyond its bindings and the prepared constants.
+			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(batch->trace); }
 
 			Prepared Prepare(const Bindings&, const org::PassPrepareContext& a_preparation) const
 			{
@@ -80,13 +64,10 @@ namespace DCLF::Features::Portals
 					return prepared;
 				prepared.batch = batch;
 				prepared.latch = frame->latch;
-				prepared.evaluate = evaluate;
-				const auto& b = *prepared.batch;
 				auto& c = prepared.constants;
-				if (b.trace)
+				if (batch->trace)
 					c.traceFrame = Scene::FrameView::Get().SceneStep();
-				c.queryCount = static_cast<std::uint32_t>(Draws::NamedUnitsOf(a_preparation, b.queries));
-				c.bucketCount = static_cast<std::uint32_t>(std::min(Draws::NamedUnitsOf(a_preparation, b.counts), Draws::NamedUnitsOf(a_preparation, b.offsets)) / 2);
+				c.queryCount = static_cast<std::uint32_t>(Draws::NamedUnitsOf(a_preparation, batch->queries));
 				return prepared;
 			}
 
@@ -94,83 +75,36 @@ namespace DCLF::Features::Portals
 			{
 				if (!a_prepared.batch)
 					return;
-				const auto& batch = *a_prepared.batch;
-				auto& commands = a_recording.Commands();
 				auto c = a_prepared.constants;
+				const auto shape = DCLF::Portals::DispatchFor(c.queryCount, 64u);
+				if (!shape.x)
+					return;
 				// The stage's declared views (none declared: 0).
 				const auto index = [&](const org::DeclaredViewToken& token) { return token.layout ? a_recording.Index(token) : 0u; };
 				c.queries = index(a_bindings.queries);
 				c.results = index(a_bindings.results);
-				c.counts = index(a_bindings.counts);
-				c.offsets = index(a_bindings.offsets);
-				c.ranks = index(a_bindings.ranks);
-				c.indices = index(a_bindings.indices);
-				c.tasks = index(a_bindings.tasks);
-				c.dispatch = index(a_bindings.dispatch);
+				c.traces = index(a_bindings.traces);
 				Draws::SetLatchWords(c, *a_prepared.latch, a_recording.Run());
-				const auto bind = [&](std::size_t stage) {
-					const auto& program = *batch.programs[stage];
-					commands.BindLayout(program.layout->GetHandle());
-					commands.BindPipeline(program.Pipeline(a_recording));
-					commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, reinterpret_cast<const std::uint32_t*>(&c));
-				};
-				if (a_prepared.evaluate && batch.inlineEvaluation) {
-					const auto shape = DCLF::Portals::DispatchFor(c.queryCount, 64u);
-					if (!shape.x)
-						return;
-					bind(8);
-					commands.Dispatch(shape.x, shape.y, 1);
-					return;
-				}
-				if (a_prepared.evaluate) {
-					bind(7);
-					commands.ExecuteIndirect(batch.signature->GetHandle(), a_recording.Resolve(a_bindings.indirect).GetHandle(), 0, {}, 0, 1);
-					return;
-				}
-				const auto dispatch = [&](std::size_t stage, std::uint32_t elements, std::uint32_t width = 64u) {
-					const auto shape = DCLF::Portals::DispatchFor(elements, width);
-					if (!shape.x)
-						return;
-					bind(stage);
-					commands.Dispatch(shape.x, shape.y, 1);
-					const auto barrier = rhi::FullMemoryBarrier();
-					commands.Barriers(rhi::BarrierBatch{ {}, {}, { &barrier, 1 } });
-				};
-				dispatch(0, c.bucketCount);
-				dispatch(1, c.queryCount);
-				dispatch(2, c.bucketCount);
-				const auto scan = DCLF::Portals::ScanFor(c.bucketCount);
-				const auto& levels = scan.levels;
-				for (std::size_t i = 0; i < levels.size(); ++i) {
-					c.base = levels[i].base;
-					c.elements = levels[i].elements;
-					c.sumsBase = i + 1 < levels.size() ? levels[i + 1].base : 0;
-					dispatch(3, c.elements, 256);
-				}
-				for (std::size_t i = levels.size() - 1; i > 0; --i) {
-					c.base = levels[i - 1].base;
-					c.elements = levels[i - 1].elements;
-					c.parentBase = levels[i].base;
-					dispatch(4, c.elements);
-				}
-				dispatch(5, c.queryCount);
-				dispatch(6, c.bucketCount);
+				const auto& program = *a_prepared.batch->program;
+				auto& commands = a_recording.Commands();
+				commands.BindLayout(program.layout->GetHandle());
+				commands.BindPipeline(program.Pipeline(a_recording));
+				commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kConstantWords, reinterpret_cast<const std::uint32_t*>(&c));
+				commands.Dispatch(shape.x, shape.y, 1);
 			}
 
 		private:
 			std::shared_ptr<Draws::Resources> resources;
 			std::shared_ptr<const Batch> batch;
 			RenderGraphRuntime::Segment segment;
-			bool evaluate;
 		};
-
 	}
 
 	std::shared_ptr<org::RenderPass> MakeBatchPass(std::shared_ptr<Draws::Resources> a_resources, std::shared_ptr<const Batch> a_batch,
-		RenderGraphRuntime::Segment a_segment, bool a_evaluate)
+		RenderGraphRuntime::Segment a_segment)
 	{
-		if (!a_batch || (!a_evaluate && a_batch->inlineEvaluation))
+		if (!a_batch)
 			return nullptr;
-		return std::make_shared<BatchPass>(std::move(a_resources), std::move(a_batch), a_segment, a_evaluate);
+		return std::make_shared<BatchPass>(std::move(a_resources), std::move(a_batch), a_segment);
 	}
 }

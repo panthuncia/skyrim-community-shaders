@@ -34,7 +34,7 @@ def main():
     flags += ["-I", str(shader_root), "-I", str(root / "package/Shaders")]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     entries = {
-        "PortalBatchCS.hlsl": ["Clear", "Count", "TaskCounts", "Scan", "AddOffsets", "Scatter", "MakeTasks", "Evaluate", "Inline"],
+        "PortalBatchCS.hlsl": ["Inline"],
         "Features/Fades/FadeStateCS.hlsl": ["PreparePortalQueries", "main"],
         "BuildDrawsCS.hlsl": ["ClearPortalQueries", "PreparePortalQueries", "main", "ShadowViews"],
         "ParabolicQueriesCS.hlsl": ["main"],
@@ -46,11 +46,8 @@ def main():
             variants = [(False, False)]
             if source == "ParabolicQueriesCS.hlsl":
                 variants = [(False, False), (True, False)]
-            elif entry == "Evaluate":
+            elif source == "PortalBatchCS.hlsl":
                 variants = [(uniform, atlas) for uniform in [False, True] for atlas in [False, True]]
-            elif source == "PortalBatchCS.hlsl" and entry == "Count":
-                # Count evaluates past-capacity queries itself, with Evaluate's program addressing.
-                variants = [(False, False), (False, True)]
             for uniform, atlas in variants:
                 variant = ("uniform" if uniform else "independent") + ("-atlas" if atlas else "")
                 output = args.output_dir / f"{Path(source).stem}-{entry}-{variant}.spv"

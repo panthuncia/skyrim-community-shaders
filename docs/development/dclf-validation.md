@@ -109,7 +109,6 @@ The other switches a test run sets:
 | --- | --- | --- |
 | `CS_DISABLE_FEATURES` | `<short name>,...` | Those features are disabled at boot for this run only (the saved "Disable at Boot" settings are not changed). Read through `Switches::List` (`State.cpp`): the environment or `CommunityShaders.env`, never the switches file, so a scenario sets it and it does not carry over to later runs. Such a run compiles on demand: give its first shot `wait = "shaders"`. |
 | `CS_DCLF_LATE_POSE` | `0\|1` | `0`: the player's parts Improved Camera hides after the shadow maps are not looked for; `1`: they are looked for in first person without the plugin too. |
-| `CS_DCLF_PORTAL_EVALUATOR` | `inline\|batched` | Portal batches' evaluation: one dispatch (`inline`, the default) or by program (count, scan, scatter, evaluate). |
 | `CS_DCLF_TEX_STREAM_FULL` | `1` | Every texture window is the full chain, made as the texture loads (the streaming baseline). |
 | `CS_DCLF_TEX_STREAM_DELAY_MS` | `<ms>` | A delay before each background window build, to see late windows. |
 
