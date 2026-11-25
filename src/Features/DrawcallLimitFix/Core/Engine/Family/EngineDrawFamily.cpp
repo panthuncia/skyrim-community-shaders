@@ -421,8 +421,6 @@ namespace DCLF::Family
 	{
 		DCLF_ZONE("CS.DCLF.Family.SlotTexture");
 		auto& textures = GpuTextures::Get();
-		if (a_view && PublishedResources::IsExport(a_view))
-			return SlotResult::Published;
 		// A frame's draws mostly share their textures (water's distant tiles, the sky's layers), so a view resolves once a frame.
 		// The cache holds a reference to each view, so a freed view's address cannot name another texture within the frame.
 		struct Cached
@@ -447,6 +445,9 @@ namespace DCLF::Family
 						a_owners.push_back(entry.binding.owner);
 					return SlotResult::Ok;
 				}
+			// Only views that were no export are cached, so the export lookup runs once a view a frame.
+			if (PublishedResources::IsExport(a_view))
+				return SlotResult::Published;
 		}
 		auto binding = a_view ? textures.ResolveBinding(a_view, a_tag, a_failure) : textures.NullOf(a_kind);
 		if (a_view && binding.index != GpuTextures::kInvalid && !binding.pending && cache.size() < 256) {

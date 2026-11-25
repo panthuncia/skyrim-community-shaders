@@ -578,15 +578,13 @@ namespace DCLF::Features::Sky
 				if (nativeMode != Native::Mode::Off) {
 					auto* accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator);
 					const Native::BatchInputs inputs{ capture.view, capture.colourFormats, capture.depthFormat, a_flags, capture.run->physSky };
-					Family::Owners owners;
+					// The leases go straight to the run: a failed build's leases are only held a frame longer.
 					std::string why;
-					nativeBuilt = Native::BuildBatch(accumulator, inputs, native, owners, why) && native.size() <= kMaxLatched;
+					nativeBuilt = Native::BuildBatch(accumulator, inputs, native, capture.run->owners, why) && native.size() <= kMaxLatched;
 					if (!nativeBuilt) {
 						static Family::RefusalLog log("[DCLF] sky native: the batch stays the capture's");
 						log.Report(std::format("a {} batch", NameOf(capture.view)), why.empty() ? std::string("more draws than one run latches") : why);
 					}
-					for (auto& owner : owners)
-						capture.run->owners.push_back(std::move(owner));
 					// Drawn natively: the engine's call finds no sky pass to draw, and nothing is latched.
 					if (nativeBuilt && nativeMode == Native::Mode::Draw) {
 						capture.run->draws = std::move(native);
@@ -634,20 +632,19 @@ namespace DCLF::Features::Sky
 				bool nativeBuilt = false;
 				if (nativeMode != Native::Mode::Off && capture.run && capture.accumulator) {
 					const Native::BatchInputs inputs{ capture.view, capture.colourFormats, capture.depthFormat, a_flags, capture.run->physSky };
-					Family::Owners owners;
 					std::string why;
 					std::int32_t lastLayer = capture.lastCloudLayer;
-					nativeBuilt = Native::BuildClouds(static_cast<RE::BSShaderAccumulator*>(capture.accumulator), a_group, inputs, lastLayer, native, owners, why) &&
+					nativeBuilt = Native::BuildClouds(static_cast<RE::BSShaderAccumulator*>(capture.accumulator), a_group, inputs, lastLayer, native,
+									  capture.run->owners, why) &&
 					              capture.run->draws.size() + native.size() <= kMaxLatched;
 					if (!nativeBuilt) {
 						static Family::RefusalLog log("[DCLF] sky native: the cloud layers stay the capture's");
 						log.Report(std::format("a {} cloud group", NameOf(capture.view)), why.empty() ? std::string("more draws than one run latches") : why);
 					}
-					for (auto& owner : owners)
-						capture.run->owners.push_back(std::move(owner));
 					// Drawn natively: the engine's call draws only the sky-object effects at the group's head, and nothing is latched.
 					if (nativeBuilt && nativeMode == Native::Mode::Draw) {
 						auto& cloudShadows = globals::features::cloudShadows;
+						capture.run->draws.reserve(capture.run->draws.size() + native.size());
 						for (auto& draw : native) {
 							if (draw.occlusion)
 								cloudShadows.NoteGraphCloudLayer(static_cast<int>(capture.run->face), draw.layer);

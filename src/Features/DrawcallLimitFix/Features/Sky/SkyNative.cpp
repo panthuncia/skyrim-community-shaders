@@ -343,6 +343,34 @@ namespace DCLF::Features::Sky::Native
 			}
 		};
 
+		/**
+		 * @brief A draw's program key and programs, by what makes them: the engine's state objects, the descriptor, the targets.
+		 * Describing the states and finding the program take a map lookup each, and a frame's sky draws use a handful of keys. A
+		 * program is cached once built, and the program cache never drops one, so an entry stays right.
+		 */
+		struct ProgramInputs
+		{
+			const void* blend = nullptr;
+			const void* depthStencil = nullptr;
+			const void* raster = nullptr;
+			const RE::BSShader* shader = nullptr;
+			std::uint32_t descriptor = 0;
+			std::uint32_t variant = 0;
+			std::array<std::uint32_t, 4> colourFormats{};
+			std::uint32_t depthFormat = 0;
+			std::uint32_t occlusion = 0;
+			bool operator==(const ProgramInputs&) const = default;
+		};
+
+		struct CachedProgram
+		{
+			ProgramInputs inputs;
+			Family::ProgramKey key;
+			std::shared_ptr<const void> program, occlusionProgram;
+		};
+
+		std::vector<CachedProgram> s_programs;  // render thread
+
 		/** @brief A cloud layer's Cloud Shadows part (TryLatchDraw's): its face occlusion draw, or its own layer's self shadow. */
 		struct CloudPart
 		{
@@ -390,31 +418,60 @@ namespace DCLF::Features::Sky::Native
 			std::uint32_t vertexDescriptor = a_technique;
 			std::uint32_t pixelDescriptor = a_technique;
 			state->ModifyShaderLookup(*a_pass->shader, vertexDescriptor, pixelDescriptor);
-			a_draw.key.descriptor = pixelDescriptor;
-			a_draw.key.defineStage = Family::DefineStage::Pixel;
-			a_draw.key.variant = inputs.view != View::Main ? kVariantFaces : 0;
 			a_draw.stencilRef = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().stencilRef;
 			auto* depthStencil = Pipeline::EngineDepthStencilState(a_modes.depth, a_modes.stencil);
 			auto* blend = cloud.occlusion ? cloudShadows.cloudShadowBlendState :
 			                                Pipeline::EngineBlendState(a_modes.blend, a_modes.alphaToCoverage, a_modes.write, a_modes.blendExtra);
-			// Cloud Shadows binds no depth target for its occlusion draws (SkyShaderHacks).
-			if (!depthStencil || !Family::DescribeStates(a_draw.key, blend, cloud.occlusion ? nullptr : depthStencil,
-									 Pipeline::EngineRasterState(a_modes.fill, a_modes.cull, a_modes.depthBias, a_modes.scissor))) {
+			auto* raster = Pipeline::EngineRasterState(a_modes.fill, a_modes.cull, a_modes.depthBias, a_modes.scissor);
+			if (!depthStencil) {
 				a_why = "a state with no description";
 				return false;
 			}
+			ProgramInputs programInputs{ .blend = blend, .depthStencil = depthStencil, .raster = raster, .shader = a_pass->shader, .descriptor = pixelDescriptor,
+				.variant = inputs.view != View::Main ? kVariantFaces : 0u, .occlusion = cloud.occlusion ? 1u : 0u };
 			if (inputs.view == View::Main) {
-				std::copy(inputs.colourFormats.begin(), inputs.colourFormats.end(), a_draw.key.colourFormats.begin());
-				a_draw.key.depthFormat = inputs.depthFormat;
+				std::copy(inputs.colourFormats.begin(), inputs.colourFormats.end(), programInputs.colourFormats.begin());
+				programInputs.depthFormat = inputs.depthFormat;
 			} else {
-				a_draw.key.colourFormats = { inputs.colourFormats[0], cloud.occlusion ? static_cast<std::uint32_t>(rhi::helpers::ToRHI(DXGI_FORMAT_R8_UNORM)) : 0u, 0u, 0u };
-				a_draw.key.depthFormat = cloud.occlusion ? 0u : inputs.depthFormat;
+				programInputs.colourFormats = { inputs.colourFormats[0], cloud.occlusion ? static_cast<std::uint32_t>(rhi::helpers::ToRHI(DXGI_FORMAT_R8_UNORM)) : 0u, 0u,
+					0u };
+				programInputs.depthFormat = cloud.occlusion ? 0u : inputs.depthFormat;
 			}
-			bool building = false;
-			a_draw.program = SkyDraws::Program(a_draw.key, *a_pass->shader, &building);
-			if (!a_draw.program) {
-				a_why = building ? "a program still building" : "a program that cannot be built";
-				return false;
+			const auto cached = std::ranges::find(s_programs, programInputs, &CachedProgram::inputs);
+			if (cached != s_programs.end()) {
+				a_draw.key = cached->key;
+				a_draw.program = cached->program;
+				a_draw.occlusionProgram = cached->occlusionProgram;
+			} else {
+				a_draw.key.descriptor = programInputs.descriptor;
+				a_draw.key.defineStage = Family::DefineStage::Pixel;
+				a_draw.key.variant = programInputs.variant;
+				// Cloud Shadows binds no depth target for its occlusion draws (SkyShaderHacks).
+				if (!Family::DescribeStates(a_draw.key, blend, cloud.occlusion ? nullptr : depthStencil, raster)) {
+					a_why = "a state with no description";
+					return false;
+				}
+				a_draw.key.colourFormats = programInputs.colourFormats;
+				a_draw.key.depthFormat = programInputs.depthFormat;
+				bool building = false;
+				a_draw.program = SkyDraws::Program(a_draw.key, *a_pass->shader, &building);
+				if (!a_draw.program) {
+					a_why = building ? "a program still building" : "a program that cannot be built";
+					return false;
+				}
+				if (cloud.occlusion) {
+					auto occlusionKey = a_draw.key;
+					occlusionKey.maskedTargets = 1;
+					a_draw.occlusionProgram = SkyDraws::Program(occlusionKey, *a_pass->shader, &building);
+					if (!a_draw.occlusionProgram) {
+						a_why = building ? "an occlusion program still building" : "an occlusion program that cannot be built";
+						return false;
+					}
+				}
+				// Bounded: the states come from fixed engine tables, so only a changed target format makes new entries.
+				if (s_programs.size() >= 256)
+					s_programs.clear();
+				s_programs.push_back({ programInputs, a_draw.key, a_draw.program, a_draw.occlusionProgram });
 			}
 			if (cloud.occlusion) {
 				// Each face layer once, in engine order, so a later layer holds every earlier layer's occlusion.
@@ -424,13 +481,6 @@ namespace DCLF::Features::Sky::Native
 				}
 				a_draw.occlusion = true;
 				a_draw.layer = cloud.layer;
-				auto occlusionKey = a_draw.key;
-				occlusionKey.maskedTargets = 1;
-				a_draw.occlusionProgram = SkyDraws::Program(occlusionKey, *a_pass->shader, &building);
-				if (!a_draw.occlusionProgram) {
-					a_why = building ? "an occlusion program still building" : "an occlusion program that cannot be built";
-					return false;
-				}
 				*a_cloudLayers = cloud.layer;
 			}
 
@@ -559,6 +609,9 @@ namespace DCLF::Features::Sky::Native
 	{
 		DCLF_ZONE("CS.DCLF.Sky.Native.Build");
 		a_draws.clear();
+		// Each draw leases about eight owners (geometry, textures, samplers); a batch holds a dozen draws or so.
+		a_draws.reserve(16);
+		a_owners.reserve(a_owners.size() + 128);
 		auto* batch = BatchOf(a_accumulator);
 		if (!batch) {
 			a_why = "the accumulator has no batch renderer";
@@ -596,10 +649,8 @@ namespace DCLF::Features::Sky::Native
 						if (type == 0 || type == 6)
 							modes.blend = 2;
 					}
-					Draw draw{};
-					if (!BuildPass(frame, pass, technique, modes, nullptr, draw, a_owners, a_why))
+					if (!BuildPass(frame, pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why))
 						return false;
-					a_draws.push_back(std::move(draw));
 				}
 			}
 		}
@@ -611,6 +662,8 @@ namespace DCLF::Features::Sky::Native
 	{
 		DCLF_ZONE("CS.DCLF.Sky.Native.BuildClouds");
 		a_draws.clear();
+		a_draws.reserve(8);
+		a_owners.reserve(a_owners.size() + 64);
 		Frame frame;
 		if (!frame.Read(a_accumulator, a_inputs, a_why))
 			return false;
@@ -633,10 +686,8 @@ namespace DCLF::Features::Sky::Native
 				modes.Setup(technique);
 				current = technique;
 			}
-			Draw draw{};
-			if (!BuildPass(frame, pass, technique, modes, &lastLayer, draw, a_owners, a_why))
+			if (!BuildPass(frame, pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why))
 				return false;
-			a_draws.push_back(std::move(draw));
 		}
 		a_lastLayer = lastLayer;
 		return true;

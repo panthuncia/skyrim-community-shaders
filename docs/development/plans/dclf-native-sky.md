@@ -1,6 +1,6 @@
 # DCLF: the sky without draw capture
 
-Status: steps 1-3 done 2026-11-24 (batch and cloud layers native, the default); steps 4-5 open. Owner: the DCLF sky family (`src/Features/DrawcallLimitFix/Features/Sky/`). Background: [p5/sky.md](../p5/sky.md)
+Status: steps 1-3a done 2026-11-24 (batch and cloud layers native, the default); steps 4-5 open. Owner: the DCLF sky family (`src/Features/DrawcallLimitFix/Features/Sky/`). Background: [p5/sky.md](../p5/sky.md)
 (the reverse engineering and the capture path this replaces).
 
 ## Goal
@@ -114,8 +114,10 @@ layers after them are latched), and the native path draws the clouds and leaves 
 1. Done: pass reading and draw computation, observe mode, parity log.
 2. Done: native mode suppresses the engine's draws and submits the native run; screenshots match the capture path.
 3. Done: cloud layers native (group 13), with Cloud Shadows' layer bookkeeping.
-3a. Open: cut the native build's cost (0.25 ms in Dev-Fast): cache each pass's program key and texture slots by property, and
-   rebuild only the constants.
+3a. Done: the build's cost cut from 4.6% to 2.0% of the render thread (960x540, Dev-Fast). Program keys and programs are cached
+   by their inputs (the engine's state objects, descriptor, variant, targets); a texture slot's export lookup runs once a view a
+   frame; the draws are built in place and the leases go straight to the run. Left: texture slots (0.5%) and geometry leases
+   (0.3%), both already cached per frame.
 4. The sun occlusion query from Sun+0x28 without the engine's draw.
 5. Delete the sky's latch path once observe runs also cover rain, storms, the aurora and night faces.
 
