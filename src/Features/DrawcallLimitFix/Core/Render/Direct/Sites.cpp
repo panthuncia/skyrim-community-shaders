@@ -1793,19 +1793,26 @@ namespace DCLF::Direct
 			rows = FrameValues::Get().RowsIfDone(true);
 		}
 		if (rows) {
+			DCLF_ZONE("CS.DCLF.Cpu.ForwardRows");
 			if (slot->forwardRows.size() < rows->size())
 				slot->forwardRows.resize(rows->size());
+			const BindlessPlacement* source = rows->data();
+			const std::size_t sourceRows = rows->size();
+			ForwardSortRow* target = slot->forwardRows.data();
 			for (const ViewType type : { ViewType::Forward, ViewType::Refraction })
-				for (const auto& batch : slot->set->List(type))
+				for (const auto& batch : slot->set->List(type)) {
+					const auto* objects = batch.object;
 					for (std::uint32_t lane = 0; lane < batch.count; ++lane)
-						if (const std::uint32_t object = batch.object[lane]; object < rows->size())
-							slot->forwardRows[object] = (*rows)[object];
-			run->bindings.placements = slot->forwardRows;
-			run->refractionBindings.placements = slot->forwardRows;
+						if (const std::uint32_t object = objects[lane]; object < sourceRows)
+							target[object] = ForwardSortRowOf(source[object]);
+				}
+			run->bindings.sortRows = slot->forwardRows;
+			run->refractionBindings.sortRows = slot->forwardRows;
 		}
 		run->bindings.viewProj = run->forward->view.viewProj;
 		run->refractionBindings.viewProj = run->refractionView->view.viewProj;
 		run->refraction = a_refraction;
+		DCLF_ZONE("CS.DCLF.Cpu.ForwardHandOff");
 		if (slot->ownsEpochs) {
 			// The rows are in: the forward sorts may start once their culls are done.
 			ArriveStage(*slot, *run, *run->forward, false);

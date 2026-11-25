@@ -50,11 +50,15 @@ namespace DCLF::Features::Fades
 				counts.resize(a_rootSlots, 0u);
 			std::vector<std::uint32_t> stamped;
 			if (a_buffers.fadeAnimated && anim.valid) {
+				// A batch can hold many roots, so the loop reads through plain pointers.
+				const std::size_t slots = std::min({ std::size_t(a_rootSlots), batchRoots.rows.size(), batchRoots.nodes.size() });
+				const auto* nodes = batchRoots.nodes.data();
+				const auto* rows = batchRoots.rows.data();
+				auto* rootCounts = counts.data();
 				for (const auto& root : roots) {
-					if (root.slot >= a_rootSlots || root.slot >= batchRoots.rows.size() || root.slot >= batchRoots.nodes.size() ||
-						batchRoots.nodes[root.slot] != root.node || batchRoots.rows[root.slot].generation != root.generation)
+					if (root.slot >= slots || nodes[root.slot] != root.node || rows[root.slot].generation != root.generation)
 						continue;
-					if (counts[root.slot]++ == 0)
+					if (rootCounts[root.slot]++ == 0)
 						stamped.push_back(root.slot);
 				}
 			}
@@ -237,16 +241,25 @@ namespace DCLF::Features::Fades
 			auto& buffers = *fades;
 			const auto rootSlots = static_cast<std::uint32_t>(adopted.Of(buffers.fadeRoots).units);
 			FadeFrame inputs = buffers.fadeFrame;
-			if (buffers.fadeFrameNumber != a_commit.frame)
+			if (buffers.fadeFrameNumber != a_commit.frame) {
+				ZoneScopedN("CS.DCLF.Fade.SampleInputs");
 				SampleFadeInputs(adopted, uploads, buffers, rootSlots, inputs);
-			UploadFadeRoots(adopted, a_commit.tables, a_commit.frame, inputs, buffers, uploads);
+			}
+			{
+				ZoneScopedN("CS.DCLF.Fade.UploadRoots");
+				UploadFadeRoots(adopted, a_commit.tables, a_commit.frame, inputs, buffers, uploads);
+			}
 			// Programs past the bucket scratch still get the same verdict, unbatched. This only reports the shortfall.
 			if (buffers.portalBatch)
 				Portals::CheckMainBatchCapacity(*buffers.portalBatch, a_commit.frame,
 					std::min(Draws::NamedUnits(adopted, buffers.portalBatch->counts), Draws::NamedUnits(adopted, buffers.portalBatch->offsets)) / 2);
 
 			Extensions::TableFamilySent(Extensions::RootStatesFamily(), buffers.FadeRootsContentEpoch(adopted));
-			ArmFadeReadback(buffers, uploads);
+			{
+				ZoneScopedN("CS.DCLF.Fade.ArmReadback");
+				ArmFadeReadback(buffers, uploads);
+			}
+			ZoneScopedN("CS.DCLF.Fade.UploadPrograms");
 			UploadFadeRootPrograms(adopted, uploads, buffers);
 		}
 	}

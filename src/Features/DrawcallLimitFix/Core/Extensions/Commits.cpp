@@ -7,7 +7,9 @@ namespace DCLF::Extensions
 {
 	void RunCommitHooks(const Api::CommitContext& a_commit)
 	{
-		for (const auto& hook : RegisteredCommitHooks())
+		for (const auto& hook : RegisteredCommitHooks()) {
+			ZoneTransientN(hookZone, hook.name.data(), TracyIsConnected);  // the names are literals
 			hook.commit(a_commit);
+		}
 	}
 }
