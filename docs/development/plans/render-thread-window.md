@@ -100,3 +100,50 @@ before starting the ORG items: optimized ORG code shrinks those buckets about 3x
    - `ListJobsWait` (0.10): move frame-start work ahead of the wait on the engine's culling jobs.
    - The texture binding resolves (0.05): cache them per frame.
    - Measurement: drop `dxvk.enableDebugUtils` from the game folder's `dxvk.conf` unless a capture tool needs it.
+
+## Results (2026-11-25, items 1-5 done)
+
+Same capture as the baseline (guest, river, frozen, Dev-Fast, `CS_ENGINE_ZONES=1`), on org_integration a1a6625b8 / ORG
+358597f, with the machine idle:
+
+| Bucket | Before (ms) | After (ms) |
+|---|---|---|
+| Window | 6.53 | 4.86 |
+| ORG tickets | 3.59 | 2.44 |
+| Engine code | 1.25 | 0.94 (with 259 zoned sites instead of 136, so more profiler cost) |
+| DCLF CPU | 0.56 | 0.65 (reflection faces moved from the engine into DCLF) |
+| `Deferred::*` loops | 0.45 | 0.25 |
+| Other CS | 0.57 | 0.46 |
+| Not in any zone | 0.12 | 0.12 |
+
+What each lead did (notes in `perf-<name>.md` beside this file):
+
+- **Item 1, tickets** (`perf-tickets.md`): five CS stages now go to DXVK in one emission with the DCLF epoch they precede
+  (13.5 emissions a frame to 8.5). Tickets stay at 13.5: each graph still needs its own admission and commit, and merging
+  DCLF's graphs with CS's was ruled out earlier (phase epochs).
+- **Item 2, hazards** (`perf-hazards.md`): writer fingerprints, three captures per prediction slot, no source cap, quiet
+  grids skipped in stream commits. Full resolves 5.6 a frame to 0.1; hazard zones 0.97 to 0.35 ms.
+- **Item 3, uploads** (`perf-tickets.md`, `perf-smalls.md`): upload lists only for tickets with uploads (13.5 to 2 a
+  frame), upload uses kept per backing set.
+- **Item 4, DCLF inputs** (`perf-dclf-inputs.md`, `perf-commit-inputs.md`): feature loops skip empty callbacks, kept frame
+  texture answers, pool firsts skipped in a steady scene. The commit is not a pointer swap: what is left settles there.
+- **Item 5, engine work** (`perf-engine-skip.md`, `perf-reflections.md`, `perf-post-native.md`, `perf-post-slots.md`):
+  sun occlusion query native; water reflection faces native (`CS_DCLF_REFLECTION_NATIVE`); native post chain families
+  0-4 plus slot effects 1, 3 and 5 (`CS_ORG_POST_NATIVE`, AE native by default, SE opt-in); native clears for rt12 and
+  rt88.
+- **Leftovers** (`perf-smalls.md`): rebinding checks kept, latch copies only over live blocks, repeated texture index
+  lookups kept.
+
+Open:
+
+- Post chain slots 6 (full-screen blur) and 7 (get hit) still use the engine's RenderEffect; the underwater DoF forms
+  and LDR slots were never reached in an observe run.
+- SE: native post chain needs one observe run on a 1.5.97 game folder before it becomes SE's default.
+- Native reflection faces: about 0.1 ms of per-face lookups left (Physical Sky's `ResolveOrgHandles` per face, a per-face
+  D3D11 Tracy zone in `ReflectionsPrepasses`).
+- Engine self that is left: Scaleform HUD 0.13, shadow caster culling and shadow maps 0.10, image-space steps around the
+  world draw (AE 107146, SSAO, AE 107285) about 0.13.
+- Seen once each, not reproduced: a DCLF uncovered-epoch tap error after a Z-prepass rebuild (observe run), and a
+  device loss after a teleport with frame generation on (guest+fg).
+- `player.setpos` does not move the player in cs-test runs, so the underwater rt12 clear has no readback yet.
+- Confirm the ranking in an optimized build: CS and ORG code shrinks about 3x there, the engine does not.
