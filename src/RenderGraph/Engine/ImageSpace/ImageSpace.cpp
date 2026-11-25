@@ -2601,7 +2601,21 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			// The slot effects CS stages natively: Render (slot 1) and UpdateParams (slot 7) must be the game's or CS's (Legacy Graphics
 			// Compatibility wraps the depth of field's Render).
-			for (const std::uint32_t slot : { 1u, 3u, 5u }) {
+			const auto foreignSlot = [&](std::uint32_t a_slot, std::string a_why) {
+				config.foreignSlots |= static_cast<std::uint8_t>(1u << a_slot);
+				logger::warn("[ORG] native post chain: {}; the engine's RenderEffect draws end-of-frame slot {}", a_why, a_slot);
+			};
+			// The full-screen blur's and get hit's Render hold CS's slot guard, which calls the code it replaced.
+			for (const auto& [slot, replaced] : { std::pair{ 6u, SlotEffectRender<6>::func.address() }, std::pair{ 7u, SlotEffectRender<7>::func.address() } })
+				if (const auto target = FollowJumps(replaced); replaced && !InModule(target, GetModuleHandleW(nullptr)) && !InModule(target, OwnModule()))
+					foreignSlot(slot, fmt::format("its Render under CS's guard leads to {:#x}, another module", target));
+			// Their blurs (effects 9 to 15) must keep the engine's UpdateParams.
+			for (std::uint32_t r = 0; r < 7; ++r)
+				if (const auto why = ForeignSlot(fmt::format("the slot blur effect {}", r), effect(9 + r), 7, REL::RelocationID(101560, 108558).address()); !why.empty()) {
+					foreignSlot(6, why);
+					foreignSlot(7, why);
+				}
+			for (const std::uint32_t slot : { 1u, 3u, 5u, 6u, 7u }) {
 				const auto* object = effect(slot);
 				if (!object)
 					continue;
