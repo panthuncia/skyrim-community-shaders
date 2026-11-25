@@ -386,3 +386,15 @@ Lighting on.
 7. The world map and FXAA: native, or left on the engine path with the menus.
 8. Should the write-back of the adapted texture be replaced by routing DCLF's Lighting and the sun query to CS's target directly
    (fewer engine writes, but the captured sun query still needs the engine pointer)?
+
+## Decisions (2026-11-25, main session; the user delegated them)
+
+1. Read points: A and B. B goes away once lens flares and VL Render leave the engine.
+2. Parity: match vanilla, including the end-of-frame camera and the vanilla jitter sequence.
+3. Jitter: CS owns it for every method.
+4. Foreign hooks: decided per family at setup. A family whose container prologue or effect vtable slot holds a foreign hook stays
+   on the engine path, with one log line naming the hook. Nothing switches at runtime.
+5. First milestone: families 0-4 (the Post stage). The Deferred containers come later.
+6. The lead answers it from Ghidra (xrefs to manager +0x3C/+0x40/+0x60/+0x54) and records the readers here.
+7. The world map and FXAA stay on the engine path. A frame that needs either runs the end-of-frame family on the engine.
+8. Keep the write-back of the adapted texture.
