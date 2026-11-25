@@ -252,21 +252,21 @@ void Skin::Prepass()
 	}
 	characterRevision = characters->revision;
 	for (auto& [geometry, entry] : geometries) {
-		if (entry.actor && !SkinSurfaces::Belongs(geometry, entry.actor.get().get())) {
+		if ((entry.actor && !SkinSurfaces::Belongs(geometry, entry.actor.get().get())) || !SkinMaterials::IsCompatible(entry.property.get())) {
+			preparedRevision += entry.ready;
 			entry.ready = false;
 			continue;
 		}
-		if (!SkinMaterials::IsCompatible(entry.property.get())) {
-			entry.ready = false;
-			continue;
-		}
-		if (!entry.ready || entry.revision != revision || entry.characterRevision != characters->revision)
+		if (!entry.ready || entry.revision != revision || entry.characterRevision != characters->revision) {
 			Prepare(entry, *characters);
+			++preparedRevision;
+		}
 	}
 	for (auto& [path, entry] : textures) {
 		if (!entry->prepared) {
 			entry->resource = SkinTextures::Load(path);
 			entry->prepared = true;
+			++preparedRevision;
 		}
 	}
 	const auto frame = globals::state->frameCount;
@@ -345,6 +345,18 @@ Skin::GeometryMaterial Skin::ResolveGeometryMaterial(RE::BSGeometry* a_geometry,
 			(!entry.target.empty() && entry.target == editor.draftTarget.key)))
 		result.previewWetness = editor.previewWetness;
 	return result;
+}
+
+uint64_t Skin::MaterialRevision()
+{
+	std::lock_guard lock(mutex);
+	MaterialInputs inputs{ revision, characterRevision, preparedRevision, settings.EnableSkin, settings.DefaultProfile, settings.ExtraSkinWetness, settings.WetParams,
+		editor.open, editor.previewWetness, editor.draftKey, editor.draftTarget.key };
+	if (inputs != materialInputs) {
+		materialInputs = std::move(inputs);
+		++materialRevision;
+	}
+	return materialRevision;
 }
 
 void Skin::BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass)

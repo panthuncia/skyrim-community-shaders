@@ -102,6 +102,11 @@ struct Skin : Feature
 	 * whose draws never reach SetupGeometry. Observes the geometry, so a new one is prepared at the next Prepass. Render thread.
 	 */
 	GeometryMaterial ResolveGeometryMaterial(RE::BSGeometry* a_geometry, RE::BSShaderProperty* a_property);
+	/**
+	 * @brief Changes whenever ResolveGeometryMaterial could return something else for a geometry whose property, material,
+	 * textures and parent are unchanged. Drawcall Limit Fix keeps a geometry's material until it changes. Render thread.
+	 */
+	uint64_t MaterialRevision();
 	/// The detail normal sampler (s15) that SetupResources creates.
 	static D3D11_SAMPLER_DESC DetailSamplerDesc();
 	/// What the last SetupGeometry uploaded to b7, for Drawcall Limit Fix's parity checks. Render thread.
@@ -226,6 +231,21 @@ private:
 	Editor editor;
 	uint64_t revision = 1;
 	uint64_t characterRevision = 0;
+	uint64_t preparedRevision = 0;  ///< Counts Prepass's changes to geometry entries and textures.
+	/// What ResolveGeometryMaterial reads besides a geometry's entry, as MaterialRevision last saw it.
+	struct MaterialInputs
+	{
+		uint64_t revision = 0, characterRevision = 0, preparedRevision = 0;
+		bool enableSkin = false;
+		SkinMaterials::Parameters defaultProfile;
+		float extraSkinWetness = 0.0f;
+		float4 wetParams;
+		bool editorOpen = false;
+		float previewWetness = -1.0f;
+		std::string draftKey, draftTarget;
+		bool operator==(const MaterialInputs&) const = default;
+	} materialInputs;
+	uint64_t materialRevision = 0;
 	bool texturesDirty = false;
 	uint32_t lastPrune = 0;
 
