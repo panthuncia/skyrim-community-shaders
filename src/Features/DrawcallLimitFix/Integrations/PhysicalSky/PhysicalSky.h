@@ -52,14 +52,22 @@ namespace DCLF::Integrations::PhysicalSky
 		GpuTextures::ViewKind::Texture2D, GpuTextures::ViewKind::Texture2D, GpuTextures::ViewKind::Texture3D, GpuTextures::ViewKind::Texture2D,
 		GpuTextures::ViewKind::Cube, GpuTextures::ViewKind::Cube };
 
-	/** @brief PhysSkyOrgHandles (Common/PhysicalSkyOrgHandles.hlsli): the textures' heap indices, then SampTr and SampSv. */
+	/**
+	 * @brief PhysSkyOrgHandles (Common/PhysicalSkyOrgHandles.hlsli): the textures' heap indices, SampTr and SampSv, then Atmosphere and
+	 * Fog's medium (luminance, transmittance, parameters). Physical Sky's header asks the medium whether it replaces the aerial
+	 * perspective and the AP shadow, so a draw that reads Physical Sky needs it too.
+	 */
 	struct OrgHandles
 	{
 		std::array<std::uint32_t, 16> textures{};
 		std::array<std::uint32_t, 4> samplers{};
+		std::array<std::uint32_t, 4> medium{};
 		bool operator==(const OrgHandles&) const = default;
 	};
-	static_assert(sizeof(OrgHandles) == 80, "PhysSkyOrgHandles' layout");
+	static_assert(sizeof(OrgHandles) == 96, "PhysSkyOrgHandles' layout");
+
+	/** @brief The medium ids an engine draw family's client lists: the main view's, or with a_faces the reflection faces'. */
+	std::vector<std::string> OrgMediumIds(bool a_faces = false);
 
 	/**
 	 * @brief Render thread. The view a graph draw reads at kOrgTextureRegisters[a_slot]: a LUT's export, or a zero view of its kind.
@@ -73,9 +81,11 @@ namespace DCLF::Integrations::PhysicalSky
 	/**
 	 * @brief Render thread, per batch. An engine draw family's handles: OrgView's views, each published one by a_read and any other
 	 * imported, and ORGPhysicalSky's samplers. All zero while Physical Sky is not loaded, since no shader then declares them.
+	 * The medium is the main view's, or with a_faces the reflection faces'; null views (no medium) while it is not published.
 	 * False with a_why when one cannot be read. The batch then stays the engine's.
 	 */
-	bool ResolveOrgHandles(OrgHandles& a_out, std::vector<std::shared_ptr<const void>>& a_owners, const ReadPublished& a_read, std::string& a_why);
+	bool ResolveOrgHandles(OrgHandles& a_out, std::vector<std::shared_ptr<const void>>& a_owners, const ReadPublished& a_read, std::string& a_why,
+		bool a_faces = false);
 
 	Api::Feature Integration();
 }

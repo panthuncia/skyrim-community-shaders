@@ -255,7 +255,7 @@ namespace DCLF::Features::Sky
 				return result == Family::InputResult::Graph;
 			};
 			std::string why;
-			if (!Integrations::PhysicalSky::ResolveOrgHandles(a_run.physSky, a_run.owners, readPhysSky, why)) {
+			if (!Integrations::PhysicalSky::ResolveOrgHandles(a_run.physSky, a_run.owners, readPhysSky, why, a_view == View::Face)) {
 				Refusals().Report(std::format("a {} batch", NameOf(a_view)), why);
 				return false;
 			}

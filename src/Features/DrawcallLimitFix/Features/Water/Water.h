@@ -128,7 +128,7 @@ namespace DCLF::Features::Water
 		std::uint32_t padding2[2];
 		Integrations::PhysicalSky::OrgHandles physSky;  // the run's, the same for every draw
 	};
-	static_assert(sizeof(DrawConstants) == 1232, "WaterOrgDraw's layout");
+	static_assert(sizeof(DrawConstants) == 1248, "WaterOrgDraw's layout");
 
 	/** @brief Light Limit Fix's PS b3 (StrictLightDataValues), 1232 bytes. */
 	inline constexpr std::size_t kStrictLightBytes = 1232;
@@ -143,7 +143,7 @@ namespace DCLF::Features::Water
 		std::byte strictLights[kStrictLightBytes];
 		std::byte directionalShadow[kDirectionalShadowBytes];
 	};
-	static_assert(sizeof(DrawLatch) == 2736 && sizeof(DrawLatch) % 16 == 0, "a draw's latch region keeps 16-byte rows");
+	static_assert(sizeof(DrawLatch) == 2752 && sizeof(DrawLatch) % 16 == 0, "a draw's latch region keeps 16-byte rows");
 
 	struct Draw
 	{

@@ -399,12 +399,14 @@ namespace DCLF::Features::Sky::SkyDraws
 		 * @brief Every published id a view's draws can read, listed at setup.
 		 * Exporting an id not listed here is refused and logged once. Add the id here.
 		 */
-		void ListInputs(Family::PublishedInputs& a_inputs)
+		void ListInputs(Family::PublishedInputs& a_inputs, View a_view)
 		{
 			constexpr std::array<std::uint32_t, kHeaderRegisters.size() + 1> kRegisters{ kHeaderRegisters[0], kHeaderRegisters[1], kHeaderRegisters[2],
 				kHeaderRegisters[3], 17 };
 			a_inputs.Add(Family::RegisteredIdsAt(kRegisters));
 			a_inputs.Add(Family::RegisteredIdsAt(Integrations::PhysicalSky::kOrgTextureRegisters));
+			// The faces read the reflection medium, which their stage follows; the main view reads the main medium.
+			a_inputs.Add(Integrations::PhysicalSky::OrgMediumIds(a_view == View::Face));
 		}
 
 		DrawsState& GetState()
@@ -477,7 +479,7 @@ namespace DCLF::Features::Sky::SkyDraws
 				}
 			}
 			if (a_shape.view != View::Sun)
-				ListInputs(client->inputs);
+				ListInputs(client->inputs, a_shape.view);
 			if (a_shape.view == View::Main && a_shape.cloudShadows)
 				for (std::uint32_t l = 0; l < kCloudLayers; ++l)
 					client->inputs.Add(ORGCloudShadows::PublishedLayerId(static_cast<int>(l)));

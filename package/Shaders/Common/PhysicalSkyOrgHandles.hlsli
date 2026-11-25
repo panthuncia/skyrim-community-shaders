@@ -9,9 +9,13 @@ struct PhysSkyOrgHandles
 {
 	uint4 Textures[4];  // t61, t62, t63, t64, t66, t67, t69, t106, t109, t110, t111, t112, t113, t114, t115, unused
 	uint4 Samplers;     // SampTr, SampSv, unused, unused
+	uint4 Medium;       // Atmosphere and Fog's luminance, transmittance and parameters (Common/ViewAtmosphere.hlsli), unused
 };
 
 #if defined(CS_ORG_BINDLESS)
+// Physical Sky's header asks ViewAtmosphere::Enabled() whether the medium replaces its aerial perspective and AP shadow, so the
+// draws read the medium through these handles, as D3D11 binds it at t125-t127.
+#	define VIEW_ATMOSPHERE_ORG_HANDLES
 // Declares OrgHandle_<name> for each of Physical Sky's header resources from H, a PhysSkyOrgHandles.
 #	define PHYS_SKY_ORG_HANDLES(H)                                   \
 		static uint OrgHandle_TexTrLut = H.Textures[0].x;              \
@@ -30,7 +34,10 @@ struct PhysSkyOrgHandles
 		static uint OrgHandle_TexVolCubeTr = H.Textures[3].y;          \
 		static uint OrgHandle_TexVolCubeLum = H.Textures[3].z;         \
 		static uint OrgHandle_SampTr = H.Samplers.x;                   \
-		static uint OrgHandle_SampSv = H.Samplers.y;
+		static uint OrgHandle_SampSv = H.Samplers.y;                   \
+		static uint OrgHandle_ViewAtmosphereLuminance = H.Medium.x;    \
+		static uint OrgHandle_ViewAtmosphereTransmittance = H.Medium.y; \
+		static uint OrgHandle_ViewAtmosphereData = H.Medium.z;
 #endif
 
 #endif  // __PHYSICAL_SKY_ORG_HANDLES_DEPENDENCY_HLSL__

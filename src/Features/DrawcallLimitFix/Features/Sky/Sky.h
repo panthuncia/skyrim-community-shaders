@@ -78,7 +78,7 @@ namespace DCLF::Features::Sky
 		std::uint32_t samplers[4];  // s0-s2
 		Integrations::PhysicalSky::OrgHandles physSky;  // the run's, the same for every draw
 	};
-	static_assert(sizeof(DrawConstants) == 432, "SkyOrgDraw's layout");
+	static_assert(sizeof(DrawConstants) == 448, "SkyOrgDraw's layout");
 	static_assert(offsetof(DrawConstants, vertexRef) == 288 && offsetof(DrawConstants, textures) == 320, "SkyOrgDraw's rows");
 
 	/** @brief The bytes of the vertex stage's PerGeometry the latch takes (c0 to c16.xy). */

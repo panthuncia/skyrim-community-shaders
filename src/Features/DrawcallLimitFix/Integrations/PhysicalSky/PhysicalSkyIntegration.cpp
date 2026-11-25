@@ -13,6 +13,8 @@
 #include "Features/PhysicalSky.h"
 #include "Features/PhysicalSky/ORGPhysicalSky.h"
 #include "Features/PhysicalSky/ORGVolumetricClouds.h"
+#include "Features/ViewAtmosphere/ORGViewAtmosphere.h"
+#include "Features/ViewAtmosphere/ORGViewAtmosphereReflection.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/PublishedResources.h"
 
@@ -148,11 +150,60 @@ namespace DCLF::Integrations::PhysicalSky
 		return nullptr;
 	}
 
-	bool ResolveOrgHandles(OrgHandles& a_out, std::vector<std::shared_ptr<const void>>& a_owners, const ReadPublished& a_read, std::string& a_why)
+	std::vector<std::string> OrgMediumIds(bool a_faces)
+	{
+		if (a_faces)
+			return { std::string(ORGViewAtmosphereReflection::kLuminanceId), std::string(ORGViewAtmosphereReflection::kTransmittanceId),
+				std::string(ORGViewAtmosphereReflection::kParametersId) };
+		return { std::string(ORGViewAtmosphere::kLuminanceId), std::string(ORGViewAtmosphere::kTransmittanceId), std::string(ORGViewAtmosphere::kParametersId) };
+	}
+
+	namespace
+	{
+		/**
+		 * @brief The medium's handles, as DCLF's frame textures at t104, t107 and t108 pick them: the main medium while it is published,
+		 * the reflection medium (published at setup, its parameters saying no medium on runs it does not run) for the faces, else null
+		 * views, which read as no medium.
+		 */
+		bool ResolveMedium(OrgHandles& a_out, std::vector<std::shared_ptr<const void>>& a_owners, const ReadPublished& a_read, std::string& a_why, bool a_faces)
+		{
+			const bool published = a_faces ? PublishedResources::IsPublished(ORGViewAtmosphereReflection::kParametersId) : ORGViewAtmosphere::Get().MediumPublished();
+			if (published) {
+				const std::array<std::string_view, 3> main{ ORGViewAtmosphere::kLuminanceId, ORGViewAtmosphere::kTransmittanceId, ORGViewAtmosphere::kParametersId };
+				const std::array<std::string_view, 3> faces{ ORGViewAtmosphereReflection::kLuminanceId, ORGViewAtmosphereReflection::kTransmittanceId,
+					ORGViewAtmosphereReflection::kParametersId };
+				const auto& ids = a_faces ? faces : main;
+				for (std::size_t i = 0; i < ids.size(); ++i) {
+					std::string why;
+					if (!a_read(ids[i], a_out.medium[i], why)) {
+						a_why = std::format("Atmosphere and Fog's '{}': {}", ids[i], why);
+						return false;
+					}
+				}
+				return true;
+			}
+			const std::array<GpuTextures::ViewKind, 3> kinds{ GpuTextures::ViewKind::Texture3D, GpuTextures::ViewKind::Texture3D, GpuTextures::ViewKind::Buffer };
+			for (std::size_t i = 0; i < kinds.size(); ++i) {
+				auto binding = GpuTextures::Get().NullOf(kinds[i]);
+				if (binding.index == GpuTextures::kInvalid) {
+					a_why = "Atmosphere and Fog's medium has no null view";
+					return false;
+				}
+				a_out.medium[i] = binding.index;
+				if (binding.owner)
+					a_owners.push_back(std::move(binding.owner));
+			}
+			return true;
+		}
+	}
+
+	bool ResolveOrgHandles(OrgHandles& a_out, std::vector<std::shared_ptr<const void>>& a_owners, const ReadPublished& a_read, std::string& a_why, bool a_faces)
 	{
 		a_out = {};
 		if (!globals::features::physicalSky.loaded)
 			return true;
+		if (!ResolveMedium(a_out, a_owners, a_read, a_why, a_faces))
+			return false;
 		for (std::size_t i = 0; i < kOrgTextureRegisters.size(); ++i) {
 			const std::uint32_t r = kOrgTextureRegisters[i];
 			const auto tag = GpuTextures::Tag(GpuTextures::Source::FamilyHeader, 4 + static_cast<std::uint32_t>(i));
