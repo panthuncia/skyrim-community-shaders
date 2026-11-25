@@ -1380,6 +1380,154 @@ namespace RenderGraph::Engine::ImageSpace
 			return passes.front().make();
 		}
 
+		/**
+		* @brief ImageSpace steps without the engine's draw (docs/development/plans/dclf-native-imagespace.md). CS_ORG_IMAGESPACE_NATIVE:
+		* 0, the capture (the engine draws, its state is applied and its constants captured); 1, observe: as 0, and each covered draw's
+		* rows are also computed from the engine's param and compared with the capture; 2 (default), draw: those draws are staged
+		* from the computed rows, and the engine's Render returns at once.
+		*/
+		namespace NativeSteps
+		{
+			enum class Mode : std::uint8_t
+			{
+				Off,
+				Observe,
+				Draw,
+				Hybrid,  // 3, a diagnostic: the computed rows are staged at the engine's draw, and the engine's Render still runs
+			};
+
+			Mode s_mode = Mode::Off;
+
+			/** @brief The PerFrame bytes a step reads (FrameBuffer, c0-c44). */
+			constexpr std::uint32_t kFrameBytes = static_cast<std::uint32_t>(sizeof(globals::game::frameBufferCached.data));
+
+			/** @brief A draw's PerGeometry (PS b2) as the engine's SetupGeometry would write it, and which rows it wrote. */
+			struct Rows
+			{
+				std::array<std::byte, 1024> bytes{};
+				std::uint32_t size = 0;  // 0: the engine writes no PerGeometry rows for it
+				std::array<std::uint8_t, 64> offsets{};  // each written row's offset in floats
+				std::uint32_t count = 0;
+			};
+
+			struct State
+			{
+				bool armed = false;  // StageStep stages rows from here, not from a capture
+				bool observing = false;  // StageStep compares the capture with rows
+				Rows rows;
+				std::size_t effect = 0;
+				// The PerFrame bytes uploaded last, reused while they do not change.
+				std::array<std::byte, kFrameBytes> frame{};
+				Constants::Location frameAt;
+				std::uint64_t frameAtFrame = ~0ull;
+				std::uint64_t taken = 0, compared = 0, differed = 0, declined = 0;
+			};
+
+			State& Get()
+			{
+				static State state;
+				return state;
+			}
+
+			/** @brief The one pixel shader of an ImageSpace shader, or null. Its table places the param's rows. */
+			const RE::BSGraphics::PixelShader* PixelShaderOf(const RE::BSImagespaceShader& a_shader)
+			{
+				const RE::BSGraphics::PixelShader* found = nullptr;
+				for (const auto& entry : a_shader.pixelShaders) {
+					if (found)
+						return nullptr;
+					found = entry;
+				}
+				return found;
+			}
+
+			/**
+			* @brief The rows the generic SetupGeometry (AE 0x1414f8500) copies into PS b2: the param's pixel constants (+0x40), one float4 per
+			* name the shader lists (+0x160), each at its offset in the pixel shader's table. None when the shader's +0x1A0 is set.
+			*/
+			const char* BuildRows(const RE::BSImagespaceShader& a_shader, const void* a_param, Rows& a_out)
+			{
+				a_out = {};
+				const auto* base = reinterpret_cast<const std::byte*>(&a_shader);
+				if (*reinterpret_cast<const bool*>(base + 0x1A0))
+					return nullptr;
+				const auto count = *reinterpret_cast<const std::uint32_t*>(base + 0x160);
+				if (count == 0)
+					return nullptr;
+				if (count > a_out.offsets.size())
+					return "more pixel constants than a table holds";
+				const auto* param = static_cast<const RE::ImageSpaceShaderParam*>(a_param);
+				if (!param || !param->pixelConstantGroup)
+					return "a param with no pixel constants";
+				const auto* pixel = PixelShaderOf(a_shader);
+				if (!pixel)
+					return "not exactly one pixel shader";
+				for (std::uint32_t row = 0; row < count; ++row) {
+					const auto offset = static_cast<std::uint8_t>(pixel->constantTable[row]);
+					const auto end = (offset + 4u) * 4u;
+					if (end > a_out.bytes.size())
+						return "a constant past the rows a step holds";
+					std::memcpy(a_out.bytes.data() + offset * 4u, param->pixelConstantGroup + row * 4u, 16);
+					a_out.offsets[row] = offset;
+					a_out.size = (std::max)(a_out.size, (end + 15u) & ~15u);
+				}
+				a_out.count = count;
+				return nullptr;
+			}
+
+			/** @brief The PerFrame bytes for a step: CS's FrameBuffer, uploaded again only when it changed. */
+			Constants::Location FrameLocation()
+			{
+				auto& native = Get();
+				const auto frame = Frame::Driver::Current().frame;
+				const auto& now = globals::game::frameBufferCached.data;
+				if (native.frameAt.owner && native.frameAtFrame == frame && std::memcmp(native.frame.data(), &now, kFrameBytes) == 0)
+					return native.frameAt;
+				std::memcpy(native.frame.data(), &now, kFrameBytes);
+				native.frameAt = Constants::Upload(native.frame);
+				native.frameAtFrame = frame;
+				return native.frameAt;
+			}
+
+			Util::ReasonLog& Differences()
+			{
+				static Util::ReasonLog log("[ORG] ImageSpace native: a step's rows differ from the capture", spdlog::level::warn);
+				return log;
+			}
+
+			/** @brief Observe mode: the captured PerGeometry and PerFrame against the computed ones. Only the rows the engine writes are compared. */
+			void Compare(std::size_t a_effect, std::span<const std::byte> a_pixel, std::span<const std::byte> a_frame)
+			{
+				auto& native = Get();
+				const auto& rows = native.rows;
+				++native.compared;
+				std::string differences;
+				for (std::uint32_t row = 0; row < rows.count; ++row) {
+					const auto at = rows.offsets[row] * 4u;
+					for (std::uint32_t c = 0; c < 4; ++c) {
+						float computed = 0.0f, captured = 0.0f;
+						std::memcpy(&computed, rows.bytes.data() + at + c * 4, 4);
+						if (at + c * 4 + 4 <= a_pixel.size())
+							std::memcpy(&captured, a_pixel.data() + at + c * 4, 4);
+						if (std::memcmp(&computed, &captured, 4) != 0 && differences.size() < 400)
+							differences += fmt::format(" c{}.{} {} vs {}", at / 16, "xyzw"[c], computed, captured);
+					}
+				}
+				for (std::uint32_t word = 0; word < kFrameBytes / 4; ++word) {
+					float computed = 0.0f, captured = 0.0f;
+					std::memcpy(&computed, native.frame.data() + word * 4, 4);
+					if (word * 4 + 4 <= a_frame.size())
+						std::memcpy(&captured, a_frame.data() + word * 4, 4);
+					if (std::memcmp(&computed, &captured, 4) != 0 && differences.size() < 600)
+						differences += fmt::format(" frame c{}.{} {} vs {}", word / 4, "xyzw"[word % 4], computed, captured);
+				}
+				if (!differences.empty()) {
+					++native.differed;
+					Differences().Report(kEffects[a_effect].effectName, fmt::format("computed vs captured:{}", differences));
+				}
+			}
+		}
+
 		/** @brief Writes each pending draw's constants location into the latch and opens its gate entry. */
 		void CommitBatch(const std::vector<Pending>& a_batch, org::LatchBlock& a_latch, RunGate& a_gate)
 		{
@@ -1464,6 +1612,11 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			Flush();
 			state.frame = frame;
+			if (NativeSteps::s_mode != NativeSteps::Mode::Off && frame % 1000 == 0) {
+				const auto& native = NativeSteps::Get();
+				logger::info("[ORG] ImageSpace native: {} steps staged natively, {} compared ({} differed), {} declined", native.taken, native.compared, native.differed,
+					native.declined);
+			}
 			// Last frame's post segments were submitted at their end taps, so their constant chunks are no longer read.
 			state.postKeep.clear();
 		}
@@ -1806,6 +1959,131 @@ namespace RenderGraph::Engine::ImageSpace
 			state.callShaders.pop_back();
 		}
 
+		/**
+		* @brief Whether the current effect's draw can be staged without the engine's (NativeSteps): a covered, eligible quad draw of a world,
+		* start or post chain step whose step is found from engine globals alone. Steps that read the engine's bound state to find their
+		* pass or inputs (lens flares, image-based flares, geometry and loaded-texture steps, menus) stay the capture's.
+		*/
+		const char* NativeStepNow()
+		{
+			const auto& state = IS();
+			if (NativeSteps::s_mode == NativeSteps::Mode::Off)
+				return "off";
+			if (!state.current || !state.current->covered)
+				return "an effect CS does not cover";
+			if (!state.current->eligible || state.current->compute)
+				return "a draw the capture refuses";
+			const auto& info = kEffects[state.current->effect];
+			if (info.geometry || info.rastersNothing || info.latched || info.vertexStage)
+				return "a geometry, loaded-texture or no-raster step";
+			using E = Effects;
+			switch (info.id) {
+			case E::ISLensFlare:
+			case E::ISLensFlareVisibility:
+			case E::ISDownsample:
+			case E::ISDownsampleCS:
+			case E::ISIBLensFlares:
+			case E::ISBlur:
+			case E::ISCopyDynamicFetchDisabled:
+				return "a lens flare or image-based flare step";
+			default:
+				break;
+			}
+			// TakeDraw's order: a lens flare first, then the start, world and post chain steps. A menu step is what is left.
+			if (LensFlareStepNow(state.current->effect))
+				return "a lens flare step";
+			if (StartStepScope() != WorldScope::None || WorldStepScope() != WorldScope::None || ChainStepNow())
+				return nullptr;
+			return "a menu step or outside every step";
+		}
+
+		/**
+		* @brief The shadow state base Render (AE 0x1414f88b0) leaves behind, without its draw: the effect's output (its first texture,
+		* ImageSpaceEffect +0x48 -> ImageSpaceTexture +0x8) as render target 0 (77456), the other targets and the depth target unbound.
+		* Later engine and CS code reads the current target (the Scaleform displays, the end-of-frame copies), so a native step keeps it.
+		*/
+		void KeepRenderTargets(const RE::BSImagespaceShader* a_shader)
+		{
+			const auto* effect = static_cast<const RE::ImageSpaceEffect*>(a_shader);
+			const auto* const* textures = *reinterpret_cast<RE::ImageSpaceTexture* const* const*>(reinterpret_cast<const std::byte*>(effect) + 0x48);
+			if (!textures || !textures[0])
+				return;
+			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto output = textures[0]->renderTarget;
+			bool changed = shadow.renderTargets[0] != output || shadow.setRenderTargetMode[0] != RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
+			shadow.renderTargets[0] = output;
+			shadow.setRenderTargetMode[0] = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
+			for (std::uint32_t i = 1; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
+				changed |= shadow.renderTargets[i] != RE::RENDER_TARGET::kNONE || shadow.setRenderTargetMode[i] != RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
+				shadow.renderTargets[i] = RE::RENDER_TARGET::kNONE;
+				shadow.setRenderTargetMode[i] = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
+			}
+			if (shadow.depthStencil != static_cast<std::uint32_t>(-1)) {
+				shadow.depthStencil = static_cast<std::uint32_t>(-1);
+				changed = true;
+			}
+			if (changed) {
+				shadow.cubeMapRenderTarget = static_cast<std::uint32_t>(-1);
+				shadow.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+			}
+		}
+
+		/**
+		* @brief The engine's Render for the current effect, or its native step. Draw mode stages the step from the param's rows and skips
+		* the engine's call; observe mode computes the rows, lets the capture take the draw and compares them.
+		*/
+		void RenderOrNative(const RE::BSImagespaceShader* a_shader, const void* a_param, const std::function<void()>& a_render)
+		{
+			auto& native = NativeSteps::Get();
+			if (const char* why = NativeStepNow()) {
+				if (NativeSteps::s_mode != NativeSteps::Mode::Off && IS().current) {
+					static Util::ReasonLog s_capture("[ORG] ImageSpace native: a draw is captured");
+					s_capture.Report(fmt::format("{}: {}", kEffects[IS().current->effect].effectName, why));
+				}
+				a_render();
+				return;
+			}
+			if (const char* why = NativeSteps::BuildRows(*a_shader, a_param, native.rows)) {
+				++native.declined;
+				static Util::ReasonLog s_declined("[ORG] ImageSpace native: a step stays the capture's");
+				s_declined.Report(why, kEffects[IS().current->effect].effectName);
+				a_render();
+				return;
+			}
+			native.effect = IS().current->effect;
+			if (NativeSteps::s_mode == NativeSteps::Mode::Observe) {
+				native.observing = true;
+				a_render();
+				native.observing = false;
+				return;
+			}
+			if (NativeSteps::s_mode == NativeSteps::Mode::Hybrid) {
+				native.armed = true;
+				a_render();
+				native.armed = false;
+				return;
+			}
+			// Base Render (AE 0x1414f88b0) runs the shader's PreRender before its draw and PostRender after; an effect's own work can
+			// live there (nested steps take their own draws in the engine's order).
+			auto* shader = const_cast<RE::BSImagespaceShader*>(a_shader);
+			KeepRenderTargets(a_shader);
+			shader->PreRender();
+			native.effect = IS().current->effect;
+			native.armed = true;
+			TakeDraw();
+			native.armed = false;
+			shader->PostRender();
+			static std::array<bool, kEffects.size()> s_logged{};
+			if (!std::exchange(s_logged[native.effect], true)) {
+				const auto* param = static_cast<const std::byte*>(a_param);
+				const bool clear = param && *reinterpret_cast<const bool*>(param + 0xC);
+				const float* colour = param ? reinterpret_cast<const float*>(param + 0x10) : nullptr;
+				logger::info("[ORG] ImageSpace native: first {} staged natively (clear {}{}, keeps viewport {}, param {})", kEffects[native.effect].effectName, clear,
+					clear ? fmt::format(" to {} {} {} {}", colour[0], colour[1], colour[2], colour[3]) : std::string(),
+					*(reinterpret_cast<const bool*>(a_shader) + 0x90 + 0x88), a_param != nullptr);
+			}
+		}
+
 		/** @brief BSImagespaceShader::Render (100950 / 107732). */
 		struct ShaderRender
 		{
@@ -1821,7 +2099,8 @@ namespace RenderGraph::Engine::ImageSpace
 				const bool covered = EffectOf(shader) >= 0;
 				EngineCall(shader, [&] {
 					const bool scoped = InScope(shader, [&] {
-						WithEffect(shader, false, covered ? Ineligible(a_quad, kEffects[static_cast<std::size_t>(EffectOf(shader))].geometry) : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+						WithEffect(shader, false, covered ? Ineligible(a_quad, kEffects[static_cast<std::size_t>(EffectOf(shader))].geometry) : std::string_view{},
+							[&] { RenderOrNative(shader, a_param, [&] { func(a_effect, a_quad, a_param); }); });
 					});
 					if (!scoped)
 						func(a_effect, a_quad, a_param);
@@ -2076,6 +2355,17 @@ namespace RenderGraph::Engine::ImageSpace
 	{
 		if (!Engine::GraphMode())
 			return;
+		{
+			const auto value = Switches::Value("CS_ORG_IMAGESPACE_NATIVE");
+			NativeSteps::s_mode = value == "0" ? NativeSteps::Mode::Off :
+			                      value == "1" ? NativeSteps::Mode::Observe :
+			                      value == "3" ? NativeSteps::Mode::Hybrid :
+			                                     NativeSteps::Mode::Draw;
+			logger::info("[ORG] ImageSpace native: CS_ORG_IMAGESPACE_NATIVE={} ({})", value.empty() ? std::string("2, the default") : value,
+				NativeSteps::s_mode == NativeSteps::Mode::Off     ? "every step captured" :
+				NativeSteps::s_mode == NativeSteps::Mode::Observe ? "param steps computed and compared with the capture" :
+				                                                    "param steps staged from the engine's params, without its draw");
+		}
 		stl::detour_thunk<ShaderRender>(REL::RelocationID(100950, 107732));
 		stl::detour_thunk<HDRRender>(REL::RelocationID(100465, 107183));
 		stl::detour_thunk<PreTonemapComposites>(REL::RelocationID(99024, 105675));

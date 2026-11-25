@@ -285,7 +285,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		variant = instance;
 	}
 	// Checked once a session. A difference means our RE of the update is wrong.
-	if (start.scope == WorldScope::WaterDisplacement) {
+	if (start.scope == WorldScope::WaterDisplacement && !NativeSteps::Get().armed) {
 		const auto bound = static_cast<std::int32_t>(RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().renderTargets[0]);
 		const auto planned = static_cast<std::int32_t>(variant >> 8);
 		static bool logged = false;

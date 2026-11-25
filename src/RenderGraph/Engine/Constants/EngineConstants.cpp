@@ -262,6 +262,24 @@ namespace RenderGraph::Engine::Constants
 				return { mirrors[a_slot.chunk].get() + a_slot.offset, a_slot.size };
 			}
 
+			/** @brief Copies a_bytes into this frame's ring, padded to whole rows. Empty when inactive. */
+			Location Upload(std::span<const std::byte> a_bytes)
+			{
+				if (!Active() || !FrameAnchors::IsRenderOwner() || a_bytes.empty())
+					return {};
+				const auto size = static_cast<std::uint32_t>((a_bytes.size() + kAlignment - 1) & ~std::size_t(kAlignment - 1));
+				std::array<std::byte, 4096> padded{};
+				if (size > padded.size())
+					return {};
+				std::memcpy(padded.data(), a_bytes.data(), a_bytes.size());
+				const auto at = Copy(padded.data(), size);
+				if (!at)
+					return {};
+				bytesThisFrame += size;
+				const auto& region = frameChunks[at->first]->region;
+				return { region, region->srvIndex, static_cast<std::uint32_t>(region->offset) + at->second, size };
+			}
+
 			Location Where(const SlotConstants& a_slot) const
 			{
 				if (a_slot.chunk >= frameChunks.size())
@@ -767,6 +785,8 @@ namespace RenderGraph::Engine::Constants
 	std::span<const std::byte> Bytes(const SlotConstants& a_slot) { return Tracker::Get().Bytes(a_slot); }
 
 	Location Where(const SlotConstants& a_slot) { return Tracker::Get().Where(a_slot); }
+
+	Location Upload(std::span<const std::byte> a_bytes) { return Tracker::Get().Upload(a_bytes); }
 
 	ID3D11Buffer* EngineComputeBuffer()
 	{

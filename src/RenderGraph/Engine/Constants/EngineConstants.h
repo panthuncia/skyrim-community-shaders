@@ -102,6 +102,12 @@ namespace RenderGraph::Engine::Constants
 	Location Where(const SlotConstants& a_slot);
 
 	/**
+	* @brief Copies bytes a consumer computed itself into this frame's ring, padded to whole rows (at most 4 KiB). The same frame
+	* lifetime as a capture's Location. Empty when inactive.
+	*/
+	Location Upload(std::span<const std::byte> a_bytes);
+
+	/**
 	* @brief The engine's CS b0 buffer, possibly a tripwire handle. A consumer that withholds a dispatch must bind it, unwrapped,
 	* before Capture, since the withheld DispatchCSShader would have. Null before the pools exist.
 	*/

@@ -1112,6 +1112,22 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 		}
 		pending.at = { .srv = at.srvIndex, .offset = at.offset, .size = at.size };
 		blocks.push_back(at.owner);
+	} else if (auto& native = NativeSteps::Get(); native.armed) {
+		// Native: the rows the engine's SetupGeometry would write and CS's FrameBuffer, with no engine state applied.
+		const auto frameAt = NativeSteps::FrameLocation();
+		const auto rowsAt = native.rows.size ? Constants::Upload({ native.rows.bytes.data(), native.rows.size }) : frameAt;
+		if (!frameAt.owner || !rowsAt.owner) {
+			RenderGraph::Fatal(kEffects[a_effect].effectName, "its computed constants have no ring chunk");
+		}
+		pending.at = { .srv = rowsAt.srvIndex, .offset = rowsAt.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = native.rows.size,
+			.frameSize = frameAt.size };
+		blocks.push_back(rowsAt.owner);
+		blocks.push_back(frameAt.owner);
+		++native.taken;
+		if (a_spec && a_spec->latchViewport) {
+			pending.at.viewport = RenderViewportOf(*a_spec);
+			pending.vertices = 6;
+		}
 	} else {
 		setDirtyStates(false);
 		const auto use = Constants::Capture(Constants::kDrawStages);
@@ -1124,6 +1140,11 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 		const auto at = slot ? Constants::Where(*slot) : frameAt;
 		if (!at.owner || !frameAt.owner) {
 			RenderGraph::Fatal(kEffects[a_effect].effectName, "its captured constants have no ring chunk");
+		}
+		if (native.observing && native.effect == a_effect) {
+			NativeSteps::FrameLocation();
+			NativeSteps::Compare(a_effect, slot ? Constants::Bytes(*slot) : std::span<const std::byte>{}, Constants::Bytes(*frameSlot));
+			native.observing = false;
 		}
 		pending.at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = slot ? at.size : 0u,
 			.frameSize = frameAt.size };
@@ -1156,6 +1177,9 @@ bool StageStep(PostClient& a_client, std::uint32_t a_entry, const Spec* a_spec, 
 */
 void CheckStepState(std::size_t a_effect, const Spec& a_spec, const std::array<std::int32_t, kMaxTargets>& a_targets)
 {
+	// A native step applies no engine state, so there is nothing bound to compare.
+	if (NativeSteps::Get().armed)
+		return;
 	static std::set<std::size_t> checked;
 	if (!checked.insert(a_effect).second)
 		return;

@@ -1335,6 +1335,16 @@
 			"description": ""
 		},
 		{
+			"name": "CS_ORG_IMAGESPACE_NATIVE",
+			"key": "",
+			"type": "string",
+			"default": "2",
+			"choices": ["0", "1", "2", "3"],
+			"kind": "other",
+			"family": "org",
+			"description": "0: ImageSpace steps captured; 1: param steps also computed and compared; 2: param steps staged without the engine's draw; 3: diagnostic, computed rows staged at the engine's draw"
+		},
+		{
 			"name": "CS_ORG_FOG_DEBUG",
 			"key": "",
 			"type": "string",
