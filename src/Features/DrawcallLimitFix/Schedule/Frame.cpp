@@ -136,7 +136,7 @@ namespace DCLF::Schedule
 			{ .id = "fp.depth", .label = "first-person depth", .trigger = "depth.committed", .segment = SegmentOf(Segment::ZPrepass), .shape = Api::EpochShape::View, .shapeIndex = ViewOf(Api::EngineView::FirstPerson), .hostedBy = "main.depth" },
 			{ .id = "fp.colour", .label = "first-person colour", .trigger = "fp.colour-render", .segment = SegmentOf(Segment::FirstPerson), .shape = Api::EpochShape::View, .shapeIndex = ViewOf(Api::EngineView::FirstPerson), .sharesWith = "fp.depth", .passes = kFirstPersonColour },
 			// The water's mask and surface. They draw what the colour commit culled, and only they draw their members, so they decide
-			// the frame's claims too. Without CS_DCLF_WATER their passes are absent, so they are dormant.
+			// the frame's claims too. Without water their passes do nothing.
 			{ .id = "water.mask", .label = "water mask", .trigger = "water.mask-batch", .segment = SegmentOf(Segment::WaterMask), .shape = Api::EpochShape::Main, .shapeIndex = MainOf(Api::MainShape::Colour), .sharesWith = "main.colour", .claims = true, .passes = kWaterMask },
 			{ .id = "water.surface", .label = "water surface", .trigger = "water.surface-batch", .segment = SegmentOf(Segment::WaterSurface), .shape = Api::EpochShape::Main, .shapeIndex = MainOf(Api::MainShape::Colour), .sharesWith = "main.colour", .claims = true, .passes = kWaterSurface },
 		};
