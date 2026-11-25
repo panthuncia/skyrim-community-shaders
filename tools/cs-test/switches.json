@@ -885,16 +885,6 @@
 			"description": "1: DCLF's tree LOD colour draws write solid magenta, so screen captures find its pixels"
 		},
 		{
-			"name": "CS_DCLF_WATER",
-			"key": "",
-			"type": "string",
-			"default": "",
-			"choices": [],
-			"kind": "feature",
-			"family": "dclf",
-			"description": "0: nothing of it is registered, and the batch hooks draw all water; 1: water shapes are DCLF scene objects: tracked under the water roots (WaterLOD, the water system's root), classified by the water port and counted by the water census, but not claimed, so the batch hooks still draw them (dclf-water-indirect.md, phase 1); 2 (default): as 1, and plain water is claimed and drawn by DCLF's water.mask and water.surface epochs, the rest staying the batch hooks' (phases 2 and 3): in GPU-driven frames by the deferred range passes, in CPU-driven frames by the CPU pipeline's water sites; 3: as 2, but CPU-driven frames leave all water to the batch hooks"
-		},
-		{
 			"name": "CS_DISABLE_FEATURES",
 			"key": "cs.disable_features",
 			"type": "string",

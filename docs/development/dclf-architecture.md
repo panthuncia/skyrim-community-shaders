@@ -2340,7 +2340,7 @@ Effect meshes under one billboard node are turned per draw on the GPU (Features/
 
 Objects the colour segment culls once and a later epoch draws (`Api/DeferredRanges.h`, `Core/Extensions/DeferredRanges.cpp`,
 `Core/Render/Passes/DeferredRanges.cpp`). Water is the only user (docs/development/plans/dclf-water-indirect.md): range 0 is
-its mask, range 1 its surface, registered with `CS_DCLF_WATER` 1 or 2.
+its mask, range 1 its surface.
 -   **Which objects.** A key of a program family built as `ProgramBuild::DeferredRanges` (`ProgramFamily::Water`: key bit 18,
     `kRasterWater`). `MainMaskOf` gives its object `kViewWater` alone: never a depth segment input, so never in the HZB. The family
     rule `deferredRanges` keeps its keys out of the Z-prepass buckets, the state classes and the main and terrain plain buckets.
@@ -2375,8 +2375,7 @@ its mask, range 1 its surface, registered with `CS_DCLF_WATER` 1 or 2.
     water stage opens with the steps after the mask; the surface epoch ends that and post-water opens. Group 10's water is the
     latch path's in the water stage, before DCLF's surface. Under water the blended draw (which taps deferred+water, water and
     post-water) comes before the surface batch, so the surface epoch ends the sun stage only if it holds work
-    (`commitBeforeIfStaged`), and sun water takes the rest. In frames with no water epoch nothing splits, so `CS_DCLF_WATER=0`
-    keeps today's tickets.
+    (`commitBeforeIfStaged`), and sun water takes the rest. In frames with no water epoch nothing splits.
 -   **With no members** nothing is planned, no sequence is written and no pass records, and the colour commit zeroes four more count
     words.
 -   **Not in the CPU-driven pipeline.** Its lanes take no `kViewWater` input, so a member would draw nowhere there.

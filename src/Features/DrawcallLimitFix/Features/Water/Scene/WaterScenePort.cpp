@@ -5,7 +5,7 @@
 //   into its values. kUnderwater is left out, since GetRenderPasses writes it from the camera every frame.
 // - derive: Port::DeriveRenderPasses with a frame-free input, so a classification never depends on the camera. The key's
 //   descriptors are the surface pass's: raw, and as CS's ModifyShaderLookup leaves them. The stencil index rides in the key's
-//   spare bits (WaterScene.h). Plain water is claimed only with CS_DCLF_WATER=2 while the water epochs draw it (Indirect::DrawnInput);
+//   spare bits (WaterScene.h). Plain water is claimed only while the water epochs draw it (Indirect::DrawnInput);
 //   otherwise it returns WaterUnclaimed. The rest is WaterVariant.
 // - evaluate: Port::EvaluateMaterial with a neutral frame, and SetupMaterial's textures. The frame's values are in the water
 //   material pool (WaterSceneRows.cpp), which the shader reads instead.
@@ -210,7 +210,7 @@ namespace DCLF::Features::Water::WaterScene
 			out.familyKeyBits = static_cast<std::uint8_t>(StencilIndexOf(c.stencilBit));
 			// Plain water is drawn by DCLF only with the claim switch and while its epochs draw it. The CPU-driven pipeline has no
 			// water range, so the input is off there and the batch hooks keep the water.
-			a_derivation.reason = Claims() && Extensions::ClassifyInputOn(Indirect::DrawnInput()) ? Ineligible::None : Ineligible::WaterUnclaimed;
+			a_derivation.reason = Extensions::ClassifyInputOn(Indirect::DrawnInput()) ? Ineligible::None : Ineligible::WaterUnclaimed;
 		}
 
 		std::uint32_t WaterVariants(const Api::MaterialPortDerivation& a_derivation)

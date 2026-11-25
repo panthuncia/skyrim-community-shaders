@@ -126,7 +126,7 @@ namespace DCLF::Features::Water::Indirect
 			if (!waterDrawer.load(std::memory_order_acquire))
 				return false;
 			// CPU-driven frames draw claimed water in the water family's anchor pass (Draws::TakeCpuRange), once its client is up.
-			if (WaterScene::ClaimsInCpuFrames() && WaterDraws::Available())
+			if (WaterDraws::Available())
 				return true;
 			return !Draws::CpuPipelineForced() && !Draws::GraphBuiltForCpu() && !CpuPipelineFor(Toggles::Get().Active(), waterInterior.load(std::memory_order_relaxed));
 		}
@@ -199,8 +199,6 @@ namespace DCLF::Features::Water::Indirect
 
 	void Register(Api::InstallContext& a_context)
 	{
-		if (!WaterScene::On())
-			return;
 		a_context.RegisterProgramFamily({
 			.family = Api::ProgramFamily::Water,
 			.shaderType = static_cast<std::uint8_t>(RE::BSShader::Type::Water),
