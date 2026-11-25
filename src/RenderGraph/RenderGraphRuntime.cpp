@@ -1251,6 +1251,7 @@ struct RenderGraphRuntime::Impl
 	// DXVK's stream signals streamPoint here, after every D3D11 command so far and ahead of the epoch's graph work.
 	bool EnqueueStreamPoint()
 	{
+		ZoneScopedN("CS.ORG.StreamPoint");
 		const VkSemaphoreSubmitInfo signal{ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, streamPoint, streamPointValue + 1,
 			VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0 };
 		DxvkOrgInteropSubmission submission{};
@@ -1464,6 +1465,7 @@ struct RenderGraphRuntime::Impl
 		// On a copy queue shared with the uploader, only the render thread's submissions are the graph's.
 		const bool copy = a_queue == self->copyQueue && (a_queue != self->uploadQueue || ::GetCurrentThreadId() == self->streamThread.load(std::memory_order_relaxed));
 		if (copy || a_queue == self->computeQueue) {
+			ZoneScopedN("CS.ORG.OffStreamSubmit");
 			if (::GetCurrentThreadId() != self->streamThread.load(std::memory_order_relaxed)) {
 				// Its entry point is a position in DXVK's stream, which only the D3D11 thread can take.
 				logger::error("[ORG] A {}-queue submission came from a thread other than the render thread", copy ? "copy" : "compute");
