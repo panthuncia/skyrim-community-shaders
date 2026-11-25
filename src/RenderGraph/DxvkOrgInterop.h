@@ -261,6 +261,16 @@ struct DxvkOrgInteropExternalCommands
 	const char* label;  // optional debug label region around the commands; copied
 };
 typedef HRESULT(__stdcall* PFN_dxvkEmitExternalCommands)(ID3D11Device* pDevice, const DxvkOrgInteropExternalCommands* pCommands);
+// A place in the D3D11 stream for external commands known only later (dxvkEmitDeferredExternalCommands). The callback runs once on
+// DXVK's worker thread, in stream order, and may block until it knows them. It records any number of external commands through the
+// recorder, each as dxvkEmitExternalCommands would have; with split, DXVK ends and submits its command list first.
+struct DxvkOrgInteropStreamRecorder
+{
+	void* context;
+	HRESULT (*record)(void* context, const DxvkOrgInteropExternalCommands* pCommands, VkBool32 split);
+};
+typedef void (*PFN_dxvkOrgInteropDeferredCallback)(void* user, const DxvkOrgInteropStreamRecorder* pRecorder);
+typedef HRESULT(__stdcall* PFN_dxvkEmitDeferredExternalCommands)(ID3D11Device* pDevice, PFN_dxvkOrgInteropDeferredCallback pCallback, void* pUser);
 // On DXVK's worker thread: onEnd records into each command buffer right before it ends, onBegin into the next right
 // after it begins, so that what a client opened in one stays balanced across DXVK's flushes. Null clears them.
 typedef HRESULT(__stdcall* PFN_dxvkSetCommandBufferBoundaryCallbacks)(ID3D11Device* pDevice, PFN_dxvkOrgInteropCommandBufferCallback pOnEnd,

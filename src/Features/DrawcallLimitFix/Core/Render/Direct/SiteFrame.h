@@ -251,7 +251,6 @@ namespace DCLF::Direct::detail
 		rhi::CommandSignaturePtr indirectSignature;  // one indexed draw at IndirectDraw's stride, read past its instance word
 		// D3D12 needs one per layout: the instance word, then the indexed draw.
 		std::vector<std::pair<rhi::PipelineLayoutHandle, rhi::CommandSignaturePtr>> layoutSignatures;
-		std::vector<rhi::TimelinePoint> emitWaits, emitSignals;
 	};
 
 	State& S();

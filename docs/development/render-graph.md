@@ -57,15 +57,19 @@ With DXVK's external commands (`dxvkEmitExternalCommands`), the async epochs are
 (`GraphHost::SetExternalEpochs`). Their graphics work runs inside DXVK's own command list, and only a
 wait on another queue splits that list:
 
-1.  At the epoch's point, `ExecuteEpoch` submits the ticket (`SubmitEpoch`). ORG submits the batches on the compute queue
-    itself; the graphics batches come back as an `ExternalEpochExecution` of ordered segments.
-2.  `Impl::EmitExecution` emits each segment as an external command. DXVK calls back on its CS thread, the callback executes
-    the segment's secondaries into DXVK's command buffer (`ExternalEpochExecution::Execute`), and the segment's waits and
-    signals go on the DXVK submission it lands in.
-3.  A segment marked `split` is preceded by a D3D11 `Flush`, which ends DXVK's command list: one of its waits is for compute
-    work that waits for an earlier segment.
-4.  `CloseComputeEpoch` adds the stream's wait for the epoch's compute and copy work (`computeTail`) as a wait-only external
-    command, after a flush when the execution's `exitSplit` says so.
+1.  At the epoch's point, `ExecuteEpoch` commits the ticket (`SubmitEpoch`) on the render thread. ORG's submission thread
+    finishes it (admission, upload lists, handoffs, ledger commits, the compute queue's batches); the graphics batches come back
+    as an `ExternalEpochExecution` of ordered segments, handed out at the commit and filled in on that thread (2026-11-25,
+    perf2-finish.md).
+2.  `Impl::EmitEpoch` puts one deferred command in DXVK's stream (`dxvkEmitDeferredExternalCommands`) at the epoch's place.
+    DXVK's CS thread runs `RecordDeferredEpoch` there: it waits until the execution is finished
+    (`ExternalEpochExecution::WaitFinished`; the submission thread is normally done long before), then records each segment as
+    an external command whose waits and signals go on the DXVK submission it lands in. The segment's callback executes its
+    secondaries into DXVK's command buffer (`ExternalEpochExecution::Execute`).
+3.  A segment marked `split` starts a new DXVK command list (the recorder's split, on the CS thread): one of its waits is for
+    compute work that waits for an earlier segment.
+4.  After the segments, the stream waits for the epoch's compute and copy work (the epoch's exit values) as a wait-only external
+    command, in a new list when the execution's `exitSplit` says so.
 5.  DXVK's images are imported at the layout DXVK reports for them (`DxvkImageImport`), which is their home: the runtime opts in
     to `DXVK_ORG_INTEROP_RESTING_LAYOUTS`, so DXVK no longer pins them to GENERAL, and the graph uses real layouts on them. With
     external home states, every epoch returns them to that layout on the graphics queue, where DXVK uses them between the epochs.
@@ -84,15 +88,24 @@ DXVK creates queues it never submits to, for ORG's off-stream kinds:
 
 A pass that touches a resource only DXVK's families may use (an exclusive import) stays on the graphics queue.
 
--   **Entry.** Before an epoch's first submission to either, DXVK's stream signals `streamPoint` where it stands (one
-    enqueued submission). Each queue's first submission of the epoch waits for it.
+-   **Entry.** Each epoch takes a `streamPoint` value when it starts (`OpenEpochStream`); its tickets carry it to the submission
+    thread (`GraphHost::SetSubmissionContext`). Each queue's first submission of the epoch waits for it. DXVK's CS thread
+    signals it at the epoch's place, and ends DXVK's command list there when either queue waited for it.
+-   **Not with FSR frame generation.** FSR-FG's interpolation runs on DXVK's compute queue too, and its present holds DXVK's
+    submission lock while it waits for that work. A graph batch on the compute queue whose waits are not met yet (a frame value
+    the uploader still has to submit under that lock, or a point in a list behind the present) then blocks the interpolation:
+    the present, the uploader and the GPU wait for each other. Guest mode therefore keeps DCLF's would-be async passes on the
+    graphics queue by default, as native mode does (`DCLF::Draws::AsyncComputeQueue`, `CS_DCLF_ASYNC_COMPUTE=1` to force the
+    compute queue). With tickets finished off the render thread guest+fg hung 8 runs of 8 with async compute on, and passed
+    with it off (2026-11-25, perf2-finish.md).
 -   **Exit.** Every submission also signals its queue's exit timeline (`computeExit`, `copyExit`). The stream waits for both
-    at the epoch's end. An epoch that `ExecuteExternalEpoch` submits (DCLF's sites) ends at `CloseExternalEpoch`, after the
-    caller emitted its execution. Before 2026-11-12 nothing closed those epochs. The next epoch then added their exit wait to
+    after the epoch. An epoch that `ExecuteExternalEpoch` submits (DCLF's sites) ends at `EmitExternalEpoch` (the caller's
+    recording per segment) or `CloseExternalEpoch` (its segments signalled unexecuted). Before 2026-11-12 nothing closed those epochs. The next epoch then added their exit wait to
     DXVK's command list without a flush. When the compute work waited for a segment in that list, the list waited for itself
     and the GPU stopped (the map menu in latch-census-short, t5 stuck one value below the run that carried t6).
 -   **Stream-order guard.** DXVK puts an external command's waits at the start of the submission that holds it, and its signals
-    at the end. Before the stream waits for compute or copy work (a segment's wait or an exit wait), the runtime checks what
+    at the end. Before the stream waits for compute or copy work in an external command emitted on the render thread
+    (EmitExternalCommands; the epochs' deferred commands rely on ORG's splits and never fired the guard), the runtime checks what
     that work waits for. When it waits for a value DXVK's current command list signals, the runtime flushes first
     (`[ORG] stream order: flushed DXVK's command list before ...`). When it waits for a value the stream has not signalled at
     all, nothing can order it: `[ORG] stream order: ... waits for off-stream submission #n ...` names it. Both log the stream

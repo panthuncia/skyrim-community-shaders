@@ -46,6 +46,7 @@ struct DxvkDestroyedView
 	X(PFN_dxvkEmitCommandBufferCallback, emitCommandBufferCallback, dxvkEmitCommandBufferCallback)                      \
 	X(PFN_dxvkSetCommandBufferBoundaryCallbacks, setCommandBufferBoundaryCallbacks, dxvkSetCommandBufferBoundaryCallbacks) \
 	X(PFN_dxvkEmitExternalCommands, emitExternalCommands, dxvkEmitExternalCommands)                                     \
+	X(PFN_dxvkEmitDeferredExternalCommands, emitDeferredExternalCommands, dxvkEmitDeferredExternalCommands)             \
 	X(PFN_dxvkSetInteropOptions, setInteropOptions, dxvkSetInteropOptions)                                              \
 	X(PFN_dxvkGetSubmissionCounter, getSubmissionCounter, dxvkGetSubmissionCounter)                                     \
 	X(PFN_dxvkSetSubmissionTrace, setSubmissionTrace, dxvkSetSubmissionTrace)                                           \
