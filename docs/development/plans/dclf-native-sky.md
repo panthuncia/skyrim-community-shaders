@@ -1,6 +1,6 @@
 # DCLF: the sky without draw capture
 
-Status: steps 1-3a done 2026-11-24 (batch and cloud layers native, the default); steps 4-5 open. Owner: the DCLF sky family (`src/Features/DrawcallLimitFix/Features/Sky/`). Background: [p5/sky.md](../p5/sky.md)
+Status: steps 1-3a done 2026-11-24 (batch and cloud layers native, the default); step 4 done 2026-11-25 (the sun query); step 5 open. Owner: the DCLF sky family (`src/Features/DrawcallLimitFix/Features/Sky/`). Background: [p5/sky.md](../p5/sky.md)
 (the reverse engineering and the capture path this replaces).
 
 ## Goal
@@ -118,7 +118,13 @@ layers after them are latched), and the native path draws the clouds and leaves 
    by their inputs (the engine's state objects, descriptor, variant, targets); a texture slot's export lookup runs once a view a
    frame; the draws are built in place and the leases go straight to the run. Left: texture slots (0.5%) and geometry leases
    (0.3%), both already cached per frame.
-4. The sun occlusion query from Sun+0x28 without the engine's draw.
+4. Done 2026-11-25: the sun occlusion query without the engine's call. In mode 2 the hook on FUN_1414b4c00 (AE 106604, SE 99958)
+   keeps the query's bookkeeping as the engine does (the accumulator's three entries at +0x70: the ring entry, created on first
+   use, and the pending flag at +0x14; the disabled flag at +0x64), begins and ends the ring entry inside a Bracket, sets the
+   query's camera, and builds the draw with `Native::BuildSun`: pass id 2 has no SetupTechnique case, so it is raw technique 0
+   (SunOcclude), no alpha test, the sun's additive blend, and the eye from the shader manager's current accumulator (the screen
+   splatter's after the world render, not the query's). Mode 1 compares it with the latched draw; observe runs (river noon and
+   night, Dragonsreach) matched every field once SunOcclude's undeclared PParams.y was written as zero, as for MoonAndStarsMask.
 5. Delete the sky's latch path once observe runs also cover rain, storms, the aurora and night faces.
 
 ## Risks

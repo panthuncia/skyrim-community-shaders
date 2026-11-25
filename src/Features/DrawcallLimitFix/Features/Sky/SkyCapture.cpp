@@ -1,5 +1,6 @@
 // Engine-side hooks for the sky family. They let the engine's sky batch, cloud layers and sun occlusion draw run
-// with their draws latched, so the graph can draw them in the engine's order. Render thread only.
+// with their draws latched, so the graph can draw them in the engine's order. In native mode (CS_DCLF_SKY_NATIVE=2) the draws are
+// computed instead, and the sun query's engine call is not made. Render thread only.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -692,6 +693,82 @@ namespace DCLF::Features::Sky
 			return a_capture.colourFormats[0] && a_capture.depthFormat ? nullptr : "a target format cannot be read";
 		}
 
+		/** @brief The sun query's view, or why the graph cannot take its draw now (logged once each). */
+		const char* SunRefusal(Capture& a_capture, Run& a_run)
+		{
+			const char* refusal = SunShape(a_capture, a_run);
+			if (!refusal && (!FrameAnchors::IsRenderOwner() || !SkyDraws::Available()))
+				refusal = "the graph cannot draw now";
+			if (!refusal && !SkyDraws::CanTakeSun())
+				refusal = "its anchor cannot run now";
+			if (refusal)
+				SunSkips().Report(refusal);
+			return refusal;
+		}
+
+		Native::BatchInputs SunInputs(const Capture& a_capture, const Run& a_run)
+		{
+			return { View::Sun, a_capture.colourFormats, a_capture.depthFormat, 0u, a_run.physSky };
+		}
+
+		/**
+		 * @brief The engine's sun query (FUN_1414b4c00) without its draw: the query's bookkeeping as the engine keeps it, and the sun's
+		 * occlusion draw computed natively for the graph's query. The engine's call is not made.
+		 */
+		void DrawNative(Capture& a_capture, RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, std::uint32_t a_query, RE::NiCamera* a_camera)
+		{
+			// The accumulator's three query entries at +0x70, 0x18 apart: the ring entry, two counts and the pending flag (+0x14).
+			// The engine skips a disabled accumulator (+0x64) and an entry whose last result is still pending.
+			auto* bytes = reinterpret_cast<std::byte*>(a_accumulator);
+			if (!a_geometry || static_cast<bool>(bytes[0x64]) || a_query >= 3)
+				return;
+			auto* entry = bytes + 0x70 + std::size_t(a_query) * 0x18;
+			auto& pending = *reinterpret_cast<bool*>(entry + 0x14);
+			if (pending)
+				return;
+			auto& query = *reinterpret_cast<void**>(entry);
+			// The engine's occlusion query entries (the ring's), as FUN_1414b4c00 calls them.
+			static const REL::Relocation<void* (*)(void*)> createQuery{ REL::RelocationID(75565, 77366) };
+			static const REL::Relocation<void (*)(void*, void*)> beginQuery{ REL::RelocationID(75567, 77368) };
+			static const REL::Relocation<void (*)(void*, void*)> endQuery{ REL::RelocationID(75568, 77369) };
+			auto* renderer = globals::game::renderer;
+			if (!query) {
+				query = createQuery(renderer);
+				if (!query) {
+					pending = false;
+					*reinterpret_cast<std::uint32_t*>(entry + 0x8) = 0;
+					*reinterpret_cast<std::uint32_t*>(entry + 0x10) = 0;
+					return;
+				}
+			}
+			Queries::Bracket bracket;
+			Family::BeginBatch();
+			auto run = std::make_shared<Run>();
+			run->view = View::Sun;
+			beginQuery(renderer, query);
+			// The engine's call sets the query's camera before its draw, and later code keeps it.
+			RE::BSGraphics::State::GetSingleton()->SetCameraData(a_camera, 0);
+			std::string why;
+			const char* skip = SunRefusal(a_capture, *run);
+			if (!skip && !Native::BuildSun(a_accumulator, a_geometry, SunInputs(a_capture, *run), run->draws.emplace_back(), run->owners, why)) {
+				SunSkips().Report("its draw cannot be computed", why);
+				skip = "its draw cannot be computed";
+			}
+			endQuery(renderer, query);
+			pending = true;
+			*reinterpret_cast<std::uint32_t*>(entry + 0x10) = 0;
+			if (!skip && bracket.Slot() == Queries::kNoSlot)
+				skip = "a draw with no query begun";
+			if (skip) {
+				SkyDraws::Keep(std::move(run->owners));
+				bracket.Skip(skip);
+				return;
+			}
+			run->query = bracket.Slot();
+			if (!SkyDraws::Submit(std::move(run)))
+				bracket.Skip("its run was not submitted");
+		}
+
 		/**
 		 * @brief Hook on BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604). Only in graph mode.
 		 * An ORG query answers the engine's GetQueryData. A draw the graph cannot take is skipped.
@@ -709,17 +786,25 @@ namespace DCLF::Features::Sky
 					SunSkips().Report("a sun query inside a sky batch's capture: the engine's call is left out");
 					return;
 				}
+				if (Native::GetMode() == Native::Mode::Draw) {
+					DrawNative(capture, static_cast<RE::BSShaderAccumulator*>(a_accumulator), a_geometry, a_query, a_camera);
+					return;
+				}
 				Queries::Bracket bracket;
 				Family::BeginBatch();
 				auto run = std::make_shared<Run>();
 				run->view = View::Sun;
-				const char* refusal = SunShape(capture, *run);
-				if (!refusal && (!FrameAnchors::IsRenderOwner() || !SkyDraws::Available()))
-					refusal = "the graph cannot draw now";
-				if (!refusal && !SkyDraws::CanTakeSun())
-					refusal = "its anchor cannot run now";
-				if (refusal)
-					SunSkips().Report(refusal);
+				const char* refusal = SunRefusal(capture, *run);
+				// Observe: the native draw from the same inputs, compared with the latched one after the engine's call.
+				Draw native;
+				bool nativeBuilt = false;
+				if (!refusal && Native::GetMode() == Native::Mode::Observe) {
+					RE::BSGraphics::State::GetSingleton()->SetCameraData(a_camera, 0);
+					std::string why;
+					nativeBuilt = Native::BuildSun(static_cast<RE::BSShaderAccumulator*>(a_accumulator), a_geometry, SunInputs(capture, *run), native, run->owners, why);
+					if (!nativeBuilt)
+						SunSkips().Report("observe: the native draw cannot be computed", why);
+				}
 				capture.view = View::Sun;
 				capture.shape = {};
 				capture.shape.view = View::Sun;
@@ -736,6 +821,8 @@ namespace DCLF::Features::Sky
 					capture.failed = true;
 					SunSkips().Report(capture.passes.Describe("sun occlusion"));
 				}
+				if (nativeBuilt && !capture.failed && !run->draws.empty())
+					Native::Compare(View::Sun, std::span<const Draw>(&native, 1), run->draws);
 				// Nothing begun and nothing drawn, because a result was pending or there was no query.
 				if (bracket.Slot() == Queries::kNoSlot && run->draws.empty() && !capture.failed) {
 					SkyDraws::Keep(std::move(run->owners));

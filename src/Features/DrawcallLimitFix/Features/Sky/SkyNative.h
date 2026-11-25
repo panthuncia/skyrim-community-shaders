@@ -11,6 +11,7 @@
 
 namespace RE
 {
+	class BSGeometry;
 	class BSShaderAccumulator;
 }
 
@@ -51,6 +52,13 @@ namespace DCLF::Features::Sky::Native
 	 */
 	bool BuildClouds(RE::BSShaderAccumulator* a_accumulator, RE::BSBatchRenderer::GeometryGroup* a_group, const BatchInputs& a_inputs, std::int32_t& a_lastLayer,
 		std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why);
+
+	/**
+	 * @brief Render thread, in place of the engine's sun query draw (AE 106604), with the query's camera set. The sun's occlusion
+	 * draw (raw technique 0, SunOcclude) from the sun geometry. False, with a_why, when it cannot be computed.
+	 */
+	bool BuildSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
+		std::string& a_why);
 
 	/** @brief Leaves only the group's sky-object effects linked, so the engine's call draws them and nothing of the clouds. */
 	void DetachClouds(RE::BSBatchRenderer::GeometryGroup* a_group);

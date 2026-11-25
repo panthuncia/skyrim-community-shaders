@@ -44,7 +44,11 @@ namespace DCLF::Features::Sky::Native
 			inline constexpr Engine::Offset kWhiteTexture{ { 411503 }, { 525021 } };    // NiSourceTexture*: t0 of the others without a base
 			inline constexpr Engine::Offset kNullTexture{ { 411502 }, { 525020 } };     // NiSourceTexture*: the null texture clouds compare with
 			inline constexpr Engine::Offset kNoiseTexture{ { 411504 }, { 525022 } };    // NiSourceTexture*: t2, the noise gradient
+			inline constexpr Engine::Offset kSkyShader{ { 415143 }, { 528198 } };       // BSSkyShader*: the sun query's pass shader
 		}
+
+		// The pass id the sun's occlusion query draws with (FUN_1414b4c00's MakeRenderPass).
+		constexpr std::uint32_t kSunOcclusionPass = 2;
 
 		template <class T>
 		T Global(const Engine::Offset& a_offset)
@@ -285,9 +289,10 @@ namespace DCLF::Features::Sky::Native
 	void RegisterSwitch(Api::InstallContext& a_context)
 	{
 		const auto id = a_context.RegisterSwitch({ .name = "CS_DCLF_SKY_NATIVE", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never,
-			.description = "0: the sky batch and cloud layers are drawn from their latched engine draws; 1: as 0, and their draws are also computed from the "
-						   "engine's registered passes and compared with the latched ones (differences logged once each); 2 (default): they are drawn from the "
-						   "computed draws, and the engine's calls draw nothing of them (dclf-native-sky.md)" });
+			.description = "0: the sky batch, cloud layers and the sun's occlusion query draw are drawn from their latched engine draws; 1: as 0, and their "
+						   "draws are also computed from the engine's registered passes and the sun geometry and compared with the latched ones (differences "
+						   "logged once each); 2 (default): they are drawn from the computed draws, the engine's calls draw nothing of them, and the engine's "
+						   "sun query call is not made (dclf-native-sky.md)" });
 		const auto& value = SwitchValue(id);
 		s_mode = value == "0" ? Mode::Off : value == "1" ? Mode::Observe : Mode::Draw;
 		if (s_mode != Mode::Off)
@@ -529,8 +534,8 @@ namespace DCLF::Features::Sky::Native
 				c.pParams[0] = a_technique == 6 && !Field<bool>(property, kFadeSecond) ? 1.0f - blendValue : blendValue;
 				std::memcpy(c.texCoordOff, a_frame.cloudOffsets + 2u * Field<std::uint16_t>(property, kCloudLayer), sizeof(c.texCoordOff));
 			}
-			// MoonAndStarsMask's pixel shader declares no PParams (the capture reads it as zero, and Sky.hlsl does not read it).
-			c.pParams[1] = type == 6 || type == 1 || a_technique == 2 ? 0.0f : a_frame.skyScale;
+			// The MoonAndStarsMask and SunOcclude pixel shaders declare no PParams (the capture reads it as zero, and Sky.hlsl does not read it).
+			c.pParams[1] = type == 6 || type == 1 || a_technique == 2 || a_technique == 0 ? 0.0f : a_frame.skyScale;
 			c.vertexRef = latched.vertexRef;
 			c.indexRef = latched.indexRef;
 			c.vertexLayout[0] = static_cast<std::uint32_t>(latched.layout);
@@ -693,6 +698,33 @@ namespace DCLF::Features::Sky::Native
 		return true;
 	}
 
+	bool BuildSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
+		std::string& a_why)
+	{
+		DCLF_ZONE("CS.DCLF.Sky.Native.BuildSun");
+		Frame frame;
+		if (!frame.Read(a_accumulator, a_inputs, a_why))
+			return false;
+		// SetupGeometry reads the eye from the shader manager's current accumulator, which after the world's render is the last one
+		// submitted (the screen splatter's), not the query's.
+		const auto* current = reinterpret_cast<RE::BSShaderAccumulator*>(*globals::game::currentAccumulator.get());
+		frame.eye = current ? current->GetRuntimeData()->eyePosition : RE::NiPoint3{};
+		// The pass the engine's call makes (BSShader::MakeRenderPass with pass id 2), without its pool entry. The property is the
+		// geometry's shader property (+0x128).
+		RE::BSRenderPass pass{};
+		pass.shader = Global<RE::BSShader*>(Address::kSkyShader);
+		pass.shaderProperty = Field<RE::BSShaderProperty*>(a_geometry, 0x128);
+		pass.geometry = a_geometry;
+		pass.passEnum = kSunOcclusionPass;
+		// RenderPassImmediately(pass, 2, no alpha test): SetupTechnique has no case for pass id 2, so it is raw technique 0 (SunOcclude).
+		Modes modes = Modes::Current();
+		modes.alphaTest = false;
+		modes.Setup(0);
+		// SetupGeometry: the sun blends additively.
+		modes.blend = 2;
+		return BuildPass(frame, &pass, 0, modes, nullptr, a_draw, a_owners, a_why);
+	}
+
 	void DetachClouds(RE::BSBatchRenderer::GeometryGroup* a_group)
 	{
 		// Only the sky-object effects stay linked, for the engine to draw; the engine's call then empties the list.
@@ -754,7 +786,7 @@ namespace DCLF::Features::Sky::Native
 	void Compare(View a_view, std::span<const Draw> a_native, std::span<const Draw> a_captured)
 	{
 		++s_parity.batches;
-		const char* view = a_view == View::Main ? "main" : "face";
+		const char* view = a_view == View::Main ? "main" : a_view == View::Face ? "face" : "sun";
 		if (a_native.size() != a_captured.size()) {
 			++s_parity.mismatched;
 			Differences().Report(std::format("{} batch draw count", view), std::format("native {}, captured {}", a_native.size(), a_captured.size()));
