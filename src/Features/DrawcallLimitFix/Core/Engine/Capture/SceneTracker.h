@@ -75,7 +75,7 @@ namespace DCLF
 		static void CollectAncestors(const RE::NiAVObject* a_node, std::vector<const void*>& a_out);
 		/** @brief A detach, before the engine's, while the child is still in its array. */
 		void PushDetached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent = nullptr);
-		/** @brief Render thread, at the frame's start. Pushes detaches held back for an attach of the same child. */
+		/** @brief Main thread, at the game update's capture. Pushes detaches held back for an attach of the same child. */
 		void PushHeldDetaches();
 		/**
 		 * @brief A hook's values, after its write. On the same stack as attaches and detaches, so a reused address never gets an earlier object's values.

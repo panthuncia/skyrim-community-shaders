@@ -63,8 +63,7 @@ namespace DCLF::Features::Shadows::Local
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterShadowSource({ .source = Api::ShadowSource::Spot, .camera = &LightCamera, .lightKept = &LightKept });
-			a_context.RegisterShadowSource({ .source = Api::ShadowSource::Point, .camera = &LightCamera, .lightKept = &LightKept, .frameStart = &PointFrameStart,
-				.frameEnd = &LocalLightCull::EndFrame });
+			a_context.RegisterShadowSource({ .source = Api::ShadowSource::Point, .camera = &LightCamera, .lightKept = &LightKept, .frameStart = &PointFrameStart });
 			a_context.RegisterShadowSource({ .source = Api::ShadowSource::Focus, .camera = &FocusCamera });
 			a_context.RegisterShadowExclusion({ .name = "entry exclusions", .build = &BuildExclusion, .publish = &PublishExclusion,
 				.frameStart = &ExclusionFrameStart, .listExclusion = &ListExclusion });

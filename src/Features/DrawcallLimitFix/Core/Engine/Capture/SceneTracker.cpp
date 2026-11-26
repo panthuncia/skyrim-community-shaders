@@ -32,7 +32,7 @@ namespace DCLF
 		};
 		thread_local MoveGroup t_move;
 
-		// Plain detaches by child. Each waits for an attach of the same child or the frame's start.
+		// Plain detaches by child. Each waits for an attach of the same child or the game update's capture.
 		struct HeldDetach
 		{
 			const RE::NiAVObject* child = nullptr;
@@ -43,7 +43,7 @@ namespace DCLF
 		std::vector<HeldDetach> heldDetaches;
 		std::atomic<std::uint32_t> heldDetachCount{ 0 };
 
-		// A load's detaches are not held, since no frame starts until it ends.
+		// A load's detaches are not held, since no capture runs until it ends.
 		bool LoadingMenuOpen()
 		{
 			auto* ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
@@ -279,7 +279,7 @@ namespace DCLF
 			return;
 		}
 		// The engine re-equips with a detach and attach of the same child, which no scene pass may split. So a plain detach waits for
-		// that attach or the frame's start, pinned so no new object takes its address.
+		// that attach or the game update's capture, pinned so no new object takes its address.
 		if (!t_move.child && !LoadingMenuOpen()) {
 			event->pins.emplace_back(a_child);
 			StampWoken(event);
@@ -308,7 +308,7 @@ namespace DCLF
 		event->stackedChannel = a_channel;
 		event->stackedWakes = a_wakes;
 		event->stackedToken = a_token;
-		// Pinned roots are pinned here while the pusher holds them, and released on the render thread. Named roots are keys only.
+		// Pinned roots are pinned here while the pusher holds them, and released through the retire queue on the main thread. Named roots are keys only.
 		event->stackedPinned.reserve(a_pinned.size());
 		event->pins.reserve(a_pinned.size());
 		for (auto* root : a_pinned)

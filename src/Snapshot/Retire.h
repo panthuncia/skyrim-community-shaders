@@ -43,7 +43,7 @@ namespace Snapshot
 		/** @brief Any thread. Keeps a_object until the GPU finished render frame a_afterFrame (0: none), then lets it go on a_lane's drain. */
 		void Push(Lane a_lane, std::shared_ptr<const void> a_object, std::uint64_t a_afterFrame);
 
-		/** @brief Render side. Keeps a_object until the GPU finished the render frame running now. */
+		/** @brief Any thread. Keeps a_object until the GPU finished the newest render frame begun (on the render side, the one running now). */
 		void AfterThisFrame(Lane a_lane, std::shared_ptr<const void> a_object);
 
 		/**

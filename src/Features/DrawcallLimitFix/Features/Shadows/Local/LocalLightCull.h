@@ -72,7 +72,5 @@ namespace DCLF::Features::Shadows::Local
 		// A light whose views DCLF draws entirely is not culled at all, and its sphere bits are applied the same way.
 		/** @brief Gives a cut entry's geometry the lights' bits, before a main registration (+0x160 0xFFFF). */
 		void NoteMainRegistration(RE::BSGeometry* a_geometry);
-		/** @brief Releases retired filters, two Presents later. Render thread, at Present. */
-		void EndFrame();
 	}
 }

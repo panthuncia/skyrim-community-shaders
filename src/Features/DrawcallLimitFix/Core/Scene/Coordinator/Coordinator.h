@@ -101,7 +101,7 @@ namespace DCLF
 	/**
 	 * @brief The scene work: tracked geometry records, kept current from engine events and published for the frame.
 	 *
-	 * Engine references it lets go of are released at Present through the retirement chain, never on its threads.
+	 * Engine references it lets go of go through the retirement chain to the retire queue, released on the main thread, never on its threads.
 	 * It tracks everything under attached cells' Static, Dynamic, MultiBound and Actor nodes. Terrain, markers and water are not tracked.
 	 */
 	class Scene::Coordinator :
@@ -432,7 +432,7 @@ namespace DCLF
 		std::vector<MaterialReference> materialOwners;
 		/**
 		 * @brief What the coordinator let go of that a publication may still name. Each publication holds the chain node it was published with,
-		 * so a batch is freed once the last frame that could read it is done. Engine references are released at Present.
+		 * so a batch is freed once the last frame that could read it is done. Engine references go to the retire queue (EngineReleases).
 		 */
 		struct RetiredBatch
 		{
@@ -440,7 +440,7 @@ namespace DCLF
 			std::vector<std::shared_ptr<const void>> imports;
 			std::vector<RE::NiPointer<RE::NiRefObject>> references;
 			std::vector<std::shared_ptr<void>> owners;  // whose last release runs the engine's destructors (event batches, material references)
-			std::uint64_t lastPublication = 0;           // the last publication that held its node (EngineReleases::NoteReleased)
+			std::uint64_t lastPublication = 0;           // the last publication that held its node (EngineReleases::PushRetired)
 			bool Empty() const { return slots.empty() && imports.empty() && references.empty() && owners.empty(); }
 		};
 		org::services::RetirementChain<RetiredBatch> retirement;
@@ -732,7 +732,7 @@ namespace DCLF
 		void CheckObjectSlots(bool a_resolveBuffers);
 
 		void DrainMaterialCaptures();
-		/** @brief Released at Present. */
+		/** @brief Released through the retire queue, on the main thread. */
 		void HandBackHeld(std::unique_ptr<MaterialPort::HeldSnapshot>&& a_held);
 		/**
 		 * @brief Keeps the material records current from the frame's sources, with no engine read. TexcoordOffset is not in the record,
@@ -1054,7 +1054,7 @@ namespace DCLF
 
 		void PublishTables();
 		void ReplayTableColumns(Tables& a_snapshot, bool a_replay);
-		// A kept publication may still name these references, so they go through the retirement chain and are released at Present.
+		// A kept publication may still name these references, so they go through the retirement chain and the retire queue.
 		template <class T>
 		void HandBack(RE::NiPointer<T>&& a_reference)
 		{

@@ -5,7 +5,6 @@
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
-#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Deferred.h"
@@ -44,7 +43,6 @@
 #include "RenderGraph/Async/Retirement.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
-#include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
@@ -164,8 +162,6 @@ namespace DCLF
 
 	void FrameDriver::BeginFrame()
 	{
-		// The engine's update is over, so a detach still waiting for a re-attach is a removal.
-		SceneTracker::Get().PushHeldDetaches();
 		// Start a load's hold before anything checks whether a load screen is up.
 		LoadHold::OnFrameStart();
 		Diagnostics::Notify(Diagnostics::FrameBegin{});
@@ -176,8 +172,8 @@ namespace DCLF
 			IndirectDraws::Get().BuildPoint();
 		auto& scene = Scene::Coordinator::Get();
 		auto& view = Scene::FrameView::Get();
-		// The engine's update is done, so workers may read its scene graph until Present.
-		EngineReadWindow::Open();
+		// The engine only reads its scene graph from here to Present, so workers may read it in the capture window.
+		EngineReadWindow::ReleaseRenderHalf();
 		// The posts below wake the coordinator once, when this scope ends.
 		ScenePassWakeBatch wakes;
 		scene.SetScenePassMode(true);
@@ -369,10 +365,10 @@ namespace DCLF
 	void FrameDriver::EndFrame()
 	{
 		LoadHold::OnFrameEnd();
-		// The engine's next update follows Present, so no worker may be inside its memory from here.
+		// The engine's next update jobs follow Present, so no worker may be inside its memory from here until the next Main::Draw.
 		{
 			RenderThreadBudget::Part boundary(RenderThreadBudget::Bucket::EngineBoundary);
-			EngineReadWindow::Close();
+			EngineReadWindow::HoldForRenderHalf();
 		}
 		const auto start = std::chrono::steady_clock::now();
 		TracyCZoneN(efCull, "CS.DCLF.EF.PrimaryCull", true);
@@ -386,14 +382,12 @@ namespace DCLF
 		FrameValues::Get().EndFrame();
 		FrameData::EndFrame();
 		TracyCZoneEnd(efBind);
-		TracyCZoneN(efReports, "CS.DCLF.EF.ReportsAndReleases", true);
+		TracyCZoneN(efReports, "CS.DCLF.EF.Reports", true);
 		// Once per frame number. Menus and loads hold the number still while Presents continue.
 		static std::uint32_t reportedFrame = ~0u;
 		if (const std::uint32_t frame = Scene::FrameView::Get().SceneStep(); std::exchange(reportedFrame, frame) != frame)
 			Reports::RenderThread(frame);
 		Scene::FrameView::Get().NoteLoadingScreen();
-		// Dropped on the engine's main thread, where nothing reads them.
-		EngineReleases::Release();
 		TracyCZoneEnd(efReports);
 		counters.timing.eventsMs += MillisecondsSince(start);
 	}

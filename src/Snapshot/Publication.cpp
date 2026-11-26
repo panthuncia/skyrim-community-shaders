@@ -6,6 +6,7 @@
 #include "Snapshot/Retire.h"
 #include "Snapshot/SideEffects.h"
 #include "Snapshot/UiCommandStream.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "State.h"
 #include "Testing/Testing.h"
 #include "Utils/Setting.h"
@@ -386,6 +387,8 @@ namespace Snapshot
 				Testing::OnGameUpdate();
 				// Native: the render half's game-visible side effects come from the game side (Snapshot/SideEffects.h).
 				SideEffects::AfterCapture(*Game().previous);
+				// The update is done and published: DCLF's workers may read the engine's scene graph until the next update's game logic.
+				DCLF::EngineReadWindow::Open();
 				const bool outer = std::exchange(t_inGameUpdate, true);
 				const auto renders = RendersThisUpdate();
 				// A load that starts inside a render (a console coc) ends the update's repeats: the engine's kept scene lists still name
@@ -394,8 +397,11 @@ namespace Snapshot
 				std::uint32_t rendered = 0;
 				{
 					const SideEffects::RenderHalfScope scope;
-					for (; rendered < renders && g_loadEpoch.load(std::memory_order_acquire) == epoch; ++rendered)
+					for (; rendered < renders && g_loadEpoch.load(std::memory_order_acquire) == epoch; ++rendered) {
+						// The render half writes the scene graph before Main::Draw (the decal manager's attaches).
+						DCLF::EngineReadWindow::HoldForRenderHalf();
 						func(a_main);
+					}
 				}
 				SideEffects::AfterRenderHalf(rendered);
 				t_inGameUpdate = outer;
@@ -407,6 +413,8 @@ namespace Snapshot
 						logger::info("{}", line);
 				if (updates % kLifetimeLineUpdates == 0)
 					logger::info("{}", Retire::TakeStatsLine());
+				// Main::Update's game logic follows.
+				DCLF::EngineReadWindow::Close();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
