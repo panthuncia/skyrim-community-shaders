@@ -7,9 +7,9 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
 #include "RenderGraph/BufferRefs.h"
 
+#include <ORGModuleServices/Async/InboxQueue.h>
 #include <ORGModuleServices/VersionedBufferBuild.h>
 #include <Resources/Buffers/Buffer.h>
-#include <tbb/concurrent_queue.h>
 
 #include <algorithm>
 #include <array>
@@ -84,7 +84,7 @@ namespace DCLF::Draws::detail
 		std::shared_ptr<std::byte[]> Take(std::size_t a_bytes)
 		{
 			Block block;
-			while (free.try_pop(block)) {
+			while (free.TryPop(block)) {
 				kept.fetch_sub(1, std::memory_order_relaxed);
 				if (block.size >= a_bytes)
 					return Wrap(block);
@@ -109,13 +109,13 @@ namespace DCLF::Draws::detail
 		void Give(Block a_block)
 		{
 			if (kept.fetch_add(1, std::memory_order_relaxed) < kKept) {
-				free.push(a_block);
+				free.Push(a_block);
 				return;
 			}
 			kept.fetch_sub(1, std::memory_order_relaxed);
 			delete[] a_block.bytes;
 		}
-		tbb::concurrent_queue<Block> free;
+		org::async::InboxQueue<Block> free;
 		std::atomic<int> kept{ 0 };
 	};
 
