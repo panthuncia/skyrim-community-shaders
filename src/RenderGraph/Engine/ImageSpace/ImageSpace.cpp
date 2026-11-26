@@ -11,6 +11,7 @@
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
+#include "Snapshot/Retire.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -1516,7 +1517,11 @@ namespace RenderGraph::Engine::ImageSpace
 			* @brief The rows the generic SetupGeometry (AE 0x1414f8500) copies into PS b2: the param's pixel constants (+0x40), one float4 per
 			* name the shader lists (+0x160), each at its offset in the pixel shader's table. None when the shader's +0x1A0 is set.
 			*/
-			const char* BuildRows(const RE::BSImagespaceShader& a_shader, const void* a_param, Rows& a_out)
+			/**
+			* @brief BuildRows from pixel constants CS holds itself (a_constants, a_rows float4 rows, the param's +0x40 group as SetupGeometry
+			* reads it), for a step CS computes without the engine's param.
+			*/
+			const char* BuildRowsFrom(const RE::BSImagespaceShader& a_shader, const float* a_constants, std::uint32_t a_rows, Rows& a_out)
 			{
 				a_out = {};
 				Get().rowsAt = {};
@@ -1528,11 +1533,8 @@ namespace RenderGraph::Engine::ImageSpace
 					return nullptr;
 				if (count > a_out.offsets.size())
 					return "more pixel constants than a table holds";
-				if (!IsShaderParam(a_param))
-					return "a param that is not an ImageSpaceShaderParam";
-				const auto* param = static_cast<const RE::ImageSpaceShaderParam*>(a_param);
 				// Both groups count float4 rows.
-				if (!param->pixelConstantGroup || param->pixelConstantGroupSize < count)
+				if (!a_constants || a_rows < count)
 					return "a param with too few pixel constants";
 				const auto* pixel = PixelShaderOf(a_shader);
 				if (!pixel)
@@ -1542,12 +1544,24 @@ namespace RenderGraph::Engine::ImageSpace
 					const auto end = (offset + 4u) * 4u;
 					if (end > a_out.bytes.size())
 						return "a constant past the rows a step holds";
-					std::memcpy(a_out.bytes.data() + offset * 4u, param->pixelConstantGroup + row * 4u, 16);
+					std::memcpy(a_out.bytes.data() + offset * 4u, a_constants + row * 4u, 16);
 					a_out.offsets[row] = offset;
 					a_out.size = (std::max)(a_out.size, (end + 15u) & ~15u);
 				}
 				a_out.count = count;
 				return nullptr;
+			}
+
+			const char* BuildRows(const RE::BSImagespaceShader& a_shader, const void* a_param, Rows& a_out)
+			{
+				const auto* base = reinterpret_cast<const std::byte*>(&a_shader);
+				if (!*reinterpret_cast<const bool*>(base + 0x1A0) && *reinterpret_cast<const std::uint32_t*>(base + 0x160) != 0 && !IsShaderParam(a_param)) {
+					a_out = {};
+					Get().rowsAt = {};
+					return "a param that is not an ImageSpaceShaderParam";
+				}
+				const auto* param = static_cast<const RE::ImageSpaceShaderParam*>(a_param);
+				return BuildRowsFrom(a_shader, param ? param->pixelConstantGroup : nullptr, param ? param->pixelConstantGroupSize : 0, a_out);
 			}
 
 			/**
@@ -1586,11 +1600,17 @@ namespace RenderGraph::Engine::ImageSpace
 			* param's vertex constants (+0x30); the quad's whole index range; slot 0 from texture 1 of the effect's list (0x1414e8bc0: an
 			* engine target, else the loaded texture's view at +0x48 -> +0x10).
 			*/
-			const char* BuildSprite(const RE::BSImagespaceShader& a_shader, const void* a_param, const void* a_geometry, State::Sprite& a_out)
+			/**
+			* @brief BuildSprite for the output target a_output, from vertex constants CS holds itself (a_constants, a_rows float4 rows, the
+			* param's +0x30 group) and the
+			* sprite's input (an engine target a_target, else the loaded texture a_texture), for a sprite CS computes without the engine's
+			* param.
+			*/
+			const char* BuildSpriteFrom(const RE::BSImagespaceShader& a_shader, std::int32_t a_output, const float* a_constants, std::uint32_t a_rows,
+				const void* a_geometry, std::int32_t a_target, const RE::NiTexture* a_texture, State::Sprite& a_out)
 			{
 				a_out = {};
 				const auto* base = reinterpret_cast<const std::byte*>(&a_shader);
-				const auto* param = static_cast<const RE::ImageSpaceShaderParam*>(a_param);
 				const RE::BSGraphics::VertexShader* vertex = nullptr;
 				for (const auto& entry : a_shader.vertexShaders) {
 					if (vertex)
@@ -1599,23 +1619,21 @@ namespace RenderGraph::Engine::ImageSpace
 				}
 				if (!vertex)
 					return "no vertex shader";
-				const auto& textures = static_cast<const RE::ImageSpaceEffect&>(a_shader).effectTextures;
-				const auto* output = textures.capacity() > 0 ? textures[0] : nullptr;
 				// The manager is the object at this address (CommonLib's GetSingleton reads it as a pointer).
 				static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> managerAt{ REL::RelocationID(524970, 411451) };
 				const auto* manager = managerAt.get();
 				const auto* graphics = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
-				if (!output || output->renderTarget < 0 || output->renderTarget >= RE::RENDER_TARGET::kTOTAL || !manager || !graphics)
+				if (a_output < 0 || a_output >= RE::RENDER_TARGET::kTOTAL || !manager || !graphics)
 					return "no output target";
 				if (!*reinterpret_cast<const bool*>(base + 0x1A0)) {
 					const auto count = *reinterpret_cast<const std::uint32_t*>(base + 0x148);
 					if (count > vertex->constantTable.size())
 						return "more vertex constants than a table holds";
-					if (count > 1 && (!IsShaderParam(a_param) || !param->vertexConstantGroup || param->vertexConstantGroupSize < count - 1))
+					if (count > 1 && (!a_constants || a_rows < count - 1))
 						return "a param with too few vertex constants";
 					const auto& data = graphics->GetRuntimeData();
 					const bool locked = data.dynamicResolutionLock != 0;
-					const auto& target = manager->renderTargetData[output->renderTarget];
+					const auto& target = manager->renderTargetData[a_output];
 					const auto scaled = [](std::uint32_t a_size, float a_ratio) {
 						return static_cast<float>(static_cast<std::uint32_t>(static_cast<std::int64_t>(static_cast<float>(a_size) * a_ratio)));
 					};
@@ -1628,7 +1646,7 @@ namespace RenderGraph::Engine::ImageSpace
 							values[2] = 0.5f / scaled(target.width, locked ? 1.0f : data.dynamicResolutionWidthRatio);
 							values[3] = 0.5f / scaled(target.height, locked ? 1.0f : data.dynamicResolutionHeightRatio);
 						} else {
-							std::memcpy(values, param->vertexConstantGroup + (row - 1) * 4u, 16);
+							std::memcpy(values, a_constants + (row - 1) * 4u, 16);
 						}
 						std::memcpy(a_out.vertex.bytes.data() + offset * 4u, values, 16);
 						a_out.vertex.offsets[row] = offset;
@@ -1641,16 +1659,27 @@ namespace RenderGraph::Engine::ImageSpace
 					return "a sprite that is not a TriShape";
 				a_out.shape = geometry->GetGeometryRuntimeData().rendererData;
 				a_out.triangles = static_cast<const RE::BSTriShape*>(geometry)->GetTrishapeRuntimeData().triangleCount;
-				const auto* input = textures.capacity() > 1 ? textures[1] : nullptr;
-				if (input && input->renderTarget >= 0) {
-					a_out.target = input->renderTarget;
-				} else if (input && *reinterpret_cast<const std::int32_t*>(reinterpret_cast<const std::byte*>(input) + 0xC) >= 0) {
-					return "a depth texture at slot 0";
-				} else if (input && input->texture) {
-					const auto* renderer = *reinterpret_cast<const std::byte* const*>(reinterpret_cast<const std::byte*>(input->texture.get()) + 0x48);
+				if (a_target >= 0) {
+					a_out.target = a_target;
+				} else if (a_texture) {
+					const auto* renderer = *reinterpret_cast<const std::byte* const*>(reinterpret_cast<const std::byte*>(a_texture) + 0x48);
 					a_out.view = renderer ? Tripwire::Unwrap(*reinterpret_cast<ID3D11ShaderResourceView* const*>(renderer + 0x10)) : nullptr;
 				}
 				return nullptr;
+			}
+
+			const char* BuildSprite(const RE::BSImagespaceShader& a_shader, const void* a_param, const void* a_geometry, State::Sprite& a_out)
+			{
+				const auto* param = IsShaderParam(a_param) ? static_cast<const RE::ImageSpaceShaderParam*>(a_param) : nullptr;
+				const auto& textures = static_cast<const RE::ImageSpaceEffect&>(a_shader).effectTextures;
+				const auto* input = textures.capacity() > 1 ? textures[1] : nullptr;
+				if (input && input->renderTarget < 0 && *reinterpret_cast<const std::int32_t*>(reinterpret_cast<const std::byte*>(input) + 0xC) >= 0) {
+					a_out = {};
+					return "a depth texture at slot 0";
+				}
+				const auto* output = textures.capacity() > 0 ? textures[0] : nullptr;
+				return BuildSpriteFrom(a_shader, output ? output->renderTarget : -1, param ? param->vertexConstantGroup : nullptr, param ? param->vertexConstantGroupSize : 0, a_geometry,
+					input ? input->renderTarget : -1, input ? input->texture.get() : nullptr, a_out);
 			}
 
 			/** @brief A geometry step's quad (a wading ripple): the TriShape's renderer data and its whole index range, as the dispatcher draws it. */
@@ -2263,6 +2292,7 @@ namespace RenderGraph::Engine::ImageSpace
 			a_shader->PostRender();
 		}
 
+#include "RenderGraph/Engine/ImageSpace/LensFlares.inl"
 #include "RenderGraph/Engine/ImageSpace/NativePost.inl"
 #include "RenderGraph/Engine/ImageSpace/Screenshots.inl"
 #include "RenderGraph/Engine/ImageSpace/NativeWorld.inl"
@@ -2925,6 +2955,19 @@ namespace RenderGraph::Engine::ImageSpace
 	{
 		const auto& chain = Chain();
 		return IS().on && chain.group.Registered() && chain.inEndOfFrame;
+	}
+
+	void BeginLensFlares()
+	{
+		auto& queue = NativePost::LensFlareRun::S().queue;
+		if (!queue.empty())
+			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::make_shared<std::vector<RE::NiPointer<RE::BSShadowLight>>>(std::move(queue)));
+		queue.clear();
+	}
+
+	void QueueLensFlare(RE::BSShadowLight& a_light)
+	{
+		NativePost::LensFlareRun::S().queue.emplace_back(&a_light);
 	}
 
 	const char* BuildTintRows(const void* a_param, TintRows& a_out)

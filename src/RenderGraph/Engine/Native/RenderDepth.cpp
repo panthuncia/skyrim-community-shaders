@@ -1,14 +1,15 @@
-// Main::RenderDepth and Main::RenderShadowMasks in native, driven by CS. See RenderDepth.h.
+// Main::RenderDepth, Main::RenderShadowMasks and Main::RenderFirstPersonView in native, driven by CS. See RenderDepth.h.
 // RenderDepth's order (AE 1.6.1170 0x1414ccb30, SE 1.5.97 0x1412e3520): the main depth bound with a clear and the colour targets unbound,
 // StartAccumulating of the depth accumulator (its pre-resolve, AE 106592), ClearItemsList and RenderFirstPersonView_End (DCLF's Z-prepass
 // point), the focus targets' stencil marks (one StartAccumulating each), the first-person block (cull, camera and node shift, its draw),
 // then the copy into kPOST_ZPREPASS_COPY. RenderShadowMasks (AE 0x1414cd600, SE 0x1412e3ac0): the clear colour, SetCameraData and the
-// current camera, the world's masks when the scene's shadows are on, the clear colours restored.
+// current camera, the world's masks when the scene's shadows are on, the clear colours restored. RenderFirstPersonView (AE 0x1414cb6d0,
+// SE 0x1412e21a0): the depth range and targets set, the first-person accumulator rendered (DCLF's colour point) and finished, the sun
+// glare culled and drawn over first person, the sun's second occlusion query.
 
 #include "RenderGraph/Engine/Native/RenderDepth.h"
 
 #include "Features/DrawcallLimitFix.h"
-#include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
@@ -29,53 +30,6 @@ namespace RenderGraph::Engine::Native
 		T& DepthGlobal(std::uint64_t a_se, std::uint64_t a_ae)
 		{
 			return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
-		}
-
-		using RE::BSGraphics::ShaderFlags;
-
-		/**
-		* @brief The shadow state RenderDepth leaves for the engine code after it, written as its setters would (observed over every native
-		* world render of the third- and first-person runs; its first-person camera is set back by RenderShadowMasks): the main depth
-		* bound and cleared, no colour or cube target, the viewport of the main depth at the frame's ratios, the depth mode 3, no stencil
-		* (reference 255), back-face culling and the write mode 1, the changed state marked dirty.
-		*/
-		void LeaveDepthState()
-		{
-			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			for (std::uint32_t i = 0; i < 3; ++i) {
-				shadow.renderTargets[i] = RE::RENDER_TARGET::kNONE;
-				shadow.setRenderTargetMode[i] = RE::BSGraphics::SetRenderTargetMode::SRTM_RESTORE;
-			}
-			shadow.cubeMapRenderTarget = static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kNONE);
-			shadow.depthStencil = RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN;
-			shadow.setDepthStencilMode = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
-			const auto viewport = DCLF::Family::FrameViewport(-1, static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN), 1);
-			shadow.viewPort.TopLeftX = static_cast<float>(viewport.rect[0]);
-			shadow.viewPort.TopLeftY = static_cast<float>(viewport.rect[1]);
-			shadow.viewPort.Width = static_cast<float>(viewport.rect[2]);
-			shadow.viewPort.Height = static_cast<float>(viewport.rect[3]);
-			shadow.depthStencilDepthMode = RE::BSGraphics::DepthStencilDepthMode::kTestWrite;
-			shadow.depthStencilStencilMode = 0;
-			shadow.stencilRef = 255;
-			shadow.rasterStateCullMode = 1;
-			shadow.alphaBlendWriteMode = 1;
-			shadow.stateUpdateFlags.set(ShaderFlags::DIRTY_RENDERTARGET, ShaderFlags::DIRTY_VIEWPORT, ShaderFlags::DIRTY_DEPTH_MODE,
-				ShaderFlags::DIRTY_DEPTH_STENCILREF_MODE, ShaderFlags::DIRTY_RASTER_CULL_MODE, ShaderFlags::DIRTY_ALPHA_BLEND);
-		}
-
-		/**
-		* @brief What RenderShadowMasks leaves when the scene's shadows are on (observed likewise): kSHADOW_MASK bound as target 0 and
-		* cleared, no depth target, the write mode 1, and the world camera current (the engine's global the masks' SetCameraData pairs with).
-		*/
-		void LeaveMaskState()
-		{
-			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			shadow.renderTargets[0] = RE::RENDER_TARGET::kSHADOW_MASK;
-			shadow.setRenderTargetMode[0] = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
-			shadow.depthStencil = static_cast<std::uint32_t>(-1);
-			shadow.setDepthStencilMode = RE::BSGraphics::SetRenderTargetMode::SRTM_RESTORE;
-			shadow.alphaBlendWriteMode = 1;
-			shadow.stateUpdateFlags.set(ShaderFlags::DIRTY_RENDERTARGET, ShaderFlags::DIRTY_ALPHA_BLEND);
 		}
 
 		/** @brief A clear or copy the skeleton did not take: nothing else makes it in native. Logged once per what. */
@@ -108,7 +62,8 @@ namespace RenderGraph::Engine::Native
 		}
 		// CopyResource(kPOST_ZPREPASS_COPY, the main depth).
 		DepthUntaken(Skeleton::CopyDepthPassDepth(), "the depth copy");
-		LeaveDepthState();
+		// The shadow state RenderDepth leaves (the main depth bound, its viewport, no colour target, the depth and raster modes) is not
+		// written: nothing after reads it in native (the masks, the precipitation and RenderWorld set their own or read CS's frame).
 		globals::state->EndPerfEvent();
 	}
 
@@ -125,10 +80,17 @@ namespace RenderGraph::Engine::Native
 		if (sceneShadows) {
 			const float clear[4]{ DepthGlobal<bool>(528095, 415040) ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
 			DCLF::Features::ShadowMask::DrawWorldMasks(clear);
-			LeaveMaskState();
 		}
-		// The current camera RenderShadowMasks sets with its SetCameraData (SE 527667 / AE 414580): the world's.
-		DepthGlobal<RE::NiCamera*>(527667, 414580) = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
+		// Not written: the shadow state the masks leave (kSHADOW_MASK bound, no depth target) and the current camera, which nothing
+		// after reads in native. The game reads the current camera; the game side writes it (Snapshot/SideEffects.cpp).
+		globals::state->EndPerfEvent();
+	}
+
+	void RenderFirstPersonView()
+	{
+		ZoneScopedN("CS.Native.RenderFirstPersonView");
+		globals::state->BeginPerfEvent("First Person View");
+		DCLF::Features::FirstPerson::ColourDrawPoint();
 		globals::state->EndPerfEvent();
 	}
 }

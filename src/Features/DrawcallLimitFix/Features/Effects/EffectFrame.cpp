@@ -4,8 +4,10 @@
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
+#include "Features/DrawcallLimitFix/Features/Reflection/ReflectionFaces.h"
 #include "Globals.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
@@ -21,9 +23,16 @@ namespace DCLF::Features::Effects
 		/** @brief Far, near and far - near, as SetupTechnique (0x1414ea2c0) passes them for a Soft pass. Zero without a camera. */
 		std::array<float, 4> SampleEffectCamera()
 		{
+			namespace WorldPass = ::RenderGraph::Engine::Native::WorldPass;
 			// Native's RenderWorld: the world camera StartAccumulating made current, its far plane nearer inside a depth shift window.
-			if (const auto planes = ::RenderGraph::Engine::Native::WorldPass::CurrentCameraPlanes())
+			if (const auto planes = WorldPass::CurrentCameraPlanes())
 				return { (*planes)[1], (*planes)[0], (*planes)[1] - (*planes)[0], 0.0f };
+			// Native elsewhere: the world camera, which the engine made current at the depth pass, the masks and the post chain. A
+			// reflection face's draws keep the face camera the engine's face render made current.
+			if (Snapshot::FrameCamera::Owned() && !Reflection::ReflectionFaces::InFace()) {
+				const auto world = WorldPass::CameraPlanes(false);
+				return { world[1], world[0], world[1] - world[0], 0.0f };
+			}
 			static const REL::Relocation<const std::byte* const*> camera{ REL::Offset(Address::kEffectCamera) };
 			const std::byte* current = *camera.get();
 			if (!current)

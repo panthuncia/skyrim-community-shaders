@@ -35,6 +35,11 @@ namespace DCLF::Features::FirstPerson
 	void DepthDrawPoint(bool a_controlDriven);
 	void ExecuteDepth(const Api::ViewPointContext& a_context);
 	void ExecuteColour();
+	/**
+	 * @brief Main::RenderFirstPersonView's draw point (its first-person accumulator render): the colour epoch. Native's first-person
+	 * driver calls it in the engine function's place. Render thread.
+	 */
+	void ColourDrawPoint();
 	std::string Report();
 
 	void InstallHooks(Api::InstallContext& a_context);

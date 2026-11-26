@@ -17,6 +17,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowFrame.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 
 #include <array>
@@ -273,7 +274,9 @@ namespace DCLF::Features::Shadows::Engine
 			// resets the radius.
 			const auto& last = *a_draws.back().descriptor;
 			LeaveCameraState(a_light, last);
-			Global<RE::NiCamera*>(Address::kCurrentCamera) = last.camera.get();
+			// Guest's Volumetric Lighting render reads the current camera next. Native reads its cameras from the snapshot.
+			if (!::RenderGraph::Engine::Native::Active())
+				Global<RE::NiCamera*>(Address::kCurrentCamera) = last.camera.get();
 			Global<RE::BSShaderAccumulator*>(Address::kCurrentAccumulator) = last.shaderAccumulator.get();
 			RE::BSShaderManager::SetRenderMode(static_cast<RE::BSShaderManager::etRenderMode>(a_draws.back().mode));
 			if (a_kind == Kind::Parabolic)

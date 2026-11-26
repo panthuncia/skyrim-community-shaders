@@ -14,8 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <ORGModuleServices/Async/InboxQueue.h>
 #include <ORGModuleServices/Async/SerializedTaskPump.h>
-#include <tbb/concurrent_queue.h>
 
 namespace DCLF
 {
@@ -42,7 +42,7 @@ namespace DCLF
 				Clock::time_point queued;
 			};
 
-			std::array<tbb::concurrent_queue<Item>, 2> tasks;  // BuildKind order: stages first
+			std::array<org::async::InboxQueue<Item>, 2> tasks;  // BuildKind order: stages first; runners never spin on each other
 			// A pop may precede its push's count, so this can read below zero for a moment.
 			std::atomic<std::int64_t> queued{ 0 };
 			std::atomic<unsigned> runners{ 0 };
@@ -60,7 +60,7 @@ namespace DCLF
 
 			bool Submit(BuildKind a_kind, Task a_task)
 			{
-				tasks[static_cast<std::size_t>(a_kind)].push({ std::move(a_task), Clock::now() });
+				tasks[static_cast<std::size_t>(a_kind)].Push({ std::move(a_task), Clock::now() });
 				const std::int64_t depth = queued.fetch_add(1) + 1;
 				if (Diagnostics::Observe().stats) {
 					std::scoped_lock lock(statsLock);
@@ -90,7 +90,7 @@ namespace DCLF
 			{
 				Item item;
 				std::size_t kind = 0;
-				while (kind < tasks.size() && !tasks[kind].try_pop(item))
+				while (kind < tasks.size() && !tasks[kind].TryPop(item))
 					++kind;
 				if (kind < tasks.size()) {
 					queued.fetch_sub(1);

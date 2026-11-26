@@ -672,3 +672,83 @@ pushes until the user is back.
      are unchanged. Six consecutive drop-cells passes.
 164. **Open: CS's executor workers spin while idle:** in a slow-phase dump all 14 spun in tbb's `micro_queue::pop`
      (about 27 s of CPU each, mostly SwitchToThread). Idle workers must block, not spin; snap3-spin fixes it.
+
+## 2026-11-26: texture zero-init and the guest face (snap3-texinit; director accepted)
+
+165. **Closes 158a:** the native device zeroes every texture made without contents inside its existing creation
+     submission (no extra submit or wait): depth and stencil clear, RTV clear, UAV clear, otherwise copies from one 4 MB
+     zero upload buffer in row bands; the texture returns to its resting state in the same submission. `ZeroWrapped` and
+     FaceTint's render-side head clear are gone. Startup cost: 256 textures (1.6 GB, nearly all clears) in about 0.4 s
+     (Dev-Fast); GPU time not measured. Staging textures are still not zeroed.
+166. **Closes 158b:** in guest, DCLF hooks FaceGen::UpdatePending (beside Upscaling's hook), reads the queued heads under
+     the queue's lock, and afterwards a main-thread task recaptures the player's materials that name one of those heads
+     (`NoteTexturesReplaced` -> `NoteWritten`). Found by walking the player's 3D (a tint job names only its head
+     texture). NPC tint jobs (NPCs without FaceGen files) are not refreshed yet. Native installs no hook.
+
+## 2026-11-26: the stats menu scene is native (snap5-menus2; director accepted)
+
+167. **The stats menu (scheme 6) is CS's:** the blended list modelled as the engine builds it (hint-1 passes in cull order,
+     the GetRenderPasses hint rule, a stable far-to-near merge sort by bound centre along camera column 0 less the radius
+     with `sortByClosestPoint`, `BSOrderedNode` groups interleaved by depth); billboards turned by the engine's CPU
+     rotation (SE 69681 / AE 71061) on the game side, as 147; a scene light reaches a geometry by bound distance (the
+     engine's geometry light lists are empty for menu geometry); permutation words as Linear Lighting's hooks set them
+     (RenderToUI, BaseTextureIsWorking, SourceAlphaBlend). Its site reads producer; shots match the engine-drawn native.
+168. **Every menu scene takes the non-TAA branch:** CS's UI::Render hook turns the engine's TAA off, so no TAA mask fill or
+     TAA UI form is needed.
+169. **A menu draw whose program is still building is left out of that render** and logged once (as the engine draw
+     families already do; the manifest prebuilds it next session). Any other draw CS cannot compute in an owned scheme is
+     fatal (149). Left: MistMenu (smoke particles, shadow-light rule, loading model shadow maps and mask, menu HDR chain
+     with RenderEndOfFrameEffects), inventory (membrane glows, skinned Effects, particles), lockpick, book (Scaleform
+     page render target), journal, local map. Main menu frames: 20 engine render calls, unchanged.
+
+## 2026-11-26: native's code after RenderWorld (snap3-fpv; director accepted)
+
+170. **Native's post-RenderWorld path calls no engine function apart from the skeleton:** `Native::RenderFirstPersonView`
+     runs only DCLF's first-person colour point (`FirstPerson::ColourDrawPoint`, shared with guest); the first-person
+     accumulator render, its blended groups, depth-range and target writes, the first-person sun glare and the second
+     sun query are not made; Main::ClearMasks is skipped. AE 107123/107124 (first-person root shift and back) stay: DCLF
+     reads the camera 107123 builds (phase 7 skeleton).
+171. **The leave-state writes are deleted** (`LeaveResolveState`, `LeaveDepthState`, `LeaveMaskState`; RenderWorld's
+     414748/9 writes): an observe run showed no engine reader left in native.
+172. **The current camera (414580) is written only on the game side**, as the world camera in
+     `SideEffects::AfterRenderHalf`, for the DOF modifier instances (AE 0x141482cd0); native readers use the frame camera
+     (reflection faces keep the face camera).
+173. **The lens flare gather (AE 106988) is CS's port** (`ImageSpace/LensFlares.inl`): game inputs in the ImageSpace block,
+     the caster selection fills a CS-owned queue whose references retire through the queue; history counts render frames.
+     The visibility pass writes the engine's rotating output channel (5..8) in native; guest still writes channel 5 (open,
+     fixing it changes guest output).
+174. **Closes 145:** RenderShadowMaps records which lights it drew; the masks leave out a kept light it did not draw (no
+     shadow that frame), and a refused world mask batch is fatal again. Engine render calls per world frame: post-effects
+     21 -> 13.9, lens 24 -> 14.9, shadows-blend 18.5 -> 14.5, upscalers 24 -> 14.0, quick 30.7 -> 27.2. Left:
+     Main::RenderSaoCs with bSAO_CS_Enable; `gensites2.py` still lists the removed detector rows.
+
+## 2026-11-26: the quarter-frame regression (snap3-quarter; director accepted)
+
+175. **Fixes a regression from 154:** native unlocks dynamic resolution after RenderPrecipitation again (the
+     `Main_RenderPrecipitation` call-site hook's native branch skipped both lock writes; with FaceTint's UpdatePending
+     calls off it was the only unlock). With the lock left at 1, native readers of the engine's lock (ImageSpace
+     `ReadEndOfFrame`, `BlurRatios`, vertex rows, `Util::ConvertToDynamic`, LegacyGraphicsCompatibility) treated
+     the render-size world as full size: every native world frame drew in the 1280x720 corner, darker (eye adaptation
+     averaged the empty rest). It was in origin/org_integration 830623810. In phase 7 these readers take full
+     resolution from FrameCamera instead of the engine's lock.
+176. **cs-test passes runs whose shots are wrong:** nothing compares shots against a reference. A kept reference with a
+     tolerance in the basic configs is needed (next lead).
+177. **Open regression: native world frames are about a quarter as bright since 3f5b50150** (mean luma of quick's
+     start shot about 64 before and in each of snap3/post, snap6/dclf and snap3/depth alone; 17.5 after the three
+     merges, still about 18 at 245ec15e5 with the quarter fix). An interaction between merges, likely exposure or
+     tonemap; it is in origin/org_integration. snap3-dark bisects the three merges and fixes it; native shot references
+     wait for the fix.
+
+## 2026-11-26: executor queues block instead of spinning (snap3-spin; director accepted)
+
+178. **CS's executor and pump queues use OMS's `InboxQueue`, not `tbb::concurrent_queue`:** a tbb pop claims a ticket and
+     then spins (pause, then unbounded SwitchToThread) on the earlier popper and its pusher; with workers at mixed
+     priorities (below normal, raised by WaitBoost, frame-critical jobs and ParallelFor helpers), raised workers spin on a
+     preempted lower-priority holder that SwitchToThread will not run. `InboxQueue` (OMS
+     `Async/InboxQueue.h`): lock-free CAS push that never waits, mutex pop that blocks. Used by the executor's ring and
+     frame-critical queues, DCLF's BuildPump, the batch StoragePool free list and the ComputeSubmitter batches. Benchmark
+     under contention: 331 jobs / 17.3 s kernel (tbb) vs 91,000 jobs / 0.30 s. Frame times unchanged (Dev-Fast).
+     OMS's StateGraph tbb queues (single serialized pump each) stay.
+179. **Slow lab phases are mostly machine contention** (builds starving the driver and startup: Streamline init, device
+     creation, pipeline cache load); the spin made them worse. Worker priorities are left as they are (a frame-time
+     trade-off).

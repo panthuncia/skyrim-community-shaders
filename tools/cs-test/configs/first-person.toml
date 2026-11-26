@@ -1,0 +1,45 @@
+# The autoloaded save in third person, then in first person, a shot of each. Compose it: guest+first-person,
+# native-vulkan+first-person.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "pov"
+arg = "third"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "third"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "pov"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["third", "first"]
