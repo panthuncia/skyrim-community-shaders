@@ -385,3 +385,22 @@ pushes until the user is back.
      are pushed at the capture, `EngineReadWindow` opens on the main thread after the publish and closes at the start of
      the next update (the render thread never takes a lease), reported writes create a new version by keeping the old
      object in the publications that name it.
+
+## 2026-11-26: phase 3 screen blood (snap3-world; director accepted)
+
+104. **Native screen blood from game data** (`BlockId::ScreenBlood`): the native capture runs RenderWorld's light flare setup
+     (SE 100269 / AE 106979, pure arithmetic whose outputs only the blood shader reads; decision 8) on the game thread and
+     copies its outputs and ScreenSplatter::Update's globals into the block. The render side builds the draws from
+     ScreenSplatter's root and camera at Main::Draw's call of RenderScreenSplatter, into `cs.blood-splatter`; RenderWorld's
+     splatter cull and submit do nothing in native. Parity: 4,488 draws matched; only the order inside one technique
+     differs (ScreenSplatter's child order; both blends are order-independent). The native viewport is the display size.
+     Native drew no screen blood before this (its flares were refused); guest still draws none (open).
+105. **The blood geometry, its property and ScreenSplatter's camera are read on the render thread** for now, like decision
+     90's sky root and water shapes.
+106. **The resize hang (94) needs Light Limit Fix and is not FSR:** `window-resize-stress` (six resizes) reproduces it
+     within two cycles with FSR or TAA, and passes twelve resizes with LLF off. Both observed hangs follow the revision that
+     adopts LLF's resized grid buffers. Leading hypothesis: a light loop reads `lightGrid` through a stale bindless index in
+     an un-rewritten latch. The loop count is not clamped, which would hide the cause.
+107. **Main::RenderWorld's replacement needs each CS point inside it fed from CS's frame** (the call-order inventory is in
+     `snap3-world.md`): most points read engine state RenderWorld's own calls set just before them (shadow state targets,
+     the accumulator, SetCameraData's camera, global 415071).
