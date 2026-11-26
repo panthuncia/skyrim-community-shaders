@@ -20,8 +20,9 @@ namespace RE
  * @brief The UI command stream: GFx's calls on the renderer in call order, with what they point at copied.
  *
  * The recorder (Renderer.cpp's hooks, native mode) appends one command per GRenderer call. The replay applies each command to a
- * RendererState, the renderer's state as CS keeps it, and turns the draws into graph draws. A frame's stream is immutable once
- * finished and handed over as a shared pointer (UiStream::Latest), so a frame snapshot can carry it.
+ * RendererState, the renderer's state as CS keeps it, and turns the draws into graph draws. Today each display is replayed at
+ * its EndDisplay. A present's stream is immutable once finished and handed over as a shared pointer (UiStream::Latest), so a
+ * frame snapshot can carry it. Replaying a stream needs the renderer state the streams before it left.
  */
 namespace RenderGraph::Engine::Scaleform
 {

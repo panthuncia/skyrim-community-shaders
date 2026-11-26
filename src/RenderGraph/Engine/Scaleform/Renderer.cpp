@@ -22,7 +22,6 @@
 #include <cstring>
 #include <map>
 #include <mutex>
-#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -148,6 +147,8 @@ namespace RenderGraph::Engine::Scaleform
 			return s_counters;
 		}
 
+		void ReportGameCalls();
+
 		void Report(Counters& a_counters)
 		{
 			const std::uint64_t total = a_counters.graph + a_counters.mixed + a_counters.lost;
@@ -160,15 +161,13 @@ namespace RenderGraph::Engine::Scaleform
 				"[ORG] Scaleform census: {} displays: {} on the graph, {} with draws left out, {} not on the graph; {} graph segments ({} into scratch images: GFx "
 				"render targets and filter passes); left out: {}",
 				total, a_counters.graph, a_counters.mixed, a_counters.lost, a_counters.segments, a_counters.scratchSegments, reasons.empty() ? "none" : reasons);
+			if (Native::Active())
+				ReportGameCalls();
 		}
-
-		bool Comparing();
 
 		/** @brief Counts something the graph does not draw. Each reason is logged the first time. */
 		void NoteLost(const char* a_reason)
 		{
-			if (Comparing())
-				return;
 			auto& counters = Count();
 			std::scoped_lock lock(counters.mutex);
 			if (counters.reasons[a_reason]++ == 0)
@@ -181,8 +180,6 @@ namespace RenderGraph::Engine::Scaleform
 		 */
 		void CountEmpty()
 		{
-			if (Comparing())
-				return;
 			auto& counters = Count();
 			std::scoped_lock lock(counters.mutex);
 			++counters.graph;
@@ -191,8 +188,6 @@ namespace RenderGraph::Engine::Scaleform
 
 		void CountLost(const char* a_reason)
 		{
-			if (Comparing())
-				return;
 			NoteLost(a_reason);
 			auto& counters = Count();
 			std::scoped_lock lock(counters.mutex);
@@ -211,17 +206,6 @@ namespace RenderGraph::Engine::Scaleform
 
 		struct Capture
 		{
-			/**
-			 * @brief What a finished segment does. Draw submits it. Expect submits it and keeps a copy for the replay to compare with
-			 * (native mode, the field path). Compare checks the replay's segment against that copy and draws nothing.
-			 */
-			enum class Mode : std::uint8_t
-			{
-				Draw,
-				Expect,
-				Compare,
-			};
-			Mode mode = Mode::Draw;
 			bool active = false;
 			Display display;
 			std::vector<ArrayUse> arrays;
@@ -276,30 +260,11 @@ namespace RenderGraph::Engine::Scaleform
 			std::uint8_t boundVertexKind = 1;  // DrawIndexedTriList keeps it for some draws
 		};
 
-		/** @brief The field path's capture: guest, and native's reference while the replay is compared with it. */
-		Capture& FieldCapture()
-		{
-			static Capture s_capture;
-			return s_capture;
-		}
-
-		/** @brief The UI stream replay's capture. */
-		Capture& ReplayCapture()
-		{
-			static Capture s_capture;
-			return s_capture;
-		}
-
-		Capture* g_current = &FieldCapture();
-
+		/** @brief The display being captured: guest's field path, or native's UI stream replay. */
 		Capture& Current()
 		{
-			return *g_current;
-		}
-
-		bool Comparing()
-		{
-			return Current().mode == Capture::Mode::Compare;
+			static Capture s_capture;
+			return s_capture;
 		}
 
 		bool Capturing()
@@ -349,12 +314,9 @@ namespace RenderGraph::Engine::Scaleform
 		/** @brief A display refused while a stage holds displays is a recipe mismatch. Fatal in development builds. */
 		void NoteRefused(const char* a_reason)
 		{
-			if (!Comparing() && StageDrawsDisplays())
+			if (StageDrawsDisplays())
 				Frame::Driver::NoteTapError(Frame::Driver::TapError::Refused, Frame::SegmentId::Count, fmt::format("a Scaleform display: {}", a_reason));
 		}
-
-		void ExpectSegment(const Display& a_display);
-		void CompareSegment(const Display& a_display);
 
 		/** @brief Draws the segment on the graph, or counts it left out. A refusal not caused by schedule lag is a mismatch in native mode. */
 		void Flush()
@@ -362,12 +324,6 @@ namespace RenderGraph::Engine::Scaleform
 			auto& capture = Current();
 			if (capture.display.commands.empty() && !capture.display.clearTarget)
 				return;
-			if (capture.mode == Capture::Mode::Compare) {
-				CompareSegment(capture.display);
-				return;
-			}
-			if (capture.mode == Capture::Mode::Expect)
-				ExpectSegment(capture.display);
 			const char* reason = nullptr;
 			bool lagged = false;
 			if (Passes::Submit(capture.display, reason, lagged)) {
@@ -387,8 +343,6 @@ namespace RenderGraph::Engine::Scaleform
 
 		void FinishDisplay()
 		{
-			if (Comparing())
-				return;
 			const auto& capture = Current();
 			auto& counters = Count();
 			std::scoped_lock lock(counters.mutex);
@@ -1659,192 +1613,6 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		// ---------------------------------------------------------------------------------------------------------------------
-		// Parity: in native mode the field path draws and keeps a copy of each segment, and the UI stream's replay of the same
-		// display is compared with those copies at EndDisplay. Differences are counted by kind and logged.
-
-		struct SegmentCopy
-		{
-			std::vector<Command> commands;
-			std::vector<std::byte> staging;
-			std::vector<ID3D11ShaderResourceView*> textures;  // identity only
-			float viewport[4]{};
-			ID3D11Texture2D* target = nullptr;  // identity only
-			ID3D11Texture2D* depth = nullptr;
-			std::int32_t scratch = -1;
-			bool clearTarget = false;
-		};
-
-		struct Parity
-		{
-			std::vector<SegmentCopy> expected;
-			std::size_t next = 0;
-			std::uint64_t displays = 0;
-			std::uint64_t segments = 0;
-			std::uint64_t differing = 0;
-			std::uint64_t logged = 0;
-			std::map<std::string, std::uint64_t> reasons;
-		};
-
-		Parity& Observed()
-		{
-			static Parity s_parity;
-			return s_parity;
-		}
-
-		void ExpectSegment(const Display& a_display)
-		{
-			SegmentCopy copy;
-			copy.commands = a_display.commands;
-			copy.staging = a_display.staging;
-			copy.textures = a_display.textures;
-			std::memcpy(copy.viewport, a_display.viewport, sizeof(copy.viewport));
-			copy.target = a_display.target;
-			copy.depth = a_display.depth;
-			copy.scratch = a_display.scratch;
-			copy.clearTarget = a_display.clearTarget;
-			Observed().expected.push_back(std::move(copy));
-		}
-
-		void NoteDifference(const char* a_reason, const std::string& a_detail)
-		{
-			auto& parity = Observed();
-			++parity.differing;
-			const bool first = parity.reasons[a_reason]++ == 0;
-			if (first || parity.logged < 20) {
-				++parity.logged;
-				logger::warn("[ORG] Scaleform parity: {} ({})", a_reason, a_detail);
-			}
-		}
-
-		template <class T>
-		bool ReadAt(const std::vector<std::byte>& a_bytes, std::size_t a_offset, T& a_out)
-		{
-			if (a_offset + sizeof(T) > a_bytes.size())
-				return false;
-			std::memcpy(&a_out, a_bytes.data() + a_offset, sizeof(T));
-			return true;
-		}
-
-		/** @brief The bytes of the vertex a draw reads at position a_index, or empty when out of range. */
-		std::span<const std::byte> VertexAt(const std::vector<std::byte>& a_staging, const DrawRecord& a_record, std::uint32_t a_index)
-		{
-			std::uint32_t index = a_index;
-			if (a_record.indexSize == 2) {
-				std::uint16_t value = 0;
-				if (!ReadAt(a_staging, a_record.indexOffset + std::size_t{ a_index } * 2, value))
-					return {};
-				index = value;
-			} else if (a_record.indexSize == 4) {
-				if (!ReadAt(a_staging, a_record.indexOffset + std::size_t{ a_index } * 4, index))
-					return {};
-			}
-			const std::int64_t vertex = static_cast<std::int64_t>(a_record.baseVertex) + index;
-			const std::int64_t offset = static_cast<std::int64_t>(a_record.vertexOffset) + vertex * a_record.vertexStride;
-			if (vertex < 0 || offset < 0 || static_cast<std::size_t>(offset) + a_record.vertexStride > a_staging.size())
-				return {};
-			return { a_staging.data() + offset, a_record.vertexStride };
-		}
-
-		/** @brief Compares one command of each side. Empty when the draws are the same. */
-		std::pair<const char*, std::string> CommandDifference(const SegmentCopy& a_expected, const Command& a_e, const Display& a_actual, const Command& a_a)
-		{
-			if (a_e.kind != a_a.kind)
-				return { "a command kind differs", "" };
-			if (a_e.kind == Command::Kind::ClearStencil)
-				return {};
-			if (a_e.state != a_a.state)
-				return { "a draw state differs", fmt::format("vertex {}/{}, pixel {}/{}, blend {}/{}, stencil {}/{}, filter {}/{}", a_e.state.vertexKind,
-													 a_a.state.vertexKind, a_e.state.pixelKind, a_a.state.pixelKind, a_e.state.blend, a_a.state.blend,
-													 static_cast<int>(a_e.state.stencil), static_cast<int>(a_a.state.stencil), a_e.state.filter, a_a.state.filter) };
-			if (a_e.stencilRef != a_a.stencilRef || a_e.noColour != a_a.noColour)
-				return { "a stencil reference or colour write differs", "" };
-			if (a_e.vertexCount != a_a.vertexCount)
-				return { "a vertex count differs", fmt::format("{} / {}", a_e.vertexCount, a_a.vertexCount) };
-			for (int stage = 0; stage < 2; ++stage) {
-				const auto e = a_e.textures[stage], a = a_a.textures[stage];
-				const bool same = (e >= 0 && a >= 0) ? a_expected.textures[e] == a_actual.textures[a] : e == a;
-				if (!same)
-					return { "a texture differs", fmt::format("stage {}", stage) };
-				if (e != kNoTexture && a_e.samplers[stage] != a_a.samplers[stage])
-					return { "a sampler differs", fmt::format("stage {}", stage) };
-			}
-			if (a_e.state.filter != 0) {
-				// Filter records hold their vertices. The colour matrix's is the shorter one.
-				const std::size_t size = a_e.state.filter >= 23 ? sizeof(FilterRecord) : kFilterConstantsOffset + 32 * sizeof(float);
-				if (a_e.record + size > a_expected.staging.size() || a_a.record + size > a_actual.staging.size() ||
-					std::memcmp(a_expected.staging.data() + a_e.record, a_actual.staging.data() + a_a.record, size) != 0)
-					return { "a filter record differs", fmt::format("filter {}", a_e.state.filter) };
-				return {};
-			}
-			DrawRecord e{}, a{};
-			if (!ReadAt(a_expected.staging, a_e.record, e) || !ReadAt(a_actual.staging, a_a.record, a))
-				return { "a draw record is out of range", "" };
-			if (std::memcmp(e.mvp, a.mvp, sizeof(e.mvp)) != 0)
-				return { "a matrix differs", fmt::format("row 0 {} {} {} {} / {} {} {} {}", e.mvp[0][0], e.mvp[0][1], e.mvp[0][2], e.mvp[0][3], a.mvp[0][0],
-												  a.mvp[0][1], a.mvp[0][2], a.mvp[0][3]) };
-			if (std::memcmp(e.texgen, a.texgen, sizeof(e.texgen)) != 0)
-				return { "a texgen row differs", "" };
-			if (std::memcmp(e.cxmul, a.cxmul, sizeof(e.cxmul)) != 0 || std::memcmp(e.cxadd, a.cxadd, sizeof(e.cxadd)) != 0)
-				return { "a colour constant differs", fmt::format("mul {} {} {} {} / {} {} {} {}", e.cxmul[0], e.cxmul[1], e.cxmul[2], e.cxmul[3], a.cxmul[0],
-													   a.cxmul[1], a.cxmul[2], a.cxmul[3]) };
-			if (e.vertexStride != a.vertexStride || e.indexSize != a.indexSize)
-				return { "a vertex layout differs", fmt::format("stride {}/{}, index size {}/{}", e.vertexStride, a.vertexStride, e.indexSize, a.indexSize) };
-			for (std::uint32_t i = 0; i < a_e.vertexCount; ++i) {
-				const auto ev = VertexAt(a_expected.staging, e, i);
-				const auto av = VertexAt(a_actual.staging, a, i);
-				if (ev.size() != av.size() || (!ev.empty() && std::memcmp(ev.data(), av.data(), ev.size()) != 0))
-					return { "vertex data differs", fmt::format("vertex {} of {}", i, a_e.vertexCount) };
-			}
-			return {};
-		}
-
-		void CompareSegment(const Display& a_display)
-		{
-			auto& parity = Observed();
-			++parity.segments;
-			if (parity.next >= parity.expected.size()) {
-				NoteDifference("the replay drew a segment the field path did not", fmt::format("{} commands", a_display.commands.size()));
-				return;
-			}
-			const auto& expected = parity.expected[parity.next++];
-			if (expected.commands.size() != a_display.commands.size()) {
-				NoteDifference("a segment's command count differs", fmt::format("{} / {}", expected.commands.size(), a_display.commands.size()));
-				return;
-			}
-			if (expected.target != a_display.target || expected.depth != a_display.depth || expected.scratch != a_display.scratch ||
-				expected.clearTarget != a_display.clearTarget || std::memcmp(expected.viewport, a_display.viewport, sizeof(expected.viewport)) != 0) {
-				NoteDifference("a segment's target or viewport differs",
-					fmt::format("scratch {}/{}, viewport {} {} {} {} / {} {} {} {}", expected.scratch, a_display.scratch, expected.viewport[0], expected.viewport[1],
-						expected.viewport[2], expected.viewport[3], a_display.viewport[0], a_display.viewport[1], a_display.viewport[2], a_display.viewport[3]));
-				return;
-			}
-			for (std::size_t i = 0; i < expected.commands.size(); ++i) {
-				const auto [reason, detail] = CommandDifference(expected, expected.commands[i], a_display, a_display.commands[i]);
-				if (reason) {
-					NoteDifference(reason, fmt::format("command {} of {}{}{}", i, expected.commands.size(), detail.empty() ? "" : ": ", detail));
-					return;
-				}
-			}
-		}
-
-		/** @brief Ends one display's comparison, and logs the parity census every kReportEvery displays. */
-		void FinishComparison()
-		{
-			auto& parity = Observed();
-			if (parity.next < parity.expected.size())
-				NoteDifference("the field path drew a segment the replay did not", fmt::format("{} of {}", parity.expected.size() - parity.next, parity.expected.size()));
-			parity.expected.clear();
-			parity.next = 0;
-			if (++parity.displays % kReportEvery)
-				return;
-			std::string reasons;
-			for (const auto& [reason, count] : parity.reasons)
-				reasons += fmt::format("{}{} {}", reasons.empty() ? "" : ", ", count, reason);
-			logger::info("[ORG] Scaleform parity: {} displays, {} segments compared, {} differ; differences: {}", parity.displays, parity.segments,
-				parity.differing, reasons.empty() ? "none" : reasons);
-		}
-
-		// ---------------------------------------------------------------------------------------------------------------------
 		// The replay: applies a UI stream's commands to the renderer state CS keeps and draws them through the translation above.
 
 		struct Replay
@@ -2012,11 +1780,8 @@ namespace RenderGraph::Engine::Scaleform
 			}
 			replay.state.stream = a_stream.get();
 			replay.state.textures = &replay.textures;
-			auto* previous = g_current;
-			g_current = &ReplayCapture();
 			for (; replay.cursor < a_stream->commands.size(); ++replay.cursor)
 				ReplayCommand(replay, *a_stream, a_stream->commands[replay.cursor]);
-			g_current = previous;
 		}
 
 		// ---------------------------------------------------------------------------------------------------------------------
@@ -2116,8 +1881,48 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		// ---------------------------------------------------------------------------------------------------------------------
-		// The vtable slots. The field path (guest, and native's reference while parity is checked) reads the D3D11 renderer's fields
-		// at each call, as before the UI stream. Native mode also records every call.
+		// The vtable slots. Guest's field path reads the D3D11 renderer's fields at each call and forwards the calls it does not
+		// draw. Native mode records every call into the UI stream and draws the stream's replay. The D3D11 renderer is not called
+		// then, except for GFx's render target stack (PushRenderTarget, PopRenderTarget, PushTempRenderTarget,
+		// SetDisplayRenderTarget) and EndDisplay's queued releases, each counted.
+
+		bool NativeUi()
+		{
+			return Native::Active();
+		}
+
+		/** @brief The D3D11 renderer's slots native mode still calls, counted for the census. */
+		enum class GameCall : std::uint8_t
+		{
+			EndDisplay,
+			SetDisplayRenderTarget,
+			PushRenderTarget,
+			PopRenderTarget,
+			PushTempRenderTarget,
+			Count,
+		};
+
+		std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(GameCall::Count)>& GameCalls()
+		{
+			static std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(GameCall::Count)> s_calls{};
+			return s_calls;
+		}
+
+		void NoteGameCall(GameCall a_call)
+		{
+			GameCalls()[static_cast<std::size_t>(a_call)].fetch_add(1, std::memory_order_relaxed);
+		}
+
+		/** @brief Logs, with the census, how often native mode called the D3D11 renderer since the last report. */
+		void ReportGameCalls()
+		{
+			static constexpr const char* kNames[] = { "EndDisplay", "SetDisplayRenderTarget", "PushRenderTarget", "PopRenderTarget", "PushTempRenderTarget" };
+			std::string calls;
+			for (std::size_t i = 0; i < GameCalls().size(); ++i)
+				if (const auto count = GameCalls()[i].exchange(0, std::memory_order_relaxed))
+					calls += fmt::format("{}{} {}", calls.empty() ? "" : ", ", count, kNames[i]);
+			logger::info("[ORG] Scaleform: the game's renderer was called for {}; every other call was CS's", calls.empty() ? "nothing" : calls);
+		}
 
 		RendererState& FieldState(void* a_renderer)
 		{
@@ -2130,7 +1935,9 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			const auto original = Original<BeginDisplayFn>(kBeginDisplay);
 			const bool renderTexture = (a_viewport->flags & kViewportRenderTexture) != 0;
-			if (Recording()) {
+			if (NativeUi()) {
+				if (!Recording())
+					return;
 				auto& stream = Stream();
 				DisplayTargets targets;
 				std::int32_t targetIndex = -1;
@@ -2145,6 +1952,7 @@ namespace RenderGraph::Engine::Scaleform
 				command.b = Field<std::uint8_t>(a_renderer, Layout::kVideoModeSet) != 0;
 				if (command.b)
 					Rec().world = nullptr;  // BeginDisplay resets the world matrix
+				return;
 			}
 			// Only the render owner captures. Another thread's display neither reads nor ends it.
 			if (!FrameAnchors::IsRenderOwner()) {
@@ -2172,31 +1980,31 @@ namespace RenderGraph::Engine::Scaleform
 
 		void EndDisplay(void* a_renderer)
 		{
-			const bool recording = Recording();
-			if (recording)
-				RecordPlain(UiOp::EndDisplay);
+			if (NativeUi()) {
+				const bool recording = Recording();
+				if (recording)
+					RecordPlain(UiOp::EndDisplay);
+				// It releases the textures GFx queued for release. The UI stream holds its own references to what it reads.
+				NoteGameCall(GameCall::EndDisplay);
+				Original<VoidFn>(kEndDisplay)(a_renderer);
+				if (recording)
+					RunReplay(Rec().stream);
+				return;
+			}
 			// Only the render owner captures. Another thread's display neither ends nor resets it.
 			if (FrameAnchors::IsRenderOwner())
 				TranslateEndDisplay(FieldState(a_renderer));
 			// Always called, since it releases the textures GFx queued and the targets a D3D11 BeginDisplay took.
 			Original<VoidFn>(kEndDisplay)(a_renderer);
-			if (recording) {
-				RunReplay(Rec().stream);
-				FinishComparison();
-			}
 		}
 
 		void SetDisplayRenderTarget(void* a_renderer, void* a_target, bool a_setState)
 		{
-			if (!TakesDisplayTarget()) {
+			if (NativeUi()) {
+				NoteGameCall(GameCall::SetDisplayRenderTarget);
 				Original<DisplayTargetFn>(kSetDisplayRenderTarget)(a_renderer, a_target, a_setState);
-			} else {
-				Flush();
-				Original<DisplayTargetFn>(kSetDisplayRenderTarget)(a_renderer, a_target, a_setState);
-				DisplayTargets targets;
-				TranslateSetDisplayTarget(ReadRendererTarget(a_renderer, targets) ? &targets : nullptr);
-			}
-			if (Recording()) {
+				if (!Recording())
+					return;
 				auto& stream = Stream();
 				DisplayTargets targets;
 				std::int32_t targetIndex = -1;
@@ -2205,20 +2013,32 @@ namespace RenderGraph::Engine::Scaleform
 					stream.targets.push_back(std::move(targets));
 				}
 				stream.Add(UiOp::SetDisplayRenderTarget).a = targetIndex;
+				return;
 			}
+			if (!TakesDisplayTarget())
+				return Original<DisplayTargetFn>(kSetDisplayRenderTarget)(a_renderer, a_target, a_setState);
+			Flush();
+			Original<DisplayTargetFn>(kSetDisplayRenderTarget)(a_renderer, a_target, a_setState);
+			DisplayTargets targets;
+			TranslateSetDisplayTarget(ReadRendererTarget(a_renderer, targets) ? &targets : nullptr);
 		}
 
 		void PushRenderTarget(void* a_renderer, const float* a_frame, void* a_target)
 		{
 			const bool valid = a_frame && a_target;
 			const PushedTarget pushed = a_target ? ReadPushedTarget(a_target) : PushedTarget{};
-			if (Recording()) {
-				auto& stream = Stream();
-				stream.NoteTexture(pushed.texture);
-				auto& command = valid ? stream.Add(UiOp::PushRenderTarget, a_frame, sizeof(float) * 4) : stream.Add(UiOp::PushRenderTarget);
-				command.key = pushed.texture;
-				command.a = static_cast<std::int32_t>(pushed.width);
-				command.b = static_cast<std::int32_t>(pushed.height);
+			if (NativeUi()) {
+				if (Recording()) {
+					auto& stream = Stream();
+					stream.NoteTexture(pushed.texture);
+					auto& command = valid ? stream.Add(UiOp::PushRenderTarget, a_frame, sizeof(float) * 4) : stream.Add(UiOp::PushRenderTarget);
+					command.key = pushed.texture;
+					command.a = static_cast<std::int32_t>(pushed.width);
+					command.b = static_cast<std::int32_t>(pushed.height);
+				}
+				// The renderer's target stack holds the targets' references; its D3D11 binds and clear reach no GPU work.
+				NoteGameCall(GameCall::PushRenderTarget);
+				return Original<PushTargetFn>(kPushRenderTarget)(a_renderer, a_frame, a_target);
 			}
 			if (!Capturing() || !valid)
 				return Original<PushTargetFn>(kPushRenderTarget)(a_renderer, a_frame, a_target);
@@ -2229,14 +2049,20 @@ namespace RenderGraph::Engine::Scaleform
 
 		RE::GTexture* PushTempRenderTarget(void* a_renderer, const float* a_frame, std::uint32_t a_width, std::uint32_t a_height, bool a_stencil)
 		{
-			// The renderer pushes its pooled target through the vtable's PushRenderTarget above.
+			// The renderer's pool makes GFx's target objects and pushes its target through the vtable's PushRenderTarget above.
+			if (NativeUi())
+				NoteGameCall(GameCall::PushTempRenderTarget);
 			return Original<PushTempTargetFn>(kPushTempRenderTarget)(a_renderer, a_frame, a_width, a_height, a_stencil);
 		}
 
 		void PopRenderTarget(void* a_renderer)
 		{
-			if (Recording())
-				RecordPlain(UiOp::PopRenderTarget);
+			if (NativeUi()) {
+				if (Recording())
+					RecordPlain(UiOp::PopRenderTarget);
+				NoteGameCall(GameCall::PopRenderTarget);
+				return Original<VoidFn>(kPopRenderTarget)(a_renderer);
+			}
 			if (!TakesPop())
 				return Original<VoidFn>(kPopRenderTarget)(a_renderer);
 			Flush();
@@ -2246,7 +2072,9 @@ namespace RenderGraph::Engine::Scaleform
 
 		void DrawBlurRect(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params)
 		{
-			if (Recording()) {
+			if (NativeUi()) {
+				if (!Recording())
+					return;
 				auto& stream = Stream();
 				RecordWorld(stream);
 				stream.NoteTexture(a_source);
@@ -2258,6 +2086,7 @@ namespace RenderGraph::Engine::Scaleform
 					std::memcpy(bytes.data() + sizeof(float) * 8, a_params, sizeof(BlurParams));
 				}
 				stream.Add(UiOp::DrawBlurRect, bytes.data(), valid ? bytes.size() : 0).key = a_source;
+				return;
 			}
 			if (!Capturing())
 				return Original<BlurFn>(kDrawBlurRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_params);
@@ -2267,7 +2096,9 @@ namespace RenderGraph::Engine::Scaleform
 		void DrawColorMatrixRect(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
 		{
 			const bool valid = a_source && a_sourceRect && a_destRect && a_matrix;
-			if (Recording()) {
+			if (NativeUi()) {
+				if (!Recording())
+					return;
 				auto& stream = Stream();
 				RecordWorld(stream);
 				stream.NoteTexture(a_source);
@@ -2278,6 +2109,7 @@ namespace RenderGraph::Engine::Scaleform
 					std::memcpy(floats.data() + 8, a_matrix, sizeof(float) * 20);
 				}
 				stream.Add(UiOp::DrawColorMatrixRect, floats.data(), valid ? sizeof(floats) : 0).key = a_source;
+				return;
 			}
 			if (!Capturing())
 				return Original<ColorMatrixFn>(kDrawColorMatrixRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_matrix);
@@ -2287,8 +2119,11 @@ namespace RenderGraph::Engine::Scaleform
 
 		void PushBlendMode(void* a_renderer, std::uint32_t a_mode)
 		{
-			if (Recording())
-				RecordPlain(UiOp::PushBlendMode).a = static_cast<std::int32_t>(a_mode);
+			if (NativeUi()) {
+				if (Recording())
+					RecordPlain(UiOp::PushBlendMode).a = static_cast<std::int32_t>(a_mode);
+				return;
+			}
 			if (!Capturing())
 				return Original<SetBlendFn>(kPushBlendMode)(a_renderer, a_mode);
 			TranslatePushBlendMode(a_mode);
@@ -2296,8 +2131,11 @@ namespace RenderGraph::Engine::Scaleform
 
 		void PopBlendMode(void* a_renderer)
 		{
-			if (Recording())
-				RecordPlain(UiOp::PopBlendMode);
+			if (NativeUi()) {
+				if (Recording())
+					RecordPlain(UiOp::PopBlendMode);
+				return;
+			}
 			if (!Capturing())
 				return Original<VoidFn>(kPopBlendMode)(a_renderer);
 			TranslatePopBlendMode();
@@ -2305,7 +2143,9 @@ namespace RenderGraph::Engine::Scaleform
 
 		void DrawIndexedTriList(void* a_renderer, std::int32_t a_base, std::int32_t a_min, std::int32_t a_count, std::int32_t a_start, std::int32_t a_triangles)
 		{
-			if (Recording()) {
+			if (NativeUi()) {
+				if (!Recording())
+					return;
 				auto& stream = Stream();
 				RecordArrays(stream, true);
 				RecordWorld(stream);
@@ -2316,6 +2156,7 @@ namespace RenderGraph::Engine::Scaleform
 				command.c = a_count;
 				command.d = a_start;
 				command.e = a_triangles;
+				return;
 			}
 			if (!Capturing())
 				return Original<DrawTrianglesFn>(kDrawIndexedTriList)(a_renderer, a_base, a_min, a_count, a_start, a_triangles);
@@ -2324,7 +2165,9 @@ namespace RenderGraph::Engine::Scaleform
 
 		void DrawLineStrip(void* a_renderer, std::int32_t a_base, std::int32_t a_lines)
 		{
-			if (Recording()) {
+			if (NativeUi()) {
+				if (!Recording())
+					return;
 				auto& stream = Stream();
 				RecordArrays(stream, false);
 				RecordWorld(stream);
@@ -2332,6 +2175,7 @@ namespace RenderGraph::Engine::Scaleform
 				auto& command = stream.Add(UiOp::DrawLineStrip);
 				command.a = a_base;
 				command.b = a_lines;
+				return;
 			}
 			if (!Capturing())
 				return Original<DrawLinesFn>(kDrawLineStrip)(a_renderer, a_base, a_lines);
@@ -2341,7 +2185,9 @@ namespace RenderGraph::Engine::Scaleform
 		void DrawBitmaps(void* a_renderer, const BitmapDesc* a_bitmaps, std::int32_t a_listSize, std::int32_t a_start, std::int32_t a_count, RE::GTexture* a_texture,
 			const float* a_matrix, void* a_cache)
 		{
-			if (Recording()) {
+			if (NativeUi()) {
+				if (!Recording())
+					return;
 				auto& stream = Stream();
 				RecordWorld(stream);
 				stream.NoteTexture(a_texture);
@@ -2354,6 +2200,7 @@ namespace RenderGraph::Engine::Scaleform
 				auto& command = stream.Add(UiOp::DrawBitmaps, bytes.data(), bytes.size());
 				command.a = count;
 				command.key = a_texture;
+				return;
 			}
 			if (!Capturing())
 				return Original<DrawBitmapsFn>(kDrawBitmaps)(a_renderer, a_bitmaps, a_listSize, a_start, a_count, a_texture, a_matrix, a_cache);
@@ -2362,8 +2209,11 @@ namespace RenderGraph::Engine::Scaleform
 
 		void BeginSubmitMask(void* a_renderer, std::int32_t a_mode)
 		{
-			if (Recording())
-				RecordPlain(UiOp::BeginSubmitMask).a = a_mode;
+			if (NativeUi()) {
+				if (Recording())
+					RecordPlain(UiOp::BeginSubmitMask).a = a_mode;
+				return;
+			}
 			if (!Capturing())
 				return Original<MaskFn>(kBeginSubmitMask)(a_renderer, a_mode);
 			TranslateBeginSubmitMask(FieldState(a_renderer), a_mode);
@@ -2371,8 +2221,11 @@ namespace RenderGraph::Engine::Scaleform
 
 		void EndSubmitMask(void* a_renderer)
 		{
-			if (Recording())
-				RecordPlain(UiOp::EndSubmitMask);
+			if (NativeUi()) {
+				if (Recording())
+					RecordPlain(UiOp::EndSubmitMask);
+				return;
+			}
 			if (!Capturing())
 				return Original<VoidFn>(kEndSubmitMask)(a_renderer);
 			TranslateEndSubmitMask(FieldState(a_renderer));
@@ -2380,129 +2233,114 @@ namespace RenderGraph::Engine::Scaleform
 
 		void DisableMask(void* a_renderer)
 		{
-			if (Recording())
-				RecordPlain(UiOp::DisableMask);
+			if (NativeUi()) {
+				if (Recording())
+					RecordPlain(UiOp::DisableMask);
+				return;
+			}
 			if (!Capturing())
 				return Original<VoidFn>(kDisableMask)(a_renderer);
 			TranslateDisableMask(FieldState(a_renderer));
 		}
 
-		// The pure setters. Native mode records them and keeps its mirror; the D3D11 renderer still gets every call.
+		// The pure setters, taken in native mode only: recorded, with the recorder's mirror kept, and not forwarded.
 
-		using SetMatrix3DFn = void (*)(void*, const float*);
-		using SetWorldFn = void (*)(void*, const float*);
-		using SetArrayFn = void (*)(void*, const void*, std::int32_t, std::int32_t, void*);
-		using ColorFn = void (*)(void*, const std::uint32_t*);
-		using BitmapFn = void (*)(void*, const FillTexture*);
-		using GouraudFn = void (*)(void*, std::int32_t, const FillTexture*, const FillTexture*, const FillTexture*);
-
-		template <Slot S, UiOp Op, std::size_t Floats>
-		void SetFloats(void* a_renderer, const float* a_values)
+		template <UiOp Op, std::size_t Floats>
+		void SetFloats(void*, const float* a_values)
 		{
 			if (Recording())
 				Stream().Add(Op, a_values, sizeof(float) * Floats);
-			Original<SetMatrixFn>(S)(a_renderer, a_values);
 		}
 
-		void SetWorld3D(void* a_renderer, const float* a_world)
+		void SetCxform(void*, const float* a_cxform)
 		{
-			if (Recording()) {
-				auto& recorder = Rec();
-				recorder.world = a_world;
-				if (a_world)
-					recorder.worldPending = true;
-				else
-					RecordPlain(UiOp::SetWorld3D);
-			}
-			Original<SetWorldFn>(kSetWorld3D)(a_renderer, a_world);
+			if (!Recording())
+				return;
+			Stream().Add(UiOp::SetCxform, a_cxform, sizeof(float) * 8);
+			std::memcpy(Rec().mirror.cxform, a_cxform, sizeof(Rec().mirror.cxform));
 		}
 
-		void SetVertexData(void* a_renderer, const void* a_data, std::int32_t a_count, std::int32_t a_format, void* a_cache)
+		void SetWorld3D(void*, const float* a_world)
 		{
-			if (Recording()) {
-				Rec().mirror.SetVertexData(a_data, a_count, a_format);
-				Rec().vertexPending = true;
-			}
-			Original<SetArrayFn>(kSetVertexData)(a_renderer, a_data, a_count, a_format, a_cache);
+			if (!Recording())
+				return;
+			auto& recorder = Rec();
+			recorder.world = a_world;
+			if (a_world)
+				recorder.worldPending = true;
+			else
+				RecordPlain(UiOp::SetWorld3D);
 		}
 
-		void SetIndexData(void* a_renderer, const void* a_data, std::int32_t a_count, std::int32_t a_format, void* a_cache)
+		void SetVertexData(void*, const void* a_data, std::int32_t a_count, std::int32_t a_format, void*)
 		{
-			if (Recording()) {
-				Rec().mirror.SetIndexData(a_data, a_count, a_format);
-				Rec().indexPending = true;
-			}
-			Original<SetArrayFn>(kSetIndexData)(a_renderer, a_data, a_count, a_format, a_cache);
+			if (!Recording())
+				return;
+			Rec().mirror.SetVertexData(a_data, a_count, a_format);
+			Rec().vertexPending = true;
 		}
 
-		void LineStyleDisable(void* a_renderer)
+		void SetIndexData(void*, const void* a_data, std::int32_t a_count, std::int32_t a_format, void*)
 		{
-			if (Recording()) {
-				RecordPlain(UiOp::LineStyleDisable);
-				Rec().mirror.LineStyleDisable();
-			}
-			Original<VoidFn>(kLineStyleDisable)(a_renderer);
+			if (!Recording())
+				return;
+			Rec().mirror.SetIndexData(a_data, a_count, a_format);
+			Rec().indexPending = true;
 		}
 
-		void LineStyleColor(void* a_renderer, const std::uint32_t* a_color)
+		void LineStyleDisable(void*)
 		{
-			if (Recording()) {
-				RecordPlain(UiOp::LineStyleColor).a = static_cast<std::int32_t>(*a_color);
-				Rec().mirror.LineStyleColor(*a_color);
-			}
-			Original<ColorFn>(kLineStyleColor)(a_renderer, a_color);
+			if (!Recording())
+				return;
+			RecordPlain(UiOp::LineStyleDisable);
+			Rec().mirror.LineStyleDisable();
 		}
 
-		void FillStyleDisable(void* a_renderer)
+		void LineStyleColor(void*, const std::uint32_t* a_color)
 		{
-			if (Recording()) {
-				RecordPlain(UiOp::FillStyleDisable);
-				Rec().mirror.FillStyleDisable();
-			}
-			Original<VoidFn>(kFillStyleDisable)(a_renderer);
+			if (!Recording())
+				return;
+			RecordPlain(UiOp::LineStyleColor).a = static_cast<std::int32_t>(*a_color);
+			Rec().mirror.LineStyleColor(*a_color);
 		}
 
-		void FillStyleColor(void* a_renderer, const std::uint32_t* a_color)
+		void FillStyleDisable(void*)
 		{
-			if (Recording()) {
-				RecordPlain(UiOp::FillStyleColor).a = static_cast<std::int32_t>(*a_color);
-				Rec().mirror.FillStyleColor(*a_color);
-			}
-			Original<ColorFn>(kFillStyleColor)(a_renderer, a_color);
+			if (!Recording())
+				return;
+			RecordPlain(UiOp::FillStyleDisable);
+			Rec().mirror.FillStyleDisable();
 		}
 
-		void FillStyleBitmap(void* a_renderer, const FillTexture* a_texture)
+		void FillStyleColor(void*, const std::uint32_t* a_color)
 		{
-			if (Recording()) {
-				Stream().Add(UiOp::FillStyleBitmap, a_texture, sizeof(FillTexture));
-				Rec().mirror.FillStyleBitmap(*a_texture);
-			}
-			Original<BitmapFn>(kFillStyleBitmap)(a_renderer, a_texture);
+			if (!Recording())
+				return;
+			RecordPlain(UiOp::FillStyleColor).a = static_cast<std::int32_t>(*a_color);
+			Rec().mirror.FillStyleColor(*a_color);
 		}
 
-		void FillStyleGouraud(void* a_renderer, std::int32_t a_type, const FillTexture* a_texture0, const FillTexture* a_texture1, const FillTexture* a_texture2)
+		void FillStyleBitmap(void*, const FillTexture* a_texture)
 		{
-			if (Recording()) {
-				FillTexture textures[2]{};
-				if (a_texture0)
-					textures[0] = *a_texture0;
-				if (a_texture1)
-					textures[1] = *a_texture1;
-				auto& command = Stream().Add(UiOp::FillStyleGouraud, textures, sizeof(textures));
-				command.a = a_type;
-				command.b = (a_texture0 ? 1 : 0) | (a_texture1 ? 2 : 0) | (a_texture2 ? 4 : 0);
-				Rec().mirror.FillStyleGouraud(a_type, a_texture0, a_texture1, a_texture2 != nullptr);
-			}
-			Original<GouraudFn>(kFillStyleGouraud)(a_renderer, a_type, a_texture0, a_texture1, a_texture2);
+			if (!Recording())
+				return;
+			Stream().Add(UiOp::FillStyleBitmap, a_texture, sizeof(FillTexture));
+			Rec().mirror.FillStyleBitmap(*a_texture);
 		}
 
-		void SetCxform(void* a_renderer, const float* a_cxform)
+		void FillStyleGouraud(void*, std::int32_t a_type, const FillTexture* a_texture0, const FillTexture* a_texture1, const FillTexture* a_texture2)
 		{
-			if (Recording()) {
-				Stream().Add(UiOp::SetCxform, a_cxform, sizeof(float) * 8);
-				std::memcpy(Rec().mirror.cxform, a_cxform, sizeof(Rec().mirror.cxform));
-			}
-			Original<SetMatrixFn>(kSetCxform)(a_renderer, a_cxform);
+			if (!Recording())
+				return;
+			FillTexture textures[2]{};
+			if (a_texture0)
+				textures[0] = *a_texture0;
+			if (a_texture1)
+				textures[1] = *a_texture1;
+			auto& command = Stream().Add(UiOp::FillStyleGouraud, textures, sizeof(textures));
+			command.a = a_type;
+			command.b = (a_texture0 ? 1 : 0) | (a_texture1 ? 2 : 0) | (a_texture2 ? 4 : 0);
+			Rec().mirror.FillStyleGouraud(a_type, a_texture0, a_texture1, a_texture2 != nullptr);
 		}
 
 		/** @brief Whether the object's vtable is GRendererD3D1x's, so the slots CS replaces are the expected functions. */
@@ -2546,14 +2384,13 @@ namespace RenderGraph::Engine::Scaleform
 			set(kDisableMask, &DisableMask);
 			set(kDrawBlurRect, &DrawBlurRect);
 			set(kDrawColorMatrixRect, &DrawColorMatrixRect);
-			if (Native::Active()) {
-				// Native mode records every call into the UI stream, the pure setters too, and compares the stream's replay with
-				// the field path's draws.
-				set(kSetMatrix, &SetFloats<kSetMatrix, UiOp::SetMatrix, 6>);
-				set(kSetUserMatrix, &SetFloats<kSetUserMatrix, UiOp::SetUserMatrix, 6>);
+			if (NativeUi()) {
+				// Native mode records every call into the UI stream, the pure setters too, and draws the stream's replay.
+				set(kSetMatrix, &SetFloats<UiOp::SetMatrix, 6>);
+				set(kSetUserMatrix, &SetFloats<UiOp::SetUserMatrix, 6>);
 				set(kSetCxform, &SetCxform);
-				set(kSetPerspective3D, &SetFloats<kSetPerspective3D, UiOp::SetPerspective3D, 16>);
-				set(kSetView3D, &SetFloats<kSetView3D, UiOp::SetView3D, 16>);
+				set(kSetPerspective3D, &SetFloats<UiOp::SetPerspective3D, 16>);
+				set(kSetView3D, &SetFloats<UiOp::SetView3D, 16>);
 				set(kSetWorld3D, &SetWorld3D);
 				set(kSetVertexData, &SetVertexData);
 				set(kSetIndexData, &SetIndexData);
@@ -2563,12 +2400,10 @@ namespace RenderGraph::Engine::Scaleform
 				set(kFillStyleColor, &FillStyleColor);
 				set(kFillStyleBitmap, &FillStyleBitmap);
 				set(kFillStyleGouraud, &FillStyleGouraud);
-				FieldCapture().mode = Capture::Mode::Expect;
-				ReplayCapture().mode = Capture::Mode::Compare;
 			}
 			*static_cast<void***>(a_renderer) = g_vtable.data() + 1;
 			logger::info("[ORG] Scaleform: the renderer has CS's vtable; displays are drawn on the render graph once it is up{}",
-				Native::Active() ? "; native mode records the UI stream and compares its replay with the field path" : "");
+				NativeUi() ? "; native mode records the UI stream and draws its replay" : "");
 		}
 
 		/** @brief The renderer's factory, SE 82831 / AE 84952, called by BSScaleformManager::InitRenderer (SE 80603 / AE 82730). */
