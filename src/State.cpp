@@ -407,8 +407,7 @@ void State::SetGrassFlags(bool sphereNormal, bool pbr)
 /**
  * @brief The render frame's end: resets per-frame state and publishes the render frame counter to off-thread readers.
  *
- * Ends the current profiler frame, resets all loaded features, caches current menu open states, clears
- * shader descriptor tracking, increments and atomically publishes the frame
+ * Ends the current profiler frame, resets all loaded features, clears shader descriptor tracking, increments and atomically publishes the frame
  * count, and disables reflection and improved snow shaders.
  */
 void State::Reset()
@@ -419,21 +418,6 @@ void State::Reset()
 	LandscapeSeamsFix::GetInstance().Reset();
 	LODBlendRingFix::GetInstance().Update();
 	SunShadowMaskFix::Update();
-
-	// Cache menu open states once per frame to avoid repeated IsMenuOpen calls
-	// (each call constructs a BSFixedString, which is expensive at scale).
-	// The menu states stay a render-side read: the main menu and loading screens publish no snapshot yet.
-	if (auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui)) {
-		isMainMenuOpen = ui->IsMenuOpen(RE::MainMenu::MENU_NAME);
-		isLoadingMenuOpen = ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
-		isMapMenuOpen = ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
-		isStatsMenuOpen = ui->IsMenuOpen(RE::StatsMenu::MENU_NAME);
-	} else {
-		isMainMenuOpen = false;
-		isLoadingMenuOpen = false;
-		isMapMenuOpen = false;
-		isStatsMenuOpen = false;
-	}
 
 	lastModifiedPixelDescriptor = 0;
 	lastModifiedVertexDescriptor = 0;

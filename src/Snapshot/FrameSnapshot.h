@@ -21,25 +21,30 @@ namespace DCLF
 * Life of a snapshot (Snapshot/Publication.h):
 * - Built: Snapshot::Capture runs the builder once per game update, at Main::Update's call of Main::DrawFrame (the boundary
 *   between the game update and its render half). It fills the core fields from game data and asks every registered feature
-*   capture for its block.
+*   capture for its block. A render frame no game update stands for (a loading screen's on the serving thread, a Bink movie's,
+*   a main-thread frame outside Main::Update) gets a frame-only snapshot from Snapshot::CaptureFrame at its Begin.
 * - Published: latest wins. A published snapshot the render side never adopted is replaced by the next one, and its events and
 *   counters are merged into that newer one first, so no event is lost.
-* - Adopted: at the render frame's start (Renderer::Begin, before the frame driver's OnBegin), on the main thread. Recording code
-*   reads only Snapshot::Current(). A render frame that finds nothing new keeps the snapshot it had: a repeat.
+* - Adopted: at the render frame's start (Renderer::Begin, before the frame driver's OnBegin), on the thread that renders it.
+*   Recording code reads only Snapshot::Current(). A render frame that finds nothing new keeps the snapshot it had: a repeat.
+*   The render side's frame kind is the adopted snapshot's kind.
 *
 * Game identity (id, gameTime, gameDelta) is the snapshot's. Render identity (render frame index, render delta) is the render
 * side's (Snapshot::Render()). Anything that means "a new game frame" keys by the snapshot id, never by a render counter.
 */
 namespace Snapshot
 {
-	/** @brief What kind of frame the game asked for. Decided from the UI and the player on the game thread. */
+	/**
+	* @brief What kind of frame the game asked for, decided by the snapshot's producer. The render side's frame kind
+	* (RenderGraph::Frame::Kind) is the adopted snapshot's.
+	*/
 	enum class FrameKind : std::uint8_t
 	{
-		World,          // no menu freezes the background and the player has 3D
-		MenuOverWorld,  // a menu that freezes the background is open over a loaded world
-		MainMenu,       // the main menu, or any update before the player has 3D
-		Loading,        // the loading menu is open
-		Movie,          // a Bink movie frame (published by the movie's producer; phase 0 never captures one)
+		World,          // main thread: no menu freezes the background and the player has 3D (also under a loading menu held open)
+		MenuOverWorld,  // main thread: a menu freezes the background (MenuManager's kFreezeFrameBackground test)
+		MainMenu,       // main thread: no menu freezes the background and the player has no 3D (the main menu, startup)
+		Loading,        // a loading screen's frame, on the serving thread
+		Movie,          // a Bink movie frame (BSMoviePlayer::Tick), on any thread
 		Count
 	};
 
@@ -71,7 +76,7 @@ namespace Snapshot
 	struct Events
 	{
 		std::uint32_t flags = 0;
-		std::uint32_t gameUpdates = 1;  // the game updates this snapshot stands for: 1, plus every replaced snapshot folded in
+		std::uint32_t gameUpdates = 1;  // the game updates this snapshot stands for: 1 (0 for a frame-only one), plus every replaced snapshot folded in
 		std::uint32_t loadsStarted = 0;
 		std::uint32_t menusOpened = 0;
 		std::uint32_t menusClosed = 0;
@@ -182,10 +187,18 @@ namespace Snapshot
 	/** @brief The UI command stream (phase 4's native UI renderer, Snapshot/UiCommandStream.h). Native only. */
 	struct UiCommandStream;
 
-	/** @brief One game update's frame data. Immutable once published. */
+	/**
+	* @brief One render frame's game data. Immutable once published.
+	*
+	* Ids: a game update's snapshot takes the next id (1, 2, ...) with sub 0. A frame-only snapshot (Snapshot::CaptureFrame) keeps
+	* the last game update's id and takes the next sub (1, 2, ...), so (id, sub) orders every snapshot and "a new game frame" is
+	* still a new id. It copies the last snapshot's world data (blocks, cameras, scene, game time, settings revision) and has its
+	* own kind, menus, load epoch, events (gameUpdates 0, game delta 0) and UI stream.
+	*/
 	struct FrameSnapshot
 	{
-		std::uint64_t id = 0;         // 1 for the first snapshot, then one more per game update
+		std::uint64_t id = 0;         // 1 for the first game update's snapshot, then one more per game update (0 before the first)
+		std::uint32_t sub = 0;        // 0 for a game update's snapshot; 1, 2, ... for the frame-only snapshots published since it
 		double gameTime = 0.0;        // game seconds since the session started, not advancing while paused
 		float gameDelta = 0.0f;       // this update's game seconds (RE::GetSecondsSinceLastFrame); 0 while paused
 		float realDelta = 0.0f;       // this update's wall-clock seconds (BSTimer::realTimeDelta)
@@ -196,6 +209,7 @@ namespace Snapshot
 		std::uint64_t settingsRevision = 0;  // CS::SettingRegistry::Serial() at the capture: moves with every settings change
 		Cameras cameras{};
 		bool interior = false;                                // the player's cell is an interior
+		bool worldLoaded = false;                             // the player has 3D and a parent cell: a frozen menu can draw the world behind it
 		std::shared_ptr<const DCLF::ScenePublication> scene;  // the scene publication it pairs with (empty in phase 0)
 		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (native; set at the update's DrawInterface end)
 		Events events{};

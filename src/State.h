@@ -17,6 +17,7 @@
 using json = nlohmann::json;
 
 #include "SharedData.h"
+#include "Snapshot/FrameSnapshot.h"
 #include <FeatureBuffer.h>
 
 #include <Hooks.h>
@@ -462,13 +463,20 @@ public:
 	bool inWorld = false;
 	bool activeReflections = false;
 
-	// Cached menu open states, updated once per frame in Reset().
-	// Avoids repeated IsMenuOpen calls (each constructs a BSFixedString).
+	// The adopted snapshot's menu states, set at each render frame's Begin (AdoptMenus).
 	bool isMainMenuOpen = false;
 	bool isLoadingMenuOpen = false;
 	bool isMapMenuOpen = false;
 	bool isStatsMenuOpen = false;
 	bool flatWorldMapLoaded = false;  ///< FlatMapMarkersSSE is loaded, which flat world map mods (e.g. FWMF) rely on
+	/** @brief Takes the render frame's menu states from its adopted snapshot. Renderer::Begin, after the adoption. */
+	void AdoptMenus(const Snapshot::MenuStates& a_menus)
+	{
+		isMainMenuOpen = a_menus.main;
+		isLoadingMenuOpen = a_menus.loading;
+		isMapMenuOpen = a_menus.map;
+		isStatsMenuOpen = a_menus.stats;
+	}
 	/** @brief The map menu is open while a flat world map mod is installed. */
 	bool IsFlatWorldMapOpen() const { return isMapMenuOpen && flatWorldMapLoaded; }
 	/**

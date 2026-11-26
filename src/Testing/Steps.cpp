@@ -17,8 +17,8 @@ namespace Testing
 {
 	namespace
 	{
-		// The clocks. The step clock counts game updates, and Presents outside a game update (the main menu and loading screens
-		// publish no snapshot). Presents count rendered frames. Atomic: a loading screen's thread presents beside the main thread.
+		// The clocks. The step clock counts game updates, and Presents outside a game update (loading screens, movies: their
+		// frame-only snapshots stand for no game update). Presents count rendered frames. Atomic: a loading screen's thread presents beside the main thread.
 		std::atomic<std::uint32_t> stepClock{ 0 };
 		std::atomic<std::uint32_t> presentFrame{ 0 };
 		// A game update published since the last Present outside one: a loading screen's Presents beside the main thread's updates
@@ -401,8 +401,8 @@ namespace Testing
 	void OnPresent()
 	{
 		const auto present = presentFrame.fetch_add(1, std::memory_order_relaxed) + 1;
-		// A Present outside a game update is a game frame of its own when no update ran since the last one: the main menu and most of a
-		// load publish no snapshot. Inside an update, its first Present runs the steps.
+		// A Present outside a game update is a game frame of its own when no update ran since the last one: a loading screen or a movie
+		// publishes only frame-only snapshots. Inside an update, its first Present runs the steps.
 		const bool inUpdate = Snapshot::InGameUpdate();
 		const bool ownFrame = !inUpdate && !updatedSincePresent.exchange(false, std::memory_order_relaxed);
 		const bool runSteps = ownFrame || (inUpdate && stepsDue.exchange(false, std::memory_order_relaxed));

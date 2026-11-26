@@ -1,7 +1,8 @@
 #include "RenderGraph/Frame/FrameDriver.h"
-#include "Snapshot/EngineReads.h"
 
 #include "Features/Upscaling.h"
+#include "Globals.h"
+#include "State.h"
 
 #include "RenderGraph/BuildManager.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
@@ -19,6 +20,7 @@
 #include "RenderGraph/FrameClock.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 #include "Utils/Setting.h"
 
@@ -34,6 +36,7 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -82,7 +85,7 @@ namespace RenderGraph::Frame::Driver
 			bool began = false;
 			std::array<bool, kSegments> tapped{};
 			bool captured = false;  // gIsInMenuMode2, so no more capture until no menu freezes the background
-			// The freeze test's answer at Begin. Main thread only.
+			// The adopted snapshot's freeze test, for Main's second test. Main thread only.
 			bool freezes = false;
 			std::uint64_t freezesFrame = ~0ull;
 			std::uint64_t freezeChanges = 0;     // frames where the engine's own test differed from Begin's
@@ -149,44 +152,51 @@ namespace RenderGraph::Frame::Driver
 		};
 
 		/**
-		 * @brief The engine's own frozen-background test. MenuManager (SE 79938, AE 82075) looks for kFreezeFrameBackground (0x20).
-		 * Main's frame (SE 35556 / AE 36555) calls it right after Begin.
+		 * @brief The producer of the frame Begin starts on this thread, when no game update stands for it. Begin is called by Main's
+		 * frame (SE 35556, from Main::Update and a few cell-change paths), the loading loop (38085) and BSMoviePlayer::Tick. A Begin
+		 * inside Main::Update's call of Main::DrawFrame adopts that update's snapshot (or repeats it in the cadence test mode).
 		 */
-		bool FreezesBackground()
+		std::optional<Snapshot::FrameSource> FrameOnlySource(const State& a_state)
 		{
-			auto* ui = CS_ENGINE_READ(UI, RecordTime, RE::UI::GetSingleton());
-			if (!ui)
-				return false;
-			using Fn = bool (*)(RE::UI*);
-			static REL::Relocation<Fn> freezes{ REL::RelocationID(79938, 82075) };
-			return freezes(ui);
-		}
-
-		/**
-		 * @brief The kind of frame Begin starts on this thread. Begin is called by Main's frame (SE 35556), the loading loop (38085)
-		 * and BSMoviePlayer::Tick. The world draws when no menu freezes it and the player's Get3D2 (vtable +0x380) is set.
-		 */
-		Kind DecideKind(State& a_state, bool& a_capture)
-		{
-			a_capture = false;
 			if (t_inMovieTick)
-				return Kind::Bink;
+				return Snapshot::FrameSource::Movie;
 			if (!FrameAnchors::IsMainThread()) {
 				static std::atomic_flag logged;
 				if (!a_state.loading.load(std::memory_order_acquire) && !logged.test_and_set())
 					logger::warn("[ORG] frame: a frame began on a thread that is neither the main thread nor a movie tick, outside a loading screen; "
 								 "it counts as a loading screen's (logged once)");
+				return Snapshot::FrameSource::LoadingScreen;
+			}
+			if (!Snapshot::InGameUpdate())
+				return Snapshot::FrameSource::MainThread;
+			return std::nullopt;
+		}
+
+		/**
+		 * @brief The kind of the frame Begin starts: the adopted snapshot's. A frozen menu draws the world behind it once, at its first
+		 * frame with the world loaded, until a main-thread frame no menu freezes.
+		 */
+		Kind DecideKind(State& a_state, bool& a_capture)
+		{
+			a_capture = false;
+			const auto& snapshot = Snapshot::Current();
+			if (!snapshot)
+				Fatal("frame driver", "a frame began with no adopted snapshot");
+			switch (snapshot->kind) {
+			case Snapshot::FrameKind::Movie:
+				return Kind::Bink;
+			case Snapshot::FrameKind::Loading:
 				return Kind::Loading;
+			default:
+				break;
 			}
-			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
-			const bool has3D = player && player->Get3D2();
-			a_state.freezes = FreezesBackground();
+			a_state.freezes = snapshot->menus.freezesBackground;
 			a_state.freezesFrame = FrameClock::BeginFrame();
-			if (!a_state.freezes) {
+			if (snapshot->kind != Snapshot::FrameKind::MenuOverWorld) {
 				a_state.captured = false;
-				return has3D ? Kind::World : Kind::MainMenu;
+				return snapshot->kind == Snapshot::FrameKind::World ? Kind::World : Kind::MainMenu;
 			}
-			if (!a_state.captured && player && player->GetParentCell() && has3D) {
+			if (!a_state.captured && snapshot->worldLoaded) {
 				a_capture = true;
 				a_state.captured = true;
 			}
@@ -195,8 +205,8 @@ namespace RenderGraph::Frame::Driver
 	}
 
 	/**
-	 * @brief Makes Main's second freeze test return what Begin decided, so the engine draws the frame the description has.
-	 * Another thread can push a menu between the two tests through the UI message queue.
+	 * @brief Makes Main's second freeze test return the adopted snapshot's, so the engine draws the frame the description has.
+	 * Another thread can push a menu between the capture and the test through the UI message queue.
 	 */
 	struct FreezeTestAtBegin
 	{
@@ -207,7 +217,7 @@ namespace RenderGraph::Frame::Driver
 			if (!Engine::GraphMode() || state.freezesFrame != state.current.frame || !FrameAnchors::IsMainThread())
 				return live;
 			if (live != state.freezes && state.freezeChanges++ < 8)
-				logger::info("[ORG] frame: the menu stack's freeze flag changed after frame {}'s Begin ({} -> {}); the frame keeps Begin's answer",
+				logger::info("[ORG] frame: the menu stack's freeze flag changed after frame {}'s snapshot ({} -> {}); the frame keeps the snapshot's answer",
 					state.current.frame, state.freezes, live);
 			return state.freezes;
 		}
@@ -220,6 +230,7 @@ namespace RenderGraph::Frame::Driver
 		* @brief Renderer::Begin (SE 75460, AE 77245), on whichever thread renders the frame, inside Renderer::Lock. In the graph modes
 		* that thread owns rendering until another one begins a frame (Engine::LoadingScreen). Then the frame clock moves, so OnBegin
 		* reads the frame it starts. Revisions adopt only on the main thread (D-4): another thread's frames keep the revision adopted last.
+		* Every frame adopts a snapshot: its game update's, or a frame-only one published here (Snapshot::CaptureFrame).
 		*/
 		struct RendererBegin
 		{
@@ -230,10 +241,13 @@ namespace RenderGraph::Frame::Driver
 					if (Engine::GraphMode())
 						FrameAnchors::ClaimRenderOwnership();
 					RenderGraphRuntime::OnRendererBegin();
-					// The render frame's snapshot, adopted once the frame clock moved (main thread only: a loading screen's frames keep the
-					// snapshot adopted last). Both modes; guest adopts the one just published, on the same thread.
-					if (FrameAnchors::IsMainThread())
-						Snapshot::Adopt();
+					// The render frame's snapshot, adopted once the frame clock moved, on every thread. A frame no game update stands for
+					// publishes its own first. Both modes; guest adopts the one just published, on the same thread.
+					if (const auto source = FrameOnlySource(Get()))
+						Snapshot::CaptureFrame(*source);
+					Snapshot::Adopt();
+					// The menu states the frame reads are the snapshot's.
+					globals::state->AdoptMenus(Snapshot::Current()->menus);
 					// The description (PostChain) and the upscaler read the window state the frame starts with.
 					Upscaling::LatchWindowState();
 					OnBegin();
