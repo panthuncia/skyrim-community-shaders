@@ -625,3 +625,22 @@ pushes until the user is back.
      Skylighting's live reads are record-time. SetupSunAndSky and RenderPrecipitation are CS points behind skeleton
      calls (decision 70). The water update now runs in the capture beside the frame jobs: snap3-jobhang checks its
      ordering with the drop-cells frame-job hang.
+
+## 2026-11-26: the player's face noise (snap3-facenoise; director accepted)
+
+156. **Closes 132:** the noise was DCLF drawing the head's first, empty tint texture (made by PrepareHeadPartForShaders
+     with `CreateRenderTexture`, no contents). DCLF captures the face material's views when the head attaches; the bake
+     then swapped a new texture into the head and released the old one (as UpdatePending does), which DCLF never sees.
+     The native device does not zero a texture created without contents, so it showed leftover memory; DXVK zeroes it,
+     so guest draws a zero tint instead (flat dark face).
+157. **A native bake copies into the head's existing texture** (no new texture, no swap, no release); a head texture that
+     does not match kPLAYER_FACEGEN_TINT is fatal. The render side zeroes a new bake's head texture first, so the frames
+     before the copy draw zeros.
+158. **Director's decisions on the open items:** (a) the native device zeroes every texture created without initial
+     contents, like DXVK and D3D11 drivers, so no texture read before its first write shows leftover memory; (b) guest's
+     player face is fixed too: DCLF refreshes a material's captured views when the engine swaps a texture under it (the
+     face tint swap first). Both go to the next lead.
+159. **Open regression:** since the snap5-menus or snap3-water merge, native's race menu (menu over world,
+     `facegen.toml`) draws the world only in the top-left 1280x720 of a 1920x1080 frame, and darker. Not caught because
+     the water validation did not run the facegen config; menu-over-world configs belong in every validation set from
+     now on. snap3-quarter bisects and fixes it.
