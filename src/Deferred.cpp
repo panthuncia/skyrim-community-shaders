@@ -250,7 +250,7 @@ void Deferred::ReflectionsPrepasses()
 
 	state->activeReflections = true;
 	globals::features::viewAtmosphere.Unbind();
-	state->UpdateSharedData(false, false);
+	state->UpdateSharedData(false);
 
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
@@ -285,7 +285,7 @@ void Deferred::EarlyPrepasses()
 	if (!shaderCache->IsEnabled())
 		return;
 
-	globals::state->UpdateSharedData(false, true);
+	globals::state->UpdateSharedData(false);
 
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
@@ -331,7 +331,7 @@ void Deferred::StartDeferred()
 	sceneDepthFinal = false;
 	if (!globals::state->inWorld)
 		return;
-	globals::state->UpdateSharedData(true, false);
+	globals::state->UpdateSharedData(true);
 
 	auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 	auto& renderTargets = shadowState->GetRuntimeData().renderTargets;

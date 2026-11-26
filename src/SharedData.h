@@ -40,7 +40,7 @@ STATIC_ASSERT_ALIGNAS_16(SharedDataCB);
 
 struct SharedLighting
 {
-	const RE::NiLight* directionalLight = nullptr;
+	bool directionalOverridden = false;  // the directional colour is Sky Sync's working-space override: no conversion
 	Util::ColorSpace::LightColor directional;
 	Util::ColorSpace::LightColor sun;
 	Util::ColorSpace::LightColor masser;

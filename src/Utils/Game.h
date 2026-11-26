@@ -29,14 +29,28 @@ namespace Util
 	/** @brief Returns the latest completed celestial-transition generation. */
 	[[nodiscard]] std::uint32_t GetCompletedCelestialTransitionGeneration();
 
-	float4 TryGetWaterData(float offsetX, float offsetY);
+	/**
+	* @brief Water colour and height relative to a_eye in the cell at a_eye plus the offset. Reads the game: the snapshot's core
+	* capture calls it (Snapshot::CoreFrame::water); record code reads the block.
+	*/
+	float4 TryGetWaterData(const RE::NiPoint3& a_eye, float offsetX, float offsetY);
+	/**
+	* @brief far, near, far - near, far * near of the main camera. Inside a snapshot capture it reads the game; elsewhere it reads
+	* the adopted snapshot's core block.
+	*/
 	float4 GetCameraData();
+	/** @brief Whether the TAA shader's flag is on: CS's copy of what SetTemporal last set (the engine's value before that). */
 	bool GetTemporal();
 	// Toggle the ISTemporalAA scene-resolve flag (companion to GetTemporal).
 	void SetTemporal(bool enabled);
 	// Disable vanilla TAA (bUseTAA:Display). CS drives TAA itself.
 	void DisableVanillaTAA();
+	/** @brief The world FOV in degrees. In a snapshot capture from the game, elsewhere from the core block. */
+	float GetWorldFOVDegrees();
+	/** @brief The vertical FOV from the world FOV and the display's aspect. */
 	float GetVerticalFOVRad();
+	/** @brief The display size the frame renders for: the adopted DisplaySize frame variable. Render owner. */
+	float2 DisplaySize();
 
 	RE::NiPoint3 GetEyePosition();
 
@@ -216,6 +230,10 @@ namespace Util
 	/** @brief Tangent of a sky billboard angular half-width, or the fallback when its bound is unavailable. */
 	float GetBillboardHalfTan(const RE::NiAVObject* a_billboard, const RE::NiPoint3& a_viewer, float a_fallback);
 
+	/**
+	* @brief An interior cell, or a worldspace without sky or with fixed dimensions. Inside a snapshot capture it reads the
+	* game; elsewhere the adopted snapshot's core block (Snapshot::CoreFrame::noSky).
+	*/
 	bool IsInterior();
 
 	/** @brief Sun disc visibility in [0, 1] from its sky shader blend alpha; 0 when the sun is missing or hidden. */
