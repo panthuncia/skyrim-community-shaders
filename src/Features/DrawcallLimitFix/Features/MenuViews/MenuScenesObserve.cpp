@@ -5,24 +5,24 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
+#include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
-#include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
-#include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
-#include "RenderGraph/Frame/FrameDriver.h"
-#include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
-#include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
+#include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 #include "Features/LightLimitFix.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "Snapshot/CoreFrame.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Native/Native.h"
-#include "RenderGraph/Switches.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Switches.h"
 #include "ShaderCache.h"
 #include "Snapshot/FrameCamera.h"
 #include "Utils/Logging.h"
@@ -267,11 +267,10 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		}
 		float frame[kFrameRows][4]{};
 		Native::FrameRows(in, frame);
-		const float(*engineFrame)[4] = a_frame;
+		const float (*engineFrame)[4] = a_frame;
 		for (std::uint32_t r = 0; r < kFrameRows; ++r)
 			if (std::memcmp(engineFrame[r], frame[r], 16) != 0) {
-				Note("frame", true, std::format("{} row {}: engine [{} {} {} {}] mine [{} {} {} {}]", name, r, engineFrame[r][0], engineFrame[r][1], engineFrame[r][2], engineFrame[r][3],
-										frame[r][0], frame[r][1], frame[r][2], frame[r][3]));
+				Note("frame", true, std::format("{} row {}: engine [{} {} {} {}] mine [{} {} {} {}]", name, r, engineFrame[r][0], engineFrame[r][1], engineFrame[r][2], engineFrame[r][3], frame[r][0], frame[r][1], frame[r][2], frame[r][3]));
 				break;
 			} else if (r + 1 == kFrameRows)
 				Note("frame", false, {});
@@ -332,8 +331,9 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		const bool sameViewport = frame.rect == a_viewport.rect && frame.depthRange == a_viewport.depthRange;
 		const auto* property = a_pass->shaderProperty;
 		const auto* alpha = a_pass->geometry->GetGeometryRuntimeData().alphaProperty.get();
-		const auto key = std::format("{} {}: blend {} coverage {} write {} extra {} depth {} stencil {} ref {:#x} fill {} cull {} bias {} alphaRef {} viewport {} {} {} {} "
-									 "range {} {} targets {} {} {} {} (frame viewport {}); property flags {:#x} alpha property {}",
+		const auto key = std::format(
+			"{} {}: blend {} coverage {} write {} extra {} depth {} stencil {} ref {:#x} fill {} cull {} bias {} alphaRef {} viewport {} {} {} {} "
+			"range {} {} targets {} {} {} {} (frame viewport {}); property flags {:#x} alpha property {}",
 			NameOf(s.view), GeometryName(a_pass->geometry), a_blend, a_coverage, a_write, a_extra, a_depth, a_stencil, a_stencilRef, a_fill, a_cull, a_depthBias, a_alphaRef,
 			a_viewport.rect[0], a_viewport.rect[1], a_viewport.rect[2], a_viewport.rect[3], a_viewport.depthRange[0], a_viewport.depthRange[1], rt0, static_cast<std::int32_t>((a_target >> 8) & 0xFF) - 1, static_cast<std::int32_t>((a_target >> 16) & 0xFF) - 1,
 			static_cast<std::int32_t>((static_cast<std::uint32_t>(a_target) >> 24) & 0xFF) - 1,

@@ -401,8 +401,8 @@ namespace EngineZones
 		{
 			const std::string_view name = kSites[a_site].name;
 			return name.find("Lockpicking") != std::string_view::npos ? 7 : name.find("MistMenu") != std::string_view::npos ? 4 :
-			       name.find("StatsMenu") != std::string_view::npos   ? 6 :
-			                                                            -1;
+			                                                            name.find("StatsMenu") != std::string_view::npos    ? 6 :
+			                                                                                                                  -1;
 		}
 
 		/** @brief CountsAsRender for a site: a menu scene site counts until CS draws its scheme natively. */
@@ -415,7 +415,7 @@ namespace EngineZones
 		const char* RoleName(std::size_t a_site) noexcept
 		{
 			const auto role = kSites[a_site].role;
-			return SiteCountsAsRender(a_site)                                    ? "render" :
+			return SiteCountsAsRender(a_site)                        ? "render" :
 			       role == Role::Producer || role == Role::MenuScene ? "producer" :
 			                                                           "helper";
 		}
