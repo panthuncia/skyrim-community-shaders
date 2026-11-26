@@ -3,6 +3,7 @@
 #include "DrawcallLimitFix.h"
 #include "DrawcallLimitFix/Diagnostics/Capture/Capture.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Deferred.h"
 #include "I18n/I18n.h"
@@ -626,6 +627,8 @@ void DrawcallLimitFix::Hooks::Install()
 	}
 	// Keeps the engine's writers inside the engine-read window out of DCLF's reads there.
 	DCLF::WindowWriters::Install();
+	// The game update is over at its capture, so a detach still waiting for a re-attach is a removal. Pushed on the game thread.
+	Snapshot::RegisterCapture([](Snapshot::Builder&) { DCLF::SceneTracker::Get().PushHeldDetaches(); });
 	logger::info("[DCLF] Native pass hooks installed");
 }
 

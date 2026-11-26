@@ -75,7 +75,7 @@ namespace DCLF::Diagnostics
 					for (const auto& input : inputs)
 						if (!(complete = test(input)))
 							break;
-				// Engine references are released on the render thread.
+				// Engine references are released on the main thread.
 				EngineReleases::PushOwner(std::shared_ptr<void>(std::const_pointer_cast<SceneTables>(std::move(tables))));
 				resident.reset();
 				inputs = {};

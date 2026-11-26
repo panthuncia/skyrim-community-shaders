@@ -1,9 +1,10 @@
 // Point-light shadow culls that skip the entries DCLF draws. LocalLightCull.h has the overview.
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/LocalLightCull.h"
-#include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Snapshot/Retire.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
@@ -67,7 +68,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		/** @brief One category node's children less its excluded entries, in child order. */
 		struct CategoryFilter
 		{
-			// Held so the node is not freed or its address reused while a snapshot still names it. Released with the snapshot at Present.
+			// Held so the node is not freed or its address reused while a snapshot still names it. Released with the snapshot (RetireFilter).
 			RE::NiPointer<RE::NiNode> node;
 			std::vector<RE::NiPointer<RE::NiAVObject>> children;
 			std::uint32_t cut = 0;               // the excluded entries left out
@@ -89,8 +90,15 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		std::atomic<const Filter*> frameFilter{ nullptr };    // this frame's light culls': null on frames they cull whole
 		std::atomic<std::uint64_t> dirtied{ 0 };              // nodes made dirty, ever
 		std::uint64_t dirtiedSeen = 0;
-		// Retired snapshots, released two Presents later: a detour that loaded one just before it was retired may still read it.
-		std::array<std::vector<std::shared_ptr<const Filter>>, 2> retired;
+		/**
+		 * @brief A retired snapshot holds engine nodes, so it goes to the retire queue's engine lane, let go on the main thread at the next
+		 * capture: after this frame's light culls, so a detour that loaded it just before it was retired may still read it.
+		 */
+		void RetireFilter(std::shared_ptr<const Filter>&& a_filter)
+		{
+			if (a_filter)
+				Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::move(a_filter));
+		}
 		thread_local const Filter* lightFilter = nullptr;  // set for the call by the Accumulate thunk
 
 		struct FilterStats
@@ -382,22 +390,21 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				} else if (a_exclusion && done->built->exclusionVersion == a_exclusion->version) {
 					dirtiedSeen = done->dirtied;
 					if (filterBuilt)
-						retired[0].push_back(std::move(filterBuilt));
+						RetireFilter(std::move(filterBuilt));
 					filterBuilt = std::move(done->built);
 					++filterStats.builds;
 					filterStats.buildTicks += done->ticks;
 				} else {
 					++filterStats.stale;
-					retired[0].push_back(std::move(done->built));
+					RetireFilter(std::move(done->built));
 				}
-				// Engine references are released here on the render thread.
 				if (done->base)
-					retired[0].push_back(std::move(done->base));
+					RetireFilter(std::move(done->base));
 			}
 			if (!a_exclusion) {
 				filterCurrent.store(nullptr, std::memory_order_release);
 				if (filterBuilt)
-					retired[0].push_back(std::move(filterBuilt));
+					RetireFilter(std::move(filterBuilt));
 				return;
 			}
 			const std::uint64_t appeared = Scene::FrameView::Get().GetLightEntriesAppeared();
@@ -848,12 +855,6 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		DCLF::Engine::At<std::uint32_t>(lightData, DCLF::Engine::kLightDataActiveMask) |= bits;
 		bitStats.given.fetch_add(1, std::memory_order_relaxed);
 		bitStats.withBits.fetch_add(bits ? 1 : 0, std::memory_order_relaxed);
-	}
-
-	void EndFrame()
-	{
-		retired[1].clear();
-		std::swap(retired[0], retired[1]);
 	}
 
 	Counters Take()

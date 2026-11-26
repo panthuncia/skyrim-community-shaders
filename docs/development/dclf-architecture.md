@@ -106,7 +106,8 @@ lane and pool, and every frame draws the newest complete snapshot of it.
 | Point in the frame | Render thread | Scene lane and pool | GPU |
 | --- | --- | --- | --- |
 | `Main::Update`'s entry (main thread) | The frame's engine writes, at the one safe point: `kAccumulated` (`IndirectDraws::WriteAccumulated`), the fade write-back's stores, then the stand-in observers ("Main::Update's entry", below) | | |
-| `Main::Draw`, before the main cull (`FrameDriver::BeginFrame`, the shell's `Main_Draw_Early` thunk) | The graph's build point (`IndirectDraws::BuildPoint`); opens the engine-read window; applies the toggles; captures the frame globals and posts the frame inputs; the camera cut; hands over the snapshot the frame revision adopted at this frame's `Renderer::Begin` (`FrameView::HandOverAtFrameStart`), never waiting for a newer one; installs the claims; serves the scene lane's requests (switch catch-ups, the category capture, mirror capture requests); decides the draw families (tree LOD); publishes the scene-list filter; kicks the frame values (`FrameValues::Kick`) | **Scene pass** (`Coordinator::RunSceneWork`, whenever its producers wake the pump): events applied, walk, joins, `CommitSet`; then, at the snapshot builder's pace, `PublishScene`. **Snapshot builder** (`IndirectDraws::PostSnapshotWork`): payloads built, revision made and sealed, payload published as pooled versions. **FrameValues' producer**: placements, palettes, shading | The frame values' uploads on the upload queue; the payload's catch-up |
+| The game update's capture (main thread, `Snapshot::Capture`) | Pushes the held detaches; after the publish, opens the engine-read window | | |
+| `Main::Draw`, before the main cull (`FrameDriver::BeginFrame`, the shell's `Main_Draw_Early` thunk) | The graph's build point (`IndirectDraws::BuildPoint`); ends the render half's hold on the engine-read window; applies the toggles; captures the frame globals and posts the frame inputs; the camera cut; hands over the snapshot the frame revision adopted at this frame's `Renderer::Begin` (`FrameView::HandOverAtFrameStart`), never waiting for a newer one; installs the claims; serves the scene lane's requests (switch catch-ups, the category capture, mirror capture requests); decides the draw families (tree LOD); publishes the scene-list filter; kicks the frame values (`FrameValues::Kick`) | **Scene pass** (`Coordinator::RunSceneWork`, whenever its producers wake the pump): events applied, walk, joins, `CommitSet`; then, at the snapshot builder's pace, `PublishScene`. **Snapshot builder** (`IndirectDraws::PostSnapshotWork`): payloads built, revision made and sealed, payload published as pooled versions. **FrameValues' producer**: placements, palettes, shading | The frame values' uploads on the upload queue; the payload's catch-up |
 | The engine's list jobs | The engine registers the passes it keeps. `PassCapture` withholds DCLF's objects; `PrimaryCull` stands in for DCLF's entries inside the list jobs; whole entries are out of the scene lists | | |
 | Inside `CalculateAndDrawShadowCasterLights` | The frame's shadow views begun and their coverage decided (`BeforeShadowCasters`), each kept light noted (`ShadowCasterKept`), the views listed from DCLF's selection (`ShadowCastersSelected`) | | |
 | `BeforeShadowMaps` | The shadow views' revision inputs and frame; then, before the engine draws the shadow maps, the occlusion maps DCLF draws this frame taken and set up (Skylighting's `RenderOcclusionAtShadowMaps`: `OcclusionReady`, the camera, `OcclusionView`, `RenderMask`'s clear) | | The maps' clears |
@@ -120,7 +121,9 @@ lane and pool, and every frame draws the newest complete snapshot of it.
 | The main pass's opaque batches | `BeforeOpaquePass`: `CaptureMainPass`. `AfterOpaquePass`: the **colour epoch** (trigger `opaque.after`) | | The drawn set into the G-buffer, depth EQUAL; decals; Terrain Blending's terrain |
 | The engine's blended draw | The **forward epoch** (trigger `blended.draw`) | | Blended objects back to front; refraction normals |
 | `Main::RenderFirstPersonView` | The **first-person colour epoch** | | |
-| `Present` (`FrameDriver::EndFrame`) | Closes the engine-read window; binds what the frame read to its last submission (`BindAdopted`, `FrameValues::EndFrame`); writes the reports; releases what the scene work let go of (`EngineReleases`) | | |
+| `Present` (`FrameDriver::EndFrame`) | Holds the engine-read window for the rest of the render half; binds what the frame read to its last submission (`BindAdopted`, `FrameValues::EndFrame`); writes the reports | | |
+| The end of `Main::Update`'s call of `Main::DrawFrame` (main thread) | Closes the engine-read window before the update's game logic | | |
+| The frame-job wait after it (main thread, `MainTick`) | Lets go of the retire queue's engine lane (DCLF's engine references among them): no engine job runs beside it | | |
 
 An epoch's position matters to the work after it. Streamline's upscalers and frame generation must not run on the GPU directly
 behind an epoch: see [render-graph.md](./render-graph.md), "Hazard: external Vulkan work directly after a graph epoch"
@@ -249,7 +252,8 @@ A load is scene events like any other. While it holds (`Scene::Channels::loading
 Present and frame start and apply their batches as usual: the unloading world's detaches erase what it tracked, and the loading
 world's attaches track what comes. There is no rescan. The tables are not written while the load is up (`BuildScenePhase`), and
 the first category capture after it is forced: the cells that came are walked from it, the ones that went are dropped. A load
-screen's frames are claims-less whatever their snapshot.
+screen's frames are claims-less whatever their snapshot. The engine references the load's passes let go wait in the retire queue
+until the main thread's first capture after the load (it is inside the load meanwhile).
 
 **The hold** (`Core/Render/LoadHold.{h,cpp}`, 5.5.1). The loading screen stays up after every load until DCLF draws the load's
 objects, so the engine draws none of them and nothing pops in. No frame is black and none is handed to the engine.
@@ -331,8 +335,13 @@ push events, and the list jobs `PrimaryCull` stands in for.
 
 ### The engine-read window
 
-When a worker may touch the engine's scene graph (`Core/Engine/EngineReadWindow.h`): open from `FrameDriver::BeginFrame`
-(`Main::Draw`) to Present, both on the render thread.
+When a worker may touch the engine's scene graph (`Core/Engine/EngineReadWindow.h`): the game-side capture window (render-thread
+roadmap, phase 6). It opens on the main thread after the game update's publish and closes at the end of `Main::Update`'s call of
+`Main::DrawFrame`, before the update's game logic. The render side never takes a lease (the report counts main-thread leases).
+-   **The render half's hold.** While the engine's render half runs inside the window it writes the scene graph outside `Main::Draw`
+    to Present (the decal manager's attaches before `Main::Draw`; the next update's jobs after Present). The window is held there
+    (`HoldForRenderHalf` at each `DrawFrame` call and at Present, `ReleaseRenderHalf` at `FrameDriver::BeginFrame`), so leases are
+    taken from `Main::Draw` to Present as before. A dropped cadence update (no render half) leaves the whole window readable.
 -   A worker touching engine memory takes a `Lease` per item or per `ParallelFor` chunk. A refused lease means the window closed,
     and the rest waits for the next window: nothing refused is dropped. FrameValues hands a refused shading item back to the next
     Kick (`RefusedShading`): a static object's slot is named once, so a dropped item left its row zero for the session (alpha 0:
@@ -348,7 +357,7 @@ When a worker may touch the engine's scene graph (`Core/Engine/EngineReadWindow.
 ### Engine references
 
 -   **Pins.** An attach's capture (`CaptureAttached`, on the attaching thread) holds every object it records and their
-    ancestors; the batch keeps them until the render thread releases it at Present. The scene work's engine references are
+    ancestors; the batch keeps them until the retire queue lets it go on the main thread. The scene work's engine references are
     copies of pins (`HoldProperties`, the root owners). A key the mirror names that nothing pins is refused: a key is never turned
     into a reference.
 -   **Pins only in the world.** A pin is taken only on an object in the world (`SceneCapture::InWorld`), where its parent holds
@@ -357,7 +366,9 @@ When a worker may touch the engine's scene graph (`Core/Engine/EngineReadWindow.
     by `FUN_14021d140`). A pin on such an object frees it at Present under its owner. Leaf updates (`PushLeafUpdate`) are dropped
     out of the world, as the mirror's records are; the subtree is captured whole at its world attach.
 -   **Releases.** No engine object's last reference is dropped on a DCLF thread. The scene work hands references back
-    (`EngineReleases`, a lock-free queue released at Present; `HandBack`); `CS_DCLF_RELEASE_GUARD` observes it. Why: engine
+    (`EngineReleases`, on the snapshot retire queue's engine lane, `Snapshot/Retire.h`: let go on the main thread once the update's frame jobs are joined (after Main::DrawFrame), once
+    the GPU finished the newest frame begun at the push; `HandBack`); `CS_DCLF_RELEASE_GUARD` observes it. A retired batch carries its
+    last publication, and `EngineReleases::Alive` turns false for it only once it is let go, while the window is closed. Why: engine
     destructors run Havok teardown and crash off the main thread.
 -   **Anything keyed by an engine node pointer holds the node** (`NiPointer`) for as long as a snapshot names it: the sun
     candidates hold their entry nodes, the scene lists' restore re-inserts only roots its candidates hold (`EntrySpace::held`),
@@ -1571,7 +1582,7 @@ of the six scene lists while DCLF draws both occlusion maps (`PrimaryCull::Publi
     build's globals also rebuild.
 -   `RestoreSceneLists` puts the roots back before an engine `SetupMask`, since only the occlusion maps read the lists between the
     list jobs and `ClearLists`. It re-inserts only roots its candidates hold and leaves out a root no longer under the scene node.
--   **Invariants:** roots the build's job releases go to `listGraveyard` and are released at Present; after a kept frame the
+-   **Invariants:** roots the build's job releases go to `listGraveyard`, handed to the retire queue at Present; after a kept frame the
     engine's build must clear the lists first (missing it once put every root in twice and hung the render thread).
 -   Measured at Riverwood: about 8,500 of 11,100 entries left out a frame; the sun's `objectArray` from 2,163 to 539 entries.
 

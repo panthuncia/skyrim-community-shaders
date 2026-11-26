@@ -25,11 +25,12 @@ namespace DCLF::SceneCapture
 #include <ankerl/unordered_dense.h>
 
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
-#include "RenderGraph/Async/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
-#include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Channels.h"
+#include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
+#include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 namespace DCLF
 {
@@ -193,8 +194,9 @@ namespace DCLF
 			Extensions::ShadowSourcesFrameEnd();
 			listFilter.store(nullptr, std::memory_order_release);
 			listMode.store(ListMode::Engine, std::memory_order_release);
-			// Release roots where the engine unloads, since one may hold a detached cell's last reference.
-			listGraveyard.clear();
+			// One may hold a detached cell's last reference, so they are let go on the main thread after the update's frame jobs.
+			if (!listGraveyard.empty())
+				EngineReleases::PushOwner(std::make_shared<std::vector<RE::NiPointer<RE::NiAVObject>>>(std::exchange(listGraveyard, {})));
 		}
 
 		/**
@@ -329,7 +331,7 @@ namespace DCLF
 		/** @brief A root attached under or detached from a category node, in event order. */
 		struct ListEvent
 		{
-			RE::NiPointer<RE::NiAVObject> held;  // kept alive until applied, released at Present
+			RE::NiPointer<RE::NiAVObject> held;  // kept alive until applied, then buried in the graveyard
 			const RE::NiAVObject* child = nullptr;
 			const RE::NiAVObject* parent = nullptr;
 			bool attached = false;
@@ -342,8 +344,8 @@ namespace DCLF
 		ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint16_t> listCategories;
 		ankerl::unordered_dense::map<const RE::NiAVObject*, std::pair<std::uint32_t, std::uint32_t>> listPositions;
 		std::uint32_t listNext = 0;
-		std::vector<RE::NiPointer<RE::NiAVObject>> listGraveyard;  // the build's job fills, Present releases
-		/** @brief The build's job. Empties the scene lists, keeping their references for Present. */
+		std::vector<RE::NiPointer<RE::NiAVObject>> listGraveyard;  // the build's job fills, Present hands to the retire queue
+		/** @brief The build's job. Empties the scene lists, keeping their references for the graveyard. */
 		void BuryLists();
 		bool listsKeepInstalled = false;
 		struct ListStats

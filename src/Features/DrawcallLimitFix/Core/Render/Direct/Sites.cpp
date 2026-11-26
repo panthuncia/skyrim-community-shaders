@@ -1010,7 +1010,7 @@ namespace DCLF::Direct::detail
 		/**
 		 * @brief A released slot's frame, destroyed together on the pool. Its signal has completed, so nothing reads it.
 		 * It leaves the render thread because BasicRHI destroys take device locks, and ORG and DCLF deletions take their own locks.
-		 * Engine references never die here. They go back lock-free and are released at Present.
+		 * Engine references never die here. They go to the retire queue, released on the main thread.
 		 * Members are destroyed in reverse order, runs before their views.
 		 */
 		struct ReleasedFrame

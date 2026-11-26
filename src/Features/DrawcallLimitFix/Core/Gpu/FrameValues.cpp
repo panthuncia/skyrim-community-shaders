@@ -306,7 +306,7 @@ namespace DCLF
 			a_out.erase(std::unique(a_out.begin(), a_out.end()), a_out.end());
 		}
 
-		// Engine references go back to the render thread, which releases them at Present.
+		// Engine references go to the retire queue, let go on the main thread.
 		template <class T>
 		void ReleaseLater(RE::NiPointer<T>& a_reference)
 		{

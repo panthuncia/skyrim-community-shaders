@@ -255,7 +255,7 @@ namespace DCLF
 
 	/**
 	 * @brief One scene pass's events, each queue drained up to where it stood at the pass's start. Its tracker events hold attached
-	 * subtrees, so it is handed back whole and released at Present.
+	 * subtrees, so it is handed back whole and released through the retire queue.
 	 */
 	struct Scene::Coordinator::EventBatch
 	{

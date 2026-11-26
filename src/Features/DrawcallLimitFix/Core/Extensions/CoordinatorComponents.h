@@ -52,7 +52,7 @@ namespace DCLF::Api
 		RE::NiPointer<RE::NiAVObject> HoldFadeNode(std::uint32_t a_slot, const void* a_node) const;
 		/** @brief Recounts a_slot at the next KeepResidentsAlive, because its keys may have changed. */
 		void NoteTouched(std::uint32_t a_slot) const;
-		/** @brief Releases an engine reference at Present through the retirement chain. */
+		/** @brief Releases an engine reference through the retirement chain and the retire queue, on the main thread. */
 		void HandBack(RE::NiPointer<RE::NiAVObject>&& a_reference) const;
 		void HandBack(std::vector<RE::NiPointer<RE::NiAVObject>>& a_references) const;
 		void HandBack(RE::NiPointer<RE::NiRefObject>&& a_reference) const;

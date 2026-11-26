@@ -70,7 +70,7 @@ namespace DCLF::Scene
 		materialIndex.clear();
 		materialDependents.clear();
 		ResetMaterialRecords();
-		// Released at Present, since the last reference deletes the engine's material and the pump runs this on a loading pass.
+		// Released on the main thread, since the last reference deletes the engine's material and the pump runs this on a loading pass.
 		for (auto& owner : materialOwners)
 			ReleaseMaterial(std::move(owner));
 		materialOwners.clear();
@@ -164,7 +164,7 @@ namespace DCLF::Scene
 		const auto key = tables.materialSlotKey[a_slot];
 		materialIndex.erase(key);
 		UnlistMaterialDependent(key.first, a_slot);
-		// Released at Present, since the last reference deletes the engine's material.
+		// Released on the main thread, since the last reference deletes the engine's material.
 		ReleaseMaterial(std::move(materialOwners[a_slot]));
 		ReleaseMaterialViews(a_slot);
 		tables.materialSlotKey[a_slot] = { nullptr, 0u };

@@ -154,7 +154,7 @@ namespace DCLF::Features::Faces
 			a_state.facePublished.clear();
 		}
 
-		// Freed records' engine references go back through the retirement chain, to be released at Present.
+		// Freed records' engine references go back through the retirement chain, to be released on the main thread.
 		void WalkBegun(const Api::CoordinatorComponentContext& a_context)
 		{
 			auto& state = a_context.State<FaceShapes>();

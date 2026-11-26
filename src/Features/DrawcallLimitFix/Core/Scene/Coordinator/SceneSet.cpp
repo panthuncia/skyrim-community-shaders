@@ -1227,15 +1227,11 @@ namespace DCLF::Scene
 					break;
 				}
 			}
-			// Imports go to the epochs. Engine references are released at Present on the render thread.
+			// Imports go to the epochs. Engine references go to the retire queue's engine lane, let go on the main thread.
 			for (auto& owner : a_batch.imports)
 				retiredImports.push_back(std::move(owner));
-			EngineReleases::NoteReleased(a_batch.lastPublication);
 			referencesReleased += a_batch.references.size() + a_batch.owners.size();
-			for (auto& reference : a_batch.references)
-				EngineReleases::Push(std::move(reference));
-			for (auto& owner : a_batch.owners)
-				EngineReleases::PushOwner(std::move(owner));
+			EngineReleases::PushRetired(a_batch.lastPublication, std::move(a_batch.references), std::move(a_batch.owners));
 		});
 		// Past the last slot alive or retiring nothing names a pipeline slot, so the columns and every GPU table sized from them are cut there.
 		if (const auto top = tables.pipelineSlots.TrimTop(); top < tables.pipelines.size()) {

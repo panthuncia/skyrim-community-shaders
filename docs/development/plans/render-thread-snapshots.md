@@ -6,8 +6,8 @@ engine list culls in native (`snap1-sidefx.md`, `snap3-lights.md`, `snap3-scene.
 native Main::RenderWorld with no resolve function and screen blood (`snap3-rworld.md`, `snap3-resolve.md`, `snap3-engstate.md`, `snap3-accum.md`); left: decision 127. Phase 4 done in-frame: native makes no game UI renderer call
 (`snap0-ui.md`, `snap4-ui2.md`). Phase 5: ImageSpace selection and constants, the TAA reset, vanilla and save screenshots,
 and every frame kind as a snapshot are done (`snap5-imagespace.md`, `snap5-isrest.md`, `snap5-kinds.md`); menu scenes and
-the image-based lens flares are left. Phase 6 part 1 (the retire queue outside DCLF) is done (`snap6-life.md`); part 2
-(DCLF) is designed. Phase 7 is prepared and planned (`snap7-prep.md`). Live engine reads in native Vulkan's world frame:
+the image-based lens flares are left. Phase 6 is done: the retire queue (`snap6-life.md`) and DCLF on it, with the
+engine-read window game-side (`snap6-dclf.md`). Phase 7 is prepared and planned (`snap7-prep.md`). Live engine reads in native Vulkan's world frame:
 1,848 at the phase 0 baseline, about 560-780 now (scene-dependent); engine render calls per native world frame: 74 at the
 baseline, about 20-33 now.
 Every decision since the roadmap, with the

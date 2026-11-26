@@ -1,8 +1,10 @@
-// Open and Close on the render thread, leases on any worker, and the report's counters.
+// Open, Close and the render half's hold on the main thread, leases on any worker, and the report's counters.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "Snapshot/Publication.h"
 
 #include <array>
 #include <chrono>
@@ -17,18 +19,40 @@ namespace DCLF
 		state.fetch_or(kOpen, std::memory_order_acq_rel);
 	}
 
-	void EngineReadWindow::Close()
+	void EngineReadWindow::NoteBoundary(std::uint32_t a_before, bool a_hold)
 	{
-		const std::uint32_t before = state.fetch_and(~kOpen, std::memory_order_acq_rel);
-		if (!(before & kOpen))
-			return;
-		++closes;
-		if (!(before & kLeases))
+		++(a_hold ? holds : closes);
+		if (!(a_before & kLeases))
 			return;
 		++closesWaited;
 		const double us = DrainLeases();
 		waitedUs += us;
 		waitedMaxUs = (std::max)(waitedMaxUs, us);
+	}
+
+	void EngineReadWindow::Close()
+	{
+		const std::uint32_t before = state.fetch_and(~(kOpen | kHeld), std::memory_order_acq_rel);
+		renderHalfHeld = false;
+		if (!(before & kOpen))
+			return;
+		NoteBoundary(before, false);
+	}
+
+	void EngineReadWindow::HoldForRenderHalf()
+	{
+		if (renderHalfHeld || !Snapshot::InGameUpdate() || !FrameAnchors::IsMainThread())
+			return;
+		renderHalfHeld = true;
+		NoteBoundary(state.fetch_or(kHeld, std::memory_order_acq_rel), true);
+	}
+
+	void EngineReadWindow::ReleaseRenderHalf()
+	{
+		if (!renderHalfHeld || !FrameAnchors::IsMainThread())
+			return;
+		renderHalfHeld = false;
+		state.fetch_and(~kHeld, std::memory_order_release);
 	}
 
 	void EngineReadWindow::Suspend()
@@ -64,9 +88,11 @@ namespace DCLF
 	EngineReadWindow::Lease::Lease()
 	{
 		// Count the lease and check open-and-not-suspended in one step, so Close and Suspend cannot miss it.
-		if ((state.fetch_add(1, std::memory_order_acq_rel) & (kOpen | kSuspended)) == kOpen) {
+		if ((state.fetch_add(1, std::memory_order_acq_rel) & (kOpen | kHeld | kSuspended)) == kOpen) {
 			held = true;
 			++heldHere;
+			if (FrameAnchors::IsMainThread())
+				mainThreadLeases.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
 		state.fetch_sub(1, std::memory_order_acq_rel);
@@ -96,15 +122,17 @@ namespace DCLF
 		c.suspendsWaited = suspendsWaited.exchange(0, std::memory_order_relaxed);
 		c.suspendWaitedUs = static_cast<double>(suspendWaitedUs.exchange(0, std::memory_order_relaxed));
 		c.suspendWaitedMaxUs = static_cast<double>(suspendWaitedMaxUs.exchange(0, std::memory_order_relaxed));
-		if (!closes && !c.unleased && !c.suspends)
+		c.mainThreadLeases = mainThreadLeases.exchange(0, std::memory_order_relaxed);
+		if (!closes && !holds && !c.unleased && !c.suspends && !c.mainThreadLeases)
 			return c;
 		c.any = true;
 		c.closes = closes;
+		c.holds = holds;
 		c.closesWaited = closesWaited;
 		c.waitedUs = waitedUs;
 		c.waitedMaxUs = waitedMaxUs;
 		c.refused = refused.exchange(0, std::memory_order_relaxed);
-		closes = closesWaited = 0;
+		closes = holds = closesWaited = 0;
 		waitedUs = waitedMaxUs = 0.0;
 		return c;
 	}

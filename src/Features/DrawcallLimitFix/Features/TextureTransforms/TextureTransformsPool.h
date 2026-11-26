@@ -14,7 +14,7 @@
 
 namespace DCLF::Features::TextureTransforms
 {
-	// Read only while this producer's Kick is the newest. Its materials are held by the publication its frame installed, released no earlier than the next frame's Present.
+	// Read only while this producer's Kick is the newest. Its materials are held by the publication its frame installed, released no earlier than the next capture.
 	inline bool Readable(const Api::FrameValuePoolProducer& a_producer, EngineReadWindow::Lease& a_lease) { return a_lease && a_producer.Newest(); }
 
 	inline void Read(const TextureTransformList::Entry& a_entry, std::size_t a_buffer, float (&a_values)[4])

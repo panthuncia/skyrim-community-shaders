@@ -18,7 +18,8 @@ namespace RE
 * - The engine lane holds what must be let go on the game's main thread: snapshots (their blocks may hold engine references) and
 *   engine refcounted objects. Dropping the last reference to an engine object runs the engine's destructors (NiRefObject counts
 *   atomically, but DeleteThis runs on the thread that drops it, and the destructors touch scene graph, renderer and texture
-*   database state with no lock). The main thread drains it at the capture, between game updates' render halves.
+*   database state with no lock). The main thread drains it once a game update's frame jobs are joined (the frame-job wait right
+*   after Main::DrawFrame), where no engine job runs beside it and DCLF's engine-read window is closed.
 * - The render lane holds CS objects and D3D11 handles (UI streams, upload textures). Their release is safe on any thread (a
 *   tripwire handle's resource goes through ServiceRetired), so the render side drains it at its frame start. This keeps a
 *   loading screen's streams, rendered on the serving thread while the main thread loads, from piling up until the load ends.
@@ -36,14 +37,14 @@ namespace Snapshot
 	{
 		enum class Lane : std::uint8_t
 		{
-			Engine,  // let go on the main thread, at the capture
+			Engine,  // let go on the main thread, after the update's frame jobs
 			Render,  // let go on the render side, at its frame start
 		};
 
 		/** @brief Any thread. Keeps a_object until the GPU finished render frame a_afterFrame (0: none), then lets it go on a_lane's drain. */
 		void Push(Lane a_lane, std::shared_ptr<const void> a_object, std::uint64_t a_afterFrame);
 
-		/** @brief Render side. Keeps a_object until the GPU finished the render frame running now. */
+		/** @brief Any thread. Keeps a_object until the GPU finished the newest render frame begun (on the render side, the one running now). */
 		void AfterThisFrame(Lane a_lane, std::shared_ptr<const void> a_object);
 
 		/**
@@ -52,10 +53,10 @@ namespace Snapshot
 		*/
 		void RenderedSnapshot(std::shared_ptr<const FrameSnapshot>&& a_snapshot, std::uint64_t a_lastFrame);
 
-		/** @brief A producer lets go of a snapshot reference: at once on the main thread, else through the engine lane. Any thread. */
+		/** @brief A producer lets go of a snapshot reference through the engine lane, at its next drain. Any thread. */
 		void LetGo(std::shared_ptr<const FrameSnapshot>&& a_snapshot);
 
-		/** @brief Main thread, game side (the capture). Lets go of the engine lane's entries whose GPU work is done. */
+		/** @brief Main thread, after the update's frame jobs. Lets go of the engine lane's entries whose GPU work is done. */
 		void DrainEngine();
 
 		/** @brief Render side, at its frame start (adoption). Lets go of the render lane's entries whose GPU work is done. */

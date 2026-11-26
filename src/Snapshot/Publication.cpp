@@ -1,5 +1,6 @@
 #include "Snapshot/Publication.h"
 
+#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FaceTint.h"
@@ -12,6 +13,7 @@
 #include "Utils/Setting.h"
 
 #include "RenderGraph/Async/LatestSlot.h"
+#include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -387,6 +389,8 @@ namespace Snapshot
 				Testing::OnGameUpdate();
 				// Native: the render half's game-visible side effects come from the game side (Snapshot/SideEffects.h).
 				SideEffects::AfterCapture(*Game().previous);
+				// The update is done and published: DCLF's workers may read the engine's scene graph until the next update's game logic.
+				DCLF::EngineReadWindow::Open();
 				const bool outer = std::exchange(t_inGameUpdate, true);
 				const auto renders = RendersThisUpdate();
 				// A load that starts inside a render (a console coc) ends the update's repeats: the engine's kept scene lists still name
@@ -395,8 +399,11 @@ namespace Snapshot
 				std::uint32_t rendered = 0;
 				{
 					const SideEffects::RenderHalfScope scope;
-					for (; rendered < renders && g_loadEpoch.load(std::memory_order_acquire) == epoch; ++rendered)
+					for (; rendered < renders && g_loadEpoch.load(std::memory_order_acquire) == epoch; ++rendered) {
+						// The render half writes the scene graph before Main::Draw (the decal manager's attaches).
+						DCLF::EngineReadWindow::HoldForRenderHalf();
 						func(a_main);
+					}
 				}
 				SideEffects::AfterRenderHalf(rendered);
 				t_inGameUpdate = outer;
@@ -408,6 +415,8 @@ namespace Snapshot
 						logger::info("{}", line);
 				if (updates % kLifetimeLineUpdates == 0)
 					logger::info("{}", Retire::TakeStatsLine());
+				// Main::Update's game logic follows.
+				DCLF::EngineReadWindow::Close();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -423,6 +432,10 @@ namespace Snapshot
 		if (REL::Module::IsVR())
 			return;
 		stl::write_thunk_call<MainUpdate_DrawFrame>(REL::RelocationID(35565, 36564).address() + REL::Relocate(0x5D2, 0xA97));
+		// The engine lane drains once the update's frame jobs are joined, right after Main::DrawFrame: they run beside it (the cell
+		// animations, Havok), and an engine object's last release there would race them. The engine-read window is closed by then.
+		if (!RenderGraph::Engine::MainTick::Add("the snapshot retire queue's engine lane", [] { Retire::DrainEngine(); }))
+			RenderGraph::Fatal("snapshot lifetimes", "the frame-job wait is not hooked, so engine references would never be let go");
 		SideEffects::InstallHooks();
 		FaceTint::InstallHooks();
 		(void)CadenceMode();
@@ -433,8 +446,6 @@ namespace Snapshot
 	{
 		ZoneScopedN("CS.Snapshot.Capture");
 		const PublishClaim claim;
-		// Game side, between render halves: what the render side retired and the GPU finished with is let go here.
-		Retire::DrainEngine();
 		// Engine reads from here on are captures, not live reads.
 		const EngineReads::CaptureScope scope;
 		const auto start = std::chrono::steady_clock::now();
@@ -469,8 +480,6 @@ namespace Snapshot
 	{
 		ZoneScopedN("CS.Snapshot.CaptureFrame");
 		const PublishClaim claim;
-		if (FrameAnchors::IsMainThread())
-			Retire::DrainEngine();
 		const EngineReads::CaptureScope scope;
 		auto& game = Game();
 		const FrameSnapshot* previous = game.previous.get();

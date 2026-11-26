@@ -21,7 +21,7 @@ namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		// Engine references must be released on the render thread, never on a worker.
+		// Engine references must be released on the main thread, never on a worker.
 		template <class T>
 		void ReleaseLater(RE::NiPointer<T>& a_reference)
 		{
