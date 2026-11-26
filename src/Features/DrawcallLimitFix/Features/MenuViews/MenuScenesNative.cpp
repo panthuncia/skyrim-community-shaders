@@ -847,7 +847,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		std::vector<RE::BSGeometry*> geometries;
 		SceneGeometry(root, *camera, SortsByClosestPoint(*a_manager), geometries);
 
-		const bool taa = false;  // the stats menu draws without TAA (UI3DSceneManager::Render: schemes 3 and 6)
+		// No TAA: schemes 3 and 6 never take it, and CS turns the engine's TAA off around UI::Render (Hooks.cpp), so no TAA mask fill follows.
+		const bool taa = false;
 		const auto targets = ColourTargets(scheme, taa);
 		// The frame's family resources start before the draws lease theirs, then kMAIN's depth and stencil clear, as at the render's start.
 		Family::BeginBatch();
@@ -864,7 +865,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			const char* why = nullptr;
 			if (netimmerse_cast<const RE::BSLightingShaderProperty*>(property))
 				why = BlendedList(*geometry) && property->alpha < 1.0f ? "a blended Lighting draw that fades (accumulation hint 9 or 10)" :
-				                                                          AddLighting(in, *geometry, targets, *run, frame, detail);
+				                                                         AddLighting(in, *geometry, targets, *run, frame, detail);
 			else if (netimmerse_cast<const RE::BSEffectShaderProperty*>(property))
 				why = AddEffect(in, *geometry, targets, *run, frame, detail);
 			else

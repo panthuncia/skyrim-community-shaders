@@ -24,8 +24,8 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
 #include "ShaderCache.h"
-#include "State.h"
 #include "Snapshot/FrameCamera.h"
+#include "State.h"
 #include "Utils/Logging.h"
 
 #include <array>
@@ -411,8 +411,8 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		}
 		const auto* skin = a_pass->geometry->GetGeometryRuntimeData().skinInstance.get();
 		const std::uint32_t rows = skin->numMatrices * 3;
-		const auto* e = reinterpret_cast<const float(*)[4]>(a_engine.data());
-		const auto* m = reinterpret_cast<const float(*)[4]>(mine.data());
+		const auto* e = reinterpret_cast<const float (*)[4]>(a_engine.data());
+		const auto* m = reinterpret_cast<const float (*)[4]>(mine.data());
 		CompareRows("palette previous", e, m, rows, GeometryName(a_pass->geometry));
 		CompareRows("palette current", e + kPaletteRows, m + kPaletteRows, rows, GeometryName(a_pass->geometry));
 	}
