@@ -215,11 +215,13 @@ void BuildMenuSteps(MenuBuild& a_build)
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
 		return;
-	D3D11_TEXTURE2D_DESC main{};
-	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
-	a_build.width = main.Width;
-	a_build.height = main.Height;
-	std::tie(a_build.finalWidth, a_build.finalHeight) = FinalSize();
+	// The sizes the revision this build is for makes: the engine's records and the imports keep the adopted ones until then.
+	const auto main = RevisionShapeOf(*ProgramInputs(), RE::RENDER_TARGET::kMAIN);
+	a_build.width = main.width;
+	a_build.height = main.height;
+	const auto framebuffer = RevisionShapeOf(*ProgramInputs(), RE::RENDER_TARGET::kFRAMEBUFFER);
+	a_build.finalWidth = framebuffer.width;
+	a_build.finalHeight = framebuffer.height;
 	a_build.levels = a_build.key.levels;
 	auto steps = MenuStepList(a_build.levels);
 

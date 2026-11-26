@@ -131,7 +131,7 @@ namespace NativePost
 		a_block.saveShots = s_saveShots;
 	}
 
-	/** @brief Render owner, each render frame's Begin, in both graph modes: the snapshot's new vanilla screenshots go to the Screenshot feature. */
+	/** @brief Render owner, each render frame's Begin (both graph modes): the snapshot's new vanilla screenshots go to the Screenshot feature. */
 	void RenderScreenshots()
 	{
 		const auto& snapshot = Snapshot::Current();
