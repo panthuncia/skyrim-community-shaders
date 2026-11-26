@@ -231,3 +231,23 @@ pushes until the user is back.
 65. **Loading-screen UI snapshots wait for phase 5:** they need a publish from a second producer (the serving thread),
     adoption there, and an id rule for snapshots that are not game updates. The serving thread already makes no game
     renderer call. Filters, 3D draws and GFx render targets were never observed in a run, so their parity is unproven.
+
+## 2026-11-26: phase 3 shadow casters (snap3-scene milestone 1; director accepted)
+
+66. **Native shadow caster selection:** in native, `SelectCasters` replaces the body of
+    `CalculateAndDrawShadowCasterLights` (AE 107132) and CS's `RenderShadowMaps` the body of 107133. CS ports the lights'
+    camera updates (sun cascades with smoothing and hull fit, spot, paraboloid and focus lights), the scissor, the
+    lens-flare queue, light release and Accumulate's bookkeeping, and writes them into the engine's shadow-light objects,
+    as ShadowMapsNative already does (decision 47 holds). Phase 6/7 moves them to render-owned memory. Parity: spot and
+    point cameras identical.
+67. **No cull, registration, attach walk or engine Render for shadow lights in native.** A light DCLF can't draw casts no
+    shadow that frame; every light goes through ShadowMapsNative.
+68. **Object creation stays engine calls:** allocation, constructors and the lights' own camera transform updates are not
+    rendering.
+69. **The sun port's cascade 1 is 88 units wider at its right edge** than the engine's; unexplained in the disassembly,
+    accepted because it covers more, so no caster is lost.
+70. **The main camera's list accumulation and registration jobs are still the engine's** (milestone 2, the scene lists).
+    Native still builds sky and wading-water draws from engine-registered passes and submits CS stages at the
+    accumulators' call sites; both must come from game data before the main cull stops. S8 for the decision 46 roots and
+    the decision 53 test-mode crash wait for it. Engine call sites that CS hooks keep counting until CS drives Main::Draw
+    itself (phase 7).
