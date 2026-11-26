@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
+#include "Snapshot/FrameSnapshot.h"
 
 #include <array>
 #include <cstdint>
@@ -26,7 +27,21 @@ namespace DCLF::Features::BloodSplatter
 	{
 		// FinishAccumulatingScreenSplatter's RenderBatches(accumulator, 0x5C006073, 0x5C006074, 0, -1).
 		inline constexpr Engine::Offset kSplatterBatch{ { 106601, 0x21 }, { 99956, 0x1D } };
+		// Main::RenderWorld's light flare setup: LightLoc, the flare scale and the HDR target, from the world camera.
+		inline constexpr Engine::Offset kFlareSetup{ { 106979 }, { 100269 } };
+		// What it writes, and what ScreenSplatter::Update writes, for SetupGeometry and SetupTechnique.
+		inline constexpr Engine::Offset kFlareScale{ { 414855 }, { 527908 } };
+		inline constexpr Engine::Offset kCtrl{ { 414856 }, { 527909 } };
+		inline constexpr Engine::Offset kHdrTarget{ { 414857 }, { 527910 } };
+		inline constexpr Engine::Offset kLightLoc{ { 414858 }, { 527911 } };
+		inline constexpr Engine::Offset kFlareAlphaScale{ { 391123 }, { 513344 } };
+		inline constexpr Engine::Offset kAlphaScale{ { 391124 }, { 513345 } };
+		// BSBloodSplatterShader's singleton, the shader of its passes (GetRenderPasses).
+		inline constexpr Engine::Offset kShader{ { 414854 }, { 527907 } };
 	}
+
+	/** @brief The most draws a run holds. */
+	inline constexpr std::uint32_t kMaxDraws = 32;
 
 	/** @brief Must match BloodSplatterOrgDraw in BloodSplatter.hlsl. */
 	struct DrawConstants
@@ -65,6 +80,46 @@ namespace DCLF::Features::BloodSplatter
 		std::uint64_t Hash() const;
 	};
 
+	/**
+	 * @brief The screen blood's game inputs in native, captured on the game thread (Snapshot::BlockId::ScreenBlood). Main::RenderWorld's
+	 * light flare setup (SE 100269, AE 106979) computes the first three from the world camera and the sun; ScreenSplatter::Update writes
+	 * the others. SetupGeometry and SetupTechnique read them.
+	 */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::ScreenBlood;
+		std::array<float, 4> lightLoc{};  // VS LightLoc: the light's screen position, 0.1 in w
+		float flareScale = 0.0f;          // how much the camera faces the light: the flare's alpha factor
+		std::int32_t hdrTarget = 0;       // the render target the flare samples (t3)
+		float ctrl = 0.0f;                // VS Ctrl: fBloodSplatterFlareOffsetScale
+		float alphaScale = 0.0f;          // every draw's alpha factor
+		float flareAlphaScale = 0.0f;     // the flare's further alpha factor
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Game thread, native world snapshots. Runs the light flare setup and copies the block. */
+	void CaptureBlock(Snapshot::Builder& a_builder);
+
+	/** @brief One draw as the engine would make it: its pass, geometry, constants, textures and samplers. */
+	struct DrawInputs
+	{
+		bool flare = false;
+		const Family::TriShape* shape = nullptr;
+		std::uint32_t triangles = 0;
+		float worldViewProj[4][4]{};
+		float lightLoc[4]{};
+		float ctrl = 0.0f;
+		float alpha = 0.0f;
+		std::array<ID3D11ShaderResourceView*, 4> views{};  // unwrapped; null where the technique samples nothing
+		std::int32_t hdrTarget = 0;                        // the flare's t3 target
+	};
+
+	/**
+	 * @brief Render thread, native. The draws Main::RenderScreenSplatter would make this frame, from ScreenSplatter's root and camera and
+	 * the adopted snapshot's block, in RenderBatches' order: the flares, then the splatters. False, with a_why, when they cannot be read.
+	 */
+	bool CollectDraws(std::vector<DrawInputs>& a_out, std::string& a_why);
+
 	Api::Feature Feature();
 
 	/** @brief Read at install. */
@@ -72,6 +127,8 @@ namespace DCLF::Features::BloodSplatter
 
 	void InstallHooks();
 	void PreflightHooks();
+	/** @brief Native only: the game-side capture and the native screen blood at Main::Draw's call of RenderScreenSplatter. */
+	void InstallNative();
 
 	// Render thread, except Setup.
 	namespace BloodSplatterDraws
@@ -91,6 +148,8 @@ namespace DCLF::Features::BloodSplatter
 		void Keep(Family::Owners&& a_owners);
 		/** @brief False means the draws were not drawn. Logged. */
 		bool Submit(std::shared_ptr<Run> a_run);
+		/** @brief Native: how the client reads a published engine target (the flare's adapted luminance). */
+		Family::InputResult ReadPublished(std::string_view a_id, std::uint32_t& a_index);
 		std::string Status();
 	}
 }

@@ -188,6 +188,8 @@ namespace Snapshot
 		PostProcessing,      // Features/PostProcessing.h, PostProcessing::Block
 		Effects11,           // Features/Effects11.h, Effects11::Block
 		ImageSpace,          // RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h, RenderGraph::Engine::ImageSpace::Block
+		// The scene (snap3-world)
+		ScreenBlood,  // Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h, DCLF::Features::BloodSplatter::Block
 		Count
 	};
 

@@ -13,6 +13,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -40,7 +41,6 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 	{
 		constexpr const char* kShader = "BloodSplatter.hlsl";
 		constexpr const char* kClientId = "cs.blood-splatter";
-		constexpr std::uint32_t kMaxDraws = 32;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
 
 		/** @brief Must match BLOOD_SPLATTER_ORG_RESOURCES in BloodSplatter.hlsl. */
@@ -58,6 +58,8 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			// Keyed by run, because the pass may record on the submission thread after the render thread published the next run.
 			::RenderGraph::RunSlots<Run> runs;
+			// Native: the engine targets the flare's luminance may be (the HDR effect's last luminance levels).
+			Family::PublishedInputs inputs;
 		};
 
 		/**
@@ -88,7 +90,11 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			BloodPass(std::shared_ptr<Client> a_client, FrameAnchors::Texture a_target, bool a_atExecution) :
 				client(std::move(a_client)), target(std::move(a_target)), atExecution(a_atExecution) {}
 
-			Bindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(target).View() }; }
+			Bindings Declare(org::PassBuilder& a_builder)
+			{
+				client->inputs.Declare(a_builder);
+				return { a_builder.RenderTarget(target).View() };
+			}
 
 			// Recorded at execution, so the run is not part of the revision.
 			void Revision(std::vector<std::uint64_t>& a_out) const
@@ -239,6 +245,10 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		client->id = kClientId;
 		client->latch = std::make_shared<org::LatchBlock>(std::string(kClientId) + ".latch", kMaxDraws * kDrawStride);
 		client->gate = ::RenderGraph::RunGate::Create(std::string(kClientId) + ".gate", kMaxDraws);
+		// Native draws the flare from game data, and its t3, the adapted luminance, is one of the HDR effect's luminance targets.
+		if (::RenderGraph::Engine::Native::Active())
+			for (auto t = static_cast<std::int32_t>(RE::RENDER_TARGET::kHDR_DOWNSAMPLE1); t <= static_cast<std::int32_t>(RE::RENDER_TARGET::kHDR_DOWNSAMPLE13); ++t)
+				client->inputs.AddEngine(static_cast<RE::RENDER_TARGET>(t));
 		if (!FrameAnchors::EngineTexture(FrameAnchors::Colour(0))) {
 			logger::warn("[DCLF] blood splatter: the back buffer cannot be imported; the screen blood stays the engine's");
 			return true;
@@ -268,6 +278,12 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 	void Keep(Family::Owners&& a_owners)
 	{
 		GetState().clients.Keep(std::move(a_owners));
+	}
+
+	Family::InputResult ReadPublished(std::string_view a_id, std::uint32_t& a_index)
+	{
+		const auto& client = GetState().clients.At(0);
+		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
 	bool Submit(std::shared_ptr<Run> a_run)

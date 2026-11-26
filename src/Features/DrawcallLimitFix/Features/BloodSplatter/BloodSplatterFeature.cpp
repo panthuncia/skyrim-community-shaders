@@ -16,6 +16,7 @@ namespace DCLF::Features::BloodSplatter
 			if (!Enabled())
 				return;
 			InstallHooks();
+			InstallNative();
 			logger::info("[DCLF] blood splatter: on (graph mode): the screen blood is drawn at the EngineDraws anchor");
 		}
 
