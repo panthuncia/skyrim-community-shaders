@@ -28,6 +28,7 @@
 #include "ORGDeferredComposite.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderWorld.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -903,7 +904,11 @@ void Deferred::Hooks::Main_RenderWorld::thunk(bool a1)
 	auto* const state = globals::state;
 	state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
 	state->inWorld = true;
-	func(a1);
+	// Native drives Main::RenderWorld's work itself; the engine's function is not entered.
+	if (RenderGraph::Engine::Native::Active())
+		RenderGraph::Engine::Native::RenderWorld(a1);
+	else
+		func(a1);
 
 	state->inWorld = false;
 	state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);

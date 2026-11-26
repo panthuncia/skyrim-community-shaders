@@ -288,7 +288,20 @@ namespace NativePost
 		std::uint64_t taaResetFrame = UINT64_MAX;
 		bool taaResetNow = false;
 		std::uint32_t saveShotsDone = 0;  // the snapshot's save screenshot count the end-of-frame effects copied last (native)
+		// Native: Main::RenderWorld's camera test for the full-screen blur, kept by CS per render (StepBlurCamera).
+		std::array<float, 3> blurRotation{}, blurPosition{};
+		bool blurMoved = false;
 	};
+
+	/** @brief The full-screen blur's reset camera values (AE 0x142029cd8): Main::RenderWorld stores them when there is no world camera. */
+	constexpr float kBlurCameraReset = 1.0f;
+
+	/**
+	* @brief Main::RenderWorld's camera test for the full-screen blur (inlined in AE 107142, SE 100424 calls it), once per render from the
+	* snapshot's main camera: the camera moved when its position or its rotation's diagonal changed by more than kAdaptRate relative to
+	* the last render. The engine runs it only while a_gate holds, and its blur reads the result. Native only.
+	*/
+	void StepBlurCamera(const Snapshot::CameraView* a_camera, bool a_gate);
 
 	/** @brief Runtime::saveShotsDone for the capture (Screenshots.inl). Written by the render side, read on the game thread. */
 	std::atomic<std::uint32_t> g_saveShotsDone{ 0 };
@@ -496,6 +509,26 @@ namespace NativePost
 		r.frameNumber = Frame::Driver::Current().frame;
 	}
 
+	void StepBlurCamera(const Snapshot::CameraView* a_camera, bool a_gate)
+	{
+		auto& r = R();
+		if (!a_gate)
+			return;
+		if (!a_camera || !a_camera->valid) {
+			r.blurRotation = { kBlurCameraReset, kBlurCameraReset, kBlurCameraReset };
+			r.blurMoved = false;
+			return;
+		}
+		const std::array<float, 3> position{ a_camera->position.x, a_camera->position.y, a_camera->position.z };
+		const std::array<float, 3> rotation{ a_camera->rotation.entry[0][0], a_camera->rotation.entry[1][1], a_camera->rotation.entry[2][2] };
+		bool moved = false;
+		for (std::size_t i = 0; i < 3; ++i)
+			moved = moved || (position[i] - r.blurPosition[i]) / r.blurPosition[i] > kAdaptRate || (rotation[i] - r.blurRotation[i]) / r.blurRotation[i] > kAdaptRate;
+		r.blurMoved = moved;
+		r.blurPosition = position;
+		r.blurRotation = rotation;
+	}
+
 	/** @brief Read point B, RenderWorldPostProcess's entry: refraction's slot and the render state the frame wrote so far. Render owner. */
 	void ReadB()
 	{
@@ -538,9 +571,18 @@ namespace NativePost
 			f.dofNear = Field<float>(*g.dofCamera, 0x160);
 			f.dofFar = Field<float>(*g.dofCamera, 0x164);
 		}
-		// The full-screen blur's Render (AE 108563) blurs at radius 2 or more while Main::RenderWorld saw the camera move.
-		const bool reset = g.blurCamera[0] == 1.0f && g.blurCamera[1] == 1.0f && g.blurCamera[2] == 1.0f;
-		f.fullBlurAtLeast2 = !reset && *g.blurCameraMoved && *g.blurCameraGate;
+		// The full-screen blur's Render (AE 108563) blurs at radius 2 or more while Main::RenderWorld saw the camera move. Native keeps
+		// that camera test itself (CS drives RenderWorld); guest reads what the engine's RenderWorld kept.
+		if (block) {
+			const auto& r = R();
+			const bool gate = block->world.blurCameraGate;
+			StepBlurCamera(&MainCamera(), gate);
+			const bool reset = r.blurRotation == std::array<float, 3>{ kBlurCameraReset, kBlurCameraReset, kBlurCameraReset };
+			f.fullBlurAtLeast2 = !reset && r.blurMoved && gate;
+		} else {
+			const bool reset = g.blurCamera[0] == 1.0f && g.blurCamera[1] == 1.0f && g.blurCamera[2] == 1.0f;
+			f.fullBlurAtLeast2 = !reset && *g.blurCameraMoved && *g.blurCameraGate;
+		}
 		f.readB = true;
 	}
 

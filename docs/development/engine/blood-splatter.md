@@ -34,6 +34,15 @@ node has children. It sets the camera data to ScreenSplatter's camera, RT0 = **k
 FinishAccumulatingScreenSplatter on the splatter accumulator (SE `DAT_143233420`), which is `RenderBatches(0x5C006073 .. 0x5C006074,
 flags 0)` at **SE 99956 `+0x1D` / AE 106601 `+0x21`**, then the first-person view's end. The draws reach `DrawTriShape` (75477 / 77263).
 
+## From game data (2026-11-26, both graph modes)
+
+The latched batch below is gone. Both graph modes draw the blood from game data (`BloodSplatterNative.cpp`): the snapshot capture
+runs RenderWorld's light flare setup on the game thread and copies its outputs and ScreenSplatter::Update's into
+`Snapshot::BlockId::ScreenBlood`; at Main::Draw's call of RenderScreenSplatter CS walks ScreenSplatter's root and makes the draws the
+engine would (snap3-world.md). The flare's t3 is the adapted luminance, read as a published engine target. RenderWorld's splatter cull
+and submit do nothing. Guest takes this route too (snap3-rworld.md): its latched flares were refused (published t3), so guest drew
+no blood. The sections below describe the latched family as it was.
+
 ## The family
 
 The pieces every engine draw family shares are `Core/Engine/Family` (render-graph.md, "Shared helpers for engine families").

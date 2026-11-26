@@ -30,7 +30,7 @@ namespace NativePost
 		const bool* saoHalf = nullptr;          // 415067: the raw AO and its blur at half size
 		const bool* saoContrastOn = nullptr;    // 415069
 		const bool* saoFog = nullptr;           // 415070: ToggleFog; the composite fogs with the portal graph's fog
-		const bool* saoReflections = nullptr;   // 415072: Main::RenderWorld copies the reflections' activity here before the composite
+		bool* saoReflections = nullptr;         // 415072: Main::RenderWorld copies the reflections' activity here before the composite
 		const std::uint32_t* saoLevels = nullptr;  // 415050
 		const bool* saoTemporal = nullptr;      // 391450
 		const bool* improvedSnow = nullptr;     // 391105 bEnableImprovedSnow
@@ -140,6 +140,7 @@ namespace NativePost
 		s.saoFog = *w.saoFog;
 		s.saoTemporal = *w.saoTemporal;
 		s.improvedSnow = *w.improvedSnow;
+		s.blurCameraGate = *G().blurCameraGate;
 		s.saoLevels = *w.saoLevels;
 		s.sparkleToggle = *w.sparkleToggle;
 		s.sparkleOnly = *w.sparkleOnly;

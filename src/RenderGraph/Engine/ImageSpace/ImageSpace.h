@@ -60,6 +60,13 @@ namespace RenderGraph::Engine::ImageSpace
 	void WorldPostProcess(std::uint32_t a_target, const std::function<void()>& a_engine);
 
 	/**
+	* @brief Native: Main::RenderWorld's ImageSpace calls in its order (SE 100424, AE 107142): RenderSSAO, the snow pass or the copy of
+	* kMAIN, then RenderSSAO's composite. CS's native RenderWorld calls it; the RenderSSAO calls take CS's route, not the engine's
+	* call sites. Render owner.
+	*/
+	void RenderWorldImageSpace();
+
+	/**
 	* @brief The world chain's RenderEndOfFrameEffects, between OnEndOfFrame's begin and end (family 2): CS's native end-of-frame effects,
 	* or a_engine for a frame CS does not draw. Render owner.
 	*/

@@ -2380,30 +2380,40 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/** @brief Main::RenderWorld sets this to 0 for RenderSSAO's first call and 1 for the composite. The snow pass runs between them. */
+		bool& SsaoComposite()
+		{
+			static REL::Relocation<bool*> composite{ REL::RelocationID(528126, 415071) };
+			return *composite.get();
+		}
+
 		/** @brief RenderSSAO (100520 / 107245): native (NativeWorld.inl), or the engine's. Its this is the SAO helper at ImageSpaceManager+0x1c8. */
 		struct RenderSSAO
 		{
-			static std::uint64_t thunk(void* a_helper, std::int32_t a_source, std::uint64_t a_destination)
+			/** @brief One call; a_composite is the second, the composite into kMAIN. */
+			static std::uint64_t Run(void* a_helper, std::int32_t a_source, std::uint64_t a_destination, bool a_composite)
 			{
-				// Main::RenderWorld sets this to 0 for the first call and 1 for the composite. The snow pass runs between them.
-				static REL::Relocation<const bool*> composite{ REL::RelocationID(528126, 415071) };
-				const bool second = *composite.get();
 				if (Usable() && EngineSaoLevels() != RaisedShape().saoLevels)
 					RaiseShape("ImageSpace: RenderSSAO's level count changed");
 				IS().snowWindow = false;
 				std::uint64_t result = 0;
 				if (NativePost::WorldNative(NativePost::Family::kSsao))
-					result = NativePost::RunSsao(a_helper, second, a_destination);
+					result = NativePost::RunSsao(a_helper, a_composite, a_destination);
 				else {
 					if (IS().on)
 						++NativePost::R().engine[5];
 					EnterScope(ScopeKind::SSAO);
-					const WorldScopeGuard guard(second ? WorldScope::SsaoComposite : WorldScope::Ssao);
+					const WorldScopeGuard guard(a_composite ? WorldScope::SsaoComposite : WorldScope::Ssao);
 					result = func(a_helper, a_source, a_destination);
 					LeaveScope();
 				}
-				IS().snowWindow = !second;
+				IS().snowWindow = !a_composite;
 				return result;
+			}
+
+			static std::uint64_t thunk(void* a_helper, std::int32_t a_source, std::uint64_t a_destination)
+			{
+				return Run(a_helper, a_source, a_destination, SsaoComposite());
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -2823,6 +2833,41 @@ namespace RenderGraph::Engine::ImageSpace
 			return;
 		}
 		a_engine();
+	}
+
+	void RenderWorldImageSpace()
+	{
+		const auto base = NativePost::ManagerBase();
+		if (!base)
+			RenderGraph::Fatal("ImageSpace", "Main::RenderWorld's ImageSpace calls: no ImageSpace manager");
+		const auto& g = NativePost::G();
+		const auto& w = NativePost::WG();
+		// The engine's functions, as Main::RenderWorld calls them (SE 100424, AE 107142).
+		static const REL::Relocation<void (*)(std::uintptr_t, std::int32_t, std::int32_t)> renderSnow{ REL::RelocationID(100537, 107267) };
+		static const REL::Relocation<void (*)(std::uintptr_t, std::int32_t, std::int32_t, std::uint64_t)> copySources{ REL::RelocationID(100498, 107219) };
+		static const REL::Relocation<void (*)(std::uintptr_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t)> copyRegion{
+			REL::RelocationID(100500, 107221)
+		};
+		static const REL::Relocation<void (*)(std::uintptr_t)> dispatchCopy{ REL::RelocationID(100496, 107217) };
+		auto* const helper = NativePost::Field<void*>(base, 0x1c8);
+		SsaoComposite() = false;
+		RenderSSAO::Run(helper, 1, 1, false);
+		// The snow pass with improved snow on and its helper active, else the copy of kMAIN into 0x71 at the render target manager's size.
+		const auto snow = NativePost::Field<std::uintptr_t>(base, 0x1e8);
+		if (*w.improvedSnow && snow && NativePost::Field<bool>(snow, 0x08)) {
+			renderSnow(snow, 1, 0x71);
+			g.setTarget(g.targets, 0, -1, 3, true);
+		} else {
+			const auto copy = NativePost::Field<std::uintptr_t>(base, 0x198);
+			const auto targets = reinterpret_cast<std::uintptr_t>(g.targets);
+			copySources(copy, 1, 0x71, 0);
+			copyRegion(copy, 0, 0, NativePost::Field<std::int32_t>(targets, 0x1c), NativePost::Field<std::int32_t>(targets, 0x20), 0, 0);
+			dispatchCopy(copy);
+		}
+		SsaoComposite() = true;
+		// The composite reads whether the reflections ran (415072), which Main::RenderWorld copies from their helper.
+		*w.saoReflections = NativePost::Field<bool>(NativePost::Field<std::uintptr_t>(base, 0x1c0), 0x10);
+		RenderSSAO::Run(helper, 0x71, 1, true);
 	}
 
 	void WorldEndOfFrame(std::int32_t a_source, std::int32_t a_final, const std::function<void()>& a_engine)

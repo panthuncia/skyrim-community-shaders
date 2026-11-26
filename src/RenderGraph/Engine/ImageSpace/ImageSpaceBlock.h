@@ -60,6 +60,7 @@ namespace RenderGraph::Engine::ImageSpace
 		std::array<float, 3> ssrRay{};
 		float saoPower = 0, saoBias = 0, saoRadius = 0, saoRow3x = 0, saoRow3z = 0, saoContrast = 0, saoCameraZw = 0;
 		bool saoHalf = false, saoContrastOn = false, saoFog = false, saoTemporal = false, improvedSnow = false;
+		bool blurCameraGate = false;  // the full-screen blur follows the world camera's movement (414598)
 		std::uint32_t saoLevels = 0;
 		bool sparkleToggle = false, sparkleOnly = false, sparkleNoAo = false, sparkleNoise = false;
 		std::array<float, 6> sparkle{};
