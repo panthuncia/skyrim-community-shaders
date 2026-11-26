@@ -48,6 +48,12 @@ namespace Snapshot
 	/** @brief The render frame's identity. Render owner. */
 	const RenderIdentity& Render();
 
+	/**
+	* @brief The time step of visual-only animation (glare, lens adaptation, ENB timers): the render frame's wall-clock delta, 0
+	* while the adopted snapshot is paused. It advances on repeated snapshots too. Render owner.
+	*/
+	float VisualDelta();
+
 	/** @brief Called by the frame driver when a loading screen begins (true) or ends (false). Any thread. */
 	void OnLoadingScreen(bool a_active);
 

@@ -235,6 +235,12 @@ public:
 	float dynamicResolutionWidthRatio = 1.0f;
 	float dynamicResolutionHeightRatio = 1.0f;
 
+	/**
+	* @brief The render size over the display size this frame, as ConfigureUpscaling wrote it into the engine's dynamic-resolution
+	* ratios: CS's own copy, read between ConfigureUpscaling and PostDisplay. 1 without the feature.
+	*/
+	static float2 FrameResolutionRatio();
+
 	bool depthUpscaleUseWideKernel = false;
 
 	void PostDisplay();

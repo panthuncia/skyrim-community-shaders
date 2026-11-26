@@ -1,5 +1,6 @@
 #include "EffectManager.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "D3D11StateBackup.h"
 #include "Editor/Effects11Editor.h"
@@ -37,10 +38,8 @@ namespace
 		// CommonLib's GetSingleton() wrongly dereferences this global: the manager is stored inline, not behind a pointer
 		static REL::Relocation<RE::BSGraphics::RenderTargetManager*> renderTargetManager{ REL::RelocationID(524970, 411451) };
 		static REL::Relocation<int32_t*> luminanceSwap{ REL::RelocationID(528109, 415054) };
-		static const auto* multipleReferences = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bUseMultipleLuminanceReferences:Display"));
-
 		// Render walks down from kHDR_DOWNSAMPLE0 in quarter steps until it reaches finalSize
-		const uint32_t finalSize = multipleReferences && multipleReferences->GetBool() ? 2 : 1;
+		const uint32_t finalSize = Effects11::FrameBlock().multipleLuminanceReferences ? 2 : 1;
 		const auto& source = renderTargetManager->renderTargetData[RE::RENDER_TARGETS::kHDR_DOWNSAMPLE0];
 		uint32_t width = source.width;
 		uint32_t height = source.height;
@@ -770,11 +769,12 @@ void EffectManager::UpdateCommonData()
 	commonData = {};
 	currentWeatherID = previousWeatherID = 0;
 
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+	const auto& frame = Effects11::FrameBlock();
 
 	// Update timer
 	{
-		auto delta = (*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime));
+		// Visual-only: the effects' timer and frame-rate readout advance by the render delta (0 while paused).
+		auto delta = Snapshot::VisualDelta();
 
 		static double timer = 0.0;
 		timer += delta;
@@ -797,22 +797,14 @@ void EffectManager::UpdateCommonData()
 
 	// Update weather
 	{
-		if (sky) {
-			if (sky->lastWeather)
-				cachedLastWeather = sky->lastWeather;
-			auto* lastWeather = sky->lastWeather ? sky->lastWeather : cachedLastWeather;
-
+		if (frame.hasSky) {
 			auto& weatherManager = WeatherManager::GetSingleton();
-			constexpr auto localMask = WeatherManager::LocalFormIDMask;
-			uint32_t currentID = sky->currentWeather ? sky->currentWeather->formID & localMask : 0;
-			uint32_t lastID = lastWeather ? lastWeather->formID & localMask : 0;
-
-			currentWeatherID = weatherManager.GetEffectiveWeatherID(currentID);
-			previousWeatherID = weatherManager.GetEffectiveWeatherID(lastID);
+			currentWeatherID = frame.currentWeather;
+			previousWeatherID = frame.previousWeather;
 			commonData.weather[0] = static_cast<float>(currentWeatherID);
 			commonData.weather[1] = static_cast<float>(previousWeatherID);
-			commonData.weather[2] = sky->currentWeatherPct;
-			commonData.weather[3] = sky->currentGameHour;
+			commonData.weather[2] = frame.weatherPct;
+			commonData.weather[3] = frame.gameHour;
 
 			commonData.enbWeather[0] = static_cast<float>(weatherManager.GetWeatherIndex(currentWeatherID));
 			commonData.enbWeather[1] = static_cast<float>(weatherManager.GetWeatherIndex(previousWeatherID));
@@ -826,7 +818,7 @@ void EffectManager::UpdateCommonData()
 		auto& settingManager = SettingManager::GetSingleton();
 
 		// Clamp current time to valid range
-		float currentTime = sky ? std::clamp(sky->currentGameHour, 0.0f, 24.0f) : 12.0f;
+		float currentTime = frame.hasSky ? std::clamp(frame.gameHour, 0.0f, 24.0f) : 12.0f;
 
 		// Load time of day settings using cached IDs
 		const float nightTime = settingManager.GetValue<float>(ids.nightTime);
@@ -950,8 +942,7 @@ void EffectManager::UpdateCommonData()
 		commonData.timeOfDay2[static_cast<int>(TimeOfDay2Index::InteriorNight)] = commonData.eInteriorFactor * (1.0f - commonData.eNightDayFactor);
 	}
 
-	if (auto camera = CS_ENGINE_READ(Camera, RecordTime, RE::PlayerCamera::GetSingleton()))
-		commonData.fieldOfView = camera->GetRuntimeData2().worldFOV;
+	commonData.fieldOfView = frame.worldFOV;
 
 	UpdateCursorData();
 	UpdateLightParameters();
@@ -996,16 +987,16 @@ void EffectManager::UpdateCursorData()
 
 void EffectManager::UpdateLightParameters()
 {
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (!sky || !sky->sun || !sky->sun->root || !sky->root)
+	const auto& frame = Effects11::FrameBlock();
+	if (!frame.hasSun || !frame.sunPlaced)
 		return;
 
-	const float visibility = Util::GetSunVisibility(sky->sun);
+	const float visibility = frame.sunVisibility;
 	if (visibility <= 0.0f)
 		return;
 
 	// Sky Sync repositions the sun node, so its offset from the sky root is the synced sun direction
-	const auto sunDirection = sky->sun->root->world.translate - sky->root->world.translate;
+	const auto sunDirection = frame.sunOffset;
 	const auto viewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Transpose();
 	const auto clip = DirectX::SimpleMath::Vector4::Transform(DirectX::SimpleMath::Vector4(sunDirection.x, sunDirection.y, sunDirection.z, 0.0f), viewProj);
 	if (clip.w <= 0.0f)

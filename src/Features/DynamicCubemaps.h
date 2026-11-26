@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Setting.h"
 
 /**
@@ -224,6 +225,20 @@ public:
 	 */
 	virtual void SetupResources() override;
 	virtual void Reset() override;
+	/** @brief Registers the capture. */
+	virtual void PostPostLoad() override;
+
+	/** @brief What the cubemap updates read of the world. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::DynamicCubemaps;
+		bool skyHidden = false;  // the sky's kHideSky flag
+
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block from the sky. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
 
 	virtual void SaveSettings(json&) override;
 	virtual void LoadSettings(json&) override;

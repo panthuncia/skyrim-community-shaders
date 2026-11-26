@@ -1,5 +1,6 @@
 #include "HDRDisplay.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "PCH.h"
 
@@ -1742,7 +1743,8 @@ float4 HDRDisplay::GetSharedDataHDR() const
 
 	auto* state = globals::state;
 	const bool isMainOrLoading = state->IsMainOrLoadingMenuOpen();
-	const bool inMenuOrPause = state->IsPausedOrMenuOpen(CS_ENGINE_READ(UI, CapturePoint, globals::game::ui));
+	const auto& snapshot = Snapshot::Current();
+	const bool inMenuOrPause = isMainOrLoading || state->isMapMenuOpen || (snapshot && (snapshot->menus.paused || snapshot->menus.main || snapshot->menus.loading));
 
 	float menuSceneEncoding = kHdrMenuSceneGameplay;
 	if (isMainOrLoading) {

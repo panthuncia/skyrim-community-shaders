@@ -811,7 +811,8 @@ void ScreenSpaceGI::DrawSSGI()
 {
 	auto context = globals::d3d::context;
 
-	auto imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
+	// A write: the vanilla SSAO's toggle (goes with phase 5's ImageSpace port).
+	auto imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager);
 	auto& BSImagespaceShaderISSAOBlurH = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISSAOBlurH;
 
 	// Toggle vanilla SSAO

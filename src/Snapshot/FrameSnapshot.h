@@ -146,6 +146,13 @@ namespace Snapshot
 	{
 		TreeWind,   // Features/TreeWind.h, TreeWind::Block
 		CoreFrame,  // Snapshot/CoreFrame.h, the shared frame state's game data
+		// The post group: post-processing, upscaling and the other non-DCLF features.
+		GrassCollision,      // Features/GrassCollision.h, GrassCollision::Block
+		UnifiedWater,        // Features/UnifiedWater.h, UnifiedWater::Block
+		DynamicCubemaps,     // Features/DynamicCubemaps.h, DynamicCubemaps::Block
+		ScreenSpaceShadows,  // Features/ScreenSpaceShadows.h, ScreenSpaceShadows::Block
+		PostProcessing,      // Features/PostProcessing.h, PostProcessing::Block
+		Effects11,           // Features/Effects11.h, Effects11::Block
 		Count
 	};
 

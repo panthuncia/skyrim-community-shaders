@@ -651,9 +651,12 @@ DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 	float bladeRoundness = renderSettings.BokehBladeRoundness;
 	bool noTarget = false;
 
-	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
-	CinematicCamera::FocusResolver* resolver = owner ? &owner->GetCinematicCamera().focusResolver : nullptr;
-	if (cam && resolver) {
+	// The focus targets come from the adopted snapshot (PostProcessing::Block).
+	const auto* focus = owner ? PostProcessing::FrameBlock() : nullptr;
+	const auto* cam = focus && focus->cameraValid ? &focus->camera : nullptr;
+	if (focus && focus->consoleRefSet)
+		currentRef = focus->consoleRef;
+	if (cam) {
 		focusLen = cam->FocalLengthMM;
 		fNumber = cam->FNumber;
 		sensorWidthMM = cam->EffectiveSensorWidthMM;
@@ -674,7 +677,7 @@ DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 			{
 				// Target focus keeps the DoF console-selection preference. Target mode
 				// never swaps the focal length; the unified lens always wins.
-				auto result = resolver->ResolveTarget(renderSettings.consoleSelection, currentRef);
+				const auto& result = focus->cameraTarget;
 				if (result.hasTarget) {
 					if (result.projected) {
 						autoFocus = true;
@@ -689,21 +692,22 @@ DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 			break;
 		}
 		debugFocusPlane = manualFocus;
-	} else if (renderSettings.targetFocus && resolver) {
+	} else if (renderSettings.targetFocus && focus) {
 		focusLen = 1.0f;
 		nearBlur = 0.0f;
 		float targetFocusDistanceGame = 0;
 		autoFocus = false;
 
-		RE::TESObjectREFR* target = resolver->FindTarget(renderSettings.consoleSelection, currentRef);
+		const auto& target = focus->dofTarget;
 		// Without a target the frame keeps its constants (a 1 mm lens, no near blur), and run says the image stays as it is.
-		noTarget = !target;
-		if (target) {
-			targetFocusDistanceGame = resolver->GetDistanceToReference(target);
+		noTarget = !target.found;
+		if (target.found) {
+			targetFocusDistanceGame = target.distance;
 			debugDistance = targetFocusDistanceGame;
 			nearBlur = renderSettings.NearPlaneMaxBlur;
 			focusLen = renderSettings.targetFocusFocalLength;
-			if (resolver->GetReferenceFocusCoord(target, focusCoord)) {
+			if (target.projected) {
+				focusCoord = target.coord;
 				// Sample the visible surface at the projected head/object position. This matches the
 				// view-space depth convention used by the CoC pass and avoids focusing behind a face.
 				autoFocus = true;
@@ -714,14 +718,14 @@ DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 		}
 	}
 	// RaceMenu always autofocuses the player, regardless of the configured mode.
-	auto* player = CS_ENGINE_READ(Player, RecordTime, globals::game::player);
-	if (resolver && player && CS_ENGINE_READ(UI, RecordTime, globals::game::ui)->IsMenuOpen(RE::RaceSexMenu::MENU_NAME)) {
+	if (focus && focus->raceMenu) {
 		if (!cam)
 			focusLen = RaceMenuFocalLengthMM;
-		autoFocus = resolver->GetReferenceFocusCoord(player, focusCoord);
-		if (!autoFocus) {
-			manualFocus = Util::Units::GameUnitsToMeters(resolver->GetDistanceToReference(player)) * 0.001f;
-		}
+		autoFocus = focus->player.projected;
+		if (autoFocus)
+			focusCoord = focus->player.coord;
+		else
+			manualFocus = Util::Units::GameUnitsToMeters(focus->player.distance) * 0.001f;
 		debugFocusPlane = manualFocus;
 	}
 

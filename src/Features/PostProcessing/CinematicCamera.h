@@ -141,6 +141,8 @@ namespace CinematicCamera
 		// Projection (degrees).
 		float HorizontalFOVDeg = 39.6f;
 		float VerticalFOVDeg = 27.0f;
+
+		bool operator==(const PhysicalCameraState&) const = default;
 	};
 
 	// CPU-side focus target resolution shared by the Cinematic Camera focus
@@ -172,6 +174,8 @@ namespace CinematicCamera
 			bool projected = false;  // target visible on screen -> autofocus at coord
 			float2 focusCoord = { 0.5f, 0.5f };
 			float distanceM = 10.0f;
+
+			bool operator==(const TargetFocusResult&) const = default;
 		};
 
 		// Full resolution for the cinematic Target focus mode. When the target

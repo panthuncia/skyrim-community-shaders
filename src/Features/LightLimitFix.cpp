@@ -1,4 +1,5 @@
 #include "LightLimitFix.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 
 #include "CSEditor/EditorWindow.h"
@@ -931,8 +932,8 @@ void LightLimitFix::UpdateLights()
 
 void LightLimitFix::UpdateClusterParameters()
 {
-	lightsNear = *CS_ENGINE_READ(Camera, RecordTime, globals::game::cameraNear);
-	lightsFar = *CS_ENGINE_READ(Camera, RecordTime, globals::game::cameraFar);
+	lightsNear = Snapshot::Core().cameraNear;
+	lightsFar = Snapshot::Core().cameraFar;
 
 	// On the graph the grid is the adopted revision's, so the culling and this frame's readers agree on it.
 	std::array<uint32_t, 3> adoptedGrid{};
@@ -941,7 +942,7 @@ void LightLimitFix::UpdateClusterParameters()
 		return;
 	}
 
-	auto renderSize = Util::ConvertToDynamic(float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight });
+	auto renderSize = Util::ConvertToDynamic(Util::DisplaySize());
 	clusterSize[0] = ((uint)renderSize.x + 63) / 64;
 	clusterSize[1] = ((uint)renderSize.y + 63) / 64;
 	clusterSize[2] = 32;

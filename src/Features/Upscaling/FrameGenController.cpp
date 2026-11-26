@@ -44,8 +44,7 @@ namespace FrameGen
 
 		Dims CurrentDims(bool a_ignoreDynamicResolutionLock)
 		{
-			const auto display = float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth,
-				(float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
+			const auto display = Util::DisplaySize();
 			const auto render = Util::ConvertToDynamic(display, a_ignoreDynamicResolutionLock);
 			return { (uint32_t)render.x, (uint32_t)render.y, (uint32_t)display.x, (uint32_t)display.y };
 		}
@@ -89,7 +88,7 @@ namespace FrameGen
 		// Wait for settings and hardware fallbacks to settle.
 		if (!globals::features::upscaling.loaded ||
 			!Streamline::GetSingleton()->IsFeatureSupportResolved() ||
-			!CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState))
+			Util::DisplaySize().x <= 0.0f)
 			return;
 
 		if (Upscaling::IsWindowUnusable())

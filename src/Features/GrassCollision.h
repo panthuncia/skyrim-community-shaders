@@ -2,8 +2,8 @@
 
 #include "Buffer.h"
 #include "GrassShared/GrassFrame.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Setting.h"
-#include "Utils/VersionedRelocation.h"
 
 struct GrassCollision : Feature
 {
@@ -46,7 +46,9 @@ public:
 		float2 MaxExtent = { 0, 0 };
 		uint IndexStart = 0;
 		uint IndexEnd = 0;
-		float2 pad0;
+		float2 pad0 = { 0, 0 };
+
+		bool operator==(const BoundingBoxPacked&) const = default;
 	};
 	STATIC_ASSERT_ALIGNAS_16(BoundingBoxPacked);
 
@@ -73,8 +75,24 @@ public:
 	eastl::unique_ptr<Buffer> collisionBoundingBoxes = nullptr;
 	eastl::unique_ptr<Buffer> collisionInstances = nullptr;
 
-	eastl::vector<BoundingBoxPacked> queuedBoundingBoxes;
-	eastl::vector<float4> queuedCollisions;
+	/**
+	* @brief The frame's colliders, gathered on the game thread from the actors near the main camera. Shapes are relative to the
+	* snapshot's main camera position, the eye the frame's update uses.
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::GrassCollision;
+		std::vector<BoundingBoxPacked> boxes;  // at most MAX_BOUNDING_BOXES
+		std::vector<float4> collisions;        // the shapes the boxes index: centre (camera-relative) and radius
+
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Gathers the colliders into the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
+	/** @brief The adopted snapshot's block, or an empty one. */
+	static const Block& FrameBlock();
 
 	/** @brief Releases the cached collision update compute shader so it can be recompiled. */
 	virtual void ClearShaderCache() override;
@@ -100,13 +118,6 @@ public:
 	/** @brief Draws the ImGui settings UI for grass collision options. */
 	virtual void DrawSettings() override;
 	/**
-	 * @brief Gathers collision shapes from nearby actors and queues them for GPU upload.
-	 *
-	 * Sorted by distance, limited to MAX_BOUNDING_BOXES actors with up to
-	 * MAX_COLLISIONS_PER_BOUNDING_BOX shapes each.
-	 */
-	void QueueCollisions();
-	/**
 	 * @brief Uploads queued collision data to GPU buffers and dispatches the collision texture update.
 	 *
 	 * Called once per frame: from the grass shader setup geometry hook (a_eye the renderer's, the main view's there), or stood down
@@ -114,8 +125,8 @@ public:
 	 */
 	void Update(const RE::NiPoint3& a_eye);
 
-	/** @brief The frame's per-frame values for a_eye; advances the clipmap origin and eye height kept from the last call. */
-	PerFrame NextPerFrame(const RE::NiPoint3& a_eye);
+	/** @brief The frame's per-frame values for a_eye and a_block; advances the clipmap origin and eye height kept from the last call. */
+	PerFrame NextPerFrame(const RE::NiPoint3& a_eye, const Block& a_block);
 
 	/** @brief The collision texture's view the grass reads: the render graph's export while it runs the update, else the D3D11 texture's. */
 	ID3D11ShaderResourceView* CollisionSRV() const;
@@ -126,8 +137,8 @@ public:
 	/** @brief Binds the per-frame constants (VS b5) and the collision texture (VS t100) for the engine's grass draws. */
 	void BindCollision() const;
 
-	/** @brief Logs the colliders of the frame every 120 frames when CS_GRASS_COLLISION_STATS=1. */
-	void LogColliders(const char* a_path) const;
+	/** @brief Logs the colliders of a_block every 120 frames when CS_GRASS_COLLISION_STATS=1. */
+	static void LogColliders(const char* a_path, const Block& a_block);
 
 	/** @brief The D3D11 path's collision texture and structured buffers: at setup, or when the render graph's path fails. */
 	void CreateD3D11Resources();
@@ -135,6 +146,7 @@ public:
 	float2 prevCellID = { 0, 0 };
 	RE::NiPoint3 prevEyePos{};
 	bool hasPrevEye = false;
+	std::uint64_t steppedSnapshot = 0;  // the snapshot the collision decay last stepped for: a repeat does not step it
 
 	/** @brief GrassShared stood-down callback, on frames DCLF owns grass and no grass SetupGeometry runs: updates the
 	    collision texture and publishes it with its constants for DCLF's grass draws. */
@@ -144,7 +156,7 @@ public:
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
 
-	/** @brief Installs the BSGrassShader and main update hooks after all plugins have loaded, and registers the stood-down update. */
+	/** @brief Installs the BSGrassShader hook after all plugins have loaded, and registers the capture and the stood-down update. */
 	virtual void PostPostLoad() override;
 
 	struct Hooks
@@ -155,16 +167,9 @@ public:
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		struct MainUpdate_QueueCollisions
-		{
-			static void thunk();
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
 		static void Install()
 		{
 			stl::write_vfunc<0x6, BSGrassShader_SetupGeometry>(RE::VTABLE_BSGrassShader[0]);
-			stl::write_thunk_call<MainUpdate_QueueCollisions>(REL::RelocationID(35565, 36564).address() + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
 			logger::info("[GRASS COLLISION] Installed hooks");
 		}
 	};

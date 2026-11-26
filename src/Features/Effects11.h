@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include "Effects11/SceneHandoff.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Setting.h"
 
 #include <array>
@@ -255,6 +256,67 @@ public:
 
 	virtual void DrawSettings() override;
 	virtual void Load() override;
+	/** @brief Registers the capture. */
+	virtual void PostPostLoad() override;
+
+	/** @brief What the effects read of the game, captured once per game update. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::Effects11;
+
+		// The sky.
+		bool hasSky = false;
+		std::uint32_t skyMode = 0;  // RE::Sky::Mode
+		bool skyHidden = false;     // kHideSky
+		float weatherPct = 0.0f;
+		float gameHour = 12.0f;
+		std::uint32_t currentWeather = 0;  // local form ids after Location Weather: what UpdateCommonData feeds the effects
+		std::uint32_t previousWeather = 0;
+		float3 horizonColor{ 0, 0, 0 };
+
+		// The sun: present at all, its nodes in place, its disc's visibility and blend, and where it is.
+		bool hasSun = false;
+		bool sunPlaced = false;          // the sun's and the sky's roots exist
+		float sunVisibility = 0.0f;      // Util::GetSunVisibility
+		bool sunBlendValid = false;      // the disc has a sky shader property
+		float4 sunBlend{ 0, 0, 0, 0 };   // its blend colour, alpha in w
+		float3 sunDirection{ 0, 0, 0 };  // Sky Sync's celestial direction
+		float3 sunOffset{ 0, 0, 0 };     // the sun root's offset from the sky root
+
+		// The moon Sky Sync lights from (its Caster value; Zenith for none), its light colour and direction.
+		std::uint32_t moonCaster = 0;
+		float4 moonColor{ 0, 0, 0, 0 };
+		float3 moonDirection{ 0, 0, 0 };
+
+		// The sky bodies' billboard half-angle tangents from the sky root; the sun falls back to the vanilla billboard's.
+		float sunBillboardTan = 425.0f / 400.0f;
+		float masserBillboardTan = 0.0f;
+		float secundaBillboardTan = 0.0f;
+
+		float worldFOV = 0.0f;
+		RE::ImageSpaceData imageSpace{};           // the ImageSpace manager's data as it is (no base override)
+		bool multipleLuminanceReferences = false;  // bUseMultipleLuminanceReferences:Display
+		float reinhardWhiteScale = 1.0f;           // fReinhardWhiteScale:Display
+
+		bool operator==(const Block& a_other) const
+		{
+			return hasSky == a_other.hasSky && skyMode == a_other.skyMode && skyHidden == a_other.skyHidden && weatherPct == a_other.weatherPct &&
+			       gameHour == a_other.gameHour && currentWeather == a_other.currentWeather && previousWeather == a_other.previousWeather &&
+			       horizonColor == a_other.horizonColor && hasSun == a_other.hasSun && sunPlaced == a_other.sunPlaced &&
+			       sunVisibility == a_other.sunVisibility && sunBlendValid == a_other.sunBlendValid && sunBlend == a_other.sunBlend &&
+			       sunDirection == a_other.sunDirection && sunOffset == a_other.sunOffset && moonCaster == a_other.moonCaster &&
+			       moonColor == a_other.moonColor && moonDirection == a_other.moonDirection && sunBillboardTan == a_other.sunBillboardTan &&
+			       masserBillboardTan == a_other.masserBillboardTan && secundaBillboardTan == a_other.secundaBillboardTan && worldFOV == a_other.worldFOV &&
+			       std::memcmp(&imageSpace, &a_other.imageSpace, sizeof(imageSpace)) == 0 &&
+			       multipleLuminanceReferences == a_other.multipleLuminanceReferences && reinhardWhiteScale == a_other.reinhardWhiteScale;
+		}
+	};
+
+	/** @brief Fills the block. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
+	/** @brief The adopted snapshot's block, or a default one (no sky) before the first. */
+	static const Block& FrameBlock();
 	virtual void SetupResources() override;
 	virtual void PostSetupResources() override;
 	virtual void Reset() override;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Setting.h"
 
 #include <cstdint>
@@ -124,8 +125,23 @@ public:
 	/** @brief Whether the shadows are drawn this frame: the feature is enabled and the full sky (sun or moon) is up. */
 	bool ShouldDraw() const;
 
-	/** @brief Whether the full sky (sun or moon) is up. */
+	/** @brief Whether the full sky (sun or moon) is up, in the adopted snapshot. */
 	static bool SkyFull();
+
+	/** @brief What the shadows read of the world. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::ScreenSpaceShadows;
+		bool skyFull = false;  // the sky's mode is kFull
+
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block from the sky. Registered in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
+	/** @brief Registers the capture. */
+	virtual void PostPostLoad() override;
 
 	/**
 	 * @brief This frame's raymarch dispatches, from the sun's direction and the render size of a_screenSize (the full size before

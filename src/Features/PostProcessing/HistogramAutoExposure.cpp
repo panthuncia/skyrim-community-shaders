@@ -1,5 +1,6 @@
 #include "HistogramAutoExposure.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Features/LinearLighting.h"
 #include "Features/PostProcessing.h"
@@ -72,13 +73,23 @@ HistogramAutoExposure::ExposureParameters HistogramAutoExposure::GetExposurePara
 	return parameters;
 }
 
+namespace
+{
+	float FrameRealDelta()
+	{
+		const auto& snapshot = Snapshot::Current();
+		return snapshot ? snapshot->realDelta : 0.0f;
+	}
+}
+
 HistogramAutoExposure::AutoExposureCB HistogramAutoExposure::Constants(bool a_reset) const
 {
 	const auto parameters = GetExposureParameters();
 	return {
 		.AdaptArea = settings.AdaptArea,
 		.AdaptationRange = parameters.LuminanceRange,
-		.AdaptLerp = a_reset ? 1.f : std::clamp(1.f - exp(-CS_ENGINE_READ(Timer, RecordTime, RE::BSTimer::GetSingleton())->realTimeDelta * settings.AdaptSpeed), 0.f, 1.f),
+		// The snapshot's wall-clock delta, as BSTimer gave it: phase 2 adapts by the render delta instead.
+		.AdaptLerp = a_reset ? 1.f : std::clamp(1.f - exp(-FrameRealDelta() * settings.AdaptSpeed), 0.f, 1.f),
 		.ExposureCompensation = exp2(parameters.CompensationEV),
 		.PurkinjeStartEV = settings.PurkinjeStartEV,
 		.PurkinjeMaxEV = settings.PurkinjeMaxEV,

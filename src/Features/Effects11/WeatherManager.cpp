@@ -218,7 +218,8 @@ uint32_t WeatherManager::GetEffectiveWeatherID(uint32_t actualWeatherID)
 		return actualWeatherID;
 	}
 
-	auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+	// Called from Effects11::Capture, on the game thread.
+	auto player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
 	if (!player) {
 		return actualWeatherID;
 	}

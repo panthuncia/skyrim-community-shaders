@@ -1,5 +1,6 @@
 #include "PhysicalGlare.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 
@@ -989,11 +990,11 @@ void PhysicalGlare::Draw(TextureInfo& inout_tex)
 
 	// Accumulate tear film time
 	if (effective.ApertureMode == 1 && effective.TearFilmStrength > 0.f) {
-		tearFilmTimeAccum += *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime);
+		tearFilmTimeAccum += Snapshot::VisualDelta();
 	}
 
 	// Update constant buffer
-	const GlareCB cbData = BuildConstants(effective, *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime), currentFFTResolution, (float)texOutput->desc.Width, (float)texOutput->desc.Height);
+	const GlareCB cbData = BuildConstants(effective, Snapshot::VisualDelta(), currentFFTResolution, (float)texOutput->desc.Width, (float)texOutput->desc.Height);
 	glareCB->Update(cbData);
 
 	ID3D11Buffer* cb = glareCB->CB();
