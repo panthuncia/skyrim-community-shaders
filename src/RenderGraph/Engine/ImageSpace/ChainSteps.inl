@@ -286,9 +286,12 @@ void CheckEndOfFrame(std::int32_t a_source, std::int32_t a_final)
 			fmt::format("{} runs in the engine's end-of-frame effects, and the frame's description at Begin does not have it", ChainGroupName(a_group)));
 	};
 	const auto count = (std::min)(*reinterpret_cast<const std::int32_t*>(member(0x40)), 7);
+	// Native mode draws the slots the snapshot turns on, and refraction's (its geometry turns it on).
+	const auto* inputs = SnapshotInputs();
 	for (std::int32_t slot = 0; slot <= count; ++slot) {
 		auto* effect = slot < static_cast<std::int32_t>(manager->effects.free_idx()) ? manager->effects[static_cast<std::uint16_t>(slot)] : nullptr;
-		if (effect && effect->IsActive())
+		const bool game = inputs && inputs->read && slot != 1;
+		if (game ? (inputs->gameSlots >> slot & 1u) != 0 : effect && effect->IsActive())
 			check(SlotGroup(static_cast<std::uint32_t>(slot), SlotIsLdr(static_cast<std::uint32_t>(slot))));
 	}
 	check(chain.hdrCopy ? ChainGroup::kHdrCopy : ChainGroup::kHdr);

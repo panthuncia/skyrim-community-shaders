@@ -45,6 +45,9 @@ namespace RenderGraph::Engine::ImageSpace
 		bool fullBlurDynamic = false, fullBlurLegacy = false, getHitDynamic = false;
 		float getHitScale = 0, getHitAmount = 0, timer = 0;
 
+		/** @brief The ImageSpace data at the manager offset a_offset (+0xC8 to +0x158). */
+		float At(std::uintptr_t a_offset) const { return data[(a_offset - 0xC8) / 4]; }
+
 		bool operator==(const GameInputs&) const = default;
 	};
 

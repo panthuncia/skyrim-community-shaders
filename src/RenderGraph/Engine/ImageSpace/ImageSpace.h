@@ -23,6 +23,14 @@ namespace RenderGraph::Engine
 
 namespace RenderGraph::Engine::ImageSpace
 {
+	struct GameInputs;
+
+	/**
+	* @brief Native mode: the adopted snapshot's ImageSpace inputs, which the native post chain draws from, so the frame's description
+	* at Begin reads the same values. Null in guest mode and before the first snapshot. Render owner.
+	*/
+	const GameInputs* SnapshotInputs();
+
 	/** @brief Published at Setup so the water draws read the texture the flow copies write. Not published without the flow copy port. */
 	inline constexpr std::string_view kFlowMapId = "cs.d3d11.engine.flow-map";
 

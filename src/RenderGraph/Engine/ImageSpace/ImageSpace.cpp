@@ -561,15 +561,21 @@ namespace RenderGraph::Engine::ImageSpace
 			return mip == AnchorPasses::kAllMips ? fmt::format("rt{}", index) : fmt::format("rt{}.mip{}", index, mip);
 		}
 
-		/** @brief The engine's shader object of a covered effect, or null before the manager made it. */
+		/**
+		* @brief The engine's shader object of a covered effect, or null before the manager made it. The manager keeps an effect object
+		* for the session once it made it, so the first one found is kept.
+		*/
 		const RE::BSImagespaceShader* ShaderOf(std::size_t a_effect)
 		{
+			static std::array<const RE::BSImagespaceShader*, kEffects.size()> s_made{};
+			if (s_made[a_effect])
+				return s_made[a_effect];
 			auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 			const std::uint32_t index = RE::ImageSpaceManager::GetCurrentIndex(kEffects[a_effect].id);
 			// NiTArray::size() counts non-null entries and would cut off the last effects. free_idx() is one past the highest set index.
 			if (!manager || index >= manager->effects.free_idx() || index >= manager->effects.capacity())
 				return nullptr;
-			return static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
+			return s_made[a_effect] = static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
 		}
 
 		void RaiseShape(std::string_view a_writer);
@@ -2820,6 +2826,12 @@ namespace RenderGraph::Engine::ImageSpace
 			return;
 		}
 		EofFamily(a_source, a_final, a_engine);
+	}
+
+	const GameInputs* SnapshotInputs()
+	{
+		const auto* block = NativePost::NativeBlock();
+		return block ? &block->inputs : nullptr;
 	}
 
 	bool SceneInMain()

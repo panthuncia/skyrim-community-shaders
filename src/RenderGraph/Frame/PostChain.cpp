@@ -7,6 +7,7 @@
 #include "Globals.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -319,6 +320,21 @@ namespace RenderGraph::Frame::PostChain
 		}
 		// The dynamic-resolution upsample (100548) is not read: a ratio is no build input (decision 6a). Its group is always on, gated.
 		fields.screenshot = Member<bool>(base, kScreenshot);
+		// Native mode draws the effects from the snapshot's ImageSpace inputs, so the description takes them too. Refraction's slot stays
+		// a read (its geometry turns it on), and the adaptation resets by the snapshot's count, not the engine's flag.
+		if (const auto* in = Engine::ImageSpace::SnapshotInputs(); in && in->read) {
+			fields.sil = in->sil;
+			fields.lensFlares = in->iblf;
+			fields.eof = in->eof;
+			fields.ldr = in->usesLdr;
+			fields.slots = in->eof ? static_cast<std::uint8_t>(in->gameSlots | (Active(EffectAt(1)) ? 2u : 0u)) : std::uint8_t(0);
+			fields.dofCompute = in->dofCompute;
+			fields.hdr = in->hdr;
+			fields.bloom = static_cast<std::uint8_t>(std::clamp(static_cast<std::int32_t>(in->At(kBloomRadius)) - 1, 0, 6));
+			fields.fade = in->At(kFade) > 0.0f;
+			fields.adapt = Global<std::int32_t>(kAdaptTarget) >= 0;
+			fields.screenshot = in->screenshot;
+		}
 		// Upscaling turns the engine's TAA on just before the end-of-frame effects and off after, so the flag at Begin says nothing.
 		auto& upscaling = globals::features::upscaling;
 		// The adopted revision's method, so the evaluate switches in with its build and textures.
