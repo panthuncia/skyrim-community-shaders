@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
 #include "Snapshot/EngineReads.h"
@@ -69,7 +70,9 @@ namespace DCLF
 		// Only a native draw flushes the engine's pending world depth target and viewport to D3D11. With every such draw withheld,
 		// RSGetViewports can still return the last shadow map's 4096x4096 viewport, which gives an out-of-bounds render area and can
 		// lose the device. So apply the pending state here, before the first-person camera replaces it, as BeforeOpaquePass does.
-		Engine::ApplyPendingState();
+		// Native's RenderDepth binds nothing through the engine: the capture takes the main depth from CS's frame.
+		if (!RenderGraph::Engine::Native::WorldPass::InRenderDepth())
+			Engine::ApplyPendingState();
 		auto capture = CaptureBindings();
 		// Use the engine's main depth, not whatever is bound. Terrain Blending swaps the bound target while terrain draws.
 		if (auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)) {

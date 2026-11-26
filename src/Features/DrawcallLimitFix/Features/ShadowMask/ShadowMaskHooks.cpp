@@ -9,13 +9,18 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LocalCameras.h"
 #include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderDepth.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "State.h"
 #include "Utils/Logging.h"
+#include "Utils/VersionedRelocation.h"
 
 #include <format>
 #include <string>
@@ -115,6 +120,56 @@ namespace DCLF::Features::ShadowMask
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+
+		/** @brief Main::RenderPlayerView's call of Main::RenderShadowMasks (SE 100422, AE 107140). */
+		struct RenderShadowMasks
+		{
+			static void thunk(bool a_arg)
+			{
+				// Native drives Main::RenderShadowMasks' work itself; the engine's function is not entered.
+				if (::RenderGraph::Engine::Native::Active())
+					::RenderGraph::Engine::Native::RenderShadowMasks();
+				else
+					func(a_arg);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		std::uintptr_t RenderShadowMasksSite() { return REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x39C, 0x39C, 0x3BA); }
+	}
+
+	void DrawWorldMasks(const float a_clear[4])
+	{
+		DCLF_ZONE("CS.DCLF.ShadowMask.Native");
+		Family::BeginBatch();
+		// SetCurrentRenderTarget(0, kSHADOW_MASK, SRTM_CLEAR) with the clear colour RenderShadowMasks set: the clear lands before the
+		// anchor's run.
+		if (!::RenderGraph::Engine::Skeleton::ClearColour(RE::RENDER_TARGET::kSHADOW_MASK, a_clear))
+			Refusals().Report("the world batch: the skeleton did not take kSHADOW_MASK's clear");
+		if (!ShadowMaskDraws::Available() || !ShadowMaskDraws::CanTake(View::World)) {
+			Refusals().Report("the world batch: the family cannot take it now; only the clear is made");
+			return;
+		}
+		auto run = std::make_shared<Run>();
+		run->view = View::World;
+		std::vector<RE::BSShadowLight*> lights;
+		std::string why;
+		if (!Native::Build(View::World, *run, lights, why)) {
+			Refusals().Report(std::format("a world batch: {}; only the clear is made", why));
+			ShadowMaskDraws::Keep(std::move(run->owners));
+		} else {
+			if (auto* sun = Native::SunMap(View::World, lights))
+				globals::state->OnShadowMaskDraw(sun);
+			if (run->draws.empty()) {
+				ShadowMaskDraws::Keep(std::move(run->owners));
+			} else {
+				DCLF_ZONE("CS.DCLF.ShadowMask.Submit");
+				ShadowMaskDraws::Submit(std::move(run));
+			}
+		}
+		// The masks' loop gives each light's maps back after its draw, drawn or not.
+		for (auto* light : Native::Lights(View::World))
+			Shadows::Native::ReturnShadowmaps(*light);
 	}
 
 	void PreflightHooks()
@@ -127,6 +182,7 @@ namespace DCLF::Features::ShadowMask
 			return;
 		HookSites::RequireCall("the world's shadow masks (Main::RenderShadowMasks' call)", REL::Offset(Address::kWorldMasks).address());
 		HookSites::RequireCall("a menu scene's shadow masks (UI3DSceneManager::Render's call)", REL::Offset(Address::kMenuMasks).address());
+		HookSites::RequireCall("Main::RenderPlayerView's shadow masks call", RenderShadowMasksSite());
 	}
 
 	void InstallHooks()
@@ -137,6 +193,7 @@ namespace DCLF::Features::ShadowMask
 		}
 		stl::write_thunk_call<MaskBatch<View::World>>(REL::Offset(Address::kWorldMasks).address());
 		stl::write_thunk_call<MaskBatch<View::Menu>>(REL::Offset(Address::kMenuMasks).address());
+		stl::write_thunk_call<RenderShadowMasks>(RenderShadowMasksSite());
 		Family::AddSetup("shadow mask", [] { return ShadowMaskDraws::Setup(); });
 		logger::info("[DCLF] shadow mask: hooks installed (the world's and the menu scenes' shadow masks)");
 	}

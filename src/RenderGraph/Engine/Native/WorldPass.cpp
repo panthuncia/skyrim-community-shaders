@@ -19,6 +19,7 @@ namespace RenderGraph::Engine::Native::WorldPass
 		constexpr std::uint32_t kTest = 1, kTestWrite = 3;
 
 		thread_local bool inRenderWorld = false;
+		thread_local bool inRenderDepth = false;
 		thread_local bool shiftWindow = false;
 		bool rawWater = false;
 		thread_local bool inScope = false;
@@ -233,6 +234,14 @@ namespace RenderGraph::Engine::Native::WorldPass
 	{
 		return rawWater;
 	}
+
+	bool InRenderDepth()
+	{
+		return inRenderDepth;
+	}
+
+	RenderDepthScope::RenderDepthScope() { inRenderDepth = true; }
+	RenderDepthScope::~RenderDepthScope() { inRenderDepth = false; }
 
 	RenderWorldScope::RenderWorldScope() { inRenderWorld = true; }
 	RenderWorldScope::~RenderWorldScope() { inRenderWorld = false; }

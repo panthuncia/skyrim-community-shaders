@@ -37,4 +37,7 @@ namespace RenderGraph::Engine::Skeleton
 
 	/** @brief kMAIN into its copy, as SetRenderTarget's force-copy restore (SRTM_FORCE_COPY_RESTORE) of kMAIN makes it. */
 	bool CopyMain();
+
+	/** @brief Native's RenderDepth driver: the main depth into kPOST_ZPREPASS_COPY, as Main::RenderDepth's last act copies it. */
+	bool CopyDepthPassDepth();
 }

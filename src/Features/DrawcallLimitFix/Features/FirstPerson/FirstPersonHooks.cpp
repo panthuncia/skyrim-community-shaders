@@ -33,14 +33,7 @@ namespace DCLF::Features::FirstPerson
 		{
 			static void thunk(void* a_camera, void* a_accumulator, std::uint32_t a_flags)
 			{
-				{
-					RenderThreadBudget::Hook budget(RenderThreadBudget::Site::ZPrepass);
-					// The hidden bits as the engine's first-person cull left them. Next frame's member chains read these.
-					if (Extensions::ViewRegistered(kView))
-						if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()))
-							FrameGlobals::NoteFirstPersonCulled(player->Get3D(true));
-					TakeDepthRange(ShellState::Passes().depthControlDriven);
-				}
+				DepthDrawPoint(ShellState::Passes().depthControlDriven);
 				func(a_camera, a_accumulator, a_flags);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -63,6 +56,16 @@ namespace DCLF::Features::FirstPerson
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+	}
+
+	void DepthDrawPoint(bool a_controlDriven)
+	{
+		RenderThreadBudget::Hook budget(RenderThreadBudget::Site::ZPrepass);
+		// The hidden bits as the first-person cull saw them. Next frame's member chains read these.
+		if (Extensions::ViewRegistered(kView))
+			if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()))
+				FrameGlobals::NoteFirstPersonCulled(player->Get3D(true));
+		TakeDepthRange(a_controlDriven);
 	}
 
 	void PreflightHooks()

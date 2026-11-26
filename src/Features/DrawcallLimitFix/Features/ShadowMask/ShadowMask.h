@@ -122,12 +122,23 @@ namespace DCLF::Features::ShadowMask
 		 */
 		bool Build(View a_view, Run& a_run, std::vector<RE::BSShadowLight*>& a_lights, std::string& a_why);
 
+		/** @brief The lights of a_view's caster array in the masks' loop order (each takes as many slots as it has maps). */
+		std::vector<RE::BSShadowLight*> Lights(View a_view);
+
 		/** @brief FUN_1414f4350: ends the technique the engine left open, as the masks' call does first. */
 		void EndTechnique();
 
 		/** @brief The world's sun cascade map (the map its mask draw binds at t4), or null. */
 		ID3D11ShaderResourceView* SunMap(View a_view, const std::vector<RE::BSShadowLight*>& a_lights);
 	}
+
+	/**
+	 * @brief Native: the world's shadow masks (Main::RenderShadowMasks' call of SE 100423 / AE 107141), driven by CS with no engine function
+	 * called. kSHADOW_MASK is cleared to a_clear through the skeleton, the draws are built from the shadow lights with the snapshot's main
+	 * camera and run at the anchor, and each light's maps are given back (CS's port of ReturnShadowmaps). A batch the build refuses is
+	 * logged once per reason and only cleared. Render owner, in a native world frame.
+	 */
+	void DrawWorldMasks(const float a_clear[4]);
 
 	/** @brief The view's name for logs and client ids. */
 	const char* NameOf(View a_view);

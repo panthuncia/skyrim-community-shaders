@@ -28,6 +28,11 @@ namespace DCLF::Features::FirstPerson
 	void CullHiddenSkeleton(Api::CullHiddenNodes& a_nodes);
 
 	void TakeDepthRange(bool a_controlDriven);
+	/**
+	 * @brief RenderDepth's first-person draw point (its first-person block, after the first-person cull): the hidden bits as the culls left
+	 * them and the depth range. Native's RenderDepth driver calls it in the engine's place. Render thread.
+	 */
+	void DepthDrawPoint(bool a_controlDriven);
 	void ExecuteDepth(const Api::ViewPointContext& a_context);
 	void ExecuteColour();
 	std::string Report();
