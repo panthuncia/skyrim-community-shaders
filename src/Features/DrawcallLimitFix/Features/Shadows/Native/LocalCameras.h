@@ -5,10 +5,8 @@
 // same writes to the light, its cameras, accumulators, culling process and the engine's globals. Render thread, inside the light
 // selection. The float math keeps the engine's operation order.
 
-#include "Features/DrawcallLimitFix/Features/Shadows/Native/WrittenRange.h"
 
 #include <cstdint>
-#include <vector>
 
 namespace RE
 {
@@ -92,11 +90,4 @@ namespace DCLF::Features::Shadows::Native
 	 * from its own tables, so nothing is registered.
 	 */
 	void PrepareFocusAccumulators(RE::BSShadowLight& a_light);
-
-	/**
-	 * @brief Every block the functions above may write for a_light: its own fields, its descriptors, cameras, accumulator fields,
-	 * culling process fields and portal entry, and the engine globals they touch. Objects not made yet (an accumulator or camera made on
-	 * first use) cannot be listed; their pointer slots are inside the descriptor ranges.
-	 */
-	void LocalLightWrites(RE::BSShadowLight& a_light, std::vector<WrittenRange>& a_out);
 }

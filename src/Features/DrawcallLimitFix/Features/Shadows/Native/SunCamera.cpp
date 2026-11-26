@@ -938,47 +938,4 @@ namespace DCLF::Features::Shadows::Native
 		Field<std::uint8_t>(&a_light, kLightPending) = 0;
 		return true;
 	}
-
-	void SunCameraWrites(RE::BSShadowDirectionalLight& a_light, std::vector<WrittenRange>& a_out)
-	{
-		using namespace SunCameraImpl;
-
-		auto& sun = a_light.GetShadowDirectionalLightRuntimeData();
-		a_out.push_back({ &sun.sunVector, sizeof(RE::NiPoint3) * 2, "light sunVector, lastSunVector" });
-		a_out.push_back({ &sun.startSplitDistances[0], sizeof(float) * 6, "light start/end split distances" });
-		a_out.push_back({ &sun.sunUpdate, sizeof(float) + sizeof(std::uint32_t), "light sunUpdate, sunUpdateMode" });
-		a_out.push_back({ &Field<std::uint8_t>(&a_light, kLightPending), 1, "light BSLight 0xD0" });
-
-		if (sun.fullFrustumCamera)
-			a_out.push_back({ sun.fullFrustumCamera.get(), kCameraSize, "full-frustum camera" });
-		for (auto& process : sun.fullFrustumCullingProcessArray) {
-			if (!process)
-				continue;
-			// The engine also copies 8 bytes of its stack into customCullPlanes unk68/unk6C; the port leaves them, so they are not listed.
-			a_out.push_back({ &process->customCullPlanes, sizeof(PlaneSet), "full-frustum process customCullPlanes" });
-			a_out.push_back({ &process->doCustomCullPlanes, 1, "full-frustum process doCustomCullPlanes" });
-		}
-
-		const std::uint32_t count = a_light.shadowMapCount < kMaxCascades ? a_light.shadowMapCount : kMaxCascades;
-		Descriptor* descriptors = a_light.GetRuntimeData().shadowmapDescriptors.data();
-		for (std::uint32_t i = 0; i < count; ++i) {
-			Descriptor& desc = descriptors[i];
-			a_out.push_back({ &desc.camera, sizeof(void*) * 2, "cascade camera and accumulator pointers" });
-			a_out.push_back({ &desc.clipPlanes.cullingPlanes[0], sizeof(RE::NiPlane) * 2, "cascade clip planes near, far" });
-			a_out.push_back({ &Field<float>(&desc, kUnitsPerTexel), sizeof(float), "cascade unitsPerTexel" });
-			a_out.push_back({ &desc.port, sizeof(desc.port), "cascade port" });
-			if (desc.camera)
-				a_out.push_back({ desc.camera.get(), kCameraSize, "cascade camera" });
-			if (desc.cullingProcess) {
-				a_out.push_back({ &desc.cullingProcess->customCullPlanes, sizeof(PlaneSet), "cascade process customCullPlanes" });
-				a_out.push_back({ &desc.cullingProcess->doCustomCullPlanes, 1, "cascade process doCustomCullPlanes" });
-			}
-			if (desc.shaderAccumulator) {
-				auto* accumulator = desc.shaderAccumulator->GetRuntimeData();
-				a_out.push_back({ &accumulator->activeShadowSceneNode, sizeof(void*), "cascade accumulator activeShadowSceneNode" });
-				a_out.push_back({ &accumulator->drawDecals, 2, "cascade accumulator drawDecals, unk12D (first use)" });
-				a_out.push_back({ &accumulator->renderMode, sizeof(std::uint32_t), "cascade accumulator renderMode (first use)" });
-			}
-		}
-	}
 }

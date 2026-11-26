@@ -731,47 +731,6 @@ namespace DCLF::Features::Shadows::Native
 						At<RE::NiPointer<RE::BSShaderAccumulator>>(process, kProcessBackAccumulator) = descriptors[1].shaderAccumulator;
 				a_globalCount = count + (twoSided ? 2 : 1);
 			}
-
-			void LocalLightWritesImpl(RE::BSShadowLight& a_light, std::vector<WrittenRange>& a_out)
-			{
-				auto* base = reinterpret_cast<std::byte*>(&a_light);
-				a_out.push_back({ &a_light.lodDimmer, sizeof(a_light.lodDimmer), "light lodDimmer" });
-				a_out.push_back({ &a_light.frustrumCull, sizeof(a_light.frustrumCull), "light frustrumCull" });
-				a_out.push_back({ base + kRefCount, sizeof(std::uint32_t), "light reference count (lens flare list)" });
-				a_out.push_back({ base + kLightRectLeft, 4 * sizeof(std::uint32_t), "light projectedBoundingBox" });
-				auto& data = a_light.GetRuntimeData();
-				if (!data.shadowmapDescriptors.empty())
-					a_out.push_back({ data.shadowmapDescriptors.data(), data.shadowmapDescriptors.size() * sizeof(Descriptor), "light descriptors" });
-				a_out.push_back({ data.focusShadowmapDescriptors, sizeof(data.focusShadowmapDescriptors), "light focus descriptors" });
-				ForEachDescriptor(a_light, [&](Descriptor& a_descriptor) {
-					if (auto* camera = a_descriptor.camera.get())
-						a_out.push_back({ camera, kCameraSize, "descriptor camera" });
-					if (auto* accumulator = a_descriptor.shaderAccumulator.get()) {
-						auto* bytes = reinterpret_cast<std::byte*>(accumulator);
-						a_out.push_back({ bytes + kRefCount, sizeof(std::uint32_t), "accumulator reference count" });
-						a_out.push_back({ bytes + kAccumulatorDrawDecals, 2, "accumulator +0x12C flags" });
-						a_out.push_back({ bytes + kAccumulatorSceneNode, 0x10, "accumulator scene node and render mode" });
-						a_out.push_back({ bytes + kAccumulatorLightIndex, 2 * sizeof(std::uint32_t), "accumulator light index and bit" });
-					}
-				});
-				if (auto* process = reinterpret_cast<std::byte*>(a_light.cullingProcess)) {
-					if (KindOf(a_light) == Kind::Parabolic)
-						a_out.push_back({ process + kProcessBackAccumulator, sizeof(void*), "process back accumulator" });
-					if (auto* entry = At<std::byte*>(process, kProcessPortalEntry)) {
-						a_out.push_back({ entry + kEntryVisibility, sizeof(void*), "portal entry visibility" });
-						a_out.push_back({ entry + kEntryCount, 3 * sizeof(std::uint32_t), "portal entry counts" });
-						if (auto* slots = At<std::byte*>(entry, kEntrySlots))
-							a_out.push_back({ slots, At<std::uint32_t>(entry, kEntryCount) * kEntrySlotSize, "portal entry slots" });
-					}
-				}
-				a_out.push_back({ &ShadowFreeMask(), sizeof(std::uint32_t), "shadow map free mask" });
-				a_out.push_back({ &CameraInsideMask(), sizeof(std::uint32_t), "camera-inside light mask" });
-				a_out.push_back({ &ShadowLightCount(), sizeof(std::uint32_t), "gLastFrameEnabledShadowCasterLightsCount2" });
-				std::byte* list = LensFlareList();
-				a_out.push_back({ list, 0x18, "lens flare list header" });
-				if (auto* slots = At<std::byte*>(list, 0))
-					a_out.push_back({ slots, At<std::uint32_t>(list, 0x8) * sizeof(void*), "lens flare list slots" });
-			}
 		}
 	}
 
@@ -828,10 +787,5 @@ namespace DCLF::Features::Shadows::Native
 	void PrepareFocusAccumulators(RE::BSShadowLight& a_light)
 	{
 		LocalCamerasImpl::PrepareFocusAccumulatorsImpl(a_light);
-	}
-
-	void LocalLightWrites(RE::BSShadowLight& a_light, std::vector<WrittenRange>& a_out)
-	{
-		LocalCamerasImpl::LocalLightWritesImpl(a_light, a_out);
 	}
 }
