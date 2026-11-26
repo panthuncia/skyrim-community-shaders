@@ -386,7 +386,8 @@ namespace DCLF::Draws
 		std::uint32_t slotLayoutsOffset;
 		// Under kCullMinTexels, the least bound radius in world units a sun caster keeps.
 		float minCasterRadius;
-		std::uint32_t spare;  // 0
+		// The fade root bounds pool's backing, which FadeStateCS reads from the depth latch. 0 for none.
+		std::uint32_t fadeRootBoundsIndex;
 		// Address of the frame's copy of the animated material rows. A row whose header names one reads it. 0 for none.
 		std::uint32_t animatedRowsLo, animatedRowsHi;
 		// The frame's per-object rows, written from the latch by the feature pass that owns them. Null for none.
@@ -402,10 +403,12 @@ namespace DCLF::Draws
 	constexpr std::uint32_t kFocusRootNone = 0xFFFFFFFFu;
 	// Byte offset that BuildDrawsCS, FadeStateCS and PortalBatchCS read as kLatchPortalPrograms.
 	constexpr std::uint32_t kLatchPortalProgramsOffset = 320;
+	// Byte offset that FadeStateCS reads as kLatchFadeRootBounds.
+	constexpr std::uint32_t kLatchFadeRootBoundsOffset = 344;
 	// Byte offset that CullEye.hlsli reads as kLatchCullEye.
 	constexpr std::uint32_t kLatchCullEyeOffset = 368;
 	static_assert(sizeof(BuildDrawsLatch) == 400 && offsetof(BuildDrawsLatch, materialRowsRef) == 384 && offsetof(BuildDrawsLatch, animatedRowsRef) == 392 &&
-				  offsetof(BuildDrawsLatch, cullEye) == kLatchCullEyeOffset && offsetof(BuildDrawsLatch, animatedRowsLo) == 348 && offsetof(BuildDrawsLatch, frameRowsRef) == 356 && offsetof(BuildDrawsLatch, spare) == 344 && offsetof(BuildDrawsLatch, slotLayoutsOffset) == 336 && offsetof(BuildDrawsLatch, minCasterRadius) == 340 && offsetof(BuildDrawsLatch, portalProgramsIndex) == kLatchPortalProgramsOffset &&
+				  offsetof(BuildDrawsLatch, cullEye) == kLatchCullEyeOffset && offsetof(BuildDrawsLatch, animatedRowsLo) == 348 && offsetof(BuildDrawsLatch, frameRowsRef) == 356 && offsetof(BuildDrawsLatch, fadeRootBoundsIndex) == kLatchFadeRootBoundsOffset && offsetof(BuildDrawsLatch, slotLayoutsOffset) == 336 && offsetof(BuildDrawsLatch, minCasterRadius) == 340 && offsetof(BuildDrawsLatch, portalProgramsIndex) == kLatchPortalProgramsOffset &&
 				  offsetof(BuildDrawsLatch, lightContextsIndex) == 324 && offsetof(BuildDrawsLatch, strictContext) == 332 && offsetof(BuildDrawsLatch, terrainNear) == 304 && offsetof(BuildDrawsLatch, classTableOffset) == 292 &&
 				  offsetof(BuildDrawsLatch, classMapOffset) == 296 && offsetof(BuildDrawsLatch, focusRoot) == 268 && offsetof(BuildDrawsLatch, fadeSeedsIndex) == 288 && offsetof(BuildDrawsLatch, inputsIndex) == 256 &&
 				  offsetof(BuildDrawsLatch, viewBits) == 264 && offsetof(BuildDrawsLatch, materialRowsLo) == 272 &&

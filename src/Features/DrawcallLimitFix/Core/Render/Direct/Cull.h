@@ -92,6 +92,8 @@ namespace DCLF::Direct
 		std::span<const FadeNodeState> rootStates;
 		std::span<const std::uint32_t> rootGenerations;
 		std::span<const std::uint32_t> rootPrograms;
+		// By root slot, the bounds the fade stage tested the roots with (diagnostics).
+		std::span<const FadeRootBound> rootBounds;
 		// The main camera's portal programs. Empty means the frustum alone.
 		std::span<const std::uint32_t> programs;
 		PortalTestFn portalTest = nullptr;

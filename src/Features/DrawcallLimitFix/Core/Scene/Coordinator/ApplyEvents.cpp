@@ -817,10 +817,29 @@ namespace DCLF::Scene
 				pendingEvaluation.push_back(it->first);
 			}
 		}
+		// What the engine shows now, so the log names the engine change that had no event. A node is named only while it is a category node.
+		const auto describe = [&](RE::BSGeometry* a_geometry) {
+			const auto nameOf = [](const RE::NiAVObject* a_object) { return a_object && a_object->name.c_str() ? a_object->name.c_str() : ""; };
+			RE::NiNode* const was = [&]() -> RE::NiNode* { const auto it = tracked.find(a_geometry); return it != tracked.end() ? it->second.categoryNode : nullptr; }();
+			std::string chain;
+			const RE::NiAVObject* top = a_geometry;
+			for (const auto* node = a_geometry->parent; node && chain.size() < 1024; node = node->parent) {
+				chain += fmt::format(" <- '{}' {}{}", nameOf(node), fmt::ptr(node), categoryNodes.contains(const_cast<RE::NiNode*>(node)) ? " (category)" : "");
+				top = node;
+			}
+			const auto* owner = a_geometry->GetUserData();
+			for (const RE::NiAVObject* at = a_geometry; at && !owner; at = at->parent)
+				owner = at->GetUserData();
+			const auto* live = FindCategoryNodeLive(a_geometry, nullptr);
+			return fmt::format("'{}' {} of {:08X} '{}': tracked under {}{}, now under {} '{}'; chain{}{}", nameOf(a_geometry), fmt::ptr(a_geometry),
+				owner ? owner->GetFormID() : 0u, owner && owner->GetBaseObject() && owner->GetBaseObject()->GetName() ? owner->GetBaseObject()->GetName() : "",
+				fmt::ptr(was), was && categoryNodes.contains(was) ? fmt::format(" '{}' (still a category node)", nameOf(was)) : std::string(" (no longer a category node)"),
+				fmt::ptr(live), nameOf(live), chain, top && !top->parent ? " (top has no parent)" : "");
+		};
 		// A missed detach is a defect: fatal in development builds. Release counts it and drops the entry.
 		for (auto* geometry : stale) {
 			::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::SceneMismatch, ::RenderGraph::Frame::SegmentId::Count,
-				fmt::format("tracked-set check: geometry {} is tracked under a category node it no longer has (a missed detach)", fmt::ptr(geometry)));
+				fmt::format("tracked-set check: geometry {} is tracked under a category node it no longer has (a missed detach)", describe(geometry)));
 			EraseTracked(geometry);
 			++stats.validationDrops;
 		}

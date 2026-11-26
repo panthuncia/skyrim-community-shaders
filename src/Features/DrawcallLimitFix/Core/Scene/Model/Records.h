@@ -363,16 +363,28 @@ namespace DCLF
 	struct FadeRootStatic
 	{
 		FadeNodeState initial;            // the node as listed
-		float radius = 0.0f;              // +0xF0, the world bound's (the centre is the member record's fade node row)
+		float radius = 0.0f;              // +0xF0 at the seed, for lodScale. The root test reads FadeRootBound instead.
 		float fadeAmount = 1.0f;          // NiAVObject +0x100
 		float nearDistance = 0.0f;        // +0x128
 		float farDistance = 0.0f;         // +0x12C
-		std::uint32_t object = ~0u;       // a member's object slot, whose record's fade node row is the root's centre
+		std::uint32_t object = ~0u;       // one member's object slot. Marks the row listed; the census names it.
 		std::uint32_t bits = 0;           // kFadeRoot*, and +0x109 in bits 8-15
 		float lodScale = 1.0f;            // FUN_14147a430's distance scale: powf(e44, logf(+0xF0 / e40) * e54) with +0x109 bit 1
 		std::uint32_t generation = 0;     // new for every listing (and every input refresh): the state row is seeded again
 	};
 	static_assert(sizeof(FadeRootStatic) == 80);
+	/**
+	 * @brief A root node's world bound, sampled every frame by the "fade-root-bounds" pool. The root test and the fade distance
+	 * read it, as BSFadeNode::OnVisible reads the node's own bound. The row counts only when its generation is the root row's.
+	 */
+	struct FadeRootBound
+	{
+		float centre[3] = {};
+		float radius = 0.0f;
+		std::uint32_t generation = 0;
+		std::uint32_t pad[3] = {};
+	};
+	static_assert(sizeof(FadeRootBound) == 32);
 	inline constexpr std::uint32_t kFadeRootPlanMask = 0x3u;  // which OnVisible the node has
 	inline constexpr std::uint32_t kFadeRootFade = 0;         // BSFadeNode's
 	inline constexpr std::uint32_t kFadeRootLeaf = 1;         // BSLeafAnimNode's: the LOD step, then BSFadeNode's

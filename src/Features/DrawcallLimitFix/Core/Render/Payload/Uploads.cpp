@@ -337,6 +337,8 @@ namespace DCLF
 			a_latch.fadeSeedsIndex = CullBindingIndex(Api::CullBindingSlot::RootSeeds, *resources->scene, frameNumber, a_commit.adopted);
 			// The commit hooks have already published this frame's portal programs.
 			a_latch.portalProgramsIndex = depthOnly ? CullBindingIndex(Api::CullBindingSlot::Programs, *resources->scene, frameNumber, a_commit.adopted) : 0u;
+			// FadeStateCS reads the root bounds from the depth latch.
+			a_latch.fadeRootBoundsIndex = depthOnly ? CullBindingIndex(Api::CullBindingSlot::RootBounds, *resources->scene, frameNumber, a_commit.adopted) : 0u;
 			// Portal-strict lights gate their receivers. Index 0 gates nothing.
 			if (!depthOnly) {
 				a_latch.lightContextsIndex = CullBindingIndex(Api::CullBindingSlot::LightContexts, *resources->scene, frameNumber, a_commit.adopted);

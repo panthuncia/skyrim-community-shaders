@@ -71,6 +71,11 @@ namespace DCLF::Features::Fades
 			a_select.Index(SeedsIndex());
 		}
 
+		void SelectRootBounds(Api::CullBindingSelect& a_select)
+		{
+			a_select.Index(RootBoundsIndex());
+		}
+
 		void SelectRootFrame(Api::CullBindingSelect& a_select)
 		{
 			if (const auto* fades = SceneOf(a_select.scene))
@@ -80,7 +85,8 @@ namespace DCLF::Features::Fades
 
 	void RegisterRender(Api::InstallContext& a_context)
 	{
-		// The order matters. The seeds pool must be the last frame value pool, and the CPU stage's pool follows it.
+		// The order matters. The CPU stage's pool samples after the root bounds and seeds pools, because it reads both.
+		RegisterRootBounds(a_context);
 		RegisterSeeds(a_context);
 		RegisterCpuStage(a_context);
 		// After every feature's scene resources, because the visibility readback reads these rows.
@@ -98,6 +104,7 @@ namespace DCLF::Features::Fades
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::RootStates, .name = "cs.dclf.fade-states-out", .select = &SelectRootStates });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::RootStepStates, .name = "cs.dclf.fade-states", .select = &SelectRootStepStates });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::RootSeeds, .name = "cs.dclf.frame-values.fade-seeds", .select = &SelectRootSeeds });
+		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::RootBounds, .name = "cs.dclf.frame-values.fade-root-bounds", .select = &SelectRootBounds });
 		a_context.RegisterCullBinding({ .slot = Api::CullBindingSlot::RootFrame, .name = "cs.dclf.fade-frame", .select = &SelectRootFrame });
 	}
 }

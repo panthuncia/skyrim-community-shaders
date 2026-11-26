@@ -111,6 +111,7 @@ namespace DCLF::Features::Fades
 			std::vector<std::array<float, 4>> sunEntry, fadeNode;
 			std::vector<std::uint32_t> rootWords, rootGenerations, rootPrograms, programs;
 			std::vector<FadeNodeState> rootStates;
+			std::vector<FadeRootBound> rootBounds;
 			FrameStorage* next = nullptr;
 		};
 		std::atomic<FrameStorage*> freeStorage{ nullptr };
@@ -399,8 +400,8 @@ namespace DCLF::Features::Fades
 		{
 			const CpuStageInput& input;
 			const Api::RootListView& list;
-			std::span<const BindlessPlacement> rows;
 			const std::vector<FadeRootStatic>& seeds;
+			const std::vector<FadeRootBound>& bounds;
 			FrameStorage& storage;
 			std::vector<FadeNodeState>& states;
 			std::vector<FadeEvent>& events;
@@ -448,11 +449,11 @@ namespace DCLF::Features::Fades
 					state.verdict = 0;
 					state.frame = 0;
 				}
-				if (state.frame != input.sceneFrame && input.frame.lodAdjust != 0.0f && root.object < a_context.rows.size()) {
-					const float* centre = a_context.rows[root.object].lodFadeNode;
-					// Use the radius the engine reads now from the sun entry row, else the listed radius.
-					const float entryRadius = a_context.rows[root.object].sunEntry[3];
-					const float radius = entryRadius >= 0.0f && entryRadius < 1e30f ? entryRadius : root.radius;
+				// The root node's own bound this frame, as OnVisible tests it. A root waits for its first sampled bound like its seed.
+				const FadeRootBound* bound = a_slot < a_context.bounds.size() && a_context.bounds[a_slot].generation == root.generation ? &a_context.bounds[a_slot] : nullptr;
+				if (state.frame != input.sceneFrame && input.frame.lodAdjust != 0.0f && bound) {
+					const float* centre = bound->centre;
+					const float radius = bound->radius;
 					state.verdict = 0;
 					const std::uint32_t updates = a_slot < a_context.animated.size() ? a_context.animated[a_slot] : 0u;
 					if (updates)
@@ -502,6 +503,7 @@ namespace DCLF::Features::Fades
 			frame->rootStates = s.rootStates;
 			frame->rootGenerations = s.rootGenerations;
 			frame->rootPrograms = s.rootPrograms;
+			frame->rootBounds = s.rootBounds;
 			frame->programs = s.programs;
 			// Portal tests only decide visibility stamps, and an observer's culls stamp nothing.
 			frame->reportsVisibility = !a_input.observer;
@@ -589,13 +591,15 @@ namespace DCLF::Features::Fades
 			std::vector<std::vector<FadeEvent>> chunkEvents(chunks);
 			std::vector<std::vector<std::uint32_t>> chunkMarked(chunks);
 			const auto& seeds = ProducerSeeds();
+			const auto& bounds = ProducerRootBounds();
+			storage->rootBounds.assign(bounds.begin(), bounds.end());
 			const auto animated = CountAnimated(*input, list);
 			TracyCZoneValue(fPrep, steps);
 			TracyCZoneEnd(fPrep);
 			TracyCZoneN(fSteps, "CS.DCLF.FadeCpuStage.Steps", true);
 			::RenderGraph::Frame::SharedExecutor().ParallelFor("CS.DCLF.FadeCpuStage.Roots", steps, kRootGrain, [&](std::size_t a_begin, std::size_t a_end) {
 				const std::size_t chunk = a_begin / kRootGrain;
-				StepContext context{ *input, list, rows, seeds, *storage, states, chunkEvents[chunk], chunkMarked[chunk], animated };
+				StepContext context{ *input, list, seeds, bounds, *storage, states, chunkEvents[chunk], chunkMarked[chunk], animated };
 				for (std::size_t r = a_begin; r < a_end; ++r)
 					StepRoot(context, slotAt(r));
 			});

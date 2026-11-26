@@ -108,12 +108,6 @@ struct FadeFrame
 	uint2 AnimPadding;
 };
 
-// The placement rows, as BindlessPlacement.
-struct PlacementRows
-{
-	float4 Rows[10];
-};
-
 static const uint kFadeFlagFadedIn = 1u << 14;
 static const uint kFadeFlagSettled = 1u << 15;
 static const uint kFadeFlagLodInUpdate = 1u << 27;
@@ -130,8 +124,8 @@ static const uint kFadeRootOther = 3;
 static const uint kFadeRootBitsShift = 8;
 static const uint kFadeRootTreeLod = 1u << 16;
 static const uint kFadeRootTreeThresholds = 1u << 17;
-static const uint kObjectSunEntryRow = 7;
-static const uint kObjectFadeNodeRow = 8;
+// GpuLayouts.h's kLatchFadeRootBoundsOffset: the root bounds pool's descriptor in the depth latch.
+static const uint kLatchFadeRootBounds = 344;
 static const uint kNoObject = 0xFFFFFFFFu;
 static const uint kFadeRootStoodIn = 1u << 19;
 static const uint kFadeEventHeaderWords = 4;
@@ -423,6 +417,33 @@ bool MergeSeed(uint a_slot, inout FadeRootStatic a_root)
 	return true;
 }
 
+// Must match Records.h's FadeRootBound. The root node's world bound, sampled this frame.
+struct FadeRootBound
+{
+	float3 Centre;
+	float Radius;
+	uint Generation;
+	uint3 Pad;
+};
+
+// The root node's own bound, as BSFadeNode::OnVisible tests it. False until a bound of the root's generation is sampled.
+bool RootBound(uint a_slot, uint a_generation, out float4 a_bound)
+{
+	a_bound = float4(0.0f, 0.0f, 0.0f, 0.0f);
+	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
+	const uint boundsIndex = latch.Load(LatchOffset + kLatchFadeRootBounds);
+	if (boundsIndex == 0)
+		return false;
+	StructuredBuffer<FadeRootBound> bounds = ResourceDescriptorHeap[boundsIndex];
+	uint count, stride;
+	bounds.GetDimensions(count, stride);
+	if (a_slot >= count)
+		return false;
+	const FadeRootBound bound = bounds[a_slot];
+	a_bound = float4(bound.Centre, bound.Radius);
+	return bound.Generation == a_generation;
+}
+
 // The cull test without a program. An always-draw node passes untested. A preprocessed actor root passes in the engine unless
 // kNotVisible, but the seed's flags are stale, so DCLF makes the actor pre-cull's frustum test itself.
 bool FrustumInView(float3 a_centre, float a_radius, uint a_rootBits)
@@ -503,13 +524,14 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 		published[index] = state;
 		return;
 	}
-	// A root's centre is its member's fade node placement row.
-	ByteAddressBuffer frameLatch = ResourceDescriptorHeap[LatchIndex];
-	StructuredBuffer<PlacementRows> placements = ResourceDescriptorHeap[frameLatch.Load(LatchOffset + 252)];
-	const float3 centre = placements[root.Object].Rows[kObjectFadeNodeRow].xyz;
-	// The bound's radius as the engine reads it now, from the member's sun entry row. A negative or unbounded radius falls back to the listed one.
-	const float entryRadius = placements[root.Object].Rows[kObjectSunEntryRow].w;
-	const float radius = entryRadius >= 0.0f && entryRadius < 1e30f ? entryRadius : root.Radius;
+	// The root's centre and radius are its node's own bound this frame. Without one yet the root waits, as for its seed.
+	float4 bound;
+	if (!RootBound(index, root.Generation, bound)) {
+		published[index] = state;
+		return;
+	}
+	const float3 centre = bound.xyz;
+	const float radius = bound.w;
 	state.Verdict = 0;
 	// The animation job's update since the last cull (FUN_1402cff60 -> FUN_14147a160), for a reference its cull did not reach.
 	// The word holds the batch's scene frame in the low 28 bits and its update count.
@@ -560,12 +582,11 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 	if ((id.x + id.y * (64u * 65535u)) < F.RootCount) {
 		StructuredBuffer<FadeRootStatic> roots = ResourceDescriptorHeap[RootsIndex];
 		FadeRootStatic root = roots[(id.x + id.y * (64u * 65535u))];
-		if (root.Object != kNoObject && root.Generation != 0 && MergeSeed((id.x + id.y * (64u * 65535u)), root)) {
+		float4 bound;
+		if (root.Object != kNoObject && root.Generation != 0 && MergeSeed((id.x + id.y * (64u * 65535u)), root) &&
+			RootBound((id.x + id.y * (64u * 65535u)), root.Generation, bound)) {
 			ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
-			StructuredBuffer<PlacementRows> placements = ResourceDescriptorHeap[latch.Load(LatchOffset + 252)];
-			query.Bound.xyz = placements[root.Object].Rows[kObjectFadeNodeRow].xyz;
-			const float radius = placements[root.Object].Rows[kObjectSunEntryRow].w;
-			query.Bound.w = radius >= 0.0f && radius < 1e30f ? radius : root.Radius;
+			query.Bound = bound;
 			uint program = kPortalNoProgram;
 			if (RootProgramsIndex != 0) {
 				StructuredBuffer<uint> programs = ResourceDescriptorHeap[RootProgramsIndex];
