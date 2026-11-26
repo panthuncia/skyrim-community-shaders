@@ -2042,7 +2042,8 @@ void Upscaling::UpscaleDepth()
 void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 {
 	const auto& snapshot = Snapshot::Current();
-	const bool gameplay = snapshot && !snapshot->menus.paused && !snapshot->menus.main && !snapshot->menus.loading;
+	// A snapshot before the first game update (id 0) is the startup's: no gameplay yet.
+	const bool gameplay = snapshot && snapshot->id != 0 && !snapshot->menus.paused && !snapshot->menus.main && !snapshot->menus.loading;
 	const auto fgMethod = GetFrameGenMethod();
 	if (!FrameGen::ActivePresenter().Surface().ready ||
 		(fgMethod == FrameGenMethod::kFSR &&

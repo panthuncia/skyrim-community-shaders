@@ -66,7 +66,7 @@ namespace Snapshot
 			std::uint32_t n = 1;
 		};
 
-		/** @brief The game side's state. Main thread. */
+		/** @brief The producers' state. The thread that holds the publish claim (g_publishing). */
 		struct Producer
 		{
 			std::vector<CaptureFn> captures;
@@ -82,7 +82,7 @@ namespace Snapshot
 		/** @brief Counters since the last load's line. Atomic: the render side adds to them too. */
 		struct Stats
 		{
-			std::atomic<std::uint64_t> published{ 0 }, replaced{ 0 }, adopted{ 0 }, repeats{ 0 }, renders{ 0 };
+			std::atomic<std::uint64_t> published{ 0 }, frameOnly{ 0 }, replaced{ 0 }, adopted{ 0 }, repeats{ 0 }, renders{ 0 };
 			std::atomic<std::uint64_t> blocksShared{ 0 }, blocksMade{ 0 }, captureNs{ 0 };
 			std::atomic<std::uint32_t> mostFolded{ 0 };
 		};
@@ -114,7 +114,7 @@ namespace Snapshot
 		}
 
 		// Latest wins. The producer takes back what the consumer did not adopt before it posts the next (Publish), so the two only
-		// ever exchange the pointer: one producer, one consumer.
+		// ever exchange the pointer: one producer at a time (g_publishing), one consumer.
 		RenderGraph::Frame::LatestSlot<std::shared_ptr<const FrameSnapshot>>& Slot()
 		{
 			static RenderGraph::Frame::LatestSlot<std::shared_ptr<const FrameSnapshot>> slot;
@@ -122,6 +122,9 @@ namespace Snapshot
 		}
 
 		std::atomic<std::uint64_t> g_currentId{ 0 };
+		// Set while a producer builds and publishes. The game update's publish and the frame-only ones never overlap (Publication.h),
+		// so finding it set is fatal: a producer never waits.
+		std::atomic_flag g_publishing;
 		thread_local bool t_inGameUpdate = false;
 		std::atomic<std::uint64_t> g_loadEpoch{ 0 };
 		std::atomic<bool> g_loadStartedPending{ false };
@@ -164,7 +167,8 @@ namespace Snapshot
 			return freezes(a_ui);
 		}
 
-		MenuStates CaptureMenus()
+		/** @brief The menu states. The freeze test walks the menu stack, so only the main thread asks it (a_freezeTest). */
+		MenuStates CaptureMenus(bool a_freezeTest)
 		{
 			MenuStates menus{};
 			auto* ui = CS_ENGINE_READ(UI, CapturePoint, RE::UI::GetSingleton());
@@ -175,11 +179,51 @@ namespace Snapshot
 			menus.map = ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
 			menus.stats = ui->IsMenuOpen(RE::StatsMenu::MENU_NAME);
 			menus.console = ui->IsMenuOpen(RE::Console::MENU_NAME);
-			menus.freezesBackground = FreezesBackground(ui);
+			menus.freezesBackground = a_freezeTest && FreezesBackground(ui);
 			menus.paused = ui->GameIsPaused();
 			menus.open = ui->menuStack.size();
 			return menus;
 		}
+
+		/**
+		* @brief A main-thread frame's kind, as Main's frame (SE 35556 / AE 36555) decides what it draws: a menu that freezes the
+		* background first, then the world when the player has 3D (Get3D2, vtable +0x380), else the main menu.
+		*/
+		FrameKind MainThreadKind(const MenuStates& a_menus, bool a_has3D)
+		{
+			return a_menus.freezesBackground ? FrameKind::MenuOverWorld : a_has3D ? FrameKind::World : FrameKind::MainMenu;
+		}
+
+		/** @brief The kind and menu events (kind changed, opened, closed, paused, resumed) of a_snapshot against a_previous. */
+		void MenuEvents(FrameSnapshot& a_snapshot, const FrameSnapshot& a_previous)
+		{
+			auto& events = a_snapshot.events;
+			const auto& menus = a_snapshot.menus;
+			if (a_snapshot.kind != a_previous.kind)
+				events.Add(Event::KindChanged);
+			if (menus.open > a_previous.menus.open) {
+				events.Add(Event::MenuOpened);
+				events.menusOpened += menus.open - a_previous.menus.open;
+			} else if (menus.open < a_previous.menus.open) {
+				events.Add(Event::MenuClosed);
+				events.menusClosed += a_previous.menus.open - menus.open;
+			}
+			if (menus.paused != a_previous.menus.paused)
+				events.Add(menus.paused ? Event::Paused : Event::Resumed);
+		}
+
+		/** @brief Holds the publish claim for one build and publish. A second producer at the same time is fatal. */
+		struct PublishClaim
+		{
+			PublishClaim()
+			{
+				if (g_publishing.test_and_set(std::memory_order_acquire))
+					RenderGraph::Fatal("snapshot publication", "two producers published a snapshot at the same time");
+			}
+			~PublishClaim() { g_publishing.clear(std::memory_order_release); }
+			PublishClaim(const PublishClaim&) = delete;
+			PublishClaim& operator=(const PublishClaim&) = delete;
+		};
 
 		CameraView CaptureMainCamera()
 		{
@@ -198,7 +242,7 @@ namespace Snapshot
 		/** @brief The core fields, from game data, and the events they imply against the previous snapshot. */
 		void FillCore(FrameSnapshot& a_snapshot, const FrameSnapshot* a_previous, Producer& a_game)
 		{
-			a_snapshot.menus = CaptureMenus();
+			a_snapshot.menus = CaptureMenus(true);
 			const auto& menus = a_snapshot.menus;
 			a_snapshot.realDelta = CS_ENGINE_READ(Timer, CapturePoint, RE::BSTimer::GetSingleton())->realTimeDelta;
 			a_snapshot.gameDelta = menus.paused ? 0.0f : CS_ENGINE_READ(Timer, CapturePoint, RE::GetSecondsSinceLastFrame());
@@ -209,10 +253,8 @@ namespace Snapshot
 			const bool has3D = player && player->Get3D2();
 			const auto* cell = player ? player->GetParentCell() : nullptr;
 			a_snapshot.interior = cell && cell->IsInteriorCell();
-			a_snapshot.kind = menus.loading           ? FrameKind::Loading :
-			                  menus.main || !has3D    ? FrameKind::MainMenu :
-			                  menus.freezesBackground ? FrameKind::MenuOverWorld :
-			                                            FrameKind::World;
+			a_snapshot.worldLoaded = has3D && cell;
+			a_snapshot.kind = MainThreadKind(menus, has3D);
 			a_snapshot.loadEpoch = g_loadEpoch.load(std::memory_order_acquire);
 			// Game side: the settings' raise count when the snapshot is built, not the variables the last render Begin took.
 			a_snapshot.settingsRevision = CS::SettingRegistry::Serial();
@@ -233,17 +275,7 @@ namespace Snapshot
 				events.Add(Event::FirstAfterLoad);
 			if (!a_previous)
 				return;
-			if (a_snapshot.kind != a_previous->kind)
-				events.Add(Event::KindChanged);
-			if (menus.open > a_previous->menus.open) {
-				events.Add(Event::MenuOpened);
-				events.menusOpened += menus.open - a_previous->menus.open;
-			} else if (menus.open < a_previous->menus.open) {
-				events.Add(Event::MenuClosed);
-				events.menusClosed += a_previous->menus.open - menus.open;
-			}
-			if (menus.paused != a_previous->menus.paused)
-				events.Add(menus.paused ? Event::Paused : Event::Resumed);
+			MenuEvents(a_snapshot, *a_previous);
 			if (a_snapshot.settingsRevision != a_previous->settingsRevision)
 				events.Add(Event::SettingsChanged);
 			const auto& before = a_previous->cameras.Current(ViewId::Main);
@@ -275,6 +307,7 @@ namespace Snapshot
 		{
 			auto& stats = Counters();
 			const auto published = stats.published.exchange(0);
+			const auto frameOnly = stats.frameOnly.exchange(0);
 			const auto replaced = stats.replaced.exchange(0);
 			const auto adopted = stats.adopted.exchange(0);
 			const auto repeats = stats.repeats.exchange(0);
@@ -284,10 +317,10 @@ namespace Snapshot
 			const auto ns = stats.captureNs.exchange(0);
 			const auto folded = stats.mostFolded.exchange(0);
 			logger::info(
-				"[Snapshot] {} (load epoch {}, snapshot {}, {}): {} published, {} adopted, {} replaced unadopted (at most {} updates in one), "
-				"{} render frames, {} repeats; blocks {} shared, {} new; capture {:.1f} us a snapshot",
-				a_why, a_snapshot.loadEpoch, a_snapshot.id, FrameKindName(a_snapshot.kind), published, adopted, replaced, folded, renders, repeats, shared, made,
-				published ? static_cast<double>(ns) / 1000.0 / static_cast<double>(published) : 0.0);
+				"[Snapshot] {} (load epoch {}, snapshot {}, {}): {} published ({} frame-only: loading screen, movie or outside an update), {} adopted, "
+				"{} replaced unadopted (at most {} updates in one), {} render frames, {} repeats; blocks {} shared, {} new; capture {:.1f} us a game snapshot",
+				a_why, a_snapshot.loadEpoch, a_snapshot.id, FrameKindName(a_snapshot.kind), published, frameOnly, adopted, replaced, folded, renders, repeats,
+				shared, made, published > frameOnly ? static_cast<double>(ns) / 1000.0 / static_cast<double>(published - frameOnly) : 0.0);
 		}
 
 		void Publish(std::shared_ptr<FrameSnapshot> a_fresh)
@@ -355,6 +388,7 @@ namespace Snapshot
 	void Capture()
 	{
 		ZoneScopedN("CS.Snapshot.Capture");
+		const PublishClaim claim;
 		// Engine reads from here on are captures, not live reads.
 		const EngineReads::CaptureScope scope;
 		const auto start = std::chrono::steady_clock::now();
@@ -384,8 +418,55 @@ namespace Snapshot
 			LogStats(*game.previous, first ? "first snapshot" : "load ended");
 	}
 
+	void CaptureFrame(FrameSource a_source)
+	{
+		ZoneScopedN("CS.Snapshot.CaptureFrame");
+		const PublishClaim claim;
+		const EngineReads::CaptureScope scope;
+		auto& game = Game();
+		const FrameSnapshot* previous = game.previous.get();
+		// The last snapshot's world data, shared by pointer: blocks, cameras, scene, game time, settings revision.
+		auto fresh = previous ? std::make_shared<FrameSnapshot>(*previous) : std::make_shared<FrameSnapshot>();
+		fresh->sub = previous ? previous->sub + 1 : 1;
+		fresh->gameDelta = 0.0f;
+		fresh->realDelta = 0.0f;
+		fresh->cameras.previous = fresh->cameras.current;
+		fresh->events = {};
+		fresh->events.gameUpdates = 0;
+		fresh->loadEpoch = g_loadEpoch.load(std::memory_order_acquire);
+		fresh->menus = CaptureMenus(a_source == FrameSource::MainThread);
+		switch (a_source) {
+		case FrameSource::MainThread:
+			{
+				auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
+				const bool has3D = player && player->Get3D2();
+				fresh->worldLoaded = has3D && player->GetParentCell();
+				fresh->kind = MainThreadKind(fresh->menus, has3D);
+				break;
+			}
+		case FrameSource::LoadingScreen:
+			fresh->kind = FrameKind::Loading;
+			break;
+		case FrameSource::Movie:
+			fresh->kind = FrameKind::Movie;
+			break;
+		}
+		// Native: the frame's UI stream, set once its DrawInterface finished it. Never the copied snapshot's holder.
+		static const bool native = RenderGraph::Engine::Native::Requested();
+		fresh->ui = native ? std::make_shared<const UiCommandStream>() : nullptr;
+		if (g_loadStartedPending.exchange(false, std::memory_order_acq_rel)) {
+			fresh->events.Add(Event::LoadStarted);
+			++fresh->events.loadsStarted;
+		}
+		if (previous)
+			MenuEvents(*fresh, *previous);
+		Counters().frameOnly.fetch_add(1, std::memory_order_relaxed);
+		Publish(std::move(fresh));
+	}
+
 	void Adopt()
 	{
+		// Begin runs inside Renderer::Lock on every thread, so adoptions never overlap. The render owner reads what this sets.
 		auto& side = RenderSide();
 		auto& stats = Counters();
 		const auto now = std::chrono::steady_clock::now();
@@ -456,6 +537,11 @@ namespace Snapshot
 			g_loadStartedPending.store(true, std::memory_order_release);
 		} else
 			g_loadEndedPending.store(true, std::memory_order_release);
+	}
+
+	std::uint64_t LoadEpoch()
+	{
+		return g_loadEpoch.load(std::memory_order_acquire);
 	}
 
 	std::uint32_t RendersThisUpdate()

@@ -9,9 +9,15 @@
 * @brief Publication and adoption of frame snapshots (contract: Snapshot/FrameSnapshot.h).
 *
 * Game side (main thread): Capture() builds the next snapshot and publishes it, at Main::Update's call of Main::DrawFrame
-* (SE 35565 +0x5D2, AE 36564 +0xA97). Render side: Adopt() at each render frame's start on the main thread
-* (Renderer::Begin, before the frame driver's OnBegin); recording reads Current(). Both modes publish and adopt. Guest
-* adopts at once on the same thread, so nothing it draws changes.
+* (SE 35565 +0x5D2, AE 36564 +0xA97). A render frame outside that call publishes a frame-only snapshot with CaptureFrame() at
+* its Begin: a loading screen's (serving thread), a Bink movie's, or a main-thread frame outside Main::Update. Render side:
+* Adopt() at each render frame's start on the thread that renders it (Renderer::Begin, before the frame driver's OnBegin);
+* recording reads Current(). Both modes publish and adopt. Guest adopts at once on the same thread, so nothing it draws changes.
+*
+* Two producers, one consumer. The game update's publish (main thread, outside Renderer::Lock) and the frame-only publishes
+* (at Begin, inside Renderer::Lock) never overlap: the serving thread renders only while the main thread is inside the load
+* coordinator, between its SetLoadingScreenActive(true) and (false), and the startup logo plays before Main::Update first runs.
+* A publish that finds another one under way is fatal. Adoption is at Begin, inside Renderer::Lock, so one thread adopts at a time.
 */
 namespace Snapshot
 {
@@ -27,10 +33,24 @@ namespace Snapshot
 	/** @brief Builds and publishes the next snapshot. Main thread, once per game update. */
 	void Capture();
 
-	/** @brief Takes the newest published snapshot, if one is new, as the render frame's. Renderer::Begin on the main thread. */
+	/** @brief Where a frame-only snapshot comes from: the producer that renders a frame no game update stands for. */
+	enum class FrameSource : std::uint8_t
+	{
+		MainThread,     // a main-thread frame outside Main::Update's call of Main::DrawFrame: the kind is decided as for a game update
+		LoadingScreen,  // the serving thread's loading screen loop (SE 38085, AE 39039): Loading
+		Movie,          // BSMoviePlayer::Tick (SE 87890, AE 90259), any thread: Movie
+	};
+
+	/**
+	* @brief Builds and publishes a frame-only snapshot (FrameSnapshot's id rule): the last snapshot's world data with this frame's
+	* kind, menus, load epoch and events, and a fresh UI stream holder in native. Renderer::Begin, before Adopt, inside Renderer::Lock.
+	*/
+	void CaptureFrame(FrameSource a_source);
+
+	/** @brief Takes the newest published snapshot, if one is new, as the render frame's. Renderer::Begin, on the thread that renders. */
 	void Adopt();
 
-	/** @brief The adopted snapshot. Null before the first adoption. Render owner (main thread in phase 0). */
+	/** @brief The adopted snapshot. Null before the first adoption. Render owner (the thread whose Begin adopted it). */
 	const std::shared_ptr<const FrameSnapshot>& Current();
 
 	/** @brief The adopted snapshot's id, 0 before the first. Any thread (for the test runner's status and logs). */
@@ -77,6 +97,9 @@ namespace Snapshot
 
 	/** @brief Called by the frame driver when a loading screen begins (true) or ends (false). Any thread. */
 	void OnLoadingScreen(bool a_active);
+
+	/** @brief The loading screens begun this session: the load epoch the next snapshot carries. Any thread. */
+	std::uint64_t LoadEpoch();
 
 	/**
 	* @brief The cadence test mode (CS_SNAPSHOT_CADENCE=repeat:N|drop:N, native only). How many times the render half runs for

@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "Snapshot/Publication.h"
 #include "Testing/Testing.h"
 
 #include <algorithm>
@@ -88,7 +89,8 @@ namespace DCLF::LoadHold
 		struct Hold
 		{
 			std::chrono::steady_clock::time_point start, progress;
-			std::uint32_t firstFrame = 0, lastScene = 0, frames = 0, settled = 0;
+			std::uint32_t firstFrame = 0, lastScene = 0, frames = 0, settled = 0;  // frames: game updates under the hold
+			std::uint64_t loadEpoch = 0;  // the load epoch whose snapshots count
 			std::uint32_t held = 0, heldSun = 0, heldOcclusion = 0, heldShadow = 0;
 			const char* reentry = nullptr;  // null for a load's hold
 			std::uint32_t best = ~0u;  // fewer than this is progress
@@ -157,6 +159,7 @@ namespace DCLF::LoadHold
 			const bool menu = MenuOpen();
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
+			hold.loadEpoch = Snapshot::LoadEpoch();
 			withMenu.store(menu, std::memory_order_relaxed);
 			// Without a menu the main thread renders next, so hold the presents now.
 			StoreState(menu ? HoldState::Closing : HoldState::Holding);
@@ -418,6 +421,7 @@ namespace DCLF::LoadHold
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
 			hold.reentry = a_why;
+			hold.loadEpoch = Snapshot::Current() ? Snapshot::Current()->loadEpoch : Snapshot::LoadEpoch();
 			withMenu.store(false, std::memory_order_relaxed);
 			StoreState(HoldState::Holding);
 			logger::info("[DCLF] load hold: started (a re-entry: {}): the presents held, the last frame stays on screen", a_why);
@@ -484,9 +488,12 @@ namespace DCLF::LoadHold
 			Release("the loading menu closed by itself", true);
 			return;
 		}
-		// Only frames that drew the world count.
+		// Only frames that drew the world count, and of those only the first render of a game update's snapshot from the hold's
+		// load epoch: the hold counts snapshots, not render frames, so it lasts the same game updates at any cadence.
 		const std::uint32_t scene = Scene::FrameView::Get().SceneStep();
-		if (scene == 0 || scene == std::exchange(hold.lastScene, scene)) {
+		const auto& snapshot = Snapshot::Current();
+		if (scene == 0 || scene == std::exchange(hold.lastScene, scene) || !snapshot || Snapshot::Render().repeat || snapshot->sub != 0 ||
+			snapshot->loadEpoch != hold.loadEpoch) {
 			hold.heldThisFrame = false;
 			return;
 		}
@@ -494,7 +501,7 @@ namespace DCLF::LoadHold
 			hold.firstFrame = scene;
 			hold.actorsWithout3DFirst = ActorsWithout3D();
 		}
-		++hold.frames;
+		hold.frames += snapshot->events.gameUpdates;
 		const auto& passes = PassCapture::Get().GetStats();
 		hold.withheld += passes.holdWithheld;
 		hold.undrawn = passes.holdNobody;

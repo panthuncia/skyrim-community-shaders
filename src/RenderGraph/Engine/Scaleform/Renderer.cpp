@@ -2717,8 +2717,9 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief MenuManager::DrawInterface (SE 79947 / AE 82084), native mode: where a frame's UI stream is complete. A game update's
-		 * stream goes into its snapshot. A repeated render of the update (cadence repeat) lets GFx draw again but records nothing:
+		 * @brief MenuManager::DrawInterface (SE 79947 / AE 82084), native mode: where a frame's UI stream is complete. It goes into the
+		 * snapshot the frame adopted: a game update's, or a frame-only one (a loading screen's on the serving thread, or a main-thread
+		 * frame outside Main::Update). A repeated render of the update (cadence repeat) lets GFx draw again but records nothing:
 		 * each of its displays is drawn from the snapshot's stream where GFx ends its own, the rest at the end. Menu scenes and the
 		 * interface's ImageSpace effect still run where DrawInterface calls them.
 		 */
@@ -2730,7 +2731,7 @@ namespace RenderGraph::Engine::Scaleform
 					return func(a_manager);
 				auto& recorder = Rec();
 				std::shared_ptr<const UiStream> repeat;
-				if (Snapshot::InGameUpdate() && Snapshot::Render().repeat)
+				if (Snapshot::Render().repeat)
 					if (const auto& snapshot = Snapshot::Current(); snapshot && snapshot->ui)
 						repeat = snapshot->ui->Get();
 				if (repeat) {
@@ -2747,7 +2748,7 @@ namespace RenderGraph::Engine::Scaleform
 				}
 				func(a_manager);
 				const auto finished = FinishStream();
-				if (finished && Snapshot::InGameUpdate() && !Snapshot::Render().repeat)
+				if (finished && !Snapshot::Render().repeat)
 					if (const auto& snapshot = Snapshot::Current(); snapshot && snapshot->ui)
 						snapshot->ui->Set(finished);
 			}

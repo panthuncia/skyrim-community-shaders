@@ -13,8 +13,10 @@
 /**
 * @brief The frame driver. At each Renderer::Begin it builds the frame's description and keeps the declared frame's tap census.
 *
-* The frame kind comes from the beginning thread, the menu stack (MenuManager SE 79938, AE 82075), the player's 3D, the loading
-* screen (SE 34552, AE 35407) and the Bink tick (SE 87890, AE 90259). Never from the census flags, which are a frame stale.
+* The frame kind is the adopted frame snapshot's (Snapshot/FrameSnapshot.h): a game update's, decided on the game thread from the
+* menu stack (MenuManager SE 79938, AE 82075) and the player's 3D, or a frame-only snapshot's published at Begin for a loading
+* screen (the serving thread), a Bink tick (SE 87890, AE 90259) or a main-thread frame outside Main::Update. Never from the
+* census flags, which are a frame stale.
 * FrameAnchors fills each segment's fields and asks for missing recordings, made while the engine draws the shadow maps.
 * A tap the description does not cover, or a segment whose tap never fired, is a tap error, counted and logged.
 * OnBegin runs on the beginning thread inside Renderer::Lock. The rest is render owner, except the counters.
