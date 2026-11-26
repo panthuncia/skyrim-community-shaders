@@ -309,3 +309,21 @@ pushes until the user is back.
     split build. Win32 `SetCursor` from a non-window thread is left for phase 7.
 86. **The phase 7 plan** is the eight-item list in `snap7-prep.md`: thread creation and ownership, Present as
     publish-and-wait, revision adoption, ImGui, settings, resize, PCL, harness.
+
+## 2026-11-26: phase 3 scene lists, milestone 2 (snap3-lists; director accepted)
+
+87. **Native's main sky comes from the sky root:** the engine's main-camera sky cull registers every sky object that isn't
+    hidden, with no bound test; native builds the main sky batch and cloud layers from the sky root with the snapshot's
+    main camera, sharing the reflection faces' cull and draw loop. The engine's still-registered cloud layers are detached
+    at the group 13 call. Parity: 0 of 60 batches differed.
+88. **Native's main water batches come from the tracked water shapes** the water epochs don't draw this frame (the wading
+    mesh, unclaimed shapes), under the world root and in the frustum, with passes from the water port. The water census map
+    now serves drawing as well as the report. Untracked water is missing until the walk tracks it, seen only inside load
+    holds.
+89. **The main registration jobs and the Z-prepass groups' prepare do not run in native;** the accumulators stay empty and
+    RenderWorld's batch calls still fire CS's stage points. The engine's list culls (BuildSceneLists, the accumulation
+    jobs, FirstPersonCulling) still run: they call OnVisible for every entry DCLF's PrimaryCull rejects (switch, billboard
+    and ordered nodes, particle systems) and step the fades of mixed and not-yet-admitted entries. Those need native
+    producers before the culls stop (milestone 3), then S8.
+90. **The sky root and water shapes are read on the render thread** for now, as the reflection faces already did; phase 6/7
+    moves them into the snapshot. CS-driven stage points need Main::RenderWorld replaced in native (milestone 3).
