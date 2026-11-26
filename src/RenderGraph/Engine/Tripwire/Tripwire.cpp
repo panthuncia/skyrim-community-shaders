@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Tripwire/TripwireHandles.h"
+#include "Snapshot/EngineReads.h"
 
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
@@ -2534,9 +2535,9 @@ namespace RenderGraph::Engine::Tripwire
 
 	void MarkEngineBindingsDirty()
 	{
-		if (!globals::game::shadowState)
+		if (!CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState))
 			return;
-		auto& state = globals::game::shadowState->GetRuntimeData();
+		auto& state = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData();
 		state.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET, RE::BSGraphics::ShaderFlags::DIRTY_VIEWPORT);
 		state.PSResourceModifiedBits = 0xFFFF;
 		state.CSResourceModifiedBits = 0xFFFF;

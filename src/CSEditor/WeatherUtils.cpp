@@ -3,6 +3,7 @@
 #include "Browser/BrowserWidgets.h"
 #include "EditorWindow.h"
 #include "PaletteWindow.h"
+#include "Snapshot/EngineReads.h"
 #include "Utils/Climate.h"
 #include "Utils/Format.h"
 #include "Utils/UI.h"
@@ -592,7 +593,7 @@ namespace TOD
 
 	float GetCurrentGameTime()
 	{
-		auto sky = globals::game::sky;
+		auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 		if (sky) {
 			return std::clamp(sky->currentGameHour, 0.0f, 24.0f);
 		}
@@ -604,7 +605,7 @@ namespace TOD
 		using ColorTime = RE::TESWeather::ColorTime;
 		static_assert(Sunrise == static_cast<int>(ColorTime::kSunrise) && Day == static_cast<int>(ColorTime::kDay) &&
 					  Sunset == static_cast<int>(ColorTime::kSunset) && Night == static_cast<int>(ColorTime::kNight));
-		const auto sky = globals::game::sky;
+		const auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 		Util::Climate::ColorTimeWeights weights{};
 		if (sky && sky->currentClimate)
 			weights = Util::Climate::GetColorTimeWeights(*sky->currentClimate, GetCurrentGameTime());

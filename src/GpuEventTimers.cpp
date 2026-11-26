@@ -1,4 +1,5 @@
 #include "GpuEventTimers.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/GpuLoadPass.h"
@@ -736,11 +737,11 @@ RWTexture2D<float> Out : register(u0);
 			dropAt = 0;
 			++presents;
 			// A run this long must not reach the idle camera: it changes what is drawn.
-			if (auto* camera = RE::PlayerCamera::GetSingleton())
+			if (auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::PlayerCamera::GetSingleton()))
 				camera->GetRuntimeData2().allowAutoVanityMode = false;
 			if (presents == 2500) {
-				auto* disabled = RE::GetINISetting("bDisableAutoVanityMode:Camera");
-				auto* delay = RE::GetINISetting("fAutoVanityModeDelay:Camera");
+				auto* disabled = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bDisableAutoVanityMode:Camera"));
+				auto* delay = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fAutoVanityModeDelay:Camera"));
 				logger::info("[PassSkip] bDisableAutoVanityMode {} fAutoVanityModeDelay {}", disabled ? (disabled->GetBool() ? "1" : "0") : "missing",
 					delay ? std::to_string(delay->GetFloat()) : std::string("missing"));
 			}

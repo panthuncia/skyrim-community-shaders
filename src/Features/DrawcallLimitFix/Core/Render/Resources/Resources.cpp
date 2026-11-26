@@ -6,6 +6,7 @@
 #include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/Relocation/Holders.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
@@ -282,7 +283,7 @@ namespace DCLF::Draws
 		 * Without them DCLF draws no refraction. */
 		void ImportRefractionNormals(Resources& a_state, rhi::Device a_device)
 		{
-			if (auto* renderer = globals::game::renderer) {
+			if (auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)) {
 				const auto& normals = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kREFRACTION_NORMALS];
 				DxvkOrgInteropResourceInfo normalsInfo{};
 				if (normals.texture && normals.RTV && RenderGraphRuntime::Get().DescribeResource(normals.texture, normalsInfo) && normalsInfo.kind == DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
@@ -308,7 +309,7 @@ namespace DCLF::Draws
 		 * The engine draws it whole, DCLF's pixels included. */
 		void ImportShadowMask(Resources& a_state, rhi::Device a_device)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer)
 				return;
 			const auto& mask = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kSHADOW_MASK];
@@ -1102,7 +1103,7 @@ namespace DCLF
 	{
 		// A DepthTarget view, such as first person's kPOST_ZPREPASS_COPY (FUN_1414cb6d0), imported in its DSV's format.
 		auto* host = RenderGraphRuntime::Get().Host();
-		auto* renderer = globals::game::renderer;
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto& view = View(a_kind);
 		if (!view.resources || !host || !renderer)
 			return false;
@@ -1145,7 +1146,7 @@ namespace DCLF
 
 	bool ShadowEngine::ImportShadowDepth(std::uint32_t a_index, std::uint32_t a_target)
 	{
-		auto* renderer = globals::game::renderer;
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		if (!renderer)
 			return false;
 		const auto& data = renderer->GetDepthStencilData().depthStencils[a_target];

@@ -1,4 +1,5 @@
 #include "SceneSettingsManager.h"
+#include "Snapshot/EngineReads.h"
 
 #include "I18n/I18n.h"
 #include "SceneSettingsContextRules.h"
@@ -81,7 +82,7 @@ const char* SceneSettingsManager::GetLocationTargetTypeName(LocationTargetType t
 
 const std::vector<SceneSettingsManager::LocationTarget>& SceneSettingsManager::GetCurrentLocationTargets() const
 {
-	auto* player = RE::PlayerCharacter::GetSingleton();
+	auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 	auto* cell = player ? player->GetParentCell() : nullptr;
 	if (!player || !cell) {
 		cachedTargetLocationId = 0;

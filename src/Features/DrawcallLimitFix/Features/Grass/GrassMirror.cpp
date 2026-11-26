@@ -1,6 +1,7 @@
 // The render-thread grass mirror. See GrassMirror.h.
 
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 
@@ -80,7 +81,7 @@ namespace DCLF::Features::Grass
 	void Mirror::Drain(std::uint32_t)
 	{
 		++drains;
-		if (const auto* state = globals::game::smState)
+		if (const auto* state = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState))
 			fadeClock += state->timerValues[1];
 		events.Drain([&](Event&& a_event) {
 			if (Stale(a_event)) {

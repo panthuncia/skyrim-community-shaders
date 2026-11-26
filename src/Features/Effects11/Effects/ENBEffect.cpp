@@ -1,4 +1,5 @@
 #include "ENBEffect.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../EffectManager.h"
 #include "../SettingManager.h"
@@ -9,7 +10,7 @@
 
 void ENBEffect::Execute()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	auto& textureManager = TextureManager::GetSingleton();
 
@@ -43,7 +44,7 @@ void ENBEffect::UpdateEffectVariables()
 {
 	float4 params01[7]{};
 
-	auto imageSpaceManager = globals::game::imageSpaceManager;
+	auto imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
 	if (!imageSpaceManager) {
 		return;
 	}
@@ -57,7 +58,7 @@ void ENBEffect::UpdateEffectVariables()
 	params01[2].x = baseData.hdr.receiveBloomThreshold;
 	static RE::Setting* reinhardWhiteScale = nullptr;
 	if (!reinhardWhiteScale)
-		reinhardWhiteScale = RE::GetINISetting("fReinhardWhiteScale:Display");
+		reinhardWhiteScale = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fReinhardWhiteScale:Display"));
 	params01[2].y = baseData.hdr.white * (reinhardWhiteScale ? reinhardWhiteScale->GetFloat() : 1.0f);
 
 	params01[3].x = baseData.cinematic.saturation;
@@ -112,5 +113,5 @@ void ENBEffect::UpdateEffectVariables()
 	const char* adaptationTexName = (textureManager.GetTextureSwap() & 1) ? "TextureAdaptation" : "TextureAdaptationSwap";
 	bindTextureIfEnabled(effectManager.enbAdaptation.IsCompiled() ? idEnableAdaptation : 0xFFFFFFFF, "TextureAdaptation", adaptationTexName);
 
-	SetShaderResourceVariable("TextureOriginal", RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].SRV));
+	SetShaderResourceVariable("TextureOriginal", RenderGraph::Engine::Tripwire::Unwrap(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].SRV));
 }

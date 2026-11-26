@@ -4,6 +4,7 @@
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "Menu/Fonts.h"
+#include "Snapshot/EngineReads.h"
 #include "State.h"
 
 #include <cctype>
@@ -84,7 +85,7 @@ namespace
 
 void TerrainVariation::DataLoaded()
 {
-	auto dataHandler = RE::TESDataHandler::GetSingleton();
+	auto dataHandler = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 	if (dataHandler == nullptr) {
 		logger::warn("TerrainVariation: No data handler, landscape texture path list unavailable; mesh support will not match any meshes");
 		return;

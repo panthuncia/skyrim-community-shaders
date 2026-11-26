@@ -1,4 +1,5 @@
 #include "CinematicCamera.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "I18n/I18n.h"
@@ -68,14 +69,14 @@ namespace CinematicCamera
 
 	bool FocusResolver::GetInDialogue()
 	{
-		return RE::MenuTopicManager::GetSingleton()->speaker || RE::MenuTopicManager::GetSingleton()->lastSpeaker;
+		return CS_ENGINE_READ(UI, RecordTime, RE::MenuTopicManager::GetSingleton())->speaker || CS_ENGINE_READ(UI, RecordTime, RE::MenuTopicManager::GetSingleton())->lastSpeaker;
 	}
 
 	// Thanks Ershin!
 	RE::NiPoint3 FocusResolver::GetCameraPos()
 	{
-		auto player = RE::PlayerCharacter::GetSingleton();
-		auto playerCamera = RE::PlayerCamera::GetSingleton();
+		auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+		auto playerCamera = CS_ENGINE_READ(Camera, RecordTime, RE::PlayerCamera::GetSingleton());
 		RE::NiPoint3 ret;
 
 		if (playerCamera->currentState == playerCamera->GetRuntimeData().cameraStates[RE::CameraStates::kFirstPerson] ||
@@ -114,14 +115,14 @@ namespace CinematicCamera
 
 	float FocusResolver::GetDistanceToReference(RE::TESObjectREFR* a_ref)
 	{
-		auto* camera = RE::Main::WorldRootCamera();
+		auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 		RE::NiPoint3 cameraPosition = camera ? camera->world.translate : GetCameraPos();
 		return cameraPosition.GetDistance(GetReferenceFocusPosition(a_ref));
 	}
 
 	bool FocusResolver::GetReferenceFocusCoord(RE::TESObjectREFR* a_ref, float2& a_focusCoord)
 	{
-		auto* camera = RE::Main::WorldRootCamera();
+		auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 		if (!camera)
 			return false;
 
@@ -157,10 +158,10 @@ namespace CinematicCamera
 		}
 
 		if (GetInDialogue()) {
-			if (RE::MenuTopicManager::GetSingleton()->speaker) {
-				target = RE::MenuTopicManager::GetSingleton()->speaker.get().get();
+			if (CS_ENGINE_READ(UI, RecordTime, RE::MenuTopicManager::GetSingleton())->speaker) {
+				target = CS_ENGINE_READ(UI, RecordTime, RE::MenuTopicManager::GetSingleton())->speaker.get().get();
 			} else {
-				target = RE::MenuTopicManager::GetSingleton()->lastSpeaker.get().get();
+				target = CS_ENGINE_READ(UI, RecordTime, RE::MenuTopicManager::GetSingleton())->lastSpeaker.get().get();
 			}
 		}
 
@@ -328,7 +329,7 @@ namespace CinematicCamera
 			// Conditional restore: only when nothing else has taken the value
 			// since our last write.
 			if (fovState == FovState::Applied || fovState == FovState::ExternallyModified) {
-				if (auto playerCamera = RE::PlayerCamera::GetSingleton()) {
+				if (auto playerCamera = CS_ENGINE_READ(Camera, RecordTime, RE::PlayerCamera::GetSingleton())) {
 					float& worldFOV = playerCamera->GetRuntimeData2().worldFOV;
 					if (std::abs(worldFOV - lastAppliedFOV) < kFovEpsilon)
 						worldFOV = restoreFOV;
@@ -360,7 +361,7 @@ namespace CinematicCamera
 
 	void Controller::ApplyFOV(float viewportAspect)
 	{
-		auto playerCamera = RE::PlayerCamera::GetSingleton();
+		auto playerCamera = CS_ENGINE_READ(Camera, RecordTime, RE::PlayerCamera::GetSingleton());
 		if (!playerCamera) {
 			fovState = FovState::Unavailable;
 			fovWritePending = true;

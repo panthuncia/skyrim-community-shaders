@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Snapshot/EngineReads.h"
 #include "Utils/Setting.h"
 
 /** @brief Simulates realistic ambient lighting by calculating sky occlusion via a 3D probe array. */
@@ -235,7 +236,7 @@ public:
 		static bool Register()
 		{
 			static MenuOpenCloseEventHandler singleton;
-			auto ui = globals::game::ui;
+			auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui);
 
 			if (!ui) {
 				logger::error("UI event source not found");

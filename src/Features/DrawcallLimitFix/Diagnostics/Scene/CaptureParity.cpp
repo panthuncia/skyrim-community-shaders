@@ -2,6 +2,7 @@
 // installed tables, from the SetupGeometry, DrawIndexed and Map/Unmap detours. Render thread.
 
 #include "CaptureParity.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -105,7 +106,7 @@ namespace DCLF
 		// Names which engine structure a node is.
 		std::string DescribeRole(const RE::NiAVObject* a_node)
 		{
-			auto* tes = RE::TES::GetSingleton();
+			auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton());
 			if (!tes)
 				return {};
 			if (a_node == tes->objRoot)
@@ -175,8 +176,8 @@ namespace DCLF
 			}
 		}
 		// Only the current shaders' PerMaterial and PerGeometry buffers are of interest.
-		auto* vs = *globals::game::currentVertexShader;
-		auto* ps = *globals::game::currentPixelShader;
+		auto* vs = *CS_ENGINE_READ(Shaders, Other, globals::game::currentVertexShader);
+		auto* ps = *CS_ENGINE_READ(Shaders, Other, globals::game::currentPixelShader);
 		for (std::uint32_t level : { kPerTechnique, kPerMaterial, kPerGeometry }) {
 			if (vs && reinterpret_cast<ID3D11Resource*>(vs->constantBuffers[level].buffer) == a_resource) {
 				Slot(0, level).buffer = a_resource;
@@ -271,8 +272,8 @@ namespace DCLF
 		const auto& tables = Scene::FrameView::Get().GetTables();
 		const auto& record = tables.materials[a_materialIndex];
 		const bool frameCharacterLight = MaterialSources::FrameCharacterLight(tables.materialSlotKey[a_materialIndex].second);
-		auto* vs = *globals::game::currentVertexShader;
-		auto* ps = *globals::game::currentPixelShader;
+		auto* vs = *CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentVertexShader);
+		auto* ps = *CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentPixelShader);
 		bool ok = true;
 		// Not compared. TexcoordOffset is patched into the rows on the GPU, and no Lighting stage reads IBLParams.
 		if (vs)
@@ -282,7 +283,7 @@ namespace DCLF
 			ok &= CompareBlock(a_geometry, "PS PerMaterial", record.ps, LightingPSLayout(), ps->constantTable.data(), ps->constantTable.size(), Slot(1, kPerMaterial),
 				reinterpret_cast<ID3D11Resource*>(ps->constantBuffers[kPerMaterial].buffer), kPSLODTexParams, kPSGroups[kPerMaterial] & ~(1ull << kPSIBLParams), 0);
 
-		const auto& state = globals::game::shadowState->GetRuntimeData();
+		const auto& state = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData();
 		for (std::uint32_t slot = 0; slot < kPixelTextureSlots; ++slot) {
 			if (!((record.textureWritten >> slot) & 1))
 				continue;
@@ -307,7 +308,7 @@ namespace DCLF
 			return true;
 
 		// Expected values are the per-frame block for this pass descriptor plus per-object values.
-		auto& shadowState = globals::game::shadowState->GetRuntimeData();
+		auto& shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData();
 		// The engine's current placement. With render flag 0x10 the previous transform is the current one.
 		BindlessPlacement placement{};
 		if (!FrameValues::SampleSlot(tables, a_objectIndex, placement))
@@ -343,8 +344,8 @@ namespace DCLF
 			expected.ps.floats[psLayout.offset[kPSProjectedUVParams + 1] + 3] = std::bit_cast<float>(kUnwrittenBits);
 		}
 
-		auto* vs = *globals::game::currentVertexShader;
-		auto* ps = *globals::game::currentPixelShader;
+		auto* vs = *CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentVertexShader);
+		auto* ps = *CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentPixelShader);
 		bool ok = true;
 		compareContext = fmt::format(" (pipeline descriptor {:08X}, skinned object {})", tables.pipelines[object.pipelineIndex].passDescriptor,
 			(object.flags & kObjectPaletteBlock) != 0);
@@ -377,13 +378,13 @@ namespace DCLF
 			if (snapshot.valid && snapshot.lastMapped)
 				std::memcpy(snapshot.bytes.data(), snapshot.lastMapped, snapshot.size);
 		}
-		auto* vs = *globals::game::currentVertexShader;
-		auto* ps = *globals::game::currentPixelShader;
+		auto* vs = *CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentVertexShader);
+		auto* ps = *CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentPixelShader);
 		bool ok = true;
 		// Terrain LOD's HighDetailRange centre is absolute in DCLF and relative to posAdjust in the engine.
 		ConstantBlock techniqueVS = technique.vs;
 		if (const std::uint32_t t = (tables.pipelines[object.pipelineIndex].passDescriptor >> 24) & 0x3f; t == 9 || t == 18) {
-			const auto eye = globals::game::shadowState->GetRuntimeData().posAdjust.getEye();
+			const auto eye = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData().posAdjust.getEye();
 			float* range = &techniqueVS.floats[LightingVSLayout().offset[kVSHighDetailRange]];
 			range[0] -= eye.x;
 			range[1] -= eye.y;
@@ -401,7 +402,7 @@ namespace DCLF
 
 		// Filter modes come from SetupMaterial, else from the technique.
 		const auto& material = tables.materials[object.materialIndex];
-		const auto& state = globals::game::shadowState->GetRuntimeData();
+		const auto& state = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData();
 		if (technique.shadowMask) {
 			const auto* native = reinterpret_cast<const ID3D11ShaderResourceView*>(state.PSTexture[kShadowMaskSlot]);
 			const auto nativeAddress = static_cast<std::uint32_t>(state.PSTextureAddressMode[kShadowMaskSlot].underlying());
@@ -668,7 +669,7 @@ namespace DCLF
 		key.zWrite = property && property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kZBufferWrite);
 		key.alphaTest = alpha && alpha->GetAlphaTesting();
 		key.alphaThreshold = alpha ? alpha->alphaThreshold : 0;
-		const auto& state = globals::game::shadowState->GetRuntimeData();
+		const auto& state = CS_ENGINE_READ(ShadowState, Other, globals::game::shadowState)->GetRuntimeData();
 		RenderStateValue value{ state.rasterStateCullMode, static_cast<std::uint32_t>(state.depthStencilDepthMode), state.depthStencilStencilMode,
 			state.alphaBlendMode, state.rasterStateDepthBiasMode, state.alphaTestEnabled, state.alphaTestRef };
 		auto& seen = renderStates[key];
@@ -789,7 +790,7 @@ namespace DCLF
 					while (root->parent)
 						root = root->parent;
 					std::string where;
-					const auto& shaderState = RE::BSShaderManager::State::GetSingleton();
+					const auto& shaderState = CS_ENGINE_READ(ShaderManagerState, CapturePoint, RE::BSShaderManager::State::GetSingleton());
 					for (std::uint32_t sg = 0; sg < std::size(shaderState.shadowSceneNode); ++sg) {
 						const auto* sceneNode = shaderState.shadowSceneNode[sg];
 						const auto* graph = sceneNode ? sceneNode->GetRuntimeData().portalGraph : nullptr;
@@ -1004,7 +1005,7 @@ namespace DCLF
 		std::string flags;
 		for (auto value : renderFlagsSeen)
 			flags += fmt::format(" {:X}", value);
-		const auto* player = RE::PlayerCharacter::GetSingleton();
+		const auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
 		const auto* cell = player ? player->GetParentCell() : nullptr;
 		const char* cellName = cell ? cell->GetName() : nullptr;
 		logger::info("[DCLF] location: cell {:08X} '{}' ({})", cell ? cell->GetFormID() : 0u, cellName ? cellName : "",

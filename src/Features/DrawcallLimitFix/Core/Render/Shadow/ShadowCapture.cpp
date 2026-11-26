@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF
 {
@@ -26,8 +27,8 @@ namespace DCLF
 		/** @brief Reads the depth format, viewport and eye the engine just drew a view with from the renderer's state. */
 		void CaptureViewTarget(PendingView& a_view, std::uint32_t a_target)
 		{
-			auto& shadowState = globals::game::shadowState->GetRuntimeData();
-			if (auto* dsv = globals::game::renderer->GetDepthStencilData().depthStencils[a_target].views[0]) {
+			auto& shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData();
+			if (auto* dsv = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetDepthStencilData().depthStencils[a_target].views[0]) {
 				D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
 				dsv->GetDesc(&dsvDesc);
 				a_view.dsvFormat = dsvDesc.Format;
@@ -44,7 +45,7 @@ namespace DCLF
 		/** @brief The depth format alone, for a view the engine did not draw. */
 		void CaptureViewFormat(PendingView& a_view, std::uint32_t a_target)
 		{
-			if (auto* dsv = globals::game::renderer->GetDepthStencilData().depthStencils[a_target].views[0]) {
+			if (auto* dsv = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetDepthStencilData().depthStencils[a_target].views[0]) {
 				D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
 				dsv->GetDesc(&dsvDesc);
 				a_view.dsvFormat = dsvDesc.Format;
@@ -54,7 +55,7 @@ namespace DCLF
 		/** @brief Replaces the captured viewport and eye with DCLF's own camera. Returns false and keeps the captured values if there is none. */
 		bool ApplyOwnViewport(PendingView& a_view, const ShadowCameras::Camera* a_cascade, std::uint32_t a_target)
 		{
-			auto* texture = globals::game::renderer->GetDepthStencilData().depthStencils[a_target].texture;
+			auto* texture = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetDepthStencilData().depthStencils[a_target].texture;
 			if (!a_cascade || !texture)
 				return false;
 			D3D11_TEXTURE2D_DESC desc{};
@@ -93,7 +94,7 @@ namespace DCLF
 		 */
 		void FocusToSlice(PendingView& a_view, const ShadowCameras::Camera& a_cascade, std::uint32_t a_target)
 		{
-			auto* texture = globals::game::renderer->GetDepthStencilData().depthStencils[a_target].texture;
+			auto* texture = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetDepthStencilData().depthStencils[a_target].texture;
 			if (!texture)
 				return;
 			D3D11_TEXTURE2D_DESC desc{};
@@ -180,7 +181,7 @@ namespace DCLF
 				}
 				largest = std::max(largest, d);
 			}
-			if (!ConstantMirror::Get().Contents(*globals::game::perFrame.get()).size())
+			if (!ConstantMirror::Get().Contents(*CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get()).size())
 				++fallback;
 			if (views == 1000) {
 				logger::info("[DCLF] shadow view capture: {} views, {} from the cached copy, {} whose b12 eye is not the renderer's (largest {:.2f}){}{}", views, fallback, differ,
@@ -198,7 +199,7 @@ namespace DCLF
 		void CapturePerFrame(PendingView& a_view)
 		{
 			auto& mirror = ConstantMirror::Get();
-			if (auto* perFrame = *globals::game::perFrame.get()) {
+			if (auto* perFrame = *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get()) {
 				mirror.Watch(perFrame);
 				const auto contents = mirror.Contents(perFrame);
 				if (contents.size() >= 48 * sizeof(float)) {
@@ -207,7 +208,7 @@ namespace DCLF
 				}
 			}
 			if (!a_view.perFrameBytes) {
-				const auto& cached = globals::game::frameBufferCached.data;
+				const auto& cached = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
 				static_assert(sizeof(cached) >= 48 * sizeof(float) && sizeof(cached) <= 1024);
 				a_view.perFrameBytes = sizeof(cached);
 				std::memcpy(a_view.perFrame.data(), &cached, sizeof(cached));
@@ -290,7 +291,7 @@ namespace DCLF
 		if (!a_native)
 			++shadowStats.views;
 		auto& pipelines = DrawPipelines::Get();
-		auto* utility = globals::game::utilityShader;
+		auto* utility = CS_ENGINE_READ(Shaders, CapturePoint, globals::game::utilityShader);
 		// A native view that fails goes back to the engine, which captures it again, so only engine views count.
 		auto notReady = [&](ShadowNotReady a_reason) {
 			if (a_native)
@@ -340,7 +341,7 @@ namespace DCLF
 		// A native view takes its placement's state, which an engine view must match.
 		std::uint32_t rasterState = 0;
 		if (!a_native) {
-			auto& shadowState = globals::game::shadowState->GetRuntimeData();
+			auto& shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData();
 			rasterState = EngineRasterStateId(shadowState.rasterStateFillMode, 1, shadowState.rasterStateDepthBiasMode, shadowState.rasterStateScissorMode, a_renderMode);
 			if (rasterState == 0)
 				rasterState = EngineRasterStateId(shadowState.rasterStateFillMode, 0, shadowState.rasterStateDepthBiasMode, shadowState.rasterStateScissorMode,
@@ -374,7 +375,7 @@ namespace DCLF
 			return drop(ShadowNotReady::Setup);
 		// A focus view draws over its whole slice. See FocusToSlice.
 		if (owned && shadowView->focus)
-			if (auto* texture = globals::game::renderer->GetDepthStencilData().depthStencils[target].texture) {
+			if (auto* texture = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetDepthStencilData().depthStencils[target].texture) {
 				D3D11_TEXTURE2D_DESC desc{};
 				texture->GetDesc(&desc);
 				view.x = 0;
@@ -452,7 +453,7 @@ namespace DCLF
 			engine.readyStates[mode].Add(rasterState, false);
 			engine.NoteCapability(engine.shadowCatalogBuilt, fmt::format("occlusion map {} draws with rasterizer state {}, not in the catalog", a_view, rasterState));
 		}
-		const auto& depth = globals::game::renderer->GetDepthStencilData().depthStencils[target];
+		const auto& depth = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetDepthStencilData().depthStencils[target];
 		if (!depth.texture || !depth.views[0])
 			return;
 		auto& view = occlusion.view;

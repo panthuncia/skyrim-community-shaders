@@ -3,6 +3,7 @@
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/EngineReads.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -221,6 +222,7 @@ namespace RenderGraph::Engine::Constants
 			UseId Capture(std::uint32_t a_stageMask)
 			{
 				ZoneScopedN("CS.Engine.Constants.Capture");
+				CS_ENGINE_READ_MARK(BoundState, BoundState);
 				if (!Active() || !FrameAnchors::IsRenderOwner())
 					return {};
 				if (uses.size() >= kMaxUsesPerFrame) {

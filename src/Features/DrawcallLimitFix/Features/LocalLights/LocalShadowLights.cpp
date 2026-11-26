@@ -1,6 +1,7 @@
 // Samples the local shadow lights from DCLF's selection and light views. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LocalShadowLights.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
@@ -84,7 +85,7 @@ namespace DCLF
 				if (selected.light != selection->sun)
 					put(selected.light, selected.maskIndex);
 		// ShadowSceneNode's active lights (+0x130).
-		auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+		auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0] : nullptr;
 		if (sceneNode)
 			for (const auto& entry : sceneNode->GetRuntimeData().activeLights)
 				if (const auto* light = entry.get(); light && light->frustrumCull != 0xFFu)

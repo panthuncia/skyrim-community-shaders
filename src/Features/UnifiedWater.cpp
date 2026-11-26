@@ -1,5 +1,6 @@
-﻿#include "UnifiedWater.h"
+#include "UnifiedWater.h"
 #include "Features/DrawcallLimitFix.h"
+#include "Snapshot/EngineReads.h"
 #include "Utils/Hash.h"
 
 #include "I18n/I18n.h"
@@ -22,12 +23,12 @@ namespace
 {
 	bool IsInteriorCellActive()
 	{
-		const auto tes = RE::TES::GetSingleton();
+		const auto tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 		if (tes && tes->interiorCell)
 			return true;
 
 		// TES::interiorCell can lag behind during load transitions
-		const auto player = RE::PlayerCharacter::GetSingleton();
+		const auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 		const auto cell = player ? player->GetParentCell() : nullptr;
 		return cell && cell->IsInteriorCell();
 	}
@@ -298,7 +299,7 @@ bool UnifiedWater::MenuOpenCloseEventHandler::Register()
 	if (registered)
 		return true;
 
-	const auto ui = globals::game::ui;
+	const auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui);
 	if (!ui) {
 		logger::error("[Unified Water] UI event source not found");
 		return false;
@@ -380,7 +381,7 @@ namespace
 
 bool UnifiedWater::LoadOrderChanged()
 {
-	auto* dataHandler = RE::TESDataHandler::GetSingleton();
+	auto* dataHandler = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 	if (!dataHandler)
 		return false;
 
@@ -597,7 +598,7 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 	if (node->GetLODLevel() != 4)
 		return;
 
-	const auto tes = globals::game::tes;
+	const auto tes = CS_ENGINE_READ(TES, CapturePoint, globals::game::tes);
 	if (!tes || !tes->gridCells)
 		return;
 
@@ -642,7 +643,7 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 
 void UnifiedWater::BGSTerrainBlock_Attach::thunk(RE::BGSTerrainBlock* block)
 {
-	const auto waterSystem = RE::TESWaterSystem::GetSingleton();
+	const auto waterSystem = CS_ENGINE_READ(Water, CapturePoint, RE::TESWaterSystem::GetSingleton());
 	const auto& singleton = globals::features::unifiedWater;
 
 	std::vector<std::pair<RE::BSTriShape*, const WaterCache::Instruction*>> built;

@@ -1,4 +1,5 @@
 #include "WaterReflectionCubemapFix.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -12,8 +13,8 @@ void WaterReflectionCubemapFix::Install()
 
 void WaterReflectionCubemapFix::ResetCubemapOnSceneChange()
 {
-	const auto tes = RE::TES::GetSingleton();
-	const auto renderer = globals::game::renderer;
+	const auto tes = CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
+	const auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	const auto context = globals::d3d::context;
 	if (!tes || !renderer || !context)
 		return;
@@ -51,9 +52,9 @@ void WaterReflectionCubemapFix::BSWaterShader_SetupGeometry::thunk(RE::BSShader*
 {
 	func(shader, pass, renderFlags);
 
-	const auto tes = RE::TES::GetSingleton();
-	const auto renderer = globals::game::renderer;
-	const auto shadowState = globals::game::shadowState;
+	const auto tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton());
+	const auto renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
+	const auto shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState);
 	if (!tes || !renderer || !shadowState || globals::state->isMapMenuOpen)
 		return;
 
@@ -62,7 +63,7 @@ void WaterReflectionCubemapFix::BSWaterShader_SetupGeometry::thunk(RE::BSShader*
 		return;
 
 	if (!tes->interiorCell) {
-		const auto player = RE::PlayerCharacter::GetSingleton();
+		const auto player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
 		const auto cell = player ? player->GetParentCell() : nullptr;
 		if (!cell || !cell->IsInteriorCell())
 			return;

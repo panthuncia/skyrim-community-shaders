@@ -1,4 +1,5 @@
 #include "LODBlendRingFix.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 
@@ -46,8 +47,8 @@ void LODBlendRingFix::EndSlide()
 
 void LODBlendRingFix::Update()
 {
-	auto* tes = globals::game::tes;
-	auto* player = globals::game::player;
+	auto* tes = CS_ENGINE_READ(TES, RecordTime, globals::game::tes);
+	auto* player = CS_ENGINE_READ(Player, RecordTime, globals::game::player);
 	if (!tes || !player || tes->interiorCell || !tes->GetRuntimeData2().worldSpace) {
 		if (sliding)
 			EndSlide();
@@ -55,7 +56,7 @@ void LODBlendRingFix::Update()
 		return;
 	}
 
-	auto& state = *globals::game::smState;
+	auto& state = *CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
 	const float2 engineCenter = ToFloat2(state.gridArrayCenter);
 	if (!hasCenter || engineCenter != center) {
 		gridCenter = engineCenter;
@@ -70,7 +71,7 @@ void LODBlendRingFix::Update()
 	}
 
 	if (!gridsToLoad)
-		gridsToLoad = RE::GetINISetting("uGridsToLoad:General");
+		gridsToLoad = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("uGridsToLoad:General"));
 	const float slack = gridsToLoad ? LeanSlack(gridsToLoad->data.u) : 0.0f;
 	const auto position = player->GetPosition();
 	float2 lean = float2(position.x, position.y) - gridCenter;
@@ -78,7 +79,7 @@ void LODBlendRingFix::Update()
 	const float2 desired = gridCenter + lean;
 
 	if (sliding) {
-		slideProgress = std::min(1.0f, slideProgress + RE::GetSecondsSinceLastFrame() / SlideSeconds);
+		slideProgress = std::min(1.0f, slideProgress + CS_ENGINE_READ(Timer, RecordTime, RE::GetSecondsSinceLastFrame()) / SlideSeconds);
 		center = float2::SmoothStep(slideOrigin, desired, slideProgress);
 		if (slideProgress >= 1.0f)
 			EndSlide();

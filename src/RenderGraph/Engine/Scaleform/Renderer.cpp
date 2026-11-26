@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Engine.h"
@@ -756,8 +757,8 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (a_renderTexture)
 				return ReadRendererTarget(a_renderer, a_display);
-			auto* renderer = globals::game::renderer;
-			auto* shadow = globals::game::shadowState;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
+			auto* shadow = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 			if (!renderer || !shadow)
 				return false;
 			const auto& rss = shadow->GetRuntimeData();

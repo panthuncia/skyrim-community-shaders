@@ -9,6 +9,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Features/DecalOcclusion/DecalOcclusion.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/Family/FamilyClient.h"
 
@@ -193,7 +194,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 		rhi::Format DepthTarget(std::uint32_t& a_width, std::uint32_t& a_height)
 		{
 			a_width = a_height = 0;
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer)
 				return rhi::Format::Unknown;
 			auto* view = renderer->GetDepthStencilData().depthStencils[static_cast<std::size_t>(kDepthTarget)].views[0];

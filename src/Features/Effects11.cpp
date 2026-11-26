@@ -1,4 +1,5 @@
 #include "Effects11.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Effects11/D3D11StateBackup.h"
 #include "Effects11/ENBExtender.h"
@@ -71,7 +72,7 @@ namespace
 	/** @brief Largest radiance the main render target can hold; the procedural sun is encoded below it for alpha blending. */
 	float GetMainTargetRadianceLimit()
 	{
-		const auto renderer = globals::game::renderer;
+		const auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		const auto rtv = renderer ? renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].RTV : nullptr;
 		if (!rtv)
 			return 1.0f;
@@ -214,7 +215,7 @@ void Effects11::UpdateSkyScattering(PerFrame& a_data)
 		return settingManager.GetInterpolatedTimeOfDayValue(a_key, a_category);
 	};
 
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 
 	// Mirror the direction below the horizon while the sun is hidden (e.g. by a weather)
 	if (sky && sky->sun) {
@@ -380,7 +381,7 @@ Effects11::PerFrame Effects11::GetCommonBufferData()
 	// Indexed by [VOLUMETRICRAYS] Quality + 1; lower Quality values are finer.
 	static constexpr uint32_t volumetricRaysSamples[4] = { 24, 16, 12, 8 };
 	data.VolumetricRaysSampleCount = volumetricRaysSamples[std::clamp(static_cast<int>(std::lround(settingManager.GetValue<float>("Quality", "VOLUMETRICRAYS"))) + 1, 0, 3)];
-	if (const auto sky = globals::game::sky) {
+	if (const auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)) {
 		const auto& horizonColor = sky->skyColor[(uint)RE::TESWeather::ColorTypes::kHorizon];
 		data.VolumetricRaysSkyColor = { horizonColor.red, horizonColor.green, horizonColor.blue };
 	}
@@ -707,7 +708,7 @@ float3 Effects11::GradeSkyColors(std::span<RE::NiColor, RE::TESWeather::ColorTyp
 		// A near-zero scale would blow up the divide below, so treat it as unset
 		static constexpr float minSunlightScale = 1e-3f;
 		float sunlightScale = 1.0f;
-		auto imageSpaceManager = globals::game::imageSpaceManager;
+		auto imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
 		if (imageSpaceManager) {
 			const float rawSunlightScale = imageSpaceManager->GetRuntimeData().data.baseData.hdr.sunlightScale;
 			sunlightScale = rawSunlightScale > minSunlightScale ? rawSunlightScale : 1.0f;
@@ -1117,7 +1118,7 @@ bool Effects11::RenderTonemap(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_out
 	if (ORGFxRuntime::Get().IsActive())
 		return false;
 
-	auto& renderTargets = globals::game::renderer->GetRuntimeData().renderTargets;
+	auto& renderTargets = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets;
 	// Only report replacement after the effect chain actually wrote the output.
 	if (effectManager.ExecuteEffects(renderTargets[a_input], renderTargets[a_output])) {
 		tonemapReplacedFrame = globals::state->frameCount;
@@ -1161,7 +1162,7 @@ void Effects11::DrawVolumetricRays()
 	if (Util::IsInterior())
 		return;
 
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!sky || sky->flags.any(RE::Sky::Flags::kHideSky))
 		return;
 
@@ -1182,7 +1183,7 @@ void Effects11::DrawVolumetricRays()
 		return;
 
 	auto context = globals::d3d::context;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
 	D3D11_TEXTURE2D_DESC mainTexDesc{};
@@ -1415,7 +1416,7 @@ void Effects11::DrawSunRays()
 	if (!enableEffect || Util::IsInterior())
 		return;
 
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!sky || sky->flags.any(RE::Sky::Flags::kHideSky))
 		return;
 
@@ -1444,7 +1445,7 @@ void Effects11::DrawSunRays()
 	if (lightPeak <= 1e-4f || light.billboardTan <= 0.0f)
 		return;
 
-	const auto viewProj = globals::game::frameBufferCached.GetCameraViewProj().Transpose();
+	const auto viewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProj().Transpose();
 	const auto clip = DirectX::SimpleMath::Vector4::Transform(DirectX::SimpleMath::Vector4(light.direction.x, light.direction.y, light.direction.z, 0.0f), viewProj);
 	if (clip.w <= 1e-6f)
 		return;
@@ -1456,7 +1457,7 @@ void Effects11::DrawSunRays()
 		return;
 
 	auto context = globals::d3d::context;
-	auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+	auto& main = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
 	D3D11_TEXTURE2D_DESC mainTexDesc{};
 	main.texture->GetDesc(&mainTexDesc);

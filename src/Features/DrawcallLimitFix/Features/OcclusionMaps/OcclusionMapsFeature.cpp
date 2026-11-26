@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
 #include "Features/Skylighting.h"
 #include "Features/Skylighting/ORGSkylighting.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF::Features::OcclusionMaps
 {
@@ -27,7 +28,7 @@ namespace DCLF::Features::OcclusionMaps
 		{
 			const auto& skylighting = globals::features::skylighting;
 			float bottom = skylighting.probeGridBottomZ;
-			if (const auto* camera = RE::Main::WorldRootCamera(); camera && bottom > -FLT_MAX)
+			if (const auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera()); camera && bottom > -FLT_MAX)
 				bottom = std::min(bottom, skylighting.ProbeGridBottomZ(camera->world.translate.z));
 			return bottom - Skylighting::OCCLUSION_BELOW_GRID_MARGIN;
 		}

@@ -1,4 +1,5 @@
 #include "PresetCompatibility.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Feature.h"
 #include "I18n/I18n.h"
@@ -114,7 +115,7 @@ namespace PresetCompatibility
 	std::vector<std::string> MissingRequiredPlugins(const std::vector<std::string>& requiredPlugins)
 	{
 		std::vector<std::string> missing;
-		auto* dataHandler = RE::TESDataHandler::GetSingleton();
+		auto* dataHandler = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton());
 		if (!dataHandler)
 			return missing;
 		for (const auto& plugin : requiredPlugins) {

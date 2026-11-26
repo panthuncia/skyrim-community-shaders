@@ -1,4 +1,5 @@
 #include "CloudShadows.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../I18n/I18n.h"
 #include "Effects11.h"
@@ -187,7 +188,7 @@ void CloudShadows::SkyShaderHacks()
 		return;
 	overrideSky = false;
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	auto reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS];
 
@@ -195,7 +196,7 @@ void CloudShadows::SkyShaderHacks()
 	// engine's context handle). A reflection face is the cube target with its face as the view, and SetDirtyStates then binds that face alone.
 	// The faces can be tripwire handles: DXVK's context takes what they wrap.
 	using RenderGraph::Engine::Tripwire::Unwrap;
-	const auto& shadowState = globals::game::shadowState->GetRuntimeData();
+	const auto& shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData();
 	ID3D11RenderTargetView* rtvs[3] = {};
 	int side = -1;
 	if (shadowState.cubeMapRenderTarget == static_cast<std::uint32_t>(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS) && shadowState.cubeMapRenderTargetView < 6) {
@@ -239,8 +240,8 @@ void CloudShadows::SkyShaderHacks()
 
 		context->OMSetBlendState(cloudShadowBlendState, blendFactor, sampleMask);
 		// Make the engine re-apply its own targets and blend state on the next draw
-		globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
-		globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
+		CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+		CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 
 		auto cubemapDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS];
 		ID3D11ShaderResourceView* cubemapDepthSRV = Unwrap(cubemapDepth.depthSRV);
@@ -252,7 +253,7 @@ void CloudShadows::SkyShaderHacks()
 
 int CloudShadows::FindCloudLayer(RE::BSRenderPass* Pass)
 {
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!sky || !sky->clouds)
 		return -1;
 
@@ -267,7 +268,7 @@ int CloudShadows::FindCloudLayer(RE::BSRenderPass* Pass)
 
 void CloudShadows::ModifySky(RE::BSRenderPass* Pass)
 {
-	const auto cubeMapRenderTarget = globals::game::shadowState->GetRuntimeData().cubeMapRenderTarget;
+	const auto cubeMapRenderTarget = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().cubeMapRenderTarget;
 	ModifySky(Pass, cubeMapRenderTarget == RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS);
 }
 
@@ -293,15 +294,15 @@ void CloudShadows::ModifySky(RE::BSRenderPass* Pass, bool a_reflectionFace)
 void CloudShadows::ReflectionsPrepass()
 {
 	if (frameChecker.IsNewFrame()) {
-		if ((globals::game::sky->mode.get() != RE::Sky::Mode::kFull) ||
-			!globals::game::sky->currentClimate)
+		if ((CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->mode.get() != RE::Sky::Mode::kFull) ||
+			!CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->currentClimate)
 			return;
 
 		auto context = globals::d3d::context;
 
 		globals::profiler->BeginPass("CloudShadows::OcclusionCopy");
 		// No cloud layer draws, so nothing would overwrite the last weather's occlusion
-		auto clouds = globals::game::sky->clouds;
+		auto clouds = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->clouds;
 		if (!clouds || clouds->numLayers == 0) {
 			if (!occlusionClearedWithoutClouds) {
 				// Layer operations of the ReflectionsPrepass run that follows, before its occlusion copy.
@@ -367,7 +368,7 @@ void CloudShadows::EarlyPrepass()
 
 void CloudShadows::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 	auto context = globals::d3d::context;
 

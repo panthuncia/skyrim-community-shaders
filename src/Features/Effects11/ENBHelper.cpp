@@ -1,4 +1,5 @@
 #include "ENBHelper.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 
@@ -37,7 +38,7 @@ namespace ENBHelper
 
 	void Update()
 	{
-		if (const auto* sky = globals::game::sky) {
+		if (const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)) {
 			if (sky->currentWeather) {
 				cachedWeather.currentWeatherFormID = sky->currentWeather->formID;
 				cachedWeather.currentClassification = GetClassification(sky->currentWeather);
@@ -65,7 +66,7 @@ namespace ENBHelper
 			cachedTime.skyMode = 0;
 		}
 
-		if (const auto* calendar = globals::game::calendar) {
+		if (const auto* calendar = CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)) {
 			cachedTime.gameHour = calendar->GetHour();
 			cachedTime.dayOfYear = calendar->GetDay() + (calendar->GetMonth() - 1) * 30.0f;
 		} else {
@@ -73,7 +74,7 @@ namespace ENBHelper
 			cachedTime.dayOfYear = 0.0f;
 		}
 
-		if (const auto* player = globals::game::player) {
+		if (const auto* player = CS_ENGINE_READ(Player, RecordTime, globals::game::player)) {
 			// GetCurrentLocation() reads the parent cell without a null check and crashes before
 			// the player is placed in the world (e.g. at the main menu), so guard on the cell.
 			if (const auto* parentCell = player->GetParentCell()) {

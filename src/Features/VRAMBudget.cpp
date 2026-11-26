@@ -1,4 +1,5 @@
 #include "VRAMBudget.h"
+#include "Snapshot/EngineReads.h"
 
 #include "TextureStreaming/Streamer.h"
 #include "Vram/DxvkMemory.h"
@@ -282,9 +283,9 @@ void VRAMBudget::Tick()
 		return;
 	}
 
-	const auto tes = RE::TES::GetSingleton();
-	const auto ui = RE::UI::GetSingleton();
-	const auto player = RE::PlayerCharacter::GetSingleton();
+	const auto tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
+	const auto ui = CS_ENGINE_READ(UI, RecordTime, RE::UI::GetSingleton());
+	const auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 	if (!tes || !tes->gridCells || !ui || ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME) || !player || !player->GetParentCell())
 		return;
 
@@ -314,7 +315,7 @@ void VRAMBudget::Tick()
 
 std::vector<RE::TESObjectCELL*> VRAMBudget::PickVictims(RE::TES* a_tes, size_t a_max) const
 {
-	const auto player = RE::PlayerCharacter::GetSingleton();
+	const auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 	const RE::TESObjectCELL* playerCell = player ? player->GetParentCell() : nullptr;
 	const auto grid = a_tes->gridCells;
 	const std::uint32_t gridSlots = grid && grid->cells ? grid->length * grid->length : 0;

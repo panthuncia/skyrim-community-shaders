@@ -3,6 +3,7 @@
 
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/LinearLighting.h"
 #include "Features/PhysicalSky.h"
@@ -49,7 +50,7 @@ namespace DCLF::Features::Water::Port
 	{
 		FrameInputs f;
 		f.frame = globals::state ? globals::state->frameCount : 0;
-		if (auto* shadowState = globals::game::shadowState) {
+		if (auto* shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)) {
 			auto& rss = shadowState->GetRuntimeData();
 			const auto posAdjust = rss.posAdjust.getEye();
 			const auto previous = rss.previousPosAdjust.getEye();
@@ -65,7 +66,7 @@ namespace DCLF::Features::Water::Port
 			f.proj00 = proj[0];
 			f.proj11 = proj[5];
 		}
-		if (const auto* sm = globals::game::smState) {
+		if (const auto* sm = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)) {
 			f.invFrameBufferRange = sm->invFrameBufferRange;
 			// Its own global, not BSShaderManager::State's timerValues[0], which runs on a different clock.
 			f.timer = Read<float>(Address::kReflectionTimer);
@@ -122,8 +123,8 @@ namespace DCLF::Features::Water::Port
 		const auto uw = globals::features::unifiedWater.GetFlowRewrite();
 		f.unifiedWater = { uw.active, uw.width, uw.height, uw.offsetX, uw.offsetY };
 		f.physicalSkySampler = globals::features::physicalSky.IsRendering();
-		if (auto* tes = RE::TES::GetSingleton()) {
-			auto* player = RE::PlayerCharacter::GetSingleton();
+		if (auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton())) {
+			auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
 			auto* cell = player ? player->GetParentCell() : nullptr;
 			f.cubemapFixInterior = tes->interiorCell || (cell && cell->IsInteriorCell());
 		}

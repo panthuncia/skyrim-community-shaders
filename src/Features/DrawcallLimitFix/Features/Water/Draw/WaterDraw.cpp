@@ -1,6 +1,7 @@
 // Water's program family and deferred ranges (WaterDraw.h).
 
 #include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
@@ -133,7 +134,7 @@ namespace DCLF::Features::Water::Indirect
 
 		void* ColourView(RE::RENDER_TARGET a_target)
 		{
-			return globals::game::renderer ? static_cast<void*>(globals::game::renderer->GetRuntimeData().renderTargets[a_target].SRV) : nullptr;
+			return CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) ? static_cast<void*>(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[a_target].SRV) : nullptr;
 		}
 		/**
 		 * @brief The refraction at t1: kMAIN's copy texture, which the engine fills from kMAIN just before the water draws. Not the
@@ -141,7 +142,7 @@ namespace DCLF::Features::Water::Indirect
 		 */
 		void* RefractionView()
 		{
-			return globals::game::renderer ? static_cast<void*>(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].SRVCopy) : nullptr;
+			return CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) ? static_cast<void*>(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].SRVCopy) : nullptr;
 		}
 		void* DisplacementView() { return ColourView(RE::RENDER_TARGET::kWATER_DISPLACEMENT); }
 		/**
@@ -164,18 +165,18 @@ namespace DCLF::Features::Water::Indirect
 		 */
 		bool GlobalCubeUnbound()
 		{
-			auto* tes = RE::TES::GetSingleton();
+			auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 			if (!tes || (globals::state && globals::state->isMapMenuOpen))
 				return false;
-			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 			auto* cell = player ? player->GetParentCell() : nullptr;
 			return tes->interiorCell || (cell && cell->IsInteriorCell());
 		}
 		void* GlobalCubeView()
 		{
-			if (!globals::game::renderer || GlobalCubeUnbound())
+			if (!CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) || GlobalCubeUnbound())
 				return nullptr;
-			return static_cast<void*>(globals::game::renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS].SRV);
+			return static_cast<void*>(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS].SRV);
 		}
 		// The published ids of the engine's targets the surface reads. The renderer's SRVs are not their exports, so each frame texture
 		// names its id through graphId rather than matching the view. Only wading water reads the displacement swap, and it is not claimed.
@@ -191,8 +192,8 @@ namespace DCLF::Features::Water::Indirect
 
 		void* DepthView()
 		{
-			return globals::game::renderer ?
-			           static_cast<void*>(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV) :
+			return CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) ?
+			           static_cast<void*>(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV) :
 			           nullptr;
 		}
 	}

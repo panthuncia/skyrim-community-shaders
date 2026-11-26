@@ -1,4 +1,5 @@
 #include "TerrainBlending.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix.h"
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
@@ -99,7 +100,7 @@ namespace
 	void RefreshDepthBackups(TerrainBlending& a_singleton)
 	{
 		using RenderGraph::Engine::Tripwire::Unwrap;
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 		if (mainDepth.depthSRV && Unwrap(mainDepth.depthSRV) == Unwrap(a_singleton.depthSRVBackup))
@@ -111,7 +112,7 @@ namespace
 
 void TerrainBlending::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	{
@@ -164,7 +165,7 @@ void TerrainBlending::CreateBlendedDepthTextures()
 {
 	if (blendedDepthTexture)
 		return;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	{
 		auto main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
@@ -214,7 +215,7 @@ void TerrainBlending::UseD3D11BlendedDepth()
 {
 	CreateBlendedDepthTextures();
 	// While the depth table names a blended depth (from the depth pass to the terrain passes), it names the D3D11 texture's.
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 	auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 	using RenderGraph::Engine::Tripwire::Unwrap;
@@ -231,14 +232,14 @@ void TerrainBlending::PostPostLoad()
 
 void TerrainBlending::DataLoaded()
 {
-	auto bEnableLandFade = RE::GetINISetting("bEnableLandFade:Display");
+	auto bEnableLandFade = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bEnableLandFade:Display"));
 	bEnableLandFade->data.b = false;
 }
 
 void TerrainBlending::TerrainShaderHacks()
 {
 	if (renderTerrainDepth) {
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto context = globals::d3d::context;
 		if (renderAltTerrain) {
 			// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
@@ -248,7 +249,7 @@ void TerrainBlending::TerrainShaderHacks()
 		} else {
 			auto dsv = terrainDepth.views[0];
 			context->OMSetRenderTargets(0, nullptr, dsv);
-			auto shadowState = globals::game::shadowState;
+			auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 			auto& currentVertexShader = shadowState->GetRuntimeData().currentVertexShader;
 			context->VSSetShader(RenderGraph::Engine::Tripwire::Unwrap((ID3D11VertexShader*)currentVertexShader->shader), NULL, NULL);
 		}
@@ -278,10 +279,10 @@ void TerrainBlending::ResetTerrainDepth()
 
 	auto context = globals::d3d::context;
 
-	auto stateUpdateFlags = globals::game::stateUpdateFlags;
+	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags);
 	stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 
-	auto currentVertexShader = *globals::game::currentVertexShader;
+	auto currentVertexShader = *CS_ENGINE_READ(Shaders, Other, globals::game::currentVertexShader);
 	context->VSSetShader(RenderGraph::Engine::Tripwire::Unwrap((ID3D11VertexShader*)currentVertexShader->shader), NULL, NULL);
 
 	if (globals::state->frameAnnotations)
@@ -298,7 +299,7 @@ void TerrainBlending::BlendPrepassDepths()
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);
 
-	auto stateUpdateFlags = globals::game::stateUpdateFlags;
+	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags);
 
 	// The ORG path: the DepthDone anchor's pass blends and writes the mask (ORGTerrainBlending).
 	if (ORGTerrainBlending::Get().Blend()) {
@@ -342,7 +343,7 @@ void TerrainBlending::BlendPrepassDepths()
 
 	stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 
 	globals::profiler->BeginPass("TerrainBlending::CopyDepth");
@@ -375,12 +376,12 @@ void TerrainBlending::Hooks::Main_RenderDepth::thunk(bool a1, bool a2)
 
 	auto& singleton = globals::features::terrainBlending;
 	auto shaderCache = globals::shaderCache;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 
 	auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 	auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 
-	globals::game::graphicsState->SetCameraData(RE::Main::WorldRootCamera(), 1);
+	CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->SetCameraData(CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera()), 1);
 
 	RefreshDepthBackups(singleton);
 	singleton.eyePosition = Util::GetEyePosition();
@@ -483,7 +484,7 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 		renderAltTerrain = false;
 		terrainRenderPasses.clear();
 		renderPasses.clear();
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 		mainDepth.depthSRV = depthSRVBackup;
@@ -491,10 +492,10 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 		return;
 	}
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
-	auto shadowState = globals::game::shadowState;
-	auto stateUpdateFlags = globals::game::stateUpdateFlags;
+	auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
+	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags);
 
 	auto* mask = GetMaskSRV();
 	context->PSSetShaderResources(55, 1, &mask);

@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -78,7 +79,7 @@ namespace DCLF
 		const float* range = highDetailRange.get();
 		in.highDetailRange = { range[0], range[1], range[2] - *margin.get(), range[3] - *margin.get() };
 		// The shadow mask in t14: its view, its filter, point unless iShadowMaskQuarter is 4, and its inverse size.
-		if (auto* renderer = globals::game::renderer) {
+		if (auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)) {
 			const auto& target = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kSHADOW_MASK];
 			in.shadowMask = reinterpret_cast<ID3D11ShaderResourceView*>(target.SRV);
 			if (target.texture) {
@@ -88,10 +89,10 @@ namespace DCLF
 				in.shadowMaskInverseSize = { 1.0f / static_cast<float>(desc.Width), 1.0f / static_cast<float>(desc.Height) };
 			}
 		}
-		static RE::Setting* quarter = RE::GetINISetting("iShadowMaskQuarter:Display");
+		static RE::Setting* quarter = CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("iShadowMaskQuarter:Display"));
 		in.shadowMaskFilter = (quarter && quarter->GetInteger() != 4) ? 1u : 0u;
 		// Fog from the current scene graph's fog property, FUN_1414dfad0 in AE.
-		const auto& shaderState = RE::BSShaderManager::State::GetSingleton();
+		const auto& shaderState = CS_ENGINE_READ(ShaderManagerState, CapturePoint, RE::BSShaderManager::State::GetSingleton());
 		auto* sceneNode = shaderState.shadowSceneNode[shaderState.sceneGraph];
 		if (const auto* fog = sceneNode ? sceneNode->GetRuntimeData().fogProperty.get() : nullptr) {
 			in.fog = true;
@@ -105,9 +106,9 @@ namespace DCLF
 		in.invFrameBufferRange = shaderState.invFrameBufferRange;
 		// ColourOutputClamp from the fLightingOutputColourClamp* settings, copied when the shader is created.
 		static RE::Setting* clampSettings[3] = {
-			RE::GetINISetting("fLightingOutputColourClampPostLit:General"),
-			RE::GetINISetting("fLightingOutputColourClampPostEnv:General"),
-			RE::GetINISetting("fLightingOutputColourClampPostSpec:General"),
+			CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("fLightingOutputColourClampPostLit:General")),
+			CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("fLightingOutputColourClampPostEnv:General")),
+			CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("fLightingOutputColourClampPostSpec:General")),
 		};
 		for (std::uint32_t i = 0; i < 3; ++i)
 			in.colourClamp[i] = clampSettings[i] ? clampSettings[i]->GetFloat() : 1.0f;

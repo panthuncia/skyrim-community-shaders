@@ -1,4 +1,5 @@
 #include "ColorGrading.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "RasterPass.h"
@@ -928,6 +929,7 @@ static auto BindVertexConstants(ID3D11DeviceContext* context, ID3D11Buffer* cons
 {
 	// RasterPass does not save VS constant buffers.
 	winrt::com_ptr<ID3D11Buffer> previous;
+	CS_ENGINE_READ_MARK(BoundState, BoundState);
 	context->VSGetConstantBuffers(1, 1, previous.put());
 	context->VSSetConstantBuffers(1, 1, &constants);
 	return SKSE::stl::scope_exit([context, previous] {

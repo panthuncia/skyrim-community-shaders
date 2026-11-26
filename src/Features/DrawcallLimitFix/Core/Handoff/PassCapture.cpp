@@ -1,5 +1,6 @@
 // The registration hooks, the withholding tests by view, the per-pass record the render thread drains, and the renderer sets.
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
+#include "Snapshot/EngineReads.h"
 
 
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -231,7 +232,7 @@ namespace DCLF
 		/** @brief Whether a_geometry is under the player's first or third person 3D. Main thread, during a registration. */
 		bool PlayerGeometry(const RE::NiAVObject* a_geometry)
 		{
-			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
 			if (!player)
 				return false;
 			const RE::NiAVObject* roots[] = { player->Get3D(false), player->Get3D(true) };
@@ -609,7 +610,7 @@ namespace DCLF
 		const auto set = std::atomic_load(&frameSet);
 		const std::uint8_t phases = set ? set->PhasesOf(a_pass->geometry) : std::uint8_t{ 0 };
 		++(!set ? entry.noSet : !phases ? entry.notMember : !(phases & kSetMain) ? entry.notMain : entry.mainNotDrawn);
-		const auto* tes = RE::TES::GetSingleton();
+		const auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton());
 		const RE::NiAVObject* root = tes ? tes->lodLandRoot : nullptr;
 		std::uint32_t depth = 0;
 		for (const RE::NiAVObject* node = a_pass->geometry; root && node && depth < 64; node = node->parent, ++depth)

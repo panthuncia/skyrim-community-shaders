@@ -1,5 +1,6 @@
 #include "Features/Skin.h"
 #include "Globals.h"
+#include "Snapshot/EngineReads.h"
 #include "State.h"
 #include <cmath>
 
@@ -9,7 +10,7 @@ float Skin::GetWaterHeight(const RE::TESObjectREFR* a_ref, const RE::NiPoint3& a
 {
 	float waterHeight = -RE::NI_INFINITY;
 
-	if (const auto waterManager = RE::TESWaterSystem::GetSingleton()) {
+	if (const auto waterManager = CS_ENGINE_READ(Water, RecordTime, RE::TESWaterSystem::GetSingleton())) {
 		waterHeight = a_ref->GetWaterHeight();
 
 		if (waterHeight != -RE::NI_INFINITY) {
@@ -103,7 +104,7 @@ float4 Skin::GetWetness(RE::BSGeometry* geometry)
 			if (cached.wetness.x < wetness.x) {
 				cached.wetness.x = wetness.x;
 			} else if (cached.wetness.x > wetness.x) {
-				cached.wetness.x -= *globals::game::deltaTime / fadeTime;
+				cached.wetness.x -= *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) / fadeTime;
 				cached.wetness.x = std::max(cached.wetness.x, 0.0f);
 			}
 			wetness.x = cached.wetness.x;
@@ -116,7 +117,7 @@ float4 Skin::GetWetness(RE::BSGeometry* geometry)
 					wetness.w = cached.wetness.w;
 				}
 			} else if (cached.wetness.y > wetness.y) {
-				cached.wetness.y -= *globals::game::deltaTime / fadeTime;
+				cached.wetness.y -= *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) / fadeTime;
 				cached.wetness.y = std::max(cached.wetness.y, 0.0f);
 				wetness.y = cached.wetness.y;
 				if (wetness.y == 0.0f) {

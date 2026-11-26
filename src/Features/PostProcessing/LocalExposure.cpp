@@ -1,4 +1,5 @@
 #include "LocalExposure.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/PostProcessing.h"
 #include "HistogramAutoExposure.h"
@@ -142,7 +143,7 @@ LocalExposure::LocalExposureCB LocalExposure::Constants(uint a_inputWidth, uint 
 
 void LocalExposure::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 
 	// Get screen dimensions from game render target
 	auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];

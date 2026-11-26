@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
@@ -43,7 +44,7 @@ namespace DCLF::Features::TreeWind
 		{
 			TreeWindFrame frame;
 			frame.deltaTime = GlobalFloat(frameSeconds);
-			if (auto* camera = RE::Main::WorldRootCamera()) {
+			if (auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera())) {
 				frame.camera[0] = camera->world.translate.x;
 				frame.camera[1] = camera->world.translate.y;
 				frame.camera[2] = camera->world.translate.z;

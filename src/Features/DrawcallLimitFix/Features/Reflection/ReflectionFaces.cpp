@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "Globals.h"
@@ -83,7 +84,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 		{
 			static ID3D11Texture2D* texture = nullptr;
 			static std::array<std::uint32_t, 2> size{};
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			auto* next = renderer ? ::RenderGraph::Engine::Tripwire::Unwrap(renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].texture) : nullptr;
 			if (next != texture) {
 				texture = next;

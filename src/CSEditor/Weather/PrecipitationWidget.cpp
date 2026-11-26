@@ -5,6 +5,7 @@
 #include "Globals.h"
 #include "RE/B/BSShaderManager.h"
 #include "RE/N/NiSourceTexture.h"
+#include "Snapshot/EngineReads.h"
 #include "Utils/UI.h"
 
 #include <cmath>
@@ -279,7 +280,7 @@ void PrecipitationWidget::ApplyLiveParticleTexture(const std::string& path)
 		return;
 	}
 
-	auto* sky = globals::game::sky;
+	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (!sky || !sky->precip)
 		return;
 

@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "RenderGraph/SharedConstants.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -74,7 +75,7 @@ namespace SharedConstants
 		std::array<std::span<const std::byte>, kBlocks> Sources()
 		{
 			std::array<std::span<const std::byte>, kBlocks> sources{};
-			const auto& frame = globals::game::frameBufferCached.data;
+			const auto& frame = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
 			sources[kFrameBuffer] = std::as_bytes(std::span(&frame, 1));
 			if (auto* state = globals::state) {
 				sources[kSharedData] = std::as_bytes(std::span(&state->lastSharedData, 1));
@@ -280,7 +281,7 @@ namespace SharedConstants
 		auto* cs = globals::state;
 		if (!cs)
 			return;
-		const std::array<ID3D11Buffer*, kBlocks> d3d11{ *globals::game::perFrame.get(), cs->sharedDataCB ? cs->sharedDataCB->CB() : nullptr,
+		const std::array<ID3D11Buffer*, kBlocks> d3d11{ *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get(), cs->sharedDataCB ? cs->sharedDataCB->CB() : nullptr,
 			cs->featureDataCB ? cs->featureDataCB->CB() : nullptr, cs->permutationCB ? cs->permutationCB->CB() : nullptr };
 		std::array<bool, kBlocks> equal{};
 		bool all = true;
@@ -295,7 +296,7 @@ namespace SharedConstants
 			++state.mismatches;
 		if (state.checks > 5 && (all || state.mismatches > 20))
 			return;
-		const auto& frame = globals::game::frameBufferCached.data;
+		const auto& frame = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
 		const auto& shared = cs->lastSharedData;
 		logger::info(
 			"[ORG] Shared constants check {}: FrameBuffer {}, SharedData {}, FeatureData {} ({} B), Permutation {}; "

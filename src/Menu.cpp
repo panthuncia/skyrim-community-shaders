@@ -1,6 +1,7 @@
 #include "Menu.h"
 #include "Menu/FeatureUndo.h"
 #include "Menu/FontAtlasState.h"
+#include "Snapshot/EngineReads.h"
 #include "Utils/Logging.h"
 #include "Utils/Notifications.h"
 
@@ -1482,7 +1483,7 @@ void Menu::SyncVanityCamera()
 	const bool wantDisabled = ShouldSwallowInput();
 	static RE::Setting* setting = nullptr;
 	if (!setting)
-		setting = RE::GetINISetting("fAutoVanityModeDelay:Camera");
+		setting = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("fAutoVanityModeDelay:Camera"));
 	if (!setting)
 		return;
 

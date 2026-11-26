@@ -1,5 +1,6 @@
 #include "PhysicalLens.h"
 #include "PhysicalLensBindings.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/PostProcessing.h"
 #include "RasterPass.h"
@@ -358,7 +359,7 @@ void PhysicalLens::SetupResources()
 	waveSources->CreateSRV();
 	waveSources->CreateUAV();
 	D3D11_TEXTURE2D_DESC sourceDescription{};
-	globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY].texture->GetDesc(&sourceDescription);
+	CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY].texture->GetDesc(&sourceDescription);
 	unsigned waveTileCount = ((sourceDescription.Width + 15) / 16) * ((sourceDescription.Height + 15) / 16);
 	waveTiles = std::make_unique<StructuredBuffer>(StructuredBufferDesc<unsigned>(uint64_t(waveTileCount), true, false), waveTileCount, "PhysicalLens::DiffractionTiles");
 	waveTiles->CreateSRV();
@@ -462,7 +463,7 @@ void PhysicalLens::SetupResources()
 	DX::ThrowIfFailed(globals::d3d::device->CreateUnorderedAccessView(planArguments.get(), &argView, planArgumentsUAV.put()));
 	Util::SetResourceName(planArgumentsUAV.get(), "PhysicalLens::PlanningDispatch UAV");
 	D3D11_TEXTURE2D_DESC desc{};
-	globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY].texture->GetDesc(&desc);
+	CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY].texture->GetDesc(&desc);
 	desc.Width = std::max(1u, (desc.Width + 1) / 2);
 	desc.Height = std::max(1u, (desc.Height + 1) / 2);
 	desc.MipLevels = 1;
@@ -589,7 +590,7 @@ PhysicalLens::Parameters PhysicalLens::FlareParameters(unsigned width, unsigned 
 	data.ghostDiffraction = settings.GhostDiffraction;
 	data.fNumber = optical.fNumber;
 	data.reserved = 1;
-	data.cutoffRelease = std::exp(-2.44932f * std::clamp(*globals::game::deltaTime, 0.f, .25f));
+	data.cutoffRelease = std::exp(-2.44932f * std::clamp(*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime), 0.f, .25f));
 	data.alignmentVariation = settings.AlignmentVariation;
 	data.lensSeed = float(settings.LensPreset + 1);
 	data.maxSources = settings.MaxSources;
@@ -624,7 +625,7 @@ PhysicalLens::FocusInputs PhysicalLens::FocusInputsFor(const CinematicCamera::Ph
 			data.manualKM = target.distanceM * .001f;
 		}
 	}
-	if (auto* player = globals::game::player; player && globals::game::ui->IsMenuOpen(RE::RaceSexMenu::MENU_NAME)) {
+	if (auto* player = CS_ENGINE_READ(Player, RecordTime, globals::game::player); player && CS_ENGINE_READ(UI, RecordTime, globals::game::ui)->IsMenuOpen(RE::RaceSexMenu::MENU_NAME)) {
 		data.automatic = resolver.GetReferenceFocusCoord(player, data.uv);
 		data.manualKM = Util::Units::GameUnitsToMeters(resolver.GetDistanceToReference(player)) * .001f;
 	}
@@ -693,7 +694,7 @@ float PhysicalLens::ResolveCameraFocus(const CinematicCamera::PhysicalCameraStat
 			std::lock_guard lock(shaderMutex);
 			shader = focusCS;
 		}
-		auto* depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
+		auto* depth = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
 		if (!shader || !depth)
 			return resolvedFocusM;
 		focusParameters->Update(FocusInputsFor(camera, reset));

@@ -1,4 +1,5 @@
 #include "Climate.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 
@@ -17,7 +18,7 @@ namespace
 	/** @brief A game setting by name, or null before the collection exists. */
 	RE::Setting* FindSetting(const char* name)
 	{
-		const auto collection = globals::game::gameSettingCollection;
+		const auto collection = CS_ENGINE_READ(Ini, RecordTime, globals::game::gameSettingCollection);
 		return collection ? collection->GetSetting(name) : nullptr;
 	}
 }
@@ -72,6 +73,6 @@ namespace Util::Climate
 
 	RE::Calendar* GetCalendar()
 	{
-		return globals::game::calendar ? globals::game::calendar : RE::Calendar::GetSingleton();
+		return CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar) ? CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar) : CS_ENGINE_READ(Calendar, RecordTime, RE::Calendar::GetSingleton());
 	}
 }

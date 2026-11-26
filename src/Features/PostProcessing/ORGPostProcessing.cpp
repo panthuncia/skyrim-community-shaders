@@ -1,4 +1,5 @@
 #include "ORGPostProcessing.h"
+#include "Snapshot/EngineReads.h"
 #include "Utils/Logging.h"
 
 #include "RenderGraph/Switches.h"
@@ -1177,7 +1178,7 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 
 	// As PreProcess, unbind the main targets, since ISRefraction may still have kMAIN_COPY bound.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
 
 bool ORGPostProcessing::Ran() const

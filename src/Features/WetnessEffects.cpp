@@ -1,10 +1,11 @@
 #include "WetnessEffects.h"
-#include "Features/DrawcallLimitFix.h"
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
+#include "Features/DrawcallLimitFix.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
-#include "Utils/DebugSection.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "Snapshot/EngineReads.h"
+#include "Utils/DebugSection.h"
 
 #define I18N_KEY_PREFIX "feature.wetness_effects."
 
@@ -910,8 +911,8 @@ void WetnessEffects::ApplyClimatePreset(ClimatePreset preset)
 void WetnessEffects::Reset()
 {
 	// Not in GetCommonBufferData: the feature buffer is rebuilt several times per frame (see Deferred).
-	if (globals::game::ui && !globals::game::ui->GameIsPaused())
-		rainTimer += (size_t)(RE::GetSecondsSinceLastFrame() * 1000000);  // BSTimer::delta is always 0 for some reason
+	if (CS_ENGINE_READ(UI, Other, globals::game::ui) && !CS_ENGINE_READ(UI, Other, globals::game::ui)->GameIsPaused())
+		rainTimer += (size_t)(CS_ENGINE_READ(Timer, Other, RE::GetSecondsSinceLastFrame()) * 1000000);  // BSTimer::delta is always 0 for some reason
 }
 
 WetnessEffects::PerFrame WetnessEffects::GetCommonBufferData() const
@@ -923,7 +924,7 @@ WetnessEffects::PerFrame WetnessEffects::GetCommonBufferData() const
 	data.PuddleWetness = 0.0f;
 
 	if (settings.EnableWetnessEffects) {
-		if (auto sky = globals::game::sky) {
+		if (auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)) {
 			if (sky->mode.get() == RE::Sky::Mode::kFull) {
 				if (auto precip = sky->precip) {
 					{
@@ -1013,7 +1014,7 @@ WetnessEffects::PerFrame WetnessEffects::GetCommonBufferData() const
 
 void WetnessEffects::Prepass()
 {
-	static auto renderer = globals::game::renderer;
+	static auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	static auto& precipOcclusionTexture = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
 
 	auto context = globals::d3d::context;
@@ -1062,7 +1063,7 @@ void WetnessEffects::DrawWeatherAnalysis() const
 	if (!settings.EnableWetnessEffects)
 		return;
 
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!sky || sky->mode.get() != RE::Sky::Mode::kFull || !sky->IsRaining())
 		return;
 

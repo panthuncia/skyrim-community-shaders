@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Snapshot/EngineReads.h"
+
 namespace Util
 {
 
@@ -121,7 +123,7 @@ namespace Util
 		if (settingData.offset == 0) {
 			auto* setting = RE::GetINISetting(settingName.c_str());
 			if (!setting) {
-				if (auto* collection = globals::game::gameSettingCollection)
+				if (auto* collection = CS_ENGINE_READ(Ini, RecordTime, globals::game::gameSettingCollection))
 					setting = collection->GetSetting(settingName.data());
 			}
 			if (setting) {
@@ -166,7 +168,7 @@ namespace Util
 		if (settingData.offset == 0) {
 			auto* setting = RE::GetINISetting(settingName.c_str());
 			if (!setting) {
-				if (auto* collection = globals::game::gameSettingCollection)
+				if (auto* collection = CS_ENGINE_READ(Ini, RecordTime, globals::game::gameSettingCollection))
 					setting = collection->GetSetting(settingName.data());
 			}
 			if (setting) {

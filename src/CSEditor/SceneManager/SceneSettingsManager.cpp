@@ -1,4 +1,5 @@
 #include "SceneSettingsManager.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Feature.h"
 #include "Globals.h"
@@ -315,7 +316,7 @@ float SceneSettingsManager::GetCurrentGameHour()
 	float hour = 12.0f;
 	if (calendar && calendar->gameHour)
 		hour = calendar->gameHour->value;
-	else if (auto sky = globals::game::sky)
+	else if (auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky))
 		hour = sky->currentGameHour;
 	if (!std::isfinite(hour))
 		hour = 12.0f;
@@ -338,7 +339,7 @@ void SceneSettingsManager::SetGameHour(float hour)
 
 SceneSettingsManager::PeriodStartHours SceneSettingsManager::GetPeriodStartHours()
 {
-	const auto sky = globals::game::sky;
+	const auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (!sky || !sky->currentClimate)
 		return kFallbackPeriodStartHours;
 
@@ -1118,7 +1119,7 @@ bool SceneSettingsManager::TryEnsureLocationDataLoaded()
 {
 	if (locationDataLoaded)
 		return true;
-	if (!gameDataReady || !RE::TESDataHandler::GetSingleton())
+	if (!gameDataReady || !CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton()))
 		return false;
 	if (!userSettingsDocumentLoaded)
 		LoadAllUserSettings();
@@ -1142,7 +1143,7 @@ bool SceneSettingsManager::TryEnsureWeatherDataLoaded()
 {
 	if (weatherDataLoaded)
 		return true;
-	if (!globals::game::sky || !RE::TESDataHandler::GetSingleton())
+	if (!CS_ENGINE_READ(Sky, Other, globals::game::sky) || !CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton()))
 		return false;
 	if (!userSettingsDocumentLoaded)
 		LoadAllUserSettings();

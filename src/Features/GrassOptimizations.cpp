@@ -1,4 +1,5 @@
 #include "GrassOptimizations.h"
+#include "Snapshot/EngineReads.h"
 
 #include "GrassShared/GrassCapture.h"
 #include "GrassShared/GrassFrame.h"
@@ -248,7 +249,7 @@ void GrassOptimizations::ClearShaderCache()
 
 RE::NiDirectionalLight* GrassOptimizations::GetSunLight()
 {
-	auto* sceneNode = globals::game::smState->shadowSceneNode[0];
+	auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0];
 	auto* sun = sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr;
 	return sun ? skyrim_cast<RE::NiDirectionalLight*>(sun->light.get()) : nullptr;
 }
@@ -266,19 +267,19 @@ void GrassOptimizations::UpdateGrass(const RE::NiCamera* cam)
 		return;
 	}
 
-	if (auto* grassManager = RE::BGSGrassManager::GetSingleton())
+	if (auto* grassManager = CS_ENGINE_READ(Data, RecordTime, RE::BGSGrassManager::GetSingleton()))
 		Hooks::NiNode_OnVisible::grassRoot.store(grassManager->grassNode.get(), std::memory_order_relaxed);
 
-	timeAccum += globals::game::smState->timerValues[1];
+	timeAccum += CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->timerValues[1];
 	prevTimeBase = timeBase;
-	timeBase = globals::game::smState->timerValues[4] * 0.0016666667f * 6.2831802f;
+	timeBase = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->timerValues[4] * 0.0016666667f * 6.2831802f;
 
 	const auto iniFloat = [](const char* name, float fallback) {
 		auto* setting = RE::GetINISetting(name);
 		return setting ? setting->GetFloat() : fallback;
 	};
 
-	static auto* fadeInSetting = RE::GetINISetting("fGrassFadeInTime:Grass");
+	static auto* fadeInSetting = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fGrassFadeInTime:Grass"));
 	const float fadeInTime = fadeInSetting ? fadeInSetting->GetFloat() : 0.0f;
 	fadeInTimeRcp = fadeInTime > 0.0f ? 1.0f / fadeInTime : 1e6f;
 
@@ -291,7 +292,7 @@ void GrassOptimizations::UpdateGrass(const RE::NiCamera* cam)
 	maxDistSq = maxGrassDistance * maxGrassDistance;
 
 	// Start fading one frame early to avoid gaps when grass is replaced.
-	bucketStore.BeginFrame({ settings.EnableMeshLOD, settings.EnableMidLOD, settings.EnableFarLOD, timeAccum - globals::game::smState->timerValues[1] });
+	bucketStore.BeginFrame({ settings.EnableMeshLOD, settings.EnableMidLOD, settings.EnableFarLOD, timeAccum - CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->timerValues[1] });
 
 	globals::profiler->BeginPass("GrassOptimizations::UploadPending");
 	bucketStore.UploadPending(ctx);
@@ -337,7 +338,7 @@ void GrassOptimizations::SetupOptimizedPass(const GrassBucket& b)
 	ctx1->PSSetConstantBuffers1(2, 1, &bucketCB, &windowFirst, &geometryNum);
 
 	// SetupGeometry applies sampler modes after the hook chain returns.
-	globals::game::shadowState->SetPSTexture(0, b.drawResources.diffuseTexture->rendererTexture);
+	CS_ENGINE_READ(ShadowState, Other, globals::game::shadowState)->SetPSTexture(0, b.drawResources.diffuseTexture->rendererTexture);
 
 	// Canopy heights use bucket constants, while shader flags stay shared.
 	globals::state->SetGrassFlags(b.drawResources.key.draw.sphereNormal, b.drawResources.key.draw.pbrMaterial);
@@ -369,7 +370,7 @@ void GrassOptimizations::DrawBucket(GrassBucket& b)
 		drawPassOpen = true;
 	}
 
-	auto& shadowState = globals::game::shadowState->GetRuntimeData();
+	auto& shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData();
 	static REL::Relocation<void (*)(uint32_t)> SetDirtyStates{ REL::RelocationID(75580, 77386) };
 	if (shadowState.topology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
 		shadowState.topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -528,8 +529,8 @@ void GrassOptimizations::Hooks::NiNode_OnVisible::thunk(RE::NiNode* This, RE::Ni
 		return;
 
 	// Prefer the main view, with a fallback when it stops visiting the grass root.
-	const auto frame = globals::game::graphicsState->frameCount;
-	const bool mainView = process->camera && process->camera == RE::Main::WorldRootCamera();
+	const auto frame = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->frameCount;
+	const bool mainView = process->camera && process->camera == CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera());
 	if (mainView)
 		mainViewVisitFrame.store(frame, std::memory_order_relaxed);
 
@@ -555,9 +556,9 @@ void GrassOptimizations::Hooks::BSGrassShader_SetupGeometry::thunk(RE::BSShader*
 	auto& self = globals::features::grassOptimizations;
 
 	// Cull with main-camera PerFrame data so shadows cannot change occlusion or fades.
-	const auto frame = globals::game::graphicsState->frameCount;
+	const auto frame = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->frameCount;
 	if (self.lastFrame != frame) {
-		const auto* cam = RE::Main::WorldRootCamera();
+		const auto* cam = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera());
 		if (!cam || IsMainCameraPerFrame(cam->world.translate)) {
 			self.UpdateGrass(cam);
 			self.lastFrame = frame;
@@ -566,7 +567,7 @@ void GrassOptimizations::Hooks::BSGrassShader_SetupGeometry::thunk(RE::BSShader*
 
 	func(This, a2, flags);
 
-	auto* shadowState = globals::game::shadowState;
+	auto* shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState);
 	shadowState->SetPSTextureAddressMode(0, RE::BSGraphics::TextureAddressMode::kClampSClampT);
 	shadowState->SetPSTextureFilterMode(0, RE::BSGraphics::TextureFilterMode::kAnisotropic);
 }
@@ -615,7 +616,7 @@ void GrassOptimizations::Hooks::DrawVanilla(RE::BSMultiStreamInstanceTriShape* g
 		}
 
 		static REL::Relocation<void (*)(RE::BSGraphics::Renderer*, RE::BSGraphics::TriShape*, uint32_t, uint32_t, uint32_t, RE::BSGraphics::VertexDesc, RE::BSGraphics::VertexBuffer*)> DrawInstancedTriShape{ REL::RelocationID(75479, 77265) };
-		DrawInstancedTriShape(globals::game::renderer, geometry->GetGeometryRuntimeData().rendererData, 0, geometry->GetTrishapeRuntimeData().triangleCount, curInstanceGroup->instanceCount, geometry->GetGeometryRuntimeData().vertexDesc, curInstanceGroup->vertexBuffer);
+		DrawInstancedTriShape(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer), geometry->GetGeometryRuntimeData().rendererData, 0, geometry->GetTrishapeRuntimeData().triangleCount, curInstanceGroup->instanceCount, geometry->GetGeometryRuntimeData().vertexDesc, curInstanceGroup->vertexBuffer);
 	}
 }
 

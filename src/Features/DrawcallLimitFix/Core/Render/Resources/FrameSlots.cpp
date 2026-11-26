@@ -5,6 +5,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Relocation/Holders.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF::Draws
 {
@@ -169,6 +170,7 @@ namespace DCLF::Draws
 
 	Capture CaptureBindings()
 	{
+		CS_ENGINE_READ_MARK(BoundState, BoundState);
 		RenderThreadBudget::Part budget(RenderThreadBudget::Bucket::Capture);
 		// In graph mode the engine's binds stay in its context handle, and D3D11's context holds none of them.
 		if (RenderGraph::Engine::GraphMode() && !RenderGraph::Engine::Tripwire::GuestContextInstalled())
@@ -205,7 +207,7 @@ namespace DCLF::Draws
 			adopt(kSharedDataRegister, state->sharedDataCB.get());
 			adopt(kFeatureDataRegister, state->featureDataCB.get());
 		}
-		auto& shadowState = globals::game::shadowState->GetRuntimeData();
+		auto& shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData();
 		capture.eye = shadowState.posAdjust.getEye();
 		capture.previousEye = shadowState.previousPosAdjust.getEye();
 		D3D11_VIEWPORT viewport{};

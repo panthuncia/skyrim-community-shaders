@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/Precipitation/Precipitation.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "Features/RainRefraction.h"
@@ -116,7 +117,7 @@ namespace DCLF::Features::Precipitation
 		 */
 		const char* TryLatchDraw(Run& a_run, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* ps = rss.currentPixelShader;
 			const auto* state = globals::state;
@@ -130,7 +131,7 @@ namespace DCLF::Features::Precipitation
 
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
-			const auto& engineTargets = globals::game::renderer->GetRuntimeData().renderTargets;
+			const auto& engineTargets = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetRuntimeData().renderTargets;
 			for (std::uint32_t i = 0; i < kMaxColours; ++i) {
 				const auto target = static_cast<std::int32_t>(rss.renderTargets[i]);
 				if (target < 0)
@@ -158,7 +159,7 @@ namespace DCLF::Features::Precipitation
 				static Util::ReasonLog extra("[DCLF] precipitation: a draw's targets past the pixel stage's two outputs are left out (the engine's draw leaves them as they were)");
 				extra.Report(std::format("colour target {}", static_cast<std::int32_t>(rss.renderTargets[kMaxColours])));
 			}
-			const auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
+			const auto& depths = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetDepthStencilData().depthStencils;
 			draw.key.depthFormat = FormatOf(depths[main].views[0]);
 			if (!draw.key.depthFormat)
 				return "no depth format";
@@ -188,7 +189,7 @@ namespace DCLF::Features::Precipitation
 			if (globals::deferred)
 				globals::deferred->GetDirectionalShadowLightData(directionalShadow);
 			std::memcpy(draw.latch.directionalShadow, &directionalShadow, Water::kDirectionalShadowBytes);
-			const auto& frame = globals::game::frameBufferCached.data;
+			const auto& frame = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
 			constants.projection[0] = frame.CameraProj.m[0][0];
 			constants.projection[1] = frame.CameraProj.m[1][1];
 			constants.projection[2] = frame.DynamicResolutionParams1.x;

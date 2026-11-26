@@ -1,4 +1,5 @@
 #include "TerrainShadows.h"
+#include "Snapshot/EngineReads.h"
 
 #include <bit>
 #include <cctype>
@@ -117,7 +118,7 @@ namespace
 	{
 		static void thunk(RE::BSScript::IVirtualMachine* a_vm, RE::VMStackID a_stackID, RE::TESGlobal* a_global, float a_value)
 		{
-			const auto calendar = globals::game::calendar;
+			const auto calendar = CS_ENGINE_READ(Calendar, CapturePoint, globals::game::calendar);
 			const bool changesGameHour = calendar && a_global == calendar->gameHour;
 			const float previousValue = changesGameHour ? a_global->value : 0.0f;
 
@@ -151,7 +152,7 @@ namespace
 	// Heightmaps are keyed by the worldspace that provides the land data.
 	RE::TESWorldSpace* GetLandWorldspace()
 	{
-		auto tes = globals::game::tes;
+		auto tes = CS_ENGINE_READ(TES, RecordTime, globals::game::tes);
 		auto worldspace = tes ? tes->GetRuntimeData2().worldSpace : nullptr;
 		while (worldspace && worldspace->parentWorld && worldspace->parentUseFlags.any(RE::TESWorldSpace::ParentUseFlag::kUseLandData))
 			worldspace = worldspace->parentWorld;
@@ -190,7 +191,7 @@ void TerrainShadows::DataLoaded()
 	if (const auto fastTravelEvents = eventSourceHolder->GetEventSource<RE::TESFastTravelEndEvent>())
 		fastTravelEvents->AddEventSink(&eventHandler);
 
-	if (const auto player = RE::PlayerCharacter::GetSingleton())
+	if (const auto player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton()))
 		player->AsBGSActorCellEventSource()->AddEventSink(&eventHandler);
 	else
 		logger::warn("[Terrain Shadows] Player singleton not found");
@@ -224,7 +225,7 @@ void TerrainShadows::DrawDebugSection()
 
 	std::string curr_worldspace = "N/A";
 	std::string curr_worldspace_name = "N/A";
-	auto tes = RE::TES::GetSingleton();
+	auto tes = CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
 	if (tes) {
 		auto worldspace = tes->GetRuntimeData2().worldSpace;
 		if (worldspace) {
@@ -553,7 +554,7 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 	constexpr uint logUpdateLength = std::bit_width(128u) - 1;  // integer log2, https://stackoverflow.com/questions/994593/how-to-do-an-integer-log2-in-c
 
 	// Runs before the world accumulator is current, which can still be a freed menu (e.g. local map) accumulator.
-	auto shadowSceneNode = globals::game::smState->shadowSceneNode[0];
+	auto shadowSceneNode = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0];
 	if (!shadowSceneNode)
 		return false;
 

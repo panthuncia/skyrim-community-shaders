@@ -1,4 +1,5 @@
 #include "ORGScreenshot.h"
+#include "Snapshot/EngineReads.h"
 
 #include <winrt/base.h>
 
@@ -205,7 +206,7 @@ namespace
 				return RenderGraph::Engine::UiTargets::Current().backBuffer;
 		}
 		if (a_source.engineTarget >= 0) {
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			// Use the engine's own import so the graph orders it with other anchors' uses.
 			if (renderer && renderer->GetRuntimeData().renderTargets[static_cast<std::size_t>(a_source.engineTarget)].texture == a_source.texture)
 				return FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(a_source.engineTarget)));
@@ -532,9 +533,9 @@ namespace
 	winrt::com_ptr<ID3D11Texture2D> FramebufferTexture()
 	{
 		winrt::com_ptr<ID3D11Texture2D> framebuffer;
-		if (!globals::game::renderer)
+		if (!CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 			return framebuffer;
-		const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+		const auto& target = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 		if (target.texture) {
 			framebuffer.copy_from(target.texture);
 			return framebuffer;

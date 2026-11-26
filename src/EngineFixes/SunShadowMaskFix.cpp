@@ -1,4 +1,5 @@
 #include "SunShadowMaskFix.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 
@@ -20,7 +21,7 @@ void SunShadowMaskFix::Update()
 {
 	sunLightMask = 0;
 
-	const auto* state = globals::game::smState;
+	const auto* state = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
 	const auto* shadowSceneNode = state->shadowSceneNode[0];
 	if (!shadowSceneNode || state->interior || *sunShadowSkipped)
 		return;

@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Events.h"
 #include "Observers.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF::Diagnostics
 {
@@ -124,8 +125,8 @@ namespace DCLF::Diagnostics
 			};
 			static std::unordered_map<RE::FormID, ActorHistory> history;
 			static std::uint32_t transitionsLogged = 0, transitionWindow = 0;
-			auto* player = RE::PlayerCharacter::GetSingleton();
-			auto* lists = RE::ProcessLists::GetSingleton();
+			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+			auto* lists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton());
 			if (!player || !lists)
 				return;
 			const bool periodic = a_frame % 300 == 0;

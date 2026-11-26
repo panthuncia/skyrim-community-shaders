@@ -1,4 +1,5 @@
 #include "Hooks.h"
+#include "Snapshot/EngineReads.h"
 
 #include "GpuEventTimers.h"
 #include "HangWatchdog.h"
@@ -289,7 +290,7 @@ bool Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertex
 			RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader));
 			state->customVertexShader = vertexShader;
 			*globals::game::currentVertexShader = vertexShader;
-			globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
+			CS_ENGINE_READ(Shaders, CapturePoint, globals::game::stateUpdateFlags)->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
 			if (skipPixelShader) {
 				pixelShader = nullptr;
 			}
@@ -407,14 +408,14 @@ namespace WaterBlendHistory
 	{
 		static void thunk(void* imageSpaceShader, RE::BSTriShape* shape, RE::ImageSpaceEffectParam* param)
 		{
-			auto& renderTargets = globals::game::shadowState->GetRuntimeData().renderTargets;
+			auto& renderTargets = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData().renderTargets;
 
 			// Clear stale coverage left by discarded non-water pixels
 			const float clearColor[4] = { 0.f, 0.f, 0.f, 0.f };
 			const auto target = renderTargets[1];
 			// Engine target fields can be tripwire handles: DXVK's context takes the wrapped view.
 			globals::d3d::context->ClearRenderTargetView(
-				RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[target].RTV),
+				RenderGraph::Engine::Tripwire::Unwrap(CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetRuntimeData().renderTargets[target].RTV),
 				clearColor);
 
 			func(imageSpaceShader, shape, param);
@@ -444,7 +445,7 @@ namespace WeatherExtensions
 			const auto previous = *geometry;
 			func(geometry, data, cubeSize, density);
 			if (previous != *geometry) {
-				auto* sky = RE::Sky::GetSingleton();
+				auto* sky = CS_ENGINE_READ(Sky, CapturePoint, RE::Sky::GetSingleton());
 				DetachRetiredPrecipitation(previous, sky ? sky->precip : nullptr);
 			}
 		}
@@ -488,7 +489,7 @@ namespace WeatherExtensions
 					// compound on every call Sky has not recomputed colors for.
 					Effects11::DirectionalAmbientColors overridden = DirectionalAmbientColors;
 					globals::features::effects11.OverrideAmbientLighting(overridden);
-					if (auto* sky = globals::game::sky; sky && &DirectionalAmbientColors.directionalAmbientColors[0][0] == &sky->directionalAmbientColors[0][0])
+					if (auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky); sky && &DirectionalAmbientColors.directionalAmbientColors[0][0] == &sky->directionalAmbientColors[0][0])
 						globals::features::effects11.BlendGradedAmbient(sky, overridden);
 					func(overridden, AmbientSpecularTint, AmbientSpecularFresnel);
 					return;
@@ -997,7 +998,7 @@ namespace Hooks
 		static void thunk()
 		{
 			// Detour the pre-call Present so plugins hooking it during this call run before our HDR composite.
-			const auto swapChain = RE::BSGraphics::Renderer::GetSingleton()->GetRuntimeData().renderWindows->swapChain;
+			const auto swapChain = CS_ENGINE_READ(Renderer, CapturePoint, RE::BSGraphics::Renderer::GetSingleton())->GetRuntimeData().renderWindows->swapChain;
 			const auto originalPresent = (*reinterpret_cast<std::uintptr_t**>(swapChain))[8];
 
 			logger::info("Calling original Init3D");
@@ -1303,14 +1304,14 @@ namespace Hooks
 							RenderGraph::Engine::Flush::BindVertexShader(reinterpret_cast<ID3D11VertexShader*>(vertexShader->shader));
 							state->customVertexShader = vertexShader;
 							*globals::game::currentVertexShader = a_vertexShader;
-							globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
+							CS_ENGINE_READ(Shaders, CapturePoint, globals::game::stateUpdateFlags)->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
 							return;
 						}
 					}
 				}
 			}
 
-			globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
+			CS_ENGINE_READ(Shaders, CapturePoint, globals::game::stateUpdateFlags)->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
 
 			state->customVertexShader = nullptr;
 			*globals::game::currentVertexShader = a_vertexShader;
@@ -1391,7 +1392,7 @@ namespace Hooks
 		{
 			auto ret = func(a_player, a_target, unk1, unk2);
 
-			auto camera = RE::PlayerCamera::GetSingleton();
+			auto camera = CS_ENGINE_READ(Camera, CapturePoint, RE::PlayerCamera::GetSingleton());
 			ret->x = camera->cameraRoot->world.translate.x;
 			ret->y = camera->cameraRoot->world.translate.y;
 			ret->z = camera->cameraRoot->world.translate.z;

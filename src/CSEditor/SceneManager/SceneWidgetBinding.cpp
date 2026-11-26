@@ -1,5 +1,6 @@
 #include "SceneWidgetBinding.h"
 #include "Menu/SettingReveal.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <cassert>
@@ -220,7 +221,7 @@ namespace
 
 		switch (a_page.type) {
 		case SceneContextType::Location:
-			if (const auto* sky = globals::game::sky; sky && sky->currentWeather)
+			if (const auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); sky && sky->currentWeather)
 				lower.push_back(WithActiveSet({ .type = SceneContextType::Weather,
 					.weatherId = sky->currentWeather->GetFormID() }));
 			[[fallthrough]];
@@ -344,7 +345,7 @@ namespace
 		case SceneContextType::TimeOfDay:
 			if (interior)
 				return upper;
-			if (const auto* sky = globals::game::sky; sky && sky->currentWeather)
+			if (const auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); sky && sky->currentWeather)
 				upper.push_back(WithActiveSet({ .type = SceneContextType::Weather,
 					.weatherId = sky->currentWeather->GetFormID() }));
 			break;

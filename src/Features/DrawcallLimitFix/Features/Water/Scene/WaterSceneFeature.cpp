@@ -13,6 +13,7 @@
 // AddWater itself attaches no shape. It writes the property's plane and flags, then SetMaterial, which is a property event.
 
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
+#include "Snapshot/EngineReads.h"
 
 #include <atomic>
 
@@ -29,9 +30,9 @@ namespace DCLF::Features::Water::WaterScene
 		{
 			RE::NiNode* lod = nullptr;
 			RE::NiNode* system = nullptr;
-			if (const auto* tes = RE::TES::GetSingleton())
+			if (const auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton()))
 				lod = tes->objLODWaterRoot;
-			if (const auto* water = RE::TESWaterSystem::GetSingleton())
+			if (const auto* water = CS_ENGINE_READ(Water, RecordTime, RE::TESWaterSystem::GetSingleton()))
 				system = water->waterRoot.get();
 			listedWaterLod.store(lod, std::memory_order_relaxed);
 			listedWaterSystem.store(system, std::memory_order_relaxed);

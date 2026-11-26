@@ -14,6 +14,7 @@
 #include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "Features/DrawcallLimitFix/Features/Water/WaterNative.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "Globals.h"
@@ -59,7 +60,7 @@ namespace DCLF::Features::Water
 		 */
 		bool CurrentShape(const void* a_accumulator, View a_view, Run& a_run, std::uint32_t& a_depthFormat)
 		{
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 			if (a_accumulator != *mainAccumulator || rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 				return false;
@@ -68,7 +69,7 @@ namespace DCLF::Features::Water
 				Refusals().Report(std::format("a main camera {} batch with depth target {} bound, not kMAIN's", NameOf(a_view), rss.depthStencil));
 				return false;
 			}
-			const auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
+			const auto& depths = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils;
 			a_depthFormat = FormatOf(depths[main].views[0]);
 			if (!a_depthFormat)
 				return false;

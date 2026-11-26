@@ -1,4 +1,5 @@
 #include "BSLightingShaderMaterialPBRLandscape.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix.h"
 
@@ -99,7 +100,7 @@ void BSLightingShaderMaterialPBRLandscape::ReceiveValuesFromRootMaterial(bool sk
 	// DCLF's material records follow the material's writes (MaterialSources).
 	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	BSLightingShaderMaterialBase::ReceiveValuesFromRootMaterial(skinned, rimLighting, softLighting, backLighting, MSN);
-	const auto& stateData = globals::game::graphicsState->GetRuntimeData();
+	const auto& stateData = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData();
 	if (terrainOverlayTexture == nullptr) {
 		terrainOverlayTexture = stateData.defaultTextureNormalMap;
 	}

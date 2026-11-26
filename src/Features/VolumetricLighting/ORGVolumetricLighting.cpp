@@ -1,4 +1,5 @@
 #include "ORGVolumetricLighting.h"
+#include "Snapshot/EngineReads.h"
 
 #include <winrt/base.h>
 
@@ -218,9 +219,9 @@ namespace
 	VolumeSize NoiseSize()
 	{
 		const auto setting = [](const char* a_name) -> std::uint32_t {
-			RE::Setting* found = globals::game::iniSettingCollection ? globals::game::iniSettingCollection->GetSetting(a_name) : nullptr;
-			if (!found && globals::game::iniPrefSettingCollection)
-				found = globals::game::iniPrefSettingCollection->GetSetting(a_name);
+			RE::Setting* found = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection) ? CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)->GetSetting(a_name) : nullptr;
+			if (!found && CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
+				found = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection)->GetSetting(a_name);
 			return found ? static_cast<std::uint32_t>((std::max)(found->GetInteger(), 0)) : 0u;
 		};
 		return { setting("iVolumetricLightingNoiseTextureWidth:Display"), setting("iVolumetricLightingNoiseTextureHeight:Display"),
@@ -884,11 +885,11 @@ void ORGVolumetricLighting::Setup()
 {
 	if (!BeginSetup())
 		return;
-	if (!globals::game::renderer)
+	if (!CS_ENGINE_READ(Renderer, Other, globals::game::renderer))
 		Fatal("there is no renderer");
 	try {
 		auto fixed = std::make_shared<VLFixed>();
-		const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+		const auto& targets = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets;
 		const auto formatOf = [&](std::uint32_t a_target) {
 			D3D11_RENDER_TARGET_VIEW_DESC view{};
 			if (!targets[a_target].RTV)

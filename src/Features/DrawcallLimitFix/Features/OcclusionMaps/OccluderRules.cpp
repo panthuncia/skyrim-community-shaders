@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF::Features::OcclusionMaps
 {
@@ -78,7 +79,7 @@ namespace DCLF::Features::OcclusionMaps
 
 	void PrecipitationCamera(Api::OcclusionCamera& a_camera)
 	{
-		auto* sky = globals::game::sky;
+		auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 		auto* precip = sky ? sky->precip : nullptr;
 		a_camera.camera = precip ? precip->occlusionData.camera.get() : nullptr;
 	}

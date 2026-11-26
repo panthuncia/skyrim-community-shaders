@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/EntrySpaceTable.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF
 {
@@ -696,7 +697,7 @@ namespace DCLF
 		/** @brief Main thread. Sets kAccumulated on the object root's non-hidden children, as DrawWorld_BuildSceneLists does each frame. */
 		void CellRoots(Readback& a_readback)
 		{
-			const auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+			const auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0] : nullptr;
 			if (!sceneNode)
 				return;
 			auto* root = Engine::ObjectRoot(*sceneNode);
@@ -705,7 +706,7 @@ namespace DCLF
 				return;
 			// Matches DrawWorld_BuildSceneLists (AE 0x14064bc20). In an exterior it sets every non-hidden child from the third on.
 			// Children 0 and 1 are list entries whose bit the list cull owns. In an interior only the cell's 3D is a cell root.
-			const auto* tes = RE::TES::GetSingleton();
+			const auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 			auto* interior = tes ? tes->interiorCell : nullptr;
 			const auto* loaded = interior ? interior->GetRuntimeData().loadedData : nullptr;
 			const RE::NiAVObject* interior3D = loaded ? loaded->cell3D.get() : nullptr;

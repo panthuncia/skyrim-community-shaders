@@ -1,4 +1,5 @@
 #include "ScreenSpaceShadows.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/ScreenSpaceShadows/ORGScreenSpaceShadows.h"
 #include "Features/TerrainBlending.h"
@@ -86,7 +87,7 @@ void ScreenSpaceShadows::ClearShaderCache()
 
 uint ScreenSpaceShadows::GetScaledSampleCount()
 {
-	float2 renderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
+	float2 renderSize = Util::ConvertToDynamic(float2{ (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenHeight });
 	return ScaleSampleCount(bendSettings.SampleCount, renderSize);
 }
 
@@ -134,13 +135,13 @@ bool ScreenSpaceShadows::ShouldDraw() const
 
 bool ScreenSpaceShadows::SkyFull()
 {
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	return sky && sky->mode.get() == RE::Sky::Mode::kFull;
 }
 
 ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches(float2 a_screenSize) const
 {
-	auto accumulator = *globals::game::currentAccumulator.get();
+	auto accumulator = *CS_ENGINE_READ(Accumulator, RecordTime, globals::game::currentAccumulator).get();
 	auto dirLight = skyrim_cast<RE::NiDirectionalLight*>(accumulator->GetRuntimeData().activeShadowSceneNode->GetRuntimeData().sunLight->light.get());
 
 	auto& directionNi = dirLight->GetWorldDirection();
@@ -148,7 +149,7 @@ ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches(float2 a_scre
 	light.Normalize();
 	float4 lightProjection = float4(-light.x, -light.y, -light.z, 0.0f);
 
-	auto viewProjMat = globals::game::frameBufferCached.GetCameraViewProj().Transpose();
+	auto viewProjMat = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProj().Transpose();
 	auto projectedLight = DirectX::SimpleMath::Vector4::Transform(lightProjection, viewProjMat);
 	float lightProjectionF[4] = { projectedLight.x, projectedLight.y, projectedLight.z, projectedLight.w };
 
@@ -158,7 +159,7 @@ ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches(float2 a_scre
 	int minRenderBounds[2] = { 0, 0 };
 	int maxRenderBounds[2] = { viewportSize[0], viewportSize[1] };
 
-	auto viewport = globals::game::graphicsState;
+	auto viewport = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 	float2 dynamicRes = { viewport->GetRuntimeData().dynamicResolutionWidthRatio, viewport->GetRuntimeData().dynamicResolutionHeightRatio };
 
 	auto dispatchList = Bend::BuildDispatchList(lightProjectionF, viewportSize, minRenderBounds, maxRenderBounds);
@@ -224,7 +225,7 @@ void ScreenSpaceShadows::DrawShadows()
 
 	context->CSSetShader(GetComputeRaymarch(), nullptr, 0);
 
-	const auto dispatches = BuildDispatches(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
+	const auto dispatches = BuildDispatches(float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight });
 	for (uint32_t i = 0; i < dispatches.count; i++) {
 		{
 			CS_GPU_ZONE(globals::state->tracyCtx, "SSS - Dispatch CB");
@@ -326,7 +327,7 @@ void ScreenSpaceShadows::SetupResources()
 	}
 
 	{
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 		auto shadowMask = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kSHADOW_MASK];
 
 		shadowMask.texture->GetDesc(&shadowTextureDesc);

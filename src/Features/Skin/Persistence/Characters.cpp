@@ -1,4 +1,5 @@
 #include "Characters.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../Editor/Files.h"
 
@@ -57,7 +58,7 @@ namespace SkinCharacters
 				!std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isxdigit(c) != 0; }))
 				throw std::runtime_error(T("feature.skin.character_file_target", "\"target\" must be \"player\" or an NPC record such as \"0xA2C8E~Skyrim.esm\"."));
 			const auto plugin = text.substr(split + 1);
-			auto* data = RE::TESDataHandler::GetSingleton();
+			auto* data = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton());
 			const auto* file = data ? data->LookupModByName(plugin) : nullptr;
 			if (!file)
 				throw std::runtime_error(T("feature.skin.character_file_plugin_missing", "Its plugin is not installed: ") + plugin);
@@ -164,7 +165,7 @@ namespace SkinCharacters
 	{
 		if (!a_actor)
 			return {};
-		if (a_actor == RE::PlayerCharacter::GetSingleton())
+		if (a_actor == CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()))
 			return PlayerTarget();
 		// Actors generated from leveled lists use a temporary record; the record their appearance comes from is stable.
 		auto* npc = a_actor->GetActorBase();

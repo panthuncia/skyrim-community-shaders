@@ -4,6 +4,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameClock.h"
 
+#include "EngineZones.h"
 #include "Globals.h"
 #include "RenderGraph/Frame/BoundaryCheck.h"
 #include "RenderGraph/Frame/Declare.h"
@@ -30,6 +31,7 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/SharedConstants.h"
+#include "Snapshot/EngineReads.h"
 #include "RenderGraph/Testing/GraphFrames.h"
 
 #include <OpenRenderGraph/GraphHost.h>
@@ -3084,6 +3086,8 @@ namespace FrameAnchors
 
 	void BeginFrame(RenderGraph::Frame::Description& a_frame)
 	{
+		::Snapshot::EngineReads::BeginFrame(static_cast<std::uint8_t>(a_frame.kind));
+		::EngineZones::BeginFrame(static_cast<std::uint8_t>(a_frame.kind));
 		auto& state = Anchors();
 		if (!state.host || !IsRenderOwner())
 			return;
@@ -3815,7 +3819,7 @@ namespace FrameAnchors
 		const bool imported = a_target.kind == Kind::Colour && (!Targets::SetDeclared() || Targets::EngineOwned(Targets::Colour(index)));
 		if (!imported)
 			return Targets::SetDeclared() ? Targets::Slot(a_target) : Texture{};
-		auto* renderer = globals::game::renderer;
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		if (!renderer)
 			return {};
 		const auto target = renderer->GetRuntimeData().renderTargets[index];

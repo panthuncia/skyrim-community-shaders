@@ -6,6 +6,7 @@
 
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPersonView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
@@ -29,10 +30,10 @@ namespace DCLF::Features::FirstPerson
 		bool FirstPersonLatch()
 		{
 			bool latch = false;
-			if (auto* player = RE::PlayerCharacter::GetSingleton())
+			if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()))
 				if (const auto* root = player->Get3D(true); root && root != player->Get3D(false) && !root->GetFlags().any(RE::NiAVObject::Flag::kHidden)) {
-					auto* ui = RE::UI::GetSingleton();
-					const auto* camera = RE::PlayerCamera::GetSingleton();
+					auto* ui = CS_ENGINE_READ(UI, CapturePoint, RE::UI::GetSingleton());
+					const auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::PlayerCamera::GetSingleton());
 					const bool mainMenu = ui && ui->IsMenuOpen(RE::MainMenu::MENU_NAME);
 					const bool freeCamera = camera && camera->IsCurrentState(RE::CameraState::kFree, RE::CameraState::kFree);
 					latch = !mainMenu && camera && !freeCamera;
@@ -43,7 +44,7 @@ namespace DCLF::Features::FirstPerson
 		// The colour targets are kMAIN and the motion vectors, as FUN_1414cb6d0 binds them. Returns true when they changed.
 		bool CaptureFirstPersonTargets(const TargetFormats& a_formats)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 			if (renderer && a_formats.colorCount >= 2) {
 				const auto& copy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 				if (copy.views[0]) {
@@ -66,7 +67,7 @@ namespace DCLF::Features::FirstPerson
 			f.slotsFrame = a_frame;
 			f.slotsWanted.assign(tables.pipelines.size(), 0);
 			std::vector<RE::BSGeometry*> geometry;
-			if (auto* player = RE::PlayerCharacter::GetSingleton())
+			if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()))
 				if (auto* root = player->Get3D(true); root && root != player->Get3D(false))
 					SceneTracker::CollectGeometry(root, geometry);
 			const ankerl::unordered_dense::set<const RE::BSGeometry*> skeleton(geometry.begin(), geometry.end());
@@ -137,7 +138,7 @@ namespace DCLF::Features::FirstPerson
 	void CaptureRoot(Api::ViewRootCapture& a_capture)
 	{
 		// The first-person skeleton (PlayerCharacter +0x8F8) has no parent. Both roots are inputs so the category signature notices a swap.
-		if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+		if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton())) {
 			auto* firstPerson = player->Get3D(true);
 			const auto* thirdPerson = player->Get3D(false);
 			a_capture.inputs = { firstPerson, thirdPerson };
@@ -150,7 +151,7 @@ namespace DCLF::Features::FirstPerson
 	void CullHiddenSkeleton(Api::CullHiddenNodes& a_nodes)
 	{
 		// Main::Draw (AE 0x1406444b0) keeps the skeleton hidden for every view except its own first-person draw.
-		if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+		if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
 			const RE::NiAVObject* thirdPerson = player->Get3D(false);
 			const RE::NiAVObject* firstPerson = player->Get3D(true);
 			if (firstPerson && firstPerson != thirdPerson)

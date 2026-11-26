@@ -1,4 +1,5 @@
 #include "GrassCapture.h"
+#include "Snapshot/EngineReads.h"
 
 #include "GrassMeshLibrary.h"
 #include "TruePBR.h"
@@ -82,7 +83,7 @@ namespace GrassShared
 		void ReadPbr(AddEvent::Pbr& out, RE::BSShaderMaterial* material)
 		{
 			const auto* pbr = static_cast<const BSLightingShaderMaterialPBR*>(material);
-			const auto& defaults = globals::game::graphicsState->GetRuntimeData();
+			const auto& defaults = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->GetRuntimeData();
 			const RE::NiSourceTexture* white = defaults.defaultTextureWhite.get();
 			const RE::NiSourceTexture* black = defaults.defaultTextureBlack.get();
 

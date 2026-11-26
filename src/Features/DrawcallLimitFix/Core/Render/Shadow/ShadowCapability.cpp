@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
 #include "EngineFixes/ShadowmapCascadeRasterizerFix.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF
 {
@@ -57,7 +58,7 @@ namespace DCLF
 
 	bool ShadowEngine::BuildShadowPlacements()
 	{
-		auto* renderer = globals::game::renderer;
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto* plain = renderer ? EngineRasterStates()[0][1][0][0] : nullptr;
 		if (!plain)
 			return false;
@@ -147,12 +148,12 @@ namespace DCLF
 		// Scene side only. The frame's shadow epochs read readyModes instead.
 		auto& i = *impl->shadowEngine;
 		std::uint8_t phases = 0;
-		if (DrawPipelines::Get().Enabled() && globals::game::utilityShader && i.SetupShadow()) {
+		if (DrawPipelines::Get().Enabled() && CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader) && i.SetupShadow()) {
 			if (!i.shadowCatalogBuilt) {
 				i.BuildShadowCatalog();
 				if (i.shadowCatalogBuilt) {
 					// The pipelines' format is the depth-stencil view's, not the typeless texture's.
-					if (auto* renderer = globals::game::renderer)
+					if (auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 						if (auto* view = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS_ESRAM].views[0]) {
 							D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
 							view->GetDesc(&desc);
@@ -161,7 +162,7 @@ namespace DCLF
 					// Caster modes are sun, spot (clamped) and point (paraboloid). No view uses the plain mode.
 					i.readyModes[kSunShadowMode] = i.readyModes[kParabolicShadowMode] = true;
 					// Both occlusion maps draw into the precipitation occlusion target, in its format.
-					if (auto* renderer = globals::game::renderer)
+					if (auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 						if (auto* view = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP].views[0]) {
 							D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
 							view->GetDesc(&desc);

@@ -6,6 +6,7 @@
 // See skyrim-engine-notes.md, "the fade nodes' OnVisible stores and the actors' animation stamp".
 
 #include "Features/DrawcallLimitFix/Features/Actors/Actors.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
@@ -49,7 +50,7 @@ namespace DCLF::Features::Actors
 
 		void UpdateActorRate()
 		{
-			auto* lists = RE::ProcessLists::GetSingleton();
+			auto* lists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton());
 			if (!lists)
 				return;
 			auto& c = actorRate;

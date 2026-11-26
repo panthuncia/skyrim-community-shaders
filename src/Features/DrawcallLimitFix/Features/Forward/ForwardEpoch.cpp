@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Globals.h"
+#include "Snapshot/EngineReads.h"
 
 #include <d3d11.h>
 
@@ -46,7 +47,7 @@ namespace DCLF::Features::Forward
 				const auto* resources = a_resources;
 				auto& pipelines = DrawPipelines::Get();
 				pipelines.RequestRefraction();
-				if (resources && resources->refractionNormals && globals::game::utilityShader) {
+				if (resources && resources->refractionNormals && CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader)) {
 					// The engine's write mask for write mode 2 with blending off (FUN_1414b4860). Refraction is outside the deferred pass.
 					std::uint8_t writeMask = 0xF;
 					if (auto* blend = EngineBlendStates()[0][0][2][0]) {
@@ -54,7 +55,7 @@ namespace DCLF::Features::Forward
 						blend->GetDesc(&desc);
 						writeMask = static_cast<std::uint8_t>(desc.RenderTarget[0].RenderTargetWriteMask & 0xF);
 					}
-					pipelines.SetRefractionInputs(*globals::game::utilityShader, resources->refractionFormat, writeMask);
+					pipelines.SetRefractionInputs(*CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader), resources->refractionFormat, writeMask);
 				}
 				if (a_shape && a_shape->refractionCapacity) {
 					drawn = resources && resources->refractionNormals && resources->pool && a_shape->indirect.refraction.valid() &&

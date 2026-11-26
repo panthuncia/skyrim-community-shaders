@@ -1,5 +1,6 @@
 #include "Deferred.h"
 #include "Features/ViewAtmosphere.h"
+#include "Snapshot/EngineReads.h"
 
 #include <DDSTextureLoader.h>
 
@@ -79,7 +80,7 @@ namespace
 
 void SetupRenderTarget(RE::RENDER_TARGET target, const char* name, D3D11_TEXTURE2D_DESC texDesc, D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc, D3D11_RENDER_TARGET_VIEW_DESC rtvDesc, D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc, DXGI_FORMAT format, uint bindFlags)
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	texDesc.BindFlags = bindFlags;
@@ -139,7 +140,7 @@ void SetupRenderTarget(RE::RENDER_TARGET target, const char* name, D3D11_TEXTURE
 
 void Deferred::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 
 	{
 		auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
@@ -254,7 +255,7 @@ void Deferred::ReflectionsPrepasses()
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
 
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
+	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
 	Feature::ForEachLoadedFeature("ReflectionsPrepass", [](Feature* feature) { feature->ReflectionsPrepass(); }, true);
 	FrameAnchors::Run(FrameAnchors::Anchor::ReflectionsPrepass);
@@ -289,7 +290,7 @@ void Deferred::EarlyPrepasses()
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);  // Unbind all bound render targets
 
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
+	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
 	// Shadow maps have just been rendered — upload BSShadowDirectionalLight data to t98.
 	CopyShadowLightData();
@@ -332,7 +333,7 @@ void Deferred::StartDeferred()
 		return;
 	globals::state->UpdateSharedData(true, false);
 
-	auto shadowState = globals::game::shadowState;
+	auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 	auto& renderTargets = shadowState->GetRuntimeData().renderTargets;
 	auto& setRenderTargetMode = shadowState->GetRuntimeData().setRenderTargetMode;
 	auto& stateUpdateFlags = shadowState->GetRuntimeData().stateUpdateFlags;
@@ -368,7 +369,7 @@ void Deferred::StartDeferred()
 	{
 		auto context = globals::d3d::context;
 
-		ID3D11Buffer* buffers[1] = { *globals::game::perFrame.get() };
+		ID3D11Buffer* buffers[1] = { *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get() };
 		context->CSSetConstantBuffers(12, 1, buffers);
 	}
 
@@ -382,11 +383,11 @@ void Deferred::DeferredPasses()
 	ZoneScoped;
 	CS_GPU_ZONE(globals::state->tracyCtx, "Deferred");
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
 
 	{
-		ID3D11Buffer* buffers[1] = { *globals::game::perFrame };
+		ID3D11Buffer* buffers[1] = { *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame) };
 		context->CSSetConstantBuffers(12, 1, buffers);
 	}
 
@@ -571,7 +572,7 @@ void Deferred::EndDeferred()
 	if (!deferredPass)
 		return;
 
-	auto shadowState = globals::game::shadowState;
+	auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 	auto& renderTargets = shadowState->GetRuntimeData().renderTargets;
 	auto& stateUpdateFlags = shadowState->GetRuntimeData().stateUpdateFlags;
 
@@ -661,7 +662,7 @@ void Deferred::OverrideBlendStates()
 		}
 	}
 
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
+	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 }
 
 void Deferred::ResetBlendStates()
@@ -679,7 +680,7 @@ void Deferred::ResetBlendStates()
 		}
 	}
 
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
+	CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 }
 
 template <typename T>
@@ -698,7 +699,7 @@ void Deferred::SetShadowCascadeParameters(T& lightData, DirectionalShadowLightDa
 bool Deferred::GetDirectionalShadowLightData(DirectionalShadowLightData& a_out)
 {
 	ZoneScoped;
-	auto* shadowSceneNode = globals::game::smState->shadowSceneNode[0];
+	auto* shadowSceneNode = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0];
 	if (!shadowSceneNode)
 		return false;
 
@@ -940,7 +941,7 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 
 	// Copy depth from before water, unless DeferredPasses already did
 	if (!deferred->sceneDepthFinal) {
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 		auto context = globals::d3d::context;
 
 		auto depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];

@@ -16,6 +16,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF
 {
@@ -587,7 +588,7 @@ namespace DCLF
 			return mapsNotDrawn(0);
 		};
 		auto& pipelines = DrawPipelines::Get();
-		auto* utility = globals::game::utilityShader;
+		auto* utility = CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader);
 		if (!pipelines.Enabled() || !utility || !engine.shadow || engine.shadowPlacements.empty())
 			return notReady(ShadowNotReady::Setup);
 		const auto indirect = FrameShadowIndirectState();

@@ -1,4 +1,5 @@
 #include "BSLightingShaderMaterialPBR.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix.h"
 
@@ -283,7 +284,7 @@ void BSLightingShaderMaterialPBR::OnLoadTextureSet(std::uint64_t arg1, RE::BSTex
 {
 	// DCLF's material records follow the material's writes (MaterialSources).
 	const DrawcallLimitFix::MaterialWriteScope written{ this };
-	const auto& stateData = globals::game::graphicsState->GetRuntimeData();
+	const auto& stateData = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->GetRuntimeData();
 
 	if (diffuseTexture == nullptr || diffuseTexture == stateData.defaultTextureNormalMap) {
 		BSLightingShaderMaterialBase::OnLoadTextureSet(arg1, inTextureSet);
@@ -346,7 +347,7 @@ void BSLightingShaderMaterialPBR::ReceiveValuesFromRootMaterial(bool skinned, bo
 	// DCLF's material records follow the material's writes (MaterialSources).
 	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	BSLightingShaderMaterialBase::ReceiveValuesFromRootMaterial(skinned, rimLighting, softLighting, backLighting, MSN);
-	const auto& stateData = globals::game::graphicsState->GetRuntimeData();
+	const auto& stateData = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData();
 	if (rmaosTexture == nullptr) {
 		rmaosTexture = stateData.defaultTextureWhite;
 	}

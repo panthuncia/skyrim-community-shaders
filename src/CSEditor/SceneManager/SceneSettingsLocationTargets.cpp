@@ -1,4 +1,5 @@
 #include "SceneSettingsLocationTargets.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "Utils/Format.h"
@@ -134,9 +135,9 @@ namespace SceneSettingsLocationTargets
 		// cell the player is standing in; anywhere else the cell's own first region is the best guess.
 		if (cell && cell->IsExteriorCell()) {
 			RE::TESRegion* region = nullptr;
-			if (auto* player = RE::PlayerCharacter::GetSingleton();
-				player && player->GetParentCell() == cell && globals::game::sky)
-				region = globals::game::sky->region;
+			if (auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
+				player && player->GetParentCell() == cell && CS_ENGINE_READ(Sky, Other, globals::game::sky))
+				region = CS_ENGINE_READ(Sky, Other, globals::game::sky)->region;
 			if (!region) {
 				if (auto* regions = cell->GetRegionList(false)) {
 					auto regionIt = std::find_if(regions->begin(), regions->end(),
@@ -159,7 +160,7 @@ namespace SceneSettingsLocationTargets
 	std::vector<SceneSettingsManager::LocationTarget> BuildLocationCatalog()
 	{
 		std::vector<SceneSettingsManager::LocationTarget> targets;
-		auto* dataHandler = RE::TESDataHandler::GetSingleton();
+		auto* dataHandler = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 		if (!dataHandler)
 			return targets;
 

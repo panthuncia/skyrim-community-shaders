@@ -1,5 +1,6 @@
 #include "Widget.h"
 #include "Menu/IconLoader.h"
+#include "Snapshot/EngineReads.h"
 
 #include <format>
 #include <functional>
@@ -327,7 +328,7 @@ bool Widget::BeginWidgetWindow(bool showApply, bool showSaveLoadRevert, bool sho
 
 void Widget::ForceWeatherReinit(RE::TESWeather* weather)
 {
-	auto* sky = globals::game::sky;
+	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (weather && sky && sky->currentWeather == weather) {
 		Util::ForceWeather(sky, weather, true);
 		// An engaged lock owns the override slot; releasing it flickers the sky until the lock reasserts.
@@ -340,7 +341,7 @@ void Widget::ForceWeatherReinit(RE::TESWeather* weather)
 
 void Widget::ForceCurrentWeatherReinit()
 {
-	if (auto* sky = globals::game::sky)
+	if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky))
 		ForceWeatherReinit(sky->currentWeather);
 }
 

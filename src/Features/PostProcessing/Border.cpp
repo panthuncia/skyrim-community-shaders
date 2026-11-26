@@ -1,4 +1,5 @@
 #include "Border.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/PostProcessing.h"
 #include "Features/Upscaling.h"
@@ -103,10 +104,10 @@ void Border::ClearMotionVectorsForFrameGen()
 	if (settings.Scale.x <= 0.f && settings.Scale.y <= 0.f && settings.Scale.z <= 0.f && settings.Scale.w <= 0.f)
 		return;
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto context = globals::d3d::context;
 
-	float2 screenSize{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+	float2 screenSize{ (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenHeight };
 	auto dynResDim = Util::ConvertToDynamic(screenSize, true);
 
 	borderCB->Update(Constants(dynResDim));
@@ -147,7 +148,7 @@ void Border::Draw(TextureInfo& inout_tex)
 		return;
 
 	globals::profiler->BeginPass("PostProcessing::Border");
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
 
 	float2 res = { (float)texOutput->desc.Width, (float)texOutput->desc.Height };

@@ -1,4 +1,5 @@
 #include "LightLimitFix.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/EditorWindow.h"
 #include "DrawcallLimitFix.h"
@@ -239,11 +240,11 @@ LightLimitFix::PerFrame LightLimitFix::GetCommonBufferData()
 	};
 
 	const float texelSize = 1.0f / static_cast<float>(std::max(localShadowCacheResolution, 1u));
-	if (!poissonRadiusScaleLookedUp && globals::game::iniSettingCollection) {
+	if (!poissonRadiusScaleLookedUp && CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)) {
 		poissonRadiusScaleLookedUp = true;
-		poissonRadiusScaleSetting = globals::game::iniSettingCollection->GetSetting("fPoissonRadiusScale:Display");
-		if (!poissonRadiusScaleSetting && globals::game::iniPrefSettingCollection)
-			poissonRadiusScaleSetting = globals::game::iniPrefSettingCollection->GetSetting("fPoissonRadiusScale:Display");
+		poissonRadiusScaleSetting = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)->GetSetting("fPoissonRadiusScale:Display");
+		if (!poissonRadiusScaleSetting && CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
+			poissonRadiusScaleSetting = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection)->GetSetting("fPoissonRadiusScale:Display");
 	}
 	const float poissonRadiusScale = poissonRadiusScaleSetting ? sanitize(poissonRadiusScaleSetting->data.f, 0.0f, LOCAL_SHADOW_MAX_POISSON_RADIUS) : LOCAL_SHADOW_DEFAULT_POISSON_RADIUS;
 	const float filterRadius = localShadowEngineResolution ? poissonRadiusScale / static_cast<float>(localShadowEngineResolution) : poissonRadiusScale * texelSize;
@@ -256,7 +257,7 @@ LightLimitFix::PerFrame LightLimitFix::GetCommonBufferData()
 
 void LightLimitFix::SetupResources()
 {
-	float2 screenSize{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+	float2 screenSize{ (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenHeight };
 	clusterSize[0] = ((uint)screenSize.x + 63) / 64;
 	clusterSize[1] = ((uint)screenSize.y + 63) / 64;
 	clusterSize[2] = 32;
@@ -448,8 +449,8 @@ uint LightLimitFix::GetShadowBitMask(const RE::BSRenderPass* a_pass)
 
 void LightLimitFix::BSLightingShader_SetupGeometry_GeometrySetupConstantPointLights(RE::BSRenderPass* a_pass)
 {
-	auto accumulator = *globals::game::currentAccumulator.get();
-	bool inWorld = accumulator->GetRuntimeData().activeShadowSceneNode == globals::game::smState->shadowSceneNode[0];
+	auto accumulator = *CS_ENGINE_READ(Accumulator, CapturePoint, globals::game::currentAccumulator).get();
+	bool inWorld = accumulator->GetRuntimeData().activeShadowSceneNode == CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0];
 
 	strictLightDataTemp.NumStrictLights = inWorld ? 0 : (a_pass->numLights - 1);
 
@@ -489,12 +490,12 @@ void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass*)
 {
 	auto shaderCache = globals::shaderCache;
 	auto context = globals::d3d::context;
-	auto smState = globals::game::smState;
+	auto smState = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
 
 	if (!shaderCache->IsEnabled())
 		return;
 
-	auto accumulator = *globals::game::currentAccumulator.get();
+	auto accumulator = *CS_ENGINE_READ(Accumulator, CapturePoint, globals::game::currentAccumulator).get();
 
 	auto shadowSceneNode = smState->shadowSceneNode[0];
 
@@ -708,7 +709,7 @@ float LightLimitFix::BSLight_GetLuminance::thunk(RE::BSLight* bsLight, RE::NiPoi
 
 void LightLimitFix::DataLoaded()
 {
-	auto iMagicLightMaxCount = globals::game::gameSettingCollection->GetSetting("iMagicLightMaxCount");
+	auto iMagicLightMaxCount = CS_ENGINE_READ(Ini, Other, globals::game::gameSettingCollection)->GetSetting("iMagicLightMaxCount");
 	iMagicLightMaxCount->data.i = MAXINT32;
 	logger::info("[LLF] Unlocked magic light limit");
 }
@@ -738,14 +739,14 @@ void LightLimitFix::ClearShaderCache()
 
 void LightLimitFix::UpdateLights()
 {
-	auto smState = globals::game::smState;
+	auto smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
 
 	auto shadowSceneNode = smState->shadowSceneNode[0];
 
 	// Cache camera position from the FrameBuffer snapshot; shadowState::posAdjust can be stale in first-person
 
 	{
-		auto eyePosition = globals::game::frameBufferCached.GetCameraPosAdjust();
+		auto eyePosition = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 		eyePositionCached = { eyePosition.x, eyePosition.y, eyePosition.z };
 		if (IsLocalShadowsEnabled())
 			strictLightDataTemp.WorldEyePosition = { eyePosition.x, eyePosition.y, eyePosition.z, 0.0f };
@@ -930,8 +931,8 @@ void LightLimitFix::UpdateLights()
 
 void LightLimitFix::UpdateClusterParameters()
 {
-	lightsNear = *globals::game::cameraNear;
-	lightsFar = *globals::game::cameraFar;
+	lightsNear = *CS_ENGINE_READ(Camera, RecordTime, globals::game::cameraNear);
+	lightsFar = *CS_ENGINE_READ(Camera, RecordTime, globals::game::cameraFar);
 
 	// On the graph the grid is the adopted revision's, so the culling and this frame's readers agree on it.
 	std::array<uint32_t, 3> adoptedGrid{};
@@ -940,7 +941,7 @@ void LightLimitFix::UpdateClusterParameters()
 		return;
 	}
 
-	auto renderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
+	auto renderSize = Util::ConvertToDynamic(float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight });
 	clusterSize[0] = ((uint)renderSize.x + 63) / 64;
 	clusterSize[1] = ((uint)renderSize.y + 63) / 64;
 	clusterSize[2] = 32;
@@ -959,8 +960,8 @@ bool LightLimitFix::CullOnRenderGraph(const eastl::vector<LightData>& a_lightsDa
 	inputs.lightsNear = lightsNear;
 	inputs.lightsFar = lightsFar;
 	// The same matrices the D3D11 shaders read from the FrameBuffer cbuffer (row-major).
-	std::memcpy(inputs.cameraProjInverse.data(), &globals::game::frameBufferCached.GetCameraProjInverse(), sizeof(float) * 16);
-	std::memcpy(inputs.cameraView.data(), &globals::game::frameBufferCached.GetCameraView(), sizeof(float) * 16);
+	std::memcpy(inputs.cameraProjInverse.data(), &CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraProjInverse(), sizeof(float) * 16);
+	std::memcpy(inputs.cameraView.data(), &CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraView(), sizeof(float) * 16);
 
 	// The Prepass anchor's commit writes these into its run. Its passes report their own GPU time (RenderGraphRuntime::ProfilerName).
 	return orgCulling.SetFrame(inputs);
@@ -1481,7 +1482,7 @@ bool LightLimitFix::TrackLocalShadowCasters()
 	if (!IsLocalShadowCacheActive())
 		return false;
 
-	auto smState = globals::game::smState;
+	auto smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
 	if (!smState)
 		return false;
 	auto shadowSceneNode = smState->shadowSceneNode[0];
@@ -1494,7 +1495,7 @@ bool LightLimitFix::TrackLocalShadowCasters()
 	const uint32_t frame = localShadowFrame;
 
 	if (frame == 1) {
-		auto eyePosition = globals::game::frameBufferCached.GetCameraPosAdjust();
+		auto eyePosition = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 		localShadowCameraPosition = { eyePosition.x, eyePosition.y, eyePosition.z };
 	}
 
@@ -1513,8 +1514,8 @@ bool LightLimitFix::TrackLocalShadowCasters()
 			return;
 		localShadowActors.push_back({ position, speed });
 	};
-	addActor(RE::PlayerCharacter::GetSingleton());
-	if (auto processLists = RE::ProcessLists::GetSingleton()) {
+	addActor(CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()));
+	if (auto processLists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton())) {
 		for (auto& handle : processLists->highActorHandles) {
 			if (auto actor = handle.get())
 				addActor(actor.get());
@@ -1522,7 +1523,7 @@ bool LightLimitFix::TrackLocalShadowCasters()
 	}
 	std::swap(localShadowActorHistory, localShadowActorHistoryNext);
 
-	const auto* camera = RE::Main::WorldRootCamera();
+	const auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 	RE::NiFrustumPlanes viewFrustum{};
 	if (camera)
 		Util::ComputeFrustumPlanes(viewFrustum, camera->GetRuntimeData2().viewFrustum, camera->world);
@@ -1986,8 +1987,8 @@ void LightLimitFix::CopyLocalShadowMaps()
 	localShadowStatRendered = 0;
 	localShadowStatCached = 0;
 
-	auto smState = globals::game::smState;
-	auto renderer = globals::game::renderer;
+	auto smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	if (!smState || !renderer)
 		return;
 	auto shadowSceneNode = smState->shadowSceneNode[0];
@@ -2140,8 +2141,8 @@ void LightLimitFix::CopyLocalShadowMaps()
 		}
 	}
 
-	const auto& eye = globals::game::frameBufferCached.GetCameraPosAdjust();
-	const float frameTime = globals::game::deltaTime ? std::clamp(*globals::game::deltaTime, 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME) : 0.0f;
+	const auto& eye = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const float frameTime = CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) ? std::clamp(*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime), 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME) : 0.0f;
 	// Unwritten slots are zero; no light flagged LocalShadow points at them.
 	localShadowFrameData.assign(localShadowCacheSlots, LocalShadowData{});
 	for (auto& caster : localShadowCasters) {

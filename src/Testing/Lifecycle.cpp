@@ -1,4 +1,5 @@
 // The load milestones and phases, and the phase timeouts.
+#include "Snapshot/EngineReads.h"
 #include "Testing/Internal.h"
 #include "Testing/SwitchRegistry.h"
 
@@ -121,7 +122,7 @@ namespace Testing
 		bool playerReady = false;
 		if (!loading && !mainMenu) {
 			// The player's cell attached and their 3D loaded: the world around them is drawn.
-			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 			auto* cell = player ? player->GetParentCell() : nullptr;
 			playerReady = cell && cell->IsAttached() && player->Get3D() != nullptr;
 		}

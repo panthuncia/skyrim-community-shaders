@@ -2,6 +2,7 @@
 // immutable snapshot.
 #include "PlayerParity.h"
 #include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Hooks.h"
 #include "I18n/I18n.h"
@@ -91,7 +92,7 @@ namespace DCLF::Diagnostics::PlayerParity
 		/** @brief The plugin a form ID's load order index names. A reference no longer loaded still names its plugin. */
 		std::string PluginOfId(std::uint32_t a_form)
 		{
-			auto* handler = RE::TESDataHandler::GetSingleton();
+			auto* handler = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton());
 			if (!handler || !a_form)
 				return {};
 			const auto index = a_form >> 24;
@@ -265,7 +266,7 @@ namespace DCLF::Diagnostics::PlayerParity
 				offender.references > 1 ? fmt::format(" and {} other references sharing it", offender.references - 1) : "", named.plugin,
 				named.lastPlugin.empty() ? "" : fmt::format(" (last edited by {})", named.lastPlugin), offender.count, offender.firstFrame, offender.lastFrame, offender.example);
 		}
-		if (auto* handler = RE::TESDataHandler::GetSingleton()) {
+		if (auto* handler = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton())) {
 			out << "\nLoad order:\n";
 			for (const auto* file : handler->files)
 				if (file && file->compileIndex != 0xFF)

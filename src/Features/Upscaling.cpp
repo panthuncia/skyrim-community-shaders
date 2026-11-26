@@ -1,6 +1,7 @@
 #include "Upscaling.h"
-#include "RenderGraph/Frame/PostChain.h"
 #include "DrawcallLimitFix.h"
+#include "RenderGraph/Frame/PostChain.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../I18n/I18n.h"
 #include "Deferred.h"
@@ -351,7 +352,7 @@ void Upscaling::DrawSettings()
 void Upscaling::SaveSettings(json& o_json)
 {
 	o_json = settings;
-	auto iniSettingCollection = globals::game::iniPrefSettingCollection;
+	auto iniSettingCollection = CS_ENGINE_READ(Ini, Other, globals::game::iniPrefSettingCollection);
 	if (iniSettingCollection) {
 		auto setting = iniSettingCollection->GetSetting("bUseTAA:Display");
 		if (setting) {
@@ -387,7 +388,7 @@ void Upscaling::LoadSettings(json& o_json)
 		logger::warn("[Upscaling] Loaded qualityMode {} out of range, clamping to 4 (Ultra Performance)", settings.qualityMode.Get());
 		settings.qualityMode = 4;
 	}
-	auto iniSettingCollection = globals::game::iniPrefSettingCollection;
+	auto iniSettingCollection = CS_ENGINE_READ(Ini, Other, globals::game::iniPrefSettingCollection);
 	if (iniSettingCollection) {
 		auto setting = iniSettingCollection->GetSetting("bUseTAA:Display");
 		if (setting) {
@@ -405,11 +406,11 @@ void Upscaling::DataLoaded()
 {
 	Util::DisableVanillaTAA();
 
-	static auto fDRClampOffset = RE::GetINISetting("fDRClampOffset:Display");
+	static auto fDRClampOffset = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("fDRClampOffset:Display"));
 	fDRClampOffset->data.f = 0.0f;
 
 	// unk88 keeps the dynamic-resolution viewport, which rounds the 16x1 lens flare visibility target to nothing
-	const auto& effects = RE::ImageSpaceManager::GetSingleton()->effects;
+	const auto& effects = CS_ENGINE_READ(ImageSpace, Other, RE::ImageSpaceManager::GetSingleton())->effects;
 	const auto visibilityIndex = RE::ImageSpaceManager::GetCurrentIndex(RE::ImageSpaceManager::ISLensFlareVisibility);
 	if (visibilityIndex < effects.size() && effects[visibilityIndex])
 		effects[visibilityIndex]->unk88 = false;
@@ -687,7 +688,7 @@ void Upscaling::BeginRenderFrame()
 		static uint64_t secondTick = 0, lastTick = 0, lastPresented = 0;
 		static uint32_t frames = 0, worst = 0, stalls = 0;
 		const auto now = GetTickCount64();
-		auto* ui = RE::UI::GetSingleton();
+		auto* ui = CS_ENGINE_READ(UI, RecordTime, RE::UI::GetSingleton());
 		const auto describe = [&] {
 			return std::format("presented x{}, setting {}x, fg {}, active {}, unusable {}, csMenu {}, paused {}, loaded {}", Streamline::GetSingleton()->GetFrameGenerationMultiplier(), settings.dlssgDynamic ? 0u : settings.frameGenMultiplier.Get(), settings.frameGeneration.Get(), IsFrameGenerationActive(), IsWindowUnusable(), globals::menu && globals::menu->ShouldSwallowInput(), ui && ui->GameIsPaused(), Streamline::GetSingleton()->IsDLSSGLoaded());
 		};
@@ -1037,8 +1038,8 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 	auto requestFaultTeardown = [&](const char* a_reason) -> HRESULT {
 		logger::error("[Upscaling] {} - disabling frame generation", a_reason);
 		settings.frameGeneration = false;
-		const uint32_t displayWidth = globals::game::graphicsState ? globals::game::graphicsState->screenWidth : 0;
-		const uint32_t displayHeight = globals::game::graphicsState ? globals::game::graphicsState->screenHeight : 0;
+		const uint32_t displayWidth = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState) ? CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth : 0;
+		const uint32_t displayHeight = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState) ? CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight : 0;
 		if (streamline->IsDLSSGLoaded() &&
 			!streamline->SetDLSSGMode(false, displayWidth, displayHeight)) {
 			logger::error("[Upscaling] DLSS-G mode-off failed; continuing with device-idle teardown");
@@ -1103,7 +1104,7 @@ void Upscaling::CreateUpscaledTexture()
 	if (UpscaledResource())
 		return;
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
 	D3D11_TEXTURE2D_DESC texDesc{};
@@ -1163,7 +1164,7 @@ Texture2D* Upscaling::SelectD3D11Hudless()
 			return nullptr;
 		hdr.outputTexture->resource->GetDesc(&texDesc);
 	} else {
-		auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+		auto& fb = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 		if (!fb.SRV)
 			return nullptr;
 		winrt::com_ptr<ID3D11Resource> fbResource;
@@ -1281,7 +1282,7 @@ ID3D11Resource* Upscaling::CaptureHudlessColor()
 		return CopyHudlessColor(hdr.outputTexture->srv.get()) ? HudlessResource() : nullptr;
 	}
 
-	auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+	auto& fb = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 	if (!fb.SRV)
 		return nullptr;
 
@@ -1378,7 +1379,7 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 
 	auto state = globals::state;
 	// The graphics-state dimensions are the full display size.
-	float2 screenSize{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+	float2 screenSize{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 
 	auto screenWidth = static_cast<int>(screenSize.x);
 	auto screenHeight = static_cast<int>(screenSize.y);
@@ -1476,7 +1477,7 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 
 void Upscaling::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
 	D3D11_TEXTURE2D_DESC texDesc{};
@@ -1579,7 +1580,7 @@ void UpdateCameraData()
 
 void Upscaling::PostDisplay()
 {
-	auto viewport = globals::game::graphicsState;
+	auto viewport = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 
 	viewport->projectionPosScaleX = projectionPosScaleX;
 	viewport->projectionPosScaleY = projectionPosScaleY;
@@ -1592,7 +1593,7 @@ void Upscaling::PostDisplay()
 	runtimeData.dynamicResolutionHeightRatio = 1;
 	runtimeData.dynamicResolutionLock = 1;
 
-	globals::game::renderer->UpdateViewPort(0, 0, 1);
+	CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->UpdateViewPort(0, 0, 1);
 	UpdateCameraData();
 
 	globals::state->UpdateSharedData(false, false);
@@ -1772,7 +1773,7 @@ void Upscaling::Upscale()
 
 	auto state = globals::state;
 	auto context = globals::d3d::context;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	const auto method = FrameUpscaleMethod();
 	// The SDK options are this frame's: the adopted quality, the display size and the pre-exposure (Streamline sets them when
 	// the evaluate records).
@@ -1799,7 +1800,7 @@ void Upscaling::Upscale()
 		auto* mainTexture = Unwrap(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture);
 		auto* depthTexture = Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture);
 		auto* motionTexture = Unwrap(motionVector.texture);
-		const auto displaySize = float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+		const auto displaySize = float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 		const auto renderSize = Util::ConvertToDynamic(displaySize);
 		auto result = Streamline::EvaluationResult::kFailed;
 
@@ -1856,7 +1857,7 @@ void Upscaling::PerformUpscaling()
 	// CS_ORG_UPSCALING: the copy into kMAIN and the depth upscale queued above.
 	ORGUpscaling::Get().RunUpscale();
 
-	auto& runtimeData = globals::game::graphicsState->GetRuntimeData();
+	auto& runtimeData = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData();
 
 	runtimeData.dynamicResolutionLock = 1;
 
@@ -1897,14 +1898,14 @@ void Upscaling::UpscaleDepth()
 	}
 
 	auto state = globals::state;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
 	auto deferred = globals::deferred;
 	if (!state || !renderer || !context || !deferred || !deferred->linearSampler || !jitterCB || !upscaleRasterizerState || !upscaleBlendState || !upscaleDepthStencilState) {
 		return;
 	}
 
-	float2 screenSize{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+	float2 screenSize{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 	if (screenSize.x <= 0.0f || screenSize.y <= 0.0f) {
 		return;
 	}
@@ -2022,7 +2023,7 @@ void Upscaling::UpscaleDepth()
 
 void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 {
-	auto* ui = globals::game::ui;
+	auto* ui = CS_ENGINE_READ(UI, RecordTime, globals::game::ui);
 	const bool gameplay = ui && !ui->GameIsPaused() && !globals::state->IsMainOrLoadingMenuOpen(ui);
 	const auto fgMethod = GetFrameGenMethod();
 	if (!FrameGen::ActivePresenter().Surface().ready ||
@@ -2030,7 +2031,7 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 		 !FrameGen::Controller::GetSingleton()->IsFSRPresenterReady()))
 		return;
 
-	auto* renderer = globals::game::renderer;
+	auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	// Engine target fields can be tripwire handles: Streamline takes the wrapped objects.
 	using RenderGraph::Engine::Tripwire::Unwrap;
 	auto* motionTexture = Unwrap(renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR].texture);
@@ -2039,7 +2040,7 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 		FrameGen::Controller::GetSingleton()->EngageDLSSG();
 
 		if (gameplay) {
-			const auto displaySize = float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+			const auto displaySize = float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 			const auto renderSize = Util::ConvertToDynamic(displaySize, true);
 			auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 			auto& depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY];
@@ -2074,7 +2075,7 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 			}
 		}
 	} else if (fgMethod == FrameGenMethod::kFSR && gameplay) {
-		const auto displaySize = float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+		const auto displaySize = float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 		const auto renderSize = Util::ConvertToDynamic(displaySize, true);
 		auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		auto& depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY];
@@ -2174,7 +2175,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 void Upscaling::Main_RenderPrecipitation::thunk()
 {
-	auto& runtimeData = globals::game::graphicsState->GetRuntimeData();
+	auto& runtimeData = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->GetRuntimeData();
 	runtimeData.dynamicResolutionLock = 1;
 	func();
 	runtimeData.dynamicResolutionLock = 0;
@@ -2182,7 +2183,7 @@ void Upscaling::Main_RenderPrecipitation::thunk()
 
 void Upscaling::BSFaceGenManager_UpdatePendingCustomizationTextures::thunk()
 {
-	auto& runtimeData = globals::game::graphicsState->GetRuntimeData();
+	auto& runtimeData = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->GetRuntimeData();
 	runtimeData.dynamicResolutionLock = 1;
 	func();
 	runtimeData.dynamicResolutionLock = 0;

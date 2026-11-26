@@ -2,6 +2,7 @@
 // and Bundle.cpp's worker writes the rest and zips it.
 
 #include "CaptureInternal.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SkinPartitionWatch.h"
@@ -227,7 +228,7 @@ namespace DCLF::Capture
 		MainThreadInfo ReadMainThread()
 		{
 			MainThreadInfo info;
-			if (auto* data = RE::TESDataHandler::GetSingleton()) {
+			if (auto* data = CS_ENGINE_READ(Data, CapturePoint, RE::TESDataHandler::GetSingleton())) {
 				const auto list = [&](RE::TESFile** a_files, std::uint32_t a_count, std::string_view a_kind) {
 					for (std::uint32_t i = 0; a_files && i < a_count; ++i)
 						if (a_files[i])
@@ -237,7 +238,7 @@ namespace DCLF::Capture
 				list(data->GetLoadedLightMods(), data->GetLoadedLightModCount(), "light");
 			}
 			json j = json::object();
-			if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+			if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton())) {
 				const auto& position = player->GetPosition();
 				j["position"] = { position.x, position.y, position.z };
 				if (auto* cell = player->GetParentCell())

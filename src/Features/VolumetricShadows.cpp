@@ -1,4 +1,5 @@
 #include "VolumetricShadows.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "I18n/I18n.h"
@@ -213,7 +214,7 @@ void VolumetricShadows::CopyShadowLightData(ID3D11ShaderResourceView* a_shadowMa
 					shadowTexture->GetDesc(&srcDesc);
 
 					// Dispatch downsample compute shader
-					auto renderer = globals::game::renderer;
+					auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 					auto& esramDepthStencil = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM];
 
 					// Engine target fields can be tripwire handles: DXVK takes the wrapped object.

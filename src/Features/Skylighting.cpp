@@ -1,4 +1,5 @@
 #include "Skylighting.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "DrawcallLimitFix.h"
@@ -111,7 +112,7 @@ void Skylighting::DrawSettings()
 
 void Skylighting::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	{
@@ -350,7 +351,7 @@ void Skylighting::Prepass()
 
 	bool interior = true;
 
-	if (auto sky = globals::game::sky)
+	if (auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky))
 		interior = sky->mode.get() != RE::Sky::Mode::kFull;
 
 	if (interior)
@@ -361,7 +362,7 @@ void Skylighting::Prepass()
 	auto context = globals::d3d::context;
 
 	if (!UpdateProbesOnGraph()) {
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto& esramDepthStencil = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM];
 
 		std::array<ID3D11ShaderResourceView*, 5> srvs = {
@@ -608,7 +609,7 @@ RE::BSShaderProperty::RenderPassArray* Skylighting::BSLightingShaderProperty_Get
 	precipitationOcclusionMapRenderPassList->Clear();
 	if (const auto technique = OcclusionTechnique(property, geometry, skylighting.inOcclusion)) {
 		precipitationOcclusionMapRenderPassList->EmplacePass(
-			globals::game::utilityShader,
+			CS_ENGINE_READ(Shaders, CapturePoint, globals::game::utilityShader),
 			property,
 			geometry,
 			technique + static_cast<uint32_t>(ShaderTechnique::UtilityGeneralStart));
@@ -686,7 +687,7 @@ void Skylighting::BeginOcclusionFrame()
 void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf)
 {
 	[[maybe_unused]] auto state = globals::state;  // Tracy only
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	// Native mode: nothing the engine draws reaches the GPU, so the engine has nothing to draw into the map: no slot of its depth table is
 	// lent to it, the engine culls nothing for it, and nothing clears it here. Drawcall Limit Fix draws the map, and ORGSkylighting clears it
@@ -806,7 +807,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 void Skylighting::RenderOcclusionAtShadowMaps()
 {
 	auto& dclf = globals::features::drawcallLimitFix;
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!loaded || !dclf.loaded || !globals::shaderCache->IsEnabled() || !sky || Util::IsInterior())
 		return;
 	ZoneScoped;
@@ -828,11 +829,11 @@ void Skylighting::RenderOcclusionAtShadowMaps()
 	// Before the engine's shadow maps, so whatever RenderMask leaves of the renderer's state (its targets, viewport, camera) the shadow maps
 	// set again as they did; the camera the shadow maps begin with is put back besides (EarlyPrepasses reads its eye after them). As
 	// Upscaling's hook of the engine's occlusion point: the maps' viewport is not scaled by dynamic resolution.
-	auto& shadowState = globals::game::shadowState->GetRuntimeData();
+	auto& shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData();
 	const auto posAdjust = shadowState.posAdjust;
 	const auto previousPosAdjust = shadowState.previousPosAdjust;
 	const auto cameraData = shadowState.cameraData;
-	auto& graphicsState = globals::game::graphicsState->GetRuntimeData();
+	auto& graphicsState = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData();
 	const auto dynamicResolutionLock = graphicsState.dynamicResolutionLock;
 	graphicsState.dynamicResolutionLock = 1;
 	if (precipitationMask)
@@ -851,7 +852,7 @@ void Skylighting::RenderOcclusion()
 	ZoneScopedS(8);
 	auto shaderCache = globals::shaderCache;
 	auto state = globals::state;
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 
 	if (!shaderCache->IsEnabled()) {
 		CS_GPU_ZONE(globals::state->tracyCtx, "Precipitation Mask");

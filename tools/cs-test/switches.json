@@ -782,7 +782,7 @@
 			"choices": [],
 			"kind": "diagnostic",
 			"family": "cs",
-			"description": "1: Tracy zones around the engine's render function calls (AE 1.6.1170 only, Tracy builds)"
+			"description": "1: the engine-render detector's call sites without its log (EngineZones.h): Tracy zones around the engine's render function calls in Tracy builds (AE 1.6.1170; SE 1.5.97 for sites with an SE match)"
 		},
 		{
 			"name": "CS_FEATURE_GPU_ZONES",
@@ -1476,6 +1476,16 @@
 			"kind": "other",
 			"family": "cs",
 			"description": ""
+		},
+		{
+			"name": "CS_SNAPSHOT_DETECT",
+			"key": "cs.snapshot_detect",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "diagnostic",
+			"family": "cs",
+			"description": "1: the snapshot detectors' tables in the log, at each load and at exit: live engine reads by site, feature and category (Snapshot/EngineReads.h), and engine render calls by site and frame kind (EngineZones.h)"
 		},
 		{
 			"name": "CS_STREAMLINE_DLSS",

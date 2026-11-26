@@ -1,4 +1,5 @@
 #include "LegacyGraphicsCompatibility.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Utils/VersionedRelocation.h"
 
@@ -155,7 +156,7 @@ namespace LegacyGraphicsCompatibility
 		static_assert(grassPerGeometrySize == 0x160);
 
 		const auto level = RE::BSGraphics::ConstantGroupLevel::PerGeometry;
-		auto* shadowState = RE::BSGraphics::RendererShadowState::GetSingleton();
+		auto* shadowState = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton());
 		if (!shadowState) {
 			logger::error("Cannot bind the Skyrim 1.7 grass pixel contract without renderer shadow state");
 			return;

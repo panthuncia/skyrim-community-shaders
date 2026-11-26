@@ -1,4 +1,5 @@
 #include "LensFlare.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "Features/PostProcessing.h"
@@ -365,7 +366,7 @@ void LensFlare::SaveSettings(json& o_json)
 
 void LensFlare::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	logger::debug("LensFlare: Creating buffers...");

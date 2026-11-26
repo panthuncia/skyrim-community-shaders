@@ -16,6 +16,7 @@
 #include "RenderGraph/Relocation/Holders.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/UndeclaredAccess.h"
+#include "Snapshot/EngineReads.h"
 
 #include <Render/PassBuilders.h>
 #include <Render/PreparedPass.h>
@@ -613,7 +614,7 @@ namespace DCLF::Extensions
 		if (GraphTextureIndex(a_reader, a_register, "precipitation occlusion", view, ids, a_index))
 			return true;
 		// Only the engine's own map. Skylighting swaps its map into the field while it draws, but Wetness Effects binds the engine's after that.
-		auto* renderer = globals::game::renderer;
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		if (!renderer)
 			return false;
 		constexpr auto target = RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP;

@@ -1,4 +1,5 @@
 #include "LandscapeSeamsFix.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -360,7 +361,7 @@ void LandscapeSeamsFix::Heal(const QuadKey& a_key, const Quad& a_quad, Healed& a
 std::shared_ptr<LandscapeSeamsFix::Resources> LandscapeSeamsFix::CreateResources(const Healed& a_healed) const
 {
 	auto resources = std::make_shared<Resources>();
-	const auto& defaults = globals::game::graphicsState->GetRuntimeData();
+	const auto& defaults = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->GetRuntimeData();
 	auto& truePBR = globals::features::truePBR;
 
 	QuadData data{};

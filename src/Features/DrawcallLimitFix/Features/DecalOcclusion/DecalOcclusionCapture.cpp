@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
@@ -69,7 +70,7 @@ namespace DCLF::Features::DecalOcclusion
 				return "its target is skinned (the bones are not latched)";
 			if (!a_capture.camera)
 				return "the test has no camera";
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			if (!vs)
 				return "no vertex shader is bound";

@@ -1,4 +1,5 @@
 #include "PhysicalSky.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <cctype>
@@ -223,8 +224,8 @@ namespace
 {
 	RE::TESWorldSpace* GetCurrentWorldspace()
 	{
-		auto* tes = globals::game::tes ? globals::game::tes : RE::TES::GetSingleton();
-		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* tes = CS_ENGINE_READ(TES, RecordTime, globals::game::tes) ? CS_ENGINE_READ(TES, RecordTime, globals::game::tes) : CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
+		auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 		auto* cell = player ? player->GetParentCell() : nullptr;
 
 		auto* worldspace = tes ? tes->GetRuntimeData2().worldSpace : nullptr;
@@ -236,7 +237,7 @@ namespace
 
 	bool IsCurrentCellInterior()
 	{
-		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 		auto* cell = player ? player->GetParentCell() : nullptr;
 		return cell && cell->IsInteriorCell();
 	}
@@ -1183,7 +1184,7 @@ void PhysicalSky::SettingsVolumetricClouds()
 	DrawCirrusSection();
 	DrawCloudStormSection();
 	if (ImGui::CollapsingHeader(T(TKEY("voxel_section"), "Voxel Clouds"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
-		const auto camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+		const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 		voxelCloudManager.DrawSettings(settings.voxelClouds, GetCurrentWorldspaceEditorID(),
 			{ camera.x * Util::Units::GAME_UNIT_TO_M, camera.y * Util::Units::GAME_UNIT_TO_M, (camera.z - cbData.zBottom) * Util::Units::GAME_UNIT_TO_M });
 	}
@@ -1349,7 +1350,7 @@ void PhysicalSky::DrawLowCloudSection()
 		if (ImGui::TreeNode(T(TKEY("cloud_local_section"), "Local Cloud"))) {
 			Util::Text::WrappedSecondary("%s", T(TKEY("cloud_local_desc"),
 												   "A single authored cloud map placed in the world for hero shapes; it replaces the weather map inside its rectangle."));
-			const auto camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+			const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 			localNdfManager.DrawSettings(settings.cloudMap, GetCurrentWorldspaceEditorID(),
 				{ camera.x * Util::Units::GAME_UNIT_TO_M, camera.y * Util::Units::GAME_UNIT_TO_M });
 			ImGui::TreePop();
@@ -1782,7 +1783,7 @@ void PhysicalSky::SetupResources()
 	}
 	{
 		D3D11_TEXTURE2D_DESC texDesc;
-		auto mainTex = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+		auto mainTex = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 		mainTex.texture->GetDesc(&texDesc);
 		texDesc.Format = DXGI_FORMAT_R8_UNORM;
 		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
@@ -1997,12 +1998,12 @@ void PhysicalSky::Reset()
 	// check worldspace
 	bool worldspaceEnabled = false;
 	bool inInterior = false;
-	bool inMainLoadingMenu = globals::game::ui && (globals::game::ui->IsMenuOpen(RE::MainMenu::MENU_NAME) || globals::game::ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME));
+	bool inMainLoadingMenu = CS_ENGINE_READ(UI, Other, globals::game::ui) && (CS_ENGINE_READ(UI, Other, globals::game::ui)->IsMenuOpen(RE::MainMenu::MENU_NAME) || CS_ENGINE_READ(UI, Other, globals::game::ui)->IsMenuOpen(RE::LoadingMenu::MENU_NAME));
 
 	std::map<std::string, WorldspaceInfo>::const_iterator worldspaceIt = settings.worldspaceWhitelist.end();
 	float zBottom = settings.fallbackZBottom;
-	auto* tes = globals::game::tes ? globals::game::tes : RE::TES::GetSingleton();
-	auto* player = RE::PlayerCharacter::GetSingleton();
+	auto* tes = CS_ENGINE_READ(TES, Other, globals::game::tes) ? CS_ENGINE_READ(TES, Other, globals::game::tes) : CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
+	auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 	auto* cell = player ? player->GetParentCell() : nullptr;
 	inInterior = cell && cell->IsInteriorCell();
 	if (tes) {
@@ -2035,7 +2036,7 @@ void PhysicalSky::Reset()
 	}
 
 	// resolution
-	float2 res{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+	float2 res{ (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenHeight };
 	float2 dynres = Util::ConvertToDynamic(res);
 	dynres = { floor(dynres.x), floor(dynres.y) };
 
@@ -2134,7 +2135,7 @@ void PhysicalSky::Reset()
 	}
 
 	RE::NiPoint3 posCam = { 0, 0, 0 };
-	if (auto cam = RE::PlayerCamera::GetSingleton(); cam && cam->cameraRoot) {
+	if (auto cam = CS_ENGINE_READ(Camera, Other, RE::PlayerCamera::GetSingleton()); cam && cam->cameraRoot) {
 		posCam = cam->cameraRoot->world.translate;
 		cbData.zCameraPlanet = posCam.z - cbData.zBottom + cbData.rPlanet;
 	}
@@ -2159,7 +2160,7 @@ void PhysicalSky::Reset()
 		0.f  // the directional light's, blended below
 	};
 	cbData.diskBillboardScale = float4(1.f);
-	if (const auto* sky = globals::game::sky; sky && sky->root) {
+	if (const auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); sky && sky->root) {
 		const auto& viewer = sky->root->world.translate;
 		const auto sunTan = sky->sun ? Util::GetBillboardHalfTan(sky->sun->sunBase.get(), viewer, 0.f) : 0.f;
 		const auto masserTan = sky->masser ? Util::GetBillboardHalfTan(sky->masser->moonMesh.get(), viewer, 0.f) : 0.f;
@@ -2178,7 +2179,7 @@ void PhysicalSky::Reset()
 	cbData.diskAngularRadius.w = std::lerp(bodyRadii[static_cast<size_t>(blend.source)], bodyRadii[static_cast<size_t>(blend.target)], blend.targetWeight);
 	cbData.dirLightBodyDir = { blend.direction.x, blend.direction.y, blend.direction.z };
 	cbData.dirLightDiskIndex = static_cast<uint>(blend.discBody);
-	const auto discDir = skySync.GetCelestialDirection(globals::game::sky, blend.discBody);
+	const auto discDir = skySync.GetCelestialDirection(CS_ENGINE_READ(Sky, Other, globals::game::sky), blend.discBody);
 	cbData.dirLightDisc = { discDir.x, discDir.y, discDir.z, blend.discWeight };
 	const float solarLimit = std::min(horizonDip + localUpRange + cbData.diskAngularRadius.x, RE::NI_PI * 0.5f);
 	cbData.volCloudUseSun = sunDir.z > -std::sin(solarLimit) ? 1u : 0u;
@@ -2283,7 +2284,7 @@ void PhysicalSky::Prepass()
 		const bool renderVolumetricClouds = VolumetricCloudsEnabled() && ShadersOK();
 
 		if (renderVolumetricClouds) {
-			const auto camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+			const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 			const float2 cameraMeters{ camera.x * Util::Units::GAME_UNIT_TO_M, camera.y * Util::Units::GAME_UNIT_TO_M };
 			const float cameraDx = cameraMeters.x - cloudCrossSectionCamera.x;
 			const float cameraDy = cameraMeters.y - cloudCrossSectionCamera.y;
@@ -2551,7 +2552,7 @@ void PhysicalSky::AccumShadow()
 		if (auto* directionalShadowBuffer = Deferred::GetSingleton()->directionalShadowLights)
 			directionalShadowLights = directionalShadowBuffer->srv.get();
 		auto srvs = std::array{
-			globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV,
+			CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV,
 			globals::deferred->GetDirectionalShadowMap(),
 			static_cast<ID3D11ShaderResourceView*>(nullptr),
 			terrainShadows.IsShadowMapReady() ? terrainShadows.texShadowHeight->srv.get() : nullptr,
@@ -2589,6 +2590,7 @@ void PhysicalSky::ModifySky()
 {
 	auto context = globals::d3d::context;
 	// Bound even while disabled: the sky VS reads physSkyData.enabled from it to decide whether to reshape the dome
+	CS_ENGINE_READ_MARK(BoundState, BoundState);  // VS b6 and the samplers below
 	context->VSGetConstantBuffers(6, 1, originalVSSkyFeatureBuffer.put());
 	auto* featureBuffer = globals::state->featureDataCB->CB();
 	context->VSSetConstantBuffers(6, 1, &featureBuffer);
@@ -2648,7 +2650,7 @@ void PhysicalSky::ModifyWater()
 	auto context = globals::d3d::context;
 	context->PSGetSamplers(13, 1, originalPSWaterSampler.put());
 
-	auto& samplerModifiedBits = globals::game::shadowState->GetRuntimeData().PSSamplerModifiedBits;
+	auto& samplerModifiedBits = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().PSSamplerModifiedBits;
 	originalPSWaterSamplerModifiedBits = samplerModifiedBits & (1u << 13);
 	samplerModifiedBits &= ~(1u << 13);
 
@@ -2664,7 +2666,7 @@ void PhysicalSky::RestoreWaterSampler()
 	auto sampler = originalPSWaterSampler.get();
 	context->PSSetSamplers(13, 1, &sampler);
 	originalPSWaterSampler = nullptr;
-	globals::game::shadowState->GetRuntimeData().PSSamplerModifiedBits |= originalPSWaterSamplerModifiedBits;
+	CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData().PSSamplerModifiedBits |= originalPSWaterSamplerModifiedBits;
 	originalPSWaterSamplerModifiedBits = 0;
 }
 

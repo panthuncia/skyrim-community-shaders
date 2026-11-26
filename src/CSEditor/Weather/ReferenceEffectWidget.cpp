@@ -3,6 +3,7 @@
 #include "../EditorWindow.h"
 #include "../WeatherUtils.h"
 #include "Globals.h"
+#include "Snapshot/EngineReads.h"
 
 #include <format>
 
@@ -139,7 +140,7 @@ void ReferenceEffectWidget::ApplyChanges()
 
 void ReferenceEffectWidget::RestartStaleSkyEffect(bool a_recordChanged) const
 {
-	auto* sky = globals::game::sky;
+	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (!sky || !sky->currentWeather || sky->currentWeather->referenceEffect != referenceEffect)
 		return;
 

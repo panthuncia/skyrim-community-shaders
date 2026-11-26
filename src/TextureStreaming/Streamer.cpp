@@ -1,4 +1,5 @@
 #include "Streamer.h"
+#include "Snapshot/EngineReads.h"
 
 #include "DxvkExports.h"
 #include "Features/TextureStreaming.h"
@@ -867,7 +868,7 @@ namespace TextureStreaming
 		void ReadPlayerWorld()
 		{
 			static const char interiors = 0;
-			if (const auto* player = RE::PlayerCharacter::GetSingleton()) {
+			if (const auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
 				// No cell while a load has the player between places: the place stays what it was.
 				if (const auto* cell = player->GetParentCell())
 					g_playerWorld.store(cell->IsInteriorCell() ? static_cast<const void*>(&interiors) : cell->GetRuntimeData().worldSpace, std::memory_order_relaxed);

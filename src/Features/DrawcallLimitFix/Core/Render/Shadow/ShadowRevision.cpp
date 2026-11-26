@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowExclusionBuild.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF
 {
@@ -258,7 +259,7 @@ namespace DCLF
 	{
 		auto& c = a_context;
 		const auto& tables = Scene::FrameView::Get().GetTables();
-		if (shadow && lastShadow.known && globals::game::utilityShader && !tables.objects.empty() &&
+		if (shadow && lastShadow.known && CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader) && !tables.objects.empty() &&
 			tables.shadowTechnique.size() == tables.objects.size()) {
 			c.shadowInputs = PrepareShadowInputs(*shadow, lastShadow.modes, lastShadow.rasterStates);
 			c.shadowTarget = shadow;

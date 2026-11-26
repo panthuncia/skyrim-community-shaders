@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeWriters.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadesInternal.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
@@ -586,7 +587,7 @@ namespace DCLF::Scene
 		const auto writeBack = Features::Fades::PeekWriteBackCensus(true);
 		RE::NiPoint3 player{};
 		bool havePlayer = false;
-		if (auto* character = RE::PlayerCharacter::GetSingleton()) {
+		if (auto* character = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
 			player = character->GetPosition();
 			havePlayer = true;
 		}

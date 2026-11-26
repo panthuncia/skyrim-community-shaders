@@ -324,3 +324,32 @@ def graph_frames(contract, status):
         if frames < least:
             result["failures"].append(f"{client} ran on the graph in {frames} frames, at least {least} expected")
     return result
+
+
+def detectors(status):
+    """The snapshot detectors' exit reports (status "report.engine_reads" and "report.engine_render"), summarised.
+    Live engine reads and engine render calls per world frame; empty when the build wrote neither."""
+    report = (status or {}).get("report") or {}
+    reads = report.get("engine_reads")
+    render = report.get("engine_render")
+    result = {}
+    if isinstance(reads, dict):
+        result["live_reads_per_world_frame"] = reads.get("world_per_frame")
+        result["live_reads_by_category"] = reads.get("world_per_frame_by_category")
+        result["live_reads_by_feature"] = {k: v.get("world_per_frame") for k, v in (reads.get("features") or {}).items()}
+    if isinstance(render, dict) and render.get("installed"):
+        world = (render.get("per_frame") or {}).get("world") or {}
+        result["engine_render_calls_per_world_frame"] = world.get("per_frame")
+        result["engine_render_calls_max_world_frame"] = world.get("max")
+        result["engine_render_sites_wrapped"] = render.get("sites_wrapped")
+    return result
+
+
+def detectors_text(summary):
+    """One clause for the run's summary line, or empty."""
+    parts = []
+    if summary.get("live_reads_per_world_frame") is not None:
+        parts.append(f"live engine reads {summary['live_reads_per_world_frame']:.0f}/world frame")
+    if summary.get("engine_render_calls_per_world_frame") is not None:
+        parts.append(f"engine render calls {summary['engine_render_calls_per_world_frame']:.0f}/world frame")
+    return "; ".join(parts)

@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
+#include "Snapshot/EngineReads.h"
 
 #include "ShaderCache.h"
 
@@ -30,7 +31,7 @@ namespace DCLF::Features::Lod
 		// Holds the terrain manager's LOD blocks, one BSMultiBoundNode each, attached and detached as the camera moves.
 		RE::NiNode* LodLandRoot()
 		{
-			const auto* tes = RE::TES::GetSingleton();
+			const auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 			return tes ? tes->lodLandRoot : nullptr;
 		}
 

@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Globals.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
 
@@ -45,7 +46,7 @@ namespace DCLF::Features::Effects
 		{
 			// Multiply in the engine's mulss order, HDR multiplier first. Light 0 is BSLight +0x48's NiLight.
 			static const REL::Relocation<const std::byte* const*> imageSpace{ REL::Offset(Engine::Address::kImageSpaceManager) };
-			auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+			auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0] : nullptr;
 			const RE::BSLight* lightZero = sceneNode ? (a_cloud ? sceneNode->GetRuntimeData().cloudLight : sceneNode->GetRuntimeData().sunLight) : nullptr;
 			const std::byte* light = nullptr;
 			if (lightZero)
@@ -77,7 +78,7 @@ namespace DCLF::Features::Effects
 		// The depth copy SetupTechnique binds for a Soft pass. With Terrain Blending's ORG path, the published blended depth is read instead.
 		void* SoftDepthView()
 		{
-			return globals::game::renderer ? static_cast<void*>(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV) :
+			return CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) ? static_cast<void*>(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV) :
 			                                 nullptr;
 		}
 	}

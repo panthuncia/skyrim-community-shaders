@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Bink/BinkGraph.h"
+#include "Snapshot/EngineReads.h"
 
 namespace RenderGraph::Engine::Bink
 {
@@ -516,7 +517,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		if (!Engine::GraphMode() || state.setUp)
 			return;
 		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host || !RenderGraphRuntime::Get().IsActive() || !globals::game::renderer)
+		if (!host || !RenderGraphRuntime::Get().IsActive() || !CS_ENGINE_READ(Renderer, Other, globals::game::renderer))
 			RenderGraph::Fatal("Bink", "the render graph is not active");
 		D3D11_TEXTURE2D_DESC atlas{};
 		atlas.Width = kAtlasWidth;

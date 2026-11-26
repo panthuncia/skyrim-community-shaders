@@ -1,6 +1,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "Snapshot/EngineReads.h"
 #include "Vram/VramLedger.h"
 
 #include "Globals.h"
@@ -569,7 +570,7 @@ namespace Vram
 
 	void TagGameRenderTargets(bool a_overwrite)
 	{
-		auto* renderer = globals::game::renderer;
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		if (!renderer || !DxvkAvailable())
 			return;
 

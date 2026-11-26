@@ -1,4 +1,5 @@
 #include "VanillaBinding.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -56,7 +57,7 @@ namespace VanillaBinding
 		context->VSSetConstantBuffers(5, 1, &sharedBuffer);
 		// The sky draws with the z-prepass copy as its DSV, which would null an SRV of it; kMAIN holds the same depth
 		// Engine target fields can be tripwire handles: DXVK's context takes the wrapped view.
-		auto* depthSRV = RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV);
+		auto* depthSRV = RenderGraph::Engine::Tripwire::Unwrap(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV);
 		context->VSSetShaderResources(17, 1, &depthSRV);
 	}
 
@@ -71,9 +72,9 @@ namespace VanillaBinding
 			return;
 
 		if (std::string_view(static_cast<const RE::BSImagespaceShader*>(shader)->name) == "BSImagespaceShaderReflectionsRayTracing") {
-			auto* reflections = RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].SRV);
+			auto* reflections = RenderGraph::Engine::Tripwire::Unwrap(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].SRV);
 			globals::d3d::context->PSSetShaderResources(4, 1, &reflections);
-			globals::game::shadowState->GetRuntimeData().PSResourceModifiedBits |= (1u << 4);
+			CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().PSResourceModifiedBits |= (1u << 4);
 		}
 	}
 }

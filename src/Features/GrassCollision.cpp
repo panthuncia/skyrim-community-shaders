@@ -1,5 +1,6 @@
 #include "GrassCollision.h"
 #include "GrassCollision/ORGGrassCollision.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "GrassShared/GrassFrame.h"
@@ -73,13 +74,13 @@ void GrassCollision::QueueCollisions()
 
 	// Actor query code from po3 under MIT
 	// https://github.com/powerof3/PapyrusExtenderSSE/blob/7a73b47bc87331bec4e16f5f42f2dbc98b66c3a7/include/Papyrus/Functions/Faction.h#L24C7-L46
-	if (const auto processLists = RE::ProcessLists::GetSingleton(); processLists) {
+	if (const auto processLists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton()); processLists) {
 		for (auto& actorHandle : processLists->highActorHandles) {
 			addActorCandidate(actorHandle);
 		}
 	}
 
-	if (auto player = RE::PlayerCharacter::GetSingleton()) {
+	if (auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
 		addActorCandidate(player->GetHandle());
 	}
 
@@ -203,7 +204,7 @@ GrassCollision::PerFrame GrassCollision::NextPerFrame(const RE::NiPoint3& a_eye)
 
 	perFrameData.ValidMargin = { (int)cellIDDiff.x, (int)cellIDDiff.y };
 
-	perFrameData.TimeDelta = *globals::game::deltaTime * !globals::game::ui->GameIsPaused();
+	perFrameData.TimeDelta = *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) * !CS_ENGINE_READ(UI, RecordTime, globals::game::ui)->GameIsPaused();
 
 	perFrameData.CameraHeightDelta = prevEyePos.z - eyePosNI.z;
 
@@ -295,14 +296,14 @@ void GrassCollision::PublishCollision() const
 	GrassShared::Collision published;
 	published.texture = CollisionSRV();
 	std::memcpy(published.perFrame.data(), &lastPerFrame, sizeof(PerFrame));
-	published.frame = globals::game::graphicsState->frameCount;
+	published.frame = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->frameCount;
 	GrassShared::PublishCollision(published);
 }
 
 void GrassCollision::LogColliders(const char* a_path) const
 {
 	static const bool requested = Switches::On("CS_GRASS_COLLISION_STATS");
-	const auto frame = globals::game::graphicsState->frameCount;
+	const auto frame = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->frameCount;
 	if (!requested || frame % 120 != 0)
 		return;
 	logger::info("[GRASS COLLISION] frame {} ({}): {} colliders, {} collision shapes", frame, a_path,
@@ -327,7 +328,7 @@ void GrassCollision::EarlyPrepass()
 		return;
 
 	// The main view's eye: posAdjust holds the last shadow pass's here (GrassShared::StoodDownFrame).
-	auto* camera = RE::Main::WorldRootCamera();
+	auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 	if (!camera)
 		return;
 	const PerFrame perFrameData = NextPerFrame(camera->world.translate);
@@ -487,7 +488,7 @@ void GrassCollision::UpdateCollisionTexture()
 	}
 
 	{
-		ID3D11Buffer* buffers[1] = { *globals::game::perFrame };
+		ID3D11Buffer* buffers[1] = { *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame) };
 		context->CSSetConstantBuffers(12, 1, buffers);
 	}
 

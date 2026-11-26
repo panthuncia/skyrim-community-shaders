@@ -1,4 +1,5 @@
 #include "Features/Skin.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/EditorWindow.h"
 #include "Globals.h"
@@ -155,7 +156,7 @@ void Skin::RefreshSurfaces()
 	std::vector<Editor::Surface> surfaces;
 	std::set<RE::NiAVObject*> roots;
 	for (bool first : { false, true }) {
-		if (first && actor.get() != RE::PlayerCharacter::GetSingleton())
+		if (first && actor.get() != CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()))
 			continue;
 		auto* root = actor->Get3D(first);
 		if (!root || !roots.insert(root).second)

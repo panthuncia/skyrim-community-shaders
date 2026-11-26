@@ -1,4 +1,5 @@
 #include "Form.h"
+#include "Snapshot/EngineReads.h"
 
 #include <charconv>
 
@@ -50,7 +51,7 @@ RE::FormID Util::SpidToFormId(const std::string& spid)
 		logger::warn("[FormIdentity] SpidToFormId: bad parse for '{}', plugin='{}' localId=0x{:X}", spid, components.pluginName, components.localFormId);
 		return 0;
 	}
-	auto* handler = RE::TESDataHandler::GetSingleton();
+	auto* handler = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton());
 	if (!handler) {
 		logger::warn("[FormIdentity] SpidToFormId: TESDataHandler is null for '{}'", spid);
 		return 0;

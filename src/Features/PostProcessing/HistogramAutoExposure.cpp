@@ -1,4 +1,5 @@
 #include "HistogramAutoExposure.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/LinearLighting.h"
 #include "Features/PostProcessing.h"
@@ -77,7 +78,7 @@ HistogramAutoExposure::AutoExposureCB HistogramAutoExposure::Constants(bool a_re
 	return {
 		.AdaptArea = settings.AdaptArea,
 		.AdaptationRange = parameters.LuminanceRange,
-		.AdaptLerp = a_reset ? 1.f : std::clamp(1.f - exp(-RE::BSTimer::GetSingleton()->realTimeDelta * settings.AdaptSpeed), 0.f, 1.f),
+		.AdaptLerp = a_reset ? 1.f : std::clamp(1.f - exp(-CS_ENGINE_READ(Timer, RecordTime, RE::BSTimer::GetSingleton())->realTimeDelta * settings.AdaptSpeed), 0.f, 1.f),
 		.ExposureCompensation = exp2(parameters.CompensationEV),
 		.PurkinjeStartEV = settings.PurkinjeStartEV,
 		.PurkinjeMaxEV = settings.PurkinjeMaxEV,

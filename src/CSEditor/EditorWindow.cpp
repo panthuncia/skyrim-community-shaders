@@ -1,4 +1,5 @@
 #include "EditorWindow.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../I18n/I18n.h"
 #include "Browser/BrowserWidgets.h"
@@ -164,7 +165,7 @@ namespace
 	// The editor can draw before globals are cached, so this falls back to the singleton.
 	RE::UI* GetUI()
 	{
-		return globals::game::ui ? globals::game::ui : RE::UI::GetSingleton();
+		return CS_ENGINE_READ(UI, Other, globals::game::ui) ? CS_ENGINE_READ(UI, Other, globals::game::ui) : CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
 	}
 
 	/// Shared chrome for every editor surface: one corner radius, and denser vertical rhythm than
@@ -217,7 +218,7 @@ std::string EditorWindow::ResolveEditorId(RE::TESForm* form, const WidgetVec& wi
 
 void EditorWindow::DrawActiveWeatherIndicator(bool drawTrailer)
 {
-	auto* sky = globals::game::sky;
+	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	auto* weather = sky ? sky->currentWeather : nullptr;
 	if (!weather)
 		return;
@@ -973,7 +974,7 @@ void EditorWindow::RenderUI()
 				ImGui::Separator();
 
 				// Current cell lighting
-				auto player = RE::PlayerCharacter::GetSingleton();
+				auto player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 				if (player && player->parentCell && player->parentCell->IsInteriorCell()) {
 					if (ImGui::MenuItem(T(TKEY("edit_current_cell_lighting"), "Edit Current Cell Lighting")))
 						OpenCellLighting(player->parentCell, true);
@@ -1218,7 +1219,7 @@ void EditorWindow::RenderUI()
 			const bool weatherLocked = IsWeatherLockedByUser();
 			RE::TESWeather* statusWeather = GetLockedWeather();
 			if (!statusWeather) {
-				if (auto* sky = RE::Sky::GetSingleton())
+				if (auto* sky = CS_ENGINE_READ(Sky, Other, RE::Sky::GetSingleton()))
 					statusWeather = sky->currentWeather;
 			}
 			const char* weatherName = nullptr;
@@ -1526,7 +1527,7 @@ void EditorWindow::Draw()
 		tempTexture = nullptr;
 	} else if (!viewportCollapsed) {
 		// Kept allocated while collapsed so expanding costs one stale frame rather than a reupload.
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 		if (renderer) {
 			auto& framebuffer = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 			if (framebuffer.SRV) {
@@ -2023,7 +2024,7 @@ bool EditorWindow::AreWeatherLockHooksInstalled()
 void EditorWindow::MaintainWeatherLock()
 {
 	auto* locked = GetActiveLock();
-	auto* sky = globals::game::sky;
+	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (!locked || !sky)
 		return;
 
@@ -2052,7 +2053,7 @@ void EditorWindow::LockWeather(RE::TESWeather* weather)
 		return;
 
 	// ForceWeather clears the sky's region; UnlockWeather restores it so the engine doesn't reroll.
-	if (auto* sky = globals::game::sky; sky && !IsWeatherLocked())
+	if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); sky && !IsWeatherLocked())
 		regionBeforeLock = sky->region;
 
 	g_lockedWeather.store(weather, std::memory_order_release);
@@ -2108,7 +2109,7 @@ void EditorWindow::ReleaseUserWeatherLock()
 void EditorWindow::LockWeatherForOverlay()
 {
 	// Weather drifting mid-session changes the scene under whatever is being edited.
-	auto* sky = globals::game::sky;
+	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (IsWeatherLocked()) {
 		overlayWeatherLockPending = false;
 		return;
@@ -2134,7 +2135,7 @@ void EditorWindow::UnlockWeather()
 
 	// ReleaseWeatherOverride makes the next sky update pick a random region weather; hand the
 	// current weather back as the natural one instead so progression resumes from it.
-	if (auto* sky = globals::game::sky) {
+	if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky)) {
 		sky->overrideWeather = nullptr;
 		sky->defaultWeather = sky->currentWeather;
 		sky->region = regionBeforeLock;
@@ -2290,7 +2291,7 @@ namespace
 	{
 		PeriodSegments segments;
 		if (periodSet == EditorWindow::TimePeriodSet::Weather) {
-			const auto sky = globals::game::sky;
+			const auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 			if (!sky || !sky->currentClimate)
 				return segments;
 			const auto day = Util::Climate::GetDayHours(*sky->currentClimate);
@@ -2360,7 +2361,7 @@ bool EditorWindow::DrawGameHourSlider(const char* label, const char* format)
 	if (const auto segments = GetPeriodSegments(timePeriodSet); segments.count > 0)
 		DrawPeriodStrip(segments, kGameHourMax);
 	// Backward clock edits otherwise look like a midnight wrap and expire the weather override.
-	if (auto* sky = globals::game::sky; changed && sky && GetActiveLock())
+	if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); changed && sky && GetActiveLock())
 		sky->lastWeatherUpdate = calendar->gameHour->value;
 	if (ImGui::IsItemActivated())
 		gameHourScrubRefreshIssued = false;
@@ -2471,7 +2472,7 @@ void EditorWindow::DrawTimeControls()
 
 bool EditorWindow::CanBeOpen()
 {
-	auto* player = globals::game::player;
+	auto* player = CS_ENGINE_READ(Player, Other, globals::game::player);
 	auto* state = globals::state;
 	// The live UI check catches a loading screen the cached menu flags have not caught up with yet.
 	return player && player->parentCell && state && !state->IsMainOrLoadingMenuOpen(GetUI());
@@ -2513,7 +2514,7 @@ void EditorWindow::HideGameMenus()
 	if (IsViewportActive())
 		return;
 
-	if (auto ui = RE::UI::GetSingleton()) {
+	if (auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton())) {
 		ui->ShowMenus(false);
 		gameMenusHidden = true;
 		logger::info("Game menus hidden for CS editor");
@@ -2525,7 +2526,7 @@ void EditorWindow::ShowGameMenus()
 	if (!gameMenusHidden)
 		return;
 
-	if (auto ui = RE::UI::GetSingleton()) {
+	if (auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton())) {
 		ui->ShowMenus(true);
 		gameMenusHidden = false;
 		logger::info("Game menus restored after CS editor");

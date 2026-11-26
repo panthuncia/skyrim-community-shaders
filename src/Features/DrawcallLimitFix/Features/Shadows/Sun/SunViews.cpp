@@ -1,6 +1,7 @@
 // SunViews: the UpdateCamera hook that writes the sun's board, and what Core reads of it. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunViews.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SunVolume.h"
@@ -28,7 +29,7 @@ namespace DCLF::Features::Shadows::Sun
 
 	void SunViews::Update(const void* a_light)
 	{
-		auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+		auto* node = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0] : nullptr;
 		const auto* sun = node ? node->GetRuntimeData().sunShadowDirLight : nullptr;
 		// The shadow scene node's caster list holds a second directional light whose descriptors are never drawn. Take the sun alone.
 		if (!sun || a_light != sun)

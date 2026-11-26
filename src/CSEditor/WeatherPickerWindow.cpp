@@ -1,4 +1,5 @@
 #include "WeatherPickerWindow.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../I18n/I18n.h"
 #include "EditorWindow.h"
@@ -54,7 +55,7 @@ void WeatherPickerWindow::DrawContents()
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ThemeManager::Constants::CSE_PICKER_ITEM_SPACING * scale, ThemeManager::Constants::CSE_PICKER_ITEM_SPACING * scale));
 	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ThemeManager::Constants::CSE_PICKER_ITEM_SPACING * scale, ThemeManager::Constants::CSE_PICKER_FRAME_PADDING_Y * scale));
 
-	auto* sky = globals::game::sky;
+	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (!sky) {
 		ImGui::TextDisabled("%s", T(TKEY("sky_not_available"), "Sky not available"));
 		ImGui::PopStyleVar(2);

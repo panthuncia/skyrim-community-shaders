@@ -3,6 +3,7 @@
 
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionView.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionFaces.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -56,7 +57,7 @@ namespace DCLF::Features::Reflection
 		if (!ReflectionFaces::Plain() || a_face >= kFaces)
 			return;
 		// The colour target is the engine's cube face. The depth is DCLF's own, cleared each face, at the engine's D24S8 precision.
-		auto* renderer = globals::game::renderer;
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto target = TargetOf(renderer ? renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].cubeSideRTV[a_face] : nullptr);
 		const ForwardTargets targets{ target.format, DXGI_FORMAT_D24_UNORM_S8_UINT };
 		if (targets.colour == DXGI_FORMAT_UNKNOWN || !target.texture)
@@ -93,7 +94,7 @@ namespace DCLF::Features::Reflection
 		auto& reflection = FrameState();
 		// The faces' targets are known before any face is drawn, so the reflection phase is the set's from the start.
 		if (state->targets.colour == DXGI_FORMAT_UNKNOWN)
-			if (auto* renderer = globals::game::renderer)
+			if (auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 				if (auto* face = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS].cubeSideRTV[0]) {
 					draws.SetViewTargets(kView, { TargetOf(face).format, DXGI_FORMAT_D24_UNORM_S8_UINT });
 					draws.PostViewInputs();
@@ -121,10 +122,10 @@ namespace DCLF::Features::Reflection
 	{
 		// TESWaterReflections::Update (AE 0x140520570) hides the player's 3D while it renders the faces, then restores it.
 		// Main::Draw calls it between the main cull jobs' Begin and Finish.
-		if (auto* player = RE::PlayerCharacter::GetSingleton())
+		if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()))
 			a_nodes.Add(player->Get3D(false));
 		// It hides the water objects' shapes around the faces too.
-		if (auto* water = RE::TESWaterSystem::GetSingleton())
+		if (auto* water = CS_ENGINE_READ(Water, RecordTime, RE::TESWaterSystem::GetSingleton()))
 			for (const auto& object : water->waterObjects)
 				if (object && object->shape)
 					a_nodes.Add(object->shape.get());

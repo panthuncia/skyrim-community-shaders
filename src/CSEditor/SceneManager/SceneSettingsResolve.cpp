@@ -1,4 +1,5 @@
 #include "SceneSettingsManager.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Feature.h"
 #include "Globals.h"
@@ -79,7 +80,7 @@ void SceneSettingsManager::ResolveAndApply(bool force, bool allowLocationTransit
 	if (globals::state && globals::state->isMapMenuOpen)
 		return;
 
-	auto* player = RE::PlayerCharacter::GetSingleton();
+	auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 	auto* cell = player ? player->GetParentCell() : nullptr;
 	if (!player || !cell) {
 		RestoreAppliedSettings();
@@ -459,7 +460,7 @@ void SceneSettingsManager::RefreshBlendSnapshot(bool interior)
 SceneSettingsManager::WeatherBlend SceneSettingsManager::GetWeatherBlend() const
 {
 	WeatherBlend blend;
-	auto* sky = globals::game::sky;
+	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (!sky)
 		return blend;
 	blend.currentWeatherId = sky->currentWeather ? sky->currentWeather->GetFormID() : 0;

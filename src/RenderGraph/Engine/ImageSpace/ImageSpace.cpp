@@ -4,6 +4,7 @@
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/EngineReads.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -560,7 +561,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/** @brief The engine's shader object of a covered effect, or null before the manager made it. */
 		const RE::BSImagespaceShader* ShaderOf(std::size_t a_effect)
 		{
-			auto* manager = RE::ImageSpaceManager::GetSingleton();
+			auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 			const std::uint32_t index = RE::ImageSpaceManager::GetCurrentIndex(kEffects[a_effect].id);
 			// NiTArray::size() counts non-null entries and would cut off the last effects. free_idx() is one past the highest set index.
 			if (!manager || index >= manager->effects.free_idx() || index >= manager->effects.capacity())
@@ -611,7 +612,7 @@ namespace RenderGraph::Engine::ImageSpace
 
 		RE::BSGraphics::Texture* DefaultTextureOf(std::uint32_t a_index)
 		{
-			auto* state = globals::game::graphicsState;
+			auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 			if (!state)
 				return nullptr;
 			auto& data = state->GetRuntimeData();
@@ -641,7 +642,7 @@ namespace RenderGraph::Engine::ImageSpace
 		*/
 		std::int32_t InputOfView(ID3D11ShaderResourceView* a_view)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer || !a_view)
 				return -1;
 			if (const auto target = IdentifyField(a_view)) {
@@ -712,7 +713,7 @@ namespace RenderGraph::Engine::ImageSpace
 			static REL::Relocation<CreateTexture2D*> createTexture{ REL::RelocationID(75511, 77303) };
 			static REL::Relocation<CreateUav*> createUav{ REL::RelocationID(75533, 77330) };
 			static REL::Relocation<MakeSourceTexture*> makeSourceTexture{ REL::RelocationID(69335, 70717) };
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer)
 				return;
 			const std::vector<std::uint8_t> zeros(static_cast<std::size_t>(size) * size * 4, 0);
@@ -784,7 +785,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			if (a_name >= 0 && (a_name & kHdrSceneOutput))
 				return a_import ? a_import.Format() : rhi::Format::Unknown;
-			const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+			const auto& targets = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets;
 			if (auto* rtv = targets[IndexOfName(a_name)].RTV) {
 				D3D11_RENDER_TARGET_VIEW_DESC view{};
 				rtv->GetDesc(&view);
@@ -800,7 +801,7 @@ namespace RenderGraph::Engine::ImageSpace
 			return a_view && map && map->UAV && Tripwire::Unwrap(a_view) == Tripwire::Unwrap(static_cast<const ID3D11UnorderedAccessView*>(map->UAV));
 		}
 
-		bool FlowCopyBound() { return IsFlowMapUav(RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().CSUAV[0]); }
+		bool FlowCopyBound() { return IsFlowMapUav(CS_ENGINE_READ(ShadowState, BoundState, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData().CSUAV[0]); }
 
 		std::array<std::uint32_t, 6> ViewportBits(const rhi::Viewport& a_viewport)
 		{
@@ -1587,7 +1588,7 @@ namespace RenderGraph::Engine::ImageSpace
 				// The manager is the object at this address (CommonLib's GetSingleton reads it as a pointer).
 				static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> managerAt{ REL::RelocationID(524970, 411451) };
 				const auto* manager = managerAt.get();
-				const auto* graphics = globals::game::graphicsState;
+				const auto* graphics = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 				if (!output || output->renderTarget < 0 || output->renderTarget >= RE::RENDER_TARGET::kTOTAL || !manager || !graphics)
 					return "no output target";
 				if (!*reinterpret_cast<const bool*>(base + 0x1A0)) {
@@ -1653,7 +1654,7 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				auto& native = Get();
 				const auto frame = Frame::Driver::Current().frame;
-				const auto& now = globals::game::frameBufferCached.data;
+				const auto& now = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
 				if (native.frameAt.owner && native.frameAtFrame == frame && std::memcmp(native.frame.data(), &now, kFrameBytes) == 0)
 					return native.frameAt;
 				std::memcpy(native.frame.data(), &now, kFrameBytes);
@@ -1779,7 +1780,7 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
 			const float width = static_cast<float>((std::max)(a_spec.width >> shift, 1u));
 			const float height = static_cast<float>((std::max)(a_spec.height >> shift, 1u));
-			const auto* graphics = globals::game::graphicsState;
+			const auto* graphics = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 			if (!graphics)
 				return { 1.0f, 1.0f, 0.0f, 0.0f };
 			const auto& data = graphics->GetRuntimeData();
@@ -1821,7 +1822,7 @@ namespace RenderGraph::Engine::ImageSpace
 		void WaterShapeNow(Frame::Vars::ImageSpaceShape& a_shape)
 		{
 			a_shape.displacementSize = 0;
-			if (auto* displacement = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kWATER_DISPLACEMENT].texture) {
+			if (auto* displacement = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kWATER_DISPLACEMENT].texture) {
 				D3D11_TEXTURE2D_DESC desc{};
 				displacement->GetDesc(&desc);
 				a_shape.displacementSize = desc.Width;
@@ -1840,7 +1841,7 @@ namespace RenderGraph::Engine::ImageSpace
 		Frame::Vars::ImageSpaceShape EngineShapeNow()
 		{
 			Frame::Vars::ImageSpaceShape shape;
-			if (!RE::ImageSpaceManager::GetSingleton())
+			if (!CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton()))
 				return shape;
 			shape.luminanceLevels = Frame::PostChain::LuminanceLevels();
 			shape.saoLevels = EngineSaoLevels();
@@ -1891,7 +1892,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/** @brief An ImageSpace draw with no CS pass in native mode. Fatal in development builds, logged once in release. Draws nothing. */
 		void NoPassDraw(const RE::BSImagespaceShader* a_shader, bool a_compute, std::string_view a_why)
 		{
-			const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& shadow = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			std::string inputs;
 			for (std::uint32_t slot = 0; slot < kMaxSlots; ++slot) {
 				auto* view = a_compute ? shadow.CSTexture[slot] : shadow.PSTexture[slot];
@@ -1963,7 +1964,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			if (!Constants::Active())
 				return "the engine-constants capture is not active";
-			auto* manager = RE::ImageSpaceManager::GetSingleton();
+			auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 			if (!manager)
 				return "no ImageSpaceManager";
 			// When +0x58 is set, RenderEffect draws the dynamic-resolution quad at +0x50 instead of +0x48 (SE 0x141297b40, AE 0x141481ff0).
@@ -1989,7 +1990,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			if (!Constants::Active())
 				return "the engine-constants capture is not active";
-			auto* manager = RE::ImageSpaceManager::GetSingleton();
+			auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 			if (!manager)
 				return "no ImageSpaceManager";
 			if (a_geometryEffect)
@@ -2151,7 +2152,7 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto* const* textures = *reinterpret_cast<RE::ImageSpaceTexture* const* const*>(reinterpret_cast<const std::byte*>(effect) + 0x48);
 			if (!textures || !textures[0])
 				return;
-			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			auto& shadow = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto output = textures[0]->renderTarget;
 			bool changed = shadow.renderTargets[0] != output || shadow.setRenderTargetMode[0] != RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
 			shadow.renderTargets[0] = output;
@@ -2491,7 +2492,7 @@ namespace RenderGraph::Engine::ImageSpace
 				if (state.on && !state.flushing && FrameAnchors::IsRenderOwner()) {
 					// Only the manager's quad is an effect's draw. Other shapes in the scope go to the engine and must not reach TakeDraw.
 					// DrawTriShape gets the renderer data, not the geometry, so compare against the quads' renderer data.
-					const auto* manager = RE::ImageSpaceManager::GetSingleton();
+					const auto* manager = CS_ENGINE_READ(ImageSpace, CapturePoint, RE::ImageSpaceManager::GetSingleton());
 					const auto* base = reinterpret_cast<const std::byte*>(manager);
 					const auto rendererDataOf = [&](std::size_t a_offset) -> const void* {
 						auto* geometry = manager ? *reinterpret_cast<RE::BSGeometry* const*>(base + a_offset) : nullptr;
@@ -2508,7 +2509,7 @@ namespace RenderGraph::Engine::ImageSpace
 						// TakeDraw applies state before DrawTriShape would, so set this shape's vertex description first.
 						// Otherwise the input layout uses the previous draw's. VertexDesc is at +0x10 of BSGraphics::TriShape.
 						const auto shapeDesc = *reinterpret_cast<const std::uint64_t*>(static_cast<const std::byte*>(a_shape) + 0x10);
-						auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+						auto& shadow = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 						if (shadow.vertexDesc != shapeDesc) {
 							shadow.vertexDesc = shapeDesc;
 							shadow.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_VERTEX_DESC);
@@ -2535,7 +2536,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			using namespace NativePost;
 			auto& config = Settings();
-			auto* manager = RE::ImageSpaceManager::GetSingleton();
+			auto* manager = CS_ENGINE_READ(ImageSpace, CapturePoint, RE::ImageSpaceManager::GetSingleton());
 			const auto effect = [&](std::uint32_t a_index) -> const void* {
 				return manager && a_index < manager->effects.free_idx() ? manager->effects[static_cast<std::uint16_t>(a_index)] : nullptr;
 			};

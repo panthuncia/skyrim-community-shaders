@@ -1,5 +1,6 @@
 #include "Features/GrassOptimizations.h"
 #include "Profiler.h"
+#include "Snapshot/EngineReads.h"
 
 void GrassOptimizations::CullGrass(const RE::NiCamera* camera)
 {
@@ -15,7 +16,7 @@ void GrassOptimizations::CullGrass(const RE::NiCamera* camera)
 	FrustumSoA frustumSoA;
 	BuildFrustumSoA(frustumSoA, frustum);
 
-	const auto& frameBuffer = globals::game::frameBufferCached;
+	const auto& frameBuffer = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached);
 	const auto& mainCameraViewProj = frameBuffer.GetCameraViewProj();
 	const auto& mainCameraPos = frameBuffer.GetCameraPosAdjust();
 
@@ -39,7 +40,7 @@ void GrassOptimizations::CullGrass(const RE::NiCamera* camera)
 	params.lodFadeBand = 0.15f;
 
 	const auto& viewFrustum = camera->GetRuntimeData2().viewFrustum;
-	const auto screenHeight = globals::game::renderer->GetScreenSize().height;
+	const auto screenHeight = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetScreenSize().height;
 	params.meshCostBias = settings.MeshCostBias;
 	params.projScale = screenHeight / (2.0f * std::abs(viewFrustum.fTop));
 	params.maxDistSq = maxDistSq;
@@ -186,7 +187,7 @@ bool GrassOptimizations::DispatchCull(ID3D11DeviceContext* ctx)
 
 bool GrassOptimizations::IsMainCameraPerFrame(const RE::NiPoint3& mainCameraPos)
 {
-	const auto& posAdjust = globals::game::frameBufferCached.GetCameraPosAdjust();
+	const auto& posAdjust = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 	const RE::NiPoint3 eyeOffset{ posAdjust.x - mainCameraPos.x, posAdjust.y - mainCameraPos.y, posAdjust.z - mainCameraPos.z };
 
 	return eyeOffset.SqrLength() < 64.0f * 64.0f;
@@ -194,7 +195,7 @@ bool GrassOptimizations::IsMainCameraPerFrame(const RE::NiPoint3& mainCameraPos)
 
 bool GrassOptimizations::HasCurrentCull() const
 {
-	return lastFrame == globals::game::graphicsState->frameCount;
+	return lastFrame == CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->frameCount;
 }
 
 void GrassOptimizations::BuildFrustumSoA(FrustumSoA& out, const RE::NiFrustumPlanes& frustum)

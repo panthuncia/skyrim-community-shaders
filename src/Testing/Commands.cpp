@@ -1,5 +1,6 @@
 // The command and wait registries, and the generic commands, which work with every feature off. A step names a command by "do" and
 // passes "arg". Features register their own (DCLF's under "dclf:").
+#include "Snapshot/EngineReads.h"
 #include "Testing/Internal.h"
 
 #include "CSEditor/EditorWindow.h"
@@ -96,8 +97,8 @@ namespace Testing
 		template <class Filter>
 		std::pair<RE::Actor*, float> NearestActor(std::size_t a_index, Filter&& a_filter)
 		{
-			auto* player = RE::PlayerCharacter::GetSingleton();
-			auto* lists = RE::ProcessLists::GetSingleton();
+			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+			auto* lists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton());
 			if (!player || !lists)
 				return {};
 			std::vector<std::pair<float, RE::Actor*>> actors;
@@ -162,7 +163,7 @@ namespace Testing
 				switch (state.phase) {
 				case Phase::Equip:
 					AddTask([formId = state.formId, left = state.left] {
-						auto* player = RE::PlayerCharacter::GetSingleton();
+						auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 						auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(formId);
 						// Skyrim.esm's LeftHand and RightHand equip slots.
 						const auto* slot = RE::TESForm::LookupByID<RE::BGSEquipSlot>(left ? 0x13F43 : 0x13F42);
@@ -274,7 +275,7 @@ namespace Testing
 		/** @brief The open loading menu's load screen model, or empty. */
 		std::string ShownLoadScreenModel()
 		{
-			auto* ui = RE::UI::GetSingleton();
+			auto* ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
 			const auto menu = ui ? ui->GetMenu<RE::LoadingMenu>() : nullptr;
 			const auto* screen = menu ? menu->GetRuntimeData().loadScreen : nullptr;
 			return screen ? LoadScreenModel(screen->loadNIFData) : std::string{};
@@ -286,7 +287,7 @@ namespace Testing
 		 */
 		bool ForceLoadScreen(const std::string& a_arg, std::string& a_error)
 		{
-			auto* data = RE::TESDataHandler::GetSingleton();
+			auto* data = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 			if (!data || a_arg.empty()) {
 				a_error = "a load screen needs a model substring and loaded data";
 				return false;
@@ -400,7 +401,7 @@ namespace Testing
 			// By editor id first, then by hex form id.
 			RE::TESWeather* weather = nullptr;
 			std::string known;
-			if (auto* data = RE::TESDataHandler::GetSingleton()) {
+			if (auto* data = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton())) {
 				for (auto* candidate : data->GetFormArray<RE::TESWeather>()) {
 					if (!candidate)
 						continue;
@@ -703,7 +704,7 @@ namespace Testing
 					return false;
 				}
 				AddTask([first = a_arg == "first"] {
-					if (auto* camera = RE::PlayerCamera::GetSingleton())
+					if (auto* camera = CS_ENGINE_READ(Camera, Other, RE::PlayerCamera::GetSingleton()))
 						first ? camera->ForceFirstPerson() : camera->ForceThirdPerson();
 				});
 				return true;
@@ -711,7 +712,7 @@ namespace Testing
 			// "draw": 1|0, the player's weapons or magic hands drawn or sheathed.
 			RegisterCommand("draw", [](const std::string& a_arg, std::string&) {
 				AddTask([draw = a_arg != "0"] {
-					if (auto* player = RE::PlayerCharacter::GetSingleton())
+					if (auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton()))
 						player->DrawWeaponMagicHands(draw);
 				});
 				return true;
@@ -722,7 +723,7 @@ namespace Testing
 				float distance = 110.0f, side = 0.0f;
 				std::sscanf(a_arg.c_str(), "%zu,%f,%f", &index, &distance, &side);
 				AddTask([index, distance, side] {
-					auto* player = RE::PlayerCharacter::GetSingleton();
+					auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 					const auto [actor, away] = NearestActor(index, [&](RE::Actor& a_actor) { return !a_actor.IsDead() && player && a_actor.GetParentCell() == player->GetParentCell(); });
 					if (!actor) {
 						logger::info("[TEST] face-npc: no actor at {}", index);
@@ -742,7 +743,7 @@ namespace Testing
 				std::sscanf(a_arg.c_str(), "%zu,%f,%f,%15s", &index, &distance, &side, flag);
 				const bool strip = std::strcmp(flag, "strip") == 0;
 				AddTask([index, distance, side, strip] {
-					auto* player = RE::PlayerCharacter::GetSingleton();
+					auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 					auto* actor = NearestActor(index, IsFemale).first;
 					if (!player || !actor) {
 						logger::info("[TEST] face-female: no female actor at {}", index);
@@ -796,7 +797,7 @@ namespace Testing
 				const auto comma = a_arg.find(',');
 				const float alpha = comma == std::string::npos ? 1.0f : std::strtof(a_arg.c_str() + comma + 1, nullptr);
 				AddTask([index, alpha] {
-					auto* player = RE::PlayerCharacter::GetSingleton();
+					auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 					auto* actor = NearestActor(index, [&](RE::Actor& a_actor) { return player && a_actor.GetParentCell() == player->GetParentCell(); }).first;
 					if (actor) {
 						actor->SetAlpha(alpha);
@@ -1135,7 +1136,7 @@ namespace Testing
 	void TurnPlayer(float a_radians)
 	{
 		AddTask([a_radians] {
-			if (auto* player = RE::PlayerCharacter::GetSingleton())
+			if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()))
 				player->SetHeading(player->GetAngleZ() + a_radians);
 		});
 	}
@@ -1143,7 +1144,7 @@ namespace Testing
 	void MovePlayer(float a_units)
 	{
 		AddTask([a_units] {
-			if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+			if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
 				auto position = player->GetPosition();
 				const float heading = player->GetAngleZ();
 				position.x += std::sin(heading) * a_units;

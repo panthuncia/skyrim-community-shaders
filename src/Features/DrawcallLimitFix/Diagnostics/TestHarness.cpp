@@ -4,6 +4,7 @@
 #include "TestHarness.h"
 #include "Testing/Testing.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Vram/MemProbe.h"
 #include "Vram/SpillLab.h"
@@ -131,8 +132,8 @@ namespace DCLF
 				const auto wanted = static_cast<std::uint32_t>(std::strtoul(command.c_str() + 19, nullptr, 10));
 				if (auto* tasks = SKSE::GetTaskInterface())
 					tasks->AddTask([wanted] {
-						auto* tes = RE::TES::GetSingleton();
-						auto* player = RE::PlayerCharacter::GetSingleton();
+						auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
+						auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 						if (!tes || !player)
 							return;
 						std::uint32_t written = 0;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../I18n/I18n.h"
+#include "Snapshot/EngineReads.h"
 #include "Util.h"
 #include "Widget.h"
 #include <format>
@@ -182,7 +183,7 @@ namespace WidgetFactory
 	template <typename WidgetType, typename FormType>
 	void PopulateWidgets(std::vector<std::unique_ptr<Widget>>& widgets, Util::FormEditorIDIndex& editorIDs)
 	{
-		auto dataHandler = RE::TESDataHandler::GetSingleton();
+		auto dataHandler = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 		if (!dataHandler)
 			return;
 
@@ -208,7 +209,7 @@ namespace WidgetFactory
 	template <typename FormType>
 	void PopulateSimpleWidgets(std::vector<std::unique_ptr<Widget>>& widgets, Util::FormEditorIDIndex& editorIDs)
 	{
-		auto dataHandler = RE::TESDataHandler::GetSingleton();
+		auto dataHandler = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 		if (!dataHandler)
 			return;
 

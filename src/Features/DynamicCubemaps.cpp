@@ -1,4 +1,5 @@
 #include "DynamicCubemaps.h"
+#include "Snapshot/EngineReads.h"
 
 #include <DDSTextureLoader.h>
 #include <DirectXTex.h>
@@ -178,7 +179,7 @@ RE::BSEventNotifyControl MenuOpenCloseEventHandler::ProcessEvent(const RE::MenuO
 bool MenuOpenCloseEventHandler::Register()
 {
 	static MenuOpenCloseEventHandler singleton;
-	auto ui = globals::game::ui;
+	auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui);
 
 	if (!ui) {
 		logger::error("UI event source not found");
@@ -338,7 +339,7 @@ DynamicCubemaps::UpdateCubemapCB DynamicCubemaps::NextCaptureConstants(bool a_re
 
 void DynamicCubemaps::UpdateCubemapCapture(bool a_reflections)
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 	auto context = globals::d3d::context;
 
 	auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
@@ -406,7 +407,7 @@ void DynamicCubemaps::UpdateCubemapCapture(bool a_reflections)
  */
 void DynamicCubemaps::Inferrence(bool a_reflections)
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
 
 	// Infer local reflection information
@@ -592,7 +593,7 @@ void DynamicCubemaps::CompressToBC6H(bool a_reflections)
 void DynamicCubemaps::BeginUpdate()
 {
 	// Reset capture when game time jumps (wait menu, timescale changes, console commands)
-	if (auto calendar = globals::game::calendar) {
+	if (auto calendar = CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)) {
 		float currentHoursPassed = calendar->GetHoursPassed();
 		float hoursPassedDiff = std::abs(currentHoursPassed - previousHoursPassed);
 		previousHoursPassed = currentHoursPassed;
@@ -767,7 +768,7 @@ void DynamicCubemaps::SetupResources()
 
 void DynamicCubemaps::CreateD3D11Textures()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	auto& cubemap = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
@@ -963,8 +964,8 @@ void DynamicCubemaps::Reset()
 {
 	activeReflections = globals::state->activeReflections;
 
-	if (globals::game::sky)
-		fakeReflections = activeReflections && globals::game::sky->flags.any(RE::Sky::Flags::kHideSky);
+	if (CS_ENGINE_READ(Sky, Other, globals::game::sky))
+		fakeReflections = activeReflections && CS_ENGINE_READ(Sky, Other, globals::game::sky)->flags.any(RE::Sky::Flags::kHideSky);
 	else
 		fakeReflections = false;
 
