@@ -1,5 +1,6 @@
 #include "ScreenSpaceGI.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include <DirectXTex.h>
 
@@ -765,13 +766,23 @@ ScreenSpaceGI::SSGICB ScreenSpaceGI::BuildConstants(float2 a_texDim)
 	SSGICB data;
 	{
 		{
-			auto eye = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().cameraData.getEye();
+			// Native: the frame camera. Elsewhere the engine's camera state.
+			Matrix view, proj;
+			if (Snapshot::FrameCamera::Owned()) {
+				const auto& camera = Snapshot::FrameCamera::Main();
+				view = camera.GetCameraView().Transpose();
+				proj = camera.GetCameraProj().Transpose();
+			} else {
+				const auto eye = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().cameraData.getEye();
+				view = eye.viewMat;
+				proj = eye.projMat;
+			}
 
 			data.PrevInvViewMat = prevInvView;
-			data.NDCToViewMul = { 2.0f / eye.projMat(0, 0), -2.0f / eye.projMat(1, 1), 0.0f, 0.0f };
-			data.NDCToViewAdd = { -1.0f / eye.projMat(0, 0), 1.0f / eye.projMat(1, 1), 0.0f, 0.0f };
+			data.NDCToViewMul = { 2.0f / proj(0, 0), -2.0f / proj(1, 1), 0.0f, 0.0f };
+			data.NDCToViewAdd = { -1.0f / proj(0, 0), 1.0f / proj(1, 1), 0.0f, 0.0f };
 
-			prevInvView = eye.viewMat.Invert();
+			prevInvView = view.Invert();
 		}
 
 		data.TexDim = res;

@@ -2,6 +2,7 @@
 #include "DrawcallLimitFix.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 
 #include "../I18n/I18n.h"
@@ -1372,7 +1373,7 @@ float2 Upscaling::FrameResolutionRatio()
 	return upscaling.loaded ? float2{ upscaling.dynamicResolutionWidthRatio, upscaling.dynamicResolutionHeightRatio } : float2{ 1.0f, 1.0f };
 }
 
-void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
+void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport, std::array<float, 2>& a_jitter)
 {
 	// The frame's method and quality: the adopted revision's, so the render size, the textures and the builds switch together.
 	const auto upscaleMethod = FrameUpscaleMethod();
@@ -1436,15 +1437,19 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 
 		GetJitterOffset(&jitter.x, &jitter.y, state->frameCount, phaseCount);
 
-		a_viewport->projectionPosScaleX = -2.0f * jitter.x / renderWidth;
-
-		a_viewport->projectionPosScaleY = 2.0f * jitter.y / renderHeight;
+		a_jitter[0] = -2.0f * jitter.x / renderWidth;
+		a_jitter[1] = 2.0f * jitter.y / renderHeight;
 	} else {
 		resolutionScale = { 1.0f, 1.0f };
 
-		jitter.x = -a_viewport->projectionPosScaleX * screenWidth / 2.0f;
+		jitter.x = -a_jitter[0] * screenWidth / 2.0f;
 
-		jitter.y = a_viewport->projectionPosScaleY * screenHeight / 2.0f;
+		jitter.y = a_jitter[1] * screenHeight / 2.0f;
+	}
+	// Native keeps its jitter render-side (the frame camera): game-side picking and culling see an unjittered projection.
+	if (!Snapshot::FrameCamera::Owned()) {
+		a_viewport->projectionPosScaleX = a_jitter[0];
+		a_viewport->projectionPosScaleY = a_jitter[1];
 	}
 
 	auto& runtimeData = a_viewport->GetRuntimeData();
@@ -1605,6 +1610,7 @@ void Upscaling::PostDisplay()
 
 	CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->UpdateViewPort(0, 0, 1);
 	UpdateCameraData();
+	Snapshot::FrameCamera::OnFullResolution();
 
 	globals::state->UpdateSharedData(false);
 }
@@ -1873,6 +1879,7 @@ void Upscaling::PerformUpscaling()
 	runtimeData.dynamicResolutionLock = 1;
 
 	UpdateCameraData();
+	Snapshot::FrameCamera::OnFullResolution();
 }
 
 Upscaling::JitterCB Upscaling::DepthUpscaleConstants()
@@ -2107,12 +2114,18 @@ void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 	upscaling.BeginRenderFrame();
 	Streamline::GetSingleton()->BeginRenderFrame();
 	upscaling.ConfigureTAA();
+	std::array<float, 2> jitter{};
 	if (RenderGraph::Frame::PostChain::OwnsJitter())
-		RenderGraph::Frame::PostChain::UpdateJitter(a_state);
-	else
+		jitter = RenderGraph::Frame::PostChain::UpdateJitter(a_state);
+	else {
 		func(a_state);
-	upscaling.ConfigureUpscaling(a_state);
-	RenderGraph::Frame::PostChain::NoteJitter(a_state->projectionPosScaleX, a_state->projectionPosScaleY);
+		jitter = { a_state->projectionPosScaleX, a_state->projectionPosScaleY };
+	}
+	// ConfigureUpscaling moves this frame's ratios into the previous ones.
+	const float previousWidth = upscaling.dynamicResolutionWidthRatio, previousHeight = upscaling.dynamicResolutionHeightRatio;
+	upscaling.ConfigureUpscaling(a_state, jitter);
+	RenderGraph::Frame::PostChain::NoteJitter(jitter[0], jitter[1]);
+	Snapshot::FrameCamera::BeginRender(jitter, { upscaling.dynamicResolutionWidthRatio, upscaling.dynamicResolutionHeightRatio, previousWidth, previousHeight });
 }
 
 void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)

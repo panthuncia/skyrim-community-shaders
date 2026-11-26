@@ -175,7 +175,8 @@ public:
 	winrt::com_ptr<ID3D11RasterizerState> upscaleRasterizerState;
 
 	void ConfigureTAA();
-	void ConfigureUpscaling(RE::BSGraphics::State* a_state);
+	/** @brief The frame's render size, upscaler jitter and dynamic resolution. a_jitter comes in as the TAA jitter and leaves as the frame's. */
+	void ConfigureUpscaling(RE::BSGraphics::State* a_state, std::array<float, 2>& a_jitter);
 	void Upscale();
 	/**
 	 * @brief Before an evaluate: DXVK work between the last render-graph epoch and the upscaler. The rule and its evidence:

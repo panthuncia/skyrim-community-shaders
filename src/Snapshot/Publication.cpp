@@ -2,6 +2,7 @@
 
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Utils/Setting.h"
 
 #include "RenderGraph/Async/LatestSlot.h"
@@ -176,15 +177,8 @@ namespace Snapshot
 		CameraView CaptureMainCamera()
 		{
 			CameraView view{};
-			const auto* camera = RE::Main::WorldRootCamera();
-			if (!camera)
-				return view;
-			view.valid = true;
-			std::memcpy(view.worldToCam, camera->GetRuntimeData().worldToCam, sizeof(view.worldToCam));
-			view.position = camera->world.translate;
-			view.rotation = camera->world.rotate;
-			view.frustum = camera->GetRuntimeData2().viewFrustum;
-			view.port = camera->GetRuntimeData2().port;
+			if (const auto* camera = RE::Main::WorldRootCamera())
+				FrameCamera::Capture(*camera, view);
 			return view;
 		}
 

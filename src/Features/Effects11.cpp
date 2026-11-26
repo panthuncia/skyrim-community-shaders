@@ -1,5 +1,6 @@
 #include "Effects11.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 
 #include "Effects11/D3D11StateBackup.h"
@@ -1511,7 +1512,7 @@ void Effects11::DrawSunRays()
 	if (lightPeak <= 1e-4f || light.billboardTan <= 0.0f)
 		return;
 
-	const auto viewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProj().Transpose();
+	const auto viewProj = Snapshot::FrameCamera::Post().GetCameraViewProj().Transpose();
 	const auto clip = DirectX::SimpleMath::Vector4::Transform(DirectX::SimpleMath::Vector4(light.direction.x, light.direction.y, light.direction.z, 0.0f), viewProj);
 	if (clip.w <= 1e-6f)
 		return;

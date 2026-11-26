@@ -1,5 +1,6 @@
 #include "ExponentialHeightFog.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 
 #include "Deferred.h"
@@ -618,7 +619,7 @@ ID3D11ShaderResourceView* ExponentialHeightFog::BuildEngineLocalShadowData(Engin
 	}
 
 	auto& shadows = a_shadows;
-	const auto& eye = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const auto& eye = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 	for (uint32_t i = 0; i < shadows.size(); i++) {
 		auto* light = shadowLights[i];
 		if (!light || maskClaims[i] != 1)
@@ -824,7 +825,7 @@ ExponentialHeightFog::VolumetricFogCB ExponentialHeightFog::BuildConstants(const
 	cb.farGridZParams = computeGridZParams(nearEndDepth, totalFarPlane, farGridSize.z, quality.depthDistribution);
 	cb.farRange = { static_cast<float>(nearEndDepth), static_cast<float>(totalFarPlane), 0.0f, 0.0f };
 
-	cb.clipToWorld = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Invert();
+	cb.clipToWorld = Snapshot::FrameCamera::Main().GetCameraViewProjUnjittered().Invert();
 
 	for (uint32_t i = 0; i < std::size(cb.frameJitterOffsets); i++) {
 		const uint32_t temporalFrame = (globals::state->frameCount - i) & 1023u;

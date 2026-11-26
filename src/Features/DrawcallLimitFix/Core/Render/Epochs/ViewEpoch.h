@@ -270,14 +270,12 @@ namespace DCLF::Draws
 		RE::NiPoint3 eye;
 	};
 	/**
-	 * @brief Builds VS_PerFrame (b12) for a camera as the engine's SetCameraData does. c20 is the projection's inverse and c24 the
-	 * projection, the reverse of FrameBuffer.hlsli's names. Without a_previous, c16 and c41 are zero, as for a reflection face.
+	 * @brief Builds VS_PerFrame (b12) for a camera as the engine's SetCameraData does (Snapshot::FrameCamera::WriteCamera), with the
+	 * render frame's jitter when a_jitter. Without a_previous, c16 and c41 are zero, as for a reflection face.
 	 */
 	void PerFrameBlock(const ShadowCameras::Camera& a_camera, std::span<const std::byte> a_frame, bool a_jitter, const PreviousCamera* a_previous, std::byte* a_out);
 	/** @brief The renderer's last VS_PerFrame upload, from the mirror or from Community Shaders' copy until the mirror sees a write. */
 	std::span<const std::byte> FrameBlockNow();
-	/** @brief Inverse of a row-major 4x4, computed in double. Zero when singular. */
-	std::array<float, 16> Inverse(const std::array<float, 16>& a_m);
 
 	/** @brief A trees view commit's rows per draw family, empty for a family without faces. */
 	using ViewFamilyRows = std::array<std::span<const std::byte>, Extensions::kDrawFamilies>;

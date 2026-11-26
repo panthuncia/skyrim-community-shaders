@@ -1,6 +1,7 @@
 #include "ScreenSpaceShadows.h"
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 
 #include "Features/ScreenSpaceShadows/ORGScreenSpaceShadows.h"
@@ -174,7 +175,7 @@ ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches(float2 a_scre
 	light.Normalize();
 	float4 lightProjection = float4(-light.x, -light.y, -light.z, 0.0f);
 
-	auto viewProjMat = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProj().Transpose();
+	auto viewProjMat = Snapshot::FrameCamera::Main().GetCameraViewProj().Transpose();
 	auto projectedLight = DirectX::SimpleMath::Vector4::Transform(lightProjection, viewProjMat);
 	float lightProjectionF[4] = { projectedLight.x, projectedLight.y, projectedLight.z, projectedLight.w };
 

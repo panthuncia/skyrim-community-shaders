@@ -1,6 +1,7 @@
 #include "Features/PhysicalSky.h"
 #include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
@@ -953,7 +954,7 @@ void PhysicalSky::RenderCloudCrossSection()
 	const float2 altitudeKm = low.GetNdfAltitudeRangeKm();
 	const float spanX = std::max(low.ndfScale.x, 1.f) * 1000.f;
 	const float spanY = std::max(low.ndfScale.y, 1.f) * 1000.f;
-	const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const auto camera = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 	const float2 cameraMeters{ camera.x * Util::Units::GAME_UNIT_TO_M, camera.y * Util::Units::GAME_UNIT_TO_M };
 
 	CloudCrossSectionCB data{};
@@ -1195,7 +1196,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	// while elevated clouds are still sunlit. Trace their actual solar column.
 	if (cbData.volCloudUseSun != 0)
 		cloudLightDir = cbData.sunDir;
-	const auto& frameBuffer = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached);
+	const auto& frameBuffer = Snapshot::FrameCamera::Main();
 	const auto& resolutionScale = frameBuffer.GetDynamicResolutionParams1();
 	const float2 textureDim = { static_cast<float>(texVolTr->desc.Width), static_cast<float>(texVolTr->desc.Height) };
 	const float2 frameDim = {
@@ -1262,7 +1263,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	const uint32_t lowH = (renderH + traceStride - 1u) / traceStride;
 	const int blurRadius = std::clamp(settings.cloudBlurRadius, 0, 2);
 
-	const auto cameraPosition = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const auto cameraPosition = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 	const float2 boundaryExtent = { KilometersToGameUnits(low.ndfScale.x * 2.f), KilometersToGameUnits(low.ndfScale.y * 2.f) };
 	const float2 boundarySpacing = boundaryExtent / static_cast<float>(kCloudBoundaryCells);
 	const float2 boundaryOrigin = {
@@ -2067,7 +2068,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		volMainHistoryValid = true;
 		volHistoryWind = volWind;
 		cloudStormManager.CommitMotion();
-		volHistoryViewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProj();
+		volHistoryViewProj = Snapshot::FrameCamera::Main().GetCameraViewProj();
 		volHistoryCamera = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
 		volHistoryCurvatureRadius = cloudCurvatureRadius;
 		volHistoryFrameDim = state->isMapMenuOpen ? float2{} : frameDim;

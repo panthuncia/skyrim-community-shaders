@@ -1,6 +1,7 @@
 #include "Features/GrassOptimizations.h"
 #include "Profiler.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 void GrassOptimizations::CullGrass(const RE::NiCamera* camera)
 {
@@ -16,7 +17,7 @@ void GrassOptimizations::CullGrass(const RE::NiCamera* camera)
 	FrustumSoA frustumSoA;
 	BuildFrustumSoA(frustumSoA, frustum);
 
-	const auto& frameBuffer = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached);
+	const auto& frameBuffer = Snapshot::FrameCamera::Main();
 	const auto& mainCameraViewProj = frameBuffer.GetCameraViewProj();
 	const auto& mainCameraPos = frameBuffer.GetCameraPosAdjust();
 
@@ -187,7 +188,7 @@ bool GrassOptimizations::DispatchCull(ID3D11DeviceContext* ctx)
 
 bool GrassOptimizations::IsMainCameraPerFrame(const RE::NiPoint3& mainCameraPos)
 {
-	const auto& posAdjust = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const auto& posAdjust = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 	const RE::NiPoint3 eyeOffset{ posAdjust.x - mainCameraPos.x, posAdjust.y - mainCameraPos.y, posAdjust.z - mainCameraPos.z };
 
 	return eyeOffset.SqrLength() < 64.0f * 64.0f;

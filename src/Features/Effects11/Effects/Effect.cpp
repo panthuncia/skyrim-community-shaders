@@ -1,5 +1,6 @@
 #include "Effect.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include <d3dcompiler.h>
 #include <fstream>
 #include <sstream>
@@ -1205,7 +1206,7 @@ void Effect::UpdateExternBindings()
 	if (externBindings.empty())
 		return;
 
-	auto& fb = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached);
+	auto& fb = Snapshot::FrameCamera::Post();
 	auto invView = fb.GetCameraViewInverse();
 	auto wvp = fb.GetCameraViewProj();
 	auto invWvp = fb.GetCameraViewProjInverse();

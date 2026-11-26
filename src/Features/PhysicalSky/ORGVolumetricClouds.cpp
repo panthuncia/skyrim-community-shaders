@@ -3,6 +3,7 @@
 
 #include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Features/PhysicalSky/ORGCloudInputs.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -1594,7 +1595,7 @@ void ORGVolumetricClouds::Stage(PhysicalSky& a_feature, const Frame& a_frame)
 	f.volMainHistoryValid = true;
 	f.volHistoryWind = f.volWind;
 	f.cloudStormManager.CommitMotion();
-	f.volHistoryViewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProj();
+	f.volHistoryViewProj = Snapshot::FrameCamera::Main().GetCameraViewProj();
 	f.volHistoryCamera = a_frame.camera;
 	f.volHistoryCurvatureRadius = c.cloudCurvatureRadius;
 	f.volHistoryFrameDim = mapMenu ? float2{} : a_frame.frameDim;

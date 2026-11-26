@@ -5,6 +5,7 @@
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -1654,7 +1655,7 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				auto& native = Get();
 				const auto frame = Frame::Driver::Current().frame;
-				const auto& now = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
+				const auto& now = Snapshot::FrameCamera::Post().data;
 				if (native.frameAt.owner && native.frameAtFrame == frame && std::memcmp(native.frame.data(), &now, kFrameBytes) == 0)
 					return native.frameAt;
 				std::memcpy(native.frame.data(), &now, kFrameBytes);

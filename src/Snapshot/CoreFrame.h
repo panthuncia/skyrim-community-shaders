@@ -19,9 +19,15 @@ namespace Snapshot
 	{
 		static constexpr BlockId kId = BlockId::CoreFrame;
 
-		/** @brief The main camera's near and far planes (the high actor culler's copy of the world camera's frustum). */
+		/**
+		* @brief The main camera's near and far planes. Native: the world camera's frustum. Guest: the high actor culler's copy of it,
+		* which the render half makes (one update late).
+		*/
 		float cameraNear = 0.0f;
 		float cameraFar = 0.0f;
+		/** @brief fDRClampOffset:Display and the inverse of fGamma:Display, for the frame camera's per-frame block. */
+		float drClampOffset = 0.0f;
+		float inverseGamma = 1.0f;
 		/** @brief The world FOV in degrees (horizontal). */
 		float fovDegrees = 0.0f;
 		/** @brief Util::IsInterior: an interior cell, or a worldspace without sky or with fixed dimensions. */

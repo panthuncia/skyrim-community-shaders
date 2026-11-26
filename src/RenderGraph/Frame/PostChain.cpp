@@ -1,5 +1,6 @@
 #include "RenderGraph/Frame/PostChain.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Deferred.h"
 #include "Features/Upscaling.h"
@@ -239,8 +240,10 @@ namespace RenderGraph::Frame::PostChain
 		return Engine::GraphMode();
 	}
 
-	void UpdateJitter(RE::BSGraphics::State* a_state)
+	std::array<float, 2> UpdateJitter(RE::BSGraphics::State* a_state)
 	{
+		// Native keeps the jitter render-side (Snapshot/FrameCamera.h) and leaves the engine's State unjittered.
+		const bool write = !Snapshot::FrameCamera::Owned();
 		// BSGraphics::State (AE 411479): the table index at +0xC0, x and y tables of eight at +0xC4 and +0xE4 (SE 8 bytes lower), the
 		// screen size at +0x24 / +0x28. The engine's UpdateJitter (AE 77518, SE 75709) reads the same.
 		auto& state = Get();
@@ -253,19 +256,23 @@ namespace RenderGraph::Frame::PostChain
 			state.jitterIndex = *index;
 		auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 		const auto taa = manager ? Member<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(manager), kTemporal) : 0;
-		if (!taa || !Member<bool>(taa, 0x18)) {
-			a_state->projectionPosScaleX = 0.0f;
-			a_state->projectionPosScaleY = 0.0f;
-			return;
+		std::array<float, 2> jitter{};
+		const bool on = taa && Member<bool>(taa, 0x18);
+		if (on) {
+			state.jitterIndex = (state.jitterIndex + 1) & 7;
+			const auto width = static_cast<float>(*reinterpret_cast<const std::uint32_t*>(base + 0x24));
+			const auto height = static_cast<float>(*reinterpret_cast<const std::uint32_t*>(base + 0x28));
+			const float x = *at(table + 4 + state.jitterIndex * 4);
+			const float y = *at(table + 0x24 + state.jitterIndex * 4);
+			jitter = { (x + x - 1.0f) / width, (y + y - 1.0f) / height };
 		}
-		state.jitterIndex = (state.jitterIndex + 1) & 7;
-		*index = state.jitterIndex;
-		const auto width = static_cast<float>(*reinterpret_cast<const std::uint32_t*>(base + 0x24));
-		const auto height = static_cast<float>(*reinterpret_cast<const std::uint32_t*>(base + 0x28));
-		const float x = *at(table + 4 + state.jitterIndex * 4);
-		const float y = *at(table + 0x24 + state.jitterIndex * 4);
-		a_state->projectionPosScaleX = (x + x - 1.0f) / width;
-		a_state->projectionPosScaleY = (y + y - 1.0f) / height;
+		if (write) {
+			if (on)
+				*index = state.jitterIndex;
+			a_state->projectionPosScaleX = jitter[0];
+			a_state->projectionPosScaleY = jitter[1];
+		}
+		return jitter;
 	}
 
 	void NoteJitter(float a_x, float a_y)

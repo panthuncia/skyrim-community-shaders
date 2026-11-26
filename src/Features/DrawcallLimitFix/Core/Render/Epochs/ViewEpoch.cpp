@@ -4,7 +4,9 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 
@@ -237,36 +239,6 @@ namespace DCLF
 			return frame;
 		}
 
-		std::array<float, 16> Inverse(const std::array<float, 16>& a_m)
-		{
-			std::array<double, 16> m{}, inv{};
-			for (std::uint32_t i = 0; i < 16; ++i)
-				m[i] = a_m[i];
-			inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
-			inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
-			inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
-			inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
-			inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
-			inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
-			inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
-			inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
-			inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
-			inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
-			inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
-			inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
-			inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
-			inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
-			inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
-			inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
-			const double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
-			std::array<float, 16> out{};
-			if (det == 0.0)
-				return out;
-			for (std::uint32_t i = 0; i < 16; ++i)
-				out[i] = static_cast<float>(inv[i] / det);
-			return out;
-		}
-
 		std::span<const std::byte> FrameBlockNow()
 		{
 			std::span<const std::byte> frame;
@@ -287,58 +259,20 @@ namespace DCLF
 		{
 			std::memcpy(a_out, a_frame.data(), ShadowCameras::kBlockBytes);
 			auto* out = reinterpret_cast<float*>(a_out);
-			auto transposed = [&](std::uint32_t a_register, const std::array<float, 16>& a_m) {
-				for (std::uint32_t row = 0; row < 4; ++row)
-					for (std::uint32_t c = 0; c < 4; ++c)
-						out[a_register * 4 + row * 4 + c] = a_m[c * 4 + row];
-			};
-			auto proj = a_camera.proj;
-			auto viewProj = a_camera.viewProj;
-			if (a_jitter) {
-				if (auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, RE::BSGraphics::State::GetSingleton())) {
-					proj[8] += state->projectionPosScaleX;
-					proj[9] += state->projectionPosScaleY;
-				}
-				viewProj = {};
-				for (std::uint32_t r = 0; r < 4; ++r)
-					for (std::uint32_t c = 0; c < 4; ++c)
-						for (std::uint32_t k = 0; k < 4; ++k)
-							viewProj[r * 4 + c] += a_camera.view[r * 4 + k] * proj[k * 4 + c];
-			}
-			transposed(0, a_camera.view);
-			transposed(4, proj);
-			transposed(8, viewProj);
-			transposed(12, a_camera.viewProj);  // CameraViewProjUnjittered
+			Snapshot::FrameCamera::Previous previous{};
 			if (a_previous)
-				transposed(16, a_previous->viewProjUnjittered);
-			else
-				std::memset(out + 16 * 4, 0, 4 * 4 * sizeof(float));
-			const auto inverseProj = Inverse(proj);
-			transposed(20, inverseProj);
-			transposed(24, proj);
-			transposed(28, Inverse(a_camera.view));
-			transposed(32, Inverse(viewProj));
-			transposed(36, inverseProj);
-			out[160] = a_camera.eye[0];
-			out[161] = a_camera.eye[1];
-			out[162] = a_camera.eye[2];
-			if (a_previous) {
-				out[164] = a_previous->eye.x;
-				out[165] = a_previous->eye.y;
-				out[166] = a_previous->eye.z;
+				previous = { a_previous->viewProjUnjittered, a_previous->eye };
+			const RE::NiPoint3 eye{ a_camera.eye[0], a_camera.eye[1], a_camera.eye[2] };
+			// The render frame's jitter, as the main view's (render-owned in native).
+			const std::array<float, 2> jitter = a_jitter ? Snapshot::FrameCamera::Jitter() : std::array<float, 2>{};
+			Snapshot::FrameCamera::WriteCamera(a_camera.view, a_camera.proj, a_camera.viewProj, eye, jitter, a_previous ? &previous : nullptr, out);
+			if (a_previous)
 				return;
-			}
-			std::memset(out + 41 * 4, 0, 4 * sizeof(float));
 			if (auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, RE::BSGraphics::State::GetSingleton())) {
 				const auto& data = state->GetRuntimeData();
-				static auto* clampSetting = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fDRClampOffset:Display"));
-				const float clamp = clampSetting ? clampSetting->data.f : 0.0f;
-				const float w = data.dynamicResolutionWidthRatio, h = data.dynamicResolutionHeightRatio;
-				const float pw = data.dynamicResolutionPreviousWidthRatio, ph = data.dynamicResolutionPreviousHeightRatio;
-				const float c43[4] = { w, h, pw, ph };
-				const float c44[4] = { 1.0f / w, 1.0f / h, w - clamp, pw - clamp };
-				std::memcpy(out + 43 * 4, c43, sizeof(c43));
-				std::memcpy(out + 44 * 4, c44, sizeof(c44));
+				Snapshot::FrameCamera::WriteRatios({ data.dynamicResolutionWidthRatio, data.dynamicResolutionHeightRatio, data.dynamicResolutionPreviousWidthRatio,
+													   data.dynamicResolutionPreviousHeightRatio },
+					Snapshot::Core().drClampOffset, out);
 			}
 		}
 	}

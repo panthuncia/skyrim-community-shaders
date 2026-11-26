@@ -1,6 +1,7 @@
 #include "Snapshot/CoreFrame.h"
 
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 
 #include "Features/LinearLighting.h"
@@ -80,15 +81,26 @@ namespace Snapshot
 	void CaptureCore(Builder& a_builder)
 	{
 		CoreFrame core{};
-		const auto camera = Util::GetCameraData();
-		core.cameraFar = camera.x;
-		core.cameraNear = camera.y;
+		const auto& main = a_builder.Built().cameras.Current(ViewId::Main);
+		if (FrameCamera::Owned() && main.valid) {
+			// Native: the world camera's own frustum, as the frame camera's projection reads it.
+			core.cameraNear = main.frustum.fNear;
+			core.cameraFar = main.frustum.fFar;
+		} else {
+			const auto camera = Util::GetCameraData();
+			core.cameraFar = camera.x;
+			core.cameraNear = camera.y;
+		}
+		if (const auto* clamp = CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("fDRClampOffset:Display")))
+			core.drClampOffset = clamp->data.f;
+		if (const auto* gamma = CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("fGamma:Display")); gamma && gamma->data.f > 0.0f)
+			core.inverseGamma = 1.0f / gamma->data.f;
 		core.fovDegrees = Util::GetWorldFOVDegrees();
 		core.noSky = Util::IsInterior();
 		CaptureLight(core);
 		CaptureSky(core);
 		// The main camera's position is the eye the main view renders from (BSGraphics posAdjust).
-		if (const auto& main = a_builder.Built().cameras.Current(ViewId::Main); main.valid)
+		if (main.valid)
 			for (int i = -2; i <= 2; ++i)
 				for (int k = -2; k <= 2; ++k)
 					core.water[(i + 2) + (k + 2) * 5] = Util::TryGetWaterData(main.position, static_cast<float>(i) * 4096.0f, static_cast<float>(k) * 4096.0f);
