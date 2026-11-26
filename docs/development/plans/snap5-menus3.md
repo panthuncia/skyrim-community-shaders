@@ -116,8 +116,10 @@ All in `Features/MenuViews/MenuScenesNative.cpp` unless named.
 - **Why loading frames stay the engine's:** with CS drawing the loading screen's first MistMenu renders (no model yet) and the engine the
   later ones (the model, with its depth pass), the engine's shadow mask call crashed: DCLF's shadow mask path (`ShadowMaskHooks.cpp`,
   `MaskBatch`) applied the pending state with the vertex shader dirty and none bound (`FUN_140e4b7d0` +0x40B), in
-  `native-vulkan+menu-scenes`, `+quick` and `native-d3d12-quick` (`s7-menus3-fin-*`). The cause was not found; the next lead porting the
-  loading model owns the whole loading screen and meets it there.
+  `native-vulkan+menu-scenes`, `+quick` and `native-d3d12-quick` (`s7-menus3-fin-*`, on base 8d21e6028). That base also had the world
+  quarter bug (snap3-quarter's dynamic-resolution lock, fixed in 75620d32b) and hung in `native-d3d12-quick` and `cadence-drop-cells`
+  whatever MistMenu's ownership (bisect runs `s7-menus3-bisect1/5/6`: HDR off, the native render skipped, scheme 4 not owned all showed
+  the quarter), so the crash may be the base's too. Not retested without the loading-frame rule after merging org_integration.
 - **The update half sets the menu culling process's camera and frustum** before the light update (an engine CPU call, as decision 147's).
   The engine's light update dims lights by the planes its last cull left; CS does not cull with that process.
 - **The shadow lights' dimmers are computed, not their shadow maps:** at the main menu the engine renders shadow maps nothing samples

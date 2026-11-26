@@ -494,6 +494,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		/** @brief The reason a draw is left out while its program builds on the program service (the next session prebuilds it). */
 		constexpr const char* kBuilding = "its program is still building";
+		/** @brief A geometry with no renderer buffers yet (a head part still loading): the engine draws nothing for it either. */
+		constexpr const char* kNoBuffers = "no renderer buffers";
 
 		/** @brief What a draw needs besides its constants: the states SetupGeometry and the alpha setup leave, and its targets. */
 		struct DrawState
@@ -565,6 +567,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			const auto triangles = static_cast<const RE::BSTriShape&>(a_geometry).GetTrishapeRuntimeData().triangleCount;
 			Family::Geometry geometry;
 			const auto result = Family::LatchGeometry(shape, 0, triangles, a_vertexDesc, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, geometry, a_run.owners, &a_detail);
+			if (result == Family::GeometryResult::Missing)
+				return kNoBuffers;
 			if (result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
 			a_vertexRef = geometry.vertexRef;
@@ -1037,6 +1041,11 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		Family::BeginBatch();
 		if (!::RenderGraph::Engine::Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL))
 			::RenderGraph::Fatal("menu scenes", "kMAIN's depth clear at a native menu scene render was not taken");
+		// Scheme 4 draws into kMAIN, which the render binds with a clear to black and zero alpha first (SetRenderTarget(0, kMAIN, clear)
+		// after the clear colour (0, 0, 0, 0)); kMAIN otherwise holds the last frame's image.
+		constexpr float kBlack[4]{ 0.0f, 0.0f, 0.0f, 0.0f };
+		if (scheme == 4 && !::RenderGraph::Engine::Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN, kBlack))
+			::RenderGraph::Fatal("menu scenes", "kMAIN's colour clear at a native menu scene render was not taken");
 		auto run = std::make_shared<Run>();
 		run->view = View::MenuColour;
 		std::uint32_t frame = ~0u;
@@ -1055,6 +1064,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				why = "a shader the native menu scene has no program for";
 			// A draw whose program is still building is left out until it is built, as the engine draw families do (the manifest
 			// prebuilds it next session).
+			if (why == kNoBuffers)
+				continue;
 			if (why == kBuilding) {
 				if (native.building++ == 0)
 					logger::info("[DCLF] menu scenes: scheme {} draw {} is left out while its program builds", scheme, geometry->name.c_str() ? geometry->name.c_str() : "?");
