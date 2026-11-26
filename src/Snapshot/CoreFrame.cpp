@@ -67,10 +67,10 @@ namespace Snapshot
 			// Bottled Shaders keeps cloud layer 28 out of the scattering.
 			constexpr std::uint16_t kNoScatteringCloudLayer = 28;
 			if (sky->clouds && kNoScatteringCloudLayer < sky->clouds->numLayers)
-				a_core.noScatteringCloud = reinterpret_cast<std::uintptr_t>(sky->clouds->clouds[kNoScatteringCloudLayer].get());
+				a_core.noScatteringCloud = EngineRef(sky->clouds->clouds[kNoScatteringCloudLayer].get());
 			if (const auto* secunda = sky->secunda) {
-				a_core.secundaMoonMesh = reinterpret_cast<std::uintptr_t>(secunda->moonMesh.get());
-				a_core.secundaShadowMesh = reinterpret_cast<std::uintptr_t>(secunda->shadowMesh.get());
+				a_core.secundaMoonMesh = EngineRef(secunda->moonMesh.get());
+				a_core.secundaShadowMesh = EngineRef(secunda->shadowMesh.get());
 				a_core.secundaDirection = toFloat4(skySync.GetCelestialDirection(sky, SkySync::Caster::Secunda));
 				if (secunda->root && !secunda->root->GetFlags().any(RE::NiAVObject::Flag::kHidden))
 					a_core.secunda = moonColor(secunda, Util::Moon::SecundaBaseColor);

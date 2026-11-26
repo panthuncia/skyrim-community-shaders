@@ -21,7 +21,8 @@ namespace RE
  * Contents: a texture made with an image gets all of it at creation (any thread). Later writes (glyph cache Update, Unmap) are
  * uploads: copied and queued with the UI stream they belong to, and applied on the render owner before that stream's draws are
  * replayed, in call order. A stream that is never replayed still has its uploads applied before the next one. Streams hold their
- * own references to the views they read, so a texture GFx releases stays alive while a snapshot may still draw it.
+ * own references to the views they read, so a texture GFx releases stays alive while a snapshot may still draw it. The render side
+ * lets streams and applied uploads go through the retire queue (Snapshot/Retire.h), once the GPU finished the frame that read them.
  */
 namespace RenderGraph::Engine::Scaleform::UiResources
 {

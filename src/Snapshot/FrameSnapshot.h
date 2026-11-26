@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Snapshot/Retire.h"
+
 #include <array>
 #include <concepts>
 #include <cstdint>
@@ -28,6 +30,10 @@ namespace DCLF
 * - Adopted: at the render frame's start (Renderer::Begin, before the frame driver's OnBegin), on the thread that renders it.
 *   Recording code reads only Snapshot::Current(). A render frame that finds nothing new keeps the snapshot it had: a repeat.
 *   The render side's frame kind is the adopted snapshot's kind.
+*
+* - Retired: the render side never lets a snapshot go itself. It hands the one it rendered last to the retire queue
+*   (Snapshot/Retire.h), which lets it go on the main thread once the GPU finished that frame. Producers let go only on the main
+*   thread too. So engine references a block holds (Snapshot::EngineRef) are always released where the engine allows it.
 *
 * Game identity (id, gameTime, gameDelta) is the snapshot's. Render identity (render frame index, render delta) is the render
 * side's (Snapshot::Render()). Anything that means "a new game frame" keys by the snapshot id, never by a render counter.
@@ -228,6 +234,7 @@ namespace Snapshot
 		std::shared_ptr<const DCLF::ScenePublication> scene;  // the scene publication it pairs with (empty in phase 0)
 		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (native; set at the update's DrawInterface end)
 		Events events{};
+		Retire::LiveCount live;  // counts snapshots alive for the leak check (Snapshot/Retire.h)
 
 		/** @brief a_T's block, or null when its feature captured none. Shared by pointer with the snapshots it did not change in. */
 		template <FeatureBlock T>

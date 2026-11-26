@@ -17,6 +17,7 @@
 #include "RenderGraph/FrameClock.h"
 #include "RenderGraph/Switches.h"
 #include "Snapshot/Publication.h"
+#include "Snapshot/Retire.h"
 #include "Snapshot/UiCommandStream.h"
 
 #include <algorithm>
@@ -1852,7 +1853,8 @@ namespace RenderGraph::Engine::Scaleform
 				FinishCapture(a_replay.state);
 				ClearDisplay();
 			}
-			a_replay.stream = a_stream;
+			// The stream replayed before goes to the retire queue: the GPU may still read the views it holds.
+			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::exchange(a_replay.stream, a_stream));
 			a_replay.cursor = 0;
 			a_replay.textures.clear();
 			a_replay.state = a_stream->header.state;
@@ -1985,7 +1987,7 @@ namespace RenderGraph::Engine::Scaleform
 			auto& recorder = Rec();
 			const auto serial = FrameClock::PresentSerial();
 			if (recorder.stream && recorder.stream->frame != serial)
-				(void)FinishStream();
+				Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, FinishStream());
 			if (!recorder.stream) {
 				recorder.stream = std::make_shared<UiStream>();
 				recorder.stream->frame = serial;
@@ -2735,10 +2737,10 @@ namespace RenderGraph::Engine::Scaleform
 					if (const auto& snapshot = Snapshot::Current(); snapshot && snapshot->ui)
 						repeat = snapshot->ui->Get();
 				if (repeat) {
-					(void)FinishStream();
+					Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, FinishStream());
 					recorder.repeat = repeat;
 					// The replay starts again from the stream's header.
-					Replayer().stream.reset();
+					Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::exchange(Replayer().stream, nullptr));
 					Repeats().next = 0;
 					func(a_manager);
 					RunReplay(repeat);
@@ -2747,10 +2749,12 @@ namespace RenderGraph::Engine::Scaleform
 					return;
 				}
 				func(a_manager);
-				const auto finished = FinishStream();
+				auto finished = FinishStream();
 				if (finished && !Snapshot::Render().repeat)
 					if (const auto& snapshot = Snapshot::Current(); snapshot && snapshot->ui)
-						snapshot->ui->Set(finished);
+						snapshot->ui->Set(std::exchange(finished, nullptr));
+				// A stream no snapshot took still went to the GPU through its replay.
+				Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::move(finished));
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};

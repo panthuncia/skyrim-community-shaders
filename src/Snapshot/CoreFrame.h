@@ -54,10 +54,13 @@ namespace Snapshot
 		Util::ColorSpace::LightColor masser{};
 		Util::ColorSpace::LightColor secunda{};
 
-		/** @brief Geometry keys the sky permutation compares draws with (never dereferenced): cloud layer 28, Secunda's meshes. */
-		std::uintptr_t noScatteringCloud = 0;
-		std::uintptr_t secundaMoonMesh = 0;
-		std::uintptr_t secundaShadowMesh = 0;
+		/**
+		* @brief Geometry the sky permutation compares draws with: cloud layer 28, Secunda's meshes. Held (EngineRef), so an address
+		* stays the same object while a snapshot names it, and never dereferenced on the render side.
+		*/
+		EngineRef noScatteringCloud;
+		EngineRef secundaMoonMesh;
+		EngineRef secundaShadowMesh;
 
 		/** @brief Water colour and relative height in the 5x5 cells around the main camera (State's WaterData). */
 		std::array<float4, 25> water{};

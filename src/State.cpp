@@ -136,8 +136,7 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 	auto* skyProperty = static_cast<const RE::BSSkyShaderProperty*>(a_pass->shaderProperty);
 	if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_CLOUDS) {
 		// Bottled Shaders keeps cloud layer 28 out of the scattering (the core capture keys its geometry).
-		const auto key = Snapshot::Core().noScatteringCloud;
-		if (key && key == reinterpret_cast<std::uintptr_t>(a_pass->geometry))
+		if (Snapshot::Core().noScatteringCloud.Names(a_pass->geometry))
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::NoSkyScattering);
 	}
 	if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_SUN ||
@@ -149,8 +148,7 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 		if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_MOON)
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsMoon);
 		const auto& core = Snapshot::Core();
-		const auto geometry = reinterpret_cast<std::uintptr_t>(a_pass->geometry);
-		if (geometry && (geometry == core.secundaMoonMesh || geometry == core.secundaShadowMesh))
+		if (core.secundaMoonMesh.Names(a_pass->geometry) || core.secundaShadowMesh.Names(a_pass->geometry))
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsSecunda);
 	}
 }

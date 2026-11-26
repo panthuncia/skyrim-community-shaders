@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/Scaleform/UiResources.h"
 
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/Retire.h"
 #include "Utils/D3D.h"
 
 #include <winrt/base.h>
@@ -802,9 +803,15 @@ namespace RenderGraph::Engine::Scaleform::UiResources
 		auto* context = Context();
 		if (!context)
 			RenderGraph::Fatal("Scaleform", "a UI texture upload before the video mode was set");
-		for (const auto& upload : ready)
+		auto textures = std::make_shared<std::vector<winrt::com_ptr<ID3D11Texture2D>>>();
+		textures->reserve(ready.size());
+		for (auto& upload : ready) {
 			context->UpdateSubresource(upload.texture.get(), upload.subresource, upload.whole ? nullptr : &upload.box, upload.bytes.data(), upload.rowPitch, 0);
+			textures->push_back(std::move(upload.texture));
+		}
 		Counts().applied.fetch_add(ready.size(), std::memory_order_relaxed);
+		// The uploads' texture references go to the retire queue: the frame's copies may still read them.
+		Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::move(textures));
 	}
 
 	std::string TakeStatsLine()
