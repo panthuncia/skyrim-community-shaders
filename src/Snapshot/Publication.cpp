@@ -4,6 +4,7 @@
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
 #include "Snapshot/SideEffects.h"
+#include "Snapshot/UiCommandStream.h"
 #include "Testing/Testing.h"
 #include "Utils/Setting.h"
 
@@ -362,6 +363,10 @@ namespace Snapshot
 		auto fresh = std::make_shared<FrameSnapshot>();
 		fresh->id = game.nextId++;
 		FillCore(*fresh, previous, game);
+		// Native: the update's UI stream, set once its DrawInterface finished it (Snapshot/UiCommandStream.h).
+		static const bool native = RenderGraph::Engine::Native::Requested();
+		if (native)
+			fresh->ui = std::make_shared<const UiCommandStream>();
 		Builder builder(*fresh, previous);
 		// The core block first: feature captures may read it through Builder::Built().
 		CaptureCore(builder);

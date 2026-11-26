@@ -1,0 +1,113 @@
+# More Scaleform menus than ui-menus, to reach the renderer paths it never does (filters, GFx render targets, 3D draws): the
+# tween menu, the journal, the magic menu, the skills (stats) menu and the sleep/wait menu, each opened through the UI message
+# queue (no input), a shot in each, then exit. The Scaleform census line names how many 3D draws, filters and pushed targets it saw.
+# Compose it: guest+ui-menus2, native-vulkan+ui-menus2, native-d3d12+ui-menus2.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "TweenMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "tween"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "TweenMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "Journal Menu=show"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "journal"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "Journal Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "MagicMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "magic"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "MagicMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "StatsMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "skills"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "StatsMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "menu"
+arg = "Sleep/Wait Menu=show"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "wait"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "Sleep/Wait Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["tween", "journal", "magic", "skills", "wait"]

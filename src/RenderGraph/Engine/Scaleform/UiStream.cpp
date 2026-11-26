@@ -1,5 +1,6 @@
 #include "RenderGraph/Engine/Scaleform/UiStream.h"
 
+#include "RenderGraph/Engine/Scaleform/UiResources.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include <algorithm>
@@ -217,8 +218,9 @@ namespace RenderGraph::Engine::Scaleform
 		TextureInfo info;
 		if (!a_texture)
 			return info;
+		// CS's own textures (native) keep GTextureD3D1x's fields.
 		static const std::uintptr_t vtable = REL::RelocationID(292188, 243114).address();
-		info.plain = *reinterpret_cast<const std::uintptr_t*>(a_texture) == vtable;
+		info.plain = *reinterpret_cast<const std::uintptr_t*>(a_texture) == vtable || UiResources::IsTexture(a_texture);
 		if (!info.plain)
 			return info;
 		auto* texture = const_cast<RE::GTexture*>(a_texture);
@@ -268,22 +270,119 @@ namespace RenderGraph::Engine::Scaleform
 		command.key = a_texture;
 	}
 
-	namespace
+	StreamHeader UiStream::EndState() const
 	{
-		std::shared_ptr<const UiStream>& LatestStream()
-		{
-			static std::shared_ptr<const UiStream> s_latest;
-			return s_latest;
+		StreamHeader end = header;
+		auto& state = end.state;
+		bool inDisplay = false;
+		const auto floats = [&](const UiCommand& a_command) { return reinterpret_cast<const float*>(At(a_command)); };
+		for (const auto& c : commands) {
+			switch (c.op) {
+			case UiOp::BeginDisplay:
+				{
+					// TranslateBeginDisplay's state changes for a display it captures.
+					state.videoModeSet = c.b != 0;
+					if (state.videoModeSet)
+						state.world3D = false;
+					inDisplay = state.videoModeSet && c.a >= 0;
+					if (!inDisplay)
+						break;
+					end.blendStack.clear();
+					const auto& args = *reinterpret_cast<const BeginDisplayArgs*>(At(c));
+					if (reinterpret_cast<const std::uint8_t*>(&args.background)[3] != 0) {
+						static constexpr float kIdentity[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+						std::memcpy(state.matrix, kIdentity, sizeof(kIdentity));
+					}
+					break;
+				}
+			case UiOp::EndDisplay:
+				inDisplay = false;
+				break;
+			case UiOp::SetMatrix:
+				std::memcpy(state.matrix, floats(c), sizeof(state.matrix));
+				break;
+			case UiOp::SetUserMatrix:
+				std::memcpy(state.userMatrix, floats(c), sizeof(state.userMatrix));
+				break;
+			case UiOp::SetCxform:
+				std::memcpy(state.cxform, floats(c), sizeof(state.cxform));
+				break;
+			case UiOp::PushBlendMode:
+				end.blendStack.push_back(end.blendMode);
+				if (static_cast<std::uint32_t>(c.a) > 2)
+					end.blendMode = static_cast<std::uint32_t>(c.a);
+				break;
+			case UiOp::PopBlendMode:
+				if (!end.blendStack.empty()) {
+					std::uint32_t mode = 0;
+					for (auto it = end.blendStack.rbegin(); it != end.blendStack.rend(); ++it)
+						if (*it > 2) {
+							mode = *it;
+							break;
+						}
+					end.blendStack.pop_back();
+					end.blendMode = mode;
+				}
+				break;
+			case UiOp::SetPerspective3D:
+				state.SetPerspective3D(*reinterpret_cast<const float (*)[16]>(At(c)));
+				break;
+			case UiOp::SetView3D:
+				state.SetView3D(*reinterpret_cast<const float (*)[16]>(At(c)));
+				break;
+			case UiOp::SetWorld3D:
+				state.world3D = c.size != 0;
+				if (state.world3D)
+					std::memcpy(state.worldMatrix, At(c), sizeof(state.worldMatrix));
+				break;
+			case UiOp::SetVertexData:
+				state.SetVertexData(nullptr, c.a, c.b);
+				break;
+			case UiOp::SetIndexData:
+				state.SetIndexData(nullptr, c.a, c.b);
+				break;
+			case UiOp::DrawIndexedTriList:
+			case UiOp::DrawLineStrip:
+			case UiOp::DrawBitmaps:
+			case UiOp::DrawBlurRect:
+			case UiOp::DrawColorMatrixRect:
+				// ApplyMatrix3D's cached product, which a 3D draw brings up to date.
+				if (inDisplay && state.world3D && state.viewPerspectiveDirty) {
+					float temp[16];
+					state.viewPerspectiveDirty = false;
+					From2D(state.userMatrix, temp);
+					Multiply(state.viewPerspective, temp, state.view3D);
+					std::memcpy(temp, state.viewPerspective, sizeof(temp));
+					Multiply(state.viewPerspective, temp, state.perspective3D);
+				}
+				break;
+			case UiOp::LineStyleDisable:
+				state.LineStyleDisable();
+				break;
+			case UiOp::LineStyleColor:
+				state.LineStyleColor(static_cast<std::uint32_t>(c.a));
+				break;
+			case UiOp::FillStyleDisable:
+				state.FillStyleDisable();
+				break;
+			case UiOp::FillStyleColor:
+				state.FillStyleColor(static_cast<std::uint32_t>(c.a));
+				break;
+			case UiOp::FillStyleBitmap:
+				state.FillStyleBitmap(*reinterpret_cast<const Layout::FillTexture*>(At(c)));
+				break;
+			case UiOp::FillStyleGouraud:
+				{
+					const auto* fills = reinterpret_cast<const Layout::FillTexture*>(At(c));
+					state.FillStyleGouraud(c.a, (c.b & 1) ? &fills[0] : nullptr, (c.b & 2) ? &fills[1] : nullptr, (c.b & 4) != 0);
+					break;
+				}
+			default:
+				break;
+			}
 		}
-	}
-
-	void UiStream::Publish(std::shared_ptr<const UiStream> a_stream)
-	{
-		LatestStream() = std::move(a_stream);
-	}
-
-	std::shared_ptr<const UiStream> UiStream::Latest()
-	{
-		return LatestStream();
+		state.vertexData = nullptr;
+		state.indexData = nullptr;
+		return end;
 	}
 }

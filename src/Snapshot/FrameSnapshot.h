@@ -178,7 +178,7 @@ namespace Snapshot
 							   { a == b } -> std::convertible_to<bool>;
 						   };
 
-	/** @brief The UI command stream (phase 4's native UI renderer). Empty in phase 0. */
+	/** @brief The UI command stream (phase 4's native UI renderer, Snapshot/UiCommandStream.h). Native only. */
 	struct UiCommandStream;
 
 	/** @brief One game update's frame data. Immutable once published. */
@@ -196,7 +196,7 @@ namespace Snapshot
 		Cameras cameras{};
 		bool interior = false;                                // the player's cell is an interior
 		std::shared_ptr<const DCLF::ScenePublication> scene;  // the scene publication it pairs with (empty in phase 0)
-		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (empty in phase 0)
+		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (native; set at the update's DrawInterface end)
 		Events events{};
 
 		/** @brief a_T's block, or null when its feature captured none. Shared by pointer with the snapshots it did not change in. */
