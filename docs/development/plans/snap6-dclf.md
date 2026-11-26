@@ -88,7 +88,41 @@ engine lane with the batch, as before (`ApplyEvents`).
 
 ## 3. Runs
 
-(filled in below)
+Stage `s7-dclf`, Dev-Fast. First build 4dcac6f74 (drain at the capture), then 812cfad3e (drain after the frame jobs).
+`CS_DCLF_STATS=1` on most runs for the report lines; `CS_DCLF_RELEASE_GUARD=1` on the first ones.
+
+| Config | Label | Build | Result |
+|---|---|---|---|
+| native-vulkan+quick | s7-dclf-nvk-quick | 4dcac6f74 | never-loaded: boot took over 120 s in State::Setup while two games shared the machine; rerun below |
+| native-vulkan+quick | s7-dclf-nvk-quick2 | 4dcac6f74 | passed (683 live reads, 33 engine render calls per world frame) |
+| native-vulkan+native-tour | s7-dclf-nvk-tour | 4dcac6f74 | passed (517 / 20) |
+| guest+quick | s7-dclf-guest-quick | 4dcac6f74 | failed: 1-5 fps from the load on (machine contention), shot timed out; passed on rerun |
+| native-d3d12-quick | s7-dclf-nd12-quick | 4dcac6f74 | passed |
+| native-vulkan+cadence-drop-cells | s7-dclf-nvk-dropcells | 4dcac6f74 | **hang** at the third coc: the cell-animations list loop (section 2), fixed by 812cfad3e |
+| native-vulkan+cadence-repeat | s7-dclf-nvk-repeat | 4dcac6f74 | passed |
+| native-vulkan+window-resize-stress-taa | s7-dclf-nvk-resize-taa | 4dcac6f74 | passed |
+| native-vulkan+cadence-drop-cells | s7-dclf-nvk-dropcells-b, -c | 812cfad3e | passed, both (three cocs each) |
+| guest+quick | s7-dclf-guest-quick-b | 812cfad3e | passed |
+| native-vulkan+quick | s7-dclf-nvk-quick3 | 812cfad3e | passed (763 / 33) |
+| native-d3d12-quick | s7-dclf-nd12-quick3 | 812cfad3e | passed |
+| native-vulkan+cadence-repeat | s7-dclf-nvk-repeat3 | 812cfad3e | passed |
+| native-vulkan+native-tour | s7-dclf-nvk-tour3 | 812cfad3e | passed (523 / 20; org_integration's s3-accum tour: 519 / 20) |
+| native-vulkan+window-resize-stress-taa | s7-dclf-nvk-resize-taa3 | 812cfad3e | passed |
+| native-vulkan+vram-loads | s7-dclf-nvk-vram-loads | 812cfad3e | passed |
+| native-vulkan+vram-loads on stage `dir` (org_integration 34b52b99b) | s7-dclf-base-vram-loads | base | passed |
+
+In every run with report lines: `main-thread leases 0 <- OK`, `scene work engine accesses without a lease 0 <- OK`, the release
+guard 0 on the scene lane and pool, no "readback writes of a released publication" or "fade write-back: store dropped" lines.
+The window reports 300 closes and 600 render-half holds per 300 frames, none of which waited for a lease.
+
+**Per-load memory (vram-loads, the second dump of each pair, device-local usage in MiB):** branch 4043, 4173, 4303; org_integration
+4037, 4103, 4329. Growth over the two later loads: branch 259, base 292. Leak lines match: both keep 2 snapshots alive and 36 engine
+references after every load, both list only the known `Skylighting::ProbeArray` and `ViewAtmosphere` "still held" warnings, and
+DCLF's "snapshots held past the pool" stays at 3-5 in both. The engine lane now carries DCLF's entries (tens of thousands a
+window, at most about 530 waiting for the GPU) and its retired count follows its queued count.
+
+Detector numbers do not move (lifetimes only): native tour 523 live reads and 20 engine render calls per world frame against 519
+and 20 on org_integration.
 
 ## Proposed decision-log entries
 
@@ -111,3 +145,14 @@ engine lane with the batch, as before (`ApplyEvents`).
   is the same).
 - `FrameSnapshot::scene` stays empty (above).
 - Engine entries wait for the newest render frame begun at the push, although the chain already waited for the GPU.
+- The engine lane drains at the frame-job wait after Main::DrawFrame instead of the capture (fixes decision 99's point; section 2).
+- The two first-build failures (never-loaded boot, slow guest) are machine contention: both passed on rerun, and the boot stall was
+  in State::Setup before any changed code runs.
+
+## Open items
+
+- `FrameSnapshot::scene` (DCLF's publication paired with the snapshot) for phase 7.
+- During a load the main thread is inside the load, so DCLF's released references wait until its first frame-job wait after it
+  (before, the serving thread's Present released them off the main thread). Peak memory inside a long load may be a little higher;
+  the per-load numbers above are taken after loads.
+- The render half's hold goes with the render half (phase 7): then the window is readable from the publish to the next update.
