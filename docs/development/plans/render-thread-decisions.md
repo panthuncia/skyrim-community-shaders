@@ -579,3 +579,24 @@ pushes until the user is back.
      light whose map has no target yet). Engine render calls per world frame: interior 20 -> 16, shadows-blend 24 -> 18.5,
      quick 33 -> 30.7. Left: the masks' settings globals and shadow lights are read at record time; the state CS writes
      for engine code after these functions goes once that code is CS's.
+
+## 2026-11-26: menu scenes, first round (snap5-menus; director accepted, unfinished)
+
+146. **Menu scene draws are computed by CS from the scene graph** (`Features/MenuViews/MenuScenesNative.cpp`): Lighting
+     and static Effect descriptors, every written constant, textures and samplers match the engine's (observe, 0
+     differences apart from the items below), built on DCLF's ports plus Light Limit Fix's light rows and Linear
+     Lighting's upload hooks. `UI3DSceneManager::Render`'s detour calls `Scenes::Native::Render` for an owned scheme;
+     none is owned yet (the stats menu's blended draw order does not match the engine's accumulator sort).
+147. **A menu scene's update half stays on the game side as engine CPU calls** (light chain, light add, root and light
+     update; decision 8). The texture-streaming mark around the engine's draw (AE 106451/106452) is not made.
+148. **Menu scene frame values are the scene's own:** previous-frame rows (PreviousWorld, c16, c41) come from the scene's
+     own last render (the engine used whatever camera was set last); depth range 0..1 (the engine's 0.999998 is stale
+     from the world frame); write mode 1 into kMAIN and 12 into the back buffer. FrameBuffer c20-c23 differ by 1 ulp
+     (CS inverts the projection in double).
+149. **Director's rule for switched menu schemes:** a scheme is owned only when CS computes every draw in it; a draw CS
+     cannot compute inside an owned scheme is fatal, not skipped (the agent's skip-and-log is only for observe builds).
+150. **Detector role `MenuScene`:** the Lockpicking, MistMenu and Stats call sites count as render until CS owns the
+     scheme, then as producer. MistMenu's UI3DSceneManager::Render is about 19 of the ~22 render calls per main-menu
+     frame. Observe scaffolding stays behind the diagnostic `CS_MENU_SCENES_OBSERVE` for the next lead. Found on the
+     way: DCLF's world material port does not apply Linear Lighting's specular colour conversion
+     (`LightingMaterialUpload`, PS 25).
