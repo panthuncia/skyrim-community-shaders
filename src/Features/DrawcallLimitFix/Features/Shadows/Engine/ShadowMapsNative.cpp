@@ -15,6 +15,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowFrame.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 
 #include <array>
@@ -260,6 +261,7 @@ namespace DCLF::Features::Shadows::Engine
 		/** @brief Captures the light's views and does its Render's bookkeeping. False leaves the light to the engine. */
 		bool RenderNative(RE::BSShadowLight& a_light, Kind a_kind, std::uint32_t& a_index)
 		{
+			DCLF_ZONE("CS.DCLF.ShadowMaps.Native");
 			thread_local std::vector<Draw> draws;
 			draws.clear();
 			draws.reserve(16);
