@@ -232,7 +232,12 @@ LightLimitFix::PerFrame LightLimitFix::GetCommonBufferData()
 	PerFrame perFrame{};
 	perFrame.EnableLightsVisualisation = settings.EnableLightsVisualisation;
 	perFrame.LightsVisualisationMode = settings.LightsVisualisationMode;
-	std::copy(clusterSize, clusterSize + 3, perFrame.ClusterSize);
+	// On the graph the readers take the adopted revision's grid, as the culling does. The frame packs this block before Prepass
+	// refreshes clusterSize, so on a revision's first frame the member still holds the old grid. Its readers would then index a new
+	// grid version by the old layout, and read entries the culling never wrote.
+	std::array<uint32_t, 3> grid{ clusterSize[0], clusterSize[1], clusterSize[2] };
+	(void)ORGLightCulling::Get().AdoptedClusterGrid(grid);
+	std::copy(grid.begin(), grid.end(), perFrame.ClusterSize);
 	if (localShadowOnGraph ? !IsLocalShadowCacheActive() : !IsLocalShadowsEnabled())
 		return perFrame;
 	perFrame.EnableLocalShadows = true;
