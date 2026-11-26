@@ -27,10 +27,22 @@ namespace RenderGraph::Frame
 		constexpr unsigned kStreamingWorkers = 2;
 
 		// A worker running an above-normal caller's ParallelFor chunk is raised to its priority, so the engine's job threads cannot preempt it.
-		// A frame-critical job runs at the coordinator's priority.
+		// A frame-critical job runs at the coordinator's priority. While a thread waits for the executor's work (a scope's Wait), every
+		// worker runs at least at that thread's priority: a below-normal worker under busy normal threads otherwise gets the CPU only from
+		// Windows' starvation boost, every few seconds (the 35-41 s graph installs, 2026-11-25).
 		Executor::ThreadPriority WorkerBoost()
 		{
-			return { [] { return GetThreadPriority(GetCurrentThread()); }, [](int a_priority) { SetThreadPriority(GetCurrentThread(), a_priority); }, kRaised };
+			Executor::ThreadPriority priority{ [] { return GetThreadPriority(GetCurrentThread()); },
+				[](int a_priority) { SetThreadPriority(GetCurrentThread(), a_priority); }, kRaised };
+			// The executor is never destroyed, so its workers' handles are never closed.
+			priority.thread = [] {
+				return reinterpret_cast<std::uintptr_t>(OpenThread(THREAD_SET_LIMITED_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentThreadId()));
+			};
+			priority.setThread = [](std::uintptr_t a_thread, int a_priority) {
+				if (a_thread)
+					SetThreadPriority(reinterpret_cast<HANDLE>(a_thread), a_priority);
+			};
+			return priority;
 		}
 
 		void NameThread(const std::wstring& a_name) { SetThreadDescription(GetCurrentThread(), a_name.c_str()); }
