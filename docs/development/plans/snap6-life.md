@@ -93,7 +93,39 @@ textures `TESWaterSystem::Update` assigns (reported by SceneWriterFramework), is
 
 ## Runs
 
-(filled in below)
+All on stage `s6-life` (commit 570fbc15c, Dev-Fast). Leak check: the `[Snapshot] lifetimes` line at every load.
+
+| Config | Label | Result | Lifetimes |
+|---|---|---|---|
+| native-vulkan+cadence-repeat | s6-life-nvk-repeat | passed | 2 snapshots alive; 62 engine references (main menu 0) |
+| native-vulkan+cadence-drop | s6-life-nvk-drop | passed | 2 alive; lanes balanced |
+| native-vulkan+cadence-drop-cells | s6-life-nvk-dropcells | passed (3 loads) | 2 alive, 35 references after each load |
+| guest+quick | s6-life-guest-quick | passed | 2 alive; render lane unused (no native UI) |
+| native-vulkan+quick | s6-life-nvk-quick | passed | |
+| native-d3d12-quick | s6-life-nd12-quick | passed | |
+| native-vulkan+ui-menus | s6-life-nvk-menus | passed | 2 alive; 122 uploads applied and retired, 0 waiting |
+| native-tour | s6-life-nvk-tour | passed | 2-4 alive, 32-35 references across loads |
+| native-vulkan+vram-loads | s6-life-nvk-vram-loads | passed (4 loads) | 2 alive, 35 references after every load; ORG's only "still held" line is the known Skylighting::ProbeArray |
+
+Across every run each lane's retired count matches its queued count within a frame or two, and at most 3 (engine) or 8 (render)
+entries wait for the GPU. No fatal from `EngineRef` (no reference let go off the main thread). The error lines in the logs
+(engine draws, Effects 11's missing enbeffect.fx, Grass Optimizations' context) are the base's.
+
+## Proposed decision-log entries
+
+- **Retire queue (snap6-life):** snapshots and what the render side keeps for them are let go through `Snapshot::Retire`. The
+  engine lane drains on the main thread at the capture; the render lane (CS objects, D3D11 handles: UI streams, upload textures)
+  drains at the render side's adoption. Entries wait for `FrameClock::GpuCompleted` in graph mode. The render side retires the
+  snapshot it rendered last at adoption; producers let go only on the main thread; an unadopted snapshot retires at once.
+- **Engine objects a block names are `Snapshot::EngineRef` keys:** held, never dereferenced, made and let go only on the main
+  thread (fatal otherwise). Outside DCLF these are the three sky keys in `CoreFrame` and Cloud Shadows' layer keys.
+- **Snapshot holders are never destroyed at process end** (producer, consumer, slot, lanes).
+- **No in-place engine write outside DCLF reaches snapshot data;** UI uploads are versioned by stream sequence and GFx re-inits by
+  reference. Engine-data copies outside DCLF are UI payloads (snapshot-owned) and render-half constant copies (go with the
+  ImageSpace render-half port).
+- **Part 2 (DCLF):** `EngineReleases` folds into the engine lane, held detaches are pushed at the capture, `EngineReadWindow`
+  opens after the publish and closes at the next update's start on the main thread; SWF-reported writes version by holding the
+  old object in the publications that name it (section 5).
 
 ## Decided by the agent, to confirm
 
