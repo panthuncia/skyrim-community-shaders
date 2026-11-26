@@ -95,6 +95,8 @@ namespace DCLF
 
 	/** @brief Render thread. What SetupTechnique reads of the engine now. */
 	TechniqueInputs SampleTechniqueInputs();
+	/** @brief The fog SetupTechnique reads (FUN_1414dfad0): a_sceneNode's fog property, none without one. */
+	void SampleFog(const RE::ShadowSceneNode* a_sceneNode, TechniqueInputs& a_inputs);
 	/** @brief Pure. SetupTechnique's writes for a pass descriptor from sampled inputs. */
 	void EvaluateTechnique(std::uint32_t a_passDescriptor, const TechniqueInputs& a_inputs, TechniqueConstants& a_out);
 	/** @brief EvaluateTechnique from the frame's sample. */

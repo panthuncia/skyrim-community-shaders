@@ -96,6 +96,13 @@ namespace DCLF::Features::Particles
 		};
 		/** @brief Expands a record's newest snapshot faced to a_camera into a_rows, back to front. One thread per record. */
 		void Expand(Record& a_record, const Camera& a_camera, std::uint32_t a_quads, float* a_rows, Expanded& a_out);
+		/**
+		 * @brief Expands a system's state read now, faced to a_camera, into a_rows as Expand does. For a menu scene, whose draws are
+		 * made right after its update half. Main thread.
+		 */
+		static void ExpandNow(const RE::NiParticleSystem& a_system, const Camera& a_camera, std::uint32_t a_quads, float* a_rows, Expanded& a_out);
+		/** @brief The renderer's particle quad index list (FUN_140e4d280), read now. Null before the renderer made it. */
+		static ID3D11Buffer* QuadIndexBuffer();
 		/** @brief Prunes records, publishes a changed table and frees what no writer can hold. Producer, after its items. */
 		void EndRun();
 

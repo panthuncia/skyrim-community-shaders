@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Engine/SkinPalettes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
@@ -18,22 +19,26 @@
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectDescriptors.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
+#include "Features/DrawcallLimitFix/Features/Particles/ParticleSnapshots.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "ShaderCache.h"
 #include "Snapshot/CoreFrame.h"
 #include "State.h"
 #include "Utils/Logging.h"
 
 #include <algorithm>
+#include <atomic>
 
 #include <cstring>
 
@@ -59,22 +64,44 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			std::memcpy(a_written, bytes.data(), a_count * 16);
 		}
 
-		/** @brief SetupGeometry's World with Community Shaders' world-space patch: rotation times scale, the translation less a_eye. */
-		void WorldRows(const RE::NiTransform& a_world, const RE::NiPoint3& a_eye, float* a_out)
+		/**
+		 * @brief SetupGeometry's World with Community Shaders' world-space patch: rotation times scale, the translation less a_eye. A
+		 * particle system's model centre a_centre is folded into the translation, as ParticleSnapshots' placement does.
+		 */
+		void WorldRows(const RE::NiTransform& a_world, const RE::NiPoint3& a_eye, float* a_out, const RE::NiPoint3& a_centre = {})
 		{
 			const auto& r = a_world.rotate.entry;
 			const float s = a_world.scale;
-			const float t[3]{ a_world.translate.x - a_eye.x, a_world.translate.y - a_eye.y, a_world.translate.z - a_eye.z };
+			const float c[3]{ a_centre.x, a_centre.y, a_centre.z };
+			const float t[3]{ a_world.translate.x, a_world.translate.y, a_world.translate.z };
+			const float e[3]{ a_eye.x, a_eye.y, a_eye.z };
 			for (int i = 0; i < 3; ++i) {
 				a_out[i * 4 + 0] = r[i][0] * s;
 				a_out[i * 4 + 1] = r[i][1] * s;
 				a_out[i * 4 + 2] = r[i][2] * s;
-				a_out[i * 4 + 3] = t[i];
+				const float folded = c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f ? t[i] : (r[i][0] * c[0] + r[i][1] * c[1] + r[i][2] * c[2]) * s + t[i];
+				a_out[i * 4 + 3] = folded - e[i];
 			}
 		}
 
+		/** @brief Whether a_geometry is a particle system drawn as camera-facing quads (not strips). */
+		bool IsParticles(const RE::BSGeometry& a_geometry, std::uint32_t a_pass)
+		{
+			namespace EF = Effects::EffectFlag;
+			return (a_pass & EF::Particles) && !(a_pass & EF::StripParticles) && netimmerse_cast<const RE::NiParticleSystem*>(&a_geometry) != nullptr;
+		}
+
 		/** @brief The point light rows (c15, c22, c29.x) as the latch writes Light Limit Fix's strict lights for a pass outside the world. */
-		void PointLightRows(const Lights& a_lights, const RE::NiPoint3& a_eye, LightingSceneConstants& a_out, LightingSceneConstants& a_written)
+		/** @brief A light's LOD dimmer: a shadow light's as MistMenu's shadow render sets it (Inputs::shadowDimmers), else the light's own. */
+		float DimmerOf(const Inputs& a_in, const RE::BSLight& a_light)
+		{
+			for (const auto& [light, dimmer] : a_in.shadowDimmers)
+				if (light == &a_light)
+					return dimmer;
+			return a_light.lodDimmer;
+		}
+
+		void PointLightRows(const Inputs& a_in, const Lights& a_lights, const RE::NiPoint3& a_eye, LightingSceneConstants& a_out, LightingSceneConstants& a_written)
 		{
 			auto& llf = globals::features::lightLimitFix;
 			if (!llf.loaded)
@@ -87,7 +114,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				if (!niLight)
 					continue;
 				auto light = llf.ProcessLight(bsLight, niLight);
-				light.fade *= bsLight->lodDimmer;
+				light.fade *= DimmerOf(a_in, *bsLight);
 				if (light.lightFlags.any(LightLimitFix::LightFlags::Disabled))
 					continue;
 				const auto position = niLight->world.translate - a_eye;
@@ -104,13 +131,65 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 	}
 
-	Inputs SampleInputs(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, const PreviousCamera& a_previous)
+	/**
+	 * @brief The scene node's shadow lights' dimmers as MistMenu's shadow render leaves them (scheme 4 with iLoadingMenuShadowLightFlags set,
+	 * FUN_140973210): for each active shadow light in order, until four were visible, the camera update (vtable +0x80, AE 0x14151b620) sets
+	 * it to 1 when the light's bound sphere is in the camera's frustum and, for a light that fades by distance, (d^2 - r^2) times the
+	 * camera's LOD adjust is below the shadow fade distance (SE 528316, AE 415264); else to 0. CS draws no shadow map for an owned render;
+	 * only the dimmer, which the light rows read, is the render's.
+	 */
+	std::vector<std::pair<const RE::BSLight*, float>> ShadowLightDimmers(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera)
+	{
+		std::vector<std::pair<const RE::BSLight*, float>> out;
+		static const REL::Relocation<const std::int32_t*> shadowFlags{ RELOCATION_ID(510351, 383327) };
+		static const REL::Relocation<const float*> fadeDistance{ RELOCATION_ID(528316, 415264) };
+		if (a_manager.currentlightScheme != RE::INTERFACE_LIGHT_SCHEME::kLoading || *shadowFlags.get() == 0 || !a_manager.shadowSceneNode)
+			return out;
+		ShadowCameras::Planes planes;
+		const auto& camera = a_camera.GetRuntimeData2();
+		ShadowCameras::FrustumPlanes(camera.viewFrustum, a_camera.world, planes);
+		std::uint32_t visible = 0;
+		for (const auto& light : a_manager.shadowSceneNode->GetRuntimeData().activeShadowLights) {
+			if (!light || !light->light || visible >= kMaxShadowSlices)
+				continue;
+			const auto* niLight = light->light.get();
+			const float radius = niLight->GetLightRuntimeData().radius.x;
+			bool inside = true;
+			for (std::uint32_t i = 0; i < 6 && inside; ++i) {
+				const auto& p = planes.plane[i];
+				const auto& c = niLight->world.translate;
+				inside = !(planes.mask & (1u << i)) || p[0] * c.x + p[1] * c.y + p[2] * c.z - p[3] >= -radius;
+			}
+			float dimmer = inside ? 1.0f : 0.0f;
+			if (inside && light->lodFade) {
+				const auto d = niLight->world.translate - a_camera.world.translate;
+				if (*fadeDistance.get() <= ((d.x * d.x + d.y * d.y + d.z * d.z) - radius * radius) * camera.lodAdjust)
+					dimmer = 0.0f;
+			}
+			visible += dimmer != 0.0f ? 1u : 0u;
+			out.emplace_back(light.get(), dimmer);
+		}
+		return out;
+	}
+
+	Inputs SampleInputs(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, const PreviousCamera& a_previous, bool a_shadowMaps)
 	{
 		Inputs in;
+		in.shadowMaps = a_shadowMaps;
+		in.shadowDimmers = ShadowLightDimmers(a_manager, a_camera);
 		in.eye = a_camera.world.translate;
 		in.sceneNode = a_manager.shadowSceneNode;
 		in.technique = SampleTechniqueInputs();
-		in.pipeline = GeometryPort::SamplePipelineFrame(in.sceneNode ? in.sceneNode->GetRuntimeData().sunLight : nullptr, true);
+		// The engine's render makes the menu's scene node the current scene graph for its draws; SetupTechnique's fog is that node's.
+		SampleFog(in.sceneNode, in.technique);
+		// DirLightColor scales by the ImageSpace data's HDR multiplier. MistMenu's scenes (main menu, loading model) have no world update
+		// behind them, so the engine's draws read the override's (manager +0xB0), which its last render copied into the current data
+		// (AE 0x141482ba0). Over a world, the game's blend replaces the current data each update.
+		const auto* imageSpace = reinterpret_cast<const std::byte*>(RE::ImageSpaceManager::GetSingleton());
+		const auto* override = imageSpace && a_manager.currentlightScheme == RE::INTERFACE_LIGHT_SCHEME::kLoading ?
+		                           *reinterpret_cast<const float* const*>(imageSpace + 0xB0) :
+		                           nullptr;
+		in.pipeline = GeometryPort::SamplePipelineFrame(in.sceneNode ? in.sceneNode->GetRuntimeData().sunLight : nullptr, true, override ? &override[6] : nullptr);
 		// The material port reads the engine's Lighting shader object, which DCLF captures only in a world frame.
 		if (!EngineShaders::Lighting()) {
 			static const REL::Relocation<RE::BSShader**> lightingShader{ REL::Offset(Engine::Address::kLightingShader) };
@@ -184,7 +263,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			}
 			a_out.pass = derived.derivedPass;
 			a_out.rawPixel = derived.rawPixel;
-			if (a_out.lights.shadow)
+			// Without shadow maps a shadow light is a plain light of the pass (GetRenderPasses reads the colour accumulator's +0x178).
+			if (a_out.lights.shadow && a_in.shadowMaps)
 				a_out.pass |= (1u << 14) | ((a_out.lights.shadow & 7u) << 6);
 		}
 		LightingShaderDescriptors(a_out.pass, false, a_out.vertex, a_out.pixel);
@@ -242,7 +322,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		for (std::uint32_t r = 15; r < 29; ++r)
 			for (std::uint32_t i = 0; i < 4; ++i)
 				c.psGeometry[r][i] = w.psGeometry[r][i] = 0.0f;
-		PointLightRows(a_out.lights, a_in.eye, c, w);
+		PointLightRows(a_in, a_out.lights, a_in.eye, c, w);
 		return true;
 	}
 
@@ -310,9 +390,11 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			a_out.pixel = derived.pixel;
 			a_out.rawPixel = derived.rawPixel;
 		}
+		// A particle system's quads are expanded by CS (ParticleSnapshots::ExpandNow); their subtexture rects are resolved there.
+		const bool particles = IsParticles(a_geometry, a_out.pass);
 		constexpr std::uint32_t kUnported = EF::Particles | EF::StripParticles | EF::Membrane | EF::Lighting | EF::ProjectedUv | EF::Soft | EF::Blood | EF::Skinned |
 		                                    EF::TexCoordIndex;
-		if (a_out.pass & kUnported) {
+		if (a_out.pass & kUnported & ~(particles ? EF::Particles | EF::TexCoordIndex : 0u)) {
 			a_why = std::format("an Effect variant the native menu scene does not draw (pass {:#x})", a_out.pass);
 			return false;
 		}
@@ -384,8 +466,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		ConstantBlock vs2, ps2;
 		vs2.Reset();
 		ps2.Reset();
-		WorldRows(a_geometry.world, a_in.eye, variable(vs2, vsLayout, Effects::kEffectVSWorld));
-		WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld));
+		// A particle system's World folds its model bound's centre into the translation (SetupGeometry, AE 0x1414eab10).
+		const auto centre = particles ? a_geometry.GetModelData().modelBound.center : RE::NiPoint3{};
+		WorldRows(a_geometry.world, a_in.eye, variable(vs2, vsLayout, Effects::kEffectVSWorld), centre);
+		WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld), centre);
 		{
 			float* colour = variable(ps2, psLayout, Effects::kEffectPSPropertyColor);
 			const auto* emittance = property->emittanceColor;
@@ -410,6 +494,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		/** @brief The reason a draw is left out while its program builds on the program service (the next session prebuilds it). */
 		constexpr const char* kBuilding = "its program is still building";
+		/** @brief A geometry with no renderer buffers yet (a head part still loading): the engine draws nothing for it either. */
+		constexpr const char* kNoBuffers = "no renderer buffers";
 
 		/** @brief What a draw needs besides its constants: the states SetupGeometry and the alpha setup leave, and its targets. */
 		struct DrawState
@@ -481,6 +567,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			const auto triangles = static_cast<const RE::BSTriShape&>(a_geometry).GetTrishapeRuntimeData().triangleCount;
 			Family::Geometry geometry;
 			const auto result = Family::LatchGeometry(shape, 0, triangles, a_vertexDesc, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, geometry, a_run.owners, &a_detail);
+			if (result == Family::GeometryResult::Missing)
+				return kNoBuffers;
 			if (result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
 			a_vertexRef = geometry.vertexRef;
@@ -601,6 +689,56 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return nullptr;
 		}
 
+		/**
+		 * @brief A particle system's quads as the engine draws them (FUN_140e51320): CS expands the system's state, read right after the
+		 * update half, faced to the menu camera, and the draw pulls them by the renderer's quad index list. a_block gets the latch region:
+		 * room for the constants, the indexed texture coordinates (row 0 the identity rect, the rects being resolved per particle), then
+		 * five rows a particle. No particles leaves the draw's index count 0.
+		 */
+		const char* AddParticles(const Inputs& a_in, const RE::NiParticleSystem& a_system, Run& a_run, Draw& a_draw, EffectSceneConstants& a_constants,
+			std::vector<std::byte>& a_block)
+		{
+			using Snapshots = Particles::ParticleSnapshots;
+			const auto* data = static_cast<const RE::NiParticles&>(a_system).GetParticlesRuntimeData().particleData.get();
+			const std::uint32_t count = data ? (std::min)(static_cast<std::uint32_t>(data->GetParticlesRuntimeData().numVertices), Snapshots::kMaxQuads) : 0u;
+			a_draw.indexCount = 0;
+			if (!count)
+				return nullptr;
+			auto* indices = Snapshots::QuadIndexBuffer();
+			auto leased = indices ? GpuResources::Frame().Acquire(indices) : std::nullopt;
+			if (!leased || !leased->buffer.ref)
+				return "the renderer's particle quad index list could not be leased";
+			Snapshots::Camera camera;
+			const auto& r = a_in.camera.rotation.entry;
+			for (int i = 0; i < 3; ++i) {
+				camera.forward[i] = r[i][0];
+				camera.up[i] = r[i][1];
+				camera.right[i] = r[i][2];
+			}
+			camera.eye[0] = a_in.eye.x;
+			camera.eye[1] = a_in.eye.y;
+			camera.eye[2] = a_in.eye.z;
+			camera.valid = true;
+			constexpr std::size_t kRowsAt = sizeof(EffectSceneConstants) + kEffectIndexedTexCoordBytes;
+			a_block.assign(kRowsAt + std::size_t(count) * Snapshots::kRowsPerParticle * 16, std::byte{ 0 });
+			constexpr float kIdentityRect[4]{ 0.0f, 1.0f, 0.0f, 1.0f };
+			std::memcpy(a_block.data() + sizeof(EffectSceneConstants), kIdentityRect, sizeof(kIdentityRect));
+			Snapshots::Expanded expanded;
+			Snapshots::ExpandNow(a_system, camera, count, reinterpret_cast<float*>(a_block.data() + kRowsAt), expanded);
+			if (!expanded.particles)
+				return nullptr;
+			a_constants.vertexRef = {};
+			a_constants.vertexStride = 0;
+			a_constants.vertexLayout[0] = a_constants.vertexLayout[1] = 0;
+			a_constants.streamRef = {};
+			a_constants.streamStride = 0;
+			a_constants.indexRef = leased->buffer.ref;
+			a_constants.firstIndex = 0;
+			a_draw.indexCount = expanded.particles * 6;
+			a_run.owners.push_back(std::move(leased->owner));
+			return nullptr;
+		}
+
 		const char* AddEffect(const Inputs& a_in, const RE::BSGeometry& a_geometry, const std::array<std::int32_t, kMaxColours>& a_targets, Run& a_run,
 			std::uint32_t& a_frame, std::string& a_detail)
 		{
@@ -630,7 +768,15 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			c.effectRadius = a_geometry.worldBound.radius;
 			c.baseTextureIsWorking = permutation.baseTextureIsWorking;
 			c.renderToUI = permutation.renderToUI;
-			if (const char* why = AddGeometry(a_geometry, vs->vertexDesc, a_run, draw, c.vertexRef, c.indexRef, c.vertexLayout, c.vertexStride, c.firstIndex, a_detail))
+			const bool particles = IsParticles(a_geometry, r.pass);
+			std::vector<std::byte> quads;
+			if (particles) {
+				if (const char* why = AddParticles(a_in, static_cast<const RE::NiParticleSystem&>(a_geometry), a_run, draw, c, quads))
+					return why;
+				// No particles: the engine draws nothing.
+				if (!draw.indexCount)
+					return nullptr;
+			} else if (const char* why = AddGeometry(a_geometry, vs->vertexDesc, a_run, draw, c.vertexRef, c.indexRef, c.vertexLayout, c.vertexStride, c.firstIndex, a_detail))
 				return why;
 			auto null = GpuTextures::Get().NullOf(Kind::Texture2D);
 			if (null.index == GpuTextures::kInvalid)
@@ -653,7 +799,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				if (const char* why = AddBones(a_geometry, a_run, draw))
 					return why;
 			draw.frameOffset = FrameOffset(a_in, a_run, a_frame);
-			draw.latchOffset = a_run.Append(std::as_bytes(std::span<const EffectSceneConstants, 1>(&c, 1)));
+			if (particles) {
+				// The constants, then the quads' block (AddParticles), one latch region.
+				std::memcpy(quads.data(), &c, sizeof(c));
+				draw.latchOffset = a_run.Append(quads);
+			} else
+				draw.latchOffset = a_run.Append(std::as_bytes(std::span<const EffectSceneConstants, 1>(&c, 1)));
 			if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
 				return "more constants than the batch's latch holds";
 			draw.viewport = Family::FrameViewport(a_targets[0], static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN), 0);
@@ -802,12 +953,40 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		return accumulator && reinterpret_cast<const std::uint8_t*>(accumulator)[0x51] != 0;
 	}
 
-	bool Owns(std::int32_t a_scheme)
+	bool Owns(std::int32_t a_scheme, bool a_keepDepth)
 	{
-		// The schemes whose draws CS computes as the engine does (observe parity, draw order included): the stats menu's constellations.
-		constexpr std::array<std::int32_t, 1> kNativeSchemes{ 6 };
-		static const bool native = ::RenderGraph::Engine::Native::Active();
-		return native && std::ranges::find(kNativeSchemes, a_scheme) != kNativeSchemes.end();
+		// The observe step compares the engine's draws, so it owns none.
+		static const bool native = ::RenderGraph::Engine::Native::Active() && !Observe::Enabled();
+		if (!native)
+			return false;
+		// The schemes whose draws CS computes as the engine does (observe parity, draw order included): the stats menu's constellations,
+		// and MistMenu's renders without a depth pass outside a load (the main menu). A MistMenu render with one (a loading model with shadow
+		// lights) needs its depth pass, shadow maps and shadow mask, which CS does not draw yet; a loading screen's renders stay the engine's
+		// whole, as CS's renders between the engine's there broke its shadow mask pass (snap5-menus3.md).
+		switch (a_scheme) {
+		case 6:
+			return true;
+		case 4:
+			return !a_keepDepth && ::RenderGraph::Frame::Driver::Current().kind != ::RenderGraph::Frame::Kind::Loading;
+		default:
+			return false;
+		}
+	}
+
+	namespace
+	{
+		/** @brief Each scheme's last render's depth pass flag, for the detector's per-frame ownership (NativeOwns). */
+		std::array<std::atomic<bool>, 8>& LastKeepDepth()
+		{
+			static std::array<std::atomic<bool>, 8> last{};
+			return last;
+		}
+	}
+
+	void NoteRender(std::int32_t a_scheme, bool a_keepDepth)
+	{
+		if (a_scheme >= 0 && static_cast<std::size_t>(a_scheme) < LastKeepDepth().size())
+			LastKeepDepth()[static_cast<std::size_t>(a_scheme)].store(a_keepDepth, std::memory_order_relaxed);
 	}
 
 	DWORD Render(RE::UI3DSceneManager* a_manager, std::int32_t a_scheme, RE::NiCamera* a_camera, bool a_keepDepth)
@@ -839,11 +1018,19 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			camera = RE::Main::WorldRootCamera();
 		if (!camera)
 			return 0;
-		updateLights(RE::BSShaderManager::State::GetSingleton().shadowSceneNode[0], a_manager->cullingProcess);
+		// The light update dims each light by the culling process's frustum and camera (AE 0x141508eb0), which the engine's cull of its
+		// last render left on the menu's culling process. CS does not cull with it, so it sets them for the menu camera first.
+		if (auto* culler = a_manager->cullingProcess) {
+			culler->camera = camera;
+			culler->SetFrustum(&camera->GetRuntimeData2().viewFrustum);
+		}
+		// The menu scenes' scene graph is the shader manager's second (State +0x8, AE 390952), whose queued lights become active here.
+		updateLights(RE::BSShaderManager::State::GetSingleton().shadowSceneNode[1], a_manager->cullingProcess);
 
 		// The draw half: the colour pass from the scene graph into CS's frame.
 		auto& native = GetNative();
-		const auto in = SampleInputs(*a_manager, *camera, native.previous);
+		// No owned render renders shadow maps (Owns): its shadow lights are plain lights of their passes.
+		const auto in = SampleInputs(*a_manager, *camera, native.previous, scheme == 4 && a_keepDepth);
 		std::vector<RE::BSGeometry*> geometries;
 		SceneGeometry(root, *camera, SortsByClosestPoint(*a_manager), geometries);
 
@@ -854,6 +1041,11 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		Family::BeginBatch();
 		if (!::RenderGraph::Engine::Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL))
 			::RenderGraph::Fatal("menu scenes", "kMAIN's depth clear at a native menu scene render was not taken");
+		// Scheme 4 draws into kMAIN, which the render binds with a clear to black and zero alpha first (SetRenderTarget(0, kMAIN, clear)
+		// after the clear colour (0, 0, 0, 0)); kMAIN otherwise holds the last frame's image.
+		constexpr float kBlack[4]{ 0.0f, 0.0f, 0.0f, 0.0f };
+		if (scheme == 4 && !::RenderGraph::Engine::Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN, kBlack))
+			::RenderGraph::Fatal("menu scenes", "kMAIN's colour clear at a native menu scene render was not taken");
 		auto run = std::make_shared<Run>();
 		run->view = View::MenuColour;
 		std::uint32_t frame = ~0u;
@@ -872,6 +1064,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				why = "a shader the native menu scene has no program for";
 			// A draw whose program is still building is left out until it is built, as the engine draw families do (the manifest
 			// prebuilds it next session).
+			if (why == kNoBuffers)
+				continue;
 			if (why == kBuilding) {
 				if (native.building++ == 0)
 					logger::info("[DCLF] menu scenes: scheme {} draw {} is left out while its program builds", scheme, geometry->name.c_str() ? geometry->name.c_str() : "?");
@@ -885,6 +1079,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			SceneDraws::Submit(std::move(run));
 		else
 			SceneDraws::Keep(std::move(run->owners));
+		// A light scheme with an ImageSpace override (manager +0xB0) runs the HDR effect from kMAIN into the back buffer, as the engine's
+		// RenderEndOfFrameEffects(1, 0) here does. Without one, and with the engine's TAA off (decision 168), nothing follows.
+		const auto* imageSpace = RE::ImageSpaceManager::GetSingleton();
+		if (imageSpace && *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<const std::byte*>(imageSpace) + 0xB0) &&
+			!::RenderGraph::Engine::ImageSpace::MenuSceneHdr(kMainTarget, kFramebufferTarget))
+			::RenderGraph::Fatal("menu scenes", std::format("scheme {}: the menu scene's HDR effect could not be staged", scheme));
 		native.previous = { true, { in.camera.viewProj, in.eye } };
 		if (native.renders++ == 0)
 			logger::info("[DCLF] menu scenes: the first native menu scene render (scheme {}, keep depth {}): {} geometries", scheme, a_keepDepth, geometries.size());
@@ -896,6 +1096,8 @@ namespace DCLF::Features::MenuViews
 {
 	bool NativeOwns(std::int32_t a_scheme)
 	{
-		return Scenes::Native::Owns(a_scheme);
+		// The scheme's ownership for its last render's kind: a MistMenu render changes kind (main menu, loading model) rarely.
+		const bool keepDepth = a_scheme >= 0 && a_scheme < 8 && Scenes::Native::LastKeepDepth()[static_cast<std::size_t>(a_scheme)].load(std::memory_order_relaxed);
+		return Scenes::Native::Owns(a_scheme, keepDepth);
 	}
 }

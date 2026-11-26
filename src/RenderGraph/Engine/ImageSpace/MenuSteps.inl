@@ -363,6 +363,15 @@ void StageTintMasks(Pending& a_pending)
 	a_pending.source = std::move(owners);
 }
 
+/** @brief Observe step of the native menu HDR (CS_MENU_SCENES_OBSERVE): CS's rows for a_key against the engine's (NativePost.inl). */
+void ObserveMenuHdrStep(const StepKey& a_key);
+
+/**
+* @brief Stages a menu composite step by its key, in the build the frame runs: the engine's draw's constants, or the native rows armed in
+* NativeSteps. A_uiSource names a TAA UI draw's source for the log.
+*/
+bool StageMenuKey(const StepKey& a_key, bool a_known, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups, std::int32_t a_uiSource);
+
 /**
 * @brief Stages the step's constants, matched by effect and by a variant from the call's arguments and the luminance parity, in the
 * build the frame runs. A draw with no pass, or with no open stage holding the client, is a mismatch. Before the stage's first
@@ -371,7 +380,6 @@ void StageTintMasks(Pending& a_pending)
 bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
 {
 	using E = Effects;
-	auto& state = IS();
 	auto& menu = Menu();
 	// The first revision registers the group; a menu scene can draw before it, such as the first loading screen's.
 	if (!menu.group.Registered()) {
@@ -430,6 +438,19 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 		key = { WorldScope::MenuCopy, id, InOut(call.source, call.destination) };
 		known = call.source >= 0 && call.destination >= 0;
 	}
+	if (known && menu.inHdr)
+		ObserveMenuHdrStep(key);
+	return StageMenuKey(key, known, a_effect, a_compute, a_groups, uiSource);
+}
+
+bool StageMenuKey(const StepKey& a_key, bool a_known, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups, std::int32_t a_uiSource)
+{
+	auto& state = IS();
+	auto& menu = Menu();
+	const auto id = kEffects[a_effect].id;
+	const auto& key = a_key;
+	const bool known = a_known;
+	const auto uiSource = a_uiSource;
 	// In a capture frame the post stage already copied the final image into kMENUBG and left it in the final target. Nothing to draw.
 	if (known && key == FrozenKey() && Frame::Driver::Current().kind == Frame::Kind::FrozenWorld && Frame::Driver::Current().capture)
 		return true;

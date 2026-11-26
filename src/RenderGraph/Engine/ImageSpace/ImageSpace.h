@@ -68,6 +68,13 @@ namespace RenderGraph::Engine::ImageSpace
 	void OnMenuEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final);
 
 	/**
+	* @brief Native: a menu scene's HDR effect from a_source into a_final, as UI3DSceneManager::Render's RenderEndOfFrameEffects draws it
+	* for a light scheme with an ImageSpace override (manager +0xB0): the menu composite's HDR steps with CS's rows from the override's
+	* data, and no engine call. False without an override or with CS's ImageSpace off. Render owner, inside the UI stage.
+	*/
+	bool MenuSceneHdr(std::int32_t a_source, std::int32_t a_final);
+
+	/**
 	* @brief RenderWorldPostProcess's hook (native-post-chain.md, family 4): reads the snapshot's B fields, then runs CS's native body
 	* or a_engine, the engine's. Render owner.
 	*/

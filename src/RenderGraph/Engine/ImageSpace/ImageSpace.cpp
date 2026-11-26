@@ -2833,6 +2833,15 @@ namespace RenderGraph::Engine::ImageSpace
 		menu.inEndOfFrame = a_begin;
 		menu.source = a_begin ? a_source : -1;
 		menu.final = a_begin ? a_final : -1;
+		if (a_begin && NativePost::MenuObserveOn())
+			NativePost::BeginMenuObserve(a_source, a_final);
+	}
+
+	bool MenuSceneHdr(std::int32_t a_source, std::int32_t a_final)
+	{
+		if (!IS().on)
+			return false;
+		return NativePost::RunMenuHdr(a_source, a_final);
 	}
 
 	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView* a_view)

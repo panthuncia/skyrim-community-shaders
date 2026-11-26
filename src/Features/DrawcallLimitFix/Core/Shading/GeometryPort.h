@@ -63,9 +63,10 @@ namespace DCLF::GeometryPort
 	PipelineFrame SamplePipelineFrame();
 	/**
 	 * @brief The same for another scene's sun, such as a menu scene node's. With a_eyeZero, EyePosition is zero: the camera that set
-	 * posAdjust is the scene's own, so its eye less posAdjust is zero.
+	 * posAdjust is the scene's own, so its eye less posAdjust is zero. a_hdr, when given, is the HDR multiplier DirLightColor scales by
+	 * in place of the ImageSpace manager's current one.
 	 */
-	PipelineFrame SamplePipelineFrame(const RE::BSLight* a_sun, bool a_eyeZero);
+	PipelineFrame SamplePipelineFrame(const RE::BSLight* a_sun, bool a_eyeZero, const float* a_hdr = nullptr);
 
 	/**
 	 * @brief What SetupGeometry on a pipeline's template pass, the sun alone, writes into its PerGeometry block. kUnwrittenBits mark the rest.

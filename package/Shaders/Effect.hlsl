@@ -401,32 +401,22 @@ float GetProjectedV(float3 worldPosition)
 }
 #	endif
 
-#	if defined(DCLF_PARTICLE_PULL)
-struct VS_PARTICLE_INPUT
+#	if defined(DCLF_PARTICLE_PULL) || (defined(EFFECT_ORG) && defined(PARTICLES) && !defined(STRIP_PARTICLES))
+// A particle's corner from its five rows (ParticleSnapshots::Expand writes them, back to front): the particle's four corners - the
+// position relative to the model bound's centre (the placement's translation carries it, as SetupGeometry's World does) and the colour
+// packed as FUN_140e51320 packs it, red lowest - then its subtexture rect, which the engine's vertex stage applies to the corner's
+// texture coordinates from its static stream: (0, 1), (1, 1), (1, 0), (0, 0).
+VS_INPUT ParticleCornerInput(uint a_corner, float4 a_vertex, float4 a_rect)
 {
-	uint VertexID: SV_VertexID;
-};
-
-// The object's block (DCLFBoneOffset; ParticleSnapshots::Expand writes it each frame, five rows a particle, back to front): the particle's
-// four corners - the position relative to the model bound's centre (the placement's translation carries it, as SetupGeometry's World does)
-// and the colour packed as FUN_140e51320 packs it, red lowest - then its subtexture rect, which the engine's vertex stage applies to the
-// corner's texture coordinates from its static stream: (0, 1), (1, 1), (1, 0), (0, 0).
-VS_INPUT DCLFParticleInput(uint a_vertex)
-{
-	const uint quad = a_vertex >> 2;
-	const uint corner = a_vertex & 3;
-	const uint row = DCLFObjects[DCLFObjectIndex].DCLFBoneOffset + quad * 5;
-	const float4 vertex = DCLFPalettes[row + corner];
 	VS_INPUT input = (VS_INPUT)0;
-	input.Position = float4(vertex.xyz, 0);
+	input.Position = float4(a_vertex.xyz, 0);
 #		if defined(TEXCOORD)
-	const float4 rect = DCLFPalettes[row + 4];
-	const float2 corners = float2(corner == 1 || corner == 2 ? 1.0 : 0.0, corner < 2 ? 1.0 : 0.0);
-	input.TexCoord0 = float2(rect.y * corners.x + rect.x, rect.w * corners.y + rect.z);
+	const float2 corners = float2(a_corner == 1 || a_corner == 2 ? 1.0 : 0.0, a_corner < 2 ? 1.0 : 0.0);
+	input.TexCoord0 = float2(a_rect.y * corners.x + a_rect.x, a_rect.w * corners.y + a_rect.z);
 #		endif
 #		if defined(VC)
 	// R8G8B8A8_UNORM as the input assembler converts it (DCLFObjects.hlsli's DCLFUnorm4: c / 255 correctly rounded).
-	const uint packed = asuint(vertex.w);
+	const uint packed = asuint(a_vertex.w);
 	precise float4 c = float4(packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF, packed >> 24);
 	precise float4 q = c * (1.0 / 255.0);
 	precise float4 r = mad(-q, 255.0, c);
@@ -434,7 +424,34 @@ VS_INPUT DCLFParticleInput(uint a_vertex)
 #		endif
 	return input;
 }
+#	endif
+
+#	if defined(DCLF_PARTICLE_PULL)
+struct VS_PARTICLE_INPUT
+{
+	uint VertexID: SV_VertexID;
+};
+
+// The object's block (DCLFBoneOffset), five rows a particle, by the vertex's index in the renderer's quad index list.
+VS_INPUT DCLFParticleInput(uint a_vertex)
+{
+	const uint corner = a_vertex & 3;
+	const uint row = DCLFObjects[DCLFObjectIndex].DCLFBoneOffset + (a_vertex >> 2) * 5;
+	return ParticleCornerInput(corner, DCLFPalettes[row + corner], DCLFPalettes[row + 4]);
+}
 #	endif  // DCLF_PARTICLE_PULL
+
+#	if defined(EFFECT_ORG) && defined(PARTICLES) && !defined(STRIP_PARTICLES)
+// A native menu scene's particles (MenuScenesNative.cpp) have no stream 1: their rows follow the draw's indexed texture coordinates
+// in the latch, five a particle, pulled by the vertex's index in the renderer's quad index list.
+#		define EFFECT_ORG_PARTICLE_ROWS (EFFECT_ORG_INDEXED_TEXCOORDS + 2048)
+VS_INPUT OrgParticleInput(uint a_vertex)
+{
+	const uint corner = a_vertex & 3;
+	const uint at = OrgOffset_EffectDraw + EFFECT_ORG_PARTICLE_ROWS + (a_vertex >> 2) * 80;
+	return ParticleCornerInput(corner, asfloat(OrgLatch_EffectDraw.Load4(at + corner * 16)), asfloat(OrgLatch_EffectDraw.Load4(at + 64)));
+}
+#	endif
 
 // Drawcall Limit Fix's builds have no input assembly: main pulls the vertex (DCLFParticleInput; DCLFPulledInput, below) and shades
 // it here.
@@ -773,6 +790,12 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 	const uint indexNumber = EffectDraw.FirstIndex + a_vertexID;
 	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(EffectDraw.IndexAddress, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+#			if defined(PARTICLES) && !defined(STRIP_PARTICLES)
+	[branch] if (EffectDraw.StreamStride == 0)
+	{
+		return DCLFShade(OrgParticleInput(index));
+	}
+#			endif
 	DCLFStream first = { EffectDraw.VertexAddress, EffectDraw.VertexStride };
 	DCLFStream second = { EffectDraw.StreamAddress, EffectDraw.StreamStride };
 	const VS_INPUT input = DCLFPulledInput(index, first, second);

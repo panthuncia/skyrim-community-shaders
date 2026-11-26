@@ -1,0 +1,97 @@
+# Inventory models that need more than plain Lighting draws (UI3DSceneManager::Render schemes 1 and 2): an enchanted weapon (its
+# enchantment glow is an Effect membrane pass) alone in the inventory, a shot of its model; then the same for an enchanted cuirass
+# (a skinned model). The inventory is emptied first so the item list's first entry is the item.
+# Compose it: native-vulkan+menu-items, guest+menu-items.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.removeallitems"
+
+# Chillrend, a frost-enchanted glass sword.
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.additem 000F8318 1"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "InventoryMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "key"
+arg = "Right"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "inventory-enchanted-weapon"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "InventoryMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "console"
+arg = "player.removeallitems"
+
+# Savior's Hide, an enchanted cuirass (its membrane has an alpha test).
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.additem 0002AC61 1"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "InventoryMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "key"
+arg = "Right"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "inventory-enchanted-armour"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "InventoryMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["inventory-enchanted-weapon", "inventory-enchanted-armour"]

@@ -185,6 +185,87 @@ namespace DCLF::Features::Particles
 		}
 	};
 
+	namespace
+	{
+		/** @brief A system's state as a snapshot slot holds it, read now. */
+		void FillSlot(const RE::NiParticleSystem& a_system, ParticleSnapshots::Record::Slot& a_slot)
+		{
+			const auto& system = static_cast<const RE::NiParticles&>(a_system);
+			const auto* data = system.GetParticlesRuntimeData().particleData.get();
+			a_slot.particles.clear();
+			a_slot.rotations = a_slot.aligned = a_slot.alignVelocity = a_slot.speedAspect = false;
+			if (data) {
+				const auto& p = static_cast<const RE::NiParticlesData*>(data)->GetParticlesRuntimeData();
+				const std::uint32_t count = std::min<std::uint32_t>(p.numVertices, ParticleSnapshots::kMaxQuads);
+				if (p.positions && p.radii && p.sizes) {
+					a_slot.particles.resize(count);
+					a_slot.rotations = p.rotationAngles != nullptr;
+					a_slot.aligned = p.unk88 || p.unk89;
+					a_slot.alignVelocity = p.unk88 != 0;
+					a_slot.speedAspect = p.unk89 != 0;
+					a_slot.aspect[0] = p.aspectRatio;
+					a_slot.aspect[1] = p.speedToAspectAspect2;
+					a_slot.aspect[2] = p.speedToAspectAspect1;
+					a_slot.aspect[3] = p.speedToAspectSpeed2;
+					const RE::NiParticleInfo* info = nullptr;
+					if (a_slot.aligned)
+						if (const auto* psys = netimmerse_cast<RE::NiPSysData*>(const_cast<RE::NiObject*>(static_cast<const RE::NiObject*>(data))))
+							info = psys->GetPSysRuntimeData().particleInfo;
+					const std::uint32_t subtextures = p.subtextureOffsets ? std::min(p.subTextureOffsetsCount, kSubtextureRows) : 0u;
+					for (std::uint32_t i = 0; i < count; ++i) {
+						auto& out = a_slot.particles[i];
+						out.position[0] = p.positions[i].x;
+						out.position[1] = p.positions[i].y;
+						out.position[2] = p.positions[i].z;
+						out.size = p.sizes[i] * p.radii[i];
+						if (p.color) {
+							out.colour[0] = p.color[i].red;
+							out.colour[1] = p.color[i].green;
+							out.colour[2] = p.color[i].blue;
+							out.colour[3] = p.color[i].alpha;
+						} else {
+							out.colour[0] = out.colour[1] = out.colour[2] = out.colour[3] = 1.0f;
+						}
+						out.angle = p.rotationAngles ? p.rotationAngles[i] : 0.0f;
+						out.velocity[0] = info ? info[i].velocity.x : 0.0f;
+						out.velocity[1] = info ? info[i].velocity.y : 0.0f;
+						out.velocity[2] = info ? info[i].velocity.z : 0.0f;
+						// Apply IndexedTexCoord[index] when the data has subtextures (FUN_1414bde90's TexCoordIndex).
+						if (p.subTextureOffsetsCount) {
+							const std::uint32_t index = p.textureIndices ? p.textureIndices[i] : 0u;
+							if (index < subtextures) {
+								const auto& offset = p.subtextureOffsets[index];
+								out.rect[0] = offset.red;
+								out.rect[1] = offset.green;
+								out.rect[2] = offset.blue;
+								out.rect[3] = offset.alpha;
+							} else {
+								out.rect[0] = out.rect[1] = out.rect[2] = out.rect[3] = 0.0f;
+							}
+						} else {
+							out.rect[0] = 0.0f;
+							out.rect[1] = 1.0f;
+							out.rect[2] = 0.0f;
+							out.rect[3] = 1.0f;
+						}
+					}
+				}
+			}
+			a_slot.world = a_system.world;
+			const auto& bound = a_system.worldBound;
+			a_slot.worldBound[0] = bound.center.x;
+			a_slot.worldBound[1] = bound.center.y;
+			a_slot.worldBound[2] = bound.center.z;
+			a_slot.worldBound[3] = bound.radius;
+			const auto& model = a_system.GetModelData().modelBound;
+			a_slot.modelCentre[0] = model.center.x;
+			a_slot.modelCentre[1] = model.center.y;
+			a_slot.modelCentre[2] = model.center.z;
+			for (std::size_t d = 0; d < 4; ++d)
+				a_slot.fadeDistances[d] = static_cast<float>(At<std::uint16_t>(&a_system, kParticlesFadeDistances + 2 * d));
+		}
+	}
+
 	struct ParticleSnapshots::UpdateHook
 	{
 		static void thunk(RE::NiParticleSystem* a_system, RE::NiUpdateData* a_data, std::uint32_t a_arg)
@@ -309,79 +390,7 @@ namespace DCLF::Features::Particles
 				record->capturedTime = time;
 				record->capturedWorld = a_system.world;
 				auto& slot = record->slots[record->writeSlot];
-				const auto& system = static_cast<const RE::NiParticles&>(a_system);
-				const auto* data = system.GetParticlesRuntimeData().particleData.get();
-				slot.particles.clear();
-				slot.rotations = slot.aligned = slot.alignVelocity = slot.speedAspect = false;
-				if (data) {
-					const auto& p = static_cast<const RE::NiParticlesData*>(data)->GetParticlesRuntimeData();
-					const std::uint32_t count = std::min<std::uint32_t>(p.numVertices, kMaxQuads);
-					if (p.positions && p.radii && p.sizes) {
-						slot.particles.resize(count);
-						slot.rotations = p.rotationAngles != nullptr;
-						slot.aligned = p.unk88 || p.unk89;
-						slot.alignVelocity = p.unk88 != 0;
-						slot.speedAspect = p.unk89 != 0;
-						slot.aspect[0] = p.aspectRatio;
-						slot.aspect[1] = p.speedToAspectAspect2;
-						slot.aspect[2] = p.speedToAspectAspect1;
-						slot.aspect[3] = p.speedToAspectSpeed2;
-						const RE::NiParticleInfo* info = nullptr;
-						if (slot.aligned)
-							if (const auto* psys = netimmerse_cast<RE::NiPSysData*>(const_cast<RE::NiObject*>(static_cast<const RE::NiObject*>(data))))
-								info = psys->GetPSysRuntimeData().particleInfo;
-						const std::uint32_t subtextures = p.subtextureOffsets ? std::min(p.subTextureOffsetsCount, kSubtextureRows) : 0u;
-						for (std::uint32_t i = 0; i < count; ++i) {
-							auto& out = slot.particles[i];
-							out.position[0] = p.positions[i].x;
-							out.position[1] = p.positions[i].y;
-							out.position[2] = p.positions[i].z;
-							out.size = p.sizes[i] * p.radii[i];
-							if (p.color) {
-								out.colour[0] = p.color[i].red;
-								out.colour[1] = p.color[i].green;
-								out.colour[2] = p.color[i].blue;
-								out.colour[3] = p.color[i].alpha;
-							} else {
-								out.colour[0] = out.colour[1] = out.colour[2] = out.colour[3] = 1.0f;
-							}
-							out.angle = p.rotationAngles ? p.rotationAngles[i] : 0.0f;
-							out.velocity[0] = info ? info[i].velocity.x : 0.0f;
-							out.velocity[1] = info ? info[i].velocity.y : 0.0f;
-							out.velocity[2] = info ? info[i].velocity.z : 0.0f;
-							// Apply IndexedTexCoord[index] when the data has subtextures (FUN_1414bde90's TexCoordIndex).
-							if (p.subTextureOffsetsCount) {
-								const std::uint32_t index = p.textureIndices ? p.textureIndices[i] : 0u;
-								if (index < subtextures) {
-									const auto& offset = p.subtextureOffsets[index];
-									out.rect[0] = offset.red;
-									out.rect[1] = offset.green;
-									out.rect[2] = offset.blue;
-									out.rect[3] = offset.alpha;
-								} else {
-									out.rect[0] = out.rect[1] = out.rect[2] = out.rect[3] = 0.0f;
-								}
-							} else {
-								out.rect[0] = 0.0f;
-								out.rect[1] = 1.0f;
-								out.rect[2] = 0.0f;
-								out.rect[3] = 1.0f;
-							}
-						}
-					}
-				}
-				slot.world = a_system.world;
-				const auto& bound = a_system.worldBound;
-				slot.worldBound[0] = bound.center.x;
-				slot.worldBound[1] = bound.center.y;
-				slot.worldBound[2] = bound.center.z;
-				slot.worldBound[3] = bound.radius;
-				const auto& model = a_system.GetModelData().modelBound;
-				slot.modelCentre[0] = model.center.x;
-				slot.modelCentre[1] = model.center.y;
-				slot.modelCentre[2] = model.center.z;
-				for (std::size_t d = 0; d < 4; ++d)
-					slot.fadeDistances[d] = static_cast<float>(At<std::uint16_t>(&a_system, kParticlesFadeDistances + 2 * d));
+				FillSlot(a_system, slot);
 				slot.sequence = ++record->written;
 				const std::uint32_t previous = record->latest.exchange(record->writeSlot | kFresh, std::memory_order_acq_rel);
 				record->writeSlot = previous & kSlotMask;
@@ -455,10 +464,9 @@ namespace DCLF::Features::Particles
 		}
 
 		// Back to front by distance along the camera's forward (FUN_140d4fcb0, then FUN_140d4ff00).
-		void OrderBackToFront(ParticleSnapshots::Record& a_record, const Slot& a_slot, const ParticleSnapshots::Camera& a_camera, std::uint32_t a_count)
+		void OrderBackToFront(std::vector<std::uint16_t>& order, std::vector<float>& depth, const Slot& a_slot, const ParticleSnapshots::Camera& a_camera,
+			std::uint32_t a_count)
 		{
-			auto& order = a_record.order;
-			auto& depth = a_record.depth;
 			order.resize(a_count);
 			std::iota(order.begin(), order.end(), std::uint16_t{ 0 });
 			if (a_count >= 2) {
@@ -562,6 +570,36 @@ namespace DCLF::Features::Particles
 			}
 			std::copy_n(a_slot.worldBound, 4, a_out.bound);
 		}
+
+		/** @brief Expands a_slot faced to a_camera into a_rows, back to front, as FUN_140e51320 does. True for aligned quads. */
+		bool ExpandSlot(const Slot& a_slot, std::vector<std::uint16_t>& a_order, std::vector<float>& a_depth, const ParticleSnapshots::Camera& a_camera,
+			std::uint32_t a_quads, float* a_rows, ParticleSnapshots::Expanded& a_out)
+		{
+			const std::uint32_t count = std::min<std::uint32_t>(static_cast<std::uint32_t>(a_slot.particles.size()), a_quads);
+			const auto& r = a_slot.world.rotate.entry;
+			const float scale = a_slot.world.scale;
+			const float t[3]{ a_slot.world.translate.x, a_slot.world.translate.y, a_slot.world.translate.z };
+			QuadFrame frame;
+			FrameOf(a_slot, a_camera, frame);
+			OrderBackToFront(a_order, a_depth, a_slot, a_camera, count);
+			const bool alignedQuads = !a_slot.rotations && (a_slot.alignVelocity || a_slot.speedAspect);
+			for (std::uint32_t k = 0; k < count; ++k) {
+				const auto& particle = a_slot.particles[a_order[k]];
+				const auto& p = particle.position;
+				const float world[3]{ (p[0] * r[0][0] + p[1] * r[0][1] + p[2] * r[0][2]) * scale + t[0], (p[0] * r[1][0] + p[1] * r[1][1] + p[2] * r[1][2]) * scale + t[1],
+					(p[0] * r[2][0] + p[1] * r[2][1] + p[2] * r[2][2]) * scale + t[2] };
+				const float fade = DistanceFade(a_slot.fadeDistances, a_camera.eye, world);
+				const float colour = std::bit_cast<float>(PackColour(particle.colour, fade));
+				float x[3], y[3];
+				QuadAxes(a_slot, particle, fade, alignedQuads, frame, x, y);
+				WriteQuad(a_slot, particle, x, y, colour, a_rows + std::size_t(k) * ParticleSnapshots::kRowsPerParticle * 4);
+			}
+			std::fill(a_rows + std::size_t(count) * ParticleSnapshots::kRowsPerParticle * 4, a_rows + std::size_t(a_quads) * ParticleSnapshots::kRowsPerParticle * 4, 0.0f);
+			PlacementOf(a_slot, a_out);
+			a_out.particles = count;
+			a_out.snapshot = true;
+			return alignedQuads;
+		}
 	}
 
 	void ParticleSnapshots::Expand(Record& a_record, const Camera& a_camera, std::uint32_t a_quads, float* a_rows, Expanded& a_out)
@@ -576,37 +614,30 @@ namespace DCLF::Features::Particles
 			withoutSnapshot.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		const std::uint32_t count = std::min<std::uint32_t>(static_cast<std::uint32_t>(slot.particles.size()), a_quads);
-		const auto& r = slot.world.rotate.entry;
-		const float scale = slot.world.scale;
-		const float t[3]{ slot.world.translate.x, slot.world.translate.y, slot.world.translate.z };
-		QuadFrame frame;
-		FrameOf(slot, a_camera, frame);
-		OrderBackToFront(a_record, slot, a_camera, count);
-		const bool alignedQuads = !slot.rotations && (slot.alignVelocity || slot.speedAspect);
-		for (std::uint32_t k = 0; k < count; ++k) {
-			const auto& particle = slot.particles[a_record.order[k]];
-			const auto& p = particle.position;
-			const float world[3]{ (p[0] * r[0][0] + p[1] * r[0][1] + p[2] * r[0][2]) * scale + t[0], (p[0] * r[1][0] + p[1] * r[1][1] + p[2] * r[1][2]) * scale + t[1],
-				(p[0] * r[2][0] + p[1] * r[2][1] + p[2] * r[2][2]) * scale + t[2] };
-			const float fade = DistanceFade(slot.fadeDistances, a_camera.eye, world);
-			const float colour = std::bit_cast<float>(PackColour(particle.colour, fade));
-			float x[3], y[3];
-			QuadAxes(slot, particle, fade, alignedQuads, frame, x, y);
-			WriteQuad(slot, particle, x, y, colour, a_rows + std::size_t(k) * kRowsPerParticle * 4);
-		}
-		std::fill(a_rows + std::size_t(count) * kRowsPerParticle * 4, a_rows + rows * 4, 0.0f);
-		PlacementOf(slot, a_out);
-		a_out.particles = count;
-		a_out.snapshot = true;
+		const bool alignedQuads = ExpandSlot(slot, a_record.order, a_record.depth, a_camera, a_quads, a_rows, a_out);
 		a_record.sameRuns = slot.sequence == a_record.expandedSequence ? a_record.sameRuns + 1 : 0;
 		a_record.expandedSequence = slot.sequence;
 		if (a_record.sameRuns == kFrozenRuns)
 			frozen.fetch_add(1, std::memory_order_relaxed);
 		expansions.fetch_add(1, std::memory_order_relaxed);
-		expandedParticles.fetch_add(count, std::memory_order_relaxed);
+		expandedParticles.fetch_add(a_out.particles, std::memory_order_relaxed);
 		if (alignedQuads)
 			aligned.fetch_add(1, std::memory_order_relaxed);
+	}
+
+	void ParticleSnapshots::ExpandNow(const RE::NiParticleSystem& a_system, const Camera& a_camera, std::uint32_t a_quads, float* a_rows, Expanded& a_out)
+	{
+		a_out = {};
+		Record::Slot slot;
+		FillSlot(a_system, slot);
+		std::vector<std::uint16_t> order;
+		std::vector<float> depth;
+		ExpandSlot(slot, order, depth, a_camera, a_quads, a_rows, a_out);
+	}
+
+	ID3D11Buffer* ParticleSnapshots::QuadIndexBuffer()
+	{
+		return Global<ID3D11Buffer*>(kQuadIndices);
 	}
 
 	void ParticleSnapshots::EndRun()
