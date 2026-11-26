@@ -2,8 +2,8 @@
 // Main::CalculateAndDrawShadowCasterLights (AE 0x1414cbb90, SE 0x1412e2660 with its sun part 0x1412e2e10), CalculateActiveShadowCasterLights
 // (AE 0x1414cc570, SE 0x1412e2f60; its loop is LightSelection's) and Main::RenderShadowMaps (AE 0x1414cbff0, SE 0x1412e2a60).
 // The sun's full-frustum culls and every light's cull and registration are not run: DCLF draws every shadow view from its own tables.
-// The main camera's list accumulation jobs are the engine's scene work and still run here, through the calls the engine's functions
-// make (so DCLF's stand-in hooks and the engine-render detector see them as before). Its registration jobs are not run.
+// Neither are the main camera's list accumulation jobs nor its registration jobs: the scene lists are DCLF's, and the game-visible
+// effects of the list culls are produced on the game thread (Snapshot/SideEffects.h).
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
@@ -15,15 +15,12 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunViews.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <memory>
-#include <vector>
 
 namespace DCLF::Features::Shadows::Native
 {
@@ -50,27 +47,12 @@ namespace DCLF::Features::Shadows::Native
 		RE::ShadowSceneNode*& SceneNode() { return Global<RE::ShadowSceneNode*>(513211, 390951); }  // 0x142033060
 		std::byte*& WorldGraph() { return Global<std::byte*>(528087, 415032); }                     // 0x14338c8e8: the world scene graph (camera at +0x128)
 
-		// The main camera's culling: its processes, their lists and the portal records the list jobs use.
-		std::uint32_t& ProcessCount() { return Global<std::uint32_t>(528071, 415016); }                            // 0x14338c868
-		void**& Processes() { return Global<void**>(528077, 415022); }                                             // 0x14338c8a0
-		std::byte*& Lists() { return Global<std::byte*>(528072, 415017); }                                         // 0x14338c870, 0x18 bytes a list
-		std::uint32_t& RecordCount() { return Global<std::uint32_t>(528079, 415024); }                             // 0x14338c8b0
-		void*& CullingJobs() { return Global<void*>(527999, 414944); }                                             // 0x14338c630: gJobList_SceneListAccumCulling
+		void**& Processes() { return Global<void**>(528077, 415022); }                                             // 0x14338c8a0: the main camera's list processes
 		RE::BSShaderAccumulator*& MainAccumulator() { return Global<RE::BSShaderAccumulator*>(528064, 415009); }   // 0x14338c830
 
-		constexpr std::size_t kPortalEntry = 0x30190;    // a culling process's portal graph entry
-		constexpr std::size_t kProcessRecord = 0x301A0;  // the process's portal record for the list jobs
-		constexpr std::size_t kContextSize = 0x68;       // a list job's culling context
-		constexpr std::size_t kRecordSize = 200;         // a portal record
 		constexpr std::size_t kLensFlareData = 0x138;    // BSLight::lensFlareData
 		constexpr std::uint32_t kMemoryContext = 0x1D;   // the TLS memory context the shadow lights' Render runs under
 		constexpr std::size_t kTlsMemoryContext = 0x768;
-
-		template <class F>
-		F Function(std::uint64_t a_se, std::uint64_t a_ae)
-		{
-			return reinterpret_cast<F>(REL::RelocationID(a_se, a_ae).address());
-		}
 
 		/** @brief The target of the rel32 CALL at a_site: the engine's function, or whatever hook sits on that call. */
 		template <class F>
@@ -81,14 +63,6 @@ namespace DCLF::Features::Shadows::Native
 			return reinterpret_cast<F>(site + 5 + rel);
 		}
 
-		// Job plumbing (engine).
-		using LockGuard = void (*)(void*, void*);
-		using UnlockGuard = void (*)(void*);
-		using QueueJob = void (*)(void*, void*, void*, std::uint64_t);
-		using BeginJobs = void (*)(void*, std::uint64_t, std::uint64_t);
-		using FinishJobs = void (*)(void*);
-		using ObjectFn = void (*)(void*);
-		using AttachRecord = void (*)(void*, void*);
 		using AfterFullFrustumFn = void (*)(RE::ShadowSceneNode*, void*);
 
 		/** @brief The TLS memory context id, set for a scope as the engine's Render loop does. */
@@ -185,68 +159,14 @@ namespace DCLF::Features::Shadows::Native
 			QueueLensFlareIfAny(*sun);
 		}
 
-		/** @brief One list job's culling context and the portal records, as 107132 makes and frees them. */
-		struct ListAccumulation
+		/**
+		 * @brief 107132's call right after the full-frustum cull (AE 106323, the culling globals the frame reads), through whatever hooks
+		 * that call: DCLF's primary cull prepares its frame there. No list job follows: the main camera's list culls are not run in native.
+		 */
+		void AfterFullFrustum()
 		{
-			std::vector<std::byte> records;
-			std::vector<std::byte> contexts;
-			std::uint32_t recordCount = 0;
-			std::uint32_t processCount = 0;
-		};
-
-		void BeginListAccumulation(ListAccumulation& a_jobs, RE::NiCamera* a_camera)
-		{
-			// The engine calls these with the node and the first process; DCLF's stand-in hooks the first one's call.
-			auto* first = Processes()[0];
-			CallTarget<AfterFullFrustumFn>(100414, 107132, 0x4B, 0x15A)(SceneNode(), first);
-			auto* entry = DCLF::Engine::At<std::byte*>(first, kPortalEntry);
-			auto* portalList = entry ? entry + 0x68 : nullptr;
-			if (portalList)
-				Function<ObjectFn>(75078, 76846)(portalList);
-			a_jobs.recordCount = RecordCount();
-			a_jobs.records.assign(std::size_t(a_jobs.recordCount) * kRecordSize + 16, std::byte{ 0 });
-			auto* records = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(a_jobs.records.data()) + 15) & ~std::uintptr_t(15));
-			for (std::uint32_t i = 0; i < a_jobs.recordCount; ++i)
-				Function<ObjectFn>(75051, 76815)(records + i * kRecordSize);
-			a_jobs.processCount = ProcessCount();
-			for (std::uint32_t i = 0; i < a_jobs.processCount; ++i) {
-				if (portalList)
-					Function<AttachRecord>(75055, 76819)(portalList, records + i * kRecordSize);
-				DCLF::Engine::At<void*>(Processes()[i], kProcessRecord) = records + i * kRecordSize;
-			}
-			a_jobs.contexts.assign(std::size_t(a_jobs.processCount) * kContextSize + 16, std::byte{ 0 });
-			auto* contexts = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(a_jobs.contexts.data()) + 15) & ~std::uintptr_t(15));
-			for (std::uint32_t i = 0; i < a_jobs.processCount; ++i)
-				Function<ObjectFn>(100211, 106919)(contexts + i * kContextSize);
-			std::array<std::uint64_t, 3> guard{};
-			Function<LockGuard>(67997, 69360)(guard.data(), CullingJobs());
-			for (std::uint32_t i = 0; i < a_jobs.processCount; ++i) {
-				auto* context = contexts + i * kContextSize;
-				DCLF::Engine::At<RE::NiPointer<RE::NiCamera>>(context, 0x10) = RE::NiPointer<RE::NiCamera>(a_camera);
-				DCLF::Engine::At<void*>(context, 0x30) = Processes()[i];
-				DCLF::Engine::At<void*>(context, 0x48) = Lists() + std::size_t(i) * 0x18;
-				DCLF::Engine::At<std::uint32_t>(context, 0x58) = i;
-				// FirstListAccumulationJob for the first list, ListAccumulationJob for the rest.
-				void* job = i == 0 ? reinterpret_cast<void*>(REL::RelocationID(100416, 107134).address()) : reinterpret_cast<void*>(REL::RelocationID(100417, 107135).address());
-				Function<QueueJob>(67988, 69349)(CullingJobs(), job, context, 0);
-			}
-			Function<UnlockGuard>(67998, 69361)(guard.data());
-			Function<BeginJobs>(67991, 69352)(CullingJobs(), 0, 0);
+			CallTarget<AfterFullFrustumFn>(100414, 107132, 0x4B, 0x15A)(SceneNode(), Processes()[0]);
 		}
-
-		void FinishListAccumulation(ListAccumulation& a_jobs)
-		{
-			// The engine's Finish call, through DCLF's stand-in hook on it.
-			CallTarget<FinishJobs>(100414, 107132, 0x2DD, 0x3BD)(CullingJobs());
-			auto* contexts = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(a_jobs.contexts.data()) + 15) & ~std::uintptr_t(15));
-			for (std::uint32_t i = 0; i < a_jobs.processCount; ++i)
-				Function<ObjectFn>(16099, 16341)(contexts + i * kContextSize);
-			auto* records = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(a_jobs.records.data()) + 15) & ~std::uintptr_t(15));
-			for (std::uint32_t i = 0; i < a_jobs.recordCount; ++i)
-				Function<ObjectFn>(75052, 76816)(records + i * kRecordSize);
-		}
-
-
 	}
 
 	bool Replaces()
@@ -292,7 +212,7 @@ namespace DCLF::Features::Shadows::Native
 		QueueLensFlareIfAny(a_light);
 	}
 
-	void SelectCasters(RE::NiCamera* a_camera)
+	void SelectCasters()
 	{
 		auto* node = SceneNode();
 		auto* world = WorldCamera();
@@ -307,11 +227,10 @@ namespace DCLF::Features::Shadows::Native
 		keptThisFrame = 0;
 		SelectSun(*node, *world, focusOn);
 		// Stage 5 is the game-side producer's (Snapshot/SideEffects.cpp).
-		ListAccumulation jobs;
-		BeginListAccumulation(jobs, a_camera);
+		AfterFullFrustum();
 		LightSelection::Get().SelectNative();
 		node->GetRuntimeData().firstPersonShadowMask = InsideMask();
-		FinishListAccumulation(jobs);
+		PrimaryCull::Get().NoListJobs();
 		KeptLights() = keptThisFrame;
 	}
 
