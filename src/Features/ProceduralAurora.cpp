@@ -1,9 +1,11 @@
 #include "ProceduralAurora.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Effects11.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/FrameClock.h"
 #include "State.h"
 
 #include <cmath>
@@ -266,9 +268,9 @@ ProceduralAurora::CommonBufferData ProceduralAurora::GetCommonBufferData()
 {
 	// The feature buffer is packed several times a frame. Every pack of a frame gets the block its first one made, so the
 	// animation clock advances once a frame.
-	static uint32_t packedFrame = UINT32_MAX;
+	static std::uint64_t packedFrame = UINT64_MAX;
 	static CommonBufferData packed{};
-	const uint32_t frame = globals::state->frameCount;
+	const auto frame = RenderGraph::FrameClock::BeginFrame();
 	if (packedFrame != frame) {
 		packedFrame = frame;
 		packed = PackCommonBufferData();
@@ -309,8 +311,8 @@ ProceduralAurora::CommonBufferData ProceduralAurora::PackCommonBufferData()
 	const float targetCurtains = static_cast<float>(std::clamp(settings.CurtainCount, 1, kMaxCurtains));
 	const float curtainStep = static_cast<float>(std::clamp(delta, 0.0, 0.1));
 	curtainCount = firstFrame ? targetCurtains : curtainCount + std::clamp(targetCurtains - curtainCount, -curtainStep, curtainStep);
-	const auto ui = CS_ENGINE_READ(UI, RecordTime, RE::UI::GetSingleton());
-	if (ui && ui->GameIsPaused())
+	const auto& snapshot = Snapshot::Current();
+	if (snapshot && snapshot->menus.paused)
 		delta = 0.0;
 	const uint32_t nightIndex = GetNightIndex();
 	if (nightIndex != clockNight) {
@@ -322,10 +324,11 @@ ProceduralAurora::CommonBufferData ProceduralAurora::PackCommonBufferData()
 	data.RayDetail = settings.RayDetail;
 	data.Softness = settings.Softness;
 	// Ease toward the vanilla visibility so the aurora never pops; snap on the first frame and after time jumps
-	float vanilla = vanillaVisibility.load(std::memory_order_relaxed);
+	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	float vanilla = frame ? frame->vanillaVisibility : 0.0f;
 	if (!std::isfinite(vanilla) || vanilla < kMinVisibility)
 		vanilla = 0.0f;
-	const double gameDays = CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar) ? static_cast<double>(CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)->GetDaysPassed()) : -1.0;
+	const double gameDays = snapshot ? static_cast<double>(snapshot->gameDaysPassed) : -1.0;
 	const bool timeJumped = lastGameDays >= 0.0 && gameDays >= 0.0 && std::abs(gameDays - lastGameDays) > kTimeJumpDays;
 	lastGameDays = gameDays;
 	const float visibilityStep = static_cast<float>(std::clamp(delta, 0.0, 0.1)) * 0.5f;
@@ -351,9 +354,23 @@ ProceduralAurora::CommonBufferData ProceduralAurora::PackCommonBufferData()
 
 uint32_t ProceduralAurora::GetNightIndex()
 {
-	if (!CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar))
+	const auto& snapshot = Snapshot::Current();
+	if (!snapshot)
 		return 0;
-	return static_cast<uint32_t>(std::max(std::floor(CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)->GetDaysPassed() + 0.5f), 0.0f));
+	return static_cast<uint32_t>(std::max(std::floor(snapshot->gameDaysPassed + 0.5f), 0.0f));
+}
+
+void ProceduralAurora::PostPostLoad()
+{
+	Snapshot::RegisterCapture(&ProceduralAurora::Capture);
+}
+
+void ProceduralAurora::Capture(Snapshot::Builder& a_builder)
+{
+	const auto& aurora = globals::features::proceduralAurora;
+	if (!aurora.loaded)
+		return;
+	a_builder.Set(Block{ .vanillaVisibility = aurora.vanillaVisibility.load(std::memory_order_relaxed) });
 }
 
 void ProceduralAurora::OnSkyUpdate(RE::Sky* a_sky)
@@ -393,7 +410,7 @@ ProceduralAurora::Night ProceduralAurora::GetNight() const
 	night.fringeAmount = settings.FringeAmount;
 	night.crownStart = settings.CrownStart;
 
-	if (settings.NewPatternEachNight && CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)) {
+	if (settings.NewPatternEachNight && Snapshot::Current()) {
 		const uint32_t nightIndex = GetNightIndex();
 		auto roll = [nightIndex](uint32_t salt) {
 			uint32_t x = nightIndex * 747796405u + salt * 2891336453u;

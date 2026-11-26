@@ -5,6 +5,7 @@
 #include "Menu.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 #include "Utils/DebugSection.h"
 
 #define I18N_KEY_PREFIX "feature.wetness_effects."
@@ -411,6 +412,7 @@ namespace Ripples
 
 void WetnessEffects::PostPostLoad()
 {
+	Snapshot::RegisterCapture(&WetnessEffects::Capture);
 	splashesOfStormsLoaded = static_cast<bool>(GetModuleHandle(L"po3_SplashesOfStorms.dll"));
 	if (splashesOfStormsLoaded) {
 		logger::info("[{}] Splashes of Storms detected, compatibility enabled", GetName());
@@ -910,9 +912,89 @@ void WetnessEffects::ApplyClimatePreset(ClimatePreset preset)
 
 void WetnessEffects::Reset()
 {
-	// Not in GetCommonBufferData: the feature buffer is rebuilt several times per frame (see Deferred).
-	if (CS_ENGINE_READ(UI, Other, globals::game::ui) && !CS_ENGINE_READ(UI, Other, globals::game::ui)->GameIsPaused())
-		rainTimer += (size_t)(CS_ENGINE_READ(Timer, Other, RE::GetSecondsSinceLastFrame()) * 1000000);  // BSTimer::delta is always 0 for some reason
+	// Not in GetCommonBufferData: the feature buffer is rebuilt several times per frame (see Deferred). The clock steps once
+	// per new snapshot by the game time it stands for (0 while paused): a repeated snapshot holds the rain still.
+	const auto& snapshot = Snapshot::Current();
+	if (snapshot && snapshot->id != steppedSnapshot) {
+		steppedSnapshot = snapshot->id;
+		rainTimer += (size_t)(snapshot->events.gameDelta * 1000000);
+	}
+}
+
+void WetnessEffects::Capture(Snapshot::Builder& a_builder)
+{
+	const auto& wetness = globals::features::wetnessEffects;
+	if (!wetness.loaded)
+		return;
+	Block block{};
+	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
+	block.sky = sky != nullptr;
+	if (sky && sky->mode.get() == RE::Sky::Mode::kFull) {
+		block.fullSky = true;
+		if (auto precip = sky->precip) {
+			block.precipitation = true;
+			// Extract rain intensities using helper function to avoid code duplication
+			float currentRaining = 0.0f;
+			float lastRaining = 0.0f;
+
+			if (precip->currentPrecip && sky->currentWeather) {
+				currentRaining = GetRainIntensity(precip->currentPrecip, sky->currentWeather);
+			}
+
+			if (precip->lastPrecip && sky->lastWeather) {
+				lastRaining = GetRainIntensity(precip->lastPrecip, sky->lastWeather);
+			}
+
+			// Apply the same fade-in/fade-out thresholds the game uses in
+			// Sky::IsRaining() to prevent CS effects appearing before the
+			// game's own rain particles become visible, with a smooth ramp
+			// from the threshold to full intensity.
+			float currentWeight = 0.0f;
+			if (sky->currentWeather && sky->currentWeather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy)) {
+				float fadeInThreshold = sky->currentWeather->data.precipitationBeginFadeIn * (1.0f / 255.0f);
+				currentWeight = linearstep(fadeInThreshold, 1.0f, sky->currentWeatherPct);
+			}
+
+			float lastWeight = 0.0f;
+			if (sky->lastWeather && sky->lastWeather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy)) {
+				float fadeOutThreshold = sky->lastWeather->data.precipitationEndFadeOut * (1.0f / 255.0f);
+				lastWeight = 1.0f - linearstep(0.0f, fadeOutThreshold, sky->currentWeatherPct);
+			}
+
+			block.raining = (currentRaining * currentWeight) + (lastRaining * lastWeight);
+		}
+
+		WeatherWetnessResult currentWeatherResult = wetness.CalculateWeatherWetness(sky->currentWeather, sky->currentWeatherPct, true);
+		WeatherWetnessResult lastWeatherResult = wetness.CalculateWeatherWetness(sky->lastWeather, sky->currentWeatherPct, false);
+		block.wetness = std::min(1.0f, currentWeatherResult.wetness + lastWeatherResult.wetness);
+		block.puddleWetness = std::min(1.0f, currentWeatherResult.puddleWetness + lastWeatherResult.puddleWetness);
+	}
+	a_builder.Set(block);
+}
+
+namespace
+{
+	/**
+	* @brief The rain occlusion map's projection, from the rain emitter. The engine's precipitation occlusion render writes it in
+	* the frame's render half (the map Wetness samples in the same frame), so it is read at record time until that render is
+	* ported (phase 3), not captured.
+	*/
+	bool RainOcclusionProjection(REX::W32::XMFLOAT4X4& a_out)
+	{
+		const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+		const auto precip = sky ? sky->precip : nullptr;
+		if (!precip)
+			return false;
+		auto precipObject = precip->currentPrecip;
+		if (!precipObject)
+			precipObject = precip->lastPrecip;
+		auto particleShaderProperty = precipObject ? netimmerse_cast<RE::BSParticleShaderProperty*>(precipObject->GetGeometryRuntimeData().shaderProperty.get()) : nullptr;
+		if (!particleShaderProperty || !particleShaderProperty->particleEmitter)
+			return false;
+		auto rain = (RE::BSParticleShaderRainEmitter*)(particleShaderProperty->particleEmitter);
+		a_out = rain->occlusionProjection;
+		return true;
+	}
 }
 
 WetnessEffects::PerFrame WetnessEffects::GetCommonBufferData() const
@@ -923,78 +1005,36 @@ WetnessEffects::PerFrame WetnessEffects::GetCommonBufferData() const
 	data.Wetness = 0.0f;
 	data.PuddleWetness = 0.0f;
 
-	if (settings.EnableWetnessEffects) {
-		if (auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)) {
-			if (sky->mode.get() == RE::Sky::Mode::kFull) {
-				if (auto precip = sky->precip) {
-					{
-						auto precipObject = precip->currentPrecip;
-						if (!precipObject) {
-							precipObject = precip->lastPrecip;
-						}
-						auto particleShaderProperty = precipObject ? netimmerse_cast<RE::BSParticleShaderProperty*>(precipObject->GetGeometryRuntimeData().shaderProperty.get()) : nullptr;
-						if (particleShaderProperty && particleShaderProperty->particleEmitter) {
-							auto rain = (RE::BSParticleShaderRainEmitter*)(particleShaderProperty->particleEmitter);
-							data.OcclusionViewProj = rain->occlusionProjection;
-						}
-					}
-
-					// Extract rain intensities using helper function to avoid code duplication
-					float currentRaining = 0.0f;
-					float lastRaining = 0.0f;
-
-					if (precip->currentPrecip && sky->currentWeather) {
-						currentRaining = GetRainIntensity(precip->currentPrecip, sky->currentWeather);
-					}
-
-					if (precip->lastPrecip && sky->lastWeather) {
-						lastRaining = GetRainIntensity(precip->lastPrecip, sky->lastWeather);
-					}
-
-					// Apply the same fade-in/fade-out thresholds the game uses in
-					// Sky::IsRaining() to prevent CS effects appearing before the
-					// game's own rain particles become visible, with a smooth ramp
-					// from the threshold to full intensity.
-					float currentWeight = 0.0f;
-					if (sky->currentWeather && sky->currentWeather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy)) {
-						float fadeInThreshold = sky->currentWeather->data.precipitationBeginFadeIn * (1.0f / 255.0f);
-						currentWeight = linearstep(fadeInThreshold, 1.0f, sky->currentWeatherPct);
-					}
-
-					float lastWeight = 0.0f;
-					if (sky->lastWeather && sky->lastWeather->data.flags.any(RE::TESWeather::WeatherDataFlag::kRainy)) {
-						float fadeOutThreshold = sky->lastWeather->data.precipitationEndFadeOut * (1.0f / 255.0f);
-						lastWeight = 1.0f - linearstep(0.0f, fadeOutThreshold, sky->currentWeatherPct);
-					}
-
-					data.Raining = (currentRaining * currentWeight) + (lastRaining * lastWeight);
-				}
-
-				WeatherWetnessResult currentWeatherResult = CalculateWeatherWetness(sky->currentWeather, sky->currentWeatherPct, true);
-				WeatherWetnessResult lastWeatherResult = CalculateWeatherWetness(sky->lastWeather, sky->currentWeatherPct, false);
-				float combinedWetness = std::min(1.0f, currentWeatherResult.wetness + lastWeatherResult.wetness);
-				float combinedPuddleWetness = std::min(1.0f, currentWeatherResult.puddleWetness + lastWeatherResult.puddleWetness);
-				data.Wetness = combinedWetness;
-				data.PuddleWetness = combinedPuddleWetness;
-				if (debugSettings.EnableWetnessOverride) {
-					data.Wetness = debugSettings.WetnessOverride.y;
-				}
-				if (debugSettings.EnablePuddleOverride) {
-					data.PuddleWetness = debugSettings.PuddleWetnessOverride.y;
-				}
-				if (debugSettings.EnableRainOverride) {
-					data.Raining = debugSettings.RainOverride.y;
-				}
-			} else {
-				if (debugSettings.EnableWetnessOverride) {
-					data.Wetness = debugSettings.EnableIntExOverride ? debugSettings.WetnessOverride.x : debugSettings.WetnessOverride.y;
-				}
-				if (debugSettings.EnablePuddleOverride) {
-					data.PuddleWetness = debugSettings.EnableIntExOverride ? debugSettings.PuddleWetnessOverride.x : debugSettings.PuddleWetnessOverride.y;
-				}
-				if (debugSettings.EnableRainOverride) {
-					data.Raining = debugSettings.EnableIntExOverride ? debugSettings.RainOverride.x : debugSettings.RainOverride.y;
-				}
+	const auto& snapshot = Snapshot::Current();
+	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	if (settings.EnableWetnessEffects && frame && frame->sky) {
+		if (frame->fullSky) {
+			if (frame->precipitation) {
+				REX::W32::XMFLOAT4X4 occlusion;
+				if (RainOcclusionProjection(occlusion))
+					data.OcclusionViewProj = occlusion;
+				data.Raining = frame->raining;
+			}
+			data.Wetness = frame->wetness;
+			data.PuddleWetness = frame->puddleWetness;
+			if (debugSettings.EnableWetnessOverride) {
+				data.Wetness = debugSettings.WetnessOverride.y;
+			}
+			if (debugSettings.EnablePuddleOverride) {
+				data.PuddleWetness = debugSettings.PuddleWetnessOverride.y;
+			}
+			if (debugSettings.EnableRainOverride) {
+				data.Raining = debugSettings.RainOverride.y;
+			}
+		} else {
+			if (debugSettings.EnableWetnessOverride) {
+				data.Wetness = debugSettings.EnableIntExOverride ? debugSettings.WetnessOverride.x : debugSettings.WetnessOverride.y;
+			}
+			if (debugSettings.EnablePuddleOverride) {
+				data.PuddleWetness = debugSettings.EnableIntExOverride ? debugSettings.PuddleWetnessOverride.x : debugSettings.PuddleWetnessOverride.y;
+			}
+			if (debugSettings.EnableRainOverride) {
+				data.Raining = debugSettings.EnableIntExOverride ? debugSettings.RainOverride.x : debugSettings.RainOverride.y;
 			}
 		}
 	}

@@ -2,6 +2,7 @@
 #include "../I18n/I18n.h"
 #include "RE/B/BSVolumetricLightingRenderData.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "LinearLighting.h"
 #include "Utils/Climate.h"
@@ -198,6 +199,7 @@ void SkySync::PostPostLoad()
 
 	stl::detour_thunk<Sky_Update>(REL::RelocationID(25682, 26229));
 	Util::SetCelestialTransitionHandlerAvailable(true);
+	Snapshot::RegisterCapture(&SkySync::Capture);
 
 	gSunPosition = reinterpret_cast<RE::NiPoint3*>(REL::RelocationID(527924, 414871).address());
 
@@ -217,6 +219,35 @@ void SkySync::DataLoaded()
 		gSunAlphaTransTime = collection->GetSetting("fSunAlphaTransTime");
 		gWeatherFlashDirectional = collection->GetSetting("fWeatherFlashDirectional");
 	}
+
+	// In BSVolumetricLightingRenderData's order: intensity, custom colour, density (4), phase (2), range.
+	constexpr std::array<const char*, 9> names{ "fVolumetricLightingIntensity:Display", "fVolumetricLightingCustomColorContribution:Display",
+		"fVolumetricLightingDensityContribution:Display", "fVolumetricLightingDensityScale:Display", "fVolumetricLightingWindSpeedScale:Display",
+		"fVolumetricLightingWindFallingSpeed:Display", "fVolumetricLightingPhaseContribution:Display", "fVolumetricLightingPhaseScattering:Display",
+		"fVolumetricLightingRangeFactor:Display" };
+	for (std::size_t i = 0; i < names.size(); ++i)
+		gDefaultVolumetricLighting[i] = CS_ENGINE_READ(Ini, Other, RE::GetINISetting(names[i]));
+}
+
+void SkySync::Capture(Snapshot::Builder& a_builder)
+{
+	auto& skySync = globals::features::skySync;
+	if (!skySync.loaded)
+		return;
+	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
+	Block block{};
+	for (std::size_t i = 0; i < BodyCount; ++i) {
+		block.rawDirections[i] = skySync.rawDirections[i];
+		block.directions[i] = skySync.GetCelestialDirection(sky, static_cast<Caster>(i));
+	}
+	block.blend = skySync.GetDirectionalLightBlend();
+	a_builder.Set(block);
+}
+
+const SkySync::Block* SkySync::Frame()
+{
+	const auto& snapshot = Snapshot::Current();
+	return snapshot ? snapshot->Block<Block>() : nullptr;
 }
 
 void SkySync::GameLoaded()
@@ -301,25 +332,18 @@ float SkySync::GetDirectionalFlash(const RE::Sky* sky)
 
 RE::BSVolumetricLightingRenderData SkySync::GetDefaultVolumetricLighting()
 {
-	// Resolve once but read live, as the console can change them
-	static const auto intensity = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingIntensity:Display"));
-	static const auto customColorContribution = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingCustomColorContribution:Display"));
-	static const auto densityContribution = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingDensityContribution:Display"));
-	static const auto densityScale = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingDensityScale:Display"));
-	static const auto windSpeedScale = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingWindSpeedScale:Display"));
-	static const auto windFallingSpeed = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingWindFallingSpeed:Display"));
-	static const auto phaseContribution = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingPhaseContribution:Display"));
-	static const auto phaseScattering = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingPhaseScattering:Display"));
-	static const auto rangeFactor = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingRangeFactor:Display"));
-
-	auto value = [](const RE::Setting* setting) { return setting ? setting->GetFloat() : 0.0f; };
+	// Resolved at DataLoaded, read live: the console can change them. Runs in Sky::Update's colour hooks, on the game thread.
+	auto value = [](std::size_t a_index) {
+		const RE::Setting* setting = gDefaultVolumetricLighting[a_index];
+		return setting ? setting->GetFloat() : 0.0f;
+	};
 	return {
-		value(intensity),
-		{ value(customColorContribution) },
+		value(0),
+		{ value(1) },
 		{ 1.0f, 1.0f, 1.0f },
-		{ value(densityContribution), value(densityScale), value(windSpeedScale), value(windFallingSpeed) },
-		{ value(phaseContribution), value(phaseScattering) },
-		{ value(rangeFactor) }
+		{ value(2), value(3), value(4), value(5) },
+		{ value(6), value(7) },
+		{ value(8) }
 	};
 }
 
@@ -349,6 +373,9 @@ RE::BSVolumetricLightingRenderData SkySync::BlendNightVolumetricLighting(const R
 
 void SkySync::Sky_Update::thunk(RE::Sky* sky, float deltaTime)
 {
+	// Sky::Update is the game's update, on the game thread before the snapshot capture: Sky Sync's work here is game-side
+	// logic (decision 8), so its engine reads count as captures. Its results reach the frame through SkySync::Block.
+	const Snapshot::EngineReads::CaptureScope scope;
 	auto& lightning = globals::features::physicalSky.lightning;
 	lightning.SuppressVanilla(sky);
 	func(sky, deltaTime);
@@ -394,7 +421,7 @@ bool SkySync::Update(const RE::Sky* sky)
 
 	const auto sun = sky->sun;
 	const auto climate = sky->currentClimate;
-	const auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+	const auto player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
 	if (!sun || !climate || !player)
 		return false;
 
@@ -444,8 +471,8 @@ bool SkySync::Update(const RE::Sky* sky)
 	if (!sunBelowHorizon)
 		HoldLowSunDirection(climate->timing, hour, sunDir, directions[static_cast<int>(Caster::Sun)]);
 
-	const auto calendar = CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar);
-	const auto deltaTime = CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime);
+	const auto calendar = CS_ENGINE_READ(Calendar, CapturePoint, globals::game::calendar);
+	const auto deltaTime = CS_ENGINE_READ(Timer, CapturePoint, globals::game::deltaTime);
 	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * calendar->GetTimescale(), 0.0f) : 0.0f;
 
 	// The clock can outrun real time (waiting, fast travel) or move while frames are paused

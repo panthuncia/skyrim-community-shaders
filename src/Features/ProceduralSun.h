@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include "Feature.h"
+#include "Snapshot/FrameSnapshot.h"
 
 /** @brief Replaces the vanilla sun texture with an angular procedural disc. */
 struct ProceduralSun : Feature
@@ -81,4 +82,18 @@ struct ProceduralSun : Feature
 
 	/** @brief Returns the settings uploaded to the shared feature buffer. */
 	PerFrameData GetCommonBufferData() const;
+
+	/** @brief Procedural Sun's snapshot block: the sun quad's model radius, captured on the game thread. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::ProceduralSun;
+
+		float sunModelRadius = 0.0f;  // the sun base's model bound radius, 0 without a sun
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block from the sky. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
+	virtual void PostPostLoad() override;
 };

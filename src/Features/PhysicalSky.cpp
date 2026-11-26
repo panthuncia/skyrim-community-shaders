@@ -1,5 +1,6 @@
 #include "PhysicalSky.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include <algorithm>
 #include <cctype>
@@ -222,10 +223,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 namespace
 {
+	// The settings UI's live reads, and the capture's. The frame reads the worldspace from PhysicalSky::Block.
 	RE::TESWorldSpace* GetCurrentWorldspace()
 	{
-		auto* tes = CS_ENGINE_READ(TES, RecordTime, globals::game::tes) ? CS_ENGINE_READ(TES, RecordTime, globals::game::tes) : CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
-		auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+		auto* tes = CS_ENGINE_READ(TES, Other, globals::game::tes) ? CS_ENGINE_READ(TES, Other, globals::game::tes) : CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
+		auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 		auto* cell = player ? player->GetParentCell() : nullptr;
 
 		auto* worldspace = tes ? tes->GetRuntimeData2().worldSpace : nullptr;
@@ -237,7 +239,7 @@ namespace
 
 	bool IsCurrentCellInterior()
 	{
-		auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+		auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 		auto* cell = player ? player->GetParentCell() : nullptr;
 		return cell && cell->IsInteriorCell();
 	}
@@ -1948,10 +1950,55 @@ bool PhysicalSky::SetLocalCloudState(const LocalNdfState& state)
 	return true;
 }
 
+void PhysicalSky::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::physicalSky.loaded)
+		return;
+	Block block{};
+	block.worldspace = GetCurrentWorldspaceEditorID();
+	if (const auto* graphicsState = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)) {
+		block.screenWidth = graphicsState->screenWidth;
+		block.screenHeight = graphicsState->screenHeight;
+	}
+	if (const auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::PlayerCamera::GetSingleton()); camera && camera->cameraRoot) {
+		block.cameraRoot = true;
+		block.cameraPosition = camera->cameraRoot->world.translate;
+	}
+	if (const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky); sky && sky->root) {
+		const auto& viewer = sky->root->world.translate;
+		block.skyRoot = true;
+		block.sunTan = sky->sun ? Util::GetBillboardHalfTan(sky->sun->sunBase.get(), viewer, 0.f) : 0.f;
+		block.masserTan = sky->masser ? Util::GetBillboardHalfTan(sky->masser->moonMesh.get(), viewer, 0.f) : 0.f;
+		block.secundaTan = sky->secunda ? Util::GetBillboardHalfTan(sky->secunda->moonMesh.get(), viewer, 0.f) : 0.f;
+	}
+	if (const auto* shaderManager = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState))
+		if (auto* shadowSceneNode = shaderManager->shadowSceneNode[0])
+			if (const auto& sunLight = shadowSceneNode->GetRuntimeData().sunLight; sunLight && sunLight->light)
+				if (auto* dirLight = skyrim_cast<RE::NiDirectionalLight*>(sunLight->light.get())) {
+					block.sunLight = true;
+					block.sunLightDirection = dirLight->GetWorldDirection();
+				}
+	a_builder.Set(block);
+}
+
+const PhysicalSky::Block* PhysicalSky::Frame()
+{
+	const auto& snapshot = Snapshot::Current();
+	return snapshot ? snapshot->Block<Block>() : nullptr;
+}
+
 void PhysicalSky::Reset()
 {
 	UpdateShaders();
-	const auto worldspaceID = GetCurrentWorldspaceEditorID();
+	// The adopted snapshot is Reset's only game input. Lightning and the cloud wind step by its game time once, the first time
+	// Reset sees it: a repeated snapshot holds them, a dropped one does not lose time.
+	const auto& snapshot = Snapshot::Current();
+	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	const bool newSnapshot = snapshot && snapshot->id != steppedSnapshot;
+	frameGameDelta = newSnapshot ? snapshot->events.gameDelta : 0.f;
+	if (newSnapshot)
+		steppedSnapshot = snapshot->id;
+	const auto worldspaceID = frame ? frame->worldspace : std::string{};
 	if (cloudAmbientWorldspace != worldspaceID) {
 		cloudAmbientValid = false;
 		cloudAmbientWorldspace = worldspaceID;
@@ -1998,26 +2045,17 @@ void PhysicalSky::Reset()
 	// check worldspace
 	bool worldspaceEnabled = false;
 	bool inInterior = false;
-	bool inMainLoadingMenu = CS_ENGINE_READ(UI, Other, globals::game::ui) && (CS_ENGINE_READ(UI, Other, globals::game::ui)->IsMenuOpen(RE::MainMenu::MENU_NAME) || CS_ENGINE_READ(UI, Other, globals::game::ui)->IsMenuOpen(RE::LoadingMenu::MENU_NAME));
+	// No sky before the first snapshot, as in the main and loading menus.
+	bool inMainLoadingMenu = !frame || snapshot->menus.main || snapshot->menus.loading;
 
 	std::map<std::string, WorldspaceInfo>::const_iterator worldspaceIt = settings.worldspaceWhitelist.end();
 	float zBottom = settings.fallbackZBottom;
-	auto* tes = CS_ENGINE_READ(TES, Other, globals::game::tes) ? CS_ENGINE_READ(TES, Other, globals::game::tes) : CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
-	auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
-	auto* cell = player ? player->GetParentCell() : nullptr;
-	inInterior = cell && cell->IsInteriorCell();
-	if (tes) {
-		auto* worldspace = tes->GetRuntimeData2().worldSpace;
-		if (!worldspace && cell)
-			worldspace = cell->GetRuntimeData().worldSpace;
-
-		if (worldspace) {
-			std::string worldspaceName = worldspace->GetFormEditorID();
-			worldspaceIt = settings.worldspaceWhitelist.find(worldspaceName);
-			worldspaceEnabled = worldspaceIt != settings.worldspaceWhitelist.end();
-			if (worldspaceEnabled)
-				zBottom = worldspaceIt->second.zBottom;
-		}
+	inInterior = snapshot && snapshot->interior;
+	if (!worldspaceID.empty()) {
+		worldspaceIt = settings.worldspaceWhitelist.find(worldspaceID);
+		worldspaceEnabled = worldspaceIt != settings.worldspaceWhitelist.end();
+		if (worldspaceEnabled)
+			zBottom = worldspaceIt->second.zBottom;
 	}
 	bool allowForcedInterior = inInterior && settings.forceEnableAllInteriorCells;
 	const bool here = (worldspaceEnabled || settings.enableAllExteriorCells || allowForcedInterior) && (!inInterior || allowForcedInterior) && !inMainLoadingMenu;
@@ -2036,13 +2074,16 @@ void PhysicalSky::Reset()
 	}
 
 	// resolution
-	float2 res{ (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenHeight };
+	float2 res{ static_cast<float>(frame->screenWidth), static_cast<float>(frame->screenHeight) };
 	float2 dynres = Util::ConvertToDynamic(res);
 	dynres = { floor(dynres.x), floor(dynres.y) };
 
-	auto sunDir = skySync.rawDirections[static_cast<int>(SkySync::Caster::Sun)];
-	auto masserDir = skySync.rawDirections[static_cast<int>(SkySync::Caster::Masser)];
-	auto secundaDir = skySync.rawDirections[static_cast<int>(SkySync::Caster::Secunda)];
+	// Sky Sync's results for this snapshot (its update runs game-side, in Sky::Update).
+	const auto* skyFrame = SkySync::Frame();
+	const SkySync::Block skyBlock = skyFrame ? *skyFrame : SkySync::Block{};
+	auto sunDir = skyBlock.rawDirections[static_cast<int>(SkySync::Caster::Sun)];
+	auto masserDir = skyBlock.rawDirections[static_cast<int>(SkySync::Caster::Masser)];
+	auto secundaDir = skyBlock.rawDirections[static_cast<int>(SkySync::Caster::Secunda)];
 
 	// Wide gamut support: when ACEScg is active, transform color parameters
 	// from sRGB gamut to AP1 gamut so that the LUTs are natively generated in AP1 space.
@@ -2135,8 +2176,8 @@ void PhysicalSky::Reset()
 	}
 
 	RE::NiPoint3 posCam = { 0, 0, 0 };
-	if (auto cam = CS_ENGINE_READ(Camera, Other, RE::PlayerCamera::GetSingleton()); cam && cam->cameraRoot) {
-		posCam = cam->cameraRoot->world.translate;
+	if (frame->cameraRoot) {
+		posCam = frame->cameraPosition;
 		cbData.zCameraPlanet = posCam.z - cbData.zBottom + cbData.rPlanet;
 	}
 	// Keep the astronomical sun as the cloud source until it is below the
@@ -2160,11 +2201,10 @@ void PhysicalSky::Reset()
 		0.f  // the directional light's, blended below
 	};
 	cbData.diskBillboardScale = float4(1.f);
-	if (const auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); sky && sky->root) {
-		const auto& viewer = sky->root->world.translate;
-		const auto sunTan = sky->sun ? Util::GetBillboardHalfTan(sky->sun->sunBase.get(), viewer, 0.f) : 0.f;
-		const auto masserTan = sky->masser ? Util::GetBillboardHalfTan(sky->masser->moonMesh.get(), viewer, 0.f) : 0.f;
-		const auto secundaTan = sky->secunda ? Util::GetBillboardHalfTan(sky->secunda->moonMesh.get(), viewer, 0.f) : 0.f;
+	if (frame->skyRoot) {
+		const auto sunTan = frame->sunTan;
+		const auto masserTan = frame->masserTan;
+		const auto secundaTan = frame->secundaTan;
 		if (settings.proceduralSun && sunTan > 0.f)
 			cbData.diskBillboardScale.x = std::tan(cbData.diskAngularRadius.x) / sunTan;
 		if (masserTan > 0.f)
@@ -2174,12 +2214,12 @@ void PhysicalSky::Reset()
 	}
 	cbData.sunDiskCos = settings.proceduralSun ? std::cos(cbData.diskAngularRadius.x) : 0.f;
 	// Caster order matches the disc slots and phase LUT rows: Sun, Masser, Secunda
-	const auto blend = skySync.GetDirectionalLightBlend();
+	const auto blend = skyBlock.blend;
 	const std::array bodyRadii{ cbData.diskAngularRadius.x, cbData.diskAngularRadius.y, cbData.diskAngularRadius.z };
 	cbData.diskAngularRadius.w = std::lerp(bodyRadii[static_cast<size_t>(blend.source)], bodyRadii[static_cast<size_t>(blend.target)], blend.targetWeight);
 	cbData.dirLightBodyDir = { blend.direction.x, blend.direction.y, blend.direction.z };
 	cbData.dirLightDiskIndex = static_cast<uint>(blend.discBody);
-	const auto discDir = skySync.GetCelestialDirection(CS_ENGINE_READ(Sky, Other, globals::game::sky), blend.discBody);
+	const auto discDir = skyFrame ? skyBlock.directions[static_cast<std::size_t>(blend.discBody)] : RE::NiPoint3{ 0.f, 0.f, 1.f };
 	cbData.dirLightDisc = { discDir.x, discDir.y, discDir.z, blend.discWeight };
 	const float solarLimit = std::min(horizonDip + localUpRange + cbData.diskAngularRadius.x, RE::NI_PI * 0.5f);
 	cbData.volCloudUseSun = sunDir.z > -std::sin(solarLimit) ? 1u : 0u;
@@ -2188,6 +2228,7 @@ void PhysicalSky::Reset()
 void PhysicalSky::PostPostLoad()
 {
 	Hooks::Install();
+	Snapshot::RegisterCapture(&PhysicalSky::Capture);
 }
 
 void PhysicalSky::EarlyPrepass()
@@ -2349,7 +2390,7 @@ void PhysicalSky::Prepass()
 				{ "froxel", globals::features::viewAtmosphere.IsPrepared() },
 				{ "planet", settings.planetRadius },
 				{ "bottom", cbData.zBottom },
-				{ "worldspace", GetCurrentWorldspaceEditorID() }
+				{ "worldspace", Frame() ? Frame()->worldspace : std::string{} }
 			}.dump();
 			if (historyKey != volCloudHistoryKey) {
 				volMainHistoryValid = false;

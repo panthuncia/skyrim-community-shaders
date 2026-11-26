@@ -19,9 +19,11 @@
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
 #include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Engine/Targets/EngineTargetSet.h"
 #include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/Observed.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameClock.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/PublishedResources.h"
@@ -224,7 +226,7 @@ struct ORGViewAtmosphere::Impl
 	// The composite's key reads it, the sky flag with Physical Sky's toggle.
 	RenderGraph::Frame::Observed<CompositeSeen> observed{ "ViewAtmosphere.Composite" };
 	std::optional<CompositeRun> pendingRun;
-	std::uint32_t compositeFrame = UINT32_MAX;
+	std::uint64_t compositeFrame = UINT64_MAX;  // the render frame (FrameClock) the composite last ran in
 	bool reportedRun = false;  // the first run's inputs are logged once
 	// The parameters Prepass staged. The commit clears what the registration the run executes does not bind.
 	ViewAtmosphere::Parameters frameParameters{};
@@ -615,7 +617,7 @@ struct ORGViewAtmosphere::Impl
 	void CompositeAdopted()
 	{
 		logger::info("[ORG] Atmosphere and Fog: a post-water composite switches in with the revision adopted at frame {}; PostWaterComposite is on",
-			globals::state->frameCount);
+			RenderGraph::FrameClock::BeginFrame());
 	}
 
 	/** @brief The two clients, declared on the settings their keys read. */
@@ -704,16 +706,15 @@ void ORGViewAtmosphere::CompositeAfterWater()
 	if (!CompositeActive() || !globals::state->inWorld)
 		return;
 	// Not for the reflection faces, and once a frame, as on D3D11.
-	const auto frame = globals::state->frameCount;
+	const auto frame = RenderGraph::FrameClock::BeginFrame();
 	if ((globals::state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections)) != 0 ||
 		impl->compositeFrame == frame)
 		return;
 	impl->compositeFrame = frame;
-	const auto& main = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-	if (!main.texture)
+	// kMAIN's adopted description, from CS's target set.
+	const D3D11_TEXTURE2D_DESC desc = RenderGraph::Engine::Targets::Desc(RenderGraph::Engine::Targets::Colour(RE::RENDER_TARGETS::kMAIN));
+	if (!desc.Width || !desc.Height)
 		return;
-	D3D11_TEXTURE2D_DESC desc{};
-	main.texture->GetDesc(&desc);
 	const auto scale = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetDynamicResolutionParams1();
 	const auto width = static_cast<std::uint32_t>(std::clamp(desc.Width * scale.x, 1.f, float(desc.Width)));
 	const auto height = static_cast<std::uint32_t>(std::clamp(desc.Height * scale.y, 1.f, float(desc.Height)));

@@ -1,5 +1,6 @@
 #include "ProceduralSun.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include <algorithm>
 #include <cmath>
@@ -157,11 +158,26 @@ ProceduralSun::PerFrameData ProceduralSun::GetCommonBufferData() const
 		.haloFalloff = settings.haloFalloff,
 		.cloudOcclusionStrength = settings.cloudOcclusionStrength
 	};
-	const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (settings.enabled && sky && sky->sun && sky->sun->sunBase) {
-		const float radius = sky->sun->sunBase->GetModelData().modelBound.radius;
+	const auto& snapshot = Snapshot::Current();
+	if (const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr; settings.enabled && frame) {
+		const float radius = frame->sunModelRadius;
 		if (std::isfinite(radius) && radius > 0.0f)
 			data.sunQuadModelRadius = radius;
 	}
 	return data;
+}
+
+void ProceduralSun::PostPostLoad()
+{
+	Snapshot::RegisterCapture(&ProceduralSun::Capture);
+}
+
+void ProceduralSun::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::proceduralSun.loaded)
+		return;
+	Block block{};
+	if (const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky); sky && sky->sun && sky->sun->sunBase)
+		block.sunModelRadius = sky->sun->sunBase->GetModelData().modelBound.radius;
+	a_builder.Set(block);
 }

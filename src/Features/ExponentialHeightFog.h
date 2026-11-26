@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include "Features/LightLimitFix.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Setting.h"
 
 struct ExponentialHeightFog : Feature
@@ -34,6 +35,19 @@ public:
 	virtual void DrawSettings() override;
 	/** @brief Sets up the render-graph path when requested; the D3D11 path makes its objects when it first runs. */
 	virtual void SetupResources() override;
+	virtual void PostPostLoad() override;
+
+	/** @brief Exponential Height Fog's snapshot block: the sky's hide flag, captured on the game thread. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::ExponentialHeightFog;
+
+		bool hideSky = false;  // Sky::flags has kHideSky
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
 	/** @brief Releases all cached volumetric fog compute shaders so they can be recompiled. */
 	virtual void ClearShaderCache() override;
 	/**

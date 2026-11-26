@@ -1,5 +1,6 @@
 #include "Skylighting.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Deferred.h"
 #include "DrawcallLimitFix.h"
@@ -8,6 +9,7 @@
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameClock.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
@@ -349,12 +351,10 @@ void Skylighting::Prepass()
 	if (globals::state->isMapMenuOpen)
 		return;
 
-	bool interior = true;
-
-	if (auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky))
-		interior = sky->mode.get() != RE::Sky::Mode::kFull;
-
-	if (interior)
+	// Probes update under a full sky only, as the capture found it.
+	const auto& snapshot = Snapshot::Current();
+	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	if (!frame || !frame->fullSky)
 		return;
 
 	CS_GPU_ZONE(globals::state->tracyCtx, "Skylighting - Update Probes");
@@ -421,8 +421,17 @@ void Skylighting::Prepass()
 	}
 }
 
+void Skylighting::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::skylighting.loaded)
+		return;
+	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
+	a_builder.Set(Block{ .fullSky = sky && sky->mode.get() == RE::Sky::Mode::kFull });
+}
+
 void Skylighting::PostPostLoad()
 {
+	Snapshot::RegisterCapture(&Skylighting::Capture);
 	logger::info("[SKYLIGHTING] Hooking BSLightingShaderProperty::GetPrecipitationOcclusionMapRenderPassesImp");
 	stl::write_vfunc<0x2D, BSLightingShaderProperty_GetPrecipitationOcclusionMapRenderPassesImpl>(RE::VTABLE_BSLightingShaderProperty[0]);
 	stl::write_thunk_call<Main_Precipitation_RenderOcclusion>(REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x3A1, 0x3A1, 0x3BF));
@@ -643,7 +652,7 @@ float Skylighting::ProbeGridBottomZ(float a_eyeZ) const
 
 void Skylighting::BeginOcclusionFrame()
 {
-	const uint frame = globals::state->frameCount;
+	const auto frame = RenderGraph::FrameClock::BeginFrame();
 	if (occlusionFrame == frame)
 		return;
 	occlusionFrame = frame;

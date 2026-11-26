@@ -1,6 +1,7 @@
 #include "InteriorSun.h"
 #include "I18n/I18n.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 #include "State.h"
 #include "Utils/VersionedRelocation.h"
 
@@ -58,6 +59,7 @@ void InteriorSun::RestoreDefaultSettings()
 
 void InteriorSun::PostPostLoad()
 {
+	Snapshot::RegisterCapture(&InteriorSun::Capture);
 	stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately>(REL::RelocationID(100852, 107642).address() + REL::Relocate(0x29E, 0x28F));
 
 	// Hooks and patch to enable directional lighting for interiors
@@ -87,9 +89,23 @@ void InteriorSun::PostPostLoad()
 	logger::info("[Interior Sun] Installed hooks");
 }
 
+void InteriorSun::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::interiorSun.loaded)
+		return;
+	Block block{};
+	if (const auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton()); tes && tes->interiorCell) {
+		block.interior = true;
+		block.cellHasSun = CellHasSun(tes->interiorCell);
+	}
+	a_builder.Set(block);
+}
+
 void InteriorSun::EarlyPrepass()
 {
-	isInteriorWithSun = IsInteriorWithSun(CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())->interiorCell);
+	const auto& snapshot = Snapshot::Current();
+	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	isInteriorWithSun = frame && IsInteriorWithSun(frame->interior, frame->cellHasSun);
 	if (!isInteriorWithSun && !arraysCleared) {
 		ClearArrays();
 		currentCell = nullptr;
@@ -97,11 +113,22 @@ void InteriorSun::EarlyPrepass()
 	}
 }
 
-inline bool InteriorSun::IsInteriorWithSun(const RE::TESObjectCELL* cell)
+bool InteriorSun::CellHasSun(const RE::TESObjectCELL* cell)
+{
+	return cell && cell->cellFlags.all(RE::TESObjectCELL::Flag::kIsInteriorCell, RE::TESObjectCELL::Flag::kShowSky, RE::TESObjectCELL::Flag::kUseSkyLighting,
+					   static_cast<RE::TESObjectCELL::Flag>(CellFlagExt::kSunlightShadows));
+}
+
+bool InteriorSun::IsInteriorWithSun(bool a_interior, bool a_cellHasSun)
 {
 	auto& physicalSky = globals::features::physicalSky;
 	bool physicalSkyInteriorOverride = physicalSky.IsActive() && physicalSky.settings.forceEnableAllInteriorCells;
-	return cell && (cell->cellFlags.all(RE::TESObjectCELL::Flag::kIsInteriorCell, RE::TESObjectCELL::Flag::kShowSky, RE::TESObjectCELL::Flag::kUseSkyLighting, static_cast<RE::TESObjectCELL::Flag>(CellFlagExt::kSunlightShadows)) || physicalSkyInteriorOverride);
+	return a_interior && (a_cellHasSun || physicalSkyInteriorOverride);
+}
+
+bool InteriorSun::IsInteriorWithSun(const RE::TESObjectCELL* cell)
+{
+	return IsInteriorWithSun(cell != nullptr, CellHasSun(cell));
 }
 
 RE::TESWorldSpace* InteriorSun::GetWorldSpace::thunk(RE::TES* tes)

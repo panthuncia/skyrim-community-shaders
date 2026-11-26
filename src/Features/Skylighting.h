@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Setting.h"
 
 /** @brief Simulates realistic ambient lighting by calculating sky occlusion via a 3D probe array. */
@@ -51,6 +52,18 @@ public:
 
 	/** @brief Installs rendering hooks and registers event handlers after plugin load. */
 	virtual void PostPostLoad() override;
+
+	/** @brief Skylighting's snapshot block: whether the sky is full (an exterior sky), captured on the game thread. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::Skylighting;
+
+		bool fullSky = false;  // Sky::mode is kFull
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
 
 	//////////////////////////////////////////////////////////////////////////////////
 
@@ -143,8 +156,8 @@ public:
 	// The capture is relative to the main camera, whose eye is only current in the next in-world buffer update.
 	bool zenithEyePending = false;
 
-	// The frame the occlusion maps' frame state was begun for (BeginOcclusionFrame: State::frameCount), and the sky direction it chose.
-	uint occlusionFrame = ~0u;
+	// The frame the occlusion maps' frame state was begun for (BeginOcclusionFrame: the render frame, RenderGraph::FrameClock), and the sky direction it chose.
+	std::uint64_t occlusionFrame = UINT64_MAX;
 	float3 occlusionDirection;
 
 	/**

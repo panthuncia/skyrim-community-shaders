@@ -1,6 +1,7 @@
 #pragma once
 #include "ShaderCache.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameSnapshot.h"
 
 struct InteriorSun : Feature
 {
@@ -114,6 +115,23 @@ public:
 	 * @return True if the cell is an interior configured for sun and sky lighting with sunlight shadows.
 	 */
 	static bool IsInteriorWithSun(const RE::TESObjectCELL* cell);
+	/** @brief The same test from captured data: a_interior is "the TES has an interior cell", a_cellHasSun is CellHasSun of that cell. */
+	static bool IsInteriorWithSun(bool a_interior, bool a_cellHasSun);
+	/** @brief Whether a cell carries the interior, sky, sky lighting and sunlight shadow flags. */
+	static bool CellHasSun(const RE::TESObjectCELL* cell);
+
+	/** @brief Interior Sun's snapshot block: the TES's interior cell and its flags, captured on the game thread. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::InteriorSun;
+
+		bool interior = false;    // the TES has an interior cell
+		bool cellHasSun = false;  // CellHasSun of that cell
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
 	/** @brief Returns whether this feature is loaded and the current cell has interior sun enabled. */
 	bool IsActiveInteriorSun() const { return loaded && isInteriorWithSun.load(); }
 	virtual bool IsCore() const override { return true; };

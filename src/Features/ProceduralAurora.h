@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Snapshot/FrameSnapshot.h"
 
 #include <atomic>
 #include <chrono>
@@ -84,6 +85,23 @@ public:
 	/** @brief Whether the procedural aurora replaces the vanilla one; off while Effects 11 owns the aurora. */
 	bool IsActive() const;
 
+	/**
+	* @brief Procedural Aurora's snapshot block: the vanilla aurora's fade OnSkyUpdate read, captured on the game thread. The day
+	* count and the pause come from the snapshot's core fields.
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::ProceduralAurora;
+
+		float vanillaVisibility = 0.0f;  // the ribbons' material alpha, 0 to 1
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
+	virtual void PostPostLoad() override;
+
 	/** @brief Packs the settings for the shared feature constant buffer (SharedData::proceduralAuroraSettings). Once per frame. */
 	CommonBufferData GetCommonBufferData();
 	/** @brief Builds the block and advances the animation clock: GetCommonBufferData's first call of a frame. */
@@ -109,10 +127,10 @@ private:
 		int colorPreset = -1;  // -1: the colors from the settings
 	};
 
-	/** @brief Rolls the current night's storm level and colors from the in-game day count. */
+	/** @brief Rolls the current night's storm level and colors from the snapshot's in-game day count. */
 	Night GetNight() const;
 
-	/** @brief In-game night number; it rolls over at noon so a night keeps its look past midnight. */
+	/** @brief The snapshot's in-game night number; it rolls over at noon so a night keeps its look past midnight. 0 before the first snapshot. */
 	static uint32_t GetNightIndex();
 
 	/** @brief Index of the color preset the current colors match, or -1 for custom colors. */

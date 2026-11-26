@@ -1084,10 +1084,8 @@ void CloudStormManager::UpdateLighting(float dropletDiameter)
 
 void PhysicalSky::UpdateCloudWind()
 {
-	auto* ui = CS_ENGINE_READ(UI, RecordTime, globals::game::ui);
-	if (!ui || ui->GameIsPaused())
-		return;
-	const double elapsed = CS_ENGINE_READ(Timer, RecordTime, RE::GetSecondsSinceLastFrame());
+	// The snapshot's game time, once per new snapshot (Reset): 0 while paused and on a repeated snapshot.
+	const double elapsed = frameGameDelta;
 	if (!std::isfinite(elapsed) || elapsed <= 0.0)
 		return;
 
@@ -1178,26 +1176,19 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 
 	auto state = globals::state;
 	auto context = globals::d3d::context;
-	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, RE::BSGraphics::Renderer::GetSingleton());
 	float3 cloudLightDir = cbData.sunDir;
-	if (auto* shaderManager = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)) {
-		if (auto* shadowSceneNode = shaderManager->shadowSceneNode[0]) {
-			auto shadowSunLight = shadowSceneNode->GetRuntimeData().sunLight;
-			if (shadowSunLight && shadowSunLight->light) {
-				if (auto* dirLight = skyrim_cast<RE::NiDirectionalLight*>(shadowSunLight->light.get())) {
-					const auto& direction = dirLight->GetWorldDirection();
-					cloudLightDir = { -direction.x, -direction.y, -direction.z };
-					const float lengthSq = cloudLightDir.x * cloudLightDir.x + cloudLightDir.y * cloudLightDir.y + cloudLightDir.z * cloudLightDir.z;
-					if (lengthSq > 1e-6f) {
-						const float invLength = 1.0f / std::sqrt(lengthSq);
-						cloudLightDir.x *= invLength;
-						cloudLightDir.y *= invLength;
-						cloudLightDir.z *= invLength;
-					} else {
-						cloudLightDir = cbData.sunDir;
-					}
-				}
-			}
+	// The scene's directional light, as the capture found it (PhysicalSky::Block).
+	if (const Block* frameBlock = Frame(); frameBlock && frameBlock->sunLight) {
+		const auto& direction = frameBlock->sunLightDirection;
+		cloudLightDir = { -direction.x, -direction.y, -direction.z };
+		const float lengthSq = cloudLightDir.x * cloudLightDir.x + cloudLightDir.y * cloudLightDir.y + cloudLightDir.z * cloudLightDir.z;
+		if (lengthSq > 1e-6f) {
+			const float invLength = 1.0f / std::sqrt(lengthSq);
+			cloudLightDir.x *= invLength;
+			cloudLightDir.y *= invLength;
+			cloudLightDir.z *= invLength;
+		} else {
+			cloudLightDir = cbData.sunDir;
 		}
 	}
 	// Ground shadow directions may be elevation-clamped or switched to a moon
@@ -1412,6 +1403,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	}
 	volCloudCb->Update(cloudData);
 
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, RE::BSGraphics::Renderer::GetSingleton());
 	const auto depthTarget = globals::features::viewAtmosphere.CompositeEnabled() && a_pass == VolumetricCloudPass::kMainViewAndCubemap ?
 	                             RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN :
 	                             RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY;

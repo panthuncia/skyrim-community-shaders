@@ -1,5 +1,6 @@
 #include "ExponentialHeightFog.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Deferred.h"
 #include "Effects11.h"
@@ -265,6 +266,19 @@ D3D11_SAMPLER_DESC ExponentialHeightFog::SamplerDesc(bool a_comparison)
 	if (a_comparison)
 		samplerDesc.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
 	return samplerDesc;
+}
+
+void ExponentialHeightFog::PostPostLoad()
+{
+	Snapshot::RegisterCapture(&ExponentialHeightFog::Capture);
+}
+
+void ExponentialHeightFog::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::exponentialHeightFog.loaded)
+		return;
+	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
+	a_builder.Set(Block{ .hideSky = sky && sky->flags.any(RE::Sky::Flags::kHideSky) });
 }
 
 void ExponentialHeightFog::SetupResources()

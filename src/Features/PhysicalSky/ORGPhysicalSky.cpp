@@ -8,6 +8,7 @@
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
 #include "Features/CloudShadows/ORGCloudShadows.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/PhysicalSky.h"
 #include "Features/PhysicalSky/ORGVolumetricClouds.h"
@@ -18,15 +19,15 @@
 #include "Globals.h"
 #include "ORGDeferredComposite.h"
 #include "RenderGraph/AnchorPasses.h"
-#include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/D3D11Wrapper.h"
 #include "RenderGraph/DepthViewSource.h"
 #include "RenderGraph/Engine/Targets/TargetRef.h"
 #include "RenderGraph/Frame/Declare.h"
-#include "RenderGraph/Frame/Observed.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Observed.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameClock.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/PublishedResources.h"
@@ -283,13 +284,13 @@ struct ORGPhysicalSky::Impl
 	RenderGraph::Frame::Observed<ShadowSeen> shadowObserved{ "PhysicalSky.ApShadow" };
 	RenderGraph::Frame::Observed<CompositeInputs> compositeObserved{ "PhysicalSky.Composite" };
 	std::string inputNote;                // the last missing AP shadow input, logged when it changes
-	std::uint32_t beganFrame = UINT32_MAX;
+	std::uint64_t beganFrame = UINT64_MAX;  // the render frame (FrameClock) BeginFrame last ran for
 
 	// Render thread. Set at the feature's Prepass, taken by the next commit.
 	std::optional<ShadowLatch> shadow;
 	std::uint32_t shadowEntry = kShadowFullEntry;
 	std::array<std::uint32_t, 2> shadowGroups{};
-	std::uint32_t compositeFrame = UINT32_MAX;  // the frame StageComposite staged
+	std::uint64_t compositeFrame = UINT64_MAX;  // the render frame (FrameClock) StageComposite staged
 	bool tail = false;                          // the sky tail
 
 	void Commit()
@@ -321,7 +322,7 @@ struct ORGPhysicalSky::Impl
 	void CommitComposite()
 	{
 		const auto held = compositeClient.Adopted();
-		if (compositeFrame != globals::state->frameCount || !held)
+		if (compositeFrame != RenderGraph::FrameClock::BeginFrame() || !held)
 			return;
 		const auto frame = ORGDeferredComposite::Get().GraphComposite();
 		// The D3D11 interior composite is built without PHYSICAL_SKY, so interiors get no AP there either.
@@ -476,7 +477,7 @@ struct ORGPhysicalSky::Impl
 		a_client.sharedConstants = builder.ReadsSharedConstants();
 		a_client.passes = builder.Take();
 		a_client.gates = { compositeGate };
-		a_client.active = [state = a_self] { return state->compositeFrame == globals::state->frameCount; };
+		a_client.active = [state = a_self] { return state->compositeFrame == RenderGraph::FrameClock::BeginFrame(); };
 		a_client.commit = [state = a_self](const FrameAnchors::Point&) { state->CommitComposite(); };
 		logger::info("[ORG] Physical Sky: an aerial perspective after the graph composite for the next revision ({}; main target {}, depth {}, clouds {})",
 			kCompositeClientId, a_inputs.main, a_inputs.depth ? "the depth copy" : "none (no Dynamic Cubemaps)", a_inputs.clouds ? "the graph's" : "none");
@@ -705,9 +706,9 @@ void ORGPhysicalSky::Setup(const PhysicalSky& a_feature)
 
 void ORGPhysicalSky::BeginFrame(PhysicalSky& a_feature)
 {
-	if (!IsActive() || impl->beganFrame == globals::state->frameCount)
+	if (!IsActive() || impl->beganFrame == RenderGraph::FrameClock::BeginFrame())
 		return;
-	impl->beganFrame = globals::state->frameCount;
+	impl->beganFrame = RenderGraph::FrameClock::BeginFrame();
 	// A new version of the AP shadow switched in at this frame's Begin, and its wrapper with it (RetargetWrappers). It was born zero.
 	ORGVolumetricClouds::Get().FollowVersions(a_feature);
 	// Reset ran before the Begin that adopted the newest revision. An off switch in it applies to this frame already, since
@@ -842,6 +843,6 @@ void ORGPhysicalSky::StageComposite(const PhysicalSky& a_feature)
 	inputs.clouds = CloudsOnGraph(a_feature);
 	// Not variables yet: a change is an event, and the next revision registers the client again.
 	state.compositeObserved.Observe(inputs);
-	state.compositeFrame = globals::state->frameCount;
+	state.compositeFrame = RenderGraph::FrameClock::BeginFrame();
 }
 

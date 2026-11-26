@@ -6,6 +6,7 @@
 
 #include "Features/PhysicalSky/ORGCloudInputs.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/FrameClock.h"
 
 void ORGVolumetricClouds::SetInputSource(InputSource a_source) { inputs = std::move(a_source); }
 
@@ -347,7 +348,7 @@ namespace
 	{
 		namespace Tripwire = RenderGraph::Engine::Tripwire;
 		namespace Targets = RenderGraph::Engine::Targets;
-		if (!a_view || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
+		if (!a_view)
 			return UINT32_MAX;
 		if (Tripwire::IsHandle(a_view)) {
 			const auto target = Targets::Identify(static_cast<const ID3D11View*>(a_view));
@@ -512,7 +513,7 @@ struct ORGVolumetricClouds::Impl
 		bool query = false;
 	};
 	std::optional<Pending> pending;
-	std::uint32_t pendingFrame = UINT32_MAX;  // the frame Stage staged pending for
+	std::uint64_t pendingFrame = UINT64_MAX;  // the render frame (FrameClock) Stage staged pending for
 	// The next commit opens the neutral clears (ClearVolumetricToNeutral, a declared reset). On at first: the feature asks for
 	// them at setup (EnsureVolumetricScreenResources), before Setup makes this. The plain twins get their first contents so.
 	bool neutral = true;
@@ -533,7 +534,7 @@ struct ORGVolumetricClouds::Impl
 	}
 
 	/** @brief Whether this frame staged work: a frame that did not stage leaves the clouds as they are. */
-	bool Active() const { return pending.has_value() && pendingFrame == globals::state->frameCount; }
+	bool Active() const { return pending.has_value() && pendingFrame == RenderGraph::FrameClock::BeginFrame(); }
 
 	void Commit()
 	{
@@ -1396,7 +1397,7 @@ void ORGVolumetricClouds::Stage(PhysicalSky& a_feature, const Frame& a_frame)
 		return;
 
 	auto& frame = state.pending.emplace();
-	state.pendingFrame = globals::state->frameCount;
+	state.pendingFrame = RenderGraph::FrameClock::BeginFrame();
 	const auto& c = *a_frame.cloud;
 	const bool mapMenu = globals::state->isMapMenuOpen;
 	const auto& storms = f.cloudStormManager;

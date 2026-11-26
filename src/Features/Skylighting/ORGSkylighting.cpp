@@ -2,6 +2,7 @@
 #include "Snapshot/EngineReads.h"
 
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/FrameClock.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -109,7 +110,6 @@ namespace
 		ID3D11ShaderResourceView* occlusionSRV = nullptr;
 		ID3D11DepthStencilView* occlusionDSV = nullptr;
 		ID3D11ShaderResourceView* shadowCascades = nullptr;  // PS t4 at the shadow mask draw
-		ID3D11ShaderResourceView* esramShadows = nullptr;
 	};
 
 	template <class T>
@@ -143,7 +143,6 @@ namespace
 			inputs.occlusionDSV = occlusion->dsv.get();
 		}
 		inputs.shadowCascades = a_feature.shadowCascadeSRV;
-		inputs.esramShadows = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM].depthSRV;
 		return inputs;
 	}
 
@@ -685,7 +684,7 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 	if (impl->ResolveInputs(MakeInputs(a_feature)) && (!native || state.mapCleared))
 		state.pending = MakeShadows(a_feature);
 	// ZenithReady held when this frame's capture was taken, so the map holds it.
-	state.copyZenith = a_feature.zenithFrame && a_feature.occlusionFrame == globals::state->frameCount;
+	state.copyZenith = a_feature.zenithFrame && a_feature.occlusionFrame == RenderGraph::FrameClock::BeginFrame();
 	if (native) {
 		state.clearOcclusion = static_cast<bool>(impl->resources->clearProgram);
 		return true;

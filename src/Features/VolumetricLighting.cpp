@@ -1,5 +1,6 @@
 #include "VolumetricLighting.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Features/VolumetricLighting/ORGVolumetricLighting.h"
 #include "I18n/I18n.h"
@@ -139,6 +140,7 @@ void VolumetricLighting::DataLoaded()
 
 void VolumetricLighting::PostPostLoad()
 {
+	Snapshot::RegisterCapture(&VolumetricLighting::Capture);
 	gVolumetricLightingSizeLow = reinterpret_cast<TextureSize*>(REL::RelocationID(527970, 414916).address());
 	gVolumetricLightingSizeMedium = reinterpret_cast<TextureSize*>(REL::RelocationID(527973, 414919).address());
 	gVolumetricLightingSizeHigh = reinterpret_cast<TextureSize*>(REL::RelocationID(527976, 414922).address());
@@ -172,10 +174,31 @@ VolumetricLighting::TextureSize VolumetricLighting::VolumeSizeFor(const int32_t 
 	}
 }
 
+void VolumetricLighting::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::volumetricLighting.loaded)
+		return;
+	Block block{};
+	if (const auto* graphicsState = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)) {
+		block.screenWidth = static_cast<std::int32_t>(graphicsState->screenWidth);
+		block.screenHeight = static_cast<std::int32_t>(graphicsState->screenHeight);
+	}
+	if (const auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton()); tes && tes->interiorCell) {
+		block.interior = true;
+		block.cellHasSun = InteriorSun::CellHasSun(tes->interiorCell);
+	}
+	a_builder.Set(block);
+}
+
 void VolumetricLighting::EarlyPrepass()
 {
-	int32_t width = static_cast<int32_t>(CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth);
-	int32_t height = static_cast<int32_t>(CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight);
+	// The adopted snapshot's block; nothing before the first.
+	const auto& snapshot = Snapshot::Current();
+	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	if (!frame)
+		return;
+	int32_t width = frame->screenWidth;
+	int32_t height = frame->screenHeight;
 
 	if (width != fullScreenX || height != fullScreenY) {
 		blurHCS = nullptr;
@@ -196,9 +219,8 @@ void VolumetricLighting::EarlyPrepass()
 	vlData.screenYMin1 = vlData.screenY - 1;
 	vlDataCB->Update(vlData);
 
-	const auto interiorCell = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())->interiorCell;
-	inInterior = interiorCell != nullptr;
-	inInteriorWithSun = InteriorSun::IsInteriorWithSun(interiorCell);
+	inInterior = frame->interior;
+	inInteriorWithSun = InteriorSun::IsInteriorWithSun(frame->interior, frame->cellHasSun);
 
 	// The engine makes its volume at the size it is given here. On the graph that must be the declared volume's size, so the
 	// adopted values are given, from the Begin that adopts them.

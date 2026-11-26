@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Features/CloudShadows/ORGCloudShadows.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Game.h"
 
 struct CloudShadows : Feature
@@ -10,6 +11,24 @@ private:
 
 public:
 	static constexpr int kMaxCloudLayers = 32;
+
+	/**
+	* @brief Cloud Shadows' snapshot block: the sky's state and its cloud layers' geometry, captured on the game thread. The layer
+	* keys identify the engine's cloud geometry by address only; nothing dereferences them.
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::CloudShadows;
+
+		bool fullSky = false;                                  // Sky::mode is kFull
+		bool climate = false;                                  // the sky has a current climate
+		std::uint32_t layerCount = 0;                          // the cloud layers that draw, at most kMaxCloudLayers
+		std::array<std::uintptr_t, kMaxCloudLayers> layers{};  // each layer's geometry address, as a key
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block from the sky. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
 
 	struct alignas(16) Settings
 	{
