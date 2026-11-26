@@ -6,6 +6,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
@@ -141,8 +142,23 @@ namespace DCLF::Features::Sky::Native
 
 			static Modes Current()
 			{
-				auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				Modes m;
+				// Native's RenderWorld points draw with CS's frame's state.
+				if (const auto* world = ::RenderGraph::Engine::Native::WorldPass::Current()) {
+					m.depth = world->depthMode;
+					m.stencil = world->stencil;
+					m.fill = world->fill;
+					m.cull = world->cull;
+					m.depthBias = world->depthBias;
+					m.scissor = world->scissor;
+					m.blend = world->blend;
+					m.alphaToCoverage = world->alphaToCoverage;
+					m.write = world->write;
+					m.blendExtra = world->blendExtra;
+					m.alphaTest = world->alphaTest;
+					return m;
+				}
+				auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				m.depth = static_cast<std::uint32_t>(rss.depthStencilDepthMode);
 				m.stencil = rss.depthStencilStencilMode;
 				m.fill = rss.rasterStateFillMode;
