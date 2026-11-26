@@ -66,12 +66,13 @@ namespace DCLF::Features::Shadows::Local
 	public:
 		static FocusViews& Get();
 		void Install();
+		/** @brief Records a_light's focus views from its focus cameras, after they were aimed (the engine's sub, or native mode's port). */
+		void Update(const RE::BSShadowLight* a_light);
 
 	private:
 		FocusViews() = default;
 		struct Hooks;
 		friend struct Hooks;
-		void Update(const RE::BSShadowLight* a_light);
 
 		bool installed = false;
 	};

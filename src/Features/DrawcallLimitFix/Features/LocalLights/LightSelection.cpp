@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalContextAtlas.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
@@ -182,7 +183,12 @@ namespace DCLF
 		return shares;
 	}
 
-	void LightSelection::Select()
+	void LightSelection::SelectNative()
+	{
+		Select(true);
+	}
+
+	void LightSelection::Select(bool a_native)
 	{
 		// Invalidate first, so an early return leaves no light views this frame.
 		ShadowViews::LightSlots().Invalidate();
@@ -221,6 +227,8 @@ namespace DCLF
 				if (const auto* light = pointer.get()) {
 					focusFound = light == lastFocusHost && !focusFound;
 					focusFlags[light] = focusFound;
+					if (a_native)
+						const_cast<RE::BSShadowLight*>(light)->GetRuntimeData().drawFocusShadows = focusFound;
 				}
 			}
 		}
@@ -230,10 +238,16 @@ namespace DCLF
 		ShadowCameras::FrustumPlanes(const_cast<RE::NiCamera*>(camera)->GetRuntimeData2().viewFrustum, camera->world, cameraPlanes);
 		for (const auto& pointer : runtime.activeShadowLights) {
 			const auto* light = pointer.get();
-			if (!light || kept >= kMaxLights)
+			if (!light)
 				continue;
-			if (!Visible(*light, *camera, cameraPlanes) || !SharesRoomWithCamera(light))
+			// Native mode does the engine's UpdateCamera itself (its result is the visibility) and releases a light it does not keep.
+			const bool keep = kept < kMaxLights && (a_native ? Features::Shadows::Native::UpdateLightCamera(*const_cast<RE::BSShadowLight*>(light), *camera) : Visible(*light, *camera, cameraPlanes)) &&
+			                  SharesRoomWithCamera(light);
+			if (!keep) {
+				if (a_native)
+					Features::Shadows::Native::ReleaseLight(*const_cast<RE::BSShadowLight*>(light));
 				continue;
+			}
 			// The engine walks a kept light here (FUN_1414a2530) and leaves the walk's edge flags on the shapes.
 			PortalViews::Get().CommitLightWalk();
 			const auto& rooms = lightRooms.at(light);
@@ -246,8 +260,12 @@ namespace DCLF
 					flag = true;
 					focusFound = true;
 					lastFocusHost = light;
+					if (a_native)
+						Features::Shadows::Native::FocusHost(*candidate, *camera);
 				}
 			}
+			if (a_native)
+				Features::Shadows::Native::KeepLocal(*const_cast<RE::BSShadowLight*>(light), *camera, kept);
 			// The engine writes the light into one slot but its Accumulate takes one per hemisphere or cascade.
 			// The extra slots keep stale contents, so they are null here.
 			auto* shadowLight = const_cast<RE::BSShadowLight*>(light);

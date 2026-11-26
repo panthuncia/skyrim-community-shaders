@@ -322,6 +322,22 @@ namespace DCLF::Features::Shadows::Engine
 		};
 	}
 
+	bool RenderLightNatively(RE::BSShadowLight& a_light, std::uint32_t& a_index)
+	{
+		const auto kind = a_light.GetIsDirectionalLight() ? Kind::Directional : a_light.GetIsParabolicLight() ? Kind::Parabolic : Kind::Frustum;
+		const auto outcome = shadowMapsOpen ? RenderNative(a_light, kind, a_index) : Fallback::NotOpen;
+		++lightCounts[static_cast<std::size_t>(outcome)];
+		if (outcome == Fallback::None)
+			return true;
+		// No engine Render: the light draws nothing this frame, and the walk moves past its slots as its Render would.
+		thread_local std::vector<Draw> draws;
+		draws.clear();
+		ListDraws(a_light, kind, draws);
+		for (const auto& draw : draws)
+			a_index += draw.counts ? 1u : 0u;
+		return false;
+	}
+
 	void SetShadowMapsOpen(bool a_open)
 	{
 		shadowMapsOpen = a_open;
