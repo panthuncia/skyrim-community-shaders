@@ -16,7 +16,6 @@ namespace RenderGraph::Engine::Scaleform::Layout
 {
 	inline constexpr std::size_t kVideoModeSet = 0xC0;     // std::uint8_t, every draw is skipped without it
 	inline constexpr std::size_t kVertexConstants = 0x1C0;  // float[32], mvp[4] then texgen[4], the VS cbuffer's CPU copy
-	inline constexpr std::size_t kTexgen = 0x200;           // float[16], texgen[4]
 	inline constexpr std::size_t kDepthStencilStates = 0x468;  // ID3D11DepthStencilState*[5], in Stencil's order
 	inline constexpr std::size_t kDevice = 0x490;              // ID3D11Device*, which the renderer and its textures create with
 	inline constexpr std::size_t kContext = 0x498;             // ID3D11DeviceContext*

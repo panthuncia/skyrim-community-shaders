@@ -1,0 +1,82 @@
+# Scaleform displays beyond the HUD: the inventory, the world map and the console, each opened through the UI message queue
+# (no input), a shot in each, then exit. Native runs log the UI stream's parity census ("[ORG] Scaleform parity").
+# Compose it: guest+ui-menus, native-vulkan+ui-menus, native-d3d12+ui-menus.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "hud"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "InventoryMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "inventory"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "InventoryMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "MapMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "map"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "MapMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "Console=show"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "console"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "Console=hide"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["hud", "inventory", "map", "console"]
