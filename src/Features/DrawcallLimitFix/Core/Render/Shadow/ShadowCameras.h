@@ -11,12 +11,13 @@
 #include <string>
 #include <vector>
 
+#include "RE/N/NiFrustum.h"
+
 namespace RE
 {
 	class BSShadowLight;
 	class NiAVObject;
 	class NiCamera;
-	class NiFrustum;
 	class NiTransform;
 	class NiCullingProcess;
 }
@@ -63,6 +64,21 @@ namespace DCLF::ShadowCameras
 	 */
 	inline constexpr std::uint32_t kBlockBytes = 45 * 16;
 	void Block(const Camera& a_camera, std::byte* a_out);
+	/** @brief The engine's 4x4 multiply (FUN_1404a6ed0): a times b, row-major, each sum in its order. */
+	std::array<float, 16> Multiply(const std::array<float, 16>& a_a, const std::array<float, 16>& a_b);
+	/**
+	 * @brief The light transform BSShadowLight::RenderShadowmap (AE 0x1414f0cf0, SE 0x141305610) writes into a descriptor after its draw:
+	 * the camera's view with its translation, times its projection. An orthographic camera that is not a paraboloid's first grows its
+	 * frustum from the descriptor's port (left, right, top, bottom texels) to the whole target, and maps into texture space.
+	 */
+	/**
+	 * @brief The frustum RenderShadowmap hands SetCameraData after its draw: grown from the port to the whole target for an orthographic
+	 * camera that is not a paraboloid's, and with top and bottom swapped. a_toTexture says whether it grew.
+	 */
+	RE::NiFrustum ShadowmapFrustum(const RE::NiCamera& a_camera, const std::array<std::int32_t, 4>& a_port, bool a_parabolic, std::uint32_t a_width,
+		std::uint32_t a_height, bool& a_toTexture);
+	std::array<float, 16> LightTransform(const RE::NiCamera& a_camera, const std::array<std::int32_t, 4>& a_port, bool a_parabolic, std::uint32_t a_width,
+		std::uint32_t a_height);
 	/** @brief Renderer::UpdateViewPort's (0x140e441c0) viewport as x, y, width, height. */
 	std::array<std::uint32_t, 4> Viewport(const std::array<float, 4>& a_port, std::uint32_t a_width, std::uint32_t a_height);
 

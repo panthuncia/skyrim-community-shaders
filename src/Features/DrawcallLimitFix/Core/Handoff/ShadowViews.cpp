@@ -230,6 +230,7 @@ namespace DCLF
 		Clear();
 		drawable = true;
 		PublishRenderers();
+		PassCapture::Get().ResetCoveredKept();
 	}
 
 	void ShadowViews::AddCaster(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots)

@@ -25,10 +25,12 @@ namespace DCLF::Features::Shadows::Engine
 		void BeforeShadowMaps()
 		{
 			IndirectDraws::Get().BeginShadowFrame();
+			SetShadowMapsOpen(true);
 		}
 
 		std::uint32_t AfterShadowMaps(std::uint32_t a_maps)
 		{
+			SetShadowMapsOpen(false);
 			Extensions::TriggerScope trigger(shadowMapsAfter);
 			return IndirectDraws::Get().ExecuteShadowFrame(a_maps);
 		}

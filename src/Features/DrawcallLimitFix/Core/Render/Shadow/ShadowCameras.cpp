@@ -131,17 +131,65 @@ namespace DCLF::ShadowCameras
 			p[11] = 0.0f;
 			p[15] = one;
 		}
-		// Port of FUN_1404a6ed0. Each row is (x * P0 + z * P2) + (y * P1 + w * P3), in that order.
-		for (std::uint32_t row = 0; row < 4; ++row) {
-			const float* a = v.data() + row * 4;
-			for (std::uint32_t c = 0; c < 4; ++c) {
-				const float zx = a[2] * p[8 + c] + a[0] * p[c];
-				const float wy = a[3] * p[12 + c] + a[1] * p[4 + c];
-				a_out.viewProj[row * 4 + c] = zx + wy;
-			}
-		}
+		a_out.viewProj = Multiply(v, p);
 		a_out.eye = { a_world.translate.x, a_world.translate.y, a_world.translate.z };
 		a_out.port = a_port;
+	}
+
+	std::array<float, 16> Multiply(const std::array<float, 16>& a_a, const std::array<float, 16>& a_b)
+	{
+		// Port of FUN_1404a6ed0. Each row is (x * B0 + z * B2) + (y * B1 + w * B3), in that order.
+		std::array<float, 16> out;
+		for (std::uint32_t row = 0; row < 4; ++row) {
+			const float* a = a_a.data() + row * 4;
+			for (std::uint32_t c = 0; c < 4; ++c) {
+				const float zx = a[2] * a_b[8 + c] + a[0] * a_b[c];
+				const float wy = a[3] * a_b[12 + c] + a[1] * a_b[4 + c];
+				out[row * 4 + c] = zx + wy;
+			}
+		}
+		return out;
+	}
+
+	RE::NiFrustum ShadowmapFrustum(const RE::NiCamera& a_camera, const std::array<std::int32_t, 4>& a_port, bool a_parabolic, std::uint32_t a_width,
+		std::uint32_t a_height, bool& a_toTexture)
+	{
+		// Port of RenderShadowmap's tail (AE 0x1414f0e68 on). The port's differences are unsigned, as the engine converts them.
+		RE::NiFrustum frustum = const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2().viewFrustum;
+		a_toTexture = frustum.bOrtho && !a_parabolic;
+		float top = frustum.fTop, bottom = frustum.fBottom;
+		if (a_toTexture) {
+			const float width = static_cast<float>(a_width), height = static_cast<float>(a_height);
+			const float span = (height / static_cast<float>(static_cast<std::uint32_t>(a_port[2] - a_port[3]))) * (frustum.fTop - frustum.fBottom);
+			bottom = frustum.fBottom - (static_cast<float>(static_cast<std::uint32_t>(a_port[3])) * span) / height;
+			frustum.fRight = (width / static_cast<float>(static_cast<std::uint32_t>(a_port[1] - a_port[0]))) * (frustum.fRight - frustum.fLeft) + frustum.fLeft;
+			top = bottom + span;
+		}
+		frustum.fTop = bottom;
+		frustum.fBottom = top;
+		return frustum;
+	}
+
+	std::array<float, 16> LightTransform(const RE::NiCamera& a_camera, const std::array<std::int32_t, 4>& a_port, bool a_parabolic, std::uint32_t a_width,
+		std::uint32_t a_height)
+	{
+		bool toTexture = false;
+		const RE::NiFrustum frustum = ShadowmapFrustum(a_camera, a_port, a_parabolic, a_width, a_height, toTexture);
+		Camera camera;
+		CameraMatrices(a_camera.world, frustum, { 0.0f, 1.0f, 1.0f, 0.0f }, camera);
+		auto projection = camera.proj;
+		if (toTexture) {
+			static constexpr std::array<float, 16> kTexture{ 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 1.0f };
+			projection = Multiply(projection, kTexture);
+		}
+		// The view's translation row: the eye through the rotation's columns, negated, each sum in the engine's order.
+		auto view = camera.view;
+		const auto& r = a_camera.world.rotate.entry;
+		const auto& e = a_camera.world.translate;
+		view[12] = -((e.x * r[0][2] + e.y * r[1][2]) + e.z * r[2][2]);
+		view[13] = -((e.x * r[0][1] + e.y * r[1][1]) + e.z * r[2][1]);
+		view[14] = -((e.y * r[1][0] + e.x * r[0][0]) + e.z * r[2][0]);
+		return Multiply(view, projection);
 	}
 
 	void Block(const Camera& a_camera, std::byte* a_out)
