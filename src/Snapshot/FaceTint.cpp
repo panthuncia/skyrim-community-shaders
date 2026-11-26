@@ -7,7 +7,6 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameClock.h"
 #include "Snapshot/Publication.h"
-#include "Utils/D3D.h"
 
 #include <atomic>
 #include <cstddef>
@@ -42,8 +41,7 @@ namespace Snapshot::FaceTint
 
 		struct Render
 		{
-			std::uint64_t staged = 0, stagedFrame = 0, done = 0, cleared = 0;
-			winrt::com_ptr<ID3D11Texture2D> zero;  // zeros of the heads' texture size, for clearing them
+			std::uint64_t staged = 0, stagedFrame = 0, done = 0;
 		};
 		Render& RenderSide()
 		{
@@ -151,35 +149,6 @@ namespace Snapshot::FaceTint
 			a_builder.Set(block);
 		}
 
-		/**
-		* @brief Zeroes a bake's head texture. The head was made with an empty texture, and the native device leaves a texture made
-		* without contents as whatever memory it got, where D3D11 drivers and DXVK hand out zeros. The face draws it until the bake
-		* is copied. Render thread.
-		*/
-		void ClearHead(Render& a_render, const Bake& a_bake)
-		{
-			D3D11_TEXTURE2D_DESC desc{};
-			a_bake.destination->GetDesc(&desc);
-			if (a_render.zero) {
-				D3D11_TEXTURE2D_DESC zero{};
-				a_render.zero->GetDesc(&zero);
-				if (zero.Width != desc.Width || zero.Height != desc.Height)
-					a_render.zero = nullptr;
-			}
-			if (!a_render.zero) {
-				desc.Usage = D3D11_USAGE_IMMUTABLE;
-				desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-				desc.CPUAccessFlags = 0;
-				desc.MiscFlags = 0;
-				const std::vector<std::uint32_t> texels(std::size_t(desc.Width) * desc.Height, 0u);
-				const D3D11_SUBRESOURCE_DATA data{ .pSysMem = texels.data(), .SysMemPitch = desc.Width * 4u, .SysMemSlicePitch = 0 };
-				if (FAILED(globals::d3d::device->CreateTexture2D(&desc, &data, a_render.zero.put())))
-					RenderGraph::Fatal("face tint", fmt::format("the {}x{} zero texture for the heads' tints could not be made", desc.Width, desc.Height));
-				Util::SetResourceName(a_render.zero.get(), "FaceTint::Zero");
-			}
-			globals::d3d::context->CopyResource(a_bake.destination, a_render.zero.get());
-		}
-
 		/** @brief Turns a CALL to the engine's UpdatePending into a five-byte NOP, after checking it is the engine's own call. */
 		void RemoveCall(const char* a_what, std::uintptr_t a_site)
 		{
@@ -230,14 +199,7 @@ namespace Snapshot::FaceTint
 			render.done = std::exchange(render.staged, 0);
 			g_done.store(render.done, std::memory_order_release);
 		}
-		if (!block)
-			return;
-		for (const auto& bake : block->bakes)
-			if (bake->serial > render.cleared) {
-				ClearHead(render, *bake);
-				render.cleared = bake->serial;
-			}
-		if (render.staged)
+		if (!block || render.staged)
 			return;
 		// One bake a frame: they share kPLAYER_FACEGEN_TINT.
 		for (const auto& bake : block->bakes) {
@@ -260,5 +222,19 @@ namespace Snapshot::FaceTint
 			return {};
 		return fmt::format("face tint bakes queued {}, drawn {}, copied {} ({} frames waited for the step)", stats.queued.exchange(0), stats.drawn.exchange(0),
 			stats.copied.exchange(0), stats.waits.exchange(0));
+	}
+
+	std::vector<RE::NiPointer<RE::NiSourceTexture>> QueuedHeads()
+	{
+		// The queue and lock CaptureBlock drains.
+		static REL::Relocation<RE::BSSpinLock*> lock{ REL::RelocationID(515577, 401752) };
+		static REL::Relocation<RE::BSTArray<std::byte*>*> queue{ REL::RelocationID(515574, 401749) };
+		std::vector<RE::NiPointer<RE::NiSourceTexture>> heads;
+		lock->Lock();
+		for (auto* job : *queue)
+			if (auto* head = job ? reinterpret_cast<RE::NiPointer<RE::NiSourceTexture>*>(job + kJobHead)->get() : nullptr)
+				heads.emplace_back(head);
+		lock->Unlock();
+		return heads;
 	}
 }

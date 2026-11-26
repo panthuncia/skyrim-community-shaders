@@ -961,6 +961,34 @@ namespace RenderGraph::Engine::Native
 		uint64_t CopyRhi(const std::string& a_label, const std::shared_ptr<NativeResource>& a_destination, const std::shared_ptr<NativeResource>& a_source, bool a_all,
 			uint32_t a_destinationSub, uint32_t a_x, uint32_t a_y, uint32_t a_z, uint32_t a_sourceSub, const D3D11_BOX* a_box, bool& a_recorded, bool* a_routed);
 
+		/**
+		 * @brief How a texture made without contents is zeroed. DXVK and D3D11 drivers zero new textures, so a texture read before its
+		 * first write shows zeros, not leftover memory.
+		 */
+		enum class ZeroWay : uint8_t
+		{
+			Depth,      // a depth and stencil clear
+			Color,      // a render target clear
+			Unordered,  // a UAV clear
+			Copy,       // copies from the zero buffer, for textures no view can clear (shader-only, block-compressed or 1D)
+		};
+
+		/** @brief What zeroing one texture records. The copies read the zero buffer from offset 0. */
+		struct ZeroWork
+		{
+			ZeroWay way = ZeroWay::Copy;
+			std::shared_ptr<NativeResource> source;  // the zero buffer, kept until the work is done
+			std::vector<rhi::BufferTextureCopyFootprint> copies;
+			uint64_t bytes = 0;  // what the texture holds, for the counts
+		};
+
+		/**
+		 * @brief Records a_work on a texture that rests in Common with a_restAccess and a_restSync, and leaves it there. a_texture is the
+		 * handle the work names (the ledger's for a tracked texture).
+		 */
+		void RecordZero(rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, NativeResource& a_record, const rhi::Resource& a_texture,
+			const ZeroWork& a_work, rhi::ResourceAccessType a_restAccess, rhi::ResourceSyncState a_restSync);
+
 		/** @brief The swap chain's presentation. */
 		struct PresentationState
 		{
@@ -1062,6 +1090,15 @@ namespace RenderGraph::Engine::Native
 			winrt::com_ptr<IDXGIDevice1> dxgiDevice;
 
 			std::atomic<bool> loggedCpuAccess = false, loggedFormat = false, loggedCreate = false, loggedUpload = false, loggedMultisample = false;
+
+			// The zero buffer textures made without contents are copied from when no view can clear them (PrepareZero).
+			std::mutex zeroLock;
+			std::shared_ptr<NativeResource> zeroSource;
+			struct ZeroCounts
+			{
+				std::atomic<uint64_t> textures{ 0 }, bytes{ 0 }, copies{ 0 };
+				std::array<std::atomic<uint64_t>, 4> ways{};  // by ZeroWay
+			} zeroCounts;
 
 			rhi::Device Rhi() { return device->Get(); }
 
@@ -1181,7 +1218,7 @@ namespace RenderGraph::Engine::Native
 					a_out = std::move(record);
 					return S_OK;
 				}
-				if (!Initialize(record->resource->GetHandle(), a_request, format, mips, layers, depth)) {
+				if (!Initialize(*record, record->resource.Get(), a_request, format, mips, layers, depth)) {
 					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
 					return E_FAIL;
 				}
@@ -1663,41 +1700,166 @@ namespace RenderGraph::Engine::Native
 			 * @brief Writes a new image's initial data and moves it into Common. Waits for the GPU so the image is ready when the handle exists.
 			 * Common is what graph executions return host-made and tracked textures to, and what the context's raw operations expect.
 			 */
-			bool Initialize(rhi::ResourceHandle a_texture, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
+			bool Initialize(NativeResource& a_record, const rhi::Resource& a_texture, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips,
+				uint32_t a_layers, uint32_t a_depth)
 			{
 				auto upload = std::make_shared<rhi::ResourcePtr>();
 				std::vector<InitialCopy> copies;
 				rhi::TextureSubresourceRange all{};
-				if (!StageInitialData(a_texture, a_request, a_format, a_mips, a_layers, a_depth, *upload, copies, all))
+				const rhi::ResourceHandle handle = a_texture.GetHandle();
+				if (!StageInitialData(handle, a_request, a_format, a_mips, a_layers, a_depth, *upload, copies, all))
 					return false;
-				const std::string label = (copies.empty() ? "initial layout " : "initial contents ") + a_request.name;
+				// Without contents it is zeroed in the same submission.
+				ZeroWork zero;
+				if (!a_request.data && !PrepareZero(a_record, handle, zero))
+					return false;
+				const std::string label = (copies.empty() ? "initial zeros " : "initial contents ") + a_request.name;
 				// Waited for, so a graph that imports it later on another queue finds it written.
 				const uint64_t value = immediate.RunUntracked(
 					label,
-					[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
-						RecordInitialize(a_list, a_texture, all, *upload, copies, rhi::ResourceLayout::Common, rhi::ResourceAccessType::Common);
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors) {
+						RecordInitialize(a_list, handle, all, *upload, copies, rhi::ResourceLayout::Common, rhi::ResourceAccessType::Common);
+						if (!a_request.data)
+							RecordZero(a_list, a_descriptors, a_record, a_texture, zero, rhi::ResourceAccessType::Common, rhi::ResourceSyncState::All);
 					},
-					{ upload }, {});
+					{ upload, zero.source }, {});
+				if (!a_request.data)
+					NoteZeroed(zero);
 				return value && immediate.Wait(value);
 			}
 
 			/**
 			 * @brief A tracked texture's first contents. With data they go through the graphs' upload service, which copies them ahead
 			 * of the next work that can use the texture (the graphs' next submission, or the context's next operation on the render
-			 * thread). Without data the external client moves it out of Undefined. No wait, since the ledger orders every later use.
+			 * thread). Without data the external client moves it out of Undefined and the same submission zeroes it. No wait, since the
+			 * ledger orders every later use.
 			 */
 			bool InitializeTracked(NativeResource& a_record, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
 			{
 				auto& texture = *a_record.graphOwned;
 				if (a_request.data)
 					return UploadTracked(a_record, a_request, a_format, a_mips, a_layers, a_depth);
+				const rhi::Resource& resource = texture.GetAPIResource();
+				ZeroWork zero;
+				if (!PrepareZero(a_record, resource.GetHandle(), zero))
+					return false;
 				const ::RenderGraph::ExternalWork::Access access{ &texture, {},
 					{ rhi::ResourceAccessType::CopyDest, rhi::ResourceLayout::Common, rhi::ResourceSyncState::Copy } };
 				NativeResource* const used[] = { &a_record };
 				Immediate::Work work;
 				work.accesses = { &access, 1 };
 				work.used = used;
-				return immediate.Run("initial layout " + a_request.name, work, [](rhi::CommandList&, const Immediate::Descriptors&) {}, {}) != 0;
+				const uint64_t value = immediate.Run(
+					"initial zeros " + a_request.name, work,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors) {
+						RecordZero(a_list, a_descriptors, a_record, resource, zero, rhi::ResourceAccessType::CopyDest, rhi::ResourceSyncState::Copy);
+					},
+					{ zero.source });
+				NoteZeroed(zero);
+				return value != 0;
+			}
+
+			/** @brief The zero buffer's size. A larger subresource is copied in bands of rows. */
+			static constexpr uint64_t kZeroBytes = uint64_t{ 4 } << 20;
+
+			/**
+			 * @brief How a texture made without contents is zeroed, and the copies when no view can clear it. False when its footprints
+			 * or the zero buffer cannot be had.
+			 */
+			bool PrepareZero(const NativeResource& a_record, rhi::ResourceHandle a_texture, ZeroWork& a_out)
+			{
+				const auto& shape = a_record.shape;
+				for (uint32_t mip = 0; mip < shape.mips; ++mip)
+					a_out.bytes += uint64_t{ shape.RowBytes(shape.Width(mip)) } * shape.Rows(shape.Height(mip)) * shape.Depth(mip) * shape.layers;
+				if (a_record.bindFlags & D3D11_BIND_DEPTH_STENCIL)
+					a_out.way = ZeroWay::Depth;
+				else if (shape.blocks || shape.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D)
+					a_out.way = ZeroWay::Copy;
+				else if (a_record.bindFlags & D3D11_BIND_RENDER_TARGET)
+					a_out.way = ZeroWay::Color;
+				else if (a_record.bindFlags & D3D11_BIND_UNORDERED_ACCESS)
+					a_out.way = ZeroWay::Unordered;
+				else
+					a_out.way = ZeroWay::Copy;
+				if (a_out.way != ZeroWay::Copy)
+					return true;
+				a_out.source = ZeroSource();
+				if (!a_out.source)
+					return false;
+				const rhi::ResourceHandle zero = a_out.source->resource->GetHandle();
+				for (uint32_t slice = 0; slice < shape.layers; ++slice) {
+					for (uint32_t mip = 0; mip < shape.mips; ++mip) {
+						rhi::FootprintRangeDesc range{};
+						range.texture = a_texture;
+						range.firstMip = mip;
+						range.firstArraySlice = slice;
+						rhi::CopyableFootprint footprint{};
+						if (Rhi().GetCopyableFootprints(range, &footprint, 1).count != 1 || !footprint.rowPitch || !footprint.height || !footprint.depth)
+							return false;
+						rhi::BufferTextureCopyFootprint copy{};
+						copy.texture = a_texture;
+						copy.buffer = zero;
+						copy.mip = mip;
+						copy.arraySlice = slice;
+						copy.footprint = { 0, footprint.rowPitch, footprint.width, footprint.height, 1 };
+						// Whole depth slices when one fits, else bands of rows (whole blocks for compressed formats).
+						const uint64_t sliceBytes = uint64_t{ footprint.rowPitch } * footprint.height;
+						if (sliceBytes <= kZeroBytes) {
+							const uint32_t perCopy = static_cast<uint32_t>((std::min<uint64_t>)(footprint.depth, kZeroBytes / sliceBytes));
+							for (uint32_t z = 0; z < footprint.depth; z += perCopy) {
+								copy.z = z;
+								copy.footprint.depth = (std::min)(perCopy, footprint.depth - z);
+								a_out.copies.push_back(copy);
+							}
+							continue;
+						}
+						const uint32_t band = static_cast<uint32_t>((kZeroBytes / footprint.rowPitch) & ~uint64_t{ 3 });
+						for (uint32_t z = 0; z < footprint.depth; ++z) {
+							for (uint32_t y = 0; y < footprint.height; y += band) {
+								copy.z = z;
+								copy.y = y;
+								copy.footprint.height = (std::min)(band, footprint.height - y);
+								a_out.copies.push_back(copy);
+							}
+						}
+					}
+				}
+				return true;
+			}
+
+			/** @brief The zero buffer, made on first use. Upload memory written with zeros once. */
+			std::shared_ptr<NativeResource> ZeroSource()
+			{
+				std::lock_guard guard(zeroLock);
+				if (zeroSource)
+					return zeroSource;
+				auto record = MakeUpload(kZeroBytes);
+				if (!record)
+					return nullptr;
+				record->name = "Native::Zeros";
+				void* mapped = nullptr;
+				record->resource->Map(&mapped);
+				if (!mapped)
+					return nullptr;
+				std::memset(mapped, 0, kZeroBytes);
+				record->resource->Unmap(0, kZeroBytes);
+				zeroSource = std::move(record);
+				return zeroSource;
+			}
+
+			/** @brief Counts a zeroed texture. Logged at 64 textures and each doubling after, which a load reaches in a few lines. */
+			void NoteZeroed(const ZeroWork& a_work)
+			{
+				auto& counts = zeroCounts;
+				counts.ways[static_cast<size_t>(a_work.way)].fetch_add(1, std::memory_order_relaxed);
+				counts.copies.fetch_add(a_work.copies.size(), std::memory_order_relaxed);
+				const uint64_t bytes = counts.bytes.fetch_add(a_work.bytes, std::memory_order_relaxed) + a_work.bytes;
+				const uint64_t total = counts.textures.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (total < 64 || (total & (total - 1)) != 0)
+					return;
+				logger::info("[ORG native] zeroed {} textures made without contents ({} depth, {} colour and {} UAV clears, {} by {} copies), {:.1f} MB", total,
+					counts.ways[0].load(std::memory_order_relaxed), counts.ways[1].load(std::memory_order_relaxed), counts.ways[2].load(std::memory_order_relaxed),
+					counts.ways[3].load(std::memory_order_relaxed), counts.copies.load(std::memory_order_relaxed), static_cast<double>(bytes) / (1024.0 * 1024.0));
 			}
 
 			/** @brief InitializeTracked's contents, through the graphs' upload service. False, logged once, when it cannot take them. */
@@ -3418,6 +3580,48 @@ namespace RenderGraph::Engine::Native
 			}
 		}
 
+		void RecordZero(rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, NativeResource& a_record, const rhi::Resource& a_texture,
+			const ZeroWork& a_work, rhi::ResourceAccessType a_restAccess, rhi::ResourceSyncState a_restSync)
+		{
+			const auto range = AllOf(a_record);
+			const Use use = a_work.way == ZeroWay::Depth     ? ClearUse(a_record, range, true) :
+			                a_work.way == ZeroWay::Color     ? ClearUse(a_record, range, false) :
+			                a_work.way == ZeroWay::Unordered ? UnorderedUse(a_record, range) :
+			                                                   CopyDest(a_record, range);
+			const rhi::ResourceHandle handle = a_texture.GetHandle();
+			rhi::TextureBarrier barrier{};
+			barrier.texture = handle;
+			barrier.range = use.range;
+			barrier.beforeSync = a_restSync;
+			barrier.beforeAccess = a_restAccess;
+			barrier.beforeLayout = rhi::ResourceLayout::Common;
+			barrier.afterSync = use.sync;
+			barrier.afterAccess = use.access;
+			barrier.afterLayout = use.layout;
+			a_list.Barriers({ { &barrier, 1 }, {}, {} });
+			static constexpr float kZero[4]{};
+			static constexpr uint32_t kZeroWords[4]{};
+			switch (a_work.way) {
+			case ZeroWay::Depth:
+				ClearImageRhi(a_list, a_descriptors, a_record, handle, range, nullptr, true, true, (a_record.shape.aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0, 0.0f, 0);
+				break;
+			case ZeroWay::Color:
+				ClearImageRhi(a_list, a_descriptors, a_record, handle, range, kZero, false, false, false, 0.0f, 0);
+				break;
+			case ZeroWay::Unordered:
+				ClearUnorderedRhi(a_list, a_descriptors, a_record, a_texture, range, 0, 0, kZeroWords, nullptr);
+				break;
+			case ZeroWay::Copy:
+				for (const auto& copy : a_work.copies)
+					a_list.CopyBufferToTexture(copy);
+				break;
+			}
+			std::swap(barrier.beforeSync, barrier.afterSync);
+			std::swap(barrier.beforeAccess, barrier.afterAccess);
+			std::swap(barrier.beforeLayout, barrier.afterLayout);
+			a_list.Barriers({ { &barrier, 1 }, {}, {} });
+		}
+
 		/** @brief A Vulkan subresource range as BasicRHI's, with both planes of a depth-stencil range. */
 		rhi::TextureSubresourceRange ToRhiRange(const VkImageSubresourceRange& a_range)
 		{
@@ -4690,35 +4894,6 @@ namespace RenderGraph::Engine::Native
 
 	namespace
 	{
-		/** @brief Zeroes a wrapped image that can be cleared, as DXVK's wrap does. Block-compressed images stay as made: their owners write them before reading. */
-		void ZeroWrapped(const std::shared_ptr<NativeResource>& a_record, UINT a_bindFlags)
-		{
-			if (a_record->shape.blocks)
-				return;
-			const bool renderTarget = (a_bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
-			const bool depthStencil = (a_bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
-			const bool unordered = (a_bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
-			if (!renderTarget && !depthStencil && !unordered)
-				return;
-			const auto& record = a_record;
-			const auto range = AllOf(*record);
-			const std::array uses{ renderTarget || depthStencil ? ClearUse(*record, range, depthStencil) : UnorderedUse(*record, range) };
-			RunOp(
-				"zero " + record->name, uses,
-				[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
-					static constexpr float kZero[4]{};
-					static constexpr uint32_t kZeroWords[4]{};
-					const auto handle = a_handles[0].GetHandle();
-					if (depthStencil)
-						ClearImageRhi(a_list, a_descriptors, *record, handle, range, nullptr, true, true, (record->shape.aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0, 0.0f, 0);
-					else if (renderTarget)
-						ClearImageRhi(a_list, a_descriptors, *record, handle, range, kZero, false, false, false, 0.0f, 0);
-					else
-						ClearUnorderedRhi(a_list, a_descriptors, *record, a_handles[0], range, 0, 0, kZeroWords, nullptr);
-				},
-				{ record });
-		}
-
 		/** @brief The texture handle over a wrap record, in the request's dimension. The handle keeps the record. */
 		winrt::com_ptr<ID3D11Resource> WrapHandle(const std::shared_ptr<NativeResource>& a_record, const TextureRequest& a_request, uint32_t a_depth, uint32_t a_layers)
 		{
@@ -4789,12 +4964,10 @@ namespace RenderGraph::Engine::Native
 			return nullptr;
 		}
 		// Zeroed when there is no data, as DXVK's wrap does. A deferred wrap leaves both to the graph (WrapFlags::DeferInitialize).
-		if (!deferred && !g_device->Initialize(a_image.GetHandle(), request, format, request.mipLevels, layers, depth)) {
+		if (!deferred && !g_device->Initialize(*record, a_image, request, format, request.mipLevels, layers, depth)) {
 			LogOnce(loggedInitialize, request.name, "the image to wrap could not be moved into GENERAL or given its contents");
 			return nullptr;
 		}
-		if (!deferred && !a_data)
-			ZeroWrapped(record, request.bindFlags);
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
 		a_info.kind = DXVK_ORG_INTEROP_RESOURCE_IMAGE;
@@ -4865,7 +5038,6 @@ namespace RenderGraph::Engine::Native
 				LogOnce(loggedInitialize, request.name, "the ORG texture's first layout could not be written");
 				return nullptr;
 			}
-			ZeroWrapped(record, request.bindFlags);
 		}
 		{
 			auto& textures = GraphTextures();

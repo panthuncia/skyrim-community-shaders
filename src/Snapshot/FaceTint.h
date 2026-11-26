@@ -24,8 +24,8 @@ struct ID3D11Texture2D;
 *   own texture for the result) and is freed as the engine frees it. A bake stays in the block until the render side reports it
 *   done. UpdatePending gave the head a new texture; a bake fills the one the head has, because Drawcall Limit Fix keeps the
 *   view a face material named when it was captured.
-* - Render half, at each world frame's start: a new bake's head texture is zeroed, since the head was made with an empty one.
-*   One bake at a time is drawn as the face tint step (ImageSpace::StageFaceTint). The next world frame copies
+* - Render half, at each world frame's start. The head's texture starts as zeros (the native device zeroes a texture made without
+*   contents, as D3D11 drivers and DXVK do). One bake at a time is drawn as the face tint step (ImageSpace::StageFaceTint). The next world frame copies
 *   kPLAYER_FACEGEN_TINT into the head's texture, once the step's stage has been submitted, and reports it done. No engine call.
 *
 * Bakes are identified by serial, so a repeated snapshot draws nothing new and a dropped one loses no bake (it stays in the next
@@ -68,4 +68,10 @@ namespace Snapshot::FaceTint
 
 	/** @brief The counters since the last call, as part of the side effects line. Empty outside native. */
 	std::string TakeStatsLine();
+
+	/**
+	* @brief The heads (NiSourceTextures) of the engine's queued tint jobs, read under the queue's lock. Any mode. Guest's Drawcall Limit
+	* Fix reads them before UpdatePending gives those heads new textures.
+	*/
+	std::vector<RE::NiPointer<RE::NiSourceTexture>> QueuedHeads();
 }
