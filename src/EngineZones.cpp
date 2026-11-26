@@ -20,6 +20,12 @@
 #	include <Tracy/TracyC.h>
 #endif
 
+namespace DCLF::Features::MenuViews
+{
+	/** @brief MenuViews.h: whether CS draws a light scheme's menu scene natively. Declared here so this file needs no DCLF header. */
+	bool NativeOwns(std::int32_t a_scheme);
+}
+
 namespace EngineZones
 {
 	namespace
@@ -30,7 +36,8 @@ namespace EngineZones
 		{
 			Render,   // an engine render function itself: work CS must port
 			Helper,   // bookkeeping, setup and helpers around it
-			Producer  // game-side work the frame's data comes from; counts as render until CS owns what it draws (decision 16)
+			Producer,  // game-side work the frame's data comes from; counts as render until CS owns what it draws (decision 16)
+			MenuScene  // a menu's UI3DSceneManager::Render: a producer once CS draws that menu's scene natively (decision 16)
 		};
 
 		struct Site
@@ -289,9 +296,9 @@ namespace EngineZones
 			{ 35565, 0x5D2, 35556, 36564, 0xA97, 36555, Role::Render, "Main::DrawFrame (in Main::Update)" },
 			{ 0, 0x0, 0, 19121, 0x1EA, 36555, Role::Render, "Main::DrawFrame (in AE 19121)" },
 			{ 0, 0x0, 0, 19122, 0xD0, 36555, Role::Render, "Main::DrawFrame (in AE 19122)" },
-			{ 0, 0x0, 0, 51951, 0x23, 52727, Role::Render, "UI3DSceneManager::Render (in LockpickingMenu::PostDisplay)" },
-			{ 0, 0x0, 0, 52308, 0xA5, 52727, Role::Render, "UI3DSceneManager::Render (in MistMenu::PostDisplay)" },
-			{ 0, 0x0, 0, 52511, 0x1B, 52727, Role::Render, "UI3DSceneManager::Render (in StatsMenu::PostDisplay)" },
+			{ 0, 0x0, 0, 51951, 0x23, 52727, Role::MenuScene, "UI3DSceneManager::Render (in LockpickingMenu::PostDisplay)" },
+			{ 0, 0x0, 0, 52308, 0xA5, 52727, Role::MenuScene, "UI3DSceneManager::Render (in MistMenu::PostDisplay)" },
+			{ 0, 0x0, 0, 52511, 0x1B, 52727, Role::MenuScene, "UI3DSceneManager::Render (in StatsMenu::PostDisplay)" },
 			{ 87890, 0x10F, 75460, 90259, 0x21C, 77245, Role::Helper, "Renderer::Begin (in BSMoviePlayer::Tick)" },
 			{ 16094, 0x4FE, 99025, 16335, 0x501, 105676, Role::Render, "ImageSpaceManager::RenderEffect (in LocalMapRenderer::Render)" },
 			{ 79947, 0x2A4, 99025, 82084, 0x315, 105676, Role::Render, "ImageSpaceManager::RenderEffect (in MenuManager::DrawInterface)" },
@@ -330,6 +337,8 @@ namespace EngineZones
 		std::atomic<std::uint64_t> g_frameCalls{ 0 };
 		// Read by the producer sites' stubs: 1 while producers count as render calls (CountsAsRender). BeginFrame sets it.
 		std::atomic<std::uint8_t> g_producersRender{ 1 };
+		// Read by the menu scene sites' stubs: 1 while the site's scene counts as render calls (SiteCountsAsRender). BeginFrame sets them.
+		std::array<std::atomic<std::uint8_t>, kCount> g_menuRender{};
 		std::array<FrameStats, Reads::kKinds> g_frameStats{};
 		std::uint8_t g_frameKind = 0;
 		bool g_frameBegun = false;
@@ -390,10 +399,28 @@ namespace EngineZones
 			return a_role == Role::Render || (a_role == Role::Producer && !RenderGraph::Engine::Scaleform::OwnsRenderer());
 		}
 
-		const char* RoleName(Role a_role) noexcept
+		/** @brief The light scheme a menu scene site's menu renders (INTERFACE_LIGHT_SCHEME), from its name. */
+		std::int32_t SchemeOf(std::size_t a_site) noexcept
 		{
-			return CountsAsRender(a_role) ? "render" : a_role == Role::Producer ? "producer" :
-			                                                                      "helper";
+			const std::string_view name = kSites[a_site].name;
+			return name.find("Lockpicking") != std::string_view::npos ? 7 : name.find("MistMenu") != std::string_view::npos ? 4 :
+			                                                            name.find("StatsMenu") != std::string_view::npos    ? 6 :
+			                                                                                                                  -1;
+		}
+
+		/** @brief CountsAsRender for a site: a menu scene site counts until CS draws its scheme natively. */
+		bool SiteCountsAsRender(std::size_t a_site) noexcept
+		{
+			const auto role = kSites[a_site].role;
+			return role == Role::MenuScene ? !DCLF::Features::MenuViews::NativeOwns(SchemeOf(a_site)) : CountsAsRender(role);
+		}
+
+		const char* RoleName(std::size_t a_site) noexcept
+		{
+			const auto role = kSites[a_site].role;
+			return SiteCountsAsRender(a_site)                        ? "render" :
+			       role == Role::Producer || role == Role::MenuScene ? "producer" :
+			                                                           "helper";
 		}
 
 		/**
@@ -413,6 +440,13 @@ namespace EngineZones
 			} else if (kSites[a_site].role == Role::Producer) {
 				// A producer adds to the frame's render calls only while g_producersRender is set (BeginFrame refreshes it).
 				a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(&g_producersRender));
+				a_code.Put({ 0x80, 0x39, 0x00 });  // cmp byte ptr [rcx], 0
+				a_code.Put({ 0x74, 0x0E });        // je past the next 14 bytes
+				a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(&g_frameCalls));
+				a_code.Put({ 0xF0, 0x48, 0xFF, 0x01 });  // lock inc qword ptr [rcx]
+			} else if (kSites[a_site].role == Role::MenuScene) {
+				// The same test on the site's own flag.
+				a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(&g_menuRender[a_site]));
 				a_code.Put({ 0x80, 0x39, 0x00 });  // cmp byte ptr [rcx], 0
 				a_code.Put({ 0x74, 0x0E });        // je past the next 14 bytes
 				a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(&g_frameCalls));
@@ -662,6 +696,9 @@ namespace EngineZones
 		g_frameBegun = true;
 		g_kind.store(a_kind, std::memory_order_relaxed);
 		g_producersRender.store(CountsAsRender(Role::Producer) ? 1 : 0, std::memory_order_relaxed);
+		for (std::size_t i = 0; i < kCount; ++i)
+			if (kSites[i].role == Role::MenuScene)
+				g_menuRender[i].store(SiteCountsAsRender(i) ? 1 : 0, std::memory_order_relaxed);
 		if (afterLoad)
 			Report("after a load");
 	}
@@ -685,7 +722,7 @@ namespace EngineZones
 			for (const auto& count : g_entries[i])
 				total += count.load(std::memory_order_relaxed);
 			if (total)
-				sites[kSites[i].name] = { { "world", g_entries[i][kWorld].load(std::memory_order_relaxed) }, { "total", total }, { "render", CountsAsRender(kSites[i].role) }, { "role", RoleName(kSites[i].role) } };
+				sites[kSites[i].name] = { { "world", g_entries[i][kWorld].load(std::memory_order_relaxed) }, { "total", total }, { "render", SiteCountsAsRender(i) }, { "role", RoleName(i) } };
 		}
 		::Testing::SetReport("engine_render", { { "mode", RenderGraph::Frame::Driver::ModeName() }, { "installed", installed }, { "unsupported", g_unsupported },
 												  { "sites_wrapped", g_wrappedCount.load(std::memory_order_relaxed) }, { "sites", kCount }, { "per_frame", perFrame },
@@ -712,7 +749,7 @@ namespace EngineZones
 				}
 			if (!total)
 				continue;
-			logger::info("[EngineZones] engine call site: {} [{}{}]: per world frame {:.2f};{}", kSites[i].name, RoleName(kSites[i].role),
+			logger::info("[EngineZones] engine call site: {} [{}{}]: per world frame {:.2f};{}", kSites[i].name, RoleName(i),
 				g_hooked[i] ? ", hooked" : "", static_cast<double>(g_entries[i][kWorld].load(std::memory_order_relaxed)) / worldFrames, split);
 		}
 	}

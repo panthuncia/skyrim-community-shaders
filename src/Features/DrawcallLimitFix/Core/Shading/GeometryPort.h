@@ -9,6 +9,11 @@
 
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 
+namespace RE
+{
+	class BSLight;
+}
+
 namespace DCLF::GeometryPort
 {
 	/**
@@ -56,6 +61,11 @@ namespace DCLF::GeometryPort
 	 * and posAdjust the main camera's. Earlier they still belong to the shadow-map camera.
 	 */
 	PipelineFrame SamplePipelineFrame();
+	/**
+	 * @brief The same for another scene's sun, such as a menu scene node's. With a_eyeZero, EyePosition is zero: the camera that set
+	 * posAdjust is the scene's own, so its eye less posAdjust is zero.
+	 */
+	PipelineFrame SamplePipelineFrame(const RE::BSLight* a_sun, bool a_eyeZero);
 
 	/**
 	 * @brief What SetupGeometry on a pipeline's template pass, the sun alone, writes into its PerGeometry block. kUnwrittenBits mark the rest.
