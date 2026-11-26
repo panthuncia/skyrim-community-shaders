@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectDescriptors.h"
+#include "Features/DrawcallLimitFix/Integrations/LinearLighting/LinearLighting.h"
 
 #include <algorithm>
 
@@ -43,6 +44,9 @@ namespace DCLF::Features::Effects
 		shading.emitColor[0] = emittance ? emittance->red : 1.0f;
 		shading.emitColor[1] = emittance ? emittance->green : 1.0f;
 		shading.emitColor[2] = emittance ? emittance->blue : 1.0f;
+		// Linear Lighting's EffectGeometryUpload converts it unless the pass maps greyscale to colour. The port draws no membrane.
+		if (const auto* space = Integrations::LinearLighting::LiveWorkingSpace(); space && !(a_shading.pass & EffectFlag::GrayscaleToColor))
+			Integrations::LinearLighting::ToWorking(*space, shading.emitColor);
 		shading.ssrSpecular = 0.0f;
 		row.written = 4u | 0x70u;  // MaterialData.w is DCLF-only, with no engine write to compare
 		row.padding = 0u;

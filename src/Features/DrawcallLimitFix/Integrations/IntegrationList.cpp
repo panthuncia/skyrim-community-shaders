@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Integrations/IBL/IBL.h"
 #include "Features/DrawcallLimitFix/Integrations/ImprovedCamera/ImprovedCamera.h"
 #include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LightLimitFix.h"
+#include "Features/DrawcallLimitFix/Integrations/LinearLighting/LinearLighting.h"
 #include "Features/DrawcallLimitFix/Integrations/PhysicalSky/PhysicalSky.h"
 #include "Features/DrawcallLimitFix/Integrations/ScreenSpaceShadows/ScreenSpaceShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/Skylighting/Skylighting.h"
@@ -32,6 +33,7 @@ namespace DCLF::Integrations
 			TerrainBlending::Integration(),
 			LightLimitFix::Integration(),
 			TruePBR::Integration(),
+			LinearLighting::Integration(),
 			SubsurfaceScattering::Integration(),
 			ExtendedTranslucency::Integration(),
 			VolumetricShadows::Integration(),
