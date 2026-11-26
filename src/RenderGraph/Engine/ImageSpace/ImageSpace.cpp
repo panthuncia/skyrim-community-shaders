@@ -4,8 +4,11 @@
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -2641,6 +2644,7 @@ namespace RenderGraph::Engine::ImageSpace
 			return;
 		NativePost::ResolveGlobals();
 		NativePost::ResolveWorldGlobals();
+		Snapshot::RegisterCapture(&NativePost::CaptureBlock);
 		stl::detour_thunk<ShaderRender>(REL::RelocationID(100950, 107732));
 		stl::detour_thunk<HDRRender>(REL::RelocationID(100465, 107183));
 		stl::detour_thunk<PreTonemapComposites>(REL::RelocationID(99024, 105675));

@@ -101,6 +101,73 @@ namespace NativePost
 		w.shaderState = At<std::uintptr_t>(513211, 390951);
 	}
 
+	/** @brief The reflections pass's and RenderSSAO's settings. Native mode reads them in the snapshot capture; guest at their hooks. */
+	WorldSettings ReadWorldSettings()
+	{
+		const auto& w = WG();
+		WorldSettings s;
+		s.ssrBlur = *w.ssrBlur;
+		s.ssrDownsample = *w.ssrDownsample;
+		s.ssrDivider = *w.ssrDivider;
+		s.ssrRay = { *w.ssrRay[0], *w.ssrRay[1], *w.ssrRay[2] };
+		s.saoPower = *w.saoPower;
+		s.saoBias = *w.saoBias;
+		s.saoRadius = *w.saoRadius;
+		s.saoRow3x = *w.saoRow3x;
+		s.saoRow3z = *w.saoRow3z;
+		s.saoContrast = *w.saoContrast;
+		s.saoCameraZw = *w.saoCameraZw;
+		s.saoHalf = *w.saoHalf;
+		s.saoContrastOn = *w.saoContrastOn;
+		s.saoFog = *w.saoFog;
+		s.saoTemporal = *w.saoTemporal;
+		s.improvedSnow = *w.improvedSnow;
+		s.saoLevels = *w.saoLevels;
+		s.sparkleToggle = *w.sparkleToggle;
+		s.sparkleOnly = *w.sparkleOnly;
+		s.sparkleNoAo = *w.sparkleNoAo;
+		s.sparkleNoise = *w.sparkleNoise;
+		for (std::size_t i = 0; i < s.sparkle.size(); ++i)
+			s.sparkle[i] = *w.sparkle[i];
+		s.sparkleMaxDistance = *w.sparkleMaxDistance;
+		s.sparkleShadow = *w.sparkleShadow;
+		s.sparkleColourMode = *w.sparkleColourMode;
+		s.sparkleColour = { *w.sparkleColour[0], *w.sparkleColour[1], *w.sparkleColour[2] };
+		s.ssrCompositeA = *w.ssrCompositeA;
+		s.ssrCompositeB = *w.ssrCompositeB;
+		return s;
+	}
+
+	/**
+	* @brief The ImageSpace block, in the snapshot capture (game thread). In a native world snapshot it also takes the adaptation reset
+	* Sky::Update asks for, which the HDR effect cleared when it ran, unless another mod keeps the HDR effect on the engine.
+	*/
+	void CaptureBlock(Snapshot::Builder& a_builder)
+	{
+		if (!G().ready)
+			return;
+		static std::uint32_t s_adaptResets = 0;
+		Block block;
+		ReadGameA(block.inputs);
+		ReadGameB(block.inputs);
+		block.world = ReadWorldSettings();
+		if (RenderGraph::Engine::Native::Requested() && Native(Family::kHdr) && a_builder.Built().kind == Snapshot::FrameKind::World && *G().adaptReset) {
+			if (!kObserving)
+				*G().adaptReset = false;
+			++s_adaptResets;
+		}
+		block.adaptResets = s_adaptResets;
+		a_builder.Set(block);
+	}
+
+	/** @brief The reflections pass's and RenderSSAO's settings: the snapshot's in native mode, else read now. */
+	WorldSettings WorldSettingsNow()
+	{
+		if (const auto* block = NativeBlock())
+			return block->world;
+		return ReadWorldSettings();
+	}
+
 	// Code constants of the containers (AE .rdata, read in Ghidra; SE's have the same values).
 	constexpr std::array<float, 3> kSsrPoint{ 0.0f, 0.0f, 1.0f };  // 0x1417ebc60: the point the ray march's row 1 takes to view space
 	// 0x141aba790, 770, 780, 760: the mask downsample's four taps, in the order the reflections pass copies them.
@@ -274,6 +341,7 @@ namespace NativePost
 	{
 		const auto& w = WG();
 		const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
+		ObserveCamera("ssao.current-camera", camera);
 		SsaoInputs in;
 		in.nearZ = Field<float>(camera, 0x160);
 		in.farZ = Field<float>(camera, 0x164);
@@ -372,6 +440,7 @@ namespace NativePost
 		auto& rows = in.rows;
 		rows = ExplicitRows(11);
 		const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
+		ObserveCamera("composite.current-camera", camera);
 		if (fogged) {
 			const float nearFog = Field<float>(fog, 0x50), farFog = Field<float>(fog, 0x54);
 			if (farFog == nearFog)
@@ -394,6 +463,12 @@ namespace NativePost
 			if (length > kSunLength) {
 				const float inverse = 1.0f / length;
 				SetId(rows, 4, inverse * x, inverse * y, inverse * z);
+				if (RenderGraph::Engine::Native::Requested()) {
+					const auto& core = Snapshot::Core().dirLightDirection;
+					Observe::CompareNear("composite.sun", "x", inverse * x, core.x);
+					Observe::CompareNear("composite.sun", "y", inverse * y, core.y);
+					Observe::CompareNear("composite.sun", "z", inverse * z, core.z);
+				}
 			}
 		}
 		SetId(rows, 5, Field<float>(camera, 0xa0), Field<float>(camera, 0xa4), Field<float>(camera, 0xa8), *w.improvedSnow ? 1.0f : 0.0f);
@@ -443,6 +518,7 @@ namespace NativePost
 	NativeStep WaterBlendStep()
 	{
 		const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
+		ObserveCamera("water-blend.current-camera", camera);
 		auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 		const auto now = shadow.posAdjust.getEye(), before = shadow.previousPosAdjust.getEye();
 		const float dx = before.x - now.x, dy = before.y - now.y, dz = before.z - now.z;

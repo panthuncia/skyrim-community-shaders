@@ -167,6 +167,7 @@ namespace Snapshot
 		ScreenSpaceShadows,  // Features/ScreenSpaceShadows.h, ScreenSpaceShadows::Block
 		PostProcessing,      // Features/PostProcessing.h, PostProcessing::Block
 		Effects11,           // Features/Effects11.h, Effects11::Block
+		ImageSpace,          // RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h, RenderGraph::Engine::ImageSpace::Block
 		Count
 	};
 
