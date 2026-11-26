@@ -7,8 +7,10 @@
 // case is a family defect, and its reason is logged once.
 
 // volk must precede every Vulkan header in this translation unit.
+#include <optional>
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -62,13 +64,22 @@ namespace DCLF::Features::Water
 		 */
 		bool CurrentShape(const void* a_accumulator, View a_view, Run& a_run, std::uint32_t& a_depthFormat)
 		{
-			const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
-			if (a_accumulator != *mainAccumulator || rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+			if (a_accumulator != *mainAccumulator)
 				return false;
 			const auto main = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
-			if (rss.depthStencil != main) {
-				Refusals().Report(std::format("a main camera {} batch with depth target {} bound, not kMAIN's", NameOf(a_view), rss.depthStencil));
+			// Native's RenderWorld: CS's frame's depth target, not the shadow state's.
+			std::uint32_t depth = main;
+			if (const auto* world = ::RenderGraph::Engine::Native::WorldPass::Current())
+				depth = static_cast<std::uint32_t>(world->depth);
+			else {
+				const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
+				if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+					return false;
+				depth = rss.depthStencil;
+			}
+			if (depth != main) {
+				Refusals().Report(std::format("a main camera {} batch with depth target {} bound, not kMAIN's", NameOf(a_view), depth));
 				return false;
 			}
 			const auto& depths = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils;
@@ -252,6 +263,9 @@ namespace DCLF::Features::Water
 				// Native computes the main camera's batch from the tracked water shapes, not from the engine's registrations.
 				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 				const bool fromScene = ::RenderGraph::Engine::Native::Active() && a_accumulator == *mainAccumulator;
+				std::optional<::RenderGraph::Engine::Native::WorldPass::Scope> world;
+				if (fromScene)
+					world.emplace(kView == View::Mask ? ::RenderGraph::Engine::Native::WorldPass::Point::WaterMask : ::RenderGraph::Engine::Native::WorldPass::Point::WaterSurface);
 				// Claimed water leaves the engine's batch empty: then there is nothing to compute, and the engine's call draws nothing.
 				const auto hasPasses = [&] {
 					if (!fromScene)

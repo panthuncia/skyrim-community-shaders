@@ -196,6 +196,7 @@ namespace Snapshot
 		ImageSpace,          // RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h, RenderGraph::Engine::ImageSpace::Block
 		// The scene (snap3-world)
 		ScreenBlood,  // Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h, DCLF::Features::BloodSplatter::Block
+		SunQuery,     // Features/DrawcallLimitFix/Features/Sky/Sky.h, DCLF::Features::Sky::SunQueryBlock
 		Count
 	};
 

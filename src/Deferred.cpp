@@ -29,6 +29,7 @@
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/RenderWorld.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -340,9 +341,14 @@ void Deferred::StartDeferred()
 	auto& setRenderTargetMode = shadowState->GetRuntimeData().setRenderTargetMode;
 	auto& stateUpdateFlags = shadowState->GetRuntimeData().stateUpdateFlags;
 
-	// Backup original render targets
-	for (uint i = 0; i < 4; i++) {
-		forwardRenderTargets[i] = renderTargets[i];
+	// Backup original render targets. Native's RenderWorld takes them from CS's frame.
+	if (RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
+		const auto forward = RenderGraph::Engine::Native::WorldPass::ForwardTargets();
+		for (uint i = 0; i < 4; i++)
+			forwardRenderTargets[i] = forward[i];
+	} else {
+		for (uint i = 0; i < 4; i++)
+			forwardRenderTargets[i] = renderTargets[i];
 	}
 
 	RE::RENDER_TARGET targets[8]{

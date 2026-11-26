@@ -7,6 +7,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
@@ -31,6 +32,7 @@
 #include <rhi_helpers.h>
 
 #include <format>
+#include <optional>
 #include <utility>
 
 namespace DCLF::Features::Sky
@@ -169,6 +171,8 @@ namespace DCLF::Features::Sky
 		 */
 		bool CurrentShape(const void* a_accumulator, Shape& a_shape, Run& a_run, PublishedInputIds& a_published, Pending& a_pending)
 		{
+			// Native's RenderWorld: the main pass's targets come from CS's frame, not the shadow state.
+			const auto* world = ::RenderGraph::Engine::Native::WorldPass::Current();
 			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
@@ -182,20 +186,20 @@ namespace DCLF::Features::Sky
 			a_shape.clouds = Address::kCloudGroup.Known();
 			if (!ResolveHeaders(a_run.headerIndices, a_run.owners, a_published))
 				return false;
-			a_shape.depth = static_cast<std::int32_t>(rss.depthStencil);
+			a_shape.depth = world ? world->depth : static_cast<std::int32_t>(rss.depthStencil);
 			if (!IsDepth(a_shape.depth))
 				return false;
 			a_pending.colourFormats = {};
 			a_pending.depthFormat = FormatOf(depths[a_shape.depth].views[0]);
 
-			if (rss.cubeMapRenderTarget == static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS)) {
+			if (!world && rss.cubeMapRenderTarget == static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS)) {
 				a_shape.view = View::Face;
 				a_run.face = rss.cubeMapRenderTargetView;
 				const auto& cube = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS];
 				a_pending.colourFormats[0] = FormatOf(cube.cubeSideRTV[0]);
 				return a_run.face < 6 && a_pending.colourFormats[0] && a_shape.depth == static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS);
 			}
-			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+			if (!world && rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 				return false;
 			// The main camera's accumulator, inside CS's deferred pass.
 			static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
@@ -204,7 +208,7 @@ namespace DCLF::Features::Sky
 			a_shape.view = View::Main;
 			const auto& targets = renderer->GetRuntimeData().renderTargets;
 			for (std::size_t i = 0; i < a_shape.colours.size(); ++i) {
-				a_shape.colours[i] = static_cast<std::int32_t>(rss.renderTargets[i]);
+				a_shape.colours[i] = world ? world->colours[i] : static_cast<std::int32_t>(rss.renderTargets[i]);
 				if (!IsTarget(a_shape.colours[i]))
 					return false;
 				a_pending.colourFormats[i] = FormatOf(targets[a_shape.colours[i]].RTV);
@@ -346,6 +350,10 @@ namespace DCLF::Features::Sky
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& pending = GetPending();
+				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
+				std::optional<::RenderGraph::Engine::Native::WorldPass::Scope> world;
+				if (a_accumulator == *mainAccumulator)
+					world.emplace(::RenderGraph::Engine::Native::WorldPass::Point::SkyBatch);
 				// If another hook kept the cloud group's call from coming, finish late and never wait for the group again.
 				if (pending.cloudGroup) {
 					if (!std::exchange(pending.broken, true))
@@ -444,14 +452,22 @@ namespace DCLF::Features::Sky
 		/** @brief The sun occlusion draw's targets from the shadow state. Returns null when taken, else why not. */
 		const char* SunShape(Native::BatchInputs& a_inputs, Run& a_run)
 		{
-			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
-			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
-				return "it draws into a cubemap";
 			constexpr auto kMain = static_cast<std::int32_t>(RE::RENDER_TARGETS::kMAIN);
-			if (static_cast<std::int32_t>(rss.renderTargets[0]) != kMain)
-				return "its first target is not kMAIN";
-			const auto depth = static_cast<std::int32_t>(rss.depthStencil);
+			std::int32_t depth = 0;
+			// Native's RenderWorld: CS's frame's targets.
+			if (const auto* world = ::RenderGraph::Engine::Native::WorldPass::Current()) {
+				if (world->colours[0] != kMain)
+					return "its first target is not kMAIN";
+				depth = world->depth;
+			} else {
+				const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
+				if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+					return "it draws into a cubemap";
+				if (static_cast<std::int32_t>(rss.renderTargets[0]) != kMain)
+					return "its first target is not kMAIN";
+				depth = static_cast<std::int32_t>(rss.depthStencil);
+			}
 			if (depth == static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN))
 				a_run.sunCopyDepth = false;
 			else if (depth == static_cast<std::int32_t>(kSceneDepth))
@@ -478,9 +494,50 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
+		 * @brief The sun's occlusion draw inside a bracket whose query has begun, as FUN_1414b4c00 draws it: the query's camera, then the
+		 * draw computed for the graph's query. Returns null when the run was submitted, else why it was skipped (the bracket is skipped).
+		 */
+		template <class EndQuery>
+		const char* DrawSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, RE::NiCamera* a_camera, Queries::Bracket& a_bracket,
+			EndQuery&& a_endQuery)
+		{
+			Family::BeginBatch();
+			auto run = std::make_shared<Run>();
+			run->view = View::Sun;
+			// The engine's call sets the query's camera before its draw, and later code keeps it.
+			CS_ENGINE_READ(GraphicsState, CapturePoint, RE::BSGraphics::State::GetSingleton())->SetCameraData(a_camera, 0);
+			Native::BatchInputs inputs;
+			std::string why;
+			const char* skip = SunRefusal(inputs, *run);
+			if (!skip) {
+				inputs.physSky = run->physSky;
+				const auto built = Native::BuildSun(a_accumulator, a_geometry, inputs, run->draws.emplace_back(), run->owners, why);
+				if (built != Native::PassResult::Drawn) {
+					skip = built == Native::PassResult::LeftOut ? "its program is still building" : "its draw cannot be computed";
+					SunSkips().Report(skip, why);
+				}
+			}
+			a_endQuery();
+			if (!skip && a_bracket.Slot() == Queries::kNoSlot)
+				skip = "a draw with no query begun";
+			if (skip) {
+				SkyDraws::Keep(std::move(run->owners));
+				a_bracket.Skip(skip);
+				return skip;
+			}
+			run->query = a_bracket.Slot();
+			if (!SkyDraws::Submit(std::move(run))) {
+				a_bracket.Skip("its run was not submitted");
+				return "its run was not submitted";
+			}
+			return nullptr;
+		}
+
+		/**
 		 * @brief Hook on BSShaderAccumulator's occlusion query draw (SE 99958, AE 106604, FUN_1414b4c00). Only in graph mode. The
 		 * query's bookkeeping as the engine keeps it, and the sun's occlusion draw computed for the graph's query, which answers the
-		 * engine's GetQueryData. The engine's call is not made. A draw the graph cannot take is skipped.
+		 * engine's GetQueryData. The engine's call is not made. A draw the graph cannot take is skipped. Native's main sun query does
+		 * not come here (SubmitSunQuery).
 		 */
 		struct SunOcclusionQuery
 		{
@@ -519,40 +576,32 @@ namespace DCLF::Features::Sky
 					}
 				}
 				Queries::Bracket bracket;
-				Family::BeginBatch();
-				auto run = std::make_shared<Run>();
-				run->view = View::Sun;
 				beginQuery(renderer, query);
-				// The engine's call sets the query's camera before its draw, and later code keeps it.
-				CS_ENGINE_READ(GraphicsState, CapturePoint, RE::BSGraphics::State::GetSingleton())->SetCameraData(a_camera, 0);
-				Native::BatchInputs inputs;
-				std::string why;
-				const char* skip = SunRefusal(inputs, *run);
-				if (!skip) {
-					inputs.physSky = run->physSky;
-					const auto built = Native::BuildSun(static_cast<RE::BSShaderAccumulator*>(a_accumulator), a_geometry, inputs, run->draws.emplace_back(), run->owners, why);
-					if (built != Native::PassResult::Drawn) {
-						skip = built == Native::PassResult::LeftOut ? "its program is still building" : "its draw cannot be computed";
-						SunSkips().Report(skip, why);
-					}
-				}
-				endQuery(renderer, query);
+				(void)DrawSun(static_cast<RE::BSShaderAccumulator*>(a_accumulator), a_geometry, a_camera, bracket, [&] { endQuery(renderer, query); });
 				pending = true;
 				*reinterpret_cast<std::uint32_t*>(entry + 0x10) = 0;
-				if (!skip && bracket.Slot() == Queries::kNoSlot)
-					skip = "a draw with no query begun";
-				if (skip) {
-					SkyDraws::Keep(std::move(run->owners));
-					bracket.Skip(skip);
-					return;
-				}
-				run->query = bracket.Slot();
-				if (!SkyDraws::Submit(std::move(run)))
-					bracket.Skip("its run was not submitted");
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+	}
 
+	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, RE::NiCamera* a_camera, std::uint64_t a_tag)
+	{
+		if (!Queries::Active() || !SkyDraws::HasSunClient()) {
+			SunSkips().Report("the graph does not answer the sun's occlusion query");
+			return;
+		}
+		// The engine skips an entry whose last answer the game has not read yet; CS's slot is that entry.
+		if (!a_geometry || Queries::Pending(Queries::kSunSlot))
+			return;
+		const ::RenderGraph::Engine::Native::WorldPass::Scope world(::RenderGraph::Engine::Native::WorldPass::Point::SunQuery);
+		Queries::Bracket bracket;
+		bracket.Begin(Queries::kSunSlot, a_tag);
+		(void)DrawSun(a_accumulator, a_geometry, a_camera, bracket, [] {});
+	}
+
+	namespace
+	{
 		/** @brief The reflection cube's and its depth's formats, read again only when their views change. */
 		struct FaceTargets
 		{
@@ -687,6 +736,8 @@ namespace DCLF::Features::Sky
 			stl::detour_thunk<SunOcclusionQuery>(REL::Offset(Address::kSunOcclusionQuery).address());
 			HookSites::NoteDetour("BSShaderAccumulator's occlusion query draw (the sun's, on the graph)", SunOcclusionQuery::func.address());
 		}
+		// Its capture runs only in native.
+		InstallSunQuery();
 		Family::AddSetup("sky", [] { return SkyDraws::Setup(); });
 		logger::info("[DCLF] sky: hooks installed (the sky batch{})", clouds ? ", the cloud group" : "");
 	}

@@ -16,6 +16,8 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
 #include "Features/DrawcallLimitFix/Integrations/PhysicalSky/PhysicalSky.h"
+#include "Snapshot/FrameSnapshot.h"
+#include "Snapshot/Retire.h"
 
 #include <array>
 #include <cstddef>
@@ -182,6 +184,30 @@ namespace DCLF::Features::Sky
 
 	void InstallHooks();
 	void PreflightHooks();
+
+	/**
+	 * @brief Native's sun occlusion query (SunQuery.cpp): what Sun::SubmitOcclusionQuery's gate reads, captured on the game thread after
+	 * the game side took the last answer (as Sun::UpdateOcclusionQueries, which native does not call).
+	 */
+	struct SunQueryBlock
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::SunQuery;
+		bool submit = false;            // the sun has its query geometry and the last results were read
+		Snapshot::EngineRef geometry;  // the query geometry, held
+		bool operator==(const SunQueryBlock&) const = default;
+	};
+
+	/** @brief The block's query geometry while it is still the sun's, else null. Render thread (reads the sun, as decision 105). */
+	RE::BSGeometry* SunQueryGeometry(const SunQueryBlock& a_block);
+
+	/**
+	 * @brief Native, render thread: Main::RenderWorld's sun occlusion draw (the engine's Sun::SubmitOcclusionQuery(1, ...)) into CS's own
+	 * query slot, tagged a_tag (the snapshot id). Skipped while the last answer has not reached the game side.
+	 */
+	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, RE::NiCamera* a_camera, std::uint64_t a_tag);
+
+	/** @brief Registers the sun query's capture. */
+	void InstallSunQuery();
 
 	namespace SkyDraws
 	{

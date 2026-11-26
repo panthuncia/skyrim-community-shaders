@@ -6,6 +6,7 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
@@ -195,8 +196,23 @@ namespace DCLF::Features::Water::Native
 
 			static Modes Current()
 			{
-				const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				Modes m;
+				// Native's RenderWorld points draw with CS's frame's state.
+				if (const auto* world = ::RenderGraph::Engine::Native::WorldPass::Current()) {
+					m.depth = world->depthMode;
+					m.stencil = world->stencil;
+					m.stencilRef = world->stencilRef;
+					m.fill = world->fill;
+					m.cull = world->cull;
+					m.depthBias = world->depthBias;
+					m.scissor = world->scissor;
+					m.blend = world->blend;
+					m.alphaToCoverage = world->alphaToCoverage;
+					m.write = world->write;
+					m.blendExtra = world->blendExtra;
+					return m;
+				}
+				const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				m.depth = static_cast<std::uint32_t>(rss.depthStencilDepthMode);
 				m.stencil = rss.depthStencilStencilMode;
 				m.stencilRef = rss.stencilRef;
@@ -293,10 +309,15 @@ namespace DCLF::Features::Water::Native
 				port = Port::CaptureFrame(a_inputs.accumulator);
 				rewrites = Port::EvaluateBindingRewrites(port);
 				start = Modes::Current();
-				const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
-				// The mask's targets are set just before its batch. The surface's RT0 is SetupTechnique's: kRAW_WATER for ISWaterBlend, else kMAIN.
+				// The mask's targets are set just before its batch (in native's RenderWorld, CS's frame's). The surface's RT0 is
+				// SetupTechnique's: kRAW_WATER for ISWaterBlend, else kMAIN.
 				if (a_inputs.view == View::Mask) {
-					targets = { static_cast<std::int32_t>(rss.renderTargets[0]), static_cast<std::int32_t>(rss.renderTargets[1]) };
+					if (const auto* world = ::RenderGraph::Engine::Native::WorldPass::Current())
+						targets = { world->colours[0], world->colours[1] };
+					else {
+						const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
+						targets = { static_cast<std::int32_t>(rss.renderTargets[0]), static_cast<std::int32_t>(rss.renderTargets[1]) };
+					}
 				} else {
 					if (port.renderMode == 0x12) {
 						a_why = "the local map's surface";

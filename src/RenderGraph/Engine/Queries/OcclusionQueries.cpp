@@ -31,8 +31,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 {
 	namespace
 	{
-		constexpr std::uint32_t kNotReady = 0xFFFFFFFF;
-		static_assert(kRingSlots <= 64, "Harvest keeps one bit per ring slot");
 		// The first answers are logged one by one, then a summary per ring slot every kSummaryReads answers.
 		constexpr std::uint32_t kLoggedAnswers = 12;
 		constexpr std::uint32_t kSummaryReads = 100;
@@ -44,6 +42,8 @@ namespace RenderGraph::Engine::OcclusionQueries
 			bool graph = false;  // its last BeginQuery was inside a Bracket
 			bool begun = false;
 			bool ready = false;
+			bool taken = false;   // a CS-owned slot's answer was taken (Take)
+			std::uint64_t tag = 0;  // a CS-owned slot's tag from Begin
 			std::uint32_t value = 0;
 			std::uint32_t last = 0;
 			// Set at BeginQuery from the bracket.
@@ -65,7 +65,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		struct Globals
 		{
 			std::mutex mutex;
-			std::array<Slot, kRingSlots> slots;
+			std::array<Slot, kSlots> slots;
 			Counters counters;
 			std::uint32_t logged = 0;
 			bool active = false;
@@ -240,7 +240,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			if (!run.committed || run.harvested)
 				return true;
 			const auto bound = [&](std::int32_t a_index) -> Slot* {
-				if (a_index < 0 || a_index >= static_cast<std::int32_t>(kRingSlots))
+				if (a_index < 0 || a_index >= static_cast<std::int32_t>(kSlots))
 					return nullptr;
 				auto& slot = a_globals.slots[a_index];
 				return slot.ring.get() == &a_ring && slot.range == a_range && slot.generation == run.generation ? &slot : nullptr;
@@ -265,18 +265,18 @@ namespace RenderGraph::Engine::OcclusionQueries
 				chunk->readback->GetAPIResource().Map(&mapped);
 			const auto* counts = static_cast<const std::uint64_t*>(mapped);
 			// A slot several queries count answers their sum.
-			std::array<std::uint64_t, kRingSlots> sums{};
-			std::uint64_t named = 0;
+			std::array<std::uint64_t, kSlots> sums{};
+			std::array<bool, kSlots> named{};
 			for (std::uint32_t i = 0; i < run.slots.size(); ++i) {
 				const auto index = run.slots[i];
 				if (!bound(index))
 					continue;
-				named |= std::uint64_t{ 1 } << index;
+				named[index] = true;
 				if (counts)
 					sums[index] += counts[(std::uint64_t(a_ring.First(a_range)) + i) * a_ring.stride / sizeof(std::uint64_t)];
 			}
-			for (std::uint32_t index = 0; index < kRingSlots; ++index) {
-				if (!(named & (std::uint64_t{ 1 } << index)))
+			for (std::uint32_t index = 0; index < kSlots; ++index) {
+				if (!named[index])
 					continue;
 				auto& slot = a_globals.slots[index];
 				if (counts)
@@ -410,7 +410,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			if (run.slots.size() <= query)
 				run.slots.resize(static_cast<std::size_t>(query) + 1, kNoSlot);
 			run.slots[query] = index;
-			if (index < 0 || index >= static_cast<std::int32_t>(kRingSlots))
+			if (index < 0 || index >= static_cast<std::int32_t>(kSlots))
 				continue;
 			auto& slot = globals.slots[index];
 			if (!slot.graph)
@@ -666,6 +666,74 @@ namespace RenderGraph::Engine::OcclusionQueries
 		// The member hides the file's Answer helper.
 		if (entry.graph && !entry.ready)
 			Deliver(entry, (std::min)(a_count, kNotReady - 1));
+	}
+
+	bool Bracket::Begin(std::int32_t a_slot, std::uint64_t a_tag)
+	{
+		if (slot != kNoSlot || a_slot < static_cast<std::int32_t>(kRingSlots) || a_slot >= static_cast<std::int32_t>(kSlots))
+			return false;
+		auto& globals = Get();
+		const std::scoped_lock lock(globals.mutex);
+		auto& entry = globals.slots[a_slot];
+		slot = a_slot;
+		entry.graph = true;
+		entry.begun = true;
+		entry.ready = false;
+		entry.taken = false;
+		entry.tag = a_tag;
+		entry.hasSkipAnswer = hasSkipAnswer;
+		entry.skipAnswer = skipAnswer;
+		entry.ring.reset();
+		// The draw is in the bracket: the query ends with it, as EndQuery would.
+		entry.begun = false;
+		return true;
+	}
+
+	bool Pending(std::int32_t a_slot)
+	{
+		if (a_slot < 0 || a_slot >= static_cast<std::int32_t>(kSlots))
+			return false;
+		auto& globals = Get();
+		const std::scoped_lock lock(globals.mutex);
+		const auto& entry = globals.slots[a_slot];
+		return entry.graph && !entry.taken;
+	}
+
+	bool Take(std::int32_t a_slot, std::uint32_t& a_count, std::uint64_t& a_tag)
+	{
+		if (a_slot < static_cast<std::int32_t>(kRingSlots) || a_slot >= static_cast<std::int32_t>(kSlots))
+			return false;
+		auto& globals = Get();
+		std::unique_lock lock(globals.mutex);
+		auto& entry = globals.slots[a_slot];
+		if (!entry.graph || entry.taken)
+			return false;
+		const auto value = Hooks::GetQueryData::Read(globals, lock, entry, false);
+		if (value == kNotReady) {
+			globals.counters.notReady.fetch_add(1, std::memory_order_relaxed);
+			return false;
+		}
+		globals.counters.graphAnswers.fetch_add(1, std::memory_order_relaxed);
+		NoteRead(globals, a_slot, entry, value, true);
+		entry.taken = true;
+		a_count = value;
+		a_tag = entry.tag;
+		return true;
+	}
+
+	std::uint32_t ReadRingEntry(void* a_entry)
+	{
+		const auto index = SlotOf(static_cast<ID3D11Query**>(a_entry));
+		if (index == kNoSlot)
+			return kNotReady;
+		auto& globals = Get();
+		std::unique_lock lock(globals.mutex);
+		auto& slot = globals.slots[index];
+		if (!slot.graph)
+			return kNotReady;
+		const auto value = Hooks::GetQueryData::Read(globals, lock, slot, false);
+		NoteRead(globals, index, slot, value, true);
+		return value;
 	}
 
 	std::string Status()
