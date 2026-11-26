@@ -1,7 +1,8 @@
 # Native rendering on its own thread: roadmap
 
-Status: roadmap, 2026-11-25; the user's decisions are recorded below. Nothing is started. It follows round 3 of the
-render-thread work (`render-thread-window.md`) and the fully native direction.
+Status: phase 0 done and phase 4 mostly done (2026-11-26: `snap0-*.md`). Every decision since the roadmap, with the
+side-effect fates, is in [render-thread-decisions.md](render-thread-decisions.md); add new ones there. It follows round 3
+of the render-thread work (`render-thread-window.md`) and the fully native direction.
 
 > The round notes, older handoffs and plans this file cites (`render-thread-window.md`, `perf2-*.md`, `perf3-*.md`,
 > `handoff-2026-11-25.md`, `org-native-frame-graph.md`, `org-full-port.md`, ...) were removed from the tree in the docs
