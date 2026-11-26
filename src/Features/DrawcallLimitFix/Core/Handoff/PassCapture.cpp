@@ -784,6 +784,21 @@ namespace DCLF
 		return std::exchange(holdNobodySamples, {});
 	}
 
+	void PassCapture::ResetCoveredKept()
+	{
+		std::scoped_lock lock(coveredKeptLock);
+		coveredKept.clear();
+		anyCoveredKept.store(false, std::memory_order_release);
+	}
+
+	bool PassCapture::CoveredKept(const void* a_accumulator) const
+	{
+		if (!anyCoveredKept.load(std::memory_order_acquire))
+			return false;
+		std::scoped_lock lock(coveredKeptLock);
+		return std::find(coveredKept.begin(), coveredKept.end(), a_accumulator) != coveredKept.end();
+	}
+
 	std::vector<const void*> PassCapture::TakeUncoveredAccumulators()
 	{
 		std::scoped_lock lock(keptLock);
@@ -794,6 +809,13 @@ namespace DCLF
 
 	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const
 	{
+		// A covered view keeps a pass only for a caster DCLF does not hold. The engine must then draw that light's maps.
+		if (std::uint32_t mode = 0; t_shadowRegistration && t_registrationAccumulator && ShadowModeOfBatch(a_batch, mode)) {
+			std::scoped_lock lock(coveredKeptLock);
+			if (std::find(coveredKept.begin(), coveredKept.end(), t_registrationAccumulator) == coveredKept.end())
+				coveredKept.push_back(t_registrationAccumulator);
+			anyCoveredKept.store(true, std::memory_order_release);
+		}
 		// Counted outside loads, with a sample by geometry read while the engine registers it.
 		if (a_pass && a_pass->geometry && !t_menuScenes && DclfClass(a_pass)) {
 			dclfKept.fetch_add(1, std::memory_order_relaxed);

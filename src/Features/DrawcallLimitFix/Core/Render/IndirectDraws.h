@@ -370,6 +370,17 @@ namespace DCLF
 
 		/** @brief Captures a shadow view after its native draws, for the shadow epoch. Draws nothing. */
 		void CaptureShadowView(std::uint32_t a_viewId, std::uint32_t a_renderMode);
+		/**
+		 * @brief Captures a covered view the engine did not draw (Shadows/Engine's native shadow maps). It reads no renderer state: the
+		 * camera is the view's shadow source's and the rasterizer state its placement's. A view no source owns is not captured.
+		 * A paraboloid's view passes its ParabolaParam (radius, side) in a_parabola; other views read the engine's globals as the engine's
+		 * capture does. Returns whether it was captured.
+		 */
+		bool CaptureNativeShadowView(std::uint32_t a_viewId, std::uint32_t a_renderMode, const float* a_parabola);
+		/** @brief How many views this frame's shadow epoch has captured so far. */
+		std::size_t CapturedShadowViews() const;
+		/** @brief Forgets the views captured from a_mark on, so the engine draws their light after all. */
+		void DropShadowViewsFrom(std::size_t a_mark);
 
 		/**
 		 * @brief Runs one epoch that culls casters into every captured shadow view and draws the occlusion maps. Returns the maps drawn.
@@ -397,6 +408,7 @@ namespace DCLF
 
 		/** @brief Commits and submits one main epoch, Z-prepass or colour. */
 		void RunEpoch(bool a_depthOnly);
+		bool CaptureView(std::uint32_t a_viewId, std::uint32_t a_renderMode, const float* a_parabola, bool a_native);
 
 		struct Impl;
 		std::unique_ptr<Impl> impl;
