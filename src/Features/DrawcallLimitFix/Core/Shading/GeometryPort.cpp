@@ -136,12 +136,16 @@ namespace DCLF::GeometryPort
 
 	PipelineFrame SamplePipelineFrame()
 	{
-		EngineReadWindow::Touch("SamplePipelineFrame");
-		PipelineFrame frame;
-
 		// The sun: ShadowSceneNode[0]->sunLight. SetupGeometry reads it through BSLight+0x48.
 		auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0] : nullptr;
-		const RE::BSLight* sun = sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr;
+		return SamplePipelineFrame(sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr, false);
+	}
+
+	PipelineFrame SamplePipelineFrame(const RE::BSLight* a_sun, bool a_eyeZero)
+	{
+		EngineReadWindow::Touch("SamplePipelineFrame");
+		PipelineFrame frame;
+		const RE::BSLight* sun = a_sun;
 		const auto* light = sun ? At<const std::byte* const>(sun, kBSLightNiLight) : nullptr;
 		const auto* imageSpace = Global<const std::byte* const>(Engine::Address::kImageSpaceManager);
 		if (light && imageSpace) {
@@ -170,7 +174,7 @@ namespace DCLF::GeometryPort
 
 		// EyePosition (0x1414de12c): the current accumulator's eye less posAdjust, one subtraction a component. In native's RenderWorld
 		// the main accumulator is current and its eye is the world camera's position, which is posAdjust too, so the difference is zero.
-		if (::RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
+		if (a_eyeZero || ::RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
 			frame.eye = true;
 			for (auto& c : frame.eyePosition)
 				c = 0.0f;

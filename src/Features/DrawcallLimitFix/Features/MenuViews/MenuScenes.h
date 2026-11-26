@@ -14,6 +14,10 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
+#include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
+#include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
+#include "Features/DrawcallLimitFix/Core/Shading/MaterialPortFrame.h"
+#include "Snapshot/FrameCamera.h"
 
 #include <algorithm>
 #include <array>
@@ -288,6 +292,97 @@ namespace DCLF::Features::MenuViews::Scenes
 
 	void InstallHooks();
 	void PreflightHooks();
+
+	/**
+	 * @brief The native menu scenes (MenuScenesNative.cpp): a menu scene's draws computed by CS from the menu's scene graph, lights and
+	 * camera, with DCLF's ports. No engine setup function runs.
+	 */
+	namespace Native
+	{
+		/** @brief The menu scene's camera last rendered, for its previous-frame rows. */
+		struct PreviousCamera
+		{
+			bool valid = false;
+			Snapshot::FrameCamera::Previous camera;
+		};
+
+		/** @brief What a menu render's draws are computed from, read once at the render. */
+		struct Inputs
+		{
+			RE::NiPoint3 eye{}, previousEye{};
+			const RE::ShadowSceneNode* sceneNode = nullptr;
+			TechniqueInputs technique;
+			GeometryPort::PipelineFrame pipeline;
+			MaterialPort::MaterialFrame material;
+			Snapshot::CameraView camera;
+			Snapshot::FrameCamera::Previous previous;
+			bool havePrevious = false;
+		};
+		Inputs SampleInputs(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, const PreviousCamera& a_previous);
+
+		/** @brief A draw's lights as GetRenderPasses gives a menu pass: the scene node's sun, its shadow lights, then its point lights. */
+		struct Lights
+		{
+			std::array<RE::BSLight*, 16> lights{};
+			std::uint32_t count = 0;
+			std::uint32_t shadow = 0;
+		};
+		void SelectLights(const Inputs& a_in, const RE::BSGeometry& a_geometry, Lights& a_out);
+
+		/** @brief The FrameBuffer (VS_PerFrame, b12) rows SetCameraData writes for the menu camera. */
+		void FrameRows(const Inputs& a_in, float (*a_out)[4]);
+
+		/** @brief A Lighting draw's constants, which floats of them the engine writes (1.0), and its descriptors and material record. */
+		struct LightingResult
+		{
+			LightingSceneConstants constants{};
+			LightingSceneConstants written{};
+			std::uint32_t pass = 0, vertex = 0, pixel = 0, rawPixel = 0;
+			MaterialRecord record{};
+			Lights lights;
+		};
+		/** @brief The Lighting draw of a_geometry as SetupTechnique, SetupMaterial and SetupGeometry would bind it. False, with why, when it cannot. */
+		bool ComputeLighting(const Inputs& a_in, const RE::BSGeometry& a_geometry, LightingResult& a_out, std::string& a_why);
+
+		/** @brief An Effect draw's constants, written floats, descriptors and material record. */
+		struct EffectResult
+		{
+			EffectSceneConstants constants{};
+			EffectSceneConstants written{};
+			std::uint32_t pass = 0, vertex = 0, pixel = 0, rawPixel = 0;
+			MaterialRecord record{};
+		};
+		/** @brief The Effect draw of a_geometry as BSEffectShader's Setup functions would bind it. Particles and the lit, membrane and soft variants are refused. */
+		bool ComputeEffect(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why);
+
+		/** @brief A menu root's visible geometry in draw order: opaque in scene order, then blended far to near. */
+		void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, std::vector<RE::BSGeometry*>& a_out);
+
+		/** @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes). */
+		bool Owns(std::int32_t a_scheme);
+
+		/**
+		 * @brief UI3DSceneManager::Render (AE 52727) in native mode for a scheme CS owns: its update half (lights, the root's update, the
+		 * scene node's light update) as the engine runs it, then the colour pass CS builds from the scene graph into its own frame.
+		 */
+		DWORD Render(RE::UI3DSceneManager* a_manager, std::int32_t a_scheme, RE::NiCamera* a_camera, bool a_keepDepth);
+	}
+
+	/** @brief Temporary observe step of the native menu scenes (MenuScenesObserve.cpp): CS's draws against the engine's. */
+	namespace Observe
+	{
+		bool Enabled();
+		void Begin(View a_view, RE::NiCamera* a_camera);
+		void End();
+		void Other(const char* a_shader, const RE::BSRenderPass* a_pass, std::uint32_t a_vertex, std::uint32_t a_pixel);
+		void Lighting(const RE::BSRenderPass* a_pass, const LightingSceneConstants& a_engine, const float (*a_frame)[4], const ID3D11ShaderResourceView* const* a_views,
+			const std::uint32_t* a_address, const std::uint32_t* a_filter, std::uint32_t a_vertex, std::uint32_t a_pixel);
+		void Effect(const RE::BSRenderPass* a_pass, const EffectSceneConstants& a_engine);
+		void State(const RE::BSRenderPass* a_pass, std::uint32_t a_blend, std::uint32_t a_coverage, std::uint32_t a_write, std::uint32_t a_extra, std::uint32_t a_depth,
+			std::uint32_t a_stencil, std::uint32_t a_stencilRef, std::uint32_t a_fill, std::uint32_t a_cull, std::uint32_t a_depthBias, float a_alphaRef,
+			const Family::Viewport& a_viewport, std::int32_t a_target);
+		void Report();
+	}
 
 	namespace SceneDraws
 	{

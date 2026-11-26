@@ -1,0 +1,94 @@
+# The menu scenes in a load and in the world (UI3DSceneManager::Render): the loading screen's model under the load hold, an
+# inventory item (the item list entered with Right), the journal and the stats menu's constellations, a shot in each.
+# The main menu's model is menu-main. Compose it: native-vulkan+menu-scenes, guest+menu-scenes.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "shot"
+arg = "loading-model"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "world"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "InventoryMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "key"
+arg = "Right"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "inventory-item"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "InventoryMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "Journal Menu=show"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "journal"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "Journal Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "StatsMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "stats"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "StatsMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["loading-model", "world", "inventory-item", "journal", "stats"]

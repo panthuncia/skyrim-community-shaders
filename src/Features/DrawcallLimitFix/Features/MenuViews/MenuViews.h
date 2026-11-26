@@ -28,6 +28,9 @@ namespace DCLF::Features::MenuViews
 
 	Api::Feature Feature();
 
+	/** @brief Whether CS draws a light scheme's menu scene natively (MenuScenesNative.cpp). */
+	bool NativeOwns(std::int32_t a_scheme);
+
 	/** @brief Whether the menu 3D scene is the family's, which is graph mode. Read once. */
 	bool Menu3DEnabled();
 	/** @brief Whether the local map is the family's, which is graph mode. Read once. */

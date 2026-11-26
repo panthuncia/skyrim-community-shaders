@@ -68,6 +68,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			Family::Passes passes;
 			// The DrawData copy's draw being latched, which has two streams. Null for a DrawTriShape draw.
 			const Family::DynamicDrawData* dynamic = nullptr;
+			// The pass whose SetupGeometry ran last in the batch (observe step).
+			const RE::BSRenderPass* pass = nullptr;
 		};
 
 		Capture& GetCapture()
@@ -203,6 +205,7 @@ namespace DCLF::Features::MenuViews::Scenes
 				return "a depth-stencil, blend or rasterizer state with no description";
 			draw.stencilRef = engine.stencilRef;
 
+			Observe::Other("Utility", a_capture.pass, descriptor, state->modifiedPixelDescriptor);
 			UtilitySceneConstants constants{};
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
@@ -266,6 +269,8 @@ namespace DCLF::Features::MenuViews::Scenes
 				return "more constants than the batch's latch holds";
 
 			draw.viewport = Family::LatchViewport(engine.depthBias);
+			Observe::State(a_capture.pass, engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra, engine.depthMode, engine.stencilMode, engine.stencilRef,
+				engine.fill, engine.cull, engine.depthBias, rss.alphaTestEnabled ? rss.alphaTestRef : -1.0f, draw.viewport, static_cast<std::int32_t>(((rss.renderTargets[0] + 1) & 0xFF) | (((rss.renderTargets[1] + 1) & 0xFF) << 8) | (((rss.renderTargets[2] + 1) & 0xFF) << 16) | (((rss.renderTargets[3] + 1) & 0xFF) << 24)));
 
 			for (auto& owner : owners)
 				if (owner)
@@ -394,10 +399,25 @@ namespace DCLF::Features::MenuViews::Scenes
 					return "its sampler modes have no graph sampler";
 			}
 
+			if (Observe::Enabled()) {
+				float frame[kFrameRows][4]{};
+				const auto stage = Family::ConstantBytes(use, Stage::Vertex, 12) ? Stage::Vertex : Stage::Pixel;
+				Family::CopyRows(use, stage, 12, frame, kFrameRows);
+				std::array<const ID3D11ShaderResourceView*, kLightingSlots> views{};
+				std::array<std::uint32_t, kLightingSlots> address{}, filter{};
+				for (std::uint32_t t = 0; t < kLightingSlots; ++t) {
+					views[t] = Unwrap(rss.PSTexture[t]);
+					address[t] = rss.PSTextureAddressMode[t].underlying();
+					filter[t] = rss.PSTextureFilterMode[t].underlying();
+				}
+				Observe::Lighting(a_capture.pass, constants, frame, views.data(), address.data(), filter.data(), state->modifiedVertexDescriptor, state->modifiedPixelDescriptor);
+			}
 			draw.latchOffset = run.Append(std::as_bytes(std::span<const LightingSceneConstants, 1>(&constants, 1)));
 			if (draw.latchOffset == ~0u)
 				return "more constants than the batch's latch holds";
 			draw.viewport = Family::LatchViewport(engine.depthBias);
+			Observe::State(a_capture.pass, engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra, engine.depthMode, engine.stencilMode, engine.stencilRef,
+				engine.fill, engine.cull, engine.depthBias, rss.alphaTestEnabled ? rss.alphaTestRef : -1.0f, draw.viewport, static_cast<std::int32_t>(((rss.renderTargets[0] + 1) & 0xFF) | (((rss.renderTargets[1] + 1) & 0xFF) << 8) | (((rss.renderTargets[2] + 1) & 0xFF) << 16) | (((rss.renderTargets[3] + 1) & 0xFF) << 24)));
 
 			for (auto& owner : owners)
 				if (owner)
@@ -429,6 +449,7 @@ namespace DCLF::Features::MenuViews::Scenes
 				return "a depth-stencil, blend or rasterizer state with no description";
 			draw.stencilRef = engine.stencilRef;
 
+			Observe::Other("Effect", a_capture.pass, state->modifiedVertexDescriptor, state->modifiedPixelDescriptor);
 			EffectSceneConstants constants{};
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
@@ -498,6 +519,7 @@ namespace DCLF::Features::MenuViews::Scenes
 					return "its sampler modes have no graph sampler";
 			}
 
+			Observe::Effect(a_capture.pass, constants);
 			std::vector<std::byte> bytes(sizeof(EffectSceneConstants) + (texCoordIndex ? kEffectIndexedTexCoordBytes : 0));
 			std::memcpy(bytes.data(), &constants, sizeof(EffectSceneConstants));
 			if (texCoordIndex) {
@@ -510,6 +532,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			if (draw.latchOffset == ~0u)
 				return "more constants than the batch's latch holds";
 			draw.viewport = Family::LatchViewport(engine.depthBias);
+			Observe::State(a_capture.pass, engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra, engine.depthMode, engine.stencilMode, engine.stencilRef,
+				engine.fill, engine.cull, engine.depthBias, rss.alphaTestEnabled ? rss.alphaTestRef : -1.0f, draw.viewport, static_cast<std::int32_t>(((rss.renderTargets[0] + 1) & 0xFF) | (((rss.renderTargets[1] + 1) & 0xFF) << 8) | (((rss.renderTargets[2] + 1) & 0xFF) << 16) | (((rss.renderTargets[3] + 1) & 0xFF) << 24)));
 
 			for (auto& owner : owners)
 				if (owner)
@@ -577,7 +601,9 @@ namespace DCLF::Features::MenuViews::Scenes
 		{
 			static void thunk(RE::NiCamera* a_camera, RE::BSShaderAccumulator* a_accumulator, std::uint32_t a_flags)
 			{
+				Observe::Begin(kView, a_camera);
 				RunBatch<kView>([&] { func(a_camera, a_accumulator, a_flags); });
+				Observe::End();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -631,6 +657,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			auto& capture = GetCapture();
 			if (!capture.active)
 				return;
+			capture.pass = a_pass;
 			if (!capture.passes.OnSetup(a_pass) && !capture.failed)
 				Refuse(capture, "a pass the dispatcher draws through another function than DrawTriShape");
 		}
