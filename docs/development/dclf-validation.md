@@ -123,7 +123,6 @@ The other switches a test run sets:
 | `CS_DCLF_TEX_STREAM_RATE_MB` | 256 | Texture upgrades started per second, in MiB. |
 | `CS_DCLF_TEX_STREAM_VISIBLE_OFFSET` | 0 | Over the budget, how many mips what is on screen may step down (0: it loads what it asks for). |
 | `CS_DCLF_TEX_STREAM_DISTANCE_SCALE` | 1 | The distance floor's sharpness: above 1, finer mips. |
-| `CS_DCLF_ASYNC_COMPUTE` | off | `1`: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on it. Off by default: cross-queue waits cost more than the passes, and in guest mode FSR frame generation shares DXVK's compute queue and deadlocks with them (render-graph.md). |
 
 ### Other switches DCLF runs depend on
 
@@ -587,8 +586,8 @@ and state); with the shadow site on it loses the device (dclf-architecture.md, "
     the game relaunched at once.
 -   **Bisect by arms and rates.** Run each arm until its first loss and compare counts; an intermittent fault needs many runs per
     arm before an arm is cleared. Re-run the control at the end.
--   **Reduce the configuration** with `CS_DCLF_ASYNC_COMPUTE=0` or `CS_DCLF_PIPELINE`, to tell DCLF's work from the render
-    graph's submission paths.
+-   **Reduce the configuration** with `CS_ORG_QUEUE_TOPOLOGY=hardware` (guest: async passes on DXVK's compute queue) or `CS_DCLF_PIPELINE`, to tell
+    DCLF's work from the render graph's submission paths.
 -   Open crashes are in [dclf-open-defects.md](./dclf-open-defects.md), "Open crashes".
 
 Not verified here: the crash logger's exact log format (it is a separate SKSE plugin), and that a release build of
@@ -771,7 +770,7 @@ Fixed in the forks; each fix states an invariant DCLF depends on.
 | --- | --- |
 | DXVK's command-stream thread woke one waiter per synchronized chunk (`notify_one`); the ORG interop lets several threads wait for their own sequence numbers, so the right one could sleep forever (`extern/dxvk/src/dxvk/dxvk_cs.cpp`). | Interop waits are multi-waiter: wake all (`notify_all`). |
 | DXVK's import paths (`importBufferResource`, `importImageResource`, the sparse `createAllocation`) popped the shared allocation pool unlocked, while loaders created buffers (`extern/dxvk/src/dxvk/dxvk_memory.cpp`). | Every import path takes the allocator's mutex. |
-| A second `vkQueueSubmit2` concurrent with DXVK's submission thread lost the device (a page fault at 0 on the first DCLF frames). | Every submission DCLF or ORG makes to a DXVK queue goes under DXVK's submission lock (`RenderGraphRuntime.cpp`); the epoch's end waits on a semaphore of the runtime's own (`computeExit`), not on a graph timeline a rebuild destroys. |
+| A second `vkQueueSubmit2` concurrent with DXVK's submission thread lost the device (a page fault at 0 on the first DCLF frames). | Every submission ORG makes to DXVK's graphics queue goes under DXVK's submission lock (`RenderGraphRuntime.cpp`). ORG's own compute, copy and upload queues take `dxvkLockQueueSubmissions` instead since 2026-11-26 (held around DXVK's submissions, never across a present): frame generation's present holds that lock while it waits for the frame, which may wait for a compute batch or an upload (perf3-compute.md). The epoch's end waits on a semaphore of the runtime's own (`computeExit`), not on a graph timeline a rebuild destroys. |
 | BasicRHI's copy service made command pools for the graphics family while submitting to a spare transfer queue. | Command allocators are made for their queue (`Device::CreateCommandAllocator(const Queue&)`). |
 | BasicRHI's Vulkan push data: a 20-byte token lost the device on NVIDIA GA102. | Push data is split into tokens of at most 16 bytes (`kMaxPushDataTokenBytes`). |
 | BasicRHI's Vulkan `frontCCW` was inverted relative to D3D12. | The D3D meaning on both backends; DCLF passes the engine's winding. |

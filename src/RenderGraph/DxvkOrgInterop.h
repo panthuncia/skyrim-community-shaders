@@ -336,6 +336,9 @@ typedef HRESULT(__stdcall* PFN_dxvkPollInteropRelocations2)(ID3D11Device* pDevic
 typedef HRESULT(__stdcall* PFN_dxvkReleaseInteropStorage)(ID3D11Device* pDevice, UINT count, void* const* pStorages);
 // Address of the immediate context's submission counter: +1 each time DXVK closes a command list (implicit
 // flushes, Flush(), the flush ahead of an enqueued submission). Read on the immediate context's thread.
+// Locks DXVK's queue submissions (TRUE) or unlocks them (FALSE): held around each of DXVK's vkQueueSubmit calls, never across
+// a present. For submissions to the queues DXVK never uses (computeQueue, uploadQueue, copyQueue).
+typedef HRESULT(__stdcall* PFN_dxvkLockQueueSubmissions)(ID3D11Device* pDevice, BOOL lock);
 typedef HRESULT(__stdcall* PFN_dxvkGetSubmissionCounter)(ID3D11Device* pDevice, const volatile uint64_t** ppCounter);
 
 // Submission trace (diagnostics): every submission on DXVK's graphics queue, bracketed by timestamps.

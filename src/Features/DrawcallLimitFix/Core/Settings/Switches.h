@@ -18,7 +18,6 @@ namespace DCLF
 	{
 		// Features: unset is DCLF's full featureset; the startup log names a run that narrows one.
 		Dclf,
-		AsyncCompute,
 		SceneCopies,
 		Shrink,
 		Cull,

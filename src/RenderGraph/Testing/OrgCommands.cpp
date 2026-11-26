@@ -6,7 +6,6 @@
 #	include "RenderGraph/Testing/GraphFrames.h"
 #	include "Testing/Testing.h"
 
-#	include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #	include "Features/RemoteControl/GpuCounters.h"
 #	include "GpuEventTimers.h"
 #	include "RenderGraph/BuildManager.h"
@@ -158,11 +157,6 @@ namespace RenderGraph::TestSupport
 				return true;
 			});
 			// What the next builds record.
-			AddOrgCommand("async-compute", [](const std::string& a_arg, std::string&) {
-				::DCLF::Draws::asyncComputeOverride.store(a_arg == "default" ? -1 : a_arg != "0", std::memory_order_relaxed);
-				OrgRebuildForSwitch("async-compute");
-				return true;
-			});
 			AddOrgCommand("pass-queries", [](const std::string& a_arg, std::string&) {
 				org::diagnostics::DiagnosticSkipPassQueries().store(a_arg == "0", std::memory_order_relaxed);
 				OrgRebuildForSwitch("pass-queries");

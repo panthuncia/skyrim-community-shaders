@@ -1265,10 +1265,15 @@ latch's `drawCount` of 0 skips its view.
     build behind tree wind and the whole fade chain. The epoch's copy passes (tree LOD's counts, the visibility and fade events'
     readbacks, the shadow cull counters) prefer the graphics queue. The graph's copy queue is a transfer-family queue,
     where each would add a cross-queue hop and, inside an in-stream epoch, a split of DXVK's list.
--   **Every queue of DXVK's device is used under DXVK's submission lock** (`RenderGraphRuntime`'s `LockQueue`), the compute submitter
-    included. The stream's wait at an epoch's end is on `computeExit`, a semaphore every compute submission signals that lives as
-    long as the device (a graph rebuild destroys the graph's own timelines). Why: a compute submission of only semaphore operations
-    overlapping DXVK's submission thread faulted the GPU at VA 0; under the lock, 0 losses in 40 startups.
+-   **ORG's own queues take `dxvkLockQueueSubmissions`** (since 2026-11-26), not DXVK's submission lock. The compute, copy and
+    upload queues are ones DXVK never submits to. DXVK holds `dxvkLockQueueSubmissions` around each of its own `vkQueueSubmit`
+    calls and never across a present; its submission lock is held through presents, and frame generation's present waits there
+    for the frame's GPU work, which may wait for a compute batch or an upload still to be submitted: guest+fg deadlocked
+    (perf3-compute.md). Some lock is needed: a compute submission of only semaphore operations overlapping DXVK's submission
+    thread faulted the GPU at VA 0 (under the lock, 0 losses in 40 startups).
+    Queue-level calls (`LockQueue`) and graphics submissions from other threads still take DXVK's submission lock. The stream's
+    wait at an epoch's end is on `computeExit`, a semaphore every compute submission signals that lives as long as the device (a
+    graph rebuild destroys the graph's own timelines).
 -   ORG's resource tracking world (flecs) has one owner at a time (`ECSManager`): every change is posted to a wait-free queue and
     applied by whoever drains it.
 

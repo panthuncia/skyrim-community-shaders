@@ -83,7 +83,7 @@ all users in the NVIDIA Control Panel ([ERR_NVGPUCTRPERM](https://developer.nvid
         `cs.org.barrier.<entry|before|after|external-entry|external-exit>.<pass>`. A pass's own range
         covers only its commands, so these are what an epoch costs between its passes.
     - Only the graphics queue is measured. A selected graph pass that runs on the compute or copy
-        queue (DCLF's fades, portal batches, tree wind, cull counters under `CS_DCLF_ASYNC_COMPUTE`) is
+        queue (DCLF's fades, portal batches, tree wind, cull counters, where the device has a compute queue) is
         never in the results; the capture lists them (`CaptureResult::otherQueueRanges`) and logs a
         warning.
 - **Frame Annotations.**

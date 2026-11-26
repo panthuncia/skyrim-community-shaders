@@ -82,22 +82,39 @@ against 6 when every epoch enqueued its batches.
 
 DXVK creates queues it never submits to, for ORG's off-stream kinds:
 
--   `DxvkOrgInteropDeviceInfo::computeQueue` is ORG's compute queue, the graph's alone.
+-   `DxvkOrgInteropDeviceInfo::computeQueue` is ORG's compute queue, the graph's alone. Its own submitter thread submits to
+    it under `dxvkLockQueueSubmissions`, not DXVK's submission lock (below, "Frame generation"), as do the copy submitter and
+    the uploader on theirs. Guest mode leaves it unused by default.
 -   `DxvkOrgInteropDeviceInfo::copyQueue` (interop version 5), a spare queue of the transfer-only family, is ORG's copy queue.
     Without one, ORG's copy queue shares the uploader's (`uploadQueue`). With neither queue it aliases the graphics one.
+
+**The queue topology is ORG's.** Features declare a pass's logical queue (DCLF's would-be async passes prefer
+`QueueKind::Compute`) and never look at the hardware. DXVK exports a compute queue only where nothing else submits to it: a
+compute-only family with a queue that neither DXVK (its transfer queue falls back to that family when there is no
+transfer-only one) nor Streamline's interposer (which appends its queues after DXVK's) takes. Otherwise, or with no compute-only
+family, it exports none and BasicRHI aliases the compute kind to the graphics queue (the same handle; native Vulkan does the
+same when its compute kind lands on the graphics queue). ORG's lowering puts a pass on the first slot of the same native queue
+(`QueueRegistry::PhysicalSlot`), so a folded pass is on the graphics slot: same timeline, no semaphore wait (`AppendWait` drops
+same-timeline waits), and in guest mode in DXVK's stream like any graphics batch. Guest mode folds the compute kind by default
+even where DXVK exports a compute queue, since FSR frame generation still hangs with it (below); `CS_ORG_QUEUE_TOPOLOGY=hardware`
+takes DXVK's compute queue (a test override). Native modes take their device's compute queue.
 
 A pass that touches a resource only DXVK's families may use (an exclusive import) stays on the graphics queue.
 
 -   **Entry.** Each epoch takes a `streamPoint` value when it starts (`OpenEpochStream`); its tickets carry it to the submission
     thread (`GraphHost::SetSubmissionContext`). Each queue's first submission of the epoch waits for it. DXVK's CS thread
     signals it at the epoch's place, and ends DXVK's command list there when either queue waited for it.
--   **Not with FSR frame generation.** FSR-FG's interpolation runs on DXVK's compute queue too, and its present holds DXVK's
-    submission lock while it waits for that work. A graph batch on the compute queue whose waits are not met yet (a frame value
-    the uploader still has to submit under that lock, or a point in a list behind the present) then blocks the interpolation:
-    the present, the uploader and the GPU wait for each other. Guest mode therefore keeps DCLF's would-be async passes on the
-    graphics queue by default, as native mode does (`DCLF::Draws::AsyncComputeQueue`, `CS_DCLF_ASYNC_COMPUTE=1` to force the
-    compute queue). With tickets finished off the render thread guest+fg hung 8 runs of 8 with async compute on, and passed
-    with it off (2026-11-25, perf2-finish.md).
+-   **Frame generation.** FSR-FG (sl.fsr_g) composes on DXVK's graphics queue and two extra graphics-family queues; it uses
+    no compute queue. Its present runs on DXVK's submission thread, which holds DXVK's submission lock through it, and waits
+    there for the frame's GPU work. Until 2026-11-26 ORG's compute submitter took that lock (`LockSubmissionQueue`, which also
+    waits for DXVK's queued submissions), so a compute batch the frame's graphics work waited for could not be submitted until
+    the present returned: guest+fg hung 8 runs of 8 with async compute on (perf2-finish.md). With that fixed, the uploader
+    (same lock) closed the same cycle. ORG's compute, copy and upload queues are ones DXVK never submits to, so their submitters
+    now take `dxvkLockQueueSubmissions` (DXVK holds it around each of its own `vkQueueSubmit` calls, never across a present)
+    instead of DXVK's submission lock (a submission beside one of DXVK's once faulted the GPU, dclf-architecture.md).
+    With both fixed and the compute queue taken, guest+fg still hangs when frame generation turns on: the GPU stops in DXVK's
+    graphics work with every ORG submission done and every ORG thread idle (perf3-compute.md, open item). Guest mode therefore
+    folds the compute kind onto the graphics queue by default; guest+fg passes that way.
 -   **Exit.** Every submission also signals its queue's exit timeline (`computeExit`, `copyExit`). The stream waits for both
     after the epoch. An epoch that `ExecuteExternalEpoch` submits (DCLF's sites) ends at `EmitExternalEpoch` (the caller's
     recording per segment) or `CloseExternalEpoch` (its segments signalled unexecuted). Before 2026-11-12 nothing closed those epochs. The next epoch then added their exit wait to
@@ -1174,6 +1191,7 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | `CS_ORG_TRIPWIRE_WATCH_ALL=1` | Guest resource, view, shader, state and query handles log the first use of every method per call site. |
 | `CS_ORG_TRIPWIRE_SELFTEST=1` | At startup, make every handle type standalone and check refcounting, `QueryInterface`, `GetDesc`, debug names, forbidden calls (fail, zeroed outputs, counted), guest forwarding and unwrapping (handle arguments recorded at their site), refusal of other D3D11 object interfaces without a trip, device and context pairing, `AttachGraphResource` lifetime, Release from several threads, and caller naming. Logs `[ORG] tripwire self-test: PASS (<n> checks, 20 interfaces)` or a `FAIL` line per check. |
 | `CS_ORG_DEFRAG=1` | Native: at loading screens, ORG compacts its device-local memory after each frame's seal (`GraphHost::DefragmentAtIdle`, org-relocation.md step 5). Each pass logs `ORG defragmenter: pass ...` with its moves, megabytes and milliseconds; a campaign logs its start and end. Moved textures keep their bindless indices; their native records follow through the relocation journal (`Native::FollowRelocations`). Buffers move too, unless pinned (raw views, DXVK or native wraps, ImGui, mapped memory, per-frame memory). A moved buffer keeps its buffer view ref slot. CS follows moved device addresses through `Relocation::FollowBufferMoves`: DCLF's scene buffer set reads its addresses again at its next seal, and frames wait for that set (`[DCLF] buffers moved` lines). |
+| `CS_ORG_QUEUE_TOPOLOGY=hardware` | Guest test override of the queue mapping: ORG takes DXVK's exported compute queue. The default (`fold`) puts the compute kind on the graphics queue, as on a device without a compute queue, because FSR frame generation still hangs with it ("The compute and copy queues"). |
 | `CS_ORG_RAW_ACCESS_CHECK=1` | Native: logs `[ORG raw access] ...` for each raw use of an image the graph tracks (the immediate context's own path, DCLF's GENERAL views), flags races, and logs counts every 600 frames. |
 | `CS_ORG_BINK_SHOT=<n>[,<n>...]` | Saves the Present of each listed decoded Bink frame (main thread, either path) as `dclf-shots/bink-<n>.png`. |
 | `CS_DISABLE_FEATURES=<short name>,...` | Not a graph switch, but read through `Switches::List` (`State.cpp`): those features are disabled at boot for this run only. See dclf-validation.md, "Test harness". |

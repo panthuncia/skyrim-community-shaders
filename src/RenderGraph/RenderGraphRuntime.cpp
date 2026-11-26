@@ -346,15 +346,30 @@ struct RenderGraphRuntime::Impl
 	PFN_dxvkEmitDeferredExternalCommands emitDeferredExternalCommands = nullptr;
 	PFN_vkGetDeviceProcAddr deviceProcAddr = nullptr;
 	VkDevice adoptedDevice = VK_NULL_HANDLE;
-	// DXVK's compute-only queue, used by the graph directly. Submissions still take DXVK's submission lock.
-	// Compute and DXVK submissions made at the same time lost the device, with a page fault at address 0.
+	// DXVK's compute-only queue, the graph's alone (DXVK and Streamline's interposer never use it). Only the compute
+	// submitter submits to it. Submissions to ORG's own queues (compute, copy, upload) go through SubmitOwnQueue.
 	VkQueue computeQueue = VK_NULL_HANDLE;
+	// DXVK's lock around its own vkQueueSubmit calls, never held across a present. A submission beside one of DXVK's lost
+	// the device (a page fault at 0), but DXVK's submission lock (LockSubmissionQueue) is held through
+	// its presents, and frame generation's present waits there for the frame's GPU work, which may wait for a compute batch
+	// or an upload still to be submitted (render-graph.md, "Frame generation").
+	PFN_dxvkLockQueueSubmissions lockQueueSubmissions = nullptr;
 	// BasicRHI's copy queue. DXVK's spare transfer queue, else the shared upload queue. A blocked batch here can deadlock the GPU,
 	// so each submission waits for its points on the CPU first. DXVK's own transfer queue cannot be shared at all.
 	VkQueue copyQueue = VK_NULL_HANDLE;
 	// DXVK's upload queue, offered to BasicRHI for ORG's upload service. It needs no order against DXVK's stream,
-	// because it only writes resources that become current after its copies complete. Still under DXVK's submission lock.
+	// because it only writes resources that become current after its copies complete. The uploader and, when the copy
+	// queue shares it, the copy submitter submit to it (SubmitOwnQueue).
 	VkQueue uploadQueue = VK_NULL_HANDLE;
+
+	// A submission to one of ORG's own queues: under DXVK's lock around its submissions, which also orders ORG's own threads.
+	VkResult SubmitOwnQueue(VkQueue a_queue, const VkSubmitInfo2& a_submit)
+	{
+		lockQueueSubmissions(globals::d3d::device, TRUE);
+		const VkResult result = queueSubmit2(a_queue, 1, &a_submit, VK_NULL_HANDLE);
+		lockQueueSubmissions(globals::d3d::device, FALSE);
+		return result;
+	}
 	// DXVK's stream signals streamPoint at each epoch's place in it. Each of the compute and copy queues' first submission of the
 	// epoch waits for it, and the stream waits for both queues after the epoch. That wait uses computeExit or copyExit, never graph
 	// timelines, because a rebuild destroys those while DXVK may still hold the wait.
@@ -803,7 +818,7 @@ struct RenderGraphRuntime::Impl
 
 	/**
 	* Submits a queue's batches on a thread of its own, since vkQueueSubmit2 costs the render thread microseconds per call.
-	* Each submission takes DXVK's submission lock here, never on the render thread. A failure disables the graph at the next epoch.
+	* A failure disables the graph at the next epoch.
 	*/
 	struct ComputeSubmitter
 	{
@@ -845,10 +860,7 @@ struct RenderGraphRuntime::Impl
 					VkResult result;
 					{
 						ZoneScopedN("CS.ORG.ComputeSubmit");
-						// DXVK's submission lock (see computeQueue), taken here rather than on the render thread.
-						a_impl.interop->LockSubmissionQueue();
-						result = a_impl.queueSubmit2(batch.queue, 1, &submit, VK_NULL_HANDLE);
-						a_impl.interop->ReleaseSubmissionQueue();
+						result = a_impl.SubmitOwnQueue(batch.queue, submit);
 					}
 					if (result != VK_SUCCESS) {
 						auto expected = VK_SUCCESS;
@@ -1411,7 +1423,8 @@ struct RenderGraphRuntime::Impl
 			waits.clear();
 			signals.clear();
 			// Values only grow. An epoch emitted after a later-started one (nested) is entered by that one's point already.
-			if (stream->entry > self.signalledEntry) {
+			// Without off-stream queues (no streamPoint) nothing waits for an entry.
+			if (self.streamPoint && stream->entry > self.signalledEntry) {
 				signals.push_back(point(self.streamPoint, stream->entry));
 				self.signalledEntry = stream->entry;
 				(void)record(&NoCommands, nullptr, false, false, "entry");
@@ -1517,7 +1530,8 @@ struct RenderGraphRuntime::Impl
 			logger::error("[ORG] {}: DXVK rejected the epoch's commands", externalLabel);
 	}
 
-	// Every queue of DXVK's device, compute and copy included, is used under DXVK's submission lock. See computeQueue.
+	// Queue-level calls on DXVK's device go under DXVK's submission lock. BasicRHI submits through Submit, and the compute queue
+	// is only submitted to there (see computeQueue).
 	static void LockQueue(void* a_user, VkQueue)
 	{
 		static_cast<Impl*>(a_user)->interop->LockSubmissionQueue();
@@ -1629,14 +1643,7 @@ struct RenderGraphRuntime::Impl
 		if (a_queue == self->uploadQueue) {
 			if (a_queue == self->copyQueue)
 				self->WaitForPoints(a_submit.pWaitSemaphoreInfos, a_submit.waitSemaphoreInfoCount, true);
-			{
-				// DXVK's submission lock covers every queue of its device: a long hold by DXVK shows here, on the upload thread only.
-				ZoneScopedN("CS.ORG.UploadQueue.LockSubmissionQueue");
-				self->interop->LockSubmissionQueue();
-			}
-			const VkResult result = self->queueSubmit2(a_queue, 1, &a_submit, VK_NULL_HANDLE);
-			self->interop->ReleaseSubmissionQueue();
-			return result;
+			return self->SubmitOwnQueue(a_queue, a_submit);
 		}
 		if (::GetCurrentThreadId() == self->streamThread.load(std::memory_order_relaxed)) {
 			if (self->batching) {
@@ -1830,6 +1837,7 @@ bool RenderGraphRuntime::Initialize()
 		state->emitExternalCommands = dxvk.emitExternalCommands;
 		// In-stream epochs, recorded on DXVK's CS thread once the submission thread finished them.
 		state->emitDeferredExternalCommands = dxvk.emitDeferredExternalCommands;
+		state->lockQueueSubmissions = dxvk.lockQueueSubmissions;
 		// Graph submissions in DXVK's command stream.
 		state->enqueueSubmission = dxvk.enqueueInteropSubmission;
 		state->enqueueSubmissions = dxvk.enqueueInteropSubmissions;
@@ -1915,6 +1923,8 @@ bool RenderGraphRuntime::Initialize()
 			state->queueSubmit2 = getDeviceProcAddr ? reinterpret_cast<PFN_vkQueueSubmit2>(getDeviceProcAddr(info.device, "vkQueueSubmit2")) : nullptr;
 			if (!state->queueSubmit2)
 				return disable("DXVK's Vulkan device has no vkQueueSubmit2");
+			if (!state->lockQueueSubmissions)
+				return disable("DXVK has no dxvkLockQueueSubmissions (an older DXVK build)");
 			state->deviceProcAddr = getDeviceProcAddr;
 			state->adoptedDevice = info.device;
 			adopt.submissionHooks.submit = &Impl::Submit;
@@ -1935,9 +1945,20 @@ bool RenderGraphRuntime::Initialize()
 					state->vkDevice = info.device;
 				logger::info("[ORG] frame pacing: {}", state->framePace ? std::format("the GPU at most {} frames behind the render thread (CS_FRAME_LATENCY)", state->frameLatency - 1) : std::string("off"));
 			}
-			// DXVK's compute-only queue, ordered against the stream at each epoch's place in it (RecordDeferredEpoch), which
-			// needs the stream.
-			if (info.computeQueue && getDeviceProcAddr) {
+			// The off-stream queues, ordered against the stream at each epoch's place in it (RecordDeferredEpoch), which needs the
+			// stream. DXVK exports a compute queue only where nothing else submits to it: with one queue in the compute family
+			// taken by DXVK's own transfer queue, or no compute-only family, it exports none. Without one the compute kind aliases
+			// the graphics queue, and ORG folds its passes into the graphics slot (QueueRegistry::PhysicalSlot).
+			// Guest mode folds by default even with one: FSR frame generation hangs in its present when the graph's compute work
+			// runs on its own queue, with none of ORG's work pending (perf3-compute.md, open item). CS_ORG_QUEUE_TOPOLOGY=hardware
+			// is the test override that takes DXVK's compute queue.
+			const bool takeCompute = info.computeQueue && Switches::EqualsNoCase("CS_ORG_QUEUE_TOPOLOGY", "hardware");
+			// Graph copies move off DXVK's stream to a transfer-only queue, DXVK's spare or the shared uploader's. Never the compute
+			// queue, where a copy waits behind a running dispatch.
+			const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue;
+			const bool sharedCopy = !info.copyQueue && uploadOffered;
+			const bool takeCopy = info.copyQueue || sharedCopy;
+			if ((takeCompute || takeCopy) && getDeviceProcAddr) {
 				const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
 				state->destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(getDeviceProcAddr(info.device, "vkDestroySemaphore"));
 				state->waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(getDeviceProcAddr(info.device, "vkWaitSemaphores"));
@@ -1946,26 +1967,23 @@ bool RenderGraphRuntime::Initialize()
 				VkSemaphoreCreateInfo create{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
 				create.pNext = &type;
 				if (createSemaphore && state->destroySemaphore && state->waitSemaphores &&
-					createSemaphore(info.device, &create, nullptr, &state->streamPoint) == VK_SUCCESS &&
-					createSemaphore(info.device, &create, nullptr, &state->computeExit) == VK_SUCCESS) {
+					createSemaphore(info.device, &create, nullptr, &state->streamPoint) == VK_SUCCESS) {
 					state->vkDevice = info.device;
-					state->computeQueue = info.computeQueue;
-					state->computeSubmitter.Start(*state, L"CS ORG compute submit", false);
-					adopt.queues[1] = { info.computeQueue, info.computeQueueFamily, info.computeQueueIndex };
-					// Graph copies move off DXVK's stream to a transfer-only queue, DXVK's spare or the shared uploader's.
-					// Never the compute queue, where a copy waits behind a running dispatch.
-					const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue;
-					const bool shared = !info.copyQueue && uploadOffered;
-					if ((info.copyQueue || shared) && createSemaphore(info.device, &create, nullptr, &state->copyExit) == VK_SUCCESS) {
-						state->copyQueue = shared ? info.uploadQueue : info.copyQueue;
-						adopt.queues[2] = shared ? rhi::vulkan::AdoptedQueue{ info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex } :
-						                           rhi::vulkan::AdoptedQueue{ info.copyQueue, info.copyQueueFamily, info.copyQueueIndex };
-						state->copySubmitter.Start(*state, L"CS ORG copy submit", shared);
+					if (takeCompute && createSemaphore(info.device, &create, nullptr, &state->computeExit) == VK_SUCCESS) {
+						state->computeQueue = info.computeQueue;
+						state->computeSubmitter.Start(*state, L"CS ORG compute submit", false);
+						adopt.queues[1] = { info.computeQueue, info.computeQueueFamily, info.computeQueueIndex };
+					}
+					if (takeCopy && createSemaphore(info.device, &create, nullptr, &state->copyExit) == VK_SUCCESS) {
+						state->copyQueue = sharedCopy ? info.uploadQueue : info.copyQueue;
+						adopt.queues[2] = sharedCopy ? rhi::vulkan::AdoptedQueue{ info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex } :
+						                               rhi::vulkan::AdoptedQueue{ info.copyQueue, info.copyQueueFamily, info.copyQueueIndex };
+						state->copySubmitter.Start(*state, L"CS ORG copy submit", sharedCopy);
 					}
 				}
 			}
 		}
-		// The upload queue, offered to ORG's copy-queue uploader. Its submissions are direct, under the lock.
+		// The upload queue, offered to ORG's copy-queue uploader. Its submissions are direct (SubmitOwnQueue).
 		rhi::vulkan::AdoptedQueue uploadSpare{};
 		if (adopt.submissionHooks.submit && info.uploadQueue) {
 			state->uploadQueue = info.uploadQueue;
