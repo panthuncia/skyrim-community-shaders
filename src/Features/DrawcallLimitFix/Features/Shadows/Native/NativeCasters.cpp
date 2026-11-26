@@ -2,8 +2,8 @@
 // Main::CalculateAndDrawShadowCasterLights (AE 0x1414cbb90, SE 0x1412e2660 with its sun part 0x1412e2e10), CalculateActiveShadowCasterLights
 // (AE 0x1414cc570, SE 0x1412e2f60; its loop is LightSelection's) and Main::RenderShadowMaps (AE 0x1414cbff0, SE 0x1412e2a60).
 // The sun's full-frustum culls and every light's cull and registration are not run: DCLF draws every shadow view from its own tables.
-// The main camera's list accumulation and registration jobs are the engine's scene work and still run here, through the calls the
-// engine's functions make (so DCLF's stand-in hooks and the engine-render detector see them as before).
+// The main camera's list accumulation jobs are the engine's scene work and still run here, through the calls the engine's functions
+// make (so DCLF's stand-in hooks and the engine-render detector see them as before). Its registration jobs are not run.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
@@ -56,10 +56,7 @@ namespace DCLF::Features::Shadows::Native
 		std::byte*& Lists() { return Global<std::byte*>(528072, 415017); }                                         // 0x14338c870, 0x18 bytes a list
 		std::uint32_t& RecordCount() { return Global<std::uint32_t>(528079, 415024); }                             // 0x14338c8b0
 		void*& CullingJobs() { return Global<void*>(527999, 414944); }                                             // 0x14338c630: gJobList_SceneListAccumCulling
-		void*& RegisterJobs() { return Global<void*>(528000, 414945); }                                            // 0x14338c638: gJobList_SceneListAccumRegister
-		RE::BSShaderAccumulator*& DepthAccumulator() { return Global<RE::BSShaderAccumulator*>(528063, 415008); }  // 0x14338c828: the Z-prepass accumulator
 		RE::BSShaderAccumulator*& MainAccumulator() { return Global<RE::BSShaderAccumulator*>(528064, 415009); }   // 0x14338c830
-		std::uint8_t& DepthGroupsFlag() { return Global<std::uint8_t>(513437, 391262); }                           // 0x142033a70
 
 		constexpr std::size_t kPortalEntry = 0x30190;    // a culling process's portal graph entry
 		constexpr std::size_t kProcessRecord = 0x301A0;  // the process's portal record for the list jobs
@@ -93,7 +90,6 @@ namespace DCLF::Features::Shadows::Native
 		using ObjectFn = void (*)(void*);
 		using AttachRecord = void (*)(void*, void*);
 		using AfterFullFrustumFn = void (*)(RE::ShadowSceneNode*, void*);
-		using GroupsFn = void (*)(RE::BSShaderAccumulator*, std::uint32_t);
 
 		/** @brief The TLS memory context id, set for a scope as the engine's Render loop does. */
 		class MemoryContext
@@ -250,15 +246,6 @@ namespace DCLF::Features::Shadows::Native
 				Function<ObjectFn>(75052, 76816)(records + i * kRecordSize);
 		}
 
-		/** @brief BSAccumProcess::DoSceneListAccumRegisterJob's argument (FUN_1414bf300 makes it). */
-		struct RegisterJob
-		{
-			RE::NiPointer<RE::BSShaderAccumulator> accumulator;
-			void*** processes = nullptr;
-			std::uint32_t count = 0;
-			std::uint32_t main = 0;
-		};
-		static_assert(sizeof(RegisterJob) == 0x18);
 
 	}
 
@@ -334,19 +321,13 @@ namespace DCLF::Features::Shadows::Native
 		auto* main = MainAccumulator();
 		if (!world || !main)
 			return;
+		// The engine's registration jobs for the Z-prepass and main accumulators and the Z-prepass groups' prepare are not run: native
+		// draws nothing from the main camera's registered passes (DCLF's tables, the sky from the sky root, the water from its shapes).
+		// The accumulators stay empty, so the engine's batch calls that still mark CS's stage points find nothing to draw. The main
+		// accumulator keeps the camera and flag RenderShadowMaps gives it before RenderWorld's batches.
 		auto* mainBytes = reinterpret_cast<std::byte*>(main);
 		DCLF::Engine::At<std::uint8_t>(mainBytes, 0x5C) = 1;
 		DCLF::Engine::At<RE::NiCamera*>(mainBytes, 0x10) = world;
-		// The main camera's registration jobs (engine scene work), as RenderShadowMaps queues them.
-		RegisterJob depthJob{ RE::NiPointer<RE::BSShaderAccumulator>(DepthAccumulator()), &Processes(), ProcessCount(), 0 };
-		RegisterJob mainJob{ RE::NiPointer<RE::BSShaderAccumulator>(main), &Processes(), ProcessCount(), 1 };
-		auto* job = reinterpret_cast<void*>(REL::RelocationID(100219, 106927).address());
-		std::array<std::uint64_t, 3> guard{};
-		Function<LockGuard>(67997, 69360)(guard.data(), RegisterJobs());
-		Function<QueueJob>(67988, 69349)(RegisterJobs(), job, &depthJob, 0);
-		Function<QueueJob>(67988, 69349)(RegisterJobs(), job, &mainJob, 0);
-		Function<UnlockGuard>(67998, 69361)(guard.data());
-		Function<BeginJobs>(67991, 69352)(RegisterJobs(), 0, 0);
 		{
 			const MemoryContext context;
 			auto& accumulated = SceneNode()->GetRuntimeData().shadowLightsAccum;
@@ -359,13 +340,6 @@ namespace DCLF::Features::Shadows::Native
 				if (index == before)
 					++index;
 			}
-		}
-		CallTarget<FinishJobs>(100415, 107133, 0x152, 0x1D0)(RegisterJobs());
-		if (DepthGroupsFlag()) {
-			auto* depth = DepthAccumulator();
-			DCLF::Engine::At<RE::NiCamera*>(depth, 0x10) = world;
-			Function<GroupsFn>(99966, 106613)(depth, 0x11);
-			Function<GroupsFn>(99966, 106613)(depth, 9);
 		}
 	}
 }

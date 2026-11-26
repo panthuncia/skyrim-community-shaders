@@ -1,19 +1,21 @@
 // Engine-side hooks for the sky family (dclf-native-sky.md). At the engine's sky batch and cloud layer calls the draws are computed
-// from the passes the engine registered (SkyNative.cpp), and the engine's calls find nothing of the sky to draw. The sun's occlusion
+// from the passes the engine registered (SkyNative.cpp), and the engine's calls find nothing of the sky to draw. In native the main
+// view's sky and cloud layers come from the sky root at the sky batch, not from the registrations. The sun's occlusion
 // query draw is computed in place of the engine's call. A water reflection face drawn without the engine's face render gets its
 // run from PrepareFace and SubmitFace. Render thread only.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
-#include "RenderGraph/Engine/Engine.h"
-#include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
-#include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
+#include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
@@ -71,6 +73,9 @@ namespace DCLF::Features::Sky
 			// Set when the cloud group's call did not follow a waiting sky batch, for example another hook at that site.
 			bool broken = false;
 			RE::BSShaderAccumulator* accumulator = nullptr;  // the sky batch's, for the cloud layers' draws
+			// Native: the main pass's geometry group 13 when the sky batch's run already holds the cloud layers from the sky root. Its
+			// call then finds no cloud layer to draw.
+			const RE::BSBatchRenderer::GeometryGroup* drawnClouds = nullptr;
 		};
 
 		Pending& GetPending()
@@ -363,8 +368,11 @@ namespace DCLF::Features::Sky
 				auto* accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator);
 				const Native::BatchInputs inputs{ shape.view, pending.colourFormats, pending.depthFormat, a_flags, run->physSky };
 				std::string why;
+				// Native draws the main view's sky from the sky root, with its cloud layers, not from the engine's registrations.
+				const bool fromRoot = shape.view == View::Main && ::RenderGraph::Engine::Native::Active();
 				// The leases go straight to the run: a failed build's leases are only held a frame longer.
-				if (!Native::BuildBatch(accumulator, inputs, run->draws, run->owners, why) || run->draws.size() > kMaxRunDraws) {
+				const bool built = fromRoot ? Native::BuildMain(accumulator, inputs, run->draws, run->owners, why) : Native::BuildBatch(accumulator, inputs, run->draws, run->owners, why);
+				if (!built || run->draws.size() > kMaxRunDraws) {
 					Refusals().Report(std::format("a {} batch", NameOf(shape.view)), why.empty() ? std::string("more draws than one run holds") : why);
 					SkyDraws::Keep(std::move(run->owners));
 					return engineDraws();
@@ -373,7 +381,11 @@ namespace DCLF::Features::Sky
 				engineDraws();
 				Native::Reattach(detached);
 				pending.run = std::move(run);
-				pending.cloudGroup = shape.clouds && !pending.broken ? CloudGroupOf(accumulator, shape.view) : nullptr;
+				pending.cloudGroup = shape.clouds && !pending.broken && !fromRoot ? CloudGroupOf(accumulator, shape.view) : nullptr;
+				if (fromRoot) {
+					const auto* batchRenderer = accumulator->GetRuntimeData()->batchRenderer;
+					pending.drawnClouds = batchRenderer ? batchRenderer->geometryGroups[kCloudGeometryGroup] : nullptr;
+				}
 				if (pending.cloudGroup) {
 					pending.accumulator = accumulator;
 					return;
@@ -392,6 +404,12 @@ namespace DCLF::Features::Sky
 			static void thunk(RE::BSBatchRenderer::GeometryGroup* a_group, std::uint32_t a_flags)
 			{
 				auto& pending = GetPending();
+				if (pending.drawnClouds && pending.drawnClouds == a_group) {
+					pending.drawnClouds = nullptr;
+					Native::DetachClouds(a_group);
+					func(a_group, a_flags);
+					return;
+				}
 				if (!pending.cloudGroup || pending.cloudGroup != a_group || !pending.run) {
 					func(a_group, a_flags);
 					return;

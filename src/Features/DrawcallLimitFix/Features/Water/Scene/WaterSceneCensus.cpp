@@ -174,6 +174,15 @@ namespace DCLF::Features::Water::WaterScene
 		}
 	}
 
+	void TrackedShapes(std::vector<const void*>& a_out)
+	{
+		a_out.clear();
+		auto& census = Census();
+		std::lock_guard lock(census.mutex);
+		for (const auto& [geometry, entry] : census.entries)
+			a_out.push_back(geometry);
+	}
+
 	void NoteClassified(const void* a_geometry, const Classification& a_classification)
 	{
 		auto& census = Census();
