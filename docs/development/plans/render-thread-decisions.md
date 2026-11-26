@@ -420,3 +420,17 @@ pushes until the user is back.
      RenderWorld sets is not written (no rendering effect found).
 110. **The full-screen blur's camera test is kept by the native post chain** once per render from the snapshot's main
      camera, its gate captured in the ImageSpace block.
+
+## 2026-11-26: the resize GPU hang (snap3-llfhang; director accepted)
+
+111. **The resize hang (94, 106) was a light-grid layout mismatch, now fixed:** on the frame that adopts new LightGrid and
+     LightIndexList versions, the readers (DCLF's colour pass and the others) took the grid size from LLF's feature data
+     block, packed in EarlyPrepasses before LLF's Prepass refreshed `clusterSize`, so they indexed the new grid with the old
+     size and read entries the cull never wrote. `LightLimitFix::GetCommonBufferData` now packs `AdoptedClusterGrid`: the
+     cull and every reader use one grid from the frame's start (guest too; it differs from before only on a revision's
+     first frame). The stale-bindless-index hypothesis was wrong. The light loop count stays unclamped.
+112. **Open: native draw families latch the engine's live viewport** (`Family::LatchViewport`,
+     `RendererShadowState::viewPort`). The engine takes a new window size at once while the frame still draws into the
+     adopted targets; with TAA (render size equal to display size) growing the window overruns and loses the device in
+     native Vulkan. This is engine-bound state read at record time: the viewport must come from the revision the fragment is
+     recorded against (the snapshot's display/render size), not the engine. Blood splatter latches it too.
