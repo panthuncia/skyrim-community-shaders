@@ -1,20 +1,21 @@
 # snap5-menus3: menu scenes, third round (roadmap phase 5, "Menu scenes")
 
-Lead `menus3`, branch `snap5/menus3` (base `org_integration` 8d21e6028), stage `s7-menus3`. Starts from
+Lead `menus3`, branch `snap5/menus3` (base `org_integration` 8d21e6028, org_integration 0039f3982 merged in), stage `s7-menus3`. Starts from
 [snap5-menus.md](snap5-menus.md) and [snap5-menus2.md](snap5-menus2.md); decisions 146-150, 160, 167-169.
 
 ## State
 
 The item is **not finished**. MistMenu's main menu is switched: CS computes and draws every draw of a MistMenu render without a depth
 pass (the main menu's logo, its glow and the smoke particles) and stages the menu HDR chain with its own rows; the engine's
-UI3DSceneManager::Render and RenderEndOfFrameEffects are not entered at the main menu. MistMenu's loading model (renders with a depth
-pass and shadow maps), the inventory, lockpicking, book, journal and the local map are still the engine's.
+UI3DSceneManager::Render and RenderEndOfFrameEffects are not entered at the main menu. A loading model rendered over world frames
+without a depth pass is CS's too. MistMenu's renders in loading frames and with a depth pass (shadow maps), the inventory, lockpicking,
+book, journal and the local map are still the engine's.
 
 | Item | State |
 |---|---|
 | 1. MistMenu, main menu | done: particles, light rule, menu HDR, fog, sun scale, menu lights; owned; main-menu frames 20 -> 1 engine render call (Main::DrawFrame) |
 | 1. MistMenu, loading model | not done: needs the depth pass, the shadow maps and the shadow mask (RE below); its renders stay the engine's |
-| 2. Inventory | not done: needs the membrane pass (RE below), skinned Effect draws; config `menu-items` added (enchanted weapon, enchanted helmet) |
+| 2. Inventory | not done: needs the membrane pass (RE below), skinned Effect draws; config `menu-items` added (Chillrend, Savior's Hide) |
 | 3. Lockpick, journal, book, local map | not started |
 | 4. Delete `CS_MENU_SCENES_OBSERVE` | not done (schemes left) |
 
@@ -43,9 +44,13 @@ All in `Features/MenuViews/MenuScenesNative.cpp` unless named.
     shadow light's dimmer in its camera update (vtable +0x80), visibility in the menu camera's frustum and the shadow fade distance; CS
     draws no shadow map for an owned render but computes the dimmer the light rows read (the main menu's warm key light was 0);
   - the fog is the menu scene node's (`SampleFog`, split out of `SampleTechniqueInputs`);
-  - DirLightColor scales by the override's HDR multiplier in MistMenu's scenes (`SamplePipelineFrame`'s new `a_hdr`).
-- **Ownership** is per render: `Owns(scheme, keepDepth)`; scheme 4 is owned without a depth pass. The detector's `NativeOwns` uses each
-  scheme's last render (`NoteRender`). Observe builds own nothing.
+  - DirLightColor scales by the override's HDR multiplier in MistMenu's scenes (`SamplePipelineFrame`'s new `a_hdr`);
+  - scheme 4 clears kMAIN to black and zero alpha before its draws, as the render binds it with a clear (without it the smoke
+    accumulated over frames, and a loading model drawn over a world frame showed the world behind it);
+  - a geometry with no renderer buffers yet (a head part still loading, `OrcTeeth` in `facegen`) is left out, as the engine draws
+    nothing for it; it was fatal under decision 149.
+- **Ownership** is per render: `Owns(scheme, keepDepth)`; scheme 4 is owned without a depth pass, outside loading frames. The
+  detector's `NativeOwns` uses each scheme's last render (`NoteRender`). Observe builds own nothing.
 - **Observe** additions: menu HDR rows per step against the engine's (`ObserveMenuHdrStep`, compared at the engine's menu steps).
 
 ## RE notes (AE 1.6.1170)
@@ -96,16 +101,34 @@ All in `Features/MenuViews/MenuScenesNative.cpp` unless named.
 
 ## Runs (native Vulkan unless named; Dev-Fast)
 
+On base 8d21e6028:
+
 | Config | Label | Result |
 |---|---|---|
-| menu-main, observe + detector | s7-menus3-obs1-main | passed; particles 0 differences (but the first frame's PreviousWorld); shadow-light rule 0 of 600 pass descriptors; menu HDR rows: blur range rows differ (fixed) |
-| menu-main, scheme 4 owned | s7-menus3-sw1-main ... sw6-main | passed; logo missing, then black, then cool-tinted: the input fixes above in turn (fog, menu lights on `shadowSceneNode[1]`, culler, dimmers) |
-| menu-main, observe (dumps) | s7-menus3-obs2-main, obs3-main | passed; light values and full rows for the comparisons; menu HDR rows 0 differences in 4000 steps |
-| menu-main, scheme 4 owned, detector | s7-menus3-sw7-main | passed; logo matches the engine-drawn shot (crop mean 56.1 vs 55.7); smoke within the engine's own shot-to-shot variance; main_menu 1.0 engine render calls per frame |
-| menu-main, observe | s7-menus3-obs4-main | passed; no shadow light dimmer or light differences logged; menu HDR rows 0 differences |
-| native-vulkan+menu-main (detector) | s7-menus3-fin-nvk-main | passed; main_menu 1.0 per frame (was 20), MistMenu site producer |
-| native-vulkan+menu-scenes, +quick, native-d3d12-quick | s7-menus3-fin-nvk-scenes, -fin-nvk-quick, -fin-d3d12-quick | crashed at the loading screen (the shadow mask crash above); loading frames then made the engine's |
-| guest+menu-scenes, guest+quick | s7-menus3-fin-guest-scenes, -fin-guest-quick | passed |
+| menu-main, observe + detector | s7-menus3-obs1-main | passed; particles 0 differences (but the first frame's PreviousWorld); shadow-light rule 0 of 600 pass descriptors; menu HDR blur range rows differed (fixed) |
+| menu-main, scheme 4 owned | s7-menus3-sw1-main ... sw6-main | passed; logo missing, then black, then cool-tinted: the input fixes above in turn |
+| menu-main, observe (dumps) | s7-menus3-obs2-main, obs3-main, obs4-main | passed; menu HDR rows 0 differences in 4000 steps; no light or dimmer differences |
+| menu-main, owned, detector | s7-menus3-sw7-main, -fin-nvk-main | passed; logo matches the engine-drawn shot; main_menu 1.0 engine render calls per frame |
+| menu-scenes, quick, d3d12-quick | s7-menus3-fin-* | crashed at the loading screen (shadow mask, above); loading frames then made the engine's |
+| quick, d3d12-quick, drop-cells, menu-scenes | s7-menus3-fin2-*, -fix1-*, -bisect1/5/6-* | the base's quarter bug and hangs (above) |
+
+After merging org_integration (0039f3982):
+
+| Config | Label | Result |
+|---|---|---|
+| native-vulkan+quick | s7-menus3-m3-nvk-quick, -m4-nvk-quick | passed |
+| native-vulkan+menu-main (detector) | s7-menus3-m3-nvk-main, -m4-nvk-main | passed; main_menu 1.0 per frame (20 before); m4's shot matches the engine-drawn one (full frame mean 13.9 vs 15.1, the smoke's variance) |
+| native-vulkan+menu-scenes (detector) | s7-menus3-m3-nvk-scenes, -m4-nvk-scenes | passed; m3's loading-model shot showed the world behind a native loading model (no kMAIN clear, fixed); m4 matches; stats, world, inventory, journal match the director's base run (mean diff 0.9-5) |
+| native-d3d12-quick | s7-menus3-m3-d3d12-quick, -m4-d3d12-quick | passed |
+| native-vulkan+cadence-drop-cells | s7-menus3-m3-dropcells, -m4-dropcells | passed |
+| native-vulkan+facegen | s7-menus3-m3-facegen, -m4-facegen | m3 hang: fatal "scheme 4 draw OrcTeeth: no TriShape buffers" (fixed: left out); m4 passed |
+| guest+quick, guest+menu-scenes | s7-menus3-m3-guest-quick, -m3-guest-scenes | passed |
+| native-vulkan+menu-items (path), observe | s7-menus3-m4-items-obs | passed; Chillrend's membrane passes are 0x8472 and Savior's Hide's 0x808472, as the GetRenderPasses formula above gives; observe refuses them ("not an Effect property") |
+| native-vulkan+menu-main-load (path) | s7-menus3-fix1-main-load, -m4-main-load | passed: main menu (CS) -> new game load (engine) -> world; m4 9 engine render calls per world frame |
+
+Detector (`[EngineZones]` exit line): main-menu frames 20.0 -> 1.0 engine render calls per frame (only `Main::DrawFrame`); the MistMenu
+site reads producer at the main menu. Loading frames unchanged (the loading screen stays the engine's): about 11 per loading frame in
+`menu-scenes`. World frames unchanged (14-15 in `menu-scenes`).
 
 ## Decided by the agent, to confirm
 

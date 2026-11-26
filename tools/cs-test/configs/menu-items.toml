@@ -1,6 +1,6 @@
 # Inventory models that need more than plain Lighting draws (UI3DSceneManager::Render schemes 1 and 2): an enchanted weapon (its
-# enchantment glow is an Effect membrane pass) alone in the inventory, a shot of its model; then the same for an enchanted helmet
-# (a skinned model with a skinned membrane). The inventory is emptied first so the item list's first entry is the item.
+# enchantment glow is an Effect membrane pass) alone in the inventory, a shot of its model; then the same for an enchanted cuirass
+# (a skinned model). The inventory is emptied first so the item list's first entry is the item.
 # Compose it: native-vulkan+menu-items, guest+menu-items.
 extends = ["base"]
 
@@ -56,7 +56,7 @@ frames = 30
 do = "console"
 arg = "player.removeallitems"
 
-# The Masque of Clavicus Vile, an enchanted helmet (skinned).
+# Savior's Hide, an enchanted cuirass (its membrane has an alpha test).
 [[steps]]
 at = "previous"
 frames = 10
