@@ -686,7 +686,7 @@ namespace NativePost
 		const std::int32_t least = a_f.stopAt2 && !a_f.adaptOff ? 2 : 1;
 		std::int32_t width = static_cast<std::int32_t>(a_f.sizes[T::kHDR_DOWNSAMPLE0].first);
 		std::int32_t height = static_cast<std::int32_t>(a_f.sizes[T::kHDR_DOWNSAMPLE0].second);
-		std::int32_t target = T::kHDR_DOWNSAMPLE1, input = T::kHDR_DOWNSAMPLE0, last = -1;
+		std::int32_t target = T::kHDR_DOWNSAMPLE1, input = T::kHDR_DOWNSAMPLE0, adaptLevel = -1;
 		std::uint32_t level = 0;
 		const auto quarter = [](std::int32_t a_size) { return (a_size + 3) / 4; };
 		while (least < width || least < height) {
@@ -711,7 +711,7 @@ namespace NativePost
 				if (!isLast)
 					input = output;
 			}
-			last = output;
+			adaptLevel = output;
 			++level;
 		}
 		if (a_state.adaptTarget >= 0 && level > 0) {
@@ -724,7 +724,7 @@ namespace NativePost
 			SetTaps(adapt.rows, 4, true);
 			steps.push_back(std::move(adapt));
 		}
-		a_state.adaptTarget = last;
+		a_state.adaptTarget = adaptLevel;
 		// The bloom: the blur effect of the radius index, its bright pass then its blur (ImageSpaceEffectBlur::UpdateParams). Post
 		// Processing's bloom replaces it (its hook on the blur effect's Render skips the draws).
 		if (!(globals::features::postProcessing.loaded && PostProcessing::SkipsVanillaBloom())) {
@@ -836,10 +836,10 @@ namespace NativePost
 			return route;
 		std::int32_t image = route.hdrOut, other = RE::RENDER_TARGET::kIMAGESPACE_TEMP_COPY2;
 		if (a_f.taa) {
-			const bool last = lastLdr < 0 && !dynamic;
-			other = last ? a_final : RE::RENDER_TARGET::kIMAGESPACE_TEMP_COPY2;
+			const bool toFinal = lastLdr < 0 && !dynamic;
+			other = toFinal ? a_final : RE::RENDER_TARGET::kIMAGESPACE_TEMP_COPY2;
 			route.taaOut = other;
-			if (!last) {
+			if (!toFinal) {
 				image = other;
 				other = route.hdrOut;
 			}
@@ -848,9 +848,9 @@ namespace NativePost
 			for (std::int32_t slot = 3; slot < 8; ++slot) {
 				if (!active(static_cast<std::uint32_t>(slot)))
 					continue;
-				const bool last = slot == lastLdr && !dynamic;
-				route.ldr.push_back({ static_cast<std::uint32_t>(slot), image, last ? a_final : other });
-				if (!last)
+				const bool toFinal = slot == lastLdr && !dynamic;
+				route.ldr.push_back({ static_cast<std::uint32_t>(slot), image, toFinal ? a_final : other });
+				if (!toFinal)
 					std::swap(image, other);
 			}
 		route.image = image;

@@ -633,15 +633,15 @@ namespace RenderGraph::Frame
 	{
 		using Key = std::decay_t<std::invoke_result_t<KeyFn&, const Inputs&>>;
 		using Built = std::decay_t<std::invoke_result_t<BuildFn&, const Key&>>;
-		using Program = std::remove_const_t<typename Built::element_type>;
+		using ProgramType = std::remove_const_t<typename Built::element_type>;
 		Detail::ProgramFunctions functions;
 		functions.key = [key = std::move(a_key)](const Inputs& a_inputs) mutable -> Detail::ErasedKey { return std::make_shared<const Key>(key(a_inputs)); };
 		functions.equal = [](const void* a_left, const void* a_right) { return *static_cast<const Key*>(a_left) == *static_cast<const Key*>(a_right); };
 		functions.build = [build = std::move(a_build)](const void* a_keyValue) mutable -> Detail::ErasedProgram {
-			std::shared_ptr<const Program> program = build(*static_cast<const Key*>(a_keyValue));
+			std::shared_ptr<const ProgramType> program = build(*static_cast<const Key*>(a_keyValue));
 			return program;
 		};
-		return DeclaredProgram<Program>(Detail::DeclareProgram(std::move(a_name), std::move(a_dependencies), std::move(functions)));
+		return DeclaredProgram<ProgramType>(Detail::DeclareProgram(std::move(a_name), std::move(a_dependencies), std::move(functions)));
 	}
 
 	namespace Detail

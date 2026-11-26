@@ -1,4 +1,7 @@
 // The render thread's frame report, written at Present. Culling, leaks and GPU timings always, full statistics with CS_DCLF_STATS.
+// volk must come before every Vulkan header in this translation unit (DxvkSource.h includes vulkan.h).
+#include <rhi_interop_vulkan.h>
+
 #include "Schedule.h"
 #include "Scene.h"
 #include "Engine.h"

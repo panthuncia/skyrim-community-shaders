@@ -506,8 +506,8 @@ namespace Testing
 						return nullptr;
 					std::size_t index = 0;
 					const auto digits = segment.substr(open + 1, close - open - 1);
-					const auto [last, error] = std::from_chars(digits.data(), digits.data() + digits.size(), index);
-					if (digits.empty() || error != std::errc{} || last != digits.data() + digits.size() || !current->is_array() || index >= current->size())
+					const auto [parsedEnd, error] = std::from_chars(digits.data(), digits.data() + digits.size(), index);
+					if (digits.empty() || error != std::errc{} || parsedEnd != digits.data() + digits.size() || !current->is_array() || index >= current->size())
 						return nullptr;
 					current = &(*current)[index];
 					a_path += fmt::format("[{}]", index);
