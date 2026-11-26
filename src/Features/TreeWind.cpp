@@ -1,10 +1,10 @@
 #include "TreeWind.h"
-#include "Snapshot/EngineReads.h"
 
 #include <imgui.h>
 
 #include "../I18n/I18n.h"
 #include "Globals.h"
+#include "Snapshot/Publication.h"
 #include "State.h"
 
 #define I18N_KEY_PREFIX "feature.tree_wind."
@@ -244,6 +244,34 @@ void TreeWind::PostPostLoad()
 		return;
 	}
 	Hooks::Install();
+	Snapshot::RegisterCapture(&TreeWind::Capture);
+}
+
+void TreeWind::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::treeWind.loaded)
+		return;
+	Block block{};
+	if (const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)) {
+		const auto weather = [](const RE::TESWeather* a_weather) {
+			Block::Weather data{};
+			if (!a_weather)
+				return data;
+			using Flag = RE::TESWeather::WeatherDataFlag;
+			data.present = true;
+			data.rainy = a_weather->data.flags.any(Flag::kRainy);
+			data.snow = a_weather->data.flags.any(Flag::kSnow);
+			data.cloudy = a_weather->data.flags.any(Flag::kCloudy);
+			data.windSpeed = a_weather->data.windSpeed;
+			return data;
+		};
+		block.windSpeed = sky->windSpeed;
+		block.windAngle = sky->windAngle;
+		block.weatherPct = std::clamp(sky->currentWeatherPct, 0.0f, 1.0f);
+		block.current = weather(sky->currentWeather);
+		block.last = weather(sky->lastWeather);
+	}
+	a_builder.Set(block);
 }
 
 void TreeWind::BeginDraw(RE::BSRenderPass* a_pass)
@@ -266,22 +294,21 @@ void TreeWind::SetupResources()
 	windOffCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOff");
 }
 
-float TreeWind::GetStorminess(const RE::TESWeather* a_weather) const
+float TreeWind::GetStorminess(const Block::Weather& a_weather) const
 {
-	if (!a_weather)
+	if (!a_weather.present)
 		return 0.0f;
 
 	// Vanilla weather wind barely differs between clear and storm, so the weather type counts too
-	using Flag = RE::TESWeather::WeatherDataFlag;
 	float typeStorminess = 0.0f;
-	if (a_weather->data.flags.any(Flag::kRainy))
+	if (a_weather.rainy)
 		typeStorminess = settings.GustRainy;
-	else if (a_weather->data.flags.any(Flag::kSnow))
+	else if (a_weather.snow)
 		typeStorminess = settings.GustSnow;
-	else if (a_weather->data.flags.any(Flag::kCloudy))
+	else if (a_weather.cloudy)
 		typeStorminess = settings.GustCloudy;
 
-	const float wind = static_cast<float>(a_weather->data.windSpeed) / 255.0f;
+	const float wind = static_cast<float>(a_weather.windSpeed) / 255.0f;
 	const float windStorminess = std::clamp((wind - settings.GustWindCalm) / std::max(settings.GustWindStorm - settings.GustWindCalm, 0.01f), 0.0f, 1.0f);
 	return std::clamp(std::max(typeStorminess, windStorminess), 0.0f, 1.0f);
 }
@@ -289,16 +316,18 @@ float TreeWind::GetStorminess(const RE::TESWeather* a_weather) const
 void TreeWind::Reset()
 {
 	ZoneScoped;
+	// The adopted snapshot is the frame's only game input. Before the first there is no wind.
+	const auto& snapshot = Snapshot::Current();
+	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
 	float windSpeed = 0.0f;
 	float windAngle = 0.0f;
 	float storminess = 0.0f;
-	if (auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky)) {
-		windSpeed = sky->windSpeed;
-		windAngle = sky->windAngle;
-		const float weatherPct = std::clamp(sky->currentWeatherPct, 0.0f, 1.0f);
-		storminess = sky->lastWeather ?
-		                 GetStorminess(sky->currentWeather) * weatherPct + GetStorminess(sky->lastWeather) * (1.0f - weatherPct) :
-		                 GetStorminess(sky->currentWeather);
+	if (block) {
+		windSpeed = block->windSpeed;
+		windAngle = block->windAngle;
+		storminess = block->last.present ?
+		                 GetStorminess(block->current) * block->weatherPct + GetStorminess(block->last) * (1.0f - block->weatherPct) :
+		                 GetStorminess(block->current);
 	}
 
 	const float gustStrength = std::lerp(settings.GustStrengthCalm, settings.GustStrengthStorm, storminess);
@@ -307,9 +336,12 @@ void TreeWind::Reset()
 	statusStorminess = storminess;
 	statusGust = gustStrength;
 
-	// Capped so a hitch or a load does not jump the trees
-	const bool paused = CS_ENGINE_READ(UI, Other, globals::game::ui) && CS_ENGINE_READ(UI, Other, globals::game::ui)->GameIsPaused();
-	const double deltaTime = paused ? 0.0 : std::min(static_cast<double>(CS_ENGINE_READ(Timer, Other, RE::GetSecondsSinceLastFrame())), 0.25);
+	// The clock steps once per new snapshot, by the game time it stands for (0 while paused), so a repeated snapshot holds the
+	// trees still. Capped so a hitch or a load does not jump the trees.
+	const bool newSnapshot = snapshot && snapshot->id != steppedSnapshot;
+	const double deltaTime = newSnapshot ? std::min(static_cast<double>(snapshot->events.gameDelta), 0.25) : 0.0;
+	if (newSnapshot)
+		steppedSnapshot = snapshot->id;
 	prevPhase = phase;
 	phase += deltaTime * (settings.BaseSpeed + settings.WindSpeedGain * std::clamp(windSpeed, 0.0f, 1.0f));
 	// Wraps at 200 pi, a whole number of cycles for every sway frequency in TreeWind.hlsli, and keeps float
@@ -322,7 +354,7 @@ void TreeWind::Reset()
 
 	// The map menus draw the LOD too, and it should stand still there. While off, the draws skip all
 	// per-draw work; both buffers then read as off, whatever is still bound at VS b3.
-	swayActive = settings.Enabled && !globals::state->isMapMenuOpen;
+	swayActive = settings.Enabled && !(snapshot && snapshot->menus.map);
 
 	WindCB data{};
 	data.Wind = { static_cast<float>(phase), static_cast<float>(prevPhase), windSpeed, windAngle };

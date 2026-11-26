@@ -71,6 +71,7 @@
 #include "Vram/VramLedger.h"
 #include "TextureStreaming/Census.h"
 #include "TextureStreaming/Streamer.h"
+#include "Snapshot/Publication.h"
 
 #include <intrin.h>
 #include <xmmintrin.h>
@@ -1622,6 +1623,9 @@ namespace Hooks
 #ifdef TRACY_ENABLE
 		stl::write_thunk_call<Main_Update>(REL::RelocationID(35551, 36544).address() + REL::Relocate(0x11F, 0x160));
 #endif
+
+		// The frame snapshot's publication point (and the cadence test mode): Main::Update's call of Main::DrawFrame.
+		Snapshot::InstallHooks();
 
 		logger::info("Hooking BSImagespaceShader");
 		stl::detour_thunk<CSShadersSupport::BSImagespaceShader_DispatchComputeShader>(REL::RelocationID(100952, 107734));

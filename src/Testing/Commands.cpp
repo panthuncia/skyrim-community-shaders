@@ -17,6 +17,7 @@
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Frame/Recipe.h"
 #include "ShaderCache.h"
+#include "Snapshot/Publication.h"
 #include "State.h"
 #include "Vram/MemProbe.h"
 #include "Vram/SpillLab.h"
@@ -337,6 +338,7 @@ namespace Testing
 			std::error_code error;
 			std::filesystem::create_directories(directory, error);
 			globals::features::screenshotFeature.RequestCapture(directory / (a_arg + ".png"));
+			logger::info("[TEST] shot {} asked at snapshot {} (render frame {})", a_arg, Snapshot::CurrentId(), Snapshot::Render().frame);
 			auto& run = Run();
 			std::scoped_lock lock(run.mutex);
 			run.shots.push_back(a_arg);
