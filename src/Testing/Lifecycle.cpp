@@ -79,8 +79,11 @@ namespace Testing
 		case SKSE::MessagingInterface::kPostPostLoad:
 			// Every feature's PostPostLoad ran: DCLF's feature switches are registered if it installed.
 			SwitchRegistry::DumpIfAsked();
-			if (Configured())
+			if (Configured()) {
 				RecheckSwitches();
+				if (!InstallTaskTick())
+					Finish("failed", "the main-thread tick for the test commands could not be installed", 0u);
+			}
 			return;
 		case SKSE::MessagingInterface::kDataLoaded:
 			{

@@ -35,7 +35,8 @@ namespace Testing
 	/**
 	 * @brief Game thread, once per game update, when its snapshot is published (Main::Update's call of Main::DrawFrame): the step
 	 * clock moves one game frame. The steps and the commands spread over frames run at the update's first Present, inside its
-	 * render half, as they always did: a console command there (a coc) cannot tear cells down under the update's cull jobs.
+	 * render half, as they always did. Their game work (a console command, a coc among them) is queued and runs on the main thread
+	 * after the update's frame jobs, where the engine is on one thread and a coc shows its loading screen.
 	 * Steps count game frames, so a cadence run takes its steps at the same game time as a normal one; with dropped renders a step
 	 * runs at the first rendered update at or after its frame.
 	 */

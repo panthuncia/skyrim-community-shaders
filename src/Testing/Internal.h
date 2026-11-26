@@ -137,6 +137,12 @@ namespace Testing
 	/** @brief Commands: the generic commands (Commands.cpp), registered at load. */
 	void RegisterGenericCommands();
 
+	/**
+	 * @brief Commands: hooks the main-thread point after the frame's jobs, where the commands' game work runs (a coc among it).
+	 * Main thread, at plugin load. False when the hook could not be installed.
+	 */
+	bool InstallTaskTick();
+
 	/** @brief Commands: the work some commands spread over frames (move, turn, cast). Once per step clock frame. */
 	void TickCommands();
 

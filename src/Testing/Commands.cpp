@@ -15,6 +15,7 @@
 #include "Profiler.h"
 #include "Menu.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
+#include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/Frame/Recipe.h"
 #include "ShaderCache.h"
 #include "Snapshot/Publication.h"
@@ -130,10 +131,39 @@ namespace Testing
 			return position;
 		}
 
+		// The commands' game work, run on the main thread after the frame's jobs (MainTick). There the engine is on one thread and its
+		// serving thread is idle, so a coc shows the loading screen as the console's does. SKSE's tasks run in a frame job
+		// ("Main render end"): a coc there loads the cells inside the frame-job wait, with no loading screen and no Present.
+		struct TaskQueue
+		{
+			std::mutex mutex;
+			std::vector<std::function<void()>> tasks;
+		};
+
+		TaskQueue& Tasks()
+		{
+			static TaskQueue queue;
+			return queue;
+		}
+
 		void AddTask(std::function<void()> a_task)
 		{
-			if (auto* tasks = SKSE::GetTaskInterface())
-				tasks->AddTask(std::move(a_task));
+			auto& queue = Tasks();
+			std::scoped_lock lock(queue.mutex);
+			queue.tasks.push_back(std::move(a_task));
+		}
+
+		/** @brief Main thread, after the frame's jobs: runs the tasks queued so far. A task that queues more leaves them for the next tick. */
+		void RunTasks()
+		{
+			std::vector<std::function<void()>> tasks;
+			{
+				auto& queue = Tasks();
+				std::scoped_lock lock(queue.mutex);
+				tasks.swap(queue.tasks);
+			}
+			for (auto& task : tasks)
+				task();
 		}
 
 		/**
@@ -1106,6 +1136,11 @@ namespace Testing
 	{
 		static std::once_flag once;
 		std::call_once(once, RegisterGeneric);
+	}
+
+	bool InstallTaskTick()
+	{
+		return RenderGraph::Engine::MainTick::Add("the test runner's tasks", RunTasks);
 	}
 
 	bool RunCommand(const std::string& a_name, const std::string& a_arg, std::string& a_error)
