@@ -496,3 +496,86 @@ pushes until the user is back.
      StartAccumulating calls and the first-person end; RenderShadowMasks; VolumetricLighting::Render; RenderWaterEffects
      (TESWaterSystem::Update, its reflections update and RenderDisplacement); RenderPostProcess; FaceGen::UpdatePending
      and JobListManager::FrameJobs. Menu scenes and the loading frames' cube faces are phase 5.
+
+## 2026-11-26: face tint bakes and the frame skeleton inventory (snap3-facegen; director accepted)
+
+128. **S18 fate, face tint bakes:** the capture drains the engine's facegen tint queue under the engine's lock
+     (`src/Snapshot/FaceTint.cpp`, `BlockId::FaceTint`), turns each job into a bake (mask references, ISAlphaBlend rows,
+     the head, a new texture created on the game thread) and frees the job as the engine does. The render side draws one
+     bake per render frame through the face tint ImageSpace client and copies it into the bake's texture the frame after.
+     A later capture hands the texture to the head and releases the old one. Bakes are keyed by serial, so repeated
+     snapshots draw nothing new and dropped ones lose nothing. A head keeps its old texture 2-3 updates longer than in
+     vanilla (accepted).
+129. **Both FaceGen::UpdatePending calls are off in native** (DrawFrame and the loading loop, AE 39039), patched with a
+     byte check that is fatal on mismatch. Guest is unchanged.
+130. **JobListManager::FrameJobs is bookkeeping** (it reads the serving thread's flag to decide a job wait): the detector
+     counts it as a helper. Native tour: 20.0 -> 18.6 engine render calls per world frame.
+131. **The frame skeleton inventory for phase 7** (every call in DrawFrame, RenderScene and RenderPlayerView, its kind
+     and its phase 7 fate) is in `snap3-facegen.md`. No dead calls removed yet (AE 107018 is empty, AE 76557 resets list
+     processes that no longer run).
+132. **Open: purple noise on the player's face in native**, present before snap3-facegen (the old engine path shows it
+     too). Vanilla NPCs use pre-built tint textures and are not affected by the bake path.
+
+## 2026-11-26: native RenderPostProcess and Volumetric Lighting (snap3-post; director accepted)
+
+133. **Native's RenderPostProcess body never runs** (AE 107148): `NativePost::RunNativeBody` runs its points in the
+     engine's order (VL render, read-back, VL apply and blur, the engine's lens flare gather, the composites, the
+     end-of-frame effects) with no flush and no target, depth-of-field plane, TLS tag or camera port writes. It still
+     writes the current camera (414580) for native readers. Guest keeps the engine body.
+134. **Volumetric Lighting: the render's CPU work is ported, both paths kept.** Making the CS feature the only path
+     would remove nothing (its ORG path uses the same engine CPU work). Game side: activity, descriptor, sun direction
+     and diffuse, the no-temporal request (a count), the noise scroll (once per game update, CS's RNG). Render side:
+     `GenerateRows` from the snapshot camera and the sun light's cascades and splits; CS keeps its own VL counter. Main
+     Draw's VL block (+0x2F1..+0x33A, byte-checked) is jumped over in native. Observe: 0 differences over 600 renders
+     except one frame where weather arrives one game update late (accepted, like 123).
+135. **Decision 124 trimmed:** the render mode (411475) is no longer written (only the engine's RenderSSAO and effect
+     setup read it); RenderWorld no longer writes the reflections' camera (RenderScene writes the same value and the
+     game side reads it through the radial blur modifier, AE 107753); TAA's form is CS state (`WorldPass::TaaForm`).
+     `LeaveResolveState` stays until the first-person view is CS's (the engine's RenderFirstPersonView still flushes).
+136. **The RenderPostProcess detector row is removed** like RenderWorld's (CS drives it); the sites inside it count, all
+     0 in native. Native interior 20 -> 18, post-effects 23 -> 21 engine render calls per world frame.
+137. **Left:** the lens flare gather (AE 106988) is still an engine call; the current camera's native readers should
+     read the frame camera; SE and the VL-off path are unrun.
+
+## 2026-11-26: DCLF on the retire queue (snap6-dclf, phase 6 part 2; director accepted)
+
+138. **DCLF's engine releases go through the retire queue's engine lane:** `EngineReleases::Push`, `PushOwner` and
+     `PushRetired` adapt to `Retire::AfterThisFrame(Lane::Engine, ...)`. An entry waits for the newest render frame begun
+     when it was pushed; a retired batch advances `releasedThrough` only when it is let go, so `Alive()` is exact. No DCLF
+     engine reference is dropped at Present. LocalLightCull's retired filters and PrimaryCull's list graveyard use the
+     lane too.
+139. **The engine lane drains at the frame-job wait after Main::DrawFrame** (refines 99), not at the capture: the capture
+     runs beside the update's frame jobs (cell animations, Havok), and a release there corrupted the cell animation list
+     (an endless loop; cadence-drop-cells hung). `Retire::LetGo` always goes through the lane. This is also the likely
+     cause of the one drop-cells hang seen after snap3-facegen (main thread in WaitForFrameJobs, 1 of 3 runs): face tint
+     bakes hold engine references that retire through the lane.
+140. **The engine-read window is game-side:** it opens after the capture and side effects in the DrawFrame hook and
+     closes at the end of that call. Until phase 7 removes the render half, a hold bit (`kHeld`) keeps it held from each
+     DrawFrame call and Present to the next BeginFrame, because the engine's render half still writes the scene graph
+     (decals attach before Main::Draw; the next update's jobs start after Present). Main-thread leases are counted (0 in
+     every run).
+141. **Held detaches are pushed at the capture in both modes** (a detach and its re-attach happen within one call).
+     `FrameSnapshot::scene` stays empty: DCLF's retirement chain holds references per publication; pairing the
+     publication with the snapshot is phase 7. No new mechanism for in-place writes or frame copies (SWF pointer swaps
+     are versioned by the material owner blocks; the constant mirror is copied into frame rows). Per-load VRAM growth
+     unchanged (branch 259 MiB over two loads, base 292).
+
+## 2026-11-26: native RenderDepth and RenderShadowMasks (snap3-depth; director accepted)
+
+142. **Native's RenderDepth calls no engine function:** `RenderGraph/Engine/Native/RenderDepth.cpp`, called from DCLF's
+     innermost `Main_RenderDepth` thunk (Terrain Blending's still wraps it), clears the main depth, runs DCLF's Z-prepass
+     (`DrawcallLimitFix::DepthPassDrawn`, shared with guest), the first-person draw point, the copy into
+     kPOST_ZPREPASS_COPY, and writes the state the engine leaves (`LeaveDepthState`). The depth accumulator offered 0
+     passes in observe runs.
+143. **First person in native is DCLF's alone:** RenderDepth's first-person block (cull, camera and node shift, submit)
+     is not made; AE 107123 in RenderPlayerView already does the camera setup and node shift, and the block undid and
+     redid it with the same values.
+144. **Native's shadow masks are CS's:** a call-site thunk on RenderPlayerView +0x39C runs `ShadowMask::DrawWorldMasks`
+     (skeleton clear, the snapshot's frustum, the frame camera's posAdjust, constant starting modes) and CS's port of
+     ReturnShadowmaps, then writes the state the engine leaves and the current camera (414580). The focus targets'
+     stencil marks are not drawn (their only reader, the mask shader's focus branch, is never taken). Terrain Blending's
+     SetCameraData before the depth pass is skipped in native.
+145. **A refused native world batch is cleared and logged once, not fatal** (once per load, the first world frame, for a
+     light whose map has no target yet). Engine render calls per world frame: interior 20 -> 16, shadows-blend 24 -> 18.5,
+     quick 33 -> 30.7. Left: the masks' settings globals and shadow lights are read at record time; the state CS writes
+     for engine code after these functions goes once that code is CS's.
