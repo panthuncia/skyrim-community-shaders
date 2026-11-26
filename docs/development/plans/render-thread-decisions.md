@@ -70,3 +70,45 @@ Side-effect ids (S1-S25) refer to [render-side-effects.md](render-side-effects.m
     between runs of one save, so progress is read per site.
 19. **Native UI renderer:** streams are cut per present. CS keeps texgen rows in its own state. Replaying a stream depends
     on the streams before it; a per-stream state header comes before repeated or skipped snapshots (phase 2/7).
+
+## 2026-11-26: phase 1 (the user is away; director decisions unless marked)
+
+Process: while the user is away the director merges validated lead branches into `org_integration` locally and holds
+pushes until the user is back.
+
+20. **Core frame block (snap1-core, accepted by the director):** `Snapshot::CaptureCore` fills `BlockId::CoreFrame` first in
+    every capture: sun light, DALC, sky flags, sun and moon, near/far, FOV, the interior rule, water tiles around the main
+    camera, sky geometry keys. `State::UpdateSharedData` and `ModifySharedLighting` read only that block. Each `Util`
+    helper serves both producers: it reads the game inside a capture scope and the block everywhere else. The settings
+    revision is `CS::SettingRegistry::Serial()` (bound `CS::Setting` changes). Display size comes from the `DisplaySize`
+    frame variable. VR makes no snapshots and keeps the block at defaults.
+21. **Open from core:** near/far still come from the high actor culler's frustum copy, which the render half makes, so a
+    change shows one frame late. Native moves to the world camera's frustum when the frame camera is ported. The
+    frame-buffer camera matrices (`frameBufferCached`) wait for that frame-camera port too.
+22. **One block per feature** (snap1-sky). No shared sky block: shared values come from `CoreFrame` and `SkySync::Block`.
+23. **World-state clocks step once per new snapshot by `events.gameDelta`:** lightning, the cloud wind (which also drives
+    the storm) and the wetness rain clock. A repeated snapshot holds them; a dropped one loses no time. The aurora keeps
+    its wall-clock time. Moving visual-only clocks to render delta is decided per feature in phase 2.
+24. **Game logic hooks open a capture scope** (decision 8 applied): Sky Sync's `Sky::Update` hook reads the game as game
+    logic, not as record-time reads.
+25. **Reads of same-frame engine render output stay record-time until phase 3** (for example Wetness's rain occlusion
+    projection): capturing them a frame early would lag guest. Phase 3 replaces the engine output itself.
+26. **`frameCount` in graph predicates and commits becomes `FrameClock::BeginFrame()`** (a render-frame count), since every
+    use found means "render frame", not "new game frame".
+27. **Visual-only post animation advances by render delta** (snap1-post): glare, lens, ENB adaptation, ENB DoF and the FX
+    timer use `Snapshot::VisualDelta()` (render delta, 0 while paused). Auto exposure uses the snapshot's `realDelta`
+    until phase 2 moves it to render delta.
+28. **Grass collision is gathered in the capture** and its decay steps once per new snapshot. The old Main::Update hook
+    after DrawFrame is gone. Colliders are now gathered one update earlier relative to the snapshot camera.
+29. **The Cinematic Camera's update, including its world-FOV write, runs in the capture** (decision 8: it is game logic).
+30. **Writes into engine state are not live reads:** the jitter undo, dynamic-resolution locks, dirty flags,
+    `SetCameraData`, the vanilla SSAO toggle and INI writes are tagged Other in the detector. Their removal is phase 2/3
+    (no render-side writes into engine objects).
+31. **The frame camera is its own item** (director): the frame-buffer camera matrices (`frameBufferCached`, 53 sites) are
+    what every phase 1 group still reads as bound state. Native computes them from the game camera in the capture; the
+    render side keeps its own last-rendered camera per view and applies render-owned jitter. It is done together with
+    phase 2's motion work, since the drop-mode smear and the repeat-mode singular Streamline matrices come from it. Light
+    Limit Fix's `FrameInputs` folds into a block after it.
+32. **Engine render-half output read the same frame waits for phase 3** (extends 25): Light Limit Fix's light walk and
+    local shadows, Terrain Blending's depth-pass state, Skylighting's occlusion-map calls, Exponential Height Fog's engine
+    local shadows.
