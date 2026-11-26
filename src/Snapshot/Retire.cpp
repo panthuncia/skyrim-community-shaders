@@ -97,12 +97,7 @@ namespace Snapshot
 
 		void LetGo(std::shared_ptr<const FrameSnapshot>&& a_snapshot)
 		{
-			if (!a_snapshot)
-				return;
-			if (FrameAnchors::IsMainThread()) {
-				a_snapshot.reset();
-				return;
-			}
+			// Even on the main thread: the capture runs beside the update's frame jobs, so its engine references wait for the drain.
 			Push(Lane::Engine, std::move(a_snapshot), 0);
 		}
 

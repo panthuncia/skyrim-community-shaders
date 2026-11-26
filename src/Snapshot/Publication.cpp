@@ -1,17 +1,18 @@
 #include "Snapshot/Publication.h"
 
+#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
 #include "Snapshot/Retire.h"
 #include "Snapshot/SideEffects.h"
 #include "Snapshot/UiCommandStream.h"
-#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "State.h"
 #include "Testing/Testing.h"
 #include "Utils/Setting.h"
 
 #include "RenderGraph/Async/LatestSlot.h"
+#include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -430,6 +431,10 @@ namespace Snapshot
 		if (REL::Module::IsVR())
 			return;
 		stl::write_thunk_call<MainUpdate_DrawFrame>(REL::RelocationID(35565, 36564).address() + REL::Relocate(0x5D2, 0xA97));
+		// The engine lane drains once the update's frame jobs are joined, right after Main::DrawFrame: they run beside it (the cell
+		// animations, Havok), and an engine object's last release there would race them. The engine-read window is closed by then.
+		if (!RenderGraph::Engine::MainTick::Add("the snapshot retire queue's engine lane", [] { Retire::DrainEngine(); }))
+			RenderGraph::Fatal("snapshot lifetimes", "the frame-job wait is not hooked, so engine references would never be let go");
 		SideEffects::InstallHooks();
 		(void)CadenceMode();
 		logger::info("[Snapshot] frame snapshots: published at Main::Update's call of Main::DrawFrame, adopted at Renderer::Begin");
@@ -439,8 +444,6 @@ namespace Snapshot
 	{
 		ZoneScopedN("CS.Snapshot.Capture");
 		const PublishClaim claim;
-		// Game side, between render halves: what the render side retired and the GPU finished with is let go here.
-		Retire::DrainEngine();
 		// Engine reads from here on are captures, not live reads.
 		const EngineReads::CaptureScope scope;
 		const auto start = std::chrono::steady_clock::now();
@@ -475,8 +478,6 @@ namespace Snapshot
 	{
 		ZoneScopedN("CS.Snapshot.CaptureFrame");
 		const PublishClaim claim;
-		if (FrameAnchors::IsMainThread())
-			Retire::DrainEngine();
 		const EngineReads::CaptureScope scope;
 		auto& game = Game();
 		const FrameSnapshot* previous = game.previous.get();

@@ -25,12 +25,12 @@ namespace DCLF::SceneCapture
 #include <ankerl/unordered_dense.h>
 
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
-#include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
-#include "RenderGraph/Async/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
-#include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
-#include "Features/DrawcallLimitFix/Core/Scene/Channels.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
+#include "Features/DrawcallLimitFix/Core/Scene/Channels.h"
+#include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
+#include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 namespace DCLF
 {
@@ -194,7 +194,7 @@ namespace DCLF
 			Extensions::ShadowSourcesFrameEnd();
 			listFilter.store(nullptr, std::memory_order_release);
 			listMode.store(ListMode::Engine, std::memory_order_release);
-			// One may hold a detached cell's last reference, so they are let go on the main thread at the capture.
+			// One may hold a detached cell's last reference, so they are let go on the main thread after the update's frame jobs.
 			if (!listGraveyard.empty())
 				EngineReleases::PushOwner(std::make_shared<std::vector<RE::NiPointer<RE::NiAVObject>>>(std::exchange(listGraveyard, {})));
 		}

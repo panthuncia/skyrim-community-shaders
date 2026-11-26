@@ -440,7 +440,7 @@ namespace DCLF
 			std::vector<std::shared_ptr<const void>> imports;
 			std::vector<RE::NiPointer<RE::NiRefObject>> references;
 			std::vector<std::shared_ptr<void>> owners;  // whose last release runs the engine's destructors (event batches, material references)
-			std::uint64_t lastPublication = 0;           // the last publication that held its node (EngineReleases::PushRetired)
+			std::uint64_t lastPublication = 0;          // the last publication that held its node (EngineReleases::PushRetired)
 			bool Empty() const { return slots.empty() && imports.empty() && references.empty() && owners.empty(); }
 		};
 		org::services::RetirementChain<RetiredBatch> retirement;

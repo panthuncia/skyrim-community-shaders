@@ -11,8 +11,9 @@ namespace DCLF::EngineReleases
 {
 	/**
 	 * DCLF's engine references go through the snapshot retire queue's engine lane (Snapshot/Retire.h, roadmap phase 6). They are let
-	 * go on the main thread at the capture, once the GPU finished the newest render frame begun when they were pushed. Dropping the
-	 * last reference to a scene graph object runs the engine's destructors, which belong on its main thread.
+	 * go on the main thread after the update's frame jobs, once the GPU finished the newest render frame begun when they were pushed.
+	 * Dropping the last reference to a scene graph object runs the engine's destructors, which belong on its main thread with no engine
+	 * job running beside them.
 	 */
 
 	// Scene work references go back through the retirement chain. A batch arrives here once no publication up to its node lives.
@@ -66,7 +67,7 @@ namespace DCLF::EngineReleases
 
 	/**
 	 * @brief Whether no object a_publication names was released. Read under an engine-read lease or on the main thread: releases happen
-	 * only at the capture, on the main thread, while the engine-read window is closed.
+	 * only after the update's frame jobs, on the main thread, while the engine-read window is closed.
 	 */
 	inline bool Alive(std::uint64_t a_publication) { return releasedThrough.load(std::memory_order_acquire) <= a_publication; }
 }
