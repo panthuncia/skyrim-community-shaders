@@ -600,3 +600,28 @@ pushes until the user is back.
      frame. Observe scaffolding stays behind the diagnostic `CS_MENU_SCENES_OBSERVE` for the next lead. Found on the
      way: DCLF's world material port does not apply Linear Lighting's specular colour conversion
      (`LightingMaterialUpload`, PS 25).
+
+## 2026-11-26: native water effects on the game thread (snap3-water; director accepted)
+
+151. **Native skips Main::RenderWaterEffects** (Main::Draw +0x16F, byte-checked; `Native/WaterEffects.cpp`). The capture
+     runs its game half on world snapshots: the S20 early-out resets, `TESWaterSystem::Update` on the game thread
+     (decision 8) and the S16 flow-map ring drain. Inside the update, the reflection face render goes to a CS recorder
+     (its clear-colour calls NOPed), RenderDisplacement and the displacement effect are CS ports, and the water
+     visibility cull (AE 32189) is a frustum test against the snapshot camera (it can mark more water visible, never
+     less). The reflection update and displacement are detector producers (`Role::WaterProducer`, decision 64's rule).
+152. **Recorded water work goes through a queue keyed by snapshot id**, drawn once at DCLF's frame start (decision 62's
+     pattern): faces through `ReflectionFaces::DrawRecorded`, displacement steps and flow copies through
+     `ImageSpace::StageNativeWater`; the displacement restart's clear is a native ClearSimulation step. With dropped
+     snapshots only the newest update's displacement steps are drawn. A face DCLF cannot draw natively is not drawn (the
+     engine's draws of it were dropped by native before too).
+153. **SetupSunAndSky runs in the capture** before the main camera is taken; DCLF's hook at Main::Draw +0xD3 returns the
+     cached result.
+154. **Native precipitation occlusion maps make no engine call:** `DrawcallLimitFix::RenderMask` computes the occlusion
+     projection; the engine's SetupMask cull, shadow-state save/restore and dynamic-resolution lock write are not made in
+     native (Skylighting and Upscaling too). Engine render calls per world frame: tour 20.0 -> 16.9, river 21.9 -> 17.3,
+     quick 33.1 -> 25.4 (before the depth and post merges).
+155. **Left for phase 7:** `WaterPort::CaptureFrame` reads engine globals (including what the water update writes) at
+     record time; the water normal textures (AE 32170) need versioning; `Precipitation::UpdateProjection` and
+     Skylighting's live reads are record-time. SetupSunAndSky and RenderPrecipitation are CS points behind skeleton
+     calls (decision 70). The water update now runs in the capture beside the frame jobs: snap3-jobhang checks its
+     ordering with the drop-cells frame-job hang.
