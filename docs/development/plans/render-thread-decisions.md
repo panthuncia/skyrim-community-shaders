@@ -170,3 +170,23 @@ pushes until the user is back.
 48. **Shadow caster selection (AE 107132) moves with the scene-lists port**, not on its own: it also sets up the sun
     cascades, runs the main list-accumulation jobs and picks the local lights. S8 fades for the decision 46 roots go with
     it.
+
+## 2026-11-26: phase 2 counters and cadence (snap2-cadence; director accepted)
+
+49. **Render counters and game time are separate.** `FrameClock` and `frameCount` are render counters. `State::Timer()` is
+    the snapshot's game time (`State::timer` is gone) and `State::Reset` only ends the render frame. World state steps by
+    `Snapshot::GameStep()` (LOD blend ring, skin wetness; Dynamic Cubemaps uses game time); auto exposure adapts by render
+    delta. DCLF's `SceneStep` stays a render-frame identity (its uses are same-frame checks); its scene-pump watchdog is
+    time-based (30 s without a scene pass).
+50. **`Snapshot::HistoryBreak()`** is true on the first render after a cut, teleport or load, merged over replaced
+    snapshots, and resets histories (TAA and upscalers, water SSR, scattering, DoF, lens, SSGI, clouds). Native only, so
+    guest's pictures at cuts don't change.
+51. **The test harness counts game frames.** Steps and milestones count game updates (world-ready needs 30), steps run at
+    the update's first Present (running them around the render half let a `coc` crash the engine's cull jobs), shots name
+    the snapshot they rendered. Phase 2's proof is `tools/cs-test/cadence.py` with `configs/cadence-still.toml`: cadence
+    shots pass at most twice the noise floor between two normal runs, or the floor plus 1.5.
+52. **Menu flags stay a render-side read until phase 5**, since the main menu publishes no snapshots. The PCL simulation
+    marker waits for phase 7.
+53. **Known test-mode gap:** repeat mode with a second `coc` can crash in the engine's list cull, because the repeated
+    render half reuses scene lists over unloaded cells; the load guard narrows it but is racy. It goes away when phase 3
+    stops running the engine's culls.
