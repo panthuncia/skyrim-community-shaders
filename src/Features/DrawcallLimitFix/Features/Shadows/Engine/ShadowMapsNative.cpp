@@ -24,6 +24,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace DCLF::Features::Shadows::Engine
@@ -35,6 +36,26 @@ namespace DCLF::Features::Shadows::Engine
 
 		// Render thread: inside Main::RenderShadowMaps, from DCLF's BeforeShadowMaps to its AfterShadowMaps.
 		bool shadowMapsOpen = false;
+
+		/** @brief Why a shadow light's Render went to the engine. Counted for the log line below. */
+		enum class Fallback : std::uint8_t
+		{
+			None,
+			NotOpen,        // outside Main::RenderShadowMaps
+			NoDraws,        // the light lists no draw
+			NotDclf,        // the frame's shadow views are not DCLF's
+			NoAccumulator,  // a draw without an accumulator, camera or batch renderer
+			NotCovered,     // a view DCLF does not cover
+			Kept,           // a caster DCLF does not hold kept its passes for the engine
+			Capture,        // a view could not be captured natively
+			Count,
+		};
+		constexpr std::array<const char*, static_cast<std::size_t>(Fallback::Count)> kFallbackNames{ "native", "outside RenderShadowMaps", "no draws",
+			"views not DCLF's", "no accumulator", "view not covered", "kept passes", "capture failed" };
+		// Render thread. Lights per outcome since the last line, and shadow map frames.
+		std::array<std::uint64_t, static_cast<std::size_t>(Fallback::Count)> lightCounts{};
+		std::uint64_t shadowFrames = 0;
+		constexpr std::uint64_t kLineFrames = 600;
 
 		enum class Kind : std::uint8_t
 		{
@@ -103,30 +124,30 @@ namespace DCLF::Features::Shadows::Engine
 			return !a_batch.alphaGroup || !a_batch.alphaGroup->passList.head;
 		}
 
-		/** @brief Fills each draw's view and mode. False when one is not a covered view DCLF draws whole, so the engine draws the light. */
-		bool Whole(std::vector<Draw>& a_draws)
+		/** @brief Fills each draw's view and mode. Anything but None when one is not a covered view DCLF draws whole, so the engine draws the light. */
+		Fallback Whole(std::vector<Draw>& a_draws)
 		{
 			if (a_draws.empty())
-				return false;
+				return Fallback::NoDraws;
 			const auto& views = DCLF::ShadowViews::Get();
 			if (!views.Valid() || !views.DclfDraws())
-				return false;
+				return Fallback::NotDclf;
 			const auto& capture = DCLF::PassCapture::Get();
 			for (auto& draw : a_draws) {
 				auto* accumulator = draw.descriptor->shaderAccumulator.get();
 				const auto* data = accumulator ? accumulator->GetRuntimeData() : nullptr;
 				if (!data || !draw.descriptor->camera || !data->batchRenderer)
-					return false;
+					return Fallback::NoAccumulator;
 				draw.view = views.ViewOfAccumulator(accumulator);
 				const auto* view = views.At(draw.view);
 				if (!view || !view->covered)
-					return false;
+					return Fallback::NotCovered;
 				draw.mode = static_cast<std::uint32_t>(data->renderMode);
 				// A caster DCLF does not hold yet kept its passes for the engine.
 				if (capture.CoveredKept(accumulator) || !GroupsEmpty(*data->batchRenderer))
-					return false;
+					return Fallback::Kept;
 			}
-			return true;
+			return Fallback::None;
 		}
 
 		/** @brief Clears a slice as RenderShadowmap's ApplyState does: depth to 1, through the engine skeleton's clear pass. */
@@ -259,16 +280,16 @@ namespace DCLF::Features::Shadows::Engine
 				Global<float>(DCLF::Engine::Address::kParabolaRadius) = -1.0f;
 		}
 
-		/** @brief Captures the light's views and does its Render's bookkeeping. False leaves the light to the engine. */
-		bool RenderNative(RE::BSShadowLight& a_light, Kind a_kind, std::uint32_t& a_index)
+		/** @brief Captures the light's views and does its Render's bookkeeping. Anything but None leaves the light to the engine. */
+		Fallback RenderNative(RE::BSShadowLight& a_light, Kind a_kind, std::uint32_t& a_index)
 		{
 			DCLF_ZONE("CS.DCLF.ShadowMaps.Native");
 			thread_local std::vector<Draw> draws;
 			draws.clear();
 			draws.reserve(16);
 			ListDraws(a_light, a_kind, draws);
-			if (!Whole(draws))
-				return false;
+			if (const auto whole = Whole(draws); whole != Fallback::None)
+				return whole;
 			// Capture first: a view that cannot be captured hands the whole light back before anything is written.
 			auto& indirect = DCLF::IndirectDraws::Get();
 			const std::size_t mark = indirect.CapturedShadowViews();
@@ -279,10 +300,10 @@ namespace DCLF::Features::Shadows::Engine
 					if (!logged.exchange(true))
 						logger::info("[DCLF] native shadow maps: shadow view {} (mode {:#x}) could not be captured natively; the engine draws its light",
 							draw.view, draw.mode);
-					return false;
+					return Fallback::Capture;
 				}
 			Render(a_light, a_kind, draws, a_index);
-			return true;
+			return Fallback::None;
 		}
 
 
@@ -291,7 +312,10 @@ namespace DCLF::Features::Shadows::Engine
 		{
 			static void thunk(RE::BSShadowLight* a_light, std::uint32_t& a_index)
 			{
-				if (!shadowMapsOpen || !a_light || !RenderNative(*a_light, K, a_index))
+				const auto outcome = !shadowMapsOpen ? Fallback::NotOpen : !a_light ? Fallback::NoDraws :
+				                                                                      RenderNative(*a_light, K, a_index);
+				++lightCounts[static_cast<std::size_t>(outcome)];
+				if (outcome != Fallback::None)
 					func(a_light, a_index);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -301,6 +325,15 @@ namespace DCLF::Features::Shadows::Engine
 	void SetShadowMapsOpen(bool a_open)
 	{
 		shadowMapsOpen = a_open;
+		if (a_open || ++shadowFrames % kLineFrames != 0)
+			return;
+		std::string reasons;
+		for (std::size_t i = 1; i < lightCounts.size(); ++i)
+			if (lightCounts[i])
+				reasons += fmt::format("{}{} {}", reasons.empty() ? "" : ", ", lightCounts[i], kFallbackNames[i]);
+		logger::info("[DCLF] native shadow maps over {} frames: {} shadow lights rendered natively, the engine's Render for the rest ({})", kLineFrames,
+			lightCounts[0], reasons.empty() ? "none" : reasons);
+		lightCounts = {};
 	}
 
 	void InstallShadowMapHooks()

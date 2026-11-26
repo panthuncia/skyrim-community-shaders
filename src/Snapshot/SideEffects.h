@@ -17,6 +17,9 @@
 * - S4: the main thread's render-unsafe bit is cleared after the render half, not after the world draw.
 * - S5: the fade enable globals come back on 20 world updates after a teleport, counted here, not in Main::Draw.
 * - S6: the actor pre-cull (kNotVisible, Actor+0x27C) is decided by a CPU frustum test here; the engine's culler is skipped.
+* - S7: kAccumulated for the animated references' roots DCLF has no verdict for, from a CPU frustum test, written after the
+*   render half so the next update's animation jobs read it.
+* - S12/S13: the stealth light level's light membership (Snapshot/StealthLights.h).
 * - S17: queued decal occlusion tests are answered "visible" here; the pending array is cleared before the render half.
 */
 namespace Snapshot::SideEffects
