@@ -32,10 +32,10 @@ namespace RenderGraph::Engine::Scaleform
 	struct TextureInfo
 	{
 		winrt::com_ptr<ID3D11ShaderResourceView> view;  // the raw view, null when the texture has none or it cannot be unwrapped
-		bool hasView = false;      // the texture had a view (null `view` then means a native handle the graph cannot read)
-		bool plain = false;        // a plain GTextureD3D1x
-		bool hasData = false;      // its D3D11 texture exists (+0x70)
-		std::uint32_t format = 0;  // DXGI_FORMAT
+		bool hasView = false;                           // the texture had a view (null `view` then means a native handle the graph cannot read)
+		bool plain = false;                             // a plain GTextureD3D1x
+		bool hasData = false;                           // its D3D11 texture exists (+0x70)
+		std::uint32_t format = 0;                       // DXGI_FORMAT
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
 
@@ -77,7 +77,7 @@ namespace RenderGraph::Engine::Scaleform
 		float worldMatrix[16] = {};
 		const void* vertexData = nullptr;
 		std::int32_t vertexCount = 0;
-		std::int32_t vertexFormat = 0;   // Layout::VertexFormat
+		std::int32_t vertexFormat = 0;  // Layout::VertexFormat
 		std::uint32_t vertexStride = 0;
 		const void* indexData = nullptr;
 		std::int32_t indexCount = 0;
@@ -114,33 +114,33 @@ namespace RenderGraph::Engine::Scaleform
 	/** @brief A GRenderer call. The arguments' meaning depends on the op; copied data lives in the stream's payload. */
 	enum class UiOp : std::uint8_t
 	{
-		BeginDisplay,            // payload: BeginDisplayArgs; a = the targets' index, b = video mode set
+		BeginDisplay,  // payload: BeginDisplayArgs; a = the targets' index, b = video mode set
 		EndDisplay,
-		SetMatrix,               // payload: float[6]
-		SetUserMatrix,           // payload: float[6]
-		SetCxform,               // payload: float[8]
-		PushBlendMode,           // a = mode
+		SetMatrix,      // payload: float[6]
+		SetUserMatrix,  // payload: float[6]
+		SetCxform,      // payload: float[8]
+		PushBlendMode,  // a = mode
 		PopBlendMode,
-		SetPerspective3D,        // payload: float[16]
-		SetView3D,               // payload: float[16]
-		SetWorld3D,              // payload: float[16], or none for null
-		SetVertexData,           // payload: the array; a = count, b = format
-		SetIndexData,            // payload: the array; a = count, b = format
-		DrawIndexedTriList,      // a = base, b = min, c = count, d = start, e = triangles
-		DrawLineStrip,           // a = base, b = lines
+		SetPerspective3D,    // payload: float[16]
+		SetView3D,           // payload: float[16]
+		SetWorld3D,          // payload: float[16], or none for null
+		SetVertexData,       // payload: the array; a = count, b = format
+		SetIndexData,        // payload: the array; a = count, b = format
+		DrawIndexedTriList,  // a = base, b = min, c = count, d = start, e = triangles
+		DrawLineStrip,       // a = base, b = lines
 		LineStyleDisable,
-		LineStyleColor,          // a = colour
+		LineStyleColor,  // a = colour
 		FillStyleDisable,
-		FillStyleColor,          // a = colour
-		FillStyleBitmap,         // payload: FillTexture
-		FillStyleGouraud,        // payload: FillTexture[2]; a = type, b = bit 0 texture 0, bit 1 texture 1, bit 2 texture 2
-		DrawBitmaps,             // payload: BitmapDesc[count] then float[6]; a = count, key = texture
-		BeginSubmitMask,         // a = mode
+		FillStyleColor,    // a = colour
+		FillStyleBitmap,   // payload: FillTexture
+		FillStyleGouraud,  // payload: FillTexture[2]; a = type, b = bit 0 texture 0, bit 1 texture 1, bit 2 texture 2
+		DrawBitmaps,       // payload: BitmapDesc[count] then float[6]; a = count, key = texture
+		BeginSubmitMask,   // a = mode
 		EndSubmitMask,
 		DisableMask,
-		DrawBlurRect,            // payload: float[4] source, float[4] dest, BlurFilterParams; key = source
-		DrawColorMatrixRect,     // payload: float[4] source, float[4] dest, float[20]; key = source
-		PushRenderTarget,        // payload: float[4] frame; key = the target's texture, a = width, b = height
+		DrawBlurRect,         // payload: float[4] source, float[4] dest, BlurFilterParams; key = source
+		DrawColorMatrixRect,  // payload: float[4] source, float[4] dest, float[20]; key = source
+		PushRenderTarget,     // payload: float[4] frame; key = the target's texture, a = width, b = height
 		PopRenderTarget,
 		SetDisplayRenderTarget,  // a = the targets' index, or -1 when the new target has no view
 		Texture,                 // key = the texture, a = its info's index

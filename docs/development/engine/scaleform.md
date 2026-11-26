@@ -44,6 +44,15 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
   released its texture; displays without masks draw in a pass without the depth-stencil; the pipelines come from a
   `ProgramCache` (D3D11 draws a segment until its pipelines are built). Below, "The ORG pass".
 
+## Native mode: the UI stream (2026-11-26, `snap0/ui`)
+
+Native mode records every GRenderer call into a UI command stream (`UiStream.h`) and draws the stream's replay. The translation
+into graph draws below is shared: guest fills its `RendererState` from the D3D11 renderer's fields at each call, native's replay
+from the stream. CS takes the pure setters in native and reproduces them (and `ApplyMatrix` in 3D) bit for bit; a parity build
+found no difference in 4,000 displays. The D3D11 renderer is still called for GFx's render target stack and `EndDisplay`'s queued
+releases, counted in `[ORG] Scaleform: the game's renderer was called for ...`. Details, the full vtable with SE/AE ids and the
+open items: `docs/development/plans/snap0-ui.md`.
+
 ## The primary path (2026-11-11, `org-port/primary-ui`)
 
 With `CS_ORG_SCALEFORM=1` the graph is the only path for what it draws (primary-path.md). What changed:

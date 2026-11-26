@@ -219,7 +219,7 @@ namespace RenderGraph::Engine::Scaleform
 			Stencil stencil = Stencil::Off;
 			std::uint32_t stencilRef = 0;
 			float viewMatrix[6]{};
-			float texgen[4][4]{};   // the renderer keeps these between draws and displays
+			float texgen[4][4]{};  // the renderer keeps these between draws and displays
 			std::unordered_map<ID3D11ShaderResourceView*, std::int32_t> textureIndex;
 			/** @brief A render target GFx pushed inside the display, drawn into a scratch image. Holds what PopRenderTarget restores. */
 			struct TargetFrame
@@ -1849,7 +1849,8 @@ namespace RenderGraph::Engine::Scaleform
 				const std::size_t size = mirror.indexData ? static_cast<std::size_t>((std::max)(mirror.indexCount, 0)) * IndexSize(mirror.indexFormat) : 0;
 				auto& command = a_stream.Add(UiOp::SetIndexData, mirror.indexData, size);
 				command.a = mirror.indexCount;
-				command.b = mirror.indexFormat == DXGI_FORMAT_R16_UINT ? 1 : mirror.indexFormat == DXGI_FORMAT_R32_UINT ? 2 : 0;
+				command.b = mirror.indexFormat == DXGI_FORMAT_R16_UINT ? 1 : mirror.indexFormat == DXGI_FORMAT_R32_UINT ? 2 :
+				                                                                                                          0;
 				command.c = mirror.indexData != nullptr;
 			}
 		}

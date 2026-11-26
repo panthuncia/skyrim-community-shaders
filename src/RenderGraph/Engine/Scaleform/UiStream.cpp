@@ -123,14 +123,17 @@ namespace RenderGraph::Engine::Scaleform
 		vertexData = a_data;
 		vertexFormat = a_format;
 		vertexCount = a_count;
-		vertexStride = a_format == 0 ? 0 : a_format == 3 ? 8 : a_format == 4 ? 12 : 4;
+		vertexStride = a_format == 0 ? 0 : a_format == 3 ? 8 :
+		                               a_format == 4     ? 12 :
+		                                                   4;
 	}
 
 	void RendererState::SetIndexData(const void* a_data, std::int32_t a_count, std::int32_t a_format)
 	{
 		indexData = a_data;
 		indexCount = a_count;
-		indexFormat = a_format == 1 ? DXGI_FORMAT_R16_UINT : a_format == 2 ? DXGI_FORMAT_R32_UINT : 0;
+		indexFormat = a_format == 1 ? DXGI_FORMAT_R16_UINT : a_format == 2 ? DXGI_FORMAT_R32_UINT :
+		                                                                     0;
 	}
 
 	void RendererState::SetPerspective3D(const float (&a_matrix)[16])
