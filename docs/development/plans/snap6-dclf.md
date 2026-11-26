@@ -13,9 +13,10 @@ Lead `dclf`, round `snap6`, branch `snap6/dclf` (base `org_integration` 175c008d
 - `PushRetired(stamp, references, owners)` pushes a retired batch as one entry. Its destructor lets go of the references and owners,
   then advances `releasedThrough` to the batch's last publication. The coordinator's `RecycleRetired` uses it (before: a
   `NoteReleased` then one push per reference).
-- `Release()` at Present, its two `EventQueue`s and their vectors are gone. The engine lane drains at the capture on the main thread.
+- `Release()` at Present, its two `EventQueue`s and their vectors are gone. The engine lane drains on the main thread after the
+  update's frame jobs (section 2).
 - `Alive(publication)` keeps its meaning, read under a lease or on the main thread. `releasedThrough` now moves only when a batch is
-  actually let go (before, the take-then-read could mark stamps released whose batch was still queued), and only at the capture,
+  actually let go (before, the take-then-read could mark stamps released whose batch was still queued), and only at the drain,
   while the window is closed.
 
 Other render-thread drops of engine references moved to the queue too:
@@ -53,6 +54,16 @@ engine lane with the batch, as before (`ApplyEvents`).
 
 ## 2. Design points checked against the code
 
+- **The engine lane drains after the update's frame jobs, not at the capture (design fixed).** Main::Update joins its frame jobs
+  (the frame-job wait, SE 34554 / AE 35409, `RenderGraph/Engine/MainTick`) right after its call of Main::DrawFrame, so those jobs
+  (the cell animations, Havok, animation) run beside the capture and the render half. The first cadence-drop-cells run hung at the
+  third coc: the cell animations job looped forever in a corrupted engine list (AE `FUN_140cf7c70`) while the main thread waited
+  for it, because the capture (no render half on a dropped update, so the job's update ran at once) dropped DCLF's last references
+  beside it. Before this change DCLF released at Present, where the job had normally finished. `Retire::DrainEngine` now runs as a
+  `MainTick` callback, where the engine is back to one thread and the engine-read window is closed, and `Retire::LetGo` always goes
+  through the lane (the snapshot it lets go may hold sky keys). Decision 99's "drained at the capture" becomes "drained at the
+  frame-job wait after Main::DrawFrame".
+
 - **The scene publication and `FrameSnapshot::scene`.** The design had the publication let go with its snapshot. In the code no
   snapshot carries it yet (`FrameSnapshot::scene` is empty): DCLF's publications reach the frame through the snapshot builder's
   `SceneSnapshot`, held by the epochs' frame owners until the GPU finished the slot, and return to the coordinator, whose
@@ -82,7 +93,8 @@ engine lane with the batch, as before (`ApplyEvents`).
 ## Proposed decision-log entries
 
 - **DCLF's engine releases are the retire queue's engine lane** (phase 6 part 2): `EngineReleases::Push`, `PushOwner` and
-  `PushRetired` push entries waiting for the newest render frame begun; the lane drains at the capture on the main thread; a
+  `PushRetired` push entries waiting for the newest render frame begun; the lane drains on the main thread at the frame-job wait
+  after Main::DrawFrame (refines 99: the capture runs beside the update's frame jobs); a
   retired batch advances `releasedThrough` when it is let go. No DCLF engine reference is dropped at Present any more (the light
   culls' retired filters and the scene lists' graveyard included).
 - **The engine-read window is game-side:** open after the update's capture and side effects, closed at the end of Main::Update's
