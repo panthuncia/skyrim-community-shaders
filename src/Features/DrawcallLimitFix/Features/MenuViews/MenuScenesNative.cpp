@@ -837,6 +837,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		const bool taa = false;  // the stats menu draws without TAA (UI3DSceneManager::Render: schemes 3 and 6)
 		const auto targets = ColourTargets(scheme, taa);
+		// The frame's family resources start before the draws lease theirs, then kMAIN's depth and stencil clear, as at the render's start.
+		Family::BeginBatch();
+		if (!::RenderGraph::Engine::Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL))
+			::RenderGraph::Fatal("menu scenes", "kMAIN's depth clear at a native menu scene render was not taken");
 		auto run = std::make_shared<Run>();
 		run->view = View::MenuColour;
 		std::uint32_t frame = ~0u;
@@ -864,9 +868,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (why)
 				::RenderGraph::Fatal("menu scenes", std::format("scheme {} draw {}: {} ({})", scheme, geometry->name.c_str() ? geometry->name.c_str() : "?", why, detail));
 		}
-		// The colour pass's clears: kMAIN's depth and stencil at the render's start.
-		::RenderGraph::Engine::Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL);
-		Family::BeginBatch();
 		if (SceneDraws::Available() && SceneDraws::CanTake(View::MenuColour))
 			SceneDraws::Submit(std::move(run));
 		else
