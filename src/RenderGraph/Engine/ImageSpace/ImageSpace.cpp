@@ -1,11 +1,12 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "Features/VolumetricLighting/ORGVolumetricLighting.h"
 #include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
-#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
@@ -2827,6 +2828,14 @@ namespace RenderGraph::Engine::ImageSpace
 
 		void WorldPostProcess(std::uint32_t a_target, const std::function<void()>& a_engine)
 	{
+		// Native never enters the engine's body, unless another mod hooks it. Its steps' families decide themselves whether CS draws them.
+		// VL's render comes first: Main::Draw ran it before RenderPostProcess, whose reads take its activity, colour and targets.
+		if (RenderGraph::Engine::Native::Active() && NativePost::Native(NativePost::Family::kPost)) {
+			ORGVolumetricLighting::Get().RenderNative();
+			NativePost::ReadB();
+			NativePost::RunNativeBody(a_target);
+			return;
+		}
 		NativePost::ReadB();
 		const auto& f = NativePost::R().frame;
 		if (IS().on && f.readB && Chain().group.Registered() && NativePost::Native(NativePost::Family::kPost)) {

@@ -546,14 +546,20 @@ namespace NativePost
 		if (auto* refraction = reinterpret_cast<RE::ImageSpaceEffect*>(EffectAt(1)); f.eof && refraction && refraction->IsActive())
 			f.slots |= 1u << 1;
 		R().lastSlots = f.slots;
-		// VL's activity changes with the cell during the frame (VL Render), so it stays a read here.
-		const auto vlEffect = Field<std::uintptr_t>(base, 0x170);
-		f.volumetric = *g.volumetric && vlEffect && Field<bool>(vlEffect, 0x08);
 		f.vlParity = Frame::PostChain::VolumetricParity();
-		// The VL composite's colour: the sun shadow light's diffuse blended with the VL colour (107017). VL Render (107023) fills the
-		// settings block during the frame.
-		if (const auto settings = g.vlSettings())
-			g.vlColour(settings, &f.vlColour[0], &f.vlColour[1], &f.vlColour[2]);
+		if (block) {
+			// Native: CS's VL render, from the snapshot.
+			f.volumetric = ORGVolumetricLighting::NativeActive();
+			f.vlColour = ORGVolumetricLighting::NativeColour();
+		} else {
+			// VL's activity changes with the cell during the frame (VL Render), so it stays a read here.
+			const auto vlEffect = Field<std::uintptr_t>(base, 0x170);
+			f.volumetric = *g.volumetric && vlEffect && Field<bool>(vlEffect, 0x08);
+			// The VL composite's colour: the sun shadow light's diffuse blended with the VL colour (107017). VL Render (107023) fills the
+			// settings block during the frame.
+			if (const auto settings = g.vlSettings())
+				g.vlColour(settings, &f.vlColour[0], &f.vlColour[1], &f.vlColour[2]);
+		}
 		// The world camera: the snapshot's main camera in native mode.
 		if (block) {
 			const auto& frustum = MainCamera().frustum;
@@ -602,7 +608,7 @@ namespace NativePost
 		if (const auto base = ManagerBase())
 			if (const auto taa = Field<std::uintptr_t>(base, 0x1f0)) {
 				f.taa = Field<bool>(taa, 0x18);
-				f.taaMode = Field<std::int32_t>(taa, 0x2c);
+				f.taaMode = NativeBlock() ? RenderGraph::Engine::Native::WorldPass::TaaForm() : Field<std::int32_t>(taa, 0x2c);
 				f.taaWater = Field<bool>(taa, 0x38);
 			}
 	}
@@ -1557,7 +1563,10 @@ namespace NativePost
 			Field<float>(taa, 0x20) = 1.0f / h;
 			Field<float>(taa, 0x24) = trunc(w * rx) * (1.0f / w);
 			Field<float>(taa, 0x28) = trunc(h * ry) * (1.0f / h);
-			Field<std::int32_t>(taa, 0x2c) = 0;
+			if (NativeBlock())
+				RenderGraph::Engine::Native::WorldPass::SetTaaForm(0);
+			else
+				Field<std::int32_t>(taa, 0x2c) = 0;
 		}
 		if (!route.direct && f.screenshot) {
 			// Native mode reports the copy back; the capture completes the request on the game thread (Screenshots.inl).
@@ -1622,6 +1631,32 @@ namespace NativePost
 		endOfFrame(RE::ImageSpaceManager::GetSingleton(), 1, a_target, 1, 0);
 		std::memcpy(reinterpret_cast<std::byte*>(Field<std::uintptr_t>(*g.worldSceneGraph, 0x128)) + 0x174, port.data(), port.size());
 		tls->taskFlag = taskFlag;
+		++r.native[3];
+	}
+
+	/**
+	* @brief Native: RenderPostProcess (SE 100430, AE 107148) driven by CS. The engine's function is not entered: CS calls its points in
+	* its order, with no flush and no render-target or depth-of-field writes (nothing native reads them): VL's apply and blur, the lens
+	* flare gather (still the engine's), the pre-tonemap composites and the end-of-frame effects through their call site, so the hooks
+	* there run in their order. The current camera is still written: native's shadow mask and effect constants read it. Render owner.
+	*/
+	void RunNativeBody(std::uint32_t a_target)
+	{
+		ZoneScopedN("CS.PostNative.Body");
+		auto& r = R();
+		const auto& g = G();
+		auto* camera = reinterpret_cast<RE::NiCamera*>(Field<std::uintptr_t>(*g.worldSceneGraph, 0x128));
+		*g.currentCamera = camera;
+		if (r.frame.volumetric)
+			ORGVolumetricLighting::Get().ApplyNative();
+		{
+			ZoneScopedN("CS.PostNative.LensFlareGather (engine)");
+			g.lensFlares(camera);
+		}
+		g.composites(RE::ImageSpaceManager::GetSingleton(), 1, 1);
+		using EndOfFrame = void (*)(void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
+		const auto endOfFrame = reinterpret_cast<EndOfFrame>(EngineZones::CallTarget(g.eofCallSite));
+		endOfFrame(RE::ImageSpaceManager::GetSingleton(), 1, a_target, 1, 0);
 		++r.native[3];
 	}
 }

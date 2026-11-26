@@ -4,10 +4,13 @@
 
 #include "Deferred.h"
 #include "Features/Upscaling.h"
+#include "Features/VolumetricLighting/ORGVolumetricLighting.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -295,7 +298,8 @@ namespace RenderGraph::Frame::PostChain
 		const auto base = reinterpret_cast<std::uintptr_t>(manager);
 		fields.read = true;
 		const auto volumetric = Member<std::uintptr_t>(base, kVolumetricEffect);
-		fields.volumetric = Global<bool>(kVolumetricEnabled) && volumetric && Member<bool>(volumetric, 0x08);
+		fields.volumetric = Engine::Native::Active() ? ORGVolumetricLighting::NativeActive() :
+		                                               Global<bool>(kVolumetricEnabled) && volumetric && Member<bool>(volumetric, 0x08);
 		if (const auto sil = Member<std::uintptr_t>(base, kSil))
 			fields.sil = Member<bool>(sil, 0x10);
 		if (const auto lens = Member<std::uintptr_t>(base, kLensFlares))
@@ -315,7 +319,7 @@ namespace RenderGraph::Frame::PostChain
 		fields.lumLevels = static_cast<std::uint8_t>(Levels());
 		if (const auto taa = Member<std::uintptr_t>(base, kTemporal)) {
 			fields.taa = Member<bool>(taa, 0x18);
-			fields.taaMode = static_cast<std::uint8_t>(Member<std::int32_t>(taa, 0x2c));
+			fields.taaMode = static_cast<std::uint8_t>(Engine::Native::Active() ? Engine::Native::WorldPass::TaaForm() : Member<std::int32_t>(taa, 0x2c));
 			fields.taaWater = Member<bool>(taa, 0x38);
 		}
 		// The dynamic-resolution upsample (100548) is not read: a ratio is no build input (decision 6a). Its group is always on, gated.
@@ -363,6 +367,9 @@ namespace RenderGraph::Frame::PostChain
 
 	std::uint32_t VolumetricParity()
 	{
+		// Native: CS's VL counter (the engine's VL render does not run).
+		if (Engine::Native::Active())
+			return ORGVolumetricLighting::NativeParity();
 		static REL::Relocation<std::uintptr_t (*)()> volumetricState{ kVolumetricState };
 		const auto vl = volumetricState();
 		return vl ? (~Member<std::uint32_t>(vl, kVolumetricCounter) & 1u) : 0u;

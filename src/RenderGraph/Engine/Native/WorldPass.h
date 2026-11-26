@@ -128,6 +128,15 @@ namespace RenderGraph::Engine::Native::WorldPass
 	/** @brief The last SetRawWater (the engine's global 528167 / 415112 kept it the same way). Render thread. */
 	bool RawWater();
 
+	/**
+	* @brief TAA's form, which the engine kept at ImageSpaceManager +0x1f0 +0x2c: 1 once the water mask point ran, 0 again after TAA's
+	* step. The water blend's test and the post chain read it. Native, render thread.
+	*/
+	std::int32_t TaaForm();
+
+	/** @brief Sets TaaForm: the water mask point (1) and TAA's step (0). */
+	void SetTaaForm(std::int32_t a_form);
+
 	/** @brief Marks native's RenderWorld: scopes set their point only inside it. */
 	class RenderWorldScope
 	{

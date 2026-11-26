@@ -1,7 +1,10 @@
 #pragma once
 
 #include "RenderGraph/Port.h"
+#include "Snapshot/FrameSnapshot.h"
 
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <string_view>
 
@@ -34,6 +37,49 @@ public:
 
 	/** @brief True when the dispatch is the VL render's on the ORG path, and the caller skips it. a_computeShader is for the log. */
 	bool TakeEngineDispatch(std::string_view a_computeShader);
+
+	/**
+	* @brief Native: the game data of the engine's VL render (SE 100306, AE 107023), captured on the game thread. Native never calls the
+	* VL render: CS computes its constants from this block and CS's frame (RenderNative).
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::VolumetricLightingRender;
+		bool enabled = false;  // gVolumetricLightingEnabled: Main::Draw renders VL and RenderPostProcess applies it
+		bool active = false;   // the VL render's test: the apply and the blur are on this update
+		// The VL descriptor's first twelve floats (intensity, colour blend, colour, the density settings, the range factor): the
+		// weather's render data, copied while the copy switch is on, else the values last copied.
+		std::array<float, 12> descriptor{};
+		std::array<float, 3> sunDirection{};  // the sun shadow light's direction, normalised (zero when too short)
+		std::array<float, 3> sunDiffuse{};    // the sun shadow light's diffuse, which the VL colour blends from
+		std::array<float, 3> noiseOffset{};   // the noise scroll, stepped once per game update
+		bool cascadeFlag = false;             // the generate's row 18 x (an INI value equal to 1)
+		float temporal = 0.0f;                // the weather's temporal factor (SE 100298, AE 107015)
+		std::uint32_t noTemporal = 0;         // apply requests with no temporal blend so far (the apply effect's +0x9, taken here)
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Registers the block's capture. Native only, at install. */
+	static void InstallCapture();
+
+	/** @brief Native: whether this frame's snapshot has VL on and active (RenderPostProcess's test). Render thread. */
+	static bool NativeActive();
+
+	/** @brief Native: the VL colour (SE 100300, AE 107017) from the snapshot's block. Render thread. */
+	static std::array<float, 3> NativeColour();
+
+	/** @brief Native: which VL target the apply writes this frame (0 or 1), from CS's own VL counter. Render thread. */
+	static std::uint32_t NativeParity();
+
+	/**
+	* @brief Native: the VL render's CPU work, from the snapshot and CS's frame: this frame's generate constants and CS's VL counter
+	* (which picks the targets). Where Main::Draw rendered VL; before RenderPostProcess's reads. Render thread.
+	*/
+	void RenderNative();
+
+	/** @brief Native, in RenderPostProcess's order: the apply and the blur, which run this frame's VL on the graph. Render thread. */
+	void ApplyNative();
+
 	~ORGVolumetricLighting();
 
 private:

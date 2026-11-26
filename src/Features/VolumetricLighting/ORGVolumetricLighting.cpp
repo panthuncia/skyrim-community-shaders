@@ -15,6 +15,7 @@
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
 #include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/Observed.h"
@@ -28,6 +29,8 @@
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
+#include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 #include "State.h"
 #include "Utils/Game.h"
 #include "Utils/Logging.h"
@@ -41,11 +44,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <vector>
@@ -340,6 +345,167 @@ namespace
 		// The commit of the build this run executes opened the gates.
 		bool opened = false;
 	};
+
+	// ---- Native: the VL render from the snapshot ----
+
+	using Block = ORGVolumetricLighting::Block;
+
+	template <class T>
+	T& Global(std::uint64_t a_se, std::uint64_t a_ae)
+	{
+		return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
+	}
+
+	template <class T>
+	T At(std::uintptr_t a_base, std::size_t a_offset)
+	{
+		T value{};
+		std::memcpy(&value, reinterpret_cast<const void*>(a_base + a_offset), sizeof(T));
+		return value;
+	}
+
+	// The sun shadow light: State::shadowSceneNode[0] +0x210, its NiLight at +0x48.
+	std::uintptr_t SunShadowLight()
+	{
+		const auto node = Global<std::uintptr_t>(513211, 390951);
+		return node ? At<std::uintptr_t>(node, 0x210) : 0;
+	}
+
+	/** @brief Game-side state the block carries from update to update. Game thread. */
+	struct GameState
+	{
+		std::array<float, 12> descriptor{};
+		bool descriptorRead = false;
+		std::array<float, 3> noiseOffset{};
+		std::uint32_t noTemporal = 0;
+		std::minstd_rand random{ 0x5eed };
+	};
+
+	GameState& Game()
+	{
+		static GameState state;
+		return state;
+	}
+
+	/** @brief Render-side state: the VL counter the engine kept at the descriptor's +0x88 (the targets' parity, the generate's row 22 w). */
+	struct RenderState
+	{
+		std::uint32_t counter = 0;
+		std::uint32_t noTemporalSeen = 0;
+		bool noTemporalRead = false;
+	};
+
+	RenderState& Rendered()
+	{
+		static RenderState state;
+		return state;
+	}
+
+	const Block* NativeBlock()
+	{
+		const auto& snapshot = Snapshot::Current();
+		return snapshot ? snapshot->Block<Block>() : nullptr;
+	}
+
+	/** @brief The capture (game thread): what the VL render (AE 107023, SE 100306 and its parts) reads of game data, and its noise step. */
+	void CaptureBlock(Snapshot::Builder& a_builder)
+	{
+		auto& game = Game();
+		Block block;
+		block.enabled = Global<bool>(527940, 414913);
+		// The VL render's test: off while DrawWorld +0x51 and an INI switch are both set, or while 415052 is set.
+		static REL::Relocation<const std::uint8_t* (*)()> drawWorld{ REL::RelocationID(100403, 107121) };
+		const auto* world = drawWorld();
+		block.active = !((world && world[0x51] && Global<bool>(513414, 391215)) || Global<bool>(528107, 415052));
+		if (!std::exchange(game.descriptorRead, true))
+			std::memcpy(game.descriptor.data(), Descriptor(), sizeof(game.descriptor));
+		const bool renders = block.enabled && block.active;
+		// The VL render copies the weather's render data into its descriptor while the copy switch is on.
+		if (renders && Global<bool>(527941, 414914))
+			std::memcpy(game.descriptor.data(), &Global<float>(527717, 414627), sizeof(game.descriptor));
+		block.descriptor = game.descriptor;
+		if (const auto sun = SunShadowLight()) {
+			const auto light = At<std::uintptr_t>(sun, 0x48);
+			const float x = At<float>(light, 0x7c), y = At<float>(light, 0x88), z = At<float>(light, 0x94);
+			const float length = std::sqrt(y * y + x * x + z * z);
+			if (length > 1.0e-6f) {
+				const float inverse = 1.0f / length;
+				block.sunDirection = { inverse * x, inverse * y, inverse * z };
+			}
+			block.sunDiffuse = { At<float>(light, 0x11c), At<float>(light, 0x120), At<float>(light, 0x124) };
+		}
+		block.cascadeFlag = Global<std::int32_t>(513334, 391108) == 1;
+		block.temporal = TemporalFactor();
+		// The apply effect's no-temporal request (+0x9): the apply consumed it when it ran; native takes it here.
+		if (const auto manager = Global<std::uintptr_t>(527731, 414660); renders && manager)
+			if (const auto apply = At<std::uintptr_t>(manager, 0x170); apply && At<bool>(apply, 0x9)) {
+				*reinterpret_cast<bool*>(apply + 0x9) = false;
+				++game.noTemporal;
+			}
+		block.noTemporal = game.noTemporal;
+		// The noise scroll (AE 0x1414c57a0's tail): the wind's direction scaled by the density settings and a random factor per axis, by
+		// the frame's delta. Once per game update, where the engine stepped once per VL render.
+		if (renders) {
+			const auto& d = game.descriptor;
+			const float step = *globals::game::deltaTime * d[6];
+			const float scale = Global<float>(513203, 390935);
+			const float angle = Global<float>(527660, 414577);
+			std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+			const float r0 = unit(game.random), r1 = unit(game.random), r2 = unit(game.random);
+			game.noiseOffset[1] += step * (std::cos(angle) * d[7] * scale * r1);
+			game.noiseOffset[2] += step * (r2 * d[8]);
+			game.noiseOffset[0] -= r0 * (std::sin(angle) * d[7] * scale) * step;
+		}
+		block.noiseOffset = game.noiseOffset;
+		a_builder.Set(block);
+	}
+
+	/**
+	* @brief The generate's constants (AE 0x1414c57a0, SE 0x1412dc510) from the block and CS's frame: the main camera's view-projection
+	* and its inverse, the sun's cascades as the shadow pass left them, the splits, the sun direction, the volume size, the noise scroll
+	* and the eye, the density settings. a_counter is the VL counter before this render.
+	*/
+	std::array<Float4, kGenerateRows> GenerateRows(const Block& a_block, const Snapshot::CameraView& a_camera, const VolumeSize& a_size, std::uint32_t a_counter)
+	{
+		std::array<Float4, kGenerateRows> rows{};
+		const auto& d = a_block.descriptor;
+		const auto transpose = [&](std::size_t a_row, const std::array<float, 16>& a_m) {
+			for (std::size_t r = 0; r < 4; ++r)
+				rows[a_row + r] = { a_m[r], a_m[4 + r], a_m[8 + r], a_m[12 + r] };
+		};
+		transpose(0, a_camera.viewProj);
+		transpose(4, Snapshot::FrameCamera::Inverse(a_camera.viewProj));
+		const float n = a_camera.frustum.fNear, f = a_camera.frustum.fFar;
+		const RE::NiPoint3& eye = a_camera.position;
+		if (const auto sun = SunShadowLight()) {
+			const auto count = At<std::uint32_t>(sun, 0x140);
+			const auto split = [&](std::size_t a_offset) {
+				const float s = At<float>(sun, a_offset);
+				return (s * f - f * n) / ((f - n) * s);
+			};
+			rows[17][0] = split(0x5a4);
+			rows[17][1] = split(0x5a8);
+			// The engine indexes its own row: a third cascade reads the row's z, which nothing writes.
+			rows[17][2] = count >= 1 && count <= 3 ? rows[17][count - 1] : 0.0f;
+			rows[17][3] = static_cast<float>(count);
+			const auto descriptors = At<std::uintptr_t>(sun, 0x148);
+			for (std::uint32_t i = 0; i < (std::min)(count, 2u) && descriptors; ++i) {
+				std::array<float, 16> m{};
+				std::memcpy(m.data(), reinterpret_cast<const void*>(descriptors + i * 0xF0), sizeof(m));
+				for (std::size_t j = 0; j < 4; ++j)
+					m[12 + j] = ((m[12 + j] + eye.x * m[j]) + eye.y * m[4 + j]) + eye.z * m[8 + j];
+				for (std::size_t r = 0; r < 3; ++r)
+					rows[8 + i * 3 + r] = { m[r], m[4 + r], m[8 + r], m[12 + r] };
+			}
+		}
+		rows[18][0] = a_block.cascadeFlag ? 1.0f : 0.0f;
+		rows[19] = { a_block.sunDirection[0], a_block.sunDirection[1], a_block.sunDirection[2], 0.0f };
+		rows[20] = { static_cast<float>(a_size.width), static_cast<float>(a_size.height), static_cast<float>(a_size.depth), 0.0f };
+		rows[21] = { a_block.noiseOffset[0] + eye.x, a_block.noiseOffset[1] + eye.y, a_block.noiseOffset[2] + eye.z, 1.0f / d[6] };
+		rows[22] = { eye.x, eye.y, eye.z, static_cast<float>(a_counter & 7) };
+		rows[23] = { d[9], d[10], d[5], 0.0f };
+		return rows;
+	}
 }
 
 struct ORGVolumetricLighting::Impl
@@ -813,6 +979,50 @@ struct ORGVolumetricLighting::Impl
 		if (!std::exchange(announced, true))
 			logger::info("{}: the first frame's volumetric lighting ran on the graph ({}x{}x{} volume)", kLogPrefix, run->size.width, run->size.height, run->size.depth);
 	}
+
+	// ---- Native ----
+
+	/** @brief The VL render's CPU work from the snapshot (RenderNative): the pending run the apply and the blur finish. */
+	void RenderNative()
+	{
+		pending = {};
+		const auto* block = NativeBlock();
+		if (!block || !block->enabled || !block->active || !volume)
+			return;
+		const auto& snapshot = Snapshot::Current();
+		const auto& camera = snapshot->cameras.Current(Snapshot::ViewId::Main);
+		if (!camera.valid)
+			Fatal("a world frame's snapshot has no main camera");
+		auto& rendered = Rendered();
+		const auto extent = volume.AdoptedExtent();
+		const VolumeSize size{ extent[0], extent[1], extent[2] };
+		const auto& d = block->descriptor;
+		const auto rows = GenerateRows(*block, camera, size, rendered.counter);
+		++rendered.counter;
+		pending.generate = true;
+		pending.size = size;
+		pending.rangeFactor = d[11];
+		std::copy(rows.begin(), rows.end(), pending.generateConstants.begin());
+		pending.generateConstants[kGenerateRows] = { pending.rangeFactor != 0.0f ? 1.0f / pending.rangeFactor : 0.0f, 0.0f, 0.0f, 0.0f };
+		// The apply writes the target the counter's parity names (RenderPostProcess: ~counter & 1 is the one it reads).
+		pending.output = rendered.counter & 1u;
+		pending.intensity = size.depth ? d[0] / static_cast<float>(size.depth) : 0.0f;
+		// A request for no temporal blend applies once, to the first render after it.
+		if (!std::exchange(rendered.noTemporalRead, true))
+			rendered.noTemporalSeen = block->noTemporal;
+		const bool noTemporal = block->noTemporal != rendered.noTemporalSeen;
+		rendered.noTemporalSeen = block->noTemporal;
+		pending.temporal = noTemporal ? 0.0f : block->temporal;
+	}
+
+	/** @brief The apply and the blur (ApplyNative): the frame's run on the graph. */
+	void ApplyNative()
+	{
+		if (!pending.output)
+			return;
+		const auto output = *pending.output;
+		Blur(OutputOf(output), PreviousOf(output), kSwapTarget);
+	}
 };
 
 ORGVolumetricLighting::ORGVolumetricLighting() = default;
@@ -878,6 +1088,8 @@ void ORGVolumetricLighting::Install()
 	stl::detour_thunk<ORGVolumetricLightingDetours::Render>(REL::RelocationID(100306, 107023));
 	stl::detour_thunk<ORGVolumetricLightingDetours::Apply>(REL::RelocationID(100475, 107193));
 	stl::detour_thunk<ORGVolumetricLightingDetours::Blur>(REL::RelocationID(100486, 107206));
+	if (RenderGraph::Engine::Native::Requested())
+		InstallCapture();
 	logger::info("{}: hooks installed (the VL render, ApplyVL, the VL blur)", kLogPrefix);
 }
 
@@ -957,6 +1169,45 @@ void ORGVolumetricLighting::Setup()
 	} catch (const std::exception& e) {
 		Fatal(fmt::format("its setup threw ({})", e.what()));
 	}
+}
+
+void ORGVolumetricLighting::InstallCapture()
+{
+	Snapshot::RegisterCapture(&CaptureBlock);
+}
+
+bool ORGVolumetricLighting::NativeActive()
+{
+	const auto* block = NativeBlock();
+	return block && block->enabled && block->active;
+}
+
+std::array<float, 3> ORGVolumetricLighting::NativeColour()
+{
+	// AE 107017: the sun shadow light's diffuse blended toward the descriptor's colour by its blend factor.
+	const auto* block = NativeBlock();
+	if (!block)
+		return {};
+	const auto& d = block->descriptor;
+	const auto& sun = block->sunDiffuse;
+	return { (d[2] - sun[0]) * d[1] + sun[0], (d[3] - sun[1]) * d[1] + sun[1], (d[4] - sun[2]) * d[1] + sun[2] };
+}
+
+std::uint32_t ORGVolumetricLighting::NativeParity()
+{
+	return ~Rendered().counter & 1u;
+}
+
+void ORGVolumetricLighting::RenderNative()
+{
+	if (impl)
+		impl->RenderNative();
+}
+
+void ORGVolumetricLighting::ApplyNative()
+{
+	if (impl)
+		impl->ApplyNative();
 }
 
 bool ORGVolumetricLighting::TakeEngineDispatch(std::string_view a_computeShader)

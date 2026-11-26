@@ -199,6 +199,8 @@ namespace Snapshot
 		SunQuery,     // Features/DrawcallLimitFix/Features/Sky/Sky.h, DCLF::Features::Sky::SunQueryBlock
 		RenderWorld,  // RenderGraph/Engine/Native/WorldPass.h, RenderGraph::Engine::Native::WorldPass::Block
 		FaceTint,     // Snapshot/FaceTint.h, Snapshot::FaceTint::Block
+		// The post (snap3-post)
+		VolumetricLightingRender,  // Features/VolumetricLighting/ORGVolumetricLighting.h, ORGVolumetricLighting::Block
 		Count
 	};
 

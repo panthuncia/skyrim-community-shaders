@@ -21,6 +21,7 @@ namespace RenderGraph::Engine::Native::WorldPass
 		thread_local bool inRenderWorld = false;
 		thread_local bool shiftWindow = false;
 		bool rawWater = false;
+		std::int32_t taaForm = 0;
 		thread_local bool inScope = false;
 		thread_local Point current = Point::Count;
 		thread_local State state;
@@ -185,10 +186,10 @@ namespace RenderGraph::Engine::Native::WorldPass
 
 	bool WaterBlendRuns(std::uint32_t a_flags)
 	{
-		// ImageSpaceManager +0x1f0 is TAA's helper: +0x38 its water history, +0x2c its form, which the water mask point sets to 1.
+		// ImageSpaceManager +0x1f0 is TAA's helper: +0x38 its water history. Its form is CS's (TaaForm), 1 after the water mask point.
 		const auto* manager = RE::ImageSpaceManager::GetSingleton();
 		const auto taa = manager ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(manager) + 0x1f0) : 0;
-		if (!taa || *reinterpret_cast<const bool*>(taa + 0x38) || *reinterpret_cast<const std::int32_t*>(taa + 0x2c) != 1)
+		if (!taa || *reinterpret_cast<const bool*>(taa + 0x38) || taaForm != 1)
 			return false;
 		if ((a_flags & 0x280) || (a_flags & 10))
 			return false;
@@ -227,6 +228,16 @@ namespace RenderGraph::Engine::Native::WorldPass
 	void SetRawWater(bool a_raw)
 	{
 		rawWater = a_raw;
+	}
+
+	std::int32_t TaaForm()
+	{
+		return taaForm;
+	}
+
+	void SetTaaForm(std::int32_t a_form)
+	{
+		taaForm = a_form;
 	}
 
 	bool RawWater()
