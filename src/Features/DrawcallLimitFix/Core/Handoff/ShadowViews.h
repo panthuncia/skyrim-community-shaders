@@ -252,6 +252,14 @@ namespace DCLF
 				return 0;
 			return captures[a_id]++;
 		}
+		/** @brief The view's captures so far this frame. */
+		std::uint32_t CapturesOf(std::uint32_t a_id) const { return a_id < captures.size() ? captures[a_id] : 0; }
+		/** @brief Takes back the last NextCapture of a_id, for a native capture the engine draws after all. */
+		void UndoCapture(std::uint32_t a_id)
+		{
+			if (a_id < captures.size() && captures[a_id])
+				--captures[a_id];
+		}
 
 	private:
 		std::vector<View> views;

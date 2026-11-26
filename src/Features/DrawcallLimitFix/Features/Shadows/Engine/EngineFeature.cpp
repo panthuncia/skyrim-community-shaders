@@ -12,6 +12,7 @@ namespace DCLF::Features::Shadows::Engine
 			RegisterPasses(a_context);
 			RegisterShadowEpochs(a_context);
 			InstallCasterHooks();
+			InstallShadowMapHooks();
 		}
 	}
 

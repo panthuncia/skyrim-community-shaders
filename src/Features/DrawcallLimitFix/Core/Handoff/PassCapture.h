@@ -192,6 +192,10 @@ namespace DCLF
 		std::vector<MapClass> TakeMapCensus();
 		/** @brief Render thread. Of the kept geometries under the LOD root, how many the frame's set now holds and how many wait. */
 		std::size_t MapKeptMembersNow(std::size_t& a_kept, std::size_t& a_waiting) const;
+		/** @brief Render thread, before the frame's shadow registrations. Forgets which covered views kept passes for the engine. */
+		void ResetCoveredKept();
+		/** @brief Render thread, once the shadow registrations are done. Whether a covered view's accumulator kept a pass for the engine. */
+		bool CoveredKept(const void* a_accumulator) const;
 		/** @brief Render thread. Accumulators of uncovered shadow views that kept passes went to, since the last call. */
 		std::vector<const void*> TakeUncoveredAccumulators();
 		/** @brief Render thread. The samples of the load hold's undrawn passes since the last call, and clears them. */
@@ -311,6 +315,10 @@ namespace DCLF
 		ankerl::unordered_dense::set<const RE::BSGeometry*> holdNobodySeen;
 		mutable ankerl::unordered_dense::map<const RE::BSGeometry*, KeptSample> keptSamples;
 		mutable ankerl::unordered_dense::set<const void*> uncoveredAccumulators;  // under keptLock
+		// The covered views' accumulators that kept a pass this frame, under coveredKeptLock. Rare: a caster DCLF does not hold yet.
+		mutable std::mutex coveredKeptLock;
+		mutable std::vector<const void*> coveredKept;
+		mutable std::atomic<bool> anyCoveredKept{ false };
 		// Under mapLock.
 		std::atomic<bool> mapCensus{ false };
 		mutable std::mutex mapLock;

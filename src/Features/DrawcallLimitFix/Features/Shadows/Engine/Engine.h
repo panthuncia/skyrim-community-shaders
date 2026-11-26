@@ -17,6 +17,10 @@ namespace DCLF::Features::Shadows::Engine
 	void RegisterShadowEpochs(Api::InstallContext& a_context);
 
 	void InstallCasterHooks();
+	/** @brief Hooks the shadow lights' Render, so a light whose views DCLF draws whole skips it (ShadowMapsNative.cpp). */
+	void InstallShadowMapHooks();
+	/** @brief Render thread. Set while Main::RenderShadowMaps runs, between DCLF's shadow map points. */
+	void SetShadowMapsOpen(bool a_open);
 	// Checks the casters' three calls before any hook is written. They must be CALLs, as the thunks chain.
 	void PreflightCasterHooks();
 }
