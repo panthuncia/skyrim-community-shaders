@@ -1,6 +1,7 @@
 #pragma once
 
-// The sky's draws computed from the passes the engine registered, the camera and a few engine globals.
+// The sky's draws computed from the passes the engine registered, or from the sky root (native's main view and faces), the camera
+// and a few engine globals.
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
 
@@ -40,6 +41,13 @@ namespace DCLF::Features::Sky::Native
 	 */
 	bool BuildBatch(RE::BSShaderAccumulator* a_accumulator, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners,
 		std::string& a_why);
+
+	/**
+	 * @brief Render thread, at the main pass's sky batch, in native. The sky batch's and cloud layers' draws from the sky root culled
+	 * with the adopted snapshot's main camera, in the engine's draw order, without the engine's registrations. Sky-object effects are
+	 * not the family's and are left out. False, with a_why, when a pass cannot be computed.
+	 */
+	bool BuildMain(RE::BSShaderAccumulator* a_accumulator, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why);
 
 	/**
 	 * @brief Render thread, at the cloud group's call, before it. The draws of its cloud layers (geometry group 13's sky passes), in

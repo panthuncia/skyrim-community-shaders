@@ -1,15 +1,17 @@
-// The sky batch's draws computed from the engine's registered passes. Render thread.
+// The sky batch's draws: from the engine's registered passes, or, for the main view in native and for native faces, from the sky root.
+// Render thread.
 // The engine functions this follows (AE 1.6.1170): BSSkyShaderProperty::GetRenderPasses 0x1414e6fd0, RenderBatches 0x1414b4fe0 and
 // its group step 0x1414f39c0, BSSkyShader::SetupTechnique 0x1414e5d00 and SetupGeometry 0x1414e6030, the transform 0x1414aaf10.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
-#include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -901,12 +903,17 @@ namespace DCLF::Features::Sky::Native
 			return false;
 		}
 
-		/** @brief What the face cull of the sky root registers, in registration order. */
+		/** @brief What the cull of the sky root registers for a face or the main camera, in registration order. */
 		struct FaceCull
 		{
 			const ShadowCameras::Planes* planes = nullptr;
 			std::vector<FacePass> passes;
 			std::string why;
+			// The main camera's cull leaves sky-object effects out (they are not the sky family's); a face fails on them.
+			bool skipEffects = false;
+			// The main camera's cull registers every sky object that is not hidden, whatever its bound (parity: the engine's main
+			// accumulator held exactly these). A face tests each object's bound.
+			bool noBounds = false;
 
 			/** @brief An always-drawn object skips its own bound test; its children test theirs (as the engine's cull does). */
 			void Visit(RE::NiAVObject* a_object, bool a_always)
@@ -917,7 +924,7 @@ namespace DCLF::Features::Sky::Native
 				if (flags.all(RE::NiAVObject::Flag::kHidden))
 					return;
 				const bool always = a_always || flags.all(RE::NiAVObject::Flag::kAlwaysDraw);
-				if (!always && Outside(a_object->worldBound, *planes))
+				if (!always && !noBounds && Outside(a_object->worldBound, *planes))
 					return;
 				if (auto* node = a_object->AsNode()) {
 					for (auto& child : node->GetChildren())
@@ -931,7 +938,8 @@ namespace DCLF::Features::Sky::Native
 				if (!property)
 					return;
 				if (!netimmerse_cast<RE::BSSkyShaderProperty*>(property)) {
-					why = std::format("a sky-object effect is in view ({})", geometry->name.c_str());
+					if (!skipEffects)
+						why = std::format("a sky-object effect is in view ({})", geometry->name.c_str());
 					return;
 				}
 				const auto passId = PassIdOf(property, Field<std::uint32_t>(property, kSkyObjectType));
@@ -974,23 +982,26 @@ namespace DCLF::Features::Sky::Native
 		 * technique, sub-group and newest first, then the cloud layers (geometry group 13) in registration order. False, with a_why,
 		 * when the face shows something the native face cannot draw (a sky-object effect).
 		 */
-		bool FacePasses(const FaceView& a_view, std::vector<FacePass>& a_batch, std::vector<FacePass>& a_clouds, std::string& a_why)
+		bool RootPasses(const RE::NiFrustum& a_frustum, const RE::NiTransform& a_world, bool a_face, std::vector<FacePass>& a_batch,
+			std::vector<FacePass>& a_clouds, std::string& a_why)
 		{
-			DCLF_ZONE("CS.DCLF.Sky.Native.FacePasses");
+			DCLF_ZONE("CS.DCLF.Sky.Native.RootPasses");
 			auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 			if (!sky || !sky->root) {
 				a_why = "no sky root";
 				return false;
 			}
 			ShadowCameras::Planes planes;
-			ShadowCameras::FrustumPlanes(a_view.frustum, a_view.world, planes);
-			// Render thread: the registration list is kept between faces.
+			ShadowCameras::FrustumPlanes(a_frustum, a_world, planes);
+			// Render thread: the registration list is kept between calls.
 			static FaceCull cull;
 			cull.planes = &planes;
 			cull.passes.clear();
 			cull.why.clear();
+			cull.skipEffects = !a_face;
+			cull.noBounds = !a_face;
 			// TESWaterReflections::Update holds the sky root always drawn while it renders the faces (AE 0x140520570).
-			cull.Visit(sky->root.get(), true);
+			cull.Visit(sky->root.get(), a_face);
 			if (!cull.why.empty()) {
 				a_why = cull.why;
 				return false;
@@ -998,6 +1009,121 @@ namespace DCLF::Features::Sky::Native
 			Order(cull.passes, a_batch, a_clouds);
 			return true;
 		}
+
+		bool FacePasses(const FaceView& a_view, std::vector<FacePass>& a_batch, std::vector<FacePass>& a_clouds, std::string& a_why)
+		{
+			return RootPasses(a_view.frustum, a_view.world, true, a_batch, a_clouds, a_why);
+		}
+	}
+
+	namespace
+	{
+		/**
+		 * @brief The draws of the sky root's passes in draw order: the batch as BuildBatch walks the engine's registrations, then the
+		 * cloud layers as BuildClouds walks geometry group 13, the clouds starting from a_cloudModes.
+		 */
+		bool DrawRootPasses(const Frame& a_frame, const std::vector<FacePass>& a_batch, const std::vector<FacePass>& a_clouds, View a_view,
+			std::uint32_t a_renderFlags, Modes a_modes, Modes a_cloudModes, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
+		{
+			a_draws.reserve(a_batch.size() + a_clouds.size());
+			a_owners.reserve(a_owners.size() + 8 * (a_batch.size() + a_clouds.size()));
+			Modes modes = a_modes;
+			std::uint32_t current = UINT32_MAX;
+			for (const auto& facePass : a_batch) {
+				if (!(a_renderFlags & 0x108))
+					modes.cull = (facePass.sub == 2 || facePass.sub == 3) ? 0u : 1u;
+				modes.alphaTest = facePass.sub == 1 || facePass.sub == 3 || facePass.sub == 4;
+				modes.alphaToCoverage = 0;
+				const std::uint32_t technique = TechniqueOf(facePass.passId);
+				if (technique != current) {
+					if (current != UINT32_MAX)
+						modes.Restore();
+					modes.Setup(technique);
+					current = technique;
+				}
+				// SetupGeometry: the sun and the moons blend additively.
+				const auto type = Field<std::uint32_t>(facePass.property, kSkyObjectType);
+				if (type == 0 || type == 6)
+					modes.blend = 2;
+				auto pass = PassOf(facePass);
+				if (!Take(BuildPass(a_frame, &pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why), a_draws, a_view, technique))
+					return false;
+			}
+			modes = a_cloudModes;
+			current = UINT32_MAX;
+			std::int32_t lastLayer = -1;
+			for (const auto& facePass : a_clouds) {
+				if (!(a_renderFlags & 0x108))
+					modes.cull = (Field<std::uint64_t>(facePass.property, 0x38) & 0x1000000000ull) ? 0u : 1u;
+				const auto* alpha = Field<const std::byte*>(facePass.geometry, 0x120);
+				modes.alphaTest = alpha && ((Field<std::uint16_t>(alpha, 0x30) >> 9) & 1u);
+				const std::uint32_t technique = TechniqueOf(facePass.passId);
+				if (technique != current) {
+					if (current != UINT32_MAX)
+						modes.Restore();
+					modes.Setup(technique);
+					current = technique;
+				}
+				auto pass = PassOf(facePass);
+				if (!Take(BuildPass(a_frame, &pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why), a_draws, a_view, technique))
+					return false;
+			}
+			return true;
+		}
+
+		/**
+		 * @brief The shadow state at the main pass's cloud group, from the state at its sky batch: FinishAccumulating sets write mode 11
+		 * between them, and a batch that drew anything ended with its last technique restored and alpha to coverage off.
+		 */
+		Modes MainCloudModes(Modes a_atBatch, bool a_batchDrew)
+		{
+			if (a_batchDrew) {
+				a_atBatch.Restore();
+				a_atBatch.alphaToCoverage = 0;
+			}
+			a_atBatch.write = 11;
+			return a_atBatch;
+		}
+
+		/** @brief The adopted snapshot's main camera as a world transform and frustum. False when it has none. */
+		bool MainCamera(RE::NiTransform& a_world, RE::NiFrustum& a_frustum, RE::NiPoint3& a_eye)
+		{
+			const auto& snapshot = Snapshot::Current();
+			if (!snapshot)
+				return false;
+			const auto& view = snapshot->cameras.Current(Snapshot::ViewId::Main);
+			if (!view.valid)
+				return false;
+			a_world.rotate = view.rotation;
+			a_world.translate = view.position;
+			a_world.scale = 1.0f;
+			a_frustum = view.frustum;
+			a_eye = view.position;
+			return true;
+		}
+	}
+
+	bool BuildMain(RE::BSShaderAccumulator* a_accumulator, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
+	{
+		DCLF_ZONE("CS.DCLF.Sky.Native.BuildMain");
+		a_draws.clear();
+		RE::NiTransform world;
+		RE::NiFrustum frustum;
+		RE::NiPoint3 eye;
+		if (!MainCamera(world, frustum, eye)) {
+			a_why = "the adopted snapshot has no main camera";
+			return false;
+		}
+		// Render thread: the lists are kept between frames.
+		static std::vector<FacePass> batch, clouds;
+		if (!RootPasses(frustum, world, false, batch, clouds, a_why))
+			return false;
+		Frame frame;
+		if (!frame.Read(a_accumulator, a_inputs, a_why))
+			return false;
+		frame.eye = eye;
+		const Modes atBatch = Modes::Current();
+		return DrawRootPasses(frame, batch, clouds, View::Main, a_inputs.renderFlags, atBatch, MainCloudModes(atBatch, !batch.empty()), a_draws, a_owners, a_why);
 	}
 
 	bool BuildFace(const FaceView& a_view, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
@@ -1008,55 +1134,10 @@ namespace DCLF::Features::Sky::Native
 		static std::vector<FacePass> batch, clouds;
 		if (!FacePasses(a_view, batch, clouds, a_why))
 			return false;
-		a_draws.reserve(batch.size() + clouds.size());
-		a_owners.reserve(a_owners.size() + 8 * (batch.size() + clouds.size()));
 		Frame frame;
 		if (!frame.ReadFace(a_view, a_inputs, a_why))
 			return false;
-		// The batch, as BuildBatch walks the engine's registrations.
-		Modes modes = Modes::FaceBatch();
-		std::uint32_t current = UINT32_MAX;
-		for (const auto& facePass : batch) {
-			if (!(kFaceRenderFlags & 0x108))
-				modes.cull = (facePass.sub == 2 || facePass.sub == 3) ? 0u : 1u;
-			modes.alphaTest = facePass.sub == 1 || facePass.sub == 3 || facePass.sub == 4;
-			modes.alphaToCoverage = 0;
-			const std::uint32_t technique = TechniqueOf(facePass.passId);
-			if (technique != current) {
-				if (current != UINT32_MAX)
-					modes.Restore();
-				modes.Setup(technique);
-				current = technique;
-			}
-			// SetupGeometry: the sun and the moons blend additively.
-			const auto type = Field<std::uint32_t>(facePass.property, kSkyObjectType);
-			if (type == 0 || type == 6)
-				modes.blend = 2;
-			auto pass = PassOf(facePass);
-			if (!Take(BuildPass(frame, &pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why), a_draws, View::Face, technique))
-				return false;
-		}
-		// The cloud layers, as BuildClouds walks geometry group 13.
-		modes = Modes::FaceClouds();
-		current = UINT32_MAX;
-		std::int32_t lastLayer = -1;
-		for (const auto& facePass : clouds) {
-			if (!(kFaceRenderFlags & 0x108))
-				modes.cull = (Field<std::uint64_t>(facePass.property, 0x38) & 0x1000000000ull) ? 0u : 1u;
-			const auto* alpha = Field<const std::byte*>(facePass.geometry, 0x120);
-			modes.alphaTest = alpha && ((Field<std::uint16_t>(alpha, 0x30) >> 9) & 1u);
-			const std::uint32_t technique = TechniqueOf(facePass.passId);
-			if (technique != current) {
-				if (current != UINT32_MAX)
-					modes.Restore();
-				modes.Setup(technique);
-				current = technique;
-			}
-			auto pass = PassOf(facePass);
-			if (!Take(BuildPass(frame, &pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why), a_draws, View::Face, technique))
-				return false;
-		}
-		return true;
+		return DrawRootPasses(frame, batch, clouds, View::Face, kFaceRenderFlags, Modes::FaceBatch(), Modes::FaceClouds(), a_draws, a_owners, a_why);
 	}
 
 	void DetachClouds(RE::BSBatchRenderer::GeometryGroup* a_group)
