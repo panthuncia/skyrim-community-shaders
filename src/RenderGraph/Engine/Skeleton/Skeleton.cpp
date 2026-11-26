@@ -2015,6 +2015,12 @@ namespace RenderGraph::Engine::Skeleton
 		return Engine::GraphMode() && CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) && !FrameAnchors::InRun() && RunCopy(CopyKind::Main, true);
 	}
 
+	bool CopyDepthPassDepth()
+	{
+		// As the engine's copy reaching its patched call site (Sites::TakeDepthCopy).
+		return Engine::GraphMode() && CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) && RunCopy(CopyKind::Depth);
+	}
+
 	namespace Sites
 	{
 		bool TakeColourClear(ID3D11DeviceContext*, ID3D11RenderTargetView* a_view, const FLOAT a_colour[4])

@@ -7,6 +7,7 @@
 #include "Deferred.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/FrameDriver.h"
@@ -382,8 +383,9 @@ void TerrainBlending::Hooks::Main_RenderDepth::thunk(bool a1, bool a2)
 	auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 	auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 
-	// A write into the engine's camera state for its depth pass (goes with phase 3's port of the pass).
-	CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->SetCameraData(CS_ENGINE_READ(Camera, Other, RE::Main::WorldRootCamera()), 1);
+	// A write into the engine's camera state for its depth pass. Native's RenderDepth reads CS's frame, so nothing there reads it.
+	if (!RenderGraph::Engine::Native::Active())
+		CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->SetCameraData(CS_ENGINE_READ(Camera, Other, RE::Main::WorldRootCamera()), 1);
 
 	RefreshDepthBackups(singleton);
 	singleton.eyePosition = Util::GetEyePosition();

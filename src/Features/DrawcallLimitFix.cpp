@@ -12,6 +12,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderDepth.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
@@ -527,7 +528,11 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth::thunk(bool a_firstPerson, bool a
 	auto& passes = DCLF::ShellState::Passes();
 	passes.inDepthPass = true;
 	passes.depthControlDriven = a_a2;
-	func(a_firstPerson, a_a2);
+	// Native drives Main::RenderDepth's work itself; the engine's function is not entered.
+	if (RenderGraph::Engine::Native::Active())
+		RenderGraph::Engine::Native::RenderDepth(a_firstPerson, a_a2);
+	else
+		func(a_firstPerson, a_a2);
 	passes.inDepthPass = false;
 }
 
@@ -536,12 +541,17 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth_WorldDrawn::thunk(void* a_accumul
 	func(a_accumulator, a_a2);
 	if (!DCLF::ShellState::Passes().inDepthPass)
 		return;
-	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::ZPrepass);
-	// The world's depth draws are done and its camera is still current. The engine's kPOST_ZPREPASS_COPY at the end of the pass will include
-	// DCLF's objects, and first-person depth goes in after the world's as it does natively, so nothing needs refreshing.
-	DCLF::FrameDriver::Get().DepthCommitted();
+	globals::features::drawcallLimitFix.DepthPassDrawn();
 	// DCLF's epoch leaves the context's bindings to the engine's state tracking, so rebind its targets for the rest of the pass.
 	CS_ENGINE_READ(Shaders, CapturePoint, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+}
+
+void DrawcallLimitFix::DepthPassDrawn()
+{
+	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::ZPrepass);
+	// The world's depth draws are done and its camera is still current. The kPOST_ZPREPASS_COPY at the end of the pass will include
+	// DCLF's objects, and first-person depth goes in after the world's as it does natively, so nothing needs refreshing.
+	DCLF::FrameDriver::Get().DepthCommitted();
 }
 
 template <int N>

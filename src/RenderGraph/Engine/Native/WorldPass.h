@@ -137,6 +137,19 @@ namespace RenderGraph::Engine::Native::WorldPass
 	/** @brief Sets TaaForm: the water mask point (1) and TAA's step (0). */
 	void SetTaaForm(std::int32_t a_form);
 
+	/** @brief Whether native's RenderDepth driver is running on this thread. */
+	bool InRenderDepth();
+
+	/** @brief Marks native's RenderDepth driver: DCLF's depth capture takes the main depth from CS's frame inside it. */
+	class RenderDepthScope
+	{
+	public:
+		RenderDepthScope();
+		~RenderDepthScope();
+		RenderDepthScope(const RenderDepthScope&) = delete;
+		RenderDepthScope& operator=(const RenderDepthScope&) = delete;
+	};
+
 	/** @brief Marks native's RenderWorld: scopes set their point only inside it. */
 	class RenderWorldScope
 	{

@@ -68,6 +68,11 @@ struct DrawcallLimitFix : Feature
 	/** @brief Where the main pass's opaque batches start. Captures what it binds for the colour epoch. */
 	void BeforeOpaquePass();
 	/**
+	 * @brief Main::RenderDepth's point after the world's depth draws (its call of RenderFirstPersonView_End): the Z-prepass, with the
+	 * views' depth work. Native's RenderDepth driver calls it in the engine's place. Render thread, inside the depth pass.
+	 */
+	void DepthPassDrawn();
+	/**
 	 * @brief The end of the main pass's opaque batches, which runs DCLF's colour epoch. Anything the engine draws after this blends onto
 	 * the G-buffer or tests against opaque depth, so DCLF's objects must already be drawn: Terrain Blending's terrain, then blended decals.
 	 */

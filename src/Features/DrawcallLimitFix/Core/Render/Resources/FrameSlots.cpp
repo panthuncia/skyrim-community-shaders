@@ -200,6 +200,10 @@ namespace DCLF::Draws
 					capture.targetCount = i + 1;
 			}
 			capture.depth = TextureOf(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].views[0]);
+		} else if (RenderGraph::Engine::Native::WorldPass::InRenderDepth()) {
+			// Native's RenderDepth: no colour target and the main depth, as the engine's depth pass binds them.
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
+			capture.depth = TextureOf(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].views[0]);
 		} else {
 			ID3D11RenderTargetView* views[kColorTargets] = {};
 			ID3D11DepthStencilView* depth = nullptr;

@@ -17,6 +17,7 @@
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/PublishedResources.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 #include "ShaderCache.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
 #include "State.h"
@@ -106,6 +107,18 @@ namespace DCLF::Features::ShadowMask::Native
 				m.alphaToCoverage = rss.alphaBlendAlphaToCoverage;
 				m.write = rss.alphaBlendWriteMode;
 				m.blendExtra = rss.alphaBlendModeExtra;
+				return m;
+			}
+
+			/**
+			 * @brief Native: the modes the world masks' loop starts from, as RenderDepth leaves them (observed constant over every native
+			 * world frame: back-face culling and the write mode 1, the rest 0).
+			 */
+			static Modes WorldStart()
+			{
+				Modes m;
+				m.cull = 1;
+				m.write = 1;
 				return m;
 			}
 		};
@@ -237,7 +250,8 @@ namespace DCLF::Features::ShadowMask::Native
 			const Family::TriShape* quad = nullptr;
 			std::uint32_t quadTriangles = 0;
 			RE::NiPoint3 adjust;
-			const RE::NiCamera* camera = nullptr;
+			bool haveCamera = false;
+			float nearPlane = 0.0f, farPlane = 0.0f;  // the world camera's frustum: RenderShadowMasks' camera
 			const RE::BSShadowLight* sun = nullptr;
 			std::uint32_t filterMode = 0, filterBits = 0;
 			bool sceneShadows = false;
@@ -271,9 +285,27 @@ namespace DCLF::Features::ShadowMask::Native
 						offset = node->GetRuntimeData().lightingOffset;
 					offset = { -offset.x, -offset.y, -offset.z };
 				}
-				const auto posAdjust = rss.posAdjust.getEye();
-				adjust = { offset.x + posAdjust.x, offset.y + posAdjust.y, offset.z + posAdjust.z };
-				camera = Global<const RE::NiCamera*>(Address::kCamera);
+				// Native: the world view's camera is the snapshot's main camera, which RenderShadowMasks would set (SetCameraData, the
+				// current camera). The scene's shadows are on whenever the world view's masks draw, so there is no lighting offset.
+				const bool native = Snapshot::FrameCamera::Owned() && a_view == View::World;
+				if (native) {
+					const auto& eye = Snapshot::FrameCamera::Main().data.CameraPosAdjust;
+					adjust = { offset.x + eye.x, offset.y + eye.y, offset.z + eye.z };
+					if (const auto& snapshot = Snapshot::Current()) {
+						const auto& frustum = snapshot->cameras.Current(Snapshot::ViewId::Main).frustum;
+						haveCamera = true;
+						nearPlane = frustum.fNear;
+						farPlane = frustum.fFar;
+					}
+				} else {
+					const auto posAdjust = rss.posAdjust.getEye();
+					adjust = { offset.x + posAdjust.x, offset.y + posAdjust.y, offset.z + posAdjust.z };
+					if (const auto* camera = Global<const RE::NiCamera*>(Address::kCamera)) {
+						haveCamera = true;
+						nearPlane = Field<float>(camera, 0x160);
+						farPlane = Field<float>(camera, 0x164);
+					}
+				}
 				auto* node0 = CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[0];
 				sun = node0 ? reinterpret_cast<const RE::BSShadowLight*>(node0->GetRuntimeData().sunShadowDirLight) : nullptr;
 				filterMode = Global<std::uint32_t>(Address::kFilterMode);
@@ -288,7 +320,6 @@ namespace DCLF::Features::ShadowMask::Native
 				// Native draws into the adopted revision's mask, whose size the engine's own target takes ahead of it at a resize.
 				static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> targets{ REL::Offset(Address::kRenderTargets) };
 				const auto& live = targets->renderTargetData[kShadowMaskTarget];
-				const bool native = Snapshot::FrameCamera::Owned() && a_view == View::World;
 				const auto adopted = ::RenderGraph::Frame::Vars::Adopted(::RenderGraph::Frame::Vars::EngineTargetShapes()).colours[kShadowMaskTarget];
 				const struct
 				{
@@ -331,7 +362,7 @@ namespace DCLF::Features::ShadowMask::Native
 				return true;
 			}
 			const auto* sun = a_frame.sun;
-			if (!sun || !a_frame.camera) {
+			if (!sun || !a_frame.haveCamera) {
 				a_why = "a cascaded mask with no sun light or camera";
 				return false;
 			}
@@ -340,8 +371,8 @@ namespace DCLF::Features::ShadowMask::Native
 				a_why = std::format("a sun light with {} cascades", count);
 				return false;
 			}
-			const float nearPlane = Field<float>(a_frame.camera, 0x160);
-			const float farPlane = Field<float>(a_frame.camera, 0x164);
+			const float nearPlane = a_frame.nearPlane;
+			const float farPlane = a_frame.farPlane;
 			const float a = farPlane * nearPlane;
 			const float b = farPlane - nearPlane;
 			for (std::uint32_t i = 0; i < count; ++i) {
@@ -553,7 +584,7 @@ namespace DCLF::Features::ShadowMask::Native
 			return false;
 		}
 		const auto& casters = node->GetRuntimeData().shadowLightsAccum;
-		auto modes = Modes::Current();
+		auto modes = Snapshot::FrameCamera::Owned() && a_view == View::World ? Modes::WorldStart() : Modes::Current();
 		// The loop's walk: each light takes as many slots as it has maps.
 		for (std::uint32_t slot = 0; slot < casters.size();) {
 			auto* light = casters[slot];
@@ -584,6 +615,23 @@ namespace DCLF::Features::ShadowMask::Native
 			}
 		}
 		return true;
+	}
+
+	std::vector<RE::BSShadowLight*> Lights(View a_view)
+	{
+		std::vector<RE::BSShadowLight*> lights;
+		auto* node = a_view == View::World ? Global<RE::ShadowSceneNode*>(Address::kWorldNode) : CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[1];
+		if (!node)
+			return lights;
+		const auto& casters = node->GetRuntimeData().shadowLightsAccum;
+		for (std::uint32_t slot = 0; slot < casters.size();) {
+			auto* light = casters[slot];
+			if (!light || !light->shadowMapCount)
+				break;
+			slot += light->shadowMapCount;
+			lights.push_back(light);
+		}
+		return lights;
 	}
 
 	ID3D11ShaderResourceView* SunMap(View a_view, const std::vector<RE::BSShadowLight*>& a_lights)
