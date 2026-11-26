@@ -1,6 +1,7 @@
 #include "Features/Skin.h"
 #include "Globals.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 #include "State.h"
 #include <cmath>
 
@@ -100,11 +101,12 @@ float4 Skin::GetWetness(RE::BSGeometry* geometry)
 		if (inserted) {
 			cached.wetness = wetness;
 		} else {
-			const float fadeTime = std::max(settings.WetFadeTime, 0.001f);
+			// The fade is game time: it steps once per new snapshot (0 on a repeated render).
+			const float fadeStep = Snapshot::GameStep() / std::max(settings.WetFadeTime, 0.001f);
 			if (cached.wetness.x < wetness.x) {
 				cached.wetness.x = wetness.x;
 			} else if (cached.wetness.x > wetness.x) {
-				cached.wetness.x -= *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) / fadeTime;
+				cached.wetness.x -= fadeStep;
 				cached.wetness.x = std::max(cached.wetness.x, 0.0f);
 			}
 			wetness.x = cached.wetness.x;
@@ -117,7 +119,7 @@ float4 Skin::GetWetness(RE::BSGeometry* geometry)
 					wetness.w = cached.wetness.w;
 				}
 			} else if (cached.wetness.y > wetness.y) {
-				cached.wetness.y -= *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) / fadeTime;
+				cached.wetness.y -= fadeStep;
 				cached.wetness.y = std::max(cached.wetness.y, 0.0f);
 				wetness.y = cached.wetness.y;
 				if (wetness.y == 0.0f) {

@@ -708,6 +708,7 @@ struct IDXGISwapChain_Present
 			using clock = std::chrono::steady_clock;
 			static clock::time_point s_rateStart = clock::now();
 			static uint32_t s_rateFrames = 0u;
+			static std::uint64_t s_rateSnapshot = Snapshot::CurrentId();
 			++s_rateFrames;
 			const auto now = clock::now();
 			const double elapsed = std::chrono::duration<double>(now - s_rateStart).count();
@@ -715,12 +716,15 @@ struct IDXGISwapChain_Present
 				auto& up = globals::features::upscaling;
 				const uint32_t mult = streamline->GetFrameGenerationMultiplier();
 				const double rendered = double(s_rateFrames) / elapsed;
+				// Game updates: snapshot ids are one per update, so the id's advance counts the dropped ones too.
+				const std::uint64_t snapshot = Snapshot::CurrentId();
+				const double updates = double(snapshot - std::exchange(s_rateSnapshot, snapshot)) / elapsed;
 				// Report the generation multiplier, do not multiply by it. DLSSGState's
 				// numFramesActuallyPresented is a per-query count that alternates 1/2, so folding it
 				// into a "displayed" figure produced readings that looked like frame generation had
 				// stopped when it had not.
-				logger::info("[Perf] rendered {:.1f} fps | lastGenMultiplier={} | fg={} method={} syncInterval={}",
-					rendered, mult,
+				logger::info("[Perf] rendered {:.1f} fps | game {:.1f} updates/s | lastGenMultiplier={} | fg={} method={} syncInterval={}",
+					rendered, updates, mult,
 					up.IsFrameGenerationActive() ? "on" : "off",
 					up.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG ? "DLSS-G" : "FSR-FG",
 					SyncInterval);

@@ -1,5 +1,6 @@
-// The step runner and the exit, driven from Present.
+// The step runner and the exit. Steps count game frames (OnGameUpdate); the exit and the live-image shots count Presents.
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 #include "Testing/Internal.h"
 
 #include "Features/ScreenshotFeature.h"
@@ -16,8 +17,21 @@ namespace Testing
 {
 	namespace
 	{
-		// The step runner's state. Render thread only.
-		std::uint32_t lastRunFrame = 0;  // the frame the previous step ran at
+		// The clocks. The step clock counts game updates, and Presents outside a game update (the main menu and loading screens
+		// publish no snapshot). Presents count rendered frames. Atomic: a loading screen's thread presents beside the main thread.
+		std::atomic<std::uint32_t> stepClock{ 0 };
+		std::atomic<std::uint32_t> presentFrame{ 0 };
+		// A game update published since the last Present outside one: a loading screen's Presents beside the main thread's updates
+		// count no game frame of their own.
+		std::atomic<bool> updatedSincePresent{ false };
+		// A game update moved the step clock and its first Present has not run the steps yet.
+		std::atomic<bool> stepsDue{ false };
+		// The steps run on the main thread's game updates and on a loading screen's Presents: one at a time.
+		std::mutex stepsMutex;
+
+		// The step runner's state, under stepsMutex.
+		std::uint32_t lastRunFrame = 0;    // the step clock when the previous step ran
+		std::uint32_t lastRunPresent = 0;  // the Present count when the previous step ran
 		double waitStart = -1.0;         // when the current step's wait started; below zero: none
 		double shotWaitStart = -1.0;     // when the current step began to wait for the previous shot's file; below zero: none
 
@@ -186,7 +200,7 @@ namespace Testing
 				if (waitStart < 0.0)
 					waitStart = Now();
 				if (!awaitRead) {
-					if (a_frame < lastRunFrame + kAwaitReadFrames) {
+					if (presentFrame.load(std::memory_order_relaxed) < lastRunPresent + kAwaitReadFrames) {
 						SetStepState("waiting to read the previous step's variable serial");
 						return;
 					}
@@ -240,6 +254,7 @@ namespace Testing
 				}
 			}
 			lastRunFrame = a_frame;
+			lastRunPresent = presentFrame.load(std::memory_order_relaxed);
 			waitStart = -1.0;
 			awaitRead = false;
 			awaitHeld = false;
@@ -376,16 +391,28 @@ namespace Testing
 			exitRequested = std::chrono::steady_clock::now();
 	}
 
+	void OnGameUpdate()
+	{
+		stepClock.fetch_add(1, std::memory_order_relaxed);
+		updatedSincePresent.store(true, std::memory_order_relaxed);
+		stepsDue.store(true, std::memory_order_relaxed);
+	}
+
 	void OnPresent()
 	{
-		static std::uint32_t frame = 0;
-		++frame;
+		const auto present = presentFrame.fetch_add(1, std::memory_order_relaxed) + 1;
+		// A Present outside a game update is a game frame of its own when no update ran since the last one: the main menu and most of a
+		// load publish no snapshot. Inside an update, its first Present runs the steps.
+		const bool inUpdate = Snapshot::InGameUpdate();
+		const bool ownFrame = !inUpdate && !updatedSincePresent.exchange(false, std::memory_order_relaxed);
+		const bool runSteps = ownFrame || (inUpdate && stepsDue.exchange(false, std::memory_order_relaxed));
+		const auto frame = ownFrame ? stepClock.fetch_add(1, std::memory_order_relaxed) + 1 : stepClock.load(std::memory_order_relaxed);
 		// The memory probe's CSV, once: the log directory is a known-folder query, which every Present would pay.
 		static const bool memProbeStarted = (MemProbe::Start(logger::log_directory().value_or(std::filesystem::path{})), true);
 		(void)memProbeStarted;
 		Vram::SpillLab::OnPresent();
 
-		UpdateLifecycle(frame);
+		UpdateLifecycle(frame, present);
 		CheckPhaseTimeouts();
 		{
 			std::vector<std::string> lines;
@@ -400,10 +427,13 @@ namespace Testing
 					logger::warn("[TEST] queued command '{}': {}", line, error);
 			}
 		}
-		RunSteps(frame);
-		TickCommands();
+		// A loading screen's thread never waits for the main thread's steps: it skips them while those run.
+		if (std::unique_lock lock(stepsMutex, std::try_to_lock); runSteps && lock) {
+			RunSteps(frame);
+			TickCommands();
+		}
 		// The exit waits for the shots still being read back or encoded: a process ended mid-write leaves a broken PNG.
-		if (exitRequested && LiveProbeDone(frame)) {
+		if (exitRequested && LiveProbeDone(present)) {
 			const bool pending = globals::features::screenshotFeature.ScriptedCapturesPending();
 			const bool late = std::chrono::steady_clock::now() - *exitRequested > std::chrono::seconds(10);
 			if (!pending || late) {

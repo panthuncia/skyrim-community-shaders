@@ -1,0 +1,81 @@
+# The cadence shot comparison's steps (tools/cs-test/cadence.py): the game held as still as it goes, so shots of a normal run and
+# of a cadence run (snapshot.cadence) compare. God mode, AI off, time of day stopped, the HUD off and a fixed game step; a shot of
+# the save's exterior (outside Whiterun) from the free camera, then one in Dragonsreach after a coc, each once it settled. Steps count game frames
+# (snapshots), so each shot is at the same game time with any cadence. The exterior's floor is high (wind moves the trees and
+# grass); Dragonsreach is the precise one. One coc only: a second one from a repeated render can crash (snap2-cadence.md).
+# Compose it: native-vulkan+cadence-still, guest+cadence-still.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+# Outside Whiterun with no fight (the autoloaded save has a hostile guard, whose hits before world-ready vary between runs).
+[game]
+save = "Save91_00000000_0_507269736F6E6572_Tamriel_000027_20261113033158_1_1"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set timescale to 0"
+
+# The HUD off: the engine UI still advances once per render (decision 16), which is not what this compares.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tm"
+
+# The free camera holds the view still: the third-person camera drifts.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tfc"
+
+# A fixed game step (iFPSClamp's 60 updates a second) from here on: every update advances the same game time, whatever the
+# render rate. The free camera stays on through the coc, so the camera does not drift in Dragonsreach either.
+[[steps]]
+at = "previous"
+frames = 0
+do = "timestep"
+arg = "16.6666667"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "exterior"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 600
+do = "shot"
+arg = "interior"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["exterior", "interior"]

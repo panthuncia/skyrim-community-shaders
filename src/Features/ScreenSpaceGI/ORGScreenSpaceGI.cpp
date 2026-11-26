@@ -17,6 +17,7 @@
 #include "RenderGraph/RunGate.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/Publication.h"
 #include "Utils/Game.h"
 #if defined(ORG_MODULE_SERVICES_HAS_DXC)
 #	include "RenderGraph/ProgramBuild.h"
@@ -825,7 +826,8 @@ void ORGScreenSpaceGI::Prepass()
 		return;
 	// A loading screen or shader reload asked for a history reset: the next revision makes new versions of the history, born zero.
 	auto& feature = globals::features::screenSpaceGI;
-	if (feature.queuedResetHistory.exchange(false))
+	// A camera cut or a load in the snapshots since the last render resets the history too (native).
+	if (feature.queuedResetHistory.exchange(false) || Snapshot::HistoryBreak())
 		feature.historyResets = feature.historyResets.Get() + 1u;
 	// The engine's slots and the noise texture are stable for the session.
 	// Deferred names its forward target in StartDeferred; kFRAMEBUFFER (0) means no world frame captured one yet.

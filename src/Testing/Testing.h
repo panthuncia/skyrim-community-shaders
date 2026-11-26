@@ -26,8 +26,20 @@ namespace Testing
 	/** @brief SKSE's message handler: the lifecycle's SKSE milestones (kDataLoaded, kPreLoadGame, kNewGame, kPostLoadGame). */
 	void OnSkseMessage(std::uint32_t a_type);
 
-	/** @brief Render thread, after every Present (beside State::Reset): milestones, steps and the status file. */
+	/**
+	 * @brief Render thread, after every Present (beside State::Reset): milestones, the live-image shots, the exit and the status file.
+	 * A Present outside a game update (the main menu, a loading screen's thread) is a game frame of its own and runs the steps.
+	 */
 	void OnPresent();
+
+	/**
+	 * @brief Game thread, once per game update, when its snapshot is published (Main::Update's call of Main::DrawFrame): the step
+	 * clock moves one game frame. The steps and the commands spread over frames run at the update's first Present, inside its
+	 * render half, as they always did: a console command there (a coc) cannot tear cells down under the update's cull jobs.
+	 * Steps count game frames, so a cadence run takes its steps at the same game time as a normal one; with dropped renders a step
+	 * runs at the first rendered update at or after its frame.
+	 */
+	void OnGameUpdate();
 
 	/** @brief Whether a test configuration was read: this run is a test run. */
 	bool Configured();

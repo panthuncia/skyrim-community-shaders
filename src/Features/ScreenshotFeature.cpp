@@ -17,6 +17,7 @@
 #include "Menu.h"
 #include "Features/PhysicalSky.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/Publication.h"
 #include "State.h"
 #include "Utils/Clipboard.h"
 #include "Utils/D3D.h"
@@ -933,6 +934,9 @@ void ScreenshotFeature::ProcessCaptureRequest()
 			captureRequested = true;
 		} else {
 			captureDeferred = false;
+			// A scripted shot names the snapshot its frame rendered (cs-test's cadence comparison reads it).
+			if (!captureOutputPath.empty())
+				logger::info("[TEST] shot {} rendered snapshot {} (render frame {})", captureOutputPath.stem().string(), Snapshot::CurrentId(), Snapshot::Render().frame);
 			try {
 				Capture();
 			} catch (const std::exception& e) {

@@ -344,21 +344,21 @@ void DrawcallLimitFix::OnGraphEpochFailed(std::string_view a_epoch, const std::s
 
 void DrawcallLimitFix::WatchScenePump()
 {
-	// Every frame wakes a scene pass, and a pass ends a frame or two behind. A frame far ahead of the last pass for long means the pump stopped,
-	// so the builder would never publish again. That is fatal. The bounds leave room for a slow pass at a load.
-	constexpr std::uint32_t kLagFrames = 600;
+	// Every frame wakes a scene pass, and a pass ends a frame or two behind. Frames going on with no pass ending for long means the pump
+	// stopped, so the builder would never publish again. That is fatal. The bound is time, not frames: the render rate varies (repeated
+	// snapshots render faster than the game updates), and it leaves room for a slow pass at a load.
 	constexpr auto kLagTime = std::chrono::seconds(30);
 	const auto frame = DCLF::Scene::FrameView::Get().SceneStep();
 	const auto done = DCLF::IndirectDraws::Get().ScenePassDoneFrame();
 	std::string reason;
 	if (DCLF::Scene::Coordinator::Get().ScenePumpFailed())
 		reason = "the scene pump stopped (see the [DCLF] error above)";
-	else if (frame > done + kLagFrames) {
+	else if (frame > done) {
 		const auto now = std::chrono::steady_clock::now();
-		if (!std::exchange(pumpLagging, true))
+		if (!std::exchange(pumpLagging, true) || std::exchange(pumpLagDone, done) != done)
 			pumpLagSince = now;
 		else if (now - pumpLagSince > kLagTime)
-			reason = fmt::format("no scene pass has ended for {} frames (the last for frame {}, now {})", frame - done, done, frame);
+			reason = fmt::format("no scene pass has ended for {:.0f} s (the last for frame {}, now {})", std::chrono::duration<double>(now - pumpLagSince).count(), done, frame);
 	} else
 		pumpLagging = false;
 	if (reason.empty())

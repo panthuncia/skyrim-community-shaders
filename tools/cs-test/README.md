@@ -109,6 +109,8 @@ The shipped configs:
 | `dclf-toggles` | DCLF's cull mode (frustum, off, occlusion) and then its pipeline (CPU, GPU) changed during play, a shot after each (`wait = "settled"`): each change rebuilds DCLF's epochs, staged and attached with the snapshot recorded on them at a Begin, with no frame-start wait (plan step 10a); compose it, `native-vulkan+dclf-toggles` |
 | `sao-cs`, `sao-cs-downscaled` | the engine's compute SAO (`bSAO_CS_Enable`, then also `bSAO_CS_Downscaled`, set through `[prefs_ini]`), a shot in third and first person: its four dispatches are post chain steps; compose it, `guest+sao-cs`, `native-vulkan+sao-cs` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
+| `cadence-repeat`, `cadence-drop` | the snapshot cadence test mode (`snapshot.cadence`, native only): the render half runs three times per game update, or for one update in three; a shot after settling, after a turn and once settled again; compose them, `native-vulkan+cadence-repeat` |
+| `cadence-still` | the cadence shot comparison's steps: god mode, AI off, time stopped, a shot in Dragonsreach and one in Whiterun once each settled; `cadence.py` (below) runs it with the cadence off and on |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |
 
@@ -178,6 +180,16 @@ Enabled = true
 - The start is the copy MO2 would serve: overwrite's, else the staged mod's, else nothing. A file that does not parse stops the run.
 - MO2's files are never written. The next run's slot build puts the slot's copy back.
 - Tables merge key by key, at any depth; other values are replaced. `--set 'saved_settings.Screen Space GI={Enabled=true}'` sets a whole section.
+
+## Cadence shot comparison
+
+`python tools/cs-test/cadence.py --stage <stage> [--mode native-vulkan] [--config cadence-still] [--cadence repeat:3 --cadence drop:3] [--label <prefix>]`
+runs the config twice with the cadence off (the noise floor between two normal runs), then once per cadence, one run after the
+other, and compares the shots. `--runs <normal A> <normal B> <cadence run>...` compares runs that already ran. Steps count game
+frames (snapshots), so every run takes its shots at the same game time. Per shot it prints the mean channel difference and the
+share of pixels over 8 against both normal runs, and the snapshot each shot rendered. A cadence shot passes when its difference
+from the nearer normal run is at most twice the floor, or the floor plus 1.5. The exit code is 0 when every run passed and every
+cadence shot is within the noise.
 
 ## PresentMon
 

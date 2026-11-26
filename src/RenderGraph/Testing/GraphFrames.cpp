@@ -3,6 +3,7 @@
 #if !defined(CS_RELEASE_PROFILE)
 
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "Snapshot/Publication.h"
 #	include "Testing/Testing.h"
 
 #	include <atomic>
@@ -17,6 +18,7 @@ namespace RenderGraph::TestSupport::GraphFrames
 	{
 		std::atomic<std::uint64_t> graph{ 0 };
 		std::atomic<std::uint64_t> firstGraphFrame{ 0 };
+		std::atomic<std::uint64_t> firstGraphSnapshot{ 0 };  // the snapshot the first graph frame rendered
 		std::atomic<std::uint64_t> lastGraphFrame{ UINT64_MAX };
 	};
 
@@ -50,8 +52,10 @@ namespace RenderGraph::TestSupport::GraphFrames
 	{
 		if (!a_counts || a_counts->lastGraphFrame.load(std::memory_order_relaxed) == a_frame)
 			return;
-		if (!a_counts->graph.load(std::memory_order_relaxed))
+		if (!a_counts->graph.load(std::memory_order_relaxed)) {
 			a_counts->firstGraphFrame.store(a_frame, std::memory_order_relaxed);
+			a_counts->firstGraphSnapshot.store(Snapshot::CurrentId(), std::memory_order_relaxed);
+		}
 		a_counts->lastGraphFrame.store(a_frame, std::memory_order_relaxed);
 		a_counts->graph.fetch_add(1, std::memory_order_relaxed);
 	}
@@ -68,13 +72,16 @@ namespace RenderGraph::TestSupport::GraphFrames
 				// A registered client that never committed is left out.
 				if (!graph)
 					continue;
-				clients[id] = { { "graph", graph }, { "first_graph_frame", counts.firstGraphFrame.load(std::memory_order_relaxed) } };
+				clients[id] = { { "graph", graph }, { "first_graph_frame", counts.firstGraphFrame.load(std::memory_order_relaxed) },
+					{ "first_graph_snapshot", counts.firstGraphSnapshot.load(std::memory_order_relaxed) } };
 				line += fmt::format("{}{} {}", line.empty() ? "" : ", ", id, graph);
 			}
 		}
 		const std::uint64_t frames = RenderGraph::Frame::Driver::Current().frame;
-		logger::info("[ORG] graph frames at exit, of {} frames (client graph frames): {}", frames, line.empty() ? "none ran" : line);
-		::Testing::SetReport("graph_frames", { { "frames", frames }, { "clients", std::move(clients) } });
+		// Graph frames are rendered frames; the snapshot is the game frame the last one rendered.
+		const std::uint64_t snapshot = Snapshot::CurrentId();
+		logger::info("[ORG] graph frames at exit, of {} frames, snapshot {} (client graph frames): {}", frames, snapshot, line.empty() ? "none ran" : line);
+		::Testing::SetReport("graph_frames", { { "frames", frames }, { "snapshot", snapshot }, { "clients", std::move(clients) } });
 	}
 }
 

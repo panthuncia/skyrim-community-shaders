@@ -168,7 +168,7 @@ void SceneSettingsManager::ResolveAndApply(bool force, bool allowLocationTransit
 
 float SceneSettingsManager::GetPauseAwareTime() const
 {
-	return globals::state ? globals::state->timer : 0.0f;
+	return globals::state ? globals::state->Timer() : 0.0f;
 }
 
 float SceneSettingsManager::EaseLocationTransition(const LocationTransition& transition, float now) const

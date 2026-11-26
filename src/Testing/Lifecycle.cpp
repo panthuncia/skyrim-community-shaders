@@ -10,7 +10,8 @@ namespace Testing
 {
 	namespace
 	{
-		// Consecutive ready frames before the world counts as ready.
+		// Consecutive ready game frames (step clock frames) before the world counts as ready. Game frames, so world-ready comes at the
+		// same game time with any snapshot cadence.
 		constexpr std::uint32_t kReadyFrames = 30;
 
 		// Lifecycle state, guarded by the run's lock.
@@ -19,6 +20,7 @@ namespace Testing
 		bool heldFrameSeen = false;      // this load drew a world frame under the kept loading menu
 		bool worldReady = false;
 		std::uint32_t readyFrames = 0;
+		std::uint32_t lifecycleFrame = 0;  // the step clock at the previous UpdateLifecycle
 		double loadTimerStart = -1.0;  // when the wait for world-ready started; below zero: none
 
 		// FPS over the last second.
@@ -113,7 +115,7 @@ namespace Testing
 		}
 	}
 
-	void UpdateLifecycle(std::uint32_t a_frame)
+	void UpdateLifecycle(std::uint32_t a_frame, std::uint32_t a_renderFrame)
 	{
 		auto* state = globals::state;
 		const bool mainMenu = state && state->isMainMenuOpen;
@@ -129,7 +131,9 @@ namespace Testing
 
 		auto& run = Run();
 		std::scoped_lock lock(run.mutex);
+		const auto advanced = a_frame - std::exchange(lifecycleFrame, a_frame);
 		run.frame = a_frame;
+		run.renderFrame = a_renderFrame;
 		const double now = Now();
 		++fpsWindowFrames;
 		if (now - fpsWindowStart >= 1.0) {
@@ -160,7 +164,7 @@ namespace Testing
 		}
 		const bool ready = !loading && !mainMenu && !held && playerReady;
 		if (ready) {
-			if (!worldReady && ++readyFrames >= kReadyFrames) {
+			if (!worldReady && (readyFrames += advanced) >= kReadyFrames) {
 				worldReady = true;
 				inLoad = false;
 				loadTimerStart = -1.0;

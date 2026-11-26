@@ -135,6 +135,7 @@ namespace Testing
 				{ "updated", Timestamp() },
 				{ "phase", a_run.phase },
 				{ "frame", a_run.frame },
+				{ "render_frame", a_run.renderFrame },
 				{ "fps", std::round(a_run.fps * 10.0) / 10.0 },
 				{ "milestones", std::move(milestones) },
 				{ "loads", std::move(loads) },

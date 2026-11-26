@@ -2302,6 +2302,9 @@ void PhysicalSky::ClearVolumetricToNeutral()
 void PhysicalSky::Prepass()
 {
 	ORGPhysicalSky::Get().BeginFrame(*this);
+	// A camera cut or a load in the snapshots since the last render restarts the cloud history (native).
+	if (Snapshot::HistoryBreak())
+		volMainHistoryValid = false;
 	if (IsActive() && VolumetricCloudsEnabled() && cloudProfileLutSrv && importedAdjustmentLutSrv) {
 		const bool generatedShape = settings.cloudNoise.procedural || !importedShapeNoiseSrv;
 		const bool generatedAdjustment = settings.cloudNoise.procedural;
