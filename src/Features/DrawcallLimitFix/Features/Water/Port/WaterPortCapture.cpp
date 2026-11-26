@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Features/LinearLighting.h"
 #include "Features/PhysicalSky.h"
@@ -50,7 +51,18 @@ namespace DCLF::Features::Water::Port
 	{
 		FrameInputs f;
 		f.frame = globals::state ? globals::state->frameCount : 0;
-		if (auto* shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)) {
+		if (Snapshot::FrameCamera::Owned()) {
+			// Native: the frame camera, with the render side's last drawn camera as the previous one.
+			const auto& camera = Snapshot::FrameCamera::Main().data;
+			f.posAdjust = { camera.CameraPosAdjust.x, camera.CameraPosAdjust.y, camera.CameraPosAdjust.z };
+			f.previousPosAdjust = { camera.CameraPreviousPosAdjust.x, camera.CameraPreviousPosAdjust.y, camera.CameraPreviousPosAdjust.z };
+			// SetupGeometry: the jittered view-projection when the flag is set, the unjittered one otherwise.
+			const bool jittered = Read<bool>(Address::kViewProjJittered);
+			f.viewProj = Snapshot::FrameCamera::RowMajor(jittered ? &camera.CameraViewProj : &camera.CameraViewProjUnjittered);
+			const auto proj = Snapshot::FrameCamera::RowMajor(&camera.CameraProj);
+			f.proj00 = proj[0];
+			f.proj11 = proj[5];
+		} else if (auto* shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)) {
 			auto& rss = shadowState->GetRuntimeData();
 			const auto posAdjust = rss.posAdjust.getEye();
 			const auto previous = rss.previousPosAdjust.getEye();

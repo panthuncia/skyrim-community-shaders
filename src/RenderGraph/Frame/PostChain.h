@@ -64,9 +64,10 @@ namespace RenderGraph::Frame::PostChain
 
 	/**
 	 * @brief The engine's jitter sequence, computed by CS: with TAA on, the next of the eight State table entries (State +0xC0 the
-	 * index, +0xC4 and +0xE4 the tables) scaled to the screen; else zero. Writes State +0x44 / +0x48 and the index. Render thread.
+	 * index, +0xC4 and +0xE4 the tables) scaled to the screen; else zero. Returns it. Outside native it also writes State +0x44 /
+	 * +0x48 and the index; native keeps it render-side (Snapshot::FrameCamera). Render thread.
 	 */
-	void UpdateJitter(RE::BSGraphics::State* a_state);
+	std::array<float, 2> UpdateJitter(RE::BSGraphics::State* a_state);
 
 	/** @brief Records the frame's final jitter (State +0x44 / +0x48 after Upscaling's override). The post chain's rows read it. */
 	void NoteJitter(float a_x, float a_y);

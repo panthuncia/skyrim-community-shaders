@@ -1,5 +1,6 @@
 #include "Features/PhysicalSky.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #include "Util.h"
@@ -340,7 +341,7 @@ void SkyLightning::StartFlash(const PhysicalSky& physicalSky)
 	sound.descriptor = 0xE7522u;
 	const float3 point = grounded ? ground : source;
 	sound.position = { point.x, point.y, point.z };
-	const auto eye = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const auto eye = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 	const float distance = (point - float3(eye.x, eye.y, eye.z)).Length() * Util::Units::GAME_UNIT_TO_M;
 	sound.time = time + distance / 343.0;
 	sound.volume = std::clamp(std::sqrt(settings.lightningIntensity), 0.f, 1.f);

@@ -1,6 +1,7 @@
 #include "LightLimitFix.h"
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "CSEditor/EditorWindow.h"
 #include "DrawcallLimitFix.h"
@@ -747,7 +748,7 @@ void LightLimitFix::UpdateLights()
 	// Cache camera position from the FrameBuffer snapshot; shadowState::posAdjust can be stale in first-person
 
 	{
-		auto eyePosition = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+		auto eyePosition = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 		eyePositionCached = { eyePosition.x, eyePosition.y, eyePosition.z };
 		if (IsLocalShadowsEnabled())
 			strictLightDataTemp.WorldEyePosition = { eyePosition.x, eyePosition.y, eyePosition.z, 0.0f };
@@ -961,8 +962,8 @@ bool LightLimitFix::CullOnRenderGraph(const eastl::vector<LightData>& a_lightsDa
 	inputs.lightsNear = lightsNear;
 	inputs.lightsFar = lightsFar;
 	// The same matrices the D3D11 shaders read from the FrameBuffer cbuffer (row-major).
-	std::memcpy(inputs.cameraProjInverse.data(), &CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraProjInverse(), sizeof(float) * 16);
-	std::memcpy(inputs.cameraView.data(), &CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraView(), sizeof(float) * 16);
+	std::memcpy(inputs.cameraProjInverse.data(), &Snapshot::FrameCamera::Main().GetCameraProjInverse(), sizeof(float) * 16);
+	std::memcpy(inputs.cameraView.data(), &Snapshot::FrameCamera::Main().GetCameraView(), sizeof(float) * 16);
 
 	// The Prepass anchor's commit writes these into its run. Its passes report their own GPU time (RenderGraphRuntime::ProfilerName).
 	return orgCulling.SetFrame(inputs);
@@ -1496,7 +1497,7 @@ bool LightLimitFix::TrackLocalShadowCasters()
 	const uint32_t frame = localShadowFrame;
 
 	if (frame == 1) {
-		auto eyePosition = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+		auto eyePosition = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 		localShadowCameraPosition = { eyePosition.x, eyePosition.y, eyePosition.z };
 	}
 
@@ -2142,7 +2143,7 @@ void LightLimitFix::CopyLocalShadowMaps()
 		}
 	}
 
-	const auto& eye = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const auto& eye = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 	const float frameTime = CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) ? std::clamp(*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime), 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME) : 0.0f;
 	// Unwritten slots are zero; no light flagged LocalShadow points at them.
 	localShadowFrameData.assign(localShadowCacheSlots, LocalShadowData{});

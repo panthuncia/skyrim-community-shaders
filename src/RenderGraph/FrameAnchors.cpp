@@ -2764,7 +2764,7 @@ namespace FrameAnchors
 				host.UseRun(a_state.stagingRun[a_declared]);
 				if (StepUsesSharedConstants(*built, a_declared, a_step)) {
 					ZoneScopedN("CS.Anchors.SharedConstants");
-					SharedConstants::Commit(a_step);
+					SharedConstants::Commit(segment, a_step);
 				}
 				a_state.tapInstance = instance;
 				for (std::uint32_t k = 0; k < committedCount; ++k) {

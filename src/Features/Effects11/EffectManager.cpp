@@ -1,5 +1,6 @@
 #include "EffectManager.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 
 #include "D3D11StateBackup.h"
@@ -997,7 +998,7 @@ void EffectManager::UpdateLightParameters()
 
 	// Sky Sync repositions the sun node, so its offset from the sky root is the synced sun direction
 	const auto sunDirection = frame.sunOffset;
-	const auto viewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Transpose();
+	const auto viewProj = Snapshot::FrameCamera::Post().GetCameraViewProjUnjittered().Transpose();
 	const auto clip = DirectX::SimpleMath::Vector4::Transform(DirectX::SimpleMath::Vector4(sunDirection.x, sunDirection.y, sunDirection.z, 0.0f), viewProj);
 	if (clip.w <= 0.0f)
 		return;

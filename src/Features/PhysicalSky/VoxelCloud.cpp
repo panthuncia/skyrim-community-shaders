@@ -1,5 +1,6 @@
 #include "Features/PhysicalSky.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "Features/PhysicalSky/ORGCloudMaps.h"
@@ -394,8 +395,8 @@ std::array<uint32_t, 4> VoxelCloudManager::ScreenRect(float bottomZ, uint32_t wi
 		return {};
 	if (REL::Module::IsVR())
 		return { 0, 0, width, height };
-	const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
-	const auto matrix = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Transpose();
+	const auto camera = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
+	const auto matrix = Snapshot::FrameCamera::Main().GetCameraViewProjUnjittered().Transpose();
 	float2 lower{ 1.f, 1.f }, upper{};
 	for (const auto& cloud : active) {
 		// Match the longest local lighting probe, as for storm screen rectangles.

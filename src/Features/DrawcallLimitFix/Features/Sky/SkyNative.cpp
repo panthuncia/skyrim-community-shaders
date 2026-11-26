@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -340,10 +341,18 @@ namespace DCLF::Features::Sky::Native
 					return false;
 				}
 				auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
-				posAdjust = rss.posAdjust.getEye();
-				previousPosAdjust = rss.previousPosAdjust.getEye();
-				const auto camera = rss.cameraData.getEye();
-				std::memcpy(viewProj.data(), &camera.viewProjMat, sizeof(viewProj));
+				if (Snapshot::FrameCamera::Owned() && a_inputs.view != View::Face) {
+					// Native: the frame camera, with the render side's last drawn camera as the previous one. The sun's query is unjittered.
+					const auto& frame = (a_inputs.view == View::Sun ? Snapshot::FrameCamera::Post() : Snapshot::FrameCamera::Main()).data;
+					posAdjust = { frame.CameraPosAdjust.x, frame.CameraPosAdjust.y, frame.CameraPosAdjust.z };
+					previousPosAdjust = { frame.CameraPreviousPosAdjust.x, frame.CameraPreviousPosAdjust.y, frame.CameraPreviousPosAdjust.z };
+					viewProj = Snapshot::FrameCamera::RowMajor(&frame.CameraViewProj);
+				} else {
+					posAdjust = rss.posAdjust.getEye();
+					previousPosAdjust = rss.previousPosAdjust.getEye();
+					const auto camera = rss.cameraData.getEye();
+					std::memcpy(viewProj.data(), &camera.viewProjMat, sizeof(viewProj));
+				}
 				eye = a_accumulator->GetRuntimeData()->eyePosition;
 				vParams = Global<float>(Address::kVParams);
 				const auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());

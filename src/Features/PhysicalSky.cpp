@@ -1,5 +1,6 @@
 #include "PhysicalSky.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 
 #include <algorithm>
@@ -1186,7 +1187,7 @@ void PhysicalSky::SettingsVolumetricClouds()
 	DrawCirrusSection();
 	DrawCloudStormSection();
 	if (ImGui::CollapsingHeader(T(TKEY("voxel_section"), "Voxel Clouds"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
-		const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+		const auto camera = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 		voxelCloudManager.DrawSettings(settings.voxelClouds, GetCurrentWorldspaceEditorID(),
 			{ camera.x * Util::Units::GAME_UNIT_TO_M, camera.y * Util::Units::GAME_UNIT_TO_M, (camera.z - cbData.zBottom) * Util::Units::GAME_UNIT_TO_M });
 	}
@@ -1352,7 +1353,7 @@ void PhysicalSky::DrawLowCloudSection()
 		if (ImGui::TreeNode(T(TKEY("cloud_local_section"), "Local Cloud"))) {
 			Util::Text::WrappedSecondary("%s", T(TKEY("cloud_local_desc"),
 												   "A single authored cloud map placed in the world for hero shapes; it replaces the weather map inside its rectangle."));
-			const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+			const auto camera = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 			localNdfManager.DrawSettings(settings.cloudMap, GetCurrentWorldspaceEditorID(),
 				{ camera.x * Util::Units::GAME_UNIT_TO_M, camera.y * Util::Units::GAME_UNIT_TO_M });
 			ImGui::TreePop();
@@ -2325,7 +2326,7 @@ void PhysicalSky::Prepass()
 		const bool renderVolumetricClouds = VolumetricCloudsEnabled() && ShadersOK();
 
 		if (renderVolumetricClouds) {
-			const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+			const auto camera = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 			const float2 cameraMeters{ camera.x * Util::Units::GAME_UNIT_TO_M, camera.y * Util::Units::GAME_UNIT_TO_M };
 			const float cameraDx = cameraMeters.x - cloudCrossSectionCamera.x;
 			const float cameraDy = cameraMeters.y - cloudCrossSectionCamera.y;

@@ -22,6 +22,7 @@
 #include "RenderGraph/Async/LatestSlot.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Cull.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
+#include "Snapshot/FrameCamera.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Recorder.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/PlacementRows/BillboardRow.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
@@ -624,6 +625,7 @@ namespace DCLF
 			bool palette;
 			bool settles = false;
 			bool mover = false;  // due again next frame when its sample changed something
+			bool continued = false;  // the slot's row was last sampled for the same geometry
 		};
 		static constexpr std::size_t kSampleGrain = 64;
 		// A particle system item also counts its rows, so one with 100 particles costs about 20 plain items.
@@ -1468,13 +1470,14 @@ namespace DCLF
 		listedSlots.push_back(a_item.slot);
 		if (rowOwner.size() <= a_item.slot)
 			rowOwner.resize(std::size_t(a_item.slot) + 1, nullptr);
+		const bool continued = rowOwner[a_item.slot] == a_item.geometry.get();
 		rowOwner[a_item.slot] = a_item.geometry.get();
 		const bool palette = a_item.boneRows && std::size_t(a_item.boneOffset) + a_item.boneRows <= a_blocks && !blockListed[a_item.boneOffset];
 		if (palette) {
 			blockListed[a_item.boneOffset] = 1;
 			listedBlocks.push_back(a_item.boneOffset);
 		}
-		a_items.push_back({ &a_item, palette, a_settles, a_mover });
+		a_items.push_back({ &a_item, palette, a_settles, a_mover, continued });
 	}
 
 	// A root writes its dependents' sun entry and fade node after their rows, so resample it when any was sampled.
@@ -1609,7 +1612,7 @@ namespace DCLF
 		auto& out = a_out.out;
 		auto& row = a_scratch.row;
 		auto& layer = a_scratch.layer;
-		const auto& [itemPointer, palette, settles, mover] = a_listed;
+		const auto& [itemPointer, palette, settles, mover, continued] = a_listed;
 		const auto& item = *itemPointer;
 		const auto paletteClass = static_cast<std::uint32_t>(item.itemClass);
 		const bool deferred = palette && paletteClass != 0 && paletteClass <= a_runs.size() && a_runs[paletteClass - 1].entry;
@@ -1629,7 +1632,18 @@ namespace DCLF
 			row = out[item.slot];
 		else
 			SampleItem(item, row, layer);
-		if (settles && !firstPerson && std::memcmp(&item.geometry->world, &DrawnPreviousWorld(*item.geometry), sizeof(RE::NiTransform)) != 0)
+		// Native: the previous transform is the one this render side last drew for the object, not the engine's previous update, so a
+		// repeated snapshot draws without motion and a dropped one moves from what was really drawn. LOD keeps its current transform.
+		const bool drawnPrevious = !firstPerson && continued && Snapshot::FrameCamera::Owned() &&
+		                           &DrawnPreviousWorld(*item.geometry) != &item.geometry->world && !(GeometryPort::kMainPassRenderFlags & 0x10);
+		if (drawnPrevious) {
+			std::memcpy(row.previousWorld, out[item.slot].world, sizeof(row.previousWorld));
+			if (item.layerSlot != kNoObjectSlot)
+				std::memcpy(layer.previousWorld, out[item.slot].world, sizeof(layer.previousWorld));
+		}
+		const bool moving = drawnPrevious ? std::memcmp(row.world, row.previousWorld, sizeof(row.world)) != 0 :
+		                                    std::memcmp(&item.geometry->world, &DrawnPreviousWorld(*item.geometry), sizeof(RE::NiTransform)) != 0;
+		if (settles && !firstPerson && moving)
 			a_mine.settling.push_back(&item);
 		// A particle snapshot's data is never read here. Its row waits for its class's write.
 		Deferred* waiting = classItem ? &Defer(a_listed, paletteClass - 1, *classItem, a_scratch) : nullptr;

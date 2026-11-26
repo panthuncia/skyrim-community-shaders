@@ -134,3 +134,17 @@ pushes until the user is back.
 40. **The stealth sun term needs no producer:** `ImageSpaceManager+0xE0` (sunlightScale) is written game-side in
     Main::Update. S12/S13 (light membership from game data) and S7/S8 for roots DCLF does not stand in for are still to
     build; designs are in `snap1-sidefx.md`.
+
+## 2026-11-26: phase 2 frame camera (snap2-camera; director accepted)
+
+41. **The frame camera (snap2-camera):** the capture stores SetCameraData's unjittered matrices per view
+    (`CameraView::view/proj/viewProj`). Native builds the engine's per-frame block (b12) itself once per render frame
+    (`Snapshot::FrameCamera`): `Main()` jittered for the world passes, `Post()` unjittered for the sun query and the post chain,
+    with ratios of 1 once the frame is at full resolution. The previous camera is the one this render side drew last. Guest and
+    D3D11 keep `frameBufferCached`. SharedConstants' Start, PreDepth and Ui segments keep the engine's block until those views get
+    snapshot cameras.
+42. **Render-owned jitter (snap2-camera):** native never writes `projectionPosScale` or the jitter index into
+    `BSGraphics::State`; game-side picking and culling see an unjittered projection. Guest keeps today's writes.
+43. **Drawn previous transforms (snap2-camera):** in native a DCLF row's previous world is the world this render
+    side last drew for the same geometry in that slot (LOD and first person excepted); sky and water take the previous posAdjust
+    from the frame camera. Skinned bone palettes still use the engine's previous update (open).

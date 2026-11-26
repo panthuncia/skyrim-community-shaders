@@ -125,6 +125,8 @@ namespace Snapshot
 		RE::NiMatrix3 rotation{};
 		RE::NiFrustum frustum{};
 		RE::NiRect<float> port{};
+		// BSGraphics::State::SetCameraData's matrices from this camera, row-major and unjittered (Snapshot/FrameCamera.h).
+		std::array<float, 16> view{}, proj{}, viewProj{};
 	};
 
 	/** @brief The cameras by view. previous is the previous published snapshot's current (not the last rendered one). */

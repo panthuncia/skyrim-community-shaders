@@ -1,5 +1,6 @@
 #include "SubsurfaceScattering.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "../I18n/I18n.h"
 #include "Deferred.h"
@@ -219,9 +220,11 @@ void SubsurfaceScattering::CalculateKernel(DiffusionProfile& a_profile, Kernel& 
 
 SubsurfaceScattering::BlurCB SubsurfaceScattering::BuildBlurConstants(int a_mode)
 {
-	auto cameraData = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().cameraData.getEye();
+	// Native: the frame camera's projection. Elsewhere the engine's camera state.
+	const float proj00 = Snapshot::FrameCamera::Owned() ? Snapshot::FrameCamera::Main().GetCameraProj().m[0][0] :
+	                                                      CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().cameraData.getEye().projMat.m[0][0];
 
-	blurCBData.SSSS_FOVY = atan(1.0f / cameraData.projMat.m[0][0]) * 2.0f * (180.0f / 3.14159265359f);
+	blurCBData.SSSS_FOVY = atan(1.0f / proj00) * 2.0f * (180.0f / 3.14159265359f);
 
 	blurCBData.BaseProfile = { settings.BaseProfile.BlurRadius, settings.BaseProfile.Thickness, 0, 0 };
 	blurCBData.HumanProfile = { settings.HumanProfile.BlurRadius, settings.HumanProfile.Thickness, 0, 0 };

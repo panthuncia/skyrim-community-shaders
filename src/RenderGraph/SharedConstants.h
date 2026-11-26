@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RenderGraph/Frame/SegmentId.h"
 #include "RenderGraph/ShaderBindings.h"
 
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
@@ -60,8 +61,11 @@ namespace SharedConstants
 	 */
 	std::shared_ptr<org::RenderPass> MakeUploadPass(std::uint32_t a_point = 0);
 
-	/** @brief Writes the values D3D11 would read now into upload point a_point. Inside an epoch or a held run. */
-	void Commit(std::uint32_t a_point = 0);
+	/**
+	* @brief Writes the values D3D11 would read now into upload point a_point. Native's frame camera stands in for the engine's
+	* FrameBuffer in a segment that draws from the main camera. Inside an epoch or a held run.
+	*/
+	void Commit(RenderGraph::Frame::SegmentId a_segment, std::uint32_t a_point);
 
 
 	/** @brief Debug check with CS_ORG_SHARED_CONSTANTS_CHECK=1. Reads the D3D11 buffers back and compares, stalling on the readback. */

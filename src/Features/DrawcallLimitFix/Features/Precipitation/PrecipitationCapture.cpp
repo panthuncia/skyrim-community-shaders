@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/Precipitation/Precipitation.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Deferred.h"
 #include "Features/RainRefraction.h"
@@ -189,7 +190,7 @@ namespace DCLF::Features::Precipitation
 			if (globals::deferred)
 				globals::deferred->GetDirectionalShadowLightData(directionalShadow);
 			std::memcpy(draw.latch.directionalShadow, &directionalShadow, Water::kDirectionalShadowBytes);
-			const auto& frame = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
+			const auto& frame = Snapshot::FrameCamera::Main().data;
 			constants.projection[0] = frame.CameraProj.m[0][0];
 			constants.projection[1] = frame.CameraProj.m[1][1];
 			constants.projection[2] = frame.DynamicResolutionParams1.x;

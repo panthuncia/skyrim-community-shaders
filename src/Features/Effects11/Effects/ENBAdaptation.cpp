@@ -1,5 +1,6 @@
 #include "ENBAdaptation.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 
 #include "../EffectManager.h"
@@ -117,7 +118,7 @@ bool ENBAdaptation::EnsureSunMaskResources()
 
 bool ENBAdaptation::SunMaskConstants(SunMaskCB& a_out) const
 {
-	const auto& frame = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached);
+	const auto& frame = Snapshot::FrameCamera::Post();
 	a_out.CameraViewProj = frame.GetCameraViewProj();
 	a_out.CameraViewProjInverse = frame.GetCameraViewProjInverse();
 	a_out.DynamicResolution = { frame.GetDynamicResolutionParams1().x, frame.GetDynamicResolutionParams1().y, frame.GetDynamicResolutionParams2().x, frame.GetDynamicResolutionParams2().y };

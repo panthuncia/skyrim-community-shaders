@@ -3,6 +3,7 @@
 
 #include "RenderGraph/SharedConstants.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Globals.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -71,11 +72,28 @@ namespace SharedConstants
 			return requested;
 		}
 
+		/** @brief The FrameBuffer a segment's clients read: the frame camera where the engine's block holds the main camera. */
+		const globals::FrameBuffer& FrameOf(RenderGraph::Frame::SegmentId a_segment)
+		{
+			using RenderGraph::Frame::SegmentId;
+			switch (a_segment) {
+			case SegmentId::Start:     // the reflection faces' cameras
+			case SegmentId::PreDepth:  // the last shadow view's camera
+			case SegmentId::Ui:        // the menu scenes' cameras
+				return CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
+			case SegmentId::Sun:   // the engine sets the main camera unjittered for the sun's query
+			case SegmentId::Post:  // and for the post chain
+				return Snapshot::FrameCamera::Post().data;
+			default:
+				return Snapshot::FrameCamera::Main().data;
+			}
+		}
+
 		/** @brief The bytes D3D11 reads from each block now. Empty where CS has not uploaded one yet. */
-		std::array<std::span<const std::byte>, kBlocks> Sources()
+		std::array<std::span<const std::byte>, kBlocks> Sources(RenderGraph::Frame::SegmentId a_segment)
 		{
 			std::array<std::span<const std::byte>, kBlocks> sources{};
-			const auto& frame = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
+			const auto& frame = FrameOf(a_segment);
 			sources[kFrameBuffer] = std::as_bytes(std::span(&frame, 1));
 			if (auto* state = globals::state) {
 				sources[kSharedData] = std::as_bytes(std::span(&state->lastSharedData, 1));
@@ -250,7 +268,7 @@ namespace SharedConstants
 		return std::static_pointer_cast<org::RenderPass>(std::make_shared<UploadPass>(buffers, a_point));
 	}
 
-	void Commit(std::uint32_t a_point)
+	void Commit(RenderGraph::Frame::SegmentId a_segment, std::uint32_t a_point)
 	{
 		auto& state = Shared();
 		if (!state.buffers || a_point >= kUploadPoints)
@@ -258,7 +276,7 @@ namespace SharedConstants
 		const auto& buffers = *state.buffers;
 		// This run's own region, which nothing else reads.
 		const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
-		const auto sources = Sources();
+		const auto sources = Sources(a_segment);
 		// Only the check reads back what was committed.
 		const bool keep = CheckRequested();
 		for (std::uint32_t i = 0; i < kBlocks; ++i) {

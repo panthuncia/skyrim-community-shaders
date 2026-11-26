@@ -13,6 +13,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 namespace DCLF
 {
@@ -345,14 +346,16 @@ namespace DCLF
 		/** @brief The blocks the epoch always supplies: the game's PerFrame (b12), CS SharedData (b5), feature data and DCLF's fog slot (VS b13). */
 		void SupplyFixedBlocks(FrameBlocks& a_out)
 		{
-			// The engine does not rewrite b12 through the hooked context every frame, so the mirror can be empty, and an empty slot
-			// drops every object that reads it. Community Shaders caches this buffer between Map and Unmap, so take it from there.
+			// Native draws with the frame camera (render-owned jitter and previous camera), never the engine's b12. Elsewhere the engine
+			// does not rewrite b12 through the hooked context every frame, so the mirror can be empty, and an empty slot drops every object
+			// that reads it. Community Shaders caches this buffer between Map and Unmap, so take it from there.
 			{
-				const auto& cached = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
+				const bool own = Snapshot::FrameCamera::Owned();
+				const auto& cached = Snapshot::FrameCamera::Main().data;
 				const auto* bytes = reinterpret_cast<const std::byte*>(&cached);
-				if (a_out.vs[kPerFrameVertexRegister].empty())
+				if (own || a_out.vs[kPerFrameVertexRegister].empty())
 					a_out.vs[kPerFrameVertexRegister].assign(bytes, bytes + sizeof(cached));
-				if (a_out.ps[kPerFrameVertexRegister].empty())
+				if (own || a_out.ps[kPerFrameVertexRegister].empty())
 					a_out.ps[kPerFrameVertexRegister].assign(bytes, bytes + sizeof(cached));
 			}
 			// CS writes b5 through its ConstantBuffer helper, so the mirror never sees it. Pack the struct CS uploaded instead.

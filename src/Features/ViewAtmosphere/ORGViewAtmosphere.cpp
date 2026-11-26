@@ -1,5 +1,6 @@
 #include "ORGViewAtmosphere.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -246,7 +247,7 @@ struct ORGViewAtmosphere::Impl
 		const auto slices = orgFog.Slices();
 		const auto& shared = globals::state->lastSharedData;
 		const auto& sky = globals::features::physicalSky.cbData;
-		const auto& camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+		const auto& camera = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 		logger::info(
 			"[ORG] Atmosphere and Fog: the first post-water composite: kMAIN {}x{} format {}, groups for {}x{}, depth format {}; "
 			"fog on {}, volumetric {}, density {:.4f}/{:.4f}, start {:.0f}, volumetric start {:.0f}, local range {:.0f}, near range {:.0f}; "
@@ -274,7 +275,7 @@ struct ORGViewAtmosphere::Impl
 				offset = at;
 				break;
 			}
-		const auto& camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+		const auto& camera = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
 		// The shader's HeightDensityIntegral for a level ray at the camera's height, at 20000 and 100000 units.
 		const auto opacity = [&](float a_length) {
 			const double height = static_cast<double>(camera.z) - expected.fogHeight;
@@ -715,7 +716,7 @@ void ORGViewAtmosphere::CompositeAfterWater()
 	const D3D11_TEXTURE2D_DESC desc = RenderGraph::Engine::Targets::Desc(RenderGraph::Engine::Targets::Colour(RE::RENDER_TARGETS::kMAIN));
 	if (!desc.Width || !desc.Height)
 		return;
-	const auto scale = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetDynamicResolutionParams1();
+	const auto scale = Snapshot::FrameCamera::Main().GetDynamicResolutionParams1();
 	const auto width = static_cast<std::uint32_t>(std::clamp(desc.Width * scale.x, 1.f, float(desc.Width)));
 	const auto height = static_cast<std::uint32_t>(std::clamp(desc.Height * scale.y, 1.f, float(desc.Height)));
 	impl->pendingRun = CompositeRun{ (width + 7u) / 8u, (height + 7u) / 8u };

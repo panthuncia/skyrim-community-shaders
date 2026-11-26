@@ -1,5 +1,6 @@
 #include "ViewAtmosphere.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include <algorithm>
 #include <cmath>
@@ -265,7 +266,7 @@ ViewAtmosphere::Parameters ViewAtmosphere::ParametersFor(const AtlasLayout& a_la
 	next.history = { a_continuous && temporal ? historyWeight : 0.0f,
 		temporal && historyWeight > 0.0f ? 1.0f : 0.0f,
 		temporal && historyWeight > 0.0f ? std::clamp(settings.sampleJitter, 0.0f, 1.0f) : 0.0f, 0 };
-	next.clipToWorld = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Invert();
+	next.clipToWorld = Snapshot::FrameCamera::Main().GetCameraViewProjUnjittered().Invert();
 	return next;
 }
 
@@ -769,7 +770,7 @@ void ViewAtmosphere::CompositeAfterWater()
 	context->CSSetShader(mediumCompositeCS.get(), nullptr, 0);
 	D3D11_TEXTURE2D_DESC desc;
 	main.texture->GetDesc(&desc);
-	const auto scale = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetDynamicResolutionParams1();
+	const auto scale = Snapshot::FrameCamera::Main().GetDynamicResolutionParams1();
 	const uint32_t width = static_cast<uint32_t>(std::clamp(desc.Width * scale.x, 1.f, float(desc.Width)));
 	const uint32_t height = static_cast<uint32_t>(std::clamp(desc.Height * scale.y, 1.f, float(desc.Height)));
 	globals::state->BeginPerfEvent("Medium Composite");
