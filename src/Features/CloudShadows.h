@@ -23,7 +23,7 @@ public:
 		bool fullSky = false;                                  // Sky::mode is kFull
 		bool climate = false;                                  // the sky has a current climate
 		std::uint32_t layerCount = 0;                          // the cloud layers that draw, at most kMaxCloudLayers
-		std::array<std::uintptr_t, kMaxCloudLayers> layers{};  // each layer's geometry address, as a key
+		std::array<Snapshot::EngineRef, kMaxCloudLayers> layers{};  // each layer's geometry, held as a key (never dereferenced)
 		bool operator==(const Block&) const = default;
 	};
 

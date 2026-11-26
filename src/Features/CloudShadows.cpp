@@ -264,7 +264,7 @@ void CloudShadows::Capture(Snapshot::Builder& a_builder)
 			// Slots past numLayers can still hold a previous weather's cloud geometry
 			block.layerCount = static_cast<std::uint32_t>(std::min(static_cast<int>(clouds->numLayers), kMaxCloudLayers));
 			for (std::uint32_t i = 0; i < block.layerCount; ++i)
-				block.layers[i] = reinterpret_cast<std::uintptr_t>(clouds->clouds[i].get());
+				block.layers[i] = Snapshot::EngineRef(clouds->clouds[i].get());
 		}
 	}
 	a_builder.Set(block);
@@ -276,9 +276,8 @@ int CloudShadows::FindCloudLayer(RE::BSRenderPass* Pass)
 	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
 	if (!frame)
 		return -1;
-	const auto key = reinterpret_cast<std::uintptr_t>(Pass->geometry);
 	for (std::uint32_t i = 0; i < frame->layerCount; i++) {
-		if (frame->layers[i] == key)
+		if (frame->layers[i].Names(Pass->geometry))
 			return static_cast<int>(i);
 	}
 	return -1;

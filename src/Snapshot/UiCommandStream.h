@@ -24,6 +24,9 @@ namespace Snapshot
 		/** @brief Sets the stream, once. Render owner. */
 		void Set(std::shared_ptr<const RenderGraph::Engine::Scaleform::UiStream> a_stream) const { stream.store(std::move(a_stream), std::memory_order_release); }
 
+		/** @brief Takes the stream out for the retire queue, once the render side will not render the snapshot again. Render side. */
+		std::shared_ptr<const RenderGraph::Engine::Scaleform::UiStream> Take() const { return stream.exchange(nullptr, std::memory_order_acq_rel); }
+
 		/** @brief The stream, or null before the update's DrawInterface finished it (or when GFx drew nothing). */
 		std::shared_ptr<const RenderGraph::Engine::Scaleform::UiStream> Get() const { return stream.load(std::memory_order_acquire); }
 

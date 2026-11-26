@@ -3,6 +3,7 @@
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Retire.h"
 #include "Snapshot/SideEffects.h"
 #include "Snapshot/UiCommandStream.h"
 #include "State.h"
@@ -12,6 +13,7 @@
 #include "RenderGraph/Async/LatestSlot.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameClock.h"
 #include "RenderGraph/Switches.h"
 
@@ -53,6 +55,8 @@ namespace Snapshot
 		constexpr float kTeleportDistance = 1024.0f;
 		// The side effects log one line per this many game updates (native).
 		constexpr std::uint64_t kSideEffectLineUpdates = 600;
+		// The lifetimes line (snapshots alive, engine references held, retire lanes) also comes once per this many game updates.
+		constexpr std::uint64_t kLifetimeLineUpdates = 1800;
 
 		/** @brief The cadence test mode, parsed once. */
 		struct Cadence
@@ -73,11 +77,11 @@ namespace Snapshot
 			std::vector<CaptureFn> captures;
 			std::shared_ptr<const FrameSnapshot> previous;  // the last published, adopted or not
 			std::uint64_t nextId = 1;
-			const RE::TESObjectCELL* previousCell = nullptr;  // a key, never read
+			RE::FormID previousCell = 0;  // the player's cell at the previous update, by form id (an address can be reused)
 			RE::NiPoint3 previousPlayer{};
 			bool havePlayer = false;
 			std::uint64_t updates = 0;  // game updates seen by the cadence mode
-			std::uint64_t sideEffectLines = 0;  // updates since the side effects' first line
+			std::uint64_t lineUpdates = 0;  // game updates since the start, for the periodic lines
 		};
 
 		/** @brief Counters since the last load's line. Atomic: the render side adds to them too. */
@@ -97,16 +101,18 @@ namespace Snapshot
 			std::uint64_t windowSizeServed = 0;  // the newest window size request this render side asked the renderer for
 		};
 
+		// The producer, the consumer and the slot hold snapshots, whose blocks may hold engine references. They are never destroyed:
+		// nothing may release engine objects while the process is torn down.
 		Producer& Game()
 		{
-			static Producer producer;
-			return producer;
+			static auto* producer = new Producer;
+			return *producer;
 		}
 
 		Consumer& RenderSide()
 		{
-			static Consumer consumer;
-			return consumer;
+			static auto* consumer = new Consumer;
+			return *consumer;
 		}
 
 		Stats& Counters()
@@ -119,8 +125,8 @@ namespace Snapshot
 		// ever exchange the pointer: one producer at a time (g_publishing), one consumer.
 		RenderGraph::Frame::LatestSlot<std::shared_ptr<const FrameSnapshot>>& Slot()
 		{
-			static RenderGraph::Frame::LatestSlot<std::shared_ptr<const FrameSnapshot>> slot;
-			return slot;
+			static auto* slot = new RenderGraph::Frame::LatestSlot<std::shared_ptr<const FrameSnapshot>>;
+			return *slot;
 		}
 
 		std::atomic<std::uint64_t> g_currentId{ 0 };
@@ -278,6 +284,7 @@ namespace Snapshot
 			auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
 			const bool has3D = player && player->Get3D2();
 			const auto* cell = player ? player->GetParentCell() : nullptr;
+			const RE::FormID cellId = cell ? cell->GetFormID() : 0;
 			a_snapshot.interior = cell && cell->IsInteriorCell();
 			a_snapshot.worldLoaded = has3D && cell;
 			a_snapshot.kind = MainThreadKind(menus, has3D);
@@ -318,13 +325,13 @@ namespace Snapshot
 			if (player && has3D) {
 				const auto position = player->GetPosition();
 				const bool moved = a_game.havePlayer && DistanceSquared(position, a_game.previousPlayer) > kTeleportDistance * kTeleportDistance;
-				const bool cellChanged = a_game.havePlayer && cell != a_game.previousCell;
+				const bool cellChanged = a_game.havePlayer && cellId != a_game.previousCell;
 				if (!loadEnded && !events.Has(Event::LoadStarted) && (moved || cellChanged)) {
 					events.Add(Event::Teleport);
 					++events.teleports;
 				}
 				a_game.previousPlayer = position;
-				a_game.previousCell = cell;
+				a_game.previousCell = cellId;
 				a_game.havePlayer = true;
 			}
 		}
@@ -348,20 +355,23 @@ namespace Snapshot
 				"{} replaced unadopted (at most {} updates in one), {} render frames, {} repeats; blocks {} shared, {} new; capture {:.1f} us a game snapshot",
 				a_why, a_snapshot.loadEpoch, a_snapshot.id, FrameKindName(a_snapshot.kind), published, frameOnly, adopted, replaced, folded, renders, repeats,
 				shared, made, published > frameOnly ? static_cast<double>(ns) / 1000.0 / static_cast<double>(published - frameOnly) : 0.0);
+			logger::info("{}", Retire::TakeStatsLine());
 		}
 
 		void Publish(std::shared_ptr<FrameSnapshot> a_fresh)
 		{
 			auto& stats = Counters();
 			// What the render side did not adopt hands its events to the fresh one.
+			// It was never rendered, so it retires at once (on the main thread; a serving-thread producer hands it to the main thread).
 			if (const auto unadopted = Slot().Take()) {
 				a_fresh->events.MergeOlder((*unadopted)->events);
 				stats.replaced.fetch_add(1, std::memory_order_relaxed);
+				Retire::LetGo(std::move(*unadopted));
 			}
 			const auto folded = a_fresh->events.gameUpdates;
 			for (auto most = stats.mostFolded.load(std::memory_order_relaxed); folded > most && !stats.mostFolded.compare_exchange_weak(most, folded);) {}
 			std::shared_ptr<const FrameSnapshot> published = std::move(a_fresh);
-			Game().previous = published;
+			Retire::LetGo(std::exchange(Game().previous, published));
 			Slot().Post(std::make_unique<std::shared_ptr<const FrameSnapshot>>(std::move(published)));
 			stats.published.fetch_add(1, std::memory_order_relaxed);
 		}
@@ -391,9 +401,12 @@ namespace Snapshot
 				t_inGameUpdate = outer;
 				// Phase 7's "publish, then wait for the next update slot". Off unless CS_UPDATE_RATE_CAP=1.
 				PaceGameUpdate();
-				if (++Game().sideEffectLines % kSideEffectLineUpdates == 0)
+				const auto updates = ++Game().lineUpdates;
+				if (updates % kSideEffectLineUpdates == 0)
 					if (const auto line = SideEffects::TakeStatsLine(); !line.empty())
 						logger::info("{}", line);
+				if (updates % kLifetimeLineUpdates == 0)
+					logger::info("{}", Retire::TakeStatsLine());
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -418,6 +431,8 @@ namespace Snapshot
 	{
 		ZoneScopedN("CS.Snapshot.Capture");
 		const PublishClaim claim;
+		// Game side, between render halves: what the render side retired and the GPU finished with is let go here.
+		Retire::DrainEngine();
 		// Engine reads from here on are captures, not live reads.
 		const EngineReads::CaptureScope scope;
 		const auto start = std::chrono::steady_clock::now();
@@ -452,6 +467,8 @@ namespace Snapshot
 	{
 		ZoneScopedN("CS.Snapshot.CaptureFrame");
 		const PublishClaim claim;
+		if (FrameAnchors::IsMainThread())
+			Retire::DrainEngine();
 		const EngineReads::CaptureScope scope;
 		auto& game = Game();
 		const FrameSnapshot* previous = game.previous.get();
@@ -501,13 +518,16 @@ namespace Snapshot
 		auto& side = RenderSide();
 		auto& stats = Counters();
 		const auto now = std::chrono::steady_clock::now();
+		const auto lastRendered = side.render.frame;
 		side.render.delta = side.lastAdopt.time_since_epoch().count() ? std::chrono::duration<float>(now - side.lastAdopt).count() : 0.0f;
 		side.lastAdopt = now;
 		side.render.frame = RenderGraph::FrameClock::BeginFrame();
 		g_lastRenderFrame.store(side.render.frame, std::memory_order_release);
 		stats.renders.fetch_add(1, std::memory_order_relaxed);
+		Retire::DrainRender();
 		if (auto taken = Slot().Take()) {
-			side.current = std::move(*taken);
+			// The snapshot rendered last never renders again: it retires once the GPU finished its last frame.
+			Retire::RenderedSnapshot(std::exchange(side.current, std::move(*taken)), lastRendered);
 			side.render.repeat = false;
 			side.render.rendersOfSnapshot = 1;
 			g_currentId.store(side.current->id, std::memory_order_release);
