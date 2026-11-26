@@ -209,7 +209,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		Pack(technique.vs, vsLayout, vsTable, kVSGroups[kPerTechnique], kVSFirstVariable[kPerTechnique], c.vsTechnique, w.vsTechnique, kLightingVSTechniqueRows);
 		Pack(technique.ps, psLayout, psTable, kPSGroups[kPerTechnique], kPSFirstVariable[kPerTechnique], c.psTechnique, w.psTechnique, kLightingPSTechniqueRows);
 
-		// PerMaterial (SetupMaterial, with Community Shaders' hooks as the port's contributors).
+		// PerMaterial (SetupMaterial, with Community Shaders' hooks as the port's contributors, Linear Lighting's SpecularColor among them).
 		MaterialPort::MaterialSnapshot snapshot;
 		if (!MaterialPort::Capture(*property->material, snapshot) || !MaterialPort::Evaluate(snapshot, a_out.pass, a_in.material, a_out.record)) {
 			a_why = "the material port does not cover its material";
@@ -217,20 +217,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 		Pack(a_out.record.vs, vsLayout, vsTable, kVSGroups[kPerMaterial], kVSFirstVariable[kPerMaterial], c.vsMaterial, w.vsMaterial, kLightingVSMaterialRows);
 		Pack(a_out.record.ps, psLayout, psTable, kPSGroups[kPerMaterial], kPSFirstVariable[kPerMaterial], c.psMaterial, w.psMaterial, kLightingPSMaterialRows);
-		// Linear Lighting's upload hook (LightingMaterialUpload) writes SpecularColor (PS 25) in working space after SetupMaterial.
-		auto& linear = globals::features::linearLighting;
-		if (linear.loaded && linear.IsLinearLightingActive() && (a_out.rawPixel & static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Specular)) &&
-			!(a_out.rawPixel & static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::TruePbr))) {
-			const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
-			const auto colour = linear.SRGBToWorking(material->specularColor) * material->specularColorScale;
-			const auto at = static_cast<std::uint32_t>(static_cast<std::uint8_t>(ps->constantTable[25]));
-			if (at != 0 && at + 3 <= kLightingPSMaterialRows * 4) {
-				float* row = &c.psMaterial[0][0] + at;
-				row[0] = colour.red;
-				row[1] = colour.green;
-				row[2] = colour.blue;
-			}
-		}
 
 		// PerGeometry (SetupGeometry): the pipeline's frame values from the menu's scene node, then the object's.
 		GeometryConstants geometry{};
@@ -355,7 +341,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		Pack(vs0, vsLayout, vsTable, Effects::kEffectVSGroups[0], Effects::kEffectVSFirstVariable[0], c.vsTechnique, w.vsTechnique, kEffectVSTechniqueRows);
 		Pack(ps0, psLayout, psTable, Effects::kEffectPSGroups[0], Effects::kEffectPSFirstVariable[0], c.psTechnique, w.psTechnique, kEffectPSTechniqueRows);
 
-		// PerMaterial (the Effect material port), then Linear Lighting's BaseColor (EffectMaterialUpload).
+		// PerMaterial (the Effect material port, which converts BaseColor into Linear Lighting's working space).
 		MaterialPort::MaterialSnapshot snapshot;
 		if (!MaterialPort::Capture(*property->material, snapshot) || snapshot.port != Effects::kMaterialKindEffect ||
 			!MaterialPort::Evaluate(snapshot, a_out.pass, a_in.material, a_out.record)) {
@@ -364,15 +350,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 		auto& linear = globals::features::linearLighting;
 		const bool linearOn = linear.loaded && linear.IsLinearLightingActive();
-		if (linearOn && !(a_out.rawPixel & (EF::GrayscaleToColor | EF::Blood))) {
-			const auto* material = static_cast<const RE::BSEffectShaderMaterial*>(property->material);
-			const auto& base = material->baseColor;
-			const auto colour = linear.SRGBToWorking(RE::NiColor{ base.red, base.green, base.blue }) * material->baseColorScale;
-			float* row = variable(a_out.record.ps, psLayout, Effects::kEffectPSBaseColor);
-			row[0] = colour.red;
-			row[1] = colour.green;
-			row[2] = colour.blue;
-		}
 		Pack(a_out.record.vs, vsLayout, vsTable, Effects::kEffectVSGroups[1], Effects::kEffectVSFirstVariable[1], c.vsMaterial, w.vsMaterial, kEffectVSMaterialRows);
 		Pack(a_out.record.ps, psLayout, psTable, Effects::kEffectPSGroups[1], Effects::kEffectPSFirstVariable[1], c.psMaterial, w.psMaterial, kEffectPSMaterialRows);
 
