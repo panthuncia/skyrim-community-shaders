@@ -24,6 +24,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
 #include "ShaderCache.h"
+#include "State.h"
 #include "Snapshot/FrameCamera.h"
 #include "Utils/Logging.h"
 
@@ -287,6 +288,10 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		};
 		{
 			const std::uint32_t uploaded = mine.rawPixel & ~mine.pixel;
+			const auto permutation = Native::PermutationOf(*geometry, false);
+			Note("permutation ui words", permutation.renderToUI != a_engine.renderToUI || permutation.baseTextureIsWorking != a_engine.baseTextureIsWorking,
+				std::format("{}: engine ui {} base {}, mine ui {} base {}", name, a_engine.renderToUI, a_engine.baseTextureIsWorking, permutation.renderToUI,
+					permutation.baseTextureIsWorking));
 			Note("permutation descriptors", a_engine.descriptors[1] != uploaded,
 				std::format("{}: engine {:#x} {:#x} {:#x} {:#x} radius {} base {} ui {}; mine pixel {:#x}", name, a_engine.descriptors[0], a_engine.descriptors[1],
 					a_engine.descriptors[2], a_engine.descriptors[3], a_engine.effectRadius, a_engine.baseTextureIsWorking, a_engine.renderToUI, uploaded));
@@ -351,6 +356,10 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			};
 			const auto& c = mine.constants;
 			const auto& w = mine.written;
+			const auto permutation = Native::PermutationOf(*a_pass->geometry, true);
+			constexpr auto kAlphaBlend = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::SourceAlphaBlend);
+			Note("effect permutation", permutation.renderToUI != a_engine.renderToUI || (permutation.extra & kAlphaBlend) != (a_engine.descriptors[2] & kAlphaBlend),
+				std::format("{}: engine ui {} extra {:#x}, mine ui {} extra {:#x}", name, a_engine.renderToUI, a_engine.descriptors[2], permutation.renderToUI, permutation.extra));
 			compare("effect vs technique", a_engine.vsTechnique, c.vsTechnique, w.vsTechnique, kEffectVSTechniqueRows);
 			compare("effect ps technique", a_engine.psTechnique, c.psTechnique, w.psTechnique, kEffectPSTechniqueRows);
 			compare("effect vs material", a_engine.vsMaterial, c.vsMaterial, w.vsMaterial, kEffectVSMaterialRows);

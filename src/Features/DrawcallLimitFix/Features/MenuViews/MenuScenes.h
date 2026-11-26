@@ -362,6 +362,13 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief Whether the menu's colour accumulator sorts its blended list by each bound's closest point. */
 		bool SortsByClosestPoint(const RE::UI3DSceneManager& a_manager);
 
+		/** @brief CS's permutation block for a draw: the extra shader descriptor and Linear Lighting's two words, as CS's hooks set them. */
+		struct Permutation
+		{
+			std::uint32_t extra = 0, baseTextureIsWorking = 0, renderToUI = 0;
+		};
+		Permutation PermutationOf(const RE::BSGeometry& a_geometry, bool a_effect);
+
 		/**
 		 * @brief A skinned geometry's palettes as VS b9 (previous) and b10 (current) hold them, after the engine's per-frame palette update.
 		 * False without skin or with more bones than the palettes hold.

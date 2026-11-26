@@ -246,6 +246,33 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		return true;
 	}
 
+	Permutation PermutationOf(const RE::BSGeometry& a_geometry, bool a_effect)
+	{
+		using Extra = State::ExtraShaderDescriptors;
+		Permutation out;
+		// The per-draw bits are this draw's; the rest is the frame's.
+		out.extra = globals::state->permutationData.ExtraShaderDescriptor &
+		            ~(static_cast<std::uint32_t>(Extra::InWorld) | static_cast<std::uint32_t>(Extra::SourceAlphaBlend) | static_cast<std::uint32_t>(Extra::ProjectedTextureIsSRGB));
+		auto& linear = globals::features::linearLighting;
+		if (!linear.loaded || !linear.IsLinearLightingActive())
+			return out;
+		// Linear Lighting's RenderMenuScene sets RenderToUI around UI3DSceneManager::Render, and its SetupGeometry hooks the rest.
+		out.renderToUI = 1;
+		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
+		if (a_effect) {
+			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+			using Function = RE::NiAlphaProperty::AlphaFunction;
+			if (property && !property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kPremultAlpha) && alpha && alpha->GetAlphaBlending() &&
+				alpha->GetSrcBlendMode() == Function::kSrcAlpha && (alpha->GetDestBlendMode() == Function::kInvSrcAlpha || alpha->GetDestBlendMode() == Function::kOne))
+				out.extra |= static_cast<std::uint32_t>(Extra::SourceAlphaBlend);
+		} else if (property && property->material) {
+			// With RenderToUI set only a water reflection source is in working space.
+			const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
+			out.baseTextureIsWorking = material->diffuseRenderTargetSourceIndex == RE::RENDER_TARGETS::kWATER_REFLECTIONS;
+		}
+		return out;
+	}
+
 	bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out)
 	{
 		auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get();
@@ -537,11 +564,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			// CS's permutation block (Hooks.cpp's shader setup): the raw descriptors, the lookup's runtime bits off the pixel one.
 			c.descriptors[0] = r.vertex;
 			c.descriptors[1] = r.rawPixel & ~r.pixel;
-			c.descriptors[2] = globals::state->permutationData.ExtraShaderDescriptor & ~static_cast<std::uint32_t>(State::ExtraShaderDescriptors::InWorld);
+			const auto permutation = PermutationOf(a_geometry, false);
+			c.descriptors[2] = permutation.extra;
 			c.descriptors[3] = globals::state->permutationData.ExtraFeatureDescriptor;
 			c.effectRadius = a_geometry.worldBound.radius;
-			c.baseTextureIsWorking = 0;
-			c.renderToUI = 0;
+			c.baseTextureIsWorking = permutation.baseTextureIsWorking;
+			c.renderToUI = permutation.renderToUI;
 			if (const char* why = AddGeometry(a_geometry, vs->vertexDesc, a_run, draw, c.vertexRef, c.indexRef, c.vertexLayout, c.vertexStride, c.firstIndex, a_detail))
 				return why;
 			auto null = GpuTextures::Get().NullOf(Kind::Texture2D);
@@ -596,11 +624,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			c.alphaTestRef = state.alphaRef;
 			c.descriptors[0] = r.vertex;
 			c.descriptors[1] = r.rawPixel & ~r.pixel;
-			c.descriptors[2] = globals::state->permutationData.ExtraShaderDescriptor & ~static_cast<std::uint32_t>(State::ExtraShaderDescriptors::InWorld);
+			const auto permutation = PermutationOf(a_geometry, true);
+			c.descriptors[2] = permutation.extra;
 			c.descriptors[3] = globals::state->permutationData.ExtraFeatureDescriptor;
 			c.effectRadius = a_geometry.worldBound.radius;
-			c.baseTextureIsWorking = 0;
-			c.renderToUI = 0;
+			c.baseTextureIsWorking = permutation.baseTextureIsWorking;
+			c.renderToUI = permutation.renderToUI;
 			if (const char* why = AddGeometry(a_geometry, vs->vertexDesc, a_run, draw, c.vertexRef, c.indexRef, c.vertexLayout, c.vertexStride, c.firstIndex, a_detail))
 				return why;
 			auto null = GpuTextures::Get().NullOf(Kind::Texture2D);
