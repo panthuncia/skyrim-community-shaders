@@ -7,17 +7,16 @@
 
 void WaterReflectionCubemapFix::Install()
 {
+	installed = true;
 	stl::detour_thunk<Main_RenderWaterEffects>(REL::RelocationID(35561, 36560));
 	stl::write_vfunc<0x6, BSWaterShader_SetupGeometry>(RE::VTABLE_BSWaterShader[0]);
 }
 
-void WaterReflectionCubemapFix::ResetCubemapOnSceneChange()
+bool WaterReflectionCubemapFix::SceneChanged()
 {
 	const auto tes = CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
-	const auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
-	const auto context = globals::d3d::context;
-	if (!tes || !renderer || !context)
-		return;
+	if (!installed || !tes)
+		return false;
 
 	const auto interiorCell = tes->interiorCell;
 	const auto worldSpace = interiorCell ? nullptr : tes->GetRuntimeData2().worldSpace;
@@ -25,6 +24,18 @@ void WaterReflectionCubemapFix::ResetCubemapOnSceneChange()
 	static const RE::TESWorldSpace* previousWorldSpace = nullptr;
 	static bool initialized = false;
 	if (initialized && interiorCell == previousInteriorCell && worldSpace == previousWorldSpace)
+		return false;
+	previousInteriorCell = interiorCell;
+	previousWorldSpace = worldSpace;
+	initialized = true;
+	return true;
+}
+
+void WaterReflectionCubemapFix::ClearCubemap()
+{
+	const auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
+	const auto context = globals::d3d::context;
+	if (!renderer || !context)
 		return;
 
 	auto& reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
@@ -36,15 +47,12 @@ void WaterReflectionCubemapFix::ResetCubemapOnSceneChange()
 	// The faces can be tripwire handles (CS_ORG_ENGINE_TARGET_HANDLES): DXVK's context takes the objects they wrap.
 	for (auto* rtv : reflections.cubeSideRTV)
 		context->ClearRenderTargetView(RenderGraph::Engine::Tripwire::Unwrap(rtv), clear);
-
-	previousInteriorCell = interiorCell;
-	previousWorldSpace = worldSpace;
-	initialized = true;
 }
 
 void WaterReflectionCubemapFix::Main_RenderWaterEffects::thunk()
 {
-	ResetCubemapOnSceneChange();
+	if (SceneChanged())
+		ClearCubemap();
 	func();
 }
 

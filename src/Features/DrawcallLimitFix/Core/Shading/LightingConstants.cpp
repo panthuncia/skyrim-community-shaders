@@ -7,6 +7,8 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
+#include "Features/DrawcallLimitFix/Integrations/LinearLighting/LinearLighting.h"
+#include "Features/LinearLighting.h"
 #include "Globals.h"
 #include "ShaderCache.h"
 #include "Snapshot/EngineReads.h"
@@ -415,11 +417,18 @@ namespace DCLF
 		shading.materialData[2] = a_member && material ? material->materialAlpha : a_property.alpha;
 		shading.materialData[3] = refraction && material ? material->refractionPower : 0.0f;
 		a_out.written = (envmap ? 1u : 0u) | (specular ? 2u : 0u) | 4u | (a_property.emissiveColor ? 0x70u : 0u) | 0x80u;
-		const float mult = a_property.emissiveMult;
+		float mult = a_property.emissiveMult;
 		const auto* emissive = a_property.emissiveColor;
-		shading.emitColor[0] = emissive ? emissive->red * mult : 0.0f;
-		shading.emitColor[1] = emissive ? emissive->green * mult : 0.0f;
-		shading.emitColor[2] = emissive ? emissive->blue * mult : 0.0f;
+		shading.emitColor[0] = emissive ? emissive->red : 0.0f;
+		shading.emitColor[1] = emissive ? emissive->green : 0.0f;
+		shading.emitColor[2] = emissive ? emissive->blue : 0.0f;
+		// Linear Lighting's LightingGeometryUpload: the colour in the working space, times its emissive multiplier too.
+		if (const auto* space = Integrations::LinearLighting::LiveWorkingSpace(); space && emissive) {
+			Integrations::LinearLighting::ToWorking(*space, shading.emitColor);
+			mult *= globals::features::linearLighting.settings.emitColorMult;
+		}
+		for (float& c : shading.emitColor)
+			c *= mult;
 		shading.ssrSpecular = ((GeometryPort::kMainPassRenderFlags & 2) ? 0.0f : 1.0f) * (specular ? a_property.specularLODFade : 0.0f);
 		a_out.padding = 0u;
 		// The feature block as its contribution derives it now. The rest is zero.

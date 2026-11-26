@@ -7,12 +7,14 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameClock.h"
 #include "Snapshot/Publication.h"
+#include "Utils/D3D.h"
 
 #include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <memory>
 #include <utility>
+#include <vector>
 
 namespace Snapshot::FaceTint
 {
@@ -40,7 +42,8 @@ namespace Snapshot::FaceTint
 
 		struct Render
 		{
-			std::uint64_t staged = 0, stagedFrame = 0, done = 0;
+			std::uint64_t staged = 0, stagedFrame = 0, done = 0, cleared = 0;
+			winrt::com_ptr<ID3D11Texture2D> zero;  // zeros of the heads' texture size, for clearing them
 		};
 		Render& RenderSide()
 		{
@@ -50,25 +53,9 @@ namespace Snapshot::FaceTint
 
 		struct Stats
 		{
-			std::atomic<std::uint64_t> queued{ 0 }, handed{ 0 }, drawn{ 0 }, copied{ 0 }, waits{ 0 };
+			std::atomic<std::uint64_t> queued{ 0 }, drawn{ 0 }, copied{ 0 }, waits{ 0 };
 		};
 		Stats stats;
-
-		using Texture = RE::NiTexture::RendererData;
-
-		Texture* CreateTexture(std::uint32_t a_width, std::uint32_t a_height)
-		{
-			using Create = Texture*(RE::BSGraphics::Renderer*, std::uint32_t, std::uint32_t, const void*, D3D11_USAGE, DXGI_FORMAT, bool);
-			static REL::Relocation<Create> create{ REL::RelocationID(75511, 77303) };
-			return create(globals::game::renderer, a_width, a_height, nullptr, D3D11_USAGE_DEFAULT, DXGI_FORMAT_R8G8B8A8_UNORM, false);
-		}
-
-		void ReleaseTexture(void* a_texture)
-		{
-			using Release = void(RE::BSGraphics::Renderer*, void*);
-			static REL::Relocation<Release> release{ REL::RelocationID(75527, 77322) };
-			release(globals::game::renderer, a_texture);
-		}
 
 		/** @brief Frees a job as UpdatePending does: the head's reference, the param, the masks, then the job's memory. */
 		void FreeJob(std::byte* a_job)
@@ -83,7 +70,11 @@ namespace Snapshot::FaceTint
 			RE::free(a_job);
 		}
 
-		/** @brief A job's bake: its masks, its rows, the head and a new texture for the result, as UpdatePending's copy makes it. */
+		/**
+		* @brief A job's bake: its masks, its rows, and the head's own texture as the result. UpdatePending gave the head a new
+		* texture instead, but Drawcall Limit Fix keeps the view a material named when it was captured, so a new texture would
+		* never be drawn and the face would read the empty texture the head was made with.
+		*/
 		std::shared_ptr<Bake> MakeBake(std::byte* a_job)
 		{
 			auto* head = reinterpret_cast<RE::NiPointer<RE::NiSourceTexture>*>(a_job + kJobHead)->get();
@@ -109,35 +100,33 @@ namespace Snapshot::FaceTint
 			static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> managerAt{ REL::RelocationID(524970, 411451) };
 			const auto& properties = managerAt->renderTargetData[RE::RENDER_TARGET::kPLAYER_FACEGEN_TINT];
 			auto* source = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kPLAYER_FACEGEN_TINT].texture;
-			auto* texture = CreateTexture(properties.width, properties.height);
-			if (!source || !texture || !texture->texture || !texture->resourceView)
-				RenderGraph::Fatal("face tint", fmt::format("the face tint's texture ({}x{}) or kPLAYER_FACEGEN_TINT is missing", properties.width, properties.height));
-			bake->texture = texture;
-			bake->destination = Tripwire::Unwrap(texture->texture);
+			// PrepareHeadPartForShaders made the head's texture (CreateRenderTexture) at the tint size, RGBA8, as UpdatePending's copy makes it.
+			const auto* data = head->rendererTexture;
+			auto* resource = data && data->texture ? Tripwire::Unwrap(data->texture) : nullptr;
+			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+			if (resource)
+				resource->GetType(&dimension);
+			auto* destination = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D ? static_cast<ID3D11Texture2D*>(resource) : nullptr;
+			D3D11_TEXTURE2D_DESC desc{};
+			if (destination)
+				destination->GetDesc(&desc);
+			if (!source || !destination || desc.Width != properties.width || desc.Height != properties.height || desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM ||
+				desc.MipLevels != 1 || desc.ArraySize != 1)
+				RenderGraph::Fatal("face tint", fmt::format("a head's tint texture ({}x{}, format {}, {} mips) is not kPLAYER_FACEGEN_TINT's {}x{} RGBA8, or one is missing",
+													desc.Width, desc.Height, static_cast<int>(desc.Format), desc.MipLevels, properties.width, properties.height));
+			bake->destination = destination;
 			bake->source = Tripwire::Unwrap(source);
 			return bake;
 		}
 
-		/** @brief Hands a done bake's texture to its head, releasing the head's old one, as UpdatePending does after its copy. */
-		void HandOver(Bake& a_bake)
-		{
-			auto* head = reinterpret_cast<RE::NiSourceTexture*>(a_bake.head.Key());
-			if (auto* old = std::exchange(head->rendererTexture, static_cast<RE::BSGraphics::Texture*>(a_bake.texture)))
-				ReleaseTexture(old);
-			a_bake.texture = nullptr;
-			stats.handed.fetch_add(1, std::memory_order_relaxed);
-		}
-
-		/** @brief The game half, in every capture: done bakes go to their heads, then the engine's queue becomes bakes. */
+		/** @brief The game half, in every capture: done bakes are let go, then the engine's queue becomes bakes. */
 		void CaptureBlock(Builder& a_builder)
 		{
 			auto& game = GameSide();
 			const auto done = g_done.load(std::memory_order_acquire);
 			std::size_t finished = 0;
-			for (; finished < game.pending.size() && game.pending[finished]->serial <= done; ++finished) {
-				HandOver(*game.pending[finished]);
-				logger::info("[Snapshot] face tint bake {} handed to its head", game.pending[finished]->serial);
-			}
+			for (; finished < game.pending.size() && game.pending[finished]->serial <= done; ++finished)
+				logger::info("[Snapshot] face tint bake {} done", game.pending[finished]->serial);
 			game.pending.erase(game.pending.begin(), game.pending.begin() + static_cast<std::ptrdiff_t>(finished));
 
 			// The queue's lock is the one AE 27040 and UpdatePending take; the queue may be filled from loader threads.
@@ -162,6 +151,35 @@ namespace Snapshot::FaceTint
 			a_builder.Set(block);
 		}
 
+		/**
+		* @brief Zeroes a bake's head texture. The head was made with an empty texture, and the native device leaves a texture made
+		* without contents as whatever memory it got, where D3D11 drivers and DXVK hand out zeros. The face draws it until the bake
+		* is copied. Render thread.
+		*/
+		void ClearHead(Render& a_render, const Bake& a_bake)
+		{
+			D3D11_TEXTURE2D_DESC desc{};
+			a_bake.destination->GetDesc(&desc);
+			if (a_render.zero) {
+				D3D11_TEXTURE2D_DESC zero{};
+				a_render.zero->GetDesc(&zero);
+				if (zero.Width != desc.Width || zero.Height != desc.Height)
+					a_render.zero = nullptr;
+			}
+			if (!a_render.zero) {
+				desc.Usage = D3D11_USAGE_IMMUTABLE;
+				desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+				desc.CPUAccessFlags = 0;
+				desc.MiscFlags = 0;
+				const std::vector<std::uint32_t> texels(std::size_t(desc.Width) * desc.Height, 0u);
+				const D3D11_SUBRESOURCE_DATA data{ .pSysMem = texels.data(), .SysMemPitch = desc.Width * 4u, .SysMemSlicePitch = 0 };
+				if (FAILED(globals::d3d::device->CreateTexture2D(&desc, &data, a_render.zero.put())))
+					RenderGraph::Fatal("face tint", fmt::format("the {}x{} zero texture for the heads' tints could not be made", desc.Width, desc.Height));
+				Util::SetResourceName(a_render.zero.get(), "FaceTint::Zero");
+			}
+			globals::d3d::context->CopyResource(a_bake.destination, a_render.zero.get());
+		}
+
 		/** @brief Turns a CALL to the engine's UpdatePending into a five-byte NOP, after checking it is the engine's own call. */
 		void RemoveCall(const char* a_what, std::uintptr_t a_site)
 		{
@@ -175,12 +193,7 @@ namespace Snapshot::FaceTint
 		}
 	}
 
-	Bake::~Bake()
-	{
-		// A bake never handed over still owns its texture.
-		if (texture)
-			ReleaseTexture(texture);
-	}
+	Bake::~Bake() = default;
 
 	void InstallHooks()
 	{
@@ -217,7 +230,14 @@ namespace Snapshot::FaceTint
 			render.done = std::exchange(render.staged, 0);
 			g_done.store(render.done, std::memory_order_release);
 		}
-		if (render.staged || !block)
+		if (!block)
+			return;
+		for (const auto& bake : block->bakes)
+			if (bake->serial > render.cleared) {
+				ClearHead(render, *bake);
+				render.cleared = bake->serial;
+			}
+		if (render.staged)
 			return;
 		// One bake a frame: they share kPLAYER_FACEGEN_TINT.
 		for (const auto& bake : block->bakes) {
@@ -238,7 +258,7 @@ namespace Snapshot::FaceTint
 	{
 		if (!installed)
 			return {};
-		return fmt::format("face tint bakes queued {}, drawn {}, copied {}, handed to heads {} ({} frames waited for the step)", stats.queued.exchange(0),
-			stats.drawn.exchange(0), stats.copied.exchange(0), stats.handed.exchange(0), stats.waits.exchange(0));
+		return fmt::format("face tint bakes queued {}, drawn {}, copied {} ({} frames waited for the step)", stats.queued.exchange(0), stats.drawn.exchange(0),
+			stats.copied.exchange(0), stats.waits.exchange(0));
 	}
 }

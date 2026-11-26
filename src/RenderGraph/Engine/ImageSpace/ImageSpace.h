@@ -25,6 +25,11 @@ namespace RenderGraph::Engine
 	struct TonemapTargets;
 }
 
+namespace RenderGraph::Engine::Native::WaterEffects
+{
+	struct Work;
+}
+
 namespace RenderGraph::Engine::ImageSpace
 {
 	struct GameInputs;
@@ -100,6 +105,12 @@ namespace RenderGraph::Engine::ImageSpace
 	* Render owner, inside the start stage.
 	*/
 	bool StageFaceTint(const std::array<ID3D11ShaderResourceView*, 16>& a_masks, const TintRows& a_rows);
+
+	/**
+	* @brief Native: the water work the game side planned (Native/WaterEffects.h) as start steps with CS's rows: the displacement steps in
+	* order, then the flow copies. Nothing is drawn while CS cannot stage the start steps. Render owner.
+	*/
+	void StageNativeWater(const Native::WaterEffects::Work& a_work);
 
 	/**
 	* @brief The world chain's RenderEndOfFrameEffects, between OnEndOfFrame's begin and end (family 2): CS's native end-of-frame effects,

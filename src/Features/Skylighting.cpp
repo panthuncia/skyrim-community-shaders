@@ -696,14 +696,14 @@ void Skylighting::BeginOcclusionFrame()
 void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf)
 {
 	[[maybe_unused]] auto state = globals::state;  // Tracy only
-	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	// Native mode: nothing the engine draws reaches the GPU, so the engine has nothing to draw into the map: no slot of its depth table is
 	// lent to it, the engine culls nothing for it, and nothing clears it here. Drawcall Limit Fix draws the map, and ORGSkylighting clears it
-	// with its own pass's load operation after the probe update read it. RenderMask still sets the camera and the projection.
+	// with its own pass's load operation after the probe update read it. CS computes the projection RenderMask would (DrawcallLimitFix::RenderMask).
 	const bool native = RenderGraph::Engine::Native::Active();
-	auto& precipitation = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
-	RE::BSGraphics::DepthStencilData precipitationCopy = precipitation;
+	auto* precipitation = native ? nullptr :
+	                               &CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
+	const RE::BSGraphics::DepthStencilData precipitationCopy = precipitation ? *precipitation : RE::BSGraphics::DepthStencilData{};
 
 	auto& dclf = globals::features::drawcallLimitFix;
 	// Held by a Drawcall Limit Fix load hold: rendered here without the engine's cull, as DCLF's own variant is.
@@ -722,9 +722,9 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 			ID3D11ShaderResourceView* nullSrv = nullptr;
 			globals::d3d::context->PSSetShaderResources(52, 1, &nullSrv);
 		}
-		precipitation.depthSRV = target->srv.get();
-		precipitation.texture = target->resource.get();
-		precipitation.views[0] = target->dsv.get();
+		precipitation->depthSRV = target->srv.get();
+		precipitation->texture = target->resource.get();
+		precipitation->views[0] = target->dsv.get();
 	}
 
 	static float& PrecipitationShaderCubeSize = (*(float*)REL::RelocationID(515451, 401590).address());
@@ -769,7 +769,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	{
 		CS_GPU_ZONE(state->tracyCtx, "Skylighting - Render Height Map");
 		globals::profiler->BeginPass("Skylighting::OcclusionMask");
-		a_precip->RenderMask((RE::BSParticleShaderRainEmitter*)rain);
+		DrawcallLimitFix::RenderMask(a_precip, (RE::BSParticleShaderRainEmitter*)rain);
 		// RenderMask defers its clear until the first engine draw. The DCLF
 		// accumulator may be empty, so explicitly discard the previous sky
 		// direction's depths before the shadow epoch draws into this map.
@@ -805,7 +805,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	PrecipitationShaderDirection = originalParticleShaderDirection;
 
 	if (!native)
-		precipitation = precipitationCopy;
+		*precipitation = precipitationCopy;
 
 	{
 		ZoneScopedN("Skylighting - Restore Projection");
@@ -835,6 +835,15 @@ void Skylighting::RenderOcclusionAtShadowMaps()
 	auto state = globals::state;
 	CS_GPU_ZONE(state->tracyCtx, "Occlusion Maps (Drawcall Limit Fix)");
 	state->BeginPerfEvent("Occlusion Maps (Drawcall Limit Fix)");
+	// Native's RenderMask leaves the renderer's state alone (DrawcallLimitFix::RenderMask), so there is nothing to put back.
+	if (RenderGraph::Engine::Native::Active()) {
+		if (precipitationMask)
+			dclf.RenderPrecipitationMask(precip, precipObject.get(), true);
+		if (skyMap)
+			RenderSkyOcclusionMap(precip, true);
+		state->EndPerfEvent();
+		return;
+	}
 	// Before the engine's shadow maps, so whatever RenderMask leaves of the renderer's state (its targets, viewport, camera) the shadow maps
 	// set again as they did; the camera the shadow maps begin with is put back besides (EarlyPrepasses reads its eye after them). As
 	// Upscaling's hook of the engine's occlusion point: the maps' viewport is not scaled by dynamic resolution.
@@ -863,7 +872,9 @@ void Skylighting::RenderOcclusion()
 	auto state = globals::state;
 	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 
-	if (!shaderCache->IsEnabled()) {
+	// Native makes no engine render call here: the maps DCLF did not draw this frame are drawn without the engine's cull (no occluders),
+	// as a held map is.
+	if (!shaderCache->IsEnabled() && !RenderGraph::Engine::Native::Active()) {
 		CS_GPU_ZONE(globals::state->tracyCtx, "Precipitation Mask");
 		state->BeginPerfEvent("Precipitation Mask");
 		Main_Precipitation_RenderOcclusion::func();

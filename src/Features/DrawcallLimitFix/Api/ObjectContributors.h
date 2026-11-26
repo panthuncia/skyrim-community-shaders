@@ -340,6 +340,8 @@ namespace DCLF::Api
 	 * @brief A record variable whose value comes from the live material each frame, like TexcoordOffset.
 	 * Writes that touch only bytes [first, end) then need no record rewrite.
 	 * The `alternate` components apply under a pass descriptor with any of alternateBits.
+	 * A workingColour variable's rgb is a colour Linear Lighting converts to its working space, before the scale, while it is on,
+	 * except under a pass descriptor with any of workingColourExceptBits.
 	 */
 	struct MaterialFrameVariable
 	{
@@ -349,10 +351,13 @@ namespace DCLF::Api
 		std::array<MaterialFrameComponent, 4> components{};
 		std::uint32_t alternateBits = 0;
 		std::array<MaterialFrameComponent, 4> alternate{};
+		bool workingColour = false;
+		std::uint32_t workingColourExceptBits = 0;
 		const std::array<MaterialFrameComponent, 4>& ComponentsFor(std::uint32_t a_passDescriptor) const
 		{
 			return (a_passDescriptor & alternateBits) ? alternate : components;
 		}
+		bool WorkingColourFor(std::uint32_t a_passDescriptor) const { return workingColour && !(a_passDescriptor & workingColourExceptBits); }
 	};
 
 	/**

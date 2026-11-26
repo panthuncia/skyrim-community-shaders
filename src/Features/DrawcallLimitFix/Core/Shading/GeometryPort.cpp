@@ -15,6 +15,7 @@
 #include <cstring>
 #include <type_traits>
 
+#include "Features/LinearLighting.h"
 #include "Globals.h"
 
 namespace DCLF::GeometryPort
@@ -151,9 +152,21 @@ namespace DCLF::GeometryPort
 		if (light && imageSpace) {
 			frame.sun = true;
 			// DirLightColor (0x1414dd5d5): the fade times the HDR multiplier, then each channel.
-			const float scale = At<const float>(light, kNiLightFade) * At<const float>(imageSpace, kImageSpaceHdr);
+			const float fade = At<const float>(light, kNiLightFade);
+			const float scale = fade * At<const float>(imageSpace, kImageSpaceHdr);
 			for (std::uint32_t c = 0; c < 3; ++c)
 				frame.dirLightColor[c] = scale * At<const float>(light, kNiLightDiffuse + c * sizeof(float));
+			// Linear Lighting's LightingGeometryUpload rewrites it while it is on or overrides the sun: the colour in the working space,
+			// and an overridden sun's without the HDR multiplier.
+			const auto& linearLighting = globals::features::linearLighting;
+			const auto* niLight = reinterpret_cast<const RE::NiLight*>(light);
+			const bool overridden = linearLighting.IsSunlightOverridden(niLight);
+			if (linearLighting.loaded && (linearLighting.IsLinearLightingActive() || overridden)) {
+				const auto colour = linearLighting.LightColorToWorking(niLight) * (overridden ? fade : scale);
+				frame.dirLightColor[0] = colour.red;
+				frame.dirLightColor[1] = colour.green;
+				frame.dirLightColor[2] = colour.blue;
+			}
 			// DirLightDirection (0x1414dd622): the direction negated with a sign flip (xorps 0x141ad3130; SE's multiply by -1.0 gives the same bits),
 			// then normalized through the engine's own D3DXVec3Normalize import, so the bits match on this machine.
 			const float negated[3] = { -At<const float>(light, kNiLightDirection), -At<const float>(light, kNiLightDirection + 4),

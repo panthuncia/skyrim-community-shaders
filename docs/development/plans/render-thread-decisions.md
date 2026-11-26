@@ -600,3 +600,47 @@ pushes until the user is back.
      frame. Observe scaffolding stays behind the diagnostic `CS_MENU_SCENES_OBSERVE` for the next lead. Found on the
      way: DCLF's world material port does not apply Linear Lighting's specular colour conversion
      (`LightingMaterialUpload`, PS 25).
+
+## 2026-11-26: native water effects on the game thread (snap3-water; director accepted)
+
+151. **Native skips Main::RenderWaterEffects** (Main::Draw +0x16F, byte-checked; `Native/WaterEffects.cpp`). The capture
+     runs its game half on world snapshots: the S20 early-out resets, `TESWaterSystem::Update` on the game thread
+     (decision 8) and the S16 flow-map ring drain. Inside the update, the reflection face render goes to a CS recorder
+     (its clear-colour calls NOPed), RenderDisplacement and the displacement effect are CS ports, and the water
+     visibility cull (AE 32189) is a frustum test against the snapshot camera (it can mark more water visible, never
+     less). The reflection update and displacement are detector producers (`Role::WaterProducer`, decision 64's rule).
+152. **Recorded water work goes through a queue keyed by snapshot id**, drawn once at DCLF's frame start (decision 62's
+     pattern): faces through `ReflectionFaces::DrawRecorded`, displacement steps and flow copies through
+     `ImageSpace::StageNativeWater`; the displacement restart's clear is a native ClearSimulation step. With dropped
+     snapshots only the newest update's displacement steps are drawn. A face DCLF cannot draw natively is not drawn (the
+     engine's draws of it were dropped by native before too).
+153. **SetupSunAndSky runs in the capture** before the main camera is taken; DCLF's hook at Main::Draw +0xD3 returns the
+     cached result.
+154. **Native precipitation occlusion maps make no engine call:** `DrawcallLimitFix::RenderMask` computes the occlusion
+     projection; the engine's SetupMask cull, shadow-state save/restore and dynamic-resolution lock write are not made in
+     native (Skylighting and Upscaling too). Engine render calls per world frame: tour 20.0 -> 16.9, river 21.9 -> 17.3,
+     quick 33.1 -> 25.4 (before the depth and post merges).
+155. **Left for phase 7:** `WaterPort::CaptureFrame` reads engine globals (including what the water update writes) at
+     record time; the water normal textures (AE 32170) need versioning; `Precipitation::UpdateProjection` and
+     Skylighting's live reads are record-time. SetupSunAndSky and RenderPrecipitation are CS points behind skeleton
+     calls (decision 70). The water update now runs in the capture beside the frame jobs: snap3-jobhang checks its
+     ordering with the drop-cells frame-job hang.
+
+## 2026-11-26: the player's face noise (snap3-facenoise; director accepted)
+
+156. **Closes 132:** the noise was DCLF drawing the head's first, empty tint texture (made by PrepareHeadPartForShaders
+     with `CreateRenderTexture`, no contents). DCLF captures the face material's views when the head attaches; the bake
+     then swapped a new texture into the head and released the old one (as UpdatePending does), which DCLF never sees.
+     The native device does not zero a texture created without contents, so it showed leftover memory; DXVK zeroes it,
+     so guest draws a zero tint instead (flat dark face).
+157. **A native bake copies into the head's existing texture** (no new texture, no swap, no release); a head texture that
+     does not match kPLAYER_FACEGEN_TINT is fatal. The render side zeroes a new bake's head texture first, so the frames
+     before the copy draw zeros.
+158. **Director's decisions on the open items:** (a) the native device zeroes every texture created without initial
+     contents, like DXVK and D3D11 drivers, so no texture read before its first write shows leftover memory; (b) guest's
+     player face is fixed too: DCLF refreshes a material's captured views when the engine swaps a texture under it (the
+     face tint swap first). Both go to the next lead.
+159. **Open regression:** since the snap5-menus or snap3-water merge, native's race menu (menu over world,
+     `facegen.toml`) draws the world only in the top-left 1280x720 of a 1920x1080 frame, and darker. Not caught because
+     the water validation did not run the facegen config; menu-over-world configs belong in every validation set from
+     now on. snap3-quarter bisects and fixes it.

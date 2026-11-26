@@ -56,7 +56,7 @@ namespace DCLF::Features::TextureTransforms
 			for (std::size_t i = 0; i < variables.size() && i < state.frameVariables.size(); ++i)
 				if (const auto& place = state.frameVariables[i]; place.mask) {
 					a_list.entries.push_back({ a_tables.materialSlotKey[m].first, static_cast<std::uint32_t>(row + place.rowByte), place.mask,
-						variables[i].ComponentsFor(pass).data() });
+						variables[i].ComponentsFor(pass).data(), variables[i].WorkingColourFor(pass) });
 					a_list.entrySlots.push_back(m);
 					++a_list.variables;
 				}

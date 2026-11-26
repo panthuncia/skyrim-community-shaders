@@ -13,6 +13,7 @@
 #include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/RenderDepth.h"
+#include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
@@ -48,6 +49,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
@@ -324,6 +326,14 @@ void DrawcallLimitFix::Hooks::Main_Update_Entry::thunk(void* a_stages)
 
 std::int64_t DrawcallLimitFix::Hooks::Main_Draw_Early::thunk(void* a_main)
 {
+	// Native runs Main::SetupSunAndSky's game half in the capture (Native/WaterEffects.h), and draws the water work the capture queued
+	// here, where Main::Draw would have called RenderWaterEffects: nothing in between draws in native.
+	namespace Water = RenderGraph::Engine::Native::WaterEffects;
+	if (Water::Owns()) {
+		globals::features::drawcallLimitFix.BeginSceneFrame();
+		Water::Render();
+		return static_cast<std::int64_t>(Water::SunAndSkyResult());
+	}
 	const auto result = func(a_main);
 	globals::features::drawcallLimitFix.BeginSceneFrame();
 	return result;
@@ -456,12 +466,37 @@ namespace
 	}
 }
 
+void DrawcallLimitFix::RenderMask(RE::Precipitation* a_precip, RE::BSParticleShaderRainEmitter* a_rain)
+{
+	if (!RenderGraph::Engine::Native::Active()) {
+		a_precip->RenderMask(a_rain);
+		return;
+	}
+	auto* camera = a_precip->occlusionData.camera.get();
+	auto* world = RE::Main::WorldRootCamera();
+	if (!camera || !world)
+		return;
+	DCLF::ShadowCameras::Camera matrices;
+	DCLF::ShadowCameras::CameraMatrices(*camera, matrices);
+	std::array<float, 16> rows{};
+	std::memcpy(rows.data(), reinterpret_cast<const void*>(REL::RelocationID(242842, 196452).address()), 16);
+	std::memcpy(rows.data() + 4, reinterpret_cast<const void*>(REL::RelocationID(242843, 196453).address()), 16);
+	std::memcpy(rows.data() + 8, reinterpret_cast<const void*>(REL::RelocationID(242844, 196454).address()), 16);
+	const auto offset = world->world.translate - camera->world.translate;
+	rows[12] = offset.x;
+	rows[13] = offset.y;
+	rows[14] = offset.z;
+	rows[15] = 1.0f;
+	const auto projection = DCLF::ShadowCameras::Multiply(rows, matrices.viewProj);
+	std::memcpy(&a_rain->occlusionProjection, projection.data(), sizeof(a_rain->occlusionProjection));
+}
+
 void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::BSGeometry* a_precipObject, bool a_dclf)
 {
 	// When DCLF draws the mask it draws every occluder from its own tables in the shadow epoch, so SetupMask is skipped
 	// and RenderMask only sets the camera and clears the mask. Otherwise the engine does it all.
-	// Held by a load, so the engine's point renders it without its cull, as DCLF's variant does.
-	const bool held = !a_dclf && OcclusionHeld(kPrecipitationOcclusion);
+	// Held by a load, so the engine's point renders it without its cull, as DCLF's variant does. Native never runs the engine's cull.
+	const bool held = !a_dclf && (OcclusionHeld(kPrecipitationOcclusion) || RenderGraph::Engine::Native::Active());
 	if (!a_dclf && !held) {
 		a_precip->SetupMask();
 	} else {
@@ -476,7 +511,7 @@ void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::
 	auto* rain = (RE::BSParticleShaderRainEmitter*)(particleShaderProperty->particleEmitter);
 
 	globals::profiler->BeginPass("Skylighting::PrecipMask");
-	a_precip->RenderMask(rain);
+	RenderMask(a_precip, rain);
 	globals::profiler->EndPass();
 }
 
@@ -491,6 +526,12 @@ void DrawcallLimitFix::RenderPrecipitationAtShadowMaps()
 	auto state = globals::state;
 	TracyD3D11Zone(state->tracyCtx, "Precipitation Mask (Drawcall Limit Fix)");
 	state->BeginPerfEvent("Precipitation Mask (Drawcall Limit Fix)");
+	// Native's RenderMask leaves the renderer's state alone (RenderMask), so there is nothing to put back.
+	if (RenderGraph::Engine::Native::Active()) {
+		RenderPrecipitationMask(CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->precip, object, true);
+		state->EndPerfEvent();
+		return;
+	}
 	// As Skylighting does, before the engine's shadow maps reset the renderer's state. Restore the camera they begin with,
 	// since EarlyPrepasses reads its eye after them. The mask's viewport is not scaled by dynamic resolution.
 	auto& shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData();
@@ -512,6 +553,12 @@ void DrawcallLimitFix::Hooks::Main_Precipitation_RenderOcclusion::thunk()
 {
 	// DCLF drew the mask in this frame's shadow epoch, so it is done. Otherwise the engine renders it whole.
 	auto& dclf = globals::features::drawcallLimitFix;
+	if (RenderGraph::Engine::Native::Active()) {
+		// Native makes no engine render call: a map DCLF did not draw this frame has no occluders, as a held map has.
+		if (auto* object = EngineMaskObject(); object && dclf.OcclusionNeedsEngine(kPrecipitationOcclusion))
+			dclf.RenderPrecipitationMask(CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->precip, object, false);
+		return;
+	}
 	if (!globals::shaderCache->IsEnabled() || !EngineMaskObject() || dclf.OcclusionNeedsEngine(kPrecipitationOcclusion))
 		func();
 }

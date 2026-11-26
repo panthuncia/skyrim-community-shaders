@@ -52,6 +52,8 @@ namespace DCLF::Features::TextureTransforms
 			std::uint32_t mask = 0;       // the components the record wrote (bit c)
 			// A declared frame variable's read. Null means TexcoordOffset, from the frame's buffer.
 			const Api::MaterialFrameComponent* components = nullptr;
+			// Its rgb converts to Linear Lighting's working space while that is on (MaterialFrameVariable::WorkingColourFor).
+			bool workingColour = false;
 			bool operator==(const Entry&) const = default;
 		};
 		std::vector<Entry> entries;
