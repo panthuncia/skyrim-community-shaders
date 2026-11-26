@@ -84,7 +84,29 @@ Movie frames are Movie snapshots (kind and identity). The decoded frame is still
 
 ## 2. Runs
 
-(filled below)
+Stage `s5-kinds`, Dev-Fast, `CS_SNAPSHOT_DETECT=1` unless noted.
+
+| Config | Label | Result |
+|---|---|---|
+| native-vulkan+quick | s5-kinds-nvk-quick | passed; kinds Bink (166 frames) -> loading (715) -> main menu (10) -> loading -> world, all from snapshots: 491 frame-only before the first game snapshot, 390 during the load |
+| guest+quick | s5-kinds-guest-quick | passed |
+| native-d3d12-quick | s5-kinds-native-d3d12-quick | passed |
+| native-vulkan+bink | s5-kinds-native-vulkan-bink | passed (4 shots) |
+| guest+bink | s5-kinds-guest-bink | passed |
+| native-vulkan+cadence-drop-cells | s5-kinds-native-vulkan-cadence-drop-cells | hang at the third coc (Riverwood): main thread in WaitForFrameJobs, the thread running the coc (an SKSE task) in an engine sleep loop; no frame-only snapshot was involved (console coc loads render no loading-screen frames) |
+| native-vulkan+cadence-drop-cells (no detect) | s5-kinds-dropcells2 | passed, 3 shots |
+| native-vulkan+imagespace-transitions | s5-kinds-native-vulkan-imagespace-transitions | passed |
+| native-vulkan+ui-menus | s5-kinds-native-vulkan-ui-menus | passed |
+| native-vulkan+cadence-repeat | s5-kinds-native-vulkan-cadence-repeat | passed |
+| native-vulkan+menu | s5-kinds-native-vulkan-menu | passed |
+| native-vulkan+boot | s5-kinds-native-vulkan-boot | passed |
+
+Detector: per-kind tables come from the description kind, which is now the snapshot's (native Vulkan quick: bink 166, loading
+715, main menu 10, world frames). The engine-render detector reads 0 per Bink frame, 11.2 per loading frame (FaceGen and the
+loading model, phase 5's menu scene) and 21.9 per main-menu frame (the main menu's scene, phase 5).
+
+Load hold, game updates under the first load's hold: normal 44, repeat:3 33 (it was counted in renders, about a third of
+that), drop:3 150 (a counted render stands for 3 updates and settling still needs DCLF's render-side progress).
 
 ## 3. Decided by the agent, to confirm
 
@@ -106,3 +128,6 @@ Movie frames are Movie snapshots (kind and identity). The decoded frame is still
 - The loading screen's Mist Menu model (phase 5 menu scenes).
 - Bink decode into the snapshot (phase 7).
 - `FaceGen::UpdatePending` in RunLoadingScreen is still a Render-role engine call on the serving thread.
+- The one cadence-drop-cells hang (third coc) did not repeat in a rerun; it looks like the racy coc-in-drop issue snap2-cadence
+  notes (decision 53), but it is not proven unrelated.
+- Main-menu and loading frames still call engine render functions (21.9 and 11.2 per frame): phase 5's menu scenes.
