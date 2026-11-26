@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "RenderGraph/SharedConstants.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
 
@@ -98,8 +99,10 @@ namespace SharedConstants
 			if (auto* state = globals::state) {
 				sources[kSharedData] = std::as_bytes(std::span(&state->lastSharedData, 1));
 				sources[kFeatureData] = state->lastFeatureData;
-				// permutationCB holds the last block it uploaded.
-				sources[kPermutation] = std::as_bytes(std::span(&state->permutationDataPrevious, 1));
+				// D3D11 reads the last block permutationCB uploaded, which State::Draw refreshes at the engine's state flush. Native's world
+				// frame flushes no engine state, and State::Reset marks that block stale each frame, so native takes CS's state as it is now.
+				const auto& permutation = RenderGraph::Engine::Native::Active() ? state->permutationData : state->permutationDataPrevious;
+				sources[kPermutation] = std::as_bytes(std::span(&permutation, 1));
 			}
 			return sources;
 		}
