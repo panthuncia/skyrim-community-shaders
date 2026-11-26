@@ -205,6 +205,7 @@ pushes until the user is back.
 57. **The engine-render detector does not count CS's own calls through an engine call site** (`EngineZones::CallTarget`).
 58. **The vanilla depth of field's `IsActive` includes Post Processing's skip flag** (CS state) and is captured on the game
     thread.
-59. **Detector runs are not shot references** until the dark-shot bug is fixed: `CS_SNAPSHOT_DETECT=1` darkens quick-run
-    start shots (mean about 18 vs 65). Compare shots only from runs without it. A diagnostic must not change the picture,
-    so this is a bug under repair (snap0-detfix), not a property.
+59. **Detector runs are shot references again** (fixed by snap0-detfix): the dark shots came from two call sites of AE
+    107221 whose seventh argument the old C++ thunk dropped. Each engine call site now jumps to a machine-code stub that
+    counts and jumps on to the original target, so any signature is safe to list. Tracy zones at the sites come only with
+    `CS_ENGINE_ZONES=1` in Tracy builds; their return-address swap is untested with Tracy connected.
