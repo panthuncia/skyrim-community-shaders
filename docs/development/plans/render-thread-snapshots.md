@@ -252,7 +252,8 @@ Done when the engine-render detector reads zero in every native frame kind.
   stream and submission threads already exist; `ClaimRenderOwnership`/`MoveOwnerThread` (`FrameAnchors.cpp:1955-1975`,
   `RenderGraphRuntime.cpp:2708-2716`) and the loading-screen thread are the precedent for moving ownership.
 - **Publication.** The engine's Present call on the game thread publishes the snapshot and returns at the next slot of the
-  update-rate cap (a CS setting, default 60 updates per second). Revisions and graph installs adopt at the render thread's frame start, as they do at Begin today.
+  update-rate cap (a CS setting, default 60 updates per second). Revisions and graph installs adopt at the render
+  thread's frame start, as they do at Begin today.
 - **Pacing.** None between the threads. The render thread's own present mode (vsync, a CS frame limiter, frame
   generation) sets its rate.
 - **Frame kinds.** `DecideKind` (`Frame/FrameDriver.cpp:172-177`, which treats any frame off the main thread as Loading)
