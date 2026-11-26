@@ -288,3 +288,24 @@ pushes until the user is back.
 80. **Known, older than this work:** `screenshot-clean` loses the device after its window-resize step (base build too);
     guest PrintScreen hits a fatal "ISCopy rt0->rt76 has no CS pass"; the save pump writes only the first of two saves in a
     config, in both modes.
+
+## 2026-11-26: phase 7 preparation (snap7-prep; director accepted)
+
+81. **ImGui input arrives only through the queue.** The game side reads UI state that the ImGui frame publishes at its end
+    (`Menu::PublishInputState`: input swallowed, editor camera flying, settings window drawn); the UI's writes into game
+    state (vanity-camera INI, `ClearInputState` after a focus change) run at the input poll (`Menu::UpdateGameSide`).
+82. **Game-side code reads settings as adopted, never live.** GrassCollision's capture is converted; the plain fields read
+    on the game thread (Sky Sync's moon settings and hook fields, Cinematic Camera, DoF) and the CS Editor's ~60 direct
+    engine writes from ImGui are listed in `snap7-prep.md` for phase 7.
+83. **A window resize is a snapshot event** (`Events::windowSize`, newest wins on merge), applied at the render frame's start
+    (native). A resize arriving between the capture and Begin waits one game update.
+84. **The update-rate cap** is the setting `State::updateRateCap` (Advanced "Update Rate Cap", default 60, 0 uncapped),
+    applied by `Snapshot::PaceGameUpdate()` after the render half, and active only under the test switch
+    `CS_UPDATE_RATE_CAP=1` until phase 7, so default pacing is unchanged today. The switch goes away in phase 7, when the cap
+    becomes the game thread's pacing.
+85. **PCL ids:** render markers use the render frame index; simulation markers use the render frame that first renders the
+    snapshot. SimulationStart fires once per game update, SimulationEnd once per snapshot. Open for phase 7: once decoupled,
+    the render thread learns which frame first renders a snapshot only at adoption; needs a frame-generation run on the
+    split build. Win32 `SetCursor` from a non-window thread is left for phase 7.
+86. **The phase 7 plan** is the eight-item list in `snap7-prep.md`: thread creation and ownership, Present as
+    publish-and-wait, revision adoption, ImGui, settings, resize, PCL, harness.
