@@ -158,6 +158,13 @@ namespace Snapshot
 		VolumetricLighting,    // Features/VolumetricLighting.h, VolumetricLighting::Block
 		WetnessEffects,        // Features/WetnessEffects.h, WetnessEffects::Block
 		ExponentialHeightFog,  // Features/ExponentialHeightFog.h, ExponentialHeightFog::Block
+		// The post group: post-processing, upscaling and the other non-DCLF features.
+		GrassCollision,      // Features/GrassCollision.h, GrassCollision::Block
+		UnifiedWater,        // Features/UnifiedWater.h, UnifiedWater::Block
+		DynamicCubemaps,     // Features/DynamicCubemaps.h, DynamicCubemaps::Block
+		ScreenSpaceShadows,  // Features/ScreenSpaceShadows.h, ScreenSpaceShadows::Block
+		PostProcessing,      // Features/PostProcessing.h, PostProcessing::Block
+		Effects11,           // Features/Effects11.h, Effects11::Block
 		Count
 	};
 

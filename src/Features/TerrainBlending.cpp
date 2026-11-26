@@ -299,7 +299,8 @@ void TerrainBlending::BlendPrepassDepths()
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);
 
-	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags);
+	// Writes: the engine re-binds its targets (goes with the engine's depth pass, phase 3).
+	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags);
 
 	// The ORG path: the DepthDone anchor's pass blends and writes the mask (ORGTerrainBlending).
 	if (ORGTerrainBlending::Get().Blend()) {
@@ -381,7 +382,8 @@ void TerrainBlending::Hooks::Main_RenderDepth::thunk(bool a1, bool a2)
 	auto& mainDepth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 	auto& zPrepassCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
 
-	CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->SetCameraData(CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera()), 1);
+	// A write into the engine's camera state for its depth pass (goes with phase 3's port of the pass).
+	CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->SetCameraData(CS_ENGINE_READ(Camera, Other, RE::Main::WorldRootCamera()), 1);
 
 	RefreshDepthBackups(singleton);
 	singleton.eyePosition = Util::GetEyePosition();
@@ -494,8 +496,9 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 
 	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
-	auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
-	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags);
+	// Writes: the blend and depth modes of the engine's terrain draws, and their dirty flags (goes with phase 3).
+	auto shadowState = CS_ENGINE_READ(ShadowState, Other, globals::game::shadowState);
+	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags);
 
 	auto* mask = GetMaskSRV();
 	context->PSSetShaderResources(55, 1, &mask);

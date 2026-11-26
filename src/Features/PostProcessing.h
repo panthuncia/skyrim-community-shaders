@@ -23,6 +23,7 @@ namespace RenderGraph::Engine
 #include "PostProcessing/PhysicalGlare.h"
 #include "PostProcessing/PhysicalLens.h"
 #include "PostProcessing/Vignette.h"
+#include "Snapshot/FrameSnapshot.h"
 
 #include <chrono>
 #include <map>
@@ -153,9 +154,58 @@ struct PostProcessing : Feature
 
 	CinematicCamera::Controller cinematicCamera;
 
-	[[nodiscard]] const CinematicCamera::PhysicalCameraState* GetActivePhysicalCameraState() const
+	/**
+	* @brief What the post chain reads of the game, captured once per game update: the ImageSpace data, the Cinematic Camera's
+	* state, and the focus targets DoF and Physical Lens resolve.
+	*/
+	struct Block
 	{
-		return cinematicCamera.GetState();
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::PostProcessing;
+
+		RE::ImageSpaceData imageSpace{};  // the ImageSpace manager's data, with the override or current base data as its base
+
+		bool cameraValid = false;                       // the Cinematic Camera published a state
+		CinematicCamera::PhysicalCameraState camera{};  // valid while cameraValid
+
+		/** @brief The focus target, by the DoF console-selection preference: console pick, TDM lock, dialogue speaker. */
+		struct Target
+		{
+			bool found = false;      // a reference was selected this update
+			bool projected = false;  // it is on screen: focus at coord
+			float2 coord = { 0.5f, 0.5f };
+			float distance = 0.0f;  // game units from the camera
+			bool operator==(const Target&) const = default;
+		};
+		CinematicCamera::FocusResolver::TargetFocusResult cameraTarget{};  // the Cinematic Camera's Target mode (holds a lost target)
+		Target dofTarget{};                                                // DoF's own target focus, while it is on
+		bool consoleRefSet = false;                                        // console selection was allowed: consoleRef is current
+		uint consoleRef = 0;                                               // the console pick's form id, for the DoF settings readout
+		bool raceMenu = false;                                             // RaceMenu is open: focus on the player
+		Target player{};
+
+		bool operator==(const Block& a_other) const
+		{
+			return std::memcmp(&imageSpace, &a_other.imageSpace, sizeof(imageSpace)) == 0 && cameraValid == a_other.cameraValid &&
+			       camera == a_other.camera && cameraTarget == a_other.cameraTarget && dofTarget == a_other.dofTarget &&
+			       consoleRefSet == a_other.consoleRefSet && consoleRef == a_other.consoleRef && raceMenu == a_other.raceMenu &&
+			       player == a_other.player;
+		}
+	};
+
+	/**
+	* @brief Fills the block. Runs the Cinematic Camera's update here too: its FOV write is game state. Registered in PostPostLoad.
+	* Game thread.
+	*/
+	static void Capture(Snapshot::Builder& a_builder);
+
+	/** @brief The adopted snapshot's block, or null before the first or while Post Processing captured none. */
+	static const Block* FrameBlock();
+
+	/** @brief The Cinematic Camera's state in the adopted snapshot, or null while it publishes none. */
+	[[nodiscard]] static const CinematicCamera::PhysicalCameraState* GetActivePhysicalCameraState()
+	{
+		const Block* block = FrameBlock();
+		return block && block->cameraValid ? &block->camera : nullptr;
 	}
 
 	[[nodiscard]] CinematicCamera::Controller& GetCinematicCamera() { return cinematicCamera; }

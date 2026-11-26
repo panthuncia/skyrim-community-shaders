@@ -1,5 +1,6 @@
 #include "ENBAdaptation.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "../EffectManager.h"
 #include "../SettingManager.h"
@@ -130,13 +131,13 @@ bool ENBAdaptation::SunMaskConstants(SunMaskCB& a_out) const
 		return false;
 
 	// Adaptation runs after the world pass, so gate on an exterior sky rather than State::inWorld
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (!sky || sky->mode.get() != RE::Sky::Mode::kFull || !sky->sun || !sky->sun->root || !sky->root)
+	const auto& game = Effects11::FrameBlock();
+	if (!game.hasSky || game.skyMode != static_cast<std::uint32_t>(RE::Sky::Mode::kFull) || !game.hasSun || !game.sunPlaced)
 		return false;
-	if (Util::GetSunVisibility(sky->sun) <= 0.0f)
+	if (game.sunVisibility <= 0.0f)
 		return false;
 
-	const auto sunDirection = globals::features::skySync.GetCelestialDirection(sky, SkySync::Caster::Sun);
+	const auto sunDirection = game.sunDirection;
 	const float maskAngle = effects11.proceduralSunAngularRadius + kSunMaskMarginRadians;
 	const float sampleAngle = maskAngle + kSunMaskMarginRadians;
 	a_out.SunDirection = { sunDirection.x, sunDirection.y, sunDirection.z, 0.0f };
@@ -227,7 +228,8 @@ void ENBAdaptation::UpdateEffectVariables()
 	auto forceMinMaxValues = settingManager.GetValue<bool>(idForceMinMax);
 
 	float adaptationTime = settingManager.GetValue<float>(idAdaptTime);
-	float deltaTime = (CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime)) ? (*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime)) : 0.0f;
+	// Visual-only: the eye adapts by the render delta (0 while paused).
+	float deltaTime = Snapshot::VisualDelta();
 
 	float4 adaptationParameters{};
 	adaptationParameters.x = !forceMinMaxValues ? 0.0f : settingManager.GetValue<float>(idAdaptMin);

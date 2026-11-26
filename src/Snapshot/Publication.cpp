@@ -415,6 +415,12 @@ namespace Snapshot
 		return RenderSide().render;
 	}
 
+	float VisualDelta()
+	{
+		const auto& side = RenderSide();
+		return side.current && !side.current->menus.paused ? side.render.delta : 0.0f;
+	}
+
 	void OnLoadingScreen(bool a_active)
 	{
 		if (a_active) {

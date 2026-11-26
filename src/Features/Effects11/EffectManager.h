@@ -199,7 +199,6 @@ private:
 
 	bool initialized = false;
 
-	RE::TESWeather* cachedLastWeather = nullptr;
 	float averageFps = 60.0f;
 	float cursorPosition[2] = { 0.5f, 0.5f };
 	float lastLeftClick[2] = { 0.5f, 0.5f };

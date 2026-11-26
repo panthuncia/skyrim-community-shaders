@@ -10,6 +10,7 @@
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ShaderBindings.h"
 #include "RenderGraph/SharedConstants.h"
+#include "Snapshot/Publication.h"
 
 #include <algorithm>
 #include <array>
@@ -105,7 +106,7 @@ namespace ORGPostChain
 			{
 				auto& glare = static_cast<PhysicalGlare&>(a_feature);
 				const auto effective = glare.GetEffectiveSettings();
-				const float deltaTime = *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime);
+				const float deltaTime = Snapshot::VisualDelta();
 				// The tear film's clock runs while it animates.
 				if (TearFilmAnimated(effective))
 					glare.tearFilmTimeAccum += deltaTime;

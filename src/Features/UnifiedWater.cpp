@@ -1,6 +1,7 @@
 #include "UnifiedWater.h"
 #include "Features/DrawcallLimitFix.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 #include "Utils/Hash.h"
 
 #include "I18n/I18n.h"
@@ -21,14 +22,15 @@
 
 namespace
 {
+	// Game side: the capture and the cell and worldspace hooks.
 	bool IsInteriorCellActive()
 	{
-		const auto tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
+		const auto tes = CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
 		if (tes && tes->interiorCell)
 			return true;
 
 		// TES::interiorCell can lag behind during load transitions
-		const auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+		const auto player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 		const auto cell = player ? player->GetParentCell() : nullptr;
 		return cell && cell->IsInteriorCell();
 	}
@@ -552,6 +554,23 @@ bool UnifiedWater::IsExteriorWorldspaceActive() const
 	return exteriorWorldspaceActive.load(std::memory_order_acquire) && !IsInteriorCellActive();
 }
 
+bool UnifiedWater::FrameExteriorActive()
+{
+	const auto& snapshot = Snapshot::Current();
+	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	return block && block->exteriorActive;
+}
+
+void UnifiedWater::Capture(Snapshot::Builder& a_builder)
+{
+	const auto& singleton = globals::features::unifiedWater;
+	if (!singleton.loaded)
+		return;
+	// The LOD root's cull flag is game state: set here, once per update, where the render half's displacement update set it.
+	singleton.UpdateWaterLODCull();
+	a_builder.Set(Block{ .exteriorActive = singleton.IsExteriorWorldspaceActive() });
+}
+
 void UnifiedWater::UpdateWaterLODCull() const
 {
 	// Only hide UW's generated LOD root, preserving child tile cull flags
@@ -598,7 +617,8 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 	if (node->GetLODLevel() != 4)
 		return;
 
-	const auto tes = CS_ENGINE_READ(TES, CapturePoint, globals::game::tes);
+	// Game side: the terrain LOD's per-update visibility.
+	const auto tes = CS_ENGINE_READ(TES, Other, globals::game::tes);
 	if (!tes || !tes->gridCells)
 		return;
 
@@ -643,7 +663,8 @@ void UnifiedWater::BGSTerrainNode_UpdateWaterMeshSubVisibility::thunk(const RE::
 
 void UnifiedWater::BGSTerrainBlock_Attach::thunk(RE::BGSTerrainBlock* block)
 {
-	const auto waterSystem = CS_ENGINE_READ(Water, CapturePoint, RE::TESWaterSystem::GetSingleton());
+	// Game side: a terrain block attaching as its cell loads.
+	const auto waterSystem = CS_ENGINE_READ(Water, Other, RE::TESWaterSystem::GetSingleton());
 	const auto& singleton = globals::features::unifiedWater;
 
 	std::vector<std::pair<RE::BSTriShape*, const WaterCache::Instruction*>> built;
@@ -829,7 +850,7 @@ void UnifiedWater::BSWaterShader_SetupGeometry::thunk(RE::BSShader* waterShader,
 {
 	auto& singleton = globals::features::unifiedWater;
 
-	if (singleton.IsExteriorWorldspaceActive() && singleton.flowmap && pass && pass->geometry) {
+	if (FrameExteriorActive() && singleton.flowmap && pass && pass->geometry) {
 		// ObjectUV.xyz below, xy contains width and height, z contains mesh scale
 		// Previously flowmap size was in x, yz contained flowmap offset for water displacement mesh
 		*singleton.gFlowMapSize = singleton.flowmap->GetWidth();                                            // ObjectUV.x
@@ -859,9 +880,7 @@ void UnifiedWater::TESWaterSystem_UpdateDisplacementMeshPosition::thunk(RE::TESW
 	func(waterSystem);
 
 	const auto& singleton = globals::features::unifiedWater;
-	singleton.UpdateWaterLODCull();
-
-	if (!singleton.flowmap || !singleton.IsExteriorWorldspaceActive())
+	if (!singleton.flowmap || !FrameExteriorActive())
 		return;
 
 	const float posX = singleton.gDisplacementMeshPos->x / 4096.0f;

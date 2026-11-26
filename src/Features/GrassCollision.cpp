@@ -1,6 +1,7 @@
 #include "GrassCollision.h"
 #include "GrassCollision/ORGGrassCollision.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Globals.h"
 #include "GrassShared/GrassFrame.h"
@@ -55,13 +56,20 @@ void GrassCollision::DrawSettings()
 	Util::Checkbox(T(TKEY("enable"), "Enable Grass Collision"), settings.EnableGrassCollision);
 }
 
-void GrassCollision::QueueCollisions()
+void GrassCollision::Capture(Snapshot::Builder& a_builder)
 {
-	if (!settings.EnableGrassCollision)
+	auto& self = globals::features::grassCollision;
+	if (!self.loaded)
 		return;
+	Block block{};
+	const auto& camera = a_builder.Built().cameras.Current(Snapshot::ViewId::Main);
+	if (!self.settings.EnableGrassCollision || !camera.valid) {
+		a_builder.Set(block);
+		return;
+	}
 
 	eastl::vector<GrassCollisionActorCandidate> actorCandidates{};
-	RE::NiPoint3 cameraPosition = Util::GetEyePosition();
+	const RE::NiPoint3 cameraPosition = camera.position;
 
 	auto addActorCandidate = [&](RE::ActorHandle a_handle) {
 		auto actor = a_handle.get();
@@ -74,13 +82,13 @@ void GrassCollision::QueueCollisions()
 
 	// Actor query code from po3 under MIT
 	// https://github.com/powerof3/PapyrusExtenderSSE/blob/7a73b47bc87331bec4e16f5f42f2dbc98b66c3a7/include/Papyrus/Functions/Faction.h#L24C7-L46
-	if (const auto processLists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton()); processLists) {
+	if (const auto processLists = CS_ENGINE_READ(Data, CapturePoint, RE::ProcessLists::GetSingleton()); processLists) {
 		for (auto& actorHandle : processLists->highActorHandles) {
 			addActorCandidate(actorHandle);
 		}
 	}
 
-	if (auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
+	if (auto player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton())) {
 		addActorCandidate(player->GetHandle());
 	}
 
@@ -88,10 +96,10 @@ void GrassCollision::QueueCollisions()
 		return a.sqDistance < b.sqDistance;
 	});
 
-	eastl::vector<BoundingBoxPacked> boundingBoxData{};
+	auto& boundingBoxData = block.boxes;
 	boundingBoxData.reserve(MAX_BOUNDING_BOXES);
 
-	eastl::vector<float4> collisionsData{};
+	auto& collisionsData = block.collisions;
 	collisionsData.reserve(MAX_COLLISIONS);
 
 	uint collisionIndexExtent = 0;
@@ -169,11 +177,18 @@ void GrassCollision::QueueCollisions()
 		}
 	}
 
-	queuedBoundingBoxes = std::move(boundingBoxData);
-	queuedCollisions = std::move(collisionsData);
+	a_builder.Set(block);
 }
 
-GrassCollision::PerFrame GrassCollision::NextPerFrame(const RE::NiPoint3& a_eye)
+const GrassCollision::Block& GrassCollision::FrameBlock()
+{
+	static const Block empty{};
+	const auto& snapshot = Snapshot::Current();
+	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	return block ? *block : empty;
+}
+
+GrassCollision::PerFrame GrassCollision::NextPerFrame(const RE::NiPoint3& a_eye, const Block& a_block)
 {
 	PerFrame perFrameData{};
 
@@ -204,11 +219,16 @@ GrassCollision::PerFrame GrassCollision::NextPerFrame(const RE::NiPoint3& a_eye)
 
 	perFrameData.ValidMargin = { (int)cellIDDiff.x, (int)cellIDDiff.y };
 
-	perFrameData.TimeDelta = *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) * !CS_ENGINE_READ(UI, RecordTime, globals::game::ui)->GameIsPaused();
+	// The grass springs back in game time (0 while paused), stepped once per new snapshot: a repeat holds it.
+	const auto& snapshot = Snapshot::Current();
+	const bool newSnapshot = snapshot && snapshot->id != steppedSnapshot;
+	if (newSnapshot)
+		steppedSnapshot = snapshot->id;
+	perFrameData.TimeDelta = newSnapshot ? snapshot->events.gameDelta : 0.0f;
 
 	perFrameData.CameraHeightDelta = prevEyePos.z - eyePosNI.z;
 
-	perFrameData.BoundingBoxCount = std::min((uint)queuedBoundingBoxes.size(), MAX_BOUNDING_BOXES);
+	perFrameData.BoundingBoxCount = std::min((uint)a_block.boxes.size(), MAX_BOUNDING_BOXES);
 
 	prevEyePos = eyePosNI;
 	return perFrameData;
@@ -221,16 +241,17 @@ void GrassCollision::Update(const RE::NiPoint3& a_eye)
 		if (!collisionTexture)
 			return;
 
-		const PerFrame perFrameData = NextPerFrame(a_eye);
-		LogColliders("D3D11");
+		const auto& block = FrameBlock();
+		const PerFrame perFrameData = NextPerFrame(a_eye, block);
+		LogColliders("D3D11", block);
 
 		auto context = globals::d3d::context;
 
-		if (!queuedCollisions.empty()) {
+		if (!block.collisions.empty()) {
 			D3D11_MAPPED_SUBRESOURCE mapped;
 			DX::ThrowIfFailed(context->Map(collisionInstances->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
-			size_t bytes = sizeof(float4) * queuedCollisions.size();
-			memcpy_s(mapped.pData, bytes, queuedCollisions.data(), bytes);
+			size_t bytes = sizeof(float4) * block.collisions.size();
+			memcpy_s(mapped.pData, bytes, block.collisions.data(), bytes);
 			context->Unmap(collisionInstances->resource.get(), 0);
 		}
 
@@ -238,12 +259,9 @@ void GrassCollision::Update(const RE::NiPoint3& a_eye)
 			D3D11_MAPPED_SUBRESOURCE mapped;
 			DX::ThrowIfFailed(context->Map(collisionBoundingBoxes->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
 			size_t bytes = sizeof(BoundingBoxPacked) * perFrameData.BoundingBoxCount;
-			memcpy_s(mapped.pData, bytes, queuedBoundingBoxes.data(), bytes);
+			memcpy_s(mapped.pData, bytes, block.boxes.data(), bytes);
 			context->Unmap(collisionBoundingBoxes->resource.get(), 0);
 		}
-
-		queuedBoundingBoxes.clear();
-		queuedCollisions.clear();
 
 		perFrame->Update(perFrameData);
 		lastPerFrame = perFrameData;
@@ -280,6 +298,7 @@ void GrassCollision::RestoreDefaultSettings()
 void GrassCollision::PostPostLoad()
 {
 	Hooks::Install();
+	Snapshot::RegisterCapture(&GrassCollision::Capture);
 	GrassShared::OnStoodDownFrame(&GrassCollision::StoodDownUpdate);
 }
 
@@ -296,18 +315,17 @@ void GrassCollision::PublishCollision() const
 	GrassShared::Collision published;
 	published.texture = CollisionSRV();
 	std::memcpy(published.perFrame.data(), &lastPerFrame, sizeof(PerFrame));
-	published.frame = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->frameCount;
 	GrassShared::PublishCollision(published);
 }
 
-void GrassCollision::LogColliders(const char* a_path) const
+void GrassCollision::LogColliders(const char* a_path, const Block& a_block)
 {
 	static const bool requested = Switches::On("CS_GRASS_COLLISION_STATS");
-	const auto frame = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->frameCount;
+	const auto frame = globals::state->frameCount;
 	if (!requested || frame % 120 != 0)
 		return;
 	logger::info("[GRASS COLLISION] frame {} ({}): {} colliders, {} collision shapes", frame, a_path,
-		std::min((uint)queuedBoundingBoxes.size(), MAX_BOUNDING_BOXES), queuedCollisions.size());
+		std::min((uint)a_block.boxes.size(), MAX_BOUNDING_BOXES), a_block.collisions.size());
 }
 
 void GrassCollision::StoodDownUpdate(const GrassShared::StoodDownFrame& a_frame)
@@ -327,22 +345,20 @@ void GrassCollision::EarlyPrepass()
 	if (!graph.IsActive() || !perFrame)
 		return;
 
-	// The main view's eye: posAdjust holds the last shadow pass's here (GrassShared::StoodDownFrame).
-	auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
-	if (!camera)
+	// The main view's eye, the snapshot's main camera: the colliders are relative to it.
+	const auto& snapshot = Snapshot::Current();
+	if (!snapshot || !snapshot->cameras.Current(Snapshot::ViewId::Main).valid)
 		return;
-	const PerFrame perFrameData = NextPerFrame(camera->world.translate);
-	LogColliders("ORG");
+	const auto& block = FrameBlock();
+	const PerFrame perFrameData = NextPerFrame(snapshot->cameras.Current(Snapshot::ViewId::Main).position, block);
+	LogColliders("ORG", block);
 
 	// The frame's update, as the D3D11 path uploads it: the graph's path stages it for the anchor.
-	const size_t collisions = std::min(queuedCollisions.size(), (size_t)MAX_COLLISIONS);
+	const size_t collisions = std::min(block.collisions.size(), (size_t)MAX_COLLISIONS);
 	graph.Stage({ .perFrame = std::as_bytes(std::span(&perFrameData, 1)),
-		.boxes = std::as_bytes(std::span(queuedBoundingBoxes.data(), perFrameData.BoundingBoxCount)),
-		.instances = std::as_bytes(std::span(queuedCollisions.data(), perFrameData.BoundingBoxCount ? collisions : 0)),
+		.boxes = std::as_bytes(std::span(block.boxes.data(), perFrameData.BoundingBoxCount)),
+		.instances = std::as_bytes(std::span(block.collisions.data(), perFrameData.BoundingBoxCount ? collisions : 0)),
 		.enabled = settings.EnableGrassCollision });
-
-	queuedBoundingBoxes.clear();
-	queuedCollisions.clear();
 
 	// The engine's grass reads these from its first SetupGeometry of the frame; DCLF's grass from the depth commit.
 	perFrame->Update(perFrameData);
@@ -438,12 +454,6 @@ bool GrassCollision::HasShaderDefine(RE::BSShader::Type shaderType)
 	default:
 		return false;
 	}
-}
-
-void GrassCollision::Hooks::MainUpdate_QueueCollisions::thunk()
-{
-	func();
-	globals::features::grassCollision.QueueCollisions();
 }
 
 void GrassCollision::Hooks::BSGrassShader_SetupGeometry::thunk(RE::BSShader* This, RE::BSRenderPass* Pass, uint32_t RenderFlags)

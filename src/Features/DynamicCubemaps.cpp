@@ -1,5 +1,6 @@
 #include "DynamicCubemaps.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include <DDSTextureLoader.h>
 #include <DirectXTex.h>
@@ -593,8 +594,8 @@ void DynamicCubemaps::CompressToBC6H(bool a_reflections)
 void DynamicCubemaps::BeginUpdate()
 {
 	// Reset capture when game time jumps (wait menu, timescale changes, console commands)
-	if (auto calendar = CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)) {
-		float currentHoursPassed = calendar->GetHoursPassed();
+	if (const auto& snapshot = Snapshot::Current()) {
+		float currentHoursPassed = snapshot->gameDaysPassed * 24.0f;
 		float hoursPassedDiff = std::abs(currentHoursPassed - previousHoursPassed);
 		previousHoursPassed = currentHoursPassed;
 
@@ -960,14 +961,27 @@ void DynamicCubemaps::CreateD3D11Textures()
 	}
 }
 
+void DynamicCubemaps::PostPostLoad()
+{
+	Snapshot::RegisterCapture(&DynamicCubemaps::Capture);
+}
+
+void DynamicCubemaps::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::dynamicCubemaps.loaded)
+		return;
+	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
+	a_builder.Set(Block{ .skyHidden = sky && sky->flags.any(RE::Sky::Flags::kHideSky) });
+}
+
 void DynamicCubemaps::Reset()
 {
 	activeReflections = globals::state->activeReflections;
 
-	if (CS_ENGINE_READ(Sky, Other, globals::game::sky))
-		fakeReflections = activeReflections && CS_ENGINE_READ(Sky, Other, globals::game::sky)->flags.any(RE::Sky::Flags::kHideSky);
-	else
-		fakeReflections = false;
+	// The adopted snapshot's sky: the game state after the update this frame rendered, as the live sky was here.
+	const auto& snapshot = Snapshot::Current();
+	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	fakeReflections = activeReflections && block && block->skyHidden;
 
 	if (!activeReflections && !Util::IsInterior()) {
 		activeReflections = true;

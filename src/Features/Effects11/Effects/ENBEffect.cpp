@@ -1,6 +1,8 @@
 #include "ENBEffect.h"
 #include "Snapshot/EngineReads.h"
 
+#include "Features/Effects11.h"
+
 #include "../EffectManager.h"
 #include "../SettingManager.h"
 #include "../TextureManager.h"
@@ -44,22 +46,15 @@ void ENBEffect::UpdateEffectVariables()
 {
 	float4 params01[7]{};
 
-	auto imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
-	if (!imageSpaceManager) {
-		return;
-	}
-
-	auto& data = imageSpaceManager->GetRuntimeData().data;
+	const auto& frame = Effects11::FrameBlock();
+	const auto& data = frame.imageSpace;
 	auto& baseData = data.baseData;
 
 	auto& modAmount = data.modAmount;
 	auto& modData = data.modData;
 
 	params01[2].x = baseData.hdr.receiveBloomThreshold;
-	static RE::Setting* reinhardWhiteScale = nullptr;
-	if (!reinhardWhiteScale)
-		reinhardWhiteScale = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fReinhardWhiteScale:Display"));
-	params01[2].y = baseData.hdr.white * (reinhardWhiteScale ? reinhardWhiteScale->GetFloat() : 1.0f);
+	params01[2].y = baseData.hdr.white * frame.reinhardWhiteScale;
 
 	params01[3].x = baseData.cinematic.saturation;
 	params01[3].z = baseData.cinematic.contrast;

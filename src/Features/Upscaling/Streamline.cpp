@@ -1,6 +1,7 @@
 #include "Streamline.h"
 #include "Features/DrawcallLimitFix.h"
 #include "Features/Upscaling.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 
 #include "DXVKInterop.h"
@@ -1030,8 +1031,8 @@ static bool cs_BuildConstants(sl::Constants& a_consts, uint32_t a_outputWidth, u
 	a_consts = {};
 	a_consts.cameraAspectRatio = static_cast<float>(a_outputWidth) / static_cast<float>(a_outputHeight);
 	a_consts.cameraFOV = Util::GetVerticalFOVRad();
-	a_consts.cameraNear = *CS_ENGINE_READ(Camera, RecordTime, globals::game::cameraNear);
-	a_consts.cameraFar = *CS_ENGINE_READ(Camera, RecordTime, globals::game::cameraFar);
+	a_consts.cameraNear = Snapshot::Core().cameraNear;
+	a_consts.cameraFar = Snapshot::Core().cameraFar;
 
 	auto viewMatrix = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewInverse().Transpose();
 	auto cameraViewToClip = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraProjUnjittered().Transpose();

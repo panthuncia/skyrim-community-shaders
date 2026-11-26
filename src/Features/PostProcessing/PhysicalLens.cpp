@@ -1,6 +1,7 @@
 #include "PhysicalLens.h"
 #include "PhysicalLensBindings.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Features/PostProcessing.h"
 #include "RasterPass.h"
@@ -590,7 +591,7 @@ PhysicalLens::Parameters PhysicalLens::FlareParameters(unsigned width, unsigned 
 	data.ghostDiffraction = settings.GhostDiffraction;
 	data.fNumber = optical.fNumber;
 	data.reserved = 1;
-	data.cutoffRelease = std::exp(-2.44932f * std::clamp(*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime), 0.f, .25f));
+	data.cutoffRelease = std::exp(-2.44932f * std::clamp(Snapshot::VisualDelta(), 0.f, .25f));
 	data.alignmentVariation = settings.AlignmentVariation;
 	data.lensSeed = float(settings.LensPreset + 1);
 	data.maxSources = settings.MaxSources;
@@ -614,20 +615,23 @@ PhysicalLens::FocusInputs PhysicalLens::FocusInputsFor(const CinematicCamera::Ph
 {
 	FocusInputs data{ camera.ScreenPointUV, camera.ManualDistanceM * .001f, camera.TransitionSpeed,
 		camera.Mode == CinematicCamera::FocusMode::ScreenPoint, reset };
-	auto* dof = owner->GetPipelineFeature<DoF>(PostProcessing::FeaturePipelineIndex::DoF);
-	auto& resolver = owner->GetCinematicCamera().focusResolver;
+	// The focus targets come from the adopted snapshot (PostProcessing::Block).
+	const auto* focus = PostProcessing::FrameBlock();
+	if (!focus)
+		return data;
 	if (camera.Mode == CinematicCamera::FocusMode::Target) {
-		uint ref = 0;
-		const auto target = resolver.ResolveTarget(!dof || dof->settings.consoleSelection, ref);
+		const auto& target = focus->cameraTarget;
 		if (target.hasTarget) {
 			data.automatic = target.projected;
 			data.uv = target.focusCoord;
 			data.manualKM = target.distanceM * .001f;
 		}
 	}
-	if (auto* player = CS_ENGINE_READ(Player, RecordTime, globals::game::player); player && CS_ENGINE_READ(UI, RecordTime, globals::game::ui)->IsMenuOpen(RE::RaceSexMenu::MENU_NAME)) {
-		data.automatic = resolver.GetReferenceFocusCoord(player, data.uv);
-		data.manualKM = Util::Units::GameUnitsToMeters(resolver.GetDistanceToReference(player)) * .001f;
+	if (focus->raceMenu) {
+		data.automatic = focus->player.projected;
+		if (data.automatic)
+			data.uv = focus->player.coord;
+		data.manualKM = Util::Units::GameUnitsToMeters(focus->player.distance) * .001f;
 	}
 	return data;
 }

@@ -1,5 +1,6 @@
 #include "PostProcessing.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "CSEditor/EditorWindow.h"
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
@@ -781,7 +782,7 @@ bool PostProcessing::BeginLinearProcessing(PostProcessFeature::TextureInfo& text
 	copyCB->Update(CopyCB{ .gamma = Util::ColorSpace::GAME_GAMMA });
 	ID3D11Buffer* cb = copyCB->CB();
 	context->OMSetRenderTargets(0, nullptr, nullptr);
-	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+	CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // a write: the engine re-binds its targets
 	context->PSSetConstantBuffers(1, 1, &cb);
 	context->PSSetShaderResources(0, 1, &texture.srv);
 	pass.SetTargets({ texInput->rtv.get() }, (float)texInput->desc.Width, (float)texInput->desc.Height);
@@ -848,7 +849,7 @@ void PostProcessing::DrawBeforeUpscaling()
 		if (pipe && pipe->IsActive() && !pipe->DrawAfterColorGrading() && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) && pipe->DrawBeforeUpscaling()) {
 			if (!processing) {
 				globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
-				CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+				CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // a write: the engine re-binds its targets
 				if (!BeginLinearProcessing(lastTexColor))
 					break;
 				processing = true;
@@ -905,7 +906,7 @@ std::optional<RE::RENDER_TARGET> PostProcessing::PreProcess(RE::RENDER_TARGET a_
 	// target. D3D11 silently nulls any SRV of a resource that is also an output, which would
 	// make the pipeline sample black instead of the scene.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
-	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+	CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // a write: the engine re-binds its targets
 
 	bool inMainLoadingMenu = globals::state->IsMainOrLoadingMenuOpen();
 
@@ -1071,7 +1072,8 @@ void PostProcessing::UpdateVanillaEffects(bool active)
 		                   globals::shaderCache->HasPixelShaders(RE::BSShader::Type::ImageSpace, tonemapShaders);
 	}
 
-	static auto* lensFlare = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bLensFlare:ImageSpace"));
+	// A settings change writes the vanilla lens flare's INI value: game state, not a frame read.
+	static auto* lensFlare = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bLensFlare:ImageSpace"));
 	if (lensFlare) {
 		if (replaces(FeaturePipelineIndex::LensFlare)) {
 			if (!savedVanillaLensFlare) {
@@ -1097,28 +1099,76 @@ void PostProcessing::Prepass()
 	if (auto* lut = GetPipelineFeature<::LUT>(FeaturePipelineIndex::LUT))
 		lut->UpdateTexture();
 
+	// The frame's ImageSpace data, from the adopted snapshot.
+	if (const Block* block = FrameBlock())
+		imageSpaceManager->gameISData = block->imageSpace;
+}
+
+const PostProcessing::Block* PostProcessing::FrameBlock()
+{
+	const auto& snapshot = Snapshot::Current();
+	return snapshot ? snapshot->Block<Block>() : nullptr;
+}
+
+void PostProcessing::Capture(Snapshot::Builder& a_builder)
+{
+	auto& self = globals::features::postProcessing;
+	if (!self.loaded)
+		return;
+	Block block{};
+
+	if (const auto* imageSpace = CS_ENGINE_READ(ImageSpace, CapturePoint, RE::ImageSpaceManager::GetSingleton())) {
+		const auto& runtime = imageSpace->GetRuntimeData();
+		block.imageSpace = runtime.data;
+		if (runtime.overrideBaseData)
+			block.imageSpace.baseData = *runtime.overrideBaseData;
+		else if (runtime.currentBaseData)
+			block.imageSpace.baseData = *runtime.currentBaseData;
+	}
+
+	// The Cinematic Camera writes the game's world FOV, so it updates here, once per game update.
 	{
-		auto graphicsState = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
+		const auto* graphicsState = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState);
 		const float aspect = graphicsState && graphicsState->screenHeight > 0 ?
 		                         (float)graphicsState->screenWidth / (float)graphicsState->screenHeight :
 		                         16.0f / 9.0f;
-		const bool runnable = IsPipelineRunning() && !globals::state->IsMainOrLoadingMenuOpen();
-		cinematicCamera.Update(runnable, aspect);
+		const auto& menus = a_builder.Built().menus;
+		const bool runnable = self.IsPipelineRunning() && !menus.main && !menus.loading;
+		self.cinematicCamera.Update(runnable, aspect);
+		if (const auto* state = self.cinematicCamera.GetState()) {
+			block.cameraValid = true;
+			block.camera = *state;
+		}
 	}
 
-	// Update gameISData
-	const auto ImageSpace = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
-	const auto& iSRuntimeData = ImageSpace->GetRuntimeData();
-	imageSpaceManager->gameISData = iSRuntimeData.data;
-	if (const auto& overrideBaseData = iSRuntimeData.overrideBaseData) {
-		imageSpaceManager->gameISData.baseData = *overrideBaseData;
-	} else {
-		imageSpaceManager->gameISData.baseData = *iSRuntimeData.currentBaseData;
+	// The focus targets, by the DoF console-selection preference (on without DoF).
+	auto* dof = self.GetPipelineFeature<DoF>(FeaturePipelineIndex::DoF);
+	const bool console = !dof || dof->settings.consoleSelection;
+	auto& resolver = self.cinematicCamera.focusResolver;
+	const auto resolve = [&](RE::TESObjectREFR* a_ref) {
+		Block::Target target{ .found = true, .distance = resolver.GetDistanceToReference(a_ref) };
+		target.projected = resolver.GetReferenceFocusCoord(a_ref, target.coord);
+		return target;
+	};
+	block.consoleRefSet = console;
+	if (block.cameraValid && block.camera.Mode == CinematicCamera::FocusMode::Target)
+		block.cameraTarget = resolver.ResolveTarget(console, block.consoleRef);
+	else if (dof && dof->settings.targetFocus) {
+		if (auto* target = resolver.FindTarget(console, block.consoleRef))
+			block.dofTarget = resolve(target);
 	}
+	if (auto* player = CS_ENGINE_READ(Player, CapturePoint, globals::game::player)) {
+		auto* ui = CS_ENGINE_READ(UI, CapturePoint, globals::game::ui);
+		block.raceMenu = ui && ui->IsMenuOpen(RE::RaceSexMenu::MENU_NAME);
+		if (block.raceMenu)
+			block.player = resolve(player);
+	}
+	a_builder.Set(block);
 }
 
 void PostProcessing::PostPostLoad()
 {
+	Snapshot::RegisterCapture(&PostProcessing::Capture);
 	logger::info("Hooking preprocess passes");
 	stl::write_vfunc<0x6, VanillaDoF_IsActive>(RE::VTABLE_ImageSpaceEffectDepthOfField[0]);
 	stl::write_vfunc<0x1, VanillaBlur_Render>(RE::VTABLE_ImageSpaceEffectBlur[0]);

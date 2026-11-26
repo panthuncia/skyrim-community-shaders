@@ -1,9 +1,9 @@
 #include "Effects11.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Effects11/D3D11StateBackup.h"
 #include "Effects11/ENBExtender.h"
-#include "Effects11/ENBHelper.h"
 #include "Effects11/Editor/Effects11Editor.h"
 #include "Effects11/EffectManager.h"
 #include "Effects11/ORG/ORGFxRuntime.h"
@@ -156,33 +156,28 @@ namespace
 	};
 
 	/** @brief Picks the visible sun, else the Sky Sync moon when moon rays are on; false when neither qualifies. */
-	bool SelectSunRaysLight(RE::Sky* a_sky, const Effects11::PerFrame& a_perFrame, bool a_sunRays, bool a_moonRays, SunRaysLight& a_light)
+	bool SelectSunRaysLight(const Effects11::Block& a_frame, const Effects11::PerFrame& a_perFrame, bool a_sunRays, bool a_moonRays, SunRaysLight& a_light)
 	{
 		// The sun disc's mask falls off much more sharply than the larger, softer moon discs
 		static constexpr float sunMaskExponent = 32.0f;
 		static constexpr float moonMaskExponent = 4.0f;
-		const auto& skySync = globals::features::skySync;
 
-		if (a_sunRays && Util::GetSunVisibility(a_sky->sun) > 0.0f) {
-			if (const auto prop = skyrim_cast<RE::BSSkyShaderProperty*>(a_sky->sun->sunBase->GetGeometryRuntimeData().shaderProperty.get())) {
-				const auto& blend = prop->kBlendColor;
-				a_light = { float3(blend.red, blend.green, blend.blue) * blend.alpha, skySync.GetCelestialDirection(a_sky, SkySync::Caster::Sun), a_perFrame.SunBillboardTan, sunMaskExponent, true };
-				return true;
-			}
+		if (a_sunRays && a_frame.sunVisibility > 0.0f && a_frame.sunBlendValid) {
+			const auto& blend = a_frame.sunBlend;
+			a_light = { float3(blend.x, blend.y, blend.z) * blend.w, RE::NiPoint3(a_frame.sunDirection.x, a_frame.sunDirection.y, a_frame.sunDirection.z), a_perFrame.SunBillboardTan, sunMaskExponent, true };
+			return true;
 		}
 
 		if (!a_moonRays)
 			return false;
 
-		const auto caster = skySync.GetMoonLightCaster(a_sky);
+		const auto caster = static_cast<SkySync::Caster>(a_frame.moonCaster);
 		if (caster == SkySync::Caster::Zenith)
 			return false;
 
 		const bool masser = caster == SkySync::Caster::Masser;
-		const auto moonColor = Util::Moon::GetLightColor(masser ? a_sky->masser : a_sky->secunda, masser ? Util::Moon::MasserBaseColor : Util::Moon::SecundaBaseColor,
-			skySync.settings.NewMoonIntensity, skySync.settings.CrescentMoonIntensity, skySync.settings.FullMoonIntensity)
-		                           .GetColor();
-		a_light = { float3(moonColor.x, moonColor.y, moonColor.z), skySync.GetCelestialDirection(a_sky, caster), masser ? a_perFrame.MasserBillboardTan : a_perFrame.SecundaBillboardTan, moonMaskExponent, false };
+		const auto& moonColor = a_frame.moonColor;
+		a_light = { float3(moonColor.x, moonColor.y, moonColor.z), RE::NiPoint3(a_frame.moonDirection.x, a_frame.moonDirection.y, a_frame.moonDirection.z), masser ? a_perFrame.MasserBillboardTan : a_perFrame.SecundaBillboardTan, moonMaskExponent, false };
 		return true;
 	}
 
@@ -215,12 +210,12 @@ void Effects11::UpdateSkyScattering(PerFrame& a_data)
 		return settingManager.GetInterpolatedTimeOfDayValue(a_key, a_category);
 	};
 
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+	const auto& frame = FrameBlock();
 
 	// Mirror the direction below the horizon while the sun is hidden (e.g. by a weather)
-	if (sky && sky->sun) {
-		auto direction = globals::features::skySync.GetCelestialDirection(sky, SkySync::Caster::Sun);
-		if (Util::GetSunVisibility(sky->sun) <= 0.0f && direction.z > 0.0f)
+	if (frame.hasSun) {
+		auto direction = frame.sunDirection;
+		if (frame.sunVisibility <= 0.0f && direction.z > 0.0f)
 			direction.z = -direction.z;
 		scatteringSunDirection = { direction.x, direction.y, direction.z };
 	}
@@ -289,18 +284,9 @@ void Effects11::UpdateSkyScattering(PerFrame& a_data)
 	a_data.CloudsLightingDensity = std::max(0.0f, timeOfDay("CloudsLightingDensity"));
 
 	// Fallback sun size matches the vanilla sun billboard; moons without a bound get no rim or glow
-	a_data.SunBillboardTan = 425.0f / 400.0f;
-	a_data.MasserBillboardTan = 0.0f;
-	a_data.SecundaBillboardTan = 0.0f;
-	if (sky && sky->root) {
-		const auto& viewer = sky->root->world.translate;
-		if (sky->sun && sky->sun->sunBase)
-			a_data.SunBillboardTan = Util::GetBillboardHalfTan(sky->sun->sunBase.get(), viewer, a_data.SunBillboardTan);
-		if (sky->masser && sky->masser->moonMesh)
-			a_data.MasserBillboardTan = Util::GetBillboardHalfTan(sky->masser->moonMesh.get(), viewer, 0.0f);
-		if (sky->secunda && sky->secunda->moonMesh)
-			a_data.SecundaBillboardTan = Util::GetBillboardHalfTan(sky->secunda->moonMesh.get(), viewer, 0.0f);
-	}
+	a_data.SunBillboardTan = frame.sunBillboardTan;
+	a_data.MasserBillboardTan = frame.masserBillboardTan;
+	a_data.SecundaBillboardTan = frame.secundaBillboardTan;
 }
 
 Effects11::PerFrame Effects11::GetCommonBufferData()
@@ -381,10 +367,8 @@ Effects11::PerFrame Effects11::GetCommonBufferData()
 	// Indexed by [VOLUMETRICRAYS] Quality + 1; lower Quality values are finer.
 	static constexpr uint32_t volumetricRaysSamples[4] = { 24, 16, 12, 8 };
 	data.VolumetricRaysSampleCount = volumetricRaysSamples[std::clamp(static_cast<int>(std::lround(settingManager.GetValue<float>("Quality", "VOLUMETRICRAYS"))) + 1, 0, 3)];
-	if (const auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)) {
-		const auto& horizonColor = sky->skyColor[(uint)RE::TESWeather::ColorTypes::kHorizon];
-		data.VolumetricRaysSkyColor = { horizonColor.red, horizonColor.green, horizonColor.blue };
-	}
+	if (const auto& frame = FrameBlock(); frame.hasSky)
+		data.VolumetricRaysSkyColor = frame.horizonColor;
 
 	data.EnableCloudsScattering = enableEffect && settingManager.GetValue<bool>("EnableCloudsScattering", "EFFECT");
 	UpdateSkyScattering(data);
@@ -482,6 +466,90 @@ void Effects11::SetUseEffect(bool enabled)
 void Effects11::Load()
 {
 	ENBExtender::SuppressHelperPrompt();
+}
+
+void Effects11::PostPostLoad()
+{
+	Snapshot::RegisterCapture(&Effects11::Capture);
+}
+
+const Effects11::Block& Effects11::FrameBlock()
+{
+	static const Block empty{};
+	const auto& snapshot = Snapshot::Current();
+	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	return block ? *block : empty;
+}
+
+void Effects11::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::effects11.loaded)
+		return;
+	Block block{};
+	const auto toFloat3 = [](const auto& a_v) { return float3{ a_v.x, a_v.y, a_v.z }; };
+
+	if (const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)) {
+		block.hasSky = true;
+		block.skyMode = sky->mode.underlying();
+		block.skyHidden = sky->flags.any(RE::Sky::Flags::kHideSky);
+		block.weatherPct = sky->currentWeatherPct;
+		block.gameHour = sky->currentGameHour;
+		const auto& horizon = sky->skyColor[(uint)RE::TESWeather::ColorTypes::kHorizon];
+		block.horizonColor = { horizon.red, horizon.green, horizon.blue };
+
+		// The outgoing weather is held past the transition, as the effects always blended from it.
+		static RE::TESWeather* heldLastWeather = nullptr;
+		if (sky->lastWeather)
+			heldLastWeather = sky->lastWeather;
+		const auto* lastWeather = sky->lastWeather ? sky->lastWeather : heldLastWeather;
+		auto& weatherManager = WeatherManager::GetSingleton();
+		constexpr auto localMask = WeatherManager::LocalFormIDMask;
+		block.currentWeather = weatherManager.GetEffectiveWeatherID(sky->currentWeather ? sky->currentWeather->formID & localMask : 0);
+		block.previousWeather = weatherManager.GetEffectiveWeatherID(lastWeather ? lastWeather->formID & localMask : 0);
+
+		const auto& skySync = globals::features::skySync;
+		if (auto* sun = sky->sun) {
+			block.hasSun = true;
+			block.sunPlaced = sun->root && sky->root;
+			block.sunVisibility = Util::GetSunVisibility(sun);
+			block.sunDirection = toFloat3(skySync.GetCelestialDirection(sky, SkySync::Caster::Sun));
+			if (block.sunPlaced)
+				block.sunOffset = toFloat3(sun->root->world.translate - sky->root->world.translate);
+			if (sun->sunBase)
+				if (const auto* property = skyrim_cast<RE::BSSkyShaderProperty*>(sun->sunBase->GetGeometryRuntimeData().shaderProperty.get())) {
+					const auto& blend = property->kBlendColor;
+					block.sunBlendValid = true;
+					block.sunBlend = { blend.red, blend.green, blend.blue, blend.alpha };
+				}
+		}
+		if (sky->root) {
+			const auto& viewer = sky->root->world.translate;
+			if (sky->sun && sky->sun->sunBase)
+				block.sunBillboardTan = Util::GetBillboardHalfTan(sky->sun->sunBase.get(), viewer, block.sunBillboardTan);
+			if (sky->masser && sky->masser->moonMesh)
+				block.masserBillboardTan = Util::GetBillboardHalfTan(sky->masser->moonMesh.get(), viewer, 0.0f);
+			if (sky->secunda && sky->secunda->moonMesh)
+				block.secundaBillboardTan = Util::GetBillboardHalfTan(sky->secunda->moonMesh.get(), viewer, 0.0f);
+		}
+		const auto caster = skySync.GetMoonLightCaster(sky);
+		block.moonCaster = static_cast<std::uint32_t>(caster);
+		if (caster != SkySync::Caster::Zenith) {
+			const bool masser = caster == SkySync::Caster::Masser;
+			block.moonColor = Util::Moon::GetLightColor(masser ? sky->masser : sky->secunda, masser ? Util::Moon::MasserBaseColor : Util::Moon::SecundaBaseColor,
+				skySync.settings.NewMoonIntensity, skySync.settings.CrescentMoonIntensity, skySync.settings.FullMoonIntensity)
+			                      .GetColor();
+			block.moonDirection = toFloat3(skySync.GetCelestialDirection(sky, caster));
+		}
+	}
+	if (const auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::PlayerCamera::GetSingleton()))
+		block.worldFOV = camera->GetRuntimeData2().worldFOV;
+	if (const auto* imageSpace = CS_ENGINE_READ(ImageSpace, CapturePoint, globals::game::imageSpaceManager))
+		block.imageSpace = imageSpace->GetRuntimeData().data;
+	static const auto* multipleReferences = CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("bUseMultipleLuminanceReferences:Display"));
+	block.multipleLuminanceReferences = multipleReferences && multipleReferences->GetBool();
+	static const auto* reinhardWhiteScale = CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("fReinhardWhiteScale:Display"));
+	block.reinhardWhiteScale = reinhardWhiteScale ? reinhardWhiteScale->GetFloat() : 1.0f;
+	a_builder.Set(block);
 }
 
 void Effects11::SetupResources()
@@ -708,9 +776,8 @@ float3 Effects11::GradeSkyColors(std::span<RE::NiColor, RE::TESWeather::ColorTyp
 		// A near-zero scale would blow up the divide below, so treat it as unset
 		static constexpr float minSunlightScale = 1e-3f;
 		float sunlightScale = 1.0f;
-		auto imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
-		if (imageSpaceManager) {
-			const float rawSunlightScale = imageSpaceManager->GetRuntimeData().data.baseData.hdr.sunlightScale;
+		if (const auto& frame = FrameBlock(); frame.hasSky) {
+			const float rawSunlightScale = frame.imageSpace.baseData.hdr.sunlightScale;
 			sunlightScale = rawSunlightScale > minSunlightScale ? rawSunlightScale : 1.0f;
 		}
 		dirLightColorF3 *= sunlightScale;
@@ -985,7 +1052,6 @@ void Effects11::CheckCommonData()
 
 	static Util::FrameChecker checker;
 	if (checker.IsNewFrame()) {
-		ENBHelper::Update();
 
 		auto& settingManager = SettingManager::GetSingleton();
 		auto& effectManager = EffectManager::GetSingleton();
@@ -1162,8 +1228,8 @@ void Effects11::DrawVolumetricRays()
 	if (Util::IsInterior())
 		return;
 
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (!sky || sky->flags.any(RE::Sky::Flags::kHideSky))
+	const auto& frame = FrameBlock();
+	if (!frame.hasSky || frame.skyHidden)
 		return;
 
 	if (globals::state->IsFullScreenMenuOpen())
@@ -1175,7 +1241,7 @@ void Effects11::DrawVolumetricRays()
 	auto& settingManager = SettingManager::GetSingleton();
 	const bool onGraph = ORGSunRays::Get().IsActive();
 	const bool volumetricRays = onGraph ? (raysToggles.Adopted() & kVolumetricRaysBit) != 0 : settingManager.GetValue<bool>("EnableVolumetricRays", "EFFECT");
-	if (!volumetricRays || Util::GetSunVisibility(sky->sun) <= 0.0f)
+	if (!volumetricRays || frame.sunVisibility <= 0.0f)
 		return;
 
 	auto& effectManager = EffectManager::GetSingleton();
@@ -1416,8 +1482,8 @@ void Effects11::DrawSunRays()
 	if (!enableEffect || Util::IsInterior())
 		return;
 
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (!sky || sky->flags.any(RE::Sky::Flags::kHideSky))
+	const auto& frame = FrameBlock();
+	if (!frame.hasSky || frame.skyHidden)
 		return;
 
 	if (globals::state->IsFullScreenMenuOpen())
@@ -1438,7 +1504,7 @@ void Effects11::DrawSunRays()
 
 	const PerFrame perFrame = GetCommonBufferData();
 	SunRaysLight light;
-	if (!SelectSunRaysLight(sky, perFrame, sunRays, moonRays, light))
+	if (!SelectSunRaysLight(frame, perFrame, sunRays, moonRays, light))
 		return;
 
 	const float lightPeak = std::max({ light.color.x, light.color.y, light.color.z });

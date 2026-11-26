@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "OverlayFeature.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "UnifiedWater/Flowmap.h"
 #include "UnifiedWater/WaterCache.h"
 
@@ -131,8 +132,20 @@ struct UnifiedWater : OverlayFeature
 
 	virtual bool IsCore() const override { return true; }
 
-	/** @brief Installs engine hooks for water mesh replacement and worldspace handling. */
+	/** @brief Installs engine hooks for water mesh replacement and worldspace handling, and registers the capture. */
 	virtual void PostPostLoad() override;
+
+	/** @brief What the frame's water draws read of the world. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::UnifiedWater;
+		bool exteriorActive = false;  // IsExteriorWorldspaceActive at the capture
+
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block and updates the water LOD's cull flag (game-side). Registered in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
 
 private:
 	RE::NiPointer<RE::BSTriShape> waterMesh;
@@ -153,6 +166,8 @@ private:
 	/** @brief Returns whether the water mesh and cache built in DataLoaded are available; hooks installed in PostPostLoad run before it and survive its failure paths. */
 	bool IsWaterDataReady() const;
 	bool IsExteriorWorldspaceActive() const;
+	/** @brief The adopted snapshot's IsExteriorWorldspaceActive, for the render half's water hooks. */
+	static bool FrameExteriorActive();
 	void UpdateWaterLODCull() const;
 	static bool LoadOrderChanged();
 };
