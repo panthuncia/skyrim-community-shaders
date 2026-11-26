@@ -1,0 +1,77 @@
+# The stealth light level's light membership (decision 10, Snapshot/StealthLights.h): at night at the autoloaded save, a
+# torch is equipped (a light added to the world scene), a second one dropped beside the player (a light that counts), then
+# the torches taken away (the held light removed). A shot after each. Native only; the `[Snapshot] side effects` lines carry the
+# stealth counters. Compose it: native-vulkan+stealth-lights; drop mode: add --set snapshot.cadence=drop:3.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 23"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.additem 1d4ec 3"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "night"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.equipitem 1d4ec"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "torch"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.drop 1d4ec 1"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "dropped"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.removeitem 1d4ec 3"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "removed"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["night", "torch", "dropped", "removed"]

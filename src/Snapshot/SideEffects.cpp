@@ -1,5 +1,8 @@
 #include "Snapshot/SideEffects.h"
 
+#include "Snapshot/StealthLights.h"
+
+#include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
@@ -21,6 +24,7 @@ namespace Snapshot::SideEffects
 		constexpr std::size_t kObjectFlags = 0xF4;
 		constexpr std::uint32_t kFlagPreprocessed = 1u << 12;  // BSFadeNodeCuller::Process1 marks the roots it tested
 		constexpr std::uint32_t kFlagNotVisible = 1u << 20;    // the actor pre-cull's "not visible"
+		constexpr std::uint32_t kFlagAccumulated = 1u << 26;   // kAccumulated: passed the last cull that reached it
 		constexpr std::size_t kCurrentFade = 0x130;            // BSFadeNode::currentFade
 		// HighActorCuller::Operate's "fully faded in" threshold (AE 0x1417afdc4, SE 0x14156b7b4: 1e-5).
 		constexpr float kFadedIn = 9.99999975e-06f;
@@ -40,6 +44,7 @@ namespace Snapshot::SideEffects
 			std::uint32_t maskBefore = 0, maskAfter = 0;  // the last clear's
 			std::uint64_t decalsAccepted = 0, decalsStuck = 0, fadeEnables = 0;
 			std::uint64_t actors = 0, actorsInView = 0, actorsHidden = 0, actorsFadedIn = 0, actorsNoFadeNode = 0;
+			std::uint64_t animatedRoots = 0, animatedByDclf = 0, animatedInView = 0;
 		};
 		Stats stats;  // game thread
 
@@ -198,6 +203,41 @@ namespace Snapshot::SideEffects
 			logger::info("[Snapshot] fade enable flags back on at snapshot {} (counted on the game thread)", a_snapshot.id);
 		}
 
+		/** @brief The six planes of the snapshot's main camera, packed for the SIMD sphere cull. False without a valid world view. */
+		bool MainPlanes(const FrameSnapshot& a_snapshot, float (&a_active)[6][4], std::uint32_t& a_count)
+		{
+			const auto& view = a_snapshot.cameras.Current(ViewId::Main);
+			a_count = 0;
+			if (a_snapshot.kind != FrameKind::World || !view.valid)
+				return false;
+			RE::NiTransform world;
+			world.rotate = view.rotation;
+			world.translate = view.position;
+			world.scale = 1.0f;
+			DCLF::ShadowCameras::Planes planes;
+			DCLF::ShadowCameras::FrustumPlanes(view.frustum, world, planes);
+			for (std::uint32_t p = 0; p < 6; ++p)
+				if ((planes.mask >> p) & 1)
+					std::memcpy(a_active[a_count++], planes.plane[p].data(), sizeof(a_active[0]));
+			return true;
+		}
+
+		/** @brief The SIMD sphere cull (org::cpu) of the spheres against the packed planes. */
+		void CullSpheres(const std::vector<float>& a_x, const std::vector<float>& a_y, const std::vector<float>& a_z, const std::vector<float>& a_r,
+			const float (&a_planes)[6][4], std::uint32_t a_planeCount, std::vector<std::uint8_t>& a_pass)
+		{
+			const auto count = static_cast<std::uint32_t>(a_x.size());
+			a_pass.assign(count, 0);
+			if (!count)
+				return;
+			const org::cpu::Spheres spheres{ a_x.data(), a_y.data(), a_z.data(), a_r.data() };
+			static const auto wide = org::cpu::WideFrustum(org::cpu::Supported());
+			if (wide)
+				wide(spheres, count, a_planes, a_planeCount, nullptr, a_pass.data());
+			else
+				org::cpu::FrustumSse(spheres, count, a_planes, a_planeCount, a_pass.data());
+		}
+
 		/**
 		* @brief S6 (decision 12). HighActorCuller::Operate (AE 40335, SE 39262) for every high actor, with the main camera's frustum
 		* tested by the SIMD sphere cull: BSFadeNodeCuller::Process1's six planes on the root's world bound, then the fade threshold.
@@ -207,22 +247,12 @@ namespace Snapshot::SideEffects
 		{
 			// bPreCullActors:General gates the engine's culler.
 			static REL::Relocation<bool*> preCull{ REL::RelocationID(508891, 380927) };
-			const auto& view = a_snapshot.cameras.Current(ViewId::Main);
 			auto* lists = RE::ProcessLists::GetSingleton();
-			// Main::Draw runs the culler only when it draws the world.
-			if (!*preCull || a_snapshot.kind != FrameKind::World || !view.valid || !lists || !SetCullerFrustum())
-				return;
-			RE::NiTransform world;
-			world.rotate = view.rotation;
-			world.translate = view.position;
-			world.scale = 1.0f;
-			DCLF::ShadowCameras::Planes planes;
-			DCLF::ShadowCameras::FrustumPlanes(view.frustum, world, planes);
 			float active[6][4]{};
 			std::uint32_t planeCount = 0;
-			for (std::uint32_t p = 0; p < 6; ++p)
-				if ((planes.mask >> p) & 1)
-					std::memcpy(active[planeCount++], planes.plane[p].data(), sizeof(active[0]));
+			// Main::Draw runs the culler only when it draws the world.
+			if (!*preCull || !lists || !MainPlanes(a_snapshot, active, planeCount) || !SetCullerFrustum())
+				return;
 
 			struct Entry
 			{
@@ -253,16 +283,7 @@ namespace Snapshot::SideEffects
 				z.push_back(fade->worldBound.center.z);
 				r.push_back(fade->worldBound.radius);
 			}
-			const auto count = static_cast<std::uint32_t>(x.size());
-			pass.assign(count, 0);
-			if (count) {
-				const org::cpu::Spheres spheres{ x.data(), y.data(), z.data(), r.data() };
-				static const auto wide = org::cpu::WideFrustum(org::cpu::Supported());
-				if (wide)
-					wide(spheres, count, active, planeCount, nullptr, pass.data());
-				else
-					org::cpu::FrustumSse(spheres, count, active, planeCount, pass.data());
-			}
+			CullSpheres(x, y, z, r, active, planeCount, pass);
 			const std::size_t bitsOffset = REL::Relocate(0x274, 0x27C);
 			std::uint32_t lane = 0;
 			for (const auto& entry : entries) {
@@ -285,6 +306,75 @@ namespace Snapshot::SideEffects
 				std::atomic_ref<std::uint32_t> word(*reinterpret_cast<std::uint32_t*>(reinterpret_cast<std::byte*>(entry.actor) + bitsOffset));
 				word.store((word.load(std::memory_order_relaxed) & ~0xFu) | bits, std::memory_order_relaxed);
 			}
+		}
+
+		/**
+		* @brief S7 (decision 13) for the roots DCLF has no verdict for. The animation jobs (UpdateAnimationJob, UpdateManagedNodesJob,
+		* UpdateAnimatedRefsJob) ask AE 19384 (SE 18972) whether an animated reference's root passed the last cull (kAccumulated).
+		* The roots are the attached cells' animated references (LOADED_CELL_DATA +0x40). Each root DCLF does not list is tested here
+		* against the snapshot's main camera; AfterRenderHalf writes the verdicts after the render half's culls, so CS's is the value
+		* the next update reads. DCLF writes its own roots' verdicts at Main::Update's entry.
+		*/
+		struct AnimatedVerdict
+		{
+			RE::NiPointer<RE::NiAVObject> root;
+			bool visible;
+		};
+		std::vector<AnimatedVerdict> animatedVerdicts;  // game thread, from AfterCapture to AfterRenderHalf
+
+		void DecideAnimatedVisibility(const FrameSnapshot& a_snapshot)
+		{
+			animatedVerdicts.clear();
+			float planes[6][4]{};
+			std::uint32_t planeCount = 0;
+			auto* tes = RE::TES::GetSingleton();
+			if (!tes || !MainPlanes(a_snapshot, planes, planeCount))
+				return;
+			static std::vector<RE::NiPointer<RE::NiAVObject>> roots;
+			static std::vector<float> x, y, z, r;
+			static std::vector<std::uint8_t> pass;
+			roots.clear();
+			x.clear();
+			y.clear();
+			z.clear();
+			r.clear();
+			tes->ForEachCell([&](RE::TESObjectCELL* a_cell) {
+				auto* loaded = a_cell && a_cell->IsAttached() ? a_cell->GetRuntimeData().loadedData : nullptr;
+				if (!loaded)
+					return;
+				for (const auto& handle : loaded->unk040) {
+					const auto reference = handle.get();
+					auto* root = reference ? reference->Get3D() : nullptr;
+					if (!root)
+						continue;
+					++stats.animatedRoots;
+					bool dclf = false;
+					if (DCLF::Extensions::ListedVerdictOf(root, dclf)) {
+						++stats.animatedByDclf;
+						continue;
+					}
+					roots.emplace_back(root);
+					x.push_back(root->worldBound.center.x);
+					y.push_back(root->worldBound.center.y);
+					z.push_back(root->worldBound.center.z);
+					r.push_back(root->worldBound.radius);
+				}
+			});
+			CullSpheres(x, y, z, r, planes, planeCount, pass);
+			animatedVerdicts.reserve(roots.size());
+			for (std::size_t i = 0; i < roots.size(); ++i) {
+				const bool visible = pass[i] != 0;
+				stats.animatedInView += visible ? 1 : 0;
+				animatedVerdicts.push_back({ std::move(roots[i]), visible });
+			}
+		}
+
+		void WriteAnimatedVisibility()
+		{
+			for (const auto& verdict : animatedVerdicts) {
+				AtomicFlags(verdict.root.get(), verdict.visible ? kFlagAccumulated : 0u, verdict.visible ? 0u : kFlagAccumulated);
+			}
+			animatedVerdicts.clear();
 		}
 	}
 
@@ -312,6 +402,7 @@ namespace Snapshot::SideEffects
 		const auto culler = REL::RelocationID(35562, 36561).address() + REL::Relocate(0x148, 0x11B);
 		RequireCall("Main::Draw's high actor culler", culler, REL::RelocationID(39263, 40336).address());
 		stl::write_thunk_call<SkipHighActorCuller>(culler);
+		StealthLights::InstallHooks();
 		installed = true;
 		logger::info(
 			"[Snapshot] side effects: render stages 5-9, the frame counter, the render-unsafe bit, the fade enable count, the actor pre-cull "
@@ -326,6 +417,7 @@ namespace Snapshot::SideEffects
 		AcceptQueuedDecals();
 		CountFadeEnable(a_snapshot);
 		DecideActorPreCull(a_snapshot);
+		DecideAnimatedVisibility(a_snapshot);
 	}
 
 	void AfterRenderHalf(std::uint32_t a_renders)
@@ -333,6 +425,8 @@ namespace Snapshot::SideEffects
 		if (!installed)
 			return;
 		stats.skipped += a_renders == 0 ? 1 : 0;
+		// S7: after the render half's culls, before the next update's animation jobs.
+		WriteAnimatedVisibility();
 		// S4 (decision 14): the main thread's bit, through the engine's own helper (SE 38080, AE 39034).
 		using SetRenderUnsafe = void (*)(bool);
 		static REL::Relocation<SetRenderUnsafe> setRenderUnsafe{ REL::RelocationID(38080, 39034) };
@@ -358,11 +452,14 @@ namespace Snapshot::SideEffects
 		const auto s = std::exchange(stats, {});
 		const double perUpdate = s.updates ? 1.0 / static_cast<double>(s.updates) : 0.0;
 		return fmt::format(
-			"[Snapshot] side effects over {} updates ({} skipped): stages 5-9 signalled {} times by CS, {} engine signals skipped; frame counter {}; "
-			"render-unsafe bit cleared {} times (last mask {:#x} to {:#x}); decals accepted {} ({} stuck in the test states); fade enables {}; actor pre-cull "
-			"{:.1f} actors an update, {:.1f} in view, {:.1f} not visible, {:.1f} faded in, {:.1f} without a fade node",
-			s.updates, s.skipped, s.stagesSignalled / 5, s.engineStagesSkipped, FrameCounter(), s.maskClears, s.maskBefore, s.maskAfter, s.decalsAccepted,
-			s.decalsStuck, s.fadeEnables, double(s.actors) * perUpdate, double(s.actorsInView) * perUpdate, double(s.actorsHidden) * perUpdate,
-			double(s.actorsFadedIn) * perUpdate, double(s.actorsNoFadeNode) * perUpdate);
+				   "[Snapshot] side effects over {} updates ({} skipped): stages 5-9 signalled {} times by CS, {} engine signals skipped; frame counter {}; "
+				   "render-unsafe bit cleared {} times (last mask {:#x} to {:#x}); decals accepted {} ({} stuck in the test states); fade enables {}; actor pre-cull "
+				   "{:.1f} actors an update, {:.1f} in view, {:.1f} not visible, {:.1f} faded in, {:.1f} without a fade node",
+				   s.updates, s.skipped, s.stagesSignalled / 5, s.engineStagesSkipped, FrameCounter(), s.maskClears, s.maskBefore, s.maskAfter, s.decalsAccepted,
+				   s.decalsStuck, s.fadeEnables, double(s.actors) * perUpdate, double(s.actorsInView) * perUpdate, double(s.actorsHidden) * perUpdate,
+				   double(s.actorsFadedIn) * perUpdate, double(s.actorsNoFadeNode) * perUpdate) +
+		       fmt::format("; animated roots {:.1f} an update ({:.1f} DCLF's, {:.1f} of the rest in view)",
+				   double(s.animatedRoots) * perUpdate, double(s.animatedByDclf) * perUpdate, double(s.animatedInView) * perUpdate) +
+		       "; " + StealthLights::TakeStatsLine();
 	}
 }
