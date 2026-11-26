@@ -644,3 +644,31 @@ pushes until the user is back.
      `facegen.toml`) draws the world only in the top-left 1280x720 of a 1920x1080 frame, and darker. Not caught because
      the water validation did not run the facegen config; menu-over-world configs belong in every validation set from
      now on. snap3-quarter bisects and fixes it.
+
+## 2026-11-26: Linear Lighting colours in DCLF rows (snap3-llspec; director accepted)
+
+160. **Linear Lighting's upload hooks are ported where DCLF makes each value:** LL rewrote colours from sRGB to its
+     working space in the engine's Setup functions' Unmap calls, which DCLF's rows never pass through (guest and native
+     alike). A new LL material contributor (`Integrations/LinearLighting/`) writes Lighting PS 25 SpecularColor for
+     non-PBR specular passes; the effect port converts BaseColor (record and per-frame patch, via
+     `MaterialFrameVariable::workingColour`) except GrayscaleToColor and Blood; the shading and geometry samples convert
+     EmitColor (with `emitColorMult`), Effect PropertyColor and DirLightColor (dropping the HDR multiplier for a Sky Sync
+     sun, as LL does). Capture parity with LL on: 158,300 -> 3,900 mismatched draws of about 202,000; what is left is
+     older (MTLandLODBlend flags, LOD rounding). Guest's picture changes to match the engine path.
+161. **Left:** lit Effect light colours (PS 8-11) are unchecked (parity compares Lighting draws only); a runtime LL
+     toggle reaches already-sampled shading rows only when their property changes; the capture parity diagnostic races
+     the scene work thread in `Coordinator::FindObject`; MenuScenesNative's own conversions are now duplicates
+     (snap5-menus2 removes them).
+
+## 2026-11-26: the drop-cells hang (snap3-jobhang; director accepted)
+
+162. **The drop-cells hang was cs-test's coc running inside a frame job, not a job-list fault:** the runner queued its
+     console command through SKSE's task interface, which runs in frame job list 5 ("Main render end",
+     Job_Post_process); `CenterOnCell_Impl` loads the cell right there, and `SetLoadingScreenActive` only switches the
+     serving thread to the loading screen when it is idle, so a slow load showed no loading screen and tripped the 15 s
+     watchdog. Face tint was not the cause (an earlier hang predates it); slow loads came from a busy machine.
+163. **cs-test runs its commands' game work at MainTick, after the frame-job wait** (`Testing::InstallTaskTick`, test runs
+     only; a failed install ends the run): console, cast, mouse, camera, draw, place, morph, move and turn. Non-test runs
+     are unchanged. Six consecutive drop-cells passes.
+164. **Open: CS's executor workers spin while idle:** in a slow-phase dump all 14 spun in tbb's `micro_queue::pop`
+     (about 27 s of CPU each, mostly SwitchToThread). Idle workers must block, not spin; snap3-spin fixes it.
