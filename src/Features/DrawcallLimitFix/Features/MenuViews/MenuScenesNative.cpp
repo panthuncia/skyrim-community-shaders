@@ -125,7 +125,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		return in;
 	}
 
-	void SelectLights(const Inputs& a_in, [[maybe_unused]] const RE::BSGeometry& a_geometry, Lights& a_out)
+	void SelectLights(const Inputs& a_in, const RE::BSGeometry& a_geometry, Lights& a_out)
 	{
 		a_out = {};
 		if (!a_in.sceneNode)
@@ -135,15 +135,21 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (a_out.count < a_out.lights.size())
 				a_out.lights[a_out.count++] = a_light;
 		};
+		// A light reaches the geometries the scene node's light update (AE 106335, run just before) put in its list.
+		const auto lights = [&](const RE::BSLight& a_light) {
+			for (const auto& shape : a_light.geomList)
+				if (shape.get() == &a_geometry)
+					return true;
+			return false;
+		};
 		push(data.sunLight);
-		// A menu scene node's lights reach every geometry under it: the engine gives each pass all of them, shadow lights first.
 		for (const auto& light : data.activeShadowLights)
-			if (light && light->light) {
+			if (light && light->light && lights(*light)) {
 				push(light.get());
 				++a_out.shadow;
 			}
 		for (const auto& light : data.activeLights)
-			if (light && light->light)
+			if (light && light->light && lights(*light))
 				push(light.get());
 	}
 
@@ -628,16 +634,25 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return false;
 		}
 
+		/** @brief A visible geometry and the ordered group it registers into (-1 for none). */
+		struct Visible
+		{
+			RE::BSGeometry* geometry = nullptr;
+			std::int32_t group = -1;
+		};
+
 		/**
 		 * @brief Appends a_object's visible geometry, depth first, as the menu's cull keeps it: hidden subtrees and bounds outside the
-		 * camera's frustum are skipped, and a switch node gives its active child.
+		 * camera's frustum are skipped, and a switch node gives its active child. A BSOrderedNode opens a group of its own
+		 * (StartGroupingAlphas, AE 0x1414f50d0) in visit order; its geometry registers into the nearest one.
 		 */
-		void Walk(RE::NiAVObject* a_object, const ShadowCameras::Planes& a_planes, std::vector<RE::BSGeometry*>& a_out)
+		void Walk(RE::NiAVObject* a_object, const ShadowCameras::Planes& a_planes, std::int32_t a_group, std::vector<Visible>& a_out,
+			std::vector<const RE::NiNode*>& a_groups)
 		{
 			if (!a_object || a_object->GetFlags().any(RE::NiAVObject::Flag::kHidden) || Outside(a_object->worldBound, a_planes))
 				return;
 			if (auto* geometry = a_object->AsGeometry()) {
-				a_out.push_back(geometry);
+				a_out.push_back({ geometry, a_group });
 				return;
 			}
 			auto* node = a_object->AsNode();
@@ -646,24 +661,16 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (auto* switchNode = netimmerse_cast<RE::NiSwitchNode*>(node)) {
 				const auto index = switchNode->index;
 				if (index >= 0 && static_cast<std::size_t>(index) < node->GetChildren().size())
-					Walk(node->GetChildren()[static_cast<std::uint16_t>(index)].get(), a_planes, a_out);
+					Walk(node->GetChildren()[static_cast<std::uint16_t>(index)].get(), a_planes, a_group, a_out, a_groups);
 				return;
 			}
+			static const REL::Relocation<const RE::NiRTTI*> orderedRtti{ RE::BSOrderedNode::Ni_RTTI };
+			if (node->GetRTTI() == orderedRtti.get()) {
+				a_group = static_cast<std::int32_t>(a_groups.size());
+				a_groups.push_back(node);
+			}
 			for (auto& child : node->GetChildren())
-				Walk(child.get(), a_planes, a_out);
-		}
-
-		/**
-		 * @brief The blended list's sort key (FUN_1414e8fc0, called by FUN_1414f5250 in FinishAccumulating): the bound centre along the
-		 * camera's view direction (world rotation column 0), less the radius when the accumulator sorts by closest point (+0x51). The
-		 * products are summed in the engine's order.
-		 */
-		float BlendedKey(const RE::BSGeometry& a_geometry, const RE::NiCamera& a_camera, bool a_closestPoint)
-		{
-			const auto& r = a_camera.world.rotate.entry;
-			const auto& c = a_geometry.worldBound.center;
-			const float key = r[1][0] * c.y + r[0][0] * c.x + r[2][0] * c.z;
-			return a_closestPoint ? key - a_geometry.worldBound.radius : key;
+				Walk(child.get(), a_planes, a_group, a_out, a_groups);
 		}
 
 		struct NativeState
@@ -705,12 +712,39 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		a_out.clear();
 		ShadowCameras::Planes planes;
 		ShadowCameras::FrustumPlanes(a_camera.GetRuntimeData2().viewFrustum, a_camera.world, planes);
-		Walk(a_root, planes, a_out);
-		// The blended list follows the batches, in registration (scene) order, then merge sorted far to near: a stable sort.
-		const auto firstBlended = std::stable_partition(a_out.begin(), a_out.end(), [](const RE::BSGeometry* a_geometry) { return !BlendedList(*a_geometry); });
-		std::stable_sort(firstBlended, a_out.end(), [&](const RE::BSGeometry* a_a, const RE::BSGeometry* a_b) {
-			return BlendedKey(*a_a, a_camera, a_closestPoint) > BlendedKey(*a_b, a_camera, a_closestPoint);
-		});
+		std::vector<Visible> visible;
+		std::vector<const RE::NiNode*> groupNodes;
+		Walk(a_root, planes, -1, visible, groupNodes);
+
+		// The batches first, in registration (scene) order.
+		std::vector<RE::BSGeometry*> list;
+		std::vector<std::vector<RE::BSGeometry*>> groups(groupNodes.size());
+		for (const auto& v : visible) {
+			if (!BlendedList(*v.geometry))
+				a_out.push_back(v.geometry);
+			else if (v.group >= 0)
+				groups[static_cast<std::size_t>(v.group)].push_back(v.geometry);
+			else
+				list.push_back(v.geometry);
+		}
+		// The blended list, merge sorted far to near (a stable sort), drawn with the ordered groups (FUN_1414f5330): the last opened
+		// group is the stack's top, drawn whole, in registration order, before the list's head when its bound lies farther.
+		const auto key = [&](const RE::NiBound& a_bound) {
+			const auto& r = a_camera.world.rotate.entry;
+			const auto& c = a_bound.center;
+			const float k = r[1][0] * c.y + r[0][0] * c.x + r[2][0] * c.z;
+			return a_closestPoint ? k - a_bound.radius : k;
+		};
+		std::stable_sort(list.begin(), list.end(), [&](const RE::BSGeometry* a_a, const RE::BSGeometry* a_b) { return key(a_a->worldBound) > key(a_b->worldBound); });
+		std::size_t head = 0;
+		std::size_t top = groups.size();
+		while (head < list.size() || top > 0) {
+			if (top > 0 && (head == list.size() || key(groupNodes[top - 1]->worldBound) > key(list[head]->worldBound))) {
+				--top;
+				a_out.insert(a_out.end(), groups[top].begin(), groups[top].end());
+			} else
+				a_out.push_back(list[head++]);
+		}
 	}
 
 	bool SortsByClosestPoint(const RE::UI3DSceneManager& a_manager)

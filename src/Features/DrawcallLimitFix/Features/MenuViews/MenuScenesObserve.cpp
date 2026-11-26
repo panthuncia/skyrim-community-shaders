@@ -172,9 +172,17 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 						const auto& c = a_g->worldBound.center;
 						return std::format("{}/{}", r[1][0] * c.y + r[0][0] * c.x + r[2][0] * c.z, a_g->worldBound.radius);
 					};
+					static const REL::Relocation<const RE::NiRTTI*> orderedRtti{ RE::BSOrderedNode::Ni_RTTI };
+					const auto ordered = [&](const RE::BSGeometry& a_g) {
+						for (auto* node = a_g.parent; node; node = node->parent)
+							if (node->GetRTTI() == orderedRtti.get())
+								return true;
+						return false;
+					};
 					std::string e, m;
 					for (std::size_t i = 0; i < s.engineOrder.size(); ++i)
-						e += std::format("{}(h{} {}{}) ", GeometryName(s.engineOrder[i]), s.engineHints[i], key(s.engineOrder[i]), Native::BlendedList(*s.engineOrder[i]) ? " B" : "");
+						e += std::format("{}(h{} {}{}{}) ", GeometryName(s.engineOrder[i]), s.engineHints[i], key(s.engineOrder[i]), Native::BlendedList(*s.engineOrder[i]) ? " B" : "",
+							ordered(*s.engineOrder[i]) ? " O" : "");
 					for (const auto* g : mine)
 						m += GeometryName(g) + " ";
 					const auto* manager = RE::UI3DSceneManager::GetSingleton();
