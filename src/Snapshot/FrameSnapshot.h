@@ -198,6 +198,8 @@ namespace Snapshot
 		ScreenBlood,  // Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h, DCLF::Features::BloodSplatter::Block
 		SunQuery,     // Features/DrawcallLimitFix/Features/Sky/Sky.h, DCLF::Features::Sky::SunQueryBlock
 		RenderWorld,  // RenderGraph/Engine/Native/WorldPass.h, RenderGraph::Engine::Native::WorldPass::Block
+		// The post (snap3-post)
+		VolumetricLightingRender,  // Features/VolumetricLighting/ORGVolumetricLighting.h, ORGVolumetricLighting::Block
 		Count
 	};
 

@@ -51,6 +51,8 @@ namespace EngineZones
 		// its AE one. A site with no confident match is AE-only. Any call is safe to list whatever its signature: a site's stub
 		// counts and jumps to the callee, leaving every argument, stack slot and the return value alone. (The generator still
 		// leaves out calls with XMM arguments, a float return or stack arguments, from when a C++ thunk forwarded the call.)
+		// Main::RenderPlayerView's calls of RenderWorld and RenderPostProcess are not listed: both go to CS's drivers in native, and
+		// the sites inside the two functions count the engine's work where it still runs.
 		constexpr Site kSites[] = {
 			{ 35556, 0x39, 75458, 36555, 0x39, 77243, Role::Helper, "Renderer::Lock (in Main::DrawFrame)" },
 			{ 35556, 0x47, 75460, 36555, 0x47, 77245, Role::Helper, "Renderer::Begin (in Main::DrawFrame)" },
@@ -118,7 +120,6 @@ namespace EngineZones
 			{ 35560, 0x9B2, 100406, 36559, 0x9C2, 107124, Role::Helper, "AE 107124 (in Main::RenderPlayerView)" },
 			{ 35560, 0xA01, 38080, 36559, 0xA0F, 39034, Role::Helper, "AE 39034 (in Main::RenderPlayerView)" },
 			{ 35560, 0xA3E, 100526, 36559, 0xA4C, 107252, Role::Render, "Main::RenderSaoCs (in Main::RenderPlayerView)" },
-			{ 35560, 0xA46, 100430, 36559, 0xA54, 107148, Role::Render, "Main::RenderPostProcess (in Main::RenderPlayerView)" },
 			{ 35560, 0xA6A, 100429, 36559, 0xA73, 107147, Role::Helper, "AE 107147 (in Main::RenderPlayerView)" },
 			{ 35560, 0xA6F, 100425, 36559, 0xA78, 107143, Role::Helper, "AE 107143 (in Main::RenderPlayerView)" },
 			{ 100424, 0xF2, 99790, 107142, 0x11F, 106437, Role::Render, "Renderer::StartAccumulating (in Main::RenderWorld)" },

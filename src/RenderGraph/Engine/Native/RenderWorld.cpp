@@ -49,7 +49,8 @@ namespace RenderGraph::Engine::Native
 		}
 
 		/**
-		* @brief The shadow state the resolve functions leave for the engine code after RenderWorld (the first-person view, RenderPostProcess),
+		* @brief The shadow state the resolve functions leave for the engine code after RenderWorld (the engine's first-person view; CS's
+		* RenderPostProcess driver reads none of it),
 		* written as their setters would (observed over every native world render of river and interior: nothing else changes). Render
 		* targets 1 and 2 unbound, slots 3 and 4 in restore mode, the full depth range, the alpha reference 128/255, and the state they set
 		* and set back marked dirty (targets, viewport, depth mode, depth bias, blend, alpha test).
@@ -87,13 +88,12 @@ namespace RenderGraph::Engine::Native
 			const WorldPass::ShiftWindow window;
 			globals::deferred->WorldOpaqueEnd(nullptr);
 			// The water mask block (SE +0x3C5, AE +0x3B4) runs when the batch renderer holds mask passes, which in native means when DCLF's
-			// mask epoch wants it: the stencil clear, the mask batch, and TAA's form 1 (ImageSpaceManager +0x1f0, +0x2c), which the post
-			// chain reads and the water blend's test needs.
+			// mask epoch wants it: the stencil clear, the mask batch, and TAA's form 1 (the engine's ImageSpaceManager +0x1f0 +0x2c, CS's
+			// WorldPass::TaaForm), which the post chain reads and the water blend's test needs.
 			if (DCLF::Features::Water::Indirect::MaskBatchWanted(a_accumulator->GetRuntimeData()->batchRenderer)) {
 				Untaken(Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_STENCIL), "the water mask's stencil clear");
 				DCLF::Features::Water::NativeMaskBatch(a_accumulator);
-				if (const auto taa = Field<std::uintptr_t>(RE::ImageSpaceManager::GetSingleton(), 0x1f0))
-					Field<std::int32_t>(reinterpret_cast<const void*>(taa), 0x2c) = 1;
+				WorldPass::SetTaaForm(1);
 			}
 			// With flag 0x40, the reflections pass.
 			if (a_flags & 0x40)
@@ -138,9 +138,8 @@ namespace RenderGraph::Engine::Native
 		const WorldPass::RenderWorldScope worldPass;
 		auto* const accumulator = Global<RE::BSShaderAccumulator*>(528064, 415009);
 		auto* const camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
-		// The render mode the engine's effect shaders read (7: the world), and the camera the reflections' helper keeps.
-		Global<std::uint32_t>(524994, 411475) = 7;
-		Global<RE::NiCamera*>(528353, 415299) = camera;
+		// Not written: the render mode (411475, 7 for the world), read only by the engine's RenderSSAO and effect shader setup, which
+		// native does not run; and the reflections' camera (415299), which Main::RenderScene already set to this camera.
 		// Sun::UpdateOcclusionQueries is not called: the game side takes the sun query's answer in its capture (Sky's SunQuery.cpp).
 		// StartAccumulating's render flags (p0 << 4 | 0x41), RenderWorld's ImageSpace calls, then the post-resolve's flags.
 		PreResolve(accumulator, (a_firstPerson ? 0x10u : 0u) | 0x41u);

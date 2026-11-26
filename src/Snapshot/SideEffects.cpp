@@ -545,6 +545,10 @@ namespace Snapshot::SideEffects
 		stl::write_thunk_call<SkipHighActorCuller>(culler);
 		// S7/S8 and DCLF produce what the main camera's list culls wrote, so they do not run.
 		SkipListCulls();
+		// Main::Draw's VL block (gVolumetricLightingEnabled: SetCameraData, the VL descriptor, VolumetricLighting::Render): CS computes the
+		// VL render's constants from the snapshot in its RenderPostProcess driver (ORGVolumetricLighting::RenderNative). Same offsets on SE and AE.
+		const auto draw = REL::RelocationID(35560, 36559).address();
+		JumpOver("Main::Draw's volumetric lighting render", draw + 0x2F1, { 0x80, 0x3D }, draw + 0x33A);
 		StealthLights::InstallHooks();
 		RenderGraph::Engine::Native::WorldPass::InstallCapture();
 		installed = true;
