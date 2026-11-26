@@ -2,6 +2,8 @@
 
 #include "Snapshot/FrameSnapshot.h"
 
+#include "RE/B/BSLensFlareRenderData.h"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -74,6 +76,20 @@ namespace RenderGraph::Engine::ImageSpace
 		bool operator==(const WorldSettings&) const = default;
 	};
 
+	/** @brief The lens flares' game inputs (the gather's, SE 100274 / AE 106988): the sun's flare as Sun::Update and the weather set it. */
+	struct LensFlareInputs
+	{
+		bool on = false;                                 // ToggleLensFlare's flag
+		const RE::BSLensFlareRenderData* sun = nullptr;  // the weather's sun flare, a form's data
+		std::array<float, 3> sunDirection{};             // to the sun
+		float sunVisibility = 0.0f;                      // the sun flare's strength, 0 when the sun is hidden
+		std::array<float, 3> sunTint{};                  // the sky's sun flare colour
+		float fadeDistance = 0.0f;                       // a light flare fades out over this distance past its radius
+		float intensity = 0.0f;                          // SetLensFlareGlobalIntensity
+
+		bool operator==(const LensFlareInputs&) const = default;
+	};
+
 	/** @brief The ImageSpace block of a snapshot. Native mode's post chain reads it; guest reads the same values at its hooks. */
 	struct Block
 	{
@@ -95,6 +111,7 @@ namespace RenderGraph::Engine::ImageSpace
 		static constexpr std::uint32_t kScreenshotRing = 4;
 		std::uint32_t screenshots = 0;
 		std::array<std::string, kScreenshotRing> screenshotPaths{};
+		LensFlareInputs lensFlares{};
 
 		bool operator==(const Block&) const = default;
 	};

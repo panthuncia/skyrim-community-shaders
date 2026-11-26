@@ -28,6 +28,7 @@
 #include "ORGDeferredComposite.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderDepth.h"
 #include "RenderGraph/Engine/Native/RenderWorld.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
@@ -998,7 +999,11 @@ void Deferred::Hooks::Main_RenderFirstPersonView::thunk(bool a1, bool a2)
 {
 	auto* const state = globals::state;
 	state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
-	func(a1, a2);
+	// Native draws first person itself; the engine's function is not entered.
+	if (RenderGraph::Engine::Native::Active())
+		RenderGraph::Engine::Native::RenderFirstPersonView();
+	else
+		func(a1, a2);
 	state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
 }
 

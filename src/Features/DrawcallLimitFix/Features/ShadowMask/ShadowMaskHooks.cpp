@@ -17,6 +17,7 @@
 #include "RenderGraph/Engine/Native/RenderDepth.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Fatal.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "State.h"
 #include "Utils/Logging.h"
@@ -141,32 +142,30 @@ namespace DCLF::Features::ShadowMask
 	void DrawWorldMasks(const float a_clear[4])
 	{
 		DCLF_ZONE("CS.DCLF.ShadowMask.Native");
-		static Family::RefusalLog refusals("[DCLF] shadow mask (native): a world batch is only cleared");
+		static Util::ReasonLog skipped("[DCLF] shadow mask (native): the world masks are only cleared");
 		Family::BeginBatch();
 		// SetCurrentRenderTarget(0, kSHADOW_MASK, SRTM_CLEAR) with the clear colour RenderShadowMasks set: the clear lands before the
 		// anchor's run.
 		if (!::RenderGraph::Engine::Skeleton::ClearColour(RE::RENDER_TARGET::kSHADOW_MASK, a_clear))
-			refusals.Report("the skeleton did not take kSHADOW_MASK's clear");
+			skipped.Report("the skeleton did not take kSHADOW_MASK's clear");
+		// Until a revision registers the client, the masks are not drawn.
 		if (!ShadowMaskDraws::Available() || !ShadowMaskDraws::CanTake(View::World)) {
-			refusals.Report("the family cannot take it now");
+			skipped.Report("the family cannot take them yet");
 			return;
 		}
 		auto run = std::make_shared<Run>();
 		run->view = View::World;
 		std::vector<RE::BSShadowLight*> lights;
 		std::string why;
-		if (!Native::Build(View::World, *run, lights, why)) {
-			refusals.Report(why);
+		if (!Native::Build(View::World, *run, lights, why))
+			::RenderGraph::Fatal("shadow masks", std::format("native's world masks cannot be built: {}", why));
+		if (auto* sun = Native::SunMap(View::World, lights))
+			globals::state->OnShadowMaskDraw(sun);
+		if (run->draws.empty()) {
 			ShadowMaskDraws::Keep(std::move(run->owners));
 		} else {
-			if (auto* sun = Native::SunMap(View::World, lights))
-				globals::state->OnShadowMaskDraw(sun);
-			if (run->draws.empty()) {
-				ShadowMaskDraws::Keep(std::move(run->owners));
-			} else {
-				DCLF_ZONE("CS.DCLF.ShadowMask.Submit");
-				ShadowMaskDraws::Submit(std::move(run));
-			}
+			DCLF_ZONE("CS.DCLF.ShadowMask.Submit");
+			ShadowMaskDraws::Submit(std::move(run));
 		}
 		// The masks' loop gives each light's maps back after its draw, drawn or not.
 		for (auto* light : Native::Lights(View::World))

@@ -60,8 +60,9 @@ namespace EngineZones
 		// its AE one. A site with no confident match is AE-only. Any call is safe to list whatever its signature: a site's stub
 		// counts and jumps to the callee, leaving every argument, stack slot and the return value alone. (The generator still
 		// leaves out calls with XMM arguments, a float return or stack arguments, from when a C++ thunk forwarded the call.)
-		// Main::RenderPlayerView's calls of RenderWorld and RenderPostProcess are not listed: both go to CS's drivers in native, and
-		// the sites inside the two functions count the engine's work where it still runs.
+		// Main::RenderPlayerView's calls of RenderWorld, RenderPostProcess and RenderFirstPersonView are not listed: they go to CS's
+		// drivers in native, and the sites inside the functions count the engine's work where it still runs. Its call of ClearMasks is
+		// not listed either: native does not make it (FirstPersonHooks.cpp).
 		constexpr Site kSites[] = {
 			{ 35556, 0x39, 75458, 36555, 0x39, 77243, Role::Helper, "Renderer::Lock (in Main::DrawFrame)" },
 			{ 35556, 0x47, 75460, 36555, 0x47, 77245, Role::Helper, "Renderer::Begin (in Main::DrawFrame)" },
@@ -126,8 +127,6 @@ namespace EngineZones
 			{ 35560, 0x869, 100427, 36559, 0x879, 107145, Role::Helper, "AE 107145 (in Main::RenderPlayerView)" },
 			{ 35560, 0x87C, 99955, 36559, 0x88C, 106600, Role::Helper, "ShaderAccumulator::ClearGroup #1 (in Main::RenderPlayerView)" },
 			{ 35560, 0x88D, 99955, 36559, 0x89D, 106600, Role::Helper, "ShaderAccumulator::ClearGroup #2 (in Main::RenderPlayerView)" },
-			{ 35560, 0x8BE, 100410, 36559, 0x8CE, 107128, Role::Render, "Main::ClearMasks (in Main::RenderPlayerView)" },
-			{ 35560, 0x944, 100411, 36559, 0x954, 107129, Role::Render, "Main::RenderFirstPersonView (in Main::RenderPlayerView)" },
 			{ 35560, 0x9B2, 100406, 36559, 0x9C2, 107124, Role::Helper, "AE 107124 (in Main::RenderPlayerView)" },
 			{ 35560, 0xA01, 38080, 36559, 0xA0F, 39034, Role::Helper, "AE 39034 (in Main::RenderPlayerView)" },
 			{ 35560, 0xA3E, 100526, 36559, 0xA4C, 107252, Role::Render, "Main::RenderSaoCs (in Main::RenderPlayerView)" },

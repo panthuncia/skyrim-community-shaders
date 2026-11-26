@@ -20,6 +20,11 @@
 */
 struct ID3D11ShaderResourceView;
 
+namespace RE
+{
+	class BSShadowLight;
+}
+
 namespace RenderGraph::Engine
 {
 	struct TonemapTargets;
@@ -83,6 +88,18 @@ namespace RenderGraph::Engine::ImageSpace
 
 	/** @brief Native: the post-resolve's water blend (SE 100550, AE 107285) in native's RenderWorld, as NativeReflections. Render owner. */
 	void NativeWaterBlend();
+
+	/**
+	* @brief Native, render thread: the caster selection's start. A lens flare queue no gather took (a frame whose post chain did not run
+	* natively) is let go.
+	*/
+	void BeginLensFlares();
+
+	/**
+	* @brief Native, render thread: queues a kept shadow light that has lens flare data for this frame's lens flares (the selection's
+	* AE 0x1414cec70). The native post chain's gather draws and lets go of the queue.
+	*/
+	void QueueLensFlare(RE::BSShadowLight& a_light);
 
 	/** @brief A face tint bake's ISAlphaBlend pixel rows (PS b2), as the generic SetupGeometry would write them from its param. */
 	struct TintRows

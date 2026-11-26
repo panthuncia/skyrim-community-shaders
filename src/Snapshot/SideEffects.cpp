@@ -584,6 +584,10 @@ namespace Snapshot::SideEffects
 		setRenderUnsafe(false);
 		stats.maskAfter = RenderUnsafeMask();
 		++stats.maskClears;
+		// The current camera (SE 527667 / AE 414580): the world camera, as RenderPostProcess left it in the engine's world frame. Game
+		// code reads it: ImageSpaceModifierInstanceDOF's constructor and Apply take a target's distance from it (AE 0x141482cd0).
+		static REL::Relocation<RE::NiCamera**> currentCamera{ REL::RelocationID(527667, 414580) };
+		*currentCamera.get() = RE::Main::WorldRootCamera();
 		// S2: once per game update, where Renderer::End moved it.
 		std::atomic_ref<std::uint32_t>(FrameCounter()).fetch_add(1, std::memory_order_relaxed);
 		// S1 (decision 9): the stages in the render half's order.

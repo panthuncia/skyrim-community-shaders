@@ -39,8 +39,8 @@ namespace DCLF::Features::Shadows::Native
 	void UpdateFocusCameras(RE::BSShadowLight& a_light, const RE::NiCamera& a_worldCamera);
 
 	/**
-	 * @brief AE FUN_1414cec70, SE FUN_1412e50a0. Appends the light, with a reference, to the engine's lens flare list when lens flares
-	 * are on. CalculateActive calls it for a light with lens flare data (+0x138).
+	 * @brief AE FUN_1414cec70, SE FUN_1412e50a0. Queues the light, with a reference, for native's lens flares when lens flares are on
+	 * (the engine appends it to its own list for its gather). CalculateActive calls it for a light with lens flare data (+0x138).
 	 */
 	void QueueLensFlare(RE::BSShadowLight& a_light);
 

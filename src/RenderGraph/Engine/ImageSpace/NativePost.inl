@@ -1636,22 +1636,20 @@ namespace NativePost
 
 	/**
 	* @brief Native: RenderPostProcess (SE 100430, AE 107148) driven by CS. The engine's function is not entered: CS calls its points in
-	* its order, with no flush and no render-target or depth-of-field writes (nothing native reads them): VL's apply and blur, the lens
-	* flare gather (still the engine's), the pre-tonemap composites and the end-of-frame effects through their call site, so the hooks
-	* there run in their order. The current camera is still written: native's shadow mask and effect constants read it. Render owner.
+	* its order, with no flush and no render-target, depth-of-field or camera writes (nothing native reads them): VL's apply and blur, the
+	* lens flares (CS's port of the gather, LensFlares.inl), the pre-tonemap composites and the end-of-frame effects through their call
+	* site, so the hooks there run in their order. Render owner.
 	*/
 	void RunNativeBody(std::uint32_t a_target)
 	{
 		ZoneScopedN("CS.PostNative.Body");
 		auto& r = R();
 		const auto& g = G();
-		auto* camera = reinterpret_cast<RE::NiCamera*>(Field<std::uintptr_t>(*g.worldSceneGraph, 0x128));
-		*g.currentCamera = camera;
 		if (r.frame.volumetric)
 			ORGVolumetricLighting::Get().ApplyNative();
 		{
-			ZoneScopedN("CS.PostNative.LensFlareGather (engine)");
-			g.lensFlares(camera);
+			ZoneScopedN("CS.PostNative.LensFlares");
+			RunLensFlares();
 		}
 		g.composites(RE::ImageSpaceManager::GetSingleton(), 1, 1);
 		using EndOfFrame = void (*)(void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
