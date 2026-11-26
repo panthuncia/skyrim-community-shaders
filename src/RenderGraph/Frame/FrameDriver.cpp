@@ -246,6 +246,10 @@ namespace RenderGraph::Frame::Driver
 					if (const auto source = FrameOnlySource(Get()))
 						Snapshot::CaptureFrame(*source);
 					Snapshot::Adopt();
+					// Native: a window resize reaches the renderer as the adopted snapshot's event, at the frame's start. The engine's
+					// Begin below resizes as it did when its window proc set the request directly.
+					if (std::uint32_t width = 0, height = 0; Snapshot::WindowResizeToApply(width, height))
+						a_renderer->RequestWindowResize(width, height);
 					// The menu states the frame reads are the snapshot's.
 					globals::state->AdoptMenus(Snapshot::Current()->menus);
 					// The description (PostChain) and the upscaler read the window state the frame starts with.

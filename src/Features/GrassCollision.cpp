@@ -63,7 +63,8 @@ void GrassCollision::Capture(Snapshot::Builder& a_builder)
 		return;
 	Block block{};
 	const auto& camera = a_builder.Built().cameras.Current(Snapshot::ViewId::Main);
-	if (!self.settings.EnableGrassCollision || !camera.valid) {
+	// The adopted value: the menu may write the setting on another thread once rendering moves off the game thread.
+	if (!self.settings.EnableGrassCollision.Adopted() || !camera.valid) {
 		a_builder.Set(block);
 		return;
 	}

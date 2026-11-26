@@ -1568,6 +1568,16 @@
 			"description": ""
 		},
 		{
+			"name": "CS_UPDATE_RATE_CAP",
+			"key": "snapshot.update_rate_cap",
+			"type": "bool",
+			"default": "0",
+			"choices": [],
+			"kind": "test",
+			"family": "cs",
+			"description": "1: the game thread waits after each update's render half for the next slot of the update-rate cap (Advanced, Update Rate Cap, default 60 per second). Test only until the render thread exists (phase 7); the engine's Present still paces the game"
+		},
+		{
 			"name": "CS_UPSCALE_UNFOCUSED",
 			"key": "",
 			"type": "bool",

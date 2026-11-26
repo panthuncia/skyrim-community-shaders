@@ -5,6 +5,7 @@
 #include "Snapshot/FrameCamera.h"
 #include "Snapshot/SideEffects.h"
 #include "Snapshot/UiCommandStream.h"
+#include "State.h"
 #include "Testing/Testing.h"
 #include "Utils/Setting.h"
 
@@ -93,6 +94,7 @@ namespace Snapshot
 			std::shared_ptr<const FrameSnapshot> current;
 			RenderIdentity render{};
 			std::chrono::steady_clock::time_point lastAdopt{};
+			std::uint64_t windowSizeServed = 0;  // the newest window size request this render side asked the renderer for
 		};
 
 		Producer& Game()
@@ -122,6 +124,30 @@ namespace Snapshot
 		}
 
 		std::atomic<std::uint64_t> g_currentId{ 0 };
+		std::atomic<std::uint64_t> g_lastGameId{ 0 };       // the newest game update's snapshot id published
+		std::atomic<std::uint64_t> g_lastRenderFrame{ 0 };  // the render frame of the newest adoption
+		// The window proc's newest resize request: the size (width in the low word) and its serial, the serial stored last.
+		std::atomic<std::uint64_t> g_windowSize{ 0 };
+		std::atomic<std::uint64_t> g_windowSizeSerial{ 0 };
+
+		/** @brief The newest resize request, for the snapshot being built. A request racing in may pair an older serial with its size: harmless. */
+		WindowSize PendingWindowSize()
+		{
+			WindowSize size{};
+			size.serial = g_windowSizeSerial.load(std::memory_order_acquire);
+			const auto packed = g_windowSize.load(std::memory_order_acquire);
+			size.width = static_cast<std::uint32_t>(packed);
+			size.height = static_cast<std::uint32_t>(packed >> 32);
+			return size;
+		}
+
+		/** @brief The window size event against the previous snapshot. */
+		void FillWindowSize(Events& a_events, const FrameSnapshot* a_previous)
+		{
+			a_events.windowSize = PendingWindowSize();
+			if (a_events.windowSize.serial != (a_previous ? a_previous->events.windowSize.serial : 0))
+				a_events.Add(Event::WindowResized);
+		}
 		// Set while a producer builds and publishes. The game update's publish and the frame-only ones never overlap (Publication.h),
 		// so finding it set is fatal: a producer never waits.
 		std::atomic_flag g_publishing;
@@ -266,6 +292,7 @@ namespace Snapshot
 
 			auto& events = a_snapshot.events;
 			events.gameDelta = a_snapshot.gameDelta;
+			FillWindowSize(events, a_previous);
 			if (g_loadStartedPending.exchange(false, std::memory_order_acq_rel)) {
 				events.Add(Event::LoadStarted);
 				++events.loadsStarted;
@@ -362,6 +389,8 @@ namespace Snapshot
 				}
 				SideEffects::AfterRenderHalf(rendered);
 				t_inGameUpdate = outer;
+				// Phase 7's "publish, then wait for the next update slot". Off unless CS_UPDATE_RATE_CAP=1.
+				PaceGameUpdate();
 				if (++Game().sideEffectLines % kSideEffectLineUpdates == 0)
 					if (const auto line = SideEffects::TakeStatsLine(); !line.empty())
 						logger::info("{}", line);
@@ -413,6 +442,7 @@ namespace Snapshot
 			std::memory_order_relaxed);
 		const bool firstAfterLoad = fresh->events.Has(Event::FirstAfterLoad);
 		const bool first = fresh->id == 1;
+		g_lastGameId.store(fresh->id, std::memory_order_release);
 		Publish(fresh);
 		if (first || firstAfterLoad)
 			LogStats(*game.previous, first ? "first snapshot" : "load ended");
@@ -458,6 +488,7 @@ namespace Snapshot
 			fresh->events.Add(Event::LoadStarted);
 			++fresh->events.loadsStarted;
 		}
+		FillWindowSize(fresh->events, previous);
 		if (previous)
 			MenuEvents(*fresh, *previous);
 		Counters().frameOnly.fetch_add(1, std::memory_order_relaxed);
@@ -473,6 +504,7 @@ namespace Snapshot
 		side.render.delta = side.lastAdopt.time_since_epoch().count() ? std::chrono::duration<float>(now - side.lastAdopt).count() : 0.0f;
 		side.lastAdopt = now;
 		side.render.frame = RenderGraph::FrameClock::BeginFrame();
+		g_lastRenderFrame.store(side.render.frame, std::memory_order_release);
 		stats.renders.fetch_add(1, std::memory_order_relaxed);
 		if (auto taken = Slot().Take()) {
 			side.current = std::move(*taken);
@@ -528,6 +560,70 @@ namespace Snapshot
 			return false;
 		const auto& events = side.current->events;
 		return events.Has(Event::CameraCut) || events.Has(Event::Teleport) || events.Has(Event::LoadStarted) || events.Has(Event::FirstAfterLoad);
+	}
+
+	void NoteWindowResize(std::uint32_t a_width, std::uint32_t a_height)
+	{
+		g_windowSize.store(std::uint64_t(a_width) | (std::uint64_t(a_height) << 32), std::memory_order_release);
+		g_windowSizeSerial.fetch_add(1, std::memory_order_acq_rel);
+	}
+
+	bool WindowResizeToApply(std::uint32_t& a_width, std::uint32_t& a_height)
+	{
+		auto& side = RenderSide();
+		if (!side.current)
+			return false;
+		const auto& size = side.current->events.windowSize;
+		if (size.serial <= side.windowSizeServed)
+			return false;
+		side.windowSizeServed = size.serial;
+		a_width = size.width;
+		a_height = size.height;
+		return true;
+	}
+
+	std::uint64_t LastGameId()
+	{
+		return g_lastGameId.load(std::memory_order_acquire);
+	}
+
+	std::uint64_t LastRenderFrame()
+	{
+		return g_lastRenderFrame.load(std::memory_order_acquire);
+	}
+
+	void PaceGameUpdate()
+	{
+		static const bool active = ::Switches::On("CS_UPDATE_RATE_CAP");
+		if (!active)
+			return;
+		using clock = std::chrono::steady_clock;
+		static clock::time_point next{};
+		const auto cap = globals::state->updateRateCap.load(std::memory_order_relaxed);
+		const auto now = clock::now();
+		if (!cap) {
+			next = {};
+			return;
+		}
+		const auto period = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(1.0 / static_cast<double>(cap)));
+		// The first update, or one that fell a whole slot behind, starts the slots again rather than catching up in a burst.
+		if (next == clock::time_point{} || now > next + period)
+			next = now;
+		if (now < next) {
+			ZoneScopedN("CS.Snapshot.UpdateRateWait");
+			static const HANDLE timer = [] {
+				const HANDLE made = ::CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+				if (!made)
+					RenderGraph::Fatal("snapshot publication", fmt::format("the update-rate cap's timer could not be made (error {})", ::GetLastError()));
+				return made;
+			}();
+			// Relative due time in 100 ns units.
+			LARGE_INTEGER due{};
+			due.QuadPart = -(std::max<LONGLONG>)(1, std::chrono::duration_cast<std::chrono::nanoseconds>(next - now).count() / 100);
+			if (!::SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE) || ::WaitForSingleObject(timer, INFINITE) != WAIT_OBJECT_0)
+				RenderGraph::Fatal("snapshot publication", fmt::format("the update-rate cap's wait failed (error {})", ::GetLastError()));
+		}
+		next += period;
 	}
 
 	void OnLoadingScreen(bool a_active)

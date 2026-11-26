@@ -156,6 +156,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_TEST_HANG" },
 			{ .name = "CS_TEST_LIST_SWITCHES", .description = "1: the game writes CommunityShaders-Switches.json (every switch) at kPostPostLoad and exits" },
 			{ .name = "CS_TEX_CENSUS", .type = Bool },
+			{ .name = "CS_UPDATE_RATE_CAP", .key = "snapshot.update_rate_cap", .type = Bool, .defaultValue = "0", .kind = Test, .description = "1: the game thread waits after each update's render half for the next slot of the update-rate cap (Advanced, Update Rate Cap, default 60 per second). Test only until the render thread exists (phase 7); the engine's Present still paces the game" },
 			{ .name = "CS_UPSCALE_UNFOCUSED", .type = Bool },
 			{ .name = "CS_VK_CLIENT_PRIORITY" },
 			{ .name = "CS_VK_DRIVER_TRACE" },

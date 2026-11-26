@@ -983,8 +983,12 @@ struct BSInputDeviceManager_PollInputDevices
 			}
 		}
 
-		// The menu is open, eat all keypresses; during active flying preview, let input reach the game for movement/camera
-		if (blockedDevice && menu->ShouldSwallowInput() && !menu->IsPreviewFlying()) {
+		// The UI's game-side writes (vanity camera, keyboard reset after a focus change), here on the game thread.
+		menu->UpdateGameSide();
+
+		// The menu is open, eat all keypresses; during active flying preview, let input reach the game for movement/camera.
+		// The UI state is what the last ImGui frame published, so the ImGui frame may run on another thread.
+		if (blockedDevice && menu->SwallowsGameInput() && !menu->PreviewFliesPublished()) {
 			constexpr RE::InputEvent* const dummy[] = { nullptr };
 			func(a_dispatcher, dummy);
 			return;
@@ -1146,6 +1150,20 @@ namespace Hooks
 				globals::OnGameWindowClose();
 			}
 			return func(a_hwnd, a_msg, a_wParam, a_lParam);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/**
+	 * @brief The engine's WindowProc asking the renderer for a new client size (WM_SIZE, WM_WINDOWPOSCHANGED; SE 35635 +0xA1,
+	 * AE 36649 +0xA5). Native only: the request becomes the next snapshot's WindowResized event, and the render side asks the
+	 * renderer for it at its frame start (RenderGraph/Frame/FrameDriver.cpp), where Renderer::Begin acts on it as before.
+	 */
+	struct WindowProc_RequestWindowResize
+	{
+		static void thunk(RE::BSGraphics::Renderer*, std::uint32_t a_width, std::uint32_t a_height)
+		{
+			Snapshot::NoteWindowResize(a_width, a_height);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1595,6 +1613,10 @@ namespace Hooks
 
 		logger::info("Hooking WndProcHandler");
 		stl::write_thunk_call<RegisterClassA_Hook, 6>(REL::VariantID(75591, 77226, 0xDC4B90).address() + REL::VariantOffset(0x8E, 0x15C, 0x99).offset());
+		if (!REL::Module::IsVR() && RenderGraph::Engine::Native::Requested()) {
+			logger::info("Hooking WindowProc's window resize request (native: a snapshot event)");
+			stl::write_thunk_call<WindowProc_RequestWindowResize>(REL::RelocationID(35635, 36649).address() + REL::Relocate(0xA1, 0xA5));
+		}
 
 		logger::info("Hooking BSShaderRenderTargets::Create");
 		stl::detour_thunk<BSShaderRenderTargets_Create>(REL::RelocationID(100458, 107175));

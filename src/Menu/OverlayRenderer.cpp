@@ -232,9 +232,14 @@ void OverlayRenderer::RenderOverlay(
 	float& cachedFontSize,
 	float currentFontSize)
 {
-	// Always sync, including frames that skip drawing, so closing the last CS UI restores vanity.
-	menu.SyncVanityCamera();
+	// What the game thread reads of the UI is published when the frame ends, including frames that skip drawing.
+	struct PublishAtEnd
+	{
+		Menu& menu;
+		~PublishAtEnd() { menu.PublishInputState(); }
+	} const publishAtEnd{ menu };
 
+	// Input reaches ImGui only through the queue: the input poll and the window proc add to it, the frame's start takes it.
 	processInputEventQueue();
 
 	// ImGui only takes game input while a CS window owns it. Otherwise status overlays

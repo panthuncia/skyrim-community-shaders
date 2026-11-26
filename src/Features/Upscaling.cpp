@@ -2159,12 +2159,18 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	const bool windowUsable = !Upscaling::IsWindowUnusable();
 
 	auto* streamline = Streamline::GetSingleton();
+	// SimulationEnd once per snapshot (a repeated render has no new simulation), RenderSubmitStart once per render frame.
 	if (windowUsable && upscaling.GetEffectiveReflex()) {
-		static uint32_t s_lastSimEndFrame = UINT32_MAX;
-		const uint32_t gameFrame = globals::state->frameCount;
-		if (s_lastSimEndFrame != gameFrame) {
-			s_lastSimEndFrame = gameFrame;
-			streamline->SetPCLMarker(Streamline::PclMarker::SimulationEnd);
+		static std::uint64_t s_lastSimEndSnapshot = 0;
+		static std::uint64_t s_lastSubmitFrame = UINT64_MAX;
+		const auto& snapshot = Snapshot::Current();
+		const std::uint64_t renderFrame = Snapshot::Render().frame;
+		if (s_lastSubmitFrame != renderFrame) {
+			s_lastSubmitFrame = renderFrame;
+			if (snapshot && s_lastSimEndSnapshot != snapshot->id) {
+				s_lastSimEndSnapshot = snapshot->id;
+				streamline->SetPCLMarker(Streamline::PclMarker::SimulationEnd);
+			}
 			streamline->SetPCLMarker(Streamline::PclMarker::RenderSubmitStart);
 		}
 	}

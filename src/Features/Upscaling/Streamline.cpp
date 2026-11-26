@@ -4,6 +4,7 @@
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 #include "DXVKInterop.h"
 #include "DxvkPresenter.h"
@@ -81,10 +82,9 @@ namespace
 
 		sl::ViewportHandle viewport{ 0 };
 
+		// The render frame's Streamline frame id: its render identity (Snapshot::Render().frame). Tags, constants and the
+		// render-thread PCL markers use it. See Streamline::BeginRenderFrame.
 		std::atomic<uint32_t> renderFrameId = { 0 };
-		// Frame index SimulationStart used, latched so tags, constants and the render-thread PCL
-		// markers all agree with it. See Streamline::BeginRenderFrame.
-		std::atomic<uint32_t> simMarkerFrameId = { 0u };
 		// PCL markers only feed Reflex and DLSS-G latency. With neither active, emitting them is pure
 		// per-frame cross-DLL overhead -- 7 slGetNewFrameToken+slPCLSetMarker pairs per frame on a path
 		// the D3D11 branch does not have at all. Streamline is now always initialised for in-game
@@ -827,17 +827,13 @@ static sl::Result cs_DiscardFSRFrameGenerationPreparedFrame(const sl::ViewportHa
 // PCL markers, tags and constants must all agree on one index per frame, or Reflex never sees a frame
 // close and its frame limiter falls back to open-loop sleeping.
 //
-// This deliberately reads Streamline's own counter rather than the game's. frameCount advances at
-// Present, so during input polling and rendering it still holds the previous frame's value, and
-// deriving the two sides from separate counters let them drift: when a render frame ran without an
-// intervening input poll the latch went stale, BeginRenderFrame took its strictly-increasing +1
-// branch, and nothing pulled the simulation side back again -- measured as a permanent off-by-one on
-// 92-98% of frames. Reading the render counter here means the two cannot diverge: whatever this
-// returns is what the next BeginRenderFrame adopts, and a skipped poll resynchronises on the frame
-// after it.
+// The simulation markers' frame id: the render frame that first renders the snapshot this game update publishes. Until the
+// render thread exists that is the next Renderer::Begin, so the newest adoption's render frame plus one. BeginRenderFrame takes
+// the render frame's own identity, so both sides read one counter and cannot drift (they once came from separate counters
+// and were off by one on 92-98% of frames).
 static uint32_t SimFrameId()
 {
-	return g_sl.renderFrameId.load(std::memory_order_acquire) + 1u;
+	return static_cast<uint32_t>(Snapshot::LastRenderFrame()) + 1u;
 }
 
 void Streamline::BeginRenderFrame()
@@ -846,20 +842,19 @@ void Streamline::BeginRenderFrame()
 	// A present there that finds nothing prepared passes the frame through.
 	if (!native && g_fsrfgCurrentlyLoaded.load(std::memory_order_acquire))
 		(void)DiscardFSRFrameGenerationPreparedFrame();
-	// Adopt the index SimulationStart already used. It is SimFrameId(), i.e. renderFrameId + 1, so
-	// this is strictly increasing by construction -- which the tag and constant keying and CS's own
-	// once-per-frame guards (s_evalFrameByVp / s_constFrameByVp) require: a repeated index reads as
-	// "already evaluated" and silently dropped every second FSR-FG evaluation, measured 11-12
-	// evaluations per second against 20-21 rendered frames with output ~24% under target. Advancing
-	// it here rather than re-deriving it from the game counter also keeps sl.dlss_g from querying a
-	// frame Streamline has no record of at present time:
+	// The render frame's identity, the id SimulationStart used for the snapshot it renders first. It must be strictly
+	// increasing -- which the tag and constant keying and CS's own once-per-frame guards (s_evalFrameByVp / s_constFrameByVp)
+	// require: a repeated index reads as "already evaluated" and silently dropped every second FSR-FG evaluation, measured
+	// 11-12 evaluations per second against 20-21 rendered frames with output ~24% under target. A second call in one render
+	// frame takes the next id. One id per frame also keeps sl.dlss_g from querying a frame Streamline has no record of at
+	// present time:
 	//   commonInterface.h:622[get] Unable to find 'common' constants for frame
 	//   commonInterface.h:256[getTaggedResource] Failed to find global tag 'kBufferTypeDepth'
 	// which interpolates without depth or motion vectors and shows up as an occasional generated
 	// frame collapsing towards a corner.
-	const uint32_t latched = g_sl.simMarkerFrameId.load(std::memory_order_acquire);
-	const uint32_t next = g_sl.renderFrameId.load(std::memory_order_acquire) + 1u;
-	g_sl.renderFrameId.store(latched == next ? latched : next, std::memory_order_release);
+	const uint32_t frame = static_cast<uint32_t>(Snapshot::Render().frame);
+	const uint32_t previous = g_sl.renderFrameId.load(std::memory_order_acquire);
+	g_sl.renderFrameId.store(frame > previous ? frame : previous + 1u, std::memory_order_release);
 	g_sl.dlssgTaggedThisFrame = false;
 	g_sl.fsrfgPreparedThisFrame.store(false, std::memory_order_release);
 }
@@ -990,15 +985,15 @@ void Streamline::SetPCLMarker(PclMarker a_marker)
 	if (!g_sl.latencyMarkersNeeded.load(std::memory_order_acquire))
 		return;
 
-	// Emit SimulationStart once per simulated frame, not once per input poll.
+	// Emit SimulationStart once per game update (the snapshot it will publish), not once per input poll.
 	uint32_t simFrame = 0;
 	if (a_marker == PclMarker::SimulationStart) {
-		static uint32_t s_lastSimFrame = UINT32_MAX;
-		simFrame = SimFrameId();
-		if (s_lastSimFrame == simFrame)
+		static std::uint64_t s_lastUpdate = UINT64_MAX;
+		const std::uint64_t update = Snapshot::LastGameId() + 1;
+		if (s_lastUpdate == update)
 			return;
-		s_lastSimFrame = simFrame;
-		g_sl.simMarkerFrameId.store(simFrame, std::memory_order_release);
+		s_lastUpdate = update;
+		simFrame = SimFrameId();
 	}
 
 	const bool renderThreadMarker =

@@ -820,10 +820,11 @@ void Menu::Init()
  */
 void Menu::DrawSettings()
 {
-	if (focusChanged) {
-		OnFocusChanged();
-		focusChanged = false;
-	}
+	settingsDrawnThisFrame = true;
+	// The ImGui half of a focus change's reset (the game thread cleared the game's keyboard): allows tab to work again after
+	// alt+tabbing back in.
+	if (imguiKeysReset.exchange(false, std::memory_order_acq_rel))
+		ImGui::GetIO().ClearInputKeys();
 
 	// Outside the feature body and its baseline interceptor scope, before anything reads the settings this frame
 	ApplyPendingUndo();
@@ -1432,15 +1433,25 @@ void Menu::addToEventQueue(KeyEvent e)
 	_keyEventQueue.emplace_back(e);
 }
 
-void Menu::OnFocusChanged()
+void Menu::PublishInputState()
 {
+	publishedSwallow.store(ShouldSwallowInput(), std::memory_order_release);
+	publishedFlying.store(IsPreviewFlying(), std::memory_order_release);
+	publishedSettingsDrawn.store(std::exchange(settingsDrawnThisFrame, false), std::memory_order_release);
+}
+
+void Menu::UpdateGameSide()
+{
+	SyncVanityCamera();
+	// A focus change is handled while the settings window shows; until then it waits.
+	if (!publishedSettingsDrawn.load(std::memory_order_acquire) || !focusChanged.exchange(false, std::memory_order_acq_rel))
+		return;
 	// Solves the alt+tab stuck issue, but disables tab after tabbing back in.
 	if (const auto& inputMgr = RE::BSInputDeviceManager::GetSingleton()) {
 		if (const auto& device = inputMgr->GetKeyboard())
 			device->ClearInputState();
 	}
-	// Allows tab to work again after alt+tabbing back in.
-	ImGui::GetIO().ClearInputKeys();
+	imguiKeysReset.store(true, std::memory_order_release);
 }
 
 void Menu::ProcessInputEvents(RE::InputEvent* const* a_events)
@@ -1480,7 +1491,7 @@ bool Menu::ShouldSwallowInput()
 
 void Menu::SyncVanityCamera()
 {
-	const bool wantDisabled = ShouldSwallowInput();
+	const bool wantDisabled = SwallowsGameInput();
 	static RE::Setting* setting = nullptr;
 	if (!setting)
 		setting = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("fAutoVanityModeDelay:Camera"));
