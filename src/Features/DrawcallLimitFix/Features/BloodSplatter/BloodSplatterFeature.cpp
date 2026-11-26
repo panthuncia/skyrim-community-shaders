@@ -1,7 +1,6 @@
 // Blood splatter feature entry. On in graph mode.
 
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
-#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -16,7 +15,6 @@ namespace DCLF::Features::BloodSplatter
 			if (!Enabled())
 				return;
 			InstallHooks();
-			InstallNative();
 			logger::info("[DCLF] blood splatter: on (graph mode): the screen blood is drawn at the EngineDraws anchor");
 		}
 

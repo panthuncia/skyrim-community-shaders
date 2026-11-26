@@ -1,5 +1,5 @@
-// The screen blood from game data, native only. The game-side capture runs Main::RenderWorld's light flare setup and copies the
-// block; the render side builds the draws from ScreenSplatter's root and camera as the engine's cull, RenderBatches,
+// The screen blood from game data, in both graph modes. The game-side capture runs Main::RenderWorld's light flare setup and copies
+// the block; the render side builds the draws from ScreenSplatter's root and camera as the engine's cull, RenderBatches,
 // BSBloodSplatterShader::SetupTechnique and SetupGeometry would make them (AE 1.6.1170: GetRenderPasses 0x1414c1490, SetupTechnique
 // 0x1414c18b0, SetupGeometry 0x1414c1a60, the light flare setup 0x1414c1e00). See docs/development/engine/blood-splatter.md.
 
@@ -93,7 +93,7 @@ namespace DCLF::Features::BloodSplatter
 
 	void CaptureBlock(Snapshot::Builder& a_builder)
 	{
-		if (!RenderGraph::Engine::Native::Active() || a_builder.Built().kind != Snapshot::FrameKind::World)
+		if (a_builder.Built().kind != Snapshot::FrameKind::World)
 			return;
 		auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera());
 		if (!camera)
@@ -157,12 +157,10 @@ namespace DCLF::Features::BloodSplatter
 				draw.alpha *= block->flareAlphaScale * block->flareScale;
 				draw.hdrTarget = block->hdrTarget;
 				draw.views[2] = ViewOf(property->bloodTextures[RE::BSBloodSplatterShaderProperty::kFlareColor].get());
-				const auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 				if (block->hdrTarget < 0 || block->hdrTarget >= RE::RENDER_TARGETS::kTOTAL) {
 					a_why = std::format("a flare HDR target {} out of range", block->hdrTarget);
 					return false;
 				}
-				draw.views[3] = Unwrap(renderer->GetRuntimeData().renderTargets[block->hdrTarget].SRV);
 				a_out.push_back(draw);
 			} else {
 				draw.views[0] = ViewOf(property->bloodTextures[RE::BSBloodSplatterShaderProperty::kBloodColor].get());
@@ -188,7 +186,7 @@ namespace DCLF::Features::BloodSplatter
 		// SetupGeometry's and SetupTechnique's samplers: CLAMP, LINEAR.
 		constexpr std::uint32_t kAddress = 0, kFilter = 1;
 
-		Family::RefusalLog& NativeRefusals()
+		Family::RefusalLog& Refusals()
 		{
 			static Family::RefusalLog log("[DCLF] blood splatter: a native draw is left out");
 			return log;
@@ -208,7 +206,7 @@ namespace DCLF::Features::BloodSplatter
 			std::vector<DrawInputs> inputs;
 			std::string why;
 			if (!CollectDraws(inputs, why)) {
-				NativeRefusals().Report(why);
+				Refusals().Report(why);
 				return nullptr;
 			}
 			if (inputs.empty())
@@ -216,7 +214,7 @@ namespace DCLF::Features::BloodSplatter
 			auto* shader = *reinterpret_cast<RE::BSShader**>(REL::Offset(Address::kShader).address());
 			auto* state = globals::state;
 			if (!shader || !state) {
-				NativeRefusals().Report("no BSBloodSplatterShader or CS state");
+				Refusals().Report("no BSBloodSplatterShader or CS state");
 				return nullptr;
 			}
 			const auto& target = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
@@ -227,7 +225,7 @@ namespace DCLF::Features::BloodSplatter
 				format = static_cast<std::uint32_t>(rhi::helpers::ToRHI(desc.Format));
 			}
 			if (!format) {
-				NativeRefusals().Report("no back buffer");
+				Refusals().Report("no back buffer");
 				return nullptr;
 			}
 			// The whole back buffer: SetRenderTarget(kFRAMEBUFFER) with the engine's viewport at full size. The shadow state's viewport
@@ -235,7 +233,7 @@ namespace DCLF::Features::BloodSplatter
 			namespace Vars = ::RenderGraph::Frame::Vars;
 			const auto display = Vars::Adopted(Vars::DisplaySize());
 			if (!display.width || !display.height) {
-				NativeRefusals().Report("no display size");
+				Refusals().Report("no display size");
 				return nullptr;
 			}
 			Family::Viewport viewport;
@@ -243,7 +241,7 @@ namespace DCLF::Features::BloodSplatter
 			auto run = std::make_shared<Run>();
 			for (const auto& input : inputs) {
 				if (run->draws.size() >= kMaxDraws) {
-					NativeRefusals().Report(std::format("more than {} draws in a frame", kMaxDraws));
+					Refusals().Report(std::format("more than {} draws in a frame", kMaxDraws));
 					break;
 				}
 				const std::uint32_t technique = input.flare ? 1u : 0u;
@@ -254,13 +252,13 @@ namespace DCLF::Features::BloodSplatter
 				draw.key.defineStage = Family::DefineStage::Pixel;
 				if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(input.flare ? kFlareBlend : kSplatterBlend, 0, kWriteMode, 0), nullptr,
 						Pipeline::EngineRasterState(kFill, kCull, 0, 0))) {
-					NativeRefusals().Report("a blend or rasterizer state with no description");
+					Refusals().Report("a blend or rasterizer state with no description");
 					continue;
 				}
 				draw.key.colourFormats[0] = format;
 				draw.program = BloodSplatterDraws::Program(draw.key, *shader);
 				if (!draw.program) {
-					NativeRefusals().Report(std::format("descriptor {:#x}: its program is not built yet", pixelDescriptor));
+					Refusals().Report(std::format("descriptor {:#x}: its program is not built yet", pixelDescriptor));
 					continue;
 				}
 				Family::Owners owners;
@@ -269,7 +267,7 @@ namespace DCLF::Features::BloodSplatter
 				if (const auto result = Family::LatchGeometry(input.shape, 0, input.triangles, VertexDescOf(*shader, technique), D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
 						geometry, owners, &detail);
 					result != Family::GeometryResult::Ok) {
-					NativeRefusals().Report(std::format("geometry: {}", Family::ReasonOf(result)), detail);
+					Refusals().Report(std::format("geometry: {}", Family::ReasonOf(result)), detail);
 					continue;
 				}
 				auto& c = draw.constants;
@@ -288,7 +286,7 @@ namespace DCLF::Features::BloodSplatter
 				for (std::uint32_t t = 0; t < 4 && texturesOk; ++t) {
 					c.samplers[t] = Family::SlotSampler(kAddress, kFilter, owners);
 					if (c.samplers[t] == GpuTextures::kInvalid) {
-						NativeRefusals().Report("no graph sampler for CLAMP, LINEAR");
+						Refusals().Report("no graph sampler for CLAMP, LINEAR");
 						texturesOk = false;
 						break;
 					}
@@ -296,7 +294,7 @@ namespace DCLF::Features::BloodSplatter
 					if (t == 3 && input.flare && input.hdrTarget > 0) {
 						const auto id = Family::EngineTargetId(static_cast<RE::RENDER_TARGET>(input.hdrTarget));
 						if (const auto result = BloodSplatterDraws::ReadPublished(id, c.textures[t]); result != Family::InputResult::Graph) {
-							NativeRefusals().Report(std::format("the flare's luminance {}: {}", id, Family::ReasonOf(result)));
+							Refusals().Report(std::format("the flare's luminance {}: {}", id, Family::ReasonOf(result)));
 							texturesOk = false;
 						}
 						continue;
@@ -304,7 +302,7 @@ namespace DCLF::Features::BloodSplatter
 					GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 					if (Family::SlotTexture(input.views[t], GpuTextures::ViewKind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), c.textures[t], owners,
 							&failure) != Family::SlotResult::Ok) {
-						NativeRefusals().Report(std::format("t{} cannot be read", t), GpuTextures::DescribeFailure(input.views[t], t, failure));
+						Refusals().Report(std::format("t{} cannot be read", t), GpuTextures::DescribeFailure(input.views[t], t, failure));
 						texturesOk = false;
 					}
 				}
@@ -319,7 +317,7 @@ namespace DCLF::Features::BloodSplatter
 
 		/**
 		* @brief Main::Draw's call of Main::RenderScreenSplatter (SE 35560 +0xA6A, AE 36559 +0xA73), made when ScreenSplatter's root has
-		* children. Native draws the screen blood from game data at the EngineDraws anchor; the engine's function is not entered.
+		* children. The screen blood is drawn from game data at the EngineDraws anchor; the engine's function is not entered.
 		*/
 		struct RenderScreenSplatter
 		{
@@ -339,7 +337,7 @@ namespace DCLF::Features::BloodSplatter
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief Main::RenderWorld's screen splatter cull and SubmitAccumulator. Native draws the blood from the root, so they do nothing. */
+		/** @brief Main::RenderWorld's screen splatter cull and SubmitAccumulator. The blood is drawn from the root, so they do nothing. */
 		struct SkipSplatterCull
 		{
 			static void thunk([[maybe_unused]] void* a_context) {}
@@ -353,19 +351,27 @@ namespace DCLF::Features::BloodSplatter
 		};
 	}
 
-	void InstallNative()
+	void PreflightHooks()
 	{
-		if (!RenderGraph::Engine::Native::Requested())
+		if (!Enabled())
 			return;
-		Snapshot::RegisterCapture(&CaptureBlock);
-		const auto draw = REL::RelocationID(35560, 36559).address() + REL::Relocate(0xA6A, 0xA73);
-		HookSites::RequireCall("Main::Draw's call of RenderScreenSplatter", draw);
-		stl::write_thunk_call<RenderScreenSplatter>(draw);
+		HookSites::RequireCall("Main::Draw's call of RenderScreenSplatter", REL::RelocationID(35560, 36559).address() + REL::Relocate(0xA6A, 0xA73));
 		const auto world = REL::RelocationID(100424, 107142).address();
 		HookSites::RequireCall("Main::RenderWorld's screen splatter cull", world + REL::Relocate(0x3D2, 0x3FE));
 		HookSites::RequireCall("Main::RenderWorld's screen splatter submit", world + REL::Relocate(0x3E4, 0x410));
+	}
+
+	void InstallHooks()
+	{
+		// Guest takes the same route: its capture runs before DrawFrame on the same thread, and the latched batch it had before
+		// refused every flare (its t3 is a published graph texture), so guest drew no screen blood.
+		Snapshot::RegisterCapture(&CaptureBlock);
+		stl::write_thunk_call<RenderScreenSplatter>(REL::RelocationID(35560, 36559).address() + REL::Relocate(0xA6A, 0xA73));
+		const auto world = REL::RelocationID(100424, 107142).address();
 		stl::write_thunk_call<SkipSplatterCull>(world + REL::Relocate(0x3D2, 0x3FE));
 		stl::write_thunk_call<SkipSplatterSubmit>(world + REL::Relocate(0x3E4, 0x410));
-		logger::info("[DCLF] blood splatter: native: drawn from ScreenSplatter's root at Main::Draw's RenderScreenSplatter call");
+		// The client is made on the main thread once the graph runs, before any blood is drawn.
+		Family::AddSetup("blood splatter", [] { return BloodSplatterDraws::Setup(); });
+		logger::info("[DCLF] blood splatter: drawn from ScreenSplatter's root at Main::Draw's RenderScreenSplatter call");
 	}
 }

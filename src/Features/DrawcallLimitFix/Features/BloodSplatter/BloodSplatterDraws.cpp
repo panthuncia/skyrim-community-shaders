@@ -58,7 +58,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			// Keyed by run, because the pass may record on the submission thread after the render thread published the next run.
 			::RenderGraph::RunSlots<Run> runs;
-			// Native: the engine targets the flare's luminance may be (the HDR effect's last luminance levels).
+			// The engine targets the flare's luminance may be (the HDR effect's last luminance levels).
 			Family::PublishedInputs inputs;
 		};
 
@@ -245,10 +245,9 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		client->id = kClientId;
 		client->latch = std::make_shared<org::LatchBlock>(std::string(kClientId) + ".latch", kMaxDraws * kDrawStride);
 		client->gate = ::RenderGraph::RunGate::Create(std::string(kClientId) + ".gate", kMaxDraws);
-		// Native draws the flare from game data, and its t3, the adapted luminance, is one of the HDR effect's luminance targets.
-		if (::RenderGraph::Engine::Native::Active())
-			for (auto t = static_cast<std::int32_t>(RE::RENDER_TARGET::kHDR_DOWNSAMPLE1); t <= static_cast<std::int32_t>(RE::RENDER_TARGET::kHDR_DOWNSAMPLE13); ++t)
-				client->inputs.AddEngine(static_cast<RE::RENDER_TARGET>(t));
+		// The flare's t3, the adapted luminance, is one of the HDR effect's luminance targets.
+		for (auto t = static_cast<std::int32_t>(RE::RENDER_TARGET::kHDR_DOWNSAMPLE1); t <= static_cast<std::int32_t>(RE::RENDER_TARGET::kHDR_DOWNSAMPLE13); ++t)
+			client->inputs.AddEngine(static_cast<RE::RENDER_TARGET>(t));
 		if (!FrameAnchors::EngineTexture(FrameAnchors::Colour(0))) {
 			logger::warn("[DCLF] blood splatter: the back buffer cannot be imported; the screen blood stays the engine's");
 			return true;

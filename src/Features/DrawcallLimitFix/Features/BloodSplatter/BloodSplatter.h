@@ -2,11 +2,10 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Blood splatter: the engine's screen blood, drawn by the render graph in the engine's place.
-// The engine's batch runs unchanged, but DrawTriShape records each draw instead of drawing it.
-// An ORG pass at the EngineDraws anchor then draws them in the engine's order with BloodSplatter.hlsl.
+// Blood splatter: the engine's screen blood, drawn by the render graph in the engine's place, in both graph modes.
+// The draws are made from ScreenSplatter's root and camera and a snapshot block; the engine's batch is not run.
+// An ORG pass at the EngineDraws anchor draws them with BloodSplatter.hlsl.
 // Programs are prebuilt and the client is made at setup, so the first hit never waits or rebuilds.
-// A draw the family cannot take ends the latched part, and the engine draws the rest of the batch.
 // See docs/development/engine/blood-splatter.md.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
@@ -25,8 +24,6 @@ namespace DCLF::Features::BloodSplatter
 {
 	namespace Address
 	{
-		// FinishAccumulatingScreenSplatter's RenderBatches(accumulator, 0x5C006073, 0x5C006074, 0, -1).
-		inline constexpr Engine::Offset kSplatterBatch{ { 106601, 0x21 }, { 99956, 0x1D } };
 		// Main::RenderWorld's light flare setup: LightLoc, the flare scale and the HDR target, from the world camera.
 		inline constexpr Engine::Offset kFlareSetup{ { 106979 }, { 100269 } };
 		// What it writes, and what ScreenSplatter::Update writes, for SetupGeometry and SetupTechnique.
@@ -60,7 +57,7 @@ namespace DCLF::Features::BloodSplatter
 	};
 	static_assert(sizeof(DrawConstants) == 176, "BloodSplatterOrgDraw's layout");
 
-	/** @brief One latched draw. */
+	/** @brief One draw. */
 	struct Draw
 	{
 		Family::ProgramKey key;
@@ -81,7 +78,7 @@ namespace DCLF::Features::BloodSplatter
 	};
 
 	/**
-	 * @brief The screen blood's game inputs in native, captured on the game thread (Snapshot::BlockId::ScreenBlood). Main::RenderWorld's
+	 * @brief The screen blood's game inputs, captured on the game thread (Snapshot::BlockId::ScreenBlood). Main::RenderWorld's
 	 * light flare setup (SE 100269, AE 106979) computes the first three from the world camera and the sun; ScreenSplatter::Update writes
 	 * the others. SetupGeometry and SetupTechnique read them.
 	 */
@@ -97,7 +94,7 @@ namespace DCLF::Features::BloodSplatter
 		bool operator==(const Block&) const = default;
 	};
 
-	/** @brief Game thread, native world snapshots. Runs the light flare setup and copies the block. */
+	/** @brief Game thread, world snapshots. Runs the light flare setup and copies the block. */
 	void CaptureBlock(Snapshot::Builder& a_builder);
 
 	/** @brief One draw as the engine would make it: its pass, geometry, constants, textures and samplers. */
@@ -115,7 +112,7 @@ namespace DCLF::Features::BloodSplatter
 	};
 
 	/**
-	 * @brief Render thread, native. The draws Main::RenderScreenSplatter would make this frame, from ScreenSplatter's root and camera and
+	 * @brief Render thread. The draws Main::RenderScreenSplatter would make this frame, from ScreenSplatter's root and camera and
 	 * the adopted snapshot's block, in RenderBatches' order: the flares, then the splatters. False, with a_why, when they cannot be read.
 	 */
 	bool CollectDraws(std::vector<DrawInputs>& a_out, std::string& a_why);
@@ -125,10 +122,9 @@ namespace DCLF::Features::BloodSplatter
 	/** @brief Read at install. */
 	bool Enabled();
 
+	/** @brief The game-side capture and the screen blood at Main::Draw's call of RenderScreenSplatter. */
 	void InstallHooks();
 	void PreflightHooks();
-	/** @brief Native only: the game-side capture and the native screen blood at Main::Draw's call of RenderScreenSplatter. */
-	void InstallNative();
 
 	// Render thread, except Setup.
 	namespace BloodSplatterDraws
@@ -148,7 +144,7 @@ namespace DCLF::Features::BloodSplatter
 		void Keep(Family::Owners&& a_owners);
 		/** @brief False means the draws were not drawn. Logged. */
 		bool Submit(std::shared_ptr<Run> a_run);
-		/** @brief Native: how the client reads a published engine target (the flare's adapted luminance). */
+		/** @brief How the client reads a published engine target (the flare's adapted luminance). */
 		Family::InputResult ReadPublished(std::string_view a_id, std::uint32_t& a_index);
 		std::string Status();
 	}
