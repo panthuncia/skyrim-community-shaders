@@ -239,7 +239,9 @@ namespace DCLF
 			const FrameBlockSizes sizesBefore = parity.blockSizes[shape];
 			const bool knownBefore = parity.known[shape];
 			const bool mainRange = impl->mainMaxDepth > 0.0f;
-			parity.viewport[shape] = { capture.viewportWidth, capture.viewportHeight, mainRange ? impl->mainMinDepth : capture.minDepth,
+			// Native's size comes from the revision its recordings name (PostRevisionInputs), never the engine's live viewport.
+			const bool native = Snapshot::FrameCamera::Owned();
+			parity.viewport[shape] = { native ? 0u : capture.viewportWidth, native ? 0u : capture.viewportHeight, mainRange ? impl->mainMinDepth : capture.minDepth,
 				mainRange ? impl->mainMaxDepth : capture.maxDepth };
 			for (std::uint32_t slot = 0; slot < kConstantBufferRegisters; ++slot) {
 				auto& sizes = parity.blockSizes[shape];
@@ -342,6 +344,7 @@ namespace DCLF
 	{
 		// FrameParams.z in the game's PerFrame, FrameParams at c42.
 		inline constexpr std::size_t kFrameParamsZOffset = 42 * 16 + 2 * sizeof(float);
+		inline constexpr float kBlendedFrameParamsZ = 1.0f;
 
 		/** @brief The blocks the epoch always supplies: the game's PerFrame (b12), CS SharedData (b5), feature data and DCLF's fog slot (VS b13). */
 		void SupplyFixedBlocks(FrameBlocks& a_out)
@@ -375,11 +378,6 @@ namespace DCLF
 		}
 	}
 
-	void IndirectDraws::NoteBlendedFrameParams(float a_z)
-	{
-		impl->blendedFrameParamsZ = a_z;
-	}
-
 	void IndirectDraws::Impl::PackFrameBlocks(const Capture& a_capture, bool a_depthOnly, FrameBlocks& a_out)
 	{
 		RenderThreadBudget::Part budget(RenderThreadBudget::Bucket::Capture);
@@ -388,10 +386,11 @@ namespace DCLF
 		MirrorFrameBlocks(a_capture, a_depthOnly, replayVertexInputs, a_out);
 		SupplyFixedBlocks(a_out);
 		CarryMissingBlocks(a_depthOnly, replayVertexInputs, a_out);
-		// The forward epoch draws after the composite, where the engine has raised FrameParams.z. Lighting's forward stage needs
-		// it for fog and fade. The colour epoch's Lighting is all deferred, so it does not notice.
+		// The forward epoch draws at the blended draw, which the post-resolve (SE 99939, AE 106584) runs right after writing the per-frame
+		// block with flag 4 (AE 0x140e45680): FrameParams.z is 1 there. Lighting's forward stage needs it for fog and fade. The colour
+		// epoch's Lighting is all deferred, so it does not notice. A constant: no bound block is read.
 		if (auto& perFrame = a_out.ps[kPerFrameVertexRegister]; !a_depthOnly && perFrame.size() >= kFrameParamsZOffset + sizeof(float))
-			std::memcpy(perFrame.data() + kFrameParamsZOffset, &blendedFrameParamsZ, sizeof(float));
+			std::memcpy(perFrame.data() + kFrameParamsZOffset, &kBlendedFrameParamsZ, sizeof(float));
 		for (std::uint32_t slot = 0; slot < kConstantBufferRegisters; ++slot) {
 			if (!a_out.vs[slot].empty())
 				a_out.vsMask |= 1u << slot;

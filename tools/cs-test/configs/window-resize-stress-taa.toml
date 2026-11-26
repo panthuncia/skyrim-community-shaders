@@ -1,0 +1,178 @@
+# window-resize-stress with TAA (render size equal to display size): growing the window lost the device in native Vulkan while
+# draws took the engine's live viewport (decision 112). God mode first: the save's hostile guard. Compose it:
+# native-vulkan+window-resize-stress-taa.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "upscale"
+arg = "taa"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1280x720"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "small0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1920x1080"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "large0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1280x720"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "small1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1920x1080"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "large1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1280x720"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "small2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1920x1080"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "large2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1280x720"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "small3"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1920x1080"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "large3"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1280x720"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "small4"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1920x1080"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "large4"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1280x720"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "small5"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "window"
+arg = "1920x1080"
+
+[[steps]]
+at = "previous"
+frames = 90
+do = "shot"
+arg = "large5"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "small0", "large0", "small1", "large1", "small2", "large2", "small3", "large3", "small4", "large4", "small5", "large5"]

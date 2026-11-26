@@ -20,6 +20,8 @@ namespace Snapshot::FrameCamera
 			globals::FrameBufferCache main{};  // jittered: the world passes
 			globals::FrameBufferCache post{};  // unjittered: the post chain and what draws after it
 			std::array<float, 2> jitter{};
+			Ratios ratios{};              // BeginRender's: the world passes' dynamic resolution
+			bool fullResolution = false;  // OnFullResolution ran this render frame
 			std::uint64_t builtFrame = 0;
 			bool built = false;
 			bool wrote = false;  // the blocks hold a camera this render frame
@@ -174,6 +176,8 @@ namespace Snapshot::FrameCamera
 			render.builtFrame = frame;
 			render.built = true;
 			render.jitter = a_jitter;
+			render.ratios = a_ratios;
+			render.fullResolution = false;
 			render.wrote = WriteMain(a_jitter, a_ratios, render.last, render.haveLast, render.main);
 			if (render.wrote)
 				WriteMain({}, a_ratios, render.last, render.haveLast, render.post);
@@ -203,7 +207,16 @@ namespace Snapshot::FrameCamera
 			return;
 		// The upscaler or Upscaling::PostDisplay set the engine back to full resolution: what draws after it reads ratios of 1.
 		auto& render = Built();
+		render.fullResolution = true;
 		WriteRatios({}, Core().drClampOffset, reinterpret_cast<float*>(&render.post.data));
+	}
+
+	std::array<float, 2> ViewportRatios()
+	{
+		const auto& render = Built();
+		if (render.fullResolution)
+			return { 1.0f, 1.0f };
+		return { render.ratios.width, render.ratios.height };
 	}
 
 	const globals::FrameBufferCache& Main()

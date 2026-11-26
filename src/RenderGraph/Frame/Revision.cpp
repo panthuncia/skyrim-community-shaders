@@ -1779,8 +1779,8 @@ namespace RenderGraph::Frame::Revision
 		// The revision's pending versions, once its lane made them and the source is a member. A member revision that changes no
 		// version (a shader reload) names the adopted ones, under its serial.
 		if (const auto& preparing = coordinator.preparing; HasSourceMember(preparing.get(), a_source))
-			return { preparing->serial, preparing->versionSet };
-		return { coordinator.sources[a_source]->adoptedVersions, nullptr };
+			return { preparing->serial, preparing->versionSet, preparing->variables };
+		return { coordinator.sources[a_source]->adoptedVersions, nullptr, Vars::Lane::Adopted() };
 	}
 
 	void PublishFragment(FragmentSourceId a_source, Fragment a_fragment)

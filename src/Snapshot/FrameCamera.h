@@ -80,6 +80,12 @@ namespace Snapshot::FrameCamera
 	/** @brief The upscaler ran or Upscaling::PostDisplay did: the engine is at full resolution for the rest of the frame. Render owner. */
 	void OnFullResolution();
 
+	/**
+	* @brief The render frame's dynamic resolution ratios for viewports (Renderer::UpdateViewPort's): BeginRender's, or 1 once the
+	* frame is at full resolution, or on a frame without BeginRender. Native only. Render owner.
+	*/
+	std::array<float, 2> ViewportRatios();
+
 	/** @brief A per-frame block matrix (stored transposed) as the engine's row-major camera data holds it. */
 	std::array<float, 16> RowMajor(const void* a_blockMatrix);
 

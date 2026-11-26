@@ -241,6 +241,10 @@ namespace DCLF
 
 		std::span<const std::byte> FrameBlockNow()
 		{
+			// Native: the frame camera's block. Its rows past the camera (FrameParams, ratios) are what the engine's block held for first
+			// person and the reflection faces (observed); the faces' ratios are written after, as before.
+			if (Snapshot::FrameCamera::Owned())
+				return std::as_bytes(std::span(&Snapshot::FrameCamera::Main().data, 1));
 			std::span<const std::byte> frame;
 			auto& mirror = ConstantMirror::Get();
 			if (auto* perFrame = *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get()) {

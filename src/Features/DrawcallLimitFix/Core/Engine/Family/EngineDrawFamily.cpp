@@ -21,7 +21,11 @@
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
+#include "RenderGraph/Engine/Targets/TargetRef.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/Variables.h"
+#include "Snapshot/FrameCamera.h"
 #include "Utils/Logging.h"
 
 #include <Render/PassBuilders.h>
@@ -381,8 +385,31 @@ namespace DCLF::Family
 		return GeometryResult::Ok;
 	}
 
+	Viewport FrameViewport(std::int32_t a_colour, std::int32_t a_depth, std::uint32_t a_depthBias, bool a_shifted)
+	{
+		namespace Targets = ::RenderGraph::Engine::Targets;
+		namespace Vars = ::RenderGraph::Frame::Vars;
+		const auto shapes = Vars::Adopted(Vars::EngineTargetShapes());
+		Targets::Shape shape{};
+		if (a_colour >= 0 && static_cast<std::uint32_t>(a_colour) < Targets::kColourSlots)
+			shape = shapes.colours[a_colour];
+		else if (a_depth >= 0 && static_cast<std::uint32_t>(a_depth) < Targets::kDepthSlots)
+			shape = shapes.depths[a_depth];
+		const auto ratios = Snapshot::FrameCamera::ViewportRatios();
+		Viewport viewport;
+		viewport.rect = { 0, 0, static_cast<std::uint32_t>(static_cast<float>(shape.width) * ratios[0]),
+			static_cast<std::uint32_t>(static_cast<float>(shape.height) * ratios[1]) };
+		const auto range = ::RenderGraph::Engine::Native::WorldPass::DepthRange(a_shifted);
+		viewport.depthRange[0] = range[0];
+		viewport.depthRange[1] = range[1] - kBiasViewportOffsets[(std::min)(a_depthBias, 11u)];
+		return viewport;
+	}
+
 	Viewport LatchViewport(std::uint32_t a_depthBias)
 	{
+		// Native's RenderWorld points draw into the adopted revision's targets: the viewport follows them, not the engine's.
+		if (const auto* world = ::RenderGraph::Engine::Native::WorldPass::Current())
+			return FrameViewport(world->colours[0], world->depth, a_depthBias, world->shifted);
 		static REL::Relocation<const float*> cameraDepthRange{ REL::Offset(Engine::Address::kCameraDepthRange) };
 		const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 		Viewport viewport;

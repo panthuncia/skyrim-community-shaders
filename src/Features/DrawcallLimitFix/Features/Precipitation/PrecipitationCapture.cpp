@@ -261,7 +261,9 @@ namespace DCLF::Features::Precipitation
 				return reason;
 			}
 
-			draw.viewport = Family::LatchViewport(engine.depthBias);
+			// Native draws into the adopted revision's kMAIN, which the engine's viewport runs ahead of at a resize (decision 112).
+			draw.viewport = Snapshot::FrameCamera::Owned() ? Family::FrameViewport(kTargets[0], static_cast<std::int32_t>(main), engine.depthBias) :
+			                                                 Family::LatchViewport(engine.depthBias);
 
 			for (auto& owner : owners)
 				if (owner)

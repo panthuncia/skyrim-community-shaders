@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Snapshot/FrameCamera.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
@@ -312,8 +313,12 @@ namespace DCLF
 			for (std::uint32_t group = 0; group < kDecalGroups; ++group)
 				if (decalCount[group] > shape.sequenceDecals)
 					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("{} decals past the sequence buffer's {} per group", decalCount[group], shape.sequenceDecals));
-			// The culling must use the draws' ViewProj from VS_PerFrame c8.
-			if (auto* buffer = a_commit.capture.vsBuffers[kPerFrameVertexRegister]) {
+			// The culling must use the draws' ViewProj from VS_PerFrame c8. Native: the frame camera's, unjittered as the engine's block
+			// is there (native writes no jitter into the engine).
+			if (Snapshot::FrameCamera::Owned()) {
+				std::memcpy(a_cull.viewProj.data(), &Snapshot::FrameCamera::Main().data.CameraViewProjUnjittered, sizeof(float) * 16);
+				a_cull.hasViewProj = true;
+			} else if (auto* buffer = a_commit.capture.vsBuffers[kPerFrameVertexRegister]) {
 				a_commit.mirror.Watch(buffer);
 				const auto contents = a_commit.mirror.Contents(buffer);
 				if (contents.size() >= 48 * sizeof(float)) {

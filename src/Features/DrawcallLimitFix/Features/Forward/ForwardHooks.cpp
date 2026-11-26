@@ -67,7 +67,6 @@ namespace DCLF::Features::Forward
 				}
 				if (main) {
 					Extensions::TriggerScope trigger(blendedDraw);
-					IndirectDraws::Get().NoteBlendedFrameParams(CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetFrameParams().z);
 					if (SubmitForwardEpoch())
 						MarkRefractionNormals();
 				}

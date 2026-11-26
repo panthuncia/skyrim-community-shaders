@@ -236,9 +236,18 @@ namespace DCLF::Family
 
 	/**
 	 * @brief The shadow state's viewport, with the depth bias mode's offset taken off its maximum depth
-	 * (CreateDepthBiasViewportOffsets' table, SE 0x141794530, AE 0x1419db270).
+	 * (CreateDepthBiasViewportOffsets' table, SE 0x141794530, AE 0x1419db270). Inside a native RenderWorld point, FrameViewport of
+	 * the point's targets instead (decision 112).
 	 */
 	Viewport LatchViewport(std::uint32_t a_depthBias);
+
+	/**
+	 * @brief The viewport Renderer::UpdateViewPort gives a draw into engine target a_colour (or, with none, depth target a_depth) in this
+	 * frame: the target's shape in the adopted revision, which the frame draws into, scaled by the render frame's dynamic resolution,
+	 * with the main camera's full port. The depth range is the main camera's, inside a depth shift window when a_shifted
+	 * (WorldPass::DepthRange), less the depth bias mode's offset.
+	 */
+	Viewport FrameViewport(std::int32_t a_colour, std::int32_t a_depth, std::uint32_t a_depthBias, bool a_shifted = false);
 
 	namespace Constants = ::RenderGraph::Engine::Constants;
 	namespace Flush = ::RenderGraph::Engine::Flush;

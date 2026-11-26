@@ -3,6 +3,8 @@
 #include "RenderGraph/Engine/Native/WorldPass.h"
 
 #include "Deferred.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "Snapshot/Publication.h"
 
 
 namespace RenderGraph::Engine::Native::WorldPass
@@ -50,12 +52,15 @@ namespace RenderGraph::Engine::Native::WorldPass
 					// The pre-resolve binds the normals target and the water mask (kMOTION_VECTOR's slot holds 7) before the mask batch.
 					auto s = Base(kTestWrite);
 					s.colours = { NormalsTarget(), kMotion, -1 };
+					s.shifted = true;
 					return s;
 				}
 			case Point::WaterSurface:
 				{
+					// The whole post-resolve is one depth shift window.
 					auto s = Base(kTest);
 					s.colours = { kMain, -1, -1 };
+					s.shifted = true;
 					return s;
 				}
 			case Point::SunQuery:
@@ -114,6 +119,43 @@ namespace RenderGraph::Engine::Native::WorldPass
 	std::array<RE::RENDER_TARGET, 4> ForwardTargets()
 	{
 		return { T::kMAIN, T::kMOTION_VECTOR, static_cast<RE::RENDER_TARGET>(NormalsTarget()), T::kNONE };
+	}
+
+	namespace
+	{
+		template <class T>
+		const T& Global(std::uint64_t a_se, std::uint64_t a_ae)
+		{
+			return *reinterpret_cast<const T*>(REL::RelocationID(a_se, a_ae).address());
+		}
+
+		/** @brief The depth shift's test (SE 100407 / AE 107125) and the maximum it sets, on the game thread. */
+		void CaptureBlock(Snapshot::Builder& a_builder)
+		{
+			if (!Native::Active() || a_builder.Built().kind != Snapshot::FrameKind::World)
+				return;
+			Block block;
+			// The local map open, or no flag 528095 / 415040; a world scene graph; ToggleDepthShift on.
+			const bool mapMenu = Global<bool>(528005, 414950);
+			const bool flag = Global<bool>(528095, 415040);
+			const auto* sceneGraph = Global<const void*>(528087, 415032);
+			const bool toggle = Global<bool>(513435, 391260);
+			block.depthShift = (mapMenu || !flag) && sceneGraph && toggle;
+			block.shiftedMax = (std::min)(1.0f, Global<float>(304859, 254902));
+			a_builder.Set(block);
+		}
+	}
+
+	void InstallCapture()
+	{
+		Snapshot::RegisterCapture(&CaptureBlock);
+	}
+
+	std::array<float, 2> DepthRange(bool a_shifted)
+	{
+		const auto& snapshot = Snapshot::Current();
+		const auto* block = snapshot ? snapshot->Block<Block>() : nullptr;
+		return { 0.0f, a_shifted && block && block->depthShift ? block->shiftedMax : 1.0f };
 	}
 
 	RenderWorldScope::RenderWorldScope() { inRenderWorld = true; }

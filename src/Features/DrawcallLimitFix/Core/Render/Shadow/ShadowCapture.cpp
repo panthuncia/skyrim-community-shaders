@@ -163,8 +163,11 @@ namespace DCLF
 			}
 		}
 
-		/** @brief Checks the block's CameraPosAdjust (c40) against the renderer's eye, and reports every 1000 views. */
-		void CheckCapturedEye(const PendingView& a_view, std::uint32_t a_viewId, std::uint32_t a_renderMode)
+		/**
+		 * @brief Checks the block's CameraPosAdjust (c40) against the renderer's eye, and reports every 1000 views. a_captured: the block
+		 * is the engine's (CapturePerFrame), not DCLF's own camera's; only then can it have come from the cached copy.
+		 */
+		void CheckCapturedEye(const PendingView& a_view, std::uint32_t a_viewId, std::uint32_t a_renderMode, bool a_captured)
 		{
 			static std::uint64_t views = 0, fallback = 0, differ = 0;
 			static float largest = 0.0f;
@@ -181,7 +184,7 @@ namespace DCLF
 				}
 				largest = std::max(largest, d);
 			}
-			if (!ConstantMirror::Get().Contents(*CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get()).size())
+			if (a_captured && !ConstantMirror::Get().Contents(*CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get()).size())
 				++fallback;
 			if (views == 1000) {
 				logger::info("[DCLF] shadow view capture: {} views, {} from the cached copy, {} whose b12 eye is not the renderer's (largest {:.2f}){}{}", views, fallback, differ,
@@ -427,7 +430,7 @@ namespace DCLF
 			(void)ShadowViews::Get().NextCapture(a_viewId);
 			++shadowStats.views;
 		}
-		CheckCapturedEye(view, a_viewId, a_renderMode);
+		CheckCapturedEye(view, a_viewId, a_renderMode, !owned);
 		shadowStats.captureMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		return true;
 	}

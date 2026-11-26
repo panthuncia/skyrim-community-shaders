@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Snapshot/FrameSnapshot.h"
+
 #include <array>
 #include <cstdint>
 
@@ -29,7 +31,31 @@ namespace RenderGraph::Engine::Native::WorldPass
 		std::uint32_t depthMode = 0, stencil = 0, stencilRef = 0, fill = 0, cull = 0, depthBias = 0, scissor = 0;
 		std::uint32_t blend = 0, alphaToCoverage = 0, write = 0, blendExtra = 0;
 		bool alphaTest = false;
+		float alphaRef = 128.0f / 255.0f;  // the pre-resolve sets 128/255 before the sky techniques; nothing in RenderWorld changes it after
+		bool shifted = false;              // inside the resolve's LOD depth shift window (SE 100407 to 100408, AE 107125 to 107126)
 	};
+
+	/**
+	* @brief What the points read of game data, captured on the game thread (native world snapshots): the LOD depth shift. Inside its
+	* windows the engine's resolve functions lower the depth range's maximum to a constant (SE 100407 / AE 107125) while the console's
+	* ToggleDepthShift is on, and narrow the world camera's near plane for the engine's own LOD draws, which native does not make.
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::RenderWorld;
+		bool depthShift = false;  // the shift applies this update
+		float shiftedMax = 1.0f;  // the depth range's maximum inside a window
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Registers the block's capture. Native only, at load. */
+	void InstallCapture();
+
+	/**
+	* @brief The depth range of the main camera's draws, in (a_shifted) or out of a depth shift window, from the adopted snapshot's block:
+	* SetCameraData's (0, 1), with the window's maximum. Render thread.
+	*/
+	std::array<float, 2> DepthRange(bool a_shifted);
 
 	/** @brief The point a native RenderWorld point runs at, while in scope. Nests; a scope outside native's RenderWorld sets nothing. */
 	class Scope

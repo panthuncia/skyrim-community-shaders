@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Features/MainView/MainView.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Triggers.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -59,9 +60,14 @@ namespace DCLF::Features::MainView
 			return text + fmt::format("depth {}", static_cast<int>(a_formats.depth));
 		}
 
-		/** @brief Development builds: the bound targets must be the declared ones DCLF's pipelines were built for at setup. */
+		/**
+		 * @brief Development builds: the bound targets must be the declared ones DCLF's pipelines were built for at setup. Guest only:
+		 * native's main pass draws into the declared targets themselves and reads no bound state.
+		 */
 		void CheckBoundFormats()
 		{
+			if (Snapshot::FrameCamera::Owned())
+				return;
 			const auto bound = BoundTargetFormats();
 			const auto& declared = DrawPipelines::Get().Targets();
 			if (!(bound == declared))

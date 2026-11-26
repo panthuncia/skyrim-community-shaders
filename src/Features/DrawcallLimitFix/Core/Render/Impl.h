@@ -266,8 +266,6 @@ namespace DCLF
 		Reports::Window sunTestWindow;
 		std::uint32_t sunTestEmpty = 0;
 		bool loggedFrameConstants = false;
-		// FrameParams.z at the blended draw. It gates Lighting's forward fog. The engine holds 1 there before the first blended draw.
-		float blendedFrameParamsZ = 1.0f;
 
 		std::vector<GpuCascade> sunCascades;
 		// Unclamped, as the build parity's reference. The latch takes a count clamped to the revision's layout.

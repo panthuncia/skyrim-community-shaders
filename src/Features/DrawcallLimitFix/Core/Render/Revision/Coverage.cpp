@@ -12,6 +12,9 @@
 
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/RecipeTable.h"
+#include "RenderGraph/Frame/Revision.h"
+#include "RenderGraph/Frame/VariablesLane.h"
+#include "Snapshot/FrameCamera.h"
 
 namespace DCLF
 {
@@ -90,6 +93,27 @@ namespace DCLF
 		}
 	}
 
+	namespace
+	{
+		/**
+		 * @brief A native main shape's size: kMAIN's shape (its colour target, or its depth target for the Z-prepass) in the revision
+		 * a_versions names, at that revision's dynamic resolution, as Renderer::UpdateViewPort sizes it. Zero before the first adoption.
+		 */
+		void NativeMainSize(const RenderGraph::Frame::Revision::FragmentVersions& a_versions, bool a_depth, MainViewport& a_out)
+		{
+			namespace Vars = RenderGraph::Frame::Vars;
+			a_out.width = a_out.height = 0;
+			if (!a_versions.variables)
+				return;
+			const auto shapes = Vars::Lane::ValueIn(*a_versions.variables, Vars::EngineTargetShapes());
+			const auto ratios = Vars::Lane::ValueIn(*a_versions.variables, Vars::DynamicRatios());
+			const auto& target = a_depth ? shapes.depths[static_cast<std::size_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)] :
+			                               shapes.colours[static_cast<std::size_t>(RE::RENDER_TARGETS::kMAIN)];
+			a_out.width = static_cast<std::uint32_t>(static_cast<float>(target.width) * ratios.x);
+			a_out.height = static_cast<std::uint32_t>(static_cast<float>(target.height) * ratios.y);
+		}
+	}
+
 	void IndirectDraws::Impl::PostRevisionInputs()
 	{
 		// Inputs can be posted before the first build point, so register the build source first.
@@ -130,21 +154,25 @@ namespace DCLF
 		next.mainKnown = mainEpochInputs.known;
 		next.viewport = mainEpochInputs.viewport;
 		next.blockSizes = mainEpochInputs.blockSizes;
+		// The frame's versions to record against: a frame revision's pending ones while its closure has DCLF epochs (plan step 10b).
+		auto frameVersions = RenderGraph::Frame::Revision::FrameVersionsFor(SceneSource());
+		// Native: the main shapes draw into kMAIN's version in that revision, so their size is its shape there at the revision's
+		// dynamic resolution. The engine's live viewport takes a new window size before the frame's targets do (decision 112).
+		if (Snapshot::FrameCamera::Owned())
+			for (const std::size_t shape : { kDepthShape, kColourShape })
+				if (next.mainKnown[shape])
+					NativeMainSize(frameVersions, shape == kDepthShape, next.viewport[shape]);
 		// A Target view's size is its imported target's. Other views use the main colour viewport.
 		for (const auto& slot : kViewSlots) {
 			const auto& view = View(slot.view);
 			const bool target = Extensions::ViewEntryOf(slot.view).area == Api::ViewArea::Target;
 			next.views[ViewIndex(slot.view)] = { view.resources, view.targets,
-				target ? (view.resources ? view.resources->width : 0u) : mainEpochInputs.viewport[kColourShape].width,
-				target ? (view.resources ? view.resources->height : 0u) : mainEpochInputs.viewport[kColourShape].height, DepthRangeOf(slot.view) };
+				target ? (view.resources ? view.resources->width : 0u) : next.viewport[kColourShape].width,
+				target ? (view.resources ? view.resources->height : 0u) : next.viewport[kColourShape].height, DepthRangeOf(slot.view) };
 		}
 		Extensions::PostSceneResourceInputs(next.resourceInputs);
-		// The frame's versions to record against: a frame revision's pending ones while its closure has DCLF epochs (plan step 10b).
-		{
-			auto frameVersions = RenderGraph::Frame::Revision::FrameVersionsFor(SceneSource());
-			next.frameVersions = std::move(frameVersions.versions);
-			next.frameVersionsSerial = frameVersions.serial;
-		}
+		next.frameVersions = std::move(frameVersions.versions);
+		next.frameVersionsSerial = frameVersions.serial;
 		const auto& previous = postedInputs;
 		next.mainGeneration = previous.mainGeneration + (next.main != previous.main ? 1u : 0u);
 		const bool same = SameRevisionInputs(next, previous);
