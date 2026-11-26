@@ -1,0 +1,43 @@
+# The main menu's model drawn first, then a new game's load with the loading screen's model (MistMenu with its depth pass and shadow
+# lights) and the world: the main menu's renders and the loading screen's in one session. The autoload mod is off; coc from the main
+# menu starts the load. Compose it: native-vulkan+menu-main-load, guest+menu-main-load.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[game]
+mods_off = ["Skyrim Engine Telemetry", "Start On Save"]
+
+[[steps]]
+at = "main-menu"
+frames = 240
+do = "shot"
+arg = "main-menu"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "world"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["main-menu", "world"]
