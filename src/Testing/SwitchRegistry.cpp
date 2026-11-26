@@ -124,7 +124,6 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_ORG_OCCLUSION_QUERY_LOG", .type = Bool, .defaultValue = "0" },
 			{ .name = "CS_ORG_PIPELINE_CACHE", .key = "org.pipeline_cache", .type = Bool, .defaultValue = "1", .description = "false: no on-disk pipeline cache (Data/ShaderCache/v3/pipelines-*.bin); every pipeline is built again each run" },
 			{ .name = "CS_ORG_PRESENT_COPY_SKIP" },
-			{ .name = "CS_ORG_QUEUE_TOPOLOGY", .type = Enum, .defaultValue = "fold", .choices = "fold|hardware", .kind = Test, .description = "guest: the graph's compute kind. fold (default): on the graphics queue, as on a device without a compute queue; hardware: on DXVK's exported compute queue, where FSR frame generation still hangs (perf3-compute.md)" },
 			{ .name = "CS_ORG_RAW_ACCESS_CHECK", .key = "org.raw_access_check", .type = Bool, .defaultValue = "0", .description = "native: log and count work on graph-tracked images that skips the graph's state tracking ([ORG raw access] lines)" },
 			{ .name = "CS_ORG_RECORDING_TIMESTAMPS", .type = Bool, .defaultValue = "0" },
 			{ .name = "CS_ORG_SHARED_CONSTANTS_CHECK", .type = Bool, .defaultValue = "0" },

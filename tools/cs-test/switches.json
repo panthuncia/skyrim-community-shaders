@@ -1248,19 +1248,6 @@
 			"description": ""
 		},
 		{
-			"name": "CS_ORG_QUEUE_TOPOLOGY",
-			"key": "",
-			"type": "enum",
-			"default": "fold",
-			"choices": [
-				"fold",
-				"hardware"
-			],
-			"kind": "test",
-			"family": "org",
-			"description": "guest: the graph's compute kind. fold (default): on the graphics queue, as on a device without a compute queue; hardware: on DXVK's exported compute queue, where FSR frame generation still hangs (perf3-compute.md)"
-		},
-		{
 			"name": "CS_ORG_RAW_ACCESS_CHECK",
 			"key": "org.raw_access_check",
 			"type": "bool",
