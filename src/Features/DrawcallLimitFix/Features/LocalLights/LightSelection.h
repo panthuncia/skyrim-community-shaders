@@ -70,6 +70,11 @@ namespace DCLF
 
 		static LightSelection& Get();
 		void Install();
+		/**
+		 * @brief Native mode, in place of CalculateActiveShadowCasterLights: the same selection, with the engine's camera updates, focus
+		 * cameras, keeps and bookkeeping done by CS (Features/Shadows/Native) and lights not kept released.
+		 */
+		void SelectNative();
 
 		/** @brief This frame's selection, or null before CalculateActiveShadowCasterLights has run this frame. */
 		const Frame* Current(std::uint32_t a_sceneFrame) const { return frame.valid && frame.sceneFrame == a_sceneFrame ? &frame : nullptr; }
@@ -79,7 +84,7 @@ namespace DCLF
 		struct Hooks;
 		friend struct Hooks;
 		bool SharesRoomWithCamera(const RE::BSShadowLight* a_light);
-		void Select();
+		void Select(bool a_native = false);
 		static void TellKeptLights(const Frame& a_frame);
 
 		Frame frame;

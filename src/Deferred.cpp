@@ -34,6 +34,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/Transients.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
 struct DepthStates
 {
@@ -888,7 +889,11 @@ void Deferred::Hooks::Main_RenderShadowMaps::thunk()
 	// setup follows): DCLF's shadow epoch below draws them with the shadow views.
 	globals::features::skylighting.RenderOcclusionAtShadowMaps();
 	globals::features::drawcallLimitFix.RenderPrecipitationAtShadowMaps();
-	func();
+	// Native mode renders the kept lights' shadow maps itself (DCLF's Features/Shadows/Native); the engine's function is not entered.
+	if (DCLF::Features::Shadows::Native::Replaces())
+		DCLF::Features::Shadows::Native::RenderShadowMaps();
+	else
+		func();
 	globals::features::drawcallLimitFix.AfterShadowMaps();
 	globals::deferred->EarlyPrepasses();
 };

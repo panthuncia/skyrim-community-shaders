@@ -51,12 +51,13 @@ namespace DCLF::Features::Shadows::Sun
 	public:
 		static SunViews& Get();
 		void Install();
+		/** @brief Records the sun's views from its cameras, after UpdateCamera (the engine's, or native mode's port). */
+		void Update(const void* a_light);
 
 	private:
 		SunViews() = default;
 		struct Hooks;
 		friend struct Hooks;
-		void Update(const void* a_light);
 
 		bool installed = false;
 	};

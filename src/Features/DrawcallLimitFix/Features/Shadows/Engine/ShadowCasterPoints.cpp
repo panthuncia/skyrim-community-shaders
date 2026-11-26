@@ -3,6 +3,7 @@
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/ShadowEngineAddresses.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
@@ -21,11 +22,15 @@ namespace DCLF::Features::Shadows::Engine
 		/** @brief Main::Draw's call of CalculateAndDrawShadowCasterLights (AE 0x140644674). The views are begun before and listed after. */
 		struct CalculateAndDrawShadowCasterLights
 		{
-			static void thunk(void* a_camera)
+			static void thunk(RE::NiCamera* a_camera)
 			{
 				castersRunning = true;
 				FrameDriver::Get().BeforeShadowCasters();
-				func(a_camera);
+				// Native mode selects the casters itself (Features/Shadows/Native); the engine's function is not entered.
+				if (Native::Replaces())
+					Native::SelectCasters(a_camera);
+				else
+					func(a_camera);
 				FrameDriver::Get().ShadowCastersSelected();
 				castersRunning = false;
 			}
