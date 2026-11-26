@@ -2,13 +2,13 @@
 // lights' UpdateCamera, the focus cameras, the lens flare queue, the scissor rectangle, the release of a light not kept, and the
 // bookkeeping of Accumulate. Each keeps the engine's writes and its float operation order.
 // Still called through the engine: memory allocation, the BSShaderAccumulator and NiCamera constructors (first use only),
-// NiAVObject::Update on the light's own cameras, BSTArrayBase::AddUninitialized (the lens flare list's growth) and
-// BSPortalGraphEntry::ClearVisibility (it takes the portal graph's lock and releases its rooms' visibility records).
+// NiAVObject::Update on the light's own cameras and BSPortalGraphEntry::ClearVisibility (it takes the portal graph's lock and releases its rooms' visibility records).
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LocalCameras.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 
 #include <algorithm>
 #include <array>
@@ -54,7 +54,6 @@ namespace DCLF::Features::Shadows::Native
 			float& FocusDistance() { return Global<float, 513753, 391721>(); }                              // 0x1420357c0: the focus port's falloff distance (450)
 			std::uint32_t& FocusMapSize() { return Global<std::uint32_t, 513751, 391718>(); }               // 0x1420357a8: the focus shadow map size (2048)
 			std::uint8_t& LensFlaresOn() { return Global<std::uint8_t, 513349, 391128>(); }                 // 0x142033658: lens flares are on
-			std::byte* LensFlareList() { return &Global<std::byte, 527921, 414868>(); }                     // 0x14338c250: BSTArray<NiPointer<BSLight>>
 			std::uint32_t& ShadowFreeMask() { return Global<std::uint32_t, 513748, 391715>(); }             // 0x142035798: the free slices of kSHADOWMAPS
 			std::uint32_t& CameraInsideMask() { return Global<std::uint32_t, 528093, 415038>(); }           // 0x14338c90c: the lights whose sphere holds the camera
 			std::uint32_t& ShadowLightCount() { return Global<std::uint32_t, 528091, 415036>(); }           // 0x14338c904: gLastFrameEnabledShadowCasterLightsCount2
@@ -65,12 +64,9 @@ namespace DCLF::Features::Shadows::Native
 			using AccumulatorCtor = RE::BSShaderAccumulator* (*)(void*, std::uint32_t);
 			using CameraCtor = RE::NiCamera* (*)(void*);
 			using ClearVisibility = void (*)(void*);
-			using AddUninitialized = std::uint32_t (*)(void*, void*, std::uint32_t, std::uint32_t);
 			AccumulatorCtor MakeAccumulator() { return Function<AccumulatorCtor, 99920, 106564>(); }             // AE 0x1414b1cf0
 			CameraCtor MakeCamera() { return Function<CameraCtor, 69258, 70624>(); }                             // AE 0x140d2afa0
 			ClearVisibility ClearEntryVisibility() { return Function<ClearVisibility, 74395, 76119>(); }         // AE 0x140e14200
-			AddUninitialized ArrayAddUninitialized() { return Function<AddUninitialized, 66908, 68163>(); }      // AE 0x140cc6890
-			std::uintptr_t HeapAllocatorFunctorVtable() { return REL::RelocationID(228548, 186376).address(); }  // AE 0x141768440
 
 			// Layouts the functions read and write without CommonLib members.
 			constexpr std::size_t kRefCount = 0x8;           // NiRefObject's reference count
@@ -500,21 +496,9 @@ namespace DCLF::Features::Shadows::Native
 
 			void QueueLensFlareImpl(RE::BSShadowLight& a_light)
 			{
-				if (!LensFlaresOn())
-					return;
-				// BSTArray<NiPointer<BSLight>>: the heap allocator (data, capacity) then the size. AddUninitialized grows it through a
-				// BSTArrayAllocatorFunctor<BSTArrayHeapAllocator> on the stack.
-				std::byte* list = LensFlareList();
-				struct Functor
-				{
-					std::uintptr_t vtable;
-					void* allocator;
-				} functor{ HeapAllocatorFunctorVtable(), list };
-				const std::uint32_t index = ArrayAddUninitialized()(list + 0x10, &functor, At<std::uint32_t>(list, 0x8), 8);
-				if (index == ~0u)
-					return;
-				At<RE::BSShadowLight**>(list, 0)[index] = &a_light;
-				a_light.IncRefCount();
+				// The engine appends the light to its lens flare list for its gather; native's gather is CS's and keeps its own queue.
+				if (LensFlaresOn())
+					::RenderGraph::Engine::ImageSpace::QueueLensFlare(a_light);
 			}
 
 			void ProjectSphereImpl(const RE::NiCamera& a_camera, const float (&a_sphere)[4], float (&a_min)[3], float (&a_max)[3], float a_epsilon)

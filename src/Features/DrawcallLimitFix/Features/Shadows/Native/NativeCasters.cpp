@@ -17,16 +17,20 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace DCLF::Features::Shadows::Native
 {
 	namespace
 	{
-		std::uint32_t keptThisFrame = 0;  // render thread, inside SelectCasters
+		std::uint32_t keptThisFrame = 0;                  // render thread, inside SelectCasters
+		std::vector<const RE::BSShadowLight*> drawnMaps;  // render thread: the lights RenderShadowMaps drew this frame
 
 		template <class T>
 		T& Global(std::uint64_t a_se, std::uint64_t a_ae)
@@ -221,6 +225,8 @@ namespace DCLF::Features::Shadows::Native
 		LightCount() = 0;
 		MaskCounter() = 0;
 		InsideMask() = 0;
+		drawnMaps.clear();
+		::RenderGraph::Engine::ImageSpace::BeginLensFlares();
 		ResetAccumulated(*node);
 		const bool focusOn = FocusSetting() != 0 && FocusTargets() != 0;
 		FocusFound() = 0;
@@ -255,10 +261,16 @@ namespace DCLF::Features::Shadows::Native
 				auto* light = accumulated[index];
 				const std::uint32_t before = index;
 				// A light DCLF cannot draw casts no shadow this frame. ShadowMapsNative's line counts it.
-				(void)Engine::RenderLightNatively(*light, index);
+				if (Engine::RenderLightNatively(*light, index))
+					drawnMaps.push_back(light);
 				if (index == before)
 					++index;
 			}
 		}
+	}
+
+	bool DrewMaps(const RE::BSShadowLight& a_light)
+	{
+		return std::ranges::find(drawnMaps, &a_light) != drawnMaps.end();
 	}
 }

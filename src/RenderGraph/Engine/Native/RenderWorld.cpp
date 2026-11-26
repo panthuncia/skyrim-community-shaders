@@ -48,32 +48,6 @@ namespace RenderGraph::Engine::Native
 			log.Report(a_what);
 		}
 
-		/**
-		* @brief The shadow state the resolve functions leave for the engine code after RenderWorld (the engine's first-person view; CS's
-		* RenderPostProcess driver reads none of it),
-		* written as their setters would (observed over every native world render of river and interior: nothing else changes). Render
-		* targets 1 and 2 unbound, slots 3 and 4 in restore mode, the full depth range, the alpha reference 128/255, and the state they set
-		* and set back marked dirty (targets, viewport, depth mode, depth bias, blend, alpha test).
-		*/
-		void LeaveResolveState()
-		{
-			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			shadow.renderTargets[1] = RE::RENDER_TARGET::kNONE;
-			shadow.renderTargets[2] = RE::RENDER_TARGET::kNONE;
-			shadow.setRenderTargetMode[3] = RE::BSGraphics::SetRenderTargetMode::SRTM_RESTORE;
-			shadow.setRenderTargetMode[4] = RE::BSGraphics::SetRenderTargetMode::SRTM_RESTORE;
-			shadow.viewPort.MaxDepth = 1.0f;
-			// The engine marks the reference's change with 0x200 (CommonLib's DIRTY_ALPHA_ENABLE_TEST name).
-			constexpr float kAlphaRef = 128.0f / 255.0f;
-			if (shadow.alphaTestRef != kAlphaRef) {
-				shadow.alphaTestRef = kAlphaRef;
-				shadow.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_ENABLE_TEST);
-			}
-			using F = RE::BSGraphics::ShaderFlags;
-			shadow.stateUpdateFlags.set(F::DIRTY_RENDERTARGET, F::DIRTY_VIEWPORT, F::DIRTY_DEPTH_MODE, F::DIRTY_RASTER_DEPTH_BIAS, F::DIRTY_ALPHA_BLEND,
-				F::DIRTY_ALPHA_TEST_REF);
-		}
-
 		/** @brief The pre-resolve (SE 99938, AE 106583) for the main accumulator with render flags a_flags. */
 		void PreResolve(RE::BSShaderAccumulator* a_accumulator, std::uint32_t a_flags)
 		{
@@ -145,7 +119,8 @@ namespace RenderGraph::Engine::Native
 		PreResolve(accumulator, (a_firstPerson ? 0x10u : 0u) | 0x41u);
 		ImageSpace::RenderWorldImageSpace();
 		PostResolve(accumulator, (Global<bool>(513335, 391110) ? 1u : 0u) | 0x40u);
-		LeaveResolveState();
+		// The shadow state the resolve functions leave (RT1 and RT2 unbound, slots 3 and 4 in restore mode, the full depth range, the alpha
+		// reference 128/255) is not written: no engine code that reads it runs after in native (the native post chain sets every target).
 		// ClearItemsList and RenderFirstPersonView_End are not called: in native nothing registers into the main accumulator, so its
 		// lists are empty at both ends of the world render (observed over every world render of the test configs).
 		// Sun::SubmitOcclusionQuery(1, ...): the sun's occlusion draw into CS's query slot, tagged with the snapshot it is drawn for.
@@ -153,8 +128,7 @@ namespace RenderGraph::Engine::Native
 			if (const auto* block = snapshot->Block<DCLF::Features::Sky::SunQueryBlock>())
 				DCLF::Features::Sky::SubmitSunQuery(accumulator, DCLF::Features::Sky::SunQueryGeometry(*block), camera, snapshot->id);
 		}
-		Global<bool>(527795, 414748) = false;
-		Global<bool>(527796, 414749) = false;
+		// Not written: Main::RenderWorld's clears of 414748 and 414749, which nothing reads (Main::Draw's setup sets them, no xref reads them).
 		globals::state->EndPerfEvent();
 	}
 }

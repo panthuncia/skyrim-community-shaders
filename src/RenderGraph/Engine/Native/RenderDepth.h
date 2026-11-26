@@ -17,4 +17,13 @@ namespace RenderGraph::Engine::Native
 	 * are on, the world's masks are cleared and drawn from CS's frame (DCLF's shadow mask family). Render owner.
 	 */
 	void RenderShadowMasks();
+
+	/**
+	 * @brief Native: Main::RenderFirstPersonView (SE 100411, AE 107129) driven by CS, with no engine function called: DCLF's first-person
+	 * colour epoch at the point of the engine's first-person accumulator render. Not made: that render and its blended groups (nothing
+	 * registers into the first-person accumulator in native), the depth range and target writes around it, the sun glare's cull and
+	 * draw over first person (no CS family draws the glare; the engine's draw was dropped) and the sun's second occlusion query (the
+	 * first, Main::RenderWorld's, already tests against the first-person depth DCLF's Z-prepass wrote). Render owner.
+	 */
+	void RenderFirstPersonView();
 }

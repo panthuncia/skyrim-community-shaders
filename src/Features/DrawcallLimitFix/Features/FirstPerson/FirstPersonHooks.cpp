@@ -1,5 +1,6 @@
-// The first-person view's two engine hooks, both on calls to the accumulator render (FUN_1414a90f0).
-// RenderDepth's first-person draw takes the culled bits and depth range. Main::RenderFirstPersonView's runs the colour epoch.
+// The first-person view's engine hooks. Two are on calls to the accumulator render (FUN_1414a90f0): RenderDepth's first-person draw
+// takes the culled bits and depth range, Main::RenderFirstPersonView's runs the colour epoch. The third is Main::RenderPlayerView's
+// call of Main::ClearMasks, which native does not make.
 
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPersonView.h"
 #include "Snapshot/EngineReads.h"
@@ -12,6 +13,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Triggers.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "Utils/VersionedRelocation.h"
 
 namespace DCLF::Features::FirstPerson
 {
@@ -44,18 +47,41 @@ namespace DCLF::Features::FirstPerson
 		{
 			static void thunk(void* a_camera, void* a_accumulator, std::uint32_t a_flags)
 			{
-				{
-					RenderThreadBudget::Hook budget(RenderThreadBudget::Site::AfterOpaque);
-					{
-						Extensions::TriggerScope trigger(colourRender);
-						ExecuteColour();
-					}
-					CS_ENGINE_READ(Shaders, CapturePoint, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
-				}
+				ColourDrawPoint();
+				// The epoch changed the context's targets: the engine's draw that follows binds its own again.
+				CS_ENGINE_READ(Shaders, CapturePoint, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 				func(a_camera, a_accumulator, a_flags);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+	}
+
+	namespace
+	{
+		/** @brief Main::RenderPlayerView's call of Main::ClearMasks (SE 100410, AE 107128), in first person only. */
+		std::uintptr_t ClearMasksSite() { return REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x8BE, 0x8CE, 0x8EB); }
+
+		/**
+		* @brief Main::ClearMasks registers the first-person list culling process's entries into the first-person accumulator, unhides
+		* the first-person root and sets the accumulator's +0x160. Native does not make it: the list cull does not run there (so the list
+		* is empty), nothing draws from the accumulator, and Main::RenderPlayerView unhides the root just before.
+		*/
+		struct ClearMasks
+		{
+			static void thunk()
+			{
+				if (!::RenderGraph::Engine::Native::Active())
+					func();
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+	}
+
+	void ColourDrawPoint()
+	{
+		RenderThreadBudget::Hook budget(RenderThreadBudget::Site::AfterOpaque);
+		Extensions::TriggerScope trigger(colourRender);
+		ExecuteColour();
 	}
 
 	void DepthDrawPoint(bool a_controlDriven)
@@ -72,6 +98,7 @@ namespace DCLF::Features::FirstPerson
 	{
 		HookSites::RequireCall("RenderDepth's first-person draw", REL::Offset(Address::kDepthFirstPersonDraw).address());
 		HookSites::RequireCall("Main::RenderFirstPersonView's accumulator render", REL::Offset(Address::kFirstPersonViewDraw).address());
+		HookSites::RequireCall("Main::RenderPlayerView's call of Main::ClearMasks", ClearMasksSite());
 	}
 
 	void InstallHooks(Api::InstallContext& a_context)
@@ -80,5 +107,6 @@ namespace DCLF::Features::FirstPerson
 		// Always installed. They chain onto whatever the calls already hold.
 		stl::write_thunk_call<RenderDepth_FirstPersonDraw>(REL::Offset(Address::kDepthFirstPersonDraw).address());
 		stl::write_thunk_call<RenderFirstPersonView_Draw>(REL::Offset(Address::kFirstPersonViewDraw).address());
+		stl::write_thunk_call<ClearMasks>(ClearMasksSite());
 	}
 }

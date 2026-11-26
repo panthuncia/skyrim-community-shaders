@@ -187,6 +187,8 @@ namespace NativePost
 		ReadGameB(block.inputs);
 		block.world = ReadWorldSettings();
 		const bool native = RenderGraph::Engine::Native::Requested();
+		if (native)
+			block.lensFlares = ReadLensFlares();
 		if (native && Native(Family::kHdr) && a_builder.Built().kind == Snapshot::FrameKind::World && *G().adaptReset) {
 			*G().adaptReset = false;
 			++s_adaptResets;

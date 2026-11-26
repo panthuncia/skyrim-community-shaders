@@ -30,6 +30,12 @@ namespace DCLF::Features::Shadows::Native
 	 */
 	void RenderShadowMaps();
 
+	/**
+	 * @brief Render thread: whether this frame's RenderShadowMaps drew a_light's maps. A kept light it could not draw casts no shadow,
+	 * so the masks leave its channel lit; its descriptors may hold no target yet (a light first kept on a load's first world frame).
+	 */
+	bool DrewMaps(const RE::BSShadowLight& a_light);
+
 	/** @brief The engine's UpdateCamera for any shadow light class, by CS's ports. Returns whether the light is visible. */
 	bool UpdateLightCamera(RE::BSShadowLight& a_light, const RE::NiCamera& a_worldCamera);
 

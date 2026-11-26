@@ -89,6 +89,9 @@ struct ChainSteps
 	std::uint32_t lensSprites = 0, lensVerticesPerSprite = 0;
 	// Whether the engine's target and blend at each lens flare pass were checked against the step's. Once a session.
 	bool lensVisibilityChecked = false, lensSpriteChecked = false;
+	// The kLENSFLAREVIS channel the visibility pass writes: native's gather sets it for its pass (LensFlares.inl); the engine's draw
+	// takes channel 0.
+	std::uint16_t lensVisibilityChannel = 0;
 	// The image-based flares' draws this frame so far, by effect, t0 and output target (IblfVariantNow). Cleared as the composites start.
 	std::map<std::tuple<std::int32_t, std::int32_t, std::int32_t>, std::uint32_t> iblfDraws;
 	// The compute SAO's helper (ImageSpaceManager+0x1d0) while its render function runs, else null (SaoCsGuard). Render owner.
@@ -763,11 +766,14 @@ void BuildChainSteps(ChainBuild& a_build)
 	// Lens flares (SE 100274), which RenderWorldPostProcess draws before the composites. The visibility pass writes a texel per
 	// light. One sprite pass draws all the frame's sprites additively into kMAIN, each from its own latch record (StageLensFlareSprite).
 	{
-		// The engine draws it with write mode 5 and the sprites with 2 (seen at the draws).
-		StepDesc v{ .name = "lensflare.visibility", .output = engine(T::kLENSFLAREVIS), .blend = PackBlend(0, 0, 5, 0) };
-		v.inputs[0] = mainDepth;
-		v.samplers[0] = kPoint;
-		add(0, ChainGroup::kLensFlare, WorldScope::LensFlare, E::ISLensFlareVisibility, 0, std::move(v));
+		// The visibility pass writes one channel of kLENSFLAREVIS a frame, in turn (the gather's write modes 5 to 8, variant c for mode
+		// 5 + c); the sprites weigh the channels by how many frames in a row their flare was seen. The sprites draw with write mode 2.
+		for (std::uint16_t c = 0; c < 4; ++c) {
+			StepDesc v{ .name = fmt::format("lensflare.visibility.c{}", c), .output = engine(T::kLENSFLAREVIS), .blend = PackBlend(0, 0, 5u + c, 0) };
+			v.inputs[0] = mainDepth;
+			v.samplers[0] = kPoint;
+			add(0, ChainGroup::kLensFlare, WorldScope::LensFlare, E::ISLensFlareVisibility, c, std::move(v));
+		}
 		// The sprite texture is clamped and trilinear (BSLensFlare's constructor). t1 is read by Load, with no sampler.
 		StepDesc s{ .name = "lensflare.sprites", .output = engine(T::kMAIN), .blend = PackBlend(5, 0, 2, 0), .latched = 0b01 };
 		s.inputs[1] = engine(T::kLENSFLAREVIS);
@@ -1689,7 +1695,7 @@ bool TakeLensFlareStep(std::size_t a_effect)
 	auto& chain = Chain();
 	const auto id = kEffects[a_effect].id;
 	constexpr auto segment = Frame::SegmentId::Post;
-	const StepKey key{ WorldScope::LensFlare, id, 0 };
+	const StepKey key{ WorldScope::LensFlare, id, id == Effects::ISLensFlareVisibility ? chain.lensVisibilityChannel : std::uint16_t{ 0 } };
 	const auto what = [&] { return fmt::format("lens flare step {}", kEffects[a_effect].effectName); };
 	const auto find = chain.group.Find(key);
 	// Behind: the engine draws for variables the build the frame runs was not made for, such as a new size.

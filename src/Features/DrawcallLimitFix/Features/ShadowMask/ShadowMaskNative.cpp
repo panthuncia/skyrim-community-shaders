@@ -9,6 +9,7 @@
 
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 #include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
@@ -584,7 +585,8 @@ namespace DCLF::Features::ShadowMask::Native
 			return false;
 		}
 		const auto& casters = node->GetRuntimeData().shadowLightsAccum;
-		auto modes = Snapshot::FrameCamera::Owned() && a_view == View::World ? Modes::WorldStart() : Modes::Current();
+		const bool native = Snapshot::FrameCamera::Owned() && a_view == View::World;
+		auto modes = native ? Modes::WorldStart() : Modes::Current();
 		// The loop's walk: each light takes as many slots as it has maps.
 		for (std::uint32_t slot = 0; slot < casters.size();) {
 			auto* light = casters[slot];
@@ -596,6 +598,9 @@ namespace DCLF::Features::ShadowMask::Native
 			}
 			slot += light->shadowMapCount;
 			a_lights.push_back(light);
+			// Native: a kept light whose maps RenderShadowMaps did not draw casts no shadow this frame; its channel stays lit.
+			if (native && !Shadows::Native::DrewMaps(*light))
+				continue;
 			if (a_run.draws.size() >= kMaxDraws) {
 				a_why = std::format("more than {} shadow lights", kMaxDraws);
 				return false;

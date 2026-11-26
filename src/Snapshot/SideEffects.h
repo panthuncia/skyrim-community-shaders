@@ -24,6 +24,7 @@
 *   are not run: S7, S8 and DCLF produce what game code read of them.
 * - S12/S13: the stealth light level's light membership (Snapshot/StealthLights.h).
 * - S17: queued decal occlusion tests are answered "visible" here; the pending array is cleared before the render half.
+* - The current camera (414580), which the depth-of-field modifier instances read, is the world camera after the render half.
 */
 namespace Snapshot::SideEffects
 {
