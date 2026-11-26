@@ -454,3 +454,21 @@ pushes until the user is back.
      Remaining engine-state readers: Forward's frame params z (engine 1, FrameCamera 0), DCLF's `CaptureBindings`, viewport
      and depth range in `Frame::Read` (with decision 112), the water capture's engine globals, the ImageSpace copy step's
      rows. Copying the engine bodies would still call the same engine functions, so that was not done.
+
+## 2026-11-26: native engine-bound state (snap3-engstate; director accepted)
+
+117. **Native viewports come from CS's frame** (fixes 112): world draws use Renderer::UpdateViewPort's rule (AE 0x140e441c0)
+     applied to the adopted revision's `EngineTargetShapes` at the render frame's ratios (`Family::FrameViewport`,
+     `FrameCamera::ViewportRatios`): sky, sun, water, the shadow mask (and its texel scale), precipitation. DCLF's main
+     shapes take their size from the revision their recordings name (`Revision::FragmentVersions` carries its variables).
+     Menu scenes, decal tests and reflection faces keep the engine's viewport for now. `window-resize-stress-taa` passes.
+118. **Forward's FrameParams.z is 1 in both modes:** the post-resolve writes the per-frame block with flag 4 before both
+     blended draws; FrameCamera's 0 is right only for the deferred part.
+119. **The LOD depth shift is a game-side block** (`BlockId::RenderWorld`, giving `WorldPass::DepthRange`): the water points
+     and DCLF's main pass are inside the shifted window, the sky and sun outside; the Z-prepass keeps the main pass's range.
+120. **Native DCLF's capture reads no bound constant buffer:** the eye, previous eye (the last drawn camera) and cull camera
+     come from the frame camera, viewport size from the revision, depth range from WorldPass. Its bound views (CS features'
+     own textures) and targets remain read. About 11 bound-state reads per native world frame removed.
+121. **Carried over from 116:** CS still calls StartAccumulating and the post-resolve; the full call order of AE 106583 and
+     106584 with each CS point and what it needs is in `snap3-engstate.md`. Also left: the water capture's engine globals
+     and the ImageSpace copy step's rows.
