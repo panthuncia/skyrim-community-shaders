@@ -1459,6 +1459,15 @@ namespace RenderGraph::Frame::Revision
 						break;
 			if (!progress.ready || !inputsReady)
 				return;
+			// The graphs an attach replaces are released once their GPU work is done and their own tasks have drained, which can
+			// take seconds while the workers wait for a busy CPU. A revision with staged builds waits while many are still held,
+			// so attaches never pile them up. Frames keep the adopted revision meanwhile.
+			constexpr std::size_t kMaxRetiredGraphs = 64;
+			if (const auto retired = revision.host->RetiredGraphCount(); progress.builds && retired >= kMaxRetiredGraphs) {
+				static Util::ReasonLog s_retired("[ORG] frame revision: a revision with staged builds waits for replaced graphs to be released");
+				s_retired.Report("too many held", fmt::format("{} held", retired));
+				return;
+			}
 			// With a source's epochs in its closure, the revision takes the source's fragment recorded against its versions while the
 			// source draws (its epochs ran last frame). Until it comes, frames keep the adopted revision and fragments. Its staged builds
 			// attach first: a failure drops that fragment, and the revision waits for the next one. A source that does not draw posts
