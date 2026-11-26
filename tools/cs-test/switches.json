@@ -1478,6 +1478,16 @@
 			"description": ""
 		},
 		{
+			"name": "CS_SNAPSHOT_CADENCE",
+			"key": "snapshot.cadence",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "test",
+			"family": "cs",
+			"description": "repeat:N|drop:N (N 2-16), native only: the cadence test mode; the render half (Main::DrawFrame) runs N times for each game update, or for one update in N, still on one thread"
+		},
+		{
 			"name": "CS_STREAMLINE_DLSS",
 			"key": "",
 			"type": "bool",
