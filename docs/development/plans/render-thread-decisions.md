@@ -738,3 +738,17 @@ pushes until the user is back.
      merges, still about 18 at 245ec15e5 with the quarter fix). An interaction between merges, likely exposure or
      tonemap; it is in origin/org_integration. snap3-dark bisects the three merges and fixes it; native shot references
      wait for the fix.
+
+## 2026-11-26: executor queues block instead of spinning (snap3-spin; director accepted)
+
+178. **CS's executor and pump queues use OMS's `InboxQueue`, not `tbb::concurrent_queue`:** a tbb pop claims a ticket and
+     then spins (pause, then unbounded SwitchToThread) on the earlier popper and its pusher; with workers at mixed
+     priorities (below normal, raised by WaitBoost, frame-critical jobs and ParallelFor helpers), raised workers spin on a
+     preempted lower-priority holder that SwitchToThread will not run. `InboxQueue` (OMS
+     `Async/InboxQueue.h`): lock-free CAS push that never waits, mutex pop that blocks. Used by the executor's ring and
+     frame-critical queues, DCLF's BuildPump, the batch StoragePool free list and the ComputeSubmitter batches. Benchmark
+     under contention: 331 jobs / 17.3 s kernel (tbb) vs 91,000 jobs / 0.30 s. Frame times unchanged (Dev-Fast).
+     OMS's StateGraph tbb queues (single serialized pump each) stay.
+179. **Slow lab phases are mostly machine contention** (builds starving the driver and startup: Streamline init, device
+     creation, pipeline cache load); the spin made them worse. Worker priorities are left as they are (a frame-time
+     trade-off).
