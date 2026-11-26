@@ -20,12 +20,13 @@ struct ID3D11Texture2D;
 * Its FaceGen::UpdatePending (SE 26455, AE 27041), called by Main::DrawFrame and the loading loop, draws each job's sixteen masks with
 * ISAlphaBlend into kPLAYER_FACEGEN_TINT, copies that into a new texture, hands the texture to the head's NiSourceTexture (+0x48) and
 * frees the job. In native the engine's two calls are gone:
-* - Game half, in the capture: the queue is drained under its lock. Each job becomes a Bake (its masks, its rows, a new texture
-*   for the result) and is freed as the engine frees it. A bake stays in the block until the render side reports it done; the
-*   next capture then hands its texture to the head and releases the old one, as UpdatePending did.
-* - Render half, at each world frame's start: one bake at a time is drawn as the face tint step (ImageSpace::StageFaceTint).
-*   The next world frame copies kPLAYER_FACEGEN_TINT into the bake's texture, once the step's stage has been submitted, and
-*   reports it done. No engine call.
+* - Game half, in the capture: the queue is drained under its lock. Each job becomes a Bake (its masks, its rows, the head's
+*   own texture for the result) and is freed as the engine frees it. A bake stays in the block until the render side reports it
+*   done. UpdatePending gave the head a new texture; a bake fills the one the head has, because Drawcall Limit Fix keeps the
+*   view a face material named when it was captured.
+* - Render half, at each world frame's start: a new bake's head texture is zeroed, since the head was made with an empty one.
+*   One bake at a time is drawn as the face tint step (ImageSpace::StageFaceTint). The next world frame copies
+*   kPLAYER_FACEGEN_TINT into the head's texture, once the step's stage has been submitted, and reports it done. No engine call.
 *
 * Bakes are identified by serial, so a repeated snapshot draws nothing new and a dropped one loses no bake (it stays in the next
 * block until reported). Guest and plain D3D11 install nothing and keep the engine's calls.
@@ -44,9 +45,8 @@ namespace Snapshot::FaceTint
 		std::array<EngineRef, 16> masks;                       // the masks' NiSourceTextures, kept alive with their views
 		std::array<ID3D11ShaderResourceView*, 16> views{};     // their views (unwrapped), null for an unset or depth slot
 		RenderGraph::Engine::ImageSpace::TintRows rows;        // ISAlphaBlend's pixel rows from the job's param
-		EngineRef head;                                        // the head's NiSourceTexture the result goes to
-		void* texture = nullptr;                               // the result's BSGraphics::Texture, ours until handed to head
-		ID3D11Texture2D* destination = nullptr;                // its texture (unwrapped)
+		EngineRef head;                                        // the head's NiSourceTexture, which keeps its texture alive
+		ID3D11Texture2D* destination = nullptr;                // the head's texture (unwrapped), the result
 		ID3D11Texture2D* source = nullptr;                     // kPLAYER_FACEGEN_TINT's texture (unwrapped)
 	};
 
