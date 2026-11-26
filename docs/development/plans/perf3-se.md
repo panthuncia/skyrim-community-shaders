@@ -14,8 +14,11 @@ Lead `se`, branch `perf3/se` (from org_integration 64374291a).
     python <main>/tools/cs-test/cs_test.py run guest --stage p3-se --wait 3600 --label p3-se-<x> --set 'steps=[...]'
   ```
 
-  The SE instance has no Start On Save, so the steps coc from the main menu (`coc Whiterun`, later `coc WhiterunDragonsreach`),
-  hide the CC Survival message box, set 13:00 and clear weather, and take a shot in each. The script is
+  Later runs also set `CS_TEST_DOCUMENTS='D:\CSLab-SE\documents'` (README, "SE 1.5.97"), so the user's saves are never read.
+  The SE instance has no Start On Save and no SE save. The first runs coc'd from the main menu, with
+  `set Survival_PlayerHasBeenPrompted to 1` and `set Survival_ModeCanBeEnabled to 0` first so the CC Survival prompt never
+  opens (hiding the message box or sending keys does not close it). A plain D3D11 run then saved `SETest` at Riverwood, on the
+  ground, into the private documents; later runs load it (`--set game.save=SETest`) as AE runs load theirs. The run script is
   `<scratchpad>/se/run.sh`.
 - Stage `p3-se` is the mod `CS AB p3-se` in the SE instance's mods (cs-test's stage, base AIO `CS AB nfg`), with nfg's DXVK,
   `sl.fsr.dll`, `sl.xess.dll`, `textures/PhysicalSky`, and the AE instance's `SettingsUser.json` so both runtimes use the same
