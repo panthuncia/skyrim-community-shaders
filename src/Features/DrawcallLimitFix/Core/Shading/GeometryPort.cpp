@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
 #include "Snapshot/EngineReads.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
@@ -167,14 +168,18 @@ namespace DCLF::GeometryPort
 			frame.directionalAmbient[r * 4 + 3] = ambient[9 + r];
 		}
 
-		// EyePosition (0x1414de12c): the current accumulator's eye less posAdjust, one subtraction a component.
-		if (const auto* accumulator = Global<const std::byte* const>(kCurrentAccumulator)) {
+		// EyePosition (0x1414de12c): the current accumulator's eye less posAdjust, one subtraction a component. In native's RenderWorld
+		// the main accumulator is current and its eye is the world camera's position, which is posAdjust too, so the difference is zero.
+		if (::RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
+			frame.eye = true;
+			for (auto& c : frame.eyePosition)
+				c = 0.0f;
+		} else if (const auto* accumulator = Global<const std::byte* const>(kCurrentAccumulator)) {
 			frame.eye = true;
 			const float* posAdjust = &Global<const float>(kPosAdjust);
 			for (std::uint32_t c = 0; c < 3; ++c)
 				frame.eyePosition[c] = At<const float>(accumulator, kAccumulatorEye + c * sizeof(float)) - posAdjust[c];
 		}
-
 		// SSRParams.xyz (0x1414de283): x, then y + x, then the auxiliary-target switch. addss gives the same bits either way round.
 		frame.ssrParams[0] = Global<const float>(kSsrX);
 		frame.ssrParams[1] = Global<const float>(kSsrY) + Global<const float>(kSsrX);

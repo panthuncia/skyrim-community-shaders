@@ -67,6 +67,15 @@ namespace RenderGraph::Engine::ImageSpace
 	void RenderWorldImageSpace();
 
 	/**
+	* @brief Native: the pre-resolve's reflections pass (SE 100428, AE 107146) in native's RenderWorld, CS's steps with no engine call.
+	* Nothing is drawn while CS cannot stage the world steps. Render owner.
+	*/
+	void NativeReflections();
+
+	/** @brief Native: the post-resolve's water blend (SE 100550, AE 107285) in native's RenderWorld, as NativeReflections. Render owner. */
+	void NativeWaterBlend();
+
+	/**
 	* @brief The world chain's RenderEndOfFrameEffects, between OnEndOfFrame's begin and end (family 2): CS's native end-of-frame effects,
 	* or a_engine for a frame CS does not draw. Render owner.
 	*/

@@ -336,37 +336,32 @@ void Deferred::StartDeferred()
 		return;
 	globals::state->UpdateSharedData(true);
 
+	// Native's RenderWorld draws from CS's frame: its forward targets are fixed, and no engine state flush follows to bind the G-buffer
+	// or the per-frame buffer, so the shadow state and the bound constant buffers are left alone.
+	if (RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
+		const auto forward = RenderGraph::Engine::Native::WorldPass::ForwardTargets();
+		for (uint i = 0; i < 4; i++)
+			forwardRenderTargets[i] = forward[i];
+		deferredPass = true;
+		PrepassPasses();
+		OverrideBlendStates();
+		return;
+	}
+
 	auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 	auto& renderTargets = shadowState->GetRuntimeData().renderTargets;
 	auto& setRenderTargetMode = shadowState->GetRuntimeData().setRenderTargetMode;
 	auto& stateUpdateFlags = shadowState->GetRuntimeData().stateUpdateFlags;
 
-	// Backup original render targets. Native's RenderWorld takes them from CS's frame.
-	if (RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
-		const auto forward = RenderGraph::Engine::Native::WorldPass::ForwardTargets();
-		for (uint i = 0; i < 4; i++)
-			forwardRenderTargets[i] = forward[i];
-	} else {
-		for (uint i = 0; i < 4; i++)
-			forwardRenderTargets[i] = renderTargets[i];
-	}
-
-	RE::RENDER_TARGET targets[8]{
-		RE::RENDER_TARGET::kMAIN,
-		RE::RENDER_TARGET::kMOTION_VECTOR,
-		NORMALROUGHNESS,
-		ALBEDO,
-		SPECULAR,
-		REFLECTANCE,
-		MASKS,
-		MASKS2
-	};
+	// Backup original render targets.
+	for (uint i = 0; i < 4; i++)
+		forwardRenderTargets[i] = renderTargets[i];
 
 	// Dirty from last frame: SRTM_CLEAR makes the engine's next state flush call ClearRenderTargetView once per target. On the render
 	// graph the Prepass anchor's pass clears them instead (ORGDeferredClears), so they are bound without a clear.
 	const auto mode = ORGDeferredClears::Get().TakeClears() ? RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR : RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR;
 	for (uint i = 2; i < 8; i++) {
-		renderTargets[i] = targets[i];  // We must use unused targets to be indexable
+		renderTargets[i] = kTargets[i];  // We must use unused targets to be indexable
 		setRenderTargetMode[i] = mode;
 	}
 
@@ -394,7 +389,8 @@ void Deferred::DeferredPasses()
 	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
 
-	{
+	// Native's RenderWorld binds no engine buffer: its passes take the per-frame block from the frame camera.
+	if (!RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
 		ID3D11Buffer* buffers[1] = { *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame) };
 		context->CSSetConstantBuffers(12, 1, buffers);
 	}
@@ -580,17 +576,15 @@ void Deferred::EndDeferred()
 	if (!deferredPass)
 		return;
 
-	auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
-	auto& renderTargets = shadowState->GetRuntimeData().renderTargets;
-	auto& stateUpdateFlags = shadowState->GetRuntimeData().stateUpdateFlags;
-
-	// Do not render to our targets past this point
-	for (uint i = 0; i < 4; i++) {
-		renderTargets[i] = forwardRenderTargets[i];
-	}
-
-	for (uint i = 4; i < 8; i++) {
-		renderTargets[i] = RE::RENDER_TARGET::kNONE;
+	// Native's RenderWorld wrote no targets into the shadow state (StartDeferred), so it restores none.
+	const bool shadowState = !RenderGraph::Engine::Native::WorldPass::InRenderWorld();
+	if (shadowState) {
+		auto& runtime = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData();
+		// Do not render to our targets past this point
+		for (uint i = 0; i < 4; i++)
+			runtime.renderTargets[i] = forwardRenderTargets[i];
+		for (uint i = 4; i < 8; i++)
+			runtime.renderTargets[i] = RE::RENDER_TARGET::kNONE;
 	}
 
 	auto context = globals::d3d::context;
@@ -598,7 +592,8 @@ void Deferred::EndDeferred()
 
 	DeferredPasses();  // Perform deferred passes and composite forward buffers
 
-	stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
+	if (shadowState)
+		CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
 	deferredPass = false;
 
@@ -920,22 +915,24 @@ void Deferred::Hooks::Main_RenderWorld::thunk(bool a1)
 	state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::InWorld);
 };
 
-void Deferred::Hooks::Main_RenderWorld_Start::thunk(RE::BSBatchRenderer* This, uint32_t StartRange, uint32_t EndRanges, uint32_t RenderFlags, int GeometryGroup)
+void Deferred::WorldStart()
 {
 	if (globals::shaderCache->IsEnabled() && globals::state->inWorld) {
 		// Here is where the first opaque objects start rendering
-		globals::deferred->StartDeferred();
+		StartDeferred();
 		if (globals::features::drawcallLimitFix.loaded)
 			globals::features::drawcallLimitFix.BeforeOpaquePass();
 	}
+}
 
+void Deferred::Hooks::Main_RenderWorld_Start::thunk(RE::BSBatchRenderer* This, uint32_t StartRange, uint32_t EndRanges, uint32_t RenderFlags, int GeometryGroup)
+{
+	globals::deferred->WorldStart();
 	func(This, StartRange, EndRanges, RenderFlags, GeometryGroup);  // RenderBatches
 };
 
-void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumulator* This, uint32_t RenderFlags)
+void Deferred::WorldOpaqueEnd(const std::function<void()>* a_decals)
 {
-	auto deferred = globals::deferred;
-
 	if (globals::shaderCache->IsEnabled() && globals::state->inWorld) {
 		// The opaque batches are done: DCLF draws its objects where the engine would have, before anything
 		// that blends onto or tests against them.
@@ -950,13 +947,13 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 	}
 
 	// Deferred blended decals
+	if (a_decals)
+		(*a_decals)();
 
-	func(This, RenderFlags);
-
-	deferred->EndDeferred();
+	EndDeferred();
 
 	// Copy depth from before water, unless DeferredPasses already did
-	if (!deferred->sceneDepthFinal) {
+	if (!sceneDepthFinal) {
 		auto renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 		auto context = globals::d3d::context;
 
@@ -968,6 +965,12 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 	}
 
 	// After this point, water starts rendering
+}
+
+void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumulator* This, uint32_t RenderFlags)
+{
+	const std::function<void()> decals = [&] { func(This, RenderFlags); };
+	globals::deferred->WorldOpaqueEnd(&decals);
 };
 
 void Deferred::BeginReflectionFace(bool a_prepasses)

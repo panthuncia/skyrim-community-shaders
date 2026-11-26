@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
@@ -554,7 +555,9 @@ namespace DCLF
 	{
 		// The engine binds and clears the G-buffer only when a draw applies its state, so apply it here as the first draw would.
 		// A frame where DCLF owns every lighting draw has no native draw to do it. The pass end is too late, the clouds have rebound t26.
-		Engine::ApplyPendingState();
+		// Native's RenderWorld binds nothing through the engine: the capture takes its targets from CS's frame.
+		if (!::RenderGraph::Engine::Native::WorldPass::InRenderWorld())
+			Engine::ApplyPendingState();
 		if (const auto* view = Extensions::PrimaryView(); view && view->beforeOpaque())
 			captureFrame = Scene::FrameView::Get().SceneStep();
 	}

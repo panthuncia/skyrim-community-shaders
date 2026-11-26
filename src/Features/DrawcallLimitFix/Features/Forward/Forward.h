@@ -21,6 +21,13 @@ namespace DCLF::Features::Forward
 	 * Returns whether it drew the refraction normals, which the caller must then mark for the engine.
 	 */
 	bool SubmitForwardEpoch();
+
+	/**
+	* @brief Native's RenderWorld driver: the main pass's blended draw point (the post-resolve's, SE 99939 +0x54 / +0x551, AE 106584 +0x51
+	* / +0x543), with no engine call. a_afterWater false is the call before the water when the camera is under water. Render owner.
+	*/
+	void NativeBlendedDraw(bool a_afterWater);
+
 	/** @brief Whether this frame's forward epoch drew the refraction normals. Render thread. */
 	bool RefractionDrawnThisFrame();
 	void RegisterReport(Api::InstallContext& a_context);

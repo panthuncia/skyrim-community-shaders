@@ -5,6 +5,8 @@
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
+#include "RenderGraph/Frame/Variables.h"
 
 #include "Features/LinearLighting.h"
 #include "Features/PhysicalSky.h"
@@ -99,15 +101,29 @@ namespace DCLF::Features::Water::Port
 			f.fogNearColor = color;
 			f.fogFarColor = color;
 		}
+		const bool native = Snapshot::FrameCamera::Owned();
 		static const REL::Relocation<const std::byte* const*> camera{ REL::Offset(Effects::Address::kEffectCamera) };
-		if (const std::byte* current = *camera.get()) {
+		if (native) {
+			// The world camera's planes, nearer far plane inside the resolve functions' depth shift windows, as the engine's current camera
+			// holds them at the water batches (and outside native's RenderWorld, at the frame's start).
+			const auto planes = ::RenderGraph::Engine::Native::WorldPass::CameraPlanes(::RenderGraph::Engine::Native::WorldPass::InShiftWindow());
+			f.cameraNear = planes[0];
+			f.cameraFar = planes[1];
+		} else if (const std::byte* current = *camera.get()) {
 			f.cameraNear = Field<float>(current, 0x160);
 			f.cameraFar = Field<float>(current, 0x164);
 		}
 		f.sunDir = ReadArray<float, 4>(Address::kSunDir);
 		f.sunColor = ReadArray<float, 4>(Address::kSunColor);
-		f.renderWidth = Read<std::uint32_t>(Address::kRenderWidth);
-		f.renderHeight = Read<std::uint32_t>(Address::kRenderHeight);
+		if (native) {
+			// The render target manager's size, which is kMAIN's shape in the adopted revision.
+			const auto shapes = ::RenderGraph::Frame::Vars::Adopted(::RenderGraph::Frame::Vars::EngineTargetShapes());
+			f.renderWidth = shapes.colours[RE::RENDER_TARGET::kMAIN].width;
+			f.renderHeight = shapes.colours[RE::RENDER_TARGET::kMAIN].height;
+		} else {
+			f.renderWidth = Read<std::uint32_t>(Address::kRenderWidth);
+			f.renderHeight = Read<std::uint32_t>(Address::kRenderHeight);
+		}
 		static const REL::Relocation<const std::byte* const*> imageSpace{ REL::Offset(Engine::Address::kImageSpaceManager) };
 		if (const std::byte* manager = *imageSpace.get())
 			if (const auto* ssr = Field<const std::byte*>(manager, kSsrShader))
@@ -121,14 +137,19 @@ namespace DCLF::Features::Water::Port
 		f.meshFlowCellOffset = ReadArray<float, 2>(Address::kMeshFlowCellOffset);
 		f.displacementOffset = ReadArray<float, 4>(Address::kDisplacementOffset);
 		f.waterLodRoot = Read<const RE::NiNode*>(Address::kWaterLOD);
-		if (a_accumulator) {
+		if (native) {
+			// The main accumulator's eye is the world camera's position, the frame camera's eye.
+			const auto& frame = Snapshot::FrameCamera::Main().data;
+			f.eyePosition = { frame.CameraPosAdjust.x, frame.CameraPosAdjust.y, frame.CameraPosAdjust.z };
+		} else if (a_accumulator) {
 			const auto& eye = a_accumulator->GetRuntimeData()->eyePosition;
 			f.eyePosition = { eye.x, eye.y, eye.z };
 		}
 		f.cameraUnderwater = Read<bool>(Address::kCameraUnderwater);
 		f.waterEnabled = Read<bool>(Address::kWaterEnabled);
 		f.localMapPasses = Read<bool>(Address::kLocalMapPasses);
-		f.rawWater = Read<bool>(Address::kRawWater);
+		// Native: the RenderWorld driver's water blend test (the post-resolve wrote the engine's global from the same test).
+		f.rawWater = native ? ::RenderGraph::Engine::Native::WorldPass::RawWater() : Read<bool>(Address::kRawWater);
 		f.renderMode = Read<std::uint32_t>(Address::kRenderMode);
 
 		f.linearLighting = globals::features::linearLighting.IsLinearLightingActive() && globals::state && globals::state->customPixelShader;

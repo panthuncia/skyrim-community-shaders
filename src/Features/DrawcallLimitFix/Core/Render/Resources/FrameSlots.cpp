@@ -1,5 +1,6 @@
 // The main pass's captured bindings, the frame textures at t16 and up, and the names of the frame constants buffer's parts.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Deferred.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
@@ -188,19 +189,32 @@ namespace DCLF::Draws
 		ReadBound(capture.psViews, [](ID3D11DeviceContext* a_context, ID3D11ShaderResourceView** a_out) { a_context->PSGetShaderResources(0, kTextureRegisters, a_out); });
 		// The targets and the viewport are the engine's alone. CS binds none for an engine draw.
 		auto* engine = RenderGraph::Engine::Tripwire::EngineContext();
-		ID3D11RenderTargetView* views[kColorTargets] = {};
-		ID3D11DepthStencilView* depth = nullptr;
-		engine->OMGetRenderTargets(kColorTargets, views, &depth);
-		for (std::uint32_t i = 0; i < kColorTargets; ++i) {
-			if (!views[i])
-				continue;
-			capture.targets[i] = TextureOf(views[i]);
-			capture.targetCount = i + 1;
-			views[i]->Release();
-		}
-		if (depth) {
-			capture.depth = TextureOf(depth);
-			depth->Release();
+		if (RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
+			// Native's RenderWorld: the deferred pass's targets from CS's frame (Deferred::StartDeferred's set, the main depth), which the
+			// engine's state flush bound here (observed equal at every main pass).
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
+			const auto& set = Deferred::kTargets;
+			for (std::uint32_t i = 0; i < set.size() && i < kColorTargets; ++i) {
+				capture.targets[i] = TextureOf(renderer->GetRuntimeData().renderTargets[set[i]].RTV);
+				if (capture.targets[i])
+					capture.targetCount = i + 1;
+			}
+			capture.depth = TextureOf(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].views[0]);
+		} else {
+			ID3D11RenderTargetView* views[kColorTargets] = {};
+			ID3D11DepthStencilView* depth = nullptr;
+			engine->OMGetRenderTargets(kColorTargets, views, &depth);
+			for (std::uint32_t i = 0; i < kColorTargets; ++i) {
+				if (!views[i])
+					continue;
+				capture.targets[i] = TextureOf(views[i]);
+				capture.targetCount = i + 1;
+				views[i]->Release();
+			}
+			if (depth) {
+				capture.depth = TextureOf(depth);
+				depth->Release();
+			}
 		}
 		// CS binds b5 SharedData and b6 FeatureData from Renderer_ResetState, so whether they are bound here depends on the last reset.
 		// They are CS's own buffers, so take them from CS when the capture lacks them.

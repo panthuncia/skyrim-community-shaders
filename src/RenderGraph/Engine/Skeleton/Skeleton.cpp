@@ -1995,6 +1995,26 @@ namespace RenderGraph::Engine::Skeleton
 		Skel().installed = true;
 	}
 
+	bool ClearColour(RE::RENDER_TARGET a_target, const float a_colour[4])
+	{
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
+		auto* view = renderer ? renderer->GetRuntimeData().renderTargets[a_target].RTV : nullptr;
+		return view && Sites::TakeColourClear(globals::d3d::context, view, a_colour);
+	}
+
+	bool ClearDepth(RE::RENDER_TARGET_DEPTHSTENCIL a_target, std::uint32_t a_flags)
+	{
+		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
+		auto* view = renderer ? renderer->GetDepthStencilData().depthStencils[a_target].views[0] : nullptr;
+		return view && Sites::TakeDepthClear(globals::d3d::context, view, a_flags, 1.0f, 0);
+	}
+
+	bool CopyMain()
+	{
+		// As the engine's copy reaching the immediate context (Sites::TakeContextCopy).
+		return Engine::GraphMode() && CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) && !FrameAnchors::InRun() && RunCopy(CopyKind::Main, true);
+	}
+
 	namespace Sites
 	{
 		bool TakeColourClear(ID3D11DeviceContext*, ID3D11RenderTargetView* a_view, const FLOAT a_colour[4])

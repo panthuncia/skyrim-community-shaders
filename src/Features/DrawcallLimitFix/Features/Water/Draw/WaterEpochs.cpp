@@ -17,6 +17,7 @@
 #include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "Snapshot/EngineReads.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 
 #include "RenderGraph/FrameAnchors.h"
 
@@ -85,7 +86,9 @@ namespace DCLF::Features::Water::Indirect
 		if (!accumulator || !a_batchRenderer || *reinterpret_cast<void* const*>(accumulator + kBatchRendererOffset) != a_batchRenderer ||
 			!FrameAnchors::IsRenderOwner())
 			return false;
-		if (CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData().cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+		// Native's RenderWorld renders no cube face.
+		if (!::RenderGraph::Engine::Native::WorldPass::InRenderWorld() &&
+			CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData().cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 			return false;
 		auto& site = WaterSiteOf(View::Mask);
 		const std::uint32_t epoch = WaterEpochOfSite(site);
@@ -100,7 +103,9 @@ namespace DCLF::Features::Water::Indirect
 		static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 		if (!a_accumulator || a_accumulator != *mainAccumulator || !FrameAnchors::IsRenderOwner())
 			return false;
-		if (CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData().cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+		// Native's RenderWorld renders no cube face.
+		if (!::RenderGraph::Engine::Native::WorldPass::InRenderWorld() &&
+			CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData().cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 			return false;
 		// A CPU-driven frame draws claimed water in the water family's anchor pass, so the stage needs no epoch of its own.
 		if (a_cpuRun && a_cpuVariant) {

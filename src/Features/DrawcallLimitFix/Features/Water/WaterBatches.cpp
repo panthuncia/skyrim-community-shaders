@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <functional>
 
 namespace DCLF::Features::Water
 {
@@ -238,85 +239,102 @@ namespace DCLF::Features::Water
 		};
 
 		/**
-		 * @brief A water batch hook. kSite tells apart the mask, the surface, and geometry group 10 just before the surface (it holds
-		 * the wading surface, hint 13). The mask and surface batches first submit DCLF's water epoch for what it claims; the rest of
-		 * the batch's water is computed and drawn here, and the engine's call draws what is not water.
+		 * @brief A water batch. kSite tells apart the mask, the surface, and geometry group 10 just before the surface (it holds the wading
+		 * surface, hint 13). The mask and surface batches first submit DCLF's water epoch for what it claims; the rest of the batch's water
+		 * is computed and drawn here, and the engine's call (a_engine) draws what is not water. Native's RenderWorld driver passes no
+		 * engine call.
 		 */
+		template <View kView, std::uint32_t kSite>
+		void BatchPoint(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::int32_t a_group, const std::function<void()>* a_engine)
+		{
+			const auto engineCall = [&] {
+				if (a_engine)
+					(*a_engine)();
+			};
+			void* cpuWater = nullptr;
+			std::uint32_t cpuVariant = 0;
+			if constexpr (kSite != kGroup10Site)
+				(void)Indirect::ReachBatch(kView, a_accumulator, &cpuWater, &cpuVariant);
+			if (!FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
+				if (cpuWater) {
+					static std::atomic<bool> logged{ false };
+					if (!logged.exchange(true))
+						logger::error("[DCLF] water: a CPU-driven frame's {} batch could not be taken by the water family; its DCLF water is not drawn", NameOf(kView));
+				}
+				engineCall();
+				return;
+			}
+			// Native computes the main camera's batch from the tracked water shapes, not from the engine's registrations.
+			static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
+			const bool fromScene = ::RenderGraph::Engine::Native::Active() && a_accumulator == *mainAccumulator;
+			std::optional<::RenderGraph::Engine::Native::WorldPass::Scope> world;
+			if (fromScene)
+				world.emplace(kView == View::Mask ? ::RenderGraph::Engine::Native::WorldPass::Point::WaterMask : ::RenderGraph::Engine::Native::WorldPass::Point::WaterSurface);
+			// Claimed water leaves the engine's batch empty: then there is nothing to compute, and the engine's call draws nothing.
+			const auto hasPasses = [&] {
+				if (!fromScene)
+					return BatchHasPasses(a_accumulator, a_first, a_last, a_group);
+				const Native::BatchInputs scene{ .view = kView, .accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator), .first = a_first, .last = a_last, .group = a_group };
+				return Native::SceneHasPasses(scene);
+			};
+			if (!cpuWater && !hasPasses()) {
+				engineCall();
+				return;
+			}
+			Family::BeginBatch();
+			Run run;
+			run.view = kView;
+			std::uint32_t depthFormat = 0;
+			if (!CurrentShape(a_accumulator, kView, run, depthFormat) || !WaterDraws::CanTake(kView)) {
+				if (cpuWater) {
+					static std::atomic<bool> logged{ false };
+					if (!logged.exchange(true))
+						logger::warn("[DCLF] water: a CPU-driven frame's {} batch is not the water family's yet; its DCLF water is not drawn that frame", NameOf(kView));
+				}
+				WaterDraws::Keep(std::move(run.owners));
+				engineCall();
+				return;
+			}
+			// The sun's shadow record is the frame's, so it is read once per batch rather than per draw.
+			static Deferred::DirectionalShadowLightData directionalShadow{};
+			if (globals::deferred)
+				globals::deferred->GetDirectionalShadowLightData(directionalShadow);
+			const Native::BatchInputs inputs{ .view = kView,
+				.accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator),
+				.first = a_first,
+				.last = a_last,
+				.group = a_group,
+				.depthFormat = depthFormat,
+				.directionalShadow = &directionalShadow,
+				.physSky = run.physSky };
+			std::vector<Draw> draws;
+			Family::Owners owners;
+			std::string why;
+			if (!(fromScene ? Native::BuildScene(inputs, draws, owners, why) : Native::BuildBatch(inputs, draws, owners, why))) {
+				// The batch's water reaches the engine, which draws it or, under the flush latch, skips it.
+				Refusals().Report(std::format("a {} batch's water", NameOf(kView)), why);
+				SubmitDraws(run, {}, std::move(owners), cpuWater, cpuVariant);
+				engineCall();
+				return;
+			}
+			if (!a_engine) {
+				SubmitDraws(run, std::move(draws), std::move(owners), cpuWater, cpuVariant);
+				return;
+			}
+			auto detached = Native::DetachBatch(inputs);
+			SubmitDraws(run, std::move(draws), std::move(owners), cpuWater, cpuVariant);
+			(*a_engine)();
+			Native::Reattach(detached);
+		}
+
+		/** @brief The engine's water batch call (BatchPoint). */
 		template <View kView, std::uint32_t kSite>
 		struct WaterBatch
 		{
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
-				void* cpuWater = nullptr;
-				std::uint32_t cpuVariant = 0;
-				if constexpr (kSite != kGroup10Site)
-					(void)Indirect::ReachBatch(kView, a_accumulator, &cpuWater, &cpuVariant);
-				if (!FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
-					if (cpuWater) {
-						static std::atomic<bool> logged{ false };
-						if (!logged.exchange(true))
-							logger::error("[DCLF] water: a CPU-driven frame's {} batch could not be taken by the water family; its DCLF water is not drawn", NameOf(kView));
-					}
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				// Native computes the main camera's batch from the tracked water shapes, not from the engine's registrations.
-				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
-				const bool fromScene = ::RenderGraph::Engine::Native::Active() && a_accumulator == *mainAccumulator;
-				std::optional<::RenderGraph::Engine::Native::WorldPass::Scope> world;
-				if (fromScene)
-					world.emplace(kView == View::Mask ? ::RenderGraph::Engine::Native::WorldPass::Point::WaterMask : ::RenderGraph::Engine::Native::WorldPass::Point::WaterSurface);
-				// Claimed water leaves the engine's batch empty: then there is nothing to compute, and the engine's call draws nothing.
-				const auto hasPasses = [&] {
-					if (!fromScene)
-						return BatchHasPasses(a_accumulator, a_first, a_last, a_group);
-					const Native::BatchInputs scene{ .view = kView, .accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator), .first = a_first, .last = a_last, .group = a_group };
-					return Native::SceneHasPasses(scene);
-				};
-				if (!cpuWater && !hasPasses()) {
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				Family::BeginBatch();
-				Run run;
-				run.view = kView;
-				std::uint32_t depthFormat = 0;
-				if (!CurrentShape(a_accumulator, kView, run, depthFormat) || !WaterDraws::CanTake(kView)) {
-					if (cpuWater) {
-						static std::atomic<bool> logged{ false };
-						if (!logged.exchange(true))
-							logger::warn("[DCLF] water: a CPU-driven frame's {} batch is not the water family's yet; its DCLF water is not drawn that frame", NameOf(kView));
-					}
-					WaterDraws::Keep(std::move(run.owners));
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				// The sun's shadow record is the frame's, so it is read once per batch rather than per draw.
-				static Deferred::DirectionalShadowLightData directionalShadow{};
-				if (globals::deferred)
-					globals::deferred->GetDirectionalShadowLightData(directionalShadow);
-				const Native::BatchInputs inputs{ .view = kView,
-					.accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator),
-					.first = a_first,
-					.last = a_last,
-					.group = a_group,
-					.depthFormat = depthFormat,
-					.directionalShadow = &directionalShadow,
-					.physSky = run.physSky };
-				std::vector<Draw> draws;
-				Family::Owners owners;
-				std::string why;
-				if (!(fromScene ? Native::BuildScene(inputs, draws, owners, why) : Native::BuildBatch(inputs, draws, owners, why))) {
-					// The batch's water reaches the engine, which draws it or, under the flush latch, skips it.
-					Refusals().Report(std::format("a {} batch's water", NameOf(kView)), why);
-					SubmitDraws(run, {}, std::move(owners), cpuWater, cpuVariant);
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				auto detached = Native::DetachBatch(inputs);
-				SubmitDraws(run, std::move(draws), std::move(owners), cpuWater, cpuVariant);
-				func(a_accumulator, a_first, a_last, a_flags, a_group);
-				Native::Reattach(detached);
+				const std::function<void()> engine = [&] { func(a_accumulator, a_first, a_last, a_flags, a_group); };
+				BatchPoint<kView, kSite>(a_accumulator, a_first, a_last, a_group, &engine);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -333,6 +351,22 @@ namespace DCLF::Features::Water
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+	}
+
+	void NativeMaskBatch(RE::BSShaderAccumulator* a_accumulator)
+	{
+		// The pre-resolve's RenderBatches of the Stencil technique (SE 99938 +0x4A6, AE 106583 +0x492).
+		BatchPoint<View::Mask, kMaskSite>(a_accumulator, 0x5c00006d, 0x5c000070, -1, nullptr);
+	}
+
+	void NativeSurfaceBatch(RE::BSShaderAccumulator* a_accumulator)
+	{
+		// Geometry group 10 first when it is a batch, not a pass list (SE 99939 +0x146, AE 106584 +0x143): it holds the wading surface.
+		const auto* batchRenderer = a_accumulator->GetRuntimeData()->batchRenderer;
+		if (const auto* group = batchRenderer ? batchRenderer->geometryGroups[10] : nullptr; group && !(group->flags & 1))
+			BatchPoint<View::Surface, kGroup10Site>(a_accumulator, 1, 0x5c006074, 10, nullptr);
+		// The post-resolve's RenderBatches of the water techniques (SE 99939 +0x164, AE 106584 +0x161).
+		BatchPoint<View::Surface, kSurfaceSite>(a_accumulator, 0x5c000071, 0x5c006071, -1, nullptr);
 	}
 
 	void PreflightHooks()

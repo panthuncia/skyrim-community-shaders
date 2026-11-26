@@ -32,6 +32,7 @@
 #include <rhi_helpers.h>
 
 #include <format>
+#include <functional>
 #include <optional>
 #include <utility>
 
@@ -341,64 +342,80 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
-		 * @brief Hook on FinishAccumulating's RenderBatches of the sky techniques (SE 99938 +0x247, AE 106583 +0x237), for the main
-		 * GBuffer pass and the engine's reflection faces. The draws are computed from the registered passes, and the engine's call
-		 * finds no sky pass to draw.
+		 * @brief The sky batch: FinishAccumulating's RenderBatches of the sky techniques (SE 99938 +0x247, AE 106583 +0x237) for the main
+		 * GBuffer pass and the engine's reflection faces, or native's RenderWorld driver for the main pass (a_engine null). The draws are
+		 * computed from the registered passes (native's main view: from the sky root), and the engine's call finds no sky pass to draw.
 		 */
+		void SkyBatchPoint(void* a_accumulator, std::uint32_t a_flags, const std::function<void()>* a_engine)
+		{
+			auto& pending = GetPending();
+			static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
+			std::optional<::RenderGraph::Engine::Native::WorldPass::Scope> world;
+			if (a_accumulator == *mainAccumulator)
+				world.emplace(::RenderGraph::Engine::Native::WorldPass::Point::SkyBatch);
+			// If another hook kept the cloud group's call from coming, finish late and never wait for the group again.
+			if (pending.cloudGroup) {
+				if (!std::exchange(pending.broken, true))
+					logger::error("[DCLF] sky: the cloud group was not drawn after a sky batch that waited for it (another hook at its call?); the engine draws the cloud layers from now on");
+				Finish(pending);
+			}
+			// Native's driver makes no engine call: a batch the graph cannot take draws nothing there.
+			const auto engineDraws = [&] {
+				if (a_engine)
+					(*a_engine)();
+				else
+					Refusals().Report("a main batch in native's RenderWorld", "not drawn");
+			};
+			if (!FrameAnchors::IsRenderOwner() || !SkyDraws::Available())
+				return engineDraws();
+			Family::BeginBatch();
+			Shape shape;
+			auto run = std::make_shared<Run>();
+			PublishedInputIds published;
+			if (!CurrentShape(a_accumulator, shape, *run, published, pending) || !SkyDraws::CanTake(shape) ||
+				!ReadInputs(shape.view, published, run->headerIndices, run->sceneDepthIndex, run->physSky, run->owners)) {
+				SkyDraws::Keep(std::move(run->owners));
+				return engineDraws();
+			}
+			run->view = shape.view;
+			auto* accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator);
+			const Native::BatchInputs inputs{ shape.view, pending.colourFormats, pending.depthFormat, a_flags, run->physSky };
+			std::string why;
+			// Native draws the main view's sky from the sky root, with its cloud layers, not from the engine's registrations.
+			const bool fromRoot = shape.view == View::Main && ::RenderGraph::Engine::Native::Active();
+			// The leases go straight to the run: a failed build's leases are only held a frame longer.
+			const bool built = fromRoot ? Native::BuildMain(accumulator, inputs, run->draws, run->owners, why) : Native::BuildBatch(accumulator, inputs, run->draws, run->owners, why);
+			if (!built || run->draws.size() > kMaxRunDraws) {
+				Refusals().Report(std::format("a {} batch", NameOf(shape.view)), why.empty() ? std::string("more draws than one run holds") : why);
+				SkyDraws::Keep(std::move(run->owners));
+				return engineDraws();
+			}
+			if (a_engine) {
+				auto detached = Native::DetachBatch(accumulator);
+				(*a_engine)();
+				Native::Reattach(detached);
+			}
+			pending.run = std::move(run);
+			pending.cloudGroup = shape.clouds && !pending.broken && !fromRoot ? CloudGroupOf(accumulator, shape.view) : nullptr;
+			// The engine's cloud group call comes next and must find the drawn cloud layers detached. Native's driver makes no such call.
+			if (fromRoot && a_engine) {
+				const auto* batchRenderer = accumulator->GetRuntimeData()->batchRenderer;
+				pending.drawnClouds = batchRenderer ? batchRenderer->geometryGroups[kCloudGeometryGroup] : nullptr;
+			}
+			if (pending.cloudGroup) {
+				pending.accumulator = accumulator;
+				return;
+			}
+			Finish(pending);
+		}
+
+		/** @brief The engine's sky batch call (SkyBatchPoint). */
 		struct SkyBatch
 		{
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
-				auto& pending = GetPending();
-				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
-				std::optional<::RenderGraph::Engine::Native::WorldPass::Scope> world;
-				if (a_accumulator == *mainAccumulator)
-					world.emplace(::RenderGraph::Engine::Native::WorldPass::Point::SkyBatch);
-				// If another hook kept the cloud group's call from coming, finish late and never wait for the group again.
-				if (pending.cloudGroup) {
-					if (!std::exchange(pending.broken, true))
-						logger::error("[DCLF] sky: the cloud group was not drawn after a sky batch that waited for it (another hook at its call?); the engine draws the cloud layers from now on");
-					Finish(pending);
-				}
-				const auto engineDraws = [&] { func(a_accumulator, a_first, a_last, a_flags, a_group); };
-				if (!FrameAnchors::IsRenderOwner() || !SkyDraws::Available())
-					return engineDraws();
-				Family::BeginBatch();
-				Shape shape;
-				auto run = std::make_shared<Run>();
-				PublishedInputIds published;
-				if (!CurrentShape(a_accumulator, shape, *run, published, pending) || !SkyDraws::CanTake(shape) ||
-					!ReadInputs(shape.view, published, run->headerIndices, run->sceneDepthIndex, run->physSky, run->owners)) {
-					SkyDraws::Keep(std::move(run->owners));
-					return engineDraws();
-				}
-				run->view = shape.view;
-				auto* accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator);
-				const Native::BatchInputs inputs{ shape.view, pending.colourFormats, pending.depthFormat, a_flags, run->physSky };
-				std::string why;
-				// Native draws the main view's sky from the sky root, with its cloud layers, not from the engine's registrations.
-				const bool fromRoot = shape.view == View::Main && ::RenderGraph::Engine::Native::Active();
-				// The leases go straight to the run: a failed build's leases are only held a frame longer.
-				const bool built = fromRoot ? Native::BuildMain(accumulator, inputs, run->draws, run->owners, why) : Native::BuildBatch(accumulator, inputs, run->draws, run->owners, why);
-				if (!built || run->draws.size() > kMaxRunDraws) {
-					Refusals().Report(std::format("a {} batch", NameOf(shape.view)), why.empty() ? std::string("more draws than one run holds") : why);
-					SkyDraws::Keep(std::move(run->owners));
-					return engineDraws();
-				}
-				auto detached = Native::DetachBatch(accumulator);
-				engineDraws();
-				Native::Reattach(detached);
-				pending.run = std::move(run);
-				pending.cloudGroup = shape.clouds && !pending.broken && !fromRoot ? CloudGroupOf(accumulator, shape.view) : nullptr;
-				if (fromRoot) {
-					const auto* batchRenderer = accumulator->GetRuntimeData()->batchRenderer;
-					pending.drawnClouds = batchRenderer ? batchRenderer->geometryGroups[kCloudGeometryGroup] : nullptr;
-				}
-				if (pending.cloudGroup) {
-					pending.accumulator = accumulator;
-					return;
-				}
-				Finish(pending);
+				const std::function<void()> engine = [&] { func(a_accumulator, a_first, a_last, a_flags, a_group); };
+				SkyBatchPoint(a_accumulator, a_flags, &engine);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -504,8 +521,10 @@ namespace DCLF::Features::Sky
 			Family::BeginBatch();
 			auto run = std::make_shared<Run>();
 			run->view = View::Sun;
-			// The engine's call sets the query's camera before its draw, and later code keeps it.
-			CS_ENGINE_READ(GraphicsState, CapturePoint, RE::BSGraphics::State::GetSingleton())->SetCameraData(a_camera, 0);
+			// The engine's call sets the query's camera before its draw, and later code keeps it. Native's RenderWorld sets none: the
+			// world camera's data is already the shadow state's (without jitter in native, flag 0's data is the same).
+			if (!::RenderGraph::Engine::Native::WorldPass::InRenderWorld())
+				CS_ENGINE_READ(GraphicsState, CapturePoint, RE::BSGraphics::State::GetSingleton())->SetCameraData(a_camera, 0);
 			Native::BatchInputs inputs;
 			std::string why;
 			const char* skip = SunRefusal(inputs, *run);
@@ -720,6 +739,11 @@ namespace DCLF::Features::Sky
 		HookSites::RequireCall("the sky batch (FinishAccumulating's RenderBatches of the sky techniques)", REL::Offset(Address::kSkyBatch).address());
 		if (Address::kCloudGroup.Known())
 			HookSites::RequireCall("the cloud group (FinishAccumulating's RenderPersistentPassList of group 13)", REL::Offset(Address::kCloudGroup).address());
+	}
+
+	void MainBatch(RE::BSShaderAccumulator* a_accumulator, std::uint32_t a_flags)
+	{
+		SkyBatchPoint(a_accumulator, a_flags, nullptr);
 	}
 
 	void InstallHooks()

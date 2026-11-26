@@ -25,4 +25,16 @@ namespace RenderGraph::Engine::Skeleton
 
 	/** @brief Deferred::DeferredPasses. False means the caller copies with D3D11. */
 	bool CopyPostZPrepassDepth();
+
+	// Native's RenderWorld driver: the clears and the copy the engine's resolve functions made, by target, in their place in the
+	// frame. Each goes where the engine's call would have gone. False when the skeleton could not take it. Render owner.
+
+	/** @brief A colour target's clear, as a state flush clears a target bound with SRTM_CLEAR. */
+	bool ClearColour(RE::RENDER_TARGET a_target, const float a_colour[4]);
+
+	/** @brief A depth target's clear to depth 1 and stencil 0 with D3D11 clear flags a_flags, as Renderer::ClearDepthStencil makes it. */
+	bool ClearDepth(RE::RENDER_TARGET_DEPTHSTENCIL a_target, std::uint32_t a_flags);
+
+	/** @brief kMAIN into its copy, as SetRenderTarget's force-copy restore (SRTM_FORCE_COPY_RESTORE) of kMAIN makes it. */
+	bool CopyMain();
 }

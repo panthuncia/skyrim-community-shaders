@@ -842,9 +842,15 @@ namespace DCLF::Features::Sky::Native
 		if (!frame.Read(a_accumulator, a_inputs, a_why))
 			return PassResult::Failed;
 		// SetupGeometry reads the eye from the shader manager's current accumulator, which after the world's render is the last one
-		// submitted (the screen splatter's), not the query's.
-		const auto* current = reinterpret_cast<RE::BSShaderAccumulator*>(*CS_ENGINE_READ(Accumulator, RecordTime, globals::game::currentAccumulator).get());
-		frame.eye = current ? current->GetRuntimeData()->eyePosition : RE::NiPoint3{};
+		// submitted (the screen splatter's), not the query's. Native's RenderWorld submits none: the main accumulator is current, and its
+		// eye is the world camera's position, the frame camera's eye.
+		if (::RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
+			const auto& camera = Snapshot::FrameCamera::Main().data;
+			frame.eye = { camera.CameraPosAdjust.x, camera.CameraPosAdjust.y, camera.CameraPosAdjust.z };
+		} else {
+			const auto* current = reinterpret_cast<RE::BSShaderAccumulator*>(*CS_ENGINE_READ(Accumulator, RecordTime, globals::game::currentAccumulator).get());
+			frame.eye = current ? current->GetRuntimeData()->eyePosition : RE::NiPoint3{};
+		}
 		// The pass the engine's call makes (BSShader::MakeRenderPass with pass id 2), without its pool entry. The property is the
 		// geometry's shader property (+0x128).
 		RE::BSRenderPass pass{};

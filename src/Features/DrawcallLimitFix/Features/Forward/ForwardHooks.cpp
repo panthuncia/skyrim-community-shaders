@@ -45,6 +45,26 @@ namespace DCLF::Features::Forward
 			*normalsDrawn = 1;
 		}
 
+		/**
+		 * @brief The main pass's blended draw point. a_afterWater false is the call used when the camera is under water, before the
+		 * water; true is the one after the water.
+		 */
+		void BlendedPoint(bool a_afterWater)
+		{
+			// Under water, the water comes after this point, so the sun stage's water steps draw it.
+			if (!a_afterWater) {
+				static bool logged = false;
+				if (!std::exchange(logged, true))
+					logger::info("[DCLF] forward: the main pass's blended draw came before the water (the camera is under water)");
+			}
+			// The stages before the blended draw end here, in frame order: DCLF's water epochs may have split deferred+water.
+			for (const auto stage : { ::RenderGraph::Frame::SegmentId::Deferred, ::RenderGraph::Frame::SegmentId::Water, ::RenderGraph::Frame::SegmentId::PostWater })
+				(void)FrameAnchors::TapPoint(stage);
+			Extensions::TriggerScope trigger(blendedDraw);
+			if (SubmitForwardEpoch())
+				MarkRefractionNormals();
+		}
+
 		// N == 0 is the call used when the camera is under water, before the water. N == 1 is the one after the water.
 		template <int N>
 		struct Accumulator_BlendedDraw
@@ -53,23 +73,8 @@ namespace DCLF::Features::Forward
 			{
 				// DCLF's blended objects draw before all of the engine's. The same function draws other accumulators, so check for the main one.
 				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
-				const bool main = a_accumulator && a_accumulator == *mainAccumulator;
-				if (main) {
-					// Under water, the water comes after this point, so the sun stage's water steps draw it.
-					if constexpr (N == 0) {
-						static bool logged = false;
-						if (!std::exchange(logged, true))
-							logger::info("[DCLF] forward: the main pass's blended draw came before the water (the camera is under water)");
-					}
-					// The stages before the blended draw end here, in frame order: DCLF's water epochs may have split deferred+water.
-					for (const auto stage : { ::RenderGraph::Frame::SegmentId::Deferred, ::RenderGraph::Frame::SegmentId::Water, ::RenderGraph::Frame::SegmentId::PostWater })
-						(void)FrameAnchors::TapPoint(stage);
-				}
-				if (main) {
-					Extensions::TriggerScope trigger(blendedDraw);
-					if (SubmitForwardEpoch())
-						MarkRefractionNormals();
-				}
+				if (a_accumulator && a_accumulator == *mainAccumulator)
+					BlendedPoint(N == 1);
 				func(a_accumulator, a_renderFlags);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -90,6 +95,11 @@ namespace DCLF::Features::Forward
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+	}
+
+	void NativeBlendedDraw(bool a_afterWater)
+	{
+		BlendedPoint(a_afterWater);
 	}
 
 	void PreflightHooks()

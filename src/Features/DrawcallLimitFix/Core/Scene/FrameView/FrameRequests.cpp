@@ -25,6 +25,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
 #include "Snapshot/EngineReads.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 
 namespace DCLF::Scene
 {
@@ -803,7 +804,10 @@ namespace DCLF::Scene
 
 	void FrameView::LatchAccumulator()
 	{
-		auto* accumulator = *CS_ENGINE_READ(Accumulator, CapturePoint, globals::game::currentAccumulator).get();
+		// Native's RenderWorld starts no accumulator: the main camera's is the main accumulator (StartAccumulating made it current).
+		static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
+		auto* accumulator = ::RenderGraph::Engine::Native::WorldPass::InRenderWorld() ? *mainAccumulator.get() :
+		                                                                                *CS_ENGINE_READ(Accumulator, CapturePoint, globals::game::currentAccumulator).get();
 		if (!accumulator || accumulator == latchedAccumulator)
 			return;
 		if (latchedAccumulator) {

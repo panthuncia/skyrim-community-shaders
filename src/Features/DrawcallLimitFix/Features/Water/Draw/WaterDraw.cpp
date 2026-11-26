@@ -1,5 +1,7 @@
 // Water's program family and deferred ranges (WaterDraw.h).
 
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Snapshot/EngineReads.h"
 
@@ -115,9 +117,14 @@ namespace DCLF::Features::Water::Indirect
 			return a_index == 0 ? FrameAnchors::EngineTexture(FrameAnchors::Colour(a_variant ? kRawWaterTarget : kMainTarget)) : nullptr;
 		}
 
-		/** @brief The global SetupTechnique reads (528167 / 415112): set, the surface draws into kRAW_WATER. Render thread. */
+		/**
+		 * @brief The global SetupTechnique reads (528167 / 415112): set, the surface draws into kRAW_WATER. Native: the RenderWorld driver's
+		 * water blend test, which the post-resolve wrote into that global. Render thread.
+		 */
 		std::uint32_t SurfaceVariant()
 		{
+			if (::RenderGraph::Engine::Native::Active())
+				return ::RenderGraph::Engine::Native::WorldPass::RawWater() ? 1u : 0u;
 			const auto offset = Port::Address::kRawWater.Get();
 			return offset && *reinterpret_cast<const bool*>(REL::Module::get().base() + offset) ? 1u : 0u;
 		}

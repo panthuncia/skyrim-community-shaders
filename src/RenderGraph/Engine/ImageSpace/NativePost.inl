@@ -1309,6 +1309,7 @@ namespace NativePost
 		switch (a_key.scope) {
 		case WorldScope::Reflections:
 		case WorldScope::Ssao:
+		case WorldScope::Snow:
 		case WorldScope::SsaoComposite:
 		case WorldScope::WaterBlend:
 			return true;
