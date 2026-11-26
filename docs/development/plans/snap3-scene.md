@@ -113,6 +113,12 @@ native; their call sites still count until Main::Draw is CS's.
 | native-vulkan+cadence-drop | `s3-scene-m1-native-vulkan-cadence-drop` | passed |
 | native-vulkan+cadence-drop-cells | `s3-scene-m1-native-vulkan-cadence-drop-cells` | passed |
 | native-vulkan+cadence-repeat | `s3-scene-m1-native-vulkan-cadence-repeat` | passed (decision 53's crash did not show; the engine's list culls still run, so it is not fixed) |
+| native-vulkan+shadows-blend | `s3-scene-m1-native-vulkan-shadows-blend` | passed |
+| native-vulkan+llf-local-shadows | `s3-scene-m1-native-vulkan-llf-local-shadows` | passed |
+| native-interior | `s3-scene-m1-native-interior` | passed; 2,400 shadow lights native per 600 frames, none to the engine |
+| native-vulkan+stealth-lights | `s3-scene-m1-native-vulkan-stealth-lights` | passed |
+| native-tour (final build 9171c3a32) | `s3-scene-f-native-tour` | passed |
+| cadence.py, native-vulkan+cadence-still (final build) | `s3-scene-f-cad-*` | all four runs passed; interior within noise (repeat 1.8, drop 0.4); exterior 16.0 / 15.3 against a floor of 2.6 this time, so "outside noise" by the rule, the same size as phase 2's accepted 15.2 / 17.5 (floor 8.7 then): wind and camera pose, shadows alike by eye |
 
 The quick shots with `CS_SNAPSHOT_DETECT=1` are dark (the scene under exposure adaptation); the baseline run with the detector
 (`s3-lights-f-nvk-quick`) and guest are equally dark, and the switch build without the detector (`s3-scene-sw3-nvk`) shows normal
