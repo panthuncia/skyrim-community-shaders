@@ -202,3 +202,49 @@ Open:
 - The Scaleform HUD (0.06), the remaining anchor clients (0.13), ORG's thin per-epoch remainder.
 - SE: every default now matches AE, and every new address is an SE/AE pair, but nothing has run on SE.
 - All numbers are Dev-Fast. An optimised build is still to confirm the ranking.
+
+## Round 3 (2026-11-25, night)
+
+Round 2's open items, plus what the leads found on the way. Notes in `perf3-<name>.md` beside this file. Window (same capture,
+Dev-Fast): 2.62 ms on lead anchors' unchanged base, 2.54 ms after it; the other leads did not move the steady window.
+
+- `install`: the 35-41 s installs were priority inversion. The render thread waited in `StopFrameProduction` on executor
+  workers at below-normal priority, which a busy machine only runs on Windows' starvation boost. Installs no longer wait:
+  the old graph is retired and released once its GPU work is done and its task scopes are idle; revisions hold while 64
+  replaced graphs are still held. Attach wait p99 76 -> 9 ms, max 40.5 s -> 11 ms.
+- `teardown`: retired graphs are torn down off the render thread (alias placements given back on the host thread, the
+  rest on ORG's deleter thread). Any thread waiting on an executor scope raises the workers to its priority
+  (`Executor::WaitBoost`). Under 16-process load: attach p99 10.7 -> 4.6 ms, render-thread teardown 16-104 ms -> none.
+  The four ORG tests that hung (Leases x3, HeadlessBenchmark) are fixed; all 50 pass.
+- `compute`: ORG owns the queue choice; DCLF only marks passes async. A logical queue kind with no queue of its own folds
+  onto the queue it shares, same timeline, no semaphore waits. DXVK never hands ORG a queue anything else submits to, so
+  one shared compute queue and none look the same to ORG. ORG's submitters take DXVK's narrow submission lock
+  (`dxvkLockQueueSubmissions`), not the lock DXVK holds through presents. Guest without a DXVK compute queue no longer
+  crashes at boot. `CS_DCLF_ASYNC_COMPUTE` deleted. Own queue vs fold in guest: GPU 6.6 vs 6.8 ms (3%).
+- `fg`: the guest+fg hang with the own queue was a whole-device wait while DXVK's submissions were held (DXVK's
+  `waitForIdle` during swapchain rebuilds, and FFX's `vkDeviceWaitIdle` inside its present), while ORG's compute batches
+  waited on stream points DXVK had not submitted. DXVK now waits only on its own queues; sl.fsr_g's device wait is a no-op
+  after FFX waited on its own queues. The device loss at FG off: the swapchain is destroyed with DXVK's queues idle and
+  held, FFX's game-queue submits take `dxvkLockPresentSubmissions`. Guest uses DXVK's compute queue when it exports one;
+  `CS_ORG_QUEUE_TOPOLOGY` deleted.
+- `shadow`: lights whose views DCLF draws whole skip the engine's shadow-map `Render`; CS does its bookkeeping (targets,
+  slices, free mask, light transforms, clears). Parity build: 4201 of 4201 lights identical. About 0.016 ms net.
+- `anchors`: the graph-frames lookup per commit and the per-tap shared-pointer list are gone; runs list only active
+  clients. `CS.FrameAnchors.Run` 0.250 -> 0.212 ms. ORG's per-epoch remainder has no contained cut left outside the
+  submission code.
+- `se`: first runs on SE 1.5.97 (guest and native Vulkan pass). Every address added since round 1 checked in Ghidra
+  against SE. Fixed: the lab helper for SE's SKSE, the full-screen blur adapters on SE (older upstream bug). SE runs use
+  `D:\CSLab-SE` (cs-test README).
+- `stability`: the profiler's timestamp switch no longer refuses staged builds (the mode is a build input; a change
+  requests an async rebuild); it was fatal when a load started as the profiler went idle, on AE too. The "broken
+  exterior" on SE was the harness shooting the loading screen; steps now wait for a scripted shot to save.
+
+Open:
+
+- The attach still holds the async host thread briefly (`HoldAsync`); the host thread could swap graphs itself.
+- FFX's presenter thread presents on its own queues without a lock (as in every round). Native FG with the compute queue
+  is untested. Native modes now use the compute queue; round 2 measured that 0.1 ms slower there, not re-measured.
+- The guest8 load hold on SE (materials waiting for streamed texture windows) did not come back; candidates in
+  `perf3-stability.md`.
+- The anchor commit bodies (0.10 ms, post chain and HUD largest), `CS.Anchors.SharedConstants` per step, the Scaleform HUD
+  (native HUD is the only cut).
