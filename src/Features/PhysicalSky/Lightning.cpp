@@ -385,11 +385,9 @@ void SkyLightning::Update(PhysicalSky& physicalSky, const std::string& currentWo
 	if (!available)
 		return;
 	previousTime = time;
-	if (auto* ui = CS_ENGINE_READ(UI, RecordTime, globals::game::ui); ui && !ui->GameIsPaused()) {
-		const double elapsed = CS_ENGINE_READ(Timer, RecordTime, RE::GetSecondsSinceLastFrame());
-		if (std::isfinite(elapsed))
-			time += std::clamp(elapsed, 0.0, 0.25);
-	}
+	// The snapshot's game time, once per new snapshot (PhysicalSky::Reset): 0 while paused and on a repeated snapshot.
+	if (const double elapsed = physicalSky.frameGameDelta; std::isfinite(elapsed))
+		time += std::clamp(elapsed, 0.0, 0.25);
 	color = settings.lightning.color;
 	if (pendingPhase == Phase::Readback) {
 		ReadSource(physicalSky);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Snapshot/FrameSnapshot.h"
 
 /** @brief Adds dynamic weather-driven wetness, puddle formation, shore wetness, and raindrop effects. */
 struct WetnessEffects : Feature
@@ -123,6 +124,26 @@ public:
 	/** @brief Builds the per-frame constant buffer data including weather state and settings. */
 	PerFrame GetCommonBufferData() const;
 
+	/**
+	* @brief Wetness Effects' snapshot block: the weathers' rain and wetness, computed from the sky on the game thread. The rain
+	* clock steps by the snapshot's game time, once per new snapshot.
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::WetnessEffects;
+
+		bool sky = false;            // there is a sky
+		bool fullSky = false;        // Sky::mode is kFull
+		bool precipitation = false;  // the sky has a precipitation object
+		float raining = 0.0f;        // the weathers' rain intensity, faded as Sky::IsRaining fades it
+		float wetness = 0.0f;        // the weathers' wetness, current plus last, at most 1
+		float puddleWetness = 0.0f;  // the same for puddles
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
 	/** @brief Advances the rain animation clock; runs once per frame, however often the feature buffer is rebuilt. */
 	virtual void Reset() override;
 
@@ -192,6 +213,7 @@ private:
 	void DrawWeatherAnalysis() const;
 
 	size_t rainTimer = 0;  // microseconds; size_t for precision
+	std::uint64_t steppedSnapshot = 0;  // the snapshot the rain clock last stepped for
 	bool splashesOfStormsLoaded = false;
 
 	// Weather wetness calculation result for debug display

@@ -4,6 +4,7 @@
 
 #include "RE/M/Moon.h"
 
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Moon.h"
 
 struct PhysicalSky;
@@ -129,10 +130,32 @@ public:
 		RE::NiPoint3 direction;  // sky-local, between the two bodies' real directions; zero when neither has one
 		Caster discBody;         // the source for the first half of the swing, then the target
 		float discWeight;        // fades the disc out at the source and back in at the target, 1 when settled
+
+		bool operator==(const DirectionalLightBlend&) const = default;
 	};
 
 	/** @brief Blend of the bodies the directional light comes from, for discs and transmittance that should follow the light rather than the shadow direction. */
 	DirectionalLightBlend GetDirectionalLightBlend() const;
+
+	/**
+	* @brief Sky Sync's snapshot block: what its game-side update computed, for the frame. Sky Sync runs in Sky::Update on the
+	* game thread; record code reads this instead of the feature's members.
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::SkySync;
+
+		std::array<RE::NiPoint3, 3> rawDirections{};  // sky-local, as rawDirections: sun, Masser, Secunda; zero when not computed
+		std::array<RE::NiPoint3, 3> directions{};     // world-space, as GetCelestialDirection gives them: sun, Masser, Secunda
+		DirectionalLightBlend blend{};                // GetDirectionalLightBlend
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block from Sky Sync's last update and the sky. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
+	/** @brief The adopted snapshot's block, or null before the first or while Sky Sync is not loaded. Render thread. */
+	static const Block* Frame();
 
 private:
 	enum class CellFlagExt : uint16_t
@@ -211,6 +234,9 @@ private:
 	inline static RE::BSVolumetricLightingRenderData* gVolumetricLighting = nullptr;
 	inline static RE::Setting* gSunAlphaTransTime = nullptr;
 	inline static RE::Setting* gWeatherFlashDirectional = nullptr;
+	// The fVolumetricLighting*:Display INI settings (GetDefaultVolumetricLighting), resolved at DataLoaded and read live by the
+	// game-side colour hooks, as the console can change them.
+	inline static std::array<RE::Setting*, 9> gDefaultVolumetricLighting{};
 
 	RE::TESObjectCELL* currentCell = nullptr;
 	bool currentCellInterior = false;

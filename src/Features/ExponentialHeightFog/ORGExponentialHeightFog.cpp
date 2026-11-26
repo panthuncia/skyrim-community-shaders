@@ -1,8 +1,10 @@
 #include "ORGExponentialHeightFog.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include <winrt/base.h>
 
+#include "RenderGraph/FrameClock.h"
 #include "RenderGraph/Switches.h"
 
 std::uint32_t ORGExponentialHeightFog::Debug()
@@ -624,7 +626,7 @@ namespace
 	/** @brief The engine's depth-stencil import when it is one of the engine's, else its own. */
 	Source ImportDepthView(ID3D11ShaderResourceView* a_view, const char* a_id)
 	{
-		if (!a_view || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
+		if (!a_view)
 			return {};
 		winrt::com_ptr<ID3D11Resource> resource;
 		a_view->GetResource(resource.put());
@@ -750,7 +752,7 @@ struct ORGExponentialHeightFog::Impl
 	// Written at Prepass and latched by the commit.
 	std::optional<LatchData> pending;
 	bool hasScatteringHistory = false, hasDepthHistory = false, hasScatteringHistoryFar = false, hasDepthHistoryFar = false;
-	std::uint32_t lastFrame = UINT32_MAX;
+	std::uint64_t lastFrame = UINT64_MAX;  // the render frame (FrameClock) of the last run
 	bool ranLastFrame = false;
 	bool reportedConstants = false;  // the first graph frame's constants are logged once
 	const FogState* reportedUnbound = nullptr;  // the last state Commit turned flags off for, logged once each
@@ -785,7 +787,7 @@ struct ORGExponentialHeightFog::Impl
 		}
 		if (!before && IntegratedWritten())
 			logger::info("[ORG] Exponential Height Fog: a run wrote the volumes at frame {}; the engine's draws and DCLF read them from the next Prepass",
-				globals::state->frameCount);
+				RenderGraph::FrameClock::BeginFrame());
 	}
 
 	void MakeVolume(Volume& a_volume, VolumeTextures& a_textures, bool a_groupReduce, bool a_far) const
@@ -994,7 +996,7 @@ struct ORGExponentialHeightFog::Impl
 		hasDepthHistory = temporal && static_cast<bool>(observedShape.inputs[kDepth]);
 		hasScatteringHistoryFar = temporal && observedShape.farEnabled;
 		hasDepthHistoryFar = hasScatteringHistoryFar && static_cast<bool>(observedShape.inputs[kDepth]);
-		lastFrame = globals::state->frameCount;
+		lastFrame = RenderGraph::FrameClock::BeginFrame();
 	}
 
 	/** @brief Mode 9's clears of each volume's histories and the textures copied into them, to zero, every run. Nothing gates them. */
@@ -1156,8 +1158,9 @@ bool ORGExponentialHeightFog::Prepass()
 	// IBL's SH and Skylighting's probes are in the client's key (DeclareClient), from the variables.
 
 	// Without the sky the shader skips terrain and cloud shadows, and Cloud Shadows binds nothing.
-	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
-	                     (CS_ENGINE_READ(Sky, RecordTime, globals::game::sky) && CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->flags.any(RE::Sky::Flags::kHideSky));
+	const auto& snapshot = Snapshot::Current();
+	const auto* fogFrame = snapshot ? snapshot->Block<ExponentialHeightFog::Block>() : nullptr;
+	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen || (fogFrame && fogFrame->hideSky);
 
 	auto& terrainShadows = globals::features::terrainShadows;
 	if (terrainShadows.loaded && !skyless) {
@@ -1228,8 +1231,8 @@ bool ORGExponentialHeightFog::Prepass()
 	inputs.skylighting = static_cast<bool>(bound[kProbes]);
 
 	// As the D3D11 Prepass keeps it. A history no run wrote yet holds none.
-	const std::uint32_t frame = globals::state->frameCount;
-	const bool consecutive = impl->lastFrame != UINT32_MAX && frame == impl->lastFrame + 1u;
+	const auto frame = RenderGraph::FrameClock::BeginFrame();
+	const bool consecutive = impl->lastFrame != UINT64_MAX && frame == impl->lastFrame + 1u;
 	const bool temporal = impl->state->shape.observed.temporal;
 	inputs.temporal = temporal;
 	inputs.historyValid = temporal && impl->hasScatteringHistory && consecutive && impl->textures->nearVolume.HistoryWritten();

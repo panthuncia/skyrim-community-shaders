@@ -5,6 +5,7 @@
 #include <span>
 
 #include "Buffer.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Setting.h"
 
 /** @brief Adds heightmap-based terrain shadow casting that updates dynamically with sun position. */
@@ -80,6 +81,20 @@ public:
 
 	/** @brief Builds the per-frame constant buffer data with terrain shadow scale, offset, and z-range. */
 	PerFrame GetCommonBufferData();
+
+	/** @brief Terrain Shadows' snapshot block: the land worldspace and the sun light's direction, captured on the game thread. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::TerrainShadows;
+
+		std::string landWorldspace;        // the editor ID of the worldspace that provides the land data, empty for none
+		bool sunLight = false;             // the shadow scene node has a directional sun light
+		RE::NiPoint3 sunLightDirection{};  // its world direction (NiDirectionalLight::GetWorldDirection)
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
 
 	winrt::com_ptr<ID3D11ComputeShader> shadowUpdateProgram = nullptr;
 

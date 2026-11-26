@@ -1,5 +1,6 @@
 #include "CloudShadows.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "../I18n/I18n.h"
 #include "Effects11.h"
@@ -251,17 +252,34 @@ void CloudShadows::SkyShaderHacks()
 	}
 }
 
+void CloudShadows::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::cloudShadows.loaded)
+		return;
+	Block block{};
+	if (const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)) {
+		block.fullSky = sky->mode.get() == RE::Sky::Mode::kFull;
+		block.climate = sky->currentClimate != nullptr;
+		if (const auto* clouds = sky->clouds) {
+			// Slots past numLayers can still hold a previous weather's cloud geometry
+			block.layerCount = static_cast<std::uint32_t>(std::min(static_cast<int>(clouds->numLayers), kMaxCloudLayers));
+			for (std::uint32_t i = 0; i < block.layerCount; ++i)
+				block.layers[i] = reinterpret_cast<std::uintptr_t>(clouds->clouds[i].get());
+		}
+	}
+	a_builder.Set(block);
+}
+
 int CloudShadows::FindCloudLayer(RE::BSRenderPass* Pass)
 {
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (!sky || !sky->clouds)
+	const auto& snapshot = Snapshot::Current();
+	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	if (!frame)
 		return -1;
-
-	// Slots past numLayers can still hold a previous weather's cloud geometry
-	const int layerCount = std::min(static_cast<int>(sky->clouds->numLayers), kMaxCloudLayers);
-	for (int i = 0; i < layerCount; i++) {
-		if (sky->clouds->clouds[i].get() == Pass->geometry)
-			return i;
+	const auto key = reinterpret_cast<std::uintptr_t>(Pass->geometry);
+	for (std::uint32_t i = 0; i < frame->layerCount; i++) {
+		if (frame->layers[i] == key)
+			return static_cast<int>(i);
 	}
 	return -1;
 }
@@ -294,16 +312,16 @@ void CloudShadows::ModifySky(RE::BSRenderPass* Pass, bool a_reflectionFace)
 void CloudShadows::ReflectionsPrepass()
 {
 	if (frameChecker.IsNewFrame()) {
-		if ((CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->mode.get() != RE::Sky::Mode::kFull) ||
-			!CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->currentClimate)
+		const auto& snapshot = Snapshot::Current();
+		const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+		if (!frame || !frame->fullSky || !frame->climate)
 			return;
 
 		auto context = globals::d3d::context;
 
 		globals::profiler->BeginPass("CloudShadows::OcclusionCopy");
 		// No cloud layer draws, so nothing would overwrite the last weather's occlusion
-		auto clouds = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->clouds;
-		if (!clouds || clouds->numLayers == 0) {
+		if (frame->layerCount == 0) {
 			if (!occlusionClearedWithoutClouds) {
 				// Layer operations of the ReflectionsPrepass run that follows, before its occlusion copy.
 				for (int face = 0; face < 6; ++face)
@@ -354,6 +372,7 @@ ID3D11ShaderResourceView* CloudShadows::OcclusionSRV() const
 void CloudShadows::PostPostLoad()
 {
 	Hooks::Install();
+	Snapshot::RegisterCapture(&CloudShadows::Capture);
 }
 
 void CloudShadows::EarlyPrepass()

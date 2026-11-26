@@ -29,6 +29,7 @@
 #include "RenderGraph/DepthViewSource.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/Observed.h"
+#include "RenderGraph/FrameClock.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/PublishedResources.h"
@@ -157,7 +158,7 @@ struct ORGViewAtmosphereVolume::Impl
 	std::uint32_t written = 0;
 	const void* committedVersion = nullptr;
 	std::optional<std::uint32_t> committedWritten;
-	std::uint32_t lastFrame = UINT32_MAX;
+	std::uint64_t lastFrame = UINT64_MAX;  // the render frame (FrameClock) of the last run
 	ViewAtmosphere::Parameters last{};
 	std::uint32_t lastShadowBits = 0;
 	bool reported = false;
@@ -395,8 +396,8 @@ ViewAtmosphere::Parameters ORGViewAtmosphereVolume::Stage()
 	auto parameters = atmosphere.ParametersFor(layout, useFog, false);
 	const bool changed = std::memcmp(state.last.grids, parameters.grids, sizeof(parameters.grids)) != 0 ||
 	                     std::memcmp(&state.last.atlas, &parameters.atlas, sizeof(parameters.atlas)) != 0 || state.last.flags.y != parameters.flags.y;
-	const auto frame = globals::state->frameCount;
-	const bool continuous = !changed && state.lastFrame != UINT32_MAX && state.lastFrame + 1u == frame && adopted.Written(state.pair[staged.history]);
+	const auto frame = RenderGraph::FrameClock::BeginFrame();
+	const bool continuous = !changed && state.lastFrame != UINT64_MAX && state.lastFrame + 1u == frame && adopted.Written(state.pair[staged.history]);
 	parameters.history = atmosphere.ParametersFor(layout, useFog, continuous).history;
 
 	// flags.z as Render finds them. The commit clears what the registration it runs does not bind.
@@ -450,7 +451,7 @@ void ORGViewAtmosphereVolume::Commit(const Inputs* a_held, ViewAtmosphere::Param
 	state.committedWritten = source;
 	state.committedVersion = RenderGraph::Frame::Revision::Adopted().Version(state.pair[source]);
 	state.written = source;
-	state.lastFrame = globals::state->frameCount;
+	state.lastFrame = RenderGraph::FrameClock::BeginFrame();
 	state.last = a_parameters;
 	if (!std::exchange(state.reported, true)) {
 		const auto& g = a_parameters.grids;

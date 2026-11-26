@@ -145,6 +145,18 @@ namespace Snapshot
 	enum class BlockId : std::uint16_t
 	{
 		TreeWind,  // Features/TreeWind.h, TreeWind::Block
+		// Sky, atmosphere and lighting (snap1-sky)
+		SkySync,               // Features/SkySync.h, SkySync::Block
+		PhysicalSky,           // Features/PhysicalSky.h, PhysicalSky::Block
+		ProceduralSun,         // Features/ProceduralSun.h, ProceduralSun::Block
+		ProceduralAurora,      // Features/ProceduralAurora.h, ProceduralAurora::Block
+		CloudShadows,          // Features/CloudShadows.h, CloudShadows::Block
+		Skylighting,           // Features/Skylighting.h, Skylighting::Block
+		TerrainShadows,        // Features/TerrainShadows.h, TerrainShadows::Block
+		InteriorSun,           // Features/InteriorSun.h, InteriorSun::Block
+		VolumetricLighting,    // Features/VolumetricLighting.h, VolumetricLighting::Block
+		WetnessEffects,        // Features/WetnessEffects.h, WetnessEffects::Block
+		ExponentialHeightFog,  // Features/ExponentialHeightFog.h, ExponentialHeightFog::Block
 		Count
 	};
 

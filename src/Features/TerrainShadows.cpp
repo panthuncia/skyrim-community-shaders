@@ -1,5 +1,6 @@
 #include "TerrainShadows.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include <bit>
 #include <cctype>
@@ -149,14 +150,28 @@ namespace
 		BindShadowHeight(nullptr);
 	}
 
-	// Heightmaps are keyed by the worldspace that provides the land data.
+	// Heightmaps are keyed by the worldspace that provides the land data. The capture's.
 	RE::TESWorldSpace* GetLandWorldspace()
 	{
-		auto tes = CS_ENGINE_READ(TES, RecordTime, globals::game::tes);
+		auto tes = CS_ENGINE_READ(TES, CapturePoint, globals::game::tes);
 		auto worldspace = tes ? tes->GetRuntimeData2().worldSpace : nullptr;
 		while (worldspace && worldspace->parentWorld && worldspace->parentUseFlags.any(RE::TESWorldSpace::ParentUseFlag::kUseLandData))
 			worldspace = worldspace->parentWorld;
 		return worldspace;
+	}
+
+	/** @brief The adopted snapshot's block, or null before the first. */
+	const TerrainShadows::Block* FrameBlock()
+	{
+		const auto& snapshot = Snapshot::Current();
+		return snapshot ? snapshot->Block<TerrainShadows::Block>() : nullptr;
+	}
+
+	/** @brief The frame's land worldspace editor ID, empty for none. */
+	std::string FrameLandWorldspace()
+	{
+		const auto* frame = FrameBlock();
+		return frame ? frame->landWorldspace : std::string{};
 	}
 }
 
@@ -169,8 +184,26 @@ TerrainShadows::TerrainShadows()
 	settings.EnableTerrainShadow.Bind(CS::SettingRegistry::Declare("TerrainShadows.EnableTerrainShadow"));
 }
 
+void TerrainShadows::Capture(Snapshot::Builder& a_builder)
+{
+	if (!globals::features::terrainShadows.loaded)
+		return;
+	Block block{};
+	if (const auto* worldspace = GetLandWorldspace())
+		block.landWorldspace = worldspace->GetFormEditorID();
+	if (const auto* shaderManager = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState))
+		if (auto* shadowSceneNode = shaderManager->shadowSceneNode[0])
+			if (const auto& sunLight = shadowSceneNode->GetRuntimeData().sunLight; sunLight && sunLight->light)
+				if (auto* dirLight = skyrim_cast<RE::NiDirectionalLight*>(sunLight->light.get())) {
+					block.sunLight = true;
+					block.sunLightDirection = dirLight->GetWorldDirection();
+				}
+	a_builder.Set(block);
+}
+
 void TerrainShadows::PostPostLoad()
 {
+	Snapshot::RegisterCapture(&TerrainShadows::Capture);
 	ConsoleCommandHook::Install();
 	PapyrusSetGlobalValueHook::Install();
 }
@@ -375,10 +408,10 @@ void TerrainShadows::CompileComputeShaders()
 
 bool TerrainShadows::IsHeightMapReady()
 {
-	auto worldspace = GetLandWorldspace();
+	const auto worldspace = FrameLandWorldspace();
 	// On the render graph the graph holds the heightmap: texHeightMap is null there.
 	const bool heightMap = texHeightMap || ORGTerrainShadows::Get().ShadowHeightSRV();
-	return worldspace && heightMap && cachedHeightmap && cachedHeightmap->worldspace == worldspace->GetFormEditorID();
+	return !worldspace.empty() && heightMap && cachedHeightmap && cachedHeightmap->worldspace == worldspace;
 }
 
 bool TerrainShadows::IsShadowMapReady()
@@ -416,11 +449,10 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 
 void TerrainShadows::LoadHeightmap()
 {
-	auto worldspace = GetLandWorldspace();
-	if (!worldspace)
+	std::string worldspace_name = FrameLandWorldspace();
+	if (worldspace_name.empty())
 		return;
 
-	std::string worldspace_name = worldspace->GetFormEditorID();
 	if (!heightmaps.contains(worldspace_name))  // no height map for that, but we don't remove cache
 		return;
 
@@ -553,17 +585,9 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 	constexpr uint updateLength = 128u;
 	constexpr uint logUpdateLength = std::bit_width(128u) - 1;  // integer log2, https://stackoverflow.com/questions/994593/how-to-do-an-integer-log2-in-c
 
-	// Runs before the world accumulator is current, which can still be a freed menu (e.g. local map) accumulator.
-	auto shadowSceneNode = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0];
-	if (!shadowSceneNode)
-		return false;
-
-	auto shadowSunLight = shadowSceneNode->GetRuntimeData().sunLight;
-	if (!shadowSunLight || !shadowSunLight->light)
-		return false;
-
-	auto sunLight = skyrim_cast<RE::NiDirectionalLight*>(shadowSunLight->light.get());
-	if (!sunLight)
+	// The sun light as the capture found it.
+	const auto* frame = FrameBlock();
+	if (!frame || !frame->sunLight)
 		return false;
 
 	/* ---- UPDATE CB ---- */
@@ -577,7 +601,7 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 	if (a_refreshImmediately)
 		shadowUpdateIdx = 0;
 	if (shadowUpdateIdx == 0) {
-		const auto worldDirection = sunLight->GetWorldDirection();
+		const auto& worldDirection = frame->sunLightDirection;
 		float3 dirLightDir = { worldDirection.x, worldDirection.y, worldDirection.z };
 		if (dirLightDir.z > 0)
 			dirLightDir = -dirLightDir;

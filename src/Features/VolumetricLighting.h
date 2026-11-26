@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/Setting.h"
 
 /** @brief Adds configurable volumetric lighting with god rays and atmospheric scattering effects. */
@@ -64,6 +65,21 @@ public:
 	 * graph the quality is the adopted revision's, so the engine's volume size matches the declared volume.
 	 */
 	virtual void EarlyPrepass() override;
+
+	/** @brief Volumetric Lighting's snapshot block: the screen size and the TES's interior cell, captured on the game thread. */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::VolumetricLighting;
+
+		std::int32_t screenWidth = 0;  // BSGraphics::State's screen size
+		std::int32_t screenHeight = 0;
+		bool interior = false;    // the TES has an interior cell
+		bool cellHasSun = false;  // InteriorSun::CellHasSun of that cell
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
 
 	virtual bool IsCore() const override { return true; };
 

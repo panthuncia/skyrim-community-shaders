@@ -24,6 +24,7 @@
 #include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/Observed.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameClock.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/ProgramService.h"
 #include "RenderGraph/PublishedResources.h"
@@ -192,7 +193,7 @@ struct ORGViewAtmosphereReflection::Impl
 
 	bool transportWritten = false;  // the sky SH holds a run's output, so it is cleared when the medium stops
 	bool reportedRun = false;       // the first run is logged once
-	std::uint32_t ranFrame = UINT32_MAX;  // the frame whose first cubemap render ran the client
+	std::uint64_t ranFrame = UINT64_MAX;  // the render frame (FrameClock) whose first cubemap render ran the client
 
 	/** @brief The null descriptor, made once. */
 	void MakeNull()
@@ -267,7 +268,7 @@ struct ORGViewAtmosphereReflection::Impl
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return;
-		ranFrame = globals::state->frameCount;
+		ranFrame = RenderGraph::FrameClock::BeginFrame();
 		const auto held = client.Held(Anchor::ReflectionsPrepass);
 		Parameters words{};
 		if (held && RunsNow(*held)) {
@@ -276,7 +277,7 @@ struct ORGViewAtmosphereReflection::Impl
 			gate->OpenDispatch(kMediumEntry, kMediumGroups[0], kMediumGroups[1], kMediumGroups[2]);
 			transportWritten = true;
 			if (!std::exchange(reportedRun, true))
-				logger::info("[ORG] Atmosphere and Fog: the first reflection medium runs at frame {} (flags.y {}, flags.z {}, clouds {})", globals::state->frameCount,
+				logger::info("[ORG] Atmosphere and Fog: the first reflection medium runs at frame {} (flags.y {}, flags.z {}, clouds {})", RenderGraph::FrameClock::BeginFrame(),
 					words[kFlagsWord + 1], words[kFlagsWord + 2], held->clouds);
 		} else if (std::exchange(transportWritten, false)) {
 			// D3D11's CloudDiffuseTransport() is null without the medium. Zero reads as no transport.
@@ -338,7 +339,7 @@ struct ORGViewAtmosphereReflection::Impl
 		};
 		// The anchor runs at every cubemap render, and the recipe holds one instance a frame. So only the frame's first render runs
 		// the client: the medium's inputs do not change within a frame. D3D11 builds the same medium again at each render.
-		a_client.active = [state = a_self] { return state->ranFrame != globals::state->frameCount; };
+		a_client.active = [state = a_self] { return state->ranFrame != RenderGraph::FrameClock::BeginFrame(); };
 		a_client.commit = [state = a_self](const FrameAnchors::Point&) { state->Commit(); };
 		// Every registration commits the same run, so the one the schedule holds keeps running until a newer one is adopted (by id).
 		logger::info("[ORG] Atmosphere and Fog: a reflection medium for the next revision ({}; clouds {}, IBL {}, probes {}, terrain heights {}, cloud layer {})",

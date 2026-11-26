@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Snapshot/FrameSnapshot.h"
 #include "Utils/AsyncShaderSet.h"
 #include "Utils/Setting.h"
 #include "Utils/TexturePreview.h"
@@ -94,6 +95,34 @@ struct PhysicalSky final : public Feature
 	/** @brief Render thread: publishes finished shaders and queues each group the first frame it is needed. */
 	void UpdateShaders();
 	bool ShadersOK();
+
+	/**
+	* @brief Physical Sky's snapshot block: the game data Reset and Prepass read, captured on the game thread. Lightning and the
+	* cloud wind step by the snapshot's game time, once per new snapshot.
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::PhysicalSky;
+
+		std::string worldspace;         // the current worldspace's editor ID (the TES worldspace, else the player cell's), empty for none
+		std::uint32_t screenWidth = 0;  // BSGraphics::State's screen size
+		std::uint32_t screenHeight = 0;
+		bool cameraRoot = false;        // the player camera has a root node
+		RE::NiPoint3 cameraPosition{};  // its world translate
+		bool skyRoot = false;           // the sky has a root node: the billboard tangents below are set
+		float sunTan = 0.f;             // the sun, Masser and Secunda billboards' half tangents as seen from the sky root, 0 for none
+		float masserTan = 0.f;
+		float secundaTan = 0.f;
+		bool sunLight = false;             // the shadow scene node has a directional sun light
+		RE::NiPoint3 sunLightDirection{};  // its world direction (NiDirectionalLight::GetWorldDirection)
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
+	/** @brief The adopted snapshot's block, or null before the first. Render thread. */
+	static const Block* Frame();
 
 	// Draw
 	void Reset() override;
@@ -694,6 +723,9 @@ struct PhysicalSky final : public Feature
 	void RenderCloudBoundary(const CloudBoundaryCB& a_data, NdfTextureSet a_textures);
 	void LoadCloudTextures();
 	void UpdateCloudWind();
+	/// The game seconds the frame's snapshot stands for the first time Reset sees it, 0 on a repeat. Lightning and the wind step by it.
+	float frameGameDelta = 0.f;
+	std::uint64_t steppedSnapshot = 0;  ///< the snapshot Reset last stepped for
 	/// Resolves the worldspace-scoped storm and rejects invalid authored parameters.
 	void UpdateCloudStorm(const std::string& worldspace);
 	/// Identifies geometry owned by the configured reference while its cloud replacement is ready.
