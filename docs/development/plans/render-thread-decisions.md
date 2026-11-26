@@ -345,3 +345,23 @@ pushes until the user is back.
     old-size scene (2 of 9 resize runs); ORG records a stage's old build against new target versions until the new build
     arrives (recordings dropped, runs pass); FSR via Streamline destroys an image view still in use when it remakes its
     context on resize.
+
+## 2026-11-26: phase 3 list culls stopped, milestone 3 (snap3-culls; director accepted)
+
+95. **Every value game code read from the main list culls has a native producer:** `kAccumulated` and fades of DCLF-listed
+    roots (including mixed, not-yet-admitted entries and actors) come from DCLF; animated roots DCLF does not list get
+    `kAccumulated` from S7; the portal map comes from DCLF's RoomVisibility. Everything else the culls did is render-only
+    and stops (billboards, switches, ordered nodes, decal nodes, multibound caches, particle appends, light receivers, the
+    first-person cull).
+96. **S8 fades** (`SideEffects::StepFade`) step once per game update, rendered or skipped, for S7's in-view roots that DCLF
+    doesn't write: the leaf/tree LOD step, BSFadeNode::OnVisible's fade part (type 6 ported, otherwise the engine's own CPU
+    fade function SE 98849 / AE 105486, called on the game thread as AE 19384 does; decision 8) and the +0x13C stamp.
+    Parity: 8,746 roots, 0 differences. Fade roots that are neither DCLF-listed nor animated references are no longer
+    stepped: no game code reads their fade.
+97. **Native skips the main list culls inside Main::Draw** (BuildSceneLists' queue, Begin and Finish, FirstPersonCulling, the
+    list-clear jobs; bytes checked, mismatch fatal), and `SelectCasters` queues no list accumulation jobs. The engine function
+    after the full-frustum cull (it sets culling globals) still runs. Mixed entries are stood in like whole ones. The
+    decision 53 test-mode crash is gone.
+98. **Main::RenderWorld is next** (about 28 of the 63 engine render calls per native world frame): CS drives its stage
+    points from its own frame. A native screen-blood pass must come first (the last `BSCullingProcess::Process` is the
+    screen splatter's cull inside RenderWorld), or blood disappears.
