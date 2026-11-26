@@ -10,13 +10,20 @@
 #include "RenderGraph/Async/EventQueue.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/EngineReads.h"
+#include "Snapshot/FaceTint.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <memory>
+#include <span>
+#include <vector>
 
 namespace DCLF::MaterialWrites
 {
@@ -232,6 +239,61 @@ namespace DCLF::MaterialWrites
 		{
 			NoteWritten(SceneWriter::Arg<RE::BSShaderMaterial*>(a_event, 0));
 		}
+
+		/**
+		 * @brief Captures again every material under a_root that names one of a_textures, whose renderer texture the engine replaced.
+		 * The material's bytes did not change, but the view its texture field resolves to did. Returns how many it found.
+		 */
+		std::uint32_t NoteTexturesReplaced(RE::NiAVObject* a_root, std::span<const RE::NiPointer<RE::NiSourceTexture>> a_textures)
+		{
+			if (!a_root)
+				return 0;
+			std::uint32_t found = 0;
+			auto snapshot = std::make_unique<MaterialPort::MaterialSnapshot>();
+			RE::BSVisit::TraverseScenegraphGeometries(a_root, [&](RE::BSGeometry* a_geometry) {
+				const auto* property = a_geometry->GetGeometryRuntimeData().shaderProperty.get();
+				const auto* material = property ? property->material : nullptr;
+				if (!material || !MaterialPort::Capture(*material, *snapshot))
+					return RE::BSVisit::BSVisitControl::kContinue;
+				for (std::uint32_t i = 0; i < snapshot->textureCount; ++i) {
+					const void* texture = snapshot->At<const void*>(snapshot->textures[i].offset);
+					if (std::ranges::any_of(a_textures, [&](const auto& a_texture) { return a_texture.get() == texture; })) {
+						NoteWritten(material);
+						++found;
+						break;
+					}
+				}
+				return RE::BSVisit::BSVisitControl::kContinue;
+			});
+			return found;
+		}
+
+		/**
+		 * @brief FaceGen::UpdatePending (SE 26455, AE 27041), guest only. It draws each queued face tint and gives the job's head a new
+		 * renderer texture with it, releasing the empty one the head was made with. The face material keeps its NiSourceTexture, so
+		 * no write hook sees the swap, and its captured view stays the empty texture. The heads are read before the call, and a task
+		 * on the main thread captures the player's materials that name them again (the loading loop calls it on another thread).
+		 * Native removes both calls and fills the head's own texture (Snapshot::FaceTint).
+		 */
+		struct FaceTintUpdate
+		{
+			static void thunk()
+			{
+				auto heads = Snapshot::FaceTint::QueuedHeads();
+				func();
+				if (heads.empty())
+					return;
+				auto* tasks = SKSE::GetTaskInterface();
+				if (!tasks)
+					return;
+				tasks->AddTask([heads = std::move(heads)] {
+					auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
+					const std::uint32_t found = player ? NoteTexturesReplaced(player->Get3D1(false), heads) + NoteTexturesReplaced(player->Get3D1(true), heads) : 0;
+					logger::info("[DCLF] face tint: {} heads got new textures; {} of the player's materials captured again", heads.size(), found);
+				});
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
 	}
 
 	void Install()
@@ -245,6 +307,11 @@ namespace DCLF::MaterialWrites
 		if (!subscribed)
 			::RenderGraph::Fatal("Drawcall Limit Fix", "the scene writer framework refused the material write hooks after reporting them installed");
 		logger::info("[DCLF] material write hooks subscribed: float and colour controllers, 14 material classes");
+		if (!RenderGraph::Engine::Native::Requested()) {
+			stl::detour_thunk<FaceTintUpdate>(REL::RelocationID(26455, 27041));
+			if (!FaceTintUpdate::func.address())
+				::RenderGraph::Fatal("Drawcall Limit Fix", "FaceGen::UpdatePending could not be hooked, so face materials would keep their empty tint textures");
+		}
 	}
 
 	void NoteWritten(const RE::BSShaderMaterial* a_material)

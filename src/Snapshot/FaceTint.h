@@ -68,4 +68,10 @@ namespace Snapshot::FaceTint
 
 	/** @brief The counters since the last call, as part of the side effects line. Empty outside native. */
 	std::string TakeStatsLine();
+
+	/**
+	* @brief The heads (NiSourceTextures) of the engine's queued tint jobs, read under the queue's lock. Any mode. Guest's Drawcall Limit
+	* Fix reads them before UpdatePending gives those heads new textures.
+	*/
+	std::vector<RE::NiPointer<RE::NiSourceTexture>> QueuedHeads();
 }

@@ -223,4 +223,18 @@ namespace Snapshot::FaceTint
 		return fmt::format("face tint bakes queued {}, drawn {}, copied {} ({} frames waited for the step)", stats.queued.exchange(0), stats.drawn.exchange(0),
 			stats.copied.exchange(0), stats.waits.exchange(0));
 	}
+
+	std::vector<RE::NiPointer<RE::NiSourceTexture>> QueuedHeads()
+	{
+		// The queue and lock CaptureBlock drains.
+		static REL::Relocation<RE::BSSpinLock*> lock{ REL::RelocationID(515577, 401752) };
+		static REL::Relocation<RE::BSTArray<std::byte*>*> queue{ REL::RelocationID(515574, 401749) };
+		std::vector<RE::NiPointer<RE::NiSourceTexture>> heads;
+		lock->Lock();
+		for (auto* job : *queue)
+			if (auto* head = job ? reinterpret_cast<RE::NiPointer<RE::NiSourceTexture>*>(job + kJobHead)->get() : nullptr)
+				heads.emplace_back(head);
+		lock->Unlock();
+		return heads;
+	}
 }
