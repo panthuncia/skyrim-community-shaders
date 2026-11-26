@@ -18,6 +18,7 @@ namespace Testing
 		// The step runner's state. Render thread only.
 		std::uint32_t lastRunFrame = 0;  // the frame the previous step ran at
 		double waitStart = -1.0;         // when the current step's wait started; below zero: none
+		double shotWaitStart = -1.0;     // when the current step began to wait for the previous shot's file; below zero: none
 
 		// An "adopted" await. The previous step's writes, and what the main thread does with them in the frame after, are taken
 		// by the Begins of the next two frames. So the variables' serial is read two Presents after that step ran.
@@ -165,6 +166,20 @@ namespace Testing
 				SetStepState(fmt::format("waiting for frame {}", *anchor + step.frames));
 				return;
 			}
+			// A shot is saved before the next step runs. A run's first shot waits for the revision that switches its copy in,
+			// so a coc right after it would otherwise capture the loading screen.
+			if (globals::features::screenshotFeature.ScriptedCapturesPending()) {
+				const double limit = step.waitSeconds > 0.0 ? step.waitSeconds : stepWait;
+				if (shotWaitStart < 0.0)
+					shotWaitStart = Now();
+				if (Now() - shotWaitStart > limit) {
+					Finish("failed", fmt::format("step {}: the previous shot was not saved after {:.0f} s", index, limit), 0u);
+					return;
+				}
+				SetStepState("waiting for the previous shot to be saved");
+				return;
+			}
+			shotWaitStart = -1.0;
 			if (!step.awaitCondition.empty() && !awaitHeld) {
 				const double limit = step.waitSeconds > 0.0 ? step.waitSeconds : stepWait;
 				if (waitStart < 0.0)
