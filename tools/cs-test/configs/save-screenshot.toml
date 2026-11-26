@@ -1,8 +1,7 @@
-# A save's screenshot (S15): a quicksave and an autosave through the save request pump (both wait for a save screenshot, request
+# A save's screenshot (S15): an autosave and a quicksave through the save request pump (both wait for a save screenshot, request
 # bit 29), then the newest save loaded again. A written save must hold its screenshot (tools/cs-test/essshot.py reads it from the
-# .ess). The pump skips the autosave while AE 380678 is set, as it is in the lab profile, so only the quicksave is written. Native
-# logs "save screenshot 1 copied by the render side, completed for the game". Compose it: native-vulkan+save-screenshot,
-# guest+save-screenshot.
+# .ess). The pump writes only the first of the two (in guest too): the second, 300 frames later, is asked for and dropped. Native logs
+# "save screenshot 1 copied by the render side, completed for the game". Compose it: native-vulkan+save-screenshot, guest+save-screenshot.
 extends = ["base"]
 
 [run]
@@ -12,13 +11,13 @@ timeout_s = 300
 at = "world-ready"
 frames = 60
 do = "call"
-arg = "imagespace.save=quick"
+arg = "imagespace.save=auto"
 
 [[steps]]
 at = "previous"
 frames = 300
 do = "call"
-arg = "imagespace.save=auto"
+arg = "imagespace.save=quick"
 
 [[steps]]
 at = "previous"
