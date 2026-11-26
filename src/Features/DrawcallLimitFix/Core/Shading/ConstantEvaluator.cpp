@@ -91,18 +91,9 @@ namespace DCLF
 		}
 		static RE::Setting* quarter = CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("iShadowMaskQuarter:Display"));
 		in.shadowMaskFilter = (quarter && quarter->GetInteger() != 4) ? 1u : 0u;
-		// Fog from the current scene graph's fog property, FUN_1414dfad0 in AE.
+		// Fog from the current scene graph's fog property.
 		const auto& shaderState = CS_ENGINE_READ(ShaderManagerState, CapturePoint, RE::BSShaderManager::State::GetSingleton());
-		auto* sceneNode = shaderState.shadowSceneNode[shaderState.sceneGraph];
-		if (const auto* fog = sceneNode ? sceneNode->GetRuntimeData().fogProperty.get() : nullptr) {
-			in.fog = true;
-			in.fogNear = fog->nearDistance;
-			in.fogFar = fog->farDistance;
-			in.fogPower = fog->power;
-			in.fogClamp = fog->clamp;
-			in.fogNearColor = { fog->nearColor.red, fog->nearColor.green, fog->nearColor.blue };
-			in.fogFarColor = { fog->farColor.red, fog->farColor.green, fog->farColor.blue };
-		}
+		SampleFog(shaderState.shadowSceneNode[shaderState.sceneGraph], in);
 		in.invFrameBufferRange = shaderState.invFrameBufferRange;
 		// ColourOutputClamp from the fLightingOutputColourClamp* settings, copied when the shader is created.
 		static RE::Setting* clampSettings[3] = {
@@ -113,6 +104,20 @@ namespace DCLF
 		for (std::uint32_t i = 0; i < 3; ++i)
 			in.colourClamp[i] = clampSettings[i] ? clampSettings[i]->GetFloat() : 1.0f;
 		return in;
+	}
+
+	void SampleFog(const RE::ShadowSceneNode* a_sceneNode, TechniqueInputs& a_inputs)
+	{
+		a_inputs.fog = false;
+		if (const auto* fog = a_sceneNode ? a_sceneNode->GetRuntimeData().fogProperty.get() : nullptr) {
+			a_inputs.fog = true;
+			a_inputs.fogNear = fog->nearDistance;
+			a_inputs.fogFar = fog->farDistance;
+			a_inputs.fogPower = fog->power;
+			a_inputs.fogClamp = fog->clamp;
+			a_inputs.fogNearColor = { fog->nearColor.red, fog->nearColor.green, fog->nearColor.blue };
+			a_inputs.fogFarColor = { fog->farColor.red, fog->farColor.green, fog->farColor.blue };
+		}
 	}
 
 	void EvaluateTechnique(std::uint32_t a_passDescriptor, const TechniqueInputs& a_inputs, TechniqueConstants& a_out)

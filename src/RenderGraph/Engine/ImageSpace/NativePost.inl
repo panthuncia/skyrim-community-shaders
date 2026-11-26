@@ -1417,6 +1417,175 @@ namespace NativePost
 		KeepTargets(a_output);
 		++r.native[0];
 	}
+
+	/**
+	* @brief A menu scene's ImageSpace data in a_data: the manager's override (+0xB0) as ImageSpaceManager's copy (AE 0x141482ba0: clear
+	* 0x1414cab10, copy 0x1414cab40, clear) and finish (AE 0x141482c90, 0x1414cabb0) make it, in their float operations. Data 0x6C to
+	* 0x83 keep what a_data held (the HDR effect reads none of it). False without an override.
+	*/
+	bool MenuData(std::array<float, 37>& a_data)
+	{
+		const auto base = ManagerBase();
+		const auto override = base ? Field<std::uintptr_t>(base, 0xb0) : 0;
+		if (!override)
+			return false;
+		const auto* source = reinterpret_cast<const float*>(override);
+		for (std::uint32_t i = 0; i < 20; ++i)
+			a_data[i] = source[i];
+		// The copy keeps +0x30 at +0x98 and scales +0x34 to +0x3C by it; the finish divides them back while +0x30 is positive.
+		const float kept = a_data[12];
+		a_data[13] = kept * a_data[13];
+		a_data[14] = a_data[14] * kept;
+		a_data[15] = kept * a_data[15];
+		if (0.0f < a_data[12]) {
+			const float inverse = 1.0f / a_data[12];
+			a_data[12] = kept;
+			a_data[13] = inverse * a_data[13];
+			a_data[14] = inverse * a_data[14];
+			a_data[15] = inverse * a_data[15];
+		}
+		// Cleared: +0x50 to +0x6B and +0x84; the finish then copies +0x40 to +0x4C into +0x84 to +0x90.
+		for (std::uint32_t i = 20; i < 27; ++i)
+			a_data[i] = 0.0f;
+		for (std::uint32_t i = 0; i < 4; ++i)
+			a_data[33 + i] = a_data[16 + i];
+		return true;
+	}
+
+	/**
+	* @brief A world HDR step's key as the menu composite registers it (MenuStepList, TakeMenuStep): the downsample by its source, the
+	* tonemap by its parity, source and final target, the luminance and bloom steps by the same variants as the world's.
+	*/
+	StepKey MenuHdrKey(const StepKey& a_key, std::int32_t a_source, std::int32_t a_final)
+	{
+		StepKey key{ WorldScope::MenuHdr, a_key.effect, a_key.variant };
+		if (a_key.effect == Effects::ISHDRDownSample4)
+			key.variant = InOut(a_source, 0);
+		else if (a_key.scope == WorldScope::Tonemap)
+			key.variant = static_cast<std::uint16_t>(a_key.variant | InOut(a_source, a_final));
+		return key;
+	}
+
+	/** @brief A menu scene's HDR steps from a_source into a_final: the world HDR effect's, from a_data with the adaptation reset (AE 0x1414d13c0). */
+	std::vector<NativeStep> MenuHdrSteps(const ImageSpaceFrame& a_frame, PostState& a_state, std::int32_t a_source, std::int32_t a_final, std::uint32_t a_levels)
+	{
+		a_state.adaptTarget = -1;
+		a_state.resetPending = false;
+		// The menu render swaps the framebuffer range for 1 around its draws (AE 0x140972590: 414582 and 414583 from constants), which
+		// the bloom blur's rows read (observed: 1, 1).
+		auto frame = a_frame;
+		frame.range = 1.0f;
+		auto steps = HdrSteps(frame, a_state, a_source, a_levels);
+		for (auto& step : steps)
+			step.key = MenuHdrKey(step.key, a_source, a_final);
+		return steps;
+	}
+
+	/** @brief The observe step's steps for the menu render in progress (CS_MENU_SCENES_OBSERVE). */
+	struct MenuHdrObserve
+	{
+		std::vector<NativeStep> steps;
+		std::uint64_t compared = 0, differ = 0, missing = 0, logged = 0;
+	};
+
+	MenuHdrObserve& MenuObserve()
+	{
+		static MenuHdrObserve observe;
+		return observe;
+	}
+
+	bool MenuObserveOn()
+	{
+		static const bool on = RenderGraph::Engine::Native::Active() && Switches::On("CS_MENU_SCENES_OBSERVE");
+		return on;
+	}
+
+	/** @brief Observe: at the engine's menu RenderEndOfFrameEffects, CS's steps for the same render, from the engine's state now. */
+	void BeginMenuObserve(std::int32_t a_source, std::int32_t a_final)
+	{
+		auto& o = MenuObserve();
+		o.steps.clear();
+		const auto held = Menu().group.Held(0);
+		auto f = R().frame;
+		if (!f.read || !held || !held->levels || !MenuData(f.data))
+			return;
+		auto state = EngineState();
+		o.steps = MenuHdrSteps(f, state, a_source, a_final, held->levels);
+	}
+
+	/**
+	* @brief Native: the menu scene's HDR effect (UI3DSceneManager::Render's RenderEndOfFrameEffects with an override; AE 0x140972590),
+	* staged with CS's rows into the menu composite's steps, through the tonemap call site as the world's. False without an override.
+	*/
+	bool RunMenuHdr(std::int32_t a_source, std::int32_t a_final)
+	{
+		ZoneScopedN("CS.PostNative.MenuHdr");
+		auto& r = R();
+		auto f = r.frame;
+		if (!f.read || !MenuData(f.data))
+			return false;
+		const auto held = Menu().group.Held(0);
+		if (!Menu().group.Registered() || !held || !held->levels) {
+			Frame::Driver::NoteLaggedWork(Frame::SegmentId::Ui);
+			return true;
+		}
+		auto state = r.state;
+		EnterScope(ScopeKind::HDR);
+		RenderGraph::Engine::TonemapCallSite(static_cast<std::uint32_t>(a_source), static_cast<std::uint32_t>(a_final), [&](std::uint32_t a_from) {
+			auto& native = NativeSteps::Get();
+			for (const auto& step : MenuHdrSteps(f, state, static_cast<std::int32_t>(a_from), a_final, held->levels)) {
+				native.rows = step.rows;
+				native.rowsAt = {};
+				native.sprite = {};
+				native.effect = step.effect;
+				native.shader = ShaderOf(step.effect);
+				native.armed = true;
+				native.computeRows = false;
+				StageMenuKey(step.key, true, step.effect, false, {}, -1);
+				native.armed = false;
+				++r.staged;
+			}
+		});
+		LeaveScope();
+		r.state = state;
+		WriteBackHdr(state);
+		KeepTargets(a_final);
+		return true;
+	}
+}
+
+void ObserveMenuHdrStep(const StepKey& a_key)
+{
+	using namespace NativePost;
+	if (!MenuObserveOn())
+		return;
+	auto& o = MenuObserve();
+	const auto& native = NativeSteps::Get();
+	if (!native.armed)
+		return;
+	const auto found = std::ranges::find_if(o.steps, [&](const NativeStep& a_step) { return a_step.key == a_key; });
+	const auto describe = [](const NativeSteps::Rows& a_rows) {
+		std::string text;
+		for (std::uint32_t i = 0; i < a_rows.size / 4; ++i)
+			text += fmt::format("{}{}", i % 4 == 0 ? " |" : " ", reinterpret_cast<const float*>(a_rows.bytes.data())[i]);
+		return text;
+	};
+	if (found == o.steps.end()) {
+		if (o.missing++ < 8)
+			logger::info("[ORG] menu scenes observe: menu HDR step {} variant {:#x} has no CS step", kEffects[native.effect].effectName, a_key.variant);
+		return;
+	}
+	++o.compared;
+	const auto& mine = found->rows;
+	const bool differ = mine.size != native.rows.size || std::memcmp(mine.bytes.data(), native.rows.bytes.data(), mine.size) != 0;
+	if (differ) {
+		++o.differ;
+		if (o.logged++ < 16)
+			logger::info("[ORG] menu scenes observe: menu HDR step {} variant {:#x} rows differ: engine{} mine{}", kEffects[native.effect].effectName, a_key.variant,
+				describe(native.rows), describe(mine));
+	}
+	if (o.compared % 2000 == 0)
+		logger::info("[ORG] menu scenes observe: menu HDR steps compared {}, rows differ {}, without a CS step {}", o.compared, o.differ, o.missing);
 }
 
 /** @brief The HDR effect's hook: native in the world chain, else the engine's. */

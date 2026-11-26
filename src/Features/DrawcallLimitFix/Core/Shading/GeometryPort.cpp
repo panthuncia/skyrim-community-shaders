@@ -142,7 +142,7 @@ namespace DCLF::GeometryPort
 		return SamplePipelineFrame(sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr, false);
 	}
 
-	PipelineFrame SamplePipelineFrame(const RE::BSLight* a_sun, bool a_eyeZero)
+	PipelineFrame SamplePipelineFrame(const RE::BSLight* a_sun, bool a_eyeZero, const float* a_hdr)
 	{
 		EngineReadWindow::Touch("SamplePipelineFrame");
 		PipelineFrame frame;
@@ -153,7 +153,7 @@ namespace DCLF::GeometryPort
 			frame.sun = true;
 			// DirLightColor (0x1414dd5d5): the fade times the HDR multiplier, then each channel.
 			const float fade = At<const float>(light, kNiLightFade);
-			const float scale = fade * At<const float>(imageSpace, kImageSpaceHdr);
+			const float scale = fade * (a_hdr ? *a_hdr : At<const float>(imageSpace, kImageSpaceHdr));
 			for (std::uint32_t c = 0; c < 3; ++c)
 				frame.dirLightColor[c] = scale * At<const float>(light, kNiLightDiffuse + c * sizeof(float));
 			// Linear Lighting's LightingGeometryUpload rewrites it while it is on or overrides the sun: the colour in the working space,

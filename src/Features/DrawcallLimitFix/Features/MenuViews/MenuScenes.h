@@ -317,8 +317,11 @@ namespace DCLF::Features::MenuViews::Scenes
 			Snapshot::CameraView camera;
 			Snapshot::FrameCamera::Previous previous;
 			bool havePrevious = false;
+			bool shadowMaps = false;  // the render renders shadow maps (scheme 4 with a depth pass): shadow lights add their descriptor bits
+			// The scene node's shadow lights' dimmers as MistMenu's shadow render sets them (ShadowLightDimmers); empty outside scheme 4.
+			std::vector<std::pair<const RE::BSLight*, float>> shadowDimmers;
 		};
-		Inputs SampleInputs(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, const PreviousCamera& a_previous);
+		Inputs SampleInputs(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, const PreviousCamera& a_previous, bool a_shadowMaps);
 
 		/** @brief A draw's lights as GetRenderPasses gives a menu pass: the scene node's sun, its shadow lights, then its point lights. */
 		struct Lights
@@ -375,8 +378,13 @@ namespace DCLF::Features::MenuViews::Scenes
 		 */
 		bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out);
 
-		/** @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes). */
-		bool Owns(std::int32_t a_scheme);
+		/**
+		 * @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes), for a render with or
+		 * without its depth pass (a_keepDepth, UI3DSceneManager::Render's fourth argument).
+		 */
+		bool Owns(std::int32_t a_scheme, bool a_keepDepth);
+		/** @brief Notes a render's scheme and depth pass flag, for the detector's ownership (MenuViews::NativeOwns). Main thread. */
+		void NoteRender(std::int32_t a_scheme, bool a_keepDepth);
 
 		/**
 		 * @brief UI3DSceneManager::Render (AE 52727) in native mode for a scheme CS owns: its update half (lights, the root's update, the

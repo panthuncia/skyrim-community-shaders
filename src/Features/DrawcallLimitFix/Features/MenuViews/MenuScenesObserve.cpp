@@ -115,6 +115,13 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			return a_state.previous;
 		}
 
+		/** @brief Whether the engine's menu render renders shadow maps now: its colour accumulator's flag (+0x178), set for scheme 4 with a depth pass. */
+		bool ShadowMapsNow(const RE::UI3DSceneManager& a_manager)
+		{
+			const auto* accumulator = reinterpret_cast<const std::uint8_t*>(a_manager.unk10.get());
+			return accumulator && accumulator[0x178] != 0;
+		}
+
 		std::string GeometryName(const RE::BSGeometry* a_geometry)
 		{
 			return a_geometry && a_geometry->name.c_str() ? a_geometry->name.c_str() : "?";
@@ -231,10 +238,14 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			return;
 		// Inputs once per batch: the engine's own previous camera is the last menu render's in a menu frame.
 		if (!s.inputsMade) {
-			s.inputs = Native::SampleInputs(*manager, *s.camera, PreviousOf(s));
+			s.inputs = Native::SampleInputs(*manager, *s.camera, PreviousOf(s), ShadowMapsNow(*manager));
 			s.inputsMade = true;
 		}
 		const auto& in = s.inputs;
+		// The shadow lights' dimmers CS computes against the ones the engine's shadow render just set.
+		for (const auto& [light, dimmer] : in.shadowDimmers)
+			Note("shadow light dimmer", dimmer != light->lodDimmer,
+				std::format("{}: light {} engine {} mine {}", name, static_cast<const void*>(light), light->lodDimmer, dimmer));
 		Native::LightingResult mine;
 		std::string why;
 		const bool made = Native::ComputeLighting(in, *geometry, mine, why);
@@ -335,7 +346,7 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			return;
 		const auto name = GeometryName(a_pass->geometry);
 		if (auto* manager = RE::UI3DSceneManager::GetSingleton(); manager && !s.inputsMade) {
-			s.inputs = Native::SampleInputs(*manager, *s.camera, PreviousOf(s));
+			s.inputs = Native::SampleInputs(*manager, *s.camera, PreviousOf(s), ShadowMapsNow(*manager));
 			s.inputsMade = true;
 		}
 		Native::EffectResult mine;
