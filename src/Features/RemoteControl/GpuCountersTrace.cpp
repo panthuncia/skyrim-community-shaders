@@ -835,7 +835,7 @@ namespace GpuCounters::Trace
 				std::string names;
 				for (const auto& name : otherQueue)
 					names += std::format("{}{}", names.empty() ? "" : ", ", name);
-				report.warnings.push_back(std::format("{} selected passes ran on the compute or copy queue and are not measured (CS_DCLF_ASYNC_COMPUTE=0 moves DCLF's to the graphics queue): {}",
+				report.warnings.push_back(std::format("{} selected passes ran on the compute or copy queue and are not measured: {}",
 					otherQueue.size(), names));
 			}
 			for (const auto& metric : unsupported)

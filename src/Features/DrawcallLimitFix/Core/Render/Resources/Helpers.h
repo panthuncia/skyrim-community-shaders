@@ -23,21 +23,11 @@
 
 namespace DCLF::Draws
 {
-	// Live override of CS_DCLF_ASYNC_COMPUTE from the test harness. -1 none, 0 graphics, 1 compute.
-	inline std::atomic<int> asyncComputeOverride{ -1 };
 	// The least a sun caster's bound may project to, in texels, or 0 for off. It is data only, so it can change live for A/B tests.
 	inline std::atomic<float> shadowMinTexels{ 0.0f };
-	// These passes default to the graphics queue. They take about 0.03 ms, but cross-queue waits cost the graphics queue about
-	// 0.13 ms a frame (native mode). In guest mode FSR frame generation's interpolation shares DXVK's compute queue, and a graph
-	// batch waiting there deadlocks its present (render-graph.md, "Not with FSR frame generation"). CS_DCLF_ASYNC_COMPUTE=1
-	// forces the compute queue.
-	inline org::QueueKind AsyncComputeQueue()
-	{
-		const int forced = asyncComputeOverride.load(std::memory_order_relaxed);
-		const auto& value = SwitchValue(Switch::AsyncCompute);
-		const bool compute = forced >= 0 ? forced != 0 : !value.empty() && value != "0";
-		return compute ? org::QueueKind::Compute : org::QueueKind::Graphics;
-	}
+	// The queue of the passes that may run beside the frame's graphics work. ORG maps it to a queue of the device: its own
+	// compute queue, or the graphics queue where the device has none for it.
+	inline constexpr org::QueueKind AsyncComputeQueue() { return org::QueueKind::Compute; }
 
 	// The format that reads a depth resource's depth aspect in a shader, as DXGI names it.
 	inline rhi::Format DepthReadFormat(rhi::Format a_format)

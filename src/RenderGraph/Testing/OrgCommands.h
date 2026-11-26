@@ -10,7 +10,7 @@
 * - refresh[=<graph id>]: the graphs that looked that id up are built again, every graph without one;
 * - reload-shaders[=all|<file>]: a shader hot reload (the "reload" wait waits for the revision that adopts its versions);
 * - gpu-window=<label>, ts-dump=<epochs>, nvperf=<range>|<range>...[#<samples>][@<metrics>] (the "nvperf" wait);
-* - async-compute=0|1|default, pass-queries, heap-dedupe, list-heaps, list-barriers, rhi-globals, queue-boundary: what the next
+* - pass-queries, heap-dedupe, list-heaps, list-barriers, rhi-globals, queue-boundary: what the next
 *   builds record.
 */
 namespace RenderGraph::TestSupport

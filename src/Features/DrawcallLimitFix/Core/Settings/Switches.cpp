@@ -47,7 +47,6 @@ namespace DCLF
 		constexpr Entry kCore[] = {
 			// Features: unset is DCLF's full featureset; the startup log names a run that narrows one.
 			{ Dclf, "CS_DCLF", Reduced::Zero },
-			{ AsyncCompute, "CS_DCLF_ASYNC_COMPUTE", Reduced::Zero },
 			{ SceneCopies, "CS_DCLF_SCENE_COPIES", N },
 			{ Shrink, "CS_DCLF_SHRINK", N },
 			{ Cull, "CS_DCLF_CULL", Reduced::Cull },
