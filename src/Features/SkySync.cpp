@@ -1,6 +1,7 @@
 #include "SkySync.h"
 #include "../I18n/I18n.h"
 #include "RE/B/BSVolumetricLightingRenderData.h"
+#include "Snapshot/EngineReads.h"
 
 #include "LinearLighting.h"
 #include "Utils/Climate.h"
@@ -143,7 +144,7 @@ void SkySync::DrawSettings()
 			UpdateWorldspaceDisabled();
 		}
 
-		const auto player = RE::PlayerCharacter::GetSingleton();
+		const auto player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 		const auto worldspace = player ? player->GetWorldspace() : nullptr;
 		const std::string editorID = worldspace && worldspace->GetFormEditorID() ? worldspace->GetFormEditorID() : "";
 		{
@@ -208,11 +209,11 @@ void SkySync::PostPostLoad()
 
 void SkySync::DataLoaded()
 {
-	const auto data = RE::TESDataHandler::GetSingleton();
+	const auto data = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 	if (data && (data->LookupLoadedModByName("DVLaSS.esp"sv) || data->LookupLoadedLightModByName("DVLaSS.esp"sv)))
 		DisableOnConflict("DVLaSS");
 
-	if (const auto collection = globals::game::gameSettingCollection) {
+	if (const auto collection = CS_ENGINE_READ(Ini, Other, globals::game::gameSettingCollection)) {
 		gSunAlphaTransTime = collection->GetSetting("fSunAlphaTransTime");
 		gWeatherFlashDirectional = collection->GetSetting("fWeatherFlashDirectional");
 	}
@@ -301,15 +302,15 @@ float SkySync::GetDirectionalFlash(const RE::Sky* sky)
 RE::BSVolumetricLightingRenderData SkySync::GetDefaultVolumetricLighting()
 {
 	// Resolve once but read live, as the console can change them
-	static const auto intensity = RE::GetINISetting("fVolumetricLightingIntensity:Display");
-	static const auto customColorContribution = RE::GetINISetting("fVolumetricLightingCustomColorContribution:Display");
-	static const auto densityContribution = RE::GetINISetting("fVolumetricLightingDensityContribution:Display");
-	static const auto densityScale = RE::GetINISetting("fVolumetricLightingDensityScale:Display");
-	static const auto windSpeedScale = RE::GetINISetting("fVolumetricLightingWindSpeedScale:Display");
-	static const auto windFallingSpeed = RE::GetINISetting("fVolumetricLightingWindFallingSpeed:Display");
-	static const auto phaseContribution = RE::GetINISetting("fVolumetricLightingPhaseContribution:Display");
-	static const auto phaseScattering = RE::GetINISetting("fVolumetricLightingPhaseScattering:Display");
-	static const auto rangeFactor = RE::GetINISetting("fVolumetricLightingRangeFactor:Display");
+	static const auto intensity = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingIntensity:Display"));
+	static const auto customColorContribution = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingCustomColorContribution:Display"));
+	static const auto densityContribution = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingDensityContribution:Display"));
+	static const auto densityScale = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingDensityScale:Display"));
+	static const auto windSpeedScale = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingWindSpeedScale:Display"));
+	static const auto windFallingSpeed = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingWindFallingSpeed:Display"));
+	static const auto phaseContribution = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingPhaseContribution:Display"));
+	static const auto phaseScattering = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingPhaseScattering:Display"));
+	static const auto rangeFactor = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fVolumetricLightingRangeFactor:Display"));
 
 	auto value = [](const RE::Setting* setting) { return setting ? setting->GetFloat() : 0.0f; };
 	return {
@@ -393,7 +394,7 @@ bool SkySync::Update(const RE::Sky* sky)
 
 	const auto sun = sky->sun;
 	const auto climate = sky->currentClimate;
-	const auto player = RE::PlayerCharacter::GetSingleton();
+	const auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 	if (!sun || !climate || !player)
 		return false;
 
@@ -443,8 +444,8 @@ bool SkySync::Update(const RE::Sky* sky)
 	if (!sunBelowHorizon)
 		HoldLowSunDirection(climate->timing, hour, sunDir, directions[static_cast<int>(Caster::Sun)]);
 
-	const auto calendar = globals::game::calendar;
-	const auto deltaTime = globals::game::deltaTime;
+	const auto calendar = CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar);
+	const auto deltaTime = CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime);
 	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * calendar->GetTimescale(), 0.0f) : 0.0f;
 
 	// The clock can outrun real time (waiting, fast travel) or move while frames are paused

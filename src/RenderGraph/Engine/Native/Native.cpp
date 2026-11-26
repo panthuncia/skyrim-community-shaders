@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Native/Native.h"
+#include "Snapshot/EngineReads.h"
 
 #include "DxvkLoader.h"
 #include "Features/RenderDoc.h"
@@ -129,7 +130,7 @@ namespace RenderGraph::Engine::Native
 	{
 		if (!Requested())
 			return;
-		auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+		auto* renderer = CS_ENGINE_READ(Renderer, Other, RE::BSGraphics::Renderer::GetSingleton());
 		if (!renderer)
 			Fail("the engine's renderer", "it does not exist after InitD3D");
 		auto& data = renderer->GetRuntimeData();

@@ -1,6 +1,7 @@
 // The main pass's points, called by Core's FrameDriver: the capture where the opaque batches start, and the colour epoch where they end.
 
 #include "Features/DrawcallLimitFix/Features/MainView/MainView.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Triggers.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -24,6 +25,7 @@ namespace DCLF::Features::MainView
 #if !defined(CS_RELEASE_PROFILE)
 		TargetFormats BoundTargetFormats()
 		{
+			CS_ENGINE_READ_MARK(BoundState, BoundState);
 			TargetFormats formats;
 			if (RenderGraph::Engine::GraphMode() && !RenderGraph::Engine::Tripwire::GuestContextInstalled())
 				RenderGraph::Fatal("DCLF main view", "the engine's targets were read before its context handle was in place");
@@ -95,7 +97,7 @@ namespace DCLF::Features::MainView
 			Extensions::TriggerScope trigger(opaqueAfter);
 			draws.ExecuteColour();  // the colour pass, against the depth written at the first draw
 			// DCLF's epoch leaves bindings to the engine's state tracking, so the targets are rebound for the rest of the pass.
-			globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+			CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 		}
 	}
 

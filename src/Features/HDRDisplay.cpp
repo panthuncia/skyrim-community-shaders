@@ -1,4 +1,5 @@
 #include "HDRDisplay.h"
+#include "Snapshot/EngineReads.h"
 
 #include "PCH.h"
 
@@ -633,7 +634,7 @@ void HDRDisplay::PreCreateRenderTargets()
 	// Skyrim's ini setting that makes its HDR render targets 16-bit float. It is set here, before the targets exist, since the prefs
 	// ini is read after plugin load and may clear it. It follows HDR's setting: forced on without HDR, the main target became
 	// 64-bit (about 2 ms a frame on an RX 6600). Off also clears a value an earlier SkyrimPrefs.ini write left.
-	auto setting = RE::GetINISetting("bUse64bitsHDRRenderTarget:Display");
+	auto setting = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bUse64bitsHDRRenderTarget:Display"));
 	if (setting) {
 		bool enableHDR = false;
 		{
@@ -745,7 +746,7 @@ void HDRDisplay::SetupResources()
 	// This ensures outputTexture matches the actual swap chain format for CopyResource
 	UpdateSwapChainColorSpace();
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
 	D3D11_TEXTURE2D_DESC texDesc{};
@@ -926,7 +927,7 @@ void HDRDisplay::RedirectFramebuffer()
 	if (framebufferRedirected)
 		return;
 
-	auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+	auto& fb = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 
 	savedFramebufferTexture = fb.texture;
 	savedFramebufferSRV = fb.SRV;
@@ -953,7 +954,7 @@ void HDRDisplay::RestoreFramebuffer()
 	if (!framebufferRedirected)
 		return;
 
-	auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+	auto& fb = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 
 	fb.texture = savedFramebufferTexture;
 	fb.SRV = savedFramebufferSRV;
@@ -971,7 +972,7 @@ void HDRDisplay::SetUIBuffer()
 	// Graph modes: Scaleform, Bink and ImGui draw into Engine::UiTargets' UI target; kFRAMEBUFFER's field is not swapped.
 	if (RenderGraph::Engine::GraphMode())
 		return;
-	auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+	auto& fb = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 
 	// SDR mode composites UI directly into kFRAMEBUFFER.
 	if (!IsHDREnabledForFrame())
@@ -1031,7 +1032,7 @@ void HDRDisplay::SyncFramebufferUIRedirect()
 	if (!uiTexture || !uiTexture->rtv)
 		return;
 
-	auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+	auto& fb = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 	if (!savedFramebufferRTV && fb.RTV != uiTexture->rtv.get())
 		savedFramebufferRTV = fb.RTV;
 	// Engine draws go into it from here.
@@ -1183,7 +1184,7 @@ void HDRDisplay::DrawImGuiForPresent()
 			globals::d3d::context->RSSetViewports(1, &uiViewport);
 		}
 	} else {
-		auto& data = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+		auto& data = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 		{
 			auto* rtv = RenderGraph::Engine::Tripwire::Unwrap(data.RTV);  // the field holds a handle in graph modes
 			globals::d3d::context->OMSetRenderTargets(1, &rtv, nullptr);
@@ -1234,7 +1235,7 @@ HRESULT HDRDisplay::RunPresentChainWithHDR(
 
 	if (hdrReady) {
 		ClearUIBuffer();
-		auto& data = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+		auto& data = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 		{
 			auto* rtv = RenderGraph::Engine::Tripwire::Unwrap(data.RTV);  // the field holds a handle in graph modes
 			globals::d3d::context->OMSetRenderTargets(1, &rtv, nullptr);
@@ -1263,7 +1264,7 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 		ClearUIBuffer();
 		{
 			ZoneScopedN("CS.Present.Overlay");
-			auto& framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+			auto& framebuffer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 			auto* rtv = RenderGraph::Engine::Tripwire::Unwrap(framebuffer.RTV);
 			globals::d3d::context->OMSetRenderTargets(1, &rtv, nullptr);
 			globals::menu->DrawOverlay();
@@ -1301,7 +1302,7 @@ void HDRDisplay::ClearUIBuffer()
 	}
 
 	if (savedFramebufferRTV) {
-		auto& data = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+		auto& data = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 		data.RTV = savedFramebufferRTV;
 		savedFramebufferRTV = nullptr;
 		if (context) {
@@ -1323,7 +1324,7 @@ void HDRDisplay::ApplyHDR()
 
 	auto context = globals::d3d::context;
 	auto state = globals::state;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	UpdateHDRData();
 
@@ -1571,7 +1572,7 @@ void HDRDisplay::UpgradeLDRRenderTargets()
 	// Graph modes: the targets are declared in the HDR format from the start (the plans in PostPostLoad).
 	if (RenderGraph::Engine::GraphMode())
 		return;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	for (auto targetId : kLDRTargets) {
@@ -1647,7 +1648,7 @@ void HDRDisplay::UpgradeLDRRenderTargets()
 
 void HDRDisplay::RestoreLDRRenderTargets()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 
 	for (auto& [targetId, saved] : savedLDRTargets) {
 		auto& rt = renderer->GetRuntimeData().renderTargets[targetId];
@@ -1741,7 +1742,7 @@ float4 HDRDisplay::GetSharedDataHDR() const
 
 	auto* state = globals::state;
 	const bool isMainOrLoading = state->IsMainOrLoadingMenuOpen();
-	const bool inMenuOrPause = state->IsPausedOrMenuOpen(globals::game::ui);
+	const bool inMenuOrPause = state->IsPausedOrMenuOpen(CS_ENGINE_READ(UI, CapturePoint, globals::game::ui));
 
 	float menuSceneEncoding = kHdrMenuSceneGameplay;
 	if (isMainOrLoading) {

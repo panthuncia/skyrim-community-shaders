@@ -1,4 +1,5 @@
 #include "ProceduralAurora.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Effects11.h"
 #include "Globals.h"
@@ -308,7 +309,7 @@ ProceduralAurora::CommonBufferData ProceduralAurora::PackCommonBufferData()
 	const float targetCurtains = static_cast<float>(std::clamp(settings.CurtainCount, 1, kMaxCurtains));
 	const float curtainStep = static_cast<float>(std::clamp(delta, 0.0, 0.1));
 	curtainCount = firstFrame ? targetCurtains : curtainCount + std::clamp(targetCurtains - curtainCount, -curtainStep, curtainStep);
-	const auto ui = RE::UI::GetSingleton();
+	const auto ui = CS_ENGINE_READ(UI, RecordTime, RE::UI::GetSingleton());
 	if (ui && ui->GameIsPaused())
 		delta = 0.0;
 	const uint32_t nightIndex = GetNightIndex();
@@ -324,7 +325,7 @@ ProceduralAurora::CommonBufferData ProceduralAurora::PackCommonBufferData()
 	float vanilla = vanillaVisibility.load(std::memory_order_relaxed);
 	if (!std::isfinite(vanilla) || vanilla < kMinVisibility)
 		vanilla = 0.0f;
-	const double gameDays = globals::game::calendar ? static_cast<double>(globals::game::calendar->GetDaysPassed()) : -1.0;
+	const double gameDays = CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar) ? static_cast<double>(CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)->GetDaysPassed()) : -1.0;
 	const bool timeJumped = lastGameDays >= 0.0 && gameDays >= 0.0 && std::abs(gameDays - lastGameDays) > kTimeJumpDays;
 	lastGameDays = gameDays;
 	const float visibilityStep = static_cast<float>(std::clamp(delta, 0.0, 0.1)) * 0.5f;
@@ -350,9 +351,9 @@ ProceduralAurora::CommonBufferData ProceduralAurora::PackCommonBufferData()
 
 uint32_t ProceduralAurora::GetNightIndex()
 {
-	if (!globals::game::calendar)
+	if (!CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar))
 		return 0;
-	return static_cast<uint32_t>(std::max(std::floor(globals::game::calendar->GetDaysPassed() + 0.5f), 0.0f));
+	return static_cast<uint32_t>(std::max(std::floor(CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)->GetDaysPassed() + 0.5f), 0.0f));
 }
 
 void ProceduralAurora::OnSkyUpdate(RE::Sky* a_sky)
@@ -392,7 +393,7 @@ ProceduralAurora::Night ProceduralAurora::GetNight() const
 	night.fringeAmount = settings.FringeAmount;
 	night.crownStart = settings.CrownStart;
 
-	if (settings.NewPatternEachNight && globals::game::calendar) {
+	if (settings.NewPatternEachNight && CS_ENGINE_READ(Calendar, RecordTime, globals::game::calendar)) {
 		const uint32_t nightIndex = GetNightIndex();
 		auto roll = [nightIndex](uint32_t salt) {
 			uint32_t x = nightIndex * 747796405u + salt * 2891336453u;

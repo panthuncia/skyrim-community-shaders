@@ -1,5 +1,6 @@
 #include "IBL.h"
 #include "IBL/ORGIBL.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "DynamicCubemaps.h"
@@ -259,7 +260,7 @@ void IBL::Prepass()
 
 	// IBL with sky (use game's native reflections cubemap directly)
 	{
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto& reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
 		// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
 		srvs.at(0) = RenderGraph::Engine::Tripwire::Unwrap(reflections.SRV);

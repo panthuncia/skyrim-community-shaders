@@ -17,6 +17,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadingFields.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF
 {
@@ -281,7 +282,7 @@ namespace DCLF::Scene
 
 	bool FrameView::IsLoadingScreenUp()
 	{
-		auto* ui = RE::UI::GetSingleton();
+		auto* ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
 		return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME) && !LoadHold::MenuHeld();
 	}
 

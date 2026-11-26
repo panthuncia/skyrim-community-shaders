@@ -3,6 +3,7 @@
 
 #include "ORGVolumetricShadows.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/ComputeProgram.h"
@@ -242,7 +243,7 @@ namespace
 	/** @brief Null unless it exists with a depth SRV. */
 	FrameAnchors::Texture ImportShadowMap(std::uint32_t a_depthStencil)
 	{
-		if (!globals::game::renderer->GetDepthStencilData().depthStencils[a_depthStencil].depthSRV)
+		if (!CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[a_depthStencil].depthSRV)
 			return nullptr;
 		return FrameAnchors::EngineTexture(FrameAnchors::Depth(a_depthStencil));
 	}
@@ -386,7 +387,7 @@ void ORGVolumetricShadows::UpdateImports()
 	if (!IsActive() || !*impl->imported)
 		return;
 	// The engine makes its shadow maps once a session, so a lost map is an error, not a change to follow.
-	if (!globals::game::renderer->GetDepthStencilData().depthStencils[kCascades].depthSRV)
+	if (!CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[kCascades].depthSRV)
 		Fatal("the engine's cascade shadow map could no longer be imported");
 }
 
@@ -397,7 +398,7 @@ void ORGVolumetricShadows::CheckShadowMaskInput(ID3D11ShaderResourceView* a_shad
 	impl->inputChecked = true;
 	// The field may be a tripwire handle while a_shadowMap is DXVK's, so compare what they wrap.
 	using RenderGraph::Engine::Tripwire::Unwrap;
-	auto* expected = globals::game::renderer->GetDepthStencilData().depthStencils[kCascades].depthSRV;
+	auto* expected = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[kCascades].depthSRV;
 	if (Unwrap(a_shadowMap) == Unwrap(expected)) {
 		logger::info("[ORG] Volumetric Shadows: the shadow mask's t4 is the engine's cascade map, as the passes read it");
 		return;

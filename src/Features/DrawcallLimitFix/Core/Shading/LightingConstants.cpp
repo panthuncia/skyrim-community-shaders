@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Globals.h"
 #include "ShaderCache.h"
+#include "Snapshot/EngineReads.h"
 
 #include <bit>
 
@@ -160,7 +161,7 @@ namespace DCLF
 		projection.rotate.entry[2][0] = 0.0f;
 		projection.rotate.entry[2][1] = 0.0f;
 		projection.rotate.entry[2][2] = 1.0f;
-		projection.translate = globals::game::shadowState->GetRuntimeData().posAdjust.getEye();
+		projection.translate = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData().posAdjust.getEye();
 		projection.scale = 1.0f;
 		toMatrix(frame.projection, &projection);
 		// The pixel parameters' globals from FUN_1414e00c0: the two tilings and the projected-normals switch.

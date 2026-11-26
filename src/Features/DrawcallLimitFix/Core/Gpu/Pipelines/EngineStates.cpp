@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/EngineStates.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 
@@ -39,7 +40,7 @@ namespace DCLF
 	{
 		// The byte the ToggleDepthBias console command flips, read by FUN_1414b3bb0. The same logic on SE 1.5.97.
 		static const REL::Relocation<std::uint8_t*> depthBiasEnabled{ REL::Offset(Engine::Address::kDepthBiasEnabled) };
-		const std::uint32_t variant = RE::DrawWorld::GetSingleton().disableSunShadows ? 1u : 0u;
+		const std::uint32_t variant = CS_ENGINE_READ(Camera, RecordTime, RE::DrawWorld::GetSingleton()).disableSunShadows ? 1u : 0u;
 		switch (a_decalGroup) {
 		case 1:
 			return *depthBiasEnabled ? 6u + variant : 0u;

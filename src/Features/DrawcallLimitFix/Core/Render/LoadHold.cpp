@@ -1,6 +1,7 @@
 // LoadHold: the hold after every load, until DCLF's claims settle.
 
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -127,7 +128,7 @@ namespace DCLF::LoadHold
 		 */
 		std::uint32_t ActorsWithout3D()
 		{
-			auto* lists = RE::ProcessLists::GetSingleton();
+			auto* lists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton());
 			if (!lists)
 				return 0;
 			std::uint32_t count = 0;
@@ -146,7 +147,7 @@ namespace DCLF::LoadHold
 
 		bool MenuOpen()
 		{
-			auto* ui = RE::UI::GetSingleton();
+			auto* ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
 			return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
 		}
 
@@ -359,7 +360,7 @@ namespace DCLF::LoadHold
 		 */
 		void WatchMapStart()
 		{
-			auto* ui = RE::UI::GetSingleton();
+			auto* ui = CS_ENGINE_READ(UI, RecordTime, RE::UI::GetSingleton());
 			const bool now = ui && ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
 			if (now == mapOpen)
 				return;

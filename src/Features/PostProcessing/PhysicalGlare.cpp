@@ -1,4 +1,5 @@
 #include "PhysicalGlare.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 
@@ -476,7 +477,7 @@ bool PhysicalGlare::EnsureTargets(uint resolution)
 
 	try {
 		if (!texOutput) {
-			auto gameTexMainCopy = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
+			auto gameTexMainCopy = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
 
 			D3D11_TEXTURE2D_DESC texDesc;
 			gameTexMainCopy.texture->GetDesc(&texDesc);
@@ -988,11 +989,11 @@ void PhysicalGlare::Draw(TextureInfo& inout_tex)
 
 	// Accumulate tear film time
 	if (effective.ApertureMode == 1 && effective.TearFilmStrength > 0.f) {
-		tearFilmTimeAccum += *globals::game::deltaTime;
+		tearFilmTimeAccum += *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime);
 	}
 
 	// Update constant buffer
-	const GlareCB cbData = BuildConstants(effective, *globals::game::deltaTime, currentFFTResolution, (float)texOutput->desc.Width, (float)texOutput->desc.Height);
+	const GlareCB cbData = BuildConstants(effective, *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime), currentFFTResolution, (float)texOutput->desc.Width, (float)texOutput->desc.Height);
 	glareCB->Update(cbData);
 
 	ID3D11Buffer* cb = glareCB->CB();

@@ -1,4 +1,5 @@
 #include "SceneSettingsUI.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <array>
@@ -1120,7 +1121,7 @@ std::optional<SceneSettingsManager::SceneContextId> SceneSettingsUI::ResolveCurr
 		return SceneSettingsManager::SceneContextId{ .type = Interior };
 	case Weather:
 		{
-			auto* sky = globals::game::sky;
+			auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 			if (!sky || !sky->currentWeather)
 				return std::nullopt;
 			return SceneSettingsManager::SceneContextId{ .type = Weather, .weatherId = sky->currentWeather->GetFormID() };

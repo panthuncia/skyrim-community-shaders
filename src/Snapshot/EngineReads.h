@@ -108,12 +108,12 @@ namespace Snapshot::EngineReads
 * values. Evaluates and returns the expression exactly as written.
 * @code auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 */
-#define CS_ENGINE_READ(a_object, a_category, ...)                                                                                                                      \
-	([&]() -> decltype(auto) {                                                                                                                                         \
+#define CS_ENGINE_READ(a_object, a_category, ...)                                                                                                                  \
+	([&]() -> decltype(auto) {                                                                                                                                     \
 		static constinit ::Snapshot::EngineReads::Site csEngineReadSite{ ::Snapshot::EngineReads::Object::a_object, ::Snapshot::EngineReads::Category::a_category, \
-			std::source_location::current() };                                                                                                                         \
-		csEngineReadSite.Count();                                                                                                                                      \
-		return (__VA_ARGS__);                                                                                                                                          \
+			std::source_location::current() };                                                                                                                     \
+		csEngineReadSite.Count();                                                                                                                                  \
+		return (__VA_ARGS__);                                                                                                                                      \
 	}())
 
 /** @brief Counts a read that has no single expression to wrap, such as a run of bound-state queries. A statement. */

@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Snapshot/EngineReads.h"
 
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -137,7 +138,7 @@ namespace DCLF::Features::Sky::Native
 
 			static Modes Current()
 			{
-				auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+				auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				Modes m;
 				m.depth = static_cast<std::uint32_t>(rss.depthStencilDepthMode);
 				m.stencil = rss.depthStencilStencilMode;
@@ -338,14 +339,14 @@ namespace DCLF::Features::Sky::Native
 					a_why = "no CS state";
 					return false;
 				}
-				auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+				auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				posAdjust = rss.posAdjust.getEye();
 				previousPosAdjust = rss.previousPosAdjust.getEye();
 				const auto camera = rss.cameraData.getEye();
 				std::memcpy(viewProj.data(), &camera.viewProjMat, sizeof(viewProj));
 				eye = a_accumulator->GetRuntimeData()->eyePosition;
 				vParams = Global<float>(Address::kVParams);
-				const auto* ism = RE::ImageSpaceManager::GetSingleton();
+				const auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 				skyScale = vParams * (ism ? Field<float>(ism, 0xE4) : 0.0f);
 				cloudOffsets = reinterpret_cast<const float*>(REL::Offset(Address::kCloudOffsets).address());
 				skyColours = reinterpret_cast<const float*>(REL::Offset(Address::kSkyColours).address());
@@ -374,7 +375,7 @@ namespace DCLF::Features::Sky::Native
 				previousPosAdjust = {};
 				viewProj = a_view.viewProj;
 				vParams = Global<float>(Address::kVParams);
-				const auto* ism = RE::ImageSpaceManager::GetSingleton();
+				const auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 				skyScale = vParams * (ism ? Field<float>(ism, 0xE4) : 0.0f);
 				cloudOffsets = reinterpret_cast<const float*>(REL::Offset(Address::kCloudOffsets).address());
 				skyColours = reinterpret_cast<const float*>(REL::Offset(Address::kSkyColours).address());
@@ -805,7 +806,7 @@ namespace DCLF::Features::Sky::Native
 			return PassResult::Failed;
 		// SetupGeometry reads the eye from the shader manager's current accumulator, which after the world's render is the last one
 		// submitted (the screen splatter's), not the query's.
-		const auto* current = reinterpret_cast<RE::BSShaderAccumulator*>(*globals::game::currentAccumulator.get());
+		const auto* current = reinterpret_cast<RE::BSShaderAccumulator*>(*CS_ENGINE_READ(Accumulator, RecordTime, globals::game::currentAccumulator).get());
 		frame.eye = current ? current->GetRuntimeData()->eyePosition : RE::NiPoint3{};
 		// The pass the engine's call makes (BSShader::MakeRenderPass with pass id 2), without its pool entry. The property is the
 		// geometry's shader property (+0x128).
@@ -967,7 +968,7 @@ namespace DCLF::Features::Sky::Native
 		bool FacePasses(const FaceView& a_view, std::vector<FacePass>& a_batch, std::vector<FacePass>& a_clouds, std::string& a_why)
 		{
 			DCLF_ZONE("CS.DCLF.Sky.Native.FacePasses");
-			auto* sky = globals::game::sky;
+			auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 			if (!sky || !sky->root) {
 				a_why = "no sky root";
 				return false;

@@ -16,6 +16,7 @@
 #include "Globals.h"
 #include "RenderGraph/PipelineCache.h"
 #include "Utils/SwitchFile.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <array>
@@ -375,7 +376,7 @@ namespace DCLF
 						continue;
 					}
 					const auto format = static_cast<DXGI_FORMAT>(identity[0]);
-					auto* utility = globals::game::utilityShader;
+					auto* utility = CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader);
 					if (format == DXGI_FORMAT_UNKNOWN || !utility || static_cast<DXGI_FORMAT>(identity[1]) != Targets().depth || !input.frontCCW ||
 						(identity[3] != 0) != *input.frontCCW || (input.refractionUtility && (input.refractionFormat != format || input.refractionWriteMask != identity[2]))) {
 						++job->otherTargets;

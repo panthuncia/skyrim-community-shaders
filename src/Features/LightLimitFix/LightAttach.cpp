@@ -1,4 +1,5 @@
 #include "Features/LightLimitFix/LightAttach.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/LightLimitFix.h"
 #include "Features/LightLimitFix/LightAttachGate.h"
@@ -70,7 +71,7 @@ namespace LightAttach
 				}
 
 				// Menu 3D (inventory, books, lockpicking) runs through shadowSceneNode[1], where LLF reads per-geometry light lists.
-				if (a_node != globals::game::smState->shadowSceneNode[0]) {
+				if (a_node != CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0]) {
 					func(a_node, a_light);
 					return;
 				}

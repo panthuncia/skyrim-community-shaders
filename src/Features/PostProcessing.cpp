@@ -1,4 +1,5 @@
 #include "PostProcessing.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/EditorWindow.h"
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
@@ -602,7 +603,7 @@ void PostProcessing::SetupResources()
 	colorTargets.clear();
 	colorTargetRetry.clear();
 
-	auto& renderTargets = globals::game::renderer->GetRuntimeData().renderTargets;
+	auto& renderTargets = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets;
 	renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&mainColorDesc);
 	renderTargets[RE::RENDER_TARGETS::kMAIN_COPY].texture->GetDesc(&sceneColorDesc);
 
@@ -780,7 +781,7 @@ bool PostProcessing::BeginLinearProcessing(PostProcessFeature::TextureInfo& text
 	copyCB->Update(CopyCB{ .gamma = Util::ColorSpace::GAME_GAMMA });
 	ID3D11Buffer* cb = copyCB->CB();
 	context->OMSetRenderTargets(0, nullptr, nullptr);
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 	context->PSSetConstantBuffers(1, 1, &cb);
 	context->PSSetShaderResources(0, 1, &texture.srv);
 	pass.SetTargets({ texInput->rtv.get() }, (float)texInput->desc.Width, (float)texInput->desc.Height);
@@ -829,7 +830,7 @@ void PostProcessing::DrawBeforeUpscaling()
 	if (!upscaling.loaded)
 		return;
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto state = globals::state;
 
 	bool inMainLoadingMenu = state->IsMainOrLoadingMenuOpen();
@@ -847,7 +848,7 @@ void PostProcessing::DrawBeforeUpscaling()
 		if (pipe && pipe->IsActive() && !pipe->DrawAfterColorGrading() && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) && pipe->DrawBeforeUpscaling()) {
 			if (!processing) {
 				globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
-				globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+				CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 				if (!BeginLinearProcessing(lastTexColor))
 					break;
 				processing = true;
@@ -896,7 +897,7 @@ std::optional<RE::RENDER_TARGET> PostProcessing::PreProcess(RE::RENDER_TARGET a_
 	if (bypass && !linear)
 		return std::nullopt;
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	auto& upscaling = globals::features::upscaling;
 
@@ -904,7 +905,7 @@ std::optional<RE::RENDER_TARGET> PostProcessing::PreProcess(RE::RENDER_TARGET a_
 	// target. D3D11 silently nulls any SRV of a resource that is also an output, which would
 	// make the pipeline sample black instead of the scene.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 
 	bool inMainLoadingMenu = globals::state->IsMainOrLoadingMenuOpen();
 
@@ -1070,7 +1071,7 @@ void PostProcessing::UpdateVanillaEffects(bool active)
 		                   globals::shaderCache->HasPixelShaders(RE::BSShader::Type::ImageSpace, tonemapShaders);
 	}
 
-	static auto* lensFlare = RE::GetINISetting("bLensFlare:ImageSpace");
+	static auto* lensFlare = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bLensFlare:ImageSpace"));
 	if (lensFlare) {
 		if (replaces(FeaturePipelineIndex::LensFlare)) {
 			if (!savedVanillaLensFlare) {
@@ -1097,7 +1098,7 @@ void PostProcessing::Prepass()
 		lut->UpdateTexture();
 
 	{
-		auto graphicsState = globals::game::graphicsState;
+		auto graphicsState = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 		const float aspect = graphicsState && graphicsState->screenHeight > 0 ?
 		                         (float)graphicsState->screenWidth / (float)graphicsState->screenHeight :
 		                         16.0f / 9.0f;
@@ -1106,7 +1107,7 @@ void PostProcessing::Prepass()
 	}
 
 	// Update gameISData
-	const auto ImageSpace = RE::ImageSpaceManager::GetSingleton();
+	const auto ImageSpace = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 	const auto& iSRuntimeData = ImageSpace->GetRuntimeData();
 	imageSpaceManager->gameISData = iSRuntimeData.data;
 	if (const auto& overrideBaseData = iSRuntimeData.overrideBaseData) {

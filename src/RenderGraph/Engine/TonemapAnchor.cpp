@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/TonemapAnchor.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/Effects11/ORG/ORGFxRuntime.h"
 #include "Features/PostProcessing.h"
@@ -20,7 +21,7 @@ namespace RenderGraph::Engine
 			const auto total = static_cast<std::uint32_t>(RE::RENDER_TARGETS::kTOTAL);
 			if (a_input >= total || a_output >= total)
 				return targets;
-			const auto& engine = globals::game::renderer->GetRuntimeData().renderTargets;
+			const auto& engine = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets;
 			// An engine target with no memory is not named, so the tonemap outside CS's chain draws nothing there.
 			const auto unbacked = [](std::uint32_t a_target) {
 				if (!Engine::Targets::Unbacked(Engine::Targets::Colour(a_target)))

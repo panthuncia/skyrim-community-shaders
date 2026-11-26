@@ -1,4 +1,5 @@
 #include "FrameAnnotations.h"
+#include "Snapshot/EngineReads.h"
 
 #include "GpuEventTimers.h"
 #include "State.h"
@@ -32,8 +33,8 @@ namespace FrameAnnotations
 		{
 			if (GeometryEventsEnabled()) {
 				uint32_t descriptor = 0;
-				if (globals::game::currentPixelShader && *globals::game::currentPixelShader) {
-					descriptor = (*globals::game::currentPixelShader)->id;
+				if (CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentPixelShader) && *CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentPixelShader)) {
+					descriptor = (*CS_ENGINE_READ(Shaders, CapturePoint, globals::game::currentPixelShader))->id;
 				}
 				const std::string passName = std::format("[{}:{:X}] ({:X}) <{}> {}", magic_enum::enum_name(ShaderType), descriptor, pass->passEnum,
 					pass->accumulationHint, pass->geometry->name.c_str());
@@ -962,7 +963,7 @@ namespace FrameAnnotations
 		if (!globals::state->frameAnnotations)
 			return;
 
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 
 		for (size_t renderTargetIndex = 0;
 			renderTargetIndex < RE::RENDER_TARGETS::kTOTAL; ++renderTargetIndex) {

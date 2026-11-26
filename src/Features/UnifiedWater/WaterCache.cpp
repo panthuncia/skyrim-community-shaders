@@ -1,4 +1,5 @@
-﻿#include "WaterCache.h"
+#include "WaterCache.h"
+#include "Snapshot/EngineReads.h"
 
 #include <BS_thread_pool.hpp>
 #include <cmath>
@@ -743,7 +744,7 @@ bool WaterCache::TryBuildRuntimeCache(const DiskCache& diskCache, RuntimeCache& 
 
 std::vector<RE::TESWorldSpace*> WaterCache::GetValidWorldSpaces()
 {
-	auto worldSpaces = RE::TESDataHandler::GetSingleton()->GetFormArray<RE::TESWorldSpace>();
+	auto worldSpaces = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton())->GetFormArray<RE::TESWorldSpace>();
 	auto validWorldSpaces = std::vector<RE::TESWorldSpace*>();
 
 	for (auto& worldSpace : worldSpaces) {

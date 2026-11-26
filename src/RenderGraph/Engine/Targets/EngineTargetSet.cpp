@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "RenderGraph/Engine/Targets/EngineTargetSet.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Engine.h"
@@ -190,7 +191,7 @@ namespace RenderGraph::Engine::Targets
 		std::atomic<bool> g_handles{ false };
 		std::atomic<std::uint32_t> g_framebufferFormat{ DXGI_FORMAT_UNKNOWN };
 
-		RE::BSGraphics::Renderer* Renderer() { return RE::BSGraphics::Renderer::GetSingleton(); }
+		RE::BSGraphics::Renderer* Renderer() { return CS_ENGINE_READ(Renderer, RecordTime, RE::BSGraphics::Renderer::GetSingleton()); }
 
 		// Indexed past CommonLib's array sizes, since AE has 116 render targets where CommonLib declares 114.
 		RE::BSGraphics::RenderTargetData& ColourData(std::uint32_t a_index) { return (&Renderer()->GetRuntimeData().renderTargets[0])[a_index]; }
@@ -468,14 +469,14 @@ namespace RenderGraph::Engine::Targets
 
 		Extent2D ScreenSize()
 		{
-			const auto* state = RE::BSGraphics::State::GetSingleton();
+			const auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, RE::BSGraphics::State::GetSingleton());
 			return state ? Extent2D{ state->screenWidth, state->screenHeight } : Extent2D{};
 		}
 
 		EngineSize ReadEngineSize()
 		{
 			EngineSize size;
-			if (const auto* state = RE::BSGraphics::State::GetSingleton()) {
+			if (const auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, RE::BSGraphics::State::GetSingleton())) {
 				size.width = state->screenWidth;
 				size.height = state->screenHeight;
 				size.viewport[0] = state->frameBufferViewport[0];
@@ -486,7 +487,7 @@ namespace RenderGraph::Engine::Targets
 
 		void WriteEngineSize(const EngineSize& a_size)
 		{
-			if (auto* state = RE::BSGraphics::State::GetSingleton()) {
+			if (auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, RE::BSGraphics::State::GetSingleton())) {
 				state->screenWidth = a_size.width;
 				state->screenHeight = a_size.height;
 				state->frameBufferViewport[0] = a_size.viewport[0];
@@ -988,9 +989,9 @@ namespace RenderGraph::Engine::Targets
 
 		std::uint32_t IniInteger(const char* a_name)
 		{
-			RE::Setting* found = globals::game::iniSettingCollection ? globals::game::iniSettingCollection->GetSetting(a_name) : nullptr;
-			if (!found && globals::game::iniPrefSettingCollection)
-				found = globals::game::iniPrefSettingCollection->GetSetting(a_name);
+			RE::Setting* found = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection) ? CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)->GetSetting(a_name) : nullptr;
+			if (!found && CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
+				found = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection)->GetSetting(a_name);
 			return found ? static_cast<std::uint32_t>((std::max)(found->GetInteger(), 0)) : 0u;
 		}
 

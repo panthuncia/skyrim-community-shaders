@@ -1,4 +1,5 @@
 #include "TextureManager.h"
+#include "Snapshot/EngineReads.h"
 
 #include <d3dcompiler.h>
 
@@ -67,8 +68,8 @@ TextureManager::Texture* TextureManager::GetCommonTexture(const std::string& nam
 	for (const auto& spec : CommonTextureSpecs) {
 		if (spec.name != name)
 			continue;
-		const uint32_t width = spec.size ? spec.size : globals::game::graphicsState->screenWidth;
-		const uint32_t height = spec.size ? spec.size : globals::game::graphicsState->screenHeight;
+		const uint32_t width = spec.size ? spec.size : CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth;
+		const uint32_t height = spec.size ? spec.size : CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight;
 		return &commonTextureCache.emplace(name, CreateTexture(width, height, spec.format, "TextureManager::" + name)).first->second;
 	}
 	return nullptr;

@@ -3,6 +3,7 @@
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/EngineReads.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -548,7 +549,7 @@ namespace RenderGraph::Engine::Skeleton
 			if (target->kind != Targets::Kind::Colour || target->view != Targets::View::Rtv || target->index == ColourTarget::kFRAMEBUFFER)
 				return std::nullopt;
 			// A mip view target's RTV names its source with the mip. Only the source's own RTV is the target's.
-			if (globals::game::renderer->GetRuntimeData().renderTargets[target->index].RTV != a_view)
+			if (CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[target->index].RTV != a_view)
 				return std::nullopt;
 			return Target{ Kind::Colour, target->index, 0 };
 		}
@@ -559,7 +560,7 @@ namespace RenderGraph::Engine::Skeleton
 			const auto target = IdentifyField(a_view);
 			if (!target || target->kind != Targets::Kind::Depth || target->view != Targets::View::Dsv)
 				return std::nullopt;
-			const auto& views = globals::game::renderer->GetDepthStencilData().depthStencils[target->index].views;
+			const auto& views = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[target->index].views;
 			for (std::uint32_t slice = 0; slice < kDepthSlices; ++slice)
 				if (views[slice] == a_view)
 					return Target{ Kind::Depth, target->index, slice };
@@ -581,7 +582,7 @@ namespace RenderGraph::Engine::Skeleton
 
 		ID3D11Texture2D* TextureOf(const Target& a_target)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			switch (a_target.kind) {
 			case Kind::Colour:
 				return renderer->GetRuntimeData().renderTargets[a_target.index].texture;
@@ -594,7 +595,7 @@ namespace RenderGraph::Engine::Skeleton
 
 		ID3D11View* ViewOf(const Target& a_target)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			switch (a_target.kind) {
 			case Kind::Colour:
 				return reinterpret_cast<ID3D11View*>(renderer->GetRuntimeData().renderTargets[a_target.index].RTV);
@@ -723,7 +724,7 @@ namespace RenderGraph::Engine::Skeleton
 		std::vector<Target> KnownTargets()
 		{
 			std::vector<Target> targets;
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer)
 				return targets;
 			// An unbacked target gets no clear pass. Its engine clear is declared dropped.
@@ -1507,7 +1508,7 @@ namespace RenderGraph::Engine::Skeleton
 		/** @brief Compared to detect a remade target. */
 		std::pair<const void*, const void*> EngineTexturesOf(CopyKind a_kind)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (a_kind == CopyKind::Depth) {
 				const auto& depths = renderer->GetDepthStencilData().depthStencils;
 				return { depths[DepthTarget::kMAIN].texture, depths[DepthTarget::kPOST_ZPREPASS_COPY].texture };
@@ -1521,7 +1522,7 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			if (a_kind == CopyKind::Depth)
 				return { FrameAnchors::EngineTexture(FrameAnchors::Depth(DepthTarget::kMAIN)), FrameAnchors::EngineTexture(FrameAnchors::Depth(DepthTarget::kPOST_ZPREPASS_COPY)) };
-			const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[ColourTarget::kMAIN];
+			const auto& main = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[ColourTarget::kMAIN];
 			auto copy = Targets::Slot(Targets::ColourCopy(ColourTarget::kMAIN));
 			if (!copy && main.textureCopy)
 				copy = FrameAnchors::ImportTexture("cs.d3d11.engine.kMAIN.copy", { .texture = main.textureCopy, .srv = main.SRVCopy });
@@ -1741,7 +1742,7 @@ namespace RenderGraph::Engine::Skeleton
 		void ObserveTargets(bool a_setup)
 		{
 			auto& state = Skel();
-			if (!globals::game::renderer)
+			if (!CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 				return;
 			const auto known = KnownTargets();
 			for (std::size_t g = 0; g < kGroups; ++g) {
@@ -1938,7 +1939,7 @@ namespace RenderGraph::Engine::Skeleton
 			return;
 		if (!state.installed)
 			RenderGraph::Fatal("engine skeleton", "its engine hooks are not installed");
-		if (!RenderGraphRuntime::Get().IsActive() || !globals::game::renderer)
+		if (!RenderGraphRuntime::Get().IsActive() || !CS_ENGINE_READ(Renderer, Other, globals::game::renderer))
 			RenderGraph::Fatal("engine skeleton", "the render graph is not active");
 		// Everything is declared here, so a clear never registers anything. A remade target registers with a revision.
 		state.programs = std::make_unique<RF::ProgramSet<ProgramKey, RasterProgram>>("EngineSkeleton.Clears", &DescribeClear);
@@ -2016,7 +2017,7 @@ namespace RenderGraph::Engine::Skeleton
 
 		bool TakeDepthCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer || !Engine::GraphMode())
 				return false;
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
@@ -2044,7 +2045,7 @@ namespace RenderGraph::Engine::Skeleton
 
 		bool TakeContextCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source)
 		{
-			if (!Engine::GraphMode() || !globals::game::renderer || !a_destination || FrameAnchors::InRun())
+			if (!Engine::GraphMode() || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) || !a_destination || FrameAnchors::InRun())
 				return false;
 			for (std::size_t i = 0; i < kCopies; ++i) {
 				const auto kind = static_cast<CopyKind>(i);

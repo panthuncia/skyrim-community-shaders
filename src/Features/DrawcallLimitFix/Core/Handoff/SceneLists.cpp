@@ -1,6 +1,7 @@
 // PrimaryCull's scene lists: the filter published on the render thread, the build job's detour that keeps, rebuilds or filters
 // the lists, and the attach and detach structure events. PrimaryCull.h describes the modes.
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
@@ -44,7 +45,7 @@ namespace DCLF
 
 		const RE::ShadowSceneNode* SceneNode()
 		{
-			return globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+			return CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0] : nullptr;
 		}
 
 		/** @brief The engine build's category rule: cell children 2, 3, 5, 6, 7 and on, node 2 not when the worldspace says so. */
@@ -117,7 +118,7 @@ namespace DCLF
 			return fail(0);
 		const auto* sceneNode = SceneNode();
 		auto** processes = Global<RE::NiCullingProcess**>(Engine::Address::kListProcesses);
-		const auto* tes = RE::TES::GetSingleton();
+		const auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 		const std::uint32_t count = Global<std::uint32_t>(Engine::Address::kSceneListCount);
 		if (!sceneNode || !processes || !processes[0] || !tes || !count || count > listSentinels.size())
 			return fail(1);
@@ -398,7 +399,7 @@ namespace DCLF
 		const auto* sceneNode = SceneNode();
 		const std::uint32_t count = Global<std::uint32_t>(Engine::Address::kSceneListCount);
 		auto* lists = Global<SceneList*>(Engine::Address::kSceneLists);
-		const auto* tes = RE::TES::GetSingleton();
+		const auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 		if (!sceneNode || !lists || !count || count > listSentinels.size() || !tes)
 			return;
 		// Read first, so an event during the build rebuilds again next frame.
@@ -595,7 +596,7 @@ namespace DCLF
 	bool PrimaryCull::ListRoots(const RE::NiAVObject*& a_objectRoot, std::vector<const RE::NiAVObject*>& a_roots)
 	{
 		const auto* sceneNode = SceneNode();
-		const auto* tes = RE::TES::GetSingleton();
+		const auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 		if (!sceneNode || !tes)
 			return false;
 		a_objectRoot = ObjectRoot(*sceneNode);

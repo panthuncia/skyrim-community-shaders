@@ -1,6 +1,7 @@
 #include "LightPicker.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
+#include "Snapshot/EngineReads.h"
 
 #include "RE/B/bhkPickData.h"
 #include "RE/N/NiCamera.h"
@@ -60,7 +61,7 @@ std::string LightPicker::FormatRefFormEntry(RE::TESObjectREFR* refr)
 
 RE::NiCamera* LightPicker::GetPlayerNiCamera()
 {
-	auto* playerCamera = RE::PlayerCamera::GetSingleton();
+	auto* playerCamera = CS_ENGINE_READ(Camera, Other, RE::PlayerCamera::GetSingleton());
 	if (!playerCamera || !playerCamera->cameraRoot)
 		return nullptr;
 	// The world NiCamera lives among the camera root's children.
@@ -96,7 +97,7 @@ LightPicker::PickedMesh LightPicker::ResolveUnderCursor(bool logResult)
 	pick.rayInput.from = RE::hkVector4(origin.x * kSkyrimToHavok, origin.y * kSkyrimToHavok, origin.z * kSkyrimToHavok, 0.0f);
 	pick.rayInput.to = RE::hkVector4(end.x * kSkyrimToHavok, end.y * kSkyrimToHavok, end.z * kSkyrimToHavok, 0.0f);
 
-	auto* tes = RE::TES::GetSingleton();
+	auto* tes = CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
 	if (!tes)
 		return out;
 	tes->Pick(pick);
@@ -132,7 +133,7 @@ LightPicker::PickedMesh LightPicker::ResolveNearestToCursor(bool logResult)
 	if (!niCamera)
 		return out;
 
-	auto* player = RE::PlayerCharacter::GetSingleton();
+	auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 	if (!player)
 		return out;
 

@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/HDRDisplay.h"
 #include "Features/ScreenshotFeature.h"
@@ -60,7 +61,7 @@ namespace RenderGraph::Engine::Bink
 		/** @brief Whether this thread owns Renderer::Lock, at Renderer +0x2790 SE or +0x27F0 AE. The startup logo holds it for the whole sequence. */
 		bool HoldsRendererLock()
 		{
-			auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, RE::BSGraphics::Renderer::GetSingleton());
 			if (!renderer)
 				return false;
 			const auto* lock = reinterpret_cast<const CRITICAL_SECTION*>(reinterpret_cast<const std::byte*>(renderer) + REL::Relocate(0x2790, 0x27F0));

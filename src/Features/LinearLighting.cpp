@@ -1,4 +1,5 @@
 #include "LinearLighting.h"
+#include "Snapshot/EngineReads.h"
 
 #include <DirectXTex.h>
 #include <cmath>
@@ -168,12 +169,12 @@ void LinearLighting::ApplyGameGamma()
 
 void LinearLighting::ClearShaderCache()
 {
-	if (!globals::d3d::context || !globals::game::renderer)
+	if (!globals::d3d::context || !CS_ENGINE_READ(Renderer, Other, globals::game::renderer))
 		return;
 	globals::state->RequestHistoryReset();
 	workingSunlight = nullptr;
 	const float clear[4]{};
-	auto& reflections = globals::game::renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
+	auto& reflections = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
 	// The faces can be tripwire handles (CS_ORG_ENGINE_TARGET_HANDLES): DXVK's context takes the objects they wrap.
 	for (auto* rtv : reflections.cubeSideRTV)
 		if (rtv)
@@ -334,7 +335,7 @@ float LinearLighting::GetSunlightScale(const RE::NiLight* light) const
 {
 	if (IsSunlightOverridden(light))
 		return 1.0f;
-	const auto* imageSpaceManager = globals::game::imageSpaceManager;
+	const auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
 	return imageSpaceManager ? imageSpaceManager->GetRuntimeData().data.baseData.hdr.sunlightScale : 1.0f;
 }
 
@@ -402,7 +403,7 @@ namespace
 				auto& descriptor = globals::state->permutationData.ExtraShaderDescriptor;
 				descriptor &= ~projectedTextureIsSRGB;
 				if (globals::state->currentPixelDescriptor & static_cast<uint>(SIE::ShaderCache::LightingShaderFlags::ProjectedUV)) {
-					if (auto* srv = globals::game::shadowState->GetRuntimeData().PSTexture[3]) {
+					if (auto* srv = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData().PSTexture[3]) {
 						D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
 						srv->GetDesc(&desc);
 						if (DirectX::IsSRGB(desc.Format))
@@ -418,7 +419,7 @@ namespace
 	{
 		if (!globals::state->customPixelShader)
 			return nullptr;
-		auto* shader = *globals::game::currentPixelShader;
+		auto* shader = *CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentPixelShader);
 		if (!shader)
 			return nullptr;
 		auto& buffer = shader->constantBuffers[static_cast<uint>(group)];

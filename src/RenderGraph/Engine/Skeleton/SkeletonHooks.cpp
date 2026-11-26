@@ -5,6 +5,7 @@
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 
@@ -48,9 +49,9 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			static void thunk(RE::BSGraphics::Renderer* a_renderer)
 			{
-				if (a_renderer && globals::game::shadowState) {
+				if (a_renderer && CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)) {
 					// As the original reads it (AE 0x140e4fcf0). kNONE is left to it.
-					const auto index = static_cast<std::uint32_t>(globals::game::shadowState->GetRuntimeData().renderTargets[0]);
+					const auto index = static_cast<std::uint32_t>(CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData().renderTargets[0]);
 					if (index < RE::RENDER_TARGET::kTOTAL) {
 						auto* view = a_renderer->GetRuntimeData().renderTargets[index].RTV;
 						auto* context = reinterpret_cast<ID3D11DeviceContext*>(a_renderer->GetRuntimeData().context);

@@ -1,5 +1,6 @@
 #include "AdvancedSettingsRenderer.h"
 #include "CSEditor/Browser/BrowserWidgets.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <format>
@@ -520,9 +521,9 @@ void AdvancedSettingsRenderer::RenderDeveloperSection()
 
 	Util::SeparatorTextWithFont(T("menu.advanced.addresses", "Addresses"), Menu::FontRole::Subheading);
 	{
-		auto Renderer = globals::game::renderer;
-		auto BSShaderAccumulator = *globals::game::currentAccumulator.get();
-		auto RendererShadowState = globals::game::shadowState;
+		auto Renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
+		auto BSShaderAccumulator = *CS_ENGINE_READ(Accumulator, Other, globals::game::currentAccumulator).get();
+		auto RendererShadowState = CS_ENGINE_READ(ShadowState, Other, globals::game::shadowState);
 		ADDRESS_NODE(Renderer);
 		ADDRESS_NODE(BSShaderAccumulator);
 		ADDRESS_NODE(RendererShadowState);
@@ -666,8 +667,8 @@ void AdvancedSettingsRenderer::RenderDeveloperSection()
 
 void AdvancedSettingsRenderer::RunTestConditions()
 {
-	auto ui = RE::UI::GetSingleton();
-	if (!ui || ui->menuStack.empty() || !RE::PlayerCharacter::GetSingleton())
+	auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
+	if (!ui || ui->menuStack.empty() || !CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton()))
 		return;
 	RE::Console::ExecuteCommand("player.setav speedmult 1000");
 	RE::Console::ExecuteCommand("tgm");

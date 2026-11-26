@@ -1,4 +1,5 @@
 #include "SceneSettingsInternal.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Feature.h"
 #include "Globals.h"
@@ -125,7 +126,7 @@ namespace SceneSettingsInternal
 		const auto components = Util::ParseSpid(std::string(formKey));
 		if (components.pluginName.empty() || components.localFormId == 0)
 			return std::string(formKey);
-		if (!RE::TESDataHandler::GetSingleton())
+		if (!CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton()))
 			return std::string(formKey);
 		const auto formId = Util::SpidToFormId(std::string(formKey));
 		return formId != 0 ? Util::FormIdToSpid(formId) : std::string(formKey);
@@ -879,8 +880,8 @@ namespace SceneSettingsInternal
 
 	RE::FormID GetActiveRegionId(RE::TESObjectCELL* cell)
 	{
-		return cell && cell->IsExteriorCell() && globals::game::sky && globals::game::sky->region ?
-		           globals::game::sky->region->GetFormID() :
+		return cell && cell->IsExteriorCell() && CS_ENGINE_READ(Sky, Other, globals::game::sky) && CS_ENGINE_READ(Sky, Other, globals::game::sky)->region ?
+		           CS_ENGINE_READ(Sky, Other, globals::game::sky)->region->GetFormID() :
 		           0;
 	}
 

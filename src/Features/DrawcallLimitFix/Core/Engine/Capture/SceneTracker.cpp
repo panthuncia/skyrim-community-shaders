@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneWriter.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
@@ -45,7 +46,7 @@ namespace DCLF
 		// A load's detaches are not held, since no frame starts until it ends.
 		bool LoadingMenuOpen()
 		{
-			auto* ui = RE::UI::GetSingleton();
+			auto* ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
 			return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
 		}
 

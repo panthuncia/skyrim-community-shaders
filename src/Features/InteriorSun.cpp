@@ -1,5 +1,6 @@
-﻿#include "InteriorSun.h"
+#include "InteriorSun.h"
 #include "I18n/I18n.h"
+#include "Snapshot/EngineReads.h"
 #include "State.h"
 #include "Utils/VersionedRelocation.h"
 
@@ -26,7 +27,7 @@ void InteriorSun::DrawSettings()
 	}
 	if (ImGui::SliderFloat(T(TKEY("interior_shadow_distance"), "Interior Shadow Distance"), &settings.InteriorShadowDistance, 1000.0f, 8000.0f)) {
 		*gInteriorShadowDistance = settings.InteriorShadowDistance;
-		auto tes = RE::TES::GetSingleton();
+		auto tes = CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
 		SetShadowDistance(tes && tes->interiorCell);
 	}
 	if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -81,14 +82,14 @@ void InteriorSun::PostPostLoad()
 	const std::int32_t displacement = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(gShadowDistance) - (address + 8));
 	REL::safe_write(address + 4, &displacement, sizeof(displacement));
 
-	rasterStateCullMode = &globals::game::shadowState->GetRuntimeData().rasterStateCullMode;
+	rasterStateCullMode = &CS_ENGINE_READ(ShadowState, Other, globals::game::shadowState)->GetRuntimeData().rasterStateCullMode;
 
 	logger::info("[Interior Sun] Installed hooks");
 }
 
 void InteriorSun::EarlyPrepass()
 {
-	isInteriorWithSun = IsInteriorWithSun(RE::TES::GetSingleton()->interiorCell);
+	isInteriorWithSun = IsInteriorWithSun(CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())->interiorCell);
 	if (!isInteriorWithSun && !arraysCleared) {
 		ClearArrays();
 		currentCell = nullptr;
@@ -129,7 +130,7 @@ void InteriorSun::DirShadowLightCulling::thunk(RE::BSShadowDirectionalLight* dir
 	if (DCLF::Features::Shadows::Sun::SunAccumulation::IsWholeCullInput(&jobArrays))
 		return func(dirLight, jobArrays, nodes);
 	auto& singleton = globals::features::interiorSun;
-	const auto cell = RE::TES::GetSingleton()->interiorCell;
+	const auto cell = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton())->interiorCell;
 	auto* passedJobArrays = &jobArrays;
 
 	if (cell && singleton.isInteriorWithSun && !jobArrays.empty()) {
@@ -206,7 +207,7 @@ void InteriorSun::PopulateReplacementJobArrays(RE::TESObjectCELL* cell, const RE
 		}
 	}
 
-	const auto playerPos = RE::PlayerCharacter::GetSingleton()->GetPosition();
+	const auto playerPos = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())->GetPosition();
 	auto lightDir = -dirLight->GetShadowDirectionalLightRuntimeData().sunVector;
 	lightDir.Unitize();
 

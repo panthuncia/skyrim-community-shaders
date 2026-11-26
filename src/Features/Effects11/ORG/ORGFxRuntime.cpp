@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "ORGFxRuntime.h"
+#include "Snapshot/EngineReads.h"
 
 #include "RenderGraph/Switches.h"
 #include <winrt/base.h>
@@ -184,7 +185,7 @@ namespace
 	{
 		auto display = a_in.Get(RF::Vars::DisplaySize());
 		if (!display.width || !display.height) {
-			const auto* graphics = globals::game::graphicsState;
+			const auto* graphics = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 			display = { static_cast<std::uint32_t>(graphics->screenWidth), static_cast<std::uint32_t>(graphics->screenHeight) };
 		}
 		return display;

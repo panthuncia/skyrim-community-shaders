@@ -1,4 +1,5 @@
 #include "WeatherManager.h"
+#include "Snapshot/EngineReads.h"
 
 #include "EffectManager.h"
 #include "PresetManager.h"
@@ -217,7 +218,7 @@ uint32_t WeatherManager::GetEffectiveWeatherID(uint32_t actualWeatherID)
 		return actualWeatherID;
 	}
 
-	auto player = RE::PlayerCharacter::GetSingleton();
+	auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 	if (!player) {
 		return actualWeatherID;
 	}

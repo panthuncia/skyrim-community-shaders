@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Flush/Flush.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Engine.h"
@@ -172,16 +173,16 @@ namespace RenderGraph::Engine::Flush
 				a_key.shaderType = static_cast<std::int32_t>(type);
 				a_key.shader = type == RE::BSShader::Type::ImageSpace ? static_cast<const RE::BSImagespaceShader*>(shader)->name : shader->fxpFilename;
 			}
-			if (globals::game::currentVertexShader && *globals::game::currentVertexShader)
-				a_key.vertex = (*globals::game::currentVertexShader)->id;
-			if (globals::game::currentPixelShader && *globals::game::currentPixelShader)
-				a_key.pixel = (*globals::game::currentPixelShader)->id;
+			if (CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentVertexShader) && *CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentVertexShader))
+				a_key.vertex = (*CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentVertexShader))->id;
+			if (CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentPixelShader) && *CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentPixelShader))
+				a_key.pixel = (*CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentPixelShader))->id;
 		}
 
 		/** @brief The view from the shadow state at +0x18 and +0x38. */
 		void View(DrawKey& a_key)
 		{
-			const auto* rss = reinterpret_cast<const std::uint8_t*>(globals::game::shadowState);
+			const auto* rss = reinterpret_cast<const std::uint8_t*>(CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState));
 			if (!rss)
 				return;
 			a_key.target = *reinterpret_cast<const std::int32_t*>(rss + 0x18);

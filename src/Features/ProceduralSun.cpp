@@ -1,4 +1,5 @@
 #include "ProceduralSun.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <cmath>
@@ -156,7 +157,7 @@ ProceduralSun::PerFrameData ProceduralSun::GetCommonBufferData() const
 		.haloFalloff = settings.haloFalloff,
 		.cloudOcclusionStrength = settings.cloudOcclusionStrength
 	};
-	const auto* sky = globals::game::sky;
+	const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (settings.enabled && sky && sky->sun && sky->sun->sunBase) {
 		const float radius = sky->sun->sunBase->GetModelData().modelBound.radius;
 		if (std::isfinite(radius) && radius > 0.0f)

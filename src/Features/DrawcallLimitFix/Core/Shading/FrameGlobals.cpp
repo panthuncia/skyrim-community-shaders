@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
@@ -235,7 +236,9 @@ namespace DCLF
 		std::array<std::shared_ptr<const FrameGlobals>, 8> recent;
 		std::uint32_t recentNext = 0;
 		std::atomic<std::uint32_t> renderThread{ 0 };
-		std::atomic<std::uint64_t> unscopedReads{ 0 };
+		// A read off the render thread with no capture bound, counted by the live-read detector.
+		constinit Snapshot::EngineReads::Site unscopedRead{ Snapshot::EngineReads::Object::FrameGlobals, Snapshot::EngineReads::Category::RecordTime, std::source_location::current() };
+		std::uint64_t unscopedTaken = 0;
 		thread_local const FrameGlobals* scoped = nullptr;
 	}
 
@@ -257,6 +260,7 @@ namespace DCLF
 	std::shared_ptr<const FrameGlobals> FrameGlobals::Capture()
 	{
 		DCLF_ZONE("CS.DCLF.FrameGlobals.Capture");
+		const Snapshot::EngineReads::CaptureScope captureScope;
 		renderThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
 		auto g = std::make_shared<FrameGlobals>();
 		g->loading = Scene::FrameView::IsLoadingScreenUp();
@@ -290,7 +294,7 @@ namespace DCLF
 		g->lodRadiusBase = Global<float>(kLodRadiusBase);
 		g->lodExponentScale = Global<float>(kLodExponentScale);
 		g->lodPowBase = Global<float>(kLodPowBase);
-		if (const auto* camera = RE::Main::WorldRootCamera()) {
+		if (const auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera())) {
 			g->eye = { camera->world.translate.x, camera->world.translate.y, camera->world.translate.z };
 			g->lodAdjust = camera->GetRuntimeData2().lodAdjust;
 		}
@@ -300,7 +304,7 @@ namespace DCLF
 			// Numbered before the reads with a locked add, so a store whose event is numbered earlier is in them.
 			g->cullHiddenSequence = SceneCapture::NextSequence();
 			g->cullHidden.reserve(sortedNodes.size() + subtree.nodes.size());
-			for (auto* sceneNode : RE::BSShaderManager::State::GetSingleton().shadowSceneNode) {
+			for (auto* sceneNode : CS_ENGINE_READ(ShaderManagerState, CapturePoint, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode) {
 				const auto* graph = sceneNode ? sceneNode->GetRuntimeData().portalGraph : nullptr;
 				if (!graph)
 					continue;
@@ -353,14 +357,19 @@ namespace DCLF
 	{
 		if (scoped)
 			return *scoped;
-		if (::GetCurrentThreadId() != renderThread.load(std::memory_order_relaxed) && unscopedReads.fetch_add(1, std::memory_order_relaxed) == 0)
+		if (::GetCurrentThreadId() == renderThread.load(std::memory_order_relaxed))
+			return *latest;
+		unscopedRead.Count();
+		if (unscopedRead.Live() == 1)
 			logger::error("[DCLF] the frame's engine globals were read off the render thread with no frame's capture bound (step 6e F2); it got the render thread's latest");
 		return *latest;
 	}
 
 	std::uint64_t FrameGlobals::TakeUnscopedReads()
 	{
-		return unscopedReads.exchange(0, std::memory_order_relaxed);
+		// Reporting thread only, so the last total needs no atomic.
+		const auto total = unscopedRead.Live();
+		return total - std::exchange(unscopedTaken, total);
 	}
 
 	FrameGlobals::Scope::Scope(std::shared_ptr<const FrameGlobals> a_globals) :

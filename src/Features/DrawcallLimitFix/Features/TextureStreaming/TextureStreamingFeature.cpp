@@ -1,4 +1,5 @@
 #include "Features/DrawcallLimitFix/Features/TextureStreaming/TextureStreaming.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
@@ -42,7 +43,7 @@ namespace DCLF::Features::Streaming
 		// The render thread's only part in the demand: a position, a direction and two ratios a frame, read by the worker.
 		void Commit(const Api::CommitContext&)
 		{
-			const auto* root = RE::Main::WorldRootCamera();
+			const auto* root = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 			if (!root)
 				return;
 			cameraX.store(root->world.translate.x, std::memory_order_relaxed);

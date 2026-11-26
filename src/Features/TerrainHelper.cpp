@@ -1,4 +1,5 @@
 #include "TerrainHelper.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -177,7 +178,7 @@ void TerrainHelper::BSLightingShader_SetupMaterial(RE::BSLightingShaderMaterialB
 	const auto& materialBase = it->second;
 
 	const auto state = globals::state;
-	const auto& stateData = globals::game::graphicsState->GetRuntimeData();
+	const auto& stateData = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->GetRuntimeData();
 
 	state->permutationData.ExtraFeatureDescriptor &= ~uint(State::ExtraFeatureDescriptors::THLandHasDisplacement);
 

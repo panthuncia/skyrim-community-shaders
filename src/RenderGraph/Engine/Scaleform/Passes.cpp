@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "RenderGraph/Engine/Scaleform/Passes.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/HDRDisplay.h"
 #include "Features/HDRDisplay/ORGHDRDisplay.h"
@@ -912,7 +913,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 		std::int32_t EngineTargetOf(ID3D11Texture2D* a_texture)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer || !a_texture)
 				return -1;
 			const auto& targets = renderer->GetRuntimeData().renderTargets;
@@ -938,7 +939,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 		std::int32_t EngineDepthOf(ID3D11Texture2D* a_texture)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer || !a_texture)
 				return -1;
 			const auto& targets = renderer->GetDepthStencilData().depthStencils;
@@ -951,7 +952,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		/** @brief kFRAMEBUFFER's RTV. HDR Display leaves it alone in graph mode: the interface's redirect is Engine::UiTargets. */
 		ID3D11RenderTargetView* FramebufferRtv()
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			return renderer ? renderer->GetRuntimeData().renderTargets[static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)].RTV : nullptr;
 		}
 
@@ -978,7 +979,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (a_role == Role::Framebuffer)
 				return TextureOf(FramebufferRtv(), a_format);
 			if (a_role == Role::Main || IsBook(a_role)) {
-				auto* renderer = globals::game::renderer;
+				auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 				a_format = DXGI_FORMAT_UNKNOWN;
 				const auto target = a_role == Role::Main ? static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN) :
 				                                           static_cast<std::uint32_t>(RE::RENDER_TARGET::kBOOK_TEXT_0) + (static_cast<std::uint32_t>(a_role) - static_cast<std::uint32_t>(Role::Book0));
@@ -1011,7 +1012,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 		ID3D11Texture2D* MainDepth()
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer)
 				return nullptr;
 			const auto& depth = renderer->GetDepthStencilData().depthStencils[static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)];
@@ -1023,7 +1024,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 			if (!IsBook(a_role))
 				return MainDepth();
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer)
 				return nullptr;
 			const auto& depth = renderer->GetDepthStencilData().depthStencils[static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kBOOK_TEXT)];

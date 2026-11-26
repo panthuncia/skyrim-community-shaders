@@ -1,4 +1,5 @@
 #include "Game.h"
+#include "Snapshot/EngineReads.h"
 
 #include <atomic>
 #include <cmath>
@@ -118,8 +119,8 @@ namespace Util
 
 	float4 TryGetWaterData(float offsetX, float offsetY)
 	{
-		if (globals::game::shadowState) {
-			if (auto tes = RE::TES::GetSingleton()) {
+		if (CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)) {
+			if (auto tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())) {
 				auto position = GetEyePosition();
 				position.x += offsetX;
 				position.y += offsetY;
@@ -165,7 +166,7 @@ namespace Util
 						}
 					}
 
-					if (auto sky = globals::game::sky) {
+					if (auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)) {
 						const auto& color = sky->skyColor[RE::TESWeather::ColorTypes::kWaterMultiplier];
 						data.x *= color.red;
 						data.y *= color.green;
@@ -183,7 +184,7 @@ namespace Util
 
 	RE::NiPoint3 GetEyePosition()
 	{
-		auto shadowState = globals::game::shadowState;
+		auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 		return shadowState->GetRuntimeData().posAdjust.getEye();
 	}
 
@@ -203,7 +204,7 @@ namespace Util
 
 	bool GetTemporal()
 	{
-		auto* imageSpaceManager = globals::game::imageSpaceManager;
+		auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
 		if (!imageSpaceManager)
 			return false;
 		auto& taaShader = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISTemporalAA;
@@ -212,7 +213,7 @@ namespace Util
 
 	void SetTemporal(bool enabled)
 	{
-		auto* imageSpaceManager = globals::game::imageSpaceManager;
+		auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
 		if (!imageSpaceManager)
 			return;
 		if (auto& taaShader = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISTemporalAA)
@@ -221,7 +222,7 @@ namespace Util
 
 	void DisableVanillaTAA()
 	{
-		if (auto* setting = RE::GetINISetting("bUseTAA:Display"))
+		if (auto* setting = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bUseTAA:Display")))
 			setting->data.b = false;
 	}
 
@@ -230,14 +231,14 @@ namespace Util
 		static float& cameraFOVDeg = (*(float*)(REL::RelocationID(513786, 388785).address()));  // FOV degrees
 		float hFOVRad = cameraFOVDeg * (3.14159265359f / 180.0f);
 		float unitHalfWidth = tan(hFOVRad / 2);                                                                                                         // This is same as camera frustum RL
-		float unitHalfHeight = unitHalfWidth / ((float)globals::game::graphicsState->screenWidth / (float)globals::game::graphicsState->screenHeight);  // frustum TB
+		float unitHalfHeight = unitHalfWidth / ((float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth / (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight);  // frustum TB
 		float vFOVRad = 2.0f * atan(unitHalfHeight);
 		return vFOVRad;
 	}
 
 	float2 ConvertToDynamic(float2 a_size, bool a_ignoreLock)
 	{
-		auto viewport = globals::game::graphicsState;
+		auto viewport = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 		auto& runtimeData = viewport->GetRuntimeData();
 
 		if (runtimeData.dynamicResolutionLock && !a_ignoreLock)
@@ -250,7 +251,7 @@ namespace Util
 
 	DispatchCount GetScreenDispatchCount(bool a_dynamic)
 	{
-		float2 resolution{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+		float2 resolution{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 
 		// Feature passes use the scaled render area even when the vanilla dynamic-resolution lock is set.
 		if (a_dynamic)
@@ -419,7 +420,7 @@ namespace Util
 
 	bool IsInterior()
 	{
-		auto tes = RE::TES::GetSingleton();
+		auto tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 		if (tes && !tes->interiorCell) {
 			if (auto worldSpace = tes->GetRuntimeData2().worldSpace) {
 				if (!worldSpace->flags.any(RE::TESWorldSpace::Flag::kNoSky, RE::TESWorldSpace::Flag::kFixedDimensions)) {

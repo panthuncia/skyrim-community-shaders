@@ -1,4 +1,5 @@
 #include "ScreenSpaceGI.h"
+#include "Snapshot/EngineReads.h"
 
 #include <DirectXTex.h>
 
@@ -407,7 +408,7 @@ RE::BSEventNotifyControl ScreenSpaceGI::MenuOpenCloseEventHandler::ProcessEvent(
 bool ScreenSpaceGI::MenuOpenCloseEventHandler::Register()
 {
 	static MenuOpenCloseEventHandler singleton;
-	auto ui = globals::game::ui;
+	auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui);
 
 	if (!ui) {
 		logger::error("UI event source not found");
@@ -425,7 +426,7 @@ void ScreenSpaceGI::PostPostLoad()
 
 void ScreenSpaceGI::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	logger::debug("Creating buffers...");
@@ -500,7 +501,7 @@ void ScreenSpaceGI::SetupResources()
 
 void ScreenSpaceGI::CreateTextures()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	logger::debug("Creating textures...");
@@ -747,7 +748,7 @@ void ScreenSpaceGI::UpdateSB()
 
 ScreenSpaceGI::DispatchSizes ScreenSpaceGI::GetDispatchSizes() const
 {
-	float2 size = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
+	float2 size = Util::ConvertToDynamic(float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight });
 	auto resolution = std::array{ (uint)size.x, (uint)size.y };
 	auto resChoices = std::array{
 		resolution, std::array{ resolution[0] >> 1, resolution[1] >> 1 }, std::array{ resolution[0] >> 2, resolution[1] >> 2 }
@@ -764,7 +765,7 @@ ScreenSpaceGI::SSGICB ScreenSpaceGI::BuildConstants(float2 a_texDim)
 	SSGICB data;
 	{
 		{
-			auto eye = globals::game::shadowState->GetRuntimeData().cameraData.getEye();
+			auto eye = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().cameraData.getEye();
 
 			data.PrevInvViewMat = prevInvView;
 			data.NDCToViewMul = { 2.0f / eye.projMat(0, 0), -2.0f / eye.projMat(1, 1), 0.0f, 0.0f };
@@ -810,7 +811,7 @@ void ScreenSpaceGI::DrawSSGI()
 {
 	auto context = globals::d3d::context;
 
-	auto imageSpaceManager = globals::game::imageSpaceManager;
+	auto imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
 	auto& BSImagespaceShaderISSAOBlurH = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISSAOBlurH;
 
 	// Toggle vanilla SSAO
@@ -856,7 +857,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 	//////////////////////////////////////////////////////
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto rts = renderer->GetRuntimeData().renderTargets;
 	// Engine target fields can be tripwire handles: DXVK takes the wrapped objects.
 	using RenderGraph::Engine::Tripwire::Unwrap;

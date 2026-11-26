@@ -1,5 +1,6 @@
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "Snapshot/EngineReads.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -289,7 +290,7 @@ namespace RenderGraph::Engine::Pipeline
 	EngineDrawState EngineDrawState::Latch()
 	{
 		EngineDrawState out;
-		auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+		auto& shadow = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 		const auto* state = globals::state;
 		out.vertexShader = state && state->customVertexShader ? state->customVertexShader : shadow.currentVertexShader;
 		out.pixelShader = state && state->customPixelShader ? state->customPixelShader : shadow.currentPixelShader;

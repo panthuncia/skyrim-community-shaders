@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/PhysicalSky/ORGVolumetricClouds.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/PhysicalSky/ORGCloudInputs.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -346,7 +347,7 @@ namespace
 	{
 		namespace Tripwire = RenderGraph::Engine::Tripwire;
 		namespace Targets = RenderGraph::Engine::Targets;
-		if (!a_view || !globals::game::renderer)
+		if (!a_view || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 			return UINT32_MAX;
 		if (Tripwire::IsHandle(a_view)) {
 			const auto target = Targets::Identify(static_cast<const ID3D11View*>(a_view));
@@ -356,7 +357,7 @@ namespace
 		a_view->GetResource(resource.put());
 		if (!resource)
 			return UINT32_MAX;
-		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
+		const auto& depthStencils = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
 			if (depthStencils[i].texture && Tripwire::Unwrap(depthStencils[i].texture) == Tripwire::Unwrap(static_cast<ID3D11Texture2D*>(resource.get())))
 				return i;
@@ -1592,7 +1593,7 @@ void ORGVolumetricClouds::Stage(PhysicalSky& a_feature, const Frame& a_frame)
 	f.volMainHistoryValid = true;
 	f.volHistoryWind = f.volWind;
 	f.cloudStormManager.CommitMotion();
-	f.volHistoryViewProj = globals::game::frameBufferCached.GetCameraViewProj();
+	f.volHistoryViewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProj();
 	f.volHistoryCamera = a_frame.camera;
 	f.volHistoryCurvatureRadius = c.cloudCurvatureRadius;
 	f.volHistoryFrameDim = mapMenu ? float2{} : a_frame.frameDim;

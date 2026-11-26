@@ -1,4 +1,5 @@
 // The step runner and the exit, driven from Present.
+#include "Snapshot/EngineReads.h"
 #include "Testing/Internal.h"
 
 #include "Features/ScreenshotFeature.h"
@@ -68,7 +69,7 @@ namespace Testing
 		std::filesystem::path SaveFile(const std::string& a_name)
 		{
 			std::string folder = "Saves\\";
-			if (auto* setting = RE::GetINISetting("sLocalSavePath:General"); setting && setting->GetType() == RE::Setting::Type::kString && setting->data.s && *setting->data.s)
+			if (auto* setting = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("sLocalSavePath:General")); setting && setting->GetType() == RE::Setting::Type::kString && setting->data.s && *setting->data.s)
 				folder = setting->data.s;
 			auto file = Util::SwitchFile::Directory().parent_path() / folder / a_name;
 			if (file.extension() != ".ess")

@@ -1,4 +1,5 @@
 #include "MotionBlur.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 #include "Features/PostProcessing.h"
@@ -187,7 +188,7 @@ void MotionBlur::Draw(TextureInfo& inout_tex)
 		return;
 
 	try {
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		if (!renderer) {
 			logger::error("Motion blur error: Renderer is null");
 			return;
@@ -496,7 +497,7 @@ void MotionBlur::ExecuteVerticalPass()
 void MotionBlur::ExecuteHorizontalPass()
 {
 	auto context = globals::d3d::context;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	if (!context || !renderer || !horizontalPassShader || !reductionPassConstantBufferObj)
 		return;
@@ -544,7 +545,7 @@ void MotionBlur::ExecuteNeighborMaxPass()
 void MotionBlur::ExecuteBlurPass(TextureInfo& inout_tex)
 {
 	auto context = globals::d3d::context;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	if (!context || !renderer || !blurPassShader || !blurConstantBufferObj)
 		return;

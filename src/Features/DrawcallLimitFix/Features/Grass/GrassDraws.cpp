@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Render/DrawFamilies/FamilySlots.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Snapshot/EngineReads.h"
 
 #include "GrassShared/GrassCapture.h"
 #include "GrassShared/GrassFrame.h"
@@ -65,7 +66,7 @@ namespace DCLF::Features::Grass
 			if (!standDown)
 				return;
 			// Not the renderer's posAdjust, which belongs to the last pass here rather than the main view.
-			auto* camera = RE::Main::WorldRootCamera();
+			auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 			if (!camera)
 				return;
 			const auto& eye = camera->world.translate;

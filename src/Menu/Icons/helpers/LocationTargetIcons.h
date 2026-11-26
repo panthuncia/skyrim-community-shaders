@@ -11,6 +11,7 @@
 #include "Menu/Icons/helpers/IconFonts.h"
 #include "Menu/Icons/helpers/LocationCategoryIcons.h"
 #include "Menu/Icons/helpers/LocationTypeIcons.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Utils/Form.h"
 
@@ -85,7 +86,7 @@ namespace LocationTargetIcons
 		} else if (!target.formKey.empty()) {
 			// Quiet resolve: SpidToFormId logs on miss, and authored lists redraw every frame.
 			const auto components = Util::ParseSpid(std::string(target.formKey));
-			if (auto* handler = RE::TESDataHandler::GetSingleton();
+			if (auto* handler = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 				handler && components.localFormId != 0 && !components.pluginName.empty())
 				location = handler->LookupForm<RE::BGSLocation>(components.localFormId, components.pluginName);
 		}

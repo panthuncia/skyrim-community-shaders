@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <iterator>
@@ -276,7 +277,7 @@ namespace DCLF
 		engine.pipelineShadowFormat = DrawPipelines::Get().ShadowFormat();
 		auto& views = engine.lastShadow;
 		ShadowLookupInputs inputs;
-		inputs.enabled = views.known && globals::game::utilityShader;
+		inputs.enabled = views.known && CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader);
 		if (inputs.enabled) {
 			inputs.modes = views.modes;
 			inputs.rasterStates = views.rasterStates;

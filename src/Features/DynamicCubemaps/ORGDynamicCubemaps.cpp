@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "ORGDynamicCubemaps.h"
+#include "Snapshot/EngineReads.h"
 
 #include <winrt/base.h>
 
@@ -714,7 +715,7 @@ bool ORGDynamicCubemaps::Setup()
 		return IsActive();
 	try {
 		auto state = std::make_unique<Impl>();
-		auto& cubemap = globals::game::renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
+		auto& cubemap = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS];
 		if (!cubemap.texture)
 			Fatal("the engine has no reflections cubemap");
 		D3D11_TEXTURE2D_DESC engine{};

@@ -1,4 +1,5 @@
 #include "ENBAdaptation.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../EffectManager.h"
 #include "../SettingManager.h"
@@ -115,7 +116,7 @@ bool ENBAdaptation::EnsureSunMaskResources()
 
 bool ENBAdaptation::SunMaskConstants(SunMaskCB& a_out) const
 {
-	const auto& frame = globals::game::frameBufferCached;
+	const auto& frame = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached);
 	a_out.CameraViewProj = frame.GetCameraViewProj();
 	a_out.CameraViewProjInverse = frame.GetCameraViewProjInverse();
 	a_out.DynamicResolution = { frame.GetDynamicResolutionParams1().x, frame.GetDynamicResolutionParams1().y, frame.GetDynamicResolutionParams2().x, frame.GetDynamicResolutionParams2().y };
@@ -129,7 +130,7 @@ bool ENBAdaptation::SunMaskConstants(SunMaskCB& a_out) const
 		return false;
 
 	// Adaptation runs after the world pass, so gate on an exterior sky rather than State::inWorld
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!sky || sky->mode.get() != RE::Sky::Mode::kFull || !sky->sun || !sky->sun->root || !sky->root)
 		return false;
 	if (Util::GetSunVisibility(sky->sun) <= 0.0f)
@@ -226,7 +227,7 @@ void ENBAdaptation::UpdateEffectVariables()
 	auto forceMinMaxValues = settingManager.GetValue<bool>(idForceMinMax);
 
 	float adaptationTime = settingManager.GetValue<float>(idAdaptTime);
-	float deltaTime = (globals::game::deltaTime) ? (*globals::game::deltaTime) : 0.0f;
+	float deltaTime = (CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime)) ? (*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime)) : 0.0f;
 
 	float4 adaptationParameters{};
 	adaptationParameters.x = !forceMinMaxValues ? 0.0f : settingManager.GetValue<float>(idAdaptMin);

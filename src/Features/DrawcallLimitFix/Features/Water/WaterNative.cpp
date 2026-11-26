@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Features/Water/WaterNative.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
@@ -189,7 +190,7 @@ namespace DCLF::Features::Water::Native
 
 			static Modes Current()
 			{
-				const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+				const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				Modes m;
 				m.depth = static_cast<std::uint32_t>(rss.depthStencilDepthMode);
 				m.stencil = rss.depthStencilStencilMode;
@@ -275,7 +276,7 @@ namespace DCLF::Features::Water::Native
 			{
 				inputs = a_inputs;
 				state = globals::state;
-				auto* renderer = globals::game::renderer;
+				auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 				if (!state || !renderer || !globals::shaderCache) {
 					a_why = "no CS state";
 					return false;
@@ -287,7 +288,7 @@ namespace DCLF::Features::Water::Native
 				port = Port::CaptureFrame(a_inputs.accumulator);
 				rewrites = Port::EvaluateBindingRewrites(port);
 				start = Modes::Current();
-				const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+				const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				// The mask's targets are set just before its batch. The surface's RT0 is SetupTechnique's: kRAW_WATER for ISWaterBlend, else kMAIN.
 				if (a_inputs.view == View::Mask) {
 					targets = { static_cast<std::int32_t>(rss.renderTargets[0]), static_cast<std::int32_t>(rss.renderTargets[1]) };
@@ -349,7 +350,7 @@ namespace DCLF::Features::Water::Native
 			a_slots = {};
 			if (a_frame.inputs.view != View::Surface)
 				return true;
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			const auto& targets = renderer->GetRuntimeData().renderTargets;
 			const auto bind = [&](std::uint32_t a_slot, ID3D11ShaderResourceView* a_view, std::uint32_t a_address, std::uint32_t a_filter) {
 				a_slots[a_slot] = { Unwrap(a_view), a_address, a_filter };

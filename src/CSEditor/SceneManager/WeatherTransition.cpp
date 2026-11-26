@@ -1,4 +1,5 @@
 #include "WeatherTransition.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "SceneSettingsManager.h"
@@ -39,7 +40,7 @@ namespace
 	void CaptureDurationBaseline()
 	{
 		durationBaselineCaptured = true;
-		auto* collection = globals::game::gameSettingCollection;
+		auto* collection = CS_ENGINE_READ(Ini, Other, globals::game::gameSettingCollection);
 		for (size_t index = 0; index < kDurationSettingNames.size(); ++index) {
 			auto* setting = collection ? collection->GetSetting(kDurationSettingNames[index]) : nullptr;
 			if (!setting || setting->GetType() != RE::Setting::Type::kFloat) {

@@ -1,4 +1,5 @@
 #include "Features/PhysicalSky.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #include "Util.h"
@@ -253,7 +254,7 @@ void SkyLightning::BuildChannel(float bottomZ)
 	ground.z = std::max(bottomZ, source.z - sourceHeight * 0.6f * units);
 	if (grounded) {
 		grounded = false;
-		if (auto* tes = RE::TES::GetSingleton()) {
+		if (auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())) {
 			for (uint32_t attempt = 0; attempt < 8 && !grounded; ++attempt) {
 				ground.x = source.x + (Random() - 0.5f) * radius;
 				ground.y = source.y + (Random() - 0.5f) * radius;
@@ -339,7 +340,7 @@ void SkyLightning::StartFlash(const PhysicalSky& physicalSky)
 	sound.descriptor = 0xE7522u;
 	const float3 point = grounded ? ground : source;
 	sound.position = { point.x, point.y, point.z };
-	const auto eye = globals::game::frameBufferCached.GetCameraPosAdjust();
+	const auto eye = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 	const float distance = (point - float3(eye.x, eye.y, eye.z)).Length() * Util::Units::GAME_UNIT_TO_M;
 	sound.time = time + distance / 343.0;
 	sound.volume = std::clamp(std::sqrt(settings.lightningIntensity), 0.f, 1.f);
@@ -384,8 +385,8 @@ void SkyLightning::Update(PhysicalSky& physicalSky, const std::string& currentWo
 	if (!available)
 		return;
 	previousTime = time;
-	if (auto* ui = globals::game::ui; ui && !ui->GameIsPaused()) {
-		const double elapsed = RE::GetSecondsSinceLastFrame();
+	if (auto* ui = CS_ENGINE_READ(UI, RecordTime, globals::game::ui); ui && !ui->GameIsPaused()) {
+		const double elapsed = CS_ENGINE_READ(Timer, RecordTime, RE::GetSecondsSinceLastFrame());
 		if (std::isfinite(elapsed))
 			time += std::clamp(elapsed, 0.0, 0.25);
 	}

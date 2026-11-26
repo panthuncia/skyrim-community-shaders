@@ -1,4 +1,5 @@
 #include "ORGSunRays.h"
+#include "Snapshot/EngineReads.h"
 
 #include "RenderGraph/Switches.h"
 #include <winrt/base.h>
@@ -413,11 +414,11 @@ namespace
 	/** @brief The engine's depth import when it is one of the engine's, else Terrain Blending's published blended depth. */
 	Source SceneDepth(ID3D11ShaderResourceView* a_view)
 	{
-		if (!a_view || !globals::game::renderer)
+		if (!a_view || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 			return {};
 		winrt::com_ptr<ID3D11Resource> resource;
 		a_view->GetResource(resource.put());
-		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
+		const auto& depthStencils = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
 			// The view is DXVK's from the raw context, while a field may be a tripwire handle wrapping it.
 			if (depthStencils[i].texture && RenderGraph::Engine::Tripwire::Unwrap(depthStencils[i].texture) == resource.get())

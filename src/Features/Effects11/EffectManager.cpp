@@ -1,4 +1,5 @@
 #include "EffectManager.h"
+#include "Snapshot/EngineReads.h"
 
 #include "D3D11StateBackup.h"
 #include "Editor/Effects11Editor.h"
@@ -36,7 +37,7 @@ namespace
 		// CommonLib's GetSingleton() wrongly dereferences this global: the manager is stored inline, not behind a pointer
 		static REL::Relocation<RE::BSGraphics::RenderTargetManager*> renderTargetManager{ REL::RelocationID(524970, 411451) };
 		static REL::Relocation<int32_t*> luminanceSwap{ REL::RelocationID(528109, 415054) };
-		static const auto* multipleReferences = RE::GetINISetting("bUseMultipleLuminanceReferences:Display");
+		static const auto* multipleReferences = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bUseMultipleLuminanceReferences:Display"));
 
 		// Render walks down from kHDR_DOWNSAMPLE0 in quarter steps until it reaches finalSize
 		const uint32_t finalSize = multipleReferences && multipleReferences->GetBool() ? 2 : 1;
@@ -475,7 +476,7 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 		return false;
 
 	auto context = globals::d3d::context;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	// Without the copy shaders the result cannot reach a_output (e.g. a failed ReloadShaders),
 	// so leave the frame to the stock pass before touching kMAIN
@@ -769,11 +770,11 @@ void EffectManager::UpdateCommonData()
 	commonData = {};
 	currentWeatherID = previousWeatherID = 0;
 
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 
 	// Update timer
 	{
-		auto delta = (*globals::game::deltaTime);
+		auto delta = (*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime));
 
 		static double timer = 0.0;
 		timer += delta;
@@ -949,7 +950,7 @@ void EffectManager::UpdateCommonData()
 		commonData.timeOfDay2[static_cast<int>(TimeOfDay2Index::InteriorNight)] = commonData.eInteriorFactor * (1.0f - commonData.eNightDayFactor);
 	}
 
-	if (auto camera = RE::PlayerCamera::GetSingleton())
+	if (auto camera = CS_ENGINE_READ(Camera, RecordTime, RE::PlayerCamera::GetSingleton()))
 		commonData.fieldOfView = camera->GetRuntimeData2().worldFOV;
 
 	UpdateCursorData();
@@ -995,7 +996,7 @@ void EffectManager::UpdateCursorData()
 
 void EffectManager::UpdateLightParameters()
 {
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!sky || !sky->sun || !sky->sun->root || !sky->root)
 		return;
 
@@ -1005,7 +1006,7 @@ void EffectManager::UpdateLightParameters()
 
 	// Sky Sync repositions the sun node, so its offset from the sky root is the synced sun direction
 	const auto sunDirection = sky->sun->root->world.translate - sky->root->world.translate;
-	const auto viewProj = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Transpose();
+	const auto viewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Transpose();
 	const auto clip = DirectX::SimpleMath::Vector4::Transform(DirectX::SimpleMath::Vector4(sunDirection.x, sunDirection.y, sunDirection.z, 0.0f), viewProj);
 	if (clip.w <= 0.0f)
 		return;
@@ -1026,7 +1027,7 @@ void EffectManager::PublishAdaptedLuminance(ID3D11ShaderResourceView* a_adaptati
 
 	const auto target = GetEngineAdaptedLuminanceTarget();
 	// Engine target fields can be tripwire handles: DXVK's context takes the object they wrap.
-	auto* luminanceRTV = RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[target].RTV);
+	auto* luminanceRTV = RenderGraph::Engine::Tripwire::Unwrap(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[target].RTV);
 	if (!luminanceRTV)
 		return;
 
@@ -1046,7 +1047,7 @@ void EffectManager::UpdateCommonVariablesForEffect(Effect& effect)
 	if (!effect.GetEffect())
 		return;
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	// Engine target fields can be tripwire handles: the effect variable takes the DXVK object.
 	effect.SetShaderResourceVariable("TextureDepth",

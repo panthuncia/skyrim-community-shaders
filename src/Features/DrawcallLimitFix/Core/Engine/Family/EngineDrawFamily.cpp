@@ -5,6 +5,7 @@
 
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
@@ -52,7 +53,7 @@ namespace DCLF::Family
 		void SetDrawState(std::uint64_t a_vertexDesc)
 		{
 			using Flags = RE::BSGraphics::ShaderFlags;
-			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			auto& shadow = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			if (shadow.vertexDesc != a_vertexDesc) {
 				shadow.vertexDesc = a_vertexDesc;
 				shadow.stateUpdateFlags.set(Flags::DIRTY_VERTEX_DESC);
@@ -382,7 +383,7 @@ namespace DCLF::Family
 	Viewport LatchViewport(std::uint32_t a_depthBias)
 	{
 		static REL::Relocation<const float*> cameraDepthRange{ REL::Offset(Engine::Address::kCameraDepthRange) };
-		const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+		const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 		Viewport viewport;
 		viewport.rect = { static_cast<std::uint32_t>(rss.viewPort.TopLeftX), static_cast<std::uint32_t>(rss.viewPort.TopLeftY),
 			static_cast<std::uint32_t>(rss.viewPort.Width), static_cast<std::uint32_t>(rss.viewPort.Height) };
@@ -621,6 +622,7 @@ namespace DCLF::Family
 	HeaderResult ResolveHeader(std::uint32_t a_register, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, Header& a_out, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure, ID3D11ShaderResourceView** a_view)
 	{
+		CS_ENGINE_READ_MARK(BoundState, BoundState);
 		a_out = {};
 		// Only CS's registers. The engine's t0-t15 come from the shadow state.
 		if (a_register < 16)

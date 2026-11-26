@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialWrites.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF::Draws
 {
@@ -58,7 +59,7 @@ namespace DCLF::Draws
 		/** @brief The texture-transform buffer the frame reads. The engine flips it each frame in Main::Update. */
 		std::uint32_t ShadowTransformBuffer()
 		{
-			return globals::game::smState ? (globals::game::smState->textureTransformCurrentBuffer & 1) : 0u;
+			return CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? (CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->textureTransformCurrentBuffer & 1) : 0u;
 		}
 
 		/**

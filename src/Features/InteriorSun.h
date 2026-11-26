@@ -1,5 +1,6 @@
-﻿#pragma once
+#pragma once
 #include "ShaderCache.h"
+#include "Snapshot/EngineReads.h"
 
 struct InteriorSun : Feature
 {
@@ -76,10 +77,10 @@ public:
 			const auto renderTwoSided = flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided) || flags.none(RE::BSShaderProperty::EShaderPropertyFlag::kAssumeShadowmask, RE::BSShaderProperty::EShaderPropertyFlag::kSkinned);
 			if (renderTwoSided && *rasterStateCullMode != 0) {
 				*rasterStateCullMode = 0;
-				globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_RASTER_CULL_MODE);
+				CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::DIRTY_RASTER_CULL_MODE);
 			} else if (!renderTwoSided && *rasterStateCullMode != RE::BSGraphics::RasterStateCullMode::RASTER_STATE_CULL_MODE_BACK) {
 				*rasterStateCullMode = RE::BSGraphics::RasterStateCullMode::RASTER_STATE_CULL_MODE_BACK;
-				globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_RASTER_CULL_MODE);
+				CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::DIRTY_RASTER_CULL_MODE);
 			}
 		}
 	}
@@ -95,7 +96,7 @@ public:
 		static bool Register()
 		{
 			static MenuOpenCloseEventHandler singleton;
-			auto ui = globals::game::ui;
+			auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui);
 			if (!ui) {
 				logger::error("UI event source not found");
 				return false;

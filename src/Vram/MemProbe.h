@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Snapshot/EngineReads.h"
+
 #include <Windows.h>
 #include <psapi.h>
 
@@ -144,7 +146,7 @@ namespace MemProbe
 	inline void Mark(std::string_view a_label, std::uint32_t a_frame)
 	{
 		std::string label(a_label);
-		if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+		if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
 			const auto position = player->GetPosition();
 			const auto* cell = player->GetParentCell();
 			const char* name = cell ? cell->GetFormEditorID() : nullptr;

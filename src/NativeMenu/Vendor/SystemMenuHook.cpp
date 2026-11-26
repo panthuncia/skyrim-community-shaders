@@ -2,6 +2,7 @@
 // License: GPL-3.0-or-later
 
 #include "NativeMenu/Vendor/SystemMenuHook.h"
+#include "Snapshot/EngineReads.h"
 
 #include "NativeMenu/Vendor/VanillaSettingsEngine.h"
 
@@ -136,7 +137,7 @@ namespace NativeMenu::Vendor::SystemMenuHook
 		installed = true;
 
 		stl::write_vfunc<0x5, JournalMenu_AdvanceMovie>(RE::JournalMenu::VTABLE[0]);
-		if (auto* ui = globals::game::ui)
+		if (auto* ui = CS_ENGINE_READ(UI, CapturePoint, globals::game::ui))
 			ui->GetEventSource<RE::MenuOpenCloseEvent>()->AddEventSink(JournalSink::GetSingleton());
 		logger::info("NativeMenu: System menu hooks installed");
 	}

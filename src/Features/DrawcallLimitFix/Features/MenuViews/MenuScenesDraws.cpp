@@ -8,6 +8,7 @@
 
 #include "RenderGraph/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/Family/FamilyClient.h"
 
@@ -296,7 +297,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		std::shared_ptr<Client> MakeClient(View a_view)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!host || !renderer)
 				return nullptr;
 			auto client = std::make_shared<Client>();

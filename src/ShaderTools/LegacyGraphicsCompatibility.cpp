@@ -1,4 +1,5 @@
 #include "LegacyGraphicsCompatibility.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "Utils/Logging.h"
@@ -62,7 +63,7 @@ namespace LegacyGraphicsCompatibility
 				std::int32_t a_right,
 				std::int32_t a_bottom)
 			{
-				auto& runtimeData = globals::game::graphicsState->GetRuntimeData();
+				auto& runtimeData = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->GetRuntimeData();
 				const float widthRatio = runtimeData.dynamicResolutionLock ? 1.0f : runtimeData.dynamicResolutionWidthRatio;
 				const float heightRatio = runtimeData.dynamicResolutionLock ? 1.0f : runtimeData.dynamicResolutionHeightRatio;
 

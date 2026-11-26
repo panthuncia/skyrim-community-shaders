@@ -1,4 +1,5 @@
 #include "ViewAtmosphere.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <cmath>
@@ -264,7 +265,7 @@ ViewAtmosphere::Parameters ViewAtmosphere::ParametersFor(const AtlasLayout& a_la
 	next.history = { a_continuous && temporal ? historyWeight : 0.0f,
 		temporal && historyWeight > 0.0f ? 1.0f : 0.0f,
 		temporal && historyWeight > 0.0f ? std::clamp(settings.sampleJitter, 0.0f, 1.0f) : 0.0f, 0 };
-	next.clipToWorld = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Invert();
+	next.clipToWorld = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Invert();
 	return next;
 }
 
@@ -318,7 +319,7 @@ bool ViewAtmosphere::Prepare()
 	}
 	auto& fog = globals::features::exponentialHeightFog;
 	const bool useFog = fog.IsActive();
-	const float2 screen = Util::ConvertToDynamic(float2{ float(globals::game::graphicsState->screenWidth), float(globals::game::graphicsState->screenHeight) });
+	const float2 screen = Util::ConvertToDynamic(float2{ float(CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth), float(CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight) });
 	const auto layout = LayoutFor(screen, settings.nearPixelSize, settings.middlePixelSize, settings.distantPixelSize, settings.nearSlices, settings.middleSlices,
 		settings.distantSlices);
 	Parameters next = ParametersFor(layout, useFog, false);
@@ -408,7 +409,7 @@ void ViewAtmosphere::Render()
 	context->CSSetShaderResources(127, 1, &paramSrv);
 	ID3D11Buffer* shared[] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
 	context->CSSetConstantBuffers(5, 2, shared);
-	auto* frame = *globals::game::perFrame;
+	auto* frame = *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame);
 	context->CSSetConstantBuffers(12, 1, &frame);
 	auto* dispatch = dispatchCB->CB();
 	context->CSSetConstantBuffers(0, 1, &dispatch);
@@ -597,7 +598,7 @@ void ViewAtmosphere::RenderReflection()
 	auto bind = [&](UINT slot, ID3D11ShaderResourceView* srv) { context->CSSetShaderResources(slot, 1, &srv); };
 	ID3D11Buffer* shared[] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
 	context->CSSetConstantBuffers(5, 2, shared);
-	auto* frame = *globals::game::perFrame;
+	auto* frame = *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame);
 	context->CSSetConstantBuffers(12, 1, &frame);
 	auto* sampler = reflectionSampler.get();
 	context->CSSetSamplers(0, 1, &sampler);
@@ -676,7 +677,7 @@ bool ViewAtmosphere::CompositeEnabled()
 	if (ORGViewAtmosphere::On())
 		return ORGViewAtmosphere::Get().CompositeActive();
 	if (!loaded || !globals::deferred->postWaterHookInstalled || !globals::shaderCache->IsEnabled() ||
-		!globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].UAV)
+		!CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].UAV)
 		return false;
 	const auto& sky = globals::features::physicalSky;
 	const auto& fog = globals::features::exponentialHeightFog;
@@ -719,13 +720,13 @@ void ViewAtmosphere::CompositeAfterWater()
 		mediumCompositeFrame == globals::state->frameCount)
 		return;
 	auto* context = globals::d3d::context;
-	auto* renderer = globals::game::renderer;
+	auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	if (!main.UAV)
 		return;
 	context->OMSetRenderTargets(0, nullptr, nullptr);
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
-	ID3D11Buffer* perFrame = *globals::game::perFrame;
+	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+	ID3D11Buffer* perFrame = *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame);
 	context->CSSetConstantBuffers(12, 1, &perFrame);
 	ID3D11Buffer* sharedBuffers[] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
 	context->CSSetConstantBuffers(5, 2, sharedBuffers);
@@ -733,6 +734,7 @@ void ViewAtmosphere::CompositeAfterWater()
 	if (sky.loaded && sky.cbData.enabled && sky.cbData.enableVolumetricClouds)
 		sky.RenderVolumetricClouds(PhysicalSky::VolumetricCloudPass::kMainViewAndCubemap);
 
+	CS_ENGINE_READ_MARK(BoundState, BoundState);  // the inherited SRVs
 	const std::array<uint32_t, 7> inheritedSlots = { 19, 22, 31, 76, 77, 78, 79 };
 	std::array<winrt::com_ptr<ID3D11ShaderResourceView>, 7> inherited;
 	for (size_t i = 0; i < inheritedSlots.size(); ++i) {
@@ -767,7 +769,7 @@ void ViewAtmosphere::CompositeAfterWater()
 	context->CSSetShader(mediumCompositeCS.get(), nullptr, 0);
 	D3D11_TEXTURE2D_DESC desc;
 	main.texture->GetDesc(&desc);
-	const auto scale = globals::game::frameBufferCached.GetDynamicResolutionParams1();
+	const auto scale = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetDynamicResolutionParams1();
 	const uint32_t width = static_cast<uint32_t>(std::clamp(desc.Width * scale.x, 1.f, float(desc.Width)));
 	const uint32_t height = static_cast<uint32_t>(std::clamp(desc.Height * scale.y, 1.f, float(desc.Height)));
 	globals::state->BeginPerfEvent("Medium Composite");

@@ -5,6 +5,7 @@
 #include "RenderGraph/BufferRefs.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
@@ -183,6 +184,7 @@ namespace DCLF::Draws
 
 	winrt::com_ptr<ID3D11Buffer> BoundPixelBuffer(std::uint32_t a_register)
 	{
+		CS_ENGINE_READ_MARK(BoundState, BoundState);
 		winrt::com_ptr<ID3D11ShaderResourceView> view;
 		globals::d3d::context->PSGetShaderResources(a_register, 1, view.put());
 		if (!view)

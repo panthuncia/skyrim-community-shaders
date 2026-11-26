@@ -1,6 +1,7 @@
 // GeometryPort.h's SetupGeometry port: the render thread's PipelineFrame sample and the pure block writers.
 
 #include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
@@ -138,7 +139,7 @@ namespace DCLF::GeometryPort
 		PipelineFrame frame;
 
 		// The sun: ShadowSceneNode[0]->sunLight. SetupGeometry reads it through BSLight+0x48.
-		auto* sceneNode = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+		auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0] : nullptr;
 		const RE::BSLight* sun = sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr;
 		const auto* light = sun ? At<const std::byte* const>(sun, kBSLightNiLight) : nullptr;
 		const auto* imageSpace = Global<const std::byte* const>(Engine::Address::kImageSpaceManager);

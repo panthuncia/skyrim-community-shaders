@@ -2,6 +2,7 @@
 // Lifecycle points forward to Draws/FrameDriver on the render thread.
 #include "DrawcallLimitFix.h"
 #include "DrawcallLimitFix/Diagnostics/Capture/Capture.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "I18n/I18n.h"
@@ -435,7 +436,7 @@ namespace
 	RE::BSGeometry* EngineMaskObject()
 	{
 		static REL::Relocation<const bool*> maskOn{ REL::RelocationID(502538, 370126) };
-		auto* sky = globals::game::sky;
+		auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 		auto* precip = sky ? sky->precip : nullptr;
 		if (!precip || !*maskOn)
 			return nullptr;
@@ -490,14 +491,14 @@ void DrawcallLimitFix::RenderPrecipitationAtShadowMaps()
 	state->BeginPerfEvent("Precipitation Mask (Drawcall Limit Fix)");
 	// As Skylighting does, before the engine's shadow maps reset the renderer's state. Restore the camera they begin with,
 	// since EarlyPrepasses reads its eye after them. The mask's viewport is not scaled by dynamic resolution.
-	auto& shadowState = globals::game::shadowState->GetRuntimeData();
+	auto& shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData();
 	const auto posAdjust = shadowState.posAdjust;
 	const auto previousPosAdjust = shadowState.previousPosAdjust;
 	const auto cameraData = shadowState.cameraData;
-	auto& graphicsState = globals::game::graphicsState->GetRuntimeData();
+	auto& graphicsState = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData();
 	const auto dynamicResolutionLock = graphicsState.dynamicResolutionLock;
 	graphicsState.dynamicResolutionLock = 1;
-	RenderPrecipitationMask(globals::game::sky->precip, object, true);
+	RenderPrecipitationMask(CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->precip, object, true);
 	graphicsState.dynamicResolutionLock = dynamicResolutionLock;
 	shadowState.posAdjust = posAdjust;
 	shadowState.previousPosAdjust = previousPosAdjust;
@@ -539,7 +540,7 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth_WorldDrawn::thunk(void* a_accumul
 	// DCLF's objects, and first-person depth goes in after the world's as it does natively, so nothing needs refreshing.
 	DCLF::FrameDriver::Get().DepthCommitted();
 	// DCLF's epoch leaves the context's bindings to the engine's state tracking, so rebind its targets for the rest of the pass.
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+	CS_ENGINE_READ(Shaders, CapturePoint, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
 
 template <int N>

@@ -1,4 +1,5 @@
 #include "SceneSettingsManager.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "SceneSettingsContextRules.h"
@@ -238,7 +239,7 @@ std::vector<SceneSettingsManager::CopySource> SceneSettingsManager::GetCopyDesti
 
 	// Weather has no "already authored" cache to lean on the way locations do, so every loaded
 	// weather form is a candidate destination, whether or not it holds any settings yet.
-	if (auto* dataHandler = RE::TESDataHandler::GetSingleton()) {
+	if (auto* dataHandler = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton())) {
 		for (auto* weather : dataHandler->GetFormArray<RE::TESWeather>()) {
 			if (weather)
 				addActiveSetDestinations({ .type = SceneContextType::Weather, .weatherId = weather->GetFormID() });
@@ -588,7 +589,7 @@ bool SceneSettingsManager::IsCurrentSceneContext(const SceneContextId& context) 
 	switch (context.type) {
 	case SceneContextType::Weather:
 		{
-			const auto* sky = globals::game::sky;
+			const auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 			return sky && sky->currentWeather && sky->currentWeather->GetFormID() == context.weatherId;
 		}
 	case SceneContextType::Location:

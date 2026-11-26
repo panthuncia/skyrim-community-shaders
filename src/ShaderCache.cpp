@@ -1,6 +1,7 @@
 #include "ShaderCache.h"
 #include "Globals.h"
 #include "ShaderFileWatcher.h"
+#include "Snapshot/EngineReads.h"
 #include "Util.h"
 
 #ifdef DEVBENCH_BRIDGE_ENABLED
@@ -2116,9 +2117,9 @@ namespace SIE
 		// A clear asks for shaders to be built from what is on disk now, so the store must read the files again.
 		Util::BeginShaderStoreGeneration();
 		auto* state = globals::state;
-		if (globals::game::currentVertexShader && *globals::game::currentVertexShader == state->customVertexShader)
+		if (CS_ENGINE_READ(Shaders, Other, globals::game::currentVertexShader) && *CS_ENGINE_READ(Shaders, Other, globals::game::currentVertexShader) == state->customVertexShader)
 			*globals::game::currentVertexShader = nullptr;
-		if (globals::game::currentPixelShader && *globals::game::currentPixelShader == state->customPixelShader)
+		if (CS_ENGINE_READ(Shaders, Other, globals::game::currentPixelShader) && *CS_ENGINE_READ(Shaders, Other, globals::game::currentPixelShader) == state->customPixelShader)
 			*globals::game::currentPixelShader = nullptr;
 		state->customVertexShader = nullptr;
 		state->customPixelShader = nullptr;

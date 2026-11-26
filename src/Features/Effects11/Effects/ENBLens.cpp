@@ -1,4 +1,5 @@
 #include "ENBLens.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../TextureManager.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -39,5 +40,5 @@ void ENBLens::UpdateEffectVariables()
 
 	// Set original texture, not typically used due to aliasing
 	// Engine target fields can be tripwire handles: the effect variable takes the DXVK object.
-	SetShaderResourceVariable("TextureOriginal", RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].SRV));
+	SetShaderResourceVariable("TextureOriginal", RenderGraph::Engine::Tripwire::Unwrap(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].SRV));
 }

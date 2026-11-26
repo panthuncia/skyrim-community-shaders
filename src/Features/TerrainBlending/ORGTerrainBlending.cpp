@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
+#include "Snapshot/EngineReads.h"
 
 ORGTerrainBlending::ORGTerrainBlending() = default;
 ORGTerrainBlending::~ORGTerrainBlending() = default;
@@ -424,7 +425,7 @@ void ORGTerrainBlending::ObserveAtSetup()
 {
 	if (!IsActive())
 		return;
-	const void* mainDepth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
+	const void* mainDepth = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
 	if (!mainDepth || !TerrainDepthTexture()) {
 		logger::warn("[ORG] Terrain Blending: the main or the terrain depth is missing at setup; the first depth pass observes them");
 		return;
@@ -437,7 +438,7 @@ void ORGTerrainBlending::Observe()
 	if (!IsActive())
 		return;
 	// No import here: the client's key imports them when the next revision starts.
-	const void* mainDepth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
+	const void* mainDepth = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
 	const void* terrainDepth = TerrainDepthTexture();
 	if (!mainDepth || !terrainDepth)
 		Fatal("the main or the terrain depth is missing");

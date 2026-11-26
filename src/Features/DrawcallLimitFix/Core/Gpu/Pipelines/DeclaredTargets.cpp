@@ -1,4 +1,5 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DeclaredTargets.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -30,7 +31,7 @@ namespace DCLF::DeclaredTargets
 
 		DXGI_FORMAT FieldColourFormat(RE::RENDER_TARGET a_target)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			auto* view = renderer ? renderer->GetRuntimeData().renderTargets[a_target].RTV : nullptr;
 			if (!view)
 				return DXGI_FORMAT_UNKNOWN;
@@ -41,7 +42,7 @@ namespace DCLF::DeclaredTargets
 
 		DXGI_FORMAT FieldDepthFormat(std::uint32_t a_target)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			auto* view = renderer ? renderer->GetDepthStencilData().depthStencils[a_target].views[0] : nullptr;
 			if (!view)
 				return DXGI_FORMAT_UNKNOWN;
@@ -91,7 +92,7 @@ namespace DCLF::DeclaredTargets
 	void InitShadows()
 	{
 		// The engine makes its Utility shader when the game's data loads, after CS's setup.
-		auto* utility = globals::game::utilityShader;
+		auto* utility = CS_ENGINE_READ(Shaders, Other, globals::game::utilityShader);
 		if (!utility)
 			::RenderGraph::Fatal("Drawcall Limit Fix", "the Utility shader is not loaded when the game's data has loaded");
 		DrawPipelines::Get().InitShadowInputs(ShadowMap(), *utility);

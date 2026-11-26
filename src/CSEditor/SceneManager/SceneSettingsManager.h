@@ -23,6 +23,7 @@ using json = nlohmann::json;
 #include "Feature.h"
 #include "Globals.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "Snapshot/EngineReads.h"
 #include "Utils/Form.h"
 #include "Utils/Logging.h"
 
@@ -134,7 +135,7 @@ public:
 				return true;
 
 			static MenuOpenCloseEventHandler singleton;
-			auto ui = globals::game::ui;
+			auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui);
 			if (!ui) {
 				logger::error("[SceneSettings] UI event source not found");
 				return false;

@@ -1,4 +1,5 @@
 #include "ORGSkylighting.h"
+#include "Snapshot/EngineReads.h"
 
 #include "RenderGraph/Engine/Native/Native.h"
 
@@ -142,7 +143,7 @@ namespace
 			inputs.occlusionDSV = occlusion->dsv.get();
 		}
 		inputs.shadowCascades = a_feature.shadowCascadeSRV;
-		inputs.esramShadows = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM].depthSRV;
+		inputs.esramShadows = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM].depthSRV;
 		return inputs;
 	}
 
@@ -361,7 +362,7 @@ namespace
 		a_srv->GetResource(resource.put());
 		if (!resource)
 			return UINT32_MAX;
-		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
+		const auto& depthStencils = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
 			if (depthStencils[i].texture && Tripwire::Unwrap(depthStencils[i].texture) == Tripwire::Unwrap(static_cast<ID3D11Texture2D*>(resource.get())))
 				return i;

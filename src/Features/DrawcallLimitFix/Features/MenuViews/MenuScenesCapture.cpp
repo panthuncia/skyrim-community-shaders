@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/LightLimitFix.h"
 #include "Globals.h"
@@ -120,7 +121,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief Maps the draw's colour targets to the view's imports. Returns null when mapped, else why not. */
 		const char* MapTargets(View a_view, std::uint32_t a_outputs, Draw& a_draw)
 		{
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 				return "a cube face is bound";
 			// The shadow batch draws into a slice of the shadow maps, every other batch into kMAIN's depth.
@@ -182,7 +183,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		const char* TryLatchUtility(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* state = globals::state;
 			const std::uint32_t descriptor = state->modifiedVertexDescriptor;
@@ -304,7 +305,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		const char* TryLatchLighting(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* state = globals::state;
 			const auto engine = Pipeline::EngineDrawState::Latch();
@@ -409,7 +410,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		const char* TryLatchEffect(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* state = globals::state;
 			using EffectFlags = SIE::ShaderCache::EffectShaderFlags;
@@ -522,7 +523,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		{
 			if (a_capture.run->draws.size() >= kMaxDraws)
 				return "more draws than the batch latches";
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto* state = globals::state;
 			if (!rss.currentVertexShader || !state || !state->currentShader)
 				return "no shader bound";

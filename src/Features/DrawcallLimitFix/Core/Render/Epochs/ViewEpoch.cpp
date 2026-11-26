@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 
@@ -270,12 +271,12 @@ namespace DCLF
 		{
 			std::span<const std::byte> frame;
 			auto& mirror = ConstantMirror::Get();
-			if (auto* perFrame = *globals::game::perFrame.get()) {
+			if (auto* perFrame = *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get()) {
 				mirror.Watch(perFrame);
 				frame = mirror.Contents(perFrame);
 			}
 			if (frame.size() < ShadowCameras::kBlockBytes) {
-				const auto& cached = globals::game::frameBufferCached.data;
+				const auto& cached = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
 				static_assert(sizeof(cached) >= ShadowCameras::kBlockBytes);
 				frame = std::as_bytes(std::span(&cached, 1));
 			}
@@ -294,7 +295,7 @@ namespace DCLF
 			auto proj = a_camera.proj;
 			auto viewProj = a_camera.viewProj;
 			if (a_jitter) {
-				if (auto* state = RE::BSGraphics::State::GetSingleton()) {
+				if (auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, RE::BSGraphics::State::GetSingleton())) {
 					proj[8] += state->projectionPosScaleX;
 					proj[9] += state->projectionPosScaleY;
 				}
@@ -328,9 +329,9 @@ namespace DCLF
 				return;
 			}
 			std::memset(out + 41 * 4, 0, 4 * sizeof(float));
-			if (auto* state = RE::BSGraphics::State::GetSingleton()) {
+			if (auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, RE::BSGraphics::State::GetSingleton())) {
 				const auto& data = state->GetRuntimeData();
-				static auto* clampSetting = RE::GetINISetting("fDRClampOffset:Display");
+				static auto* clampSetting = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("fDRClampOffset:Display"));
 				const float clamp = clampSetting ? clampSetting->data.f : 0.0f;
 				const float w = data.dynamicResolutionWidthRatio, h = data.dynamicResolutionHeightRatio;
 				const float pw = data.dynamicResolutionPreviousWidthRatio, ph = data.dynamicResolutionPreviousHeightRatio;

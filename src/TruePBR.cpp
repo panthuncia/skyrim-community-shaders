@@ -1,4 +1,5 @@
 #include "TruePBR.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix.h"
 
@@ -1025,13 +1026,13 @@ struct BSLightingShaderProperty_GetRenderPasses_LocalMap
 static bool HasDisplacementTexture(const BSLightingShaderMaterialPBR* material)
 {
 	return material->displacementTexture != nullptr &&
-	       material->displacementTexture != globals::game::graphicsState->GetRuntimeData().defaultTextureBlack;
+	       material->displacementTexture != CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData().defaultTextureBlack;
 }
 
 /** @brief True when slot 4 green is explicitly enabled and its texture is available. */
 static bool HasFuzzRoughnessTexture(const BSLightingShaderMaterialPBR* material)
 {
-	if (!material->fuzzRoughnessTexture || material->displacementTexture == globals::game::graphicsState->GetRuntimeData().defaultTextureBlack) {
+	if (!material->fuzzRoughnessTexture || material->displacementTexture == CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData().defaultTextureBlack) {
 		return false;
 	}
 
@@ -1048,10 +1049,10 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 	auto lightingFlags = shader->currentRawTechnique & ~(~0u << 24);
 	auto lightingType = static_cast<SIE::ShaderCache::LightingShaderTechniques>((shader->currentRawTechnique >> 24) & 0x3F);
 	if (!(lightingType == LODLand || lightingType == LODLandNoise) && (lightingFlags & static_cast<uint32_t>(SIE::ShaderCache::LightingShaderFlags::TruePbr))) {
-		auto shadowState = globals::game::shadowState;
-		auto renderer = globals::game::renderer;
-		auto graphicsState = globals::game::graphicsState;
-		auto smState = globals::game::smState;
+		auto shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState);
+		auto renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
+		auto graphicsState = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState);
+		auto smState = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
 
 		RE::BSGraphics::Renderer::PrepareVSConstantGroup(RE::BSGraphics::ConstantGroupLevel::PerMaterial);
 		RE::BSGraphics::Renderer::PreparePSConstantGroup(RE::BSGraphics::ConstantGroupLevel::PerMaterial);
@@ -1488,7 +1489,7 @@ bool TruePBR::TESObjectLAND_SetupMaterial(RE::TESObjectLAND* land)
 			}
 
 			auto material = static_cast<BSLightingShaderMaterialPBRLandscape*>(shaderProperty->material);
-			const auto& stateData = globals::game::graphicsState->GetRuntimeData();
+			const auto& stateData = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->GetRuntimeData();
 
 			for (uint32_t textureIndex = 0; textureIndex < BSLightingShaderMaterialPBRLandscape::NumTiles; ++textureIndex) {
 				material->landscapeBaseColorTextures[textureIndex] = stateData.defaultTextureBlack;
@@ -1512,12 +1513,12 @@ bool TruePBR::TESObjectLAND_SetupMaterial(RE::TESObjectLAND* land)
 			// Written in place after SetMaterial's copy: DCLF's material records follow the material's writes.
 			DrawcallLimitFix::NoteMaterialWritten(material);
 
-			if (globals::game::bEnableLandFade->GetBool()) {
+			if (CS_ENGINE_READ(Ini, CapturePoint, globals::game::bEnableLandFade)->GetBool()) {
 				shaderProperty->unk108 = false;
 			}
 
 			bool noLODLandBlend = false;
-			auto tes = RE::TES::GetSingleton();
+			auto tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton());
 			auto worldSpace = tes->GetRuntimeData2().worldSpace;
 			if (worldSpace != nullptr) {
 				if (auto terrainManager = worldSpace->GetTerrainManager()) {
@@ -1537,7 +1538,7 @@ bool TruePBR::TESObjectLAND_SetupMaterial(RE::TESObjectLAND* land)
 			// The quad is in the scene already (the land's attach ran before this hook's call returned): a scene write.
 			DrawcallLimitFix::WriteShaderProperty(geometry, shaderProperty);
 
-			globals::game::smState->shadowSceneNode[0]->AttachObject(geometry);
+			CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0]->AttachObject(geometry);
 		}
 
 		return true;
@@ -1568,7 +1569,7 @@ void TruePBR::SetupGrassMaterial(RE::BSLightingShaderProperty* sourceProperty, R
 		grassMaterial.diffuseTexture = generatedMaterial->diffuseTexture;
 		grassMaterial.textureClampMode = generatedMaterial->textureClampMode;
 	}
-	const auto& stateData = globals::game::graphicsState->GetRuntimeData();
+	const auto& stateData = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->GetRuntimeData();
 	if (grassMaterial.diffuseTexture == nullptr) {
 		grassMaterial.diffuseTexture = stateData.defaultTextureWhite;
 	}
@@ -1586,24 +1587,24 @@ void TruePBR::SetupGrassMaterial(RE::BSLightingShaderProperty* sourceProperty, R
 static bool HasGrassFeaturesTexture0(const BSLightingShaderMaterialPBR* material)
 {
 	return material->featuresTexture0 != nullptr &&
-	       material->featuresTexture0 != globals::game::graphicsState->GetRuntimeData().defaultTextureWhite;
+	       material->featuresTexture0 != CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData().defaultTextureWhite;
 }
 
 static bool HasGrassFeaturesTexture1(const BSLightingShaderMaterialPBR* material)
 {
 	return material->featuresTexture1 != nullptr &&
-	       material->featuresTexture1 != globals::game::graphicsState->GetRuntimeData().defaultTextureWhite;
+	       material->featuresTexture1 != CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData().defaultTextureWhite;
 }
 
 static bool HasGrassEmissive(const BSLightingShaderMaterialPBR* material)
 {
 	return material->emissiveTexture != nullptr &&
-	       material->emissiveTexture != globals::game::graphicsState->GetRuntimeData().defaultTextureBlack;
+	       material->emissiveTexture != CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->GetRuntimeData().defaultTextureBlack;
 }
 
 void TruePBR::SetGrassPBRTextures(const BSLightingShaderMaterialPBR* material)
 {
-	auto* shadowState = globals::game::shadowState;
+	auto* shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 	const auto clampMode = static_cast<RE::BSGraphics::TextureAddressMode>(material->textureClampMode);
 
 	shadowState->SetPSTexture(2, material->normalTexture->rendererTexture);
@@ -1721,7 +1722,7 @@ struct BSTempEffectSimpleDecal_SetupGeometry
 
 			constexpr static RE::NiColor whiteColor(1.f, 1.f, 1.f);
 			*shaderProperty->emissiveColor = whiteColor;
-			const bool hasEmissive = pbrMaterial->emissiveTexture != nullptr && pbrMaterial->emissiveTexture != globals::game::graphicsState->GetRuntimeData().defaultTextureBlack;
+			const bool hasEmissive = pbrMaterial->emissiveTexture != nullptr && pbrMaterial->emissiveTexture != CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->GetRuntimeData().defaultTextureBlack;
 			shaderProperty->emissiveMult = hasEmissive ? 1.f : 0.f;
 
 			{
@@ -1760,7 +1761,7 @@ struct BSTempEffectGeometryDecal_Initialize
 
 			constexpr static RE::NiColor whiteColor(1.f, 1.f, 1.f);
 			*shaderProperty->emissiveColor = whiteColor;
-			const bool hasEmissive = pbrMaterial->emissiveTexture != nullptr && pbrMaterial->emissiveTexture != globals::game::graphicsState->GetRuntimeData().defaultTextureBlack;
+			const bool hasEmissive = pbrMaterial->emissiveTexture != nullptr && pbrMaterial->emissiveTexture != CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->GetRuntimeData().defaultTextureBlack;
 			shaderProperty->emissiveMult = hasEmissive ? 1.f : 0.f;
 
 			{
@@ -1812,9 +1813,9 @@ struct BSGrassShader_SetupTechnique
 			return func(shader, globalTechnique);
 		}
 
-		auto* shadowState = globals::game::shadowState;
-		auto* graphicsState = globals::game::graphicsState;
-		auto* renderer = globals::game::renderer;
+		auto* shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState);
+		auto* graphicsState = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState);
+		auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 
 		uint32_t shaderDescriptor = static_cast<uint32_t>(SIE::ShaderCache::GrassShaderTechniques::TruePbr);
 		if (graphicsState->useEarlyZ) {
@@ -1831,14 +1832,14 @@ struct BSGrassShader_SetupTechnique
 		static auto fogMethod = REL::Relocation<void (*)()>(REL::RelocationID(100000, 106707));
 		fogMethod();
 
-		if (!globals::game::bShadowsOnGrass->GetBool()) {
+		if (!CS_ENGINE_READ(Ini, CapturePoint, globals::game::bShadowsOnGrass)->GetBool()) {
 			shadowState->SetPSTexture(1, graphicsState->GetRuntimeData().defaultTextureWhite->rendererTexture);
 			shadowState->SetPSTextureAddressMode(1, RE::BSGraphics::TextureAddressMode::kClampSClampT);
 			shadowState->SetPSTextureFilterMode(1, RE::BSGraphics::TextureFilterMode::kNearest);
 		} else {
 			shadowState->SetPSTexture(1, renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kSHADOW_MASK]);
 			shadowState->SetPSTextureAddressMode(1, RE::BSGraphics::TextureAddressMode::kClampSClampT);
-			shadowState->SetPSTextureFilterMode(1, globals::game::shadowMaskQuarter->GetInteger() != 4 ? RE::BSGraphics::TextureFilterMode::kBilinear : RE::BSGraphics::TextureFilterMode::kNearest);
+			shadowState->SetPSTextureFilterMode(1, CS_ENGINE_READ(Ini, CapturePoint, globals::game::shadowMaskQuarter)->GetInteger() != 4 ? RE::BSGraphics::TextureFilterMode::kBilinear : RE::BSGraphics::TextureFilterMode::kNearest);
 		}
 		return true;
 	}
@@ -1857,7 +1858,7 @@ struct BSGrassShader_SetupMaterial
 			return;
 		}
 
-		auto* shadowState = globals::game::shadowState;
+		auto* shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState);
 		auto* pbrMaterial = static_cast<const BSLightingShaderMaterialPBR*>(material);
 		const auto& grassPSConstants = ShaderConstants::GrassPS::Get();
 

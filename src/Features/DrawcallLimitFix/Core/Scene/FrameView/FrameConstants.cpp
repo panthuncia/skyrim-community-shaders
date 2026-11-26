@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialSources.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF::Scene
 {
@@ -113,7 +114,7 @@ namespace DCLF::Scene
 		// What BSLightingShader::SetupGeometry binds for a ProjectedUV pass (SE 0x1412f2bb0, AE 0x1414dd040), read from the start of
 		// BSGraphics::State (SE 0x14302c890, AE 0x14328cc20). DCLF takes all four even when projected normals are off.
 		static_assert(ProjectedTextures::kSlots[0] == 3 && ProjectedTextures::kSlots[1] == 8 && ProjectedTextures::kSlots[2] == 10 && ProjectedTextures::kSlots[3] == 11);
-		const auto* engineState = reinterpret_cast<RE::NiSourceTexture* const*>(RE::BSGraphics::State::GetSingleton());
+		const auto* engineState = reinterpret_cast<RE::NiSourceTexture* const*>(CS_ENGINE_READ(GraphicsState, RecordTime, RE::BSGraphics::State::GetSingleton()));
 		if (!engineState)
 			return;
 		constexpr std::array<std::size_t, 4> kStateIndex{ 1, 2, 3, 0 };

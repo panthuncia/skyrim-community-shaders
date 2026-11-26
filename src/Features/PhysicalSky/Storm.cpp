@@ -1,4 +1,5 @@
 #include "Features/PhysicalSky.h"
+#include "Snapshot/EngineReads.h"
 
 #include <cctype>
 #include <cfloat>
@@ -469,8 +470,8 @@ std::array<uint32_t, 4> CloudStormManager::ScreenRect(float bottomZ, uint32_t wi
 {
 	if (REL::Module::IsVR())
 		return active.empty() ? std::array<uint32_t, 4>{} : std::array<uint32_t, 4>{ 0, 0, width, viewHeight };
-	const auto camera = globals::game::frameBufferCached.GetCameraPosAdjust();
-	const auto matrix = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Transpose();
+	const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const auto matrix = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Transpose();
 	float2 screenMin{ 1.f, 1.f }, screenMax{};
 	for (const auto& storm : active) {
 		// Include the longest local light probe, so an off-screen storm can still

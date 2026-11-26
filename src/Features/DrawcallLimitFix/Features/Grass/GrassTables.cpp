@@ -21,6 +21,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBuffers.h"
 #include "Features/DrawcallLimitFix/Features/Grass/Diagnostics/GrassEvents.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
+#include "Snapshot/EngineReads.h"
 
 #include "GrassShared/GrassFrame.h"
 
@@ -70,7 +71,7 @@ namespace DCLF::Features::Grass
 		{
 			a_row.dirLightDirection[3] = Engine::Global<float>(Address::kShadowClampValue);
 			a_row.dirLightColor[3] = Engine::Global<float>(Address::kFogNearColorW);
-			auto* state = globals::game::smState;
+			auto* state = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
 			auto* scene = state ? state->shadowSceneNode[0] : nullptr;
 			auto* sun = scene ? scene->GetRuntimeData().sunLight : nullptr;
 			auto* light = sun ? static_cast<RE::NiDirectionalLight*>(sun->light.get()) : nullptr;
@@ -98,8 +99,8 @@ namespace DCLF::Features::Grass
 		// The cull values follow Grass Optimizations' CullParams. Returns false without a camera.
 		bool SampleCull(DrawRow& a_row)
 		{
-			auto* camera = RE::Main::WorldRootCamera();
-			auto* renderer = globals::game::renderer;
+			auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera());
+			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 			if (!camera || !renderer)
 				return false;
 			const auto settings = GrassShared::Settings();
@@ -146,7 +147,7 @@ namespace DCLF::Features::Grass
 		// Stands in for a PBR bucket's missing maps, and for the shadow mask without bShadowsOnGrass.
 		ID3D11ShaderResourceView* DefaultView(bool a_normal)
 		{
-			auto* state = globals::game::graphicsState;
+			auto* state = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
 			if (!state)
 				return nullptr;
 			auto& data = state->GetRuntimeData();
@@ -398,11 +399,11 @@ namespace DCLF::Features::Grass
 
 		bool BindFrameTextures(OwnedRow<DrawRow>& a_row)
 		{
-			static auto* shadowsOnGrass = RE::GetINISetting("bShadowsOnGrass:Display");
+			static auto* shadowsOnGrass = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bShadowsOnGrass:Display"));
 			ID3D11ShaderResourceView* mask = DefaultView(false);
 			bool engineMask = false;
-			if ((!shadowsOnGrass || shadowsOnGrass->GetBool()) && globals::game::renderer) {
-				mask = reinterpret_cast<ID3D11ShaderResourceView*>(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kSHADOW_MASK].SRV);
+			if ((!shadowsOnGrass || shadowsOnGrass->GetBool()) && CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)) {
+				mask = reinterpret_cast<ID3D11ShaderResourceView*>(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kSHADOW_MASK].SRV);
 				engineMask = true;
 			}
 			// The engine's mask is written this frame, so bind its graph texture rather than the view.

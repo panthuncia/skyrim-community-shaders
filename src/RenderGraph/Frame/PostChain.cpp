@@ -1,4 +1,5 @@
 #include "RenderGraph/Frame/PostChain.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "Features/Upscaling.h"
@@ -116,7 +117,7 @@ namespace RenderGraph::Frame::PostChain
 
 		RE::ImageSpaceEffect* EffectAt(std::uint32_t a_index)
 		{
-			auto* manager = RE::ImageSpaceManager::GetSingleton();
+			auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 			if (!manager || a_index >= manager->effects.free_idx() || a_index >= manager->effects.capacity())
 				return nullptr;
 			return manager->effects[static_cast<std::uint16_t>(a_index)];
@@ -250,7 +251,7 @@ namespace RenderGraph::Frame::PostChain
 		// CS's own index from the first call on. The engine's starts it, so the sequence continues where the engine left it.
 		if (!std::exchange(state.jitterIndexRead, true))
 			state.jitterIndex = *index;
-		auto* manager = RE::ImageSpaceManager::GetSingleton();
+		auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 		const auto taa = manager ? Member<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(manager), kTemporal) : 0;
 		if (!taa || !Member<bool>(taa, 0x18)) {
 			a_state->projectionPosScaleX = 0.0f;
@@ -280,7 +281,7 @@ namespace RenderGraph::Frame::PostChain
 	PostFields Read()
 	{
 		PostFields fields;
-		auto* manager = RE::ImageSpaceManager::GetSingleton();
+		auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 		if (!manager)
 			return fields;
 		const auto base = reinterpret_cast<std::uintptr_t>(manager);
@@ -368,7 +369,7 @@ namespace RenderGraph::Frame::PostChain
 	WorldFields ReadWorld(Scope a_scope, const WorldFields& a_base)
 	{
 		WorldFields fields = a_base;
-		auto* manager = RE::ImageSpaceManager::GetSingleton();
+		auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 		if (!manager)
 			return fields;
 		const auto base = reinterpret_cast<std::uintptr_t>(manager);

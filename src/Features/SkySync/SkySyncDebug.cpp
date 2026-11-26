@@ -1,6 +1,7 @@
 #include "Features/SkySync.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
+#include "Snapshot/EngineReads.h"
 #include "Utils/DebugSection.h"
 
 #define I18N_KEY_PREFIX "feature.sky_sync."
@@ -69,7 +70,7 @@ void SkySync::DrawDebugSection()
 		ImGui::Text(T(TKEY("debug_moon_entry"), "%s  [%s]  color (%.3f, %.3f, %.3f, %.3f)"), label, phase, color.x, color.y, color.z, color.w);
 	};
 
-	const auto sky = globals::game::sky;
+	const auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	const char* unknown = T(TKEY("debug_unknown"), "Unknown");
 	drawMoonEntry("Masser", Caster::Masser, sky ? getPhase(sky->masser) : unknown);
 	drawMoonEntry("Secunda", Caster::Secunda, sky ? getPhase(sky->secunda) : unknown);

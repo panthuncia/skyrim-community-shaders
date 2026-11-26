@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF
 {
@@ -36,7 +37,7 @@ namespace DCLF
 		*/
 		bool IsEngineMainDepth(ID3D11Texture2D* a_bound)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 			if (!renderer || !a_bound)
 				return false;
 			auto* field = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture;
@@ -56,7 +57,7 @@ namespace DCLF
 			impl->pending->Release();
 		impl->pending = CaptureBindings();
 		// Checked now, in this frame's version. A later frame may run a new version of kMAIN after a resize.
-		if (globals::game::renderer)
+		if (CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer))
 			impl->mainPassBindsMainDepth = IsEngineMainDepth(impl->pending->depth.get());
 		impl->mainMinDepth = impl->pending->minDepth;
 		impl->mainMaxDepth = impl->pending->maxDepth;
@@ -70,7 +71,7 @@ namespace DCLF
 		Engine::ApplyPendingState();
 		auto capture = CaptureBindings();
 		// Use the engine's main depth, not whatever is bound. Terrain Blending swaps the bound target while terrain draws.
-		if (auto* renderer = globals::game::renderer) {
+		if (auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)) {
 			// The field can hold a tripwire handle, so unwrap it to DXVK's texture.
 			if (auto* main = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture)) {
 				capture.depth = nullptr;
@@ -347,7 +348,7 @@ namespace DCLF
 			// The engine does not rewrite b12 through the hooked context every frame, so the mirror can be empty, and an empty slot
 			// drops every object that reads it. Community Shaders caches this buffer between Map and Unmap, so take it from there.
 			{
-				const auto& cached = globals::game::frameBufferCached.data;
+				const auto& cached = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).data;
 				const auto* bytes = reinterpret_cast<const std::byte*>(&cached);
 				if (a_out.vs[kPerFrameVertexRegister].empty())
 					a_out.vs[kPerFrameVertexRegister].assign(bytes, bytes + sizeof(cached));

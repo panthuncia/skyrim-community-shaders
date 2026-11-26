@@ -1,4 +1,5 @@
 #include "Surfaces.h"
+#include "Snapshot/EngineReads.h"
 
 namespace SkinSurfaces
 {
@@ -118,7 +119,7 @@ namespace SkinSurfaces
 
 	bool Belongs(RE::BSGeometry* a_geometry, RE::Actor* a_actor)
 	{
-		return a_geometry && a_actor && (Within(a_geometry, a_actor->Get3D(false)) || (a_actor == RE::PlayerCharacter::GetSingleton() && Within(a_geometry, a_actor->Get3D(true))));
+		return a_geometry && a_actor && (Within(a_geometry, a_actor->Get3D(false)) || (a_actor == CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()) && Within(a_geometry, a_actor->Get3D(true))));
 	}
 
 	RE::Actor* Owner(RE::BSGeometry* a_geometry)
@@ -127,7 +128,7 @@ namespace SkinSurfaces
 			if (auto* owner = object->GetUserData())
 				if (auto* actor = owner->As<RE::Actor>(); Belongs(a_geometry, actor))
 					return actor;
-		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 		return Belongs(a_geometry, player) ? player : nullptr;
 	}
 
@@ -137,7 +138,7 @@ namespace SkinSurfaces
 		if (!Belongs(a_geometry, a_actor))
 			return result;
 		auto* third = a_actor->Get3D(false);
-		auto* first = a_actor == RE::PlayerCharacter::GetSingleton() ? a_actor->Get3D(true) : nullptr;
+		auto* first = a_actor == CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()) ? a_actor->Get3D(true) : nullptr;
 		result.firstPerson = first && first != third && Within(a_geometry, first);
 		if (IsHead(a_geometry)) {
 			result.part = Part::Head;

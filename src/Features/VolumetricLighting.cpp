@@ -1,4 +1,5 @@
 #include "VolumetricLighting.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/VolumetricLighting/ORGVolumetricLighting.h"
 #include "I18n/I18n.h"
@@ -173,8 +174,8 @@ VolumetricLighting::TextureSize VolumetricLighting::VolumeSizeFor(const int32_t 
 
 void VolumetricLighting::EarlyPrepass()
 {
-	int32_t width = static_cast<int32_t>(globals::game::graphicsState->screenWidth);
-	int32_t height = static_cast<int32_t>(globals::game::graphicsState->screenHeight);
+	int32_t width = static_cast<int32_t>(CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth);
+	int32_t height = static_cast<int32_t>(CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight);
 
 	if (width != fullScreenX || height != fullScreenY) {
 		blurHCS = nullptr;
@@ -195,7 +196,7 @@ void VolumetricLighting::EarlyPrepass()
 	vlData.screenYMin1 = vlData.screenY - 1;
 	vlDataCB->Update(vlData);
 
-	const auto interiorCell = RE::TES::GetSingleton()->interiorCell;
+	const auto interiorCell = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())->interiorCell;
 	inInterior = interiorCell != nullptr;
 	inInteriorWithSun = InteriorSun::IsInteriorWithSun(interiorCell);
 

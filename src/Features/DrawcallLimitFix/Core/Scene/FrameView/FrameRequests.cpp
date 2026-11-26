@@ -24,6 +24,7 @@
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF::Scene
 {
@@ -258,7 +259,7 @@ namespace DCLF::Scene
 			ForEachGatheredRoot(listing, [&hash](RE::NiNode* a_root) { hash.Mix(a_root); });
 			if (const auto& unheld = Extensions::RegisteredUnheldRoots(); unheld.owner)
 				hash.Mix(unheld.owner());
-			if (auto* tes = RE::TES::GetSingleton()) {
+			if (auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())) {
 				hash.Mix(tes->objRoot);
 				hash.Mix(tes->interiorCell);
 				const auto* grid = tes->gridCells;
@@ -309,7 +310,7 @@ namespace DCLF::Scene
 					}
 				}
 			};
-			if (auto* tes = RE::TES::GetSingleton()) {
+			if (auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())) {
 				if (auto* objRoot = tes->objRoot)
 					hash.Mix(objRoot->GetChildren().size());
 				mix(tes->objRoot);
@@ -328,7 +329,7 @@ namespace DCLF::Scene
 			if (const auto& unheld = Extensions::RegisteredUnheldRoots(); unheld.owner)
 				mix(unheld.owner());
 			// Watched whether or not a cell is loaded yet.
-			for (auto* sceneNode : RE::BSShaderManager::State::GetSingleton().shadowSceneNode)
+			for (auto* sceneNode : CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode)
 				watch(sceneNode);
 			return hash.value;
 		}
@@ -415,7 +416,7 @@ namespace DCLF::Scene
 				}
 			};
 
-			if (auto* tes = RE::TES::GetSingleton()) {
+			if (auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())) {
 				if (auto* objRoot = tes->objRoot) {
 					for (auto& child : Engine::Children(*objRoot)) {
 						if (auto* multiBound = child ? netimmerse_cast<RE::BSMultiBoundNode*>(child.get()) : nullptr)
@@ -578,7 +579,7 @@ namespace DCLF::Scene
 			return;
 		DCLF_ZONE("CS.DCLF.Ingest.SwitchCatchUps");
 		const auto start = std::chrono::steady_clock::now();
-		const auto* root = static_cast<const RE::NiAVObject*>(RE::Main::WorldRootNode());
+		const auto* root = static_cast<const RE::NiAVObject*>(CS_ENGINE_READ(Data, RecordTime, RE::Main::WorldRootNode()));
 		auto inWorld = [root](const RE::NiAVObject* a_object) {
 			for (std::uint32_t depth = 0; root && a_object && depth <= Engine::kMaxParentDepth; ++depth, a_object = a_object->parent)
 				if (a_object == root)
@@ -802,7 +803,7 @@ namespace DCLF::Scene
 
 	void FrameView::LatchAccumulator()
 	{
-		auto* accumulator = *globals::game::currentAccumulator.get();
+		auto* accumulator = *CS_ENGINE_READ(Accumulator, CapturePoint, globals::game::currentAccumulator).get();
 		if (!accumulator || accumulator == latchedAccumulator)
 			return;
 		if (latchedAccumulator) {

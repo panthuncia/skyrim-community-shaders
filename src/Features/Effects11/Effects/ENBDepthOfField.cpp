@@ -1,4 +1,5 @@
 #include "ENBDepthOfField.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../EffectManager.h"
 #include "../SettingManager.h"
@@ -26,7 +27,7 @@ void ENBDepthOfField::Execute()
 {
 	auto& textureManager = TextureManager::GetSingleton();
 
-	auto* renderer = globals::game::renderer;
+	auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	if (!renderer)
 		return;
 
@@ -109,7 +110,7 @@ void ENBDepthOfField::UpdateEffectVariables()
 	}
 	SetShaderResourceVariable("TextureAdaptation", adaptationSRV);
 
-	const float deltaTime = globals::game::deltaTime ? (*globals::game::deltaTime) : 0.0f;
+	const float deltaTime = CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) ? (*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime)) : 0.0f;
 	auto blendFactor = [&](uint32_t settingID) {
 		const float time = settingManager.GetValue<float>(settingID);
 		return historyValid ? std::clamp(time > 0.0f ? deltaTime / time : 1.0f, 0.0f, 1.0f) : 1.0f;

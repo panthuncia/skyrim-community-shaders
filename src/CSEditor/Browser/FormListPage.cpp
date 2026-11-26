@@ -1,4 +1,5 @@
 #include "FormListPage.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../../I18n/I18n.h"
 #include "../EditorWindow.h"
@@ -329,7 +330,7 @@ namespace
 	{
 		EditorWindow& editor = *context.editor;
 		std::vector<ActiveRecord> records;
-		auto* sky = globals::game::sky;
+		auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 		auto* weather = sky ? sky->currentWeather : nullptr;
 
 		auto add = [&](RE::TESForm* form, WidgetVec& widgets, std::string suffix, bool outgoing, std::string_view category) {
@@ -364,11 +365,11 @@ namespace
 			if (weather)
 				addTimesOfDay(weather->imageSpaces, editor.imageSpaceWidgets, kImageSpace);
 		} else if (category == kLightingTemplate) {
-			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 			if (player && player->parentCell)
 				add(player->parentCell->GetRuntimeData().lightingTemplate, editor.lightingTemplateWidgets, "", false, kLightingTemplate);
 		} else if (category == kCellLighting) {
-			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 			if (player && player->parentCell && player->parentCell->IsInteriorCell()) {
 				auto* cell = player->parentCell;
 				const char* cellName = cell->GetName();
@@ -1094,7 +1095,7 @@ namespace
 
 	void DrawLightingTemplateUsage(Widget& widget)
 	{
-		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 		auto* cell = player ? player->parentCell : nullptr;
 		if (!cell || !widget.form || cell->GetRuntimeData().lightingTemplate != widget.form)
 			return;
@@ -1187,7 +1188,7 @@ namespace
 	void DrawCellLightingCard(FormListState& state, const Context& context)
 	{
 		EditorWindow& editor = *context.editor;
-		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 		auto* cell = player ? player->parentCell : nullptr;
 		if (!cell) {
 			BrowserUI::EmptyState(T(TKEY("player_cell_unavailable"), "Player cell not available."));

@@ -3,6 +3,7 @@
 
 #include "ORGUpscaling.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/HDRDisplay/ORGHDRDisplay.h"
 #include "Features/Upscaling.h"
@@ -551,7 +552,7 @@ namespace
 	FrameAnchors::Texture HudlessSourceOf(ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_view)
 	{
 		// HDR's clean composite is its output twin in graph mode, ordered after its writes, else an imported D3D11 texture.
-		const auto& framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+		const auto& framebuffer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 		if (framebuffer.texture == a_texture)
 			return FrameAnchors::EngineTexture(FrameAnchors::Colour(RE::RENDER_TARGETS::kFRAMEBUFFER));
 		if (auto slot = ORGHDRDisplay::Get().GraphOf(a_texture))

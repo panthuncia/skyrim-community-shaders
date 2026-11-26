@@ -1,4 +1,5 @@
 #include "D3D.h"
+#include "Snapshot/EngineReads.h"
 #include "Utils/FxcShaderStore.h"
 #include "Utils/SharedShaderStore.h"
 
@@ -54,7 +55,7 @@ namespace Util
 
 	ID3D11ShaderResourceView* GetCurrentSceneDepthSRV(bool prefer16bit)
 	{
-		auto renderer = globals::game::renderer;
+		auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		if (!renderer)
 			return nullptr;
 		// The field can be a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES). Callers bind it on DXVK's context, so they get the
@@ -75,7 +76,7 @@ namespace Util
 	ID3D11ShaderResourceView* GetSRVFromRTV(const ID3D11RenderTargetView* a_rtv)
 	{
 		if (a_rtv) {
-			if (auto r = globals::game::renderer) {
+			if (auto r = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)) {
 				for (int i = 0; i < RE::RENDER_TARGETS::kTOTAL; i++) {
 					auto rt = r->GetRuntimeData().renderTargets[i];
 					if (a_rtv == rt.RTV) {
@@ -90,7 +91,7 @@ namespace Util
 	ID3D11RenderTargetView* GetRTVFromSRV(const ID3D11ShaderResourceView* a_srv)
 	{
 		if (a_srv) {
-			if (auto r = globals::game::renderer) {
+			if (auto r = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)) {
 				for (int i = 0; i < RE::RENDER_TARGETS::kTOTAL; i++) {
 					auto rt = r->GetRuntimeData().renderTargets[i];
 					if (a_srv == rt.SRV || a_srv == rt.SRVCopy) {
@@ -107,7 +108,7 @@ namespace Util
 		using RENDER_TARGET = RE::RENDER_TARGETS::RENDER_TARGET;
 
 		if (a_srv) {
-			if (auto r = globals::game::renderer) {
+			if (auto r = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)) {
 				for (int i = 0; i < RE::RENDER_TARGETS::kTOTAL; i++) {
 					auto rt = r->GetRuntimeData().renderTargets[i];
 					if (a_srv == rt.SRV || a_srv == rt.SRVCopy) {
@@ -123,7 +124,7 @@ namespace Util
 	{
 		using RENDER_TARGET = RE::RENDER_TARGETS::RENDER_TARGET;
 		if (a_rtv) {
-			if (auto r = globals::game::renderer) {
+			if (auto r = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)) {
 				for (int i = 0; i < RE::RENDER_TARGETS::kTOTAL; i++) {
 					auto rt = r->GetRuntimeData().renderTargets[i];
 					if (a_rtv == rt.RTV) {

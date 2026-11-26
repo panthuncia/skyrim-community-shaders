@@ -1,4 +1,5 @@
 #include "ExponentialHeightFog.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "Effects11.h"
@@ -333,7 +334,7 @@ void ExponentialHeightFog::ClearShaderCache()
 ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 {
 	const auto& quality = globals::features::viewAtmosphere.settings;
-	float2 screenSz{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+	float2 screenSz{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 	return GridSizesFor(Util::ConvertToDynamic(screenSz), quality.nearPixelSize, quality.nearSlices, quality.middlePixelSize, quality.middleSlices);
 }
 
@@ -563,8 +564,8 @@ void ExponentialHeightFog::BindIntegratedLightScattering()
 
 ID3D11ShaderResourceView* ExponentialHeightFog::BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const
 {
-	auto* renderer = globals::game::renderer;
-	auto* smState = globals::game::smState;
+	auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
+	auto* smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
 	if (!renderer || !smState || !smState->shadowSceneNode[0])
 		return nullptr;
 	auto* shadowSceneNode = smState->shadowSceneNode[0];
@@ -603,7 +604,7 @@ ID3D11ShaderResourceView* ExponentialHeightFog::BuildEngineLocalShadowData(Engin
 	}
 
 	auto& shadows = a_shadows;
-	const auto& eye = globals::game::frameBufferCached.GetCameraPosAdjust();
+	const auto& eye = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 	for (uint32_t i = 0; i < shadows.size(); i++) {
 		auto* light = shadowLights[i];
 		if (!light || maskClaims[i] != 1)
@@ -809,7 +810,7 @@ ExponentialHeightFog::VolumetricFogCB ExponentialHeightFog::BuildConstants(const
 	cb.farGridZParams = computeGridZParams(nearEndDepth, totalFarPlane, farGridSize.z, quality.depthDistribution);
 	cb.farRange = { static_cast<float>(nearEndDepth), static_cast<float>(totalFarPlane), 0.0f, 0.0f };
 
-	cb.clipToWorld = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Invert();
+	cb.clipToWorld = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Invert();
 
 	for (uint32_t i = 0; i < std::size(cb.frameJitterOffsets); i++) {
 		const uint32_t temporalFrame = (globals::state->frameCount - i) & 1023u;
@@ -947,7 +948,7 @@ void ExponentialHeightFog::Prepass()
 	ID3D11Buffer* sharedBuffers[2]{ globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
 	context->CSSetConstantBuffers(5, 2, sharedBuffers);
 
-	ID3D11Buffer* frameBuffers[1]{ *globals::game::perFrame.get() };
+	ID3D11Buffer* frameBuffers[1]{ *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame).get() };
 	context->CSSetConstantBuffers(12, 1, frameBuffers);
 
 	ID3D11SamplerState* samplers[2]{ linearSampler.get(), shadowSampler.get() };

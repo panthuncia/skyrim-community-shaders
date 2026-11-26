@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/PostProcessing/ORGPostEffect.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/LinearLighting.h"
 #include "Features/PostProcessing/PhysicalGlare.h"
@@ -104,7 +105,7 @@ namespace ORGPostChain
 			{
 				auto& glare = static_cast<PhysicalGlare&>(a_feature);
 				const auto effective = glare.GetEffectiveSettings();
-				const float deltaTime = *globals::game::deltaTime;
+				const float deltaTime = *CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime);
 				// The tear film's clock runs while it animates.
 				if (TearFilmAnimated(effective))
 					glare.tearFilmTimeAccum += deltaTime;

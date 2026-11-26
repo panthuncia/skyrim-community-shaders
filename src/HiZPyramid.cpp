@@ -1,4 +1,5 @@
 #include "HiZPyramid.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/TerrainBlending.h"
 #include "Profiler.h"
@@ -39,7 +40,7 @@ ID3D11ShaderResourceView* HiZPyramid::GetSourceDepthSRV()
 	if (terrainBlending.loaded && terrainBlending.FrameEnabled() && terrainBlending.prepassSRVBackup)
 		return Unwrap(terrainBlending.prepassSRVBackup);
 
-	if (auto* renderer = globals::game::renderer)
+	if (auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 		return Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV);
 
 	return nullptr;
@@ -53,7 +54,7 @@ ID3D11ShaderResourceView* HiZPyramid::GetLiveDepthSRV()
 	if (terrainBlending.loaded && terrainBlending.depthSRVBackup)
 		return Unwrap(terrainBlending.depthSRVBackup);
 
-	auto* renderer = globals::game::renderer;
+	auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	if (!renderer)
 		return nullptr;
 
@@ -126,10 +127,10 @@ bool HiZPyramid::Build(ID3D11Device* device, ID3D11DeviceContext* ctx, bool forc
 
 	valid = false;
 
-	if (!paramsCB || !globals::game::renderer)
+	if (!paramsCB || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 		return false;
 
-	const float2 screenSize{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+	const float2 screenSize{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 	// Depth uses the scaled viewport even while dynamic resolution is locked.
 	const auto renderSize = Util::ConvertToDynamic(screenSize, true);
 

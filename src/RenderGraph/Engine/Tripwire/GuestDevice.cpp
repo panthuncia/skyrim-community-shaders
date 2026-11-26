@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -36,7 +37,7 @@ namespace RenderGraph::Engine::Tripwire
 		auto& guest = GetGuest();
 		if (!GuestRequested() || guest.context.load(std::memory_order_acquire))
 			return;
-		auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+		auto* renderer = CS_ENGINE_READ(Renderer, Other, RE::BSGraphics::Renderer::GetSingleton());
 		if (!renderer) {
 			logger::warn("[ORG] tripwire guest: no renderer yet, nothing installed");
 			return;

@@ -8,6 +8,7 @@
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/ShadowEngineAddresses.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
@@ -131,7 +132,7 @@ namespace DCLF::Features::Shadows::Engine
 		/** @brief Clears a slice as RenderShadowmap's ApplyState does: depth to 1, through the engine skeleton's clear pass. */
 		void ClearSlice(std::uint32_t a_target, std::uint32_t a_slice)
 		{
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 			auto* view = a_slice < 8 ? renderer->GetDepthStencilData().depthStencils[a_target].views[a_slice] : nullptr;
 			auto* context = reinterpret_cast<ID3D11DeviceContext*>(renderer->GetRuntimeData().context);
 			if (!view || !context)
@@ -145,7 +146,7 @@ namespace DCLF::Features::Shadows::Engine
 		{
 			a_width = a_height = 0;
 			const auto target = static_cast<std::uint32_t>(a_descriptor.renderTarget);
-			if (auto* texture = target < DepthTarget::kTOTAL ? globals::game::renderer->GetDepthStencilData().depthStencils[target].texture : nullptr) {
+			if (auto* texture = target < DepthTarget::kTOTAL ? CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[target].texture : nullptr) {
 				D3D11_TEXTURE2D_DESC desc{};
 				texture->GetDesc(&desc);
 				a_width = desc.Width;

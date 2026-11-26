@@ -20,6 +20,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Draws.h"
+#include "Snapshot/EngineReads.h"
 
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
@@ -391,7 +392,7 @@ namespace DCLF
 			Api::SunCascadeSink cascadeSink(sunCascades);
 			Extensions::SampleSunCascades(cascadeSink);
 			// Frames with no cascades draw sun-lit passes unshadowed. That is only right in interiors.
-			const auto* tes = RE::TES::GetSingleton();
+			const auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 			sunTestEmpty += sunCascades.empty() && !(tes && tes->interiorCell) ? 1 : 0;
 			if (sunTestWindow.Tick())
 				Reports::ColourSunTestLine(std::exchange(sunTestEmpty, 0));

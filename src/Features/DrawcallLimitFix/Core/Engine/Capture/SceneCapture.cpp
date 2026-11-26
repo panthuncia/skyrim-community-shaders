@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 #include "Features/DrawcallLimitFix/Core/Engine/SceneClock.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/PlacementRows/BillboardRow.h"
 
@@ -765,7 +766,7 @@ namespace DCLF::SceneCapture
 	bool InWorld(const RE::NiAVObject* a_object)
 	{
 		EngineReadWindow::Touch("SceneCapture::InWorld");
-		const auto* root = static_cast<const RE::NiAVObject*>(RE::Main::WorldRootNode());
+		const auto* root = static_cast<const RE::NiAVObject*>(CS_ENGINE_READ(Data, CapturePoint, RE::Main::WorldRootNode()));
 		const RE::NiAVObject* top = nullptr;
 		for (std::uint32_t depth = 0; root && a_object && depth <= kMaxDepth; ++depth, a_object = a_object->parent) {
 			if (a_object == root)

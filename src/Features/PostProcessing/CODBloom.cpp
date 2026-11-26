@@ -1,4 +1,5 @@
 #include "CODBloom.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/PostProcessing.h"
 #include "I18n/I18n.h"
@@ -72,7 +73,7 @@ void CODBloom::SaveSettings(json& o_json)
 
 void CODBloom::SetupResources()
 {
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	logger::debug("Creating buffers...");

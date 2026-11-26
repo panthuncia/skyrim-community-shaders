@@ -1,4 +1,5 @@
 #include "State.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <cmath>
@@ -133,7 +134,7 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 	if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_CLOUDS) {
 		// Bottled Shaders keeps cloud layer 28 out of the scattering
 		constexpr std::uint16_t kNoScatteringCloudLayer = 28;
-		auto* sky = globals::game::sky;
+		auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 		if (sky && sky->clouds && kNoScatteringCloudLayer < sky->clouds->numLayers &&
 			sky->clouds->clouds[kNoScatteringCloudLayer].get() == a_pass->geometry)
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::NoSkyScattering);
@@ -146,7 +147,7 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 		skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_MOON_SHADOW) {
 		if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_MOON)
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsMoon);
-		const auto* sky = globals::game::sky;
+		const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 		if (sky && sky->secunda && (a_pass->geometry == sky->secunda->moonMesh.get() || a_pass->geometry == sky->secunda->shadowMesh.get()))
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsSecunda);
 	}
@@ -162,7 +163,7 @@ void State::UpdateEffectShaderPermutation(RE::BSRenderPass* a_pass)
 	if (!(currentVertexDescriptor & static_cast<uint32_t>(SIE::ShaderCache::EffectShaderFlags::SkyObject)))
 		return;
 
-	const auto sky = globals::game::sky;
+	const auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!sky || !sky->auroraRoot)
 		return;
 
@@ -249,7 +250,7 @@ void State::Draw()
 				if (currentPixelDescriptor & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask)) {
 					// The sun's shadow cascades, from the engine's shadow state: the flush has just applied it (the same view as PS t4),
 					// and under the flush latch (P5.13) it bound nothing. DXVK's view, as ShadowMaskCapture gives it.
-					OnShadowMaskDraw(RenderGraph::Engine::Tripwire::Unwrap(globals::game::shadowState->GetRuntimeData().PSTexture[4]));
+					OnShadowMaskDraw(RenderGraph::Engine::Tripwire::Unwrap(CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().PSTexture[4]));
 				}
 			}
 		}
@@ -376,12 +377,12 @@ bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_
 	if (!globals::features::effects11.RenderTonemap(a_input, a_output))
 		return false;
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	// Engine target fields can be tripwire handles: DXVK's context takes the wrapped view.
 	auto* outputRTV = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetRuntimeData().renderTargets[a_output].RTV);
 	globals::d3d::context->OMSetRenderTargets(1, &outputRTV, nullptr);
 
-	auto shadowState = globals::game::shadowState;
+	auto shadowState = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
 	auto& stateData = shadowState->GetRuntimeData();
 	stateData.renderTargets[0] = a_output;
 	stateData.setRenderTargetMode[0] = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
@@ -421,9 +422,9 @@ void State::Reset()
 
 	// Cache menu open states once per frame to avoid repeated IsMenuOpen calls
 	// (each call constructs a BSFixedString, which is expensive at scale).
-	if (auto ui = globals::game::ui) {
+	if (auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui)) {
 		if (!ui->GameIsPaused())
-			timer += RE::GetSecondsSinceLastFrame();
+			timer += CS_ENGINE_READ(Timer, Other, RE::GetSecondsSinceLastFrame());
 
 		isMainMenuOpen = ui->IsMenuOpen(RE::MainMenu::MENU_NAME);
 		isLoadingMenuOpen = ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
@@ -447,7 +448,7 @@ void State::Reset()
 	// Publish for off-thread readers (e.g. the MCP listener thread).
 	frameCountAtomic.store(frameCount, std::memory_order_relaxed);
 
-	if (auto* imageSpaceManager = globals::game::imageSpaceManager) {
+	if (auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager)) {
 		auto& BSImagespaceShaderApplyReflections = imageSpaceManager->GetRuntimeData().BSImagespaceShaderApplyReflections;
 
 		// Disable reflections being applied to things other than water
@@ -459,7 +460,7 @@ void State::Reset()
 	// Disable "improved" snow shader, unsupported
 	static RE::Setting* improvedSnow = nullptr;
 	if (!improvedSnow)
-		improvedSnow = RE::GetINISetting("bEnableImprovedSnow:Display");
+		improvedSnow = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bEnableImprovedSnow:Display"));
 	if (improvedSnow)
 		improvedSnow->data.b = false;
 
@@ -1395,7 +1396,7 @@ void State::SetupResources()
 
 	frameTimingActive = false;
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 
 	permutationCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<PermutationCB>(), "State::PermutationCB");
 	sharedDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SharedDataCB>(), "State::SharedDataCB");
@@ -1692,7 +1693,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.PreExposureHistoryRatio = preExposure / previousPreExposure;
 		SharedLighting lighting{};
 
-		const auto shaderManager = globals::game::smState;
+		const auto shaderManager = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
 		const RE::NiTransform& dalcTransform = shaderManager->directionalAmbientTransform;
 
 		auto shadowSceneNode = shaderManager->shadowSceneNode[0];
@@ -1710,7 +1711,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.DirLightDirection.Normalize();
 
 		data.CameraData = Util::GetCameraData();
-		data.BufferDim = { (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight, 1.0f / (float)globals::game::graphicsState->screenWidth, 1.0f / (float)globals::game::graphicsState->screenHeight };
+		data.BufferDim = { (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenHeight, 1.0f / (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenWidth, 1.0f / (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenHeight };
 		data.Timer = timer;
 
 		auto temporal = Util::GetTemporal();
@@ -1734,8 +1735,8 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.InInterior = Util::IsInterior();
 		data.HasDirectionalShadows = HasDirectionalShadows();
 
-		if (globals::game::sky)
-			data.HideSky = globals::game::sky->flags.any(RE::Sky::Flags::kHideSky);
+		if (CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky))
+			data.HideSky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)->flags.any(RE::Sky::Flags::kHideSky);
 		else
 			data.HideSky = false;
 
@@ -1746,7 +1747,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		if (upscaling.loaded) {
 			auto upscaleMethod = upscaling.FrameUpscaleMethod();
 			if (temporal && upscaleMethod != Upscaling::UpscaleMethod::kTAA) {
-				float2 screenSz{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+				float2 screenSz{ (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenHeight };
 				auto renderSize = Util::ConvertToDynamic(screenSz, true);
 				data.MipBias = std::log2f(renderSize.x / screenSz.x) - 1.0f;
 			} else {
@@ -1756,7 +1757,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 			data.MipBias = 0;
 		}
 
-		if (auto sky = globals::game::sky) {
+		if (auto sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)) {
 			const auto& skySync = globals::features::skySync;
 			auto getMoonColor = [&](const RE::Moon* moon, const Util::ColorSpace::LightColor& baseColor) {
 				return Util::Moon::GetLightColor(moon, baseColor, globals::features::skySync.settings.NewMoonIntensity, globals::features::skySync.settings.CrescentMoonIntensity, globals::features::skySync.settings.FullMoonIntensity);

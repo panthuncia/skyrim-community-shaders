@@ -1,4 +1,5 @@
 #include "DoF.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
 
@@ -377,7 +378,7 @@ void DoF::UpdateProceduralBokehSamples(int bladeCount, float bladeRoundness, boo
 void DoF::SetupResources()
 {
 	focusFrame = ~0u;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto device = globals::d3d::device;
 
 	logger::debug("Creating buffers...");
@@ -713,8 +714,8 @@ DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 		}
 	}
 	// RaceMenu always autofocuses the player, regardless of the configured mode.
-	auto* player = globals::game::player;
-	if (resolver && player && globals::game::ui->IsMenuOpen(RE::RaceSexMenu::MENU_NAME)) {
+	auto* player = CS_ENGINE_READ(Player, RecordTime, globals::game::player);
+	if (resolver && player && CS_ENGINE_READ(UI, RecordTime, globals::game::ui)->IsMenuOpen(RE::RaceSexMenu::MENU_NAME)) {
 		if (!cam)
 			focusLen = RaceMenuFocalLengthMM;
 		autoFocus = resolver->GetReferenceFocusCoord(player, focusCoord);
@@ -808,7 +809,7 @@ void DoF::Draw(TextureInfo& inout_tex)
 
 	auto state = globals::state;
 	auto context = globals::d3d::context;
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	// Engine target fields can be tripwire handles: DXVK takes the wrapped object.
 	auto* depthSRV = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV);
 	if (!depthSRV) {

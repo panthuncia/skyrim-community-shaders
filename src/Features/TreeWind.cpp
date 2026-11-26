@@ -1,4 +1,5 @@
 #include "TreeWind.h"
+#include "Snapshot/EngineReads.h"
 
 #include <imgui.h>
 
@@ -291,7 +292,7 @@ void TreeWind::Reset()
 	float windSpeed = 0.0f;
 	float windAngle = 0.0f;
 	float storminess = 0.0f;
-	if (auto sky = globals::game::sky) {
+	if (auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky)) {
 		windSpeed = sky->windSpeed;
 		windAngle = sky->windAngle;
 		const float weatherPct = std::clamp(sky->currentWeatherPct, 0.0f, 1.0f);
@@ -307,8 +308,8 @@ void TreeWind::Reset()
 	statusGust = gustStrength;
 
 	// Capped so a hitch or a load does not jump the trees
-	const bool paused = globals::game::ui && globals::game::ui->GameIsPaused();
-	const double deltaTime = paused ? 0.0 : std::min(static_cast<double>(RE::GetSecondsSinceLastFrame()), 0.25);
+	const bool paused = CS_ENGINE_READ(UI, Other, globals::game::ui) && CS_ENGINE_READ(UI, Other, globals::game::ui)->GameIsPaused();
+	const double deltaTime = paused ? 0.0 : std::min(static_cast<double>(CS_ENGINE_READ(Timer, Other, RE::GetSecondsSinceLastFrame())), 0.25);
 	prevPhase = phase;
 	phase += deltaTime * (settings.BaseSpeed + settings.WindSpeedGain * std::clamp(windSpeed, 0.0f, 1.0f));
 	// Wraps at 200 pi, a whole number of cycles for every sway frequency in TreeWind.hlsli, and keeps float

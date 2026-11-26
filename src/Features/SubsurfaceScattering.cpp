@@ -1,4 +1,5 @@
 #include "SubsurfaceScattering.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../I18n/I18n.h"
 #include "Deferred.h"
@@ -218,7 +219,7 @@ void SubsurfaceScattering::CalculateKernel(DiffusionProfile& a_profile, Kernel& 
 
 SubsurfaceScattering::BlurCB SubsurfaceScattering::BuildBlurConstants(int a_mode)
 {
-	auto cameraData = globals::game::shadowState->GetRuntimeData().cameraData.getEye();
+	auto cameraData = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)->GetRuntimeData().cameraData.getEye();
 
 	blurCBData.SSSS_FOVY = atan(1.0f / cameraData.projMat.m[0][0]) * 2.0f * (180.0f / 3.14159265359f);
 
@@ -255,7 +256,7 @@ void SubsurfaceScattering::DrawSSS()
 
 	blurCB->Update(BuildBlurConstants(settings.SSMode.Get()));
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
 
 	{
@@ -377,7 +378,7 @@ void SubsurfaceScattering::SetupResources()
 		EnsureD3D11Resources();
 		return;
 	}
-	auto main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+	auto main = CS_ENGINE_READ(Renderer, Other, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	D3D11_TEXTURE2D_DESC texDesc{};
 	main.texture->GetDesc(&texDesc);
 	texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
@@ -390,7 +391,7 @@ void SubsurfaceScattering::EnsureD3D11Resources()
 		blurCB = new ConstantBuffer(ConstantBufferDesc<BlurCB>(), "SSS::BlurCB");
 	}
 
-	auto renderer = globals::game::renderer;
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 
 	if (!blurHorizontalTemp || !diffuseNoAlbedoTex) {
 		auto main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
@@ -418,7 +419,7 @@ void SubsurfaceScattering::EnsureD3D11Resources()
 
 void SubsurfaceScattering::Reset()
 {
-	auto shaderManager = globals::game::smState;
+	auto shaderManager = CS_ENGINE_READ(ShaderManagerState, Other, globals::game::smState);
 	auto shaderCache = globals::shaderCache;
 	shaderManager->characterLightEnabled = shaderCache->IsEnabled() ? settings.EnableCharacterLighting.Get() != 0 : true;
 	if (shaderManager->characterLightEnabled) {

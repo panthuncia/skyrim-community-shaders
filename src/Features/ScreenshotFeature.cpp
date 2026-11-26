@@ -4,6 +4,7 @@
 // capture does not stall the frame.
 
 #include "Features/ScreenshotFeature.h"
+#include "Snapshot/EngineReads.h"
 
 #include <PCH.h>
 
@@ -294,7 +295,7 @@ namespace
 	CaptureSource SelectCaptureSource(winrt::com_ptr<ID3D11Texture2D>& holder, bool forCapture)
 	{
 		CaptureSource src;
-		auto* renderer = globals::game::renderer;
+		auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 		if (!renderer) {
 			return src;
 		}
@@ -616,7 +617,7 @@ void ScreenshotFeature::SetupResources()
 void ScreenshotFeature::ApplyVanillaScreenshotSetting()
 {
 	// Toggles the in-memory value only; Skyrim.ini on disk is never rewritten.
-	auto* setting = RE::GetINISetting("bAllowScreenShot:Display");
+	auto* setting = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bAllowScreenShot:Display"));
 	if (!setting || setting->GetType() != RE::Setting::Type::kBool)
 		return;
 	if (!vanillaScreenshotDefault)
@@ -633,7 +634,7 @@ void ScreenshotFeature::SuppressVanillaMultiScreenshot() const
 	// The engine's Multi-Screenshot toggle ignores bAllowScreenShot, so the queued request is cleared directly.
 	if (!disableVanillaScreenshot)
 		return;
-	if (auto* controls = RE::MenuControls::GetSingleton(); controls && controls->screenshotHandler)
+	if (auto* controls = CS_ENGINE_READ(UI, RecordTime, RE::MenuControls::GetSingleton()); controls && controls->screenshotHandler)
 		controls->screenshotHandler->multiScreenshotQueued = false;
 }
 
@@ -868,11 +869,11 @@ void ScreenshotFeature::SnapshotCleanScene()
 	const bool previewWanted = std::exchange(previewVisible, false);
 	// The render graph took this frame's capture snapshot already.
 	const bool captureWanted = captureRequested && !ORGScreenshot::Get().HasFreshCleanScene();
-	if (!loaded || !(captureWanted || previewWanted) || IsFlatHdrScreenshotCapture() || !globals::game::renderer)
+	if (!loaded || !(captureWanted || previewWanted) || IsFlatHdrScreenshotCapture() || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 		return;
 
 	winrt::com_ptr<ID3D11Texture2D> sceneKeepAlive;
-	auto* scene = ResolveSlotTexture(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER], sceneKeepAlive);
+	auto* scene = ResolveSlotTexture(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER], sceneKeepAlive);
 	if (!scene)
 		return;
 

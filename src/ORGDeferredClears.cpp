@@ -1,4 +1,5 @@
 #include "ORGDeferredClears.h"
+#include "Snapshot/EngineReads.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -176,7 +177,7 @@ void ORGDeferredClears::Setup()
 		client.gates = { SharedState().gate };
 		client.commit = [](const FrameAnchors::Point&) {
 			SharedState().gate->OpenDispatch(0, 1);
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 			if (!renderer)
 				return;
 			const auto& colour = renderer->GetRendererData().clearColor;

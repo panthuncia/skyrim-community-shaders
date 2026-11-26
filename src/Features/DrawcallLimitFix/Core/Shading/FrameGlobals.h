@@ -14,6 +14,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPortFrame.h"
+#include "Snapshot/EngineReads.h"
 
 namespace RE
 {
@@ -102,10 +103,10 @@ namespace DCLF
 		static void NoteFirstPersonCulled(const RE::NiAVObject* a_root);
 		/** @brief The capture this thread reads: its Scope's, or the latest on the render thread. */
 		static const FrameGlobals& Current();
-		/** @brief Reads since the last call from a thread with neither a scope nor the render thread's identity. */
+		/** @brief Reads since the last call from a thread with neither a scope nor the render thread's identity. The live-read detector's FrameGlobals site holds the count. */
 		static std::uint64_t TakeUnscopedReads();
 
-		/** @brief Binds a capture to this thread for the scene work's frame. */
+		/** @brief Binds a capture to this thread for the scene work's frame. Engine reads inside it count as captures (Snapshot/EngineReads.h). */
 		class Scope
 		{
 		public:
@@ -117,6 +118,8 @@ namespace DCLF
 		private:
 			std::shared_ptr<const FrameGlobals> held;
 			const FrameGlobals* previous = nullptr;
+			// The live-read detector counts reads under a bound capture as captures.
+			Snapshot::EngineReads::CaptureScope capture;
 		};
 	};
 }

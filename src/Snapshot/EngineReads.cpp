@@ -191,8 +191,9 @@ namespace Snapshot::EngineReads
 
 		if (!Logging())
 			return;
-		logger::info("[Snapshot] live engine reads {} ({}; frames: world {}, frozen world {}, main menu {}, loading {}, bink {}): {} live reads at {} sites, {} on the render "
-					 "thread; {} captured; per world frame {:.1f} ({})",
+		logger::info(
+			"[Snapshot] live engine reads {} ({}; frames: world {}, frozen world {}, main menu {}, loading {}, bink {}): {} live reads at {} sites, {} on the render "
+			"thread; {} captured; per world frame {:.1f} ({})",
 			a_when, RenderGraph::Frame::Driver::ModeName(), frames[0], frames[1], frames[2], frames[3], frames[4], all.live, rows.size(), all.liveRender, all.captured,
 			all.world / worldFrames, categories(all));
 		for (const auto& [name, t] : byFeature)

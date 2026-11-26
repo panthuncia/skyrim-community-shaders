@@ -2,6 +2,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Menu/ImGuiRenderer.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "Menu/IconLoader.h"
@@ -180,7 +181,7 @@ namespace ImGuiRenderer
 		{
 			if (!RenderGraph::Engine::GraphMode() || !RenderGraphRuntime::Get().IsActive())
 				return;
-			auto* renderer = globals::game::renderer;
+			auto* renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 			auto* framebufferRTV = renderer ? renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER].RTV : nullptr;
 			// The pipeline and the client are declared once for the session. Their keys are the interface's target, which only HDR
 			// switches. A revision starts once its target's pipeline is built. A failed build is fatal.

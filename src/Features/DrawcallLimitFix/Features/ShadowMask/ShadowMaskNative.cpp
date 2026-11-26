@@ -9,6 +9,7 @@
 
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
@@ -93,7 +94,7 @@ namespace DCLF::Features::ShadowMask::Native
 
 			static Modes Current()
 			{
-				const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+				const auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				Modes m;
 				m.fill = rss.rasterStateFillMode;
 				m.cull = rss.rasterStateCullMode;
@@ -249,8 +250,8 @@ namespace DCLF::Features::ShadowMask::Native
 			{
 				view = a_view;
 				state = globals::state;
-				shader = RE::BSUtilityShader::GetSingleton();
-				auto* ism = RE::ImageSpaceManager::GetSingleton();
+				shader = CS_ENGINE_READ(Shaders, RecordTime, RE::BSUtilityShader::GetSingleton());
+				auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 				auto* quadGeometry = ism ? Field<RE::BSGeometry*>(ism, 0x48) : nullptr;
 				if (!state || !shader || !quadGeometry || quadGeometry->GetType().get() != RE::BSGeometry::Type::kTriShape) {
 					a_why = "no CS state, utility shader or screen quad";
@@ -258,12 +259,12 @@ namespace DCLF::Features::ShadowMask::Native
 				}
 				quad = reinterpret_cast<const Family::TriShape*>(quadGeometry->GetGeometryRuntimeData().rendererData);
 				quadTriangles = static_cast<RE::BSTriShape*>(quadGeometry)->GetTrishapeRuntimeData().triangleCount;
-				auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+				auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				// FUN_1414fbd30's adjustment: the posAdjust, less the lighting offset in two render modes when the scene's shadows are off.
 				RE::NiPoint3 offset{};
 				if (!Global<bool>(Address::kSceneShadows)) {
 					const auto mode = Global<std::uint32_t>(Address::kRenderMode);
-					auto* node = RE::BSShaderManager::State::GetSingleton().shadowSceneNode[0];
+					auto* node = CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[0];
 					if ((mode == 0x16 || mode == 0x11) && node)
 						offset = node->GetRuntimeData().lightingOffset;
 					offset = { -offset.x, -offset.y, -offset.z };
@@ -271,7 +272,7 @@ namespace DCLF::Features::ShadowMask::Native
 				const auto posAdjust = rss.posAdjust.getEye();
 				adjust = { offset.x + posAdjust.x, offset.y + posAdjust.y, offset.z + posAdjust.z };
 				camera = Global<const RE::NiCamera*>(Address::kCamera);
-				auto* node0 = RE::BSShaderManager::State::GetSingleton().shadowSceneNode[0];
+				auto* node0 = CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[0];
 				sun = node0 ? reinterpret_cast<const RE::BSShadowLight*>(node0->GetRuntimeData().sunShadowDirLight) : nullptr;
 				filterMode = Global<std::uint32_t>(Address::kFilterMode);
 				filterBits = Global<std::uint32_t>(Address::kFilterBits);
@@ -290,7 +291,7 @@ namespace DCLF::Features::ShadowMask::Native
 				}
 				vposX = 1.0f / static_cast<float>(mask.width);
 				vposY = 1.0f / static_cast<float>(mask.height);
-				colourFormat = FormatOf(globals::game::renderer->GetRuntimeData().renderTargets[kShadowMaskTarget].RTV);
+				colourFormat = FormatOf(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[kShadowMaskTarget].RTV);
 				if (!colourFormat) {
 					a_why = "no shadow mask target";
 					return false;
@@ -476,7 +477,7 @@ namespace DCLF::Features::ShadowMask::Native
 
 			// t2 the main depth (WRAP, POINT), the light's map in t4 (t3 when the filter has no bits) and its sampler. The ORG build
 			// reads the map through t4's index either way. Other slots get a null view and the first sampler.
-			auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
+			auto& depths = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils;
 			const auto target = static_cast<std::uint32_t>(data.shadowmapDescriptors[0].renderTarget);
 			if (target >= RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL) {
 				a_why = std::format("a shadow map in depth target {}", target);
@@ -537,7 +538,7 @@ namespace DCLF::Features::ShadowMask::Native
 		Frame frame;
 		if (!frame.Read(a_view, a_why))
 			return false;
-		auto* node = a_view == View::World ? Global<RE::ShadowSceneNode*>(Address::kWorldNode) : RE::BSShaderManager::State::GetSingleton().shadowSceneNode[1];
+		auto* node = a_view == View::World ? Global<RE::ShadowSceneNode*>(Address::kWorldNode) : CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[1];
 		if (!node) {
 			a_why = "no shadow scene node";
 			return false;
@@ -585,7 +586,7 @@ namespace DCLF::Features::ShadowMask::Native
 				continue;
 			const auto target = static_cast<std::uint32_t>(light->GetRuntimeData().shadowmapDescriptors[0].renderTarget);
 			if (target < RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL)
-				return Unwrap(globals::game::renderer->GetDepthStencilData().depthStencils[target].depthSRV);
+				return Unwrap(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[target].depthSRV);
 		}
 		return nullptr;
 	}

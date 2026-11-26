@@ -1,4 +1,5 @@
 #include "ORGExponentialHeightFog.h"
+#include "Snapshot/EngineReads.h"
 
 #include <winrt/base.h>
 
@@ -623,7 +624,7 @@ namespace
 	/** @brief The engine's depth-stencil import when it is one of the engine's, else its own. */
 	Source ImportDepthView(ID3D11ShaderResourceView* a_view, const char* a_id)
 	{
-		if (!a_view || !globals::game::renderer)
+		if (!a_view || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 			return {};
 		winrt::com_ptr<ID3D11Resource> resource;
 		a_view->GetResource(resource.put());
@@ -652,10 +653,10 @@ namespace
 	/** @brief As Util::GetCurrentSceneDepthSRV(true). */
 	Source SceneDepth(ID3D11ShaderResourceView* a_view)
 	{
-		if (!a_view || !globals::game::renderer)
+		if (!a_view || !CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer))
 			return {};
 		using RenderGraph::Engine::Tripwire::Unwrap;
-		if (Unwrap(a_view) == Unwrap(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV))
+		if (Unwrap(a_view) == Unwrap(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV))
 			return { FrameAnchors::EngineTexture(FrameAnchors::Depth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY)), {} };
 		return Published(ORGTerrainBlending::kBlendedDepth16Id, a_view);
 	}
@@ -1156,7 +1157,7 @@ bool ORGExponentialHeightFog::Prepass()
 
 	// Without the sky the shader skips terrain and cloud shadows, and Cloud Shadows binds nothing.
 	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen ||
-	                     (globals::game::sky && globals::game::sky->flags.any(RE::Sky::Flags::kHideSky));
+	                     (CS_ENGINE_READ(Sky, RecordTime, globals::game::sky) && CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->flags.any(RE::Sky::Flags::kHideSky));
 
 	auto& terrainShadows = globals::features::terrainShadows;
 	if (terrainShadows.loaded && !skyless) {

@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Integrations/CloudShadows/CloudShadows.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
+#include "Snapshot/EngineReads.h"
 
 #include "State.h"
 
@@ -20,7 +21,7 @@ namespace DCLF::Integrations::CloudShadows
 			const auto& cloudShadows = globals::features::cloudShadows;
 			if (!cloudShadows.loaded || !globals::state->activeReflections || !cloudShadows.OcclusionSRV())
 				return false;
-			const auto* sky = globals::game::sky;
+			const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 			return sky && sky->mode.get() == RE::Sky::Mode::kFull && sky->currentClimate;
 		}
 

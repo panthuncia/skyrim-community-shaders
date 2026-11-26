@@ -1,5 +1,6 @@
 #include "Features/PhysicalSky.h"
 #include "Features/PhysicalSky/ORGCloudMaps.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
@@ -482,7 +483,7 @@ void PhysicalSky::SetupVolumetricResources()
 	}
 
 	// Get main render target dimensions for TR/Lum textures
-	auto renderer = RE::BSGraphics::Renderer::GetSingleton();
+	auto renderer = CS_ENGINE_READ(Renderer, Other, RE::BSGraphics::Renderer::GetSingleton());
 	auto& mainTex = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
 	D3D11_TEXTURE2D_DESC mainDesc;
@@ -754,7 +755,7 @@ bool PhysicalSky::EnsureVolumetricScreenResources()
 	}
 
 	D3D11_TEXTURE2D_DESC mainDesc;
-	globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&mainDesc);
+	CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&mainDesc);
 	try {
 		for (const auto& target : kScreenTargets) {
 			if (ORGVolumetricClouds::On()) {
@@ -952,7 +953,7 @@ void PhysicalSky::RenderCloudCrossSection()
 	const float2 altitudeKm = low.GetNdfAltitudeRangeKm();
 	const float spanX = std::max(low.ndfScale.x, 1.f) * 1000.f;
 	const float spanY = std::max(low.ndfScale.y, 1.f) * 1000.f;
-	const auto camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+	const auto camera = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 	const float2 cameraMeters{ camera.x * Util::Units::GAME_UNIT_TO_M, camera.y * Util::Units::GAME_UNIT_TO_M };
 
 	CloudCrossSectionCB data{};
@@ -1044,7 +1045,7 @@ void PhysicalSky::RenderCloudBoundary(const CloudBoundaryCB& a_data, NdfTextureS
 	context->OMSetDepthStencilState(cloudBoundaryDepth.get(), 0);
 	context->IASetIndexBuffer(cloudBoundaryIndices.get(), DXGI_FORMAT_R32_UINT, 0);
 	ID3D11Buffer* cb = cloudBoundaryCB->CB();
-	ID3D11Buffer* perFrame = *globals::game::perFrame;
+	ID3D11Buffer* perFrame = *CS_ENGINE_READ(BoundState, BoundState, globals::game::perFrame);
 	ID3D11SamplerState* sampler = sampTileable.get();
 	ID3D11ShaderResourceView* resources[] = { a_textures.height, a_textures.modeling };
 	context->VSSetConstantBuffers(0, 1, &cb);
@@ -1083,10 +1084,10 @@ void CloudStormManager::UpdateLighting(float dropletDiameter)
 
 void PhysicalSky::UpdateCloudWind()
 {
-	auto* ui = globals::game::ui;
+	auto* ui = CS_ENGINE_READ(UI, RecordTime, globals::game::ui);
 	if (!ui || ui->GameIsPaused())
 		return;
-	const double elapsed = RE::GetSecondsSinceLastFrame();
+	const double elapsed = CS_ENGINE_READ(Timer, RecordTime, RE::GetSecondsSinceLastFrame());
 	if (!std::isfinite(elapsed) || elapsed <= 0.0)
 		return;
 
@@ -1177,9 +1178,9 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 
 	auto state = globals::state;
 	auto context = globals::d3d::context;
-	auto renderer = RE::BSGraphics::Renderer::GetSingleton();
+	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, RE::BSGraphics::Renderer::GetSingleton());
 	float3 cloudLightDir = cbData.sunDir;
-	if (auto* shaderManager = globals::game::smState) {
+	if (auto* shaderManager = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)) {
 		if (auto* shadowSceneNode = shaderManager->shadowSceneNode[0]) {
 			auto shadowSunLight = shadowSceneNode->GetRuntimeData().sunLight;
 			if (shadowSunLight && shadowSunLight->light) {
@@ -1203,7 +1204,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	// while elevated clouds are still sunlit. Trace their actual solar column.
 	if (cbData.volCloudUseSun != 0)
 		cloudLightDir = cbData.sunDir;
-	const auto& frameBuffer = globals::game::frameBufferCached;
+	const auto& frameBuffer = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached);
 	const auto& resolutionScale = frameBuffer.GetDynamicResolutionParams1();
 	const float2 textureDim = { static_cast<float>(texVolTr->desc.Width), static_cast<float>(texVolTr->desc.Height) };
 	const float2 frameDim = {
@@ -1270,7 +1271,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	const uint32_t lowH = (renderH + traceStride - 1u) / traceStride;
 	const int blurRadius = std::clamp(settings.cloudBlurRadius, 0, 2);
 
-	const auto cameraPosition = globals::game::frameBufferCached.GetCameraPosAdjust();
+	const auto cameraPosition = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 	const float2 boundaryExtent = { KilometersToGameUnits(low.ndfScale.x * 2.f), KilometersToGameUnits(low.ndfScale.y * 2.f) };
 	const float2 boundarySpacing = boundaryExtent / static_cast<float>(kCloudBoundaryCells);
 	const float2 boundaryOrigin = {
@@ -2074,7 +2075,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		volMainHistoryValid = true;
 		volHistoryWind = volWind;
 		cloudStormManager.CommitMotion();
-		volHistoryViewProj = globals::game::frameBufferCached.GetCameraViewProj();
+		volHistoryViewProj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProj();
 		volHistoryCamera = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
 		volHistoryCurvatureRadius = cloudCurvatureRadius;
 		volHistoryFrameDim = state->isMapMenuOpen ? float2{} : frameDim;

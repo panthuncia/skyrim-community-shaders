@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
@@ -83,7 +84,7 @@ namespace DCLF::Features::BloodSplatter
 				a_capture.run = std::make_shared<Run>();
 			}
 			auto& run = *a_capture.run;
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* ps = rss.currentPixelShader;
 			const auto* state = globals::state;
@@ -104,7 +105,7 @@ namespace DCLF::Features::BloodSplatter
 			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra), nullptr,
 					Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor)))
 				return "a blend or rasterizer state with no description";
-			const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[kFramebuffer];
+			const auto& target = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetRuntimeData().renderTargets[kFramebuffer];
 			if (target.RTV) {
 				D3D11_RENDER_TARGET_VIEW_DESC desc{};
 				target.RTV->GetDesc(&desc);

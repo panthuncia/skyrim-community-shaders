@@ -3,6 +3,7 @@
 // so it names the player's third-person root as a late pose, and views drawn after the shadows leave the hidden parts out too.
 
 #include "Features/DrawcallLimitFix/Integrations/ImprovedCamera/ImprovedCamera.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
@@ -25,8 +26,8 @@ namespace DCLF::Integrations::ImprovedCamera
 			const auto& value = SwitchValue(latePoseSwitch);
 			if (value == "0" || (value != "1" && !PluginLoaded()))
 				return nullptr;
-			const auto* camera = RE::PlayerCamera::GetSingleton();
-			auto* player = RE::PlayerCharacter::GetSingleton();
+			const auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::PlayerCamera::GetSingleton());
+			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 			if (!camera || !camera->IsInFirstPerson() || !player)
 				return nullptr;
 			return player->Get3D(false);

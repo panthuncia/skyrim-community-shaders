@@ -1,4 +1,5 @@
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/Upscaling.h"
 
@@ -152,7 +153,7 @@ namespace RenderGraph::Frame::Driver
 		 */
 		bool FreezesBackground()
 		{
-			auto* ui = RE::UI::GetSingleton();
+			auto* ui = CS_ENGINE_READ(UI, RecordTime, RE::UI::GetSingleton());
 			if (!ui)
 				return false;
 			using Fn = bool (*)(RE::UI*);
@@ -176,7 +177,7 @@ namespace RenderGraph::Frame::Driver
 								 "it counts as a loading screen's (logged once)");
 				return Kind::Loading;
 			}
-			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 			const bool has3D = player && player->Get3D2();
 			a_state.freezes = FreezesBackground();
 			a_state.freezesFrame = FrameClock::BeginFrame();
@@ -323,7 +324,7 @@ namespace RenderGraph::Frame::Driver
 		*/
 		void SampleEngine()
 		{
-			if (const auto* tes = RE::TES::GetSingleton())
+			if (const auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton()))
 				(void)Vars::Set(Vars::Interior(), tes->interiorCell != nullptr, "engine sampler");
 			// The VL descriptor (SE 100297, AE 107014) is made on its first read, with the Low preset's static default. The engine's
 			// ImageSpace setup (SE 1412dbd00) then sets the INI's quality, after CS's setup. A quality change (SE 100299: the

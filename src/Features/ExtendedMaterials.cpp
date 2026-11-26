@@ -1,5 +1,6 @@
 #include "ExtendedMaterials.h"
 #include "../I18n/I18n.h"
+#include "Snapshot/EngineReads.h"
 
 #define I18N_KEY_PREFIX "feature.extended_materials."
 
@@ -15,7 +16,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 void ExtendedMaterials::DataLoaded()
 {
 	if (settings.EnableTerrain) {
-		if (auto bLandSpecular = globals::game::iniSettingCollection->GetSetting("bLandSpecular:Landscape"); bLandSpecular) {
+		if (auto bLandSpecular = CS_ENGINE_READ(Ini, Other, globals::game::iniSettingCollection)->GetSetting("bLandSpecular:Landscape"); bLandSpecular) {
 			if (!bLandSpecular->data.b) {
 				logger::info("[CPM] Changing bLandSpecular from {} to {} to support Terrain Parallax", bLandSpecular->data.b, true);
 				bLandSpecular->data.b = true;

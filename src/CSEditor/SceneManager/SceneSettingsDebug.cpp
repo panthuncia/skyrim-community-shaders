@@ -1,4 +1,5 @@
 #include "SceneSettingsManager.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "SceneSettingsInternal.h"
@@ -60,7 +61,7 @@ SceneSettingsManager::DebugSnapshot SceneSettingsManager::GetDebugSnapshot() con
 	snapshot.currentWeatherName = FormatDebugFormName(snapshot.weather.currentWeatherId);
 	snapshot.previousWeatherName = FormatDebugFormName(snapshot.weather.previousWeatherId);
 
-	auto* player = RE::PlayerCharacter::GetSingleton();
+	auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 	auto* cell = player ? player->GetParentCell() : nullptr;
 	snapshot.playerReady = player && cell;
 	if (cell) {

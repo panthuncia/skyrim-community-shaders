@@ -1,6 +1,7 @@
 #include "Streamline.h"
 #include "Features/DrawcallLimitFix.h"
 #include "Features/Upscaling.h"
+#include "Snapshot/EngineReads.h"
 
 #include "DXVKInterop.h"
 #include "DxvkPresenter.h"
@@ -1029,18 +1030,18 @@ static bool cs_BuildConstants(sl::Constants& a_consts, uint32_t a_outputWidth, u
 	a_consts = {};
 	a_consts.cameraAspectRatio = static_cast<float>(a_outputWidth) / static_cast<float>(a_outputHeight);
 	a_consts.cameraFOV = Util::GetVerticalFOVRad();
-	a_consts.cameraNear = *globals::game::cameraNear;
-	a_consts.cameraFar = *globals::game::cameraFar;
+	a_consts.cameraNear = *CS_ENGINE_READ(Camera, RecordTime, globals::game::cameraNear);
+	a_consts.cameraFar = *CS_ENGINE_READ(Camera, RecordTime, globals::game::cameraFar);
 
-	auto viewMatrix = globals::game::frameBufferCached.GetCameraViewInverse().Transpose();
-	auto cameraViewToClip = globals::game::frameBufferCached.GetCameraProjUnjittered().Transpose();
+	auto viewMatrix = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewInverse().Transpose();
+	auto cameraViewToClip = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraProjUnjittered().Transpose();
 
 	a_consts.cameraMotionIncluded = sl::Boolean::eTrue;
 	a_consts.cameraPinholeOffset = { 0.f, 0.f };
 	a_consts.cameraRight = { viewMatrix._11, viewMatrix._12, viewMatrix._13 };
 	a_consts.cameraUp = { viewMatrix._21, viewMatrix._22, viewMatrix._23 };
 	a_consts.cameraFwd = { viewMatrix._31, viewMatrix._32, viewMatrix._33 };
-	const auto cameraPosAdjust = globals::game::frameBufferCached.GetCameraPosAdjust();
+	const auto cameraPosAdjust = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
 	a_consts.cameraPos = *reinterpret_cast<const sl::float3*>(&cameraPosAdjust);
 	a_consts.cameraViewToClip = *reinterpret_cast<const sl::float4x4*>(&cameraViewToClip);
 	a_consts.depthInverted = sl::Boolean::eFalse;
@@ -1049,10 +1050,10 @@ static bool cs_BuildConstants(sl::Constants& a_consts, uint32_t a_outputWidth, u
 
 	// Translate between the current and previous camera-relative origins before reprojection.
 	// Streamline applies jitter separately, so both matrices remain unjittered.
-	Matrix curVP = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Transpose();
-	Matrix prevVP = globals::game::frameBufferCached.GetCameraPreviousViewProjUnjittered().Transpose();
-	const auto& posAdj = globals::game::frameBufferCached.GetCameraPosAdjust();
-	const auto& prevPosAdj = globals::game::frameBufferCached.GetCameraPreviousPosAdjust();
+	Matrix curVP = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraViewProjUnjittered().Transpose();
+	Matrix prevVP = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPreviousViewProjUnjittered().Transpose();
+	const auto& posAdj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPosAdjust();
+	const auto& prevPosAdj = CS_ENGINE_READ(BoundState, BoundState, globals::game::frameBufferCached).GetCameraPreviousPosAdjust();
 	Matrix camDelta = Matrix::CreateTranslation(posAdj.x - prevPosAdj.x, posAdj.y - prevPosAdj.y, posAdj.z - prevPosAdj.z);
 	// A camera cut or load (State::RequestHistoryReset, upstream #2354) resets the history.
 	a_consts.reset = globals::state->ShouldResetHistory() ? sl::Boolean::eTrue : sl::Boolean::eFalse;

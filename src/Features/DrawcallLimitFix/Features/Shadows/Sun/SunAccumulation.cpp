@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/LocalLightCull.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
@@ -172,7 +173,7 @@ namespace DCLF::Features::Shadows::Sun
 		armedExclusion.reset();
 		if (!M1Active() || !a_light)
 			return;
-		auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+		auto* node = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0] : nullptr;
 		if (!node || node->GetRuntimeData().sunShadowDirLight != a_light)
 			return;
 		if (!exclusion || !exclusion->candidates || !exclusion->removed || !exclusion->cleared) {
@@ -197,7 +198,7 @@ namespace DCLF::Features::Shadows::Sun
 	{
 		if (!M1Active() || !a_light)
 			return false;
-		auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+		auto* node = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0] : nullptr;
 		if (!node || node->GetRuntimeData().sunShadowDirLight != a_light)
 			return false;
 		// The exclusion needs every sun cascade view to be DCLF's this frame.
@@ -349,7 +350,7 @@ namespace DCLF::Features::Shadows::Sun
 		{
 			static void thunk(RE::BSShadowDirectionalLight* a_light, std::uint32_t* a_count, std::uint32_t* a_arg2, RE::NiAVObject* a_arg3)
 			{
-				auto* node = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+				auto* node = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0] : nullptr;
 				if (!node || node->GetRuntimeData().sunShadowDirLight != a_light) {
 					func(a_light, a_count, a_arg2, a_arg3);
 					return;

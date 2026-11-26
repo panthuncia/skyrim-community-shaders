@@ -11,6 +11,7 @@
 #include "RE/B/BSShadowLight.h"
 #include "RE/E/ExtraEmittanceSource.h"
 #include "RE/T/TESRegion.h"
+#include "Snapshot/EngineReads.h"
 #include "WeatherUtils.h"
 #include "imgui_internal.h"
 
@@ -267,7 +268,7 @@ void LightEditor::EnsureEmittanceFormListBuilt()
 {
 	if (!s_emittanceFormList.empty())
 		return;
-	auto* dh = RE::TESDataHandler::GetSingleton();
+	auto* dh = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 	if (!dh)
 		return;
 	auto containsCaseInsensitive = [](const std::string& str, std::string_view needle) {
@@ -385,7 +386,7 @@ RE::FormID LightEditor::ResolveFormEntry(const std::string& entry)
 	} catch (...) {
 		return 0;
 	}
-	auto* dh = RE::TESDataHandler::GetSingleton();
+	auto* dh = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 	auto* form = dh ? dh->LookupForm(relativeID, entry.substr(tildePos + 1)) : nullptr;
 	return form ? form->GetFormID() : 0;
 }
@@ -415,7 +416,7 @@ void LightEditor::EnsureLighFormListBuilt()
 {
 	if (!s_lighFormList.empty())
 		return;
-	if (auto* dh = RE::TESDataHandler::GetSingleton()) {
+	if (auto* dh = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton())) {
 		for (auto* form : dh->GetFormArray<RE::TESObjectLIGH>()) {
 			if (!form || form->formID == 0)
 				continue;
@@ -649,7 +650,7 @@ void LightEditor::DrawLightTable(const ImVec2& size)
 				ImGui::SetScrollY(0.0f);
 			}
 
-			const auto* player = RE::PlayerCharacter::GetSingleton();
+			const auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 			const RE::NiPoint3 playerPos = player ? player->GetPosition() : RE::NiPoint3{};
 			ImGuiListClipper clipper;
 			clipper.Begin(static_cast<int>(visible.size()), rowHeight);
@@ -2049,7 +2050,7 @@ void LightEditor::GatherLights()
 	lightsAttached.clear();
 	totalLightCount = 0;
 	activeShadowLightCount = 0;
-	const auto smState = globals::game::smState;
+	const auto smState = CS_ENGINE_READ(ShaderManagerState, Other, globals::game::smState);
 	const auto shadowSceneNode = smState->shadowSceneNode[0];
 
 	const auto& activeLights = shadowSceneNode->GetRuntimeData().activeLights;
@@ -2084,7 +2085,7 @@ void LightEditor::GatherAttachedBulbs(RE::TESObjectREFR* refr)
 	if (!refr)
 		return;
 
-	const auto smState = globals::game::smState;
+	const auto smState = CS_ENGINE_READ(ShaderManagerState, Other, globals::game::smState);
 	const auto shadowSceneNode = smState->shadowSceneNode[0];
 	std::unordered_map<RE::TESObjectREFR*, uint32_t> running;
 
@@ -2883,7 +2884,7 @@ void LightEditor::SortLights()
 	switch (sortOption) {
 	case SortOption::Distance:
 		{
-			const auto playerPos = RE::PlayerCharacter::GetSingleton()->GetPosition();
+			const auto playerPos = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton())->GetPosition();
 			sortBy([&](const LightInfo& a, const LightInfo& b) {
 				// Lights without a position always go last.
 				if (a.hasPosition != b.hasPosition)

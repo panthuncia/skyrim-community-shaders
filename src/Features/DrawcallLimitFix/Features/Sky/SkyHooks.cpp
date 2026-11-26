@@ -14,6 +14,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
@@ -109,7 +110,7 @@ namespace DCLF::Features::Sky
 		/** @brief The engine depth target whose depth SRV is a_view, or -1. */
 		std::int32_t DepthOfView(ID3D11ShaderResourceView* a_view)
 		{
-			const auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
+			const auto& depths = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer)->GetDepthStencilData().depthStencils;
 			for (std::int32_t d = 0; d < static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++d)
 				if (a_view && Unwrap(depths[d].depthSRV) == a_view)
 					return d;
@@ -163,8 +164,8 @@ namespace DCLF::Features::Sky
 		 */
 		bool CurrentShape(const void* a_accumulator, Shape& a_shape, Run& a_run, PublishedInputIds& a_published, Pending& a_pending)
 		{
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			auto* renderer = globals::game::renderer;
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
+			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
 			auto& cloudShadows = globals::features::cloudShadows;
 			// The sky's pixel stages read Cloud Shadows' occlusion (t25), which the graph has only on its ORG path.
@@ -425,8 +426,8 @@ namespace DCLF::Features::Sky
 		/** @brief The sun occlusion draw's targets from the shadow state. Returns null when taken, else why not. */
 		const char* SunShape(Native::BatchInputs& a_inputs, Run& a_run)
 		{
-			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-			auto* renderer = globals::game::renderer;
+			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
+			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 				return "it draws into a cubemap";
 			constexpr auto kMain = static_cast<std::int32_t>(RE::RENDER_TARGETS::kMAIN);
@@ -489,7 +490,7 @@ namespace DCLF::Features::Sky
 				static const REL::Relocation<void* (*)(void*)> createQuery{ REL::RelocationID(75565, 77366) };
 				static const REL::Relocation<void (*)(void*, void*)> beginQuery{ REL::RelocationID(75567, 77368) };
 				static const REL::Relocation<void (*)(void*, void*)> endQuery{ REL::RelocationID(75568, 77369) };
-				auto* renderer = globals::game::renderer;
+				auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 				if (!query) {
 					query = createQuery(renderer);
 					if (!query) {
@@ -505,7 +506,7 @@ namespace DCLF::Features::Sky
 				run->view = View::Sun;
 				beginQuery(renderer, query);
 				// The engine's call sets the query's camera before its draw, and later code keeps it.
-				RE::BSGraphics::State::GetSingleton()->SetCameraData(a_camera, 0);
+				CS_ENGINE_READ(GraphicsState, CapturePoint, RE::BSGraphics::State::GetSingleton())->SetCameraData(a_camera, 0);
 				Native::BatchInputs inputs;
 				std::string why;
 				const char* skip = SunRefusal(inputs, *run);
@@ -543,7 +544,7 @@ namespace DCLF::Features::Sky
 
 			void Read()
 			{
-				auto* renderer = globals::game::renderer;
+				auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
 				auto* nextRtv = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS].cubeSideRTV[0];
 				auto* nextDsv = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kCUBEMAP_REFLECTIONS].views[0];
 				if (nextRtv != rtv) {

@@ -1,4 +1,5 @@
 #include "RainRefraction.h"
+#include "Snapshot/EngineReads.h"
 
 #include <DirectXTex.h>
 
@@ -243,5 +244,5 @@ void RainRefraction::ParticleShaderHacks()
 
 	float blendFactor[4] = { 0, 0, 0, 0 };
 	globals::d3d::context->OMSetBlendState(alphaBlendState.get(), blendFactor, 0xFFFFFFFF);
-	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
+	CS_ENGINE_READ(Shaders, RecordTime, globals::game::stateUpdateFlags)->set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 }

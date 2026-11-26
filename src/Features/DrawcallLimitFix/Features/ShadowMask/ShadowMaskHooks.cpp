@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
+#include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -61,14 +62,14 @@ namespace DCLF::Features::ShadowMask
 			if (a_view == View::World)
 				for (auto* light : a_lights)
 					light->ReturnShadowmaps();
-			auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			if (rss.alphaBlendWriteMode != 1) {
 				rss.alphaBlendWriteMode = 1;
 				rss.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_ALPHA_BLEND);
 			}
 			if (a_view == View::Menu) {
 				static REL::Relocation<void (*)(void*)> restore{ REL::Offset(Calls::kRestoreClearColours) };
-				restore(globals::game::renderer);
+				restore(CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer));
 			}
 		}
 

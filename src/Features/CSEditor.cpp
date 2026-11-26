@@ -1,5 +1,6 @@
 #include "CSEditor.h"
 #include "I18n/I18n.h"
+#include "Snapshot/EngineReads.h"
 
 #define I18N_KEY_PREFIX "feature.cs_editor."
 
@@ -299,7 +300,7 @@ void CSEditor::RenderWeatherDetailsWindow(bool* open, bool showSectionHeaders)
 	if (!open || !*open)
 		return;
 
-	auto player = RE::PlayerCharacter::GetSingleton();
+	auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 	if (!player || !player->parentCell)
 		return;
 
@@ -320,7 +321,7 @@ void CSEditor::RenderWeatherDetailsWindow(bool* open, bool showSectionHeaders)
 		// Enable interactive elements when a menu is open
 		auto shouldEnableInteractiveElements = []() -> bool {
 			return (Menu::GetSingleton()->ShouldSwallowInput() ||
-					(globals::game::ui && globals::game::ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)));
+					(CS_ENGINE_READ(UI, RecordTime, globals::game::ui) && CS_ENGINE_READ(UI, RecordTime, globals::game::ui)->IsMenuOpen(RE::CursorMenu::MENU_NAME)));
 		};
 
 		RenderCoreWeatherDetails(shouldEnableInteractiveElements(), showSectionHeaders);
@@ -346,7 +347,7 @@ void CSEditor::DrawWeatherDebugWindow(bool* open)
 	const std::string title = std::string(T(TKEY("weather_debug"), "Weather Debug")) + "##CSEditorWeatherDebugCompact";
 	if (Util::BeginWithRoundedClose(title.c_str(), open, ImGuiWindowFlags_None)) {
 		const auto& theme = Menu::GetSingleton()->GetTheme();
-		auto* sky = globals::game::sky;
+		auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 
 		if (sky && sky->currentWeather) {
 			if (globals::sceneSettingsManager->HasWeatherConfig(sky->currentWeather->GetFormID()))
@@ -511,7 +512,7 @@ void CSEditor::DisplayLightningInfo(RE::TESWeather* weather, bool showInteractiv
 
 void CSEditor::DisplayWindInfo(RE::TESWeather* weather)
 {
-	auto sky = globals::game::sky;
+	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 	if (!weather || (weather->data.windSpeed <= 0 && (!sky || sky->windSpeed <= 0.0f)))
 		return;
 	const auto& theme = Menu::GetSingleton()->GetTheme();
@@ -539,7 +540,7 @@ void CSEditor::DisplayWindInfo(RE::TESWeather* weather)
 	float weatherWindRangeDegrees = Util::Units::DirectionRangeToDegrees(weather->data.windDirectionRange);
 	ImGui::BulletText(T(TKEY("wind_direction_range"), "Wind Direction Range: %.1f\xc2\xb0 (raw %d)"), weatherWindRangeDegrees, weather->data.windDirectionRange);
 
-	if (auto player = RE::PlayerCharacter::GetSingleton()) {
+	if (auto player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
 		float playerAngleZ = player->GetAngleZ();
 		float playerAngleDegrees = Util::Units::NormalizeDegrees0To360(Util::Units::RadiansToDegrees(playerAngleZ));
 		ImGui::BulletText(T(TKEY("player_direction"), "Player Direction: %.1f\xc2\xb0"), playerAngleDegrees);
@@ -786,7 +787,7 @@ void CSEditor::RenderCoreWeatherDetails(bool showInteractiveElements, bool showS
 		ImGui::TextColored(theme.StatusPalette.Error, "%s", msg);
 	};
 
-	if (auto sky = globals::game::sky) {
+	if (auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)) {
 		if (sky->mode.get() == RE::Sky::Mode::kFull) {
 			if (showInteractiveElements) {
 				// Same picker as the editor's Weather Picker window (combo, filter chips, reset, transition).
@@ -807,7 +808,7 @@ void CSEditor::LoadAllWeathers()
 	if (s_weathersLoaded)
 		return;
 
-	auto dataHandler = RE::TESDataHandler::GetSingleton();
+	auto dataHandler = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
 	if (dataHandler) {
 		auto& weatherArray = dataHandler->GetFormArray<RE::TESWeather>();
 		s_allWeathers.clear();
@@ -1102,7 +1103,7 @@ std::string CSEditor::GetDisplayName(const RE::TESWeather* weather)
 
 void CSEditor::DrawOverlay()
 {
-	auto player = RE::PlayerCharacter::GetSingleton();
+	auto player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 	if (!player || !player->parentCell)
 		return;
 

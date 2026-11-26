@@ -1,4 +1,5 @@
 #include "Features/Skin.h"
+#include "Snapshot/EngineReads.h"
 
 #include "CSEditor/Browser/BrowserWidgets.h"
 #include "Globals.h"
@@ -141,7 +142,7 @@ void Skin::DrawTargetBar()
 	const ImVec4 iconColor = Util::Colors::GetSecondary();
 	using Source = Editor::Source;
 	if (BrowserUI::Chip("##skin_player", T("feature.skin.player", "Player"), Icons::TI(ICON_TI_USER), &iconColor, editor.source == Source::Player ? &accent : nullptr))
-		SelectActor(RE::PlayerCharacter::GetSingleton(), Source::Player);
+		SelectActor(CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()), Source::Player);
 	Util::AddTooltip(T("feature.skin.player_tooltip", "Edit the skin textures your character shows."));
 	ImGui::SameLine();
 	if (BrowserUI::Chip("##skin_console", T("feature.skin.console_selection", "Console selection"), Icons::TI(ICON_TI_CROSSHAIR), &iconColor, editor.source == Source::Console ? &accent : nullptr)) {

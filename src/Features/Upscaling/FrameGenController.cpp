@@ -1,4 +1,5 @@
 #include "FrameGenController.h"
+#include "Snapshot/EngineReads.h"
 
 #include "../HDRDisplay.h"
 #include "../Upscaling.h"
@@ -43,8 +44,8 @@ namespace FrameGen
 
 		Dims CurrentDims(bool a_ignoreDynamicResolutionLock)
 		{
-			const auto display = float2{ (float)globals::game::graphicsState->screenWidth,
-				(float)globals::game::graphicsState->screenHeight };
+			const auto display = float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth,
+				(float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
 			const auto render = Util::ConvertToDynamic(display, a_ignoreDynamicResolutionLock);
 			return { (uint32_t)render.x, (uint32_t)render.y, (uint32_t)display.x, (uint32_t)display.y };
 		}
@@ -88,7 +89,7 @@ namespace FrameGen
 		// Wait for settings and hardware fallbacks to settle.
 		if (!globals::features::upscaling.loaded ||
 			!Streamline::GetSingleton()->IsFeatureSupportResolved() ||
-			!globals::game::graphicsState)
+			!CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState))
 			return;
 
 		if (Upscaling::IsWindowUnusable())
