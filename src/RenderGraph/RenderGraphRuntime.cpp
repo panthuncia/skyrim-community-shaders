@@ -65,7 +65,7 @@
 #include <semaphore>
 #include <unordered_map>
 
-#include <tbb/concurrent_queue.h>
+#include <ORGModuleServices/Async/InboxQueue.h>
 
 namespace
 {
@@ -829,7 +829,7 @@ struct RenderGraphRuntime::Impl
 			std::vector<VkCommandBufferSubmitInfo> commandBuffers;
 			bool stop = false;
 		};
-		tbb::concurrent_queue<Batch> batches;
+		org::async::InboxQueue<Batch> batches;
 		std::counting_semaphore<> available{ 0 };
 		std::atomic<std::uint64_t> pushed{ 0 }, submitted{ 0 };
 		std::atomic<VkResult> failure{ VK_SUCCESS };
@@ -844,7 +844,7 @@ struct RenderGraphRuntime::Impl
 				for (;;) {
 					available.acquire();
 					Batch batch;
-					if (!batches.try_pop(batch))
+					if (!batches.TryPop(batch))
 						continue;
 					if (batch.stop)
 						return;
@@ -874,7 +874,7 @@ struct RenderGraphRuntime::Impl
 		void Push(Batch&& a_batch)
 		{
 			pushed.fetch_add(1, std::memory_order_relaxed);
-			batches.push(std::move(a_batch));
+			batches.Push(std::move(a_batch));
 			available.release();
 		}
 		/** @brief Waits until every batch pushed so far is submitted (teardown). */
@@ -892,7 +892,7 @@ struct RenderGraphRuntime::Impl
 			Flush();
 			Batch stop;
 			stop.stop = true;
-			batches.push(std::move(stop));
+			batches.Push(std::move(stop));
 			available.release();
 			thread.join();
 		}
