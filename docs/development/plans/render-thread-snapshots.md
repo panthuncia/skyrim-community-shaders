@@ -3,13 +3,13 @@
 Status (2026-11-26, late): phases 0, 1 and 2 done (`snap0-*.md`, `snap1-*.md`, `snap2-*.md`). Phase 3: game-side side
 effects, stealth lights, native shadow casters, the main sky and water from game data, no main registration jobs and no
 engine list culls in native (`snap1-sidefx.md`, `snap3-lights.md`, `snap3-scene.md`, `snap3-lists.md`, `snap3-culls.md`);
-Main::RenderWorld and screen blood are in progress. Phase 4 done in-frame: native makes no game UI renderer call
+native Main::RenderWorld with no resolve function and screen blood (`snap3-rworld.md`, `snap3-resolve.md`, `snap3-engstate.md`, `snap3-accum.md`); left: decision 127. Phase 4 done in-frame: native makes no game UI renderer call
 (`snap0-ui.md`, `snap4-ui2.md`). Phase 5: ImageSpace selection and constants, the TAA reset, vanilla and save screenshots,
 and every frame kind as a snapshot are done (`snap5-imagespace.md`, `snap5-isrest.md`, `snap5-kinds.md`); menu scenes and
 the image-based lens flares are left. Phase 6 part 1 (the retire queue outside DCLF) is done (`snap6-life.md`); part 2
 (DCLF) is designed. Phase 7 is prepared and planned (`snap7-prep.md`). Live engine reads in native Vulkan's world frame:
-1,848 at the phase 0 baseline, about 750-860 now (scene-dependent); engine render calls per native world frame: 74 at the
-baseline, 63 now.
+1,848 at the phase 0 baseline, about 560-780 now (scene-dependent); engine render calls per native world frame: 74 at the
+baseline, about 20-33 now.
 Every decision since the roadmap, with the
 side-effect fates, is in [render-thread-decisions.md](render-thread-decisions.md); add new ones there. It follows round 3
 of the render-thread work (`render-thread-window.md`) and the fully native direction.

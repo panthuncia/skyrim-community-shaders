@@ -472,3 +472,27 @@ pushes until the user is back.
 121. **Carried over from 116:** CS still calls StartAccumulating and the post-resolve; the full call order of AE 106583 and
      106584 with each CS point and what it needs is in `snap3-engstate.md`. Also left: the water capture's engine globals
      and the ImageSpace copy step's rows.
+
+## 2026-11-26: native RenderWorld without the resolve functions (snap3-accum; director accepted)
+
+122. **Native's RenderWorld calls no resolve function** (refines 109, 116, 121): CS runs each point of StartAccumulating
+     (AE 106583) and the post-resolve (AE 106584) in the engine's order. Their clears (the mask's stencil, the TAA mask,
+     kMAIN_ONLY_ALPHA) and the kMAIN copy go through skeleton calls (`ClearDepth`, `ClearColour`, `CopyMain`).
+     `LeaveResolveState` writes the shadow state they leave, for the code after RenderWorld. Every reader of what they
+     set reads CS's frame. Engine render calls per native world frame: quick 56 -> 33, interior 38 -> 20, tour 39 -> 20.
+123. **The depth shift window is CS state:** `WorldPass::ShiftWindow` and `CameraPlanes` compute the shifted planes from
+     the RenderWorld block (which gains the scene graph's near and far and the shift scale). The engine camera is not
+     modified. The far distance is one snapshot late at a cell change (accepted).
+124. **Engine state CS still writes, until RenderPostProcess and the first-person view are CS's:** the end shadow state
+     (`LeaveResolveState`), TAA's form, the render mode (411475) and the reflections' camera globals. The accumulator's
+     camera is not nulled and the first-person node is not hidden.
+125. **`RenderSnowSSS` stays an engine call** (improved snow only; no test scene reaches it). It is the only direct
+     engine render call left in RenderWorld's scope.
+126. **The water capture's globals and the snow copy come from CS:** planes, eye, render size and raw water from the
+     frame; the snow copy is a native `ISCopySubRegionCS` step. `WaterDraw.cpp`'s `SurfaceVariant` reads `RawWater`
+     (reading the engine global drew the river black once the post-resolve stopped).
+127. **What remains in a native world frame** (detector, tour, about 20 calls): the frame skeleton (DrawFrame,
+     RenderScene, RenderPlayerView and their CS-hooked children, phase 7 per decision 70); RenderDepth's two
+     StartAccumulating calls and the first-person end; RenderShadowMasks; VolumetricLighting::Render; RenderWaterEffects
+     (TESWaterSystem::Update, its reflections update and RenderDisplacement); RenderPostProcess; FaceGen::UpdatePending
+     and JobListManager::FrameJobs. Menu scenes and the loading frames' cube faces are phase 5.
