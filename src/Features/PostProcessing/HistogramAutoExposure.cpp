@@ -73,23 +73,15 @@ HistogramAutoExposure::ExposureParameters HistogramAutoExposure::GetExposurePara
 	return parameters;
 }
 
-namespace
-{
-	float FrameRealDelta()
-	{
-		const auto& snapshot = Snapshot::Current();
-		return snapshot ? snapshot->realDelta : 0.0f;
-	}
-}
-
 HistogramAutoExposure::AutoExposureCB HistogramAutoExposure::Constants(bool a_reset) const
 {
 	const auto parameters = GetExposureParameters();
 	return {
 		.AdaptArea = settings.AdaptArea,
 		.AdaptationRange = parameters.LuminanceRange,
-		// The snapshot's wall-clock delta, as BSTimer gave it: phase 2 adapts by the render delta instead.
-		.AdaptLerp = a_reset ? 1.f : std::clamp(1.f - exp(-FrameRealDelta() * settings.AdaptSpeed), 0.f, 1.f),
+		// The render delta (wall clock between render frames, paused or not): the eye adapts per rendered frame, so a repeated
+		// snapshot keeps adapting at the same speed and a dropped one does not jump.
+		.AdaptLerp = a_reset ? 1.f : std::clamp(1.f - exp(-Snapshot::Render().delta * settings.AdaptSpeed), 0.f, 1.f),
 		.ExposureCompensation = exp2(parameters.CompensationEV),
 		.PurkinjeStartEV = settings.PurkinjeStartEV,
 		.PurkinjeMaxEV = settings.PurkinjeMaxEV,

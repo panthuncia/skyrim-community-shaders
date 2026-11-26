@@ -74,7 +74,6 @@ public:
 	std::shared_ptr<const std::vector<std::pair<std::string, std::string>>> shaderDefines = std::make_shared<const std::vector<std::pair<std::string, std::string>>>();  // data structure to parse string into; needed to avoid dangling pointers
 	std::mutex shaderDefinesMutex;
 
-	float timer = 0;
 	double smoothDrawCalls[RE::BSShader::Type::Total + 1];
 	int drawCalls[RE::BSShader::Type::Total + 1];
 
@@ -99,8 +98,17 @@ public:
 	void OnShadowMaskDraw(ID3D11ShaderResourceView* a_shadowMap);
 	/** @brief Accumulates per-shader-type draw call counts and frame timing for the performance overlay. */
 	void Debug();
-	/** @brief Per-frame reset: advances timer, caches menu state, resets descriptors and frame counters. */
+	/**
+	 * @brief The render frame's end, after its Present: feature resets, menu state, descriptor tracking, the render frame
+	 * counter (frameCount). Game time is not here: it is the adopted snapshot's (Timer).
+	 */
 	void Reset();
+
+	/**
+	 * @brief The shaders' Timer: game seconds of the adopted snapshot (Snapshot::FrameSnapshot::gameTime), stopped while paused.
+	 * It moves once per new snapshot, so a repeated snapshot renders the same time and a dropped one loses none.
+	 */
+	float Timer() const;
 
 	/** @brief Selects sphere-normal lighting and TruePBR for the next grass draw. */
 	void SetGrassFlags(bool sphereNormal, bool pbr);
@@ -563,7 +571,8 @@ public:
 	/// Resets the Active Shaders counts once per frame; separate from frameChecker, which only ticks while the performance overlay shows.
 	Util::FrameChecker shaderTrackingFrameChecker;
 	void RequestHistoryReset() { historyResetFrame = frameCount + 1u; }
-	bool ShouldResetHistory() const { return frameCount == historyResetFrame; }
+	/** @brief The render frame resets temporal histories: a requested reset, or a snapshot event that breaks them (Snapshot::HistoryBreak). */
+	bool ShouldResetHistory() const;
 
 	uint frameCount = 0;
 	// Frozen for all views/passes in a frame, including reflection rendering.

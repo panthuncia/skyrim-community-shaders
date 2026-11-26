@@ -54,6 +54,27 @@ namespace Snapshot
 	*/
 	float VisualDelta();
 
+	/**
+	* @brief The game time world state steps by in this render frame: the adopted snapshot's events.gameDelta (summed over the
+	* snapshots it replaced) on its first render, 0 on a repeat. So a repeated snapshot holds the world still and a dropped one
+	* loses no time. Render owner.
+	*/
+	float GameStep();
+
+	/**
+	* @brief Whether this render frame breaks temporal histories (TAA and the upscalers, SSGI, water SSR, clouds): its snapshot
+	* carries a camera cut, a teleport, a load start or the first frame after a load, counting the events of the snapshots it
+	* replaced, and this is its first render. So a cut resets histories even when the snapshot that carried it was never
+	* rendered, and a repeat does not reset them again. Native only: guest keeps its own reset triggers. Render owner.
+	*/
+	bool HistoryBreak();
+
+	/**
+	* @brief Whether this thread is inside a game update's render half (Main::Update's call of Main::DrawFrame, all of its cadence
+	* renders). A Present outside it belongs to no game update: the main menu, a loading screen's thread. Any thread.
+	*/
+	bool InGameUpdate();
+
 	/** @brief Called by the frame driver when a loading screen begins (true) or ends (false). Any thread. */
 	void OnLoadingScreen(bool a_active);
 

@@ -1,6 +1,6 @@
 # The snapshot cadence test mode (CS_SNAPSHOT_CADENCE, Snapshot/Publication.h), repeat:3: the render half runs three times for each game update, on
 # one thread. Native only. The autoloaded save (the quick scene): a shot after settling, one three frames after a turn and one once it settled, then exit.
-# Step frames count rendered frames (Presents). Compose it: native-vulkan+cadence-repeat. Artefacts are expected (phase 2's list).
+# Step frames count game frames (snapshots). Compose it: native-vulkan+cadence-repeat. The cadence shot comparison is tools/cs-test/cadence.py.
 extends = ["base"]
 
 [run]

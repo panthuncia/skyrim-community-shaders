@@ -327,9 +327,10 @@ DynamicCubemaps::UpdateCubemapCB DynamicCubemaps::NextCaptureConstants(bool a_re
 
 	updateData.CameraPreviousPosAdjust = cameraPreviousPosAdjust[index];
 	updateData.CaptureIndex = index;
-	updateData.CaptureDeltaTime = std::max(0.0f, globals::state->timer - previousCaptureTime[index]);
+	// Game time: a repeated snapshot adds nothing to the capture's blend, a dropped one adds all its time.
+	updateData.CaptureDeltaTime = std::max(0.0f, globals::state->Timer() - previousCaptureTime[index]);
 	updateData.ResetCapture = resetCapture[index];
-	previousCaptureTime[index] = globals::state->timer;
+	previousCaptureTime[index] = globals::state->Timer();
 	resetCapture[index] = false;
 
 	auto eyePosition = Util::GetEyePosition();

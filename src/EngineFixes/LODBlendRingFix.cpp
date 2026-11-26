@@ -1,5 +1,6 @@
 #include "LODBlendRingFix.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Globals.h"
 
@@ -79,7 +80,8 @@ void LODBlendRingFix::Update()
 	const float2 desired = gridCenter + lean;
 
 	if (sliding) {
-		slideProgress = std::min(1.0f, slideProgress + CS_ENGINE_READ(Timer, RecordTime, RE::GetSecondsSinceLastFrame()) / SlideSeconds);
+		// The slide is game time: it steps once per new snapshot, by the game time since the last rendered one.
+		slideProgress = std::min(1.0f, slideProgress + Snapshot::GameStep() / SlideSeconds);
 		center = float2::SmoothStep(slideOrigin, desired, slideProgress);
 		if (slideProgress >= 1.0f)
 			EndSlide();

@@ -4,6 +4,7 @@
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
 #include "Snapshot/SideEffects.h"
+#include "Testing/Testing.h"
 #include "Utils/Setting.h"
 
 #include "RenderGraph/Async/LatestSlot.h"
@@ -120,6 +121,7 @@ namespace Snapshot
 		}
 
 		std::atomic<std::uint64_t> g_currentId{ 0 };
+		thread_local bool t_inGameUpdate = false;
 		std::atomic<std::uint64_t> g_loadEpoch{ 0 };
 		std::atomic<bool> g_loadStartedPending{ false };
 		std::atomic<bool> g_loadEndedPending{ false };
@@ -309,15 +311,23 @@ namespace Snapshot
 			static void thunk(RE::Main* a_main)
 			{
 				Capture();
+				// The test steps count game frames: one per update.
+				Testing::OnGameUpdate();
 				// Native: the render half's game-visible side effects come from the game side (Snapshot/SideEffects.h).
 				SideEffects::AfterCapture(*Game().previous);
+				const bool outer = std::exchange(t_inGameUpdate, true);
 				const auto renders = RendersThisUpdate();
+				// A load that starts inside a render (a console coc) ends the update's repeats: the engine's kept scene lists still name
+				// the cells it unloaded, and only the next update builds them again.
+				const auto epoch = g_loadEpoch.load(std::memory_order_acquire);
+				std::uint32_t rendered = 0;
 				{
 					const SideEffects::RenderHalfScope scope;
-					for (std::uint32_t i = 0; i < renders; ++i)
+					for (; rendered < renders && g_loadEpoch.load(std::memory_order_acquire) == epoch; ++rendered)
 						func(a_main);
 				}
-				SideEffects::AfterRenderHalf(renders);
+				SideEffects::AfterRenderHalf(rendered);
+				t_inGameUpdate = outer;
 				if (++Game().sideEffectLines % kSideEffectLineUpdates == 0)
 					if (const auto line = SideEffects::TakeStatsLine(); !line.empty())
 						logger::info("{}", line);
@@ -411,6 +421,27 @@ namespace Snapshot
 	{
 		const auto& side = RenderSide();
 		return side.current && !side.current->menus.paused ? side.render.delta : 0.0f;
+	}
+
+	bool InGameUpdate()
+	{
+		return t_inGameUpdate;
+	}
+
+	float GameStep()
+	{
+		const auto& side = RenderSide();
+		return side.current && !side.render.repeat ? side.current->events.gameDelta : 0.0f;
+	}
+
+	bool HistoryBreak()
+	{
+		static const bool native = RenderGraph::Engine::Native::Requested();
+		const auto& side = RenderSide();
+		if (!native || !side.current || side.render.repeat)
+			return false;
+		const auto& events = side.current->events;
+		return events.Has(Event::CameraCut) || events.Has(Event::Teleport) || events.Has(Event::LoadStarted) || events.Has(Event::FirstAfterLoad);
 	}
 
 	void OnLoadingScreen(bool a_active)

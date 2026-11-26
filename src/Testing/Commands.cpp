@@ -653,6 +653,21 @@ namespace Testing
 			RegisterCommand("weather", Weather);
 			RegisterCommand("feature", SetFeature);
 			RegisterCommand("setting", SetSetting);
+			// "timestep": the game timer's fixed step in milliseconds (BSTimer's clamp, what iFPSClamp sets), 0 for the wall clock. With a
+			// fixed step every update advances the same game time, so runs at different render rates reach the same game time per frame.
+			RegisterCommand("timestep", [](const std::string& a_arg, std::string& a_error) {
+				float ms = 0.0f;
+				const auto [end, error] = std::from_chars(a_arg.data(), a_arg.data() + a_arg.size(), ms);
+				auto* timer = RE::BSTimer::GetSingleton();
+				if (error != std::errc{} || end != a_arg.data() + a_arg.size() || ms < 0.0f || !timer) {
+					a_error = fmt::format("timestep '{}' is not a step in milliseconds (0 for the wall clock)", a_arg);
+					return false;
+				}
+				timer->clamp = ms;
+				timer->clampRemainder = 0.0f;
+				logger::info("[TEST] timestep: the game timer steps {}", ms > 0.0f ? fmt::format("{} ms an update", ms) : std::string("by the wall clock"));
+				return true;
+			});
 			// "profiler": "on" keeps GPU and CPU pass timing running as the performance overlay does; "dump" logs every pass it holds.
 			RegisterCommand("profiler", [](const std::string& a_arg, std::string& a_error) {
 				if (a_arg == "on") {

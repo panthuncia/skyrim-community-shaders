@@ -1,6 +1,7 @@
 #include "State.h"
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include <algorithm>
 #include <cmath>
@@ -404,10 +405,9 @@ void State::SetGrassFlags(bool sphereNormal, bool pbr)
 }
 
 /**
- * @brief Resets per-frame state and publishes frame counter to off-thread readers.
+ * @brief The render frame's end: resets per-frame state and publishes the render frame counter to off-thread readers.
  *
- * Ends the current profiler frame, resets all loaded features, updates the
- * timer if the game is not paused, caches current menu open states, clears
+ * Ends the current profiler frame, resets all loaded features, caches current menu open states, clears
  * shader descriptor tracking, increments and atomically publishes the frame
  * count, and disables reflection and improved snow shaders.
  */
@@ -422,10 +422,8 @@ void State::Reset()
 
 	// Cache menu open states once per frame to avoid repeated IsMenuOpen calls
 	// (each call constructs a BSFixedString, which is expensive at scale).
+	// The menu states stay a render-side read: the main menu and loading screens publish no snapshot yet.
 	if (auto ui = CS_ENGINE_READ(UI, Other, globals::game::ui)) {
-		if (!ui->GameIsPaused())
-			timer += CS_ENGINE_READ(Timer, Other, RE::GetSecondsSinceLastFrame());
-
 		isMainMenuOpen = ui->IsMenuOpen(RE::MainMenu::MENU_NAME);
 		isLoadingMenuOpen = ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
 		isMapMenuOpen = ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
@@ -465,6 +463,17 @@ void State::Reset()
 		improvedSnow->data.b = false;
 
 	activeReflections = false;
+}
+
+bool State::ShouldResetHistory() const
+{
+	return frameCount == historyResetFrame || Snapshot::HistoryBreak();
+}
+
+float State::Timer() const
+{
+	const auto& snapshot = Snapshot::Current();
+	return snapshot ? static_cast<float>(snapshot->gameTime) : 0.0f;
 }
 
 void State::Setup()
@@ -1705,7 +1714,7 @@ void State::UpdateSharedData(bool a_inWorld)
 		data.CameraData = Util::GetCameraData();
 		const auto display = Util::DisplaySize();
 		data.BufferDim = { display.x, display.y, 1.0f / display.x, 1.0f / display.y };
-		data.Timer = timer;
+		data.Timer = Timer();
 
 		auto temporal = Util::GetTemporal();
 

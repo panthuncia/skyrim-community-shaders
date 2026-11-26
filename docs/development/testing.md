@@ -117,7 +117,7 @@ The harness writes this file. All keys are present; empty means none.
 
 `do` names a registered command and `arg` is its argument. An unregistered command fails the step (outcome `failed`).
 
-- **Generic** (`src/Testing/Commands.cpp`, any feature set): `shot`, `exit`, `console` (a console line), `loadscreen` (`<model path substring>`: every load screen shows that model), `menu` (`<menu name>=show|hide`), `cs-menu` (`open|close`), `save`, `load` (`<name>|recent`), `weather` (`<editor id or form id>|off`), `mark`, `vram-json`, `window`, `capture`, `telemetry`, `feature` (`<ShortName>=0|1`), `setting` (`<ShortName>.<key>=<JSON value>`: one setting, as its menu widget writes it. The key may be a path, `PostProcessing.CODBloom.MipBlendFactor[3]=0.2`: `.` steps into an object, `[n]` into an array, a name matches with its spaces dropped, and a sub-effect's `settings` object is passed through), `shot-ui`, `upscale`, `pov`, `draw`, `face-npc`, `face-female`, `morph-female`, `npc-alpha`, `cast`, `fg`, `pp`, `hdr`, `bink`, `signal`, `move` and `turn` (`<frames>:<amount per frame>`), `spill`, `demote`, `frame-window`, `ballast`.
+- **Generic** (`src/Testing/Commands.cpp`, any feature set): `shot`, `exit`, `console` (a console line), `loadscreen` (`<model path substring>`: every load screen shows that model), `menu` (`<menu name>=show|hide`), `cs-menu` (`open|close`), `save`, `load` (`<name>|recent`), `weather` (`<editor id or form id>|off`), `mark`, `vram-json`, `window`, `capture`, `telemetry`, `feature` (`<ShortName>=0|1`), `setting` (`<ShortName>.<key>=<JSON value>`: one setting, as its menu widget writes it. The key may be a path, `PostProcessing.CODBloom.MipBlendFactor[3]=0.2`: `.` steps into an object, `[n]` into an array, a name matches with its spaces dropped, and a sub-effect's `settings` object is passed through), `shot-ui`, `upscale`, `pov`, `draw`, `face-npc`, `face-female`, `morph-female`, `npc-alpha`, `cast`, `fg`, `pp`, `hdr`, `bink`, `timestep` (`<ms>`: the game timer's fixed step, 0 for the wall clock), `signal`, `move` and `turn` (`<frames>:<amount per frame>`), `spill`, `demote`, `frame-window`, `ballast`.
 - **`setting`** also takes `<ShortName>={<key>: <value>, ...}`: several top-level settings written at once and applied once, as a preset button writes them.
 - **`call`** (`<owner>.<name>[=<arg>]`) runs a feature's test command, registered with `Testing::RegisterFeatureCommand(owner, name, command)`. An unknown one fails the step and names the owner's commands.
 - **The render graph's** (`src/RenderGraph/Testing/OrgCommands.h`, owner `org`, not in Release builds): `org:<name>` or `call org.<name>`. `rebuild`, `refresh[=<graph id>]`, `reload-shaders[=all|<file>]`, `gpu-window`, `nvperf`, `ts-dump` and the build switches (`pass-queries`, `heap-dedupe`, `list-heaps`, `list-barriers`, `rhi-globals`, `queue-boundary`). Builds are asked at the next adoption point, never inside a frame.
@@ -159,7 +159,12 @@ The game rewrites this file about once a second and at every milestone and outco
 }
 ```
 
-- **`t`** is seconds since the plugin loaded. **`frame`** counts every Present.
+- **`t`** is seconds since the plugin loaded. **`frame`** is the step clock: it counts game updates (one per published snapshot,
+  `Testing::OnGameUpdate`) and every Present outside a game update (the main menu and loading screens publish no snapshot).
+  **`render_frame`** counts every Present. Steps and milestones count `frame`, so with `snapshot.cadence` set a run takes its
+  steps at the same game time as a normal run. Shots log the snapshot their frame rendered (`[TEST] shot <name> rendered
+  snapshot <id> (render frame <n>)`): a shot asked at game frame N is the first render of snapshot N or later.
+  `expect.live_frames` and the graph-frames report count rendered frames.
 - **`phase`** is one of `boot`, `compiling`, `menu`, `loading`, `world` and `exiting`.
 - **Milestones** are recorded the first time each is reached. A save loaded after the first world-ready records `load-start` and `world-ready` again, in a `loads` array of the same shape.
 - **`config.unchecked`** lists `CS_DCLF_*` names that may be DCLF feature switches but could not be checked, because DCLF did not install.
@@ -167,7 +172,7 @@ The game rewrites this file about once a second and at every milestone and outco
 - **world-ready** is recorded when all of these hold:
   - the loading menu is closed and no hold is active;
   - the player's parent cell is attached and their 3D is loaded;
-  - 30 frames in a row have been presented in that state.
+  - 30 game frames (`frame`, the step clock) in a row have passed in that state.
 
 ### Outcomes
 

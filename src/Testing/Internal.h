@@ -46,7 +46,7 @@ namespace Testing
 		std::uint32_t expectLiveFrames = 0;
 	};
 
-	/** @brief A milestone's time (seconds since the plugin loaded) and frame. */
+	/** @brief A milestone's time (seconds since the plugin loaded) and frame (the step clock: game frames). */
 	struct Milestone
 	{
 		std::string name;
@@ -75,7 +75,8 @@ namespace Testing
 		// Lifecycle.
 		std::vector<Milestone> occurrences;  // every milestone reached, repeats included
 		std::string phase = "boot";
-		std::uint32_t frame = 0;
+		std::uint32_t frame = 0;        // the step clock: game updates, and Presents outside a game update
+		std::uint32_t renderFrame = 0;  // Presents
 		double fps = 0.0;
 
 		// Steps.
@@ -121,13 +122,13 @@ namespace Testing
 	/** @brief The no_log substrings the log watcher found so far, each with its first line. Takes its own lock. */
 	std::vector<std::pair<std::string, std::string>> NoLogHits();
 
-	/** @brief Lifecycle: per Present. Render thread. */
-	void UpdateLifecycle(std::uint32_t a_frame);
+	/** @brief Lifecycle: per Present. Render thread. a_frame is the step clock (game frames), a_renderFrame the Present count. */
+	void UpdateLifecycle(std::uint32_t a_frame, std::uint32_t a_renderFrame);
 
 	/** @brief Lifecycle: the phase timeouts, from the status thread and from Present. */
 	void CheckPhaseTimeouts();
 
-	/** @brief Steps: per Present. Render thread. */
+	/** @brief Steps: per game update, and per Present outside a game update. a_frame is the step clock (game frames). */
 	void RunSteps(std::uint32_t a_frame);
 
 	/** @brief Commands: runs a registered command. Render thread. */
@@ -136,7 +137,7 @@ namespace Testing
 	/** @brief Commands: the generic commands (Commands.cpp), registered at load. */
 	void RegisterGenericCommands();
 
-	/** @brief Commands: the work some commands spread over frames (move, turn, cast). Render thread, every Present. */
+	/** @brief Commands: the work some commands spread over frames (move, turn, cast). Once per step clock frame. */
 	void TickCommands();
 
 	/** @brief Turns the player's heading by a_radians, on the main thread. */

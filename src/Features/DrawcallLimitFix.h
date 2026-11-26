@@ -237,6 +237,7 @@ private:
 	// The scene pump's watchdog. A stopped pump is fatal, rather than keeping the last snapshot forever.
 	void WatchScenePump();
 	bool pumpLagging = false;
+	std::uint32_t pumpLagDone = 0;  // the last scene pass's frame when pumpLagSince was taken
 	std::chrono::steady_clock::time_point pumpLagSince;
 	// Why DCLF did not install, shown in the menu.
 	std::string unavailableReason;
