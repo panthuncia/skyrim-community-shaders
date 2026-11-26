@@ -201,6 +201,12 @@ namespace DCLF::Features::Sky
 	RE::BSGeometry* SunQueryGeometry(const SunQueryBlock& a_block);
 
 	/**
+	* @brief The main pass's sky batch in native's RenderWorld, at the pre-resolve's sky techniques (SE 99938 +0x247, AE 106583 +0x237):
+	* the sky root's draws with their cloud layers, with no engine call. a_flags are the pre-resolve's render flags. Render owner.
+	*/
+	void MainBatch(RE::BSShaderAccumulator* a_accumulator, std::uint32_t a_flags);
+
+	/**
 	 * @brief Native, render thread: Main::RenderWorld's sun occlusion draw (the engine's Sun::SubmitOcclusionQuery(1, ...)) into CS's own
 	 * query slot, tagged a_tag (the snapshot id). Skipped while the last answer has not reached the game side.
 	 */

@@ -196,6 +196,12 @@ namespace DCLF::Features::Water
 	bool InstallHooks();
 	void PreflightHooks();
 
+	/** @brief Native's RenderWorld driver: the main camera's water mask batch, with no engine call. Render owner. */
+	void NativeMaskBatch(RE::BSShaderAccumulator* a_accumulator);
+
+	/** @brief Native's RenderWorld driver: the main camera's water surface batch, with no engine call. Render owner. */
+	void NativeSurfaceBatch(RE::BSShaderAccumulator* a_accumulator);
+
 	namespace WaterDraws
 	{
 		/** @brief Whether the anchor and runtime are up. False for good once a client failed. */

@@ -6,6 +6,9 @@
 #include "RE/B/BSShadowDirectionalLight.h"
 #include "Utils/VersionedRelocation.h"
 
+#include <array>
+#include <functional>
+
 #define ALBEDO RE::RENDER_TARGETS::kINDIRECT
 #define SPECULAR RE::RENDER_TARGETS::kINDIRECT_DOWNSCALED
 #define REFLECTANCE RE::RENDER_TARGETS::kRAWINDIRECT
@@ -31,6 +34,10 @@ public:
 		float2 StartSplitDistances;
 	};
 	STATIC_ASSERT_ALIGNAS_16(DirectionalShadowLightData);
+
+	/** @brief The targets the deferred pass draws into, in slot order: kMAIN, motion vectors, then CS's G-buffer from slot 2. */
+	static constexpr std::array<RE::RENDER_TARGET, 8> kTargets{ RE::RENDER_TARGET::kMAIN, RE::RENDER_TARGET::kMOTION_VECTOR, NORMALROUGHNESS, ALBEDO, SPECULAR,
+		REFLECTANCE, MASKS, MASKS2 };
 
 	/** @brief Creates render targets, samplers, and the directional shadow structured buffer. */
 	void SetupResources();
@@ -73,6 +80,19 @@ public:
 
 	/** @brief Runs feature prepasses between StartDeferred and geometry rendering. */
 	void PrepassPasses();
+
+	/**
+	* @brief Where the main pass's first opaque batch starts (the pre-resolve's first RenderBatches, SE 99938 +0x8E, AE 106583 +0x84):
+	* StartDeferred and Drawcall Limit Fix's BeforeOpaquePass. The engine's hook and native's RenderWorld driver call it.
+	*/
+	void WorldStart();
+
+	/**
+	* @brief Where the opaque batches end (the pre-resolve's RenderOpaqueDecals, SE 99938 +0x319, AE 106583 +0x308): Drawcall Limit
+	* Fix's AfterOpaquePass, terrain blending, a_decals (the engine's decal call, null for native's driver), EndDeferred and the depth
+	* copy from before the water.
+	*/
+	void WorldOpaqueEnd(const std::function<void()>* a_decals);
 
 	/** @brief Releases cached composite compute shaders, forcing recompilation on next use. */
 	void ClearShaderCache();

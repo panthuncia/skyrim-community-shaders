@@ -19,6 +19,8 @@ namespace RenderGraph::Engine::Native::WorldPass
 		constexpr std::uint32_t kTest = 1, kTestWrite = 3;
 
 		thread_local bool inRenderWorld = false;
+		thread_local bool shiftWindow = false;
+		bool rawWater = false;
 		thread_local bool inScope = false;
 		thread_local Point current = Point::Count;
 		thread_local State state;
@@ -142,6 +144,14 @@ namespace RenderGraph::Engine::Native::WorldPass
 			const bool toggle = Global<bool>(513435, 391260);
 			block.depthShift = (mapMenu || !flag) && sceneGraph && toggle;
 			block.shiftedMax = (std::min)(1.0f, Global<float>(304859, 254902));
+			if (block.depthShift) {
+				// SceneGraph::GetFarDistance and GetNearDistance (vtable +0x1f0 and +0x1f8), as the shift calls them.
+				using Distance = float (*)(const void*);
+				const auto* vtable = *static_cast<const std::uintptr_t* const*>(sceneGraph);
+				block.farDistance = reinterpret_cast<Distance>(vtable[0x1f0 / 8])(sceneGraph);
+				block.nearDistance = reinterpret_cast<Distance>(vtable[0x1f8 / 8])(sceneGraph);
+				block.shiftScale = Global<float>(304860, 254903);
+			}
 			a_builder.Set(block);
 		}
 	}
@@ -156,6 +166,72 @@ namespace RenderGraph::Engine::Native::WorldPass
 		const auto& snapshot = Snapshot::Current();
 		const auto* block = snapshot ? snapshot->Block<Block>() : nullptr;
 		return { 0.0f, a_shifted && block && block->depthShift ? block->shiftedMax : 1.0f };
+	}
+
+	std::array<float, 2> CameraPlanes(bool a_shifted)
+	{
+		const auto& snapshot = Snapshot::Current();
+		if (!snapshot)
+			return { 0.0f, 0.0f };
+		const auto* block = snapshot->Block<Block>();
+		if (a_shifted && block && block->depthShift) {
+			// In the engine's order: near * far over (near - far) * scale + far.
+			const float n = block->nearDistance, f = block->farDistance;
+			return { n, (n * f) / ((n - f) * block->shiftScale + f) };
+		}
+		const auto& frustum = snapshot->cameras.Current(Snapshot::ViewId::Main).frustum;
+		return { frustum.fNear, frustum.fFar };
+	}
+
+	bool WaterBlendRuns(std::uint32_t a_flags)
+	{
+		// ImageSpaceManager +0x1f0 is TAA's helper: +0x38 its water history, +0x2c its form, which the water mask point sets to 1.
+		const auto* manager = RE::ImageSpaceManager::GetSingleton();
+		const auto taa = manager ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(manager) + 0x1f0) : 0;
+		if (!taa || *reinterpret_cast<const bool*>(taa + 0x38) || *reinterpret_cast<const std::int32_t*>(taa + 0x2c) != 1)
+			return false;
+		if ((a_flags & 0x280) || (a_flags & 10))
+			return false;
+		// 1 or 2 under water (TESWaterSystem's state). At 1 the blend runs only with the camera above the water's height (+0xc0).
+		const auto underwater = Global<std::int32_t>(513267, 391008);
+		if (underwater == 2)
+			return false;
+		if (underwater == 1) {
+			const auto* water = RE::TESWaterSystem::GetSingleton();
+			const auto& snapshot = Snapshot::Current();
+			if (!water || !snapshot)
+				return false;
+			const float height = *reinterpret_cast<const float*>(reinterpret_cast<std::uintptr_t>(water) + 0xc0);
+			if (snapshot->cameras.Current(Snapshot::ViewId::Main).position.z <= height)
+				return false;
+		}
+		// The local map's passes.
+		return !Global<bool>(527793, 414746);
+	}
+
+	ShiftWindow::ShiftWindow() { shiftWindow = true; }
+	ShiftWindow::~ShiftWindow() { shiftWindow = false; }
+
+	bool InShiftWindow()
+	{
+		return shiftWindow;
+	}
+
+	std::optional<std::array<float, 2>> CurrentCameraPlanes()
+	{
+		if (!inRenderWorld)
+			return std::nullopt;
+		return CameraPlanes(shiftWindow);
+	}
+
+	void SetRawWater(bool a_raw)
+	{
+		rawWater = a_raw;
+	}
+
+	bool RawWater()
+	{
+		return rawWater;
 	}
 
 	RenderWorldScope::RenderWorldScope() { inRenderWorld = true; }

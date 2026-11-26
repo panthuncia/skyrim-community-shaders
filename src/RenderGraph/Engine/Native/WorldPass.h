@@ -3,6 +3,7 @@
 #include "Snapshot/FrameSnapshot.h"
 
 #include <array>
+#include <optional>
 #include <cstdint>
 
 /**
@@ -45,6 +46,9 @@ namespace RenderGraph::Engine::Native::WorldPass
 		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::RenderWorld;
 		bool depthShift = false;  // the shift applies this update
 		float shiftedMax = 1.0f;  // the depth range's maximum inside a window
+		// The scene graph's near and far distances and the shift's scale (SE 304860 / AE 254903), from which the window's far plane is
+		// computed.
+		float nearDistance = 0.0f, farDistance = 0.0f, shiftScale = 0.0f;
 		bool operator==(const Block&) const = default;
 	};
 
@@ -56,6 +60,32 @@ namespace RenderGraph::Engine::Native::WorldPass
 	* SetCameraData's (0, 1), with the window's maximum. Render thread.
 	*/
 	std::array<float, 2> DepthRange(bool a_shifted);
+
+	/**
+	* @brief The world camera's near and far planes, in (a_shifted) or out of a depth shift window: inside a window the engine rebuilds
+	* the camera's frustum with a nearer far plane (SE 100407 / AE 107125) and restores it after; outside, the snapshot camera's.
+	* Render thread.
+	*/
+	std::array<float, 2> CameraPlanes(bool a_shifted);
+
+	/** @brief Marks a depth shift window of native's RenderWorld driver (the resolve functions' SE 100407 to 100408, AE 107125 to 107126). */
+	class ShiftWindow
+	{
+	public:
+		ShiftWindow();
+		~ShiftWindow();
+		ShiftWindow(const ShiftWindow&) = delete;
+		ShiftWindow& operator=(const ShiftWindow&) = delete;
+	};
+
+	/** @brief Whether native's RenderWorld driver is inside a depth shift window on this thread. */
+	bool InShiftWindow();
+
+	/**
+	* @brief The world camera's planes as the engine's camera holds them now: CameraPlanes inside native's RenderWorld (shifted inside a
+	* window), else null, and the caller reads the engine's current camera. Render thread.
+	*/
+	std::optional<std::array<float, 2>> CurrentCameraPlanes();
 
 	/** @brief The point a native RenderWorld point runs at, while in scope. Nests; a scope outside native's RenderWorld sets nothing. */
 	class Scope
@@ -85,6 +115,18 @@ namespace RenderGraph::Engine::Native::WorldPass
 	* targets): kMAIN, kMOTION_VECTOR, the normals target, none.
 	*/
 	std::array<RE::RENDER_TARGET, 4> ForwardTargets();
+
+	/**
+	* @brief The post-resolve's test for the water blend (SE 99939, AE 106584): the surface draws into kRAW_WATER and the blend runs.
+	* a_flags are the post-resolve's render flags. Render thread, after the water mask point.
+	*/
+	bool WaterBlendRuns(std::uint32_t a_flags);
+
+	/** @brief The driver's water blend test for this render (WaterBlendRuns), kept until the next: the water surface's raw-water flag. */
+	void SetRawWater(bool a_raw);
+
+	/** @brief The last SetRawWater (the engine's global 528167 / 415112 kept it the same way). Render thread. */
+	bool RawWater();
 
 	/** @brief Marks native's RenderWorld: scopes set their point only inside it. */
 	class RenderWorldScope

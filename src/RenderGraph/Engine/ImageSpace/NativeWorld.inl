@@ -568,16 +568,48 @@ namespace NativePost
 	*/
 	NativeStep WaterBlendStep()
 	{
-		const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
-		auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-		const auto now = shadow.posAdjust.getEye(), before = shadow.previousPosAdjust.getEye();
+		float nearPlane = 0.0f, farPlane = 0.0f;
+		RE::NiPoint3 now, before;
+		if (::RenderGraph::Engine::Native::WorldPass::InRenderWorld()) {
+			// Native's RenderWorld: the world camera inside the post-resolve's depth shift window, and the frame camera's eyes.
+			const auto planes = ::RenderGraph::Engine::Native::WorldPass::CameraPlanes(true);
+			nearPlane = planes[0];
+			farPlane = planes[1];
+			const auto& camera = Snapshot::FrameCamera::Main().data;
+			now = { camera.CameraPosAdjust.x, camera.CameraPosAdjust.y, camera.CameraPosAdjust.z };
+			before = { camera.CameraPreviousPosAdjust.x, camera.CameraPreviousPosAdjust.y, camera.CameraPreviousPosAdjust.z };
+		} else {
+			const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
+			nearPlane = Field<float>(camera, 0x160);
+			farPlane = Field<float>(camera, 0x164);
+			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			now = shadow.posAdjust.getEye();
+			before = shadow.previousPosAdjust.getEye();
+		}
 		const float dx = before.x - now.x, dy = before.y - now.y, dz = before.z - now.z;
 		const float moved = (std::max)(1.0f - std::sqrt(dy * dy + dx * dx + dz * dz) * kWaterMoveScale, 0.0f);
 		const auto* block = NativeBlock();
 		auto* ui = block ? nullptr : RE::UI::GetSingleton();
 		const bool menu = block ? block->inputs.menu : ui && ui->numPausesGame != 0;
 		auto step = WorldStep(WorldScope::WaterBlend, Effects::ISWaterBlend, static_cast<std::uint16_t>(EngineFrameCounter() & 1u), 1);
-		SetId(step.rows, 0, Field<float>(camera, 0x160), Field<float>(camera, 0x164), menu ? 1.0f : 0.0f, moved);
+		SetId(step.rows, 0, nearPlane, farPlane, menu ? 1.0f : 0.0f, moved);
+		return step;
+	}
+
+	/**
+	* @brief Main::RenderWorld's copy of kMAIN into kSNOW_SWAP (ISCopySubRegionCS, AE 107219 / 107221 / 107217): the region from (0, 0)
+	* at the render target manager's size, which is kMAIN's shape in the adopted revision, to (0, 0). Its block is the region and the
+	* destination as integers; one group per 8x8 pixels.
+	*/
+	NativeStep SnowCopyStep()
+	{
+		const auto shapes = Frame::Vars::Adopted(Frame::Vars::EngineTargetShapes());
+		const auto& main = shapes.colours[RE::RENDER_TARGET::kMAIN];
+		auto step = WorldStep(WorldScope::Snow, Effects::ISCopySubRegionCS, 0, 2);
+		SetBits(step.rows, 0, 2, main.width);
+		SetBits(step.rows, 0, 3, main.height);
+		step.compute = true;
+		step.groups = { (main.width + 7) >> 3, (main.height + 7) >> 3, 1 };
 		return step;
 	}
 
@@ -610,8 +642,13 @@ namespace NativePost
 		if (!ssr || !Field<bool>(ssr, 0x10))
 			return;
 		auto* camera = reinterpret_cast<RE::NiCamera*>(Field<std::uintptr_t>(*g.worldSceneGraph, 0x128));
-		RE::BSGraphics::State::GetSingleton()->SetCameraData(camera, 1);
-		g.setDepth(g.targets, -1, 3, false);
+		// Native's RenderWorld writes back no render state: nothing after it reads the camera data or targets the pass leaves (the
+		// driver leaves the resolve functions' end state itself).
+		const bool writeBack = !::RenderGraph::Engine::Native::WorldPass::InRenderWorld();
+		if (writeBack) {
+			RE::BSGraphics::State::GetSingleton()->SetCameraData(camera, 1);
+			g.setDepth(g.targets, -1, 3, false);
+		}
 		*WG().ssrCamera = camera;
 		const auto in = ReadReflections(camera);
 		// The normals target it keeps (+0x34): the downsampled mask after the raster downsample, else the frame's normals.
@@ -619,8 +656,10 @@ namespace NativePost
 		                                                                     static_cast<std::int32_t>(RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK) + in.normals;
 		StageScope(ScopeKind::Reflections, ReflectionSteps(in));
 		Field<bool>(ssr, 0x11) = true;
-		g.setTarget(g.targets, 0, -1, 3, true);
-		g.setTarget(g.targets, 1, -1, 3, true);
+		if (writeBack) {
+			g.setTarget(g.targets, 0, -1, 3, true);
+			g.setTarget(g.targets, 1, -1, 3, true);
+		}
 	}
 
 	/**
@@ -634,17 +673,23 @@ namespace NativePost
 		const auto& g = G();
 		const auto sao = reinterpret_cast<std::uintptr_t>(a_helper);
 		++r.native[5];
+		// Native's RenderWorld writes back no targets (the driver leaves the resolve functions' end state).
+		const bool writeBack = !::RenderGraph::Engine::Native::WorldPass::InRenderWorld();
 		if (!a_composite) {
 			auto& counter = Field<std::int32_t>(sao, 0x54);
 			counter = counter + 1 > 1 ? 0 : counter + 1;
 			const auto in = ReadSsao();
 			StageScope(ScopeKind::SSAO, SsaoSteps(in));
-			g.setDepth(g.targets, -1, 3, false);
-			g.setTarget(g.targets, 0, static_cast<std::int32_t>(RE::RENDER_TARGET::kSAO) + (in.half ? 1 : 0), 3, true);
+			if (writeBack) {
+				g.setDepth(g.targets, -1, 3, false);
+				g.setTarget(g.targets, 0, static_cast<std::int32_t>(RE::RENDER_TARGET::kSAO) + (in.half ? 1 : 0), 3, true);
+			}
 		} else {
 			StageScope(ScopeKind::SSAO, { CompositeStep(ReadComposite(sao)) });
-			g.setTarget(g.targets, 0, static_cast<std::int32_t>(a_destination), 3, true);
-			g.setDepth(g.targets, 0, 3, false);
+			if (writeBack) {
+				g.setTarget(g.targets, 0, static_cast<std::int32_t>(a_destination), 3, true);
+				g.setDepth(g.targets, 0, 3, false);
+			}
 		}
 		return a_destination & 0xffffffff;
 	}
@@ -678,6 +723,9 @@ namespace NativePost
 			clear = 0;
 		}
 		StageScope(ScopeKind::Effect, { WaterBlendStep() });
+		// Native's RenderWorld writes back no render state (the driver leaves the resolve functions' end state).
+		if (::RenderGraph::Engine::Native::WorldPass::InRenderWorld())
+			return a_destination;
 		const auto& g = G();
 		g.setTarget(g.targets, 1, -1, 3, true);
 		g.setTarget(g.targets, 0, -1, 3, true);

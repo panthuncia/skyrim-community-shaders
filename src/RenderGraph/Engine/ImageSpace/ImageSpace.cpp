@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
@@ -2840,34 +2841,38 @@ namespace RenderGraph::Engine::ImageSpace
 		const auto base = NativePost::ManagerBase();
 		if (!base)
 			RenderGraph::Fatal("ImageSpace", "Main::RenderWorld's ImageSpace calls: no ImageSpace manager");
-		const auto& g = NativePost::G();
 		const auto& w = NativePost::WG();
-		// The engine's functions, as Main::RenderWorld calls them (SE 100424, AE 107142).
-		static const REL::Relocation<void (*)(std::uintptr_t, std::int32_t, std::int32_t)> renderSnow{ REL::RelocationID(100537, 107267) };
-		static const REL::Relocation<void (*)(std::uintptr_t, std::int32_t, std::int32_t, std::uint64_t)> copySources{ REL::RelocationID(100498, 107219) };
-		static const REL::Relocation<void (*)(std::uintptr_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t)> copyRegion{
-			REL::RelocationID(100500, 107221)
-		};
-		static const REL::Relocation<void (*)(std::uintptr_t)> dispatchCopy{ REL::RelocationID(100496, 107217) };
 		auto* const helper = NativePost::Field<void*>(base, 0x1c8);
 		SsaoComposite() = false;
 		RenderSSAO::Run(helper, 1, 1, false);
-		// The snow pass with improved snow on and its helper active, else the copy of kMAIN into 0x71 at the render target manager's size.
+		// The snow pass with improved snow on and its helper active (Main::RenderWorld, SE 100424 / AE 107142), else the copy of kMAIN
+		// into kSNOW_SWAP at the render target manager's size.
 		const auto snow = NativePost::Field<std::uintptr_t>(base, 0x1e8);
 		if (*w.improvedSnow && snow && NativePost::Field<bool>(snow, 0x08)) {
+			// No test scene reaches the snow pass: it stays the engine's function, whose draw the ImageSpace detours take.
+			static const REL::Relocation<void (*)(std::uintptr_t, std::int32_t, std::int32_t)> renderSnow{ REL::RelocationID(100537, 107267) };
 			renderSnow(snow, 1, 0x71);
-			g.setTarget(g.targets, 0, -1, 3, true);
-		} else {
-			const auto copy = NativePost::Field<std::uintptr_t>(base, 0x198);
-			const auto targets = reinterpret_cast<std::uintptr_t>(g.targets);
-			copySources(copy, 1, 0x71, 0);
-			copyRegion(copy, 0, 0, NativePost::Field<std::int32_t>(targets, 0x1c), NativePost::Field<std::int32_t>(targets, 0x20), 0, 0);
-			dispatchCopy(copy);
+		} else if (NativePost::WorldNative(NativePost::Family::kSsao)) {
+			NativePost::StageScope(ScopeKind::Effect, { NativePost::SnowCopyStep() });
 		}
 		SsaoComposite() = true;
 		// The composite reads whether the reflections ran (415072), which Main::RenderWorld copies from their helper.
 		*w.saoReflections = NativePost::Field<bool>(NativePost::Field<std::uintptr_t>(base, 0x1c0), 0x10);
 		RenderSSAO::Run(helper, 0x71, 1, true);
+	}
+
+	void NativeReflections()
+	{
+		if (NativePost::WorldNative(NativePost::Family::kReflections))
+			NativePost::RunReflections();
+	}
+
+	void NativeWaterBlend()
+	{
+		// The blend object is ImageSpaceManager +0x200; the engine blends kWATER_1's parity (0x58) into kMAIN.
+		const auto base = NativePost::ManagerBase();
+		if (base && NativePost::WorldNative(NativePost::Family::kWaterBlend))
+			(void)NativePost::RunWaterBlend(NativePost::Field<void*>(base, 0x200), 0x58, 1);
 	}
 
 	void WorldEndOfFrame(std::int32_t a_source, std::int32_t a_final, const std::function<void()>& a_engine)
