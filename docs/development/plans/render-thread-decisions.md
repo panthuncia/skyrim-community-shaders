@@ -365,3 +365,23 @@ pushes until the user is back.
 98. **Main::RenderWorld is next** (about 28 of the 63 engine render calls per native world frame): CS drives its stage
     points from its own frame. A native screen-blood pass must come first (the last `BSCullingProcess::Process` is the
     screen splatter's cull inside RenderWorld), or blood disappears.
+
+## 2026-11-26: phase 6 lifetimes, part 1 (snap6-life; director accepted)
+
+99. **The retire queue has two lanes** (`Snapshot/Retire.{h,cpp}`). The engine lane is drained on the main thread at the
+    capture, because the engine runs an object's destructor on whichever thread drops the last reference and those
+    destructors touch engine state unlocked; it never drains inside the render half. The render lane (UI streams, upload
+    textures; D3D11 handles release on any thread) is drained by the render side at adoption. Every entry waits until the
+    GPU finished the render frame it names (graph mode), CPU-only entries included, so part 2 uses the same rule. Adopting
+    a new snapshot retires the one rendered last; a snapshot never adopted retires at once.
+100. **Engine objects a snapshot names are held keys** (`Snapshot::EngineRef`): a reference that is never dereferenced;
+     making, copying or releasing one off the main thread is fatal. Outside DCLF no published snapshot dereferences a bare
+     engine pointer at record time; the cloud layer and Secunda keys now hold references so a reused address can't match a
+     different object. The player's cell is keyed by form id.
+101. **Snapshot holders are never destroyed,** so nothing releases engine objects while the process exits.
+102. **No in-place engine write outside DCLF reaches snapshot data:** GFx texture writes are versioned by stream order and a
+     re-initialised GFx texture keeps its old version by reference.
+103. **Part 2 (DCLF) folds in as designed in `snap6-life.md`:** `EngineReleases` moves into the engine lane, held detaches
+     are pushed at the capture, `EngineReadWindow` opens on the main thread after the publish and closes at the start of
+     the next update (the render thread never takes a lease), reported writes create a new version by keeping the old
+     object in the publications that name it.
