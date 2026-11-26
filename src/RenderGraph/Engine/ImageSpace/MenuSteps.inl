@@ -43,6 +43,8 @@ struct MenuSteps
 	};
 	std::vector<EffectCall> calls;
 	std::uint64_t lagged = 0;  // draws withheld before the UI stage's first build held the client
+	// A snapshot bake's mask views while StageFaceTint stages it, in place of the effect's texture list.
+	const std::array<ID3D11ShaderResourceView*, kMaxSlots>* bakedMasks = nullptr;
 };
 
 MenuSteps& Menu()
@@ -328,7 +330,11 @@ void StageTintMasks(Pending& a_pending)
 		// Default textures are loaded textures like the masks, so read them by heap index.
 		auto input = view ? InputOfView(view) : -1;
 		auto target = input >= 0 && !(input & kDefaultTextureInput) ? input : -1;
-		if (native.shader && native.armed) {
+		if (const auto* baked = Menu().bakedMasks) {
+			// A snapshot bake: its masks are loaded textures, never engine targets.
+			view = (*baked)[slot];
+			target = -1;
+		} else if (native.shader && native.armed) {
 			// Native: the slot from the effect's texture list.
 			std::int32_t listedTarget = -1;
 			ID3D11ShaderResourceView* listedView = nullptr;

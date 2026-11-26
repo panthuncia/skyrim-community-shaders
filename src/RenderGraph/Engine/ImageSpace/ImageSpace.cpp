@@ -2900,5 +2900,54 @@ namespace RenderGraph::Engine::ImageSpace
 		const auto& chain = Chain();
 		return IS().on && chain.group.Registered() && chain.inEndOfFrame;
 	}
+
+	const char* BuildTintRows(const void* a_param, TintRows& a_out)
+	{
+		a_out = {};
+		// The manager's own lookup, not ShaderOf's cache, which the render thread fills.
+		auto* manager = RE::ImageSpaceManager::GetSingleton();
+		const std::uint32_t index = RE::ImageSpaceManager::GetCurrentIndex(Effects::ISAlphaBlend);
+		if (!manager || index >= manager->effects.free_idx() || index >= manager->effects.capacity())
+			return "the ImageSpace manager has no ISAlphaBlend effect yet";
+		const auto* shader = static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
+		if (!shader)
+			return "the ImageSpace manager has no ISAlphaBlend effect yet";
+		NativeSteps::Rows rows;
+		if (const char* why = NativeSteps::BuildRows(*shader, a_param, rows))
+			return why;
+		std::memcpy(a_out.bytes.data(), rows.bytes.data(), sizeof(a_out.bytes));
+		a_out.size = rows.size;
+		std::memcpy(a_out.offsets.data(), rows.offsets.data(), sizeof(a_out.offsets));
+		a_out.count = rows.count;
+		return nullptr;
+	}
+
+	bool StageFaceTint(const std::array<ID3D11ShaderResourceView*, 16>& a_masks, const TintRows& a_rows)
+	{
+		if (!Usable())
+			return false;
+		const auto effect = EffectIndexOf(Effects::ISAlphaBlend);
+		if (effect < 0)
+			return false;
+		auto& state = IS();
+		auto& native = NativeSteps::Get();
+		const auto before = state.taken;
+		EnterScope(ScopeKind::Effect);
+		std::memcpy(native.rows.bytes.data(), a_rows.bytes.data(), sizeof(a_rows.bytes));
+		native.rows.size = a_rows.size;
+		std::memcpy(native.rows.offsets.data(), a_rows.offsets.data(), sizeof(a_rows.offsets));
+		native.rows.count = a_rows.count;
+		native.rowsAt = {};
+		native.sprite = {};
+		native.effect = static_cast<std::size_t>(effect);
+		native.shader = nullptr;
+		native.armed = true;
+		Menu().bakedMasks = &a_masks;
+		(void)TakeMenuStep(static_cast<std::size_t>(effect), false, {});
+		Menu().bakedMasks = nullptr;
+		native.armed = false;
+		LeaveScope();
+		return state.taken != before;
+	}
 }
 

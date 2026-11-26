@@ -2,6 +2,7 @@
 
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FaceTint.h"
 #include "Snapshot/FrameCamera.h"
 #include "Snapshot/Retire.h"
 #include "Snapshot/SideEffects.h"
@@ -423,6 +424,7 @@ namespace Snapshot
 			return;
 		stl::write_thunk_call<MainUpdate_DrawFrame>(REL::RelocationID(35565, 36564).address() + REL::Relocate(0x5D2, 0xA97));
 		SideEffects::InstallHooks();
+		FaceTint::InstallHooks();
 		(void)CadenceMode();
 		logger::info("[Snapshot] frame snapshots: published at Main::Update's call of Main::DrawFrame, adopted at Renderer::Begin");
 	}

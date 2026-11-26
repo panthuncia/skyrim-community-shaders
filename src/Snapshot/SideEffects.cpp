@@ -1,5 +1,6 @@
 #include "Snapshot/SideEffects.h"
 
+#include "Snapshot/FaceTint.h"
 #include "Snapshot/StealthLights.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -606,6 +607,6 @@ namespace Snapshot::SideEffects
 		       fmt::format("; animated roots {:.1f} an update ({:.1f} DCLF's, {:.1f} of the rest in view)",
 				   double(s.animatedRoots) * perUpdate, double(s.animatedByDclf) * perUpdate, double(s.animatedInView) * perUpdate) +
 		       fmt::format("; {:.1f} of their fades stepped (S8)", double(s.fadesStepped) * perUpdate) +
-		       "; " + StealthLights::TakeStatsLine();
+		       "; " + StealthLights::TakeStatsLine() + "; " + FaceTint::TakeStatsLine();
 	}
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -16,6 +18,8 @@
 * Each engine effect step is a CS pass held by a CS stage (WorldSteps.inl, ChainSteps.inl, StartSteps.inl, MenuSteps.inl).
 * A draw with no pass is a mismatch. Effects whose vertex shader writes no SV_Position are taken with no pass.
 */
+struct ID3D11ShaderResourceView;
+
 namespace RenderGraph::Engine
 {
 	struct TonemapTargets;
@@ -74,6 +78,28 @@ namespace RenderGraph::Engine::ImageSpace
 
 	/** @brief Native: the post-resolve's water blend (SE 100550, AE 107285) in native's RenderWorld, as NativeReflections. Render owner. */
 	void NativeWaterBlend();
+
+	/** @brief A face tint bake's ISAlphaBlend pixel rows (PS b2), as the generic SetupGeometry would write them from its param. */
+	struct TintRows
+	{
+		std::array<std::byte, 1024> bytes{};
+		std::uint32_t size = 0;
+		std::array<std::uint8_t, 64> offsets{};
+		std::uint32_t count = 0;
+	};
+
+	/**
+	* @brief Native, game thread (the capture): a_out from a face tint job's ImageSpaceShaderParam. Returns why it cannot, or null.
+	* Reads the engine's ISAlphaBlend shader object for its row table.
+	*/
+	const char* BuildTintRows(const void* a_param, TintRows& a_out);
+
+	/**
+	* @brief Native: stages one face tint bake as the face tint step (ISAlphaBlend into kPLAYER_FACEGEN_TINT), from the bake's sixteen
+	* mask views (null reads the null texture) and rows, with no engine call. False when the frame holds no build with the step yet.
+	* Render owner, inside the start stage.
+	*/
+	bool StageFaceTint(const std::array<ID3D11ShaderResourceView*, 16>& a_masks, const TintRows& a_rows);
 
 	/**
 	* @brief The world chain's RenderEndOfFrameEffects, between OnEndOfFrame's begin and end (family 2): CS's native end-of-frame effects,

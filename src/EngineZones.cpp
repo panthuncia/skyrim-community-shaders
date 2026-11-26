@@ -64,7 +64,9 @@ namespace EngineZones
 			{ 35556, 0x225, 35558, 36555, 0x284, 36558, Role::Render, "Main::RenderScene #1 (in Main::DrawFrame)" },
 			{ 35556, 0x252, 100412, 36555, 0x2C3, 107130, Role::Helper, "AE 107130 (in Main::DrawFrame)" },
 			{ 35556, 0x363, 99025, 36555, 0x329, 105676, Role::Render, "ImageSpaceManager::RenderEffect #1 (in Main::DrawFrame)" },
-			{ 35556, 0x36D, 34551, 36555, 0x333, 35406, Role::Render, "JobListManager::FrameJobs (in Main::DrawFrame)" },
+			// Not a render function: it only reads the job serving thread's state (+0x6c) to decide whether DrawFrame waits for the UI
+			// job (snap3-facegen.md). Bookkeeping, so a helper.
+			{ 35556, 0x36D, 34551, 36555, 0x333, 35406, Role::Helper, "JobListManager::FrameJobs (in Main::DrawFrame)" },
 			{ 35556, 0x37D, 68167, 36555, 0x343, 69516, Role::Helper, "WaitForJobTask (in Main::DrawFrame)" },
 			{ 35556, 0x3AB, 79947, 36555, 0x371, 82084, Role::Producer, "MenuManager::DrawInterface (in Main::DrawFrame)" },
 			{ 35556, 0x3E6, 99025, 36555, 0x3AC, 105676, Role::Render, "ImageSpaceManager::RenderEffect #2 (in Main::DrawFrame)" },

@@ -21,6 +21,7 @@
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FaceTint.h"
 #include "Snapshot/Publication.h"
 #include "Utils/Setting.h"
 
@@ -257,6 +258,8 @@ namespace RenderGraph::Frame::Driver
 					OnBegin();
 				}
 				func(a_renderer, a_flags);
+				// Native: the face tint bakes' render half, where Main::DrawFrame called FaceGen::UpdatePending.
+				Snapshot::FaceTint::RenderFrame();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
