@@ -327,3 +327,21 @@ pushes until the user is back.
     producers before the culls stop (milestone 3), then S8.
 90. **The sky root and water shapes are read on the render thread** for now, as the reflection faces already did; phase 6/7
     moves them into the snapshot. CS-driven stage points need Main::RenderWorld replaced in native (milestone 3).
+
+## 2026-11-26: bug fixes (snap5-bugs; director accepted)
+
+91. **Guest screenshots take native's route** (a deliberate guest behaviour change, to fix a fatal "ISCopy rt0->rt76 has no
+    CS pass"): guest already runs the snapshot capture before DrawFrame, so PrintScreen, capture mode and Papyrus
+    `TakeScreenshot` go to the Screenshot feature in both graph modes and are saved in its format. The save-screenshot
+    handshake stays native only.
+92. **The "second save dropped" was a test-setup problem:** a hostile guard opened the Health Low tutorial, which pauses the
+    game, and `Save_Impl` refuses saves while paused. Configs with hostile NPCs start with `tgm` (the standing rule);
+    `window-resize` and `screenshot-clean` still lack it.
+93. **Resize fixes in the ImageSpace step groups:** step render areas follow the size the next revision brings
+    (`EngineTargetShapes`), kept SAO/TAA/bloom textures follow it too, reused step builds re-import the engine's own
+    targets, and the start steps follow the display size. Since engine targets live in shared placed memory, a stale
+    render area corrupts neighbouring resources, so these are correctness fixes, not cosmetics.
+94. **Open:** an intermittent GPU hang in `cs.dclf.main-opaque` (seen again in the merge validation, 3 of 10 resize runs so far) in the ~250 ms after a resize while DCLF still draws its
+    old-size scene (2 of 9 resize runs); ORG records a stage's old build against new target versions until the new build
+    arrives (recordings dropped, runs pass); FSR via Streamline destroys an image view still in use when it remakes its
+    context on resize.
