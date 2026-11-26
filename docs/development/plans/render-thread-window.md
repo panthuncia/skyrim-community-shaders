@@ -239,6 +239,22 @@ Dev-Fast): 2.62 ms on lead anchors' unchanged base, 2.54 ms after it; the other 
   requests an async rebuild); it was fatal when a load started as the profiler went idle, on AE too. The "broken
   exterior" on SE was the harness shooting the loading screen; steps now wait for a scripted shot to save.
 
+Release profile (optimised, LTCG; ORG pass timestamps off), final round 3 tree, same capture (`perf-tools/r3-rel.buckets.txt`):
+
+| Bucket | Dev-Fast (anchors after2) | Release |
+|---|---|---|
+| Window | 2.544 | 1.306 |
+| ORG epochs | 0.700 | 0.319 |
+| other CS / features | 0.670 | 0.326 |
+| engine code | 0.547 | 0.329 |
+| DCLF CPU | 0.493 | 0.244 (0.057 of it waiting on the list jobs) |
+
+CS's own code is about 2.2x faster optimised, so the engine's code is now as large as any CS bucket. The top CS zones stay
+the same: `CS.Anchors.ClientCommit` 0.049, `CS.PostNative.Stage` 0.037, `CS.Stage.CopyLatch` 0.026, `ORG.Host.CommitTicket`
+0.023, `CS.State.UpdateSharedData` 0.024. Engine: the Scaleform HUD 0.042, 106337 0.031, the shadow caster lights 0.030.
+The Release build needed fixes first: it compiles each file alone at warning level 4 (C4459 shadowing in five places, one
+file that took vulkan.h before volk), and BasicRHI's SPIRV-Tools precompiled header failed under the Visual Studio generator.
+
 Open:
 
 - The attach still holds the async host thread briefly (`HoldAsync`); the host thread could swap graphs itself.
