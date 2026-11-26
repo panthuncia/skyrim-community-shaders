@@ -782,7 +782,7 @@
 			"choices": [],
 			"kind": "diagnostic",
 			"family": "cs",
-			"description": "1: Tracy zones around the engine's render function calls (AE 1.6.1170 only, Tracy builds)"
+			"description": "1: the engine-render detector's call sites without its log (EngineZones.h): Tracy zones around the engine's render function calls in Tracy builds (AE 1.6.1170; SE 1.5.97 for sites with an SE match)"
 		},
 		{
 			"name": "CS_FEATURE_GPU_ZONES",

@@ -77,7 +77,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_DISABLE_FEATURES", .key = "cs.disable_features", .description = "comma-separated feature short names disabled at boot (write [features] instead)" },
 			{ .name = "CS_EDITOR" },
 			{ .name = "CS_ENABLE_FEATURES" },
-			{ .name = "CS_ENGINE_ZONES", .type = Bool, .kind = Diagnostic, .description = "1: Tracy zones around the engine's render function calls (AE 1.6.1170 only, Tracy builds)" },
+			{ .name = "CS_ENGINE_ZONES", .type = Bool, .kind = Diagnostic, .description = "1: the engine-render detector's call sites without its log (EngineZones.h): Tracy zones around the engine's render function calls in Tracy builds (AE 1.6.1170; SE 1.5.97 for sites with an SE match)" },
 			{ .name = "CS_FEATURE_GPU_ZONES", .type = Bool, .kind = Diagnostic, .description = "1: Tracy GPU zones on CS's D3D11 work and each feature's frame callbacks (a D3D11 query pair each, Tracy builds)" },
 			{ .name = "CS_FORCE_FSR_FG" },
 			{ .name = "CS_FRAME_LATENCY" },

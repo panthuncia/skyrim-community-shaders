@@ -1,12 +1,22 @@
 #pragma once
 
+#include <cstdint>
+
 /**
-* Tracy zones around the engine's render functions, for attributing render-thread time that falls between CS's own zones.
-* CS_ENGINE_ZONES=1 turns them on. Each zone wraps one call site with a pass-through thunk on its own trampoline, so it chains
-* onto any hook already written there. Only on AE 1.6.1170: the sites are offsets inside engine functions.
+* @brief The engine-render detector: counts each engine render function the frame still calls, per call site and frame kind, and
+* the render functions' calls per frame. Each counted site is a CALL inside an engine function, retargeted to a pass-through thunk
+* on its own trampoline, so it chains onto any hook already written there. Tracy builds also give each call a zone.
+* CS_SNAPSHOT_DETECT=1 or CS_ENGINE_ZONES=1 installs the sites (AE 1.6.1170; SE 1.5.97 for the sites with an SE match).
+* CS_SNAPSHOT_DETECT=1 logs the tables at each load and at exit. The snapshot roadmap's phases 3 to 5 drive native's count to zero.
 */
 namespace EngineZones
 {
-	/** @brief Writes the call-site zones when CS_ENGINE_ZONES=1 and Tracy is compiled in. Call after every other hook is installed. */
+	/** @brief Installs the counted call sites when asked for, and registers the detectors' exit report. Call after every other hook is installed. */
 	void Install();
+
+	/** @brief Renderer::Begin, with the new frame's RenderGraph::Frame::Kind: closes the last frame's count. Begin's thread. */
+	void BeginFrame(std::uint8_t a_kind) noexcept;
+
+	/** @brief Logs the call-site table (under CS_SNAPSHOT_DETECT=1) and writes its summary to the test status. a_when names the moment. */
+	void Report(const char* a_when);
 }
