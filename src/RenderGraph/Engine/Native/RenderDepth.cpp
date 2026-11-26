@@ -114,16 +114,19 @@ namespace RenderGraph::Engine::Native
 
 	void RenderShadowMasks()
 	{
-		// The scene's shadows (SE 513204 / AE 390933) and the last frame's kept caster count (SE 528090 / AE 415035).
+		// The scene's shadows (SE 513204 / AE 390933), else a caster kept last frame (SE 528090 / AE 415035), runs the call's body.
 		const bool sceneShadows = DepthGlobal<bool>(513204, 390933);
-		if (!sceneShadows)
+		if (!sceneShadows && DepthGlobal<std::int32_t>(528090, 415035) <= 0)
 			return;
 		ZoneScopedN("CS.Native.RenderShadowMasks");
 		globals::state->BeginPerfEvent("Shadowmasks");
-		// Renderer::SetClearColor(r, 0, 0, 0): r is 0 with the sun's shadows off (SE 528095 / AE 415040), else 1.
-		const float clear[4]{ DepthGlobal<bool>(528095, 415040) ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
-		DCLF::Features::ShadowMask::DrawWorldMasks(clear);
-		LeaveMaskState();
+		// The masks draw only with the scene's shadows on. Renderer::SetClearColor(r, 0, 0, 0): r is 0 with the sun's shadows off
+		// (SE 528095 / AE 415040), else 1.
+		if (sceneShadows) {
+			const float clear[4]{ DepthGlobal<bool>(528095, 415040) ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
+			DCLF::Features::ShadowMask::DrawWorldMasks(clear);
+			LeaveMaskState();
+		}
 		// The current camera RenderShadowMasks sets with its SetCameraData (SE 527667 / AE 414580): the world's.
 		DepthGlobal<RE::NiCamera*>(527667, 414580) = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 		globals::state->EndPerfEvent();

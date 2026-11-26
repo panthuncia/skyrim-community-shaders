@@ -141,13 +141,14 @@ namespace DCLF::Features::ShadowMask
 	void DrawWorldMasks(const float a_clear[4])
 	{
 		DCLF_ZONE("CS.DCLF.ShadowMask.Native");
+		static Family::RefusalLog refusals("[DCLF] shadow mask (native): a world batch is only cleared");
 		Family::BeginBatch();
 		// SetCurrentRenderTarget(0, kSHADOW_MASK, SRTM_CLEAR) with the clear colour RenderShadowMasks set: the clear lands before the
 		// anchor's run.
 		if (!::RenderGraph::Engine::Skeleton::ClearColour(RE::RENDER_TARGET::kSHADOW_MASK, a_clear))
-			Refusals().Report("the world batch: the skeleton did not take kSHADOW_MASK's clear");
+			refusals.Report("the skeleton did not take kSHADOW_MASK's clear");
 		if (!ShadowMaskDraws::Available() || !ShadowMaskDraws::CanTake(View::World)) {
-			Refusals().Report("the world batch: the family cannot take it now; only the clear is made");
+			refusals.Report("the family cannot take it now");
 			return;
 		}
 		auto run = std::make_shared<Run>();
@@ -155,7 +156,7 @@ namespace DCLF::Features::ShadowMask
 		std::vector<RE::BSShadowLight*> lights;
 		std::string why;
 		if (!Native::Build(View::World, *run, lights, why)) {
-			Refusals().Report(std::format("a world batch: {}; only the clear is made", why));
+			refusals.Report(why);
 			ShadowMaskDraws::Keep(std::move(run->owners));
 		} else {
 			if (auto* sun = Native::SunMap(View::World, lights))
