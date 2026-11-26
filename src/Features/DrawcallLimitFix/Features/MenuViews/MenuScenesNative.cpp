@@ -684,10 +684,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		/**
 		 * @brief Appends a_object's visible geometry, depth first, as the menu's cull keeps it: hidden subtrees and bounds outside the
-		 * camera's frustum are skipped, and a switch node gives its active child. A BSOrderedNode opens a group of its own
+		 * camera's frustum are skipped, a switch node gives its active child, and a billboard turns to the camera. A BSOrderedNode opens a group of its own
 		 * (StartGroupingAlphas, AE 0x1414f50d0) in visit order; its geometry registers into the nearest one.
 		 */
-		void Walk(RE::NiAVObject* a_object, const ShadowCameras::Planes& a_planes, std::int32_t a_group, std::vector<Visible>& a_out,
+		void Walk(RE::NiAVObject* a_object, const RE::NiCamera& a_camera, const ShadowCameras::Planes& a_planes, std::int32_t a_group, std::vector<Visible>& a_out,
 			std::vector<const RE::NiNode*>& a_groups)
 		{
 			if (!a_object || a_object->GetFlags().any(RE::NiAVObject::Flag::kHidden) || Outside(a_object->worldBound, a_planes))
@@ -702,7 +702,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (auto* switchNode = netimmerse_cast<RE::NiSwitchNode*>(node)) {
 				const auto index = switchNode->index;
 				if (index >= 0 && static_cast<std::size_t>(index) < node->GetChildren().size())
-					Walk(node->GetChildren()[static_cast<std::uint16_t>(index)].get(), a_planes, a_group, a_out, a_groups);
+					Walk(node->GetChildren()[static_cast<std::uint16_t>(index)].get(), a_camera, a_planes, a_group, a_out, a_groups);
 				return;
 			}
 			static const REL::Relocation<const RE::NiRTTI*> orderedRtti{ RE::BSOrderedNode::Ni_RTTI };
@@ -710,8 +710,14 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				a_group = static_cast<std::int32_t>(a_groups.size());
 				a_groups.push_back(node);
 			}
+			// A billboard turns to the culling camera in its OnVisible (AE 71063): its rotation (SE 69681, AE 71061) turns the node and updates
+			// its children's world transforms, a CPU side effect of the cull the draws need.
+			if (netimmerse_cast<RE::NiBillboardNode*>(node)) {
+				static const REL::Relocation<void (*)(RE::NiNode*, const RE::NiCamera*)> rotateToCamera{ RELOCATION_ID(69681, 71061) };
+				rotateToCamera(node, &a_camera);
+			}
 			for (auto& child : node->GetChildren())
-				Walk(child.get(), a_planes, a_group, a_out, a_groups);
+				Walk(child.get(), a_camera, a_planes, a_group, a_out, a_groups);
 		}
 
 		struct NativeState
@@ -756,7 +762,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		ShadowCameras::FrustumPlanes(a_camera.GetRuntimeData2().viewFrustum, a_camera.world, planes);
 		std::vector<Visible> visible;
 		std::vector<const RE::NiNode*> groupNodes;
-		Walk(a_root, planes, -1, visible, groupNodes);
+		Walk(a_root, a_camera, planes, -1, visible, groupNodes);
 
 		// The batches first, in registration (scene) order.
 		std::vector<RE::BSGeometry*> list;
