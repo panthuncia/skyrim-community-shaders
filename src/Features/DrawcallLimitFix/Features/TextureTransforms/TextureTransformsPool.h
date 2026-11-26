@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Api/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameValuePools.h"
+#include "Features/DrawcallLimitFix/Integrations/LinearLighting/LinearLighting.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -17,15 +18,19 @@ namespace DCLF::Features::TextureTransforms
 	// Read only while this producer's Kick is the newest. Its materials are held by the publication its frame installed, released no earlier than the next capture.
 	inline bool Readable(const Api::FrameValuePoolProducer& a_producer, EngineReadWindow::Lease& a_lease) { return a_lease && a_producer.Newest(); }
 
-	inline void Read(const TextureTransformList::Entry& a_entry, std::size_t a_buffer, float (&a_values)[4])
+	// a_space is Linear Lighting's working space this frame, null while it is off.
+	inline void Read(const TextureTransformList::Entry& a_entry, std::size_t a_buffer, const Integrations::LinearLighting::WorkingSpace* a_space, float (&a_values)[4])
 	{
 		const auto* material = a_entry.material;
 		if (const auto* components = a_entry.components) {
 			const auto* bytes = reinterpret_cast<const std::byte*>(material);
+			for (std::size_t c = 0; c < 4; ++c)
+				std::memcpy(&a_values[c], bytes + components[c].source, sizeof(float));
+			// Linear Lighting converts the colour before the scale, as its upload hook does.
+			if (a_space && a_entry.workingColour)
+				Integrations::LinearLighting::ToWorking(*a_space, a_values);
 			for (std::size_t c = 0; c < 4; ++c) {
-				const auto& component = components[c];
-				std::memcpy(&a_values[c], bytes + component.source, sizeof(float));
-				if (component.scale != Api::MaterialFrameComponent::kNoScale) {
+				if (const auto& component = components[c]; component.scale != Api::MaterialFrameComponent::kNoScale) {
 					float scale;
 					std::memcpy(&scale, bytes + component.scale, sizeof(scale));
 					a_values[c] = scale * a_values[c];

@@ -277,10 +277,14 @@ void LinearLighting::ModifySharedLighting(SharedLighting& lighting)
 
 void LinearLighting::SRGBToWorking(float* color) const
 {
-	if (!IsLinearLightingActive())
-		return;
+	if (IsLinearLightingActive())
+		SRGBToWorking(color, IsACEScgActive());
+}
+
+void LinearLighting::SRGBToWorking(float* color, bool acescg)
+{
 	Util::ColorSpace::SRGBToLinear(color);
-	if (IsACEScgActive())
+	if (acescg)
 		Util::ColorSpace::SRGBGamutToAP1(color);
 }
 

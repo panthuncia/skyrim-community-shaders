@@ -105,6 +105,8 @@ struct LinearLighting : Feature
 	bool IsACEScgActive() const { return IsLinearLightingActive() && configuredACEScg; }
 	RE::NiColor SRGBToWorking(RE::NiColor color) const;
 	void SRGBToWorking(float* color) const;
+	/** @brief The working space conversion for a given space, whatever the feature's state. Any thread. */
+	static void SRGBToWorking(float* color, bool acescg);
 	RE::NiColor LightColorToWorking(const RE::NiLight* light, bool effect = false) const;
 	bool IsSunlightOverridden(const RE::NiLight* light) const;
 	/** @brief Whether any light currently carries a working-space sunlight override. */

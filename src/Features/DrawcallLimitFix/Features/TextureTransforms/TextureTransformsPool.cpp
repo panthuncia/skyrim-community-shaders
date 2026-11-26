@@ -55,6 +55,7 @@ namespace DCLF::Features::TextureTransforms
 		Sampled SampleEntries(const Api::FrameValuePoolProducer& a_producer, const TextureTransformList* a_list, std::size_t a_count, std::size_t a_buffer,
 			std::vector<TextureTransformRow>& a_out)
 		{
+			const auto* space = Integrations::LinearLighting::LiveWorkingSpace();
 			auto& p = produced;
 			constexpr std::size_t kGrain = 256;
 			struct Chunk
@@ -76,7 +77,7 @@ namespace DCLF::Features::TextureTransforms
 					next.rowOffset = entry.rowOffset;
 					next.mask = entry.mask;
 					if (readable) {
-						Read(entry, a_buffer, next.values);
+						Read(entry, a_buffer, space, next.values);
 						p.materials[i] = entry.material;
 					} else {
 						// An unread entry keeps its values for the same material, else the row keeps its own.

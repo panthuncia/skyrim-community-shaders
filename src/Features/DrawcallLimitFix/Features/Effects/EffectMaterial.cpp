@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectDescriptors.h"
+#include "Features/DrawcallLimitFix/Integrations/LinearLighting/LinearLighting.h"
 #include "RenderGraph/Fatal.h"
 
 #include <bit>
@@ -34,7 +35,7 @@ namespace DCLF::Features::Effects
 		constexpr std::uint16_t kEffectTextureFields[] = { kSourceTexture, kGreyscaleTexture };
 
 		// Effect controllers change falloff and base colour every frame, so the frame owns these variables rather than the record.
-		// No other record value reads those bytes.
+		// No other record value reads those bytes. Linear Lighting converts the base colour as the record does.
 		constexpr std::uint16_t kNoScale = Api::MaterialFrameComponent::kNoScale;
 		constexpr Api::MaterialFrameVariable kEffectFrameVariables[] = {
 			{ .pixel = false, .variable = kEffectVSFalloffData, .first = kFalloff, .end = kFalloff + 16,
@@ -42,7 +43,9 @@ namespace DCLF::Features::Effects
 			{ .pixel = true, .variable = kEffectPSBaseColor, .first = kBaseColor, .end = kBaseColor + 16,
 				.components = { { { kBaseColor, kBaseColorScale }, { kBaseColor + 4, kBaseColorScale }, { kBaseColor + 8, kBaseColorScale }, { kBaseColor + 12, kNoScale } } },
 				.alternateBits = EffectFlag::GrayscaleToColor,
-				.alternate = { { { kBaseColor, kNoScale }, { kBaseColor + 4, kNoScale }, { kBaseColor + 8, kNoScale }, { kBaseColor + 12, kNoScale } } } },
+				.alternate = { { { kBaseColor, kNoScale }, { kBaseColor + 4, kNoScale }, { kBaseColor + 8, kNoScale }, { kBaseColor + 12, kNoScale } } },
+				.workingColour = true,
+				.workingColourExceptBits = EffectFlag::GrayscaleToColor | EffectFlag::Blood },
 		};
 
 		const StageLayout& EffectVSLayout()
@@ -109,6 +112,13 @@ namespace DCLF::Features::Effects
 				setPS(kEffectPSBaseColor, 1, a_port.At<float>(kBaseColor + 4) * scale);
 				setPS(kEffectPSBaseColor, 2, a_port.At<float>(kBaseColor + 8) * scale);
 				copyPS(kEffectPSBaseColor, 3, kBaseColor + 12);
+				// Linear Lighting's EffectMaterialUpload: the rgb in the working space, then the scale, except for Blood.
+				if (const auto* space = Integrations::LinearLighting::FrameWorkingSpace(a_port.frame.contributors); space && !(pass & EffectFlag::Blood)) {
+					float colour[3] = { a_port.At<float>(kBaseColor), a_port.At<float>(kBaseColor + 4), a_port.At<float>(kBaseColor + 8) };
+					Integrations::LinearLighting::ToWorking(*space, colour);
+					for (std::uint32_t c = 0; c < 3; ++c)
+						setPS(kEffectPSBaseColor, c, colour[c] * scale);
+				}
 			} else {
 				for (std::uint32_t c = 0; c < 4; ++c)
 					copyPS(kEffectPSBaseColor, c, kBaseColor + 4 * c);
@@ -139,7 +149,7 @@ namespace DCLF::Features::Effects
 
 		bool EvaluateEffectPort(Api::MaterialPortEvaluation& a_evaluation)
 		{
-			// Community Shaders does not hook BSEffectShader's SetupMaterial, so vanilla values are enough.
+			// Community Shaders' only hook on BSEffectShader's SetupMaterial is Linear Lighting's, which EvaluateEffect ports.
 			return EvaluateEffect(a_evaluation);
 		}
 	}
