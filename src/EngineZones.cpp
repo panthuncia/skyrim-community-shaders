@@ -1,5 +1,6 @@
 #include "EngineZones.h"
 
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Switches.h"
 #include "Snapshot/EngineReads.h"
@@ -27,8 +28,9 @@ namespace EngineZones
 
 		enum class Role : std::uint8_t
 		{
-			Render,  // an engine render function itself: work CS must port
-			Helper   // bookkeeping, setup and helpers around it
+			Render,   // an engine render function itself: work CS must port
+			Helper,   // bookkeeping, setup and helpers around it
+			Producer  // game-side work the frame's data comes from; counts as render until CS owns what it draws (decision 16)
 		};
 
 		struct Site
@@ -64,7 +66,7 @@ namespace EngineZones
 			{ 35556, 0x363, 99025, 36555, 0x329, 105676, Role::Render, "ImageSpaceManager::RenderEffect #1 (in Main::DrawFrame)" },
 			{ 35556, 0x36D, 34551, 36555, 0x333, 35406, Role::Render, "JobListManager::FrameJobs (in Main::DrawFrame)" },
 			{ 35556, 0x37D, 68167, 36555, 0x343, 69516, Role::Helper, "WaitForJobTask (in Main::DrawFrame)" },
-			{ 35556, 0x3AB, 79947, 36555, 0x371, 82084, Role::Render, "MenuManager::DrawInterface (in Main::DrawFrame)" },
+			{ 35556, 0x3AB, 79947, 36555, 0x371, 82084, Role::Producer, "MenuManager::DrawInterface (in Main::DrawFrame)" },
 			{ 35556, 0x3E6, 99025, 36555, 0x3AC, 105676, Role::Render, "ImageSpaceManager::RenderEffect #2 (in Main::DrawFrame)" },
 			{ 35556, 0x44E, 75462, 36555, 0x414, 77247, Role::Helper, "Renderer::ApplyState (in Main::DrawFrame)" },
 			{ 35556, 0x47C, 99025, 36555, 0x442, 105676, Role::Render, "ImageSpaceManager::RenderEffect #3 (in Main::DrawFrame)" },
@@ -276,7 +278,7 @@ namespace EngineZones
 			{ 38085, 0xEB, 75460, 39039, 0xEB, 77245, Role::Helper, "Renderer::Begin (in ServingThread::RunLoadingScreen)" },
 			{ 38085, 0x144, 100460, 39039, 0x144, 107177, Role::Helper, "AE 107177 (in ServingThread::RunLoadingScreen)" },
 			{ 38085, 0x18E, 75462, 39039, 0x18E, 77247, Role::Helper, "Renderer::ApplyState #2 (in ServingThread::RunLoadingScreen)" },
-			{ 38085, 0x19A, 79947, 39039, 0x19A, 82084, Role::Render, "MenuManager::DrawInterface (in ServingThread::RunLoadingScreen)" },
+			{ 38085, 0x19A, 79947, 39039, 0x19A, 82084, Role::Producer, "MenuManager::DrawInterface (in ServingThread::RunLoadingScreen)" },
 			{ 38085, 0x19F, 26455, 39039, 0x19F, 27041, Role::Render, "FaceGen::UpdatePending (in ServingThread::RunLoadingScreen)" },
 			{ 38085, 0x1AE, 75461, 39039, 0x1AE, 77246, Role::Helper, "Renderer::End (in ServingThread::RunLoadingScreen)" },
 			{ 38085, 0x1D8, 87936, 39039, 0x1D8, 90319, Role::Helper, "AE 90319 (in ServingThread::RunLoadingScreen)" },
@@ -323,6 +325,8 @@ namespace EngineZones
 		std::atomic<std::uint8_t> g_kind{ 2 };  // RenderGraph::Frame::Kind::MainMenu
 		// Render-function entries since the last Begin, and per frame kind the frames' totals. Begin's thread only.
 		std::atomic<std::uint64_t> g_frameCalls{ 0 };
+		// Read by the producer sites' stubs: 1 while producers count as render calls (CountsAsRender). BeginFrame sets it.
+		std::atomic<std::uint8_t> g_producersRender{ 1 };
 		std::array<FrameStats, Reads::kKinds> g_frameStats{};
 		std::uint8_t g_frameKind = 0;
 		bool g_frameBegun = false;
@@ -375,6 +379,21 @@ namespace EngineZones
 		};
 
 		/**
+		 * @brief Whether a site's entries count as engine render calls. DrawInterface is a producer once CS's Scaleform renderer owns
+		 * every slot of the game's (native mode): it then draws nothing itself, it advances the menus and records the UI stream.
+		 */
+		bool CountsAsRender(Role a_role) noexcept
+		{
+			return a_role == Role::Render || (a_role == Role::Producer && !RenderGraph::Engine::Scaleform::OwnsRenderer());
+		}
+
+		const char* RoleName(Role a_role) noexcept
+		{
+			return CountsAsRender(a_role) ? "render" : a_role == Role::Producer ? "producer" :
+			                                                                      "helper";
+		}
+
+		/**
 		* @brief Counts one entry of a_site. It touches only RAX, RCX and the flags, and restores RAX and RCX, so every argument
 		* register, XMM register and stack argument reaches the callee as the engine left it, whatever the callee's signature.
 		*/
@@ -386,6 +405,13 @@ namespace EngineZones
 			a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(g_entries[a_site].data()));
 			a_code.Put({ 0xF0, 0x48, 0xFF, 0x04, 0xC1 });  // lock inc qword ptr [rcx+rax*8]
 			if (kSites[a_site].role == Role::Render) {
+				a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(&g_frameCalls));
+				a_code.Put({ 0xF0, 0x48, 0xFF, 0x01 });  // lock inc qword ptr [rcx]
+			} else if (kSites[a_site].role == Role::Producer) {
+				// A producer adds to the frame's render calls only while g_producersRender is set (BeginFrame refreshes it).
+				a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(&g_producersRender));
+				a_code.Put({ 0x80, 0x39, 0x00 });  // cmp byte ptr [rcx], 0
+				a_code.Put({ 0x74, 0x0E });        // je past the next 14 bytes
 				a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(&g_frameCalls));
 				a_code.Put({ 0xF0, 0x48, 0xFF, 0x01 });  // lock inc qword ptr [rcx]
 			}
@@ -632,6 +658,7 @@ namespace EngineZones
 		g_frameKind = a_kind;
 		g_frameBegun = true;
 		g_kind.store(a_kind, std::memory_order_relaxed);
+		g_producersRender.store(CountsAsRender(Role::Producer) ? 1 : 0, std::memory_order_relaxed);
 		if (afterLoad)
 			Report("after a load");
 	}
@@ -655,7 +682,7 @@ namespace EngineZones
 			for (const auto& count : g_entries[i])
 				total += count.load(std::memory_order_relaxed);
 			if (total)
-				sites[kSites[i].name] = { { "world", g_entries[i][kWorld].load(std::memory_order_relaxed) }, { "total", total }, { "render", kSites[i].role == Role::Render } };
+				sites[kSites[i].name] = { { "world", g_entries[i][kWorld].load(std::memory_order_relaxed) }, { "total", total }, { "render", CountsAsRender(kSites[i].role) }, { "role", RoleName(kSites[i].role) } };
 		}
 		::Testing::SetReport("engine_render", { { "mode", RenderGraph::Frame::Driver::ModeName() }, { "installed", installed }, { "unsupported", g_unsupported },
 												  { "sites_wrapped", g_wrappedCount.load(std::memory_order_relaxed) }, { "sites", kCount }, { "per_frame", perFrame },
@@ -682,7 +709,7 @@ namespace EngineZones
 				}
 			if (!total)
 				continue;
-			logger::info("[EngineZones] engine call site: {} [{}{}]: per world frame {:.2f};{}", kSites[i].name, kSites[i].role == Role::Render ? "render" : "helper",
+			logger::info("[EngineZones] engine call site: {} [{}{}]: per world frame {:.2f};{}", kSites[i].name, RoleName(kSites[i].role),
 				g_hooked[i] ? ", hooked" : "", static_cast<double>(g_entries[i][kWorld].load(std::memory_order_relaxed)) / worldFrames, split);
 		}
 	}

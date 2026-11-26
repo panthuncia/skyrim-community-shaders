@@ -20,9 +20,10 @@ namespace RE
  * @brief The UI command stream: GFx's calls on the renderer in call order, with what they point at copied.
  *
  * The recorder (Renderer.cpp's hooks, native mode) appends one command per GRenderer call. The replay applies each command to a
- * RendererState, the renderer's state as CS keeps it, and turns the draws into graph draws. Today each display is replayed at
- * its EndDisplay. A present's stream is immutable once finished and handed over as a shared pointer (UiStream::Latest), so a
- * frame snapshot can carry it. Replaying a stream needs the renderer state the streams before it left.
+ * RendererState, the renderer's state as CS keeps it, and turns the draws into graph draws. Each display is replayed at its
+ * EndDisplay. A stream is finished at the end of MenuManager::DrawInterface and is immutable from then on; a game update's stream
+ * goes into its frame snapshot (Snapshot/UiCommandStream.h). Each stream starts with a state header, the renderer state the
+ * streams before it left, so it replays the same alone, again or after skipped streams.
  */
 namespace RenderGraph::Engine::Scaleform
 {
@@ -155,6 +156,18 @@ namespace RenderGraph::Engine::Scaleform
 		std::uint32_t size = 0;
 	};
 
+	/**
+	 * @brief The renderer state a stream starts with (decision 19): what the replay carries from one stream into the next. Array
+	 * pointers are left out, since the recorder copies the arrays again at each stream's first draw. Texgen rows are not kept: a
+	 * draw writes the rows of every stage it binds, so the replay starts each stream with them zero.
+	 */
+	struct StreamHeader
+	{
+		RendererState state;
+		std::uint32_t blendMode = 0;
+		std::vector<std::uint32_t> blendStack;
+	};
+
 	/** @brief BeginDisplay's arguments. */
 	struct BeginDisplayArgs
 	{
@@ -167,7 +180,9 @@ namespace RenderGraph::Engine::Scaleform
 	class UiStream
 	{
 	public:
-		std::uint64_t frame = 0;  // the present it was recorded for (FrameClock::PresentSerial)
+		std::uint64_t frame = 0;     // the present it was recorded for (FrameClock::PresentSerial)
+		std::uint64_t sequence = 0;  // one more per stream; uploads are applied by it (UiResources)
+		StreamHeader header;
 		std::vector<UiCommand> commands;
 		std::vector<std::byte> payload;
 		std::vector<TextureInfo> textures;
@@ -186,10 +201,10 @@ namespace RenderGraph::Engine::Scaleform
 		/** @brief Names the texture's current info with a Texture command, when it changed since this stream last named it. */
 		void NoteTexture(const RE::GTexture* a_texture);
 
-		/** @brief Makes a finished stream the latest. Render owner. */
-		static void Publish(std::shared_ptr<const UiStream> a_stream);
-
-		/** @brief The newest finished frame's stream, or null. Render owner. */
-		static std::shared_ptr<const UiStream> Latest();
+		/**
+		 * @brief The header the next stream starts with: this one's header advanced over its commands by the replay's pure setters
+		 * (and the cached 3D product, updated by 3D draws inside displays, as ApplyMatrix3D does).
+		 */
+		StreamHeader EndState() const;
 	};
 }

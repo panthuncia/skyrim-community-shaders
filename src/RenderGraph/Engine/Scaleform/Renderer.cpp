@@ -8,6 +8,7 @@
 #include "RenderGraph/Engine/Scaleform/GRendererLayout.h"
 #include "RenderGraph/Engine/Scaleform/GfxTextures.h"
 #include "RenderGraph/Engine/Scaleform/Passes.h"
+#include "RenderGraph/Engine/Scaleform/UiResources.h"
 #include "RenderGraph/Engine/Scaleform/UiStream.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
@@ -15,6 +16,8 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameClock.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/Publication.h"
+#include "Snapshot/UiCommandStream.h"
 
 #include <algorithm>
 #include <array>
@@ -40,10 +43,16 @@ namespace RenderGraph::Engine::Scaleform
 		// Vtable slots CS takes. CommonLib numbers 0-45 the same way.
 		enum Slot : std::size_t
 		{
+			kDestructor = 0,
+			kGetRenderCaps = 1,
+			kCreateTexture = 2,
+			kCreateTextureYUV = 3,
+			kCreateRenderTarget = 6,
 			kSetDisplayRenderTarget = 7,
 			kPushRenderTarget = 8,
 			kPopRenderTarget = 9,
 			kPushTempRenderTarget = 10,
+			kReleaseTempRenderTargets = 11,
 			kBeginDisplay = 12,
 			kEndDisplay = 13,
 			kSetMatrix = 14,
@@ -54,6 +63,7 @@ namespace RenderGraph::Engine::Scaleform
 			kSetPerspective3D = 21,
 			kSetView3D = 22,
 			kSetWorld3D = 23,
+			kMakeViewAndPersp3D = 24,
 			kSetVertexData = 27,
 			kSetIndexData = 28,
 			kDrawIndexedTriList = 30,
@@ -68,8 +78,16 @@ namespace RenderGraph::Engine::Scaleform
 			kBeginSubmitMask = 40,
 			kEndSubmitMask = 41,
 			kDisableMask = 42,
+			kCheckFilterSupport = 43,
 			kDrawBlurRect = 44,
 			kDrawColorMatrixRect = 45,
+			kGetRenderStats = 48,
+			kReleaseResources = 50,
+			kSetDependentVideoMode = 53,
+			kResetVideoMode = 54,
+			kGetDisplayStatus = 55,
+			kGetDevice = 56,
+			kGetContext = 57,
 		};
 
 		// The renderer's 1/255 (DAT_141540648), used as it uses it so results match bit for bit.
@@ -101,6 +119,9 @@ namespace RenderGraph::Engine::Scaleform
 			std::uint32_t flags, padding;
 		};
 		static_assert(sizeof(Viewport) == 0x38);
+
+		/** @brief Set once native mode's vtable owns every D3D1x slot but the destructor (decision 16's condition). */
+		std::atomic<bool> g_ownsRenderer{ false };
 
 		/** @brief The D3D11 renderer's own slots. Written once, before the renderer is used. */
 		std::array<void*, kSlots + 1> g_original{};
@@ -140,6 +161,9 @@ namespace RenderGraph::Engine::Scaleform
 			std::uint64_t segments = 0;
 			std::uint64_t scratchSegments = 0;             // into a scratch image, for a GFx render target or a filter pass
 			std::map<std::string, std::uint64_t> reasons;  // a whole display counts once
+			// The paths with no parity run before phase 4's second lead: translated 3D draws, filter draws, pushed targets and
+			// display target switches inside displays.
+			std::atomic<std::uint64_t> draws3D{ 0 }, blurs{ 0 }, colorMatrices{ 0 }, pushes{ 0 }, displayTargets{ 0 };
 		};
 
 		Counters& Count()
@@ -160,8 +184,9 @@ namespace RenderGraph::Engine::Scaleform
 				reasons += fmt::format("{}{} {}", reasons.empty() ? "" : ", ", count, reason);
 			logger::info(
 				"[ORG] Scaleform census: {} displays: {} on the graph, {} with draws left out, {} not on the graph; {} graph segments ({} into scratch images: GFx "
-				"render targets and filter passes); left out: {}",
-				total, a_counters.graph, a_counters.mixed, a_counters.lost, a_counters.segments, a_counters.scratchSegments, reasons.empty() ? "none" : reasons);
+				"render targets and filter passes); left out: {}; seen: {} 3D draws, {} blur filters, {} colour matrices, {} pushed targets, {} display target switches",
+				total, a_counters.graph, a_counters.mixed, a_counters.lost, a_counters.segments, a_counters.scratchSegments, reasons.empty() ? "none" : reasons,
+				a_counters.draws3D.load(), a_counters.blurs.load(), a_counters.colorMatrices.load(), a_counters.pushes.load(), a_counters.displayTargets.load());
 			if (Native::Active())
 				ReportGameCalls();
 		}
@@ -319,12 +344,15 @@ namespace RenderGraph::Engine::Scaleform
 				Frame::Driver::NoteTapError(Frame::Driver::TapError::Refused, Frame::SegmentId::Count, fmt::format("a Scaleform display: {}", a_reason));
 		}
 
+		void NoteSegment(const Display& a_display);
+
 		/** @brief Draws the segment on the graph, or counts it left out. A refusal not caused by schedule lag is a mismatch in native mode. */
 		void Flush()
 		{
 			auto& capture = Current();
 			if (capture.display.commands.empty() && !capture.display.clearTarget)
 				return;
+			NoteSegment(capture.display);
 			const char* reason = nullptr;
 			bool lagged = false;
 			if (Passes::Submit(capture.display, reason, lagged)) {
@@ -615,6 +643,7 @@ namespace RenderGraph::Engine::Scaleform
 				MatrixConstants(matrix, a_record);
 				return;
 			}
+			Count().draws3D.fetch_add(1, std::memory_order_relaxed);
 			if (!a_state.renderer) {
 				ApplyMatrix3D(a_state, matrix, a_record.mvp);
 				return;
@@ -763,26 +792,64 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief The renderer's current render target at +0x740, with its RTV at +0x50 and DSV at +0x58. */
-		bool ReadRendererTarget(void* a_renderer, DisplayTargets& a_out)
+		/**
+		 * @brief A pushed target's frame as CS keeps it in native mode: the D3D1x push saves the target and the 3D matrices (SE 82887),
+		 * and the pop sets them back (SE 82882).
+		 */
+		struct PushedFrame
 		{
-			auto* target = Field<std::byte*>(a_renderer, Layout::kRenderTarget);
+			void* target = nullptr;
+			float view[16]{};
+			float perspective[16]{};
+			const float* world = nullptr;
+		};
+
+		/** @brief GFx's render target stack in native mode, which the D3D1x renderer keeps at +0x740 and +0x748. Any thread GFx renders on. */
+		struct NativeTargetStack
+		{
+			void* current = nullptr;
+			std::vector<PushedFrame> pushed;
+		};
+
+		NativeTargetStack& NativeTargets()
+		{
+			static NativeTargetStack s_targets;
+			return s_targets;
+		}
+
+		/** @brief GFx's current render target: CS's in native mode, the renderer's +0x740 in guest. */
+		void* CurrentTarget(void* a_renderer)
+		{
+			return Native::Active() ? NativeTargets().current : Field<void*>(a_renderer, Layout::kRenderTarget);
+		}
+
+		/** @brief A GFx render target's views: the RTV at +0x50 and the DSV at +0x58. */
+		bool ReadTargetViews(void* a_target, DisplayTargets& a_out)
+		{
+			auto* target = static_cast<std::byte*>(a_target);
 			if (!target)
 				return false;
 			return ViewTargets(*reinterpret_cast<ID3D11RenderTargetView**>(target + Layout::kRenderTargetRtv),
 				*reinterpret_cast<ID3D11DepthStencilView**>(target + Layout::kRenderTargetDsv), a_out);
 		}
 
+		/** @brief The renderer's current render target's views. */
+		bool ReadRendererTarget(void* a_renderer, DisplayTargets& a_out)
+		{
+			return ReadTargetViews(CurrentTarget(a_renderer), a_out);
+		}
+
 		/**
 		 * @brief The targets UI::DrawInterface bound, read from the engine's shadow state because the context's state is stale under
-		 * the flush latch. Render texture displays use the renderer's own current target.
+		 * the flush latch. Render texture displays use GFx's current target. DrawInterface is a game-side producer (decision 16), so
+		 * these are capture-point reads.
 		 */
 		bool ReadTargets(void* a_renderer, DisplayTargets& a_out, bool a_renderTexture)
 		{
 			if (a_renderTexture)
 				return ReadRendererTarget(a_renderer, a_out);
-			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
-			auto* shadow = CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState);
+			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
+			auto* shadow = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState);
 			if (!renderer || !shadow)
 				return false;
 			const auto& rss = shadow->GetRuntimeData();
@@ -948,6 +1015,7 @@ namespace RenderGraph::Engine::Scaleform
 		 */
 		void TranslateSetDisplayTarget(const DisplayTargets* a_targets)
 		{
+			Count().displayTargets.fetch_add(1, std::memory_order_relaxed);
 			auto& capture = Current();
 			ClearSegment();
 			capture.display.Reset();
@@ -1047,6 +1115,7 @@ namespace RenderGraph::Engine::Scaleform
 		 */
 		void TranslatePushRenderTarget(const RendererState& a_state, const float* a_frame, const PushedTarget& a_target)
 		{
+			Count().pushes.fetch_add(1, std::memory_order_relaxed);
 			auto& capture = Current();
 			Capture::TargetFrame frame{};
 			std::memcpy(frame.viewport, capture.display.viewport, sizeof(frame.viewport));
@@ -1109,6 +1178,7 @@ namespace RenderGraph::Engine::Scaleform
 		/** @brief DrawBlurRect inside a captured display. */
 		void TranslateBlurRect(RendererState& a_state, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params)
 		{
+			Count().blurs.fetch_add(1, std::memory_order_relaxed);
 			if (!a_source || !a_sourceRect || !a_destRect || !a_params || !CaptureBlur(a_state, a_source, a_sourceRect, a_destRect, a_params))
 				NoteLeftOut("a blur, shadow, glow or bevel filter of a texture the graph cannot read");
 		}
@@ -1119,6 +1189,7 @@ namespace RenderGraph::Engine::Scaleform
 		 */
 		void CaptureColorMatrix(RendererState& a_state, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
 		{
+			Count().colorMatrices.fetch_add(1, std::memory_order_relaxed);
 			auto& capture = Current();
 			std::array<float, 28> arguments;
 			std::memcpy(arguments.data(), a_sourceRect, sizeof(float) * 4);
@@ -1770,19 +1841,44 @@ namespace RenderGraph::Engine::Scaleform
 			}
 		}
 
-		/** @brief Replays a_stream's commands not replayed yet. Render owner. */
-		void RunReplay(const std::shared_ptr<const UiStream>& a_stream)
+		/**
+		 * @brief Starts replaying a_stream from its header, so the replay reads nothing the streams before it left (decision 19). A
+		 * display the stream before left open is drawn first.
+		 */
+		void StartReplay(Replay& a_replay, const std::shared_ptr<const UiStream>& a_stream)
+		{
+			auto& capture = Current();
+			if (capture.active) {
+				FinishCapture(a_replay.state);
+				ClearDisplay();
+			}
+			a_replay.stream = a_stream;
+			a_replay.cursor = 0;
+			a_replay.textures.clear();
+			a_replay.state = a_stream->header.state;
+			capture.blendMode = a_stream->header.blendMode;
+			capture.blendStack = a_stream->header.blendStack;
+			std::memset(capture.texgen, 0, sizeof(capture.texgen));
+		}
+
+		/**
+		 * @brief Replays a_stream's commands not replayed yet, through the next EndDisplay when a_oneDisplay. The uploads of this stream
+		 * and the ones before it, replayed or not, are applied first. Render owner.
+		 */
+		void RunReplay(const std::shared_ptr<const UiStream>& a_stream, bool a_oneDisplay = false)
 		{
 			auto& replay = Replayer();
-			if (replay.stream != a_stream) {
-				replay.stream = a_stream;
-				replay.cursor = 0;
-				replay.textures.clear();
-			}
+			if (replay.stream != a_stream)
+				StartReplay(replay, a_stream);
+			UiResources::ApplyUploads(a_stream->sequence);
 			replay.state.stream = a_stream.get();
 			replay.state.textures = &replay.textures;
-			for (; replay.cursor < a_stream->commands.size(); ++replay.cursor)
-				ReplayCommand(replay, *a_stream, a_stream->commands[replay.cursor]);
+			while (replay.cursor < a_stream->commands.size()) {
+				const auto& command = a_stream->commands[replay.cursor++];
+				ReplayCommand(replay, *a_stream, command);
+				if (a_oneDisplay && command.op == UiOp::EndDisplay)
+					break;
+			}
 		}
 
 		// ---------------------------------------------------------------------------------------------------------------------
@@ -1793,12 +1889,17 @@ namespace RenderGraph::Engine::Scaleform
 		struct Recorder
 		{
 			std::shared_ptr<UiStream> stream;
-			RendererState mirror;  // the arrays, fill and line styles GFx set
+			StreamHeader next;  // the header the next stream starts with
+			std::uint64_t sequence = 0;
+			RendererState mirror;  // what GFx set: arrays, styles, matrices, the colour transform
 			bool vertexPending = false;
 			bool indexPending = false;
 			const float* world = nullptr;
 			bool worldPending = false;
 			float worldValues[16]{};
+			// A repeated render's stream (cadence repeat): GFx's calls are not recorded, and this stream is replayed in their place.
+			std::shared_ptr<const UiStream> repeat;
+			std::uint64_t repeatedRenders = 0;
 		};
 
 		Recorder& Rec()
@@ -1807,30 +1908,112 @@ namespace RenderGraph::Engine::Scaleform
 			return s_recorder;
 		}
 
-		bool Recording()
+		/** @brief Whether GFx's setter calls update the recorder's mirror: native mode, on the render owner. */
+		bool Mirroring()
 		{
 			return Native::Active() && FrameAnchors::IsRenderOwner();
 		}
 
-		/** @brief The stream of the current present. A new present finishes the last one: its tail is replayed and it is published. */
+		/** @brief Whether GFx's calls are recorded: mirroring, outside a repeated render. */
+		bool Recording()
+		{
+			return Mirroring() && !Rec().repeat;
+		}
+
+		std::shared_ptr<const UiStream> FinishStream();
+
+		/**
+		 * @brief The cadence test mode's repeat check: each segment's hash (staging bytes, commands, textures, target, viewport) in a
+		 * stream's first render, compared with the same segment of each repeated render. Counted for the census. Cadence mode only.
+		 */
+		struct RepeatCheck
+		{
+			bool on = !::Switches::Value("CS_SNAPSHOT_CADENCE").empty();
+			std::vector<std::uint64_t> first;
+			std::size_t next = 0;
+			std::uint64_t same = 0, differ = 0, missing = 0;
+		};
+
+		RepeatCheck& Repeats()
+		{
+			static RepeatCheck s_check;
+			return s_check;
+		}
+
+		std::uint64_t Fnv(std::uint64_t a_hash, const void* a_bytes, std::size_t a_size)
+		{
+			const auto* bytes = static_cast<const std::uint8_t*>(a_bytes);
+			for (std::size_t i = 0; i < a_size; ++i)
+				a_hash = (a_hash ^ bytes[i]) * 0x100000001b3ull;
+			return a_hash;
+		}
+
+		void NoteSegment(const Display& a_display)
+		{
+			auto& check = Repeats();
+			if (!check.on || !Native::Active())
+				return;
+			std::uint64_t hash = 0xcbf29ce484222325ull;
+			hash = Fnv(hash, a_display.staging.data(), a_display.staging.size());
+			for (const auto& command : a_display.commands) {
+				hash = Fnv(hash, &command.state, sizeof(command.state));
+				hash = Fnv(hash, &command.vertexCount, sizeof(command.vertexCount));
+				hash = Fnv(hash, command.textures, sizeof(command.textures));
+				hash = Fnv(hash, command.samplers, sizeof(command.samplers));
+				hash = Fnv(hash, &command.stencilRef, sizeof(command.stencilRef));
+			}
+			hash = Fnv(hash, a_display.textures.data(), a_display.textures.size() * sizeof(void*));
+			hash = Fnv(hash, &a_display.target, sizeof(a_display.target));
+			hash = Fnv(hash, a_display.viewport, sizeof(a_display.viewport));
+			hash = Fnv(hash, &a_display.scratch, sizeof(a_display.scratch));
+			if (!Rec().repeat) {
+				check.first.push_back(hash);
+				return;
+			}
+			if (check.next >= check.first.size())
+				++check.missing;
+			else if (check.first[check.next] == hash)
+				++check.same;
+			else
+				++check.differ;
+			++check.next;
+		}
+
+		/** @brief The open stream, opened with the header the last one left. A stream left open past its present is finished first. */
 		UiStream& Stream()
 		{
 			auto& recorder = Rec();
 			const auto serial = FrameClock::PresentSerial();
-			if (recorder.stream && recorder.stream->frame != serial) {
-				RunReplay(recorder.stream);
-				recorder.stream->named.clear();
-				UiStream::Publish(std::move(recorder.stream));
+			if (recorder.stream && recorder.stream->frame != serial)
+				(void)FinishStream();
+			if (!recorder.stream) {
+				recorder.stream = std::make_shared<UiStream>();
+				recorder.stream->frame = serial;
+				recorder.stream->sequence = ++recorder.sequence;
+				recorder.stream->header = recorder.next;
+				UiResources::OpenStream(recorder.stream->sequence);
+				Repeats().first.clear();
 				// The new stream carries its own copies.
 				recorder.vertexPending = recorder.mirror.vertexData != nullptr;
 				recorder.indexPending = recorder.mirror.indexData != nullptr;
 				recorder.worldPending = recorder.world != nullptr;
 			}
-			if (!recorder.stream) {
-				recorder.stream = std::make_shared<UiStream>();
-				recorder.stream->frame = serial;
-			}
 			return *recorder.stream;
+		}
+
+		/** @brief Finishes the open stream: its tail is replayed and it is immutable from here. Null when none is open. */
+		std::shared_ptr<const UiStream> FinishStream()
+		{
+			auto& recorder = Rec();
+			if (!recorder.stream)
+				return nullptr;
+			RunReplay(recorder.stream);
+			recorder.stream->named.clear();
+			recorder.next = recorder.stream->EndState();
+			UiResources::CloseStream(recorder.stream->sequence);
+			std::shared_ptr<const UiStream> finished = std::move(recorder.stream);
+			recorder.stream.reset();
+			return finished;
 		}
 
 		void RecordArrays(UiStream& a_stream, bool a_indices)
@@ -1884,23 +2067,19 @@ namespace RenderGraph::Engine::Scaleform
 
 		// ---------------------------------------------------------------------------------------------------------------------
 		// The vtable slots. Guest's field path reads the D3D11 renderer's fields at each call and forwards the calls it does not
-		// draw. Native mode records every call into the UI stream and draws the stream's replay. The D3D11 renderer is not called
-		// then, except for GFx's render target stack (PushRenderTarget, PopRenderTarget, PushTempRenderTarget,
-		// SetDisplayRenderTarget) and EndDisplay's queued releases, each counted.
+		// draw. Native mode takes every slot of the D3D1x renderer but its destructor: it records every call into the UI stream, draws
+		// the stream's replay, and keeps GFx's textures, render targets, target stack and video mode itself (UiResources). The slots
+		// that are GFx's base class code (frame and user-data no-ops, event handlers, MakeViewAndPersp3D) stay GFx's.
 
 		bool NativeUi()
 		{
 			return Native::Active();
 		}
 
-		/** @brief The D3D11 renderer's slots native mode still calls, counted for the census. */
+		/** @brief The D3D1x renderer's slots native mode still calls, counted for the census. */
 		enum class GameCall : std::uint8_t
 		{
-			EndDisplay,
-			SetDisplayRenderTarget,
-			PushRenderTarget,
-			PopRenderTarget,
-			PushTempRenderTarget,
+			Destructor,
 			Count,
 		};
 
@@ -1915,16 +2094,25 @@ namespace RenderGraph::Engine::Scaleform
 			GameCalls()[static_cast<std::size_t>(a_call)].fetch_add(1, std::memory_order_relaxed);
 		}
 
-		/** @brief Logs, with the census, how often native mode called the D3D11 renderer since the last report. */
+		/** @brief Logs, with the census, how often native mode called the D3D11 renderer since the last report, and CS's UI objects. */
 		void ReportGameCalls()
 		{
-			static constexpr const char* kNames[] = { "EndDisplay", "SetDisplayRenderTarget", "PushRenderTarget", "PopRenderTarget", "PushTempRenderTarget" };
+			static constexpr const char* kNames[] = { "the destructor" };
 			std::string calls;
 			for (std::size_t i = 0; i < GameCalls().size(); ++i)
 				if (const auto count = GameCalls()[i].exchange(0, std::memory_order_relaxed))
 					calls += fmt::format("{}{} {}", calls.empty() ? "" : ", ", count, kNames[i]);
-			logger::info("[ORG] Scaleform: the game's renderer was called for {}; every other call was CS's", calls.empty() ? "nothing" : calls);
+			const auto& repeats = Repeats();
+			logger::info(
+				"[ORG] Scaleform: the game's renderer was called for {}; every other call was CS's; {} repeated renders replayed their snapshot's stream "
+				"(segments: {} as in the first render, {} differ, {} more than it had)",
+				calls.empty() ? "nothing" : calls, Rec().repeatedRenders, repeats.same, repeats.differ, repeats.missing);
+			logger::info("[ORG] Scaleform: {}", UiResources::TakeStatsLine());
 		}
+
+		struct PushedTarget;
+		void NativePushRenderTarget(void* a_renderer, const float* a_frame, void* a_target, const PushedTarget& a_pushed);
+		void NativePopRenderTarget(void* a_renderer);
 
 		RendererState& FieldState(void* a_renderer)
 		{
@@ -1938,6 +2126,11 @@ namespace RenderGraph::Engine::Scaleform
 			const auto original = Original<BeginDisplayFn>(kBeginDisplay);
 			const bool renderTexture = (a_viewport->flags & kViewportRenderTexture) != 0;
 			if (NativeUi()) {
+				if (!Mirroring())
+					return;
+				const bool videoMode = UiResources::VideoModeSet();
+				if (videoMode)
+					Rec().world = nullptr;  // BeginDisplay resets the world matrix
 				if (!Recording())
 					return;
 				auto& stream = Stream();
@@ -1951,9 +2144,7 @@ namespace RenderGraph::Engine::Scaleform
 				std::memcpy(args.viewport, a_viewport, sizeof(args.viewport));
 				auto& command = stream.Add(UiOp::BeginDisplay, &args, sizeof(args));
 				command.a = targetIndex;
-				command.b = Field<std::uint8_t>(a_renderer, Layout::kVideoModeSet) != 0;
-				if (command.b)
-					Rec().world = nullptr;  // BeginDisplay resets the world matrix
+				command.b = videoMode;
 				return;
 			}
 			// Only the render owner captures. Another thread's display neither reads nor ends it.
@@ -1983,14 +2174,17 @@ namespace RenderGraph::Engine::Scaleform
 		void EndDisplay(void* a_renderer)
 		{
 			if (NativeUi()) {
-				const bool recording = Recording();
-				if (recording)
-					RecordPlain(UiOp::EndDisplay);
-				// It releases the textures GFx queued for release. The UI stream holds its own references to what it reads.
-				NoteGameCall(GameCall::EndDisplay);
-				Original<VoidFn>(kEndDisplay)(a_renderer);
-				if (recording)
-					RunReplay(Rec().stream);
+				// CS's textures need no release queue: GFx's references and the streams' own keep them.
+				if (!Mirroring())
+					return;
+				auto& recorder = Rec();
+				if (recorder.repeat) {
+					// A repeated render draws the snapshot's display where GFx ends its own.
+					RunReplay(recorder.repeat, true);
+					return;
+				}
+				RecordPlain(UiOp::EndDisplay);
+				RunReplay(recorder.stream);
 				return;
 			}
 			// Only the render owner captures. Another thread's display neither ends nor resets it.
@@ -2003,14 +2197,14 @@ namespace RenderGraph::Engine::Scaleform
 		void SetDisplayRenderTarget(void* a_renderer, void* a_target, bool a_setState)
 		{
 			if (NativeUi()) {
-				NoteGameCall(GameCall::SetDisplayRenderTarget);
-				Original<DisplayTargetFn>(kSetDisplayRenderTarget)(a_renderer, a_target, a_setState);
+				// SE 82919 sets +0x740 and binds the target's views. CS keeps the target; the replay draws onto it.
+				NativeTargets().current = a_target;
 				if (!Recording())
 					return;
 				auto& stream = Stream();
 				DisplayTargets targets;
 				std::int32_t targetIndex = -1;
-				if (ReadRendererTarget(a_renderer, targets)) {
+				if (ReadTargetViews(a_target, targets)) {
 					targetIndex = static_cast<std::int32_t>(stream.targets.size());
 					stream.targets.push_back(std::move(targets));
 				}
@@ -2029,19 +2223,8 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			const bool valid = a_frame && a_target;
 			const PushedTarget pushed = a_target ? ReadPushedTarget(a_target) : PushedTarget{};
-			if (NativeUi()) {
-				if (Recording()) {
-					auto& stream = Stream();
-					stream.NoteTexture(pushed.texture);
-					auto& command = valid ? stream.Add(UiOp::PushRenderTarget, a_frame, sizeof(float) * 4) : stream.Add(UiOp::PushRenderTarget);
-					command.key = pushed.texture;
-					command.a = static_cast<std::int32_t>(pushed.width);
-					command.b = static_cast<std::int32_t>(pushed.height);
-				}
-				// The renderer's target stack holds the targets' references; its D3D11 binds and clear reach no GPU work.
-				NoteGameCall(GameCall::PushRenderTarget);
-				return Original<PushTargetFn>(kPushRenderTarget)(a_renderer, a_frame, a_target);
-			}
+			if (NativeUi())
+				return NativePushRenderTarget(a_renderer, a_frame, a_target, pushed);
 			if (!Capturing() || !valid)
 				return Original<PushTargetFn>(kPushRenderTarget)(a_renderer, a_frame, a_target);
 			Flush();
@@ -2051,20 +2234,20 @@ namespace RenderGraph::Engine::Scaleform
 
 		RE::GTexture* PushTempRenderTarget(void* a_renderer, const float* a_frame, std::uint32_t a_width, std::uint32_t a_height, bool a_stencil)
 		{
+			if (NativeUi()) {
+				// CS's port of the D3D1x pool, then the push.
+				auto* target = UiResources::AcquireTempTarget(a_renderer, a_width, a_height, a_stencil);
+				PushRenderTarget(a_renderer, a_frame, target);
+				return target->target;
+			}
 			// The renderer's pool makes GFx's target objects and pushes its target through the vtable's PushRenderTarget above.
-			if (NativeUi())
-				NoteGameCall(GameCall::PushTempRenderTarget);
 			return Original<PushTempTargetFn>(kPushTempRenderTarget)(a_renderer, a_frame, a_width, a_height, a_stencil);
 		}
 
 		void PopRenderTarget(void* a_renderer)
 		{
-			if (NativeUi()) {
-				if (Recording())
-					RecordPlain(UiOp::PopRenderTarget);
-				NoteGameCall(GameCall::PopRenderTarget);
-				return Original<VoidFn>(kPopRenderTarget)(a_renderer);
-			}
+			if (NativeUi())
+				return NativePopRenderTarget(a_renderer);
 			if (!TakesPop())
 				return Original<VoidFn>(kPopRenderTarget)(a_renderer);
 			Flush();
@@ -2245,38 +2428,51 @@ namespace RenderGraph::Engine::Scaleform
 			TranslateDisableMask(FieldState(a_renderer));
 		}
 
-		// The pure setters, taken in native mode only: recorded, with the recorder's mirror kept, and not forwarded.
+		// The pure setters, taken in native mode only: the recorder's mirror follows GFx (repeated renders too) and the calls are
+		// recorded. Nothing is forwarded.
 
 		template <UiOp Op, std::size_t Floats>
 		void SetFloats(void*, const float* a_values)
 		{
+			if (!Mirroring())
+				return;
+			auto& mirror = Rec().mirror;
+			if constexpr (Op == UiOp::SetMatrix)
+				std::memcpy(mirror.matrix, a_values, sizeof(mirror.matrix));
+			else if constexpr (Op == UiOp::SetUserMatrix)
+				std::memcpy(mirror.userMatrix, a_values, sizeof(mirror.userMatrix));
+			else if constexpr (Op == UiOp::SetPerspective3D)
+				mirror.SetPerspective3D(*reinterpret_cast<const float (*)[16]>(a_values));
+			else if constexpr (Op == UiOp::SetView3D)
+				mirror.SetView3D(*reinterpret_cast<const float (*)[16]>(a_values));
 			if (Recording())
 				Stream().Add(Op, a_values, sizeof(float) * Floats);
 		}
 
 		void SetCxform(void*, const float* a_cxform)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
-			Stream().Add(UiOp::SetCxform, a_cxform, sizeof(float) * 8);
 			std::memcpy(Rec().mirror.cxform, a_cxform, sizeof(Rec().mirror.cxform));
+			if (Recording())
+				Stream().Add(UiOp::SetCxform, a_cxform, sizeof(float) * 8);
 		}
 
 		void SetWorld3D(void*, const float* a_world)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
 			auto& recorder = Rec();
 			recorder.world = a_world;
 			if (a_world)
 				recorder.worldPending = true;
-			else
+			else if (Recording())
 				RecordPlain(UiOp::SetWorld3D);
 		}
 
 		void SetVertexData(void*, const void* a_data, std::int32_t a_count, std::int32_t a_format, void*)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
 			Rec().mirror.SetVertexData(a_data, a_count, a_format);
 			Rec().vertexPending = true;
@@ -2284,7 +2480,7 @@ namespace RenderGraph::Engine::Scaleform
 
 		void SetIndexData(void*, const void* a_data, std::int32_t a_count, std::int32_t a_format, void*)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
 			Rec().mirror.SetIndexData(a_data, a_count, a_format);
 			Rec().indexPending = true;
@@ -2292,46 +2488,54 @@ namespace RenderGraph::Engine::Scaleform
 
 		void LineStyleDisable(void*)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
-			RecordPlain(UiOp::LineStyleDisable);
 			Rec().mirror.LineStyleDisable();
+			if (Recording())
+				RecordPlain(UiOp::LineStyleDisable);
 		}
 
 		void LineStyleColor(void*, const std::uint32_t* a_color)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
-			RecordPlain(UiOp::LineStyleColor).a = static_cast<std::int32_t>(*a_color);
 			Rec().mirror.LineStyleColor(*a_color);
+			if (Recording())
+				RecordPlain(UiOp::LineStyleColor).a = static_cast<std::int32_t>(*a_color);
 		}
 
 		void FillStyleDisable(void*)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
-			RecordPlain(UiOp::FillStyleDisable);
 			Rec().mirror.FillStyleDisable();
+			if (Recording())
+				RecordPlain(UiOp::FillStyleDisable);
 		}
 
 		void FillStyleColor(void*, const std::uint32_t* a_color)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
-			RecordPlain(UiOp::FillStyleColor).a = static_cast<std::int32_t>(*a_color);
 			Rec().mirror.FillStyleColor(*a_color);
+			if (Recording())
+				RecordPlain(UiOp::FillStyleColor).a = static_cast<std::int32_t>(*a_color);
 		}
 
 		void FillStyleBitmap(void*, const FillTexture* a_texture)
 		{
-			if (!Recording())
+			if (!Mirroring())
 				return;
-			Stream().Add(UiOp::FillStyleBitmap, a_texture, sizeof(FillTexture));
 			Rec().mirror.FillStyleBitmap(*a_texture);
+			if (Recording())
+				Stream().Add(UiOp::FillStyleBitmap, a_texture, sizeof(FillTexture));
 		}
 
 		void FillStyleGouraud(void*, std::int32_t a_type, const FillTexture* a_texture0, const FillTexture* a_texture1, const FillTexture* a_texture2)
 		{
+			if (!Mirroring())
+				return;
+			Rec().mirror.FillStyleGouraud(a_type, a_texture0, a_texture1, a_texture2 != nullptr);
 			if (!Recording())
 				return;
 			FillTexture textures[2]{};
@@ -2342,8 +2546,213 @@ namespace RenderGraph::Engine::Scaleform
 			auto& command = Stream().Add(UiOp::FillStyleGouraud, textures, sizeof(textures));
 			command.a = a_type;
 			command.b = (a_texture0 ? 1 : 0) | (a_texture1 ? 2 : 0) | (a_texture2 ? 4 : 0);
-			Rec().mirror.FillStyleGouraud(a_type, a_texture0, a_texture1, a_texture2 != nullptr);
 		}
+
+		// The D3D1x renderer's own slots past drawing, CS's in native mode.
+
+		/** @brief CreateTexture (SE 82832 / AE 84953). */
+		RE::GTexture* CreateTexture(void* a_renderer)
+		{
+			return UiResources::CreateTexture(a_renderer);
+		}
+
+		/** @brief CreateTextureYUV (SE 82833 / AE 84954): only GFx's video player asks, and Skyrim does not link it. */
+		RE::GTexture* CreateTextureYUV(void*)
+		{
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::warn("[ORG] Scaleform: GFx asked for a YUV texture, which CS does not make (the D3D1x renderer's is for GFx's video player)");
+			return nullptr;
+		}
+
+		/** @brief CreateRenderTarget (SE 82830 / AE 84951). */
+		void* CreateRenderTarget(void* a_renderer)
+		{
+			return UiResources::CreateRenderTarget(a_renderer);
+		}
+
+		/** @brief ReleaseTempRenderTargets (SE 82895 / AE 85012). */
+		void ReleaseTempRenderTargets(void*, std::uint32_t a_keepPixels)
+		{
+			UiResources::ReleaseTempTargets(a_keepPixels);
+		}
+
+		/** @brief GetRenderCaps (SE 82852 / AE 84973): the D3D1x renderer's caps once a video mode is set. */
+		bool GetRenderCaps(void*, std::uint32_t* a_caps)
+		{
+			if (!UiResources::VideoModeSet())
+				return false;
+			a_caps[0] = 0xC8F384;  // cap bits
+			a_caps[1] = 0x1B;      // blend modes
+			a_caps[2] = 0x36B;     // vertex formats
+			a_caps[3] = 0x800;     // max texture size
+			return true;
+		}
+
+		/** @brief CheckFilterSupport (SE 82825 / AE 84948): multi-pass (3) for large or multi-pass blurs, else one pass (1). */
+		std::uint32_t CheckFilterSupport(void*, const std::uint8_t* a_params)
+		{
+			constexpr float kOnePassArea = 32.0f;  // DAT_14158142c
+			float blurX = 0.0f, blurY = 0.0f;
+			std::uint32_t passes = 0;
+			std::memcpy(&blurX, a_params + 4, sizeof(blurX));
+			std::memcpy(&blurY, a_params + 8, sizeof(blurY));
+			std::memcpy(&passes, a_params + 0xC, sizeof(passes));
+			return (passes > 1 || kOnePassArea < blurY * blurX) ? 3u : 1u;
+		}
+
+		/** @brief GetRenderStats (SE 0x140f5f460): CS keeps no D3D1x statistics, so they read zero. */
+		void GetRenderStats(void*, std::uint8_t* a_stats, bool)
+		{
+			if (a_stats)
+				std::memset(a_stats, 0, 0x14);
+		}
+
+		/** @brief ReleaseResources (SE 0x140f62240): CS's objects need no device reset, so nothing is let go. */
+		void ReleaseResources(void*)
+		{
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::info("[ORG] Scaleform: GFx asked the renderer to release its resources; CS's UI objects stay valid (no device reset in native mode)");
+		}
+
+		/** @brief SetDependentVideoMode (SE 82918 / AE 85033): keeps the engine's device and context, and the video mode is set. */
+		void SetDependentVideoMode(void*, ID3D11Device* a_device, ID3D11DeviceContext* a_context, std::uint32_t)
+		{
+			UiResources::SetVideoMode(a_device, a_context);
+		}
+
+		/** @brief ResetVideoMode (SE 0x140f62ec0). */
+		bool ResetVideoMode(void*)
+		{
+			UiResources::ResetVideoMode();
+			return true;
+		}
+
+		/** @brief GetDisplayStatus (SE 0x140f5ce60): 1 (no video mode) until one is set, then 0. */
+		std::uint32_t GetDisplayStatus(void*)
+		{
+			return UiResources::VideoModeSet() ? 0u : 1u;
+		}
+
+		ID3D11Device* GetDevice(void*)
+		{
+			return UiResources::Device();
+		}
+
+		ID3D11DeviceContext* GetContext(void*)
+		{
+			return UiResources::Context();
+		}
+
+		/** @brief The destructor stays the D3D1x renderer's (it runs at shutdown); counted. */
+		void* Destroy(void* a_renderer, std::uint32_t a_flags)
+		{
+			NoteGameCall(GameCall::Destructor);
+			using DestroyFn = void* (*)(void*, std::uint32_t);
+			return Original<DestroyFn>(kDestructor)(a_renderer, a_flags);
+		}
+
+		/**
+		 * @brief PushRenderTarget in native mode, CS's port of SE 82887: the frame is saved and the target becomes current, then the
+		 * D3D1x push's vtable calls are made the same way (a camera for the target's frame through GFx's MakeViewAndPersp3D, then
+		 * SetView3D, SetPerspective3D and no world matrix), so the stream gets the same commands.
+		 */
+		void NativePushRenderTarget(void* a_renderer, const float* a_frame, void* a_target, const PushedTarget& a_pushed)
+		{
+			if (!a_frame || !a_target)
+				RenderGraph::Fatal("Scaleform", "GFx pushed a render target without a frame or a target");
+			auto& targets = NativeTargets();
+			auto& recorder = Rec();
+			PushedFrame& frame = targets.pushed.emplace_back();
+			frame.target = targets.current;
+			std::memcpy(frame.view, recorder.mirror.view3D, sizeof(frame.view));
+			std::memcpy(frame.perspective, recorder.mirror.perspective3D, sizeof(frame.perspective));
+			frame.world = recorder.world;
+			targets.current = a_target;
+			if (Recording()) {
+				auto& stream = Stream();
+				stream.NoteTexture(a_pushed.texture);
+				auto& command = stream.Add(UiOp::PushRenderTarget, a_frame, sizeof(float) * 4);
+				command.key = a_pushed.texture;
+				command.a = static_cast<std::int32_t>(a_pushed.width);
+				command.b = static_cast<std::int32_t>(a_pushed.height);
+			}
+			// The D3D1x push's field of view and Y flip (SE 0x1417be7b4 holds 55).
+			constexpr float kPushFov = 55.0f;
+			float view[16]{}, perspective[16]{};
+			for (int i = 0; i < 4; ++i)
+				view[i * 5] = perspective[i * 5] = 1.0f;
+			using MakeViewAndPerspFn = void (*)(void*, const float*, float*, float*, float, bool);
+			Original<MakeViewAndPerspFn>(kMakeViewAndPersp3D)(a_renderer, a_frame, view, perspective, kPushFov, true);
+			SetFloats<UiOp::SetView3D, 16>(a_renderer, view);
+			SetFloats<UiOp::SetPerspective3D, 16>(a_renderer, perspective);
+			SetWorld3D(a_renderer, nullptr);
+		}
+
+		/**
+		 * @brief PopRenderTarget in native mode, CS's port of SE 82882: a pooled target lets its depth-stencil go (the flag
+		 * PushTempRenderTarget set), the saved target becomes current again and its 3D matrices are set back through the slots.
+		 */
+		void NativePopRenderTarget(void* a_renderer)
+		{
+			auto& targets = NativeTargets();
+			if (targets.pushed.empty())
+				RenderGraph::Fatal("Scaleform", "GFx popped a render target it never pushed");
+			if (UiResources::IsRenderTarget(targets.current)) {
+				auto* popped = static_cast<UiResources::RenderTarget*>(targets.current);
+				if (popped->pooled && popped->depth) {
+					UiResources::Release(popped->depth);
+					popped->depth = nullptr;
+				}
+			}
+			const PushedFrame frame = targets.pushed.back();
+			targets.pushed.pop_back();
+			targets.current = frame.target;
+			if (Recording())
+				RecordPlain(UiOp::PopRenderTarget);
+			SetFloats<UiOp::SetView3D, 16>(a_renderer, frame.view);
+			SetFloats<UiOp::SetPerspective3D, 16>(a_renderer, frame.perspective);
+			SetWorld3D(a_renderer, frame.world);
+		}
+
+		/**
+		 * @brief MenuManager::DrawInterface (SE 79947 / AE 82084), native mode: where a frame's UI stream is complete. A game update's
+		 * stream goes into its snapshot. A repeated render of the update (cadence repeat) lets GFx draw again but records nothing:
+		 * each of its displays is drawn from the snapshot's stream where GFx ends its own, the rest at the end. Menu scenes and the
+		 * interface's ImageSpace effect still run where DrawInterface calls them.
+		 */
+		struct DrawInterface
+		{
+			static void thunk(void* a_manager)
+			{
+				if (!NativeUi() || !FrameAnchors::IsRenderOwner())
+					return func(a_manager);
+				auto& recorder = Rec();
+				std::shared_ptr<const UiStream> repeat;
+				if (Snapshot::InGameUpdate() && Snapshot::Render().repeat)
+					if (const auto& snapshot = Snapshot::Current(); snapshot && snapshot->ui)
+						repeat = snapshot->ui->Get();
+				if (repeat) {
+					(void)FinishStream();
+					recorder.repeat = repeat;
+					// The replay starts again from the stream's header.
+					Replayer().stream.reset();
+					Repeats().next = 0;
+					func(a_manager);
+					RunReplay(repeat);
+					recorder.repeat.reset();
+					++recorder.repeatedRenders;
+					return;
+				}
+				func(a_manager);
+				const auto finished = FinishStream();
+				if (finished && Snapshot::InGameUpdate() && !Snapshot::Render().repeat)
+					if (const auto& snapshot = Snapshot::Current(); snapshot && snapshot->ui)
+						snapshot->ui->Set(finished);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
 
 		/** @brief Whether the object's vtable is GRendererD3D1x's, so the slots CS replaces are the expected functions. */
 		bool IsD3D1xRenderer(void* const* a_vtable)
@@ -2402,6 +2811,23 @@ namespace RenderGraph::Engine::Scaleform
 				set(kFillStyleColor, &FillStyleColor);
 				set(kFillStyleBitmap, &FillStyleBitmap);
 				set(kFillStyleGouraud, &FillStyleGouraud);
+				// And the renderer's own slots: textures, targets and the video mode are CS's.
+				UiResources::Install();
+				set(kDestructor, &Destroy);
+				set(kGetRenderCaps, &GetRenderCaps);
+				set(kCreateTexture, &CreateTexture);
+				set(kCreateTextureYUV, &CreateTextureYUV);
+				set(kCreateRenderTarget, &CreateRenderTarget);
+				set(kReleaseTempRenderTargets, &ReleaseTempRenderTargets);
+				set(kCheckFilterSupport, &CheckFilterSupport);
+				set(kGetRenderStats, &GetRenderStats);
+				set(kReleaseResources, &ReleaseResources);
+				set(kSetDependentVideoMode, &SetDependentVideoMode);
+				set(kResetVideoMode, &ResetVideoMode);
+				set(kGetDisplayStatus, &GetDisplayStatus);
+				set(kGetDevice, &GetDevice);
+				set(kGetContext, &GetContext);
+				g_ownsRenderer.store(true, std::memory_order_release);
 			}
 			*static_cast<void***>(a_renderer) = g_vtable.data() + 1;
 			logger::info("[ORG] Scaleform: the renderer has CS's vtable; displays are drawn on the render graph once it is up{}",
@@ -2429,5 +2855,12 @@ namespace RenderGraph::Engine::Scaleform
 		logger::info("[ORG] Scaleform: hooking the renderer's factory");
 		stl::detour_thunk<CreateRenderer>(REL::RelocationID(82831, 84952));
 		GfxTextures::Install();
+		if (Native::Requested() && !REL::Module::IsVR())
+			stl::detour_thunk<DrawInterface>(REL::RelocationID(79947, 82084));
+	}
+
+	bool OwnsRenderer()
+	{
+		return g_ownsRenderer.load(std::memory_order_acquire);
 	}
 }
