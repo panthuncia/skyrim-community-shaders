@@ -119,3 +119,11 @@ hold, an inventory item, the journal, the stats menu). Pass by path from the mai
 | native-vulkan+menu-main | s7-menus-obs1-main, -obs2-main | passed (observe) |
 | native-vulkan+menu-scenes | s7-menus-obs2..10-scenes | passed (observe iterations) |
 | native-vulkan+menu-scenes (detector, scheme 6 native) | s7-menus-sw1-scenes | passed; stats site producer; picture differs (order) |
+| guest+quick, native-vulkan+quick, native-d3d12-quick (final build, no scheme owned) | s7-menus-fin-guest-quick, -fin-nvk-quick, -fin-d3d12-quick | passed |
+| native-vulkan+menu-scenes, guest+menu-scenes | s7-menus-fin-nvk-scenes, -fin-guest-scenes | passed |
+| native-vulkan+menu-main | s7-menus-fin-nvk-main | passed |
+| native-vulkan+cadence-drop-cells | s7-menus-fin-dropcells | passed |
+
+Detector: unchanged by the final build (no scheme owned): main-menu frames still enter UI3DSceneManager::Render and its inner
+sites once per frame (about 19 of the ~22 render calls per main-menu frame are this item's), loading frames the same per loading
+model render. With scheme 6 owned (`s7-menus-sw1-scenes`) the stats site read producer and its inner sites were not entered.
