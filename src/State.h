@@ -579,7 +579,10 @@ public:
 	/// Resets the Active Shaders counts once per frame; separate from frameChecker, which only ticks while the performance overlay shows.
 	Util::FrameChecker shaderTrackingFrameChecker;
 	void RequestHistoryReset() { historyResetFrame = frameCount + 1u; }
-	/** @brief The render frame resets temporal histories: a requested reset, or a snapshot event that breaks them (Snapshot::HistoryBreak). */
+	/**
+	* @brief The render frame resets temporal histories: a requested reset, a snapshot event that breaks them (Snapshot::HistoryBreak),
+	* or the game's TAA reset (ImageSpace::TaaResetDue, native).
+	*/
 	bool ShouldResetHistory() const;
 
 	uint frameCount = 0;

@@ -31,6 +31,13 @@ namespace RenderGraph::Engine::ImageSpace
 	*/
 	const GameInputs* SnapshotInputs();
 
+	/**
+	* @brief Native mode: whether this render frame applies a TAA history reset the game asked for (the loading menu's flag, taken in
+	* the snapshot capture). True for one render, the first world render after the snapshot's count moves. False in guest mode.
+	* Render owner.
+	*/
+	bool TaaResetDue();
+
 	/** @brief Published at Setup so the water draws read the texture the flow copies write. Not published without the flow copy port. */
 	inline constexpr std::string_view kFlowMapId = "cs.d3d11.engine.flow-map";
 

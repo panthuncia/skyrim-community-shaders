@@ -3,7 +3,8 @@
 Status (2026-11-26, evening): phases 0, 1 and 2 done (`snap0-*.md`, `snap1-*.md`, `snap2-*.md`). Phase 3: the game-side
 side effects, stealth lights and part of the coverage cull are done (`snap1-sidefx.md`, `snap3-lights.md`); the scene
 lists port is in progress. Phase 4: the stream, replay and switch are done (`snap0-ui.md`); CS-owned textures and the
-loading screen are in progress. Phase 5: ImageSpace effect selection and constants are done (`snap5-imagespace.md`).
+loading screen are in progress. Phase 5: ImageSpace effect selection and constants are done (`snap5-imagespace.md`); the TAA reset, the vanilla screenshot and
+the save screenshot are snapshot events (`snap5-isrest.md`).
 Live engine reads in native Vulkan's world frame: 1,848 at the phase 0 baseline, about 860-1,130 now (scene-dependent).
 Every decision since the roadmap, with the
 side-effect fates, is in [render-thread-decisions.md](render-thread-decisions.md); add new ones there. It follows round 3

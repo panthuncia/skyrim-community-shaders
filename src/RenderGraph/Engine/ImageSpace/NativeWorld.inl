@@ -173,23 +173,53 @@ namespace NativePost
 
 	/**
 	* @brief The ImageSpace block, in the snapshot capture (game thread). In a native world snapshot it also takes the adaptation reset
-	* Sky::Update asks for, which the HDR effect cleared when it ran, unless another mod keeps the HDR effect on the engine.
+	* Sky::Update asks for, which the HDR effect cleared when it ran, unless another mod keeps the HDR effect on the engine. In any
+	* native snapshot it takes TAA's reset, which TAA's helper cleared, unless another mod keeps the end-of-frame effects on the engine.
 	*/
 	void CaptureBlock(Snapshot::Builder& a_builder)
 	{
 		if (!G().ready)
 			return;
-		static std::uint32_t s_adaptResets = 0;
+		static std::uint32_t s_adaptResets = 0, s_taaResets = 0;
 		Block block;
 		ReadGameA(block.inputs);
 		ReadGameB(block.inputs);
 		block.world = ReadWorldSettings();
-		if (RenderGraph::Engine::Native::Requested() && Native(Family::kHdr) && a_builder.Built().kind == Snapshot::FrameKind::World && *G().adaptReset) {
+		const bool native = RenderGraph::Engine::Native::Requested();
+		if (native && Native(Family::kHdr) && a_builder.Built().kind == Snapshot::FrameKind::World && *G().adaptReset) {
 			*G().adaptReset = false;
 			++s_adaptResets;
 		}
+		if (native && Native(Family::kEof) && *G().taaReset) {
+			*G().taaReset = false;
+			++s_taaResets;
+		}
 		block.adaptResets = s_adaptResets;
+		block.taaResets = s_taaResets;
+		if (native)
+			CaptureScreenshots(block);
 		a_builder.Set(block);
+	}
+
+	/** @brief ImageSpace::TaaResetDue: the first native world render after the snapshot's TAA reset count moved. Render owner. */
+	bool TaaResetDue()
+	{
+		auto& r = R();
+		const auto frame = Snapshot::Render().frame;
+		if (r.taaResetFrame == frame)
+			return r.taaResetNow;
+		r.taaResetFrame = frame;
+		r.taaResetNow = false;
+		const auto* block = NativeBlock();
+		const auto& snapshot = Snapshot::Current();
+		if (!block || !snapshot || snapshot->kind != Snapshot::FrameKind::World || block->taaResets == r.taaResets)
+			return false;
+		r.taaResets = block->taaResets;
+		r.taaResetNow = true;
+		if (++r.taaResetsApplied <= 16)
+			logger::info("[ORG] native post chain: TAA history reset from the game's request (count {}, snapshot {}, render frame {})", r.taaResets,
+				snapshot->id, frame);
+		return true;
 	}
 
 	/** @brief The reflections pass's and RenderSSAO's settings: the snapshot's in native mode, else read now. */

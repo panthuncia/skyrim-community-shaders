@@ -1,0 +1,29 @@
+# The vanilla screenshot (S24, decision 15) in native mode: PrintScreen's request, taken in the snapshot capture; the engine names
+# the file, shows its HUD message and moves iScreenShotIndex, and the Screenshot feature saves the frame ("vanilla screenshot 1 to
+# ...", then "Saved screenshot to ...ScreenShotN.png"). Native only: guest's DrawFrame copy from kFRAMEBUFFER has no CS pass (a
+# fatal tap error, unchanged). Compose it: native-vulkan+vanilla-screenshot.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "call"
+arg = "imagespace.printscreen"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "after"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["after"]

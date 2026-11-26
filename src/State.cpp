@@ -1,4 +1,5 @@
 #include "State.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
@@ -451,7 +452,7 @@ void State::Reset()
 
 bool State::ShouldResetHistory() const
 {
-	return frameCount == historyResetFrame || Snapshot::HistoryBreak();
+	return frameCount == historyResetFrame || Snapshot::HistoryBreak() || RenderGraph::Engine::ImageSpace::TaaResetDue();
 }
 
 float State::Timer() const
