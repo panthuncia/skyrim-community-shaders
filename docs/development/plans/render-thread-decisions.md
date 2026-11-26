@@ -112,3 +112,25 @@ pushes until the user is back.
 32. **Engine render-half output read the same frame waits for phase 3** (extends 25): Light Limit Fix's light walk and
     local shadows, Terrain Blending's depth-pass state, Skylighting's occlusion-map calls, Exponential Height Fog's engine
     local shadows.
+
+## 2026-11-26: phase 3 game-side side effects (snap1-sidefx; director accepted)
+
+33. **CS produces the side effects in native and patches the engine's own write out.** `Snapshot/SideEffects.cpp` runs
+    on the game thread around the render half (`AfterCapture`, then the render half 0..N times, then `AfterRenderHalf`).
+    Each engine patch checks the original bytes and is fatal on a mismatch. Guest installs nothing.
+34. **S1 and S4 happen after the render half until phase 7** (refines 9 and 14): the render half still reads the live
+    scene graph in phases 0-6, so stage events 5-9 and the render-unsafe clear wait for it. Phase 7 moves both to right
+    after the capture. The cost was not measured uncapped yet.
+35. **S2:** `gFrameCounter` moves once per game update (CS increments it; Renderer::End's increment is removed). Render
+    code that meant "once per rendered frame" keys on the render frame, not a snapshot copy of the counter.
+36. **S5:** CS counts the 20 fade-enable updates after a teleport itself, on world snapshots only.
+37. **S6:** the actor pre-cull is the `org::cpu` SIMD sphere cull against the snapshot camera's frustum, on world snapshots
+    only; it writes `kNotVisible`, bit 12 and Actor +0x274 (SE) / +0x27C (AE). The engine culler runs only its
+    initialising call, and CS does the frustum setup the culler used to do (CS's own capture reads it). Parity: 5,009
+    verdicts, 0 differences. The occluder test is not repeated (a root in view counts as not occluded). A sphere exactly on
+    a plane is kept, where the engine culled it.
+38. **S17:** queued decals go straight from state 3 to state 5 (placed) and the pending array is cleared.
+39. **S7/S8 fades** step once per game update a snapshot stands for (0 on a repeated render); guest is unchanged.
+40. **The stealth sun term needs no producer:** `ImageSpaceManager+0xE0` (sunlightScale) is written game-side in
+    Main::Update. S12/S13 (light membership from game data) and S7/S8 for roots DCLF does not stand in for are still to
+    build; designs are in `snap1-sidefx.md`.
