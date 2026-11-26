@@ -213,7 +213,7 @@ void WaterOrgPermutation()
 	Permutation::EffectRadius = WaterDraw.EffectRadius;
 }
 #	elif defined(DCLF_BINDLESS)
-// Drawcall Limit Fix's water draws (Features/DrawcallLimitFix/Features/Water/Draw; docs/development/plans/dclf-water-indirect.md).
+// Drawcall Limit Fix's water draws (Features/DrawcallLimitFix/Features/Water/Draw).
 // The colour segment culls water into its deferred ranges: the mask (the Stencil technique) in range 0, the surface (techniques
 // 0, 9 and 11) in range 1. Each range draws plain indexed indirect draws (DCLF_PULLED), so a stage finds its draw's sequence by its
 // instance, as Effect.hlsl's and Lighting.hlsl's pulled stages do.

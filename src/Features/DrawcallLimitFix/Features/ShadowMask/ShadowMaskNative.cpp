@@ -1,4 +1,4 @@
-// The shadow masks' draws computed from the engine's shadow lights (docs/development/plans/perf2-shadow.md). Render thread.
+// The shadow masks' draws computed from the engine's shadow lights. Render thread.
 // The engine functions this follows (AE 1.6.1170, SE 1.5.97): the world's masks 0x1414cd6a0 / 0x1412e3b80, a menu scene's masks
 // 0x140972f70 / 0x1408d2d70, BSUtilityShader::SetupTechnique 0x1414fa160 / 0x14130df90 and SetupGeometry 0x1414fae40 / 0x14130ec70,
 // the mask textures 0x1414fbab0 / 0x14130f960, the mask projections 0x1414fbd30 / 0x14130fbe0, the descriptors 0x1415221e0 and

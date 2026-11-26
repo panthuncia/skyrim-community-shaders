@@ -11,7 +11,7 @@ and probes, how a change is validated in game, crash triage, and the bugs parity
 -   [dclf-open-defects.md](./dclf-open-defects.md) lists the checks that fail or flake today, the open crashes and the accepted
     differences. A flag listed there is not a regression.
 -   [dclf-layout.md](./dclf-layout.md) is the code layout, including the diagnostics contract (`Diagnostics/`).
--   [dclf-roadmap.md](./dclf-roadmap.md) lists diagnostics not built yet.
+-   `dclf-roadmap.md` lists diagnostics not built yet.
 -   [skyrim-engine-notes.md](./skyrim-engine-notes.md) holds the engine behaviour the engine-bug rules below rest on.
 
 Every engine address here is Skyrim AE 1.6.1170's, the only runtime DCLF installs on.
@@ -161,7 +161,7 @@ switches file too (`Util::SwitchFile`).
 | `CS_RENDERDOC_REF_ALL` | `Features/RenderDoc.cpp`, env | `0`: RenderDoc's "reference all resources" option off (on by default: DXVK resources outlive its frame tracking). |
 | `CS_STREAMLINE_DLSS` | `Upscaling/Streamline.cpp`, file | `0`: Streamline loads neither DLSS nor DLSS-G (DLSS-G's plugin adds `VK_NV_optical_flow` even when DXVK runs on another vendor's GPU). |
 | `CS_TEX_CENSUS` | `TextureStreaming/Census.cpp`, file | `1`: the texture survey; `dclf:tex-census` writes `texture-census-<n>.json` ([texture-streaming.md](./texture-streaming.md)). |
-| `CS_VRAM_DEBUG` | `Vram/Debug.cpp`, file | `1`: VRAM attribution's debug hooks ([memory-usage.md](./memory-usage.md)). |
+| `CS_VRAM_DEBUG` | `Vram/Debug.cpp`, file | `1`: VRAM attribution's debug hooks (`memory-usage.md`). |
 | `CS_GPA`, `CS_GPA_DIR` | `RemoteControl/Gpa.cpp`, env | `1` (or a GPU counter request): AMD's GPUPerfAPI counters; `0` never. `CS_GPA_DIR` is where its DLLs are (default the DXVK runtime folder). |
 | `CS_GPU_COUNTERS_<suffix>` | `RemoteControl/GpuCounters.cpp`, env | The vendor-neutral names of the range capture's `CS_NVPERF_<suffix>` (`RANGES`, `METRICS`, `START_FRAME`, `SAMPLES`, `CSV`); either works. |
 | `CS_NVPERF_MIN_SAMPLES`, `CS_NVPERF_MAX_SAMPLES`, `CS_NVPERF_MAX_REPEATS`, `CS_NVPERF_HALF_WIDTH` | `RemoteControl/GpuCountersTrace.cpp`, env | A template trace's statistics bounds ([nsight-perf.md](./nsight-perf.md)). |
@@ -663,7 +663,7 @@ Bugs DCLF's parity checks found in other Community Shaders features, in the engi
 -   Unverified: what the engine means by 3. The table treats the field as one bit per filter; the field may be a number, and 3 a
     filter the table maps to nothing. The vanilla shader's own handling (the engine's Utility PS for these descriptors) is the
     reference to read before choosing a fix.
--   Found by the shadow mask port's parity (p5/shadow-mask.md, "The shadow map at t3 and t4"): the ORG build read t3 as the engine
+-   Found by the shadow mask port's parity (engine/shadow-mask.md, "The shadow map at t3 and t4"): the ORG build read t3 as the engine
     latched it, a null view, and every sun mask came out black. The ORG build now reads the shadow map through t4's index, so it
     matches the D3D11 build whatever the fix here turns out to be.
 

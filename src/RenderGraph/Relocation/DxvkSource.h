@@ -1,7 +1,6 @@
 #pragma once
 
 // Guest mode: DXVK's moves of the pinless imports, handed to ORG's relocation service.
-// See docs/development/plans/org-relocation.md, section 4.
 
 #include <Resources/Relocation.h>
 

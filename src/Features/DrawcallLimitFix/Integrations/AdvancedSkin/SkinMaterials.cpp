@@ -473,7 +473,7 @@ namespace DCLF::Integrations::AdvancedSkin
 			{ .name = "skin-materials", .stride = sizeof(MaterialRow), .kick = &KickMaterials, .sample = &SampleMaterials, .send = &SendMaterials });
 		a_context.RegisterFrameBinding({ .name = "skin materials SRV", .textureRegister = kMaterialTableRegister, .select = &SelectMaterialTable });
 		// Actor-owned surfaces only, by decision. A skin surface no actor owns keeps row 0 (skin off), unlike Skin's D3D11 path, which
-		// gives it a material by its texture (docs/development/plans/dclf-skin-per-geometry.md, 2.3).
+		// gives it a material by its texture.
 		a_context.RegisterShadingField({ .name = "skin material", .field = Api::ShadingRowField::SkinMaterial, .members = Api::EntryClass::ActorOwned,
 			.membership = &MaterialMembership, .capture = &CaptureMaterials });
 		// SkinPerGeometry (b7), bound per draw. DCLF's draws take it from the shading row and the material table instead.

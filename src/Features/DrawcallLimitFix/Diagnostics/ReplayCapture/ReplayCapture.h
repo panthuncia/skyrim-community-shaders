@@ -3,8 +3,7 @@
 // The DCLF pass capture (CS_DCLF_CAPTURE=<dir>, D3D12 native only). With the switch set, every recording of the Z-prepass and main
 // opaque passes copies what the pass reads per epoch (frame constants, sequences, counts, depth, colour targets) on its own command
 // list, with a marker. The cs-test command dclf:capture arms the dump: at a frame's end the render thread waits for the GPU, takes the
-// recordings whose markers say they ran, walks every descriptor slot they can reach and writes a dump that pascal-fetch-bench replays
-// (docs/development/plans/dclf-replay.md).
+// recordings whose markers say they ran, walks every descriptor slot they can reach and writes a dump that pascal-fetch-bench replays.
 
 #include <rhi.h>
 

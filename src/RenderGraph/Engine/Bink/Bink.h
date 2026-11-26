@@ -3,7 +3,7 @@
 #include <string>
 
 /**
- * @brief Bink video drawn by the render graph, in graph mode (Engine::GraphMode). The RE and design are in docs/development/p5/bink.md.
+ * @brief Bink video drawn by the render graph, in graph mode (Engine::GraphMode). The RE and design are in docs/development/engine/bink.md.
  *
  * Skyrim's Bink converts each frame on the CPU into BGRA 256x256 tiles, and the engine draws one quad per tile.
  * In graph mode a render-thread tick decodes into a staging buffer instead, and the Present anchor's epoch copies it into

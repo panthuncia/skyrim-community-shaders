@@ -1,6 +1,6 @@
 #pragma once
 
-// Water drawn by DCLF (docs/development/plans/dclf-water-indirect.md, phases 2 and 3): the Water program family and its two deferred
+// Water drawn by DCLF: the Water program family and its two deferred
 // ranges, the mask (the Stencil technique) and the surface (techniques 0, 9 and 11). Water.hlsl's DCLF_BINDLESS path draws both.
 // - The family's keys come from the water port (Features/Water/Scene). Each key gets one plain pipeline per range, with the engine's
 //   blend, depth and stencil state (DrawPipelines' TryRequestDeferred and BuildDeferred).
@@ -44,7 +44,7 @@ namespace DCLF::Features::Water::Indirect
 	 * reach the same depth. DCLF's mask and surface pipelines land one or two depth steps apart on the same water (water plan,
 	 * section 11), so the surface failed in bands. Here the mask only tests (1) and the surface tests and writes (3). The depth
 	 * after the surface holds the nearest water either way, and nothing between the two epochs reads kMAIN's depth.
-	 * The surface's stencil mode (p5/water.md) is NOT_EQUAL on bit 0 with reference 1.
+	 * The surface's stencil mode (engine/water.md) is NOT_EQUAL on bit 0 with reference 1.
 	 */
 	inline constexpr std::uint8_t kSurfaceDepthMode = 3, kSurfaceStencilMode = 30;
 	/** @brief The mask's depth mode (see kSurfaceDepthMode), and the write modes: the mask's RT0 blue and RT1, the surface's kMAIN. */

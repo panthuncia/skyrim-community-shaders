@@ -19,7 +19,7 @@ namespace ORGCloudInputs
 }
 
 /**
-* @brief Physical Sky's volumetric clouds on the render graph (docs/development/plans/physical-sky-port.md, 6 and 6a).
+* @brief Physical Sky's volumetric clouds on the render graph.
 *
 * One client, cs.physical-sky.clouds, at the Prepass anchor before cs.physical-sky. It holds both of the D3D11 passes in
 * their order: the shadow volume and its mean, then the main view and cubemap (ambient, bounds, the boundary raster, the

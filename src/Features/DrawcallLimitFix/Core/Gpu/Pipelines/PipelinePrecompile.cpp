@@ -1,5 +1,5 @@
 // The startup pipeline step: every key the pipeline key sources list is built before the main menu, through the lane's normal
-// request paths, so play starts with them in the catalog. See docs/development/plans/precompile-pipelines.md.
+// request paths, so play starts with them in the catalog.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>

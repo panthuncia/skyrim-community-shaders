@@ -1,5 +1,5 @@
 // Scaleform GFx 3.3's fill vertex shaders (GRendererD3D1x, the exe's VS-A table), transcribed from the HLSL source the exe
-// embeds beside the bytecode (docs/development/p5/scaleform.md, "Shaders"). FXC builds each variant as the game's own: the
+// embeds beside the bytecode (docs/development/engine/scaleform.md, "Shaders"). FXC builds each variant as the game's own: the
 // same signature and constants, and the same instructions as the embedded source compiled by FXC.
 //
 // VS_KIND, the D3D11 renderer's vertex shader index:

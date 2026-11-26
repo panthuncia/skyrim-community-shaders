@@ -1,5 +1,5 @@
 // Scaleform GFx 3.3's fill pixel shaders (GRendererD3D1x, the exe's PS-A table), transcribed from the HLSL source the exe
-// embeds beside the bytecode (docs/development/p5/scaleform.md, "Shaders"). FXC builds each variant as the game's own: the
+// embeds beside the bytecode (docs/development/engine/scaleform.md, "Shaders"). FXC builds each variant as the game's own: the
 // same signature, constants and resources, and the same instructions as the embedded source compiled by FXC.
 //
 // PS_KIND, the D3D11 renderer's pixel shader index (its member +0x240 + 8 * index):

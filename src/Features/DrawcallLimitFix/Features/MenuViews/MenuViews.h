@@ -1,6 +1,6 @@
 #pragma once
 
-// MenuViews (graph mode; docs/development/p5/menus.md): the engine's menu scene renders as DCLF views of their own.
+// MenuViews (graph mode; docs/development/engine/menus.md): the engine's menu scene renders as DCLF views of their own.
 // Menu scenes are UI3DSceneManager::Render's models and the local map. The race menu and world map are the main world render with
 // another camera, which DCLF's main view already draws.
 

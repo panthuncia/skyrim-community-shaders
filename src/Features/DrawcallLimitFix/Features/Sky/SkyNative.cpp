@@ -1,4 +1,4 @@
-// The sky batch's draws computed from the engine's registered passes (docs/development/plans/dclf-native-sky.md). Render thread.
+// The sky batch's draws computed from the engine's registered passes. Render thread.
 // The engine functions this follows (AE 1.6.1170): BSSkyShaderProperty::GetRenderPasses 0x1414e6fd0, RenderBatches 0x1414b4fe0 and
 // its group step 0x1414f39c0, BSSkyShader::SetupTechnique 0x1414e5d00 and SetupGeometry 0x1414e6030, the transform 0x1414aaf10.
 
@@ -153,7 +153,7 @@ namespace DCLF::Features::Sky::Native
 				return m;
 			}
 
-			/** @brief BSSkyShader::SetupTechnique (p5/sky.md). */
+			/** @brief BSSkyShader::SetupTechnique (engine/sky.md). */
 			void Setup(std::uint32_t a_technique)
 			{
 				depth = 1;

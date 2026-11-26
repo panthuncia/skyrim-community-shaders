@@ -4,8 +4,7 @@
 
 // Shadow mask, in graph mode: the render graph draws the shadow mask passes in the engine's place.
 // Each shadow-casting light is one BSUtilityShader screen-quad pass into kSHADOW_MASK. The world's run at Main::Draw (AE 107141,
-// SE 100423) and a menu scene's at UI3DSceneManager::Render (AE 52728, SE 51856). Details are in docs/development/p5/shadow-mask.md
-// and docs/development/plans/perf2-shadow.md.
+// SE 100423) and a menu scene's at UI3DSceneManager::Render (AE 52728, SE 51856). Details are in docs/development/engine/shadow-mask.md.
 // At each call the draws are computed from the shadow lights (ShadowMaskNative.cpp), the call's own bookkeeping is done
 // (ShadowMaskHooks.cpp), and an ORG pass at the EngineDraws anchor draws them in engine order with CS's Utility.hlsl
 // (ShadowMaskDraws.cpp). The engine's call does not run. A batch the native build cannot compute is the engine's, logged once.

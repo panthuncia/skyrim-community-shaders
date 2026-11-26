@@ -1,4 +1,4 @@
-// Shared by the FX parity test preset (docs/development/parity/fx.md). Effects11's quad: POSITION and TEXCOORD0.
+// Shared by the FX parity test preset. Effects11's quad: POSITION and TEXCOORD0.
 struct VS_OUTPUT_POST
 {
 	float4 pos : SV_POSITION;

@@ -9,8 +9,7 @@
 struct PhysicalSky;
 
 /**
-* @brief The cloud renderer's inputs that Physical Sky's managers make: file textures and generated maps
-* (docs/development/plans/physical-sky-port.md, 6a).
+* @brief The cloud renderer's inputs that Physical Sky's managers make: file textures and generated maps.
 *
 * The generators run in cs.physical-sky.cloud-maps at Prepass, ahead of cs.physical-sky.clouds, which reads these.
 * Each field is the texture the D3D11 code binds at the named register this frame, as a graph handle: a twin of a generated

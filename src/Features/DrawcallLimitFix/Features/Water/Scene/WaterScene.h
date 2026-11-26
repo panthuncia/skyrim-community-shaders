@@ -1,6 +1,6 @@
 #pragma once
 
-// Water as DCLF scene objects (docs/development/plans/dclf-water-indirect.md). Water shapes are tracked under the water roots,
+// Water as DCLF scene objects. Water shapes are tracked under the water roots,
 // classified by the water port and counted by a census. Plain water is claimed while the water epochs draw it; the rest stays
 // the batch hooks'.
 // The port's pure functions are Features/Water/Port. This folder registers them with Core:

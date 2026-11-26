@@ -3,13 +3,13 @@
 #include "RenderGraph/BufferRef.h"
 
 // Sky, in graph mode: the render graph draws the engine's BSSkyShader passes in the main pass and the water reflection faces.
-// Details are in docs/development/plans/dclf-native-sky.md and docs/development/p5/sky.md.
+// Details are in docs/development/engine/sky.md.
 // At the engine's sky batch the draws are computed from the passes the engine registered (SkyNative.cpp), and the engine's call
 // finds nothing of the sky to draw (SkyHooks.cpp). An ORG pass at the Sky or SkyReflections anchor then draws the batch in engine
 // order (SkyDraws.cpp). The cloud layers come right after in geometry group 13 and join the batch's run.
 // Cloud Shadows keeps per-layer occlusion in its layer cubemaps, and layer L holds the occlusion of layers up to L. Graph cloud
 // draws write the same layers.
-// In graph mode the sun's occlusion query draw is the graph's too (docs/development/p5/occlusion-queries.md).
+// In graph mode the sun's occlusion query draw is the graph's too (docs/development/engine/occlusion-queries.md).
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"

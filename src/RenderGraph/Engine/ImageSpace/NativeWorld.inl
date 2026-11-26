@@ -1,4 +1,4 @@
-// The native post chain's deferred families (docs/development/plans/native-post-chain.md, families 5 and 6): the reflections pass
+// The native post chain's deferred families: the reflections pass
 // (SE 100428 / AE 107146), RenderSSAO's two calls (100520 / 107245) and the water blend (100550 / 107285). Included by ImageSpace.cpp
 // after NativePost.inl, before the hooks that use it.
 //

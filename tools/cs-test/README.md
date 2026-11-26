@@ -249,7 +249,7 @@ reads it empty. Every plugin has its own CommonLib build, so the gate is what ma
 as usual. The SE profile has no Start On Save, so name a save in the private documents (`--set game.save=SETest`), or coc from the
 main menu in the steps. The SE game folder ships its own `d3dcompiler_47.dll`, so its first run compiles every shader again. Turn
 off TressFXSSE there (`game.mods_off`): it crashed the game at start-up. Add `*TerrainHelper.esp` to the SE profile's
-`plugins.txt` for the run, and take it out after. Notes: `docs/development/plans/perf3-se.md`.
+`plugins.txt` for the run, and take it out after.
 
 ## What a run does
 

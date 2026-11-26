@@ -5,7 +5,7 @@
 #include "RenderGraph/BufferRef.h"
 
 // Water, in graph mode: the render graph draws the main camera's BSWaterShader passes in the engine's place.
-// That covers the water mask (Stencil technique) and the water itself. Details are in docs/development/p5/water.md.
+// That covers the water mask (Stencil technique) and the water itself. Details are in docs/development/engine/water.md.
 // DCLF's scene path draws the water it claims in its water epochs. The rest (the wading displacement mesh, and water the scene path
 // refuses) is computed at each water batch from the passes the engine registered and the water port's constants (WaterNative.cpp),
 // and an ORG pass at the EngineDraws anchor draws it with CS's Water.hlsl (WaterDraws.cpp). Its passes are taken out of the batch,

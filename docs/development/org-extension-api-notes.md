@@ -1,7 +1,7 @@
 # ORG extension API notes
 
 What other SKSE plugins will need from CS once the renderer runs through OpenRenderGraph without D3D11. This is a
-collection of requirements, not a design: each port in [org-full-port.md](./org-full-port.md) adds what it finds here,
+collection of requirements, not a design: each port in `org-full-port.md` adds what it finds here,
 and the API is designed from this list later.
 
 Until that API exists, the DXVK build stays the default, and plugins that call D3D11 keep working there. In the
@@ -104,7 +104,7 @@ Each anchor's rule:
 - **EngineShadowClear, EngineCubeClear, EngineFrameClear.** Where the engine clears a target (`Renderer::ApplyState`,
   `SetDirtyStates`, `Renderer::ClearColor`, `ClearDepthStencil`), right before the engine binds it: shadow map slices, the
   reflection faces and their depth, and every other engine clear. Zero or more times a frame. Reserved only by the engine
-  skeleton (`CS_ORG_ENGINE_SKELETON=1`, `p5/skeleton.md`) and the self-test.
+  skeleton (`CS_ORG_ENGINE_SKELETON=1`, `engine/skeleton.md`) and the self-test.
 - **EngineDepthCopy.** Where the main depth is copied into `kPOST_ZPREPASS_COPY`: `Main::RenderDepth`'s end, FinishAccumulating's
   copy, and `Deferred::DeferredPasses` before the DeferredPasses anchor. Reserved only by the engine skeleton and the self-test.
 - **EngineCopy.** Native mode only: where the engine copies `kMAIN` into its copy texture ("kMAIN Copy"), at the native
@@ -312,11 +312,11 @@ Keys used so far:
   frames stay on D3D11.
 - **Where it fits:** `FrameAnchors::OnMainThread` widened to "the main thread, or the owner of `Renderer::Lock` while the
   main thread is not in a frame". The engine already serializes frames by that lock, so anchor runs never overlap and the
-  lock orders the anchors' state between threads. The design is in `docs/development/p5/bink.md`, "Threads, and what P5.12
+  lock orders the anchors' state between threads. The design is in `docs/development/engine/bink.md`, "Threads, and what P5.12
   needs".
 - **Built (P5.12, `CS_ORG_LOADING_THREAD=1`; reworked in the Phase 5 review):** `FrameAnchors::IsRenderOwner`, a pure query
   of the render owner, which the thread that begins an engine frame claims (`FrameAnchors::ClaimRenderOwnership`, from a
-  `Renderer::Begin` detour; `docs/development/p5/loading-screen.md`). The first version claimed inside the query, from the
+  `Renderer::Begin` detour; `docs/development/engine/loading-screen.md`). The first version claimed inside the query, from the
   lock's `OwningThread`, so any thread check handed rendering to its caller. ORG needed no change:
   `GraphHost::Uploads()->SetOwnerThread()` moves the frame upload instance, and the host has no thread id of its own. What a
   plugin API would want: an explicit `GraphHost::SetOwnerThread()` that moves every owner-thread structure at once (today only the upload instance keeps one), and
@@ -950,7 +950,7 @@ Keys used so far:
 - **Need:** Cloud Shadows' per-layer occlusion copies the layer below into a layer just before that layer's draw. On the graph the
   draws of a face are one pass, so the copy (one subresource of another imported image, written earlier in the same pass) has no
   place: a pass cannot declare an image both as a render target and as a read, and has no in-pass copy with barriers.
-- **Workaround (CS side, p5/sky.md, "Cloud Shadows' layers"):** each cloud draw also draws its occlusion into the face's later layers
+- **Workaround (CS side, engine/sky.md, "Cloud Shadows' layers"):** each cloud draw also draws its occlusion into the face's later layers
   (the face target write-masked), and the layer is cleared on D3D11 at the latch, before the anchor's run. n(n-1)/2 extra draws a
   face for n layers. The main pass's clouds then read their layer by heap index (GpuTextures), relying on the faces' epoch having
   returned the import to DXVK's layout at its end.
@@ -1208,7 +1208,7 @@ Keys used so far:
 - **Where it fits:** a descriptor-table binding model beside `ShaderBindings`' push block: the shader builds for SPIR-V
   with register shifts (`-fvk-t-shift 0 0 -fvk-s-shift 100 0 -fvk-u-shift 200 0 -fvk-b-shift 300 0` builds and validates
   for all of them), and the pass maps each binding to an engine target, texture or latch. See
-  `docs/development/p5/imagespace-shaders.md`, "What the ORG ImageSpace pass still needs".
+  `docs/development/engine/imagespace-shaders.md`, "What the ORG ImageSpace pass still needs".
 - **Found by:** P5.6 shader sources (2026-11-10).
 
 ### Pipelines built from a D3D11 plugin's shaders and states
@@ -1362,7 +1362,7 @@ Keys used so far:
   neither the buffer pointer nor its contents at any later point identify that draw.
 - **Who:** Phase 5's sky, ImageSpace, menu 3D and DCLF families; any plugin that hooks an engine draw and re-issues it
   (today they read the bound D3D11 buffer back or mirror its Map, as DCLF's `ConstantMirror` does for b12).
-- **Where it fits:** `RenderGraph::Engine::Constants` (P5.7, [p5/constants.md](./p5/constants.md)): each engine draw and
+- **Where it fits:** `RenderGraph::Engine::Constants` (P5.7, [p5/constants.md](engine/constants.md)): each engine draw and
   dispatch is a use with an id; a plugin asks for a stage and slot and gets a host-visible ring location for its shader. A
   plugin that issues its own D3D11 binds is captured too (group Other). A kept recording reads the location through its own
   latch, never baked. Gaps: async-queue readers are not ordered by the ring's retirement, and loading-screen frames on the
@@ -1512,7 +1512,7 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   never calls `Main::Draw`). DCLF's frame, its adoption of a publication and its explicit build point all live in `Main::Draw`, so a
   menu view has no frame there. It needs a frame start outside the world frame (at `UI::Render`) that adopts the newest publication and
   calls `host->BuildIfRequested()`, as Bink's blocking loop does.
-- **Found by:** P5.8 and P5.9 (`docs/development/p5/menus.md`).
+- **Found by:** P5.8 and P5.9 (`docs/development/engine/menus.md`).
 
 ### Engine targets a graph pass writes, sampled by a replaced engine draw
 
@@ -1527,7 +1527,7 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   every graph, so a target published after the client is made joins at that rebuild, with no new client. The list is the gap: an
   export of an id not on it keeps its batch on the engine (logged once with the id). A graph-level "this pass reads whatever published
   resources its draws name, resolved at execution" would remove the list.
-- **Found by:** the w3 misc lane (2026-11-11, `docs/development/p5/water.md` "Published inputs", `p5/shadow-mask.md`).
+- **Found by:** the w3 misc lane (2026-11-11, `docs/development/engine/water.md` "Published inputs", `engine/shadow-mask.md`).
 
 ### An engine pass whose deferred clear its draw function would have issued
 
@@ -1539,7 +1539,7 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   draw function would: the clear lands before the anchor's run (on D3D11, or as the engine skeleton's clear pass at EngineFrameClear)
   and the dirty bits are consumed as before. Under the flush latch it is a flush from CS code, which is applied. Once the skeleton owns
   every clear and the flush is latch-only, the pending clear could be handed to the family's own pass as a load op instead.
-- **Found by:** the w3 misc lane (2026-11-11, `p5/shadow-mask.md`).
+- **Found by:** the w3 misc lane (2026-11-11, `engine/shadow-mask.md`).
 
 ### A stencil view of a depth-stencil image
 
@@ -1552,7 +1552,7 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   Vulkan backend's sampled view of a depth-stencil format always takes the depth aspect (`VkSampledImageAspectMaskForFormat`);
   `SrvDesc::tex2D.planeSlice` (D3D12's plane 1 is the stencil) is not read by the Vulkan backend. A stencil format or a plane slice
   honoured as `VK_IMAGE_ASPECT_STENCIL_BIT`, with DXVK's swizzle (stencil in green), would let GpuTextures import the view as is.
-- **Found by:** the shadow mask world fix (2026-11-11, `p5/shadow-mask.md`, "The focus shadows' stencil").
+- **Found by:** the shadow mask world fix (2026-11-11, `engine/shadow-mask.md`, "The focus shadows' stencil").
 
 ### A movie or loading thread's first frame on the graph
 
@@ -1563,7 +1563,7 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   holds `Renderer::Lock` (the CRITICAL_SECTION's owner): `FrameAnchors::ClaimRenderOwnership` then `FrameAnchors::OnFrameEnd` between
   frames (Bink's `ClaimForBlockingTick`). A framework call "this thread holds the renderer lock and starts a frame now" would make it one
   rule for every such thread.
-- **Found by:** the w3 misc lane (2026-11-11, `p5/bink.md` "The first frame").
+- **Found by:** the w3 misc lane (2026-11-11, `engine/bink.md` "The first frame").
 
 ## Present, output and capture
 
@@ -1757,7 +1757,7 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
 
 ### A pass whose targets are chosen per run
 
-ImageSpace (p5/imagespace.md, "The primary path") would have liked one pass per effect slot whose output, inputs and viewport are
+ImageSpace (engine/imagespace.md, "The primary path") would have liked one pass per effect slot whose output, inputs and viewport are
 picked per run. ORG fixes a pass's render targets and reads at its build, one pass cannot declare an image as both a target and a
 read, its push words are part of its kept recording, and the render area is the viewport. Per-run choice would need either a
 revision that reads per-frame-slot state (re-recording on change) or descriptor handles read from a latch in every dual-target
@@ -1778,7 +1778,7 @@ thread's preparations.
 
 ### An owned UAV for an extension's image
 
-The water's flow copies (p5/imagespace.md, "5.5.4: the remainder") read each source texture by a heap index the commit writes into
+The water's flow copies (engine/imagespace.md, "5.5.4: the remainder") read each source texture by a heap index the commit writes into
 the latch, through `IDescriptorService::CreateOwnedShaderResourceView` (GpuTextures). The target, though, is a fixed import of the
 flow map, because the descriptor service has no owned UAV: an engine image written by a pass must be a graph resource, and so must
 exist when the graph is built. CS makes the engine's flow map at Setup to have it then. A `CreateOwnedUnorderedAccessView` beside
@@ -1803,7 +1803,7 @@ at the cost of the graph not ordering that write.
 - **Need:** read an engine `Texture1D` (Volumetric Lighting's repartition, 4096 texels the engine rewrites with Map) and an engine
   3D render target (`texture3DRenderTargets`) from a pass. `FrameAnchors`' imports describe `ID3D11Texture2D`s only, and ORG's
   descriptor manager makes no `Texture1D` views (BasicRHI has `SrvDim::Texture1D`).
-- **Who:** the Volumetric Lighting port (p5/volumetric-lighting.md). It avoids both: it owns its volumes as graph textures and
+- **Who:** the Volumetric Lighting port (engine/volumetric-lighting.md). It avoids both: it owns its volumes as graph textures and
   computes the repartition's samples in the shader from the exponent.
 - **Where it fits:** an `is1D` view kind beside `is3D` in `DescriptorHeapManager`'s texture views (`ExternalTextureResource` setting it
   from `TextureDescription::type`), and an import that takes `ID3D11Resource` and describes 1D and 3D images from DXVK's info.
@@ -1934,7 +1934,7 @@ three fields the port could take these draws as passes like any other (docs/deve
 than its target needs a dynamic viewport separate from the render area.
 ## A null UAV view and a geometry stage for `.fx` effects
 
-- **Need:** the ORG FX runtime must take every preset FX11 takes ([parity/fx.md](./parity/fx.md)). Two constructs it cannot:
+- **Need:** the ORG FX runtime must take every preset FX11 takes (`parity/fx.md`). Two constructs it cannot:
   - `RW*` globals. Effects11 never binds a UAV, so FX11 reads zero and drops writes. The lowering would bind each `RW*` global to
     a null UAV view of its type.
   - Geometry shaders on a pass. FX11 runs them between the quad's vertex and pixel stages.
@@ -1974,7 +1974,7 @@ than its target needs a dynamic viewport separate from the render area.
   submitted in the batch's place. `RenderGraph::PassEpochRecordsAtExecution` tells an extension whether such a pass is recorded at
   execution. A kept recording records its late batch again at each submission.
 - **Left:** inline lists carry no Tracy GPU zones (the submitting thread records them beside the recording workers).
-- **Found by:** parity wave, `par-inline-exec` lane (2026-11-14). Notes: [parity/inline-exec.md](./parity/inline-exec.md).
+- **Found by:** parity wave, `par-inline-exec` lane (2026-11-14). Notes: `parity/inline-exec.md`.
 - **Done** (ImageSpace parity round 2): `AnchorPasses::Draw` takes `depth` (declared `DepthRead`, or `DepthReadWrite` with
   `depthReadOnly = false`), `stencilReference`, `scissor` and `dynamicViewport`. `RasterProgram::DrawDesc` sets the last two inside
   the pass with BasicRHI's `SetViewports` / `SetScissors`, after `BeginPass`, so the render area clips them and a fullscreen draw's

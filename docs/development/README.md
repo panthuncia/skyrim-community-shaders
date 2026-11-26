@@ -13,12 +13,21 @@
 - **[DCLF validation](./dclf-validation.md)** - DCLF's switches, parity checks, diagnostics and probes, how to validate a change, crash triage, and the bugs parity found
 - **[DCLF open defects](./dclf-open-defects.md)** - Defects and failing parity checks under investigation, with their evidence
 - **[External mod requirements](./external-mod-requirements.md)** - Per mod, what it would change for DCLF to draw it without workarounds (RaceMenu first)
-- **[DCLF roadmap](./dclf-roadmap.md)** - The work left, by priority: engine work still on the render thread, the scene lane, GPU cost, coverage, integrations and tooling
-- **[Memory usage](./memory-usage.md)** - What occupies VRAM in the main menu, by owner and resource, for choosing ORG aliasing port targets
-- **[Full ORG port](./org-full-port.md)** - The plan for running the whole renderer, engine included, through ORG on Vulkan or D3D12 with DXVK optional: phases, tasks, lanes and verification
 - **[Engine D3D11 surface](./engine-d3d11-surface.md)** - Where the engine issues D3D11 (SE and AE addresses): draws, the state flush, constants, ImageSpace, Scaleform, Bink, threads, the swap chain
 - **[ORG extension API notes](./org-extension-api-notes.md)** - What external mods will need from an ORG extension API, collected while porting
 - **[Skyrim engine notes](./skyrim-engine-notes.md)** - What the decompiled game binary does, where features depend on it
+- **[Engine ports](./engine/)** - The engine subsystems the render graph took over (Scaleform, ImageSpace, menus, sky, water, Bink, loading screen, shadow mask, the guest context, buffers and textures): the RE behind each and how the code drives it
+- **[Render thread roadmap](./plans/render-thread-snapshots.md)** - The plan for native rendering on its own thread from published frame snapshots, with the decisions taken
+- **[Testing](./testing.md)** - How CS is tested: cs-test, the lab slots, configs and what a run checks
+- **[DCLF hot reload](./dclf-hot-reload.md)** - How a shader edit reaches the render graph's live pipelines without a restart
+- **[Portal query batches](./dclf-portal-query-batches.md)** - The portal programs DCLF culls with, and strict point-light gates
+- **[Shader cache](./shader-cache.md)** - The V2 shader store
+- **[Shader runtime A/B](./shader-runtime-ab.md)** - Comparing a refactored shader against the shipping one in a captured frame
+- **[DXC game shaders](./dxc-game-shaders.md)** - Compiling the game shaders with DXC
+- **[ORG FX runtime](./org-fx-runtime.md)** - ENB-style `.fx` presets without FX11
+- **[Texture streaming](./texture-streaming.md)** - DCLF's texture streaming and its budget
+- **[VRAM spill lab](./vram-spill-lab.md)** - What a resource in system memory costs, what the driver demotes first, and the tools
+- **[Skyrim cell buffers](./skyrim-cell-buffer.md)** and **[texture bookkeeping](./skyrim-texture-bookkeeping.md)** - Engine RE for cell unloading and texture lifetimes
 
 ## Subsystems
 

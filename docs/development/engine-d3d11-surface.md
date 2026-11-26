@@ -1,6 +1,6 @@
 # Engine D3D11 surface
 
-Where Skyrim SE 1.5.97 and AE 1.6.1170 issue D3D11, for the native ORG port ([org-full-port.md](./org-full-port.md),
+Where Skyrim SE 1.5.97 and AE 1.6.1170 issue D3D11, for the native ORG port (`org-full-port.md`,
 Phase R). Found with Ghidra (GhidraMCP over HTTP) and the Address Library on 2026-11-09. IDs are Address Library IDs.
 _(inferred)_ marks conclusions not checked on every path. AE 1.7.104 is not verified anywhere in this file.
 
@@ -500,7 +500,7 @@ BSGraphics and SetDirtyStates.
 5. The PS size-class pools (0x143027c00, 0x143027ca0, 0x143027d40) are mapped to tech, material and
    geometry by symmetry only. 75582 `0x140d70e60` reads 0x143027c08 and is presumably the PS serializer.
    Confirm. **Answered (P5.7):** 75582 is `SavePixelShader` and maps levels 0, 1, 2 to those three pools. The AE
-   addresses of every constant-buffer global are in [p5/constants.md](./p5/constants.md).
+   addresses of every constant-buffer global are in [p5/constants.md](engine/constants.md).
 6. AE twins not matched by hash: InitD3D 77649 (by xref), raster 77652, samplers 77653 (by xref), Init
    ~77635, device creation ~77396, 75546 ~77346. Also the AE addresses of the size-class pools and the
    custom-CB ring (only the AE alpha, compute, per-frame and type-7 CBs were confirmed).
@@ -818,7 +818,7 @@ the raw device and context, and every UI draw is its own D3D11 call.
 | CreateShaders and states         | 82863 | 0x140f5fae0 | 84984 | 0x14104a670 | Releases everything via 82894 on failure.                                                                                   |
 | BSScaleformManager renderer init | 80603 | 0x140edb730 | 82730 | 0x140fc31e0 | Factory, `GetScaleformRendererParameters`, `SetDependentVideoMode(dev, ctx, 0)`, GFxRenderConfig (0x140f63d20, flags 0x11). |
 
-**Members:** +0x490 device, +0x498 context, +0xC0 video mode set, +0xD8/+0xE0 the RTV and DSV bound at BeginDisplay (the mask stencil is kMAIN's, see p5/scaleform.md), +0x150..
+**Members:** +0x490 device, +0x498 context, +0xC0 video mode set, +0xD8/+0xE0 the RTV and DSV bound at BeginDisplay (the mask stencil is kMAIN's, see engine/scaleform.md), +0x150..
 VS, +0x248.. and +0x2D8.. PS, +0x110 input layout, +0x1B8 and +0x3B0 constant buffers (0x80 each), +0x3E0..+0x458 blend
 states (2x7), +0x410 color-write-off, +0x3B8..+0x3D0 samplers (4), +0x458/+0x460 rasterizer states, +0x468..+0x488
 depth-stencil states (5), +0x4A0 in-mask flag, +0x4A4 stencil ref, +0x620 texture list, +0x640 CRITICAL_SECTION, +0x720
@@ -958,7 +958,7 @@ ORG present stage must accept presents from the blocking loop and the sequence t
 1. AE render-target indices (116 vs 114): confirm the two extra are appended.
 2. Bink colour order: BINKSURFACE32's byte order may not match R8G8B8A8_UNORM; dump the PS at 0x141e0bf10 for a swizzle.
 3. Scaleform enable tables: what fills the `.bss` enable bytes, so which blobs are created at runtime.
-4. Pair the 53 embedded HLSL sources with the 55 blobs before porting. **Done** (P5.10, `tools/check-scaleform-shaders.py`): 46 identical, 5 differ in register allocation only, 2 sources have no blob; table in p5/scaleform.md.
+4. Pair the 53 embedded HLSL sources with the 55 blobs before porting. **Done** (P5.10, `tools/check-scaleform-shaders.py`): 46 identical, 5 differ in register allocation only, 2 sources have no blob; table in engine/scaleform.md.
 5. No callers found for slots 8 (Map), 33 (Noise), 49-51 (DistantBlur) and 57/61/63.
 6. Which console command or INI sets the HDR flag (SE `DAT_141e0eb24`), and what mgr+0x118 means.
 7. Missing AE IDs: 100430, 51855, 80603, 87887, 87889 and the helper render functions.
@@ -1121,7 +1121,7 @@ SE +0x50 / AE Init +0x2BC), then 0x140d88c90, 0x140d891f0, 0x140d89230, 0x140d89
 `Renderer::Init` (75445/77226) then creates 64 OCCLUSION queries (0x143025f60) and 6 TIMESTAMP_DISJOINT queries
 (0x14302ac78, stride 0x50) and creates `Data/ShaderCache`.
 
-The occlusion ring's functions, confirmed in Ghidra (2026-11-11, Phase 5.5.5; details in `p5/occlusion-queries.md`): ring SE
+The occlusion ring's functions, confirmed in Ghidra (2026-11-11, Phase 5.5.5; details in `engine/occlusion-queries.md`): ring SE
 524740 / 0x143025f60, AE 411344 / 0x143286800 (64 `ID3D11Query*`, next index at ring + 0x200). `AcquireOcclusionQuery` SE 75565 /
 0x140d70150, AE 77366 / 0x140e4ae40; `ReleaseOcclusionQuery` (a user count only) SE 75566 / 0x140d70180, AE 77367 / 0x140e4ae70;
 `BeginQuery` SE 75567 / 0x140d70190, AE 77368 / 0x140e4ae80; `EndQuery` SE 75568 / 0x140d701b0, AE 77369 / 0x140e4aea0;

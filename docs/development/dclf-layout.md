@@ -3,7 +3,7 @@
 This is how Drawcall Limit Fix's code is laid out, the extension points its features build on, and the rules
 `tools/dclf-layout-check.py` enforces. How DCLF works, and why, is [dclf-architecture.md](./dclf-architecture.md). The
 switches, parity checks and run procedure are [dclf-validation.md](./dclf-validation.md). Work not built yet is
-[dclf-roadmap.md](./dclf-roadmap.md).
+`dclf-roadmap.md`.
 
 ## The target
 
@@ -580,7 +580,7 @@ What Core keeps that a feature alone uses, and why. The first is the largest.
 
 ## Not yet in place
 
-Checked against the tree; the plans are in [dclf-roadmap.md](./dclf-roadmap.md).
+Checked against the tree; the plans are in `dclf-roadmap.md`.
 - **Diagnostics' own PassDefs.** Diagnostics adds its passes through the `diag.*` anchors and is exempt from rules 6 and 8 until
   the parity rework gives it PassDefs and redefines its observer contract (`Hooks.h`, `Observation`, `Policy`).
 - **Diagnostics' area folders.** `Diagnostics/{Scene,Engine,Draws}` are named after layers, not areas; the parity

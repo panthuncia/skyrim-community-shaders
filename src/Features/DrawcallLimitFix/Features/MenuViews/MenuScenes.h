@@ -2,7 +2,7 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Menu scenes as an engine draw family (docs/development/p5/menus.md). The engine culls, registers and sets up every pass as
+// Menu scenes as an engine draw family (docs/development/engine/menus.md). The engine culls, registers and sets up every pass as
 // usual, DrawTriShape latches each draw, and an ORG pass at the EngineDraws anchor draws the batch in engine order.
 // Batches are the local map (LocalMapRenderer::Render, SE 16094, AE 16335) with its fog of war, and a menu model's depth and
 // colour passes (UI3DSceneManager::Render, SE 51855, AE 52727). In local map mode a Lighting property makes a BSUtilityShader

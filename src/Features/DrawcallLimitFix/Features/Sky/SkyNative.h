@@ -1,7 +1,6 @@
 #pragma once
 
-// The sky's draws computed from the passes the engine registered, the camera and a few engine globals
-// (docs/development/plans/dclf-native-sky.md).
+// The sky's draws computed from the passes the engine registered, the camera and a few engine globals.
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
 

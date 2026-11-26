@@ -1,6 +1,6 @@
 # ORG FX runtime: ENB-style `.fx` presets without FX11
 
-Plan task P3 W5 ([org-full-port.md](./org-full-port.md)). Status (2026-11-10): design, parser and lowering are written and
+Plan task P3 W5 (`org-full-port.md`). Status (2026-11-10): design, parser and lowering are written and
 checked offline against the corpus (section 10). Execution (`ORGFxRuntime`, section 5, behind `CS_ORG_FX=1`) runs in game
 and matches FX11 in both test cells, with recording reuse on.
 
@@ -322,7 +322,7 @@ Not supported yet (the frame stays on FX11, logged):
 
 - Geometry shaders (BasicRHI has no geometry stage) and UAVs (ORG has no owned null UAV view to stand in for FX11's
   unbound one).
-- Encrypted presets: only FX11 gets their compiled `fx_5_0` binary. See [parity/fx.md](./parity/fx.md).
+- Encrypted presets: only FX11 gets their compiled `fx_5_0` binary. See `parity/fx.md`.
 - A pass that reaches more than 28 textures and samplers.
 - The UI seam below: FX11 still holds the values, so FX11 must still compile every effect.
 - GPU timers per pass, and `Effects11::<effect> Pass <n>` profiler zones.
@@ -402,7 +402,7 @@ Done: `RasterProgram` from generated text (`Desc::pixelText`/`vertexText`, `lang
 
 1. Done: build and A/B on Rudy's preset. The graph matches FX11 in both test cells.
 2. Done (parity wave): `enbdepthoffield.fx`, `cbuffer` blocks, render states, `RenderTarget` annotations to any texture
-   FX11 finds, more than 30 textures, `#pragma pack_matrix`. See [parity/fx.md](./parity/fx.md).
+   FX11 finds, more than 30 textures, `#pragma pack_matrix`. See `parity/fx.md`.
 3. The UI seam (section 5): `UIVariable` value handle, and UI variables built from the model on the ORG path, so the
    value image starts from `BuildDefaultValues` and FX11 is no longer compiled.
 4. GPU timers per pass (P2 timers), and the rest of the "not supported yet" list.

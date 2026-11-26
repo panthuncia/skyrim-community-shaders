@@ -14,7 +14,7 @@ class Texture3D;
 struct PhysicalSky;
 
 /**
-* @brief Physical Sky on the render graph (docs/development/plans/physical-sky-port.md).
+* @brief Physical Sky on the render graph.
 *
 * Three clients, declared at setup (Frame/Declare.h), so they switch in with frame revisions:
 * - cs.physical-sky.luts at EarlyPrepass: the disk phase, transmittance, multiscatter, sky-view and aerial perspective LUTs.

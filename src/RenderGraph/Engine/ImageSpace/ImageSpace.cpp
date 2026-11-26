@@ -1385,7 +1385,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		* @brief ImageSpace steps without the engine's draw (docs/development/plans/dclf-native-imagespace.md): a covered draw is staged
+		* @brief ImageSpace steps without the engine's draw: a covered draw is staged
 		* from rows computed from the engine's param, and the engine's Render returns at once. Steps NativeStepNow declines stay the
 		* capture's.
 		*/

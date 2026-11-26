@@ -1685,7 +1685,7 @@ namespace SIE
 		};
 
 		/**
-		 * @brief Every image-space shader whose CS source was checked against the vanilla DXBC (docs/development/p5/imagespace-shaders.md:
+		 * @brief Every image-space shader whose CS source was checked against the vanilla DXBC (docs/development/engine/imagespace-shaders.md:
 		 * the same instructions under FXC, or the same outputs on the GPU). Each enabled one builds from CS's HLSL, as the shaders
 		 * in GetImagespaceShaderDescriptor's map do. The three left disabled differ from vanilla on purpose; the comment says why.
 		 */

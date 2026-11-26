@@ -3,7 +3,7 @@
 
 // An engine constant buffer read on ORG: the bytes the engine wrote for one draw, which the
 // engine-constants capture copied into its per-frame ring (src/RenderGraph/Engine/Constants,
-// docs/development/p5/constants.md).
+// docs/development/engine/constants.md).
 //
 // The ring's chunk and the offset change every frame, so a kept recording cannot hold them. The
 // pass's own latch holds them instead (an OrgEngineConstantsAt, written at commit), and the shader

@@ -1,4 +1,4 @@
-// The water's two DCLF epochs (docs/development/plans/dclf-water-indirect.md, section 3.5): water.mask at the engine's mask batch
+// The water's two DCLF epochs: water.mask at the engine's mask batch
 // and water.surface at its water batch. Each shares main.colour's shape and draws one deferred range of what this frame's colour
 // commit culled (Core/Render/Passes/DeferredRanges.cpp).
 // - The triggers are WaterBatches.cpp's batch thunks. Each submits its epoch before the engine runs the batch, so the batch hook

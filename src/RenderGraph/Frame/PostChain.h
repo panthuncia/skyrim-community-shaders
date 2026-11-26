@@ -6,7 +6,7 @@
 #include <cstdint>
 
 /**
- * @brief Reads the world post chain's engine state for CS's own post passes. See org-native-frame-graph.md, "The post stage".
+ * @brief Reads the world post chain's engine state for CS's own post passes.
  *
  * The chain is ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148), which runs the volumetric lighting,
  * RenderPreTonemapComposites (99024 / 105675) and RenderEndOfFrameEffects (99023 / 105674).

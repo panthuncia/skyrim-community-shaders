@@ -1977,7 +1977,7 @@ Reverse engineered 2026-10-11 (Ghidra, AE 1.6.1170) for the T7f checklist's item
 ### T7f item 8: the OnVisibles a skipped entry no longer runs
 
 Reverse engineered 2026-10-12 (Ghidra, AE 1.6.1170) for the culls-off switch (`CS_DCLF_CULLS_OFF`,
-[drawcall-limit-fix.md](./drawcall-limit-fix.md), "T7f item 8"). A cull reaches a node's or geometry's `OnVisible` (vtable slot
+`drawcall-limit-fix.md`, "T7f item 8"). A cull reaches a node's or geometry's `OnVisible` (vtable slot
 `0x34`) through `Process1`; an entry no cull visits runs none of them. What each one does besides the recursion:
 
 | Class | `OnVisible` | What it does |
@@ -2052,7 +2052,7 @@ exactly `vertexCount * 16`), guarded by a `BSSpinLock` at `+0x168` (lock `FUN_14
 
 ## Particle systems: the writer of their data, and the draw that builds their quads
 
-AE 1.6.1170, decompiled for T7e (DCLF's particles: [drawcall-limit-fix.md](./drawcall-limit-fix.md), "Particles (T7e)").
+AE 1.6.1170, decompiled for T7e (DCLF's particles: `drawcall-limit-fix.md`, "Particles (T7e)").
 
 -   **The classes.** `NiParticles : BSGeometry` (type byte `+0x150` = 1, `kParticles`; `BSStripParticleSystem` is type 2): its data
     `NiPSysData` at `+0x158`, four fade distances (ushort) at `+0x160..+0x166`, its vertex description `0x0840200004000051`
@@ -2139,7 +2139,7 @@ AE 1.6.1170, decompiled for T7e (DCLF's particles: [drawcall-limit-fix.md](./dra
 
 ## Billboards: turned by the culls, per culling camera
 
-AE 1.6.1170, decompiled for DCLF's billboards ([drawcall-limit-fix.md](./drawcall-limit-fix.md), "Billboards and aligned particles").
+AE 1.6.1170, decompiled for DCLF's billboards (`drawcall-limit-fix.md`, "Billboards and aligned particles").
 
 -   **Where.** `NiBillboardNode` (vtable `0x1417f0750`; `+0x128` userFlags, the face mode in bits 0-2) turns in its cull, not in its
     update. `NiBillboardNode::OnVisible` (slot `0x34`, `0x140d3f720`) calls `0x140d3e650` with the culling process's camera when the
@@ -2190,7 +2190,7 @@ AE 1.6.1170. `FUN_14147ac00` (static initialisation) allocates a `BSFadeNode` (0
 ## Scene state writers: where DCLF takes its events
 
 AE 1.6.1170. These are the choke points `SceneStore::InstallSceneEvents` detours for the delta walk
-([dclf-event-driven-tables.md](./dclf-event-driven-tables.md), Phases 2 and 3).
+(`dclf-event-driven-tables.md`, Phases 2 and 3).
 
 -   **`BSFadeNode::currentFade`** is written in the cull by `BSFadeNode::OnVisible` (vtable slot `0x34`,
     `0x141479f50`): directly for one LOD mode, and through the fade update `FUN_14147a160` otherwise.

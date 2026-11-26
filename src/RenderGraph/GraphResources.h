@@ -39,7 +39,7 @@ namespace RenderGraph::Engine::Native
 * A transient's first use each frame must be a write, and nothing may read it in a later frame.
 * Teardown releases the D3D11 side first, then frees the graph resource after D3D11's last use.
 *
-* Revisions (docs/development/plans/frame-revision-plan.md):
+* Revisions:
 * - A twin keeps its size for life unless it is declared (Frame/Declare.h). There is no resize call.
 * - A declared texture's new extent is a new version of the same slot, in the same shape class (format, mips, slices). The
 *   revision lane makes it off the render thread (PlanPrepare, then Prepare from the plan), and the revision's adoption at a
@@ -50,7 +50,7 @@ namespace RenderGraph::Engine::Native
 */
 namespace GraphResources
 {
-	/** @brief How long a resource's contents live (docs/development/org-aliasing-port-priorities.md, "Lifetime classes"). */
+	/** @brief How long a resource's contents live. */
 	enum class Lifetime : std::uint8_t
 	{
 		Transient,   // written before any read, every frame, and read only within that frame: aliasable unless exported (a declared,

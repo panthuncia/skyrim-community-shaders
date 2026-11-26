@@ -1,8 +1,7 @@
 #pragma once
 
-// CS's side of ORG's resource relocation (docs/development/plans/org-relocation.md, "How each holder follows" and
-// "Movability"). A relocation keeps a resource's identity but gives its backing new memory, and in steady state new bindless
-// indices. Code that caches an index, or hands out something only the old backing has, uses these helpers.
+// CS's side of ORG's resource relocation. A relocation keeps a resource's identity but gives its backing new memory, and
+// in steady state new bindless indices. Code that caches an index, or hands out something only the old backing has, uses these helpers.
 
 #include <atomic>
 #include <cstdint>

@@ -1,6 +1,6 @@
 #pragma once
 
-// The water batches without draw capture (docs/development/plans/dclf-water-indirect.md, section 13): each batch's draws are
+// The water batches without draw capture: each batch's draws are
 // computed from the passes the engine registered, with the water port's constants (Features/Water/Port), instead of latched from
 // the engine's draws. This covers what DCLF's scene path does not claim: the wading displacement mesh (its mask pass in the mask
 // batch, its surface in geometry group 10), and any water the scene path refuses.

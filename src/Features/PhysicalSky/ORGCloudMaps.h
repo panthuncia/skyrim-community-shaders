@@ -15,7 +15,7 @@
 struct PhysicalSky;
 
 /**
-* @brief Physical Sky's cloud map generators on the render graph (docs/development/plans/physical-sky-port.md, 6a).
+* @brief Physical Sky's cloud map generators on the render graph.
 *
 * One client, cs.physical-sky.cloud-maps, at the Prepass anchor, ahead of the cloud renderer (cs.physical-sky.clouds).
 * The managers keep their CPU change detection and describe each dispatch in D3D11 terms (views, constants, group

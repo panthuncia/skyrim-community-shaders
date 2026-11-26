@@ -1,4 +1,4 @@
-# A DCLF pass dump for pascal-fetch-bench's replay (docs/development/plans/dclf-replay.md): native D3D12 with CS_DCLF_CAPTURE,
+# A DCLF pass dump for pascal-fetch-bench's replay: native D3D12 with CS_DCLF_CAPTURE,
 # then dclf:capture arms the dump of the next frame's Z-prepass and main opaque passes, after the scene has settled.
 # The dump goes to C:\Modding\CS-AB\replay\capture; --set env.CS_DCLF_CAPTURE=<dir> writes it elsewhere.
 # Replay: pascal-fetch-bench replay <dir> (times every bucket), --check (PNGs of the replayed targets).

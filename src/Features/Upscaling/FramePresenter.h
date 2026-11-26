@@ -13,7 +13,7 @@
 struct IDXGISwapChain;
 
 // One presenter interface with a backend per present path: DXVK's presenter in guest, the native swap chain in native
-// mode. FrameGen::Controller and the present hook drive either one the same way (docs/development/plans/native-frame-generation-plan.md).
+// mode. FrameGen::Controller and the present hook drive either one the same way.
 namespace FrameGen
 {
 	// What the present writes into for this frame.

@@ -3,7 +3,7 @@
 #include "RenderGraph/BufferRef.h"
 
 // Decal occlusion, in graph mode: the render graph draws the engine's decal occlusion test and answers its query.
-// See docs/development/p5/occlusion-queries.md.
+// See docs/development/engine/occlusion-queries.md.
 //
 // Before Main::Draw the engine tests each decal waiting to be placed (SE 35563, AE 36562). It draws the decal's target
 // into kDECAL_OCCLUSION inside an occlusion query, and a later frame drops the decal if the count is 0.

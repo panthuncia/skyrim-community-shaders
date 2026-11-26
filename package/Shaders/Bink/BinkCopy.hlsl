@@ -1,4 +1,4 @@
-// Bink's tile copy: one textured quad per 256x256 tile of a decoded video frame (docs/development/p5/bink.md).
+// Bink's tile copy: one textured quad per 256x256 tile of a decoded video frame (docs/development/engine/bink.md).
 //
 // The engine's own pair (SE 1.5.97 VS 0x141e0bcd0, PS 0x141e0bf10; AE 1.6.1170 0x1420300b0 and 0x1420302f0, the same bytes)
 // has no HLSL in the executable. This is that pair written out. The FXC build of each stage gives the same instructions as the

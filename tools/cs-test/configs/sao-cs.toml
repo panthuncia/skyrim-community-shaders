@@ -1,5 +1,5 @@
-# The engine's compute SAO (bSAO_CS_Enable:Display=1), whose four dispatches Main::Draw runs after the world render
-# (docs/development/parity/imagespace.md, "Compute SAO"). The helper's constructor reads the pref at boot, so [prefs_ini] sets it
+# The engine's compute SAO (bSAO_CS_Enable:Display=1), whose four dispatches Main::Draw runs after the world render.
+# The helper's constructor reads the pref at boot, so [prefs_ini] sets it
 # in the profile's SkyrimPrefs.ini for the run. In third person and then first person, so the dispatches come both while the sun
 # stage is open and after it ended.
 # The log must show "the engine's ISSAO... binds what its step reads and writes" once per effect, and no tap error.

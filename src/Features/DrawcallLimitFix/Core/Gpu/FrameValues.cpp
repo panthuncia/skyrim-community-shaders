@@ -348,8 +348,8 @@ namespace DCLF
 		{
 			// Each frame writes its own copy, so the copies live in ORG's per-frame blocks.
 			// Uncapped, and a backing is reused only once the GPU is done with it: a job that reused a bound copy waited for the bound
-			// work on the copy queue, and that work could be waiting for the job's own signal, which deadlocked both queues
-			// (docs/development/plans/pascal-d3d12-stability.md). A job never waits on the GPU now.
+			// work on the copy queue, and that work could be waiting for the job's own signal, which deadlocked both queues.
+			// A job never waits on the GPU now.
 			return org::services::BackingPool::Create(PooledBackings::PerFrameHooks(), ::RenderGraph::Frame::Retirement::Clock(),
 				{ .name = fmt::format("cs.dclf.frame-values.{}", a_name), .maxPerClass = 0, .spareFree = PooledBackings::SceneCopies(), .reuseBound = false });
 		}

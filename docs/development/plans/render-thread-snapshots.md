@@ -3,6 +3,11 @@
 Status: roadmap, 2026-11-25; the user's decisions are recorded below. Nothing is started. It follows round 3 of the
 render-thread work (`render-thread-window.md`) and the fully native direction.
 
+> The round notes, older handoffs and plans this file cites (`render-thread-window.md`, `perf2-*.md`, `perf3-*.md`,
+> `handoff-2026-11-25.md`, `org-native-frame-graph.md`, `org-full-port.md`, ...) were removed from the tree in the docs
+> cleanup of 2026-11-26. Read any of them with `git show 13403653f:docs/development/<path>`, for example
+> `git show 13403653f:docs/development/plans/perf3-guards.md`.
+
 ## Goal
 
 Skyrim's main thread runs the game update and then its render half. Today CS's whole frame runs inside that render half,

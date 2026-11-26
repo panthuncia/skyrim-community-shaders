@@ -26,7 +26,7 @@
 #include <unordered_map>
 #include <vector>
 
-// The movie player's hooks. The RE is in docs/development/p5/bink.md. In graph mode a tick decodes and draws on the render
+// The movie player's hooks. The RE is in docs/development/engine/bink.md. In graph mode a tick decodes and draws on the render
 // graph, lags and draws nothing, or is a tap error and draws nothing. The engine never draws the tiles there.
 namespace RenderGraph::Engine::Bink
 {

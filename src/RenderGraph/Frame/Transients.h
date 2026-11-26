@@ -18,7 +18,7 @@ namespace org
 }
 
 /**
- * @brief One memory arena for the whole frame's transients. See docs/development/org-native-frame-graph.md.
+ * @brief One memory arena for the whole frame's transients.
  *
  * A transient lives from the first stage that uses it to the last. Transients whose spans do not overlap share bytes, so the
  * frame needs only the most memory live at one stage. Each stage's graph places its own transients. Resources several stages

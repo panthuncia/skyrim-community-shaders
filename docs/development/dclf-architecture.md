@@ -9,7 +9,7 @@ present only.
 -   [dclf-validation.md](./dclf-validation.md) has the switches, the parity checks and what each report line means, the run
     procedure, crash triage, and the bugs parity found in the engine and in other features.
 -   [dclf-open-defects.md](./dclf-open-defects.md) lists the defects and limitations still open.
--   [dclf-roadmap.md](./dclf-roadmap.md) is the work not built yet.
+-   `dclf-roadmap.md` is the work not built yet.
 -   The engine behaviour DCLF depends on is in [skyrim-engine-notes.md](./skyrim-engine-notes.md); the render graph on DXVK
     is [render-graph.md](./render-graph.md).
 
@@ -3259,7 +3259,7 @@ DCLF claims whole objects in the phases it draws; the engine keeps:
 -   **Mixed entries** keep the engine's culls whole, though DCLF still draws their members.
 
 What the engine still draws is checked in [dclf-validation.md](./dclf-validation.md); what is still to be taken over is
-[dclf-roadmap.md](./dclf-roadmap.md).
+`dclf-roadmap.md`.
 
 ## Trusted and parity
 

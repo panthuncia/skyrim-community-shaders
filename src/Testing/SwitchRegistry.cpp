@@ -51,7 +51,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_AB_PROBE" },
 			{ .name = "CS_D3D12_SOURCE_DUMP" },
 			{ .name = "CS_DCLF", .key = "dclf.enabled", .type = Bool, .defaultValue = "1", .kind = Feature, .description = "0: DCLF does not install" },
-			{ .name = "CS_DCLF_CAPTURE", .kind = Diagnostic, .description = "<dir>: D3D12 native only. Records every view, sampler and pipeline; the cs-test command dclf:capture then dumps one frame of DCLF's Z-prepass and main opaque passes into <dir>/capture-<frame>/ for pascal-fetch-bench replay (docs/development/plans/dclf-replay.md)" },
+			{ .name = "CS_DCLF_CAPTURE", .kind = Diagnostic, .description = "<dir>: D3D12 native only. Records every view, sampler and pipeline; the cs-test command dclf:capture then dumps one frame of DCLF's Z-prepass and main opaque passes into <dir>/capture-<frame>/ for pascal-fetch-bench replay" },
 			{ .name = "CS_DCLF_CAPTURE_PARITY", .key = "dclf.capture_parity", .type = Bool, .defaultValue = "0", .kind = Parity, .description = "1: the tables against the engine's own lighting draws (run with CS_DCLF_PARITY_BOTH=1, so the engine draws what DCLF draws)" },
 			{ .name = "CS_DCLF_CPU_BATCH", .kind = Feature, .description = "the CPU pipeline's batch lanes (default 4096, rounded up to a multiple of 8; the live setting's seed: dclf:cpu-batch, the menu)" },
 			{ .name = "CS_DCLF_CPU_RECORD", .kind = Feature, .description = "indirect|serial (default indirect on every vendor): the CPU pipeline's per-frame views as indirect draws the cull jobs write, or direct draws DXVK's CS thread records (live toggle's seed)" },

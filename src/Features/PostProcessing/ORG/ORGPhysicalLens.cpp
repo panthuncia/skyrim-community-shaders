@@ -42,7 +42,7 @@
 #include <span>
 
 /*
-* Physical Lens on the ORG post chain (docs/development/plans/physical-lens-port.md): the camera focus, the lens model, the
+* Physical Lens on the ORG post chain: the camera focus, the lens model, the
 * image mapping, the diffraction starburst and the ghosts. The effect writes no chain image. Composite reads its published
 * mapping, ghosts and diffraction outputs.
 *

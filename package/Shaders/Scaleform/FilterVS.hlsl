@@ -1,5 +1,5 @@
 // Scaleform GFx 3.3's filter vertex shader (GRendererD3D1x, the exe's VS-B table slot 1), transcribed from the HLSL source the
-// exe embeds (docs/development/p5/scaleform.md, "Shaders"). It draws DrawBlurRect's and DrawColorMatrixRect's rectangles. FXC
+// exe embeds (docs/development/engine/scaleform.md, "Shaders"). It draws DrawBlurRect's and DrawColorMatrixRect's rectangles. FXC
 // builds it as the game's own.
 //
 // The ORG build (CS_ORG_BINDLESS) has no input layout: it reads the rectangle's vertices (float4 position, float2 texture

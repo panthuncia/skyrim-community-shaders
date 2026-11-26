@@ -89,7 +89,7 @@ float4 DCLFPullFloat4(uint a_attribute, DCLFStream a_first, DCLFStream a_second)
 // The position (attribute 0, R32G32B32A32_FLOAT), loaded whatever the layout says: every drawable geometry has one. AMD's driver
 // culls a vertex stage's triangles before rasterization (its primitive shader: back faces, small and off-screen triangles) only
 // when the position does not come from a conditional load; DCLFPullFloat4's check made every pulled stage draw all its triangles
-// to the rasterizer (rx6600-dxvk-overhead.md).
+// to the rasterizer.
 float4 DCLFPullPosition(DCLFStream a_first, DCLFStream a_second)
 {
 	return asfloat(DeviceLoad(uint4, DCLFAttribute(0, a_first, a_second)));

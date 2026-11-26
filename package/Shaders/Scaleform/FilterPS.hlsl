@@ -1,5 +1,5 @@
 // Scaleform GFx 3.3's filter pixel shaders (GRendererD3D1x, the exe's PS-B table), transcribed from the HLSL source the exe
-// embeds (docs/development/p5/scaleform.md, "Shaders"): blurs, drop shadows, glows and bevels (DrawBlurRect) and the colour
+// embeds (docs/development/engine/scaleform.md, "Shaders"): blurs, drop shadows, glows and bevels (DrawBlurRect) and the colour
 // matrix (DrawColorMatrixRect). FXC builds each variant as the game's own: the same constants, resources and instructions as
 // the embedded source compiled by FXC.
 //

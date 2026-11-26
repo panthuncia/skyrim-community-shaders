@@ -1,7 +1,6 @@
 #pragma once
 
 // Where the startup pipeline step gets its keys: the local manifest of keys sessions built, and a shipped copy.
-// See docs/development/plans/precompile-pipelines.md.
 //
 // A manifest line is a tag, a tab, the key's identity words, a "|" token, then the resolved inputs its build needs:
 //   <tag>\t<identity words> | <input words>

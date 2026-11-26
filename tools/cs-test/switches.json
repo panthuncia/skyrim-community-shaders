@@ -348,7 +348,7 @@
 			"choices": [],
 			"kind": "diagnostic",
 			"family": "dclf",
-			"description": "<dir>: D3D12 native only. Records every view, sampler and pipeline; the cs-test command dclf:capture then dumps one frame of DCLF's Z-prepass and main opaque passes into <dir>/capture-<frame>/ for pascal-fetch-bench replay (docs/development/plans/dclf-replay.md)"
+			"description": "<dir>: D3D12 native only. Records every view, sampler and pipeline; the cs-test command dclf:capture then dumps one frame of DCLF's Z-prepass and main opaque passes into <dir>/capture-<frame>/ for pascal-fetch-bench replay"
 		},
 		{
 			"name": "CS_DCLF_CAPTURE_PARITY",

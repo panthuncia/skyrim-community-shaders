@@ -6,7 +6,7 @@
 #include <vector>
 
 /**
- * @brief VRAM attribution's view of BasicRHI and ORG (org-full-port.md P4.7): the device's memory through BasicRHI's memory budget
+ * @brief VRAM attribution's view of BasicRHI and ORG: the device's memory through BasicRHI's memory budget
  * (VK_EXT_memory_budget, P0.7), and ORG's allocator by owner label (P0.13), in place of DXVK's heap reports.
  *
  * CS_ORG_VRAM_SOURCE=org selects it for the heaps of Vram::Current and for texture streaming's budget. DXVK's snapshot still lists

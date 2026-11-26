@@ -7,7 +7,7 @@
 // An ORG pass at the EngineDraws anchor then draws them in the engine's order with BloodSplatter.hlsl.
 // Programs are prebuilt and the client is made at setup, so the first hit never waits or rebuilds.
 // A draw the family cannot take ends the latched part, and the engine draws the rest of the batch.
-// See docs/development/p5/blood-splatter.md.
+// See docs/development/engine/blood-splatter.md.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"

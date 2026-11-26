@@ -10,7 +10,7 @@
  * @brief What CS decides a frame contains, read at Renderer::Begin from state it reads itself.
  *
  * A plain value that can be hashed and diffed field by field, so a re-recorded segment can log which field changed.
- * See docs/development/org-native-frame-graph.md, "The declared frame". This header stays free of ORG includes.
+ * This header stays free of ORG includes.
  */
 namespace RenderGraph::Frame
 {

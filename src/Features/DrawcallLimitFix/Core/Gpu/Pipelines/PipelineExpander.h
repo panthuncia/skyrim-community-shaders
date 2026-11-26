@@ -1,7 +1,7 @@
 #pragma once
 
 // The combination expander: a pipeline key source that adds likely neighbours of the keys the manifests list, so a key a session
-// happened not to see is still built at startup. See docs/development/plans/precompile-pipelines.md, "The combination expander".
+// happened not to see is still built at startup.
 //
 // Every rule is a small function in PipelineExpander.cpp. A rule only derives keys from listed keys, never from another rule's
 // keys, and takes every input a new key needs (engine state words, target formats, shadow rasterizer state) from listed keys.

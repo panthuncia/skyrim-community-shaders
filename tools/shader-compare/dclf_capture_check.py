@@ -1,4 +1,4 @@
-"""Checks a DCLF pass capture dump (CS_DCLF_CAPTURE, dclf:capture) against docs/development/plans/dclf-replay.md.
+"""Checks a DCLF pass capture dump (CS_DCLF_CAPTURE, dclf:capture) against the dump format the capture writes.
 
 Usage: python tools/shader-compare/dclf_capture_check.py <capture dir>
 Prints counts and every problem found. Exit 0 when the dump is complete.

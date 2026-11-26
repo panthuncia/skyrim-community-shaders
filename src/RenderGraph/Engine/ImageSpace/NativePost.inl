@@ -1,4 +1,4 @@
-// The native post chain (docs/development/plans/native-post-chain.md), families 0 to 4. Included by ImageSpace.cpp after the step
+// The native post chain, families 0 to 4. Included by ImageSpace.cpp after the step
 // files and the scope helpers, before the hooks that use it.
 //
 // Family 0 is the snapshot (ImageSpaceFrame), read once at Renderer::Begin (read point A) and at RenderWorldPostProcess's entry

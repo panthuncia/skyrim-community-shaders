@@ -62,7 +62,7 @@ namespace DCLF
 	 * @brief Whether Auto draws exteriors CPU-driven too: on a GPU with the legacy binding model (D3D12 resource heap tier 1, or
 	 * Vulkan without bindless descriptors: NVIDIA Pascal and older). There the GPU pipeline's culling and pulled bindless draws cost
 	 * more than the CPU pipeline (GTX 1070 Ti, native D3D12: about 2.3 ms of the frame), and its build pass lost the device in about a
-	 * third of the perf runs (docs/development/plans/pascal-d3d12-stability.md). False until the render graph's device exists.
+	 * third of the perf runs. False until the render graph's device exists.
 	 */
 	bool CpuExteriorsByDefault();
 
