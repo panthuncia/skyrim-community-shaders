@@ -147,6 +147,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_RHI_CENSUS" },
 			{ .name = "CS_SHADER_DXC", .key = "cs.shader_dxc", .description = "a regular expression on <path>:<target>:<descriptor>: the shaders that build with DXC; empty: every shader with FXC" },
 			{ .name = "CS_SL_VERBOSE" },
+			{ .name = "CS_SNAPSHOT_CADENCE", .key = "snapshot.cadence", .kind = Test, .description = "repeat:N|drop:N (N 2-16), native only: the cadence test mode; the render half (Main::DrawFrame) runs N times for each game update, or for one update in N, still on one thread" },
 			{ .name = "CS_STREAMLINE_DLSS", .type = Bool },
 			{ .name = "CS_STREAMLINE_REFLEX", .description = "0: Streamline does not load Reflex, PCL or DLSS-G (for Nsight captures)" },
 			{ .name = "CS_SUBMIT_TRACE" },

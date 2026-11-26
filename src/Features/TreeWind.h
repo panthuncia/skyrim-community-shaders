@@ -2,6 +2,7 @@
 
 #include "Buffer.h"
 #include "Feature.h"
+#include "Snapshot/FrameSnapshot.h"
 #include "TreeWind/TreeShapes.h"
 
 /**
@@ -55,6 +56,36 @@ public:
 	};
 	static_assert(sizeof(WindCB) % 16 == 0);
 
+	/**
+	* @brief Tree Wind's snapshot block (the pilot of the per-feature block shape): the sky's wind and the two weathers' wind
+	* data, captured on the game thread. Reset reads only this and the snapshot's core fields.
+	*/
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::TreeWind;
+
+		/** @brief What GetStorminess reads of a weather. */
+		struct Weather
+		{
+			bool present = false;
+			bool rainy = false;
+			bool snow = false;
+			bool cloudy = false;
+			std::uint8_t windSpeed = 0;  // TESWeather::data.windSpeed, 0-255
+			bool operator==(const Weather&) const = default;
+		};
+
+		float windSpeed = 0.0f;   // Sky::windSpeed, 0-1
+		float windAngle = 0.0f;   // Sky::windAngle, radians
+		float weatherPct = 1.0f;  // Sky::currentWeatherPct, clamped to 0-1
+		Weather current{};
+		Weather last{};
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Fills the block from the sky. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
+	static void Capture(Snapshot::Builder& a_builder);
+
 	enum class Preset
 	{
 		Gentle,
@@ -91,7 +122,7 @@ public:
 	virtual void PostPostLoad() override;
 	virtual void SetupResources() override;
 
-	/** @brief Advances the wind clock and uploads the on and off buffers, once per frame. */
+	/** @brief Advances the wind clock once per new snapshot and uploads the on and off buffers, once per render frame. */
 	virtual void Reset() override;
 
 	/** @brief Binds the wind buffer, and the bend data for a tree LOD draw, for the current Lighting or Utility draw. Called from State::Draw. */
@@ -110,7 +141,7 @@ public:
 
 private:
 	/** @brief How stormy a weather is, 0 calm to 1 storm: the larger of its type and its own wind speed. */
-	float GetStorminess(const RE::TESWeather* a_weather) const;
+	float GetStorminess(const Block::Weather& a_weather) const;
 
 	std::unique_ptr<ConstantBuffer> windOnCB;
 	std::unique_ptr<ConstantBuffer> windOffCB;
@@ -123,6 +154,7 @@ private:
 
 	double phase = 0.0;
 	double prevPhase = 0.0;
+	std::uint64_t steppedSnapshot = 0;  // the snapshot the wind clock last stepped for: a repeated snapshot does not move it
 
 	// Shown on the settings page
 	float statusWind = 0.0f;

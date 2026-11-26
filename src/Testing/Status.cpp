@@ -4,6 +4,7 @@
 #include "Globals.h"
 #include "RenderGraph/Frame/Revision.h"
 #include "ShaderCache.h"
+#include "Snapshot/Publication.h"
 #include "Utils/LogTee.h"
 #include "Utils/SwitchFile.h"
 
@@ -146,6 +147,7 @@ namespace Testing
 				{ "reason", a_run.reason },
 				{ "fault", { { "address", a_run.faultAddress }, { "markers", a_run.faultMarkers } } },
 				{ "shots", a_run.shots },
+				{ "snapshot", Snapshot::CurrentId() },
 				{ "revision", { { "running", mark.running }, { "adopted", mark.revision }, { "adopted_variables", mark.adoptedVariables }, { "taken_variables", mark.takenVariables } } },
 				{ "report", a_run.report },
 			};

@@ -18,6 +18,7 @@
 #include "RenderGraph/FrameClock.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/Publication.h"
 #include "Utils/Setting.h"
 
 #include <ORGModuleServices/ViolationPolicy.h>
@@ -228,6 +229,10 @@ namespace RenderGraph::Frame::Driver
 					if (Engine::GraphMode())
 						FrameAnchors::ClaimRenderOwnership();
 					RenderGraphRuntime::OnRendererBegin();
+					// The render frame's snapshot, adopted once the frame clock moved (main thread only: a loading screen's frames keep the
+					// snapshot adopted last). Both modes; guest adopts the one just published, on the same thread.
+					if (FrameAnchors::IsMainThread())
+						Snapshot::Adopt();
 					// The description (PostChain) and the upscaler read the window state the frame starts with.
 					Upscaling::LatchWindowState();
 					OnBegin();
@@ -280,6 +285,7 @@ namespace RenderGraph::Frame::Driver
 	{
 		auto& state = Get();
 		state.loading.store(a_active, std::memory_order_release);
+		Snapshot::OnLoadingScreen(a_active);
 		// A load that starts inside a world frame ends that frame's world work where it is.
 		if (a_active)
 			state.loadStart.store(FrameClock::BeginFrame() + 1, std::memory_order_release);
