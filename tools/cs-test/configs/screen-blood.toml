@@ -1,0 +1,73 @@
+# Screen blood in first person from the autoloaded save: the player's health raised (no tgm: god mode would take no hits),
+# the splatters made to last, one melee bandit placed at the player. After about 8 s every actor's AI is turned off and the camera
+# looks down at the ground, then two shots. Placement and count are the engine's random draws: compare the splatters' look, not
+# their pixels. Native draws it from game data: expect `the first screen blood run drawn by the graph`. Compose it: native-vulkan+screen-blood,
+# guest+screen-blood.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "console"
+arg = "player.setav health 100000"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "setgs fBloodSplatterDuration 1000"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "setgs fBloodSplatterFadeStart 1000"
+
+[[steps]]
+at = "previous"
+frames = 8
+do = "pov"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.placeatme 1bcd8 1"
+
+[[steps]]
+at = "previous"
+frames = 470
+do = "console"
+arg = "tai"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x 80"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "blood"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "blood2"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["blood", "blood2"]
+no_log = ["frame tap error", "blood splatter: a native draw is left out: the flare", "blood splatter: a native draw is left out: no"]

@@ -86,6 +86,8 @@ The shipped configs:
 | `ibl` | Image Based Lighting on, static IBL off, a DALC mode that reads the environment SH and back, then IBL off (`setting` steps): IBL's client and the fog's IBL inputs switch with frame revisions; compose it, `native-vulkan+ibl` |
 | `skylighting-reset` | coc into Dragonsreach and back out to Whiterun: each loading screen resets Skylighting's probe volumes as new versions in a frame revision; compose it, `native-vulkan+skylighting-reset` |
 | `dclf-family` | Riverwood in cloudy weather with a melee bandit: screen blood in first person, blood decals in third, then HDR on and off with shots of the blood and the sky: the DCLF family clients (sky, decal occlusion, blood, shadow mask) declared on frame variables; compose it, `native-vulkan+dclf-family` |
+| `screen-blood` | the autoloaded save in first person, health raised, a melee bandit placed at the player, the splatters made to last, then two shots looking down: the screen blood (native draws it from game data); compose it, `native-vulkan+screen-blood` |
+| `window-resize-stress` | six window resizes in one run with a shot after each: reproduces the native device loss after a resize within two cycles (needs Light Limit Fix); compose it, `native-vulkan+window-resize-stress` |
 | `bink` | BGS_Logo.bik played through the `bink` step in SDR, then again with HDR on: Bink's client declared on its targets' variables; compose it, `native-vulkan+bink` |
 
 | `imagespace-transitions` | Whiterun, Dragonsreach and Whiterun again by coc, each with a loading screen, a shot after each settles: ImageSpace's step groups must lag across the shape changes, never raise a tap error; compose it, `guest+imagespace-transitions`, `native-vulkan+imagespace-transitions` |
