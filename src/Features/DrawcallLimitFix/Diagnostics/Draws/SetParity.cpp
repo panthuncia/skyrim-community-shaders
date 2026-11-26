@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
 #include "Features/DrawcallLimitFix/Features/Portals/Portals.h"
+#include "Features/DrawcallLimitFix/Core/Render/Direct/Cull.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Events.h"
@@ -12,6 +13,195 @@
 
 namespace DCLF::Diagnostics
 {
+	namespace
+	{
+		// What happened to one object in a read-back frame, for the actor census.
+		enum CensusFate : std::uint8_t
+		{
+			kFateDrawn,          // in the set, the colour segment drew it
+			kFateNobody,         // in the set, GPU culling kept it, nothing drew it
+			kFateFrustum,        // in the set, culled by the frustum
+			kFateFade,           // in the set, culled by the fade test
+			kFateOccluded,       // in the set, culled past the frustum and fade (HZB, portals)
+			kFateOutsideDrawn,   // not in the set, drawn by DCLF anyway
+			kFateClaimedOutside, // not in the set, claimed by the registration hooks: drawn by nobody
+			kFateOutside,        // not in the set, not claimed
+			kFateUnread,         // no word of this frame (the forward family on the CPU)
+			kFateCount
+		};
+		constexpr const char* kFateNames[kFateCount] = { "drawn", "nobody", "frustum", "fade", "occluded", "outside-drawn", "claimed-outside", "outside",
+			"unread" };
+
+		void CollectGeometry(RE::NiAVObject* a_node, std::vector<RE::BSGeometry*>& a_out, std::uint32_t a_depth = 0)
+		{
+			if (!a_node || a_depth > 64)
+				return;
+			if (auto* geometry = a_node->AsGeometry()) {
+				a_out.push_back(geometry);
+				return;
+			}
+			if (auto* node = a_node->AsNode())
+				for (auto& child : node->GetChildren())
+					CollectGeometry(child.get(), a_out, a_depth + 1);
+		}
+
+		// Bones whose world transform could collapse or scatter a skinned mesh.
+		std::uint32_t BadBones(const RE::BSGeometry* a_geometry, std::uint32_t& a_total)
+		{
+			const auto* skin = a_geometry->GetGeometryRuntimeData().skinInstance.get();
+			if (!skin || !skin->skinData || !skin->boneWorldTransforms)
+				return 0;
+			const std::uint32_t count = skin->skinData->GetBoneCount();
+			a_total += count;
+			std::uint32_t bad = 0;
+			for (std::uint32_t b = 0; b < count; ++b) {
+				const auto* t = skin->boneWorldTransforms[b];
+				if (!t) {
+					++bad;
+					continue;
+				}
+				const auto& p = t->translate;
+				const bool finite = std::isfinite(t->scale) && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+				if (!finite || t->scale <= 1e-4f || t->scale > 1e3f || std::abs(p.x) > 1e7f || std::abs(p.y) > 1e7f || std::abs(p.z) > 1e7f)
+					++bad;
+			}
+			return bad;
+		}
+
+		/** @brief The fade root test's inputs for an actor, from the newest CPU cull frame's tables and sampled rows, against the live root node. */
+		std::string SampledRootRows(const std::vector<RE::BSGeometry*>& a_shapes)
+		{
+			const auto frame = Direct::LatestCullFrame();
+			if (!frame || !frame->tables)
+				return "; no CPU cull frame";
+			const auto& tables = *frame->tables;
+			const auto roots = Extensions::RootListOf(tables);
+			const auto rows = Direct::SampledRows(frame->frameValuesSeq);
+			for (auto* shape : a_shapes) {
+				const auto it = std::find(tables.objectGeometry.begin(), tables.objectGeometry.end(), shape);
+				if (it == tables.objectGeometry.end())
+					continue;
+				const auto slot = static_cast<std::uint32_t>(it - tables.objectGeometry.begin());
+				const std::uint32_t root = roots.RootOf(slot);
+				if (root == kNoFadeRoot || root >= roots.Size())
+					return fmt::format("; '{}' (slot {}): no fade root", shape->name.c_str() ? shape->name.c_str() : "", slot);
+				const auto& row = roots.rows[root];
+				const auto* node = static_cast<const RE::NiAVObject*>(roots.NodeOf(root));
+				std::string sampled = "no sampled row";
+				if (row.object < rows.size()) {
+					const auto& placement = rows[row.object];
+					const float* c = placement.lodFadeNode;
+					std::string off;
+					if (node) {
+						const auto& live = node->worldBound;
+						const float dx = c[0] - live.center.x, dy = c[1] - live.center.y, dz = c[2] - live.center.z;
+						off = fmt::format(", live node bound ({:.0f} {:.0f} {:.0f} r {:.0f}), centre off {:.0f}", live.center.x, live.center.y, live.center.z, live.radius,
+							std::sqrt(dx * dx + dy * dy + dz * dz));
+					}
+					const auto* member = row.object < tables.objectGeometry.size() ? tables.objectGeometry[row.object] : nullptr;
+					const auto* memberProperty = member ? member->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+					const auto* memberFade = memberProperty ? static_cast<const RE::NiAVObject*>(memberProperty->fadeNode) : nullptr;
+					const auto* memberRoot = static_cast<const RE::NiAVObject*>(roots.NodeOf(roots.RootOf(row.object)));
+					sampled = fmt::format("member {} '{}' (its fade node {}, its root {}) row 8 ({:.0f} {:.0f} {:.0f} w {:.0f}), sunEntry r {:.0f}{}", row.object,
+						member && member->name.c_str() ? member->name.c_str() : "(none)", !memberFade ? "none" : memberFade == node ? "this root" : "another node",
+						memberRoot == node ? "this one" : memberRoot ? "another" : "none", c[0], c[1], c[2], c[3], placement.sunEntry[3], off);
+				}
+				return fmt::format("; fade root {} '{}' (bits {:#x}{}{}), cull frame {}: {}", root, node && node->name.c_str() ? node->name.c_str() : "", row.bits,
+					(row.bits & kFadeRootPreprocessed) ? ", preprocessed" : "", (row.bits & kFadeRootPreprocessHidden) ? ", not visible" : "", frame->sceneFrame, sampled);
+			}
+			return "; no shape in the CPU cull frame";
+		}
+
+		/**
+		 * @brief The actor census: for each actor near the player, what happened to each of its shapes in this read-back frame.
+		 * Logs every 300 scene steps, and at once when an actor that had shapes drawn has none drawn while it still has tracked shapes.
+		 */
+		void CensusActors(std::uint32_t a_frame, const std::vector<const RE::BSGeometry*>& a_geometry, const std::vector<std::uint8_t>& a_fates,
+			const std::function<std::string(std::size_t)>& a_colourState)
+		{
+			struct ActorHistory
+			{
+				std::uint32_t drawn = 0;
+				std::uint32_t frame = 0;
+			};
+			static std::unordered_map<RE::FormID, ActorHistory> history;
+			static std::uint32_t transitionsLogged = 0, transitionWindow = 0;
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* lists = RE::ProcessLists::GetSingleton();
+			if (!player || !lists)
+				return;
+			const bool periodic = a_frame % 300 == 0;
+			if (a_frame / 300 != transitionWindow) {
+				transitionWindow = a_frame / 300;
+				transitionsLogged = 0;
+			}
+			std::unordered_map<const RE::BSGeometry*, std::uint32_t> index;
+			index.reserve(a_geometry.size());
+			for (std::size_t o = 0; o < a_geometry.size(); ++o)
+				if (a_geometry[o])
+					index.emplace(a_geometry[o], static_cast<std::uint32_t>(o));
+			const auto playerPos = player->GetPosition();
+			std::vector<RE::Actor*> actors;
+			for (auto& handle : lists->highActorHandles)
+				if (auto actor = handle.get(); actor && actor.get() != player)
+					actors.push_back(actor.get());
+			std::vector<RE::BSGeometry*> shapes;
+			for (auto* actor : actors) {
+				const float distance = actor->GetPosition().GetDistance(playerPos);
+				if (distance > 6000.0f)
+					continue;
+				auto* root = actor->Get3D(false);
+				shapes.clear();
+				CollectGeometry(root, shapes);
+				std::array<std::uint32_t, kFateCount> fates{};
+				std::uint32_t untracked = 0, hidden = 0, boneTotal = 0, badBones = 0;
+				std::string undrawn;
+				std::uint32_t undrawnListed = 0;
+				for (auto* shape : shapes) {
+					badBones += BadBones(shape, boneTotal);
+					if (shape->GetAppCulled())
+						++hidden;
+					const auto it = index.find(shape);
+					if (it == index.end()) {
+						++untracked;
+						if (undrawnListed++ < 8)
+							undrawn += fmt::format("{}'{}' untracked{}", undrawn.empty() ? "" : ", ", shape->name.c_str() ? shape->name.c_str() : "",
+								shape->GetAppCulled() ? " (app-culled)" : "");
+						continue;
+					}
+					const std::uint8_t fate = it->second < a_fates.size() ? a_fates[it->second] : kFateUnread;
+					++fates[fate];
+					if (fate != kFateDrawn && fate != kFateOutsideDrawn && undrawnListed++ < 8)
+						undrawn += fmt::format("{}'{}' {} (object {}, colour build {}{})", undrawn.empty() ? "" : ", ", shape->name.c_str() ? shape->name.c_str() : "",
+							kFateNames[fate], it->second, a_colourState(it->second), shape->GetGeometryRuntimeData().skinInstance ? ", skinned" : "");
+				}
+				const std::uint32_t drawn = fates[kFateDrawn] + fates[kFateOutsideDrawn];
+				const std::uint32_t tracked = static_cast<std::uint32_t>(shapes.size()) - untracked;
+				auto& seen = history[actor->GetFormID()];
+				const bool vanished = seen.frame && seen.drawn > 0 && drawn == 0 && !shapes.empty();
+				seen.drawn = drawn;
+				seen.frame = a_frame;
+				if (!periodic && !(vanished && transitionsLogged++ < 20))
+					continue;
+				const auto* fadeNode = root ? root->AsFadeNode() : nullptr;
+				std::string counts;
+				for (std::uint32_t f = 0; f < kFateCount; ++f)
+					if (fates[f])
+						counts += fmt::format("{}{} {}", counts.empty() ? "" : ", ", kFateNames[f], fates[f]);
+				logger::info("[DCLF] actor census, frame {}{}: '{}' {:08X} dist {:.0f}{}{}, 3D '{}'{} fade {:.2f}: shapes {} (tracked {}, untracked {}, app-culled {}): {}; "
+							 "bad bones {}/{}{}{}",
+					a_frame, vanished ? " VANISHED" : "", actor->GetName() ? actor->GetName() : "", actor->GetFormID(), distance, actor->IsDead() ? ", dead" : "",
+					actor->IsDisabled() ? ", disabled" : "", root && root->name.c_str() ? root->name.c_str() : "(none)", root && root->GetAppCulled() ? " (app-culled)" : "",
+					fadeNode ? fadeNode->GetRuntimeData().currentFade : -1.0f, shapes.size(), tracked, untracked, hidden, counts.empty() ? "none" : counts, badBones,
+					boneTotal, undrawn.empty() ? "" : "; not drawn: ", undrawn);
+				logger::info("[DCLF] actor census, frame {}:   '{}' {:08X}{}", a_frame, actor->GetName() ? actor->GetName() : "", actor->GetFormID(), SampledRootRows(shapes));
+			}
+			// Forget actors gone for a while.
+			if (periodic)
+				std::erase_if(history, [&](const auto& a_entry) { return a_frame - a_entry.second.frame > 600; });
+		}
+	}
+
 	void CheckSetParity(const MainEpochDone& a_epoch)
 	{
 		if (a_epoch.depthOnly || !a_epoch.depth)
@@ -69,6 +259,7 @@ namespace DCLF::Diagnostics
 			}
 			bool damaged = false;
 			const Api::RootListView roots = snapshot.tables ? Extensions::RootListOf(*snapshot.tables) : Api::RootListView{};
+			std::vector<std::uint8_t> fates(snapshot.flags.size(), kFateUnread);
 			for (std::size_t o = 0; o < snapshot.flags.size(); ++o) {
 				const std::uint32_t word = words[o];
 				const bool current = (word >> 4) == stamp;
@@ -78,6 +269,20 @@ namespace DCLF::Diagnostics
 				const std::uint8_t flags = snapshot.flags[o];
 				const bool withheld = flags & 1;
 				const bool alpha = flags & 4;
+				{
+					// The census's view of this object.
+					const std::uint32_t frustumWord = frustum && o < frustumWords ? frustum[o] : 0u;
+					const bool passed = (frustumWord & 0x0FFFFFFFu) == stamp;
+					const bool claimedMain = o < snapshot.claims.size() && (snapshot.claims[o] & kSetMain);
+					if (!current)
+						fates[o] = withheld ? kFateUnread : claimedMain ? kFateClaimedOutside : kFateOutside;
+					else if (withheld)
+						fates[o] = colourDrawn            ? kFateDrawn :
+						           verdict == 0 || verdict == 2 ? (!frustum ? kFateOccluded : !passed ? kFateFrustum : (frustumWord & 0x80000000u) ? kFateFade : kFateOccluded) :
+						                                   kFateNobody;
+					else
+						fates[o] = depthDrawn || colourDrawn ? kFateOutsideDrawn : claimedMain ? kFateClaimedOutside : kFateOutside;
+				}
 				counts.depthDrawnTotal += depthDrawn;
 				counts.colourDrawnTotal += colourDrawn;
 				const char* kind = nullptr;
@@ -308,6 +513,8 @@ namespace DCLF::Diagnostics
 						(flags & 2) ? "bound" : "not bound", withheld ? ", in the set" : "", (flags & 8) ? ", RECORD DISAGREES" : "");
 				}
 			}
+			CensusActors(snapshot.frame, snapshot.geometry, fates,
+				[&](std::size_t a_object) { return stateName(a_object < snapshot.colourState.size() ? snapshot.colourState[a_object] : kObjectStateAbsent); });
 			context->Unmap(snapshot.staging.get(), 0);
 			setParityStaging.push_back(std::move(snapshot.staging));
 			if (frustum)
