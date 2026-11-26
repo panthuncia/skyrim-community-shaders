@@ -41,6 +41,8 @@ namespace DCLF::Features::Water::Native
 	 * batch's order, without the engine's registrations. False, with a_why, when a pass cannot be computed.
 	 */
 	bool BuildScene(const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why);
+	/** @brief Whether BuildScene has anything to draw for the batch (or a reason to report), before its inputs are read. Only accumulator, range and group are read. */
+	bool SceneHasPasses(const BatchInputs& a_inputs);
 
 	/** @brief The water pass groups taken out of the batch renderer, so the engine's call finds nothing of the water to draw. */
 	struct Detached

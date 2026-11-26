@@ -253,7 +253,13 @@ namespace DCLF::Features::Water
 				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 				const bool fromScene = ::RenderGraph::Engine::Native::Active() && a_accumulator == *mainAccumulator;
 				// Claimed water leaves the engine's batch empty: then there is nothing to compute, and the engine's call draws nothing.
-				if (!cpuWater && !fromScene && !BatchHasPasses(a_accumulator, a_first, a_last, a_group)) {
+				const auto hasPasses = [&] {
+					if (!fromScene)
+						return BatchHasPasses(a_accumulator, a_first, a_last, a_group);
+					const Native::BatchInputs scene{ .view = kView, .accumulator = static_cast<RE::BSShaderAccumulator*>(a_accumulator), .first = a_first, .last = a_last, .group = a_group };
+					return Native::SceneHasPasses(scene);
+				};
+				if (!cpuWater && !hasPasses()) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}

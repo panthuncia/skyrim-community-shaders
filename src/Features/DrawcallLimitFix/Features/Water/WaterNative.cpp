@@ -681,6 +681,42 @@ namespace DCLF::Features::Water::Native
 		}
 	}
 
+	namespace
+	{
+		/** @brief A batch's scene passes, computed once per batch call: SceneHasPasses' test and BuildScene share them. Render thread. */
+		struct SceneBatch
+		{
+			std::uint32_t frame = UINT32_MAX;
+			std::uint32_t first = 0, last = 0;
+			std::int32_t group = -2;
+			bool ok = false;
+			std::string why;
+			std::vector<ScenePass> passes;
+		};
+		SceneBatch s_sceneBatch;
+
+		const SceneBatch& SceneBatchOf(const BatchInputs& a_inputs, const Port::FrameInputs& a_port)
+		{
+			auto& batch = s_sceneBatch;
+			const auto frame = Family::RenderFrame();
+			if (batch.frame == frame && batch.first == a_inputs.first && batch.last == a_inputs.last && batch.group == a_inputs.group)
+				return batch;
+			batch.frame = frame;
+			batch.first = a_inputs.first;
+			batch.last = a_inputs.last;
+			batch.group = a_inputs.group;
+			batch.why.clear();
+			batch.ok = ScenePasses(a_inputs, a_port, batch.passes, batch.why);
+			return batch;
+		}
+	}
+
+	bool SceneHasPasses(const BatchInputs& a_inputs)
+	{
+		const auto& batch = SceneBatchOf(a_inputs, Port::CaptureFrame(a_inputs.accumulator));
+		return !batch.ok || !batch.passes.empty();
+	}
+
 	bool BuildScene(const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
 	{
 		DCLF_ZONE("CS.DCLF.Water.Native.BuildScene");
@@ -688,10 +724,12 @@ namespace DCLF::Features::Water::Native
 		Frame frame;
 		if (!frame.Read(a_inputs, a_why))
 			return false;
-		// Render thread: kept between batches.
-		static std::vector<ScenePass> passes;
-		if (!ScenePasses(a_inputs, frame.port, passes, a_why))
+		const auto& batch = SceneBatchOf(a_inputs, frame.port);
+		if (!batch.ok) {
+			a_why = batch.why;
 			return false;
+		}
+		const auto& passes = batch.passes;
 		auto* shader = const_cast<RE::BSShader*>(ShaderPrograms::FamilyShader(Api::ProgramFamily::Water));
 		if (!passes.empty() && !shader) {
 			a_why = "no BSWaterShader handed over yet";
