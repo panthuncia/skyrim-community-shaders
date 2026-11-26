@@ -29,7 +29,17 @@ namespace RenderGraph::Engine::OcclusionQueries
 {
 	inline constexpr std::uint32_t kRingSlots = 64;
 
+	/**
+	* @brief Slots past the engine's ring that CS owns, with no engine query behind them. Native's sun occlusion query (Main::RenderWorld's,
+	* query index 1) is the only one: the render side begins it in a Bracket, the game side takes its answer (Take).
+	*/
+	inline constexpr std::int32_t kSunSlot = static_cast<std::int32_t>(kRingSlots);
+	inline constexpr std::uint32_t kSlots = kRingSlots + 1;
+
 	inline constexpr std::int32_t kNoSlot = -1;
+
+	/** @brief What a read returns while the count is not there yet, as D3D11's GetQueryData. */
+	inline constexpr std::uint32_t kNotReady = 0xFFFFFFFF;
 
 	bool Active();
 
@@ -59,6 +69,12 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 		/** @brief Answers at once with no run, for a bracket that drew nothing. */
 		void Answer(std::uint32_t a_count);
+
+		/**
+		* @brief Begins the CS-owned slot a_slot in this bracket, as the engine's BeginQuery begins a ring slot, tagged a_tag (for the sun,
+		* the snapshot id it is drawn for). Render thread. False if this bracket already has a slot.
+		*/
+		bool Begin(std::int32_t a_slot, std::uint64_t a_tag);
 
 	private:
 		friend struct Hooks;
@@ -118,6 +134,18 @@ namespace RenderGraph::Engine::OcclusionQueries
 	private:
 		std::shared_ptr<State> state;
 	};
+
+	/** @brief A CS-owned slot was begun and its answer not taken yet. Any thread. */
+	bool Pending(std::int32_t a_slot);
+
+	/**
+	* @brief Game thread. A CS-owned slot's answer, once: true with its count and the tag it was begun with. False while it is not
+	* there yet or after it was taken. Never waits.
+	*/
+	bool Take(std::int32_t a_slot, std::uint32_t& a_count, std::uint64_t& a_tag);
+
+	/** @brief An engine ring entry's answer as GetQueryData(no wait) gives it in graph mode, or kNotReady. Game thread. */
+	std::uint32_t ReadRingEntry(void* a_entry);
 
 	std::string Status();
 }
