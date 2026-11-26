@@ -181,6 +181,10 @@ namespace DCLF::Features::Fades
 	std::uint32_t SeedsIndex();
 	/** @brief The seed rows this producer just made. Producer thread only. */
 	const std::vector<FadeRootStatic>& ProducerSeeds();
+	/** @brief Render thread. Descriptor of this frame's root bounds, one row per root slot, or 0 before the first frame. */
+	std::uint32_t RootBoundsIndex();
+	/** @brief The root bound rows this producer just sampled. Producer thread only. */
+	const std::vector<FadeRootBound>& ProducerRootBounds();
 
 	/**
 	 * @brief Render thread, at the start of the frame. Hands fade events read back since the last kick to a task for WriteFadeStores.
@@ -194,6 +198,7 @@ namespace DCLF::Features::Fades
 	void WriteFadeStores(const std::function<bool(const void*)>& a_written);
 
 	// RegisterRender's parts, in the order FadeRender.cpp calls them.
+	void RegisterRootBounds(Api::InstallContext& a_context);
 	void RegisterSeeds(Api::InstallContext& a_context);
 	void RegisterPixelRows(Api::InstallContext& a_context);
 	void RegisterResources(Api::InstallContext& a_context);

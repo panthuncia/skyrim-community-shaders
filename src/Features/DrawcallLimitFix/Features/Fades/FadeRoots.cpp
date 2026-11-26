@@ -172,7 +172,7 @@ namespace DCLF::Scene
 			auto& current = family.objectRow[a_slot];
 			if (members.Has(current, a_slot))
 				members.Remove(current, a_slot);
-			// The root's centre is one of its members, so pick another if this slot was it.
+			// The row names one of its members, so pick another if this slot was it.
 			if (current < roots.fadeRoots.size() && roots.fadeRoots[current].object == a_slot && roots.fadeRootRefs[current] > 1) {
 				roots.fadeRoots[current].object = members.First(current);
 				family.Mark(current);

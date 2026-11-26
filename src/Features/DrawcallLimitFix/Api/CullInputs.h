@@ -44,6 +44,7 @@ namespace DCLF::Api
 	 *
 	 * - RootStates: the published states a frame's cull reads. May alternate by frame.
 	 * - RootStepStates: the root state step's own rows for this frame, read by the visibility events.
+	 * - RootBounds: each root node's world bound this frame, which the root test reads.
 	 * - MemberClaims: per-object atomic claims during query generation.
 	 * - LightContexts: the frame's portal context atlas for the camera and the strict lights.
 	 * - StrictGates: each strict-light gate's verdict per atlas context.
@@ -57,6 +58,7 @@ namespace DCLF::Api
 		RootStates,
 		RootStepStates,
 		RootSeeds,
+		RootBounds,
 		RootFrame,
 		MemberQueries,
 		MemberResults,

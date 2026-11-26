@@ -68,7 +68,24 @@ namespace DCLF::Diagnostics
 			return bad;
 		}
 
-		/** @brief The fade root test's inputs for an actor, from the newest CPU cull frame's tables and sampled rows, against the live root node. */
+		/** @brief The root bound the fade stage tested a_root with in a_frame, against the live root node. */
+		std::string RootBoundText(const Direct::CullFrame& a_frame, std::uint32_t a_root, std::uint32_t a_generation, const RE::NiAVObject* a_node)
+		{
+			if (a_root >= a_frame.rootBounds.size())
+				return "no sampled bound";
+			const auto& b = a_frame.rootBounds[a_root];
+			std::string live;
+			if (a_node) {
+				const auto& bound = a_node->worldBound;
+				const float dx = b.centre[0] - bound.center.x, dy = b.centre[1] - bound.center.y, dz = b.centre[2] - bound.center.z;
+				live = fmt::format(", live node bound ({:.0f} {:.0f} {:.0f} r {:.0f}), centre off {:.0f}, radius off {:.0f}", bound.center.x, bound.center.y, bound.center.z,
+					bound.radius, std::sqrt(dx * dx + dy * dy + dz * dz), b.radius - bound.radius);
+			}
+			return fmt::format("root bound ({:.0f} {:.0f} {:.0f} r {:.0f}), generation {}{}", b.centre[0], b.centre[1], b.centre[2], b.radius,
+				b.generation == a_generation ? "current" : fmt::format("{} (stale, the row's is {})", b.generation, a_generation), live);
+		}
+
+		/** @brief The fade root test's inputs for an actor, from the newest CPU cull frame, against the live root node. */
 		std::string SampledRootRows(const std::vector<RE::BSGeometry*>& a_shapes)
 		{
 			const auto frame = Direct::LatestCullFrame();
@@ -76,7 +93,6 @@ namespace DCLF::Diagnostics
 				return "; no CPU cull frame";
 			const auto& tables = *frame->tables;
 			const auto roots = Extensions::RootListOf(tables);
-			const auto rows = Direct::SampledRows(frame->frameValuesSeq);
 			for (auto* shape : a_shapes) {
 				const auto it = std::find(tables.objectGeometry.begin(), tables.objectGeometry.end(), shape);
 				if (it == tables.objectGeometry.end())
@@ -87,27 +103,9 @@ namespace DCLF::Diagnostics
 					return fmt::format("; '{}' (slot {}): no fade root", shape->name.c_str() ? shape->name.c_str() : "", slot);
 				const auto& row = roots.rows[root];
 				const auto* node = static_cast<const RE::NiAVObject*>(roots.NodeOf(root));
-				std::string sampled = "no sampled row";
-				if (row.object < rows.size()) {
-					const auto& placement = rows[row.object];
-					const float* c = placement.lodFadeNode;
-					std::string off;
-					if (node) {
-						const auto& live = node->worldBound;
-						const float dx = c[0] - live.center.x, dy = c[1] - live.center.y, dz = c[2] - live.center.z;
-						off = fmt::format(", live node bound ({:.0f} {:.0f} {:.0f} r {:.0f}), centre off {:.0f}", live.center.x, live.center.y, live.center.z, live.radius,
-							std::sqrt(dx * dx + dy * dy + dz * dz));
-					}
-					const auto* member = row.object < tables.objectGeometry.size() ? tables.objectGeometry[row.object] : nullptr;
-					const auto* memberProperty = member ? member->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
-					const auto* memberFade = memberProperty ? static_cast<const RE::NiAVObject*>(memberProperty->fadeNode) : nullptr;
-					const auto* memberRoot = static_cast<const RE::NiAVObject*>(roots.NodeOf(roots.RootOf(row.object)));
-					sampled = fmt::format("member {} '{}' (its fade node {}, its root {}) row 8 ({:.0f} {:.0f} {:.0f} w {:.0f}), sunEntry r {:.0f}{}", row.object,
-						member && member->name.c_str() ? member->name.c_str() : "(none)", !memberFade ? "none" : memberFade == node ? "this root" : "another node",
-						memberRoot == node ? "this one" : memberRoot ? "another" : "none", c[0], c[1], c[2], c[3], placement.sunEntry[3], off);
-				}
 				return fmt::format("; fade root {} '{}' (bits {:#x}{}{}), cull frame {}: {}", root, node && node->name.c_str() ? node->name.c_str() : "", row.bits,
-					(row.bits & kFadeRootPreprocessed) ? ", preprocessed" : "", (row.bits & kFadeRootPreprocessHidden) ? ", not visible" : "", frame->sceneFrame, sampled);
+					(row.bits & kFadeRootPreprocessed) ? ", preprocessed" : "", (row.bits & kFadeRootPreprocessHidden) ? ", not visible" : "", frame->sceneFrame,
+					RootBoundText(*frame, root, row.generation, node));
 			}
 			return "; no shape in the CPU cull frame";
 		}
@@ -378,7 +376,6 @@ namespace DCLF::Diagnostics
 							for (const RE::NiAVObject* node = geometry; node && !owner; node = node->parent)
 								owner = node->GetUserData();
 							const auto* base = owner ? owner->GetBaseObject() : nullptr;
-							const auto& tables = *snapshot.tables;
 							const std::uint32_t root = roots.RootOf(static_cast<std::uint32_t>(o));
 							const auto* rootNode = static_cast<const RE::NiAVObject*>(roots.NodeOf(root));
 							const auto* fadeNode = rootNode ? const_cast<RE::NiAVObject*>(rootNode)->AsFadeNode() : nullptr;
@@ -399,18 +396,12 @@ namespace DCLF::Diagnostics
 									cpuVerdict == 1 ? "in view" : cpuVerdict == 0 ? "culled" : "no program", cpuProgram == ~0u ? -1 : static_cast<std::int64_t>(cpuProgram),
 									input && cpuProgram == input->contribution.noProgram ? ", none" : "", cpuWhy.empty() ? "" : "; " + cpuWhy);
 							}
-							// FadeStateCS tests the root at its chosen member's placement row 8, against the root node's own bound.
+							// The fade stage tests the root against its node's sampled bound.
 							if (fadeHidden && root < roots.Size()) {
-								const std::uint32_t member = roots.rows[root].object;
-								const auto* memberGeometry = member < tables.objectGeometry.size() ? tables.objectGeometry[member] : nullptr;
-								const auto* property = memberGeometry ? memberGeometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
-								const auto row = LodFadeNodeOf(property);
-								const auto centre = rootNode ? rootNode->worldBound.center : RE::NiPoint3{};
-								logger::info("[DCLF] set parity, frame {}:   its root's centre for FadeStateCS: member {} '{}' row 8 ({:.0f} {:.0f} {:.0f} w {:.2f}), property fade node {}; "
-											 "the root node's bound ({:.0f} {:.0f} {:.0f}) r {:.0f}; listed near {:.0f} far {:.0f} radius {:.0f}",
-									snapshot.frame, member, memberGeometry && memberGeometry->name.c_str() ? memberGeometry->name.c_str() : "?", row[0], row[1], row[2], row[3],
-									property && property->fadeNode ? "present" : "none", centre.x, centre.y, centre.z, rootNode ? rootNode->worldBound.radius : -1.0f,
-									roots.rows[root].nearDistance, roots.rows[root].farDistance, roots.rows[root].radius);
+								const auto frame = Direct::LatestCullFrame();
+								logger::info("[DCLF] set parity, frame {}:   its root's test input: {}; listed near {:.0f} far {:.0f}", snapshot.frame,
+									frame ? RootBoundText(*frame, root, roots.rows[root].generation, rootNode) : std::string("no CPU cull frame"), roots.rows[root].nearDistance,
+									roots.rows[root].farDistance);
 							}
 						}
 					}
