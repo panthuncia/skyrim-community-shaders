@@ -4,13 +4,16 @@
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
 #include "Deferred.h"
+#include "EngineZones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
@@ -559,15 +562,21 @@ namespace RenderGraph::Engine::ImageSpace
 			return mip == AnchorPasses::kAllMips ? fmt::format("rt{}", index) : fmt::format("rt{}.mip{}", index, mip);
 		}
 
-		/** @brief The engine's shader object of a covered effect, or null before the manager made it. */
+		/**
+		* @brief The engine's shader object of a covered effect, or null before the manager made it. The manager keeps an effect object
+		* for the session once it made it, so the first one found is kept.
+		*/
 		const RE::BSImagespaceShader* ShaderOf(std::size_t a_effect)
 		{
+			static std::array<const RE::BSImagespaceShader*, kEffects.size()> s_made{};
+			if (s_made[a_effect])
+				return s_made[a_effect];
 			auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 			const std::uint32_t index = RE::ImageSpaceManager::GetCurrentIndex(kEffects[a_effect].id);
 			// NiTArray::size() counts non-null entries and would cut off the last effects. free_idx() is one past the highest set index.
 			if (!manager || index >= manager->effects.free_idx() || index >= manager->effects.capacity())
 				return nullptr;
-			return static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
+			return s_made[a_effect] = static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
 		}
 
 		void RaiseShape(std::string_view a_writer);
@@ -2641,6 +2650,7 @@ namespace RenderGraph::Engine::ImageSpace
 			return;
 		NativePost::ResolveGlobals();
 		NativePost::ResolveWorldGlobals();
+		Snapshot::RegisterCapture(&NativePost::CaptureBlock);
 		stl::detour_thunk<ShaderRender>(REL::RelocationID(100950, 107732));
 		stl::detour_thunk<HDRRender>(REL::RelocationID(100465, 107183));
 		stl::detour_thunk<PreTonemapComposites>(REL::RelocationID(99024, 105675));
@@ -2817,6 +2827,12 @@ namespace RenderGraph::Engine::ImageSpace
 			return;
 		}
 		EofFamily(a_source, a_final, a_engine);
+	}
+
+	const GameInputs* SnapshotInputs()
+	{
+		const auto* block = NativePost::NativeBlock();
+		return block ? &block->inputs : nullptr;
 	}
 
 	bool SceneInMain()

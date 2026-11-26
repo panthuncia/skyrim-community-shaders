@@ -306,6 +306,7 @@ namespace EngineZones
 
 		std::array<std::array<std::atomic<std::uint64_t>, Reads::kKinds>, kCount> g_entries{};
 		std::array<bool, kCount> g_hooked{};  // the call already went to a hook outside the engine's code
+		std::array<std::uintptr_t, kCount> g_sources{};  // each counted CALL's address
 		std::atomic<std::uint32_t> g_wrappedCount{ 0 };
 		std::atomic<bool> g_installed{ false };
 		const char* g_unsupported = "";
@@ -351,6 +352,13 @@ namespace EngineZones
 		std::array<Entry, sizeof...(I)> MakeEntries(std::index_sequence<I...>)
 		{
 			return { Entry{ reinterpret_cast<std::uintptr_t>(&Zone<I>::thunk), &Zone<I>::func }... };
+		}
+
+		/** @brief Every site's thunk and its forward target. */
+		const std::array<Entry, kCount>& Entries()
+		{
+			static const auto entries = MakeEntries(std::make_index_sequence<kCount>{});
+			return entries;
 		}
 
 		/** @brief Writes a_size bytes at a_at with one 16-byte compare-exchange. They must lie in one 16-byte line. */
@@ -424,7 +432,7 @@ namespace EngineZones
 		static SKSE::Trampoline trampoline("CS engine zones");
 		// Placed from the end of the engine's code (the default), so every call site in it reaches the trampoline with a rel32.
 		trampoline.create(kCount * 16 + 64);
-		static const auto entries = MakeEntries(std::make_index_sequence<kCount>{});
+		const auto& entries = Entries();
 		const auto moduleBase = REL::Module::get().base();
 		const auto text = REL::Module::get().segment(REL::Segment::textx);
 		const auto textBegin = text.address();
@@ -464,6 +472,7 @@ namespace EngineZones
 				continue;
 			}
 			g_hooked[i] = !engine;
+			g_sources[i] = src;
 			++written;
 		}
 		g_wrappedCount.store(written, std::memory_order_relaxed);
@@ -475,6 +484,15 @@ namespace EngineZones
 #endif
 		logger::info("[EngineZones] {} of {} engine call sites counted{}{}", written, kCount, kTracy,
 			aeOnly ? fmt::format("; {} sites have no SE match, so on SE the detector covers only part of the frame (AE-only sites)", aeOnly) : std::string());
+	}
+
+	std::uintptr_t CallTarget(std::uintptr_t a_callSite)
+	{
+		if (g_installed.load(std::memory_order_acquire))
+			for (std::size_t i = 0; i < kCount; ++i)
+				if (g_sources[i] == a_callSite)
+					return reinterpret_cast<std::uintptr_t>(*Entries()[i].func);
+		return a_callSite + 5 + *reinterpret_cast<const std::int32_t*>(a_callSite + 1);
 	}
 
 	void BeginFrame(std::uint8_t a_kind) noexcept

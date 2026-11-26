@@ -119,6 +119,87 @@ namespace NativePost
 	constexpr float kSsrCompositeScale = 0.8f;            // 0x141ad2868
 	constexpr float kWaterMoveScale = 0.025f;             // 0x14189eac8
 
+	/** @brief The reflections pass's and RenderSSAO's settings. Native mode reads them in the snapshot capture; guest at their hooks. */
+	WorldSettings ReadWorldSettings()
+	{
+		const auto& w = WG();
+		WorldSettings s;
+		s.ssrBlur = *w.ssrBlur;
+		s.ssrDownsample = *w.ssrDownsample;
+		s.ssrDivider = *w.ssrDivider;
+		s.ssrRay = { *w.ssrRay[0], *w.ssrRay[1], *w.ssrRay[2] };
+		s.saoPower = *w.saoPower;
+		s.saoBias = *w.saoBias;
+		s.saoRadius = *w.saoRadius;
+		s.saoRow3x = *w.saoRow3x;
+		s.saoRow3z = *w.saoRow3z;
+		s.saoContrast = *w.saoContrast;
+		s.saoCameraZw = *w.saoCameraZw;
+		s.saoHalf = *w.saoHalf;
+		s.saoContrastOn = *w.saoContrastOn;
+		s.saoFog = *w.saoFog;
+		s.saoTemporal = *w.saoTemporal;
+		s.improvedSnow = *w.improvedSnow;
+		s.saoLevels = *w.saoLevels;
+		s.sparkleToggle = *w.sparkleToggle;
+		s.sparkleOnly = *w.sparkleOnly;
+		s.sparkleNoAo = *w.sparkleNoAo;
+		s.sparkleNoise = *w.sparkleNoise;
+		for (std::size_t i = 0; i < s.sparkle.size(); ++i)
+			s.sparkle[i] = *w.sparkle[i];
+		s.sparkleMaxDistance = *w.sparkleMaxDistance;
+		s.sparkleShadow = *w.sparkleShadow;
+		s.sparkleColourMode = *w.sparkleColourMode;
+		s.sparkleColour = { *w.sparkleColour[0], *w.sparkleColour[1], *w.sparkleColour[2] };
+		s.ssrCompositeA = *w.ssrCompositeA;
+		s.ssrCompositeB = *w.ssrCompositeB;
+		// The sun's direction: its shadow light's world rotation, first column, normalised (zero when shorter than kSunLength).
+		const auto shadowSceneNode = *w.shaderState;  // State::shadowSceneNode[0]
+		if (const auto sun = Field<std::uintptr_t>(shadowSceneNode, 0x210)) {
+			const auto light = Field<std::uintptr_t>(sun, 0x48);
+			const float x = Field<float>(light, 0x7c), y = Field<float>(light, 0x88), z = Field<float>(light, 0x94);
+			const float length = std::sqrt(y * y + x * x + z * z);
+			if (length > kSunLength) {
+				const float inverse = 1.0f / length;
+				s.sunDirection = { inverse * x, inverse * y, inverse * z };
+			}
+		}
+		if (const auto sunLight = Field<std::uintptr_t>(shadowSceneNode, 0x200)) {
+			const auto light = Field<std::uintptr_t>(sunLight, 0x48);
+			s.sunColour = { Field<float>(light, 0x11c), Field<float>(light, 0x120), Field<float>(light, 0x124) };
+		}
+		return s;
+	}
+
+	/**
+	* @brief The ImageSpace block, in the snapshot capture (game thread). In a native world snapshot it also takes the adaptation reset
+	* Sky::Update asks for, which the HDR effect cleared when it ran, unless another mod keeps the HDR effect on the engine.
+	*/
+	void CaptureBlock(Snapshot::Builder& a_builder)
+	{
+		if (!G().ready)
+			return;
+		static std::uint32_t s_adaptResets = 0;
+		Block block;
+		ReadGameA(block.inputs);
+		ReadGameB(block.inputs);
+		block.world = ReadWorldSettings();
+		if (RenderGraph::Engine::Native::Requested() && Native(Family::kHdr) && a_builder.Built().kind == Snapshot::FrameKind::World && *G().adaptReset) {
+			*G().adaptReset = false;
+			++s_adaptResets;
+		}
+		block.adaptResets = s_adaptResets;
+		a_builder.Set(block);
+	}
+
+	/** @brief The reflections pass's and RenderSSAO's settings: the snapshot's in native mode, else read now. */
+	WorldSettings WorldSettingsNow()
+	{
+		if (const auto* block = NativeBlock())
+			return block->world;
+		return ReadWorldSettings();
+	}
+
 	/** @brief A step of the RenderWorld scopes: explicit rows (the setters copy their struct as rows), zero. */
 	NativeStep WorldStep(WorldScope a_scope, Effects::ImageSpaceEffectEnum a_effect, std::uint16_t a_variant, std::uint32_t a_rows)
 	{
@@ -182,13 +263,14 @@ namespace NativePost
 	{
 		using T = RE::RENDER_TARGET;
 		const auto& w = WG();
+		const auto s = WorldSettingsNow();
 		ReflectionInputs in;
 		in.normals = EngineNormalsParity();
-		if (*w.ssrDownsample && *w.ssrDivider > 1)
-			in.divider = *w.ssrDivider;
-		in.blur = *w.ssrBlur;
-		const float radius = *w.ssrRay[0];
-		in.ray = { radius, *w.ssrRay[1], *w.ssrRay[2], 1.0f / radius };
+		if (s.ssrDownsample && s.ssrDivider > 1)
+			in.divider = s.ssrDivider;
+		in.blur = s.ssrBlur;
+		const float radius = s.ssrRay[0];
+		in.ray = { radius, s.ssrRay[1], s.ssrRay[2], 1.0f / radius };
 		// The ray march's row 1: the camera data's view matrix (+0x30, row vectors) applied to the point (AE 0x1414d54b0).
 		const auto data = w.cameraData(RE::BSGraphics::State::GetSingleton(), a_camera, false);
 		if (data < 0x10000)
@@ -270,31 +352,52 @@ namespace NativePost
 		return static_cast<float>(s_random()) * kSaoAngle;
 	}
 
+	/** @brief The current camera's frustum and position, as RenderSSAO reads them. */
+	struct CameraValues
+	{
+		RE::NiFrustum frustum{};
+		std::array<float, 3> position{};
+	};
+
+	/** @brief The current camera at RenderSSAO's calls: the world camera, which is the snapshot's main camera in native mode. */
+	CameraValues CurrentCamera()
+	{
+		if (NativeBlock()) {
+			const auto& view = MainCamera();
+			return { view.frustum, { view.position.x, view.position.y, view.position.z } };
+		}
+		const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
+		CameraValues out;
+		out.frustum = Field<RE::NiFrustum>(camera, 0x150);
+		out.position = { Field<float>(camera, 0xa0), Field<float>(camera, 0xa4), Field<float>(camera, 0xa8) };
+		return out;
+	}
+
 	SsaoInputs ReadSsao()
 	{
-		const auto& w = WG();
-		const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
+		const auto s = WorldSettingsNow();
+		const auto camera = CurrentCamera();
 		SsaoInputs in;
-		in.nearZ = Field<float>(camera, 0x160);
-		in.farZ = Field<float>(camera, 0x164);
-		in.frustumX = 1.0f / (Field<float>(camera, 0x154) - Field<float>(camera, 0x150));
+		in.nearZ = camera.frustum.fNear;
+		in.farZ = camera.frustum.fFar;
+		in.frustumX = 1.0f / (camera.frustum.fRight - camera.frustum.fLeft);
 		in.frustumX += in.frustumX;
-		in.frustumY = 1.0f / (Field<float>(camera, 0x158) - Field<float>(camera, 0x15c));
+		in.frustumY = 1.0f / (camera.frustum.fTop - camera.frustum.fBottom);
 		in.frustumY += in.frustumY;
 		const auto& main = G().targets->renderTargetData[RE::RENDER_TARGET::kMAIN];
 		in.width = main.width;
 		in.height = main.height;
-		in.levels = *w.saoLevels;
-		in.contrastOn = *w.saoContrastOn;
-		in.half = *w.saoHalf;
-		in.temporal = *w.saoTemporal;
-		in.power = *w.saoPower;
-		in.bias = *w.saoBias;
-		in.radius = *w.saoRadius;
-		in.row3x = *w.saoRow3x;
-		in.row3z = *w.saoRow3z;
-		in.contrast = *w.saoContrast;
-		in.cameraZw = *w.saoCameraZw;
+		in.levels = s.saoLevels;
+		in.contrastOn = s.saoContrastOn;
+		in.half = s.saoHalf;
+		in.temporal = s.saoTemporal;
+		in.power = s.saoPower;
+		in.bias = s.saoBias;
+		in.radius = s.saoRadius;
+		in.row3x = s.saoRow3x;
+		in.row3z = s.saoRow3z;
+		in.contrast = s.saoContrast;
+		in.cameraZw = s.saoCameraZw;
 		in.angle = SsaoAngle();
 		in.normals = EngineNormalsParity();
 		in.history = static_cast<std::uint16_t>(Frame::Driver::Current().parity);
@@ -360,18 +463,19 @@ namespace NativePost
 	CompositeInputs ReadComposite(std::uintptr_t a_sao)
 	{
 		const auto& w = WG();
+		const auto s = WorldSettingsNow();
 		CompositeInputs in;
 		const bool sao = Field<bool>(a_sao, 0x50);
 		const auto fog = w.portalFog(*w.portalIndex);
-		const bool fogged = fog && *w.saoFog;
+		const bool fogged = fog && s.saoFog;
 		in.form = static_cast<std::uint8_t>(sao ? (fogged ? 1 : 0) : (fogged ? 2 : 3));
 		in.normals = EngineNormalsParity();
-		in.blur = *w.ssrBlur;
+		in.blur = s.ssrBlur;
 		if (in.form == 3)
 			return in;
 		auto& rows = in.rows;
 		rows = ExplicitRows(11);
-		const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
+		const auto camera = CurrentCamera();
 		if (fogged) {
 			const float nearFog = Field<float>(fog, 0x50), farFog = Field<float>(fog, 0x54);
 			if (farFog == nearFog)
@@ -380,29 +484,20 @@ namespace NativePost
 				const float scale = 1.0f / (farFog - nearFog);
 				SetId(rows, 0, scale * nearFog, scale, Field<float>(fog, 0x84), Field<float>(fog, 0x88));
 			}
-			const float range = *G().range;
+			const auto* block = NativeBlock();
+			const float range = block ? block->inputs.range : *G().range;
 			SetId(rows, 1, Field<float>(fog, 0x38), Field<float>(fog, 0x3c), Field<float>(fog, 0x40), range);
 			SetId(rows, 2, Field<float>(fog, 0x44), Field<float>(fog, 0x48), Field<float>(fog, 0x4c), range);
 		}
-		SetId(rows, 3, Field<float>(camera, 0x160), Field<float>(camera, 0x164));
-		// The sun's direction: its light's world rotation, first column, normalised (zero when shorter than kSunLength).
-		const auto shadowSceneNode = *w.shaderState;  // State::shadowSceneNode[0]
-		if (const auto sun = Field<std::uintptr_t>(shadowSceneNode, 0x210)) {
-			const auto light = Field<std::uintptr_t>(sun, 0x48);
-			const float x = Field<float>(light, 0x7c), y = Field<float>(light, 0x88), z = Field<float>(light, 0x94);
-			const float length = std::sqrt(y * y + x * x + z * z);
-			if (length > kSunLength) {
-				const float inverse = 1.0f / length;
-				SetId(rows, 4, inverse * x, inverse * y, inverse * z);
-			}
-		}
-		SetId(rows, 5, Field<float>(camera, 0xa0), Field<float>(camera, 0xa4), Field<float>(camera, 0xa8), *w.improvedSnow ? 1.0f : 0.0f);
-		const bool noise = *w.sparkleNoise;
-		SetId(rows, 6, *w.sparkle[0], *w.sparkle[5], *w.sparkle[2], noise ? *w.sparkle[1] + kSparkleNoiseDensity : *w.sparkle[1]);
-		SetId(rows, 7, noise ? *w.sparkle[3] + 1.0f : *w.sparkle[3], *w.sparkle[4], *w.sparkleToggle ? 1.0f : 0.0f, *w.sparkleOnly ? 1.0f : 0.0f);
-		SetId(rows, 8, *w.sparkleNoAo ? 1.0f : 0.0f, *w.sparkleMaxDistance, noise ? 1.0f : 0.0f);
+		SetId(rows, 3, camera.frustum.fNear, camera.frustum.fFar);
+		SetId(rows, 4, s.sunDirection[0], s.sunDirection[1], s.sunDirection[2]);
+		SetId(rows, 5, camera.position[0], camera.position[1], camera.position[2], s.improvedSnow ? 1.0f : 0.0f);
+		const bool noise = s.sparkleNoise;
+		SetId(rows, 6, s.sparkle[0], s.sparkle[5], s.sparkle[2], noise ? s.sparkle[1] + kSparkleNoiseDensity : s.sparkle[1]);
+		SetId(rows, 7, noise ? s.sparkle[3] + 1.0f : s.sparkle[3], s.sparkle[4], s.sparkleToggle ? 1.0f : 0.0f, s.sparkleOnly ? 1.0f : 0.0f);
+		SetId(rows, 8, s.sparkleNoAo ? 1.0f : 0.0f, s.sparkleMaxDistance, noise ? 1.0f : 0.0f);
 		std::array<float, 3> colour{};
-		switch (*w.sparkleColourMode) {
+		switch (s.sparkleColourMode) {
 		case 0:
 			colour = { Field<float>(a_sao, 0x58), Field<float>(a_sao, 0x5c), Field<float>(a_sao, 0x60) };
 			break;
@@ -410,19 +505,17 @@ namespace NativePost
 			colour = { Field<float>(a_sao, 0x64), Field<float>(a_sao, 0x68), Field<float>(a_sao, 0x6c) };
 			break;
 		case 2:
-			{
-				const auto light = Field<std::uintptr_t>(Field<std::uintptr_t>(shadowSceneNode, 0x200), 0x48);
-				colour = { Field<float>(light, 0x11c), Field<float>(light, 0x120), Field<float>(light, 0x124) };
-				break;
-			}
+			colour = s.sunColour;
+			break;
 		case 3:
-			colour = { *w.sparkleColour[0], *w.sparkleColour[1], *w.sparkleColour[2] };
+			colour = s.sparkleColour;
 			break;
 		default:
 			break;
 		}
-		SetId(rows, 9, *w.sparkleShadow, colour[0], colour[1], colour[2]);
-		SetId(rows, 10, *w.ssrCompositeA * kSsrCompositeScale, *w.ssrCompositeB, *w.saoReflections ? 1.0f : 0.0f);
+		SetId(rows, 9, s.sparkleShadow, colour[0], colour[1], colour[2]);
+		// Main::RenderWorld copies the reflections' activity into saoReflections just before the composite: a render read.
+		SetId(rows, 10, s.ssrCompositeA * kSsrCompositeScale, s.ssrCompositeB, *w.saoReflections ? 1.0f : 0.0f);
 		return in;
 	}
 
@@ -439,7 +532,10 @@ namespace NativePost
 		return step;
 	}
 
-	/** @brief The water blend's row (AE 107285): the current camera's near and far, the menu flag, and how far the eye moved. */
+	/**
+	* @brief The water blend's row (AE 107285): the current camera's near and far, the menu flag, and how far the eye moved. The far
+	* plane here is the one the render half set for the water (not the snapshot camera's), so the camera stays a render read.
+	*/
 	NativeStep WaterBlendStep()
 	{
 		const auto camera = reinterpret_cast<std::uintptr_t>(*G().currentCamera);
@@ -447,9 +543,11 @@ namespace NativePost
 		const auto now = shadow.posAdjust.getEye(), before = shadow.previousPosAdjust.getEye();
 		const float dx = before.x - now.x, dy = before.y - now.y, dz = before.z - now.z;
 		const float moved = (std::max)(1.0f - std::sqrt(dy * dy + dx * dx + dz * dz) * kWaterMoveScale, 0.0f);
-		auto* ui = RE::UI::GetSingleton();
+		const auto* block = NativeBlock();
+		auto* ui = block ? nullptr : RE::UI::GetSingleton();
+		const bool menu = block ? block->inputs.menu : ui && ui->numPausesGame != 0;
 		auto step = WorldStep(WorldScope::WaterBlend, Effects::ISWaterBlend, static_cast<std::uint16_t>(EngineFrameCounter() & 1u), 1);
-		SetId(step.rows, 0, Field<float>(camera, 0x160), Field<float>(camera, 0x164), ui && ui->numPausesGame != 0 ? 1.0f : 0.0f, moved);
+		SetId(step.rows, 0, Field<float>(camera, 0x160), Field<float>(camera, 0x164), menu ? 1.0f : 0.0f, moved);
 		return step;
 	}
 

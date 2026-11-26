@@ -207,51 +207,31 @@ namespace NativePost
 	/** @brief ImageSpaceManager +0xC8 to +0x15C: the blended ImageSpace data (HDR, cinematic, tint, fade, blurs, DoF). */
 	constexpr std::uintptr_t kDataFirst = 0xC8, kDataEnd = 0x15C;
 
-	/** @brief The snapshot. Values only, no pointers. "A" fields are read at Renderer::Begin, "B" at the post chain's entry. */
-	struct ImageSpaceFrame
+	static_assert(sizeof(GameInputs::data) == kDataEnd - kDataFirst);
+
+	/**
+	* @brief The frame's inputs. Values only, no pointers. The game's part (GameInputs) comes from the snapshot in native mode and is
+	* read at Renderer::Begin (A) and the post chain's entry (B) in guest mode. The rest is render state, read at A, B or the
+	* end-of-frame entry.
+	*/
+	struct ImageSpaceFrame : GameInputs
 	{
-		bool read = false;  // A: the manager exists (AE)
 		bool readB = false;
-		std::array<float, (kDataEnd - kDataFirst) / 4> data{};  // A
-		// A: settings.
-		bool filmic = false, worldMap = false, adaptOff = false, stopAt2 = false, menu = false;
-		float reinhardWhite = 0, filmicWhite = 0, saturationBoost = 0, contrastBoost = 0, brightnessBoost = 0, adaptSpeed = 0, adaptStrength = 0, bloomBoost = 0;
-		float frameTime = 0, menuTimer = 0, range = 1;
-		// A: the blur effects of the bloom (effects 0x17 + r): their radius (+0x90) and bright pass flag (+0x94).
-		std::array<std::int32_t, 7> blurRadius{};
-		std::array<bool, 7> blurBright{};
 		// A: target sizes, from the render target manager.
 		std::array<std::pair<std::uint32_t, std::uint32_t>, RE::RENDER_TARGET::kTOTAL> sizes{};
 		float ratioX = 1, ratioY = 1;
 		bool locked = false;
-		bool hdr = false, eof = false, usesLdr = false, volumetric = false /* B */, sil = false, iblf = false, upsample = false;
+		bool upsample = false;
+		bool volumetric = false;          // B: VL is on and its effect is active
 		std::array<float, 3> vlColour{};  // B
-		float taaK = 1, taaThreshold = 0;
-		std::array<float, 4> taaBlend{};
 		// B.
-		std::uint8_t slots = 0;          // active end-of-frame slots: refraction turns on mid-frame
+		std::uint8_t slots = 0;          // active end-of-frame slots: the game's, and refraction, which turns on mid-frame
 		std::uint32_t vlParity = 0;      // VL Render bumps the counter during the frame
 		float cameraNear = 0, cameraFar = 0;  // the world camera, current at the end of frame
 		std::array<float, 2> jitter{};   // CS's (PostChain::Jitter)
-		bool screenshot = false;         // a save asks with a frame's notice
-		std::uint32_t frameCounter = 0;
-		// B: the slot effects' inputs.
-		std::array<float, 4> refractionTint{};  // manager +0x98
-		std::array<bool, 5> dofSteps{};         // the depth of field's step flags (its +0x98 array): downsample, blur, composites 2 to 4
-		bool dofCompute = false;
-		float dofNear = 0, dofFar = 0;          // the camera RenderWorldPostProcess copies into the depth of field (+0x14C, +0x150)
-		std::int32_t underwater = 0;
-		bool underwaterData = false;            // manager +0xB8, the underwater depth of field
-		std::array<float, 4> underwaterDof{};   // its +0x40 to +0x4C
-		std::array<float, 7> dofIni{}, dofCustom{};
-		std::int32_t radialEffect = -1;         // the radial blur's shader (by quality), a kEffects index
-		bool dofDynamic = false, radialDynamic = false;  // the depth of field's and radial blur's ImageSpaceEffect +0x88
-		// B: the full-screen blur (slot 6) and get hit (slot 7). Their blurs are effects 9 to 15: radius (+0x90) and flag (+0x88).
-		std::array<std::int32_t, 7> slotBlurRadius{};
-		std::array<bool, 7> slotBlurDynamic{};
-		bool fullBlurDynamic = false, fullBlurLegacy = false, fullBlurAtLeast2 = false;
-		bool getHitDynamic = false;
-		float getHitScale = 0, getHitAmount = 0, timer = 0;
+		std::array<bool, 5> dofSteps{};  // the depth of field's step flags (its +0x98 array): downsample, blur, composites 2 to 4
+		float dofNear = 0, dofFar = 0;   // the camera RenderWorldPostProcess copies into the depth of field (+0x14C, +0x150)
+		bool fullBlurAtLeast2 = false;   // the full-screen blur's camera test (Main::RenderWorld)
 		// The end-of-frame entry: Upscaling's call-site hook turns TAA on just before it, and sets the dynamic resolution.
 		bool taa = false;
 		std::int32_t taaMode = 0;
@@ -302,6 +282,7 @@ namespace NativePost
 		std::array<std::uint64_t, 7> native{}, engine{};
 		std::uint64_t slotNative = 0, slotEngine = 0;  // slot effects staged natively, and run through the engine's RenderEffect
 		std::uint8_t lastSlots = 0;  // the last B read's, for the log
+		std::uint32_t adaptResets = 0;  // the snapshot's adaptation reset count the HDR effect last applied (native)
 	};
 
 	Runtime& R()
@@ -338,7 +319,139 @@ namespace NativePost
 	/** @brief Done once, at the first frame with the ImageSpace manager (ImageSpace.cpp, after the hooks it checks). */
 	void CheckForeignHooksOnce();
 
-	/** @brief Read point A, Renderer::Begin. Render owner. */
+	/** @brief The effect in the manager's slot a_slot, or 0. */
+	std::uintptr_t EffectAt(std::uint32_t a_slot)
+	{
+		auto* manager = RE::ImageSpaceManager::GetSingleton();
+		return manager && a_slot < manager->effects.free_idx() ? reinterpret_cast<std::uintptr_t>(manager->effects[static_cast<std::uint16_t>(a_slot)]) : 0;
+	}
+
+	/**
+	* @brief The game's inputs guest reads at Renderer::Begin (A): the ImageSpace data, the HDR, adaptation and TAA settings, the
+	* bloom's blur effects and the chain's switches. Native mode reads them in the snapshot capture.
+	*/
+	void ReadGameA(GameInputs& a_in)
+	{
+		const auto& g = G();
+		const auto base = reinterpret_cast<std::uintptr_t>(CS_ENGINE_READ(ImageSpace, CapturePoint, RE::ImageSpaceManager::GetSingleton()));
+		if (!g.ready || !base)
+			return;
+		std::memcpy(a_in.data.data(), reinterpret_cast<const void*>(base + kDataFirst), sizeof(a_in.data));
+		a_in.filmic = *g.filmic;
+		a_in.worldMap = *g.worldMap;
+		a_in.adaptOff = *g.adaptOff;
+		a_in.stopAt2 = *g.stopAt2;
+		auto* ui = CS_ENGINE_READ(UI, CapturePoint, RE::UI::GetSingleton());
+		a_in.menu = ui && ui->numPausesGame != 0;
+		a_in.reinhardWhite = *g.reinhardWhite;
+		a_in.filmicWhite = *g.filmicWhite;
+		a_in.saturationBoost = *g.saturationBoost;
+		a_in.contrastBoost = a_in.worldMap ? *g.contrastBoostMap : *g.contrastBoost;
+		a_in.brightnessBoost = a_in.worldMap ? *g.brightnessBoostMap : *g.brightnessBoost;
+		a_in.adaptSpeed = *g.adaptSpeed;
+		a_in.adaptStrength = *g.adaptStrength;
+		a_in.bloomBoost = a_in.worldMap ? *g.bloomBoostMap : *g.bloomBoost;
+		a_in.frameTime = *g.frameTime;
+		a_in.menuTimer = *g.menuTimer;
+		a_in.range = *g.range;
+		for (std::uint32_t r7 = 0; r7 < 7; ++r7) {
+			const auto blur = EffectAt(0x17u + r7);
+			a_in.blurRadius[r7] = blur ? Field<std::int32_t>(blur, 0x90) : 0;
+			a_in.blurBright[r7] = blur && Field<bool>(blur, 0x94);
+		}
+		a_in.hdr = *g.hdr;
+		a_in.eof = *g.eof;
+		a_in.usesLdr = Field<bool>(base, 0x210);
+		if (const auto sil = Field<std::uintptr_t>(base, 0x1d8))
+			a_in.sil = Field<bool>(sil, 0x10);
+		if (const auto iblf = Field<std::uintptr_t>(base, 0x180))
+			a_in.iblf = Field<bool>(iblf, 0x30);
+		a_in.taaK = *g.taaK;
+		std::memcpy(a_in.taaBlend.data(), g.taaBlend, sizeof(a_in.taaBlend));
+		a_in.taaThreshold = *g.taaThreshold;
+		a_in.read = true;
+	}
+
+	/**
+	* @brief The game's inputs guest reads at the post chain's entry (B): the slots the game turns on, VL's activity, a save's
+	* screenshot request, the frame counter and the slot effects' inputs. Native mode reads them in the snapshot capture.
+	*/
+	void ReadGameB(GameInputs& a_in)
+	{
+		const auto& g = G();
+		const auto base = reinterpret_cast<std::uintptr_t>(CS_ENGINE_READ(ImageSpace, CapturePoint, RE::ImageSpaceManager::GetSingleton()));
+		if (!g.ready || !base)
+			return;
+		// The slots' IsActive read only game state (the ImageSpace data, the effects' enabled flags, the underwater state), except
+		// refraction's, which reads the flags its geometry sets while the frame draws (ReadB).
+		a_in.gameSlots = 0;
+		if (a_in.eof)
+			for (std::uint32_t slot = 0; slot < 8; ++slot) {
+				auto* effect = reinterpret_cast<RE::ImageSpaceEffect*>(EffectAt(slot));
+				if (slot != 1 && effect && effect->IsActive())
+					a_in.gameSlots |= static_cast<std::uint8_t>(1u << slot);
+			}
+		a_in.screenshot = Field<bool>(base, 0x211);
+		a_in.frameCounter = *g.frameCounter;
+		std::memcpy(a_in.refractionTint.data(), reinterpret_cast<const void*>(base + 0x98), sizeof(a_in.refractionTint));
+		a_in.dofCompute = *g.dofCompute;
+		a_in.underwater = *g.underwater;
+		const auto underwater = Field<std::uintptr_t>(base, 0xb8);
+		a_in.underwaterData = underwater != 0;
+		a_in.underwaterDof = {};
+		if (underwater)
+			std::memcpy(a_in.underwaterDof.data(), reinterpret_cast<const void*>(underwater + 0x40), sizeof(a_in.underwaterDof));
+		for (std::size_t i = 0; i < 7; ++i) {
+			a_in.dofIni[i] = *g.dofIni[i];
+			a_in.dofCustom[i] = *g.dofCustom[i];
+		}
+		a_in.dofDynamic = EffectAt(3) && Field<bool>(EffectAt(3), 0x88);
+		a_in.radialDynamic = EffectAt(5) && Field<bool>(EffectAt(5), 0x88);
+		// The radial blur draws the one shader its Setup picked by quality (AE 107750): its list's first entry.
+		a_in.radialEffect = -1;
+		if (const auto radial = EffectAt(5))
+			if (const auto* list = Field<RE::ImageSpaceEffect* const*>(radial, 0x18); list && list[0])
+				a_in.radialEffect = EffectOf(static_cast<const RE::BSImagespaceShader*>(list[0]));
+		// The full-screen blur (slot 6) and get hit (slot 7). Their blurs are effects 9 to 15: radius (+0x90) and flag (+0x88).
+		for (std::uint32_t r = 0; r < 7; ++r)
+			if (const auto blur = EffectAt(9 + r)) {
+				a_in.slotBlurRadius[r] = Field<std::int32_t>(blur, 0x90);
+				a_in.slotBlurDynamic[r] = Field<bool>(blur, 0x88);
+			}
+		if (const auto full = EffectAt(6)) {
+			a_in.fullBlurDynamic = Field<bool>(full, 0x88);
+			// Legacy Graphics Compatibility's full-screen blur adapter adds an eleventh entry (its HasElevenSlots and the copy there).
+			const auto& object = *reinterpret_cast<const RE::ImageSpaceEffect*>(full);
+			a_in.fullBlurLegacy = object.effects.size() >= 11 && object.effectParams.size() >= 11 && object.effectTextures.size() >= 11 && object.effects[10];
+		}
+		a_in.getHitDynamic = EffectAt(7) && Field<bool>(EffectAt(7), 0x88);
+		a_in.getHitScale = *g.getHitScale;
+		a_in.getHitAmount = *g.getHitAmount;
+		a_in.timer = *g.timer;
+	}
+
+	/** @brief The adopted snapshot's ImageSpace block in native mode, else null: guest reads the game at its hooks. */
+	const Block* NativeBlock()
+	{
+		if (!RenderGraph::Engine::Native::Requested())
+			return nullptr;
+		const auto& snapshot = Snapshot::Current();
+		return snapshot ? snapshot->Block<Block>() : nullptr;
+	}
+
+	/** @brief The snapshot's main camera, in native mode. A world frame without one is fatal. */
+	const Snapshot::CameraView& MainCamera()
+	{
+		const auto& snapshot = Snapshot::Current();
+		if (!snapshot || !snapshot->cameras.Current(Snapshot::ViewId::Main).valid)
+			RenderGraph::Fatal("ImageSpace", "native post chain: the snapshot has no main camera");
+		return snapshot->cameras.Current(Snapshot::ViewId::Main);
+	}
+
+	/** @brief The reflections pass's and RenderSSAO's settings, read now (NativeWorld.inl). */
+	WorldSettings ReadWorldSettings();
+
+	/** @brief Read point A, Renderer::Begin: the game's inputs (native: the snapshot's) and the render state. Render owner. */
 	void ReadA()
 	{
 		ZoneScopedN("CS.PostNative.ReadA");
@@ -350,108 +463,29 @@ namespace NativePost
 		if (!g.ready || !base)
 			return;
 		CheckForeignHooksOnce();
-		std::memcpy(f.data.data(), reinterpret_cast<const void*>(base + kDataFirst), sizeof(f.data));
-		f.filmic = *g.filmic;
-		f.worldMap = *g.worldMap;
-		f.adaptOff = *g.adaptOff;
-		f.stopAt2 = *g.stopAt2;
-		auto* ui = RE::UI::GetSingleton();
-		f.menu = ui && ui->numPausesGame != 0;
-		f.reinhardWhite = *g.reinhardWhite;
-		f.filmicWhite = *g.filmicWhite;
-		f.saturationBoost = *g.saturationBoost;
-		f.contrastBoost = f.worldMap ? *g.contrastBoostMap : *g.contrastBoost;
-		f.brightnessBoost = f.worldMap ? *g.brightnessBoostMap : *g.brightnessBoost;
-		f.adaptSpeed = *g.adaptSpeed;
-		f.adaptStrength = *g.adaptStrength;
-		f.bloomBoost = f.worldMap ? *g.bloomBoostMap : *g.bloomBoost;
-		f.frameTime = *g.frameTime;
-		f.menuTimer = *g.menuTimer;
-		f.range = *g.range;
-		auto* manager = RE::ImageSpaceManager::GetSingleton();
-		for (std::uint32_t r7 = 0; r7 < 7; ++r7) {
-			const auto index = 0x17u + r7;
-			const auto* blur = index < manager->effects.free_idx() ? manager->effects[static_cast<std::uint16_t>(index)] : nullptr;
-			f.blurRadius[r7] = blur ? Field<std::int32_t>(reinterpret_cast<std::uintptr_t>(blur), 0x90) : 0;
-			f.blurBright[r7] = blur && Field<bool>(reinterpret_cast<std::uintptr_t>(blur), 0x94);
-		}
+		const auto* block = NativeBlock();
+		if (block)
+			static_cast<GameInputs&>(f) = block->inputs;
+		else
+			ReadGameA(f);
+		if (!f.read)
+			return;
 		for (std::uint32_t t = 0; t < f.sizes.size(); ++t)
 			f.sizes[t] = { g.targets->renderTargetData[t].width, g.targets->renderTargetData[t].height };
-		f.hdr = *g.hdr;
-		f.eof = *g.eof;
-		f.usesLdr = Field<bool>(base, 0x210);
-		if (const auto sil = Field<std::uintptr_t>(base, 0x1d8))
-			f.sil = Field<bool>(sil, 0x10);
-		if (const auto iblf = Field<std::uintptr_t>(base, 0x180))
-			f.iblf = Field<bool>(iblf, 0x30);
-		f.taaK = *g.taaK;
-		std::memcpy(f.taaBlend.data(), g.taaBlend, sizeof(f.taaBlend));
-		f.taaThreshold = *g.taaThreshold;
-		f.read = true;
 		r.state = EngineState();
+		// Native mode's resets come from the snapshot's count (RunHdr), not the engine's flag.
+		if (block)
+			r.state.resetPending = false;
 		if (Frame::Driver::Current().frame % 300 == 0)
 			logger::info("[ORG] native post chain: {} steps staged natively; native frames hdr {} eof {} composites {} post {}, "
 						 "end-of-frame frames on the engine {} (last slots {:#x}); slot effects native {}, through RenderEffect {}; "
-						 "native reflections {} SSAO calls {} water blends {}, on the engine {} {} {}",
+						 "native reflections {} SSAO calls {} water blends {}, on the engine {} {} {}; game inputs from the {}",
 				r.staged, r.native[0], r.native[1], r.native[2], r.native[3], r.engine[1], r.lastSlots, r.slotNative, r.slotEngine, r.native[4],
-				r.native[5], r.native[6], r.engine[4], r.engine[5], r.engine[6]);
+				r.native[5], r.native[6], r.engine[4], r.engine[5], r.engine[6], block ? "snapshot" : "engine at its hooks");
 		r.frameNumber = Frame::Driver::Current().frame;
 	}
 
-	/** @brief The slot effects' inputs, read at B with the slot activity. */
-	void ReadSlotInputs(ImageSpaceFrame& a_f, std::uintptr_t a_base)
-	{
-		const auto& g = G();
-		auto* manager = RE::ImageSpaceManager::GetSingleton();
-		const auto effect = [&](std::uint32_t a_slot) -> std::uintptr_t {
-			return a_slot < manager->effects.free_idx() ? reinterpret_cast<std::uintptr_t>(manager->effects[static_cast<std::uint16_t>(a_slot)]) : 0;
-		};
-		std::memcpy(a_f.refractionTint.data(), reinterpret_cast<const void*>(a_base + 0x98), sizeof(a_f.refractionTint));
-		if (const auto dof = effect(3))
-			if (const auto* steps = Field<const bool*>(dof, 0x98))
-				std::memcpy(a_f.dofSteps.data(), steps, sizeof(a_f.dofSteps));
-		a_f.dofCompute = *g.dofCompute;
-		if (*g.dofCamera) {
-			a_f.dofNear = Field<float>(*g.dofCamera, 0x160);
-			a_f.dofFar = Field<float>(*g.dofCamera, 0x164);
-		}
-		a_f.underwater = *g.underwater;
-		const auto underwater = Field<std::uintptr_t>(a_base, 0xb8);
-		a_f.underwaterData = underwater != 0;
-		if (underwater)
-			std::memcpy(a_f.underwaterDof.data(), reinterpret_cast<const void*>(underwater + 0x40), sizeof(a_f.underwaterDof));
-		for (std::size_t i = 0; i < 7; ++i) {
-			a_f.dofIni[i] = *g.dofIni[i];
-			a_f.dofCustom[i] = *g.dofCustom[i];
-		}
-		// The radial blur draws the one shader its Setup picked by quality (AE 107750): its list's first entry.
-		a_f.dofDynamic = effect(3) && Field<bool>(effect(3), 0x88);
-		a_f.radialDynamic = effect(5) && Field<bool>(effect(5), 0x88);
-		a_f.radialEffect = -1;
-		if (const auto radial = effect(5))
-			if (const auto* list = Field<RE::ImageSpaceEffect* const*>(radial, 0x18); list && list[0])
-				a_f.radialEffect = EffectOf(static_cast<const RE::BSImagespaceShader*>(list[0]));
-		for (std::uint32_t r = 0; r < 7; ++r)
-			if (const auto blur = effect(9 + r)) {
-				a_f.slotBlurRadius[r] = Field<std::int32_t>(blur, 0x90);
-				a_f.slotBlurDynamic[r] = Field<bool>(blur, 0x88);
-			}
-		if (const auto full = effect(6)) {
-			a_f.fullBlurDynamic = Field<bool>(full, 0x88);
-			// Legacy Graphics Compatibility's full-screen blur adapter adds an eleventh entry (its HasElevenSlots and the copy there).
-			const auto& object = *reinterpret_cast<const RE::ImageSpaceEffect*>(full);
-			a_f.fullBlurLegacy = object.effects.size() >= 11 && object.effectParams.size() >= 11 && object.effectTextures.size() >= 11 && object.effects[10];
-		}
-		// The full-screen blur's Render (AE 108563) blurs at radius 2 or more while Main::RenderWorld saw the camera move.
-		const bool reset = g.blurCamera[0] == 1.0f && g.blurCamera[1] == 1.0f && g.blurCamera[2] == 1.0f;
-		a_f.fullBlurAtLeast2 = !reset && *g.blurCameraMoved && *g.blurCameraGate;
-		a_f.getHitDynamic = effect(7) && Field<bool>(effect(7), 0x88);
-		a_f.getHitScale = *g.getHitScale;
-		a_f.getHitAmount = *g.getHitAmount;
-		a_f.timer = *g.timer;
-	}
-
-	/** @brief Read point B, RenderWorldPostProcess's entry. Render owner. */
+	/** @brief Read point B, RenderWorldPostProcess's entry: refraction's slot and the render state the frame wrote so far. Render owner. */
 	void ReadB()
 	{
 		ZoneScopedN("CS.PostNative.ReadB");
@@ -461,31 +495,41 @@ namespace NativePost
 		f.readB = false;
 		if (!f.read || !base)
 			return;
-		auto* manager = RE::ImageSpaceManager::GetSingleton();
-		f.slots = 0;
-		if (f.eof)
-			for (std::uint32_t slot = 0; slot < 8; ++slot) {
-				auto* effect = slot < manager->effects.free_idx() ? manager->effects[static_cast<std::uint16_t>(slot)] : nullptr;
-				if (effect && effect->IsActive())
-					f.slots |= static_cast<std::uint8_t>(1u << slot);
-			}
-		// VL's activity changes with the cell (observe saw an interior frame turn it off after A).
+		const auto* block = NativeBlock();
+		if (!block)
+			ReadGameB(f);
+		f.slots = f.gameSlots;
+		if (auto* refraction = reinterpret_cast<RE::ImageSpaceEffect*>(EffectAt(1)); f.eof && refraction && refraction->IsActive())
+			f.slots |= 1u << 1;
+		R().lastSlots = f.slots;
+		// VL's activity changes with the cell during the frame (VL Render), so it stays a read here.
 		const auto vlEffect = Field<std::uintptr_t>(base, 0x170);
 		f.volumetric = *g.volumetric && vlEffect && Field<bool>(vlEffect, 0x08);
-		R().lastSlots = f.slots;
 		f.vlParity = Frame::PostChain::VolumetricParity();
 		// The VL composite's colour: the sun shadow light's diffuse blended with the VL colour (107017). VL Render (107023) fills the
-		// settings block during the frame, so this is a B value (observe found the A value stale).
+		// settings block during the frame.
 		if (const auto settings = g.vlSettings())
 			g.vlColour(settings, &f.vlColour[0], &f.vlColour[1], &f.vlColour[2]);
-		if (const auto camera = *g.worldSceneGraph ? Field<std::uintptr_t>(*g.worldSceneGraph, 0x128) : 0) {
+		// The world camera: the snapshot's main camera in native mode.
+		if (block) {
+			const auto& frustum = MainCamera().frustum;
+			f.cameraNear = frustum.fNear;
+			f.cameraFar = frustum.fFar;
+		} else if (const auto camera = *g.worldSceneGraph ? Field<std::uintptr_t>(*g.worldSceneGraph, 0x128) : 0) {
 			f.cameraNear = Field<float>(camera, 0x160);
 			f.cameraFar = Field<float>(camera, 0x164);
 		}
 		f.jitter = Frame::PostChain::Jitter();
-		f.screenshot = Field<bool>(base, 0x211);
-		f.frameCounter = *g.frameCounter;
-		ReadSlotInputs(f, base);
+		if (const auto dof = EffectAt(3))
+			if (const auto* steps = Field<const bool*>(dof, 0x98))
+				std::memcpy(f.dofSteps.data(), steps, sizeof(f.dofSteps));
+		if (*g.dofCamera) {
+			f.dofNear = Field<float>(*g.dofCamera, 0x160);
+			f.dofFar = Field<float>(*g.dofCamera, 0x164);
+		}
+		// The full-screen blur's Render (AE 108563) blurs at radius 2 or more while Main::RenderWorld saw the camera move.
+		const bool reset = g.blurCamera[0] == 1.0f && g.blurCamera[1] == 1.0f && g.blurCamera[2] == 1.0f;
+		f.fullBlurAtLeast2 = !reset && *g.blurCameraMoved && *g.blurCameraGate;
 		f.readB = true;
 	}
 
@@ -1245,7 +1289,9 @@ namespace NativePost
 	{
 		auto& g = G();
 		*g.lumParity = a_state.lumParity;
-		*g.adaptReset = false;
+		// Native mode's capture takes the reset on the game thread.
+		if (!NativeBlock())
+			*g.adaptReset = false;
 		auto& adapted = *g.adapted;
 		// As the engine's ImageSpaceTexture assignment and reset (AE 0x1414e8d60, 0x1414e8b50): a target, no texture, no depth.
 		if (adapted.texture)
@@ -1293,6 +1339,12 @@ namespace NativePost
 		if (levels == 0) {
 			Frame::Driver::NoteLaggedWork(Frame::SegmentId::Post);
 			return;
+		}
+		// The adaptation reset follows the snapshot's count: the first HDR effect after the count moved resets, however often a
+		// snapshot renders and whatever frames without the effect came between.
+		if (const auto* block = NativeBlock(); block && block->adaptResets != r.adaptResets) {
+			r.state.resetPending = true;
+			r.adaptResets = block->adaptResets;
 		}
 		EnterScope(ScopeKind::HDR);
 		{
@@ -1503,7 +1555,8 @@ namespace NativePost
 		g.composites(RE::ImageSpaceManager::GetSingleton(), 1, 1);
 		using EndOfFrame = void (*)(void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
 		const auto site = g.eofCallSite;
-		const auto endOfFrame = reinterpret_cast<EndOfFrame>(site + 5 + *reinterpret_cast<const std::int32_t*>(site + 1));
+		// CS calls it, not the engine: past the engine-render detector's count.
+		const auto endOfFrame = reinterpret_cast<EndOfFrame>(EngineZones::CallTarget(site));
 		endOfFrame(RE::ImageSpaceManager::GetSingleton(), 1, a_target, 1, 0);
 		std::memcpy(reinterpret_cast<std::byte*>(Field<std::uintptr_t>(*g.worldSceneGraph, 0x128)) + 0x174, port.data(), port.size());
 		tls->taskFlag = taskFlag;

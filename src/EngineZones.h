@@ -17,6 +17,13 @@ namespace EngineZones
 	/** @brief Renderer::Begin, with the new frame's RenderGraph::Frame::Kind: closes the last frame's count. Begin's thread. */
 	void BeginFrame(std::uint8_t a_kind) noexcept;
 
+	/**
+	* @brief The function the CALL at a_callSite leads to, past this detector's counting thunk: the hooks chained there, then the engine's
+	* function. CS code that calls through an engine call site itself (to run what other features hook there) uses it, so the table
+	* counts only the engine's own calls.
+	*/
+	std::uintptr_t CallTarget(std::uintptr_t a_callSite);
+
 	/** @brief Logs the call-site table (under CS_SNAPSHOT_DETECT=1) and writes its summary to the test status. a_when names the moment. */
 	void Report(const char* a_when);
 }
