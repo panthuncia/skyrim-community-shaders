@@ -1555,7 +1555,8 @@ namespace NativePost
 		g.composites(RE::ImageSpaceManager::GetSingleton(), 1, 1);
 		using EndOfFrame = void (*)(void*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
 		const auto site = g.eofCallSite;
-		const auto endOfFrame = reinterpret_cast<EndOfFrame>(site + 5 + *reinterpret_cast<const std::int32_t*>(site + 1));
+		// CS calls it, not the engine: past the engine-render detector's count.
+		const auto endOfFrame = reinterpret_cast<EndOfFrame>(EngineZones::CallTarget(site));
 		endOfFrame(RE::ImageSpaceManager::GetSingleton(), 1, a_target, 1, 0);
 		std::memcpy(reinterpret_cast<std::byte*>(Field<std::uintptr_t>(*g.worldSceneGraph, 0x128)) + 0x174, port.data(), port.size());
 		tls->taskFlag = taskFlag;

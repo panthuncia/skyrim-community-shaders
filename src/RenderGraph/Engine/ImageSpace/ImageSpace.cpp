@@ -13,6 +13,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Deferred.h"
+#include "EngineZones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
