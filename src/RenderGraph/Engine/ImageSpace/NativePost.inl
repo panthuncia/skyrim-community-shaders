@@ -222,6 +222,7 @@ namespace NativePost
 		float ratioX = 1, ratioY = 1;
 		bool locked = false;
 		bool upsample = false;
+		bool volumetric = false;          // B: VL is on and its effect is active
 		std::array<float, 3> vlColour{};  // B
 		// B.
 		std::uint8_t slots = 0;          // active end-of-frame slots: the game's, and refraction, which turns on mid-frame
@@ -281,7 +282,7 @@ namespace NativePost
 		std::array<std::uint64_t, 7> native{}, engine{};
 		std::uint64_t slotNative = 0, slotEngine = 0;  // slot effects staged natively, and run through the engine's RenderEffect
 		std::uint8_t lastSlots = 0;  // the last B read's, for the log
-		std::uint32_t adaptResets = 0;  // the snapshot's adaptation reset count last applied (native)
+		std::uint32_t adaptResets = 0;  // the snapshot's adaptation reset count the HDR effect last applied (native)
 	};
 
 	Runtime& R()
@@ -317,9 +318,6 @@ namespace NativePost
 
 	/** @brief Done once, at the first frame with the ImageSpace manager (ImageSpace.cpp, after the hooks it checks). */
 	void CheckForeignHooksOnce();
-
-	// Temporary, removed at the switch: native frames keep the engine's values while the observe log compares them with the snapshot.
-	constexpr bool kObserving = true;
 
 	/** @brief The effect in the manager's slot a_slot, or 0. */
 	std::uintptr_t EffectAt(std::uint32_t a_slot)
@@ -393,8 +391,6 @@ namespace NativePost
 				if (slot != 1 && effect && effect->IsActive())
 					a_in.gameSlots |= static_cast<std::uint8_t>(1u << slot);
 			}
-		const auto vlEffect = Field<std::uintptr_t>(base, 0x170);
-		a_in.volumetric = *g.volumetric && vlEffect && Field<bool>(vlEffect, 0x08);
 		a_in.screenshot = Field<bool>(base, 0x211);
 		a_in.frameCounter = *g.frameCounter;
 		std::memcpy(a_in.refractionTint.data(), reinterpret_cast<const void*>(base + 0x98), sizeof(a_in.refractionTint));
@@ -443,10 +439,17 @@ namespace NativePost
 		return snapshot ? snapshot->Block<Block>() : nullptr;
 	}
 
+	/** @brief The snapshot's main camera, in native mode. A world frame without one is fatal. */
+	const Snapshot::CameraView& MainCamera()
+	{
+		const auto& snapshot = Snapshot::Current();
+		if (!snapshot || !snapshot->cameras.Current(Snapshot::ViewId::Main).valid)
+			RenderGraph::Fatal("ImageSpace", "native post chain: the snapshot has no main camera");
+		return snapshot->cameras.Current(Snapshot::ViewId::Main);
+	}
+
 	/** @brief The reflections pass's and RenderSSAO's settings, read now (NativeWorld.inl). */
 	WorldSettings ReadWorldSettings();
-
-#include "RenderGraph/Engine/ImageSpace/ObserveInputs.inl"
 
 	/** @brief Read point A, Renderer::Begin: the game's inputs (native: the snapshot's) and the render state. Render owner. */
 	void ReadA()
@@ -461,21 +464,18 @@ namespace NativePost
 			return;
 		CheckForeignHooksOnce();
 		const auto* block = NativeBlock();
-		if (block) {
+		if (block)
 			static_cast<GameInputs&>(f) = block->inputs;
-			ObserveA(f, *block);
-		} else
+		else
 			ReadGameA(f);
 		if (!f.read)
 			return;
 		for (std::uint32_t t = 0; t < f.sizes.size(); ++t)
 			f.sizes[t] = { g.targets->renderTargetData[t].width, g.targets->renderTargetData[t].height };
 		r.state = EngineState();
-		if (block && !kObserving) {
-			// The adaptation reset follows the snapshot's count: once per count, however often the snapshot renders.
-			r.state.resetPending = block->adaptResets != r.adaptResets;
-			r.adaptResets = block->adaptResets;
-		}
+		// Native mode's resets come from the snapshot's count (RunHdr), not the engine's flag.
+		if (block)
+			r.state.resetPending = false;
 		if (Frame::Driver::Current().frame % 300 == 0)
 			logger::info("[ORG] native post chain: {} steps staged natively; native frames hdr {} eof {} composites {} post {}, "
 						 "end-of-frame frames on the engine {} (last slots {:#x}); slot effects native {}, through RenderEffect {}; "
@@ -495,18 +495,27 @@ namespace NativePost
 		f.readB = false;
 		if (!f.read || !base)
 			return;
-		if (!NativeBlock())
+		const auto* block = NativeBlock();
+		if (!block)
 			ReadGameB(f);
 		f.slots = f.gameSlots;
 		if (auto* refraction = reinterpret_cast<RE::ImageSpaceEffect*>(EffectAt(1)); f.eof && refraction && refraction->IsActive())
 			f.slots |= 1u << 1;
 		R().lastSlots = f.slots;
+		// VL's activity changes with the cell during the frame (VL Render), so it stays a read here.
+		const auto vlEffect = Field<std::uintptr_t>(base, 0x170);
+		f.volumetric = *g.volumetric && vlEffect && Field<bool>(vlEffect, 0x08);
 		f.vlParity = Frame::PostChain::VolumetricParity();
 		// The VL composite's colour: the sun shadow light's diffuse blended with the VL colour (107017). VL Render (107023) fills the
 		// settings block during the frame.
 		if (const auto settings = g.vlSettings())
 			g.vlColour(settings, &f.vlColour[0], &f.vlColour[1], &f.vlColour[2]);
-		if (const auto camera = *g.worldSceneGraph ? Field<std::uintptr_t>(*g.worldSceneGraph, 0x128) : 0) {
+		// The world camera: the snapshot's main camera in native mode.
+		if (block) {
+			const auto& frustum = MainCamera().frustum;
+			f.cameraNear = frustum.fNear;
+			f.cameraFar = frustum.fFar;
+		} else if (const auto camera = *g.worldSceneGraph ? Field<std::uintptr_t>(*g.worldSceneGraph, 0x128) : 0) {
 			f.cameraNear = Field<float>(camera, 0x160);
 			f.cameraFar = Field<float>(camera, 0x164);
 		}
@@ -521,8 +530,6 @@ namespace NativePost
 		// The full-screen blur's Render (AE 108563) blurs at radius 2 or more while Main::RenderWorld saw the camera move.
 		const bool reset = g.blurCamera[0] == 1.0f && g.blurCamera[1] == 1.0f && g.blurCamera[2] == 1.0f;
 		f.fullBlurAtLeast2 = !reset && *g.blurCameraMoved && *g.blurCameraGate;
-		if (NativeBlock())
-			ObserveB(f);
 		f.readB = true;
 	}
 
@@ -1282,7 +1289,9 @@ namespace NativePost
 	{
 		auto& g = G();
 		*g.lumParity = a_state.lumParity;
-		*g.adaptReset = false;
+		// Native mode's capture takes the reset on the game thread.
+		if (!NativeBlock())
+			*g.adaptReset = false;
 		auto& adapted = *g.adapted;
 		// As the engine's ImageSpaceTexture assignment and reset (AE 0x1414e8d60, 0x1414e8b50): a target, no texture, no depth.
 		if (adapted.texture)
@@ -1330,6 +1339,12 @@ namespace NativePost
 		if (levels == 0) {
 			Frame::Driver::NoteLaggedWork(Frame::SegmentId::Post);
 			return;
+		}
+		// The adaptation reset follows the snapshot's count: the first HDR effect after the count moved resets, however often a
+		// snapshot renders and whatever frames without the effect came between.
+		if (const auto* block = NativeBlock(); block && block->adaptResets != r.adaptResets) {
+			r.state.resetPending = true;
+			r.adaptResets = block->adaptResets;
 		}
 		EnterScope(ScopeKind::HDR);
 		{

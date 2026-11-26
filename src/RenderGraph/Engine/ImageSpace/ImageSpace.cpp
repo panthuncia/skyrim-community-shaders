@@ -5,7 +5,6 @@
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
-#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"

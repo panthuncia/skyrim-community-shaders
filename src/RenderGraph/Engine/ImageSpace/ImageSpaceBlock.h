@@ -29,7 +29,6 @@ namespace RenderGraph::Engine::ImageSpace
 		std::array<float, 4> taaBlend{};
 		// The end-of-frame slots the game turns on (bit per slot). Refraction (bit 1) is not here: its geometry turns it on.
 		std::uint8_t gameSlots = 0;
-		bool volumetric = false;  // VL is on and its effect is active
 		bool screenshot = false;  // a save asks for a frame (manager +0x211)
 		std::uint32_t frameCounter = 0;
 		// The slot effects' inputs.
@@ -64,6 +63,8 @@ namespace RenderGraph::Engine::ImageSpace
 		std::int32_t sparkleColourMode = 0;
 		std::array<float, 3> sparkleColour{};
 		float ssrCompositeA = 0, ssrCompositeB = 0;
+		// The SAO composite's sun: the sun shadow light's direction (zero without one) and the sun light's diffuse.
+		std::array<float, 3> sunDirection{}, sunColour{};
 
 		bool operator==(const WorldSettings&) const = default;
 	};
