@@ -25,9 +25,11 @@
 #include "RenderGraph/Switches.h"
 #include "ShaderCache.h"
 #include "Snapshot/FrameCamera.h"
+#include "State.h"
 #include "Utils/Logging.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <format>
 #include <map>
@@ -56,6 +58,7 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			Native::PreviousCamera previous;
 			// The batch's draws in the engine's order, and CS's order for the same root.
 			std::vector<const RE::BSGeometry*> engineOrder;
+			std::vector<std::uint32_t> engineHints;  // each engine draw's accumulation hint, for the order log
 			std::vector<RE::BSGeometry*> mineOrder;
 			std::uint64_t orderBatches = 0, orderDiffer = 0;
 		};
@@ -132,11 +135,12 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		s.camera = a_camera;
 		s.inputsMade = false;
 		s.engineOrder.clear();
+		s.engineHints.clear();
 		s.mineOrder.clear();
 		if (s.active && a_view == View::MenuColour && a_camera)
 			if (auto* manager = RE::UI3DSceneManager::GetSingleton())
 				if (auto* root = manager->menuObjects[static_cast<std::uint32_t>(manager->currentlightScheme)].get())
-					Native::SceneGeometry(root, *a_camera, s.mineOrder);
+					Native::SceneGeometry(root, *a_camera, Native::SortsByClosestPoint(*manager), s.mineOrder);
 	}
 
 	void End()
@@ -144,27 +148,49 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		auto& s = Get();
 		if (s.active && s.view == View::MenuColour && !s.engineOrder.empty()) {
 			++s.orderBatches;
-			std::vector<const RE::BSGeometry*> mine;
+			// The blended list's order (hint 1 in the engine's passes, BlendedList in CS's), and whether the two agree on membership.
+			std::vector<const RE::BSGeometry*> mine, engine;
 			for (auto* g : s.mineOrder)
-				if (!netimmerse_cast<RE::NiParticleSystem*>(g))
+				if (Native::BlendedList(*g))
 					mine.push_back(g);
-			std::vector<const RE::BSGeometry*> engine;
-			for (const auto* g : s.engineOrder)
-				if (!netimmerse_cast<const RE::NiParticleSystem*>(g))
-					engine.push_back(g);
-			if (mine != engine) {
+			bool membership = true;
+			for (std::size_t i = 0; i < s.engineOrder.size(); ++i) {
+				const bool hint1 = s.engineHints[i] == 1;
+				membership &= hint1 == Native::BlendedList(*s.engineOrder[i]);
+				if (hint1)
+					engine.push_back(s.engineOrder[i]);
+			}
+			Note("blended membership", !membership, "an engine draw's hint 1 and BlendedList disagree");
+			if (mine != engine || !membership) {
 				++s.orderDiffer;
 				std::string pattern;
-				for (const auto* g : engine)
+				for (const auto* g : s.engineOrder)
 					pattern += GeometryName(g) + " ";
 				static std::map<std::string, int> seen;
 				if (seen[pattern]++ == 0 && seen.size() < 20) {
+					// Each draw with its accumulation hint and the blended sort's key (bound centre along the camera's view direction, radius).
+					const auto& r = s.camera->world.rotate.entry;
+					const auto key = [&](const RE::BSGeometry* a_g) {
+						const auto& c = a_g->worldBound.center;
+						return std::format("{}/{}", r[1][0] * c.y + r[0][0] * c.x + r[2][0] * c.z, a_g->worldBound.radius);
+					};
+					static const REL::Relocation<const RE::NiRTTI*> orderedRtti{ RE::BSOrderedNode::Ni_RTTI };
+					const auto ordered = [&](const RE::BSGeometry& a_g) {
+						for (auto* node = a_g.parent; node; node = node->parent)
+							if (node->GetRTTI() == orderedRtti.get())
+								return true;
+						return false;
+					};
 					std::string e, m;
-					for (const auto* g : s.engineOrder)
-						e += GeometryName(g) + " ";
+					for (std::size_t i = 0; i < s.engineOrder.size(); ++i)
+						e += std::format("{}(h{} {}{}{}) ", GeometryName(s.engineOrder[i]), s.engineHints[i], key(s.engineOrder[i]), Native::BlendedList(*s.engineOrder[i]) ? " B" : "",
+							ordered(*s.engineOrder[i]) ? " O" : "");
 					for (const auto* g : mine)
-						m += std::format("{}{} ", GeometryName(g), g->GetGeometryRuntimeData().alphaProperty ? "*" : "");
-					logger::info("[DCLF] menu scenes observe: order differs: engine {} | mine {}", e, m);
+						m += GeometryName(g) + " ";
+					const auto* manager = RE::UI3DSceneManager::GetSingleton();
+					const auto* accumulator = manager ? reinterpret_cast<const std::uint8_t*>(manager->unk10.get()) : nullptr;
+					logger::info("[DCLF] menu scenes observe: order differs (accumulator +0x50..52 {} {} {}): engine {} | mine blended {}", accumulator ? accumulator[0x50] : 0,
+						accumulator ? accumulator[0x51] : 0, accumulator ? accumulator[0x52] : 0, e, m);
 				}
 			}
 		}
@@ -180,8 +206,10 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		auto& s = Get();
 		if (!s.active)
 			return;
-		if (a_pass && a_pass->geometry && (s.engineOrder.empty() || s.engineOrder.back() != a_pass->geometry))
+		if (a_pass && a_pass->geometry && (s.engineOrder.empty() || s.engineOrder.back() != a_pass->geometry)) {
 			s.engineOrder.push_back(a_pass->geometry);
+			s.engineHints.push_back(a_pass->accumulationHint);
+		}
 		const auto key = std::format("{} {} vs {:#x} ps {:#x} pass {:#x} ({})", NameOf(s.view), a_shader, a_vertex, a_pixel, a_pass ? a_pass->passEnum : 0u,
 			a_pass ? GeometryName(a_pass->geometry) : "no pass");
 		if (s.others[key]++ == 0)
@@ -223,8 +251,28 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 				engineLights += std::format("{} ", static_cast<const void*>(a_pass->sceneLights[l]));
 			for (std::uint32_t l = 1; l < mine.lights.count; ++l)
 				mineLights += std::format("{} ", static_cast<const void*>(mine.lights.lights[l]));
-			Note("point lights", engineLights != mineLights || a_pass->numShadowLights != mine.lights.shadow,
-				std::format("{}: engine {}(shadow {}) mine {}(shadow {})", name, engineLights, a_pass->numShadowLights, mineLights, mine.lights.shadow));
+			const bool differ = engineLights != mineLights || a_pass->numShadowLights != mine.lights.shadow;
+			Note("point lights", differ, std::format("{}: engine {}(shadow {}) mine {}(shadow {})", name, engineLights, a_pass->numShadowLights, mineLights, mine.lights.shadow));
+			// Once per geometry: every scene node light with its position, radius and distance to the bound.
+			static std::map<std::string, int> detailed;
+			if (differ && detailed[name]++ == 0 && detailed.size() < 24) {
+				std::string text;
+				const auto& data = in.sceneNode->GetRuntimeData();
+				const auto describe = [&](const char* a_kind, const RE::BSLight* a_light) {
+					const auto* l = a_light ? a_light->light.get() : nullptr;
+					if (!l)
+						return;
+					const auto d = l->world.translate - geometry->worldBound.center;
+					text += std::format("{} {} at [{} {} {}] radius {} lodDimmer {} distance {}; ", a_kind, static_cast<const void*>(a_light), l->world.translate.x, l->world.translate.y,
+						l->world.translate.z, l->GetLightRuntimeData().radius.x, a_light->lodDimmer, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
+				};
+				for (const auto& light : data.activeShadowLights)
+					describe("shadow", light.get());
+				for (const auto& light : data.activeLights)
+					describe("point", light.get());
+				logger::info("[DCLF] menu scenes observe: lights of {} (bound [{} {} {}] radius {}): {}", name, geometry->worldBound.center.x, geometry->worldBound.center.y,
+					geometry->worldBound.center.z, geometry->worldBound.radius, text);
+			}
 		}
 		// Rows: only the floats the port writes; the rest of the engine's buffer holds what an earlier draw left.
 		const auto compare = [&](const char* a_field, const float (*a_e)[4], const float (*a_m)[4], const float (*a_w)[4], std::uint32_t a_first, std::uint32_t a_count) {
@@ -240,6 +288,10 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		};
 		{
 			const std::uint32_t uploaded = mine.rawPixel & ~mine.pixel;
+			const auto permutation = Native::PermutationOf(*geometry, false);
+			Note("permutation ui words", permutation.renderToUI != a_engine.renderToUI || permutation.baseTextureIsWorking != a_engine.baseTextureIsWorking,
+				std::format("{}: engine ui {} base {}, mine ui {} base {}", name, a_engine.renderToUI, a_engine.baseTextureIsWorking, permutation.renderToUI,
+					permutation.baseTextureIsWorking));
 			Note("permutation descriptors", a_engine.descriptors[1] != uploaded,
 				std::format("{}: engine {:#x} {:#x} {:#x} {:#x} radius {} base {} ui {}; mine pixel {:#x}", name, a_engine.descriptors[0], a_engine.descriptors[1],
 					a_engine.descriptors[2], a_engine.descriptors[3], a_engine.effectRadius, a_engine.baseTextureIsWorking, a_engine.renderToUI, uploaded));
@@ -304,6 +356,10 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			};
 			const auto& c = mine.constants;
 			const auto& w = mine.written;
+			const auto permutation = Native::PermutationOf(*a_pass->geometry, true);
+			constexpr auto kAlphaBlend = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::SourceAlphaBlend);
+			Note("effect permutation", permutation.renderToUI != a_engine.renderToUI || (permutation.extra & kAlphaBlend) != (a_engine.descriptors[2] & kAlphaBlend),
+				std::format("{}: engine ui {} extra {:#x}, mine ui {} extra {:#x}", name, a_engine.renderToUI, a_engine.descriptors[2], permutation.renderToUI, permutation.extra));
 			compare("effect vs technique", a_engine.vsTechnique, c.vsTechnique, w.vsTechnique, kEffectVSTechniqueRows);
 			compare("effect ps technique", a_engine.psTechnique, c.psTechnique, w.psTechnique, kEffectPSTechniqueRows);
 			compare("effect vs material", a_engine.vsMaterial, c.vsMaterial, w.vsMaterial, kEffectVSMaterialRows);
@@ -341,6 +397,24 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			alpha ? std::format("flags {:#x} threshold {}", alpha->alphaFlags, alpha->alphaThreshold) : std::string("none"));
 		if (s.others[key]++ == 0)
 			logger::info("[DCLF] menu scenes observe: state {}", key);
+	}
+
+	void Bones(const RE::BSRenderPass* a_pass, std::span<const std::byte> a_engine)
+	{
+		auto& s = Get();
+		if (!s.active || !a_pass || !a_pass->geometry || a_engine.size() < kBonesBytes)
+			return;
+		std::array<std::byte, kBonesBytes> mine{};
+		if (!Native::BoneRows(*a_pass->geometry, mine)) {
+			Note("palettes", true, std::format("{}: no palettes computed", GeometryName(a_pass->geometry)));
+			return;
+		}
+		const auto* skin = a_pass->geometry->GetGeometryRuntimeData().skinInstance.get();
+		const std::uint32_t rows = skin->numMatrices * 3;
+		const auto* e = reinterpret_cast<const float (*)[4]>(a_engine.data());
+		const auto* m = reinterpret_cast<const float (*)[4]>(mine.data());
+		CompareRows("palette previous", e, m, rows, GeometryName(a_pass->geometry));
+		CompareRows("palette current", e + kPaletteRows, m + kPaletteRows, rows, GeometryName(a_pass->geometry));
 	}
 
 	void Report()

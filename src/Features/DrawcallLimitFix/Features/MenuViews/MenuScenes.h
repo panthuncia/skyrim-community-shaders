@@ -355,8 +355,25 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief The Effect draw of a_geometry as BSEffectShader's Setup functions would bind it. Particles and the lit, membrane and soft variants are refused. */
 		bool ComputeEffect(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why);
 
-		/** @brief A menu root's visible geometry in draw order: opaque in scene order, then blended far to near. */
-		void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, std::vector<RE::BSGeometry*>& a_out);
+		/** @brief A menu root's visible geometry in draw order: the batches' in scene order, then the blended list sorted far to near. */
+		void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, bool a_closestPoint, std::vector<RE::BSGeometry*>& a_out);
+		/** @brief Whether a_geometry's pass goes to the accumulator's blended list (accumulation hint 1). */
+		bool BlendedList(const RE::BSGeometry& a_geometry);
+		/** @brief Whether the menu's colour accumulator sorts its blended list by each bound's closest point. */
+		bool SortsByClosestPoint(const RE::UI3DSceneManager& a_manager);
+
+		/** @brief CS's permutation block for a draw: the extra shader descriptor and Linear Lighting's two words, as CS's hooks set them. */
+		struct Permutation
+		{
+			std::uint32_t extra = 0, baseTextureIsWorking = 0, renderToUI = 0;
+		};
+		Permutation PermutationOf(const RE::BSGeometry& a_geometry, bool a_effect);
+
+		/**
+		 * @brief A skinned geometry's palettes as VS b9 (previous) and b10 (current) hold them, after the engine's per-frame palette update.
+		 * False without skin or with more bones than the palettes hold.
+		 */
+		bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out);
 
 		/** @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes). */
 		bool Owns(std::int32_t a_scheme);
@@ -381,6 +398,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		void State(const RE::BSRenderPass* a_pass, std::uint32_t a_blend, std::uint32_t a_coverage, std::uint32_t a_write, std::uint32_t a_extra, std::uint32_t a_depth,
 			std::uint32_t a_stencil, std::uint32_t a_stencilRef, std::uint32_t a_fill, std::uint32_t a_cull, std::uint32_t a_depthBias, float a_alphaRef,
 			const Family::Viewport& a_viewport, std::int32_t a_target);
+		void Bones(const RE::BSRenderPass* a_pass, std::span<const std::byte> a_engine);
 		void Report();
 	}
 
@@ -396,8 +414,9 @@ namespace DCLF::Features::MenuViews::Scenes
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
 		/** @brief The program for a key, one per shader. Null when it cannot be built. */
 		std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
-		std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
-		std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		/** @brief a_building, when given, is set when null means the program is still building on the program service. */
+		std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
+		std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
 		/** @brief The format of a_view's import a_index, or 0 without one. */
 		std::uint32_t ColourFormat(View a_view, std::uint32_t a_index);
 		std::uint32_t DepthFormat(View a_view);

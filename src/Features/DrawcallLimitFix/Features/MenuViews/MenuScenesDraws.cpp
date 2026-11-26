@@ -448,14 +448,14 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		return GetState().utility.Get(a_key, a_shader);
 	}
 
-	std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
+	std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building)
 	{
-		return GetState().lighting.Get(a_key, a_shader);
+		return GetState().lighting.Get(a_key, a_shader, a_building);
 	}
 
-	std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
+	std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building)
 	{
-		return GetState().effect.Get(a_key, a_shader);
+		return GetState().effect.Get(a_key, a_shader, a_building);
 	}
 
 	std::uint32_t ColourFormat(View a_view, std::uint32_t a_index)
