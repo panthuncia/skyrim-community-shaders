@@ -118,7 +118,40 @@ decoupled build to choose.
 
 ## Runs
 
-(filled below)
+All on stage `s7-prep` (commit 04a35c8c5, Dev-Fast):
+
+| Config | Label | Result |
+|---|---|---|
+| guest+quick | s7-prep-guest-quick | passed |
+| native-vulkan+quick | s7-prep-nvk-quick | passed |
+| native-d3d12-quick | s7-prep-nd12-quick | passed |
+| native-vulkan+menu | s7-prep-nvk-menu | passed. The vanity camera is disabled and restored from the input poll. |
+| native-vulkan+menu-resize | s7-prep-native-vulkan-menu-resize | passed |
+| guest+stats-window | s7-prep-guest-stats-window | passed |
+| native-d3d12+window-resize | s7-prep-nd12-winresize | passed. Both resizes go through the snapshot event. |
+| native-vulkan+window-resize | s7-prep-nvk-winresize | device-lost 83 frames after world-ready (see below) |
+| native-vulkan+resize-drag | s7-prep-native-vulkan-resize-drag | passed |
+| native-d3d12+hdr-resize | s7-prep-native-d3d12-hdr-resize | passed |
+| native-vulkan+fg-dlss (foreground) | s7-prep-nvk-fgdlss | passed. DLSS-G status OK, 2 frames. One "Unable to find 'common' constants" line when DLSS-G pauses for the menu, the same count as baseline run `p-post-native-fgdlss`. |
+| native-vulkan+fg | s7-prep-nvk-fg | passed. FSR-FG presented x2. |
+| native-vulkan+cadence-repeat, `CS_UPDATE_RATE_CAP=1`, cap 30 | s7-prep-nvk-cadence-cap30 | passed. [Perf]: rendered 85.4 fps, game 28.5 updates/s. |
+
+About the native Vulkan window-resize failure:
+
+- The resize itself went through as intended. The window step's request reached the engine on the main thread 5 ms later
+  through the snapshot event: "the engine resized to 1280x720", then the swap chain was resized and the target set
+  adopted at 1280x720.
+- The device was lost about 7 s later, in an external texture upload.
+- The `s5-bugs` lead's runs of the same config on its own branch, minutes earlier and without this change, were also
+  device-lost (`s5-bugs-b-nvk-window-resize`, `...-validation`). So it is in the base, not caused by this change.
+
+Seen in the menu run: the input poll hook (`BSInputDeviceManager::PollInputDevices`) does not always run on the main
+thread. AE runs it on a job thread during Main::Update. The game-side reads of UI state were already cross-thread before
+this change, and they are atomic now.
+
+The cs-test schema came from the stage's own switch dump (`list-switches`, label `s7-prep-switches`, then `schema --out`).
+It matches the committed row. The main checkout's schema lacks the row until this merges, so the cap run set the variable
+in the launching shell.
 
 ## Phase 7 plan: what remains for the thread split
 
