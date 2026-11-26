@@ -209,3 +209,25 @@ pushes until the user is back.
     107221 whose seventh argument the old C++ thunk dropped. Each engine call site now jumps to a machine-code stub that
     counts and jumps on to the original target, so any signature is safe to list. Tracy zones at the sites come only with
     `CS_ENGINE_ZONES=1` in Tracy builds; their return-address swap is untested with Tracy connected.
+
+## 2026-11-26: phase 4 finished in-frame (snap4-ui2; director accepted)
+
+60. **Native owns every GRendererD3D1x slot except the destructor** (shutdown only, still counted). GFx textures and render
+    targets are CS objects in the D3D1x field layout (vtables copied from the D3D1x ones); creation, updates and the
+    render-target stack are CS ports. GFx base-class functions (change and event handlers, user data,
+    MakeViewAndPersp3D) stay GFx's: they are GFx core, not the renderer. Textures go through the engine's device handles
+    (CS's D3D11 layer). The census reads "the game's renderer was called for nothing" in native.
+61. **Lifetime by reference:** streams hold references to the views they draw and uploads to their textures, so a texture
+    GFx releases stays valid for any snapshot that names it. These are the per-snapshot references phase 6's retire queue
+    takes over.
+62. **Each UI stream carries its start state** (`StreamHeader`, decision 19 built): the replay depends on no earlier
+    stream. Texgen rows start at zero per stream. Uploads are kept out of the replayable commands: they are queued per
+    stream and applied once, in call order, before that stream's draws; a stream never replayed still has its uploads
+    applied before the next.
+63. **`FrameSnapshot::ui` is written once, at the end of the update's first DrawInterface** (until phase 7). Repeated
+    renders replay it.
+64. **DrawInterface counts as a producer, not a render call, once CS owns the renderer** (decision 16 built;
+    `Role::Producer` in the engine-render detector, refreshed per frame for the call-site stubs).
+65. **Loading-screen UI snapshots wait for phase 5:** they need a publish from a second producer (the serving thread),
+    adoption there, and an id rule for snapshots that are not game updates. The serving thread already makes no game
+    renderer call. Filters, 3D draws and GFx render targets were never observed in a run, so their parity is unproven.
