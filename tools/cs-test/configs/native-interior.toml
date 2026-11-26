@@ -66,3 +66,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["dragonsreach", "dragonsreach2", "vl-custom", "vl-exterior"]
+shot_refs = ["dragonsreach", "dragonsreach2", "vl-custom", "vl-exterior"]

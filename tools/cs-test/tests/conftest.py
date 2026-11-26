@@ -42,7 +42,8 @@ def write(path, text):
 def fake(tmp_path):
     """A fake CS-AB root, MO2 instance, game, Documents and lab folder in a temp dir."""
     paths = Paths(root=tmp_path / "CS-AB", mo2=tmp_path / "MO2", profile="Default", documents=tmp_path / "Documents",
-                  game=tmp_path / "Game", lab=tmp_path / "Lab", helper=tmp_path / "helper" / "!CSTestLab.dll")
+                  game=tmp_path / "Game", lab=tmp_path / "Lab", helper=tmp_path / "helper" / "!CSTestLab.dll",
+                  refs_manifest=tmp_path / "refs.json")
     paths.root.mkdir()
     paths.modlist.parent.mkdir(parents=True)
     paths.modlist.write_bytes(MODLIST.replace("\n", "\r\n").encode())

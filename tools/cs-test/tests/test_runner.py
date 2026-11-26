@@ -165,6 +165,18 @@ def test_frozen_image_fails(fake, game):
     assert result["live_image"]["same"]
 
 
+def test_reference_shots_are_checked(fake, game):
+    fake.refs.mkdir()
+    (fake.refs / "abc.png").write_bytes(tiny_png(10))
+    fake.refs_manifest.write_text(json.dumps({"guest+quick/start": {"sha256": "abc", "run": "r"}}))
+    result = runner.run(fake, "guest+quick", [], stage="p35", log=lambda *_: None)
+    # The fake game's shot is not a PNG: the check fails the run and says which shot.
+    assert result["outcome"] == "failed" and "shot start: unreadable" in result["reason"]
+    assert result["shot_refs"]["checked"]
+    result = runner.run(fake, "guest+quick", ["expect.shot_refs=[]"], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "passed" and not result["shot_refs"]["checked"]
+
+
 def test_missing_live_shots_fail(fake, game):
     game.live = None
     result = runner.run(fake, "guest+quick", ["expect.live_frames=30"], stage="p35", log=lambda *_: None)

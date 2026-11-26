@@ -17,6 +17,7 @@ stage <worktree|aio folder> --name p35 [--preset Dev-Fast] [--base-aio DIR] [--p
 run <config>[+<config>...] [--stage p35] [--set key=value]... [--label x] [--dry-run] [--wait S] [--slots N]
 sweep <config> --base "features.*=false" --vary features.Skylighting,features.ScreenSpaceGI [--mode on-one|off-one] [run options]
 compare <run A> <run B> [--no-shots] [--no-memory]
+ref accept <run> [--shot NAME]... | ref check <run|png> [--against <png|run|key>] | ref list
 status
 restore [--journal-only]
 schema [<CommunityShaders-Switches.json>] [--out FILE]
@@ -34,6 +35,7 @@ check-schema [<CommunityShaders-Switches.json>]
   - The exit code is 0 only for `passed`.
 - **sweep** runs the base, then one run per varied key: on (`on-one`) or off (`off-one`). It prints an outcome table.
 - **compare** shows two runs' outcomes, config differences, milestone times and error kinds. It diffs their common shots (`shotdiff.py`) and memory (`compare.py`, when both runs have `CS-AB-memory.csv`). Both also run alone: `python tools/cs-test/shotdiff.py a.png b.png [diff.png]`, `python tools/cs-test/compare.py <run>...`.
+- **ref** keeps and checks reference shots (see Reference shots).
 - **status** shows the lab's locks, the runs in its slots with their game PIDs and logs, and the shared shader cache's generation. It changes nothing.
 - **restore** puts back the CS mod the old MO2 harness left swapped in `modlist.txt` (its `state.json`). Lab runs change nothing outside the lab.
 - **schema** copies the game's switch dump (by default the newest run folder's) to `switches.json`, the schema, and lists what changed. It refuses a dump made with DCLF off.
@@ -145,6 +147,37 @@ min = { "cs.ssgi" = 300 }   # at least this many frames on the graph
 - A run without the report fails (a Release build or an older build). A run with `CS_ORG=0` (plain D3D11) skips the check.
 - Each failure is one clause: `cs.ssgi ran on the graph in 12 frames, at least 300 expected`.
 - `result.json`'s `graph_frames` has the expectation, the report, the failures and why it was skipped.
+
+### Reference shots
+
+`expect.shot_refs` names shots that must look like a kept reference. A run whose shots are grossly wrong fails, even
+when the game said "passed" (on 2026-11-26 every native world frame drew in the top-left 1280x720 corner for an afternoon
+and every run passed).
+
+```toml
+[expect]
+shot_refs = ["start"]   # quick, native-d3d12-quick; facegen: racemenu; native-interior: all four; menu-scenes: all but loading-model
+```
+
+- The reference is per run name and shot: `native-vulkan+quick/start` and `guest+quick/start` are separate. `refs.json`
+  (in the repo) maps each key to a PNG's sha256 and the run it came from. The PNGs are in `<root>\refs` (`C:\Modding\CS-AB\refs`),
+  named by their sha256. `CS_TEST_REFS` moves the manifest.
+- `ref accept <run>` makes a passed run's shots the references: the config's `shot_refs` (else every shot), or `--shot`.
+  Nothing accepts a reference by itself. Look at the shots first, and commit `refs.json`.
+- `ref check <run>` compares a run's shots with their references, as the run's own check does. `ref check <png> --against <x>`
+  compares one PNG with another PNG, a run's shot of the same name, or a manifest key. The exit code is 0 when it passed.
+- A shot without a reference is logged with the `ref accept` line to run, and does not fail the run. A reference missing
+  from the store, or an unreadable shot, fails it. `--set expect.shot_refs=[]` turns the check off for one run.
+- `result.json`'s `shot_refs` has, per shot, the measures, the tile map and the failures.
+
+The check is coarse on purpose (`cstest/shotref.py`). Two runs of one build differ a lot in these scenes: the fight's
+camera angle, NPCs, Health Low popups, motion blur, eye adaptation. Each shot becomes a 96x54 grid of cell lightness
+(the square root of the mean luma, so dark scenes keep their detail), grouped in 16x9 tiles. A tile is wrong when its mean
+moved by more than 56 (dark, bright), or its detail (the spread of its cells) collapsed (flat) or appeared (busy). A shot
+fails when more than 23% of its tiles are wrong, or its mean lightness moved by more than 20, or it is black or white.
+The failure says how many tiles of which kind and where, for example
+`shot start: 89 of 144 tiles wrong: 49 dark by 86 (x 0-1320, y 0-720), 39 flat (detail 1.3, reference 20.4; x 0-1920, y 0-1080)`.
+The thresholds come from 741 good pairs and 525 quarter-frame pairs of 2026-11-26's runs (`docs/development/plans/snap3-shotref.md`).
 
 ### Snapshot detectors
 
@@ -307,4 +340,4 @@ python -m pytest tools/cs-test/tests -p no:anyio
 ```
 
 They use temp folders only: never MO2, the game or the lab. The `CS_TEST_ROOT`, `CS_TEST_MO2`, `CS_TEST_PROFILE`, `CS_TEST_GAME`,
-`CS_TEST_DOCUMENTS`, `CS_TEST_LAB` and `CS_TEST_LAB_HELPER` variables move every path.
+`CS_TEST_DOCUMENTS`, `CS_TEST_LAB`, `CS_TEST_LAB_HELPER` and `CS_TEST_REFS` variables move every path.

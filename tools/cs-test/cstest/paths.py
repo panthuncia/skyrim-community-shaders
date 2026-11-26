@@ -9,6 +9,7 @@ TOOL_DIR = Path(__file__).resolve().parents[1]
 REPO_DIR = TOOL_DIR.parents[1]
 CONFIG_DIR = TOOL_DIR / "configs"
 SCHEMA_PATH = TOOL_DIR / "switches.json"  # the game's switch dump, copied by "cs_test.py schema"
+REFS_MANIFEST = TOOL_DIR / "refs.json"  # the reference shots' manifest (shotref.py); the PNGs are in <root>/refs
 HELPER_BUILD = TOOL_DIR / "lab" / "plugin" / "build" / "Release" / "!CSTestLab.dll"
 
 TEST_FILE = "CommunityShaders-Test.json"
@@ -52,6 +53,7 @@ class Paths:
     game: Path = None  # the installed game: only read and hard-linked
     lab: Path = None  # D:\CSLab, on the game's volume
     helper: Path = field(default=HELPER_BUILD)
+    refs_manifest: Path = field(default=REFS_MANIFEST)
 
     @property
     def modlist(self):
@@ -79,6 +81,10 @@ class Paths:
         return self.root / "runs"
 
     @property
+    def refs(self):
+        return self.root / "refs"
+
+    @property
     def stages(self):
         return self.root / "stages"
 
@@ -103,4 +109,5 @@ def default_paths():
         game=Path(game) if game else game_from_mo2(mo2),
         lab=Path(os.environ.get("CS_TEST_LAB", r"D:\CSLab")),
         helper=Path(os.environ.get("CS_TEST_LAB_HELPER", str(HELPER_BUILD))),
+        refs_manifest=Path(os.environ.get("CS_TEST_REFS", str(REFS_MANIFEST))),
     )

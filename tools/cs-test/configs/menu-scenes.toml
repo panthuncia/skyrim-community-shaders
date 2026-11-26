@@ -92,3 +92,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["loading-model", "world", "inventory-item", "journal", "stats"]
+shot_refs = ["world", "inventory-item", "journal", "stats"]   # not loading-model: the loading screen's model is random

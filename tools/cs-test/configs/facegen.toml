@@ -22,3 +22,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["racemenu"]
+shot_refs = ["racemenu"]

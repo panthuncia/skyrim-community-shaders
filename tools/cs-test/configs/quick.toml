@@ -18,3 +18,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["start"]
+shot_refs = ["start"]       # compared with refs.json's reference for the run name (README, Reference shots)

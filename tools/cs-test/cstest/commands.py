@@ -1,4 +1,4 @@
-"""sweep, compare, status, restore, schema and check-schema."""
+"""sweep, compare, ref, status, restore, schema and check-schema."""
 
 import json
 import subprocess
@@ -6,7 +6,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from . import collect, lab as lab_mod, locks, mo2, procs
+from . import collect, lab as lab_mod, locks, mo2, procs, shotref
 from .config import diff
 from . import schema as schema_mod
 from .paths import LOG_FILE, REPO_DIR, SCHEMA_PATH, SWITCHES_FILE
@@ -147,6 +147,74 @@ def compare(paths, a, b, log=print, shots=True, memory=True):
         log("Memory (compare.py):")
         result = subprocess.run([sys.executable, str(TOOLS / "compare.py"), str(run_a), str(run_b)], capture_output=True, text=True)
         log((result.stdout or result.stderr).rstrip())
+
+
+# ref
+
+def _ref_against(paths, against, shot_name):
+    """The reference PNG that --against names: a PNG, a refs.json key, or a run's shot of the same name."""
+    if Path(against).is_file():
+        return Path(against)
+    entry = shotref.load_manifest(paths).get(against)
+    if entry:
+        return shotref.reference_path(paths, entry)
+    return find_run(paths, against) / "shots" / f"{shot_name}.png"
+
+
+def _ref_report(label, found, log):
+    log(label)
+    for line in shotref.text(found):
+        log(f"  {line}")
+    return not found["failures"]
+
+
+def ref(paths, args, log=print):
+    """cs_test.py ref accept|check|list. Returns the exit code."""
+    if args.ref_command == "list":
+        for key, entry in shotref.load_manifest(paths).items():
+            stored = "" if shotref.reference_path(paths, entry).exists() else "  (not in the store)"
+            log(f"{key}: {entry['sha256'][:12]} {entry.get('size', '')} from {entry.get('run', '?')} ({entry.get('accepted', '?')}){stored}")
+        return 0
+    if args.ref_command == "accept":
+        run_dir = find_run(paths, args.run)
+        wanted = args.shot or (json.loads((run_dir / "resolved.json").read_text(encoding="utf-8")).get("harness") or {}).get("shot_refs") or None
+        try:
+            shotref.accept(paths, run_dir, wanted, log=log)
+        except ValueError as error:
+            log(f"error: {error}")
+            return 2
+        return 0
+    target = Path(args.shot)
+    if target.is_file():
+        if not args.against:
+            log("error: a PNG needs --against")
+            return 2
+        reference = _ref_against(paths, args.against, target.stem)
+        return 0 if _ref_report(f"{target} against {reference}", shotref.compare(shotref.signature(reference), shotref.signature(target)), log) else 1
+    run_dir = find_run(paths, args.shot)
+    name = shotref.run_name(run_dir)
+    manifest = shotref.load_manifest(paths)
+    ok, checked = True, 0
+    for shot in collect.shots_in(run_dir):
+        path = run_dir / "shots" / f"{shot}.png"
+        if not path.exists():
+            continue
+        if args.against:
+            reference = _ref_against(paths, args.against, shot)
+            if not reference.exists():
+                continue
+            found = shotref.compare(shotref.signature(reference), shotref.signature(path))
+        elif f"{name}/{shot}" in manifest:
+            reference = f"{name}/{shot}"
+            found = shotref.check_shot(paths, manifest[reference], path)
+        else:
+            log(f"{shot}: no reference for {name}/{shot}")
+            continue
+        checked += 1
+        ok = _ref_report(f"{shot} against {reference}", found, log) and ok
+    if not checked:
+        log(f"{run_dir.name}: nothing to compare")
+    return 0 if ok and checked else 1
 
 
 # status and restore

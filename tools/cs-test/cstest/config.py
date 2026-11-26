@@ -23,7 +23,8 @@ FIXED = {
     "build": {"stage": str, "shader_cache": str},
     "game": {"save": str, "cell": str, "mods_off": list, "autoload_mod": str, "uncapped": bool},
     "timeouts": {"launch": int, "compile": int, "load": int, "step_wait": int},
-    "expect": {"reach": str, "shots": list, "no_log": list, "live_frames": int, "graph_frames": dict},
+    # expect.shot_refs: the shots compared with their kept references after a passed run (shotref.py); the harness's, not the game's.
+    "expect": {"reach": str, "shots": list, "no_log": list, "live_frames": int, "graph_frames": dict, "shot_refs": list},
     # fg.presentmon: the game's presents per second from the PresentMon service, next to the [FGTEST] lines (presentmon.py).
     "fg": {"presentmon": bool},
 }
@@ -323,6 +324,7 @@ def flatten(merged, schema, name):
         "timeout_s": run.get("timeout_s", 600),
         "stall_s": run.get("stall_s", 90),
         "label": run.get("label", ""),
+        "shot_refs": list(expect.get("shot_refs", [])),
         "origin": dict(sorted(origin.items())),
     }
     return contract, harness
