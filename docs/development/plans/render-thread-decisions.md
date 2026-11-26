@@ -269,3 +269,22 @@ pushes until the user is back.
     the capture.
 75. **The load hold counts game snapshots and load epochs:** the first render of a game snapshot from the hold's load epoch,
     plus `gameUpdates`, not render frames. VR publishes a frame-only snapshot at every Begin (untested).
+
+## 2026-11-26: phase 5 ImageSpace rest and screenshots (snap5-isrest; director accepted)
+
+76. **The TAA reset is a game-side count** (`taaResets` in the ImageSpace block): only the loading menu sets the engine's
+    flag, on open and close; the first native world render after the count moves resets histories through
+    `State::ShouldResetHistory`. `HistoryBreak` alone missed closes that land a few frames after the load. Guest unchanged.
+77. **The vanilla screenshot is a snapshot event** (15 built): the capture takes the PrintScreen request before
+    Main::DrawFrame, runs the engine's screenshot function on the game thread (file name, HUD message, index, INI save) with
+    its one render call redirected to record the name, and the render side saves the frame under the vanilla name in the
+    Screenshot feature's format (PNG/AVIF/BMP, not the engine's). One hook covers PrintScreen, capture mode and Papyrus
+    `TakeScreenshot`. PrintScreen and the capture toggle in one frame are both handled that frame.
+78. **The save screenshot is a request count with a report back** (S15): the render side copies the frame and reports the
+    count; the next capture completes the request on the game thread, so a save is written one game update later than
+    vanilla.
+79. **No-raster ImageSpace steps need no port** (ISMap and ISNoise draw nothing). The image-based lens flare port (about
+    30 steps including `ISDownsampleCS`) is deferred: CS forces IBLF off unless the console turns it on.
+80. **Known, older than this work:** `screenshot-clean` loses the device after its window-resize step (base build too);
+    guest PrintScreen hits a fatal "ISCopy rt0->rt76 has no CS pass"; the save pump writes only the first of two saves in a
+    config, in both modes.
