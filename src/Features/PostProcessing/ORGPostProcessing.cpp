@@ -1014,7 +1014,7 @@ struct ORGPostProcessing::Impl
 		commit.Write(a_build.input, CopyLatch{ .conversion = { .gamma = linear ? 1.0f : Util::ColorSpace::GAME_GAMMA }, .source = readsMainCopy ? 1u : 0u });
 		for (std::size_t i = 0; i < a_build.order.size(); ++i) {
 			ZoneScopedN("CS.PP.StepCommit");
-			const char* name = StepName(a_build.order[i]);
+			[[maybe_unused]] const char* name = StepName(a_build.order[i]);
 			ZoneText(name, std::strlen(name));
 			a_build.runs[i]->Commit(commit, *pp.pipeline[static_cast<std::size_t>(a_build.order[i])]);
 		}

@@ -537,9 +537,13 @@ namespace LegacyGraphicsCompatibility
 				"48 89 2C 06 FF C7 83 FF 0A 7C AF">();
 			constexpr auto destructorContext = REL::make_pattern<
 				"4C 89 34 06 FF C7 83 FF 0A 7C AF">();
+			// On SE the destructor calls Shutdown for its loop; on AE it holds its own copy of the loop.
+			const bool sharedLoop = REL::Module::IsSE();
+			const bool destructorVerified = sharedLoop ? Util::VersionedRelocation::IsCallTo(destructorAddress + 0xF, shutdownAddress) :
+			                                             REL::verify_code(destructorAddress + 0x86, destructorContext);
 			if (!REL::verify_code(setupAddress + 0x24, setupContext) ||
 				!REL::verify_code(shutdownAddress + 0x86, shutdownContext) ||
-				!REL::verify_code(destructorAddress + 0x86, destructorContext)) {
+				!destructorVerified) {
 				logger::error("Legacy FullScreenBlur stage-count opcode contexts do not match the verified 1.5.97/1.6.1170 sequences; no blur adapters installed");
 				return false;
 			}
@@ -576,10 +580,11 @@ namespace LegacyGraphicsCompatibility
 				shutdownAddress + 0x8E,
 				destructorAddress + 0x8E,
 			};
+			const std::size_t countSites = sharedLoop ? 2 : countAddresses.size();
 			std::array<bool, countAddresses.size()> countWritten{};
 			const auto restoreCounts = [&]() noexcept {
 				bool restored = true;
-				for (std::size_t i = countAddresses.size(); i-- > 0;) {
+				for (std::size_t i = countSites; i-- > 0;) {
 					if (!countWritten[i]) {
 						continue;
 					}
@@ -590,7 +595,7 @@ namespace LegacyGraphicsCompatibility
 				}
 				return restored;
 			};
-			for (std::size_t i = 0; i < countAddresses.size(); ++i) {
+			for (std::size_t i = 0; i < countSites; ++i) {
 				if (REL::safe_write(countAddresses[i], latestCount, std::array{ legacyCount })) {
 					countWritten[i] = true;
 					continue;

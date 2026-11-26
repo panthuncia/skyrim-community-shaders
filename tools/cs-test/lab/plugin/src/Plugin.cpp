@@ -383,6 +383,22 @@ extern "C"
 		0,                // seVersionRequired
 	};
 
+	// skse64's PluginInfo. SKSE for SE 1.5.97 loads only plugins that export SKSEPlugin_Query; later SKSE reads SKSEPlugin_Version.
+	struct PluginInfo
+	{
+		std::uint32_t infoVersion;
+		const char* name;
+		std::uint32_t version;
+	};
+
+	__declspec(dllexport) bool SKSEPlugin_Query(const SKSEInterface*, PluginInfo* a_info)
+	{
+		a_info->infoVersion = 1;
+		a_info->name = "CSTestLab";
+		a_info->version = 1;
+		return true;
+	}
+
 	__declspec(dllexport) bool SKSEPlugin_Load(const SKSEInterface* a_skse)
 	{
 		g_home = Environment(L"CS_TEST_LAB_HOME");

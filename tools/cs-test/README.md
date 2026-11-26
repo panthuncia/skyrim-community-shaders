@@ -242,6 +242,13 @@ reads it empty. Every plugin has its own CommonLib build, so the gate is what ma
 
 `lab\active\<run id>.json` names a running run's slot, home, log and status file (perf-tools' `trun.sh` reads it).
 
+**SE 1.5.97.** The same tool runs the SE instance with its own lab and documents, sharing the locks:
+`CS_TEST_MO2="D:\MO2 installations\MO2 1.5.97 Dev" CS_TEST_LAB=D:\CSLab-SE CS_TEST_DOCUMENTS=D:\CSLab-SE\documents`. Stage and run
+as usual. The SE profile has no Start On Save, so name a save in the private documents (`--set game.save=SETest`), or coc from the
+main menu in the steps. The SE game folder ships its own `d3dcompiler_47.dll`, so its first run compiles every shader again. Turn
+off TressFXSSE there (`game.mods_off`): it crashed the game at start-up. Add `*TerrainHelper.esp` to the SE profile's
+`plugins.txt` for the run, and take it out after. Notes: `docs/development/plans/perf3-se.md`.
+
 ## What a run does
 
 1. Takes a lab slot (or, exclusive, every slot). A lock whose PID is gone is taken over. With none free it refuses, or waits with `--wait`.
