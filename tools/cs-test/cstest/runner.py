@@ -9,7 +9,7 @@ import signal
 import time
 from pathlib import Path
 
-from . import collect, lab as lab_mod, locks, mo2, presentmon, procs
+from . import collect, lab as lab_mod, locks, mo2, presentmon, procs, shotref
 from .config import diff, resolve
 from .outcome import Final, Watcher, frames_after, read_status, summary_line
 from .paths import CONFIG_DIR, LOG_FILE, STATUS_FILE
@@ -149,8 +149,9 @@ def _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path
             return final, status
 
 
-def check_expectations(contract, run_dir, status, final):
-    """The harness's own checks, after a passed run: shots on disk, forbidden log lines, the milestone reached."""
+def check_expectations(contract, run_dir, status, final, refs=None):
+    """The harness's own checks, after a passed run: shots on disk, forbidden log lines, the milestone reached, the graph
+    frames, and the reference shots (refs, from shotref.check_run)."""
     if final.outcome != "passed":
         return final
     expect = contract["expect"]
@@ -170,6 +171,8 @@ def check_expectations(contract, run_dir, status, final):
     graph = collect.graph_frames(contract, collect.final_status(run_dir, status))
     if graph["failures"]:
         return Final("failed", "; ".join(graph["failures"]) + " (harness)", "harness")
+    if refs and refs.get("failures"):
+        return Final("failed", "; ".join(refs["failures"]) + " (harness)", "harness")
     return final
 
 
@@ -386,7 +389,10 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
     status_copy = slot.skse / STATUS_FILE
     if status_copy.exists() and collect.new_since(status_copy, started):
         shutil.copy2(status_copy, run_dir / "status.json")
-    final = check_expectations(contract, run_dir, status, final)
+    refs = shotref.check_run(paths, harness["shot_refs"], contract["name"], run_dir) if final.outcome == "passed" else {"checked": False}
+    for shot in refs.get("unreferenced", []):
+        log(f"shot {shot}: no reference for {contract['name']}/{shot} (cs_test.py ref accept {run_dir.name})")
+    final = check_expectations(contract, run_dir, status, final, refs)
     scan = collect.scan_log(run_dir / LOG_FILE)
     fault = ((status or {}).get("fault") or {}).get("address") or scan["fault_address"]
     shots = collect.shots_in(run_dir)
@@ -418,6 +424,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
         "shots": shots,
         "live_image": collect.live_image(run_dir, contract["expect"]),
         "graph_frames": collect.graph_frames(contract, collect.final_status(run_dir, status)),
+        "shot_refs": refs,
         "detectors": detected,
         "first_error": scan["first_error"] or (status or {}).get("last_error", ""),
         "fault": (status or {}).get("fault") or ({"address": fault} if fault else {}),

@@ -57,6 +57,16 @@ def build_parser():
     p.add_argument("dump", nargs="?", help="the dump (default: the newest run folder's CommunityShaders-Switches.json)")
     p.add_argument("--out", help="where to write it (default: tools/cs-test/switches.json)")
 
+    p = sub.add_parser("ref", help="reference shots: accept a run's shots, check shots against references, list them")
+    refs = p.add_subparsers(dest="ref_command", required=True)
+    r = refs.add_parser("accept", help="make a passed run's shots the references for its config (refs.json and <root>/refs)")
+    r.add_argument("run")
+    r.add_argument("--shot", action="append", help="only this shot (repeatable; default: the config's expect.shot_refs, else every shot)")
+    r = refs.add_parser("check", help="compare shots with references, as a run's check does")
+    r.add_argument("shot", help="a run (its shots against refs.json) or a PNG")
+    r.add_argument("--against", help="a PNG, a run (its shot of the same name) or a refs.json key such as native-vulkan+quick/start")
+    refs.add_parser("list", help="the references in refs.json")
+
     p = sub.add_parser("check-schema", help="compare switches.json with the game's switch dump")
     p.add_argument("dump", nargs="?", help="the dump (default: the newest run folder's CommunityShaders-Switches.json)")
     return parser
@@ -99,6 +109,8 @@ def main(argv=None):
             return 0 if commands.restore(paths) else 1
         if args.command == "schema":
             return 0 if commands.write_schema(paths, args.dump, args.out) else 1
+        if args.command == "ref":
+            return commands.ref(paths, args)
         if args.command == "check-schema":
             return 0 if commands.check_schema(paths, args.dump) == 0 else 1
     except (ConfigError, locks.LockError) as error:
