@@ -112,3 +112,17 @@ pushes until the user is back.
 32. **Engine render-half output read the same frame waits for phase 3** (extends 25): Light Limit Fix's light walk and
     local shadows, Terrain Blending's depth-pass state, Skylighting's occlusion-map calls, Exponential Height Fog's engine
     local shadows.
+
+## 2026-11-26: phase 2 (the user is away; director decisions unless marked)
+
+33. **The frame camera (snap2-camera, to confirm):** the capture stores SetCameraData's unjittered matrices per view
+    (`CameraView::view/proj/viewProj`). Native builds the engine's per-frame block (b12) itself once per render frame
+    (`Snapshot::FrameCamera`): `Main()` jittered for the world passes, `Post()` unjittered for the sun query and the post chain,
+    with ratios of 1 once the frame is at full resolution. The previous camera is the one this render side drew last. Guest and
+    D3D11 keep `frameBufferCached`. SharedConstants' Start, PreDepth and Ui segments keep the engine's block until those views get
+    snapshot cameras.
+34. **Render-owned jitter (snap2-camera, to confirm):** native never writes `projectionPosScale` or the jitter index into
+    `BSGraphics::State`; game-side picking and culling see an unjittered projection. Guest keeps today's writes.
+35. **Drawn previous transforms (snap2-camera, to confirm):** in native a DCLF row's previous world is the world this render
+    side last drew for the same geometry in that slot (LOD and first person excepted); sky and water take the previous posAdjust
+    from the frame camera. Skinned bone palettes still use the engine's previous update (open).
