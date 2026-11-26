@@ -1,7 +1,7 @@
-# The vanilla screenshot (S24, decision 15) in native mode: PrintScreen's request, taken in the snapshot capture; the engine names
-# the file, shows its HUD message and moves iScreenShotIndex, and the Screenshot feature saves the frame ("vanilla screenshot 1 to
-# ...", then "Saved screenshot to ...ScreenShotN.png"). Native only: guest's DrawFrame copy from kFRAMEBUFFER has no CS pass (a
-# fatal tap error, unchanged). Compose it: native-vulkan+vanilla-screenshot.
+# The vanilla screenshot (S24, decision 15): PrintScreen's request, taken in the snapshot capture; the engine names the file, shows
+# its HUD message and moves iScreenShotIndex, and the Screenshot feature saves the frame ("vanilla screenshot 1 to ...", then "Saved
+# screenshot to ...ScreenShotN.png"). The same in guest mode: DrawFrame's copies from kFRAMEBUFFER, which have no CS pass, are not
+# entered. Compose it: native-vulkan+vanilla-screenshot, guest+vanilla-screenshot.
 extends = ["base"]
 
 [run]
@@ -27,3 +27,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["after"]
+no_log = ["frame tap error"]
