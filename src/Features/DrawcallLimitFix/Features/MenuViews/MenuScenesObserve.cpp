@@ -56,6 +56,7 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			Native::PreviousCamera previous;
 			// The batch's draws in the engine's order, and CS's order for the same root.
 			std::vector<const RE::BSGeometry*> engineOrder;
+			std::vector<std::uint32_t> engineHints;  // each engine draw's accumulation hint, for the order log
 			std::vector<RE::BSGeometry*> mineOrder;
 			std::uint64_t orderBatches = 0, orderDiffer = 0;
 		};
@@ -132,11 +133,12 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		s.camera = a_camera;
 		s.inputsMade = false;
 		s.engineOrder.clear();
+		s.engineHints.clear();
 		s.mineOrder.clear();
 		if (s.active && a_view == View::MenuColour && a_camera)
 			if (auto* manager = RE::UI3DSceneManager::GetSingleton())
 				if (auto* root = manager->menuObjects[static_cast<std::uint32_t>(manager->currentlightScheme)].get())
-					Native::SceneGeometry(root, *a_camera, s.mineOrder);
+					Native::SceneGeometry(root, *a_camera, Native::SortsByClosestPoint(*manager), s.mineOrder);
 	}
 
 	void End()
@@ -144,27 +146,41 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		auto& s = Get();
 		if (s.active && s.view == View::MenuColour && !s.engineOrder.empty()) {
 			++s.orderBatches;
-			std::vector<const RE::BSGeometry*> mine;
+			// The blended list's order (hint 1 in the engine's passes, BlendedList in CS's), and whether the two agree on membership.
+			std::vector<const RE::BSGeometry*> mine, engine;
 			for (auto* g : s.mineOrder)
-				if (!netimmerse_cast<RE::NiParticleSystem*>(g))
+				if (Native::BlendedList(*g))
 					mine.push_back(g);
-			std::vector<const RE::BSGeometry*> engine;
-			for (const auto* g : s.engineOrder)
-				if (!netimmerse_cast<const RE::NiParticleSystem*>(g))
-					engine.push_back(g);
-			if (mine != engine) {
+			bool membership = true;
+			for (std::size_t i = 0; i < s.engineOrder.size(); ++i) {
+				const bool hint1 = s.engineHints[i] == 1;
+				membership &= hint1 == Native::BlendedList(*s.engineOrder[i]);
+				if (hint1)
+					engine.push_back(s.engineOrder[i]);
+			}
+			Note("blended membership", !membership, "an engine draw's hint 1 and BlendedList disagree");
+			if (mine != engine || !membership) {
 				++s.orderDiffer;
 				std::string pattern;
-				for (const auto* g : engine)
+				for (const auto* g : s.engineOrder)
 					pattern += GeometryName(g) + " ";
 				static std::map<std::string, int> seen;
 				if (seen[pattern]++ == 0 && seen.size() < 20) {
+					// Each draw with its accumulation hint and the blended sort's key (bound centre along the camera's view direction, radius).
+					const auto& r = s.camera->world.rotate.entry;
+					const auto key = [&](const RE::BSGeometry* a_g) {
+						const auto& c = a_g->worldBound.center;
+						return std::format("{}/{}", r[1][0] * c.y + r[0][0] * c.x + r[2][0] * c.z, a_g->worldBound.radius);
+					};
 					std::string e, m;
-					for (const auto* g : s.engineOrder)
-						e += GeometryName(g) + " ";
+					for (std::size_t i = 0; i < s.engineOrder.size(); ++i)
+						e += std::format("{}(h{} {}{}) ", GeometryName(s.engineOrder[i]), s.engineHints[i], key(s.engineOrder[i]), Native::BlendedList(*s.engineOrder[i]) ? " B" : "");
 					for (const auto* g : mine)
-						m += std::format("{}{} ", GeometryName(g), g->GetGeometryRuntimeData().alphaProperty ? "*" : "");
-					logger::info("[DCLF] menu scenes observe: order differs: engine {} | mine {}", e, m);
+						m += GeometryName(g) + " ";
+					const auto* manager = RE::UI3DSceneManager::GetSingleton();
+					const auto* accumulator = manager ? reinterpret_cast<const std::uint8_t*>(manager->unk10.get()) : nullptr;
+					logger::info("[DCLF] menu scenes observe: order differs (accumulator +0x50..52 {} {} {}): engine {} | mine blended {}", accumulator ? accumulator[0x50] : 0,
+						accumulator ? accumulator[0x51] : 0, accumulator ? accumulator[0x52] : 0, e, m);
 				}
 			}
 		}
@@ -180,8 +196,10 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		auto& s = Get();
 		if (!s.active)
 			return;
-		if (a_pass && a_pass->geometry && (s.engineOrder.empty() || s.engineOrder.back() != a_pass->geometry))
+		if (a_pass && a_pass->geometry && (s.engineOrder.empty() || s.engineOrder.back() != a_pass->geometry)) {
 			s.engineOrder.push_back(a_pass->geometry);
+			s.engineHints.push_back(a_pass->accumulationHint);
+		}
 		const auto key = std::format("{} {} vs {:#x} ps {:#x} pass {:#x} ({})", NameOf(s.view), a_shader, a_vertex, a_pixel, a_pass ? a_pass->passEnum : 0u,
 			a_pass ? GeometryName(a_pass->geometry) : "no pass");
 		if (s.others[key]++ == 0)

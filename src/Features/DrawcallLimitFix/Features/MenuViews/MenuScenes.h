@@ -355,8 +355,12 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief The Effect draw of a_geometry as BSEffectShader's Setup functions would bind it. Particles and the lit, membrane and soft variants are refused. */
 		bool ComputeEffect(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why);
 
-		/** @brief A menu root's visible geometry in draw order: opaque in scene order, then blended far to near. */
-		void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, std::vector<RE::BSGeometry*>& a_out);
+		/** @brief A menu root's visible geometry in draw order: the batches' in scene order, then the blended list sorted far to near. */
+		void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, bool a_closestPoint, std::vector<RE::BSGeometry*>& a_out);
+		/** @brief Whether a_geometry's pass goes to the accumulator's blended list (accumulation hint 1). */
+		bool BlendedList(const RE::BSGeometry& a_geometry);
+		/** @brief Whether the menu's colour accumulator sorts its blended list by each bound's closest point. */
+		bool SortsByClosestPoint(const RE::UI3DSceneManager& a_manager);
 
 		/** @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes). */
 		bool Owns(std::int32_t a_scheme);

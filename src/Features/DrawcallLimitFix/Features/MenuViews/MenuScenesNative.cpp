@@ -26,6 +26,7 @@
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Fatal.h"
 #include "ShaderCache.h"
 #include "Snapshot/CoreFrame.h"
 #include "State.h"
@@ -381,13 +382,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 
-		/** @brief The draws CS leaves out, each reason logged once. */
-		Family::RefusalLog& NativeRefusals()
-		{
-			static Family::RefusalLog log("[DCLF] menu scenes: a native menu draw is left out");
-			return log;
-		}
-
 		/** @brief What a draw needs besides its constants: the states SetupGeometry and the alpha setup leave, and its targets. */
 		struct DrawState
 		{
@@ -659,11 +653,17 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				Walk(child.get(), a_planes, a_out);
 		}
 
-		/** @brief Whether a geometry's alpha property blends. Blended draws follow the opaque ones, far to near, as the batch sorts them. */
-		bool Blends(const RE::BSGeometry& a_geometry)
+		/**
+		 * @brief The blended list's sort key (FUN_1414e8fc0, called by FUN_1414f5250 in FinishAccumulating): the bound centre along the
+		 * camera's view direction (world rotation column 0), less the radius when the accumulator sorts by closest point (+0x51). The
+		 * products are summed in the engine's order.
+		 */
+		float BlendedKey(const RE::BSGeometry& a_geometry, const RE::NiCamera& a_camera, bool a_closestPoint)
 		{
-			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
-			return alpha && alpha->GetAlphaBlending();
+			const auto& r = a_camera.world.rotate.entry;
+			const auto& c = a_geometry.worldBound.center;
+			const float key = r[1][0] * c.y + r[0][0] * c.x + r[2][0] * c.z;
+			return a_closestPoint ? key - a_geometry.worldBound.radius : key;
 		}
 
 		struct NativeState
@@ -679,22 +679,45 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 	}
 
-	void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, std::vector<RE::BSGeometry*>& a_out)
+	/**
+	 * @brief Whether a_geometry's pass has accumulation hint 1, the accumulator's blended list (FUN_1414f50b0, batch renderer +0xF0), as
+	 * GetRenderPasses gives it. BSEffectShaderProperty (AE 0x1414bd890): not a decal or billboard, and the property's alpha below one,
+	 * the alpha property blending, a particle system or falloff. BSLightingShaderProperty: the alpha property blends (a blended pass
+	 * that also fades below alpha one gets hint 9 or 10, which Render refuses).
+	 */
+	bool BlendedList(const RE::BSGeometry& a_geometry)
+	{
+		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
+		const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+		const bool blending = alpha && alpha->GetAlphaBlending();
+		if (netimmerse_cast<const RE::BSEffectShaderProperty*>(property)) {
+			if (property->flags.any(Flag::kDecal, Flag::kDynamicDecal, Flag::kBillboard))
+				return false;
+			const bool particles = netimmerse_cast<const RE::NiParticleSystem*>(&a_geometry) != nullptr;
+			return property->alpha < 1.0f || blending || particles || property->flags.any(Flag::kFalloff);
+		}
+		return blending && !(property && property->flags.any(Flag::kDecal, Flag::kDynamicDecal));
+	}
+
+	void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, bool a_closestPoint, std::vector<RE::BSGeometry*>& a_out)
 	{
 		a_out.clear();
 		ShadowCameras::Planes planes;
 		ShadowCameras::FrustumPlanes(a_camera.GetRuntimeData2().viewFrustum, a_camera.world, planes);
-		const auto a_eye = a_camera.world.translate;
 		Walk(a_root, planes, a_out);
-		std::stable_partition(a_out.begin(), a_out.end(), [](const RE::BSGeometry* a_geometry) { return !Blends(*a_geometry); });
-		const auto firstBlended = std::ranges::find_if(a_out, [](const RE::BSGeometry* a_geometry) { return Blends(*a_geometry); });
-		// The depth of a bound's centre along the camera's view direction (rotation column 0).
-		const auto& r = a_camera.world.rotate.entry;
-		const auto distance = [&](const RE::BSGeometry* a_geometry) {
-			const auto d = a_geometry->worldBound.center - a_eye;
-			return d.x * r[0][0] + d.y * r[1][0] + d.z * r[2][0];
-		};
-		std::stable_sort(firstBlended, a_out.end(), [&](const RE::BSGeometry* a_a, const RE::BSGeometry* a_b) { return distance(a_a) > distance(a_b); });
+		// The blended list follows the batches, in registration (scene) order, then merge sorted far to near: a stable sort.
+		const auto firstBlended = std::stable_partition(a_out.begin(), a_out.end(), [](const RE::BSGeometry* a_geometry) { return !BlendedList(*a_geometry); });
+		std::stable_sort(firstBlended, a_out.end(), [&](const RE::BSGeometry* a_a, const RE::BSGeometry* a_b) {
+			return BlendedKey(*a_a, a_camera, a_closestPoint) > BlendedKey(*a_b, a_camera, a_closestPoint);
+		});
+	}
+
+	bool SortsByClosestPoint(const RE::UI3DSceneManager& a_manager)
+	{
+		// NiAlphaAccumulator::sortByClosestPoint (+0x51) of the colour pass's accumulator.
+		const auto* accumulator = a_manager.unk10.get();
+		return accumulator && reinterpret_cast<const std::uint8_t*>(accumulator)[0x51] != 0;
 	}
 
 	bool Owns(std::int32_t a_scheme)
@@ -741,7 +764,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		auto& native = GetNative();
 		const auto in = SampleInputs(*a_manager, *camera, native.previous);
 		std::vector<RE::BSGeometry*> geometries;
-		SceneGeometry(root, *camera, geometries);
+		SceneGeometry(root, *camera, SortsByClosestPoint(*a_manager), geometries);
 
 		const bool taa = false;  // the stats menu draws without TAA (UI3DSceneManager::Render: schemes 3 and 6)
 		const auto targets = ColourTargets(scheme, taa);
@@ -755,13 +778,15 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			std::string detail;
 			const char* why = nullptr;
 			if (netimmerse_cast<const RE::BSLightingShaderProperty*>(property))
-				why = AddLighting(in, *geometry, targets, *run, frame, detail);
+				why = BlendedList(*geometry) && property->alpha < 1.0f ? "a blended Lighting draw that fades (accumulation hint 9 or 10)" :
+				                                                          AddLighting(in, *geometry, targets, *run, frame, detail);
 			else if (netimmerse_cast<const RE::BSEffectShaderProperty*>(property))
 				why = AddEffect(in, *geometry, targets, *run, frame, detail);
 			else
 				why = "a shader the native menu scene has no program for";
+			// Decision 149: a scheme is owned only when CS computes every draw in it.
 			if (why)
-				NativeRefusals().Report(why, detail);
+				::RenderGraph::Fatal("menu scenes", std::format("scheme {} draw {}: {} ({})", scheme, geometry->name.c_str() ? geometry->name.c_str() : "?", why, detail));
 		}
 		// The colour pass's clears: kMAIN's depth and stencil at the render's start.
 		::RenderGraph::Engine::Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL);
