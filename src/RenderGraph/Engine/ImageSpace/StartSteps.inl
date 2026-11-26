@@ -163,6 +163,10 @@ void BuildStartSteps(StartBuild& a_build)
 			add(WorldScope::WaterDisplacement, E::ISWaterWadingHeightmap, static_cast<std::uint16_t>(high | h), std::move(d));
 		}
 	}
+	// Native's displacement restart (Native/WaterEffects.h): the engine clears kWATER_DISPLACEMENT to 0.5, what ClearSimulation draws.
+	if (Native::Requested())
+		add(WorldScope::WaterDisplacement, E::ISWaterDisplacementClearSimulation, 0,
+			StepDesc{ .name = "water.clear", .output = engine(static_cast<std::int32_t>(T::kWATER_DISPLACEMENT)) });
 	// Each reads its loaded texture by heap index, with no declared input.
 	if (a_build.flowSize)
 		for (std::uint16_t k = 0; k < kFlowInstances; ++k)
@@ -360,7 +364,8 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		}
 	} else if (id == E::ISCopySubRegionCS) {
 		// BGSAutoWater loads these and never writes them, so the graph exempts them from declarations. Held until the run retires.
-		auto* view = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().CSTexture[0];
+		auto& native = NativeSteps::Get();
+		auto* view = native.armed ? native.flowSource : RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().CSTexture[0];
 		auto binding = view ? ::DCLF::GpuTextures::Get().ResolveBinding(view, kImageSpaceTag) : ::DCLF::GpuTextures::Binding{};
 		if (!binding) {
 			client.batch.pop_back();

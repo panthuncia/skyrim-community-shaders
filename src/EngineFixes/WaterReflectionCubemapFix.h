@@ -8,8 +8,14 @@ struct WaterReflectionCubemapFix : EngineFix
 
 	void Install() override;
 
+	/** @brief Whether the cell or worldspace changed since the last call. False while the fix is not installed. Game side in native. */
+	static bool SceneChanged();
+
+	/** @brief Clears the reflection cube's faces. Render side. */
+	static void ClearCubemap();
+
 private:
-	static void ResetCubemapOnSceneChange();
+	static inline bool installed = false;
 
 	struct Main_RenderWaterEffects
 	{

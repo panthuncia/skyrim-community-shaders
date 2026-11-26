@@ -6,11 +6,17 @@
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 
 #include <cstdint>
+#include <span>
 #include <string>
 
 namespace RE
 {
 	class NiCamera;
+}
+
+namespace RenderGraph::Engine::Native::WaterEffects
+{
+	struct Face;
 }
 
 namespace DCLF::Features::Reflection::ReflectionFaces
@@ -42,6 +48,15 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 	 */
 	using FaceOriented = void (*)(const ShadowCameras::Camera& a_camera, std::uint32_t a_face);
 	void SetFaceOriented(FaceOriented a_callback);
+
+	/** @brief The cube camera's LOD roots (BSCubeMapCamera +0x188), released after an update's last face as the face render does. */
+	void ReleaseRoots(RE::NiCamera* a_camera);
+
+	/**
+	* @brief Native: draws the faces the game side recorded (Native/WaterEffects.h), one face each, as faces drawn without the engine's face
+	* render. A face DCLF cannot draw is not drawn: native never runs the engine's face render. Returns the faces drawn. Render thread.
+	*/
+	std::uint32_t DrawRecorded(std::span<const ::RenderGraph::Engine::Native::WaterEffects::Face> a_faces);
 
 	/** @brief The faces' report line since the last call: native faces and the faces left to the engine. */
 	std::string TakeReport();
