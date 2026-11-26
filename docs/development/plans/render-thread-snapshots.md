@@ -88,9 +88,9 @@ thread. This is the less visible half of "port first", and it needs its own inve
 - **Jitter and projection.** `PostChain::UpdateJitter` writes `projectionPosScale` into `BSGraphics::State`
   (`RenderGraph/Frame/PostChain.cpp:241-268`); game-side picking or culling that reads the projection must see an
   unjittered one.
-- **Frame pacing.** Today the engine's Present blocks, which paces the game loop. With an asynchronous render thread, the
-  game thread needs its own rate limit: Skyrim's physics and scripts misbehave at high update rates. The game thread's
-  Present call becomes "publish, then wait for the game's own target rate".
+- **Frame pacing.** Today the engine's Present blocks, which paces the game loop. With an asynchronous render thread, an
+  update-rate cap setting (default 60 updates per second) paces the game thread instead: its Present call becomes
+  "publish, then wait for the next update slot".
 
 ## Shared code and guest mode
 
@@ -251,17 +251,16 @@ Done when the engine-render detector reads zero in every native frame kind.
 - **The render thread.** CS creates it. It owns ORG's host, the swapchain and present, and the frame's submission. ORG's
   stream and submission threads already exist; `ClaimRenderOwnership`/`MoveOwnerThread` (`FrameAnchors.cpp:1955-1975`,
   `RenderGraphRuntime.cpp:2708-2716`) and the loading-screen thread are the precedent for moving ownership.
-- **Publication.** The engine's Present call on the game thread publishes the snapshot and returns after the game's own
-  rate limit. Revisions and graph installs adopt at the render thread's frame start, as they do at Begin today.
+- **Publication.** The engine's Present call on the game thread publishes the snapshot and returns at the next slot of the
+  update-rate cap (a CS setting, default 60 updates per second). Revisions and graph installs adopt at the render thread's frame start, as they do at Begin today.
 - **Pacing.** None between the threads. The render thread's own present mode (vsync, a CS frame limiter, frame
   generation) sets its rate.
 - **Frame kinds.** `DecideKind` (`Frame/FrameDriver.cpp:172-177`, which treats any frame off the main thread as Loading)
   moves into the capture. The load hold counts snapshots and load epochs, not Presents.
 - **Input and UI.** Window messages stay on the game thread. ImGui input reaches the render thread through a queue; ImGui
   draws on the render thread. Settings changes go through the revision lane. Swapchain resize is a published event.
-- **Frame generation and Reflex.** PCL markers carry the snapshot id (simulation) and the render frame (submit, present).
-  With an uncapped render thread, frame generation interpolates between render frames; whether it should interpolate
-  between snapshots instead is open (below).
+- **Frame generation and Reflex.** Frame generation multiplies the render rate, interpolating between rendered frames.
+  PCL markers carry the snapshot id (simulation) and the render frame (submit, present).
 
 ## Watch list: frame-cadence assumptions found
 
@@ -315,16 +314,16 @@ Phases 1 and 2 are per-feature work and suit parallel leads by feature group. Ph
 single item, so it can run alongside 1 to 3. Phases 3 and 5 are the largest ports. Phase 7 should be small if the rest is
 done.
 
-## Open questions
+## Settled questions (user, 2026-11-25)
 
-1. **The game thread's rate.** What caps the game update once Present no longer blocks it: Skyrim's own frame-rate
-   settings, a CS game-rate limit, or the refresh rate? Physics and scripts constrain the choice.
-2. **Frame generation.** With an uncapped render thread, does frame generation stay (interpolating render frames), or
-   move to interpolating between snapshots?
-3. **Visual-only animation between snapshots.** Which effects advance by render delta (smooth between snapshots) and which
-   must hold still until the next snapshot? A rule per feature in phase 2.
-4. **Engine render-half side effects.** The phase 0 inventory decides, for each write, whether the game reads it (CS must
-   produce it) or only the engine's renderer did (it goes away).
+1. **The game thread's rate.** A separate update-rate cap setting paces the game's update, defaulting to 60 updates per
+   second. It replaces the pacing the engine's blocking Present gives today (phase 7).
+2. **Frame generation** multiplies the render rate: it interpolates between rendered frames, as it does now. Snapshots
+   only carry data to the render thread and play no part in timing.
+3. **Visual-only animation between snapshots** (what advances by render delta, what holds until the next snapshot) is
+   decided per feature when that feature is ported.
+4. **Engine render-half side effects**: each write's fate (CS produces it for the game, or it goes away) is decided per
+   feature when its port is investigated, from the phase 0 inventory.
 
 ## Investigation notes
 
