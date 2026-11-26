@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "RenderGraph/Async/EventQueue.h"
+#include "RenderGraph/FrameClock.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
@@ -47,9 +48,10 @@ namespace DCLF::Features::Particles::MasterParticles
 			return *reinterpret_cast<RE::BSReadWriteLock*>(REL::Module::get().base() + kManager.Get() + sizeof(void*));
 		}
 
+		/** @brief The render frame. gFrameCounter moves once per game update in native, so held frames count renders here. */
 		std::uint32_t FrameCounter()
 		{
-			return Engine::Global<std::uint32_t>(Engine::Address::kFrameCounter);
+			return static_cast<std::uint32_t>(::RenderGraph::FrameClock::BeginFrame());
 		}
 
 		// Shared by the render thread's category capture, exclusive for the removal hook, so no removal lands between a master's listing

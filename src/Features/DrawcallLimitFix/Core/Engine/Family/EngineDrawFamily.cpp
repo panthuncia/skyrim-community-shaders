@@ -15,6 +15,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/Engine/MainTick.h"
+#include "RenderGraph/FrameClock.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Switches.h"
 #include "RenderGraph/PublishedResources.h"
@@ -210,17 +211,17 @@ namespace DCLF::Family
 	void BeginBatch()
 	{
 		static std::uint32_t last = ~0u;
-		const std::uint32_t frame = GameFrame();
+		const std::uint32_t frame = RenderFrame();
 		if (frame == last)
 			return;
 		last = frame;
 		GpuResources::Frame().BeginFrame();
 	}
 
-	std::uint32_t GameFrame()
+	std::uint32_t RenderFrame()
 	{
-		static REL::Relocation<std::uint32_t*> counter{ REL::Offset(Engine::Address::kFrameCounter) };
-		return *counter;
+		// Not gFrameCounter: in native that moves once per game update, and a repeated render must still start a new frame.
+		return static_cast<std::uint32_t>(::RenderGraph::FrameClock::BeginFrame());
 	}
 
 	bool Passes::OnSetup(const RE::BSRenderPass* a_pass)
@@ -717,7 +718,7 @@ namespace DCLF::Family
 
 	void KeptOwners::Keep(Owners&& a_owners)
 	{
-		const std::uint32_t frame = GameFrame();
+		const std::uint32_t frame = RenderFrame();
 		while (!kept.empty() && frame - kept.front().first > KeptFrames())
 			kept.pop_front();
 		if (!a_owners.empty())
