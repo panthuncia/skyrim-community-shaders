@@ -1,5 +1,6 @@
 #include "EngineZones.h"
 
+#include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Switches.h"
@@ -30,7 +31,8 @@ namespace EngineZones
 		{
 			Render,   // an engine render function itself: work CS must port
 			Helper,   // bookkeeping, setup and helpers around it
-			Producer  // game-side work the frame's data comes from; counts as render until CS owns what it draws (decision 16)
+			Producer,      // game-side work the frame's data comes from; counts as render until CS owns what it draws (decision 16)
+			WaterProducer  // a render call inside TESWaterSystem::Update that native records on the game thread (Native/WaterEffects.h)
 		};
 
 		struct Site
@@ -189,12 +191,12 @@ namespace EngineZones
 			{ 31383, 0x510, 31478, 32174, 0x70F, 32277, Role::Helper, "AE 32277 (in TESWaterSystem::Update)" },
 			{ 31383, 0x592, 31398, 32174, 0x8D3, 32189, Role::Helper, "AE 32189 (in TESWaterSystem::Update)" },
 			{ 31383, 0x87D, 31479, 32174, 0xBFA, 32278, Role::Helper, "AE 32278 (in TESWaterSystem::Update)" },
-			{ 31383, 0x8A0, 31373, 32174, 0xC1C, 32160, Role::Render, "TESWaterReflections::Update (in TESWaterSystem::Update)" },
+			{ 31383, 0x8A0, 31373, 32174, 0xC1C, 32160, Role::WaterProducer, "TESWaterReflections::Update (in TESWaterSystem::Update)" },
 			{ 31383, 0x91E, 31477, 32174, 0xCF4, 68161, Role::Helper, "BSTArray::RemoveElements #1 (in TESWaterSystem::Update)" },
 			{ 31383, 0x928, 31380, 32174, 0xCFE, 32170, Role::Helper, "AE 32170 (in TESWaterSystem::Update)" },
 			{ 31383, 0xA0D, 66906, 32174, 0xDE4, 68161, Role::Helper, "BSTArray::RemoveElements #2 (in TESWaterSystem::Update)" },
 			{ 31383, 0xA25, 31384, 32174, 0xDFC, 32175, Role::Helper, "AE 32175 (in TESWaterSystem::Update)" },
-			{ 31383, 0xA2D, 31385, 32174, 0xE04, 32176, Role::Render, "TESWaterSystem::RenderDisplacement (in TESWaterSystem::Update)" },
+			{ 31383, 0xA2D, 31385, 32174, 0xE04, 32176, Role::WaterProducer, "TESWaterSystem::RenderDisplacement (in TESWaterSystem::Update)" },
 			{ 31373, 0x137, 10798, 32160, 0x137, 10854, Role::Helper, "NiMemoryAllocate (in TESWaterReflections::Update)" },
 			{ 31373, 0x14C, 100776, 32160, 0x14C, 107560, Role::Helper, "BSCubeMapCamera::Ctor (in TESWaterReflections::Update)" },
 			{ 31373, 0x1AD, 36755, 32160, 0x1CA, 37771, Role::Helper, "Actor::CalculateLOSLocation (in TESWaterReflections::Update)" },
@@ -380,17 +382,21 @@ namespace EngineZones
 
 		/**
 		 * @brief Whether a site's entries count as engine render calls. DrawInterface is a producer once CS's Scaleform renderer owns
-		 * every slot of the game's (native mode): it then draws nothing itself, it advances the menus and records the UI stream.
+		 * every slot of the game's (native mode): it then draws nothing itself, it advances the menus and records the UI stream. The water
+		 * update's reflection update and displacement are producers once native runs the update on the game thread: the reflection update
+		 * records its faces and the displacement is CS's port, so neither draws.
 		 */
 		bool CountsAsRender(Role a_role) noexcept
 		{
-			return a_role == Role::Render || (a_role == Role::Producer && !RenderGraph::Engine::Scaleform::OwnsRenderer());
+			return a_role == Role::Render || (a_role == Role::Producer && !RenderGraph::Engine::Scaleform::OwnsRenderer()) ||
+			       (a_role == Role::WaterProducer && !RenderGraph::Engine::Native::WaterEffects::Owns());
 		}
 
 		const char* RoleName(Role a_role) noexcept
 		{
-			return CountsAsRender(a_role) ? "render" : a_role == Role::Producer ? "producer" :
-			                                                                      "helper";
+			return CountsAsRender(a_role)                                    ? "render" :
+			       a_role == Role::Producer || a_role == Role::WaterProducer ? "producer" :
+			                                                                   "helper";
 		}
 
 		/**
@@ -404,7 +410,8 @@ namespace EngineZones
 			a_code.Put({ 0x0F, 0xB6, 0x00 });  // movzx eax, byte ptr [rax]
 			a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(g_entries[a_site].data()));
 			a_code.Put({ 0xF0, 0x48, 0xFF, 0x04, 0xC1 });  // lock inc qword ptr [rcx+rax*8]
-			if (kSites[a_site].role == Role::Render) {
+			// Native's water ownership is decided before the stubs are placed, so a water producer's stub counts as its role is now.
+			if (kSites[a_site].role == Role::Render || (kSites[a_site].role == Role::WaterProducer && CountsAsRender(Role::WaterProducer))) {
 				a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(&g_frameCalls));
 				a_code.Put({ 0xF0, 0x48, 0xFF, 0x01 });  // lock inc qword ptr [rcx]
 			} else if (kSites[a_site].role == Role::Producer) {

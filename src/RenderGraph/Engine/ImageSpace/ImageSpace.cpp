@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Fatal.h"
@@ -1421,6 +1422,7 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				bool armed = false;  // StageStep stages rows from here, not from a capture
 				bool computeRows = false;  // with armed, a compute step's CS b0 rows are these (the native post chain), not the engine's buffer
+				ID3D11ShaderResourceView* flowSource = nullptr;  // with armed, a flow copy's source (native water work), not the shadow state's
 				Rows rows;
 				const RE::BSImagespaceShader* shader = nullptr;  // the step's shader, while armed
 				// A lens flare sprite's draw: its vertex rows, its quad and the texture at slot 0.
@@ -2263,6 +2265,7 @@ namespace RenderGraph::Engine::ImageSpace
 #include "RenderGraph/Engine/ImageSpace/NativePost.inl"
 #include "RenderGraph/Engine/ImageSpace/Screenshots.inl"
 #include "RenderGraph/Engine/ImageSpace/NativeWorld.inl"
+#include "RenderGraph/Engine/ImageSpace/NativeStart.inl"
 
 		/** @brief BSImagespaceShader::Render (100950 / 107732). */
 		struct ShaderRender
@@ -2873,6 +2876,11 @@ namespace RenderGraph::Engine::ImageSpace
 		const auto base = NativePost::ManagerBase();
 		if (base && NativePost::WorldNative(NativePost::Family::kWaterBlend))
 			(void)NativePost::RunWaterBlend(NativePost::Field<void*>(base, 0x200), 0x58, 1);
+	}
+
+	void StageNativeWater(const Native::WaterEffects::Work& a_work)
+	{
+		NativeStart::Stage(a_work);
 	}
 
 	void WorldEndOfFrame(std::int32_t a_source, std::int32_t a_final, const std::function<void()>& a_engine)

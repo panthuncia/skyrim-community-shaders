@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
+#include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "Snapshot/EngineReads.h"
 
 #include "Deferred.h"
@@ -41,8 +42,9 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			inline constexpr Engine::Offset kAddRoot{ { 32258 }, { 15623 } };
 		}
 
-		// Render thread only. The update, the face render and every caller run there.
-		const RE::NiCamera* camera = nullptr;
+		// Render thread only. The update, the face render and every caller run there (native: the update runs on the game thread, and
+		// the faces are drawn on the render thread from what it recorded).
+		bool inFace = false;
 		std::uint32_t faceMask = 0;
 		bool plain = false;
 		FaceOriented faceOriented = nullptr;
@@ -71,12 +73,22 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			{ 0.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, -1.0f, 0.0f, 0.0f },
 		} };
 
-		std::array<float, 4> PortOf(const RE::NiCamera& a_camera)
+		/** @brief The cube camera as TESWaterReflections::Update placed it: its local translate and scale, frustum and port. */
+		struct CubeView
 		{
-			// NiRect<float> members are protected. The order is left, right, top, bottom.
-			std::array<float, 4> port;
-			std::memcpy(port.data(), &const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2().port, sizeof(port));
-			return port;
+			RE::NiPoint3 translate;
+			float scale = 1.0f;
+			RE::NiFrustum frustum;
+			std::array<float, 4> port{};  // NiRect<float>: left, right, top, bottom
+		};
+
+		CubeView ViewOf(const RE::NiCamera& a_camera)
+		{
+			auto& data = const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2();
+			CubeView view{ .translate = a_camera.local.translate, .scale = a_camera.local.scale, .frustum = data.viewFrustum };
+			// NiRect<float> members are protected.
+			std::memcpy(view.port.data(), &data.port, sizeof(view.port));
+			return view;
 		}
 
 		/** @brief The reflection cube's face size, read again only when the engine's cube texture changes. */
@@ -102,7 +114,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 		 * @brief A face's camera without SetFace: the position TESWaterReflections::Update gave the cube camera (its local translate;
 		 * the world transform follows only at SetFace's update), the face's rotation, and the frustum and port the update set.
 		 */
-		Sky::FaceView NativeFace(const RE::NiCamera& a_cube, std::uint32_t a_face, const std::array<std::uint32_t, 2>& a_size, ShadowCameras::Camera& a_camera)
+		Sky::FaceView NativeFace(const CubeView& a_cube, std::uint32_t a_face, const std::array<std::uint32_t, 2>& a_size, ShadowCameras::Camera& a_camera)
 		{
 			Sky::FaceView view;
 			view.face = a_face;
@@ -110,14 +122,13 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			for (std::uint32_t r = 0; r < 3; ++r)
 				for (std::uint32_t c = 0; c < 3; ++c)
 					view.world.rotate.entry[r][c] = rotation[r * 3 + c];
-			view.world.translate = a_cube.local.translate;
-			view.world.scale = a_cube.local.scale;
-			view.frustum = const_cast<RE::NiCamera&>(a_cube).GetRuntimeData2().viewFrustum;
-			const auto port = PortOf(a_cube);
-			ShadowCameras::CameraMatrices(view.world, view.frustum, port, a_camera);
+			view.world.translate = a_cube.translate;
+			view.world.scale = a_cube.scale;
+			view.frustum = a_cube.frustum;
+			ShadowCameras::CameraMatrices(view.world, view.frustum, a_cube.port, a_camera);
 			view.viewProj = a_camera.viewProj;
 			view.eye = view.world.translate;
-			view.rect = ShadowCameras::Viewport(port, a_size[0], a_size[1]);
+			view.rect = ShadowCameras::Viewport(a_cube.port, a_size[0], a_size[1]);
 			return view;
 		}
 
@@ -126,6 +137,12 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 		{
 			static void thunk(void* a_reflection)
 			{
+				// Native runs the update on the game thread and records its faces (Native/WaterEffects.h); the roots DCLF draws are decided
+				// when the faces are drawn.
+				if (::RenderGraph::Engine::Native::WaterEffects::Owns()) {
+					func(a_reflection);
+					return;
+				}
 				// Flags at +0x10: bit 12 drops the LOD roots, bit 4 adds silhouettes (mode 0x1B). Without bit 12 and bReflectSky (0x1420104e8)
 				// the sky is suppressed (0x19). Only mode 0 is plain.
 				const auto flags = *reinterpret_cast<const std::uint16_t*>(static_cast<const std::byte*>(a_reflection) + 0x10);
@@ -170,19 +187,12 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The cube camera's LOD roots (BSCubeMapCamera +0x188), released after an update's last face as the face render does. */
-		void ReleaseRoots(RE::NiCamera* a_camera)
-		{
-			auto& roots = *reinterpret_cast<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>*>(reinterpret_cast<std::byte*>(a_camera) + 0x188);
-			roots.clear();
-		}
-
 		/**
 		 * @brief Draws a_faces without the engine's face render: per face, its sky computed from the Sky object list and DCLF's LOD camera,
 		 * after CS's reflection prepasses (Deferred, as its face render hook runs them). The prepasses and the inputs they bind are the
 		 * same for every face, so they run once a frame. Returns the faces left to the engine.
 		 */
-		std::uint32_t DrawNative(RE::NiCamera* a_camera, std::uint32_t a_faces)
+		std::uint32_t DrawNative(const CubeView& a_camera, std::uint32_t a_faces)
 		{
 			DCLF_ZONE("CS.DCLF.Reflection.NativeFaces");
 			struct Prepared
@@ -202,7 +212,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 					continue;
 				auto& face = prepared[count];
 				std::string why;
-				face.run = Sky::PrepareFace(NativeFace(*a_camera, f, size, face.camera), why);
+				face.run = Sky::PrepareFace(NativeFace(a_camera, f, size, face.camera), why);
 				if (!face.run) {
 					left |= bit;
 					++faceStats.engine;
@@ -217,7 +227,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			}
 			if (!count)
 				return left;
-			camera = a_camera;
+			inFace = true;
 			faceMask = 1u << prepared[0].face;
 			plain = true;
 			// The update renders one face a call, and a frame may hold several updates. The prepasses bind the same views every time and
@@ -238,7 +248,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 					faceOriented(face.camera, face.face);
 			}
 			globals::deferred->EndReflectionFace();
-			camera = nullptr;
+			inFace = false;
 			faceMask = 0;
 			if (faceStats.native == 0) {
 				static bool logFirst = true;
@@ -259,14 +269,14 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 				// A plain face whose LOD roots are all DCLF's holds only the sky, which the sky family computes, so the engine's render
 				// is skipped. An update that adds roots DCLF does not draw stays the engine's.
 				if (a_camera && plainMode && skipRoots == (kLodRoots | kTreeRoot) && Sky::Enabled()) {
-					a_faces = DrawNative(a_camera, a_faces);
+					a_faces = DrawNative(ViewOf(*a_camera), a_faces);
 					if (!a_faces) {
 						if (a_clearRoots)
 							ReleaseRoots(a_camera);
 						return;
 					}
 				}
-				camera = a_camera;
+				inFace = a_camera != nullptr;
 				faceMask = a_faces;
 				plain = plainMode;
 				auto& capture = PassCapture::Get();
@@ -284,7 +294,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 				func(a_camera, a_faces, a_silhouettes, a_clearRoots, a_noSky);
 				capture.SetViewRendering(kView, false);
 				capture.SetViewWithholdActive(kView, false);
-				camera = nullptr;
+				inFace = false;
 				faceMask = 0;
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -335,11 +345,50 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 		logger::info("[DCLF] reflection face hooks installed: the update, its LOD add-roots, the face render (vfunc 0x35) and its orientation");
 	}
 
-	bool InFace() { return camera != nullptr; }
+	bool InFace() { return inFace; }
 	std::uint32_t FaceMask() { return faceMask; }
 	bool Plain() { return plain; }
 	void SetFaceOriented(FaceOriented a_callback) { faceOriented = a_callback; }
 	void SetRootsOwned(RootsOwned a_callback) { rootsOwned = a_callback; }
+
+	void ReleaseRoots(RE::NiCamera* a_camera)
+	{
+		auto& roots = *reinterpret_cast<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>*>(reinterpret_cast<std::byte*>(a_camera) + 0x188);
+		roots.clear();
+	}
+
+	std::uint32_t DrawRecorded(std::span<const ::RenderGraph::Engine::Native::WaterEffects::Face> a_faces)
+	{
+		// Only plain faces are DCLF's (FaceOriented), and only while it draws every LOD root a face shows and the sky family draws its sky.
+		const std::uint32_t owned = rootsOwned ? rootsOwned(true) : 0u;
+		const bool drawable = owned == (kLodRoots | kTreeRoot) && Sky::Enabled();
+		std::uint32_t drawn = 0;
+		const auto size = CubeSize();
+		for (const auto& face : a_faces) {
+			const CubeView view{ .translate = face.translate, .scale = face.scale, .frustum = face.frustum, .port = face.port };
+			if (!face.plain || !drawable) {
+				++faceStats.engine;
+				faceStats.engineWhy = !face.plain ? "a face with silhouettes or without the sky" :
+				                                    fmt::format("a face whose LOD roots or sky DCLF does not draw yet (roots {:#x}, sky {})", owned, Sky::Enabled());
+				static Util::ReasonLog log("[DCLF] reflection native: a recorded face has no sky; native never runs the engine's face render");
+				log.Report(faceStats.engineWhy);
+				// A plain face is still the view's, as the engine's face render hands it over (Orient): the view draws its LOD, and its
+				// coverage starts from those faces.
+				if (face.plain && faceOriented) {
+					ShadowCameras::Camera camera;
+					(void)NativeFace(view, face.face, size, camera);
+					plain = true;
+					faceOriented(camera, face.face);
+					plain = false;
+				}
+				continue;
+			}
+			if (!DrawNative(view, 1u << face.face))
+				++drawn;
+		}
+		++rootStats.updates;
+		return drawn;
+	}
 
 	std::string TakeReport()
 	{

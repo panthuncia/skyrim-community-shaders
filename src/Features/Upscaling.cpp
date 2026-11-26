@@ -2206,6 +2206,11 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 void Upscaling::Main_RenderPrecipitation::thunk()
 {
+	// Native's occlusion maps make no engine render call (DrawcallLimitFix::RenderMask), so the engine's dynamic resolution needs no lock.
+	if (RenderGraph::Engine::Native::Active()) {
+		func();
+		return;
+	}
 	// Writes engine state around an engine render function (goes with phase 3's port of it).
 	auto& runtimeData = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->GetRuntimeData();
 	runtimeData.dynamicResolutionLock = 1;

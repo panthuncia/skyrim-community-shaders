@@ -12,6 +12,7 @@
 
 #include "RenderGraph/Async/LatestSlot.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameClock.h"
@@ -292,6 +293,9 @@ namespace Snapshot
 			// Game side: the settings' raise count when the snapshot is built, not the variables the last render Begin took.
 			a_snapshot.settingsRevision = CS::SettingRegistry::Serial();
 
+			// Native: Main::SetupSunAndSky's game half sets the camera's FOV and moves the sky with it, so it runs before the camera is taken.
+			if (a_snapshot.kind == FrameKind::World)
+				RenderGraph::Engine::Native::WaterEffects::SetupSunAndSky();
 			auto& main = a_snapshot.cameras.current[static_cast<std::size_t>(ViewId::Main)];
 			main = CaptureMainCamera();
 			if (a_previous)
@@ -402,9 +406,12 @@ namespace Snapshot
 				// Phase 7's "publish, then wait for the next update slot". Off unless CS_UPDATE_RATE_CAP=1.
 				PaceGameUpdate();
 				const auto updates = ++Game().lineUpdates;
-				if (updates % kSideEffectLineUpdates == 0)
+				if (updates % kSideEffectLineUpdates == 0) {
 					if (const auto line = SideEffects::TakeStatsLine(); !line.empty())
 						logger::info("{}", line);
+					if (const auto line = RenderGraph::Engine::Native::WaterEffects::TakeStatsLine(); !line.empty())
+						logger::info("{}", line);
+				}
 				if (updates % kLifetimeLineUpdates == 0)
 					logger::info("{}", Retire::TakeStatsLine());
 			}
@@ -423,6 +430,7 @@ namespace Snapshot
 			return;
 		stl::write_thunk_call<MainUpdate_DrawFrame>(REL::RelocationID(35565, 36564).address() + REL::Relocate(0x5D2, 0xA97));
 		SideEffects::InstallHooks();
+		RenderGraph::Engine::Native::WaterEffects::InstallHooks();
 		(void)CadenceMode();
 		logger::info("[Snapshot] frame snapshots: published at Main::Update's call of Main::DrawFrame, adopted at Renderer::Begin");
 	}
@@ -448,6 +456,9 @@ namespace Snapshot
 		Builder builder(*fresh, previous);
 		// The core block first: feature captures may read it through Builder::Built().
 		CaptureCore(builder);
+		// Native: RenderWaterEffects' game half, before the feature captures read what the water update sets (the underwater state and
+		// effects, the water shader's globals).
+		RenderGraph::Engine::Native::WaterEffects::Capture(*fresh);
 		for (const auto capture : game.captures)
 			capture(builder);
 		auto& stats = Counters();
