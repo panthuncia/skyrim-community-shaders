@@ -404,6 +404,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 
+		/** @brief The reason a draw is left out while its program builds on the program service (the next session prebuilds it). */
+		constexpr const char* kBuilding = "its program is still building";
+
 		/** @brief What a draw needs besides its constants: the states SetupGeometry and the alpha setup leave, and its targets. */
 		struct DrawState
 		{
@@ -576,9 +579,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				if (const char* why = AddTexture(written ? r.record.textures[t] : nullptr, r.record.addressModes[t], filter, t, a_run, c.textures[t], c.samplers[t], a_detail))
 					return why;
 			}
-			draw.program = SceneDraws::LightingProgram(draw.key, *shader);
+			bool building = false;
+			draw.program = SceneDraws::LightingProgram(draw.key, *shader, &building);
 			if (!draw.program)
-				return "its ORG program cannot be built";
+				return building ? kBuilding : "its ORG program cannot be built";
 			if (r.vertex & static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Skinned))
 				if (const char* why = AddBones(a_geometry, a_run, draw))
 					return why;
@@ -635,9 +639,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 						c.samplers[t], a_detail))
 					return why;
 			}
-			draw.program = SceneDraws::EffectProgram(draw.key, *shader);
+			bool building = false;
+			draw.program = SceneDraws::EffectProgram(draw.key, *shader, &building);
 			if (!draw.program)
-				return "its ORG program cannot be built";
+				return building ? kBuilding : "its ORG program cannot be built";
 			if (r.vertex & Effects::EffectFlag::Skinned)
 				if (const char* why = AddBones(a_geometry, a_run, draw))
 					return why;
@@ -707,6 +712,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		{
 			PreviousCamera previous;
 			std::uint64_t renders = 0;
+			std::uint64_t building = 0;  // draws left out while their programs build
 		};
 
 		NativeState& GetNative()
@@ -847,6 +853,13 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				why = AddEffect(in, *geometry, targets, *run, frame, detail);
 			else
 				why = "a shader the native menu scene has no program for";
+			// A draw whose program is still building is left out until it is built, as the engine draw families do (the manifest
+			// prebuilds it next session).
+			if (why == kBuilding) {
+				if (native.building++ == 0)
+					logger::info("[DCLF] menu scenes: scheme {} draw {} is left out while its program builds", scheme, geometry->name.c_str() ? geometry->name.c_str() : "?");
+				continue;
+			}
 			// Decision 149: a scheme is owned only when CS computes every draw in it.
 			if (why)
 				::RenderGraph::Fatal("menu scenes", std::format("scheme {} draw {}: {} ({})", scheme, geometry->name.c_str() ? geometry->name.c_str() : "?", why, detail));

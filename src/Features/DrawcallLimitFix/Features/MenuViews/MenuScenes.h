@@ -407,8 +407,9 @@ namespace DCLF::Features::MenuViews::Scenes
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
 		/** @brief The program for a key, one per shader. Null when it cannot be built. */
 		std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
-		std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
-		std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		/** @brief a_building, when given, is set when null means the program is still building on the program service. */
+		std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
+		std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
 		/** @brief The format of a_view's import a_index, or 0 without one. */
 		std::uint32_t ColourFormat(View a_view, std::uint32_t a_index);
 		std::uint32_t DepthFormat(View a_view);
