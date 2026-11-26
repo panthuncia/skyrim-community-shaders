@@ -251,3 +251,21 @@ pushes until the user is back.
     accumulators' call sites; both must come from game data before the main cull stops. S8 for the decision 46 roots and
     the decision 53 test-mode crash wait for it. Engine call sites that CS hooks keep counting until CS drives Main::Draw
     itself (phase 7).
+
+## 2026-11-26: phase 5 frame kinds (snap5-kinds; director accepted)
+
+71. **Every render frame adopts a snapshot.** Frames with no game update (the loading screen on the serving thread, a Bink
+    tick, a main-thread frame outside Main::Update such as the TES cell-change path AE 13316) publish a frame-only
+    snapshot at `Renderer::Begin`: the same id with the next `sub`, the last snapshot's world data (blocks, cameras, scene,
+    game time) and their own kind, menus, load epoch, events (`gameUpdates` 0) and UI stream. A new game frame still means a
+    new id. The frame kind is the adopted snapshot's; `DecideKind` only maps it. Movie snapshots now exist (replaces part
+    of 17).
+72. **A main-thread frame's kind follows Main's own rule** (the freeze test, then player 3D); Loading is only the serving
+    thread's kind. Side effects and the adaptation reset therefore run on world frames under a held loading menu, as the
+    engine did. The freeze test is asked only on the main thread.
+73. **Two producers never overlap:** frame-only publishes run inside `Renderer::Lock`, and the serving thread renders only
+    while the main thread is in the load coordinator. An overlap is fatal (`PublishClaim`), not waited on.
+74. **Menu flags come from the adopted snapshot** (`State::AdoptMenus`; replaces 52). In guest, kind and menus are taken at
+    the capture.
+75. **The load hold counts game snapshots and load epochs:** the first render of a game snapshot from the hold's load epoch,
+    plus `gameUpdates`, not render frames. VR publishes a frame-only snapshot at every Begin (untested).
