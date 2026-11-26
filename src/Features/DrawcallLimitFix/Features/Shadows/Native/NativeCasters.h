@@ -2,8 +2,8 @@
 
 // Native mode's shadow lights without the engine's shadow code: CS selects the shadow casters, sets up their cameras and does the
 // bookkeeping the shadow maps and masks read, in place of Main::CalculateAndDrawShadowCasterLights (AE 107132, SE 100414) and
-// Main::RenderShadowMaps (AE 107133, SE 100415). The main camera's list accumulation jobs still run from here until the scene lists
-// are DCLF's; its registration jobs are not run (native draws nothing from registered passes).
+// Main::RenderShadowMaps (AE 107133, SE 100415). The main camera's list accumulation and registration jobs are not run: native draws
+// nothing from the engine's scene lists or registered passes.
 
 #include <cstdint>
 
@@ -19,10 +19,10 @@ namespace DCLF::Features::Shadows::Native
 	bool Replaces();
 
 	/**
-	 * @brief Render thread, in place of CalculateAndDrawShadowCasterLights(a_camera): the sun's cameras and keep, the main camera's list
-	 * accumulation jobs (engine work), and DCLF's light selection with the engine's per-light bookkeeping while they run.
+	 * @brief Render thread, in place of CalculateAndDrawShadowCasterLights: the sun's cameras and keep, then DCLF's light selection with
+	 * the engine's per-light bookkeeping. The primary cull's frame ends here, where the list jobs were awaited.
 	 */
-	void SelectCasters(RE::NiCamera* a_camera);
+	void SelectCasters();
 
 	/**
 	 * @brief Render thread, in place of Main::RenderShadowMaps: each kept light's native shadow maps. A light whose views DCLF cannot

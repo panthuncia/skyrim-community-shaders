@@ -2,8 +2,12 @@
 
 #include "Snapshot/StealthLights.h"
 
+#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
+#include "Features/DrawcallLimitFix/Features/Fades/FadeState.h"
+#include "Features/DrawcallLimitFix/Features/Fades/FadeWriters.h"
+#include "Features/DrawcallLimitFix/Features/Fades/FadesAddresses.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
 
@@ -44,7 +48,7 @@ namespace Snapshot::SideEffects
 			std::uint32_t maskBefore = 0, maskAfter = 0;  // the last clear's
 			std::uint64_t decalsAccepted = 0, decalsStuck = 0, fadeEnables = 0;
 			std::uint64_t actors = 0, actorsInView = 0, actorsHidden = 0, actorsFadedIn = 0, actorsNoFadeNode = 0;
-			std::uint64_t animatedRoots = 0, animatedByDclf = 0, animatedInView = 0;
+			std::uint64_t animatedRoots = 0, animatedByDclf = 0, animatedInView = 0, fadesStepped = 0;
 		};
 		Stats stats;  // game thread
 
@@ -89,6 +93,44 @@ namespace Snapshot::SideEffects
 			for (const auto expected : a_bytes)
 				if (bytes[i++] != expected)
 					RenderGraph::Fatal("snapshot side effects", fmt::format("{} at {:#x} is not the engine's code; another plugin may have patched it", a_what, a_site));
+		}
+
+		/** @brief A short jump from a_from to a_to over engine code, after checking the bytes it replaces. */
+		void JumpOver(const char* a_what, std::uintptr_t a_from, std::initializer_list<std::uint8_t> a_bytes, std::uintptr_t a_to)
+		{
+			RequireBytes(a_what, a_from, a_bytes);
+			const auto distance = static_cast<std::intptr_t>(a_to) - static_cast<std::intptr_t>(a_from + 2);
+			if (distance < 0 || distance > 0x7F)
+				RenderGraph::Fatal("snapshot side effects", fmt::format("{}: no short jump reaches {:#x} from {:#x}", a_what, a_to, a_from));
+			const std::uint8_t jump[2]{ 0xEB, static_cast<std::uint8_t>(distance) };
+			REL::safe_write(a_from, jump, sizeof(jump));
+		}
+
+		/**
+		* @brief The main camera's list culls (decisions 12 and 13): Main::Draw (SE 35560, AE 36559) queues DrawWorld_BuildSceneLists and
+		* waits for it around Main::RenderWaterEffects, runs Main::FirstPersonCulling after the shadow caster selection, and clears the
+		* scene lists in jobs around Main::RenderWorld. Native draws nothing from the lists or the first-person cull, and the culls'
+		* game-visible effects are produced here (S7, S8) and by DCLF, so Main::Draw jumps over all of it. The list accumulation jobs
+		* are not queued either (NativeCasters.cpp). Offsets are the same on SE and AE up to the last one.
+		*/
+		void SkipListCulls()
+		{
+			const auto draw = REL::RelocationID(35560, 36559).address();
+			// The lock, QueueJob(BuildSceneLists), unlock and Begin, up to RenderWaterEffects; then its Finish.
+			JumpOver("Main::Draw's scene list build", draw + 0x12A, { 0x48, 0x8B, 0x15 }, draw + 0x16F);
+			JumpOver("Main::Draw's scene list build's Finish", draw + 0x177, { 0x48, 0x8B, 0x0D }, draw + 0x183);
+			// Main::FirstPersonCulling(main, firstPerson) and its argument setup.
+			JumpOver("Main::Draw's first-person cull", draw + 0x1EB, { 0x41, 0x0F, 0xB6, 0xD6 }, draw + 0x1F7);
+			// The ClearLists job list's creation, its jobs and Begin. R15D is the function's zero register, set inside the block.
+			const auto clear = draw + 0x3CB;
+			RequireBytes("Main::Draw's scene list clears", clear, { 0x48, 0x8B, 0x05 });
+			const auto clearEnd = draw + 0x519;
+			std::uint8_t skip[8]{ 0x45, 0x31, 0xFF, 0xE9 };  // xor r15d, r15d; jmp rel32
+			const auto relative = static_cast<std::int32_t>(static_cast<std::intptr_t>(clearEnd) - static_cast<std::intptr_t>(clear + sizeof(skip)));
+			std::memcpy(skip + 4, &relative, sizeof(relative));
+			REL::safe_write(clear, skip, sizeof(skip));
+			// The ClearLists Finish after Main::RenderWorld.
+			JumpOver("Main::Draw's scene list clears' Finish", draw + REL::Relocate(0x836, 0x846), { 0x48, 0x8B, 0x0D }, draw + REL::Relocate(0x842, 0x852));
 		}
 
 		/** @brief SetJobTaskEvent (SE 68165, AE 69514). Inside the render half, stages 5 to 9 are left to AfterRenderHalf. */
@@ -319,8 +361,95 @@ namespace Snapshot::SideEffects
 		{
 			RE::NiPointer<RE::NiAVObject> root;
 			bool visible;
+			std::uint32_t plan;  // the fade plan (FadeState::PlanOf), kFadeRootOther for a root S8 does not step
 		};
 		std::vector<AnimatedVerdict> animatedVerdicts;  // game thread, from AfterCapture to AfterRenderHalf
+
+		// BSFadeNode fields, the same on SE and AE.
+		constexpr std::size_t kFadeAmount = 0x100;
+		constexpr std::size_t kLastVisible = 0x13C;  // the fade frame counter an OnVisible last stamped
+		constexpr std::size_t kLodBlend = 0x14C;
+		constexpr std::size_t kLodLevels = 0x152;
+		constexpr std::size_t kLodType = 0x153;
+		constexpr std::size_t kTreeLodSwitch = 0x180;  // BSTreeNode: its LOD switch, with a count at +0x12C
+		constexpr std::uint32_t kFlagFadedIn = 1u << 14;
+		constexpr std::uint32_t kFlagSettled = 1u << 15;
+		constexpr std::size_t kCameraLodAdjust = 0x184;
+
+		/** @brief The camera an OnVisible of the main camera's cull reads: the world camera's position and LOD adjust. */
+		bool FadeCamera(float (&a_camera)[4])
+		{
+			const auto* camera = RE::Main::WorldRootCamera();
+			if (!camera)
+				return false;
+			a_camera[0] = camera->world.translate.x;
+			a_camera[1] = camera->world.translate.y;
+			a_camera[2] = camera->world.translate.z;
+			a_camera[3] = *reinterpret_cast<const float*>(reinterpret_cast<const std::byte*>(camera) + kCameraLodAdjust);
+			return true;
+		}
+
+		/**
+		* @brief S8 (decisions 13, 39, 46): what the main camera's cull did to a fade root in view, without the children. BSLeafAnimNode's
+		* and BSTreeNode's LOD step (AE 105588, 105604), then BSFadeNode::OnVisible's fade part (SE 98848, AE 105485): the LOD type 6
+		* step or the fade state machine (SE 98849, AE 105486), and the +0x13C stamp. The main camera's list processes have
+		* cameraRelatedUpdates set and the tree height test off. CPU only: the engine's own fade functions, as AE 19384 calls them.
+		*/
+		void StepFade(std::byte* a_node, std::uint32_t a_plan, const float (&a_camera)[4])
+		{
+			using namespace DCLF::Engine;
+			namespace FadeAddress = DCLF::Features::Fades::Address;
+			const std::int32_t counter = Global<std::int32_t>(FadeAddress::kFadeFrameCounter);
+			if ((a_plan == DCLF::kFadeRootLeaf || a_plan == DCLF::kFadeRootTree) && Global<std::uint8_t>(Address::kFadeLodUpdates)) {
+				using Distance = float (*)(void*, const float*, std::int32_t*);
+				using LevelUpdate = void (*)(void*, std::int32_t);
+				std::int32_t level = 0;
+				reinterpret_cast<Distance>(REL::Module::get().base() + FadeAddress::kFadeDistance)(a_node, a_camera, &level);
+				reinterpret_cast<LevelUpdate>(REL::Module::get().base() + Address::kLodLevelUpdate)(a_node, level);
+				At<std::int32_t>(a_node, kLastVisible) = counter;
+			}
+			[&] {
+				if (!Global<std::uint8_t>(Address::kFadesOn))
+					return;
+				const float one = Global<float>(FadeAddress::kFloatOne);
+				const float amount = At<float>(a_node, kFadeAmount);
+				auto& current = At<float>(a_node, kCurrentFade);
+				if ((At<std::uint32_t>(a_node, kObjectFlags) & kFlagSettled) && one == amount && one == current)
+					return;
+				if ((At<std::uint8_t>(a_node, kLodType) & 0xF) == 6 && !(Global<float>(Address::kFadeSpecialA) != Global<float>(Address::kFadeSpecialB))) {
+					if (!Global<std::uint8_t>(Address::kFadeLodUpdates)) {
+						AtomicFlags(a_node, kFlagFadedIn, 0);
+						current = 1.0f;
+					}
+					if (!(At<std::uint32_t>(a_node, kObjectFlags) & kFlagFadedIn)) {
+						if (counter - At<std::int32_t>(a_node, kLastVisible) < 2) {
+							float step = Global<float>(FadeAddress::kFadeStepTime) / Global<float>(FadeAddress::kFadeStepDivisor);
+							if (Global<float>(FadeAddress::kFadeStepMax) <= step)
+								step = Global<float>(FadeAddress::kFadeStepMax);
+							float fade = step + current;
+							if (one <= fade)
+								fade = one;
+							current = fade;
+							if (!(fade < one))
+								AtomicFlags(a_node, kFlagFadedIn, 0);
+						} else {
+							current = 1.0f;
+							AtomicFlags(a_node, kFlagFadedIn, 0);
+						}
+					}
+				} else {
+					using FadeUpdate = std::uint64_t (*)(void*, float, const float*);
+					reinterpret_cast<FadeUpdate>(REL::Module::get().base() + Address::kFadeUpdate)(a_node, amount, a_camera);
+				}
+				At<std::int32_t>(a_node, kLastVisible) = counter;
+			}();
+			// BSTreeNode::OnVisible's LOD fix-up, after BSLeafAnimNode's.
+			if (a_plan == DCLF::kFadeRootTree)
+				if (const auto* lod = At<const std::byte*>(a_node, kTreeLodSwitch); lod && At<std::int32_t>(lod, 0x12C) > 0) {
+					At<std::uint8_t>(a_node, kLodType) = static_cast<std::uint8_t>((At<std::uint8_t>(a_node, kLodType) & 0xAF) | 0x20);
+					At<float>(a_node, kLodBlend) = 0.0f;
+				}
+		}
 
 		void DecideAnimatedVisibility(const FrameSnapshot& a_snapshot)
 		{
@@ -365,14 +494,25 @@ namespace Snapshot::SideEffects
 			for (std::size_t i = 0; i < roots.size(); ++i) {
 				const bool visible = pass[i] != 0;
 				stats.animatedInView += visible ? 1 : 0;
-				animatedVerdicts.push_back({ std::move(roots[i]), visible });
+				// A root DCLF lists is DCLF's to fade even before its first visibility verdict.
+				const std::uint32_t plan = roots[i]->AsFadeNode() && !DCLF::Features::Fades::FadeWrittenByDclf(roots[i].get()) ?
+				                               DCLF::FadeState::PlanOf(*roots[i]) :
+				                               DCLF::kFadeRootOther;
+				animatedVerdicts.push_back({ std::move(roots[i]), visible, plan });
 			}
 		}
 
+		/** @brief S7, then S8 for the roots in view: once per game update, as the engine's cull ran once per rendered update. */
 		void WriteAnimatedVisibility()
 		{
+			float camera[4]{};
+			const bool haveCamera = FadeCamera(camera);
 			for (const auto& verdict : animatedVerdicts) {
 				AtomicFlags(verdict.root.get(), verdict.visible ? kFlagAccumulated : 0u, verdict.visible ? 0u : kFlagAccumulated);
+				if (verdict.visible && verdict.plan != DCLF::kFadeRootOther && haveCamera) {
+					StepFade(reinterpret_cast<std::byte*>(verdict.root.get()), verdict.plan, camera);
+					++stats.fadesStepped;
+				}
 			}
 			animatedVerdicts.clear();
 		}
@@ -402,11 +542,14 @@ namespace Snapshot::SideEffects
 		const auto culler = REL::RelocationID(35562, 36561).address() + REL::Relocate(0x148, 0x11B);
 		RequireCall("Main::Draw's high actor culler", culler, REL::RelocationID(39263, 40336).address());
 		stl::write_thunk_call<SkipHighActorCuller>(culler);
+		// S7/S8 and DCLF produce what the main camera's list culls wrote, so they do not run.
+		SkipListCulls();
 		StealthLights::InstallHooks();
 		installed = true;
 		logger::info(
-			"[Snapshot] side effects: render stages 5-9, the frame counter, the render-unsafe bit, the fade enable count, the actor pre-cull "
-			"and the decal tests are produced on the game thread (native); the engine's writes are off");
+			"[Snapshot] side effects: render stages 5-9, the frame counter, the render-unsafe bit, the fade enable count, the actor pre-cull, "
+			"the decal tests and the animated roots' visibility and fades are produced on the game thread (native); the engine's writes and "
+			"the main camera's list culls are off");
 	}
 
 	void AfterCapture(const FrameSnapshot& a_snapshot)
@@ -460,6 +603,7 @@ namespace Snapshot::SideEffects
 				   double(s.actorsFadedIn) * perUpdate, double(s.actorsNoFadeNode) * perUpdate) +
 		       fmt::format("; animated roots {:.1f} an update ({:.1f} DCLF's, {:.1f} of the rest in view)",
 				   double(s.animatedRoots) * perUpdate, double(s.animatedByDclf) * perUpdate, double(s.animatedInView) * perUpdate) +
+		       fmt::format("; {:.1f} of their fades stepped (S8)", double(s.fadesStepped) * perUpdate) +
 		       "; " + StealthLights::TakeStatsLine();
 	}
 }

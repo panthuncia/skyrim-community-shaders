@@ -28,7 +28,7 @@ namespace DCLF::Features::Shadows::Engine
 				FrameDriver::Get().BeforeShadowCasters();
 				// Native mode selects the casters itself (Features/Shadows/Native); the engine's function is not entered.
 				if (Native::Replaces())
-					Native::SelectCasters(a_camera);
+					Native::SelectCasters();
 				else
 					func(a_camera);
 				FrameDriver::Get().ShadowCastersSelected();

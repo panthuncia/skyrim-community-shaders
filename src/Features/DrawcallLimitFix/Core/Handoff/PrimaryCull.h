@@ -77,6 +77,11 @@ namespace DCLF
 		/** @brief Render thread, at BeginSceneFrame. Takes the camera cut from the main camera so it does not depend on the list processes running. */
 		void BeginFrameCamera();
 		/**
+		 * @brief Native, render thread, where the list jobs were queued and awaited: no engine list cull runs, so the cut's frame ends here.
+		 * The observers' beforeListJobsWait and listJobsDone run as if the jobs had.
+		 */
+		void NoListJobs();
+		/**
 		 * @brief Main thread at Main::Update's entry, where no cull or animation job writes the flags. Writes the stood-in roots'
 		 * kAccumulated from DCLF's visibility, then calls the stand-in observers.
 		 */
@@ -366,6 +371,8 @@ namespace DCLF
 		void AfterListJobs();
 
 		bool installed = false;
+		// Native: no engine cull runs and the engine-drawn parts are not drawn, so a mixed entry is stood in like a whole one.
+		bool mixedStoodIn = false;
 
 		/** @brief Per candidate entry, from the snapshot and a walk of its subtree. */
 		enum class EntryPlan : std::uint8_t

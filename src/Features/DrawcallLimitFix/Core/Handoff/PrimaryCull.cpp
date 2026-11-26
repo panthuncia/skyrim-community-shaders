@@ -38,6 +38,7 @@
 #include <cstring>
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
 
 namespace DCLF
@@ -773,14 +774,15 @@ namespace DCLF
 	{
 		if (a_e >= cut.plans.size() || !cut.roots[a_e] || !cut.admitted[a_e])
 			return kOwnNone;
+		const bool mixed = cut.mixed[a_e] && !mixedStoodIn;
 		switch (cut.plans[a_e]) {
 		case EntryPlan::Plain:
-			return cut.mixed[a_e] ? kOwnNone : kOwnPlain;
+			return mixed ? kOwnNone : kOwnPlain;
 		case EntryPlan::FadeRoot:
 		case EntryPlan::LeafRoot:
-			return cut.mixed[a_e] ? kOwnMixedFade : kOwnFade;
+			return mixed ? kOwnMixedFade : kOwnFade;
 		case EntryPlan::TreeRoot:
-			return cut.mixed[a_e] ? kOwnMixedFade : kOwnTree;
+			return mixed ? kOwnMixedFade : kOwnTree;
 		default:
 			return kOwnNone;
 		}
@@ -1020,6 +1022,12 @@ namespace DCLF
 		cutStats.afterTicks += Now() - start;
 	}
 
+	void PrimaryCull::NoListJobs()
+	{
+		Extensions::StandInBeforeListJobsWait();
+		AfterListJobs();
+	}
+
 	void PrimaryCull::AfterFullFrustum()
 	{
 		DCLF_ZONE("CS.DCLF.AfterFullFrustum");
@@ -1210,6 +1218,7 @@ namespace DCLF
 		stl::write_vfunc<0x18, Hooks::AppendVirtual>(RE::VTABLE_BSGeometryListCullingProcess[0]);
 		InstallSceneLists();
 		Extensions::NoteStandInInstalled();
+		mixedStoodIn = ::RenderGraph::Engine::Native::Requested();
 		REL::Relocation<std::uintptr_t> triShape{ RE::VTABLE_BSTriShape[0] };
 		geometryOnVisible = reinterpret_cast<const std::uintptr_t*>(triShape.address())[0x34];
 		// A slot may hold another hook that ends in the engine's function, so both the slot and the engine's NiNode::OnVisible count.
