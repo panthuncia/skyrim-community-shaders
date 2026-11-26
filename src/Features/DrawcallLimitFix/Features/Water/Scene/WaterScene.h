@@ -191,6 +191,8 @@ namespace DCLF::Features::Water::WaterScene
 	};
 	/** @brief Pure. The port's classification of a water leaf whose property record has the water capture. */
 	Classification ClassifyLeaf(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf);
+	/** @brief Render thread. The water shapes Core tracks, as of the last walk: native draws those its epochs do not claim from these. */
+	void TrackedShapes(std::vector<const void*>& a_out);
 	/** @brief Any thread the port's derive runs on. Queues a_classification of the geometry keyed a_geometry for the census. */
 	void NoteClassified(const void* a_geometry, const Classification& a_classification);
 	/** @brief Render thread. The material pool's sizes for the census line. */

@@ -1,8 +1,8 @@
 #pragma once
 
 // The water batches without draw capture: each batch's draws are
-// computed from the passes the engine registered, with the water port's constants (Features/Water/Port), instead of latched from
-// the engine's draws. This covers what DCLF's scene path does not claim: the wading displacement mesh (its mask pass in the mask
+// computed from the passes the engine registered (or, in native, from the tracked water shapes and GetRenderPasses' port), with the
+// water port's constants (Features/Water/Port), instead of latched from the engine's draws. This covers what DCLF's scene path does not claim: the wading displacement mesh (its mask pass in the mask
 // batch, its surface in geometry group 10), and any water the scene path refuses.
 
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
@@ -34,6 +34,13 @@ namespace DCLF::Features::Water::Native
 	 * the batch's range, in the engine's order. False, with a_why, when a pass cannot be computed: the batch's water then reaches the engine.
 	 */
 	bool BuildBatch(const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why);
+
+	/**
+	 * @brief Render thread, at a water batch's call, in native. The draws of the tracked water shapes DCLF's epochs do not draw this
+	 * frame (refused, or not claimed yet) that the main camera sees, with GetRenderPasses' passes in the batch's range and group, in the
+	 * batch's order, without the engine's registrations. False, with a_why, when a pass cannot be computed.
+	 */
+	bool BuildScene(const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why);
 
 	/** @brief The water pass groups taken out of the batch renderer, so the engine's call finds nothing of the water to draw. */
 	struct Detached

@@ -6,10 +6,15 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
-#include "Features/DrawcallLimitFix/Features/Water/WaterNative.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
+#include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
+#include "Features/DrawcallLimitFix/Features/Water/WaterNative.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
@@ -572,6 +577,138 @@ namespace DCLF::Features::Water::Native
 			return ok;
 		});
 		return ok;
+	}
+
+	namespace
+	{
+		/** @brief A water shape's pass as the main camera's registration would hold it. */
+		struct ScenePass
+		{
+			RE::BSGeometry* geometry = nullptr;
+			RE::BSShaderProperty* property = nullptr;
+			std::uint32_t passEnum = 0;
+			std::uint8_t hint = 0;
+			std::uint32_t sub = 0;
+		};
+
+		// The accumulation hint the accumulator files into geometry group 10, which FinishAccumulatingPostResolveDepth draws just before
+		// the water batch (the wading surface).
+		constexpr std::uint8_t kGroup10Hint = 13;
+		// BSWaterShaderProperty +0xC0: the stencil pass id GetRenderPasses cached the first time.
+		constexpr std::size_t kCachedStencilPass = 0xC0;
+
+		/**
+		 * @brief Whether the main camera's cull would reach a_object: it hangs under the world root, and neither it nor an ancestor is
+		 * app-culled (NiAVObject::Cull skips such an object with everything under it). A shape detached by a cell change stays tracked
+		 * until Core lets it go, and is not reached.
+		 */
+		bool Reached(const RE::NiAVObject* a_object, const RE::NiAVObject* a_worldRoot)
+		{
+			for (std::uint32_t depth = 0; a_object && depth < 128; a_object = a_object->parent, ++depth) {
+				if (a_object->GetFlags().any(RE::NiAVObject::Flag::kHidden))
+					return false;
+				if (a_object == a_worldRoot)
+					return true;
+			}
+			return false;
+		}
+
+		/** @brief Whether a bound lies wholly outside a plane of the set (NiCullingProcess's test). */
+		bool Outside(const RE::NiBound& a_bound, const ShadowCameras::Planes& a_planes)
+		{
+			for (std::uint32_t p = 0; p < 6; ++p) {
+				if (!(a_planes.mask & (1u << p)))
+					continue;
+				const auto& plane = a_planes.plane[p];
+				if (plane[0] * a_bound.center.x + plane[1] * a_bound.center.y + plane[2] * a_bound.center.z - plane[3] < -a_bound.radius)
+					return true;
+			}
+			return false;
+		}
+
+		/**
+		 * @brief The passes the main camera's registration would hold in a batch's range and group: each tracked water shape DCLF's
+		 * epochs do not draw this frame (refused, or not claimed yet), not hidden and in the adopted snapshot's main frustum, with
+		 * GetRenderPasses' passes, in the batch's draw order (technique, then sub-group). False, with a_why, without a snapshot main camera.
+		 */
+		bool ScenePasses(const BatchInputs& a_inputs, const Port::FrameInputs& a_port, std::vector<ScenePass>& a_out, std::string& a_why)
+		{
+			a_out.clear();
+			const auto& snapshot = Snapshot::Current();
+			const auto* view = snapshot ? &snapshot->cameras.Current(Snapshot::ViewId::Main) : nullptr;
+			if (!view || !view->valid) {
+				a_why = "the adopted snapshot has no main camera";
+				return false;
+			}
+			RE::NiTransform world;
+			world.rotate = view->rotation;
+			world.translate = view->position;
+			world.scale = 1.0f;
+			ShadowCameras::Planes planes;
+			ShadowCameras::FrustumPlanes(view->frustum, world, planes);
+			// Render thread: kept between batches.
+			static std::vector<const void*> shapes;
+			WaterScene::TrackedShapes(shapes);
+			// The frame's claims: a shape DCLF draws, or waits to draw, in the main phase is its epochs', not the batch's.
+			const auto claims = PassCapture::Get().CurrentSet();
+			const auto* worldRoot = static_cast<const RE::NiAVObject*>(CS_ENGINE_READ(Data, RecordTime, RE::Main::WorldRootNode()));
+			const bool group10 = a_inputs.group == 10;
+			for (const void* shape : shapes) {
+				auto* geometry = static_cast<RE::BSGeometry*>(const_cast<void*>(shape));
+				if (!geometry || (claims && (claims->WithheldPhasesOf(geometry) & kSetMain)))
+					continue;
+				auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
+				if (!property || property->GetRTTI() != globals::rtti::BSWaterShaderPropertyRTTI.get() || !Reached(geometry, worldRoot) || Outside(geometry->worldBound, planes))
+					continue;
+				const auto& water = static_cast<const RE::BSWaterShaderProperty&>(*property);
+				const auto passes = Port::DeriveRenderPasses(Port::CaptureObject(water, *geometry), a_port.renderMode, 0, a_port);
+				if (passes.none || passes.localMap)
+					continue;
+				auto stencil = passes.stencil;
+				if (const auto cached = Field<std::uint32_t>(property, kCachedStencilPass))
+					stencil.passEnum = cached;
+				const std::uint32_t sub = PassCapture::SubPassOf(geometry, property->flags.underlying());
+				for (const auto& spec : { stencil, passes.surface, passes.lights }) {
+					if (!spec.present || spec.passEnum < a_inputs.first || spec.passEnum > a_inputs.last || group10 != (spec.accumulationHint == kGroup10Hint))
+						continue;
+					a_out.push_back({ geometry, property, spec.passEnum, spec.accumulationHint, sub });
+				}
+			}
+			std::ranges::stable_sort(a_out, [](const ScenePass& a_left, const ScenePass& a_right) {
+				return a_left.passEnum != a_right.passEnum ? a_left.passEnum < a_right.passEnum : a_left.sub < a_right.sub;
+			});
+			return true;
+		}
+	}
+
+	bool BuildScene(const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
+	{
+		DCLF_ZONE("CS.DCLF.Water.Native.BuildScene");
+		a_draws.clear();
+		Frame frame;
+		if (!frame.Read(a_inputs, a_why))
+			return false;
+		// Render thread: kept between batches.
+		static std::vector<ScenePass> passes;
+		if (!ScenePasses(a_inputs, frame.port, passes, a_why))
+			return false;
+		auto* shader = const_cast<RE::BSShader*>(ShaderPrograms::FamilyShader(Api::ProgramFamily::Water));
+		if (!passes.empty() && !shader) {
+			a_why = "no BSWaterShader handed over yet";
+			return false;
+		}
+		Modes modes = frame.start;
+		for (const auto& scenePass : passes) {
+			RE::BSRenderPass pass{};
+			pass.shader = shader;
+			pass.shaderProperty = scenePass.property;
+			pass.geometry = scenePass.geometry;
+			pass.passEnum = scenePass.passEnum;
+			pass.accumulationHint = scenePass.hint;
+			if (!BuildPass(frame, &pass, modes, a_draws.emplace_back(), a_owners, a_why))
+				return false;
+		}
+		return true;
 	}
 
 	Detached DetachBatch(const BatchInputs& a_inputs)

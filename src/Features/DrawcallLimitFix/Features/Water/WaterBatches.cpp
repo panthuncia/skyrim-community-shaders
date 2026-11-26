@@ -2,6 +2,7 @@
 // Each batch first submits DCLF's water epoch for the water the scene path claims (Indirect::ReachBatch). The water the batch
 // renderer still holds (the wading displacement mesh, and any water the scene path refuses) is computed from its registered passes
 // (WaterNative.cpp), drawn by the anchor's pass (WaterDraws.cpp), and taken out of the batch, so the engine's call draws none of it.
+// In native the main camera's batches are computed from the tracked water shapes the epochs do not draw, not from registrations.
 // A batch that cannot be computed reaches the engine with nobody vouching for it. Under the flush latch it is skipped. Each such
 // case is a family defect, and its reason is logged once.
 
@@ -18,6 +19,7 @@
 
 #include "Deferred.h"
 #include "Globals.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "Utils/Logging.h"
 
@@ -247,8 +249,11 @@ namespace DCLF::Features::Water
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
+				// Native computes the main camera's batch from the tracked water shapes, not from the engine's registrations.
+				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
+				const bool fromScene = ::RenderGraph::Engine::Native::Active() && a_accumulator == *mainAccumulator;
 				// Claimed water leaves the engine's batch empty: then there is nothing to compute, and the engine's call draws nothing.
-				if (!cpuWater && !BatchHasPasses(a_accumulator, a_first, a_last, a_group)) {
+				if (!cpuWater && !fromScene && !BatchHasPasses(a_accumulator, a_first, a_last, a_group)) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
@@ -281,7 +286,7 @@ namespace DCLF::Features::Water
 				std::vector<Draw> draws;
 				Family::Owners owners;
 				std::string why;
-				if (!Native::BuildBatch(inputs, draws, owners, why)) {
+				if (!(fromScene ? Native::BuildScene(inputs, draws, owners, why) : Native::BuildBatch(inputs, draws, owners, why))) {
 					// The batch's water reaches the engine, which draws it or, under the flush latch, skips it.
 					Refusals().Report(std::format("a {} batch's water", NameOf(kView)), why);
 					SubmitDraws(run, {}, std::move(owners), cpuWater, cpuVariant);
