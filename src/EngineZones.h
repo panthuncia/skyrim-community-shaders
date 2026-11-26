@@ -4,10 +4,11 @@
 
 /**
 * @brief The engine-render detector: counts each engine render function the frame still calls, per call site and frame kind, and
-* the render functions' calls per frame. Each counted site is a CALL inside an engine function, retargeted to a pass-through thunk
-* on its own trampoline, so it chains onto any hook already written there. Tracy builds also give each call a zone.
-* CS_SNAPSHOT_DETECT=1 or CS_ENGINE_ZONES=1 installs the sites (AE 1.6.1170; SE 1.5.97 for the sites with an SE match).
-* CS_SNAPSHOT_DETECT=1 logs the tables at each load and at exit. The snapshot roadmap's phases 3 to 5 drive native's count to zero.
+* the render functions' calls per frame. Each counted site is a CALL inside an engine function, retargeted to a machine-code stub
+* on its own trampoline that counts and jumps on to the call's old target, so it chains onto any hook already written there and
+* changes no register the callee reads. CS_SNAPSHOT_DETECT=1 or CS_ENGINE_ZONES=1 installs the sites (AE 1.6.1170; SE 1.5.97 for
+* the sites with an SE match). CS_SNAPSHOT_DETECT=1 logs the tables at each load and at exit. CS_ENGINE_ZONES=1 in Tracy builds
+* also gives each call a zone while Tracy is connected. The snapshot roadmap's phases 3 to 5 drive native's count to zero.
 */
 namespace EngineZones
 {
