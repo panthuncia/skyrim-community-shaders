@@ -153,6 +153,9 @@ namespace RenderGraph::Frame::Revision
 	{
 		std::uint64_t serial = 0;
 		std::shared_ptr<const org::IResourceVersions> versions;
+		// The frame variables of the revision those versions are: the preparing one's, else the adopted ones. Null before the first
+		// adoption. Read with Vars::Lane::ValueIn: sizes the recordings derive (a viewport) must follow the versions they draw into.
+		std::shared_ptr<const org::services::VariableSnapshot> variables;
 	};
 
 	/**

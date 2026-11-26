@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Features/Fades/FadeWriters.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadesAddresses.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Fatal.h"
 
 #include <ORGModuleServices/Cpu/SphereCull.h>
@@ -545,6 +546,7 @@ namespace Snapshot::SideEffects
 		// S7/S8 and DCLF produce what the main camera's list culls wrote, so they do not run.
 		SkipListCulls();
 		StealthLights::InstallHooks();
+		RenderGraph::Engine::Native::WorldPass::InstallCapture();
 		installed = true;
 		logger::info(
 			"[Snapshot] side effects: render stages 5-9, the frame counter, the render-unsafe bit, the fade enable count, the actor pre-cull, "

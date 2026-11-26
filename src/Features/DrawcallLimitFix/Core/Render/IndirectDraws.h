@@ -156,11 +156,6 @@ namespace DCLF
 		 * @brief Submits a shared epoch at its owner's hook, at most once a frame. Only valid after this frame's commit of the epoch it shares with.
 		 */
 		SharedEpochResult SubmitSharedEpoch(std::uint32_t a_epoch, const SharedEpochSubmit& a_submit);
-		/**
-		 * @brief The engine's FrameParams.z at the blended draw. The engine raises it after the colour commit, so later commits must pick
-		 * it up for the pixel stage's b12.
-		 */
-		void NoteBlendedFrameParams(float a_z);
 		/** @brief Returns and resets a shared epoch's counters since the last report. */
 		SharedEpochStats TakeSharedEpochStats(std::uint32_t a_epoch);
 		/** @brief The shared epochs' report lines. */

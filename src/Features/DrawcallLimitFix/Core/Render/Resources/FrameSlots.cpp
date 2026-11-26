@@ -1,11 +1,13 @@
 // The main pass's captured bindings, the frame textures at t16 and up, and the names of the frame constants buffer's parts.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Relocation/Holders.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
 
 namespace DCLF::Draws
 {
@@ -176,8 +178,13 @@ namespace DCLF::Draws
 		if (RenderGraph::Engine::GraphMode() && !RenderGraph::Engine::Tripwire::GuestContextInstalled())
 			RenderGraph::Fatal("DCLF capture", "the engine's bindings were read before its context handle was in place");
 		Capture capture;
-		ReadBound(capture.vsBuffers, [](ID3D11DeviceContext* a_context, ID3D11Buffer** a_out) { a_context->VSGetConstantBuffers(0, kConstantBufferRegisters, a_out); });
-		ReadBound(capture.psBuffers, [](ID3D11DeviceContext* a_context, ID3D11Buffer** a_out) { a_context->PSGetConstantBuffers(0, kConstantBufferRegisters, a_out); });
+		// Native supplies every pass-wide block itself: b12 from the frame camera, b5 and b6 from CS's state, VS b13 from DCLF. Nothing
+		// else is bound at the main pass (observed), so it reads no bound constant buffer.
+		const bool native = Snapshot::FrameCamera::Owned();
+		if (!native) {
+			ReadBound(capture.vsBuffers, [](ID3D11DeviceContext* a_context, ID3D11Buffer** a_out) { a_context->VSGetConstantBuffers(0, kConstantBufferRegisters, a_out); });
+			ReadBound(capture.psBuffers, [](ID3D11DeviceContext* a_context, ID3D11Buffer** a_out) { a_context->PSGetConstantBuffers(0, kConstantBufferRegisters, a_out); });
+		}
 		ReadBound(capture.psViews, [](ID3D11DeviceContext* a_context, ID3D11ShaderResourceView** a_out) { a_context->PSGetShaderResources(0, kTextureRegisters, a_out); });
 		// The targets and the viewport are the engine's alone. CS binds none for an engine draw.
 		auto* engine = RenderGraph::Engine::Tripwire::EngineContext();
@@ -197,7 +204,7 @@ namespace DCLF::Draws
 		}
 		// CS binds b5 SharedData and b6 FeatureData from Renderer_ResetState, so whether they are bound here depends on the last reset.
 		// They are CS's own buffers, so take them from CS when the capture lacks them.
-		if (auto* state = globals::state) {
+		if (auto* state = globals::state; state && !native) {
 			auto adopt = [&](std::uint32_t a_slot, ConstantBuffer* a_buffer) {
 				if (capture.psBuffers[a_slot] || !a_buffer || !a_buffer->CB())
 					return;
@@ -207,9 +214,25 @@ namespace DCLF::Draws
 			adopt(kSharedDataRegister, state->sharedDataCB.get());
 			adopt(kFeatureDataRegister, state->featureDataCB.get());
 		}
-		auto& shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData();
-		capture.eye = shadowState.posAdjust.getEye();
-		capture.previousEye = shadowState.previousPosAdjust.getEye();
+		if (native) {
+			// The frame camera's eyes: rows are stored relative to the camera b12 draws with, and the previous one is the camera this
+			// render side drew last, as the rows' previous transforms are (decision 43).
+			const auto& frame = Snapshot::FrameCamera::Main().data;
+			capture.eye = { frame.CameraPosAdjust.x, frame.CameraPosAdjust.y, frame.CameraPosAdjust.z };
+			capture.previousEye = { frame.CameraPreviousPosAdjust.x, frame.CameraPreviousPosAdjust.y, frame.CameraPreviousPosAdjust.z };
+		} else {
+			auto& shadowState = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData();
+			capture.eye = shadowState.posAdjust.getEye();
+			capture.previousEye = shadowState.previousPosAdjust.getEye();
+		}
+		if (native) {
+			// The size comes from the revision the recordings name (PostRevisionInputs). The main pass draws inside the pre-resolve's first
+			// depth shift window, and the Z-prepass takes the main pass's range so both rasterise alike.
+			const auto range = RenderGraph::Engine::Native::WorldPass::DepthRange(true);
+			capture.minDepth = range[0];
+			capture.maxDepth = range[1];
+			return capture;
+		}
 		D3D11_VIEWPORT viewport{};
 		UINT count = 1;
 		engine->RSGetViewports(&count, &viewport);

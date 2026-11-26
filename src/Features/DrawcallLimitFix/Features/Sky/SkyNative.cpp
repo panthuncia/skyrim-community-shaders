@@ -358,28 +358,38 @@ namespace DCLF::Features::Sky::Native
 					a_why = "no CS state";
 					return false;
 				}
-				auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
-				if (Snapshot::FrameCamera::Owned() && a_inputs.view != View::Face) {
+				// Native's RenderWorld points read nothing of the shadow state.
+				const auto* world = ::RenderGraph::Engine::Native::WorldPass::Current();
+				const bool frameCamera = Snapshot::FrameCamera::Owned() && a_inputs.view != View::Face;
+				auto* const rss = world && frameCamera ? nullptr : &CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
+				if (frameCamera) {
 					// Native: the frame camera, with the render side's last drawn camera as the previous one. The sun's query is unjittered.
 					const auto& frame = (a_inputs.view == View::Sun ? Snapshot::FrameCamera::Post() : Snapshot::FrameCamera::Main()).data;
 					posAdjust = { frame.CameraPosAdjust.x, frame.CameraPosAdjust.y, frame.CameraPosAdjust.z };
 					previousPosAdjust = { frame.CameraPreviousPosAdjust.x, frame.CameraPreviousPosAdjust.y, frame.CameraPreviousPosAdjust.z };
 					viewProj = Snapshot::FrameCamera::RowMajor(&frame.CameraViewProj);
 				} else {
-					posAdjust = rss.posAdjust.getEye();
-					previousPosAdjust = rss.previousPosAdjust.getEye();
-					const auto camera = rss.cameraData.getEye();
+					posAdjust = rss->posAdjust.getEye();
+					previousPosAdjust = rss->previousPosAdjust.getEye();
+					const auto camera = rss->cameraData.getEye();
 					std::memcpy(viewProj.data(), &camera.viewProjMat, sizeof(viewProj));
 				}
-				eye = a_accumulator->GetRuntimeData()->eyePosition;
+				// StartAccumulating gives the accumulator the world camera's position, which is the frame camera's eye at native's points.
+				eye = world && frameCamera ? posAdjust : a_accumulator->GetRuntimeData()->eyePosition;
 				vParams = Global<float>(Address::kVParams);
 				const auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 				skyScale = vParams * (ism ? Field<float>(ism, 0xE4) : 0.0f);
 				cloudOffsets = reinterpret_cast<const float*>(REL::Offset(Address::kCloudOffsets).address());
 				skyColours = reinterpret_cast<const float*>(REL::Offset(Address::kSkyColours).address());
 				viewport = Family::LatchViewport(0);
-				alphaRef = rss.alphaTestRef;
-				stencilRef = rss.stencilRef;
+				// Native's RenderWorld points take the references from CS's frame.
+				if (!rss) {
+					alphaRef = world->alphaRef;
+					stencilRef = world->stencilRef;
+				} else {
+					alphaRef = rss->alphaTestRef;
+					stencilRef = rss->stencilRef;
+				}
 				reflection = a_inputs.view == View::Face ? static_cast<std::uint32_t>(State::ExtraShaderDescriptors::IsReflections) : 0u;
 				return true;
 			}

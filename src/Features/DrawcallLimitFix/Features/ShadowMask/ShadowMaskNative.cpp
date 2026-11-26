@@ -14,7 +14,9 @@
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/PublishedResources.h"
+#include "Snapshot/FrameCamera.h"
 #include "ShaderCache.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
 #include "State.h"
@@ -283,8 +285,15 @@ namespace DCLF::Features::ShadowMask::Native
 				biasScale = Global<float>(Address::kBiasScale);
 				sunBiasScale = Global<float>(Address::kSunBiasScale);
 				secondBiasScale = Global<float>(Address::kSecondBiasScale);
+				// Native draws into the adopted revision's mask, whose size the engine's own target takes ahead of it at a resize.
 				static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> targets{ REL::Offset(Address::kRenderTargets) };
-				const auto& mask = targets->renderTargetData[kShadowMaskTarget];
+				const auto& live = targets->renderTargetData[kShadowMaskTarget];
+				const bool native = Snapshot::FrameCamera::Owned() && a_view == View::World;
+				const auto adopted = ::RenderGraph::Frame::Vars::Adopted(::RenderGraph::Frame::Vars::EngineTargetShapes()).colours[kShadowMaskTarget];
+				const struct
+				{
+					std::uint32_t width, height;
+				} mask{ native ? adopted.width : live.width, native ? adopted.height : live.height };
 				if (!mask.width || !mask.height) {
 					a_why = "kSHADOW_MASK has no size";
 					return false;
@@ -299,7 +308,7 @@ namespace DCLF::Features::ShadowMask::Native
 				writeTable = reinterpret_cast<const std::uint32_t*>(REL::Offset(a_view == View::World ? Address::kWorldBlend : Address::kMenuBlend).address());
 				// FUN_1414cec50: focus shadows when the scene's shadows are on and a focus target is listed.
 				focusTargets = Global<bool>(Address::kSceneShadows) && Global<std::uint32_t>(Engine::Address::kFocusTargetCount) != 0;
-				viewport = Family::LatchViewport(1);
+				viewport = native ? Family::FrameViewport(static_cast<std::int32_t>(kShadowMaskTarget), -1, 1) : Family::LatchViewport(1);
 				return true;
 			}
 		};
