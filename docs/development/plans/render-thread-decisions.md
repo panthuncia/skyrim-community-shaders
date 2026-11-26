@@ -190,3 +190,21 @@ pushes until the user is back.
 53. **Known test-mode gap:** repeat mode with a second `coc` can crash in the engine's list cull, because the repeated
     render half reuses scene lists over unloaded cells; the load guard narrows it but is racy. It goes away when phase 3
     stops running the engine's culls.
+
+## 2026-11-26: phase 5 ImageSpace, stage 1 (snap5-imagespace; director accepted)
+
+54. **The post chain's game inputs are one block** (`BlockId::ImageSpace`): blended ImageSpace data, HDR/TAA/adaptation
+    settings, active slots, slot inputs, SSAO and SSR settings, the sun. One set of reader functions serves both producers:
+    native in the capture, guest at its old hooks. Native's frame description reads the same block. Parity: 0
+    differences on every switched field over 3,037 frames. A native world frame without a snapshot main camera is fatal.
+55. **The adaptation reset is a game-side count:** Sky::Update's reset flag is taken on the game thread as a count, and the
+    first native HDR effect after the count moves resets, so repeated and dropped snapshots behave.
+56. **Values the render half writes stay render reads until phase 3** (extends 25 and 32): refraction's and VL's activity
+    and colour, depth of field steps and camera, the full-screen blur's camera test, the water blend's camera and
+    posAdjust, portal fog, `saoReflections`.
+57. **The engine-render detector does not count CS's own calls through an engine call site** (`EngineZones::CallTarget`).
+58. **The vanilla depth of field's `IsActive` includes Post Processing's skip flag** (CS state) and is captured on the game
+    thread.
+59. **Detector runs are not shot references** until the dark-shot bug is fixed: `CS_SNAPSHOT_DETECT=1` darkens quick-run
+    start shots (mean about 18 vs 65). Compare shots only from runs without it. A diagnostic must not change the picture,
+    so this is a bug under repair (snap0-detfix), not a property.
