@@ -147,6 +147,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_RHI_CENSUS" },
 			{ .name = "CS_SHADER_DXC", .key = "cs.shader_dxc", .description = "a regular expression on <path>:<target>:<descriptor>: the shaders that build with DXC; empty: every shader with FXC" },
 			{ .name = "CS_SL_VERBOSE" },
+			{ .name = "CS_SNAPSHOT_DETECT", .key = "cs.snapshot_detect", .type = Bool, .defaultValue = "0", .kind = Diagnostic, .description = "1: the snapshot detectors' tables in the log, at each load and at exit: live engine reads by site, feature and category (Snapshot/EngineReads.h), and engine render calls by site and frame kind (EngineZones.h)" },
 			{ .name = "CS_STREAMLINE_DLSS", .type = Bool },
 			{ .name = "CS_STREAMLINE_REFLEX", .description = "0: Streamline does not load Reflex, PCL or DLSS-G (for Nsight captures)" },
 			{ .name = "CS_SUBMIT_TRACE" },
