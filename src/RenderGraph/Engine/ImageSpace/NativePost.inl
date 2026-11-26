@@ -283,7 +283,15 @@ namespace NativePost
 		std::uint64_t slotNative = 0, slotEngine = 0;  // slot effects staged natively, and run through the engine's RenderEffect
 		std::uint8_t lastSlots = 0;  // the last B read's, for the log
 		std::uint32_t adaptResets = 0;  // the snapshot's adaptation reset count the HDR effect last applied (native)
+		// The snapshot's TAA reset count last applied, and whether the render frame taaResetFrame applies one (TaaResetDue, native).
+		std::uint32_t taaResets = 0, taaResetsApplied = 0;
+		std::uint64_t taaResetFrame = UINT64_MAX;
+		bool taaResetNow = false;
+		std::uint32_t saveShotsDone = 0;  // the snapshot's save screenshot count the end-of-frame effects copied last (native)
 	};
+
+	/** @brief Runtime::saveShotsDone for the capture (Screenshots.inl). Written by the render side, read on the game thread. */
+	std::atomic<std::uint32_t> g_saveShotsDone{ 0 };
 
 	Runtime& R()
 	{
@@ -473,9 +481,12 @@ namespace NativePost
 		for (std::uint32_t t = 0; t < f.sizes.size(); ++t)
 			f.sizes[t] = { g.targets->renderTargetData[t].width, g.targets->renderTargetData[t].height };
 		r.state = EngineState();
-		// Native mode's resets come from the snapshot's count (RunHdr), not the engine's flag.
-		if (block)
+		// Native mode's resets come from the snapshot's count (RunHdr), not the engine's flag. A save's screenshot is due while the
+		// snapshot's count is ahead of the last copy.
+		if (block) {
 			r.state.resetPending = false;
+			f.screenshot = block->saveShots != r.saveShotsDone;
+		}
 		if (Frame::Driver::Current().frame % 300 == 0)
 			logger::info("[ORG] native post chain: {} steps staged natively; native frames hdr {} eof {} composites {} post {}, "
 						 "end-of-frame frames on the engine {} (last slots {:#x}); slot effects native {}, through RenderEffect {}; "
@@ -1491,7 +1502,9 @@ namespace NativePost
 		LeaveScope();
 		// TAA's helper (AE 107270): the reset is consumed, the parity and row 0 kept on the object, the form back to 0.
 		if (taa && !route.direct && f.taa) {
-			*g.taaReset = false;
+			// Native mode's capture takes the reset on the game thread (TaaResetDue applies it).
+			if (!NativeBlock())
+				*g.taaReset = false;
 			Field<std::int32_t>(taa, 0x30) = 0;
 			Field<std::int32_t>(taa, 0x34) = r.state.taaParity;
 			const auto [w, h] = f.Size(route.taaOut);
@@ -1504,8 +1517,14 @@ namespace NativePost
 			Field<std::int32_t>(taa, 0x2c) = 0;
 		}
 		if (!route.direct && f.screenshot) {
-			Field<bool>(base, 0x211) = false;
-			Field<std::uint64_t>(base, 0x218) = f.frameCounter;
+			// Native mode reports the copy back; the capture completes the request on the game thread (Screenshots.inl).
+			if (const auto* block = NativeBlock()) {
+				r.saveShotsDone = block->saveShots;
+				g_saveShotsDone.store(block->saveShots, std::memory_order_release);
+			} else {
+				Field<bool>(base, 0x211) = false;
+				Field<std::uint64_t>(base, 0x218) = f.frameCounter;
+			}
 			globals::game::renderer->UpdateViewPort(0, 0, false);
 		}
 		KeepTargets(a_final);

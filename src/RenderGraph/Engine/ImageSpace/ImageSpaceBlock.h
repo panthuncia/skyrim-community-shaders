@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace RenderGraph::Engine::ImageSpace
 {
@@ -82,6 +83,17 @@ namespace RenderGraph::Engine::ImageSpace
 		// Adaptation resets the game asked for so far (Sky::Update sets the engine's flag; the capture takes it). The render side
 		// resets once when the count moves, so a repeated snapshot does not reset again and a dropped one is not lost.
 		std::uint32_t adaptResets = 0;
+		// TAA history resets the game asked for so far (the loading menu sets the engine's flag as it opens and closes; the capture
+		// takes it). The first native world render after the count moves resets the histories (State::ShouldResetHistory).
+		std::uint32_t taaResets = 0;
+		// Save screenshots asked for so far: the capture takes the manager's request (+0x211) as a count. The render side copies the
+		// frame into kSAVE_GAME_SCREENSHOT once the count moves and reports the count back; the next capture completes the request.
+		std::uint32_t saveShots = 0;
+		// Vanilla screenshots asked for so far (PrintScreen, the capture mode, Papyrus's TakeScreenshot), and the newest files, request
+		// n at n % kScreenshotRing. The render side hands each new one to the Screenshot feature.
+		static constexpr std::uint32_t kScreenshotRing = 4;
+		std::uint32_t screenshots = 0;
+		std::array<std::string, kScreenshotRing> screenshotPaths{};
 
 		bool operator==(const Block&) const = default;
 	};

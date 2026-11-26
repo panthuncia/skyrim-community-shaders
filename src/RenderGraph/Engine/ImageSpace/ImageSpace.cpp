@@ -23,6 +23,7 @@
 #include "Features/IBL/ORGIBL.h"
 #include "Features/PhysicalSky/ORGPhysicalSky.h"
 #include "Features/PostProcessing.h"
+#include "Features/ScreenshotFeature.h"
 #include "Features/UnifiedWater.h"
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
@@ -52,6 +53,7 @@
 #include "RenderGraph/ShaderBindings.h"
 #include "ShaderCache.h"
 #include "State.h"
+#include "Testing/Testing.h"
 #include "Utils/D3D.h"
 #include "Utils/Logging.h"
 #include "Utils/SharedShaderStore.h"
@@ -2258,6 +2260,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 #include "RenderGraph/Engine/ImageSpace/NativePost.inl"
+#include "RenderGraph/Engine/ImageSpace/Screenshots.inl"
 #include "RenderGraph/Engine/ImageSpace/NativeWorld.inl"
 
 		/** @brief BSImagespaceShader::Render (100950 / 107732). */
@@ -2651,6 +2654,7 @@ namespace RenderGraph::Engine::ImageSpace
 		NativePost::ResolveGlobals();
 		NativePost::ResolveWorldGlobals();
 		Snapshot::RegisterCapture(&NativePost::CaptureBlock);
+		NativePost::InstallScreenshots();
 		stl::detour_thunk<ShaderRender>(REL::RelocationID(100950, 107732));
 		stl::detour_thunk<HDRRender>(REL::RelocationID(100465, 107183));
 		stl::detour_thunk<PreTonemapComposites>(REL::RelocationID(99024, 105675));
@@ -2759,6 +2763,7 @@ namespace RenderGraph::Engine::ImageSpace
 	void OnFrameBegin()
 	{
 		// After the revision's adoption, so a change is a later revision's.
+		NativePost::RenderScreenshots();
 		if (!Usable())
 			return;
 			NoteWorldBegin();
@@ -2827,6 +2832,11 @@ namespace RenderGraph::Engine::ImageSpace
 			return;
 		}
 		EofFamily(a_source, a_final, a_engine);
+	}
+
+	bool TaaResetDue()
+	{
+		return NativePost::TaaResetDue();
 	}
 
 	const GameInputs* SnapshotInputs()
