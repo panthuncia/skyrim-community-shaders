@@ -404,3 +404,19 @@ pushes until the user is back.
 107. **Main::RenderWorld's replacement needs each CS point inside it fed from CS's frame** (the call-order inventory is in
      `snap3-world.md`): most points read engine state RenderWorld's own calls set just before them (shadow state targets,
      the accumulator, SetCameraData's camera, global 415071).
+
+## 2026-11-26: phase 3 RenderWorld driven by CS (snap3-rworld; director accepted)
+
+108. **Guest screen blood takes native's route** (a deliberate guest change, like 91): guest's capture fills the ScreenBlood
+     block and the draws are built from ScreenSplatter's root at the same anchor, so guest's draw order is unchanged; the
+     latched blood family is deleted. In guest, RenderWorld still runs the flare setup, which yields the values the capture
+     already took. The `screen-blood` config raises health at world-ready and requires the blood client on the graph.
+109. **CS drives Main::RenderWorld in native** (refines 98): the engine's function is not entered; CS's driver
+     (`RenderGraph/Engine/Native/RenderWorld.cpp`) repeats its steps in order. RenderSSAO, the snow pass or kMAIN copy and
+     the composite go through `ImageSpace::RenderWorldImageSpace`, the composite flag from call order instead of global
+     415071. Not run: the flare setup (in the block), the splatter cull and submit, the blur test. Still engine functions CS
+     calls: StartAccumulating (with the pre-resolve's CS points), the post-resolve, the sun's update and submit query,
+     ClearItemsList and the first-person end; the pre/post-resolve points are next, then those calls go. The TLS +0x768 tag
+     RenderWorld sets is not written (no rendering effect found).
+110. **The full-screen blur's camera test is kept by the native post chain** once per render from the snapshot's main
+     camera, its gate captured in the ImageSpace block.
