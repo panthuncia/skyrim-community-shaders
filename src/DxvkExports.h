@@ -49,6 +49,7 @@ struct DxvkDestroyedView
 	X(PFN_dxvkEmitDeferredExternalCommands, emitDeferredExternalCommands, dxvkEmitDeferredExternalCommands)             \
 	X(PFN_dxvkSetInteropOptions, setInteropOptions, dxvkSetInteropOptions)                                              \
 	X(PFN_dxvkGetSubmissionCounter, getSubmissionCounter, dxvkGetSubmissionCounter)                                     \
+	X(PFN_dxvkLockQueueSubmissions, lockQueueSubmissions, dxvkLockQueueSubmissions)                                     \
 	X(PFN_dxvkSetSubmissionTrace, setSubmissionTrace, dxvkSetSubmissionTrace)                                           \
 	X(PFN_dxvkReadSubmissionTrace, readSubmissionTrace, dxvkReadSubmissionTrace)                                        \
 	X(ResolveCheckpointMarkerFn, resolveCheckpointMarker, dxvkResolveCheckpointMarker)                                  \
