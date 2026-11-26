@@ -47,6 +47,7 @@ struct StartKey
 	std::uint64_t flowMap = 0;
 	std::uint32_t effects = 0, states = 0;
 	std::uint32_t heightmaps = 0;
+	Frame::Vars::Extent2D display{};  // the underwater mask is display-sized
 	friend bool operator==(const StartKey&, const StartKey&) = default;
 };
 
@@ -88,16 +89,16 @@ std::optional<StartKey> StartKeyOf(const Values& a_values)
 	const auto shape = ReadyShape(a_values);
 	if (!shape || !IS().on || !shape->displacementSize)
 		return std::nullopt;
-	return StartKey{ shape->displacementSize, shape->flowCopySize, shape->flowMap, shape->effects, shape->states, shape->heightmapSteps };
+	return StartKey{ shape->displacementSize, shape->flowCopySize, shape->flowMap, shape->effects, shape->states, shape->heightmapSteps,
+		a_values.Get(Frame::Vars::DisplaySize()) };
 }
 
 void BuildStartSteps(StartBuild& a_build);
 
-/** @brief Setup. The start client, declared on the engine's ImageSpace shape. */
+/** @brief Setup. The start client, declared on the engine's ImageSpace shape and the display size. */
 void DeclareStartSteps()
 {
-	Start().group.Declare({ PostPart::Start }, Frame::DependsOn(Frame::Vars::EngineImageSpace()), [](const Frame::Inputs& a_in) { return StartKeyOf(a_in); },
-		[](StartBuild& a_build) { BuildStartSteps(a_build); });
+	Start().group.Declare({ PostPart::Start }, Frame::DependsOn(Frame::Vars::EngineImageSpace(), Frame::Vars::DisplaySize()), [](const Frame::Inputs& a_in) { return StartKeyOf(a_in); }, [](StartBuild& a_build) { BuildStartSteps(a_build); });
 }
 
 /** @brief All on. Each pass only works where the engine opens its gate entry. */

@@ -325,17 +325,6 @@ std::uint16_t InnerVariant(std::int32_t a_slot, Effects::ImageSpaceEffectEnum a_
 	return static_cast<std::uint16_t>((blends ? 0x8000u : 0u) | (a_occurrence & 7u) << 12 | (a_slot == 7 ? 0x800u : 0u) | 0x400u);
 }
 
-/**
-* @brief Read from the render target manager, a static at 524970 / 411451, not CommonLib's GetSingleton pointer.
-* The renderer's own entry holds no texture in native mode.
-*/
-std::pair<std::uint32_t, std::uint32_t> FinalSize()
-{
-	static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> manager{ REL::RelocationID(524970, 411451) };
-	const auto& data = manager.get()->renderTargetData[RE::RENDER_TARGET::kFRAMEBUFFER];
-	return { data.width, data.height };
-}
-
 /** @brief The registration's HDR scene texture while HDR is on, else kFRAMEBUFFER. */
 std::int32_t FinalName()
 {
@@ -368,10 +357,10 @@ void BuildChainSteps(ChainBuild& a_build);
 /** @brief Setup. The kept chain textures, the adapted pair published once, and the three clients declared on their variables. */
 /** @brief The engine target an owned texture is made like: a_target when the engine made it, else a_full. The compute SAO's downscaled
 * targets exist only with bSAO_CS_Downscaled, and TAA's water targets only with bTAAWater at boot. */
-std::int32_t OwnedLike(std::int32_t a_target, std::int32_t a_full)
+std::int32_t OwnedLike(std::int32_t a_target, std::int32_t a_full, const Frame::Inputs* a_in = ProgramInputs())
 {
 	D3D11_TEXTURE2D_DESC desc{};
-	return OwnedDescLike(a_target, desc) ? a_target : a_full;
+	return OwnedDescLike(a_target, desc, a_in) ? a_target : a_full;
 }
 
 void DeclareChainSteps()
@@ -385,13 +374,13 @@ void DeclareChainSteps()
 	for (std::uint32_t i = 0; i < chain.taaWaterHistory.size(); ++i) {
 		const auto like = static_cast<std::int32_t>(T::kTEMPORAL_AA_WATER_1) + static_cast<std::int32_t>(i);
 		DeclareKept(chain.taaWaterHistory[i], fmt::format("ImageSpace::TAAWaterHistory{}", i), Frame::DependsOn(Frame::Vars::DisplaySize()),
-			[like](const Frame::Inputs&, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(OwnedLike(like, T::kTEMPORAL_AA_ACCUMULATION_1), a_desc); });
+			[like](const Frame::Inputs& a_in, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(OwnedLike(like, T::kTEMPORAL_AA_ACCUMULATION_1, &a_in), a_desc, &a_in); });
 	}
 	for (std::uint32_t i = 0; i < chain.saoCsHistory.size(); ++i) {
 		const auto like = static_cast<std::int32_t>(T::kSAO_RAWAO) + static_cast<std::int32_t>(i);
 		const auto full = static_cast<std::int32_t>(T::kSAO_RAWAO) + static_cast<std::int32_t>(i & 2);
 		DeclareKept(chain.saoCsHistory[i], fmt::format("ImageSpace::SAOCSRawAO{}", i), Frame::DependsOn(Frame::Vars::DisplaySize()),
-			[like, full](const Frame::Inputs&, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(OwnedLike(like, full), a_desc); });
+			[like, full](const Frame::Inputs& a_in, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(OwnedLike(like, full, &a_in), a_desc, &a_in); });
 	}
 	// The pair follows the luminance chain's last level. One texel like the first level while the levels have no pair.
 	for (std::uint32_t parity = 0; parity < 2; ++parity)
@@ -399,8 +388,8 @@ void DeclareChainSteps()
 			[parity](const Frame::Inputs& a_in, D3D11_TEXTURE2D_DESC& a_desc) {
 				const auto target = AdaptTargetOf(a_in.Get(Frame::Vars::EngineImageSpace()).luminanceLevels, parity);
 				if (target >= 0)
-					return OwnedDescLike(target, a_desc);
-				if (!OwnedDescLike(T::kHDR_DOWNSAMPLE1, a_desc))
+					return OwnedDescLike(target, a_desc, &a_in);
+				if (!OwnedDescLike(T::kHDR_DOWNSAMPLE1, a_desc, &a_in))
 					return false;
 				a_desc.Width = a_desc.Height = 1;
 				return true;
@@ -503,8 +492,8 @@ void ChainRows(const StepPart& a_part, std::array<std::uint64_t, 4>& a_rows)
 }
 
 /**
-* @brief A registration's transient texture with the engine target's size and RTV format, so a plain texel copy works. Also works
-* for the final target, which has only a view in native mode. Fatal when it cannot be made.
+* @brief A registration's transient texture with the engine target's size in the build's revision and its RTV format, so a plain
+* texel copy works. Also works for the final target, which has only a view in native mode. Fatal when it cannot be made.
 */
 void MakeTransientLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view a_name)
 {
@@ -520,8 +509,7 @@ void MakeTransientLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view
 	else
 		RenderGraph::Fatal("ImageSpace", fmt::format("the texture {} is made like target {}, which has no RTV", a_name, index));
 	D3D11_TEXTURE2D_DESC desc{};
-	desc.Width = import.Width();
-	desc.Height = import.Height();
+	std::tie(desc.Width, desc.Height) = StepOutputExtent(StepTexture::Engine(index), import);
 	desc.MipLevels = 1;
 	desc.ArraySize = 1;
 	desc.Format = view.Format;
@@ -652,15 +640,15 @@ void BuildChainSteps(ChainBuild& a_build)
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 	if (!targets[RE::RENDER_TARGET::kMAIN].texture)
 		return;
-	D3D11_TEXTURE2D_DESC main{};
-	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
-	chain.width = main.Width;
-	chain.height = main.Height;
-	std::tie(chain.finalWidth, chain.finalHeight) = FinalSize();
+	// The sizes the revision this build is for makes: the engine's records and the imports keep the adopted ones until then.
+	const auto main = RevisionShapeOf(*ProgramInputs(), RE::RENDER_TARGET::kMAIN);
+	chain.width = main.width;
+	chain.height = main.height;
 	// The key's HDR target, not the live one, so the registration matches the revision that switches it in.
 	chain.hdrTarget = a_key.hdr.id ? reinterpret_cast<ID3D11Texture2D*>(a_key.hdr.id) : nullptr;
 	chain.hdrFormat = static_cast<DXGI_FORMAT>(a_key.hdr.format);
 	chain.final = FinalName();
+	std::tie(chain.finalWidth, chain.finalHeight) = StepOutputExtent(StepTexture::Engine(chain.final), ImportOf(ImportOfName(chain.final)));
 	chain.levels = a_key.levels;
 	a_build.levels = a_key.levels;
 	using T = RE::RENDER_TARGET;

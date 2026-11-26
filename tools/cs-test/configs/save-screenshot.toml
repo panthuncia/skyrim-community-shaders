@@ -1,7 +1,8 @@
 # A save's screenshot (S15): an autosave and a quicksave through the save request pump (both wait for a save screenshot, request
 # bit 29), then the newest save loaded again. A written save must hold its screenshot (tools/cs-test/essshot.py reads it from the
-# .ess). The pump writes only the first of the two (in guest too): the second, 300 frames later, is asked for and dropped. Native logs
-# "save screenshot 1 copied by the render side, completed for the game". Compose it: native-vulkan+save-screenshot, guest+save-screenshot.
+# .ess). The save's guard is hostile: without tgm the "Health Low" tutorial opens, pauses the game and the second save is refused
+# (Save_Impl writes nothing while it is up). Native logs "save screenshot 1 copied by the render side, completed for the game".
+# Compose it: native-vulkan+save-screenshot, guest+save-screenshot.
 extends = ["base"]
 
 [run]
@@ -9,6 +10,12 @@ timeout_s = 300
 
 [[steps]]
 at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
 frames = 60
 do = "call"
 arg = "imagespace.save=auto"

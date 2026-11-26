@@ -1,7 +1,8 @@
-// Screenshots in native mode: the vanilla screenshot (S24, decision 15) and a save's screenshot (S15). Included by ImageSpace.cpp
+// Screenshots in the graph modes: the vanilla screenshot (S24, decision 15) and a save's screenshot (S15). Included by ImageSpace.cpp
 // after NativePost.inl, before NativeWorld.inl, whose capture calls CaptureScreenshots.
 //
-// The game side keeps its part on the game thread. PrintScreen's request is taken in the snapshot capture, before Main::DrawFrame
+// The vanilla screenshot takes the same route in native and guest mode, since neither has a CS pass for DrawFrame's copies from
+// kFRAMEBUFFER. The game side keeps its part on the game thread. PrintScreen's request is taken in the snapshot capture, before Main::DrawFrame
 // sees it, and the engine's own screenshot function (SE 35882 / AE 36853) runs there: it names the file, shows the HUD message,
 // moves iScreenShotIndex and saves the INI. Its one render call, Renderer::SaveRenderTargetToFile of kSCREENSHOT (0x4C), only
 // records the file. The capture mode (AE 36591) and Papyrus's TakeScreenshot call the same function. The snapshot carries the files,
@@ -10,7 +11,7 @@
 // A save's screenshot: the save request pump asks for it through the manager's +0x211. The capture takes it as a count, the render
 // side's end-of-frame effects copy the frame into kSAVE_GAME_SCREENSHOT and report the count back, and a later capture completes the
 // request as the engine's end-of-frame effects did (+0x211 cleared, +0x218 the frame counter). Main::DrawFrame's handshake then
-// marks it ready and the pump writes the save.
+// marks it ready and the pump writes the save. Native only: guest's end-of-frame effects complete the request at render.
 
 namespace NativePost
 {
@@ -30,9 +31,8 @@ namespace NativePost
 	}
 
 	/**
-	* @brief The call of Renderer::SaveRenderTargetToFile in the engine's screenshot function (SE 35882 +0x73, AE 36853 +0x69). Native
-	* only: the file the engine names goes to the next snapshot, made absolute against the game's folder as the engine's relative
-	* name is.
+	* @brief The call of Renderer::SaveRenderTargetToFile in the engine's screenshot function (SE 35882 +0x73, AE 36853 +0x69). The
+	* file the engine names goes to the next snapshot, made absolute against the game's folder as the engine's relative name is.
 	*/
 	struct SaveScreenshotTarget
 	{
@@ -53,8 +53,7 @@ namespace NativePost
 	};
 
 	/**
-	* @brief Native mode only: the screenshot function records its file instead of saving the engine's target. In every mode, test
-	* commands that ask as the game does: "call imagespace.printscreen" (PrintScreen's request), "call imagespace.save=quick|auto"
+	* @brief The screenshot function records its file instead of saving the engine's target. Test commands that ask as the game does: "call imagespace.printscreen" (PrintScreen's request), "call imagespace.save=quick|auto"
 	* (the save request pump's quicksave or autosave, both of which wait for a save screenshot).
 	*/
 	void InstallScreenshots()
@@ -83,15 +82,14 @@ namespace NativePost
 			return true;
 		});
 #endif
-		if (!RenderGraph::Engine::Native::Requested())
-			return;
 		stl::write_thunk_call<SaveScreenshotTarget>(REL::RelocationID(35882, 36853).address() + REL::Relocate(0x73, 0x69));
-		logger::info("[ORG] native post chain: the vanilla screenshot is a snapshot event, saved by the Screenshot feature");
+		logger::info("[ORG] ImageSpace: the vanilla screenshot is a snapshot event, saved by the Screenshot feature");
 	}
 
 	/**
-	* @brief Game thread, in a native snapshot's capture: PrintScreen's request (MenuControls' screenshot handler +0x10, which Main::DrawFrame
-	* would consume after the capture), the files asked for since the last capture, and the save screenshot handshake.
+	* @brief Game thread, in a snapshot's capture: PrintScreen's request (MenuControls' screenshot handler +0x10, which Main::DrawFrame
+	* would consume after the capture) and the files asked for since the last capture; in native mode also the save screenshot
+	* handshake.
 	*/
 	void CaptureScreenshots(Block& a_block)
 	{
@@ -112,6 +110,8 @@ namespace NativePost
 		}
 		a_block.screenshots = vanilla.count;
 		a_block.screenshotPaths = vanilla.recent;
+		if (!RenderGraph::Engine::Native::Requested())
+			return;
 
 		static std::uint32_t s_saveShots = 0, s_inFlight = 0;
 		const auto base = ManagerBase();
@@ -131,10 +131,11 @@ namespace NativePost
 		a_block.saveShots = s_saveShots;
 	}
 
-	/** @brief Render owner, each render frame's Begin: the snapshot's new vanilla screenshots go to the Screenshot feature. */
+	/** @brief Render owner, each render frame's Begin (both graph modes): the snapshot's new vanilla screenshots go to the Screenshot feature. */
 	void RenderScreenshots()
 	{
-		const auto* block = NativeBlock();
+		const auto& snapshot = Snapshot::Current();
+		const auto* block = snapshot ? snapshot->Block<Block>() : nullptr;
 		if (!block)
 			return;
 		static std::uint32_t s_done = 0;
@@ -142,14 +143,14 @@ namespace NativePost
 			return;
 		// A count behind the snapshot's by more than the ring lost files: logged, the newest are saved.
 		if (block->screenshots - s_done > Block::kScreenshotRing) {
-			logger::warn("[ORG] native post chain: {} vanilla screenshots came in one render frame; the oldest {} are not saved", block->screenshots - s_done,
+			logger::warn("[ORG] ImageSpace: {} vanilla screenshots came in one render frame; the oldest {} are not saved", block->screenshots - s_done,
 				block->screenshots - s_done - Block::kScreenshotRing);
 			s_done = block->screenshots - Block::kScreenshotRing;
 		}
 		while (s_done != block->screenshots) {
 			++s_done;
 			const auto& file = block->screenshotPaths[s_done % Block::kScreenshotRing];
-			logger::info("[ORG] native post chain: vanilla screenshot {} to {} (snapshot {})", s_done, file, Snapshot::CurrentId());
+			logger::info("[ORG] ImageSpace: vanilla screenshot {} to {} (snapshot {})", s_done, file, Snapshot::CurrentId());
 			globals::features::screenshotFeature.RequestCapture(file);
 		}
 	}

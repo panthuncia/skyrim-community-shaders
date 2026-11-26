@@ -196,8 +196,7 @@ namespace NativePost
 		}
 		block.adaptResets = s_adaptResets;
 		block.taaResets = s_taaResets;
-		if (native)
-			CaptureScreenshots(block);
+		CaptureScreenshots(block);
 		a_builder.Set(block);
 	}
 

@@ -112,6 +112,37 @@ std::int32_t EffectIndexOf(Effects::ImageSpaceEffectEnum a_effect)
 	return -1;
 }
 
+/** @brief An engine colour target's shape in a_in, a revision's values. Fatal when it has none. */
+Engine::Targets::Shape RevisionShapeOf(const Frame::Inputs& a_in, std::uint32_t a_index)
+{
+	const auto table = a_in.Get(Frame::Vars::EngineTargetShapes());
+	if (a_index >= table.colours.size() || !table.colours[a_index].width)
+		RenderGraph::Fatal("ImageSpace", fmt::format("the revision a step group is built for has no shape for {}", NameForLog(static_cast<std::int32_t>(a_index))));
+	return table.colours[a_index];
+}
+
+/**
+* @brief A step output's extent in the revision its build is for. An import's current version is the adopted one, which that
+* revision may replace (a new display size), so engine targets take their shape and HDR Display's scene texture the display size
+* from the revision's values. An owned target has its registration's extent. Outside a build, the current version's.
+*/
+std::pair<std::uint32_t, std::uint32_t> StepOutputExtent(const StepTexture& a_output, const FrameAnchors::Texture& a_import)
+{
+	if (a_output.owned)
+		return { a_output.owned->width, a_output.owned->height };
+	if (const auto* in = ProgramInputs(); in && a_output.engine >= 0) {
+		if (a_output.engine & kHdrSceneOutput) {
+			const auto display = in->Get(Frame::Vars::DisplaySize());
+			return { display.width, display.height };
+		}
+		if (!(a_output.engine & kKindBits)) {
+			const auto shape = RevisionShapeOf(*in, IndexOfName(a_output.engine));
+			return { shape.width, shape.height };
+		}
+	}
+	return { a_import.Width(), a_import.Height() };
+}
+
 /** @brief Null with a_error when the effect is not covered or a texture is missing. */
 std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a_entry, std::string& a_error)
 {
@@ -149,9 +180,8 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 		a_error = "its output could not be resolved";
 		return nullptr;
 	}
-	// A kept output may still have its last version's extent. The registration is for the extent the revision adopts with it.
-	spec->width = a_desc.output.owned ? a_desc.output.owned->width : spec->output.Width();
-	spec->height = a_desc.output.owned ? a_desc.output.owned->height : spec->output.Height();
+	// The output may still have its last version's extent. The registration is for the extent the revision adopts with it.
+	std::tie(spec->width, spec->height) = StepOutputExtent(a_desc.output, spec->output);
 	if (a_desc.output1) {
 		spec->output1 = texture(a_desc.output1);
 		if (!spec->output1) {
@@ -477,8 +507,10 @@ private:
 	*/
 	std::shared_ptr<Build> For(const Key& a_key, const Frame::Inputs& a_in)
 	{
-		if (auto kept = Kept(a_key))
+		if (auto kept = Kept(a_key)) {
+			ImportEngineOwned(*kept);
 			return kept;
+		}
 		auto made = std::make_shared<Build>();
 		made->key = a_key;
 		SpecProgramsMissing() = false;
@@ -491,6 +523,28 @@ private:
 		if (builds.size() > kKeptBuilds)
 			builds.erase(builds.begin());
 		return made;
+	}
+
+	/**
+	* @brief Imports again the engine targets a kept build's steps name. The engine's own (mip-generating) targets are imports, and an
+	* import takes the engine's new texture only when it is imported inside the adoption point. A new build imports them as it makes
+	* its specs; a kept one made none, so after a new display size its passes would keep the old texture.
+	*/
+	static void ImportEngineOwned(const Build& a_build)
+	{
+		const auto import = [](std::int32_t a_name) {
+			if (a_name >= 0 && !(a_name & kKindBits))
+				(void)ImportOf(ImportOfName(a_name));
+		};
+		for (const auto& part : a_build.table->parts)
+			for (std::uint32_t entry = 0; entry < part.count; ++entry)
+				if (const auto* spec = part.SpecOf(entry)) {
+					import(spec->key.output);
+					import(spec->key.output1);
+					import(spec->key.output2);
+					for (const auto input : spec->key.inputs)
+						import(input);
+				}
 	}
 
 	std::array<PostPart, kParts> parts{};
@@ -613,8 +667,12 @@ std::uint16_t EngineNormalsParity()
 	return ssr ? static_cast<std::uint16_t>(~EngineFrameCounter() & 1u) : 0;
 }
 
-/** @brief Like the engine target, with a UAV for a history's first clear. False while the engine has not made it. */
-bool OwnedDescLike(std::int32_t a_like, D3D11_TEXTURE2D_DESC& a_desc)
+/**
+* @brief Like the engine target, with a UAV for a history's first clear. False while the engine has not made it. The extent is the
+* target's shape in a_in, a revision's values (by default the one a step group build reads): the engine's texture is the adopted
+* version until that revision is adopted. With no values, the adopted version's.
+*/
+bool OwnedDescLike(std::int32_t a_like, D3D11_TEXTURE2D_DESC& a_desc, const Frame::Inputs* a_in = ProgramInputs())
 {
 	if (a_like < 0 || a_like >= static_cast<std::int32_t>(RE::RENDER_TARGET::kTOTAL))
 		return false;
@@ -623,6 +681,13 @@ bool OwnedDescLike(std::int32_t a_like, D3D11_TEXTURE2D_DESC& a_desc)
 		return false;
 	a_desc = {};
 	target.texture->GetDesc(&a_desc);
+	if (a_in) {
+		const auto shape = a_in->Get(Frame::Vars::EngineTargetShapes()).colours[static_cast<std::size_t>(a_like)];
+		if (!shape.width)
+			return false;
+		a_desc.Width = shape.width;
+		a_desc.Height = shape.height;
+	}
 	// The engine's texture may be typeless, so use the RTV's format.
 	if (target.RTV) {
 		D3D11_RENDER_TARGET_VIEW_DESC view{};
@@ -696,7 +761,7 @@ void DeclareKept(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_view 
 {
 	const auto like = static_cast<std::int32_t>(a_like);
 	DeclareKept(a_out, a_name, Frame::DependsOn(Frame::Vars::DisplaySize()),
-		[like](const Frame::Inputs&, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(like, a_desc); });
+		[like](const Frame::Inputs& a_in, D3D11_TEXTURE2D_DESC& a_desc) { return OwnedDescLike(like, a_desc, &a_in); });
 }
 
 /** @brief A kept texture like an engine target: its extent in the registration being built. */
@@ -725,11 +790,10 @@ std::uint32_t EngineSaoLevels()
 	return *levels.get();
 }
 
-/** @brief The first level whose source height is at most 16 (RenderSSAO, SE 0x1412ebd70). 0 for none. */
-std::uint32_t ContrastLevel(std::uint32_t a_levels)
+/** @brief The first level whose source height is at most 16 (RenderSSAO, SE 0x1412ebd70), at kMAIN's height in a_main. 0 for none. */
+std::uint32_t ContrastLevel(std::uint32_t a_levels, const Engine::Targets::Shape& a_main)
 {
-	static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> targets{ REL::RelocationID(524970, 411451) };
-	const auto height = targets.get()->renderTargetData[RE::RENDER_TARGET::kMAIN].height;
+	const auto height = a_main.height;
 	for (std::uint32_t level = 1; level < a_levels; ++level)
 		if ((height >> (level - 1)) <= 16)
 			return level;
@@ -856,15 +920,12 @@ void BuildWorldSteps(WorldBuild& a_build)
 	auto& state = IS();
 	auto& world = World();
 	const auto& a_key = a_build.key;
-	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN];
-	if (!main.texture)
-		return;
-	D3D11_TEXTURE2D_DESC mainDesc{};
-	main.texture->GetDesc(&mainDesc);
-	a_build.width = mainDesc.Width;
-	a_build.height = mainDesc.Height;
+	// kMAIN as the revision this build is for makes it: the engine's records and the import keep the adopted size until then.
+	const auto main = RevisionShapeOf(*ProgramInputs(), RE::RENDER_TARGET::kMAIN);
+	a_build.width = main.width;
+	a_build.height = main.height;
 	a_build.saoLevels = a_key.saoLevels;
-	a_build.contrastLevel = ContrastLevel(a_build.saoLevels);
+	a_build.contrastLevel = ContrastLevel(a_build.saoLevels, main);
 	MakeTransient(world.ssrMask, RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED, "ImageSpace::SSRMaskDownsampled");
 	MakeTransient(world.saoTemp, RE::RENDER_TARGET::kSAO_TEMP_BLUR, "ImageSpace::SAOBlurTemp");
 	KeptExtentLike(world.sao, RE::RENDER_TARGET::kSAO);
