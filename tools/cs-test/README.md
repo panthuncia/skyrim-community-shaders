@@ -142,6 +142,15 @@ min = { "cs.ssgi" = 300 }   # at least this many frames on the graph
 - Each failure is one clause: `cs.ssgi ran on the graph in 12 frames, at least 300 expected`.
 - `result.json`'s `graph_frames` has the expectation, the report, the failures and why it was skipped.
 
+### Snapshot detectors
+
+The game writes two more reports at exit: `report.engine_reads` (live engine reads per world frame, by category and feature;
+`src/Snapshot/EngineReads.h`) and `report.engine_render` (engine render calls per frame by kind and call site, once the call
+sites are installed with `env.CS_SNAPSHOT_DETECT=1`; `src/EngineZones.h`). `result.json`'s `detectors` summarises both and the
+summary line ends with them, for example `(live engine reads 2100/world frame; engine render calls 85/world frame)`. With
+`CS_SNAPSHOT_DETECT=1` the log has the full tables (`[Snapshot]` and `[EngineZones]` lines) at each load and at exit; the
+`snapshot:detect` step logs them on demand.
+
 ### Prefs INI
 
 `[prefs_ini]` sets values in the slot's `SkyrimPrefs.ini` for one run. Its tables are the file's sections.

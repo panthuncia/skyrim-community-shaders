@@ -397,6 +397,9 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
         log(f"PresentMon: {presents}")
         watch.sampler = None
     line = summary_line(contract["name"], harness["label"], final, status, shots, fault)
+    detected = collect.detectors(collect.final_status(run_dir, status))
+    if collect.detectors_text(detected):
+        line += f" ({collect.detectors_text(detected)})"
     result = {
         "run_id": contract["run_id"],
         "name": contract["name"],
@@ -415,6 +418,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
         "shots": shots,
         "live_image": collect.live_image(run_dir, contract["expect"]),
         "graph_frames": collect.graph_frames(contract, collect.final_status(run_dir, status)),
+        "detectors": detected,
         "first_error": scan["first_error"] or (status or {}).get("last_error", ""),
         "fault": (status or {}).get("fault") or ({"address": fault} if fault else {}),
         "errors": scan["errors"],
