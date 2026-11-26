@@ -434,3 +434,23 @@ pushes until the user is back.
      adopted targets; with TAA (render size equal to display size) growing the window overruns and loses the device in
      native Vulkan. This is engine-bound state read at record time: the viewport must come from the revision the fragment is
      recorded against (the snapshot's display/render size), not the engine. Blood splatter latches it too.
+
+## 2026-11-26: phase 3 resolve points and the sun query (snap3-resolve; director accepted)
+
+113. **Native's sun occlusion query is CS's:** the native RenderWorld driver draws the sun's occlusion pass into a CS-owned
+     query slot (`OcclusionQueries::kSunSlot`) tagged with the snapshot id; a game-side capture (`Sky/SunQuery.cpp`) ports
+     `Sun::UpdateOcclusionQueries`, takes the answer without waiting, writes the accumulator's query results and captures
+     `BlockId::SunQuery` (answers arrive about 1.9 snapshots after the draw). The engine's query functions are not called in
+     native. The sun query geometry is read on the render thread (decision 105's rule). The glare value is unverified: no
+     test scene has the sun in view.
+114. **The main accumulator's end calls (ClearItemsList, RenderFirstPersonView_End) are not made in native:** its lists were
+     empty at both ends of the world render over 1,800+ renders.
+115. **RenderWorld's points read CS's frame (`WorldPass`)** for targets, depth target and render modes (the engine's resolve
+     code uses fixed values, so they are not captured per frame); sky batch, water mask and surface, sun draw and
+     StartDeferred's forward targets are converted with 0 parity differences.
+116. **Not done, and what it needs:** StartAccumulating and the post-resolve are still called. Replacing them needs CS
+     producers for the perFrame/camera constants (SetCameraData, AE 0x140e45680), the render-state flush and the clears it
+     triggers, the pre-resolve's LOD near-plane camera tweak, and the render state RenderPostProcess still reads.
+     Remaining engine-state readers: Forward's frame params z (engine 1, FrameCamera 0), DCLF's `CaptureBindings`, viewport
+     and depth range in `Frame::Read` (with decision 112), the water capture's engine globals, the ImageSpace copy step's
+     rows. Copying the engine bodies would still call the same engine functions, so that was not done.
