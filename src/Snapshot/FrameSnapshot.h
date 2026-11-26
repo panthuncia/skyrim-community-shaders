@@ -144,7 +144,8 @@ namespace Snapshot
 	*/
 	enum class BlockId : std::uint16_t
 	{
-		TreeWind,  // Features/TreeWind.h, TreeWind::Block
+		TreeWind,   // Features/TreeWind.h, TreeWind::Block
+		CoreFrame,  // Snapshot/CoreFrame.h, the shared frame state's game data
 		Count
 	};
 
@@ -170,7 +171,7 @@ namespace Snapshot
 		FrameKind kind = FrameKind::MainMenu;
 		std::uint64_t loadEpoch = 0;  // loading screens begun this session
 		MenuStates menus{};
-		std::uint64_t settingsRevision = 0;
+		std::uint64_t settingsRevision = 0;  // CS::SettingRegistry::Serial() at the capture: moves with every settings change
 		Cameras cameras{};
 		bool interior = false;                                // the player's cell is an interior
 		std::shared_ptr<const DCLF::ScenePublication> scene;  // the scene publication it pairs with (empty in phase 0)

@@ -17,6 +17,8 @@ namespace Util::ColorSpace
 			const auto rgb = color * tint * intensity;
 			return { rgb.red, rgb.green, rgb.blue, alpha };
 		}
+
+		bool operator==(const LightColor&) const = default;
 	};
 
 	inline constexpr float GAME_GAMMA = 1.6f;

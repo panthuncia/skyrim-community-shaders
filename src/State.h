@@ -489,11 +489,11 @@ public:
 	}
 
 	/**
-	 * @brief Updates the shared constant buffer data based on world state and rendering pass.
-	 * @param a_inWorld Whether the camera is in world space.
-	 * @param a_prepass Whether this is a prepass rendering phase.
+	 * @brief Fills the shared constant buffer. A function of the adopted snapshot's core block (Snapshot::CoreFrame), CS settings
+	 * and render state: it reads no engine object.
+	 * @param a_inWorld Whether the main world view renders (fills the water tiles and the post-water composite flag).
 	 */
-	void UpdateSharedData(bool a_inWorld, bool a_prepass);
+	void UpdateSharedData(bool a_inWorld);
 	/**
 	 * @brief Updates sky shader permutation based on the current render pass.
 	 * @param a_pass The render pass to inspect.

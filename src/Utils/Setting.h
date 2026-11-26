@@ -102,8 +102,15 @@ namespace CS
 		 */
 		static bool Adopting() noexcept { return adopting.load(std::memory_order_acquire); }
 
+		/**
+		 * @brief Any thread. Counts the raises so far: it moves whenever a bound setting's value changes, whoever wrote it. The frame
+		 * snapshot's settingsRevision.
+		 */
+		static std::uint64_t Serial() noexcept { return serial.load(std::memory_order_acquire); }
+
 	private:
 		static inline std::atomic<bool> adopting{ false };
+		static inline std::atomic<std::uint64_t> serial{ 0 };
 	};
 
 	/** @brief One element of an array setting. A write sets the whole value, so it raises the event. */

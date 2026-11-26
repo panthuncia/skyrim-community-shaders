@@ -265,7 +265,9 @@ void LinearLighting::ModifySharedLighting(SharedLighting& lighting)
 {
 	if (!IsLinearLightingActive())
 		return;
-	lighting.directional.color = LightColorToWorking(lighting.directionalLight);
+	// LightColorToWorking's rule for the sun light, from the captured colour.
+	if (!lighting.directionalOverridden)
+		lighting.directional.color = SRGBToWorking(lighting.directional.color);
 	lighting.sun.color = SRGBToWorking(lighting.sun.color);
 	for (auto* moon : { &lighting.masser, &lighting.secunda }) {
 		moon->color = SRGBToWorking(moon->color);

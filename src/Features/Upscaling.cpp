@@ -1596,7 +1596,7 @@ void Upscaling::PostDisplay()
 	CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->UpdateViewPort(0, 0, 1);
 	UpdateCameraData();
 
-	globals::state->UpdateSharedData(false, false);
+	globals::state->UpdateSharedData(false);
 }
 
 /*

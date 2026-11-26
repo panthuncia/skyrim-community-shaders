@@ -1,4 +1,5 @@
 #include "State.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 
 #include <algorithm>
@@ -132,11 +133,9 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 
 	auto* skyProperty = static_cast<const RE::BSSkyShaderProperty*>(a_pass->shaderProperty);
 	if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_CLOUDS) {
-		// Bottled Shaders keeps cloud layer 28 out of the scattering
-		constexpr std::uint16_t kNoScatteringCloudLayer = 28;
-		auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-		if (sky && sky->clouds && kNoScatteringCloudLayer < sky->clouds->numLayers &&
-			sky->clouds->clouds[kNoScatteringCloudLayer].get() == a_pass->geometry)
+		// Bottled Shaders keeps cloud layer 28 out of the scattering (the core capture keys its geometry).
+		const auto key = Snapshot::Core().noScatteringCloud;
+		if (key && key == reinterpret_cast<std::uintptr_t>(a_pass->geometry))
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::NoSkyScattering);
 	}
 	if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_SUN ||
@@ -147,8 +146,9 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 		skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_MOON_SHADOW) {
 		if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_MOON)
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsMoon);
-		const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-		if (sky && sky->secunda && (a_pass->geometry == sky->secunda->moonMesh.get() || a_pass->geometry == sky->secunda->shadowMesh.get()))
+		const auto& core = Snapshot::Core();
+		const auto geometry = reinterpret_cast<std::uintptr_t>(a_pass->geometry);
+		if (geometry && (geometry == core.secundaMoonMesh || geometry == core.secundaShadowMesh))
 			permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsSecunda);
 	}
 }
@@ -1666,7 +1666,7 @@ void State::SetAdapterDescription(const std::wstring& description)
 	adapterDescription = converter.to_bytes(description);
 }
 
-void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] bool a_prepass)
+void State::UpdateSharedData(bool a_inWorld)
 {
 	ZoneScopedN("CS.State.UpdateSharedData");
 	if (preExposureFrame != frameCount) {
@@ -1691,27 +1691,20 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.RcpPreExposure = 1.0f / preExposure;
 		data.PreviousPreExposure = previousPreExposure;
 		data.PreExposureHistoryRatio = preExposure / previousPreExposure;
+		// Game data comes from the adopted snapshot's core block (Snapshot::CoreFrame), captured once per game update.
+		const auto& core = Snapshot::Core();
 		SharedLighting lighting{};
-
-		const auto shaderManager = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
-		const RE::NiTransform& dalcTransform = shaderManager->directionalAmbientTransform;
-
-		auto shadowSceneNode = shaderManager->shadowSceneNode[0];
-		auto dirLight = skyrim_cast<RE::NiDirectionalLight*>(shadowSceneNode->GetRuntimeData().sunLight->light.get());
-
-		auto& lightRuntimeData = dirLight->GetLightRuntimeData();
-		lighting.directionalLight = dirLight;
-		lighting.directional.color = lightRuntimeData.diffuse;
-		lighting.directional.intensity = lightRuntimeData.fade;
-		lighting.directional.intensity *= globals::features::linearLighting.GetSunlightScale(dirLight);
+		lighting.directionalOverridden = core.dirLightOverridden;
+		lighting.directional.color = core.dirLightColor;
+		lighting.directional.intensity = core.dirLightFade * core.sunlightScale;
 		lighting.directional.alpha = lighting.directional.intensity;
 
-		const auto& direction = dirLight->GetWorldDirection();
-		data.DirLightDirection = { -direction.x, -direction.y, -direction.z, 0.0f };
+		data.DirLightDirection = { -core.dirLightDirection.x, -core.dirLightDirection.y, -core.dirLightDirection.z, 0.0f };
 		data.DirLightDirection.Normalize();
 
 		data.CameraData = Util::GetCameraData();
-		data.BufferDim = { (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenHeight, 1.0f / (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenWidth, 1.0f / (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenHeight };
+		const auto display = Util::DisplaySize();
+		data.BufferDim = { display.x, display.y, 1.0f / display.x, 1.0f / display.y };
 		data.Timer = timer;
 
 		auto temporal = Util::GetTemporal();
@@ -1720,26 +1713,15 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.FrameCountAlwaysActive = frameCount;
 		data.ResetHistory = ShouldResetHistory();
 
-		if (a_inWorld) {
-			for (int i = -2; i <= 2; i++) {
-				for (int k = -2; k <= 2; k++) {
-					int waterTile = (i + 2) + ((k + 2) * 5);
-					data.WaterData[waterTile] = Util::TryGetWaterData((float)i * 4096.0f, (float)k * 4096.0f);
-				}
-			}
-		}
+		if (a_inWorld)
+			std::copy(core.water.begin(), core.water.end(), std::begin(data.WaterData));
 
 		data.WaterSystemHeight = -RE::NI_INFINITY;
 		data.PostWaterComposite = a_inWorld && globals::features::viewAtmosphere.CompositeEnabled() ? 1u : 0u;
 
-		data.InInterior = Util::IsInterior();
+		data.InInterior = core.noSky;
 		data.HasDirectionalShadows = HasDirectionalShadows();
-
-		if (CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky))
-			data.HideSky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)->flags.any(RE::Sky::Flags::kHideSky);
-		else
-			data.HideSky = false;
-
+		data.HideSky = core.hideSky;
 		data.InMapMenu = isMapMenuOpen;
 
 		auto& upscaling = globals::features::upscaling;
@@ -1747,9 +1729,8 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		if (upscaling.loaded) {
 			auto upscaleMethod = upscaling.FrameUpscaleMethod();
 			if (temporal && upscaleMethod != Upscaling::UpscaleMethod::kTAA) {
-				float2 screenSz{ (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenHeight };
-				auto renderSize = Util::ConvertToDynamic(screenSz, true);
-				data.MipBias = std::log2f(renderSize.x / screenSz.x) - 1.0f;
+				auto renderSize = Util::ConvertToDynamic(display, true);
+				data.MipBias = std::log2f(renderSize.x / display.x) - 1.0f;
 			} else {
 				data.MipBias = 0;
 			}
@@ -1757,50 +1738,24 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 			data.MipBias = 0;
 		}
 
-		if (auto sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)) {
-			const auto& skySync = globals::features::skySync;
-			auto getMoonColor = [&](const RE::Moon* moon, const Util::ColorSpace::LightColor& baseColor) {
-				return Util::Moon::GetLightColor(moon, baseColor, globals::features::skySync.settings.NewMoonIntensity, globals::features::skySync.settings.CrescentMoonIntensity, globals::features::skySync.settings.FullMoonIntensity);
-			};
-
-			// Process sun
-			if (auto sun = sky->sun; sun && sun->root && sky->root) {
-				const auto sunDirection = skySync.GetCelestialDirection(sky, SkySync::Caster::Sun);
-				data.SunDirection = { sunDirection.x, sunDirection.y, sunDirection.z, 0.0f };
-
-				if (sun->sunBase) {
-					if (const auto prop = skyrim_cast<RE::BSSkyShaderProperty*>(sun->sunBase->GetGeometryRuntimeData().shaderProperty.get())) {
-						const auto& sunColor = prop->kBlendColor;
-						lighting.sun = { .color = { sunColor.red, sunColor.green, sunColor.blue }, .intensity = sunColor.alpha, .alpha = sunColor.alpha };
-					}
-				}
-			}
-
-			if (auto masser = sky->masser) {
-				auto dir = skySync.GetCelestialDirection(sky, SkySync::Caster::Masser);
-				data.MasserDirection = { dir.x, dir.y, dir.z, 0.0f };
-				if (masser->root && !masser->root->GetFlags().any(RE::NiAVObject::Flag::kHidden))
-					lighting.masser = getMoonColor(masser, Util::Moon::MasserBaseColor);
-			}
-
-			if (auto secunda = sky->secunda) {
-				auto dir = skySync.GetCelestialDirection(sky, SkySync::Caster::Secunda);
-				data.SecundaDirection = { dir.x, dir.y, dir.z, 0.0f };
-				if (secunda->root && !secunda->root->GetFlags().any(RE::NiAVObject::Flag::kHidden))
-					lighting.secunda = getMoonColor(secunda, Util::Moon::SecundaBaseColor);
-			}
-		}
+		data.SunDirection = core.sunDirection;
+		data.MasserDirection = core.masserDirection;
+		data.SecundaDirection = core.secundaDirection;
+		lighting.sun = core.sun;
+		lighting.masser = core.masser;
+		lighting.secunda = core.secunda;
 
 		// DALC to SH
-		const auto& m = dalcTransform.rotate;
-		const auto& t = dalcTransform.translate;
+		const auto& dalc = core.dalc;
+		const auto m = [&](int a_row, int a_column) { return dalc[a_row * 3 + a_column]; };
+		const float3 t{ dalc[9], dalc[10], dalc[11] };
 		float3 dalcColors[6];
-		dalcColors[0] = float3{ m.entry[0][0] + t.x, m.entry[1][0] + t.y, m.entry[2][0] + t.z };     // +X
-		dalcColors[1] = float3{ -m.entry[0][0] + t.x, -m.entry[1][0] + t.y, -m.entry[2][0] + t.z };  // -X
-		dalcColors[2] = float3{ m.entry[0][1] + t.x, m.entry[1][1] + t.y, m.entry[2][1] + t.z };     // +Y
-		dalcColors[3] = float3{ -m.entry[0][1] + t.x, -m.entry[1][1] + t.y, -m.entry[2][1] + t.z };  // -Y
-		dalcColors[4] = float3{ m.entry[0][2] + t.x, m.entry[1][2] + t.y, m.entry[2][2] + t.z };     // +Z
-		dalcColors[5] = float3{ -m.entry[0][2] + t.x, -m.entry[1][2] + t.y, -m.entry[2][2] + t.z };  // -Z
+		dalcColors[0] = float3{ m(0, 0) + t.x, m(1, 0) + t.y, m(2, 0) + t.z };     // +X
+		dalcColors[1] = float3{ -m(0, 0) + t.x, -m(1, 0) + t.y, -m(2, 0) + t.z };  // -X
+		dalcColors[2] = float3{ m(0, 1) + t.x, m(1, 1) + t.y, m(2, 1) + t.z };     // +Y
+		dalcColors[3] = float3{ -m(0, 1) + t.x, -m(1, 1) + t.y, -m(2, 1) + t.z };  // -Y
+		dalcColors[4] = float3{ m(0, 2) + t.x, m(1, 2) + t.y, m(2, 2) + t.z };     // +Z
+		dalcColors[5] = float3{ -m(0, 2) + t.x, -m(1, 2) + t.y, -m(2, 2) + t.z };  // -Z
 
 		SphericalHarmonics::SH2Color dalcSH = SphericalHarmonics::DALCToSH(dalcColors);
 		data.AmbientSHR = { dalcSH.r.c0, dalcSH.r.c1[0], dalcSH.r.c1[1], dalcSH.r.c1[2] };

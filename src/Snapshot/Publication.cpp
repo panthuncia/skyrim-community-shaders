@@ -1,11 +1,12 @@
 #include "Snapshot/Publication.h"
 
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
+#include "Utils/Setting.h"
 
 #include "RenderGraph/Async/LatestSlot.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
-#include "RenderGraph/Frame/Revision.h"
 #include "RenderGraph/FrameClock.h"
 #include "RenderGraph/Switches.h"
 
@@ -212,7 +213,8 @@ namespace Snapshot
 			                  menus.freezesBackground ? FrameKind::MenuOverWorld :
 			                                            FrameKind::World;
 			a_snapshot.loadEpoch = g_loadEpoch.load(std::memory_order_acquire);
-			a_snapshot.settingsRevision = RenderGraph::Frame::Revision::Mark().takenVariables;
+			// Game side: the settings' raise count when the snapshot is built, not the variables the last render Begin took.
+			a_snapshot.settingsRevision = CS::SettingRegistry::Serial();
 
 			auto& main = a_snapshot.cameras.current[static_cast<std::size_t>(ViewId::Main)];
 			main = CaptureMainCamera();
@@ -359,6 +361,8 @@ namespace Snapshot
 		fresh->id = game.nextId++;
 		FillCore(*fresh, previous, game);
 		Builder builder(*fresh, previous);
+		// The core block first: feature captures may read it through Builder::Built().
+		CaptureCore(builder);
 		for (const auto capture : game.captures)
 			capture(builder);
 		auto& stats = Counters();

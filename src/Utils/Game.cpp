@@ -1,4 +1,5 @@
 #include "Game.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 
 #include <atomic>
@@ -6,6 +7,7 @@
 #include <limits>
 
 #include "Globals.h"
+#include "RenderGraph/Frame/Variables.h"
 #include "State.h"
 
 namespace
@@ -117,11 +119,11 @@ namespace Util
 		return completedCelestialTransitionGeneration.load(std::memory_order_acquire);
 	}
 
-	float4 TryGetWaterData(float offsetX, float offsetY)
+	float4 TryGetWaterData(const RE::NiPoint3& a_eye, float offsetX, float offsetY)
 	{
-		if (CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState)) {
-			if (auto tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton())) {
-				auto position = GetEyePosition();
+		{
+			if (auto tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton())) {
+				auto position = a_eye;
 				position.x += offsetX;
 				position.y += offsetY;
 				if (auto cell = tes->GetCell(position)) {
@@ -166,7 +168,7 @@ namespace Util
 						}
 					}
 
-					if (auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)) {
+					if (auto sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)) {
 						const auto& color = sky->skyColor[RE::TESWeather::ColorTypes::kWaterMultiplier];
 						data.x *= color.red;
 						data.y *= color.green;
@@ -190,8 +192,17 @@ namespace Util
 
 	float4 GetCameraData()
 	{
-		static float& cameraNear = (*(float*)(REL::RelocationID(517032, 403540).address() + 0x40));
-		static float& cameraFar = (*(float*)(REL::RelocationID(517032, 403540).address() + 0x44));
+		float cameraNear = 0.0f, cameraFar = 0.0f;
+		if (Snapshot::EngineReads::InCapture()) {
+			// The high actor culler's frustum (+0x30 in it), which Main::SetupSunAndSky copies from the world camera.
+			static const auto culler = REL::RelocationID(517032, 403540).address();
+			cameraNear = CS_ENGINE_READ(Camera, CapturePoint, *reinterpret_cast<const float*>(culler + 0x40));
+			cameraFar = *reinterpret_cast<const float*>(culler + 0x44);
+		} else {
+			const auto& core = Snapshot::Core();
+			cameraNear = core.cameraNear;
+			cameraFar = core.cameraFar;
+		}
 
 		float4 cameraData{};
 		cameraData.x = cameraFar;
@@ -202,22 +213,45 @@ namespace Util
 		return cameraData;
 	}
 
+	namespace
+	{
+		/** @brief CS's copy of the TAA shader's flag. Only CS sets it (SetTemporal), so the frame reads it from here. */
+		struct TemporalFlag
+		{
+			bool known = false;
+			bool enabled = false;
+		};
+
+		TemporalFlag& Temporal()
+		{
+			static TemporalFlag flag;
+			return flag;
+		}
+
+		RE::ImageSpaceManager::UNK_BSImagespaceShaderISTemporalAA* TemporalShader()
+		{
+			auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager);
+			return imageSpaceManager ? imageSpaceManager->GetRuntimeData().BSImagespaceShaderISTemporalAA : nullptr;
+		}
+	}
+
 	bool GetTemporal()
 	{
-		auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
-		if (!imageSpaceManager)
-			return false;
-		auto& taaShader = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISTemporalAA;
-		return taaShader && taaShader->taaEnabled;
+		auto& flag = Temporal();
+		// Before CS first sets it, the engine's value (from its INI) is the one in force.
+		if (!flag.known) {
+			const auto* shader = TemporalShader();
+			flag = { true, shader && shader->taaEnabled };
+		}
+		return flag.enabled;
 	}
 
 	void SetTemporal(bool enabled)
 	{
-		auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, RecordTime, globals::game::imageSpaceManager);
-		if (!imageSpaceManager)
-			return;
-		if (auto& taaShader = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISTemporalAA)
-			taaShader->taaEnabled = enabled;
+		auto* shader = TemporalShader();
+		Temporal() = { true, shader && enabled };
+		if (shader)
+			shader->taaEnabled = enabled;
 	}
 
 	void DisableVanillaTAA()
@@ -226,14 +260,21 @@ namespace Util
 			setting->data.b = false;
 	}
 
+	float GetWorldFOVDegrees()
+	{
+		if (!Snapshot::EngineReads::InCapture())
+			return Snapshot::Core().fovDegrees;
+		static const auto fov = REL::RelocationID(513786, 388785).address();
+		return CS_ENGINE_READ(Camera, CapturePoint, *reinterpret_cast<const float*>(fov));
+	}
+
 	float GetVerticalFOVRad()
 	{
-		static float& cameraFOVDeg = (*(float*)(REL::RelocationID(513786, 388785).address()));  // FOV degrees
-		float hFOVRad = cameraFOVDeg * (3.14159265359f / 180.0f);
-		float unitHalfWidth = tan(hFOVRad / 2);                                                                                                         // This is same as camera frustum RL
-		float unitHalfHeight = unitHalfWidth / ((float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth / (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight);  // frustum TB
-		float vFOVRad = 2.0f * atan(unitHalfHeight);
-		return vFOVRad;
+		const float hFOVRad = GetWorldFOVDegrees() * (3.14159265359f / 180.0f);
+		const float unitHalfWidth = tan(hFOVRad / 2);  // This is same as camera frustum RL
+		const auto display = DisplaySize();
+		const float unitHalfHeight = unitHalfWidth / (display.x / display.y);  // frustum TB
+		return 2.0f * atan(unitHalfHeight);
 	}
 
 	float2 ConvertToDynamic(float2 a_size, bool a_ignoreLock)
@@ -249,9 +290,15 @@ namespace Util
 			a_size.y * runtimeData.dynamicResolutionHeightRatio);
 	}
 
+	float2 DisplaySize()
+	{
+		const auto display = RenderGraph::Frame::Vars::Adopted(RenderGraph::Frame::Vars::DisplaySize());
+		return { static_cast<float>(display.width), static_cast<float>(display.height) };
+	}
+
 	DispatchCount GetScreenDispatchCount(bool a_dynamic)
 	{
-		float2 resolution{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
+		float2 resolution = DisplaySize();
 
 		// Feature passes use the scaled render area even when the vanilla dynamic-resolution lock is set.
 		if (a_dynamic)
@@ -420,7 +467,9 @@ namespace Util
 
 	bool IsInterior()
 	{
-		auto tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
+		if (!Snapshot::EngineReads::InCapture())
+			return Snapshot::Core().noSky;
+		auto tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton());
 		if (tes && !tes->interiorCell) {
 			if (auto worldSpace = tes->GetRuntimeData2().worldSpace) {
 				if (!worldSpace->flags.any(RE::TESWorldSpace::Flag::kNoSky, RE::TESWorldSpace::Flag::kFixedDimensions)) {
