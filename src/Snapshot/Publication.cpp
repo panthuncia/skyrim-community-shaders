@@ -2,6 +2,7 @@
 
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/SideEffects.h"
 #include "Utils/Setting.h"
 
 #include "RenderGraph/Async/LatestSlot.h"
@@ -46,6 +47,8 @@ namespace Snapshot
 		constexpr float kCutTurnCos = 0.5f;
 		// A player move larger than this in one update without a loading screen is a teleport.
 		constexpr float kTeleportDistance = 1024.0f;
+		// The side effects log one line per this many game updates (native).
+		constexpr std::uint64_t kSideEffectLineUpdates = 600;
 
 		/** @brief The cadence test mode, parsed once. */
 		struct Cadence
@@ -70,6 +73,7 @@ namespace Snapshot
 			RE::NiPoint3 previousPlayer{};
 			bool havePlayer = false;
 			std::uint64_t updates = 0;  // game updates seen by the cadence mode
+			std::uint64_t sideEffectLines = 0;  // updates since the side effects' first line
 		};
 
 		/** @brief Counters since the last load's line. Atomic: the render side adds to them too. */
@@ -305,31 +309,24 @@ namespace Snapshot
 			stats.published.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		/**
-		* @brief What a skipped render half must still do for the game: signal the main thread's render stages 5 to 9
-		* (SetJobTaskEvent, SE 68165, AE 69514). NiCamera::CalculateAndDrawShadowCasterLights signals 5, Main::Draw 6 and 7, and
-		* Main::DrawFrame 6 to 9. Frame jobs wait on them (FUN_1406d2e80 waits for 5 or 6, FUN_1406d3660 for 8 then 9), and
-		* Main::Update's frame-job wait (SE 34554, AE 35409) waits for those jobs, so without them the update hangs.
-		*/
-		void SignalRenderStages()
-		{
-			using Fn = void (*)(std::uint32_t);
-			static REL::Relocation<Fn> setEvent{ REL::RelocationID(68165, 69514) };
-			for (std::uint32_t stage = 5; stage <= 9; ++stage)
-				setEvent(stage);
-		}
-
 		/** @brief Main::Update's call of Main::DrawFrame (SE 35565 +0x5D2, AE 36564 +0xA97): publish, then the render half. */
 		struct MainUpdate_DrawFrame
 		{
 			static void thunk(RE::Main* a_main)
 			{
 				Capture();
+				// Native: the render half's game-visible side effects come from the game side (Snapshot/SideEffects.h).
+				SideEffects::AfterCapture(*Game().previous);
 				const auto renders = RendersThisUpdate();
-				for (std::uint32_t i = 0; i < renders; ++i)
-					func(a_main);
-				if (renders == 0)
-					SignalRenderStages();
+				{
+					const SideEffects::RenderHalfScope scope;
+					for (std::uint32_t i = 0; i < renders; ++i)
+						func(a_main);
+				}
+				SideEffects::AfterRenderHalf(renders);
+				if (++Game().sideEffectLines % kSideEffectLineUpdates == 0)
+					if (const auto line = SideEffects::TakeStatsLine(); !line.empty())
+						logger::info("{}", line);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -345,6 +342,7 @@ namespace Snapshot
 		if (REL::Module::IsVR())
 			return;
 		stl::write_thunk_call<MainUpdate_DrawFrame>(REL::RelocationID(35565, 36564).address() + REL::Relocate(0x5D2, 0xA97));
+		SideEffects::InstallHooks();
 		(void)CadenceMode();
 		logger::info("[Snapshot] frame snapshots: published at Main::Update's call of Main::DrawFrame, adopted at Renderer::Begin");
 	}

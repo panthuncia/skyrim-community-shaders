@@ -152,13 +152,13 @@ namespace DCLF::Family
 	void RunSetups();
 
 	/**
-	 * @brief Once a game frame, from the first family batch. Lets the render thread's buffer registry drop dead entries and take
+	 * @brief Once a render frame, from the first family batch. Lets the render thread's buffer registry drop dead entries and take
 	 * DXVK's buffer moves, whether or not grass and tree LOD run.
 	 */
 	void BeginBatch();
 
-	/** @brief Any thread. The engine's frame counter, incremented by Renderer::End. */
-	std::uint32_t GameFrame();
+	/** @brief Any thread. The render frame (RenderGraph::FrameClock::BeginFrame), which moves at each Renderer::Begin. */
+	std::uint32_t RenderFrame();
 
 	/**
 	 * @brief A batch's passes against its draws. A pass that drew through another function than DrawTriShape was the engine's,

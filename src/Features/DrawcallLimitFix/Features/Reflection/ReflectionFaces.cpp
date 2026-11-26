@@ -224,7 +224,7 @@ namespace DCLF::Features::Reflection::ReflectionFaces
 			// their graph clients run only at the frame's first, so they run and are read once a frame.
 			static std::uint32_t preparedFrame = UINT32_MAX;
 			static Sky::FaceInputs inputs;
-			const auto frame = Family::GameFrame();
+			const auto frame = Family::RenderFrame();
 			const bool first = std::exchange(preparedFrame, frame) != frame;
 			globals::deferred->BeginReflectionFace(first);
 			if (first)

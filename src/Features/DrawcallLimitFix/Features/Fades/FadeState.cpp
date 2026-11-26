@@ -6,6 +6,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
+#include "Snapshot/Publication.h"
 
 #include <algorithm>
 #include <cmath>
@@ -301,7 +302,11 @@ namespace DCLF::FadeState
 			frame.lodAdjust = At<float>(a_camera, 0x184);
 		}
 		frame.counter = Global<std::int32_t>(Features::Fades::Address::kFadeFrameCounter);
-		frame.deltaTime = Global<float>(Features::Fades::Address::kFadeStepTime);
+		// The engine steps a visible root's fade once per game update by that update's step. The render steps it once by the sum of
+		// the updates the adopted snapshot stands for, and not at all on a repeated render (the cadence test mode's drop and repeat).
+		const auto& snapshot = Snapshot::Current();
+		const float updates = !snapshot ? 1.0f : Snapshot::Render().repeat ? 0.0f : static_cast<float>(snapshot->events.gameUpdates);
+		frame.deltaTime = Global<float>(Features::Fades::Address::kFadeStepTime) * updates;
 		frame.fadesOn = Global<std::uint8_t>(Engine::Address::kFadesOn) ? 1u : 0u;
 		frame.lodUpdates = Global<std::uint8_t>(Engine::Address::kFadeLodUpdates) ? 1u : 0u;
 		frame.fadeInTime = Global<float>(Features::Fades::Address::kFadeStepDivisor);
@@ -310,7 +315,7 @@ namespace DCLF::FadeState
 		frame.fadeOutBelow = Global<float>(Engine::Address::kFadeOutThreshold);
 		frame.blendTime = Global<float>(Features::Fades::Address::kFadeBlendTime);
 		frame.distanceMult = Global<float>(Engine::Address::kFadeDistanceMult);
-		frame.stepMax = Global<float>(Features::Fades::Address::kFadeStepMax);
+		frame.stepMax = Global<float>(Features::Fades::Address::kFadeStepMax) * updates;  // each update's step is clamped on its own
 		frame.amountTime = Global<float>(Features::Fades::Address::kFadeAmountTime);
 		frame.metricScale = Global<float>(Engine::Address::kMetricScale);
 		frame.defaultScale = Global<float>(Engine::Address::kFadeDefaultScale);

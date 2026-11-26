@@ -446,7 +446,7 @@ namespace DCLF::Features::Sky::Native
 		/** @brief The slots for a_views, resolved on the frame's first use. Null, with a_why, when one cannot be read. */
 		Slots* SlotsOf(const std::array<ID3D11ShaderResourceView*, 3>& a_views, const std::array<bool, 3>& a_used, std::string& a_why)
 		{
-			if (const auto frame = Family::GameFrame(); s_slots.frame != frame) {
+			if (const auto frame = Family::RenderFrame(); s_slots.frame != frame) {
 				s_slots.frame = frame;
 				s_slots.entries.clear();
 			}

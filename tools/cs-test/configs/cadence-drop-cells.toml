@@ -1,0 +1,63 @@
+# The cadence test mode's drop:3 (cadence-drop.toml) through cell loads: three coc steps, each into new cells (Whiterun's
+# exterior, Dragonsreach, Riverwood), a shot once each settles, then exit. Checks the game-side side effects
+# (Snapshot/SideEffects.h) where cells, actors, decals, fades after a teleport and the flow-map pool are exercised.
+# Native only. Compose it: native-vulkan+cadence-drop-cells. Step frames count rendered frames (three game updates each).
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[snapshot]
+cadence = "drop:3"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "console"
+arg = "coc Whiterun"
+
+# A coc does not record a new world-ready, so the frames count from the coc.
+[[steps]]
+at = "previous"
+frames = 400
+do = "shot"
+arg = "whiterun"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 400
+do = "shot"
+arg = "dragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "previous"
+frames = 400
+do = "shot"
+arg = "riverwood"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["whiterun", "dragonsreach", "riverwood"]
