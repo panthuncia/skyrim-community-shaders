@@ -9,12 +9,19 @@
 */
 namespace RenderGraph::TestSupport::GraphFrames
 {
+	/** @brief One client id's counts. Made once per id and never freed, so a registration keeps a pointer to it. */
+	struct Counts;
+
 #if defined(CS_RELEASE_PROFILE)
-	inline void NoteGraph(std::string_view, std::uint64_t) {}
+	inline Counts* CountsOf(std::string_view) { return nullptr; }
+	inline void NoteGraph(Counts*, std::uint64_t) {}
 	inline void Report() {}
 #else
-	/** @brief Render owner. a_client's work committed in a stage of frame a_frame (FrameAnchors' taps). Counted once a frame. */
-	void NoteGraph(std::string_view a_client, std::uint64_t a_frame);
+	/** @brief The counts of client a_client, made on first use. Any thread. FrameAnchors keeps it with each registration. */
+	Counts* CountsOf(std::string_view a_client);
+
+	/** @brief Render owner. The client's work committed in a stage of frame a_frame (FrameAnchors' taps). Counted once a frame. Null does nothing. */
+	void NoteGraph(Counts* a_counts, std::uint64_t a_frame);
 
 	/** @brief Logs one "[ORG] graph frames:" line and writes the counts to the test status file's report. The test exit calls it. */
 	void Report();

@@ -569,6 +569,8 @@ namespace FrameAnchors
 			// Made at Publish from desc: the anchors it has passes at (AnchorMask), and each declared segment's steps that hold it.
 			std::uint32_t anchors = 0;
 			std::array<std::uint32_t, kDeclared> steps{};
+			// The id's graph frame counts for test runs (null in Release), found once here rather than at every commit.
+			RenderGraph::TestSupport::GraphFrames::Counts* frames = nullptr;
 		};
 
 		/**
@@ -1834,6 +1836,7 @@ namespace FrameAnchors
 		}
 		Client client;
 		client.desc = std::make_shared<const ClientDesc>(std::move(a_client));
+		client.frames = RenderGraph::TestSupport::GraphFrames::CountsOf(client.desc->id);
 		std::uint32_t mask = AnchorMask(*client.desc);
 		auto* existing = FindClient(state, client.desc->id);
 		std::shared_ptr<const ClientDesc> replaced;
@@ -1895,13 +1898,12 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/** @brief A client with work at this run, and whether its commit runs. */
+		/** @brief A client with work at this run: an active one, whose commit runs. */
 		struct RunClient
 		{
 			std::shared_ptr<const ClientDesc> desc;
-			std::uint64_t serial = 0;
-			bool active = false;
 			std::array<std::uint32_t, kDeclared> steps{};  // Client::steps
+			RenderGraph::TestSupport::GraphFrames::Counts* frames = nullptr;  // Client::frames
 		};
 	}
 
@@ -2703,9 +2705,16 @@ namespace FrameAnchors
 			// When the schedule lags the frame's description, work the schedule has off is left out. That is not a mismatch.
 			const SegmentFields& wanted = a_state.frameWanted[a_declared];
 			const bool comparable = wanted.graph == held.graph;
-			// This step's clients that are on in the schedule and have work. An active client the schedule turned off is a mismatch,
-			// unless the schedule only lags.
-			std::vector<std::shared_ptr<const ClientDesc>> committed;
+			// This step's clients that are on in the schedule and have work, by index into the stage's clients, with their counts.
+			// An active client the schedule turned off is a mismatch, unless the schedule only lags. Only the first kSegmentClients
+			// can be on, so the list never overflows.
+			struct Committed
+			{
+				std::uint32_t index = 0;
+				RenderGraph::TestSupport::GraphFrames::Counts* frames = nullptr;
+			};
+			std::array<Committed, RenderGraph::Frame::kSegmentClients> committed;
+			std::uint32_t committedCount = 0;
 			const std::uint32_t local = a_state.stepTaps[a_declared][a_step]++;
 			const std::uint32_t instance = step.firstInstance + local;
 			const auto& clients = SegmentClients(*built, a_declared);
@@ -2714,7 +2723,7 @@ namespace FrameAnchors
 				if (!(clientSteps[i] >> a_step & 1u))
 					continue;
 				const auto found = std::ranges::find_if(a_clients, [&](const RunClient& a_client) { return SameClient(clients[i], a_client.desc); });
-				const bool active = found != a_clients.end() && found->active;
+				const bool active = found != a_clients.end();
 				const bool on = i < RenderGraph::Frame::kSegmentClients && (held.clientsOn >> i & 1u);
 				if (!on) {
 					if (active) {
@@ -2739,7 +2748,7 @@ namespace FrameAnchors
 							fmt::format("{} at the {} tap, instance {} of {} declared", clients[i]->id, tap, instance, declaredInstances));
 					continue;
 				}
-				committed.push_back(clients[i]);
+				committed[committedCount++] = { static_cast<std::uint32_t>(i), found->frames };
 			}
 			// Nothing on the GPU reads the staging run the commits write.
 			a_state.stagedFrame[a_declared] = frame.frame;
@@ -2756,25 +2765,26 @@ namespace FrameAnchors
 					SharedConstants::Commit(a_step);
 				}
 				a_state.tapInstance = instance;
-				for (const auto& client : committed) {
+				for (std::uint32_t k = 0; k < committedCount; ++k) {
+					const ClientDesc& client = *clients[committed[k].index];
 					ZoneScopedN("CS.Anchors.ClientCommit");
-					ZoneText(client->id.data(), client->id.size());
-					if (client->commit)
-						client->commit(a_point);
-					RenderGraph::TestSupport::GraphFrames::NoteGraph(client->id, frame.frame);
+					ZoneText(client.id.data(), client.id.size());
+					if (client.commit)
+						client.commit(a_point);
+					RenderGraph::TestSupport::GraphFrames::NoteGraph(committed[k].frames, frame.frame);
 				}
 				a_state.tapInstance = 0;
 			}
 			if (!end) {
 				// A staged tap counts as run. Its values reach the GPU with the stage's commit, before later work reads them.
 				// Last, since an executed callback may register, refresh or rearm.
-				for (const auto& client : committed)
-					if (client->executed)
+				for (std::uint32_t k = 0; k < committedCount; ++k)
+					if (const auto& client = clients[committed[k].index]; client->executed)
 						client->executed(a_point);
 				return { RunStatus::Ran };
 			}
-			for (const auto& client : committed)
-				a_state.stagedExecuted[a_declared].emplace_back(client, a_point);
+			for (std::uint32_t k = 0; k < committedCount; ++k)
+				a_state.stagedExecuted[a_declared].emplace_back(clients[committed[k].index], a_point);
 			a_state.endedFrame[a_declared] = frame.frame;
 			return SubmitSegment(a_state, a_declared);
 		}
@@ -3451,18 +3461,15 @@ namespace FrameAnchors
 			return { RunStatus::Refused };
 		ServiceRetiredTextures();
 		// Failed epochs' clients were dropped at the adoption point (Frame::Driver::OnBegin), never in the middle of a frame.
-		// The run happens when a client is active.
+		// The run happens when a client is active. Only active clients are listed: nothing below reads an inactive one.
 		// A client registered after the build waits for the next build.
 		std::vector<RunClient> clients;
-		bool work = false;
-		const auto& at = state.anchorClients[index];
-		clients.reserve(at.size());
-		for (const auto i : at) {
+		for (const auto i : state.anchorClients[index]) {
 			const auto& client = state.clients[i];
-			const bool active = !client.desc->active || client.desc->active();
-			work = work || active;
-			clients.push_back({ client.desc, client.serial, active, client.steps });
+			if (!client.desc->active || client.desc->active())
+				clients.push_back({ client.desc, client.steps, client.frames });
 		}
+		bool work = !clients.empty();
 		// Declared segments: an anchor a segment holds wholly is one of its taps whenever it fires.
 		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared) {
 			const auto step = TapStepAt(state, declared, a_point.anchor);
@@ -3474,13 +3481,13 @@ namespace FrameAnchors
 		}
 		// At a shared anchor, clients a segment names commit into it while its window is open. The others are a mismatch.
 		// A segment-only client draws nothing outside every open window.
-		const auto hasWork = [](const RunClient& a_client) { return a_client.active; };
 		const auto dropSegmentOnly = [&](std::vector<RunClient>& a_clients, std::string_view a_why) {
-			for (auto& client : a_clients)
-				if (client.active && client.desc->segmentOnly) {
-					Driver::NoteTapError(Driver::TapError::NotDeclared, SegmentId::Count, fmt::format("{} had work at the {} tap {}", client.desc->id, kInfo[index].name, a_why));
-					client.active = false;
-				}
+			std::erase_if(a_clients, [&](const RunClient& a_client) {
+				if (!a_client.desc->segmentOnly)
+					return false;
+				Driver::NoteTapError(Driver::TapError::NotDeclared, SegmentId::Count, fmt::format("{} had work at the {} tap {}", a_client.desc->id, kInfo[index].name, a_why));
+				return true;
+			});
 		};
 		if (work) {
 			if (OpenStepAt(state, a_point.anchor).first < kDeclared) {
@@ -3514,13 +3521,13 @@ namespace FrameAnchors
 						// A client that commits once per segment run, active at a second run of its step: a mismatch. That run draws nothing.
 						const bool again = state.stagedFrame[declared] == RenderGraph::FrameClock::BeginFrame() && state.stepTaps[declared][k] > 0 &&
 						                   std::ranges::any_of(stepMembers, [](const RunClient& a_client) {
-											   return a_client.active && !a_client.desc->repeats && a_client.desc->maxInstances <= 1;
+											   return !a_client.desc->repeats && a_client.desc->maxInstances <= 1;
 										   });
 						if (again) {
 							Driver::NoteTapError(Driver::TapError::Repeated, static_cast<RenderGraph::Frame::SegmentId>(declared), fmt::format("the {} step ran again in one segment run", kInfo[index].name));
 							break;
 						}
-						if (std::ranges::any_of(stepMembers, [](const RunClient& a_client) { return a_client.active; })) {
+						if (!stepMembers.empty()) {
 							const auto result = TapDeclared(state, a_point, declared, k, stepMembers);
 							if (tapped.status == RunStatus::Idle || !result)
 								tapped = result;
@@ -3528,14 +3535,13 @@ namespace FrameAnchors
 					}
 				}
 				dropSegmentOnly(others, "outside its segment's built graph");
-				const bool otherWork = std::ranges::any_of(others, hasWork);
-				if (!otherWork)
+				if (others.empty())
 					return tapped;
 				// The rest have no step that takes them now.
 				clients = std::move(others);
 			} else {
 				dropSegmentOnly(clients, "outside its segment's window");
-				work = std::ranges::any_of(clients, hasWork);
+				work = !clients.empty();
 			}
 		}
 		if (!work)
@@ -3543,8 +3549,7 @@ namespace FrameAnchors
 		// Anchors have no epochs of their own, so work here is a mismatch and draws nothing.
 		std::string ids;
 		for (const auto& client : clients)
-			if (client.active)
-				ids += (ids.empty() ? "" : ",") + client.desc->id;
+			ids += (ids.empty() ? "" : ",") + client.desc->id;
 		Driver::NoteTapError(Driver::TapError::OwnEpoch, SegmentId::Count,
 			fmt::format("the {} anchor had work outside every stage's step (clients [{}]); no stage of the frame has a place for it", kInfo[index].name, ids));
 		return { RunStatus::Idle };
