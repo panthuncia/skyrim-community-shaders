@@ -148,3 +148,25 @@ pushes until the user is back.
 43. **Drawn previous transforms (snap2-camera):** in native a DCLF row's previous world is the world this render
     side last drew for the same geometry in that slot (LOD and first person excepted); sky and water take the previous posAdjust
     from the frame camera. Skinned bone palettes still use the engine's previous update (open).
+
+## 2026-11-26: phase 3 lights (snap3-lights; director accepted)
+
+44. **Stealth light level from CS's light membership** (S12/S13, decision 10 built): in native, `CalculateLightValue`
+    (SE 38900 / AE 39946) sums over the membership `ProcessQueuedLights` would leave (active and shadow lists with the
+    queued adds and removes applied, and the orphan sweep), read under `lightQueueLock`, rebuilt at every call with no
+    cache. The engine's own luminance function and, for shadow lights, its light pick (with its line-of-sight raycasts)
+    still do the per-light work, so occlusion still counts. The engine's own mask loop has its picks thunked to "true"
+    because its result is unused. Parity: 0 differences in player sums and in 5,400 membership checks, drop mode
+    included.
+45. **NPC light sums** use the active lights whose radius reaches the NPC's skin bound, without a portal test: a light in
+    another room within range counts. Shadow lights are left out, as in the engine's geometry light lists. Parity showed
+    no difference in the scenes run.
+46. **S7 for roots DCLF has no verdict for** covers the attached cells' animated references, frustum-tested with the
+    shared S6 SIMD cull, written after the render half. It is frustum-only (no portal or occluder test), the same trade as
+    decision 37: an object the engine's portal cull hid now counts as visible (about 3.7k of 23k compared roots), never
+    the reverse.
+47. **The shadow light bookkeeping has no game-side readers** (Ghidra xrefs: free mask, `shadowLightsAccum`, camera data),
+    so it needs no producer and goes away with the engine's shadow code.
+48. **Shadow caster selection (AE 107132) moves with the scene-lists port**, not on its own: it also sets up the sun
+    cascades, runs the main list-accumulation jobs and picks the local lights. S8 fades for the decision 46 roots go with
+    it.
