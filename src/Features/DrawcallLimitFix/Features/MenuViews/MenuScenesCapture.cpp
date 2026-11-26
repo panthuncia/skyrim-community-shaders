@@ -353,6 +353,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			constants.renderToUI = permutation.RenderToUI;
 			if ((state->modifiedVertexDescriptor & 0x2u) && !LatchBones(use, run, draw.bonesOffset))
 				return "more palettes than the batch's latch holds";
+			if (Observe::Enabled() && (state->modifiedVertexDescriptor & 0x2u))
+				Observe::Bones(a_capture.pass, std::span<const std::byte>(run.latch).subspan(draw.bonesOffset, kBonesBytes));
 			if (!LatchFrame(use, run, draw.frameOffset))
 				return "no FrameBuffer bound, or more than the batch's latch holds";
 
@@ -473,6 +475,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			constants.renderToUI = permutation.RenderToUI;
 			if ((state->modifiedVertexDescriptor & static_cast<std::uint32_t>(EffectFlags::Skinned)) && !LatchBones(use, run, draw.bonesOffset))
 				return "more palettes than the batch's latch holds";
+			if (Observe::Enabled() && (state->modifiedVertexDescriptor & static_cast<std::uint32_t>(EffectFlags::Skinned)))
+				Observe::Bones(a_capture.pass, std::span<const std::byte>(run.latch).subspan(draw.bonesOffset, kBonesBytes));
 			if (!LatchFrame(use, run, draw.frameOffset))
 				return "no FrameBuffer bound, or more than the batch's latch holds";
 

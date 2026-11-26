@@ -28,6 +28,7 @@
 #include "Utils/Logging.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <format>
 #include <map>
@@ -249,8 +250,28 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 				engineLights += std::format("{} ", static_cast<const void*>(a_pass->sceneLights[l]));
 			for (std::uint32_t l = 1; l < mine.lights.count; ++l)
 				mineLights += std::format("{} ", static_cast<const void*>(mine.lights.lights[l]));
-			Note("point lights", engineLights != mineLights || a_pass->numShadowLights != mine.lights.shadow,
-				std::format("{}: engine {}(shadow {}) mine {}(shadow {})", name, engineLights, a_pass->numShadowLights, mineLights, mine.lights.shadow));
+			const bool differ = engineLights != mineLights || a_pass->numShadowLights != mine.lights.shadow;
+			Note("point lights", differ, std::format("{}: engine {}(shadow {}) mine {}(shadow {})", name, engineLights, a_pass->numShadowLights, mineLights, mine.lights.shadow));
+			// Once per geometry: every scene node light with its position, radius and distance to the bound.
+			static std::map<std::string, int> detailed;
+			if (differ && detailed[name]++ == 0 && detailed.size() < 24) {
+				std::string text;
+				const auto& data = in.sceneNode->GetRuntimeData();
+				const auto describe = [&](const char* a_kind, const RE::BSLight* a_light) {
+					const auto* l = a_light ? a_light->light.get() : nullptr;
+					if (!l)
+						return;
+					const auto d = l->world.translate - geometry->worldBound.center;
+					text += std::format("{} {} at [{} {} {}] radius {} lodDimmer {} distance {}; ", a_kind, static_cast<const void*>(a_light), l->world.translate.x, l->world.translate.y,
+						l->world.translate.z, l->GetLightRuntimeData().radius.x, a_light->lodDimmer, std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z));
+				};
+				for (const auto& light : data.activeShadowLights)
+					describe("shadow", light.get());
+				for (const auto& light : data.activeLights)
+					describe("point", light.get());
+				logger::info("[DCLF] menu scenes observe: lights of {} (bound [{} {} {}] radius {}): {}", name, geometry->worldBound.center.x, geometry->worldBound.center.y,
+					geometry->worldBound.center.z, geometry->worldBound.radius, text);
+			}
 		}
 		// Rows: only the floats the port writes; the rest of the engine's buffer holds what an earlier draw left.
 		const auto compare = [&](const char* a_field, const float (*a_e)[4], const float (*a_m)[4], const float (*a_w)[4], std::uint32_t a_first, std::uint32_t a_count) {
@@ -367,6 +388,24 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			alpha ? std::format("flags {:#x} threshold {}", alpha->alphaFlags, alpha->alphaThreshold) : std::string("none"));
 		if (s.others[key]++ == 0)
 			logger::info("[DCLF] menu scenes observe: state {}", key);
+	}
+
+	void Bones(const RE::BSRenderPass* a_pass, std::span<const std::byte> a_engine)
+	{
+		auto& s = Get();
+		if (!s.active || !a_pass || !a_pass->geometry || a_engine.size() < kBonesBytes)
+			return;
+		std::array<std::byte, kBonesBytes> mine{};
+		if (!Native::BoneRows(*a_pass->geometry, mine)) {
+			Note("palettes", true, std::format("{}: no palettes computed", GeometryName(a_pass->geometry)));
+			return;
+		}
+		const auto* skin = a_pass->geometry->GetGeometryRuntimeData().skinInstance.get();
+		const std::uint32_t rows = skin->numMatrices * 3;
+		const auto* e = reinterpret_cast<const float(*)[4]>(a_engine.data());
+		const auto* m = reinterpret_cast<const float(*)[4]>(mine.data());
+		CompareRows("palette previous", e, m, rows, GeometryName(a_pass->geometry));
+		CompareRows("palette current", e + kPaletteRows, m + kPaletteRows, rows, GeometryName(a_pass->geometry));
 	}
 
 	void Report()

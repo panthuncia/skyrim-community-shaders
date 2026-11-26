@@ -362,6 +362,12 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief Whether the menu's colour accumulator sorts its blended list by each bound's closest point. */
 		bool SortsByClosestPoint(const RE::UI3DSceneManager& a_manager);
 
+		/**
+		 * @brief A skinned geometry's palettes as VS b9 (previous) and b10 (current) hold them, after the engine's per-frame palette update.
+		 * False without skin or with more bones than the palettes hold.
+		 */
+		bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out);
+
 		/** @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes). */
 		bool Owns(std::int32_t a_scheme);
 
@@ -385,6 +391,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		void State(const RE::BSRenderPass* a_pass, std::uint32_t a_blend, std::uint32_t a_coverage, std::uint32_t a_write, std::uint32_t a_extra, std::uint32_t a_depth,
 			std::uint32_t a_stencil, std::uint32_t a_stencilRef, std::uint32_t a_fill, std::uint32_t a_cull, std::uint32_t a_depthBias, float a_alphaRef,
 			const Family::Viewport& a_viewport, std::int32_t a_target);
+		void Bones(const RE::BSRenderPass* a_pass, std::span<const std::byte> a_engine);
 		void Report();
 	}
 

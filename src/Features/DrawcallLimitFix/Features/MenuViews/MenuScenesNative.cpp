@@ -6,6 +6,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SkinPalettes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
@@ -135,12 +136,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (a_out.count < a_out.lights.size())
 				a_out.lights[a_out.count++] = a_light;
 		};
-		// A light reaches the geometries the scene node's light update (AE 106335, run just before) put in its list.
+		// A light reaches a geometry whose bound its radius touches.
 		const auto lights = [&](const RE::BSLight& a_light) {
-			for (const auto& shape : a_light.geomList)
-				if (shape.get() == &a_geometry)
-					return true;
-			return false;
+			const auto* niLight = a_light.light.get();
+			const auto d = niLight->world.translate - a_geometry.worldBound.center;
+			const float reach = niLight->GetLightRuntimeData().radius.x + a_geometry.worldBound.radius;
+			return d.x * d.x + d.y * d.y + d.z * d.z <= reach * reach;
 		};
 		push(data.sunLight);
 		for (const auto& light : data.activeShadowLights)
@@ -256,6 +257,21 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			for (std::uint32_t i = 0; i < 4; ++i)
 				c.psGeometry[r][i] = w.psGeometry[r][i] = 0.0f;
 		PointLightRows(a_out.lights, a_in.eye, c, w);
+		return true;
+	}
+
+	bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out)
+	{
+		auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get();
+		if (!skin)
+			return false;
+		const std::uint32_t rows = skin->numMatrices * SkinPalettes::kRowsPerBone;
+		const float *current = nullptr, *previous = nullptr;
+		if (!rows || rows > kPaletteRows || !SkinPalettes::Sample(a_geometry, rows, current, previous))
+			return false;
+		std::fill(a_out.begin(), a_out.end(), std::byte{ 0 });
+		std::memcpy(a_out.data(), previous, rows * 16);
+		std::memcpy(a_out.data() + kBonesBytes / 2, current, rows * 16);
 		return true;
 	}
 
@@ -496,6 +512,16 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return a_cached;
 		}
 
+		/** @brief A skinned draw's palettes, appended to the run's latch. */
+		const char* AddBones(const RE::BSGeometry& a_geometry, Run& a_run, Draw& a_draw)
+		{
+			std::array<std::byte, kBonesBytes> bones;
+			if (!BoneRows(a_geometry, bones))
+				return "a skinned draw whose palettes could not be computed";
+			a_draw.bonesOffset = a_run.Append(bones);
+			return a_draw.bonesOffset == ~0u ? "more palettes than the batch's latch holds" : nullptr;
+		}
+
 		const char* DescribeStates(Draw& a_draw, const DrawState& a_state)
 		{
 			// The colour pass writes stencil bit 0 everywhere it draws (mode 2, ref 0xff) for the TAA mask fill that follows.
@@ -513,8 +539,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			LightingResult r;
 			if (!ComputeLighting(a_in, a_geometry, r, a_detail))
 				return "its Lighting constants could not be computed";
-			if (r.vertex & static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Skinned))
-				return "a skinned Lighting draw (its palettes are not computed yet)";
 			Draw draw{};
 			draw.shader = Shader::Lighting;
 			constexpr auto kVertexInputs = static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::VC) | static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Skinned);
@@ -555,6 +579,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			draw.program = SceneDraws::LightingProgram(draw.key, *shader);
 			if (!draw.program)
 				return "its ORG program cannot be built";
+			if (r.vertex & static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Skinned))
+				if (const char* why = AddBones(a_geometry, a_run, draw))
+					return why;
 			draw.frameOffset = FrameOffset(a_in, a_run, a_frame);
 			draw.latchOffset = a_run.Append(std::as_bytes(std::span<const LightingSceneConstants, 1>(&c, 1)));
 			if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
@@ -611,6 +638,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			draw.program = SceneDraws::EffectProgram(draw.key, *shader);
 			if (!draw.program)
 				return "its ORG program cannot be built";
+			if (r.vertex & Effects::EffectFlag::Skinned)
+				if (const char* why = AddBones(a_geometry, a_run, draw))
+					return why;
 			draw.frameOffset = FrameOffset(a_in, a_run, a_frame);
 			draw.latchOffset = a_run.Append(std::as_bytes(std::span<const EffectSceneConstants, 1>(&c, 1)));
 			if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
@@ -756,9 +786,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 	bool Owns(std::int32_t a_scheme)
 	{
-		// The schemes whose draws CS draws as the engine does (observe parity, draw order included). None yet: the stats menu's
-		// constellations (scheme 6) are next once its blended order matches the accumulator's (snap5-menus.md).
-		constexpr std::array<std::int32_t, 0> kNativeSchemes{};
+		// The schemes whose draws CS computes as the engine does (observe parity, draw order included): the stats menu's constellations.
+		constexpr std::array<std::int32_t, 1> kNativeSchemes{ 6 };
 		static const bool native = ::RenderGraph::Engine::Native::Active();
 		return native && std::ranges::find(kNativeSchemes, a_scheme) != kNativeSchemes.end();
 	}
