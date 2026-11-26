@@ -305,7 +305,8 @@ namespace DCLF::FadeState
 		// The engine steps a visible root's fade once per game update by that update's step. The render steps it once by the sum of
 		// the updates the adopted snapshot stands for, and not at all on a repeated render (the cadence test mode's drop and repeat).
 		const auto& snapshot = Snapshot::Current();
-		const float updates = !snapshot ? 1.0f : Snapshot::Render().repeat ? 0.0f : static_cast<float>(snapshot->events.gameUpdates);
+		const float updates = !snapshot ? 1.0f : Snapshot::Render().repeat ? 0.0f :
+		                                                                     static_cast<float>(snapshot->events.gameUpdates);
 		frame.deltaTime = Global<float>(Features::Fades::Address::kFadeStepTime) * updates;
 		frame.fadesOn = Global<std::uint8_t>(Engine::Address::kFadesOn) ? 1u : 0u;
 		frame.lodUpdates = Global<std::uint8_t>(Engine::Address::kFadeLodUpdates) ? 1u : 0u;
