@@ -733,3 +733,8 @@ pushes until the user is back.
      resolution from FrameCamera instead of the engine's lock.
 176. **cs-test passes runs whose shots are wrong:** nothing compares shots against a reference. A kept reference with a
      tolerance in the basic configs is needed (next lead).
+177. **Open regression: native world frames are about a quarter as bright since 3f5b50150** (mean luma of quick's
+     start shot about 64 before and in each of snap3/post, snap6/dclf and snap3/depth alone; 17.5 after the three
+     merges, still about 18 at 245ec15e5 with the quarter fix). An interaction between merges, likely exposure or
+     tonemap; it is in origin/org_integration. snap3-dark bisects the three merges and fixes it; native shot references
+     wait for the fix.
