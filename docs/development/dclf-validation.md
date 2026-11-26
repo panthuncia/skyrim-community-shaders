@@ -586,7 +586,7 @@ and state); with the shadow site on it loses the device (dclf-architecture.md, "
     the game relaunched at once.
 -   **Bisect by arms and rates.** Run each arm until its first loss and compare counts; an intermittent fault needs many runs per
     arm before an arm is cleared. Re-run the control at the end.
--   **Reduce the configuration** with `CS_ORG_QUEUE_TOPOLOGY=hardware` (guest: async passes on DXVK's compute queue) or `CS_DCLF_PIPELINE`, to tell
+-   **Reduce the configuration** with `CS_DCLF_PIPELINE`, to tell
     DCLF's work from the render graph's submission paths.
 -   Open crashes are in [dclf-open-defects.md](./dclf-open-defects.md), "Open crashes".
 

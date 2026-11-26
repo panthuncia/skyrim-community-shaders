@@ -140,7 +140,7 @@ That is about 2-4 weeks on a legacy driver branch with unknown performance. Skip
 the engine or visible ordering faults.
 
 Pascal performance risks: counted draws per bucket are front-end bound, and empty buckets cost about 8-9 µs per shadow view on
-Ampere (`dclf-async-compute.md`). Pascal's async compute is weak, so compare native's default (compute queue) with guest's (folded onto graphics, `CS_ORG_QUEUE_TOPOLOGY=hardware` to take it).
+Ampere (`dclf-async-compute.md`). Pascal's async compute is weak, so measure the compute queue against folding onto graphics (where DXVK exports no compute queue, guest folds).
 
 ## Phases
 

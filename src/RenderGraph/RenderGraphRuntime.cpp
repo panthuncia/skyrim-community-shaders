@@ -1949,10 +1949,9 @@ bool RenderGraphRuntime::Initialize()
 			// stream. DXVK exports a compute queue only where nothing else submits to it: with one queue in the compute family
 			// taken by DXVK's own transfer queue, or no compute-only family, it exports none. Without one the compute kind aliases
 			// the graphics queue, and ORG folds its passes into the graphics slot (QueueRegistry::PhysicalSlot).
-			// Guest mode folds by default even with one: FSR frame generation hangs in its present when the graph's compute work
-			// runs on its own queue, with none of ORG's work pending (perf3-compute.md, open item). CS_ORG_QUEUE_TOPOLOGY=hardware
-			// is the test override that takes DXVK's compute queue.
-			const bool takeCompute = info.computeQueue && Switches::EqualsNoCase("CS_ORG_QUEUE_TOPOLOGY", "hardware");
+			// The compute queue's work may wait for stream points DXVK has not submitted yet, so nothing may wait for the whole
+			// device while holding DXVK's submissions back (perf3-fg.md).
+			const bool takeCompute = info.computeQueue != VK_NULL_HANDLE;
 			// Graph copies move off DXVK's stream to a transfer-only queue, DXVK's spare or the shared uploader's. Never the compute
 			// queue, where a copy waits behind a running dispatch.
 			const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue;
