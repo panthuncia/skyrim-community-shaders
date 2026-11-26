@@ -65,6 +65,7 @@ namespace Snapshot
 		Paused = 1u << 7,           // the game paused
 		Resumed = 1u << 8,          // the game resumed
 		SettingsChanged = 1u << 9,  // the settings revision moved
+		WindowResized = 1u << 10,   // the window proc saw a new client size (Events::windowSize)
 	};
 
 	constexpr Event operator|(Event a, Event b) { return static_cast<Event>(static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b)); }
@@ -73,6 +74,17 @@ namespace Snapshot
 	* @brief The events since the previous snapshot. A snapshot replaced before adoption hands its events on to the next one
 	* (MergeOlder): flags OR, counters add. So a render frame sees every event of the game updates it skipped.
 	*/
+	/**
+	* @brief The newest client size the window proc asked the renderer for (WM_SIZE, WM_WINDOWPOSCHANGED). A state, not a delta:
+	* every snapshot carries the newest request, and serial moves with each one, so a render frame acts once on a new serial.
+	*/
+	struct WindowSize
+	{
+		std::uint64_t serial = 0;  // 0 before the first request
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+	};
+
 	struct Events
 	{
 		std::uint32_t flags = 0;
@@ -83,6 +95,7 @@ namespace Snapshot
 		std::uint32_t cameraCuts = 0;
 		std::uint32_t teleports = 0;
 		float gameDelta = 0.0f;  // the game time these updates advanced, summed over folded snapshots
+		WindowSize windowSize{};  // the newest resize request at the capture; the newer serial wins when folded
 
 		bool Has(Event a_event) const { return (flags & static_cast<std::uint32_t>(a_event)) != 0; }
 		void Add(Event a_event) { flags |= static_cast<std::uint32_t>(a_event); }
@@ -96,6 +109,8 @@ namespace Snapshot
 			cameraCuts += a_older.cameraCuts;
 			teleports += a_older.teleports;
 			gameDelta += a_older.gameDelta;
+			if (a_older.windowSize.serial > windowSize.serial)
+				windowSize = a_older.windowSize;
 		}
 	};
 

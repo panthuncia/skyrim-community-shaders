@@ -95,6 +95,30 @@ namespace Snapshot
 	*/
 	bool InGameUpdate();
 
+	/**
+	* @brief The window proc (game thread): the renderer is asked for a new client size. Native publishes it as the next
+	* snapshot's WindowResized event (Events::windowSize) instead of letting the engine flag it at once.
+	*/
+	void NoteWindowResize(std::uint32_t a_width, std::uint32_t a_height);
+
+	/**
+	* @brief After Adopt, render owner. True once for each new resize request the adopted snapshot carries, with its size: the
+	* render side asks the renderer for it at its frame start.
+	*/
+	bool WindowResizeToApply(std::uint32_t& a_width, std::uint32_t& a_height);
+
+	/** @brief The newest game update's snapshot id published, 0 before the first. Any thread. */
+	std::uint64_t LastGameId();
+
+	/** @brief The render frame of the newest adoption (RenderIdentity::frame), 0 before the first. Any thread. */
+	std::uint64_t LastRenderFrame();
+
+	/**
+	* @brief Game thread, after the update's render half: waits for the next slot of the update-rate cap (State::updateRateCap,
+	* decision 2). Only with CS_UPDATE_RATE_CAP=1 until phase 7, while the engine's Present still paces the game.
+	*/
+	void PaceGameUpdate();
+
 	/** @brief Called by the frame driver when a loading screen begins (true) or ends (false). Any thread. */
 	void OnLoadingScreen(bool a_active);
 

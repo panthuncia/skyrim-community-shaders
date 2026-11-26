@@ -411,6 +411,12 @@ public:
 	static constexpr uint32_t kShaderStoreMinMB = 512;
 	static constexpr uint32_t kShaderStoreMaxMB = 32768;
 
+	/// The game thread's update-rate cap, in updates per second (render-thread roadmap decision 2); 0 is uncapped. Today the
+	/// engine's Present paces the game, so it acts only with CS_UPDATE_RATE_CAP=1 (Snapshot::PaceGameUpdate).
+	/// Atomic: written from the UI thread, read on the game thread.
+	std::atomic<uint32_t> updateRateCap{ 60 };
+	static constexpr uint32_t kUpdateRateCapMax = 1000;
+
 	uint lastVertexDescriptor = 0;
 	uint lastPixelDescriptor = 0;
 	uint modifiedVertexDescriptor = 0;

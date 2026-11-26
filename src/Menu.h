@@ -175,10 +175,23 @@ public:
 	void RecordDirectInputWheelDelta(std::int32_t delta);
 	/** @brief Returns true if the menu should consume all input (menu open or capturing hotkey) */
 	bool ShouldSwallowInput();
-	/** @brief Keeps Skyrim's AFK vanity camera off while any CS UI is open (settings, editor, first-time setup). */
-	void SyncVanityCamera();
 	/** @brief Returns true if the free camera preview is in flying mode */
 	bool IsPreviewFlying();
+	/**
+	 * @brief The end of each ImGui frame. Publishes what the game thread reads of the UI: whether CS UI takes the game's input,
+	 * whether the editor camera flies, and whether the settings window drew. Any thread that runs the ImGui frame.
+	 */
+	void PublishInputState();
+	/** @brief Game thread. Whether the last ImGui frame's UI takes the game's input (ShouldSwallowInput, published). */
+	bool SwallowsGameInput() const { return publishedSwallow.load(std::memory_order_acquire); }
+	/** @brief Game thread. Whether the last ImGui frame's editor camera flies (IsPreviewFlying, published). */
+	bool PreviewFliesPublished() const { return publishedFlying.load(std::memory_order_acquire); }
+	/**
+	 * @brief Game thread, at the input poll. The UI's writes into game state: Skyrim's AFK vanity camera stays off while CS UI
+	 * is open, and the game's keyboard state is cleared after a focus change while the settings window is shown. The ImGui
+	 * half of the focus reset reaches the next ImGui frame as an event.
+	 */
+	void UpdateGameSide();
 	/**
 	 * @brief Claims the Escape press ImGui reports this frame for a widget, such as a search field
 	 * clearing its text or a popup closing, so the same press does not also close the CS Editor or
@@ -229,10 +242,8 @@ public:
 	float2 lastDisplaySize{};
 	bool resetLayout = false;
 
-	// Used for resetting input keys to solve alt-tab stuck issue
+	// Used for resetting input keys to solve alt-tab stuck issue. Set by the window proc, taken by UpdateGameSide.
 	std::atomic<bool> focusChanged = false;
-	/** @brief Called on window focus change to reset stuck modifier key state */
-	void OnFocusChanged();
 
 	struct Constants
 	{
@@ -593,6 +604,16 @@ private:
 	std::vector<KeyEvent> _keyEventQueue;
 	mutable std::shared_mutex _inputEventMutex;
 	std::atomic<int64_t> _directInputWheelDelta = 0;
+
+	// The UI state the game thread reads, published at the end of each ImGui frame (PublishInputState).
+	std::atomic<bool> publishedSwallow = false;
+	std::atomic<bool> publishedFlying = false;
+	std::atomic<bool> publishedSettingsDrawn = false;
+	bool settingsDrawnThisFrame = false;  // the ImGui frame's thread
+	// Set by the game thread after a focus change; the next settings frame clears ImGui's held keys.
+	std::atomic<bool> imguiKeysReset = false;
+	/** @brief Keeps Skyrim's AFK vanity camera off while any CS UI is open (settings, editor, first-time setup). Game thread. */
+	void SyncVanityCamera();
 
 	// Keys whose key-down already fired a combo hotkey. Their matching key-up is
 	// suppressed so a shared single-key binding (e.g. End) doesn't also fire once
