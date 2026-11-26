@@ -116,6 +116,8 @@ The converted scenarios map old frame N to world-ready + (N - 100) for their fir
 
 ### Steps
 
+- A step after a `shot` holds until the shot is saved (timeout as for `await`). A run's first shot waits several frames for
+  the revision that switches its copy in, so a coc right after it would otherwise capture the loading screen.
 - `await = "adopted"` holds a step until the frame revision that holds the previous step's writes is adopted. Two frames after
   the previous step ran, the game reads the newest variable serial and holds until the adopted revision carries it. `frames`
   still counts first. A timeout uses `wait_s` (else `timeouts.step_wait`) and fails the run. In plain D3D11 mode it holds at once.
