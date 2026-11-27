@@ -6,6 +6,9 @@
 #include "Features/DrawcallLimitFix/Api/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
+#include "RE/N/NiFrustum.h"
+#include "RE/N/NiTransform.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -66,11 +69,14 @@ namespace DCLF::Api
 		std::int32_t (*nearestFadeBsx)(const OccluderLeaf& a_leaf) = nullptr;
 	};
 
-	/** @brief What a map's camera gets. Leave it empty when the view is not set up. */
+	/** @brief What a map's camera gets, as values. Leave it invalid when the view is not set up. */
 	class OcclusionCamera
 	{
 	public:
-		const RE::NiCamera* camera = nullptr;
+		bool valid = false;
+		RE::NiTransform world{};
+		RE::NiFrustum frustum{};
+		std::array<float, 4> port{};  // NiRect<float>: left, right, top, bottom
 	};
 
 	/** @brief A light the selection kept, and the scene frame of the selection. */

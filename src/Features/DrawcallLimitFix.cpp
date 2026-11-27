@@ -3,6 +3,7 @@
 #include "DrawcallLimitFix.h"
 #include "DrawcallLimitFix/Diagnostics/Capture/Capture.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/PrecipitationOcclusion.h"
 #include "Snapshot/Publication.h"
 
 #include "Deferred.h"
@@ -429,9 +430,9 @@ void DrawcallLimitFix::OcclusionView(OcclusionMap a_map)
 		return;
 	DCLF::Api::OcclusionCamera camera;
 	map.camera(camera);
-	if (!camera.camera)
+	if (!camera.valid)
 		return;
-	DCLF::IndirectDraws::Get().OcclusionView(a_map, *camera.camera);
+	DCLF::IndirectDraws::Get().OcclusionView(a_map, camera.world, camera.frustum, camera.port);
 }
 
 bool DrawcallLimitFix::OcclusionNeedsEngine(OcclusionMap a_map)
@@ -443,8 +444,9 @@ bool DrawcallLimitFix::OcclusionNeedsEngine(OcclusionMap a_map)
 namespace
 {
 	/**
-	 * @brief The precipitation object Main::Precipitation::RenderOcclusion (AE FUN_1404076c0, SE FUN_1403ae920) renders the mask for:
-	 * the current rain or snow, else the last, while the occlusion map is on. Null when the engine renders none.
+	 * @brief Guest: the precipitation object Main::Precipitation::RenderOcclusion (AE FUN_1404076c0, SE FUN_1403ae920) renders the mask for:
+	 * the current rain or snow, else the last, while the occlusion map is on. Null when the engine renders none. Native reads the capture's
+	 * test (Snapshot::PrecipitationOcclusion::Block::engineMask).
 	 */
 	RE::BSGeometry* EngineMaskObject()
 	{
@@ -465,39 +467,21 @@ namespace
 			return nullptr;
 		return precip->currentPrecip ? precip->currentPrecip.get() : precip->lastPrecip.get();
 	}
-}
 
-void DrawcallLimitFix::RenderMask(RE::Precipitation* a_precip, RE::BSParticleShaderRainEmitter* a_rain)
-{
-	if (!RenderGraph::Engine::Native::Active()) {
-		a_precip->RenderMask(a_rain);
-		return;
+	/** @brief Native: whether the engine would render the mask this update, from the capture. */
+	bool NativeEngineMask()
+	{
+		const auto* block = Snapshot::PrecipitationOcclusion::Current();
+		return block && block->engineMask && block->mask.valid;
 	}
-	auto* camera = a_precip->occlusionData.camera.get();
-	auto* world = RE::Main::WorldRootCamera();
-	if (!camera || !world)
-		return;
-	DCLF::ShadowCameras::Camera matrices;
-	DCLF::ShadowCameras::CameraMatrices(*camera, matrices);
-	std::array<float, 16> rows{};
-	std::memcpy(rows.data(), reinterpret_cast<const void*>(REL::RelocationID(242842, 196452).address()), 16);
-	std::memcpy(rows.data() + 4, reinterpret_cast<const void*>(REL::RelocationID(242843, 196453).address()), 16);
-	std::memcpy(rows.data() + 8, reinterpret_cast<const void*>(REL::RelocationID(242844, 196454).address()), 16);
-	const auto offset = world->world.translate - camera->world.translate;
-	rows[12] = offset.x;
-	rows[13] = offset.y;
-	rows[14] = offset.z;
-	rows[15] = 1.0f;
-	const auto projection = DCLF::ShadowCameras::Multiply(rows, matrices.viewProj);
-	std::memcpy(&a_rain->occlusionProjection, projection.data(), sizeof(a_rain->occlusionProjection));
 }
 
 void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::BSGeometry* a_precipObject, bool a_dclf)
 {
 	// When DCLF draws the mask it draws every occluder from its own tables in the shadow epoch, so SetupMask is skipped
 	// and RenderMask only sets the camera and clears the mask. Otherwise the engine does it all.
-	// Held by a load, so the engine's point renders it without its cull, as DCLF's variant does. Native never runs the engine's cull.
-	const bool held = !a_dclf && (OcclusionHeld(kPrecipitationOcclusion) || RenderGraph::Engine::Native::Active());
+	// Held by a load, so the engine's point renders it without its cull, as DCLF's variant does.
+	const bool held = !a_dclf && OcclusionHeld(kPrecipitationOcclusion);
 	if (!a_dclf && !held) {
 		a_precip->SetupMask();
 	} else {
@@ -512,7 +496,7 @@ void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::
 	auto* rain = (RE::BSParticleShaderRainEmitter*)(particleShaderProperty->particleEmitter);
 
 	globals::profiler->BeginPass("Skylighting::PrecipMask");
-	RenderMask(a_precip, rain);
+	a_precip->RenderMask(rain);
 	globals::profiler->EndPass();
 }
 
@@ -521,15 +505,16 @@ void DrawcallLimitFix::RenderPrecipitationAtShadowMaps()
 	// Skylighting draws the maps when loaded. With the shader cache off, the engine renders the mask whole.
 	if (globals::features::skylighting.loaded || !globals::shaderCache->IsEnabled())
 		return;
-	auto* object = EngineMaskObject();
-	if (!object || !OcclusionReady(kPrecipitationOcclusion))
+	// Native: the capture placed the mask's camera and set the rain emitter's projection, so only DCLF's view is left to set up.
+	const bool native = RenderGraph::Engine::Native::Active();
+	auto* object = native ? nullptr : EngineMaskObject();
+	if (!(native ? NativeEngineMask() : object != nullptr) || !OcclusionReady(kPrecipitationOcclusion))
 		return;
 	auto state = globals::state;
 	TracyD3D11Zone(state->tracyCtx, "Precipitation Mask (Drawcall Limit Fix)");
 	state->BeginPerfEvent("Precipitation Mask (Drawcall Limit Fix)");
-	// Native's RenderMask leaves the renderer's state alone (RenderMask), so there is nothing to put back.
-	if (RenderGraph::Engine::Native::Active()) {
-		RenderPrecipitationMask(CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->precip, object, true);
+	if (native) {
+		OcclusionView(kPrecipitationOcclusion);
 		state->EndPerfEvent();
 		return;
 	}
@@ -555,9 +540,10 @@ void DrawcallLimitFix::Hooks::Main_Precipitation_RenderOcclusion::thunk()
 	// DCLF drew the mask in this frame's shadow epoch, so it is done. Otherwise the engine renders it whole.
 	auto& dclf = globals::features::drawcallLimitFix;
 	if (RenderGraph::Engine::Native::Active()) {
-		// Native makes no engine render call: a map DCLF did not draw this frame has no occluders, as a held map has.
-		if (auto* object = EngineMaskObject(); object && dclf.OcclusionNeedsEngine(kPrecipitationOcclusion))
-			dclf.RenderPrecipitationMask(CS_ENGINE_READ(Sky, RecordTime, globals::game::sky)->precip, object, false);
+		// Native makes no engine render call: a map DCLF did not draw this frame has no occluders, as a held map has. The capture placed
+		// its camera.
+		if (NativeEngineMask() && dclf.OcclusionNeedsEngine(kPrecipitationOcclusion))
+			dclf.OcclusionView(kPrecipitationOcclusion);
 		return;
 	}
 	if (!globals::shaderCache->IsEnabled() || !EngineMaskObject() || dclf.OcclusionNeedsEngine(kPrecipitationOcclusion))

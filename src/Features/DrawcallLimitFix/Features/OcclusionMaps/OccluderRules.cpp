@@ -2,7 +2,12 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
+#include "Features/Skylighting.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/PrecipitationOcclusion.h"
+
+#include <cstring>
 
 namespace DCLF::Features::OcclusionMaps
 {
@@ -77,10 +82,49 @@ namespace DCLF::Features::OcclusionMaps
 		return DepthTechnique(a_leaf);
 	}
 
+	namespace
+	{
+		/** @brief Guest: the precipitation accumulator's camera, as the engine's ComputeProjection just left it. */
+		void EngineCamera(Api::OcclusionCamera& a_camera)
+		{
+			auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+			auto* precip = sky ? sky->precip : nullptr;
+			auto* camera = precip ? precip->occlusionData.camera.get() : nullptr;
+			if (!camera)
+				return;
+			const auto& data = camera->GetRuntimeData2();
+			a_camera.valid = true;
+			a_camera.world = camera->world;
+			a_camera.frustum = data.viewFrustum;
+			static_assert(sizeof(data.port) == sizeof(a_camera.port));
+			std::memcpy(a_camera.port.data(), &data.port, sizeof(a_camera.port));
+		}
+
+		void FromValues(const Snapshot::PrecipitationOcclusion::MapCamera& a_values, Api::OcclusionCamera& a_camera)
+		{
+			if (!a_values.valid)
+				return;
+			a_camera.valid = true;
+			a_camera.world = a_values.world;
+			a_camera.frustum = a_values.frustum;
+			a_camera.port = a_values.port;
+		}
+	}
+
 	void PrecipitationCamera(Api::OcclusionCamera& a_camera)
 	{
-		auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-		auto* precip = sky ? sky->precip : nullptr;
-		a_camera.camera = precip ? precip->occlusionData.camera.get() : nullptr;
+		// Native: the capture's mask camera.
+		if (!RenderGraph::Engine::Native::Active())
+			return EngineCamera(a_camera);
+		if (const auto* block = Snapshot::PrecipitationOcclusion::Current())
+			FromValues(block->mask, a_camera);
+	}
+
+	void SkyCamera(Api::OcclusionCamera& a_camera)
+	{
+		// Native: the camera Skylighting computed for this frame's sky map.
+		if (!RenderGraph::Engine::Native::Active())
+			return EngineCamera(a_camera);
+		FromValues(globals::features::skylighting.occlusionCamera, a_camera);
 	}
 }

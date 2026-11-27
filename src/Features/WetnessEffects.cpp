@@ -3,8 +3,10 @@
 #include "Features/DrawcallLimitFix.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/PrecipitationOcclusion.h"
 #include "Snapshot/Publication.h"
 #include "Utils/DebugSection.h"
 
@@ -975,12 +977,19 @@ void WetnessEffects::Capture(Snapshot::Builder& a_builder)
 namespace
 {
 	/**
-	* @brief The rain occlusion map's projection, from the rain emitter. The engine's precipitation occlusion render writes it in
-	* the frame's render half (the map Wetness samples in the same frame), so it is read at record time until that render is
-	* ported (phase 3), not captured.
+	* @brief The rain occlusion map's projection. Native: the capture's (Snapshot::PrecipitationOcclusion), which it also sets in the rain
+	* emitter. Guest: from the rain emitter, which the engine's precipitation occlusion render writes in the frame's render half.
 	*/
 	bool RainOcclusionProjection(REX::W32::XMFLOAT4X4& a_out)
 	{
+		if (RenderGraph::Engine::Native::Active()) {
+			const auto* block = Snapshot::PrecipitationOcclusion::Current();
+			if (!block || !block->rainEmitter || !block->mask.valid)
+				return false;
+			static_assert(sizeof(a_out) == sizeof(block->maskProjection));
+			std::memcpy(&a_out, block->maskProjection.data(), sizeof(a_out));
+			return true;
+		}
 		const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
 		const auto precip = sky ? sky->precip : nullptr;
 		if (!precip)

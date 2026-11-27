@@ -116,17 +116,12 @@ struct DrawcallLimitFix : Feature
 	/** @brief After OcclusionNeedsEngine. The map is held by a load, so render it without the engine's cull. */
 	bool OcclusionHeld(OcclusionMap a_map) const;
 	/**
-	 * @brief Renders the precipitation mask, for Skylighting at its two points or for DCLF alone without Skylighting.
+	 * @brief Guest: renders the precipitation mask, for Skylighting at its two points or for DCLF alone without Skylighting.
 	 * With a_dclf, the engine's cull and registration are skipped except on a reference frame, and RenderMask sets the camera and clears it.
+	 * Native makes no engine call: the capture places the mask's camera and sets the rain emitter's projection (Snapshot::PrecipitationOcclusion),
+	 * so its callers only set up DCLF's view (OcclusionView).
 	 */
 	void RenderPrecipitationMask(RE::Precipitation* a_precip, RE::BSGeometry* a_precipObject, bool a_dclf);
-	/**
-	 * @brief Precipitation::RenderMask (SE 25642, AE 26184) for an occlusion map DCLF draws. Native makes no engine call: its accumulator is
-	 * empty and nothing reads the state it sets, so only its output is computed, the occlusion projection in a_rain (+0xED0): fixed rows and
-	 * the world camera's offset from the map's camera, times that camera's view-projection as SetCameraData builds it. Elsewhere the
-	 * engine's.
-	 */
-	static void RenderMask(RE::Precipitation* a_precip, RE::BSParticleShaderRainEmitter* a_rain);
 	/** @brief After Skylighting's maps. Without Skylighting, sets up and clears the precipitation mask DCLF draws this frame. */
 	void RenderPrecipitationAtShadowMaps();
 

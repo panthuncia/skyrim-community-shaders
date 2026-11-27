@@ -26,8 +26,10 @@ namespace DCLF::Features::OcclusionMaps
 	std::uint32_t SkylightingTechnique(const Api::OccluderLeaf& a_leaf);
 	std::uint32_t PrecipitationTechnique(const Api::OccluderLeaf& a_leaf);
 	std::uint32_t EnginePrecipitationTechnique(const Api::OccluderLeaf& a_leaf);
-	// Both maps use the precipitation accumulator's camera. It draws Skylighting's map while Skylighting draws it, else the mask.
+	// Guest: both maps use the precipitation accumulator's camera, which ComputeProjection set up for the map being drawn.
+	// Native: the mask's camera from the capture, the sky map's from Skylighting (Snapshot::PrecipitationOcclusion).
 	void PrecipitationCamera(Api::OcclusionCamera& a_camera);
+	void SkyCamera(Api::OcclusionCamera& a_camera);
 
 	void RegisterReport(Api::InstallContext& a_context);
 }
