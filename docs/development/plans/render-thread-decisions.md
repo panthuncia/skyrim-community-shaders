@@ -863,3 +863,15 @@ pushes until the user is back.
      with phase 7. Open: after a pov switch from third person, native never runs the first-person block (the root stays
      hidden since ClearMasks is skipped; pre-existing, an engine-only build shows the same); first person still draws
      through DCLF's Z-prepass.
+
+## 2026-11-26: first person after a pov switch (snap3-pov; director accepted)
+
+195. **Closes 194's open item:** native's first-person test takes the root's hidden bit before the water update. The
+     reflection cube update (AE 32160, inside the water update AE 32174) hides the player's current 3D (the first-person
+     root in first person) and leaves RenderPlayerView's first-person block to show it again; native runs that update in
+     the capture, so the skeleton driver read the bit already hidden and the block never ran. The core snapshot takes it
+     first (`FrameSnapshot::firstPersonShown`, set in `FillCore` before the water capture); the skeleton driver's
+     `ReadBranches` and DCLF's `FirstPersonLatch` read it (guest too: same value). New config `first-person-switch`.
+196. **Open:** after a switch to first person, the third-person root is hidden in native but shown in guest (narrowed to
+     the SWF-patched store at 0x140736237 in PlayerCharacter::SetFirstPerson, AE 40476); it decides whether the player's
+     body casts a shadow in first person.
