@@ -77,26 +77,6 @@ namespace DCLF::Features::BloodSplatter
 		std::uint64_t Hash() const;
 	};
 
-	/**
-	 * @brief The screen blood's game inputs, captured on the game thread (Snapshot::BlockId::ScreenBlood). Main::RenderWorld's
-	 * light flare setup (SE 100269, AE 106979) computes the first three from the world camera and the sun; ScreenSplatter::Update writes
-	 * the others. SetupGeometry and SetupTechnique read them.
-	 */
-	struct Block
-	{
-		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::ScreenBlood;
-		std::array<float, 4> lightLoc{};  // VS LightLoc: the light's screen position, 0.1 in w
-		float flareScale = 0.0f;          // how much the camera faces the light: the flare's alpha factor
-		std::int32_t hdrTarget = 0;       // the render target the flare samples (t3)
-		float ctrl = 0.0f;                // VS Ctrl: fBloodSplatterFlareOffsetScale
-		float alphaScale = 0.0f;          // every draw's alpha factor
-		float flareAlphaScale = 0.0f;     // the flare's further alpha factor
-		bool operator==(const Block&) const = default;
-	};
-
-	/** @brief Game thread, world snapshots. Runs the light flare setup and copies the block. */
-	void CaptureBlock(Snapshot::Builder& a_builder);
-
 	/** @brief One draw as the engine would make it: its pass, geometry, constants, textures and samplers. */
 	struct DrawInputs
 	{
@@ -109,11 +89,36 @@ namespace DCLF::Features::BloodSplatter
 		float alpha = 0.0f;
 		std::array<ID3D11ShaderResourceView*, 4> views{};  // unwrapped; null where the technique samples nothing
 		std::int32_t hdrTarget = 0;                        // the flare's t3 target
+		bool operator==(const DrawInputs&) const = default;
 	};
 
 	/**
-	 * @brief Render thread. The draws Main::RenderScreenSplatter would make this frame, from ScreenSplatter's root and camera and
-	 * the adopted snapshot's block, in RenderBatches' order: the flares, then the splatters. False, with a_why, when they cannot be read.
+	 * @brief The screen blood's game inputs, captured on the game thread (Snapshot::BlockId::ScreenBlood). Main::RenderWorld's
+	 * light flare setup (SE 100269, AE 106979) computes the first three from the world camera and the sun; ScreenSplatter::Update writes
+	 * the others. SetupGeometry and SetupTechnique read them. The draws are taken from ScreenSplatter's root and camera in the same
+	 * capture (render-thread roadmap phase 7: the render side no longer walks the live root); the block holds their geometries.
+	 */
+	struct Block
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::ScreenBlood;
+		std::array<float, 4> lightLoc{};  // VS LightLoc: the light's screen position, 0.1 in w
+		float flareScale = 0.0f;          // how much the camera faces the light: the flare's alpha factor
+		std::int32_t hdrTarget = 0;       // the render target the flare samples (t3)
+		float ctrl = 0.0f;                // VS Ctrl: fBloodSplatterFlareOffsetScale
+		float alphaScale = 0.0f;          // every draw's alpha factor
+		float flareAlphaScale = 0.0f;     // the flare's further alpha factor
+		std::vector<DrawInputs> draws;    // RenderBatches' order: the flares, then the splatters
+		std::vector<Snapshot::EngineRef> geometries;  // the draws' geometries, held while a snapshot names them
+		std::string refused;                          // why the draws could not be taken, empty when they were
+		bool operator==(const Block&) const = default;
+	};
+
+	/** @brief Game thread, world snapshots. Runs the light flare setup, copies the block and takes the draws. */
+	void CaptureBlock(Snapshot::Builder& a_builder);
+
+	/**
+	 * @brief Render thread. The draws Main::RenderScreenSplatter would make this frame, from the adopted snapshot's block, in
+	 * RenderBatches' order: the flares, then the splatters. False, with a_why, when the capture could not take them.
 	 */
 	bool CollectDraws(std::vector<DrawInputs>& a_out, std::string& a_why);
 

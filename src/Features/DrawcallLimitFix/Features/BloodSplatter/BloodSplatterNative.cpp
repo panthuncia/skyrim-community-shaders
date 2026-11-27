@@ -91,36 +91,11 @@ namespace DCLF::Features::BloodSplatter
 		}
 	}
 
-	void CaptureBlock(Snapshot::Builder& a_builder)
+	/** @brief The draws from ScreenSplatter's root and camera, with a_block's values; their geometries are held in a_block. Game thread. */
+	bool TakeDraws(Block& a_block, std::string& a_why)
 	{
-		if (a_builder.Built().kind != Snapshot::FrameKind::World)
-			return;
-		auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera());
-		if (!camera)
-			return;
-		// Game thread: the setup only does arithmetic on the camera and the sun and writes globals that only the blood shader reads.
-		using FlareSetup = void (*)(RE::NiCamera*);
-		static const REL::Relocation<FlareSetup> flareSetup{ REL::Offset(Address::kFlareSetup) };
-		flareSetup(camera);
-		Block block;
-		block.lightLoc = Global<std::array<float, 4>>(Address::kLightLoc);
-		block.flareScale = Global<float>(Address::kFlareScale);
-		block.hdrTarget = Global<std::int32_t>(Address::kHdrTarget);
-		block.ctrl = Global<float>(Address::kCtrl);
-		block.alphaScale = Global<float>(Address::kAlphaScale);
-		block.flareAlphaScale = Global<float>(Address::kFlareAlphaScale);
-		a_builder.Set(block);
-	}
-
-	bool CollectDraws(std::vector<DrawInputs>& a_out, std::string& a_why)
-	{
-		a_out.clear();
-		const auto& snapshot = Snapshot::Current();
-		const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
-		if (!block) {
-			a_why = "no screen blood block in the adopted snapshot";
-			return false;
-		}
+		auto& out = a_block.draws;
+		const Block* block = &a_block;
 		auto* splatter = RE::ScreenSplatter::GetSingleton();
 		if (!splatter || !splatter->root || !splatter->camera) {
 			a_why = "no ScreenSplatter root or camera";
@@ -141,6 +116,7 @@ namespace DCLF::Features::BloodSplatter
 				a_why = "a blood geometry that is not a TriShape";
 				return false;
 			}
+			a_block.geometries.emplace_back(geometry);
 			DrawInputs draw;
 			// GetRenderPasses: the flare pass when the property has a flare texture, else the splatter pass.
 			draw.flare = property->bloodTextures[RE::BSBloodSplatterShaderProperty::kFlareColor] != nullptr;
@@ -161,14 +137,56 @@ namespace DCLF::Features::BloodSplatter
 					a_why = std::format("a flare HDR target {} out of range", block->hdrTarget);
 					return false;
 				}
-				a_out.push_back(draw);
+				out.push_back(draw);
 			} else {
 				draw.views[0] = ViewOf(property->bloodTextures[RE::BSBloodSplatterShaderProperty::kBloodColor].get());
 				draw.views[1] = ViewOf(property->bloodTextures[RE::BSBloodSplatterShaderProperty::kBloodAlpha].get());
 				splatters.push_back(draw);
 			}
 		}
-		a_out.insert(a_out.end(), splatters.begin(), splatters.end());
+		out.insert(out.end(), splatters.begin(), splatters.end());
+		return true;
+	}
+
+	void CaptureBlock(Snapshot::Builder& a_builder)
+	{
+		if (a_builder.Built().kind != Snapshot::FrameKind::World)
+			return;
+		auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera());
+		if (!camera)
+			return;
+		// Game thread: the setup only does arithmetic on the camera and the sun and writes globals that only the blood shader reads.
+		using FlareSetup = void (*)(RE::NiCamera*);
+		static const REL::Relocation<FlareSetup> flareSetup{ REL::Offset(Address::kFlareSetup) };
+		flareSetup(camera);
+		Block block;
+		block.lightLoc = Global<std::array<float, 4>>(Address::kLightLoc);
+		block.flareScale = Global<float>(Address::kFlareScale);
+		block.hdrTarget = Global<std::int32_t>(Address::kHdrTarget);
+		block.ctrl = Global<float>(Address::kCtrl);
+		block.alphaScale = Global<float>(Address::kAlphaScale);
+		block.flareAlphaScale = Global<float>(Address::kFlareAlphaScale);
+		if (!TakeDraws(block, block.refused)) {
+			block.draws.clear();
+			block.geometries.clear();
+		}
+		a_builder.Set(block);
+	}
+
+	bool CollectDraws(std::vector<DrawInputs>& a_out, std::string& a_why)
+	{
+		a_out.clear();
+		const auto& snapshot = Snapshot::Current();
+		const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+		if (!block) {
+			a_why = "no screen blood block in the adopted snapshot";
+			return false;
+		}
+		if (!block->refused.empty()) {
+			a_why = block->refused;
+			return false;
+		}
+		a_out = block->draws;
 		return true;
 	}
 }
