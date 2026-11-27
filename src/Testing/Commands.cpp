@@ -1079,6 +1079,20 @@ namespace Testing
 				});
 				return true;
 			});
+			// "uievent": <menu>=<user event>, a user event sent to an open menu, as its input would: MapMenu=LocalMap shows or hides the
+			// local map (MapMenu::ProcessMessage, AE 0x140984a80).
+			RegisterCommand("uievent", [](const std::string& a_arg, std::string& a_error) {
+				const auto split = a_arg.find('=');
+				if (split == std::string::npos || split == 0 || split + 1 == a_arg.size()) {
+					a_error = fmt::format("'{}' is not <menu>=<user event>", a_arg);
+					return false;
+				}
+				AddTask([menu = a_arg.substr(0, split), userEvent = a_arg.substr(split + 1)] {
+					RE::BSUIMessageData::SendUIStringMessage(menu.c_str(), RE::UI_MESSAGE_TYPE::kUserEvent, userEvent.c_str());
+					logger::info("[TEST] uievent: {} sent to {}", userEvent, menu);
+				});
+				return true;
+			});
 			// "key": <menu user event>, a key press queued as the keyboard's: Right, Left, Up, Down or Accept. Menus act on the user event,
 			// so this moves an open menu's selection (the inventory's item list, for its 3D item). Only the press is sent.
 			RegisterCommand("key", [](const std::string& a_arg, std::string& a_error) {
