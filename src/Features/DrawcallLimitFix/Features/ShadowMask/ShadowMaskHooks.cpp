@@ -80,6 +80,28 @@ namespace DCLF::Features::ShadowMask
 			}
 		}
 
+		/** @brief Hands a built run to the anchor, or keeps its owners when it has no draw. */
+		void SubmitMaskRun(std::shared_ptr<Run> a_run)
+		{
+			if (a_run->draws.empty()) {
+				ShadowMaskDraws::Keep(std::move(a_run->owners));
+			} else {
+				DCLF_ZONE("CS.DCLF.ShadowMask.Submit");
+				ShadowMaskDraws::Submit(std::move(a_run));
+			}
+		}
+
+		/**
+		 * @brief SubmitMaskRun after the sun's cascades go to Volumetric Shadows, Exponential Height Fog and Skylighting, which take them at
+		 * the mask draw.
+		 */
+		void SubmitMaskRunWithSun(View a_view, std::span<const Native::Light> a_lights, std::shared_ptr<Run> a_run)
+		{
+			if (auto* sun = Native::SunMap(a_view, a_lights))
+				globals::state->OnShadowMaskDraw(sun);
+			SubmitMaskRun(std::move(a_run));
+		}
+
 		/** @brief A shadow mask call hook. The draws are computed and run at the anchor in the engine's place. */
 		template <View kView>
 		struct MaskBatch
@@ -119,15 +141,7 @@ namespace DCLF::Features::ShadowMask
 					}
 					Engine::ApplyPendingState();
 				}
-				// The sun's cascades for Volumetric Shadows, Exponential Height Fog and Skylighting, which take them at the mask draw.
-				if (auto* sun = Native::SunMap(kView, lights))
-					globals::state->OnShadowMaskDraw(sun);
-				if (run->draws.empty()) {
-					ShadowMaskDraws::Keep(std::move(run->owners));
-				} else {
-					DCLF_ZONE("CS.DCLF.ShadowMask.Submit");
-					ShadowMaskDraws::Submit(std::move(run));
-				}
+				SubmitMaskRunWithSun(kView, lights, std::move(run));
 				Finish(kView, lights);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -173,14 +187,7 @@ namespace DCLF::Features::ShadowMask
 		std::string why;
 		if (!Native::Build(View::World, *run, lights.lights, lights.mask, lights.sun, why))
 			::RenderGraph::Fatal("shadow masks", std::format("native's world masks cannot be built: {}", why));
-		if (auto* sun = Native::SunMap(View::World, lights.lights))
-			globals::state->OnShadowMaskDraw(sun);
-		if (run->draws.empty()) {
-			ShadowMaskDraws::Keep(std::move(run->owners));
-		} else {
-			DCLF_ZONE("CS.DCLF.ShadowMask.Submit");
-			ShadowMaskDraws::Submit(std::move(run));
-		}
+		SubmitMaskRunWithSun(View::World, lights.lights, std::move(run));
 	}
 
 	void DrawMenuMasks(const RE::NiPoint3& a_eye)
@@ -201,10 +208,7 @@ namespace DCLF::Features::ShadowMask
 		std::string why = node ? "" : "no shadow scene node";
 		if (!node || !Native::Build(View::Menu, *run, lights, Shadows::Native::ReadMaskSettings(), Native::ReadSun(), why, &a_eye))
 			::RenderGraph::Fatal("shadow masks", std::format("a native menu scene's masks cannot be built: {}", why));
-		if (run->draws.empty())
-			ShadowMaskDraws::Keep(std::move(run->owners));
-		else
-			ShadowMaskDraws::Submit(std::move(run));
+		SubmitMaskRun(std::move(run));
 	}
 
 	void PreflightHooks()

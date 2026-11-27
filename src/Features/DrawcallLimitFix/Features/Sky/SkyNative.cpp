@@ -80,9 +80,8 @@ namespace DCLF::Features::Sky::Native
 		float SkyBrightness()
 		{
 			if (::RenderGraph::Engine::Native::Active())
-				if (const auto& snapshot = Snapshot::Current())
-					if (const auto* block = snapshot->Block<::RenderGraph::Engine::ImageSpace::Block>(); block && block->inputs.read)
-						return block->inputs.At(0xE4);
+				if (const auto* block = Snapshot::CurrentBlock<::RenderGraph::Engine::ImageSpace::Block>(); block && block->inputs.read)
+					return block->inputs.At(0xE4);
 			const auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 			return ism ? Field<float>(ism, 0xE4) : 0.0f;
 		}

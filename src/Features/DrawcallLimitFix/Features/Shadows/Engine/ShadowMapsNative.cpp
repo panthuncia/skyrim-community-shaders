@@ -62,18 +62,7 @@ namespace DCLF::Features::Shadows::Engine
 		std::uint64_t shadowFrames = 0;
 		constexpr std::uint64_t kLineFrames = 600;
 
-		enum class Kind : std::uint8_t
-		{
-			Directional,
-			Frustum,
-			Parabolic,
-		};
-
-		Kind KindOf(RE::BSShadowLight& a_light)
-		{
-			return a_light.GetIsDirectionalLight() ? Kind::Directional : a_light.GetIsParabolicLight() ? Kind::Parabolic :
-			                                                                                             Kind::Frustum;
-		}
+		using Kind = Native::LightKind;
 
 		/** @brief One RenderShadowmap call of a light's Render, in its order. */
 		struct Draw
@@ -393,7 +382,7 @@ namespace DCLF::Features::Shadows::Engine
 
 	void PrepareLightMaps(RE::BSShadowLight& a_light, Native::ShadowLight& a_out, std::uint32_t& a_index)
 	{
-		const auto kind = KindOf(a_light);
+		const auto kind = Native::LightKindOf(a_light);
 		thread_local std::vector<Draw> draws;
 		draws.clear();
 		ListDraws(a_light, kind, draws);

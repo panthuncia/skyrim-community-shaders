@@ -36,12 +36,6 @@ namespace DCLF::Features::Shadows::Native
 		constexpr std::size_t kSunSplitEnd = 0x5A4;    // float[3]: and ends
 
 		template <class T>
-		T Global(const DCLF::Engine::Offset& a_offset)
-		{
-			return *reinterpret_cast<const T*>(REL::Offset(a_offset).address());
-		}
-
-		template <class T>
 		T Field(const void* a_object, std::size_t a_offset)
 		{
 			T value;
@@ -60,13 +54,19 @@ namespace DCLF::Features::Shadows::Native
 		return found != lights.end() ? &*found : nullptr;
 	}
 
+	LightKind LightKindOf(const RE::BSShadowLight& a_light)
+	{
+		auto& light = const_cast<RE::BSShadowLight&>(a_light);
+		return light.GetIsDirectionalLight() ? LightKind::Directional : light.GetIsParabolicLight() ? LightKind::Parabolic :
+		                                                                                              LightKind::Frustum;
+	}
+
 	ShadowLight ReadLight(const RE::BSShadowLight& a_light)
 	{
 		auto& light = const_cast<RE::BSShadowLight&>(a_light);
 		ShadowLight out;
 		out.light = &a_light;
-		out.kind = light.GetIsDirectionalLight() ? LightKind::Directional : light.GetIsParabolicLight() ? LightKind::Parabolic :
-		                                                                                                  LightKind::Frustum;
+		out.kind = LightKindOf(a_light);
 		out.omni = light.GetIsOmniLight();
 		out.maps = light.shadowMapCount;
 		const auto& data = light.GetRuntimeData();
@@ -87,9 +87,17 @@ namespace DCLF::Features::Shadows::Native
 			out.radius = lightData.radius.x;
 			out.fade = lightData.fade;
 		}
-		out.descriptors.reserve(data.shadowmapDescriptors.size());
-		for (const auto& descriptor : data.shadowmapDescriptors) {
-			auto& values = out.descriptors.emplace_back();
+		out.descriptors = ReadDescriptors(a_light);
+		return out;
+	}
+
+	std::vector<MapValues> ReadDescriptors(const RE::BSShadowLight& a_light)
+	{
+		const auto& descriptors = const_cast<RE::BSShadowLight&>(a_light).GetRuntimeData().shadowmapDescriptors;
+		std::vector<MapValues> out;
+		out.reserve(descriptors.size());
+		for (const auto& descriptor : descriptors) {
+			auto& values = out.emplace_back();
 			values.target = static_cast<std::int32_t>(descriptor.renderTarget);
 			values.slice = descriptor.shadowmapIndex;
 			static_assert(sizeof(values.lightTransform) == sizeof(descriptor.lightTransform));
@@ -121,16 +129,16 @@ namespace DCLF::Features::Shadows::Native
 	MaskSettings ReadMaskSettings()
 	{
 		MaskSettings out;
-		out.filterMode = Global<std::uint32_t>(Address::kFilterMode);
-		out.filterBits = Global<std::uint32_t>(Address::kFilterBits);
-		out.sceneShadows = Global<bool>(Address::kSceneShadows);
-		out.focusTargets = out.sceneShadows && Global<std::uint32_t>(DCLF::Engine::Address::kFocusTargetCount) != 0;
-		out.poisson = Global<float>(Address::kPoissonRadius);
-		out.resolution = static_cast<float>(Global<std::uint32_t>(Address::kMapResolution));
-		out.farParam = Global<float>(Address::kFarParam);
-		out.biasScale = Global<float>(Address::kBiasScale);
-		out.sunBiasScale = Global<float>(Address::kSunBiasScale);
-		out.secondBiasScale = Global<float>(Address::kSecondBiasScale);
+		out.filterMode = DCLF::Engine::Global<std::uint32_t>(Address::kFilterMode);
+		out.filterBits = DCLF::Engine::Global<std::uint32_t>(Address::kFilterBits);
+		out.sceneShadows = DCLF::Engine::Global<bool>(Address::kSceneShadows);
+		out.focusTargets = out.sceneShadows && DCLF::Engine::Global<std::uint32_t>(DCLF::Engine::Address::kFocusTargetCount) != 0;
+		out.poisson = DCLF::Engine::Global<float>(Address::kPoissonRadius);
+		out.resolution = static_cast<float>(DCLF::Engine::Global<std::uint32_t>(Address::kMapResolution));
+		out.farParam = DCLF::Engine::Global<float>(Address::kFarParam);
+		out.biasScale = DCLF::Engine::Global<float>(Address::kBiasScale);
+		out.sunBiasScale = DCLF::Engine::Global<float>(Address::kSunBiasScale);
+		out.secondBiasScale = DCLF::Engine::Global<float>(Address::kSecondBiasScale);
 		return out;
 	}
 

@@ -112,8 +112,7 @@ namespace DCLF::Features::Water::Port
 	FrameInputs CaptureFrame(const RE::BSShaderAccumulator* a_accumulator)
 	{
 		// Native: the game's values as the update's capture took them; the view's values come from the render side below.
-		const auto& snapshot = Snapshot::Current();
-		const auto* block = snapshot && Snapshot::FrameCamera::Owned() ? snapshot->Block<GameBlock>() : nullptr;
+		const auto* block = Snapshot::FrameCamera::Owned() ? Snapshot::CurrentBlock<GameBlock>() : nullptr;
 		FrameInputs f = block ? block->inputs : FrameInputs{};
 		if (!block)
 			ReadGame(f);

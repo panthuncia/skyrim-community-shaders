@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <intrin.h>
 #include <memory>
 
 namespace DCLF::Engine
@@ -187,6 +188,12 @@ namespace DCLF::Engine
 		inline constexpr Offset kLodLevelUpdate{ { 105487 }, { 98850 } };  // FUN_14147a430(node, level): the leaf and tree LOD transition (+0x152)
 		inline constexpr Offset kShadowSceneNode{ { 390951 }, { 513211 } };  // ShadowSceneNode*: the main one (BSShaderManager::State's first; its +0x304 the wind magnitude)
 		inline constexpr Offset kFocusTargetCount{ { 414625 }, { 527703 } };  // the focus targets' count
+		inline constexpr Offset kFocusTargets{ { 414623 }, { 527701 } };      // 0x14332a488: the focus targets, 16 bytes each ({float distance; NiAVObject* node})
+		inline constexpr Offset kFocusShadows{ { 390932 }, { 513201 } };      // byte, 0x142032fd0: the focus shadows setting
+		inline constexpr Offset kShadowLightCount{ { 415036 }, { 528091 } };  // std::uint32_t, 0x14338c904: gLastFrameEnabledShadowCasterLightsCount2
+		inline constexpr Offset kShadowInsideMask{ { 415038 }, { 528093 } };  // std::uint32_t, 0x14338c90c: the shadow lights whose sphere holds the camera
+		inline constexpr Offset kLodFadeCutoff{ { 415264 }, { 528316 } };     // float, 0x1433dcfac: the shadow lights' UpdateCamera lodFade cutoff
+		inline constexpr Offset kTlsIndex{ { 415542 }, { 528600 } };          // std::uint32_t, 0x1435f0878: the executable's TLS index
 		inline constexpr Offset kTransformToMatrix{ { 106462 }, { 99814 } };  // FUN_1414aaf10: an NiTransform as the shaders' row-major matrix
 		inline constexpr Offset kLightingShader{ { 415094 }, { 528150 } };  // BSLightingShader*: the instance its constructor writes
 		inline constexpr Offset kImageSpaceManager{ { 414660 }, { 527731 } };  // ImageSpaceManager*; the HDR multiplier at +0xe0
@@ -220,6 +227,30 @@ namespace DCLF::Engine
 		inline constexpr Offset kCameraDepthRange{ { 388951 }, { 524904 } };        // float[2]: the camera state's depth range (FUN_140e57e10)
 		inline constexpr Offset kMatrixMultiply{ { 109815 }, { 102357 } };          // the engine's 4x4 multiply (out, a, b)
 	}
+
+	/**
+	 * @brief Sets the thread's allocation context id (+0x768 in its TLS block) for a scope and restores it after, as the engine does around
+	 * some allocations and releases, so its memory accounting treats them as its own.
+	 */
+	class ScopedMemoryContext
+	{
+	public:
+		explicit ScopedMemoryContext(std::uint32_t a_context)
+		{
+			constexpr std::size_t kContextSlot = 0x768;
+			const auto* blocks = reinterpret_cast<const std::uintptr_t*>(__readgsqword(0x58));
+			slot = reinterpret_cast<std::uint32_t*>(blocks[Global<std::uint32_t>(Address::kTlsIndex)] + kContextSlot);
+			saved = *slot;
+			*slot = a_context;
+		}
+		~ScopedMemoryContext() { *slot = saved; }
+		ScopedMemoryContext(const ScopedMemoryContext&) = delete;
+		ScopedMemoryContext& operator=(const ScopedMemoryContext&) = delete;
+
+	private:
+		std::uint32_t* slot = nullptr;
+		std::uint32_t saved = 0;
+	};
 
 	// NiAVObject::flags and the bits DCLF reads and writes.
 	constexpr std::size_t kObjectFlags = 0xF4;

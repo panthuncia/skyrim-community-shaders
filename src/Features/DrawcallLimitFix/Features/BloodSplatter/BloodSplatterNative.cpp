@@ -176,8 +176,7 @@ namespace DCLF::Features::BloodSplatter
 	bool CollectDraws(std::vector<DrawInputs>& a_out, std::string& a_why)
 	{
 		a_out.clear();
-		const auto& snapshot = Snapshot::Current();
-		const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+		const Block* block = Snapshot::CurrentBlock<Block>();
 		if (!block) {
 			a_why = "no screen blood block in the adopted snapshot";
 			return false;

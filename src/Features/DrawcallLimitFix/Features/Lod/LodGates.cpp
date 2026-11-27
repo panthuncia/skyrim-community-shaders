@@ -10,8 +10,6 @@
 #include <Tracy/Tracy.hpp>
 #include <ankerl/unordered_dense.h>
 
-#include <intrin.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -73,7 +71,6 @@ namespace DCLF::Features::Lod::LodGates
 		// Data.
 		inline constexpr Offset kManagerLock{ { 402330 }, { 516179 } };  // DAT_14315b8c8: the terrain manager's recursive BSSpinLock, held around the drain
 		inline constexpr Offset kLoadScreen{ { 402259 }, { 516108 } };   // DAT_14315b6a0: load screen up (FUN_1401a1150 sets it; its close runs the LOD full update, then clears it)
-		inline constexpr Offset kTlsIndex{ { 415542 }, { 528600 } };     // TLS index: +0x768 in its block is the memory context id FUN_140510a10 sets to 0x55
 		// Block cache pointers, read only on SE, whose release takes (cache + 0xD0, handle).
 		inline constexpr Offset kObjectCache{ { 402175 }, { 516081 } };
 		inline constexpr Offset kTerrainCache{ { 402238 }, { 516106 } };
@@ -101,7 +98,7 @@ namespace DCLF::Features::Lod::LodGates
 		} };
 		// Every one must resolve on the running runtime.
 		constexpr std::array<Offset, 17> kFunctions{ { kLodDrain, kRetire, kDeactivate, kMapHideAll, kMapEnter, kMapExit, kTerrainCacheFlush,
-			kObjectCacheFlush, kDetachObject, kDetachTerrain, kReleaseObject, kReleaseTerrain, kManagerLock, kLoadScreen, kTlsIndex,
+			kObjectCacheFlush, kDetachObject, kDetachTerrain, kReleaseObject, kReleaseTerrain, kManagerLock, kLoadScreen, Engine::Address::kTlsIndex,
 			kObjectCache, kTerrainCache } };
 
 		std::uintptr_t Base()
@@ -144,27 +141,6 @@ namespace DCLF::Features::Lod::LodGates
 
 		private:
 			RE::BSSpinLock& lock;
-		};
-
-		// Sets the memory context FUN_140510a10 sets, so the engine's allocation accounting treats our releases as its own.
-		class MemoryContext
-		{
-		public:
-			explicit MemoryContext(std::uint32_t a_id)
-			{
-				const auto index = *reinterpret_cast<const std::uint32_t*>(Base() + kTlsIndex);
-				const auto* blocks = reinterpret_cast<const std::uintptr_t*>(__readgsqword(0x58));
-				slot = reinterpret_cast<std::uint32_t*>(blocks[index] + 0x768);
-				saved = *slot;
-				*slot = a_id;
-			}
-			~MemoryContext() { *slot = saved; }
-			MemoryContext(const MemoryContext&) = delete;
-			MemoryContext& operator=(const MemoryContext&) = delete;
-
-		private:
-			std::uint32_t* slot;
-			std::uint32_t saved;
 		};
 
 		enum class Kind : std::uint8_t
@@ -582,7 +558,8 @@ namespace DCLF::Features::Lod::LodGates
 				counters.deferred.fetch_add(1, std::memory_order_relaxed);
 				return;
 			}
-			MemoryContext context(0x55);
+			// FUN_140510a10's memory context, so the engine's allocation accounting treats this release as its own.
+			const Engine::ScopedMemoryContext context(0x55);
 			const auto handoff = a_block.handoff.load(std::memory_order_relaxed);
 			const bool reused = At<std::uintptr_t>(a_block.node, HandleSlot(a_block.kind)) == a_block.handle ||
 			                    At<std::uintptr_t>(a_block.node, MapHandleSlot(a_block.kind)) == a_block.handle;
