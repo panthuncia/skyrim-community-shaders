@@ -235,6 +235,7 @@ namespace DCLF::Features::Shadows::Native
 				// Read after the bookkeeping, which gave the descriptors their targets, slices and light transforms.
 				auto& captured = set->lights.emplace_back(ReadLight(*light));
 				captured.verdict = maps.verdict;
+				captured.coverageLeft = maps.coverageLeft;
 				captured.draws = std::move(maps.draws);
 				captured.left = maps.left;
 				// The selection queues a kept light with lens flare data for the gather (AE 0x1414cec70).
