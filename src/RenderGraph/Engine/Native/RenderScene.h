@@ -79,6 +79,9 @@ namespace RenderGraph::Engine::Native::Scene
 	/** @brief Whether native's world frames run CS's driver in place of Main::RenderScene. */
 	bool Owns();
 
-	/** @brief The current world frame's game half, for its render half. Render side. Invalid outside a native world frame's render half. */
+	/**
+	* @brief The game half's values the render half records from: the Prepared handed to the driver's render half, while it records.
+	* Render side only; invalid outside a native world frame's render half (the game half never sees its own values here).
+	*/
 	const Prepared& Current();
 }

@@ -214,7 +214,7 @@ namespace RenderGraph::Engine::Native::Scene
 		void ClearWorldTargets(const Prepared& a_frame)
 		{
 			const float normals[4]{ a_frame.normalsClear, a_frame.normalsClear, 0.0f, 0.0f };
-			Untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(WorldPass::NormalsTarget()), normals), "the normals target");
+			Untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(a_frame.normalsTarget), normals), "the normals target");
 			const float main[4]{ a_frame.mainClear[0], a_frame.mainClear[1], a_frame.mainClear[2], 1.0f };
 			Untaken(Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN, main), "kMAIN");
 			if (a_frame.snowClear) {
@@ -239,8 +239,8 @@ namespace RenderGraph::Engine::Native::Scene
 			return taken;
 		}
 
-		// The world frame's game half, for the render half that follows it.
-		Prepared g_current;
+		// The game half's values the render half is recording from (RecordFrame), null outside it. Only the render half reads it.
+		const Prepared* g_rendering = nullptr;
 
 		/**
 		* @brief The driver's game half (decision 8), on the game thread, in the engine's order: the reflections' camera, the branches, the
@@ -290,7 +290,7 @@ namespace RenderGraph::Engine::Native::Scene
 			if (Global<const bool>(525010, 411491))
 				Field<std::array<float, 4>>(Global<RE::NiCamera*>(528062, 415007), 0x174) = Global<const std::array<float, 4>>(259744, 207173);
 			p.normalsClear = Global<const float>(230690, 187405);
-			p.normalsTarget = WorldPass::NormalsTarget();
+			p.normalsTarget = WorldPass::EngineNormalsTarget();
 			p.mainClear = Global<const std::array<float, 3>>(527696, 414618);
 			p.snowClear = Global<const bool>(513332, 391105);
 			if (b.firstPerson) {
@@ -331,6 +331,14 @@ namespace RenderGraph::Engine::Native::Scene
 		{
 			ZoneScopedN("CS.Native.RenderScene.Render");
 			const Snapshot::EngineReads::RenderHalfScope half(Snapshot::EngineReads::Half::Record);
+			// The points below read a_frame through Current().
+			struct Rendering
+			{
+				explicit Rendering(const Prepared& a_frame) { g_rendering = &a_frame; }
+				~Rendering() { g_rendering = nullptr; }
+				Rendering(const Rendering&) = delete;
+				Rendering& operator=(const Rendering&) = delete;
+			} rendering(a_frame);
 			// The shadow maps, masks and lens flares draw from the game half's light set.
 			DCLF::Features::Shadows::Native::AdoptSet(a_frame.shadowLights);
 			// +0x2EC, the shadow maps.
@@ -375,9 +383,8 @@ namespace RenderGraph::Engine::Native::Scene
 				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran before any game update's snapshot");
 			ZoneScopedN("CS.Native.RenderScene");
 			globals::state->BeginPerfEvent("Player View");
-			g_current = PrepareFrame(a_main, *player, camera, *snapshot);
-			RecordFrame(g_current, camera, a_target);
-			g_current = {};
+			const auto prepared = PrepareFrame(a_main, *player, camera, *snapshot);
+			RecordFrame(prepared, camera, a_target);
 			globals::state->EndPerfEvent();
 		}
 
@@ -413,6 +420,7 @@ namespace RenderGraph::Engine::Native::Scene
 
 	const Prepared& Current()
 	{
-		return g_current;
+		static const Prepared none{};
+		return g_rendering ? *g_rendering : none;
 	}
 }

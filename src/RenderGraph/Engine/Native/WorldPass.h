@@ -104,8 +104,14 @@ namespace RenderGraph::Engine::Native::WorldPass
 	/** @brief The state of the point in scope, or null outside every scope. */
 	const State* Current();
 
-	/** @brief The normals target the frame writes (GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP, SE 100460 / AE 107177). */
+	/**
+	* @brief The normals target the frame writes (GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP, SE 100460 / AE 107177): native's render
+	* half reads its game half's value; elsewhere the engine's rule.
+	*/
 	std::int32_t NormalsTarget();
+
+	/** @brief The engine's rule for the normals target, read now. Native's driver game half and guest. */
+	std::int32_t EngineNormalsTarget();
 
 	/** @brief Whether native's RenderWorld is running on this thread. */
 	bool InRenderWorld();
