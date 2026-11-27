@@ -97,6 +97,9 @@ namespace RenderGraph::Engine::Scaleform
 		std::vector<ID3D11ShaderResourceView*> textures;  // each holds a reference
 		// The viewport BeginDisplay set, in pixels.
 		float viewport[4] = {};  // x, y, width, height
+		// The buffer size GFx laid the display out for (its viewport's buffer). The draw maps it onto the target's size, which
+		// differs after a window resize until the movie is loaded again. Zero for a render texture display, never mapped.
+		float layout[2] = {};                   // width, height
 		ID3D11Texture2D* target = nullptr;      // referenced
 		DXGI_FORMAT targetFormat = DXGI_FORMAT_UNKNOWN;  // its RTV's format
 		ID3D11Texture2D* depth = nullptr;       // referenced, null without one
