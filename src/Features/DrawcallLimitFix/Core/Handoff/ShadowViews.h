@@ -157,6 +157,8 @@ namespace DCLF
 	 * as the engine keeps it, so its registrations are already withheld.
 	 * Downstream a view is identified by its accumulator and its batch renderer.
 	 * Render thread only, valid from the end of CalculateAndDrawShadowCasterLights to the end of the frame's shadow draws.
+	 * Native's game half lists the views on an instance of its own (Get inside FrameView's game half): no coverage, no renderers
+	 * published. The light set carries a copy, which the render half adopts and covers (AdoptList, CoverAdopted).
 	 */
 	class ShadowViews
 	{
@@ -207,7 +209,10 @@ namespace DCLF
 			bool volumetricCopy = false;
 		};
 
+		/** @brief Native's game half: its own list. Anywhere else: the render side's. */
 		static ShadowViews& Get();
+		/** @brief The render side's list, from any thread (the revision inputs read its candidate count). */
+		static const ShadowViews& Rendered();
 		/** @brief Render thread. The selection's slots the list is rebuilt from. */
 		static LightSlotFrame& LightSlots();
 
@@ -235,6 +240,12 @@ namespace DCLF
 		std::string DescribeAccumulator(const void* a_accumulator) const;
 		/** @brief Drops the list. */
 		void Clear();
+		/** @brief Render side, native: this render's list, a copy of the game half's (no coverage yet). Call SetViewCapacity next. */
+		void AdoptList(const ShadowViews& a_list);
+		/** @brief Render side, after AdoptList, the capacity and the drawable decision: covers the views and publishes their renderers. */
+		void CoverAdopted();
+		/** @brief Whether this list was adopted from a game half's for the current render (native), not made by the selection here. */
+		bool Adopted() const { return adopted; }
 		/** @brief The list has views DCLF would draw, but not this frame, so the engine draws them. */
 		bool Unrecorded() const { return unrecorded; }
 
@@ -278,5 +289,7 @@ namespace DCLF
 		std::uint32_t candidates = 0;
 		bool drawable = true;
 		bool unrecorded = false;  // a view would be covered but the frame's are not DCLF's
+		bool gameSide = false;    // native's game half instance: lists only
+		bool adopted = false;     // AdoptList made it
 	};
 }

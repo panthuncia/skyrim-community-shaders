@@ -46,19 +46,21 @@ namespace DCLF
 	void DrawPipelines::RequestFamily(Api::DrawFamily a_family)
 	{
 		const auto f = static_cast<std::size_t>(a_family);
-		if (impl->familyAsked[f])
+		if (impl->familyAsked[f].exchange(true, std::memory_order_acq_rel))
 			return;
-		impl->familyAsked[f] = true;
 		impl->completions->familyRequest[f].store(true, std::memory_order_release);
 		WakePipelineLane();
 	}
 
 	void DrawPipelines::SetFamilyInputs(Api::DrawFamily a_family, RE::BSShader& a_shader)
 	{
-		auto& source = impl->renderInput.drawFamilySource[static_cast<std::size_t>(a_family)];
-		if (source == &a_shader || !Enabled())
-			return;
-		source = &a_shader;
+		{
+			const std::scoped_lock lock(impl->renderInputLock);
+			auto& source = impl->renderInput.drawFamilySource[static_cast<std::size_t>(a_family)];
+			if (source == &a_shader || !Enabled())
+				return;
+			source = &a_shader;
+		}
 		impl->PostInput(*this);
 	}
 

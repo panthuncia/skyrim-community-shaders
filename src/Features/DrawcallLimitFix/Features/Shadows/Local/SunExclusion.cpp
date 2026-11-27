@@ -21,10 +21,12 @@ namespace DCLF::Features::Shadows::Local
 	void SunExclusionSlot::BeginFrame(const std::shared_ptr<const EntrySpace>& a_candidates)
 	{
 		// Take the builder's translation for the frame's candidates. With none, the pending one stays and the full-frustum cull treats it as stale.
-		if (!pending || !a_candidates || pending->candidates == a_candidates)
+		auto current = std::atomic_load(&pending);
+		if (!current || !a_candidates || current->candidates == a_candidates)
 			return;
-		if (auto forwarded = ForwardExclusion(pending, a_candidates)) {
-			pending = std::move(forwarded);
+		if (auto forwarded = ForwardExclusion(current, a_candidates)) {
+			// A newer exclusion the render side published meanwhile wins.
+			(void)std::atomic_compare_exchange_strong(&pending, &current, std::move(forwarded));
 			++counts.forwarded;
 		} else {
 			++counts.unforwarded;

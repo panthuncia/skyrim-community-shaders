@@ -59,18 +59,21 @@ namespace DCLF::Features::Shadows::Local
 	std::shared_ptr<SunExclusion> ForwardExclusion(const std::shared_ptr<SunExclusion>& a_exclusion, const std::shared_ptr<const EntrySpace>& a_to,
 		std::vector<std::uint32_t>* a_changed = nullptr);
 
-	/** @brief Holds the sun's exclusion from the shadow epoch until the full-frustum cull applies it once. Render thread only. */
+	/**
+	 * @brief Holds the sun's exclusion from the shadow epoch until the full-frustum cull applies it once. The render side publishes,
+	 * native's game half forwards and takes it: every access is an atomic exchange of the pointer.
+	 */
 	class SunExclusionSlot
 	{
 	public:
 		static SunExclusionSlot& Get();
 
 		/** @brief Sets the exclusion the next full-frustum cull applies once. Called after the shadow epoch. */
-		void Publish(std::shared_ptr<SunExclusion> a_exclusion) { pending = std::move(a_exclusion); }
+		void Publish(std::shared_ptr<SunExclusion> a_exclusion) { std::atomic_store(&pending, std::move(a_exclusion)); }
 		/** @brief The exclusion the next full-frustum cull will apply, or null. */
-		std::shared_ptr<const SunExclusion> Pending() const { return pending; }
+		std::shared_ptr<const SunExclusion> Pending() const { return std::atomic_load(&pending); }
 		/** @brief Takes the pending exclusion and leaves the slot empty. */
-		std::shared_ptr<SunExclusion> Take() { return std::move(pending); }
+		std::shared_ptr<SunExclusion> Take() { return std::atomic_exchange(&pending, std::shared_ptr<SunExclusion>{}); }
 		/**
 		 * @brief At frame start, swaps the pending exclusion for the builder's translation to a_candidates.
 		 * With none, the pending one stays and the full-frustum cull treats it as stale.
@@ -95,7 +98,7 @@ namespace DCLF::Features::Shadows::Local
 
 	/**
 	 * @brief Holds the paraboloid exclusion until the next frame's point-light culls take it.
-	 * Published only while the Point source's culls are installed. Render thread only.
+	 * Published only while the Point source's culls are installed. The render side publishes, native's game half reads: atomic.
 	 */
 	class ParabolicExclusionSlot
 	{
@@ -103,9 +106,9 @@ namespace DCLF::Features::Shadows::Local
 		static ParabolicExclusionSlot& Get();
 
 		/** @brief Sets next frame's exclusion. Called after the shadow epoch. */
-		void Publish(std::shared_ptr<SunExclusion> a_exclusion) { pending = std::move(a_exclusion); }
+		void Publish(std::shared_ptr<SunExclusion> a_exclusion) { std::atomic_store(&pending, std::move(a_exclusion)); }
 		/** @brief The last published exclusion, or null. It stays until the next Publish. */
-		std::shared_ptr<SunExclusion> Pending() const { return pending; }
+		std::shared_ptr<SunExclusion> Pending() const { return std::atomic_load(&pending); }
 
 	private:
 		ParabolicExclusionSlot() = default;

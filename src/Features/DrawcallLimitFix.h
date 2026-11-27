@@ -99,6 +99,8 @@ struct DrawcallLimitFix : Feature
 	void BeginNativeRenderHalf();
 	/** @brief Native, game thread: the ticket the last game half made (a DCLF::FrameTicket), null without DCLF. */
 	std::shared_ptr<const void> NativeGameTicket() const;
+	/** @brief Native, game thread, at a publish: a_old's routed snapshot was never rendered; a_fresh's ticket takes its scene if it has none. */
+	void NativeTicketSuperseded(const std::shared_ptr<const void>& a_old, const std::shared_ptr<const void>& a_fresh);
 	/** @brief Native, main thread: the end of the skeleton driver's game half (before Main::Draw's tail), every render. */
 	void OnNativeGameHalfEnd();
 

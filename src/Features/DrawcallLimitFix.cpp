@@ -27,6 +27,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Features/FeatureList.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 #include "Features/DrawcallLimitFix/Integrations/IntegrationList.h"
 #include "Features/DrawcallLimitFix/Schedule/Schedule.h"
@@ -394,8 +395,12 @@ void DrawcallLimitFix::WatchScenePump()
 void DrawcallLimitFix::BeforeShadowMaps()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::BeforeShadowMaps);
-	if (installed)
-		DCLF::FrameDriver::Get().BeforeShadowMaps();
+	if (!installed)
+		return;
+	// Native: the render half covers its game half's shadow view list before anything reads it.
+	if (DCLF::Features::Shadows::Native::Replaces())
+		DCLF::Features::Shadows::Native::AdoptShadowViews();
+	DCLF::FrameDriver::Get().BeforeShadowMaps();
 }
 
 void DrawcallLimitFix::AfterShadowMaps()
@@ -721,6 +726,12 @@ void DrawcallLimitFix::BeginNativeRenderHalf()
 std::shared_ptr<const void> DrawcallLimitFix::NativeGameTicket() const
 {
 	return installed ? DCLF::FrameDriver::Get().GameTicket() : nullptr;
+}
+
+void DrawcallLimitFix::NativeTicketSuperseded(const std::shared_ptr<const void>& a_old, const std::shared_ptr<const void>& a_fresh)
+{
+	if (installed && a_old && a_fresh)
+		DCLF::FrameDriver::Get().TicketSuperseded(*static_cast<const DCLF::FrameTicket*>(a_old.get()), *static_cast<const DCLF::FrameTicket*>(a_fresh.get()));
 }
 
 void DrawcallLimitFix::OnNativeGameHalfEnd()

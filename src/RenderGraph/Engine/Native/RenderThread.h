@@ -81,6 +81,12 @@ namespace RenderGraph::Engine::Native::RenderThread
 	/** @brief Renderer::Begin's detour, right after the adoption: a routed render names its payload's DCLF ticket. */
 	void OnAdopted();
 
+	/**
+	 * @brief Game thread, at a publish: a_old (dropped by the cadence, or replaced before a render took it) is never rendered. Its DCLF
+	 * scene fragment goes on in a_fresh's ticket when that one took none.
+	 */
+	void Superseded(const Snapshot::FrameSnapshot& a_old, const Snapshot::FrameSnapshot& a_fresh);
+
 	/** @brief Whether this thread is inside a routed render half: its Present belongs to no game update. */
 	bool InRoutedRender();
 

@@ -5,10 +5,12 @@
 // It reaches the coordinator only through Scene::Channels.
 
 #include <array>
+#include <atomic>
 #include <deque>
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "Features/DrawcallLimitFix/Api/CoordinatorComponents.h"
@@ -41,17 +43,51 @@ namespace DCLF::Scene
 		using Tables = SceneTables;
 		static FrameView& Get();
 		/**
-		 * @brief DCLF's scene step: moves once per world render, only while DCLF runs (at the game half's BeginFrame, or at a repeated
-		 * render's StepRepeat), and at an update the cadence renders nothing for. Not the CS frame (RenderGraph::FrameClock).
+		 * @brief DCLF's scene step: moves once per world render, only while DCLF runs (at the game half's BeginFrame, or at a render's
+		 * StepRender), and at an update the cadence renders nothing for. Not the CS frame (RenderGraph::FrameClock). Every step comes
+		 * from one counter, so steps are unique and grow on each side. Inside native's game half (GameHalfScope, on its thread) it is
+		 * the game half's step; anywhere else the render's.
 		 */
-		std::uint32_t SceneStep() const { return sceneStep; }
-		/** @brief Render half of a repeated render, which renders the last ticket again: the render's scene step. */
-		void StepRepeat();
+		std::uint32_t SceneStep() const { return t_gameHalf ? gameStep : renderStep; }
 		/**
-		* @brief At a CS Begin, before DCLF's BeginFrame of that frame: the scene step the beginning frame runs. The frame driver's
-		* adoption point runs before DCLF's BeginFrame in both modes.
+		 * @brief Render half: the render's scene step. A ticket's first render keeps the ticket's step when no step was taken since
+		 * (always in guest and on one thread); otherwise, and for a repeated render, it takes the next.
+		 */
+		void StepRender(std::uint32_t a_ticketStep, bool a_first);
+		/** @brief Render side: renders since the start, one per StepRender. */
+		std::uint64_t RenderSerial() const { return renderSerial; }
+		/**
+		* @brief At a CS Begin, before DCLF's BeginFrame of that frame: the next step the counter gives. On one thread it is the step
+		* the beginning frame runs.
 		*/
-		std::uint32_t NextSceneStep() const { return sceneStep + 1; }
+		std::uint32_t NextSceneStep() const { return stepCounter.load(std::memory_order_acquire) + 1; }
+		/** @brief Native's game half on this thread, from FrameDriver::GameHalfStart to GameHalfEnd (no scope spans them). */
+		static void SetGameHalf(bool a_in) { t_gameHalf = a_in; }
+		/** @brief Whether this thread is inside native's game half. */
+		static bool InGameHalf() { return t_gameHalf; }
+		/**
+		 * @brief What the frame start installed, as the render side reads it: the publication and its tables, lookups, catalog,
+		 * candidates, light entries and claims. Native's game half installs into FrameView's own members; its frame start ends with
+		 * a copy for its ticket (TakeInstalledFrame), which the render half adopts (AdoptInstalledFrame). The accessors below read the
+		 * game half's members inside the game half, the adopted frame anywhere else, and the members while none is adopted (guest).
+		 */
+		struct InstalledFrame
+		{
+			std::shared_ptr<const ScenePublication> publication;
+			std::shared_ptr<const Tables> tables;
+			std::shared_ptr<const Lookups> lookups;
+			std::shared_ptr<const PipelineCatalog> catalog;
+			std::uint32_t tablesGeneration = 0;
+			std::shared_ptr<const EntrySpace> sunCandidates, lightCandidates;
+			std::uint64_t lightEntriesAppeared = 0;
+			std::shared_ptr<const ankerl::unordered_dense::set<RE::NiNode*>> categoryNodes;
+			std::shared_ptr<const ankerl::unordered_dense::set<const RE::NiAVObject*>> lightEntries;
+			std::shared_ptr<const SetSnapshot> claims;
+		};
+		/** @brief Native's game half, at its frame start's end: the copy its ticket carries. */
+		std::shared_ptr<const InstalledFrame> TakeInstalledFrame();
+		/** @brief Render half, frame start: the ticket's installed frame. Null (guest) keeps reading the members. */
+		void AdoptInstalledFrame(std::shared_ptr<const InstalledFrame> a_frame);
 		/** @brief 0 before the first publication. A reader that keeps data checks it against EngineReleases::Alive. */
 		std::uint64_t InstalledSequence() const;
 		/** @brief For a reader whose slot indices must outlive the frame. */
@@ -136,7 +172,7 @@ namespace DCLF::Scene
 		void SyncFrameTables()
 		{
 			const Tables& view = View();
-			frameTables.SyncPipelines(view.pipelines, view.pipelineBindingVersion, frameTablesGeneration, view.pipelinesStamp);
+			frameTables.SyncPipelines(view.pipelines, view.pipelineBindingVersion, GetTablesGeneration(), view.pipelinesStamp);
 		}
 		/** @brief Render thread, EarlyPrepass. Does no scene work, the next scene pass takes the inputs. */
 		void PostAccumulateInputs();
@@ -145,9 +181,9 @@ namespace DCLF::Scene
 		/** @brief The first installation applies the claims whole, since the engine's hooks hold none before it. */
 		void InstallClaims();
 		/** @brief Any thread. Null during a load or before the first installation. Immutable and swapped whole. */
-		std::shared_ptr<const SetSnapshot> FrameClaims() const { return std::atomic_load(&frameClaims); }
-		bool HasInstalled() const { return installed != nullptr; }
-		const ScenePublication* InstalledPublication() const { return installed.get(); }
+		std::shared_ptr<const SetSnapshot> FrameClaims() const { return RenderSide() ? std::atomic_load(&renderClaims) : std::atomic_load(&frameClaims); }
+		bool HasInstalled() const { return RenderSide() ? renderFrame->publication != nullptr : installed != nullptr; }
+		const ScenePublication* InstalledPublication() const { return RenderSide() ? renderFrame->publication.get() : installed.get(); }
 		/**
 		 * @brief True before DCLF's first covered frame, and after an adoption stopped it (StopDrawing) until its next covered frame.
 		 * Its epochs draw nothing then, and the engine draws the scene. While DCLF draws the claims stay: the adopted snapshot stays
@@ -168,26 +204,33 @@ namespace DCLF::Scene
 		PublicationStats TakePublicationStats() { return std::exchange(publicationStats, PublicationStats{}); }
 		/** @brief Render thread, frame start. Reads no coordinator state. Installs a_adopted when it is newer. */
 		void HandOverAtFrameStart(std::shared_ptr<const void> a_adopted);
-		const std::shared_ptr<const Tables>& AcceptedTables() const { return acceptedTables; }
+		const std::shared_ptr<const Tables>& AcceptedTables() const { return RenderSide() ? renderFrame->tables : acceptedTables; }
 		const FrameCapture& GetFrameCapture() const { return frameCapture; }
 		/** @brief 0 before the first. Moves on a slot table reset or InvalidateVerdicts. */
-		std::uint32_t GetTablesGeneration() const { return frameTablesGeneration; }
-		std::shared_ptr<const EntrySpace> GetSunCandidates() const { return frameSunCandidates; }
+		std::uint32_t GetTablesGeneration() const { return RenderSide() ? renderFrame->tablesGeneration : frameTablesGeneration; }
+		std::shared_ptr<const EntrySpace> GetSunCandidates() const { return RenderSide() ? renderFrame->sunCandidates : frameSunCandidates; }
 		/** @brief Entries whose every tracked geometry is a table object, so DCLF can take them out of the point lights' culls. */
-		std::shared_ptr<const EntrySpace> GetLightCandidates() const { return frameLightCandidates; }
+		std::shared_ptr<const EntrySpace> GetLightCandidates() const { return RenderSide() ? renderFrame->lightCandidates : frameLightCandidates; }
 		/** @brief An entry LocalLightCull cut for holding no geometry is judged again when this moves. */
-		std::uint64_t GetLightEntriesAppeared() const { return frameLightEntriesAppeared; }
+		std::uint64_t GetLightEntriesAppeared() const { return RenderSide() ? renderFrame->lightEntriesAppeared : frameLightEntriesAppeared; }
 		/** @brief Written only at frame start, from the publication log. */
 		bool IsLightEntry(const RE::NiAVObject* a_node) const
 		{
+			if (RenderSide())
+				return renderFrame->lightEntries && renderFrame->lightEntries->contains(a_node) && !IsCategoryNode(a_node);
 			return frameLightEntrySet.contains(a_node) && !IsCategoryNode(a_node);
 		}
 		bool IsCategoryNode(const RE::NiAVObject* a_node) const
 		{
-			return frameCategoryNodes && frameCategoryNodes->contains(static_cast<RE::NiNode*>(const_cast<RE::NiAVObject*>(a_node)));
+			const auto& nodes = RenderSide() ? renderFrame->categoryNodes : frameCategoryNodes;
+			return nodes && nodes->contains(static_cast<RE::NiNode*>(const_cast<RE::NiAVObject*>(a_node)));
 		}
 		/** @brief Made by the scene lane and immutable. */
-		const Lookups& GetLookups() const { return frameLookups ? *frameLookups : EmptyLookups(); }
+		const Lookups& GetLookups() const
+		{
+			const auto& lookups = RenderSide() ? renderFrame->lookups : frameLookups;
+			return lookups ? *lookups : EmptyLookups();
+		}
 		static const Lookups& EmptyLookups()
 		{
 			static const Lookups empty;
@@ -285,7 +328,13 @@ namespace DCLF::Scene
 		void PostFrameInputs();
 		void RefreshCharacterLightView();
 		void PostPipelineConstants(std::uint32_t a_slot);
-		const Tables& View() const { return acceptedTables ? *acceptedTables : EmptyTables(); }
+		const Tables& View() const
+		{
+			const auto& tables = RenderSide() ? renderFrame->tables : acceptedTables;
+			return tables ? *tables : EmptyTables();
+		}
+		/** @brief Whether the caller reads the adopted installed frame: outside native's game half once one is adopted. */
+		bool RenderSide() const { return !t_gameHalf && renderFrame != nullptr; }
 		static const Tables& EmptyTables()
 		{
 			static const Tables empty;
@@ -294,7 +343,7 @@ namespace DCLF::Scene
 		void PublishFrameClaims(std::shared_ptr<const SetSnapshot> a_claims);
 		/** @brief The coordinator drops it. */
 		void ReturnPublication(std::shared_ptr<const ScenePublication>&& a_publication);
-		std::shared_ptr<const ScenePublication> Newest() const { return installed; }
+		std::shared_ptr<const ScenePublication> Newest() const { return RenderSide() ? renderFrame->publication : installed; }
 		FrameCapture frameCapture;  // GetFrameCapture
 		FrameTables frameTables;    // GetFrameTables: the frame's values, out of the tables (render thread)
 		std::shared_ptr<const CategoryCapture> categoryCapture;  // render thread: the newest made
@@ -330,6 +379,12 @@ namespace DCLF::Scene
 		bool loadSinceCapture = false;  // render thread: a load came since the last category capture (the job before it is dropped)
 		std::vector<std::vector<std::shared_ptr<const void>>> frameComponentDeltas;
 		std::shared_ptr<const ScenePublication> installed;
+		// Render side (native): the installed frame its ticket carried, and its claims for FrameClaims from any thread.
+		std::shared_ptr<const InstalledFrame> renderFrame;
+		std::shared_ptr<const SetSnapshot> renderClaims;
+		// Game half: the light entries' copy for the tickets, made again when the set changed.
+		std::shared_ptr<const ankerl::unordered_dense::set<const RE::NiAVObject*>> lightEntriesCopy;
+		bool lightEntriesChanged = true;
 		// Cursors into the log. The notes cursor never passes the deltas cursor. Null means the log's first node.
 		org::async::PublicationLog<PublicationDeltas>::Node* deltasCursor = nullptr;
 		org::async::PublicationLog<PublicationDeltas>::Node* notesCursor = nullptr;
@@ -347,7 +402,12 @@ namespace DCLF::Scene
 		// The first refresh evaluates every pipeline in full. That seeds frame lighting variables the sample's pipeline does not write.
 		bool constantsRefreshed = false;
 		std::uint32_t verdictsRequested = 0;  // render thread: bumped by each request to drop the cached verdicts
-		std::uint32_t sceneStep = 0;  // SceneStep
+		// SceneStep. The game half's step is written only by the game half; the render's only by the render owner.
+		std::atomic<std::uint32_t> stepCounter{ 0 };
+		std::uint32_t gameStep = 0;
+		std::uint32_t renderStep = 0;
+		std::uint64_t renderSerial = 0;
+		static inline thread_local bool t_gameHalf = false;
 		struct GeometryStats
 		{
 			std::uint64_t frames = 0, full = 0, samples = 0, changed = 0, lightingVersions = 0;

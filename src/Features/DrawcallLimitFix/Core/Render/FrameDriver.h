@@ -43,6 +43,7 @@ namespace DCLF
 		WaterScene,  // the tracked water shapes (Features/Water/WaterNative.cpp)
 		SkyRoot,     // the sky root's objects (Features/Sky/SkyNative.cpp)
 		Fades,       // the fade update's engine inputs (Features/Fades/FadeState.cpp)
+		FirstPerson,  // the first-person latch and skeleton walk (Features/FirstPerson/FirstPersonView.cpp)
 		Count
 	};
 	inline constexpr std::size_t kTicketParts = static_cast<std::size_t>(TicketPart::Count);
@@ -126,16 +127,21 @@ namespace DCLF
 		const FrameTicket* Ticket() const { return ticket.get(); }
 		/**
 		 * @brief The tickets made, those no render took, those a repeated render made again, and renders whose ticket's scene was not the
-		 * one the frame revision had adopted (they draw no DCLF work), since the last take.
+		 * one the frame revision had adopted (they draw no DCLF work), and scenes a superseded ticket handed on, since the last take.
 		 */
 		struct TicketCounts
 		{
-			std::uint64_t made = 0, unrendered = 0, remade = 0, unpaired = 0;
+			std::uint64_t made = 0, unrendered = 0, remade = 0, unpaired = 0, carried = 0;
 		};
 		TicketCounts TakeTicketCounts()
 		{
-			return { ticketsMade.exchange(0), ticketsUnrendered.exchange(0), ticketsRemade.exchange(0), ticketsUnpaired.exchange(0) };
+			return { ticketsMade.exchange(0), ticketsUnrendered.exchange(0), ticketsRemade.exchange(0), ticketsUnpaired.exchange(0), ticketScenesCarried.exchange(0) };
 		}
+		/**
+		 * @brief Native, game thread, at a publish: a_old's snapshot was never rendered (the cadence dropped it, or a newer publish
+		 * replaced it before a render took it). Its scene fragment goes to a_fresh when a_fresh took none.
+		 */
+		void TicketSuperseded(const FrameTicket& a_old, const FrameTicket& a_fresh);
 		/** @brief Before Present, in menus too. Queues the CPU pipeline's frame signal and the frame values' signal before DXVK presents. */
 		void BeforePresent();
 		/** @brief After Present, in menus too. Ends the frame and writes its report. */
@@ -221,8 +227,8 @@ namespace DCLF
 		std::atomic<std::shared_ptr<const void>> renderAdopted;
 		// The last render's coverage of DCLF's claims epochs: the render half publishes it, the game half reads the latest (never waits).
 		std::atomic<bool> coveredLast{ false };
-		std::atomic<std::uint64_t> ticketsMade{ 0 }, ticketsUnrendered{ 0 }, ticketsRemade{ 0 }, ticketsUnpaired{ 0 };
-		bool latePosesHold = false;  // native: the game half's confirmation of this render's late-pose plan
+		std::atomic<std::uint64_t> ticketsMade{ 0 }, ticketsUnrendered{ 0 }, ticketsRemade{ 0 }, ticketsUnpaired{ 0 }, ticketScenesCarried{ 0 };
+		std::uint32_t latePosesStep = ~0u;  // native, render side: the ticket whose late poses a depth pass used
 		bool inGameHalf = false;     // native: between GameHalfStart and GameHalfEnd (game thread)
 	};
 }

@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameTicket.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderThread.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
@@ -29,6 +30,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ClassifyInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CoordinatorComponents.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
 #include "Features/DrawcallLimitFix/Core/LatePoses/LatePoseOverrides.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PaletteRows.h"
@@ -211,7 +213,7 @@ namespace DCLF
 		using Take = RenderGraph::Frame::Revision::FragmentTake;
 		if (expected) {
 			// The ticket's scene goes to the revision once; a repeat of the ticket takes nothing.
-			if (!expected->rendered.load(std::memory_order_acquire))
+			if (!expected->sceneHanded.exchange(true, std::memory_order_acq_rel))
 				a_given = std::exchange(expected->scene, std::nullopt);
 			return Take::Given;
 		}
@@ -261,6 +263,18 @@ namespace DCLF
 		// The rest of the driver's game half reads the update's globals, not the render side's adopted ones.
 		if (inGameHalf)
 			FrameGlobals::BeginGameHalf(gameTicket->globals);
+	}
+
+	void FrameDriver::TicketSuperseded(const FrameTicket& a_old, const FrameTicket& a_fresh)
+	{
+		// Neither ticket reached a render yet: the game thread owns both scenes until the publish. A revision may wait for exactly the
+		// old one's fragment, so the fresh ticket takes it when it brought none; a fresh one supersedes it.
+		if (a_old.sceneHanded.exchange(true, std::memory_order_acq_rel) || !a_old.scene)
+			return;
+		if (!a_fresh.scene) {
+			a_fresh.scene = std::exchange(a_old.scene, std::nullopt);
+			ticketScenesCarried.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 
 	void FrameDriver::ExpectTicket(std::shared_ptr<const FrameTicket> a_ticket)
@@ -358,8 +372,8 @@ namespace DCLF
 			view.HandOverAtFrameStart(publication);
 		}
 		t->publication = view.InstalledSequence();
-		// Views start before the claims that withhold their members.
-		RunViewWork(Api::ViewPoint::FrameStartBeforeCoverage);
+		// The views' game work: what they read of the engine, for the render half's view start (a ticket part).
+		RunViewWork(Api::ViewPoint::FrameStartGame);
 		// Entries changed since the sun exclusion's snapshot leave it, and the engine culls them.
 		Extensions::ShadowExclusionFrameStart();
 		{
@@ -395,7 +409,7 @@ namespace DCLF
 			DCLF_ZONE("CS.DCLF.BF.RefreshMainRenderers");
 			PassCapture::Get().RefreshMainRenderers();
 		}
-		// Draw families decide before the main camera's cull registers its passes.
+		// Draw families decide before the main camera's cull registers its passes, and before the frame values' inputs are taken.
 		{
 			DCLF_ZONE("CS.DCLF.BF.DecideDrawFamilies");
 			draws.DecideDrawFamilies(view.SceneStep());
@@ -422,6 +436,9 @@ namespace DCLF
 			// The ticket's sampling job, rendered or not. Every render's upload job comes after it on the frame values' chain.
 			FrameValues::Get().KickSample(std::move(plans), std::move(shading), std::move(fields), t->globals, std::move(samples));
 		}
+		// Native's game half: what it installed, for its renders.
+		if (Scene::FrameView::InGameHalf())
+			t->installed = view.TakeInstalledFrame();
 		// The features' values the render half reads instead of the engine.
 		for (std::size_t part = 0; part < kTicketParts; ++part)
 			if (const auto take = s_ticketParts[part]) {
@@ -450,14 +467,22 @@ namespace DCLF
 		auto& view = Scene::FrameView::Get();
 		auto& draws = IndirectDraws::Get();
 		// Each render has its own scene step: the epochs' once-a-frame guards and commits are keyed by it.
-		if (!first)
-			view.StepRepeat();
+		view.StepRender(t.sceneStep, first);
+		// Native: the render side reads what its ticket's game half installed, not what a newer game half installs meanwhile.
+		view.AdoptInstalledFrame(std::static_pointer_cast<const Scene::FrameView::InstalledFrame>(t.installed));
 		FrameGlobals::Adopt(t.globals);
 		{
 			DCLF_ZONE("CS.DCLF.BF.SyncFrameTables");
 			view.SyncFrameTables();
 		}
 		draws.PostLookupInputs();
+		// Native: the draw families' mirrors are drained on the render side, whose commits read them (guest drained them in its game half).
+		if (t.installed) {
+			DCLF_ZONE("CS.DCLF.BF.ServeDrawFamilies");
+			Extensions::ServeDrawFamilies(view.SceneStep());
+		}
+		// Views start before the coverage, which decides whether their members are withheld.
+		RunViewWork(Api::ViewPoint::FrameStartBeforeCoverage);
 		{
 			DCLF_ZONE("CS.DCLF.BF.Coverage");
 			// While DCLF does not draw (before its first covered frame, or after an adoption stopped it) the engine draws everything. While
@@ -533,8 +558,9 @@ namespace DCLF
 	{
 		Extensions::TriggerScope trigger(Draws::CoreTriggerOf(Draws::CoreTrigger::DepthCommitted));
 		// Late poses are parts a plugin hid after the shadow maps. Confirm them before the depth epoch, so later epochs read the late copies.
-		// Native confirmed them at the end of its game half.
-		if (RenderGraph::Engine::Native::Active() ? std::exchange(latePosesHold, false) : LatePoses::ConfirmFrame())
+		// Native confirmed them at the end of its game half, into the ticket; only the ticket's first depth pass uses them.
+		const bool nativeLate = ticket && ticket->latePosesConfirmed && std::exchange(latePosesStep, ticket->sceneStep) != ticket->sceneStep;
+		if (RenderGraph::Engine::Native::Active() ? nativeLate : LatePoses::ConfirmFrame())
 			FrameValues::Get().UseLatePoses();
 		// The depth epoch hosts the view passes, such as reflection faces and first-person depth, so they draw after its index pool copies.
 		// Drawn against the previous frame's pool, a reused slot would read old indices with new vertices and fault the device.
@@ -572,13 +598,17 @@ namespace DCLF
 	void FrameDriver::GameHalfStart()
 	{
 		inGameHalf = true;
+		Scene::FrameView::SetGameHalf(true);
 	}
 
 	void FrameDriver::GameHalfEnd()
 	{
 		const Snapshot::EngineReads::CaptureScope capture;
-		latePosesHold = LatePoses::ConfirmFrame();
+		const bool confirmed = LatePoses::ConfirmFrame();
+		if (gameTicket)
+			gameTicket->latePosesConfirmed = confirmed;
 		inGameHalf = false;
+		Scene::FrameView::SetGameHalf(false);
 		FrameGlobals::EndGameHalf();
 	}
 
@@ -616,7 +646,10 @@ namespace DCLF
 		static std::uint32_t reportedFrame = ~0u;
 		if (const std::uint32_t frame = Scene::FrameView::Get().SceneStep(); std::exchange(reportedFrame, frame) != frame)
 			Reports::RenderThread(frame);
-		Scene::FrameView::Get().NoteLoadingScreen(Scene::FrameView::LoadingScreenInFrame());
+		// Native's render thread leaves the load screen note to the game half (each ticket's), which owns the scene pass's load state
+		// and the switch events' thread.
+		if (!RenderGraph::Engine::Native::RenderThread::OnRenderThread())
+			Scene::FrameView::Get().NoteLoadingScreen(Scene::FrameView::LoadingScreenInFrame());
 		TracyCZoneEnd(efReports);
 		counters.timing.eventsMs += MillisecondsSince(start);
 	}
@@ -632,7 +665,8 @@ namespace DCLF
 		shadowViewsMs = 0.0;
 		// Decide shadow coverage before the engine keeps its first light, since its registrations and the sun's claims depend on it.
 		Draws::BeginShadowViews();
-		if (const auto* epochs = Extensions::ShadowEpochs())
+		// Native's game half lists the views only. The render side decides their coverage on its copy (AdoptShadowViews).
+		if (const auto* epochs = Extensions::ShadowEpochs(); epochs && !Scene::FrameView::InGameHalf())
 			epochs->beforeShadowCasters();
 		AddShadowViewsTime(start);
 	}

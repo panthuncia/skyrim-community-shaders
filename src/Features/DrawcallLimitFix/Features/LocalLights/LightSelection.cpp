@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalContextAtlas.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -181,6 +182,13 @@ namespace DCLF
 		const bool shares = portals.SharesRoom(rooms);
 		roomVerdicts[a_light] = shares;
 		return shares;
+	}
+
+	const LightSelection::Frame* LightSelection::Current(std::uint32_t a_sceneFrame) const
+	{
+		if (const auto* boards = Features::Shadows::Native::AdoptedBoards())
+			return static_cast<const Frame*>(boards->selection.get());
+		return frame.valid && frame.sceneFrame == a_sceneFrame ? &frame : nullptr;
 	}
 
 	void LightSelection::SelectNative()

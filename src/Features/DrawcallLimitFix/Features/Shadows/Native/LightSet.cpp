@@ -4,6 +4,8 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "RenderGraph/FrameAnchors.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -164,5 +166,12 @@ namespace DCLF::Features::Shadows::Native
 	const LightSet* RenderSet()
 	{
 		return adopted.get();
+	}
+
+	const CasterBoards* AdoptedBoards()
+	{
+		if (Scene::FrameView::InGameHalf() || !adopted || !adopted->boards.views || !::FrameAnchors::IsRenderOwner())
+			return nullptr;
+		return &adopted->boards;
 	}
 }

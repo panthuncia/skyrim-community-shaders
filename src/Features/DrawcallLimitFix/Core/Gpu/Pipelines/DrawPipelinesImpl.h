@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
@@ -588,7 +590,7 @@ namespace DCLF
 			std::array<rhi::PipelinePtr, 2> colours;  // the second is null with one colour program
 		};
 		// Render thread. Each is asked of the lane only once.
-		std::array<bool, kDrawFamilyLanes> familyAsked{};
+		std::array<std::atomic<bool>, kDrawFamilyLanes> familyAsked{};  // native's game half asks (the draw families' decision)
 		bool refractionAsked = false;
 		ankerl::unordered_dense::set<ForwardPipelineKey, ForwardPipelineKeyHash> forwardAsked;
 		rhi::PipelineLayoutHandle ShadowLayout() const { return shadowLayout->GetHandle(); }
@@ -870,14 +872,21 @@ namespace DCLF
 		};
 		::RenderGraph::Frame::LatestSlot<FrameInput> inputSlot;
 		FrameInput renderInput;
+		// Native's game half sets the families' shaders (SetFamilyInputs) while the render side posts: both hold it, briefly.
+		std::mutex renderInputLock;
 		std::vector<std::uint32_t> pendingStateBits;  // asked for by the lane but not readable until the deferred pass
 		::RenderGraph::Frame::LatestSlot<PipelineCatalog> catalogSlot;
 
 		/** @brief Render thread. Posts the current frame inputs and wakes the lane. */
 		void PostInput(const DrawPipelines& a_owner)
 		{
-			renderInput.targets = a_owner.targets;
-			inputSlot.Post(std::make_unique<FrameInput>(renderInput));
+			std::unique_ptr<FrameInput> input;
+			{
+				const std::scoped_lock lock(renderInputLock);
+				renderInput.targets = a_owner.targets;
+				input = std::make_unique<FrameInput>(renderInput);
+			}
+			inputSlot.Post(std::move(input));
 			WakePipelineLane();
 		}
 

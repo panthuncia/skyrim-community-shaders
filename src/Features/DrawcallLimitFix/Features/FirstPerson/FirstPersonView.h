@@ -19,8 +19,6 @@ namespace DCLF::Features::FirstPerson
 	struct FirstPersonFrame
 	{
 		std::uint32_t slots = 0, pipelinesReady = 0;
-		std::vector<std::uint8_t> slotsWanted;
-		std::uint32_t slotsFrame = 0;
 		bool latch = false;
 		std::uint32_t latchFrame = ~0u;
 		// World space. previous is last frame's camera, for the motion vectors.
@@ -35,7 +33,6 @@ namespace DCLF::Features::FirstPerson
 		std::uint64_t frames = 0, latched = 0, depthEpochs = 0, colourEpochs = 0;
 		std::array<std::uint64_t, 7> skipped{};  // not drawn (latch, claims), not covered, no camera, stale inputs, no resources, failed, no depth epoch
 		std::uint64_t forwardMembers = 0;
-		std::uint32_t forwardMembersNow = 0;
 	};
 
 	/** @brief Render thread. The report reads and resets its counters. */

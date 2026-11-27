@@ -19,6 +19,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowFrame.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
@@ -134,13 +135,16 @@ namespace DCLF::Features::Shadows::Engine
 			return !a_batch.alphaGroup || !a_batch.alphaGroup->passList.head;
 		}
 
-		/** @brief Fills each draw's view and mode. Anything but None when one is not a covered view DCLF draws whole, so the engine draws the light. */
-		Fallback Whole(std::vector<Draw>& a_draws)
+		/**
+		 * @brief Fills each draw's view and mode. Anything but None when one is not a covered view DCLF draws whole, so the engine draws
+		 * the light. Without a_coverage (native's game half, whose list has no coverage yet) the render side checks coverage (Covered).
+		 */
+		Fallback Whole(std::vector<Draw>& a_draws, bool a_coverage)
 		{
 			if (a_draws.empty())
 				return Fallback::NoDraws;
 			const auto& views = DCLF::ShadowViews::Get();
-			if (!views.Valid() || !views.DclfDraws())
+			if (!views.Valid() || (a_coverage && !views.DclfDraws()))
 				return Fallback::NotDclf;
 			const auto& capture = DCLF::PassCapture::Get();
 			for (auto& draw : a_draws) {
@@ -150,7 +154,7 @@ namespace DCLF::Features::Shadows::Engine
 					return Fallback::NoAccumulator;
 				draw.view = views.ViewOfAccumulator(accumulator);
 				const auto* view = views.At(draw.view);
-				if (!view || !view->covered)
+				if (!view || (a_coverage && !view->covered))
 					return Fallback::NotCovered;
 				draw.mode = static_cast<std::uint32_t>(data->renderMode);
 				// A caster DCLF does not hold yet kept its passes for the engine.
@@ -325,7 +329,7 @@ namespace DCLF::Features::Shadows::Engine
 			draws.clear();
 			draws.reserve(16);
 			ListDraws(a_light, a_kind, draws);
-			if (const auto whole = Whole(draws); whole != Fallback::None)
+			if (const auto whole = Whole(draws, true); whole != Fallback::None)
 				return whole;
 			// Capture first: a view that cannot be captured hands the whole light back before anything is written.
 			auto& indirect = DCLF::IndirectDraws::Get();
@@ -393,8 +397,10 @@ namespace DCLF::Features::Shadows::Engine
 		thread_local std::vector<Draw> draws;
 		draws.clear();
 		ListDraws(a_light, kind, draws);
-		const auto whole = Whole(draws);
+		const bool coverage = !DCLF::Scene::FrameView::InGameHalf();
+		const auto whole = Whole(draws, coverage);
 		a_out.verdict = static_cast<std::uint8_t>(whole);
+		a_out.coverageLeft = !coverage;
 		a_out.draws.clear();
 		if (whole != Fallback::None) {
 			// No bookkeeping: the light draws nothing this frame, and the walk moves past its slots as its Render would.
@@ -409,6 +415,18 @@ namespace DCLF::Features::Shadows::Engine
 	bool RenderLightNatively(const Native::ShadowLight& a_light)
 	{
 		auto outcome = !shadowMapsOpen ? Fallback::NotOpen : static_cast<Fallback>(a_light.verdict);
+		// A game half's verdict: the render side's copy of the list decides whether DCLF draws the light's views.
+		if (outcome == Fallback::None && a_light.coverageLeft) {
+			const auto& views = DCLF::ShadowViews::Get();
+			if (!views.Valid() || !views.DclfDraws())
+				outcome = Fallback::NotDclf;
+			else
+				for (const auto& draw : a_light.draws)
+					if (const auto* view = views.At(draw.view); !view || !view->covered) {
+						outcome = Fallback::NotCovered;
+						break;
+					}
+		}
 		if (outcome == Fallback::None)
 			outcome = DrawFromSet(a_light);
 		++lightCounts[static_cast<std::size_t>(outcome)];

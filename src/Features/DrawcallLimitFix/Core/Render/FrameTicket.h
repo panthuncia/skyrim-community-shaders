@@ -46,5 +46,11 @@ namespace DCLF
 		// render hands it to the frame revision at its Begin (FrameDriver::ExpectTicket); a repeat hands nothing. Render side only.
 		mutable std::optional<RenderGraph::Frame::Revision::Fragment> scene;
 		mutable std::atomic<bool> rendered{ false };  // a render took the ticket
+		// The scene went to a render's Begin, or on to the next ticket: whichever side exchanges it first owns the fragment.
+		mutable std::atomic<bool> sceneHanded{ false };
+		// Native: the game half's end confirmed the late-pose plan (LatePoses::ConfirmFrame). Written once before the ticket is published.
+		mutable bool latePosesConfirmed = false;
+		// Native's game half: what its frame start installed (Scene::FrameView::InstalledFrame), which its renders adopt. Null in guest.
+		std::shared_ptr<const void> installed;
 	};
 }

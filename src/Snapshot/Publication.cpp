@@ -402,6 +402,7 @@ namespace Snapshot
 			// It was never rendered, so it retires at once (on the main thread; a serving-thread producer hands it to the main thread).
 			if (const auto unadopted = Slot().Take()) {
 				a_fresh->events.MergeOlder((*unadopted)->events);
+				RenderGraph::Engine::Native::RenderThread::Superseded(**unadopted, *a_fresh);
 				stats.replaced.fetch_add(1, std::memory_order_relaxed);
 				Retire::LetGo(std::move(*unadopted));
 			}
@@ -410,6 +411,7 @@ namespace Snapshot
 			// A dropped routed update's events too.
 			if (auto dropped = std::move(Game().dropped)) {
 				a_fresh->events.MergeOlder(dropped->events);
+				RenderGraph::Engine::Native::RenderThread::Superseded(*dropped, *a_fresh);
 				stats.replaced.fetch_add(1, std::memory_order_relaxed);
 				Retire::LetGo(std::move(dropped));
 			}
@@ -460,10 +462,13 @@ namespace Snapshot
 				// in engine memory past this point. Guest closed at its Present already. Phase 7 closes at the publish.
 				DCLF::EngineReadWindow::Close();
 				SideEffects::AfterRenderHalf(rendered);
-				// The cadence rendered nothing for this update: its game halves run all the same.
-				if (!rendered)
+				// The cadence rendered nothing for this update: its game halves run all the same. They touch the render side's DCLF state,
+				// so the render thread stops first (no Main::DrawFrame parked it).
+				if (!rendered) {
+					Routed::Park("an unrendered update");
 					for (const auto fn : Game().unrendered)
 						fn(*Game().previous);
+				}
 				// The update's game-side end, rendered or not.
 				for (const auto fn : Game().updateEnds)
 					fn(*Game().previous);
@@ -490,6 +495,8 @@ namespace Snapshot
 				const bool interfaceInline = static_cast<const Routed::FramePayload*>(a_fresh->nativeFrame.get())->interfaceInline;
 				// The cadence test mode's dropped update is never published: its events go to the next one's.
 				if (!a_renders) {
+					if (Game().dropped)
+						Routed::Superseded(*Game().dropped, *a_fresh);
 					Retire::LetGo(std::exchange(Game().dropped, std::move(a_fresh)));
 					return;
 				}

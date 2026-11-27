@@ -384,8 +384,10 @@ namespace DCLF
 	{
 		if (!a_globals || a_globals == latest)
 			return;
-		recent[recentNext++ % recent.size()] = std::move(latest);
+		// Never empty in between: a reader on another thread (native's game thread outside a scope) may load it meanwhile.
+		auto previous = latest;
 		latest = std::move(a_globals);
+		recent[recentNext++ % recent.size()] = std::move(previous);
 	}
 
 	void FrameGlobals::BeginGameHalf(std::shared_ptr<const FrameGlobals> a_globals)

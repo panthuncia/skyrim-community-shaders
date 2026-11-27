@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
 namespace DCLF
@@ -21,9 +22,10 @@ namespace DCLF::Draws
 {
 	void BeginShadowViews()
 	{
-		// Set the capacity before any shadow light registers, so every later check sees this frame's value.
-		auto& draws = IndirectDraws::Get();
-		ShadowViews::Get().SetViewCapacity(draws.ShadowViewCapacity());
+		// Set the capacity before any shadow light registers, so every later check sees this frame's value. Native's game half only
+		// lists the views: the render side sets the capacity and covers its copy (ShadowViews::AdoptList).
+		if (!Scene::FrameView::InGameHalf())
+			ShadowViews::Get().SetViewCapacity(IndirectDraws::Get().ShadowViewCapacity());
 		ShadowViews::Get().BeginCasters();
 	}
 

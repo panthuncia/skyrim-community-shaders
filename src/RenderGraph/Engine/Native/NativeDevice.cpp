@@ -2210,12 +2210,20 @@ namespace RenderGraph::Engine::Native
 			}
 
 			/**
-			 * @brief Remakes the swap chain at its size after Present reports a mode change or failure. The thread that presents, under
-			 * presentLock: the submission thread when presents are queued. The back buffer stays, since the engine draws through its views.
+			 * @brief Remakes the swap chain after Present reports a mode change or failure, at the window's client size. The thread that
+			 * presents, under presentLock: the submission thread when presents are queued. The back buffer stays, since the engine draws
+			 * through its views. A window resized before the engine's resize reached the render side (the render thread presents on) gives
+			 * a Vulkan surface of the new size: images made at the old size would be the surface's, and the present copy would write past
+			 * them. The engine's own resize follows and queues its size.
 			 */
 			void RecreateSwapchain()
 			{
-				ResizeSwapchain(swapBufferCount, swapWidth, swapHeight);
+				uint32_t w = swapWidth, h = swapHeight;
+				if (RECT client{}; ::GetClientRect(window, &client) && client.right > client.left && client.bottom > client.top) {
+					w = static_cast<uint32_t>(client.right - client.left);
+					h = static_cast<uint32_t>(client.bottom - client.top);
+				}
+				ResizeSwapchain(swapBufferCount, w, h);
 			}
 
 			/** @brief Publishes what the swap chain is now. Under presentLock. */

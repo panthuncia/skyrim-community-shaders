@@ -238,6 +238,14 @@ namespace RenderGraph::Engine::Native::RenderThread
 		t_routedRender = outer;
 	}
 
+	void Superseded(const Snapshot::FrameSnapshot& a_old, const Snapshot::FrameSnapshot& a_fresh)
+	{
+		const auto* old = static_cast<const FramePayload*>(a_old.nativeFrame.get());
+		const auto* fresh = static_cast<const FramePayload*>(a_fresh.nativeFrame.get());
+		if (old && fresh)
+			globals::features::drawcallLimitFix.NativeTicketSuperseded(old->prepared.sceneTicket, fresh->prepared.sceneTicket);
+	}
+
 	void OnAdopted()
 	{
 		if (!t_routedRender)

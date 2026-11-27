@@ -26,6 +26,27 @@ namespace RE
 	class ShadowSceneNode;
 }
 
+namespace DCLF
+{
+	class ShadowViews;
+}
+
+namespace DCLF::Portals
+{
+	struct Context;
+}
+
+namespace DCLF::Features::Shadows::Sun
+{
+	struct SunFrame;
+}
+
+namespace DCLF::Features::Shadows::Local
+{
+	struct LightFrame;
+	struct FocusFrame;
+}
+
 namespace DCLF::Features::Shadows::Native
 {
 	enum class LightKind : std::uint8_t
@@ -89,6 +110,7 @@ namespace DCLF::Features::Shadows::Native
 		std::vector<MapValues> descriptors;  // shadowmapDescriptors, in order
 		// The shadow maps: whether DCLF draws the light (0) or why not (ShadowMapsNative's reasons), its draws and the state they leave.
 		std::uint8_t verdict = 0;
+		bool coverageLeft = false;  // the game half's verdict: the render side still checks its views' coverage
 		std::vector<MapDraw> draws;
 		LeftState left;
 		const RE::BSLensFlareRenderData* lensFlare = nullptr;  // set when the light has a lens flare and lens flares are on
@@ -113,12 +135,28 @@ namespace DCLF::Features::Shadows::Native
 		std::vector<MapValues> descriptors;
 	};
 
+	/**
+	 * @brief What the caster selection left for the render side, as copies made at the end of the game half: DCLF's shadow view
+	 * list (no coverage), the selection's frame, the shadow cameras' boards and the main camera's portal programs. The render half reads these instead of the
+	 * selection's working storage, which the next game half rewrites.
+	 */
+	struct CasterBoards
+	{
+		std::shared_ptr<const ShadowViews> views;
+		std::shared_ptr<const void> selection;  // LightSelection::Frame
+		std::shared_ptr<const Sun::SunFrame> sun;
+		std::shared_ptr<const Local::LightFrame> lights;
+		std::shared_ptr<const Local::FocusFrame> focus;
+		std::shared_ptr<const DCLF::Portals::Context> portals;  // the main camera's portal programs (PortalViews::MainContext)
+	};
+
 	/** @brief The frame's kept shadow lights, in shadowLightsAccum's walk (each light once, in slot order), with the masks' settings. */
 	struct LightSet
 	{
 		std::vector<ShadowLight> lights;
 		SunSplits sun;
 		MaskSettings mask;
+		CasterBoards boards;  // native's game half only
 
 		/** @brief The light a_light keys, or null. */
 		const ShadowLight* Find(const RE::BSShadowLight* a_light) const;
@@ -154,4 +192,10 @@ namespace DCLF::Features::Shadows::Native
 
 	/** @brief Render side: the adopted set, or null (guest; before the first native world frame). */
 	const LightSet* RenderSet();
+
+	/**
+	 * @brief The adopted set's boards when the calling thread owns rendering and is not inside native's game half (which writes the
+	 * working storage), and the set has them. Null otherwise: the caller reads the working storage, as guest does.
+	 */
+	const CasterBoards* AdoptedBoards();
 }

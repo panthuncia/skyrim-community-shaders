@@ -18,6 +18,7 @@ namespace DCLF
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEngine.h"
 #include "Features/DrawcallLimitFix/Api/LightVolumes.h"
 
+#include <atomic>
 #include <Render/RunRef.h>
 
 namespace DCLF
@@ -163,10 +164,10 @@ namespace DCLF
 		}
 		// Builds ahead run one at a time in publication order, so they can share these buffers.
 		std::shared_ptr<SceneBuffers> scene;
-		// This frame's draw family decisions.
-		std::array<bool, Extensions::kDrawFamilies> familyOwned{};
+		// This frame's draw family decisions. Native's game half decides them while the render side reads them: atomic.
+		std::array<std::atomic<bool>, Extensions::kDrawFamilies> familyOwned{};
 		// Families whose last decision waited for pipelines. Their passes are withheld and not drawn.
-		std::array<bool, Extensions::kDrawFamilies> familyWaiting{};
+		std::array<std::atomic<bool>, Extensions::kDrawFamilies> familyWaiting{};
 		// The render side's last published family state, and the game half's copy while it decides (one value per decision).
 		std::atomic<std::shared_ptr<const FamilyRenderState>> familyRenderState;
 		std::shared_ptr<const FamilyRenderState> familyInputs;

@@ -95,8 +95,9 @@ namespace DCLF::Integrations::LightLimitFix
 	{
 		a_out.clear();
 		const auto& views = ShadowViews::Get();
-		// This frame's list only: the selection publishes the light slots for its scene frame, and the list is rebuilt from them.
-		if (!DrawsShadowViews() || !views.Valid() || !ShadowViews::LightSlots().Current(Scene::FrameView::Get().SceneStep()))
+		// This frame's list only: the selection publishes the light slots for its scene frame, and the list is rebuilt from them. Native's
+		// render side adopted this render's list from its game half.
+		if (!DrawsShadowViews() || !views.Valid() || (!views.Adopted() && !ShadowViews::LightSlots().Current(Scene::FrameView::Get().SceneStep())))
 			return;
 		for (const auto& view : views.All()) {
 			const bool local = view.kind == ShadowViews::Kind::Frustum || view.kind == ShadowViews::Kind::Parabolic;

@@ -1,6 +1,7 @@
 // SunViews: the UpdateCamera hook that writes the sun's board, and what Core reads of it. Render thread.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunViews.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
@@ -65,17 +66,32 @@ namespace DCLF::Features::Shadows::Sun
 		next.valid = true;
 	}
 
+	namespace
+	{
+		/** @brief The board a reader reads: native's render side the copy its light set carries (with its own step), else the board. */
+		const SunFrame& ReadBoard(std::uint32_t& a_frame)
+		{
+			if (const auto* boards = Native::AdoptedBoards(); boards && boards->sun) {
+				a_frame = boards->sun->sceneFrame;
+				return *boards->sun;
+			}
+			return SunBoard();
+		}
+	}
+
 	void SunCamera(Api::ShadowSourceCamera& a_camera)
 	{
-		a_camera.camera = SunBoard().CascadeOf(a_camera.descriptor, a_camera.sceneFrame);
+		std::uint32_t frame = a_camera.sceneFrame;
+		const auto& board = ReadBoard(frame);
+		a_camera.camera = board.CascadeOf(a_camera.descriptor, frame);
 	}
 
 	void SampleSunCascades(Api::SunCascadeSink& a_sink)
 	{
 		// Every frame's cascades, whether or not the exclusion ran. Without them every pass with the sun's bits would draw unshadowed.
 		// None when UpdateCamera did not run for the sun, as in an interior, where no pass has the sun's bits either.
-		const auto& views = SunBoard();
-		const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
+		std::uint32_t frame = Scene::FrameView::Get().SceneStep();
+		const auto& views = ReadBoard(frame);
 		if (!views.valid || views.sceneFrame != frame)
 			return;
 		for (std::uint32_t d = 0; d < views.count && d < views.cascades.size(); ++d)
@@ -86,7 +102,7 @@ namespace DCLF::Features::Shadows::Sun
 	bool SampleSunEntryPlanes(Api::SunEntryPlanesSink& a_sink, std::uint32_t a_frame)
 	{
 		// a_frame's planes at the shadow epoch, or the frame before's for the build ahead, posted before this frame's UpdateCamera.
-		const auto& views = SunBoard();
+		const auto& views = ReadBoard(a_frame);
 		if (!views.valid || (views.sceneFrame != a_frame && views.sceneFrame + 1 != a_frame) || views.fullFrusta.empty())
 			return false;
 		for (const auto& planes : views.fullFrusta)

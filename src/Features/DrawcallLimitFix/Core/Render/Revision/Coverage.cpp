@@ -151,7 +151,7 @@ namespace DCLF
 			next.cpuPipeline = conditions.cpuPipeline;
 		}
 		next.claims = true;
-		next.shadowCandidates = ShadowViews::Get().Candidates();
+		next.shadowCandidates = ShadowViews::Rendered().Candidates();
 		next.mainKnown = mainEpochInputs.known;
 		next.viewport = mainEpochInputs.viewport;
 		next.blockSizes = mainEpochInputs.blockSizes;

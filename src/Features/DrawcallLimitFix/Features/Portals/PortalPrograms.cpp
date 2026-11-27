@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Features/Portals/PortalPrograms.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"
 #include "Features/DrawcallLimitFix/Features/Portals/Portals.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
@@ -132,7 +133,9 @@ namespace DCLF::Features::Portals
 		/** @brief Publishes the frame's encoding into a backing sized to it. An unchanged encoding keeps the last one. Render thread. */
 		std::shared_ptr<const Publication> Publish(ProgramsScene& a_scene, Draws::CommitUploads& a_uploads)
 		{
-			const auto& encoded = PortalViews::Get().Encoded();
+			// Native's render side: the programs its light set carries; the game thread's walk rewrites PortalViews' own.
+			const auto* boards = Features::Shadows::Native::AdoptedBoards();
+			const auto& encoded = boards && boards->portals ? boards->portals->programs : PortalViews::Get().Encoded();
 			if (encoded.size() < kPortalHeaderBytes / 4)
 				return nullptr;
 			if (a_scene.current && a_scene.current->words == encoded)

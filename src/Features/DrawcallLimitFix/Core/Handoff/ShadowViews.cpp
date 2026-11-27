@@ -201,10 +201,28 @@ namespace DCLF
 		}
 	}
 
+	namespace
+	{
+		ShadowViews& RenderViews()
+		{
+			static ShadowViews views;
+			return views;
+		}
+	}
+
 	ShadowViews& ShadowViews::Get()
 	{
-		static ShadowViews views;
-		return views;
+		static ShadowViews gameViews = [] {
+			ShadowViews made;
+			made.gameSide = true;
+			return made;
+		}();
+		return Scene::FrameView::InGameHalf() ? gameViews : RenderViews();
+	}
+
+	const ShadowViews& ShadowViews::Rendered()
+	{
+		return RenderViews();
 	}
 
 	LightSlotFrame& ShadowViews::LightSlots()
@@ -222,6 +240,29 @@ namespace DCLF
 		valid = false;
 		candidates = 0;
 		unrecorded = false;
+		adopted = false;
+	}
+
+	void ShadowViews::AdoptList(const ShadowViews& a_list)
+	{
+		views = a_list.views;
+		captures.assign(views.size(), 0);
+		batchToView = a_list.batchToView;
+		accumulatorToView = a_list.accumulatorToView;
+		valid = a_list.valid;
+		candidates = 0;
+		unrecorded = false;
+		drawable = true;
+		adopted = true;
+		for (auto& view : views)
+			view.covered = false;
+	}
+
+	void ShadowViews::CoverAdopted()
+	{
+		PassCapture::Get().ResetCoveredKept();
+		(void)CoverFrom(0);
+		PublishRenderers();
 	}
 
 	void ShadowViews::BeginCasters()
@@ -229,6 +270,9 @@ namespace DCLF
 		// Before the first light's Accumulate, so nothing registered from here is withheld by last frame's renderers.
 		Clear();
 		drawable = true;
+		// The game half's list publishes nothing: PassCapture is the render side's.
+		if (gameSide)
+			return;
 		PublishRenderers();
 		PassCapture::Get().ResetCoveredKept();
 	}
@@ -333,6 +377,9 @@ namespace DCLF
 
 	bool ShadowViews::CoverFrom(std::size_t a_first)
 	{
+		// The game half's list is covered on the render side, after AdoptList.
+		if (gameSide)
+			return false;
 		// DCLF's views are its candidates within the slots its buffers hold. On a frame whose views are not DCLF's, none is covered.
 		bool covered = false;
 		const auto& shadowViews = Extensions::ShadowViewsSet();
@@ -384,6 +431,8 @@ namespace DCLF
 
 	void ShadowViews::PublishRenderers()
 	{
+		if (gameSide)
+			return;
 		// Published whole, since the hook runs on the engine's registration threads.
 		auto renderers = std::make_shared<PassCapture::ShadowRendererMap>();
 		// For a group renderer the engine makes during a registration, which is in no set yet.
