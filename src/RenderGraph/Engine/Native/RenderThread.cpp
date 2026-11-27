@@ -11,6 +11,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "Snapshot/FrameSnapshot.h"
 #include "Snapshot/Publication.h"
+#include "RenderGraph/Async/Retirement.h"
 
 #include "Globals.h"
 
@@ -20,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -57,6 +59,9 @@ namespace RenderGraph::Engine::Native::RenderThread
 			return *thread;
 		}
 
+		/** @brief Render thread. The GPU point of the last render's submissions, until a commit waits for it. */
+		thread_local std::optional<::org::GraphHost::GpuPoint> t_lastRender;
+
 		void Loop()
 		{
 			t_renderThread = true;
@@ -77,6 +82,7 @@ namespace RenderGraph::Engine::Native::RenderThread
 					}
 				}
 				RenderHalf();
+				t_lastRender = ::RenderGraph::Frame::Retirement::SubmittedGpuPoint();
 			}
 		}
 
@@ -254,6 +260,15 @@ namespace RenderGraph::Engine::Native::RenderThread
 		const auto& snapshot = Snapshot::Current();
 		if (const auto* payload = snapshot ? static_cast<const FramePayload*>(snapshot->nativeFrame.get()) : nullptr)
 			globals::features::drawcallLimitFix.ExpectNativeTicket(payload->prepared.sceneTicket);
+	}
+
+	void WaitForLastRender()
+	{
+		if (!t_lastRender)
+			return;
+		if (!t_lastRender->Wait())
+			RenderGraph::Fatal("native render thread", "the wait for the last render's GPU work failed");
+		t_lastRender.reset();
 	}
 
 	void InstallHooks()

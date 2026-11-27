@@ -73,6 +73,12 @@ namespace RenderGraph::Engine::Native::RenderThread
 	void Park(const char* a_why);
 
 	/** @brief Whether the render thread exists and is not parked: the game thread's update-rate cap applies. Any thread. */
+	/**
+	 * @brief Render thread: waits for the GPU work of the render before this one, once per render. DCLF's depth commit calls it:
+	 * without it a render overlapping the one before lost the device (snap7-devloss.md). Elsewhere it returns at once.
+	 */
+	void WaitForLastRender();
+
 	bool Running();
 
 	/** @brief Whether the calling thread is CS's render thread. */
