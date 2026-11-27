@@ -522,7 +522,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::string lastRefusal;
 			// The engine has made its ImageSpace manager, effects and blend states. Until then each Begin raises the shape (RaiseShape).
 			bool shapeMade = false;
-			std::array<PostClient, 9> post{};
+			std::array<PostClient, 10> post{};
 			// Between RenderSSAO's two calls, an own-scope copy-subregion call is the snow copy.
 			bool snowWindow = false;
 			std::vector<std::shared_ptr<const void>> postKeep;
@@ -841,6 +841,14 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/** @brief ISReflectionsRayTracing with ENABLESSR (Dynamic Cubemaps' EnabledSSR). The only feature define an effect's key carries. */
 		constexpr std::uint32_t kSsrPermutation = 1;
+		/** @brief A copy whose t0 is a loaded texture read by the heap index the latch holds (ORG_LOADED_SOURCE), such as the book's page. */
+		constexpr std::uint32_t kLoadedSourcePermutation = 2;
+
+		/** @brief The slots an effect's program reads by latched heap index: its own, and t0 for a loaded-source copy. */
+		constexpr std::uint32_t LatchedSlots(std::size_t a_effect, std::uint32_t a_permutation)
+		{
+			return kEffects[a_effect].latched | ((a_permutation & kLoadedSourcePermutation) ? 1u : 0u);
+		}
 
 		rhi::Viewport ViewportOf(const ShapeKey& a_key)
 		{
@@ -1006,6 +1014,8 @@ namespace RenderGraph::Engine::ImageSpace
 				if (a_permutation & kSsrPermutation)
 					defines.emplace_back("ENABLESSR", "");
 			}
+			if (a_permutation & kLoadedSourcePermutation)
+				defines.emplace_back("ORG_LOADED_SOURCE", "");
 			return AnchorPasses::Defines(defines);
 		}
 
@@ -1121,13 +1131,14 @@ namespace RenderGraph::Engine::ImageSpace
 				desc.vertexSource = effect.source;
 			// FXC-era sources use vector conditions in ?:.
 			desc.languageVersion = L"2018";
+			const auto latched = LatchedSlots(effectIndex, permutation);
 			// Shared (4), SRVs, samplers, feature handles, latch (2), sources' latch (2).
-			desc.constantWords = 4 + effect.slots - static_cast<std::uint32_t>(std::popcount(effect.latched)) + effect.samplers +
-			                     (effect.features ? kFeatureWords : 0) + 2 + (effect.latched ? 2 : 0);
+			desc.constantWords = 4 + effect.slots - static_cast<std::uint32_t>(std::popcount(latched)) + effect.samplers + (effect.features ? kFeatureWords : 0) + 2 +
+			                     (latched ? 2 : 0);
 			desc.defines = DefinesOf(effectIndex, permutation);
 			if (latchViewport && !effect.geometry && !effect.vertexStage) {
 				// The latch's handle and offset are the push words before the sources' latch, as MakePass binds them.
-				const auto word = desc.constantWords - 2 - (effect.latched ? 2 : 0);
+				const auto word = desc.constantWords - 2 - (latched ? 2 : 0);
 				desc.vertexSource = kLatchViewportVertexShader;
 				desc.defines.emplace_back(L"ORG_VIEWPORT_LATCH_WORD", std::to_wstring(word));
 			}
@@ -1322,8 +1333,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::vector<AnchorPasses::Bind> bindings;
 			bindings.push_back(AnchorPasses::Bind::Shared());
 			// A latched slot is read by heap index and has no SRV entry.
+			const auto latched = LatchedSlots(spec.key.effect, spec.permutation);
 			for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
-				if (!(effect.latched & (1u << slot)))
+				if (!(latched & (1u << slot)))
 					bindings.push_back(spec.inputs[slot] ? AnchorPasses::Bind::Srv(spec.inputs[slot], MipOfName(spec.key.inputs[slot])) : AnchorPasses::Bind::Unused());
 			for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
 				bindings.push_back(SlotRead(spec, slot) ? AnchorPasses::Bind::Handle(samplers[slot]) : AnchorPasses::Bind::Unused());
@@ -1344,7 +1356,7 @@ namespace RenderGraph::Engine::ImageSpace
 				}
 			}
 			bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride));
-			if (effect.latched)
+			if (latched)
 				bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt))));
 			AnchorPasses::Builder builder(Anchor::ImageSpace, a_clientId, static_cast<std::int32_t>(spec.entry), a_latch, a_gate);
 			if (effect.compute) {
@@ -1477,7 +1489,8 @@ namespace RenderGraph::Engine::ImageSpace
 			/**
 			* @brief What input slot a_slot of a draw reads, from its effect's texture list as the generic SetupGeometry binds it (texture
 			* a_slot + 1, 0x1414e8bc0): an engine target in a_target, else a loaded texture's view (unwrapped) in a_view. False for a depth
-			* texture, which the list names by its own index.
+			* texture, which the list names by its own index. A loaded texture is checked first: the texture form of RenderEffect (99029 /
+			* 105680) leaves that index at 0.
 			*/
 			bool SlotTexture(const RE::BSImagespaceShader& a_shader, std::uint32_t a_slot, std::int32_t& a_target, ID3D11ShaderResourceView*& a_view)
 			{
@@ -1492,13 +1505,12 @@ namespace RenderGraph::Engine::ImageSpace
 					a_target = texture->renderTarget;
 					return true;
 				}
-				if (*reinterpret_cast<const std::int32_t*>(reinterpret_cast<const std::byte*>(texture) + 0xC) >= 0)
-					return false;
 				if (texture->texture) {
 					const auto* renderer = *reinterpret_cast<const std::byte* const*>(reinterpret_cast<const std::byte*>(texture->texture.get()) + 0x48);
 					a_view = renderer ? Tripwire::Unwrap(*reinterpret_cast<ID3D11ShaderResourceView* const*>(renderer + 0x10)) : nullptr;
+					return true;
 				}
-				return true;
+				return *reinterpret_cast<const std::int32_t*>(reinterpret_cast<const std::byte*>(texture) + 0xC) < 0;
 			}
 
 			/** @brief The one pixel shader of an ImageSpace shader, or null. Its table places the param's rows. */
@@ -1846,11 +1858,12 @@ namespace RenderGraph::Engine::ImageSpace
 			Menu,         // menu scene composites
 			Frozen,
 			FaceTint,     // start stage in a world frame, UI stage at a loading screen
+			BookPages,    // the book menu's page copies, before the pages' displays
 			Count
 		};
 		constexpr std::array<const char*, static_cast<std::size_t>(PostPart::Count)> kPostIds{ "cs.engine.imagespace.post.composites", "cs.engine.imagespace.post.hdr",
 			"cs.engine.imagespace.post.final", "cs.engine.imagespace.world.scopes", "cs.engine.imagespace.world.water", "cs.engine.imagespace.start",
-			"cs.engine.imagespace.menu", "cs.engine.imagespace.frozen", "cs.engine.imagespace.facetint" };
+			"cs.engine.imagespace.menu", "cs.engine.imagespace.frozen", "cs.engine.imagespace.facetint", "cs.engine.imagespace.book" };
 		static_assert(sizeof(IS().post) / sizeof(PostClient) == static_cast<std::size_t>(PostPart::Count), "a post client per part");
 
 #include "RenderGraph/Engine/ImageSpace/WorldSteps.inl"
@@ -2541,6 +2554,20 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		* @brief RenderEffect's texture form (99029 / 105680): a loaded texture into a target. BookMenu::PreDisplay copies the page
+		* texture into each kBOOK_TEXT target with it; the call is a book page step (MenuSteps.inl).
+		*/
+		struct RenderTextureEffect
+		{
+			static void thunk(void* a_manager, std::uint32_t a_effect, void* a_texture, std::uint64_t a_destination, std::uint64_t a_param)
+			{
+				const MenuEffectCall call(a_effect, kLoadedSource, static_cast<std::int32_t>(a_destination));
+				func(a_manager, a_effect, a_texture, a_destination, a_param);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief DrawTriShape (75477 / 77263). Any draw other than the current effect's runs the batch first. */
 		struct DrawTriShape
 		{
@@ -2713,15 +2740,17 @@ namespace RenderGraph::Engine::ImageSpace
 		stl::detour_thunk<DrawTriShape>(REL::RelocationID(75477, 77263));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
 		stl::detour_thunk<RenderEffect>(REL::RelocationID(99025, 105676));
+		stl::detour_thunk<RenderTextureEffect>(REL::RelocationID(99029, 105680));
 		auto& state = IS();
 		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && ExplicitRender::func.address() &&
 		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && RenderSaoCs::func.address() && WaterBlend::func.address() && WaterDisplacement::func.address() &&
-		                  DrawTriShape::func.address() && DispatchCSShader::func.address() && RenderEffect::func.address();
+		                  DrawTriShape::func.address() && DispatchCSShader::func.address() && RenderEffect::func.address() &&
+		                  RenderTextureEffect::func.address();
 		if (!state.installed)
 			RenderGraph::Fatal("ImageSpace", "a hook could not be installed");
 		logger::info(
 			"[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render and its explicit-target form, DispatchComputeShader, the HDR effect, the pre-tonemap "
-			"composites, RenderSSAO, the reflections pass, the compute SAO, the water blend, the water's displacement update, DrawTriShape, DispatchCSShader)");
+			"composites, RenderSSAO, the reflections pass, the compute SAO, the water blend, the water's displacement update, DrawTriShape, DispatchCSShader, RenderEffect and its texture form)");
 	}
 
 	void Setup()

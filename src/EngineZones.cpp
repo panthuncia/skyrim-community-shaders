@@ -300,6 +300,8 @@ namespace EngineZones
 			{ 0, 0x0, 0, 51951, 0x23, 52727, Role::MenuScene, "UI3DSceneManager::Render (in LockpickingMenu::PostDisplay)" },
 			{ 0, 0x0, 0, 52308, 0xA5, 52727, Role::MenuScene, "UI3DSceneManager::Render (in MistMenu::PostDisplay)" },
 			{ 0, 0x0, 0, 52511, 0x1B, 52727, Role::MenuScene, "UI3DSceneManager::Render (in StatsMenu::PostDisplay)" },
+			// BookMenu::PostDisplay reaches UI3DSceneManager::Render (scheme 3) by a tail jump, so only its page copies are a site here.
+			{ 50121, 0x6C, 99029, 51052, 0x6C, 105680, Role::Render, "ImageSpaceManager::RenderEffect's texture form (in BookMenu::PreDisplay)" },
 			{ 87890, 0x10F, 75460, 90259, 0x21C, 77245, Role::Helper, "Renderer::Begin (in BSMoviePlayer::Tick)" },
 			{ 16094, 0x4FE, 99025, 16335, 0x501, 105676, Role::Render, "ImageSpaceManager::RenderEffect (in LocalMapRenderer::Render)" },
 			{ 79947, 0x2A4, 99025, 82084, 0x315, 105676, Role::Render, "ImageSpaceManager::RenderEffect (in MenuManager::DrawInterface)" },

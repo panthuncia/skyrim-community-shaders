@@ -8,7 +8,12 @@
 #	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
 #	include "Common/OrgEngineConstants.hlsli"
 #	include "Common/OrgResources.hlsli"
-#	define ISCOPY_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SAMPLER, SamplerState, ImageSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	if defined(ORG_LOADED_SOURCE)
+// t0 is a loaded texture (the book's page), read by the heap index the pass's latch holds (SourcesAt).
+#		define ISCOPY_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SAMPLER, SamplerState, ImageSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2) X(LATCH, OrgEngineSourcesAt, SourcesAt, 3)
+#	else
+#		define ISCOPY_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SAMPLER, SamplerState, ImageSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+#	endif
 ORG_PUSH_BLOCK(ISCOPY_ORG_RESOURCES(ORG_HANDLE))
 ISCOPY_ORG_RESOURCES(ORG_RESOURCE)
 #endif
@@ -98,6 +103,9 @@ struct PS_OUTPUT
 
 #if defined(PSHADER)
 #	if defined(CS_ORG_BINDLESS)
+#		if defined(ORG_LOADED_SOURCE)
+static Texture2D<float4> ImageTex = ResourceDescriptorHeap[OrgEngineSource(SourcesAt, 0)];
+#		endif
 static float4 RotationMatrix = OrgEngineRow(PerGeometryAt, 0);
 static float4 ColorSelect = OrgEngineRow(PerGeometryAt, 1);
 static float4 ScaleBias = OrgEngineRow(PerGeometryAt, 2);

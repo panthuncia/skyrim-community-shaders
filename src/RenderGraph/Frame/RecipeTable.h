@@ -343,7 +343,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				// generation's inputs pass, which reads the hudless copy (a whole anchor's taps all reach its first step).
 				{ .anchor = Anchor::FrameGeneration, .clients = { "cs.upscaling.hudless", "cs.upscaling.fg-inputs", "cs.screenshot.clean" }, .whole = true },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.blood-splatter" } },
-				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.frozen" } },
+				// The frozen frame, and the book menu's page copies before the displays that draw the pages' text over them.
+				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.frozen", "cs.engine.imagespace.book" } },
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" } },
 				{ .anchor = Anchor::Interface, .clients = { "cs.scaleform" }, .whole = true, .untilLater = true, .firstInstance = 8, .instanceCount = 8 },
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@menu-scene", "cs.engine.skeleton.shadow@menu-scene" } },

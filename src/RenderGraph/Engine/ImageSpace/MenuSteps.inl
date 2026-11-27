@@ -4,7 +4,8 @@
 // - a menu's 3D scene runs the HDR effect and its tonemap into the framebuffer when its light scheme has an ImageSpace override,
 // - otherwise, and after a menu drawn into kMAIN, kMAIN is copied into the framebuffer,
 // - under a menu that freezes the world, the frozen frame (kMENUBG) is composited into the framebuffer,
-// - a menu's 3D scene with TAA marks its pixels in the TAA mask, runs TAA's UI form and copies the result into the framebuffer.
+// - a menu's 3D scene with TAA marks its pixels in the TAA mask, runs TAA's UI form and copies the result into the framebuffer,
+// - the book menu copies its page texture into each kBOOK_TEXT target before Scaleform draws the page's text there.
 // Each is a step of the UI stage in every frame kind. The player's face tint at a load is a step of the start stage in a
 // world frame and of the UI stage in a loading screen. Hooks only stage the engine's constants, and the stage records at execution.
 
@@ -17,13 +18,16 @@ struct MenuKey
 };
 
 /** @brief The composites' clients, in their declarations' order. */
-constexpr std::array<PostPart, 3> kMenuParts{ PostPart::Menu, PostPart::Frozen, PostPart::FaceTint };
+constexpr std::array<PostPart, 4> kMenuParts{ PostPart::Menu, PostPart::Frozen, PostPart::FaceTint, PostPart::BookPages };
+
+/** @brief The part of the book page copies, one entry per kBOOK_TEXT target. */
+constexpr std::uint8_t kBookPart = 3;
 
 /**
 * @brief The composites' build for a key. Part 0 is the menu client's steps. The frozen composite and the face tint are entry 0 of
-* parts 1 and 2, their own clients.
+* parts 1 and 2, their own clients. Part 3 holds the book page copies.
 */
-struct MenuBuild : StepBuild<MenuKey, 3>
+struct MenuBuild : StepBuild<MenuKey, 4>
 {
 	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
 };
@@ -86,6 +90,18 @@ constexpr StepKey FrozenKey()
 constexpr StepKey TintKey()
 {
 	return { WorldScope::MenuCopy, Effects::ISAlphaBlend, 0 };
+}
+
+/** @brief The source a book page copy names in its key: a loaded texture, not an engine target. No engine target has this index. */
+constexpr std::int32_t kLoadedSource = 0x7e;
+
+/** @brief The kBOOK_TEXT targets BookMenu::PreDisplay (AE 51052) draws pages into: kBOOK_TEXT_0 + page, for up to four pages. */
+constexpr std::uint32_t kBookPages = 4;
+
+/** @brief Its own client's entry a_page: the page texture copied into kBOOK_TEXT_0 + a_page. */
+constexpr StepKey BookKey(std::uint32_t a_page)
+{
+	return { WorldScope::MenuCopy, Effects::ISCopy, InOut(kLoadedSource, RE::RENDER_TARGET::kBOOK_TEXT_0 + static_cast<std::int32_t>(a_page)) };
 }
 
 /** @brief ISSimpleColor's stencil mode in a menu's 3D scene: it fills only where the scene's draws wrote stencil (AE 0x140972590). */
@@ -180,6 +196,17 @@ std::vector<MenuStep> MenuStepList(std::uint32_t a_levels)
 		add(WorldScope::MenuCopy, E::ISCopy, InOut(T::kIMAGESPACE_TEMP_COPY, kFinal), std::move(c));
 	}
 
+	// The book's page texture into each page's target (BookMenu::PreDisplay's RenderEffect texture form, effect 0x22). t0 is the loaded
+	// texture, read by heap index; point sampling and clamp, as the call's ImageSpaceTexture defaults.
+	for (std::uint32_t page = 0; page < kBookPages; ++page) {
+		const auto target = T::kBOOK_TEXT_0 + static_cast<std::int32_t>(page);
+		if (!targets[target].texture)
+			continue;
+		StepDesc d{ .name = fmt::format("book.page{}", page), .output = engine(target), .latched = 1, .permutation = kLoadedSourcePermutation };
+		const auto key = BookKey(page);
+		add(key.scope, key.effect, key.variant, std::move(d));
+	}
+
 	// Sixteen loaded tint masks blended over grey, each read by heap index.
 	if (targets[T::kPLAYER_FACEGEN_TINT].texture) {
 		StepDesc d{ .name = "facetint", .output = engine(T::kPLAYER_FACEGEN_TINT), .latched = 0xFFFF };
@@ -229,13 +256,15 @@ void BuildMenuSteps(MenuBuild& a_build)
 
 	for (const auto part : kMenuParts)
 		state.post[static_cast<std::size_t>(part)].batch.clear();
-	std::array<std::vector<FrameAnchors::PassDesc>, 3> partPasses;
+	std::array<std::vector<FrameAnchors::PassDesc>, kMenuParts.size()> partPasses;
 	for (auto& step : steps) {
-		// The frozen composite and the face tint are entry 0 of their own clients. Other steps take the menu client's next entry.
-		const auto p = static_cast<std::uint8_t>(step.key == FrozenKey() ? 1 : step.key == TintKey() ? 2 : 0);
+		// The frozen composite and the face tint are entry 0 of their own clients, the book pages entries of theirs. Other steps take
+		// the menu client's next entry.
+		const bool book = step.key.scope == WorldScope::MenuCopy && step.key.effect == Effects::ISCopy && (step.key.variant >> 8) == kLoadedSource;
+		const auto p = static_cast<std::uint8_t>(step.key == FrozenKey() ? 1 : step.key == TintKey() ? 2 : book ? kBookPart : 0);
 		auto& owner = state.post[static_cast<std::size_t>(kMenuParts[p])];
 		const auto entry = table->parts[p].count;
-		if (entry >= kGateEntries || (p != 0 && entry != 0))
+		if (entry >= kGateEntries || (p != 0 && p != kBookPart && entry != 0))
 			continue;
 		std::string error;
 		auto spec = MakeStepSpec(step.desc, entry, error);
@@ -315,10 +344,11 @@ bool UiSceneKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::i
 }
 
 /**
-* @brief Stages the sixteen masks by heap index, held with the run. An unset layer reads the black default texture.
-* A slot holding an engine render target reads the null texture, since the graph has no declared read of it. Logged once.
+* @brief Stages the loaded textures of a_slots by heap index, held with the run: the sixteen tint masks, or a book page copy's t0. An
+* unset slot reads the null texture. A slot holding an engine render target reads the null texture, since the graph has no declared
+* read of it. Logged once.
 */
-void StageTintMasks(Pending& a_pending)
+void StageLoadedSources(Pending& a_pending, std::uint32_t a_slots)
 {
 	const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 	auto& native = NativeSteps::Get();
@@ -326,6 +356,10 @@ void StageTintMasks(Pending& a_pending)
 	SourcesAt sources{};
 	std::string targets;
 	for (std::uint32_t slot = 0; slot < kMaxSlots; ++slot) {
+		if (!(a_slots & (1u << slot))) {
+			sources[slot] = 0;
+			continue;
+		}
 		auto* view = shadow.PSTexture[slot];
 		// Default textures are loaded textures like the masks, so read them by heap index.
 		auto input = view ? InputOfView(view) : -1;
@@ -357,7 +391,7 @@ void StageTintMasks(Pending& a_pending)
 	if (!targets.empty()) {
 		static std::uint64_t count = 0;
 		if (count++ == 0)
-			logger::info("[ORG] ImageSpace: the face tint's slots {} hold engine targets; they read the null texture (counted, logged once)", targets);
+			logger::info("[ORG] ImageSpace: a loaded-texture step's slots {} hold engine targets; they read the null texture (counted, logged once)", targets);
 	}
 	a_pending.sources = sources;
 	a_pending.source = std::move(owners);
@@ -489,9 +523,10 @@ bool StageMenuKey(const StepKey& a_key, bool a_known, std::size_t a_effect, bool
 		if (const auto* spec = find.Part().SpecOf(entry))
 			CheckStepState(a_effect, *spec, { spec->key.output, spec->key.output1, -1 });
 	const auto before = client.batch.size();
-	StageStep(client, entry, find.Part().SpecOf(entry), a_effect, a_compute, a_groups);
-	if (isTint && client.batch.size() > before)
-		StageTintMasks(client.batch.back());
+	const auto* spec = find.Part().SpecOf(entry);
+	StageStep(client, entry, spec, a_effect, a_compute, a_groups);
+	if (const auto latched = spec ? LatchedSlots(spec->key.effect, spec->permutation) : 0u; latched && client.batch.size() > before)
+		StageLoadedSources(client.batch.back(), latched);
 	return true;
 }
 
