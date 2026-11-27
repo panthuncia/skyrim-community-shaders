@@ -25,11 +25,17 @@
 * - S12/S13: the stealth light level's light membership (Snapshot/StealthLights.h).
 * - S17: queued decal occlusion tests are answered "visible" here; the pending array is cleared before the render half.
 * - The current camera (414580), which the depth-of-field modifier instances read, is the world camera after the render half.
+* - CS's own per-update engine writes, after the capture (guest makes them at each frame's end, State::Reset): the LOD blend ring
+*   (LODBlendRingFix), the sun's light mask bits (SunShadowMaskFix), the character light (Subsurface Scattering's settings),
+*   ApplyReflections kept off and bEnableImprovedSnow kept false.
 */
 namespace Snapshot::SideEffects
 {
 	/** @brief Native only: turns off the engine's writes listed above. Called by Snapshot::InstallHooks. */
 	void InstallHooks();
+
+	/** @brief Whether the hooks are installed: native mode. Any thread, after Hooks::Install. */
+	bool Installed();
 
 	/** @brief Game thread, right after the snapshot is published and before the render half. Native only. */
 	void AfterCapture(const FrameSnapshot& a_snapshot);

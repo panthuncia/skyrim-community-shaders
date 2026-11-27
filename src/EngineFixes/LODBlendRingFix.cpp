@@ -1,6 +1,5 @@
 #include "LODBlendRingFix.h"
 #include "Snapshot/EngineReads.h"
-#include "Snapshot/Publication.h"
 
 #include "Globals.h"
 
@@ -46,10 +45,10 @@ void LODBlendRingFix::EndSlide()
 	sliding = false;
 }
 
-void LODBlendRingFix::Update()
+void LODBlendRingFix::Update(float a_seconds)
 {
-	auto* tes = CS_ENGINE_READ(TES, RecordTime, globals::game::tes);
-	auto* player = CS_ENGINE_READ(Player, RecordTime, globals::game::player);
+	auto* tes = CS_ENGINE_READ(TES, CapturePoint, globals::game::tes);
+	auto* player = CS_ENGINE_READ(Player, CapturePoint, globals::game::player);
 	if (!tes || !player || tes->interiorCell || !tes->GetRuntimeData2().worldSpace) {
 		if (sliding)
 			EndSlide();
@@ -57,7 +56,7 @@ void LODBlendRingFix::Update()
 		return;
 	}
 
-	auto& state = *CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+	auto& state = *CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
 	const float2 engineCenter = ToFloat2(state.gridArrayCenter);
 	if (!hasCenter || engineCenter != center) {
 		gridCenter = engineCenter;
@@ -72,7 +71,7 @@ void LODBlendRingFix::Update()
 	}
 
 	if (!gridsToLoad)
-		gridsToLoad = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("uGridsToLoad:General"));
+		gridsToLoad = CS_ENGINE_READ(Ini, CapturePoint, RE::GetINISetting("uGridsToLoad:General"));
 	const float slack = gridsToLoad ? LeanSlack(gridsToLoad->data.u) : 0.0f;
 	const auto position = player->GetPosition();
 	float2 lean = float2(position.x, position.y) - gridCenter;
@@ -80,8 +79,8 @@ void LODBlendRingFix::Update()
 	const float2 desired = gridCenter + lean;
 
 	if (sliding) {
-		// The slide is game time: it steps once per new snapshot, by the game time since the last rendered one.
-		slideProgress = std::min(1.0f, slideProgress + Snapshot::GameStep() / SlideSeconds);
+		// The slide is game time.
+		slideProgress = std::min(1.0f, slideProgress + a_seconds / SlideSeconds);
 		center = float2::SmoothStep(slideOrigin, desired, slideProgress);
 		if (slideProgress >= 1.0f)
 			EndSlide();

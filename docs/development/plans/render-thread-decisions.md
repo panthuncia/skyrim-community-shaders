@@ -999,3 +999,30 @@ pushes until the user is back.
      none; nothing pushes 5 on AE) is owned. Left: port the local map (CS visibility for its ortho camera, render mode 0x12
      passes including tree LOD, the fog of war in mode 0x13, ISLocalMap's row), its graph-mode look, prebuilding its
      Utility programs 0x10000003 and 0x200001a, scheme 5 on SE.
+
+## 2026-11-27: the render half reads captured values (snap7-reads; director accepted)
+
+211. **Native's render half reads captured values:** `EngineReads::RenderHalfScope` wraps `RecordFrame` and the Present
+     hook's body and splits render-half reads into game-mutated and render-owned objects (the render-owned Renderer,
+     GraphicsState, ShadowState, Shaders, BoundState and Accumulator are counted but not the work list). Values go to the
+     carrier matching when they are final: snapshot blocks (sky mode for Skylighting and Cloud Shadows, ImageSpace sky
+     brightness, the water cubemap interior test, CS Editor preload, interior and menus, the main camera for texture
+     streaming and the occlusion floor), DCLF's frame ticket (frame-globals contributions for Effect rows, Grass and Tree
+     wind inputs, growing from 8 to 64 floats; `FrameGlobals` landBlend, projectedGlobals, pipeline), or `Prepared` (Light
+     Limit Fix's whole light walk `LightLimitFix::CaptureLights` as `Prepared::pointLights`, the local-shadow caster
+     tracking inputs). Deferred's sun cascades and LLF's `CopyLocalShadowMaps` read the shadow light set. Tree wind clocks
+     step once per update. The ProjectedUV projection sits at the frame camera's eye in native. Exponential Height Fog
+     reads no light in native and writes no engine local shadows (as before in practice; turning them on is a separate
+     visual decision). Guest keeps its reads. Native quick, render half game-mutated reads per world frame: 59.5 -> 10.9.
+212. **Left, with owners:** DCLF's EngineReadWindow hold still covers the water scene passes, sky root passes, skin
+     material resolution, DCLF's load state and the DepthCommitted/EarlyPrepass/Prepass/BeforePresent/EndFrame walks;
+     precipitation occlusion (`Skylighting.cpp`, `OccluderRules.cpp`, `WetnessEffects.cpp`) needs the engine's
+     `ComputeProjection` ported; ImageSpace's step-lag check, Begin's reads and ApplyReflections' `active` write; the frame
+     end's LODBlendRingFix and SunShadowMaskFix updates, the SSS settings write and the harness's player read.
+
+## 2026-11-27: steps after phase 7 (user)
+
+213. **Three steps follow the thread split** (roadmap section "After phase 7"): a cleanup pass over all render-thread
+     changes (suboptimal code, duplicate-intent code consolidated, migration switches and temporary code removed); a
+     performance investigation confirming fully asynchronous rendering (neither thread waits on the other), fixing clear
+     issues and logging larger design decisions; a summary and handoff document for future agents.

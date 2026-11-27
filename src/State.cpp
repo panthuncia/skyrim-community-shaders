@@ -3,6 +3,7 @@
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
+#include "Snapshot/SideEffects.h"
 
 #include <algorithm>
 #include <cmath>
@@ -415,8 +416,12 @@ void State::Reset()
 
 	Feature::ForEachLoadedFeature("Reset", [](Feature* feature) { feature->Reset(); });
 	LandscapeSeamsFix::GetInstance().Reset();
-	LODBlendRingFix::GetInstance().Update();
-	SunShadowMaskFix::Update();
+	// Native makes CS's per-update engine writes on the game side, after the capture (Snapshot/SideEffects).
+	const bool gameSideWrites = Snapshot::SideEffects::Installed();
+	if (!gameSideWrites) {
+		LODBlendRingFix::GetInstance().Update(Snapshot::GameStep());
+		SunShadowMaskFix::Update();
+	}
 
 	lastModifiedPixelDescriptor = 0;
 	lastModifiedVertexDescriptor = 0;
@@ -429,21 +434,23 @@ void State::Reset()
 	// Publish for off-thread readers (e.g. the MCP listener thread).
 	frameCountAtomic.store(frameCount, std::memory_order_relaxed);
 
-	if (auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager)) {
-		auto& BSImagespaceShaderApplyReflections = imageSpaceManager->GetRuntimeData().BSImagespaceShaderApplyReflections;
+	if (!gameSideWrites) {
+		if (auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager)) {
+			auto& BSImagespaceShaderApplyReflections = imageSpaceManager->GetRuntimeData().BSImagespaceShaderApplyReflections;
 
-		// Disable reflections being applied to things other than water
-		if (BSImagespaceShaderApplyReflections.get()) {
-			BSImagespaceShaderApplyReflections->active = false;
+			// Disable reflections being applied to things other than water
+			if (BSImagespaceShaderApplyReflections.get()) {
+				BSImagespaceShaderApplyReflections->active = false;
+			}
 		}
-	}
 
-	// Disable "improved" snow shader, unsupported
-	static RE::Setting* improvedSnow = nullptr;
-	if (!improvedSnow)
-		improvedSnow = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bEnableImprovedSnow:Display"));
-	if (improvedSnow)
-		improvedSnow->data.b = false;
+		// Disable "improved" snow shader, unsupported
+		static RE::Setting* improvedSnow = nullptr;
+		if (!improvedSnow)
+			improvedSnow = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bEnableImprovedSnow:Display"));
+		if (improvedSnow)
+			improvedSnow->data.b = false;
+	}
 
 	activeReflections = false;
 }

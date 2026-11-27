@@ -18,7 +18,7 @@ struct SunShadowMaskFix : EngineFix
 	/** @brief Hooks the lighting property render pass builder. */
 	void Install() override;
 
-	/** @brief Caches the sun's light mask bits for the next frame's cull. Render thread, once per frame. */
+	/** @brief Caches the sun's light mask bits for the next cull. Main thread: native once per game update after the capture (Snapshot/SideEffects), guest at each frame's end. */
 	static void Update();
 
 private:

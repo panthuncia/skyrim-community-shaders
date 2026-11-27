@@ -61,10 +61,11 @@ struct ScreenshotFeature : public Feature
 	 */
 	void SuppressVanillaMultiScreenshot() const;
 	/**
-	 * @brief Any thread: the next Present's back buffer saved to a_outputPath (its extension replaced by the format's), for scripted
-	 * runs that must tie a capture to a frame (DCLF's test harness, dclf:shot=).
+	 * @brief Any thread: the back buffer of the next Present whose frame renders snapshot a_minSnapshot or a newer one (0: the next
+	 * Present) saved to a_outputPath (its extension replaced by the format's), for scripted runs that must tie a capture to a frame
+	 * (DCLF's test harness, dclf:shot=, cs-test's shots). Later requests wait behind it.
 	 */
-	void RequestCapture(std::filesystem::path a_outputPath);
+	void RequestCapture(std::filesystem::path a_outputPath, std::uint64_t a_minSnapshot = 0);
 	/** @brief Any thread: whether a RequestCapture capture is still to be saved (requested, read back or being encoded). */
 	bool ScriptedCapturesPending() const { return scriptedInFlight.load(std::memory_order_acquire) != 0; }
 	bool applyCropToScreenshot = true;
@@ -121,10 +122,15 @@ private:
 	Util::Subrect::Controller subrect;
 	// bAllowScreenShot as loaded from Skyrim.ini, captured before we first override it.
 	std::optional<bool> vanillaScreenshotDefault;
-	// RequestCapture's paths, taken in order by the next Presents (one a Present); empty: the user's capture, named by time.
+	// RequestCapture's paths and the snapshot each must render, taken in order by the next Presents (one a Present).
+	struct RequestedCapture
+	{
+		std::filesystem::path path;
+		std::uint64_t minSnapshot = 0;
+	};
 	std::mutex requestedPathsMutex;
-	std::queue<std::filesystem::path> requestedPaths;
-	std::filesystem::path captureOutputPath;  // render thread: the path Capture() saves to (empty: BuildScreenshotPath)
+	std::queue<RequestedCapture> requestedPaths;
+	std::filesystem::path captureOutputPath;  // render thread: the path Capture() saves to (empty: the user's capture, BuildScreenshotPath)
 
 	// SRV-readable copy used when the capture source's own SRV can't be sampled
 	// directly (kFRAMEBUFFER on flat aliases the swap-chain backbuffer).

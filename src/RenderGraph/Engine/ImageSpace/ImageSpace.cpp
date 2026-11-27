@@ -2927,8 +2927,12 @@ namespace RenderGraph::Engine::ImageSpace
 		RenderSSAO::Run(helper, 1, 1, false);
 		// The snow pass with improved snow on and its helper active (Main::RenderWorld, SE 100424 / AE 107142), else the copy of kMAIN
 		// into kSNOW_SWAP at the render target manager's size.
+		// The switches are the snapshot's (the description at Begin reads the same).
+		const auto* world = SnapshotWorld();
+		if (!world)
+			RenderGraph::Fatal("ImageSpace", "Main::RenderWorld's ImageSpace calls: the snapshot has no ImageSpace block");
 		const auto snow = NativePost::Field<std::uintptr_t>(base, 0x1e8);
-		if (*w.improvedSnow && snow && NativePost::Field<bool>(snow, 0x08)) {
+		if (world->improvedSnow && world->snowOn && snow) {
 			// No test scene reaches the snow pass: it stays the engine's function, whose draw the ImageSpace detours take.
 			static const REL::Relocation<void (*)(std::uintptr_t, std::int32_t, std::int32_t)> renderSnow{ REL::RelocationID(100537, 107267) };
 			renderSnow(snow, 1, 0x71);
@@ -2937,7 +2941,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 		SsaoComposite() = true;
 		// The composite reads whether the reflections ran (415072), which Main::RenderWorld copies from their helper.
-		*w.saoReflections = NativePost::Field<bool>(NativePost::Field<std::uintptr_t>(base, 0x1c0), 0x10);
+		*w.saoReflections = world->ssrOn;
 		RenderSSAO::Run(helper, 0x71, 1, true);
 	}
 
@@ -2978,6 +2982,12 @@ namespace RenderGraph::Engine::ImageSpace
 	{
 		const auto* block = NativePost::NativeBlock();
 		return block ? &block->inputs : nullptr;
+	}
+
+	const WorldSettings* SnapshotWorld()
+	{
+		const auto* block = NativePost::NativeBlock();
+		return block ? &block->world : nullptr;
 	}
 
 	bool SceneInMain()

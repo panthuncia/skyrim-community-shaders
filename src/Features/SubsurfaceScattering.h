@@ -29,9 +29,9 @@ public:
 
 	struct Settings
 	{
-		// Applied to the engine's character light each frame (Reset). No graph state depends on it.
+		// Applied to the engine's character light (ApplyCharacterLight). No graph state depends on them.
 		CS::Setting<std::uint32_t> EnableCharacterLighting = 0;
-		float CharacterLightingStrength = 1.0f;
+		CS::Setting<float> CharacterLightingStrength = 1.0f;
 		// The render graph's programs and passes follow it through a frame revision.
 		CS::Setting<int> SSMode = 1;
 		int ScatterMode = kPreAndPostScatter;
@@ -106,8 +106,14 @@ public:
 
 	/** @brief Creates GPU resources including constant buffers and temporary render textures. */
 	virtual void SetupResources() override;
-	/** @brief Resets per-frame state including character lighting and kernel recalculation. */
+	/** @brief Resets per-frame state: the kernels, and in guest the character light. */
 	virtual void Reset() override;
+
+	/**
+	 * @brief Writes the settings into the engine's character light. Main thread: native once per game update after the capture
+	 * (Snapshot/SideEffects, the adopted values), guest at each frame's end (Reset).
+	 */
+	void ApplyCharacterLight(bool a_enabled, float a_strength);
 	virtual void RestoreDefaultSettings() override;
 
 	/** @brief Draws the ImGui settings panel for Subsurface Scattering configuration. */

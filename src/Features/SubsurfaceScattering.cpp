@@ -1,6 +1,7 @@
 #include "SubsurfaceScattering.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/SideEffects.h"
 
 #include "../I18n/I18n.h"
 #include "Deferred.h"
@@ -14,6 +15,7 @@
 SubsurfaceScattering::SubsurfaceScattering()
 {
 	settings.EnableCharacterLighting.Bind(CS::SettingRegistry::Declare("SubsurfaceScattering.EnableCharacterLighting"));
+	settings.CharacterLightingStrength.Bind(CS::SettingRegistry::Declare("SubsurfaceScattering.CharacterLightingStrength"));
 	settings.SSMode.Bind(CS::SettingRegistry::Declare("SubsurfaceScattering.SSMode"));
 }
 
@@ -39,7 +41,7 @@ void SubsurfaceScattering::DrawSettings()
 		ImGui::Text("%s", T(TKEY("enable_character_lighting_tooltip"), "Vanilla feature."));
 	}
 	if (settings.EnableCharacterLighting.Get()) {
-		ImGui::SliderFloat(T(TKEY("strength"), "Strength"), &settings.CharacterLightingStrength, 0, 5, "%.2f");
+		Util::SliderFloat(T(TKEY("strength"), "Strength"), settings.CharacterLightingStrength, 0, 5, "%.2f");
 	}
 
 	Util::RadioButton(T(TKEY("separable_sss"), "Separable SSS"), settings.SSMode, 0);
@@ -420,17 +422,23 @@ void SubsurfaceScattering::EnsureD3D11Resources()
 	}
 }
 
-void SubsurfaceScattering::Reset()
+void SubsurfaceScattering::ApplyCharacterLight(bool a_enabled, float a_strength)
 {
-	auto shaderManager = CS_ENGINE_READ(ShaderManagerState, Other, globals::game::smState);
-	auto shaderCache = globals::shaderCache;
-	shaderManager->characterLightEnabled = shaderCache->IsEnabled() ? settings.EnableCharacterLighting.Get() != 0 : true;
+	auto shaderManager = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
+	shaderManager->characterLightEnabled = globals::shaderCache->IsEnabled() ? a_enabled : true;
 	if (shaderManager->characterLightEnabled) {
 		if (CharacterLightingStrengthOriginal == -1.0f) {
 			CharacterLightingStrengthOriginal = shaderManager->characterLightParams[2];
 		}
-		shaderManager->characterLightParams[2] = settings.CharacterLightingStrength * CharacterLightingStrengthOriginal;
+		shaderManager->characterLightParams[2] = a_strength * CharacterLightingStrengthOriginal;
 	}
+}
+
+void SubsurfaceScattering::Reset()
+{
+	// Native writes the character light on the game side (Snapshot/SideEffects).
+	if (!Snapshot::SideEffects::Installed())
+		ApplyCharacterLight(settings.EnableCharacterLighting.Get() != 0, settings.CharacterLightingStrength.Get());
 
 	if (updateKernels) {
 		updateKernels = false;

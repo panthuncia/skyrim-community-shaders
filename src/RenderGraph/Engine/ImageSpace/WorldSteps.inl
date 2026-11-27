@@ -661,6 +661,11 @@ std::uint32_t EngineFrameCounter()
 /** @brief The normals target as the engine picks it (100460). The swap on even frames with SSR on, else the main one. */
 std::uint16_t EngineNormalsParity()
 {
+	// Native: the snapshot's SSR switch and frame counter (the game thread moves the counter once per update, S2).
+	if (const auto* world = SnapshotWorld()) {
+		if (const auto* inputs = SnapshotInputs(); inputs && inputs->read)
+			return world->ssrOn ? static_cast<std::uint16_t>(~inputs->frameCounter & 1u) : 0;
+	}
 	auto* manager = RE::ImageSpaceManager::GetSingleton();
 	const auto reflections = manager ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(manager) + 0x1c0) : 0;
 	const bool ssr = reflections && *reinterpret_cast<const bool*>(reflections + 0x10);
