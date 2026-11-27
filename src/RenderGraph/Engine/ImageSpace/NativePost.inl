@@ -981,7 +981,7 @@ namespace NativePost
 			if (a_f.taaMode != 2)
 				a_state.taaParity = 1 - a_state.taaParity;
 			const auto history = static_cast<std::uint16_t>(Frame::Driver::Current().parity & 1u);
-			const auto normals = static_cast<std::uint16_t>(globals::deferred && globals::deferred->forwardRenderTargets[2] == RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK_SWAP);
+			const auto normals = EngineNormalsParity();
 			const auto effect = a_f.taaWater ? E::ISTemporalAA_Water : E::ISTemporalAA;
 			NativeStep taa{ .key = { WorldScope::Taa, effect, static_cast<std::uint16_t>((history << 15) | (normals << 14)) }, .group = ChainGroup::kTaa,
 				.effect = EffectIndex(effect) };

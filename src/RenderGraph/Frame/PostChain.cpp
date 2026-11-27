@@ -64,7 +64,7 @@ namespace RenderGraph::Frame::PostChain
 		// The normal mask is downsampled when this is set and the mode is above 1. Mode 4 is the compute form.
 		constexpr REL::RelocationID kSsrDownsample{ 513568, 391448 };
 		constexpr REL::RelocationID kSsrDownsampleMode{ 513454, 391287 };
-		// GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP (100460) returns (~counter & 1) | 4 while SSR is active, else 4.
+		// gFrameCounter: the normals target (WorldPass::NormalsTargetOf) and the water history follow its parity.
 		constexpr REL::RelocationID kFrameCounter{ 525008, 411489 };
 		// Main::RenderWorld (100424 / 107142) runs the snow pass when this and the helper are on, else copies kMAIN.
 		constexpr REL::RelocationID kSnow{ 513332, 391105 };
@@ -424,7 +424,7 @@ namespace RenderGraph::Frame::PostChain
 		WorldFields ReadWorldFrom(Scope a_scope, WorldFields a_fields, const Engine::ImageSpace::WorldSettings& a_world, std::uint32_t a_frameCounter)
 		{
 			a_fields.read = true;
-			a_fields.normals = static_cast<std::uint8_t>(a_world.ssrOn ? ((~a_frameCounter & 1u) | 4u) : 4u);
+			a_fields.normals = static_cast<std::uint8_t>(Engine::Native::WorldPass::NormalsTargetOf(a_world.ssrOn, a_frameCounter));
 			a_fields.ssrBlur = a_world.ssrBlur;
 			a_fields.saoHalf = a_world.saoHalf;
 			switch (a_scope) {
@@ -475,8 +475,7 @@ namespace RenderGraph::Frame::PostChain
 		fields.read = true;
 		const auto reflections = Member<std::uintptr_t>(base, kReflections);
 		const bool ssr = reflections && Member<bool>(reflections, 0x10);
-		// Follows the frame counter (100460).
-		fields.normals = static_cast<std::uint8_t>(ssr ? ((~Global<std::uint32_t>(kFrameCounter) & 1u) | 4u) : 4u);
+		fields.normals = static_cast<std::uint8_t>(Engine::Native::WorldPass::NormalsTargetOf(ssr, Global<std::uint32_t>(kFrameCounter)));
 		fields.ssrBlur = Global<bool>(kSsrBlur);
 		fields.saoHalf = Global<bool>(kSaoHalf);
 		switch (a_scope) {

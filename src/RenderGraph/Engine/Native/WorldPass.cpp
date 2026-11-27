@@ -122,7 +122,7 @@ namespace RenderGraph::Engine::Native::WorldPass
 		auto* manager = RE::ImageSpaceManager::GetSingleton();
 		const auto reflections = manager ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(manager) + 0x1c0) : 0;
 		const bool ssr = reflections && *reinterpret_cast<const bool*>(reflections + 0x10);
-		return static_cast<std::int32_t>(ssr ? ((~*frameCounter.get() & 1u) | 4u) : 4u);
+		return NormalsTargetOf(ssr, *frameCounter.get());
 	}
 
 	bool InRenderWorld()

@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/LightLimitFix.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
 #include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WaterEffects.h"
@@ -271,7 +272,11 @@ namespace RenderGraph::Engine::Native::Scene
 			if (Global<const bool>(525010, 411491))
 				Field<std::array<float, 4>>(Global<RE::NiCamera*>(528062, 415007), 0x174) = Global<const std::array<float, 4>>(259744, 207173);
 			p.normalsClear = Global<const float>(230690, 187405);
-			p.normalsTarget = WorldPass::EngineNormalsTarget();
+			// The update's snapshot carries the SSR switch and frame counter every native reader of the normals target uses.
+			if (const auto* imageSpace = a_snapshot.Block<ImageSpace::Block>(); imageSpace && imageSpace->inputs.read)
+				p.normalsTarget = WorldPass::NormalsTargetOf(imageSpace->world.ssrOn, imageSpace->inputs.frameCounter);
+			else
+				p.normalsTarget = WorldPass::EngineNormalsTarget();
 			p.mainClear = Global<const std::array<float, 3>>(527696, 414618);
 			p.snowClear = Global<const bool>(513332, 391105);
 			if (p.firstPerson) {

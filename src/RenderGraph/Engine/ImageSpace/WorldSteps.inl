@@ -658,18 +658,15 @@ std::uint32_t EngineFrameCounter()
 	return *counter.get();
 }
 
-/** @brief The normals target as the engine picks it (100460). The swap on even frames with SSR on, else the main one. */
+/** @brief 1 when the frame's normals target (WorldPass::NormalsTargetOf) is the swap, else 0. */
 std::uint16_t EngineNormalsParity()
 {
-	// Native: the snapshot's SSR switch and frame counter (the game thread moves the counter once per update, S2).
+	// Native: the snapshot's SSR switch and frame counter, which native's game half also took the world pass's target from.
 	if (const auto* world = SnapshotWorld()) {
 		if (const auto* inputs = SnapshotInputs(); inputs && inputs->read)
-			return world->ssrOn ? static_cast<std::uint16_t>(~inputs->frameCounter & 1u) : 0;
+			return static_cast<std::uint16_t>(Native::WorldPass::NormalsTargetOf(world->ssrOn, inputs->frameCounter) & 1);
 	}
-	auto* manager = RE::ImageSpaceManager::GetSingleton();
-	const auto reflections = manager ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(manager) + 0x1c0) : 0;
-	const bool ssr = reflections && *reinterpret_cast<const bool*>(reflections + 0x10);
-	return ssr ? static_cast<std::uint16_t>(~EngineFrameCounter() & 1u) : 0;
+	return static_cast<std::uint16_t>(Native::WorldPass::EngineNormalsTarget() & 1);
 }
 
 /**
