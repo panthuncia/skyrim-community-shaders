@@ -1120,3 +1120,18 @@ pushes until the user is back.
 224. **Native's render half reads no game-mutated engine state** (native quick, detector at exit after the sky and
      precipitation merges): record half 0.02 per world frame (two one-time reads), frame end none. 1 engine render call
      per world frame. The render thread can now be created.
+
+## 2026-11-27: native local map (snap5-localmap2; director accepted)
+
+225. **In native, the local map is CS's:** the `LocalMapRender` detour calls `Scenes::Native::RenderLocalMap`. Roots are
+     the attached cells' node children, the sky cell, the portal-graph list, ShadowSceneNode[0]'s children 8 and 9 and the
+     fog root. Cell children are frustum culled a level at a time (ORGModuleServices' SIMD sphere kernel); the other roots
+     keep everything outside hidden subtrees, as the engine does. Draws: Utility base-texture objects, Utility fog,
+     Lighting land with local-map rules, and water through a new `WATER_ORG_SCENE` build. Skeleton clears; ISLocalMap is
+     staged natively inside an effect scope. Per-draw observe: 0 differences apart from three explained ones (c21 1 ulp,
+     the water timer comes from the snapshot, a fog view never read); the observe step is deleted. Local map frames:
+     35.0 engine render calls per frame -> 2.0; the second is the frozen-world menu-background copy (AE 107130), not the
+     local map. Accepted as is: tree LOD fails the frame (no batch held one); the local map batch takes 8,192 draws
+     (guest too); a menu-scene draw whose shader is not compiled yet is left out of that render instead of failing.
+     Open: membership (CS draws 174 passes the engine does not and misses 2), the frozen-world copy, the explored-area
+     difference against D3D11 that predates this, SE untested.
