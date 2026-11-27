@@ -103,7 +103,7 @@ namespace RenderGraph::Engine::Scaleform::UiResources
 
 	/**
 	 * @brief PushTempRenderTarget's pool (SE 82888 / AE 85005), CS's port: a pooled target at least a_width x a_height, with a
-	 * depth-stencil when a_stencil, its asked size set. The caller pushes it. Render owner.
+	 * depth-stencil when a_stencil, its asked size set. The caller pushes it. UI producer (GFx's renderer state, never the render side's).
 	 */
 	RenderTarget* AcquireTempTarget(void* a_renderer, std::uint32_t a_width, std::uint32_t a_height, bool a_stencil);
 
@@ -115,9 +115,9 @@ namespace RenderGraph::Engine::Scaleform::UiResources
 	 * uploads made between streams belong to the next one.
 	 */
 	/** @{ */
-	/** @brief The recorder opened stream a_sequence. Render owner. */
+	/** @brief The recorder opened stream a_sequence. UI producer. */
 	void OpenStream(std::uint64_t a_sequence);
-	/** @brief The recorder finished stream a_sequence. Render owner. */
+	/** @brief The recorder finished stream a_sequence. UI producer. */
 	void CloseStream(std::uint64_t a_sequence);
 	/** @brief Applies every queued upload of streams up to a_sequence, in call order. Render owner. */
 	void ApplyUploads(std::uint64_t a_sequence);

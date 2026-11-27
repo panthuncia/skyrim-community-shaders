@@ -1,5 +1,10 @@
 #pragma once
 
+namespace Snapshot
+{
+	struct FrameSnapshot;
+}
+
 /**
  * @brief Scaleform on the render graph, in graph mode (Engine::GraphMode).
  *
@@ -21,4 +26,40 @@ namespace RenderGraph::Engine::Scaleform
 	 * MenuManager::DrawInterface draws nothing itself: it is a game-side producer of the UI stream (decision 16). Any thread.
 	 */
 	bool OwnsRenderer();
+
+	/**
+	 * @brief Native mode: this thread produces the UI without render ownership (phase 7's game thread). Open it around a call of
+	 * MenuManager::DrawInterface (SE 79947 / AE 82084) in a game update, before the snapshot is published. GFx's calls are only
+	 * recorded, into Snapshot::Building()'s UI stream holder. Nothing is replayed and no render-owned state is touched: the render
+	 * side draws the stream with ReplaySnapshotUi. Only for frames where GFx alone records inside DrawInterface (an unpaused world
+	 * frame without the map, see snap7-thread.md "Package U"). Without the scope, the render owner's DrawInterface decides the mode
+	 * itself.
+	 */
+	class ProducerScope
+	{
+	public:
+		ProducerScope();
+		~ProducerScope();
+		ProducerScope(const ProducerScope&) = delete;
+		ProducerScope& operator=(const ProducerScope&) = delete;
+	};
+
+	/**
+	 * @brief The UI point, native mode, render owner: DrawInterface's render-side work (Upscaling's PostDisplay, the clean-scene copy,
+	 * HDR's UI buffer, temporal off), then a_snapshot's UI stream replayed whole from its header, then temporal back. A repeated
+	 * render of the snapshot calls it again. Call it where Main::DrawFrame calls DrawInterface.
+	 */
+	void ReplaySnapshotUi(const Snapshot::FrameSnapshot& a_snapshot);
+
+	/**
+	 * @brief Whether DrawInterface's render-side work runs at CS's UI point (native, DrawInterface hooked). Then the features'
+	 * DrawInterface detours only call through. Any thread.
+	 */
+	bool OwnsUiPoint();
+
+	/**
+	 * @brief Engine render work other than GFx inside DrawInterface (a menu scene, an ImageSpace effect, the local map). In a
+	 * record-only DrawInterface it would draw out of order with the displays: counted and logged once. Any thread.
+	 */
+	void NoteOtherUiWork(const char* a_what);
 }

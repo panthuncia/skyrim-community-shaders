@@ -111,8 +111,8 @@ point (`Scaleform::ReplaySnapshotUi`), with DrawInterface's render-side detours 
 
 | # | Package | Single-thread testable | Status |
 |---|---|---|---|
-| P | Game-half accessors and thread-identity cleanups: `Snapshot::Building()` for game-half readers; FrameGlobals scope over the whole game half; `SampleEngine` into the capture; `FrameOnlySource`/`FreezeTestAtBegin` without `IsMainThread`; the engine-read window closed at the update's end; `MakeRegistered` at install; the kept rows handed to the render side as copies or views; the fade statics and the per-render fade kick's camera from the ticket | yes | done (snap7/thread-prep), section 6 |
-| U | UI producer record-only (3.5) | yes (record, then replay at once) | see section 6 |
+| P | Game-half accessors and thread-identity cleanups: `Snapshot::Building()` for game-half readers; FrameGlobals scope over the whole game half; `SampleEngine` into the capture; `FrameOnlySource`/`FreezeTestAtBegin` without `IsMainThread`; the engine-read window closed at the update's end; `MakeRegistered` at install; the kept rows handed to the render side as copies or views; the fade statics and the per-render fade kick's camera from the ticket | yes | done (snap7/thread-prep, merged), section 6 |
+| U | UI producer record-only (3.5) | yes (record, then replay at once) | done (snap7/thread-ui, merged), section 6 |
 | S1 | CS's game frame in place of Main::DrawFrame for routed updates, game half before the render half, scene pairing (3.2, 3.4), still one thread | yes | |
 | S2 | The render thread (3.3), parking, cross-thread checks, PaceGameUpdate on | - | |
 | R | Resize on the render thread (native device Resize, swap chain, target versions) instead of Renderer::RequestWindowResize + Begin | - | |
@@ -211,6 +211,100 @@ Decided by the agent, to confirm:
 - P-d. Guest keeps live fade values and camera at its render points (as SKY-a); it reads eye and tree height from the ticket, which it
   already took at the frame start.
 - P-e. A movie's or loading screen's frame-only snapshot keeps the last engine values (the old code did not sample off the main thread).
+
+### Package U: the UI producer records without render ownership (sub-lead `th-ui`, branch `snap7/thread-ui`)
+
+Built in today's single-threaded frame. No visible change is intended. Code: `src/RenderGraph/Engine/Scaleform/Renderer.cpp`
+and `Scaleform.h`.
+
+**Who records.** `Mirroring()` used to mean "native and the render owner". Now it means "native and this thread is inside a
+DrawInterface it produces" (thread-local `UiMode`: `None`, `PerDisplay`, `RecordOnly`). A GFx call on the render owner outside
+DrawInterface is counted and logged once. Every run below shows 0. Streams are per DrawInterface: `FrameClock::PresentSerial`
+and `UiStream::frame` are gone, and so is the "stream left open past its present" retire in `Stream()`. `FinishStream()` no
+longer replays.
+
+**The frame's mode, decided at DrawInterface's start** (render owner, no `ProducerScope` open):
+- *record-only* when all of these hold: the DrawInterface is inside a game update; the stream's snapshot is a World frame with
+  `!menus.paused && !menus.map`; the UI asked again at DrawInterface's start says the same (`GameIsPaused`, the map); and no
+  Book/Map PreDisplay is due. GFx only records, into `Snapshot::Building()->ui`, and nothing is replayed. Then
+  `ReplaySnapshotUi` runs at once, on the same thread.
+- *per display* otherwise: menus that pause, the map, the book, loading screens, frame-only snapshots. The render owner records
+  and replays each display at its EndDisplay, as before, inside the UI point's scope.
+- The live UI check was added after `s7-thui-nvk-menu-scenes`. There, an inventory opened by the update's UI jobs after the
+  capture drew its menu scene in a frame that was record-only by the snapshot's menus.
+
+**Stream holder.** In a game update the stream goes into `Snapshot::Building()` (th-prep's accessor, cherry-picked as
+703f1d543). Outside one it goes into `Snapshot::Current()` (loading screen thread, frame-only main-thread frames), as before. A
+holder that already has a stream marks a cadence repeat: GFx draws again and nothing is recorded.
+
+**Render-owned state, slot by slot (native branches):**
+- Safe on the producer: the recorder and its mirror, `NativeTargets` (GFx's own target stack), `ReadTargetViews` /
+  `ReadRendererTarget` (CS objects' fields), `UiResources::AcquireTempTarget` / `ReleaseTempTargets` (GFx's pool; textures are
+  made through the device from any thread; stream references keep replaced textures alive), `UiResources::Release`,
+  `Open/CloseStream` (one atomic), `VideoModeSet`, texture creation and uploads (queued; `ApplyUploads` runs in the replay).
+  Their docs now say "UI producer".
+- Moved off the producer: BeginDisplay's engine target read (`ReadTargets`: the shadow state's target and the renderer's
+  target array). A record-only stream marks the display (`command.c`) and keeps GFx's current target as the fallback. The
+  replay reads the engine's targets (`ReadEngineTargets`, RecordTime). DrawInterface (AE 0x140fa4f00) binds slot 0 and depth
+  at its start and does not undo them, so the targets read after it are the ones read during it.
+- Replay side only: `RunReplay`, `StartReplay`, `ApplyUploads`, `Retire::AfterThisFrame`, and the repeat check (now keyed on
+  `Replay::again`, a stream replayed again).
+
+**The replay entry.** `void Scaleform::ReplaySnapshotUi(const Snapshot::FrameSnapshot&)` runs on the render owner (fatal
+otherwise). It does the UI point's render-side work (`UiPoint`: Upscaling's PostDisplay, the clean-scene copy, HDR's
+SetUIBuffer, `Util::SetTemporal(false)`), then replays the snapshot's stream whole from its header, then sets temporal back.
+In native, the features' detours on 82084 (Upscaling, HDR, Hooks.cpp) just call through (`Scaleform::OwnsUiPoint()`).
+Guest and plain D3D11 are unchanged. The lead calls `ReplaySnapshotUi(*Snapshot::Current())` on the render thread where
+Main::DrawFrame called DrawInterface, after VL, before Renderer::End. A repeat calls it again.
+
+**What the game thread opens.** `Scaleform::ProducerScope` around its call of `MenuManager::DrawInterface`, in a game update
+whose snapshot `Building()` returns. The detour then records only, into `Building()->ui`, and never replays.
+
+**Found, for S1/S2:**
+- DrawInterface's own body writes render state before GFx draws: `Renderer::SetRenderTarget` on slots 0-2, the depth target,
+  `Renderer::ApplyState`, a `UpdateViewPort` per menu, and at the end `ImageSpaceManager::RenderEffect(0x22)` when the target
+  is not the framebuffer. On the game thread those race the render thread's shadow state. They need porting out, or a
+  DrawInterface replacement that calls each menu's PostDisplay only.
+- The snapshot's menus are captured before the update's UI jobs. A menu that opens in those jobs draws in the same update's
+  DrawInterface. The S1 routing decision needs the menus as of DrawInterface's start (capture them after
+  `WaitForJobTask(0, 2)`), or that frame draws a menu scene out of order.
+- `OffscreenPreDisplay::thunk` runs PreDisplay at once off the render owner, so on the game thread book and map frames would
+  draw engine work there. Those frames are not routed (TH-a).
+- `UiResources::TakeStatsLine` reads the temp pool's sizes from the census thread. Harmless today; a race once the producer has
+  its own thread.
+
+**Decided by the agent, to confirm:**
+- U-a. In record-only frames, the UI point's work (PostDisplay, clean scene, temporal off) now runs after DrawInterface's
+  engine prologue instead of before it. Nothing in native reads the engine viewport or jitter between them. Upscalers and HDR
+  shots pass.
+- U-b. A cadence repeat is detected by the holder already having a stream, not by `Render().repeat`, so the producer reads no
+  render identity. In a per-display repeat, book pages from a due PreDisplay are now drawn once, from the snapshot's stream.
+  Before, they were drawn from a freshly recorded stream and again from the snapshot's.
+- U-c. Engine render work inside a record-only DrawInterface (menu scene, ImageSpace effect, local map) is counted and logged,
+  not fatal. After the live UI check every run shows 0, but the predicate is not proven complete (non-pausing menus with 3D
+  scenes, if any).
+- U-d. UiPoint uses `upscaling.loaded` / `hdrDisplay.loaded` to choose the work, as the detours' install conditions do. Nothing
+  clears `loaded` after PostPostLoad.
+
+Runs (Dev-Fast, stage `s7-thui`):
+
+| Config | Label | Result |
+|---|---|---|
+| native-vulkan+quick | s7-thui-nvk-quick | passed (shot reference); left the world before the first record-only frame |
+| native-vulkan+menu-ui | s7-thui-nvk-menuui | passed; record-only from snapshot 29, HUD correct in the closed shot |
+| native-vulkan+menu-scenes | s7-thui-nvk-menu-scenes | passed; 2 menu-scene calls inside a record-only DrawInterface (the inventory's first frame): led to the live UI check |
+| native-vulkan+upscalers | s7-thui-nvk-upscalers | passed (dlss, fsr, taa, xess); 229 record-only |
+| native-vulkan+cadence-repeat | s7-thui-nvk-cadence-repeat | passed; 137 repeated renders, 297 segments as in the first render, 0 differ |
+| native-vulkan+cadence-drop-cells | s7-thui-nvk-cadence-drop-cells | passed; 351 record-only |
+| native-vulkan+hdr | s7-thui-nvk-hdr | passed (6 shots); 179 record-only |
+| guest+quick | s7-thui-guest-quick | passed |
+| native-vulkan+menu-scenes (live UI check) | s7-thui-f-nvk-menu-scenes | passed; 222 record-only, 0 engine calls inside them |
+| native-vulkan+ui-menus | s7-thui-f-nvk-ui-menus | passed (hud, inventory, map, console); 0 engine calls inside record-only |
+| native-vulkan+menu-ui | s7-thui-f-nvk-menu-ui | passed |
+| native-vulkan+quick | s7-thui-f-nvk-quick | passed |
+
+Every run: 0 GFx calls on the render owner outside DrawInterface. The game's renderer was called for nothing. Skipped:
+native-d3d12 (no ORG, BasicRHI or device change).
 
 ## 7. Decided by the agent, to confirm
 
