@@ -3,13 +3,15 @@
 // (AE 0x1414cc570, SE 0x1412e2f60; its loop is LightSelection's) and Main::RenderShadowMaps (AE 0x1414cbff0, SE 0x1412e2a60).
 // The sun's full-frustum culls and every light's cull and registration are not run: DCLF draws every shadow view from its own tables.
 // Neither are the main camera's list accumulation jobs nor its registration jobs: the scene lists are DCLF's, and the game-visible
-// effects of the list culls are produced on the game thread (Snapshot/SideEffects.h).
+// effects of the list culls are produced on the game thread (Snapshot/SideEffects.h). The selection and the shadow maps' bookkeeping
+// run on the game side and hand the render side the light set (LightSet.h); RenderShadowMaps reads only the set.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/FocusViews.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LocalCameras.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/SunCamera.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunViews.h"
@@ -17,8 +19,9 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
-#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderScene.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -29,8 +32,8 @@ namespace DCLF::Features::Shadows::Native
 {
 	namespace
 	{
-		std::uint32_t keptThisFrame = 0;                  // render thread, inside SelectCasters
-		std::vector<const RE::BSShadowLight*> drawnMaps;  // render thread: the lights RenderShadowMaps drew this frame
+		std::uint32_t keptThisFrame = 0;                  // game side, inside SelectCasters
+		std::vector<const RE::BSShadowLight*> drawnMaps;  // render side: the lights RenderShadowMaps drew this frame
 
 		template <class T>
 		T& Global(std::uint64_t a_se, std::uint64_t a_ae)
@@ -47,6 +50,7 @@ namespace DCLF::Features::Shadows::Native
 		std::uint32_t& KeptLights() { return Global<std::uint32_t>(528090, 415035); }               // 0x14338c900: gLastFrameEnabledShadowCasterLightCount
 		RE::BSShadowLight*& LastFocusHost() { return Global<RE::BSShadowLight*>(528315, 415267); }  // 0x1433dcfb8
 		std::uint8_t& FocusSetting() { return Global<std::uint8_t>(513201, 390932); }               // 0x142032fd0: focus shadows on
+		std::uint8_t& LensFlaresOn() { return Global<std::uint8_t>(513349, 391128); }               // 0x142033658: lens flares are on
 		std::uint32_t& FocusTargets() { return Global<std::uint32_t>(527703, 414625); }             // 0x14332a498: the focus targets' count
 		RE::ShadowSceneNode*& SceneNode() { return Global<RE::ShadowSceneNode*>(513211, 390951); }  // 0x142033060
 		std::byte*& WorldGraph() { return Global<std::byte*>(528087, 415032); }                     // 0x14338c8e8: the world scene graph (camera at +0x128)
@@ -54,7 +58,6 @@ namespace DCLF::Features::Shadows::Native
 		void**& Processes() { return Global<void**>(528077, 415022); }                                             // 0x14338c8a0: the main camera's list processes
 		RE::BSShaderAccumulator*& MainAccumulator() { return Global<RE::BSShaderAccumulator*>(528064, 415009); }   // 0x14338c830
 
-		constexpr std::size_t kLensFlareData = 0x138;    // BSLight::lensFlareData
 		constexpr std::uint32_t kMemoryContext = 0x1D;   // the TLS memory context the shadow lights' Render runs under
 		constexpr std::size_t kTlsMemoryContext = 0x768;
 
@@ -114,12 +117,6 @@ namespace DCLF::Features::Shadows::Native
 			FrameDriver::Get().ShadowCasterKept(a_light, a_first, a_slots);
 		}
 
-		void QueueLensFlareIfAny(RE::BSShadowLight& a_light)
-		{
-			if (DCLF::Engine::At<void*>(&a_light, kLensFlareData))
-				QueueLensFlare(a_light);
-		}
-
 		RE::NiCamera* WorldCamera()
 		{
 			auto* graph = WorldGraph();
@@ -160,7 +157,6 @@ namespace DCLF::Features::Shadows::Native
 				FocusFound() = 1;
 				LastFocusHost() = nullptr;
 			}
-			QueueLensFlareIfAny(*sun);
 		}
 
 		/**
@@ -213,7 +209,6 @@ namespace DCLF::Features::Shadows::Native
 		a_light.GetRuntimeData().maskIndex = MaskCounter()++;
 		ProjectLightRect(a_light, a_worldCamera, first);
 		AccumulateBookkeeping(a_light, LightCount(), a_kept);
-		QueueLensFlareIfAny(a_light);
 	}
 
 	void SelectCasters()
@@ -225,8 +220,6 @@ namespace DCLF::Features::Shadows::Native
 		LightCount() = 0;
 		MaskCounter() = 0;
 		InsideMask() = 0;
-		drawnMaps.clear();
-		::RenderGraph::Engine::ImageSpace::BeginLensFlares();
 		ResetAccumulated(*node);
 		const bool focusOn = FocusSetting() != 0 && FocusTargets() != 0;
 		FocusFound() = 0;
@@ -240,37 +233,70 @@ namespace DCLF::Features::Shadows::Native
 		KeptLights() = keptThisFrame;
 	}
 
-	void RenderShadowMaps()
+	void CaptureSet()
 	{
-		auto* world = WorldCamera();
-		auto* main = MainAccumulator();
-		if (!world || !main)
-			return;
-		// The engine's registration jobs for the Z-prepass and main accumulators and the Z-prepass groups' prepare are not run: native
-		// draws nothing from the main camera's registered passes (DCLF's tables, the sky from the sky root, the water from its shapes).
-		// The accumulators stay empty, so the engine's batch calls that still mark CS's stage points find nothing to draw. The main
-		// accumulator keeps the camera and flag RenderShadowMaps gives it before RenderWorld's batches.
-		auto* mainBytes = reinterpret_cast<std::byte*>(main);
-		DCLF::Engine::At<std::uint8_t>(mainBytes, 0x5C) = 1;
-		DCLF::Engine::At<RE::NiCamera*>(mainBytes, 0x10) = world;
-		{
+		const Snapshot::EngineReads::CaptureScope scope;
+		auto set = std::make_shared<LightSet>();
+		auto* node = SceneNode();
+		set->mask = ReadMaskSettings();
+		set->sun = ReadSun(node ? node->GetRuntimeData().sunShadowDirLight : nullptr);
+		if (node) {
+			// The light walk RenderShadowMaps and the masks make: each kept light once, from its first slot.
 			const MemoryContext context;
-			auto& accumulated = SceneNode()->GetRuntimeData().shadowLightsAccum;
+			auto& accumulated = node->GetRuntimeData().shadowLightsAccum;
+			const bool lensFlares = LensFlaresOn() != 0;
 			std::uint32_t index = 0;
 			while (index < accumulated.size() && accumulated[index]) {
 				auto* light = accumulated[index];
+				CS_ENGINE_READ_MARK(ShadowLights, CapturePoint);
 				const std::uint32_t before = index;
-				// A light DCLF cannot draw casts no shadow this frame. ShadowMapsNative's line counts it.
-				if (Engine::RenderLightNatively(*light, index))
-					drawnMaps.push_back(light);
+				ShadowLight maps;
+				Engine::PrepareLightMaps(*light, maps, index);
+				// Read after the bookkeeping, which gave the descriptors their targets, slices and light transforms.
+				auto& captured = set->lights.emplace_back(ReadLight(*light));
+				captured.verdict = maps.verdict;
+				captured.draws = std::move(maps.draws);
+				captured.left = maps.left;
+				// The selection queues a kept light with lens flare data for the gather (AE 0x1414cec70).
+				if (lensFlares)
+					captured.lensFlare = light->lensFlareData;
 				if (index == before)
 					++index;
 			}
+			// The masks' loop gave each light's maps back after its draw, drawn or not. The render side draws from the set's values, so the
+			// slices go back here, before the next update's game logic can remove a light.
+			for (const auto& captured : set->lights)
+				ReturnShadowmaps(*const_cast<RE::BSShadowLight*>(captured.light));
 		}
+		// The main accumulator keeps the camera and flag RenderShadowMaps gave it before RenderWorld's batches. Its registration jobs
+		// are not run: native draws nothing from the main camera's registered passes, so the engine's batch calls that still mark CS's
+		// stage points find nothing to draw.
+		if (auto* main = MainAccumulator(); main && WorldCamera()) {
+			auto* mainBytes = reinterpret_cast<std::byte*>(main);
+			DCLF::Engine::At<std::uint8_t>(mainBytes, 0x5C) = 1;
+			DCLF::Engine::At<RE::NiCamera*>(mainBytes, 0x10) = WorldCamera();
+		}
+		MadeSet(std::move(set));
 	}
 
-	bool DrewMaps(const RE::BSShadowLight& a_light)
+	void RenderShadowMaps()
 	{
-		return std::ranges::find(drawnMaps, &a_light) != drawnMaps.end();
+		drawnMaps.clear();
+		// The native driver's render half adopted its game half's set. A frame the engine's own skeleton draws (the frozen menu
+		// capture) selected just before, on this thread: it draws that set.
+		if (!::RenderGraph::Engine::Native::Scene::Current().valid)
+			AdoptSet(TakeSet());
+		const auto* set = RenderSet();
+		if (!set)
+			return;
+		// A light DCLF cannot draw casts no shadow this frame. ShadowMapsNative's line counts it.
+		for (const auto& light : set->lights)
+			if (Engine::RenderLightNatively(light))
+				drawnMaps.push_back(light.light);
+	}
+
+	bool DrewMaps(const RE::BSShadowLight* a_light)
+	{
+		return std::ranges::find(drawnMaps, a_light) != drawnMaps.end();
 	}
 }

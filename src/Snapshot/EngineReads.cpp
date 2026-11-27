@@ -29,7 +29,8 @@ namespace Snapshot::EngineReads
 		std::array<std::atomic<std::uint64_t>, kKinds> g_frames{};
 
 		constexpr std::array<const char*, static_cast<std::size_t>(Object::Count)> kObjectNames{ "Sky", "TES", "Player", "Camera", "ShadowState", "GraphicsState",
-			"Renderer", "ShaderManagerState", "Accumulator", "Shaders", "Timer", "Calendar", "Ini", "UI", "ImageSpace", "Water", "Data", "BoundState", "FrameGlobals" };
+			"Renderer", "ShaderManagerState", "Accumulator", "Shaders", "Timer", "Calendar", "Ini", "UI", "ImageSpace", "Water", "Data", "BoundState", "FrameGlobals",
+			"ShadowLights" };
 		constexpr std::array<const char*, static_cast<std::size_t>(Category::Count)> kCategoryNames{ "capture-point", "record-time", "bound-state", "other" };
 		constexpr std::array<const char*, kKinds> kKindKeys{ "world", "frozen_world", "main_menu", "loading", "bink" };
 

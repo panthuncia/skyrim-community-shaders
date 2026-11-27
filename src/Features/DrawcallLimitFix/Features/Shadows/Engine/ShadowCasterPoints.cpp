@@ -1,16 +1,19 @@
-// Hooks on the engine's shadow-light selection, on the render thread. They begin the frame's shadow views and decide their coverage
+// Hooks on the engine's shadow-light selection (the render thread in guest, the native driver's game half in native). They begin the frame's shadow views and decide their coverage
 // before the engine keeps a light, hand each light's views over before its Accumulate, and list them once the selection is done.
 
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/ShadowEngineAddresses.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Snapshot/EngineReads.h"
 
 #include <cstdint>
+#include <optional>
 
 namespace DCLF::Features::Shadows::Engine
 {
@@ -24,6 +27,10 @@ namespace DCLF::Features::Shadows::Engine
 		{
 			static void thunk(RE::NiCamera* a_camera)
 			{
+				// Native: the selection is game-side work (the driver's game half), so what it reads of the engine is a capture.
+				std::optional<Snapshot::EngineReads::CaptureScope> capture;
+				if (Native::Replaces())
+					capture.emplace();
 				castersRunning = true;
 				FrameDriver::Get().BeforeShadowCasters();
 				// Native mode selects the casters itself (Features/Shadows/Native); the engine's function is not entered.
@@ -32,6 +39,9 @@ namespace DCLF::Features::Shadows::Engine
 				else
 					func(a_camera);
 				FrameDriver::Get().ShadowCastersSelected();
+				// Native: the shadow maps' bookkeeping and the light set the render side draws from, once DCLF listed the views.
+				if (Native::Replaces())
+					Native::CaptureSet();
 				castersRunning = false;
 			}
 			static inline REL::Relocation<decltype(thunk)> func;

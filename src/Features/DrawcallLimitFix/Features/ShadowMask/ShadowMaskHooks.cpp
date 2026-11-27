@@ -9,7 +9,6 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
-#include "Features/DrawcallLimitFix/Features/Shadows/Native/LocalCameras.h"
 #include "Snapshot/EngineReads.h"
 
 #include "Globals.h"
@@ -25,6 +24,7 @@
 
 #include <format>
 #include <mutex>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -64,11 +64,11 @@ namespace DCLF::Features::ShadowMask
 		 * @brief What the calls do after their lights: the write mode back to 1; the world's call returns each light's maps (after
 		 * its draw, which the native build has read), a menu scene's restores the clear colours.
 		 */
-		void Finish(View a_view, const std::vector<RE::BSShadowLight*>& a_lights)
+		void Finish(View a_view, std::span<const Native::Light> a_lights)
 		{
 			if (a_view == View::World)
-				for (auto* light : a_lights)
-					light->ReturnShadowmaps();
+				for (const auto& light : a_lights)
+					const_cast<RE::BSShadowLight*>(light.light)->ReturnShadowmaps();
 			auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			if (rss.alphaBlendWriteMode != 1) {
 				rss.alphaBlendWriteMode = 1;
@@ -96,9 +96,11 @@ namespace DCLF::Features::ShadowMask
 				SetTargets();
 				auto run = std::make_shared<Run>();
 				run->view = kView;
-				std::vector<RE::BSShadowLight*> lights;
-				std::string why;
-				if (!Native::Build(kView, *run, lights, why)) {
+				// The engine renders this scene: its lights are read here, where they are drawn.
+				const auto* node = Native::SceneNodeOf(kView);
+				const auto lights = Shadows::Native::ReadLights(node);
+				std::string why = node ? "" : "no shadow scene node";
+				if (!node || !Native::Build(kView, *run, lights, Shadows::Native::ReadMaskSettings(), Native::ReadSun(), why)) {
 					Refusals().Report(std::format("a {} batch: {}", NameOf(kView), why));
 					ShadowMaskDraws::Keep(std::move(run->owners));
 					func(a_arg1, a_arg2, a_arg3, a_arg4);
@@ -164,11 +166,14 @@ namespace DCLF::Features::ShadowMask
 		}
 		auto run = std::make_shared<Run>();
 		run->view = View::World;
-		std::vector<RE::BSShadowLight*> lights;
+		// The light set the render half adopted. Its lights gave their maps back on the game side once it was made.
+		static const Shadows::Native::LightSet kNoSet;
+		const auto* set = Shadows::Native::RenderSet();
+		const auto& lights = set ? *set : kNoSet;
 		std::string why;
-		if (!Native::Build(View::World, *run, lights, why))
+		if (!Native::Build(View::World, *run, lights.lights, lights.mask, lights.sun, why))
 			::RenderGraph::Fatal("shadow masks", std::format("native's world masks cannot be built: {}", why));
-		if (auto* sun = Native::SunMap(View::World, lights))
+		if (auto* sun = Native::SunMap(View::World, lights.lights))
 			globals::state->OnShadowMaskDraw(sun);
 		if (run->draws.empty()) {
 			ShadowMaskDraws::Keep(std::move(run->owners));
@@ -176,9 +181,6 @@ namespace DCLF::Features::ShadowMask
 			DCLF_ZONE("CS.DCLF.ShadowMask.Submit");
 			ShadowMaskDraws::Submit(std::move(run));
 		}
-		// The masks' loop gives each light's maps back after its draw, drawn or not.
-		for (auto* light : Native::Lights(View::World))
-			Shadows::Native::ReturnShadowmaps(*light);
 	}
 
 	void DrawMenuMasks(const RE::NiPoint3& a_eye)
@@ -193,9 +195,11 @@ namespace DCLF::Features::ShadowMask
 			return;
 		auto run = std::make_shared<Run>();
 		run->view = View::Menu;
-		std::vector<RE::BSShadowLight*> lights;
-		std::string why;
-		if (!Native::Build(View::Menu, *run, lights, why, &a_eye))
+		// A menu scene renders where its lights are kept: they are read here.
+		const auto* node = Native::SceneNodeOf(View::Menu);
+		const auto lights = Shadows::Native::ReadLights(node);
+		std::string why = node ? "" : "no shadow scene node";
+		if (!node || !Native::Build(View::Menu, *run, lights, Shadows::Native::ReadMaskSettings(), Native::ReadSun(), why, &a_eye))
 			::RenderGraph::Fatal("shadow masks", std::format("a native menu scene's masks cannot be built: {}", why));
 		if (run->draws.empty())
 			ShadowMaskDraws::Keep(std::move(run->owners));

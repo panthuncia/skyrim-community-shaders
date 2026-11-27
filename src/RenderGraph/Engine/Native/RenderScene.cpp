@@ -7,6 +7,7 @@
 #include "RenderGraph/Engine/Native/RenderScene.h"
 
 #include "EngineZones.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
@@ -241,10 +242,10 @@ namespace RenderGraph::Engine::Native::Scene
 		/**
 		* @brief The driver's game half (decision 8), on the game thread, in the engine's order: the reflections' camera, the branches, the
 		* list processes' camera, the queued lights and the shadow casters with the first-person root and the sky node hidden, the
-		* first-person shift with its camera taken, the sky colours, the first-person port, the shift back, and Main::Draw's tail. Two
-		* points still run here because their game work and their recording are not split yet: SetupSunAndSky (DCLF's frame start, which
-		* takes the first-person rows before the shift, and the water render point) and the shadow casters. The other points are the render
-		* half's.
+		* first-person shift with its camera taken, the sky colours, the first-person port, the shift back, and Main::Draw's tail. The shadow
+		* casters' point is game-side work (the selection, the light cameras and the maps' bookkeeping) and hands the render half the light
+		* set. SetupSunAndSky still runs here because its game work and its recording are not split yet (DCLF's frame start, which takes the
+		* first-person rows before the shift, and the water render point). The other points are the render half's.
 		*/
 		Prepared PrepareFrame(RE::Main* a_main, RE::PlayerCharacter& a_player, RE::NiCamera* a_camera, const Snapshot::FrameSnapshot& a_snapshot)
 		{
@@ -272,6 +273,7 @@ namespace RenderGraph::Engine::Native::Scene
 			Point<void (*)(RE::NiCamera*)>(0x1C4, 0x1C4, "CalculateAndDrawShadowCasterLights")(a_camera);
 			if (skipped && !skippedHidden)
 				Flags(skipped) &= ~kHidden;
+			p.shadowLights = DCLF::Features::Shadows::Native::TakeSet();
 			// The first-person depth epoch takes the camera the shift placed, before the port below (as RenderDepth saw it).
 			if (b.firstPerson) {
 				ShiftFirstPerson(a_player, false);
@@ -320,6 +322,8 @@ namespace RenderGraph::Engine::Native::Scene
 		void RecordFrame(const Prepared& a_frame, RE::NiCamera* a_camera, std::uint32_t a_target)
 		{
 			ZoneScopedN("CS.Native.RenderScene.Render");
+			// The shadow maps, masks and lens flares draw from the game half's light set.
+			DCLF::Features::Shadows::Native::AdoptSet(a_frame.shadowLights);
 			// +0x2EC, the shadow maps.
 			Point<void (*)()>(0x2EC, 0x2EC, "RenderShadowMaps")();
 			// +0x395, +0x39C, +0x3A1: the depth pass, the masks, the precipitation.

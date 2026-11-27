@@ -1,5 +1,5 @@
 // Ports of the per-light pieces of CalculateActiveShadowCasterLights (AE 0x1414cc570, SE 0x1412e2f60): the frustum and paraboloid
-// lights' UpdateCamera, the focus cameras, the lens flare queue, the scissor rectangle, the release of a light not kept, and the
+// lights' UpdateCamera, the focus cameras, the scissor rectangle, the release of a light not kept, and the
 // bookkeeping of Accumulate. Each keeps the engine's writes and its float operation order.
 // Still called through the engine: memory allocation, the BSShaderAccumulator and NiCamera constructors (first use only),
 // NiAVObject::Update on the light's own cameras and BSPortalGraphEntry::ClearVisibility (it takes the portal graph's lock and releases its rooms' visibility records).
@@ -8,7 +8,6 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
-#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 
 #include <algorithm>
 #include <array>
@@ -53,7 +52,6 @@ namespace DCLF::Features::Shadows::Native
 			std::byte*& FocusTargets() { return Global<std::byte*, 527701, 414623>(); }                     // 0x14332a488: the focus targets, 16 bytes each, the node at +8
 			float& FocusDistance() { return Global<float, 513753, 391721>(); }                              // 0x1420357c0: the focus port's falloff distance (450)
 			std::uint32_t& FocusMapSize() { return Global<std::uint32_t, 513751, 391718>(); }               // 0x1420357a8: the focus shadow map size (2048)
-			std::uint8_t& LensFlaresOn() { return Global<std::uint8_t, 513349, 391128>(); }                 // 0x142033658: lens flares are on
 			std::uint32_t& ShadowFreeMask() { return Global<std::uint32_t, 513748, 391715>(); }             // 0x142035798: the free slices of kSHADOWMAPS
 			std::uint32_t& CameraInsideMask() { return Global<std::uint32_t, 528093, 415038>(); }           // 0x14338c90c: the lights whose sphere holds the camera
 			std::uint32_t& ShadowLightCount() { return Global<std::uint32_t, 528091, 415036>(); }           // 0x14338c904: gLastFrameEnabledShadowCasterLightsCount2
@@ -494,13 +492,6 @@ namespace DCLF::Features::Shadows::Native
 				}
 			}
 
-			void QueueLensFlareImpl(RE::BSShadowLight& a_light)
-			{
-				// The engine appends the light to its lens flare list for its gather; native's gather is CS's and keeps its own queue.
-				if (LensFlaresOn())
-					::RenderGraph::Engine::ImageSpace::QueueLensFlare(a_light);
-			}
-
 			void ProjectSphereImpl(const RE::NiCamera& a_camera, const float (&a_sphere)[4], float (&a_min)[3], float (&a_max)[3], float a_epsilon)
 			{
 				const auto& data = CameraData(a_camera);
@@ -731,11 +722,6 @@ namespace DCLF::Features::Shadows::Native
 	void UpdateFocusCameras(RE::BSShadowLight& a_light, const RE::NiCamera& a_worldCamera)
 	{
 		LocalCamerasImpl::UpdateFocusCamerasImpl(a_light, a_worldCamera);
-	}
-
-	void QueueLensFlare(RE::BSShadowLight& a_light)
-	{
-		LocalCamerasImpl::QueueLensFlareImpl(a_light);
 	}
 
 	void ProjectSphere(const RE::NiCamera& a_camera, const float (&a_sphere)[4], float (&a_min)[3], float (&a_max)[3], float a_epsilon)

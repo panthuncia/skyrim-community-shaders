@@ -1,4 +1,4 @@
-// The shadow masks' draws computed from the engine's shadow lights. Render thread.
+// The shadow masks' draws computed from the shadow lights' values (Shadows/Native/LightSet.h). Render thread.
 // The engine functions this follows (AE 1.6.1170, SE 1.5.97): the world's masks 0x1414cd6a0 / 0x1412e3b80, a menu scene's masks
 // 0x140972f70 / 0x1408d2d70, BSUtilityShader::SetupTechnique 0x1414fa160 / 0x14130df90 and SetupGeometry 0x1414fae40 / 0x14130ec70,
 // the mask textures 0x1414fbab0 / 0x14130f960, the mask projections 0x1414fbd30 / 0x14130fbe0, the descriptors 0x1415221e0 and
@@ -43,17 +43,8 @@ namespace DCLF::Features::ShadowMask::Native
 			inline constexpr Engine::Offset kWorldNode{ { 415033 }, { 528088 } };        // ShadowSceneNode*: the world masks' caster array
 			inline constexpr Engine::Offset kWorldBlend{ { 254901 }, { 304858 } };       // std::uint32_t[4]: the world's write mode by mask channel
 			inline constexpr Engine::Offset kMenuBlend{ { 216241 }, { 270481 } };        // std::uint32_t[4]: a menu scene's
-			inline constexpr Engine::Offset kSlice{ { 415266 }, { 528313 } };            // float: a local light's map slice, set per light
 			inline constexpr Engine::Offset kCamera{ { 414580 }, { 527667 } };           // NiCamera*: RenderShadowMasks' camera
 			inline constexpr Engine::Offset kSceneShadows{ { 390933 }, { 513204 } };     // bool: the scene's shadows are on
-			inline constexpr Engine::Offset kFilterMode{ { 390942 }, { 513194 } };       // std::uint32_t: the shadow filter; 2 and 3 take the Poisson radius
-			inline constexpr Engine::Offset kFilterBits{ { 390941 }, { 513193 } };       // std::uint32_t: the filter's descriptor bits; 0 samples t3
-			inline constexpr Engine::Offset kPoissonRadius{ { 391759 }, { 513773 } };    // float
-			inline constexpr Engine::Offset kMapResolution{ { 415268 }, { 528318 } };    // std::uint32_t
-			inline constexpr Engine::Offset kFarParam{ { 415264 }, { 528316 } };         // float: ShadowLightParam.z for a light with +0x63 set
-			inline constexpr Engine::Offset kSunBiasScale{ { 391869 }, { 513809 } };     // float: AlphaTestRef.y's factor for a cascaded light
-			inline constexpr Engine::Offset kSecondBiasScale{ { 391716 }, { 513749 } };  // float: AlphaTestRef.z's factor
-			inline constexpr Engine::Offset kBiasScale{ { 415265 }, { 528317 } };        // float: both biases' last factor
 			inline constexpr Engine::Offset kRenderMode{ { 414601 }, { 527651 } };       // std::uint32_t: the shader manager's render mode
 			inline constexpr Engine::Offset kRenderTargets{ { 411451 }, { 524970 } };    // BSGraphics::RenderTargetManager (the object)
 			inline constexpr Engine::Offset kEndTechnique{ { 107653 }, { 100860 } };     // FUN_1414f4350: RestoreTechnique of the open technique
@@ -65,12 +56,6 @@ namespace DCLF::Features::ShadowMask::Native
 		constexpr float kBiasFactor = 0.00025f;         // DAT_141ac1d48 / DAT_141868784
 		constexpr float kSecondBiasAe = 8.333334e-05f;  // AE DAT_141ac1d44: SE multiplies kBiasFactor by kThird instead
 		constexpr float kThird = 0.33333334f;           // SE DAT_1415d6764
-
-		// BSShadowLight fields the setup reads past CommonLib's.
-		constexpr std::size_t kFarFlag = 0x63;  // bool: ShadowLightParam.z takes kFarParam
-		constexpr std::size_t kNiLight = 0x48;  // NiLight*: its radius at +0x128 is a paraboloid light's falloff
-		constexpr std::size_t kRadius = 0x128;
-		constexpr std::size_t kSpotFalloff = 0x568;  // float: a frustum light's falloff
 
 		// The rows of PS b0 and PS b2 (Utility.hlsl's packoffsets).
 		constexpr std::uint32_t kVPOSOffset = 0, kShadowSampleParam = 1, kEndSplits = 2, kStartSplits = 3;
@@ -124,23 +109,25 @@ namespace DCLF::Features::ShadowMask::Native
 			}
 		};
 
+		using Shadows::Native::LightKind;
+
 		/** @brief The light kinds the masks' loop tells apart, by its technique bits. */
-		std::uint32_t TechniqueOf(View a_view, RE::BSShadowLight* a_light, bool a_focusTargets)
+		std::uint32_t TechniqueOf(View a_view, const Light& a_light, bool a_focusTargets)
 		{
-			if (a_view == View::World && a_light->GetIsDirectionalLight())
+			if (a_view == View::World && a_light.kind == LightKind::Directional)
 				return ((a_focusTargets ? 0x2100u : 0x2000u) | 0x200002u) + 0x2B;
 			std::uint32_t bits = 0;
-			if (a_light->GetIsFrustumLight())
-				bits = a_view == View::World && a_light->GetRuntimeData().drawFocusShadows ? 0x400100u : 0x400000u;
+			if (a_light.kind == LightKind::Frustum)
+				bits = a_view == View::World && a_light.drawFocusShadows ? 0x400100u : 0x400000u;
 			else
-				bits = a_light->GetIsOmniLight() ? 0x1000000u : 0x800000u;
+				bits = a_light.omni ? 0x1000000u : 0x800000u;
 			return (bits | 0x2002u) + 0x2B;
 		}
 
 		/** @brief FUN_141522260: the pixel descriptor of a mask technique, with the filter's bits. */
-		std::uint32_t PixelDescriptorOf(std::uint32_t a_raw)
+		std::uint32_t PixelDescriptorOf(std::uint32_t a_raw, std::uint32_t a_filterBits)
 		{
-			const auto bits = Global<std::uint32_t>(Address::kFilterBits);
+			const auto bits = a_filterBits;
 			std::uint32_t d = (a_raw & 0x1E00100u) | ((bits & 1) ? 0x22002u : 0x2002u);
 			if (bits & 2)
 				d |= 0x40000u;
@@ -242,7 +229,7 @@ namespace DCLF::Features::ShadowMask::Native
 			RE::NiPoint3 adjust;
 			bool haveCamera = false;
 			float nearPlane = 0.0f, farPlane = 0.0f;  // the world camera's frustum: RenderShadowMasks' camera
-			const RE::BSShadowLight* sun = nullptr;
+			const Shadows::Native::SunSplits* sun = nullptr;
 			std::uint32_t filterMode = 0, filterBits = 0;
 			bool sceneShadows = false;
 			float poisson = 0.0f, resolution = 1.0f, farParam = 0.0f, biasScale = 0.0f, sunBiasScale = 0.0f, secondBiasScale = 0.0f;
@@ -252,7 +239,8 @@ namespace DCLF::Features::ShadowMask::Native
 			bool focusTargets = false;
 			Family::Viewport viewport;
 
-			bool Read(View a_view, const RE::NiPoint3* a_menuEye, std::string& a_why)
+			bool Read(View a_view, const Shadows::Native::MaskSettings& a_settings, const Shadows::Native::SunSplits& a_sun, const RE::NiPoint3* a_menuEye,
+				std::string& a_why)
 			{
 				view = a_view;
 				state = globals::state;
@@ -268,7 +256,7 @@ namespace DCLF::Features::ShadowMask::Native
 				auto& rss = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 				// FUN_1414fbd30's adjustment: the posAdjust, less the lighting offset in two render modes when the scene's shadows are off.
 				RE::NiPoint3 offset{};
-				if (!Global<bool>(Address::kSceneShadows)) {
+				if (!a_settings.sceneShadows) {
 					const auto mode = Global<std::uint32_t>(Address::kRenderMode);
 					auto* node = CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[0];
 					if ((mode == 0x16 || mode == 0x11) && node)
@@ -300,17 +288,16 @@ namespace DCLF::Features::ShadowMask::Native
 						farPlane = Field<float>(camera, 0x164);
 					}
 				}
-				auto* node0 = CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[0];
-				sun = node0 ? reinterpret_cast<const RE::BSShadowLight*>(node0->GetRuntimeData().sunShadowDirLight) : nullptr;
-				filterMode = Global<std::uint32_t>(Address::kFilterMode);
-				filterBits = Global<std::uint32_t>(Address::kFilterBits);
-				sceneShadows = Global<bool>(Address::kSceneShadows);
-				poisson = Global<float>(Address::kPoissonRadius);
-				resolution = static_cast<float>(Global<std::uint32_t>(Address::kMapResolution));
-				farParam = Global<float>(Address::kFarParam);
-				biasScale = Global<float>(Address::kBiasScale);
-				sunBiasScale = Global<float>(Address::kSunBiasScale);
-				secondBiasScale = Global<float>(Address::kSecondBiasScale);
+				sun = a_sun.light ? &a_sun : nullptr;
+				filterMode = a_settings.filterMode;
+				filterBits = a_settings.filterBits;
+				sceneShadows = a_settings.sceneShadows;
+				poisson = a_settings.poisson;
+				resolution = a_settings.resolution;
+				farParam = a_settings.farParam;
+				biasScale = a_settings.biasScale;
+				sunBiasScale = a_settings.sunBiasScale;
+				secondBiasScale = a_settings.secondBiasScale;
 				// Native draws into the adopted revision's mask, whose size the engine's own target takes ahead of it at a resize.
 				static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> targets{ REL::Offset(Address::kRenderTargets) };
 				const auto& live = targets->renderTargetData[kShadowMaskTarget];
@@ -332,7 +319,7 @@ namespace DCLF::Features::ShadowMask::Native
 				}
 				writeTable = reinterpret_cast<const std::uint32_t*>(REL::Offset(a_view == View::World ? Address::kWorldBlend : Address::kMenuBlend).address());
 				// FUN_1414cec50: focus shadows when the scene's shadows are on and a focus target is listed.
-				focusTargets = Global<bool>(Address::kSceneShadows) && Global<std::uint32_t>(Engine::Address::kFocusTargetCount) != 0;
+				focusTargets = a_settings.focusTargets;
 				viewport = native ? Family::FrameViewport(static_cast<std::int32_t>(kShadowMaskTarget), -1, 1) : Family::LatchViewport(1);
 				return true;
 			}
@@ -360,7 +347,7 @@ namespace DCLF::Features::ShadowMask::Native
 				a_why = "a cascaded mask with no sun light or camera";
 				return false;
 			}
-			const auto count = sun->shadowMapCount;
+			const auto count = sun->maps;
 			if (count == 0 || count > 3) {
 				a_why = std::format("a sun light with {} cascades", count);
 				return false;
@@ -370,9 +357,9 @@ namespace DCLF::Features::ShadowMask::Native
 			const float a = farPlane * nearPlane;
 			const float b = farPlane - nearPlane;
 			for (std::uint32_t i = 0; i < count; ++i) {
-				const float end = Field<float>(sun, 0x5A4 + i * 4);
+				const float end = sun->end[i];
 				rows[kEndSplits][i] = (end * farPlane - a) / (end * b);
-				const float start = Field<float>(sun, 0x598 + i * 4);
+				const float start = sun->start[i];
 				rows[kStartSplits][i] = (start * farPlane - a) / (start * b);
 			}
 			rows[kEndSplits][2] = rows[kEndSplits][count - 1];
@@ -386,20 +373,20 @@ namespace DCLF::Features::ShadowMask::Native
 		}
 
 		/** @brief SetupGeometry's PS b2 rows for a mask technique: the projections, the biases and the light's parameters. */
-		void GeometryRows(const Frame& a_frame, RE::BSShadowLight* a_light, std::uint32_t a_technique, DrawConstants& a_c)
+		void GeometryRows(const Frame& a_frame, const Light& a_light, std::uint32_t a_technique, DrawConstants& a_c)
 		{
 			auto* rows = a_c.psGeometry;
-			const auto& data = a_light->GetRuntimeData();
+			const auto& descriptors = a_light.descriptors;
 			// FUN_1414fbd30: a light that is neither a frustum nor a paraboloid light has a map per cascade, each a 4x3.
-			const bool cascades = !a_light->GetIsFrustumLight() && !a_light->GetIsParabolicLight();
+			const bool cascades = a_light.kind == LightKind::Directional;
 			if (cascades) {
-				const auto count = (std::min)(a_light->shadowMapCount, 3u);
-				for (std::uint32_t i = 0; i < count && i < data.shadowmapDescriptors.size(); ++i)
-					Projection(reinterpret_cast<const float*>(&data.shadowmapDescriptors[i].lightTransform), a_frame.adjust, true, rows + kShadowMapProj + i * 3, 3);
-			} else if (!data.shadowmapDescriptors.empty()) {
-				Projection(reinterpret_cast<const float*>(&data.shadowmapDescriptors[0].lightTransform), a_frame.adjust, false, rows + kShadowMapProj, 4);
+				const auto count = (std::min)(a_light.maps, 3u);
+				for (std::uint32_t i = 0; i < count && i < descriptors.size(); ++i)
+					Projection(descriptors[i].lightTransform.data(), a_frame.adjust, true, rows + kShadowMapProj + i * 3, 3);
+			} else if (!descriptors.empty()) {
+				Projection(descriptors[0].lightTransform.data(), a_frame.adjust, false, rows + kShadowMapProj, 4);
 			}
-			const float bias = data.shadowBiasScale;
+			const float bias = a_light.biasScale;
 			if (Engine::Running() == Engine::Runtime::Se1597) {
 				const float first = bias * kBiasFactor * (cascades ? a_frame.sunBiasScale : 1.0f);
 				const float second = bias * kBiasFactor * kThird * a_frame.secondBiasScale;
@@ -411,28 +398,25 @@ namespace DCLF::Features::ShadowMask::Native
 				rows[kAlphaTestRef][1] = first * a_frame.biasScale;
 				rows[kAlphaTestRef][2] = second * a_frame.biasScale;
 			}
-			rows[kShadowLightParam][2] = Field<bool>(a_light, kFarFlag) ? a_frame.farParam : kNearParam;
-			if (a_technique & 0x1800000u) {
-				const auto* light = Field<const std::byte*>(a_light, kNiLight);
-				rows[kShadowLightParam][0] = light ? Field<float>(light, kRadius) : 0.0f;
-			} else if (a_technique & 0x400000u) {
-				rows[kShadowLightParam][0] = Field<float>(a_light, kSpotFalloff);
-			}
+			rows[kShadowLightParam][2] = a_light.farFlag ? a_frame.farParam : kNearParam;
+			if (a_technique & 0x1800000u)
+				rows[kShadowLightParam][0] = a_light.hasNiLight ? a_light.radius : 0.0f;
+			else if (a_technique & 0x400000u)
+				rows[kShadowLightParam][0] = a_light.spotFalloff;
 		}
 
 		std::uint64_t s_builds = 0;  // render thread: one per batch
 
 		/** @brief One light's draw. */
-		PassResult BuildLight(const Frame& a_frame, RE::BSShadowLight* a_light, Modes& a_modes, Run& a_run, Draw& a_draw, std::string& a_why)
+		PassResult BuildLight(const Frame& a_frame, const Light& a_light, Modes& a_modes, Run& a_run, Draw& a_draw, std::string& a_why)
 		{
 			const auto raw = TechniqueOf(a_frame.view, a_light, a_frame.focusTargets);
 			const auto technique = raw - 0x2B;
-			const auto& data = a_light->GetRuntimeData();
-			if (data.shadowmapDescriptors.empty()) {
+			if (a_light.descriptors.empty()) {
 				a_why = "a shadow light with no shadow map";
 				return PassResult::Failed;
 			}
-			const auto mask = data.maskIndex;
+			const auto mask = a_light.maskIndex;
 			if (mask > 3) {
 				a_why = std::format("a shadow light on mask channel {}", mask);
 				return PassResult::Failed;
@@ -445,7 +429,7 @@ namespace DCLF::Features::ShadowMask::Native
 
 			auto& c = a_draw.constants;
 			c = {};
-			const float slice = static_cast<float>(static_cast<std::int32_t>(data.shadowmapDescriptors[0].shadowmapIndex));
+			const float slice = static_cast<float>(static_cast<std::int32_t>(a_light.descriptors[0].slice));
 			if (!TechniqueRows(a_frame, technique, slice, c, a_why))
 				return PassResult::Failed;
 			GeometryRows(a_frame, a_light, technique, c);
@@ -464,7 +448,7 @@ namespace DCLF::Features::ShadowMask::Native
 			if (cached == s_programs.end()) {
 				CachedProgram entry{ .inputs = inputs };
 				const std::uint32_t vertexDescriptor = VertexDescriptorOf(technique);
-				std::uint32_t pixelDescriptor = PixelDescriptorOf(technique);
+				std::uint32_t pixelDescriptor = PixelDescriptorOf(technique, a_frame.filterBits);
 				if (LegacyGraphicsCompatibility::IsLegacyVersion())
 					pixelDescriptor = LegacyGraphicsCompatibility::NormalizeLegacyUtilityDescriptor(pixelDescriptor);
 				auto modifiedVertex = vertexDescriptor;
@@ -512,7 +496,7 @@ namespace DCLF::Features::ShadowMask::Native
 			// t2 the main depth (WRAP, POINT), the light's map in t4 (t3 when the filter has no bits) and its sampler. The ORG build
 			// reads the map through t4's index either way. Other slots get a null view and the first sampler.
 			auto& depths = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils;
-			const auto target = static_cast<std::uint32_t>(data.shadowmapDescriptors[0].renderTarget);
+			const auto target = static_cast<std::uint32_t>(a_light.descriptors[0].target);
 			if (target >= RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL) {
 				a_why = std::format("a shadow map in depth target {}", target);
 				return PassResult::Failed;
@@ -574,36 +558,24 @@ namespace DCLF::Features::ShadowMask::Native
 		return d;
 	}
 
-	bool Build(View a_view, Run& a_run, std::vector<RE::BSShadowLight*>& a_lights, std::string& a_why, const RE::NiPoint3* a_menuEye)
+	bool Build(View a_view, Run& a_run, std::span<const Light> a_lights, const Shadows::Native::MaskSettings& a_settings, const Shadows::Native::SunSplits& a_sun,
+		std::string& a_why, const RE::NiPoint3* a_menuEye)
 	{
 		DCLF_ZONE("CS.DCLF.ShadowMask.Build");
 		++s_builds;
-		a_lights.clear();
 		Frame frame;
-		if (!frame.Read(a_view, a_menuEye, a_why))
+		if (!frame.Read(a_view, a_settings, a_sun, a_menuEye, a_why))
 			return false;
-		auto* node = a_view == View::World ? Global<RE::ShadowSceneNode*>(Address::kWorldNode) : CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[1];
-		if (!node) {
-			a_why = "no shadow scene node";
-			return false;
-		}
-		const auto& casters = node->GetRuntimeData().shadowLightsAccum;
 		const bool native = Snapshot::FrameCamera::Owned() && a_view == View::World;
 		// A native menu scene starts from the same modes: nothing engine-side ran before it.
 		auto modes = native || a_menuEye ? Modes::WorldStart() : Modes::Current();
-		// The loop's walk: each light takes as many slots as it has maps.
-		for (std::uint32_t slot = 0; slot < casters.size();) {
-			auto* light = casters[slot];
-			if (!light)
-				break;
-			if (!light->shadowMapCount) {
+		for (const auto& light : a_lights) {
+			if (!light.maps) {
 				a_why = "a shadow light with no maps";
 				return false;
 			}
-			slot += light->shadowMapCount;
-			a_lights.push_back(light);
 			// Native: a kept light whose maps RenderShadowMaps did not draw casts no shadow this frame; its channel stays lit.
-			if (native && !Shadows::Native::DrewMaps(*light))
+			if (native && !Shadows::Native::DrewMaps(light.light))
 				continue;
 			if (a_run.draws.size() >= kMaxDraws) {
 				a_why = std::format("more than {} shadow lights", kMaxDraws);
@@ -626,31 +598,26 @@ namespace DCLF::Features::ShadowMask::Native
 		return true;
 	}
 
-	std::vector<RE::BSShadowLight*> Lights(View a_view)
+	const RE::ShadowSceneNode* SceneNodeOf(View a_view)
 	{
-		std::vector<RE::BSShadowLight*> lights;
-		auto* node = a_view == View::World ? Global<RE::ShadowSceneNode*>(Address::kWorldNode) : CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[1];
-		if (!node)
-			return lights;
-		const auto& casters = node->GetRuntimeData().shadowLightsAccum;
-		for (std::uint32_t slot = 0; slot < casters.size();) {
-			auto* light = casters[slot];
-			if (!light || !light->shadowMapCount)
-				break;
-			slot += light->shadowMapCount;
-			lights.push_back(light);
-		}
-		return lights;
+		return a_view == View::World ? Global<const RE::ShadowSceneNode*>(Address::kWorldNode) :
+		                               CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[1];
 	}
 
-	ID3D11ShaderResourceView* SunMap(View a_view, const std::vector<RE::BSShadowLight*>& a_lights)
+	Shadows::Native::SunSplits ReadSun()
+	{
+		auto* node0 = CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[0];
+		return Shadows::Native::ReadSun(node0 ? reinterpret_cast<const RE::BSShadowLight*>(node0->GetRuntimeData().sunShadowDirLight) : nullptr);
+	}
+
+	ID3D11ShaderResourceView* SunMap(View a_view, std::span<const Light> a_lights)
 	{
 		if (a_view != View::World)
 			return nullptr;
-		for (auto* light : a_lights) {
-			if (!light->GetIsDirectionalLight() || light->GetRuntimeData().shadowmapDescriptors.empty())
+		for (const auto& light : a_lights) {
+			if (light.kind != LightKind::Directional || light.descriptors.empty())
 				continue;
-			const auto target = static_cast<std::uint32_t>(light->GetRuntimeData().shadowmapDescriptors[0].renderTarget);
+			const auto target = static_cast<std::uint32_t>(light.descriptors[0].target);
 			if (target < RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL)
 				return Unwrap(CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[target].depthSRV);
 		}

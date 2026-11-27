@@ -407,7 +407,9 @@ namespace DCLF
 			}
 			view.slot = engine.shadowPlacements[placement].slot;
 		}
-		CaptureCasterVolume(view, *shadowView);
+		// DCLF's own camera brings its caster volume (ApplyOwnCamera); only an engine-camera view reads the light's.
+		if (!owned)
+			CaptureCasterVolume(view, *shadowView);
 		// PerTechnique (b0). ParabolaParam comes from the same two engine globals SetupTechnique reads, or a native paraboloid's values.
 		{
 			static const REL::Relocation<float*> parabolaRadius{ REL::Offset(Engine::Address::kParabolaRadius) };
