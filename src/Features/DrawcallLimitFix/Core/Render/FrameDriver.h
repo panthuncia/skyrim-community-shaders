@@ -117,6 +117,11 @@ namespace DCLF
 		/** @brief After Present, in menus too. Ends the frame and writes its report. */
 		void EndFrame();
 		/**
+		 * @brief Native, game thread: the start of the skeleton driver's game half, every render. From DCLF's frame start to GameHalfEnd
+		 * the rest of the game half reads the ticket's frame globals (FrameGlobals::BeginGameHalf).
+		 */
+		void GameHalfStart();
+		/**
 		 * @brief Native, main thread: the end of the skeleton driver's game half, every render. The late poses are confirmed here: the
 		 * render half changes no scene graph, so the depth commit would see the same nodes.
 		 */
@@ -185,5 +190,6 @@ namespace DCLF
 		std::atomic<bool> coveredLast{ false };
 		std::uint64_t ticketsMade = 0, ticketsUnrendered = 0, ticketsRemade = 0;
 		bool latePosesHold = false;  // native: the game half's confirmation of this render's late-pose plan
+		bool inGameHalf = false;     // native: between GameHalfStart and GameHalfEnd (game thread)
 	};
 }

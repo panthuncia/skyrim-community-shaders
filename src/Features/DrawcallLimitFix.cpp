@@ -688,6 +688,12 @@ void DrawcallLimitFix::Hooks::Install()
 	logger::info("[DCLF] Native pass hooks installed");
 }
 
+void DrawcallLimitFix::OnNativeGameHalfStart()
+{
+	if (installed)
+		DCLF::FrameDriver::Get().GameHalfStart();
+}
+
 void DrawcallLimitFix::OnNativeGameHalfEnd()
 {
 	if (installed)

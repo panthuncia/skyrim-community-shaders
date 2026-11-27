@@ -253,6 +253,7 @@ namespace RenderGraph::Engine::Native::Scene
 		Prepared PrepareFrame(RE::Main* a_main, RE::PlayerCharacter& a_player, RE::NiCamera* a_camera, const Snapshot::FrameSnapshot& a_snapshot)
 		{
 			ZoneScopedN("CS.Native.RenderScene.Game");
+			globals::features::drawcallLimitFix.OnNativeGameHalfStart();
 			Prepared p;
 			p.valid = true;
 			// The reflections' camera (SE 528353, AE 415299): the radial blur modifier's projection reads it on the game side (AE 107753).

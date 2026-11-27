@@ -89,6 +89,8 @@ struct DrawcallLimitFix : Feature
 	/** @brief Called after the Lighting shader's SetupGeometry for every native lighting draw. */
 	void OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags);
 
+	/** @brief Native, game thread: the start of the skeleton driver's game half (PrepareFrame), every render. */
+	void OnNativeGameHalfStart();
 	/** @brief Native, main thread: the end of the skeleton driver's game half (before Main::Draw's tail), every render. */
 	void OnNativeGameHalfEnd();
 
