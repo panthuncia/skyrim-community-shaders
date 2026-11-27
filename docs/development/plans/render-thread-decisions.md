@@ -1097,3 +1097,26 @@ pushes until the user is back.
      render calls); menu models in the ORG build lack Linear Lighting while D3D11 draws them with it (check against D3D11
      shots); `kMaxDraws` (2048 per batch) can be exceeded (Whiterun's local map draws about 1,380 passes); a D3D11 run
      with Linear Lighting disabled still drew the land dark (unexplained).
+
+## 2026-11-27: native sky from captured passes; the frame values producer split (snap7-sky; director accepted)
+
+222. **Native's sky reads its passes from the ticket:** `Native::PassObject` holds what a sky pass's draw reads of its
+     geometry and property (`TakePass` reads it); the ticket's sky slot holds one per root pass, the sun query's pass and
+     the sky globals (VParams, cloud offsets, sky colours, the fallback textures' views). `BuildPass` reads only the
+     `PassObject`; native's main view, faces and sun query use the ticket. Guest calls `TakePass` on the live pass at the
+     draw. The CS sky hooks (`State::UpdateSkyShaderPermutation`, `Effects11::ModifySky`, `CloudShadows::ModifySky`) take
+     the sky object type and the geometry as a key; `SubmitSunQuery` takes the `SunQueryBlock`. Observe: 21,615 passes
+     and 386 globals, 0 differences. A cloud layer index of 32 or more fails the pass (it read past the offsets array).
+223. **The frame values' producer is split:** the game half kicks a sampling job per ticket (`FrameValues::KickSample`:
+     plans, moved samples, shading rows, game-side pools' samples; it takes every lease; pools' frame starts and game-side
+     kicks run per ticket); the render half kicks an upload job per render (`Kick(globals)`) on the same ordered chain,
+     reading only sampled rows. `Api::FrameValuePool::perRender` marks the two pools needing render-side state (fade CPU
+     states, pixel rows). The ticket's one-shot inputs and `PrependRootViews` are deleted. `EngineReadWindow::RenderSideJob`
+     counts leases asked for on render-kicked jobs: native tour 1,844-5,930 per 300 frames -> 0. Native quick record-half
+     game-mutated reads (before the precipitation merge): 25.9 -> 5.0, all precipitation's. Open for the thread: the render
+     side reads the live kept row arrays (`RowsIfDone`, forward rows: must become views or copies); `MakeRegistered`
+     belongs at install; fade CPU states' kick still reads engine state per render (uncounted); pointer lifetimes of the
+     ticket's texture views and renderer data.
+224. **Native's render half reads no game-mutated engine state** (native quick, detector at exit after the sky and
+     precipitation merges): record half 0.02 per world frame (two one-time reads), frame end none. 1 engine render call
+     per world frame. The render thread can now be created.
