@@ -119,3 +119,11 @@ The loading frames left are the loading model's renders (depth pass, shadow maps
 | menu-items, owned, detector | s7-menus4-sw4-items | passed; both shots match the engine-drawn `obs1` (ref check pass); 9.0 per world frame |
 | menu-main-load, detector | s7-menus4-ld1-main-load | passed; mask guard logged once; loading 4.2 |
 | menu-scenes, detector | s7-menus4-ld1-scenes | passed; shot references pass; world 9.0, loading 11.8 |
+
+Final runs (`s7-menus4-fin-*`, on d0edb4913's code): guest+quick, native-vulkan+quick, native-d3d12-quick, guest+menu-scenes,
+native-vulkan+menu-main (main menu 1.0 per frame), native-vulkan+facegen passed. native-vulkan+cadence-drop-cells timed out: the main
+checkout's config already needs snap3-cocwait's step change, which this base lacked. After merging org_integration (a5f868f4f):
+native-vulkan+cadence-drop-cells, native-vulkan+menu-items and native-vulkan+quick (`s7-menus4-m1-*`) passed.
+
+Shot references to accept: `s7-menus4-m1-native-vulkan-menu-items` (both inventory shots; checked against the engine-drawn
+`s7-menus4-obs1-items`).
