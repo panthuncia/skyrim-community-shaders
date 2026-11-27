@@ -8,14 +8,21 @@
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Fatal.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "Snapshot/FrameSnapshot.h"
 #include "Snapshot/Publication.h"
 
 #include "Globals.h"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
 
 namespace RenderGraph::Engine::Native::RenderThread
 {
@@ -28,6 +35,61 @@ namespace RenderGraph::Engine::Native::RenderThread
 		}
 
 		thread_local bool t_routedRender = false;
+		thread_local bool t_renderThread = false;
+
+		/** @brief The render thread and its park handshake. */
+		struct Thread
+		{
+			std::mutex mutex;
+			std::condition_variable changed;
+			bool started = false;
+			bool parkAsked = false;  // a producer asked the render thread to stop after its frame
+			bool parked = false;     // the render thread stopped (or has not rendered yet)
+			std::atomic<bool> running{ false };
+			// Parks by producer since the last line, and the producers' wait.
+			std::uint64_t parks = 0, drawFrameParks = 0, loadingParks = 0, movieParks = 0, interfaceParks = 0;
+			double parkWaitMs = 0.0, parkWaitMaxMs = 0.0;
+		};
+
+		Thread& Get()
+		{
+			static auto* thread = new Thread;  // never destroyed: the thread runs until the process ends
+			return *thread;
+		}
+
+		void Loop()
+		{
+			t_renderThread = true;
+			::SetThreadDescription(::GetCurrentThread(), L"CS native render thread");
+			// Its Begins adopt the newest published snapshot and publish no frame-only one.
+			const Frame::Driver::GameSnapshotRenderScope scope;
+			auto& thread = Get();
+			for (;;) {
+				{
+					std::unique_lock lock(thread.mutex);
+					if (thread.parkAsked) {
+						thread.parked = true;
+						thread.running.store(false, std::memory_order_release);
+						thread.changed.notify_all();
+						thread.changed.wait(lock, [&] { return !thread.parkAsked; });
+						thread.parked = false;
+						thread.running.store(true, std::memory_order_release);
+					}
+				}
+				RenderHalf();
+			}
+		}
+
+		/** @brief Main::DrawFrame (SE 35556, AE 36555): a producer that renders on the game thread parks the render thread first. */
+		struct DrawFrame
+		{
+			static void thunk(RE::Main* a_main)
+			{
+				Park("Main::DrawFrame");
+				func(a_main);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
 
 		struct Stats
 		{
@@ -186,6 +248,64 @@ namespace RenderGraph::Engine::Native::RenderThread
 			globals::features::drawcallLimitFix.ExpectNativeTicket(payload->prepared.sceneTicket);
 	}
 
+	void InstallHooks()
+	{
+		if (REL::Module::IsVR() || !Native::Requested())
+			return;
+		stl::detour_thunk<DrawFrame>(REL::RelocationID(35556, 36555));
+		if (!DrawFrame::func.address())
+			RenderGraph::Fatal("native render thread", "Main::DrawFrame could not be hooked, so its frames could not park the render thread");
+	}
+
+	void OnPublished()
+	{
+		auto& thread = Get();
+		std::unique_lock lock(thread.mutex);
+		if (!thread.started) {
+			thread.started = true;
+			thread.running.store(true, std::memory_order_release);
+			std::thread(&Loop).detach();
+			logger::info("[ORG native] render thread: started at the first routed update; it renders the published snapshots from here on");
+			return;
+		}
+		if (thread.parkAsked) {
+			thread.parkAsked = false;
+			thread.changed.notify_all();
+		}
+	}
+
+	void Park(const char* a_why)
+	{
+		if (t_renderThread)
+			return;
+		auto& thread = Get();
+		std::unique_lock lock(thread.mutex);
+		if (!thread.started || thread.parkAsked)
+			return;
+		const auto start = std::chrono::steady_clock::now();
+		thread.parkAsked = true;
+		thread.changed.wait(lock, [&] { return thread.parked; });
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		++thread.parks;
+		thread.parkWaitMs += ms;
+		thread.parkWaitMaxMs = (std::max)(thread.parkWaitMaxMs, ms);
+		const std::string_view why = a_why;
+		++(why == "Main::DrawFrame"     ? thread.drawFrameParks :
+			why == "the loading screen" ? thread.loadingParks :
+			why == "a movie tick"       ? thread.movieParks :
+										  thread.interfaceParks);
+	}
+
+	bool Running()
+	{
+		return Get().running.load(std::memory_order_acquire);
+	}
+
+	bool OnRenderThread()
+	{
+		return t_renderThread;
+	}
+
 	bool InRoutedRender()
 	{
 		return t_routedRender;
@@ -195,9 +315,24 @@ namespace RenderGraph::Engine::Native::RenderThread
 	{
 		if (!Native::Active())
 			return {};
+		auto& thread = Get();
+		std::uint64_t parks = 0, drawFrame = 0, loading = 0, movie = 0, interfaces = 0;
+		double waitMs = 0.0, maxMs = 0.0;
+		{
+			const std::lock_guard lock(thread.mutex);
+			parks = std::exchange(thread.parks, 0);
+			drawFrame = std::exchange(thread.drawFrameParks, 0);
+			loading = std::exchange(thread.loadingParks, 0);
+			movie = std::exchange(thread.movieParks, 0);
+			interfaces = std::exchange(thread.interfaceParks, 0);
+			waitMs = std::exchange(thread.parkWaitMs, 0.0);
+			maxMs = std::exchange(thread.parkWaitMaxMs, 0.0);
+		}
 		return fmt::format(
 			"[ORG native] routed updates: {} routed (CS's game frame, render half from the payload), {} on Main::DrawFrame, {} with the "
-			"interface drawn by the render half; {} routed renders",
-			g_stats.routed.exchange(0), g_stats.unrouted.exchange(0), g_stats.interfaceInline.exchange(0), g_stats.renders.exchange(0));
+			"interface drawn by the producer; {} routed renders; render thread parked {} times (Main::DrawFrame {}, loading screen {}, "
+			"movie {}, interface {}), the producers waited {:.2f} ms in all, at most {:.2f} ms",
+			g_stats.routed.exchange(0), g_stats.unrouted.exchange(0), g_stats.interfaceInline.exchange(0), g_stats.renders.exchange(0), parks, drawFrame,
+			loading, movie, interfaces, waitMs, maxMs);
 	}
 }

@@ -86,6 +86,7 @@ namespace Snapshot
 			std::vector<UpdateEndFn> updateEnds;
 			std::shared_ptr<const FrameSnapshot> previous;  // the last published, adopted or not
 			std::shared_ptr<const FrameSnapshot> building;  // the newest game update's (Capture), never a frame-only one
+			std::shared_ptr<const FrameSnapshot> dropped;   // a routed update the cadence test mode dropped, not published
 			std::uint64_t nextId = 1;
 			RE::FormID previousCell = 0;  // the player's cell at the previous update, by form id (an address can be reused)
 			RE::NiPoint3 previousPlayer{};
@@ -406,6 +407,12 @@ namespace Snapshot
 			}
 			const auto folded = a_fresh->events.gameUpdates;
 			for (auto most = stats.mostFolded.load(std::memory_order_relaxed); folded > most && !stats.mostFolded.compare_exchange_weak(most, folded);) {}
+			// A dropped routed update's events too.
+			if (auto dropped = std::move(Game().dropped)) {
+				a_fresh->events.MergeOlder(dropped->events);
+				stats.replaced.fetch_add(1, std::memory_order_relaxed);
+				Retire::LetGo(std::move(dropped));
+			}
 			std::shared_ptr<const FrameSnapshot> published = std::move(a_fresh);
 			Retire::LetGo(std::exchange(Game().previous, published));
 			Slot().Post(std::make_unique<std::shared_ptr<const FrameSnapshot>>(std::move(published)));
@@ -434,7 +441,7 @@ namespace Snapshot
 				if (Routed::Routes(*fresh)) {
 					RoutedUpdate(a_main, std::move(fresh), renders);
 					t_inGameUpdate = outer;
-					EndUpdate();
+					EndUpdate(Routed::Running());
 					return;
 				}
 				Publish(fresh);
@@ -461,7 +468,7 @@ namespace Snapshot
 				for (const auto fn : Game().updateEnds)
 					fn(*Game().previous);
 				t_inGameUpdate = outer;
-				EndUpdate();
+				EndUpdate(false);
 			}
 
 			/**
@@ -480,19 +487,30 @@ namespace Snapshot
 					fn(*a_fresh);
 				// The steps and milestones run at the update's publish (they ran at its Present before).
 				Testing::OnGamePresent();
+				const bool interfaceInline = static_cast<const Routed::FramePayload*>(a_fresh->nativeFrame.get())->interfaceInline;
+				// The cadence test mode's dropped update is never published: its events go to the next one's.
+				if (!a_renders) {
+					Retire::LetGo(std::exchange(Game().dropped, std::move(a_fresh)));
+					return;
+				}
+				// The interface drawn by the producer: the render thread stops, and this thread renders the update itself.
+				if (interfaceInline)
+					Routed::Park("the interface");
 				Publish(a_fresh);
 				LogFirst(*a_fresh);
-				// The render half from the payload alone. A load that starts in a render ends the update's repeats.
-				const auto epoch = g_loadEpoch.load(std::memory_order_acquire);
-				for (std::uint32_t rendered = 0; rendered < a_renders && g_loadEpoch.load(std::memory_order_acquire) == epoch; ++rendered)
+				if (interfaceInline) {
 					Routed::RenderHalf();
+					return;
+				}
+				// The render thread renders it, and the game thread goes on to the next update.
+				Routed::OnPublished();
 			}
 
-			/** @brief The update's end: the update-rate cap's wait and the periodic lines. */
-			static void EndUpdate()
+			/** @brief The update's end: the update-rate cap's wait while the render thread renders (a_paced), and the periodic lines. */
+			static void EndUpdate(bool a_paced)
 			{
-				// Phase 7's "publish, then wait for the next update slot". Off unless CS_UPDATE_RATE_CAP=1.
-				PaceGameUpdate();
+				if (a_paced)
+					PaceGameUpdate();
 				const auto updates = ++Game().lineUpdates;
 				if (updates % kSideEffectLineUpdates == 0) {
 					if (const auto line = SideEffects::TakeStatsLine(); !line.empty())
@@ -540,6 +558,7 @@ namespace Snapshot
 		RegisterCapture(&PrecipitationOcclusion::Capture);
 		RenderGraph::Engine::Native::WaterEffects::InstallHooks();
 		RenderGraph::Engine::Native::Scene::InstallHooks();
+		RenderGraph::Engine::Native::RenderThread::InstallHooks();
 		(void)CadenceMode();
 		logger::info("[Snapshot] frame snapshots: published at Main::Update's call of Main::DrawFrame, adopted at Renderer::Begin");
 	}
@@ -649,6 +668,9 @@ namespace Snapshot
 		// Begin runs inside Renderer::Lock on every thread, so adoptions never overlap. The render owner reads what this sets.
 		auto& side = RenderSide();
 		auto& stats = Counters();
+		// The cadence test mode's repeat on the render thread: a routed snapshot renders N times before a newer one is taken.
+		const bool hold = CadenceMode().mode == Cadence::Mode::Repeat && side.current && side.current->nativeFrame &&
+		                  RenderGraph::Engine::Native::RenderThread::OnRenderThread() && side.render.rendersOfSnapshot < CadenceMode().n;
 		const auto now = std::chrono::steady_clock::now();
 		const auto lastRendered = side.render.frame;
 		side.render.delta = side.lastAdopt.time_since_epoch().count() ? std::chrono::duration<float>(now - side.lastAdopt).count() : 0.0f;
@@ -657,7 +679,7 @@ namespace Snapshot
 		g_lastRenderFrame.store(side.render.frame, std::memory_order_release);
 		stats.renders.fetch_add(1, std::memory_order_relaxed);
 		Retire::DrainRender();
-		if (auto taken = Slot().Take()) {
+		if (auto taken = hold ? nullptr : Slot().Take()) {
 			// The snapshot rendered last never renders again: it retires once the GPU finished its last frame.
 			Retire::RenderedSnapshot(std::exchange(side.current, std::move(*taken)), lastRendered);
 			side.render.repeat = false;
@@ -751,9 +773,6 @@ namespace Snapshot
 
 	void PaceGameUpdate()
 	{
-		static const bool active = ::Switches::On("CS_UPDATE_RATE_CAP");
-		if (!active)
-			return;
 		using clock = std::chrono::steady_clock;
 		static clock::time_point next{};
 		const auto cap = globals::state->updateRateCap.load(std::memory_order_relaxed);

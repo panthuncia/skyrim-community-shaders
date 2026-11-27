@@ -136,8 +136,8 @@ namespace Snapshot
 	std::uint64_t LastRenderFrame();
 
 	/**
-	* @brief Game thread, after the update's render half: waits for the next slot of the update-rate cap (State::updateRateCap,
-	* decision 2). Only with CS_UPDATE_RATE_CAP=1 until phase 7, while the engine's Present still paces the game.
+	* @brief Game thread, after a routed update's publish while the render thread renders: waits for the next slot of the update-rate cap
+	* (State::updateRateCap, decision 2). Updates the game thread renders itself are paced by their own Present.
 	*/
 	void PaceGameUpdate();
 

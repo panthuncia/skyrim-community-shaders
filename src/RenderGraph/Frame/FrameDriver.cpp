@@ -162,6 +162,7 @@ namespace RenderGraph::Frame::Driver
 		{
 			static void thunk()
 			{
+				Engine::Native::RenderThread::Park("the loading screen");
 				const bool outer = std::exchange(t_inLoadingLoop, true);
 				func();
 				t_inLoadingLoop = outer;
@@ -309,7 +310,9 @@ namespace RenderGraph::Frame::Driver
 	MovieTickScope::MovieTickScope() :
 		outer(std::exchange(t_inMovieTick, true)),
 		outerNext(std::exchange(t_movieFrameNext, true))
-	{}
+	{
+		Engine::Native::RenderThread::Park("a movie tick");
+	}
 
 	MovieTickScope::~MovieTickScope()
 	{

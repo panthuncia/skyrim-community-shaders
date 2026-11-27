@@ -23,6 +23,12 @@ namespace Snapshot
 * Renderer::Lock and Begin (CS's adoption and frame start), DrawFrame's render state, DCLF's render half from the payload's ticket, the
 * driver's render half, volumetric lighting, the UI point's replay, Renderer::End (CS's Present hook: the render side's frame end only)
 * and Unlock. A repeated render draws the same payload again.
+*
+* The render half runs on CS's render thread, created at the first routed update's publish. Its loop renders the newest published
+* snapshot, or the adopted one again when none is new, and never waits for the game. A producer that must render on its own thread
+* (Main::DrawFrame for an unrouted update or a frame outside Main::Update, the loading screen's serving loop, a Bink tick, a routed
+* update whose interface the render half must draw on the producer) parks the render thread first: it finishes its frame and stops.
+* That wait, at a route change, is the only one between the threads. The next routed update's publish wakes it.
 */
 namespace RenderGraph::Engine::Native::RenderThread
 {
@@ -50,6 +56,27 @@ namespace RenderGraph::Engine::Native::RenderThread
 	* calling thread, which becomes the render owner at its Begin.
 	*/
 	void RenderHalf();
+
+	/** @brief Native only: the producers' park hooks (Main::DrawFrame's entry). Snapshot::InstallHooks calls it. */
+	void InstallHooks();
+
+	/**
+	* @brief Game thread, after a routed update's publish: starts the render thread at the first, wakes it when parked. The render thread
+	* renders the published snapshot from then on.
+	*/
+	void OnPublished();
+
+	/**
+	* @brief A producer that renders on its own thread: the render thread finishes its frame and stops until the next routed publish.
+	* Returns at once on the render thread, before it exists, or while parked. a_why names the producer for the counts.
+	*/
+	void Park(const char* a_why);
+
+	/** @brief Whether the render thread exists and is not parked: the game thread's update-rate cap applies. Any thread. */
+	bool Running();
+
+	/** @brief Whether the calling thread is CS's render thread. */
+	bool OnRenderThread();
 
 	/** @brief Renderer::Begin's detour, right after the adoption: a routed render names its payload's DCLF ticket. */
 	void OnAdopted();

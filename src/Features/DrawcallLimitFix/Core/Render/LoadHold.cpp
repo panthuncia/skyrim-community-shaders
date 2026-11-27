@@ -20,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -408,6 +409,20 @@ namespace DCLF::LoadHold
 		}
 	}
 
+	namespace
+	{
+		/**
+		* @brief The hold's state is written by the game half (the frame start, the map's re-entry) and by the render side (held views,
+		* the occlusion re-entry, the frame end), which run on two threads once native renders on its own thread. Held only for the
+		* entry's own work.
+		*/
+		std::recursive_mutex& HoldLock()
+		{
+			static std::recursive_mutex lock;
+			return lock;
+		}
+	}
+
 	bool Active() { return state.load(std::memory_order_acquire) == HoldState::Holding; }
 
 	bool MenuHeld()
@@ -420,6 +435,7 @@ namespace DCLF::LoadHold
 
 	void NoteHeld(View a_view)
 	{
+		const std::lock_guard lock(HoldLock());
 		if (!Active())
 			return;
 		++(a_view == View::Sun ? hold.heldSun : a_view == View::Occlusion ? hold.heldOcclusion : hold.heldShadow);
@@ -430,6 +446,7 @@ namespace DCLF::LoadHold
 
 	void BeginReentry(const char* a_why, const Snapshot::FrameSnapshot* a_frame)
 	{
+		const std::lock_guard lock(HoldLock());
 		reentryThisFrame = true;
 		const auto now = state.load(std::memory_order_acquire);
 		// The first world frames after a load's hold can still need a re-entry, because the graph rebuilds for re-made targets
@@ -449,6 +466,7 @@ namespace DCLF::LoadHold
 
 	void NoteUndrawable(View a_view, std::string_view a_why)
 	{
+		const std::lock_guard lock(HoldLock());
 		if (Active()) {
 			NoteHeld(a_view);
 			return;
@@ -463,6 +481,7 @@ namespace DCLF::LoadHold
 
 	void OnFrameStart()
 	{
+		const std::lock_guard lock(HoldLock());
 		WatchMapStart();
 		// The render side's measurement of the actors still loading, counted on the game side.
 		if (::RenderGraph::Engine::Native::Active())
@@ -480,6 +499,7 @@ namespace DCLF::LoadHold
 
 	void OnFrameEnd()
 	{
+		const std::lock_guard lock(HoldLock());
 		WatchMap();
 		const auto now = state.load(std::memory_order_acquire);
 		if (now == HoldState::Releasing) {
@@ -560,8 +580,10 @@ namespace DCLF::LoadHold
 		{
 			static void thunk(bool a_active)
 			{
-				if (a_active)
+				if (a_active) {
+					const std::lock_guard lock(HoldLock());
 					OnLoadBegin();
+				}
 				func(a_active);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
