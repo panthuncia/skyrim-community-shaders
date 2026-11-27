@@ -1161,3 +1161,18 @@ pushes until the user is back.
      not the ticket (T2-d, for snap7-pace). Not fixed: the resize device loss (snap7-devloss; native-interior's device
      losses look like the same fault), the portal main-context stamp, update dips and frame-start reads (snap7-pace).
      native-interior turns AI off after god mode: hostile guards followed into Dragonsreach and made its shots differ.
+
+## 2026-11-27: lock scope, portal step, frame-start reads (snap7-pace; director accepted)
+
+228. **The render half records without `Renderer::Lock`** (P-1, `snap7-pace.md`): it locks only around Renderer::Begin and
+     the volumetric lighting/interface/End part. The game thread had spent 25% of perf-dragonsreach waiting for the lock in
+     BGSDecalManager's update while the render thread held it for its whole render half. perf-dragonsreach 46-59 -> 60.0
+     updates/s, 218-220 -> 223-227 fps (Dev-Fast). Porting Begin's and End's bodies (TH-b) would take the lock off the
+     render side entirely (open). The main portal context is restamped with the game step at the point shadow source's
+     frame start, native only, and the light atlas validates against the selection's step (P-2): every repeated render had
+     rejected the atlas. Guest keeps its off-by-one camera stamp (nothing reads that context). First person's depth format
+     and import come from CS's target set; grass's fade clock is a frame-globals value summed once per game update, which
+     also fixes repeats running the spawn fade about three times too fast (P-3). Frame-start reads 3.01 -> 0.05 per world
+     frame, all one-time (shadow catalog/placements, shadow import keyed on the texture pointer for Skylighting's swap,
+     reflection faces' format). Targeted 8 configs passed on the merge; native-interior ~210 fps in Dragonsreach (the 110
+     the lead saw was the old guard fight).
