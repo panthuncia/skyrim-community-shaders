@@ -303,13 +303,20 @@ namespace NativePost
 		in.blur = s.ssrBlur;
 		const float radius = s.ssrRay[0];
 		in.ray = { radius, s.ssrRay[1], s.ssrRay[2], 1.0f / radius };
-		// The ray march's row 1: the camera data's view matrix (+0x30, row vectors) applied to the point (AE 0x1414d54b0).
-		const auto data = w.cameraData(RE::BSGraphics::State::GetSingleton(), a_camera, false);
-		if (data < 0x10000)
-			RenderGraph::Fatal("ImageSpace", "native post chain: the State has no camera data for the reflections pass's camera");
-		const auto m = [&](std::uintptr_t a_offset) { return Field<float>(data, a_offset); };
+		// The ray march's row 1: the camera data's view matrix (+0x30, row vectors) applied to the point (AE 0x1414d54b0). Native: the
+		// snapshot camera's view, which SetCameraData builds the same way (native makes no SetCameraData call for the world camera).
+		std::array<float, 16> view{};
+		if (::RenderGraph::Engine::Native::Active()) {
+			view = MainCamera().view;
+		} else {
+			const auto data = w.cameraData(RE::BSGraphics::State::GetSingleton(), a_camera, false);
+			if (data < 0x10000)
+				RenderGraph::Fatal("ImageSpace", "native post chain: the State has no camera data for the reflections pass's camera");
+			for (std::uint32_t i = 0; i < 16; ++i)
+				view[i] = Field<float>(data, 0x30 + i * 4);
+		}
 		for (std::uint32_t c = 0; c < 3; ++c)
-			in.point[c] = kSsrPoint[1] * m(0x40 + c * 4) + kSsrPoint[0] * m(0x30 + c * 4) + kSsrPoint[2] * m(0x50 + c * 4) + m(0x60 + c * 4);
+			in.point[c] = kSsrPoint[1] * view[4 + c] + kSsrPoint[0] * view[c] + kSsrPoint[2] * view[8 + c] + view[12 + c];
 		in.main = TargetSize(T::kMAIN);
 		in.mask = TargetSize(T::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED);
 		in.raw = TargetSize(T::kSSR_RAW);
