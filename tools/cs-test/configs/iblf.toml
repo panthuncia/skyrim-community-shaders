@@ -31,8 +31,8 @@ do = "console"
 arg = "coc Whiterun"
 
 [[steps]]
-at = "previous"
-frames = 900
+at = "world-ready"
+frames = 60
 do = "console"
 arg = "player.setangle x -40"
 

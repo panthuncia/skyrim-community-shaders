@@ -23,8 +23,8 @@ do = "console"
 arg = "coc Whiterun"
 
 [[steps]]
-at = "previous"
-frames = 600
+at = "world-ready"
+frames = 60
 do = "console"
 arg = "set timescale to 20"
 
@@ -129,8 +129,8 @@ do = "load"
 arg = "recent"
 
 [[steps]]
-at = "previous"
-frames = 700
+at = "world-ready"
+frames = 120
 do = "shot"
 arg = "loaded"
 
@@ -141,8 +141,8 @@ do = "console"
 arg = "coc WhiterunDragonsreach"
 
 [[steps]]
-at = "previous"
-frames = 800
+at = "world-ready"
+frames = 120
 do = "shot"
 arg = "dragonsreach"
 

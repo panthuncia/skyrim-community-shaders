@@ -27,10 +27,9 @@ frames = 1
 do = "console"
 arg = "coc Riverwood"
 
-# A coc does not record a new world-ready, so the frames count from the coc.
 [[steps]]
-at = "previous"
-frames = 700
+at = "world-ready"
+frames = 300
 do = "vram-json"
 
 [[steps]]
@@ -45,14 +44,14 @@ do = "console"
 arg = "coc WhiterunDragonsreach"
 
 [[steps]]
-at = "previous"
-frames = 600
+at = "world-ready"
+frames = 60
 do = "console"
 arg = "coc Riverwood"
 
 [[steps]]
-at = "previous"
-frames = 700
+at = "world-ready"
+frames = 300
 do = "vram-json"
 
 [[steps]]
@@ -67,8 +66,8 @@ do = "console"
 arg = "coc Riverwood"
 
 [[steps]]
-at = "previous"
-frames = 700
+at = "world-ready"
+frames = 120
 do = "shot"
 arg = "riverwood"
 

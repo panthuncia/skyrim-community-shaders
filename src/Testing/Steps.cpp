@@ -33,6 +33,7 @@ namespace Testing
 		std::uint32_t lastRunFrame = 0;    // the step clock when the previous step ran
 		std::uint32_t lastRunPresent = 0;  // the Present count when the previous step ran
 		double waitStart = -1.0;         // when the current step's wait started; below zero: none
+		double anchorWaitStart = -1.0;   // when the current step began to wait for its milestone in a ready world; below zero: none
 		double shotWaitStart = -1.0;     // when the current step began to wait for the previous shot's file; below zero: none
 
 		// An "adopted" await. The previous step's writes, and what the main thread does with them in the frame after, are taken
@@ -62,7 +63,8 @@ namespace Testing
 				return lastRunFrame;
 			auto& run = Run();
 			std::scoped_lock lock(run.mutex);
-			// The first time the milestone is reached at or after the previous step: a step after a load waits for that load's.
+			// The first time the milestone is reached at or after the previous step: a step after a load (a save, a coc) waits for that
+			// load's.
 			for (const auto& occurrence : run.occurrences)
 				if (occurrence.name == a_step.at && occurrence.frame >= lastRunFrame)
 					return occurrence.frame;
@@ -174,9 +176,28 @@ namespace Testing
 			}
 			const auto anchor = Anchor(step);
 			if (!anchor) {
+				// The phase timeouts time the wait through boot, compiling, a load or a menu. In a ready world nothing would: a step
+				// whose load never starts fails here.
+				bool world = false;
+				{
+					std::scoped_lock lock(run.mutex);
+					world = run.phase == "world";
+				}
+				if (!world) {
+					anchorWaitStart = -1.0;
+				} else {
+					const double limit = step.waitSeconds > 0.0 ? step.waitSeconds : stepWait;
+					if (anchorWaitStart < 0.0)
+						anchorWaitStart = Now();
+					if (Now() - anchorWaitStart > limit) {
+						Finish("failed", fmt::format("step {}: waited {:.0f} s for {} after the previous step, and no load started", index, limit, step.at), 0u);
+						return;
+					}
+				}
 				SetStepState(fmt::format("waiting for {}", step.at));
 				return;
 			}
+			anchorWaitStart = -1.0;
 			if (a_frame < *anchor + step.frames) {
 				SetStepState(fmt::format("waiting for frame {}", *anchor + step.frames));
 				return;
