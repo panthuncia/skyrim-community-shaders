@@ -59,7 +59,7 @@ The shipped configs:
 | `base` | what every run shares: autoload save (`game.autoload_mod`, turned off when `game.save` names a save), Telemetry off, `DXVK_DEBUG=hang`, Nsight layer off, the live-image check, off (`expect.live_frames = 0`; its D3D11 fallback shots read black in guest) |
 | `guest`, `native-vulkan`, `native-d3d12` | the three modes; guest and native run every port |
 | `d3d11` | plain D3D11 mode, the render graph off (`CS_ORG=0`); compose it, `d3d11+quick` |
-| `quick` | a shot 60 frames after world-ready, then exit; compose it, `native-vulkan+quick` |
+| `quick` | god mode, a shot 60 frames after world-ready, then exit; compose it, `native-vulkan+quick` |
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |
 | `boot` | exits at shaders-ready (`--set build.shader_cache=cold` for a cold compile) |
 | `resize` | Exponential Height Fog turned on, its grid settings changed (`setting` steps) and upscale method switches: graph textures that take a new size mid-session; compose it, `native-vulkan+resize` |
@@ -119,9 +119,21 @@ The shipped configs:
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |
 
 The converted scenarios map old frame N to world-ready + (N - 100) for their first command, then each command at `previous` plus the old gap.
+A step after a coc or a `load` is anchored at that load's `world-ready` instead (see Steps).
 
 ### Steps
 
+- `at` is a milestone or `previous`. A milestone anchors the step at its first occurrence at or after the previous step ran.
+  Every load records `load-start` and `world-ready` again: a loading menu (a save loaded, a coc into another cell) or a
+  teleport, a player move of more than 1024 units between two Presents (a coc nearby loads with no loading menu;
+  `loading-screen` is recorded only when the menu shows). A `player.setpos` that far counts too. So a step after a coc or
+  `load` uses `at = "world-ready"` with `frames` to settle: 60-120 for a shot (a Riverwood coc's fade-in was still black 36
+  frames after world-ready), more where the scene needs it. Counting frames from the coc with `previous` lands on the loading
+  screen or the fade-in when the load is slow.
+- A step waiting for its milestone while the world is ready and no load is under way fails after `wait_s` (else
+  `timeouts.step_wait`): `step N: waited 60 s for world-ready after the previous step, and no load started` (a coc to where
+  the player already stands moves nothing, so it is not seen as a load). Through boot, compiling, a load or a menu the phase
+  timeouts time the wait.
 - A step after a `shot` holds until the shot is saved (timeout as for `await`). A run's first shot waits several frames for
   the revision that switches its copy in, so a coc right after it would otherwise capture the loading screen.
 - `await = "adopted"` holds a step until the frame revision that holds the previous step's writes is adopted. Two frames after

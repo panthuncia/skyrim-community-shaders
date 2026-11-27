@@ -71,10 +71,9 @@ frames = 120
 do = "console"
 arg = "coc WhiterunDragonsreach"
 
-# Frames, not world-ready: plain D3D11 mode records no world-ready after a coc.
 [[steps]]
-at = "previous"
-frames = 900
+at = "world-ready"
+frames = 300
 do = "shot"
 arg = "fg-loaded"
 

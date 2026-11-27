@@ -38,8 +38,8 @@ do = "console"
 arg = "coc Riverwood"
 
 [[steps]]
-at = "previous"
-frames = 1100
+at = "world-ready"
+frames = 60
 do = "console"
 arg = "set timescale to 0"
 

@@ -9,8 +9,8 @@ do = "console"
 arg = "coc WhiterunDragonsreach"
 
 [[steps]]
-at = "previous"
-frames = 600
+at = "world-ready"
+frames = 120
 do = "shot"
 arg = "dragonsreach"
 
@@ -47,8 +47,8 @@ do = "console"
 arg = "coc Whiterun"
 
 [[steps]]
-at = "previous"
-frames = 600
+at = "world-ready"
+frames = 120
 do = "shot"
 arg = "vl-exterior"
 

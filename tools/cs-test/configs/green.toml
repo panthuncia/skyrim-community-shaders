@@ -23,10 +23,10 @@ frames = 99
 do = "console"
 arg = "coc Whiterun"
 
-# A coc does not record a new world-ready, so the rest counts frames from the coc (the old scenario's gaps).
+# The coc's world-ready, then the old scenario's gaps.
 [[steps]]
-at = "previous"
-frames = 600
+at = "world-ready"
+frames = 60
 do = "weather"
 arg = "SkyrimClear_A"
 

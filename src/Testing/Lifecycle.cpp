@@ -13,6 +13,9 @@ namespace Testing
 		// Consecutive ready game frames (step clock frames) before the world counts as ready. Game frames, so world-ready comes at the
 		// same game time with any snapshot cadence.
 		constexpr std::uint32_t kReadyFrames = 30;
+		// A player move longer than this between two Presents is a teleport. A coc nearby loads with no loading screen, so its jump
+		// is how the runner sees that load. Walking moves a few units a frame.
+		constexpr float kTeleportDistance = 1024.0f;
 
 		// Lifecycle state, guarded by the run's lock.
 		bool inLoad = false;             // a load started and the world is not ready yet
@@ -21,6 +24,7 @@ namespace Testing
 		bool worldReady = false;
 		std::uint32_t readyFrames = 0;
 		std::uint32_t lifecycleFrame = 0;  // the step clock at the previous UpdateLifecycle
+		std::optional<RE::NiPoint3> playerSeen;  // the player's position at the previous UpdateLifecycle, when in the world
 		double loadTimerStart = -1.0;  // when the wait for world-ready started; below zero: none
 
 		// FPS over the last second.
@@ -30,7 +34,7 @@ namespace Testing
 		/** @brief Whether the configuration waits for a load: then the load timeout applies. */
 		bool LoadExpected(const Config& a_config)
 		{
-			const auto isLoadMilestone = [](std::string_view a_name) { return a_name == "load-start" || a_name == "loading-screen" || a_name == "world-ready"; };
+			const auto isLoadMilestone = [](std::string_view a_name) { return a_name == "load-start" || a_name == "loading-screen" || a_name == "held-frame" || a_name == "world-ready"; };
 			if (isLoadMilestone(a_config.expectReach))
 				return true;
 			return std::ranges::any_of(a_config.steps, [&](const Step& a_step) { return isLoadMilestone(a_step.at); });
@@ -125,11 +129,14 @@ namespace Testing
 		const bool loading = state && state->isLoadingMenuOpen;
 		const bool held = Holds::Any();
 		bool playerReady = false;
+		std::optional<RE::NiPoint3> position;
 		if (!loading && !mainMenu) {
 			// The player's cell attached and their 3D loaded: the world around them is drawn.
 			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
 			auto* cell = player ? player->GetParentCell() : nullptr;
 			playerReady = cell && cell->IsAttached() && player->Get3D() != nullptr;
+			if (player)
+				position = player->GetPosition();
 		}
 
 		auto& run = Run();
@@ -153,6 +160,14 @@ namespace Testing
 				loadTimerStart = now;
 		}
 		// The game's own loading screen at startup comes before the main menu: it is not a load.
+		// A teleport with no loading screen (a coc nearby) is a load too: the steps after it wait for its world-ready.
+		const auto previousPosition = std::exchange(playerSeen, position);
+		const bool teleported = position && previousPosition && position->GetSquaredDistance(*previousPosition) > kTeleportDistance * kTeleportDistance;
+		if (teleported && FindMilestone("main-menu")) {
+			logger::info("[TEST] teleport at frame {}: the player moved {:.0f} units, from ({:.0f}, {:.0f}, {:.0f}) to ({:.0f}, {:.0f}, {:.0f})", a_frame,
+				position->GetDistance(*previousPosition), previousPosition->x, previousPosition->y, previousPosition->z, position->x, position->y, position->z);
+			BeginLoad(a_frame);
+		}
 		if (loading && FindMilestone("main-menu")) {
 			BeginLoad(a_frame);
 			if (!loadingScreenSeen) {

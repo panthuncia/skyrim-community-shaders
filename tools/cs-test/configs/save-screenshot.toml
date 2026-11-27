@@ -39,8 +39,8 @@ do = "load"
 arg = "recent"
 
 [[steps]]
-at = "previous"
-frames = 600
+at = "world-ready"
+frames = 120
 do = "shot"
 arg = "loaded"
 

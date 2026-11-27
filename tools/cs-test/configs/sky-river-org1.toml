@@ -31,8 +31,8 @@ do = "console"
 arg = "coc Riverwood"
 
 [[steps]]
-at = "previous"
-frames = 1100
+at = "world-ready"
+frames = 60
 do = "console"
 arg = "set timescale to 20"
 
@@ -163,8 +163,8 @@ do = "console"
 arg = "coc WhiterunDragonsreach"
 
 [[steps]]
-at = "previous"
-frames = 990
+at = "world-ready"
+frames = 300
 do = "shot"
 arg = "dragonsreach"
 

@@ -35,10 +35,9 @@ frames = 1
 do = "console"
 arg = "coc RavenRock"
 
-# A coc does not record a new world-ready, so the frames count from the coc.
 [[steps]]
-at = "previous"
-frames = 900
+at = "world-ready"
+frames = 300
 do = "shot"
 arg = "solstheim"
 
@@ -49,8 +48,8 @@ do = "console"
 arg = "coc Riverwood"
 
 [[steps]]
-at = "previous"
-frames = 900
+at = "world-ready"
+frames = 300
 do = "shot"
 arg = "riverwood"
 
