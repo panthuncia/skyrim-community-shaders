@@ -14,10 +14,11 @@ namespace Snapshot
 	 * @brief A snapshot's UI command stream (phase 4, native only): GFx's renderer calls of the game update, recorded by CS's
 	 * Scaleform renderer (RenderGraph/Engine/Scaleform/UiStream.h).
 	 *
-	 * The capture makes the holder empty. The UI producer's DrawInterface sets it once and it never changes afterwards (Scaleform.h).
-	 * Today DrawInterface runs inside the update's first render, after the snapshot was published (Snapshot::Building is still the
-	 * update's). In phase 7 the game thread runs it with a Scaleform::ProducerScope before the publish, and the render side replays
-	 * the stream with Scaleform::ReplaySnapshotUi. A repeated render of the snapshot replays it again.
+	 * The capture makes the holder empty. The UI producer sets it once and it never changes afterwards (Scaleform.h). A routed
+	 * update's game frame records the interface before the publish (Scaleform::ProduceUi), and the render side replays the stream
+	 * with Scaleform::ReplaySnapshotUi. An update the game thread renders, or a routed one whose menus draw engine work, runs
+	 * DrawInterface inside its render, after the publish (Snapshot::Building is still the update's). A repeated render of the
+	 * snapshot replays it again.
 	 */
 	struct UiCommandStream
 	{

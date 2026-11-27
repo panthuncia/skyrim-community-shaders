@@ -18,7 +18,6 @@
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
-#include "RenderGraph/Switches.h"
 #include "Snapshot/Publication.h"
 #include "Snapshot/Retire.h"
 #include "Snapshot/UiCommandStream.h"
@@ -166,8 +165,7 @@ namespace RenderGraph::Engine::Scaleform
 			std::uint64_t segments = 0;
 			std::uint64_t scratchSegments = 0;             // into a scratch image, for a GFx render target or a filter pass
 			std::map<std::string, std::uint64_t> reasons;  // a whole display counts once
-			// The paths with no parity run before phase 4's second lead: translated 3D draws, filter draws, pushed targets and
-			// display target switches inside displays.
+			// Seen counts: translated 3D draws, filter draws, pushed targets and display target switches inside displays.
 			std::atomic<std::uint64_t> draws3D{ 0 }, blurs{ 0 }, colorMatrices{ 0 }, pushes{ 0 }, displayTargets{ 0 };
 		};
 
@@ -177,7 +175,7 @@ namespace RenderGraph::Engine::Scaleform
 			return s_counters;
 		}
 
-		void ReportGameCalls();
+		void ReportNativeUi();
 
 		void Report(Counters& a_counters)
 		{
@@ -193,7 +191,7 @@ namespace RenderGraph::Engine::Scaleform
 				total, a_counters.graph, a_counters.mixed, a_counters.lost, a_counters.segments, a_counters.scratchSegments, reasons.empty() ? "none" : reasons,
 				a_counters.draws3D.load(), a_counters.blurs.load(), a_counters.colorMatrices.load(), a_counters.pushes.load(), a_counters.displayTargets.load());
 			if (Native::Active())
-				ReportGameCalls();
+				ReportNativeUi();
 		}
 
 		/** @brief Counts something the graph does not draw. Each reason is logged the first time. */
@@ -315,6 +313,7 @@ namespace RenderGraph::Engine::Scaleform
 			return a_dxgiFormat == DXGI_FORMAT_R16_UINT ? 2 : 4;
 		}
 
+		/** @brief Starts a new segment: after a flush, a render target push or pop, or a filter pass. The texgen rows carry over, as in D3D11. */
 		void ClearSegment()
 		{
 			auto& capture = Current();
@@ -322,12 +321,6 @@ namespace RenderGraph::Engine::Scaleform
 			capture.vertexArray = capture.indexArray = -1;
 			capture.display.ResetCommands();
 			capture.textureIndex.clear();
-		}
-
-		/** @brief Starts a new segment after a render target push or pop, or a filter pass. The texgen rows carry over, as in D3D11. */
-		void StartSegment()
-		{
-			ClearSegment();
 		}
 
 		void NoteLeftOut(const char* a_reason)
@@ -349,15 +342,12 @@ namespace RenderGraph::Engine::Scaleform
 				Frame::Driver::NoteTapError(Frame::Driver::TapError::Refused, Frame::SegmentId::Count, fmt::format("a Scaleform display: {}", a_reason));
 		}
 
-		void NoteSegment(const Display& a_display);
-
 		/** @brief Draws the segment on the graph, or counts it left out. A refusal not caused by schedule lag is a mismatch in native mode. */
 		void Flush()
 		{
 			auto& capture = Current();
 			if (capture.display.commands.empty() && !capture.display.clearTarget)
 				return;
-			NoteSegment(capture.display);
 			const char* reason = nullptr;
 			bool lagged = false;
 			if (Passes::Submit(capture.display, reason, lagged)) {
@@ -995,8 +985,7 @@ namespace RenderGraph::Engine::Scaleform
 
 			// The background is the frame rectangle in its colour, with the identity matrix left set.
 			if (reinterpret_cast<const std::uint8_t*>(&a_background)[3] != 0) {
-				static constexpr float kIdentity[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
-				std::memcpy(a_state.matrix, kIdentity, sizeof(kIdentity));
+				std::memcpy(a_state.matrix, kIdentityMatrix, sizeof(kIdentityMatrix));
 				const std::int16_t x0 = static_cast<std::int16_t>(static_cast<std::int32_t>(a_x0));
 				const std::int16_t x1 = static_cast<std::int16_t>(static_cast<std::int32_t>(a_x1));
 				const std::int16_t y0 = static_cast<std::int16_t>(static_cast<std::int32_t>(a_y0));
@@ -1004,7 +993,7 @@ namespace RenderGraph::Engine::Scaleform
 				const std::int16_t corners[8] = { x0, y0, x1, y0, x0, y1, x1, y1 };
 				const std::uint16_t strip[6] = { 0, 1, 2, 1, 3, 2 };
 				DrawRecord record{};
-				MatrixConstants(kIdentity, record);
+				MatrixConstants(kIdentityMatrix, record);
 				ColorConstant(a_background, record.cxmul);
 				std::memcpy(record.texgen, capture.texgen, sizeof(record.texgen));
 				record.vertexOffset = capture.display.Append(corners, sizeof(corners), 4);
@@ -1053,7 +1042,7 @@ namespace RenderGraph::Engine::Scaleform
 				capture.display.scratch = Display::kLostScratch;
 				NoteLeftOut("SetDisplayRenderTarget inside a display to a target without a view (the rest of the display)");
 			}
-			StartSegment();
+			ClearSegment();
 		}
 
 		std::uint32_t BusyScratch()
@@ -1173,7 +1162,7 @@ namespace RenderGraph::Engine::Scaleform
 			capture.viewMatrix[5] = 1.0f - capture.viewMatrix[4] * a_frame[1];
 			capture.stencil = Stencil::Off;
 			capture.stencilRef = 0;
-			StartSegment();
+			ClearSegment();
 			capture.display.clearTarget = true;
 		}
 
@@ -1197,7 +1186,7 @@ namespace RenderGraph::Engine::Scaleform
 			capture.maskLevel = frame.maskLevel;
 			capture.stencil = frame.stencil;
 			capture.stencilRef = frame.stencilRef;
-			StartSegment();
+			ClearSegment();
 		}
 
 		bool CaptureBlur(RendererState& a_state, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params);
@@ -1453,7 +1442,6 @@ namespace RenderGraph::Engine::Scaleform
 					lastSlot += 2;
 			}
 
-			static constexpr float kIdentity[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
 			static constexpr float kUnitRect[4] = { -1.0f, -1.0f, 1.0f, 1.0f };
 			std::int32_t source = original;
 			float sourceWidth = originalWidth, sourceHeight = originalHeight;
@@ -1490,9 +1478,9 @@ namespace RenderGraph::Engine::Scaleform
 				std::memcpy(capture.viewMatrix, unitView, sizeof(unitView));
 				capture.stencil = Stencil::Off;
 				capture.stencilRef = 0;
-				StartSegment();
+				ClearSegment();
 				capture.display.clearTarget = true;
-				EmitBlurPass(a_state, kIdentity, kUnitRect, sourceRect, sourceWidth, sourceHeight, slot, constants, original, source,
+				EmitBlurPass(a_state, kIdentityMatrix, kUnitRect, sourceRect, sourceWidth, sourceHeight, slot, constants, original, source,
 					capture.inMask ? 7 : 9);
 				Flush();
 				ClearSegment();
@@ -1501,7 +1489,7 @@ namespace RenderGraph::Engine::Scaleform
 				std::memcpy(capture.viewMatrix, viewMatrix, sizeof(viewMatrix));
 				capture.stencil = stencil;
 				capture.stencilRef = stencilRef;
-				StartSegment();
+				ClearSegment();
 				if (held >= 0)
 					capture.pinnedScratch &= ~(1u << held);
 				held = scratch;
@@ -1520,29 +1508,18 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief PushBlendMode with the renderer's rule: the stack keeps the previous mode, and Normal and Layer keep the parent's mode. */
+		/** @brief PushBlendMode inside a captured display (BlendStackPush). */
 		void TranslatePushBlendMode(std::uint32_t a_mode)
 		{
 			auto& capture = Current();
-			capture.blendStack.push_back(capture.blendMode);
-			if (a_mode > 2)
-				capture.blendMode = a_mode;
+			BlendStackPush(capture.blendMode, capture.blendStack, a_mode);
 		}
 
-		/** @brief PopBlendMode with the renderer's rule: the mode is the topmost on the stack above Layer, or None. */
+		/** @brief PopBlendMode inside a captured display (BlendStackPop). */
 		void TranslatePopBlendMode()
 		{
 			auto& capture = Current();
-			if (capture.blendStack.empty())
-				return;
-			std::uint32_t mode = 0;
-			for (auto it = capture.blendStack.rbegin(); it != capture.blendStack.rend(); ++it)
-				if (*it > 2) {
-					mode = *it;
-					break;
-				}
-			capture.blendStack.pop_back();
-			capture.blendMode = mode;
+			BlendStackPop(capture.blendMode, capture.blendStack);
 		}
 
 		void TranslateDrawIndexedTriList(RendererState& a_state, std::int32_t a_base, std::int32_t a_start, std::int32_t a_triangles)
@@ -1714,32 +1691,12 @@ namespace RenderGraph::Engine::Scaleform
 		// ---------------------------------------------------------------------------------------------------------------------
 		// The replay: applies a UI stream's commands to the renderer state CS keeps and draws them through the translation above.
 
-		/**
-		 * @brief The cadence test mode's repeat check: each segment's hash (staging bytes, commands, textures, target, viewport) in a
-		 * stream's first render, compared with the same segment of each repeated render. Counted for the census. Cadence mode only.
-		 */
-		struct RepeatCheck
-		{
-			bool on = !::Switches::Value("CS_SNAPSHOT_CADENCE").empty();
-			std::vector<std::uint64_t> first;
-			std::size_t next = 0;
-			std::uint64_t same = 0, differ = 0, missing = 0;
-		};
-
-		RepeatCheck& Repeats()
-		{
-			static RepeatCheck s_check;
-			return s_check;
-		}
-
 		struct Replay
 		{
 			RendererState state;
 			std::unordered_map<const RE::GTexture*, std::uint32_t> textures;
 			std::shared_ptr<const UiStream> stream;
 			std::size_t cursor = 0;
-			bool again = false;  // this replay draws a stream drawn before: a repeated render of its snapshot
-			std::uint64_t repeatedRenders = 0;
 		};
 
 		Replay& Replayer()
@@ -1917,13 +1874,6 @@ namespace RenderGraph::Engine::Scaleform
 			}
 			// The stream replayed before goes to the retire queue: the GPU may still read the views it holds.
 			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::exchange(a_replay.stream, a_stream));
-			// The repeat check compares a repeated render's segments with the first render's.
-			auto& check = Repeats();
-			check.next = 0;
-			if (a_replay.again)
-				++a_replay.repeatedRenders;
-			else
-				check.first.clear();
 			a_replay.cursor = 0;
 			a_replay.textures.clear();
 			a_replay.state = a_stream->header.state;
@@ -2021,45 +1971,6 @@ namespace RenderGraph::Engine::Scaleform
 			return Mirroring() && !Rec().repeat;
 		}
 
-		std::uint64_t Fnv(std::uint64_t a_hash, const void* a_bytes, std::size_t a_size)
-		{
-			const auto* bytes = static_cast<const std::uint8_t*>(a_bytes);
-			for (std::size_t i = 0; i < a_size; ++i)
-				a_hash = (a_hash ^ bytes[i]) * 0x100000001b3ull;
-			return a_hash;
-		}
-
-		void NoteSegment(const Display& a_display)
-		{
-			auto& check = Repeats();
-			if (!check.on || !Native::Active())
-				return;
-			std::uint64_t hash = 0xcbf29ce484222325ull;
-			hash = Fnv(hash, a_display.staging.data(), a_display.staging.size());
-			for (const auto& command : a_display.commands) {
-				hash = Fnv(hash, &command.state, sizeof(command.state));
-				hash = Fnv(hash, &command.vertexCount, sizeof(command.vertexCount));
-				hash = Fnv(hash, command.textures, sizeof(command.textures));
-				hash = Fnv(hash, command.samplers, sizeof(command.samplers));
-				hash = Fnv(hash, &command.stencilRef, sizeof(command.stencilRef));
-			}
-			hash = Fnv(hash, a_display.textures.data(), a_display.textures.size() * sizeof(void*));
-			hash = Fnv(hash, &a_display.target, sizeof(a_display.target));
-			hash = Fnv(hash, a_display.viewport, sizeof(a_display.viewport));
-			hash = Fnv(hash, &a_display.scratch, sizeof(a_display.scratch));
-			if (!Replayer().again) {
-				check.first.push_back(hash);
-				return;
-			}
-			if (check.next >= check.first.size())
-				++check.missing;
-			else if (check.first[check.next] == hash)
-				++check.same;
-			else
-				++check.differ;
-			++check.next;
-		}
-
 		/**
 		 * @brief The open stream, opened with the header the last one left. Streams are per DrawInterface: its end finishes the one it
 		 * opened. UI producer.
@@ -2154,37 +2065,9 @@ namespace RenderGraph::Engine::Scaleform
 			return Native::Active();
 		}
 
-		/** @brief The D3D1x renderer's slots native mode still calls, counted for the census. */
-		enum class GameCall : std::uint8_t
+		/** @brief Logs, with the census, how native mode's DrawInterface calls ran and CS's UI objects. */
+		void ReportNativeUi()
 		{
-			Destructor,
-			Count,
-		};
-
-		std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(GameCall::Count)>& GameCalls()
-		{
-			static std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(GameCall::Count)> s_calls{};
-			return s_calls;
-		}
-
-		void NoteGameCall(GameCall a_call)
-		{
-			GameCalls()[static_cast<std::size_t>(a_call)].fetch_add(1, std::memory_order_relaxed);
-		}
-
-		/** @brief Logs, with the census, how often native mode called the D3D11 renderer since the last report, and CS's UI objects. */
-		void ReportGameCalls()
-		{
-			static constexpr const char* kNames[] = { "the destructor" };
-			std::string calls;
-			for (std::size_t i = 0; i < GameCalls().size(); ++i)
-				if (const auto count = GameCalls()[i].exchange(0, std::memory_order_relaxed))
-					calls += fmt::format("{}{} {}", calls.empty() ? "" : ", ", count, kNames[i]);
-			const auto& repeats = Repeats();
-			logger::info(
-				"[ORG] Scaleform: the game's renderer was called for {}; every other call was CS's; {} repeated renders replayed their snapshot's stream "
-				"(segments: {} as in the first render, {} differ, {} more than it had)",
-				calls.empty() ? "nothing" : calls, Replayer().repeatedRenders, repeats.same, repeats.differ, repeats.missing);
 			logger::info(
 				"[ORG] Scaleform: DrawInterface {} record-only (replayed at the UI point), {} per display; {} engine render calls inside a record-only "
 				"DrawInterface; {} GFx calls on the render owner outside DrawInterface",
@@ -2236,7 +2119,7 @@ namespace RenderGraph::Engine::Scaleform
 			}
 			// Only the render owner captures. Another thread's display neither reads nor ends it.
 			if (!FrameAnchors::IsRenderOwner()) {
-				CountLost("a whole display off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)");
+				CountLost("a whole display off the render owner (a loading screen)");
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
@@ -2735,10 +2618,9 @@ namespace RenderGraph::Engine::Scaleform
 			return UiResources::Context();
 		}
 
-		/** @brief The destructor stays the D3D1x renderer's (it runs at shutdown); counted. */
+		/** @brief The destructor stays the D3D1x renderer's (it runs at shutdown). */
 		void* Destroy(void* a_renderer, std::uint32_t a_flags)
 		{
-			NoteGameCall(GameCall::Destructor);
 			using DestroyFn = void* (*)(void*, std::uint32_t);
 			return Original<DestroyFn>(kDestructor)(a_renderer, a_flags);
 		}
@@ -2964,7 +2846,6 @@ namespace RenderGraph::Engine::Scaleform
 				auto& replay = Replayer();
 				const Snapshot::UiCommandStream* holder = a_snapshot ? a_snapshot->ui.get() : nullptr;
 				const auto repeat = holder ? holder->Get() : nullptr;
-				replay.again = repeat != nullptr;
 				if (repeat) {
 					recorder.repeat = repeat;
 					// The replay starts again from the stream's header.
@@ -3196,7 +3077,6 @@ namespace RenderGraph::Engine::Scaleform
 		if (!stream)
 			return;
 		auto& replay = Replayer();
-		replay.again = replay.stream == stream;
 		// The replay starts from the stream's header, a repeated render's too.
 		Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::exchange(replay.stream, nullptr));
 		RunReplay(stream);

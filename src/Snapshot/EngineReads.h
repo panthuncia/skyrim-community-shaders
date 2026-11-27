@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <source_location>
@@ -7,7 +8,7 @@
 /**
 * @brief The live-read detector. CS reads engine singletons (sky, TES, player, camera, shadow state, renderer data, timers, INI)
 * through CS_ENGINE_READ, which counts each read at its call site. A read inside a CaptureScope is a capture. Any other read is
-* a live read: the snapshot roadmap's phase 1 removes them from native's frame. The counters are always on: one relaxed atomic
+* a live read, which native's frame should not make. The counters are always on: one relaxed atomic
 * add per read, on a site object each call site owns. CS_SNAPSHOT_DETECT=1 logs the table at exit and at each load.
 */
 namespace Snapshot::EngineReads
@@ -39,10 +40,10 @@ namespace Snapshot::EngineReads
 		Count
 	};
 
-	/** @brief The roadmap's read categories, so the table can group by what phase 1 does with a site. */
+	/** @brief The read categories, so the table groups the sites by kind of read. */
 	enum class Category : std::uint8_t
 	{
-		CapturePoint,  // in a hook that is a capture point today, scattered across the engine's render sequence
+		CapturePoint,  // in a hook that captures game state, scattered across the engine's render sequence
 		RecordTime,    // while CS records its frame (commits, passes, feature draw code)
 		BoundState,    // reads what the engine bound to the D3D11 context
 		Other,         // setup, settings UI, load-time work, writes to engine state
@@ -51,12 +52,14 @@ namespace Snapshot::EngineReads
 
 	/** @brief The frame kinds the counters split by, RenderGraph::Frame::Kind's values. */
 	inline constexpr std::uint32_t kKinds = 5;
+	/** @brief Each frame kind's key in the detectors' tables and test reports, by RenderGraph::Frame::Kind value. */
+	inline constexpr std::array<const char*, kKinds> kKindKeys{ "world", "frozen_world", "main_menu", "loading", "bink" };
 	/** @brief 0 for the thread that began the current frame, 1 for any other. */
 	inline constexpr std::uint32_t kThreads = 2;
 
 	/**
-	* @brief The parts of a native world frame that phase 7 moves to the render thread, for the render-half counts: Record is the
-	* skeleton driver's render half (RecordFrame and every stage it records), FrameEnd the Present hook's body.
+	* @brief The parts of a native world frame the render thread runs, for the render-half counts: Record is the skeleton driver's
+	* render half (RecordFrame and every stage it records), FrameEnd the Present hook's body.
 	*/
 	enum class Half : std::uint8_t
 	{
@@ -137,11 +140,17 @@ namespace Snapshot::EngineReads
 	/** @brief Whether this thread is inside the ImGui frame. */
 	bool InUiFrame() noexcept;
 
-	/** @brief Renderer::Begin, before the frame's work: a_kind is the frame's RenderGraph::Frame::Kind. Its thread is the render thread. */
-	void BeginFrame(std::uint8_t a_kind) noexcept;
+	/**
+	* @brief Renderer::Begin, before the frame's work: a_kind is the frame's RenderGraph::Frame::Kind. Its thread is the render thread.
+	* Returns the last frame's kind. EngineZones::BeginFrame calls it, so both detectors begin the frame together.
+	*/
+	std::uint8_t BeginFrame(std::uint8_t a_kind) noexcept;
 
 	/** @brief The current frame's kind, as BeginFrame last set it. */
 	std::uint8_t CurrentKind() noexcept;
+
+	/** @brief The current frame's kind as BeginFrame stores it, for machine-code stubs that read it by address. */
+	const std::atomic<std::uint8_t>* CurrentKindAddress() noexcept;
 
 	/** @brief 0 on the thread that began the current frame, 1 elsewhere. */
 	std::uint32_t ThreadIndex() noexcept;

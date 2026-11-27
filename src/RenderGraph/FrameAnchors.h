@@ -323,8 +323,8 @@ namespace FrameAnchors
 	bool InRun();
 
 	/** @brief Whether the calling thread owns rendering now, the only thread where anchors run. A pure query. Any thread.
-	*  In the graph modes it is the thread that last began an engine frame. A false answer is always safe. Revisions adopt only
-	*  on the main thread (IsMainThread), whichever thread owns rendering. */
+	*  In the graph modes it is the thread that last began an engine frame. A false answer is always safe. Revisions adopt on
+	*  the render owner (decision 70). */
 	bool IsRenderOwner();
 
 	/** @brief Makes the calling thread the render owner, at each engine frame start (Renderer::Begin, SE 75460, AE 77245).

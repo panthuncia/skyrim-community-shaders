@@ -121,9 +121,6 @@ struct PhysicalSky final : public Feature
 	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
 	static void Capture(Snapshot::Builder& a_builder);
 
-	/** @brief The adopted snapshot's block, or null before the first. Render thread. */
-	static const Block* Frame();
-
 	// Draw
 	void Reset() override;
 	void EarlyPrepass() override;

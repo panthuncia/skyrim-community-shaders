@@ -1,7 +1,7 @@
 #pragma once
 
-// The formats DCLF's pipelines are built for, read once at setup from the engine target set's declarations (cleanup plan A1,
-// phase 3 design 5.1). They never change in a session, so nothing watches the bound targets each frame.
+// The formats DCLF's pipelines are built for, read once at setup from the engine target set's declarations. They never
+// change in a session, so nothing watches the bound targets each frame.
 
 #include <dxgiformat.h>
 

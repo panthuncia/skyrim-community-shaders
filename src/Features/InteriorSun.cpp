@@ -103,8 +103,7 @@ void InteriorSun::Capture(Snapshot::Builder& a_builder)
 
 void InteriorSun::EarlyPrepass()
 {
-	const auto& snapshot = Snapshot::Current();
-	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* frame = Snapshot::CurrentBlock<Block>();
 	isInteriorWithSun = frame && IsInteriorWithSun(frame->interior, frame->cellHasSun);
 	if (!isInteriorWithSun && !arraysCleared) {
 		ClearArrays();

@@ -31,7 +31,7 @@ namespace DCLF::Draws
 	constexpr std::uint32_t kShadowShape = 0, kShadowShapes = 1;
 
 	/**
-	 * @brief Why the engine draws an epoch's work in a frame (cleanup plan A3, step 6). Each is decided from what the frame's Begin
+	 * @brief Why the engine draws an epoch's work in a frame. Each is decided from what the frame's Begin
 	 * adopted: the drawing state, the toggles and the scene. An uncovered epoch the recipe has DCLF cover, with no state, is a tap
 	 * error (TapError::Uncovered).
 	 */

@@ -697,7 +697,8 @@ namespace DCLF
 		/** @brief Main thread. Sets kAccumulated on the object root's non-hidden children, as DrawWorld_BuildSceneLists does each frame. */
 		void CellRoots(Readback& a_readback)
 		{
-			const auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0] : nullptr;
+			const auto* shaderState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+			const auto* sceneNode = shaderState ? shaderState->shadowSceneNode[0] : nullptr;
 			if (!sceneNode)
 				return;
 			auto* root = Engine::ObjectRoot(*sceneNode);

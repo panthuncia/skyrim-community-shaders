@@ -48,24 +48,16 @@ namespace DCLF::Features::Shadows::Native
 		}
 
 		// The selection's globals (AE address).
-		std::uint32_t& LightCount() { return Global<std::uint32_t>(528091, 415036); }               // 0x14338c904: the shadow light count (gLastFrameEnabledShadowCasterLightsCount2)
+		std::uint32_t& LightCount() { return DCLF::Engine::Global<std::uint32_t>(DCLF::Engine::Address::kShadowLightCount); }
 		std::uint32_t& MaskCounter() { return Global<std::uint32_t>(528092, 415037); }              // 0x14338c908: the next mask index
-		std::uint32_t& InsideMask() { return Global<std::uint32_t>(528093, 415038); }               // 0x14338c90c: lights whose sphere holds the camera
-		std::uint8_t& SunOff() { return Global<std::uint8_t>(528095, 415040); }                     // 0x14338c911
+		std::uint32_t& InsideMask() { return DCLF::Engine::Global<std::uint32_t>(DCLF::Engine::Address::kShadowInsideMask); }
 		std::uint8_t& FocusFound() { return Global<std::uint8_t>(528096, 415041); }                 // 0x14338c912
 		std::uint32_t& KeptLights() { return Global<std::uint32_t>(528090, 415035); }               // 0x14338c900: gLastFrameEnabledShadowCasterLightCount
 		RE::BSShadowLight*& LastFocusHost() { return Global<RE::BSShadowLight*>(528315, 415267); }  // 0x1433dcfb8
-		std::uint8_t& FocusSetting() { return Global<std::uint8_t>(513201, 390932); }               // 0x142032fd0: focus shadows on
 		std::uint8_t& LensFlaresOn() { return Global<std::uint8_t>(513349, 391128); }               // 0x142033658: lens flares are on
-		std::uint32_t& FocusTargets() { return Global<std::uint32_t>(527703, 414625); }             // 0x14332a498: the focus targets' count
-		RE::ShadowSceneNode*& SceneNode() { return Global<RE::ShadowSceneNode*>(513211, 390951); }  // 0x142033060
-		std::byte*& WorldGraph() { return Global<std::byte*>(528087, 415032); }                     // 0x14338c8e8: the world scene graph (camera at +0x128)
+		RE::ShadowSceneNode* SceneNode() { return DCLF::Engine::Global<RE::ShadowSceneNode*>(DCLF::Engine::Address::kShadowSceneNode); }
 
-		void**& Processes() { return Global<void**>(528077, 415022); }                                             // 0x14338c8a0: the main camera's list processes
-		RE::BSShaderAccumulator*& MainAccumulator() { return Global<RE::BSShaderAccumulator*>(528064, 415009); }   // 0x14338c830
-
-		constexpr std::uint32_t kMemoryContext = 0x1D;   // the TLS memory context the shadow lights' Render runs under
-		constexpr std::size_t kTlsMemoryContext = 0x768;
+		constexpr std::uint32_t kMemoryContext = 0x1D;  // the TLS memory context the shadow lights' Render runs under
 
 		/** @brief The target of the rel32 CALL at a_site: the engine's function, or whatever hook sits on that call. */
 		template <class F>
@@ -77,27 +69,6 @@ namespace DCLF::Features::Shadows::Native
 		}
 
 		using AfterFullFrustumFn = void (*)(RE::ShadowSceneNode*, void*);
-
-		/** @brief The TLS memory context id, set for a scope as the engine's Render loop does. */
-		class MemoryContext
-		{
-		public:
-			MemoryContext()
-			{
-				const auto index = Global<std::uint32_t>(528600, 415542);  // the executable's TLS index
-				auto* tls = reinterpret_cast<std::byte**>(__readgsqword(0x58));
-				slot = reinterpret_cast<std::uint32_t*>(tls[index] + kTlsMemoryContext);
-				saved = *slot;
-				*slot = kMemoryContext;
-			}
-			~MemoryContext() { *slot = saved; }
-			MemoryContext(const MemoryContext&) = delete;
-			MemoryContext& operator=(const MemoryContext&) = delete;
-
-		private:
-			std::uint32_t* slot = nullptr;
-			std::uint32_t saved = 0;
-		};
 
 		/** @brief FUN_1414a4030 (AE 106367): every shadowLightsAccum slot emptied, its light's mask index reset. */
 		void ResetAccumulated(RE::ShadowSceneNode& a_node)
@@ -125,7 +96,7 @@ namespace DCLF::Features::Shadows::Native
 
 		RE::NiCamera* WorldCamera()
 		{
-			auto* graph = WorldGraph();
+			const auto* graph = DCLF::Engine::Global<const std::byte*>(DCLF::Engine::Address::kWorldSceneGraph);
 			return graph ? DCLF::Engine::At<RE::NiCamera*>(graph, 0x128) : nullptr;
 		}
 
@@ -133,7 +104,7 @@ namespace DCLF::Features::Shadows::Native
 		void SelectSun(RE::ShadowSceneNode& a_node, RE::NiCamera& a_world, bool a_focusOn)
 		{
 			auto* sun = a_node.GetRuntimeData().sunShadowDirLight;
-			if (SunOff()) {
+			if (DCLF::Engine::Global<std::uint8_t>(DCLF::Engine::Address::kSunOff)) {
 				if (sun)
 					ReturnShadowmaps(*sun);
 				return;
@@ -171,7 +142,7 @@ namespace DCLF::Features::Shadows::Native
 		 */
 		void AfterFullFrustum()
 		{
-			CallTarget<AfterFullFrustumFn>(100414, 107132, 0x4B, 0x15A)(SceneNode(), Processes()[0]);
+			CallTarget<AfterFullFrustumFn>(100414, 107132, 0x4B, 0x15A)(SceneNode(), DCLF::Engine::Global<void**>(DCLF::Engine::Address::kListProcesses)[0]);
 		}
 	}
 
@@ -230,7 +201,7 @@ namespace DCLF::Features::Shadows::Native
 		MaskCounter() = 0;
 		InsideMask() = 0;
 		ResetAccumulated(*node);
-		const bool focusOn = FocusSetting() != 0 && FocusTargets() != 0;
+		const bool focusOn = DCLF::Engine::Global<std::uint8_t>(DCLF::Engine::Address::kFocusShadows) != 0 && DCLF::Engine::Global<std::uint32_t>(DCLF::Engine::Address::kFocusTargetCount) != 0;
 		FocusFound() = 0;
 		keptThisFrame = 0;
 		SelectSun(*node, *world, focusOn);
@@ -251,7 +222,7 @@ namespace DCLF::Features::Shadows::Native
 		set->sun = ReadSun(node ? node->GetRuntimeData().sunShadowDirLight : nullptr);
 		if (node) {
 			// The light walk RenderShadowMaps and the masks make: each kept light once, from its first slot.
-			const MemoryContext context;
+			const DCLF::Engine::ScopedMemoryContext context(kMemoryContext);
 			auto& accumulated = node->GetRuntimeData().shadowLightsAccum;
 			const bool lensFlares = LensFlaresOn() != 0;
 			std::uint32_t index = 0;
@@ -277,13 +248,15 @@ namespace DCLF::Features::Shadows::Native
 			for (const auto& captured : set->lights)
 				ReturnShadowmaps(*const_cast<RE::BSShadowLight*>(captured.light));
 			// The sun's descriptors as the bookkeeping left them, for the cascade record, also when the sun casts nothing this update.
-			if (const auto* sun = set->sun.light)
-				set->sun.descriptors = set->Find(sun) ? set->Find(sun)->descriptors : ReadLight(*sun).descriptors;
+			if (const auto* sun = set->sun.light) {
+				const auto* kept = set->Find(sun);
+				set->sun.descriptors = kept ? kept->descriptors : ReadDescriptors(*sun);
+			}
 		}
 		// The main accumulator keeps the camera and flag RenderShadowMaps gave it before RenderWorld's batches. Its registration jobs
 		// are not run: native draws nothing from the main camera's registered passes, so the engine's batch calls that still mark CS's
 		// stage points find nothing to draw.
-		if (auto* main = MainAccumulator(); main && WorldCamera()) {
+		if (auto* main = DCLF::Engine::Global<RE::BSShaderAccumulator*>(DCLF::Engine::Address::kMainAccumulator); main && WorldCamera()) {
 			auto* mainBytes = reinterpret_cast<std::byte*>(main);
 			DCLF::Engine::At<std::uint8_t>(mainBytes, 0x5C) = 1;
 			DCLF::Engine::At<RE::NiCamera*>(mainBytes, 0x10) = WorldCamera();

@@ -5,16 +5,18 @@
 #include "RenderGraph/Engine/Native/RenderThread.h"
 
 #include "Features/DrawcallLimitFix.h"
+#include "RenderGraph/Async/Retirement.h"
+#include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "Snapshot/FrameSnapshot.h"
 #include "Snapshot/Publication.h"
-#include "RenderGraph/Async/Retirement.h"
 
 #include "Globals.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -23,6 +25,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -30,10 +33,12 @@ namespace RenderGraph::Engine::Native::RenderThread
 {
 	namespace
 	{
-		template <class T>
-		T& Global(std::uint64_t a_se, std::uint64_t a_ae)
+		using Access::Global;
+
+		/** @brief a_snapshot's routed frame payload, or null when it carries none. */
+		const FramePayload* PayloadOf(const Snapshot::FrameSnapshot& a_snapshot)
 		{
-			return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
+			return static_cast<const FramePayload*>(a_snapshot.nativeFrame.get());
 		}
 
 		thread_local bool t_routedRender = false;
@@ -49,7 +54,8 @@ namespace RenderGraph::Engine::Native::RenderThread
 			bool parked = false;     // the render thread stopped (or has not rendered yet)
 			std::atomic<bool> running{ false };
 			// Parks by producer since the last line, and the producers' wait.
-			std::uint64_t parks = 0, drawFrameParks = 0, loadingParks = 0, movieParks = 0, interfaceParks = 0;
+			std::uint64_t parks = 0;
+			std::array<std::uint64_t, static_cast<std::size_t>(ParkReason::Count)> parksBy{};
 			double parkWaitMs = 0.0, parkWaitMaxMs = 0.0;
 		};
 
@@ -91,11 +97,30 @@ namespace RenderGraph::Engine::Native::RenderThread
 		{
 			static void thunk(RE::Main* a_main)
 			{
-				Park("Main::DrawFrame");
+				Park(ParkReason::DrawFrame);
 				func(a_main);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+
+		/** @brief a_reason's name in the stats line. */
+		const char* ParkReasonName(ParkReason a_reason)
+		{
+			switch (a_reason) {
+			case ParkReason::DrawFrame:
+				return "Main::DrawFrame";
+			case ParkReason::LoadingScreen:
+				return "loading screen";
+			case ParkReason::MovieTick:
+				return "movie";
+			case ParkReason::Interface:
+				return "interface";
+			case ParkReason::UnrenderedUpdate:
+				return "unrendered update";
+			default:
+				return "unknown";
+			}
+		}
 
 		struct Stats
 		{
@@ -218,7 +243,7 @@ namespace RenderGraph::Engine::Native::RenderThread
 		begin(renderer, 0);
 		unlock(renderer);
 		const auto& snapshot = Snapshot::Current();
-		const auto* payload = snapshot ? static_cast<const FramePayload*>(snapshot->nativeFrame.get()) : nullptr;
+		const auto* payload = snapshot ? PayloadOf(*snapshot) : nullptr;
 		if (!payload)
 			RenderGraph::Fatal("native render half", fmt::format("the adopted snapshot {} has no routed frame payload", snapshot ? snapshot->id : 0));
 		g_stats.renders.fetch_add(1, std::memory_order_relaxed);
@@ -251,8 +276,8 @@ namespace RenderGraph::Engine::Native::RenderThread
 
 	void Superseded(const Snapshot::FrameSnapshot& a_old, const Snapshot::FrameSnapshot& a_fresh)
 	{
-		const auto* old = static_cast<const FramePayload*>(a_old.nativeFrame.get());
-		const auto* fresh = static_cast<const FramePayload*>(a_fresh.nativeFrame.get());
+		const auto* old = PayloadOf(a_old);
+		const auto* fresh = PayloadOf(a_fresh);
 		if (old && fresh)
 			globals::features::drawcallLimitFix.NativeTicketSuperseded(old->prepared.sceneTicket, fresh->prepared.sceneTicket);
 	}
@@ -263,7 +288,7 @@ namespace RenderGraph::Engine::Native::RenderThread
 			return;
 		// The adopted snapshot's DCLF ticket: this Begin's revision adopts its scene (a repeat adopts nothing).
 		const auto& snapshot = Snapshot::Current();
-		if (const auto* payload = snapshot ? static_cast<const FramePayload*>(snapshot->nativeFrame.get()) : nullptr)
+		if (const auto* payload = snapshot ? PayloadOf(*snapshot) : nullptr)
 			globals::features::drawcallLimitFix.ExpectNativeTicket(payload->prepared.sceneTicket);
 	}
 
@@ -302,7 +327,7 @@ namespace RenderGraph::Engine::Native::RenderThread
 		}
 	}
 
-	void Park(const char* a_why)
+	void Park(ParkReason a_reason)
 	{
 		if (t_renderThread)
 			return;
@@ -317,11 +342,7 @@ namespace RenderGraph::Engine::Native::RenderThread
 		++thread.parks;
 		thread.parkWaitMs += ms;
 		thread.parkWaitMaxMs = (std::max)(thread.parkWaitMaxMs, ms);
-		const std::string_view why = a_why;
-		++(why == "Main::DrawFrame"     ? thread.drawFrameParks :
-			why == "the loading screen" ? thread.loadingParks :
-			why == "a movie tick"       ? thread.movieParks :
-										  thread.interfaceParks);
+		++thread.parksBy[static_cast<std::size_t>(a_reason)];
 	}
 
 	bool Running()
@@ -344,23 +365,24 @@ namespace RenderGraph::Engine::Native::RenderThread
 		if (!Native::Active())
 			return {};
 		auto& thread = Get();
-		std::uint64_t parks = 0, drawFrame = 0, loading = 0, movie = 0, interfaces = 0;
+		std::uint64_t parks = 0;
+		std::array<std::uint64_t, static_cast<std::size_t>(ParkReason::Count)> parksBy{};
 		double waitMs = 0.0, maxMs = 0.0;
 		{
 			const std::lock_guard lock(thread.mutex);
 			parks = std::exchange(thread.parks, 0);
-			drawFrame = std::exchange(thread.drawFrameParks, 0);
-			loading = std::exchange(thread.loadingParks, 0);
-			movie = std::exchange(thread.movieParks, 0);
-			interfaces = std::exchange(thread.interfaceParks, 0);
+			parksBy = std::exchange(thread.parksBy, {});
 			waitMs = std::exchange(thread.parkWaitMs, 0.0);
 			maxMs = std::exchange(thread.parkWaitMaxMs, 0.0);
 		}
+		std::string byReason;
+		for (std::size_t i = 0; i < parksBy.size(); ++i)
+			byReason += fmt::format("{}{} {}", i ? ", " : "", ParkReasonName(static_cast<ParkReason>(i)), parksBy[i]);
 		return fmt::format(
 			"[ORG native] routed updates: {} routed (CS's game frame, render half from the payload), {} on Main::DrawFrame, {} with the "
-			"interface drawn by the producer; {} routed renders; render thread parked {} times (Main::DrawFrame {}, loading screen {}, "
-			"movie {}, interface {}), the producers waited {:.2f} ms in all, at most {:.2f} ms",
-			g_stats.routed.exchange(0), g_stats.unrouted.exchange(0), g_stats.interfaceInline.exchange(0), g_stats.renders.exchange(0), parks, drawFrame,
-			loading, movie, interfaces, waitMs, maxMs);
+			"interface drawn by the producer; {} routed renders; render thread parked {} times ({}), the producers waited {:.2f} ms in all, "
+			"at most {:.2f} ms",
+			g_stats.routed.exchange(0), g_stats.unrouted.exchange(0), g_stats.interfaceInline.exchange(0), g_stats.renders.exchange(0), parks, byReason,
+			waitMs, maxMs);
 	}
 }

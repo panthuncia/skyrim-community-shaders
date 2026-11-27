@@ -2,6 +2,7 @@
 #include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
@@ -1179,7 +1180,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	auto context = globals::d3d::context;
 	float3 cloudLightDir = cbData.sunDir;
 	// The scene's directional light, as the capture found it (PhysicalSky::Block).
-	if (const Block* frameBlock = Frame(); frameBlock && frameBlock->sunLight) {
+	if (const Block* frameBlock = Snapshot::CurrentBlock<Block>(); frameBlock && frameBlock->sunLight) {
 		const auto& direction = frameBlock->sunLightDirection;
 		cloudLightDir = { -direction.x, -direction.y, -direction.z };
 		const float lengthSq = cloudLightDir.x * cloudLightDir.x + cloudLightDir.y * cloudLightDir.y + cloudLightDir.z * cloudLightDir.z;

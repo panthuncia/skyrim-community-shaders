@@ -2,19 +2,20 @@
 // per shadow view and occlusion map, uploads the arena, and submits the recorded work.
 // Also here: the shadow inputs, the occlusion maps' readiness check and the culling counter readback.
 
-#include "Features/DrawcallLimitFix/Core/Render/Internal.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
-#include "Features/DrawcallLimitFix/Core/Render/Direct/ShadowSite.h"
-#include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
-#include "Features/DrawcallLimitFix/Core/Render/Epochs/ExecutionOwners.h"
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
+#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SunVolume.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/VertexStreams.h"
+#include "Features/DrawcallLimitFix/Core/Render/Direct/ShadowSite.h"
+#include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/ExecutionOwners.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
-#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
-#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "RenderGraph/Fatal.h"
 #include "Snapshot/EngineReads.h"
 
@@ -588,8 +589,7 @@ namespace DCLF
 			return mapsNotDrawn(0);
 		};
 		auto& pipelines = DrawPipelines::Get();
-		auto* utility = CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader);
-		if (!pipelines.Enabled() || !utility || !engine.shadow || engine.shadowPlacements.empty())
+		if (!pipelines.Enabled() || !TicketUtilityShader() || !engine.shadow || engine.shadowPlacements.empty())
 			return notReady(ShadowNotReady::Setup);
 		const auto indirect = FrameShadowIndirectState();
 		if (!indirect.valid) {

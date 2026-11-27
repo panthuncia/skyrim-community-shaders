@@ -272,8 +272,7 @@ void CloudShadows::Capture(Snapshot::Builder& a_builder)
 
 int CloudShadows::FindCloudLayer(const void* a_geometry)
 {
-	const auto& snapshot = Snapshot::Current();
-	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* frame = Snapshot::CurrentBlock<Block>();
 	if (!frame)
 		return -1;
 	for (std::uint32_t i = 0; i < frame->layerCount; i++) {
@@ -314,8 +313,7 @@ void CloudShadows::ModifySky(std::uint32_t a_skyObjectType, const void* a_geomet
 void CloudShadows::ReflectionsPrepass()
 {
 	if (frameChecker.IsNewFrame()) {
-		const auto& snapshot = Snapshot::Current();
-		const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+		const Block* frame = Snapshot::CurrentBlock<Block>();
 		if (!frame || !frame->fullSky || !frame->climate)
 			return;
 

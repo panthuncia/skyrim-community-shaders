@@ -178,14 +178,13 @@ void GrassCollision::Capture(Snapshot::Builder& a_builder)
 		}
 	}
 
-	a_builder.Set(block);
+	a_builder.Set(std::move(block));
 }
 
 const GrassCollision::Block& GrassCollision::FrameBlock()
 {
 	static const Block empty{};
-	const auto& snapshot = Snapshot::Current();
-	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* block = Snapshot::CurrentBlock<Block>();
 	return block ? *block : empty;
 }
 
@@ -221,11 +220,7 @@ GrassCollision::PerFrame GrassCollision::NextPerFrame(const RE::NiPoint3& a_eye,
 	perFrameData.ValidMargin = { (int)cellIDDiff.x, (int)cellIDDiff.y };
 
 	// The grass springs back in game time (0 while paused), stepped once per new snapshot: a repeat holds it.
-	const auto& snapshot = Snapshot::Current();
-	const bool newSnapshot = snapshot && snapshot->id != steppedSnapshot;
-	if (newSnapshot)
-		steppedSnapshot = snapshot->id;
-	perFrameData.TimeDelta = newSnapshot ? snapshot->events.gameDelta : 0.0f;
+	perFrameData.TimeDelta = Snapshot::StepOnce(steppedSnapshot);
 
 	perFrameData.CameraHeightDelta = prevEyePos.z - eyePosNI.z;
 

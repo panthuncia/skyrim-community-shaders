@@ -168,7 +168,8 @@ namespace
 	// The editor can draw before globals are cached, so this falls back to the singleton.
 	RE::UI* GetUI()
 	{
-		return CS_ENGINE_READ(UI, Other, globals::game::ui) ? CS_ENGINE_READ(UI, Other, globals::game::ui) : CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
+		auto* ui = CS_ENGINE_READ(UI, Other, globals::game::ui);
+		return ui ? ui : CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
 	}
 
 	/// Shared chrome for every editor surface: one corner radius, and denser vertical rhythm than

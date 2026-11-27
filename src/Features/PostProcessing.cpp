@@ -1106,14 +1106,8 @@ void PostProcessing::Prepass()
 		lut->UpdateTexture();
 
 	// The frame's ImageSpace data, from the adopted snapshot.
-	if (const Block* block = FrameBlock())
+	if (const Block* block = Snapshot::CurrentBlock<Block>())
 		imageSpaceManager->gameISData = block->imageSpace;
-}
-
-const PostProcessing::Block* PostProcessing::FrameBlock()
-{
-	const auto& snapshot = Snapshot::Current();
-	return snapshot ? snapshot->Block<Block>() : nullptr;
 }
 
 void PostProcessing::Capture(Snapshot::Builder& a_builder)

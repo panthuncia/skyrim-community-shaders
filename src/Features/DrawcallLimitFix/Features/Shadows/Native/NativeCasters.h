@@ -20,9 +20,9 @@ namespace DCLF::Features::Shadows::Native
 	bool Replaces();
 
 	/**
-	 * @brief Game side (the native driver's game half), in place of CalculateAndDrawShadowCasterLights: the last set's maps given back,
-	 * the sun's cameras and keep, then DCLF's light selection with the engine's per-light bookkeeping. The primary cull's frame ends
-	 * here, where the list jobs were awaited. CaptureSet follows once DCLF listed the views.
+	 * @brief Game side (the native driver's game half), in place of CalculateAndDrawShadowCasterLights: the sun's cameras and keep,
+	 * then DCLF's light selection with the engine's per-light bookkeeping. The primary cull's frame ends here, where the list jobs
+	 * were awaited. CaptureSet follows once DCLF listed the views.
 	 */
 	void SelectCasters();
 

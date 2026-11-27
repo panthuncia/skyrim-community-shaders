@@ -16,7 +16,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <intrin.h>
 
 namespace DCLF::Features::Shadows::Native
 {
@@ -44,17 +43,15 @@ namespace DCLF::Features::Shadows::Native
 			}
 
 			// Engine globals (AE address in the comment).
-			float& LodFadeCutoff() { return Global<float, 528316, 415264>(); }                              // 0x1433dcfac: UpdateCamera's lodFade cutoff
 			std::uint16_t& ShadowMapSize() { return Global<std::uint16_t, 513206, 390938>(); }              // 0x142032ff4: a spot light's shadow map size
-			RE::ShadowSceneNode** SceneNodes() { return &Global<RE::ShadowSceneNode*, 513211, 390951>(); }  // 0x142033060: ShadowSceneNode* per scene graph index
-			std::uint32_t& TlsIndex() { return Global<std::uint32_t, 528600, 415542>(); }                   // 0x1435f0878: the executable's TLS index
-			std::uint32_t& FocusCount() { return Global<std::uint32_t, 527703, 414625>(); }                 // 0x14332a498: the focus targets' count
-			std::byte*& FocusTargets() { return Global<std::byte*, 527701, 414623>(); }                     // 0x14332a488: the focus targets, 16 bytes each, the node at +8
+			// ShadowSceneNode* per scene graph index, the main one first.
+			RE::ShadowSceneNode** SceneNodes() { return &DCLF::Engine::Global<RE::ShadowSceneNode*>(DCLF::Engine::Address::kShadowSceneNode); }
+			std::uint32_t& FocusCount() { return DCLF::Engine::Global<std::uint32_t>(DCLF::Engine::Address::kFocusTargetCount); }
+			std::byte*& FocusTargets() { return DCLF::Engine::Global<std::byte*>(DCLF::Engine::Address::kFocusTargets); }  // 16 bytes each, the node at +8
 			float& FocusDistance() { return Global<float, 513753, 391721>(); }                              // 0x1420357c0: the focus port's falloff distance (450)
 			std::uint32_t& FocusMapSize() { return Global<std::uint32_t, 513751, 391718>(); }               // 0x1420357a8: the focus shadow map size (2048)
 			std::uint32_t& ShadowFreeMask() { return Global<std::uint32_t, 513748, 391715>(); }             // 0x142035798: the free slices of kSHADOWMAPS
-			std::uint32_t& CameraInsideMask() { return Global<std::uint32_t, 528093, 415038>(); }           // 0x14338c90c: the lights whose sphere holds the camera
-			std::uint32_t& ShadowLightCount() { return Global<std::uint32_t, 528091, 415036>(); }           // 0x14338c904: gLastFrameEnabledShadowCasterLightsCount2
+			std::uint32_t& CameraInsideMask() { return DCLF::Engine::Global<std::uint32_t>(DCLF::Engine::Address::kShadowInsideMask); }
 			std::uint32_t& ScreenWidth() { return Global<std::uint32_t, 524978, 411459>(); }                // 0x14328c078
 			std::uint32_t& ScreenHeight() { return Global<std::uint32_t, 524979, 411460>(); }               // 0x14328c07c
 
@@ -99,7 +96,6 @@ namespace DCLF::Features::Shadows::Native
 			constexpr std::size_t kEntryCount = 0x44;
 			constexpr std::size_t kEntrySlots = 0x60;
 			constexpr std::size_t kEntrySlotSize = 0x18;
-			constexpr std::size_t kMemoryContext = 0x768;  // the thread's allocation context, in its TLS block
 			constexpr std::uint32_t kAccumulatorContext = 0x1D;
 			constexpr std::uint32_t kNotCulled = 0;  // BSLight::frustrumCull: visible
 			constexpr std::uint32_t kCulled = 0xFF;  // BSLight::frustrumCull: culled
@@ -128,30 +124,10 @@ namespace DCLF::Features::Shadows::Native
 			RE::NiCamera::RUNTIME_DATA2& CameraData(const RE::NiCamera& a_camera) { return const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2(); }
 			float LightRadius(const RE::NiLight& a_light) { return const_cast<RE::NiLight&>(a_light).GetLightRuntimeData().radius.x; }
 
-			/** @brief Sets the thread's allocation context for one allocation, as the engine does around a spot light's accumulator. */
-			class MemoryContext
-			{
-			public:
-				explicit MemoryContext(std::uint32_t a_context)
-				{
-					auto** blocks = reinterpret_cast<std::byte**>(__readgsqword(0x58));
-					slot = reinterpret_cast<std::uint32_t*>(blocks[TlsIndex()] + kMemoryContext);
-					saved = *slot;
-					*slot = a_context;
-				}
-				~MemoryContext() { *slot = saved; }
-				MemoryContext(const MemoryContext&) = delete;
-				MemoryContext& operator=(const MemoryContext&) = delete;
-
-			private:
-				std::uint32_t* slot = nullptr;
-				std::uint32_t saved = 0;
-			};
-
 			/** @brief The accumulator a spot light's UpdateCamera makes on first use: render mode 0xD, no decals. */
 			void MakeSpotAccumulator(Descriptor& a_descriptor)
 			{
-				const MemoryContext context(kAccumulatorContext);
+				const DCLF::Engine::ScopedMemoryContext context(kAccumulatorContext);
 				void* memory = RE::MemoryManager::GetSingleton()->Allocate(kAccumulatorSize, 0, false);
 				RE::BSShaderAccumulator* accumulator = memory ? MakeAccumulator()(memory, kAccumulatorCtorArg) : nullptr;
 				a_descriptor.shaderAccumulator.reset(accumulator);
@@ -196,94 +172,6 @@ namespace DCLF::Features::Shadows::Native
 				a_camera.local.rotate = a_light.world.rotate;
 			}
 
-			// FUN_14150aba0 (AE), FUN_14131e000 (SE), as LightSelection.cpp ports it: the eye, then the far rectangle's corners in its order.
-			using Corners = std::array<std::array<float, 3>, 5>;
-
-			Corners FrustumCorners(const RE::NiCamera& a_camera)
-			{
-				const auto& r = a_camera.world.rotate.entry;
-				const auto& t = a_camera.world.translate;
-				const auto& f = CameraData(a_camera).viewFrustum;
-				const float farDistance = f.fFar;
-				const float eye[3] = { t.x, t.y, t.z };
-				float dir[3], up[3], right[3];
-				for (std::uint32_t i = 0; i < 3; ++i) {
-					dir[i] = r[i][0] * farDistance;
-					up[i] = r[i][1] * f.fTop * farDistance;
-					right[i] = r[i][2] * f.fRight * farDistance;
-				}
-				Corners out;
-				out[0] = { eye[0], eye[1], eye[2] };
-				for (std::uint32_t i = 0; i < 3; ++i) {
-					const float centreUp = eye[i] + dir[i] + up[i];
-					const float centreDown = eye[i] + dir[i] - up[i];
-					out[1][i] = centreUp + right[i];
-					out[2][i] = centreUp - right[i];
-					out[3][i] = centreDown + right[i];
-					out[4][i] = centreDown - right[i];
-				}
-				return out;
-			}
-
-			// Tests all six planes, whatever the mask.
-			bool CornersOrEdgesInside(const Corners& a_points, const DCLF::ShadowCameras::Planes& a_planes)
-			{
-				const auto& planes = a_planes.plane;
-				for (const auto& p : a_points) {
-					std::uint32_t k = 0;
-					while (0.0f < (p[0] * planes[k][0] + p[1] * planes[k][1] + p[2] * planes[k][2]) - planes[k][3])
-						if (++k > 5)
-							return true;
-				}
-				static constexpr std::uint8_t kEdges[8][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 0, 4 }, { 1, 2 }, { 1, 3 }, { 2, 4 }, { 3, 4 } };
-				const auto side = [](float a_value) -> std::uint8_t { return 0.0f <= a_value ? (0.0f < a_value ? 1 : 0) : 2; };
-				for (const auto& edge : kEdges) {
-					const auto& a = a_points[edge[0]];
-					const auto& b = a_points[edge[1]];
-					for (std::uint32_t j = 0; j < 6; ++j) {
-						const auto& n = planes[j];
-						const std::uint8_t sa = side((a[0] * n[0] + a[1] * n[1] + a[2] * n[2]) - n[3]);
-						const std::uint8_t sb = side((b[0] * n[0] + b[1] * n[1] + b[2] * n[2]) - n[3]);
-						if (sa == sb) {
-							if (sa == 0)
-								return true;
-							continue;
-						}
-						const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
-						const float t = ((n[0] * n[3] - a[0]) * n[0] + (n[3] * n[1] - a[1]) * n[1] + (n[3] * n[2] - a[2]) * n[2]) / (dx * n[0] + dy * n[1] + dz * n[2]);
-						if (!(0.0f <= t) || !(t <= 1.0f))
-							continue;
-						std::uint32_t k = 0;
-						while (k == j || 0.0f <= ((dy * t + a[1]) * planes[k][1] + (dx * t + a[0]) * planes[k][0] + (dz * t + a[2]) * planes[k][2]) - planes[k][3])
-							if (++k > 5)
-								return true;
-					}
-				}
-				return false;
-			}
-
-			bool FrustaIntersect(const RE::NiCamera& a_view, const RE::NiCamera& a_light)
-			{
-				DCLF::ShadowCameras::Planes viewPlanes, lightPlanes;
-				DCLF::ShadowCameras::FrustumPlanes(CameraData(a_view).viewFrustum, a_view.world, viewPlanes);
-				DCLF::ShadowCameras::FrustumPlanes(CameraData(a_light).viewFrustum, a_light.world, lightPlanes);
-				return CornersOrEdgesInside(FrustumCorners(a_view), lightPlanes) || CornersOrEdgesInside(FrustumCorners(a_light), viewPlanes);
-			}
-
-			/** @brief Port of BSMultiBoundSphere's plane test (AE 0x140e20250, SE FUN_140d48cc0) against the active planes. NaN counts as outside. */
-			bool SphereInside(const float (&a_centre)[3], float a_radius, const DCLF::ShadowCameras::Planes& a_planes)
-			{
-				for (std::uint32_t k = 0; k < 6; ++k) {
-					if (!((a_planes.mask >> k) & 1))
-						continue;
-					const auto& n = a_planes.plane[k];
-					const float value = ((a_centre[1] * n[1] + a_centre[0] * n[0]) + a_centre[2] * n[2]) - n[3];
-					if (!(value > -a_radius))
-						return false;
-				}
-				return true;
-			}
-
 			/**
 			 * @brief The lodDimmer both UpdateCameras leave: unchanged for a culled light, else 1, or 0 with the light culled when its lodFade
 			 * distance is past the cutoff. Each class sums the squared distance in its own order.
@@ -292,18 +180,10 @@ namespace DCLF::Features::Shadows::Native
 			{
 				if (a_light.frustrumCull == kCulled)
 					return;
-				const auto& position = a_niLight.world.translate;
-				const float dx = position.x - a_view.world.translate.x;
-				const float dy = position.y - a_view.world.translate.y;
-				const float dz = position.z - a_view.world.translate.z;
 				float dimmer = 1.0f;
-				if (a_light.lodFade) {
-					const float radius = LightRadius(a_niLight);
-					const float squared = a_frustumOrder ? (dy * dy + dx * dx) + dz * dz : (dx * dx + dy * dy) + dz * dz;
-					if ((squared - radius * radius) * CameraData(a_view).lodAdjust >= LodFadeCutoff()) {
-						a_light.frustrumCull = kCulled;
-						dimmer = 0.0f;
-					}
+				if (a_light.lodFade && DCLF::ShadowCameras::LodFaded(a_view, a_niLight.world.translate, LightRadius(a_niLight), a_frustumOrder)) {
+					a_light.frustrumCull = kCulled;
+					dimmer = 0.0f;
 				}
 				a_light.lodDimmer = dimmer;
 			}
@@ -365,7 +245,7 @@ namespace DCLF::Features::Shadows::Native
 				At<std::uint32_t>(&descriptor, kDescriptorPortTop) = size;
 				if (!descriptor.camera)
 					return false;
-				a_light.frustrumCull = FrustaIntersect(a_viewCamera, *descriptor.camera) ? kNotCulled : kCulled;
+				a_light.frustrumCull = DCLF::ShadowCameras::FrustaIntersect(a_viewCamera, *descriptor.camera) ? kNotCulled : kCulled;
 				ApplyLodFade(a_light, a_viewCamera, *niLight, true);
 				return a_light.frustrumCull != kCulled;
 			}
@@ -409,7 +289,7 @@ namespace DCLF::Features::Shadows::Native
 				DCLF::ShadowCameras::FrustumPlanes(CameraData(a_viewCamera).viewFrustum, a_viewCamera.world, planes);
 				const auto& position = niLight->world.translate;
 				const float centre[3] = { position.x, position.y, position.z };
-				a_light.frustrumCull = SphereInside(centre, LightRadius(*niLight), planes) ? kNotCulled : kCulled;
+				a_light.frustrumCull = DCLF::ShadowCameras::SphereInside(centre, LightRadius(*niLight), planes) ? kNotCulled : kCulled;
 				ApplyLodFade(a_light, a_viewCamera, *niLight, false);
 				return a_light.frustrumCull != kCulled;
 			}
@@ -666,7 +546,7 @@ namespace DCLF::Features::Shadows::Native
 					auto& descriptor = focus[i];
 					descriptor.isEnabled = true;
 					if (!descriptor.shaderAccumulator) {
-						const MemoryContext context(kAccumulatorContext);
+						const DCLF::Engine::ScopedMemoryContext context(kAccumulatorContext);
 						void* memory = RE::MemoryManager::GetSingleton()->Allocate(kAccumulatorSize, 0, false);
 						descriptor.shaderAccumulator.reset(memory ? MakeAccumulator()(memory, kAccumulatorCtorArg) : nullptr);
 						if (auto* made = descriptor.shaderAccumulator.get()) {

@@ -12,9 +12,9 @@ namespace DCLF
 	 *
 	 * It is open while the engine only reads its scene graph: from DCLF's game half (FrameDriver::GameFrameStart, at Main::Draw's
 	 * SetupSunAndSky, or a dropped update's game half) to the start of the engine's next update jobs: guest's Present (CloseAtPresent),
-	 * native's end of the update's renders, before CS raises the job stages (Close; phase 7 puts it at the publish), and at the latest the
-	 * end of Main::Update's call of Main::DrawFrame (Close). Before the game half, DrawFrame writes the scene graph
-	 * (the decal manager's attaches). The render side never takes a lease: it reads publications and DCLF's ticket. A worker takes a
+	 * native's end of the update's renders, or a routed update's end of its game frame right before the publish, before CS raises the job
+	 * stages (Close), and at the latest the end of Main::Update's call of Main::DrawFrame (Close). Before the game half, DrawFrame writes
+	 * the scene graph (the decal manager's attaches). The render side never takes a lease: it reads publications and DCLF's ticket. A worker takes a
 	 * Lease per item or bounded chunk, and a refused lease means the window closed, so it leaves the rest for the next window. Closing
 	 * waits for leases in flight, so the engine writes after it never run beside a worker in engine memory. One atomic word holds the
 	 * open bit, the writers' suspensions and the lease count, so no lease can be taken after a close has seen the count.

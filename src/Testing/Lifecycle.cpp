@@ -83,8 +83,9 @@ namespace Testing
 			SwitchRegistry::DumpIfAsked();
 			if (Configured()) {
 				RecheckSwitches();
-				if (!InstallTaskTick())
-					Finish("failed", "the main-thread tick for the test commands could not be installed", 0u);
+				// The commands' game work runs at the main tick through the game-thread queue. VR has no main tick.
+				if (REL::Module::IsVR())
+					Finish("failed", "VR has no main-thread tick for the test commands", 0u);
 			}
 			return;
 		case SKSE::MessagingInterface::kDataLoaded:
@@ -130,7 +131,7 @@ namespace Testing
 		bool playerReady = false;
 		if (!loading && !mainMenu) {
 			// The player's cell attached and their 3D loaded: the world around them is drawn.
-			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
+			auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 			auto* cell = player ? player->GetParentCell() : nullptr;
 			playerReady = cell && cell->IsAttached() && player->Get3D() != nullptr;
 		}

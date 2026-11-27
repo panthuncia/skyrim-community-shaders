@@ -12,7 +12,6 @@
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 
 #include "Globals.h"
-#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/ShaderDescriptor.h"
@@ -246,10 +245,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 	}
 
-	Inputs SampleLocalMapInputs(const RE::NiCamera& a_camera, const PreviousCamera& a_previous)
+	Inputs SampleLocalMapInputs(const RE::NiCamera& a_camera)
 	{
 		// The render makes ShadowSceneNode[0] its accumulator's scene node (+0x148): the land's lights and fog are the world's.
-		auto in = SampleSceneInputs(RE::BSShaderManager::State::GetSingleton().shadowSceneNode[0], a_camera, a_previous, nullptr);
+		auto in = SampleSceneInputs(RE::BSShaderManager::State::GetSingleton().shadowSceneNode[0], a_camera, PreviousCamera{}, nullptr);
 		in.localMap = true;
 		// EyePosition is the current accumulator's eye less posAdjust (AE 0x1414de12c); the local map's accumulator keeps a zero eye, so
 		// the land reads the camera's position negated.
@@ -282,23 +281,25 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 	namespace
 	{
-		// BSWaterShaderMaterial's texture fields (SetupGeometry): the static cube, the first normal map, the byte that picks the global cube.
-		constexpr std::size_t kStaticCube = 0x38, kNormal1 = 0x40, kGlobalCubeByte = 0x17D;
+		// BSWaterShaderMaterial's first normal map (SetupGeometry).
+		constexpr std::size_t kNormal1 = 0x40;
 		// The water shader (GetRenderPasses' pass shader) and the white texture a normal map slot without a texture takes.
 		constexpr Engine::Offset kWaterShader{ { 415108 }, { 528163 } };
 		constexpr Engine::Offset kWhiteTexture{ { 411503 }, { 525021 } };
 
-		/** @brief Writes a port row group into latch rows and their written masks. */
+		/** @brief Writes a port row group into latch rows: the floats the port wrote, zero elsewhere. */
 		template <std::size_t N>
-		void PutRows(const std::array<Water::Port::Row, N>& a_rows, float (*a_out)[4], float (*a_written)[4])
+		void PutRows(const std::array<Water::Port::Row, N>& a_rows, float (*a_out)[4])
 		{
 			for (std::size_t r = 0; r < N; ++r)
-				for (std::uint32_t c = 0; c < 4; ++c) {
-					const bool written = (a_rows[r].written >> c) & 1u;
-					a_out[r][c] = written ? a_rows[r].v[c] : 0.0f;
-					a_written[r][c] = written ? 1.0f : 0.0f;
-				}
+				for (std::uint32_t c = 0; c < 4; ++c)
+					a_out[r][c] = ((a_rows[r].written >> c) & 1u) ? a_rows[r].v[c] : 0.0f;
 		}
+	}
+
+	RE::BSShader* WaterShader()
+	{
+		return Global<RE::BSShader*>(kWaterShader);
 	}
 
 	bool ComputeWater(const Water::Port::FrameInputs& a_frame, const RE::BSGeometry& a_geometry, WaterResult& a_out, std::string& a_why)
@@ -311,7 +312,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			a_why = "not a water TriShape with a water material";
 			return false;
 		}
-		auto* shader = Global<RE::BSShader*>(kWaterShader);
+		auto* shader = WaterShader();
 		if (!shader) {
 			a_why = "no water shader";
 			return false;
@@ -338,19 +339,16 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		const auto rows = Port::Assemble(Port::EvaluateTechnique(descriptor, a_frame), Port::EvaluateMaterial(bytes, a_frame), Port::EvaluateObject(object, descriptor, a_frame),
 			Port::EvaluateGeometry(object, descriptor, a_frame), Port::PassLights{}, tables);
 		auto& c = a_out.constants;
-		auto& w = a_out.written;
-		PutRows(rows.vsTechnique, c.vsTechnique, w.vsTechnique);
-		PutRows(rows.vsMaterial, c.vsMaterial, w.vsMaterial);
-		PutRows(rows.vsGeometry, c.vsGeometry, w.vsGeometry);
-		PutRows(rows.psTechnique, c.psTechnique, w.psTechnique);
-		PutRows(rows.psMaterial, c.psMaterial, w.psMaterial);
-		PutRows(rows.psGeometry, c.psGeometry, w.psGeometry);
+		PutRows(rows.vsTechnique, c.vsTechnique);
+		PutRows(rows.vsMaterial, c.vsMaterial);
+		PutRows(rows.vsGeometry, c.vsGeometry);
+		PutRows(rows.psTechnique, c.psTechnique);
+		PutRows(rows.psMaterial, c.psMaterial);
+		PutRows(rows.psGeometry, c.psGeometry);
 		// Observed: the local map's water draws find TextureProj (PS b2 c0-c3) zero; LOD's pixel stage reads none of it.
 		for (std::uint32_t r = 0; r < 4; ++r)
-			for (std::uint32_t i = 0; i < 4; ++i) {
+			for (std::uint32_t i = 0; i < 4; ++i)
 				c.psGeometry[r][i] = 0.0f;
-				w.psGeometry[r][i] = 1.0f;
-			}
 		// CS's permutation block, as its BeginTechnique hook sets it.
 		const auto& permutation = globals::state->permutationData;
 		c.descriptors[0] = descriptor;
@@ -366,22 +364,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		a_out.state.cull = 0;
 		a_out.state.stencil = 30;
 		a_out.state.stencilRef = 1;
-		// The textures LOD's pixel stage reads: t3, the material's static cube or the global reflections cube, with Reflections; t4, the first
-		// normal map (or the white texture).
-		const auto field = [&](std::size_t a_offset) {
-			const void* value = nullptr;
-			std::memcpy(&value, bytes.data() + a_offset, sizeof(value));
-			return value;
-		};
-		if (descriptor & Port::Flag::kReflections) {
-			const void* cube = field(kStaticCube);
-			std::uint8_t global = 0;
-			std::memcpy(&global, bytes.data() + kGlobalCubeByte, 1);
-			auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
-			auto* reflections = renderer->GetRendererData().cubemapRenderTargets[RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS].SRV;
-			a_out.cube = { !global && cube ? MaterialPort::ViewOf(cube) : ::RenderGraph::Engine::Tripwire::Unwrap(reflections), 0, 1 };
-		}
-		const void* normals = field(kNormal1);
+		// The texture LOD's pixel stage reads: t4, the first normal map (or the white texture). The local map's descriptor carries no
+		// Reflections bit, so t3 stays null.
+		const void* normals = nullptr;
+		std::memcpy(&normals, bytes.data() + kNormal1, sizeof(normals));
 		a_out.normals = { MaterialPort::ViewOf(normals ? normals : Global<const void*>(kWhiteTexture)), 3, 3 };
 		return true;
 	}

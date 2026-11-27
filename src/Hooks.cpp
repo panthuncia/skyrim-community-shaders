@@ -1176,7 +1176,7 @@ namespace Hooks
 
 	/**
 	 * @brief The engine's WindowProc asking the renderer for a new client size (WM_SIZE, WM_WINDOWPOSCHANGED; SE 35635 +0xA1,
-	 * AE 36649 +0xA5). Native only: the request becomes the next snapshot's WindowResized event, and the render side asks the
+	 * AE 36649 +0xA5). Native only: the request travels in the next snapshot (Events::windowSize), and the render side asks the
 	 * renderer for it at its frame start (RenderGraph/Frame/FrameDriver.cpp), where Renderer::Begin acts on it as before.
 	 */
 	struct WindowProc_RequestWindowResize

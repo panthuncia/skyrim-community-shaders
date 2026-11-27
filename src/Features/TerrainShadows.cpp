@@ -160,18 +160,12 @@ namespace
 		return worldspace;
 	}
 
-	/** @brief The adopted snapshot's block, or null before the first. */
-	const TerrainShadows::Block* FrameBlock()
+	/** @brief The frame's land worldspace editor ID, empty for none. Valid while the adopted snapshot is. */
+	const std::string& FrameLandWorldspace()
 	{
-		const auto& snapshot = Snapshot::Current();
-		return snapshot ? snapshot->Block<TerrainShadows::Block>() : nullptr;
-	}
-
-	/** @brief The frame's land worldspace editor ID, empty for none. */
-	std::string FrameLandWorldspace()
-	{
-		const auto* frame = FrameBlock();
-		return frame ? frame->landWorldspace : std::string{};
+		static const std::string none;
+		const auto* frame = Snapshot::CurrentBlock<TerrainShadows::Block>();
+		return frame ? frame->landWorldspace : none;
 	}
 }
 
@@ -198,7 +192,7 @@ void TerrainShadows::Capture(Snapshot::Builder& a_builder)
 					block.sunLight = true;
 					block.sunLightDirection = dirLight->GetWorldDirection();
 				}
-	a_builder.Set(block);
+	a_builder.Set(std::move(block));
 }
 
 void TerrainShadows::PostPostLoad()
@@ -408,7 +402,7 @@ void TerrainShadows::CompileComputeShaders()
 
 bool TerrainShadows::IsHeightMapReady()
 {
-	const auto worldspace = FrameLandWorldspace();
+	const auto& worldspace = FrameLandWorldspace();
 	// On the render graph the graph holds the heightmap: texHeightMap is null there.
 	const bool heightMap = texHeightMap || ORGTerrainShadows::Get().ShadowHeightSRV();
 	return !worldspace.empty() && heightMap && cachedHeightmap && cachedHeightmap->worldspace == worldspace;
@@ -449,7 +443,7 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 
 void TerrainShadows::LoadHeightmap()
 {
-	std::string worldspace_name = FrameLandWorldspace();
+	const std::string& worldspace_name = FrameLandWorldspace();
 	if (worldspace_name.empty())
 		return;
 
@@ -586,7 +580,7 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 	constexpr uint logUpdateLength = std::bit_width(128u) - 1;  // integer log2, https://stackoverflow.com/questions/994593/how-to-do-an-integer-log2-in-c
 
 	// The sun light as the capture found it.
-	const auto* frame = FrameBlock();
+	const auto* frame = Snapshot::CurrentBlock<Block>();
 	if (!frame || !frame->sunLight)
 		return false;
 

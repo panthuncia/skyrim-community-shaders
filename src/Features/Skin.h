@@ -167,6 +167,8 @@ private:
 	 * reads properties, so it is game-side work. Native runs it at the snapshot capture, guest at Prepass.
 	 */
 	void RevalidateOwners();
+	/** @brief Whether a_entry is stale: its actor no longer owns a_geometry, or its property is not compatible. Game-side reads, no lock. */
+	static bool IsStale(RE::BSGeometry* a_geometry, const GeometryEntry& a_entry);
 	static void Capture(Snapshot::Builder& a_builder);
 	struct ActorWetnessCacheEntry
 	{

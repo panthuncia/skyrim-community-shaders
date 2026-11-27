@@ -56,6 +56,9 @@ namespace DCLF::Features::Shadows::Native
 		Parabolic,
 	};
 
+	/** @brief a_light's class: directional, paraboloid, else frustum. */
+	LightKind LightKindOf(const RE::BSShadowLight& a_light);
+
 	/** @brief A descriptor's values once the shadow maps' bookkeeping ran: its depth target (-1 for none), slice and light transform. */
 	struct MapValues
 	{
@@ -164,6 +167,9 @@ namespace DCLF::Features::Shadows::Native
 
 	/** @brief a_light's values (no maps' bookkeeping): for a scene drawn where it is read (a menu scene, guest). */
 	ShadowLight ReadLight(const RE::BSShadowLight& a_light);
+
+	/** @brief a_light's shadowmapDescriptors' values, in order, read now (ReadLight's descriptors). */
+	std::vector<MapValues> ReadDescriptors(const RE::BSShadowLight& a_light);
 
 	/** @brief The lights of a_node's shadowLightsAccum walk, read where they are drawn (ReadLight). */
 	std::vector<ShadowLight> ReadLights(const RE::ShadowSceneNode* a_node);

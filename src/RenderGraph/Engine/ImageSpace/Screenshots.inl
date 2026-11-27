@@ -134,8 +134,7 @@ namespace NativePost
 	/** @brief Render owner, each render frame's Begin (both graph modes): the snapshot's new vanilla screenshots go to the Screenshot feature. */
 	void RenderScreenshots()
 	{
-		const auto& snapshot = Snapshot::Current();
-		const auto* block = snapshot ? snapshot->Block<Block>() : nullptr;
+		const auto* block = Snapshot::CurrentBlock<Block>();
 		if (!block)
 			return;
 		static std::uint32_t s_done = 0;

@@ -68,7 +68,7 @@ namespace Snapshot
 		bool operator==(const CoreFrame&) const = default;
 	};
 
-	/** @brief Fills the core block. Called by Snapshot::Capture before the feature captures. Game thread. */
+	/** @brief Fills the core block. The snapshot builder calls it before the feature captures. Game thread. */
 	void CaptureCore(Builder& a_builder);
 
 	/** @brief The adopted snapshot's core block, or a default block before the first snapshot. Render owner. */

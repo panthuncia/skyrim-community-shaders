@@ -15,12 +15,13 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/SunCamera.h"
 #include "Snapshot/Publication.h"
 
+#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+
 #include <array>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <intrin.h>
 #include <limits>
 #include <xmmintrin.h>
 
@@ -33,7 +34,6 @@ namespace DCLF::Features::Shadows::Native::SunCameraImpl
 	constexpr std::size_t kNiAVObjectFlags = 0xF4;     // NiAVObject flags: bit 0 hides the light, and UpdateCamera then does nothing
 	constexpr std::size_t kUnitsPerTexel = 0xCC;       // ShadowmapDescriptor::unitsPerTexel: CommonLib says uint32, the engine stores a float
 	constexpr std::size_t kLightPending = 0xD0;        // BSLight::unk0D0, cleared at the end
-	constexpr std::size_t kMemoryContextSlot = 0x768;  // in the thread's TLS block: the allocation context id
 	constexpr std::uint32_t kMemoryContextId = 0x1D;   // the id the engine sets around its allocations here
 	constexpr std::size_t kCameraSize = 0x188;         // sizeof(NiCamera), flat
 	constexpr std::size_t kAccumulatorSize = 0x180;    // sizeof(BSShaderAccumulator), flat
@@ -73,7 +73,6 @@ namespace DCLF::Features::Shadows::Native::SunCameraImpl
 		const std::uint8_t* fullViewPort;        // bDirShadowMapFullViewPort:Display
 		const float* jumpCos;                    // cosine of the jump angle, set by the light's constructor (AE 0x142035cc8, SE 0x141e10a48)
 		const float* sunShadowUpdateTime;        // fSunShadowUpdateTime:Display
-		const std::uint32_t* tlsIndex;           // the module's TLS index
 		CameraCtor cameraCtor;                   // NiCamera::NiCamera
 		AccumulatorCtor accumulatorCtor;         // BSShaderAccumulator::BSShaderAccumulator
 	};
@@ -98,7 +97,6 @@ namespace DCLF::Features::Shadows::Native::SunCameraImpl
 			Resolve<const std::uint8_t*>(513803, 391860),
 			Resolve<const float*>(513810, 391871),
 			Resolve<const float*>(513799, 391854),
-			Resolve<const std::uint32_t*>(528600, 415542),
 			Resolve<CameraCtor>(69258, 70624),
 			Resolve<AccumulatorCtor>(99920, 106564),
 		};
@@ -542,36 +540,16 @@ namespace DCLF::Features::Shadows::Native::SunCameraImpl
 		}
 	}
 
-	/** @brief Sets the thread's allocation context id as the engine does around its allocations, and restores it. */
-	class ScopedMemoryContext
-	{
-	public:
-		explicit ScopedMemoryContext(const EngineData& a_data)
-		{
-			const auto* blocks = reinterpret_cast<const std::uintptr_t*>(__readgsqword(0x58));
-			slot = reinterpret_cast<std::uint32_t*>(blocks[*a_data.tlsIndex] + kMemoryContextSlot);
-			saved = *slot;
-			*slot = kMemoryContextId;
-		}
-		~ScopedMemoryContext() { *slot = saved; }
-		ScopedMemoryContext(const ScopedMemoryContext&) = delete;
-		ScopedMemoryContext& operator=(const ScopedMemoryContext&) = delete;
-
-	private:
-		std::uint32_t* slot;
-		std::uint32_t saved;
-	};
-
 	RE::NiCamera* CreateCamera(const EngineData& a_data)
 	{
-		ScopedMemoryContext context(a_data);
+		const DCLF::Engine::ScopedMemoryContext context(kMemoryContextId);
 		void* memory = RE::MemoryManager::GetSingleton()->Allocate(kCameraSize, 0, false);
 		return memory ? a_data.cameraCtor(memory) : nullptr;
 	}
 
 	RE::BSShaderAccumulator* CreateAccumulator(const EngineData& a_data)
 	{
-		ScopedMemoryContext context(a_data);
+		const DCLF::Engine::ScopedMemoryContext context(kMemoryContextId);
 		void* memory = RE::MemoryManager::GetSingleton()->Allocate(kAccumulatorSize, 0, false);
 		return memory ? a_data.accumulatorCtor(memory, kAccumulatorArg) : nullptr;
 	}

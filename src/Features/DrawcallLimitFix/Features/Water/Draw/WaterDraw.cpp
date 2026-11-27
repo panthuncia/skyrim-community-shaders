@@ -173,8 +173,8 @@ namespace DCLF::Features::Water::Indirect
 		bool GlobalCubeUnbound()
 		{
 			// Native: the test as the update's capture took it (the water port's game block).
-			if (const auto& snapshot = Snapshot::Current(); snapshot && Snapshot::FrameCamera::Owned())
-				if (const auto* block = snapshot->Block<Port::GameBlock>())
+			if (Snapshot::FrameCamera::Owned())
+				if (const auto* block = Snapshot::CurrentBlock<Port::GameBlock>())
 					return block->inputs.cubemapFixInterior && !(globals::state && globals::state->isMapMenuOpen);
 			auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 			if (!tes || (globals::state && globals::state->isMapMenuOpen))

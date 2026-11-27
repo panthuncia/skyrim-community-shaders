@@ -45,7 +45,8 @@ namespace DCLF
 
 		const RE::ShadowSceneNode* SceneNode()
 		{
-			return CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0] : nullptr;
+			const auto* shaderState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+			return shaderState ? shaderState->shadowSceneNode[0] : nullptr;
 		}
 
 		/** @brief The engine build's category rule: cell children 2, 3, 5, 6, 7 and on, node 2 not when the worldspace says so. */

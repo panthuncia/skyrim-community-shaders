@@ -250,12 +250,14 @@ LightLimitFix::PerFrame LightLimitFix::GetCommonBufferData()
 	};
 
 	const float texelSize = 1.0f / static_cast<float>(std::max(localShadowCacheResolution, 1u));
-	if (!poissonRadiusScaleLookedUp && CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)) {
-		poissonRadiusScaleLookedUp = true;
-		poissonRadiusScaleSetting = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)->GetSetting("fPoissonRadiusScale:Display");
-		if (!poissonRadiusScaleSetting && CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
-			poissonRadiusScaleSetting = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection)->GetSetting("fPoissonRadiusScale:Display");
-	}
+	if (!poissonRadiusScaleLookedUp)
+		if (auto* iniSettings = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)) {
+			poissonRadiusScaleLookedUp = true;
+			poissonRadiusScaleSetting = iniSettings->GetSetting("fPoissonRadiusScale:Display");
+			if (!poissonRadiusScaleSetting)
+				if (auto* iniPrefSettings = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
+					poissonRadiusScaleSetting = iniPrefSettings->GetSetting("fPoissonRadiusScale:Display");
+		}
 	const float poissonRadiusScale = poissonRadiusScaleSetting ? sanitize(poissonRadiusScaleSetting->data.f, 0.0f, LOCAL_SHADOW_MAX_POISSON_RADIUS) : LOCAL_SHADOW_DEFAULT_POISSON_RADIUS;
 	const float filterRadius = localShadowEngineResolution ? poissonRadiusScale / static_cast<float>(localShadowEngineResolution) : poissonRadiusScale * texelSize;
 
@@ -267,7 +269,8 @@ LightLimitFix::PerFrame LightLimitFix::GetCommonBufferData()
 
 void LightLimitFix::SetupResources()
 {
-	float2 screenSize{ (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenHeight };
+	const auto* graphicsState = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState);
+	float2 screenSize{ (float)graphicsState->screenWidth, (float)graphicsState->screenHeight };
 	clusterSize[0] = ((uint)screenSize.x + 63) / 64;
 	clusterSize[1] = ((uint)screenSize.y + 63) / 64;
 	clusterSize[2] = 32;

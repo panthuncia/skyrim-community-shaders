@@ -114,7 +114,7 @@ namespace DCLF
 			const std::uint32_t e = a_epoch;
 			const auto& shapeFragment = a_inputs[1];
 			// DCLF's buffers first, then the frame's versions: a frame revision's pending textures while one with DCLF epochs in its
-			// closure is in preparation (plan step 10b). The versions fragment changes with them, so every epoch records again.
+			// closure is in preparation. The versions fragment changes with them, so every epoch records again.
 			std::shared_ptr<const org::IResourceVersions> composed;
 			if (a_frame.frameVersions)
 				composed = std::make_shared<const org::services::ComposedVersions>(
@@ -160,7 +160,7 @@ namespace DCLF
 					requirements.push_back({ R::kShapeSlot + h, a_inputs[input++] });
 			auto fragment = std::make_shared<RevisionFragment>(std::move(requirements));
 			const std::uint32_t hosted = traits.shape == ShapeKind::Main ? a_hosted : 0u;
-			// Recorded on the build the inputs name, the staged one while one is staged. It attaches with the snapshot (plan step 10a).
+			// Recorded on the build the inputs name, the staged one while one is staged. It attaches with the snapshot.
 			// A recording made on any other does not belong to this revision.
 			const std::uint64_t buildGeneration = a_frame.epochBuilds[static_cast<std::size_t>(traits.segment)];
 			const auto epoch = RenderGraphRuntime::EpochOf(traits.segment);

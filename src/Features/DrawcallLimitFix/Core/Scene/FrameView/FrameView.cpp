@@ -280,17 +280,17 @@ namespace DCLF::Scene
 
 	void FrameView::StopDrawing()
 	{
-		if (!RenderSide()) {
-			std::atomic_store(&renderClaims, std::shared_ptr<const SetSnapshot>{});
-			stopsAsked.fetch_add(1, std::memory_order_acq_rel);
+		// The render side stops now. The game half withdraws the claims at its next frame start. Asked even while this side does not
+		// draw: a ticket the game half made since may install the claims again. Off the render side (guest, or a game half) the stop
+		// applies here.
+		const bool renderSide = RenderSide();
+		const bool drawing = renderSide && !NotDrawingYet();
+		std::atomic_store(&renderClaims, std::shared_ptr<const SetSnapshot>{});
+		stopsAsked.fetch_add(1, std::memory_order_acq_rel);
+		if (!renderSide) {
 			ApplyAskedStops();
 			return;
 		}
-		// The render side stops now. The game half withdraws the claims at its next frame start. Asked even while this side does not
-		// draw: a ticket the game half made since may install the claims again.
-		const bool drawing = !NotDrawingYet();
-		std::atomic_store(&renderClaims, std::shared_ptr<const SetSnapshot>{});
-		stopsAsked.fetch_add(1, std::memory_order_acq_rel);
 		if (drawing)
 			logger::info("[DCLF] frame {}: a frame revision left DCLF's scene on old versions, so the engine draws until DCLF's next scene", SceneStep());
 	}
@@ -366,10 +366,22 @@ namespace DCLF::Scene
 			deltas.clear();
 	}
 
-	bool FrameView::IsLoadingScreenUp()
+	bool FrameView::LoadingMenuOpen()
 	{
 		auto* ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
-		return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME) && !LoadHold::MenuHeld();
+		return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
+	}
+
+	bool FrameView::LoadingMenuIn(const Snapshot::FrameSnapshot* a_frame)
+	{
+		if (!::RenderGraph::Engine::Native::Active())
+			return LoadingMenuOpen();
+		return a_frame && a_frame->menus.loading;
+	}
+
+	bool FrameView::IsLoadingScreenUp()
+	{
+		return LoadingMenuOpen() && !LoadHold::MenuHeld();
 	}
 
 	bool FrameView::LoadingScreenInFrame()
@@ -379,14 +391,7 @@ namespace DCLF::Scene
 
 	bool FrameView::LoadingScreenIn(const Snapshot::FrameSnapshot* a_frame)
 	{
-		if (!::RenderGraph::Engine::Native::Active())
-			return IsLoadingScreenUp();
-		return a_frame && a_frame->menus.loading && !LoadHold::MenuHeld();
-	}
-
-	bool FrameView::LoadShown()
-	{
-		return LoadShownIn(Snapshot::Current().get());
+		return LoadingMenuIn(a_frame) && !LoadHold::MenuHeld();
 	}
 
 	bool FrameView::LoadShownIn(const Snapshot::FrameSnapshot* a_frame)

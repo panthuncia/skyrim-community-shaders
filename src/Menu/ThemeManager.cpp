@@ -1042,9 +1042,10 @@ float ThemeManager::ResolveFontSize(const Menu& menu)
 
 	// Compute dynamic size from screen resolution
 	float dynamicSize;
-	if (CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState) && CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenHeight > 0) {
+	const auto* graphicsState = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState);
+	if (graphicsState && graphicsState->screenHeight > 0) {
 		// Use current screen height
-		dynamicSize = (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenHeight * Constants::DEFAULT_FONT_RATIO;
+		dynamicSize = (float)graphicsState->screenHeight * Constants::DEFAULT_FONT_RATIO;
 	} else {
 		// Fallback: use default font size
 		logger::warn("ThemeManager::ResolveFontSize() - Falling back to Constants::DEFAULT_FONT_SIZE due to missing screen height.");

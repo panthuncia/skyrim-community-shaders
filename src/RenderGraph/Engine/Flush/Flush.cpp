@@ -173,10 +173,10 @@ namespace RenderGraph::Engine::Flush
 				a_key.shaderType = static_cast<std::int32_t>(type);
 				a_key.shader = type == RE::BSShader::Type::ImageSpace ? static_cast<const RE::BSImagespaceShader*>(shader)->name : shader->fxpFilename;
 			}
-			if (CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentVertexShader) && *CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentVertexShader))
-				a_key.vertex = (*CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentVertexShader))->id;
-			if (CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentPixelShader) && *CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentPixelShader))
-				a_key.pixel = (*CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentPixelShader))->id;
+			if (auto* const* vertex = CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentVertexShader); vertex && *vertex)
+				a_key.vertex = (*vertex)->id;
+			if (auto* const* pixel = CS_ENGINE_READ(Shaders, RecordTime, globals::game::currentPixelShader); pixel && *pixel)
+				a_key.pixel = (*pixel)->id;
 		}
 
 		/** @brief The view from the shadow state at +0x18 and +0x38. */

@@ -118,7 +118,7 @@ namespace DCLF::Draws
 	/**
 	 * @brief Host data for one epoch's recording: the revision's versions and the epoch's shape. composed names DCLF's buffers and
 	 * the frame's versions (RevisionInputs::frameVersions) when there are frame versions to name, so a CS texture's new version is
-	 * recorded against before the frame revision adopts it (plan step 10b).
+	 * recorded against before the frame revision adopts it.
 	 */
 	struct EpochRevisionData final : org::IHostExecutionData
 	{

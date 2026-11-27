@@ -69,7 +69,8 @@ namespace CinematicCamera
 
 	bool FocusResolver::GetInDialogue()
 	{
-		return CS_ENGINE_READ(UI, RecordTime, RE::MenuTopicManager::GetSingleton())->speaker || CS_ENGINE_READ(UI, RecordTime, RE::MenuTopicManager::GetSingleton())->lastSpeaker;
+		const auto* topicManager = CS_ENGINE_READ(UI, RecordTime, RE::MenuTopicManager::GetSingleton());
+		return topicManager->speaker || topicManager->lastSpeaker;
 	}
 
 	// Thanks Ershin!

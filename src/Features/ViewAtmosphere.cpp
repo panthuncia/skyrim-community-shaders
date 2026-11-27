@@ -320,7 +320,8 @@ bool ViewAtmosphere::Prepare()
 	}
 	auto& fog = globals::features::exponentialHeightFog;
 	const bool useFog = fog.IsActive();
-	const float2 screen = Util::ConvertToDynamic(float2{ float(CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth), float(CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight) });
+	const auto* graphicsState = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
+	const float2 screen = Util::ConvertToDynamic(float2{ float(graphicsState->screenWidth), float(graphicsState->screenHeight) });
 	const auto layout = LayoutFor(screen, settings.nearPixelSize, settings.middlePixelSize, settings.distantPixelSize, settings.nearSlices, settings.middleSlices,
 		settings.distantSlices);
 	Parameters next = ParametersFor(layout, useFog, false);

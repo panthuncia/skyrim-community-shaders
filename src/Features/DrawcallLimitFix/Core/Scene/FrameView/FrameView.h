@@ -144,6 +144,10 @@ namespace DCLF::Scene
 		 * because the load is done and the world's frames under it build the tables.
 		 */
 		static bool IsLoadingScreenUp();
+		/** @brief The live UI's loading menu is open, held by a load's hold or not. Game side (a capture), or guest. */
+		static bool LoadingMenuOpen();
+		/** @brief The loading menu is open in a_frame (native) or the live UI (guest), held by a load's hold or not. */
+		static bool LoadingMenuIn(const Snapshot::FrameSnapshot* a_frame);
 		/**
 		 * @brief Render side: IsLoadingScreenUp as the frame sees it. Native reads the adopted snapshot's menus (captured by the game
 		 * side, its own for a loading screen's frame); guest reads the live UI.
@@ -152,13 +156,11 @@ namespace DCLF::Scene
 		/** @brief LoadingScreenInFrame for a_frame, the snapshot of the half that asks (native; guest reads the live UI). */
 		static bool LoadingScreenIn(const Snapshot::FrameSnapshot* a_frame);
 		/**
-		 * @brief Render side: also true while a load's hold keeps the world off the screen. Run-comparable frame counters must not
-		 * advance then.
+		 * @brief LoadingScreenIn, or a load's hold keeps the world off the screen. Run-comparable frame counters must not advance then.
+		 * a_frame is the snapshot of the half that asks: the render side passes Snapshot::Current(), the game half Snapshot::Building().
 		 */
-		static bool LoadShown();
-		/** @brief LoadShown for a_frame, the snapshot of the half that asks: the game half passes Snapshot::Building(). */
 		static bool LoadShownIn(const Snapshot::FrameSnapshot* a_frame);
-		/** @brief LoadShown from the live UI: game side only (a capture). */
+		/** @brief LoadShownIn from the live UI: game side only (a capture). */
 		static bool LoadShownNow();
 		/**
 		 * @brief Call where `globals::game::currentAccumulator` is set. That global is null before the main pass even though the

@@ -105,7 +105,7 @@ namespace DCLF
 		// A snapshot whose recordings named frame versions the builder no longer knows. The frame revision never adopts one.
 		static constexpr std::uint64_t kUnknownFrameVersions = UINT64_MAX - 1;
 		::RenderGraph::Frame::LatestSlot<SnapshotWork> snapshotWorkSlot;  // the coordinator -> the builder
-		// The builder posts its snapshots to the frame revision (Frame::Revision::PublishFragment), which adopts them (plan step 10b).
+		// The builder posts its snapshots to the frame revision (Frame::Revision::PublishFragment), which adopts them.
 		// Publication pacing. The builder stores with release and the coordinator loads with acquire.
 		std::atomic<std::uint64_t> snapshotWorkTaken{ 0 };
 		// Gate for publishing a payload only for a snapshot the frame will adopt. The frame stores the frame first, then the serial,
@@ -150,7 +150,7 @@ namespace DCLF
 		// Scenes not adopted since the last report, by Frame::Revision::FragmentDrop, and in the session for the log's rate limit.
 		std::array<std::uint64_t, 4> scenesDropped{};
 		std::uint64_t scenesDroppedLogged = 0;
-		// Scenes dropped for their builds since the last new build state (restageInputSerial): the one starvation rule (cleanup plan B10).
+		// Scenes dropped for their builds since the last new build state (restageInputSerial): the one starvation rule.
 		::RenderGraph::Frame::StarvationWatch restageWatch{ "DCLF's staged builds" };
 		std::uint64_t restageInputSerial = 0;
 		// Adopted scenes with a recording of a version the frame does not read, in the session (CheckSceneVersions).

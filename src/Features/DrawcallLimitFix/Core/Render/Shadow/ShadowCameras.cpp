@@ -76,6 +76,100 @@ namespace DCLF::ShadowCameras
 		a_out.mask = 0x3F;  // NiCullingProcess::SetFrustum
 	}
 
+	Corners FrustumCorners(const RE::NiCamera& a_camera)
+	{
+		const auto& r = a_camera.world.rotate.entry;
+		const auto& t = a_camera.world.translate;
+		const auto& f = const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2().viewFrustum;
+		const float farDistance = f.fFar;
+		const float eye[3] = { t.x, t.y, t.z };
+		float dir[3], up[3], right[3];
+		for (std::uint32_t i = 0; i < 3; ++i) {
+			dir[i] = r[i][0] * farDistance;
+			up[i] = r[i][1] * f.fTop * farDistance;
+			right[i] = r[i][2] * f.fRight * farDistance;
+		}
+		Corners out;
+		out[0] = { eye[0], eye[1], eye[2] };
+		for (std::uint32_t i = 0; i < 3; ++i) {
+			const float centreUp = eye[i] + dir[i] + up[i];
+			const float centreDown = eye[i] + dir[i] - up[i];
+			out[1][i] = centreUp + right[i];
+			out[2][i] = centreUp - right[i];
+			out[3][i] = centreDown + right[i];
+			out[4][i] = centreDown - right[i];
+		}
+		return out;
+	}
+
+	bool CornersOrEdgesInside(const Corners& a_points, const Planes& a_planes)
+	{
+		const auto& planes = a_planes.plane;
+		for (const auto& p : a_points) {
+			std::uint32_t k = 0;
+			while (0.0f < (p[0] * planes[k][0] + p[1] * planes[k][1] + p[2] * planes[k][2]) - planes[k][3])
+				if (++k > 5)
+					return true;
+		}
+		static constexpr std::uint8_t kEdges[8][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 0, 4 }, { 1, 2 }, { 1, 3 }, { 2, 4 }, { 3, 4 } };
+		const auto side = [](float a_value) -> std::uint8_t { return 0.0f <= a_value ? (0.0f < a_value ? 1 : 0) : 2; };
+		for (const auto& edge : kEdges) {
+			const auto& a = a_points[edge[0]];
+			const auto& b = a_points[edge[1]];
+			for (std::uint32_t j = 0; j < 6; ++j) {
+				const auto& n = planes[j];
+				const std::uint8_t sa = side((a[0] * n[0] + a[1] * n[1] + a[2] * n[2]) - n[3]);
+				const std::uint8_t sb = side((b[0] * n[0] + b[1] * n[1] + b[2] * n[2]) - n[3]);
+				if (sa == sb) {
+					if (sa == 0)
+						return true;
+					continue;
+				}
+				const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+				const float t = ((n[0] * n[3] - a[0]) * n[0] + (n[3] * n[1] - a[1]) * n[1] + (n[3] * n[2] - a[2]) * n[2]) / (dx * n[0] + dy * n[1] + dz * n[2]);
+				if (!(0.0f <= t) || !(t <= 1.0f))
+					continue;
+				std::uint32_t k = 0;
+				while (k == j || 0.0f <= ((dy * t + a[1]) * planes[k][1] + (dx * t + a[0]) * planes[k][0] + (dz * t + a[2]) * planes[k][2]) - planes[k][3])
+					if (++k > 5)
+						return true;
+			}
+		}
+		return false;
+	}
+
+	bool FrustaIntersect(const RE::NiCamera& a_view, const RE::NiCamera& a_light)
+	{
+		Planes viewPlanes, lightPlanes;
+		FrustumPlanes(const_cast<RE::NiCamera&>(a_view).GetRuntimeData2().viewFrustum, a_view.world, viewPlanes);
+		FrustumPlanes(const_cast<RE::NiCamera&>(a_light).GetRuntimeData2().viewFrustum, a_light.world, lightPlanes);
+		return CornersOrEdgesInside(FrustumCorners(a_view), lightPlanes) || CornersOrEdgesInside(FrustumCorners(a_light), viewPlanes);
+	}
+
+	bool SphereInside(const float (&a_centre)[3], float a_radius, const Planes& a_planes)
+	{
+		for (std::uint32_t k = 0; k < 6; ++k) {
+			if (!((a_planes.mask >> k) & 1))
+				continue;
+			const auto& n = a_planes.plane[k];
+			const float value = ((a_centre[1] * n[1] + a_centre[0] * n[0]) + a_centre[2] * n[2]) - n[3];
+			if (!(value > -a_radius))
+				return false;
+		}
+		return true;
+	}
+
+	bool LodFaded(const RE::NiCamera& a_view, const RE::NiPoint3& a_position, float a_radius, bool a_frustumOrder)
+	{
+		const float dx = a_position.x - a_view.world.translate.x;
+		const float dy = a_position.y - a_view.world.translate.y;
+		const float dz = a_position.z - a_view.world.translate.z;
+		// Each class sums in its own order. Keep it, so float results match the engine.
+		const float squared = a_frustumOrder ? (dy * dy + dx * dx) + dz * dz : (dx * dx + dy * dy) + dz * dz;
+		const float lodAdjust = const_cast<RE::NiCamera&>(a_view).GetRuntimeData2().lodAdjust;
+		return (squared - a_radius * a_radius) * lodAdjust >= Engine::Global<float>(Engine::Address::kLodFadeCutoff);
+	}
+
 	void CullPlanes(const RE::NiCullingProcess* a_process, const RE::NiCamera& a_camera, Planes& a_out)
 	{
 		// As in Process2, custom cull planes replace all six planes and the active mask.

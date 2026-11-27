@@ -24,6 +24,7 @@ namespace RenderGraph::Engine
 #include "PostProcessing/PhysicalLens.h"
 #include "PostProcessing/Vignette.h"
 #include "Snapshot/FrameSnapshot.h"
+#include "Snapshot/Publication.h"
 
 #include <chrono>
 #include <map>
@@ -198,13 +199,10 @@ struct PostProcessing : Feature
 	*/
 	static void Capture(Snapshot::Builder& a_builder);
 
-	/** @brief The adopted snapshot's block, or null before the first or while Post Processing captured none. */
-	static const Block* FrameBlock();
-
 	/** @brief The Cinematic Camera's state in the adopted snapshot, or null while it publishes none. */
 	[[nodiscard]] static const CinematicCamera::PhysicalCameraState* GetActivePhysicalCameraState()
 	{
-		const Block* block = FrameBlock();
+		const Block* block = Snapshot::CurrentBlock<Block>();
 		return block && block->cameraValid ? &block->camera : nullptr;
 	}
 

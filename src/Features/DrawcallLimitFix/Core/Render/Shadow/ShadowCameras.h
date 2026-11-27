@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "RE/N/NiFrustum.h"
+#include "RE/N/NiPoint3.h"
 
 namespace RE
 {
@@ -52,6 +53,22 @@ namespace DCLF::ShadowCameras
 
 	/** @brief NiCullingProcess::SetFrustum's planes, ported from FUN_140d32cc0. */
 	void FrustumPlanes(const RE::NiFrustum& a_frustum, const RE::NiTransform& a_world, Planes& a_out);
+
+	/** @brief A camera's eye, then its far rectangle's corners, in the order FUN_14150aba0 (AE; SE FUN_14131e000) builds them. */
+	using Corners = std::array<std::array<float, 3>, 5>;
+	/** @brief The eye and far corners of a_camera's view frustum (Corners). */
+	Corners FrustumCorners(const RE::NiCamera& a_camera);
+	/** @brief Whether a corner is inside all six planes, or an edge between corners crosses into them. Tests all six, whatever the mask. */
+	bool CornersOrEdgesInside(const Corners& a_points, const Planes& a_planes);
+	/** @brief Port of FUN_14150aba0 (AE; SE FUN_14131e000): whether two cameras' view frusta intersect. */
+	bool FrustaIntersect(const RE::NiCamera& a_view, const RE::NiCamera& a_light);
+	/** @brief Port of BSMultiBoundSphere's plane test (AE 0x140e20250, SE FUN_140d48cc0) against the active planes. NaN counts as outside. */
+	bool SphereInside(const float (&a_centre)[3], float a_radius, const Planes& a_planes);
+	/**
+	 * @brief The lodFade test of the shadow lights' UpdateCamera: whether a light at a_position with a_radius is past the lodFade cutoff
+	 * from a_view. A frustum light sums the squared distance as (y + x) + z, a paraboloid as (x + y) + z: a_frustumOrder picks.
+	 */
+	bool LodFaded(const RE::NiCamera& a_view, const RE::NiPoint3& a_position, float a_radius, bool a_frustumOrder);
 	/** @brief What BSCullingProcess::Process2 (0x140e28690) tests. The custom planes replace the frustum whole when present. */
 	void CullPlanes(const RE::NiCullingProcess* a_process, const RE::NiCamera& a_camera, Planes& a_out);
 	/** @brief SetCameraData's matrices and eye (FUN_140e57ae0), and the port. */

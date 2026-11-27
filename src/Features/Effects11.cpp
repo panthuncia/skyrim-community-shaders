@@ -477,8 +477,7 @@ void Effects11::PostPostLoad()
 const Effects11::Block& Effects11::FrameBlock()
 {
 	static const Block empty{};
-	const auto& snapshot = Snapshot::Current();
-	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* block = Snapshot::CurrentBlock<Block>();
 	return block ? *block : empty;
 }
 

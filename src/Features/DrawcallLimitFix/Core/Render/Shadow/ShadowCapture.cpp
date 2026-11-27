@@ -1,10 +1,11 @@
 // Captures the shadow and occlusion views at the engine's hooks, on the render thread. For each view it records the target,
 // viewport, camera and constants, using DCLF's own camera where it has one. Also decides whether DCLF covers the frame's shadows.
 
+#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
-#include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Snapshot/EngineReads.h"
 
 namespace DCLF
@@ -294,7 +295,6 @@ namespace DCLF
 		if (!a_native)
 			++shadowStats.views;
 		auto& pipelines = DrawPipelines::Get();
-		auto* utility = CS_ENGINE_READ(Shaders, CapturePoint, globals::game::utilityShader);
 		// A native view that fails goes back to the engine, which captures it again, so only engine views count.
 		auto notReady = [&](ShadowNotReady a_reason) {
 			if (a_native)
@@ -305,7 +305,7 @@ namespace DCLF
 				engine.ShadowsNotDrawn(shadowStats);
 			return false;
 		};
-		if (!pipelines.Enabled() || !utility || !engine.SetupShadow())
+		if (!pipelines.Enabled() || !TicketUtilityShader() || !engine.SetupShadow())
 			return notReady(ShadowNotReady::Setup);
 		// The scene tables are not read here. ExecuteShadowFrame checks them.
 		const auto* shadowView = ShadowViews::Get().At(a_viewId);

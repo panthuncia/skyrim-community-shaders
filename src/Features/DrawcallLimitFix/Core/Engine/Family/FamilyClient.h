@@ -122,7 +122,7 @@ namespace DCLF::Family
 
 		/**
 		 * @brief The client at a_index once a revision registered it. Until then null, and the engine draws the batch. Registration
-		 * happens only at a revision's adoption, so this engine state switches only there (cleanup plan A3, step 6).
+		 * happens only at a revision's adoption, so this engine state switches only there.
 		 */
 		const std::shared_ptr<State>& Registered(std::size_t a_index) const
 		{

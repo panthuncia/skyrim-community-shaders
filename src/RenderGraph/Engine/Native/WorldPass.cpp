@@ -3,6 +3,7 @@
 #include "RenderGraph/Engine/Native/WorldPass.h"
 
 #include "Deferred.h"
+#include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/RenderScene.h"
 #include "Snapshot/Publication.h"
@@ -136,11 +137,7 @@ namespace RenderGraph::Engine::Native::WorldPass
 
 	namespace
 	{
-		template <class T>
-		const T& Global(std::uint64_t a_se, std::uint64_t a_ae)
-		{
-			return *reinterpret_cast<const T*>(REL::RelocationID(a_se, a_ae).address());
-		}
+		using Access::Global;
 
 		/** @brief The depth shift's test (SE 100407 / AE 107125) and the maximum it sets, on the game thread. */
 		void CaptureBlock(Snapshot::Builder& a_builder)
@@ -174,8 +171,7 @@ namespace RenderGraph::Engine::Native::WorldPass
 
 	std::array<float, 2> DepthRange(bool a_shifted)
 	{
-		const auto& snapshot = Snapshot::Current();
-		const auto* block = snapshot ? snapshot->Block<Block>() : nullptr;
+		const auto* block = Snapshot::CurrentBlock<Block>();
 		return { 0.0f, a_shifted && block && block->depthShift ? block->shiftedMax : 1.0f };
 	}
 

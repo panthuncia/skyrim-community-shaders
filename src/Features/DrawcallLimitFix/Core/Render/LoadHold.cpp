@@ -148,19 +148,10 @@ namespace DCLF::LoadHold
 			return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a_start).count();
 		}
 
-		bool MenuOpen()
-		{
-			auto* ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
-			return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
-		}
-
 		/** @brief Render side: the loading menu as the frame sees it (native: the adopted snapshot's menus; guest: the live UI). */
 		bool MenuOpenInFrame()
 		{
-			if (!::RenderGraph::Engine::Native::Active())
-				return MenuOpen();
-			const auto& snapshot = Snapshot::Current();
-			return snapshot && snapshot->menus.loading;
+			return Scene::FrameView::LoadingMenuIn(Snapshot::Current().get());
 		}
 
 		// ActorsWithout3D as the game side last counted it (OnFrameStart). Read by the render side.
@@ -175,7 +166,7 @@ namespace DCLF::LoadHold
 		/** @brief Main thread. Starts a hold. True when the menu's close is kept. */
 		bool Begin()
 		{
-			const bool menu = MenuOpen();
+			const bool menu = Scene::FrameView::LoadingMenuOpen();
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
 			hold.loadEpoch = Snapshot::LoadEpoch();
@@ -473,7 +464,7 @@ namespace DCLF::LoadHold
 		}
 		// Before the world draws, or under a loading screen, nothing is drawn yet.
 		auto& view = Scene::FrameView::Get();
-		if (view.NotDrawingYet() || Scene::FrameView::LoadShown())
+		if (view.NotDrawingYet() || Scene::FrameView::LoadShownIn(Snapshot::Current().get()))
 			return;
 		::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::Uncovered, ::RenderGraph::Frame::SegmentId::Count,
 			fmt::format("DCLF: frame {}: {}", view.SceneStep(), a_why));
@@ -512,7 +503,7 @@ namespace DCLF::LoadHold
 			reentryBlocked = false;
 		if (now != HoldState::Holding) {
 			// Outside a load, what is not ready is withheld, never handed to the engine.
-			if (now == HoldState::Idle && !Scene::FrameView::LoadShown()) {
+			if (now == HoldState::Idle && !Scene::FrameView::LoadShownIn(Snapshot::Current().get())) {
 				WatchAfterHold();
 				if (after.actorsWithout3D) {
 					++after.actorFrames;

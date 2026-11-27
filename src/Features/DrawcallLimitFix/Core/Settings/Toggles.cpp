@@ -150,7 +150,7 @@ namespace DCLF
 		active.store(Pack(Normalised(seeded)), std::memory_order_relaxed);
 		frame.store(active.load(std::memory_order_relaxed), std::memory_order_relaxed);
 		gameFrame.store(active.load(std::memory_order_relaxed), std::memory_order_relaxed);
-		// The revision that carries a new requested set makes it the active one at its adoption (plan step 10c).
+		// The revision that carries a new requested set makes it the active one at its adoption.
 		RenderGraph::Frame::Vars::OnAdopted(requested, std::function<void(const std::uint64_t&, const std::uint64_t&)>(
 														   [this](const std::uint64_t&, const std::uint64_t& a_now) { ApplyAdopted(a_now); }));
 	}

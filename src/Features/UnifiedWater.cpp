@@ -558,8 +558,7 @@ bool UnifiedWater::IsExteriorWorldspaceActive() const
 
 bool UnifiedWater::FrameExteriorActive()
 {
-	const auto& snapshot = Snapshot::Current();
-	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* block = Snapshot::CurrentBlock<Block>();
 	return block && block->exteriorActive;
 }
 

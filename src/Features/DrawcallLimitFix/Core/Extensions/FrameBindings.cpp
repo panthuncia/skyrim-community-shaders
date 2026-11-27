@@ -335,7 +335,7 @@ namespace DCLF::Extensions
 		const org::SrvView view{ .variant = PublishedResources::ShaderResourceVariant(a_id) };
 		DeclaredReads::Entry entry{ .id = std::string(a_id), .view = a_builder.ShaderResource(org::ResourceIdentifier(a_id), view).View() };
 		// The index of the view just declared, which the commit latches. A versioned slot's index follows its versions, which change
-		// only with a frame revision that records its readers against the new one (plan step 10b), so the build's index is no
+		// only with a frame revision that records its readers against the new one, so the build's index is no
 		// reference for it. ORG checks those readers' version currency instead.
 		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
 		// The head before the index, so a move between the two counts as after the latch.

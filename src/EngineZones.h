@@ -15,7 +15,10 @@ namespace EngineZones
 	/** @brief Installs the counted call sites when asked for, and registers the detectors' exit report. Call after every other hook is installed. */
 	void Install();
 
-	/** @brief Renderer::Begin, with the new frame's RenderGraph::Frame::Kind: closes the last frame's count. Begin's thread. */
+	/**
+	* @brief Renderer::Begin, with the new frame's RenderGraph::Frame::Kind: begins the frame in both detectors (this one closes the
+	* last frame's count) and reports both tables at the first world frame after a load. Begin's thread.
+	*/
 	void BeginFrame(std::uint8_t a_kind) noexcept;
 
 	/**

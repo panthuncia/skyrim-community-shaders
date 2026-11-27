@@ -21,6 +21,7 @@
 
 #include <format>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -189,7 +190,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 	}
 
-	void RenderShadowsAndDepth(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, RE::NiAVObject* a_root, const Inputs& a_in)
+	void RenderShadowsAndDepth(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, RE::NiAVObject* a_root, const Inputs& a_in,
+		std::span<const ScenePass> a_passes)
 	{
 		auto* node = RE::BSShaderManager::State::GetSingleton().shadowSceneNode[1];
 		if (!node)
@@ -239,13 +241,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		view.view = View::MenuDepth;
 		view.eye = a_in.eye;
 		view.textureTransformBuffer = a_in.material.vanilla.textureTransformBuffer;
-		view.viewport = Family::FrameViewport(kMainTarget, static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN), 0);
-		view.viewport.depthRange = { 0.0f, 1.0f };
+		view.viewport = MenuViewport(kMainTarget, DrawState{});
 		FrameRows(a_in, view.frame);
-		std::vector<ScenePass> passes;
-		SceneGeometry(a_root, a_camera, SortsByClosestPoint(a_manager), passes);
 		std::vector<RE::BSGeometry*> geometry;
-		for (const auto& pass : passes)
+		for (const auto& pass : a_passes)
 			if (!pass.membrane)
 				geometry.push_back(pass.geometry);
 		AddDraws(view, geometry, *depth);

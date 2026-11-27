@@ -224,9 +224,11 @@ namespace
 	VolumeSize NoiseSize()
 	{
 		const auto setting = [](const char* a_name) -> std::uint32_t {
-			RE::Setting* found = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection) ? CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)->GetSetting(a_name) : nullptr;
-			if (!found && CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
-				found = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection)->GetSetting(a_name);
+			auto* iniSettings = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection);
+			RE::Setting* found = iniSettings ? iniSettings->GetSetting(a_name) : nullptr;
+			if (!found)
+				if (auto* iniPrefSettings = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
+					found = iniPrefSettings->GetSetting(a_name);
 			return found ? static_cast<std::uint32_t>((std::max)(found->GetInteger(), 0)) : 0u;
 		};
 		return { setting("iVolumetricLightingNoiseTextureWidth:Display"), setting("iVolumetricLightingNoiseTextureHeight:Display"),
@@ -399,12 +401,6 @@ namespace
 	{
 		static RenderState state;
 		return state;
-	}
-
-	const Block* NativeBlock()
-	{
-		const auto& snapshot = Snapshot::Current();
-		return snapshot ? snapshot->Block<Block>() : nullptr;
 	}
 
 	/** @brief The capture (game thread): what the VL render (AE 107023, SE 100306 and its parts) reads of game data, and its noise step. */
@@ -986,7 +982,7 @@ struct ORGVolumetricLighting::Impl
 	void RenderNative()
 	{
 		pending = {};
-		const auto* block = NativeBlock();
+		const auto* block = Snapshot::CurrentBlock<Block>();
 		if (!block || !block->enabled || !block->active || !volume)
 			return;
 		const auto& snapshot = Snapshot::Current();
@@ -1178,14 +1174,14 @@ void ORGVolumetricLighting::InstallCapture()
 
 bool ORGVolumetricLighting::NativeActive()
 {
-	const auto* block = NativeBlock();
+	const auto* block = Snapshot::CurrentBlock<Block>();
 	return block && block->enabled && block->active;
 }
 
 std::array<float, 3> ORGVolumetricLighting::NativeColour()
 {
 	// AE 107017: the sun shadow light's diffuse blended toward the descriptor's colour by its blend factor.
-	const auto* block = NativeBlock();
+	const auto* block = Snapshot::CurrentBlock<Block>();
 	if (!block)
 		return {};
 	const auto& d = block->descriptor;

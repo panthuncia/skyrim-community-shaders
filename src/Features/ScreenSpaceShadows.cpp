@@ -91,7 +91,8 @@ void ScreenSpaceShadows::ClearShaderCache()
 
 uint ScreenSpaceShadows::GetScaledSampleCount()
 {
-	float2 renderSize = Util::ConvertToDynamic(float2{ (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState)->screenHeight });
+	const auto* graphicsState = CS_ENGINE_READ(GraphicsState, CapturePoint, globals::game::graphicsState);
+	float2 renderSize = Util::ConvertToDynamic(float2{ (float)graphicsState->screenWidth, (float)graphicsState->screenHeight });
 	return ScaleSampleCount(bendSettings.SampleCount, renderSize);
 }
 
@@ -137,15 +138,6 @@ bool ScreenSpaceShadows::ShouldDraw() const
 	return bendSettings.Enable && SkyFull();
 }
 
-namespace
-{
-	const ScreenSpaceShadows::Block* FrameBlock()
-	{
-		const auto& snapshot = Snapshot::Current();
-		return snapshot ? snapshot->Block<ScreenSpaceShadows::Block>() : nullptr;
-	}
-}
-
 void ScreenSpaceShadows::PostPostLoad()
 {
 	Snapshot::RegisterCapture(&ScreenSpaceShadows::Capture);
@@ -163,7 +155,7 @@ void ScreenSpaceShadows::Capture(Snapshot::Builder& a_builder)
 
 bool ScreenSpaceShadows::SkyFull()
 {
-	const Block* block = FrameBlock();
+	const Block* block = Snapshot::CurrentBlock<Block>();
 	return block && block->skyFull;
 }
 

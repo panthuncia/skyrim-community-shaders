@@ -99,7 +99,12 @@ void Skin::RevalidateOwners()
 {
 	std::lock_guard lock(mutex);
 	for (auto& [geometry, entry] : geometries)
-		entry.stale = (entry.actor && !SkinSurfaces::Belongs(geometry, entry.actor.get().get())) || !SkinMaterials::IsCompatible(entry.property.get());
+		entry.stale = IsStale(geometry, entry);
+}
+
+bool Skin::IsStale(RE::BSGeometry* a_geometry, const GeometryEntry& a_entry)
+{
+	return (a_entry.actor && !SkinSurfaces::Belongs(a_geometry, a_entry.actor.get().get())) || !SkinMaterials::IsCompatible(a_entry.property.get());
 }
 
 std::shared_ptr<Skin::TextureEntry> Skin::RequestTexture(const std::string& a_path)
@@ -273,7 +278,7 @@ void Skin::Prepass()
 	for (auto& [geometry, entry] : geometries) {
 		// Native took the owners at the capture (RevalidateOwners).
 		if (!native)
-			entry.stale = (entry.actor && !SkinSurfaces::Belongs(geometry, entry.actor.get().get())) || !SkinMaterials::IsCompatible(entry.property.get());
+			entry.stale = IsStale(geometry, entry);
 		if (entry.stale) {
 			preparedRevision += entry.ready;
 			entry.ready = false;

@@ -19,7 +19,6 @@ namespace DCLF::Features::Shadows::Local
 	{
 		// Engine::Offsets (Address Library ids).
 		constexpr DCLF::Engine::Offset kFocusCameras{ { 107601 }, { 100817 } };  // BSShadowDirectionalLight::sub: the focus cameras, any host
-		constexpr DCLF::Engine::Offset kFocusTargets{ { 414623 }, { 527701 } };  // the focus targets: {float distance; NiAVObject* node} x count
 	}
 
 	std::uint32_t EngineFocusTargetCount()
@@ -29,7 +28,7 @@ namespace DCLF::Features::Shadows::Local
 
 	const RE::NiAVObject* EngineFocusTarget(std::uint32_t a_index)
 	{
-		const auto* targets = DCLF::Engine::Global<const std::byte*>(kFocusTargets);
+		const auto* targets = DCLF::Engine::Global<const std::byte*>(DCLF::Engine::Address::kFocusTargets);
 		if (!targets || a_index >= EngineFocusTargetCount())
 			return nullptr;
 		return DCLF::Engine::At<const RE::NiAVObject*>(targets, std::size_t(a_index) * 16 + 8);

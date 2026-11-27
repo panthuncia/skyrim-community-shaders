@@ -59,7 +59,8 @@ namespace DCLF::Draws
 		/** @brief The texture-transform buffer the frame reads. The engine flips it each frame in Main::Update. */
 		std::uint32_t ShadowTransformBuffer()
 		{
-			return CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState) ? (CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->textureTransformCurrentBuffer & 1) : 0u;
+			const auto* shaderState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+			return shaderState ? (shaderState->textureTransformCurrentBuffer & 1) : 0u;
 		}
 
 		/**

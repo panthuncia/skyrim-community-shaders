@@ -269,12 +269,6 @@ void SkySync::Capture(Snapshot::Builder& a_builder)
 	a_builder.Set(block);
 }
 
-const SkySync::Block* SkySync::Frame()
-{
-	const auto& snapshot = Snapshot::Current();
-	return snapshot ? snapshot->Block<Block>() : nullptr;
-}
-
 void SkySync::GameLoaded()
 {
 	Util::RequestGameLoadTransition();

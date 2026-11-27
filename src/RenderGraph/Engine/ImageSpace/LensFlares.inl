@@ -8,29 +8,19 @@
 
 namespace NativePost
 {
-	namespace LensFlareGame
-	{
-		template <class T>
-		const T& At(std::uint64_t a_se, std::uint64_t a_ae)
-		{
-			return *reinterpret_cast<const T*>(REL::RelocationID(a_se, a_ae).address());
-		}
-	}
-
 	/** @brief The lens flares' game inputs. Game thread (the snapshot capture). */
 	LensFlareInputs ReadLensFlares()
 	{
-		using LensFlareGame::At;
 		LensFlareInputs in;
-		in.on = At<bool>(513349, 391128);                               // ToggleLensFlare's flag
-		in.sun = At<const RE::BSLensFlareRenderData*>(527915, 414867);  // the weather's sun lens flare
-		const auto* direction = &At<float>(527924, 414871);             // Sun::Update's direction to the sun
+		in.on = *At<const bool>(513349, 391128);                               // ToggleLensFlare's flag
+		in.sun = *At<const RE::BSLensFlareRenderData* const>(527915, 414867);  // the weather's sun lens flare
+		const auto* direction = At<const float>(527924, 414871);               // Sun::Update's direction to the sun
 		in.sunDirection = { direction[0], direction[1], direction[2] };
-		in.sunVisibility = At<float>(527933, 414878);   // Sun::Update
-		const auto* tint = &At<float>(527934, 414879);  // the sky's sun flare colour
+		in.sunVisibility = *At<const float>(527933, 414878);  // Sun::Update
+		const auto* tint = At<const float>(527934, 414879);   // the sky's sun flare colour
 		in.sunTint = { tint[0], tint[1], tint[2] };
-		in.fadeDistance = At<float>(513351, 391131);
-		in.intensity = At<float>(513353, 391134);  // SetLensFlareGlobalIntensity
+		in.fadeDistance = *At<const float>(513351, 391131);
+		in.intensity = *At<const float>(513353, 391134);  // SetLensFlareGlobalIntensity
 		return in;
 	}
 

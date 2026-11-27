@@ -113,6 +113,17 @@ namespace RenderGraph::Engine::Scaleform
 	/** @brief The D3D1x renderer's ApplyMatrix in 3D (SE 82817 / AE 84940): the vertex constants' mvp rows. Updates the cached product. */
 	void ApplyMatrix3D(RendererState& a_state, const float (&a_matrix)[6], float (&a_mvp)[4][4]);
 
+	/** @brief ApplyMatrix3D's cached view-perspective product (user matrix, view, perspective), brought up to date when it is dirty. */
+	void RefreshViewPerspective(RendererState& a_state);
+
+	/** @brief The identity GMatrix2D, which BeginDisplay's background leaves set. */
+	inline constexpr float kIdentityMatrix[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+
+	/** @brief PushBlendMode with the renderer's rule: the stack keeps the previous mode, and Normal and Layer keep the parent's mode. */
+	void BlendStackPush(std::uint32_t& a_mode, std::vector<std::uint32_t>& a_stack, std::uint32_t a_push);
+	/** @brief PopBlendMode with the renderer's rule: the mode is the topmost on the stack above Layer, or None. A no-op when empty. */
+	void BlendStackPop(std::uint32_t& a_mode, std::vector<std::uint32_t>& a_stack);
+
 	/** @brief A GRenderer call. The arguments' meaning depends on the op; copied data lives in the stream's payload. */
 	enum class UiOp : std::uint8_t
 	{

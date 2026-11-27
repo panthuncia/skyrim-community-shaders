@@ -40,8 +40,9 @@ namespace DCLF::Reports
 		auto& categoryMirrorRecords = V::categoryMirrorRecords();
 		if (captureFrames) {
 			const auto unscoped = FrameGlobals::TakeUnscopedReads();
-			text += fmt::format("[DCLF] frame capture (6e F2): render thread {:.1f} us/frame for the globals, {:.1f} us/frame for the categories ({} captures made; {} subtrees the "
-								"mirror lacked captured, {} records); {} reads off the render thread with no frame's capture bound{}\n",
+			text += fmt::format(
+				"[DCLF] frame capture (6e F2): render thread {:.1f} us/frame for the globals, {:.1f} us/frame for the categories ({} captures made; {} subtrees the "
+				"mirror lacked captured, {} records); {} reads off the render owner and outside a game half with no frame's capture bound{}\n",
 				static_cast<double>(captureNs) / 1000.0 / captureFrames, static_cast<double>(categoryCaptureNs) / 1000.0 / captureFrames, categoryCapturesMade, categoryMirrorCaptures,
 				categoryMirrorRecords, unscoped, unscoped ? " <- CAPTURE" : " <- OK");
 			captureNs = categoryCaptureNs = categoryCapturesMade = captureFrames = 0;

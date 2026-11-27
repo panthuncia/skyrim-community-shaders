@@ -4,6 +4,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "RenderGraph/Frame/Revision.h"
 
 #include <array>
@@ -50,7 +51,7 @@ namespace DCLF
 		mutable std::atomic<bool> sceneHanded{ false };
 		// Native: the game half's end confirmed the late-pose plan (LatePoses::ConfirmFrame). Written once before the ticket is published.
 		mutable bool latePosesConfirmed = false;
-		// Native's game half: what its frame start installed (Scene::FrameView::InstalledFrame), which its renders adopt. Null in guest.
-		std::shared_ptr<const void> installed;
+		// Native's game half: what its frame start installed, which its renders adopt. Null in guest.
+		std::shared_ptr<const Scene::FrameView::InstalledFrame> installed;
 	};
 }

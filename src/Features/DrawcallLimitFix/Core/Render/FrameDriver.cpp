@@ -221,9 +221,14 @@ namespace DCLF
 		if (snapshot && (snapshot->kind == Snapshot::FrameKind::Loading || snapshot->kind == Snapshot::FrameKind::Movie))
 			return Take::Skip;
 		// A repeated render keeps the scene its ticket installed.
-		if (ticket && Snapshot::Render().repeat && ticket->snapshot == Snapshot::CurrentId())
+		if (RepeatsTicket())
 			return Take::Given;
 		return Take::Newest;
+	}
+
+	bool FrameDriver::RepeatsTicket() const
+	{
+		return ticket && Snapshot::Render().repeat && ticket->snapshot == Snapshot::CurrentId();
 	}
 
 	void FrameDriver::NoteAdopted(std::shared_ptr<const void> a_publication)
@@ -243,7 +248,7 @@ namespace DCLF
 		// Both halves at the frame start point, after the frame's Begin (guest, and native's frames the engine's skeleton draws). A repeated
 		// render of a snapshot renders its ticket again: the scene source took no new scene at its Begin, so the publication stays the
 		// ticket's. A frame revision adopted with a held scene can still bring a newer one: the ticket is made again.
-		const bool repeat = ticket && Snapshot::Render().repeat && ticket->snapshot == Snapshot::CurrentId();
+		const bool repeat = RepeatsTicket();
 		if (!repeat || AdoptedSequence() > ticket->publication) {
 			if (repeat)
 				ticketsRemade.fetch_add(1, std::memory_order_relaxed);
@@ -251,7 +256,7 @@ namespace DCLF
 			RenderTicket(gameTicket);
 		}
 		// Native: the rest of the driver's game half reads the update's globals, not the render side's adopted ones.
-		if (inGameHalf)
+		if (Scene::FrameView::InGameHalf())
 			FrameGlobals::BeginGameHalf(ticket->globals);
 		BeginFrame();
 	}
@@ -261,7 +266,7 @@ namespace DCLF
 		ScenePassWakeBatch wakes;
 		MakeTicket(Snapshot::LastGameId(), true);
 		// The rest of the driver's game half reads the update's globals, not the render side's adopted ones.
-		if (inGameHalf)
+		if (Scene::FrameView::InGameHalf())
 			FrameGlobals::BeginGameHalf(gameTicket->globals);
 	}
 
@@ -357,7 +362,7 @@ namespace DCLF
 		t->loading = Scene::FrameView::IsLoadingScreenUp();
 		t->utilityShader = CS_ENGINE_READ(Shaders, CapturePoint, globals::game::utilityShader) != nullptr;
 		{
-			// The publication the frame revision adopted at this frame's Begin (plan step 10b), with the staged builds it was recorded on.
+			// The publication the frame revision adopted at this frame's Begin, with the staged builds it was recorded on.
 			// Nothing waits here: a newer snapshot not ready yet leaves the adopted one, recorded on the graphs that run.
 			// A routed update runs before its render's Begin: it takes the newest posted fragment into the ticket, whose render adopts it,
 			// and installs its publication (none new: the publication the render side adopted last).
@@ -470,7 +475,7 @@ namespace DCLF
 		// Each render has its own scene step: the epochs' once-a-frame guards and commits are keyed by it.
 		view.StepRender(t.sceneStep, first);
 		// Native: the render side reads what its ticket's game half installed, not what a newer game half installs meanwhile.
-		view.AdoptInstalledFrame(std::static_pointer_cast<const Scene::FrameView::InstalledFrame>(t.installed));
+		view.AdoptInstalledFrame(t.installed);
 		FrameGlobals::Adopt(t.globals);
 		{
 			DCLF_ZONE("CS.DCLF.BF.SyncFrameTables");
@@ -492,13 +497,6 @@ namespace DCLF
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			const bool covered = draws.DecideCoverage();
 			coveredLast.store(covered ? view.StopsAsked() + 1 : 0, std::memory_order_release);
-			// Native mode bring-up: log why claims are not installed, once every 300 such frames.
-			if (!(covered && view.HasInstalled()) && RenderGraph::Engine::Native::Active()) {
-				static std::uint32_t s_uncovered = 0;
-				if (s_uncovered++ % 300 == 0)
-					logger::info("[DCLF] native: frame {} has no claims (covered {}, a publication installed {}, loading {}): {}", view.SceneStep(), covered,
-						view.HasInstalled(), t.loading, draws.CoverageState());
-			}
 			if (!(covered && view.HasInstalled()) && !view.NotDrawingYet() && !t.loading && paired) {
 				// The graph itself stopped, so no snapshot can cover a frame again and that reason is the defect.
 				// "GPU completion timeline failed" means a timeline read UINT64_MAX, which Windows sets on a removed device's fences.
@@ -598,7 +596,6 @@ namespace DCLF
 
 	void FrameDriver::GameHalfStart()
 	{
-		inGameHalf = true;
 		Scene::FrameView::SetGameHalf(true);
 	}
 
@@ -608,7 +605,6 @@ namespace DCLF
 		const bool confirmed = LatePoses::ConfirmFrame();
 		if (gameTicket)
 			gameTicket->latePosesConfirmed = confirmed;
-		inGameHalf = false;
 		Scene::FrameView::SetGameHalf(false);
 		FrameGlobals::EndGameHalf();
 	}

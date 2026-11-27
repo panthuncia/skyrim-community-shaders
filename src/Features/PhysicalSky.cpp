@@ -227,7 +227,9 @@ namespace
 	// The settings UI's live reads, and the capture's. The frame reads the worldspace from PhysicalSky::Block.
 	RE::TESWorldSpace* GetCurrentWorldspace()
 	{
-		auto* tes = CS_ENGINE_READ(TES, Other, globals::game::tes) ? CS_ENGINE_READ(TES, Other, globals::game::tes) : CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
+		auto* tes = CS_ENGINE_READ(TES, Other, globals::game::tes);
+		if (!tes)
+			tes = CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
 		auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 		auto* cell = player ? player->GetParentCell() : nullptr;
 
@@ -1980,13 +1982,7 @@ void PhysicalSky::Capture(Snapshot::Builder& a_builder)
 					block.sunLight = true;
 					block.sunLightDirection = dirLight->GetWorldDirection();
 				}
-	a_builder.Set(block);
-}
-
-const PhysicalSky::Block* PhysicalSky::Frame()
-{
-	const auto& snapshot = Snapshot::Current();
-	return snapshot ? snapshot->Block<Block>() : nullptr;
+	a_builder.Set(std::move(block));
 }
 
 void PhysicalSky::Reset()
@@ -1995,12 +1991,10 @@ void PhysicalSky::Reset()
 	// The adopted snapshot is Reset's only game input. Lightning and the cloud wind step by its game time once, the first time
 	// Reset sees it: a repeated snapshot holds them, a dropped one does not lose time.
 	const auto& snapshot = Snapshot::Current();
-	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
-	const bool newSnapshot = snapshot && snapshot->id != steppedSnapshot;
-	frameGameDelta = newSnapshot ? snapshot->events.gameDelta : 0.f;
-	if (newSnapshot)
-		steppedSnapshot = snapshot->id;
-	const auto worldspaceID = frame ? frame->worldspace : std::string{};
+	const Block* frame = Snapshot::CurrentBlock<Block>();
+	frameGameDelta = Snapshot::StepOnce(steppedSnapshot);
+	static const std::string noWorldspace;
+	const std::string& worldspaceID = frame ? frame->worldspace : noWorldspace;
 	if (cloudAmbientWorldspace != worldspaceID) {
 		cloudAmbientValid = false;
 		cloudAmbientWorldspace = worldspaceID;
@@ -2081,7 +2075,7 @@ void PhysicalSky::Reset()
 	dynres = { floor(dynres.x), floor(dynres.y) };
 
 	// Sky Sync's results for this snapshot (its update runs game-side, in Sky::Update).
-	const auto* skyFrame = SkySync::Frame();
+	const auto* skyFrame = Snapshot::CurrentBlock<SkySync::Block>();
 	const SkySync::Block skyBlock = skyFrame ? *skyFrame : SkySync::Block{};
 	auto sunDir = skyBlock.rawDirections[static_cast<int>(SkySync::Caster::Sun)];
 	auto masserDir = skyBlock.rawDirections[static_cast<int>(SkySync::Caster::Masser)];
@@ -2379,6 +2373,7 @@ void PhysicalSky::Prepass()
 				noiseTopology.push_back({ input.texturePath, noise.type, noise.seed,
 					noise.frequency, noise.octaves, noise.lacunarity, noise.repetitions });
 			}
+			const Block* worldFrame = Snapshot::CurrentBlock<Block>();
 			const auto historyKey = nlohmann::json{
 				{ "ndfSource", { settings.cloudMap.type, settings.cloudMap.texture } },
 				{ "noiseTopology", noiseTopology },
@@ -2395,7 +2390,7 @@ void PhysicalSky::Prepass()
 				{ "froxel", globals::features::viewAtmosphere.IsPrepared() },
 				{ "planet", settings.planetRadius },
 				{ "bottom", cbData.zBottom },
-				{ "worldspace", Frame() ? Frame()->worldspace : std::string{} }
+				{ "worldspace", worldFrame ? worldFrame->worldspace : std::string{} }
 			}.dump();
 			if (historyKey != volCloudHistoryKey) {
 				volMainHistoryValid = false;

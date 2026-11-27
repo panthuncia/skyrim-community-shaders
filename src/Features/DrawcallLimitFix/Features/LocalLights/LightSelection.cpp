@@ -24,100 +24,9 @@ namespace DCLF
 		using Engine::Global;
 
 		constexpr Engine::Offset kCalculateActive{ { 107137 }, { 100419 } };  // CalculateActiveShadowCasterLights
-		constexpr Engine::Offset kLodFadeCutoff{ { 415264 }, { 528316 } };    // UpdateCamera's lodFade cutoff
-		constexpr Engine::Offset kFocusShadows{ { 390932 }, { 513201 } };     // Focus shadows setting, a byte.
 		constexpr std::size_t kPortalEntry = 0x30190;           // A culling process's portal-graph entry.
 		constexpr std::size_t kShadowMapCount = 0x140;          // BSShadowLight's descriptors in use.
 		constexpr std::uint32_t kMaxLights = 4;
-
-		using Corners = std::array<std::array<float, 3>, 5>;
-
-		// The eye, then the far rectangle's corners in FUN_14150aba0's order.
-		Corners FrustumCorners(const RE::NiCamera& a_camera)
-		{
-			const auto& r = a_camera.world.rotate.entry;
-			const auto& t = a_camera.world.translate;
-			const auto& f = const_cast<RE::NiCamera&>(a_camera).GetRuntimeData2().viewFrustum;
-			const float farDistance = f.fFar;
-			const float eye[3] = { t.x, t.y, t.z };
-			float dir[3], up[3], right[3];
-			for (std::uint32_t i = 0; i < 3; ++i) {
-				dir[i] = r[i][0] * farDistance;
-				up[i] = r[i][1] * f.fTop * farDistance;
-				right[i] = r[i][2] * f.fRight * farDistance;
-			}
-			Corners out;
-			out[0] = { eye[0], eye[1], eye[2] };
-			for (std::uint32_t i = 0; i < 3; ++i) {
-				const float centreUp = eye[i] + dir[i] + up[i];
-				const float centreDown = eye[i] + dir[i] - up[i];
-				out[1][i] = centreUp + right[i];
-				out[2][i] = centreUp - right[i];
-				out[3][i] = centreDown + right[i];
-				out[4][i] = centreDown - right[i];
-			}
-			return out;
-		}
-
-		// Tests all six planes, whatever the mask, as FUN_14150aba0 does.
-		bool CornersOrEdgesInside(const Corners& a_points, const ShadowCameras::Planes& a_planes)
-		{
-			const auto& planes = a_planes.plane;
-			for (const auto& p : a_points) {
-				std::uint32_t k = 0;
-				while (0.0f < (p[0] * planes[k][0] + p[1] * planes[k][1] + p[2] * planes[k][2]) - planes[k][3])
-					if (++k > 5)
-						return true;
-			}
-			static constexpr std::uint8_t kEdges[8][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 0, 4 }, { 1, 2 }, { 1, 3 }, { 2, 4 }, { 3, 4 } };
-			const auto side = [](float a_value) -> std::uint8_t { return 0.0f <= a_value ? (0.0f < a_value ? 1 : 0) : 2; };
-			for (const auto& edge : kEdges) {
-				const auto& a = a_points[edge[0]];
-				const auto& b = a_points[edge[1]];
-				for (std::uint32_t j = 0; j < 6; ++j) {
-					const auto& n = planes[j];
-					const std::uint8_t sa = side((a[0] * n[0] + a[1] * n[1] + a[2] * n[2]) - n[3]);
-					const std::uint8_t sb = side((b[0] * n[0] + b[1] * n[1] + b[2] * n[2]) - n[3]);
-					if (sa == sb) {
-						if (sa == 0)
-							return true;
-						continue;
-					}
-					const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
-					const float t = ((n[0] * n[3] - a[0]) * n[0] + (n[3] * n[1] - a[1]) * n[1] + (n[3] * n[2] - a[2]) * n[2]) / (dx * n[0] + dy * n[1] + dz * n[2]);
-					if (!(0.0f <= t) || !(t <= 1.0f))
-						continue;
-					std::uint32_t k = 0;
-					while (k == j || 0.0f <= ((dy * t + a[1]) * planes[k][1] + (dx * t + a[0]) * planes[k][0] + (dz * t + a[2]) * planes[k][2]) - planes[k][3])
-						if (++k > 5)
-							return true;
-				}
-			}
-			return false;
-		}
-
-		// Port of FUN_14150aba0.
-		bool FrustaIntersect(const RE::NiCamera& a_world, const RE::NiCamera& a_light)
-		{
-			ShadowCameras::Planes worldPlanes, lightPlanes;
-			ShadowCameras::FrustumPlanes(const_cast<RE::NiCamera&>(a_world).GetRuntimeData2().viewFrustum, a_world.world, worldPlanes);
-			ShadowCameras::FrustumPlanes(const_cast<RE::NiCamera&>(a_light).GetRuntimeData2().viewFrustum, a_light.world, lightPlanes);
-			return CornersOrEdgesInside(FrustumCorners(a_world), lightPlanes) || CornersOrEdgesInside(FrustumCorners(a_light), worldPlanes);
-		}
-
-		// Port of BSMultiBoundSphere::Func41. NaN counts as outside.
-		bool SphereInside(const float a_centre[3], float a_radius, const ShadowCameras::Planes& a_planes)
-		{
-			for (std::uint32_t k = 0; k < 6; ++k) {
-				if (!((a_planes.mask >> k) & 1))
-					continue;
-				const auto& n = a_planes.plane[k];
-				const float value = (n[1] * a_centre[1] + n[0] * a_centre[0] + n[2] * a_centre[2]) - n[3];
-				if (!(value > -a_radius))
-					return false;
-			}
-			return true;
-		}
 
 		// Port of vfunc 0x10 (BSShadowFrustumLight 0x14151ac50, BSShadowParabolicLight 0x14151b620). Directional lights always pass.
 		bool Visible(const RE::BSShadowLight& a_light, const RE::NiCamera& a_camera, const ShadowCameras::Planes& a_cameraPlanes)
@@ -137,20 +46,13 @@ namespace DCLF
 			if (frustum) {
 				const auto& descriptors = light.GetRuntimeData().shadowmapDescriptors;
 				const auto* camera = descriptors.empty() ? nullptr : descriptors[0].camera.get();
-				visible = camera && FrustaIntersect(a_camera, *camera);
+				visible = camera && ShadowCameras::FrustaIntersect(a_camera, *camera);
 			} else {
 				const float centre[3] = { position.x, position.y, position.z };
-				visible = SphereInside(centre, radius, a_cameraPlanes);
+				visible = ShadowCameras::SphereInside(centre, radius, a_cameraPlanes);
 			}
-			if (visible && light.lodFade) {
-				const float dx = position.x - a_camera.world.translate.x;
-				const float dy = position.y - a_camera.world.translate.y;
-				const float dz = position.z - a_camera.world.translate.z;
-				// Each class sums in its own order. Keep it, so float results match the engine.
-				const float squared = frustum ? (dy * dy + dx * dx) + dz * dz : (dx * dx + dy * dy) + dz * dz;
-				if (Global<float>(kLodFadeCutoff) <= (squared - radius * radius) * At<float>(&a_camera, 0x184))
-					visible = false;
-			}
+			if (visible && light.lodFade && ShadowCameras::LodFaded(a_camera, position, radius, frustum))
+				visible = false;
 			return visible;
 		}
 
@@ -214,7 +116,7 @@ namespace DCLF
 		auto& runtime = node->GetRuntimeData();
 		std::uint32_t kept = 0, slot = 0, mask = 0;
 		// focusFound mirrors the engine's 0x14338c912.
-		const bool focusOn = Global<std::uint8_t>(kFocusShadows) != 0 && Global<std::uint32_t>(Engine::Address::kFocusTargetCount) != 0;
+		const bool focusOn = Global<std::uint8_t>(Engine::Address::kFocusShadows) != 0 && Global<std::uint32_t>(Engine::Address::kFocusTargetCount) != 0;
 		bool focusFound = false;
 		if (!Global<std::uint8_t>(Engine::Address::kSunOff) && runtime.sunShadowDirLight) {
 			frame.sun = runtime.sunShadowDirLight;
