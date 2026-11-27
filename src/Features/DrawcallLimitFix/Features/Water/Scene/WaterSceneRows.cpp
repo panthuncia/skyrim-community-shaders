@@ -7,7 +7,9 @@
 //   shading field names each slot's row. Each row is Port::EvaluateMaterial with this frame's inputs, since fog, the water
 //   lighting and the timer move every frame.
 // - the frame row: a one-row frame-value pool read at t59, Port::TechniqueRows plus the frame inputs the shader needs.
-// The frame inputs are Port::CaptureFrame at the frame's start, on the render thread, in the shading field's capture.
+// The material rows' inputs are Port::CaptureGameFrame, taken by the game half in the shading field's capture. The frame row
+// holds the render's own values (the target size, the camera planes), so native makes it per render from Port::CaptureFrame on
+// the render thread. Guest renders on the game thread and keeps the game half's.
 // Advanced Skin's material table (Integrations/AdvancedSkin/SkinMaterials.cpp) and the landscape seams' quad table
 // (Features/Landscape/LandscapeSeams.cpp) are the models.
 
@@ -31,6 +33,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
+#include "Snapshot/FrameCamera.h"
 
 #include <ORGModuleServices/GrowableBufferTypes.h>
 
@@ -370,7 +373,7 @@ namespace DCLF::Features::Water::WaterScene
 		{
 			auto& state = Pool();
 			static REL::Relocation<RE::BSShaderAccumulator**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
-			state.frame = Port::CaptureFrame(*mainAccumulator);
+			state.frame = Port::CaptureGameFrame(*mainAccumulator);
 			state.haveFrame = true;
 			for (const auto slot : a_capture.changedObjects)
 				ResolveSlot(state, a_capture, slot);
@@ -492,8 +495,11 @@ namespace DCLF::Features::Water::WaterScene
 			return out;
 		}
 
+		/** @brief Native: each render's upload, on the render thread. Guest: the game half, with the material rows' inputs. */
 		Api::FrameValueInput KickFrame(const Api::FrameValuePoolKick&)
 		{
+			if (Snapshot::FrameCamera::Owned())
+				return { std::make_shared<const WaterFrameRow>(FrameRowOf(Port::CaptureFrame(nullptr))), 1 };
 			const auto& state = Pool();
 			return { std::make_shared<const WaterFrameRow>(state.haveFrame ? FrameRowOf(state.frame) : WaterFrameRow{}), 1 };
 		}
@@ -538,7 +544,8 @@ namespace DCLF::Features::Water::WaterScene
 		rowsScene = a_context.RegisterSceneResources({ .name = "water-rows", .setup = &SetupRowsScene, .registerGraph = &RegisterRowsGraph, .require = &RequireRows, .fit = &FitRows });
 		a_context.RegisterCommitHook({ .name = "water-rows", .commit = &CommitRows });
 		a_context.RegisterFrameBinding({ .name = "water object rows SRV", .textureRegister = Indirect::kObjectRowsRegister, .select = &SelectRows });
-		framePool = a_context.RegisterFrameValuePool({ .name = "water-frame", .stride = sizeof(WaterFrameRow), .kick = &KickFrame, .sample = &SampleFrame, .send = &SendFrame });
+		framePool = a_context.RegisterFrameValuePool(
+			{ .name = "water-frame", .stride = sizeof(WaterFrameRow), .perRender = Snapshot::FrameCamera::Owned(), .kick = &KickFrame, .sample = &SampleFrame, .send = &SendFrame });
 		materialPool = a_context.RegisterFrameValuePool(
 			{ .name = "water-materials", .stride = sizeof(WaterMaterialRow), .kick = &KickMaterials, .sample = &SampleMaterials, .send = &SendMaterials });
 		a_context.RegisterFrameBinding({ .name = "water frame row SRV", .textureRegister = kFrameRowRegister, .select = &SelectFrame });

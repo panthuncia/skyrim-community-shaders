@@ -231,6 +231,13 @@ namespace DCLF::Features::Water::Port
 	*/
 	FrameInputs CaptureFrame(const RE::BSShaderAccumulator* a_accumulator);
 
+	/**
+	* @brief The game half's FrameInputs, for the material rows. Native: the game's fields from the snapshot being built (GameBlock)
+	* and CS's hooks; the view's fields stay zero, since the render side owns the camera and the target size. Guest: CaptureFrame.
+	* Game thread.
+	*/
+	FrameInputs CaptureGameFrame(const RE::BSShaderAccumulator* a_accumulator);
+
 	/** @brief SetupTechnique's rows, a frame row once the descriptor's Depth bit is known: VS b0 and PS b0. */
 	struct TechniqueRows
 	{
