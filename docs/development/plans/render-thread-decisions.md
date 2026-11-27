@@ -904,3 +904,31 @@ pushes until the user is back.
      plugin off in every mode; `first-person-switch` gains sun and interior shadow shots. Open: native draws no
      first-person body while Improved Camera is installed, until a plugin's D3D11 draws are ported (the extension API's
      "draw family a plugin adds geometry to").
+
+## 2026-11-27: phase 7 groundwork: reads before the thread (snap7-split, partial; director accepted)
+
+201. **Reads first, thread last:** every native frame point still read game-mutated engine state while recording, so a
+     render thread now would race the next update or wait for a read window (forbidden). The skeleton driver is split
+     into `PrepareFrame` (the game half, in engine order) and `RecordFrame` (from the shadow maps on), handing over
+     `Native::Scene::Prepared` (the first-person camera for DCLF's first-person depth epoch and the post chain's depth of
+     field). Screen blood's draws are taken in the capture (geometries as `EngineRef`s), `WorldPass::NormalsTarget` in
+     the game half, the water port's ~25 engine values once per update (`BlockId::WaterPort`). SetupSunAndSky (DCLF's
+     frame start) and the shadow casters stay in the game half until split. Non-world frame kinds stay on their producing
+     thread, with the render thread parked, until their ports land. New configs `update-cap30` and `update-cap240`.
+     Remaining steps (in `snap7-split.md`): split DCLF's BeginFrame with a per-update game ticket; a captured shadow light
+     set; the other points' and features' record-time reads; Present as publish; create the thread; revision adoption and
+     resize on it; the harness split.
+
+## 2026-11-27: books work in native; the book scene is native (snap5-book; director accepted)
+
+202. **Closes 191:** BookMenu::PreDisplay (AE 51052 / SE 50121), called from DrawFrame's offscreen-menus loop before any CS
+     stage is open, is delayed to the start of DrawInterface in graph mode (native and guest; guest hit the same fatal
+     tap error), under the engine loop's movie lock, restoring target and depth after. The page copy is a UI-stage
+     ImageSpace client (`cs.engine.imagespace.book`, an ISCopy reading the page texture through a latched heap index,
+     `ORG_LOADED_SOURCE` permutation). The book scene (scheme 3) is CS's: kBOOK_TEXT_0..3 as inputs, single-partition
+     skinned shapes without renderer data drawn from their skin partition. Book frames: fatal -> 13 engine render calls
+     (9 world-frame sites at the time plus 4 page copies, which stay engine RenderEffect calls).
+203. **Open bugs found:** native crashes when the world map opens (SetDirtyStates under the engine's end-of-frame family,
+     SkyrimSE+0xE4B9BB; pre-existing); the blood Effect variant (EdgeBlood03, pass 0x4842) is not ported, so a random
+     loading model using it is fatal in owned scheme 4; skinned menu shapes with several partitions are left out. Left:
+     the local map (MapMenu::PreDisplay still runs from the offscreen loop), then deleting `CS_MENU_SCENES_OBSERVE`.

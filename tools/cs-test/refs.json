@@ -1,4 +1,16 @@
 {
+  "guest+menu-book/book-open": {
+    "sha256": "2ddcf366ff6f26d66c57ceac457dfe9524357f4b35d5d9ea100fa5fe6dda04bf",
+    "size": "1920x1080",
+    "run": "1126-225611-s7-book-guest-menu-book-s7-book-fin-guest-book",
+    "accepted": "2026-11-26"
+  },
+  "guest+menu-book/book-page": {
+    "sha256": "70255ad97fe66cdaa84884608a8d82f3eb32bf65e21f4aa4f11d5564565eee68",
+    "size": "1920x1080",
+    "run": "1126-225611-s7-book-guest-menu-book-s7-book-fin-guest-book",
+    "accepted": "2026-11-26"
+  },
   "guest+menu-loading/loading-model": {
     "sha256": "a912aafdd74562361936f63cc8be76c59567ba63654fd3e17a4c8d571fab0527",
     "size": "1920x1080",
@@ -57,6 +69,18 @@
     "sha256": "03f3a6882f74601096fb5616094330e1f8c9c4422f97e4524d79eeba058fbd3c",
     "size": "1920x1080",
     "run": "1126-185749-dir-native-vulkan-facegen-dir-s7dk-native-vulkan+facegen",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-book/book-open": {
+    "sha256": "a22cc66cad03d43b078573297e21328364de55cacd5040f07fadec911a39fe24",
+    "size": "1920x1080",
+    "run": "1126-225531-s7-book-native-vulkan-menu-book-s7-book-fin-nvk-book3",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-book/book-page": {
+    "sha256": "802946d8d8d616cb5c4e829de55612158783418fe48f133e7c9213a9bad3f7b5",
+    "size": "1920x1080",
+    "run": "1126-225531-s7-book-native-vulkan-menu-book-s7-book-fin-nvk-book3",
     "accepted": "2026-11-26"
   },
   "native-vulkan+menu-items/inventory-enchanted-armour": {
