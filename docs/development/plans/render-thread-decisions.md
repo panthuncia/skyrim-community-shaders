@@ -1176,3 +1176,17 @@ pushes until the user is back.
      frame, all one-time (shadow catalog/placements, shadow import keyed on the texture pointer for Skylighting's swap,
      reflection faces' format). Targeted 8 configs passed on the merge; native-interior ~210 fps in Dragonsreach (the 110
      the lead saw was the old guard fight).
+
+## 2026-11-27: render thread device loss, interim wait (snap7-devloss; director accepted as interim)
+
+229. **The depth commit waits for the previous render's GPU work** (DL-a, interim; `snap7-devloss.md`). The device losses
+     on the render thread (window-resize-stress-taa, native-interior; a D3D12 main-opaque hang once) are a race between
+     overlapping renders: DCLF passes read through addresses never bound to any allocation, so render N+1 writes something
+     on the CPU that render N's GPU work still reads. Bisected to the window between the start of DCLF's depth
+     `CommitMainPayload` and `UploadSceneStreams`. `Native::RenderThread::WaitForLastRender()` at the top of that commit
+     waits once on the previous render's `Retirement::SubmittedGpuPoint()` (guest and producer-thread frames never wait).
+     Cost ~155-170 vs ~170 fps (Dev-Fast). This breaks the render thread's never-wait rule; snap7-devloss2 names the write,
+     fixes its lifetime and deletes the wait. With crash markers on, BasicRHI records address binding events in a ring and
+     the device-fault report lists those near the faulting address (DL-b; BasicRHI branch snap7/devloss). Merge checks:
+     resize passed; native-d3d12-quick's shot once showed the land as a flat grey plane (rerun passed; possibly the same
+     race, passed to snap7-devloss2).
