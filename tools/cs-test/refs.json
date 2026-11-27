@@ -125,6 +125,18 @@
     "run": "1126-185749-dir-native-vulkan-facegen-dir-s7dk-native-vulkan+facegen",
     "accepted": "2026-11-26"
   },
+  "native-vulkan+first-person/first": {
+    "sha256": "ca882ee30bd05bf28807492cb05b7242b6c19caf90e743bb9ed5e772f1b715c0",
+    "size": "1920x1080",
+    "run": "1127-171835-post-refs-native-vulkan-first-person-post-refs-n1-fp",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person/third": {
+    "sha256": "708d1fa85105e74244f9fed5843e5dbc5dbc37e0fbe50f25699b411011f0f31c",
+    "size": "1920x1080",
+    "run": "1127-171835-post-refs-native-vulkan-first-person-post-refs-n1-fp",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+map-local/localmap": {
     "sha256": "6234b7e578d4e82b56a0c11bbb38590969c66db6bc8799be8c174974498fe620",
     "size": "1920x1080",
@@ -249,6 +261,84 @@
     "sha256": "5861b2283ba5e61b4a8586f693ab4a404353df3744c7c8392641b7dab2e08cde",
     "size": "1920x1080",
     "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/bloom-blend": {
+    "sha256": "d141367a942471c0c23119fb16bf3075b26a8774ae9a673fad1df192e049e268",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/bloom-mips": {
+    "sha256": "7fa63986aa15463f6a279f3851793ab63187eb83ce9de4cf5d08d26e653d90ca",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/dof-legacy": {
+    "sha256": "a1e6af9e9d1a357d2f474f7e1913c601186390c03a8b9b0a7717a05c4173d341",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/dof-on": {
+    "sha256": "d693145b0c4a897bd84024984f195919361181d5c9b05d6bc98f816281ab491c",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/dof-rings": {
+    "sha256": "f1e0a91c8f368b5551228007948a3719326dfb765c05d93085387300663435b7",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/flare-fft": {
+    "sha256": "9653510b82e9ed86eb559e3061e45d68290c6086edb375264155c9323bf4775e",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/flare-mode": {
+    "sha256": "55b61ba4f8f319946c8ae268a3887607b0fc4382b712adf49699fa0903f7b117",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/glare-fft": {
+    "sha256": "f86ca2be71b8d1350d88f98c1e5c976ea0421e1dc2aa1623da93bb9dd658799d",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/glare-on": {
+    "sha256": "5491de31ce857c0894cc953ae9a12a09158358e41be0e683ac9fa9aa54eee747",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/glare-pupil": {
+    "sha256": "1849ce91b34196e02b45e22e82990ee470f7b0a314df7a36db85b0d330c905de",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/list-off": {
+    "sha256": "c86f08bf98e5d0d32c3dcd70a21d870e5ac848a38a310795a70be1b1456077d3",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/list-on": {
+    "sha256": "f3150a6dc66f96a5d3032563f1bacde1c47f77c1082f47b682afbef3ef03b67b",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/pp-base": {
+    "sha256": "3655ba0d616c03f1eda7eae6136afc0f904c3af147513f548f0f0be9ca2b591f",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
     "accepted": "2026-11-27"
   },
   "native-vulkan+quick/start": {
