@@ -168,9 +168,9 @@
     "accepted": "2026-11-27"
   },
   "native-vulkan+map/whiterun": {
-    "sha256": "e23332e24306afb9ad9588fbbfe1f8b27c2667a3fc6ca9d3b6a2b111215256b8",
+    "sha256": "ef7e53e248c5951292767e734abaaaefcd493ca5637fd9390ec04dbf14ee7d94",
     "size": "1920x1080",
-    "run": "1127-011151-s7-map-native-vulkan-map-s7-map-fin-nvk-map2",
+    "run": "1127-180707-post-refs-native-vulkan-map-post-refs-n1-map",
     "accepted": "2026-11-27"
   },
   "native-vulkan+menu-book/book-open": {

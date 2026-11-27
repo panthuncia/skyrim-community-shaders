@@ -93,3 +93,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["localmap", "localmap-b", "map"]
+shot_refs = ["localmap", "localmap-b", "map"]
