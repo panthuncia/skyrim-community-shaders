@@ -114,9 +114,9 @@ point (`Scaleform::ReplaySnapshotUi`), with DrawInterface's render-side detours 
 | P | Game-half accessors and thread-identity cleanups: `Snapshot::Building()` for game-half readers; FrameGlobals scope over the whole game half; `SampleEngine` into the capture; `FrameOnlySource`/`FreezeTestAtBegin` without `IsMainThread`; the engine-read window closed at the update's end; `MakeRegistered` at install; the kept rows handed to the render side as copies or views; the fade statics and the per-render fade kick's camera from the ticket | yes | done (snap7/thread-prep, merged), section 6 |
 | U | UI producer record-only (3.5) | yes (record, then replay at once) | done (snap7/thread-ui, merged), section 6 |
 | S1 | CS's game frame in place of Main::DrawFrame for routed updates, game half before the render half, scene pairing (3.2, 3.4), still one thread | yes | done (135f05e48), section 6 |
-| S2 | The render thread (3.3), parking, cross-thread checks, PaceGameUpdate on | - | landed (49aabed95); suite in section 5 |
-| R | Resize on the render thread (native device Resize, swap chain, target versions) instead of Renderer::RequestWindowResize + Begin | - | |
-| I | ImGui on the render thread (Menu::DrawOverlay from RenderFrameEnd; it already is) and the harness (shots and live frames on the render thread) | - | |
+| S2 | The render thread (3.3), parking, cross-thread checks, PaceGameUpdate on | - | landed (49aabed95); long runs fail on the casters' race (section 6 "S2") |
+| R | Resize on the render thread (native device Resize, swap chain, target versions) instead of Renderer::RequestWindowResize + Begin | - | not started (TH-j) |
+| I | ImGui on the render thread (Menu::DrawOverlay from RenderFrameEnd; it already is) and the harness (shots and live frames on the render thread) | - | runs on the thread with S2 (menu-ui passes); `ui-writes` not checked |
 
 ## 5. Runs
 
@@ -128,6 +128,11 @@ Stage `s7-thread`, Dev-Fast. Build s1a = S1 (135f05e48); s2a = S2 first build; s
 | native-vulkan+cadence-repeat | s7-thread-s1a-nvk-cadence-repeat | s1a | passed, 3 shots |
 | native-vulkan+menu-scenes | s7-thread-s1a-nvk-menu-scenes | s1a | passed with shot references (inventory, journal, loading model, stats, world); 165 routed, 435 on Main::DrawFrame, 2 routed updates whose interface the render half drew (a menu opened by the UI jobs) |
 | native-vulkan+quick, detect | s7-thread-s2b-nvk-quick | s2b | passed with the shot reference, render thread running; render half (record) game-mutated reads 0.00 per world frame, frame end none |
+| guest+quick | s7-thread-s2c-guest-quick | s2c (49aabed95) | passed |
+| native-vulkan+menu-scenes | s7-thread-s2c-native-vulkan-menu-scenes | s2c | passed with shot references |
+| native-vulkan+menu-ui | s7-thread-s2c-native-vulkan-menu-ui | s2c | passed (ImGui on the render thread, every cs-ui-expect holds) |
+| native-vulkan+cadence-drop-cells | s7-thread-s2c-native-vulkan-cadence-drop-cells | s2c | failed: tap error (fatal) 40 s in, frame 2132: "DCLF: occlusion map 0 of frame 1745 was taken for the shadow epoch, which did not draw it" (FrameDriver::OcclusionNeedsEngine, from Skylighting::RenderOcclusion on the render thread); 416 routed / 1340 routed renders before it |
+| native-vulkan+first-person-switch | s7-thread-s2c-native-vulkan-first-person-switch | s2c | failed: the same tap error at frame 3279 (occlusion map 0 of frame 2556), after shots first-1 and third-1; 542 routed updates, 2070 routed renders (about 3.8 renders per update) |
 | native-vulkan+quick, detect | s7-thread-s2a-nvk-quick | s2a | crashed 3 frames after world-ready, 0.4 s after the render thread started: both threads in `DCLF::Features::Fades::CountAnimatedRoots` (FadeWriters.cpp, a shared static scratch array; the animated fade batch is prepared by the game half and taken by the render side's commit) |
 
 ## 6. Steps landed
@@ -370,7 +375,15 @@ switches.json, update-cap30/240 configs). The cadence test mode on the thread: `
 Cross-thread fixes so far: LoadHold's state under one lock (`HoldLock`); the animated fade batch's hand-off under `stampsLock`, its
 scratch array thread-local.
 
-Status: native quick passes with the thread (s2b). The next crash class to expect is the same kind as the fade batch:
+Status: native quick, guest quick, menu-scenes and menu-ui pass with the thread. **Stopped at the first long-run failure** (s2c
+cadence-drop-cells and first-person-switch): an uncovered occlusion-map tap error after 1,300-1,600 frames. The occlusion maps' state
+(`FrameDriver::occlusionTaken/Drawn/Wanted`, reset in the render half's `BeginFrame`) is shared with the shadow casters' DCLF calls,
+which still run in the game half on the game thread (`PrepareFrame`'s +0x1C4 point: `BeforeShadowCasters` -> `Draws::BeginShadowViews`,
+`ShadowCasterKept`, `ShadowCastersSelected`, and the shadow epochs' `beforeShadowCasters`). They decide shadow coverage and the views
+from render-side state (TICKET-a's coupling) and now race the render thread's frame (the map named is about 700 scene steps old, which
+fits a cross-thread overwrite). Next step: make the casters' DCLF part a ticket product (the game half records the selection and the
+views' inputs in the ticket or the light set; the render half decides shadow coverage and lists the views at its frame start from them),
+then rerun drop-cells and first-person-switch. The next crash class to expect is the same kind as the fade batch:
 DCLF state the game half writes and the render side's commit or frame end reads, which one thread never raced. Find them by running
 native-vulkan+quick, symbolizing the crash address against `build/Dev-Fast/CommunityShaders.dll` with VS's `llvm-symbolizer`, and
 guarding or handing off the state named. Then: the live-read detector on the render thread, the frame kinds below, R and I, the suite.
