@@ -6,8 +6,9 @@ and "After phase 7", [snap7-prep.md](snap7-prep.md) (the phase 7 plan), [snap7-s
 [snap7-precip.md](snap7-precip.md), [snap7-sky.md](snap7-sky.md), [snap7-prep2.md](snap7-prep2.md), decisions 8, 34, 51, 62-75, 99,
 138-141, 192-224.
 
-Status: **in progress.** This file is the design, the work packages in order, and the steps landed. A successor continues from
-section 6.
+Status: **S3 landed; R open.** The render thread runs the suite (section 5, s2f-s2k runs) except window-resize-stress-taa, which loses
+the device at its second shrink (open item 1). This file is the design, the work packages in order, the steps landed, the frame rates
+(section 6 "Frame rates") and the open items (section 8). A successor continues from section 8.
 
 ## 1. What still couples the two halves (survey, 2026-11-27)
 
@@ -114,13 +115,16 @@ point (`Scaleform::ReplaySnapshotUi`), with DrawInterface's render-side detours 
 | P | Game-half accessors and thread-identity cleanups: `Snapshot::Building()` for game-half readers; FrameGlobals scope over the whole game half; `SampleEngine` into the capture; `FrameOnlySource`/`FreezeTestAtBegin` without `IsMainThread`; the engine-read window closed at the update's end; `MakeRegistered` at install; the kept rows handed to the render side as copies or views; the fade statics and the per-render fade kick's camera from the ticket | yes | done (snap7/thread-prep, merged), section 6 |
 | U | UI producer record-only (3.5) | yes (record, then replay at once) | done (snap7/thread-ui, merged), section 6 |
 | S1 | CS's game frame in place of Main::DrawFrame for routed updates, game half before the render half, scene pairing (3.2, 3.4), still one thread | yes | done (135f05e48), section 6 |
-| S2 | The render thread (3.3), parking, cross-thread checks, PaceGameUpdate on | - | landed (49aabed95); long runs fail on the casters' race (section 6 "S2") |
-| R | Resize on the render thread (native device Resize, swap chain, target versions) instead of Renderer::RequestWindowResize + Begin | - | not started (TH-j) |
-| I | ImGui on the render thread (Menu::DrawOverlay from RenderFrameEnd; it already is) and the harness (shots and live frames on the render thread) | - | runs on the thread with S2 (menu-ui passes); `ui-writes` not checked |
+| S2 | The render thread (3.3), parking, cross-thread checks, PaceGameUpdate on | - | landed (49aabed95) |
+| S3 | The halves stop sharing DCLF state: steps, the casters' views and boards, the installed frame, first person, scene carry (section 6 "S3") | - | landed; the long runs pass |
+| R | Resize on the render thread (native device Resize, swap chain, target versions) instead of Renderer::RequestWindowResize + Begin | - | partial: the swap chain's mode-change remake takes the window's size (S3 item 8); resize-stress still loses the device (open item 1) |
+| I | ImGui on the render thread (Menu::DrawOverlay from RenderFrameEnd; it already is) and the harness (shots and live frames on the render thread) | - | done: menu-ui passes with `cs-ui-expect ui-writes=0: holds` (s2h); shots work on the thread (every shot config) |
 
 ## 5. Runs
 
-Stage `s7-thread`, Dev-Fast. Build s1a = S1 (135f05e48); s2a = S2 first build; s2b = S2 with the fade and load-hold locks.
+Stage `s7-thread`, Dev-Fast. Build s1a = S1 (135f05e48); s2a = S2 first build; s2b = S2 with the fade and load-hold locks; s2c = 49aabed95.
+S3 builds: s2d = items 1-6; s2e = + portal programs; s2f = + scene carry; s2h = + witness and `latest` fixes; s2i = + draw family mirrors on
+the render side; s2k = + the swap chain remade at the client size; s2l = the decision back in the game half (the final code).
 
 | Config | Label | Build | Result |
 |---|---|---|---|
@@ -133,6 +137,44 @@ Stage `s7-thread`, Dev-Fast. Build s1a = S1 (135f05e48); s2a = S2 first build; s
 | native-vulkan+menu-ui | s7-thread-s2c-native-vulkan-menu-ui | s2c | passed (ImGui on the render thread, every cs-ui-expect holds) |
 | native-vulkan+cadence-drop-cells | s7-thread-s2c-native-vulkan-cadence-drop-cells | s2c | failed: tap error (fatal) 40 s in, frame 2132: "DCLF: occlusion map 0 of frame 1745 was taken for the shadow epoch, which did not draw it" (FrameDriver::OcclusionNeedsEngine, from Skylighting::RenderOcclusion on the render thread); 416 routed / 1340 routed renders before it |
 | native-vulkan+first-person-switch | s7-thread-s2c-native-vulkan-first-person-switch | s2c | failed: the same tap error at frame 3279 (occlusion map 0 of frame 2556), after shots first-1 and third-1; 542 routed updates, 2070 routed renders (about 3.8 renders per update) |
+| native-vulkan+cadence-drop-cells | s7-thread-s2d-nvk-drop-cells | s2d (S3 items 1-6) | failed: graph submission fault 50 s in, "staged upload of 320 bytes ... 'cs.dclf.portal-programs.encoding' is past its 256 bytes" (the portal encoding copied while the game thread's walk resized it); the occlusion tap error is gone |
+| native-vulkan+cadence-drop-cells | s7-thread-s2e-nvk-drop-cells | s2e (+ portal programs in the light set) | failed: step 3, the first shot never read back ("a revision waits for a drawing source's fragment"; the dropped tickets' fragments were lost) |
+| native-vulkan+cadence-drop-cells | s7-thread-s2f-nvk-drop-cells | s2f (+ scene carry) | passed, 3 shots |
+| native-vulkan+first-person-switch | s7-thread-s2f-nvk-fps | s2f | passed, 7 shots |
+| native-vulkan+quick, detect | s7-thread-s2f-nvk-quick-detect | s2f | passed with the shot reference; record game-mutated 0.00 (capture-point 33.2, record-time 121.3, bound-state 4.3, other 14.0 per world frame, all render-owned or captured); frame start 2.01 per world frame (was 0.04): first person's target formats (FirstPersonView.cpp:55) and the view target import (Resources.cpp:1106), both the renderer's own target table, now read in the render half's view start (TH-n); engine render calls 0 |
+| guest+quick | s7-thread-s2f-guest-quick | s2f | passed |
+| native-vulkan+perf-taa | s7-thread-s2f-nvk-perf-taa | s2f | passed; frame rates in section 6 |
+| native-vulkan+perf-dragonsreach, game.uncapped | s7-thread-s2f-nvk-perf-dr | s2f | passed |
+| native-vulkan+update-cap30 / cap240 | s7-thread-s2f-nvk-cap30, -cap240, s2g-nvk-cap30 (first) | s2f | config-error: the configs still set `snapshot.update_rate_cap` (CS_UPDATE_RATE_CAP, removed by S2). Measured with perf-taa and `saved_settings.Advanced={"Update Rate Cap"=N}` instead |
+| native-vulkan+perf-taa, cap 30 | s7-thread-s2g-nvk-cap30 (second) | s2f | passed: rendered 147 fps, game 30 updates/s |
+| native-vulkan+perf-taa, cap 240 | s7-thread-s2g-nvk-cap240 | s2f | crashed: game thread in `PrimaryCull::SampleMembershipWitness` reading a null `FrameGlobals::latest` (the render thread's `Adopt` emptied it for a moment); fixed (S3 item 9) |
+| native-vulkan+perf-taa, cap 240 | s7-thread-s2h-nvk-cap240 | s2h | passed: rendered 156 fps, game 186 updates/s |
+| native-vulkan+native-interior | s7-thread-s2h-native-vulkan-native-interior | s2h | failed vl-exterior's reference (dense fog weather after the coc out; the other three shots matched); passed on rerun s7-thread-s2j-nvk-native-interior (all four references): weather variance |
+| native-vulkan+native-tour | s7-thread-s2h-native-vulkan-native-tour | s2h | passed |
+| native-vulkan+post-effects | s7-thread-s2h-native-vulkan-post-effects | s2h | passed, 13 shots |
+| native-vulkan+shadows-blend | s7-thread-s2h-native-vulkan-shadows-blend | s2h | passed, 7 shots |
+| native-vulkan+llf-local-shadows | s7-thread-s2h-native-vulkan-llf-local-shadows | s2h | passed, 6 shots |
+| native-vulkan+native-river | s7-thread-s2h-native-vulkan-native-river | s2h | passed |
+| native-vulkan+rain | s7-thread-s2h-native-vulkan-rain | s2h | passed |
+| native-vulkan+screen-blood | s7-thread-s2h-native-vulkan-screen-blood | s2h | passed |
+| native-vulkan+upscalers | s7-thread-s2h-native-vulkan-upscalers | s2h | passed (dlss, fsr, taa, xess) |
+| native-vulkan+window-resize-stress-taa | s7-thread-s2h-..., s2i-..., s2j-nvk-resize-taa | s2h, s2i | crashed at the load's held frame once (an engine thread executing null 0.2 s after the render thread started; not reproduced); then device lost at the first shrink, twice: the swap chain remade at its old size after Present's mode change while the window was already smaller |
+| native-vulkan+window-resize-stress-taa | s7-thread-s2k-nvk-resize-taa | s2k (+ remake at the client size) | device lost at the second shrink (after shots start, small0, large0): invalid read at 0x6335000, no buffer near it. Open item 1 |
+| native-vulkan+window-resize-stress-taa on stage nfg (org_integration 0a609eca) | s7-thread-base-nfg-resize-taa | base | device lost 206 frames after world-ready |
+| native-vulkan+window-resize-stress-taa on stage dir (org_integration 1a07653be, single thread) | s7-thread-base-dir-resize-taa | base | passed, 13 shots |
+| native-vulkan+menu-scenes | s7-thread-s2h-native-vulkan-menu-scenes | s2h | passed with shot references |
+| native-vulkan+menu-main, menu-main-load, menu-loading, menu-book, menu-items, menu-lockpick | s7-thread-s2h-native-vulkan-<config> | s2h | all passed |
+| native-vulkan+map | s7-thread-s2h-native-vulkan-map | s2h | crashed 222 frames after world-ready: the game half drained the grass mirror (`ServeDrawFamilies`) while the render side's commit read it; fixed (S3 item 10); passed on s7-thread-s2i-nvk-map |
+| native-vulkan+map-local | s7-thread-s2h-native-vulkan-map-local | s2h | passed |
+| native-vulkan+menu-ui | s7-thread-s2h-native-vulkan-menu-ui | s2h | passed, `ui-writes=0` holds |
+| native-vulkan+facegen | s7-thread-s2h-native-vulkan-facegen | s2h | crashed at the load's held frame (game thread memcpy fault 0.16 s after the render thread started; the build was replaced before it could be symbolized); passed on s7-thread-s2i-nvk-facegen. Open item 2 |
+| native-vulkan+cadence-drop-cells, first-person-switch, quick | s7-thread-s2h-native-vulkan-<config> | s2h | passed |
+| guest+quick, native-d3d12-quick | s7-thread-s2h-guest-quick, s7-thread-s2h-native-d3d12-quick | s2h | passed |
+| native-vulkan+native-interior | s7-thread-s2i-nvk-native-interior | s2i | device lost 30 frames after world-ready; passed on rerun (s2j) |
+| native-vulkan+cadence-drop-cells | s7-thread-s2k-native-vulkan-cadence-drop-cells | s2k | device lost 2 s into Riverwood: the family decision on the render side (S3 item 10), reverted in s2l |
+| native-vulkan+first-person-switch, menu-ui, map-local, upscalers; native-d3d12-quick; guest+quick | s7-thread-s2k-<config> | s2k | all passed |
+| native-vulkan+quick, detect | s7-thread-s2k-nvk-quick-detect | s2k | passed with the shot reference; engine render calls 0 |
+| native-vulkan+cadence-drop-cells (twice), map, quick, native-interior, native-tour | s7-thread-s2l-nvk-<config> | s2l | all passed, with shot references |
 | native-vulkan+quick, detect | s7-thread-s2a-nvk-quick | s2a | crashed 3 frames after world-ready, 0.4 s after the render thread started: both threads in `DCLF::Features::Fades::CountAnimatedRoots` (FadeWriters.cpp, a shared static scratch array; the animated fade batch is prepared by the game half and taken by the render side's commit) |
 
 ## 6. Steps landed
@@ -388,6 +430,81 @@ DCLF state the game half writes and the render side's commit or frame end reads,
 native-vulkan+quick, symbolizing the crash address against `build/Dev-Fast/CommunityShaders.dll` with VS's `llvm-symbolizer`, and
 guarding or handing off the state named. Then: the live-read detector on the render thread, the frame kinds below, R and I, the suite.
 
+### S3: the halves stop sharing DCLF state (successor sub-lead, `snap7/thread` after 64b1a12a1)
+
+Two read-only audits (scene step uses; game-half state the render half also touches) found the casters' race was one of about fifteen.
+The rule applied everywhere: the game half writes its own working state and ends with an immutable copy carried by its ticket or
+light set; the render side reads only the copy it adopted. No lock spans a decision and nothing waits. Fixed, in order of danger:
+
+1. **Scene steps** (`FrameView`). One atomic counter gives every step. The game half's `BeginFrame` takes `gameStep`; the render side's
+   `StepRender(ticketStep, first)` keeps the ticket's step on a first render while the counter still stands there (always in guest and
+   on one thread, so their numbers are unchanged) and otherwise takes the next. `SceneStep()` is the game step on a thread inside native's
+   game half (`FrameView::SetGameHalf`, from `FrameDriver::GameHalfStart` to `GameHalfEnd`) and the render step anywhere else.
+   `NextSceneStep()` is the counter's next value. `StepRepeat` is gone. The occlusion maps' stamp (`capturedFrame`) and the shadow
+   epoch's check now see one step through a render: the game half moving the step between them was the tap error's direct cause.
+   `RenderSerial()` counts renders: the CPU pipeline's visibility restart keys on it (steps now skip the numbers game halves take).
+2. **The casters' DCLF part** (the task). `ShadowViews::Get()` is an instance of its own inside native's game half: it lists the views
+   (engine reads, target prediction) and covers nothing, publishes no renderers and resets nothing in PassCapture. `CaptureSet` copies the
+   list into the light set (`LightSet::boards.views`). At the render half's shadow maps, `Native::AdoptShadowViews` (from
+   `DrawcallLimitFix::BeforeShadowMaps`, native driver renders only) adopts the copy into the render instance, sets this frame's capacity,
+   runs the shadow epochs' `beforeShadowCasters` (`DecideShadowCoverage`, the render side's revision and payload) and covers it
+   (`CoverAdopted`: coverage, renderers, covered-kept reset). The verdict `PrepareLightMaps` makes in the game half leaves out coverage
+   (`ShadowLight::coverageLeft`); `RenderLightNatively` checks the light's views against the render instance. The revision inputs read
+   the render instance's candidates (`ShadowViews::Rendered()`), never the game half's.
+3. **The selection's and shadow cameras' boards.** The light set also carries copies of `LightSelection`'s frame, the sun, light and
+   focus boards and the main camera's portal context (`CasterBoards`). `Native::AdoptedBoards()` returns them on the render owner outside
+   the game half; `LightSelection::Current`, `SunCamera`, `SampleSunCascades`, `SampleSunEntryPlanes`, `LightCamera`, `FocusCamera` and the
+   portal programs' publish read them (keyed by their own step), Light Limit Fix's local shadow views read the adopted list. A frame the
+   engine's skeleton draws (frozen menu capture) adopts no set before its selection. The portal programs' encoding was the second failure
+   (s2d: a 320-byte upload into a 256-byte backing, the game thread's walk resizing the vector the depth commit was copying).
+4. **What the frame start installed** (`FrameView::InstalledFrame`): the publication, tables, lookups, catalog, generation, candidates,
+   light entries, category nodes and claims, copied into the ticket at the game half's end (`FrameTicket::installed`) and adopted at the
+   render half's `BeginFrame`. FrameView's accessors read the game half's members inside the game half, the adopted frame elsewhere,
+   and the members while none is adopted (guest). The held pipeline catalog has a game and a render copy (`HoldCatalog(.., gameHalf)`).
+   The replaced frame retires through the engine lane (it may hold a publication's last reference).
+5. **First person's view start.** New view point `FrameStartGame` (game half): the latch and the skeleton walk go into a ticket part
+   (`TicketPart::FirstPerson`). `FrameStartBeforeCoverage` now runs in the render half's `BeginFrame`, before the coverage: targets,
+   forward targets, the pipelines' resolve and the target import (`ImportViewTarget` adds its graph extension on the render side now).
+   The latch frame is the render step, so `Covered` and the epochs pass on every render of the ticket, repeats included.
+6. **Smaller ones:** the late-pose confirmation is the ticket's (`FrameTicket::latePosesConfirmed`, used by its first depth pass); the
+   sun and paraboloid exclusion slots are atomic (the forward is a compare-exchange, a newer publish wins); the draw families' decisions
+   are atomics; `DrawPipelines::SetFamilyInputs` and `PostInput` share a short lock on the frame input, `familyAsked` is atomic; the render
+   thread leaves the load-screen note (`NoteLoadingScreen`, which also sets the switch events' thread) to the game half; an update the
+   cadence renders nothing for parks the render thread before its game halves run.
+7. **Scene fragments in tickets no render takes.** A routed update's game half takes DCLF's newest posted fragment into its ticket. A
+   ticket the cadence drops, or whose snapshot a newer publish replaces before a render takes it, lost its fragment, and a frame revision
+   that waited for exactly that fragment ("a revision waits for a drawing source's fragment: source 0") never adopted: s2e's first shot
+   (the screenshot copy's registration rides a revision) was never read back. At the publish, `RenderThread::Superseded` hands the old
+   ticket's fragment to the fresh ticket when the fresh one took none (`FrameDriver::TicketSuperseded`, counted as "scenes handed on" on
+   the tickets line). `FrameTicket::sceneHanded` (an atomic exchange) decides whether a render's Begin or the next ticket owns it.
+8. **Swap chain remake** (`NativeDevice::RecreateSwapchain`): after Present reports a mode change it remakes the swap chain at the
+   window's client size, not its recorded size. With the render thread presenting on, the window shrank before the engine's resize reached
+   the render side; Vulkan made the images at the surface's new size while CS recorded the old one, and the present copy wrote past them.
+9. **The frame's engine globals off the render owner.** `FrameView::PostFrameInputs` samples the membership witness from the frame's own
+   capture (`PrimaryCull::SampleMembershipWitness(globals)`), not `FrameGlobals::Current()`, which on the game thread before the game
+   half's scope fell to the render owner's `latest`. `FrameGlobals::Adopt` never leaves `latest` empty while it replaces it (cap240 crash).
+10. **Draw family mirrors.** Native's game half no longer serves the draw families (the grass and tree LOD mirrors' drains): the render
+   half's `BeginFrame` does, before the view starts, for a ticket made by a game half (`FrameTicket::installed`); the render side's commits
+   read the mirrors (map crash). The decision stays in the game half, before the frame values' inputs are taken: moving it to the render
+   half too (s2i/s2k) lost the device intermittently (drop-cells entering Riverwood, native-interior once), since the ticket's sampled
+   inputs were taken under the previous decision. It reads the mirrors' scalar sizes the last render left.
+
+### Frame rates (Dev-Fast, /Od; one sample each)
+
+"Before" is snap7-split's base numbers (Dev-Fast, single thread, where rendered frames equal game updates): perf-taa 139 fps,
+perf-dragonsreach 181 fps. No base worktree was built. "After" is the thread build s2f, `game.uncapped` (perf-taa sets it; added for
+dragonsreach), the update cap at its default 60 unless named; read from the `[Perf]` lines between the marks:
+
+| Config | Rendered | Game updates/s |
+|---|---|---|
+| native-vulkan+perf-taa | 145-147 fps | 60 (one window 44: a hitch) |
+| native-vulkan+perf-dragonsreach | 224 fps | 41-60 (dips below the cap) |
+| perf-taa, cap 30 (s2g) | 147 fps | 30 (one window 10) |
+| perf-taa, cap 240 (s2h) | 156 fps | 186 |
+
+The render rate barely moves with the update rate: the render thread is the long pole in these scenes (TAA at 1080p, Dev-Fast). The
+game update rate dips under its cap in single 5 s windows (44, 41, 10 updates/s); not investigated (open item 6).
+
 ### Frame kinds (how each runs with the render thread)
 
 | Kind | Producer and thread | Render thread |
@@ -419,6 +536,49 @@ guarding or handing off the state named. Then: the live-read detector on the ren
   neither side waits for the other's frame.
 - TH-i. The update-rate cap paces only routed updates while the render thread runs; updates the game thread renders itself (menus,
   the map) are paced by their own Present.
+- TH-k. Scene steps come from one counter; a ticket's first render keeps the ticket's step only when no step was taken since, otherwise
+  it takes the next. Why: unique and growing on each side, guest's numbers unchanged; game-half products are read through the ticket's
+  copies, not by matching steps. Parity-keyed buffers (fade states, tree wind rows) can read a slot two renders old after a skip (open
+  item 4).
+- TH-l. The casters' DCLF part is split: the game half lists the views (engine reads) and the render half decides coverage on its copy.
+  The light's verdict leaves coverage to the render side, so the maps' bookkeeping runs for lights whose views end up uncovered (they
+  cast no shadow that render, as before).
+- TH-m. FrameView's installed publication, tables, lookups, catalog, candidates, light entries and claims are copied per ticket and
+  adopted per render; readers pick by thread (inside native's game half: the game members; elsewhere: the adopted frame). Worker threads
+  read the adopted frame, as they read the render thread's members before.
+- TH-n. First person's view start is split: latch and skeleton walk in the game half (a ticket part), targets, pipelines and the target
+  import in the render half before the coverage. Its renderer target-table reads now count as frame-start reads (2.0 per world frame,
+  render-owned, as TICKET-i). Repeated renders draw first person now (the latch frame is the render's step); before, a repeat skipped it.
+- TH-o. A ticket no render takes hands its scene fragment to the next published ticket only when that one took none; a newer fragment
+  supersedes it. Done at the publish, where the game thread still owns both tickets.
+- TH-p. Draw families' mirrors are drained in the render half for native routed frames (guest: game half); the decision stays in the
+  game half and reads the mirrors' sizes as the last render left them (a word-sized read racing the drain; one update of lag).
+- TH-q. The swap chain remake after a mode change takes the window's client size (all backends).
 - TH-j. R (resize): with TH-b the engine's resize already runs on the render thread (Begin's body, from `WindowResizeToApply`); porting
   it to the native device's Resize and target versions is left for the cleanup step.
 
+## 8. Open items (after S3)
+
+1. **R: window-resize-stress-taa loses the device in the thread build** (s2k: at the second shrink, after shots start, small0, large0;
+   invalid read at a low address no buffer covers). The director's single-thread stage (org_integration 1a07653be) passes it; an older
+   org_integration (0a609eca) also lost the device. S3 item 8 fixed the first failure (swap chain size after a mode change). Next: read the
+   crash markers with `DXVK_DEBUG=hang`-style ORG markers on the native device, and check what the game half captures of the engine's
+   size-dependent state (viewport, render size, the upscaler's RenderSize) while the render thread's Begin applies the resize: the game half
+   may build a ticket for the new size that a render of the old frame versions draws, or the reverse. The resize itself still runs in
+   Renderer::Begin's body on the render thread (TH-j).
+2. **A crash at a load's held frame right after the render thread starts** (facegen s2h, resize-stress s2h; not reproduced on reruns):
+   a game-thread memcpy fault and another thread reading 0x10000000f, 0.16-0.2 s after "render thread: started". Symbolize the next one
+   against the staged build's PDB (`build/Dev-Fast/CommunityShaders.pdb` of the same commit).
+3. **Shared state still touched by both halves** (audit 2026-11-27, not fixed): `FrameView`'s claims state (`drawingStarted`, `stopped`,
+   `installNotes`, written by the game half's `InstallClaims` and the render side's `StopDrawing` at an adoption that stops DCLF, rare);
+   `PassCapture::PublishSet` (the game half's claims reach PassCapture mid-render, atomic); `Toggles::InstallFrame` at the hand-over;
+   `LatePoses` plan keys (raw pointers used as keys only, never dereferenced); `PortalViews::Build` stamps the main context with the render
+   step from Main::Update (it was off by one before too); the scene-thread ahead build reads the sun board's working copy (as before).
+4. **Parity-keyed buffers** (`FadeScene::FadeStatesRead`, `TreeWindScene::WindReadBuffer`): with steps that skip, a render can read
+   the slot two renders old. Key them on `FrameView::RenderSerial` (the shader side picks the write slot from the same frame number).
+5. **update-cap30/240 configs** set `snapshot.update_rate_cap`, whose switch S2 removed: the main checkout's configs and switches.json need
+   the line dropped when this merges (measured here with perf-taa and the saved setting).
+6. **Game update dips** under the cap in single 5 s windows (44, 41, 10 updates/s) while the render thread runs: check the park and
+   PaceGameUpdate waits and the game half's own cost.
+7. **Frame-start reads 2.0 per world frame** (TH-n): pass the first-person target formats and the import's target through the ticket if
+   the director wants the render half's frame start at 0.
