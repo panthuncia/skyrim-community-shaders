@@ -21,6 +21,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Scene.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Schedule.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameData.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/Segments.h"
@@ -80,6 +81,39 @@ namespace DCLF
 
 	// Scene/FrameView/FrameView.cpp. Whether DCLF's first claims are installed. Render thread.
 	bool DrawsWorld();
+
+	namespace
+	{
+		/**
+		 * @brief Render thread, inside a revision's adoption point, after its versions. A resize points the engine's target views at new
+		 * versions and keeps the views, so DCLF's imports of them still name the old images (the shadow mask every colour draw reads:
+		 * black lighting, then garbage once the old memory is reused). Their imports are superseded, so every binding looks them up again.
+		 */
+		void FollowEngineTargetVersions()
+		{
+			namespace Vars = RenderGraph::Frame::Vars;
+			static RenderGraph::Engine::Targets::ShapeTable s_seen{};
+			const auto table = Vars::Adopted(Vars::EngineTargetShapes());
+			if (table == s_seen)
+				return;
+			if (auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)) {
+				auto& textures = GpuTextures::Get();
+				auto& colours = renderer->GetRuntimeData().renderTargets;
+				for (std::size_t i = 0; i < std::size(colours) && i < table.colours.size(); ++i)
+					if (!(table.colours[i] == s_seen.colours[i])) {
+						textures.NoteViewChanged(colours[i].SRV);
+						textures.NoteViewChanged(colours[i].SRVCopy);
+					}
+				auto& depths = renderer->GetDepthStencilData().depthStencils;
+				for (std::size_t i = 0; i < std::size(depths) && i < table.depths.size(); ++i)
+					if (!(table.depths[i] == s_seen.depths[i])) {
+						textures.NoteViewChanged(depths[i].depthSRV);
+						textures.NoteViewChanged(depths[i].stencilSRV);
+					}
+			}
+			s_seen = table;
+		}
+	}
 
 	void RegisterSceneSource()
 	{
@@ -157,6 +191,7 @@ namespace DCLF
 		source.drawsWorld = [] { return DrawsWorld(); };
 		source.epochFailed = [](std::string_view a_label, std::string_view a_error) { DrawcallLimitFix::OnGraphEpochFailed(a_label, std::string(a_error)); };
 		s_sceneSource = Revision::RegisterFragmentSource(std::move(source));
+		Revision::OnVersionsAdopted([] { FollowEngineTargetVersions(); });
 	}
 
 	namespace

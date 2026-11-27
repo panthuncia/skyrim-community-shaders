@@ -1320,14 +1320,14 @@ namespace DCLF
 		return complete;
 	}
 
-	void GpuTextures::NoteWindowChanged(const ID3D11ShaderResourceView* a_shell)
+	void GpuTextures::NoteViewChanged(const ID3D11ShaderResourceView* a_view)
 	{
 		const auto published = impl->importer->published.load(std::memory_order_acquire);
 		if (!published || !published->registry)
 			return;
 		auto& registry = *published->registry;
 		std::scoped_lock lock(registry.mutex);
-		if (const auto found = registry.entries.find(const_cast<ID3D11ShaderResourceView*>(a_shell)); found != registry.entries.end())
+		if (const auto found = registry.entries.find(const_cast<ID3D11ShaderResourceView*>(a_view)); found != registry.entries.end())
 			if (const auto entry = found->second.live.lock())
 				Impl::Supersede(registry, *entry);
 	}

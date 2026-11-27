@@ -150,6 +150,12 @@ namespace DCLF::Scene
 			const std::uint32_t textureGeneration = GpuTextures::Get().Generation();
 			bool sweep = textureGeneration != sb.textureGenerationSeen;
 			sb.textureGenerationSeen = textureGeneration;
+			// The shadow mask's view names a new image after a resize (GpuTextures::NoteViewChanged), so its import was superseded.
+			{
+				std::vector<ID3D11ShaderResourceView*> moved;
+				const bool complete = GpuTextures::Get().RelocatedViews(sb.relocationCursor, moved);
+				sweep |= !complete || (frameMask && std::ranges::find(moved, frameMask) != moved.end());
+			}
 			const std::size_t rowsSeen = sb.techniqueSeen.size();
 			sb.techniqueSeen.resize(tables.techniqueConstants.size(), 0);
 			for (std::size_t r = 0; r < tables.techniqueConstants.size(); ++r) {
@@ -169,7 +175,8 @@ namespace DCLF::Scene
 				const auto& technique = tables.TechniqueOf(a_slot).value;
 				auto* view = technique.shadowMask ? technique.shadowMaskTexture : nullptr;
 				const auto& entry = lookups.pipelines[a_slot];
-				return mask.settled && mask.wanted == technique.shadowMask && entry.shadowMaskView == view && entry.shadowMaskTextureGeneration == textureGeneration;
+				return mask.settled && mask.wanted == technique.shadowMask && entry.shadowMaskView == view && entry.shadowMaskTextureGeneration == textureGeneration &&
+				       !GpuTextures::Superseded(entry.shadowMaskOwner.get());
 			};
 			auto resolve = [&](std::uint32_t a_slot) {
 				if (a_slot >= tables.pipelines.size() || !tables.PipelineUsed(a_slot) || !tables.TechniqueConstantsValid(a_slot))
@@ -305,7 +312,8 @@ namespace DCLF::Scene
 		const bool wanted = technique.shadowMask;
 		auto* view = wanted ? technique.shadowMaskTexture : nullptr;
 		const std::uint32_t textureGeneration = GpuTextures::Get().Generation();
-		if (mask.wanted == wanted && entry.shadowMaskView == view && entry.shadowMaskTextureGeneration == textureGeneration && mask.settled)
+		if (mask.wanted == wanted && entry.shadowMaskView == view && entry.shadowMaskTextureGeneration == textureGeneration && mask.settled &&
+			!GpuTextures::Superseded(entry.shadowMaskOwner.get()))
 			return false;
 		GpuTextures::Binding binding{ Lookups::kNone, {} };
 		if (wanted && view) {
@@ -319,8 +327,16 @@ namespace DCLF::Scene
 			else
 				binding.pending = true;
 		}
+		// A superseded import names an image the view no longer has (a resize's old version, which may be freed), so the members read
+		// the null descriptor until the new import arrives.
+		const bool superseded = GpuTextures::Superseded(entry.shadowMaskOwner.get());
+		if (binding.pending && superseded && sb.fixed) {
+			binding = sb.fixed->null;
+			binding.pending = true;
+		}
 		// Held while the new view is asked for, since the set's members draw with it.
-		if (binding.pending && entry.shadowMaskOwner && entry.shadowMaskIndex != Lookups::kNone && entry.shadowMaskTextureGeneration == textureGeneration) {
+		if (binding.pending && !superseded && entry.shadowMaskOwner && entry.shadowMaskIndex != Lookups::kNone &&
+			entry.shadowMaskTextureGeneration == textureGeneration) {
 			++sb.stats.masksHeld;
 			return true;
 		}
