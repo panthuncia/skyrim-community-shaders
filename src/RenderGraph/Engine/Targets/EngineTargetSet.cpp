@@ -989,9 +989,12 @@ namespace RenderGraph::Engine::Targets
 
 		std::uint32_t IniInteger(const char* a_name)
 		{
-			RE::Setting* found = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection) ? CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection)->GetSetting(a_name) : nullptr;
-			if (!found && CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
-				found = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection)->GetSetting(a_name);
+			auto* const settings = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniSettingCollection);
+			RE::Setting* found = settings ? settings->GetSetting(a_name) : nullptr;
+			if (!found) {
+				if (auto* const prefs = CS_ENGINE_READ(Ini, RecordTime, globals::game::iniPrefSettingCollection))
+					found = prefs->GetSetting(a_name);
+			}
 			return found ? static_cast<std::uint32_t>((std::max)(found->GetInteger(), 0)) : 0u;
 		}
 

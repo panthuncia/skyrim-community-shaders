@@ -677,7 +677,6 @@ namespace RenderGraph::Engine::OcclusionQueries
 		auto& entry = globals.slots[a_slot];
 		slot = a_slot;
 		entry.graph = true;
-		entry.begun = true;
 		entry.ready = false;
 		entry.taken = false;
 		entry.tag = a_tag;

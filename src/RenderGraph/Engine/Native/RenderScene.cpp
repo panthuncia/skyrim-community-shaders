@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/LightLimitFix.h"
+#include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
@@ -39,89 +40,63 @@ namespace RenderGraph::Engine::Native::Scene
 		constexpr std::size_t kWorldTranslate = 0xA0;
 		constexpr std::size_t kCameraFrustum = 0x150;  // NiCamera::viewFrustum
 
-		template <class T>
-		T& Global(std::uint64_t a_se, std::uint64_t a_ae)
-		{
-			return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
-		}
-
-		template <class T>
-		T& Field(void* a_object, std::size_t a_offset)
-		{
-			return *reinterpret_cast<T*>(static_cast<std::byte*>(a_object) + a_offset);
-		}
+		using Access::Field;
+		using Access::Global;
 
 		std::uint32_t& Flags(RE::NiAVObject* a_object) { return Field<std::uint32_t>(a_object, kObjectFlags); }
 
 		std::uintptr_t PlayerView() { return REL::RelocationID(35560, 36559).address(); }
 
+		/** @brief What a point's CALL is meant to lead to. */
+		enum class PointTarget : bool
+		{
+			Hook,    // CS's hook chain at the call site
+			Engine,  // the engine's function, which CS detours inside (its prologue)
+		};
+
 		/**
 		* @brief A call of Main::RenderPlayerView (SE offset, AE offset): the function its CALL leads to, past the engine-render detector's
 		* stub. Each is CS's hook chain in native, which enters no engine function. A point still leading to the engine's own function (a
-		* feature that did not hook it) is logged once: the engine's function then runs, as it did inside RenderPlayerView.
+		* feature that did not hook it) is logged once: the engine's function then runs, as it did inside RenderPlayerView. A point marked
+		* PointTarget::Engine is meant to call the engine's function and is not logged.
 		*/
 		template <class F>
-		F Point(std::uint32_t a_se, std::uint32_t a_ae, const char* a_what)
+		F Point(std::uint32_t a_se, std::uint32_t a_ae, const char* a_what, PointTarget a_expected = PointTarget::Hook)
 		{
 			const auto target = EngineZones::CallTarget(PlayerView() + REL::Relocate(a_se, a_ae));
 			const auto text = REL::Module::get().segment(REL::Segment::textx);
-			if (target >= text.address() && target < text.address() + text.size()) {
+			if (a_expected == PointTarget::Hook && target >= text.address() && target < text.address() + text.size()) {
 				static Util::ReasonLog log("[ORG native] skeleton: a point of Main::RenderPlayerView is not hooked, so the engine's function runs");
 				log.Report(a_what);
 			}
 			return reinterpret_cast<F>(target);
 		}
 
-		/** @brief Fatal unless a_site is a CALL rel32 to a_target. */
-		void RequireCall(const char* a_what, std::uintptr_t a_site, std::uintptr_t a_target)
+		/**
+		* @brief The game-side reads RenderScene and RenderPlayerView decide their branches with, into a_frame's firstPerson,
+		* controlDriven and menuMode. Returns the first-person root. Main thread.
+		*/
+		RE::NiAVObject* ReadBranches(RE::PlayerCharacter& a_player, const Snapshot::FrameSnapshot& a_snapshot, Prepared& a_frame)
 		{
-			const auto* bytes = reinterpret_cast<const std::uint8_t*>(a_site);
-			std::int32_t relative = 0;
-			std::memcpy(&relative, bytes + 1, sizeof(relative));
-			if (bytes[0] != 0xE8 || a_site + 5 + relative != a_target)
-				RenderGraph::Fatal("native frame skeleton", fmt::format("{} at {:#x} is not the engine's call; another plugin may have patched it", a_what, a_site));
-		}
-
-		/** @brief A clear the skeleton did not take: nothing else makes it in native. Logged once per what. */
-		void Untaken(bool a_taken, const char* a_what)
-		{
-			if (a_taken)
-				return;
-			static Util::ReasonLog log("[ORG native] skeleton: a clear before RenderWorld was not taken by the skeleton; it is not made");
-			log.Report(a_what);
-		}
-
-		/** @brief The game-side reads RenderScene and RenderPlayerView decide their branches with. Main thread. */
-		struct Branches
-		{
-			RE::NiAVObject* firstPersonRoot = nullptr;
-			bool firstPerson = false;    // the first-person view is drawn
-			bool controlDriven = false;  // the movement controller's vfunc +0x78: RenderDepth's and RenderFirstPersonView's second argument
-			bool menuMode = false;       // UI +0x160 above 0: RenderWorld's and RenderFirstPersonView's first argument
-		};
-
-		Branches ReadBranches(RE::PlayerCharacter& a_player, const Snapshot::FrameSnapshot& a_snapshot)
-		{
-			Branches b;
 			auto* ui = RE::UI::GetSingleton();
 			const auto* strings = RE::InterfaceStrings::GetSingleton();
 			// RenderScene's test (AE 82074): the main menu is open.
 			const bool mainMenu = ui && strings && ui->IsMenuOpen(strings->mainMenu.c_str());
-			b.firstPersonRoot = a_player.Get3D1(true);
+			auto* firstPersonRoot = a_player.Get3D1(true);
 			// RenderPlayerView's: the first-person root shown, no main menu, and the camera not in its free state. The root's bit comes
 			// from the snapshot, taken before the water update that native runs in the capture (it hides the root in first person).
 			const auto* camera = RE::PlayerCamera::GetSingleton();
 			const bool freeCamera = camera && camera->currentState.get() == camera->GetRuntimeData().cameraStates[RE::CameraStates::kFree].get();
-			b.firstPerson = b.firstPersonRoot && a_snapshot.firstPersonShown && !mainMenu && !freeCamera;
+			a_frame.firstPerson = firstPersonRoot && a_snapshot.firstPersonShown && !mainMenu && !freeCamera;
 			// Actor::GetMovementController (SE 36776, AE 37792), then the controller's vfunc +0x78.
 			using GetController = void** (*)(RE::Actor*);
 			static REL::Relocation<GetController> getController{ REL::RelocationID(36776, 37792) };
 			if (void** controller = getController(&a_player); controller && *controller) {
 				using Driven = bool (*)(void*);
-				b.controlDriven = (*reinterpret_cast<Driven**>(*controller))[0x78 / sizeof(void*)](*controller);
+				a_frame.controlDriven = (*reinterpret_cast<Driven**>(*controller))[0x78 / sizeof(void*)](*controller);
 			}
-			b.menuMode = ui && Field<std::int32_t>(ui, 0x160) != 0;
-			return b;
+			a_frame.menuMode = ui && Field<std::int32_t>(ui, 0x160) != 0;
+			return firstPersonRoot;
 		}
 
 		/**
@@ -214,13 +189,14 @@ namespace RenderGraph::Engine::Native::Scene
 		*/
 		void ClearWorldTargets(const Prepared& a_frame)
 		{
+			static Access::UntakenLog untaken("[ORG native] skeleton: a clear before RenderWorld was not taken by the skeleton; it is not made");
 			const float normals[4]{ a_frame.normalsClear, a_frame.normalsClear, 0.0f, 0.0f };
-			Untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(a_frame.normalsTarget), normals), "the normals target");
+			untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(a_frame.normalsTarget), normals), "the normals target");
 			const float main[4]{ a_frame.mainClear[0], a_frame.mainClear[1], a_frame.mainClear[2], 1.0f };
-			Untaken(Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN, main), "kMAIN");
+			untaken(Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN, main), "kMAIN");
 			if (a_frame.snowClear) {
 				constexpr float zero[4]{};
-				Untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(0x70), zero), "the snow target");
+				untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(0x70), zero), "the snow target");
 			}
 		}
 
@@ -250,8 +226,9 @@ namespace RenderGraph::Engine::Native::Scene
 		* list processes' camera, the queued lights and the shadow casters with the first-person root and the sky node hidden, the
 		* first-person shift with its camera taken, the sky colours, the first-person port, the shift back, and Main::Draw's tail. The shadow
 		* casters' point is game-side work (the selection, the light cameras and the maps' bookkeeping) and hands the render half the light
-		* set. SetupSunAndSky still runs here because its game work and its recording are not split yet (DCLF's frame start, which takes the
-		* first-person rows before the shift, and the water render point). The other points are the render half's.
+		* set. The SetupSunAndSky point (+0xD3) runs here for DCLF's game-side frame start, which makes the ticket and takes the first-person
+		* rows before the shift, and for the sky result. In a routed update the render half draws the ticket and the queued water work. The
+		* other points are the render half's.
 		*/
 		Prepared PrepareFrame(RE::Main* a_main, RE::PlayerCharacter& a_player, RE::NiCamera* a_camera, const Snapshot::FrameSnapshot& a_snapshot)
 		{
@@ -262,21 +239,18 @@ namespace RenderGraph::Engine::Native::Scene
 			p.camera = a_camera;
 			// The reflections' camera (SE 528353, AE 415299): the radial blur modifier's projection reads it on the game side (AE 107753).
 			Global<RE::NiCamera*>(528353, 415299) = a_camera;
-			const auto b = ReadBranches(a_player, a_snapshot);
-			p.firstPerson = b.firstPerson;
-			p.controlDriven = b.controlDriven;
-			p.menuMode = b.menuMode;
+			auto* const firstPersonRoot = ReadBranches(a_player, a_snapshot, p);
 			SetListProcessCameras(a_camera);
-			// +0xD3, Main::SetupSunAndSky: DCLF's frame start and the water render point. Its result (the capture's) holds the node the
-			// shadow casters skip in first person.
+			// +0xD3, Main::SetupSunAndSky: DCLF's frame start (the ticket). Its result (the capture's) holds the node the shadow casters
+			// skip in first person.
 			const auto sky = Point<std::uintptr_t (*)(RE::Main*)>(0xD3, 0xD3, "SetupSunAndSky")(a_main);
 			if (t_routedGameHalf)
 				p.sceneTicket = globals::features::drawcallLimitFix.NativeGameTicket();
-			if (b.firstPersonRoot)
-				Flags(b.firstPersonRoot) |= kHidden;
-			ProcessQueuedLights(b.firstPersonRoot);
+			if (firstPersonRoot)
+				Flags(firstPersonRoot) |= kHidden;
+			ProcessQueuedLights(firstPersonRoot);
 			// +0x1C4, the shadow casters, with the sky result's node hidden in first person.
-			RE::NiAVObject* skipped = b.firstPerson && sky ? Field<RE::NiAVObject*>(reinterpret_cast<void*>(sky), 0x18) : nullptr;
+			RE::NiAVObject* skipped = p.firstPerson && sky ? Field<RE::NiAVObject*>(reinterpret_cast<void*>(sky), 0x18) : nullptr;
 			const bool skippedHidden = skipped && (Flags(skipped) & kHidden);
 			if (skipped)
 				Flags(skipped) |= kHidden;
@@ -288,7 +262,7 @@ namespace RenderGraph::Engine::Native::Scene
 			if (globals::features::lightLimitFix.loaded)
 				p.pointLights = globals::features::lightLimitFix.CaptureLights();
 			// The first-person depth epoch takes the camera the shift placed, before the port below (as RenderDepth saw it).
-			if (b.firstPerson) {
+			if (p.firstPerson) {
 				ShiftFirstPerson(a_player, false);
 				p.firstPersonCamera = TakeFirstPersonCamera();
 			}
@@ -300,8 +274,8 @@ namespace RenderGraph::Engine::Native::Scene
 			p.normalsTarget = WorldPass::EngineNormalsTarget();
 			p.mainClear = Global<const std::array<float, 3>>(527696, 414618);
 			p.snowClear = Global<const bool>(513332, 391105);
-			if (b.firstPerson) {
-				Flags(b.firstPersonRoot) &= ~kHidden;
+			if (p.firstPerson) {
+				Flags(firstPersonRoot) &= ~kHidden;
 				ShiftFirstPerson(a_player, true);
 			}
 			// The end-of-frame ImageSpace (SE 527654 / AE 414573 and gEnableEOFImageSpace SE 513299 / AE 391055).
@@ -373,7 +347,7 @@ namespace RenderGraph::Engine::Native::Scene
 				return;
 			// +0xA4C, the compute SAO: the engine's function, whose dispatches ImageSpace takes as steps.
 			if (a_frame.saoCompute)
-				Point<void (*)(void*, RE::NiCamera*)>(0xA3E, 0xA4C, "RenderSaoCs")(a_frame.saoHelper, a_camera);
+				Point<void (*)(void*, RE::NiCamera*)>(0xA3E, 0xA4C, "RenderSaoCs", PointTarget::Engine)(a_frame.saoHelper, a_camera);
 			// +0xA54, RenderWorldPostProcess: the post chain's detour runs CS's native body.
 			using PostProcess = void (*)(std::uint32_t);
 			static REL::Relocation<PostProcess> postProcess{ REL::RelocationID(100430, 107148) };
@@ -420,7 +394,7 @@ namespace RenderGraph::Engine::Native::Scene
 		if (REL::Module::IsVR() || !Native::Requested())
 			return;
 		const auto site = REL::RelocationID(35556, 36555).address() + REL::Relocate(0x2DC, 0x4C8);
-		RequireCall("Main::DrawFrame's world call of Main::RenderScene", site, REL::RelocationID(35559, 36558).address());
+		Access::RequireCall("Main::DrawFrame's world call of Main::RenderScene", site, REL::RelocationID(35559, 36558).address(), "native frame skeleton");
 		stl::write_thunk_call<DrawFrame_RenderScene>(site);
 		installed = true;
 		logger::info("[ORG native] frame skeleton: Main::DrawFrame's world branch runs CS's driver; Main::RenderScene and Main::RenderPlayerView are not entered");

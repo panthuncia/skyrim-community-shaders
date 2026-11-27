@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix.h"
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
+#include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "Snapshot/EngineReads.h"
@@ -24,31 +25,14 @@
 
 namespace RenderGraph::Engine::Native
 {
-	namespace
-	{
-		template <class T>
-		T& DepthGlobal(std::uint64_t a_se, std::uint64_t a_ae)
-		{
-			return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
-		}
-
-		/** @brief A clear or copy the skeleton did not take: nothing else makes it in native. Logged once per what. */
-		void DepthUntaken(bool a_taken, const char* a_what)
-		{
-			if (a_taken)
-				return;
-			static Util::ReasonLog log("[ORG native] RenderDepth: the skeleton did not take the depth pass's clear or copy; it is not made");
-			log.Report(a_what);
-		}
-	}
-
 	void RenderDepth(bool a_firstPerson, bool a_controlDriven)
 	{
 		ZoneScopedN("CS.Native.RenderDepth");
 		globals::state->BeginPerfEvent("Depth");
 		const WorldPass::RenderDepthScope depthPass;
+		static Access::UntakenLog untaken("[ORG native] RenderDepth: the skeleton did not take the depth pass's clear or copy; it is not made");
 		// SetCurrentDepthStencilTarget(kMAIN, SRTM_CLEAR): the depth and stencil clear, which the Z-prepass epoch hosts.
-		DepthUntaken(Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL), "the main depth's clear");
+		untaken(Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL), "the main depth's clear");
 		// StartAccumulating(world camera, depth accumulator, 0x21), ClearItemsList and RenderFirstPersonView_End are not called: nothing
 		// registers into the depth accumulator in native, so its pre-resolve draws nothing. Then DCLF's point after the world's depth draws.
 		globals::features::drawcallLimitFix.DepthPassDrawn();
@@ -61,7 +45,7 @@ namespace RenderGraph::Engine::Native
 				DCLF::Features::FirstPerson::DepthDrawPoint(a_controlDriven);
 		}
 		// CopyResource(kPOST_ZPREPASS_COPY, the main depth).
-		DepthUntaken(Skeleton::CopyDepthPassDepth(), "the depth copy");
+		untaken(Skeleton::CopyDepthPassDepth(), "the depth copy");
 		// The shadow state RenderDepth leaves (the main depth bound, its viewport, no colour target, the depth and raster modes) is not
 		// written: nothing after reads it in native (the masks, the precipitation and RenderWorld set their own or read CS's frame).
 		globals::state->EndPerfEvent();
@@ -70,15 +54,15 @@ namespace RenderGraph::Engine::Native
 	void RenderShadowMasks()
 	{
 		// The scene's shadows (SE 513204 / AE 390933), else a caster kept last frame (SE 528090 / AE 415035), runs the call's body.
-		const bool sceneShadows = DepthGlobal<bool>(513204, 390933);
-		if (!sceneShadows && DepthGlobal<std::int32_t>(528090, 415035) <= 0)
+		const bool sceneShadows = Access::Global<bool>(513204, 390933);
+		if (!sceneShadows && Access::Global<std::int32_t>(528090, 415035) <= 0)
 			return;
 		ZoneScopedN("CS.Native.RenderShadowMasks");
 		globals::state->BeginPerfEvent("Shadowmasks");
 		// The masks draw only with the scene's shadows on. Renderer::SetClearColor(r, 0, 0, 0): r is 0 with the sun's shadows off
 		// (SE 528095 / AE 415040), else 1.
 		if (sceneShadows) {
-			const float clear[4]{ DepthGlobal<bool>(528095, 415040) ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
+			const float clear[4]{ Access::Global<bool>(528095, 415040) ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
 			DCLF::Features::ShadowMask::DrawWorldMasks(clear);
 		}
 		// Not written: the shadow state the masks leave (kSHADOW_MASK bound, no depth target) and the current camera, which nothing

@@ -119,12 +119,6 @@ namespace NativePost
 		return globals;
 	}
 
-	template <class T>
-	T* At(std::uint64_t a_se, std::uint64_t a_ae, std::ptrdiff_t a_offset = 0)
-	{
-		return reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address() + a_offset);
-	}
-
 	void ResolveGlobals()
 	{
 		auto& g = G();
@@ -290,7 +284,6 @@ namespace NativePost
 		std::uint32_t taaResets = 0, taaResetsApplied = 0;
 		std::uint64_t taaResetFrame = UINT64_MAX;
 		bool taaResetNow = false;
-		std::uint32_t saveShotsDone = 0;  // the snapshot's save screenshot count the end-of-frame effects copied last (native)
 		// Native: Main::RenderWorld's camera test for the full-screen blur, kept by CS per render (StepBlurCamera).
 		std::array<float, 3> blurRotation{}, blurPosition{};
 		bool blurMoved = false;
@@ -306,7 +299,10 @@ namespace NativePost
 	*/
 	void StepBlurCamera(const Snapshot::CameraView* a_camera, bool a_gate);
 
-	/** @brief Runtime::saveShotsDone for the capture (Screenshots.inl). Written by the render side, read on the game thread. */
+	/**
+	* @brief The snapshot's save screenshot count the end-of-frame effects copied last (native). Written by the render side, read by the
+	* render side's due test and the capture on the game thread (Screenshots.inl).
+	*/
 	std::atomic<std::uint32_t> g_saveShotsDone{ 0 };
 
 	Runtime& R()
@@ -467,8 +463,7 @@ namespace NativePost
 	{
 		if (!RenderGraph::Engine::Native::Requested())
 			return nullptr;
-		const auto& snapshot = Snapshot::Current();
-		return snapshot ? snapshot->Block<Block>() : nullptr;
+		return Snapshot::CurrentBlock<Block>();
 	}
 
 	/** @brief The snapshot's main camera, in native mode. A world frame without one is fatal. */
@@ -509,7 +504,7 @@ namespace NativePost
 		// snapshot's count is ahead of the last copy.
 		if (block) {
 			r.state.resetPending = false;
-			f.screenshot = block->saveShots != r.saveShotsDone;
+			f.screenshot = block->saveShots != g_saveShotsDone.load(std::memory_order_relaxed);
 		}
 		if (Frame::Driver::Current().frame % 300 == 0)
 			logger::info("[ORG] native post chain: {} steps staged natively; native frames hdr {} eof {} composites {} post {}, "
@@ -1749,7 +1744,6 @@ namespace NativePost
 		if (!route.direct && f.screenshot) {
 			// Native mode reports the copy back; the capture completes the request on the game thread (Screenshots.inl).
 			if (const auto* block = NativeBlock()) {
-				r.saveShotsDone = block->saveShots;
 				g_saveShotsDone.store(block->saveShots, std::memory_order_release);
 			} else {
 				Field<bool>(base, 0x211) = false;

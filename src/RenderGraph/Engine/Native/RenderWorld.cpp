@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "Features/ViewAtmosphere.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "Snapshot/Publication.h"
@@ -26,19 +27,13 @@ namespace RenderGraph::Engine::Native
 {
 	namespace
 	{
-		template <class T>
-		T& Global(std::uint64_t a_se, std::uint64_t a_ae)
-		{
-			return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
-		}
+		using Access::Global;
 
-		/** @brief A clear or copy the skeleton did not take: nothing else makes it in native. Logged once per what. */
-		void Untaken(bool a_taken, const char* a_what)
+		/** @brief The resolve functions' clears and copies the skeleton did not take. */
+		Access::UntakenLog& ResolveUntaken()
 		{
-			if (a_taken)
-				return;
-			static Util::ReasonLog log("[ORG native] RenderWorld: the skeleton did not take a resolve function's clear or copy; it is not made");
-			log.Report(a_what);
+			static Access::UntakenLog log("[ORG native] RenderWorld: the skeleton did not take a resolve function's clear or copy; it is not made");
+			return log;
 		}
 
 		/** @brief The pre-resolve (SE 99938, AE 106583) for the main accumulator with render flags a_flags. */
@@ -58,7 +53,7 @@ namespace RenderGraph::Engine::Native
 			// mask epoch wants it: the stencil clear, the mask batch, and TAA's form 1 (the engine's ImageSpaceManager +0x1f0 +0x2c, CS's
 			// WorldPass::TaaForm), which the post chain reads and the water blend's test needs.
 			if (DCLF::Features::Water::Indirect::MaskBatchWanted(a_accumulator->GetRuntimeData()->batchRenderer)) {
-				Untaken(Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_STENCIL), "the water mask's stencil clear");
+				ResolveUntaken()(Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_STENCIL), "the water mask's stencil clear");
 				DCLF::Features::Water::NativeMaskBatch(a_accumulator);
 				WorldPass::SetTaaForm(1);
 			}
@@ -76,7 +71,7 @@ namespace RenderGraph::Engine::Native
 			if (underwater)
 				DCLF::Features::Forward::NativeBlendedDraw(false);
 			// SetRenderTarget(0, kMAIN, SRTM_FORCE_COPY_RESTORE) with kMAIN bound copies it into its copy.
-			Untaken(Skeleton::CopyMain(), "the kMAIN copy");
+			ResolveUntaken()(Skeleton::CopyMain(), "the kMAIN copy");
 			const bool blend = WorldPass::WaterBlendRuns(a_flags);
 			WorldPass::SetRawWater(blend);
 			DCLF::Features::Water::NativeSurfaceBatch(a_accumulator);

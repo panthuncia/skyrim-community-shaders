@@ -66,19 +66,30 @@ namespace RenderGraph::Engine::Native::RenderThread
 	*/
 	void OnPublished();
 
+	/** @brief The producer that parks the render thread, counted by kind in the stats line. */
+	enum class ParkReason : std::uint8_t
+	{
+		DrawFrame,         // Main::DrawFrame
+		LoadingScreen,     // the loading screen's serving loop
+		MovieTick,         // a Bink tick
+		Interface,         // a routed update whose interface the producer draws
+		UnrenderedUpdate,  // an update the render thread does not render
+		Count
+	};
+
 	/**
 	* @brief A producer that renders on its own thread: the render thread finishes its frame and stops until the next routed publish.
-	* Returns at once on the render thread, before it exists, or while parked. a_why names the producer for the counts.
+	* Returns at once on the render thread, before it exists, or while parked. a_reason names the producer for the counts.
 	*/
-	void Park(const char* a_why);
+	void Park(ParkReason a_reason);
 
-	/** @brief Whether the render thread exists and is not parked: the game thread's update-rate cap applies. Any thread. */
 	/**
 	 * @brief Render thread: waits for the GPU work of the render before this one, once per render. DCLF's depth commit calls it:
 	 * without it a render overlapping the one before lost the device (snap7-devloss.md). Elsewhere it returns at once.
 	 */
 	void WaitForLastRender();
 
+	/** @brief Whether the render thread exists and is not parked: the game thread's update-rate cap applies. Any thread. */
 	bool Running();
 
 	/** @brief Whether the calling thread is CS's render thread. */

@@ -2308,6 +2308,16 @@ namespace RenderGraph::Engine::ImageSpace
 			a_shader->PostRender();
 		}
 
+		namespace NativePost
+		{
+			/** @brief The engine global at Address Library id a_se (SE) or a_ae (AE), a_offset bytes in. The NativePost files below share it. */
+			template <class T>
+			T* At(std::uint64_t a_se, std::uint64_t a_ae, std::ptrdiff_t a_offset = 0)
+			{
+				return reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address() + a_offset);
+			}
+		}
+
 #include "RenderGraph/Engine/ImageSpace/LensFlares.inl"
 #include "RenderGraph/Engine/ImageSpace/NativePost.inl"
 #include "RenderGraph/Engine/ImageSpace/Screenshots.inl"

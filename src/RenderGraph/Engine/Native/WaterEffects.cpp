@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionFaces.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Fatal.h"
 #include "Snapshot/Publication.h"
@@ -26,17 +27,8 @@ namespace RenderGraph::Engine::Native::WaterEffects
 
 	namespace
 	{
-		template <class T>
-		T& Global(std::uint64_t a_se, std::uint64_t a_ae)
-		{
-			return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
-		}
-
-		template <class T>
-		T& Field(void* a_base, std::size_t a_offset)
-		{
-			return *reinterpret_cast<T*>(static_cast<std::byte*>(a_base) + a_offset);
-		}
+		using Access::Field;
+		using Access::Global;
 
 		/** @brief Fatal unless a_site holds a_bytes: the patches below assume the engine's own code. */
 		void RequireBytes(const char* a_what, std::uintptr_t a_site, std::initializer_list<std::uint8_t> a_bytes)
@@ -46,16 +38,6 @@ namespace RenderGraph::Engine::Native::WaterEffects
 			for (const auto expected : a_bytes)
 				if (bytes[i++] != expected)
 					RenderGraph::Fatal("native water effects", fmt::format("{} at {:#x} is not the engine's code; another plugin may have patched it", a_what, a_site));
-		}
-
-		/** @brief Fatal unless a_site is a CALL rel32 to a_target. */
-		void RequireCall(const char* a_what, std::uintptr_t a_site, std::uintptr_t a_target)
-		{
-			const auto* bytes = reinterpret_cast<const std::uint8_t*>(a_site);
-			std::int32_t relative = 0;
-			std::memcpy(&relative, bytes + 1, sizeof(relative));
-			if (bytes[0] != 0xE8 || a_site + 5 + relative != a_target)
-				RenderGraph::Fatal("native water effects", fmt::format("{} at {:#x} is not the engine's call; another plugin may have patched it", a_what, a_site));
 		}
 
 		// Engine functions and data (AE 1.6.1170, SE 1.5.97).
@@ -445,7 +427,7 @@ namespace RenderGraph::Engine::Native::WaterEffects
 		{
 			const auto at = REL::RelocationID(35560, 36559).address() + 0x16F;
 			RequireBytes("Main::Draw's call of Main::RenderWaterEffects", at, { 0x49, 0x8B, 0xCC, 0xE8 });
-			RequireCall("Main::Draw's call of Main::RenderWaterEffects", at + 3, REL::RelocationID(35561, 36560).address());
+			Access::RequireCall("Main::Draw's call of Main::RenderWaterEffects", at + 3, REL::RelocationID(35561, 36560).address(), "native water effects");
 			constexpr std::uint8_t kJump[2]{ 0xEB, 0x06 };
 			REL::safe_write(at, kJump, sizeof(kJump));
 		}
@@ -458,7 +440,7 @@ namespace RenderGraph::Engine::Native::WaterEffects
 			RequireBytes("TESWaterReflections::Update's face render call", face, { 0xFF, 0x90, 0xA8, 0x01, 0x00, 0x00 });
 			SKSE::GetTrampoline().write_call<6>(face, reinterpret_cast<std::uintptr_t>(&RecordFace));
 			for (const auto& [offset, id] : { std::pair{ REL::Relocate(0x339, 0x32D), REL::RelocationID(75463, 77249) }, std::pair{ REL::Relocate(0x4D5, 0x493), REL::RelocationID(75464, 77250) } }) {
-				RequireCall("TESWaterReflections::Update's clear colour call", update + offset, id.address());
+				Access::RequireCall("TESWaterReflections::Update's clear colour call", update + offset, id.address(), "native water effects");
 				REL::safe_fill(update + offset, 0x90, 5);
 			}
 		}
@@ -471,10 +453,10 @@ namespace RenderGraph::Engine::Native::WaterEffects
 		SkipEngineCall();
 		const auto update = WaterUpdateId().address();
 		const auto test = update + REL::Relocate(0x592, 0x8D3);
-		RequireCall("TESWaterSystem::Update's water test", test, REL::RelocationID(31398, 32189).address());
+		Access::RequireCall("TESWaterSystem::Update's water test", test, REL::RelocationID(31398, 32189).address(), "native water effects");
 		stl::write_thunk_call<WaterVisible>(test);
 		const auto displacement = update + REL::Relocate(0xA2D, 0xE04);
-		RequireCall("TESWaterSystem::Update's RenderDisplacement call", displacement, REL::RelocationID(31385, 32176).address());
+		Access::RequireCall("TESWaterSystem::Update's RenderDisplacement call", displacement, REL::RelocationID(31385, 32176).address(), "native water effects");
 		stl::write_thunk_call<RenderDisplacement>(displacement);
 		PatchReflectionUpdate();
 		installed = true;
@@ -565,16 +547,16 @@ namespace RenderGraph::Engine::Native::WaterEffects
 		const auto& snapshot = Snapshot::Current();
 		if (!snapshot)
 			return;
-		auto ready = std::make_shared<std::vector<Work>>();
+		std::vector<Work> ready;
 		{
 			std::scoped_lock lock(Pending().mutex);
 			auto& items = Pending().items;
 			while (!items.empty() && items.front().snapshot <= snapshot->id) {
-				ready->push_back(std::move(items.front()));
+				ready.push_back(std::move(items.front()));
 				items.pop_front();
 			}
 		}
-		if (ready->empty())
+		if (ready.empty())
 			return;
 		Counts().rendered.fetch_add(1, std::memory_order_relaxed);
 		// Several updates since the last render point (replaced snapshots): each face as the newest update placed it, the newest update's
@@ -582,7 +564,7 @@ namespace RenderGraph::Engine::Native::WaterEffects
 		auto merged = std::make_shared<Work>();
 		std::array<const Face*, 6> newest{};
 		bool clear = false;
-		for (auto& work : *ready) {
+		for (auto& work : ready) {
 			merged->clearCube |= work.clearCube;
 			clear |= work.displacement.clear;
 			for (const auto& face : work.faces)
