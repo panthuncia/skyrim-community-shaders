@@ -473,6 +473,12 @@
     "run": "1127-180234-post-refs-native-vulkan-sky-native-post-refs-n1-sky",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+taa-water/river": {
+    "sha256": "4137d79530782e8ca748745e8a5f4d53729ffb5835a7cfe5c23fa4725250868f",
+    "size": "1920x1080",
+    "run": "1127-175430-post-refs-native-vulkan-taa-water-post-refs-n1-taaw",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+update-cap240/settled": {
     "sha256": "c364efa82f7bfeca95a0907f3524d5c3cc0cc403d3ed3343d9ac671d01d254bf",
     "size": "1920x1080",
