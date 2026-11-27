@@ -1204,3 +1204,30 @@ pushes until the user is back.
      bring-up log now prints in guest too, and test tasks run earlier in MainTick (both accepted). Proposals P1-P26 go to
      post-cleanup2 (P14/P15 after snap7-devloss2). Full suite on the merge: 24/24 after native-interior's vl-exterior shot
      caught a random foggy weather once; that config now forces clear weather (`fw 81a`) outside.
+
+## 2026-11-27: cleanup pass, second round (post-cleanup2; director accepted)
+
+231. **Cleanup round 2** (`post-cleanup.md`, "Second pass"). Fixes: `CaptureSet` copies `coverageLeft`, so native's
+     render-side coverage re-check runs (the lights it drops were dropped before as "capture failed"; the `Fallback` enum
+     and its log stay); LLF's native shadow fade steps by the game step and SunCamera checks `repeat` only outside the game
+     half; native VL takes the sun cascades from the render set, not raw engine memory; water work (`WaterEffects::Render`)
+     now runs in worlds drawn on Main::DrawFrame too (paused menus over the world, the camera path), which had held the
+     queue until the next routed render. Consolidated: one normals-target rule (`WorldPass::NormalsTargetOf`, from the
+     ImageSpace block, which also gives native's underwater state); the render half's remaining engine reads moved into
+     `Prepared`; one `SaveScreenshotDue()`; `CoreFrame::fullSky` replaces the EHF, DynamicCubemaps, Skylighting and SSS
+     blocks; shared menu-scene refusal and hand helpers, so every menu batch is fatal past its draw limit; fewer per-frame
+     allocations. Skipped with reasons: the display-size reads (P9), the per-half copies (P13, decision 227). Open:
+     Streamline `SimFrameId` repeats when two publishes precede one adoption (for the performance step); P14/P15 after the
+     device loss. Broad suite on the merge 22/22.
+
+## 2026-11-27: the device loss is the resize transition (snap7-devloss2; director accepted)
+
+232. **The render-thread device loss is GPU-side overlap in the resize transition, not a CPU write** (`snap7-devloss2.md`).
+     Without the interim wait window-resize-stress-taa lost the device 11/11; making each render wait on the GPU for the
+     previous one passes, and the loss rate grows with the allowed overlap. Round 1's bisection inside the depth commit was
+     noise. The GPU stops after the stages' new-size builds attach (alias placements given back, frame alias arena blocks
+     freed) and before DCLF adopts its new-size main resources: DCLF draws its old-size scene against new-size stages,
+     decision 94's open item, now frequent. The interim wait stays (DV2-a). The retirement clock counts only host tickets and
+     can pass points whose external work still runs (DV2-b; fixed separately). snap7-devloss3 switches stages and DCLF at
+     the same frame and removes the wait. The D3D12 grey-land shot (1127-114515) looks like zeroed land rows at startup, not
+     this.
