@@ -113,15 +113,22 @@ point (`Scaleform::ReplaySnapshotUi`), with DrawInterface's render-side detours 
 |---|---|---|---|
 | P | Game-half accessors and thread-identity cleanups: `Snapshot::Building()` for game-half readers; FrameGlobals scope over the whole game half; `SampleEngine` into the capture; `FrameOnlySource`/`FreezeTestAtBegin` without `IsMainThread`; the engine-read window closed at the update's end; `MakeRegistered` at install; the kept rows handed to the render side as copies or views; the fade statics and the per-render fade kick's camera from the ticket | yes | done (snap7/thread-prep, merged), section 6 |
 | U | UI producer record-only (3.5) | yes (record, then replay at once) | done (snap7/thread-ui, merged), section 6 |
-| S1 | CS's game frame in place of Main::DrawFrame for routed updates, game half before the render half, scene pairing (3.2, 3.4), still one thread | yes | |
-| S2 | The render thread (3.3), parking, cross-thread checks, PaceGameUpdate on | - | |
+| S1 | CS's game frame in place of Main::DrawFrame for routed updates, game half before the render half, scene pairing (3.2, 3.4), still one thread | yes | done (135f05e48), section 6 |
+| S2 | The render thread (3.3), parking, cross-thread checks, PaceGameUpdate on | - | landed (49aabed95); suite in section 5 |
 | R | Resize on the render thread (native device Resize, swap chain, target versions) instead of Renderer::RequestWindowResize + Begin | - | |
 | I | ImGui on the render thread (Menu::DrawOverlay from RenderFrameEnd; it already is) and the harness (shots and live frames on the render thread) | - | |
 
 ## 5. Runs
 
+Stage `s7-thread`, Dev-Fast. Build s1a = S1 (135f05e48); s2a = S2 first build; s2b = S2 with the fade and load-hold locks.
+
 | Config | Label | Build | Result |
 |---|---|---|---|
+| native-vulkan+quick, detect | s7-thread-s1a-nvk-quick | s1a | passed with the shot reference; routed from snapshot 65 (the first 53 world updates are paused by the load's fade and go through Main::DrawFrame); Main::DrawFrame's own calls (Renderer::Lock in it) 0.33 per world frame = only those unrouted ones; the call-site census still counts CS's hook on Main::Update's call as 1.0 |
+| native-vulkan+cadence-repeat | s7-thread-s1a-nvk-cadence-repeat | s1a | passed, 3 shots |
+| native-vulkan+menu-scenes | s7-thread-s1a-nvk-menu-scenes | s1a | passed with shot references (inventory, journal, loading model, stats, world); 165 routed, 435 on Main::DrawFrame, 2 routed updates whose interface the render half drew (a menu opened by the UI jobs) |
+| native-vulkan+quick, detect | s7-thread-s2b-nvk-quick | s2b | passed with the shot reference, render thread running; render half (record) game-mutated reads 0.00 per world frame, frame end none |
+| native-vulkan+quick, detect | s7-thread-s2a-nvk-quick | s2a | crashed 3 frames after world-ready, 0.4 s after the render thread started: both threads in `DCLF::Features::Fades::CountAnimatedRoots` (FadeWriters.cpp, a shared static scratch array; the animated fade batch is prepared by the game half and taken by the render side's commit) |
 
 ## 6. Steps landed
 
@@ -306,9 +313,99 @@ Runs (Dev-Fast, stage `s7-thui`):
 Every run: 0 GFx calls on the render owner outside DrawInterface. The game's renderer was called for nothing. Skipped:
 native-d3d12 (no ORG, BasicRHI or device change).
 
+### S1: CS's game frame for routed updates (135f05e48, still one thread)
+
+Code: `src/RenderGraph/Engine/Native/RenderThread.{h,cpp}` (game frame, render half, later the thread), `Snapshot/Publication.cpp`
+(`MainUpdate_DrawFrame`: `Build()` without publishing, then `RoutedUpdate` or the old publish + Main::DrawFrame), `Native/RenderScene.*`
+(`PrepareRouted`, `RecordRouted`, `InGameHalf()`, `Prepared::camera`/`sceneTicket`), DCLF `FrameDriver` (game/render ticket split, scene
+pairing), `Revision` (`FragmentSource::take`, `TakePostedFragment`), `Scaleform/Renderer.cpp` (`ProduceUi`, `RecordsUiOnly`, the
+replay's target rule).
+
+- **Routing** (`RenderThread::Routes`, after the capture): native, `Scene::Owns()`, the snapshot is World, not paused, no map, and
+  MenuControls' camera path test (SE 51363 / AE 52210) is off. A menu the update's UI jobs open is caught at DrawInterface's point:
+  `Scaleform::RecordsUiOnly` asks the UI again (th-ui's live check); when it says no, the payload's `interfaceInline` is set and the
+  render half calls the engine's DrawInterface itself on the render owner (per display, as before). S2 parks the render thread and
+  renders that update on the game thread.
+- **Game frame** (`RenderThread::GameFrame`, game thread, in DrawFrame's order): 82085 PreDisplay; `gIsInMenuMode2 = 0`
+  (SE 516934 / AE 403436); the thread's scrap heap mark (66889 / 68150); WorldPtToScreenPt3's camera (50744 / 51639); the driver's
+  game half (`PrepareRouted`: DCLF's frame start makes the ticket only, `SceneGameStart`); the release (66890 / 68151); the TVL flags
+  (528190+528189 / 415135+415134) and target (513720 / 391674) into the payload; FrameJobs (34551 / 35406) and WaitForJobTask(0, 2)
+  (68167 / 69516); the interface (`ProduceUi` or inline); the save screenshot request (35888 / 36859, the frozen branch's 36857/36858
+  are not asked: no menu freezes the background in a routed update); the scene graph's upkeep (74986 / 76748); the render passes'
+  returns (100722 / 107502). Not ported: the debug camera path toggle (52211), an update with the camera path running is unrouted.
+- **The update's order** (`RoutedUpdate`): game frame, `EngineReadWindow::Close`, `SideEffects::AfterRenderHalf` (S1/S2/S4/S7, stage
+  events 5-9), the update ends, `Testing::OnGamePresent` (the steps run at the publish), the publish with the payload. S1 then ran the
+  render half the cadence's number of times on the same thread.
+- **Render half** (`RenderThread::RenderHalf`): Renderer::Lock (75458 / 77243), Begin (CS's detour: claim, adopt,
+  `RenderThread::OnAdopted` names the payload's ticket for DCLF's scene take, resize, menus, OnBegin; then the engine's body and
+  FaceTint's render frame), `RecordRouted` (DCLF's `SceneRenderStart` from the ticket, `WaterEffects::Render`, then the driver's render
+  half), volumetric lighting (99025 / 105676, effect 0x22), the interface (`ReplaySnapshotUi` or the engine's DrawInterface when
+  inline), End (CS's Present hook: `RenderFrameEnd`; `Testing::OnGamePresent` is skipped inside a routed render), Unlock (75459 /
+  77244), then dynamic resolution's scale (508794 / 380760, 75579 / 77385, 75708 / 77517). DrawFrame's other render-state calls before
+  the world (per-frame buffers, the NONE target and depth binds, 77516/77258, 107698/107646) are not made: CS's points bind their own.
+- **The interface without render state** (`Scaleform::ProduceUi`): DrawInterface's loop ported (TLS memory context 0x46, the movie
+  lock 80605/82732, the menu stack lock SE 525557 / AE 412033, PostDisplay from the topmost menu with flag 0x200 up, 107502). Left
+  out: the per-frame buffers, the target/depth binds, ApplyState, the per-menu viewport, VParams = 1 and the closing ISCopy when the bound
+  target is not the framebuffer. `ReplaySnapshotUi` ports the binds' only effect the replay reads: a NONE slot 0 becomes kMAIN. The
+  ISCopy never ran in record-only frames (th-ui: 0 ImageSpace effects inside them), so it is not ported. `ProducerScope` is deleted.
+- **Scene pairing** (3.4 built): `FrameDriver::SceneGameStart` takes the newest posted fragment (`Revision::TakePostedFragment`) into
+  `FrameTicket::scene` and installs its publication's claims (no new fragment: the publication the render side adopted last,
+  `renderAdopted`, set in the source's `afterAdoption`). At the render's Begin the source's `take` callback (`FrameDriver::TakeAtBegin`)
+  hands exactly the expected ticket's fragment, once (`FrameTicket::rendered`); a repeat hands nothing (`FragmentTake::Given` with
+  none); a loading screen's or movie's Begin skips the source (as `mainThreadOnly` did off the main thread); other Begins (guest,
+  native frames on Main::DrawFrame) take the newest and their game half installs what was adopted, as before (`SceneFrameStart`, which
+  keeps TICKET-h's remake for its repeats). A render whose ticket's publication is not the adopted one draws no DCLF work and is not
+  a tap error (`ticketsUnpaired`, on the tickets line). `HoldsScene`, `takes` and `mainThreadOnly` are gone. The game side keeps
+  `gameTicket`; the render side `ticket`, retired through the engine lane when replaced.
+
+### S2: the render thread (49aabed95)
+
+Commit 49aabed95: `RenderThread.cpp` `Loop`,
+`OnPublished`, `Park`, `Running`, `OnRenderThread`, the Main::DrawFrame entry detour (35556 / 36555) that parks; the loading loop
+(`RunLoadingScreen` thunk) and `MovieTickScope` park too. `RoutedUpdate` publishes and returns (`OnPublished` starts the thread at the
+first routed update and wakes it after a park); a routed update whose interface is drawn by the producer parks and renders on the game
+thread. `PaceGameUpdate` runs after a routed update while the render thread runs; `CS_UPDATE_RATE_CAP` is deleted (SwitchRegistry,
+switches.json, update-cap30/240 configs). The cadence test mode on the thread: `drop:N` holds a dropped routed update unpublished
+(its events merge into the next publish), `repeat:N` makes the render thread's Adopt keep a routed snapshot until it rendered N times.
+Cross-thread fixes so far: LoadHold's state under one lock (`HoldLock`); the animated fade batch's hand-off under `stampsLock`, its
+scratch array thread-local.
+
+Status: native quick passes with the thread (s2b). The next crash class to expect is the same kind as the fade batch:
+DCLF state the game half writes and the render side's commit or frame end reads, which one thread never raced. Find them by running
+native-vulkan+quick, symbolizing the crash address against `build/Dev-Fast/CommunityShaders.dll` with VS's `llvm-symbolizer`, and
+guarding or handing off the state named. Then: the live-read detector on the render thread, the frame kinds below, R and I, the suite.
+
+### Frame kinds (how each runs with the render thread)
+
+| Kind | Producer and thread | Render thread |
+|---|---|---|
+| Unpaused world update (routed) | game thread: CS's game frame; render half on the render thread | renders it (and repeats) |
+| Routed update whose UI jobs opened a pausing menu or the map | game thread renders it (interface per display) | parked for it |
+| Menu over world, paused menus (inventory, journal, book, lockpick, menu scenes), map and local map | game thread, Main::DrawFrame (the engine-drawn local map and book pages draw as before, snap5-localmap2's port untouched) | parked at Main::DrawFrame's entry |
+| Main menu | game thread, Main::DrawFrame | parked (never started before the first world update) |
+| Loading screen | serving thread (`RunLoadingScreen`) | parked at the loop's start |
+| Bink | the movie tick's thread | parked at the tick |
+| Main-thread frame outside Main::Update (cell change) | game thread, Main::DrawFrame | parked at its entry |
+
 ## 7. Decided by the agent, to confirm
 
 - TH-a. The render thread draws unpaused world updates only; every other frame stays on its producer with the render thread parked
   (3.1).
 - TH-b. The render thread keeps calling Renderer::Lock/Begin/End (3.3).
 - TH-c. Scene pairing by a fragment the game half takes into the ticket (3.4).
+- TH-d. A routed render whose ticket's fragment was held for a revision in preparation, or dropped, draws no DCLF work for those renders
+  (counted as unpaired) instead of a tap error. Why: the game half cannot know at its take whether the render's revision adopts the
+  fragment alone; the window is a revision's preparation (settings, resize, builds).
+- TH-e. `SideEffects::AfterRenderHalf` (S1/S4, stage events 5-9) runs at the end of the routed game frame, not right after the capture
+  (decision 34's wording). Why: the game half after the capture still reads and writes the scene graph and the UI (DCLF's frame start,
+  the casters, DrawInterface), which the next update's jobs those stages release would race.
+- TH-f. DrawFrame's render-state calls around the world and the interface (per-frame buffers, NONE binds, 77516/77258, 107698/107646)
+  are not made in a routed render; CS's points and the replay bind their own. The quick and menu-scenes shot references pass.
+- TH-g. The debug camera path (52210/52211) is not ported: an update with it running goes through Main::DrawFrame.
+- TH-h. LoadHold and the animated fade hand-off use short locks (held for the entry's work, never across a frame) rather than messages:
+  neither side waits for the other's frame.
+- TH-i. The update-rate cap paces only routed updates while the render thread runs; updates the game thread renders itself (menus,
+  the map) are paced by their own Present.
+- TH-j. R (resize): with TH-b the engine's resize already runs on the render thread (Begin's body, from `WindowResizeToApply`); porting
+  it to the native device's Resize and target versions is left for the cleanup step.
+
