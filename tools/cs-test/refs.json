@@ -119,6 +119,18 @@
     "run": "1126-185705-dir-native-d3d12-quick-dir-s7dk-native-d3d12-quick",
     "accepted": "2026-11-26"
   },
+  "native-vulkan+cadence-drop-cells/riverwood": {
+    "sha256": "bc55c7781febf20e33c0008860ad6749eb6491c4aa8a2c6d7e18adba9e03b54a",
+    "size": "1920x1080",
+    "run": "1127-174517-post-refs-native-vulkan-cadence-drop-cells-post-refs-n1-cdc",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+cadence-drop-cells/whiterun": {
+    "sha256": "809542571bddc86bfb2c3133242b8990858312815bbce179de6d0dddf33ee627",
+    "size": "1920x1080",
+    "run": "1127-174517-post-refs-native-vulkan-cadence-drop-cells-post-refs-n1-cdc",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+cloud-shadows/clouds": {
     "sha256": "c011793ce534ac6efa3b9e1f51a5ebb0b4d81a342214be8ec1f9bb7ec6b1a33b",
     "size": "1920x1080",
