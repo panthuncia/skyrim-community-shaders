@@ -13,6 +13,7 @@
 #include "Features/ViewAtmosphere.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/EngineAccess.h"
+#include "RenderGraph/Engine/Native/RenderScene.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "Snapshot/Publication.h"
@@ -67,7 +68,7 @@ namespace RenderGraph::Engine::Native
 		{
 			const WorldPass::ShiftWindow window;
 			// 2 when the camera is under water (TESWaterSystem's state): the blended draw then comes before the water.
-			const bool underwater = Global<std::int32_t>(513267, 391008) == 2;
+			const bool underwater = WorldPass::Underwater() == 2;
 			if (underwater)
 				DCLF::Features::Forward::NativeBlendedDraw(false);
 			// SetRenderTarget(0, kMAIN, SRTM_FORCE_COPY_RESTORE) with kMAIN bound copies it into its copy.
@@ -100,7 +101,7 @@ namespace RenderGraph::Engine::Native
 		// StartAccumulating's render flags (p0 << 4 | 0x41), RenderWorld's ImageSpace calls, then the post-resolve's flags.
 		PreResolve(accumulator, (a_firstPerson ? 0x10u : 0u) | 0x41u);
 		ImageSpace::RenderWorldImageSpace();
-		PostResolve(accumulator, (Global<bool>(513335, 391110) ? 1u : 0u) | 0x40u);
+		PostResolve(accumulator, (Scene::Current().postResolveFlag ? 1u : 0u) | 0x40u);
 		// The shadow state the resolve functions leave (RT1 and RT2 unbound, slots 3 and 4 in restore mode, the full depth range, the alpha
 		// reference 128/255) is not written: no engine code that reads it runs after in native (the native post chain sets every target).
 		// ClearItemsList and RenderFirstPersonView_End are not called: in native nothing registers into the main accumulator, so its

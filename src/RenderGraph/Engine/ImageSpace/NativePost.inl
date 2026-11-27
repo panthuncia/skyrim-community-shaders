@@ -500,11 +500,10 @@ namespace NativePost
 		for (std::uint32_t t = 0; t < f.sizes.size(); ++t)
 			f.sizes[t] = { g.targets->renderTargetData[t].width, g.targets->renderTargetData[t].height };
 		r.state = EngineState();
-		// Native mode's resets come from the snapshot's count (RunHdr), not the engine's flag. A save's screenshot is due while the
-		// snapshot's count is ahead of the last copy.
+		// Native mode's resets come from the snapshot's count (RunHdr), not the engine's flag.
 		if (block) {
 			r.state.resetPending = false;
-			f.screenshot = block->saveShots != g_saveShotsDone.load(std::memory_order_relaxed);
+			f.screenshot = SaveScreenshotDue();
 		}
 		if (Frame::Driver::Current().frame % 300 == 0)
 			logger::info("[ORG] native post chain: {} steps staged natively; native frames hdr {} eof {} composites {} post {}, "
@@ -981,7 +980,7 @@ namespace NativePost
 			if (a_f.taaMode != 2)
 				a_state.taaParity = 1 - a_state.taaParity;
 			const auto history = static_cast<std::uint16_t>(Frame::Driver::Current().parity & 1u);
-			const auto normals = static_cast<std::uint16_t>(globals::deferred && globals::deferred->forwardRenderTargets[2] == RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK_SWAP);
+			const auto normals = EngineNormalsParity();
 			const auto effect = a_f.taaWater ? E::ISTemporalAA_Water : E::ISTemporalAA;
 			NativeStep taa{ .key = { WorldScope::Taa, effect, static_cast<std::uint16_t>((history << 15) | (normals << 14)) }, .group = ChainGroup::kTaa,
 				.effect = EffectIndex(effect) };

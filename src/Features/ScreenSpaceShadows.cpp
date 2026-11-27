@@ -138,25 +138,9 @@ bool ScreenSpaceShadows::ShouldDraw() const
 	return bendSettings.Enable && SkyFull();
 }
 
-void ScreenSpaceShadows::PostPostLoad()
-{
-	Snapshot::RegisterCapture(&ScreenSpaceShadows::Capture);
-}
-
-void ScreenSpaceShadows::Capture(Snapshot::Builder& a_builder)
-{
-	if (!globals::features::screenSpaceShadows.loaded)
-		return;
-	Block block{};
-	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
-	block.skyFull = sky && sky->mode.get() == RE::Sky::Mode::kFull;
-	a_builder.Set(block);
-}
-
 bool ScreenSpaceShadows::SkyFull()
 {
-	const Block* block = Snapshot::CurrentBlock<Block>();
-	return block && block->skyFull;
+	return Snapshot::Core().fullSky;
 }
 
 ScreenSpaceShadows::Dispatches ScreenSpaceShadows::BuildDispatches(float2 a_screenSize) const

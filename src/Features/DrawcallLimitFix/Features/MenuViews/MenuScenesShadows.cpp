@@ -93,26 +93,18 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		{
 			for (auto* geometry : a_geometry) {
 				std::string detail;
-				const char* why = AddUtility(a_view, *geometry, a_run, detail);
-				if (!why)
-					continue;
-				const char* name = geometry->name.c_str() ? geometry->name.c_str() : "?";
-				if (LeftOut(why)) {
-					if (GetShadowState().leftOut++ == 0)
-						logger::info("[DCLF] menu scenes: {} draw {} is left out of this render: {} ({})", NameOf(a_view.view), name, why, detail);
-					continue;
-				}
-				::RenderGraph::Fatal("menu scenes", std::format("{} draw {}: {} ({})", NameOf(a_view.view), name, why, detail));
+				if (const char* why = AddUtility(a_view, *geometry, a_run, detail))
+					Refuse("menu scenes", NameOf(a_view.view), *geometry, why, detail, GetShadowState().leftOut);
 			}
 		}
 
-		/** @brief Hands a run to its view's client, or keeps its imports alive when the client cannot take it now. */
+		/** @brief Hands a run with draws to its view's client (SceneDraws::Hand); an empty one only keeps its imports alive. */
 		void SubmitRun(std::shared_ptr<Run> a_run)
 		{
-			if (a_run->draws.empty() || !SceneDraws::Available() || !SceneDraws::CanTake(a_run->view))
+			if (a_run->draws.empty())
 				SceneDraws::Keep(std::move(a_run->owners));
 			else
-				SceneDraws::Submit(std::move(a_run));
+				SceneDraws::Hand(std::move(a_run));
 		}
 
 		/**

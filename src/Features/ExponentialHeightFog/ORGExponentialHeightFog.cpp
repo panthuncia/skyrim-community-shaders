@@ -1,4 +1,5 @@
 #include "ORGExponentialHeightFog.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 
@@ -1158,8 +1159,7 @@ bool ORGExponentialHeightFog::Prepass()
 	// IBL's SH and Skylighting's probes are in the client's key (DeclareClient), from the variables.
 
 	// Without the sky the shader skips terrain and cloud shadows, and Cloud Shadows binds nothing.
-	const auto* fogFrame = Snapshot::CurrentBlock<ExponentialHeightFog::Block>();
-	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen || (fogFrame && fogFrame->hideSky);
+	const bool skyless = Util::IsInterior() || globals::state->isMapMenuOpen || Snapshot::Core().hideSky;
 
 	auto& terrainShadows = globals::features::terrainShadows;
 	if (terrainShadows.loaded && !skyless) {

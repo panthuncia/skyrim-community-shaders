@@ -52,6 +52,12 @@ namespace RenderGraph::Engine::ImageSpace
 	const WorldSettings* SnapshotWorld();
 
 	/**
+	* @brief Native mode: whether a save's screenshot is due, that is the snapshot's save screenshot count is ahead of the last copy.
+	* False in guest mode and before the first snapshot. Render owner.
+	*/
+	bool SaveScreenshotDue();
+
+	/**
 	* @brief Native mode: whether this render frame applies a TAA history reset the game asked for (the loading menu's flag, taken in
 	* the snapshot capture). True for one render, the first world render after the snapshot's count moves. False in guest mode.
 	* Render owner.

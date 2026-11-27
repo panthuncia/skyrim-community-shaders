@@ -183,15 +183,15 @@ namespace DCLF::Features::Shadows::Native
 	/**
 	 * @brief Game side, native, once the caster selection kept its lights and DCLF listed their views: each light's shadow maps'
 	 * bookkeeping (ShadowMapsNative), the set, then each light's maps given back (CS's port of ReturnShadowmaps, which the masks' loop
-	 * ran after its draws). The render half takes the set with TakeSet.
+	 * ran after its draws). The render half reads the set with LastSet.
 	 */
 	void CaptureSet();
 
-	/** @brief Game side: CaptureSet's result, which TakeSet hands out until the next. */
+	/** @brief Game side: CaptureSet's result, which LastSet hands out until the next. */
 	void MadeSet(std::shared_ptr<const LightSet> a_set);
 
 	/** @brief The set CaptureSet made last, for the render half. Null before any. */
-	std::shared_ptr<const LightSet> TakeSet();
+	std::shared_ptr<const LightSet> LastSet();
 
 	/** @brief Render side, at the render half's start: the set this frame draws. */
 	void AdoptSet(std::shared_ptr<const LightSet> a_set);

@@ -11,6 +11,7 @@
 #include "Features/CloudShadows/ORGCloudShadows.h"
 #include "Features/TerrainShadows.h"
 #include "Features/TerrainShadows/ORGTerrainShadows.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/VolumetricLighting.h"
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
@@ -473,21 +474,20 @@ namespace
 		transpose(4, Snapshot::FrameCamera::Inverse(a_camera.viewProj));
 		const float n = a_camera.frustum.fNear, f = a_camera.frustum.fFar;
 		const RE::NiPoint3& eye = a_camera.position;
-		if (const auto sun = SunShadowLight()) {
-			const auto count = At<std::uint32_t>(sun, 0x140);
-			const auto split = [&](std::size_t a_offset) {
-				const float s = At<float>(sun, a_offset);
-				return (s * f - f * n) / ((f - n) * s);
-			};
-			rows[17][0] = split(0x5a4);
-			rows[17][1] = split(0x5a8);
+		// The sun's cascades from the frame's light set (the game half took them after the maps' bookkeeping): the count, the cascade
+		// ends (+0x5a4) and each descriptor's light transform.
+		const auto* set = DCLF::Features::Shadows::Native::RenderSet();
+		if (const auto* sun = set && set->sun.light ? &set->sun : nullptr) {
+			const auto count = sun->maps;
+			const auto split = [&](float a_end) { return (a_end * f - f * n) / ((f - n) * a_end); };
+			rows[17][0] = split(sun->end[0]);
+			rows[17][1] = split(sun->end[1]);
 			// The engine indexes its own row: a third cascade reads the row's z, which nothing writes.
 			rows[17][2] = count >= 1 && count <= 3 ? rows[17][count - 1] : 0.0f;
 			rows[17][3] = static_cast<float>(count);
-			const auto descriptors = At<std::uintptr_t>(sun, 0x148);
-			for (std::uint32_t i = 0; i < (std::min)(count, 2u) && descriptors; ++i) {
-				std::array<float, 16> m{};
-				std::memcpy(m.data(), reinterpret_cast<const void*>(descriptors + i * 0xF0), sizeof(m));
+			const auto cascades = (std::min)({ count, 2u, static_cast<std::uint32_t>(sun->descriptors.size()) });
+			for (std::uint32_t i = 0; i < cascades; ++i) {
+				auto m = sun->descriptors[i].lightTransform;
 				for (std::size_t j = 0; j < 4; ++j)
 					m[12 + j] = ((m[12 + j] + eye.x * m[j]) + eye.y * m[4 + j]) + eye.z * m[8 + j];
 				for (std::size_t r = 0; r < 3; ++r)

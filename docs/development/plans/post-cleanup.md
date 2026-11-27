@@ -224,3 +224,69 @@ full suite covers them.
   and Scaleform ports removed; `Snapshot::CurrentBlock`/`StepOnce` are the one way features read a block and step once.
 - Decisions 60 and 219: the Scaleform `GameCall` census is gone; `ReportNativeUi` logs the DrawInterface counts and the
   UI resource stats.
+
+## Second pass (post-cleanup2)
+
+Lead: post-cleanup2, branch `post/cleanup2` from `org_integration` 4f7b26333 (the first pass merged). The director accepted
+the proposals above as the work list. Stayed out of DCLF's main payload commit path, `WaitForLastRender` and FrameValues
+(snap7-devloss2), so P14 and P15 wait. No submodule pointer moved.
+
+### Per proposal
+
+| # | Result | Commit |
+| --- | --- | --- |
+| P1 | Fixed: `CaptureSet` copies `coverageLeft`. The render-side re-check now runs. In cadence-drop-cells the first window after a load counts 52 lights as "views not DCLF's"; before the fix the same lights (37-58 a run) failed later as "capture failed" (CaptureNativeShadowView), so no light that drew before is lost. The `Fallback` enum stays: guest's LightRender needs the reason to call the engine's Render, and the 600-frame line is the only place native's dropped lights show. | 4b41b8efa |
+| P10 | Fixed: native's local shadow fade steps by `Snapshot::GameStep()` (0 on a repeat, summed over dropped snapshots). Guest still reads the engine's delta. | cfd6d7f87 |
+| P11 | Fixed: SunCamera's `RealDelta` checks `Render().repeat` only off the game half (a render owner selection in a frame the engine's skeleton draws). Native's game half runs once per update, so it needs no check. No `GameUpdates()` helper: nothing else needed it. | cfd6d7f87 |
+| P2 | Done: `WorldPass::NormalsTargetOf(ssr, frameCounter)` is the one rule. Native's game half takes the world pass's target from the update's snapshot (ImageSpace block: SSR switch and frame counter), the same values the native post steps use, so the world pass and SSR/SAO/TAA cannot disagree. Native TAA's step key uses `EngineNormalsParity()` instead of Deferred's forward targets. Guest's engine-chain classifier (ChainSteps `ChainKeyOf`) keeps reading what Deferred bound: that is the bound target, not a copy of the rule. | bc1f1dfbf |
+| P3 | Done: RenderWorld's post-resolve flag, the masks' scene shadows / kept casters / sun shadows off, and the water blend test's TAA water history, water height and local map flag are `Prepared` fields taken in the game half. The under water state is `WorldPass::Underwater()`, from the snapshot's ImageSpace inputs (the block the post chain's depth of field already reads). | 00850bc09 |
+| P5 | Done: `ImageSpace::SaveScreenshotDue()`; the frame description (PostChain) took the raw request flag, the native chain the count test. | 172e70590 |
+| P8 | Partly: `CoreFrame::fullSky` added; the Exponential Height Fog, Dynamic Cubemaps, Skylighting and Screen Space Shadows blocks (hide flag or full mode only) and their captures and BlockIds are gone; Cloud Shadows reads `fullSky` from the core. Not done: Effects11's sky fields (its block compares them as one value), TerrainShadows' sun direction (needs a "has sun light" flag the core lacks), WetnessEffects' fullSky (gates its own capture), VolumetricLighting's interior/cellHasSun/screen size. Low value each. | d50c57df8 |
+| P9 | Skipped: the seven live display-size reads are the D3D11 (non-graph) paths (`Prepass`, `DrawSSGI`, `EnsureVolumetricResources`, Border's D3D11 clear, HiZ for grass), Light Limit Fix's `SetupResources` (before any adoption) and two game-thread captures. The graph paths already read `Vars::DisplaySize`. Switching the D3D11 paths changes guest/D3D11 timing for no native gain. | - |
+| P12 | Renamed `TakeSet` to `LastSet`. Not a `TicketPart`: the set is made at the shadow casters' point, after the ticket (SetupSunAndSky, +0xD3), and `Prepared` already hands it to the render half. | bd16ae278 |
+| P13 | Skipped: decision 227 (snap7-thread2) made the per-half copies deliberate (Toggles keep one frame word per half; the halves own their DCLF state). | - |
+| P20 | Done in part: `Native::Refuse` (left-out log or fatal) and `SceneDraws::Hand` (draw limit, take or keep) replace the local map's and the loading model shadows' copies and the colour pass's inline submit. Every batch now checks its draw limit (fatal), as the local map did. The three scene walks and the AddLighting/AddEffect tails stay: they differ in billboard handling and hot-path shape. | c61a72fe3 |
+| P21 | Done: a new UI stream reserves the last stream's command, payload and texture counts; DrawBitmaps' glyph vertices and the local map's visibility walk reuse thread scratch; a declared display read keeps whether it is an engine target, so a commit no longer scans the render targets per read. | f40ece545 |
+| P7 | Done: native VL's generate rows take the sun's count, cascade ends and light transforms from `Shadows::Native::RenderSet()->sun` instead of raw engine memory on the render thread. | 2241aa8a9 |
+
+### Open items from the first pass
+- **WaterEffects in unrouted worlds: a real gap, fixed** (fff6b2ebb). `Render()` ran only with a routed ticket. A world drawn on
+  Main::DrawFrame (paused menus over the world, the camera path) queued water work in each capture and never drew it, so the
+  queue held face and flow-copy data until the next routed render. `RecordFrame` draws it in both paths now.
+- **Streamline `SimFrameId`: recorded, not fixed.** With routed updates two publishes before one adoption take the same id
+  (`LastRenderFrame() + 1`), so Reflex gets two SimulationStart markers for one frame id; the first update's snapshot is never
+  rendered. Deduplicating by id keeps the earlier update's start (latency overstated); keying by game id needs the render side
+  to know which game id each render frame adopts and to map Reflex's frame token to it. Needs a rule from the publish side, with
+  roadmap item 2 (performance), where Reflex pacing is measured.
+- `docs/development/engine/scaleform.md` no longer describes the GameCall census (fe845a42d). Decisions 60 and 219 are history.
+
+### Decided by the agent, to confirm
+- P1: keep the `Fallback` enum and its 600-frame line (guest's fallback needs the reason; the line is native's only view of
+  dropped lights).
+- P2: native's normals target comes from the update's ImageSpace block rather than a separate engine read in the game half.
+- P3: the under water state comes from the ImageSpace block (captured at publication), not a game-half read.
+- P20: every menu batch fails fatally past its draw limit (only the local map did).
+- Water work draws in unrouted world frames (paused menus over the world).
+
+### Runs (stage post-cleanup2, Dev-Fast; all passed)
+
+| config | label | at | note |
+| --- | --- | --- | --- |
+| native-vulkan+quick | post-cleanup2-nvk-quick-1 | bc1f1dfbf | live reads 496/world frame |
+| native-vulkan+cadence-drop-cells | post-cleanup2-nvk-cadence | c61a72fe3 | P1 coverage line above; side effects line present |
+| native-vulkan+llf-local-shadows | post-cleanup2-nvk-llf | fe845a42d | P10 |
+| native-vulkan+update-cap30 | post-cleanup2-nvk-cap30 | fe845a42d | repeats (P10, P11) |
+| native-interior | post-cleanup2-interior | fe845a42d | P7; VL shots look right by eye |
+| native-vulkan+taa-water | post-cleanup2-nvk-taaw | fe845a42d | P2, P3 (water blend, TAA water form) |
+| native-river | post-cleanup2-river | fe845a42d | P2, P3 |
+| native-vulkan+ui-menus | post-cleanup2-nvk-uimenus | fe845a42d | water fix: 427 updates on Main::DrawFrame, 584 water render points for 590 updates |
+| native-vulkan+menu-scenes | post-cleanup2-nvk-menuscenes | fe845a42d | P20 |
+| native-vulkan+map-local | post-cleanup2-nvk-maplocal | fe845a42d | P20, P21 |
+| native-vulkan+menu-loading | post-cleanup2-nvk-menuload | fe845a42d | P20 (loading model shadows) |
+| native-vulkan+save-screenshot | post-cleanup2-nvk-saveshot | fe845a42d | P5 |
+| native-vulkan+shadows-blend | post-cleanup2-nvk-shblend | fe845a42d | P8 (Screen Space Shadows' full sky) |
+| guest+quick | post-cleanup2-guest-quick | fe845a42d | shared feature code (P8, LLF) |
+| native-vulkan+quick | post-cleanup2-nvk-quick-2 | fe845a42d | live reads 478/world frame (496 before) |
+
+Skipped: native-d3d12-quick (no ORG, BasicRHI or device code touched), upscalers (Streamline not changed), the guest parity
+configs (guest code paths unchanged apart from reading the core block's sky flags).

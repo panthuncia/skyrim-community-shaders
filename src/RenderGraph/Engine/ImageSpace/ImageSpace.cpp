@@ -3002,6 +3002,12 @@ namespace RenderGraph::Engine::ImageSpace
 		return block ? &block->inputs : nullptr;
 	}
 
+	bool SaveScreenshotDue()
+	{
+		const auto* block = NativePost::NativeBlock();
+		return block && block->saveShots != NativePost::g_saveShotsDone.load(std::memory_order_relaxed);
+	}
+
 	const WorldSettings* SnapshotWorld()
 	{
 		const auto* block = NativePost::NativeBlock();

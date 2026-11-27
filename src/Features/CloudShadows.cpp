@@ -1,4 +1,5 @@
 #include "CloudShadows.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 
@@ -258,7 +259,6 @@ void CloudShadows::Capture(Snapshot::Builder& a_builder)
 		return;
 	Block block{};
 	if (const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky)) {
-		block.fullSky = sky->mode.get() == RE::Sky::Mode::kFull;
 		block.climate = sky->currentClimate != nullptr;
 		if (const auto* clouds = sky->clouds) {
 			// Slots past numLayers can still hold a previous weather's cloud geometry
@@ -314,7 +314,7 @@ void CloudShadows::ReflectionsPrepass()
 {
 	if (frameChecker.IsNewFrame()) {
 		const Block* frame = Snapshot::CurrentBlock<Block>();
-		if (!frame || !frame->fullSky || !frame->climate)
+		if (!frame || !Snapshot::Core().fullSky || !frame->climate)
 			return;
 
 		auto context = globals::d3d::context;

@@ -161,7 +161,7 @@ namespace DCLF::Features::Shadows::Native
 		made = std::move(a_set);
 	}
 
-	std::shared_ptr<const LightSet> TakeSet()
+	std::shared_ptr<const LightSet> LastSet()
 	{
 		return made;
 	}

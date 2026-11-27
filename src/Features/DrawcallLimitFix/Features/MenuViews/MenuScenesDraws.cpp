@@ -8,6 +8,7 @@
 
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 #include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Fatal.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/EngineReads.h"
 
@@ -524,6 +525,16 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			return false;
 		const auto view = static_cast<std::size_t>(a_run->view);
 		return GetState().clients.Submit(view, std::move(a_run));
+	}
+
+	bool Hand(std::shared_ptr<Run> a_run)
+	{
+		if (a_run->draws.size() > MaxDrawsOf(a_run->view))
+			::RenderGraph::Fatal("menu scenes", std::format("{} draws in the {} batch, past its {}", a_run->draws.size(), NameOf(a_run->view), MaxDrawsOf(a_run->view)));
+		if (Available() && CanTake(a_run->view))
+			return Submit(std::move(a_run));
+		Keep(std::move(a_run->owners));
+		return false;
 	}
 
 	std::string Status()

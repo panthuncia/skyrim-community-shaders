@@ -128,21 +128,6 @@ public:
 	/** @brief Whether the full sky (sun or moon) is up, in the adopted snapshot. */
 	static bool SkyFull();
 
-	/** @brief What the shadows read of the world. */
-	struct Block
-	{
-		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::ScreenSpaceShadows;
-		bool skyFull = false;  // the sky's mode is kFull
-
-		bool operator==(const Block&) const = default;
-	};
-
-	/** @brief Fills the block from the sky. Registered in PostPostLoad. Game thread. */
-	static void Capture(Snapshot::Builder& a_builder);
-
-	/** @brief Registers the capture. */
-	virtual void PostPostLoad() override;
-
 	/**
 	 * @brief This frame's raymarch dispatches, from the sun's direction and the render size of a_screenSize (the full size before
 	 * dynamic resolution). The D3D11 path passes the engine's screen size, the graph path the adopted display size.

@@ -1687,6 +1687,18 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		return a_why == kBuilding || a_why == kNoBuffers || a_why == kStreaming;
 	}
 
+	void Refuse(const char* a_scene, std::string_view a_batch, const RE::BSGeometry& a_geometry, const char* a_why, const std::string& a_detail,
+		std::uint64_t& a_leftOut)
+	{
+		const char* name = a_geometry.name.c_str() ? a_geometry.name.c_str() : "?";
+		if (LeftOut(a_why)) {
+			if (a_leftOut++ == 0)
+				logger::info("[DCLF] {}: {} draw {} is left out of this render: {} ({})", a_scene, a_batch, name, a_why, a_detail);
+			return;
+		}
+		::RenderGraph::Fatal(a_scene, std::format("{} draw {}: {} ({})", a_batch, name, a_why, a_detail));
+	}
+
 	void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, bool a_closestPoint, std::vector<ScenePass>& a_out)
 	{
 		a_out.clear();
@@ -1828,27 +1840,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return state;
 		}
 
-		/** @brief A draw's refusal: left out of this render (a building program, a streaming texture, no buffers yet), else fatal (decision 149). */
+		/** @brief A local map draw's refusal (Refuse). */
 		void Refused(const char* a_batch, const RE::BSGeometry& a_geometry, const char* a_why, const std::string& a_detail)
 		{
-			const char* name = a_geometry.name.c_str() ? a_geometry.name.c_str() : "?";
-			if (LeftOut(a_why)) {
-				if (GetLocalMap().leftOut++ == 0)
-					logger::info("[DCLF] local map: {} draw {} is left out of this render: {} ({})", a_batch, name, a_why, a_detail);
-				return;
-			}
-			::RenderGraph::Fatal("local map", std::format("{} draw {}: {} ({})", a_batch, name, a_why, a_detail));
-		}
-
-		/** @brief Hands a batch's run to its client (or keeps its owners when the client cannot take it now). */
-		void Hand(View a_view, std::shared_ptr<Run> a_run)
-		{
-			if (a_run->draws.size() > MaxDrawsOf(a_view))
-				::RenderGraph::Fatal("local map", std::format("{} draws in the {} batch, past its {}", a_run->draws.size(), NameOf(a_view), MaxDrawsOf(a_view)));
-			if (SceneDraws::Available() && SceneDraws::CanTake(a_view))
-				SceneDraws::Submit(std::move(a_run));
-			else
-				SceneDraws::Keep(std::move(a_run->owners));
+			Refuse("local map", a_batch, a_geometry, a_why, a_detail, GetLocalMap().leftOut);
 		}
 	}
 
@@ -1954,7 +1949,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			::RenderGraph::Fatal("local map", "kLOCAL_MAP_SWAP's clear was not taken");
 
 		// The land and objects batch, then its water (the post-resolve group after them, FinishAccumulatingPostResolveDepth).
-		std::vector<RE::BSGeometry*> visible;
+		thread_local std::vector<RE::BSGeometry*> visible;
 		LocalMapVisible(scene.roots, camera, visible);
 		auto run = std::make_shared<Run>();
 		run->view = View::LocalMap;
@@ -1989,7 +1984,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				Refused("water", *geometry, why, detail);
 		}
 		const auto mapDraws = run->draws.size();
-		Hand(View::LocalMap, std::move(run));
+		SceneDraws::Hand(std::move(run));
 
 		// The fog of war batch: its root's Utility passes in render mode 0x13, alpha only.
 		std::size_t fogDraws = 0;
@@ -2007,7 +2002,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 					Refused("fog of war", *geometry, why, detail);
 			}
 			fogDraws = fog->draws.size();
-			Hand(View::LocalMapFog, std::move(fog));
+			SceneDraws::Hand(std::move(fog));
 		}
 
 		// ISLocalMap from kLOCAL_MAP_SWAP into kLOCAL_MAP, its row 1 / the local map's size.
@@ -2125,11 +2120,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				::RenderGraph::Fatal("menu scenes", std::format("scheme {} draw {}: {} ({})", scheme, geometry->name.c_str() ? geometry->name.c_str() : "?", why, detail));
 		}
 		const auto draws = run->draws.size();
-		const bool taken = SceneDraws::Available() && SceneDraws::CanTake(View::MenuColour);
-		if (taken)
-			SceneDraws::Submit(std::move(run));
-		else
-			SceneDraws::Keep(std::move(run->owners));
+		const bool taken = SceneDraws::Hand(std::move(run));
 		// A light scheme with an ImageSpace override (manager +0xB0) runs the HDR effect from kMAIN into the back buffer, as the engine's
 		// RenderEndOfFrameEffects(1, 0) here does. Without one, and with the engine's TAA off (decision 168), nothing follows.
 		const auto* imageSpace = RE::ImageSpaceManager::GetSingleton();

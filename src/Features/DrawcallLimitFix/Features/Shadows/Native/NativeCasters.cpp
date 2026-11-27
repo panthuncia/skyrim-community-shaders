@@ -235,6 +235,7 @@ namespace DCLF::Features::Shadows::Native
 				// Read after the bookkeeping, which gave the descriptors their targets, slices and light transforms.
 				auto& captured = set->lights.emplace_back(ReadLight(*light));
 				captured.verdict = maps.verdict;
+				captured.coverageLeft = maps.coverageLeft;
 				captured.draws = std::move(maps.draws);
 				captured.left = maps.left;
 				// The selection queues a kept light with lens flare data for the gather (AE 0x1414cec70).
@@ -293,7 +294,7 @@ namespace DCLF::Features::Shadows::Native
 		// The native driver's render half adopted its game half's set. A frame the engine's own skeleton draws (the frozen menu
 		// capture) selected just before, on this thread: it draws that set.
 		if (!::RenderGraph::Engine::Native::Scene::Current().valid)
-			AdoptSet(TakeSet());
+			AdoptSet(LastSet());
 		const auto* set = RenderSet();
 		if (!set)
 			return;

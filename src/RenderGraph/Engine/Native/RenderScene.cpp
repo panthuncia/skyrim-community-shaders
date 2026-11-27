@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/LightLimitFix.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
 #include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WaterEffects.h"
@@ -257,7 +258,7 @@ namespace RenderGraph::Engine::Native::Scene
 			Point<void (*)(RE::NiCamera*)>(0x1C4, 0x1C4, "CalculateAndDrawShadowCasterLights")(a_camera);
 			if (skipped && !skippedHidden)
 				Flags(skipped) &= ~kHidden;
-			p.shadowLights = DCLF::Features::Shadows::Native::TakeSet();
+			p.shadowLights = DCLF::Features::Shadows::Native::LastSet();
 			// Light Limit Fix's scene lights, after the queued lights (added and removed above) and the casters' mask channels.
 			if (globals::features::lightLimitFix.loaded)
 				p.pointLights = globals::features::lightLimitFix.CaptureLights();
@@ -271,7 +272,11 @@ namespace RenderGraph::Engine::Native::Scene
 			if (Global<const bool>(525010, 411491))
 				Field<std::array<float, 4>>(Global<RE::NiCamera*>(528062, 415007), 0x174) = Global<const std::array<float, 4>>(259744, 207173);
 			p.normalsClear = Global<const float>(230690, 187405);
-			p.normalsTarget = WorldPass::EngineNormalsTarget();
+			// The update's snapshot carries the SSR switch and frame counter every native reader of the normals target uses.
+			if (const auto* imageSpace = a_snapshot.Block<ImageSpace::Block>(); imageSpace && imageSpace->inputs.read)
+				p.normalsTarget = WorldPass::NormalsTargetOf(imageSpace->world.ssrOn, imageSpace->inputs.frameCounter);
+			else
+				p.normalsTarget = WorldPass::EngineNormalsTarget();
 			p.mainClear = Global<const std::array<float, 3>>(527696, 414618);
 			p.snowClear = Global<const bool>(513332, 391105);
 			if (p.firstPerson) {
@@ -287,6 +292,16 @@ namespace RenderGraph::Engine::Native::Scene
 			auto* splatter = RE::ScreenSplatter::GetSingleton();
 			auto* splatterRoot = splatter ? Field<std::byte*>(splatter, 0x8) : nullptr;
 			p.splatter = splatterRoot && Field<std::uint16_t>(splatterRoot, 0x124) != 0;
+			p.sceneShadows = Global<const bool>(513204, 390933);
+			p.keptCasters = Global<const std::int32_t>(528090, 415035);
+			p.sunShadowsOff = Global<const bool>(528095, 415040);
+			p.postResolveFlag = Global<const bool>(513335, 391110);
+			if (auto* manager = RE::ImageSpaceManager::GetSingleton())
+				if (auto* taa = Field<std::byte*>(manager, 0x1f0))
+					p.taaWaterHistory = Field<bool>(taa, 0x38);
+			if (auto* water = RE::TESWaterSystem::GetSingleton())
+				p.waterHeight = Field<float>(water, 0xc0);
+			p.localMapPasses = Global<const bool>(527793, 414746);
 			if (auto* dofCamera = Global<RE::NiCamera*>(528062, 415007)) {
 				const auto& frustum = dofCamera->GetRuntimeData2().viewFrustum;
 				p.dofCamera = true;
@@ -310,12 +325,12 @@ namespace RenderGraph::Engine::Native::Scene
 		*/
 		void RecordFrame(const Prepared& a_frame, RE::NiCamera* a_camera, std::uint32_t a_target)
 		{
-			// A routed render: DCLF's frame start renders the game half's ticket, and the water work the capture queued draws, where
-			// Main::Draw's SetupSunAndSky point ran them.
-			if (a_frame.sceneTicket) {
+			// A routed render: DCLF's frame start renders the game half's ticket.
+			if (a_frame.sceneTicket)
 				globals::features::drawcallLimitFix.BeginNativeRenderHalf();
-				WaterEffects::Render();
-			}
+			// The water work the captures queued up to the adopted snapshot draws where Main::Draw's SetupSunAndSky point ran it, also in an
+			// update drawn on Main::DrawFrame (a paused menu over the world, the camera path), so the queue does not grow while one shows.
+			WaterEffects::Render();
 			ZoneScopedN("CS.Native.RenderScene.Render");
 			const Snapshot::EngineReads::RenderHalfScope half(Snapshot::EngineReads::Half::Record);
 			// The points below read a_frame through Current().

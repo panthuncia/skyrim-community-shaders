@@ -110,7 +110,13 @@ namespace RenderGraph::Engine::Native::WorldPass
 	*/
 	std::int32_t NormalsTarget();
 
-	/** @brief The engine's rule for the normals target, read now. Native's driver game half and guest. */
+	/** @brief The engine's rule for the normals target (100460): the swap on even frames while SSR is on, else the main one. */
+	constexpr std::int32_t NormalsTargetOf(bool a_ssr, std::uint32_t a_frameCounter)
+	{
+		return a_ssr ? static_cast<std::int32_t>((~a_frameCounter & 1u) | 4u) : 4;
+	}
+
+	/** @brief The normals target from the engine's SSR switch and frame counter, read now. Guest. */
 	std::int32_t EngineNormalsTarget();
 
 	/** @brief Whether native's RenderWorld is running on this thread. */
@@ -127,6 +133,9 @@ namespace RenderGraph::Engine::Native::WorldPass
 	* a_flags are the post-resolve's render flags. Render thread, after the water mask point.
 	*/
 	bool WaterBlendRuns(std::uint32_t a_flags);
+
+	/** @brief TESWaterSystem's state from the adopted snapshot (ImageSpace's inputs): 1 or 2 under water, else 0. Render owner. */
+	std::int32_t Underwater();
 
 	/** @brief The driver's water blend test for this render (WaterBlendRuns), kept until the next: the water surface's raw-water flag. */
 	void SetRawWater(bool a_raw);

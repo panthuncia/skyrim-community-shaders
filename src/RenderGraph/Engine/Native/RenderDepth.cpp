@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 #include "RenderGraph/Engine/Native/EngineAccess.h"
+#include "RenderGraph/Engine/Native/RenderScene.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "Snapshot/EngineReads.h"
@@ -54,15 +55,15 @@ namespace RenderGraph::Engine::Native
 	void RenderShadowMasks()
 	{
 		// The scene's shadows (SE 513204 / AE 390933), else a caster kept last frame (SE 528090 / AE 415035), runs the call's body.
-		const bool sceneShadows = Access::Global<bool>(513204, 390933);
-		if (!sceneShadows && Access::Global<std::int32_t>(528090, 415035) <= 0)
+		const auto& frame = Scene::Current();
+		if (!frame.sceneShadows && frame.keptCasters <= 0)
 			return;
 		ZoneScopedN("CS.Native.RenderShadowMasks");
 		globals::state->BeginPerfEvent("Shadowmasks");
 		// The masks draw only with the scene's shadows on. Renderer::SetClearColor(r, 0, 0, 0): r is 0 with the sun's shadows off
 		// (SE 528095 / AE 415040), else 1.
-		if (sceneShadows) {
-			const float clear[4]{ Access::Global<bool>(528095, 415040) ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
+		if (frame.sceneShadows) {
+			const float clear[4]{ frame.sunShadowsOff ? 0.0f : 1.0f, 0.0f, 0.0f, 0.0f };
 			DCLF::Features::ShadowMask::DrawWorldMasks(clear);
 		}
 		// Not written: the shadow state the masks leave (kSHADOW_MASK bound, no depth target) and the current camera, which nothing

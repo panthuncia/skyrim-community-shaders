@@ -54,17 +54,6 @@ public:
 	/** @brief Installs rendering hooks and registers event handlers after plugin load. */
 	virtual void PostPostLoad() override;
 
-	/** @brief Skylighting's snapshot block: whether the sky is full (an exterior sky), captured on the game thread. */
-	struct Block
-	{
-		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::Skylighting;
-
-		bool fullSky = false;  // Sky::mode is kFull
-		bool operator==(const Block&) const = default;
-	};
-
-	/** @brief Fills the block. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
-	static void Capture(Snapshot::Builder& a_builder);
 
 	//////////////////////////////////////////////////////////////////////////////////
 

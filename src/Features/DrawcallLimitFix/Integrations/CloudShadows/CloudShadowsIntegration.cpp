@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Integrations/CloudShadows/CloudShadows.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/Publication.h"
 
 #include "State.h"
@@ -24,7 +25,7 @@ namespace DCLF::Integrations::CloudShadows
 			// The sky's mode and climate as the update's capture took them.
 			const auto& snapshot = Snapshot::Current();
 			const auto* frame = snapshot ? snapshot->Block<::CloudShadows::Block>() : nullptr;
-			return frame && frame->fullSky && frame->climate;
+			return frame && Snapshot::Core().fullSky && frame->climate;
 		}
 
 		void* CloudOcclusionView()
