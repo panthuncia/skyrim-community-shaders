@@ -932,3 +932,20 @@ pushes until the user is back.
      SkyrimSE+0xE4B9BB; pre-existing); the blood Effect variant (EdgeBlood03, pass 0x4842) is not ported, so a random
      loading model using it is fatal in owned scheme 4; skinned menu shapes with several partitions are left out. Left:
      the local map (MapMenu::PreDisplay still runs from the offscreen loop), then deleting `CS_MENU_SCENES_OBSERVE`.
+
+## 2026-11-27: shadows from a captured light set (snap7-lights; director accepted)
+
+204. **Native shadow rendering reads a captured light set** (`Shadows/Native/LightSet.{h,cpp}`), not live engine lights:
+     each kept light as values in `shadowLightsAccum` order (kind, maps, mask index, bias, NiLight values, each
+     descriptor's target/slice/light transform, DCLF view draws with slice clears, the state the last draw leaves, lens
+     flare data), plus the sun's splits and the masks' settings. Lights are keys only (no engine references: holding them
+     broke the engine's teardown of the sun light). The game half's casters point runs `SelectCasters`, DCLF's
+     `ShadowCastersSelected`, then `CaptureSet` (the maps' bookkeeping `Engine::PrepareLightMaps` under the TLS memory
+     context, the values, and `ReturnShadowmaps` for every light, which the masks did before). `RecordFrame` adopts the
+     set from `Prepared::shadowLights`; the maps, world masks, lens flares (queue and references gone) and
+     `LocalShadowLights` read only it. Selection, cameras and bookkeeping stay game-side (they call engine allocation,
+     constructors and TLS, decision 68); the engine light objects stay the selection's working storage there. Sun
+     smoothing steps once per update. Menu masks and guest's engine-path masks read their lights at the call. Shadow
+     light live reads per world frame: quick 6.6 -> 0, interior 21 -> 0. Open: Light Limit Fix, Exponential Height Fog
+     and Deferred still read shadow lights at record time (the set has their values); menu scene shadows still select
+     where they record.
