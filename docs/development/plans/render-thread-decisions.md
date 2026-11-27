@@ -1254,3 +1254,19 @@ pushes until the user is back.
      kept (back to 2026-11-26 morning); d3d11 renders all 13 shots correctly; guest goes dark at the first resize and then
      lost the device. Owned by snap7-devloss3 together with the device loss: native and guest must match d3d11 after
      resizes, with references accepted.
+
+## 2026-11-27: resize renders correctly again (snap7-devloss3; director accepted)
+
+235. **DCLF bindings follow resized engine targets** (`snap7-devloss3.md`). A resize points the engine's target views at
+     new images but keeps the view objects; DCLF keyed its shadow-mask binding on the view pointer and the GpuTextures
+     generation, so every colour draw kept reading the released old `kSHADOW_MASK` (black lighting, then garbage), in native
+     and guest. Now `GpuTextures::NoteViewChanged` supersedes the import of any view that names another image, a DCLF
+     listener on `Frame::Revision::OnVersionsAdopted` supersedes engine views whose shape changed, and mask bindings
+     re-resolve, reading the null descriptor while the new import is pending (a frame or two unshadowed; DV3-b/c). Native
+     screenshots copy the adopted target's size (DV3-e). window-resize-stress-taa has references for native start/large and
+     all d3d11 shots; native small shots wait for the HUD layout fix (snap7-resizeui). Without the interim wait resize went
+     0/11 -> 5/10 passing, so the wait stays (DV3-a). Tried and not kept: one revision for stages and DCLF, an exact
+     retirement clock (both made losses more frequent: the loss depends on retirement timing; DV3-d). Open, with
+     snap7-devloss4: the remaining losses (z.depth, cull counters, reflection faces; one after a TAA switch without a
+     resize), other bindings caching engine views by pointer, guest's loss at the second resize. With snap7-resizeui: the
+     HUD keeps the old layout after a resize, a `WorldPass::CameraPlanes` null-camera crash, water flicker. Merge check 8/8.
