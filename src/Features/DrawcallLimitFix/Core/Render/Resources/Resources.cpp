@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/BufferRefs.h"
+#include "RenderGraph/Engine/Targets/EngineTargetSet.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/Relocation/Holders.h"
 #include "Snapshot/EngineReads.h"
@@ -1101,42 +1102,29 @@ namespace DCLF
 
 	bool IndirectDraws::Impl::ImportViewDepthTarget(ViewKind a_kind)
 	{
-		// A DepthTarget view, such as first person's kPOST_ZPREPASS_COPY (FUN_1414cb6d0), imported in its DSV's format.
+		// A DepthTarget view, such as first person's kPOST_ZPREPASS_COPY (FUN_1414cb6d0): the slot CS's target set declared for it, which
+		// stays the same for the session and follows the target's versions. The renderer's table is not read: a resize rewrites it.
+		namespace Targets = RenderGraph::Engine::Targets;
+		constexpr auto kDepth = Targets::Depth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
 		auto* host = RenderGraphRuntime::Get().Host();
-		auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 		auto& view = View(a_kind);
-		if (!view.resources || !host || !renderer)
+		if (!view.resources || !host)
 			return false;
 		auto& r = *view.resources;
-		const auto& copy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
-		if (!copy.texture || !copy.views[0])
-			return false;
-		if (r.target && r.targetTexture == copy.texture && !r.rebuildPending)
+		if (r.target && !r.rebuildPending)
 			return true;
-		if (!r.target || r.targetTexture != copy.texture) {
-			DxvkOrgInteropResourceInfo info{};
-			if (!RenderGraphRuntime::Get().DescribeResource(copy.texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
-				return false;
-			D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
-			copy.views[0]->GetDesc(&dsvDesc);
-			org::TextureDescription desc{};
-			desc.imageDimensions.push_back({ info.image.extent.width, info.image.extent.height, 0, 0 });
-			desc.format = rhi::helpers::ToRHI(dsvDesc.Format);
-			desc.channels = 1;
-			desc.hasDSV = true;
-			desc.dsvFormat = desc.format;
-			const auto& traits = TraitsOf(a_kind);
-			auto imported = ImportImage(host->Device(), copy.texture, info.image, desc, fmt::format("DCLF {} depth (kPOST_ZPREPASS_COPY)", traits.name).c_str());
-			if (!imported) {
+		if (!r.target) {
+			auto slot = Targets::Slot(kDepth);
+			if (!slot) {
 				static std::uint32_t logged = 0;
 				if (logged++ < 4)
-					logger::warn("[DCLF] kPOST_ZPREPASS_COPY could not be imported (not in the general layout?); {} stays native",
-						kKeyGroupNames[kViewSlots[ViewIndex(a_kind)].keyGroup]);
+					logger::warn("[DCLF] kPOST_ZPREPASS_COPY has no declared slot; {} stays native", kKeyGroupNames[kViewSlots[ViewIndex(a_kind)].keyGroup]);
 				return false;
 			}
-			r.target = std::move(imported);
-			r.targetTexture = copy.texture;
-			logger::info("[DCLF] {} depth imported: {}x{}, format {}", traits.name, info.image.extent.width, info.image.extent.height, static_cast<int>(dsvDesc.Format));
+			r.target = std::move(slot);
+			const auto shape = Targets::AdoptedShape(kDepth);
+			logger::info("[DCLF] {} depth imported: {}x{}, format {}", TraitsOf(a_kind).name, shape.width, shape.height,
+				static_cast<int>(Targets::ViewFormat(Targets::Depth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY, Targets::View::Dsv))));
 		}
 		r.rebuildPending = false;
 		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return MakeViewExtension(BuildingState(id), kind); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
