@@ -26,7 +26,7 @@ namespace DCLF::WholeCull
 		wholeCulls[i].fetch_add(1, std::memory_order_relaxed);
 		if (!wholeWarned[i].exchange(true, std::memory_order_relaxed))
 			logger::warn("[DCLF] the engine culled a view whole ({}) at scene frame {}, loading screen {}: DCLF does not cover it yet (counted in the primary cull's report lines)",
-				kReasonNames[i], Scene::FrameView::Get().SceneStep(), Scene::FrameView::IsLoadingScreenUp() ? "up" : "down");
+				kReasonNames[i], Scene::FrameView::Get().SceneStep(), Scene::FrameView::LoadingScreenInFrame() ? "up" : "down");
 	}
 
 	std::string Line()

@@ -9,6 +9,7 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
@@ -950,10 +951,96 @@ namespace DCLF::Features::Sky::Native
 			return false;
 		}
 
+		/** @brief One object under the sky root as the game half took it, in the cull's pre-order. Hidden objects are left out with their subtrees. */
+		struct RootObject
+		{
+			enum class Kind : std::uint8_t
+			{
+				Node,    // its children follow, up to end
+				Pass,    // a sky object with a pass
+				Effect,  // a geometry with another shader (a sky-object effect)
+				None     // a geometry with no property or no pass
+			};
+			Kind kind = Kind::None;
+			bool always = false;  // kAlwaysDraw: skips its own bound test
+			std::uint32_t end = 0;  // the index past its subtree
+			RE::NiBound bound;
+			RE::BSGeometry* geometry = nullptr;  // Pass: the draw's geometry and property, read when its draw is built
+			RE::BSShaderProperty* property = nullptr;
+			std::uint32_t passId = 0;
+			std::uint32_t sub = 0;
+			std::string name;  // Effect: the geometry's name, for the refusal
+		};
+
+		/** @brief The sky root's objects, taken once per game update (TicketPart::SkyRoot). Empty without a sky root. */
+		struct RootObjects
+		{
+			bool root = false;
+			std::vector<RootObject> objects;
+		};
+
+		void Flatten(RE::NiAVObject* a_object, std::vector<RootObject>& a_out)
+		{
+			if (!a_object)
+				return;
+			const auto flags = a_object->GetFlags();
+			if (flags.all(RE::NiAVObject::Flag::kHidden))
+				return;
+			const auto index = a_out.size();
+			{
+				auto& entry = a_out.emplace_back();
+				entry.always = flags.all(RE::NiAVObject::Flag::kAlwaysDraw);
+				entry.bound = a_object->worldBound;
+			}
+			if (auto* node = a_object->AsNode()) {
+				a_out[index].kind = RootObject::Kind::Node;
+				for (auto& child : node->GetChildren())
+					Flatten(child.get(), a_out);
+				a_out[index].end = static_cast<std::uint32_t>(a_out.size());
+				return;
+			}
+			auto& entry = a_out[index];
+			entry.end = static_cast<std::uint32_t>(index + 1);
+			auto* geometry = a_object->AsGeometry();
+			auto* property = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+			if (!property)
+				return;
+			if (!netimmerse_cast<RE::BSSkyShaderProperty*>(property)) {
+				entry.kind = RootObject::Kind::Effect;
+				entry.name = geometry->name.c_str();
+				return;
+			}
+			const auto passId = PassIdOf(property, Field<std::uint32_t>(property, kSkyObjectType));
+			if (!passId)
+				return;
+			entry.kind = RootObject::Kind::Pass;
+			entry.geometry = geometry;
+			entry.property = property;
+			entry.passId = passId;
+			entry.sub = IsCloudPass(passId) ? 0u : SubGroupOf(geometry, property);
+		}
+
+		/**
+		 * @brief The game half's capture (TicketPart::SkyRoot): the sky root flattened, with each object's bound and pass. Both modes:
+		 * the reflection faces cull it in guest too.
+		 */
+		std::shared_ptr<const void> CaptureRootObjects()
+		{
+			auto out = std::make_shared<RootObjects>();
+			auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
+			if (!sky || !sky->root)
+				return out;
+			CS_ENGINE_READ_MARK(Scene, CapturePoint);
+			out->root = true;
+			Flatten(sky->root.get(), out->objects);
+			return out;
+		}
+
 		/** @brief What the cull of the sky root registers for a face or the main camera, in registration order. */
 		struct FaceCull
 		{
 			const ShadowCameras::Planes* planes = nullptr;
+			const std::vector<RootObject>* objects = nullptr;
 			std::vector<FacePass> passes;
 			std::string why;
 			// The main camera's cull leaves sky-object effects out (they are not the sky family's); a face fails on them.
@@ -963,35 +1050,29 @@ namespace DCLF::Features::Sky::Native
 			bool noBounds = false;
 
 			/** @brief An always-drawn object skips its own bound test; its children test theirs (as the engine's cull does). */
-			void Visit(RE::NiAVObject* a_object, bool a_always)
+			void Visit(std::uint32_t a_index, bool a_always)
 			{
-				if (!a_object || !why.empty())
+				if (a_index >= objects->size() || !why.empty())
 					return;
-				const auto flags = a_object->GetFlags();
-				if (flags.all(RE::NiAVObject::Flag::kHidden))
+				const auto& object = (*objects)[a_index];
+				const bool always = a_always || object.always;
+				if (!always && !noBounds && Outside(object.bound, *planes))
 					return;
-				const bool always = a_always || flags.all(RE::NiAVObject::Flag::kAlwaysDraw);
-				if (!always && !noBounds && Outside(a_object->worldBound, *planes))
-					return;
-				if (auto* node = a_object->AsNode()) {
-					for (auto& child : node->GetChildren())
-						Visit(child.get(), false);
-					return;
-				}
-				auto* geometry = a_object->AsGeometry();
-				if (!geometry)
-					return;
-				auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
-				if (!property)
-					return;
-				if (!netimmerse_cast<RE::BSSkyShaderProperty*>(property)) {
+				switch (object.kind) {
+				case RootObject::Kind::Node:
+					for (auto child = a_index + 1; child < object.end; child = (*objects)[child].end)
+						Visit(child, false);
+					break;
+				case RootObject::Kind::Effect:
 					if (!skipEffects)
-						why = std::format("a sky-object effect is in view ({})", geometry->name.c_str());
-					return;
+						why = std::format("a sky-object effect is in view ({})", object.name);
+					break;
+				case RootObject::Kind::Pass:
+					passes.push_back({ object.geometry, object.property, object.passId, object.sub });
+					break;
+				case RootObject::Kind::None:
+					break;
 				}
-				const auto passId = PassIdOf(property, Field<std::uint32_t>(property, kSkyObjectType));
-				if (passId)
-					passes.push_back({ geometry, property, passId, IsCloudPass(passId) ? 0u : SubGroupOf(geometry, property) });
 			}
 		};
 
@@ -1033,9 +1114,10 @@ namespace DCLF::Features::Sky::Native
 			std::vector<FacePass>& a_clouds, std::string& a_why)
 		{
 			DCLF_ZONE("CS.DCLF.Sky.Native.RootPasses");
-			auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-			if (!sky || !sky->root) {
-				a_why = "no sky root";
+			// The game half took the sky root into the frame ticket.
+			const auto* root = static_cast<const RootObjects*>(TicketPartOf(TicketPart::SkyRoot));
+			if (!root || !root->root || root->objects.empty()) {
+				a_why = root ? "no sky root" : "the frame's ticket holds no sky root";
 				return false;
 			}
 			ShadowCameras::Planes planes;
@@ -1043,13 +1125,13 @@ namespace DCLF::Features::Sky::Native
 			// Render thread: the registration list is kept between calls.
 			static FaceCull cull;
 			cull.planes = &planes;
+			cull.objects = &root->objects;
 			cull.passes.clear();
 			cull.why.clear();
 			cull.skipEffects = !a_face;
-			CS_ENGINE_READ_MARK(Scene, RecordTime);
 			cull.noBounds = !a_face;
 			// TESWaterReflections::Update holds the sky root always drawn while it renders the faces (AE 0x140520570).
-			cull.Visit(sky->root.get(), a_face);
+			cull.Visit(0, a_face);
 			if (!cull.why.empty()) {
 				a_why = cull.why;
 				return false;
@@ -1149,6 +1231,11 @@ namespace DCLF::Features::Sky::Native
 			a_eye = view.position;
 			return true;
 		}
+	}
+
+	void RegisterRootCapture()
+	{
+		RegisterTicketPart(TicketPart::SkyRoot, &CaptureRootObjects);
 	}
 
 	bool BuildMain(RE::BSShaderAccumulator* a_accumulator, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)

@@ -34,6 +34,7 @@ namespace DCLF
 	struct Lookups;
 	struct LookupsResolveState;
 	struct FamilyPipelines;
+	struct FamilyRenderState;
 	struct PipelineCatalog;
 	struct SceneTables;
 	struct ForwardTargets;
@@ -252,6 +253,13 @@ namespace DCLF
 		 * so withholding the engine's draws always means a recording draws the family.
 		 */
 		std::shared_ptr<const FamilyPipelines> AdoptedFamilyPipelines(Api::DrawFamily a_family) const;
+		/**
+		 * @brief Render owner, after each adoption: publishes what the families' decisions read of the render side (the adopted
+		 * revision's family pipelines). The game half reads the last one published and never waits for a newer one.
+		 */
+		void PublishFamilyRenderState();
+		/** @brief Game half, inside DecideDrawFamilies: the render state as last published, or null before the first. */
+		const FamilyRenderState* FamilyInputs() const;
 		// View engine calls. Render thread unless noted, and nothing exists before the implementation.
 		/** @brief The view's frame state, with its targets, resources and coverage. */
 		const ViewEpochState* ViewState(Api::EngineView a_view) const;

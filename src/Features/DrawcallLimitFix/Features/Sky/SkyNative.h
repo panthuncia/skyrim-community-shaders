@@ -42,6 +42,9 @@ namespace DCLF::Features::Sky::Native
 	bool BuildBatch(RE::BSShaderAccumulator* a_accumulator, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners,
 		std::string& a_why);
 
+	/** @brief At install: the game half takes the sky root's objects into the frame ticket (TicketPart::SkyRoot), for BuildMain and BuildFace. */
+	void RegisterRootCapture();
+
 	/**
 	 * @brief Render thread, at the main pass's sky batch, in native. The sky batch's and cloud layers' draws from the sky root culled
 	 * with the adopted snapshot's main camera, in the engine's draw order, without the engine's registrations. Sky-object effects are

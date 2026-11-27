@@ -41,6 +41,8 @@ namespace DCLF::Features::Water::Native
 	 * batch's order, without the engine's registrations. False, with a_why, when a pass cannot be computed.
 	 */
 	bool BuildScene(const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why);
+	/** @brief At install: the game half takes the tracked water shapes into the frame ticket (TicketPart::WaterScene), for BuildScene. */
+	void RegisterSceneCapture();
 	/** @brief Whether BuildScene has anything to draw for the batch (or a reason to report), before its inputs are read. Only accumulator, range and group are read. */
 	bool SceneHasPasses(const BatchInputs& a_inputs);
 

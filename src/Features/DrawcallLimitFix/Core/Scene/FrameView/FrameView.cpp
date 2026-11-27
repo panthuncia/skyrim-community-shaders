@@ -17,7 +17,9 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadingFields.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 namespace DCLF
 {
@@ -292,18 +294,31 @@ namespace DCLF::Scene
 		return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME) && !LoadHold::MenuHeld();
 	}
 
+	bool FrameView::LoadingScreenInFrame()
+	{
+		if (!::RenderGraph::Engine::Native::Active())
+			return IsLoadingScreenUp();
+		const auto& snapshot = Snapshot::Current();
+		return snapshot && snapshot->menus.loading && !LoadHold::MenuHeld();
+	}
+
 	bool FrameView::LoadShown()
+	{
+		return LoadingScreenInFrame() || LoadHold::Active() || LoadHold::MenuHeld();
+	}
+
+	bool FrameView::LoadShownNow()
 	{
 		return IsLoadingScreenUp() || LoadHold::Active() || LoadHold::MenuHeld();
 	}
 
-	bool FrameView::NoteLoadingScreen()
+	bool FrameView::NoteLoadingScreen(bool a_loading)
 	{
 		// Switch events are taken on the render thread only.
 		switchEventThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
 		// Nothing may walk the scene graph while a load screen is up. A load tears down and rebuilds TES::objRoot, so a live walk
 		// gives a stale or garbage pointer. No table is written while the load is up.
-		if (!IsLoadingScreenUp()) {
+		if (!a_loading) {
 			if (std::exchange(loadingPosted, false)) {
 				channels.loadingSeen.store(false, std::memory_order_release);
 				SetScenePassLoading(false);

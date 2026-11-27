@@ -25,6 +25,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
 #include "Snapshot/EngineReads.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 
 namespace DCLF::Scene
@@ -734,8 +735,9 @@ namespace DCLF::Scene
 	void FrameView::PrepareAccumulatePhase()
 	{
 		DCLF_ZONE("CS.DCLF.Accumulate.Prepare");
-		// No sceneBuilt test, since a scene pass may be running. The queue is empty when no join ran.
-		ServeMaterialRequests();
+		// No sceneBuilt test, since a scene pass may be running. The queue is empty when no join ran. Native serves them in the game half.
+		if (!::RenderGraph::Engine::Native::Active())
+			ServeMaterialRequests();
 		Diagnostics::Notify<Diagnostics::ScenePoint::AccumulatePrepared>();
 	}
 
@@ -743,7 +745,7 @@ namespace DCLF::Scene
 	{
 		channels.materialRequests.Drain([&](MaterialRequest&& a_request) {
 			CS_ENGINE_READ_MARK(Scene, RecordTime);
-			// A property whose material changed since is stale, and the join asks again. The reference is dropped here on the render thread.
+			// A property whose material changed since is stale, and the join asks again. The reference is dropped here on the main thread.
 			const bool current = a_request.property && a_request.property->material == a_request.material;
 			if (current)
 				MaterialPort::PushCapture(a_request.material);

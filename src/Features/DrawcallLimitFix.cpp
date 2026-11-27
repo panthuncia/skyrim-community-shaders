@@ -694,7 +694,18 @@ void DrawcallLimitFix::Hooks::Install()
 		if (globals::features::drawcallLimitFix.installed && a_snapshot.kind == Snapshot::FrameKind::World)
 			DCLF::FrameDriver::Get().UnrenderedUpdate(a_snapshot.id);
 	});
+	// The update's game-side end, after its renders.
+	Snapshot::RegisterUpdateEnd([](const Snapshot::FrameSnapshot&) {
+		if (globals::features::drawcallLimitFix.installed)
+			DCLF::FrameDriver::Get().UpdateEnd();
+	});
 	logger::info("[DCLF] Native pass hooks installed");
+}
+
+void DrawcallLimitFix::OnNativeGameHalfEnd()
+{
+	if (installed)
+		DCLF::FrameDriver::Get().GameHalfEnd();
 }
 
 void DrawcallLimitFix::OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags)

@@ -6,9 +6,11 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
@@ -350,7 +352,7 @@ namespace DCLF::Features::Water::Native
 				return true;
 			}
 
-			void StrictLights(const RE::BSRenderPass& a_pass, std::byte* a_out) const
+			void StrictLights(int a_roomIndex, std::byte* a_out) const
 			{
 				std::memcpy(a_out, strictLights.data(), kStrictLightBytes);
 				if (!llf)
@@ -359,7 +361,7 @@ namespace DCLF::Features::Water::Native
 				data->NumStrictLights = 0;
 				data->ShadowBitMask = 0;
 				data->FirstPerson = globals::features::lightLimitFix.localShadowFirstPersonPass ? 1u : 0u;
-				data->RoomIndex = globals::features::lightLimitFix.GetRoomIndex(a_pass.geometry);
+				data->RoomIndex = a_roomIndex;
 			}
 		};
 
@@ -434,23 +436,60 @@ namespace DCLF::Features::Water::Native
 			return true;
 		}
 
-		/** @brief One pass's draw, as SetupTechnique, SetupMaterial, SetupGeometry and CS's hooks on them would make it. */
-		bool BuildPass(const Frame& a_frame, RE::BSRenderPass* a_pass, Modes& a_modes, Draw& a_draw, Family::Owners& a_owners, std::string& a_why)
+		/**
+		 * @brief What a pass's draw reads of its geometry, property and material: from the live pass (an engine batch's registrations)
+		 * or from the frame ticket (native's tracked shapes, taken in the game half).
+		 */
+		struct PassObject
 		{
-			CS_ENGINE_READ_MARK(Scene, RecordTime);
-			auto* geometry = a_pass->geometry;
-			const auto* property = a_pass->shaderProperty;
-			if (!geometry || !property || property->GetRTTI() != globals::rtti::BSWaterShaderPropertyRTTI.get()) {
+			bool water = false;     // a BSWaterShaderProperty
+			bool triShape = false;  // a BSTriShape
+			bool material = false;  // with a water material
+			Port::ObjectInputs object;
+			std::array<std::byte, Port::kMaterialBytes> bytes{};
+			const Family::TriShape* shape = nullptr;  // the geometry's renderer data
+			std::uint32_t triangles = 0;
+			int roomIndex = 0;  // Light Limit Fix's room of the geometry
+		};
+
+		/** @brief Takes a_out from a geometry and its property. Reads the engine: an engine batch's pass, or the game half's capture. */
+		void TakeObject(const RE::BSGeometry* a_geometry, const RE::BSShaderProperty* a_property, PassObject& a_out)
+		{
+			a_out = {};
+			a_out.water = a_geometry && a_property && a_property->GetRTTI() == globals::rtti::BSWaterShaderPropertyRTTI.get();
+			if (!a_out.water)
+				return;
+			a_out.triShape = a_geometry->GetType().get() == RE::BSGeometry::Type::kTriShape;
+			const auto& water = static_cast<const RE::BSWaterShaderProperty&>(*a_property);
+			const auto* material = static_cast<const RE::BSWaterShaderMaterial*>(water.material);
+			a_out.material = material && material->GetType() == RE::BSShaderMaterial::Type::kWater;
+			if (!a_out.triShape || !a_out.material)
+				return;
+			a_out.object = Port::CaptureObject(water, *a_geometry);
+			const auto bytes = Port::BytesOf(*material);
+			std::memcpy(a_out.bytes.data(), bytes.data(), bytes.size());
+			a_out.shape = reinterpret_cast<const Family::TriShape*>(a_geometry->GetGeometryRuntimeData().rendererData);
+			a_out.triangles = static_cast<const RE::BSTriShape*>(a_geometry)->GetTrishapeRuntimeData().triangleCount;
+			if (globals::features::lightLimitFix.loaded)
+				a_out.roomIndex = globals::features::lightLimitFix.GetRoomIndex(const_cast<RE::BSGeometry*>(a_geometry));
+		}
+
+		/**
+		 * @brief One pass's draw, as SetupTechnique, SetupMaterial, SetupGeometry and CS's hooks on them would make it, from a_object.
+		 * Of a_pass only the shader, the pass enum and its scene lights are read.
+		 */
+		bool BuildPass(const Frame& a_frame, RE::BSRenderPass* a_pass, const PassObject& a_object, Modes& a_modes, Draw& a_draw, Family::Owners& a_owners,
+			std::string& a_why)
+		{
+			if (!a_object.water) {
 				a_why = "a pass that is not a BSWaterShaderProperty's";
 				return false;
 			}
-			if (geometry->GetType().get() != RE::BSGeometry::Type::kTriShape) {
+			if (!a_object.triShape) {
 				a_why = "a water pass that is not a TriShape";
 				return false;
 			}
-			const auto& water = static_cast<const RE::BSWaterShaderProperty&>(*property);
-			const auto* material = static_cast<const RE::BSWaterShaderMaterial*>(water.material);
-			if (!material || material->GetType() != RE::BSShaderMaterial::Type::kWater) {
+			if (!a_object.material) {
 				a_why = "a water property with no water material";
 				return false;
 			}
@@ -467,7 +506,7 @@ namespace DCLF::Features::Water::Native
 			}
 
 			a_modes.Technique(a_pass->passEnum, descriptor, a_frame.start.blend);
-			a_modes.Geometry(a_pass->passEnum, descriptor, water.unk8C);
+			a_modes.Geometry(a_pass->passEnum, descriptor, a_object.object.stencilBit);
 			auto* depthStencil = Pipeline::EngineDepthStencilState(a_modes.depth, a_modes.stencil);
 			auto* blend = Pipeline::EngineBlendState(a_modes.blend, a_modes.alphaToCoverage, a_modes.write, a_modes.blendExtra);
 			auto* raster = Pipeline::EngineRasterState(a_modes.fill, a_modes.cull, a_modes.depthBias, a_modes.scissor);
@@ -506,8 +545,8 @@ namespace DCLF::Features::Water::Native
 			// The constants: the port's rows, written through the CS shaders' tables as the engine writes them.
 			auto frame = a_frame.port;
 			frame.linearLighting = globals::features::linearLighting.IsLinearLightingActive();
-			const auto object = Port::CaptureObject(water, *geometry);
-			const auto bytes = Port::BytesOf(*material);
+			const auto& object = a_object.object;
+			const Port::MaterialBytes bytes(a_object.bytes.data(), Port::kMaterialBytes);
 			const auto rows = Port::Assemble(Port::EvaluateTechnique(descriptor, frame), Port::EvaluateMaterial(bytes, frame), Port::EvaluateObject(object, descriptor, frame),
 				Port::EvaluateGeometry(object, descriptor, frame), Port::EvaluateLights(*a_pass, bytes, descriptor, frame), TablesOf(*vs, *ps));
 			auto& c = a_draw.latch.constants;
@@ -517,7 +556,7 @@ namespace DCLF::Features::Water::Native
 			PutRows(rows.psTechnique, c.psTechnique);
 			PutRows(rows.psMaterial, c.psMaterial);
 			PutRows(rows.psGeometry, c.psGeometry);
-			a_frame.StrictLights(*a_pass, a_draw.latch.strictLights);
+			a_frame.StrictLights(a_object.roomIndex, a_draw.latch.strictLights);
 			std::memcpy(a_draw.latch.directionalShadow, a_frame.inputs.directionalShadow, kDirectionalShadowBytes);
 			// CS's permutation block, as its BeginTechnique hook sets it. The water shaders read the extra descriptor's InWorld bit.
 			const auto& permutation = state->permutationData;
@@ -529,11 +568,9 @@ namespace DCLF::Features::Water::Native
 			c.physSky = a_frame.inputs.physSky;
 
 			// The geometry: the TriShape's buffers and its whole index range, as the dispatcher draws it.
-			const auto* shape = reinterpret_cast<const Family::TriShape*>(geometry->GetGeometryRuntimeData().rendererData);
-			const auto triangles = static_cast<RE::BSTriShape*>(geometry)->GetTrishapeRuntimeData().triangleCount;
 			Family::Geometry latched;
 			std::string detail;
-			if (const auto result = Family::LatchGeometry(shape, 0, triangles, vs->vertexDesc, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, latched, a_owners, &detail);
+			if (const auto result = Family::LatchGeometry(a_object.shape, 0, a_object.triangles, vs->vertexDesc, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, latched, a_owners, &detail);
 				result != Family::GeometryResult::Ok) {
 				a_why = std::format("geometry: {} {}", Family::ReasonOf(result), detail);
 				return false;
@@ -548,7 +585,7 @@ namespace DCLF::Features::Water::Native
 
 			// The textures. An unbound slot reads zero, with the first sampler.
 			std::array<Slot, kMaterialSlots> slots;
-			if (!SlotsOf(a_frame, descriptor, reinterpret_cast<const std::byte*>(material), slots, a_why))
+			if (!SlotsOf(a_frame, descriptor, a_object.bytes.data(), slots, a_why))
 				return false;
 			for (std::uint32_t t = 0; t < kMaterialSlots; ++t) {
 				const auto& slot = slots[t];
@@ -594,8 +631,12 @@ namespace DCLF::Features::Water::Native
 			if (!WaterGroup(a_group))
 				return true;
 			for (std::uint32_t sub = 0; sub < 5 && ok; ++sub)
-				for (auto* pass = Field<RE::BSRenderPass*>(a_group, sub * 8); pass && ok; pass = pass->passGroupNext)
-					ok = BuildPass(frame, pass, modes, a_draws.emplace_back(), a_owners, a_why);
+				for (auto* pass = Field<RE::BSRenderPass*>(a_group, sub * 8); pass && ok; pass = pass->passGroupNext) {
+					CS_ENGINE_READ_MARK(Scene, RecordTime);
+					PassObject object;
+					TakeObject(pass->geometry, pass->shaderProperty, object);
+					ok = BuildPass(frame, pass, object, modes, a_draws.emplace_back(), a_owners, a_why);
+				}
 			return ok;
 		});
 		return ok;
@@ -603,21 +644,27 @@ namespace DCLF::Features::Water::Native
 
 	namespace
 	{
-		/** @brief A water shape's pass as the main camera's registration would hold it. */
-		struct ScenePass
-		{
-			RE::BSGeometry* geometry = nullptr;
-			RE::BSShaderProperty* property = nullptr;
-			std::uint32_t passEnum = 0;
-			std::uint8_t hint = 0;
-			std::uint32_t sub = 0;
-		};
-
 		// The accumulation hint the accumulator files into geometry group 10, which FinishAccumulatingPostResolveDepth draws just before
 		// the water batch (the wading surface).
 		constexpr std::uint8_t kGroup10Hint = 13;
 		// BSWaterShaderProperty +0xC0: the stencil pass id GetRenderPasses cached the first time.
 		constexpr std::size_t kCachedStencilPass = 0xC0;
+
+		/** @brief One tracked water shape as the game half took it: what the main camera's batch reads of it. */
+		struct SceneShape
+		{
+			const RE::BSGeometry* geometry = nullptr;  // a key: the claims' lookup
+			RE::NiBound bound;
+			std::uint32_t cachedStencil = 0;  // GetRenderPasses' cached stencil pass id, or 0
+			std::uint32_t sub = 0;            // the pass group's sub-group
+			PassObject object;
+		};
+
+		/** @brief The tracked water shapes the main camera's cull would reach, taken once per game update (TicketPart::WaterScene). */
+		struct SceneShapes
+		{
+			std::vector<SceneShape> shapes;
+		};
 
 		/**
 		 * @brief Whether the main camera's cull would reach a_object: it hangs under the world root, and neither it nor an ancestor is
@@ -648,12 +695,47 @@ namespace DCLF::Features::Water::Native
 			return false;
 		}
 
+		/** @brief The game half's capture (TicketPart::WaterScene): every tracked water shape under the world root, not hidden. Native only. */
+		std::shared_ptr<const void> CaptureSceneShapes()
+		{
+			if (!::RenderGraph::Engine::Native::Active())
+				return nullptr;
+			// Game half: kept between updates.
+			static std::vector<const void*> tracked;
+			WaterScene::TrackedShapes(tracked);
+			CS_ENGINE_READ_MARK(Scene, CapturePoint);
+			const auto* worldRoot = static_cast<const RE::NiAVObject*>(CS_ENGINE_READ(Data, CapturePoint, RE::Main::WorldRootNode()));
+			auto out = std::make_shared<SceneShapes>();
+			out->shapes.reserve(tracked.size());
+			for (const void* entry : tracked) {
+				const auto* geometry = static_cast<const RE::BSGeometry*>(entry);
+				const auto* property = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
+				if (!property || property->GetRTTI() != globals::rtti::BSWaterShaderPropertyRTTI.get() || !Reached(geometry, worldRoot))
+					continue;
+				auto& shape = out->shapes.emplace_back();
+				shape.geometry = geometry;
+				shape.bound = geometry->worldBound;
+				shape.cachedStencil = Field<std::uint32_t>(property, kCachedStencilPass);
+				shape.sub = PassCapture::SubPassOf(geometry, property->flags.underlying());
+				TakeObject(geometry, property, shape.object);
+			}
+			return out;
+		}
+
+		/** @brief A water shape's pass as the main camera's registration would hold it. */
+		struct ScenePass
+		{
+			const SceneShape* shape = nullptr;
+			std::uint32_t passEnum = 0;
+			std::uint8_t hint = 0;
+		};
+
 		/**
-		 * @brief The passes the main camera's registration would hold in a batch's range and group: each tracked water shape DCLF's
-		 * epochs do not draw this frame (refused, or not claimed yet), not hidden and in the adopted snapshot's main frustum, with
-		 * GetRenderPasses' passes, in the batch's draw order (technique, then sub-group). False, with a_why, without a snapshot main camera.
+		 * @brief The passes the main camera's registration would hold in a batch's range and group: each water shape of the frame ticket
+		 * DCLF's epochs do not draw this frame (refused, or not claimed yet) in the adopted snapshot's main frustum, with GetRenderPasses'
+		 * passes, in the batch's draw order (technique, then sub-group). False, with a_why, without a snapshot main camera.
 		 */
-		bool ScenePasses(const BatchInputs& a_inputs, const Port::FrameInputs& a_port, std::vector<ScenePass>& a_out, std::string& a_why)
+		bool ScenePasses(const SceneShapes& a_scene, const BatchInputs& a_inputs, const Port::FrameInputs& a_port, std::vector<ScenePass>& a_out, std::string& a_why)
 		{
 			a_out.clear();
 			const auto& snapshot = Snapshot::Current();
@@ -668,37 +750,26 @@ namespace DCLF::Features::Water::Native
 			world.scale = 1.0f;
 			ShadowCameras::Planes planes;
 			ShadowCameras::FrustumPlanes(view->frustum, world, planes);
-			// Render thread: kept between batches.
-			static std::vector<const void*> shapes;
-			WaterScene::TrackedShapes(shapes);
-			CS_ENGINE_READ_MARK(Scene, RecordTime);
 			// The frame's claims: a shape DCLF draws, or waits to draw, in the main phase is its epochs', not the batch's.
 			const auto claims = PassCapture::Get().CurrentSet();
-			const auto* worldRoot = static_cast<const RE::NiAVObject*>(CS_ENGINE_READ(Data, RecordTime, RE::Main::WorldRootNode()));
 			const bool group10 = a_inputs.group == 10;
-			for (const void* shape : shapes) {
-				auto* geometry = static_cast<RE::BSGeometry*>(const_cast<void*>(shape));
-				if (!geometry || (claims && (claims->WithheldPhasesOf(geometry) & kSetMain)))
+			for (const auto& shape : a_scene.shapes) {
+				if ((claims && (claims->WithheldPhasesOf(shape.geometry) & kSetMain)) || Outside(shape.bound, planes))
 					continue;
-				auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
-				if (!property || property->GetRTTI() != globals::rtti::BSWaterShaderPropertyRTTI.get() || !Reached(geometry, worldRoot) || Outside(geometry->worldBound, planes))
-					continue;
-				const auto& water = static_cast<const RE::BSWaterShaderProperty&>(*property);
-				const auto passes = Port::DeriveRenderPasses(Port::CaptureObject(water, *geometry), a_port.renderMode, 0, a_port);
+				const auto passes = Port::DeriveRenderPasses(shape.object.object, a_port.renderMode, 0, a_port);
 				if (passes.none || passes.localMap)
 					continue;
 				auto stencil = passes.stencil;
-				if (const auto cached = Field<std::uint32_t>(property, kCachedStencilPass))
-					stencil.passEnum = cached;
-				const std::uint32_t sub = PassCapture::SubPassOf(geometry, property->flags.underlying());
+				if (shape.cachedStencil)
+					stencil.passEnum = shape.cachedStencil;
 				for (const auto& spec : { stencil, passes.surface, passes.lights }) {
 					if (!spec.present || spec.passEnum < a_inputs.first || spec.passEnum > a_inputs.last || group10 != (spec.accumulationHint == kGroup10Hint))
 						continue;
-					a_out.push_back({ geometry, property, spec.passEnum, spec.accumulationHint, sub });
+					a_out.push_back({ &shape, spec.passEnum, spec.accumulationHint });
 				}
 			}
 			std::ranges::stable_sort(a_out, [](const ScenePass& a_left, const ScenePass& a_right) {
-				return a_left.passEnum != a_right.passEnum ? a_left.passEnum < a_right.passEnum : a_left.sub < a_right.sub;
+				return a_left.passEnum != a_right.passEnum ? a_left.passEnum < a_right.passEnum : a_left.shape->sub < a_right.shape->sub;
 			});
 			return true;
 		}
@@ -714,7 +785,7 @@ namespace DCLF::Features::Water::Native
 			std::int32_t group = -2;
 			bool ok = false;
 			std::string why;
-			std::vector<ScenePass> passes;
+			std::vector<ScenePass> passes;  // point into the rendered ticket's part, which lives through the frame
 		};
 		SceneBatch s_sceneBatch;
 
@@ -729,9 +800,21 @@ namespace DCLF::Features::Water::Native
 			batch.last = a_inputs.last;
 			batch.group = a_inputs.group;
 			batch.why.clear();
-			batch.ok = ScenePasses(a_inputs, a_port, batch.passes, batch.why);
+			batch.passes.clear();
+			const auto* scene = static_cast<const SceneShapes*>(TicketPartOf(TicketPart::WaterScene));
+			if (!scene) {
+				batch.ok = false;
+				batch.why = "the frame's ticket holds no water shapes";
+				return batch;
+			}
+			batch.ok = ScenePasses(*scene, a_inputs, a_port, batch.passes, batch.why);
 			return batch;
 		}
+	}
+
+	void RegisterSceneCapture()
+	{
+		RegisterTicketPart(TicketPart::WaterScene, &CaptureSceneShapes);
 	}
 
 	bool SceneHasPasses(const BatchInputs& a_inputs)
@@ -760,13 +843,12 @@ namespace DCLF::Features::Water::Native
 		}
 		Modes modes = frame.start;
 		for (const auto& scenePass : passes) {
+			// BuildPass reads only the shader, the pass enum and the scene lights (none here) of the pass.
 			RE::BSRenderPass pass{};
 			pass.shader = shader;
-			pass.shaderProperty = scenePass.property;
-			pass.geometry = scenePass.geometry;
 			pass.passEnum = scenePass.passEnum;
 			pass.accumulationHint = scenePass.hint;
-			if (!BuildPass(frame, &pass, modes, a_draws.emplace_back(), a_owners, a_why))
+			if (!BuildPass(frame, &pass, scenePass.shape->object, modes, a_draws.emplace_back(), a_owners, a_why))
 				return false;
 		}
 		return true;

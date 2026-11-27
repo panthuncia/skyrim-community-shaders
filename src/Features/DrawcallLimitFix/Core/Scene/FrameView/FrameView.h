@@ -76,8 +76,11 @@ namespace DCLF::Scene
 		{
 			std::uint64_t installed = 0, kept = 0, skipped = 0;
 		};
-		/** @brief Render thread. On the first sighting of a load screen, withdraws the set and raises Channels::loadingSeen. */
-		bool NoteLoadingScreen();
+		/**
+		 * @brief On the first sighting of a load screen, withdraws the set and raises Channels::loadingSeen. a_loading is the frame's
+		 * value: the game half's capture, or LoadingScreenInFrame at Present. Returns a_loading.
+		 */
+		bool NoteLoadingScreen(bool a_loading);
 		/** @brief Render thread, frame start, not during a load. */
 		void ServeFrameRequests();
 		/**
@@ -94,8 +97,18 @@ namespace DCLF::Scene
 		 * because the load is done and the world's frames under it build the tables.
 		 */
 		static bool IsLoadingScreenUp();
-		/** @brief Also true while a load's hold keeps the world off the screen. Run-comparable frame counters must not advance then. */
+		/**
+		 * @brief Render side: IsLoadingScreenUp as the frame sees it. Native reads the adopted snapshot's menus (captured by the game
+		 * side, its own for a loading screen's frame); guest reads the live UI.
+		 */
+		static bool LoadingScreenInFrame();
+		/**
+		 * @brief Render side: also true while a load's hold keeps the world off the screen. Run-comparable frame counters must not
+		 * advance then.
+		 */
 		static bool LoadShown();
+		/** @brief LoadShown from the live UI: game side only (a capture). */
+		static bool LoadShownNow();
 		/**
 		 * @brief Call where `globals::game::currentAccumulator` is set. That global is null before the main pass even though the
 		 * accumulator is built before the shadow maps, so earlier readers use the latch.
@@ -183,6 +196,11 @@ namespace DCLF::Scene
 		void BeginFrame();
 		/** @brief Render thread, EarlyPrepass. Reads nothing of the coordinator's, since a scene pass may be running. */
 		void PrepareAccumulatePhase();
+		/**
+		 * @brief Answers every material request: reads each property's material and captures it. Native: the game half (DCLF's frame
+		 * start), so a request posted after it is answered at the next update. Guest: EarlyPrepass (PrepareAccumulatePhase).
+		 */
+		void ServeMaterialRequests();
 		/** @brief Render thread, or any thread between commits. */
 		std::uint8_t SetPhasesOf(std::int32_t a_object) const
 		{
@@ -267,8 +285,6 @@ namespace DCLF::Scene
 		void PublishFrameClaims(std::shared_ptr<const SetSnapshot> a_claims);
 		/** @brief The coordinator drops it. */
 		void ReturnPublication(std::shared_ptr<const ScenePublication>&& a_publication);
-		/** @brief Render thread, EarlyPrepass. Every request is answered. */
-		void ServeMaterialRequests();
 		std::shared_ptr<const ScenePublication> Newest() const { return installed; }
 		FrameCapture frameCapture;  // GetFrameCapture
 		FrameTables frameTables;    // GetFrameTables: the frame's values, out of the tables (render thread)

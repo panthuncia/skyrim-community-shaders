@@ -4,6 +4,7 @@
 #include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
+#include "Features/DrawcallLimitFix/Features/Water/WaterNative.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
 
@@ -25,6 +26,8 @@ namespace DCLF::Features::Water
 			if (!Enabled())
 				return;
 			const bool hooked = InstallHooks();
+			// Native's main water batches read the tracked shapes from the frame ticket.
+			Native::RegisterSceneCapture();
 			logger::info("[DCLF] water: on (graph mode): the engine's water batches are drawn at the EngineDraws anchor (mask and surface)");
 			// The batch hooks trigger the water epochs, so only then may the port claim water.
 			if (hooked) {
