@@ -294,7 +294,7 @@ namespace DCLF::Features::Shadows::Native
 		// The native driver's render half adopted its game half's set. A frame the engine's own skeleton draws (the frozen menu
 		// capture) selected just before, on this thread: it draws that set.
 		if (!::RenderGraph::Engine::Native::Scene::Current().valid)
-			AdoptSet(TakeSet());
+			AdoptSet(LastSet());
 		const auto* set = RenderSet();
 		if (!set)
 			return;

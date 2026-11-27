@@ -258,7 +258,7 @@ namespace RenderGraph::Engine::Native::Scene
 			Point<void (*)(RE::NiCamera*)>(0x1C4, 0x1C4, "CalculateAndDrawShadowCasterLights")(a_camera);
 			if (skipped && !skippedHidden)
 				Flags(skipped) &= ~kHidden;
-			p.shadowLights = DCLF::Features::Shadows::Native::TakeSet();
+			p.shadowLights = DCLF::Features::Shadows::Native::LastSet();
 			// Light Limit Fix's scene lights, after the queued lights (added and removed above) and the casters' mask channels.
 			if (globals::features::lightLimitFix.loaded)
 				p.pointLights = globals::features::lightLimitFix.CaptureLights();
