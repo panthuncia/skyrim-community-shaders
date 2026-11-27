@@ -17,6 +17,8 @@
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPortFrame.h"
+#include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
+#include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "Snapshot/FrameCamera.h"
 
 #include <algorithm>
@@ -238,13 +240,21 @@ namespace DCLF::Features::MenuViews::Scenes
 	/** @brief The engine renders at most four of a scene's shadow lights. */
 	inline constexpr std::uint32_t kMaxShadowSlices = 4;
 
-	/** @brief The most draws and latch bytes one batch takes. Past either, the rest of the batch is the engine's. */
+	/** @brief The most draws and latch bytes a menu batch takes. */
 	inline constexpr std::uint32_t kMaxDraws = 2048;
 	inline constexpr std::uint32_t kLatchBytes = 1u << 20;
-	/** @brief A batch's latch size. The local map's land and objects draw a few thousand passes. */
+	/**
+	 * @brief A batch's draw limit. The local map's land and objects draw one pass per visible shape of the loaded cells (about 1,380 in
+	 * Whiterun); a city's can pass 2048, so its batch takes four times as many.
+	 */
+	constexpr std::uint32_t MaxDrawsOf(View a_view)
+	{
+		return a_view == View::LocalMap ? 4u * kMaxDraws : kMaxDraws;
+	}
+	/** @brief A batch's latch size: room for its draw limit's Utility constants and a share of Lighting ones. */
 	constexpr std::uint32_t LatchBytesOf(View a_view)
 	{
-		return a_view == View::LocalMap ? 4u * kLatchBytes : kLatchBytes;
+		return a_view == View::LocalMap ? 8u * kLatchBytes : kLatchBytes;
 	}
 
 	enum class Shader : std::uint8_t
@@ -252,6 +262,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		Utility,
 		Lighting,
 		Effect,
+		Water,
 	};
 
 	struct Draw
@@ -329,10 +340,69 @@ namespace DCLF::Features::MenuViews::Scenes
 			Snapshot::FrameCamera::Previous previous;
 			bool havePrevious = false;
 			bool shadowMaps = false;  // the render renders shadow maps (scheme 4 with a depth pass): shadow lights add their descriptor bits
+			// The local map's draws (SampleLocalMapInputs): no previous camera (FrameBuffer c16-c19 and c41 zero, PreviousWorld from a zero
+			// eye), the sun as the only light, and the land's descriptor bits as the engine's local map passes carry them.
+			bool localMap = false;
 			// The scene node's shadow lights' dimmers as MistMenu's shadow render sets them (ShadowLightDimmers); empty outside scheme 4.
 			std::vector<std::pair<const RE::BSLight*, float>> shadowDimmers;
 		};
 		Inputs SampleInputs(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, const PreviousCamera& a_previous, bool a_shadowMaps);
+		/** @brief The inputs a scene node and a camera give, with a_hdrOverride the ImageSpace HDR row to light by (null: the current data's). */
+		Inputs SampleSceneInputs(const RE::ShadowSceneNode* a_sceneNode, const RE::NiCamera& a_camera, const PreviousCamera& a_previous, const float* a_hdrOverride);
+
+		/**
+		 * @brief A root of the local map's culls. A cell's node children (FUN_140243ea0) are culled by the frustum (cull mode 3) from their
+		 * children down, shown whatever their hidden flag and their stale bound. The other roots take the local map process's own mode,
+		 * which keeps every object outside hidden subtrees (observed: ObjectLODRoot's whole contents and every fog of war tile draw).
+		 */
+		struct LocalMapRoot
+		{
+			RE::NiAVObject* object = nullptr;
+			bool cell = false;
+		};
+
+		/** @brief What LocalMapRenderer::Render (AE 16335, SE 16094) draws from: its camera, its roots, the fog of war's root. */
+		struct LocalMapScene
+		{
+			RE::NiCamera* camera = nullptr;
+			RE::NiAVObject* fogRoot = nullptr;  // renderer +0x30358, culled into the fog of war batch
+			bool fogOfWar = false;              // the global AE 0x141fd6f46: the fog of war batch runs
+			bool water = false;                 // water draws: an exterior that is not a small world (the render's 0x142033510)
+			std::vector<LocalMapRoot> roots;    // the land and objects batch's
+		};
+		/** @brief The local map's camera and roots, read from the renderer and the loaded cells as its render reads them. */
+		LocalMapScene CollectLocalMap(const void* a_renderer);
+
+		/**
+		 * @brief The geometry the local map's culls keep: under a cell root the frustum (cull mode 3, no multibounds) by DCLF's SIMD sphere
+		 * cull over each level, elsewhere everything; hidden objects are left out, a switch node gives its active child, a billboard turns
+		 * to the camera.
+		 */
+		void LocalMapVisible(std::span<const LocalMapRoot> a_roots, const RE::NiCamera& a_camera, std::vector<RE::BSGeometry*>& a_out);
+
+		/** @brief The pass a visible geometry makes in a local map batch. */
+		enum class LocalMapPass : std::uint8_t
+		{
+			None,
+			Utility,  // a Lighting property's base texture (render mode 0x12) or fog of war (0x13) Utility pass
+			Land,     // a landscape Lighting property's own Lighting passes
+			Water,    // BSWaterShader's local map pass (technique LOD)
+			Tree,     // BSDistantTreeShader's colour pass
+		};
+		LocalMapPass LocalMapPassOf(const RE::BSGeometry& a_geometry, View a_view, bool a_water);
+
+		/** @brief The render's tree detail: each loaded tree's LOD switch shows child 1 (FUN_140438580(BSTreeManager, 1)). */
+		void SetLocalMapTreeDetail();
+
+		/** @brief The inputs of the local map's Lighting draws: the world's scene node and the local map camera. */
+		Inputs SampleLocalMapInputs(const RE::NiCamera& a_camera, const PreviousCamera& a_previous);
+
+		/**
+		 * @brief The water port's frame inputs as BSWaterShader sees them in the local map's render (AE 0x140242e00): the local map camera's
+		 * posAdjust, matrices and planes, no previous camera, the accumulator's zero eye, render mode 0x12 with the local map's pass branch,
+		 * no raw water target.
+		 */
+		Water::Port::FrameInputs SampleLocalMapWater(const Inputs& a_in, bool a_water);
 
 		/** @brief A draw's lights as GetRenderPasses gives a menu pass: the scene node's sun, its shadow lights, then its point lights. */
 		struct Lights
@@ -384,6 +454,28 @@ namespace DCLF::Features::MenuViews::Scenes
 			std::uint32_t stencil = 2, stencilRef = 0xff;  // the colour pass writes stencil bit 0 everywhere it draws
 			float alphaRef = 0.0f;
 		};
+
+		/** @brief A local map water draw: the latch rows, which floats the setup writes, descriptors, states and the two textures LOD reads. */
+		struct WaterResult
+		{
+			Water::DrawConstants constants{};
+			Water::DrawConstants written{};
+			std::uint32_t descriptor = 0, vertex = 0, pixel = 0;
+			DrawState state;
+			struct Slot
+			{
+				ID3D11ShaderResourceView* view = nullptr;
+				std::uint32_t address = 0, filter = 0;
+			};
+			Slot cube, normals;  // t3 (with the Reflections bit) and t4
+			const RE::BSShader* shader = nullptr;
+			std::uint64_t vertexDesc = 0;  // CS's vertex shader's input description
+		};
+		/**
+		 * @brief The water pass a_geometry makes in the local map (BSWaterShaderProperty::GetRenderPasses' local map branch, AE 0x1414c02e0),
+		 * with BSWaterShader's Setup functions through the water port. False, with why, when it cannot.
+		 */
+		bool ComputeWater(const Water::Port::FrameInputs& a_frame, const RE::BSGeometry& a_geometry, WaterResult& a_out, std::string& a_why);
 		/**
 		 * @brief A membrane pass's states, drawn in the accumulator's membrane group (accumulation hint 3, FUN_1414b3d50): the effect data's
 		 * blend, depth test without write, depth bias mode 10 (11 with a_closestPoint), back faces culled, write mode 11. False for a blend
@@ -470,6 +562,15 @@ namespace DCLF::Features::MenuViews::Scenes
 		 */
 		void RenderShadowsAndDepth(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, RE::NiAVObject* a_root, const Inputs& a_in);
 
+		/**
+		 * @brief LocalMapRenderer::Render (AE 16335) in native mode: the land and objects, their water and the fog of war computed from the
+		 * scene (CollectLocalMap, LocalMapVisible) into kLOCAL_MAP_SWAP, then ISLocalMap staged into kLOCAL_MAP. No engine render function
+		 * runs. Fatal when a draw CS cannot compute is met (decision 149).
+		 */
+		void RenderLocalMap(const void* a_renderer);
+		/** @brief Render thread, at setup: queues the programs the local map's draws take, so its first render draws them all. */
+		void QueueLocalMapPrograms();
+
 		/** @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes). */
 		bool Owns(std::int32_t a_scheme);
 
@@ -495,6 +596,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief a_building, when given, is set when null means the program is still building on the program service. */
 		std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
 		std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
+		std::shared_ptr<const void> WaterProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
 		/** @brief The format of a_view's import a_index, or 0 without one. */
 		std::uint32_t ColourFormat(View a_view, std::uint32_t a_index);
 		std::uint32_t DepthFormat(View a_view);

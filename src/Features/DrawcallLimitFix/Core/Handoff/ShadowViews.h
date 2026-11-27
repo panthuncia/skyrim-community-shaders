@@ -104,6 +104,8 @@ namespace DCLF
 	 */
 	bool CastsNoShadow(const SceneCapture::LeafView& a_leaf);
 
+	/** @brief BSLightingShaderProperty::DetermineUtilityShaderDecl (vtable 0x3D, AE 0x1414adf00): a Lighting property's Utility declaration. */
+	std::uint32_t UtilityShaderDecl(std::uint64_t a_flags);
 	/** @brief The Utility technique the engine derives for a caster, without the view's mode bits. The registered pass is this plus 0x2B. */
 	std::uint32_t ShadowUtilityTechnique(const SceneCapture::LeafView& a_leaf);
 	/** @brief ShadowUtilityTechnique from a Lighting property's flags and whether its geometry alpha tests. */

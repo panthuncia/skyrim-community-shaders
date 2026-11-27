@@ -79,6 +79,8 @@ namespace RenderGraph::Engine::ImageSpace
 	* data, and no engine call. False without an override or with CS's ImageSpace off. Render owner, inside the UI stage.
 	*/
 	bool MenuSceneHdr(std::int32_t a_source, std::int32_t a_final);
+	/** @brief Native: the local map's ISLocalMap from kLOCAL_MAP_SWAP into kLOCAL_MAP with param row 0 = (a_texelX, a_texelY). False when not staged. */
+	bool LocalMapEffect(float a_texelX, float a_texelY);
 
 	/**
 	* @brief RenderWorldPostProcess's hook (native-post-chain.md, family 4): reads the snapshot's B fields, then runs CS's native body

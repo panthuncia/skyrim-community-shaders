@@ -114,6 +114,28 @@ PS_OUTPUT main(PS_INPUT input)
 
 #else
 
+#	if defined(CS_ORG_BINDLESS) && defined(WATER_ORG_SCENE)
+// The menu scenes family's build (Features/DrawcallLimitFix/Features/MenuViews): the local map's water, technique LOD into
+// kLOCAL_MAP_SWAP. The draw's latch region is the water family's (WaterOrgDraw below, Water::DrawConstants); its FrameBuffer rows are
+// the local map camera's, latched with it; its push block is the menu scenes' (shared, draw, bones, frame). The world's CS features are
+// off: a top-down map has none of their frame inputs (light clusters, skylighting, cubemaps, the world's shadows, fog, Physical Sky),
+// as in Lighting.hlsl's menu scene build. Linear Lighting stays, as for the local map's land.
+#		undef LIGHT_LIMIT_FIX
+#		undef SKYLIGHTING
+#		undef IBL
+#		undef DYNAMIC_CUBEMAPS
+#		undef CLOUD_SHADOWS
+#		undef TERRAIN_SHADOWS
+#		undef VOLUMETRIC_SHADOWS
+#		undef SCREEN_SPACE_SHADOWS
+#		undef WETNESS_EFFECTS
+#		undef WATER_EFFECTS
+#		undef WATER_PARALLAX
+#		undef EXP_HEIGHT_FOG
+#		undef PHYSICAL_SKY
+#		undef HORIZON_FIX
+#	endif
+
 #	if defined(CS_ORG_BINDLESS)
 // The ORG build (Drawcall Limit Fix's water family, Features/DrawcallLimitFix/Features/Water). One push block serves both stages.
 // A draw's engine constants (both stages' PerTechnique, PerMaterial and PerGeometry), its descriptors, its textures' and samplers'
@@ -151,6 +173,25 @@ struct WaterOrgDraw
 	PhysSkyOrgHandles PhysSky;  // Physical Sky's resources and samplers, the same for every draw of a batch
 };
 
+#		if defined(WATER_ORG_SCENE)
+// The draw's FrameBuffer rows (b12, c0-c44), as the local map camera gives them (OrgSceneFrame, below).
+struct OrgSceneFrameRows
+{
+	float4 Rows[45];
+};
+// The menu scenes' push block has a palettes entry; water draws are never skinned.
+struct WaterOrgBones
+{
+	float4 Rows[480];
+};
+#			define WATER_ORG_RESOURCES(X)                    \
+				X(SHARED, ConstantBuffer, Shared, 0)            \
+				X(LATCH, WaterOrgDraw, WaterDraw, 2)            \
+				X(EXTERN_LATCH, WaterOrgBones, Bones, 9)        \
+				X(EXTERN_LATCH, OrgSceneFrameRows, Frame, 12)   \
+				X(UNREAD, Texture2D<float4>, DepthTexture, 17)  \
+				X(UNREAD_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)
+#		else
 #		define WATER_ORG_RESOURCES(X)                                                         \
 			X(SHARED, ConstantBuffer, Shared, 0)                                                 \
 			X(LATCH, WaterOrgDraw, WaterDraw, 2)                                                 \
@@ -174,8 +215,19 @@ struct WaterOrgDraw
 			X(EXTERN_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)              \
 			X(EXTERN, StructuredBuffer<LocalShadowData>, LocalShadows, 102)                      \
 			X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)
+#		endif
 ORG_PUSH_BLOCK(WATER_ORG_RESOURCES(ORG_HANDLE))
 WATER_ORG_RESOURCES(ORG_RESOURCE)
+#		if defined(WATER_ORG_SCENE)
+// FrameBuffer as the local map camera gives it, loaded raw from its latch (Common/NamespacedCBuffer.hlsli, ORG_SHARED_FRAMEBUFFER_AT).
+struct OrgSceneFrameAt
+{
+	uint FrameSrv;
+	uint FrameOffset;
+};
+static OrgSceneFrameAt OrgSceneFrame = { OrgHandle_Frame, OrgOffset_Frame };
+#			define ORG_SHARED_FRAMEBUFFER_AT OrgSceneFrame
+#		endif
 // Physical Sky's header reads its resources through these.
 PHYS_SKY_ORG_HANDLES(WaterDraw.PhysSky)
 #	endif

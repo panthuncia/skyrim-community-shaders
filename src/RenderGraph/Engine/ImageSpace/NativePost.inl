@@ -1564,6 +1564,35 @@ namespace NativePost
 		KeepTargets(a_final);
 		return true;
 	}
+
+	/**
+	* @brief Native: the local map's ISLocalMap (LocalMapRenderer::Render's RenderEffect(0x62) from kLOCAL_MAP_SWAP into kLOCAL_MAP, AE
+	* 0x140242e00), staged with CS's row into its menu composite step: param row 0 = (1 / width, 1 / height) of the local map's size.
+	*/
+	bool RunLocalMap(float a_texelX, float a_texelY)
+	{
+		ZoneScopedN("CS.PostNative.LocalMap");
+		using T = RE::RENDER_TARGET;
+		auto step = Step(WorldScope::MenuCopy, Effects::ISLocalMap, InOut(T::kLOCAL_MAP_SWAP, T::kLOCAL_MAP), 0);
+		SetId(step.rows, 0, a_texelX, a_texelY);
+		// As the engine's RenderEffect: one effect scope, whose end runs the staged step at the ImageSpace anchor.
+		EnterScope(ScopeKind::Effect);
+		if (IS().scopeDepth == 0)
+			return false;
+		auto& native = NativeSteps::Get();
+		native.rows = step.rows;
+		native.rowsAt = {};
+		native.sprite = {};
+		native.effect = step.effect;
+		native.shader = ShaderOf(step.effect);
+		native.armed = true;
+		native.computeRows = false;
+		const bool taken = StageMenuKey(step.key, true, step.effect, false, {}, -1);
+		native.armed = false;
+		++R().staged;
+		LeaveScope();
+		return taken;
+	}
 }
 
 /** @brief The HDR effect's hook: native in the world chain, else the engine's. */
