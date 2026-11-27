@@ -76,9 +76,10 @@ namespace RenderGraph::Engine::Skeleton
 
 		// The views the engine clears get one pass each, declared at Setup and registered again only for a remade target.
 		// At a patched engine site, a clear of any other engine view is a tap error (EngineWork), so a new view never changes the registration.
-		constexpr std::array<std::uint32_t, 8> kColourTargets{ ColourTarget::kMAIN, ColourTarget::kMAIN_COPY, ColourTarget::kMAIN_ONLY_ALPHA,
+		// kLOCAL_MAP_SWAP: the local map clears it before its batches (LocalMapRenderer::Render, in the UI stage).
+		constexpr std::array<std::uint32_t, 9> kColourTargets{ ColourTarget::kMAIN, ColourTarget::kMAIN_COPY, ColourTarget::kMAIN_ONLY_ALPHA,
 			ColourTarget::kNORMAL_TAAMASK_SSRMASK, ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP, ColourTarget::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED,
-			ColourTarget::kMOTION_VECTOR, ColourTarget::kSHADOW_MASK };
+			ColourTarget::kMOTION_VECTOR, ColourTarget::kSHADOW_MASK, ColourTarget::kLOCAL_MAP_SWAP };
 		// Cleared views missing from the RE list. Native mode hands their clears over through Sites::TakeContextColourClear.
 		constexpr std::array<std::uint32_t, 5> kMoreColourTargets{ ColourTarget::kTEMPORAL_AA_MASK, ColourTarget::kWATER_1, ColourTarget::kWATER_2,
 			ColourTarget::kRAW_WATER, ColourTarget::kUNDERWATER_MASK };
@@ -1130,7 +1131,10 @@ namespace RenderGraph::Engine::Skeleton
 			return ids[a_group][a_place];
 		}
 
-		/** @brief The clears seen in loading screen and main menu frames. Any other clear there keeps its group anchor's ticket. */
+		/**
+		* @brief The clears seen in loading screen and main menu frames, and the local map's (kLOCAL_MAP_SWAP) under the map menu. Any other
+		* clear there keeps its group anchor's ticket.
+		*/
 		bool PlaceClears(Place, const Target& a_target)
 		{
 			if (a_target.kind == Kind::Depth)
@@ -1143,6 +1147,7 @@ namespace RenderGraph::Engine::Skeleton
 			case ColourTarget::kNORMAL_TAAMASK_SSRMASK:
 			case ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP:
 			case ColourTarget::kSHADOW_MASK:
+			case ColourTarget::kLOCAL_MAP_SWAP:
 				return true;
 			default:
 				return false;

@@ -5,7 +5,7 @@
 // (read point B), and CS's post state (the parities and the adapted luminance). Families 1 to 4 are the HDR effect, the end-of-frame
 // effects, the pre-tonemap composites and RenderWorldPostProcess's body. Their containers are not called: CS stages the steps from the
 // snapshot and writes back what engine code after the chain reads. A family stays on the engine's container only for a case CS does
-// not draw: another mod's hook (decision 4), the world map or FXAA (decision 7), SIL or the image-based flares.
+// not draw: another mod's hook (decision 4), FXAA (decision 7), SIL or the image-based flares, and in guest the world map.
 //
 // The globals are SE/AE pairs. SE's were matched statically (perf-post-slots.md) and are untested at runtime.
 
@@ -109,6 +109,7 @@ namespace NativePost
 		const float* getHitScale = nullptr;        // 415419
 		const float* getHitAmount = nullptr;       // 415420
 		const float* timer = nullptr;              // 390953: the timer get hit's double vision turns with
+		const float* worldMapDof = nullptr;        // 415301: the world map's blur row (four floats), which MapMenu writes
 		bool ready = false;
 	};
 
@@ -184,6 +185,7 @@ namespace NativePost
 		g.getHitScale = At<float>(528473, 415419);
 		g.getHitAmount = At<float>(528474, 415420);
 		g.timer = At<float>(513213, 390953);
+		g.worldMapDof = At<float>(528355, 415301);
 		g.ready = true;
 	}
 
@@ -203,6 +205,7 @@ namespace NativePost
 	constexpr std::uint32_t kDofGridX = 480, kDofGridY = 270;
 	constexpr float kGetHitTurn = 0.0017453278f;  // 0x141ac58d0: the timer to the double vision's angle (SE: / 3600 * 2 pi)
 	constexpr float kGetHitRadius = 2.0f;          // 0x141ad288c: get hit's blurs take radius 2's weights
+	constexpr float kWorldMapTexel = 0.5f;         // 0x141ad285c: the world map's texel row scale
 
 	/** @brief ImageSpaceManager +0xC8 to +0x15C: the blended ImageSpace data (HDR, cinematic, tint, fade, blurs, DoF). */
 	constexpr std::uintptr_t kDataFirst = 0xC8, kDataEnd = 0x15C;
@@ -433,6 +436,14 @@ namespace NativePost
 		if (const auto radial = EffectAt(5))
 			if (const auto* list = Field<RE::ImageSpaceEffect* const*>(radial, 0x18); list && list[0])
 				a_in.radialEffect = EffectOf(static_cast<const RE::BSImagespaceShader*>(list[0]));
+		// The world map (slot 0) draws the one shader its Setup picked (AE 0x1414fdb70: with or without the sky blur).
+		a_in.worldMapEffect = -1;
+		if (const auto map = EffectAt(0)) {
+			if (const auto* list = Field<RE::ImageSpaceEffect* const*>(map, 0x18); list && list[0])
+				a_in.worldMapEffect = EffectOf(static_cast<const RE::BSImagespaceShader*>(list[0]));
+			a_in.worldMapDynamic = Field<bool>(map, 0x88);
+		}
+		std::memcpy(a_in.worldMapDof.data(), g.worldMapDof, sizeof(a_in.worldMapDof));
 		// The full-screen blur (slot 6) and get hit (slot 7). Their blurs are effects 9 to 15: radius (+0x90) and flag (+0x88).
 		for (std::uint32_t r = 0; r < 7; ++r)
 			if (const auto blur = EffectAt(9 + r)) {
@@ -1273,10 +1284,35 @@ namespace NativePost
 		return steps;
 	}
 
-	/** @brief The slots CS stages natively: refraction (1), the depth of field (3), the radial blur (5), the full-screen blur (6), get hit (7). */
+	/**
+	* @brief The world map (ImageSpaceEffectWorldMap::UpdateParams, AE 107802): the far blur from the camera's near and far, the blur row
+	* MapMenu writes, and half a texel of the destination.
+	*/
+	std::vector<NativeStep> WorldMapSteps(const ImageSpaceFrame& a_f, const SlotCall& a_call, bool& a_supported)
+	{
+		std::vector<NativeStep> steps;
+		if (a_f.worldMapEffect < 0) {
+			a_supported = false;
+			return steps;
+		}
+		auto step = SlotStep(0, false, kEffects[static_cast<std::size_t>(a_f.worldMapEffect)].id);
+		SetId(step.rows, 0, kDofNoRange, a_f.cameraNear, a_f.cameraFar - a_f.cameraNear, a_f.cameraFar * a_f.cameraNear);
+		const auto& dof = a_f.worldMapDof;
+		SetId(step.rows, 1, dof[0], dof[1], dof[2], dof[3]);
+		const auto [w, h] = a_f.Size(a_call.destination);
+		SetId(step.rows, 2, kWorldMapTexel / w, kWorldMapTexel / h);
+		SetLegacySelector(step, a_f.worldMapDynamic);
+		steps.push_back(std::move(step));
+		return steps;
+	}
+
+	/**
+	* @brief The slots CS stages natively: the world map (0), refraction (1), the depth of field (3), the radial blur (5), the full-screen
+	* blur (6), get hit (7).
+	*/
 	bool SlotIsNative(std::uint32_t a_slot)
 	{
-		return (a_slot == 1 || a_slot == 3 || a_slot == 5 || a_slot == 6 || a_slot == 7) && !(Settings().foreignSlots >> a_slot & 1u);
+		return a_slot != 2 && a_slot != 4 && a_slot < 8 && !(Settings().foreignSlots >> a_slot & 1u);
 	}
 
 	/** @brief A native slot's steps. a_supported is false when the frame's slot needs the engine's RenderEffect. */
@@ -1286,6 +1322,8 @@ namespace NativePost
 		if (!a_supported)
 			return {};
 		switch (a_call.slot) {
+		case 0:
+			return WorldMapSteps(a_f, a_call, a_supported);
 		case 1:
 			return RefractionSteps(a_f);
 		case 3:
@@ -1487,38 +1525,6 @@ namespace NativePost
 		return steps;
 	}
 
-	/** @brief The observe step's steps for the menu render in progress (CS_MENU_SCENES_OBSERVE). */
-	struct MenuHdrObserve
-	{
-		std::vector<NativeStep> steps;
-		std::uint64_t compared = 0, differ = 0, missing = 0, logged = 0;
-	};
-
-	MenuHdrObserve& MenuObserve()
-	{
-		static MenuHdrObserve observe;
-		return observe;
-	}
-
-	bool MenuObserveOn()
-	{
-		static const bool on = RenderGraph::Engine::Native::Active() && Switches::On("CS_MENU_SCENES_OBSERVE");
-		return on;
-	}
-
-	/** @brief Observe: at the engine's menu RenderEndOfFrameEffects, CS's steps for the same render, from the engine's state now. */
-	void BeginMenuObserve(std::int32_t a_source, std::int32_t a_final)
-	{
-		auto& o = MenuObserve();
-		o.steps.clear();
-		const auto held = Menu().group.Held(0);
-		auto f = R().frame;
-		if (!f.read || !held || !held->levels || !MenuData(f.data))
-			return;
-		auto state = EngineState();
-		o.steps = MenuHdrSteps(f, state, a_source, a_final, held->levels);
-	}
-
 	/**
 	* @brief Native: the menu scene's HDR effect (UI3DSceneManager::Render's RenderEndOfFrameEffects with an override; AE 0x140972590),
 	* staged with CS's rows into the menu composite's steps, through the tonemap call site as the world's. False without an override.
@@ -1560,40 +1566,6 @@ namespace NativePost
 	}
 }
 
-void ObserveMenuHdrStep(const StepKey& a_key)
-{
-	using namespace NativePost;
-	if (!MenuObserveOn())
-		return;
-	auto& o = MenuObserve();
-	const auto& native = NativeSteps::Get();
-	if (!native.armed)
-		return;
-	const auto found = std::ranges::find_if(o.steps, [&](const NativeStep& a_step) { return a_step.key == a_key; });
-	const auto describe = [](const NativeSteps::Rows& a_rows) {
-		std::string text;
-		for (std::uint32_t i = 0; i < a_rows.size / 4; ++i)
-			text += fmt::format("{}{}", i % 4 == 0 ? " |" : " ", reinterpret_cast<const float*>(a_rows.bytes.data())[i]);
-		return text;
-	};
-	if (found == o.steps.end()) {
-		if (o.missing++ < 8)
-			logger::info("[ORG] menu scenes observe: menu HDR step {} variant {:#x} has no CS step", kEffects[native.effect].effectName, a_key.variant);
-		return;
-	}
-	++o.compared;
-	const auto& mine = found->rows;
-	const bool differ = mine.size != native.rows.size || std::memcmp(mine.bytes.data(), native.rows.bytes.data(), mine.size) != 0;
-	if (differ) {
-		++o.differ;
-		if (o.logged++ < 16)
-			logger::info("[ORG] menu scenes observe: menu HDR step {} variant {:#x} rows differ: engine{} mine{}", kEffects[native.effect].effectName, a_key.variant,
-				describe(native.rows), describe(mine));
-	}
-	if (o.compared % 2000 == 0)
-		logger::info("[ORG] menu scenes observe: menu HDR steps compared {}, rows differ {}, without a CS step {}", o.compared, o.differ, o.missing);
-}
-
 /** @brief The HDR effect's hook: native in the world chain, else the engine's. */
 template <class Engine>
 void HdrFamily(void* a_effect, Engine&& a_engine)
@@ -1617,12 +1589,14 @@ void HdrFamily(void* a_effect, Engine&& a_engine)
 namespace NativePost
 {
 	/**
-	* @brief Whether a frame's end-of-frame effects can run natively. The world map (slot 0) and FXAA (slot 2) keep the frame on the
-	* engine (decision 7).
+	* @brief Whether a frame's end-of-frame effects can run natively. FXAA (slot 2) keeps the frame on the engine (decision 7), and so
+	* does the world map (slot 0) in guest. Native mode stages the world map: the engine's ImageSpaceEffect::Render applies the engine's
+	* state after each pass, and native binds no engine vertex shader for it to apply.
 	*/
 	bool EofNativeFrame(const ImageSpaceFrame& a_f)
 	{
-		return a_f.read && a_f.readB && (a_f.slots & 0b101) == 0 && Chain().group.Registered();
+		const std::uint8_t engineSlots = NativeBlock() ? 0b100 : 0b101;
+		return a_f.read && a_f.readB && (a_f.slots & engineSlots) == 0 && Chain().group.Registered();
 	}
 
 	/** @brief The manager's spare image-space target (+0x60), which the slots ping-pong with. */

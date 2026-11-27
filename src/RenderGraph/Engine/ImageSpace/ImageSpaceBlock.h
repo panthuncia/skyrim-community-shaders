@@ -42,6 +42,9 @@ namespace RenderGraph::Engine::ImageSpace
 		std::array<float, 4> underwaterDof{};
 		std::array<float, 7> dofIni{}, dofCustom{};
 		std::int32_t radialEffect = -1;  // the radial blur's shader (by quality), a kEffects index
+		std::int32_t worldMapEffect = -1;    // the world map's shader (with or without the sky blur), a kEffects index
+		std::array<float, 4> worldMapDof{};  // the world map's blur row, which MapMenu writes (415301)
+		bool worldMapDynamic = false;
 		bool dofDynamic = false, radialDynamic = false;
 		std::array<std::int32_t, 7> slotBlurRadius{};
 		std::array<bool, 7> slotBlurDynamic{};

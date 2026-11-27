@@ -95,7 +95,6 @@ namespace Testing::SwitchRegistry
 			{ .name = "CS_GPU_TIMERS" },
 			{ .name = "CS_GRASS_COLLISION_STATS", .type = Bool },
 			{ .name = "CS_HANG_WATCHDOG", .key = "cs.hang_watchdog", .type = Int, .description = "seconds without progress before the hang watchdog writes its report (default 15)" },
-			{ .name = "CS_MENU_SCENES_OBSERVE", .type = Bool, .kind = Diagnostic, .description = "1: native mode's menu scene observe: CS's menu scene draws (constants, descriptors, lights, order) computed beside the engine's latched ones and compared, with a summary every 600 batches (Features/MenuViews/MenuScenesObserve.cpp)" },
 			{ .name = "CS_NATIVE_D3D11" },
 			{ .name = "CS_NVPERF_BASELINE" },
 			{ .name = "CS_NVPERF_HALF_WIDTH" },

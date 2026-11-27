@@ -1221,7 +1221,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		/**
 		 * @brief A Lighting property's membrane pass, in the membrane group (accumulation hint 3). The engine gave every observed menu
-		 * membrane hint 3, its fade node's fade (0 for a menu model) notwithstanding; observe checks the hint.
+		 * membrane hint 3, its fade node's fade (0 for a menu model) notwithstanding.
 		 */
 		const char* AddMembrane(const Inputs& a_in, const RE::BSGeometry& a_geometry, bool a_closestPoint, const std::array<std::int32_t, kMaxColours>& a_targets,
 			Run& a_run, std::uint32_t& a_frame, std::string& a_detail)
@@ -1445,13 +1445,14 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 	bool Owns(std::int32_t a_scheme)
 	{
-		// The observe step compares the engine's draws, so it owns none.
-		static const bool native = ::RenderGraph::Engine::Native::Active() && !Observe::Enabled();
+		static const bool native = ::RenderGraph::Engine::Native::Active();
 		if (!native)
 			return false;
 		// The schemes whose draws CS computes as the engine does (observe parity, draw order included): the inventory's item (1, 2) with its
 		// enchantment membranes, the book (3, its pages sample the kBOOK_TEXT targets), MistMenu (4: the main menu, a loading screen, and a
 		// loading model with its shadow maps, depth pass and masks), the stats menu's constellations and the lockpicking menu's lock (7).
+		// The journal's scheme (0) has no 3D scene, and no menu pushes scheme 5 (the light scheme push, AE 0x1409738f0, has callers for
+		// 0 to 4, 6 and 7 only).
 		switch (a_scheme) {
 		case 1:
 		case 2:
