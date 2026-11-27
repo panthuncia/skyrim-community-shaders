@@ -119,6 +119,24 @@
     "run": "1126-185705-dir-native-d3d12-quick-dir-s7dk-native-d3d12-quick",
     "accepted": "2026-11-26"
   },
+  "native-vulkan+cloud-shadows/clouds": {
+    "sha256": "c011793ce534ac6efa3b9e1f51a5ebb0b4d81a342214be8ec1f9bb7ec6b1a33b",
+    "size": "1920x1080",
+    "run": "1127-184827-post-refs-native-vulkan-cloud-shadows-post-refs-n2-cs",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+cloud-shadows/clouds-opaque": {
+    "sha256": "0e583a8ee3065cc2cd5d53466feeb280f487621e33c3db2cf7c2e9748b359da2",
+    "size": "1920x1080",
+    "run": "1127-184827-post-refs-native-vulkan-cloud-shadows-post-refs-n2-cs",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+cloud-shadows/exterior": {
+    "sha256": "e868457375d75e8c81de3d4835c72200a60af6b10184db080b8258773a841050",
+    "size": "1920x1080",
+    "run": "1127-184827-post-refs-native-vulkan-cloud-shadows-post-refs-n2-cs",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+facegen/racemenu": {
     "sha256": "03f3a6882f74601096fb5616094330e1f8c9c4422f97e4524d79eeba058fbd3c",
     "size": "1920x1080",
