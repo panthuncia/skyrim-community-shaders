@@ -29,10 +29,10 @@ namespace DCLF::Features::TreeWind
 		// Tree rows (the commits' uploads) and GPU-only clocks, by tree slot.
 		Draws::Versioned trees, treeClocks;
 		std::shared_ptr<org::Buffer> treeFrameBuffer;  // TreeWindFrameRow
-		// One wind buffer per frame parity. The Z-prepass writes this frame's and the draws read the other.
+		// One wind buffer per render parity (FrameView::RenderSerial). The Z-prepass writes this render's and the draws read the other.
 		std::array<Draws::Versioned, 2> treeWindRows;
-		/** @brief The wind buffer a frame's draws read, which the previous frame wrote. */
-		const Draws::Versioned& WindReadBuffer(std::uint32_t a_frame) const { return treeWindRows[(a_frame + 1) & 1]; }
+		/** @brief The wind buffer render a_render's draws read, which the render before wrote. */
+		const Draws::Versioned& WindReadBuffer(std::uint64_t a_render) const { return treeWindRows[(a_render + 1) & 1]; }
 		org::services::FilledContents<> treesFilled;  // the tree rows' content epoch (SceneTables::treesContentEpoch)
 		/** @brief The tree rows' content epoch held by the version a_sealed names, ~0 for none. */
 		std::uint64_t TreesContentEpoch(const Draws::NamedVersions& a_sealed) const { return treesFilled.Since(a_sealed.Of(trees)).value_or(~0ull); }

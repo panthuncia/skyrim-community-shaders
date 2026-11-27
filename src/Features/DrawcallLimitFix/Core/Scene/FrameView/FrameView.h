@@ -54,8 +54,11 @@ namespace DCLF::Scene
 		 * (always in guest and on one thread); otherwise, and for a repeated render, it takes the next.
 		 */
 		void StepRender(std::uint32_t a_ticketStep, bool a_first);
-		/** @brief Render side: renders since the start, one per StepRender. */
-		std::uint64_t RenderSerial() const { return renderSerial; }
+		/**
+		 * @brief Renders since the start, one per StepRender. Written by the render owner; other threads read the newest value. Buffers
+		 * that alternate per render pick their slot from it, since scene steps skip the numbers game halves take.
+		 */
+		std::uint64_t RenderSerial() const { return renderSerial.load(std::memory_order_acquire); }
 		/**
 		* @brief At a CS Begin, before DCLF's BeginFrame of that frame: the next step the counter gives. On one thread it is the step
 		* the beginning frame runs.
@@ -83,6 +86,9 @@ namespace DCLF::Scene
 			std::shared_ptr<const ankerl::unordered_dense::set<RE::NiNode*>> categoryNodes;
 			std::shared_ptr<const ankerl::unordered_dense::set<const RE::NiAVObject*>> lightEntries;
 			std::shared_ptr<const SetSnapshot> claims;
+			ToggleSet toggles{};      // the installed publication's toggles (Toggles::Frame on the render side)
+			bool notDrawing = true;   // NotDrawingYet as the game half left it
+			std::uint64_t stops = 0;  // the render side's stops the game half had applied (StopDrawing)
 		};
 		/** @brief Native's game half, at its frame start's end: the copy its ticket carries. */
 		std::shared_ptr<const InstalledFrame> TakeInstalledFrame();
@@ -187,14 +193,26 @@ namespace DCLF::Scene
 		/**
 		 * @brief True before DCLF's first covered frame, and after an adoption stopped it (StopDrawing) until its next covered frame.
 		 * Its epochs draw nothing then, and the engine draws the scene. While DCLF draws the claims stay: the adopted snapshot stays
-		 * in use until a Begin adopts a newer current one.
+		 * in use until a Begin adopts a newer current one. The render side reads its adopted frame's value; a stop it asked after
+		 * that frame's game half counts at once.
 		 */
-		bool NotDrawingYet() const { return !drawingStarted || stopped; }
-		/** @brief Whether DCLF ever drew in the session. What its graphs are built for may not change after that. */
-		bool EverDrew() const { return drawingStarted; }
+		bool NotDrawingYet() const
+		{
+			if (RenderSide())
+				return renderFrame->notDrawing || stopsAsked.load(std::memory_order_acquire) > renderFrame->stops;
+			return !drawingStarted.load(std::memory_order_acquire) || stopped;
+		}
+		/** @brief Any thread. How many times the render side stopped DCLF (StopDrawing). */
+		std::uint64_t StopsAsked() const { return stopsAsked.load(std::memory_order_acquire); }
+		/** @brief Game half: the stops it applied, after its frame start's hand-over. */
+		std::uint64_t StopsApplied() const { return stopsApplied; }
+		/** @brief Any thread. Whether DCLF ever drew in the session. What its graphs are built for may not change after that. */
+		bool EverDrew() const { return drawingStarted.load(std::memory_order_acquire); }
 		/**
-		 * @brief Render thread, inside a Begin's adoption point. A frame revision left DCLF's scene on old versions, so DCLF stops
-		 * drawing. Every claim is withdrawn, as at a load, until the next covered frame installs them again whole.
+		 * @brief The render owner, inside a Begin's adoption point. A frame revision left DCLF's scene on old versions, so DCLF stops
+		 * drawing. Every claim is withdrawn, as at a load, until the next covered frame installs them again whole. The render side's
+		 * claims go at once. The claims state is the game half's: native's game half applies the stop at its next frame start
+		 * (HandOverAtFrameStart); guest, and a render side with no adopted frame, apply it here.
 		 */
 		void StopDrawing();
 		/** @brief Render thread, frame start before the culls. The deltas are by component, oldest first, cleared by ClearAdoptedDeltas. */
@@ -395,8 +413,13 @@ namespace DCLF::Scene
 		std::shared_ptr<const SetSnapshot> frameClaims;
 		std::array<std::uint32_t, 3> frameLackingCount{};
 		PublicationStats publicationStats;
-		bool drawingStarted = false;  // the first claims installed (InstallClaims; NotDrawingYet until then), never cleared
-		bool stopped = false;         // an adoption stopped DCLF (StopDrawing) and no covered frame installed the claims since
+		std::atomic<bool> drawingStarted{ false };  // the first claims installed (InstallClaims; NotDrawingYet until then), never cleared
+		bool stopped = false;  // game half: an adoption stopped DCLF and no covered frame installed the claims since
+		// Stops the render side asked (StopDrawing), and those the game half applied (ApplyAskedStops).
+		std::atomic<std::uint64_t> stopsAsked{ 0 };
+		std::uint64_t stopsApplied = 0;
+		/** @brief Game half: withdraws every claim for the stops asked since the last call. */
+		void ApplyAskedStops();
 		std::optional<GeometryPort::PipelineFrame> geometryPortFrame;
 		std::uint32_t geometryPortFrameNumber = ~0u;
 		// The first refresh evaluates every pipeline in full. That seeds frame lighting variables the sample's pipeline does not write.
@@ -406,7 +429,7 @@ namespace DCLF::Scene
 		std::atomic<std::uint32_t> stepCounter{ 0 };
 		std::uint32_t gameStep = 0;
 		std::uint32_t renderStep = 0;
-		std::uint64_t renderSerial = 0;
+		std::atomic<std::uint64_t> renderSerial{ 0 };
 		static inline thread_local bool t_gameHalf = false;
 		struct GeometryStats
 		{

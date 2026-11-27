@@ -110,7 +110,7 @@ namespace DCLF::Features::TreeWind
 
 	struct TreeWindFrameRow
 	{
-		std::uint32_t treeCount = 0, objectCount = 0, frame = 0;
+		std::uint32_t treeCount = 0, windSlot = 0, frame = 0;  // windSlot: the wind buffer this render writes (RenderSerial's parity)
 		std::uint32_t treeSeedsIndex = 0;  // the seeds pool's backing the frame reads (SeedsIndex)
 		TreeWindFrame inputs{};
 		std::uint32_t padding2[2]{};

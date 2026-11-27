@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
@@ -157,7 +158,7 @@ namespace DCLF::Features::TreeWind
 				a_scene.treeInputs = SampleTreeWindFrame();
 			}
 			if (a_frameRow && a_scene.treeFrameBuffer) {
-				const TreeWindFrameRow row{ a_scene.treeCount, 0, a_scene.treeFrame, SeedsIndex(), a_scene.treeInputs, {} };
+				const TreeWindFrameRow row{ a_scene.treeCount, static_cast<std::uint32_t>(Scene::FrameView::Get().RenderSerial() & 1), a_scene.treeFrame, SeedsIndex(), a_scene.treeInputs, {} };
 				a_uploads(a_scene.treeFrameBuffer, &row, sizeof(row), 0);
 			}
 		}
@@ -169,11 +170,11 @@ namespace DCLF::Features::TreeWind
 				UploadTrees(a_commit.adopted, TreesOf(a_commit.tables), a_commit.frame, *scene, a_commit.uploads, a_commit.kind == Api::CommitKind::Depth);
 		}
 
-		// t124 reads the wind buffer the previous frame wrote.
+		// t124 reads the wind buffer the previous render wrote.
 		void SelectWind(Api::FrameBindingSelect& a_select)
 		{
 			if (const auto* scene = SceneOf(a_select.scene))
-				a_select.buffer = &scene->WindReadBuffer(a_select.frame);
+				a_select.buffer = &scene->WindReadBuffer(Scene::FrameView::Get().RenderSerial());
 		}
 	}
 

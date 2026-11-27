@@ -130,10 +130,10 @@ namespace DCLF::Features::Fades
 		{
 			std::vector<std::uint32_t> roots, asked, programs;
 		} fadeRootProgramsBatch;
-		// Indexed by frame parity. Every version is zero-filled, so builds fall back to the static row's state.
+		// Indexed by render parity (FrameView::RenderSerial). Every version is zero-filled, so builds fall back to the static row's state.
 		std::array<Draws::Versioned, 2> fadeStatesOut;
-		/** @brief The states a frame's builds read, which are the previous frame's. */
-		const Draws::Versioned& FadeStatesRead(std::uint32_t a_frame) const { return fadeStatesOut[(a_frame + 1) & 1]; }
+		/** @brief The states render a_render's builds read, which the render before wrote. */
+		const Draws::Versioned& FadeStatesRead(std::uint64_t a_render) const { return fadeStatesOut[(a_render + 1) & 1]; }
 		org::services::FilledContents<> fadeRootsFilled;
 		/** @brief Content epoch of the fadeRoots version named in a_sealed, or ~0 if none. */
 		std::uint64_t FadeRootsContentEpoch(const Draws::NamedVersions& a_sealed) const { return fadeRootsFilled.Since(a_sealed.Of(fadeRoots)).value_or(~0ull); }

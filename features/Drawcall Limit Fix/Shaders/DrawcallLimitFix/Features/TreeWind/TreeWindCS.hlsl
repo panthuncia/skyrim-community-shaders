@@ -11,7 +11,7 @@ cbuffer TreeWindConstants : register(b0)
 	uint ClocksIndex;   // RWStructuredBuffer<TreeClock>
 	uint FrameIndex;    // StructuredBuffer<TreeWindFrameRow>, one row (every commit's)
 	uint Padding0;
-	uint2 WindIndices;  // RWStructuredBuffer<float4>, the two wind buffers, by frame parity
+	uint2 WindIndices;  // RWStructuredBuffer<float4>, the two wind buffers, by render parity (WindSlot)
 	uint2 Padding1;
 }
 
@@ -19,7 +19,7 @@ cbuffer TreeWindConstants : register(b0)
 struct TreeWindFrameRow
 {
 	uint TreeCount;    // tree slots
-	uint ObjectCount;  // members (unused)
+	uint WindSlot;     // the wind buffer this render writes
 	uint Frame;
 	uint TreeSeedsIndex;  // StructuredBuffer<TreeStatic>, the seeds' pool, two rows a slot
 	float DeltaTime;
@@ -151,7 +151,7 @@ float Distance2(float3 a_position)
 	const float distance = entry != 0 ? FastSqrt(distance2) : 0.0f;
 	precise float faded = (1.0f - (distance - W.FadeStart) / (W.FadeEnd - W.FadeStart)) * amplitude;
 	faded = min(max(faded, 0.0f), amplitude);
-	RWStructuredBuffer<float4> wind = ResourceDescriptorHeap[(W.Frame & 1u) != 0 ? WindIndices.y : WindIndices.x];
+	RWStructuredBuffer<float4> wind = ResourceDescriptorHeap[W.WindSlot != 0 ? WindIndices.y : WindIndices.x];
 	wind[entry * 3] = float4(0.0f, W.WindMagnitude, faded, leafFrequency);
 	wind[entry * 3 + 1] = float4(timer * W.TimerScale, previousTimer * W.TimerScale, distance2, amplitude);
 	wind[entry * 3 + 2] = float4(asfloat(generation), 0.0f, 0.0f, 0.0f);

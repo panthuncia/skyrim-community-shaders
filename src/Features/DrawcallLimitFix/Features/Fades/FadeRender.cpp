@@ -7,12 +7,13 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Cull.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
 namespace DCLF::Features::Fades
 {
 	namespace
 	{
-		// GPU frames read the previous frame's published states. CPU frames read their CPU stage's pool by index.
+		// GPU frames read the previous render's published states. CPU frames read their CPU stage's pool by index.
 		void SelectStatesBinding(Api::FrameBindingSelect& a_select)
 		{
 			if (a_select.renderThread && Direct::CpuRootStatesFor(a_select.frame)) {
@@ -20,7 +21,7 @@ namespace DCLF::Features::Fades
 				return;
 			}
 			if (const auto* fades = SceneOf(a_select.scene))
-				a_select.buffer = &fades->FadeStatesRead(a_select.frame);
+				a_select.buffer = &fades->FadeStatesRead(Scene::FrameView::Get().RenderSerial());
 		}
 
 		void SelectRootsBinding(Api::FrameBindingSelect& a_select)
@@ -57,7 +58,7 @@ namespace DCLF::Features::Fades
 				return;
 			}
 			if (const auto* fades = SceneOf(a_select.scene))
-				a_select.Versioned(fades->FadeStatesRead(a_select.frame));
+				a_select.Versioned(fades->FadeStatesRead(Scene::FrameView::Get().RenderSerial()));
 		}
 
 		void SelectRootStepStates(Api::CullBindingSelect& a_select)

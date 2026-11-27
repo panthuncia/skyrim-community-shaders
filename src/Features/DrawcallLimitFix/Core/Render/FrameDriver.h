@@ -226,7 +226,9 @@ namespace DCLF
 		// Render side: the publication the frame revision adopted last. The game half installs it when no newer fragment was posted.
 		std::atomic<std::shared_ptr<const void>> renderAdopted;
 		// The last render's coverage of DCLF's claims epochs: the render half publishes it, the game half reads the latest (never waits).
-		std::atomic<bool> coveredLast{ false };
+		// 1 + the stops the render side had asked (FrameView::StopsAsked) when its last render was covered; 0 when it was not. A render
+		// covered before a stop never lets the game half install the claims again after it.
+		std::atomic<std::uint64_t> coveredLast{ 0 };
 		std::atomic<std::uint64_t> ticketsMade{ 0 }, ticketsUnrendered{ 0 }, ticketsRemade{ 0 }, ticketsUnpaired{ 0 }, ticketScenesCarried{ 0 };
 		std::uint32_t latePosesStep = ~0u;  // native, render side: the ticket whose late poses a depth pass used
 		bool inGameHalf = false;     // native: between GameHalfStart and GameHalfEnd (game thread)

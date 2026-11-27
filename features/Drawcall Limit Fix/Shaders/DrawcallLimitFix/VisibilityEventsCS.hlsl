@@ -91,7 +91,7 @@ struct FadeFrame
 	float4 Divisors[4];
 	uint RootCount;
 	uint SceneFrame;
-	uint Reserved0;
+	uint OutSlot;
 	uint Reserved1;
 	float3 AnimEye;
 	float AnimLodAdjust;

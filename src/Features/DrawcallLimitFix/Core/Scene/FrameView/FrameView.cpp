@@ -82,7 +82,7 @@ namespace DCLF::Scene
 			renderStep = stepCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
 		else
 			renderStep = a_ticketStep;
-		++renderSerial;
+		renderSerial.fetch_add(1, std::memory_order_acq_rel);
 		DCLF::SceneClock::Set(renderStep);
 	}
 
@@ -129,6 +129,9 @@ namespace DCLF::Scene
 			lightEntriesCopy = std::make_shared<const ankerl::unordered_dense::set<const RE::NiAVObject*>>(frameLightEntrySet);
 		frame->lightEntries = lightEntriesCopy;
 		frame->claims = std::atomic_load(&frameClaims);
+		frame->toggles = installed ? installed->toggles : Toggles::Get().Active();
+		frame->notDrawing = NotDrawingYet();
+		frame->stops = stopsApplied;
 		return frame;
 	}
 
@@ -138,6 +141,7 @@ namespace DCLF::Scene
 			return;
 		std::atomic_store(&renderClaims, a_frame->claims);
 		DrawPipelines::Get().HoldCatalog(a_frame->catalog, false);
+		Toggles::Get().InstallFrame(a_frame->toggles);
 		// The replaced frame may hold the last reference to a publication: it goes through the engine lane, like the tickets.
 		if (renderFrame)
 			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::move(renderFrame));
@@ -149,6 +153,7 @@ namespace DCLF::Scene
 		DCLF_ZONE("CS.DCLF.Scene.HandOverAtFrameStart");
 		// Nothing of the coordinator's is read here.
 		DeliverPrimaryNotes();
+		ApplyAskedStops();
 		// A snapshot remade for the installed publication brings no new one.
 		auto adopted = std::static_pointer_cast<const ScenePublication>(std::move(a_adopted));
 		const bool fresh = adopted && (!installed || adopted->sequence > installed->sequence);
@@ -249,7 +254,7 @@ namespace DCLF::Scene
 		if (!installed)
 			return;
 		// No claim is withdrawn while DCLF draws. The first installation, and the first after a stop, install the claims whole.
-		const bool whole = !std::exchange(drawingStarted, true) || std::exchange(stopped, false);
+		const bool whole = !drawingStarted.exchange(true, std::memory_order_acq_rel) || std::exchange(stopped, false);
 		if (!whole && !installPending)
 			return;
 		installPending = false;
@@ -275,7 +280,25 @@ namespace DCLF::Scene
 
 	void FrameView::StopDrawing()
 	{
-		if (!drawingStarted || stopped)
+		if (!RenderSide()) {
+			std::atomic_store(&renderClaims, std::shared_ptr<const SetSnapshot>{});
+			stopsAsked.fetch_add(1, std::memory_order_acq_rel);
+			ApplyAskedStops();
+			return;
+		}
+		// The render side stops now. The game half withdraws the claims at its next frame start. Asked even while this side does not
+		// draw: a ticket the game half made since may install the claims again.
+		const bool drawing = !NotDrawingYet();
+		std::atomic_store(&renderClaims, std::shared_ptr<const SetSnapshot>{});
+		stopsAsked.fetch_add(1, std::memory_order_acq_rel);
+		if (drawing)
+			logger::info("[DCLF] frame {}: a frame revision left DCLF's scene on old versions, so the engine draws until DCLF's next scene", SceneStep());
+	}
+
+	void FrameView::ApplyAskedStops()
+	{
+		const std::uint64_t asked = stopsAsked.load(std::memory_order_acquire);
+		if (asked == std::exchange(stopsApplied, asked) || !drawingStarted.load(std::memory_order_acquire) || stopped)
 			return;
 		stopped = true;
 		// Every claimed main member leaves, so the engine's culls take the whole scene again.
@@ -285,11 +308,11 @@ namespace DCLF::Scene
 				if (phases & kSetMain)
 					left.push_back(geometry);
 		PublishFrameClaims(nullptr);
-		std::atomic_store(&renderClaims, std::shared_ptr<const SetSnapshot>{});
 		if (!left.empty())
 			PrimaryCull::Get().NoteSetChanges({}, left);
 		installNotes.clear();
-		logger::info("[DCLF] frame {}: a frame revision left DCLF's scene on old versions, so the engine draws until DCLF's next scene", SceneStep());
+		if (!t_gameHalf)
+			logger::info("[DCLF] frame {}: a frame revision left DCLF's scene on old versions, so the engine draws until DCLF's next scene", SceneStep());
 	}
 
 	void FrameView::PublishFrameClaims(std::shared_ptr<const SetSnapshot> a_claims)

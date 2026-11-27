@@ -233,7 +233,7 @@ namespace DCLF
 
 	void FrameDriver::NoteStoppedDrawing()
 	{
-		coveredLast.store(false, std::memory_order_release);
+		coveredLast.store(0, std::memory_order_release);
 	}
 
 	void FrameDriver::SceneFrameStart()
@@ -379,9 +379,10 @@ namespace DCLF
 		{
 			DCLF_ZONE("CS.DCLF.BF.Claims");
 			// While DCLF draws, the installed publication's claims install. The first installation, and the first after a stop, waits for a
-			// render whose coverage of DCLF's claims epochs passed: until then the engine draws everything. The render half checks coverage.
+			// render whose coverage of DCLF's claims epochs passed, after the last stop: until then the engine draws everything. The render
+			// half checks coverage.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
-			if (view.HasInstalled() && (!view.NotDrawingYet() || coveredLast.load(std::memory_order_acquire)))
+			if (view.HasInstalled() && (!view.NotDrawingYet() || coveredLast.load(std::memory_order_acquire) == view.StopsApplied() + 1))
 				view.InstallClaims();
 			Reports::GateReleases(view.SceneStep());
 			// Release the LOD gates the installed publications flipped, before the culls.
@@ -490,7 +491,7 @@ namespace DCLF
 			// its builds. Load screen frames are the engine's (EngineState::LoadScreen).
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			const bool covered = draws.DecideCoverage();
-			coveredLast.store(covered, std::memory_order_release);
+			coveredLast.store(covered ? view.StopsAsked() + 1 : 0, std::memory_order_release);
 			// Native mode bring-up: log why claims are not installed, once every 300 such frames.
 			if (!(covered && view.HasInstalled()) && RenderGraph::Engine::Native::Active()) {
 				static std::uint32_t s_uncovered = 0;

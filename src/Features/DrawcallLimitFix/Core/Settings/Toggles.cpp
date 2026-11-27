@@ -5,6 +5,7 @@
 #include <rhi_interop_vulkan.h>
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/Variables.h"
@@ -148,6 +149,7 @@ namespace DCLF
 		requested.Bind(CS::SettingRegistry::Declare("DCLF.Toggles"));
 		active.store(Pack(Normalised(seeded)), std::memory_order_relaxed);
 		frame.store(active.load(std::memory_order_relaxed), std::memory_order_relaxed);
+		gameFrame.store(active.load(std::memory_order_relaxed), std::memory_order_relaxed);
 		// The revision that carries a new requested set makes it the active one at its adoption (plan step 10c).
 		RenderGraph::Frame::Vars::OnAdopted(requested, std::function<void(const std::uint64_t&, const std::uint64_t&)>(
 														   [this](const std::uint64_t&, const std::uint64_t& a_now) { ApplyAdopted(a_now); }));
@@ -190,6 +192,16 @@ namespace DCLF
 			return;
 		requested = word;
 		logger::info("[DCLF] toggles: {} asked for {:#x}; they apply with the frame revision that carries them", a_writer, word);
+	}
+
+	ToggleSet Toggles::Frame() const
+	{
+		return Unpack((Scene::FrameView::InGameHalf() ? gameFrame : frame).load(std::memory_order_relaxed));
+	}
+
+	void Toggles::InstallFrame(const ToggleSet& a_set)
+	{
+		(Scene::FrameView::InGameHalf() ? gameFrame : frame).store(Pack(a_set), std::memory_order_relaxed);
 	}
 
 	void Toggles::ApplyAdopted(std::uint64_t a_word)
